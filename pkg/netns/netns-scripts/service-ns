@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+
+# Exit on error, print commands before execution
+set -ex
+
+# Use environment variables with defaults
+SERVICE_NAME="${SERVICE_NAME:-service1}"
+NS_NAME="yeet-$SERVICE_NAME-ns"
+
+RANGE="${RANGE:-}"
+HOST_IP="${HOST_IP:-}"
+YEET_IP="${YEET_IP:-}"
+SERVICE_IP="${SERVICE_IP:-}"
+
+MACVLAN_INTERFACE="${MACVLAN_INTERFACE:-}"
+MACVLAN_PARENT="${MACVLAN_PARENT:-}"
+MACVLAN_VLAN="${MACVLAN_VLAN:-}"
+MACVLAN_MAC="${MACVLAN_MAC:-}"
+RESOLV_CONF="${RESOLV_CONF:-}"
+
+
+DHCP_AVAILABLE=true
+DHCP="dhcpcd"
+DHCP_RELEASE="dhcpcd -k"
+DHCP_PIDFILE="/var/run/dhclient-${SERVICE_NAME}-${MACVLAN_INTERFACE}.pid"
+
+if ! command -v dhcpcd &> /dev/null; then
+    if ! command -v dhclient &> /dev/null; then
+        DHCP_AVAILABLE=false
+    else
+        DHCP="dhclient -pf ${DHCP_PIDFILE}"
+        DHCP_RELEASE="dhclient -r -pf ${DHCP_PIDFILE}"
+    fi
+fi
+
+if [ "$1" == "cleanup" ]; then
+    if [ -n "$MACVLAN_INTERFACE" ]; then
+        # Kill existing dhclient process if any
+        if [ -f "${DHCP_PIDFILE}" ]; then
+            kill $(cat "${DHCP_PIDFILE}") || true
+            rm -f "${DHCP_PIDFILE}"
+        fi
+        ip netns exec $NS_NAME ip link del $MACVLAN_INTERFACE || true
+        if $DHCP_AVAILABLE; then
+            ip netns exec $NS_NAME $DHCP_RELEASE $MACVLAN_INTERFACE || true
+        fi
+    fi
+    ip netns del $NS_NAME || true
+    exit 0
+fi
+
+# Create the service namespace
+ip netns del $NS_NAME || true
+ip netns add $NS_NAME
+
+# Bring up loopback in service-ns
+ip netns exec $NS_NAME ip link set lo up
+
+if [ -n "$SERVICE_IP" ]; then
+    IF_NAME="$(printf 'y-%04x-v' $RANDOM)"
+    IF_IN_NS_NAME="${IF_NAME}p"
+
+    # Extract base IP without subnet mask
+    SERVICE_IP_BASE=$(echo $SERVICE_IP | cut -d'/' -f1)
+
+    # Create veth pair for service-ns to yeet-ns connection
+    ip link add $IF_NAME type veth peer name $IF_IN_NS_NAME
+
+    # Move $IF_IN_NS_NAME into service-ns
+    ip link set $IF_IN_NS_NAME netns $NS_NAME
+
+    # Move $IF_NAME into yeet-ns
+    ip link set $IF_NAME netns yeet-ns
+
+    # Bring up $IF_NAME in yeet-ns
+    ip netns exec yeet-ns ip link set $IF_NAME up
+
+    # Add $IF_NAME to the bridge in yeet-ns
+    ip netns exec yeet-ns ip link set $IF_NAME master br0
+
+    # Configure IP for $IF_IN_NS_NAME in service-ns
+    ip netns exec $NS_NAME ip addr add $SERVICE_IP dev $IF_IN_NS_NAME
+
+    # Bring up $IF_IN_NS_NAME in service-ns
+    ip netns exec $NS_NAME ip link set $IF_IN_NS_NAME up
+
+    # Add default route in service-ns
+    ip netns exec $NS_NAME ip route add default dev $IF_IN_NS_NAME
+    ip netns exec $NS_NAME ip route replace default via $YEET_IP dev $IF_IN_NS_NAME
+fi
+
+if [ -n "$MACVLAN_PARENT" ] && [ -n "$MACVLAN_MAC" ]; then
+    ip link del $MACVLAN_INTERFACE || true
+    if [ -n "$MACVLAN_VLAN" ]; then
+        ip link add link $MACVLAN_PARENT name $MACVLAN_PARENT.$MACVLAN_VLAN type vlan id $MACVLAN_VLAN || true
+        ip link set $MACVLAN_PARENT.$MACVLAN_VLAN up
+        ip link add $MACVLAN_INTERFACE link $MACVLAN_PARENT.$MACVLAN_VLAN type macvlan mode bridge
+    else
+        ip link add $MACVLAN_INTERFACE link $MACVLAN_PARENT type macvlan mode bridge
+    fi
+    ip link set $MACVLAN_INTERFACE address $MACVLAN_MAC
+    ip link set $MACVLAN_INTERFACE netns $NS_NAME
+    ip netns exec $NS_NAME ip link set $MACVLAN_INTERFACE up
+    if $DHCP_AVAILABLE; then
+        ip netns exec $NS_NAME $DHCP $MACVLAN_INTERFACE
+    fi
+fi
+
+if [ -n "$TAILSCALE_TAP_INTERFACE" ]; then
+    if ! ip netns exec "$NS_NAME" ip link show "$TAILSCALE_TAP_INTERFACE" 2>/dev/null; then
+        # Not in netns, wait for it in host
+        while ! ip link show "$TAILSCALE_TAP_INTERFACE" 2>/dev/null; do
+            sleep 2
+        done
+        ip link set "$TAILSCALE_TAP_INTERFACE" netns "$NS_NAME"
+    fi
+
+    # Configure it
+    ip netns exec "$NS_NAME" ip link set "$TAILSCALE_TAP_INTERFACE" up
+    if $DHCP_AVAILABLE; then
+        ip netns exec "$NS_NAME" $DHCP "$TAILSCALE_TAP_INTERFACE"
+    fi
+fi
+
+if [ -n "$RESOLV_CONF" ]; then
+    mkdir -p /etc/netns/$NS_NAME
+    cp $RESOLV_CONF "/etc/netns/$NS_NAME/resolv.conf"
+fi
+
+echo "Service namespace $NS_NAME set up and connected to yeet-ns"

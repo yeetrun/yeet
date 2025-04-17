@@ -1,0 +1,71 @@
+#!/bin/bash
+
+# Exit on error, print commands before execution
+set -ex
+
+# Use environment variables with defaults
+RANGE="${RANGE:-192.168.100.0/24}"
+HOST_IP="${HOST_IP:-192.168.100.1/32}"
+BRIDGE_IP="${BRIDGE_IP:-192.168.100.254/32}"
+YEET_IP="${YEET_IP:-192.168.100.2/32}"
+
+# Extract base IPs without subnet mask
+HOST_IP_BASE=$(echo $HOST_IP | cut -d'/' -f1)
+YEET_IP_BASE=$(echo $YEET_IP | cut -d'/' -f1)
+
+# Create the yeet namespace
+if ! ip netns list | grep -q yeet-ns; then
+	ip netns add yeet-ns
+fi
+
+# Create the bridge in the yeet namespace
+if ! ip netns exec yeet-ns ip link show br0; then
+    ip netns exec yeet-ns ip link add br0 type bridge
+fi
+
+ip netns exec yeet-ns ip addr replace ${BRIDGE_IP} dev br0
+ip netns exec yeet-ns ip link set br0 up
+
+# Create veth pair for host to yeet-ns connection
+if ! ip link show yeet0; then
+    ip link add yeet0 type veth peer name yeet0-peer
+fi
+ip addr replace ${HOST_IP} dev yeet0
+ip link set yeet0 up
+
+if ! ip netns exec yeet-ns ip link show | grep -q "yeet0-peer"; then
+  ip link set yeet0-peer netns yeet-ns
+fi
+ip netns exec yeet-ns ip addr replace ${YEET_IP} dev yeet0-peer
+ip netns exec yeet-ns ip link set yeet0-peer up
+ip netns exec yeet-ns ip route replace ${RANGE} dev br0
+ip netns exec yeet-ns ip route replace ${HOST_IP} dev yeet0-peer
+
+# Configure routing
+ip netns exec yeet-ns ip route replace default via ${HOST_IP_BASE} dev yeet0-peer
+
+## TODO: Wtf do i need to this followed by a replace?
+ip route del ${RANGE} || true
+ip route add ${RANGE} dev yeet0
+ip route replace ${RANGE} via ${YEET_IP_BASE} dev yeet0
+
+# Enable IP forwarding
+sysctl -w net.ipv4.ip_forward=1
+ip netns exec yeet-ns sysctl -w net.ipv4.ip_forward=1
+
+# Setup NAT on the host
+if ! iptables -t nat -C POSTROUTING -s ${RANGE} ! -d ${RANGE} -j MASQUERADE 2>/dev/null; then
+  iptables -t nat -A POSTROUTING -s ${RANGE} ! -d ${RANGE} -j MASQUERADE
+fi
+
+# Allow forwarding for traffic coming in on yeet0
+if ! iptables -C FORWARD -i yeet0 -j ACCEPT 2>/dev/null; then
+  iptables -A FORWARD -i yeet0 -j ACCEPT
+fi
+
+# Allow forwarding for traffic going out on yeet0 with RELATED,ESTABLISHED state
+if ! iptables -C FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+  iptables -A FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+fi
+
+echo "Yeet bridge namespace setup complete."
