@@ -1,0 +1,8 @@
+/.direnv
+/bin
+/data
+/gomod2nix-template
+/Makefile
+/result
+go.work
+go.work.*

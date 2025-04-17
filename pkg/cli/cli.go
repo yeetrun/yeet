@@ -1,0 +1,543 @@
+// Copyright (c) 2025 AUTHORS All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package cli
+
+import (
+	"fmt"
+	"reflect"
+	"strings"
+
+	"github.com/yeetrun/yeet/pkg/yargs"
+)
+
+type FlagSpec struct {
+	ConsumesValue bool
+}
+
+type CommandInfo struct {
+	Name        string
+	Description string
+	Usage       string
+	Hidden      bool
+	Aliases     []string
+}
+
+type GroupInfo struct {
+	Name        string
+	Description string
+	Commands    map[string]CommandInfo
+	Hidden      bool
+}
+
+type RunFlags struct {
+	Net           string
+	TsVer         string
+	TsExit        string
+	TsTags        []string
+	TsAuthKey     string
+	MacvlanMac    string
+	MacvlanVlan   int
+	MacvlanParent string
+	Restart       bool
+}
+
+type StageFlags struct {
+	Net           string
+	TsVer         string
+	TsExit        string
+	TsTags        []string
+	TsAuthKey     string
+	MacvlanMac    string
+	MacvlanVlan   int
+	MacvlanParent string
+	Restart       bool
+	Env           bool
+}
+
+type EditFlags struct {
+	Env     bool
+	Config  bool
+	TS      bool
+	Restart bool
+}
+
+type LogsFlags struct {
+	Follow bool
+	Lines  int
+}
+
+type StatusFlags struct {
+	Format string
+}
+
+type EventsFlags struct {
+	All bool
+}
+
+type MountFlags struct {
+	Type string
+	Opts string
+	Deps []string
+}
+
+type VersionFlags struct {
+	JSON bool
+}
+
+type runFlagsParsed struct {
+	Net           string   `flag:"net"`
+	TsVer         string   `flag:"ts-ver"`
+	TsExit        string   `flag:"ts-exit"`
+	TsTags        []string `flag:"ts-tags"`
+	TsAuthKey     string   `flag:"ts-auth-key"`
+	MacvlanMac    string   `flag:"macvlan-mac"`
+	MacvlanVlan   int      `flag:"macvlan-vlan"`
+	MacvlanParent string   `flag:"macvlan-parent"`
+	Restart       bool     `flag:"restart" default:"true"`
+}
+
+type stageFlagsParsed struct {
+	Net           string   `flag:"net"`
+	TsVer         string   `flag:"ts-ver"`
+	TsExit        string   `flag:"ts-exit"`
+	TsTags        []string `flag:"ts-tags"`
+	TsAuthKey     string   `flag:"ts-auth-key"`
+	MacvlanMac    string   `flag:"macvlan-mac"`
+	MacvlanVlan   int      `flag:"macvlan-vlan"`
+	MacvlanParent string   `flag:"macvlan-parent"`
+	Restart       bool     `flag:"restart" default:"true"`
+	Env           bool     `flag:"env"`
+}
+
+type editFlagsParsed struct {
+	Env     bool `flag:"env"`
+	Config  bool `flag:"config"`
+	TS      bool `flag:"ts"`
+	Restart bool `flag:"restart" default:"true"`
+}
+
+type logsFlagsParsed struct {
+	Follow bool `flag:"follow" short:"f"`
+	Lines  int  `flag:"lines" short:"n" default:"-1"`
+}
+
+type statusFlagsParsed struct {
+	Format string `flag:"format" default:"table"`
+}
+
+type eventsFlagsParsed struct {
+	All bool `flag:"all"`
+}
+
+type mountFlagsParsed struct {
+	Type string   `flag:"type" short:"t" default:"nfs"`
+	Opts string   `flag:"opts" short:"o" default:"defaults"`
+	Deps []string `flag:"deps"`
+}
+
+type versionFlagsParsed struct {
+	JSON bool `flag:"json"`
+}
+
+var remoteCommandInfos = map[string]CommandInfo{
+	"cron":     {Name: "cron", Description: "Install a cron with the binary received from stdin", Usage: `cron "<cron expression>" [-- <binary args>]`},
+	"copy":     {Name: "copy", Description: "Copy a local file to the service data dir or env file", Usage: "copy <file> env|./data/<path>", Aliases: []string{"cp"}},
+	"disable":  {Name: "disable", Description: "Disable a service"},
+	"edit":     {Name: "edit", Description: "Edit a service"},
+	"env":      {Name: "env", Description: "Manage environment variables"},
+	"enable":   {Name: "enable", Description: "Enable a service"},
+	"events":   {Name: "events", Description: "Show events for a service"},
+	"logs":     {Name: "logs", Description: "Show logs of a service"},
+	"mount":    {Name: "mount", Description: "Mount a directory from a host", Usage: "mount | host:path [target] [--type=nfs] [--opts=default]"},
+	"ip":       {Name: "ip", Description: "Show the IP addresses of a service"},
+	"umount":   {Name: "umount", Description: "Unmount a directory"},
+	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}},
+	"restart":  {Name: "restart", Description: "Restart a service"},
+	"rollback": {Name: "rollback", Description: "Rollback a service"},
+	"run":      {Name: "run", Description: "Install a service with the binary received from stdin"},
+	"start":    {Name: "start", Description: "Start a service"},
+	"stage":    {Name: "stage", Description: "Stage a service"},
+	"status":   {Name: "status", Description: "Show status of a service"},
+	"ts":       {Name: "ts", Description: "Run a tailscale command"},
+	"stop":     {Name: "stop", Description: "Stop a service"},
+	"version":  {Name: "version", Description: "Show the version of the Catch server"},
+}
+
+var remoteFlagSpecs = map[string]map[string]FlagSpec{
+	"run":      flagSpecsFromStruct(runFlagsParsed{}),
+	"stage":    flagSpecsFromStruct(stageFlagsParsed{}),
+	"edit":     flagSpecsFromStruct(editFlagsParsed{}),
+	"logs":     flagSpecsFromStruct(logsFlagsParsed{}),
+	"status":   flagSpecsFromStruct(statusFlagsParsed{}),
+	"events":   flagSpecsFromStruct(eventsFlagsParsed{}),
+	"mount":    flagSpecsFromStruct(mountFlagsParsed{}),
+	"version":  flagSpecsFromStruct(versionFlagsParsed{}),
+	"copy":     {},
+	"cron":     {},
+	"disable":  {},
+	"enable":   {},
+	"env":      {},
+	"ip":       {},
+	"remove":   {},
+	"restart":  {},
+	"rollback": {},
+	"start":    {},
+	"stop":     {},
+	"ts":       {},
+	"umount":   {},
+}
+
+var remoteGroupInfos = map[string]GroupInfo{
+	"docker": {
+		Name:        "docker",
+		Description: "Docker compose management",
+		Commands: map[string]CommandInfo{
+			"update": {Name: "update", Description: "Update a docker compose service", Usage: "docker update <svc>"},
+			"pull":   {Name: "pull", Description: "Pull images for a docker compose service", Usage: "docker pull <svc>"},
+		},
+	},
+}
+
+var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
+	"docker": {
+		"update": {},
+		"pull":   {},
+	},
+}
+
+func RemoteCommandNames() []string {
+	names := make([]string, 0, len(remoteCommandInfos))
+	for name := range remoteCommandInfos {
+		names = append(names, name)
+	}
+	return names
+}
+
+func RemoteCommandInfos() map[string]CommandInfo {
+	return remoteCommandInfos
+}
+
+func RemoteFlagSpecs() map[string]map[string]FlagSpec {
+	return remoteFlagSpecs
+}
+
+func RemoteGroupInfos() map[string]GroupInfo {
+	return remoteGroupInfos
+}
+
+func RemoteGroupFlagSpecs() map[string]map[string]map[string]FlagSpec {
+	return remoteGroupFlagSpecs
+}
+
+func ParseRun(args []string) (RunFlags, []string, error) {
+	specs := remoteFlagSpecs["run"]
+	parseArgs, extraArgs := splitArgsForParsing(args, specs)
+	parsed, err := parseFlags[runFlagsParsed](parseArgs)
+	if err != nil {
+		return RunFlags{}, nil, err
+	}
+	flags := RunFlags{
+		Net:           parsed.Flags.Net,
+		TsVer:         parsed.Flags.TsVer,
+		TsExit:        parsed.Flags.TsExit,
+		TsTags:        parsed.Flags.TsTags,
+		TsAuthKey:     parsed.Flags.TsAuthKey,
+		MacvlanMac:    parsed.Flags.MacvlanMac,
+		MacvlanVlan:   parsed.Flags.MacvlanVlan,
+		MacvlanParent: parsed.Flags.MacvlanParent,
+		Restart:       parsed.Flags.Restart,
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseStage(args []string) (StageFlags, string, []string, error) {
+	specs := remoteFlagSpecs["stage"]
+	parseArgs, extraArgs := splitArgsForParsing(args, specs)
+	parsed, err := parseFlags[stageFlagsParsed](parseArgs)
+	if err != nil {
+		return StageFlags{}, "", nil, err
+	}
+
+	flags := StageFlags{
+		Net:           parsed.Flags.Net,
+		TsVer:         parsed.Flags.TsVer,
+		TsExit:        parsed.Flags.TsExit,
+		TsTags:        parsed.Flags.TsTags,
+		TsAuthKey:     parsed.Flags.TsAuthKey,
+		MacvlanMac:    parsed.Flags.MacvlanMac,
+		MacvlanVlan:   parsed.Flags.MacvlanVlan,
+		MacvlanParent: parsed.Flags.MacvlanParent,
+		Restart:       parsed.Flags.Restart,
+		Env:           parsed.Flags.Env,
+	}
+
+	argsOut := append(parsed.Args, extraArgs...)
+	subcmd := "stage"
+	if len(argsOut) > 0 {
+		switch argsOut[0] {
+		case "show", "clear", "commit":
+			subcmd = argsOut[0]
+			argsOut = argsOut[1:]
+		}
+	}
+	return flags, subcmd, argsOut, nil
+}
+
+func ParseEdit(args []string) (EditFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[editFlagsParsed](parseArgs)
+	if err != nil {
+		return EditFlags{}, nil, err
+	}
+	flags := EditFlags{
+		Env:     parsed.Flags.Env,
+		Config:  parsed.Flags.Config,
+		TS:      parsed.Flags.TS,
+		Restart: parsed.Flags.Restart,
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseLogs(args []string) (LogsFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[logsFlagsParsed](parseArgs)
+	if err != nil {
+		return LogsFlags{}, nil, err
+	}
+	flags := LogsFlags{
+		Follow: parsed.Flags.Follow,
+		Lines:  parsed.Flags.Lines,
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseStatus(args []string) (StatusFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[statusFlagsParsed](parseArgs)
+	if err != nil {
+		return StatusFlags{}, nil, err
+	}
+	flags := StatusFlags{Format: parsed.Flags.Format}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseEvents(args []string) (EventsFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[eventsFlagsParsed](parseArgs)
+	if err != nil {
+		return EventsFlags{}, nil, err
+	}
+	flags := EventsFlags{All: parsed.Flags.All}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseMount(args []string) (MountFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[mountFlagsParsed](parseArgs)
+	if err != nil {
+		return MountFlags{}, nil, err
+	}
+	flags := MountFlags{
+		Type: parsed.Flags.Type,
+		Opts: parsed.Flags.Opts,
+		Deps: parsed.Flags.Deps,
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseVersion(args []string) (VersionFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[versionFlagsParsed](parseArgs)
+	if err != nil {
+		return VersionFlags{}, nil, err
+	}
+	flags := VersionFlags{JSON: parsed.Flags.JSON}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+type parsedFlags[T any] struct {
+	Flags  T
+	Args   []string
+	Parser *yargs.Parser
+}
+
+func parseFlags[T any](args []string) (parsedFlags[T], error) {
+	result, err := yargs.ParseFlags[T](args)
+	if err != nil {
+		return parsedFlags[T]{}, err
+	}
+	argsOut := append([]string{}, result.Args...)
+	if len(result.RemainingArgs) > 0 {
+		argsOut = append(argsOut, result.RemainingArgs...)
+	}
+	return parsedFlags[T]{Flags: result.Flags, Args: argsOut, Parser: result.Parser}, nil
+}
+
+func splitArgsAtDoubleDash(args []string) ([]string, []string) {
+	for i, arg := range args {
+		if arg == "--" {
+			if i+1 < len(args) {
+				return args[:i], args[i+1:]
+			}
+			return args[:i], nil
+		}
+	}
+	return args, nil
+}
+
+func splitArgsForParsing(args []string, specs map[string]FlagSpec) ([]string, []string) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			if i+1 < len(args) {
+				return args[:i], args[i+1:]
+			}
+			return args[:i], nil
+		}
+		if strings.HasPrefix(arg, "--") && len(arg) > 2 {
+			name := arg
+			if idx := strings.Index(name, "="); idx != -1 {
+				name = name[:idx]
+			}
+			spec, ok := specs[name]
+			if !ok {
+				return args[:i], args[i:]
+			}
+			if spec.ConsumesValue && !strings.Contains(arg, "=") {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			if strings.Contains(arg, "=") {
+				name := arg[:strings.Index(arg, "=")]
+				if _, ok := specs[name]; ok {
+					continue
+				}
+				return args[:i], args[i:]
+			}
+			if len(arg) == 2 {
+				spec, ok := specs[arg]
+				if !ok {
+					return args[:i], args[i:]
+				}
+				if spec.ConsumesValue {
+					i++
+				}
+				continue
+			}
+			short := "-" + string(arg[1])
+			spec, ok := specs[short]
+			if !ok {
+				return args[:i], args[i:]
+			}
+			if spec.ConsumesValue {
+				continue
+			}
+			continue
+		}
+	}
+	return args, nil
+}
+
+func extractLongFlagValues(args []string, name string, splitComma bool) ([]string, []string) {
+	var out []string
+	var values []string
+	flag := "--" + name
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if strings.HasPrefix(arg, flag+"=") {
+			val := strings.TrimPrefix(arg, flag+"=")
+			values = appendValues(values, val, splitComma)
+			continue
+		}
+		if arg == flag {
+			if i+1 < len(args) {
+				val := args[i+1]
+				values = appendValues(values, val, splitComma)
+				i++
+			}
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out, values
+}
+
+func appendValues(dst []string, val string, splitComma bool) []string {
+	if !splitComma {
+		return append(dst, val)
+	}
+	parts := strings.Split(val, ",")
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		dst = append(dst, part)
+	}
+	return dst
+}
+
+func flagSpecsFromStruct(v any) map[string]FlagSpec {
+	specs := make(map[string]FlagSpec)
+	t := reflect.TypeOf(v)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return specs
+	}
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := field.Tag.Get("flag")
+		if name == "" {
+			name = strings.ToLower(field.Name)
+		}
+		spec := FlagSpec{ConsumesValue: consumesValue(field.Type)}
+		specs["--"+name] = spec
+		if short := field.Tag.Get("short"); short != "" {
+			specs["-"+short] = spec
+		}
+	}
+	return specs
+}
+
+func consumesValue(t reflect.Type) bool {
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	switch t.Kind() {
+	case reflect.Bool:
+		return false
+	default:
+		return true
+	}
+}
+
+func withExtraFlagSpecs(specs map[string]FlagSpec, name string, spec FlagSpec) map[string]FlagSpec {
+	out := make(map[string]FlagSpec, len(specs)+1)
+	for k, v := range specs {
+		out[k] = v
+	}
+	out["--"+name] = spec
+	return out
+}
+
+func RequireArgsAtLeast(subcmd string, args []string, count int) error {
+	if len(args) < count {
+		return fmt.Errorf("'%s' requires at least %d argument(s), got %d", subcmd, count, len(args))
+	}
+	return nil
+}

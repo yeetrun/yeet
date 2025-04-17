@@ -1,0 +1,12 @@
+# Copyright (c) 2025 AUTHORS All rights reserved.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file.
+
+services:
+  uptime-kuma:
+    image: louislam/uptime-kuma:1
+    volumes:
+      - ./data:/app/data
+    ports:
+      - 3001:3001
+    restart: unless-stopped
