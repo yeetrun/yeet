@@ -34,12 +34,12 @@ import (
 	"slices"
 	"time"
 
+	"github.com/tailscale/golang-x-crypto/ssh"
 	"github.com/yeetrun/yeet/pkg/catch"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	cdb "github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/dnet"
 	"github.com/yeetrun/yeet/pkg/svc"
-	"github.com/tailscale/golang-x-crypto/ssh"
 	"tailscale.com/tsnet"
 	"tailscale.com/util/must"
 )
@@ -47,9 +47,9 @@ import (
 const defaultTSNetPort = 41547 // above CATCH on QWERTY
 
 var (
-	dataDir   = flag.String("data-dir", must.Get(filepath.Abs("data")), "data directory")
-	tsnetHost = flag.String("tsnet-host", "catch", "hostname to use for tsnet")
-	tsnetPort = flag.Int("tsnet-port", defaultTSNetPort, "port to use for tsnet")
+	legacyDataDir = flag.String("data-dir", must.Get(filepath.Abs("data")), "data directory")
+	tsnetHost     = flag.String("tsnet-host", "catch", "hostname to use for tsnet")
+	tsnetPort     = flag.Int("tsnet-port", defaultTSNetPort, "port to use for tsnet")
 
 	// TODO: This should be randomly assigned at stored in the JSON DB.
 	registryInternalAddr = flag.String("registry-internal-addr", "127.0.0.1:0", "address for registry to listen on internally")
@@ -61,12 +61,12 @@ var (
 )
 
 // initTSNet initializes and returns a tsnet.Server if tsnetHost is set.
-func initTSNet() *tsnet.Server {
+func initTSNet(dataDir string) *tsnet.Server {
 	if *tsnetHost == "" {
 		return nil
 	}
 	ts := &tsnet.Server{
-		Dir:      filepath.Join(*dataDir, "tsnet"),
+		Dir:      filepath.Join(dataDir, "tsnet"),
 		Hostname: *tsnetHost,
 		Port:     uint16(*tsnetPort),
 	}
@@ -121,20 +121,21 @@ func main() {
 		return
 	}
 
+	dataDir := *legacyDataDir
 	// Set and create all the necessary directories.
-	log.Printf("data dir: %v", *dataDir)
-	dbPath := filepath.Join(*dataDir, "db.json")
+	log.Printf("data dir: %v", dataDir)
+	dbPath := filepath.Join(dataDir, "db.json")
 
-	must.Do(os.MkdirAll(*dataDir, 0700))
-	registryDir := filepath.Join(*dataDir, "registry")
+	must.Do(os.MkdirAll(dataDir, 0700))
+	registryDir := filepath.Join(dataDir, "registry")
 	must.Do(os.MkdirAll(registryDir, 0700))
-	servicesDir := filepath.Join(*dataDir, "services")
+	servicesDir := filepath.Join(dataDir, "services")
 	must.Do(os.MkdirAll(servicesDir, 0700))
-	mountsDir := filepath.Join(*dataDir, "mounts")
+	mountsDir := filepath.Join(dataDir, "mounts")
 	must.Do(os.MkdirAll(mountsDir, 0700))
 
 	// Load or generate private key.
-	kp := filepath.Join(*dataDir, "id_ed25519")
+	kp := filepath.Join(dataDir, "id_ed25519")
 	privateBytes, err := os.ReadFile(kp) // TODO create one per data dir
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -156,7 +157,7 @@ func main() {
 		Signer:               private,
 		DB:                   cdb.NewStore(dbPath, servicesDir),
 		DefaultUser:          curUser.Username, // maybe not default to root?
-		RootDir:              *dataDir,
+		RootDir:              dataDir,
 		ServicesRoot:         servicesDir,
 		MountsRoot:           mountsDir,
 		InternalRegistryAddr: irAddr,
@@ -171,7 +172,7 @@ func main() {
 			return
 		case "install":
 			// Perform install
-			if err := doInstall(scfg); err != nil {
+			if err := doInstall(scfg, dataDir); err != nil {
 				log.Fatal("failed to install: ", err)
 			}
 			setupDocker()
@@ -180,7 +181,7 @@ func main() {
 	}
 
 	// Require tsnet to continue.
-	ts := initTSNet()
+	ts := initTSNet(dataDir)
 	if ts == nil {
 		log.Fatal("failed to initialize tsnet")
 	}
@@ -278,9 +279,9 @@ func setupDocker() error {
 }
 
 // doInstall installs the catch binary as a service.
-func doInstall(cfg *catch.Config) error {
+func doInstall(cfg *catch.Config, dataDir string) error {
 	// Set up Tailscale
-	ts := initTSNet()
+	ts := initTSNet(dataDir)
 	// Close it at the end so that when the systedm service is started, it
 	// doesn't fight for tsnet.
 	defer ts.Close()
@@ -291,7 +292,7 @@ func doInstall(cfg *catch.Config) error {
 			Printer:     log.Printf,
 		},
 		Args: []string{
-			fmt.Sprintf("--data-dir=%v", *dataDir),
+			fmt.Sprintf("--data-dir=%v", dataDir),
 			fmt.Sprintf("--tsnet-host=%v", *tsnetHost),
 		},
 	})
