@@ -13,7 +13,7 @@ import (
 
 //go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort
 
-// View returns a readonly view of Data.
+// View returns a read-only view of Data.
 func (p *Data) View() DataView {
 	return DataView{ж: p}
 }
@@ -29,7 +29,7 @@ type DataView struct {
 	ж *Data
 }
 
-// Valid reports whether underlying value is non-nil.
+// Valid reports whether v's underlying value is non-nil.
 func (v DataView) Valid() bool { return v.ж != nil }
 
 // AsStruct returns a clone of the underlying value which aliases no memory with
@@ -93,7 +93,7 @@ var _DataViewNeedsRegeneration = Data(struct {
 	DockerNetworks map[string]*DockerNetwork
 }{})
 
-// View returns a readonly view of Service.
+// View returns a read-only view of Service.
 func (p *Service) View() ServiceView {
 	return ServiceView{ж: p}
 }
@@ -109,7 +109,7 @@ type ServiceView struct {
 	ж *Service
 }
 
-// Valid reports whether underlying value is non-nil.
+// Valid reports whether v's underlying value is non-nil.
 func (v ServiceView) Valid() bool { return v.ж != nil }
 
 // AsStruct returns a clone of the underlying value which aliases no memory with
@@ -140,7 +140,6 @@ func (v *ServiceView) UnmarshalJSON(b []byte) error {
 
 func (v ServiceView) Name() string             { return v.ж.Name }
 func (v ServiceView) ServiceType() ServiceType { return v.ж.ServiceType }
-func (v ServiceView) Dir() string              { return v.ж.Dir }
 func (v ServiceView) Generation() int          { return v.ж.Generation }
 func (v ServiceView) LatestGeneration() int    { return v.ж.LatestGeneration }
 
@@ -149,20 +148,12 @@ func (v ServiceView) Artifacts() views.MapFn[ArtifactName, *Artifact, ArtifactVi
 		return t.View()
 	})
 }
-func (v ServiceView) SvcNetwork() *SvcNetwork {
-	if v.ж.SvcNetwork == nil {
-		return nil
-	}
-	x := *v.ж.SvcNetwork
-	return &x
+func (v ServiceView) SvcNetwork() views.ValuePointer[SvcNetwork] {
+	return views.ValuePointerOf(v.ж.SvcNetwork)
 }
 
-func (v ServiceView) Macvlan() *MacvlanNetwork {
-	if v.ж.Macvlan == nil {
-		return nil
-	}
-	x := *v.ж.Macvlan
-	return &x
+func (v ServiceView) Macvlan() views.ValuePointer[MacvlanNetwork] {
+	return views.ValuePointerOf(v.ж.Macvlan)
 }
 
 func (v ServiceView) TSNet() TailscaleNetworkView { return v.ж.TSNet.View() }
@@ -171,7 +162,6 @@ func (v ServiceView) TSNet() TailscaleNetworkView { return v.ж.TSNet.View() }
 var _ServiceViewNeedsRegeneration = Service(struct {
 	Name             string
 	ServiceType      ServiceType
-	Dir              string
 	Generation       int
 	LatestGeneration int
 	Artifacts        ArtifactStore
@@ -180,7 +170,7 @@ var _ServiceViewNeedsRegeneration = Service(struct {
 	TSNet            *TailscaleNetwork
 }{})
 
-// View returns a readonly view of Volume.
+// View returns a read-only view of Volume.
 func (p *Volume) View() VolumeView {
 	return VolumeView{ж: p}
 }
@@ -196,7 +186,7 @@ type VolumeView struct {
 	ж *Volume
 }
 
-// Valid reports whether underlying value is non-nil.
+// Valid reports whether v's underlying value is non-nil.
 func (v VolumeView) Valid() bool { return v.ж != nil }
 
 // AsStruct returns a clone of the underlying value which aliases no memory with
@@ -242,7 +232,7 @@ var _VolumeViewNeedsRegeneration = Volume(struct {
 	Deps string
 }{})
 
-// View returns a readonly view of ImageRepo.
+// View returns a read-only view of ImageRepo.
 func (p *ImageRepo) View() ImageRepoView {
 	return ImageRepoView{ж: p}
 }
@@ -258,7 +248,7 @@ type ImageRepoView struct {
 	ж *ImageRepo
 }
 
-// Valid reports whether underlying value is non-nil.
+// Valid reports whether v's underlying value is non-nil.
 func (v ImageRepoView) Valid() bool { return v.ж != nil }
 
 // AsStruct returns a clone of the underlying value which aliases no memory with
@@ -294,7 +284,7 @@ var _ImageRepoViewNeedsRegeneration = ImageRepo(struct {
 	Refs map[ImageRef]ImageManifest
 }{})
 
-// View returns a readonly view of Artifact.
+// View returns a read-only view of Artifact.
 func (p *Artifact) View() ArtifactView {
 	return ArtifactView{ж: p}
 }
@@ -310,7 +300,7 @@ type ArtifactView struct {
 	ж *Artifact
 }
 
-// Valid reports whether underlying value is non-nil.
+// Valid reports whether v's underlying value is non-nil.
 func (v ArtifactView) Valid() bool { return v.ж != nil }
 
 // AsStruct returns a clone of the underlying value which aliases no memory with
@@ -346,7 +336,7 @@ var _ArtifactViewNeedsRegeneration = Artifact(struct {
 	Refs map[ArtifactRef]string
 }{})
 
-// View returns a readonly view of DockerNetwork.
+// View returns a read-only view of DockerNetwork.
 func (p *DockerNetwork) View() DockerNetworkView {
 	return DockerNetworkView{ж: p}
 }
@@ -362,7 +352,7 @@ type DockerNetworkView struct {
 	ж *DockerNetwork
 }
 
-// Valid reports whether underlying value is non-nil.
+// Valid reports whether v's underlying value is non-nil.
 func (v DockerNetworkView) Valid() bool { return v.ж != nil }
 
 // AsStruct returns a clone of the underlying value which aliases no memory with
@@ -423,7 +413,7 @@ var _DockerNetworkViewNeedsRegeneration = DockerNetwork(struct {
 	PortMap       map[string]*EndpointPort
 }{})
 
-// View returns a readonly view of DockerEndpoint.
+// View returns a read-only view of DockerEndpoint.
 func (p *DockerEndpoint) View() DockerEndpointView {
 	return DockerEndpointView{ж: p}
 }
@@ -439,7 +429,7 @@ type DockerEndpointView struct {
 	ж *DockerEndpoint
 }
 
-// Valid reports whether underlying value is non-nil.
+// Valid reports whether v's underlying value is non-nil.
 func (v DockerEndpointView) Valid() bool { return v.ж != nil }
 
 // AsStruct returns a clone of the underlying value which aliases no memory with
@@ -477,7 +467,7 @@ var _DockerEndpointViewNeedsRegeneration = DockerEndpoint(struct {
 	IPv4       netip.Prefix
 }{})
 
-// View returns a readonly view of TailscaleNetwork.
+// View returns a read-only view of TailscaleNetwork.
 func (p *TailscaleNetwork) View() TailscaleNetworkView {
 	return TailscaleNetworkView{ж: p}
 }
@@ -493,7 +483,7 @@ type TailscaleNetworkView struct {
 	ж *TailscaleNetwork
 }
 
-// Valid reports whether underlying value is non-nil.
+// Valid reports whether v's underlying value is non-nil.
 func (v TailscaleNetworkView) Valid() bool { return v.ж != nil }
 
 // AsStruct returns a clone of the underlying value which aliases no memory with
@@ -537,7 +527,7 @@ var _TailscaleNetworkViewNeedsRegeneration = TailscaleNetwork(struct {
 	StableID  tailcfg.StableNodeID
 }{})
 
-// View returns a readonly view of EndpointPort.
+// View returns a read-only view of EndpointPort.
 func (p *EndpointPort) View() EndpointPortView {
 	return EndpointPortView{ж: p}
 }
@@ -553,7 +543,7 @@ type EndpointPortView struct {
 	ж *EndpointPort
 }
 
-// Valid reports whether underlying value is non-nil.
+// Valid reports whether v's underlying value is non-nil.
 func (v EndpointPortView) Valid() bool { return v.ж != nil }
 
 // AsStruct returns a clone of the underlying value which aliases no memory with

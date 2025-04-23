@@ -111,7 +111,6 @@ func InstallYeetNSService() error {
 
 	cfg := &db.Service{
 		Name:       "yeet-ns",
-		Dir:        ".",
 		Generation: 1,
 		Artifacts: map[db.ArtifactName]*db.Artifact{
 			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{

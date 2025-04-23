@@ -105,7 +105,6 @@ func (src *Service) Clone() *Service {
 var _ServiceCloneNeedsRegeneration = Service(struct {
 	Name             string
 	ServiceType      ServiceType
-	Dir              string
 	Generation       int
 	LatestGeneration int
 	Artifacts        ArtifactStore

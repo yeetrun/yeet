@@ -109,9 +109,6 @@ type Service struct {
 
 	ServiceType ServiceType
 
-	// Dir is the directory where the service's files are stored.
-	Dir string
-
 	// Generation is the current generation of the service.
 	Generation int `json:",omitempty"`
 
@@ -366,7 +363,6 @@ func (s *Store) MutateService(name string, f func(*Data, *Service) error) (*Data
 		if !ok {
 			svc = &Service{
 				Name: name,
-				Dir:  filepath.Join(s.serviceRoot, name),
 			}
 			mak.Set(&d.Services, name, svc)
 		}
