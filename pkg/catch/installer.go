@@ -620,7 +620,7 @@ func (i *FileInstaller) installOnClose() error {
 				uvArgs = append(uvArgs, "--with", dep)
 			}
 			
-			uvArgs = append(uvArgs, "./example.py")
+			uvArgs = append(uvArgs, "./main.py")
 			
 			su := &svc.SystemdUnit{
 				Name:             i.cfg.ServiceName,
@@ -630,7 +630,7 @@ func (i *FileInstaller) installOnClose() error {
 					"run", "--rm",
 					"--net", "host",
 					"--volume", fmt.Sprintf("%s:/data", dataDir),
-					"--volume", fmt.Sprintf("%s:/example.py", filepath.Join(runDir, "main.py")),
+					"--volume", fmt.Sprintf("%s:/main.py", filepath.Join(runDir, "main.py")),
 					"ghcr.io/astral-sh/uv:debian",
 				}, append(uvArgs, i.cfg.Args...)...),
 			}
