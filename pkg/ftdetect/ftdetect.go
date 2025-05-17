@@ -286,20 +286,33 @@ func (f *file) detectPython() (bool, error) {
 	scanner := bufio.NewScanner(f.f)
 	
 	inScriptBlock := false
-	hasPythonSyntax := false
+	isPython := false
+	lineCount := 0
 	
-	for scanner.Scan() {
+	for scanner.Scan() && lineCount < 20 {
 		line := scanner.Text()
+		lineCount++
 		
-		// Check for Python syntax indicators (type annotations, etc.)
-		if strings.Contains(line, "type ") && strings.Contains(line, "=") {
-			hasPythonSyntax = true
-		}
-		
+		// Check for Python script header
 		if strings.TrimSpace(line) == "# /// script" {
 			inScriptBlock = true
 		} else if strings.TrimSpace(line) == "# ///" && inScriptBlock {
 			return true, nil
+		}
+		
+		// Check for common Python patterns
+		if strings.HasPrefix(strings.TrimSpace(line), "import ") || 
+		   strings.HasPrefix(strings.TrimSpace(line), "from ") && strings.Contains(line, " import ") ||
+		   strings.HasPrefix(strings.TrimSpace(line), "def ") ||
+		   strings.HasPrefix(strings.TrimSpace(line), "class ") ||
+		   strings.Contains(line, "print(") ||
+		   strings.Contains(line, "type ") && strings.Contains(line, "=") {
+			isPython = true
+		}
+		
+		// Check for Python comments
+		if strings.TrimSpace(line) != "" && strings.TrimSpace(line)[0] == '#' {
+			isPython = true
 		}
 	}
 	
@@ -307,7 +320,7 @@ func (f *file) detectPython() (bool, error) {
 		return false, fmt.Errorf("error scanning file: %w", err)
 	}
 	
-	return hasPythonSyntax, nil
+	return isPython, nil
 }
 
 type PythonScriptMetadata struct {
