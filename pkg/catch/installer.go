@@ -631,7 +631,7 @@ func (i *FileInstaller) installOnClose() error {
 					"--net", "host",
 					"--volume", fmt.Sprintf("%s:/data", dataDir),
 					"--volume", fmt.Sprintf("%s:/main.py", filepath.Join(runDir, "main.py")),
-					"ghcr.io/astral-sh/uv:latest",
+					"ghcr.io/astral-sh/uv:python3.12-bookworm",
 				}, append(uvArgs, i.cfg.Args...)...),
 			}
 			units, err := su.WriteOutUnitFiles(binDir)
