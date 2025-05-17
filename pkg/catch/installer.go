@@ -614,7 +614,7 @@ func (i *FileInstaller) installOnClose() error {
 				return fmt.Errorf("failed to parse Python script metadata: %w", err)
 			}
 			
-			uvArgs := []string{"run"}
+			uvArgs := []string{"uv", "run"}
 			
 			for _, dep := range metadata.Dependencies {
 				uvArgs = append(uvArgs, "--with", dep)
