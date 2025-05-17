@@ -103,16 +103,16 @@ func (f *file) detect() (FileType, error) {
 	} else if is {
 		return DockerCompose, nil
 	}
+	if is, err := f.detectPython(); err != nil {
+		return Unknown, fmt.Errorf("failed to detect Python: %w", err)
+	} else if is {
+		return Python, nil
+	}
 	// TypeScript file
 	if is, err := f.detectTypeScript(); err != nil {
 		return Unknown, fmt.Errorf("failed to detect TypeScript: %w", err)
 	} else if is {
 		return TypeScript, nil
-	}
-	if is, err := f.detectPython(); err != nil {
-		return Unknown, fmt.Errorf("failed to detect Python: %w", err)
-	} else if is {
-		return Python, nil
 	}
 	return Unknown, fmt.Errorf("unable to detect file type")
 }
