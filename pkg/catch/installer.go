@@ -614,6 +614,14 @@ func (i *FileInstaller) installOnClose() error {
 				return fmt.Errorf("failed to parse Python script metadata: %w", err)
 			}
 			
+			mainPyPath := filepath.Join(runDir, "main.py")
+			postRenameActions = append(postRenameActions, func() error {
+				if err := os.Chmod(mainPyPath, 0755); err != nil {
+					return fmt.Errorf("failed to make Python script executable: %w", err)
+				}
+				return nil
+			})
+			
 			uvArgs := []string{"uv", "run"}
 			
 			for _, dep := range metadata.Dependencies {
@@ -630,7 +638,7 @@ func (i *FileInstaller) installOnClose() error {
 					"run", "--rm",
 					"--net", "host",
 					"--volume", fmt.Sprintf("%s:/data", dataDir),
-					"--volume", fmt.Sprintf("%s:/main.py", filepath.Join(runDir, "main.py")),
+					"--volume", fmt.Sprintf("%s:/main.py", mainPyPath),
 					"ghcr.io/astral-sh/uv:python3.12-bookworm",
 				}, append(uvArgs, i.cfg.Args...)...),
 			}
