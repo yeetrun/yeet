@@ -191,6 +191,7 @@ const (
 	ArtifactDockerComposeFile    ArtifactName = "compose.yml"
 	ArtifactDockerComposeNetwork ArtifactName = "compose.network"
 	ArtifactTypeScriptFile       ArtifactName = "main.ts"
+	ArtifactPythonFile           ArtifactName = "main.py"
 	ArtifactSystemdUnit          ArtifactName = "systemd.service"
 	ArtifactSystemdTimerFile     ArtifactName = "systemd.timer"
 

@@ -575,7 +575,7 @@ func (i *FileInstaller) installOnClose() error {
 				Executable:       dockerCmd,
 				WorkingDirectory: dataDir,
 				Arguments: append([]string{
-					"run", "--rm",
+					"run", "--rm", "--tty",
 					"--net", "host",
 					"--volume", fmt.Sprintf("%s:/data", dataDir),
 					"--volume", fmt.Sprintf("%s:/main.ts", filepath.Join(runDir, "main.ts")),
@@ -608,30 +608,19 @@ func (i *FileInstaller) installOnClose() error {
 			if err != nil {
 				return fmt.Errorf("failed get Docker cmd: %w", err)
 			}
-			
-			metadata, err := ftdetect.ParsePythonScriptMetadata(bin)
-			if err != nil {
-				return fmt.Errorf("failed to parse Python script metadata: %w", err)
-			}
-			
-			uvArgs := []string{"uv", "run"}
-			
-			for _, dep := range metadata.Dependencies {
-				uvArgs = append(uvArgs, "--with", dep)
-			}
-			
-			uvArgs = append(uvArgs, "/main.py")
-			
+
+			uvArgs := []string{"uv", "run", "/main.py"}
+
 			su := &svc.SystemdUnit{
 				Name:             i.cfg.ServiceName,
 				Executable:       dockerCmd,
 				WorkingDirectory: dataDir,
 				Arguments: append([]string{
-					"run", "--rm",
+					"run", "--rm", "--tty",
 					"--net", "host",
 					"--volume", fmt.Sprintf("%s:/data", dataDir),
 					"--volume", fmt.Sprintf("%s:/main.py", filepath.Join(runDir, "main.py")),
-					"ghcr.io/astral-sh/uv:debian",
+					"ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
 				}, append(uvArgs, i.cfg.Args...)...),
 			}
 			units, err := su.WriteOutUnitFiles(binDir)
@@ -641,7 +630,7 @@ func (i *FileInstaller) installOnClose() error {
 			for u, p := range units {
 				mak.Set(&i.artifacts, u, p)
 			}
-			artifactName = db.ArtifactName("python-file") // Add this to db.ArtifactName constants if needed
+			artifactName = db.ArtifactPythonFile
 			detectedServiceType = db.ServiceTypeSystemd
 		case ftdetect.Unknown:
 			return fmt.Errorf("unknown file type")

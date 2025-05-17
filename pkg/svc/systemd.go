@@ -223,6 +223,7 @@ func (s *SystemdService) artifactInstaller() map[db.ArtifactName]artifactInstall
 		db.ArtifactNetNSEnv:     {dstPath: filepath.Join(s.runDir, "netns.env")},
 
 		db.ArtifactTypeScriptFile: {dstPath: filepath.Join(s.runDir, "main.ts")},
+		db.ArtifactPythonFile:     {dstPath: filepath.Join(s.runDir, "main.py")},
 		db.ArtifactBinary:         {dstPath: filepath.Join(s.runDir, s.Name())},
 		db.ArtifactEnvFile:        {dstPath: filepath.Join(s.runDir, "env")},
 
@@ -245,6 +246,7 @@ func (s *SystemdService) Install() error {
 		db.ArtifactNetNSEnv,
 		db.ArtifactBinary,
 		db.ArtifactTypeScriptFile,
+		db.ArtifactPythonFile,
 		db.ArtifactEnvFile,
 		db.ArtifactTSService,
 		db.ArtifactTSEnv,

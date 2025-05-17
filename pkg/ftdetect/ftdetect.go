@@ -15,6 +15,7 @@
 package ftdetect
 
 import (
+	"bufio"
 	"debug/elf"
 	"debug/macho"
 	"encoding/binary"
@@ -23,10 +24,8 @@ import (
 	"log"
 	"os"
 	"strings"
-	"bufio"
 
 	"github.com/evanw/esbuild/pkg/api"
-	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -103,16 +102,16 @@ func (f *file) detect() (FileType, error) {
 	} else if is {
 		return DockerCompose, nil
 	}
-	if is, err := f.detectPython(); err != nil {
-		return Unknown, fmt.Errorf("failed to detect Python: %w", err)
-	} else if is {
-		return Python, nil
-	}
-	// TypeScript file
+	// TypeScript file - checking before Python to prevent false positives
 	if is, err := f.detectTypeScript(); err != nil {
 		return Unknown, fmt.Errorf("failed to detect TypeScript: %w", err)
 	} else if is {
 		return TypeScript, nil
+	}
+	if is, err := f.detectPython(); err != nil {
+		return Unknown, fmt.Errorf("failed to detect Python: %w", err)
+	} else if is {
+		return Python, nil
 	}
 	return Unknown, fmt.Errorf("unable to detect file type")
 }
@@ -264,17 +263,67 @@ func (f *file) detectTypeScript() (bool, error) {
 	if err := f.checkAndSeek0(); err != nil {
 		return false, fmt.Errorf("failed to seek to start of file: %w", err)
 	}
+
+	// First do a quick check for common TypeScript patterns
+	scanner := bufio.NewScanner(f.f)
+	tsPatterns := 0
+	lineCount := 0
+
+	for scanner.Scan() && lineCount < 20 {
+		line := scanner.Text()
+		lineCount++
+
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		// Check for TS-specific patterns
+		if strings.Contains(line, ": ") && (strings.Contains(line, "string") ||
+			strings.Contains(line, "number") || strings.Contains(line, "boolean") ||
+			strings.Contains(line, "any") || strings.Contains(line, "void")) {
+			tsPatterns += 2
+		} else if strings.Contains(line, "interface ") || strings.Contains(line, "namespace ") {
+			tsPatterns += 2
+		} else if strings.Contains(line, "as ") && (strings.Contains(line, "string") ||
+			strings.Contains(line, "number") || strings.Contains(line, "boolean")) {
+			tsPatterns++
+		} else if strings.HasPrefix(trimmed, "import ") &&
+			(strings.Contains(line, "from ") || strings.Contains(line, "{ ")) {
+			tsPatterns++
+		} else if strings.Contains(line, "export ") {
+			tsPatterns++
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("error scanning file: %w", err)
+	}
+
+	// If we have enough TypeScript patterns, return true immediately
+	if tsPatterns >= 2 {
+		return true, nil
+	}
+
+	// If quick check was inconclusive, use the full TypeScript parser
+	if err := f.checkAndSeek0(); err != nil {
+		return false, fmt.Errorf("failed to seek to start of file: %w", err)
+	}
+
 	bs, err := io.ReadAll(f.f)
 	if err != nil {
 		return false, fmt.Errorf("failed to read file: %v", err)
 	}
-	// TODO: This is pretty heavy-handed in terms of binary size impact.
+
+	// Try to parse as TypeScript
 	result := api.Transform(string(bs), api.TransformOptions{
 		Loader: api.LoaderTS,
 	})
+
 	if len(result.Errors) > 0 {
-		return false, fmt.Errorf("failed to parse TypeScript: %v", result.Errors)
+		return false, nil
 	}
+
 	return true, nil
 }
 
@@ -284,90 +333,55 @@ func (f *file) detectPython() (bool, error) {
 	}
 
 	scanner := bufio.NewScanner(f.f)
-	
+
 	inScriptBlock := false
-	isPython := false
+	pythonPatterns := 0
 	lineCount := 0
-	
+
 	for scanner.Scan() && lineCount < 20 {
 		line := scanner.Text()
 		lineCount++
-		
+
 		// Check for Python script header
 		if strings.TrimSpace(line) == "# /// script" {
 			inScriptBlock = true
 		} else if strings.TrimSpace(line) == "# ///" && inScriptBlock {
 			return true, nil
 		}
-		
-		// Check for common Python patterns
-		if strings.HasPrefix(strings.TrimSpace(line), "import ") || 
-		   strings.HasPrefix(strings.TrimSpace(line), "from ") && strings.Contains(line, " import ") ||
-		   strings.HasPrefix(strings.TrimSpace(line), "def ") ||
-		   strings.HasPrefix(strings.TrimSpace(line), "class ") ||
-		   strings.Contains(line, "print(") ||
-		   strings.Contains(line, "type ") && strings.Contains(line, "=") {
-			isPython = true
+
+		// Skip empty lines and potential TypeScript-style comments
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "//") {
+			continue
 		}
-		
-		// Check for Python comments
-		if strings.TrimSpace(line) != "" && strings.TrimSpace(line)[0] == '#' {
-			isPython = true
+
+		// Check for distinctive Python patterns
+		if strings.HasPrefix(trimmed, "import ") && !strings.Contains(line, "from") {
+			pythonPatterns++
+		} else if strings.HasPrefix(trimmed, "from ") && strings.Contains(line, " import ") {
+			// This is a strong Python indicator
+			pythonPatterns += 2
+		} else if strings.HasPrefix(trimmed, "def ") && strings.Contains(line, ":") {
+			// Function definitions with colon are distinctive to Python
+			pythonPatterns += 2
+		} else if strings.HasPrefix(trimmed, "class ") && strings.Contains(line, ":") {
+			// Class definitions with colon are distinctive to Python
+			pythonPatterns += 2
+		} else if trimmed[0] == '#' {
+			// Pure Python-style comments (not inside a string)
+			pythonPatterns++
+		} else if strings.Contains(line, "elif ") || strings.Contains(line, " and ") ||
+			strings.Contains(line, " or ") || strings.Contains(line, " is ") ||
+			strings.Contains(line, " not ") || strings.Contains(line, " pass ") {
+			// Python-specific keywords
+			pythonPatterns++
 		}
 	}
-	
+
 	if err := scanner.Err(); err != nil {
 		return false, fmt.Errorf("error scanning file: %w", err)
 	}
-	
-	return isPython, nil
-}
 
-type PythonScriptMetadata struct {
-	RequiresPython string     `toml:"requires-python"`
-	Dependencies   []string   `toml:"dependencies"`
-}
-
-// ParsePythonScriptMetadata extracts and parses the metadata from a Python script file
-func ParsePythonScriptMetadata(path string) (*PythonScriptMetadata, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-	
-	scanner := bufio.NewScanner(file)
-	
-	var metadataLines []string
-	inScriptBlock := false
-	
-	for scanner.Scan() {
-		line := scanner.Text()
-		
-		if strings.TrimSpace(line) == "# /// script" {
-			inScriptBlock = true
-			continue
-		} else if strings.TrimSpace(line) == "# ///" && inScriptBlock {
-			break
-		} else if inScriptBlock {
-			if strings.HasPrefix(line, "# ") {
-				metadataLines = append(metadataLines, line[2:])
-			}
-		}
-	}
-	
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error scanning file: %w", err)
-	}
-	
-	if len(metadataLines) == 0 {
-		return &PythonScriptMetadata{RequiresPython: ">=3.7", Dependencies: []string{}}, nil
-	}
-	
-	metadata := &PythonScriptMetadata{}
-	if err := toml.Unmarshal([]byte(strings.Join(metadataLines, "\n")), metadata); err != nil {
-		return nil, fmt.Errorf("failed to parse metadata: %w", err)
-	}
-	
-	return metadata, nil
+	// Need multiple Python patterns to be confident
+	return pythonPatterns >= 2, nil
 }
