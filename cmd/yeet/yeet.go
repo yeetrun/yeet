@@ -589,7 +589,11 @@ func initCatch(userAtRemote string) error {
 func stageFile(svc, bin string) error {
 	svcAt := fmt.Sprintf("%s@%s", svc, loadedPrefs.Host)
 	cmd := cmdutil.NewStdCmd("scp", bin, fmt.Sprintf("%s:stage", svcAt))
-	return cmd.Run()
+	err := cmd.Run()
+	if err != nil {
+		return fmt.Errorf("failed to upload file %s to stage: %w", bin, err)
+	}
+	return nil
 }
 
 func handleSvcCmd(args []string) error {
