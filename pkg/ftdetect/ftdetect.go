@@ -22,8 +22,11 @@ import (
 	"io"
 	"log"
 	"os"
+	"strings"
+	"bufio"
 
 	"github.com/evanw/esbuild/pkg/api"
+	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -36,6 +39,7 @@ const (
 	TypeScript
 	Script
 	Zstd
+	Python
 )
 
 type file struct {
@@ -104,6 +108,11 @@ func (f *file) detect() (FileType, error) {
 		return Unknown, fmt.Errorf("failed to detect TypeScript: %w", err)
 	} else if is {
 		return TypeScript, nil
+	}
+	if is, err := f.detectPython(); err != nil {
+		return Unknown, fmt.Errorf("failed to detect Python: %w", err)
+	} else if is {
+		return Python, nil
 	}
 	return Unknown, fmt.Errorf("unable to detect file type")
 }
@@ -267,4 +276,85 @@ func (f *file) detectTypeScript() (bool, error) {
 		return false, fmt.Errorf("failed to parse TypeScript: %v", result.Errors)
 	}
 	return true, nil
+}
+
+func (f *file) detectPython() (bool, error) {
+	if err := f.checkAndSeek0(); err != nil {
+		return false, fmt.Errorf("failed to seek to start of file: %w", err)
+	}
+
+	scanner := bufio.NewScanner(f.f)
+	
+	inScriptBlock := false
+	hasPythonSyntax := false
+	
+	for scanner.Scan() {
+		line := scanner.Text()
+		
+		// Check for Python syntax indicators (type annotations, etc.)
+		if strings.Contains(line, "type ") && strings.Contains(line, "=") {
+			hasPythonSyntax = true
+		}
+		
+		if strings.TrimSpace(line) == "# /// script" {
+			inScriptBlock = true
+		} else if strings.TrimSpace(line) == "# ///" && inScriptBlock {
+			return true, nil
+		}
+	}
+	
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("error scanning file: %w", err)
+	}
+	
+	return hasPythonSyntax, nil
+}
+
+type PythonScriptMetadata struct {
+	RequiresPython string     `toml:"requires-python"`
+	Dependencies   []string   `toml:"dependencies"`
+}
+
+// ParsePythonScriptMetadata extracts and parses the metadata from a Python script file
+func ParsePythonScriptMetadata(path string) (*PythonScriptMetadata, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer file.Close()
+	
+	scanner := bufio.NewScanner(file)
+	
+	var metadataLines []string
+	inScriptBlock := false
+	
+	for scanner.Scan() {
+		line := scanner.Text()
+		
+		if strings.TrimSpace(line) == "# /// script" {
+			inScriptBlock = true
+			continue
+		} else if strings.TrimSpace(line) == "# ///" && inScriptBlock {
+			break
+		} else if inScriptBlock {
+			if strings.HasPrefix(line, "# ") {
+				metadataLines = append(metadataLines, line[2:])
+			}
+		}
+	}
+	
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error scanning file: %w", err)
+	}
+	
+	if len(metadataLines) == 0 {
+		return &PythonScriptMetadata{RequiresPython: ">=3.7", Dependencies: []string{}}, nil
+	}
+	
+	metadata := &PythonScriptMetadata{}
+	if err := toml.Unmarshal([]byte(strings.Join(metadataLines, "\n")), metadata); err != nil {
+		return nil, fmt.Errorf("failed to parse metadata: %w", err)
+	}
+	
+	return metadata, nil
 }

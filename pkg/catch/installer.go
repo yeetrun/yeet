@@ -594,6 +594,55 @@ func (i *FileInstaller) installOnClose() error {
 			// TODO: add support for user deno flags
 			artifactName = db.ArtifactTypeScriptFile
 			detectedServiceType = db.ServiceTypeSystemd
+		case ftdetect.Python:
+			i.printf("Detected Python file\n")
+			// Python runs in a Docker container but is installed as a systemd
+			// service, similar to TypeScript
+			binName := fmt.Sprintf("main.%s.py", i.version())
+			// Move the "binary" file to the final location.
+			binDir := i.s.serviceBinDir(i.cfg.ServiceName)
+			runDir := i.s.serviceRunDir(i.cfg.ServiceName)
+			dataDir := i.s.serviceDataDir(i.cfg.ServiceName)
+			dst = filepath.Join(binDir, binName)
+			dockerCmd, err := svc.DockerCmd()
+			if err != nil {
+				return fmt.Errorf("failed get Docker cmd: %w", err)
+			}
+			
+			metadata, err := ftdetect.ParsePythonScriptMetadata(bin)
+			if err != nil {
+				return fmt.Errorf("failed to parse Python script metadata: %w", err)
+			}
+			
+			uvArgs := []string{"run"}
+			
+			for _, dep := range metadata.Dependencies {
+				uvArgs = append(uvArgs, "--with", dep)
+			}
+			
+			uvArgs = append(uvArgs, "/main.py")
+			
+			su := &svc.SystemdUnit{
+				Name:             i.cfg.ServiceName,
+				Executable:       dockerCmd,
+				WorkingDirectory: dataDir,
+				Arguments: append([]string{
+					"run", "--rm",
+					"--net", "host",
+					"--volume", fmt.Sprintf("%s:/data", dataDir),
+					"--volume", fmt.Sprintf("%s:/main.py", filepath.Join(runDir, "main.py")),
+					"ghcr.io/astral-sh/uv:latest",
+				}, append(uvArgs, i.cfg.Args...)...),
+			}
+			units, err := su.WriteOutUnitFiles(binDir)
+			if err != nil {
+				return fmt.Errorf("failed to write unit files: %v", err)
+			}
+			for u, p := range units {
+				mak.Set(&i.artifacts, u, p)
+			}
+			artifactName = db.ArtifactName("python-file") // Add this to db.ArtifactName constants if needed
+			detectedServiceType = db.ServiceTypeSystemd
 		case ftdetect.Unknown:
 			return fmt.Errorf("unknown file type")
 		}
