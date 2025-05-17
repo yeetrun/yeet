@@ -620,7 +620,7 @@ func (i *FileInstaller) installOnClose() error {
 				uvArgs = append(uvArgs, "--with", dep)
 			}
 			
-			uvArgs = append(uvArgs, "./main.py")
+			uvArgs = append(uvArgs, "/main.py")
 			
 			su := &svc.SystemdUnit{
 				Name:             i.cfg.ServiceName,
