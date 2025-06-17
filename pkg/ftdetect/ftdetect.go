@@ -96,22 +96,23 @@ func (f *file) detect() (FileType, error) {
 	} else if is {
 		return Script, nil
 	}
+	// Check Python before TypeScript since Python script blocks are definitive
+	if is, err := f.detectPython(); err != nil {
+		return Unknown, fmt.Errorf("failed to detect Python: %w", err)
+	} else if is {
+		return Python, nil
+	}
 	// Docker Compose file
 	if is, err := f.detectDockerCompose(); err != nil {
 		return Unknown, fmt.Errorf("failed to detect Docker Compose: %w", err)
 	} else if is {
 		return DockerCompose, nil
 	}
-	// TypeScript file - checking before Python to prevent false positives
+	// TypeScript file - checking after Python to prevent false positives
 	if is, err := f.detectTypeScript(); err != nil {
 		return Unknown, fmt.Errorf("failed to detect TypeScript: %w", err)
 	} else if is {
 		return TypeScript, nil
-	}
-	if is, err := f.detectPython(); err != nil {
-		return Unknown, fmt.Errorf("failed to detect Python: %w", err)
-	} else if is {
-		return Python, nil
 	}
 	return Unknown, fmt.Errorf("unable to detect file type")
 }
@@ -346,6 +347,7 @@ func (f *file) detectPython() (bool, error) {
 		if strings.TrimSpace(line) == "# /// script" {
 			inScriptBlock = true
 		} else if strings.TrimSpace(line) == "# ///" && inScriptBlock {
+			// Found complete script block, this is definitely a Python file
 			return true, nil
 		}
 
