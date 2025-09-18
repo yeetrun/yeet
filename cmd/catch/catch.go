@@ -34,12 +34,12 @@ import (
 	"slices"
 	"time"
 
-	"github.com/tailscale/golang-x-crypto/ssh"
 	"github.com/yeetrun/yeet/pkg/catch"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	cdb "github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/dnet"
 	"github.com/yeetrun/yeet/pkg/svc"
+	"golang.org/x/crypto/ssh"
 	"tailscale.com/tsnet"
 	"tailscale.com/util/must"
 )

@@ -35,9 +35,8 @@ import (
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/netns"
 	"github.com/yeetrun/yeet/pkg/svc"
-	"github.com/tailscale/golang-x-crypto/ssh"
+	"golang.org/x/crypto/ssh"
 	"tailscale.com/client/tailscale"
-	"tailscale.com/syncs"
 	gssh "tailscale.com/tempfork/gliderlabs/ssh"
 	"tailscale.com/util/set"
 )
@@ -58,7 +57,7 @@ var DockerStatusesUnknown = svc.DockerComposeStatus{}
 type Server struct {
 	cfg       Config
 	registry  *containerRegistry
-	waitGroup syncs.WaitGroup
+	waitGroup sync.WaitGroup
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -271,18 +270,22 @@ func (s *Server) verifyCaller(ctx context.Context, remoteAddr string) error {
 // handleSSHConnection should be called in a goroutine to handle an incoming SSH
 // connection. It will accept the connection and handle incoming channels.
 func (s *Server) handleSSHConnection(nConn net.Conn) {
+	var spac ssh.ServerPreAuthConn
 	ss := &gssh.Server{
 		Version: "catch",
 		ServerConfigCallback: func(ctx gssh.Context) *ssh.ServerConfig {
 			return &ssh.ServerConfig{
 				NoClientAuth: true,
+				PreAuthConnCallback: func(c ssh.ServerPreAuthConn) {
+					spac = c
+				},
 			}
 		},
 		HostSigners: []gssh.Signer{s.cfg.Signer},
 
 		NoClientAuthHandler: func(ctx gssh.Context) error {
 			if err := s.verifyCaller(ctx, ctx.RemoteAddr().String()); err != nil {
-				ctx.SendAuthBanner("This machine is not authorized.\r\n")
+				spac.SendAuthBanner("This machine is not authorized.\r\n")
 				return fmt.Errorf("unauthorized connection: %v", err)
 			}
 			return nil

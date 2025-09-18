@@ -21,8 +21,8 @@ require (
 	github.com/pkg/sftp v1.13.6
 	github.com/spf13/cobra v1.9.1
 	github.com/spf13/pflag v1.0.6
-	github.com/tailscale/golang-x-crypto v0.0.0-20250404221719-a5573b049869
 	github.com/vishvananda/netns v0.0.5
+	golang.org/x/crypto v0.38.0
 	golang.org/x/oauth2 v0.30.0
 	golang.org/x/sync v0.14.0
 	golang.org/x/sys v0.33.0
@@ -113,7 +113,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.33.0 // indirect
 	go4.org/mem v0.0.0-20240501181205-ae6ca9944745 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
-	golang.org/x/crypto v0.38.0 // indirect
 	golang.org/x/exp v0.0.0-20250210185358-939b2ce775ac // indirect
 	golang.org/x/mod v0.24.0 // indirect
 	golang.org/x/net v0.40.0 // indirect
