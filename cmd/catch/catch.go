@@ -66,9 +66,10 @@ func initTSNet(dataDir string) *tsnet.Server {
 		return nil
 	}
 	ts := &tsnet.Server{
-		Dir:      filepath.Join(dataDir, "tsnet"),
-		Hostname: *tsnetHost,
-		Port:     uint16(*tsnetPort),
+		Dir:        filepath.Join(dataDir, "tsnet"),
+		Hostname:   *tsnetHost,
+		Port:       uint16(*tsnetPort),
+		ControlURL: os.Getenv("YEET_CONTROL_URL"),
 	}
 	st := must.Get(ts.Up(context.Background()))
 	tsIPs := st.TailscaleIPs
