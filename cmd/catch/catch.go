@@ -18,7 +18,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"flag"
@@ -94,7 +93,7 @@ func initTSNet(dataDir string) *tsnet.Server {
 			dialIP = ipv6Loopback
 		}
 
-		bc, err := d.Dial("tcp", fmt.Sprintf("%s:%d", dialIP, dst.Port()))
+		bc, err := d.Dial("tcp", netip.AddrPortFrom(dialIP, dst.Port()).String())
 		if err != nil {
 			log.Printf("failed to dial %v: %v", dst, err)
 			return nil, false
@@ -195,50 +194,50 @@ func main() {
 	}
 	scfg.LocalClient = must.Get(ts.LocalClient())
 
-	domains := ts.CertDomains()
-	if len(domains) == 0 {
-		log.Fatal("no Tailscale cert domains available; is HTTPS enabled on the tailnet?")
-	}
-	scfg.ExternalRegistryAddr = domains[0]
-	log.Printf("Registry listening on https://%v", scfg.ExternalRegistryAddr)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		_, _, err := scfg.LocalClient.CertPair(ctx, domains[0])
-		if err != nil {
-			log.Fatalf("failed to get cert pair for %v: %v", domains[0], err)
-		}
-		log.Printf("Successfully got cert pair for %v", domains[0])
-	}()
+	// domains := ts.CertDomains()
+	// if len(domains) == 0 {
+	// 	log.Fatal("no Tailscale cert domains available; is HTTPS enabled on the tailnet?")
+	// }
+	// scfg.ExternalRegistryAddr = domains[0]
+	// log.Printf("Registry listening on https://%v", scfg.ExternalRegistryAddr)
+	// go func() {
+	// 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	// 	defer cancel()
+	// 	_, _, err := scfg.LocalClient.CertPair(ctx, domains[0])
+	// 	if err != nil {
+	// 		log.Fatalf("failed to get cert pair for %v: %v", domains[0], err)
+	// 	}
+	// 	log.Printf("Successfully got cert pair for %v", domains[0])
+	// }()
 
 	// Acquire the listeners.
 	sshln := must.Get(ts.Listen("tcp", ":22"))
-	internalRegLn := must.Get(net.Listen("tcp", *registryInternalAddr))
-	scfg.InternalRegistryAddr = internalRegLn.Addr().String()
+	// internalRegLn := must.Get(net.Listen("tcp", *registryInternalAddr))
+	// scfg.InternalRegistryAddr = internalRegLn.Addr().String()
 	server := catch.NewServer(scfg)
-	go func() {
-		ln := must.Get(ts.Listen("tcp", ":80"))
-		hs := &http.Server{
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Redirect to https://domains[0]
-				http.Redirect(w, r, "https://"+domains[0]+r.URL.Path, http.StatusTemporaryRedirect)
-			}),
-		}
-		must.Do(hs.Serve(ln))
-	}()
-	go func() {
-		webLn := must.Get(ts.Listen("tcp", ":443"))
-		hs := &http.Server{
-			Handler: must.Get(server.WebMux()),
-			TLSConfig: &tls.Config{
-				GetCertificate: scfg.LocalClient.GetCertificate,
-			},
-		}
-		must.Do(hs.ServeTLS(webLn, "", ""))
-	}()
-	go func() {
-		must.Do(server.ServeInternalRegistry(internalRegLn))
-	}()
+	// go func() {
+	// 	ln := must.Get(ts.Listen("tcp", ":80"))
+	// 	hs := &http.Server{
+	// 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// 			// Redirect to https://domains[0]
+	// 			http.Redirect(w, r, "https://"+domains[0]+r.URL.Path, http.StatusTemporaryRedirect)
+	// 		}),
+	// 	}
+	// 	must.Do(hs.Serve(ln))
+	// }()
+	// go func() {
+	// 	webLn := must.Get(ts.Listen("tcp", ":443"))
+	// 	hs := &http.Server{
+	// 		Handler: must.Get(server.WebMux()),
+	// 		TLSConfig: &tls.Config{
+	// 			GetCertificate: scfg.LocalClient.GetCertificate,
+	// 		},
+	// 	}
+	// 	must.Do(hs.ServeTLS(webLn, "", ""))
+	// }()
+	// go func() {
+	// 	must.Do(server.ServeInternalRegistry(internalRegLn))
+	// }()
 	go startDockerPlugin(scfg.DB)
 
 	// Run the SSH server in the foreground.
