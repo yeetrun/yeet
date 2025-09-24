@@ -44,7 +44,10 @@ import (
 	"tailscale.com/util/must"
 )
 
-const defaultTSNetPort = 41547 // above CATCH on QWERTY
+const (
+	defaultTSNetPort  = 41547 // above CATCH on QWERTY
+	defaultControlURL = "https://sky.yeet.net"
+)
 
 var (
 	legacyDataDir = flag.String("data-dir", must.Get(filepath.Abs("data")), "data directory")
@@ -62,6 +65,10 @@ var (
 
 // initTSNet initializes and returns a tsnet.Server if tsnetHost is set.
 func initTSNet(dataDir string) *tsnet.Server {
+	controlURL := os.Getenv("YEET_CONTROL_URL")
+	if controlURL == "" {
+		controlURL = defaultControlURL
+	}
 	if *tsnetHost == "" {
 		return nil
 	}
@@ -69,7 +76,7 @@ func initTSNet(dataDir string) *tsnet.Server {
 		Dir:        filepath.Join(dataDir, "tsnet"),
 		Hostname:   *tsnetHost,
 		Port:       uint16(*tsnetPort),
-		ControlURL: os.Getenv("YEET_CONTROL_URL"),
+		ControlURL: controlURL,
 	}
 	st := must.Get(ts.Up(context.Background()))
 	tsIPs := st.TailscaleIPs
