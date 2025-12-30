@@ -156,7 +156,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}},
 	"restart":  {Name: "restart", Description: "Restart a service"},
 	"rollback": {Name: "rollback", Description: "Rollback a service"},
-	"run":      {Name: "run", Description: "Install a service with the binary received from stdin"},
+	"run":      {Name: "run", Description: "Install a service with the binary received from stdin", Usage: "SVC PAYLOAD [-- <payload args>]"},
 	"start":    {Name: "start", Description: "Start a service"},
 	"stage":    {Name: "stage", Description: "Stage a service"},
 	"status":   {Name: "status", Description: "Show status of a service"},

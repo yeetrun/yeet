@@ -8,7 +8,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -237,6 +239,91 @@ func TestParser_GetFlagAndHasFlag(t *testing.T) {
 	if result.HasFlag("nonexistent") {
 		t.Error("HasFlag(nonexistent) = true, want false")
 	}
+}
+
+func TestRunSubcommandsWithGroups_SubcommandHelp(t *testing.T) {
+	config := HelpConfig{
+		Command: CommandInfo{Name: "testcli"},
+		SubCommands: map[string]SubCommandInfo{
+			"run": {Name: "run", Description: "Run command"},
+		},
+	}
+	called := false
+	handlers := map[string]SubcommandHandler{
+		"run": func(ctx context.Context, args []string) error {
+			called = true
+			return nil
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if err := RunSubcommandsWithGroups(context.Background(), []string{"run", "--help"}, config, struct{}{}, handlers, nil); err != nil {
+			t.Fatalf("RunSubcommandsWithGroups returned error: %v", err)
+		}
+	})
+
+	if called {
+		t.Fatal("expected help to short-circuit handler")
+	}
+	if !strings.Contains(output, "USAGE:") {
+		t.Fatalf("expected help output to include USAGE, got: %s", output)
+	}
+	if !strings.Contains(output, "testcli run") {
+		t.Fatalf("expected help output to include command name, got: %s", output)
+	}
+}
+
+func TestRunSubcommandsWithGroups_SubcommandHelpLLM(t *testing.T) {
+	config := HelpConfig{
+		Command: CommandInfo{Name: "testcli"},
+		SubCommands: map[string]SubCommandInfo{
+			"run": {Name: "run", Description: "Run command"},
+		},
+	}
+	called := false
+	handlers := map[string]SubcommandHandler{
+		"run": func(ctx context.Context, args []string) error {
+			called = true
+			return nil
+		},
+	}
+
+	output := captureStdout(t, func() {
+		if err := RunSubcommandsWithGroups(context.Background(), []string{"run", "--help-llm"}, config, struct{}{}, handlers, nil); err != nil {
+			t.Fatalf("RunSubcommandsWithGroups returned error: %v", err)
+		}
+	})
+
+	if called {
+		t.Fatal("expected help to short-circuit handler")
+	}
+	if !strings.Contains(output, "# testcli run") {
+		t.Fatalf("expected LLM help output to include header, got: %s", output)
+	}
+	if !strings.Contains(output, "## Usage") {
+		t.Fatalf("expected LLM help output to include usage section, got: %s", output)
+	}
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe failed: %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = old
+	}()
+	fn()
+	_ = w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout failed: %v", err)
+	}
+	_ = r.Close()
+	return string(out)
 }
 
 func TestParseFlags_EdgeCases(t *testing.T) {
