@@ -79,9 +79,9 @@ type prefs struct {
 }
 
 type globalFlagsParsed struct {
-	Host    string `flag:"host"`
-	Service string `flag:"service"`
-	RPCPort int    `flag:"rpc-port"`
+	Host    string `flag:"host" help:"Override target host (CATCH_HOST)"`
+	Service string `flag:"service" help:"Force the service name for the command"`
+	RPCPort int    `flag:"rpc-port" help:"Override RPC port (CATCH_RPC_PORT)"`
 }
 
 func parseGlobalFlags(args []string) (globalFlagsParsed, []string, error) {
@@ -386,7 +386,7 @@ func main() {
 			},
 		},
 	}
-	if err := yargs.RunSubcommandsWithGroups(context.Background(), args, helpConfig, struct{}{}, handlers, groups); err != nil {
+	if err := yargs.RunSubcommandsWithGroups(context.Background(), args, helpConfig, globalFlagsParsed{}, handlers, groups); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
 }
@@ -600,6 +600,7 @@ func buildHelpConfig() yargs.HelpConfig {
 			Name:        name,
 			Description: info.Description,
 			Usage:       info.Usage,
+			Examples:    info.Examples,
 			Hidden:      info.Hidden,
 			Aliases:     info.Aliases,
 		}
@@ -607,7 +608,8 @@ func buildHelpConfig() yargs.HelpConfig {
 	subcommands["init"] = yargs.SubCommandInfo{
 		Name:        "init",
 		Description: "Install catch on a remote host",
-		Usage:       "REMOTE",
+		Usage:       "ROOT@HOST",
+		Examples:    []string{"yeet init root@<host>", "yeet init"},
 	}
 	subcommands["docker-host"] = yargs.SubCommandInfo{
 		Name:        "docker-host",
@@ -615,8 +617,9 @@ func buildHelpConfig() yargs.HelpConfig {
 	}
 	subcommands["push"] = yargs.SubCommandInfo{
 		Name:        "push",
-		Description: "Push a container image to the remote host",
-		Usage:       "SVC IMAGE",
+		Description: "Push a container image to the remote host (optionally run it)",
+		Usage:       "SVC IMAGE [--run] [--all-local]",
+		Examples:    []string{"yeet push <svc> <local-image>:<tag> --run"},
 	}
 	subcommands["list-hosts"] = yargs.SubCommandInfo{
 		Name:        "list-hosts",
@@ -639,6 +642,7 @@ func buildHelpConfig() yargs.HelpConfig {
 				Name:        cmd.Name,
 				Description: cmd.Description,
 				Usage:       cmd.Usage,
+				Examples:    cmd.Examples,
 				Hidden:      cmd.Hidden,
 				Aliases:     cmd.Aliases,
 			}
@@ -652,7 +656,14 @@ func buildHelpConfig() yargs.HelpConfig {
 	}
 	return yargs.HelpConfig{
 		Command: yargs.CommandInfo{
-			Name: "yeet",
+			Name:        "yeet",
+			Description: "Deploy and manage services on a remote catch host; most commands are forwarded over RPC on your tailnet.",
+			Examples: []string{
+				"yeet status",
+				"yeet status <svc>",
+				"yeet run <svc> ./bin/<svc> -- --app-flag value",
+				"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
+			},
 		},
 		SubCommands: subcommands,
 		Groups:      groups,

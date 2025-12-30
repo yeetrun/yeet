@@ -16,18 +16,24 @@ yeet is a lightweight client + server setup for deploying and managing services 
 - Push updates over Tailscale RPC
 - Support a few networking modes used in my lab (e.g., Tailscale, macvlan)
 
-## Docker Quickstart (Most Common Path)
+## Docker Quickstart (Most Common Path: Compose)
 
 ```bash
 yeet init root@<host>
-yeet run <svc> nginx:latest
+yeet run <svc> ./compose.yml
 ```
 
-Other common variants:
+Other common variants (in order of use):
 
 ```bash
-yeet run <svc> ./compose.yml
 yeet run <svc> ./Dockerfile
+yeet run <svc> ./bin/<svc> -- --app-flag value
+```
+
+Less common (registry image or pushing a local image):
+
+```bash
+yeet run <svc> nginx:latest
 yeet push <svc> <local-image>:<tag> --run
 ```
 

@@ -20,6 +20,7 @@ type CommandInfo struct {
 	Name        string
 	Description string
 	Usage       string
+	Examples    []string
 	Hidden      bool
 	Aliases     []string
 }
@@ -142,27 +143,40 @@ type versionFlagsParsed struct {
 }
 
 var remoteCommandInfos = map[string]CommandInfo{
-	"cron":     {Name: "cron", Description: "Install a cron with the binary received from stdin", Usage: `cron "<cron expression>" [-- <binary args>]`},
-	"copy":     {Name: "copy", Description: "Copy a local file to the service data dir or env file", Usage: "copy <file> env|./data/<path>", Aliases: []string{"cp"}},
-	"disable":  {Name: "disable", Description: "Disable a service"},
-	"edit":     {Name: "edit", Description: "Edit a service"},
-	"env":      {Name: "env", Description: "Manage environment variables"},
-	"enable":   {Name: "enable", Description: "Enable a service"},
-	"events":   {Name: "events", Description: "Show events for a service"},
-	"logs":     {Name: "logs", Description: "Show logs of a service"},
-	"mount":    {Name: "mount", Description: "Mount a directory from a host", Usage: "mount | host:path [target] [--type=nfs] [--opts=default]"},
+	"cron":    {Name: "cron", Description: "Install a cron job from a file and 5-field expression", Usage: `SVC FILE "<cron expr>" [-- <args...>]`, Examples: []string{`yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo`}},
+	"copy":    {Name: "copy", Description: "Copy a local file to a service env file or data dir", Usage: "SVC <file> env|data/<path>", Aliases: []string{"cp"}},
+	"disable": {Name: "disable", Description: "Disable a service"},
+	"edit":    {Name: "edit", Description: "Edit a service"},
+	"env":     {Name: "env", Description: "Manage environment variables"},
+	"enable":  {Name: "enable", Description: "Enable a service"},
+	"events":  {Name: "events", Description: "Show events for a service"},
+	"logs":    {Name: "logs", Description: "Show logs of a service"},
+	"mount": {Name: "mount", Description: "Mount a network filesystem on the host (global, not per-service)", Usage: "SOURCE [name] [--type=nfs] [--opts=defaults]", Examples: []string{
+		"yeet mount host:/export data-share --type=nfs --opts=defaults",
+		"yeet mount",
+	}},
 	"ip":       {Name: "ip", Description: "Show the IP addresses of a service"},
-	"umount":   {Name: "umount", Description: "Unmount a directory"},
+	"umount":   {Name: "umount", Description: "Unmount a host mount by name", Usage: "NAME", Examples: []string{"yeet umount data-share"}},
 	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}},
 	"restart":  {Name: "restart", Description: "Restart a service"},
 	"rollback": {Name: "rollback", Description: "Rollback a service"},
-	"run":      {Name: "run", Description: "Install a service with the binary received from stdin", Usage: "SVC PAYLOAD [-- <payload args>]"},
-	"start":    {Name: "start", Description: "Start a service"},
-	"stage":    {Name: "stage", Description: "Stage a service"},
-	"status":   {Name: "status", Description: "Show status of a service"},
-	"ts":       {Name: "ts", Description: "Run a tailscale command"},
-	"stop":     {Name: "stop", Description: "Stop a service"},
-	"version":  {Name: "version", Description: "Show the version of the Catch server"},
+	"run": {Name: "run", Description: "Install or update a service from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [-- <payload args>]", Examples: []string{
+		"yeet run <svc> ./bin/<svc> -- --app-flag value",
+		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
+		"yeet run <svc> ghcr.io/org/app:latest",
+		"yeet run <svc> ./Dockerfile",
+	}},
+	"start": {Name: "start", Description: "Start a service"},
+	"stage": {Name: "stage", Description: "Upload a payload without applying it (use stage show/commit)", Usage: "SVC PAYLOAD|show|commit [-- <payload args>]", Examples: []string{
+		"yeet stage <svc> ./bin/<svc>",
+		"yeet stage <svc> show",
+		"yeet stage <svc> show --env",
+		"yeet stage <svc> commit",
+	}},
+	"status":  {Name: "status", Description: "Show status of a service"},
+	"ts":      {Name: "ts", Description: "Run a tailscale command"},
+	"stop":    {Name: "stop", Description: "Stop a service"},
+	"version": {Name: "version", Description: "Show the version of the Catch server"},
 }
 
 var remoteFlagSpecs = map[string]map[string]FlagSpec{
