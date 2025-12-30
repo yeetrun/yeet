@@ -1220,6 +1220,12 @@ func GenerateSubCommandHelp[G any, S any, A any](config HelpConfig, subCmdName s
 	return b.String()
 }
 
+// GenerateSubCommandHelpFromConfig generates subcommand help using only HelpConfig metadata.
+// It omits subcommand-specific flags and arguments when no structured types are available.
+func GenerateSubCommandHelpFromConfig[G any](config HelpConfig, subCmdName string, globalFlagsExample G) string {
+	return GenerateSubCommandHelp(config, subCmdName, globalFlagsExample, struct{}{}, struct{}{})
+}
+
 // GenerateGlobalHelpLLM generates LLM-optimized help for the entire CLI as structured markdown.
 // This format is designed for LLMs to understand the CLI structure, commands, and their usage.
 func GenerateGlobalHelpLLM[G any](config HelpConfig, globalFlagsExample G) string {
@@ -1618,6 +1624,12 @@ func GenerateSubCommandHelpLLM[G any, S any, A any](config HelpConfig, subCmdNam
 	return b.String()
 }
 
+// GenerateSubCommandHelpLLMFromConfig generates LLM-optimized help for a subcommand
+// using only HelpConfig metadata.
+func GenerateSubCommandHelpLLMFromConfig[G any](config HelpConfig, subCmdName string, globalFlagsExample G) string {
+	return GenerateSubCommandHelpLLM(config, subCmdName, globalFlagsExample, struct{}{}, struct{}{})
+}
+
 // ParseFlags parses command-line arguments and returns a typed struct with parsed flags.
 // The struct fields should have a `flag:"name"` tag to specify the flag name.
 // Optionally use `short:"x"` tag for short flag aliases.
@@ -1898,6 +1910,19 @@ func isHelpFlag(arg string) bool {
 	return arg == helpCommand || arg == helpFlagLong || arg == helpFlagShort
 }
 
+func helpFlagsInArgs(args []string) (help bool, helpLLM bool) {
+	for _, arg := range args {
+		if arg == helpFlagLLM {
+			helpLLM = true
+			continue
+		}
+		if arg == helpFlagLong || arg == helpFlagShort {
+			help = true
+		}
+	}
+	return help, helpLLM
+}
+
 // stripFirstNonFlagArg removes the first non-flag argument from args.
 // This is used for grouped commands to strip the group name before passing to handlers.
 // The "help" check ensures that "help docker" doesn't strip "docker" from the args.
@@ -2058,6 +2083,14 @@ func RunSubcommandsWithGroups[G any](ctx context.Context, args []string, config 
 	handler, ok := commands[cmdName]
 	if !ok {
 		return fmt.Errorf("unknown command: %s\nRun '%s --help' for usage", cmdName, config.Command.Name)
+	}
+	if help, helpLLM := helpFlagsInArgs(args); help || helpLLM {
+		if helpLLM {
+			fmt.Print(GenerateSubCommandHelpLLMFromConfig(config, cmdName, globalFlagsExample))
+			return nil
+		}
+		fmt.Print(GenerateSubCommandHelpFromConfig(config, cmdName, globalFlagsExample))
+		return nil
 	}
 	return handler(ctx, args)
 }
