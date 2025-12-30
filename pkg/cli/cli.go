@@ -208,8 +208,8 @@ var remoteGroupInfos = map[string]GroupInfo{
 		Name:        "docker",
 		Description: "Docker compose management",
 		Commands: map[string]CommandInfo{
-			"update": {Name: "update", Description: "Update a docker compose service", Usage: "docker update <svc>"},
-			"pull":   {Name: "pull", Description: "Pull images for a docker compose service", Usage: "docker pull <svc>"},
+			"update": {Name: "update", Description: "Pull images and recreate containers for a compose service", Usage: "docker update <svc>"},
+			"pull":   {Name: "pull", Description: "Pull images for a compose service without restarting", Usage: "docker pull <svc>"},
 		},
 	},
 }
