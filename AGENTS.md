@@ -42,6 +42,7 @@
 ## Wiki (User Manual)
 - The wiki lives in the `wiki/` submodule and serves as the **user manual** for yeet/catch.
 - When you make user-facing changes (CLI commands, flags, workflows, behavior), update the wiki in the same work session.
+- Keep CLI-facing documentation (README quickstart/examples and CLI help text) in sync with those changes.
 - To get the latest wiki content: `git submodule update --init --recursive`.
 - Edit markdown files inside `wiki/`, commit and push **within that repo**, then commit the updated submodule pointer in this repo.
 
