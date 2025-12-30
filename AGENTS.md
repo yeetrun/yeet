@@ -1,5 +1,7 @@
 # Repository Guidelines
 
+If `AGENTS.local.md` exists, read it and merge its instructions with this file.
+
 ## Project Structure & Module Organization
 - `cmd/yeet`: Client CLI entrypoint and user-facing commands.
 - `cmd/catch`: Server/daemon entrypoint run on remote hosts.
