@@ -11,6 +11,7 @@ import (
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 func TestParseRepositoryName(t *testing.T) {
@@ -275,7 +276,10 @@ func TestParseRepositoryNameEdgeCases(t *testing.T) {
 }
 
 func TestCompleteUploadReleasesLeaseOnSuccess(t *testing.T) {
-	store := &ContainerdCacheStorage{bgCtx: context.Background()}
+	store := &ContainerdCacheStorage{
+		bgCtx:        context.Background(),
+		contentStore: &fakeContentStore{},
+	}
 	released := 0
 	want := digest.FromString("success")
 	store.uploads.Store("ok", &containerdUpload{
@@ -296,7 +300,10 @@ func TestCompleteUploadReleasesLeaseOnSuccess(t *testing.T) {
 }
 
 func TestCompleteUploadReleasesLeaseOnAlreadyExists(t *testing.T) {
-	store := &ContainerdCacheStorage{bgCtx: context.Background()}
+	store := &ContainerdCacheStorage{
+		bgCtx:        context.Background(),
+		contentStore: &fakeContentStore{},
+	}
 	released := 0
 	want := digest.FromString("exists")
 	store.uploads.Store("exists", &containerdUpload{
@@ -313,6 +320,52 @@ func TestCompleteUploadReleasesLeaseOnAlreadyExists(t *testing.T) {
 	}
 	if released != 1 {
 		t.Fatalf("expected release to be called once, got %d", released)
+	}
+}
+
+func TestBlobExistsRequiresReadableContent(t *testing.T) {
+	dg := digest.FromString("missing-reader")
+	cs := &fakeContentStore{
+		info:     map[digest.Digest]content.Info{dg: {Digest: dg}},
+		readerAt: map[digest.Digest]content.ReaderAt{dg: nil},
+		readerErr: map[digest.Digest]error{
+			dg: errdefs.ErrNotFound,
+		},
+	}
+	store := &ContainerdCacheStorage{contentStore: cs}
+	if store.BlobExists(context.Background(), dg.String()) {
+		t.Fatalf("expected BlobExists to be false when ReaderAt fails")
+	}
+}
+
+func TestCompleteUploadMarksContentRoot(t *testing.T) {
+	dg := digest.FromString("root-me")
+	cs := &fakeContentStore{
+		info:      map[digest.Digest]content.Info{},
+		readerAt:  map[digest.Digest]content.ReaderAt{},
+		readerErr: map[digest.Digest]error{},
+	}
+	store := &ContainerdCacheStorage{
+		bgCtx:        context.Background(),
+		contentStore: cs,
+	}
+	store.uploads.Store("root", &containerdUpload{
+		writer:  &fakeWriter{digest: dg},
+		release: func(context.Context) error { return nil },
+	})
+
+	got, err := store.CompleteUpload(context.Background(), "root", dg.String())
+	if err != nil {
+		t.Fatalf("CompleteUpload returned error: %v", err)
+	}
+	if got != dg.String() {
+		t.Fatalf("CompleteUpload digest=%q, want %q", got, dg.String())
+	}
+	if cs.updateDigest != dg {
+		t.Fatalf("markContentRoot digest=%q, want %q", cs.updateDigest, dg)
+	}
+	if cs.updateLabel != "containerd.io/gc.root" {
+		t.Fatalf("markContentRoot label=%q, want containerd.io/gc.root", cs.updateLabel)
 	}
 }
 
@@ -345,6 +398,59 @@ func (f *fakeWriter) Status() (content.Status, error) { return f.status, nil }
 
 func (f *fakeWriter) Truncate(size int64) error {
 	f.status.Offset = size
+	return nil
+}
+
+type fakeContentStore struct {
+	info      map[digest.Digest]content.Info
+	readerAt  map[digest.Digest]content.ReaderAt
+	readerErr map[digest.Digest]error
+
+	updateDigest digest.Digest
+	updateLabel  string
+	updateValue  string
+
+	abortRef string
+}
+
+func (f *fakeContentStore) Info(_ context.Context, dg digest.Digest) (content.Info, error) {
+	if info, ok := f.info[dg]; ok {
+		return info, nil
+	}
+	return content.Info{}, errdefs.ErrNotFound
+}
+
+func (f *fakeContentStore) ReaderAt(_ context.Context, desc ocispec.Descriptor) (content.ReaderAt, error) {
+	if f.readerErr != nil {
+		if err, ok := f.readerErr[desc.Digest]; ok && err != nil {
+			return nil, err
+		}
+	}
+	if f.readerAt != nil {
+		if ra, ok := f.readerAt[desc.Digest]; ok && ra != nil {
+			return ra, nil
+		}
+	}
+	return nil, errdefs.ErrNotFound
+}
+
+func (f *fakeContentStore) Update(_ context.Context, info content.Info, _ ...string) (content.Info, error) {
+	f.updateDigest = info.Digest
+	if info.Labels != nil {
+		if v, ok := info.Labels["containerd.io/gc.root"]; ok {
+			f.updateLabel = "containerd.io/gc.root"
+			f.updateValue = v
+		}
+	}
+	return info, nil
+}
+
+func (f *fakeContentStore) Delete(_ context.Context, _ digest.Digest) error {
+	return nil
+}
+
+func (f *fakeContentStore) Abort(_ context.Context, ref string) error {
+	f.abortRef = ref
 	return nil
 }
 

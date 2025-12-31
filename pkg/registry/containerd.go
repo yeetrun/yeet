@@ -40,12 +40,21 @@ type ContainerdCacheStorage struct {
 	bgCtx            context.Context
 	cancelBg         context.CancelFunc
 
-	uploads syncs.Map[string, *containerdUpload]
+	contentStore containerdContentStore
+	uploads      syncs.Map[string, *containerdUpload]
 }
 
 type containerdUpload struct {
 	writer  content.Writer
 	release func(context.Context) error
+}
+
+type containerdContentStore interface {
+	Info(ctx context.Context, dg digest.Digest) (content.Info, error)
+	ReaderAt(ctx context.Context, desc ocispec.Descriptor) (content.ReaderAt, error)
+	Update(ctx context.Context, info content.Info, fieldpaths ...string) (content.Info, error)
+	Delete(ctx context.Context, dg digest.Digest) error
+	Abort(ctx context.Context, ref string) error
 }
 
 var _ Storage = (*ContainerdCacheStorage)(nil)
@@ -80,6 +89,16 @@ func (s *ContainerdCacheStorage) Close() error {
 	return nil
 }
 
+func (s *ContainerdCacheStorage) getContentStore() containerdContentStore {
+	if s.contentStore != nil {
+		return s.contentStore
+	}
+	if s.containerdClient == nil {
+		return nil
+	}
+	return s.containerdClient.ContentStore()
+}
+
 type readAtCloserAsReader struct {
 	io.ReaderAt
 	io.Closer
@@ -94,7 +113,11 @@ func (r *readAtCloserAsReader) Read(p []byte) (int, error) {
 
 // GetBlob retrieves a blob by digest from Docker's image cache as a stream.
 func (s *ContainerdCacheStorage) GetBlob(ctx context.Context, dg string) (io.ReadCloser, error) {
-	r, err := s.containerdClient.ContentStore().ReaderAt(ctx, ocispec.Descriptor{Digest: digest.Digest(dg)})
+	cs := s.getContentStore()
+	if cs == nil {
+		return nil, errors.New("content store unavailable")
+	}
+	r, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: digest.Digest(dg)})
 	if err != nil {
 		return nil, fmt.Errorf("get blob from containerd: %w", err)
 	}
@@ -106,7 +129,10 @@ func (s *ContainerdCacheStorage) GetBlob(ctx context.Context, dg string) (io.Rea
 
 // BlobExists checks if a blob exists in Docker's cache.
 func (s *ContainerdCacheStorage) BlobExists(ctx context.Context, dg string) bool {
-	cs := s.containerdClient.ContentStore()
+	cs := s.getContentStore()
+	if cs == nil {
+		return false
+	}
 	_, err := cs.Info(ctx, digest.Digest(dg))
 	if err != nil {
 		return false
@@ -121,7 +147,11 @@ func (s *ContainerdCacheStorage) BlobExists(ctx context.Context, dg string) bool
 
 // BlobSize returns the size of a blob by digest.
 func (s *ContainerdCacheStorage) BlobSize(ctx context.Context, dg string) (int64, error) {
-	info, err := s.containerdClient.ContentStore().Info(ctx, digest.Digest(dg))
+	cs := s.getContentStore()
+	if cs == nil {
+		return 0, errors.New("content store unavailable")
+	}
+	info, err := cs.Info(ctx, digest.Digest(dg))
 	if err != nil {
 		if errdefs.IsNotFound(err) {
 			return 0, ErrBlobNotFound
@@ -133,13 +163,20 @@ func (s *ContainerdCacheStorage) BlobSize(ctx context.Context, dg string) (int64
 
 // DeleteBlob removes a blob from Docker's image cache.
 func (s *ContainerdCacheStorage) DeleteBlob(ctx context.Context, dg string) error {
-	return s.containerdClient.ContentStore().Delete(ctx, digest.Digest(dg))
+	cs := s.getContentStore()
+	if cs == nil {
+		return errors.New("content store unavailable")
+	}
+	return cs.Delete(ctx, digest.Digest(dg))
 }
 
 // GetManifest retrieves a manifest from containerd's metadata store.
 func (s *ContainerdCacheStorage) GetManifest(ctx context.Context, repo, reference string) (*ManifestMetadata, error) {
 	if strings.HasPrefix(reference, "sha256:") {
-		cs := s.containerdClient.ContentStore()
+		cs := s.getContentStore()
+		if cs == nil {
+			return nil, errors.New("content store unavailable")
+		}
 		dg := digest.Digest(reference)
 		info, err := cs.Info(ctx, dg)
 		if err != nil {
@@ -170,7 +207,11 @@ func (s *ContainerdCacheStorage) GetManifest(ctx context.Context, repo, referenc
 		}
 		return nil, fmt.Errorf("get image from containerd: %w", err)
 	}
-	blob, err := content.ReadBlob(ctx, s.containerdClient.ContentStore(), img.Target)
+	cs := s.getContentStore()
+	if cs == nil {
+		return nil, errors.New("content store unavailable")
+	}
+	blob, err := content.ReadBlob(ctx, cs, img.Target)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
 			return nil, ErrManifestNotFound
@@ -305,7 +346,10 @@ func (s *ContainerdCacheStorage) PutManifest(ctx context.Context, repo, referenc
 		}
 	}
 
-	cs := s.containerdClient.ContentStore()
+	cs := s.getContentStore()
+	if cs == nil {
+		return "", errors.New("content store unavailable")
+	}
 	if _, err := cs.Update(ctx, content.Info{
 		Digest: wantDigest,
 		Labels: labels,
@@ -444,10 +488,10 @@ func (s *ContainerdCacheStorage) CompleteUpload(ctx context.Context, uuid, expec
 }
 
 func (s *ContainerdCacheStorage) markContentRoot(dg digest.Digest) error {
-	if s.containerdClient == nil {
-		return nil
+	cs := s.getContentStore()
+	if cs == nil {
+		return errors.New("content store unavailable")
 	}
-	cs := s.containerdClient.ContentStore()
 	ctx := s.bgCtx
 	if ctx == nil {
 		ctx = context.Background()
@@ -473,7 +517,11 @@ func (s *ContainerdCacheStorage) AbortUpload(ctx context.Context, uuid string) e
 	if err := fu.release(ctx); err != nil {
 		return fmt.Errorf("release lease: %w", err)
 	}
-	if err := s.containerdClient.ContentStore().Abort(ctx, "upload-"+uuid); err != nil {
+	cs := s.getContentStore()
+	if cs == nil {
+		return errors.New("content store unavailable")
+	}
+	if err := cs.Abort(ctx, "upload-"+uuid); err != nil {
 		return fmt.Errorf("abort upload: %w", err)
 	}
 	return nil
