@@ -3031,6 +3031,151 @@ func TestExtractGroupAndSubcommand(t *testing.T) {
 	}
 }
 
+func TestResolveCommand(t *testing.T) {
+	type RunArgs struct {
+		Service string   `pos:"0"`
+		Payload string   `pos:"1"`
+		Extra   []string `pos:"2*"`
+	}
+
+	reg := Registry{
+		Command: CommandInfo{Name: "testcli"},
+		SubCommands: map[string]CommandSpec{
+			"status": {Info: SubCommandInfo{Name: "status", Aliases: []string{"st"}}},
+			"copy":   {Info: SubCommandInfo{Name: "copy", Aliases: []string{"cp"}}},
+			"run":    {Info: SubCommandInfo{Name: "run"}, ArgsSchema: RunArgs{}},
+		},
+		Groups: map[string]GroupSpec{
+			"docker": {
+				Info: GroupInfo{Name: "docker"},
+				Commands: map[string]CommandSpec{
+					"pull": {Info: SubCommandInfo{Name: "pull", Aliases: []string{"pl"}}},
+				},
+			},
+		},
+	}
+
+	t.Run("flat command", func(t *testing.T) {
+		res, ok, err := ResolveCommandWithRegistry([]string{"status", "--json"}, reg)
+		if err != nil {
+			t.Fatalf("ResolveCommand error: %v", err)
+		}
+		if !ok {
+			t.Fatalf("expected ok")
+		}
+		if got := strings.Join(res.Path, " "); got != "status" {
+			t.Fatalf("unexpected path: %s", got)
+		}
+		if got := strings.Join(res.Args, " "); got != "--json" {
+			t.Fatalf("unexpected args: %s", got)
+		}
+	})
+
+	t.Run("flat command alias", func(t *testing.T) {
+		res, ok, err := ResolveCommandWithRegistry([]string{"cp", "svc-a"}, reg)
+		if err != nil {
+			t.Fatalf("ResolveCommand error: %v", err)
+		}
+		if !ok {
+			t.Fatalf("expected ok")
+		}
+		if got := strings.Join(res.Path, " "); got != "copy" {
+			t.Fatalf("unexpected path: %s", got)
+		}
+		if got := strings.Join(res.Args, " "); got != "svc-a" {
+			t.Fatalf("unexpected args: %s", got)
+		}
+	})
+
+	t.Run("group command", func(t *testing.T) {
+		res, ok, err := ResolveCommandWithRegistry([]string{"docker", "pull", "svc-a"}, reg)
+		if err != nil {
+			t.Fatalf("ResolveCommand error: %v", err)
+		}
+		if !ok {
+			t.Fatalf("expected ok")
+		}
+		if got := strings.Join(res.Path, " "); got != "docker pull" {
+			t.Fatalf("unexpected path: %s", got)
+		}
+		if got := strings.Join(res.Args, " "); got != "svc-a" {
+			t.Fatalf("unexpected args: %s", got)
+		}
+	})
+
+	t.Run("group command alias", func(t *testing.T) {
+		res, ok, err := ResolveCommandWithRegistry([]string{"docker", "pl", "svc-a"}, reg)
+		if err != nil {
+			t.Fatalf("ResolveCommand error: %v", err)
+		}
+		if !ok {
+			t.Fatalf("expected ok")
+		}
+		if got := strings.Join(res.Path, " "); got != "docker pull" {
+			t.Fatalf("unexpected path: %s", got)
+		}
+		if got := strings.Join(res.Args, " "); got != "svc-a" {
+			t.Fatalf("unexpected args: %s", got)
+		}
+	})
+
+	t.Run("group only", func(t *testing.T) {
+		_, ok, err := ResolveCommandWithRegistry([]string{"docker"}, reg)
+		if err != nil {
+			t.Fatalf("ResolveCommand error: %v", err)
+		}
+		if ok {
+			t.Fatalf("expected ok=false for group without subcommand")
+		}
+	})
+
+	t.Run("unknown command", func(t *testing.T) {
+		_, ok, err := ResolveCommandWithRegistry([]string{"nope"}, reg)
+		if err == nil {
+			t.Fatalf("expected error for unknown command")
+		}
+		if ok {
+			t.Fatalf("expected ok=false for unknown command")
+		}
+	})
+
+	t.Run("help flag", func(t *testing.T) {
+		_, ok, err := ResolveCommandWithRegistry([]string{"--help"}, reg)
+		if err != nil {
+			t.Fatalf("ResolveCommand error: %v", err)
+		}
+		if ok {
+			t.Fatalf("expected ok=false for help")
+		}
+	})
+
+	t.Run("arg spec", func(t *testing.T) {
+		res, ok, err := ResolveCommandWithRegistry([]string{"run", "svc", "payload"}, reg)
+		if err != nil {
+			t.Fatalf("ResolveCommand error: %v", err)
+		}
+		if !ok {
+			t.Fatalf("expected ok")
+		}
+		arg, ok := res.PArg(0)
+		if !ok {
+			t.Fatalf("expected arg 0")
+		}
+		if arg.Name != "Service" {
+			t.Fatalf("expected arg name Service, got %q", arg.Name)
+		}
+		if arg.GoType == nil {
+			t.Fatalf("expected GoType to be set")
+		}
+		if arg.GoType != reflect.TypeOf("") {
+			t.Fatalf("expected GoType to be string, got %v", arg.GoType)
+		}
+		if !arg.Required {
+			t.Fatalf("expected arg to be required")
+		}
+	})
+}
+
 // TestRunSubcommandsWithGroups tests command group routing
 func TestRunSubcommandsWithGroups(t *testing.T) {
 	type GlobalFlags struct {

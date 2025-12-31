@@ -23,6 +23,8 @@ type CommandInfo struct {
 	Examples    []string
 	Hidden      bool
 	Aliases     []string
+	// ArgsSchema optionally defines positional args via `pos` tags.
+	ArgsSchema any
 }
 
 type GroupInfo struct {
@@ -146,41 +148,55 @@ type versionFlagsParsed struct {
 	JSON bool `flag:"json"`
 }
 
+const (
+	CommandEvents = "events"
+)
+
+type ServiceArgs struct {
+	Service ServiceName `pos:"0" help:"Service name"`
+}
+
+type ServiceName string
+
+func IsServiceArgSpec(spec yargs.ArgSpec) bool {
+	return spec.GoType == reflect.TypeOf(ServiceName(""))
+}
+
 var remoteCommandInfos = map[string]CommandInfo{
-	"cron":    {Name: "cron", Description: "Install a cron job from a file and 5-field expression", Usage: `SVC FILE "<cron expr>" [-- <args...>]`, Examples: []string{`yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo`}},
-	"copy":    {Name: "copy", Description: "Copy a local file to a service env file or data dir", Usage: "SVC <file> env|data/<path>", Aliases: []string{"cp"}},
-	"disable": {Name: "disable", Description: "Disable a service"},
-	"edit":    {Name: "edit", Description: "Edit a service"},
-	"env":     {Name: "env", Description: "Manage environment variables"},
-	"enable":  {Name: "enable", Description: "Enable a service"},
+	"cron":    {Name: "cron", Description: "Install a cron job from a file and 5-field expression", Usage: `SVC FILE "<cron expr>" [-- <args...>]`, Examples: []string{`yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo`}, ArgsSchema: ServiceArgs{}},
+	"copy":    {Name: "copy", Description: "Copy a local file to a service env file or data dir", Usage: "SVC <file> env|data/<path>", Aliases: []string{"cp"}, ArgsSchema: ServiceArgs{}},
+	"disable": {Name: "disable", Description: "Disable a service", ArgsSchema: ServiceArgs{}},
+	"edit":    {Name: "edit", Description: "Edit a service", ArgsSchema: ServiceArgs{}},
+	"env":     {Name: "env", Description: "Manage environment variables", ArgsSchema: ServiceArgs{}},
+	"enable":  {Name: "enable", Description: "Enable a service", ArgsSchema: ServiceArgs{}},
 	"events":  {Name: "events", Description: "Show events for a service"},
-	"logs":    {Name: "logs", Description: "Show logs of a service"},
+	"logs":    {Name: "logs", Description: "Show logs of a service", ArgsSchema: ServiceArgs{}},
 	"mount": {Name: "mount", Description: "Mount a network filesystem on the host (global, not per-service)", Usage: "SOURCE [name] [--type=nfs] [--opts=defaults]", Examples: []string{
 		"yeet mount host:/export data-share --type=nfs --opts=defaults",
 		"yeet mount",
 	}},
 	"ip":       {Name: "ip", Description: "Show the IP addresses of a service"},
 	"umount":   {Name: "umount", Description: "Unmount a host mount by name", Usage: "NAME", Examples: []string{"yeet umount data-share"}},
-	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}},
-	"restart":  {Name: "restart", Description: "Restart a service"},
-	"rollback": {Name: "rollback", Description: "Rollback a service"},
+	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}},
+	"restart":  {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
+	"rollback": {Name: "rollback", Description: "Rollback a service", ArgsSchema: ServiceArgs{}},
 	"run": {Name: "run", Description: "Install or update a service from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [-- <payload args>]", Examples: []string{
 		"yeet run <svc> ./bin/<svc> -- --app-flag value",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
 		"yeet run --pull <svc> ./compose.yml",
 		"yeet run <svc> ghcr.io/org/app:latest",
 		"yeet run <svc> ./Dockerfile",
-	}},
-	"start": {Name: "start", Description: "Start a service"},
+	}, ArgsSchema: ServiceArgs{}},
+	"start": {Name: "start", Description: "Start a service", ArgsSchema: ServiceArgs{}},
 	"stage": {Name: "stage", Description: "Upload a payload without applying it (use stage show/commit)", Usage: "SVC PAYLOAD|show|commit [-- <payload args>]", Examples: []string{
 		"yeet stage <svc> ./bin/<svc>",
 		"yeet stage <svc> show",
 		"yeet stage <svc> show --env",
 		"yeet stage <svc> commit",
-	}},
+	}, ArgsSchema: ServiceArgs{}},
 	"status":  {Name: "status", Description: "Show status of a service"},
-	"ts":      {Name: "ts", Description: "Run a tailscale command"},
-	"stop":    {Name: "stop", Description: "Stop a service"},
+	"ts":      {Name: "ts", Description: "Run a tailscale command", ArgsSchema: ServiceArgs{}},
+	"stop":    {Name: "stop", Description: "Stop a service", ArgsSchema: ServiceArgs{}},
 	"version": {Name: "version", Description: "Show the version of the Catch server"},
 }
 
@@ -213,8 +229,8 @@ var remoteGroupInfos = map[string]GroupInfo{
 		Name:        "docker",
 		Description: "Docker compose management",
 		Commands: map[string]CommandInfo{
-			"update": {Name: "update", Description: "Pull images and recreate containers for a compose service", Usage: "docker update <svc>"},
-			"pull":   {Name: "pull", Description: "Pull images for a compose service without restarting", Usage: "docker pull <svc>"},
+			"update": {Name: "update", Description: "Pull images and recreate containers for a compose service", Usage: "docker update <svc>", ArgsSchema: ServiceArgs{}},
+			"pull":   {Name: "pull", Description: "Pull images for a compose service without restarting", Usage: "docker pull <svc>", ArgsSchema: ServiceArgs{}},
 		},
 	},
 }
@@ -238,6 +254,40 @@ func RemoteCommandInfos() map[string]CommandInfo {
 	return remoteCommandInfos
 }
 
+func RemoteCommandRegistry() yargs.Registry {
+	subcommands := make(map[string]yargs.CommandSpec, len(remoteCommandInfos))
+	for name, info := range remoteCommandInfos {
+		subcommands[name] = yargs.CommandSpec{
+			Info:       toSubCommandInfo(name, info),
+			ArgsSchema: info.ArgsSchema,
+		}
+	}
+	groups := make(map[string]yargs.GroupSpec, len(remoteGroupInfos))
+	for name, info := range remoteGroupInfos {
+		cmds := make(map[string]yargs.CommandSpec, len(info.Commands))
+		for cmdName, cmd := range info.Commands {
+			cmds[cmdName] = yargs.CommandSpec{
+				Info:       toSubCommandInfo(cmdName, cmd),
+				ArgsSchema: cmd.ArgsSchema,
+			}
+		}
+		groupInfo := yargs.GroupInfo{
+			Name:        info.Name,
+			Description: info.Description,
+			Hidden:      info.Hidden,
+		}
+		groups[name] = yargs.GroupSpec{
+			Info:     groupInfo,
+			Commands: cmds,
+		}
+	}
+	return yargs.Registry{
+		Command:     yargs.CommandInfo{Name: "yeet"},
+		SubCommands: subcommands,
+		Groups:      groups,
+	}
+}
+
 func RemoteFlagSpecs() map[string]map[string]FlagSpec {
 	return remoteFlagSpecs
 }
@@ -248,6 +298,18 @@ func RemoteGroupInfos() map[string]GroupInfo {
 
 func RemoteGroupFlagSpecs() map[string]map[string]map[string]FlagSpec {
 	return remoteGroupFlagSpecs
+}
+
+func toSubCommandInfo(name string, info CommandInfo) yargs.SubCommandInfo {
+	return yargs.SubCommandInfo{
+		Name:            name,
+		Description:     info.Description,
+		Usage:           info.Usage,
+		Examples:        info.Examples,
+		Hidden:          info.Hidden,
+		Aliases:         info.Aliases,
+		LLMInstructions: "",
+	}
 }
 
 func ParseRun(args []string) (RunFlags, []string, error) {

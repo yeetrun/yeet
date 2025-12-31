@@ -42,6 +42,29 @@ func TestHandleSvcCmdDefaultsToStatus(t *testing.T) {
 	}
 }
 
+func TestHandleSvcCmdLogsRequiresService(t *testing.T) {
+	oldExec := execRemoteFn
+	oldService := serviceOverride
+	defer func() {
+		execRemoteFn = oldExec
+		serviceOverride = oldService
+	}()
+
+	serviceOverride = ""
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		t.Fatalf("execRemoteFn should not be called without a service name")
+		return nil
+	}
+
+	err := handleSvcCmd([]string{"logs"})
+	if err == nil {
+		t.Fatalf("expected missing service error")
+	}
+	if !strings.Contains(err.Error(), "logs requires a service name") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestHandleSvcCmdCronSplitsQuotedExpression(t *testing.T) {
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn
