@@ -14,6 +14,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
@@ -105,9 +106,17 @@ func (s *ContainerdCacheStorage) GetBlob(ctx context.Context, dg string) (io.Rea
 
 // BlobExists checks if a blob exists in Docker's cache.
 func (s *ContainerdCacheStorage) BlobExists(ctx context.Context, dg string) bool {
-	// Check containerd content store (layers and other blobs)
-	_, err := s.containerdClient.ContentStore().Info(ctx, digest.Digest(dg))
-	return err == nil
+	cs := s.containerdClient.ContentStore()
+	_, err := cs.Info(ctx, digest.Digest(dg))
+	if err != nil {
+		return false
+	}
+	ra, err := cs.ReaderAt(ctx, ocispec.Descriptor{Digest: digest.Digest(dg)})
+	if err != nil {
+		return false
+	}
+	_ = ra.Close()
+	return true
 }
 
 // BlobSize returns the size of a blob by digest.
@@ -419,11 +428,37 @@ func (s *ContainerdCacheStorage) CompleteUpload(ctx context.Context, uuid, expec
 
 	if err = fu.writer.Commit(ctx, 0, digest.Digest(expectedDigest)); err != nil {
 		if errdefs.IsAlreadyExists(err) {
-			return expectedDigest, nil
+			dg = expectedDigest
+			if uerr := s.markContentRoot(digest.Digest(dg)); uerr != nil {
+				return "", uerr
+			}
+			return dg, nil
 		}
 		return "", fmt.Errorf("commit upload: %w", err)
 	}
-	return fu.writer.Digest().String(), nil
+	dg = fu.writer.Digest().String()
+	if uerr := s.markContentRoot(digest.Digest(dg)); uerr != nil {
+		return "", uerr
+	}
+	return dg, nil
+}
+
+func (s *ContainerdCacheStorage) markContentRoot(dg digest.Digest) error {
+	if s.containerdClient == nil {
+		return nil
+	}
+	cs := s.containerdClient.ContentStore()
+	ctx := s.bgCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	labels := map[string]string{
+		"containerd.io/gc.root": time.Now().UTC().Format(time.RFC3339),
+	}
+	if _, err := cs.Update(ctx, content.Info{Digest: dg, Labels: labels}, "labels.containerd.io/gc.root"); err != nil {
+		return fmt.Errorf("mark content root %s: %w", dg, err)
+	}
+	return nil
 }
 
 // AbortUpload removes an upload session.
