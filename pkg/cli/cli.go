@@ -9,7 +9,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/yeetrun/yeet/pkg/yargs"
+	"github.com/shayne/yargs"
 )
 
 type FlagSpec struct {

@@ -14,6 +14,7 @@ require (
 	github.com/klauspost/compress v1.17.11
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.0
+	github.com/shayne/yargs v0.0.0-20251231185228-cb5e0dd57a50
 	github.com/vishvananda/netns v0.0.5
 	golang.org/x/oauth2 v0.30.0
 	golang.org/x/sync v0.17.0
