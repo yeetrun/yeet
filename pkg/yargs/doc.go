@@ -95,4 +95,36 @@
 //	    HTTPPort  Port  `flag:"port" port:"1-65535" help:"HTTP port"`
 //	    AdminPort *Port `flag:"admin-port" port:"8000-9000" help:"Admin port"`
 //	}
+//
+// # Command Registry and Introspection
+//
+// Use Registry to declare command schemas once and resolve commands without
+// hardcoded lists. This is useful for checking positional requirements.
+//
+//	type RunArgs struct {
+//	    Service string `pos:"0" help:"Service name"`
+//	    Payload string `pos:"1" help:"Payload (file/image)"`
+//	}
+//
+//	type StatusArgs struct {
+//	    Service string `pos:"0?" help:"Optional service name"`
+//	}
+//
+//	reg := yargs.Registry{
+//	    Command: yargs.CommandInfo{Name: "app"},
+//	    SubCommands: map[string]yargs.CommandSpec{
+//	        "run": {Info: yargs.SubCommandInfo{Name: "run"}, ArgsSchema: RunArgs{}},
+//	        "status": {Info: yargs.SubCommandInfo{Name: "status"}, ArgsSchema: StatusArgs{}},
+//	    },
+//	}
+//
+//	res, ok, err := yargs.ResolveCommandWithRegistry(os.Args[1:], reg)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	if ok {
+//	    if arg0, ok := res.PArg(0); ok {
+//	        fmt.Printf("arg0 name=%s required=%v\n", arg0.Name, arg0.Required)
+//	    }
+//	}
 package yargs
