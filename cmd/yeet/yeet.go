@@ -32,7 +32,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/codecutil"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
 	"github.com/yeetrun/yeet/pkg/svc"
-	"github.com/yeetrun/yeet/pkg/yargs"
+	"github.com/shayne/yargs"
 	"golang.org/x/term"
 	"tailscale.com/client/tailscale"
 )
