@@ -523,6 +523,10 @@ func (i *FileInstaller) installOnClose() error {
 			}
 		}
 
+		if i.cfg.Pull && binFT != ftdetect.DockerCompose {
+			return fmt.Errorf("--pull is only valid for docker compose payloads")
+		}
+
 		var artifactName db.ArtifactName
 		// Set the service type and "binary" name (file in the bin/ dir)
 		switch binFT {
@@ -973,6 +977,9 @@ func (si *Installer) Install() error {
 }
 
 func (si *Installer) doInstall(d *db.Data, s *db.Service) error {
+	if si.icfg.Pull && s.ServiceType != db.ServiceTypeDockerCompose {
+		return fmt.Errorf("--pull is only valid for docker compose payloads")
+	}
 	switch s.ServiceType {
 	case db.ServiceTypeSystemd:
 		// Install and start the service.
@@ -997,16 +1004,16 @@ func (si *Installer) doInstall(d *db.Data, s *db.Service) error {
 		if _, err := svc.DockerCmd(); err != nil {
 			return err // svc.ErrDockerNotFound
 		}
-		service, err := svc.NewDockerComposeService(si.s.cfg.DB, s.View(), si.s.cfg.InternalRegistryAddr, d.Images, si.s.serviceDataDir(s.Name), si.s.serviceRunDir(s.Name))
+		service, err := svc.NewDockerComposeService(si.s.cfg.DB, s.View(), si.s.serviceDataDir(s.Name), si.s.serviceRunDir(s.Name))
 		if err != nil {
 			return fmt.Errorf("failed to create service: %v", err)
 		}
 		service.NewCmd = si.NewCmd
-		if err := service.Install(); err != nil {
+		if err := service.InstallWithPull(si.icfg.Pull); err != nil {
 			return fmt.Errorf("failed to install service: %v", err)
 		}
 
-		err = service.Up()
+		err = service.UpWithPull(si.icfg.Pull)
 		if err != nil {
 			return fmt.Errorf("failed to up service: %v", err)
 		}

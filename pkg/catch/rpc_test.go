@@ -17,6 +17,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	cdb "github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/registry"
 )
 
 func newTestServer(t *testing.T) *Server {
@@ -34,6 +35,11 @@ func newTestServer(t *testing.T) *Server {
 			return nil
 		},
 	}
+	storage, err := registry.NewFilesystemStorage(cfg.RegistryRoot)
+	if err != nil {
+		t.Fatalf("NewFilesystemStorage: %v", err)
+	}
+	cfg.RegistryStorage = storage
 	return NewUnstartedServer(cfg)
 }
 

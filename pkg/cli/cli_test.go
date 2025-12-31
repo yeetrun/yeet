@@ -21,6 +21,7 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 		"--macvlan-mac", "00:11:22:33:44:55",
 		"--macvlan-vlan", "12",
 		"--macvlan-parent", "eth0",
+		"--pull",
 		"arg1", "arg2",
 	}
 
@@ -48,6 +49,9 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	}
 	if flags.MacvlanParent != "eth0" {
 		t.Errorf("MacvlanParent = %q, want %q", flags.MacvlanParent, "eth0")
+	}
+	if !flags.Pull {
+		t.Errorf("Pull = false, want true")
 	}
 	wantTags := []string{"tag:a", "tag:b"}
 	if !reflect.DeepEqual(flags.TsTags, wantTags) {
@@ -79,5 +83,25 @@ func TestParseRunStopsAtUnknownFlag(t *testing.T) {
 	}
 	if got := strings.Join(outArgs, " "); got != "--unknown value arg1" {
 		t.Errorf("args = %q, want %q", got, "--unknown value arg1")
+	}
+}
+
+func TestParseStagePullFlag(t *testing.T) {
+	args := []string{
+		"--pull",
+		"commit",
+	}
+	flags, subcmd, outArgs, err := ParseStage(args)
+	if err != nil {
+		t.Fatalf("ParseStage failed: %v", err)
+	}
+	if !flags.Pull {
+		t.Fatalf("Pull = false, want true")
+	}
+	if subcmd != "commit" {
+		t.Fatalf("subcmd = %q, want %q", subcmd, "commit")
+	}
+	if len(outArgs) != 0 {
+		t.Fatalf("expected no args, got %v", outArgs)
 	}
 }

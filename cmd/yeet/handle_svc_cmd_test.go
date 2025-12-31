@@ -202,6 +202,63 @@ func TestRunComposeTTYDependsOnTerminal(t *testing.T) {
 	}
 }
 
+func TestHandleSvcCmdRunPullBeforePayload(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldPush := pushAllLocalImagesFn
+	oldService := serviceOverride
+	oldIsTerminal := isTerminalFn
+	defer func() {
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		pushAllLocalImagesFn = oldPush
+		serviceOverride = oldService
+		isTerminalFn = oldIsTerminal
+	}()
+
+	serviceOverride = "svc-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	pushAllLocalImagesFn = func(string, string, string) error {
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	tmp := t.TempDir()
+	compose := filepath.Join(tmp, "compose.yml")
+	if err := os.WriteFile(compose, []byte("services:\n  app:\n    image: alpine\n"), 0o600); err != nil {
+		t.Fatalf("failed to write compose: %v", err)
+	}
+
+	var gotArgs []string
+	var gotPayload []byte
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotArgs = append([]string{}, args...)
+		if stdin == nil {
+			t.Fatalf("expected stdin to be provided")
+		}
+		payload, err := io.ReadAll(stdin)
+		if err != nil {
+			t.Fatalf("failed to read stdin payload: %v", err)
+		}
+		gotPayload = payload
+		return nil
+	}
+
+	if err := handleSvcCmd([]string{"run", "--pull", compose}); err != nil {
+		t.Fatalf("handleSvcCmd returned error: %v", err)
+	}
+
+	wantArgs := []string{"run", "--pull"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+	if !bytes.Contains(gotPayload, []byte("services:")) {
+		t.Fatalf("expected compose payload, got %q", string(gotPayload))
+	}
+}
+
 func TestRunBinaryUploadsZstd(t *testing.T) {
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn

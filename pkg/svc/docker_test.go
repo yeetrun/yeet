@@ -21,71 +21,44 @@ type cmdCall struct {
 
 func TestDockerComposePullInternal(t *testing.T) {
 	calls := []cmdCall{}
-	svc := newTestDockerComposeService(t, map[db.ImageRepoName]*db.ImageRepo{
-		"svc-a/app": {Refs: map[db.ImageRef]db.ImageManifest{"latest": {}}},
-	}, "services:\n  app:\n    image: catchit.dev/svc-a/app\n", recordCmd(t, &calls))
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: catchit.dev/svc-a/app\n", recordCmd(t, &calls))
 
 	if err := svc.Pull(); err != nil {
 		t.Fatalf("Pull returned error: %v", err)
 	}
-
-	internalRef := svc.InternalRegistryAddr + "/svc-a/app:latest"
-	canonicalRef := InternalRegistryHost + "/svc-a/app:latest"
-
-	assertCallOrder(t, calls,
-		callSpec{argsPrefix: []string{"pull", internalRef}},
-		callSpec{argsPrefix: []string{"tag", internalRef, canonicalRef}},
-		callSpec{argsPrefix: []string{"rmi", internalRef}},
-		callSpec{composeSubcmd: "pull"},
-	)
-	if !composeCallHasArg(calls, "pull", "--ignore-pull-failures") {
-		t.Fatalf("expected compose pull to include --ignore-pull-failures")
+	if composeCallHasSubcmd(calls, "pull") {
+		t.Fatalf("did not expect compose pull for internal images")
 	}
 }
 
 func TestDockerComposePullExternalOnly(t *testing.T) {
 	calls := []cmdCall{}
-	svc := newTestDockerComposeService(t, nil, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
 
 	if err := svc.Pull(); err != nil {
 		t.Fatalf("Pull returned error: %v", err)
 	}
 
-	if hasCallWithPrefix(calls, []string{"pull"}) || hasCallWithPrefix(calls, []string{"tag"}) || hasCallWithPrefix(calls, []string{"rmi"}) {
-		t.Fatalf("unexpected internal image commands: %#v", calls)
-	}
 	if !composeCallHasSubcmd(calls, "pull") {
 		t.Fatalf("expected compose pull command")
-	}
-	if composeCallHasArg(calls, "pull", "--ignore-pull-failures") {
-		t.Fatalf("did not expect --ignore-pull-failures for external-only pull")
 	}
 }
 
 func TestDockerComposeUpdateRunningInternal(t *testing.T) {
 	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,running\n")
 	calls := []cmdCall{}
-	svc := newTestDockerComposeService(t, map[db.ImageRepoName]*db.ImageRepo{
-		"svc-a/app": {Refs: map[db.ImageRef]db.ImageManifest{"latest": {}}},
-	}, "services:\n  app:\n    image: catchit.dev/svc-a/app\n", recordCmd(t, &calls))
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: catchit.dev/svc-a/app\n", recordCmd(t, &calls))
 
 	if err := svc.Update(); err != nil {
 		t.Fatalf("Update returned error: %v", err)
 	}
 
-	internalRef := svc.InternalRegistryAddr + "/svc-a/app:latest"
-	canonicalRef := InternalRegistryHost + "/svc-a/app:latest"
-
 	assertCallOrder(t, calls,
 		callSpec{composeSubcmd: "ps"},
-		callSpec{composeSubcmd: "pull"},
-		callSpec{argsPrefix: []string{"pull", internalRef}},
-		callSpec{argsPrefix: []string{"tag", internalRef, canonicalRef}},
-		callSpec{argsPrefix: []string{"rmi", internalRef}},
 		callSpec{composeSubcmd: "up"},
 	)
-	if !composeCallHasArg(calls, "pull", "--ignore-pull-failures") {
-		t.Fatalf("expected compose pull to include --ignore-pull-failures")
+	if composeCallHasSubcmd(calls, "pull") {
+		t.Fatalf("did not expect compose pull for internal images")
 	}
 	if !composeCallHasArg(calls, "up", "--pull") || !composeCallHasArg(calls, "up", "never") {
 		t.Fatalf("expected compose up to use --pull never")
@@ -95,7 +68,7 @@ func TestDockerComposeUpdateRunningInternal(t *testing.T) {
 func TestDockerComposeUpdateStoppedExternal(t *testing.T) {
 	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,exited\n")
 	calls := []cmdCall{}
-	svc := newTestDockerComposeService(t, nil, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
 
 	if err := svc.Update(); err != nil {
 		t.Fatalf("Update returned error: %v", err)
@@ -116,33 +89,22 @@ func TestDockerComposeUpdateStoppedExternal(t *testing.T) {
 func TestDockerComposePrePullIfRunning(t *testing.T) {
 	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,running\n")
 	calls := []cmdCall{}
-	svc := newTestDockerComposeService(t, map[db.ImageRepoName]*db.ImageRepo{
-		"svc-a/app": {Refs: map[db.ImageRef]db.ImageManifest{"latest": {}}},
-	}, "services:\n  app:\n    image: catchit.dev/svc-a/app\n", recordCmd(t, &calls))
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: catchit.dev/svc-a/app\n", recordCmd(t, &calls))
 
 	if err := svc.PrePullIfRunning(); err != nil {
 		t.Fatalf("PrePullIfRunning returned error: %v", err)
 	}
 
-	internalRef := svc.InternalRegistryAddr + "/svc-a/app:latest"
-	canonicalRef := InternalRegistryHost + "/svc-a/app:latest"
-
-	assertCallOrder(t, calls,
-		callSpec{composeSubcmd: "ps"},
-		callSpec{argsPrefix: []string{"pull", internalRef}},
-		callSpec{argsPrefix: []string{"tag", internalRef, canonicalRef}},
-		callSpec{argsPrefix: []string{"rmi", internalRef}},
-		callSpec{composeSubcmd: "pull"},
-	)
-	if !composeCallHasArg(calls, "pull", "--ignore-pull-failures") {
-		t.Fatalf("expected compose pull to include --ignore-pull-failures")
+	assertCallOrder(t, calls, callSpec{composeSubcmd: "ps"})
+	if composeCallHasSubcmd(calls, "pull") {
+		t.Fatalf("did not expect compose pull for internal images")
 	}
 }
 
 func TestDockerComposePrePullIfStopped(t *testing.T) {
 	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,exited\n")
 	calls := []cmdCall{}
-	svc := newTestDockerComposeService(t, nil, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
 
 	if err := svc.PrePullIfRunning(); err != nil {
 		t.Fatalf("PrePullIfRunning returned error: %v", err)
@@ -154,6 +116,22 @@ func TestDockerComposePrePullIfStopped(t *testing.T) {
 	}
 }
 
+func TestDockerComposeUpWithoutPull(t *testing.T) {
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+
+	if err := svc.UpWithPull(false); err != nil {
+		t.Fatalf("UpWithPull(false) returned error: %v", err)
+	}
+
+	if !composeCallHasSubcmd(calls, "up") {
+		t.Fatalf("expected compose up command")
+	}
+	if composeCallHasArg(calls, "up", "--pull") {
+		t.Fatalf("did not expect compose up to include --pull")
+	}
+}
+
 func TestDockerComposeStatusesStateMapping(t *testing.T) {
 	t.Setenv("HELPER_DOCKER_PS_OUTPUT", strings.Join([]string{
 		"app,created",
@@ -161,7 +139,7 @@ func TestDockerComposeStatusesStateMapping(t *testing.T) {
 		"db,paused",
 		"",
 	}, "\n"))
-	svc := newTestDockerComposeService(t, nil, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
 
 	statuses, err := svc.Statuses()
 	if err != nil {
@@ -178,7 +156,7 @@ func TestDockerComposeStatusesStateMapping(t *testing.T) {
 	}
 }
 
-func newTestDockerComposeService(t *testing.T, images map[db.ImageRepoName]*db.ImageRepo, composeContent string, newCmd func(string, ...string) *exec.Cmd) *DockerComposeService {
+func newTestDockerComposeService(t *testing.T, composeContent string, newCmd func(string, ...string) *exec.Cmd) *DockerComposeService {
 	t.Helper()
 	tmp := t.TempDir()
 	dockerPath := filepath.Join(tmp, "docker")
@@ -208,12 +186,10 @@ func newTestDockerComposeService(t *testing.T, images map[db.ImageRepoName]*db.I
 	}
 
 	return &DockerComposeService{
-		Name:                 "svc-a",
-		cfg:                  cfg,
-		DataDir:              tmp,
-		NewCmd:               newCmd,
-		Images:               images,
-		InternalRegistryAddr: "127.0.0.1:5000",
+		Name:    "svc-a",
+		cfg:     cfg,
+		DataDir: tmp,
+		NewCmd:  newCmd,
 	}
 }
 

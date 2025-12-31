@@ -7,12 +7,14 @@ package catch
 import (
 	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/registry"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
 
@@ -133,5 +135,88 @@ func TestRegistryLoopbackWriteRejected(t *testing.T) {
 	server.registry.ServeHTTP(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want %d", rr.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+type recordingStorage struct {
+	repo      string
+	reference string
+	mediaType string
+}
+
+func (r *recordingStorage) GetBlob(ctx context.Context, digest string) (io.ReadCloser, error) {
+	return nil, registry.ErrBlobNotFound
+}
+
+func (r *recordingStorage) BlobSize(ctx context.Context, digest string) (int64, error) {
+	return 0, registry.ErrBlobNotFound
+}
+
+func (r *recordingStorage) BlobExists(ctx context.Context, digest string) bool {
+	return false
+}
+
+func (r *recordingStorage) DeleteBlob(ctx context.Context, digest string) error {
+	return nil
+}
+
+func (r *recordingStorage) GetManifest(ctx context.Context, repo, reference string) (*registry.ManifestMetadata, error) {
+	return nil, registry.ErrManifestNotFound
+}
+
+func (r *recordingStorage) PutManifest(ctx context.Context, repo, reference string, data []byte, mediaType string) (string, error) {
+	r.repo = repo
+	r.reference = reference
+	r.mediaType = mediaType
+	return "sha256:deadbeef", nil
+}
+
+func (r *recordingStorage) ManifestExists(ctx context.Context, repo, reference string) bool {
+	return false
+}
+
+func (r *recordingStorage) DeleteManifest(ctx context.Context, repo, reference string) error {
+	return nil
+}
+
+func (r *recordingStorage) NewUpload(ctx context.Context) (*registry.UploadSession, error) {
+	return &registry.UploadSession{UUID: "u"}, nil
+}
+
+func (r *recordingStorage) GetUpload(ctx context.Context, uuid string) (*registry.UploadSession, error) {
+	return &registry.UploadSession{UUID: uuid}, nil
+}
+
+func (r *recordingStorage) CopyChunk(ctx context.Context, uuid string, rd io.Reader) (*registry.UploadSession, error) {
+	return &registry.UploadSession{UUID: uuid}, nil
+}
+
+func (r *recordingStorage) CompleteUpload(ctx context.Context, uuid, expectedDigest string) (string, error) {
+	return expectedDigest, nil
+}
+
+func (r *recordingStorage) AbortUpload(ctx context.Context, uuid string) error {
+	return nil
+}
+
+func TestInternalRegistryStoragePrefixesRepo(t *testing.T) {
+	server := newTestServer(t)
+	rec := &recordingStorage{}
+	inst := &stubInstaller{}
+	storage := &internalRegistryStorage{
+		s:          server,
+		base:       rec,
+		repoPrefix: svc.InternalRegistryHost,
+		newInstaller: func(_ *Server, cfg FileInstallerCfg) (registryInstaller, error) {
+			return inst, nil
+		},
+	}
+	manifest := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json"}`)
+	if _, err := storage.PutManifest(context.Background(), "svc/app", "run", manifest, "application/vnd.oci.image.manifest.v1+json"); err != nil {
+		t.Fatalf("PutManifest: %v", err)
+	}
+	wantRepo := svc.InternalRegistryHost + "/svc/app"
+	if rec.repo != wantRepo {
+		t.Fatalf("repo = %q, want %q", rec.repo, wantRepo)
 	}
 }

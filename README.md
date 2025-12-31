@@ -23,6 +23,9 @@ yeet init root@<host>
 yeet run <svc> ./compose.yml
 ```
 
+Note: `yeet run` for compose does not pull new images by default. To refresh images, use `yeet run --pull <svc> ./compose.yml` or `yeet docker update <svc>`.
+Note: Docker hosts must enable the containerd snapshotter so pushed images show up locally (see Installation in the wiki).
+
 Other common variants (in order of use):
 
 ```bash
