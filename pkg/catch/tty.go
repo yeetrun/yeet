@@ -508,6 +508,7 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 		return fmt.Errorf("cannot run, reserved service name")
 	}
 	cfg := e.fileInstaller(netFlagsFromRun(flags), argsIn)
+	cfg.Pull = flags.Pull
 	return e.install(e.payloadReader(), cfg)
 }
 
@@ -637,6 +638,7 @@ func (e *ttyExecer) stageCmdFunc(subcmd string, flags cli.StageFlags, args []str
 		return fmt.Errorf("cannot stage system service")
 	}
 	fi := e.fileInstaller(netFlagsFromStage(flags), args)
+	fi.Pull = flags.Pull
 	if err := e.s.ensureDirs(e.sn, e.user); err != nil {
 		return fmt.Errorf("failed to ensure directories: %w", err)
 	}

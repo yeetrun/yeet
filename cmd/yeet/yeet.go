@@ -831,8 +831,13 @@ func handleSvcCmd(args []string) error {
 	// `run <svc> <file/docker-image> [args...]`
 	case "run":
 		if len(args) >= 2 {
-			return runRun(args[1], args[2:])
+			payload, runArgs, err := splitRunPayloadArgs(args[1:])
+			if err != nil {
+				return err
+			}
+			return runRun(payload, runArgs)
 		}
+		return fmt.Errorf("run requires a payload")
 	// `copy <svc> <file> <dest>`
 	case "copy":
 		if len(args) == 3 {
@@ -863,6 +868,61 @@ var handleSvcCmdFn = handleSvcCmd
 var tryRunDockerFn = tryRunDocker
 var buildDockerImageForRemoteFn = buildDockerImageForRemote
 var tryRunRemoteImageFn = tryRunRemoteImage
+
+func splitRunPayloadArgs(args []string) (string, []string, error) {
+	if len(args) == 0 {
+		return "", nil, fmt.Errorf("run requires a payload")
+	}
+	specs := cli.RemoteFlagSpecs()["run"]
+	payloadIdx := -1
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			break
+		}
+		if strings.HasPrefix(arg, "--") && len(arg) > 2 {
+			name := arg
+			if idx := strings.Index(name, "="); idx != -1 {
+				name = name[:idx]
+			}
+			if spec, ok := specs[name]; ok {
+				if spec.ConsumesValue && !strings.Contains(arg, "=") {
+					i++
+				}
+				continue
+			}
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			if strings.Contains(arg, "=") {
+				name := arg[:strings.Index(arg, "=")]
+				if _, ok := specs[name]; ok {
+					continue
+				}
+			} else if len(arg) == 2 {
+				if spec, ok := specs[arg]; ok {
+					if spec.ConsumesValue {
+						i++
+					}
+					continue
+				}
+			} else if short := "-" + string(arg[1]); short != "-" {
+				if spec, ok := specs[short]; ok && spec.ConsumesValue {
+					continue
+				}
+			}
+		}
+		payloadIdx = i
+		break
+	}
+	if payloadIdx == -1 {
+		return "", nil, fmt.Errorf("run requires a payload")
+	}
+	payload := args[payloadIdx]
+	out := make([]string, 0, len(args)-1)
+	out = append(out, args[:payloadIdx]...)
+	out = append(out, args[payloadIdx+1:]...)
+	return payload, out, nil
+}
 
 func runRun(payload string, args []string) error {
 	if ok, err := tryRunDockerfile(payload, args); err != nil {

@@ -28,13 +28,11 @@ var ErrDockerStatusUnknown = fmt.Errorf("unknown docker status")
 var ErrDockerNotFound = fmt.Errorf("docker not found")
 
 type DockerComposeService struct {
-	Name                 string
-	cfg                  *db.Service
-	DataDir              string
-	NewCmd               func(name string, arg ...string) *exec.Cmd
-	Images               map[db.ImageRepoName]*db.ImageRepo
-	InternalRegistryAddr string
-	sd                   *SystemdService
+	Name    string
+	cfg     *db.Service
+	DataDir string
+	NewCmd  func(name string, arg ...string) *exec.Cmd
+	sd      *SystemdService
 
 	installEnvOnce lazy.SyncValue[error]
 }
@@ -104,23 +102,18 @@ func (s *DockerComposeService) runCommand(args ...string) error {
 	return nil
 }
 
-func matchingRefs(refs map[db.ImageRepoName]*db.ImageRepo, svcName string, ref db.ImageRef) (matching []string) {
-	for rn, ir := range refs {
-		if s, _, _ := strings.Cut(string(rn), "/"); s == svcName {
-			if _, ok := ir.Refs[ref]; ok {
-				matching = append(matching, string(rn))
-			}
-		}
-	}
-	return matching
-}
-
 // InternalRegistryHost is the domain name for the internal registry.
 const InternalRegistryHost = "catchit.dev"
 
 func (s *DockerComposeService) Install() error {
-	if err := s.PrePullIfRunning(); err != nil {
-		return fmt.Errorf("failed to pre-pull images: %v", err)
+	return s.InstallWithPull(true)
+}
+
+func (s *DockerComposeService) InstallWithPull(pull bool) error {
+	if pull {
+		if err := s.PrePullIfRunning(); err != nil {
+			return fmt.Errorf("failed to pre-pull images: %v", err)
+		}
 	}
 	if err := s.Down(); err != nil {
 		return fmt.Errorf("failed to stop service: %v", err)
@@ -129,30 +122,35 @@ func (s *DockerComposeService) Install() error {
 }
 
 func (s *DockerComposeService) Up() error {
-	s.sd.Start()
-	// Ok so this is a bit of a hack. We want to use a nice looking image
-	// name catchit.dev/svc/img instead of a weirdo loopback
-	// 127.0.0.1:42353/svc/img address or with a random port. So to pull
-	// this off we first pull the image from the internal registry with the
-	// random address, then retag it with the nice looking address, then
-	// remove the image with the random address. This is all a bit of a hack
-	// but it works for now. We likely want to replace docker with
-	// containerd but we need to figure out how to get the same compose
-	// functionality with containerd.
-	isInternal, err := s.pullInternalImages()
+	return s.UpWithPull(true)
+}
+
+func (s *DockerComposeService) UpWithPull(pull bool) error {
+	if s.sd != nil {
+		s.sd.Start()
+	}
+	isInternal, err := s.composeUsesInternalImages()
 	if err != nil {
 		return err
 	}
-	return s.runCommand("up", "--pull", pullMode(isInternal), "-d")
+	args := []string{"up"}
+	if pull {
+		args = append(args, "--pull", pullMode(isInternal))
+	}
+	args = append(args, "-d")
+	return s.runCommand(args...)
 }
 
 // Pull pulls the docker images used by this compose service without restarting it.
 func (s *DockerComposeService) Pull() error {
-	isInternal, err := s.pullInternalImages()
+	isInternal, err := s.composeUsesInternalImages()
 	if err != nil {
 		return err
 	}
-	return s.composePull(isInternal)
+	if isInternal {
+		return nil
+	}
+	return s.composePull(false)
 }
 
 // Update pulls images (prefetching if running) and recreates containers.
@@ -161,17 +159,14 @@ func (s *DockerComposeService) Update() error {
 	if err != nil {
 		return err
 	}
-	isInternal, err := s.hasInternalImages()
+	isInternal, err := s.composeUsesInternalImages()
 	if err != nil {
 		return err
 	}
-	if running {
-		if err := s.composePull(isInternal); err != nil {
+	if running && !isInternal {
+		if err := s.composePull(false); err != nil {
 			return err
 		}
-	}
-	if _, err := s.pullInternalImages(); err != nil {
-		return err
 	}
 	return s.runCommand("up", "--pull", pullMode(isInternal), "-d")
 }
@@ -319,42 +314,6 @@ func (s *DockerComposeService) Logs(opts *LogOptions) error {
 		args = append(args, "--tail", strconv.Itoa(opts.Lines))
 	}
 	return s.runCommand(args...)
-}
-
-func (s *DockerComposeService) hasInternalImages() (bool, error) {
-	usesInternal, err := s.composeUsesInternalImages()
-	if err != nil {
-		return false, err
-	}
-	if !usesInternal {
-		return false, nil
-	}
-	return len(matchingRefs(s.Images, s.Name, "latest")) > 0, nil
-}
-
-func (s *DockerComposeService) pullInternalImages() (bool, error) {
-	usesInternal, err := s.composeUsesInternalImages()
-	if err != nil {
-		return false, err
-	}
-	if !usesInternal {
-		return false, nil
-	}
-	isInternal := false
-	for _, ref := range matchingRefs(s.Images, s.Name, "latest") {
-		isInternal = true
-		internalRef := fmt.Sprintf("%s/%s:latest", s.InternalRegistryAddr, ref)
-		canonicalRef := fmt.Sprintf("%s/%s:latest", InternalRegistryHost, ref)
-		if err := do(
-			s.NewCmd("docker", "pull", internalRef).Run,
-			s.NewCmd("docker", "tag", internalRef, canonicalRef).Run,
-			s.NewCmd("docker", "rmi", internalRef).Run,
-		); err != nil {
-			log.Printf("docker tag: %v", err)
-			return false, fmt.Errorf("failed to tag image: %v", err)
-		}
-	}
-	return isInternal, nil
 }
 
 func (s *DockerComposeService) composeUsesInternalImages() (bool, error) {

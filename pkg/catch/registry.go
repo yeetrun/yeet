@@ -28,16 +28,24 @@ type registryInstaller interface {
 type newRegistryInstaller func(*Server, FileInstallerCfg) (registryInstaller, error)
 
 func (s *Server) newRegistry() *containerRegistry {
-	if err := os.MkdirAll(s.cfg.RegistryRoot, 0700); err != nil {
-		log.Fatalf("MkdirAll: %v", err)
-	}
-	fs, err := registry.NewFilesystemStorage(s.cfg.RegistryRoot)
-	if err != nil {
-		log.Fatalf("NewFilesystemStorage: %v", err)
+	base := s.cfg.RegistryStorage
+	if base == nil {
+		if s.cfg.ContainerdSocket == "" {
+			log.Fatalf("containerd socket not configured; set --containerd-socket (default /run/containerd/containerd.sock)")
+		}
+		if _, err := os.Stat(s.cfg.ContainerdSocket); err != nil {
+			log.Fatalf("containerd socket %q not found: %v", s.cfg.ContainerdSocket, err)
+		}
+		var err error
+		base, err = registry.NewContainerdCacheStorage(s.cfg.ContainerdSocket)
+		if err != nil {
+			log.Fatalf("NewContainerdCacheStorage: %v", err)
+		}
 	}
 	storage := &internalRegistryStorage{
 		s:            s,
-		base:         fs,
+		base:         base,
+		repoPrefix:   svc.InternalRegistryHost,
 		newInstaller: defaultRegistryInstaller,
 	}
 	return &containerRegistry{
@@ -81,8 +89,16 @@ func (cr *containerRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type internalRegistryStorage struct {
 	s            *Server
-	base         *registry.FilesystemStorage
+	base         registry.Storage
+	repoPrefix   string
 	newInstaller newRegistryInstaller
+}
+
+func (s *internalRegistryStorage) storageRepo(repo string) string {
+	if s.repoPrefix == "" {
+		return repo
+	}
+	return fmt.Sprintf("%s/%s", s.repoPrefix, repo)
 }
 
 func (s *internalRegistryStorage) GetBlob(ctx context.Context, digest string) (io.ReadCloser, error) {
@@ -103,7 +119,7 @@ func (s *internalRegistryStorage) DeleteBlob(ctx context.Context, digest string)
 
 func (s *internalRegistryStorage) GetManifest(ctx context.Context, repo, reference string) (*registry.ManifestMetadata, error) {
 	if isDigest(reference) {
-		return s.base.GetManifest(ctx, repo, reference)
+		return s.base.GetManifest(ctx, s.storageRepo(repo), reference)
 	}
 	manifest, ok, err := s.lookupManifest(repo, reference)
 	if err != nil {
@@ -112,12 +128,12 @@ func (s *internalRegistryStorage) GetManifest(ctx context.Context, repo, referen
 	if !ok {
 		return nil, registry.ErrManifestNotFound
 	}
-	return s.base.GetManifest(ctx, repo, manifest.BlobHash)
+	return s.base.GetManifest(ctx, s.storageRepo(repo), manifest.BlobHash)
 }
 
 func (s *internalRegistryStorage) PutManifest(ctx context.Context, repo, reference string, data []byte, mediaType string) (string, error) {
 	if isDigest(reference) {
-		return s.base.PutManifest(ctx, repo, reference, data, mediaType)
+		return s.base.PutManifest(ctx, s.storageRepo(repo), reference, data, mediaType)
 	}
 	svcName, err := parseRepo(repo)
 	if err != nil {
@@ -127,8 +143,9 @@ func (s *internalRegistryStorage) PutManifest(ctx context.Context, repo, referen
 	if err != nil {
 		return "", err
 	}
-	digest, err := s.base.PutManifest(ctx, repo, reference, data, mediaType)
+	digest, err := s.base.PutManifest(ctx, s.storageRepo(repo), reference, data, mediaType)
 	if err != nil {
+		log.Printf("registry PutManifest failed for %q:%q: %v", repo, reference, err)
 		return "", err
 	}
 	d, err := s.s.cfg.DB.MutateData(func(d *db.Data) error {
@@ -158,7 +175,7 @@ func (s *internalRegistryStorage) PutManifest(ctx context.Context, repo, referen
 
 func (s *internalRegistryStorage) ManifestExists(ctx context.Context, repo, reference string) bool {
 	if isDigest(reference) {
-		return s.base.ManifestExists(ctx, repo, reference)
+		return s.base.ManifestExists(ctx, s.storageRepo(repo), reference)
 	}
 	_, ok, err := s.lookupManifest(repo, reference)
 	return err == nil && ok
@@ -166,7 +183,7 @@ func (s *internalRegistryStorage) ManifestExists(ctx context.Context, repo, refe
 
 func (s *internalRegistryStorage) DeleteManifest(ctx context.Context, repo, reference string) error {
 	if isDigest(reference) {
-		if err := s.base.DeleteManifest(ctx, repo, reference); err != nil {
+		if err := s.base.DeleteManifest(ctx, s.storageRepo(repo), reference); err != nil {
 			return err
 		}
 		_, err := s.s.cfg.DB.MutateData(func(d *db.Data) error {
@@ -194,7 +211,7 @@ func (s *internalRegistryStorage) DeleteManifest(ctx context.Context, repo, refe
 	if err != nil {
 		return err
 	}
-	_ = s.base.DeleteManifest(ctx, repo, reference)
+	_ = s.base.DeleteManifest(ctx, s.storageRepo(repo), reference)
 	return nil
 }
 

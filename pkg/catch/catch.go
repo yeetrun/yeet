@@ -23,6 +23,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/netns"
+	"github.com/yeetrun/yeet/pkg/registry"
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/client/tailscale"
 	"tailscale.com/util/set"
@@ -131,6 +132,8 @@ type Config struct {
 	InternalRegistryAddr string
 	ExternalRegistryAddr string
 	RegistryRoot         string
+	ContainerdSocket     string
+	RegistryStorage      registry.Storage
 	LocalClient          *tailscale.LocalClient
 	AuthorizeFunc        func(ctx context.Context, remoteAddr string) error `json:"-"`
 }
@@ -254,7 +257,7 @@ func (s *Server) dockerComposeService(sn string) (*svc.DockerComposeService, err
 	if !ok {
 		return nil, errServiceNotFound
 	}
-	service, err := svc.NewDockerComposeService(s.cfg.DB, sv, s.cfg.InternalRegistryAddr, d.AsStruct().Images, s.serviceDataDir(sn), s.serviceRunDir(sn))
+	service, err := svc.NewDockerComposeService(s.cfg.DB, sv, s.serviceDataDir(sn), s.serviceRunDir(sn))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load service: %v", err)
 	}
@@ -303,6 +306,8 @@ func (s *Server) serviceView(sn string) (db.ServiceView, error) {
 type InstallerCfg struct {
 	ServiceName string
 	User        string
+	// Pull forces docker compose services to pull images on install.
+	Pull bool
 	// Printer is a function to print messages to the client.
 	Printer func(string, ...any) `json:"-"`
 

@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -41,6 +42,7 @@ var (
 
 	// TODO: This should be randomly assigned at stored in the JSON DB.
 	registryInternalAddr = flag.String("registry-internal-addr", "127.0.0.1:0", "address for registry to listen on internally")
+	containerdSocket     = flag.String("containerd-socket", "/run/containerd/containerd.sock", "path to containerd socket (required for registry cache)")
 )
 
 var (
@@ -124,6 +126,16 @@ func main() {
 	must.Do(os.MkdirAll(mountsDir, 0700))
 
 	curUser := must.Get(user.Current())
+	if *containerdSocket == "" {
+		log.Fatal("containerd socket is required (set --containerd-socket)")
+	}
+	if _, err := os.Stat(*containerdSocket); err != nil {
+		if os.IsNotExist(err) {
+			log.Fatalf("containerd socket not found at %s (is containerd running?)", *containerdSocket)
+		}
+		log.Fatalf("failed to stat containerd socket %s: %v", *containerdSocket, err)
+	}
+	ensureContainerdSnapshotterEnabled()
 	irAddr := *registryInternalAddr
 	scfg := &catch.Config{
 		DB:                   cdb.NewStore(dbPath, servicesDir),
@@ -133,6 +145,7 @@ func main() {
 		MountsRoot:           mountsDir,
 		InternalRegistryAddr: irAddr,
 		RegistryRoot:         registryDir,
+		ContainerdSocket:     *containerdSocket,
 	}
 
 	if len(flag.Args()) == 1 {
@@ -180,6 +193,28 @@ func main() {
 
 	// Run the RPC server in the foreground.
 	must.Do(http.Serve(rpcln, server.RPCMux()))
+}
+
+func ensureContainerdSnapshotterEnabled() {
+	const dockerConfigPath = "/etc/docker/daemon.json"
+	raw, err := os.ReadFile(dockerConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Fatalf("docker config %s missing; enable containerd-snapshotter (\"features\": {\"containerd-snapshotter\": true}) and restart docker", dockerConfigPath)
+		}
+		log.Fatalf("failed to read docker config %s: %v", dockerConfigPath, err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		log.Fatalf("failed to parse docker config %s: %v", dockerConfigPath, err)
+	}
+	features, ok := cfg["features"].(map[string]any)
+	if !ok || features == nil {
+		log.Fatalf("docker config %s missing features.containerd-snapshotter=true; enable it and restart docker", dockerConfigPath)
+	}
+	if v, ok := features["containerd-snapshotter"]; !ok || v != true {
+		log.Fatalf("docker config %s must set features.containerd-snapshotter=true; update and restart docker", dockerConfigPath)
+	}
 }
 
 // setupDocker checks if docker is installed and prompts the user to install it.

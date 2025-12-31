@@ -26,18 +26,16 @@ func NewSystemdService(db *db.Store, cfg db.ServiceView, runDir string) (*System
 }
 
 // NewDockerComposeService creates a new docker compose service from a config.
-func NewDockerComposeService(db *db.Store, cfg db.ServiceView, registryAddr string, images map[db.ImageRepoName]*db.ImageRepo, dataDir, runDir string) (*DockerComposeService, error) {
+func NewDockerComposeService(db *db.Store, cfg db.ServiceView, dataDir, runDir string) (*DockerComposeService, error) {
 	sd, err := NewSystemdService(db, cfg, runDir)
 	if err != nil {
 		return nil, err
 	}
 	return &DockerComposeService{
-		Name:                 cfg.Name(),
-		cfg:                  cfg.AsStruct(),
-		DataDir:              dataDir,
-		NewCmd:               cmdutil.NewStdCmd,
-		InternalRegistryAddr: registryAddr,
-		Images:               images,
-		sd:                   sd,
+		Name:    cfg.Name(),
+		cfg:     cfg.AsStruct(),
+		DataDir: dataDir,
+		NewCmd:  cmdutil.NewStdCmd,
+		sd:      sd,
 	}, nil
 }

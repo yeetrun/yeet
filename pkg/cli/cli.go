@@ -42,6 +42,7 @@ type RunFlags struct {
 	MacvlanVlan   int
 	MacvlanParent string
 	Restart       bool
+	Pull          bool
 }
 
 type StageFlags struct {
@@ -55,6 +56,7 @@ type StageFlags struct {
 	MacvlanParent string
 	Restart       bool
 	Env           bool
+	Pull          bool
 }
 
 type EditFlags struct {
@@ -97,6 +99,7 @@ type runFlagsParsed struct {
 	MacvlanVlan   int      `flag:"macvlan-vlan"`
 	MacvlanParent string   `flag:"macvlan-parent"`
 	Restart       bool     `flag:"restart" default:"true"`
+	Pull          bool     `flag:"pull"`
 }
 
 type stageFlagsParsed struct {
@@ -110,6 +113,7 @@ type stageFlagsParsed struct {
 	MacvlanParent string   `flag:"macvlan-parent"`
 	Restart       bool     `flag:"restart" default:"true"`
 	Env           bool     `flag:"env"`
+	Pull          bool     `flag:"pull"`
 }
 
 type editFlagsParsed struct {
@@ -163,6 +167,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"run": {Name: "run", Description: "Install or update a service from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [-- <payload args>]", Examples: []string{
 		"yeet run <svc> ./bin/<svc> -- --app-flag value",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
+		"yeet run --pull <svc> ./compose.yml",
 		"yeet run <svc> ghcr.io/org/app:latest",
 		"yeet run <svc> ./Dockerfile",
 	}},
@@ -262,6 +267,7 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		MacvlanVlan:   parsed.Flags.MacvlanVlan,
 		MacvlanParent: parsed.Flags.MacvlanParent,
 		Restart:       parsed.Flags.Restart,
+		Pull:          parsed.Flags.Pull,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
@@ -286,6 +292,7 @@ func ParseStage(args []string) (StageFlags, string, []string, error) {
 		MacvlanParent: parsed.Flags.MacvlanParent,
 		Restart:       parsed.Flags.Restart,
 		Env:           parsed.Flags.Env,
+		Pull:          parsed.Flags.Pull,
 	}
 
 	argsOut := append(parsed.Args, extraArgs...)
