@@ -731,8 +731,8 @@ github.com/safchain/ethtool v0.3.0/go.mod h1:SA9BwrgyAqNo7M+uaL6IYbxpm5wk3L7Mm6o
 github.com/satori/go.uuid v1.2.0/go.mod h1:dA0hQrYB0VpLJoorglMZABFdXlWrHn1NEOzdhQKdks0=
 github.com/sclevine/spec v1.2.0/go.mod h1:W4J29eT/Kzv7/b9IWLB055Z+qvVC9vt0Arko24q7p+U=
 github.com/seccomp/libseccomp-golang v0.9.1/go.mod h1:GbW5+tmTXfcxTToHLXlScSlAvWlF4P2Ca7zGrPiEpWo=
-github.com/shayne/yargs v0.0.0-20251231185228-cb5e0dd57a50 h1:pMVbDfmseumW2kdUVTWUPutNGe67hPpD+S+ta4y47hk=
-github.com/shayne/yargs v0.0.0-20251231185228-cb5e0dd57a50/go.mod h1:DFtyaQ0tkOuhAqltb0q6wagwIKPTbw2oVJHiB122SlQ=
+github.com/shayne/yargs v1.0.0 h1:1QF5jb8t8O33gRnSf/Q/bGuWceh9Q6b2oEYsaBo2F+g=
+github.com/shayne/yargs v1.0.0/go.mod h1:DFtyaQ0tkOuhAqltb0q6wagwIKPTbw2oVJHiB122SlQ=
 github.com/shurcooL/sanitized_anchor_name v1.0.0/go.mod h1:1NzhyTcUVG4SuEtjjoZeVRXNmyL/1OwPU0+IJeTBvfc=
 github.com/sirupsen/logrus v1.0.4-0.20170822132746-89742aefa4b2/go.mod h1:pMByvHTf9Beacp5x1UXfOR9xyW/9antXMhjMPG0dEzc=
 github.com/sirupsen/logrus v1.0.6/go.mod h1:pMByvHTf9Beacp5x1UXfOR9xyW/9antXMhjMPG0dEzc=
