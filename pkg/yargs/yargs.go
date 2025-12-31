@@ -172,6 +172,93 @@ type HelpConfig struct {
 	Groups      map[string]GroupInfo      // Command groups (docker, etc.)
 }
 
+// ArgSpec describes a positional argument defined by struct tags.
+type ArgSpec struct {
+	Position    int
+	Name        string
+	Type        string
+	GoType      reflect.Type
+	Description string
+	Required    bool
+	Variadic    bool
+	MinCount    int
+	IsSlice     bool
+}
+
+// CommandSpec describes a subcommand with optional positional-argument schema.
+type CommandSpec struct {
+	Info       SubCommandInfo
+	ArgsSchema any
+}
+
+// GroupSpec describes a group of commands with optional positional-argument schemas.
+type GroupSpec struct {
+	Info     GroupInfo
+	Commands map[string]CommandSpec
+}
+
+// Registry provides a schema-aware command registry independent of help config.
+type Registry struct {
+	Command     CommandInfo
+	SubCommands map[string]CommandSpec
+	Groups      map[string]GroupSpec
+}
+
+// HelpConfig returns a HelpConfig derived from the registry.
+func (r Registry) HelpConfig() HelpConfig {
+	subcommands := make(map[string]SubCommandInfo, len(r.SubCommands))
+	for name, spec := range r.SubCommands {
+		subcommands[name] = spec.Info
+	}
+	groups := make(map[string]GroupInfo, len(r.Groups))
+	for name, group := range r.Groups {
+		cmds := make(map[string]SubCommandInfo, len(group.Commands))
+		for cmdName, spec := range group.Commands {
+			cmds[cmdName] = spec.Info
+		}
+		info := group.Info
+		info.Commands = cmds
+		groups[name] = info
+	}
+	return HelpConfig{
+		Command:     r.Command,
+		SubCommands: subcommands,
+		Groups:      groups,
+	}
+}
+
+// CommandSpec returns the CommandSpec for the given command path.
+func (r Registry) CommandSpec(path []string) (CommandSpec, bool) {
+	if len(path) == 1 {
+		spec, ok := r.SubCommands[path[0]]
+		return spec, ok
+	}
+	if len(path) == 2 {
+		group, ok := r.Groups[path[0]]
+		if !ok {
+			return CommandSpec{}, false
+		}
+		spec, ok := group.Commands[path[1]]
+		return spec, ok
+	}
+	return CommandSpec{}, false
+}
+
+// ResolvedCommand describes a resolved subcommand and the remaining args.
+// Path is ["subcommand"] or ["group", "subcommand"] and Args excludes the command tokens.
+type ResolvedCommand struct {
+	Path []string
+	Info SubCommandInfo
+	Args []string
+	// ArgsSchema is an optional schema (struct with `pos` tags) used for introspection.
+	ArgsSchema any
+}
+
+// PArg returns the positional argument spec at the given index, if available.
+func (r ResolvedCommand) PArg(pos int) (ArgSpec, bool) {
+	return ArgSpecAt(r.ArgsSchema, pos)
+}
+
 func aliasSuffix(aliases []string) string {
 	if len(aliases) == 0 {
 		return ""
@@ -741,12 +828,54 @@ type argInfo struct {
 	Position    int
 	Name        string
 	Type        string
+	GoType      reflect.Type
 	Description string
 	Required    bool // true for required args
 	Variadic    bool // true for []string with pos:"N*" or pos:"N+"
 	MinCount    int  // minimum number of args (for variadic)
 	IsSlice     bool // true if field type is []string
 	FieldIndex  int  // index of the field in the struct
+}
+
+// ExtractArgSpecs extracts positional argument metadata from a struct with `pos` tags.
+// It returns an empty slice if schema is nil or not a struct.
+func ExtractArgSpecs(schema any) []ArgSpec {
+	if schema == nil {
+		return nil
+	}
+	t := reflect.TypeOf(schema)
+	for t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil
+	}
+	infos := extractArgsInfo(t)
+	specs := make([]ArgSpec, 0, len(infos))
+	for _, info := range infos {
+		specs = append(specs, ArgSpec{
+			Position:    info.Position,
+			Name:        info.Name,
+			Type:        info.Type,
+			GoType:      info.GoType,
+			Description: info.Description,
+			Required:    info.Required,
+			Variadic:    info.Variadic,
+			MinCount:    info.MinCount,
+			IsSlice:     info.IsSlice,
+		})
+	}
+	return specs
+}
+
+// ArgSpecAt returns the ArgSpec for the given position in the schema, if any.
+func ArgSpecAt(schema any, pos int) (ArgSpec, bool) {
+	for _, spec := range ExtractArgSpecs(schema) {
+		if spec.Position == pos {
+			return spec, true
+		}
+	}
+	return ArgSpec{}, false
 }
 
 // extractArgsInfo extracts positional argument information from a struct.
@@ -772,6 +901,7 @@ func extractArgsInfo(structType reflect.Type) []argInfo {
 		info := argInfo{
 			Name:        field.Name,
 			Type:        field.Type.String(),
+			GoType:      field.Type,
 			Description: helpText,
 			FieldIndex:  i,
 		}
@@ -1899,6 +2029,62 @@ func ExtractGroupAndSubcommand(args []string) (group, subcommand string) {
 		return "", found[0]
 	}
 	return "", ""
+}
+
+// ResolveCommand resolves a subcommand (including grouped commands) using the same
+// alias and parsing rules as the dispatcher. It returns the resolved command path
+// and the remaining args with the command tokens removed.
+func ResolveCommand(args []string, config HelpConfig) (ResolvedCommand, bool, error) {
+	if len(args) == 0 {
+		return ResolvedCommand{}, false, nil
+	}
+	if args[0] == helpCommand || args[0] == helpFlagLong || args[0] == helpFlagShort || args[0] == helpFlagLLM {
+		return ResolvedCommand{}, false, nil
+	}
+	args = ApplyAliases(args, config)
+	first, second := ExtractGroupAndSubcommand(args)
+	if first == "" && second == "" {
+		return ResolvedCommand{}, false, nil
+	}
+
+	if first != "" && second != "" {
+		if grp, ok := config.Groups[first]; ok {
+			if cmd, ok := grp.Commands[second]; ok {
+				trimmed := stripFirstNonFlagArg(args)
+				trimmed = stripFirstNonFlagArg(trimmed)
+				return ResolvedCommand{Path: []string{first, second}, Info: cmd, Args: trimmed}, true, nil
+			}
+			return ResolvedCommand{}, false, fmt.Errorf("unknown command in group '%s': %s", first, second)
+		}
+	}
+
+	cmdName := first
+	if cmdName == "" {
+		cmdName = second
+	}
+	if cmdName == "" {
+		return ResolvedCommand{}, false, nil
+	}
+	if _, isGroup := config.Groups[cmdName]; isGroup {
+		return ResolvedCommand{}, false, nil
+	}
+	if cmd, ok := config.SubCommands[cmdName]; ok {
+		trimmed := stripFirstNonFlagArg(args)
+		return ResolvedCommand{Path: []string{cmdName}, Info: cmd, Args: trimmed}, true, nil
+	}
+	return ResolvedCommand{}, false, fmt.Errorf("unknown command: %s", cmdName)
+}
+
+// ResolveCommandWithRegistry resolves a command using the registry and attaches the args schema.
+func ResolveCommandWithRegistry(args []string, reg Registry) (ResolvedCommand, bool, error) {
+	res, ok, err := ResolveCommand(args, reg.HelpConfig())
+	if err != nil || !ok {
+		return res, ok, err
+	}
+	if spec, ok := reg.CommandSpec(res.Path); ok {
+		res.ArgsSchema = spec.ArgsSchema
+	}
+	return res, ok, err
 }
 
 // SubcommandHandler is a function that handles a subcommand.

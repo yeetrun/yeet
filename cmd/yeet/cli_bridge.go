@@ -7,7 +7,6 @@ package main
 import (
 	"strings"
 
-	"github.com/yeetrun/yeet/pkg/catch"
 	"github.com/yeetrun/yeet/pkg/cli"
 )
 
@@ -86,23 +85,23 @@ func bridgeServiceArgs(args []string, remoteSpecs map[string]map[string]cli.Flag
 	}
 
 	if flags, ok := remoteSpecs[args[0]]; ok {
-		service = catch.SystemService
 		if idx := findServiceIndex(args, 1, flags); idx != -1 {
 			service = args[idx]
 			bridged = removeArgAt(args, idx)
+			return service, bridged, true
 		}
-		return service, bridged, true
+		return "", nil, false
 	}
 
 	if len(args) > 1 {
 		if group, ok := groupSpecs[args[0]]; ok {
 			if flags, ok := group[args[1]]; ok {
-				service = catch.SystemService
 				if idx := findServiceIndex(args, 2, flags); idx != -1 {
 					service = args[idx]
 					bridged = removeArgAt(args, idx)
+					return service, bridged, true
 				}
-				return service, bridged, true
+				return "", nil, false
 			}
 		}
 	}

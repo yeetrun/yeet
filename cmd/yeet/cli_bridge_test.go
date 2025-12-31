@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yeetrun/yeet/pkg/catch"
 	"github.com/yeetrun/yeet/pkg/cli"
 )
 
@@ -52,19 +51,13 @@ func TestHandleRemoteUsesArgsWithoutBridge(t *testing.T) {
 	}
 }
 
-func TestBridgeServiceArgsDefaultsToSys(t *testing.T) {
+func TestBridgeServiceArgsNoServiceDoesNotBridge(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()
 	args := []string{"status", "--format", "json"}
 	service, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
-	if !ok {
-		t.Fatalf("expected to recognize remote command")
-	}
-	if service != catch.SystemService {
-		t.Fatalf("expected default service %s, got %q", catch.SystemService, service)
-	}
-	if got := strings.Join(bridged, " "); got != "status --format json" {
-		t.Fatalf("unexpected bridged args: %s", got)
+	if ok {
+		t.Fatalf("expected no bridging, got service=%q bridged=%v", service, bridged)
 	}
 }
 
@@ -188,18 +181,12 @@ func TestBridgeServiceArgsDockerGroup(t *testing.T) {
 	}
 }
 
-func TestBridgeServiceArgsDockerGroupDefaultsToSys(t *testing.T) {
+func TestBridgeServiceArgsDockerGroupNoServiceDoesNotBridge(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()
 	args := []string{"docker", "pull"}
 	service, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
-	if !ok {
-		t.Fatalf("expected to recognize docker group command")
-	}
-	if service != catch.SystemService {
-		t.Fatalf("expected default service %s, got %q", catch.SystemService, service)
-	}
-	if got := strings.Join(bridged, " "); got != "docker pull" {
-		t.Fatalf("unexpected bridged args: %s", got)
+	if ok {
+		t.Fatalf("expected no bridging, got service=%q bridged=%v", service, bridged)
 	}
 }

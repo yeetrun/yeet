@@ -41,6 +41,7 @@ var (
 	prefsFile       = filepath.Join(os.Getenv("HOME"), ".yeet", "prefs.json")
 	bridgedArgs     []string
 	serviceOverride string
+	remoteRegistry  = cli.RemoteCommandRegistry()
 )
 
 const (
@@ -219,6 +220,68 @@ func payloadNameFromReader(r io.Reader) string {
 	return base
 }
 
+type errorPrefixer interface {
+	errorPrefix() string
+}
+
+type remoteExitError struct {
+	code   int
+	prefix string
+}
+
+func (e remoteExitError) Error() string {
+	return fmt.Sprintf("remote exit %d", e.code)
+}
+
+func (e remoteExitError) errorPrefix() string {
+	return e.prefix
+}
+
+type trackingWriter struct {
+	w    io.Writer
+	last byte
+	saw  bool
+}
+
+func (t *trackingWriter) Write(p []byte) (int, error) {
+	if len(p) > 0 {
+		t.last = p[len(p)-1]
+		t.saw = true
+	}
+	return t.w.Write(p)
+}
+
+func (t *trackingWriter) LastByte() (byte, bool) {
+	return t.last, t.saw
+}
+
+func errorPrefixForRemoteExit(rawMode bool, lastByte byte, sawOutput bool) string {
+	if !rawMode || !sawOutput {
+		return ""
+	}
+	switch lastByte {
+	case '\n':
+		return "\r"
+	case '\r':
+		return "\n"
+	default:
+		return "\r\n"
+	}
+}
+
+func printCLIError(w io.Writer, err error) {
+	if err == nil {
+		return
+	}
+	var pref errorPrefixer
+	if errors.As(err, &pref) {
+		if prefix := pref.errorPrefix(); prefix != "" {
+			fmt.Fprint(w, prefix)
+		}
+	}
+	fmt.Fprintln(w, err)
+}
+
 func execRemote(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
 	client := newRPCClient(loadedPrefs.Host)
 	req := catchrpc.ExecRequest{
@@ -233,7 +296,8 @@ func execRemote(ctx context.Context, service string, args []string, stdin io.Rea
 	}
 	var resizeCh <-chan catchrpc.Resize
 	fd := int(os.Stdin.Fd())
-	if tty && term.IsTerminal(fd) {
+	rawMode := false
+	if tty && isTerminalFn(fd) {
 		cols, rows, err := term.GetSize(fd)
 		if err == nil {
 			req.Cols = cols
@@ -243,6 +307,7 @@ func execRemote(ctx context.Context, service string, args []string, stdin io.Rea
 		if stdin == nil || stdin == os.Stdin {
 			state, err := term.MakeRaw(fd)
 			if err == nil {
+				rawMode = true
 				defer term.Restore(fd, state)
 				resizeCh = watchResize(ctx, fd)
 			} else {
@@ -257,12 +322,15 @@ func execRemote(ctx context.Context, service string, args []string, stdin io.Rea
 	if stdin == nil && req.TTY {
 		stdin = os.Stdin
 	}
-	code, err := client.Exec(ctx, req, stdin, os.Stdout, resizeCh)
+	out := &trackingWriter{w: os.Stdout}
+	code, err := client.Exec(ctx, req, stdin, out, resizeCh)
 	if err != nil {
 		return err
 	}
 	if code != 0 {
-		return fmt.Errorf("remote exit %d", code)
+		last, saw := out.LastByte()
+		prefix := errorPrefixForRemoteExit(rawMode && isTerminalFn(int(os.Stderr.Fd())), last, saw)
+		return remoteExitError{code: code, prefix: prefix}
 	}
 	return nil
 }
@@ -387,7 +455,7 @@ func main() {
 		},
 	}
 	if err := yargs.RunSubcommandsWithGroups(context.Background(), args, helpConfig, globalFlagsParsed{}, handlers, groups); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(os.Stderr, err)
 	}
 }
 
@@ -820,10 +888,61 @@ func stageFile(svc, bin string) error {
 	return nil
 }
 
+func missingServiceError(args []string) error {
+	name := missingServiceCommandName(args)
+	if name == "" {
+		return fmt.Errorf("missing service name")
+	}
+	return fmt.Errorf("%s requires a service name\nRun 'yeet %s --help' for usage", name, name)
+}
+
+func missingServiceCommandName(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	if args[0] == "docker" && len(args) > 1 {
+		return args[0] + " " + args[1]
+	}
+	return args[0]
+}
+
+func commandNeedsService(args []string) (bool, error) {
+	res, ok, err := yargs.ResolveCommandWithRegistry(args, remoteRegistry)
+	if err != nil || !ok {
+		return false, err
+	}
+	if len(res.Path) > 0 && res.Path[0] == cli.CommandEvents {
+		flags, _, err := cli.ParseEvents(args[1:])
+		if err != nil {
+			return false, err
+		}
+		if flags.All {
+			return false, nil
+		}
+	}
+	arg, ok := res.PArg(0)
+	if !ok {
+		return false, nil
+	}
+	if !cli.IsServiceArgSpec(arg) {
+		return false, nil
+	}
+	return arg.Required, nil
+}
+
 func handleSvcCmd(args []string) error {
 	svc := getService()
 	if len(args) == 0 {
 		return execRemoteFn(context.Background(), svc, []string{"status"}, nil, true)
+	}
+	if serviceOverride == "" {
+		needsService, err := commandNeedsService(args)
+		if err != nil {
+			return err
+		}
+		if needsService {
+			return missingServiceError(args)
+		}
 	}
 
 	// Check for special commands
@@ -852,10 +971,13 @@ func handleSvcCmd(args []string) error {
 		if len(args) == 2 {
 			return runStageBinary(args[1])
 		}
-	case "events":
+	case cli.CommandEvents:
 		flags, _, err := cli.ParseEvents(args[1:])
 		if err != nil {
 			return err
+		}
+		if serviceOverride == "" && !flags.All {
+			return missingServiceError(args)
 		}
 		return handleEventsRPC(context.Background(), svc, flags)
 	}

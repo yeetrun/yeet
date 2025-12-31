@@ -27,6 +27,7 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Package names are lowercase; exported identifiers use `PascalCase`.
 - CLI flags use kebab-case in tags (e.g., `flag:"ts-auth-key"`).
 - Keep functions small and explicit; avoid hidden side effects in CLI parsing.
+- Avoid magic strings; use constants or shared registries for command names/keywords.
 - RPC CLI flow: `yeet` parses global/subcommand routing with `pkg/yargs` and forwards args via `catchrpc.Exec`; `catch` is authoritative for command/flag parsing via `pkg/cli.Parse*` (which uses `pkg/yargs`). Avoid adding per-command structured RPCs unless there is a strong need.
 
 ## Testing Guidelines
