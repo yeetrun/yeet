@@ -440,17 +440,19 @@ func main() {
 	handlers["umount"] = handleMountSys
 	handlers["init"] = handleInit
 	handlers["docker-host"] = handleDockerHost
-	handlers["push"] = handlePush
 	handlers["list-hosts"] = handleListHosts
 	handlers["prefs"] = handlePrefs
 	handlers["skirt"] = handleSkirt
 
+	// Keep group handlers aligned with pkg/cli/cli.go metadata and
+	// cmd/yeet/cli_bridge.go localGroupCommands.
 	groups := map[string]yargs.Group{
 		"docker": {
-			Description: "Docker compose management",
+			Description: "Docker compose and registry management",
 			Commands: map[string]yargs.SubcommandHandler{
 				"pull":   handleDockerGroup,
 				"update": handleDockerGroup,
+				"push":   handlePush,
 			},
 		},
 	}
@@ -683,12 +685,6 @@ func buildHelpConfig() yargs.HelpConfig {
 		Name:        "docker-host",
 		Description: "Print out the docker host",
 	}
-	subcommands["push"] = yargs.SubCommandInfo{
-		Name:        "push",
-		Description: "Push a container image to the remote host (optionally run it)",
-		Usage:       "SVC IMAGE [--run] [--all-local]",
-		Examples:    []string{"yeet push <svc> <local-image>:<tag> --run"},
-	}
 	subcommands["list-hosts"] = yargs.SubCommandInfo{
 		Name:        "list-hosts",
 		Description: "List all hosts with the given tags",
@@ -721,6 +717,15 @@ func buildHelpConfig() yargs.HelpConfig {
 			Commands:    commands,
 			Hidden:      info.Hidden,
 		}
+	}
+	if docker, ok := groups["docker"]; ok {
+		docker.Commands["push"] = yargs.SubCommandInfo{
+			Name:        "push",
+			Description: "Push a container image to the remote host (optionally run it)",
+			Usage:       "docker push SVC IMAGE [--run] [--all-local]",
+			Examples:    []string{"yeet docker push <svc> <local-image>:<tag> --run"},
+		}
+		groups["docker"] = docker
 	}
 	return yargs.HelpConfig{
 		Command: yargs.CommandInfo{

@@ -91,6 +91,11 @@ type VersionFlags struct {
 	JSON bool
 }
 
+type dockerPushFlagsParsed struct {
+	Run      bool `flag:"run"`
+	AllLocal bool `flag:"all-local"`
+}
+
 type runFlagsParsed struct {
 	Net           string   `flag:"net"`
 	TsVer         string   `flag:"ts-ver"`
@@ -154,6 +159,11 @@ const (
 
 type ServiceArgs struct {
 	Service ServiceName `pos:"0" help:"Service name"`
+}
+
+type DockerPushArgs struct {
+	Service ServiceName `pos:"0" help:"Service name"`
+	Image   string      `pos:"1" help:"Local image ref"`
 }
 
 type ServiceName string
@@ -224,21 +234,28 @@ var remoteFlagSpecs = map[string]map[string]FlagSpec{
 	"umount":   {},
 }
 
+// Keep this in sync with cmd/yeet/yeet.go group handlers and
+// cmd/yeet/cli_bridge.go localGroupCommands (local-only group commands still
+// belong here for registry metadata, but must be skipped during bridging).
 var remoteGroupInfos = map[string]GroupInfo{
 	"docker": {
 		Name:        "docker",
-		Description: "Docker compose management",
+		Description: "Docker compose and registry management",
 		Commands: map[string]CommandInfo{
 			"update": {Name: "update", Description: "Pull images and recreate containers for a compose service", Usage: "docker update <svc>", ArgsSchema: ServiceArgs{}},
 			"pull":   {Name: "pull", Description: "Pull images for a compose service without restarting", Usage: "docker pull <svc>", ArgsSchema: ServiceArgs{}},
+			"push":   {Name: "push", Description: "Push a local image into the internal registry", Usage: "docker push <svc> <image> [--run] [--all-local]", ArgsSchema: DockerPushArgs{}},
 		},
 	},
 }
 
+// Keep this aligned with remoteGroupInfos and cmd/yeet/cli_bridge.go to avoid
+// accidentally bridging local-only group commands like docker push.
 var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 	"docker": {
 		"update": {},
 		"pull":   {},
+		"push":   flagSpecsFromStruct(dockerPushFlagsParsed{}),
 	},
 }
 

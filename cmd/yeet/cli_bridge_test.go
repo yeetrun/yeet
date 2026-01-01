@@ -190,3 +190,13 @@ func TestBridgeServiceArgsDockerGroupNoServiceDoesNotBridge(t *testing.T) {
 		t.Fatalf("expected no bridging, got service=%q bridged=%v", service, bridged)
 	}
 }
+
+func TestBridgeServiceArgsDockerPushDoesNotBridge(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"docker", "push", "svc-a", "image:tag"}
+	service, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if ok {
+		t.Fatalf("expected no bridging, got service=%q bridged=%v", service, bridged)
+	}
+}

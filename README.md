@@ -37,7 +37,7 @@ Less common (registry image or pushing a local image):
 
 ```bash
 yeet run <svc> nginx:latest
-yeet push <svc> <local-image>:<tag> --run
+yeet docker push <svc> <local-image>:<tag> --run
 ```
 
 ## Documentation (Wiki)
