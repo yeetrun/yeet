@@ -439,7 +439,6 @@ func main() {
 	handlers["mount"] = handleMountSys
 	handlers["umount"] = handleMountSys
 	handlers["init"] = handleInit
-	handlers["docker-host"] = handleDockerHost
 	handlers["list-hosts"] = handleListHosts
 	handlers["prefs"] = handlePrefs
 	handlers["skirt"] = handleSkirt
@@ -611,15 +610,6 @@ func handleInit(_ context.Context, args []string) error {
 	return initCatch(args[0])
 }
 
-func handleDockerHost(ctx context.Context, _ []string) error {
-	host, err := getDockerHost(ctx)
-	if err != nil {
-		return err
-	}
-	fmt.Print(host)
-	return nil
-}
-
 func handleSkirt(ctx context.Context, _ []string) error {
 	colors := []*color.Color{
 		color.New(color.FgRed),
@@ -680,10 +670,6 @@ func buildHelpConfig() yargs.HelpConfig {
 		Description: "Install catch on a remote host",
 		Usage:       "ROOT@HOST",
 		Examples:    []string{"yeet init root@<host>", "yeet init"},
-	}
-	subcommands["docker-host"] = yargs.SubCommandInfo{
-		Name:        "docker-host",
-		Description: "Print out the docker host",
 	}
 	subcommands["list-hosts"] = yargs.SubCommandInfo{
 		Name:        "list-hosts",
