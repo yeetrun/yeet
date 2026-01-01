@@ -10,6 +10,15 @@ import (
 	"github.com/yeetrun/yeet/pkg/cli"
 )
 
+// localGroupCommands lists group commands handled locally (not bridged to catch).
+// Keep this in sync with cmd/yeet/yeet.go group handlers and
+// pkg/cli/cli.go remoteGroupInfos/remoteGroupFlagSpecs.
+var localGroupCommands = map[string]map[string]struct{}{
+	"docker": {
+		"push": {},
+	},
+}
+
 func findServiceIndex(args []string, start int, flags map[string]cli.FlagSpec) int {
 	for i := start; i < len(args); i++ {
 		arg := args[i]
@@ -95,6 +104,11 @@ func bridgeServiceArgs(args []string, remoteSpecs map[string]map[string]cli.Flag
 
 	if len(args) > 1 {
 		if group, ok := groupSpecs[args[0]]; ok {
+			if locals, ok := localGroupCommands[args[0]]; ok {
+				if _, ok := locals[args[1]]; ok {
+					return "", nil, false
+				}
+			}
 			if flags, ok := group[args[1]]; ok {
 				if idx := findServiceIndex(args, 2, flags); idx != -1 {
 					service = args[idx]
