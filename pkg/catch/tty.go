@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/cronutil"
@@ -82,6 +83,7 @@ type ttyExecer struct {
 	sn          string
 	user        string
 	payloadName string
+	progress    catchrpc.ProgressMode
 	rawRW       io.ReadWriter
 	rawCloser   io.Closer
 	isPty       bool
@@ -90,6 +92,47 @@ type ttyExecer struct {
 	// Assigned during run
 	rw             io.ReadWriter // May be a pty
 	bypassPtyInput bool
+}
+
+func normalizeProgressMode(mode catchrpc.ProgressMode) catchrpc.ProgressMode {
+	switch mode {
+	case catchrpc.ProgressAuto, catchrpc.ProgressTTY, catchrpc.ProgressPlain, catchrpc.ProgressQuiet:
+		return mode
+	default:
+		return catchrpc.ProgressAuto
+	}
+}
+
+func progressSettings(mode catchrpc.ProgressMode, isPty bool) (enabled bool, quiet bool) {
+	mode = normalizeProgressMode(mode)
+	switch mode {
+	case catchrpc.ProgressTTY:
+		return true, false
+	case catchrpc.ProgressPlain:
+		return false, false
+	case catchrpc.ProgressQuiet:
+		return false, true
+	default:
+		return isPty, false
+	}
+}
+
+func (e *ttyExecer) newProgressUI(action string) *runUI {
+	enabled, quiet := progressSettings(e.progress, e.isPty)
+	return newRunUI(e.rw, enabled, quiet, action, e.sn)
+}
+
+func (e *ttyExecer) runAction(action, step string, fn func() error) error {
+	ui := e.newProgressUI(action)
+	ui.Start()
+	defer ui.Stop()
+	ui.StartStep(step)
+	if err := fn(); err != nil {
+		ui.FailStep(err.Error())
+		return err
+	}
+	ui.DoneStep("")
+	return nil
 }
 
 func (e *ttyExecer) run() error {
@@ -336,12 +379,12 @@ func humanReadableBytes(bts float64) string {
 // install installs a service by reading the binary from the `in` input stream.
 // The service is configured via `cfg`, an InstallerCfg struct. Client output
 // can be written to `out`. An error is returned if the installation fails.
-func (e *ttyExecer) install(in io.Reader, cfg FileInstallerCfg) (retErr error) {
+func (e *ttyExecer) install(action string, in io.Reader, cfg FileInstallerCfg) (retErr error) {
 	if runtime.GOOS == "darwin" {
 		// Don't do anything on macOS yet.
 		return nil
 	}
-	ui := newRunUI(e.rw, e.isPty, e.sn)
+	ui := e.newProgressUI(action)
 	ui.Start()
 	defer ui.Stop()
 
@@ -509,7 +552,7 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	}
 	cfg := e.fileInstaller(netFlagsFromRun(flags), argsIn)
 	cfg.Pull = flags.Pull
-	return e.install(e.payloadReader(), cfg)
+	return e.install("run", e.payloadReader(), cfg)
 }
 
 func (e *ttyExecer) copyCmdFunc(dest string) error {
@@ -621,11 +664,13 @@ func (e *ttyExecer) dockerPullCmdFunc() error {
 }
 
 func (e *ttyExecer) dockerUpdateCmdFunc() error {
-	docker, err := e.dockerComposeServiceCmd()
-	if err != nil {
-		return err
-	}
-	return docker.Update()
+	return e.runAction("docker update", "Update service", func() error {
+		docker, err := e.dockerComposeServiceCmd()
+		if err != nil {
+			return err
+		}
+		return docker.Update()
+	})
 }
 
 func (e *ttyExecer) stageCmdFunc(subcmd string, flags cli.StageFlags, args []string) error {
@@ -651,7 +696,7 @@ func (e *ttyExecer) stageCmdFunc(subcmd string, flags cli.StageFlags, args []str
 		fi.StageOnly = subcmd == "stage"
 		var ui *runUI
 		if !fi.StageOnly {
-			ui = newRunUI(e.rw, e.isPty, e.sn)
+			ui = e.newProgressUI("stage")
 			ui.Start()
 			defer ui.Stop()
 			fi.Printer = ui.Printer
@@ -679,31 +724,40 @@ func (e *ttyExecer) startCmdFunc() error {
 	if e.sn == SystemService || e.sn == CatchService {
 		return fmt.Errorf("cannot start system service")
 	}
-	runner, err := e.serviceRunner()
-	if err != nil {
-		return fmt.Errorf("failed to get service runner: %w", err)
-	}
-	if err := runner.Start(); err != nil {
-		return fmt.Errorf("failed to start service: %w", err)
-	}
-	return nil
+	return e.runAction("start", "Start service", func() error {
+		runner, err := e.serviceRunner()
+		if err != nil {
+			return fmt.Errorf("failed to get service runner: %w", err)
+		}
+		if err := runner.Start(); err != nil {
+			return fmt.Errorf("failed to start service: %w", err)
+		}
+		return nil
+	})
 }
 
 func (e *ttyExecer) stopCmdFunc() error {
 	if e.sn == SystemService || e.sn == CatchService {
 		return fmt.Errorf("cannot stop system service")
 	}
-	runner, err := e.serviceRunner()
-	if err != nil {
-		return fmt.Errorf("failed to get service runner: %w", err)
-	}
-	if err := runner.Stop(); err != nil {
-		return fmt.Errorf("failed to stop service: %w", err)
-	}
-	return nil
+	return e.runAction("stop", "Stop service", func() error {
+		runner, err := e.serviceRunner()
+		if err != nil {
+			return fmt.Errorf("failed to get service runner: %w", err)
+		}
+		if err := runner.Stop(); err != nil {
+			return fmt.Errorf("failed to stop service: %w", err)
+		}
+		return nil
+	})
 }
 
 func (e *ttyExecer) rollbackCmdFunc() error {
+	ui := e.newProgressUI("rollback")
+	ui.Start()
+	defer ui.Stop()
+
+	ui.StartStep("Select generation")
 	_, s, err := e.s.cfg.DB.MutateService(e.sn, func(d *db.Data, s *db.Service) error {
 		if s.Generation == 0 {
 			return fmt.Errorf("no generation to rollback")
@@ -720,28 +774,39 @@ func (e *ttyExecer) rollbackCmdFunc() error {
 		return nil
 	})
 	if err != nil {
+		ui.FailStep(err.Error())
 		return fmt.Errorf("failed to rollback service: %w", err)
 	}
+	gen := s.Generation
+	ui.DoneStep(fmt.Sprintf("generation=%d", gen))
+
+	ui.StartStep("Install generation")
 	cfg := e.installerCfg()
 	i, err := e.s.NewInstaller(cfg)
 	if err != nil {
+		ui.FailStep(err.Error())
 		return fmt.Errorf("failed to create installer: %w", err)
 	}
 	i.NewCmd = e.newCmd
-	return i.InstallGen(s.Generation)
+	if err := i.InstallGen(gen); err != nil {
+		ui.FailStep(err.Error())
+		return err
+	}
+	ui.DoneStep(fmt.Sprintf("generation=%d", gen))
+	return nil
 }
 
 func (e *ttyExecer) restartCmdFunc() error {
-	e.printf("Restarting service %q\n", e.sn)
-	runner, err := e.serviceRunner()
-	if err != nil {
-		return fmt.Errorf("failed to get service runner: %w", err)
-	}
-	if err := runner.Restart(); err != nil {
-		return fmt.Errorf("failed to restart service: %w", err)
-	}
-	e.printf("Restarted service %q\n", e.sn)
-	return nil
+	return e.runAction("restart", "Restart service", func() error {
+		runner, err := e.serviceRunner()
+		if err != nil {
+			return fmt.Errorf("failed to get service runner: %w", err)
+		}
+		if err := runner.Restart(); err != nil {
+			return fmt.Errorf("failed to restart service: %w", err)
+		}
+		return nil
+	})
 }
 
 func (e *ttyExecer) editCmdFunc(flags cli.EditFlags) error {
@@ -1118,7 +1183,7 @@ func (e *ttyExecer) editEnvCmdFunc() error {
 func (e *ttyExecer) envCopyCmdFunc() error {
 	cfg := e.fileInstaller(netFlags{}, nil)
 	cfg.EnvFile = true
-	return e.install(e.payloadReader(), cfg)
+	return e.install("env", e.payloadReader(), cfg)
 }
 
 type envAssignment struct {
@@ -1281,7 +1346,7 @@ func (e *ttyExecer) envSetCmdFunc(assignments []envAssignment) error {
 	}
 	cfg := e.fileInstaller(netFlags{}, nil)
 	cfg.EnvFile = true
-	return e.install(bytes.NewReader(updated), cfg)
+	return e.install("env", bytes.NewReader(updated), cfg)
 }
 
 func (e *ttyExecer) enableCmdFunc() error {
@@ -1486,7 +1551,7 @@ func (e *ttyExecer) cronCmdFunc(cronexpr string, args []string) error {
 		OnCalendar: oncal,
 		Persistent: true, // This should be an option keyvalue in the future
 	}
-	return e.install(e.rw, cfg)
+	return e.install("cron", e.rw, cfg)
 }
 
 func (e *ttyExecer) removeCmdFunc() error {
@@ -1553,6 +1618,10 @@ func (e *ttyExecer) newCmd(name string, args ...string) *exec.Cmd {
 	c.Stdin = rw
 	c.Stdout = rw
 	c.Stderr = rw
+	if e.shouldSuppressCmdOutput(name, args) {
+		c.Stdout = io.Discard
+		c.Stderr = io.Discard
+	}
 
 	env := os.Environ()
 	if e.isPty {
@@ -1570,6 +1639,22 @@ func (e *ttyExecer) newCmd(name string, args ...string) *exec.Cmd {
 		c.Env = env
 	}
 	return c
+}
+
+func (e *ttyExecer) shouldSuppressCmdOutput(name string, args []string) bool {
+	mode := normalizeProgressMode(e.progress)
+	if mode == catchrpc.ProgressAuto && e.isPty {
+		return false
+	}
+	if mode == catchrpc.ProgressAuto {
+		mode = catchrpc.ProgressPlain
+	}
+	if mode == catchrpc.ProgressPlain || mode == catchrpc.ProgressQuiet {
+		if filepath.Base(name) == "docker" && len(args) > 0 && args[0] == "compose" {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *ttyExecer) serviceRunner() (ServiceRunner, error) {
