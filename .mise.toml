@@ -1,0 +1,14 @@
+[tools]
+go = "1.25.5"
+
+[tasks.init-host]
+description = "Install yeet/catch on a host via yeet init"
+usage = '''
+arg "host" help="user@host for the catch install (e.g. root@box)"
+'''
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+go run ./cmd/yeet init "${usage_host?}"
+'''
