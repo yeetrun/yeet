@@ -127,6 +127,7 @@ func TestRunUsesRunCommandWithStdin(t *testing.T) {
 	pushAllLocalImagesFn = func(string, string, string) error {
 		return nil
 	}
+	isTerminalFn = func(int) bool { return false }
 
 	tmp := t.TempDir()
 	bin := filepath.Join(tmp, "run.sh")
@@ -171,6 +172,58 @@ func TestRunUsesRunCommandWithStdin(t *testing.T) {
 	}
 	if len(gotPayload) >= 4 && bytes.Equal(gotPayload[:4], []byte{0x28, 0xb5, 0x2f, 0xfd}) {
 		t.Fatalf("unexpected zstd payload for script")
+	}
+}
+
+func TestRunBinaryTTYDependsOnTerminal(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldService := serviceOverride
+	oldIsTerminal := isTerminalFn
+	defer func() {
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		serviceOverride = oldService
+		isTerminalFn = oldIsTerminal
+	}()
+
+	serviceOverride = "svc-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+
+	tmp := t.TempDir()
+	bin := filepath.Join(tmp, "run.sh")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatalf("failed to write temp binary: %v", err)
+	}
+
+	var gotTTY bool
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotTTY = tty
+		if stdin == nil {
+			t.Fatalf("expected stdin to be provided")
+		}
+		if _, err := io.ReadAll(stdin); err != nil {
+			t.Fatalf("failed to read stdin payload: %v", err)
+		}
+		return nil
+	}
+
+	isTerminalFn = func(int) bool { return false }
+	if err := runRun(bin, nil); err != nil {
+		t.Fatalf("runRun returned error: %v", err)
+	}
+	if gotTTY {
+		t.Fatalf("expected tty=false when not a terminal")
+	}
+
+	isTerminalFn = func(int) bool { return true }
+	if err := runRun(bin, nil); err != nil {
+		t.Fatalf("runRun returned error: %v", err)
+	}
+	if !gotTTY {
+		t.Fatalf("expected tty=true when terminal")
 	}
 }
 
@@ -222,6 +275,55 @@ func TestRunComposeTTYDependsOnTerminal(t *testing.T) {
 	}
 	if !gotTTY {
 		t.Fatalf("expected tty=true when terminal and compose")
+	}
+}
+
+func TestCronTTYDependsOnTerminal(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldService := serviceOverride
+	oldIsTerminal := isTerminalFn
+	defer func() {
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		serviceOverride = oldService
+		isTerminalFn = oldIsTerminal
+	}()
+
+	serviceOverride = "svc-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+
+	tmp := t.TempDir()
+	bin := buildTestELF(t, tmp)
+
+	var gotTTY bool
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotTTY = tty
+		if stdin == nil {
+			t.Fatalf("expected stdin to be provided")
+		}
+		if _, err := io.ReadAll(stdin); err != nil {
+			t.Fatalf("failed to read stdin payload: %v", err)
+		}
+		return nil
+	}
+
+	isTerminalFn = func(int) bool { return false }
+	if err := runCron(bin, []string{"0", "9", "*", "*", "*"}); err != nil {
+		t.Fatalf("runCron returned error: %v", err)
+	}
+	if gotTTY {
+		t.Fatalf("expected tty=false when not a terminal")
+	}
+
+	isTerminalFn = func(int) bool { return true }
+	if err := runCron(bin, []string{"0", "9", "*", "*", "*"}); err != nil {
+		t.Fatalf("runCron returned error: %v", err)
+	}
+	if !gotTTY {
+		t.Fatalf("expected tty=true when terminal")
 	}
 }
 
