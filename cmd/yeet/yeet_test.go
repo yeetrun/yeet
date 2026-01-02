@@ -152,6 +152,20 @@ func TestEnvCopyAlias(t *testing.T) {
 	}
 }
 
+func TestRewriteEnvSetArgs(t *testing.T) {
+	args := rewriteEnvSetArgs([]string{"env", "svc-a", "FOO="})
+	want := []string{"env", "set", "svc-a", "FOO="}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("unexpected args: %v", args)
+	}
+
+	args = rewriteEnvSetArgs([]string{"env", "show", "svc-a"})
+	want = []string{"env", "show", "svc-a"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("unexpected args: %v", args)
+	}
+}
+
 func TestLooksLikeImageRef(t *testing.T) {
 	tests := []struct {
 		name    string

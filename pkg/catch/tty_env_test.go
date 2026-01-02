@@ -64,3 +64,32 @@ func TestApplyEnvAssignmentsNoChange(t *testing.T) {
 		t.Fatalf("expected output to match input")
 	}
 }
+
+func TestApplyEnvAssignmentsUnsetKey(t *testing.T) {
+	contents := []byte("FOO=one\nBAR=two\n")
+	out, changed, err := applyEnvAssignments(contents, []envAssignment{{Key: "FOO", Value: ""}})
+	if err != nil {
+		t.Fatalf("applyEnvAssignments failed: %v", err)
+	}
+	if !changed {
+		t.Fatalf("expected changed=true")
+	}
+	want := "BAR=two\n"
+	if string(out) != want {
+		t.Fatalf("unexpected output:\n%s", string(out))
+	}
+}
+
+func TestApplyEnvAssignmentsUnsetMissingNoChange(t *testing.T) {
+	contents := []byte("FOO=one\n")
+	out, changed, err := applyEnvAssignments(contents, []envAssignment{{Key: "BAR", Value: ""}})
+	if err != nil {
+		t.Fatalf("applyEnvAssignments failed: %v", err)
+	}
+	if changed {
+		t.Fatalf("expected changed=false")
+	}
+	if string(out) != string(contents) {
+		t.Fatalf("expected output to match input")
+	}
+}
