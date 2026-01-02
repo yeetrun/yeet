@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/shayne/yargs"
 	"github.com/yeetrun/yeet/pkg/cli"
 )
 
@@ -140,6 +141,14 @@ func TestGroupHandlersCoverRemoteGroupInfos(t *testing.T) {
 				t.Fatalf("missing handler for group %q command %q", groupName, cmdName)
 			}
 		}
+	}
+}
+
+func TestEnvCopyAlias(t *testing.T) {
+	helpConfig := buildHelpConfig()
+	args := yargs.ApplyAliases([]string{"env", "cp", "svc", "file"}, helpConfig)
+	if len(args) < 2 || args[1] != "copy" {
+		t.Fatalf("expected alias to resolve to copy, got %v", args)
 	}
 }
 

@@ -254,7 +254,7 @@ var remoteGroupInfos = map[string]GroupInfo{
 		Commands: map[string]CommandInfo{
 			"show": {Name: "show", Description: "Print the current env file", Usage: "env show <svc> [--staged]", ArgsSchema: ServiceArgs{}},
 			"edit": {Name: "edit", Description: "Edit the env file", Usage: "env edit <svc>", ArgsSchema: ServiceArgs{}},
-			"copy": {Name: "copy", Description: "Upload an env file", Usage: "env copy <svc> <file>", ArgsSchema: ServiceArgs{}},
+			"copy": {Name: "copy", Description: "Upload an env file", Usage: "env copy <svc> <file>", Aliases: []string{"cp"}, ArgsSchema: ServiceArgs{}},
 			"set":  {Name: "set", Description: "Set env keys", Usage: "env set <svc> KEY=VALUE [KEY=VALUE...]", ArgsSchema: ServiceArgs{}},
 		},
 	},
