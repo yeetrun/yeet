@@ -1228,7 +1228,7 @@ func runFilePayload(file string, args []string, pushLocalImages bool) (ok bool, 
 	}
 	defer cleanup()
 	runArgs := append([]string{"run"}, args...)
-	tty := ft == ftdetect.DockerCompose && isTerminalFn(int(os.Stdout.Fd()))
+	tty := isTerminalFn(int(os.Stdout.Fd()))
 	if err := execRemoteFn(context.Background(), svc, runArgs, payload, tty); err != nil {
 		return false, fmt.Errorf("failed to run service: %w", err)
 	}
@@ -1548,7 +1548,8 @@ func runCron(file string, args []string) error {
 	if len(binArgs) > 0 {
 		nargs = append(nargs, binArgs...)
 	}
-	return execRemoteFn(context.Background(), svc, nargs, payload, false)
+	tty := isTerminalFn(int(os.Stdout.Fd()))
+	return execRemoteFn(context.Background(), svc, nargs, payload, tty)
 }
 
 func splitCronArgs(args []string) ([]string, []string, error) {
