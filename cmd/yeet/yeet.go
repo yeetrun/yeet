@@ -836,40 +836,48 @@ func updateCatch() error {
 	return initCatch(loadedPrefs.Host)
 }
 
-func buildCatch(goos, goarch string) (string, error) {
+func buildCatch(goos, goarch string) (string, int64, string, error) {
 	goos = strings.ToLower(goos)
 	goarch = strings.ToLower(goarch)
 	// Check if the system is Linux
 	if goos != "linux" {
-		log.Fatalf("Remote system is not Linux: %s", goos)
+		return "", 0, "", fmt.Errorf("remote system is not Linux: %s", goos)
 	}
-
-	fmt.Println("Remote architecture:", goarch)
 
 	// Check if we are in the git root directory
 	cmd := cmdutil.NewStdCmd("git", "rev-parse", "--show-toplevel")
 	cmd.Stdout = nil
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("not in a git repository")
+		return "", 0, "", fmt.Errorf("not in a git repository")
 	}
 	// Get the output of the command and trim the whitespace
 	gitRoot := strings.TrimSpace(string(output))
 
 	// Check if we have go installed
-	cmd = cmdutil.NewStdCmd("go", "version")
+	cmd = exec.Command("go", "version")
 	cmd.Dir = gitRoot
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("go is not installed")
+	goVersionOut, err := cmd.Output()
+	if err != nil {
+		return "", 0, "", fmt.Errorf("go is not installed")
 	}
+	goVersion := strings.TrimSpace(string(goVersionOut))
 	// Build the catch binary
-	cmd = cmdutil.NewStdCmd("go", "build", "-o", "catch", "./cmd/catch")
+	cmd = exec.Command("go", "build", "-o", "catch", "./cmd/catch")
 	cmd.Env = append(os.Environ(), "GOARCH="+goarch, "GOOS=linux")
 	cmd.Dir = gitRoot
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("failed to build catch binary")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if len(out) > 0 {
+			fmt.Fprintln(os.Stderr, string(out))
+		}
+		return "", 0, goVersion, fmt.Errorf("failed to build catch binary")
 	}
-	return filepath.Join(gitRoot, "catch"), nil
+	bin := filepath.Join(gitRoot, "catch")
+	info, err := os.Stat(bin)
+	if err != nil {
+		return "", 0, goVersion, fmt.Errorf("failed to stat catch binary: %w", err)
+	}
+	return bin, info.Size(), goVersion, nil
 }
 
 func initCatch(userAtRemote string) error {
@@ -878,24 +886,69 @@ func initCatch(userAtRemote string) error {
 		fmt.Fprint(os.Stderr, color.RedString("Warning: root is required to install catch on the remote host.\nsudo will be used which may require a password.\n\n"))
 		useSudo = true
 	}
+	isTTY := isTerminalFn(int(os.Stdout.Fd()))
+	enabled, quiet := initProgressSettings(execProgressMode(), isTTY)
+	ui := newInitUI(os.Stdout, enabled, quiet, loadedPrefs.Host, userAtRemote, catch.CatchService)
+	ui.Start()
+	defer ui.Stop()
+
+	ui.StartStep("Detect host")
 	systemName, goarch, err := remoteHostOSAndArch(userAtRemote)
 	if err != nil {
+		ui.FailStep(err.Error())
 		return err
 	}
-	bin, err := buildCatch(systemName, goarch)
+	ui.DoneStep(fmt.Sprintf("%s/%s", strings.ToLower(systemName), goarch))
+
+	ui.StartStep("Build catch")
+	bin, binSize, goVersion, err := buildCatch(systemName, goarch)
 	if err != nil {
+		ui.FailStep(err.Error())
 		return err
 	}
-	// SCP the binary to the remote host
-	cmd := cmdutil.NewStdCmd("scp", "-C", bin, fmt.Sprintf("%s:catch", userAtRemote))
+	defer os.Remove(bin)
+	buildTarget := fmt.Sprintf("%s/%s", strings.ToLower(systemName), goarch)
+	buildDetail := buildTarget
+	if strings.TrimSpace(goVersion) != "" {
+		buildDetail = fmt.Sprintf("%s → %s", goVersion, buildTarget)
+	}
+	if binSize > 0 {
+		buildDetail = fmt.Sprintf("%s, %s", buildDetail, humanReadableBytes(float64(binSize)))
+	}
+	ui.DoneStep(buildDetail)
+
+	ui.StartStep("Upload catch")
+	uploadStart := time.Now()
+	cmd := exec.Command("scp", "-q", "-C", bin, fmt.Sprintf("%s:catch", userAtRemote))
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		ui.FailStep("upload failed")
 		return fmt.Errorf("failed to copy catch binary to remote host")
 	}
-	// Make the binary executable on the remote host
-	cmd = cmdutil.NewStdCmd("ssh", userAtRemote, "chmod", "+x", "./catch")
+	uploadDetail := ""
+	if binSize > 0 {
+		uploadDetail = humanReadableBytes(float64(binSize))
+		if elapsed := time.Since(uploadStart); elapsed > 0 {
+			rate := float64(binSize) / elapsed.Seconds()
+			if rate > 0 {
+				uploadDetail = fmt.Sprintf("%s @ %s/s", uploadDetail, humanReadableBytes(rate))
+			}
+		}
+	}
+	ui.DoneStep(uploadDetail)
+
+	ui.StartStep("Install catch")
+	cmd = exec.Command("ssh", userAtRemote, "chmod", "+x", "./catch")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
+		ui.FailStep("chmod failed")
 		return fmt.Errorf("failed to make catch binary executable on remote host")
 	}
+
 	args := append(make([]string, 0, 7), "-t", userAtRemote)
 	if useSudo {
 		args = append(args, "sudo")
@@ -903,12 +956,25 @@ func initCatch(userAtRemote string) error {
 	args = append(args, "./catch", fmt.Sprintf("--tsnet-host=%v", loadedPrefs.Host), "install")
 
 	// Run the catch binary on the remote host
-	cmd = cmdutil.NewStdCmd("ssh", args...)
+	cmd = exec.Command("ssh", args...)
+	cmd.Stdin = os.Stdin
+	ui.Suspend()
+	filter := newInitInstallFilter(os.Stdout)
+	cmd.Stdout = filter
+	cmd.Stderr = filter
 	if err := cmd.Run(); err != nil {
+		ui.FailStep("install failed")
 		return fmt.Errorf("failed to run catch binary on remote host")
 	}
-	// Remove the catch binary from the local machine and the remote host
-	return os.Remove(bin)
+	installDetail := filter.SummaryDetail()
+	ui.DoneStep(installDetail)
+	if warn := filter.WarningSummary(); warn != "" {
+		ui.Warn(warn)
+	}
+	if info := filter.InfoSummary(); info != "" {
+		ui.Info(info)
+	}
+	return nil
 }
 
 func stageFile(svc, bin string) error {
