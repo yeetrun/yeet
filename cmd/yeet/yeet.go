@@ -421,6 +421,7 @@ func main() {
 	}
 	helpConfig := buildHelpConfig()
 	args = yargs.ApplyAliases(remaining, helpConfig)
+	args = rewriteEnvSetArgs(args)
 
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()
@@ -643,6 +644,26 @@ func handleDockerGroup(_ context.Context, args []string) error {
 func handleEnvGroup(_ context.Context, args []string) error {
 	full := append([]string{"env"}, args...)
 	return handleRemote(nil, full)
+}
+
+func rewriteEnvSetArgs(args []string) []string {
+	if len(args) < 3 {
+		return args
+	}
+	if args[0] != "env" {
+		return args
+	}
+	switch args[1] {
+	case "show", "edit", "copy", "set":
+		return args
+	}
+	if !strings.Contains(args[2], "=") {
+		return args
+	}
+	out := make([]string, 0, len(args)+1)
+	out = append(out, "env", "set", args[1])
+	out = append(out, args[2:]...)
+	return out
 }
 
 func buildGroupHandlers() map[string]yargs.Group {

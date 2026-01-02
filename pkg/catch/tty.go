@@ -1217,6 +1217,13 @@ func applyEnvAssignments(contents []byte, assignments []envAssignment) ([]byte, 
 		if !ok {
 			continue
 		}
+		if val == "" {
+			lines = append(lines[:i], lines[i+1:]...)
+			i--
+			changed = true
+			updated[key] = true
+			continue
+		}
 		newLine := matches[1] + key + "=" + val
 		if newLine != line {
 			lines[i] = newLine
@@ -1229,7 +1236,11 @@ func applyEnvAssignments(contents []byte, assignments []envAssignment) ([]byte, 
 		if updated[key] {
 			continue
 		}
-		lines = append(lines, key+"="+updates[key])
+		val := updates[key]
+		if val == "" {
+			continue
+		}
+		lines = append(lines, key+"="+val)
 		changed = true
 	}
 
