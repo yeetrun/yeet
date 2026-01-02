@@ -34,15 +34,25 @@ const (
 	ErrInternal       = -32603
 )
 
+type ProgressMode string
+
+const (
+	ProgressAuto  ProgressMode = "auto"
+	ProgressTTY   ProgressMode = "tty"
+	ProgressPlain ProgressMode = "plain"
+	ProgressQuiet ProgressMode = "quiet"
+)
+
 type ExecRequest struct {
-	Service     string   `json:"service"`
-	User        string   `json:"user,omitempty"`
-	Args        []string `json:"args"`
-	PayloadName string   `json:"payloadName,omitempty"`
-	TTY         bool     `json:"tty"`
-	Term        string   `json:"term,omitempty"`
-	Rows        int      `json:"rows,omitempty"`
-	Cols        int      `json:"cols,omitempty"`
+	Service     string       `json:"service"`
+	User        string       `json:"user,omitempty"`
+	Args        []string     `json:"args"`
+	PayloadName string       `json:"payloadName,omitempty"`
+	TTY         bool         `json:"tty"`
+	Progress    ProgressMode `json:"progress,omitempty"`
+	Term        string       `json:"term,omitempty"`
+	Rows        int          `json:"rows,omitempty"`
+	Cols        int          `json:"cols,omitempty"`
 }
 
 type ExecMessage struct {

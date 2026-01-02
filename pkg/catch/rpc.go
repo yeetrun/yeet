@@ -200,6 +200,7 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
 		sn:          req.Service,
 		user:        req.User,
 		payloadName: req.PayloadName,
+		progress:    req.Progress,
 		rawRW:       rw,
 		rawCloser:   wsCloser{conn: conn},
 		isPty:       req.TTY,

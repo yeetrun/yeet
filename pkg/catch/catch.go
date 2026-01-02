@@ -315,7 +315,7 @@ type InstallerCfg struct {
 	ClientOut io.Writer `json:"-"`
 
 	// UI is used to render user-facing install progress.
-	UI *runUI `json:"-"`
+	UI ProgressUI `json:"-"`
 
 	// Timer, if set, specifies that the service should be installed as a timer service.
 	Timer *svc.TimerConfig `json:"-"`

@@ -80,9 +80,12 @@ type prefs struct {
 }
 
 type globalFlagsParsed struct {
-	Host    string `flag:"host" help:"Override target host (CATCH_HOST)"`
-	Service string `flag:"service" help:"Force the service name for the command"`
-	RPCPort int    `flag:"rpc-port" help:"Override RPC port (CATCH_RPC_PORT)"`
+	Host     string `flag:"host" help:"Override target host (CATCH_HOST)"`
+	Service  string `flag:"service" help:"Force the service name for the command"`
+	RPCPort  int    `flag:"rpc-port" help:"Override RPC port (CATCH_RPC_PORT)"`
+	TTY      bool   `flag:"tty" help:"Force TTY for remote commands"`
+	NoTTY    bool   `flag:"no-tty" help:"Disable TTY for remote commands"`
+	Progress string `flag:"progress" help:"Progress output (auto|tty|plain|quiet)"`
 }
 
 func parseGlobalFlags(args []string) (globalFlagsParsed, []string, error) {
@@ -284,11 +287,13 @@ func printCLIError(w io.Writer, err error) {
 
 func execRemote(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
 	client := newRPCClient(loadedPrefs.Host)
+	tty = applyTTYOverride(tty)
 	req := catchrpc.ExecRequest{
 		Service: service,
 		Args:    args,
 		TTY:     tty,
 	}
+	req.Progress = execProgressMode()
 	if stdin != nil && stdin != os.Stdin {
 		if payload := payloadNameFromReader(stdin); payload != "" {
 			req.PayloadName = payload
@@ -403,6 +408,10 @@ func main() {
 	args := os.Args[1:]
 	globalFlags, remaining, err := parseGlobalFlags(args)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return
+	}
+	if err := applyGlobalUIFlags(globalFlags); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
