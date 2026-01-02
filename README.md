@@ -6,6 +6,29 @@ A personal homelab service manager built around Tailscale RPC. See the [Architec
 
 This repository is **personal infrastructure tooling** for how I run my homelab. It is not intended for a general audience, likely will not work for you as-is, and may rely on assumptions, configs, and workflows that only exist in my environment. Use it only as a reference or starting point.
 
+## Toolchain Setup (Recommended: mise)
+
+If you already have Go in your `PATH`, you can skip mise and use the Go commands elsewhere in this README. If not, the quickest path is to use mise to install the toolchain and run the bootstrap task.
+
+1) Install mise (use a package manager like Homebrew/apt/dnf/pacman, or run the installer script):
+
+```bash
+curl https://mise.run | sh
+```
+
+2) Activate mise in your shell (zsh example — swap for bash/fish as needed):
+
+```bash
+echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
+```
+
+3) From the repo root, install tools (Go 1.25.5) + bootstrap a host:
+
+```bash
+mise install
+mise run init-host -- root@<host>
+```
+
 ## High-Level Overview
 
 yeet is a lightweight client + server setup for deploying and managing services on remote Linux machines. The primary use case is running Docker images on a host over Tailscale with a tiny workflow (`yeet run <svc> <image>`).
