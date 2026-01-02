@@ -200,3 +200,35 @@ func TestBridgeServiceArgsDockerPushDoesNotBridge(t *testing.T) {
 		t.Fatalf("expected no bridging, got service=%q bridged=%v", service, bridged)
 	}
 }
+
+func TestBridgeServiceArgsEnvGroup(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"env", "show", "svc-a", "--staged"}
+	service, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to recognize env group command")
+	}
+	if service != "svc-a" {
+		t.Fatalf("expected service svc-a, got %q", service)
+	}
+	if got := strings.Join(bridged, " "); got != "env show --staged" {
+		t.Fatalf("unexpected bridged args: %s", got)
+	}
+}
+
+func TestBridgeServiceArgsEnvSetGroup(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"env", "set", "svc-a", "FOO=bar"}
+	service, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to recognize env set group command")
+	}
+	if service != "svc-a" {
+		t.Fatalf("expected service svc-a, got %q", service)
+	}
+	if got := strings.Join(bridged, " "); got != "env set FOO=bar" {
+		t.Fatalf("unexpected bridged args: %s", got)
+	}
+}

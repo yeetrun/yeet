@@ -25,6 +25,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/hugomd/ascii-live/frames"
+	"github.com/shayne/yargs"
 	"github.com/yeetrun/yeet/pkg/catch"
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
@@ -32,7 +33,6 @@ import (
 	"github.com/yeetrun/yeet/pkg/codecutil"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
 	"github.com/yeetrun/yeet/pkg/svc"
-	"github.com/shayne/yargs"
 	"golang.org/x/term"
 	"tailscale.com/client/tailscale"
 )
@@ -445,16 +445,7 @@ func main() {
 
 	// Keep group handlers aligned with pkg/cli/cli.go metadata and
 	// cmd/yeet/cli_bridge.go localGroupCommands.
-	groups := map[string]yargs.Group{
-		"docker": {
-			Description: "Docker compose and registry management",
-			Commands: map[string]yargs.SubcommandHandler{
-				"pull":   handleDockerGroup,
-				"update": handleDockerGroup,
-				"push":   handlePush,
-			},
-		},
-	}
+	groups := buildGroupHandlers()
 	if err := yargs.RunSubcommandsWithGroups(context.Background(), args, helpConfig, globalFlagsParsed{}, handlers, groups); err != nil {
 		printCLIError(os.Stderr, err)
 	}
@@ -647,6 +638,33 @@ func handleRemote(_ context.Context, args []string) error {
 func handleDockerGroup(_ context.Context, args []string) error {
 	full := append([]string{"docker"}, args...)
 	return handleRemote(nil, full)
+}
+
+func handleEnvGroup(_ context.Context, args []string) error {
+	full := append([]string{"env"}, args...)
+	return handleRemote(nil, full)
+}
+
+func buildGroupHandlers() map[string]yargs.Group {
+	return map[string]yargs.Group{
+		"docker": {
+			Description: "Docker compose and registry management",
+			Commands: map[string]yargs.SubcommandHandler{
+				"pull":   handleDockerGroup,
+				"update": handleDockerGroup,
+				"push":   handlePush,
+			},
+		},
+		"env": {
+			Description: "Manage service environment files",
+			Commands: map[string]yargs.SubcommandHandler{
+				"show": handleEnvGroup,
+				"edit": handleEnvGroup,
+				"copy": handleEnvGroup,
+				"set":  handleEnvGroup,
+			},
+		},
+	}
 }
 
 func handleMountSys(ctx context.Context, _ []string) error {
@@ -891,8 +909,10 @@ func missingServiceCommandName(args []string) string {
 	if len(args) == 0 {
 		return ""
 	}
-	if args[0] == "docker" && len(args) > 1 {
-		return args[0] + " " + args[1]
+	if len(args) > 1 {
+		if _, ok := cli.RemoteGroupInfos()[args[0]]; ok {
+			return args[0] + " " + args[1]
+		}
 	}
 	return args[0]
 }
@@ -938,6 +958,28 @@ func handleSvcCmd(args []string) error {
 
 	// Check for special commands
 	switch args[0] {
+	case "env":
+		if len(args) >= 2 && args[1] == "copy" {
+			if len(args) != 3 {
+				return fmt.Errorf("env copy requires a file")
+			}
+			return runEnvCopy(args[2])
+		}
+		if len(args) >= 2 && args[1] == "set" {
+			if len(args) < 3 {
+				return fmt.Errorf("env set requires at least one KEY=VALUE assignment")
+			}
+			assignments, err := parseEnvAssignments(args[2:])
+			if err != nil {
+				return err
+			}
+			svc := getService()
+			setArgs := []string{"env", "set"}
+			for _, assignment := range assignments {
+				setArgs = append(setArgs, assignment.Key+"="+assignment.Value)
+			}
+			return execRemoteFn(context.Background(), svc, setArgs, nil, true)
+		}
 	// `run <svc> <file/docker-image> [args...]`
 	case "run":
 		if len(args) >= 2 {
@@ -948,12 +990,15 @@ func handleSvcCmd(args []string) error {
 			return runRun(payload, runArgs)
 		}
 		return fmt.Errorf("run requires a payload")
-	// `copy <svc> <file> <dest>`
+	// `copy <svc> <file> [dest]`
 	case "copy":
-		if len(args) == 3 {
+		switch len(args) {
+		case 2:
+			return runCopy(args[1], "")
+		case 3:
 			return runCopy(args[1], args[2])
 		}
-		return fmt.Errorf("copy requires a source file and destination")
+		return fmt.Errorf("copy requires a source file and optional destination")
 	// `cron <svc> <file> <cronexpr>`
 	case "cron":
 		return runCron(args[1], args[2:])
@@ -1170,8 +1215,8 @@ func runFilePayload(file string, args []string, pushLocalImages bool) (ok bool, 
 }
 
 func runCopy(file, dest string) error {
-	if file == "" || dest == "" {
-		return fmt.Errorf("copy requires a source file and destination")
+	if file == "" {
+		return fmt.Errorf("copy requires a source file")
 	}
 	if st, err := os.Stat(file); err != nil {
 		return err
@@ -1197,28 +1242,32 @@ func runCopy(file, dest string) error {
 
 func normalizeCopyDest(src, dest string) (string, error) {
 	dest = strings.TrimSpace(dest)
-	if dest == "" {
-		return "", fmt.Errorf("copy requires a destination")
-	}
-	if trimmed := strings.TrimSuffix(dest, "/"); trimmed == "env" || trimmed == "./env" {
-		return "env", nil
-	}
 	trimmed := strings.TrimPrefix(dest, "./")
+	if trimmed == "" {
+		trimmed = filepath.Base(src)
+	}
 	if strings.HasPrefix(trimmed, "/") {
 		return "", fmt.Errorf("copy destination must be relative")
 	}
-	if trimmed == "data" || strings.HasPrefix(trimmed, "data/") {
-		if trimmed == "data" || strings.HasSuffix(dest, "/") || strings.HasSuffix(trimmed, "/") {
-			base := filepath.Base(src)
-			if base == "." || base == string(os.PathSeparator) {
-				return "", fmt.Errorf("invalid source file %q", src)
-			}
-			trimmed = strings.TrimSuffix(trimmed, "/")
-			trimmed = filepath.Join(trimmed, base)
-		}
-		return trimmed, nil
+
+	rel := trimmed
+	if rel == "data" || strings.HasPrefix(rel, "data/") {
+		rel = strings.TrimPrefix(rel, "data")
+		rel = strings.TrimPrefix(rel, "/")
 	}
-	return "", fmt.Errorf("copy destination must be \"env\" or under ./data/")
+	if rel == "" || strings.HasSuffix(dest, "/") || strings.HasSuffix(rel, "/") {
+		base := filepath.Base(src)
+		if base == "." || base == string(os.PathSeparator) {
+			return "", fmt.Errorf("invalid source file %q", src)
+		}
+		rel = filepath.Join(rel, base)
+	}
+
+	rel = filepath.Clean(rel)
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("invalid copy destination %q", dest)
+	}
+	return filepath.Join("data", rel), nil
 }
 
 func tryRunDocker(image string, args []string) (ok bool, _ error) {
@@ -1243,6 +1292,88 @@ func tryRunDocker(image string, args []string) (ok bool, _ error) {
 		return false, errors.New("failed to run service")
 	}
 	return true, nil
+}
+
+func runEnvCopy(file string) error {
+	if file == "" {
+		return fmt.Errorf("env copy requires a file")
+	}
+	if st, err := os.Stat(file); err != nil {
+		return err
+	} else if st.IsDir() {
+		return fmt.Errorf("%q is a directory, expected a file", file)
+	}
+	f, err := os.Open(file)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	svc := getService()
+	args := []string{"env", "copy"}
+	if err := execRemoteFn(context.Background(), svc, args, f, false); err != nil {
+		return err
+	}
+	return nil
+}
+
+type envAssignment struct {
+	Key   string
+	Value string
+}
+
+func parseEnvAssignments(args []string) ([]envAssignment, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("env set requires at least one KEY=VALUE assignment")
+	}
+	seen := make(map[string]int, len(args))
+	assignments := make([]envAssignment, 0, len(args))
+	for _, arg := range args {
+		key, value, err := splitEnvAssignment(arg)
+		if err != nil {
+			return nil, err
+		}
+		if idx, ok := seen[key]; ok {
+			assignments[idx].Value = value
+			continue
+		}
+		seen[key] = len(assignments)
+		assignments = append(assignments, envAssignment{Key: key, Value: value})
+	}
+	return assignments, nil
+}
+
+func splitEnvAssignment(arg string) (string, string, error) {
+	i := strings.Index(arg, "=")
+	if i <= 0 {
+		return "", "", fmt.Errorf("invalid env assignment %q (expected KEY=VALUE)", arg)
+	}
+	key := arg[:i]
+	value := arg[i+1:]
+	if strings.TrimSpace(key) != key {
+		return "", "", fmt.Errorf("invalid env key %q (contains whitespace)", key)
+	}
+	if !isValidEnvKey(key) {
+		return "", "", fmt.Errorf("invalid env key %q", key)
+	}
+	return key, value, nil
+}
+
+func isValidEnvKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i, r := range key {
+		if i == 0 {
+			if !(r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')) {
+				return false
+			}
+			continue
+		}
+		if !(r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
 }
 
 func buildDockerImageForRemote(ctx context.Context, dockerfilePath, imageName string) error {

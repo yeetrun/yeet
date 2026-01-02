@@ -7,6 +7,8 @@ package main
 import (
 	"reflect"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/cli"
 )
 
 func TestParseGlobalFlags(t *testing.T) {
@@ -123,6 +125,21 @@ func TestParseListHostsFlags(t *testing.T) {
 				t.Fatalf("Tags = %#v, want %#v", flags.Tags, tt.wantTags)
 			}
 		})
+	}
+}
+
+func TestGroupHandlersCoverRemoteGroupInfos(t *testing.T) {
+	groups := buildGroupHandlers()
+	for groupName, info := range cli.RemoteGroupInfos() {
+		group, ok := groups[groupName]
+		if !ok {
+			t.Fatalf("missing group handler for %q", groupName)
+		}
+		for cmdName := range info.Commands {
+			if _, ok := group.Commands[cmdName]; !ok {
+				t.Fatalf("missing handler for group %q command %q", groupName, cmdName)
+			}
+		}
 	}
 }
 

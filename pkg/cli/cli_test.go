@@ -105,3 +105,16 @@ func TestParseStagePullFlag(t *testing.T) {
 		t.Fatalf("expected no args, got %v", outArgs)
 	}
 }
+
+func TestParseEnvShowFlags(t *testing.T) {
+	flags, outArgs, err := ParseEnvShow([]string{"--staged"})
+	if err != nil {
+		t.Fatalf("ParseEnvShow failed: %v", err)
+	}
+	if !flags.Staged {
+		t.Fatalf("Staged = false, want true")
+	}
+	if len(outArgs) != 0 {
+		t.Fatalf("expected no args, got %v", outArgs)
+	}
+}
