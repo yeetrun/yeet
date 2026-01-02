@@ -57,12 +57,10 @@ type StageFlags struct {
 	MacvlanVlan   int
 	MacvlanParent string
 	Restart       bool
-	Env           bool
 	Pull          bool
 }
 
 type EditFlags struct {
-	Env     bool
 	Config  bool
 	TS      bool
 	Restart bool
@@ -89,6 +87,10 @@ type MountFlags struct {
 
 type VersionFlags struct {
 	JSON bool
+}
+
+type EnvShowFlags struct {
+	Staged bool
 }
 
 type dockerPushFlagsParsed struct {
@@ -119,12 +121,10 @@ type stageFlagsParsed struct {
 	MacvlanVlan   int      `flag:"macvlan-vlan"`
 	MacvlanParent string   `flag:"macvlan-parent"`
 	Restart       bool     `flag:"restart" default:"true"`
-	Env           bool     `flag:"env"`
 	Pull          bool     `flag:"pull"`
 }
 
 type editFlagsParsed struct {
-	Env     bool `flag:"env"`
 	Config  bool `flag:"config"`
 	TS      bool `flag:"ts"`
 	Restart bool `flag:"restart" default:"true"`
@@ -153,6 +153,10 @@ type versionFlagsParsed struct {
 	JSON bool `flag:"json"`
 }
 
+type envShowFlagsParsed struct {
+	Staged bool `flag:"staged"`
+}
+
 const (
 	CommandEvents = "events"
 )
@@ -174,10 +178,9 @@ func IsServiceArgSpec(spec yargs.ArgSpec) bool {
 
 var remoteCommandInfos = map[string]CommandInfo{
 	"cron":    {Name: "cron", Description: "Install a cron job from a file and 5-field expression", Usage: `SVC FILE "<cron expr>" [-- <args...>]`, Examples: []string{`yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo`}, ArgsSchema: ServiceArgs{}},
-	"copy":    {Name: "copy", Description: "Copy a local file to a service env file or data dir", Usage: "SVC <file> env|data/<path>", Aliases: []string{"cp"}, ArgsSchema: ServiceArgs{}},
+	"copy":    {Name: "copy", Description: "Copy a local file into a service data dir", Usage: "SVC <file> [data/<path>|<path>]", Aliases: []string{"cp"}, ArgsSchema: ServiceArgs{}},
 	"disable": {Name: "disable", Description: "Disable a service", ArgsSchema: ServiceArgs{}},
 	"edit":    {Name: "edit", Description: "Edit a service", ArgsSchema: ServiceArgs{}},
-	"env":     {Name: "env", Description: "Manage environment variables", ArgsSchema: ServiceArgs{}},
 	"enable":  {Name: "enable", Description: "Enable a service", ArgsSchema: ServiceArgs{}},
 	"events":  {Name: "events", Description: "Show events for a service"},
 	"logs":    {Name: "logs", Description: "Show logs of a service", ArgsSchema: ServiceArgs{}},
@@ -201,7 +204,6 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"stage": {Name: "stage", Description: "Upload a payload without applying it (use stage show/commit)", Usage: "SVC PAYLOAD|show|commit [-- <payload args>]", Examples: []string{
 		"yeet stage <svc> ./bin/<svc>",
 		"yeet stage <svc> show",
-		"yeet stage <svc> show --env",
 		"yeet stage <svc> commit",
 	}, ArgsSchema: ServiceArgs{}},
 	"status":  {Name: "status", Description: "Show status of a service"},
@@ -223,7 +225,6 @@ var remoteFlagSpecs = map[string]map[string]FlagSpec{
 	"cron":     {},
 	"disable":  {},
 	"enable":   {},
-	"env":      {},
 	"ip":       {},
 	"remove":   {},
 	"restart":  {},
@@ -247,6 +248,16 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"push":   {Name: "push", Description: "Push a local image into the internal registry", Usage: "docker push <svc> <image> [--run] [--all-local]", ArgsSchema: DockerPushArgs{}},
 		},
 	},
+	"env": {
+		Name:        "env",
+		Description: "Manage service environment files",
+		Commands: map[string]CommandInfo{
+			"show": {Name: "show", Description: "Print the current env file", Usage: "env show <svc> [--staged]", ArgsSchema: ServiceArgs{}},
+			"edit": {Name: "edit", Description: "Edit the env file", Usage: "env edit <svc>", ArgsSchema: ServiceArgs{}},
+			"copy": {Name: "copy", Description: "Upload an env file", Usage: "env copy <svc> <file>", ArgsSchema: ServiceArgs{}},
+			"set":  {Name: "set", Description: "Set env keys", Usage: "env set <svc> KEY=VALUE [KEY=VALUE...]", ArgsSchema: ServiceArgs{}},
+		},
+	},
 }
 
 // Keep this aligned with remoteGroupInfos and cmd/yeet/cli_bridge.go to avoid
@@ -256,6 +267,12 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"update": {},
 		"pull":   {},
 		"push":   flagSpecsFromStruct(dockerPushFlagsParsed{}),
+	},
+	"env": {
+		"show": flagSpecsFromStruct(envShowFlagsParsed{}),
+		"edit": {},
+		"copy": {},
+		"set":  {},
 	},
 }
 
@@ -370,7 +387,6 @@ func ParseStage(args []string) (StageFlags, string, []string, error) {
 		MacvlanVlan:   parsed.Flags.MacvlanVlan,
 		MacvlanParent: parsed.Flags.MacvlanParent,
 		Restart:       parsed.Flags.Restart,
-		Env:           parsed.Flags.Env,
 		Pull:          parsed.Flags.Pull,
 	}
 
@@ -393,7 +409,6 @@ func ParseEdit(args []string) (EditFlags, []string, error) {
 		return EditFlags{}, nil, err
 	}
 	flags := EditFlags{
-		Env:     parsed.Flags.Env,
 		Config:  parsed.Flags.Config,
 		TS:      parsed.Flags.TS,
 		Restart: parsed.Flags.Restart,
@@ -411,6 +426,19 @@ func ParseLogs(args []string) (LogsFlags, []string, error) {
 	flags := LogsFlags{
 		Follow: parsed.Flags.Follow,
 		Lines:  parsed.Flags.Lines,
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseEnvShow(args []string) (EnvShowFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[envShowFlagsParsed](parseArgs)
+	if err != nil {
+		return EnvShowFlags{}, nil, err
+	}
+	flags := EnvShowFlags{
+		Staged: parsed.Flags.Staged,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil

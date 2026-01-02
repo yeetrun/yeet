@@ -545,7 +545,7 @@ func buildTestELF(t *testing.T, dir string) string {
 	return binPath
 }
 
-func TestRunCopyEnvUsesCopyCommand(t *testing.T) {
+func TestRunCopyDefaultsToDataDir(t *testing.T) {
 	oldExec := execRemoteFn
 	oldService := serviceOverride
 	defer func() {
@@ -573,14 +573,14 @@ func TestRunCopyEnvUsesCopyCommand(t *testing.T) {
 		return nil
 	}
 
-	if err := runCopy(src, "env"); err != nil {
+	if err := runCopy(src, ""); err != nil {
 		t.Fatalf("runCopy returned error: %v", err)
 	}
 
 	if gotService != "svc-a" {
 		t.Fatalf("expected service svc-a, got %q", gotService)
 	}
-	wantArgs := []string{"copy", "env"}
+	wantArgs := []string{"copy", "data/envfile"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
 	}
@@ -617,5 +617,118 @@ func TestRunCopyDataDirAppendsBaseName(t *testing.T) {
 	wantArgs := []string{"copy", "data/payload.txt"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+}
+
+func TestRunCopyUsesRelativeDestUnderDataDir(t *testing.T) {
+	oldExec := execRemoteFn
+	oldService := serviceOverride
+	defer func() {
+		execRemoteFn = oldExec
+		serviceOverride = oldService
+	}()
+
+	serviceOverride = "svc-a"
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "config.yml")
+	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+
+	if err := runCopy(src, "configs/app.yml"); err != nil {
+		t.Fatalf("runCopy returned error: %v", err)
+	}
+
+	wantArgs := []string{"copy", "data/configs/app.yml"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+}
+
+func TestHandleSvcCmdEnvCopyUsesExecRemote(t *testing.T) {
+	oldExec := execRemoteFn
+	oldService := serviceOverride
+	defer func() {
+		execRemoteFn = oldExec
+		serviceOverride = oldService
+	}()
+
+	serviceOverride = "svc-a"
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "envfile")
+	if err := os.WriteFile(src, []byte("KEY=VALUE\n"), 0o600); err != nil {
+		t.Fatalf("failed to write temp env file: %v", err)
+	}
+
+	var gotService string
+	var gotArgs []string
+	var gotStdin io.Reader
+	var gotTTY bool
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotService = service
+		gotArgs = append([]string{}, args...)
+		gotStdin = stdin
+		gotTTY = tty
+		return nil
+	}
+
+	if err := handleSvcCmd([]string{"env", "copy", src}); err != nil {
+		t.Fatalf("handleSvcCmd returned error: %v", err)
+	}
+
+	if gotService != "svc-a" {
+		t.Fatalf("expected service svc-a, got %q", gotService)
+	}
+	wantArgs := []string{"env", "copy"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+	if gotStdin == nil {
+		t.Fatalf("expected stdin to be provided")
+	}
+	if gotTTY {
+		t.Fatalf("expected tty=false, got true")
+	}
+}
+
+func TestHandleSvcCmdEnvSetUsesExecRemote(t *testing.T) {
+	oldExec := execRemoteFn
+	oldService := serviceOverride
+	defer func() {
+		execRemoteFn = oldExec
+		serviceOverride = oldService
+	}()
+
+	serviceOverride = "svc-a"
+
+	var gotService string
+	var gotArgs []string
+	var gotTTY bool
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotService = service
+		gotArgs = append([]string{}, args...)
+		gotTTY = tty
+		return nil
+	}
+
+	if err := handleSvcCmd([]string{"env", "set", "FOO=bar", "FOO=baz", "PORT=8080"}); err != nil {
+		t.Fatalf("handleSvcCmd returned error: %v", err)
+	}
+
+	if gotService != "svc-a" {
+		t.Fatalf("expected service svc-a, got %q", gotService)
+	}
+	wantArgs := []string{"env", "set", "FOO=baz", "PORT=8080"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+	if !gotTTY {
+		t.Fatalf("expected tty=true, got false")
 	}
 }

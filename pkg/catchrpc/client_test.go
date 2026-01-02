@@ -176,6 +176,72 @@ func TestClientExec(t *testing.T) {
 	}
 }
 
+func TestClientExecClosesStdinWhenNil(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	var gotReq ExecRequest
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read exec request: %v", err)
+		}
+		if err := json.Unmarshal(data, &gotReq); err != nil {
+			t.Fatalf("unmarshal exec request: %v", err)
+		}
+
+		closeSeen := make(chan struct{})
+		go func() {
+			defer close(closeSeen)
+			for {
+				mt, msg, err := conn.ReadMessage()
+				if err != nil {
+					return
+				}
+				if mt != websocket.TextMessage {
+					continue
+				}
+				var ctrl ExecMessage
+				if json.Unmarshal(msg, &ctrl) != nil {
+					continue
+				}
+				if ctrl.Type == ExecMsgStdinClose {
+					return
+				}
+			}
+		}()
+
+		select {
+		case <-closeSeen:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for stdin close")
+		}
+
+		exit := ExecMessage{Type: ExecMsgExit, Code: 0}
+		payload, _ := json.Marshal(exit)
+		_ = conn.WriteMessage(websocket.TextMessage, payload)
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	client := NewClient(host, port)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, err := client.Exec(ctx, ExecRequest{Service: "svc", Args: []string{"status"}}, nil, nil, nil); err != nil {
+		t.Fatalf("exec failed: %v", err)
+	}
+	if gotReq.Service != "svc" || len(gotReq.Args) != 1 || gotReq.Args[0] != "status" {
+		t.Fatalf("unexpected exec request: %#v", gotReq)
+	}
+}
+
 func TestClientEvents(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

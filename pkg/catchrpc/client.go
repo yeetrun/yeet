@@ -152,6 +152,8 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest, stdin io.Reader, std
 			}
 			_ = writeControl(ExecMessage{Type: ExecMsgStdinClose})
 		}()
+	} else {
+		_ = writeControl(ExecMessage{Type: ExecMsgStdinClose})
 	}
 
 	if resizeCh != nil {
