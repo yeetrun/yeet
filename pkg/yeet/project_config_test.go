@@ -36,6 +36,7 @@ func TestSaveRunConfigCreatesToml(t *testing.T) {
 	}
 
 	runArgs := []string{"--net=svc", "--", "--flag", "value"}
+	wantArgs := []string{"--net=svc", "--flag", "value"}
 	loc := &projectConfigLocation{
 		Path:   filepath.Join(tmp, projectConfigName),
 		Dir:    tmp,
@@ -62,12 +63,12 @@ func TestSaveRunConfigCreatesToml(t *testing.T) {
 	if entry.Payload != filepath.Join("apps", "compose.yml") {
 		t.Fatalf("payload = %q", entry.Payload)
 	}
-	if len(entry.Args) != len(runArgs) {
+	if len(entry.Args) != len(wantArgs) {
 		t.Fatalf("args = %#v", entry.Args)
 	}
-	for i := range runArgs {
-		if entry.Args[i] != runArgs[i] {
-			t.Fatalf("args[%d] = %q, want %q", i, entry.Args[i], runArgs[i])
+	for i := range wantArgs {
+		if entry.Args[i] != wantArgs[i] {
+			t.Fatalf("args[%d] = %q, want %q", i, entry.Args[i], wantArgs[i])
 		}
 	}
 }
@@ -107,6 +108,7 @@ func TestSaveRunConfigOverwritesArgs(t *testing.T) {
 	}
 
 	secondArgs := []string{"--", "--flagB", "valueB", "--bool-flag2", "posArg2"}
+	wantArgs := []string{"--flagB", "valueB", "--bool-flag2", "posArg2"}
 	if err := saveRunConfig(loc, "host-a", payload, secondArgs); err != nil {
 		t.Fatalf("saveRunConfig error: %v", err)
 	}
@@ -122,12 +124,12 @@ func TestSaveRunConfigOverwritesArgs(t *testing.T) {
 	if entry.Type != serviceTypeRun {
 		t.Fatalf("type = %q", entry.Type)
 	}
-	if len(entry.Args) != len(secondArgs) {
+	if len(entry.Args) != len(wantArgs) {
 		t.Fatalf("args = %#v", entry.Args)
 	}
-	for i := range secondArgs {
-		if entry.Args[i] != secondArgs[i] {
-			t.Fatalf("args[%d] = %q, want %q", i, entry.Args[i], secondArgs[i])
+	for i := range wantArgs {
+		if entry.Args[i] != wantArgs[i] {
+			t.Fatalf("args[%d] = %q, want %q", i, entry.Args[i], wantArgs[i])
 		}
 	}
 }
