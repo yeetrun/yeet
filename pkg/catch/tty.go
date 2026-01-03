@@ -274,7 +274,7 @@ func (e *ttyExecer) dispatch(args []string) error {
 		return e.mountCmdFunc(flags, mountArgs)
 	case "ip":
 		return e.ipCmdFunc()
-	case "ts":
+	case "tailscale", "ts":
 		return e.tsCmdFunc(args)
 	case "umount":
 		return e.umountCmdFunc(args)
@@ -1954,7 +1954,7 @@ func parseIPv4Addresses(text string) []string {
 
 func (e *ttyExecer) tsCmdFunc(args []string) error {
 	if e.sn == SystemService || e.sn == CatchService {
-		return errors.New("ts command not supported for sys or catch service")
+		return errors.New("tailscale command not supported for sys or catch service")
 	}
 	sv, err := e.s.serviceView(e.sn)
 	if err != nil {
