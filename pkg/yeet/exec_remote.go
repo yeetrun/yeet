@@ -22,7 +22,7 @@ import (
 )
 
 func newRPCClient(host string) *catchrpc.Client {
-	return catchrpc.NewClient(host, loadedPrefs.RPCPort)
+	return catchrpc.NewClient(host, defaultRPCPort)
 }
 
 func watchResize(ctx context.Context, fd int) <-chan catchrpc.Resize {
@@ -133,12 +133,13 @@ func PrintCLIError(w io.Writer, err error) {
 }
 
 func execRemote(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
-	client := newRPCClient(loadedPrefs.Host)
+	host := Host()
+	client := newRPCClient(host)
 	tty = applyTTYOverride(tty)
 	req := catchrpc.ExecRequest{
 		Service: service,
 		Args:    args,
-		Host:    loadedPrefs.Host,
+		Host:    host,
 		TTY:     tty,
 	}
 	req.Progress = execProgressMode()
@@ -224,7 +225,7 @@ func handleEventsRPC(ctx context.Context, svc string, flags cli.EventsFlags) err
 	if !flags.All {
 		sub.Service = svc
 	}
-	return newRPCClient(loadedPrefs.Host).Events(ctx, sub, func(ev catchrpc.Event) {
+	return newRPCClient(Host()).Events(ctx, sub, func(ev catchrpc.Event) {
 		fmt.Fprintf(os.Stdout, "Received event: %v\n", ev)
 	})
 }

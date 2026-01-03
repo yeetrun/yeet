@@ -43,10 +43,6 @@ func main() {
 		serviceOverride = svc
 		yeet.SetServiceOverride(serviceOverride)
 	}
-	if globalFlags.RPCPort != 0 {
-		yeet.SetRPCPort(globalFlags.RPCPort)
-	}
-
 	helpConfig := buildHelpConfig()
 	args := yargs.ApplyAliases(remaining, helpConfig)
 	args = rewriteEnvSetArgs(args)

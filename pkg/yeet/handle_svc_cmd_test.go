@@ -57,7 +57,7 @@ func TestHandleStatusSingleHostIncludesHostColumn(t *testing.T) {
 	}()
 
 	serviceOverride = ""
-	loadedPrefs.Host = "host-a"
+	loadedPrefs.DefaultHost = "host-a"
 	SetHostOverride("host-a")
 
 	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {

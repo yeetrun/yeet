@@ -15,7 +15,7 @@ func TestSetServiceOverrideQualified(t *testing.T) {
 		resetHostOverride()
 	}()
 
-	loadedPrefs.Host = "catch"
+	loadedPrefs.DefaultHost = "catch"
 	SetServiceOverride("plex@yeet-pve1")
 
 	if got := getService(); got != "plex" {
@@ -24,7 +24,7 @@ func TestSetServiceOverrideQualified(t *testing.T) {
 	if host, ok := HostOverride(); !ok || host != "yeet-pve1" {
 		t.Fatalf("host override = %q ok=%v, want yeet-pve1", host, ok)
 	}
-	if loadedPrefs.Host != "yeet-pve1" {
-		t.Fatalf("host = %q, want yeet-pve1", loadedPrefs.Host)
+	if loadedPrefs.DefaultHost != "yeet-pve1" {
+		t.Fatalf("host = %q, want yeet-pve1", loadedPrefs.DefaultHost)
 	}
 }

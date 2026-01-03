@@ -73,14 +73,14 @@ func remoteCatchOSAndArch() (goos, goarch string, _ error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var si serverInfo
-	if err := newRPCClient(loadedPrefs.Host).Call(ctx, "catch.Info", nil, &si); err != nil {
+	if err := newRPCClient(Host()).Call(ctx, "catch.Info", nil, &si); err != nil {
 		return "", "", fmt.Errorf("failed to get version of catch binary: %w", err)
 	}
 	return si.GOOS, si.GOARCH, nil
 }
 
 func updateCatch() error {
-	return initCatch(loadedPrefs.Host)
+	return initCatch(Host())
 }
 
 func buildCatch(goos, goarch string) (string, int64, string, error) {
@@ -135,7 +135,7 @@ func initCatch(userAtRemote string) error {
 	}
 	isTTY := isTerminalFn(int(os.Stdout.Fd()))
 	enabled, quiet := initProgressSettings(execProgressMode(), isTTY)
-	ui := newInitUI(os.Stdout, enabled, quiet, loadedPrefs.Host, userAtRemote, catchServiceName)
+	ui := newInitUI(os.Stdout, enabled, quiet, Host(), userAtRemote, catchServiceName)
 	ui.Start()
 	defer ui.Stop()
 
@@ -186,7 +186,7 @@ func initCatch(userAtRemote string) error {
 	if useSudo {
 		args = append(args, "sudo")
 	}
-	args = append(args, "./catch", fmt.Sprintf("--tsnet-host=%v", loadedPrefs.Host), "install")
+	args = append(args, "./catch", fmt.Sprintf("--tsnet-host=%v", Host()), "install")
 
 	// Run the catch binary on the remote host
 	cmd = exec.Command("ssh", args...)
