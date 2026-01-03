@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yeetrun/yeet/pkg/catchrpc"
-	"github.com/yeetrun/yeet/pkg/tui"
+	"github.com/shayne/yeet/pkg/catchrpc"
+	"github.com/shayne/yeet/pkg/tui"
 )
 
 func initProgressSettings(mode catchrpc.ProgressMode, isTTY bool) (enabled bool, quiet bool) {

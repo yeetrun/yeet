@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yeetrun/yeet/pkg/svc"
+	"github.com/shayne/yeet/pkg/svc"
 	"tailscale.com/logtail/backoff"
 )
 

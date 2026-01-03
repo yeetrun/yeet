@@ -7,7 +7,7 @@ package main
 import (
 	"strings"
 
-	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/shayne/yeet/pkg/cli"
 )
 
 func splitQualifiedName(value string) (string, string, bool) {

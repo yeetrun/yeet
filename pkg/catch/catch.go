@@ -21,10 +21,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yeetrun/yeet/pkg/db"
-	"github.com/yeetrun/yeet/pkg/netns"
-	"github.com/yeetrun/yeet/pkg/registry"
-	"github.com/yeetrun/yeet/pkg/svc"
+	"github.com/shayne/yeet/pkg/db"
+	"github.com/shayne/yeet/pkg/netns"
+	"github.com/shayne/yeet/pkg/registry"
+	"github.com/shayne/yeet/pkg/svc"
 	"tailscale.com/client/tailscale"
 	"tailscale.com/util/set"
 )

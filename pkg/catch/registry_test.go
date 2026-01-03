@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yeetrun/yeet/pkg/db"
-	"github.com/yeetrun/yeet/pkg/registry"
-	"github.com/yeetrun/yeet/pkg/svc"
+	"github.com/shayne/yeet/pkg/db"
+	"github.com/shayne/yeet/pkg/registry"
+	"github.com/shayne/yeet/pkg/svc"
 )
 
 type stubInstaller struct {

@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/yeetrun/yeet/pkg/cmdutil"
+	"github.com/shayne/yeet/pkg/cmdutil"
 )
 
 var archMap = map[string]string{

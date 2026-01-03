@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yeetrun/yeet/pkg/tui"
+	"github.com/shayne/yeet/pkg/tui"
 )
 
 const (

@@ -7,8 +7,8 @@ package catch
 import (
 	"log"
 
-	"github.com/yeetrun/yeet/pkg/db"
-	"github.com/yeetrun/yeet/pkg/svc"
+	"github.com/shayne/yeet/pkg/db"
+	"github.com/shayne/yeet/pkg/svc"
 )
 
 type ServiceDataType string

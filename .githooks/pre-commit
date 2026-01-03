@@ -15,6 +15,27 @@ if ! tools/addlicense.sh --check; then
   exit 1
 fi
 
+gofmt_targets=()
+while IFS= read -r file; do
+  if [[ "$file" == *.go ]]; then
+    gofmt_targets+=("$file")
+  fi
+done < <(
+  {
+    git diff --name-only --diff-filter=ACMRT
+    git diff --name-only --cached --diff-filter=ACMRT
+  } | sort -u
+)
+
+if ((${#gofmt_targets[@]})); then
+  gofmt -w "${gofmt_targets[@]}"
+  if ! git diff --exit-code -- "${gofmt_targets[@]}" >/dev/null; then
+    echo "" >&2
+    echo "gofmt changed files; please stage the updates and retry the commit." >&2
+    exit 1
+  fi
+fi
+
 if ! go run github.com/tailscale/depaware -update ./cmd/yeet ./cmd/catch; then
   echo "" >&2
   echo "depaware.txt generation failed." >&2
@@ -27,13 +48,13 @@ if ! git diff --exit-code -- cmd/yeet/depaware.txt cmd/catch/depaware.txt >/dev/
   exit 1
 fi
 
-if rg -n '(^|[[:space:]])github.com/yeetrun/yeet/pkg/catch([[:space:]]|$)' cmd/yeet/depaware.txt; then
+if rg -n '(^|[[:space:]])github.com/shayne/yeet/pkg/catch([[:space:]]|$)' cmd/yeet/depaware.txt; then
   echo "" >&2
   echo "cmd/yeet depends on pkg/catch (not allowed)." >&2
   exit 1
 fi
 
-if rg -n '(^|[[:space:]])github.com/yeetrun/yeet/pkg/yeet([[:space:]]|$)' cmd/catch/depaware.txt; then
+if rg -n '(^|[[:space:]])github.com/shayne/yeet/pkg/yeet([[:space:]]|$)' cmd/catch/depaware.txt; then
   echo "" >&2
   echo "cmd/catch depends on pkg/yeet (not allowed)." >&2
   exit 1

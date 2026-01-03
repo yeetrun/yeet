@@ -15,8 +15,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yeetrun/yeet/pkg/cli"
-	"github.com/yeetrun/yeet/pkg/codecutil"
+	"github.com/shayne/yeet/pkg/cli"
+	"github.com/shayne/yeet/pkg/codecutil"
 )
 
 func TestHandleSvcCmdDefaultsToStatus(t *testing.T) {

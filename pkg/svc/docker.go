@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/yeetrun/yeet/pkg/db"
-	"github.com/yeetrun/yeet/pkg/fileutil"
+	"github.com/shayne/yeet/pkg/db"
+	"github.com/shayne/yeet/pkg/fileutil"
 	"tailscale.com/types/lazy"
 )
 
