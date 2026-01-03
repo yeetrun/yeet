@@ -46,7 +46,7 @@ func TestHandleSvcCmdUsesConfigHost(t *testing.T) {
 	}
 
 	serviceOverride = "svc-a"
-	loadedPrefs.Host = "catch"
+	loadedPrefs.DefaultHost = "catch"
 
 	called := false
 	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
@@ -63,7 +63,7 @@ func TestHandleSvcCmdUsesConfigHost(t *testing.T) {
 	if !called {
 		t.Fatalf("expected execRemoteFn to be called")
 	}
-	if loadedPrefs.Host != "host-a" {
-		t.Fatalf("host = %q, want host-a", loadedPrefs.Host)
+	if loadedPrefs.DefaultHost != "host-a" {
+		t.Fatalf("host = %q, want host-a", loadedPrefs.DefaultHost)
 	}
 }

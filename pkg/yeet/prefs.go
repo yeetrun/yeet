@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 
 	"github.com/shayne/yargs"
 )
@@ -24,8 +23,8 @@ var (
 )
 
 const (
-	defaultHost    = "catch"
-	defaultRPCPort = 41548
+	defaultCatchHost = "catch"
+	defaultRPCPort   = 41548
 )
 
 func init() {
@@ -35,35 +34,26 @@ func init() {
 		}
 	}
 	if host := os.Getenv("CATCH_HOST"); host != "" {
-		loadedPrefs.Host = host
+		loadedPrefs.DefaultHost = host
 	}
-	if port := os.Getenv("CATCH_RPC_PORT"); port != "" {
-		if p, err := strconv.Atoi(port); err == nil {
-			loadedPrefs.RPCPort = p
-		}
-	}
-	if loadedPrefs.Host == "" {
-		loadedPrefs.Host = defaultHost
-	}
-	if loadedPrefs.RPCPort == 0 {
-		loadedPrefs.RPCPort = defaultRPCPort
+	if loadedPrefs.DefaultHost == "" {
+		loadedPrefs.DefaultHost = defaultCatchHost
 	}
 }
 
 var loadedPrefs prefs
 
 type prefs struct {
-	changed bool   `json:"-"`
-	Host    string `json:"host"`
-	RPCPort int    `json:"rpcPort"`
+	changed     bool   `json:"-"`
+	DefaultHost string `json:"defaultHost"`
 }
 
 func SetHost(host string) {
 	if host == "" {
 		return
 	}
-	if host != loadedPrefs.Host {
-		loadedPrefs.Host = host
+	if host != loadedPrefs.DefaultHost {
+		loadedPrefs.DefaultHost = host
 		loadedPrefs.changed = true
 	}
 }
@@ -90,21 +80,7 @@ func resetHostOverride() {
 }
 
 func Host() string {
-	return loadedPrefs.Host
-}
-
-func SetRPCPort(port int) {
-	if port == 0 {
-		return
-	}
-	if port != loadedPrefs.RPCPort {
-		loadedPrefs.RPCPort = port
-		loadedPrefs.changed = true
-	}
-}
-
-func RPCPort() int {
-	return loadedPrefs.RPCPort
+	return loadedPrefs.DefaultHost
 }
 
 func SetServiceOverride(service string) {

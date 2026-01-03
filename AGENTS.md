@@ -52,5 +52,4 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 
 ## Configuration & Environment
 - `CATCH_HOST`: overrides the default remote host for the client.
-- `CATCH_RPC_PORT`: overrides the RPC port for the client.
 - Keep local config in `~/.yeet/prefs.json` (managed via `yeet prefs`).

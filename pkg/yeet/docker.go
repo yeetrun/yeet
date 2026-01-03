@@ -71,12 +71,12 @@ func getDockerHost(ctx context.Context) (string, error) {
 	}
 	for _, peer := range st.Peer {
 		// Check for FQDN match
-		if strings.EqualFold(strings.TrimSuffix(peer.DNSName, "."), loadedPrefs.Host) {
+		if strings.EqualFold(strings.TrimSuffix(peer.DNSName, "."), Host()) {
 			return strings.TrimSuffix(peer.DNSName, "."), nil
 		}
 		// Check for shortname match
 		h, _, _ := strings.Cut(peer.DNSName, ".")
-		if strings.EqualFold(h, loadedPrefs.Host) {
+		if strings.EqualFold(h, Host()) {
 			return strings.TrimSuffix(peer.DNSName, "."), nil
 		}
 	}

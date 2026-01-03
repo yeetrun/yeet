@@ -18,7 +18,6 @@ import (
 type globalFlagsParsed struct {
 	Host     string `flag:"host" help:"Override target host (CATCH_HOST)"`
 	Service  string `flag:"service" help:"Force the service name for the command"`
-	RPCPort  int    `flag:"rpc-port" help:"Override RPC port (CATCH_RPC_PORT)"`
 	TTY      bool   `flag:"tty" help:"Force TTY for remote commands"`
 	NoTTY    bool   `flag:"no-tty" help:"Disable TTY for remote commands"`
 	Progress string `flag:"progress" help:"Progress output (auto|tty|plain|quiet)"`

@@ -38,7 +38,6 @@ var (
 	legacyDataDir = flag.String("data-dir", must.Get(filepath.Abs("data")), "data directory")
 	tsnetHost     = flag.String("tsnet-host", "catch", "hostname to use for tsnet")
 	tsnetPort     = flag.Int("tsnet-port", defaultTSNetPort, "port to use for tsnet")
-	rpcPort       = flag.Int("rpc-port", defaultRPCPort, "port to use for RPC server")
 
 	// TODO: This should be randomly assigned at stored in the JSON DB.
 	registryInternalAddr = flag.String("registry-internal-addr", "127.0.0.1:0", "address for registry to listen on internally")
@@ -171,7 +170,7 @@ func main() {
 	scfg.LocalClient = must.Get(ts.LocalClient())
 
 	// Acquire the listener.
-	rpcln := must.Get(ts.Listen("tcp", fmt.Sprintf(":%d", *rpcPort)))
+	rpcln := must.Get(ts.Listen("tcp", fmt.Sprintf(":%d", defaultRPCPort)))
 	internalRegLn := must.Get(net.Listen("tcp", *registryInternalAddr))
 	scfg.InternalRegistryAddr = internalRegLn.Addr().String()
 	regln := must.Get(ts.ListenTLS("tcp", ":443"))
