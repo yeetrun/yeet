@@ -664,13 +664,23 @@ func (e *ttyExecer) dockerPullCmdFunc() error {
 }
 
 func (e *ttyExecer) dockerUpdateCmdFunc() error {
-	return e.runAction("docker update", "Update service", func() error {
-		docker, err := e.dockerComposeServiceCmd()
-		if err != nil {
-			return err
-		}
-		return docker.Update()
-	})
+	ui := e.newProgressUI("docker update")
+	ui.Start()
+	defer ui.Stop()
+	ui.StartStep("Update service")
+	// Stop the spinner so compose output has a clean line to write to.
+	ui.Suspend()
+	docker, err := e.dockerComposeServiceCmd()
+	if err != nil {
+		ui.FailStep(err.Error())
+		return err
+	}
+	if err := docker.Update(); err != nil {
+		ui.FailStep(err.Error())
+		return err
+	}
+	ui.DoneStep("")
+	return nil
 }
 
 func (e *ttyExecer) stageCmdFunc(subcmd string, flags cli.StageFlags, args []string) error {
@@ -1616,6 +1626,11 @@ func (e *ttyExecer) newCmd(name string, args ...string) *exec.Cmd {
 	rw := e.rw
 
 	c.Stdin = rw
+	if e.isPty && filepath.Base(name) == "docker" && len(args) > 0 && args[0] == "compose" {
+		// Ensure compose starts on a clean line without wrapping stdout/stderr,
+		// so it still detects a TTY and renders its own progress UI.
+		fmt.Fprint(rw, "\r\033[K")
+	}
 	c.Stdout = rw
 	c.Stderr = rw
 	if e.shouldSuppressCmdOutput(name, args) {
