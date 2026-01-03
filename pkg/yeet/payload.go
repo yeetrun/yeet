@@ -10,8 +10,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/yeetrun/yeet/pkg/codecutil"
-	"github.com/yeetrun/yeet/pkg/ftdetect"
+	"github.com/shayne/yeet/pkg/codecutil"
+	"github.com/shayne/yeet/pkg/ftdetect"
 )
 
 type namedReadCloser struct {

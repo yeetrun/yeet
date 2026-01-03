@@ -20,11 +20,11 @@ import (
 	"slices"
 	"time"
 
-	"github.com/yeetrun/yeet/pkg/catch"
-	"github.com/yeetrun/yeet/pkg/cmdutil"
-	cdb "github.com/yeetrun/yeet/pkg/db"
-	"github.com/yeetrun/yeet/pkg/dnet"
-	"github.com/yeetrun/yeet/pkg/svc"
+	"github.com/shayne/yeet/pkg/catch"
+	"github.com/shayne/yeet/pkg/cmdutil"
+	cdb "github.com/shayne/yeet/pkg/db"
+	"github.com/shayne/yeet/pkg/dnet"
+	"github.com/shayne/yeet/pkg/svc"
 	"tailscale.com/tsnet"
 	"tailscale.com/util/must"
 )
@@ -56,9 +56,9 @@ func initTSNet(dataDir string) *tsnet.Server {
 		return nil
 	}
 	ts := &tsnet.Server{
-		Dir:        filepath.Join(dataDir, "tsnet"),
-		Hostname:   *tsnetHost,
-		Port:       uint16(*tsnetPort),
+		Dir:      filepath.Join(dataDir, "tsnet"),
+		Hostname: *tsnetHost,
+		Port:     uint16(*tsnetPort),
 	}
 	st := must.Get(ts.Up(context.Background()))
 	tsIPs := st.TailscaleIPs

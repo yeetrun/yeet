@@ -13,10 +13,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/yeetrun/yeet/pkg/db"
-	"github.com/yeetrun/yeet/pkg/env"
-	"github.com/yeetrun/yeet/pkg/fileutil"
-	"github.com/yeetrun/yeet/pkg/svc"
+	"github.com/shayne/yeet/pkg/db"
+	"github.com/shayne/yeet/pkg/env"
+	"github.com/shayne/yeet/pkg/fileutil"
+	"github.com/shayne/yeet/pkg/svc"
 	"tailscale.com/util/must"
 )
 

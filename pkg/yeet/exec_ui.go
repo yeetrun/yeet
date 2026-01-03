@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/shayne/yeet/pkg/catchrpc"
 )
 
 type UIConfig struct {

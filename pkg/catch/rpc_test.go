@@ -15,9 +15,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/yeetrun/yeet/pkg/catchrpc"
-	cdb "github.com/yeetrun/yeet/pkg/db"
-	"github.com/yeetrun/yeet/pkg/registry"
+	"github.com/shayne/yeet/pkg/catchrpc"
+	cdb "github.com/shayne/yeet/pkg/db"
+	"github.com/shayne/yeet/pkg/registry"
 )
 
 func newTestServer(t *testing.T) *Server {

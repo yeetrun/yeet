@@ -16,7 +16,7 @@ import (
 	"os/exec"
 	"runtime"
 
-	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/shayne/yeet/pkg/db"
 	"github.com/vishvananda/netns"
 	"tailscale.com/syncs"
 	"tailscale.com/types/ptr"
