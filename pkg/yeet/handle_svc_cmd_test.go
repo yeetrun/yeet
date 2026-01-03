@@ -21,25 +21,60 @@ import (
 
 func TestHandleSvcCmdDefaultsToStatus(t *testing.T) {
 	oldExec := execRemoteFn
+	oldExecOutput := execRemoteOutputFn
 	oldService := serviceOverride
+	oldPrefs := loadedPrefs
 	defer func() {
 		execRemoteFn = oldExec
+		execRemoteOutputFn = oldExecOutput
 		serviceOverride = oldService
+		loadedPrefs = oldPrefs
+		resetHostOverride()
 	}()
 
 	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
 
-	var gotArgs []string
 	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
-		gotArgs = append([]string{}, args...)
+		t.Fatalf("execRemoteFn should not be called for status table rendering")
 		return nil
 	}
 
-	if err := HandleSvcCmd([]string{}); err != nil {
-		t.Fatalf("HandleSvcCmd returned error: %v", err)
+	var gotArgs []string
+	var gotHost string
+	var gotService string
+	execRemoteOutputFn = func(ctx context.Context, host string, service string, args []string, stdin io.Reader) ([]byte, error) {
+		gotHost = host
+		gotService = service
+		gotArgs = append([]string{}, args...)
+		return []byte(`[{"serviceName":"svc-a","serviceType":"service","components":[{"name":"svc-a","status":"running"}]}]`), nil
 	}
-	if len(gotArgs) != 1 || gotArgs[0] != "status" {
-		t.Fatalf("expected default args [status], got %#v", gotArgs)
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe error: %v", err)
+	}
+	os.Stdout = w
+	runErr := HandleSvcCmd([]string{})
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	if _, readErr := io.ReadAll(r); readErr != nil {
+		t.Fatalf("ReadAll error: %v", readErr)
+	}
+
+	if runErr != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", runErr)
+	}
+	if gotHost != "host-a" {
+		t.Fatalf("host = %q, want host-a", gotHost)
+	}
+	if gotService != "svc-a" {
+		t.Fatalf("service = %q, want svc-a", gotService)
+	}
+	if strings.Join(gotArgs, " ") != "status --format=json" {
+		t.Fatalf("expected args [status --format=json], got %#v", gotArgs)
 	}
 }
 
@@ -105,6 +140,73 @@ func TestHandleStatusSingleHostIncludesHostColumn(t *testing.T) {
 	}
 	if !strings.Contains(output, "host-a") {
 		t.Fatalf("expected host value in output, got %q", output)
+	}
+}
+
+func TestHandleStatusServiceOverrideIncludesHostColumn(t *testing.T) {
+	oldExec := execRemoteFn
+	oldExecOutput := execRemoteOutputFn
+	oldService := serviceOverride
+	oldPrefs := loadedPrefs
+	defer func() {
+		execRemoteFn = oldExec
+		execRemoteOutputFn = oldExecOutput
+		serviceOverride = oldService
+		loadedPrefs = oldPrefs
+		resetHostOverride()
+	}()
+
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		t.Fatalf("execRemoteFn should not be called for service status table rendering")
+		return nil
+	}
+	execRemoteOutputFn = func(ctx context.Context, host string, service string, args []string, stdin io.Reader) ([]byte, error) {
+		if host != "host-a" {
+			t.Fatalf("host = %q, want host-a", host)
+		}
+		if service != "svc-a" {
+			t.Fatalf("service = %q, want svc-a", service)
+		}
+		if strings.Join(args, " ") != "status --format=json" {
+			t.Fatalf("unexpected args: %v", args)
+		}
+		return []byte(`[{"serviceName":"svc-a","serviceType":"docker","components":[{"name":"c1","status":"running"}]}]`), nil
+	}
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe error: %v", err)
+	}
+	os.Stdout = w
+	runErr := handleStatusCommand(context.Background(), []string{}, nil, false)
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	out, readErr := io.ReadAll(r)
+	if readErr != nil {
+		t.Fatalf("ReadAll error: %v", readErr)
+	}
+	if runErr != nil {
+		t.Fatalf("handleStatusCommand error: %v", runErr)
+	}
+
+	output := string(out)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected output, got %q", output)
+	}
+	if !strings.Contains(lines[0], "HOST") {
+		t.Fatalf("expected HOST column, got %q", lines[0])
+	}
+	if !strings.Contains(output, "host-a") {
+		t.Fatalf("expected host value in output, got %q", output)
+	}
+	if !strings.Contains(output, "svc-a") {
+		t.Fatalf("expected service value in output, got %q", output)
 	}
 }
 

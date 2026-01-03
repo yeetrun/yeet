@@ -666,8 +666,11 @@ func handleStatusCommand(ctx context.Context, args []string, cfgLoc *projectConf
 	if err != nil {
 		return err
 	}
+	format := strings.TrimSpace(flags.Format)
+	if (format == "" || format == "table") && serviceOverride != "" {
+		return renderStatusTableForService(ctx, Host(), serviceOverride)
+	}
 	if serviceOverride == "" {
-		format := strings.TrimSpace(flags.Format)
 		if hostOverrideSet && (format == "" || format == "table") {
 			return statusMultiHost(ctx, []string{Host()}, flags)
 		}
@@ -733,6 +736,19 @@ func fetchStatusForHost(ctx context.Context, host string, _ cli.StatusFlags) ([]
 		return nil, fmt.Errorf("status on %s returned invalid JSON: %w", host, err)
 	}
 	return statuses, nil
+}
+
+func renderStatusTableForService(ctx context.Context, host, service string) error {
+	args := []string{"status", "--format=json"}
+	payload, err := execRemoteOutputFn(ctx, host, service, args, nil)
+	if err != nil {
+		return err
+	}
+	var statuses []statusService
+	if err := json.Unmarshal(payload, &statuses); err != nil {
+		return fmt.Errorf("status on %s returned invalid JSON: %w", host, err)
+	}
+	return renderStatusTables(os.Stdout, []hostStatusData{{Host: host, Services: statuses}})
 }
 
 func renderStatusTables(w io.Writer, results []hostStatusData) error {
