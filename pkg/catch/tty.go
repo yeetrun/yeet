@@ -93,6 +93,9 @@ type ttyExecer struct {
 	// Assigned during run
 	rw             io.ReadWriter // May be a pty
 	bypassPtyInput bool
+
+	// Optional override for tests.
+	serviceRunnerFn func() (ServiceRunner, error)
 }
 
 func normalizeProgressMode(mode catchrpc.ProgressMode) catchrpc.ProgressMode {
@@ -1576,9 +1579,11 @@ func (e *ttyExecer) removeCmdFunc() error {
 	runner, err := e.serviceRunner()
 	if err != nil {
 		if errors.Is(err, errNoServiceConfigured) {
-			if err := e.s.RemoveService(e.sn); err != nil {
+			report, err := e.s.RemoveService(e.sn)
+			if err != nil {
 				return fmt.Errorf("failed to cleanup service %q: %w", e.sn, err)
 			}
+			e.printRemoveWarnings(report)
 			e.printf("service %q not found\n", e.sn)
 			return nil
 		}
@@ -1591,18 +1596,29 @@ func (e *ttyExecer) removeCmdFunc() error {
 		return nil
 	}
 
-	err = runner.Remove()
-	if err != nil && errors.Is(err, svc.ErrNotInstalled) {
-		// Systemd service is not installed
-		e.printf("warning: systemd service %q was not installed\n", e.sn)
-	} else if err != nil {
-		return fmt.Errorf("failed to remove service: %w", err)
+	if err := runner.Remove(); err != nil {
+		if errors.Is(err, svc.ErrNotInstalled) {
+			// Systemd service is not installed
+			e.printf("warning: systemd service %q was not installed\n", e.sn)
+		} else {
+			e.printf("warning: failed to stop/remove service %q: %v\n", e.sn, err)
+		}
 	}
-	err = e.s.RemoveService(e.sn)
+	report, err := e.s.RemoveService(e.sn)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup service %q: %w", e.sn, err)
 	}
+	e.printRemoveWarnings(report)
 	return nil
+}
+
+func (e *ttyExecer) printRemoveWarnings(report *RemoveReport) {
+	if report == nil {
+		return
+	}
+	for _, warn := range report.Warnings {
+		e.printf("warning: %v\n", warn)
+	}
 }
 
 // ServiceRunner is an interface for the minimal set of methods required to
@@ -1678,6 +1694,9 @@ func (e *ttyExecer) shouldSuppressCmdOutput(name string, args []string) bool {
 }
 
 func (e *ttyExecer) serviceRunner() (ServiceRunner, error) {
+	if e.serviceRunnerFn != nil {
+		return e.serviceRunnerFn()
+	}
 	st, err := e.s.serviceType(e.sn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get service type: %w", err)

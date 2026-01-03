@@ -504,20 +504,56 @@ func (s *Server) IsServiceRunning(name string) (bool, error) {
 	return false, fmt.Errorf("unknown service type")
 }
 
-// RemoveService checks if service is stopped, removes the service directory
-// from the filesystem, and removes the service from the database.
-func (s *Server) RemoveService(name string) error {
-	// Check if service is still running, and if so, return an error. Do not
-	// remove the service if it is still running.
+// RemoveService removes the service from the database and attempts to clean up
+// related files/devices. It always removes the DB entry if possible, returning
+// cleanup warnings separately from fatal errors.
+func (s *Server) RemoveService(name string) (*RemoveReport, error) {
+	report := &RemoveReport{}
+	var tsStableID string
+
 	if running, err := s.IsServiceRunning(name); err != nil {
-		log.Printf("failed to check if service is running: %v", err)
+		report.addWarning(fmt.Errorf("failed to check if service %q is running: %w", name, err))
 	} else if running {
-		return fmt.Errorf("service is not stopped")
+		report.addWarning(fmt.Errorf("service %q is still running", name))
+	}
+
+	if sv, err := s.serviceView(name); err == nil {
+		if sv.TSNet().Valid() && !sv.TSNet().StableID().IsZero() {
+			tsStableID = string(sv.TSNet().StableID())
+		}
+	} else if !errors.Is(err, errServiceNotFound) {
+		report.addWarning(fmt.Errorf("failed to load service view for %q: %w", name, err))
+	}
+
+	if _, err := s.cfg.DB.MutateData(func(d *db.Data) error {
+		delete(d.Services, name)
+		return nil
+	}); err != nil {
+		return report, fmt.Errorf("failed to remove service from db: %w", err)
+	}
+	s.PublishEvent(Event{
+		Type:        EventTypeServiceDeleted,
+		ServiceName: name,
+	})
+
+	if tsStableID != "" {
+		c, err := tsClient(s.ctx)
+		if err != nil {
+			report.addWarning(fmt.Errorf("failed to get tailscale client: %w", err))
+		} else if err := c.DeleteDevice(s.ctx, tsStableID); err != nil {
+			var errResp tailscale.ErrResponse
+			if errors.As(err, &errResp) && errResp.Status == http.StatusNotFound {
+				log.Printf("tailscale device not found: %v", errResp)
+			} else {
+				report.addWarning(fmt.Errorf("failed to delete tailscale device: %w", err))
+			}
+		}
 	}
 
 	dirs, err := filepath.Glob(filepath.Join(s.cfg.ServicesRoot, name, "*"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to list service directories: %w", err)
+		report.addWarning(fmt.Errorf("failed to list service directories: %w", err))
+		return report, nil
 	}
 	for _, dir := range dirs {
 		if filepath.Base(dir) == "data" {
@@ -526,36 +562,18 @@ func (s *Server) RemoveService(name string) error {
 		}
 		log.Printf("removing service directory: %v", dir)
 		if err := os.RemoveAll(dir); err != nil {
-			return fmt.Errorf("failed to remove service directory: %w", err)
+			report.addWarning(fmt.Errorf("failed to remove service directory %s: %w", dir, err))
 		}
 	}
-	if sv, err := s.serviceView(name); err == nil {
-		if sv.TSNet().Valid() && !sv.TSNet().StableID().IsZero() {
-			c, err := tsClient(s.ctx)
-			if err != nil {
-				return fmt.Errorf("failed to get tailscale client: %w", err)
-			}
-			if err := c.DeleteDevice(s.ctx, string(sv.TSNet().StableID())); err != nil {
-				var errResp tailscale.ErrResponse
-				if errors.As(err, &errResp) && errResp.Status == http.StatusNotFound {
-					log.Printf("tailscale device not found: %v", errResp)
-				} else {
-					return fmt.Errorf("failed to delete tailscale device: %w", err)
-				}
-			}
-		}
-	}
+	return report, nil
+}
 
-	_, err = s.cfg.DB.MutateData(func(d *db.Data) error {
-		delete(d.Services, name)
-		return nil
-	})
+type RemoveReport struct {
+	Warnings []error
+}
+
+func (r *RemoveReport) addWarning(err error) {
 	if err != nil {
-		return fmt.Errorf("failed to remove service from db: %w", err)
+		r.Warnings = append(r.Warnings, err)
 	}
-	s.PublishEvent(Event{
-		Type:        EventTypeServiceDeleted,
-		ServiceName: name,
-	})
-	return nil
 }
