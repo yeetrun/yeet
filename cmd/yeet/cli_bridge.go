@@ -11,7 +11,7 @@ import (
 )
 
 // localGroupCommands lists group commands handled locally (not bridged to catch).
-// Keep this in sync with cmd/yeet/yeet.go group handlers and
+// Keep this in sync with cmd/yeet/cli.go group handlers and
 // pkg/cli/cli.go remoteGroupInfos/remoteGroupFlagSpecs.
 var localGroupCommands = map[string]map[string]struct{}{
 	"docker": {
