@@ -670,16 +670,17 @@ func handleStatusCommand(ctx context.Context, args []string, cfgLoc *projectConf
 	if (format == "" || format == "table") && serviceOverride != "" {
 		return renderStatusTableForService(ctx, Host(), serviceOverride)
 	}
-	if serviceOverride == "" {
-		if hostOverrideSet && (format == "" || format == "table") {
+	if serviceOverride == "" && (format == "" || format == "table") {
+		if hostOverrideSet {
 			return statusMultiHost(ctx, []string{Host()}, flags)
 		}
-		if !hostOverrideSet && cfgLoc != nil {
+		if cfgLoc != nil {
 			hosts := cfgLoc.Config.AllHosts()
 			if len(hosts) > 0 {
 				return statusMultiHost(ctx, hosts, flags)
 			}
 		}
+		return statusMultiHost(ctx, []string{Host()}, flags)
 	}
 	svc := getService()
 	statusArgs := append([]string{"status"}, args...)
@@ -722,7 +723,7 @@ func statusMultiHost(ctx context.Context, hosts []string, flags cli.StatusFlags)
 		}
 		return enc.Encode(results)
 	}
-	return renderStatusTables(os.Stdout, results)
+	return renderStatusTables(os.Stdout, results, true)
 }
 
 func fetchStatusForHost(ctx context.Context, host string, _ cli.StatusFlags) ([]statusService, error) {
@@ -748,32 +749,54 @@ func renderStatusTableForService(ctx context.Context, host, service string) erro
 	if err := json.Unmarshal(payload, &statuses); err != nil {
 		return fmt.Errorf("status on %s returned invalid JSON: %w", host, err)
 	}
-	return renderStatusTables(os.Stdout, []hostStatusData{{Host: host, Services: statuses}})
+	return renderStatusTables(os.Stdout, []hostStatusData{{Host: host, Services: statuses}}, false)
 }
 
-func renderStatusTables(w io.Writer, results []hostStatusData) error {
+const statusContainersMaxWidth = 32
+
+func renderStatusTables(w io.Writer, results []hostStatusData, aggregateContainers bool) error {
 	type statusRow struct {
-		Host      string
-		Service   string
-		Type      string
-		Container string
-		Status    string
+		Host       string
+		Service    string
+		Type       string
+		Containers string
+		Status     string
 	}
 
 	rows := make([]statusRow, 0)
 	for _, res := range results {
 		for _, status := range res.Services {
+			if aggregateContainers && status.ServiceType == dockerServiceType {
+				rows = append(rows, statusRow{
+					Host:       res.Host,
+					Service:    status.ServiceName,
+					Type:       status.ServiceType,
+					Containers: truncateStatusContainers(formatStatusContainers(status.Components)),
+					Status:     dockerAggregateStatus(status.Components),
+				})
+				continue
+			}
+			if len(status.Components) == 0 {
+				rows = append(rows, statusRow{
+					Host:       res.Host,
+					Service:    status.ServiceName,
+					Type:       status.ServiceType,
+					Containers: "-",
+					Status:     "unknown",
+				})
+				continue
+			}
 			for _, component := range status.Components {
 				container := "-"
 				if status.ServiceType == dockerServiceType {
 					container = component.Name
 				}
 				rows = append(rows, statusRow{
-					Host:      res.Host,
-					Service:   status.ServiceName,
-					Type:      status.ServiceType,
-					Container: container,
-					Status:    component.Status,
+					Host:       res.Host,
+					Service:    status.ServiceName,
+					Type:       status.ServiceType,
+					Containers: container,
+					Status:     component.Status,
 				})
 			}
 		}
@@ -786,18 +809,76 @@ func renderStatusTables(w io.Writer, results []hostStatusData) error {
 		if rows[i].Host != rows[j].Host {
 			return rows[i].Host < rows[j].Host
 		}
-		if rows[i].Container != rows[j].Container {
-			return rows[i].Container < rows[j].Container
+		if rows[i].Containers != rows[j].Containers {
+			return rows[i].Containers < rows[j].Containers
 		}
 		return rows[i].Status < rows[j].Status
 	})
 
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(tw, "SERVICE\tHOST\tTYPE\tCONTAINER\tSTATUS\t")
+	header := "CONTAINER"
+	if aggregateContainers {
+		header = "CONTAINERS"
+	}
+	fmt.Fprintf(tw, "SERVICE\tHOST\tTYPE\t%s\tSTATUS\t\n", header)
 	for _, row := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t\n", row.Service, row.Host, row.Type, row.Container, row.Status)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t\n", row.Service, row.Host, row.Type, row.Containers, row.Status)
 	}
 	return tw.Flush()
+}
+
+func dockerAggregateStatus(components []statusComponent) string {
+	total := len(components)
+	if total == 0 {
+		return "(0) stopped"
+	}
+	running := 0
+	stopped := 0
+	for _, component := range components {
+		switch component.Status {
+		case "running":
+			running++
+		case "stopped":
+			stopped++
+		}
+	}
+	if running == total {
+		return fmt.Sprintf("running (%d)", total)
+	}
+	if stopped == total {
+		return fmt.Sprintf("stopped (%d)", total)
+	}
+	return fmt.Sprintf("partial (%d/%d)", running, total)
+}
+
+func formatStatusContainers(components []statusComponent) string {
+	if len(components) == 0 {
+		return "-"
+	}
+	names := make([]string, 0, len(components))
+	for _, component := range components {
+		if component.Name == "" {
+			continue
+		}
+		names = append(names, component.Name)
+	}
+	if len(names) == 0 {
+		return "-"
+	}
+	return strings.Join(names, ",")
+}
+
+func truncateStatusContainers(value string) string {
+	if value == "-" || statusContainersMaxWidth <= 0 {
+		return value
+	}
+	if len(value) <= statusContainersMaxWidth {
+		return value
+	}
+	if statusContainersMaxWidth <= 3 {
+		return value[:statusContainersMaxWidth]
+	}
+	return value[:statusContainersMaxWidth-3] + "..."
 }
 
 func runFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) error {

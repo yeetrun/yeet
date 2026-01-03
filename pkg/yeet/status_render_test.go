@@ -28,7 +28,7 @@ func TestRenderStatusTablesSortedWithHostColumn(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := renderStatusTables(&buf, results); err != nil {
+	if err := renderStatusTables(&buf, results, false); err != nil {
 		t.Fatalf("renderStatusTables error: %v", err)
 	}
 
@@ -59,5 +59,79 @@ func TestRenderStatusTablesSortedWithHostColumn(t *testing.T) {
 		if i-1 < len(wantOrder) && !strings.HasPrefix(normalized, wantOrder[i-1]) {
 			t.Fatalf("row %d = %q, want prefix %q", i, lines[i], wantOrder[i-1])
 		}
+	}
+}
+
+func TestRenderStatusTablesAggregatesDockerServices(t *testing.T) {
+	results := []hostStatusData{
+		{
+			Host: "host-a",
+			Services: []statusService{
+				{ServiceName: "svc-a", ServiceType: "docker", Components: []statusComponent{
+					{Name: "a1", Status: "running"},
+					{Name: "a2", Status: "running"},
+				}},
+				{ServiceName: "svc-b", ServiceType: "docker", Components: []statusComponent{
+					{Name: "b1", Status: "stopped"},
+					{Name: "b2", Status: "stopped"},
+				}},
+				{ServiceName: "svc-c", ServiceType: "docker", Components: []statusComponent{
+					{Name: "c1", Status: "running"},
+					{Name: "c2", Status: "stopped"},
+				}},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := renderStatusTables(&buf, results, true); err != nil {
+		t.Fatalf("renderStatusTables error: %v", err)
+	}
+
+	output := buf.String()
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected output lines, got %q", output)
+	}
+	if !strings.Contains(lines[0], "CONTAINERS") {
+		t.Fatalf("expected CONTAINERS header, got %q", lines[0])
+	}
+	if !strings.Contains(output, "running (2)") {
+		t.Fatalf("expected running summary, got %q", output)
+	}
+	if !strings.Contains(output, "stopped (2)") {
+		t.Fatalf("expected stopped summary, got %q", output)
+	}
+	if !strings.Contains(output, "partial (1/2)") {
+		t.Fatalf("expected partial summary, got %q", output)
+	}
+}
+
+func TestRenderStatusTablesTruncatesContainers(t *testing.T) {
+	results := []hostStatusData{
+		{
+			Host: "host-a",
+			Services: []statusService{
+				{ServiceName: "svc-a", ServiceType: "docker", Components: []statusComponent{
+					{Name: "alpha"},
+					{Name: "bravo"},
+					{Name: "charlie"},
+					{Name: "delta"},
+					{Name: "echo"},
+					{Name: "foxtrot"},
+					{Name: "golf"},
+				}},
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := renderStatusTables(&buf, results, true); err != nil {
+		t.Fatalf("renderStatusTables error: %v", err)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "...") {
+		t.Fatalf("expected truncated containers list, got %q", output)
 	}
 }
