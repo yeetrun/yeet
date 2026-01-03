@@ -12,3 +12,7 @@ set -euo pipefail
 
 go run ./cmd/yeet init "${usage_host?}"
 '''
+
+[tasks.install-githooks]
+description = "Install git hooks by pointing core.hooksPath at .githooks"
+run = "git config --local core.hooksPath .githooks"
