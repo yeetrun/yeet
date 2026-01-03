@@ -166,29 +166,15 @@ func initCatch(userAtRemote string) error {
 	ui.DoneStep(buildDetail)
 
 	ui.StartStep("Upload catch")
-	uploadStart := time.Now()
-	cmd := exec.Command("scp", "-q", "-C", bin, fmt.Sprintf("%s:catch", userAtRemote))
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	uploadDetail, err := uploadCatchBinary(ui, bin, binSize, userAtRemote)
+	if err != nil {
 		ui.FailStep("upload failed")
-		return fmt.Errorf("failed to copy catch binary to remote host")
-	}
-	uploadDetail := ""
-	if binSize > 0 {
-		uploadDetail = humanReadableBytes(float64(binSize))
-		if elapsed := time.Since(uploadStart); elapsed > 0 {
-			rate := float64(binSize) / elapsed.Seconds()
-			if rate > 0 {
-				uploadDetail = fmt.Sprintf("%s @ %s/s", uploadDetail, humanReadableBytes(rate))
-			}
-		}
+		return fmt.Errorf("failed to copy catch binary to remote host: %w", err)
 	}
 	ui.DoneStep(uploadDetail)
 
 	ui.StartStep("Install catch")
-	cmd = exec.Command("ssh", userAtRemote, "chmod", "+x", "./catch")
+	cmd := exec.Command("ssh", userAtRemote, "chmod", "+x", "./catch")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
