@@ -161,7 +161,7 @@ func HandleSvcCmd(args []string) error {
 		if err := runRun(payload, runArgs); err != nil {
 			return err
 		}
-		runArgs = normalizeArgs(runArgs)
+		runArgs = normalizeRunArgs(runArgs)
 		return saveRunConfig(cfgLoc, hostOverride, payload, runArgs)
 	// `copy <svc> <file> [dest]`
 	case "copy":
@@ -276,6 +276,91 @@ func normalizeArgs(args []string) []string {
 		}
 		out = append(out, arg)
 	}
+	return out
+}
+
+func normalizeRunArgs(args []string) []string {
+	args = normalizeArgs(args)
+	for i, arg := range args {
+		if arg == "--" {
+			out := make([]string, 0, len(args)-1)
+			out = append(out, args[:i]...)
+			out = append(out, args[i+1:]...)
+			return out
+		}
+	}
+	return args
+}
+
+func splitRunArgsForParsing(args []string) ([]string, []string) {
+	specs := cli.RemoteFlagSpecs()["run"]
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			if i+1 < len(args) {
+				return args[:i], args[i+1:]
+			}
+			return args[:i], nil
+		}
+		if strings.HasPrefix(arg, "--") && len(arg) > 2 {
+			name := arg
+			if idx := strings.Index(name, "="); idx != -1 {
+				name = name[:idx]
+			}
+			spec, ok := specs[name]
+			if !ok {
+				return args[:i], args[i:]
+			}
+			if spec.ConsumesValue && !strings.Contains(arg, "=") {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			if strings.Contains(arg, "=") {
+				name := arg[:strings.Index(arg, "=")]
+				if _, ok := specs[name]; ok {
+					continue
+				}
+				return args[:i], args[i:]
+			}
+			if len(arg) == 2 {
+				spec, ok := specs[arg]
+				if !ok {
+					return args[:i], args[i:]
+				}
+				if spec.ConsumesValue {
+					i++
+				}
+				continue
+			}
+			short := "-" + string(arg[1])
+			spec, ok := specs[short]
+			if !ok {
+				return args[:i], args[i:]
+			}
+			if spec.ConsumesValue {
+				continue
+			}
+			continue
+		}
+	}
+	return args, nil
+}
+
+func rehydrateRunArgs(args []string) []string {
+	args = normalizeArgs(args)
+	if len(args) == 0 {
+		return nil
+	}
+	flagArgs, payloadArgs := splitRunArgsForParsing(args)
+	if len(payloadArgs) == 0 {
+		return flagArgs
+	}
+	out := make([]string, 0, len(flagArgs)+1+len(payloadArgs))
+	out = append(out, flagArgs...)
+	out = append(out, "--")
+	out = append(out, payloadArgs...)
 	return out
 }
 
@@ -912,7 +997,7 @@ func runFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) er
 	if strings.TrimSpace(payload) == "" {
 		return fmt.Errorf("no payload configured for %s@%s", service, host)
 	}
-	return runRun(payload, entry.Args)
+	return runRun(payload, rehydrateRunArgs(entry.Args))
 }
 
 func runCronFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) error {
@@ -978,7 +1063,7 @@ func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload s
 		Host:    host,
 		Type:    serviceTypeRun,
 		Payload: payloadRel,
-		Args:    runArgs,
+		Args:    normalizeRunArgs(runArgs),
 	}
 	loc.Config.SetServiceEntry(entry)
 	return saveProjectConfig(loc)
