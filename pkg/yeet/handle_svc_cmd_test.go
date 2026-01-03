@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package yeet
 
 import (
 	"bytes"
@@ -34,8 +34,8 @@ func TestHandleSvcCmdDefaultsToStatus(t *testing.T) {
 		return nil
 	}
 
-	if err := handleSvcCmd([]string{}); err != nil {
-		t.Fatalf("handleSvcCmd returned error: %v", err)
+	if err := HandleSvcCmd([]string{}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
 	}
 	if len(gotArgs) != 1 || gotArgs[0] != "status" {
 		t.Fatalf("expected default args [status], got %#v", gotArgs)
@@ -56,7 +56,7 @@ func TestHandleSvcCmdLogsRequiresService(t *testing.T) {
 		return nil
 	}
 
-	err := handleSvcCmd([]string{"logs"})
+	err := HandleSvcCmd([]string{"logs"})
 	if err == nil {
 		t.Fatalf("expected missing service error")
 	}
@@ -91,8 +91,8 @@ func TestHandleSvcCmdCronSplitsQuotedExpression(t *testing.T) {
 		return nil
 	}
 
-	if err := handleSvcCmd([]string{"cron", bin, "0 9 15 * *", "--", "-live"}); err != nil {
-		t.Fatalf("handleSvcCmd returned error: %v", err)
+	if err := HandleSvcCmd([]string{"cron", bin, "0 9 15 * *", "--", "-live"}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
 	}
 
 	want := []string{"cron", "0", "9", "15", "*", "*", "-live"}
@@ -371,8 +371,8 @@ func TestHandleSvcCmdRunPullBeforePayload(t *testing.T) {
 		return nil
 	}
 
-	if err := handleSvcCmd([]string{"run", "--pull", compose}); err != nil {
-		t.Fatalf("handleSvcCmd returned error: %v", err)
+	if err := HandleSvcCmd([]string{"run", "--pull", compose}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
 	}
 
 	wantArgs := []string{"run", "--pull"}
@@ -780,8 +780,8 @@ func TestHandleSvcCmdEnvCopyUsesExecRemote(t *testing.T) {
 		return nil
 	}
 
-	if err := handleSvcCmd([]string{"env", "copy", src}); err != nil {
-		t.Fatalf("handleSvcCmd returned error: %v", err)
+	if err := HandleSvcCmd([]string{"env", "copy", src}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
 	}
 
 	if gotService != "svc-a" {
@@ -819,8 +819,8 @@ func TestHandleSvcCmdEnvSetUsesExecRemote(t *testing.T) {
 		return nil
 	}
 
-	if err := handleSvcCmd([]string{"env", "set", "FOO=bar", "FOO=baz", "PORT=8080"}); err != nil {
-		t.Fatalf("handleSvcCmd returned error: %v", err)
+	if err := HandleSvcCmd([]string{"env", "set", "FOO=bar", "FOO=baz", "PORT=8080"}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
 	}
 
 	if gotService != "svc-a" {
