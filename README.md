@@ -41,6 +41,8 @@ yeet is a lightweight client + server setup for deploying and managing services 
 
 ## Docker Quickstart (Most Common Path: Compose)
 
+Host terminology: `yeet init root@<host>` uses the SSH **machine host**. `yeet run <svc>@<host>` (and `CATCH_HOST`) uses the **catch host** (Tailscale/tsnet hostname).
+
 ```bash
 yeet init root@<host>
 yeet run <svc> ./compose.yml
