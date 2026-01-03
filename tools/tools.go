@@ -10,5 +10,6 @@ package tools
 
 import (
 	_ "github.com/google/addlicense"
+	_ "github.com/tailscale/depaware"
 	_ "tailscale.com/cmd/cloner"
 )
