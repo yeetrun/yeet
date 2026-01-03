@@ -198,6 +198,7 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
 		s:           s,
 		args:        req.Args,
 		sn:          req.Service,
+		hostLabel:   req.Host,
 		user:        req.User,
 		payloadName: req.PayloadName,
 		progress:    req.Progress,

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/yeetrun/yeet/pkg/catch"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 )
 
@@ -73,7 +72,7 @@ func remoteHostOSAndArch(userAtRemote string) (system, goarch string, _ error) {
 func remoteCatchOSAndArch() (goos, goarch string, _ error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	var si catch.ServerInfo
+	var si serverInfo
 	if err := newRPCClient(loadedPrefs.Host).Call(ctx, "catch.Info", nil, &si); err != nil {
 		return "", "", fmt.Errorf("failed to get version of catch binary: %w", err)
 	}
@@ -136,7 +135,7 @@ func initCatch(userAtRemote string) error {
 	}
 	isTTY := isTerminalFn(int(os.Stdout.Fd()))
 	enabled, quiet := initProgressSettings(execProgressMode(), isTTY)
-	ui := newInitUI(os.Stdout, enabled, quiet, loadedPrefs.Host, userAtRemote, catch.CatchService)
+	ui := newInitUI(os.Stdout, enabled, quiet, loadedPrefs.Host, userAtRemote, catchServiceName)
 	ui.Start()
 	defer ui.Stop()
 

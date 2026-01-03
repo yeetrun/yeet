@@ -14,7 +14,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/yeetrun/yeet/pkg/catch"
 	"tailscale.com/client/tailscale"
 )
 
@@ -53,7 +52,7 @@ func HandleListHosts(ctx context.Context, tags []string) error {
 		}
 		rpc := newRPCClient(host)
 		infoCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		var info catch.ServerInfo
+		var info serverInfo
 		if err := rpc.Call(infoCtx, "catch.Info", nil, &info); err != nil {
 			log.Printf("failed to get version for %s: %v", host, err)
 			fmt.Fprintf(w, "%s\t%s\t%s\n", host, "unknown", strings.Join(peer.Tags.AsSlice(), ","))

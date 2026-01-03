@@ -5,6 +5,7 @@
 package yeet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -15,7 +16,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/yeetrun/yeet/pkg/catch"
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"golang.org/x/term"
@@ -138,6 +138,7 @@ func execRemote(ctx context.Context, service string, args []string, stdin io.Rea
 	req := catchrpc.ExecRequest{
 		Service: service,
 		Args:    args,
+		Host:    loadedPrefs.Host,
 		TTY:     tty,
 	}
 	req.Progress = execProgressMode()
@@ -188,9 +189,35 @@ func execRemote(ctx context.Context, service string, args []string, stdin io.Rea
 }
 
 var execRemoteFn = execRemote
+var execRemoteOutputFn = execRemoteOutput
 var remoteCatchOSAndArchFn = remoteCatchOSAndArch
 var pushAllLocalImagesFn = pushAllLocalImages
 var isTerminalFn = term.IsTerminal
+
+func execRemoteOutput(ctx context.Context, host string, service string, args []string, stdin io.Reader) ([]byte, error) {
+	client := newRPCClient(host)
+	req := catchrpc.ExecRequest{
+		Service:  service,
+		Args:     args,
+		Host:     host,
+		TTY:      false,
+		Progress: execProgressMode(),
+	}
+	if stdin != nil && stdin != os.Stdin {
+		if payload := payloadNameFromReader(stdin); payload != "" {
+			req.PayloadName = payload
+		}
+	}
+	var buf bytes.Buffer
+	code, err := client.Exec(ctx, req, stdin, &buf, nil)
+	if err != nil {
+		return nil, err
+	}
+	if code != 0 {
+		return nil, remoteExitError{code: code}
+	}
+	return buf.Bytes(), nil
+}
 
 func handleEventsRPC(ctx context.Context, svc string, flags cli.EventsFlags) error {
 	sub := catchrpc.EventsRequest{All: flags.All}
@@ -203,5 +230,5 @@ func handleEventsRPC(ctx context.Context, svc string, flags cli.EventsFlags) err
 }
 
 func HandleMountSys(ctx context.Context, rawArgs []string) error {
-	return execRemote(ctx, catch.SystemService, rawArgs, nil, true)
+	return execRemote(ctx, systemServiceName, rawArgs, nil, true)
 }
