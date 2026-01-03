@@ -33,10 +33,14 @@ func main() {
 		return
 	}
 	if globalFlags.Host != "" {
-		yeet.SetHost(globalFlags.Host)
+		yeet.SetHostOverride(globalFlags.Host)
 	}
 	if globalFlags.Service != "" {
-		serviceOverride = globalFlags.Service
+		svc, host, ok := splitQualifiedName(globalFlags.Service)
+		if ok && host != "" {
+			yeet.SetHostOverride(host)
+		}
+		serviceOverride = svc
 		yeet.SetServiceOverride(serviceOverride)
 	}
 	if globalFlags.RPCPort != 0 {
@@ -46,13 +50,25 @@ func main() {
 	helpConfig := buildHelpConfig()
 	args := yargs.ApplyAliases(remaining, helpConfig)
 	args = rewriteEnvSetArgs(args)
+	if host, updated, ok := splitCommandHost(args); ok {
+		if host != "" {
+			yeet.SetHostOverride(host)
+		}
+		args = updated
+		if len(args) == 1 && args[0] == cli.CommandEvents {
+			args = append(args, "--all")
+		}
+	}
 
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()
 	if len(args) > 1 {
-		if svc, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, serviceOverride); ok {
+		if svc, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, serviceOverride); ok {
 			serviceOverride = svc
 			yeet.SetServiceOverride(serviceOverride)
+			if host != "" {
+				yeet.SetHostOverride(host)
+			}
 			bridgedArgs = bridged
 			args = bridged
 		}

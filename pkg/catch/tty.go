@@ -81,6 +81,7 @@ type ttyExecer struct {
 	args        []string
 	s           *Server
 	sn          string
+	hostLabel   string
 	user        string
 	payloadName string
 	progress    catchrpc.ProgressMode
@@ -119,7 +120,11 @@ func progressSettings(mode catchrpc.ProgressMode, isPty bool) (enabled bool, qui
 
 func (e *ttyExecer) newProgressUI(action string) *runUI {
 	enabled, quiet := progressSettings(e.progress, e.isPty)
-	return newRunUI(e.rw, enabled, quiet, action, e.sn)
+	serviceLabel := e.sn
+	if e.hostLabel != "" && serviceLabel != "" {
+		serviceLabel = fmt.Sprintf("%s@%s", serviceLabel, e.hostLabel)
+	}
+	return newRunUI(e.rw, enabled, quiet, action, serviceLabel)
 }
 
 func (e *ttyExecer) runAction(action, step string, fn func() error) error {
@@ -199,7 +204,7 @@ func (e *ttyExecer) shouldBypassPtyInput() bool {
 		return false
 	}
 	switch e.args[0] {
-	case "run", "copy", "stage":
+	case "run", "copy", "stage", "cron":
 		return true
 	default:
 		return false
@@ -1561,7 +1566,7 @@ func (e *ttyExecer) cronCmdFunc(cronexpr string, args []string) error {
 		OnCalendar: oncal,
 		Persistent: true, // This should be an option keyvalue in the future
 	}
-	return e.install("cron", e.rw, cfg)
+	return e.install("cron", e.payloadReader(), cfg)
 }
 
 func (e *ttyExecer) removeCmdFunc() error {

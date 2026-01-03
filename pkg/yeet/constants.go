@@ -4,9 +4,10 @@
 
 package yeet
 
-func getService() string {
-	if serviceOverride != "" {
-		return serviceOverride
-	}
-	return systemServiceName
-}
+const (
+	systemServiceName = "sys"
+	catchServiceName  = "catch"
+	dockerServiceType = "docker"
+	serviceTypeRun    = "run"
+	serviceTypeCron   = "cron"
+)

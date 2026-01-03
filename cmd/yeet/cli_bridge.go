@@ -73,51 +73,51 @@ func removeArgAt(args []string, idx int) []string {
 	return out
 }
 
-func bridgeServiceArgs(args []string, remoteSpecs map[string]map[string]cli.FlagSpec, groupSpecs map[string]map[string]map[string]cli.FlagSpec, override string) (service string, bridged []string, ok bool) {
+func bridgeServiceArgs(args []string, remoteSpecs map[string]map[string]cli.FlagSpec, groupSpecs map[string]map[string]map[string]cli.FlagSpec, override string) (service string, host string, bridged []string, ok bool) {
 	if len(args) == 0 {
-		return "", nil, false
+		return "", "", nil, false
 	}
 	bridged = args
 
 	if override != "" {
 		if _, ok := remoteSpecs[args[0]]; ok {
-			return override, bridged, true
+			return override, "", bridged, true
 		}
 		if len(args) > 1 {
 			if group, ok := groupSpecs[args[0]]; ok {
 				if _, ok := group[args[1]]; ok {
-					return override, bridged, true
+					return override, "", bridged, true
 				}
 			}
 		}
-		return "", nil, false
+		return "", "", nil, false
 	}
 
 	if flags, ok := remoteSpecs[args[0]]; ok {
 		if idx := findServiceIndex(args, 1, flags); idx != -1 {
-			service = args[idx]
+			service, host, _ = splitQualifiedName(args[idx])
 			bridged = removeArgAt(args, idx)
-			return service, bridged, true
+			return service, host, bridged, true
 		}
-		return "", nil, false
+		return "", "", nil, false
 	}
 
 	if len(args) > 1 {
 		if group, ok := groupSpecs[args[0]]; ok {
 			if locals, ok := localGroupCommands[args[0]]; ok {
 				if _, ok := locals[args[1]]; ok {
-					return "", nil, false
+					return "", "", nil, false
 				}
 			}
 			if flags, ok := group[args[1]]; ok {
 				if idx := findServiceIndex(args, 2, flags); idx != -1 {
-					service = args[idx]
+					service, host, _ = splitQualifiedName(args[idx])
 					bridged = removeArgAt(args, idx)
-					return service, bridged, true
+					return service, host, bridged, true
 				}
-				return "", nil, false
+				return "", "", nil, false
 			}
 		}
 	}
-	return "", nil, false
+	return "", "", nil, false
 }

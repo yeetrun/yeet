@@ -45,6 +45,7 @@ const (
 
 type ExecRequest struct {
 	Service     string       `json:"service"`
+	Host        string       `json:"host,omitempty"`
 	User        string       `json:"user,omitempty"`
 	Args        []string     `json:"args"`
 	PayloadName string       `json:"payloadName,omitempty"`

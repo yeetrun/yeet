@@ -4,9 +4,8 @@
 
 package yeet
 
-func getService() string {
-	if serviceOverride != "" {
-		return serviceOverride
-	}
-	return systemServiceName
+type serverInfo struct {
+	Version string `json:"version"`
+	GOOS    string `json:"goos"`
+	GOARCH  string `json:"goarch"`
 }

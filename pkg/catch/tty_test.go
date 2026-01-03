@@ -7,6 +7,7 @@ package catch
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -72,5 +73,33 @@ func TestNewCmdDoesNotClearLineWhenNotComposeTTY(t *testing.T) {
 				t.Fatalf("expected no line clear prefix, got %q", got)
 			}
 		})
+	}
+}
+
+func TestProgressUIIncludesHostLabel(t *testing.T) {
+	var buf bytes.Buffer
+	execer := &ttyExecer{
+		rw:        &buf,
+		isPty:     true,
+		progress:  catchrpc.ProgressAuto,
+		sn:        "svc-a",
+		hostLabel: "yeet-hetz",
+	}
+
+	ui := execer.newProgressUI("run")
+	ui.Start()
+
+	if got := buf.String(); !strings.Contains(got, "yeet run svc-a@yeet-hetz") {
+		t.Fatalf("expected host label in header, got %q", got)
+	}
+}
+
+func TestShouldBypassPtyInputForCron(t *testing.T) {
+	execer := &ttyExecer{
+		isPty: true,
+		args:  []string{"cron"},
+	}
+	if !execer.shouldBypassPtyInput() {
+		t.Fatalf("expected cron to bypass pty input")
 	}
 }

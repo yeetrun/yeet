@@ -19,6 +19,8 @@ import (
 var (
 	prefsFile       = filepath.Join(os.Getenv("HOME"), ".yeet", "prefs.json")
 	serviceOverride string
+	hostOverride    string
+	hostOverrideSet bool
 )
 
 const (
@@ -66,6 +68,27 @@ func SetHost(host string) {
 	}
 }
 
+func SetHostOverride(host string) {
+	if host == "" {
+		return
+	}
+	hostOverride = host
+	hostOverrideSet = true
+	SetHost(host)
+}
+
+func HostOverride() (string, bool) {
+	if !hostOverrideSet {
+		return "", false
+	}
+	return hostOverride, true
+}
+
+func resetHostOverride() {
+	hostOverride = ""
+	hostOverrideSet = false
+}
+
 func Host() string {
 	return loadedPrefs.Host
 }
@@ -85,7 +108,11 @@ func RPCPort() int {
 }
 
 func SetServiceOverride(service string) {
-	serviceOverride = service
+	svc, host, ok := splitServiceHost(service)
+	if ok && host != "" {
+		SetHostOverride(host)
+	}
+	serviceOverride = svc
 }
 
 func (p *prefs) save() error {

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/codecutil"
 )
 
@@ -39,6 +40,71 @@ func TestHandleSvcCmdDefaultsToStatus(t *testing.T) {
 	}
 	if len(gotArgs) != 1 || gotArgs[0] != "status" {
 		t.Fatalf("expected default args [status], got %#v", gotArgs)
+	}
+}
+
+func TestHandleStatusSingleHostIncludesHostColumn(t *testing.T) {
+	oldExec := execRemoteFn
+	oldFetch := fetchStatusForHostFn
+	oldService := serviceOverride
+	oldPrefs := loadedPrefs
+	defer func() {
+		execRemoteFn = oldExec
+		fetchStatusForHostFn = oldFetch
+		serviceOverride = oldService
+		loadedPrefs = oldPrefs
+		resetHostOverride()
+	}()
+
+	serviceOverride = ""
+	loadedPrefs.Host = "host-a"
+	SetHostOverride("host-a")
+
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		t.Fatalf("execRemoteFn should not be called for single-host table status")
+		return nil
+	}
+	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		if host != "host-a" {
+			t.Fatalf("host = %q, want host-a", host)
+		}
+		return []statusService{
+			{
+				ServiceName: "svc-a",
+				ServiceType: "docker",
+				Components:  []statusComponent{{Name: "c1", Status: "running"}},
+			},
+		}, nil
+	}
+
+	oldStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe error: %v", err)
+	}
+	os.Stdout = w
+	runErr := handleStatusCommand(context.Background(), []string{}, nil, true)
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	out, readErr := io.ReadAll(r)
+	if readErr != nil {
+		t.Fatalf("ReadAll error: %v", readErr)
+	}
+	if runErr != nil {
+		t.Fatalf("handleStatusCommand error: %v", runErr)
+	}
+
+	output := string(out)
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	if len(lines) == 0 {
+		t.Fatalf("expected output, got %q", output)
+	}
+	if !strings.Contains(lines[0], "HOST") {
+		t.Fatalf("expected HOST column, got %q", lines[0])
+	}
+	if !strings.Contains(output, "host-a") {
+		t.Fatalf("expected host value in output, got %q", output)
 	}
 }
 
@@ -69,10 +135,15 @@ func TestHandleSvcCmdCronSplitsQuotedExpression(t *testing.T) {
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn
 	oldService := serviceOverride
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
 	defer func() {
 		execRemoteFn = oldExec
 		remoteCatchOSAndArchFn = oldArch
 		serviceOverride = oldService
+		_ = os.Chdir(cwd)
 	}()
 
 	serviceOverride = "svc-a"
@@ -80,6 +151,9 @@ func TestHandleSvcCmdCronSplitsQuotedExpression(t *testing.T) {
 		return "linux", "amd64", nil
 	}
 	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
 	bin := filepath.Join(tmp, "owesplit")
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
 		t.Fatalf("failed to write temp binary: %v", err)
@@ -311,7 +385,7 @@ func TestCronTTYDependsOnTerminal(t *testing.T) {
 	}
 
 	isTerminalFn = func(int) bool { return false }
-	if err := runCron(bin, []string{"0", "9", "*", "*", "*"}); err != nil {
+	if err := runCron(bin, []string{"0", "9", "*", "*", "*"}, nil); err != nil {
 		t.Fatalf("runCron returned error: %v", err)
 	}
 	if gotTTY {
@@ -319,7 +393,7 @@ func TestCronTTYDependsOnTerminal(t *testing.T) {
 	}
 
 	isTerminalFn = func(int) bool { return true }
-	if err := runCron(bin, []string{"0", "9", "*", "*", "*"}); err != nil {
+	if err := runCron(bin, []string{"0", "9", "*", "*", "*"}, nil); err != nil {
 		t.Fatalf("runCron returned error: %v", err)
 	}
 	if !gotTTY {
@@ -333,12 +407,17 @@ func TestHandleSvcCmdRunPullBeforePayload(t *testing.T) {
 	oldPush := pushAllLocalImagesFn
 	oldService := serviceOverride
 	oldIsTerminal := isTerminalFn
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
 	defer func() {
 		execRemoteFn = oldExec
 		remoteCatchOSAndArchFn = oldArch
 		pushAllLocalImagesFn = oldPush
 		serviceOverride = oldService
 		isTerminalFn = oldIsTerminal
+		_ = os.Chdir(cwd)
 	}()
 
 	serviceOverride = "svc-a"
@@ -351,6 +430,9 @@ func TestHandleSvcCmdRunPullBeforePayload(t *testing.T) {
 	isTerminalFn = func(int) bool { return false }
 
 	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
 	compose := filepath.Join(tmp, "compose.yml")
 	if err := os.WriteFile(compose, []byte("services:\n  app:\n    image: alpine\n"), 0o600); err != nil {
 		t.Fatalf("failed to write compose: %v", err)
@@ -599,7 +681,7 @@ func TestCronBinaryUploadsZstd(t *testing.T) {
 		return nil
 	}
 
-	if err := runCron(bin, []string{"0", "9", "*", "*", "*"}); err != nil {
+	if err := runCron(bin, []string{"0", "9", "*", "*", "*"}, nil); err != nil {
 		t.Fatalf("runCron returned error: %v", err)
 	}
 	if len(gotPayload) < 4 || !bytes.Equal(gotPayload[:4], []byte{0x28, 0xb5, 0x2f, 0xfd}) {
