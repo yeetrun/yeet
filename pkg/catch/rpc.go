@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -96,6 +97,31 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Result:  GetInfo(),
+		})
+	case "catch.ServiceInfo":
+		var params catchrpc.ServiceInfoRequest
+		if len(req.Params) == 0 {
+			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "missing params", nil)
+			return
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "invalid params", err.Error())
+			return
+		}
+		params.Service = strings.TrimSpace(params.Service)
+		if params.Service == "" {
+			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "missing service", nil)
+			return
+		}
+		resp, err := s.serviceInfo(params.Service)
+		if err != nil {
+			writeRPCError(w, req.ID, catchrpc.ErrInternal, "failed to get service info", err.Error())
+			return
+		}
+		writeRPCResponse(w, catchrpc.Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  resp,
 		})
 	case "catch.ServicesList":
 		list, err := s.listServices()

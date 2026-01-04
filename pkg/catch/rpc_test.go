@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"testing"
 
@@ -77,6 +78,65 @@ func TestRPCInfo(t *testing.T) {
 	}
 	if info.GOOS == "" || info.GOARCH == "" {
 		t.Fatalf("unexpected info: %#v", info)
+	}
+}
+
+func TestRPCServiceInfo(t *testing.T) {
+	server := newTestServer(t)
+	_, _, err := server.cfg.DB.MutateService("svc-info", func(_ *cdb.Data, s *cdb.Service) error {
+		s.ServiceType = cdb.ServiceTypeSystemd
+		s.Generation = 2
+		s.LatestGeneration = 2
+		s.SvcNetwork = &cdb.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.5")}
+		s.Artifacts = cdb.ArtifactStore{
+			cdb.ArtifactSystemdUnit: {Refs: map[cdb.ArtifactRef]string{"latest": "/tmp/svc-info.service"}},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("mutate service: %v", err)
+	}
+
+	ts := httptest.NewServer(server.RPCMux())
+	defer ts.Close()
+
+	params, err := json.Marshal(catchrpc.ServiceInfoRequest{Service: "svc-info"})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	req := catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "catch.ServiceInfo",
+		Params:  params,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp, err := http.Post(ts.URL+"/rpc", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp catchrpc.Response
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", rpcResp.Error)
+	}
+	var info catchrpc.ServiceInfoResponse
+	b, _ := json.Marshal(rpcResp.Result)
+	if err := json.Unmarshal(b, &info); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !info.Found || info.Info.Name != "svc-info" {
+		t.Fatalf("unexpected info: %#v", info)
+	}
+	if info.Info.Network.SvcIP != "192.168.100.5" {
+		t.Fatalf("unexpected svc ip: %#v", info.Info.Network.SvcIP)
 	}
 }
 

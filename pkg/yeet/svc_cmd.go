@@ -203,6 +203,8 @@ func HandleSvcCmd(args []string) error {
 		return handleEventsRPC(context.Background(), svc, flags)
 	case "status":
 		return handleStatusCommand(context.Background(), cmdArgs, cfgLoc, hostOverrideSet)
+	case "info":
+		return handleInfoCommand(context.Background(), cmdArgs, cfgLoc)
 	}
 
 	// Assume the first argument is a command

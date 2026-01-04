@@ -75,6 +75,10 @@ type StatusFlags struct {
 	Format string
 }
 
+type InfoFlags struct {
+	Format string
+}
+
 type EventsFlags struct {
 	All bool
 }
@@ -139,6 +143,10 @@ type statusFlagsParsed struct {
 	Format string `flag:"format" default:"table"`
 }
 
+type infoFlagsParsed struct {
+	Format string `flag:"format" default:"plain"`
+}
+
 type eventsFlagsParsed struct {
 	All bool `flag:"all"`
 }
@@ -183,6 +191,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"edit":    {Name: "edit", Description: "Edit a service", ArgsSchema: ServiceArgs{}},
 	"enable":  {Name: "enable", Description: "Enable a service", ArgsSchema: ServiceArgs{}},
 	"events":  {Name: "events", Description: "Show events for a service"},
+	"info":    {Name: "info", Description: "Show detailed info about a service", Usage: "SVC [--format=plain|json|json-pretty]", ArgsSchema: ServiceArgs{}},
 	"logs":    {Name: "logs", Description: "Show logs of a service", ArgsSchema: ServiceArgs{}},
 	"mount": {Name: "mount", Description: "Mount a network filesystem on the host (global, not per-service)", Usage: "SOURCE [name] [--type=nfs] [--opts=defaults]", Examples: []string{
 		"yeet mount host:/export data-share --type=nfs --opts=defaults",
@@ -218,6 +227,7 @@ var remoteFlagSpecs = map[string]map[string]FlagSpec{
 	"edit":      flagSpecsFromStruct(editFlagsParsed{}),
 	"logs":      flagSpecsFromStruct(logsFlagsParsed{}),
 	"status":    flagSpecsFromStruct(statusFlagsParsed{}),
+	"info":      flagSpecsFromStruct(infoFlagsParsed{}),
 	"events":    flagSpecsFromStruct(eventsFlagsParsed{}),
 	"mount":     flagSpecsFromStruct(mountFlagsParsed{}),
 	"version":   flagSpecsFromStruct(versionFlagsParsed{}),
@@ -451,6 +461,17 @@ func ParseStatus(args []string) (StatusFlags, []string, error) {
 		return StatusFlags{}, nil, err
 	}
 	flags := StatusFlags{Format: parsed.Flags.Format}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseInfo(args []string) (InfoFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[infoFlagsParsed](parseArgs)
+	if err != nil {
+		return InfoFlags{}, nil, err
+	}
+	flags := InfoFlags{Format: parsed.Flags.Format}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
 }
