@@ -327,7 +327,7 @@ func (e *ttyExecer) dispatch(args []string) error {
 			return err
 		}
 		if flags.JSON {
-			json.NewEncoder(e.rw).Encode(GetInfo())
+			json.NewEncoder(e.rw).Encode(GetInfoWithInstallUser(e.s.cfg.InstallUser, e.s.cfg.InstallHost))
 		} else {
 			fmt.Fprintln(e.rw, VersionCommit())
 		}

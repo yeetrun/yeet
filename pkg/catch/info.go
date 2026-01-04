@@ -7,9 +7,11 @@ package catch
 import "runtime"
 
 type ServerInfo struct {
-	Version string `json:"version"`
-	GOOS    string `json:"goos"`
-	GOARCH  string `json:"goarch"`
+	Version     string `json:"version"`
+	GOOS        string `json:"goos"`
+	GOARCH      string `json:"goarch"`
+	InstallUser string `json:"installUser,omitempty"`
+	InstallHost string `json:"installHost,omitempty"`
 }
 
 func GetInfo() ServerInfo {
@@ -18,4 +20,11 @@ func GetInfo() ServerInfo {
 		GOARCH:  runtime.GOARCH,
 		GOOS:    runtime.GOOS,
 	}
+}
+
+func GetInfoWithInstallUser(installUser string, installHost string) ServerInfo {
+	info := GetInfo()
+	info.InstallUser = installUser
+	info.InstallHost = installHost
+	return info
 }

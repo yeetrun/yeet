@@ -126,6 +126,8 @@ func (s *Server) RemoveEventListener(h set.Handle) {
 type Config struct {
 	DB                   *db.Store
 	DefaultUser          string
+	InstallUser          string
+	InstallHost          string
 	RootDir              string
 	ServicesRoot         string
 	MountsRoot           string
