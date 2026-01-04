@@ -483,13 +483,22 @@ func runFilePayload(file string, args []string, pushLocalImages bool) (ok bool, 
 	if err != nil {
 		return false, err
 	}
+	defer cleanup()
+	if ft == ftdetect.DockerCompose {
+		flags, _, err := cli.ParseRun(args)
+		if err != nil {
+			return false, err
+		}
+		if len(flags.Publish) > 0 {
+			return false, fmt.Errorf("-p/--publish is not supported for docker compose payloads")
+		}
+	}
 	svc := getService()
 	if ft == ftdetect.DockerCompose && pushLocalImages {
 		if err := pushAllLocalImagesFn(svc, goos, goarch); err != nil {
 			return false, fmt.Errorf("failed to push all local images: %w", err)
 		}
 	}
-	defer cleanup()
 	runArgs := append([]string{"run"}, args...)
 	tty := isTerminalFn(int(os.Stdout.Fd()))
 	if err := execRemoteFn(context.Background(), svc, runArgs, payload, tty); err != nil {

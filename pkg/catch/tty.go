@@ -34,6 +34,7 @@ import (
 	"github.com/shayne/yeet/pkg/fileutil"
 	"github.com/shayne/yeet/pkg/svc"
 	"golang.org/x/sys/unix"
+	"gopkg.in/yaml.v3"
 	"tailscale.com/util/mak"
 )
 
@@ -488,6 +489,7 @@ type netFlags struct {
 	macvlanMac    string
 	macvlanVlan   int
 	macvlanParent string
+	publish       []string
 }
 
 func netFlagsFromRun(flags cli.RunFlags) netFlags {
@@ -500,6 +502,7 @@ func netFlagsFromRun(flags cli.RunFlags) netFlags {
 		macvlanMac:    flags.MacvlanMac,
 		macvlanVlan:   flags.MacvlanVlan,
 		macvlanParent: flags.MacvlanParent,
+		publish:       flags.Publish,
 	}
 }
 
@@ -513,6 +516,7 @@ func netFlagsFromStage(flags cli.StageFlags) netFlags {
 		macvlanMac:    flags.MacvlanMac,
 		macvlanVlan:   flags.MacvlanVlan,
 		macvlanParent: flags.MacvlanParent,
+		publish:       flags.Publish,
 	}
 }
 
@@ -541,6 +545,7 @@ func (e *ttyExecer) fileInstaller(flags netFlags, argsIn []string) FileInstaller
 		Args:        args,
 		PayloadName: e.payloadName,
 		NewCmd:      e.newCmd,
+		Publish:     flags.publish,
 	}
 }
 
@@ -727,6 +732,11 @@ func (e *ttyExecer) stageCmdFunc(subcmd string, flags cli.StageFlags, args []str
 		if err := inst.Close(); err != nil {
 			return fmt.Errorf("failed to close installer: %w", err)
 		}
+		if len(flags.Publish) > 0 {
+			if err := e.applyPublishToCompose(flags.Publish); err != nil {
+				return fmt.Errorf("failed to apply publish ports: %w", err)
+			}
+		}
 		if fi.StageOnly {
 			if ui == nil {
 				fmt.Fprintf(e.rw, "Staged service %q\n", e.sn)
@@ -736,6 +746,72 @@ func (e *ttyExecer) stageCmdFunc(subcmd string, flags cli.StageFlags, args []str
 		return fmt.Errorf("invalid argument %q", subcmd)
 	}
 	return nil
+}
+
+func (e *ttyExecer) applyPublishToCompose(publish []string) error {
+	if len(publish) == 0 {
+		return nil
+	}
+	service, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return err
+	}
+	af := service.AsStruct().Artifacts
+	if af == nil {
+		return fmt.Errorf("compose file not found")
+	}
+	path, ok := af.Staged(db.ArtifactDockerComposeFile)
+	if !ok {
+		path, ok = af.Latest(db.ArtifactDockerComposeFile)
+	}
+	if !ok {
+		return fmt.Errorf("compose file not found")
+	}
+	return updateComposePorts(path, e.sn, publish)
+}
+
+func updateComposePorts(path, serviceName string, publish []string) error {
+	ports := make([]string, 0, len(publish))
+	for _, entry := range publish {
+		if trimmed := strings.TrimSpace(entry); trimmed != "" {
+			ports = append(ports, trimmed)
+		}
+	}
+	if len(ports) == 0 {
+		return nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var doc map[string]any
+	if err := yaml.Unmarshal(content, &doc); err != nil {
+		return err
+	}
+	servicesRaw, ok := doc["services"]
+	if !ok {
+		return fmt.Errorf("compose file missing services")
+	}
+	services, ok := servicesRaw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("compose services are not a map")
+	}
+	serviceRaw, ok := services[serviceName]
+	if !ok {
+		return fmt.Errorf("compose service %q not found", serviceName)
+	}
+	serviceMap, ok := serviceRaw.(map[string]any)
+	if !ok {
+		return fmt.Errorf("compose service %q is malformed", serviceName)
+	}
+	serviceMap["ports"] = ports
+	services[serviceName] = serviceMap
+	doc["services"] = services
+	updated, err := yaml.Marshal(doc)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, updated, 0644)
 }
 
 func (e *ttyExecer) startCmdFunc() error {
@@ -1450,10 +1526,14 @@ func (e *ttyExecer) statusCmdFunc(flags cli.StatusFlags) error {
 			return fmt.Errorf("failed to get all docker compose statuses: %w", err)
 		}
 		for sn, cs := range composeStatuses {
+			serviceType := ServiceDataTypeDocker
+			if service, err := e.s.serviceView(sn); err == nil {
+				serviceType = ServiceDataTypeForService(service)
+			}
 			if len(cs) == 0 {
 				statuses = append(statuses, ServiceStatusData{
 					ServiceName: sn,
-					ServiceType: ServiceDataTypeDocker,
+					ServiceType: serviceType,
 					ComponentStatus: []ComponentStatusData{
 						{
 							Name:   sn,
@@ -1465,7 +1545,7 @@ func (e *ttyExecer) statusCmdFunc(flags cli.StatusFlags) error {
 			}
 			data := ServiceStatusData{
 				ServiceName:     sn,
-				ServiceType:     ServiceDataTypeDocker,
+				ServiceType:     serviceType,
 				ComponentStatus: []ComponentStatusData{},
 			}
 			for cn, status := range cs {

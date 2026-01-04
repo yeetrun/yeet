@@ -45,6 +45,7 @@ type RunFlags struct {
 	MacvlanParent string
 	Restart       bool
 	Pull          bool
+	Publish       []string
 }
 
 type StageFlags struct {
@@ -58,6 +59,7 @@ type StageFlags struct {
 	MacvlanParent string
 	Restart       bool
 	Pull          bool
+	Publish       []string
 }
 
 type EditFlags struct {
@@ -113,6 +115,7 @@ type runFlagsParsed struct {
 	MacvlanParent string   `flag:"macvlan-parent"`
 	Restart       bool     `flag:"restart" default:"true"`
 	Pull          bool     `flag:"pull"`
+	Publish       []string `flag:"publish" short:"p"`
 }
 
 type stageFlagsParsed struct {
@@ -126,6 +129,7 @@ type stageFlagsParsed struct {
 	MacvlanParent string   `flag:"macvlan-parent"`
 	Restart       bool     `flag:"restart" default:"true"`
 	Pull          bool     `flag:"pull"`
+	Publish       []string `flag:"publish" short:"p"`
 }
 
 type editFlagsParsed struct {
@@ -374,6 +378,7 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		MacvlanParent: parsed.Flags.MacvlanParent,
 		Restart:       parsed.Flags.Restart,
 		Pull:          parsed.Flags.Pull,
+		Publish:       parsed.Flags.Publish,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
@@ -398,6 +403,7 @@ func ParseStage(args []string) (StageFlags, string, []string, error) {
 		MacvlanParent: parsed.Flags.MacvlanParent,
 		Restart:       parsed.Flags.Restart,
 		Pull:          parsed.Flags.Pull,
+		Publish:       parsed.Flags.Publish,
 	}
 
 	argsOut := append(parsed.Args, extraArgs...)

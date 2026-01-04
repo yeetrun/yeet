@@ -21,6 +21,8 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 		"--macvlan-mac", "00:11:22:33:44:55",
 		"--macvlan-vlan", "12",
 		"--macvlan-parent", "eth0",
+		"-p", "8000:8000",
+		"-p", "9000:9000",
 		"--pull",
 		"arg1", "arg2",
 	}
@@ -56,6 +58,10 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	wantTags := []string{"tag:a", "tag:b"}
 	if !reflect.DeepEqual(flags.TsTags, wantTags) {
 		t.Errorf("TsTags = %v, want %v", flags.TsTags, wantTags)
+	}
+	wantPublish := []string{"8000:8000", "9000:9000"}
+	if !reflect.DeepEqual(flags.Publish, wantPublish) {
+		t.Errorf("Publish = %v, want %v", flags.Publish, wantPublish)
 	}
 	if got := strings.Join(outArgs, " "); got != "arg1 arg2" {
 		t.Errorf("args = %q, want %q", got, "arg1 arg2")

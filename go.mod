@@ -1,6 +1,6 @@
 module github.com/shayne/yeet
 
-go 1.25.1
+go 1.25.5
 
 require (
 	github.com/BurntSushi/toml v1.4.1-0.20240526193622-a339e1f7089c
@@ -15,7 +15,7 @@ require (
 	github.com/klauspost/compress v1.17.11
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.0
-	github.com/shayne/yargs v1.0.0
+	github.com/shayne/yargs v1.0.1
 	github.com/tailscale/depaware v0.0.0-20251001183927-9c2ad255ef3f
 	github.com/vishvananda/netns v0.0.5
 	golang.org/x/oauth2 v0.30.0

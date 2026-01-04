@@ -509,9 +509,9 @@ func formatServiceDataType(dt string) string {
 	case "binary":
 		return "systemd binary service"
 	case "typescript":
-		return "systemd typescript service"
+		return "typescript service"
 	case "python":
-		return "systemd python service"
+		return "python service"
 	default:
 		return dt
 	}
