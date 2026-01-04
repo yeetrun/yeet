@@ -489,7 +489,7 @@ func runFilePayload(file string, args []string, pushLocalImages bool) (ok bool, 
 		if err != nil {
 			return false, err
 		}
-		if len(flags.Publish) > 0 {
+		if len(flags.Publish) > 0 && pushLocalImages {
 			return false, fmt.Errorf("-p/--publish is not supported for docker compose payloads")
 		}
 	}

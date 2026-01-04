@@ -689,6 +689,52 @@ func TestRunRemoteImageUsesComposePayload(t *testing.T) {
 	}
 }
 
+func TestRunRemoteImageWithPublish(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldPush := pushAllLocalImagesFn
+	oldService := serviceOverride
+	oldIsTerminal := isTerminalFn
+	defer func() {
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		pushAllLocalImagesFn = oldPush
+		serviceOverride = oldService
+		isTerminalFn = oldIsTerminal
+	}()
+
+	serviceOverride = "svc-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	pushAllLocalImagesFn = func(string, string, string) error {
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotArgs = append([]string{}, args...)
+		if stdin == nil {
+			t.Fatalf("expected stdin to be provided")
+		}
+		if tty {
+			t.Fatalf("expected tty=false, got true")
+		}
+		return nil
+	}
+
+	image := "nginx:latest"
+	if err := runRun(image, []string{"-p", "8000:80"}); err != nil {
+		t.Fatalf("runRun returned error: %v", err)
+	}
+
+	wantArgs := []string{"run", "-p", "8000:80"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+}
+
 func TestStageBinaryUploadsZstd(t *testing.T) {
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn
