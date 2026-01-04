@@ -36,6 +36,39 @@ func TestServiceDataTypeForService(t *testing.T) {
 			want: ServiceDataTypeService,
 		},
 		{
+			name: "systemd-binary",
+			service: &db.Service{
+				Name:        "svc-binary",
+				ServiceType: db.ServiceTypeSystemd,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/svc-binary"}},
+				},
+			},
+			want: ServiceDataTypeBinary,
+		},
+		{
+			name: "systemd-typescript",
+			service: &db.Service{
+				Name:        "svc-ts",
+				ServiceType: db.ServiceTypeSystemd,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactTypeScriptFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/svc-ts.ts"}},
+				},
+			},
+			want: ServiceDataTypeTypeScript,
+		},
+		{
+			name: "systemd-python",
+			service: &db.Service{
+				Name:        "svc-py",
+				ServiceType: db.ServiceTypeSystemd,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactPythonFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/svc-py.py"}},
+				},
+			},
+			want: ServiceDataTypePython,
+		},
+		{
 			name: "docker-compose",
 			service: &db.Service{
 				Name:        "svc-docker",

@@ -79,7 +79,8 @@ execLoop:
 			if !ok {
 				continue
 			}
-			if _, err := s.serviceView(sn); err != nil {
+			sv, err := s.serviceView(sn)
+			if err != nil {
 				if errors.Is(err, errServiceNotFound) {
 					continue
 				}
@@ -100,7 +101,7 @@ execLoop:
 
 			data := ServiceStatusData{
 				ServiceName: sn,
-				ServiceType: ServiceDataTypeService,
+				ServiceType: ServiceDataTypeForService(sv),
 				ComponentStatus: []ComponentStatusData{
 					{
 						Name:   sn,
