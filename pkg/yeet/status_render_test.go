@@ -16,7 +16,7 @@ func TestRenderStatusTablesSortedWithHostColumn(t *testing.T) {
 			Host: "host-b",
 			Services: []statusService{
 				{ServiceName: "svc-b", ServiceType: "docker", Components: []statusComponent{{Name: "b", Status: "running"}}},
-				{ServiceName: "svc-a", ServiceType: "service", Components: []statusComponent{{Name: "svc-a", Status: "stopped"}}},
+				{ServiceName: "svc-a", ServiceType: "binary", Components: []statusComponent{{Name: "svc-a", Status: "stopped"}}},
 			},
 		},
 		{
@@ -45,7 +45,7 @@ func TestRenderStatusTablesSortedWithHostColumn(t *testing.T) {
 	wantOrder := []string{
 		"svc-a\thost-a\tdocker\ta1\trunning",
 		"svc-a\thost-a\tdocker\ta2\trunning",
-		"svc-a\thost-b\tservice\t-\tstopped",
+		"svc-a\thost-b\tbinary\t-\tstopped",
 		"svc-b\thost-b\tdocker\tb\trunning",
 	}
 	for i, want := range wantOrder {

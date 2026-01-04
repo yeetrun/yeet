@@ -506,6 +506,12 @@ func formatServiceDataType(dt string) string {
 		return "systemd service"
 	case "cron":
 		return "cron service"
+	case "binary":
+		return "systemd binary service"
+	case "typescript":
+		return "systemd typescript service"
+	case "python":
+		return "systemd python service"
 	default:
 		return dt
 	}

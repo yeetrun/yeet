@@ -15,10 +15,13 @@ type ServiceDataType string
 type ComponentStatus string
 
 const (
-	ServiceDataTypeService ServiceDataType = "service"
-	ServiceDataTypeCron    ServiceDataType = "cron"
-	ServiceDataTypeDocker  ServiceDataType = "docker"
-	ServiceDataTypeUnknown ServiceDataType = "unknown"
+	ServiceDataTypeService    ServiceDataType = "service"
+	ServiceDataTypeCron       ServiceDataType = "cron"
+	ServiceDataTypeDocker     ServiceDataType = "docker"
+	ServiceDataTypeBinary     ServiceDataType = "binary"
+	ServiceDataTypeTypeScript ServiceDataType = "typescript"
+	ServiceDataTypePython     ServiceDataType = "python"
+	ServiceDataTypeUnknown    ServiceDataType = "unknown"
 
 	ComponentStatusStarting ComponentStatus = "starting"
 	ComponentStatusRunning  ComponentStatus = "running"
@@ -71,16 +74,29 @@ func ServiceDataTypeForService(sv db.ServiceView) ServiceDataType {
 		if hasTimerArtifact(sv) {
 			return ServiceDataTypeCron
 		}
+		if hasArtifact(sv, db.ArtifactTypeScriptFile) {
+			return ServiceDataTypeTypeScript
+		}
+		if hasArtifact(sv, db.ArtifactPythonFile) {
+			return ServiceDataTypePython
+		}
+		if hasArtifact(sv, db.ArtifactBinary) {
+			return ServiceDataTypeBinary
+		}
 		return ServiceDataTypeService
 	}
 	return ServiceDataTypeFromServiceType(sv.ServiceType())
 }
 
 func hasTimerArtifact(sv db.ServiceView) bool {
+	return hasArtifact(sv, db.ArtifactSystemdTimerFile)
+}
+
+func hasArtifact(sv db.ServiceView, name db.ArtifactName) bool {
 	if !sv.Valid() {
 		return false
 	}
-	_, ok := sv.Artifacts().GetOk(db.ArtifactSystemdTimerFile)
+	_, ok := sv.Artifacts().GetOk(name)
 	return ok
 }
 
@@ -92,6 +108,12 @@ func ServiceDataTypeFromUnitType(unitType string) ServiceDataType {
 		return ServiceDataTypeCron
 	case "docker":
 		return ServiceDataTypeDocker
+	case "binary":
+		return ServiceDataTypeBinary
+	case "typescript":
+		return ServiceDataTypeTypeScript
+	case "python":
+		return ServiceDataTypePython
 	default:
 		log.Printf("unknown unit type: %q", unitType)
 		return ServiceDataTypeUnknown
