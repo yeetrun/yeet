@@ -57,7 +57,7 @@ func TestSaveRunConfigCreatesToml(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected service config to be saved")
 	}
-	if entry.Type != serviceTypeRun {
+	if entry.Type != "" {
 		t.Fatalf("type = %q", entry.Type)
 	}
 	if entry.Payload != filepath.Join("apps", "compose.yml") {
@@ -121,7 +121,7 @@ func TestSaveRunConfigOverwritesArgs(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected service config to be saved")
 	}
-	if entry.Type != serviceTypeRun {
+	if entry.Type != "" {
 		t.Fatalf("type = %q", entry.Type)
 	}
 	if len(entry.Args) != len(wantArgs) {

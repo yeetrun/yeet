@@ -1061,7 +1061,7 @@ func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload s
 	entry := ServiceEntry{
 		Name:    serviceOverride,
 		Host:    host,
-		Type:    serviceTypeRun,
+		Type:    "",
 		Payload: payloadRel,
 		Args:    normalizeRunArgs(runArgs),
 	}
