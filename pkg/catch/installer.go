@@ -29,6 +29,7 @@ import (
 	"github.com/shayne/yeet/pkg/ftdetect"
 	"github.com/shayne/yeet/pkg/netns"
 	"github.com/shayne/yeet/pkg/svc"
+	"gopkg.in/yaml.v3"
 	"tailscale.com/net/netmon"
 	"tailscale.com/tstime/rate"
 	"tailscale.com/types/lazy"
@@ -44,6 +45,7 @@ type FileInstallerCfg struct {
 	Network   NetworkOpts
 	StageOnly bool
 	NoBinary  bool
+	Publish   []string
 	// PayloadName preserves the original filename for type detection.
 	PayloadName string
 
@@ -486,6 +488,7 @@ func (i *FileInstaller) installOnClose() error {
 	var dst string
 	var postRenameActions []func() error
 	var detectedServiceType db.ServiceType
+	var allowServiceTypeUpgrade bool
 	if i.cfg.EnvFile {
 		er := i.s.serviceEnvDir(i.cfg.ServiceName)
 		dst = filepath.Join(er, "env-"+i.version())
@@ -523,8 +526,8 @@ func (i *FileInstaller) installOnClose() error {
 			}
 		}
 
-		if i.cfg.Pull && binFT != ftdetect.DockerCompose {
-			return fmt.Errorf("--pull is only valid for docker compose payloads")
+		if i.cfg.Pull && binFT != ftdetect.DockerCompose && binFT != ftdetect.Python && binFT != ftdetect.TypeScript {
+			return fmt.Errorf("--pull is only valid for docker compose, python, or typescript payloads")
 		}
 
 		var artifactName db.ArtifactName
@@ -553,6 +556,9 @@ func (i *FileInstaller) installOnClose() error {
 			}
 		case ftdetect.DockerCompose:
 			i.printf("Detected Docker Compose file\n")
+			if len(i.cfg.Publish) > 0 {
+				return fmt.Errorf("-p/--publish is not supported for docker compose payloads")
+			}
 			// serviceType = db.ServiceTypeDockerCompose
 			binName := fmt.Sprintf("docker-compose.%s.yml", i.version())
 			// Move the "binary" file to the final location.
@@ -561,81 +567,48 @@ func (i *FileInstaller) installOnClose() error {
 			detectedServiceType = db.ServiceTypeDockerCompose
 		case ftdetect.TypeScript:
 			i.printf("Detected TypeScript file\n")
-			// TypeScript runs in a Docker container but is installed as a systemd
-			// service. I know, it's weird.
-			// serviceType = db.ServiceTypeSystemd
 			binName := fmt.Sprintf("main.%s.ts", i.version())
-			// Move the "binary" file to the final location.
 			binDir := i.s.serviceBinDir(i.cfg.ServiceName)
 			runDir := i.s.serviceRunDir(i.cfg.ServiceName)
 			dataDir := i.s.serviceDataDir(i.cfg.ServiceName)
 			dst = filepath.Join(binDir, binName)
-			dockerCmd, err := svc.DockerCmd()
+
+			composeName := fmt.Sprintf("docker-compose.%s.yml", i.version())
+			composePath := filepath.Join(binDir, composeName)
+			composeContent, err := typescriptComposeFile(i.cfg.ServiceName, runDir, dataDir, i.cfg.Args, i.cfg.Publish)
 			if err != nil {
-				return fmt.Errorf("failed get Docker cmd: %w", err)
+				return fmt.Errorf("failed to render typescript compose file: %w", err)
 			}
-			su := &svc.SystemdUnit{
-				Name:             i.cfg.ServiceName,
-				Executable:       dockerCmd,
-				WorkingDirectory: dataDir,
-				Arguments: append([]string{
-					"run", "--rm", "--tty",
-					"--net", "host",
-					"--volume", fmt.Sprintf("%s:/data", dataDir),
-					"--volume", fmt.Sprintf("%s:/main.ts", filepath.Join(runDir, "main.ts")),
-					"denoland/deno:2.0.0-rc.2",
-					"run", "--allow-net",
-					"/main.ts",
-				}, i.cfg.Args...),
+			if err := os.WriteFile(composePath, []byte(composeContent), 0644); err != nil {
+				return fmt.Errorf("failed to write typescript compose file: %w", err)
 			}
-			units, err := su.WriteOutUnitFiles(binDir)
-			if err != nil {
-				return fmt.Errorf("failed to write unit files: %v", err)
-			}
-			for u, p := range units {
-				mak.Set(&i.artifacts, u, p)
-			}
-			// TODO: add support for user deno flags
+			mak.Set(&i.artifacts, db.ArtifactDockerComposeFile, composePath)
+
 			artifactName = db.ArtifactTypeScriptFile
-			detectedServiceType = db.ServiceTypeSystemd
+			detectedServiceType = db.ServiceTypeDockerCompose
+			allowServiceTypeUpgrade = true
 		case ftdetect.Python:
 			i.printf("Detected Python file\n")
-			// Python runs in a Docker container but is installed as a systemd
-			// service, similar to TypeScript
 			binName := fmt.Sprintf("main.%s.py", i.version())
-			// Move the "binary" file to the final location.
 			binDir := i.s.serviceBinDir(i.cfg.ServiceName)
 			runDir := i.s.serviceRunDir(i.cfg.ServiceName)
 			dataDir := i.s.serviceDataDir(i.cfg.ServiceName)
 			dst = filepath.Join(binDir, binName)
-			dockerCmd, err := svc.DockerCmd()
-			if err != nil {
-				return fmt.Errorf("failed get Docker cmd: %w", err)
-			}
 
-			uvArgs := []string{"uv", "run", "/main.py"}
-
-			su := &svc.SystemdUnit{
-				Name:             i.cfg.ServiceName,
-				Executable:       dockerCmd,
-				WorkingDirectory: dataDir,
-				Arguments: append([]string{
-					"run", "--rm", "--tty",
-					"--net", "host",
-					"--volume", fmt.Sprintf("%s:/data", dataDir),
-					"--volume", fmt.Sprintf("%s:/main.py", filepath.Join(runDir, "main.py")),
-					"ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
-				}, append(uvArgs, i.cfg.Args...)...),
-			}
-			units, err := su.WriteOutUnitFiles(binDir)
+			composeName := fmt.Sprintf("docker-compose.%s.yml", i.version())
+			composePath := filepath.Join(binDir, composeName)
+			composeContent, err := pythonComposeFile(i.cfg.ServiceName, runDir, dataDir, i.cfg.Args, i.cfg.Publish)
 			if err != nil {
-				return fmt.Errorf("failed to write unit files: %v", err)
+				return fmt.Errorf("failed to render python compose file: %w", err)
 			}
-			for u, p := range units {
-				mak.Set(&i.artifacts, u, p)
+			if err := os.WriteFile(composePath, []byte(composeContent), 0644); err != nil {
+				return fmt.Errorf("failed to write python compose file: %w", err)
 			}
+			mak.Set(&i.artifacts, db.ArtifactDockerComposeFile, composePath)
+
 			artifactName = db.ArtifactPythonFile
-			detectedServiceType = db.ServiceTypeSystemd
+			detectedServiceType = db.ServiceTypeDockerCompose
+			allowServiceTypeUpgrade = true
 		case ftdetect.Unknown:
 			return fmt.Errorf("unknown file type")
 		}
@@ -664,7 +637,11 @@ func (i *FileInstaller) installOnClose() error {
 		if s.ServiceType == "" {
 			s.ServiceType = detectedServiceType
 		} else if detectedServiceType != "" && s.ServiceType != detectedServiceType {
-			return fmt.Errorf("service type mismatch: %v != %v", s.ServiceType, detectedServiceType)
+			if allowServiceTypeUpgrade && s.ServiceType == db.ServiceTypeSystemd && detectedServiceType == db.ServiceTypeDockerCompose {
+				s.ServiceType = detectedServiceType
+			} else {
+				return fmt.Errorf("service type mismatch: %v != %v", s.ServiceType, detectedServiceType)
+			}
 		}
 		if i.macvlan != nil {
 			s.Macvlan = i.macvlan
@@ -725,6 +702,77 @@ func (i *FileInstaller) version() string {
 		i.ver = fileutil.Version()
 	}
 	return i.ver
+}
+
+type composeFile struct {
+	Services map[string]composeService `yaml:"services"`
+}
+
+type composeService struct {
+	Image      string   `yaml:"image,omitempty"`
+	Restart    string   `yaml:"restart,omitempty"`
+	Volumes    []string `yaml:"volumes,omitempty"`
+	Command    []string `yaml:"command,omitempty"`
+	WorkingDir string   `yaml:"working_dir,omitempty"`
+	Ports      []string `yaml:"ports,omitempty"`
+}
+
+func pythonComposeFile(serviceName, runDir, dataDir string, args []string, publish []string) (string, error) {
+	command := append([]string{"uv", "run", "/main.py"}, args...)
+	ports := normalizePublish(publish)
+	compose := composeFile{
+		Services: map[string]composeService{
+			serviceName: {
+				Image:   "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+				Restart: "unless-stopped",
+				Volumes: []string{
+					fmt.Sprintf("%s:/data", dataDir),
+					fmt.Sprintf("%s:/main.py:ro", filepath.Join(runDir, "main.py")),
+				},
+				Command: command,
+				Ports:   ports,
+			},
+		},
+	}
+	content, err := yaml.Marshal(compose)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
+}
+
+func typescriptComposeFile(serviceName, runDir, dataDir string, args []string, publish []string) (string, error) {
+	command := append([]string{"deno", "run", "--allow-net", "/main.ts"}, args...)
+	ports := normalizePublish(publish)
+	compose := composeFile{
+		Services: map[string]composeService{
+			serviceName: {
+				Image:   "denoland/deno:2.0.0-rc.2",
+				Restart: "unless-stopped",
+				Volumes: []string{
+					fmt.Sprintf("%s:/data", dataDir),
+					fmt.Sprintf("%s:/main.ts:ro", filepath.Join(runDir, "main.ts")),
+				},
+				Command: command,
+				Ports:   ports,
+			},
+		},
+	}
+	content, err := yaml.Marshal(compose)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
+}
+
+func normalizePublish(publish []string) []string {
+	ports := make([]string, 0, len(publish))
+	for _, entry := range publish {
+		if trimmed := strings.TrimSpace(entry); trimmed != "" {
+			ports = append(ports, trimmed)
+		}
+	}
+	return ports
 }
 
 func (i *FileInstaller) tempPayloadName() string {

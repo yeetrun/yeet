@@ -488,6 +488,9 @@ func (s *Server) IsServiceRunning(name string) (bool, error) {
 	case db.ServiceTypeDockerCompose:
 		sts, err := s.DockerComposeStatus(name)
 		if err != nil {
+			if err == svc.ErrDockerStatusUnknown {
+				return false, nil
+			}
 			return false, err
 		}
 		for _, status := range sts {

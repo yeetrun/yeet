@@ -70,19 +70,19 @@ func ServiceDataTypeForService(sv db.ServiceView) ServiceDataType {
 	if !sv.Valid() {
 		return ServiceDataTypeUnknown
 	}
+	if hasTimerArtifact(sv) {
+		return ServiceDataTypeCron
+	}
+	if hasArtifact(sv, db.ArtifactTypeScriptFile) {
+		return ServiceDataTypeTypeScript
+	}
+	if hasArtifact(sv, db.ArtifactPythonFile) {
+		return ServiceDataTypePython
+	}
+	if hasArtifact(sv, db.ArtifactBinary) {
+		return ServiceDataTypeBinary
+	}
 	if sv.ServiceType() == db.ServiceTypeSystemd {
-		if hasTimerArtifact(sv) {
-			return ServiceDataTypeCron
-		}
-		if hasArtifact(sv, db.ArtifactTypeScriptFile) {
-			return ServiceDataTypeTypeScript
-		}
-		if hasArtifact(sv, db.ArtifactPythonFile) {
-			return ServiceDataTypePython
-		}
-		if hasArtifact(sv, db.ArtifactBinary) {
-			return ServiceDataTypeBinary
-		}
 		return ServiceDataTypeService
 	}
 	return ServiceDataTypeFromServiceType(sv.ServiceType())
