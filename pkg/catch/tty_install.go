@@ -18,7 +18,6 @@ import (
 	"github.com/shayne/yeet/pkg/cronutil"
 	"github.com/shayne/yeet/pkg/db"
 	"github.com/shayne/yeet/pkg/svc"
-	"gopkg.in/yaml.v3"
 )
 
 // Human-readable format function
@@ -354,50 +353,6 @@ func (e *ttyExecer) applyPublishToCompose(publish []string) error {
 		return fmt.Errorf("compose file not found")
 	}
 	return updateComposePorts(path, e.sn, publish)
-}
-
-func updateComposePorts(path, serviceName string, publish []string) error {
-	ports := make([]string, 0, len(publish))
-	for _, entry := range publish {
-		if trimmed := strings.TrimSpace(entry); trimmed != "" {
-			ports = append(ports, trimmed)
-		}
-	}
-	if len(ports) == 0 {
-		return nil
-	}
-	content, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	var doc map[string]any
-	if err := yaml.Unmarshal(content, &doc); err != nil {
-		return err
-	}
-	servicesRaw, ok := doc["services"]
-	if !ok {
-		return fmt.Errorf("compose file missing services")
-	}
-	services, ok := servicesRaw.(map[string]any)
-	if !ok {
-		return fmt.Errorf("compose services are not a map")
-	}
-	serviceRaw, ok := services[serviceName]
-	if !ok {
-		return fmt.Errorf("compose service %q not found", serviceName)
-	}
-	serviceMap, ok := serviceRaw.(map[string]any)
-	if !ok {
-		return fmt.Errorf("compose service %q is malformed", serviceName)
-	}
-	serviceMap["ports"] = ports
-	services[serviceName] = serviceMap
-	doc["services"] = services
-	updated, err := yaml.Marshal(doc)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, updated, 0644)
 }
 
 func (e *ttyExecer) cronCmdFunc(cronexpr string, args []string) error {

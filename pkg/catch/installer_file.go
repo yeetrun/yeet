@@ -554,7 +554,9 @@ func (i *FileInstaller) installOnClose() error {
 		case ftdetect.DockerCompose:
 			i.printf("Detected Docker Compose file\n")
 			if len(i.cfg.Publish) > 0 {
-				return fmt.Errorf("-p/--publish is not supported for docker compose payloads")
+				if err := updateComposePorts(bin, i.cfg.ServiceName, i.cfg.Publish); err != nil {
+					return fmt.Errorf("failed to apply publish ports: %w", err)
+				}
 			}
 			// serviceType = db.ServiceTypeDockerCompose
 			binName := fmt.Sprintf("docker-compose.%s.yml", i.version())
@@ -760,16 +762,6 @@ func typescriptComposeFile(serviceName, runDir, dataDir string, args []string, p
 		return "", err
 	}
 	return string(content), nil
-}
-
-func normalizePublish(publish []string) []string {
-	ports := make([]string, 0, len(publish))
-	for _, entry := range publish {
-		if trimmed := strings.TrimSpace(entry); trimmed != "" {
-			ports = append(ports, trimmed)
-		}
-	}
-	return ports
 }
 
 func (i *FileInstaller) tempPayloadName() string {
