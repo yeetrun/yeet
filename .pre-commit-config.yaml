@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: yeet-pre-commit
+        name: yeet pre-commit checks
+        entry: tools/hooks/pre-commit
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+      - id: yeet-prepare-commit-msg
+        name: yeet prepare commit message
+        entry: tools/hooks/prepare-commit-msg
+        language: system
+        stages: [prepare-commit-msg]
