@@ -138,12 +138,21 @@ func main() {
 	scfg := &catch.Config{
 		DB:                   cdb.NewStore(dbPath, servicesDir),
 		DefaultUser:          curUser.Username, // maybe not default to root?
+		InstallUser:          curUser.Username,
 		RootDir:              dataDir,
 		ServicesRoot:         servicesDir,
 		MountsRoot:           mountsDir,
 		InternalRegistryAddr: irAddr,
 		RegistryRoot:         registryDir,
 		ContainerdSocket:     *containerdSocket,
+	}
+	if meta, err := readInstallMeta(dataDir); err == nil {
+		if meta.InstallUser != "" {
+			scfg.InstallUser = meta.InstallUser
+		}
+		if meta.InstallHost != "" {
+			scfg.InstallHost = meta.InstallHost
+		}
 	}
 
 	if len(flag.Args()) == 1 {
@@ -256,8 +265,73 @@ func setupDocker() error {
 	return nil
 }
 
+type installMeta struct {
+	InstallUser string `json:"installUser"`
+	InstallHost string `json:"installHost"`
+}
+
+func installMetaPath(dataDir string) string {
+	return filepath.Join(dataDir, "install.json")
+}
+
+func detectInstallUser() string {
+	if installUser := os.Getenv("CATCH_INSTALL_USER"); installUser != "" {
+		return installUser
+	}
+	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
+		return sudoUser
+	}
+	if userEnv := os.Getenv("USER"); userEnv != "" {
+		return userEnv
+	}
+	if cur, err := user.Current(); err == nil && cur.Username != "" {
+		return cur.Username
+	}
+	return ""
+}
+
+func detectInstallHost() string {
+	if installHost := os.Getenv("CATCH_INSTALL_HOST"); installHost != "" {
+		return installHost
+	}
+	if hostname, err := os.Hostname(); err == nil {
+		return hostname
+	}
+	return ""
+}
+
+func writeInstallMeta(dataDir string) error {
+	meta := installMeta{
+		InstallUser: detectInstallUser(),
+		InstallHost: detectInstallHost(),
+	}
+	if meta.InstallUser == "" && meta.InstallHost == "" {
+		return nil
+	}
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(installMetaPath(dataDir), raw, 0600)
+}
+
+func readInstallMeta(dataDir string) (installMeta, error) {
+	raw, err := os.ReadFile(installMetaPath(dataDir))
+	if err != nil {
+		return installMeta{}, err
+	}
+	var meta installMeta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return installMeta{}, err
+	}
+	return meta, nil
+}
+
 // doInstall installs the catch binary as a service.
 func doInstall(cfg *catch.Config, dataDir string) error {
+	if err := writeInstallMeta(dataDir); err != nil {
+		log.Printf("warning: failed to record install metadata: %v", err)
+	}
 	// Set up Tailscale
 	ts := initTSNet(dataDir)
 	// Close it at the end so that when the systedm service is started, it

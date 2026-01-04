@@ -5,7 +5,9 @@
 package yeet
 
 type serverInfo struct {
-	Version string `json:"version"`
-	GOOS    string `json:"goos"`
-	GOARCH  string `json:"goarch"`
+	Version     string `json:"version"`
+	GOOS        string `json:"goos"`
+	GOARCH      string `json:"goarch"`
+	InstallUser string `json:"installUser"`
+	InstallHost string `json:"installHost"`
 }

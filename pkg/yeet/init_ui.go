@@ -98,6 +98,15 @@ func (u *initUI) Suspend() {
 	u.stopSpinner(true)
 }
 
+func (u *initUI) Resume() {
+	if u.quiet {
+		return
+	}
+	u.mu.Lock()
+	u.suspended = false
+	u.mu.Unlock()
+}
+
 func (u *initUI) StartStep(name string) {
 	if u.quiet {
 		return

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/shayne/yeet/pkg/cmdutil"
 )
 
 var archMap = map[string]string{
@@ -70,61 +69,67 @@ func remoteHostOSAndArch(userAtRemote string) (system, goarch string, _ error) {
 // remoteCatchOSAndArch fetches the GOOS and GOARCH of the remote host by calling
 // the catch RPC info endpoint.
 func remoteCatchOSAndArch() (goos, goarch string, _ error) {
+	info, err := remoteCatchInfo()
+	if err != nil {
+		return "", "", err
+	}
+	return info.GOOS, info.GOARCH, nil
+}
+
+func remoteCatchInfo() (serverInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var si serverInfo
 	if err := newRPCClient(Host()).Call(ctx, "catch.Info", nil, &si); err != nil {
-		return "", "", fmt.Errorf("failed to get version of catch binary: %w", err)
+		return serverInfo{}, fmt.Errorf("failed to get version of catch binary: %w", err)
 	}
-	return si.GOOS, si.GOARCH, nil
+	return si, nil
 }
 
 func updateCatch() error {
-	return initCatch(Host())
+	userAtRemote := Host()
+	if info, err := remoteCatchInfo(); err == nil {
+		host := userAtRemote
+		if info.InstallHost != "" {
+			host = info.InstallHost
+		}
+		if strings.Contains(host, "@") {
+			userAtRemote = host
+		} else if info.InstallUser != "" {
+			userAtRemote = fmt.Sprintf("%s@%s", info.InstallUser, host)
+		} else {
+			userAtRemote = host
+		}
+	}
+	return initCatch(userAtRemote)
 }
 
-func buildCatch(goos, goarch string) (string, int64, string, error) {
+func buildCatch(goos, goarch, gitRoot string) (string, int64, error) {
 	goos = strings.ToLower(goos)
 	goarch = strings.ToLower(goarch)
 	// Check if the system is Linux
 	if goos != "linux" {
-		return "", 0, "", fmt.Errorf("remote system is not Linux: %s", goos)
+		return "", 0, fmt.Errorf("remote system is not Linux: %s", goos)
 	}
-
-	// Check if we are in the git root directory
-	cmd := cmdutil.NewStdCmd("git", "rev-parse", "--show-toplevel")
-	cmd.Stdout = nil
-	output, err := cmd.Output()
-	if err != nil {
-		return "", 0, "", fmt.Errorf("not in a git repository")
+	if gitRoot == "" {
+		return "", 0, fmt.Errorf("missing git root for catch build")
 	}
-	// Get the output of the command and trim the whitespace
-	gitRoot := strings.TrimSpace(string(output))
-
-	// Check if we have go installed
-	cmd = exec.Command("go", "version")
-	cmd.Dir = gitRoot
-	goVersionOut, err := cmd.Output()
-	if err != nil {
-		return "", 0, "", fmt.Errorf("go is not installed")
-	}
-	goVersion := strings.TrimSpace(string(goVersionOut))
 	// Build the catch binary
-	cmd = exec.Command("go", "build", "-o", "catch", "./cmd/catch")
+	cmd := exec.Command("go", "build", "-o", "catch", "./cmd/catch")
 	cmd.Env = append(os.Environ(), "GOARCH="+goarch, "GOOS=linux")
 	cmd.Dir = gitRoot
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if len(out) > 0 {
 			fmt.Fprintln(os.Stderr, string(out))
 		}
-		return "", 0, goVersion, fmt.Errorf("failed to build catch binary")
+		return "", 0, fmt.Errorf("failed to build catch binary")
 	}
 	bin := filepath.Join(gitRoot, "catch")
 	info, err := os.Stat(bin)
 	if err != nil {
-		return "", 0, goVersion, fmt.Errorf("failed to stat catch binary: %w", err)
+		return "", 0, fmt.Errorf("failed to stat catch binary: %w", err)
 	}
-	return bin, info.Size(), goVersion, nil
+	return bin, info.Size(), nil
 }
 
 func initCatch(userAtRemote string) error {
@@ -139,6 +144,26 @@ func initCatch(userAtRemote string) error {
 	ui.Start()
 	defer ui.Stop()
 
+	ui.StartStep("Check local")
+	gitRoot, goVersion, err := preflightLocalInit()
+	if err != nil {
+		ui.FailStep(err.Error())
+		return err
+	}
+	ui.DoneStep(goVersion)
+
+	if isTerminalFn(int(os.Stdin.Fd())) && isTerminalFn(int(os.Stderr.Fd())) {
+		ui.StartStep("Verify SSH")
+		ui.Suspend()
+		err := preflightSSHHostKey(userAtRemote)
+		ui.Resume()
+		if err != nil {
+			ui.FailStep(err.Error())
+			return err
+		}
+		ui.DoneStep("")
+	}
+
 	ui.StartStep("Detect host")
 	systemName, goarch, err := remoteHostOSAndArch(userAtRemote)
 	if err != nil {
@@ -148,7 +173,7 @@ func initCatch(userAtRemote string) error {
 	ui.DoneStep(fmt.Sprintf("%s/%s", strings.ToLower(systemName), goarch))
 
 	ui.StartStep("Build catch")
-	bin, binSize, goVersion, err := buildCatch(systemName, goarch)
+	bin, binSize, err := buildCatch(systemName, goarch, gitRoot)
 	if err != nil {
 		ui.FailStep(err.Error())
 		return err
@@ -186,6 +211,21 @@ func initCatch(userAtRemote string) error {
 	if useSudo {
 		args = append(args, "sudo")
 	}
+	installEnv := []string{}
+	if user, host, ok := strings.Cut(userAtRemote, "@"); ok {
+		if user != "" {
+			installEnv = append(installEnv, "CATCH_INSTALL_USER="+user)
+		}
+		if host != "" {
+			installEnv = append(installEnv, "CATCH_INSTALL_HOST="+host)
+		}
+	} else if userAtRemote != "" {
+		installEnv = append(installEnv, "CATCH_INSTALL_HOST="+userAtRemote)
+	}
+	if len(installEnv) > 0 {
+		args = append(args, "env")
+		args = append(args, installEnv...)
+	}
 	args = append(args, "./catch", fmt.Sprintf("--tsnet-host=%v", Host()), "install")
 
 	// Run the catch binary on the remote host
@@ -206,6 +246,40 @@ func initCatch(userAtRemote string) error {
 	}
 	if info := filter.InfoSummary(); info != "" {
 		ui.Info(info)
+	}
+	return nil
+}
+
+func preflightLocalInit() (string, string, error) {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("not in a git repository; clone github.com/shayne/yeet and run from that repo")
+	}
+	gitRoot := strings.TrimSpace(string(output))
+	if gitRoot == "" {
+		return "", "", fmt.Errorf("not in a git repository; clone github.com/shayne/yeet and run from that repo")
+	}
+	catchDir := filepath.Join(gitRoot, "cmd", "catch")
+	if info, err := os.Stat(catchDir); err != nil || !info.IsDir() {
+		return "", "", fmt.Errorf("missing cmd/catch; clone github.com/shayne/yeet and run from that repo")
+	}
+	cmd = exec.Command("go", "version")
+	cmd.Dir = gitRoot
+	goVersionOut, err := cmd.Output()
+	if err != nil {
+		return "", "", fmt.Errorf("go is not installed (required to build catch)")
+	}
+	return gitRoot, strings.TrimSpace(string(goVersionOut)), nil
+}
+
+func preflightSSHHostKey(userAtRemote string) error {
+	cmd := exec.Command("ssh", userAtRemote, "true")
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("ssh preflight failed: %w", err)
 	}
 	return nil
 }
