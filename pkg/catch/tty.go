@@ -1940,19 +1940,6 @@ func (e *ttyExecer) mountCmdFunc(flags cli.MountFlags, args []string) error {
 	return nil
 }
 
-var ipv4Re = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}/\d{1,2}\b`)
-
-func parseIPv4Addresses(text string) []string {
-	matches := ipv4Re.FindAllString(text, -1)
-
-	var ips []string
-	for _, match := range matches {
-		ip := strings.Split(match, "/")[0]
-		ips = append(ips, ip)
-	}
-	return ips
-}
-
 func (e *ttyExecer) tsCmdFunc(args []string) error {
 	if e.sn == SystemService || e.sn == CatchService {
 		return errors.New("tailscale command not supported for sys or catch service")
@@ -2005,18 +1992,13 @@ func (e *ttyExecer) ipCmdFunc() error {
 			args = append([]string{"netns", "exec", netns, "ip"}, args...)
 		}
 	}
-	c := exec.Command("ip", args...)
-	bs, err := c.CombinedOutput()
+	ips, err := listIPv4Addrs(args)
 	if err != nil {
 		return fmt.Errorf("failed to get IP addresses: %w", err)
 	}
-	ips := parseIPv4Addresses(string(bs))
 	for _, ip := range ips {
 		// Skip 127.0.0.1
-		if ip == "127.0.0.1" {
-			continue
-		}
-		fmt.Fprintln(e.rw, ip)
+		fmt.Fprintln(e.rw, ip.IP)
 	}
 	return nil
 }

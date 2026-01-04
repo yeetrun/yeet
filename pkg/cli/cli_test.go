@@ -118,3 +118,27 @@ func TestParseEnvShowFlags(t *testing.T) {
 		t.Fatalf("expected no args, got %v", outArgs)
 	}
 }
+
+func TestParseInfoFlags(t *testing.T) {
+	flags, outArgs, err := ParseInfo([]string{"--format=json"})
+	if err != nil {
+		t.Fatalf("ParseInfo failed: %v", err)
+	}
+	if flags.Format != "json" {
+		t.Fatalf("Format = %q, want %q", flags.Format, "json")
+	}
+	if len(outArgs) != 0 {
+		t.Fatalf("expected no args, got %v", outArgs)
+	}
+
+	flags, outArgs, err = ParseInfo(nil)
+	if err != nil {
+		t.Fatalf("ParseInfo (default) failed: %v", err)
+	}
+	if flags.Format != "plain" {
+		t.Fatalf("Format = %q, want %q", flags.Format, "plain")
+	}
+	if len(outArgs) != 0 {
+		t.Fatalf("expected no args, got %v", outArgs)
+	}
+}

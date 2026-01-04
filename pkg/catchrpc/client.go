@@ -253,3 +253,9 @@ func (c *Client) Events(ctx context.Context, req EventsRequest, onEvent func(Eve
 		onEvent(ev)
 	}
 }
+
+func (c *Client) ServiceInfo(ctx context.Context, service string) (ServiceInfoResponse, error) {
+	var resp ServiceInfoResponse
+	err := c.Call(ctx, "catch.ServiceInfo", ServiceInfoRequest{Service: service}, &resp)
+	return resp, err
+}
