@@ -1,5 +1,6 @@
 [tools]
 go = "1.25.5"
+pre-commit = "4.5.1"
 
 [tasks.init-host]
 description = "Install yeet/catch on a host via yeet init"
@@ -14,5 +15,14 @@ go run ./cmd/yeet init "${usage_host?}"
 '''
 
 [tasks.install-githooks]
-description = "Install git hooks by pointing core.hooksPath at .githooks"
-run = "git config --local core.hooksPath .githooks"
+description = "Install git hooks via pre-commit"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+git config --local --unset-all core.hooksPath || true
+
+pre-commit install --install-hooks \
+  --hook-type pre-commit \
+  --hook-type prepare-commit-msg
+'''
