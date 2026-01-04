@@ -1436,7 +1436,7 @@ func (e *ttyExecer) statusCmdFunc(flags cli.StatusFlags) error {
 			}
 			statuses = append(statuses, ServiceStatusData{
 				ServiceName: sn,
-				ServiceType: ServiceDataTypeFromServiceType(service.ServiceType()),
+				ServiceType: ServiceDataTypeForService(service),
 				ComponentStatus: []ComponentStatusData{
 					{
 						Name:   sn,
@@ -1477,13 +1477,14 @@ func (e *ttyExecer) statusCmdFunc(flags cli.StatusFlags) error {
 			statuses = append(statuses, data)
 		}
 	} else {
-		st, err := e.s.serviceType(e.sn)
+		service, err := e.s.serviceView(e.sn)
 		if err != nil {
 			return fmt.Errorf("failed to get service type: %w", err)
 		}
+		st := service.ServiceType()
 		data := ServiceStatusData{
 			ServiceName:     e.sn,
-			ServiceType:     ServiceDataTypeFromServiceType(st),
+			ServiceType:     ServiceDataTypeForService(service),
 			ComponentStatus: []ComponentStatusData{},
 		}
 		switch st {

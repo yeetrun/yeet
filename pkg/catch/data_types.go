@@ -63,6 +63,27 @@ func ServiceDataTypeFromServiceType(st db.ServiceType) ServiceDataType {
 	}
 }
 
+func ServiceDataTypeForService(sv db.ServiceView) ServiceDataType {
+	if !sv.Valid() {
+		return ServiceDataTypeUnknown
+	}
+	if sv.ServiceType() == db.ServiceTypeSystemd {
+		if hasTimerArtifact(sv) {
+			return ServiceDataTypeCron
+		}
+		return ServiceDataTypeService
+	}
+	return ServiceDataTypeFromServiceType(sv.ServiceType())
+}
+
+func hasTimerArtifact(sv db.ServiceView) bool {
+	if !sv.Valid() {
+		return false
+	}
+	_, ok := sv.Artifacts().GetOk(db.ArtifactSystemdTimerFile)
+	return ok
+}
+
 func ServiceDataTypeFromUnitType(unitType string) ServiceDataType {
 	switch unitType {
 	case "service":
