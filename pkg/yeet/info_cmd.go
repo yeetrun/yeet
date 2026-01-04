@@ -269,7 +269,6 @@ func renderClientSection(client clientInfo) infoSection {
 		rows = append(rows, infoRow{Label: "Config", Value: msg})
 		return infoSection{Title: "Client (yeet.toml)", Rows: rows}
 	}
-	rows = append(rows, infoRow{Label: "Config", Value: filepath.Base(client.ConfigFile)})
 	if client.Entry != nil && client.Entry.Host != "" {
 		rows = append(rows, infoRow{Label: "Saved host", Value: client.Entry.Host})
 	}
