@@ -46,6 +46,7 @@ Host terminology: `yeet init root@<host>` uses the SSH **machine host**. `yeet r
 ```bash
 yeet init root@<host>
 yeet run <svc> ./compose.yml
+yeet ssh
 ```
 
 Note: `yeet run` for compose does not pull new images by default. To refresh images, use `yeet run --pull <svc> ./compose.yml` or `yeet docker update <svc>`.

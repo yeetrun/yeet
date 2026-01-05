@@ -79,6 +79,7 @@ func main() {
 	handlers["init"] = yeet.HandleInit
 	handlers["list-hosts"] = handleListHosts
 	handlers["prefs"] = yeet.HandlePrefs
+	handlers["ssh"] = yeet.HandleSSH
 	handlers["skirt"] = yeet.HandleSkirt
 
 	groups := buildGroupHandlers()

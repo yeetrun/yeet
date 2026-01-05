@@ -122,6 +122,12 @@ func buildHelpConfig() yargs.HelpConfig {
 		Name:        "prefs",
 		Description: "Manage the current preferences",
 	}
+	subcommands["ssh"] = yargs.SubCommandInfo{
+		Name:        "ssh",
+		Description: "Open an SSH session to the host with the install user",
+		Usage:       "[ssh-args...]",
+		Examples:    []string{"yeet ssh", "yeet --host=<host> ssh", "yeet ssh htop"},
+	}
 	subcommands["skirt"] = yargs.SubCommandInfo{
 		Name:   "skirt",
 		Hidden: true,
