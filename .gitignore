@@ -7,3 +7,4 @@
 go.work
 go.work.*
 AGENTS.local.md
+.codex/
