@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/shayne/yeet/pkg/cli"
+	"github.com/shayne/yeet/pkg/copyutil"
 	"github.com/shayne/yeet/pkg/cronutil"
 	"github.com/shayne/yeet/pkg/db"
 	"github.com/shayne/yeet/pkg/svc"
@@ -216,35 +217,88 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	return e.install("run", e.payloadReader(), cfg)
 }
 
-func (e *ttyExecer) copyCmdFunc(dest string) error {
-	dest = strings.TrimSpace(dest)
-	if dest == "" {
-		return fmt.Errorf("copy requires a destination")
+func (e *ttyExecer) copyCmdFunc(args []string) error {
+	parsed, err := parseCopyExecArgs(args)
+	if err != nil {
+		return err
 	}
-	dest = strings.TrimPrefix(dest, "./")
-	if strings.HasPrefix(dest, "/") {
-		return fmt.Errorf("copy destination must be relative")
+	if parsed.From != "" {
+		return e.copyFromRemote(parsed)
 	}
-	rel := dest
-	if rel == "data" || strings.HasPrefix(rel, "data/") {
-		rel = strings.TrimPrefix(rel, "data")
-		rel = strings.TrimPrefix(rel, "/")
+	return e.copyToRemote(parsed)
+}
+
+type copyExecArgs struct {
+	From      string
+	To        string
+	Recursive bool
+	Archive   bool
+}
+
+func parseCopyExecArgs(args []string) (copyExecArgs, error) {
+	var out copyExecArgs
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--from":
+			if i+1 >= len(args) {
+				return copyExecArgs{}, fmt.Errorf("copy --from requires a value")
+			}
+			out.From = args[i+1]
+			i++
+		case "--to":
+			if i+1 >= len(args) {
+				return copyExecArgs{}, fmt.Errorf("copy --to requires a value")
+			}
+			out.To = args[i+1]
+			i++
+		case "--recursive", "-r":
+			out.Recursive = true
+		case "--archive":
+			out.Archive = true
+		default:
+			return copyExecArgs{}, fmt.Errorf("invalid copy argument %q", args[i])
+		}
 	}
-	if rel == "" {
+	if out.From == "" && out.To == "" {
+		return copyExecArgs{}, fmt.Errorf("copy requires --from or --to")
+	}
+	if out.From != "" && out.To != "" {
+		return copyExecArgs{}, fmt.Errorf("copy requires either --from or --to")
+	}
+	return out, nil
+}
+
+func (e *ttyExecer) copyToRemote(parsed copyExecArgs) error {
+	dest, err := normalizeCopyRelPath(parsed.To, parsed.Archive)
+	if err != nil {
+		return err
+	}
+	if dest == "" && !parsed.Archive {
 		return fmt.Errorf("copy destination must include a file name")
-	}
-	rel = filepath.Clean(rel)
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
-		return fmt.Errorf("invalid copy destination %q", dest)
 	}
 	if err := e.s.ensureDirs(e.sn, e.user); err != nil {
 		return fmt.Errorf("failed to ensure directories: %w", err)
 	}
-	dstPath := filepath.Join(e.s.serviceDataDir(e.sn), rel)
-	if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+	dstRoot := filepath.Join(e.s.serviceDataDir(e.sn), dest)
+	if dest == "" {
+		dstRoot = e.s.serviceDataDir(e.sn)
+	}
+	if parsed.Archive {
+		if err := os.MkdirAll(dstRoot, 0755); err != nil {
+			return fmt.Errorf("failed to create destination directory: %w", err)
+		}
+		if err := copyutil.ExtractTar(e.rw, dstRoot); err != nil {
+			return fmt.Errorf("failed to extract archive: %w", err)
+		}
+		return nil
+	}
+	if strings.HasSuffix(parsed.To, "/") {
+		return fmt.Errorf("copy destination must include a file name")
+	}
+	if err := os.MkdirAll(filepath.Dir(dstRoot), 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
-	tmpf, err := os.CreateTemp(filepath.Dir(dstPath), "yeet-copy-*")
+	tmpf, err := os.CreateTemp(filepath.Dir(dstRoot), "yeet-copy-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -257,14 +311,92 @@ func (e *ttyExecer) copyCmdFunc(dest string) error {
 		os.Remove(tmpf.Name())
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
-	if err := os.Rename(tmpf.Name(), dstPath); err != nil {
+	if err := os.Rename(tmpf.Name(), dstRoot); err != nil {
 		os.Remove(tmpf.Name())
 		return fmt.Errorf("failed to move file in place: %w", err)
 	}
-	if err := os.Chmod(dstPath, 0644); err != nil {
+	if err := os.Chmod(dstRoot, 0644); err != nil {
 		return fmt.Errorf("failed to set permissions: %w", err)
 	}
 	return nil
+}
+
+func (e *ttyExecer) copyFromRemote(parsed copyExecArgs) error {
+	src, err := normalizeCopyRelPath(parsed.From, true)
+	if err != nil {
+		return err
+	}
+	srcPath := filepath.Join(e.s.serviceDataDir(e.sn), src)
+	if src == "" {
+		srcPath = e.s.serviceDataDir(e.sn)
+	}
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		return err
+	}
+	base := ""
+	if src != "" {
+		base = filepath.Base(src)
+	}
+	if info.IsDir() {
+		if !parsed.Recursive {
+			return fmt.Errorf("copy requires --recursive for directories")
+		}
+		if err := copyutil.WriteHeader(e.rw, "dir", base); err != nil {
+			return err
+		}
+		if err := copyutil.TarDirectory(e.rw, srcPath, ""); err != nil {
+			return err
+		}
+		return nil
+	}
+	if base == "" {
+		return fmt.Errorf("copy requires a file path")
+	}
+	if err := copyutil.WriteHeader(e.rw, "file", base); err != nil {
+		return err
+	}
+	f, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := io.Copy(e.rw, f); err != nil {
+		return err
+	}
+	return nil
+}
+
+func normalizeCopyRelPath(raw string, allowEmpty bool) (string, error) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(raw, "./")
+	if raw == "." {
+		raw = ""
+	}
+	if raw == "data" || strings.HasPrefix(raw, "data/") {
+		raw = strings.TrimPrefix(raw, "data")
+		raw = strings.TrimPrefix(raw, "/")
+	}
+	if strings.HasPrefix(raw, "/") {
+		return "", fmt.Errorf("copy path must be relative")
+	}
+	if raw == "" {
+		if allowEmpty {
+			return "", nil
+		}
+		return "", fmt.Errorf("copy path must not be empty")
+	}
+	clean := filepath.Clean(raw)
+	if clean == "." {
+		if allowEmpty {
+			return "", nil
+		}
+		return "", fmt.Errorf("copy path must not be empty")
+	}
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(os.PathSeparator)) || filepath.IsAbs(clean) {
+		return "", fmt.Errorf("invalid copy path %q", raw)
+	}
+	return clean, nil
 }
 
 type sessionCloser struct {

@@ -152,6 +152,14 @@ func TestEnvCopyAlias(t *testing.T) {
 	}
 }
 
+func TestCopyAlias(t *testing.T) {
+	helpConfig := buildHelpConfig()
+	args := yargs.ApplyAliases([]string{"cp", "src", "dst"}, helpConfig)
+	if len(args) == 0 || args[0] != "copy" {
+		t.Fatalf("expected alias to resolve to copy, got %v", args)
+	}
+}
+
 func TestRewriteEnvSetArgs(t *testing.T) {
 	args := rewriteEnvSetArgs([]string{"env", "svc-a", "FOO="})
 	want := []string{"env", "set", "svc-a", "FOO="}

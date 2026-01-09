@@ -5,6 +5,7 @@
 package yeet
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"io"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/shayne/yeet/pkg/cli"
 	"github.com/shayne/yeet/pkg/codecutil"
+	"github.com/shayne/yeet/pkg/copyutil"
 )
 
 func TestHandleSvcCmdDefaultsToStatus(t *testing.T) {
@@ -877,19 +879,16 @@ func buildTestELF(t *testing.T, dir string) string {
 	return binPath
 }
 
-func TestRunCopyDefaultsToDataDir(t *testing.T) {
+func TestHandleSvcCmdCopyUploadFile(t *testing.T) {
 	oldExec := execRemoteFn
-	oldService := serviceOverride
 	defer func() {
 		execRemoteFn = oldExec
-		serviceOverride = oldService
 	}()
 
-	serviceOverride = "svc-a"
 	tmp := t.TempDir()
-	src := filepath.Join(tmp, "envfile")
-	if err := os.WriteFile(src, []byte("KEY=VALUE\n"), 0o600); err != nil {
-		t.Fatalf("failed to write temp env file: %v", err)
+	src := filepath.Join(tmp, "config.yml")
+	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
 	}
 
 	var gotService string
@@ -905,14 +904,14 @@ func TestRunCopyDefaultsToDataDir(t *testing.T) {
 		return nil
 	}
 
-	if err := runCopy(src, ""); err != nil {
-		t.Fatalf("runCopy returned error: %v", err)
+	if err := HandleSvcCmd([]string{"copy", src, "svc-a:configs/app.yml"}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
 	}
 
 	if gotService != "svc-a" {
 		t.Fatalf("expected service svc-a, got %q", gotService)
 	}
-	wantArgs := []string{"copy", "data/envfile"}
+	wantArgs := []string{"copy", "--to", "configs/app.yml"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
 	}
@@ -921,65 +920,192 @@ func TestRunCopyDefaultsToDataDir(t *testing.T) {
 	}
 }
 
-func TestRunCopyDataDirAppendsBaseName(t *testing.T) {
+func TestHandleSvcCmdCopyUploadDirRecursiveContents(t *testing.T) {
 	oldExec := execRemoteFn
-	oldService := serviceOverride
 	defer func() {
 		execRemoteFn = oldExec
-		serviceOverride = oldService
 	}()
 
-	serviceOverride = "svc-a"
 	tmp := t.TempDir()
-	src := filepath.Join(tmp, "payload.txt")
-	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+	src := filepath.Join(tmp, "configs")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "app.yml"), []byte("payload"), 0o600); err != nil {
 		t.Fatalf("failed to write temp file: %v", err)
 	}
 
 	var gotArgs []string
+	var gotNames []string
 	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
 		gotArgs = append([]string{}, args...)
+		if stdin == nil {
+			t.Fatalf("expected stdin to be provided")
+		}
+		tr := tar.NewReader(stdin)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("failed to read tar: %v", err)
+			}
+			if strings.HasSuffix(hdr.Name, "/") {
+				continue
+			}
+			gotNames = append(gotNames, hdr.Name)
+		}
 		return nil
 	}
 
-	if err := runCopy(src, "./data/"); err != nil {
-		t.Fatalf("runCopy returned error: %v", err)
+	srcWithSlash := src + string(os.PathSeparator)
+	if err := HandleSvcCmd([]string{"copy", "-r", srcWithSlash, "svc-a:configs/"}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
 	}
 
-	wantArgs := []string{"copy", "data/payload.txt"}
+	wantArgs := []string{"copy", "--to", "configs", "--archive"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+	if len(gotNames) != 1 || gotNames[0] != "app.yml" {
+		t.Fatalf("expected archive to contain app.yml, got %v", gotNames)
 	}
 }
 
-func TestRunCopyUsesRelativeDestUnderDataDir(t *testing.T) {
+func TestHandleSvcCmdCopyUploadDirRecursiveKeepsDir(t *testing.T) {
 	oldExec := execRemoteFn
-	oldService := serviceOverride
 	defer func() {
 		execRemoteFn = oldExec
-		serviceOverride = oldService
 	}()
 
-	serviceOverride = "svc-a"
 	tmp := t.TempDir()
-	src := filepath.Join(tmp, "config.yml")
-	if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+	src := filepath.Join(tmp, "configs")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatalf("failed to create temp dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "app.yml"), []byte("payload"), 0o600); err != nil {
 		t.Fatalf("failed to write temp file: %v", err)
 	}
 
-	var gotArgs []string
+	var gotNames []string
 	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
-		gotArgs = append([]string{}, args...)
+		if stdin == nil {
+			t.Fatalf("expected stdin to be provided")
+		}
+		tr := tar.NewReader(stdin)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("failed to read tar: %v", err)
+			}
+			if strings.HasSuffix(hdr.Name, "/") {
+				continue
+			}
+			gotNames = append(gotNames, hdr.Name)
+		}
 		return nil
 	}
 
-	if err := runCopy(src, "configs/app.yml"); err != nil {
-		t.Fatalf("runCopy returned error: %v", err)
+	if err := HandleSvcCmd([]string{"copy", "-r", src, "svc-a:configs/"}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
 	}
 
-	wantArgs := []string{"copy", "data/configs/app.yml"}
+	if len(gotNames) != 1 || gotNames[0] != "configs/app.yml" {
+		t.Fatalf("expected archive to contain configs/app.yml, got %v", gotNames)
+	}
+}
+
+func TestHandleSvcCmdCopyDownloadFile(t *testing.T) {
+	oldStream := execRemoteStreamFn
+	defer func() {
+		execRemoteStreamFn = oldStream
+	}()
+
+	tmp := t.TempDir()
+	dest := filepath.Join(tmp, "out.txt")
+
+	var gotService string
+	var gotArgs []string
+	execRemoteStreamFn = func(ctx context.Context, service string, args []string, stdin io.Reader) (io.ReadCloser, <-chan error, error) {
+		gotService = service
+		gotArgs = append([]string{}, args...)
+		var buf bytes.Buffer
+		if err := copyutil.WriteHeader(&buf, "file", "remote.txt"); err != nil {
+			return nil, nil, err
+		}
+		buf.WriteString("payload")
+		done := make(chan error, 1)
+		done <- nil
+		return io.NopCloser(bytes.NewReader(buf.Bytes())), done, nil
+	}
+
+	if err := HandleSvcCmd([]string{"copy", "svc-a:remote.txt", dest}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
+	}
+
+	if gotService != "svc-a" {
+		t.Fatalf("expected service svc-a, got %q", gotService)
+	}
+	wantArgs := []string{"copy", "--from", "remote.txt"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
+	}
+	out, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	if string(out) != "payload" {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+func TestHandleSvcCmdCopyDownloadDirRecursive(t *testing.T) {
+	oldStream := execRemoteStreamFn
+	defer func() {
+		execRemoteStreamFn = oldStream
+	}()
+
+	srcDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(srcDir, "app.yml"), []byte("payload"), 0o600); err != nil {
+		t.Fatalf("failed to write temp file: %v", err)
+	}
+	var tarBuf bytes.Buffer
+	if err := copyutil.TarDirectory(&tarBuf, srcDir, ""); err != nil {
+		t.Fatalf("failed to build tar: %v", err)
+	}
+
+	tmp := t.TempDir()
+	dest := filepath.Join(tmp, "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatalf("failed to create dest dir: %v", err)
+	}
+
+	execRemoteStreamFn = func(ctx context.Context, service string, args []string, stdin io.Reader) (io.ReadCloser, <-chan error, error) {
+		var buf bytes.Buffer
+		if err := copyutil.WriteHeader(&buf, "dir", "configs"); err != nil {
+			return nil, nil, err
+		}
+		buf.Write(tarBuf.Bytes())
+		done := make(chan error, 1)
+		done <- nil
+		return io.NopCloser(bytes.NewReader(buf.Bytes())), done, nil
+	}
+
+	if err := HandleSvcCmd([]string{"copy", "-r", "svc-a:configs", dest}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
+	}
+
+	outPath := filepath.Join(dest, "configs", "app.yml")
+	out, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("failed to read output file: %v", err)
+	}
+	if string(out) != "payload" {
+		t.Fatalf("unexpected output: %s", out)
 	}
 }
 

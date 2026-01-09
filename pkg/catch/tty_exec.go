@@ -278,10 +278,7 @@ func (e *ttyExecer) dispatch(args []string) error {
 		}
 		return e.runCmdFunc(flags, runArgs)
 	case "copy":
-		if err := cli.RequireArgsAtLeast("copy", args, 1); err != nil {
-			return err
-		}
-		return e.copyCmdFunc(args[0])
+		return e.copyCmdFunc(args)
 	case "docker":
 		return e.dockerCmdFunc(args)
 	case "stage":

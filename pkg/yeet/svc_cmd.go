@@ -163,15 +163,13 @@ func HandleSvcCmd(args []string) error {
 		}
 		runArgs = normalizeRunArgs(runArgs)
 		return saveRunConfig(cfgLoc, hostOverride, payload, runArgs)
-	// `copy <svc> <file> [dest]`
+	// `copy [-r] <src> <dst>`
 	case "copy":
-		switch len(cmdArgs) {
-		case 1:
-			return runCopy(cmdArgs[0], "")
-		case 2:
-			return runCopy(cmdArgs[0], cmdArgs[1])
+		var cfg *ProjectConfig
+		if cfgLoc != nil {
+			cfg = cfgLoc.Config
 		}
-		return fmt.Errorf("copy requires a source file and optional destination")
+		return runCopyCommand(cmdArgs, cfg)
 	// `cron <svc> <file> <cronexpr>`
 	case "cron":
 		if len(cmdArgs) == 0 {
@@ -505,62 +503,6 @@ func runFilePayload(file string, args []string, pushLocalImages bool) (ok bool, 
 		return false, fmt.Errorf("failed to run service: %w", err)
 	}
 	return true, nil
-}
-
-func runCopy(file, dest string) error {
-	if file == "" {
-		return fmt.Errorf("copy requires a source file")
-	}
-	if st, err := os.Stat(file); err != nil {
-		return err
-	} else if st.IsDir() {
-		return fmt.Errorf("%q is a directory, expected a file", file)
-	}
-	normalized, err := normalizeCopyDest(file, dest)
-	if err != nil {
-		return err
-	}
-	f, err := os.Open(file)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	svc := getService()
-	args := []string{"copy", normalized}
-	if err := execRemoteFn(context.Background(), svc, args, f, false); err != nil {
-		return err
-	}
-	return nil
-}
-
-func normalizeCopyDest(src, dest string) (string, error) {
-	dest = strings.TrimSpace(dest)
-	trimmed := strings.TrimPrefix(dest, "./")
-	if trimmed == "" {
-		trimmed = filepath.Base(src)
-	}
-	if strings.HasPrefix(trimmed, "/") {
-		return "", fmt.Errorf("copy destination must be relative")
-	}
-
-	rel := trimmed
-	if rel == "data" || strings.HasPrefix(rel, "data/") {
-		rel = strings.TrimPrefix(rel, "data")
-		rel = strings.TrimPrefix(rel, "/")
-	}
-	if rel == "" || strings.HasSuffix(dest, "/") || strings.HasSuffix(rel, "/") {
-		base := filepath.Base(src)
-		if base == "." || base == string(os.PathSeparator) {
-			return "", fmt.Errorf("invalid source file %q", src)
-		}
-		rel = filepath.Join(rel, base)
-	}
-
-	rel = filepath.Clean(rel)
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
-		return "", fmt.Errorf("invalid copy destination %q", dest)
-	}
-	return filepath.Join("data", rel), nil
 }
 
 func tryRunDocker(image string, args []string) (ok bool, _ error) {
