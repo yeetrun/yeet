@@ -77,6 +77,9 @@ func bridgeServiceArgs(args []string, remoteSpecs map[string]map[string]cli.Flag
 	if len(args) == 0 {
 		return "", "", nil, false
 	}
+	if args[0] == "copy" {
+		return "", "", nil, false
+	}
 	bridged = args
 
 	if override != "" {

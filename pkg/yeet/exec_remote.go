@@ -191,6 +191,7 @@ func execRemote(ctx context.Context, service string, args []string, stdin io.Rea
 
 var execRemoteFn = execRemote
 var execRemoteOutputFn = execRemoteOutput
+var execRemoteStreamFn = execRemoteStream
 var remoteCatchOSAndArchFn = remoteCatchOSAndArch
 var pushAllLocalImagesFn = pushAllLocalImages
 var isTerminalFn = term.IsTerminal
@@ -218,6 +219,42 @@ func execRemoteOutput(ctx context.Context, host string, service string, args []s
 		return nil, remoteExitError{code: code}
 	}
 	return buf.Bytes(), nil
+}
+
+func execRemoteStream(ctx context.Context, service string, args []string, stdin io.Reader) (io.ReadCloser, <-chan error, error) {
+	host := Host()
+	client := newRPCClient(host)
+	req := catchrpc.ExecRequest{
+		Service:  service,
+		Args:     args,
+		Host:     host,
+		TTY:      false,
+		Progress: execProgressMode(),
+	}
+	if stdin != nil && stdin != os.Stdin {
+		if payload := payloadNameFromReader(stdin); payload != "" {
+			req.PayloadName = payload
+		}
+	}
+	pr, pw := io.Pipe()
+	done := make(chan error, 1)
+	go func() {
+		code, err := client.Exec(ctx, req, stdin, pw, nil)
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			done <- err
+			return
+		}
+		if code != 0 {
+			err := remoteExitError{code: code}
+			_ = pw.CloseWithError(err)
+			done <- err
+			return
+		}
+		_ = pw.Close()
+		done <- nil
+	}()
+	return pr, done, nil
 }
 
 func handleEventsRPC(ctx context.Context, svc string, flags cli.EventsFlags) error {
