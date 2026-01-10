@@ -5,14 +5,18 @@
 package yeet
 
 import (
+	"archive/tar"
 	"bufio"
+	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/shayne/yeet/pkg/copyutil"
 )
@@ -28,6 +32,9 @@ type copyEndpoint struct {
 
 type copyRequest struct {
 	Recursive bool
+	Archive   bool
+	Compress  bool
+	Verbose   bool
 	Src       copyEndpoint
 	Dst       copyEndpoint
 }
@@ -53,7 +60,12 @@ func runCopyCommand(args []string, cfg *ProjectConfig) error {
 }
 
 func parseCopyArgs(args []string) (copyRequest, error) {
-	var req copyRequest
+	req := copyRequest{
+		Recursive: true,
+		Archive:   true,
+		Compress:  true,
+		Verbose:   true,
+	}
 	operands := make([]string, 0, 2)
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -64,9 +76,56 @@ func parseCopyArgs(args []string) (copyRequest, error) {
 			break
 		}
 		if strings.HasPrefix(arg, "-") && arg != "-" {
+			if strings.HasPrefix(arg, "--") {
+				switch arg {
+				case "--recursive":
+					req.Recursive = true
+					continue
+				case "--archive":
+					req.Archive = true
+					req.Recursive = true
+					continue
+				case "--compress":
+					req.Compress = true
+					continue
+				case "--verbose":
+					req.Verbose = true
+					continue
+				default:
+					return copyRequest{}, fmt.Errorf("unknown flag %q", arg)
+				}
+			}
+			if len(arg) > 2 {
+				for _, flag := range arg[1:] {
+					switch flag {
+					case 'r', 'R':
+						req.Recursive = true
+					case 'a':
+						req.Archive = true
+						req.Recursive = true
+					case 'z':
+						req.Compress = true
+					case 'v':
+						req.Verbose = true
+					default:
+						return copyRequest{}, fmt.Errorf("unknown flag %q", arg)
+					}
+				}
+				continue
+			}
 			switch arg {
-			case "-r", "-R", "--recursive":
+			case "-r", "-R":
 				req.Recursive = true
+				continue
+			case "-a":
+				req.Archive = true
+				req.Recursive = true
+				continue
+			case "-z":
+				req.Compress = true
+				continue
+			case "-v":
+				req.Verbose = true
 				continue
 			default:
 				return copyRequest{}, fmt.Errorf("unknown flag %q", arg)
@@ -168,44 +227,81 @@ func copyToRemote(req copyRequest) error {
 	if srcPath == "" {
 		return fmt.Errorf("copy requires a source path")
 	}
-	info, err := os.Stat(srcPath)
+	info, err := os.Lstat(srcPath)
 	if err != nil {
 		return err
 	}
 
 	destRel := dst.Path
 	destDir := dst.DirHint
+	report := newCopyReport(req.Verbose)
+	report.Start("sending")
+
+	var reader io.ReadCloser
+	var args []string
+
 	if info.IsDir() {
-		if !req.Recursive {
-			return fmt.Errorf("%q is a directory (use -r)", srcPath)
-		}
 		prefix := ""
 		if !hasTrailingSlash(req.Src.Raw) {
 			prefix = filepath.Base(srcPath)
 		}
-		reader, err := tarDirectoryStream(srcPath, prefix)
+		reader, err = tarDirectoryStream(srcPath, prefix, req.Compress, report.OnEntry)
 		if err != nil {
 			return err
 		}
-		defer reader.Close()
-		args := []string{"copy", "--to", remotePathOrDot(destRel), "--archive"}
-		return execRemoteFn(context.Background(), dst.Service, args, reader, false)
+		args = []string{"copy", "--to", remotePathOrDot(destRel), "--archive"}
+		if req.Compress {
+			args = append(args, "--compress")
+		}
+	} else if req.Archive {
+		destRoot := destRel
+		entryName := filepath.Base(srcPath)
+		if destRel != "" && !destDir {
+			entryName = path.Base(destRel)
+			destRoot = path.Dir(destRel)
+			if destRoot == "." {
+				destRoot = ""
+			}
+		}
+		destRoot, _, err = normalizeRemotePath(destRoot)
+		if err != nil {
+			return fmt.Errorf("invalid copy destination %q", dst.Raw)
+		}
+		reader, err = tarFileStream(srcPath, entryName, req.Compress, report.OnEntry)
+		if err != nil {
+			return err
+		}
+		args = []string{"copy", "--to", remotePathOrDot(destRoot), "--archive"}
+		if req.Compress {
+			args = append(args, "--compress")
+		}
+	} else {
+		if destRel == "" || destDir {
+			destRel = path.Join(destRel, filepath.Base(srcPath))
+		}
+		destRel, _, err = normalizeRemotePath(destRel)
+		if err != nil || destRel == "" {
+			return fmt.Errorf("invalid copy destination %q", dst.Raw)
+		}
+		f, err := os.Open(srcPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		reader = f
+		args = []string{"copy", "--to", destRel}
+		if req.Compress {
+			args = append(args, "--compress")
+		}
 	}
 
-	if destRel == "" || destDir {
-		destRel = path.Join(destRel, filepath.Base(srcPath))
-	}
-	destRel, _, err = normalizeRemotePath(destRel)
-	if err != nil || destRel == "" {
-		return fmt.Errorf("invalid copy destination %q", dst.Raw)
-	}
-	f, err := os.Open(srcPath)
-	if err != nil {
+	defer reader.Close()
+	counter := &countingReader{r: reader}
+	if err := execRemoteFn(context.Background(), dst.Service, args, counter, false); err != nil {
 		return err
 	}
-	defer f.Close()
-	args := []string{"copy", "--to", destRel}
-	return execRemoteFn(context.Background(), dst.Service, args, f, false)
+	report.Finish(counter.N(), 0)
+	return nil
 }
 
 func applyCopyHostOverride(req copyRequest, cfg *ProjectConfig) error {
@@ -244,7 +340,13 @@ func copyFromRemote(req copyRequest) error {
 		return fmt.Errorf("copy requires a source path")
 	}
 	args := []string{"copy", "--from", remotePathOrDot(srcRel)}
-	if req.Recursive {
+	if req.Archive {
+		args = append(args, "--archive")
+	}
+	if req.Compress {
+		args = append(args, "--compress")
+	}
+	if req.Recursive && !req.Archive {
 		args = append(args, "--recursive")
 	}
 	reader, done, err := execRemoteStreamFn(context.Background(), src.Service, args, nil)
@@ -253,7 +355,11 @@ func copyFromRemote(req copyRequest) error {
 	}
 	defer reader.Close()
 
-	buf := bufio.NewReader(reader)
+	report := newCopyReport(req.Verbose)
+	report.Start("receiving")
+
+	counter := &countingReader{r: reader}
+	buf := bufio.NewReader(counter)
 	kind, base, err := copyutil.ReadHeader(buf)
 	if err != nil {
 		<-done
@@ -271,48 +377,67 @@ func copyFromRemote(req copyRequest) error {
 		}
 	}
 
-	switch kind {
-	case "file":
-		if base == "" {
-			<-done
-			return fmt.Errorf("invalid copy header")
-		}
-		outPath := destPath
-		if destDir {
-			outPath = filepath.Join(destPath, base)
-		}
-		if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil {
-			<-done
-			return err
-		}
-		out, err := os.OpenFile(outPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	payload := io.Reader(buf)
+	var gz *gzip.Reader
+	if req.Compress {
+		var err error
+		gz, err = gzip.NewReader(buf)
 		if err != nil {
 			<-done
 			return err
 		}
-		if _, err := io.Copy(out, buf); err != nil {
-			out.Close()
+		defer gz.Close()
+		payload = gz
+	}
+
+	switch kind {
+	case "file":
+		parent := filepath.Dir(destPath)
+		if destDir {
+			parent = destPath
+		}
+		if err := os.MkdirAll(parent, 0o755); err != nil {
 			<-done
 			return err
 		}
-		if err := out.Close(); err != nil {
+		staged, stageDir, err := extractToTemp(parent, payload, report.OnEntry)
+		if err != nil {
+			<-done
+			return err
+		}
+		defer os.RemoveAll(stageDir)
+		baseName := base
+		if baseName == "" {
+			baseName = filepath.Base(staged)
+		}
+		outPath := destPath
+		if destDir {
+			outPath = filepath.Join(destPath, baseName)
+		}
+		if err := replaceLocalPath(staged, outPath); err != nil {
 			<-done
 			return err
 		}
 	case "dir":
-		if !req.Recursive {
-			<-done
-			return fmt.Errorf("%q is a directory (use -r)", src.Raw)
-		}
 		root := destPath
 		if destDir && base != "" && !src.DirHint {
 			root = filepath.Join(destPath, base)
 		}
-		if err := os.MkdirAll(root, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
 			<-done
 			return err
 		}
-		if err := copyutil.ExtractTar(buf, root); err != nil {
+		stageDir, err := os.MkdirTemp(filepath.Dir(root), "yeet-copy-*")
+		if err != nil {
+			<-done
+			return err
+		}
+		defer os.RemoveAll(stageDir)
+		if err := copyutil.ExtractTarWithOptions(payload, stageDir, copyutil.ExtractOptions{OnEntry: report.OnEntry}); err != nil {
+			<-done
+			return err
+		}
+		if err := copyutil.MoveTree(stageDir, root); err != nil {
 			<-done
 			return err
 		}
@@ -324,20 +449,175 @@ func copyFromRemote(req copyRequest) error {
 	if err := <-done; err != nil {
 		return err
 	}
+	report.Finish(0, counter.N())
 	return nil
 }
 
-func tarDirectoryStream(src string, prefix string) (io.ReadCloser, error) {
+func tarDirectoryStream(src string, prefix string, compress bool, observer copyutil.TarObserver) (io.ReadCloser, error) {
 	pr, pw := io.Pipe()
-	go func() {
-		err := copyutil.TarDirectory(pw, src, prefix)
-		if err != nil {
-			_ = pw.CloseWithError(err)
-			return
-		}
-		_ = pw.Close()
-	}()
+	go writeTarStream(pw, compress, func(w io.Writer) error {
+		return copyutil.TarDirectoryWithObserver(w, src, prefix, observer)
+	})
 	return pr, nil
+}
+
+func tarFileStream(src string, name string, compress bool, observer copyutil.TarObserver) (io.ReadCloser, error) {
+	pr, pw := io.Pipe()
+	go writeTarStream(pw, compress, func(w io.Writer) error {
+		return copyutil.TarFileWithObserver(w, src, name, observer)
+	})
+	return pr, nil
+}
+
+func writeTarStream(pw *io.PipeWriter, compress bool, fn func(io.Writer) error) {
+	var (
+		err error
+		gz  *gzip.Writer
+		w   io.Writer = pw
+	)
+	if compress {
+		gz = gzip.NewWriter(pw)
+		w = gz
+	}
+	err = fn(w)
+	if gz != nil {
+		if cerr := gz.Close(); err == nil && cerr != nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		_ = pw.CloseWithError(err)
+		return
+	}
+	_ = pw.Close()
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func (c *countingReader) N() int64 {
+	return c.n
+}
+
+type copyReport struct {
+	verbose   bool
+	startedAt time.Time
+	total     int64
+}
+
+func newCopyReport(verbose bool) *copyReport {
+	return &copyReport{verbose: verbose}
+}
+
+func (r *copyReport) Start(direction string) {
+	if !r.verbose {
+		return
+	}
+	fmt.Fprintf(os.Stdout, "%s incremental file list\n", direction)
+	r.startedAt = time.Now()
+}
+
+func (r *copyReport) OnEntry(entry copyutil.TarEntry) {
+	if entry.Type == tar.TypeReg || entry.Type == tar.TypeRegA {
+		r.total += entry.Size
+	}
+	if !r.verbose {
+		return
+	}
+	name := entry.Name
+	if entry.Type == tar.TypeDir {
+		name += "/"
+	}
+	if name != "" {
+		fmt.Fprintln(os.Stdout, name)
+	}
+}
+
+func (r *copyReport) Finish(sentBytes, receivedBytes int64) {
+	if !r.verbose {
+		return
+	}
+	if r.startedAt.IsZero() {
+		r.startedAt = time.Now()
+	}
+	elapsed := time.Since(r.startedAt).Seconds()
+	if elapsed <= 0 {
+		elapsed = 0.001
+	}
+	totalBytes := sentBytes + receivedBytes
+	rate := int64(float64(totalBytes) / elapsed)
+	fmt.Fprintln(os.Stdout, "")
+	fmt.Fprintf(os.Stdout, "sent %s bytes  received %s bytes  %s bytes/sec\n",
+		formatBytesShort(sentBytes),
+		formatBytesShort(receivedBytes),
+		formatBytesShort(rate),
+	)
+	speedup := 1.0
+	if totalBytes > 0 {
+		speedup = float64(r.total) / float64(totalBytes)
+	}
+	fmt.Fprintf(os.Stdout, "total size is %s  speedup is %.2f\n", formatBytesShort(r.total), speedup)
+}
+
+func formatBytesShort(n int64) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	units := []string{"K", "M", "G", "T", "P", "E"}
+	val := float64(n)
+	unit := ""
+	for _, u := range units {
+		val /= 1000
+		unit = u
+		if val < 1000 {
+			break
+		}
+	}
+	return fmt.Sprintf("%.2f%s", val, unit)
+}
+
+func extractToTemp(parent string, r io.Reader, observer copyutil.TarObserver) (string, string, error) {
+	stageDir, err := os.MkdirTemp(parent, "yeet-copy-*")
+	if err != nil {
+		return "", "", err
+	}
+	var staged string
+	var stagedCount int
+	err = copyutil.ExtractTarWithOptions(r, stageDir, copyutil.ExtractOptions{OnEntry: func(entry copyutil.TarEntry) {
+		if observer != nil {
+			observer(entry)
+		}
+		if entry.Type != tar.TypeDir && stagedCount == 0 {
+			staged = filepath.Join(stageDir, filepath.FromSlash(entry.Name))
+		}
+		if entry.Type != tar.TypeDir {
+			stagedCount++
+		}
+	}})
+	if err != nil {
+		_ = os.RemoveAll(stageDir)
+		return "", "", err
+	}
+	if stagedCount != 1 {
+		_ = os.RemoveAll(stageDir)
+		return "", "", fmt.Errorf("expected single file in archive, found %d", stagedCount)
+	}
+	return staged, stageDir, nil
+}
+
+func replaceLocalPath(src, dst string) error {
+	if err := os.RemoveAll(dst); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.Rename(src, dst)
 }
 
 func remotePathOrDot(rel string) string {
