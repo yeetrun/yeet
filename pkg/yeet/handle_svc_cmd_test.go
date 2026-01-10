@@ -7,6 +7,7 @@ package yeet
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"io"
 	"os"
@@ -901,6 +902,22 @@ func TestHandleSvcCmdCopyUploadFile(t *testing.T) {
 		if tty {
 			t.Fatalf("expected tty=false, got true")
 		}
+		if stdin == nil {
+			t.Fatalf("expected stdin to be provided")
+		}
+		gz, err := gzip.NewReader(stdin)
+		if err != nil {
+			t.Fatalf("failed to read gzip: %v", err)
+		}
+		defer gz.Close()
+		tr := tar.NewReader(gz)
+		hdr, err := tr.Next()
+		if err != nil {
+			t.Fatalf("failed to read tar: %v", err)
+		}
+		if hdr.Name != "app.yml" {
+			t.Fatalf("expected tar entry app.yml, got %q", hdr.Name)
+		}
 		return nil
 	}
 
@@ -911,7 +928,7 @@ func TestHandleSvcCmdCopyUploadFile(t *testing.T) {
 	if gotService != "svc-a" {
 		t.Fatalf("expected service svc-a, got %q", gotService)
 	}
-	wantArgs := []string{"copy", "--to", "configs/app.yml"}
+	wantArgs := []string{"copy", "--to", "configs", "--archive", "--compress"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
 	}
@@ -942,7 +959,12 @@ func TestHandleSvcCmdCopyUploadDirRecursiveContents(t *testing.T) {
 		if stdin == nil {
 			t.Fatalf("expected stdin to be provided")
 		}
-		tr := tar.NewReader(stdin)
+		gz, err := gzip.NewReader(stdin)
+		if err != nil {
+			t.Fatalf("failed to read gzip: %v", err)
+		}
+		defer gz.Close()
+		tr := tar.NewReader(gz)
 		for {
 			hdr, err := tr.Next()
 			if err == io.EOF {
@@ -964,7 +986,7 @@ func TestHandleSvcCmdCopyUploadDirRecursiveContents(t *testing.T) {
 		t.Fatalf("HandleSvcCmd returned error: %v", err)
 	}
 
-	wantArgs := []string{"copy", "--to", "configs", "--archive"}
+	wantArgs := []string{"copy", "--to", "configs", "--archive", "--compress"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
 	}
@@ -993,7 +1015,12 @@ func TestHandleSvcCmdCopyUploadDirRecursiveKeepsDir(t *testing.T) {
 		if stdin == nil {
 			t.Fatalf("expected stdin to be provided")
 		}
-		tr := tar.NewReader(stdin)
+		gz, err := gzip.NewReader(stdin)
+		if err != nil {
+			t.Fatalf("failed to read gzip: %v", err)
+		}
+		defer gz.Close()
+		tr := tar.NewReader(gz)
 		for {
 			hdr, err := tr.Next()
 			if err == io.EOF {
@@ -1033,11 +1060,29 @@ func TestHandleSvcCmdCopyDownloadFile(t *testing.T) {
 	execRemoteStreamFn = func(ctx context.Context, service string, args []string, stdin io.Reader) (io.ReadCloser, <-chan error, error) {
 		gotService = service
 		gotArgs = append([]string{}, args...)
+		srcTmp := t.TempDir()
+		src := filepath.Join(srcTmp, "remote.txt")
+		if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+			return nil, nil, err
+		}
+		var tarBuf bytes.Buffer
+		if err := copyutil.TarFile(&tarBuf, src, "remote.txt"); err != nil {
+			return nil, nil, err
+		}
+		var gzBuf bytes.Buffer
+		gz := gzip.NewWriter(&gzBuf)
+		if _, err := gz.Write(tarBuf.Bytes()); err != nil {
+			gz.Close()
+			return nil, nil, err
+		}
+		if err := gz.Close(); err != nil {
+			return nil, nil, err
+		}
 		var buf bytes.Buffer
 		if err := copyutil.WriteHeader(&buf, "file", "remote.txt"); err != nil {
 			return nil, nil, err
 		}
-		buf.WriteString("payload")
+		buf.Write(gzBuf.Bytes())
 		done := make(chan error, 1)
 		done <- nil
 		return io.NopCloser(bytes.NewReader(buf.Bytes())), done, nil
@@ -1050,7 +1095,7 @@ func TestHandleSvcCmdCopyDownloadFile(t *testing.T) {
 	if gotService != "svc-a" {
 		t.Fatalf("expected service svc-a, got %q", gotService)
 	}
-	wantArgs := []string{"copy", "--from", "remote.txt"}
+	wantArgs := []string{"copy", "--from", "remote.txt", "--archive", "--compress"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("expected args %v, got %v", wantArgs, gotArgs)
 	}
@@ -1089,7 +1134,16 @@ func TestHandleSvcCmdCopyDownloadDirRecursive(t *testing.T) {
 		if err := copyutil.WriteHeader(&buf, "dir", "configs"); err != nil {
 			return nil, nil, err
 		}
-		buf.Write(tarBuf.Bytes())
+		var gzBuf bytes.Buffer
+		gz := gzip.NewWriter(&gzBuf)
+		if _, err := gz.Write(tarBuf.Bytes()); err != nil {
+			gz.Close()
+			return nil, nil, err
+		}
+		if err := gz.Close(); err != nil {
+			return nil, nil, err
+		}
+		buf.Write(gzBuf.Bytes())
 		done := make(chan error, 1)
 		done <- nil
 		return io.NopCloser(bytes.NewReader(buf.Bytes())), done, nil

@@ -163,7 +163,7 @@ func HandleSvcCmd(args []string) error {
 		}
 		runArgs = normalizeRunArgs(runArgs)
 		return saveRunConfig(cfgLoc, hostOverride, payload, runArgs)
-	// `copy [-r] <src> <dst>`
+	// `copy [-avz] <src> <dst>`
 	case "copy":
 		var cfg *ProjectConfig
 		if cfgLoc != nil {

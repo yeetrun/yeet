@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"compress/gzip"
 	"fmt"
 	"io"
 	"log"
@@ -233,6 +234,7 @@ type copyExecArgs struct {
 	To        string
 	Recursive bool
 	Archive   bool
+	Compress  bool
 }
 
 func parseCopyExecArgs(args []string) (copyExecArgs, error) {
@@ -253,8 +255,11 @@ func parseCopyExecArgs(args []string) (copyExecArgs, error) {
 			i++
 		case "--recursive", "-r":
 			out.Recursive = true
-		case "--archive":
+		case "--archive", "-a":
 			out.Archive = true
+			out.Recursive = true
+		case "--compress", "-z":
+			out.Compress = true
 		default:
 			return copyExecArgs{}, fmt.Errorf("invalid copy argument %q", args[i])
 		}
@@ -284,11 +289,29 @@ func (e *ttyExecer) copyToRemote(parsed copyExecArgs) error {
 		dstRoot = e.s.serviceDataDir(e.sn)
 	}
 	if parsed.Archive {
-		if err := os.MkdirAll(dstRoot, 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(dstRoot), 0755); err != nil {
 			return fmt.Errorf("failed to create destination directory: %w", err)
 		}
-		if err := copyutil.ExtractTar(e.rw, dstRoot); err != nil {
+		stageDir, err := os.MkdirTemp(filepath.Dir(dstRoot), "yeet-copy-*")
+		if err != nil {
+			return fmt.Errorf("failed to create temp dir: %w", err)
+		}
+		defer os.RemoveAll(stageDir)
+		input := io.Reader(e.rw)
+		var gz *gzip.Reader
+		if parsed.Compress {
+			gz, err = gzip.NewReader(e.rw)
+			if err != nil {
+				return fmt.Errorf("failed to read compressed payload: %w", err)
+			}
+			defer gz.Close()
+			input = gz
+		}
+		if err := copyutil.ExtractTarWithOptions(input, stageDir, copyutil.ExtractOptions{}); err != nil {
 			return fmt.Errorf("failed to extract archive: %w", err)
+		}
+		if err := copyutil.MoveTree(stageDir, dstRoot); err != nil {
+			return fmt.Errorf("failed to move staged files: %w", err)
 		}
 		return nil
 	}
@@ -302,7 +325,17 @@ func (e *ttyExecer) copyToRemote(parsed copyExecArgs) error {
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
-	if _, err := io.Copy(tmpf, e.rw); err != nil {
+	input := io.Reader(e.rw)
+	var gz *gzip.Reader
+	if parsed.Compress {
+		gz, err = gzip.NewReader(e.rw)
+		if err != nil {
+			return fmt.Errorf("failed to read compressed payload: %w", err)
+		}
+		defer gz.Close()
+		input = gz
+	}
+	if _, err := io.Copy(tmpf, input); err != nil {
 		tmpf.Close()
 		os.Remove(tmpf.Name())
 		return fmt.Errorf("failed to copy file: %w", err)
@@ -340,13 +373,27 @@ func (e *ttyExecer) copyFromRemote(parsed copyExecArgs) error {
 	}
 	if info.IsDir() {
 		if !parsed.Recursive {
-			return fmt.Errorf("copy requires --recursive for directories")
+			return fmt.Errorf("copy requires recursive mode for directories")
 		}
 		if err := copyutil.WriteHeader(e.rw, "dir", base); err != nil {
 			return err
 		}
-		if err := copyutil.TarDirectory(e.rw, srcPath, ""); err != nil {
+		payload := io.Writer(e.rw)
+		var gz *gzip.Writer
+		if parsed.Compress {
+			gz = gzip.NewWriter(e.rw)
+			payload = gz
+		}
+		if err := copyutil.TarDirectory(payload, srcPath, ""); err != nil {
+			if gz != nil {
+				gz.Close()
+			}
 			return err
+		}
+		if gz != nil {
+			if err := gz.Close(); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -356,13 +403,45 @@ func (e *ttyExecer) copyFromRemote(parsed copyExecArgs) error {
 	if err := copyutil.WriteHeader(e.rw, "file", base); err != nil {
 		return err
 	}
-	f, err := os.Open(srcPath)
-	if err != nil {
-		return err
+	payload := io.Writer(e.rw)
+	var gz *gzip.Writer
+	if parsed.Compress {
+		gz = gzip.NewWriter(e.rw)
+		payload = gz
 	}
-	defer f.Close()
-	if _, err := io.Copy(e.rw, f); err != nil {
-		return err
+	if parsed.Archive {
+		if err := copyutil.TarFile(payload, srcPath, base); err != nil {
+			if gz != nil {
+				gz.Close()
+			}
+			return err
+		}
+	} else {
+		f, err := os.Open(srcPath)
+		if err != nil {
+			if gz != nil {
+				gz.Close()
+			}
+			return err
+		}
+		if _, err := io.Copy(payload, f); err != nil {
+			f.Close()
+			if gz != nil {
+				gz.Close()
+			}
+			return err
+		}
+		if err := f.Close(); err != nil {
+			if gz != nil {
+				gz.Close()
+			}
+			return err
+		}
+	}
+	if gz != nil {
+		if err := gz.Close(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
