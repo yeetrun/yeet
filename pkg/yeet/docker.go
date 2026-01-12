@@ -18,7 +18,7 @@ import (
 	"github.com/shayne/yargs"
 	"github.com/shayne/yeet/pkg/cmdutil"
 	"github.com/shayne/yeet/pkg/svc"
-	"tailscale.com/client/tailscale"
+	"tailscale.com/client/local"
 )
 
 type pushFlagsParsed struct {
@@ -64,7 +64,7 @@ func HandlePush(ctx context.Context, args []string) error {
 }
 
 func getDockerHost(ctx context.Context) (string, error) {
-	var lc tailscale.LocalClient
+	var lc local.Client
 	st, err := lc.Status(ctx)
 	if err != nil {
 		return "", err

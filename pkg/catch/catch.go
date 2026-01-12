@@ -25,7 +25,8 @@ import (
 	"github.com/shayne/yeet/pkg/netns"
 	"github.com/shayne/yeet/pkg/registry"
 	"github.com/shayne/yeet/pkg/svc"
-	"tailscale.com/client/tailscale"
+	"tailscale.com/client/local"
+	tsapi "tailscale.com/client/tailscale/v2"
 	"tailscale.com/util/set"
 )
 
@@ -136,7 +137,7 @@ type Config struct {
 	RegistryRoot         string
 	ContainerdSocket     string
 	RegistryStorage      registry.Storage
-	LocalClient          *tailscale.LocalClient
+	LocalClient          *local.Client
 	AuthorizeFunc        func(ctx context.Context, remoteAddr string) error `json:"-"`
 }
 
@@ -545,10 +546,9 @@ func (s *Server) RemoveService(name string) (*RemoveReport, error) {
 		c, err := tsClient(s.ctx)
 		if err != nil {
 			report.addWarning(fmt.Errorf("failed to get tailscale client: %w", err))
-		} else if err := c.DeleteDevice(s.ctx, tsStableID); err != nil {
-			var errResp tailscale.ErrResponse
-			if errors.As(err, &errResp) && errResp.Status == http.StatusNotFound {
-				log.Printf("tailscale device not found: %v", errResp)
+		} else if err := c.Devices().Delete(s.ctx, tsStableID); err != nil {
+			if tsapi.IsNotFound(err) {
+				log.Printf("tailscale device not found: %v", err)
 			} else {
 				report.addWarning(fmt.Errorf("failed to delete tailscale device: %w", err))
 			}

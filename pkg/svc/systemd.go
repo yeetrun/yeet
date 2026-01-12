@@ -19,7 +19,7 @@ import (
 	"github.com/shayne/yeet/pkg/db"
 	"github.com/shayne/yeet/pkg/fileutil"
 	"golang.org/x/sync/errgroup"
-	"tailscale.com/client/tailscale"
+	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 	"tailscale.com/logtail/backoff"
 )
@@ -384,7 +384,7 @@ func (s *SystemdService) monitorTailscale() (err error) {
 	}()
 	log.Printf("monitoring tailscale for %s", s.Name())
 	sock := filepath.Join(s.runDir, "tailscaled.sock")
-	lc := tailscale.LocalClient{
+	lc := local.Client{
 		Socket:        sock,
 		UseSocketOnly: true,
 	}

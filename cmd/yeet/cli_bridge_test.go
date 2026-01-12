@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -65,7 +66,7 @@ func TestHandleRemoteUsesArgsWithoutBridge(t *testing.T) {
 
 	bridgedArgs = nil
 
-	if err := handleRemote(nil, []string{"status", "--format", "json"}); err != nil {
+	if err := handleRemote(context.Background(), []string{"status", "--format", "json"}); err != nil {
 		t.Fatalf("handleRemote returned error: %v", err)
 	}
 	if got := strings.Join(got, " "); got != "status --format json" {
@@ -102,7 +103,7 @@ func TestHandleSvcCmdForwardsArgsOverRPC(t *testing.T) {
 
 	bridgedArgs = []string{"status", "--format", "json"}
 
-	if err := handleRemote(nil, []string{"status"}); err != nil {
+	if err := handleRemote(context.Background(), []string{"status"}); err != nil {
 		t.Fatalf("handleRemote returned error: %v", err)
 	}
 	if got := strings.Join(got, " "); got != "status --format json" {

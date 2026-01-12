@@ -271,15 +271,6 @@ func findCallIndex(calls []cmdCall, spec callSpec) int {
 	return -1
 }
 
-func hasCallWithPrefix(calls []cmdCall, prefix []string) bool {
-	for _, call := range calls {
-		if hasPrefix(call.args, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
 func hasPrefix(args, prefix []string) bool {
 	if len(args) < len(prefix) {
 		return false

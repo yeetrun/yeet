@@ -393,7 +393,7 @@ func tryRunDockerfile(path string, args []string) (ok bool, _ error) {
 		return false, nil
 	}
 	if st, err := os.Stat(path); os.IsNotExist(err) || st != nil && st.IsDir() {
-		return false, fmt.Errorf("Dockerfile payload does not exist: %s", path)
+		return false, fmt.Errorf("dockerfile payload does not exist: %s", path)
 	} else if err != nil {
 		return false, err
 	}

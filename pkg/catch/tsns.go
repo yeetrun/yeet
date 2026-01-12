@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,8 +24,7 @@ import (
 	"github.com/shayne/yeet/pkg/fileutil"
 	"github.com/shayne/yeet/pkg/svc"
 	"github.com/shayne/yeet/pkg/targz"
-	"golang.org/x/oauth2/clientcredentials"
-	"tailscale.com/client/tailscale"
+	"tailscale.com/client/tailscale/v2"
 	"tailscale.com/ipn"
 	"tailscale.com/types/ptr"
 )
@@ -145,18 +145,20 @@ func tsClient(ctx context.Context) (*tailscale.Client, error) {
 		return nil, errors.New("invalid oauth secret")
 	}
 	baseURL := cmp.Or(os.Getenv("TS_BASE_URL"), "https://api.tailscale.com")
-
-	credentials := clientcredentials.Config{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		TokenURL:     baseURL + "/api/v2/oauth/token",
-		Scopes:       []string{"device"},
+	parsedBaseURL, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid TS_BASE_URL %q: %w", baseURL, err)
 	}
-	tailscale.I_Acknowledge_This_API_Is_Unstable = true
 
-	tsClient := tailscale.NewClient("-", nil)
-	tsClient.HTTPClient = credentials.Client(ctx)
-	tsClient.BaseURL = baseURL
+	tsClient := &tailscale.Client{
+		BaseURL: parsedBaseURL,
+		Tailnet: "-",
+		Auth: &tailscale.OAuth{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			Scopes:       []string{"device"},
+		},
+	}
 	return tsClient, nil
 }
 
@@ -165,20 +167,17 @@ func generateTailscaleAuthKey(ctx context.Context, tags []string) (string, error
 	if err != nil {
 		return "", err
 	}
-	caps := tailscale.KeyCapabilities{
-		Devices: tailscale.KeyDeviceCapabilities{
-			Create: tailscale.KeyDeviceCreateCapabilities{
-				Preauthorized: true,
-				Tags:          tags,
-			},
-		},
-	}
+	caps := tailscale.KeyCapabilities{}
+	caps.Devices.Create.Preauthorized = true
+	caps.Devices.Create.Tags = tags
 
-	authkey, _, err := tsClient.CreateKey(ctx, caps)
+	key, err := tsClient.Keys().CreateAuthKey(ctx, tailscale.CreateKeyRequest{
+		Capabilities: caps,
+	})
 	if err != nil {
 		return "", err
 	}
-	return authkey, nil
+	return key.Key, nil
 }
 
 func (s *Server) getTailscaleAuthKey(ctx context.Context, tags []string) (string, error) {

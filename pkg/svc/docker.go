@@ -37,15 +37,6 @@ type DockerComposeService struct {
 	installEnvOnce lazy.SyncValue[error]
 }
 
-func do(f ...func() error) error {
-	for _, fn := range f {
-		if err := fn(); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // DockerCmd returns the path to the docker binary.
 func DockerCmd() (string, error) {
 	p, err := exec.LookPath("docker")

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Copyright (c) 2025 AUTHORS All rights reserved.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file.
+
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$repo_root"
+
+if rg -n '(^|[[:space:]])github.com/shayne/yeet/pkg/catch([[:space:]]|$)' cmd/yeet/depaware.txt; then
+  echo "" >&2
+  echo "cmd/yeet depends on pkg/catch (not allowed)." >&2
+  exit 1
+fi
+
+if rg -n '(^|[[:space:]])github.com/shayne/yeet/pkg/yeet([[:space:]]|$)' cmd/catch/depaware.txt; then
+  echo "" >&2
+  echo "cmd/catch depends on pkg/yeet (not allowed)." >&2
+  exit 1
+fi

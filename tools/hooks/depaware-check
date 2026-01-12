@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Copyright (c) 2025 AUTHORS All rights reserved.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file.
+
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$repo_root"
+
+if ! go run github.com/tailscale/depaware -update ./cmd/yeet ./cmd/catch; then
+  echo "" >&2
+  echo "depaware.txt generation failed." >&2
+  exit 1
+fi
+
+if ! git diff --exit-code -- cmd/yeet/depaware.txt cmd/catch/depaware.txt >/dev/null; then
+  echo "" >&2
+  echo "depaware.txt changed; please stage the updates and retry the commit." >&2
+  exit 1
+fi

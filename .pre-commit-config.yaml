@@ -1,12 +1,48 @@
 repos:
   - repo: local
     hooks:
-      - id: yeet-pre-commit
-        name: yeet pre-commit checks
-        entry: tools/hooks/pre-commit
+      - id: yeet-license-check
+        name: yeet license check
+        entry: tools/hooks/check-license
         language: system
         pass_filenames: false
         always_run: true
+        stages: [pre-commit]
+      - id: yeet-gofmt-check
+        name: yeet gofmt check
+        entry: tools/hooks/gofmt-check
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: yeet-go-vet
+        name: yeet go vet
+        entry: tools/hooks/go-vet
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: yeet-go-mod-tidy
+        name: yeet go mod tidy
+        entry: tools/hooks/go-mod-tidy-check
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: yeet-staticcheck
+        name: yeet staticcheck
+        entry: tools/hooks/staticcheck
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: yeet-depaware
+        name: yeet depaware
+        entry: tools/hooks/depaware-check
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
+      - id: yeet-depaware-deps
+        name: yeet depaware dependency check
+        entry: tools/hooks/depaware-deps-check
+        language: system
+        pass_filenames: false
         stages: [pre-commit]
       - id: yeet-prepare-commit-msg
         name: yeet prepare commit message
