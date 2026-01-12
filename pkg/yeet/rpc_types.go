@@ -10,4 +10,6 @@ type serverInfo struct {
 	GOARCH      string `json:"goarch"`
 	InstallUser string `json:"installUser"`
 	InstallHost string `json:"installHost"`
+	RootDir     string `json:"rootDir,omitempty"`
+	ServicesDir string `json:"servicesDir,omitempty"`
 }

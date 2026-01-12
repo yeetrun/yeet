@@ -96,7 +96,7 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		writeRPCResponse(w, catchrpc.Response{
 			JSONRPC: "2.0",
 			ID:      req.ID,
-			Result:  GetInfoWithInstallUser(s.cfg.InstallUser, s.cfg.InstallHost),
+			Result:  GetInfoWithConfig(&s.cfg),
 		})
 	case "catch.ServiceInfo":
 		var params catchrpc.ServiceInfoRequest
