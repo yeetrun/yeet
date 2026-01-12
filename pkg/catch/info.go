@@ -12,6 +12,8 @@ type ServerInfo struct {
 	GOARCH      string `json:"goarch"`
 	InstallUser string `json:"installUser,omitempty"`
 	InstallHost string `json:"installHost,omitempty"`
+	RootDir     string `json:"rootDir,omitempty"`
+	ServicesDir string `json:"servicesDir,omitempty"`
 }
 
 func GetInfo() ServerInfo {
@@ -26,5 +28,12 @@ func GetInfoWithInstallUser(installUser string, installHost string) ServerInfo {
 	info := GetInfo()
 	info.InstallUser = installUser
 	info.InstallHost = installHost
+	return info
+}
+
+func GetInfoWithConfig(cfg *Config) ServerInfo {
+	info := GetInfoWithInstallUser(cfg.InstallUser, cfg.InstallHost)
+	info.RootDir = cfg.RootDir
+	info.ServicesDir = cfg.ServicesRoot
 	return info
 }

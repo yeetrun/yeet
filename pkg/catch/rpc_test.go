@@ -79,6 +79,9 @@ func TestRPCInfo(t *testing.T) {
 	if info.GOOS == "" || info.GOARCH == "" {
 		t.Fatalf("unexpected info: %#v", info)
 	}
+	if info.RootDir == "" || info.ServicesDir == "" {
+		t.Fatalf("expected root and services dirs in info: %#v", info)
+	}
 }
 
 func TestRPCServiceInfo(t *testing.T) {

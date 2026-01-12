@@ -124,9 +124,15 @@ func buildHelpConfig() yargs.HelpConfig {
 	}
 	subcommands["ssh"] = yargs.SubCommandInfo{
 		Name:        "ssh",
-		Description: "Open an SSH session to the host with the install user",
-		Usage:       "[ssh-args...]",
-		Examples:    []string{"yeet ssh", "yeet --host=<host> ssh", "yeet ssh htop"},
+		Description: "Open an SSH session to the catch host (optionally into a service data dir)",
+		Usage:       "[ssh-opts...] [<svc>] [-- <remote-cmd...>]",
+		Examples: []string{
+			"yeet ssh",
+			"yeet --host=<host> ssh",
+			"yeet ssh <svc>",
+			"yeet ssh -- uname -a",
+			"yeet ssh <svc> -- ls -la",
+		},
 	}
 	subcommands["skirt"] = yargs.SubCommandInfo{
 		Name:   "skirt",
