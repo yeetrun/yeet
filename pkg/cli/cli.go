@@ -608,44 +608,6 @@ func splitArgsForParsing(args []string, specs map[string]FlagSpec) ([]string, []
 	return args, nil
 }
 
-func extractLongFlagValues(args []string, name string, splitComma bool) ([]string, []string) {
-	var out []string
-	var values []string
-	flag := "--" + name
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if strings.HasPrefix(arg, flag+"=") {
-			val := strings.TrimPrefix(arg, flag+"=")
-			values = appendValues(values, val, splitComma)
-			continue
-		}
-		if arg == flag {
-			if i+1 < len(args) {
-				val := args[i+1]
-				values = appendValues(values, val, splitComma)
-				i++
-			}
-			continue
-		}
-		out = append(out, arg)
-	}
-	return out, values
-}
-
-func appendValues(dst []string, val string, splitComma bool) []string {
-	if !splitComma {
-		return append(dst, val)
-	}
-	parts := strings.Split(val, ",")
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		dst = append(dst, part)
-	}
-	return dst
-}
-
 func flagSpecsFromStruct(v any) map[string]FlagSpec {
 	specs := make(map[string]FlagSpec)
 	t := reflect.TypeOf(v)
@@ -683,15 +645,6 @@ func consumesValue(t reflect.Type) bool {
 	default:
 		return true
 	}
-}
-
-func withExtraFlagSpecs(specs map[string]FlagSpec, name string, spec FlagSpec) map[string]FlagSpec {
-	out := make(map[string]FlagSpec, len(specs)+1)
-	for k, v := range specs {
-		out[k] = v
-	}
-	out["--"+name] = spec
-	return out
 }
 
 func RequireArgsAtLeast(subcmd string, args []string, count int) error {

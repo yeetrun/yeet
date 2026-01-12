@@ -95,14 +95,14 @@ func handleRemote(_ context.Context, args []string) error {
 	return handleSvcCmdFn(args)
 }
 
-func handleDockerGroup(_ context.Context, args []string) error {
+func handleDockerGroup(ctx context.Context, args []string) error {
 	full := append([]string{"docker"}, args...)
-	return handleRemote(nil, full)
+	return handleRemote(ctx, full)
 }
 
-func handleEnvGroup(_ context.Context, args []string) error {
+func handleEnvGroup(ctx context.Context, args []string) error {
 	full := append([]string{"env"}, args...)
-	return handleRemote(nil, full)
+	return handleRemote(ctx, full)
 }
 
 func handleMountSys(ctx context.Context, _ []string) error {

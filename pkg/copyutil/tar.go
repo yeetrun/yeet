@@ -253,7 +253,7 @@ func ExtractTarWithOptions(r io.Reader, dest string, opts ExtractOptions) error 
 				return err
 			}
 			dirs = append(dirs, dirMeta{path: target, hdr: hdr})
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg, 0:
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return err
 			}

@@ -14,7 +14,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"tailscale.com/client/tailscale"
+	"tailscale.com/client/local"
 )
 
 func overlaps(a, b []string) bool {
@@ -27,7 +27,7 @@ func overlaps(a, b []string) bool {
 }
 
 func HandleListHosts(ctx context.Context, tags []string) error {
-	var lc tailscale.LocalClient
+	var lc local.Client
 	st, err := lc.Status(ctx)
 	if err != nil {
 		return err

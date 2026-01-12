@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Copyright (c) 2025 AUTHORS All rights reserved.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file.
+
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+cd "$repo_root"
+
+gofmt_targets=()
+while IFS= read -r file; do
+  if [[ "$file" == *.go ]]; then
+    gofmt_targets+=("$file")
+  fi
+done < <(
+  {
+    git diff --name-only --diff-filter=ACMRT
+    git diff --name-only --cached --diff-filter=ACMRT
+  } | sort -u
+)
+
+if ((${#gofmt_targets[@]})); then
+  gofmt -w "${gofmt_targets[@]}"
+  if ! git diff --exit-code -- "${gofmt_targets[@]}" >/dev/null; then
+    echo "" >&2
+    echo "gofmt changed files; please stage the updates and retry the commit." >&2
+    exit 1
+  fi
+fi

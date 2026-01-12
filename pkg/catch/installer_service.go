@@ -7,7 +7,6 @@ package catch
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"math/rand/v2"
 	"net/netip"
@@ -44,12 +43,6 @@ type Installer struct {
 
 	icfg InstallerCfg
 	s    *Server
-}
-
-func (si *Installer) printf(format string, args ...any) {
-	if si.icfg.Printer != nil {
-		si.icfg.Printer(format, args...)
-	}
 }
 
 func unassignedIP(dv db.DataView) (netip.Addr, error) {
@@ -303,26 +296,4 @@ func asJSON(v any) string {
 		return fmt.Sprintf("failed to marshal: %v", err)
 	}
 	return string(b)
-}
-
-func verifyCatchBinary(path string) error {
-	// Check if the file is a valid ELF binary.
-	f, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("failed to open file: %v", err)
-	}
-	defer f.Close()
-	_, err = f.Seek(0, io.SeekStart)
-	if err != nil {
-		return fmt.Errorf("failed to seek: %v", err)
-	}
-	// Execute the binary, passing "is-catch" as the first argument.
-	out, err := exec.Command(path, "is-catch").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to execute binary: %v", err)
-	}
-	if string(out) != "yes\n" {
-		return fmt.Errorf("not a catch binary")
-	}
-	return nil
 }

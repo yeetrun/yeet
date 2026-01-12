@@ -526,7 +526,7 @@ func (r *copyReport) Start(direction string) {
 }
 
 func (r *copyReport) OnEntry(entry copyutil.TarEntry) {
-	if entry.Type == tar.TypeReg || entry.Type == tar.TypeRegA {
+	if entry.Type == tar.TypeReg || entry.Type == 0 {
 		r.total += entry.Size
 	}
 	if !r.verbose {
