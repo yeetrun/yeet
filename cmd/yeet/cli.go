@@ -124,7 +124,7 @@ func buildHelpConfig() yargs.HelpConfig {
 	}
 	subcommands["ssh"] = yargs.SubCommandInfo{
 		Name:        "ssh",
-		Description: "Open an SSH session to the catch host (optionally into a service data dir)",
+		Description: "Open SSH to the catch host (optionally into a service dir)",
 		Usage:       "[ssh-opts...] [<svc>] [-- <remote-cmd...>]",
 		Examples: []string{
 			"yeet ssh",
@@ -170,7 +170,7 @@ func buildHelpConfig() yargs.HelpConfig {
 	return yargs.HelpConfig{
 		Command: yargs.CommandInfo{
 			Name:        "yeet",
-			Description: "Deploy and manage services on a remote catch host; most commands are forwarded over RPC on your tailnet.",
+			Description: "Deploy/manage services on a remote catch host; commands go over RPC.",
 			Examples: []string{
 				"yeet status",
 				"yeet status <svc>",

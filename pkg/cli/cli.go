@@ -190,7 +190,7 @@ func IsServiceArgSpec(spec yargs.ArgSpec) bool {
 
 var remoteCommandInfos = map[string]CommandInfo{
 	"cron": {Name: "cron", Description: "Install a cron job from a file and 5-field expression", Usage: `SVC FILE "<cron expr>" [-- <args...>]`, Examples: []string{`yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo`}, ArgsSchema: ServiceArgs{}},
-	"copy": {Name: "copy", Description: "Copy files between local and a service data dir (rsync-like, defaults to -avz)", Usage: "[-avz] <src> <dst>", Examples: []string{
+	"copy": {Name: "copy", Description: "Copy files between local and service data", Usage: "[-avz] <src> <dst>", Examples: []string{
 		"yeet copy ./config.yml svc:data/config.yml",
 		"yeet copy ./configs/ svc:data/",
 		"yeet copy svc:data/configs ./configs",
@@ -210,7 +210,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}},
 	"restart":  {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
 	"rollback": {Name: "rollback", Description: "Rollback a service", ArgsSchema: ServiceArgs{}},
-	"run": {Name: "run", Description: "Install or update a service from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [-- <payload args>]", Examples: []string{
+	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [-- <payload args>]", Examples: []string{
 		"yeet run <svc> ./bin/<svc> -- --app-flag value",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
 		"yeet run --pull <svc> ./compose.yml",
