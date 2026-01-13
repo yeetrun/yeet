@@ -6,6 +6,18 @@ A personal homelab service manager built around Tailscale RPC. See the [Architec
 
 This repository is **personal infrastructure tooling** for how I run my homelab. It is not intended for a general audience, likely will not work for you as-is, and may rely on assumptions, configs, and workflows that only exist in my environment. Use it only as a reference or starting point.
 
+## Install yeet (release binary)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shayne/yeet/main/install.sh | sh
+```
+
+Nightly build:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shayne/yeet/main/install.sh | sh -s -- --nightly
+```
+
 ## Toolchain Setup (Recommended: mise)
 
 If you already have Go in your `PATH`, you can skip mise and use the Go commands elsewhere in this README. If not, the quickest path is to use mise to install the toolchain and run the bootstrap task.
@@ -27,6 +39,18 @@ echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
 ```bash
 mise install
 mise run init-host -- root@<host>
+```
+
+## Install yeet (release binary)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shayne/yeet/main/install.sh | sh
+```
+
+Nightly build:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/shayne/yeet/main/install.sh | sh -s -- --nightly
 ```
 
 ## High-Level Overview
