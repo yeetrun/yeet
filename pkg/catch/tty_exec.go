@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime/debug"
 	"strings"
 	"syscall"
 
@@ -305,42 +304,13 @@ func (e *ttyExecer) dispatch(args []string) error {
 		if flags.JSON {
 			json.NewEncoder(e.rw).Encode(GetInfoWithInstallUser(e.s.cfg.InstallUser, e.s.cfg.InstallHost))
 		} else {
-			fmt.Fprintln(e.rw, VersionCommit())
+			fmt.Fprintln(e.rw, Version())
 		}
 		return nil
 	default:
 		log.Printf("Unhandled command %q", cmd)
 		return fmt.Errorf("unhandled command %q", cmd)
 	}
-}
-
-// VersionCommit returns the commit hash of the current build.
-func VersionCommit() string {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-	var dirty bool
-	var commit string
-	for _, s := range bi.Settings {
-		switch s.Key {
-		case "vcs.revision":
-			commit = s.Value
-		case "vcs.modified":
-			dirty = s.Value == "true"
-		}
-	}
-	if commit == "" {
-		return "dev"
-	}
-
-	if len(commit) >= 9 {
-		commit = commit[:9]
-	}
-	if dirty {
-		commit += "+dirty"
-	}
-	return commit
 }
 
 func (e *ttyExecer) printf(format string, a ...any) {
