@@ -74,8 +74,10 @@ jobs:
       - name: Build
         run: |
           mkdir -p dist
+          VERSION=${{ github.ref_name }}
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -o dist/${{ matrix.asset }} ./cmd/catch
+            go build -ldflags "-X github.com/shayne/yeet/pkg/catch.buildVersion=${VERSION}" \
+            -o dist/${{ matrix.asset }} ./cmd/catch
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

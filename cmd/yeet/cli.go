@@ -109,8 +109,8 @@ func buildHelpConfig() yargs.HelpConfig {
 	}
 	subcommands["init"] = yargs.SubCommandInfo{
 		Name:        "init",
-		Description: "Install catch on a remote host",
-		Usage:       "ROOT@HOST",
+		Description: "Install catch on a remote host (local build or GitHub release)",
+		Usage:       "[--from-github] [--nightly] [ROOT@HOST]",
 		Examples:    []string{"yeet init root@<host>", "yeet init"},
 	}
 	subcommands["list-hosts"] = yargs.SubCommandInfo{

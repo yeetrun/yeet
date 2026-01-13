@@ -18,7 +18,7 @@ type ServerInfo struct {
 
 func GetInfo() ServerInfo {
 	return ServerInfo{
-		Version: VersionCommit(),
+		Version: Version(),
 		GOARCH:  runtime.GOARCH,
 		GOOS:    runtime.GOOS,
 	}
