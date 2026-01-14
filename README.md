@@ -9,13 +9,13 @@ This repository is **personal infrastructure tooling** for how I run my homelab.
 ## Install yeet (release binary)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shayne/yeet/main/install.sh | sh
+curl -fsSL https://yeetrun.com/install.sh | sh
 ```
 
 Nightly build:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/shayne/yeet/main/install.sh | sh -s -- --nightly
+curl -fsSL https://yeetrun.com/install.sh | sh -s -- --nightly
 ```
 
 ## Toolchain Setup (Recommended: mise)
@@ -39,18 +39,6 @@ echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
 ```bash
 mise install
 mise run init-host -- root@<host>
-```
-
-## Install yeet (release binary)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/shayne/yeet/main/install.sh | sh
-```
-
-Nightly build:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/shayne/yeet/main/install.sh | sh -s -- --nightly
 ```
 
 ## High-Level Overview

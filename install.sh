@@ -11,8 +11,8 @@ usage() {
 yeet install script
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sh
-  curl -fsSL https://raw.githubusercontent.com/${REPO}/main/install.sh | sh -s -- --nightly
+  curl -fsSL https://yeetrun.com/install.sh | sh
+  curl -fsSL https://yeetrun.com/install.sh | sh -s -- --nightly
 
 Options:
   --nightly           Install the nightly build
@@ -166,4 +166,3 @@ if [ "$INSTALL_DIR" = "$HOME/.local/bin" ]; then
 else
   echo "Installed yeet to $install_target"
 fi
-
