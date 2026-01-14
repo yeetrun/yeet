@@ -1,6 +1,6 @@
 # yeet
 
-A personal homelab service manager built around Tailscale RPC. See the [Architecture](https://github.com/shayne/yeet/wiki/Architecture) page for how the pieces fit together.
+A personal homelab service manager built around Tailscale RPC. See the [Architecture](https://yeetrun.com/docs/concepts/architecture) page for how the pieces fit together.
 
 ## Read This First
 
@@ -64,7 +64,7 @@ yeet ssh
 Note: from a repo checkout, `yeet init` builds and uploads `catch`. Released yeet binaries (or `--from-github`) download the latest stable release; add `--nightly` for nightly builds.
 
 Note: `yeet run` for compose does not pull new images by default. To refresh images, use `yeet run --pull <svc> ./compose.yml` or `yeet docker update <svc>`.
-Note: Docker hosts must enable the containerd snapshotter so pushed images show up locally (see Installation in the wiki).
+Note: Docker hosts must enable the containerd snapshotter so pushed images show up locally (see Installation in the docs).
 
 Other common variants (in order of use):
 
@@ -80,37 +80,37 @@ yeet run <svc> nginx:latest
 yeet docker push <svc> <local-image>:<tag> --run
 ```
 
-## Documentation (Wiki)
+## Documentation
 
-The wiki is the user manual and the source of truth for behavior and workflows:
+The docs site is the user manual and the source of truth for behavior and workflows:
 
-- [Quick Start](https://github.com/shayne/yeet/wiki/Quick-Start)
-- [Workflows](https://github.com/shayne/yeet/wiki/Workflows) (Docker-first walkthroughs)
-- [Installation](https://github.com/shayne/yeet/wiki/Installation)
-- [Architecture](https://github.com/shayne/yeet/wiki/Architecture)
-- [CLI Overview](https://github.com/shayne/yeet/wiki/CLI-Overview)
-- [yeet CLI](https://github.com/shayne/yeet/wiki/Yeet-CLI)
-- [catch CLI](https://github.com/shayne/yeet/wiki/Catch-CLI)
-- [Networking](https://github.com/shayne/yeet/wiki/Networking)
-- [Service Types](https://github.com/shayne/yeet/wiki/Service-Types)
-- [Configuration & Prefs](https://github.com/shayne/yeet/wiki/Configuration-and-Prefs)
-- [Data Layout](https://github.com/shayne/yeet/wiki/Data-Layout)
-- [Troubleshooting](https://github.com/shayne/yeet/wiki/Troubleshooting)
-- [Development](https://github.com/shayne/yeet/wiki/Development)
-- [FAQ](https://github.com/shayne/yeet/wiki/FAQ)
+- [Quick Start](https://yeetrun.com/docs/getting-started/quick-start)
+- [Workflows](https://yeetrun.com/docs/operations/workflows) (Docker-first walkthroughs)
+- [Installation](https://yeetrun.com/docs/getting-started/installation)
+- [Architecture](https://yeetrun.com/docs/concepts/architecture)
+- [CLI Overview](https://yeetrun.com/docs/cli/cli-overview)
+- [yeet CLI](https://yeetrun.com/docs/cli/yeet-cli)
+- [catch CLI](https://yeetrun.com/docs/cli/catch-cli)
+- [Networking](https://yeetrun.com/docs/concepts/networking)
+- [Service Types](https://yeetrun.com/docs/concepts/service-types)
+- [Configuration & Prefs](https://yeetrun.com/docs/concepts/configuration-and-prefs)
+- [Data Layout](https://yeetrun.com/docs/concepts/data-layout)
+- [Troubleshooting](https://yeetrun.com/docs/operations/troubleshooting)
+- [Development](https://yeetrun.com/docs/development)
+- [FAQ](https://yeetrun.com/docs/faq)
 
 ## Components
 
-- **yeet**: client CLI used from my workstation (see the [yeet CLI](https://github.com/shayne/yeet/wiki/Yeet-CLI) reference)
-- **catch**: service manager daemon running on homelab hosts (see the [catch CLI](https://github.com/shayne/yeet/wiki/Catch-CLI) reference)
+- **yeet**: client CLI used from my workstation (see the [yeet CLI](https://yeetrun.com/docs/cli/yeet-cli) reference)
+- **catch**: service manager daemon running on homelab hosts (see the [catch CLI](https://yeetrun.com/docs/cli/catch-cli) reference)
 
 ## How I Run It
 
-In my homelab, I run `catch` on each host and use `yeet` to push binaries/images, manage versions, and poke at service state over Tailscale. The [Networking](https://github.com/shayne/yeet/wiki/Networking) and [Configuration & Prefs](https://github.com/shayne/yeet/wiki/Configuration-and-Prefs) pages describe the host targeting and network modes that make this work in my lab. The workflow is optimized for my machines and my network topology, not for general compatibility.
+In my homelab, I run `catch` on each host and use `yeet` to push binaries/images, manage versions, and poke at service state over Tailscale. The [Networking](https://yeetrun.com/docs/concepts/networking) and [Configuration & Prefs](https://yeetrun.com/docs/concepts/configuration-and-prefs) pages describe the host targeting and network modes that make this work in my lab. The workflow is optimized for my machines and my network topology, not for general compatibility.
 
 ## Security Notes
 
-Currently, services managed by `catch` run as root. This is fine for my lab, but it is not a good default for production or multi-tenant setups. See the [FAQ](https://github.com/shayne/yeet/wiki/FAQ) for current limitations.
+Currently, services managed by `catch` run as root. This is fine for my lab, but it is not a good default for production or multi-tenant setups. See the [FAQ](https://yeetrun.com/docs/faq) for current limitations.
 
 ## License
 
