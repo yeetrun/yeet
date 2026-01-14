@@ -43,12 +43,12 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
   - Tests run (commands + results).
   - Any user-facing behavior changes or CLI impacts.
 
-## Wiki (User Manual)
-- The wiki lives in the `wiki/` submodule and serves as the **user manual** for yeet/catch.
-- When you make user-facing changes (CLI commands, flags, workflows, behavior), update the wiki in the same work session.
+## Website Docs (User Manual)
+- The user manual lives in the `website/` submodule.
+- When you make user-facing changes (CLI commands, flags, workflows, behavior), update the website docs in the same work session.
 - Keep CLI-facing documentation (README quickstart/examples and CLI help text) in sync with those changes.
-- To get the latest wiki content: `git submodule update --init --recursive`.
-- Edit markdown files inside `wiki/`, commit and push **within that repo**, then commit the updated submodule pointer in this repo.
+- To get the latest website content: `git submodule update --init --recursive`.
+- Edit markdown files inside `website/`, commit and push **within that repo**, then commit the updated submodule pointer in this repo.
 
 ## Configuration & Environment
 - `CATCH_HOST`: overrides the default remote host for the client.
