@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/shayne/yeet/pkg/catchrpc"
@@ -140,6 +142,60 @@ func TestRPCServiceInfo(t *testing.T) {
 	}
 	if info.Info.Network.SvcIP != "192.168.100.5" {
 		t.Fatalf("unexpected svc ip: %#v", info.Info.Network.SvcIP)
+	}
+}
+
+func TestRPCTailscaleSetup(t *testing.T) {
+	server := newTestServer(t)
+	ts := httptest.NewServer(server.RPCMux())
+	defer ts.Close()
+
+	secret := "tskey-client-abc-123"
+	params, err := json.Marshal(catchrpc.TailscaleSetupRequest{ClientSecret: secret})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	req := catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "catch.TailscaleSetup",
+		Params:  params,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp, err := http.Post(ts.URL+"/rpc", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp catchrpc.Response
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", rpcResp.Error)
+	}
+	var setupResp catchrpc.TailscaleSetupResponse
+	b, _ := json.Marshal(rpcResp.Result)
+	if err := json.Unmarshal(b, &setupResp); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if !setupResp.Verified {
+		t.Fatalf("expected verified response: %#v", setupResp)
+	}
+	path := filepath.Join(server.serviceDataDir(CatchService), "tailscale.key")
+	if setupResp.Path != path {
+		t.Fatalf("unexpected path: %q", setupResp.Path)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read tailscale.key: %v", err)
+	}
+	if strings.TrimSpace(string(contents)) != secret {
+		t.Fatalf("unexpected tailscale.key contents: %q", contents)
 	}
 }
 

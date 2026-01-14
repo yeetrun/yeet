@@ -92,6 +92,15 @@ type ServiceInfoResponse struct {
 	Info    ServiceInfo `json:"info,omitempty"`
 }
 
+type TailscaleSetupRequest struct {
+	ClientSecret string `json:"clientSecret"`
+}
+
+type TailscaleSetupResponse struct {
+	Path     string `json:"path"`
+	Verified bool   `json:"verified"`
+}
+
 type ServiceInfo struct {
 	Name             string         `json:"name"`
 	ServiceType      string         `json:"serviceType,omitempty"`
