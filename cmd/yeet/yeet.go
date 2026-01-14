@@ -74,6 +74,7 @@ func main() {
 	for _, name := range cli.RemoteCommandNames() {
 		handlers[name] = handleRemote
 	}
+	handlers["tailscale"] = yeet.HandleTailscale
 	handlers["mount"] = handleMountSys
 	handlers["umount"] = handleMountSys
 	handlers["init"] = yeet.HandleInit

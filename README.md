@@ -80,6 +80,20 @@ yeet run <svc> nginx:latest
 yeet docker push <svc> <local-image>:<tag> --run
 ```
 
+## Tailscale OAuth Setup
+
+If you use `--net=ts` for service networking, configure an OAuth client secret
+on the catch host:
+
+```bash
+yeet tailscale --setup
+# or
+yeet tailscale --setup --client-secret=tskey-client-...
+```
+
+The interactive flow links you to the admin console steps for creating a tag
+and trust credential, then writes the secret to the catch host for you.
+
 ## Documentation
 
 The docs site is the user manual and the source of truth for behavior and workflows:

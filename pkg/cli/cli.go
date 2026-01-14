@@ -223,10 +223,14 @@ var remoteCommandInfos = map[string]CommandInfo{
 		"yeet stage <svc> show",
 		"yeet stage <svc> commit",
 	}, ArgsSchema: ServiceArgs{}},
-	"status":    {Name: "status", Description: "Show status of a service"},
-	"tailscale": {Name: "tailscale", Description: "Run a tailscale command", Aliases: []string{"ts"}, ArgsSchema: ServiceArgs{}},
-	"stop":      {Name: "stop", Description: "Stop a service", ArgsSchema: ServiceArgs{}},
-	"version":   {Name: "version", Description: "Show the version of the Catch server"},
+	"status": {Name: "status", Description: "Show status of a service"},
+	"tailscale": {Name: "tailscale", Description: "Configure tailscale OAuth or run tailscale commands in a service netns", Usage: "--setup [--client-secret=...] | <svc> -- <tailscale args...>", Examples: []string{
+		"yeet tailscale --setup",
+		"yeet tailscale --setup --client-secret=tskey-client-***",
+		"yeet tailscale <svc> -- serve --bg 8080",
+	}, Aliases: []string{"ts"}, ArgsSchema: ServiceArgs{}},
+	"stop":    {Name: "stop", Description: "Stop a service", ArgsSchema: ServiceArgs{}},
+	"version": {Name: "version", Description: "Show the version of the Catch server"},
 }
 
 var remoteFlagSpecs = map[string]map[string]FlagSpec{
