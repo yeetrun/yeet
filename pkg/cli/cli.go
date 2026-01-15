@@ -218,10 +218,11 @@ var remoteCommandInfos = map[string]CommandInfo{
 		"yeet run <svc> ./Dockerfile",
 	}, ArgsSchema: ServiceArgs{}},
 	"start": {Name: "start", Description: "Start a service", ArgsSchema: ServiceArgs{}},
-	"stage": {Name: "stage", Description: "Upload a payload without applying it (use stage show/commit)", Usage: "SVC PAYLOAD|show|commit [-- <payload args>]", Examples: []string{
+	"stage": {Name: "stage", Description: "Upload a payload without applying it (use stage show/commit/clear)", Usage: "SVC PAYLOAD|show|commit|clear [-- <payload args>]", Examples: []string{
 		"yeet stage <svc> ./bin/<svc>",
 		"yeet stage <svc> show",
 		"yeet stage <svc> commit",
+		"yeet stage <svc> clear",
 	}, ArgsSchema: ServiceArgs{}},
 	"status": {Name: "status", Description: "Show status of a service"},
 	"tailscale": {Name: "tailscale", Description: "Configure tailscale OAuth or run tailscale commands in a service netns", Usage: "--setup [--client-secret=...] | <svc> -- <tailscale args...>", Examples: []string{
