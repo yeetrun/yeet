@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shayne/yeet/pkg/copyutil"
+	"github.com/yeetrun/yeet/pkg/copyutil"
 )
 
 type copyEndpoint struct {

@@ -20,11 +20,11 @@ import (
 	"slices"
 	"time"
 
-	"github.com/shayne/yeet/pkg/catch"
-	"github.com/shayne/yeet/pkg/cmdutil"
-	cdb "github.com/shayne/yeet/pkg/db"
-	"github.com/shayne/yeet/pkg/dnet"
-	"github.com/shayne/yeet/pkg/svc"
+	"github.com/yeetrun/yeet/pkg/catch"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
+	cdb "github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/dnet"
+	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/tsnet"
 	"tailscale.com/util/must"
 )

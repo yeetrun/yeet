@@ -14,10 +14,10 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/shayne/yeet/pkg/cli"
-	"github.com/shayne/yeet/pkg/cmdutil"
-	"github.com/shayne/yeet/pkg/db"
-	"github.com/shayne/yeet/pkg/svc"
+	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
+	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 )
 
 func (e *ttyExecer) startCmdFunc() error {

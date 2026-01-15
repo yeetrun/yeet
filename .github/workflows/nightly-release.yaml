@@ -77,7 +77,7 @@ jobs:
           mkdir -p dist
           VERSION=nightly-${GITHUB_SHA::7}
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -ldflags "-X github.com/shayne/yeet/pkg/catch.buildVersion=${VERSION}" -o dist/${{ matrix.asset }} ./cmd/catch
+            go build -ldflags "-X github.com/yeetrun/yeet/pkg/catch.buildVersion=${VERSION}" -o dist/${{ matrix.asset }} ./cmd/catch
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

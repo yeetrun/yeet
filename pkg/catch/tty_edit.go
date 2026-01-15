@@ -13,9 +13,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/shayne/yeet/pkg/cli"
-	"github.com/shayne/yeet/pkg/db"
-	"github.com/shayne/yeet/pkg/fileutil"
+	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/fileutil"
 )
 
 const (

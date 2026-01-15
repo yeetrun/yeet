@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shayne/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/cli"
 )
 
 func TestBridgeServiceArgsSkipsFlagValues(t *testing.T) {

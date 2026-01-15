@@ -19,8 +19,8 @@ import (
 	"time"
 
 	"github.com/shayne/yargs"
-	"github.com/shayne/yeet/pkg/cli"
-	"github.com/shayne/yeet/pkg/ftdetect"
+	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/ftdetect"
 )
 
 var remoteRegistry = cli.RemoteCommandRegistry()

@@ -16,8 +16,8 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/shayne/yeet/pkg/db"
-	"github.com/shayne/yeet/pkg/fileutil"
+	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/fileutil"
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"

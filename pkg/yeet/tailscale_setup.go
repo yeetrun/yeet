@@ -14,7 +14,7 @@ import (
 	"strings"
 
 	"github.com/shayne/yargs"
-	"github.com/shayne/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 type tailscaleSetupFlagsParsed struct {

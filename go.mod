@@ -1,4 +1,4 @@
-module github.com/shayne/yeet
+module github.com/yeetrun/yeet
 
 go 1.25.5
 

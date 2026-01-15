@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/shayne/yargs"
-	"github.com/shayne/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/cli"
 )
 
 func TestParseGlobalFlags(t *testing.T) {

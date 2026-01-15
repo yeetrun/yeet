@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/shayne/yeet/pkg/fileutil"
+	"github.com/yeetrun/yeet/pkg/fileutil"
 	"tailscale.com/tailcfg"
 	"tailscale.com/util/mak"
 )

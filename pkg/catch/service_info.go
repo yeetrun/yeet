@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/shayne/yeet/pkg/catchrpc"
-	"github.com/shayne/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {

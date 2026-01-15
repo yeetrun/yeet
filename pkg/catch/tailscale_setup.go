@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/shayne/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 func (s *Server) setupTailscale(clientSecret string) (catchrpc.TailscaleSetupResponse, error) {

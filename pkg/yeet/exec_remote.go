@@ -16,8 +16,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/shayne/yeet/pkg/catchrpc"
-	"github.com/shayne/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/cli"
 	"golang.org/x/term"
 )
 

@@ -1,6 +1,6 @@
 #!/bin/sh
 
-REPO="shayne/yeet"
+REPO="yeetrun/yeet"
 BASE_URL="https://github.com/${REPO}/releases"
 CHANNEL="stable"
 INSTALL_DIR=""

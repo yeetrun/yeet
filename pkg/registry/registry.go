@@ -17,7 +17,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/shayne/yeet/pkg/compress"
+	"github.com/yeetrun/yeet/pkg/compress"
 )
 
 // Registry implements an OCI Distribution Specification v1.1 compliant registry.

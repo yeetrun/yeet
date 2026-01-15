@@ -16,8 +16,8 @@ import (
 	"strings"
 
 	"github.com/shayne/yargs"
-	"github.com/shayne/yeet/pkg/cmdutil"
-	"github.com/shayne/yeet/pkg/svc"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
+	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/client/local"
 )
 

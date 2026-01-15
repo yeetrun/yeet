@@ -12,9 +12,9 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/shayne/yeet/pkg/cli"
-	"github.com/shayne/yeet/pkg/db"
-	"github.com/shayne/yeet/pkg/svc"
+	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/util/mak"
 )
 
