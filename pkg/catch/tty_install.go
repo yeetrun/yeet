@@ -510,7 +510,10 @@ func (e *ttyExecer) stageCmdFunc(subcmd string, flags cli.StageFlags, args []str
 		}
 		fmt.Fprintf(e.rw, "%s\n", asJSON(sv))
 	case "clear":
-		return fmt.Errorf("not implemented")
+		if len(args) > 0 {
+			return fmt.Errorf("stage clear takes no arguments")
+		}
+		return e.clearStage()
 	case "stage", "commit":
 		fi.StageOnly = subcmd == "stage"
 		var ui *runUI
@@ -541,6 +544,84 @@ func (e *ttyExecer) stageCmdFunc(subcmd string, flags cli.StageFlags, args []str
 	default:
 		return fmt.Errorf("invalid argument %q", subcmd)
 	}
+	return nil
+}
+
+func (e *ttyExecer) clearStage() error {
+	var stagedPaths []string
+	removedArtifacts := 0
+	removedImages := 0
+
+	if _, err := e.s.cfg.DB.MutateData(func(d *db.Data) error {
+		svc, ok := d.Services[e.sn]
+		if !ok {
+			return errServiceNotFound
+		}
+		for _, art := range svc.Artifacts {
+			if art == nil || art.Refs == nil {
+				continue
+			}
+			if p, ok := art.Refs[db.ArtifactRef("staged")]; ok {
+				delete(art.Refs, db.ArtifactRef("staged"))
+				stagedPaths = append(stagedPaths, p)
+				removedArtifacts++
+			}
+		}
+		for repoName, repo := range d.Images {
+			svcName, err := parseRepo(string(repoName))
+			if err != nil || svcName != e.sn {
+				continue
+			}
+			if repo == nil || repo.Refs == nil {
+				continue
+			}
+			if _, ok := repo.Refs[db.ImageRef("staged")]; ok {
+				delete(repo.Refs, db.ImageRef("staged"))
+				removedImages++
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if removedArtifacts == 0 && removedImages == 0 {
+		fmt.Fprintf(e.rw, "No staged changes for %q\n", e.sn)
+		return nil
+	}
+
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return err
+	}
+	referenced := make(map[string]struct{})
+	if sv.Valid() {
+		for _, art := range sv.AsStruct().Artifacts {
+			if art == nil {
+				continue
+			}
+			for _, p := range art.Refs {
+				referenced[p] = struct{}{}
+			}
+		}
+	}
+
+	removedFiles := 0
+	for _, p := range stagedPaths {
+		if p == "" {
+			continue
+		}
+		if _, ok := referenced[p]; ok {
+			continue
+		}
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			log.Printf("failed to remove staged file %q: %v", p, err)
+			continue
+		}
+		removedFiles++
+	}
+
+	fmt.Fprintf(e.rw, "Cleared staged refs for %q (artifacts: %d, images: %d). Removed %d files.\n", e.sn, removedArtifacts, removedImages, removedFiles)
 	return nil
 }
 
