@@ -8,13 +8,13 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
-if rg -n '(^|[[:space:]])github.com/shayne/yeet/pkg/catch([[:space:]]|$)' cmd/yeet/depaware.txt; then
+if rg -n '(^|[[:space:]])github.com/yeetrun/yeet/pkg/catch([[:space:]]|$)' cmd/yeet/depaware.txt; then
   echo "" >&2
   echo "cmd/yeet depends on pkg/catch (not allowed)." >&2
   exit 1
 fi
 
-if rg -n '(^|[[:space:]])github.com/shayne/yeet/pkg/yeet([[:space:]]|$)' cmd/catch/depaware.txt; then
+if rg -n '(^|[[:space:]])github.com/yeetrun/yeet/pkg/yeet([[:space:]]|$)' cmd/catch/depaware.txt; then
   echo "" >&2
   echo "cmd/catch depends on pkg/yeet (not allowed)." >&2
   exit 1

@@ -15,11 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/shayne/yeet/pkg/cli"
-	"github.com/shayne/yeet/pkg/copyutil"
-	"github.com/shayne/yeet/pkg/cronutil"
-	"github.com/shayne/yeet/pkg/db"
-	"github.com/shayne/yeet/pkg/svc"
+	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/copyutil"
+	"github.com/yeetrun/yeet/pkg/cronutil"
+	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 )
 
 // Human-readable format function

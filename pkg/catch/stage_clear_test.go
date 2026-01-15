@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	cdb "github.com/shayne/yeet/pkg/db"
+	cdb "github.com/yeetrun/yeet/pkg/db"
 )
 
 func TestStageClearRemovesStagedRefsAndFiles(t *testing.T) {

@@ -7,8 +7,8 @@ package main
 import (
 	"testing"
 
-	"github.com/shayne/yeet/pkg/catchrpc"
-	"github.com/shayne/yeet/pkg/yeet"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/yeet"
 )
 
 func TestApplyGlobalUIFlagsRejectsConflicts(t *testing.T) {

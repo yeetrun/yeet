@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shayne/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 func TestShouldSuppressCmdOutputForDockerComposePlain(t *testing.T) {

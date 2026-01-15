@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shayne/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 func TestRPCExecVersionJSON(t *testing.T) {

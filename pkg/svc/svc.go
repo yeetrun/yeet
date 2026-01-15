@@ -7,8 +7,8 @@ package svc
 import (
 	"errors"
 
-	"github.com/shayne/yeet/pkg/cmdutil"
-	"github.com/shayne/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 var (

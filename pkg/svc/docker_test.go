@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/shayne/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 type cmdCall struct {

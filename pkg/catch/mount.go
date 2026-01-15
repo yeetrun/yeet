@@ -12,7 +12,7 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/shayne/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 type systemdMounter struct {

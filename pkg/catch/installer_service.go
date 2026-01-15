@@ -17,9 +17,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/shayne/yeet/pkg/cmdutil"
-	"github.com/shayne/yeet/pkg/db"
-	"github.com/shayne/yeet/pkg/svc"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
+	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/util/set"
 )
 

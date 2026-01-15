@@ -10,8 +10,8 @@ import (
 	"os"
 
 	"github.com/shayne/yargs"
-	"github.com/shayne/yeet/pkg/cli"
-	"github.com/shayne/yeet/pkg/yeet"
+	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/yeet"
 )
 
 var (

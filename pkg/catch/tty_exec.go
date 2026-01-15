@@ -18,8 +18,8 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
-	"github.com/shayne/yeet/pkg/catchrpc"
-	"github.com/shayne/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/cli"
 	"golang.org/x/sys/unix"
 )
 

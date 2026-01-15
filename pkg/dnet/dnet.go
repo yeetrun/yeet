@@ -16,8 +16,8 @@ import (
 	"os/exec"
 	"runtime"
 
-	"github.com/shayne/yeet/pkg/db"
 	"github.com/vishvananda/netns"
+	"github.com/yeetrun/yeet/pkg/db"
 	"tailscale.com/syncs"
 	"tailscale.com/types/ptr"
 	"tailscale.com/util/mak"

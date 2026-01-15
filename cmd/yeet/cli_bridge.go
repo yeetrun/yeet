@@ -7,7 +7,7 @@ package main
 import (
 	"strings"
 
-	"github.com/shayne/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/cli"
 )
 
 // localGroupCommands lists group commands handled locally (not bridged to catch).

@@ -7,7 +7,7 @@ package catch
 import (
 	"testing"
 
-	"github.com/shayne/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 func TestServiceDataTypeForService(t *testing.T) {

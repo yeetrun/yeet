@@ -16,9 +16,9 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/shayne/yeet/pkg/catchrpc"
-	"github.com/shayne/yeet/pkg/cli"
-	"github.com/shayne/yeet/pkg/ftdetect"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/ftdetect"
 )
 
 type infoOutput struct {
