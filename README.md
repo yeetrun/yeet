@@ -106,6 +106,7 @@ The docs site is the user manual and the source of truth for behavior and workfl
 - [yeet CLI](https://yeetrun.com/docs/cli/yeet-cli)
 - [catch CLI](https://yeetrun.com/docs/cli/catch-cli)
 - [Networking](https://yeetrun.com/docs/concepts/networking)
+- [Tailscale](https://yeetrun.com/docs/concepts/tailscale)
 - [Service Types](https://yeetrun.com/docs/concepts/service-types)
 - [Configuration & Prefs](https://yeetrun.com/docs/concepts/configuration-and-prefs)
 - [Data Layout](https://yeetrun.com/docs/concepts/data-layout)
