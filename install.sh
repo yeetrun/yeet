@@ -141,10 +141,26 @@ main() {
   fetch "$asset_url" "$tmp_dir/$asset"
   fetch "$sha_url" "$tmp_dir/$sha"
 
+  normalize_sha() {
+    awk '{
+      fname=$NF
+      star=""
+      if (fname ~ /^\*/) { star="*"; fname=substr(fname,2) }
+      sub(/^.*\//, "", fname)
+      print $1 "  " star fname
+    }'
+  }
+
+  sha_check="$sha"
+  if grep -q '/' "$tmp_dir/$sha"; then
+    normalize_sha < "$tmp_dir/$sha" > "$tmp_dir/${sha}.normalized"
+    sha_check="${sha}.normalized"
+  fi
+
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$tmp_dir" && sha256sum -c "$sha")
+    (cd "$tmp_dir" && sha256sum -c "$sha_check")
   elif command -v shasum >/dev/null 2>&1; then
-    (cd "$tmp_dir" && shasum -a 256 -c "$sha")
+    (cd "$tmp_dir" && shasum -a 256 -c "$sha_check")
   else
     echo "sha256sum or shasum is required" >&2
     exit 1
