@@ -123,6 +123,31 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 			ID:      req.ID,
 			Result:  resp,
 		})
+	case "catch.ArtifactHashes":
+		var params catchrpc.ArtifactHashesRequest
+		if len(req.Params) == 0 {
+			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "missing params", nil)
+			return
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "invalid params", err.Error())
+			return
+		}
+		params.Service = strings.TrimSpace(params.Service)
+		if params.Service == "" {
+			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "missing service", nil)
+			return
+		}
+		resp, err := s.artifactHashes(params.Service)
+		if err != nil {
+			writeRPCError(w, req.ID, catchrpc.ErrInternal, "failed to get artifact hashes", err.Error())
+			return
+		}
+		writeRPCResponse(w, catchrpc.Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  resp,
+		})
 	case "catch.TailscaleSetup":
 		var params catchrpc.TailscaleSetupRequest
 		if len(req.Params) == 0 {

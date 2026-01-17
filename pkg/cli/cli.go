@@ -46,6 +46,7 @@ type RunFlags struct {
 	Restart       bool
 	Pull          bool
 	Publish       []string
+	EnvFile       string
 }
 
 type StageFlags struct {
@@ -71,6 +72,11 @@ type EditFlags struct {
 type LogsFlags struct {
 	Follow bool
 	Lines  int
+}
+
+type RemoveFlags struct {
+	Yes         bool
+	CleanConfig bool
 }
 
 type StatusFlags struct {
@@ -116,6 +122,12 @@ type runFlagsParsed struct {
 	Restart       bool     `flag:"restart" default:"true"`
 	Pull          bool     `flag:"pull"`
 	Publish       []string `flag:"publish" short:"p"`
+	EnvFile       string   `flag:"env-file"`
+}
+
+type removeFlagsParsed struct {
+	Yes         bool `flag:"yes" short:"y"`
+	CleanConfig bool `flag:"clean-config"`
 }
 
 type stageFlagsParsed struct {
@@ -214,6 +226,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 		"yeet run <svc> ./bin/<svc> -- --app-flag value",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
 		"yeet run --pull <svc> ./compose.yml",
+		"yeet run --env-file=prod.env <svc> ./compose.yml",
 		"yeet run <svc> ghcr.io/org/app:latest",
 		"yeet run <svc> ./Dockerfile",
 	}, ArgsSchema: ServiceArgs{}},
@@ -249,7 +262,7 @@ var remoteFlagSpecs = map[string]map[string]FlagSpec{
 	"disable":   {},
 	"enable":    {},
 	"ip":        {},
-	"remove":    {},
+	"remove":    flagSpecsFromStruct(removeFlagsParsed{}),
 	"restart":   {},
 	"rollback":  {},
 	"start":     {},
@@ -388,6 +401,21 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		Restart:       parsed.Flags.Restart,
 		Pull:          parsed.Flags.Pull,
 		Publish:       parsed.Flags.Publish,
+		EnvFile:       parsed.Flags.EnvFile,
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseRemove(args []string) (RemoveFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[removeFlagsParsed](parseArgs)
+	if err != nil {
+		return RemoveFlags{}, nil, err
+	}
+	flags := RemoveFlags{
+		Yes:         parsed.Flags.Yes,
+		CleanConfig: parsed.Flags.CleanConfig,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil

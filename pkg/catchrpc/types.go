@@ -101,6 +101,22 @@ type TailscaleSetupResponse struct {
 	Verified bool   `json:"verified"`
 }
 
+type ArtifactHashesRequest struct {
+	Service string `json:"service"`
+}
+
+type ArtifactHash struct {
+	Kind   string `json:"kind,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
+type ArtifactHashesResponse struct {
+	Found   bool          `json:"found"`
+	Message string        `json:"message,omitempty"`
+	Payload *ArtifactHash `json:"payload,omitempty"`
+	Env     *ArtifactHash `json:"env,omitempty"`
+}
+
 type ServiceInfo struct {
 	Name             string         `json:"name"`
 	ServiceType      string         `json:"serviceType,omitempty"`

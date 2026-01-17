@@ -31,6 +31,7 @@ type ServiceEntry struct {
 	Host     string   `toml:"host"`
 	Type     string   `toml:"type,omitempty"`
 	Payload  string   `toml:"payload,omitempty"`
+	EnvFile  string   `toml:"env_file,omitempty"`
 	Schedule string   `toml:"schedule,omitempty"`
 	Args     []string `toml:"args,omitempty"`
 }
@@ -195,6 +196,9 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 			c.Services[i].Payload = entry.Payload
 			c.Services[i].Schedule = entry.Schedule
 			c.Services[i].Args = append([]string{}, entry.Args...)
+			if entry.EnvFile != "" {
+				c.Services[i].EnvFile = entry.EnvFile
+			}
 			c.addHost(entry.Host)
 			sortServiceEntries(c.Services)
 			return
@@ -203,6 +207,26 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 	c.Services = append(c.Services, entry)
 	c.addHost(entry.Host)
 	sortServiceEntries(c.Services)
+}
+
+func (c *ProjectConfig) RemoveServiceEntry(service, host string) bool {
+	if c == nil {
+		return false
+	}
+	removed := false
+	out := c.Services[:0]
+	for _, entry := range c.Services {
+		if entry.Name == service && entry.Host == host {
+			removed = true
+			continue
+		}
+		out = append(out, entry)
+	}
+	if removed {
+		c.Services = out
+		sortServiceEntries(c.Services)
+	}
+	return removed
 }
 
 func (c *ProjectConfig) addHost(host string) {
@@ -239,6 +263,17 @@ func resolvePayloadPath(configDir, payload string) string {
 	return filepath.Join(configDir, payload)
 }
 
+func resolveEnvFilePath(configDir, envFile string) string {
+	envFile = strings.TrimSpace(envFile)
+	if envFile == "" {
+		return envFile
+	}
+	if filepath.IsAbs(envFile) {
+		return envFile
+	}
+	return filepath.Join(configDir, envFile)
+}
+
 func relativePayloadPath(configDir, payload string) string {
 	payload = strings.TrimSpace(payload)
 	if payload == "" {
@@ -258,6 +293,26 @@ func relativePayloadPath(configDir, payload string) string {
 	rel, err := filepath.Rel(configDir, abs)
 	if err != nil {
 		return payload
+	}
+	return filepath.Clean(rel)
+}
+
+func relativeEnvFilePath(configDir, envFile string) string {
+	envFile = strings.TrimSpace(envFile)
+	if envFile == "" {
+		return envFile
+	}
+	abs := envFile
+	if !filepath.IsAbs(envFile) {
+		if cwd, err := os.Getwd(); err == nil {
+			abs = filepath.Join(cwd, envFile)
+		} else {
+			abs = filepath.Clean(envFile)
+		}
+	}
+	rel, err := filepath.Rel(configDir, abs)
+	if err != nil {
+		return envFile
 	}
 	return filepath.Clean(rel)
 }

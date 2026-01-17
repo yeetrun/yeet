@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/codecutil"
 	"github.com/yeetrun/yeet/pkg/copyutil"
@@ -512,6 +513,7 @@ func TestHandleSvcCmdRunPullBeforePayload(t *testing.T) {
 	oldPush := pushAllLocalImagesFn
 	oldService := serviceOverride
 	oldIsTerminal := isTerminalFn
+	oldHashes := fetchRemoteArtifactHashesFn
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd error: %v", err)
@@ -522,12 +524,16 @@ func TestHandleSvcCmdRunPullBeforePayload(t *testing.T) {
 		pushAllLocalImagesFn = oldPush
 		serviceOverride = oldService
 		isTerminalFn = oldIsTerminal
+		fetchRemoteArtifactHashesFn = oldHashes
 		_ = os.Chdir(cwd)
 	}()
 
 	serviceOverride = "svc-a"
 	remoteCatchOSAndArchFn = func() (string, string, error) {
 		return "linux", "amd64", nil
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
 	}
 	pushAllLocalImagesFn = func(string, string, string) error {
 		return nil
@@ -1166,13 +1172,21 @@ func TestHandleSvcCmdCopyDownloadDirRecursive(t *testing.T) {
 func TestHandleSvcCmdEnvCopyUsesExecRemote(t *testing.T) {
 	oldExec := execRemoteFn
 	oldService := serviceOverride
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
 	defer func() {
 		execRemoteFn = oldExec
 		serviceOverride = oldService
+		_ = os.Chdir(cwd)
 	}()
 
 	serviceOverride = "svc-a"
 	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
 	src := filepath.Join(tmp, "envfile")
 	if err := os.WriteFile(src, []byte("KEY=VALUE\n"), 0o600); err != nil {
 		t.Fatalf("failed to write temp env file: %v", err)

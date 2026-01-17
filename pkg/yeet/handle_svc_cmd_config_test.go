@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 func TestHandleSvcCmdUsesConfigHost(t *testing.T) {
@@ -96,17 +98,22 @@ func TestRunFromProjectConfigRehydratesArgs(t *testing.T) {
 	oldPush := pushAllLocalImagesFn
 	oldService := serviceOverride
 	oldIsTerminal := isTerminalFn
+	oldHashes := fetchRemoteArtifactHashesFn
 	defer func() {
 		execRemoteFn = oldExec
 		remoteCatchOSAndArchFn = oldArch
 		pushAllLocalImagesFn = oldPush
 		serviceOverride = oldService
 		isTerminalFn = oldIsTerminal
+		fetchRemoteArtifactHashesFn = oldHashes
 	}()
 
 	serviceOverride = "rssbot"
 	remoteCatchOSAndArchFn = func() (string, string, error) {
 		return "linux", "amd64", nil
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
 	}
 	pushAllLocalImagesFn = func(string, string, string) error {
 		return nil
