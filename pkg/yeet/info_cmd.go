@@ -43,6 +43,7 @@ type clientServiceEntry struct {
 	Host     string   `json:"host"`
 	Type     string   `json:"type,omitempty"`
 	Payload  string   `json:"payload,omitempty"`
+	EnvFile  string   `json:"envFile,omitempty"`
 	Schedule string   `json:"schedule,omitempty"`
 	Args     []string `json:"args,omitempty"`
 }
@@ -125,6 +126,7 @@ func buildClientInfo(cfgLoc *projectConfigLocation, service, host string, hostIn
 		Host:     entry.Host,
 		Type:     entry.Type,
 		Payload:  entry.Payload,
+		EnvFile:  entry.EnvFile,
 		Schedule: entry.Schedule,
 		Args:     entry.Args,
 	}
@@ -290,6 +292,9 @@ func renderClientSection(client clientInfo) infoSection {
 		} else if client.Payload.DetectErr != "" {
 			rows = append(rows, infoRow{Label: "Payload detect", Value: client.Payload.DetectErr})
 		}
+	}
+	if client.Entry != nil && client.Entry.EnvFile != "" {
+		rows = append(rows, infoRow{Label: "Env file", Value: client.Entry.EnvFile})
 	}
 	if client.Entry != nil {
 		if len(client.Entry.Args) > 0 {

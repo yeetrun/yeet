@@ -306,7 +306,7 @@ func (e *ttyExecer) statusCmdFunc(flags cli.StatusFlags) error {
 	return nil
 }
 
-func (e *ttyExecer) removeCmdFunc() error {
+func (e *ttyExecer) removeCmdFunc(flags cli.RemoveFlags) error {
 	if e.sn == SystemService || e.sn == CatchService {
 		return fmt.Errorf("cannot remove system service")
 	}
@@ -324,10 +324,12 @@ func (e *ttyExecer) removeCmdFunc() error {
 		return fmt.Errorf("failed to get service runner: %w", err)
 	}
 	// Confirm the removal of the service.
-	if ok, err := cmdutil.Confirm(e.rw, e.rw, fmt.Sprintf("Are you sure you want to remove service %q?", e.sn)); err != nil {
-		return fmt.Errorf("failed to confirm removal: %w", err)
-	} else if !ok {
-		return nil
+	if !flags.Yes {
+		if ok, err := cmdutil.Confirm(e.rw, e.rw, fmt.Sprintf("Are you sure you want to remove service %q?", e.sn)); err != nil {
+			return fmt.Errorf("failed to confirm removal: %w", err)
+		} else if !ok {
+			return nil
+		}
 	}
 
 	if err := runner.Remove(); err != nil {

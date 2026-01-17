@@ -20,6 +20,7 @@ import (
 
 	"github.com/shayne/yargs"
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
 )
 
@@ -132,7 +133,10 @@ func HandleSvcCmd(args []string) error {
 			if len(args) != 3 {
 				return fmt.Errorf("env copy requires a file")
 			}
-			return runEnvCopy(args[2])
+			if err := runEnvCopy(args[2]); err != nil {
+				return err
+			}
+			return saveEnvFileConfig(cfgLoc, hostOverride, args[2])
 		}
 		if len(args) >= 2 && args[1] == "set" {
 			if len(args) < 3 {
@@ -158,11 +162,59 @@ func HandleSvcCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := runRun(payload, runArgs); err != nil {
+		envFileArg, filteredArgs, envFileSet, err := extractEnvFileFlag(runArgs)
+		if err != nil {
 			return err
 		}
-		runArgs = normalizeRunArgs(runArgs)
-		return saveRunConfig(cfgLoc, hostOverride, payload, runArgs)
+		entry, hasEntry := serviceEntryForConfig(cfgLoc, hostOverride)
+		if hasEntry {
+			if err := ensureLockedRunFlags(entry, filteredArgs); err != nil {
+				return err
+			}
+		}
+		envFile := envFileArg
+		if envFile == "" && hasEntry && entry.EnvFile != "" && cfgLoc != nil {
+			envFile = resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
+		}
+		if err := runWithChanges(payload, filteredArgs, envFile, entry); err != nil {
+			return err
+		}
+		normalizedArgs := normalizeRunArgs(filteredArgs)
+		if err := saveRunConfig(cfgLoc, hostOverride, payload, normalizedArgs); err != nil {
+			return err
+		}
+		if envFileSet {
+			if err := saveEnvFileConfig(cfgLoc, hostOverride, envFileArg); err != nil {
+				return err
+			}
+		}
+		return nil
+	case "remove":
+		removeFlags, _, err := cli.ParseRemove(cmdArgs)
+		if err != nil {
+			return err
+		}
+		remoteArgs := filterRemoveArgs(cmdArgs)
+		if err := execRemoteFn(context.Background(), svc, append([]string{"remove"}, remoteArgs...), nil, true); err != nil {
+			return err
+		}
+		if removeFlags.CleanConfig {
+			return removeServiceConfig(cfgLoc, hostOverride)
+		}
+		if removeFlags.Yes {
+			return nil
+		}
+		if !hasServiceConfig(cfgLoc, hostOverride) {
+			return nil
+		}
+		ok, err := cmdutil.Confirm(os.Stdin, os.Stdout, fmt.Sprintf("Remove %q from yeet.toml?", svc))
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+		return removeServiceConfig(cfgLoc, hostOverride)
 	// `copy [-avz] <src> <dst>`
 	case "copy":
 		var cfg *ProjectConfig
@@ -950,7 +1002,8 @@ func runFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) er
 	if strings.TrimSpace(payload) == "" {
 		return fmt.Errorf("no payload configured for %s@%s", service, host)
 	}
-	return runRun(payload, rehydrateRunArgs(entry.Args))
+	envFile := resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
+	return runWithChanges(payload, rehydrateRunArgs(entry.Args), envFile, entry)
 }
 
 func runCronFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) error {

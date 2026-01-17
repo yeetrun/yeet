@@ -8,12 +8,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
@@ -114,7 +116,7 @@ func TestRemoveCmdContinuesAfterRunnerError(t *testing.T) {
 		},
 	}
 
-	if err := execer.removeCmdFunc(); err != nil {
+	if err := execer.removeCmdFunc(cli.RemoveFlags{}); err != nil {
 		t.Fatalf("removeCmdFunc: %v", err)
 	}
 	if !strings.Contains(out.String(), "warning: failed to stop/remove service") {
@@ -127,5 +129,37 @@ func TestRemoveCmdContinuesAfterRunnerError(t *testing.T) {
 	}
 	if _, ok := dv.Services().GetOk(name); ok {
 		t.Fatalf("service still present in db")
+	}
+}
+
+func TestRemoveCmdSkipsPromptWithYes(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-yes"
+
+	if _, err := server.cfg.DB.MutateData(func(d *db.Data) error {
+		if d.Services == nil {
+			d.Services = map[string]*db.Service{}
+		}
+		d.Services[name] = &db.Service{Name: name}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader(""),
+			Writer: io.Discard,
+		},
+		serviceRunnerFn: func() (ServiceRunner, error) {
+			return &fakeRunner{}, nil
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{Yes: true}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
 	}
 }

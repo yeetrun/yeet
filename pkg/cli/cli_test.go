@@ -21,6 +21,7 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 		"--macvlan-mac", "00:11:22:33:44:55",
 		"--macvlan-vlan", "12",
 		"--macvlan-parent", "eth0",
+		"--env-file", "prod.env",
 		"-p", "8000:8000",
 		"-p", "9000:9000",
 		"--pull",
@@ -51,6 +52,9 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	}
 	if flags.MacvlanParent != "eth0" {
 		t.Errorf("MacvlanParent = %q, want %q", flags.MacvlanParent, "eth0")
+	}
+	if flags.EnvFile != "prod.env" {
+		t.Errorf("EnvFile = %q, want %q", flags.EnvFile, "prod.env")
 	}
 	if !flags.Pull {
 		t.Errorf("Pull = false, want true")
@@ -119,6 +123,22 @@ func TestParseEnvShowFlags(t *testing.T) {
 	}
 	if !flags.Staged {
 		t.Fatalf("Staged = false, want true")
+	}
+	if len(outArgs) != 0 {
+		t.Fatalf("expected no args, got %v", outArgs)
+	}
+}
+
+func TestParseRemoveFlags(t *testing.T) {
+	flags, outArgs, err := ParseRemove([]string{"-y", "--clean-config"})
+	if err != nil {
+		t.Fatalf("ParseRemove failed: %v", err)
+	}
+	if !flags.Yes {
+		t.Fatalf("Yes = false, want true")
+	}
+	if !flags.CleanConfig {
+		t.Fatalf("CleanConfig = false, want true")
 	}
 	if len(outArgs) != 0 {
 		t.Fatalf("expected no args, got %v", outArgs)

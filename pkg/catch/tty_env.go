@@ -6,6 +6,7 @@ package catch
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -140,6 +141,15 @@ func (e *ttyExecer) editEnvCmdFunc() error {
 func (e *ttyExecer) envCopyCmdFunc() error {
 	cfg := e.fileInstaller(netFlags{}, nil)
 	cfg.EnvFile = true
+	if sv, err := e.s.serviceView(e.sn); err != nil {
+		if errors.Is(err, errServiceNotFound) {
+			cfg.StageOnly = true
+		} else {
+			return err
+		}
+	} else if sv.ServiceType() == "" {
+		cfg.StageOnly = true
+	}
 	return e.install("env", e.payloadReader(), cfg)
 }
 

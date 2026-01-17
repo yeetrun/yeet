@@ -130,6 +130,25 @@ func TestBridgeServiceArgsWithRepeatedArrayFlags(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsWithEnvFileFlag(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"run", "--env-file", "prod.env", "svc-a", "./compose.yml"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to recognize remote command")
+	}
+	if service != "svc-a" {
+		t.Fatalf("expected service svc-a, got %q", service)
+	}
+	if host != "" {
+		t.Fatalf("expected no host, got %q", host)
+	}
+	if got := strings.Join(bridged, " "); got != "run --env-file prod.env ./compose.yml" {
+		t.Fatalf("unexpected bridged args: %s", got)
+	}
+}
+
 func TestBridgeServiceArgsUnknownFlagBeforeServiceTreatsNextTokenAsService(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

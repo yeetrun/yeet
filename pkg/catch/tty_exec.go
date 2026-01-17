@@ -265,7 +265,11 @@ func (e *ttyExecer) dispatch(args []string) error {
 		}
 		return e.logsCmdFunc(flags)
 	case "remove":
-		return e.removeCmdFunc()
+		flags, _, err := cli.ParseRemove(args)
+		if err != nil {
+			return err
+		}
+		return e.removeCmdFunc(flags)
 	case "restart":
 		return e.restartCmdFunc()
 	case "rollback":
