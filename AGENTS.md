@@ -50,6 +50,12 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - To get the latest website content: `git submodule update --init --recursive`.
 - Edit markdown files inside `website/`, commit and push **within that repo**, then commit the updated submodule pointer in this repo.
 
+## Website Changelog Styleguide
+- Date-first sections, then version headings, then 1-3 short bullets per release.
+- Use plain, user-facing language focused on behavior changes; avoid internal refactor notes.
+- Keep tense consistent (past or present), keep lines concise, and avoid emojis.
+- Include only releases/tags; don’t list every commit.
+
 ## Configuration & Environment
 - `CATCH_HOST`: overrides the default remote host for the client.
 - Keep local config in `~/.yeet/prefs.json` (managed via `yeet prefs`).
