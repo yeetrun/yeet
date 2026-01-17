@@ -110,7 +110,7 @@ jobs:
             fi
             chmod +x "dist/raw/${asset}"
             tar -czf "dist/release/${asset}.tar.gz" -C dist/raw "${asset}"
-            sha256sum "dist/release/${asset}.tar.gz" > "dist/release/${asset}.tar.gz.sha256"
+            (cd dist/release && sha256sum "${asset}.tar.gz" > "${asset}.tar.gz.sha256")
           done
       - name: Publish release
         uses: softprops/action-gh-release@v2
