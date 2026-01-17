@@ -1,6 +1,20 @@
-# yeet
+<div align="center">
+  <a href="https://yeetrun.com">
+    <img src="https://github.com/yeetrun.png" alt="yeet logo" width="140" height="140">
+  </a>
+  <h1>yeet</h1>
+  <p>Personal homelab service manager built around Tailscale RPC.</p>
+  <p>
+    <a href="https://yeetrun.com"><strong>yeetrun.com</strong></a>
+    · <a href="https://yeetrun.com/docs/getting-started/quick-start">Quick Start</a>
+    · <a href="https://yeetrun.com/docs/getting-started/installation">Install</a>
+    · <a href="https://yeetrun.com/docs">Docs</a>
+  </p>
+</div>
 
-A personal homelab service manager built around Tailscale RPC. See the [Architecture](https://yeetrun.com/docs/concepts/architecture) page for how the pieces fit together.
+If you landed here first, start with the docs and installation guide on [yeetrun.com](https://yeetrun.com).
+
+See the [Architecture](https://yeetrun.com/docs/concepts/architecture) page for how the pieces fit together.
 
 ## Read This First
 
