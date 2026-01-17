@@ -43,6 +43,13 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
   - Tests run (commands + results).
   - Any user-facing behavior changes or CLI impacts.
 
+## Release & Tagging Process
+- Find the latest `vX.Y.Z` tag and bump the patch version.
+- Update `website/docs/changelog.mdx` with a new date section and 1-3 user-facing bullets for the release.
+- Commit and push the changelog update inside `website/`, then commit the updated submodule pointer in this repo.
+- Create an annotated tag with message equal to the version only (example: `git tag -a v0.1.2 -m "v0.1.2"`).
+- Push commits and the new tag (`git push` then `git push origin v0.1.2`).
+
 ## Website Docs (User Manual)
 - The user manual lives in the `website/` submodule.
 - When you make user-facing changes (CLI commands, flags, workflows, behavior), update the website docs in the same work session.
