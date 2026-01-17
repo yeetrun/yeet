@@ -49,6 +49,7 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Commit and push the changelog update inside `website/`, then commit the updated submodule pointer in this repo.
 - Create an annotated tag with message equal to the version only (example: `git tag -a v0.1.2 -m "v0.1.2"`).
 - Push commits and the new tag (`git push` then `git push origin v0.1.2`).
+- Require explicit user authorization before any commit, tag, or push operations.
 
 ## Website Docs (User Manual)
 - The user manual lives in the `website/` submodule.
