@@ -63,6 +63,12 @@ yeet ssh
 
 Note: from a repo checkout, `yeet init` builds and uploads `catch`. Released yeet binaries (or `--from-github`) download the latest stable release; add `--nightly` for nightly builds.
 
+If your compose uses an env file, upload it before deploy:
+
+```bash
+yeet run --env-file=prod.env <svc> ./compose.yml
+```
+
 Note: `yeet run` for compose does not pull new images by default. To refresh images, use `yeet run --pull <svc> ./compose.yml` or `yeet docker update <svc>`.
 Note: Docker hosts must enable the containerd snapshotter so pushed images show up locally (see Installation in the docs).
 
