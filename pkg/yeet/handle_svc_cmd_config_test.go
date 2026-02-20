@@ -168,3 +168,79 @@ func TestRunFromProjectConfigRehydratesArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestHandleSvcCmdRunForceUsesStoredPayload(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldService := serviceOverride
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldIsTerminal := isTerminalFn
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	defer func() {
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		serviceOverride = oldService
+		fetchRemoteArtifactHashesFn = oldHashes
+		isTerminalFn = oldIsTerminal
+		_ = os.Chdir(cwd)
+	}()
+
+	serviceOverride = "svc-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
+	payload := filepath.Join(tmp, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+	payloadHash, err := hashFileSHA256(payload)
+	if err != nil {
+		t.Fatalf("hashFileSHA256 error: %v", err)
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{
+			Found: true,
+			Payload: &catchrpc.ArtifactHash{
+				Kind:   "binary",
+				SHA256: payloadHash,
+			},
+		}, true, nil
+	}
+
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:    "svc-a",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "run.sh",
+	})
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: cfg}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig error: %v", err)
+	}
+
+	var calls [][]string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		calls = append(calls, append([]string{}, args...))
+		return nil
+	}
+
+	if err := HandleSvcCmd([]string{"run", "--force"}); err != nil {
+		t.Fatalf("HandleSvcCmd error: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("expected one remote call, got %d", len(calls))
+	}
+	if len(calls[0]) == 0 || calls[0][0] != "run" {
+		t.Fatalf("expected run call, got %v", calls[0])
+	}
+}

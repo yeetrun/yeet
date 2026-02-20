@@ -24,6 +24,7 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 		"--env-file", "prod.env",
 		"-p", "8000:8000",
 		"-p", "9000:9000",
+		"--force",
 		"--pull",
 		"arg1", "arg2",
 	}
@@ -58,6 +59,9 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	}
 	if !flags.Pull {
 		t.Errorf("Pull = false, want true")
+	}
+	if !flags.Force {
+		t.Errorf("Force = false, want true")
 	}
 	wantTags := []string{"tag:a", "tag:b"}
 	if !reflect.DeepEqual(flags.TsTags, wantTags) {

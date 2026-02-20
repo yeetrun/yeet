@@ -84,6 +84,8 @@ yeet run --env-file=prod.env <svc> ./compose.yml
 ```
 
 Note: `yeet run` for compose does not pull new images by default. To refresh images, use `yeet run --pull <svc> ./compose.yml` or `yeet docker update <svc>`.
+If you need to redeploy even when nothing changed, use `yeet run --force <svc> ./compose.yml`.
+With a stored `yeet.toml` payload, `yeet run <svc> --force` also works.
 Note: Docker hosts must enable the containerd snapshotter so pushed images show up locally (see Installation in the docs).
 
 Other common variants (in order of use):

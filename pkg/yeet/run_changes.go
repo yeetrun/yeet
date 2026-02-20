@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -59,6 +60,36 @@ func extractEnvFileFlag(args []string) (string, []string, bool, error) {
 		out = append(out, arg)
 	}
 	return envFile, out, found, nil
+}
+
+func extractForceFlag(args []string) (bool, []string, error) {
+	if len(args) == 0 {
+		return false, args, nil
+	}
+	out := make([]string, 0, len(args))
+	force := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+		if arg == "--force" {
+			force = true
+			continue
+		}
+		if strings.HasPrefix(arg, "--force=") {
+			value := strings.TrimPrefix(arg, "--force=")
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return false, nil, fmt.Errorf("invalid --force value %q", value)
+			}
+			force = parsed
+			continue
+		}
+		out = append(out, arg)
+	}
+	return force, out, nil
 }
 
 func filterRemoveArgs(args []string) []string {
@@ -179,12 +210,16 @@ func tagsEqual(a, b []string) bool {
 	return reflect.DeepEqual(aa, bb)
 }
 
-func runWithChanges(payload string, runArgs []string, envFile string, entry ServiceEntry) error {
+func runWithChanges(payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
 	summary, err := detectRunChanges(payload, runArgs, envFile, entry.Args)
 	if err != nil {
 		return err
 	}
 	if !summary.payloadChanged && !summary.envChanged && !summary.argsChanged {
+		if forceDeploy {
+			fmt.Fprintln(os.Stdout, "No changes detected, forcing deploy")
+			return runRun(payload, runArgs)
+		}
 		fmt.Fprintln(os.Stdout, "No changes detected")
 		return nil
 	}
