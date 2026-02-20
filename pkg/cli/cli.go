@@ -45,6 +45,7 @@ type RunFlags struct {
 	MacvlanParent string
 	Restart       bool
 	Pull          bool
+	Force         bool
 	Publish       []string
 	EnvFile       string
 }
@@ -121,6 +122,7 @@ type runFlagsParsed struct {
 	MacvlanParent string   `flag:"macvlan-parent"`
 	Restart       bool     `flag:"restart" default:"true"`
 	Pull          bool     `flag:"pull"`
+	Force         bool     `flag:"force"`
 	Publish       []string `flag:"publish" short:"p"`
 	EnvFile       string   `flag:"env-file"`
 }
@@ -226,6 +228,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 		"yeet run <svc> ./bin/<svc> -- --app-flag value",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
 		"yeet run --pull <svc> ./compose.yml",
+		"yeet run --force <svc> ./compose.yml",
 		"yeet run --env-file=prod.env <svc> ./compose.yml",
 		"yeet run <svc> ghcr.io/org/app:latest",
 		"yeet run <svc> ./Dockerfile",
@@ -400,6 +403,7 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		MacvlanParent: parsed.Flags.MacvlanParent,
 		Restart:       parsed.Flags.Restart,
 		Pull:          parsed.Flags.Pull,
+		Force:         parsed.Flags.Force,
 		Publish:       parsed.Flags.Publish,
 		EnvFile:       parsed.Flags.EnvFile,
 	}

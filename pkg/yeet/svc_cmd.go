@@ -158,11 +158,22 @@ func HandleSvcCmd(args []string) error {
 		if len(cmdArgs) == 0 {
 			return runFromProjectConfig(cfgLoc, hostOverride)
 		}
+		forceFromConfig, err := shouldRunFromConfigWithForce(cmdArgs)
+		if err != nil {
+			return err
+		}
+		if forceFromConfig {
+			return runFromProjectConfigWithForce(cfgLoc, hostOverride, true)
+		}
 		payload, runArgs, err := splitRunPayloadArgs(cmdArgs)
 		if err != nil {
 			return err
 		}
 		envFileArg, filteredArgs, envFileSet, err := extractEnvFileFlag(runArgs)
+		if err != nil {
+			return err
+		}
+		forceDeploy, filteredArgs, err := extractForceFlag(filteredArgs)
 		if err != nil {
 			return err
 		}
@@ -176,7 +187,7 @@ func HandleSvcCmd(args []string) error {
 		if envFile == "" && hasEntry && entry.EnvFile != "" && cfgLoc != nil {
 			envFile = resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
 		}
-		if err := runWithChanges(payload, filteredArgs, envFile, entry); err != nil {
+		if err := runWithChanges(payload, filteredArgs, envFile, entry, forceDeploy); err != nil {
 			return err
 		}
 		normalizedArgs := normalizeRunArgs(filteredArgs)
@@ -972,6 +983,10 @@ func truncateStatusContainers(value string) string {
 }
 
 func runFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) error {
+	return runFromProjectConfigWithForce(cfgLoc, hostOverride, false)
+}
+
+func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride string, forceDeploy bool) error {
 	if serviceOverride == "" {
 		return fmt.Errorf("run requires a service name")
 	}
@@ -1003,7 +1018,18 @@ func runFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) er
 		return fmt.Errorf("no payload configured for %s@%s", service, host)
 	}
 	envFile := resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
-	return runWithChanges(payload, rehydrateRunArgs(entry.Args), envFile, entry)
+	return runWithChanges(payload, rehydrateRunArgs(entry.Args), envFile, entry, forceDeploy)
+}
+
+func shouldRunFromConfigWithForce(args []string) (bool, error) {
+	forceDeploy, filtered, err := extractForceFlag(args)
+	if err != nil {
+		return false, err
+	}
+	if !forceDeploy {
+		return false, nil
+	}
+	return len(normalizeRunArgs(filtered)) == 0, nil
 }
 
 func runCronFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) error {
