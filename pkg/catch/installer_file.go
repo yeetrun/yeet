@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"math/rand/v2"
 	"net/netip"
@@ -187,6 +188,50 @@ func hexStr(n int) string {
 	return hex.EncodeToString(bytes)
 }
 
+var hostDefaultRouteInterfaceFn = hostDefaultRouteInterface
+
+func hostDefaultRouteInterface() (string, error) {
+	if runtime.GOOS == "linux" {
+		f, err := os.Open("/proc/1/net/route")
+		if err == nil {
+			defer f.Close()
+			iface, err := hostDefaultRouteInterfaceFromProcRoute(f)
+			if err == nil {
+				return iface, nil
+			}
+			log.Printf("failed to parse /proc/1/net/route, falling back to netmon: %v", err)
+		} else if !os.IsNotExist(err) {
+			log.Printf("failed to open /proc/1/net/route, falling back to netmon: %v", err)
+		}
+	}
+	return netmon.DefaultRouteInterface()
+}
+
+func hostDefaultRouteInterfaceFromProcRoute(r io.Reader) (string, error) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 0 || fields[0] == "Iface" {
+			continue
+		}
+		if len(fields) < 2 {
+			continue
+		}
+		if fields[1] != "00000000" {
+			continue
+		}
+		iface := strings.TrimSpace(fields[0])
+		if iface == "" {
+			return "", fmt.Errorf("default route interface is empty")
+		}
+		return iface, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("default route interface not found")
+}
+
 func (i *FileInstaller) parseNetwork() error {
 	nets := strings.Split(i.cfg.Network.Interfaces, ",")
 	if len(nets) == 0 {
@@ -222,7 +267,7 @@ func (i *FileInstaller) parseNetwork() error {
 				IPv4: ip,
 			}
 		case net == "lan":
-			iface, err := netmon.DefaultRouteInterface()
+			iface, err := hostDefaultRouteInterfaceFn()
 			if err != nil {
 				return fmt.Errorf("failed to get default route interface: %v", err)
 			}
