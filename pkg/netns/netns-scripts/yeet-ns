@@ -8,6 +8,9 @@ RANGE="${RANGE:-192.168.100.0/24}"
 HOST_IP="${HOST_IP:-192.168.100.1/32}"
 BRIDGE_IP="${BRIDGE_IP:-192.168.100.254/32}"
 YEET_IP="${YEET_IP:-192.168.100.2/32}"
+BRIDGE_IF="${BRIDGE_IF:-yeet0}"
+FIREWALL_BACKEND="${FIREWALL_BACKEND:-}"
+CATCH_BIN="${CATCH_BIN:-catch}"
 
 # Extract base IPs without subnet mask
 HOST_IP_BASE=$(echo $HOST_IP | cut -d'/' -f1)
@@ -53,19 +56,8 @@ ip route replace ${RANGE} via ${YEET_IP_BASE} dev yeet0
 sysctl -w net.ipv4.ip_forward=1
 ip netns exec yeet-ns sysctl -w net.ipv4.ip_forward=1
 
-# Setup NAT on the host
-if ! iptables -t nat -C POSTROUTING -s ${RANGE} ! -d ${RANGE} -j MASQUERADE 2>/dev/null; then
-  iptables -t nat -A POSTROUTING -s ${RANGE} ! -d ${RANGE} -j MASQUERADE
-fi
-
-# Allow forwarding for traffic coming in on yeet0
-if ! iptables -C FORWARD -i yeet0 -j ACCEPT 2>/dev/null; then
-  iptables -A FORWARD -i yeet0 -j ACCEPT
-fi
-
-# Allow forwarding for traffic going out on yeet0 with RELATED,ESTABLISHED state
-if ! iptables -C FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
-  iptables -A FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-fi
+# Ensure yeet-owned firewall state on the host using the backend-aware helper.
+"${CATCH_BIN}" netns-firewall ensure
+"${CATCH_BIN}" netns-firewall verify
 
 echo "Yeet bridge namespace setup complete."

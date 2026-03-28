@@ -60,11 +60,22 @@ func InstallYeetNSService() error {
 	if err != nil {
 		return fmt.Errorf("failed to write netns scripts: %v", err)
 	}
+	backend, err := DetectFirewallBackend()
+	if err != nil {
+		return fmt.Errorf("failed to detect firewall backend: %v", err)
+	}
+	catchBin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to resolve catch binary path: %v", err)
+	}
 	ye := yeetNSEnv{
-		Range:    "192.168.100.0/24",
-		HostIP:   "192.168.100.1/32",
-		YeetIP:   "192.168.100.2/32",
-		BridgeIP: "192.168.100.254/32",
+		Range:           "192.168.100.0/24",
+		HostIP:          "192.168.100.1/32",
+		YeetIP:          "192.168.100.2/32",
+		BridgeIP:        "192.168.100.254/32",
+		BridgeIf:        defaultFirewallBridgeIf,
+		FirewallBackend: string(backend),
+		CatchBin:        catchBin,
 	}
 	if err := env.Write("yeet-ns.env.tmp", &ye); err != nil {
 		return fmt.Errorf("failed to write env: %v", err)
@@ -130,10 +141,13 @@ func InstallYeetNSService() error {
 }
 
 type yeetNSEnv struct {
-	Range    string `env:"RANGE"`
-	HostIP   string `env:"HOST_IP"`
-	BridgeIP string `env:"BRIDGE_IP"`
-	YeetIP   string `env:"YEET_IP"`
+	Range           string `env:"RANGE"`
+	HostIP          string `env:"HOST_IP"`
+	BridgeIP        string `env:"BRIDGE_IP"`
+	YeetIP          string `env:"YEET_IP"`
+	BridgeIf        string `env:"BRIDGE_IF"`
+	FirewallBackend string `env:"FIREWALL_BACKEND"`
+	CatchBin        string `env:"CATCH_BIN"`
 }
 
 type Service struct {

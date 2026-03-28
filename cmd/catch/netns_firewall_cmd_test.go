@@ -14,7 +14,7 @@ import (
 func TestHandleNetNSFirewallCommand(t *testing.T) {
 	t.Parallel()
 
-	cfg := netns.FirewallEnv{
+	cfg := netns.FirewallConfig{
 		Backend: netns.BackendNFT,
 		Spec: netns.FirewallSpec{
 			SubnetCIDR: "192.168.100.0/24",
@@ -27,10 +27,10 @@ func TestHandleNetNSFirewallCommand(t *testing.T) {
 		defer restore()
 
 		called := ""
-		ensureNetNSFirewall = func(backend netns.FirewallBackend, spec netns.FirewallSpec) error {
+		ensureFirewall = func(backend netns.FirewallBackend, spec netns.FirewallSpec) error {
 			called = "ensure"
 			if backend != cfg.Backend || spec != cfg.Spec {
-				t.Fatalf("ensureNetNSFirewall got (%v, %+v), want (%v, %+v)", backend, spec, cfg.Backend, cfg.Spec)
+				t.Fatalf("ensureFirewall got (%v, %+v), want (%v, %+v)", backend, spec, cfg.Backend, cfg.Spec)
 			}
 			return nil
 		}
@@ -39,7 +39,7 @@ func TestHandleNetNSFirewallCommand(t *testing.T) {
 			t.Fatalf("handleNetNSFirewallCommand returned error: %v", err)
 		}
 		if called != "ensure" {
-			t.Fatalf("ensureNetNSFirewall was not called")
+			t.Fatalf("ensureFirewall was not called")
 		}
 	})
 
@@ -48,10 +48,10 @@ func TestHandleNetNSFirewallCommand(t *testing.T) {
 		defer restore()
 
 		called := ""
-		verifyNetNSFirewall = func(backend netns.FirewallBackend, spec netns.FirewallSpec) error {
+		verifyFirewall = func(backend netns.FirewallBackend, spec netns.FirewallSpec) error {
 			called = "verify"
 			if backend != cfg.Backend || spec != cfg.Spec {
-				t.Fatalf("verifyNetNSFirewall got (%v, %+v), want (%v, %+v)", backend, spec, cfg.Backend, cfg.Spec)
+				t.Fatalf("verifyFirewall got (%v, %+v), want (%v, %+v)", backend, spec, cfg.Backend, cfg.Spec)
 			}
 			return nil
 		}
@@ -60,7 +60,7 @@ func TestHandleNetNSFirewallCommand(t *testing.T) {
 			t.Fatalf("handleNetNSFirewallCommand returned error: %v", err)
 		}
 		if called != "verify" {
-			t.Fatalf("verifyNetNSFirewall was not called")
+			t.Fatalf("verifyFirewall was not called")
 		}
 	})
 
@@ -69,10 +69,10 @@ func TestHandleNetNSFirewallCommand(t *testing.T) {
 		defer restore()
 
 		called := ""
-		cleanupNetNSFirewall = func(backend netns.FirewallBackend) error {
+		cleanupFirewall = func(backend netns.FirewallBackend) error {
 			called = "cleanup"
 			if backend != cfg.Backend {
-				t.Fatalf("cleanupNetNSFirewall got %v, want %v", backend, cfg.Backend)
+				t.Fatalf("cleanupFirewall got %v, want %v", backend, cfg.Backend)
 			}
 			return nil
 		}
@@ -81,7 +81,7 @@ func TestHandleNetNSFirewallCommand(t *testing.T) {
 			t.Fatalf("handleNetNSFirewallCommand returned error: %v", err)
 		}
 		if called != "cleanup" {
-			t.Fatalf("cleanupNetNSFirewall was not called")
+			t.Fatalf("cleanupFirewall was not called")
 		}
 	})
 
@@ -98,8 +98,8 @@ func TestHandleNetNSFirewallCommand(t *testing.T) {
 		restore := stubNetNSFirewallHelpers(cfg)
 		defer restore()
 
-		loadNetNSFirewallEnv = func(_ []string) (netns.FirewallEnv, error) {
-			return netns.FirewallEnv{}, errors.New("boom")
+		loadFirewallEnv = func(_ []string) (netns.FirewallConfig, error) {
+			return netns.FirewallConfig{}, errors.New("boom")
 		}
 
 		if err := handleNetNSFirewallCommand([]string{"ensure"}); err == nil {
@@ -108,23 +108,23 @@ func TestHandleNetNSFirewallCommand(t *testing.T) {
 	})
 }
 
-func stubNetNSFirewallHelpers(cfg netns.FirewallEnv) func() {
-	prevLoad := loadNetNSFirewallEnv
-	prevEnsure := ensureNetNSFirewall
-	prevVerify := verifyNetNSFirewall
-	prevCleanup := cleanupNetNSFirewall
+func stubNetNSFirewallHelpers(cfg netns.FirewallConfig) func() {
+	prevLoad := loadFirewallEnv
+	prevEnsure := ensureFirewall
+	prevVerify := verifyFirewall
+	prevCleanup := cleanupFirewall
 
-	loadNetNSFirewallEnv = func(_ []string) (netns.FirewallEnv, error) {
+	loadFirewallEnv = func(_ []string) (netns.FirewallConfig, error) {
 		return cfg, nil
 	}
-	ensureNetNSFirewall = func(netns.FirewallBackend, netns.FirewallSpec) error { return nil }
-	verifyNetNSFirewall = func(netns.FirewallBackend, netns.FirewallSpec) error { return nil }
-	cleanupNetNSFirewall = func(netns.FirewallBackend) error { return nil }
+	ensureFirewall = func(netns.FirewallBackend, netns.FirewallSpec) error { return nil }
+	verifyFirewall = func(netns.FirewallBackend, netns.FirewallSpec) error { return nil }
+	cleanupFirewall = func(netns.FirewallBackend) error { return nil }
 
 	return func() {
-		loadNetNSFirewallEnv = prevLoad
-		ensureNetNSFirewall = prevEnsure
-		verifyNetNSFirewall = prevVerify
-		cleanupNetNSFirewall = prevCleanup
+		loadFirewallEnv = prevLoad
+		ensureFirewall = prevEnsure
+		verifyFirewall = prevVerify
+		cleanupFirewall = prevCleanup
 	}
 }

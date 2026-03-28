@@ -12,11 +12,10 @@ import (
 )
 
 var (
-	loadNetNSFirewallEnv = netns.LoadFirewallEnv
-	ensureNetNSFirewall  = netns.EnsureFirewall
-	verifyNetNSFirewall  = netns.VerifyFirewall
-	cleanupNetNSFirewall = netns.CleanupFirewall
-	getEnviron           = os.Environ
+	loadFirewallEnv = netns.LoadFirewallEnv
+	ensureFirewall  = netns.EnsureFirewall
+	verifyFirewall  = netns.VerifyFirewall
+	cleanupFirewall = netns.CleanupFirewall
 )
 
 func handleNetNSFirewallCommand(args []string) error {
@@ -24,18 +23,18 @@ func handleNetNSFirewallCommand(args []string) error {
 		return fmt.Errorf("usage: catch netns-firewall <ensure|verify|cleanup>")
 	}
 
-	fwEnv, err := loadNetNSFirewallEnv(getEnviron())
+	fwEnv, err := loadFirewallEnv(os.Environ())
 	if err != nil {
 		return err
 	}
 
 	switch args[0] {
 	case "ensure":
-		return ensureNetNSFirewall(fwEnv.Backend, fwEnv.Spec)
+		return ensureFirewall(fwEnv.Backend, fwEnv.Spec)
 	case "verify":
-		return verifyNetNSFirewall(fwEnv.Backend, fwEnv.Spec)
+		return verifyFirewall(fwEnv.Backend, fwEnv.Spec)
 	case "cleanup":
-		return cleanupNetNSFirewall(fwEnv.Backend)
+		return cleanupFirewall(fwEnv.Backend)
 	default:
 		return fmt.Errorf("unknown netns-firewall command %q", args[0])
 	}
