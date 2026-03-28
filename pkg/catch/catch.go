@@ -39,6 +39,8 @@ const (
 
 var DockerStatusesUnknown = svc.DockerComposeStatus{}
 
+var installYeetNSService = netns.InstallYeetNSService
+
 // Server hosts the RPC handlers that manage services and exec commands.
 type Server struct {
 	cfg       Config
@@ -57,6 +59,8 @@ type Server struct {
 		mu sync.Mutex
 		m  map[string]map[string]ComponentStatus // serviceName -> componentName -> ComponentStatus
 	}
+
+	newDockerComposeService func(name string) (dockerNetNSReconciler, error)
 }
 
 type EventListener struct {
@@ -148,6 +152,9 @@ func NewUnstartedServer(config *Config) *Server {
 		cfg: *config,
 	}
 	s.registry = s.newRegistry()
+	s.newDockerComposeService = func(name string) (dockerNetNSReconciler, error) {
+		return s.dockerComposeService(name)
+	}
 	return s
 }
 
@@ -167,8 +174,11 @@ func (s *Server) Start() {
 	s.waitGroup.Go(s.monitorSystemd)
 	s.waitGroup.Go(s.monitorDocker)
 	s.waitGroup.Go(s.heartbeat)
-	if err := netns.InstallYeetNSService(); err != nil {
+	if err := installYeetNSService(); err != nil {
 		log.Fatalf("Failed to install bridge service: %v", err)
+	}
+	if err := s.reconcileNetNSBackedDockerServices(); err != nil {
+		log.Printf("netns reconciliation failed: %v", err)
 	}
 }
 
