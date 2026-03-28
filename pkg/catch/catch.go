@@ -60,7 +60,7 @@ type Server struct {
 		m  map[string]map[string]ComponentStatus // serviceName -> componentName -> ComponentStatus
 	}
 
-	newDockerComposeService func(name string) (dockerNetNSReconciler, error)
+	newDockerComposeService func(sv db.ServiceView) (dockerNetNSReconciler, error)
 }
 
 type EventListener struct {
@@ -152,8 +152,8 @@ func NewUnstartedServer(config *Config) *Server {
 		cfg: *config,
 	}
 	s.registry = s.newRegistry()
-	s.newDockerComposeService = func(name string) (dockerNetNSReconciler, error) {
-		return s.dockerComposeService(name)
+	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
+		return svc.NewDockerComposeService(s.cfg.DB, sv, s.serviceDataDir(sv.Name()), s.serviceRunDir(sv.Name()))
 	}
 	return s
 }

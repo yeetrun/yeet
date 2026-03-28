@@ -29,7 +29,7 @@ func (s *Server) reconcileNetNSBackedDockerServices() error {
 			continue
 		}
 
-		service, err := s.newDockerComposeService(name)
+		service, err := s.newDockerComposeService(sv)
 		if err != nil {
 			return fmt.Errorf("load docker compose service %q: %w", name, err)
 		}
