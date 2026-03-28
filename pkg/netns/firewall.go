@@ -24,10 +24,17 @@ type FirewallSpec struct {
 	BridgeIf   string
 }
 
+type FirewallEnv struct {
+	Backend FirewallBackend
+	Spec    FirewallSpec
+}
+
 type probeResult struct {
 	HasNFT          bool
 	IPTablesVersion string
 }
+
+const defaultFirewallBridgeIf = "yeet0"
 
 var (
 	lookPath          = exec.LookPath
@@ -63,6 +70,34 @@ func DetectFirewallBackend() (FirewallBackend, error) {
 	return backend, nil
 }
 
+func LoadFirewallEnv(envv []string) (FirewallEnv, error) {
+	vals := make(map[string]string, len(envv))
+	for _, kv := range envv {
+		key, val, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		vals[key] = val
+	}
+
+	spec := FirewallSpec{
+		SubnetCIDR: vals["RANGE"],
+		BridgeIf:   vals["BRIDGE_IF"],
+	}
+	if spec.SubnetCIDR == "" {
+		return FirewallEnv{}, fmt.Errorf("missing RANGE in environment")
+	}
+	if spec.BridgeIf == "" {
+		spec.BridgeIf = defaultFirewallBridgeIf
+	}
+
+	backend, err := parseFirewallBackend(vals["FIREWALL_BACKEND"])
+	if err != nil {
+		return FirewallEnv{}, err
+	}
+	return FirewallEnv{Backend: backend, Spec: spec}, nil
+}
+
 func DetectFirewallBackendFromProbe(probe probeResult) FirewallBackend {
 	if probe.HasNFT {
 		return BackendNFT
@@ -75,6 +110,19 @@ func DetectFirewallBackendFromProbe(probe probeResult) FirewallBackend {
 		return BackendIPTablesLegacy
 	default:
 		return ""
+	}
+}
+
+func parseFirewallBackend(raw string) (FirewallBackend, error) {
+	if raw == "" {
+		return DetectFirewallBackend()
+	}
+	backend := FirewallBackend(raw)
+	switch backend {
+	case BackendNFT, BackendIPTablesNFT, BackendIPTablesLegacy:
+		return backend, nil
+	default:
+		return "", fmt.Errorf("unsupported firewall backend %q", raw)
 	}
 }
 
