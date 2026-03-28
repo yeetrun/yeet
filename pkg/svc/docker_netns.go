@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 type composeContainer struct {
@@ -27,12 +28,23 @@ type netnsInspector interface {
 
 type linuxNetNSInspector struct{}
 
+var (
+	netnsStat     = os.Stat
+	netnsReadlink = os.Readlink
+	netnsExecCmd  = exec.Command
+	procNetNSPath = func(pid int) string { return filepath.Join("/proc", strconv.Itoa(pid), "ns/net") }
+)
+
 func (linuxNetNSInspector) NamedNetNSID(path string) (string, error) {
-	target, err := os.Readlink(path)
+	info, err := netnsStat(path)
 	if err != nil {
-		return "", fmt.Errorf("read netns %q: %w", path, err)
+		return "", fmt.Errorf("stat netns %q: %w", path, err)
 	}
-	return target, nil
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return "", fmt.Errorf("unexpected stat payload type %T", info.Sys())
+	}
+	return fmt.Sprintf("net:[%d]", stat.Ino), nil
 }
 
 func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer, error) {
@@ -41,7 +53,7 @@ func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer
 		return nil, err
 	}
 
-	psCmd := exec.Command(dockerPath, "compose", "--project-name", project, "ps", "-q")
+	psCmd := netnsExecCmd(dockerPath, "compose", "--project-name", project, "ps", "-q")
 	output, err := psCmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("docker compose ps -q for %q: %w", project, err)
@@ -58,7 +70,7 @@ func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer
 		`{{.Id}}{{"\t"}}{{.State.Pid}}{{"\t"}}{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}`,
 	}
 	args = append(args, containerIDs...)
-	inspectCmd := exec.Command(dockerPath, args...)
+	inspectCmd := netnsExecCmd(dockerPath, args...)
 	inspectOutput, err := inspectCmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("docker inspect for %q: %w", project, err)
@@ -75,7 +87,7 @@ func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer
 		if err != nil {
 			return nil, fmt.Errorf("parse container pid %q: %w", fields[1], err)
 		}
-		netnsID, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "ns/net"))
+		netnsID, err := netnsReadlink(procNetNSPath(pid))
 		if err != nil {
 			return nil, fmt.Errorf("read container netns for %q: %w", fields[0], err)
 		}

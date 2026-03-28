@@ -5,6 +5,11 @@
 package svc
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+	"syscall"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -102,5 +107,81 @@ func TestDockerComposeServiceReconcileNetNS(t *testing.T) {
 	}
 	if !composeCallHasSubcmd(calls, "restart") {
 		t.Fatalf("expected compose restart command, got %#v", calls)
+	}
+}
+
+func TestLinuxNetNSInspectorNamedNetNSID(t *testing.T) {
+	tmp := t.TempDir()
+	handle := filepath.Join(tmp, "yeet-svc-a-ns")
+	if err := os.WriteFile(handle, []byte("nsfs"), 0644); err != nil {
+		t.Fatalf("failed to create fake netns handle: %v", err)
+	}
+
+	info, err := os.Stat(handle)
+	if err != nil {
+		t.Fatalf("stat failed: %v", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("unexpected stat payload type %T", info.Sys())
+	}
+
+	got, err := (linuxNetNSInspector{}).NamedNetNSID(handle)
+	if err != nil {
+		t.Fatalf("NamedNetNSID returned error: %v", err)
+	}
+
+	want := fmt.Sprintf("net:[%d]", stat.Ino)
+	if got != want {
+		t.Fatalf("NamedNetNSID() = %q, want %q", got, want)
+	}
+}
+
+func TestLinuxNetNSInspectorProjectContainers(t *testing.T) {
+	tmp := t.TempDir()
+	procDir := filepath.Join(tmp, "proc")
+	pidOne := 4242
+	pidTwo := 5252
+	netNSIDOne := "net:[4026533001]"
+	netNSIDTwo := "net:[4026533002]"
+	for pid, target := range map[int]string{
+		pidOne: netNSIDOne,
+		pidTwo: netNSIDTwo,
+	} {
+		nsDir := filepath.Join(procDir, strconv.Itoa(pid), "ns")
+		if err := os.MkdirAll(nsDir, 0755); err != nil {
+			t.Fatalf("failed to create fake proc dir: %v", err)
+		}
+		if err := os.Symlink(target, filepath.Join(nsDir, "net")); err != nil {
+			t.Fatalf("failed to create fake proc netns symlink: %v", err)
+		}
+	}
+
+	t.Setenv("HELPER_DOCKER_PSQ_OUTPUT", "cid-app\ncid-worker\n")
+	t.Setenv(
+		"HELPER_DOCKER_INSPECT_OUTPUT",
+		fmt.Sprintf(
+			"cid-app\t%s\tcatch-svc-a_default extra\ncid-worker\t%s\tbridge\n",
+			strconv.Itoa(pidOne),
+			strconv.Itoa(pidTwo),
+		),
+	)
+
+	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	oldProcNetNSPath := procNetNSPath
+	procNetNSPath = func(pid int) string { return filepath.Join(procDir, strconv.Itoa(pid), "ns/net") }
+	defer func() { procNetNSPath = oldProcNetNSPath }()
+
+	got, err := (linuxNetNSInspector{}).ProjectContainers("catch-svc-a")
+	if err != nil {
+		t.Fatalf("ProjectContainers returned error: %v", err)
+	}
+
+	want := []composeContainer{
+		{ID: "cid-app", PID: pidOne, Networks: []string{"catch-svc-a_default", "extra"}, NetNSID: netNSIDOne},
+		{ID: "cid-worker", PID: pidTwo, Networks: []string{"bridge"}, NetNSID: netNSIDTwo},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("ProjectContainers mismatch (-want +got):\n%s", diff)
 	}
 }
