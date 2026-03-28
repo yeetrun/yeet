@@ -126,6 +126,7 @@ func TestReconcileNetNSBackedDockerServicesContinuesAfterServiceError(t *testing
 
 	wantErr := errors.New("boom")
 	var called []string
+	restarted := map[string]bool{}
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		name := sv.Name()
 		return fakeDockerNetNSReconciler{
@@ -135,6 +136,7 @@ func TestReconcileNetNSBackedDockerServicesContinuesAfterServiceError(t *testing
 				if name == "docker-fail" {
 					return false, wantErr
 				}
+				restarted[name] = true
 				return true, nil
 			},
 		}, nil
@@ -147,8 +149,22 @@ func TestReconcileNetNSBackedDockerServicesContinuesAfterServiceError(t *testing
 	if !strings.Contains(err.Error(), `docker-fail`) {
 		t.Fatalf("aggregate error missing failing service name: %v", err)
 	}
-	if diff := cmp.Diff([]string{"docker-fail", "docker-later"}, called); diff != "" {
+	if len(called) != 2 {
+		t.Fatalf("expected two eligible services to be attempted, got %v", called)
+	}
+	gotCalled := map[string]int{}
+	for _, name := range called {
+		gotCalled[name]++
+	}
+	wantCalled := map[string]int{
+		"docker-fail":  1,
+		"docker-later": 1,
+	}
+	if diff := cmp.Diff(wantCalled, gotCalled); diff != "" {
 		t.Fatalf("unexpected reconciled services (-want +got):\n%s", diff)
+	}
+	if !restarted["docker-later"] {
+		t.Fatalf("expected later eligible service to still reconcile successfully; restarted=%v called=%v", restarted, called)
 	}
 	out := logs.String()
 	if !strings.Contains(out, `netns reconciliation failed for service "docker-fail"`) {
