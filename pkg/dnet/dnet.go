@@ -6,15 +6,18 @@ package dnet
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
 	"runtime"
+	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/vishvananda/netns"
 	"github.com/yeetrun/yeet/pkg/db"
@@ -97,6 +100,7 @@ func (p *plugin) runInNetNS(nsName string, f func() error) error {
 }
 
 func runCmd(name string, args ...string) error {
+	args = withCommandDefaults(name, args)
 	fmt.Printf("running %s %v\n", name, args)
 	cmd := exec.Command(name, args...)
 	cmd.Stdout = os.Stdout
@@ -108,44 +112,294 @@ func runCmd(name string, args ...string) error {
 	return nil
 }
 
+func withCommandDefaults(name string, args []string) []string {
+	if name != "iptables" {
+		return args
+	}
+	for _, arg := range args {
+		if arg == "-w" || arg == "--wait" {
+			return args
+		}
+	}
+	out := make([]string, 0, len(args)+1)
+	out = append(out, "-w")
+	out = append(out, args...)
+	return out
+}
+
 const (
 	postroutingChainName = "YEET_POSTROUTING"
 	preroutingChainName  = "YEET_PREROUTING"
+	outputChainName      = "YEET_OUTPUT"
 )
 
 func ensurePreroutingChain() error {
-	if err := runCmd("iptables", "-t", "nat", "-L", preroutingChainName); err == nil {
-		return nil
+	if err := runCmd("iptables", "-t", "nat", "-L", preroutingChainName); err != nil {
+		if err := runCmd("iptables", "-t", "nat", "-N", preroutingChainName); err != nil {
+			return err
+		}
 	}
-	if err := runCmd("iptables", "-t", "nat", "-N", preroutingChainName); err != nil {
-		return err
+	if err := runCmd("iptables", "-t", "nat", "-C", "PREROUTING", "-j", preroutingChainName); err == nil {
+		return nil
 	}
 	if err := runCmd("iptables", "-t", "nat", "-A", "PREROUTING", "-j", preroutingChainName); err != nil {
 		return err
 	}
-	if err := runCmd("iptables", "-t", "nat", "-A", preroutingChainName, "-i", "br0", "-j", "RETURN"); err != nil {
+	return nil
+}
+
+func ensureOutputChain() error {
+	if err := runCmd("iptables", "-t", "nat", "-L", outputChainName); err != nil {
+		if err := runCmd("iptables", "-t", "nat", "-N", outputChainName); err != nil {
+			return err
+		}
+	}
+	if err := runCmd("iptables", "-t", "nat", "-C", "OUTPUT", "-o", "lo", "-j", outputChainName); err == nil {
+		return nil
+	}
+	if err := runCmd("iptables", "-t", "nat", "-A", "OUTPUT", "-o", "lo", "-j", outputChainName); err != nil {
 		return err
 	}
 	return nil
 }
 
 func ensurePostroutingChain() error {
-	if err := runCmd("iptables", "-t", "nat", "-L", postroutingChainName); err == nil {
-		return nil
+	if err := runCmd("iptables", "-t", "nat", "-L", postroutingChainName); err != nil {
+		if err := runCmd("iptables", "-t", "nat", "-N", postroutingChainName); err != nil {
+			return err
+		}
 	}
-	if err := runCmd("iptables", "-t", "nat", "-N", postroutingChainName); err != nil {
-		return err
+	if err := runCmd("iptables", "-t", "nat", "-C", "POSTROUTING", "-j", postroutingChainName); err != nil {
+		if err := runCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-j", postroutingChainName); err != nil {
+			return err
+		}
 	}
-	if err := runCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-j", postroutingChainName); err != nil {
-		return err
+	if err := runCmd("iptables", "-t", "nat", "-C", postroutingChainName, "-m", "addrtype", "!", "--src-type", "LOCAL", "-o", "br0", "-j", "RETURN"); err != nil {
+		if err := runCmd("iptables", "-t", "nat", "-I", postroutingChainName, "-m", "addrtype", "!", "--src-type", "LOCAL", "-o", "br0", "-j", "RETURN"); err != nil {
+			return err
+		}
 	}
-	if err := runCmd("iptables", "-t", "nat", "-I", postroutingChainName, "-m", "addrtype", "!", "--src-type", "LOCAL", "-o", "br0", "-j", "RETURN"); err != nil {
-		return err
-	}
-	if err := runCmd("iptables", "-t", "nat", "-A", postroutingChainName, "-j", "MASQUERADE"); err != nil {
-		return err
+	if err := runCmd("iptables", "-t", "nat", "-C", postroutingChainName, "-j", "MASQUERADE"); err != nil {
+		if err := runCmd("iptables", "-t", "nat", "-A", postroutingChainName, "-j", "MASQUERADE"); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+type portForwardRule struct {
+	Proto      string
+	HostPort   uint16
+	TargetIP   string
+	TargetPort uint16
+}
+
+type natRuleBackend interface {
+	ListChain(chain string) ([]string, error)
+	FlushChain(chain string) error
+	AppendRule(chain string, rule ...string) error
+	DeleteRule(chain string, rule ...string) error
+	EnsureChains() error
+}
+
+type iptablesBackend struct{}
+
+func (iptablesBackend) ListChain(chain string) ([]string, error) {
+	cmd := exec.Command("iptables", withCommandDefaults("iptables", []string{"-t", "nat", "-S", chain})...)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list chain %q: %w", chain, err)
+	}
+	return splitNonEmptyLines(string(output)), nil
+}
+
+func (iptablesBackend) FlushChain(chain string) error {
+	return runCmd("iptables", "-t", "nat", "-F", chain)
+}
+
+func (iptablesBackend) AppendRule(chain string, rule ...string) error {
+	args := []string{"-t", "nat", "-A", chain}
+	args = append(args, rule...)
+	return runCmd("iptables", args...)
+}
+
+func (iptablesBackend) DeleteRule(chain string, rule ...string) error {
+	args := []string{"-t", "nat", "-D", chain}
+	args = append(args, rule...)
+	return runCmd("iptables", args...)
+}
+
+func (iptablesBackend) EnsureChains() error {
+	if err := ensurePreroutingChain(); err != nil {
+		return err
+	}
+	return ensureOutputChain()
+}
+
+func desiredPortForwards(n *db.DockerNetwork) []portForwardRule {
+	if n == nil {
+		return nil
+	}
+	rules := make([]portForwardRule, 0, len(n.PortMap))
+	for key, pm := range n.PortMap {
+		if pm == nil {
+			continue
+		}
+		ep, ok := n.Endpoints[pm.EndpointID]
+		if !ok || ep == nil {
+			continue
+		}
+		var hpProto db.ProtoPort
+		if err := hpProto.Parse(key); err != nil {
+			continue
+		}
+		proto := protoName(hpProto.Proto)
+		if proto == "" {
+			continue
+		}
+		rules = append(rules, portForwardRule{
+			Proto:      proto,
+			HostPort:   hpProto.Port,
+			TargetIP:   ep.IPv4.Addr().String(),
+			TargetPort: pm.Port,
+		})
+	}
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].Proto != rules[j].Proto {
+			return rules[i].Proto < rules[j].Proto
+		}
+		if rules[i].HostPort != rules[j].HostPort {
+			return rules[i].HostPort < rules[j].HostPort
+		}
+		if rules[i].TargetIP != rules[j].TargetIP {
+			return rules[i].TargetIP < rules[j].TargetIP
+		}
+		return rules[i].TargetPort < rules[j].TargetPort
+	})
+	return rules
+}
+
+func removeEndpointPortMappings(n *db.DockerNetwork, endpointID string) {
+	if n == nil {
+		return
+	}
+	for key, pm := range n.PortMap {
+		if pm != nil && pm.EndpointID == endpointID {
+			delete(n.PortMap, key)
+		}
+	}
+}
+
+func syncNetNSPortForwards(netns string, desired []portForwardRule, backend natRuleBackend) error {
+	if err := backend.EnsureChains(); err != nil {
+		return fmt.Errorf("ensure yeet nat chains for %q: %w", netns, err)
+	}
+
+	outputRules, err := backend.ListChain("OUTPUT")
+	if err != nil {
+		return fmt.Errorf("list output rules for %q: %w", netns, err)
+	}
+	for _, rule := range outputRules {
+		if !isLegacyDirectOutputRule(rule) {
+			continue
+		}
+		args, err := chainRuleArgs(rule, "OUTPUT")
+		if err != nil {
+			return fmt.Errorf("parse legacy output rule %q for %q: %w", rule, netns, err)
+		}
+		if err := backend.DeleteRule("OUTPUT", args...); err != nil {
+			return fmt.Errorf("delete legacy output rule %q for %q: %w", rule, netns, err)
+		}
+	}
+
+	if err := backend.FlushChain(preroutingChainName); err != nil {
+		return fmt.Errorf("flush prerouting chain for %q: %w", netns, err)
+	}
+	if err := backend.FlushChain(outputChainName); err != nil {
+		return fmt.Errorf("flush output chain for %q: %w", netns, err)
+	}
+	if err := backend.AppendRule(preroutingChainName, "-i", "br0", "-j", "RETURN"); err != nil {
+		return fmt.Errorf("append bridge guard for %q: %w", netns, err)
+	}
+	for _, rule := range desired {
+		dnat := dnatRuleArgs(rule)
+		if err := backend.AppendRule(preroutingChainName, dnat...); err != nil {
+			return fmt.Errorf("append prerouting rule for %q: %w", netns, err)
+		}
+		if err := backend.AppendRule(outputChainName, dnat...); err != nil {
+			return fmt.Errorf("append output rule for %q: %w", netns, err)
+		}
+	}
+	return nil
+}
+
+func protoName(proto int) string {
+	switch proto {
+	case 6:
+		return "tcp"
+	case 17:
+		return "udp"
+	default:
+		return ""
+	}
+}
+
+func dnatRuleArgs(rule portForwardRule) []string {
+	return []string{
+		"-p", rule.Proto,
+		"-m", rule.Proto,
+		"--dport", strconv.Itoa(int(rule.HostPort)),
+		"-j", "DNAT",
+		"--to-destination", net.JoinHostPort(rule.TargetIP, strconv.Itoa(int(rule.TargetPort))),
+	}
+}
+
+func isLegacyDirectOutputRule(rule string) bool {
+	fields := strings.Fields(rule)
+	if len(fields) < 3 || fields[0] != "-A" || fields[1] != "OUTPUT" {
+		return false
+	}
+	hasLoopbackOut := false
+	hasDNAT := false
+	for i := 2; i < len(fields)-1; i++ {
+		switch fields[i] {
+		case "-o":
+			if fields[i+1] == "lo" {
+				hasLoopbackOut = true
+			}
+		case "-j":
+			if fields[i+1] == "DNAT" {
+				hasDNAT = true
+			}
+		}
+	}
+	return hasLoopbackOut && hasDNAT
+}
+
+func chainRuleArgs(rule, chain string) ([]string, error) {
+	fields := strings.Fields(rule)
+	if len(fields) < 3 || fields[0] != "-A" || fields[1] != chain {
+		return nil, fmt.Errorf("unexpected chain rule %q", rule)
+	}
+	return fields[2:], nil
+}
+
+func splitNonEmptyLines(output string) []string {
+	lines := strings.Split(output, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func (p *plugin) syncPortForwards(netns string, desired []portForwardRule) error {
+	return p.runInNetNS(netns, func() error {
+		return syncNetNSPortForwards(netns, desired, iptablesBackend{})
+	})
 }
 
 func (p *plugin) LeaveNetwork(w http.ResponseWriter, r *http.Request) {
@@ -160,39 +414,34 @@ func (p *plugin) LeaveNetwork(w http.ResponseWriter, r *http.Request) {
 	eid := req["EndpointID"].(string)
 	ifName := "yv-" + eid[:4]
 	var netns string
-	var ep *db.DockerEndpoint
-	var toDelete map[string]*db.EndpointPort
+	var desired []portForwardRule
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[nid]
 		if !ok {
 			return fmt.Errorf("network not found")
 		}
 		netns = n.NetNS
-		ep, ok = n.Endpoints[eid]
+		_, ok = n.Endpoints[eid]
 		if !ok {
 			return fmt.Errorf("endpoint not found")
 		}
 		delete(n.Endpoints, eid)
-		for k, pm := range n.PortMap {
-			if pm.EndpointID == eid {
-				mak.Set(&toDelete, k, pm)
-			}
-		}
+		removeEndpointPortMappings(n, eid)
+		desired = desiredPortForwards(n)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := p.runInNetNS(netns, func() error {
-		for hp, dst := range toDelete {
-			if err := p.forwardPort(ep, hp, dst, false); err != nil {
-				return err
-			}
+		var errs []error
+		if err := syncNetNSPortForwards(netns, desired, iptablesBackend{}); err != nil {
+			errs = append(errs, err)
 		}
 		if err := runCmd("ip", "link", "del", ifName); err != nil {
-			return err
+			errs = append(errs, err)
 		}
-		return nil
+		return errors.Join(errs...)
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -253,14 +502,14 @@ func (p *plugin) JoinNetwork(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "network not found", http.StatusBadRequest)
 		return
 	}
-	ep, ok := n.Endpoints[eid]
-	if !ok {
+	if _, ok := n.Endpoints[eid]; !ok {
 		http.Error(w, "endpoint not found", http.StatusBadRequest)
 		return
 	}
 	gateway := n.IPv4Gateway.Addr()
 	gatewayPrefix := n.IPv4Gateway
 	netns = n.NetNS
+	desired := desiredPortForwards(n)
 
 	ifName := "yv-" + eid[:4]
 	peerName := ifName + "p"
@@ -286,12 +535,7 @@ func (p *plugin) JoinNetwork(w http.ResponseWriter, r *http.Request) {
 		if err := ensurePostroutingChain(); err != nil {
 			return err
 		}
-		for hp, dst := range n.PortMap {
-			if err := p.forwardPort(ep, hp, dst, true); err != nil {
-				return err
-			}
-		}
-		return nil
+		return syncNetNSPortForwards(netns, desired, iptablesBackend{})
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -305,58 +549,6 @@ func (p *plugin) JoinNetwork(w http.ResponseWriter, r *http.Request) {
 		"Gateway": gateway.String(),
 	}
 	json.NewEncoder(w).Encode(resp)
-}
-
-func (p *plugin) forwardPort(ep *db.DockerEndpoint, hp string, dst *db.EndpointPort, add bool) error {
-	if dst.EndpointID != ep.EndpointID {
-		return nil
-	}
-	if err := ensurePreroutingChain(); err != nil {
-		return err
-	}
-	var hpProto db.ProtoPort
-	if err := hpProto.Parse(hp); err != nil {
-		return err
-	}
-	var proto string
-	switch hpProto.Proto {
-	case 6:
-		proto = "tcp"
-	case 17:
-		proto = "udp"
-	default:
-		return fmt.Errorf("unsupported protocol: %d", hpProto.Proto)
-	}
-	var cmd string
-	if add {
-		cmd = "-A"
-	} else {
-		cmd = "-D"
-	}
-	log.Printf("adding forward for %s:%d -> %s:%d", proto, hpProto.Port, ep.IPv4.Addr().String(), dst.Port)
-	if err := runCmd("iptables",
-		"-t", "nat",
-		cmd, preroutingChainName,
-		"-p", proto,
-		"--dport", fmt.Sprint(hpProto.Port),
-		"-j", "DNAT",
-		"--to-destination", net.JoinHostPort(ep.IPv4.Addr().String(), fmt.Sprint(dst.Port)),
-	); err != nil {
-		return err
-	}
-
-	if err := runCmd("iptables",
-		"-t", "nat",
-		cmd, "OUTPUT",
-		"-p", proto,
-		"-o", "lo",
-		"--dport", fmt.Sprint(hpProto.Port),
-		"-j", "DNAT",
-		"--to-destination", net.JoinHostPort(ep.IPv4.Addr().String(), fmt.Sprint(dst.Port)),
-	); err != nil {
-		return err
-	}
-	return nil
 }
 
 func (p *plugin) DeleteNetwork(w http.ResponseWriter, r *http.Request) {
@@ -461,31 +653,42 @@ func (p *plugin) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		dbpm[db.ProtoPort{Proto: pm.Proto, Port: pm.HostPort}] = &db.EndpointPort{EndpointID: req.EndpointID, Port: pm.Port}
 	}
 	pfx := req.Interface.Address
+	var netns string
+	var desired []portForwardRule
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[req.NetworkID]
 		if !ok {
 			return fmt.Errorf("network not found")
 		}
+		netns = n.NetNS
 		ep, ok := n.Endpoints[req.EndpointID]
 		if !ok {
 			ep = &db.DockerEndpoint{
 				EndpointID: req.EndpointID,
 				IPv4:       pfx,
 			}
+		} else {
+			ep.IPv4 = pfx
 		}
+		removeEndpointPortMappings(n, req.EndpointID)
 		for k, pm := range dbpm {
 			mak.Set(&n.PortMap, k.String(), pm)
 		}
-		for k, ep := range n.Endpoints {
-			if ep.IPv4 == pfx && k != ep.EndpointID {
+		for k, existing := range n.Endpoints {
+			if existing.IPv4 == pfx && k != req.EndpointID {
+				removeEndpointPortMappings(n, k)
 				delete(n.Endpoints, k)
-				// TODO: do we have to update iptables?
 			}
 		}
 		mak.Set(&n.Endpoints, req.EndpointID, ep)
+		desired = desiredPortForwards(n)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := p.syncPortForwards(netns, desired); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -503,14 +706,23 @@ func (p *plugin) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	var netns string
+	var desired []portForwardRule
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[req.NetworkID]
 		if !ok {
 			return fmt.Errorf("network not found")
 		}
+		netns = n.NetNS
+		removeEndpointPortMappings(n, req.EndpointID)
 		delete(n.Endpoints, req.EndpointID)
+		desired = desiredPortForwards(n)
 		return nil
 	}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := p.syncPortForwards(netns, desired); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
