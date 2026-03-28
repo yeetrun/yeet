@@ -102,12 +102,19 @@ func initTSNet(dataDir string) *tsnet.Server {
 
 func main() {
 	flag.Parse()
-	// Fast path for is-catch command.
-	if len(flag.Args()) > 0 && flag.Args()[0] == "is-catch" {
-		// is-catch is a special command that is used to determine if the
-		// binary is a catch binary.
-		fmt.Println("yes")
-		return
+	if len(flag.Args()) > 0 {
+		switch flag.Args()[0] {
+		case "is-catch":
+			// is-catch is a special command that is used to determine if the
+			// binary is a catch binary.
+			fmt.Println("yes")
+			return
+		case "netns-firewall":
+			if err := handleNetNSFirewallCommand(flag.Args()[1:]); err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
 	}
 
 	dataDir := *legacyDataDir
