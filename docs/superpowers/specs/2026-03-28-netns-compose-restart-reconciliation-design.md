@@ -5,8 +5,9 @@
 Prevent docker compose services from becoming unreachable when yeet recreates
 their service network namespaces.
 
-The fix should be precise: restart only the compose projects whose named netns
-identity actually changed, and leave unaffected projects alone.
+The fix should be precise: restart only the compose projects whose running
+containers no longer match the current named netns, and leave unaffected
+projects alone.
 
 ## Problem
 
@@ -39,8 +40,8 @@ The current lifecycle has three independent pieces:
    deletes and recreates `yeet-<svc>-ns`.
 2. Docker compose containers continue running unless compose itself is told to
    restart or recreate them.
-3. Yeet does not currently record or compare the identity of the named netns
-   that a compose project last synced with.
+3. Yeet does not currently compare the identity of the current named netns with
+   the actual runtime netns identity of the compose project containers.
 
 Because those pieces are not coordinated, yeet has no way to know that a
 compose project is now attached to a stale namespace.
@@ -49,12 +50,14 @@ compose project is now attached to a stale namespace.
 
 ### Functional
 
-1. Yeet must detect when the named service netns for a docker compose service
-   has changed identity.
-2. If the netns identity changed, yeet must restart the entire compose project
-   for that service, not just one container.
-3. If the netns identity did not change, yeet must not restart the compose
-   project.
+1. Yeet must detect when a running docker compose project has any container
+   attached to the yeet-managed network for that service that is using a
+   different netns than the current named service netns.
+2. If any running container attached to the yeet-managed network is using the
+   wrong netns, yeet must restart the entire compose project for that service,
+   not just one container.
+3. If the running project already matches the current named netns, yeet must
+   not restart the compose project.
 4. The fix must work for single-container and multi-container compose projects.
 5. The fix must cover both:
    - explicit service operations like `yeet run` and `yeet restart`
@@ -75,20 +78,26 @@ compose project is now attached to a stale namespace.
 
 ## Recommended Approach
 
-Use a precise netns identity reconciliation model.
+Use a precise live netns reconciliation model.
 
 For each docker compose service with a yeet-managed service netns:
 
 1. Read the current identity of `/var/run/netns/yeet-<svc>-ns`.
-2. Compare it with the last identity that yeet recorded for that service.
-3. If the identity changed, restart the entire compose project.
-4. If the identity did not change, leave the project alone.
-5. After a successful restart, update the recorded identity.
+2. Discover the running containers in that compose project that are attached to
+   the yeet-managed network for that service.
+3. Read the current netns identity for those running containers.
+4. If there are no running containers, do not restart just for reconciliation.
+   The next start will attach to the current named netns.
+5. If any selected container identity differs from the current named netns
+   identity, restart the entire compose project.
+6. If all running containers already match the current named netns, leave the
+   project alone.
 
 This is the recommended approach because it is:
 
-- precise enough to avoid unnecessary downtime
+- as precise as the live runtime state allows
 - correct for multi-container projects
+- able to repair already-stranded services on first deployment
 - compatible with the current yeet architecture
 - much less risky than trying to preserve namespaces in place
 
@@ -104,19 +113,26 @@ which yields a stable token like `net:[4026535299]`.
 That is preferable to using the mountpoint path string alone, because the path
 name stays constant even when the namespace behind it is replaced.
 
+Yeet also needs the runtime netns identity of the running compose project
+containers that are attached to the yeet-managed network for that service. The
+preferred source is the kernel namespace identity for each selected container
+process, for example via the container PID and `/proc/<pid>/ns/net`.
+
+The comparison must use live runtime identities, not just cached service
+metadata, because cached state can drift and would not reliably repair already
+stranded services.
+
 ## Persisted State
 
-Yeet should persist one small piece of runtime metadata per netns-backed docker
-compose service:
+No persisted "last synced netns identity" is required for correctness.
 
-- current synced netns identity
+If yeet later wants cached state for observability or optimization, it can be
+added as a secondary detail, but the restart decision should be based on the
+live comparison between:
 
-Suggested storage location:
-
-- service run/data directory under catch-managed service state
-
-The exact file format can be minimal, for example a one-field JSON document or
-plain text file. It does not need to be user-facing configuration.
+- the current named service netns identity
+- the current netns identity of the running compose project containers attached
+  to the yeet-managed network
 
 ## Trigger Points
 
@@ -131,8 +147,9 @@ the netns identity during service lifecycle actions such as:
 - start
 - restart
 
-If the current netns identity differs from the last recorded identity, yeet
-should restart the compose project and then record the new identity.
+If the current named netns identity differs from the netns identity of any
+selected running container in the project, yeet should restart the compose
+project.
 
 This covers explicit user operations like `yeet run` and `yeet restart`.
 
@@ -143,11 +160,12 @@ seen on `pve1`: named netns objects were recreated even though the compose
 projects were not otherwise touched.
 
 After a host-level operation that can recreate service netns objects, yeet
-should scan netns-backed docker compose services and perform the same
-identity-based comparison:
+should scan netns-backed docker compose services and perform the same live
+comparison:
 
-- if changed, restart that compose project
-- if unchanged, skip it
+- if the running project does not match the named netns, restart that compose
+  project
+- if the running project already matches, skip it
 
 This should restart exactly the affected projects, not every compose project on
 the host.
@@ -174,12 +192,14 @@ Project-level restart is therefore the correct and simplest behavior.
 
 1. If yeet cannot read the current named netns identity for a docker compose
    service that should have one, fail the operation clearly.
-2. If the netns identity changed and the compose restart fails, surface the
-   failure and do not silently update the recorded identity.
-3. If there is no previously recorded identity:
-   - do not restart just because state is missing
-   - record the current identity after the compose project is known-good
-4. If a service has no `ArtifactNetNSService`, skip reconciliation entirely.
+2. If yeet cannot read the runtime netns identity for a selected running
+   container it is using for reconciliation, fail the operation clearly instead
+   of guessing.
+3. If a mismatch is detected and the compose restart fails, surface the failure
+   and do not silently continue.
+4. If a service has no running containers, do not restart just for
+   reconciliation.
+5. If a service has no `ArtifactNetNSService`, skip reconciliation entirely.
 
 ## Implementation Shape
 
@@ -188,8 +208,8 @@ service lifecycle:
 
 - [pkg/catch/installer_service.go](/Users/shayne/code/yeet/pkg/catch/installer_service.go)
 - [pkg/svc/docker.go](/Users/shayne/code/yeet/pkg/svc/docker.go)
-- any small helper package or file needed to read netns identity and persist the
-  last synced value
+- any small helper package or file needed to read the named netns identity and
+  the runtime container netns identities
 
 The namespace shell scripts should not be responsible for compose restart
 policy. They only create namespaces. Catch should decide when a compose project
@@ -202,11 +222,15 @@ needs to be bounced.
 Add tests for:
 
 1. reading current named netns identity
-2. comparing recorded vs current identity
-3. unchanged identity -> no compose restart
-4. changed identity -> compose project restart
+2. reading runtime container netns identity for containers attached to the
+   yeet-managed network
+3. unchanged named netns vs selected container netns -> no compose restart
+4. changed named netns vs selected container netns -> compose project restart
 5. multi-container project -> one project-level restart path
 6. services without netns artifacts -> reconciliation skipped
+7. stopped project -> reconciliation does not force a restart
+8. project with extra containers not attached to the yeet-managed network ->
+   reconciliation ignores those containers
 
 ### Live Validation
 
@@ -215,20 +239,24 @@ Acceptance must include live verification on both `pve1` and `hetz`.
 For each host:
 
 1. deploy or use a temporary netns-backed docker compose service
-2. record its current named netns identity
+2. record its current named netns identity and a selected running container's
+   current netns identity
 3. recreate the service netns
-4. verify yeet detects the identity change
-5. verify yeet restarts the compose project automatically
-6. verify the service is reachable after the operation
+4. verify the named netns identity changed while the running container identity
+   stayed stale
+5. verify yeet detects the mismatch
+6. verify yeet restarts the compose project automatically
+7. verify the service is reachable after the operation
 
 On `pve1`, also verify this against an existing multi-container or
 representative compose service where practical.
 
 ## Rollout Notes
 
-This fix should repair the exact outage pattern that happened on `pve1`, but
-the first deployment of the fix may still need one cleanup pass for already
-stranded services if the deployment process itself does not touch them.
+This fix should repair the exact outage pattern that happened on `pve1`,
+including already-stranded services, because the reconciliation decision is
+based on live container state instead of previously cached service state.
 
 The design intentionally avoids broad unconditional restarts. Only services
-whose named netns identity changed should be bounced.
+whose running project no longer matches the current named netns should be
+bounced.
