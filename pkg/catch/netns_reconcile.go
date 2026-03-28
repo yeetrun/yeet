@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"errors"
 	"fmt"
 	"log"
 
@@ -21,6 +22,7 @@ func (s *Server) reconcileNetNSBackedDockerServices() error {
 		return err
 	}
 
+	var errs []error
 	for name, sv := range dv.Services().All() {
 		if sv.ServiceType() != db.ServiceTypeDockerCompose {
 			continue
@@ -31,16 +33,22 @@ func (s *Server) reconcileNetNSBackedDockerServices() error {
 
 		service, err := s.newDockerComposeService(sv)
 		if err != nil {
-			return fmt.Errorf("load docker compose service %q: %w", name, err)
+			err = fmt.Errorf("load docker compose service %q: %w", name, err)
+			log.Printf("netns reconciliation failed for service %q: %v", name, err)
+			errs = append(errs, err)
+			continue
 		}
 		restarted, err := service.ReconcileNetNS()
 		if err != nil {
-			return fmt.Errorf("reconcile docker compose service %q: %w", name, err)
+			err = fmt.Errorf("reconcile docker compose service %q: %w", name, err)
+			log.Printf("netns reconciliation failed for service %q: %v", name, err)
+			errs = append(errs, err)
+			continue
 		}
 		if restarted {
 			log.Printf("reconciled stale docker netns for service %q; restarted containers", name)
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
