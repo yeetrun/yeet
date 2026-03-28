@@ -24,7 +24,7 @@ type FirewallSpec struct {
 	BridgeIf   string
 }
 
-type FirewallEnv struct {
+type FirewallConfig struct {
 	Backend FirewallBackend
 	Spec    FirewallSpec
 }
@@ -70,7 +70,7 @@ func DetectFirewallBackend() (FirewallBackend, error) {
 	return backend, nil
 }
 
-func LoadFirewallEnv(envv []string) (FirewallEnv, error) {
+func LoadFirewallEnv(envv []string) (FirewallConfig, error) {
 	vals := make(map[string]string, len(envv))
 	for _, kv := range envv {
 		key, val, ok := strings.Cut(kv, "=")
@@ -85,7 +85,7 @@ func LoadFirewallEnv(envv []string) (FirewallEnv, error) {
 		BridgeIf:   vals["BRIDGE_IF"],
 	}
 	if spec.SubnetCIDR == "" {
-		return FirewallEnv{}, fmt.Errorf("missing RANGE in environment")
+		return FirewallConfig{}, fmt.Errorf("missing RANGE in environment")
 	}
 	if spec.BridgeIf == "" {
 		spec.BridgeIf = defaultFirewallBridgeIf
@@ -93,9 +93,9 @@ func LoadFirewallEnv(envv []string) (FirewallEnv, error) {
 
 	backend, err := parseFirewallBackend(vals["FIREWALL_BACKEND"])
 	if err != nil {
-		return FirewallEnv{}, err
+		return FirewallConfig{}, err
 	}
-	return FirewallEnv{Backend: backend, Spec: spec}, nil
+	return FirewallConfig{Backend: backend, Spec: spec}, nil
 }
 
 func DetectFirewallBackendFromProbe(probe probeResult) FirewallBackend {
