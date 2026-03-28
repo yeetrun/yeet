@@ -424,6 +424,13 @@ func (s *SystemdService) monitorTailscale() (err error) {
 }
 
 func (s *SystemdService) Start() error {
+	if err := s.StartAuxiliaryUnits(); err != nil {
+		return err
+	}
+	return s.run("start", s.primaryUnit())
+}
+
+func (s *SystemdService) StartAuxiliaryUnits() error {
 	af := s.cfg.AsStruct().Artifacts
 	var wg errgroup.Group
 	if _, ok := af.Gen(db.ArtifactNetNSService, s.cfg.Generation()); ok {
@@ -444,10 +451,7 @@ func (s *SystemdService) Start() error {
 			return nil
 		})
 	}
-	if err := wg.Wait(); err != nil {
-		return err
-	}
-	return s.run("start", s.primaryUnit())
+	return wg.Wait()
 }
 
 func (s *SystemdService) hasArtifact(a db.ArtifactName) bool {

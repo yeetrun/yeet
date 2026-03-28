@@ -165,6 +165,11 @@ func newTestDockerComposeService(t *testing.T, composeContent string, newCmd fun
 	if err := os.WriteFile(dockerPath, []byte(dockerScript), 0755); err != nil {
 		t.Fatalf("failed to write fake docker: %v", err)
 	}
+	nsenterPath := filepath.Join(tmp, "nsenter")
+	nsenterScript := "#!/bin/sh\nGO_WANT_HELPER_PROCESS=1 exec " + strconv.Quote(os.Args[0]) + " -test.run=TestHelperProcess -- nsenter \"$@\"\n"
+	if err := os.WriteFile(nsenterPath, []byte(nsenterScript), 0755); err != nil {
+		t.Fatalf("failed to write fake nsenter: %v", err)
+	}
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	composePath := filepath.Join(tmp, "compose.yml")
@@ -243,6 +248,11 @@ func TestHelperProcess(t *testing.T) {
 	}
 	if len(actualArgs) > 0 && actualArgs[0] == "inspect" {
 		if output := os.Getenv("HELPER_DOCKER_INSPECT_OUTPUT"); output != "" {
+			os.Stdout.WriteString(output)
+		}
+	}
+	if cmdArgs[0] == "nsenter" {
+		if output := os.Getenv("HELPER_NSENTER_IP_LINK_OUTPUT"); output != "" {
 			os.Stdout.WriteString(output)
 		}
 	}
