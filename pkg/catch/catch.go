@@ -177,9 +177,11 @@ func (s *Server) Start() {
 	if err := installYeetNSService(); err != nil {
 		log.Fatalf("Failed to install bridge service: %v", err)
 	}
-	if err := s.reconcileNetNSBackedDockerServices(); err != nil {
-		log.Printf("netns reconciliation failed: %v", err)
-	}
+	s.waitGroup.Go(func() {
+		if err := s.reconcileNetNSBackedDockerServices(); err != nil {
+			log.Printf("netns reconciliation failed: %v", err)
+		}
+	})
 }
 
 func (s *Server) Shutdown() {
