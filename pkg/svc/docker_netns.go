@@ -77,7 +77,7 @@ func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer
 		return nil, fmt.Errorf("docker inspect for %q: %w", project, err)
 	}
 
-	lines := splitNonEmptyLines(string(inspectOutput))
+	lines := splitNonEmptyRawLines(string(inspectOutput))
 	containers := make([]composeContainer, 0, len(lines))
 	for _, line := range lines {
 		fields := strings.Split(line, "\t")
@@ -135,6 +135,18 @@ func splitNonEmptyLines(output string) []string {
 	out := make([]string, 0, len(lines))
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
+		if line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func splitNonEmptyRawLines(output string) []string {
+	lines := strings.Split(output, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
 		if line != "" {
 			out = append(out, line)
 		}

@@ -283,3 +283,22 @@ func TestLinuxNetNSInspectorProjectContainers(t *testing.T) {
 		t.Fatalf("ProjectContainers mismatch (-want +got):\n%s", diff)
 	}
 }
+
+func TestLinuxNetNSInspectorProjectContainersHandlesContainerWithNoNetworks(t *testing.T) {
+	t.Setenv("HELPER_DOCKER_PSQ_OUTPUT", "cid-empty\n")
+	t.Setenv("HELPER_DOCKER_INSPECT_OUTPUT", "cid-empty\t\n")
+
+	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+	got, err := (linuxNetNSInspector{}).ProjectContainers("catch-svc-a")
+	if err != nil {
+		t.Fatalf("ProjectContainers returned error: %v", err)
+	}
+
+	want := []composeContainer{
+		{ID: "cid-empty", NetworkEndpointIDs: map[string]string{}},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("ProjectContainers mismatch (-want +got):\n%s", diff)
+	}
+}
