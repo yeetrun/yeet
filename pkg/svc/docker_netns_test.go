@@ -64,7 +64,8 @@ func TestNeedsNetNSRestart(t *testing.T) {
 }
 
 func TestDockerComposeServiceReconcileNetNS(t *testing.T) {
-	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
 	svc.netnsInspector = fakeNetNSInspector{
 		namedID:    "net:[4026534010]",
 		containers: []composeContainer{{ID: "app", PID: 1001, Networks: []string{"catch-svc-a_default"}, NetNSID: "net:[4026533010]"}},
@@ -76,5 +77,8 @@ func TestDockerComposeServiceReconcileNetNS(t *testing.T) {
 	}
 	if !restarted {
 		t.Fatal("expected restart when container netns is stale")
+	}
+	if !composeCallHasSubcmd(calls, "restart") {
+		t.Fatalf("expected compose restart command, got %#v", calls)
 	}
 }
