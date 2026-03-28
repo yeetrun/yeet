@@ -258,7 +258,11 @@ func deleteNFTTable() error {
 	if !commandExists("nft") {
 		return fmt.Errorf("nft command not found")
 	}
-	if _, err := commandOutput("nft", "list", "table", "ip", "yeet"); err != nil {
+	exists, err := nftTableExists()
+	if err != nil {
+		return err
+	}
+	if !exists {
 		return nil
 	}
 	return runCommandWithInput(nil, "nft", "delete", "table", "ip", "yeet")
@@ -303,14 +307,14 @@ func iptablesBinary(backend FirewallBackend) (string, error) {
 	switch backend {
 	case BackendIPTablesNFT:
 		for _, candidate := range []string{"iptables-nft", "iptables"} {
-			if commandExists(candidate) {
+			if version, err := iptablesVersion(candidate); err == nil && strings.Contains(strings.ToLower(version), "nf_tables") {
 				return candidate, nil
 			}
 		}
 		return "", fmt.Errorf("iptables nft backend requested but no iptables binary found")
 	case BackendIPTablesLegacy:
 		for _, candidate := range []string{"iptables-legacy", "iptables"} {
-			if commandExists(candidate) {
+			if version, err := iptablesVersion(candidate); err == nil && strings.Contains(strings.ToLower(version), "legacy") {
 				return candidate, nil
 			}
 		}
@@ -331,6 +335,32 @@ func hasUsableCommand(name string, args ...string) bool {
 	}
 	_, err := runCombinedOutput(name, args...)
 	return err == nil
+}
+
+func iptablesVersion(name string) (string, error) {
+	if !commandExists(name) {
+		return "", fmt.Errorf("%s command not found", name)
+	}
+	out, err := runCombinedOutput(name, "--version")
+	if err != nil {
+		return "", fmt.Errorf("failed to run %s --version: %w", name, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func nftTableExists() (bool, error) {
+	out, err := runCombinedOutput("nft", "list", "table", "ip", "yeet")
+	if err == nil {
+		return true, nil
+	}
+	msg := strings.TrimSpace(string(out))
+	if strings.Contains(strings.ToLower(msg), "no such file") {
+		return false, nil
+	}
+	if msg == "" {
+		return false, fmt.Errorf("failed to inspect nft table ip yeet: %w", err)
+	}
+	return false, fmt.Errorf("failed to inspect nft table ip yeet: %w\n%s", err, msg)
 }
 
 func commandOutput(name string, args ...string) (string, error) {
