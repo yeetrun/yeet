@@ -228,9 +228,20 @@ func TestHelperProcess(t *testing.T) {
 	if len(actualArgs) > 0 && actualArgs[0] == "compose" {
 		if composeSubcommand(actualArgs) == "ps" {
 			output := os.Getenv("HELPER_DOCKER_PS_OUTPUT")
+			for _, arg := range actualArgs {
+				if arg == "-q" {
+					output = os.Getenv("HELPER_DOCKER_PSQ_OUTPUT")
+					break
+				}
+			}
 			if output != "" {
 				os.Stdout.WriteString(output)
 			}
+		}
+	}
+	if len(actualArgs) > 0 && actualArgs[0] == "inspect" {
+		if output := os.Getenv("HELPER_DOCKER_INSPECT_OUTPUT"); output != "" {
+			os.Stdout.WriteString(output)
 		}
 	}
 	os.Exit(0)

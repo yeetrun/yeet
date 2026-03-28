@@ -8,7 +8,23 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/yeetrun/yeet/pkg/db"
 )
+
+type fakeNetNSInspector struct {
+	namedID    string
+	namedErr   error
+	containers []composeContainer
+	projectErr error
+}
+
+func (f fakeNetNSInspector) NamedNetNSID(path string) (string, error) {
+	return f.namedID, f.namedErr
+}
+
+func (f fakeNetNSInspector) ProjectContainers(project string) ([]composeContainer, error) {
+	return f.containers, f.projectErr
+}
 
 func TestSelectNetNSContainers(t *testing.T) {
 	project := "catch-demo"
@@ -66,6 +82,12 @@ func TestNeedsNetNSRestart(t *testing.T) {
 func TestDockerComposeServiceReconcileNetNS(t *testing.T) {
 	calls := []cmdCall{}
 	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.cfg.Artifacts[db.ArtifactNetNSService] = &db.Artifact{
+		Refs: map[db.ArtifactRef]string{
+			db.Gen(svc.cfg.Generation): "/etc/systemd/system/yeet-svc-a-ns.service",
+		},
+	}
+	svc.sd = &SystemdService{cfg: svc.cfg.View(), runDir: svc.DataDir}
 	svc.netnsInspector = fakeNetNSInspector{
 		namedID:    "net:[4026534010]",
 		containers: []composeContainer{{ID: "app", PID: 1001, Networks: []string{"catch-svc-a_default"}, NetNSID: "net:[4026533010]"}},
