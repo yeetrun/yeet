@@ -21,9 +21,13 @@ type fakeNetNSInspector struct {
 	namedErr   error
 	containers []composeContainer
 	projectErr error
+	namedCalls *int
 }
 
 func (f fakeNetNSInspector) NamedNetNSID(path string) (string, error) {
+	if f.namedCalls != nil {
+		*f.namedCalls++
+	}
 	return f.namedID, f.namedErr
 }
 
@@ -107,6 +111,70 @@ func TestDockerComposeServiceReconcileNetNS(t *testing.T) {
 	}
 	if !composeCallHasSubcmd(calls, "restart") {
 		t.Fatalf("expected compose restart command, got %#v", calls)
+	}
+}
+
+func TestDockerComposeServiceReconcileNetNSNoSelectedContainersSkipsNamedLookup(t *testing.T) {
+	namedCalls := 0
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	svc.cfg.Artifacts[db.ArtifactNetNSService] = &db.Artifact{
+		Refs: map[db.ArtifactRef]string{
+			db.Gen(svc.cfg.Generation): "/etc/systemd/system/yeet-svc-a-ns.service",
+		},
+	}
+	svc.sd = &SystemdService{cfg: svc.cfg.View(), runDir: svc.DataDir}
+	svc.netnsInspector = fakeNetNSInspector{
+		namedErr:   fmt.Errorf("named netns should not be read"),
+		containers: []composeContainer{{ID: "app", PID: 1001, Networks: []string{"bridge"}, NetNSID: "net:[4026533010]"}},
+		namedCalls: &namedCalls,
+	}
+
+	restarted, err := svc.ReconcileNetNS()
+	if err != nil {
+		t.Fatalf("ReconcileNetNS returned error: %v", err)
+	}
+	if restarted {
+		t.Fatal("expected no restart when no containers are on the managed network")
+	}
+	if namedCalls != 0 {
+		t.Fatalf("NamedNetNSID called %d times, want 0", namedCalls)
+	}
+}
+
+func TestDockerComposeServiceRestartShortCircuitsAfterReconcileRestart(t *testing.T) {
+	tmp := t.TempDir()
+	systemctlPath := filepath.Join(tmp, "systemctl")
+	if err := os.WriteFile(systemctlPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("failed to write fake systemctl: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,running\n")
+
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.cfg.Artifacts[db.ArtifactNetNSService] = &db.Artifact{
+		Refs: map[db.ArtifactRef]string{
+			db.Gen(svc.cfg.Generation): "/etc/systemd/system/yeet-svc-a-ns.service",
+		},
+	}
+	svc.sd = &SystemdService{cfg: svc.cfg.View(), runDir: svc.DataDir}
+	svc.netnsInspector = fakeNetNSInspector{
+		namedID:    "net:[4026534010]",
+		containers: []composeContainer{{ID: "app", PID: 1001, Networks: []string{"catch-svc-a_default"}, NetNSID: "net:[4026533010]"}},
+	}
+
+	if err := svc.Restart(); err != nil {
+		t.Fatalf("Restart returned error: %v", err)
+	}
+
+	restarts := 0
+	for _, call := range calls {
+		if len(call.args) > 0 && call.args[0] == "compose" && composeSubcommand(call.args) == "restart" {
+			restarts++
+		}
+	}
+	if restarts != 1 {
+		t.Fatalf("compose restart called %d times, want 1; calls=%#v", restarts, calls)
 	}
 }
 

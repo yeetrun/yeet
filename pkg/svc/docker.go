@@ -232,15 +232,18 @@ func (s *DockerComposeService) ReconcileNetNS() (bool, error) {
 	if s.sd == nil || !s.sd.hasArtifact(db.ArtifactNetNSService) {
 		return false, nil
 	}
-	namedID, err := s.getNetNSInspector().NamedNetNSID(s.namedNetNSPath())
-	if err != nil {
-		return false, err
-	}
 	containers, err := s.getNetNSInspector().ProjectContainers(s.composeProjectName())
 	if err != nil {
 		return false, err
 	}
 	selected := selectNetNSContainers(containers, s.defaultNetworkName())
+	if len(selected) == 0 {
+		return false, nil
+	}
+	namedID, err := s.getNetNSInspector().NamedNetNSID(s.namedNetNSPath())
+	if err != nil {
+		return false, err
+	}
 	if !needsNetNSRestart(namedID, selected) {
 		return false, nil
 	}
