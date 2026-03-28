@@ -379,7 +379,15 @@ func TestServerStartReturnsBeforeNetNSReconciliationFinishes(t *testing.T) {
 		t.Fatal("Start did not return promptly while reconciliation was blocked")
 	}
 
+	sawCleanup := false
+	t.Cleanup(func() {
+		if !sawCleanup {
+			s.Shutdown()
+		}
+	})
 	releaseFn()
+	s.Shutdown()
+	sawCleanup = true
 }
 
 func TestServerShutdownWaitsForNetNSReconciliation(t *testing.T) {
