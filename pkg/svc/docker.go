@@ -143,7 +143,7 @@ func (s *DockerComposeService) Up() error {
 
 func (s *DockerComposeService) UpWithPull(pull bool) error {
 	if s.sd != nil {
-		if err := s.sd.Start(); err != nil {
+		if err := s.sd.StartAuxiliaryUnits(); err != nil {
 			return err
 		}
 		if _, err := s.ReconcileNetNS(context.Background()); err != nil {
