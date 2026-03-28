@@ -6,6 +6,7 @@ package svc
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -28,11 +29,12 @@ var ErrDockerStatusUnknown = fmt.Errorf("unknown docker status")
 var ErrDockerNotFound = fmt.Errorf("docker not found")
 
 type DockerComposeService struct {
-	Name    string
-	cfg     *db.Service
-	DataDir string
-	NewCmd  func(name string, arg ...string) *exec.Cmd
-	sd      *SystemdService
+	Name          string
+	cfg           *db.Service
+	DataDir       string
+	NewCmd        func(name string, arg ...string) *exec.Cmd
+	NewCmdContext func(ctx context.Context, name string, arg ...string) *exec.Cmd
+	sd            *SystemdService
 
 	netnsInspector netnsInspector
 	installEnvOnce lazy.SyncValue[error]
@@ -48,6 +50,10 @@ func DockerCmd() (string, error) {
 }
 
 func (s *DockerComposeService) command(args ...string) (*exec.Cmd, error) {
+	return s.commandContext(context.Background(), args...)
+}
+
+func (s *DockerComposeService) commandContext(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	dockerPath, err := DockerCmd()
 	if err != nil {
 		return nil, err
@@ -78,17 +84,35 @@ func (s *DockerComposeService) command(args ...string) (*exec.Cmd, error) {
 		return nil, fmt.Errorf("failed to copy env file: %v", err)
 	}
 	args = append(nargs, args...)
-	c := s.NewCmd(dockerPath, args...)
+	var c *exec.Cmd
+	switch {
+	case s.NewCmdContext != nil:
+		c = s.NewCmdContext(ctx, dockerPath, args...)
+	case s.NewCmd != nil:
+		c = s.NewCmd(dockerPath, args...)
+	default:
+		c = exec.CommandContext(ctx, dockerPath, args...)
+	}
 	c.Dir = s.DataDir
 	return c, nil
 }
 
 func (s *DockerComposeService) runCommand(args ...string) error {
-	cmd, err := s.command(args...)
+	return s.runCommandContext(context.Background(), args...)
+}
+
+func (s *DockerComposeService) runCommandContext(ctx context.Context, args ...string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	cmd, err := s.commandContext(ctx, args...)
 	if err != nil {
 		return fmt.Errorf("failed to create docker-compose command: %v", err)
 	}
 	if err := cmd.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		return fmt.Errorf("failed to run docker command: %v", err)
 	}
 	return nil
@@ -122,7 +146,7 @@ func (s *DockerComposeService) UpWithPull(pull bool) error {
 		if err := s.sd.Start(); err != nil {
 			return err
 		}
-		if _, err := s.ReconcileNetNS(); err != nil {
+		if _, err := s.ReconcileNetNS(context.Background()); err != nil {
 			return err
 		}
 	}
@@ -190,7 +214,7 @@ func (s *DockerComposeService) Start() error {
 		if err := s.sd.StartAuxiliaryUnits(); err != nil {
 			return err
 		}
-		if _, err := s.ReconcileNetNS(); err != nil {
+		if _, err := s.ReconcileNetNS(context.Background()); err != nil {
 			return err
 		}
 	}
@@ -217,7 +241,7 @@ func (s *DockerComposeService) Restart() error {
 		if err := s.sd.StartAuxiliaryUnits(); err != nil {
 			return err
 		}
-		restarted, err := s.ReconcileNetNS()
+		restarted, err := s.ReconcileNetNS(context.Background())
 		if err != nil {
 			return err
 		}
@@ -228,11 +252,14 @@ func (s *DockerComposeService) Restart() error {
 	return s.runCommand("restart")
 }
 
-func (s *DockerComposeService) ReconcileNetNS() (bool, error) {
+func (s *DockerComposeService) ReconcileNetNS(ctx context.Context) (bool, error) {
 	if s.sd == nil || !s.sd.hasArtifact(db.ArtifactNetNSService) {
 		return false, nil
 	}
-	containers, err := s.getNetNSInspector().ProjectContainers(s.composeProjectName())
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	containers, err := s.getNetNSInspector().ProjectContainers(ctx, s.composeProjectName())
 	if err != nil {
 		return false, err
 	}
@@ -240,14 +267,14 @@ func (s *DockerComposeService) ReconcileNetNS() (bool, error) {
 	if len(selected) == 0 {
 		return false, nil
 	}
-	linkNames, err := s.getNetNSInspector().NamedNetNSLinkNames(s.namedNetNSPath())
+	linkNames, err := s.getNetNSInspector().NamedNetNSLinkNames(ctx, s.namedNetNSPath())
 	if err != nil {
 		return false, err
 	}
 	if !needsNetNSRecreate(linkNames, selected, s.defaultNetworkName()) {
 		return false, nil
 	}
-	return true, s.runCommand("up", "-d", "--force-recreate")
+	return true, s.runCommandContext(ctx, "up", "-d", "--force-recreate")
 }
 
 // PrePullIfRunning pulls images while containers are still running to reduce downtime.

@@ -5,6 +5,7 @@
 package svc
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -16,20 +17,22 @@ type composeContainer struct {
 }
 
 type netnsInspector interface {
-	NamedNetNSLinkNames(path string) ([]string, error)
-	ProjectContainers(project string) ([]composeContainer, error)
+	NamedNetNSLinkNames(ctx context.Context, path string) ([]string, error)
+	ProjectContainers(ctx context.Context, project string) ([]composeContainer, error)
 }
 
 type linuxNetNSInspector struct{}
 
-var (
-	netnsExecCmd = exec.Command
-)
-
-func (linuxNetNSInspector) NamedNetNSLinkNames(path string) ([]string, error) {
-	cmd := netnsExecCmd("nsenter", "--net="+path, "ip", "-o", "link", "show")
+func (linuxNetNSInspector) NamedNetNSLinkNames(ctx context.Context, path string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, "nsenter", "--net="+path, "ip", "-o", "link", "show")
 	output, err := cmd.Output()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, fmt.Errorf("list netns links for %q: %w", path, err)
 	}
 	lines := splitNonEmptyLines(string(output))
@@ -48,15 +51,21 @@ func (linuxNetNSInspector) NamedNetNSLinkNames(path string) ([]string, error) {
 	return links, nil
 }
 
-func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer, error) {
+func (linuxNetNSInspector) ProjectContainers(ctx context.Context, project string) ([]composeContainer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	dockerPath, err := DockerCmd()
 	if err != nil {
 		return nil, err
 	}
 
-	psCmd := netnsExecCmd(dockerPath, "compose", "--project-name", project, "ps", "-q")
+	psCmd := exec.CommandContext(ctx, dockerPath, "compose", "--project-name", project, "ps", "-q")
 	output, err := psCmd.Output()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, fmt.Errorf("docker compose ps -q for %q: %w", project, err)
 	}
 
@@ -71,9 +80,12 @@ func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer
 		`{{.Id}}{{"\t"}}{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s=%s " $name $network.EndpointID}}{{end}}`,
 	}
 	args = append(args, containerIDs...)
-	inspectCmd := netnsExecCmd(dockerPath, args...)
+	inspectCmd := exec.CommandContext(ctx, dockerPath, args...)
 	inspectOutput, err := inspectCmd.Output()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, fmt.Errorf("docker inspect for %q: %w", project, err)
 	}
 

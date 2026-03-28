@@ -6,6 +6,7 @@ package catch
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"log"
 	"strings"
@@ -19,11 +20,11 @@ import (
 
 type fakeDockerNetNSReconciler struct {
 	name      string
-	reconcile func() (bool, error)
+	reconcile func(context.Context) (bool, error)
 }
 
-func (f fakeDockerNetNSReconciler) ReconcileNetNS() (bool, error) {
-	return f.reconcile()
+func (f fakeDockerNetNSReconciler) ReconcileNetNS(ctx context.Context) (bool, error) {
+	return f.reconcile(ctx)
 }
 
 func addTestServices(t *testing.T, s *Server, services ...db.Service) {
@@ -51,6 +52,19 @@ func captureLogs(t *testing.T) *bytes.Buffer {
 		log.SetFlags(prevFlags)
 	})
 	return &buf
+}
+
+func waitForLogContains(t *testing.T, buf *bytes.Buffer, needle string) string {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		out := buf.String()
+		if strings.Contains(out, needle) {
+			return out
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return buf.String()
 }
 
 func TestReconcileNetNSBackedDockerServices(t *testing.T) {
@@ -87,14 +101,14 @@ func TestReconcileNetNSBackedDockerServices(t *testing.T) {
 		name := sv.Name()
 		return fakeDockerNetNSReconciler{
 			name: name,
-			reconcile: func() (bool, error) {
+			reconcile: func(context.Context) (bool, error) {
 				called = append(called, name)
 				return name == "docker-netns", nil
 			},
 		}, nil
 	}
 
-	if err := s.reconcileNetNSBackedDockerServices(); err != nil {
+	if err := s.reconcileNetNSBackedDockerServices(context.Background()); err != nil {
 		t.Fatalf("reconcileNetNSBackedDockerServices returned error: %v", err)
 	}
 	if diff := cmp.Diff([]string{"docker-netns"}, called); diff != "" {
@@ -133,7 +147,7 @@ func TestReconcileNetNSBackedDockerServicesContinuesAfterServiceError(t *testing
 		name := sv.Name()
 		return fakeDockerNetNSReconciler{
 			name: name,
-			reconcile: func() (bool, error) {
+			reconcile: func(context.Context) (bool, error) {
 				called = append(called, name)
 				if name == "docker-fail" {
 					return false, wantErr
@@ -144,7 +158,7 @@ func TestReconcileNetNSBackedDockerServicesContinuesAfterServiceError(t *testing
 		}, nil
 	}
 
-	err := s.reconcileNetNSBackedDockerServices()
+	err := s.reconcileNetNSBackedDockerServices(context.Background())
 	if err == nil {
 		t.Fatal("reconcileNetNSBackedDockerServices returned nil error")
 	}
@@ -204,7 +218,7 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 		name := sv.Name()
 		return fakeDockerNetNSReconciler{
 			name: name,
-			reconcile: func() (bool, error) {
+			reconcile: func(context.Context) (bool, error) {
 				calls = append(calls, "reconcile:"+name)
 				close(reconciled)
 				return false, nil
@@ -249,7 +263,7 @@ func TestServerStartLogsReconciliationFailureNonFatally(t *testing.T) {
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		return fakeDockerNetNSReconciler{
 			name: sv.Name(),
-			reconcile: func() (bool, error) {
+			reconcile: func(context.Context) (bool, error) {
 				close(reconciled)
 				return false, errors.New("reconcile exploded")
 			},
@@ -265,7 +279,7 @@ func TestServerStartLogsReconciliationFailureNonFatally(t *testing.T) {
 		t.Fatal("timed out waiting for reconciliation failure to run")
 	}
 
-	out := logs.String()
+	out := waitForLogContains(t, logs, `netns reconciliation failed:`)
 	if !strings.Contains(out, `netns reconciliation failed for service "docker-netns"`) {
 		t.Fatalf("missing per-service failure log:\n%s", out)
 	}
@@ -297,7 +311,7 @@ func TestServerStartLogsRestartedNetNSService(t *testing.T) {
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		return fakeDockerNetNSReconciler{
 			name: sv.Name(),
-			reconcile: func() (bool, error) {
+			reconcile: func(context.Context) (bool, error) {
 				close(reconciled)
 				return true, nil
 			},
@@ -349,7 +363,7 @@ func TestServerStartReturnsBeforeNetNSReconciliationFinishes(t *testing.T) {
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		return fakeDockerNetNSReconciler{
 			name: sv.Name(),
-			reconcile: func() (bool, error) {
+			reconcile: func(context.Context) (bool, error) {
 				select {
 				case <-started:
 				default:
@@ -390,7 +404,7 @@ func TestServerStartReturnsBeforeNetNSReconciliationFinishes(t *testing.T) {
 	sawCleanup = true
 }
 
-func TestServerShutdownWaitsForNetNSReconciliation(t *testing.T) {
+func TestServerShutdownCancelsNetNSReconciliation(t *testing.T) {
 	s := newTestServer(t)
 	addTestServices(t, s, db.Service{
 		Name:             "docker-netns",
@@ -409,26 +423,20 @@ func TestServerShutdownWaitsForNetNSReconciliation(t *testing.T) {
 	}()
 
 	started := make(chan struct{})
-	release := make(chan struct{})
-	releaseOnce := sync.Once{}
-	releaseFn := func() {
-		releaseOnce.Do(func() {
-			close(release)
-		})
-	}
-	t.Cleanup(releaseFn)
+	canceled := make(chan struct{})
 
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		return fakeDockerNetNSReconciler{
 			name: sv.Name(),
-			reconcile: func() (bool, error) {
+			reconcile: func(ctx context.Context) (bool, error) {
 				select {
 				case <-started:
 				default:
 					close(started)
 				}
-				<-release
-				return true, nil
+				<-ctx.Done()
+				close(canceled)
+				return false, ctx.Err()
 			},
 		}, nil
 	}
@@ -459,15 +467,58 @@ func TestServerShutdownWaitsForNetNSReconciliation(t *testing.T) {
 
 	select {
 	case <-shutdownDone:
-		t.Fatal("Shutdown returned before reconciliation was released")
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	releaseFn()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("reconciliation was not canceled by shutdown")
+	}
 
 	select {
 	case <-shutdownDone:
 	case <-time.After(time.Second):
-		t.Fatal("Shutdown did not return after reconciliation was released")
+		t.Fatal("Shutdown did not return after reconciliation was canceled")
+	}
+}
+
+func TestServerShutdownDoesNotLogCancellationAsFailure(t *testing.T) {
+	s := newTestServer(t)
+	logs := captureLogs(t)
+	addTestServices(t, s, db.Service{
+		Name:             "docker-netns",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		Generation:       1,
+		LatestGeneration: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ns.service"}},
+		},
+	})
+
+	prevInstall := installYeetNSService
+	installYeetNSService = func() error { return nil }
+	defer func() {
+		installYeetNSService = prevInstall
+	}()
+
+	started := make(chan struct{})
+	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
+		return fakeDockerNetNSReconciler{
+			name: sv.Name(),
+			reconcile: func(ctx context.Context) (bool, error) {
+				close(started)
+				<-ctx.Done()
+				return false, ctx.Err()
+			},
+		}, nil
+	}
+
+	s.Start()
+	<-started
+	s.Shutdown()
+
+	if strings.Contains(logs.String(), "netns reconciliation failed") {
+		t.Fatalf("unexpected cancellation failure log:\n%s", logs.String())
 	}
 }

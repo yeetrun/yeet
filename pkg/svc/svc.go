@@ -32,10 +32,11 @@ func NewDockerComposeService(db *db.Store, cfg db.ServiceView, dataDir, runDir s
 		return nil, err
 	}
 	return &DockerComposeService{
-		Name:    cfg.Name(),
-		cfg:     cfg.AsStruct(),
-		DataDir: dataDir,
-		NewCmd:  cmdutil.NewStdCmd,
-		sd:      sd,
+		Name:          cfg.Name(),
+		cfg:           cfg.AsStruct(),
+		DataDir:       dataDir,
+		NewCmd:        cmdutil.NewStdCmd,
+		NewCmdContext: cmdutil.NewStdCmdContext,
+		sd:            sd,
 	}, nil
 }

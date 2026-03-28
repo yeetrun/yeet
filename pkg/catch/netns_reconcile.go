@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -13,10 +14,10 @@ import (
 )
 
 type dockerNetNSReconciler interface {
-	ReconcileNetNS() (bool, error)
+	ReconcileNetNS(ctx context.Context) (bool, error)
 }
 
-func (s *Server) reconcileNetNSBackedDockerServices() error {
+func (s *Server) reconcileNetNSBackedDockerServices(ctx context.Context) error {
 	dv, err := s.getDB()
 	if err != nil {
 		return err
@@ -24,6 +25,9 @@ func (s *Server) reconcileNetNSBackedDockerServices() error {
 
 	var errs []error
 	for name, sv := range dv.Services().All() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if sv.ServiceType() != db.ServiceTypeDockerCompose {
 			continue
 		}
@@ -38,8 +42,11 @@ func (s *Server) reconcileNetNSBackedDockerServices() error {
 			errs = append(errs, err)
 			continue
 		}
-		restarted, err := service.ReconcileNetNS()
+		restarted, err := service.ReconcileNetNS(ctx)
 		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
 			err = fmt.Errorf("reconcile docker compose service %q: %w", name, err)
 			log.Printf("netns reconciliation failed for service %q: %v", name, err)
 			errs = append(errs, err)

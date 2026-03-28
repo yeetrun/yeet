@@ -178,7 +178,7 @@ func (s *Server) Start() {
 		log.Fatalf("Failed to install bridge service: %v", err)
 	}
 	s.waitGroup.Go(func() {
-		if err := s.reconcileNetNSBackedDockerServices(); err != nil {
+		if err := s.reconcileNetNSBackedDockerServices(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("netns reconciliation failed: %v", err)
 		}
 	})

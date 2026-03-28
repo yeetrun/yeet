@@ -5,6 +5,7 @@
 package cmdutil
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,14 @@ import (
 
 func NewStdCmd(name string, arg ...string) *exec.Cmd {
 	cmd := exec.Command(name, arg...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd
+}
+
+func NewStdCmdContext(ctx context.Context, name string, arg ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, arg...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
