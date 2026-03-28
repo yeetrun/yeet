@@ -59,7 +59,8 @@ func TestReconcileNetNSBackedDockerServices(t *testing.T) {
 	}
 
 	var called []string
-	s.newDockerComposeService = func(name string) (dockerNetNSReconciler, error) {
+	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
+		name := sv.Name()
 		return fakeDockerNetNSReconciler{
 			name: name,
 			reconcile: func() (bool, error) {
@@ -104,7 +105,8 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 		installYeetNSService = prevInstall
 	}()
 
-	s.newDockerComposeService = func(name string) (dockerNetNSReconciler, error) {
+	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
+		name := sv.Name()
 		return fakeDockerNetNSReconciler{
 			name: name,
 			reconcile: func() (bool, error) {
