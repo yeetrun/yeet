@@ -281,6 +281,52 @@ func TestDockerComposeServiceRestartStartsOnlyAuxiliaryUnits(t *testing.T) {
 	}
 }
 
+func TestDockerComposeServiceUpStartsOnlyAuxiliaryUnits(t *testing.T) {
+	tmp := t.TempDir()
+	systemctlLog := filepath.Join(tmp, "systemctl.log")
+	systemctlPath := filepath.Join(tmp, "systemctl")
+	systemctlScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + strconv.Quote(systemctlLog) + "\nexit 0\n"
+	if err := os.WriteFile(systemctlPath, []byte(systemctlScript), 0755); err != nil {
+		t.Fatalf("failed to write fake systemctl: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.cfg.Artifacts[db.ArtifactNetNSService] = &db.Artifact{
+		Refs: map[db.ArtifactRef]string{
+			db.Gen(svc.cfg.Generation): "/etc/systemd/system/yeet-svc-a-ns.service",
+		},
+	}
+	svc.sd = &SystemdService{cfg: svc.cfg.View(), runDir: svc.DataDir}
+	svc.netnsInspector = fakeNetNSInspector{
+		linkNames: []string{"lo", "yv-abcd", "br0"},
+		containers: []composeContainer{{
+			ID:                 "app",
+			NetworkEndpointIDs: map[string]string{"catch-svc-a_default": "abcd1234"},
+		}},
+	}
+
+	if err := svc.UpWithPull(false); err != nil {
+		t.Fatalf("UpWithPull(false) returned error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(systemctlLog)
+	if err != nil {
+		t.Fatalf("failed to read systemctl log: %v", err)
+	}
+	logOutput := string(logBytes)
+	if !strings.Contains(logOutput, "start yeet-svc-a-ns.service") {
+		t.Fatalf("expected netns unit start, got:\n%s", logOutput)
+	}
+	if strings.Contains(logOutput, "start svc-a.service") {
+		t.Fatalf("unexpected primary unit start for docker-compose service:\n%s", logOutput)
+	}
+	if !composeCallHasSubcmd(calls, "up") {
+		t.Fatalf("expected compose up command, got %#v", calls)
+	}
+}
+
 func TestLinuxNetNSInspectorNamedNetNSLinkNames(t *testing.T) {
 	t.Setenv("HELPER_NSENTER_IP_LINK_OUTPUT", strings.Join([]string{
 		"1: lo: <LOOPBACK,UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000",
