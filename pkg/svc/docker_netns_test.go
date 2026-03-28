@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"syscall"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -17,18 +17,18 @@ import (
 )
 
 type fakeNetNSInspector struct {
-	namedID    string
+	linkNames  []string
 	namedErr   error
 	containers []composeContainer
 	projectErr error
 	namedCalls *int
 }
 
-func (f fakeNetNSInspector) NamedNetNSID(path string) (string, error) {
+func (f fakeNetNSInspector) NamedNetNSLinkNames(path string) ([]string, error) {
 	if f.namedCalls != nil {
 		*f.namedCalls++
 	}
-	return f.namedID, f.namedErr
+	return f.linkNames, f.namedErr
 }
 
 func (f fakeNetNSInspector) ProjectContainers(project string) ([]composeContainer, error) {
@@ -40,9 +40,9 @@ func TestSelectNetNSContainers(t *testing.T) {
 	network := project + "_default"
 
 	containers := []composeContainer{
-		{ID: "app", PID: 101, Networks: []string{network}},
-		{ID: "worker", PID: 202, Networks: []string{network, "extra"}},
-		{ID: "sidecar", PID: 303, Networks: []string{"bridge"}},
+		{ID: "app", NetworkEndpointIDs: map[string]string{network: "endpoint-app"}},
+		{ID: "worker", NetworkEndpointIDs: map[string]string{network: "endpoint-worker", "extra": "endpoint-extra"}},
+		{ID: "sidecar", NetworkEndpointIDs: map[string]string{"bridge": "endpoint-sidecar"}},
 	}
 
 	got := selectNetNSContainers(containers, network)
@@ -51,28 +51,34 @@ func TestSelectNetNSContainers(t *testing.T) {
 	}
 }
 
-func TestNeedsNetNSRestart(t *testing.T) {
+func TestNeedsNetNSRecreate(t *testing.T) {
 	cases := []struct {
 		name       string
-		namedID    string
+		linkNames  []string
 		containers []composeContainer
 		want       bool
 	}{
 		{
-			name:       "matching selected containers",
-			namedID:    "net:[4026533001]",
-			containers: []composeContainer{{ID: "app", NetNSID: "net:[4026533001]"}},
-			want:       false,
+			name:      "expected endpoint link present",
+			linkNames: []string{"lo", "yv-abcd", "br0"},
+			containers: []composeContainer{{
+				ID:                 "app",
+				NetworkEndpointIDs: map[string]string{"catch-svc-a_default": "abcd1234"},
+			}},
+			want: false,
 		},
 		{
-			name:       "mismatch requires restart",
-			namedID:    "net:[4026533009]",
-			containers: []composeContainer{{ID: "app", NetNSID: "net:[4026533001]"}},
-			want:       true,
+			name:      "missing endpoint link requires recreate",
+			linkNames: []string{"lo", "br0"},
+			containers: []composeContainer{{
+				ID:                 "app",
+				NetworkEndpointIDs: map[string]string{"catch-svc-a_default": "abcd1234"},
+			}},
+			want: true,
 		},
 		{
 			name:       "no selected containers",
-			namedID:    "net:[4026533009]",
+			linkNames:  []string{"lo", "br0"},
 			containers: nil,
 			want:       false,
 		},
@@ -80,9 +86,9 @@ func TestNeedsNetNSRestart(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := needsNetNSRestart(tc.namedID, tc.containers)
+			got := needsNetNSRecreate(tc.linkNames, tc.containers, "catch-svc-a_default")
 			if got != tc.want {
-				t.Fatalf("needsNetNSRestart() = %v, want %v", got, tc.want)
+				t.Fatalf("needsNetNSRecreate() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -98,8 +104,11 @@ func TestDockerComposeServiceReconcileNetNS(t *testing.T) {
 	}
 	svc.sd = &SystemdService{cfg: svc.cfg.View(), runDir: svc.DataDir}
 	svc.netnsInspector = fakeNetNSInspector{
-		namedID:    "net:[4026534010]",
-		containers: []composeContainer{{ID: "app", PID: 1001, Networks: []string{"catch-svc-a_default"}, NetNSID: "net:[4026533010]"}},
+		linkNames: []string{"lo", "br0"},
+		containers: []composeContainer{{
+			ID:                 "app",
+			NetworkEndpointIDs: map[string]string{"catch-svc-a_default": "abcd1234"},
+		}},
 	}
 
 	restarted, err := svc.ReconcileNetNS()
@@ -107,10 +116,13 @@ func TestDockerComposeServiceReconcileNetNS(t *testing.T) {
 		t.Fatalf("ReconcileNetNS returned error: %v", err)
 	}
 	if !restarted {
-		t.Fatal("expected restart when container netns is stale")
+		t.Fatal("expected recreate when endpoint link is stale")
 	}
-	if !composeCallHasSubcmd(calls, "restart") {
-		t.Fatalf("expected compose restart command, got %#v", calls)
+	if !composeCallHasSubcmd(calls, "up") {
+		t.Fatalf("expected compose up command, got %#v", calls)
+	}
+	if !composeCallHasArg(calls, "up", "--force-recreate") {
+		t.Fatalf("expected compose recreate flag, got %#v", calls)
 	}
 }
 
@@ -125,7 +137,7 @@ func TestDockerComposeServiceReconcileNetNSNoSelectedContainersSkipsNamedLookup(
 	svc.sd = &SystemdService{cfg: svc.cfg.View(), runDir: svc.DataDir}
 	svc.netnsInspector = fakeNetNSInspector{
 		namedErr:   fmt.Errorf("named netns should not be read"),
-		containers: []composeContainer{{ID: "app", PID: 1001, Networks: []string{"bridge"}, NetNSID: "net:[4026533010]"}},
+		containers: []composeContainer{{ID: "app", NetworkEndpointIDs: map[string]string{"bridge": "bridge1234"}}},
 		namedCalls: &namedCalls,
 	}
 
@@ -137,7 +149,7 @@ func TestDockerComposeServiceReconcileNetNSNoSelectedContainersSkipsNamedLookup(
 		t.Fatal("expected no restart when no containers are on the managed network")
 	}
 	if namedCalls != 0 {
-		t.Fatalf("NamedNetNSID called %d times, want 0", namedCalls)
+		t.Fatalf("NamedNetNSLinkNames called %d times, want 0", namedCalls)
 	}
 }
 
@@ -159,86 +171,104 @@ func TestDockerComposeServiceRestartShortCircuitsAfterReconcileRestart(t *testin
 	}
 	svc.sd = &SystemdService{cfg: svc.cfg.View(), runDir: svc.DataDir}
 	svc.netnsInspector = fakeNetNSInspector{
-		namedID:    "net:[4026534010]",
-		containers: []composeContainer{{ID: "app", PID: 1001, Networks: []string{"catch-svc-a_default"}, NetNSID: "net:[4026533010]"}},
+		linkNames: []string{"lo", "br0"},
+		containers: []composeContainer{{
+			ID:                 "app",
+			NetworkEndpointIDs: map[string]string{"catch-svc-a_default": "abcd1234"},
+		}},
 	}
 
 	if err := svc.Restart(); err != nil {
 		t.Fatalf("Restart returned error: %v", err)
 	}
 
-	restarts := 0
+	recreates := 0
 	for _, call := range calls {
-		if len(call.args) > 0 && call.args[0] == "compose" && composeSubcommand(call.args) == "restart" {
-			restarts++
+		if composeCallHasArg([]cmdCall{call}, "up", "--force-recreate") {
+			recreates++
 		}
 	}
-	if restarts != 1 {
-		t.Fatalf("compose restart called %d times, want 1; calls=%#v", restarts, calls)
+	if recreates != 1 {
+		t.Fatalf("compose recreate called %d times, want 1; calls=%#v", recreates, calls)
 	}
 }
 
-func TestLinuxNetNSInspectorNamedNetNSID(t *testing.T) {
+func TestDockerComposeServiceRestartStartsOnlyAuxiliaryUnits(t *testing.T) {
 	tmp := t.TempDir()
-	handle := filepath.Join(tmp, "yeet-svc-a-ns")
-	if err := os.WriteFile(handle, []byte("nsfs"), 0644); err != nil {
-		t.Fatalf("failed to create fake netns handle: %v", err)
+	systemctlLog := filepath.Join(tmp, "systemctl.log")
+	systemctlPath := filepath.Join(tmp, "systemctl")
+	systemctlScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + strconv.Quote(systemctlLog) + "\nexit 0\n"
+	if err := os.WriteFile(systemctlPath, []byte(systemctlScript), 0755); err != nil {
+		t.Fatalf("failed to write fake systemctl: %v", err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,running\n")
+
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.cfg.Artifacts[db.ArtifactNetNSService] = &db.Artifact{
+		Refs: map[db.ArtifactRef]string{
+			db.Gen(svc.cfg.Generation): "/etc/systemd/system/yeet-svc-a-ns.service",
+		},
+	}
+	svc.sd = &SystemdService{cfg: svc.cfg.View(), runDir: svc.DataDir}
+	svc.netnsInspector = fakeNetNSInspector{
+		linkNames: []string{"lo", "yv-abcd", "br0"},
+		containers: []composeContainer{{
+			ID:                 "app",
+			NetworkEndpointIDs: map[string]string{"catch-svc-a_default": "abcd1234"},
+		}},
 	}
 
-	info, err := os.Stat(handle)
+	if err := svc.Restart(); err != nil {
+		t.Fatalf("Restart returned error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(systemctlLog)
 	if err != nil {
-		t.Fatalf("stat failed: %v", err)
+		t.Fatalf("failed to read systemctl log: %v", err)
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatalf("unexpected stat payload type %T", info.Sys())
+	logOutput := string(logBytes)
+	if !strings.Contains(logOutput, "start yeet-svc-a-ns.service") {
+		t.Fatalf("expected netns unit start, got:\n%s", logOutput)
 	}
+	if strings.Contains(logOutput, "start svc-a.service") {
+		t.Fatalf("unexpected primary unit start for docker-compose service:\n%s", logOutput)
+	}
+	if !composeCallHasSubcmd(calls, "restart") {
+		t.Fatalf("expected compose restart command, got %#v", calls)
+	}
+}
 
-	got, err := (linuxNetNSInspector{}).NamedNetNSID(handle)
+func TestLinuxNetNSInspectorNamedNetNSLinkNames(t *testing.T) {
+	t.Setenv("HELPER_NSENTER_IP_LINK_OUTPUT", strings.Join([]string{
+		"1: lo: <LOOPBACK,UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000",
+		"3: br0: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state UP mode DEFAULT group default qlen 1000",
+		"284: yv-e091@if283: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue master br0 state UP mode DEFAULT group default qlen 1000",
+	}, "\n")+"\n")
+	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+	got, err := (linuxNetNSInspector{}).NamedNetNSLinkNames(filepath.Join("/var/run/netns", "yeet-svc-a-ns"))
 	if err != nil {
-		t.Fatalf("NamedNetNSID returned error: %v", err)
+		t.Fatalf("NamedNetNSLinkNames returned error: %v", err)
 	}
-
-	want := fmt.Sprintf("net:[%d]", stat.Ino)
-	if got != want {
-		t.Fatalf("NamedNetNSID() = %q, want %q", got, want)
+	want := []string{"lo", "br0", "yv-e091"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("NamedNetNSLinkNames mismatch (-want +got):\n%s", diff)
 	}
 }
 
 func TestLinuxNetNSInspectorProjectContainers(t *testing.T) {
-	tmp := t.TempDir()
-	procDir := filepath.Join(tmp, "proc")
-	pidOne := 4242
-	pidTwo := 5252
-	netNSIDOne := "net:[4026533001]"
-	netNSIDTwo := "net:[4026533002]"
-	for pid, target := range map[int]string{
-		pidOne: netNSIDOne,
-		pidTwo: netNSIDTwo,
-	} {
-		nsDir := filepath.Join(procDir, strconv.Itoa(pid), "ns")
-		if err := os.MkdirAll(nsDir, 0755); err != nil {
-			t.Fatalf("failed to create fake proc dir: %v", err)
-		}
-		if err := os.Symlink(target, filepath.Join(nsDir, "net")); err != nil {
-			t.Fatalf("failed to create fake proc netns symlink: %v", err)
-		}
-	}
-
 	t.Setenv("HELPER_DOCKER_PSQ_OUTPUT", "cid-app\ncid-worker\n")
 	t.Setenv(
 		"HELPER_DOCKER_INSPECT_OUTPUT",
-		fmt.Sprintf(
-			"cid-app\t%s\tcatch-svc-a_default extra\ncid-worker\t%s\tbridge\n",
-			strconv.Itoa(pidOne),
-			strconv.Itoa(pidTwo),
-		),
+		strings.Join([]string{
+			"cid-app\tcatch-svc-a_default=endpoint-app extra=endpoint-extra",
+			"cid-worker\tbridge=endpoint-worker",
+		}, "\n")+"\n",
 	)
 
 	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
-	oldProcNetNSPath := procNetNSPath
-	procNetNSPath = func(pid int) string { return filepath.Join(procDir, strconv.Itoa(pid), "ns/net") }
-	defer func() { procNetNSPath = oldProcNetNSPath }()
 
 	got, err := (linuxNetNSInspector{}).ProjectContainers("catch-svc-a")
 	if err != nil {
@@ -246,8 +276,8 @@ func TestLinuxNetNSInspectorProjectContainers(t *testing.T) {
 	}
 
 	want := []composeContainer{
-		{ID: "cid-app", PID: pidOne, Networks: []string{"catch-svc-a_default", "extra"}, NetNSID: netNSIDOne},
-		{ID: "cid-worker", PID: pidTwo, Networks: []string{"bridge"}, NetNSID: netNSIDTwo},
+		{ID: "cid-app", NetworkEndpointIDs: map[string]string{"catch-svc-a_default": "endpoint-app", "extra": "endpoint-extra"}},
+		{ID: "cid-worker", NetworkEndpointIDs: map[string]string{"bridge": "endpoint-worker"}},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("ProjectContainers mismatch (-want +got):\n%s", diff)

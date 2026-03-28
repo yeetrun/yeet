@@ -6,45 +6,46 @@ package svc
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 )
 
 type composeContainer struct {
-	ID       string
-	PID      int
-	Networks []string
-	NetNSID  string
+	ID                 string
+	NetworkEndpointIDs map[string]string
 }
 
 type netnsInspector interface {
-	NamedNetNSID(path string) (string, error)
+	NamedNetNSLinkNames(path string) ([]string, error)
 	ProjectContainers(project string) ([]composeContainer, error)
 }
 
 type linuxNetNSInspector struct{}
 
 var (
-	netnsStat     = os.Stat
-	netnsReadlink = os.Readlink
-	netnsExecCmd  = exec.Command
-	procNetNSPath = func(pid int) string { return filepath.Join("/proc", strconv.Itoa(pid), "ns/net") }
+	netnsExecCmd = exec.Command
 )
 
-func (linuxNetNSInspector) NamedNetNSID(path string) (string, error) {
-	info, err := netnsStat(path)
+func (linuxNetNSInspector) NamedNetNSLinkNames(path string) ([]string, error) {
+	cmd := netnsExecCmd("nsenter", "--net="+path, "ip", "-o", "link", "show")
+	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("stat netns %q: %w", path, err)
+		return nil, fmt.Errorf("list netns links for %q: %w", path, err)
 	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return "", fmt.Errorf("unexpected stat payload type %T", info.Sys())
+	lines := splitNonEmptyLines(string(output))
+	links := make([]string, 0, len(lines))
+	for _, line := range lines {
+		fields := strings.SplitN(line, ":", 3)
+		if len(fields) < 2 {
+			return nil, fmt.Errorf("unexpected ip link output: %q", line)
+		}
+		name := strings.TrimSpace(fields[1])
+		if idx := strings.IndexByte(name, '@'); idx >= 0 {
+			name = name[:idx]
+		}
+		links = append(links, name)
 	}
-	return fmt.Sprintf("net:[%d]", stat.Ino), nil
+	return links, nil
 }
 
 func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer, error) {
@@ -67,7 +68,7 @@ func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer
 	args := []string{
 		"inspect",
 		"--format",
-		`{{.Id}}{{"\t"}}{{.State.Pid}}{{"\t"}}{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}`,
+		`{{.Id}}{{"\t"}}{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s=%s " $name $network.EndpointID}}{{end}}`,
 	}
 	args = append(args, containerIDs...)
 	inspectCmd := netnsExecCmd(dockerPath, args...)
@@ -80,22 +81,20 @@ func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer
 	containers := make([]composeContainer, 0, len(lines))
 	for _, line := range lines {
 		fields := strings.Split(line, "\t")
-		if len(fields) != 3 {
+		if len(fields) != 2 {
 			return nil, fmt.Errorf("unexpected docker inspect output: %q", line)
 		}
-		pid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			return nil, fmt.Errorf("parse container pid %q: %w", fields[1], err)
-		}
-		netnsID, err := netnsReadlink(procNetNSPath(pid))
-		if err != nil {
-			return nil, fmt.Errorf("read container netns for %q: %w", fields[0], err)
+		networks := map[string]string{}
+		for _, network := range strings.Fields(fields[1]) {
+			name, endpointID, ok := strings.Cut(network, "=")
+			if !ok {
+				return nil, fmt.Errorf("unexpected docker network entry: %q", network)
+			}
+			networks[name] = endpointID
 		}
 		containers = append(containers, composeContainer{
-			ID:       fields[0],
-			PID:      pid,
-			Networks: strings.Fields(fields[2]),
-			NetNSID:  netnsID,
+			ID:                 fields[0],
+			NetworkEndpointIDs: networks,
 		})
 	}
 	return containers, nil
@@ -104,22 +103,27 @@ func (linuxNetNSInspector) ProjectContainers(project string) ([]composeContainer
 func selectNetNSContainers(containers []composeContainer, network string) []composeContainer {
 	selected := make([]composeContainer, 0, len(containers))
 	for _, container := range containers {
-		for _, attached := range container.Networks {
-			if attached == network {
-				selected = append(selected, container)
-				break
-			}
+		if _, ok := container.NetworkEndpointIDs[network]; ok {
+			selected = append(selected, container)
 		}
 	}
 	return selected
 }
 
-func needsNetNSRestart(namedID string, containers []composeContainer) bool {
+func needsNetNSRecreate(linkNames []string, containers []composeContainer, network string) bool {
 	if len(containers) == 0 {
 		return false
 	}
+	links := map[string]struct{}{}
+	for _, linkName := range linkNames {
+		links[linkName] = struct{}{}
+	}
 	for _, container := range containers {
-		if container.NetNSID != namedID {
+		endpointID := container.NetworkEndpointIDs[network]
+		if len(endpointID) < 4 {
+			return true
+		}
+		if _, ok := links["yv-"+endpointID[:4]]; !ok {
 			return true
 		}
 	}

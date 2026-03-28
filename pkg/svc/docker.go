@@ -187,7 +187,7 @@ func (s *DockerComposeService) Down() error {
 
 func (s *DockerComposeService) Start() error {
 	if s.sd != nil {
-		if err := s.sd.Start(); err != nil {
+		if err := s.sd.StartAuxiliaryUnits(); err != nil {
 			return err
 		}
 		if _, err := s.ReconcileNetNS(); err != nil {
@@ -214,7 +214,7 @@ func (s *DockerComposeService) Restart() error {
 		return nil
 	}
 	if s.sd != nil {
-		if err := s.sd.Start(); err != nil {
+		if err := s.sd.StartAuxiliaryUnits(); err != nil {
 			return err
 		}
 		restarted, err := s.ReconcileNetNS()
@@ -240,14 +240,14 @@ func (s *DockerComposeService) ReconcileNetNS() (bool, error) {
 	if len(selected) == 0 {
 		return false, nil
 	}
-	namedID, err := s.getNetNSInspector().NamedNetNSID(s.namedNetNSPath())
+	linkNames, err := s.getNetNSInspector().NamedNetNSLinkNames(s.namedNetNSPath())
 	if err != nil {
 		return false, err
 	}
-	if !needsNetNSRestart(namedID, selected) {
+	if !needsNetNSRecreate(linkNames, selected, s.defaultNetworkName()) {
 		return false, nil
 	}
-	return true, s.runCommand("restart")
+	return true, s.runCommand("up", "-d", "--force-recreate")
 }
 
 // PrePullIfRunning pulls images while containers are still running to reduce downtime.
