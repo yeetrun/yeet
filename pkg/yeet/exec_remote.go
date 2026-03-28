@@ -15,11 +15,18 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
+
+type rpcExecClient interface {
+	Exec(ctx context.Context, req catchrpc.ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan catchrpc.Resize) (int, error)
+	Events(ctx context.Context, req catchrpc.EventsRequest, onEvent func(catchrpc.Event)) error
+}
 
 func newRPCClient(host string) *catchrpc.Client {
 	return catchrpc.NewClient(host, defaultRPCPort)
@@ -93,6 +100,106 @@ type trackingWriter struct {
 	saw  bool
 }
 
+type sessionStdinProxy struct {
+	r         *io.PipeReader
+	dup       *os.File
+	done      chan struct{}
+	stop      chan struct{}
+	origFlags int
+}
+
+func newSessionStdinProxy(stdin *os.File) (*sessionStdinProxy, error) {
+	origFlags, err := unix.FcntlInt(stdin.Fd(), unix.F_GETFL, 0)
+	if err != nil {
+		return nil, fmt.Errorf("get stdin flags: %w", err)
+	}
+	dup, err := syscall.Dup(int(stdin.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("dup stdin: %w", err)
+	}
+	if err := syscall.SetNonblock(dup, true); err != nil {
+		_ = syscall.Close(dup)
+		return nil, fmt.Errorf("set stdin nonblocking: %w", err)
+	}
+	dupFile := os.NewFile(uintptr(dup), stdin.Name())
+	pr, pw := io.Pipe()
+	proxy := &sessionStdinProxy{
+		r:         pr,
+		dup:       dupFile,
+		done:      make(chan struct{}),
+		stop:      make(chan struct{}),
+		origFlags: origFlags,
+	}
+	go func() {
+		defer close(proxy.done)
+		defer func() {
+			_ = dupFile.Close()
+		}()
+		buf := make([]byte, 4096)
+		for {
+			select {
+			case <-proxy.stop:
+				_ = pw.Close()
+				return
+			default:
+			}
+
+			n, err := dupFile.Read(buf)
+			if n > 0 {
+				if _, werr := pw.Write(buf[:n]); werr != nil {
+					_ = pw.CloseWithError(werr)
+					return
+				}
+			}
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed) {
+				_ = pw.Close()
+				return
+			}
+			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+				select {
+				case <-proxy.stop:
+					_ = pw.Close()
+					return
+				case <-time.After(10 * time.Millisecond):
+				}
+				continue
+			}
+			_ = pw.CloseWithError(err)
+			return
+		}
+	}()
+	return proxy, nil
+}
+
+func (p *sessionStdinProxy) Read(b []byte) (int, error) {
+	return p.r.Read(b)
+}
+
+func (p *sessionStdinProxy) Close() error {
+	select {
+	case <-p.stop:
+	default:
+		close(p.stop)
+	}
+	_, errFlags := unix.FcntlInt(p.dup.Fd(), unix.F_SETFL, p.origFlags)
+	errRead := p.r.Close()
+	errDup := p.dup.Close()
+	<-p.done
+	if errFlags != nil {
+		return errFlags
+	}
+	if errDup != nil && !errors.Is(errDup, os.ErrClosed) {
+		return errDup
+	}
+	if errRead != nil && !errors.Is(errRead, io.ErrClosedPipe) {
+		return errRead
+	}
+	return nil
+}
+
 func (t *trackingWriter) Write(p []byte) (int, error) {
 	if len(p) > 0 {
 		t.last = p[len(p)-1]
@@ -134,7 +241,7 @@ func PrintCLIError(w io.Writer, err error) {
 
 func execRemote(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
 	host := Host()
-	client := newRPCClient(host)
+	client := newRPCExecClientFn(host)
 	tty = applyTTYOverride(tty)
 	req := catchrpc.ExecRequest{
 		Service: service,
@@ -152,17 +259,17 @@ func execRemote(ctx context.Context, service string, args []string, stdin io.Rea
 	fd := int(os.Stdin.Fd())
 	rawMode := false
 	if tty && isTerminalFn(fd) {
-		cols, rows, err := term.GetSize(fd)
+		cols, rows, err := termGetSizeFn(fd)
 		if err == nil {
 			req.Cols = cols
 			req.Rows = rows
 		}
 		req.Term = os.Getenv("TERM")
 		if stdin == nil || stdin == os.Stdin {
-			state, err := term.MakeRaw(fd)
+			state, err := termMakeRawFn(fd)
 			if err == nil {
 				rawMode = true
-				defer term.Restore(fd, state)
+				defer termRestoreFn(fd, state)
 				resizeCh = watchResize(ctx, fd)
 			} else {
 				req.TTY = false
@@ -175,6 +282,16 @@ func execRemote(ctx context.Context, service string, args []string, stdin io.Rea
 	}
 	if stdin == nil && req.TTY {
 		stdin = os.Stdin
+	}
+	if req.TTY {
+		if stdinFile, ok := stdin.(*os.File); ok && stdinFile == os.Stdin {
+			proxy, err := newSessionStdinProxy(stdinFile)
+			if err != nil {
+				return fmt.Errorf("failed to prepare interactive stdin: %w", err)
+			}
+			defer proxy.Close()
+			stdin = proxy
+		}
 	}
 	out := &trackingWriter{w: os.Stdout}
 	code, err := client.Exec(ctx, req, stdin, out, resizeCh)
@@ -195,9 +312,15 @@ var execRemoteStreamFn = execRemoteStream
 var remoteCatchOSAndArchFn = remoteCatchOSAndArch
 var pushAllLocalImagesFn = pushAllLocalImages
 var isTerminalFn = term.IsTerminal
+var termGetSizeFn = term.GetSize
+var termMakeRawFn = term.MakeRaw
+var termRestoreFn = term.Restore
+var newRPCExecClientFn = func(host string) rpcExecClient {
+	return newRPCClient(host)
+}
 
 func execRemoteOutput(ctx context.Context, host string, service string, args []string, stdin io.Reader) ([]byte, error) {
-	client := newRPCClient(host)
+	client := newRPCExecClientFn(host)
 	req := catchrpc.ExecRequest{
 		Service:  service,
 		Args:     args,
@@ -223,7 +346,7 @@ func execRemoteOutput(ctx context.Context, host string, service string, args []s
 
 func execRemoteStream(ctx context.Context, service string, args []string, stdin io.Reader) (io.ReadCloser, <-chan error, error) {
 	host := Host()
-	client := newRPCClient(host)
+	client := newRPCExecClientFn(host)
 	req := catchrpc.ExecRequest{
 		Service:  service,
 		Args:     args,
@@ -262,7 +385,7 @@ func handleEventsRPC(ctx context.Context, svc string, flags cli.EventsFlags) err
 	if !flags.All {
 		sub.Service = svc
 	}
-	return newRPCClient(Host()).Events(ctx, sub, func(ev catchrpc.Event) {
+	return newRPCExecClientFn(Host()).Events(ctx, sub, func(ev catchrpc.Event) {
 		fmt.Fprintf(os.Stdout, "Received event: %v\n", ev)
 	})
 }
