@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -160,7 +161,8 @@ func newTestDockerComposeService(t *testing.T, composeContent string, newCmd fun
 	t.Helper()
 	tmp := t.TempDir()
 	dockerPath := filepath.Join(tmp, "docker")
-	if err := os.WriteFile(dockerPath, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+	dockerScript := "#!/bin/sh\nGO_WANT_HELPER_PROCESS=1 exec " + strconv.Quote(os.Args[0]) + " -test.run=TestHelperProcess -- docker \"$@\"\n"
+	if err := os.WriteFile(dockerPath, []byte(dockerScript), 0755); err != nil {
 		t.Fatalf("failed to write fake docker: %v", err)
 	}
 	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
