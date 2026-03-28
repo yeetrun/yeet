@@ -56,7 +56,7 @@ func TestDetectFirewallBackendFromProbe(t *testing.T) {
 	}
 }
 
-func TestRenderFirewallRules(t *testing.T) {
+func TestRenderRuleset(t *testing.T) {
 	t.Parallel()
 
 	spec := FirewallSpec{
