@@ -5,12 +5,15 @@
 package svc
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
 )
@@ -157,6 +160,51 @@ func TestDockerComposeStatusesStateMapping(t *testing.T) {
 	}
 }
 
+func TestNewDockerComposeServiceSetsContextAwareCommandFactory(t *testing.T) {
+	tmp := t.TempDir()
+	composePath := filepath.Join(tmp, "compose.yml")
+	if err := os.WriteFile(composePath, []byte("services: {}\n"), 0644); err != nil {
+		t.Fatalf("failed to write compose file: %v", err)
+	}
+	cfg := (&db.Service{
+		Name:       "svc-a",
+		Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactDockerComposeFile: {
+				Refs: map[db.ArtifactRef]string{
+					db.Gen(1): composePath,
+				},
+			},
+		},
+	}).View()
+
+	svc, err := NewDockerComposeService(db.NewStore(filepath.Join(tmp, "db.json"), tmp), cfg, tmp, filepath.Join(tmp, "run"))
+	if err != nil {
+		t.Fatalf("NewDockerComposeService returned error: %v", err)
+	}
+	if svc.NewCmdContext == nil {
+		t.Fatal("expected NewDockerComposeService to install a context-aware command factory")
+	}
+}
+
+func TestDockerComposeServiceRunCommandContextReturnsContextErrorAfterStart(t *testing.T) {
+	t.Setenv("HELPER_SLEEP_MS", "500")
+
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	svc.NewCmd = nil
+	svc.NewCmdContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, name, args...)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := svc.runCommandContext(ctx, "ps", "-a")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("runCommandContext error = %v, want context deadline exceeded", err)
+	}
+}
+
 func newTestDockerComposeService(t *testing.T, composeContent string, newCmd func(string, ...string) *exec.Cmd) *DockerComposeService {
 	t.Helper()
 	tmp := t.TempDir()
@@ -193,10 +241,11 @@ func newTestDockerComposeService(t *testing.T, composeContent string, newCmd fun
 	}
 
 	return &DockerComposeService{
-		Name:    "svc-a",
-		cfg:     cfg,
-		DataDir: tmp,
-		NewCmd:  newCmd,
+		Name:          "svc-a",
+		cfg:           cfg,
+		DataDir:       tmp,
+		NewCmd:        newCmd,
+		NewCmdContext: recordCmdContext(t, newCmd),
 	}
 }
 
@@ -209,6 +258,13 @@ func recordCmd(t *testing.T, calls *[]cmdCall) func(string, ...string) *exec.Cmd
 		cmd := exec.Command(os.Args[0], cs...)
 		cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
 		return cmd
+	}
+}
+
+func recordCmdContext(t *testing.T, base func(string, ...string) *exec.Cmd) func(context.Context, string, ...string) *exec.Cmd {
+	t.Helper()
+	return func(_ context.Context, name string, args ...string) *exec.Cmd {
+		return base(name, args...)
 	}
 }
 
@@ -230,6 +286,12 @@ func TestHelperProcess(t *testing.T) {
 	cmdArgs := args[idx+1:]
 	if len(cmdArgs) < 2 {
 		os.Exit(0)
+	}
+	if delay := os.Getenv("HELPER_SLEEP_MS"); delay != "" {
+		ms, err := strconv.Atoi(delay)
+		if err == nil {
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
 	}
 	actualArgs := cmdArgs[1:]
 	if len(actualArgs) > 0 && actualArgs[0] == "compose" {

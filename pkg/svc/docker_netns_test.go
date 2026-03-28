@@ -5,12 +5,15 @@
 package svc
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/yeetrun/yeet/pkg/db"
@@ -24,14 +27,20 @@ type fakeNetNSInspector struct {
 	namedCalls *int
 }
 
-func (f fakeNetNSInspector) NamedNetNSLinkNames(path string) ([]string, error) {
+func (f fakeNetNSInspector) NamedNetNSLinkNames(ctx context.Context, path string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f.namedCalls != nil {
 		*f.namedCalls++
 	}
 	return f.linkNames, f.namedErr
 }
 
-func (f fakeNetNSInspector) ProjectContainers(project string) ([]composeContainer, error) {
+func (f fakeNetNSInspector) ProjectContainers(ctx context.Context, project string) ([]composeContainer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return f.containers, f.projectErr
 }
 
@@ -111,7 +120,7 @@ func TestDockerComposeServiceReconcileNetNS(t *testing.T) {
 		}},
 	}
 
-	restarted, err := svc.ReconcileNetNS()
+	restarted, err := svc.ReconcileNetNS(context.Background())
 	if err != nil {
 		t.Fatalf("ReconcileNetNS returned error: %v", err)
 	}
@@ -141,7 +150,7 @@ func TestDockerComposeServiceReconcileNetNSNoSelectedContainersSkipsNamedLookup(
 		namedCalls: &namedCalls,
 	}
 
-	restarted, err := svc.ReconcileNetNS()
+	restarted, err := svc.ReconcileNetNS(context.Background())
 	if err != nil {
 		t.Fatalf("ReconcileNetNS returned error: %v", err)
 	}
@@ -190,6 +199,38 @@ func TestDockerComposeServiceRestartShortCircuitsAfterReconcileRestart(t *testin
 	}
 	if recreates != 1 {
 		t.Fatalf("compose recreate called %d times, want 1; calls=%#v", recreates, calls)
+	}
+}
+
+func TestDockerComposeServiceReconcileNetNSHonorsCanceledContext(t *testing.T) {
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.cfg.Artifacts[db.ArtifactNetNSService] = &db.Artifact{
+		Refs: map[db.ArtifactRef]string{
+			db.Gen(svc.cfg.Generation): "/etc/systemd/system/yeet-svc-a-ns.service",
+		},
+	}
+	svc.sd = &SystemdService{cfg: svc.cfg.View(), runDir: svc.DataDir}
+	svc.netnsInspector = fakeNetNSInspector{
+		linkNames: []string{"lo", "br0"},
+		containers: []composeContainer{{
+			ID:                 "app",
+			NetworkEndpointIDs: map[string]string{"catch-svc-a_default": "abcd1234"},
+		}},
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	restarted, err := svc.ReconcileNetNS(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReconcileNetNS error = %v, want context.Canceled", err)
+	}
+	if restarted {
+		t.Fatal("expected no restart when context is canceled")
+	}
+	if composeCallHasSubcmd(calls, "up") {
+		t.Fatalf("did not expect compose recreate command after cancellation, got %#v", calls)
 	}
 }
 
@@ -248,7 +289,7 @@ func TestLinuxNetNSInspectorNamedNetNSLinkNames(t *testing.T) {
 	}, "\n")+"\n")
 	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
 
-	got, err := (linuxNetNSInspector{}).NamedNetNSLinkNames(filepath.Join("/var/run/netns", "yeet-svc-a-ns"))
+	got, err := (linuxNetNSInspector{}).NamedNetNSLinkNames(context.Background(), filepath.Join("/var/run/netns", "yeet-svc-a-ns"))
 	if err != nil {
 		t.Fatalf("NamedNetNSLinkNames returned error: %v", err)
 	}
@@ -270,7 +311,7 @@ func TestLinuxNetNSInspectorProjectContainers(t *testing.T) {
 
 	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
 
-	got, err := (linuxNetNSInspector{}).ProjectContainers("catch-svc-a")
+	got, err := (linuxNetNSInspector{}).ProjectContainers(context.Background(), "catch-svc-a")
 	if err != nil {
 		t.Fatalf("ProjectContainers returned error: %v", err)
 	}
@@ -290,7 +331,7 @@ func TestLinuxNetNSInspectorProjectContainersHandlesContainerWithNoNetworks(t *t
 
 	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
 
-	got, err := (linuxNetNSInspector{}).ProjectContainers("catch-svc-a")
+	got, err := (linuxNetNSInspector{}).ProjectContainers(context.Background(), "catch-svc-a")
 	if err != nil {
 		t.Fatalf("ProjectContainers returned error: %v", err)
 	}
@@ -300,5 +341,51 @@ func TestLinuxNetNSInspectorProjectContainersHandlesContainerWithNoNetworks(t *t
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("ProjectContainers mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestLinuxNetNSInspectorNamedNetNSLinkNamesHonorsContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := (linuxNetNSInspector{}).NamedNetNSLinkNames(ctx, filepath.Join("/var/run/netns", "yeet-svc-a-ns"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("NamedNetNSLinkNames error = %v, want context.Canceled", err)
+	}
+}
+
+func TestLinuxNetNSInspectorProjectContainersHonorsContextCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := (linuxNetNSInspector{}).ProjectContainers(ctx, "catch-svc-a")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ProjectContainers error = %v, want context.Canceled", err)
+	}
+}
+
+func TestLinuxNetNSInspectorNamedNetNSLinkNamesReturnsContextErrorAfterStart(t *testing.T) {
+	t.Setenv("HELPER_SLEEP_MS", "500")
+	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := (linuxNetNSInspector{}).NamedNetNSLinkNames(ctx, filepath.Join("/var/run/netns", "yeet-svc-a-ns"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("NamedNetNSLinkNames error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestLinuxNetNSInspectorProjectContainersReturnsContextErrorAfterStart(t *testing.T) {
+	t.Setenv("HELPER_SLEEP_MS", "500")
+	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := (linuxNetNSInspector{}).ProjectContainers(ctx, "catch-svc-a")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ProjectContainers error = %v, want context deadline exceeded", err)
 	}
 }
