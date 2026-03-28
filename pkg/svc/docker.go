@@ -34,6 +34,7 @@ type DockerComposeService struct {
 	NewCmd  func(name string, arg ...string) *exec.Cmd
 	sd      *SystemdService
 
+	netnsInspector netnsInspector
 	installEnvOnce lazy.SyncValue[error]
 }
 
@@ -118,7 +119,12 @@ func (s *DockerComposeService) Up() error {
 
 func (s *DockerComposeService) UpWithPull(pull bool) error {
 	if s.sd != nil {
-		s.sd.Start()
+		if err := s.sd.Start(); err != nil {
+			return err
+		}
+		if _, err := s.ReconcileNetNS(); err != nil {
+			return err
+		}
 	}
 	isInternal, err := s.composeUsesInternalImages()
 	if err != nil {
@@ -180,7 +186,14 @@ func (s *DockerComposeService) Down() error {
 }
 
 func (s *DockerComposeService) Start() error {
-	s.sd.Start()
+	if s.sd != nil {
+		if err := s.sd.Start(); err != nil {
+			return err
+		}
+		if _, err := s.ReconcileNetNS(); err != nil {
+			return err
+		}
+	}
 	return s.runCommand("start")
 }
 
@@ -200,7 +213,38 @@ func (s *DockerComposeService) Restart() error {
 	} else if !ok {
 		return nil
 	}
+	if s.sd != nil {
+		if err := s.sd.Start(); err != nil {
+			return err
+		}
+		restarted, err := s.ReconcileNetNS()
+		if err != nil {
+			return err
+		}
+		if restarted {
+			return nil
+		}
+	}
 	return s.runCommand("restart")
+}
+
+func (s *DockerComposeService) ReconcileNetNS() (bool, error) {
+	if s.sd == nil || !s.sd.hasArtifact(db.ArtifactNetNSService) {
+		return false, nil
+	}
+	namedID, err := s.getNetNSInspector().NamedNetNSID(s.namedNetNSPath())
+	if err != nil {
+		return false, err
+	}
+	containers, err := s.getNetNSInspector().ProjectContainers(s.composeProjectName())
+	if err != nil {
+		return false, err
+	}
+	selected := selectNetNSContainers(containers, s.defaultNetworkName())
+	if !needsNetNSRestart(namedID, selected) {
+		return false, nil
+	}
+	return true, s.runCommand("restart")
 }
 
 // PrePullIfRunning pulls images while containers are still running to reduce downtime.
@@ -339,4 +383,23 @@ func pullMode(isInternal bool) string {
 // projectName returns the docker-compose project name for the given service name.
 func (s *DockerComposeService) projectName(sn string) string {
 	return fmt.Sprintf("%s-%s", dockerContainerNamePrefix, sn)
+}
+
+func (s *DockerComposeService) composeProjectName() string {
+	return s.projectName(s.Name)
+}
+
+func (s *DockerComposeService) defaultNetworkName() string {
+	return s.composeProjectName() + "_default"
+}
+
+func (s *DockerComposeService) namedNetNSPath() string {
+	return filepath.Join("/var/run/netns", "yeet-"+s.Name+"-ns")
+}
+
+func (s *DockerComposeService) getNetNSInspector() netnsInspector {
+	if s.netnsInspector != nil {
+		return s.netnsInspector
+	}
+	return linuxNetNSInspector{}
 }
