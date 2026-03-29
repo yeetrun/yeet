@@ -322,7 +322,14 @@ func (e *ttyExecer) printf(format string, a ...any) {
 }
 
 func (e *ttyExecer) newCmd(name string, args ...string) *exec.Cmd {
-	c := exec.CommandContext(e.ctx, name, args...)
+	return e.newCmdContext(e.ctx, name, args...)
+}
+
+func (e *ttyExecer) newCmdContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if ctx == nil {
+		ctx = e.ctx
+	}
+	c := exec.CommandContext(ctx, name, args...)
 	rw := e.rw
 
 	c.Stdin = rw

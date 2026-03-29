@@ -55,6 +55,7 @@ func (e *ttyExecer) dockerComposeServiceCmd() (*svc.DockerComposeService, error)
 		return nil, err
 	}
 	docker.NewCmd = e.newCmd
+	docker.NewCmdContext = e.newCmdContext
 	return docker, nil
 }
 

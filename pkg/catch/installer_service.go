@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -263,6 +264,9 @@ func (si *Installer) doInstall(d *db.Data, s *db.Service) error {
 			return fmt.Errorf("failed to create service: %v", err)
 		}
 		service.NewCmd = si.NewCmd
+		service.NewCmdContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+			return si.NewCmd(name, args...)
+		}
 		if err := service.InstallWithPull(si.icfg.Pull); err != nil {
 			return fmt.Errorf("failed to install service: %v", err)
 		}
