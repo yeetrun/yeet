@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -481,6 +482,9 @@ type dockerComposeServiceRunner struct {
 
 func (s *dockerComposeServiceRunner) SetNewCmd(f func(string, ...string) *exec.Cmd) {
 	s.NewCmd = f
+	s.NewCmdContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return f(name, args...)
+	}
 }
 
 func (s *dockerComposeServiceRunner) Start() error {
