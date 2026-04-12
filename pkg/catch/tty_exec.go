@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,7 +35,16 @@ func shouldLogCopyErr(err error) bool {
 	if errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrClosedPipe) ||
 		errors.Is(err, os.ErrClosed) ||
-		errors.Is(err, syscall.EIO) {
+		errors.Is(err, syscall.EIO) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, net.ErrClosed) {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "use of closed network connection") ||
+		strings.Contains(msg, "endpoint is closed for send") ||
+		strings.Contains(msg, "websocket: close sent") {
 		return false
 	}
 	if ne, ok := err.(interface{ Unwrap() error }); ok {
@@ -373,10 +383,33 @@ func (e *ttyExecer) shouldSuppressCmdOutput(name string, args []string) bool {
 	}
 	if mode == catchrpc.ProgressPlain || mode == catchrpc.ProgressQuiet {
 		if filepath.Base(name) == "docker" && len(args) > 0 && args[0] == "compose" {
-			return true
+			return dockerComposeSubcommand(args[1:]) != "logs"
 		}
 	}
 	return false
+}
+
+func dockerComposeSubcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+		if !strings.HasPrefix(arg, "-") || arg == "-" {
+			return arg
+		}
+		if strings.Contains(arg, "=") {
+			continue
+		}
+		switch arg {
+		case "--project-name", "--project-directory", "--file", "--env-file", "--profile":
+			i++
+		}
+	}
+	return ""
 }
 
 func setWinsize(f *os.File, w, h int) {

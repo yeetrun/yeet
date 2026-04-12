@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -114,6 +115,32 @@ func (w *wsBinaryWriter) CloseWrite() error {
 	return nil
 }
 
+func writeAllWithRetry(w io.Writer, p []byte) error {
+	for len(p) > 0 {
+		n, err := w.Write(p)
+		if n > 0 {
+			p = p[n:]
+		}
+		if err == nil {
+			if len(p) == 0 {
+				return nil
+			}
+			if n == 0 {
+				return io.ErrShortWrite
+			}
+			continue
+		}
+		if errors.Is(err, syscall.EINTR) ||
+			errors.Is(err, syscall.EAGAIN) ||
+			errors.Is(err, syscall.EWOULDBLOCK) {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		return err
+	}
+	return nil
+}
+
 func (c *Client) Exec(ctx context.Context, req ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan Resize) (int, error) {
 	conn, _, err := c.wsDialer.DialContext(ctx, c.wsURL+"/rpc/exec", nil)
 	if err != nil {
@@ -177,7 +204,7 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest, stdin io.Reader, std
 			switch mt {
 			case websocket.BinaryMessage:
 				if stdout != nil {
-					if _, err := stdout.Write(data); err != nil {
+					if err := writeAllWithRetry(stdout, data); err != nil {
 						errCh <- err
 						return
 					}

@@ -326,3 +326,41 @@ func TestBridgeServiceArgsEnvSetGroup(t *testing.T) {
 		t.Fatalf("unexpected bridged args: %s", got)
 	}
 }
+
+func TestBridgeServiceArgsLogsServiceBeforeFollowFlag(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"logs", "ombi@yeet-pve1", "-f"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to recognize logs command")
+	}
+	if service != "ombi" {
+		t.Fatalf("expected service ombi, got %q", service)
+	}
+	if host != "yeet-pve1" {
+		t.Fatalf("expected host yeet-pve1, got %q", host)
+	}
+	if got := strings.Join(bridged, " "); got != "logs -f" {
+		t.Fatalf("unexpected bridged args: %s", got)
+	}
+}
+
+func TestBridgeServiceArgsLogsServiceAfterFollowFlag(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"logs", "-f", "ombi@yeet-pve1"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to recognize logs command")
+	}
+	if service != "ombi" {
+		t.Fatalf("expected service ombi, got %q", service)
+	}
+	if host != "yeet-pve1" {
+		t.Fatalf("expected host yeet-pve1, got %q", host)
+	}
+	if got := strings.Join(bridged, " "); got != "logs -f" {
+		t.Fatalf("unexpected bridged args: %s", got)
+	}
+}

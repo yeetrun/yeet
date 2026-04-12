@@ -8,11 +8,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -240,6 +242,72 @@ func TestClientExecClosesStdinWhenNil(t *testing.T) {
 	if gotReq.Service != "svc" || len(gotReq.Args) != 1 || gotReq.Args[0] != "status" {
 		t.Fatalf("unexpected exec request: %#v", gotReq)
 	}
+}
+
+type partialWriter struct {
+	maxChunk int
+	buf      bytes.Buffer
+}
+
+func (w *partialWriter) Write(p []byte) (int, error) {
+	if len(p) > w.maxChunk {
+		_, _ = w.buf.Write(p[:w.maxChunk])
+		return w.maxChunk, nil
+	}
+	return w.buf.Write(p)
+}
+
+type retryWriter struct {
+	buf    bytes.Buffer
+	calls  int
+	failOn int
+}
+
+func (w *retryWriter) Write(p []byte) (int, error) {
+	w.calls++
+	if w.calls == w.failOn {
+		return 0, syscall.EAGAIN
+	}
+	return w.buf.Write(p)
+}
+
+func TestWriteAllWithRetryHandlesShortWrites(t *testing.T) {
+	w := &partialWriter{maxChunk: 2}
+	if err := writeAllWithRetry(w, []byte("output")); err != nil {
+		t.Fatalf("writeAllWithRetry failed: %v", err)
+	}
+	if got := w.buf.String(); got != "output" {
+		t.Fatalf("unexpected buffer contents: %q", got)
+	}
+}
+
+func TestWriteAllWithRetryRetriesTemporaryErrors(t *testing.T) {
+	w := &retryWriter{failOn: 1}
+	if err := writeAllWithRetry(w, []byte("output")); err != nil {
+		t.Fatalf("writeAllWithRetry failed: %v", err)
+	}
+	if got := w.buf.String(); got != "output" {
+		t.Fatalf("unexpected buffer contents: %q", got)
+	}
+	if w.calls < 2 {
+		t.Fatalf("expected retry after temporary error, got %d calls", w.calls)
+	}
+}
+
+func TestWriteAllWithRetryReturnsPermanentErrors(t *testing.T) {
+	want := errors.New("boom")
+	err := writeAllWithRetry(writerFunc(func([]byte) (int, error) {
+		return 0, want
+	}), []byte("output"))
+	if !errors.Is(err, want) {
+		t.Fatalf("expected %v, got %v", want, err)
+	}
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) {
+	return f(p)
 }
 
 func TestClientEvents(t *testing.T) {
