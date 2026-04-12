@@ -13,10 +13,8 @@ already live, while keeping the normal yeet CLI install flow clearly distinct.
 The current docs site already has the right information architecture for this
 change:
 
-- docs home:
-  [website/docs/index.mdx](/Users/shayne/code/yeet/website/docs/index.mdx)
-- install page:
-  [website/docs/getting-started/installation.mdx](/Users/shayne/code/yeet/website/docs/getting-started/installation.mdx)
+- docs home: `website/docs/index.mdx`
+- install page: `website/docs/getting-started/installation.mdx`
 
 The install page already explains:
 
@@ -72,8 +70,7 @@ This is the right shape because:
 
 ## Installation Page Changes
 
-Update
-[website/docs/getting-started/installation.mdx](/Users/shayne/code/yeet/website/docs/getting-started/installation.mdx)
+Update `website/docs/getting-started/installation.mdx`
 to add a short section after the local `yeet` install options and before the
 “Install catch on a host” section.
 
@@ -97,7 +94,7 @@ path for getting started with yeet itself.
 
 ## Docs Home Page Changes
 
-Update [website/docs/index.mdx](/Users/shayne/code/yeet/website/docs/index.mdx)
+Update `website/docs/index.mdx`
 to add a small discoverability pointer to the Installation page for the agent
 skill setup.
 
