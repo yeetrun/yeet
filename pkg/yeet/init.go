@@ -138,9 +138,7 @@ func buildCatch(goos, goarch, gitRoot string) (string, int64, error) {
 		return "", 0, fmt.Errorf("missing git root for catch build")
 	}
 	// Build the catch binary
-	cmd := exec.Command("go", "build", "-o", "catch", "./cmd/catch")
-	cmd.Env = append(os.Environ(), "GOARCH="+goarch, "GOOS=linux")
-	cmd.Dir = gitRoot
+	cmd := buildCatchCmd(goarch, gitRoot)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if len(out) > 0 {
 			fmt.Fprintln(os.Stderr, string(out))
@@ -153,6 +151,13 @@ func buildCatch(goos, goarch, gitRoot string) (string, int64, error) {
 		return "", 0, fmt.Errorf("failed to stat catch binary: %w", err)
 	}
 	return bin, info.Size(), nil
+}
+
+func buildCatchCmd(goarch, gitRoot string) *exec.Cmd {
+	cmd := exec.Command("go", "build", "-o", "catch", "./cmd/catch")
+	cmd.Env = append(os.Environ(), "GOARCH="+goarch, "GOOS=linux", "CGO_ENABLED=0")
+	cmd.Dir = gitRoot
+	return cmd
 }
 
 func initCatch(userAtRemote string, opts initOptions) error {

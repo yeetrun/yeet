@@ -7,10 +7,14 @@ package catch
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -35,6 +39,16 @@ func TestShouldSuppressCmdOutputAllowsTTY(t *testing.T) {
 	}
 	if execer.shouldSuppressCmdOutput("docker", []string{"compose", "up"}) {
 		t.Fatalf("did not expect suppression in TTY mode")
+	}
+}
+
+func TestShouldSuppressCmdOutputAllowsDockerComposeLogsInPlainMode(t *testing.T) {
+	execer := &ttyExecer{
+		progress: catchrpc.ProgressPlain,
+		isPty:    false,
+	}
+	if execer.shouldSuppressCmdOutput("docker", []string{"compose", "--project-name", "catch-svc", "--file", "/tmp/compose.yml", "logs"}) {
+		t.Fatalf("did not expect docker compose logs output to be suppressed in plain mode")
 	}
 }
 
@@ -106,6 +120,40 @@ func TestShouldBypassPtyInputForCron(t *testing.T) {
 	}
 	if !execer.shouldBypassPtyInput() {
 		t.Fatalf("expected cron to bypass pty input")
+	}
+}
+
+func TestShouldLogCopyErrIgnoresExpectedDisconnects(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{name: "eof", err: io.EOF},
+		{name: "closed pipe", err: io.ErrClosedPipe},
+		{name: "os closed", err: os.ErrClosed},
+		{name: "eio", err: syscall.EIO},
+		{name: "epipe", err: syscall.EPIPE},
+		{name: "conn reset", err: syscall.ECONNRESET},
+		{name: "net closed", err: net.ErrClosed},
+		{name: "wrapped epipe", err: &net.OpError{Op: "write", Net: "tcp", Err: syscall.EPIPE}},
+		{name: "wrapped closed", err: &net.OpError{Op: "write", Net: "tcp", Err: net.ErrClosed}},
+		{name: "closed network string", err: errors.New("write tcp 127.0.0.1:1234->127.0.0.1:4321: use of closed network connection")},
+		{name: "endpoint closed string", err: errors.New("write tcp 100.85.58.107:41548: endpoint is closed for send")},
+		{name: "websocket close sent", err: errors.New("websocket: close sent")},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if shouldLogCopyErr(tc.err) {
+				t.Fatalf("expected disconnect error to be suppressed: %v", tc.err)
+			}
+		})
+	}
+}
+
+func TestShouldLogCopyErrReturnsTrueForUnexpectedErrors(t *testing.T) {
+	if !shouldLogCopyErr(errors.New("boom")) {
+		t.Fatal("expected unexpected error to be logged")
 	}
 }
 
