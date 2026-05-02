@@ -5,7 +5,12 @@
 package dnet
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -193,6 +198,93 @@ func TestDesiredPortForwardsByNetNSGroupsDeterministically(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("desiredPortForwardsByNetNS mismatch (-want +got):\n%s", diff)
+	}
+}
+
+type capturedPortForwardSync struct {
+	netns string
+	rules []portForwardRule
+}
+
+func newTestPlugin(t *testing.T, data *db.Data, syncs *[]capturedPortForwardSync) *plugin {
+	t.Helper()
+	root := t.TempDir()
+	store := db.NewStore(filepath.Join(root, "db.json"), filepath.Join(root, "services"))
+	if data == nil {
+		data = &db.Data{}
+	}
+	if err := store.Set(data); err != nil {
+		t.Fatalf("store.Set: %v", err)
+	}
+	return &plugin{
+		db: store,
+		syncPortForwardsFunc: func(netns string, desired []portForwardRule) error {
+			*syncs = append(*syncs, capturedPortForwardSync{
+				netns: netns,
+				rules: append([]portForwardRule(nil), desired...),
+			})
+			return nil
+		},
+	}
+}
+
+func postJSON(t *testing.T, h http.HandlerFunc, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestCreateEndpointReplaysAggregateNetNSRules(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"active": {
+				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"web": {EndpointID: "web", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/3000": {EndpointID: "web", Port: 3000},
+				},
+			},
+			"sidecar-network": {
+				NetNS:     "/var/run/netns/yeet-hoarder-ns",
+				Endpoints: map[string]*db.DockerEndpoint{},
+				PortMap:   map[string]*db.EndpointPort{},
+			},
+		},
+	}, &syncs)
+
+	rr := postJSON(t, p.CreateEndpoint, map[string]any{
+		"NetworkID":  "sidecar-network",
+		"EndpointID": "chrome",
+		"Interface": map[string]any{
+			"Address": "172.21.0.2/16",
+		},
+		"Options": map[string]any{
+			"com.docker.network.portmap": []any{},
+		},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("CreateEndpoint status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(syncs) != 1 {
+		t.Fatalf("sync count = %d, want 1", len(syncs))
+	}
+	want := capturedPortForwardSync{
+		netns: "/var/run/netns/yeet-hoarder-ns",
+		rules: []portForwardRule{
+			{Proto: "tcp", HostPort: 3000, TargetIP: "172.21.0.4", TargetPort: 3000},
+		},
+	}
+	if diff := cmp.Diff(want, syncs[0], cmp.AllowUnexported(capturedPortForwardSync{})); diff != "" {
+		t.Fatalf("sync mismatch (-want +got):\n%s", diff)
 	}
 }
 

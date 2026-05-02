@@ -31,6 +31,8 @@ type plugin struct {
 
 	// netnsSema ensures that only one goroutine is running in a given network namespace at a time.
 	netnsSema syncs.Map[string, *syncs.Semaphore]
+
+	syncPortForwardsFunc func(netns string, desired []portForwardRule) error
 }
 
 // ErrorResponse represents an error response
@@ -449,6 +451,9 @@ func splitNonEmptyLines(output string) []string {
 }
 
 func (p *plugin) syncPortForwards(netns string, desired []portForwardRule) error {
+	if p.syncPortForwardsFunc != nil {
+		return p.syncPortForwardsFunc(netns, desired)
+	}
 	return p.runInNetNS(netns, func() error {
 		return syncNetNSPortForwards(netns, desired, iptablesBackend{})
 	})
@@ -479,7 +484,7 @@ func (p *plugin) LeaveNetwork(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(n.Endpoints, eid)
 		removeEndpointPortMappings(n, eid)
-		desired = desiredPortForwards(n)
+		desired = desiredPortForwardsForNetNS(d, netns)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -561,7 +566,7 @@ func (p *plugin) JoinNetwork(w http.ResponseWriter, r *http.Request) {
 	gateway := n.IPv4Gateway.Addr()
 	gatewayPrefix := n.IPv4Gateway
 	netns = n.NetNS
-	desired := desiredPortForwards(n)
+	desired := desiredPortForwardsForNetNS(d, netns)
 
 	ifName := "yv-" + eid[:4]
 	peerName := ifName + "p"
@@ -733,7 +738,7 @@ func (p *plugin) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		mak.Set(&n.Endpoints, req.EndpointID, ep)
-		desired = desiredPortForwards(n)
+		desired = desiredPortForwardsForNetNS(d, netns)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -768,7 +773,7 @@ func (p *plugin) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 		netns = n.NetNS
 		removeEndpointPortMappings(n, req.EndpointID)
 		delete(n.Endpoints, req.EndpointID)
-		desired = desiredPortForwards(n)
+		desired = desiredPortForwardsForNetNS(d, netns)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
