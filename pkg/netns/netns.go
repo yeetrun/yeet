@@ -20,6 +20,11 @@ import (
 	"tailscale.com/util/must"
 )
 
+const (
+	dockerPrereqsTargetUnit = "yeet-docker-prereqs.target"
+	dockerServiceUnit       = "docker.service"
+)
+
 //go:embed netns-scripts/*
 var netnsScripts embed.FS
 
@@ -90,16 +95,14 @@ func InstallYeetNSService() error {
 			return fmt.Errorf("failed to rename env: %v", err)
 		}
 	}
-	if !changed {
-		return nil
-	}
-
 	unit := svc.SystemdUnit{
 		Name:             "yeet-ns",
 		Executable:       must.Get(filepath.Abs("yeet-ns")),
 		EnvFile:          must.Get(filepath.Abs("yeet-ns.env")),
 		WorkingDirectory: "/",
 		OneShot:          true,
+		Before:           dockerPrereqsTargetUnit + " " + dockerServiceUnit,
+		WantedBy:         "multi-user.target " + dockerPrereqsTargetUnit,
 	}
 
 	unitFiles, err := unit.WriteOutUnitFiles(".")
@@ -108,6 +111,14 @@ func InstallYeetNSService() error {
 	}
 	for _, f := range unitFiles {
 		defer os.Remove(f)
+	}
+	if same, err := fileutil.Identical("/etc/systemd/system/yeet-ns.service", unitFiles[db.ArtifactSystemdUnit]); err != nil {
+		return fmt.Errorf("failed to compare yeet-ns unit: %v", err)
+	} else if !same {
+		changed = true
+	}
+	if !changed {
+		return nil
 	}
 
 	cfg := &db.Service{
@@ -188,8 +199,10 @@ func WriteServiceNetNS(binDir, runDir string, se Service) (map[db.ArtifactName]s
 		EnvFile:          filepath.Join(runDir, "netns.env"),
 		WorkingDirectory: "/",
 		Requires:         "yeet-ns.service",
+		Before:           dockerPrereqsTargetUnit + " " + dockerServiceUnit,
 		OneShot:          true,
 		StopCmd:          exe + " cleanup",
+		WantedBy:         "multi-user.target " + dockerPrereqsTargetUnit,
 	}
 	if se.TailscaleTAPInterface != "" {
 		unit.Requires += " yeet-" + se.ServiceName + "-ts.service"

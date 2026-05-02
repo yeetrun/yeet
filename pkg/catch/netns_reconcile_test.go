@@ -67,6 +67,15 @@ func waitForLogContains(t *testing.T, buf *bytes.Buffer, needle string) string {
 	return buf.String()
 }
 
+func stubDockerPrereqsInstaller(t *testing.T, f func(*Server) error) {
+	t.Helper()
+	prev := installDockerPrereqs
+	installDockerPrereqs = f
+	t.Cleanup(func() {
+		installDockerPrereqs = prev
+	})
+}
+
 func TestReconcileNetNSBackedDockerServices(t *testing.T) {
 	s := newTestServer(t)
 	addTestServices(t, s,
@@ -213,6 +222,10 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubDockerPrereqsInstaller(t, func(*Server) error {
+		calls = append(calls, "docker-prereqs")
+		return nil
+	})
 
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		name := sv.Name()
@@ -235,7 +248,7 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 		t.Fatal("timed out waiting for reconciliation to run")
 	}
 
-	if diff := cmp.Diff([]string{"install", "reconcile:docker-netns"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{"install", "docker-prereqs", "reconcile:docker-netns"}, calls); diff != "" {
 		t.Fatalf("unexpected startup call order (-want +got):\n%s", diff)
 	}
 }
@@ -258,6 +271,7 @@ func TestServerStartLogsReconciliationFailureNonFatally(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 
 	reconciled := make(chan struct{})
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
@@ -306,6 +320,7 @@ func TestServerStartLogsRestartedNetNSService(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 
 	reconciled := make(chan struct{})
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
@@ -349,6 +364,7 @@ func TestServerStartReturnsBeforeNetNSReconciliationFinishes(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -421,6 +437,7 @@ func TestServerShutdownCancelsNetNSReconciliation(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 
 	started := make(chan struct{})
 	canceled := make(chan struct{})
@@ -501,6 +518,7 @@ func TestServerShutdownDoesNotLogCancellationAsFailure(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 
 	started := make(chan struct{})
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {

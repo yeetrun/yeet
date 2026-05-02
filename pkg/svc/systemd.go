@@ -42,11 +42,14 @@ type TimerConfig struct {
 const (
 	systemdServiceTemplate = `[Unit]
 ConditionFileIsExecutable={{.Executable}}
+{{if .Wants}}Wants={{.Wants}}{{end}}
 {{if .Requires}}Requires={{.Requires}}{{end}}
-{{if .Requires}}After={{.Requires}}{{end}}
+{{if .Before}}Before={{.Before}}{{end}}
+{{if .After}}After={{.After}}{{else if .Requires}}After={{.Requires}}{{end}}
 
 [Service]
 ExecStart={{.Executable}}{{range .Arguments}} {{.}}{{end}}
+{{range .ExecStartPost}}ExecStartPost={{.}}{{end}}
 {{if or .OneShot .Timer}}Type=oneshot{{end}}
 {{if .WorkingDirectory}}WorkingDirectory={{.WorkingDirectory}}{{end}}
 {{if .Restart}}Restart={{.Restart}}{{end}}
@@ -63,7 +66,7 @@ BindPaths={{.ResolvConf}}:/etc/resolv.conf
 PrivateMounts=yes
 {{end}}
 [Install]
-WantedBy=multi-user.target
+WantedBy={{.WantedBy}}
 `
 	systemdTimerTemplate = `[Unit]
 
@@ -118,6 +121,25 @@ type SystemdUnit struct {
 	// For multiple services, separate with spaces.
 	Requires string
 
+	// Wants is a weaker dependency list than Requires.
+	// For multiple services, separate with spaces.
+	Wants string
+
+	// After controls service ordering. If empty, Requires is used to preserve
+	// the historical "requires also means after" behavior of this generator.
+	After string
+
+	// Before controls reverse service ordering.
+	Before string
+
+	// ExecStartPost commands run after ExecStart and participate in systemd
+	// ordering constraints.
+	ExecStartPost []string
+
+	// WantedBy controls the [Install] target list. If empty, multi-user.target
+	// is used.
+	WantedBy string
+
 	// ResolvConf is the path to the resolv.conf file to use.
 	ResolvConf string
 }
@@ -156,6 +178,10 @@ func (u *SystemdUnit) writeOutService(path string) error {
 	if u.Timer != nil || u.OneShot {
 		restartDefault = "on-failure"
 	}
+	wantedBy := u.WantedBy
+	if wantedBy == "" {
+		wantedBy = "multi-user.target"
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -163,10 +189,12 @@ func (u *SystemdUnit) writeOutService(path string) error {
 	defer f.Close()
 	return systemdServiceTmpl.Execute(f, struct {
 		*SystemdUnit
-		Restart string
+		Restart  string
+		WantedBy string
 	}{
 		u,
 		restartDefault,
+		wantedBy,
 	})
 }
 
