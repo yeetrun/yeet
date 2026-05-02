@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -331,6 +332,62 @@ func desiredPortForwardsByNetNS(d *db.Data) map[string][]portForwardRule {
 		out[netns] = desiredPortForwardsForNetNS(d, netns)
 	}
 	return out
+}
+
+type netnsExistsFunc func(path string) (bool, error)
+type netnsPortForwardSyncFunc func(netns string, desired []portForwardRule) error
+
+func netnsPathExists(path string) (bool, error) {
+	if path == "" {
+		return false, nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func reconcilePortForwardsFromData(d *db.Data, exists netnsExistsFunc, sync netnsPortForwardSyncFunc) error {
+	byNetNS := desiredPortForwardsByNetNS(d)
+	netnsPaths := make([]string, 0, len(byNetNS))
+	for netns := range byNetNS {
+		netnsPaths = append(netnsPaths, netns)
+	}
+	sort.Strings(netnsPaths)
+
+	var errs []error
+	for _, netns := range netnsPaths {
+		ok, err := exists(netns)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("check netns %q: %w", netns, err))
+			continue
+		}
+		if !ok {
+			log.Printf("skipping docker port forward reconciliation for missing netns %q", netns)
+			continue
+		}
+		if err := sync(netns, byNetNS[netns]); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile port forwards for %q: %w", netns, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func ReconcilePortForwards(store *db.Store) error {
+	if store == nil {
+		return fmt.Errorf("nil db store")
+	}
+	dv, err := store.Get()
+	if err != nil {
+		return err
+	}
+	p := &plugin{db: store}
+	return reconcilePortForwardsFromData(dv.AsStruct(), netnsPathExists, func(netns string, _ []portForwardRule) error {
+		return p.syncCurrentPortForwards(netns)
+	})
 }
 
 func removeEndpointPortMappings(n *db.DockerNetwork, endpointID string) {
