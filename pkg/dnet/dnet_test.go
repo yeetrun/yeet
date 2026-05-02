@@ -288,6 +288,118 @@ func TestCreateEndpointReplaysAggregateNetNSRules(t *testing.T) {
 	}
 }
 
+func TestProgramExternalConnectivityUpdatesPortMapAndReplaysAggregateRules(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"hoarder": {
+				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"web": {EndpointID: "web", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{},
+			},
+		},
+	}, &syncs)
+
+	rr := postJSON(t, p.ProgramExternalConnectivity, map[string]any{
+		"NetworkID":  "hoarder",
+		"EndpointID": "web",
+		"Options": map[string]any{
+			"com.docker.network.portmap": []map[string]any{
+				{"Proto": 6, "Port": 3000, "HostPort": 3000, "HostPortEnd": 3000},
+			},
+		},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("ProgramExternalConnectivity status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(syncs) != 1 {
+		t.Fatalf("sync count = %d, want 1", len(syncs))
+	}
+	wantRules := []portForwardRule{
+		{Proto: "tcp", HostPort: 3000, TargetIP: "172.21.0.4", TargetPort: 3000},
+	}
+	if diff := cmp.Diff(wantRules, syncs[0].rules); diff != "" {
+		t.Fatalf("rules mismatch (-want +got):\n%s", diff)
+	}
+
+	dv, err := p.db.Get()
+	if err != nil {
+		t.Fatalf("db.Get: %v", err)
+	}
+	got := dv.AsStruct().DockerNetworks["hoarder"].PortMap
+	want := map[string]*db.EndpointPort{
+		"6/3000": {EndpointID: "web", Port: 3000},
+	}
+	if diff := cmp.Diff(want, got, cmp.AllowUnexported(db.EndpointPort{})); diff != "" {
+		t.Fatalf("port map mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestRevokeExternalConnectivityRemovesPortMapAndReplaysAggregateRules(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"hoarder": {
+				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"web": {EndpointID: "web", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/3000": {EndpointID: "web", Port: 3000},
+				},
+			},
+		},
+	}, &syncs)
+
+	rr := postJSON(t, p.RevokeExternalConnectivity, map[string]any{
+		"NetworkID":  "hoarder",
+		"EndpointID": "web",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("RevokeExternalConnectivity status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(syncs) != 1 {
+		t.Fatalf("sync count = %d, want 1", len(syncs))
+	}
+	if len(syncs[0].rules) != 0 {
+		t.Fatalf("rules after revoke = %#v, want none", syncs[0].rules)
+	}
+
+	dv, err := p.db.Get()
+	if err != nil {
+		t.Fatalf("db.Get: %v", err)
+	}
+	if got := dv.AsStruct().DockerNetworks["hoarder"].PortMap; len(got) != 0 {
+		t.Fatalf("port map after revoke = %#v, want empty", got)
+	}
+}
+
+func TestRevokeExternalConnectivityUnknownEndpointIsIdempotent(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"hoarder": {
+				NetNS:     "/var/run/netns/yeet-hoarder-ns",
+				Endpoints: map[string]*db.DockerEndpoint{},
+				PortMap:   map[string]*db.EndpointPort{},
+			},
+		},
+	}, &syncs)
+
+	rr := postJSON(t, p.RevokeExternalConnectivity, map[string]any{
+		"NetworkID":  "hoarder",
+		"EndpointID": "missing",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("RevokeExternalConnectivity status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(syncs) != 1 {
+		t.Fatalf("sync count = %d, want 1", len(syncs))
+	}
+}
+
 func TestRemoveEndpointPortMappings(t *testing.T) {
 	network := &db.DockerNetwork{
 		PortMap: map[string]*db.EndpointPort{
