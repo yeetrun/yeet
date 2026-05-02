@@ -62,8 +62,7 @@ func TestDockerPrereqsTargetContentIncludesServiceNetNSUnits(t *testing.T) {
 	got := dockerPrereqsTargetContent([]string{"yeet-zeta-ns.service", "yeet-alpha-ns.service"})
 	for _, want := range []string{
 		"Description=Yeet Docker network prerequisites\n",
-		"Requires=catch.service yeet-ns.service\n",
-		"Wants=yeet-alpha-ns.service yeet-zeta-ns.service\n",
+		"Wants=catch.service yeet-ns.service yeet-alpha-ns.service yeet-zeta-ns.service\n",
 		"After=catch.service yeet-ns.service yeet-alpha-ns.service yeet-zeta-ns.service\n",
 		"Before=docker.service\n",
 	} {
@@ -92,7 +91,7 @@ func TestDockerPrereqsInstallerWritesTargetAndDockerDropIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read target returned error: %v", err)
 	}
-	if !strings.Contains(string(targetRaw), "Wants=yeet-plex-ns.service\n") {
+	if !strings.Contains(string(targetRaw), "Wants=catch.service yeet-ns.service yeet-plex-ns.service\n") {
 		t.Fatalf("target missing service unit:\n%s", string(targetRaw))
 	}
 	dropInRaw, err := os.ReadFile(filepath.Join(root, "etc/systemd/system/docker.service.d/yeet.conf"))
@@ -100,7 +99,7 @@ func TestDockerPrereqsInstallerWritesTargetAndDockerDropIn(t *testing.T) {
 		t.Fatalf("read docker drop-in returned error: %v", err)
 	}
 	for _, want := range []string{
-		"Requires=yeet-docker-prereqs.target\n",
+		"Wants=yeet-docker-prereqs.target\n",
 		"After=yeet-docker-prereqs.target\n",
 	} {
 		if !strings.Contains(string(dropInRaw), want) {

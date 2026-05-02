@@ -228,7 +228,10 @@ func (s *Server) installTS(service string, runInNetNS string, tsNet *db.Tailscal
 		unit.Arguments = append(unit.Arguments, "--tun=tap:"+tsNet.Interface)
 	} else {
 		unit.Arguments = append(unit.Arguments, "--tun="+tsNet.Interface)
-		unit.Requires = runInNetNS + ".service"
+		nsUnit := runInNetNS + ".service"
+		unit.Wants = nsUnit
+		unit.After = nsUnit
+		unit.ExecStartPre = []string{"/bin/systemctl is-active --quiet " + nsUnit}
 		unit.NetNS = runInNetNS
 		unit.ResolvConf = resolvConf
 	}

@@ -48,6 +48,7 @@ ConditionFileIsExecutable={{.Executable}}
 {{if .After}}After={{.After}}{{else if .Requires}}After={{.Requires}}{{end}}
 
 [Service]
+{{range .ExecStartPre}}ExecStartPre={{.}}{{end}}
 ExecStart={{.Executable}}{{range .Arguments}} {{.}}{{end}}
 {{range .ExecStartPost}}ExecStartPost={{.}}{{end}}
 {{if or .OneShot .Timer}}Type=oneshot{{end}}
@@ -131,6 +132,9 @@ type SystemdUnit struct {
 
 	// Before controls reverse service ordering.
 	Before string
+
+	// ExecStartPre commands run before ExecStart.
+	ExecStartPre []string
 
 	// ExecStartPost commands run after ExecStart and participate in systemd
 	// ordering constraints.

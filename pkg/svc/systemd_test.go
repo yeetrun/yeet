@@ -20,6 +20,9 @@ func TestSystemdUnitRendersExplicitDependencies(t *testing.T) {
 		Requires:   "local-fs.target",
 		After:      "containerd.service local-fs.target",
 		Before:     "yeet-docker-prereqs.target docker.service",
+		ExecStartPre: []string{
+			"/bin/systemctl is-active --quiet yeet-demo-ns.service",
+		},
 		ExecStartPost: []string{
 			"/bin/sh -c 'i=0; while [ \"$i\" -lt 600 ]; do [ -S /run/docker/plugins/yeet.sock ] && exit 0; i=$((i+1)); sleep 0.1; done; exit 1'",
 		},
@@ -40,6 +43,7 @@ func TestSystemdUnitRendersExplicitDependencies(t *testing.T) {
 		"Requires=local-fs.target\n",
 		"After=containerd.service local-fs.target\n",
 		"Before=yeet-docker-prereqs.target docker.service\n",
+		"ExecStartPre=/bin/systemctl is-active --quiet yeet-demo-ns.service\n",
 		"ExecStartPost=/bin/sh -c 'i=0; while [ \"$i\" -lt 600 ]; do [ -S /run/docker/plugins/yeet.sock ] && exit 0; i=$((i+1)); sleep 0.1; done; exit 1'\n",
 		"WantedBy=multi-user.target yeet-docker-prereqs.target\n",
 	} {
