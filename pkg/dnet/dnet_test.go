@@ -201,6 +201,58 @@ func TestDesiredPortForwardsByNetNSGroupsDeterministically(t *testing.T) {
 	}
 }
 
+func TestReconcilePortForwardsFromDataGroupsExistingNetNS(t *testing.T) {
+	data := &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"hoarder": {
+				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"web": {EndpointID: "web", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/3000": {EndpointID: "web", Port: 3000},
+				},
+			},
+			"missing": {
+				NetNS: "/var/run/netns/yeet-missing-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"app": {EndpointID: "app", IPv4: netip.MustParsePrefix("172.22.0.2/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/8080": {EndpointID: "app", Port: 8080},
+				},
+			},
+		},
+	}
+
+	exists := func(path string) (bool, error) {
+		return path == "/var/run/netns/yeet-hoarder-ns", nil
+	}
+	var syncs []capturedPortForwardSync
+	sync := func(netns string, desired []portForwardRule) error {
+		syncs = append(syncs, capturedPortForwardSync{
+			netns: netns,
+			rules: append([]portForwardRule(nil), desired...),
+		})
+		return nil
+	}
+
+	if err := reconcilePortForwardsFromData(data, exists, sync); err != nil {
+		t.Fatalf("reconcilePortForwardsFromData returned error: %v", err)
+	}
+	want := []capturedPortForwardSync{
+		{
+			netns: "/var/run/netns/yeet-hoarder-ns",
+			rules: []portForwardRule{
+				{Proto: "tcp", HostPort: 3000, TargetIP: "172.21.0.4", TargetPort: 3000},
+			},
+		},
+	}
+	if diff := cmp.Diff(want, syncs, cmp.AllowUnexported(capturedPortForwardSync{})); diff != "" {
+		t.Fatalf("syncs mismatch (-want +got):\n%s", diff)
+	}
+}
+
 type capturedPortForwardSync struct {
 	netns string
 	rules []portForwardRule
