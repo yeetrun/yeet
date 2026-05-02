@@ -450,11 +450,27 @@ func splitNonEmptyLines(output string) []string {
 	return out
 }
 
-func (p *plugin) syncPortForwards(netns string, desired []portForwardRule) error {
+func (p *plugin) currentPortForwardsForNetNS(netns string) ([]portForwardRule, error) {
+	dv, err := p.db.Get()
+	if err != nil {
+		return nil, err
+	}
+	return desiredPortForwardsForNetNS(dv.AsStruct(), netns), nil
+}
+
+func (p *plugin) syncCurrentPortForwards(netns string) error {
 	if p.syncPortForwardsFunc != nil {
+		desired, err := p.currentPortForwardsForNetNS(netns)
+		if err != nil {
+			return err
+		}
 		return p.syncPortForwardsFunc(netns, desired)
 	}
 	return p.runInNetNS(netns, func() error {
+		desired, err := p.currentPortForwardsForNetNS(netns)
+		if err != nil {
+			return err
+		}
 		return syncNetNSPortForwards(netns, desired, iptablesBackend{})
 	})
 }
@@ -471,7 +487,6 @@ func (p *plugin) LeaveNetwork(w http.ResponseWriter, r *http.Request) {
 	eid := req["EndpointID"].(string)
 	ifName := "yv-" + eid[:4]
 	var netns string
-	var desired []portForwardRule
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[nid]
 		if !ok {
@@ -484,7 +499,6 @@ func (p *plugin) LeaveNetwork(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(n.Endpoints, eid)
 		removeEndpointPortMappings(n, eid)
-		desired = desiredPortForwardsForNetNS(d, netns)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -492,7 +506,10 @@ func (p *plugin) LeaveNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := p.runInNetNS(netns, func() error {
 		var errs []error
-		if err := syncNetNSPortForwards(netns, desired, iptablesBackend{}); err != nil {
+		desired, err := p.currentPortForwardsForNetNS(netns)
+		if err != nil {
+			errs = append(errs, err)
+		} else if err := syncNetNSPortForwards(netns, desired, iptablesBackend{}); err != nil {
 			errs = append(errs, err)
 		}
 		if err := runCmd("ip", "link", "del", ifName); err != nil {
@@ -520,6 +537,9 @@ func endpointPortMap(endpointID string, portMaps []portMap) (map[db.ProtoPort]*d
 	for _, pm := range portMaps {
 		if pm.Proto != 6 && pm.Proto != 17 {
 			return nil, fmt.Errorf("unsupported protocol")
+		}
+		if pm.HostPortEnd != 0 && pm.HostPortEnd != pm.HostPort {
+			return nil, fmt.Errorf("unsupported port range")
 		}
 		dbpm[db.ProtoPort{Proto: pm.Proto, Port: pm.HostPort}] = &db.EndpointPort{
 			EndpointID: endpointID,
@@ -587,7 +607,6 @@ func (p *plugin) JoinNetwork(w http.ResponseWriter, r *http.Request) {
 	gateway := n.IPv4Gateway.Addr()
 	gatewayPrefix := n.IPv4Gateway
 	netns = n.NetNS
-	desired := desiredPortForwardsForNetNS(d, netns)
 
 	ifName := "yv-" + eid[:4]
 	peerName := ifName + "p"
@@ -611,6 +630,10 @@ func (p *plugin) JoinNetwork(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if err := ensurePostroutingChain(); err != nil {
+			return err
+		}
+		desired, err := p.currentPortForwardsForNetNS(netns)
+		if err != nil {
 			return err
 		}
 		return syncNetNSPortForwards(netns, desired, iptablesBackend{})
@@ -727,7 +750,6 @@ func (p *plugin) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	pfx := req.Interface.Address
 	var netns string
-	var desired []portForwardRule
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[req.NetworkID]
 		if !ok {
@@ -751,13 +773,12 @@ func (p *plugin) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		mak.Set(&n.Endpoints, req.EndpointID, ep)
-		desired = desiredPortForwardsForNetNS(d, netns)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := p.syncPortForwards(netns, desired); err != nil {
+	if err := p.syncCurrentPortForwards(netns); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -786,7 +807,6 @@ func (p *plugin) ProgramExternalConnectivity(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var netns string
-	var desired []portForwardRule
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[req.NetworkID]
 		if !ok {
@@ -797,13 +817,12 @@ func (p *plugin) ProgramExternalConnectivity(w http.ResponseWriter, r *http.Requ
 		}
 		netns = n.NetNS
 		setEndpointPortMappings(n, req.EndpointID, dbpm)
-		desired = desiredPortForwardsForNetNS(d, netns)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := p.syncPortForwards(netns, desired); err != nil {
+	if err := p.syncCurrentPortForwards(netns); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -818,7 +837,6 @@ func (p *plugin) RevokeExternalConnectivity(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var netns string
-	var desired []portForwardRule
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[req.NetworkID]
 		if !ok {
@@ -826,13 +844,12 @@ func (p *plugin) RevokeExternalConnectivity(w http.ResponseWriter, r *http.Reque
 		}
 		netns = n.NetNS
 		removeEndpointPortMappings(n, req.EndpointID)
-		desired = desiredPortForwardsForNetNS(d, netns)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := p.syncPortForwards(netns, desired); err != nil {
+	if err := p.syncCurrentPortForwards(netns); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -851,7 +868,6 @@ func (p *plugin) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var netns string
-	var desired []portForwardRule
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[req.NetworkID]
 		if !ok {
@@ -860,13 +876,12 @@ func (p *plugin) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 		netns = n.NetNS
 		removeEndpointPortMappings(n, req.EndpointID)
 		delete(n.Endpoints, req.EndpointID)
-		desired = desiredPortForwardsForNetNS(d, netns)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := p.syncPortForwards(netns, desired); err != nil {
+	if err := p.syncCurrentPortForwards(netns); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

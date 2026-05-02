@@ -299,6 +299,15 @@ func TestProgramExternalConnectivityUpdatesPortMapAndReplaysAggregateRules(t *te
 				},
 				PortMap: map[string]*db.EndpointPort{},
 			},
+			"metrics": {
+				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"api": {EndpointID: "api", IPv4: netip.MustParsePrefix("172.21.0.5/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/9090": {EndpointID: "api", Port: 9090},
+				},
+			},
 		},
 	}, &syncs)
 
@@ -319,6 +328,7 @@ func TestProgramExternalConnectivityUpdatesPortMapAndReplaysAggregateRules(t *te
 	}
 	wantRules := []portForwardRule{
 		{Proto: "tcp", HostPort: 3000, TargetIP: "172.21.0.4", TargetPort: 3000},
+		{Proto: "tcp", HostPort: 9090, TargetIP: "172.21.0.5", TargetPort: 9090},
 	}
 	if diff := cmp.Diff(wantRules, syncs[0].rules); diff != "" {
 		t.Fatalf("rules mismatch (-want +got):\n%s", diff)
@@ -334,6 +344,44 @@ func TestProgramExternalConnectivityUpdatesPortMapAndReplaysAggregateRules(t *te
 	}
 	if diff := cmp.Diff(want, got, cmp.AllowUnexported(db.EndpointPort{})); diff != "" {
 		t.Fatalf("port map mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestEndpointPortMapRejectsPortRanges(t *testing.T) {
+	_, err := endpointPortMap("web", []portMap{
+		{Proto: 6, Port: 3000, HostPort: 3000, HostPortEnd: 3002},
+	})
+	if err == nil {
+		t.Fatal("endpointPortMap returned nil error for port range")
+	}
+	if !strings.Contains(err.Error(), "unsupported port range") {
+		t.Fatalf("endpointPortMap error = %q, want unsupported port range", err)
+	}
+}
+
+func TestRevokeExternalConnectivityRouteRegistered(t *testing.T) {
+	root := t.TempDir()
+	store := db.NewStore(filepath.Join(root, "db.json"), filepath.Join(root, "services"))
+	if err := store.Set(&db.Data{}); err != nil {
+		t.Fatalf("store.Set: %v", err)
+	}
+	handler := New(store)
+
+	raw, err := json.Marshal(map[string]any{
+		"NetworkID":  "missing",
+		"EndpointID": "web",
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/NetworkDriver.RevokeExternalConnectivity", bytes.NewReader(raw))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("RevokeExternalConnectivity route status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "network not found") {
+		t.Fatalf("RevokeExternalConnectivity route body = %q, want network not found", rr.Body.String())
 	}
 }
 
