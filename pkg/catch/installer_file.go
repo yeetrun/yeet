@@ -473,7 +473,7 @@ func rewriteSystemdUnit(p, exe string, args []string) (string, error) {
 func (i *FileInstaller) ensureSystemdUnit() error {
 	runDir := i.s.serviceRunDir(i.cfg.ServiceName)
 	exe := filepath.Join(runDir, i.cfg.ServiceName)
-	if i.existingService.Valid() {
+	if i.existingService.Valid() && i.cfg.ServiceName != CatchService {
 		s := i.existingService.AsStruct()
 		p, ok := s.Artifacts.Staged(db.ArtifactSystemdUnit)
 		if ok {
@@ -500,6 +500,9 @@ func (i *FileInstaller) ensureSystemdUnit() error {
 		EnvFile:          "-" + filepath.Join(runDir, "env"), // "-" means optional
 		Timer:            i.cfg.Timer,
 	}
+	if i.cfg.ServiceName == CatchService {
+		configureCatchSystemdUnit(su)
+	}
 
 	if n, err := i.configureNetwork(); err != nil {
 		return fmt.Errorf("failed to configure network: %v", err)
@@ -518,6 +521,13 @@ func (i *FileInstaller) ensureSystemdUnit() error {
 		mak.Set(&i.artifacts, u, p)
 	}
 	return nil
+}
+
+func configureCatchSystemdUnit(su *svc.SystemdUnit) {
+	su.Wants = "containerd.service"
+	su.After = "containerd.service"
+	su.Before = dockerPrereqsTargetUnit + " " + dockerServiceUnit
+	su.ExecStartPost = append(su.ExecStartPost, dockerPluginSocketWaitCommand())
 }
 
 func (i *FileInstaller) installOnClose() error {
