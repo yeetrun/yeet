@@ -226,6 +226,14 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 		calls = append(calls, "docker-prereqs")
 		return nil
 	})
+	prevNAT := reconcileDockerNetNSPortForwards
+	reconcileDockerNetNSPortForwards = func(*db.Store) error {
+		calls = append(calls, "nat-reconcile")
+		return nil
+	}
+	defer func() {
+		reconcileDockerNetNSPortForwards = prevNAT
+	}()
 
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		name := sv.Name()
@@ -248,8 +256,69 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 		t.Fatal("timed out waiting for reconciliation to run")
 	}
 
-	if diff := cmp.Diff([]string{"install", "docker-prereqs", "reconcile:docker-netns"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{"install", "docker-prereqs", "nat-reconcile", "reconcile:docker-netns"}, calls); diff != "" {
 		t.Fatalf("unexpected startup call order (-want +got):\n%s", diff)
+	}
+}
+
+func TestServerStartLogsNATReconciliationFailureNonFatally(t *testing.T) {
+	s := newTestServer(t)
+	logs := captureLogs(t)
+	addTestServices(t, s, db.Service{
+		Name:             "docker-netns",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		Generation:       1,
+		LatestGeneration: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ns.service"}},
+		},
+	})
+
+	prevInstall := installYeetNSService
+	installYeetNSService = func() error { return nil }
+	defer func() {
+		installYeetNSService = prevInstall
+	}()
+	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+
+	prevNAT := reconcileDockerNetNSPortForwards
+	reconciledNAT := make(chan struct{})
+	reconcileDockerNetNSPortForwards = func(*db.Store) error {
+		close(reconciledNAT)
+		return errors.New("nat exploded")
+	}
+	defer func() {
+		reconcileDockerNetNSPortForwards = prevNAT
+	}()
+
+	reconciledLinks := make(chan struct{})
+	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
+		return fakeDockerNetNSReconciler{
+			name: sv.Name(),
+			reconcile: func(context.Context) (bool, error) {
+				close(reconciledLinks)
+				return false, nil
+			},
+		}, nil
+	}
+
+	s.Start()
+	t.Cleanup(s.Shutdown)
+
+	select {
+	case <-reconciledNAT:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for NAT reconciliation to run")
+	}
+	select {
+	case <-reconciledLinks:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for link reconciliation to run")
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "docker netns NAT reconciliation failed: nat exploded") {
+		t.Fatalf("missing NAT failure log:\n%s", out)
 	}
 }
 
@@ -272,6 +341,11 @@ func TestServerStartLogsReconciliationFailureNonFatally(t *testing.T) {
 		installYeetNSService = prevInstall
 	}()
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+	prevNAT := reconcileDockerNetNSPortForwards
+	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
+	defer func() {
+		reconcileDockerNetNSPortForwards = prevNAT
+	}()
 
 	reconciled := make(chan struct{})
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
@@ -321,6 +395,11 @@ func TestServerStartLogsRestartedNetNSService(t *testing.T) {
 		installYeetNSService = prevInstall
 	}()
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+	prevNAT := reconcileDockerNetNSPortForwards
+	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
+	defer func() {
+		reconcileDockerNetNSPortForwards = prevNAT
+	}()
 
 	reconciled := make(chan struct{})
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
@@ -365,6 +444,11 @@ func TestServerStartReturnsBeforeNetNSReconciliationFinishes(t *testing.T) {
 		installYeetNSService = prevInstall
 	}()
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+	prevNAT := reconcileDockerNetNSPortForwards
+	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
+	defer func() {
+		reconcileDockerNetNSPortForwards = prevNAT
+	}()
 
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -438,6 +522,11 @@ func TestServerShutdownCancelsNetNSReconciliation(t *testing.T) {
 		installYeetNSService = prevInstall
 	}()
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+	prevNAT := reconcileDockerNetNSPortForwards
+	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
+	defer func() {
+		reconcileDockerNetNSPortForwards = prevNAT
+	}()
 
 	started := make(chan struct{})
 	canceled := make(chan struct{})
@@ -519,6 +608,11 @@ func TestServerShutdownDoesNotLogCancellationAsFailure(t *testing.T) {
 		installYeetNSService = prevInstall
 	}()
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+	prevNAT := reconcileDockerNetNSPortForwards
+	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
+	defer func() {
+		reconcileDockerNetNSPortForwards = prevNAT
+	}()
 
 	started := make(chan struct{})
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
