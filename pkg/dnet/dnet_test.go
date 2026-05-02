@@ -103,6 +103,99 @@ func TestDesiredPortForwardsSkipsStalePortOwners(t *testing.T) {
 	}
 }
 
+func TestDesiredPortForwardsForNetNSAggregatesAndDedupes(t *testing.T) {
+	data := &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"active": {
+				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"web": {EndpointID: "web", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/3000": {EndpointID: "web", Port: 3000},
+				},
+			},
+			"duplicate": {
+				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"web-copy": {EndpointID: "web-copy", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/3000": {EndpointID: "web-copy", Port: 3000},
+				},
+			},
+			"stale": {
+				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"old": {EndpointID: "old", IPv4: netip.MustParsePrefix("172.21.0.99/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/3001": {EndpointID: "missing", Port: 3001},
+				},
+			},
+			"other": {
+				NetNS: "/var/run/netns/yeet-other-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"app": {EndpointID: "app", IPv4: netip.MustParsePrefix("172.22.0.2/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/8080": {EndpointID: "app", Port: 8080},
+				},
+			},
+		},
+	}
+
+	got := desiredPortForwardsForNetNS(data, "/var/run/netns/yeet-hoarder-ns")
+	want := []portForwardRule{
+		{Proto: "tcp", HostPort: 3000, TargetIP: "172.21.0.4", TargetPort: 3000},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("desiredPortForwardsForNetNS mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDesiredPortForwardsByNetNSGroupsDeterministically(t *testing.T) {
+	data := &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"b": {
+				NetNS: "/var/run/netns/yeet-b-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"app": {EndpointID: "app", IPv4: netip.MustParsePrefix("172.22.0.2/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/8080": {EndpointID: "app", Port: 8080},
+				},
+			},
+			"a": {
+				NetNS: "/var/run/netns/yeet-a-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"app": {EndpointID: "app", IPv4: netip.MustParsePrefix("172.21.0.2/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/3000": {EndpointID: "app", Port: 3000},
+				},
+			},
+			"empty": {
+				NetNS: "/var/run/netns/yeet-empty-ns",
+			},
+		},
+	}
+
+	got := desiredPortForwardsByNetNS(data)
+	want := map[string][]portForwardRule{
+		"/var/run/netns/yeet-a-ns": {
+			{Proto: "tcp", HostPort: 3000, TargetIP: "172.21.0.2", TargetPort: 3000},
+		},
+		"/var/run/netns/yeet-b-ns": {
+			{Proto: "tcp", HostPort: 8080, TargetIP: "172.22.0.2", TargetPort: 8080},
+		},
+		"/var/run/netns/yeet-empty-ns": nil,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("desiredPortForwardsByNetNS mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestRemoveEndpointPortMappings(t *testing.T) {
 	network := &db.DockerNetwork{
 		PortMap: map[string]*db.EndpointPort{
