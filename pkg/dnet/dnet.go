@@ -515,6 +515,27 @@ type portMap struct {
 	HostPortEnd uint16 `json:"HostPortEnd"`
 }
 
+func endpointPortMap(endpointID string, portMaps []portMap) (map[db.ProtoPort]*db.EndpointPort, error) {
+	dbpm := make(map[db.ProtoPort]*db.EndpointPort)
+	for _, pm := range portMaps {
+		if pm.Proto != 6 && pm.Proto != 17 {
+			return nil, fmt.Errorf("unsupported protocol")
+		}
+		dbpm[db.ProtoPort{Proto: pm.Proto, Port: pm.HostPort}] = &db.EndpointPort{
+			EndpointID: endpointID,
+			Port:       pm.Port,
+		}
+	}
+	return dbpm, nil
+}
+
+func setEndpointPortMappings(n *db.DockerNetwork, endpointID string, mappings map[db.ProtoPort]*db.EndpointPort) {
+	removeEndpointPortMappings(n, endpointID)
+	for k, pm := range mappings {
+		mak.Set(&n.PortMap, k.String(), pm)
+	}
+}
+
 func ensureBridge(addr netip.Prefix) error {
 	if err := runCmd("ip", "link", "show", "br0"); err == nil {
 		return nil
@@ -699,15 +720,10 @@ func (p *plugin) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	for _, pm := range req.Options.PortMap {
-		if pm.Proto != 6 && pm.Proto != 17 {
-			http.Error(w, "unsupported protocol", http.StatusBadRequest)
-			return
-		}
-	}
-	dbpm := make(map[db.ProtoPort]*db.EndpointPort)
-	for _, pm := range req.Options.PortMap {
-		dbpm[db.ProtoPort{Proto: pm.Proto, Port: pm.HostPort}] = &db.EndpointPort{EndpointID: req.EndpointID, Port: pm.Port}
+	dbpm, err := endpointPortMap(req.EndpointID, req.Options.PortMap)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 	pfx := req.Interface.Address
 	var netns string
@@ -727,10 +743,7 @@ func (p *plugin) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		} else {
 			ep.IPv4 = pfx
 		}
-		removeEndpointPortMappings(n, req.EndpointID)
-		for k, pm := range dbpm {
-			mak.Set(&n.PortMap, k.String(), pm)
-		}
+		setEndpointPortMappings(n, req.EndpointID, dbpm)
 		for k, existing := range n.Endpoints {
 			if existing.IPv4 == pfx && k != req.EndpointID {
 				removeEndpointPortMappings(n, k)
@@ -749,6 +762,80 @@ func (p *plugin) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	json.NewEncoder(w).Encode(SuccessResponse{})
+}
+
+type endpointConnectivityRequest struct {
+	NetworkID  string `json:"NetworkID"`
+	EndpointID string `json:"EndpointID"`
+	Options    struct {
+		PortMap []portMap `json:"com.docker.network.portmap"`
+	} `json:"Options"`
+}
+
+func (p *plugin) ProgramExternalConnectivity(w http.ResponseWriter, r *http.Request) {
+	body := requestLogger(r)
+	var req endpointConnectivityRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	dbpm, err := endpointPortMap(req.EndpointID, req.Options.PortMap)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var netns string
+	var desired []portForwardRule
+	if _, err := p.db.MutateData(func(d *db.Data) error {
+		n, ok := d.DockerNetworks[req.NetworkID]
+		if !ok {
+			return fmt.Errorf("network not found")
+		}
+		if _, ok := n.Endpoints[req.EndpointID]; !ok {
+			return fmt.Errorf("endpoint not found")
+		}
+		netns = n.NetNS
+		setEndpointPortMappings(n, req.EndpointID, dbpm)
+		desired = desiredPortForwardsForNetNS(d, netns)
+		return nil
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := p.syncPortForwards(netns, desired); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	json.NewEncoder(w).Encode(SuccessResponse{})
+}
+
+func (p *plugin) RevokeExternalConnectivity(w http.ResponseWriter, r *http.Request) {
+	body := requestLogger(r)
+	var req endpointConnectivityRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var netns string
+	var desired []portForwardRule
+	if _, err := p.db.MutateData(func(d *db.Data) error {
+		n, ok := d.DockerNetworks[req.NetworkID]
+		if !ok {
+			return fmt.Errorf("network not found")
+		}
+		netns = n.NetNS
+		removeEndpointPortMappings(n, req.EndpointID)
+		desired = desiredPortForwardsForNetNS(d, netns)
+		return nil
+	}); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := p.syncPortForwards(netns, desired); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	json.NewEncoder(w).Encode(SuccessResponse{})
 }
 
@@ -822,10 +909,8 @@ func New(db *db.Store) http.Handler {
 		requestLogger(r)
 		json.NewEncoder(w).Encode(SuccessResponse{})
 	})
-	mux.HandleFunc("/NetworkDriver.ProgramExternalConnectivity", func(w http.ResponseWriter, r *http.Request) {
-		requestLogger(r)
-		json.NewEncoder(w).Encode(SuccessResponse{})
-	})
+	mux.HandleFunc("/NetworkDriver.ProgramExternalConnectivity", p.ProgramExternalConnectivity)
+	mux.HandleFunc("/NetworkDriver.RevokeExternalConnectivity", p.RevokeExternalConnectivity)
 	mux.HandleFunc("/NetworkDriver.GetCapabilities", func(w http.ResponseWriter, r *http.Request) {
 		requestLogger(r)
 		resp := map[string]string{
