@@ -65,15 +65,13 @@ func dockerPluginSocketWaitCommand() string {
 
 func dockerPrereqsTargetContent(serviceUnits []string) string {
 	serviceUnits = sortedUniqueUnits(serviceUnits)
+	wants := append([]string{"catch.service", "yeet-ns.service"}, serviceUnits...)
 	after := append([]string{"catch.service", "yeet-ns.service"}, serviceUnits...)
 
 	var b strings.Builder
 	b.WriteString("[Unit]\n")
 	b.WriteString("Description=Yeet Docker network prerequisites\n")
-	b.WriteString("Requires=catch.service yeet-ns.service\n")
-	if len(serviceUnits) > 0 {
-		fmt.Fprintf(&b, "Wants=%s\n", strings.Join(serviceUnits, " "))
-	}
+	fmt.Fprintf(&b, "Wants=%s\n", strings.Join(wants, " "))
 	fmt.Fprintf(&b, "After=%s\n", strings.Join(after, " "))
 	b.WriteString("Before=docker.service\n")
 	return b.String()
@@ -81,7 +79,7 @@ func dockerPrereqsTargetContent(serviceUnits []string) string {
 
 func dockerDropInContent() string {
 	return "[Unit]\n" +
-		"Requires=" + dockerPrereqsTargetUnit + "\n" +
+		"Wants=" + dockerPrereqsTargetUnit + "\n" +
 		"After=" + dockerPrereqsTargetUnit + "\n"
 }
 

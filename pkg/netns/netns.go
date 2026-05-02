@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/yeetrun/yeet/pkg/db"
@@ -141,14 +142,23 @@ func InstallYeetNSService() error {
 	if err != nil {
 		return fmt.Errorf("failed to create service: %v", err)
 	}
+	alreadyActive := systemdUnitActive("yeet-ns.service")
 	if err := service.Install(); err != nil {
 		return fmt.Errorf("failed to install service: %v", err)
 	}
-	if err := service.Restart(); err != nil {
+	if alreadyActive {
+		log.Printf("installed updated yeet-ns.service; leaving active namespace running")
+		return nil
+	}
+	if err := service.Start(); err != nil {
 		return fmt.Errorf("failed to start yeet-ns service: %v", err)
 	}
 
 	return nil
+}
+
+func systemdUnitActive(unit string) bool {
+	return exec.Command("systemctl", "is-active", "--quiet", unit).Run() == nil
 }
 
 type yeetNSEnv struct {
@@ -186,6 +196,13 @@ func (e *Service) ServiceUnit() string {
 	return e.NetNS() + ".service"
 }
 
+func appendSystemdDep(existing, dep string) string {
+	if existing == "" {
+		return dep
+	}
+	return existing + " " + dep
+}
+
 func WriteServiceNetNS(binDir, runDir string, se Service) (map[db.ArtifactName]string, error) {
 	envFile := filepath.Join(binDir, fileutil.ApplyVersion("netns.env"))
 	if err := env.Write(envFile, se); err != nil {
@@ -199,13 +216,20 @@ func WriteServiceNetNS(binDir, runDir string, se Service) (map[db.ArtifactName]s
 		EnvFile:          filepath.Join(runDir, "netns.env"),
 		WorkingDirectory: "/",
 		Requires:         "yeet-ns.service",
+		After:            "yeet-ns.service",
 		Before:           dockerPrereqsTargetUnit + " " + dockerServiceUnit,
 		OneShot:          true,
 		StopCmd:          exe + " cleanup",
 		WantedBy:         "multi-user.target " + dockerPrereqsTargetUnit,
 	}
+	if se.MacvlanParent != "" {
+		unit.Wants = appendSystemdDep(unit.Wants, "network-online.target")
+		unit.After = appendSystemdDep(unit.After, "network-online.target")
+	}
 	if se.TailscaleTAPInterface != "" {
-		unit.Requires += " yeet-" + se.ServiceName + "-ts.service"
+		tsUnit := "yeet-" + se.ServiceName + "-ts.service"
+		unit.Requires = appendSystemdDep(unit.Requires, tsUnit)
+		unit.After = appendSystemdDep(unit.After, tsUnit)
 	}
 	artifacts, err := unit.WriteOutUnitFiles(binDir)
 	if err != nil {
