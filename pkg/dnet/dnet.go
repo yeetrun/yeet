@@ -264,6 +264,11 @@ func desiredPortForwards(n *db.DockerNetwork) []portForwardRule {
 			TargetPort: pm.Port,
 		})
 	}
+	sortPortForwardRules(rules)
+	return rules
+}
+
+func sortPortForwardRules(rules []portForwardRule) {
 	sort.Slice(rules, func(i, j int) bool {
 		if rules[i].Proto != rules[j].Proto {
 			return rules[i].Proto < rules[j].Proto
@@ -276,7 +281,54 @@ func desiredPortForwards(n *db.DockerNetwork) []portForwardRule {
 		}
 		return rules[i].TargetPort < rules[j].TargetPort
 	})
-	return rules
+}
+
+func dedupePortForwardRules(rules []portForwardRule) []portForwardRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	sortPortForwardRules(rules)
+	out := rules[:0]
+	for _, rule := range rules {
+		if len(out) > 0 && out[len(out)-1] == rule {
+			continue
+		}
+		out = append(out, rule)
+	}
+	return out
+}
+
+func desiredPortForwardsForNetNS(d *db.Data, netns string) []portForwardRule {
+	if d == nil || netns == "" {
+		return nil
+	}
+	var rules []portForwardRule
+	for _, network := range d.DockerNetworks {
+		if network == nil || network.NetNS != netns {
+			continue
+		}
+		rules = append(rules, desiredPortForwards(network)...)
+	}
+	return dedupePortForwardRules(rules)
+}
+
+func desiredPortForwardsByNetNS(d *db.Data) map[string][]portForwardRule {
+	out := map[string][]portForwardRule{}
+	if d == nil {
+		return out
+	}
+	for _, network := range d.DockerNetworks {
+		if network == nil || network.NetNS == "" {
+			continue
+		}
+		if _, ok := out[network.NetNS]; !ok {
+			out[network.NetNS] = nil
+		}
+	}
+	for netns := range out {
+		out[netns] = desiredPortForwardsForNetNS(d, netns)
+	}
+	return out
 }
 
 func removeEndpointPortMappings(n *db.DockerNetwork, endpointID string) {
