@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/dnet"
 	"github.com/yeetrun/yeet/pkg/netns"
 	"github.com/yeetrun/yeet/pkg/registry"
 	"github.com/yeetrun/yeet/pkg/svc"
@@ -40,6 +41,7 @@ const (
 var DockerStatusesUnknown = svc.DockerComposeStatus{}
 
 var installYeetNSService = netns.InstallYeetNSService
+var reconcileDockerNetNSPortForwards = dnet.ReconcilePortForwards
 
 // Server hosts the RPC handlers that manage services and exec commands.
 type Server struct {
@@ -181,6 +183,9 @@ func (s *Server) Start() {
 		log.Fatalf("Failed to install Docker prerequisites: %v", err)
 	}
 	s.waitGroup.Go(func() {
+		if err := reconcileDockerNetNSPortForwards(s.cfg.DB); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("docker netns NAT reconciliation failed: %v", err)
+		}
 		if err := s.reconcileNetNSBackedDockerServices(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("netns reconciliation failed: %v", err)
 		}
