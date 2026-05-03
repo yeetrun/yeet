@@ -4,31 +4,20 @@ cyclop|cmd/catch/catch.go|main
 cyclop|cmd/yeet/yeet.go|main
 cyclop|pkg/catch/catch.go|RemoveService
 cyclop|pkg/catch/docker_prereqs.go|writeTextFileIfChanged
-cyclop|pkg/catch/installer_file.go|ensureSystemdUnit
-cyclop|pkg/catch/installer_file.go|parseNetwork
 cyclop|pkg/catch/installer_service.go|doInstall
 cyclop|pkg/catch/mount.go|umount
 cyclop|pkg/catch/rpc.go|handleEventsWS
 cyclop|pkg/catch/rpc.go|handleExecWS
-cyclop|pkg/catch/service_info.go|labelForIP
-cyclop|pkg/catch/service_info.go|serviceIPList
 cyclop|pkg/catch/tsns.go|downloadTailscale
 cyclop|pkg/catch/tsns.go|installTS
 cyclop|pkg/catch/tty_env.go|editEnvCmdFunc
 cyclop|pkg/catch/tty_env.go|envCmdFunc
-cyclop|pkg/catch/tty_service.go|removeCmdFunc
-cyclop|pkg/catchrpc/client.go|Call
-cyclop|pkg/catchrpc/client.go|Events
 cyclop|pkg/compress/compress.go|SelectEncoding
 cyclop|pkg/copyutil/move.go|moveTreeContents
 cyclop|pkg/copyutil/tar.go|TarFileWithObserver
 cyclop|pkg/cronutil/cronutil.go|CronToCalender
 cyclop|pkg/dnet/dnet.go|JoinNetwork
 cyclop|pkg/dnet/dnet.go|syncNetNSPortForwards
-cyclop|pkg/netns/firewall.go|EnsureFirewall
-cyclop|pkg/netns/firewall.go|VerifyFirewall
-cyclop|pkg/netns/netns.go|InstallYeetNSService
-cyclop|pkg/netns/netns.go|writeNetNSScripts
 cyclop|pkg/registry/containerd.go|GetManifest
 cyclop|pkg/registry/containerd.go|PutManifest
 cyclop|pkg/svc/docker.go|Statuses
@@ -40,8 +29,6 @@ cyclop|pkg/yeet/exec_remote.go|execRemote
 cyclop|pkg/yeet/init_install_filter.go|Absorb
 cyclop|pkg/yeet/run_changes.go|payloadLabelFromLocal
 cyclop|pkg/yeet/run_changes.go|runWithChanges
-cyclop|pkg/yeet/ssh_cmd.go|HandleSSH
-cyclop|pkg/yeet/ssh_cmd.go|serviceShellCommand
 cyclop|pkg/yeet/svc_cmd.go|handleStatusCommand
 cyclop|pkg/yeet/svc_cmd.go|isValidEnvKey
 cyclop|pkg/yeet/svc_cmd.go|renderStatusTables
@@ -62,38 +49,15 @@ errcheck|cmd/catch/catch.go|startDockerPlugin|source:os.Remove(sock)|Error retur
 errcheck|pkg/catch/artifact_hashes.go|hashFileSHA256|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/catch/docker_prereqs.go|writeTextFileIfChanged|source:defer os.Remove(tmpName)|Error return value of `os.Remove` is not checked
 errcheck|pkg/catch/docker_prereqs.go|writeTextFileIfChanged|source:tmp.Close()|Error return value of `tmp.Close` is not checked
-errcheck|pkg/catch/installer_file.go|(*FileInstaller).installOnClose|source:defer os.Remove(unpackPath)|Error return value of `os.Remove` is not checked
-errcheck|pkg/catch/installer_file.go|(*FileInstaller).installOnClose|source:os.Remove(tmppath)|Error return value of `os.Remove` is not checked
-errcheck|pkg/catch/installer_file.go|hostDefaultRouteInterface|source:defer f.Close()|Error return value of `f.Close` is not checked
-errcheck|pkg/catch/installer_file.go|rewriteSystemdUnit|source:defer f.Close()|Error return value of `f.Close` is not checked
-errcheck|pkg/catch/installer_file.go|rewriteSystemdUnit|source:defer out.Close()|Error return value of `out.Close` is not checked
-errcheck|pkg/catch/installer_file.go|rewriteSystemdUnit|source:fmt.Fprintf(out, "ExecStart=%s %s\n", exe, strings.Join(args, " "))|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/installer_file.go|rewriteSystemdUnit|source:fmt.Fprintln(out, line)|Error return value of `fmt.Fprintln` is not checked
 errcheck|pkg/catch/rpc.go|(*Server).handleEventsWS|source:defer conn.Close()|Error return value of `conn.Close` is not checked
 errcheck|pkg/catch/rpc.go|(*Server).handleExecWS|source:defer conn.Close()|Error return value of `conn.Close` is not checked
 errcheck|pkg/catch/rpc.go|(*Server).handleRPC|source:defer r.Body.Close()|Error return value of `r.Body.Close` is not checked
 errcheck|pkg/catch/tsns.go|(*Server).downloadTailscale|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/catch/tsns.go|(*Server).downloadTailscale|source:defer resp.Body.Close()|Error return value of `resp.Body.Close` is not checked
-errcheck|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc|source:defer f.Close()|Error return value of `f.Close` is not checked
-errcheck|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc|source:defer fi.Close()|Error return value of `fi.Close` is not checked
-errcheck|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc|source:defer os.Remove(tmpPath)|Error return value of `os.Remove` is not checked
-errcheck|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc|source:defer os.Remove(tmpf.Name())|Error return value of `os.Remove` is not checked
-errcheck|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc|source:defer srcf.Close()|Error return value of `srcf.Close` is not checked
-errcheck|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc|source:defer tmpf.Close()|Error return value of `tmpf.Close` is not checked
-errcheck|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc|source:fmt.Fprintf(srcf, "\n\n")|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc|source:fmt.Fprintf(srcf, editUnitsSeparator, name)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_edit.go|copyToTmpFile|source:tmpf.Close()|Error return value of `tmpf.Close` is not checked
 errcheck|pkg/catch/tty_env.go|(*Server).printEnv|source:fmt.Fprintf(w, "%s\n", b)|Error return value of `fmt.Fprintf` is not checked
 errcheck|pkg/catch/tty_env.go|(*ttyExecer).editEnvCmdFunc|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/catch/tty_env.go|(*ttyExecer).editEnvCmdFunc|source:defer fi.Close()|Error return value of `fi.Close` is not checked
 errcheck|pkg/catch/tty_env.go|(*ttyExecer).editEnvCmdFunc|source:defer os.Remove(tmpPath)|Error return value of `os.Remove` is not checked
-errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:defer w.Flush()|Error return value of `w.Flush` is not checked
-errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", status.ServiceName, status.ServiceType, component.Name, component.Status)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:fmt.Fprintf(w, "%s\t%s\t-\t%s\t\n", status.ServiceName, status.ServiceType, component.Status)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:fmt.Fprintln(w, "SERVICE\tTYPE\tCONTAINER\tSTATUS\t")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catchrpc/client.go|(*Client).Call|source:defer resp.Body.Close()|Error return value of `resp.Body.Close` is not checked
-errcheck|pkg/catchrpc/client.go|(*Client).Events|source:defer conn.Close()|Error return value of `conn.Close` is not checked
-errcheck|pkg/catchrpc/client.go|(*Client).Exec|source:defer conn.Close()|Error return value of `conn.Close` is not checked
 errcheck|pkg/copyutil/tar.go|ExtractTarWithOptions|source:f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/copyutil/tar.go|TarDirectoryWithObserver|source:defer tw.Close()|Error return value of `tw.Close` is not checked
 errcheck|pkg/copyutil/tar.go|TarDirectoryWithObserver|source:f.Close()|Error return value of `f.Close` is not checked
@@ -101,8 +65,6 @@ errcheck|pkg/copyutil/tar.go|TarFileWithObserver|source:defer tw.Close()|Error r
 errcheck|pkg/copyutil/tar.go|TarFileWithObserver|source:f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/db/db.go|(*Store).readLocked|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/db/db.go|(*Store).saveLocked|source:defer os.Remove(tmp.Name())|Error return value of `os.Remove` is not checked
-errcheck|pkg/netns/netns.go|InstallYeetNSService|source:defer os.Remove("yeet-ns.env.tmp")|Error return value of `os.Remove` is not checked
-errcheck|pkg/netns/netns.go|InstallYeetNSService|source:defer os.Remove(f)|Error return value of `os.Remove` is not checked
 errcheck|pkg/registry/containerd.go|(*ContainerdCacheStorage).PutManifest|source:s.AbortUpload(ctx, upload.UUID)|Error return value of `s.AbortUpload` is not checked
 errcheck|pkg/svc/docker.go|(*DockerComposeService).Remove|source:s.sd.Stop()|Error return value of `s.sd.Stop` is not checked
 errcheck|pkg/svc/docker.go|(*DockerComposeService).Stop|source:s.sd.Stop()|Error return value of `s.sd.Stop` is not checked
@@ -142,19 +104,13 @@ errcheck|pkg/yeet/svc_cmd.go|tryRunRemoteImage|source:defer os.RemoveAll(tmpDir)
 gocognit|cmd/yeet/cli_bridge.go|bridgeServiceArgs
 gocognit|cmd/yeet/cli_bridge.go|findServiceIndex
 gocognit|pkg/catch/docker.go|(*Server).monitorDocker
-gocognit|pkg/catch/installer_file.go|(*FileInstaller).configureNetwork
-gocognit|pkg/catch/installer_file.go|(*FileInstaller).installOnClose
 gocognit|pkg/catch/rpc.go|(*Server).handleRPC
 gocognit|pkg/catch/systemd.go|(*Server).monitorSystemd
-gocognit|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc
-gocognit|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc
-gocognit|pkg/catchrpc/client.go|(*Client).Exec
 gocognit|pkg/cli/cli.go|splitArgsForParsing
 gocognit|pkg/copyutil/tar.go|ExtractTarWithOptions
 gocognit|pkg/copyutil/tar.go|TarDirectoryWithObserver
 gocognit|pkg/yeet/copy_cmd.go|copyFromRemote
 gocognit|pkg/yeet/copy_cmd.go|copyToRemote
-gocognit|pkg/yeet/copy_cmd.go|parseCopyArgs
 gocognit|pkg/yeet/init.go|initCatch
 gocognit|pkg/yeet/run_changes.go|detectRunChanges
 gocognit|pkg/yeet/svc_cmd.go|HandleSvcCmd
@@ -162,9 +118,6 @@ gocognit|pkg/yeet/svc_cmd.go|splitRunArgsForParsing
 gocognit|pkg/yeet/svc_cmd.go|splitRunPayloadArgs
 govet|pkg/cli/cli.go|consumesValue|source:for t.Kind() == reflect.Ptr {|inline: Constant reflect.Ptr should be inlined
 govet|pkg/cli/cli.go|flagSpecsFromStruct|source:if t.Kind() == reflect.Ptr {|inline: Constant reflect.Ptr should be inlined
-staticcheck|pkg/catch/installer_file.go|(*FileInstaller).parseNetwork|source:switch {|QF1002: could use tagged switch on net
-staticcheck|pkg/catch/tty_service.go|(*systemdServiceRunner).Logs|source:args = append(args, "--unit="+s.SystemdService.Name())|QF1008: could remove embedded field "SystemdService" from selector
-staticcheck|pkg/catch/tty_service.go|(*systemdServiceRunner).Remove|source:return s.SystemdService.Uninstall()|QF1008: could remove embedded field "SystemdService" from selector
 staticcheck|pkg/registry/containerd.go|(*readAtCloserAsReader).Read|source:n, err := r.ReaderAt.ReadAt(p, r.offset)|QF1008: could remove embedded field "ReaderAt" from selector
 staticcheck|pkg/yeet/svc_cmd.go|isValidEnvKey|source:if !(r == '_' // (r >= 'A' && r <= 'Z') // (r >= 'a' && r <= 'z') // (r >= '0' && r <= '9')) {|QF1001: could apply De Morgan's law
 staticcheck|pkg/yeet/svc_cmd.go|isValidEnvKey|source:if !(r == '_' // (r >= 'A' && r <= 'Z') // (r >= 'a' && r <= 'z')) {|QF1001: could apply De Morgan's law

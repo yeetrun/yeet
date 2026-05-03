@@ -6,6 +6,7 @@ package netns
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -163,34 +164,9 @@ COMMIT
 func EnsureFirewall(backend FirewallBackend, spec FirewallSpec) error {
 	switch backend {
 	case BackendNFT:
-		if err := deleteNFTTable(); err != nil {
-			return err
-		}
-		return runCommandWithInput([]byte(RenderFirewallRules(backend, spec)), "nft", "-f", "-")
+		return ensureNFTFirewall(spec)
 	case BackendIPTablesNFT, BackendIPTablesLegacy:
-		bin, err := iptablesBinary(backend)
-		if err != nil {
-			return err
-		}
-		if err := ensureIPTablesChain(bin, "filter", "YEET_FORWARD"); err != nil {
-			return err
-		}
-		if err := ensureIPTablesRule(bin, "filter", "FORWARD", "-j", "YEET_FORWARD"); err != nil {
-			return err
-		}
-		if err := ensureIPTablesRule(bin, "filter", "YEET_FORWARD", "-i", spec.BridgeIf, "-j", "ACCEPT"); err != nil {
-			return err
-		}
-		if err := ensureIPTablesRule(bin, "filter", "YEET_FORWARD", "-o", spec.BridgeIf, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"); err != nil {
-			return err
-		}
-		if err := ensureIPTablesChain(bin, "nat", "YEET_POSTROUTING"); err != nil {
-			return err
-		}
-		if err := ensureIPTablesRule(bin, "nat", "POSTROUTING", "-j", "YEET_POSTROUTING"); err != nil {
-			return err
-		}
-		return ensureIPTablesRule(bin, "nat", "YEET_POSTROUTING", "-s", spec.SubnetCIDR, "!", "-d", spec.SubnetCIDR, "-j", "MASQUERADE")
+		return ensureIPTablesFirewall(backend, spec)
 	default:
 		return fmt.Errorf("unsupported firewall backend %q", backend)
 	}
@@ -199,61 +175,125 @@ func EnsureFirewall(backend FirewallBackend, spec FirewallSpec) error {
 func VerifyFirewall(backend FirewallBackend, spec FirewallSpec) error {
 	switch backend {
 	case BackendNFT:
-		out, err := commandOutput("nft", "list", "table", "ip", "yeet")
-		if err != nil {
-			return err
-		}
-		for _, marker := range []string{"table ip yeet", spec.BridgeIf, spec.SubnetCIDR, "masquerade"} {
-			if !strings.Contains(out, marker) {
-				return fmt.Errorf("missing %q in nft firewall state", marker)
-			}
-		}
-		return nil
+		return verifyNFTFirewall(spec)
 	case BackendIPTablesNFT, BackendIPTablesLegacy:
-		bin, err := iptablesBinary(backend)
-		if err != nil {
-			return err
-		}
-
-		forwardOut, err := commandOutput(bin, "-S", "YEET_FORWARD")
-		if err != nil {
-			return err
-		}
-		if !strings.Contains(forwardOut, "-A YEET_FORWARD -i "+spec.BridgeIf+" -j ACCEPT") {
-			return fmt.Errorf("missing yeet forward ingress rule")
-		}
-		if !strings.Contains(forwardOut, "-A YEET_FORWARD -o "+spec.BridgeIf+" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT") {
-			return fmt.Errorf("missing yeet forward return rule")
-		}
-
-		postroutingOut, err := commandOutput(bin, "-t", "nat", "-S", "YEET_POSTROUTING")
-		if err != nil {
-			return err
-		}
-		wantMASQ := fmt.Sprintf("-A YEET_POSTROUTING -s %s ! -d %s -j MASQUERADE", spec.SubnetCIDR, spec.SubnetCIDR)
-		if !strings.Contains(postroutingOut, wantMASQ) {
-			return fmt.Errorf("missing yeet postrouting masquerade rule")
-		}
-
-		rootForwardOut, err := commandOutput(bin, "-S", "FORWARD")
-		if err != nil {
-			return err
-		}
-		if !strings.Contains(rootForwardOut, "-A FORWARD -j YEET_FORWARD") {
-			return fmt.Errorf("missing yeet forward jump rule")
-		}
-
-		rootPostroutingOut, err := commandOutput(bin, "-t", "nat", "-S", "POSTROUTING")
-		if err != nil {
-			return err
-		}
-		if !strings.Contains(rootPostroutingOut, "-A POSTROUTING -j YEET_POSTROUTING") {
-			return fmt.Errorf("missing yeet postrouting jump rule")
-		}
-		return nil
+		return verifyIPTablesFirewall(backend, spec)
 	default:
 		return fmt.Errorf("unsupported firewall backend %q", backend)
 	}
+}
+
+func ensureNFTFirewall(spec FirewallSpec) error {
+	if err := deleteNFTTable(); err != nil {
+		return err
+	}
+	return runCommandWithInput([]byte(RenderFirewallRules(BackendNFT, spec)), "nft", "-f", "-")
+}
+
+func ensureIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
+	bin, err := iptablesBinary(backend)
+	if err != nil {
+		return err
+	}
+	return runFirewallSteps([]func() error{
+		func() error { return ensureIPTablesChain(bin, "filter", "YEET_FORWARD") },
+		func() error { return ensureIPTablesRule(bin, "filter", "FORWARD", "-j", "YEET_FORWARD") },
+		func() error {
+			return ensureIPTablesRule(bin, "filter", "YEET_FORWARD", "-i", spec.BridgeIf, "-j", "ACCEPT")
+		},
+		func() error {
+			return ensureIPTablesRule(bin, "filter", "YEET_FORWARD", "-o", spec.BridgeIf, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		},
+		func() error { return ensureIPTablesChain(bin, "nat", "YEET_POSTROUTING") },
+		func() error { return ensureIPTablesRule(bin, "nat", "POSTROUTING", "-j", "YEET_POSTROUTING") },
+		func() error {
+			return ensureIPTablesRule(bin, "nat", "YEET_POSTROUTING", "-s", spec.SubnetCIDR, "!", "-d", spec.SubnetCIDR, "-j", "MASQUERADE")
+		},
+	})
+}
+
+func runFirewallSteps(steps []func() error) error {
+	for _, step := range steps {
+		if err := step(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func verifyNFTFirewall(spec FirewallSpec) error {
+	out, err := commandOutput("nft", "list", "table", "ip", "yeet")
+	if err != nil {
+		return err
+	}
+	return verifyOutputContains("nft firewall state", out, []string{
+		"table ip yeet",
+		spec.BridgeIf,
+		spec.SubnetCIDR,
+		"masquerade",
+	})
+}
+
+func verifyOutputContains(label, out string, markers []string) error {
+	for _, marker := range markers {
+		if !strings.Contains(out, marker) {
+			return fmt.Errorf("missing %q in %s", marker, label)
+		}
+	}
+	return nil
+}
+
+type firewallStateCheck struct {
+	args []string
+	want string
+	err  error
+}
+
+func verifyIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
+	bin, err := iptablesBinary(backend)
+	if err != nil {
+		return err
+	}
+	return verifyFirewallStateChecks(bin, []firewallStateCheck{
+		{
+			args: []string{"-S", "YEET_FORWARD"},
+			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -j ACCEPT",
+			err:  errors.New("missing yeet forward ingress rule"),
+		},
+		{
+			args: []string{"-S", "YEET_FORWARD"},
+			want: "-A YEET_FORWARD -o " + spec.BridgeIf + " -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+			err:  errors.New("missing yeet forward return rule"),
+		},
+		{
+			args: []string{"-t", "nat", "-S", "YEET_POSTROUTING"},
+			want: fmt.Sprintf("-A YEET_POSTROUTING -s %s ! -d %s -j MASQUERADE", spec.SubnetCIDR, spec.SubnetCIDR),
+			err:  errors.New("missing yeet postrouting masquerade rule"),
+		},
+		{
+			args: []string{"-S", "FORWARD"},
+			want: "-A FORWARD -j YEET_FORWARD",
+			err:  errors.New("missing yeet forward jump rule"),
+		},
+		{
+			args: []string{"-t", "nat", "-S", "POSTROUTING"},
+			want: "-A POSTROUTING -j YEET_POSTROUTING",
+			err:  errors.New("missing yeet postrouting jump rule"),
+		},
+	})
+}
+
+func verifyFirewallStateChecks(bin string, checks []firewallStateCheck) error {
+	for _, check := range checks {
+		out, err := commandOutput(bin, check.args...)
+		if err != nil {
+			return err
+		}
+		if !strings.Contains(out, check.want) {
+			return check.err
+		}
+	}
+	return nil
 }
 
 func CleanupFirewall(backend FirewallBackend) error {

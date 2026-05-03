@@ -60,12 +60,7 @@ func runCopyCommand(args []string, cfg *ProjectConfig) error {
 }
 
 func parseCopyArgs(args []string) (copyRequest, error) {
-	req := copyRequest{
-		Recursive: true,
-		Archive:   true,
-		Compress:  true,
-		Verbose:   true,
-	}
+	req := defaultCopyRequest()
 	operands := make([]string, 0, 2)
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -76,63 +71,72 @@ func parseCopyArgs(args []string) (copyRequest, error) {
 			break
 		}
 		if strings.HasPrefix(arg, "-") && arg != "-" {
-			if strings.HasPrefix(arg, "--") {
-				switch arg {
-				case "--recursive":
-					req.Recursive = true
-					continue
-				case "--archive":
-					req.Archive = true
-					req.Recursive = true
-					continue
-				case "--compress":
-					req.Compress = true
-					continue
-				case "--verbose":
-					req.Verbose = true
-					continue
-				default:
-					return copyRequest{}, fmt.Errorf("unknown flag %q", arg)
-				}
-			}
-			if len(arg) > 2 {
-				for _, flag := range arg[1:] {
-					switch flag {
-					case 'r', 'R':
-						req.Recursive = true
-					case 'a':
-						req.Archive = true
-						req.Recursive = true
-					case 'z':
-						req.Compress = true
-					case 'v':
-						req.Verbose = true
-					default:
-						return copyRequest{}, fmt.Errorf("unknown flag %q", arg)
-					}
-				}
-				continue
-			}
-			switch arg {
-			case "-r", "-R":
-				req.Recursive = true
-				continue
-			case "-a":
-				req.Archive = true
-				req.Recursive = true
-				continue
-			case "-z":
-				req.Compress = true
-				continue
-			case "-v":
-				req.Verbose = true
-				continue
-			default:
+			if err := applyCopyFlag(&req, arg); err != nil {
 				return copyRequest{}, fmt.Errorf("unknown flag %q", arg)
 			}
+			continue
 		}
 		operands = append(operands, arg)
 	}
+	return finishCopyRequest(req, operands)
+}
+
+func defaultCopyRequest() copyRequest {
+	return copyRequest{
+		Recursive: true,
+		Archive:   true,
+		Compress:  true,
+		Verbose:   true,
+	}
+}
+
+func applyCopyFlag(req *copyRequest, arg string) error {
+	if strings.HasPrefix(arg, "--") {
+		return applyLongCopyFlag(req, arg)
+	}
+	for _, flag := range arg[1:] {
+		if err := applyShortCopyFlag(req, flag); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyLongCopyFlag(req *copyRequest, arg string) error {
+	switch arg {
+	case "--recursive":
+		req.Recursive = true
+	case "--archive":
+		req.Archive = true
+		req.Recursive = true
+	case "--compress":
+		req.Compress = true
+	case "--verbose":
+		req.Verbose = true
+	default:
+		return fmt.Errorf("unknown flag")
+	}
+	return nil
+}
+
+func applyShortCopyFlag(req *copyRequest, flag rune) error {
+	switch flag {
+	case 'r', 'R':
+		req.Recursive = true
+	case 'a':
+		req.Archive = true
+		req.Recursive = true
+	case 'z':
+		req.Compress = true
+	case 'v':
+		req.Verbose = true
+	default:
+		return fmt.Errorf("unknown flag")
+	}
+	return nil
+}
+
+func finishCopyRequest(req copyRequest, operands []string) (copyRequest, error) {
 	if len(operands) != 2 {
 		return copyRequest{}, fmt.Errorf("copy requires exactly two paths")
 	}
