@@ -48,6 +48,10 @@ go tool cover -func=.tmp/quality/coverage.out | tee .tmp/quality/coverage.txt
 description = "Run tests, coverage, CRAP, and lint quality gates"
 run = "tools/quality/check"
 
+[tasks."quality:goal"]
+description = "Run the industry-standard quality goal check"
+run = "tools/quality/goal"
+
 [tasks."quality:baseline"]
 description = "Refresh the current CRAP and lint baselines"
 run = "tools/quality/check --update-baseline"
