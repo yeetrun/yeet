@@ -473,19 +473,19 @@ Expected: PASS
 )
 ```
 
-### Task 5: Live Verification On `lab-host` And `cloud-host`
+### Task 5: Live Verification On `edge-a` And `edge-b`
 
 **Files:**
 - Modify: none
-- Test: live hosts `yeet-lab`, `yeet-cloud`
+- Test: live hosts `yeet-edge-a`, `yeet-edge-b`
 
 - [ ] **Step 1: Update `catch` on both hosts**
 
 Run:
 
 ```bash
-CATCH_HOST=yeet-lab go run ./cmd/yeet init root@lab-host
-CATCH_HOST=yeet-cloud go run ./cmd/yeet init root@cloud-host
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet init root@edge-a
+CATCH_HOST=yeet-edge-b go run ./cmd/yeet init root@edge-b
 ```
 
 Expected: both hosts install the new catch binary cleanly.
@@ -508,8 +508,8 @@ EOF
 Run:
 
 ```bash
-CATCH_HOST=yeet-lab go run ./cmd/yeet run netns-reconcile-check-lab-host "$tmpdir/compose.yml" --net=svc
-CATCH_HOST=yeet-cloud go run ./cmd/yeet run netns-reconcile-check-cloud-host "$tmpdir/compose.yml" --net=svc
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet run netns-reconcile-check-edge-a "$tmpdir/compose.yml" --net=svc
+CATCH_HOST=yeet-edge-b go run ./cmd/yeet run netns-reconcile-check-edge-b "$tmpdir/compose.yml" --net=svc
 ```
 
 Expected: both services deploy and show as running.
@@ -519,9 +519,9 @@ Expected: both services deploy and show as running.
 Run:
 
 ```bash
-ssh root@lab-host 'ns=yeet-netns-reconcile-check-lab-host-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-lab-host | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"'
+ssh root@edge-a 'ns=yeet-netns-reconcile-check-edge-a-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-edge-a | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"'
 
-ssh root@cloud-host 'ns=yeet-netns-reconcile-check-cloud-host-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-cloud-host | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"'
+ssh root@edge-b 'ns=yeet-netns-reconcile-check-edge-b-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-edge-b | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"'
 ```
 
 Expected: named and container identities match before the forced refresh.
@@ -531,8 +531,8 @@ Expected: named and container identities match before the forced refresh.
 Run:
 
 ```bash
-ssh root@lab-host 'systemctl restart yeet-netns-reconcile-check-lab-host-ns.service'
-ssh root@cloud-host 'systemctl restart yeet-netns-reconcile-check-cloud-host-ns.service'
+ssh root@edge-a 'systemctl restart yeet-netns-reconcile-check-edge-a-ns.service'
+ssh root@edge-b 'systemctl restart yeet-netns-reconcile-check-edge-b-ns.service'
 ```
 
 Expected before catch reconciliation: the named netns identity changes while the currently running container still shows the old netns identity.
@@ -542,8 +542,8 @@ Expected before catch reconciliation: the named netns identity changes while the
 Run:
 
 ```bash
-ssh root@lab-host 'systemctl restart catch'
-ssh root@cloud-host 'systemctl restart catch'
+ssh root@edge-a 'systemctl restart catch'
+ssh root@edge-b 'systemctl restart catch'
 ```
 
 Expected: catch startup runs the scan and restarts only the affected temp compose service on each host.
@@ -553,9 +553,9 @@ Expected: catch startup runs the scan and restarts only the affected temp compos
 Run:
 
 ```bash
-ssh root@lab-host 'ns=yeet-netns-reconcile-check-lab-host-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-lab-host | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"; journalctl -u catch --since "5 minutes ago" --no-pager | tail -n 50'
+ssh root@edge-a 'ns=yeet-netns-reconcile-check-edge-a-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-edge-a | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"; journalctl -u catch --since "5 minutes ago" --no-pager | tail -n 50'
 
-ssh root@cloud-host 'ns=yeet-netns-reconcile-check-cloud-host-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-cloud-host | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"; journalctl -u catch --since "5 minutes ago" --no-pager | tail -n 50'
+ssh root@edge-b 'ns=yeet-netns-reconcile-check-edge-b-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-edge-b | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"; journalctl -u catch --since "5 minutes ago" --no-pager | tail -n 50'
 ```
 
 Expected:
@@ -567,8 +567,8 @@ Expected:
 Run:
 
 ```bash
-CATCH_HOST=yeet-lab go run ./cmd/yeet restart --service netns-reconcile-check-lab-host
-CATCH_HOST=yeet-cloud go run ./cmd/yeet restart --service netns-reconcile-check-cloud-host
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet restart --service netns-reconcile-check-edge-a
+CATCH_HOST=yeet-edge-b go run ./cmd/yeet restart --service netns-reconcile-check-edge-b
 ```
 
 Expected: both commands succeed without unnecessary extra restarts when the project is already in the correct namespace.
@@ -578,8 +578,8 @@ Expected: both commands succeed without unnecessary extra restarts when the proj
 Run interactively:
 
 ```bash
-CATCH_HOST=yeet-lab go run ./cmd/yeet rm netns-reconcile-check-lab-host
-CATCH_HOST=yeet-cloud go run ./cmd/yeet rm netns-reconcile-check-cloud-host
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet rm netns-reconcile-check-edge-a
+CATCH_HOST=yeet-edge-b go run ./cmd/yeet rm netns-reconcile-check-edge-b
 ```
 
 Expected: both services are removed cleanly.

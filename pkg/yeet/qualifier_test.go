@@ -16,15 +16,15 @@ func TestSetServiceOverrideQualified(t *testing.T) {
 	}()
 
 	loadedPrefs.DefaultHost = "catch"
-	SetServiceOverride("plex@yeet-lab")
+	SetServiceOverride("media@yeet-edge-a")
 
-	if got := getService(); got != "plex" {
-		t.Fatalf("service = %q, want plex", got)
+	if got := getService(); got != "media" {
+		t.Fatalf("service = %q, want media", got)
 	}
-	if host, ok := HostOverride(); !ok || host != "yeet-lab" {
-		t.Fatalf("host override = %q ok=%v, want yeet-lab", host, ok)
+	if host, ok := HostOverride(); !ok || host != "yeet-edge-a" {
+		t.Fatalf("host override = %q ok=%v, want yeet-edge-a", host, ok)
 	}
-	if loadedPrefs.DefaultHost != "yeet-lab" {
-		t.Fatalf("host = %q, want yeet-lab", loadedPrefs.DefaultHost)
+	if loadedPrefs.DefaultHost != "yeet-edge-a" {
+		t.Fatalf("host = %q, want yeet-edge-a", loadedPrefs.DefaultHost)
 	}
 }
