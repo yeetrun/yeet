@@ -6,6 +6,9 @@ package registry
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/containerd/containerd/content"
@@ -369,10 +372,136 @@ func TestCompleteUploadMarksContentRoot(t *testing.T) {
 	}
 }
 
+func TestBuildContainerdManifestInfoForImageManifest(t *testing.T) {
+	configDigest := digest.FromString("config")
+	layerDigest := digest.FromString("layer")
+	data := mustManifestJSON(t, ocispec.Manifest{
+		Config: ocispec.Descriptor{Digest: configDigest},
+		Layers: []ocispec.Descriptor{
+			{Digest: layerDigest},
+		},
+	})
+
+	got, err := buildContainerdManifestInfo("registry.example.com/team/app", data, ocispec.MediaTypeImageManifest)
+	if err != nil {
+		t.Fatalf("buildContainerdManifestInfo returned error: %v", err)
+	}
+	if got.repo != "registry.example.com/team/app" {
+		t.Fatalf("repo=%q, want registry.example.com/team/app", got.repo)
+	}
+	wantLabels := map[string]string{
+		"containerd.io/distribution.source.registry.example.com": "team/app",
+		"containerd.io/content/type":                             ocispec.MediaTypeImageManifest,
+		"containerd.io/gc.ref.content.config":                    configDigest.String(),
+		"containerd.io/gc.ref.content.l.0":                       layerDigest.String(),
+	}
+	if !reflect.DeepEqual(got.labels, wantLabels) {
+		t.Fatalf("labels=%v, want %v", got.labels, wantLabels)
+	}
+}
+
+func TestBuildContainerdManifestInfoForImageIndex(t *testing.T) {
+	manifestDigest := digest.FromString("manifest")
+	data := mustManifestJSON(t, ocispec.Index{
+		Manifests: []ocispec.Descriptor{
+			{Digest: manifestDigest},
+		},
+	})
+
+	got, err := buildContainerdManifestInfo("alpine", data, ocispec.MediaTypeImageIndex)
+	if err != nil {
+		t.Fatalf("buildContainerdManifestInfo returned error: %v", err)
+	}
+	if got.repo != "docker.io/library/alpine" {
+		t.Fatalf("repo=%q, want docker.io/library/alpine", got.repo)
+	}
+	wantLabels := map[string]string{
+		"containerd.io/distribution.source.docker.io": "library/alpine",
+		"containerd.io/content/type":                  ocispec.MediaTypeImageIndex,
+		"containerd.io/gc.ref.content.m.0":            manifestDigest.String(),
+	}
+	if !reflect.DeepEqual(got.labels, wantLabels) {
+		t.Fatalf("labels=%v, want %v", got.labels, wantLabels)
+	}
+}
+
+func TestBuildContainerdManifestInfoRejectsUnsupportedMediaType(t *testing.T) {
+	_, err := buildContainerdManifestInfo("alpine", []byte("{}"), "application/example")
+	if err == nil {
+		t.Fatal("expected error for unsupported media type")
+	}
+}
+
+func TestAbortUploadRemovesSessionAndAbortsContainerdRef(t *testing.T) {
+	cs := &fakeContentStore{}
+	store := &ContainerdCacheStorage{contentStore: cs}
+	writer := &fakeWriter{}
+	released := 0
+	store.uploads.Store("upload-id", &containerdUpload{
+		writer:  writer,
+		release: func(context.Context) error { released++; return nil },
+	})
+
+	if err := store.AbortUpload(context.Background(), "upload-id"); err != nil {
+		t.Fatalf("AbortUpload returned error: %v", err)
+	}
+	if writer.closed != 1 {
+		t.Fatalf("writer closed %d times, want 1", writer.closed)
+	}
+	if released != 1 {
+		t.Fatalf("release called %d times, want 1", released)
+	}
+	if cs.abortRef != "upload-upload-id" {
+		t.Fatalf("abort ref=%q, want upload-upload-id", cs.abortRef)
+	}
+	if _, ok := store.uploads.Load("upload-id"); ok {
+		t.Fatal("upload still stored after abort")
+	}
+}
+
+func TestAbortUploadReturnsReleaseError(t *testing.T) {
+	wantErr := errors.New("release failed")
+	store := &ContainerdCacheStorage{contentStore: &fakeContentStore{}}
+	store.uploads.Store("upload-id", &containerdUpload{
+		writer:  &fakeWriter{},
+		release: func(context.Context) error { return wantErr },
+	})
+
+	err := store.AbortUpload(context.Background(), "upload-id")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("AbortUpload error=%v, want %v", err, wantErr)
+	}
+}
+
+func TestAbortUploadReturnsAbortError(t *testing.T) {
+	wantErr := errors.New("abort failed")
+	store := &ContainerdCacheStorage{contentStore: &fakeContentStore{abortErr: wantErr}}
+	store.uploads.Store("upload-id", &containerdUpload{
+		writer:  &fakeWriter{},
+		release: func(context.Context) error { return nil },
+	})
+
+	err := store.AbortUpload(context.Background(), "upload-id")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("AbortUpload error=%v, want %v", err, wantErr)
+	}
+}
+
+func mustManifestJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	return data
+}
+
 type fakeWriter struct {
 	digest    digest.Digest
 	commitErr error
 	status    content.Status
+	closeErr  error
+	closed    int
 }
 
 func (f *fakeWriter) Write(p []byte) (int, error) {
@@ -380,7 +509,10 @@ func (f *fakeWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (f *fakeWriter) Close() error { return nil }
+func (f *fakeWriter) Close() error {
+	f.closed++
+	return f.closeErr
+}
 
 func (f *fakeWriter) Digest() digest.Digest { return f.digest }
 
@@ -411,6 +543,7 @@ type fakeContentStore struct {
 	updateValue  string
 
 	abortRef string
+	abortErr error
 }
 
 func (f *fakeContentStore) Info(_ context.Context, dg digest.Digest) (content.Info, error) {
@@ -451,7 +584,7 @@ func (f *fakeContentStore) Delete(_ context.Context, _ digest.Digest) error {
 
 func (f *fakeContentStore) Abort(_ context.Context, ref string) error {
 	f.abortRef = ref
-	return nil
+	return f.abortErr
 }
 
 // TestParseRepositoryNameConsistency tests that the function is consistent

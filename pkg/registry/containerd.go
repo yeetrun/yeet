@@ -106,7 +106,7 @@ type readAtCloserAsReader struct {
 }
 
 func (r *readAtCloserAsReader) Read(p []byte) (int, error) {
-	n, err := r.ReaderAt.ReadAt(p, r.offset)
+	n, err := r.ReadAt(p, r.offset)
 	r.offset += int64(n)
 	return n, err
 }
@@ -173,33 +173,36 @@ func (s *ContainerdCacheStorage) DeleteBlob(ctx context.Context, dg string) erro
 // GetManifest retrieves a manifest from containerd's metadata store.
 func (s *ContainerdCacheStorage) GetManifest(ctx context.Context, repo, reference string) (*ManifestMetadata, error) {
 	if strings.HasPrefix(reference, "sha256:") {
-		cs := s.getContentStore()
-		if cs == nil {
-			return nil, errors.New("content store unavailable")
-		}
-		dg := digest.Digest(reference)
-		info, err := cs.Info(ctx, dg)
-		if err != nil {
-			if errors.Is(err, errdefs.ErrNotFound) {
-				return nil, ErrManifestNotFound
-			}
-			return nil, fmt.Errorf("get manifest info from containerd: %w", err)
-		}
-		blob, err := content.ReadBlob(ctx, cs, ocispec.Descriptor{Digest: dg})
-		if err != nil {
-			if errdefs.IsNotFound(err) {
-				return nil, ErrManifestNotFound
-			}
-			return nil, fmt.Errorf("read manifest blob '%s' from containerd: %w", dg, err)
-		}
-		return &ManifestMetadata{
-			MediaType: info.Labels["containerd.io/content/type"],
-			Digest:    dg.String(),
-			Size:      info.Size,
-			Data:      io.NopCloser(bytes.NewReader(blob)),
-		}, nil
+		return s.getManifestByDigest(ctx, digest.Digest(reference))
 	}
-	imageName := repo + ":" + reference
+	return s.getManifestByTag(ctx, repo+":"+reference)
+}
+
+func (s *ContainerdCacheStorage) getManifestByDigest(ctx context.Context, dg digest.Digest) (*ManifestMetadata, error) {
+	cs := s.getContentStore()
+	if cs == nil {
+		return nil, errors.New("content store unavailable")
+	}
+	info, err := cs.Info(ctx, dg)
+	if err != nil {
+		if errors.Is(err, errdefs.ErrNotFound) {
+			return nil, ErrManifestNotFound
+		}
+		return nil, fmt.Errorf("get manifest info from containerd: %w", err)
+	}
+	blob, err := readManifestBlob(ctx, cs, ocispec.Descriptor{Digest: dg})
+	if err != nil {
+		return nil, err
+	}
+	return &ManifestMetadata{
+		MediaType: info.Labels["containerd.io/content/type"],
+		Digest:    dg.String(),
+		Size:      info.Size,
+		Data:      io.NopCloser(bytes.NewReader(blob)),
+	}, nil
+}
+
+func (s *ContainerdCacheStorage) getManifestByTag(ctx context.Context, imageName string) (*ManifestMetadata, error) {
 	img, err := s.containerdClient.ImageService().Get(ctx, imageName)
 	if err != nil {
 		if errors.Is(err, errdefs.ErrNotFound) {
@@ -211,12 +214,9 @@ func (s *ContainerdCacheStorage) GetManifest(ctx context.Context, repo, referenc
 	if cs == nil {
 		return nil, errors.New("content store unavailable")
 	}
-	blob, err := content.ReadBlob(ctx, cs, img.Target)
+	blob, err := readManifestBlob(ctx, cs, img.Target)
 	if err != nil {
-		if errdefs.IsNotFound(err) {
-			return nil, ErrManifestNotFound
-		}
-		return nil, fmt.Errorf("read blob '%s' from containerd content store: %w", img.Target.Digest, err)
+		return nil, err
 	}
 
 	return &ManifestMetadata{
@@ -225,6 +225,17 @@ func (s *ContainerdCacheStorage) GetManifest(ctx context.Context, repo, referenc
 		Size:      int64(img.Target.Size),
 		Data:      io.NopCloser(bytes.NewReader(blob)),
 	}, nil
+}
+
+func readManifestBlob(ctx context.Context, cs containerdContentStore, desc ocispec.Descriptor) ([]byte, error) {
+	blob, err := content.ReadBlob(ctx, cs, desc)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil, ErrManifestNotFound
+		}
+		return nil, fmt.Errorf("read manifest blob '%s' from containerd: %w", desc.Digest, err)
+	}
+	return blob, nil
 }
 
 // ParseRepositoryName parses a repository name and returns the normalized domain and path.
@@ -261,106 +272,187 @@ func ParseRepositoryName(repo string) (domain, path string) {
 
 // PutManifest stores a manifest in containerd's content store and registers the image.
 func (s *ContainerdCacheStorage) PutManifest(ctx context.Context, repo, reference string, data []byte, mediaType string) (_ string, err error) {
-	labels := make(map[string]string)
-	domain, path := ParseRepositoryName(repo)
-	repo = domain + "/" + path
-
-	labels["containerd.io/distribution.source."+domain] = path
-	labels["containerd.io/content/type"] = mediaType
-	// Parse manifest to get child references
-	var platform *ocispec.Platform
-	switch mediaType {
-	case ocispec.MediaTypeImageManifest, "application/vnd.docker.distribution.manifest.v2+json":
-		var manifest ocispec.Manifest
-		if err := json.Unmarshal(data, &manifest); err != nil {
-			return "", fmt.Errorf("unmarshal manifest: %w", err)
-		}
-		labels["containerd.io/gc.ref.content.config"] = manifest.Config.Digest.String()
-		for i, layer := range manifest.Layers {
-			labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", i)] = layer.Digest.String()
-		}
-		platform = manifest.Config.Platform
-
-	case ocispec.MediaTypeImageIndex, "application/vnd.docker.distribution.manifest.list.v2+json":
-		var index ocispec.Index
-		if err := json.Unmarshal(data, &index); err != nil {
-			return "", fmt.Errorf("unmarshal index: %w", err)
-		}
-		for i, manifest := range index.Manifests {
-			labels[fmt.Sprintf("containerd.io/gc.ref.content.m.%d", i)] = manifest.Digest.String()
-		}
-	default:
-		return "", fmt.Errorf("unsupported media type: %s", mediaType)
-	}
-	_ = platform
-	upload, err := s.NewUpload(ctx)
+	manifestInfo, err := buildContainerdManifestInfo(repo, data, mediaType)
 	if err != nil {
-		return "", fmt.Errorf("new upload: %w", err)
+		return "", err
 	}
-	defer func() {
-		if err != nil {
-			s.AbortUpload(ctx, upload.UUID)
-		}
-	}()
-
-	h := sha256.New()
-	h.Write(data)
-	wantDigest := digest.NewDigest(digest.SHA256, h)
-
-	if _, err := s.CopyChunk(ctx, upload.UUID, bytes.NewReader(data)); err != nil {
-		return "", fmt.Errorf("copy chunk: %w", err)
+	wantDigest := digestFromBytes(data)
+	if err := s.putManifestContent(ctx, data, wantDigest); err != nil {
+		return "", err
 	}
-
-	if _, err := s.CompleteUpload(ctx, upload.UUID, wantDigest.String()); err != nil {
-		return "", fmt.Errorf("complete upload: %w", err)
+	if err := s.finishManifestPut(ctx, manifestInfo, reference, wantDigest, int64(len(data))); err != nil {
+		return "", err
 	}
-
-	img := images.Image{
-		Name: repo + ":" + reference,
-		Target: ocispec.Descriptor{
-			MediaType: mediaType,
-			Digest:    wantDigest,
-			Size:      int64(len(data)),
-		},
-	}
-
-	if _, err := s.containerdClient.ImageService().Create(ctx, img); err != nil {
-		if !errdefs.IsAlreadyExists(err) {
-			return "", fmt.Errorf("create image: %w", err)
-		}
-		if _, err := s.containerdClient.ImageService().Update(ctx, img); err != nil {
-			return "", fmt.Errorf("update image: %w", err)
-		}
-	}
-	ci := containerd.NewImage(s.containerdClient, img)
-	if ok, err := ci.IsUnpacked(ctx, defaultSnapshotter); err != nil {
-		return "", fmt.Errorf("is unpacked: %w", err)
-	} else if !ok {
-		if err := ci.Unpack(ctx, defaultSnapshotter, containerd.WithSnapshotterPlatformCheck(), func(ctx context.Context, uc *containerd.UnpackConfig) error {
-			uc.SnapshotOpts = append(uc.SnapshotOpts, snapshots.WithLabels(map[string]string{
-				"containerd.io/distribution.source." + domain: path,
-			}))
-			return nil
-		}); err != nil {
-			return "", fmt.Errorf("unpack: %w", err)
-		}
-	}
-
-	cs := s.getContentStore()
-	if cs == nil {
-		return "", errors.New("content store unavailable")
-	}
-	if _, err := cs.Update(ctx, content.Info{
-		Digest: wantDigest,
-		Labels: labels,
-	}); err != nil {
-		return "", fmt.Errorf("update content store: %w", err)
-	}
-
 	return wantDigest.String(), nil
 }
 
+func (s *ContainerdCacheStorage) finishManifestPut(ctx context.Context, manifestInfo containerdManifestInfo, reference string, dg digest.Digest, size int64) error {
+	img := manifestInfo.image(reference, dg, size)
+	if err := s.registerImage(ctx, img); err != nil {
+		return err
+	}
+	if err := s.unpackImage(ctx, img, manifestInfo.snapshotLabels()); err != nil {
+		return err
+	}
+	if err := s.updateManifestLabels(ctx, dg, manifestInfo.labels); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *ContainerdCacheStorage) putManifestContent(ctx context.Context, data []byte, wantDigest digest.Digest) (err error) {
+	upload, err := s.NewUpload(ctx)
+	if err != nil {
+		return fmt.Errorf("new upload: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, s.abortUploadError(ctx, upload.UUID))
+		}
+	}()
+	if _, err := s.CopyChunk(ctx, upload.UUID, bytes.NewReader(data)); err != nil {
+		return fmt.Errorf("copy chunk: %w", err)
+	}
+	if _, err := s.CompleteUpload(ctx, upload.UUID, wantDigest.String()); err != nil {
+		return fmt.Errorf("complete upload: %w", err)
+	}
+	return nil
+}
+
+func (s *ContainerdCacheStorage) abortUploadError(ctx context.Context, uuid string) error {
+	if err := s.AbortUpload(ctx, uuid); err != nil {
+		return fmt.Errorf("abort upload: %w", err)
+	}
+	return nil
+}
+
+func (s *ContainerdCacheStorage) updateManifestLabels(ctx context.Context, dg digest.Digest, labels map[string]string) error {
+	cs := s.getContentStore()
+	if cs == nil {
+		return errors.New("content store unavailable")
+	}
+	if _, err := cs.Update(ctx, content.Info{
+		Digest: dg,
+		Labels: labels,
+	}); err != nil {
+		return fmt.Errorf("update content store: %w", err)
+	}
+	return nil
+}
+
 const defaultSnapshotter = "overlayfs"
+
+type containerdManifestInfo struct {
+	repo      string
+	domain    string
+	path      string
+	mediaType string
+	labels    map[string]string
+}
+
+func buildContainerdManifestInfo(repo string, data []byte, mediaType string) (containerdManifestInfo, error) {
+	domain, path := ParseRepositoryName(repo)
+	info := containerdManifestInfo{
+		repo:      domain + "/" + path,
+		domain:    domain,
+		path:      path,
+		mediaType: mediaType,
+		labels: map[string]string{
+			"containerd.io/distribution.source." + domain: path,
+			"containerd.io/content/type":                  mediaType,
+		},
+	}
+
+	switch mediaType {
+	case ocispec.MediaTypeImageManifest, "application/vnd.docker.distribution.manifest.v2+json":
+		if err := addManifestLabels(info.labels, data); err != nil {
+			return containerdManifestInfo{}, err
+		}
+	case ocispec.MediaTypeImageIndex, "application/vnd.docker.distribution.manifest.list.v2+json":
+		if err := addIndexLabels(info.labels, data); err != nil {
+			return containerdManifestInfo{}, err
+		}
+	default:
+		return containerdManifestInfo{}, fmt.Errorf("unsupported media type: %s", mediaType)
+	}
+	return info, nil
+}
+
+func addManifestLabels(labels map[string]string, data []byte) error {
+	var manifest ocispec.Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("unmarshal manifest: %w", err)
+	}
+	labels["containerd.io/gc.ref.content.config"] = manifest.Config.Digest.String()
+	for i, layer := range manifest.Layers {
+		labels[fmt.Sprintf("containerd.io/gc.ref.content.l.%d", i)] = layer.Digest.String()
+	}
+	return nil
+}
+
+func addIndexLabels(labels map[string]string, data []byte) error {
+	var index ocispec.Index
+	if err := json.Unmarshal(data, &index); err != nil {
+		return fmt.Errorf("unmarshal index: %w", err)
+	}
+	for i, manifest := range index.Manifests {
+		labels[fmt.Sprintf("containerd.io/gc.ref.content.m.%d", i)] = manifest.Digest.String()
+	}
+	return nil
+}
+
+func (m containerdManifestInfo) image(reference string, dg digest.Digest, size int64) images.Image {
+	return images.Image{
+		Name: m.repo + ":" + reference,
+		Target: ocispec.Descriptor{
+			MediaType: m.mediaType,
+			Digest:    dg,
+			Size:      size,
+		},
+	}
+}
+
+func (m containerdManifestInfo) snapshotLabels() map[string]string {
+	return map[string]string{
+		"containerd.io/distribution.source." + m.domain: m.path,
+	}
+}
+
+func digestFromBytes(data []byte) digest.Digest {
+	h := sha256.New()
+	_, _ = h.Write(data)
+	return digest.NewDigest(digest.SHA256, h)
+}
+
+func (s *ContainerdCacheStorage) registerImage(ctx context.Context, img images.Image) error {
+	if _, err := s.containerdClient.ImageService().Create(ctx, img); err != nil {
+		if !errdefs.IsAlreadyExists(err) {
+			return fmt.Errorf("create image: %w", err)
+		}
+		if _, err := s.containerdClient.ImageService().Update(ctx, img); err != nil {
+			return fmt.Errorf("update image: %w", err)
+		}
+	}
+	return nil
+}
+
+func (s *ContainerdCacheStorage) unpackImage(ctx context.Context, img images.Image, snapshotLabels map[string]string) error {
+	ci := containerd.NewImage(s.containerdClient, img)
+	ok, err := ci.IsUnpacked(ctx, defaultSnapshotter)
+	if err != nil {
+		return fmt.Errorf("is unpacked: %w", err)
+	}
+	if ok {
+		return nil
+	}
+	if err := ci.Unpack(ctx, defaultSnapshotter, containerd.WithSnapshotterPlatformCheck(), func(ctx context.Context, uc *containerd.UnpackConfig) error {
+		uc.SnapshotOpts = append(uc.SnapshotOpts, snapshots.WithLabels(snapshotLabels))
+		return nil
+	}); err != nil {
+		return fmt.Errorf("unpack: %w", err)
+	}
+	return nil
+}
 
 // ManifestExists checks if a manifest exists in containerd's metadata.
 func (s *ContainerdCacheStorage) ManifestExists(ctx context.Context, repo, reference string) bool {
@@ -376,16 +468,23 @@ func (s *ContainerdCacheStorage) ManifestExists(ctx context.Context, repo, refer
 // DeleteManifest removes a manifest from containerd.
 func (s *ContainerdCacheStorage) DeleteManifest(ctx context.Context, repo, reference string) error {
 	if strings.HasPrefix(reference, "sha256:") {
-		if err := s.containerdClient.ContentStore().Delete(ctx, digest.Digest(reference)); err != nil {
-			if errors.Is(err, errdefs.ErrNotFound) {
-				return nil
-			}
-			return fmt.Errorf("delete manifest content from containerd: %w", err)
-		}
+		return s.deleteManifestContent(ctx, digest.Digest(reference))
+	}
+	return s.deleteManifestImage(ctx, repo+":"+reference)
+}
+
+func (s *ContainerdCacheStorage) deleteManifestContent(ctx context.Context, dg digest.Digest) error {
+	err := s.containerdClient.ContentStore().Delete(ctx, dg)
+	if errors.Is(err, errdefs.ErrNotFound) {
 		return nil
 	}
-	imageName := repo + ":" + reference
+	if err != nil {
+		return fmt.Errorf("delete manifest content from containerd: %w", err)
+	}
+	return nil
+}
 
+func (s *ContainerdCacheStorage) deleteManifestImage(ctx context.Context, imageName string) error {
 	err := s.containerdClient.ImageService().Delete(ctx, imageName)
 	if err != nil {
 		if errors.Is(err, errdefs.ErrNotFound) {

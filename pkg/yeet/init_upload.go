@@ -18,12 +18,16 @@ import (
 
 const uploadProgressInterval = 120 * time.Millisecond
 
-func uploadCatchBinary(ui *initUI, bin string, binSize int64, userAtRemote string) (string, error) {
+func uploadCatchBinary(ui *initUI, bin string, binSize int64, userAtRemote string) (detail string, err error) {
 	file, err := os.Open(bin)
 	if err != nil {
 		return "", fmt.Errorf("failed to open catch binary: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("failed to close catch binary: %w", closeErr)
+		}
+	}()
 
 	progress := newUploadProgress(binSize)
 	reader := progress.reader(file)

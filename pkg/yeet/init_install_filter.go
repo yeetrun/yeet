@@ -27,7 +27,9 @@ func (f *initInstallFilter) Write(p []byte) (int, error) {
 	for len(p) > 0 {
 		idx := bytes.IndexByte(p, '\n')
 		if idx == -1 {
-			f.buf.Write(p)
+			if _, err := f.buf.Write(p); err != nil {
+				return written, err
+			}
 			if shouldFlushPartial(f.buf.String()) {
 				if _, err := f.out.Write(f.buf.Bytes()); err != nil {
 					return written, err
@@ -36,10 +38,14 @@ func (f *initInstallFilter) Write(p []byte) (int, error) {
 			}
 			return written, nil
 		}
-		f.buf.Write(p[:idx])
+		if _, err := f.buf.Write(p[:idx]); err != nil {
+			return written, err
+		}
 		line := f.buf.String()
 		f.buf.Reset()
-		f.handleLine(line)
+		if err := f.handleLine(line); err != nil {
+			return written, err
+		}
 		p = p[idx+1:]
 	}
 	return written, nil
@@ -57,21 +63,23 @@ func (f *initInstallFilter) InfoSummary() string {
 	return f.summary.InfoSummary()
 }
 
-func (f *initInstallFilter) handleLine(line string) {
+func (f *initInstallFilter) handleLine(line string) error {
 	msg := strings.TrimSpace(stripLogPrefix(line))
 	if msg == "" {
-		return
+		return nil
 	}
 	if f.summary.Absorb(msg) {
-		return
+		return nil
 	}
 	if isImportantInitLine(msg) {
-		f.writeLine(msg)
+		return f.writeLine(msg)
 	}
+	return nil
 }
 
-func (f *initInstallFilter) writeLine(msg string) {
-	fmt.Fprintln(f.out, msg)
+func (f *initInstallFilter) writeLine(msg string) error {
+	_, err := fmt.Fprintln(f.out, msg)
+	return err
 }
 
 type initInstallSummary struct {
@@ -83,6 +91,27 @@ type initInstallSummary struct {
 }
 
 func (s *initInstallSummary) Absorb(msg string) bool {
+	if s.absorbPath(msg) {
+		return true
+	}
+	if s.absorbImageLine(msg) {
+		return true
+	}
+	if isIgnoredInstallProgressLine(msg) {
+		return true
+	}
+	if isInstallWarningLine(msg) {
+		s.addWarning(msg)
+		return true
+	}
+	if isVisibleWarningLine(msg) {
+		s.addWarning(msg)
+		return false
+	}
+	return false
+}
+
+func (s *initInstallSummary) absorbPath(msg string) bool {
 	switch {
 	case strings.HasPrefix(msg, "data dir:"):
 		s.dataDir = strings.TrimSpace(strings.TrimPrefix(msg, "data dir:"))
@@ -98,10 +127,13 @@ func (s *initInstallSummary) Absorb(msg string) bool {
 			s.tsnetRoot = root
 		}
 		return true
-	case strings.HasPrefix(msg, "NetNS:"):
-		return true
-	case strings.HasPrefix(msg, "Requires:"):
-		return true
+	default:
+		return false
+	}
+}
+
+func (s *initInstallSummary) absorbImageLine(msg string) bool {
+	switch {
 	case strings.HasPrefix(msg, "skipping image "):
 		s.skippedImages++
 		return true
@@ -109,35 +141,40 @@ func (s *initInstallSummary) Absorb(msg string) bool {
 		return true
 	case strings.HasPrefix(msg, "setting image "):
 		return true
-	case strings.HasPrefix(msg, "Detected "):
-		return true
-	case strings.HasPrefix(msg, "File moved to "):
-		return true
-	case strings.HasPrefix(msg, "Removed old file:"):
-		return true
-	case strings.HasPrefix(msg, "copying "):
-		return true
-	case strings.HasPrefix(msg, "adding unit "):
-		return true
-	case strings.HasPrefix(msg, "no ") && strings.Contains(msg, "artifact"):
-		return true
-	case strings.HasPrefix(msg, "Installing service"):
-		return true
-	case strings.HasPrefix(msg, "Service \"") && strings.HasSuffix(msg, "\" installed"):
-		return true
-	case strings.HasPrefix(msg, "File received"):
-		return true
-	case strings.HasPrefix(msg, "Installation of "):
-		s.addWarning(msg)
-		return true
-	case strings.HasPrefix(msg, "Failed to install service:"):
-		s.addWarning(msg)
-		return false
-	case strings.HasPrefix(msg, "Warning:"):
-		s.addWarning(msg)
+	default:
 		return false
 	}
-	return false
+}
+
+func isIgnoredInstallProgressLine(msg string) bool {
+	prefixes := []string{
+		"NetNS:",
+		"Requires:",
+		"Detected ",
+		"File moved to ",
+		"Removed old file:",
+		"copying ",
+		"adding unit ",
+		"Installing service",
+		"File received",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(msg, prefix) {
+			return true
+		}
+	}
+	if strings.HasPrefix(msg, "Service \"") && strings.HasSuffix(msg, "\" installed") {
+		return true
+	}
+	return strings.HasPrefix(msg, "no ") && strings.Contains(msg, "artifact")
+}
+
+func isInstallWarningLine(msg string) bool {
+	return strings.HasPrefix(msg, "Installation of ")
+}
+
+func isVisibleWarningLine(msg string) bool {
+	return strings.HasPrefix(msg, "Failed to install service:") || strings.HasPrefix(msg, "Warning:")
 }
 
 func (s *initInstallSummary) Detail() string {

@@ -87,7 +87,7 @@ func latestArtifactPathFromStore(artifacts db.ArtifactStore, name db.ArtifactNam
 	return path, ok
 }
 
-func hashFileSHA256(path string) (string, error) {
+func hashFileSHA256(path string) (sum string, err error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -95,7 +95,11 @@ func hashFileSHA256(path string) (string, error) {
 		}
 		return "", err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, f); err != nil {
 		return "", err

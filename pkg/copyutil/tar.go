@@ -79,7 +79,7 @@ func TarDirectory(w io.Writer, src string, prefix string) error {
 }
 
 // TarDirectoryWithObserver writes a tar archive of src into w, invoking observer for each entry.
-func TarDirectoryWithObserver(w io.Writer, src string, prefix string, observer TarObserver) error {
+func TarDirectoryWithObserver(w io.Writer, src string, prefix string, observer TarObserver) (err error) {
 	info, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -88,67 +88,11 @@ func TarDirectoryWithObserver(w io.Writer, src string, prefix string, observer T
 		return fmt.Errorf("expected directory, got %q", src)
 	}
 	tw := tar.NewWriter(w)
-	defer tw.Close()
+	defer closeTarWriter(tw, &err)
 
 	src = filepath.Clean(src)
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if p == src {
-			return nil
-		}
-		info, err := os.Lstat(p)
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, p)
-		if err != nil {
-			return err
-		}
-		name := filepath.ToSlash(rel)
-		if prefix != "" {
-			name = path.Join(prefix, name)
-		}
-		var linkname string
-		if info.Mode()&os.ModeSymlink != 0 {
-			linkname, err = os.Readlink(p)
-			if err != nil {
-				return err
-			}
-		}
-		hdr, err := tar.FileInfoHeader(info, linkname)
-		if err != nil {
-			return err
-		}
-		hdr.Name = name
-		if d.IsDir() && !strings.HasSuffix(hdr.Name, "/") {
-			hdr.Name += "/"
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-		if observer != nil {
-			observer(tarEntryFromHeader(hdr))
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if info.Mode().IsRegular() {
-			f, err := os.Open(p)
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(tw, f); err != nil {
-				f.Close()
-				return err
-			}
-			if err := f.Close(); err != nil {
-				return err
-			}
-			return nil
-		}
-		return nil
+		return writeDirectoryTarEntry(tw, src, prefix, p, d, err, observer)
 	})
 }
 
@@ -158,7 +102,7 @@ func TarFile(w io.Writer, src string, name string) error {
 }
 
 // TarFileWithObserver writes a single file or symlink entry to w, invoking observer.
-func TarFileWithObserver(w io.Writer, src string, name string, observer TarObserver) error {
+func TarFileWithObserver(w io.Writer, src string, name string, observer TarObserver) (err error) {
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
@@ -170,15 +114,9 @@ func TarFileWithObserver(w io.Writer, src string, name string, observer TarObser
 		name = filepath.Base(src)
 	}
 	tw := tar.NewWriter(w)
-	defer tw.Close()
-	var linkname string
-	if info.Mode()&os.ModeSymlink != 0 {
-		linkname, err = os.Readlink(src)
-		if err != nil {
-			return err
-		}
-	}
-	hdr, err := tar.FileInfoHeader(info, linkname)
+	defer closeTarWriter(tw, &err)
+
+	hdr, err := tarHeaderForPath(src, info)
 	if err != nil {
 		return err
 	}
@@ -190,15 +128,7 @@ func TarFileWithObserver(w io.Writer, src string, name string, observer TarObser
 		observer(tarEntryFromHeader(hdr))
 	}
 	if info.Mode().IsRegular() {
-		f, err := os.Open(src)
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(tw, f); err != nil {
-			f.Close()
-			return err
-		}
-		if err := f.Close(); err != nil {
+		if err := copyFileToTar(tw, src); err != nil {
 			return err
 		}
 	}
@@ -219,10 +149,6 @@ type ExtractOptions struct {
 func ExtractTarWithOptions(r io.Reader, dest string, opts ExtractOptions) error {
 	tr := tar.NewReader(r)
 	dest = filepath.Clean(dest)
-	type dirMeta struct {
-		path string
-		hdr  *tar.Header
-	}
 	var dirs []dirMeta
 	for {
 		hdr, err := tr.Next()
@@ -232,94 +158,217 @@ func ExtractTarWithOptions(r io.Reader, dest string, opts ExtractOptions) error 
 		if err != nil {
 			return err
 		}
-		name := path.Clean(hdr.Name)
-		if name == "." || name == "" {
+		target, ok, err := tarTargetPath(dest, hdr.Name)
+		if err != nil {
+			return err
+		}
+		if !ok {
 			continue
 		}
-		if path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
-			return fmt.Errorf("invalid tar entry %q", hdr.Name)
+		notifyTarObserver(opts.OnEntry, hdr)
+		dir, err := extractTarEntry(tr, dest, target, hdr)
+		if err != nil {
+			return err
 		}
-		target := filepath.Join(dest, filepath.FromSlash(name))
-		if !isSubpath(dest, target) {
-			return fmt.Errorf("invalid tar entry %q", hdr.Name)
-		}
-		if opts.OnEntry != nil {
-			opts.OnEntry(tarEntryFromHeader(hdr))
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			mode := fileModeForHeader(hdr, 0o755)
-			if err := os.MkdirAll(target, mode); err != nil {
-				return err
-			}
-			dirs = append(dirs, dirMeta{path: target, hdr: hdr})
-		case tar.TypeReg, 0:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			mode := fileModeForHeader(hdr, 0o644)
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode.Perm())
-			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(f, tr); err != nil {
-				f.Close()
-				return err
-			}
-			if err := f.Close(); err != nil {
-				return err
-			}
-			if err := applyHeaderMetadata(target, hdr, false); err != nil {
-				return err
-			}
-		case tar.TypeSymlink:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			if err := os.RemoveAll(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			if err := os.Symlink(hdr.Linkname, target); err != nil {
-				return err
-			}
-			if err := applyHeaderMetadata(target, hdr, true); err != nil {
-				return err
-			}
-		case tar.TypeLink:
-			linkTarget := filepath.Join(dest, filepath.FromSlash(path.Clean(hdr.Linkname)))
-			if !isSubpath(dest, linkTarget) {
-				return fmt.Errorf("invalid tar entry %q", hdr.Name)
-			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			if err := os.RemoveAll(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			if err := os.Link(linkTarget, target); err != nil {
-				return err
-			}
-		case tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			if err := os.RemoveAll(target); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			if err := createSpecial(target, hdr); err != nil {
-				return err
-			}
-			if err := applyHeaderMetadata(target, hdr, false); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("unsupported tar entry %q", hdr.Name)
+		if dir != nil {
+			dirs = append(dirs, *dir)
 		}
 	}
 	for i := len(dirs) - 1; i >= 0; i-- {
 		if err := applyHeaderMetadata(dirs[i].path, dirs[i].hdr, false); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+type dirMeta struct {
+	path string
+	hdr  *tar.Header
+}
+
+func closeTarWriter(tw *tar.Writer, errp *error) {
+	if err := tw.Close(); err != nil && *errp == nil {
+		*errp = err
+	}
+}
+
+func writeDirectoryTarEntry(tw *tar.Writer, src, prefix, filePath string, d fs.DirEntry, walkErr error, observer TarObserver) error {
+	if walkErr != nil {
+		return walkErr
+	}
+	if filePath == src {
+		return nil
+	}
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		return err
+	}
+	hdr, err := directoryTarHeader(src, prefix, filePath, d, info)
+	if err != nil {
+		return err
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return err
+	}
+	notifyTarObserver(observer, hdr)
+	if d.IsDir() || !info.Mode().IsRegular() {
+		return nil
+	}
+	return copyFileToTar(tw, filePath)
+}
+
+func directoryTarHeader(src, prefix, filePath string, d fs.DirEntry, info fs.FileInfo) (*tar.Header, error) {
+	rel, err := filepath.Rel(src, filePath)
+	if err != nil {
+		return nil, err
+	}
+	hdr, err := tarHeaderForPath(filePath, info)
+	if err != nil {
+		return nil, err
+	}
+	hdr.Name = filepath.ToSlash(rel)
+	if prefix != "" {
+		hdr.Name = path.Join(prefix, hdr.Name)
+	}
+	if d.IsDir() && !strings.HasSuffix(hdr.Name, "/") {
+		hdr.Name += "/"
+	}
+	return hdr, nil
+}
+
+func tarHeaderForPath(filePath string, info fs.FileInfo) (*tar.Header, error) {
+	var linkname string
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(filePath)
+		if err != nil {
+			return nil, err
+		}
+		linkname = target
+	}
+	return tar.FileInfoHeader(info, linkname)
+}
+
+func copyFileToTar(tw *tar.Writer, filePath string) error {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(tw, f); err != nil {
+		closeErr := f.Close()
+		if closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
+		return err
+	}
+	return f.Close()
+}
+
+func notifyTarObserver(observer TarObserver, hdr *tar.Header) {
+	if observer != nil {
+		observer(tarEntryFromHeader(hdr))
+	}
+}
+
+func tarTargetPath(dest, name string) (string, bool, error) {
+	cleanName := path.Clean(name)
+	if cleanName == "." || cleanName == "" {
+		return "", false, nil
+	}
+	if path.IsAbs(cleanName) || cleanName == ".." || strings.HasPrefix(cleanName, "../") {
+		return "", false, fmt.Errorf("invalid tar entry %q", name)
+	}
+	target := filepath.Join(dest, filepath.FromSlash(cleanName))
+	if !isSubpath(dest, target) {
+		return "", false, fmt.Errorf("invalid tar entry %q", name)
+	}
+	return target, true, nil
+}
+
+func extractTarEntry(tr *tar.Reader, dest, target string, hdr *tar.Header) (*dirMeta, error) {
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		return extractDirectory(target, hdr)
+	case tar.TypeReg, 0:
+		return nil, extractRegularFile(tr, target, hdr)
+	case tar.TypeSymlink:
+		return nil, extractSymlink(target, hdr)
+	case tar.TypeLink:
+		return nil, extractHardlink(dest, target, hdr)
+	case tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
+		return nil, extractSpecial(target, hdr)
+	default:
+		return nil, fmt.Errorf("unsupported tar entry %q", hdr.Name)
+	}
+}
+
+func extractDirectory(target string, hdr *tar.Header) (*dirMeta, error) {
+	mode := fileModeForHeader(hdr, 0o755)
+	if err := os.MkdirAll(target, mode); err != nil {
+		return nil, err
+	}
+	return &dirMeta{path: target, hdr: hdr}, nil
+}
+
+func extractRegularFile(tr *tar.Reader, target string, hdr *tar.Header) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	mode := fileModeForHeader(hdr, 0o644)
+	f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode.Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, tr); err != nil {
+		closeErr := f.Close()
+		if closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return applyHeaderMetadata(target, hdr, false)
+}
+
+func extractSymlink(target string, hdr *tar.Header) error {
+	if err := prepareReplacement(target); err != nil {
+		return err
+	}
+	if err := os.Symlink(hdr.Linkname, target); err != nil {
+		return err
+	}
+	return applyHeaderMetadata(target, hdr, true)
+}
+
+func extractHardlink(dest, target string, hdr *tar.Header) error {
+	linkTarget := filepath.Join(dest, filepath.FromSlash(path.Clean(hdr.Linkname)))
+	if !isSubpath(dest, linkTarget) {
+		return fmt.Errorf("invalid tar entry %q", hdr.Name)
+	}
+	if err := prepareReplacement(target); err != nil {
+		return err
+	}
+	return os.Link(linkTarget, target)
+}
+
+func extractSpecial(target string, hdr *tar.Header) error {
+	if err := prepareReplacement(target); err != nil {
+		return err
+	}
+	if err := createSpecial(target, hdr); err != nil {
+		return err
+	}
+	return applyHeaderMetadata(target, hdr, false)
+}
+
+func prepareReplacement(target string) error {
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	return nil
 }

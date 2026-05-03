@@ -176,7 +176,7 @@ func (u *SystemdUnit) WriteOutUnitFiles(root string) (map[db.ArtifactName]string
 	return paths, nil
 }
 
-func (u *SystemdUnit) writeOutService(path string) error {
+func (u *SystemdUnit) writeOutService(path string) (err error) {
 	// Timer units do not support "always" or "on-success" restarts
 	restartDefault := "always"
 	if u.Timer != nil || u.OneShot {
@@ -190,7 +190,7 @@ func (u *SystemdUnit) writeOutService(path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer closeFile(f, &err)
 	return systemdServiceTmpl.Execute(f, struct {
 		*SystemdUnit
 		Restart  string
@@ -202,13 +202,19 @@ func (u *SystemdUnit) writeOutService(path string) error {
 	})
 }
 
-func (u *SystemdUnit) writeOutTimer(path string) error {
+func (u *SystemdUnit) writeOutTimer(path string) (err error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer closeFile(f, &err)
 	return systemdTimerTmpl.Execute(f, u.Timer)
+}
+
+func closeFile(f *os.File, err *error) {
+	if closeErr := f.Close(); closeErr != nil && *err == nil {
+		*err = closeErr
+	}
 }
 
 type SystemdService struct {
@@ -236,6 +242,11 @@ type artifactInstall struct {
 	primaryUnitIfAvailable bool
 }
 
+type installStep struct {
+	artifact db.ArtifactName
+	artifactInstall
+}
+
 func (s *SystemdService) artifactInstaller() map[db.ArtifactName]artifactInstall {
 	return map[db.ArtifactName]artifactInstall{
 		db.ArtifactSystemdUnit:      {dstPath: s.servicePath(), unit: s.serviceUnit()},
@@ -256,12 +267,9 @@ func (s *SystemdService) artifactInstaller() map[db.ArtifactName]artifactInstall
 	}
 }
 
-func (s *SystemdService) Install() error {
-	af := s.cfg.AsStruct().Artifacts
+func (s *SystemdService) installPlan() []installStep {
 	installPaths := s.artifactInstaller()
-
-	unitsToEnable := []string{}
-	for _, k := range []db.ArtifactName{
+	artifactOrder := []db.ArtifactName{
 		db.ArtifactSystemdUnit,
 		db.ArtifactSystemdTimerFile,
 		db.ArtifactNetNSService,
@@ -274,37 +282,72 @@ func (s *SystemdService) Install() error {
 		db.ArtifactTSEnv,
 		db.ArtifactTSBinary,
 		db.ArtifactTSConfig,
-	} {
-		dst := installPaths[k]
-		srcPath, ok := af.Gen(k, s.cfg.Generation())
+	}
+	plan := make([]installStep, 0, len(artifactOrder))
+	for _, artifact := range artifactOrder {
+		plan = append(plan, installStep{
+			artifact:        artifact,
+			artifactInstall: installPaths[artifact],
+		})
+	}
+	return plan
+}
+
+func enabledUnitsForInstallPlan(plan []installStep, af db.ArtifactStore, gen int) []string {
+	units := []string{}
+	for _, step := range plan {
+		if _, ok := af.Gen(step.artifact, gen); !ok || step.unit == "" {
+			continue
+		}
+		log.Printf("adding unit %s to enable list", step.unit)
+		if step.primaryUnitIfAvailable && len(units) > 0 {
+			units[0] = step.unit
+			continue
+		}
+		units = append(units, step.unit)
+	}
+	return units
+}
+
+func (s *SystemdService) installArtifacts(plan []installStep) error {
+	af := s.cfg.AsStruct().Artifacts
+	for _, step := range plan {
+		srcPath, ok := af.Gen(step.artifact, s.cfg.Generation())
 		if !ok {
-			log.Printf("no %s artifact to install", k)
-			if err := os.Remove(dst.dstPath); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("failed to remove optional artifact %s: %v", dst.dstPath, err)
-			} else if err == nil {
-				log.Printf("removed optional artifact %s", dst.dstPath)
+			log.Printf("no %s artifact to install", step.artifact)
+			if err := removeOptionalArtifact(step.dstPath); err != nil {
+				return err
 			}
 			continue
 		}
-		log.Printf("copying %s to %s", srcPath, dst.dstPath)
-		if err := fileutil.CopyFile(srcPath, dst.dstPath); err != nil {
+		log.Printf("copying %s to %s", srcPath, step.dstPath)
+		if err := fileutil.CopyFile(srcPath, step.dstPath); err != nil {
 			return err
 		}
-		if dst.unit != "" {
-			log.Printf("adding unit %s to enable list", dst.unit)
-			if dst.primaryUnitIfAvailable && len(unitsToEnable) > 0 {
-				unitsToEnable[0] = dst.unit
-			} else {
-				unitsToEnable = append(unitsToEnable, dst.unit)
-			}
-		}
+	}
+	return nil
+}
+
+func removeOptionalArtifact(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove optional artifact %s: %v", path, err)
+	} else if err == nil {
+		log.Printf("removed optional artifact %s", path)
+	}
+	return nil
+}
+
+func (s *SystemdService) Install() error {
+	plan := s.installPlan()
+	if err := s.installArtifacts(plan); err != nil {
+		return err
 	}
 
 	if err := s.run("daemon-reload"); err != nil {
 		return fmt.Errorf("failed to reload systemd: %v", err)
 	}
 
-	for _, unit := range unitsToEnable {
+	for _, unit := range enabledUnitsForInstallPlan(plan, s.cfg.AsStruct().Artifacts, s.cfg.Generation()) {
 		if err := s.run("enable", unit); err != nil {
 			return fmt.Errorf("failed to enable %s: %v", unit, err)
 		}
@@ -369,26 +412,49 @@ func (s *SystemdService) primaryUnit() string {
 }
 
 func (s *SystemdService) Uninstall() error {
-	if s.isInstalled() {
-		if err := s.run("disable", "--now", s.primaryUnit()); err != nil {
-			return err
-		}
-		if err := os.Remove(s.timerPath()); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-		if err := os.Remove(s.servicePath()); err != nil && !os.IsNotExist(err) {
-			return err
-		}
-	}
-	s.run("disable", "--now", s.netnsServiceUnit())
-	if err := os.Remove(s.netnsServicePath()); err != nil && !os.IsNotExist(err) {
+	if err := s.disableAndRemovePrimaryUnitIfInstalled(); err != nil {
 		return err
 	}
-	s.run("disable", "--now", s.tailscaledServiceUnit())
-	if err := os.Remove(s.tailscaledServicePath()); err != nil && !os.IsNotExist(err) {
+	for _, unit := range s.uninstallDisableUnits()[1:] {
+		s.disableNowForCleanup(unit)
+	}
+	if err := s.removeAuxiliaryUnitFiles(); err != nil {
 		return err
 	}
 	return s.run("daemon-reload")
+}
+
+func (s *SystemdService) disableAndRemovePrimaryUnitIfInstalled() error {
+	if !s.isInstalled() {
+		return nil
+	}
+	if err := s.run("disable", "--now", s.primaryUnit()); err != nil {
+		return err
+	}
+	return removeFilesIfPresent(s.timerPath(), s.servicePath())
+}
+
+func (s *SystemdService) removeAuxiliaryUnitFiles() error {
+	return removeFilesIfPresent(s.netnsServicePath(), s.tailscaledServicePath())
+}
+
+func removeFilesIfPresent(paths ...string) error {
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *SystemdService) uninstallDisableUnits() []string {
+	return []string{s.primaryUnit(), s.netnsServiceUnit(), s.tailscaledServiceUnit()}
+}
+
+func (s *SystemdService) disableNowForCleanup(unit string) {
+	if err := s.run("disable", "--now", unit); err != nil {
+		log.Printf("failed to disable optional unit %s during cleanup: %v", unit, err)
+	}
 }
 
 func (s *SystemdService) Status() (Status, error) {
@@ -409,11 +475,6 @@ func (s *SystemdService) isActive(unit string) bool {
 }
 
 func (s *SystemdService) monitorTailscale() (err error) {
-	defer func() {
-		if err != nil {
-			log.Printf("failed to monitor tailscale: %v", err)
-		}
-	}()
 	log.Printf("monitoring tailscale for %s", s.Name())
 	sock := filepath.Join(s.runDir, "tailscaled.sock")
 	lc := local.Client{
@@ -424,34 +485,60 @@ func (s *SystemdService) monitorTailscale() (err error) {
 	defer cancel()
 	bo := backoff.NewBackoff("tailscale monitor", log.Printf, time.Minute)
 	for {
-		bus, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialNetMap)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				log.Printf("tailscaled socket not found, retrying")
-				bo.BackOff(ctx, err)
-				continue
+		if err := s.monitorTailscaleBus(ctx, &lc, bo); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return err
 			}
+			log.Printf("tailscaled socket not found, retrying")
+			bo.BackOff(ctx, err)
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+		}
+	}
+}
+
+func (s *SystemdService) monitorTailscaleBus(ctx context.Context, lc *local.Client, bo *backoff.Backoff) (err error) {
+	bus, err := lc.WatchIPNBus(ctx, ipn.NotifyInitialNetMap)
+	if err != nil {
+		return tailscaleWatchError(ctx, err)
+	}
+	defer closeIPNBus(bus, &err)
+	bo.BackOff(ctx, nil)
+	return s.storeTailscaleStableID(bus)
+}
+
+func tailscaleWatchError(ctx context.Context, err error) error {
+	if errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
+func closeIPNBus(bus *local.IPNBusWatcher, err *error) {
+	if closeErr := bus.Close(); closeErr != nil && *err == nil {
+		*err = closeErr
+	}
+}
+
+func (s *SystemdService) storeTailscaleStableID(bus *local.IPNBusWatcher) error {
+	for {
+		msg, err := bus.Next()
+		if err != nil {
 			return err
 		}
-		defer bus.Close()
-		bo.BackOff(ctx, nil)
-		for {
-			msg, err := bus.Next()
-			if err != nil {
-				return err
-			}
-			if msg.NetMap != nil {
-				log.Printf("got netmap")
-				_, _, err := s.db.MutateService(s.cfg.Name(), func(d *db.Data, s *db.Service) error {
-					s.TSNet.StableID = msg.NetMap.SelfNode.StableID()
-					return nil
-				})
-				return err
-			}
+		if msg.NetMap == nil {
+			continue
 		}
+		log.Printf("got netmap")
+		_, _, err = s.db.MutateService(s.cfg.Name(), func(d *db.Data, s *db.Service) error {
+			s.TSNet.StableID = msg.NetMap.SelfNode.StableID()
+			return nil
+		})
+		return err
 	}
 }
 
@@ -479,7 +566,11 @@ func (s *SystemdService) StartAuxiliaryUnits() error {
 			if err := s.run("start", s.tailscaledServiceUnit()); err != nil {
 				return err
 			}
-			go s.monitorTailscale()
+			go func() {
+				if err := s.monitorTailscale(); err != nil {
+					log.Printf("failed to monitor tailscale: %v", err)
+				}
+			}()
 			return nil
 		})
 	}
@@ -496,24 +587,55 @@ func (s *SystemdService) hasArtifact(a db.ArtifactName) bool {
 }
 
 func (s *SystemdService) Stop() error {
+	if err := s.stopPrimaryIfInstalled(); err != nil {
+		return err
+	}
+	s.stopAuxiliaryUnitsForCleanup()
+	return nil
+}
+
+func (s *SystemdService) stopPrimaryIfInstalled() error {
 	if s.isInstalled() {
-		if err := s.run("stop", s.primaryUnit()); err != nil {
-			return err
-		}
-		if s.isTimer() {
-			// Also stop the service if it's a timer.
-			if err := s.run("stop", s.serviceUnit()); err != nil {
+		for _, unit := range s.primaryStopUnits() {
+			if err := s.run("stop", unit); err != nil {
 				return err
 			}
 		}
 	}
+	return nil
+}
+
+func (s *SystemdService) stopAuxiliaryUnitsForCleanup() {
+	for _, unit := range s.auxiliaryStopUnits() {
+		if err := s.run("stop", unit); err != nil {
+			log.Printf("failed to stop optional unit %s during cleanup: %v", unit, err)
+		}
+	}
+}
+
+func (s *SystemdService) stopUnits() []string {
+	units := s.primaryStopUnits()
+	return append(units, s.auxiliaryStopUnits()...)
+}
+
+func (s *SystemdService) primaryStopUnits() []string {
+	units := []string{s.primaryUnit()}
+	if s.isTimer() {
+		// Also stop the service if it's a timer.
+		units = append(units, s.serviceUnit())
+	}
+	return units
+}
+
+func (s *SystemdService) auxiliaryStopUnits() []string {
+	units := []string{}
 	if s.hasArtifact(db.ArtifactTSService) {
-		s.run("stop", s.tailscaledServiceUnit())
+		units = append(units, s.tailscaledServiceUnit())
 	}
 	if s.hasArtifact(db.ArtifactNetNSService) {
-		s.run("stop", s.netnsServiceUnit())
+		units = append(units, s.netnsServiceUnit())
 	}
-	return nil
+	return units
 }
 
 func (s *SystemdService) Restart() error {
