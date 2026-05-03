@@ -30,7 +30,9 @@ func NewStdCmdContext(ctx context.Context, name string, arg ...string) *exec.Cmd
 }
 
 func Confirm(r io.Reader, w io.Writer, msg string) (bool, error) {
-	fmt.Fprintf(w, "%s [y/N]: ", msg)
+	if _, err := fmt.Fprintf(w, "%s [y/N]: ", msg); err != nil {
+		return false, fmt.Errorf("failed to write confirmation prompt: %w", err)
+	}
 
 	var confirm string
 	_, err := fmt.Fscanln(r, &confirm)
