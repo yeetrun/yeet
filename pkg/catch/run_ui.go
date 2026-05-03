@@ -202,17 +202,11 @@ func (u *runUI) Printer(format string, args ...any) {
 }
 
 func (u *runUI) handleKnownMessage(msg string) bool {
-	switch {
-	case strings.HasPrefix(msg, "Detected ") && strings.HasSuffix(msg, " file"):
-		detail := strings.TrimSuffix(strings.TrimPrefix(msg, "Detected "), " file")
-		u.mu.Lock()
-		current := u.current
-		u.mu.Unlock()
-		if current != runStepDetect {
-			u.StartStep(runStepDetect)
-		}
-		u.DoneStep(detail)
+	if detail, ok := detectedFileDetail(msg); ok {
+		u.finishDetectedFile(detail)
 		return true
+	}
+	switch {
 	case msg == "File received":
 		return true
 	case strings.HasPrefix(msg, "Installing service"):
@@ -228,6 +222,23 @@ func (u *runUI) handleKnownMessage(msg string) bool {
 	default:
 		return false
 	}
+}
+
+func detectedFileDetail(msg string) (string, bool) {
+	if !strings.HasPrefix(msg, "Detected ") || !strings.HasSuffix(msg, " file") {
+		return "", false
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(msg, "Detected "), " file"), true
+}
+
+func (u *runUI) finishDetectedFile(detail string) {
+	u.mu.Lock()
+	current := u.current
+	u.mu.Unlock()
+	if current != runStepDetect {
+		u.StartStep(runStepDetect)
+	}
+	u.DoneStep(detail)
 }
 
 func (u *runUI) printHeader() {

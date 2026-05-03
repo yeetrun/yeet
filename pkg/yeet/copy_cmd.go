@@ -178,31 +178,49 @@ func parseCopyEndpoint(raw string) (copyEndpoint, error) {
 }
 
 func normalizeRemotePath(raw string) (string, bool, error) {
+	trimmed, dirHint := trimRemotePath(raw)
+	if strings.HasPrefix(trimmed, "/") {
+		return "", dirHint, fmt.Errorf("remote path must be relative")
+	}
+	trimmed = trimRemoteDataPrefix(trimmed)
+	if trimmed == "" {
+		return "", true, nil
+	}
+	rel := cleanRemotePath(trimmed)
+	if escapesRemoteRoot(rel) {
+		return "", dirHint, fmt.Errorf("invalid remote path %q", raw)
+	}
+	return rel, dirHint, nil
+}
+
+func trimRemotePath(raw string) (string, bool) {
 	trimmed := strings.TrimSpace(raw)
 	dirHint := trimmed == "" || trimmed == "." || trimmed == "./" || strings.HasSuffix(trimmed, "/")
 	trimmed = strings.TrimPrefix(trimmed, "./")
 	if trimmed == "." {
 		trimmed = ""
 	}
-	if strings.HasPrefix(trimmed, "/") {
-		return "", dirHint, fmt.Errorf("remote path must be relative")
-	}
-	if trimmed == "data" || strings.HasPrefix(trimmed, "data/") {
-		trimmed = strings.TrimPrefix(trimmed, "data")
-		trimmed = strings.TrimPrefix(trimmed, "/")
-	}
 	trimmed = strings.TrimSuffix(trimmed, "/")
-	if trimmed == "" {
-		return "", true, nil
+	return trimmed, dirHint
+}
+
+func trimRemoteDataPrefix(remotePath string) string {
+	if remotePath == "data" {
+		return ""
 	}
-	rel := path.Clean(trimmed)
+	return strings.TrimPrefix(remotePath, "data/")
+}
+
+func cleanRemotePath(remotePath string) string {
+	rel := path.Clean(remotePath)
 	if rel == "." {
-		rel = ""
+		return ""
 	}
-	if rel == ".." || strings.HasPrefix(rel, "../") {
-		return "", dirHint, fmt.Errorf("invalid remote path %q", raw)
-	}
-	return rel, dirHint, nil
+	return rel
+}
+
+func escapesRemoteRoot(remotePath string) bool {
+	return remotePath == ".." || strings.HasPrefix(remotePath, "../")
 }
 
 func isWindowsDrivePath(raw string) bool {

@@ -28,29 +28,59 @@ type writeCloser interface {
 	CloseWrite() error
 }
 
+var expectedCopyErrs = []error{
+	io.EOF,
+	io.ErrClosedPipe,
+	os.ErrClosed,
+	syscall.EIO,
+	syscall.EPIPE,
+	syscall.ECONNRESET,
+	net.ErrClosed,
+}
+
+var expectedCopyErrMessages = []string{
+	"use of closed network connection",
+	"endpoint is closed for send",
+	"websocket: close sent",
+}
+
 func shouldLogCopyErr(err error) bool {
+	return err != nil && !isExpectedCopyErr(err)
+}
+
+func isExpectedCopyErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, io.EOF) ||
-		errors.Is(err, io.ErrClosedPipe) ||
-		errors.Is(err, os.ErrClosed) ||
-		errors.Is(err, syscall.EIO) ||
-		errors.Is(err, syscall.EPIPE) ||
-		errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, net.ErrClosed) {
-		return false
+	return isExpectedCopyErrValue(err) ||
+		isExpectedCopyErrMessage(err) ||
+		isExpectedCopyErrUnwrapped(err)
+}
+
+func isExpectedCopyErrValue(err error) bool {
+	for _, expected := range expectedCopyErrs {
+		if errors.Is(err, expected) {
+			return true
+		}
 	}
+	return false
+}
+
+func isExpectedCopyErrMessage(err error) bool {
 	msg := err.Error()
-	if strings.Contains(msg, "use of closed network connection") ||
-		strings.Contains(msg, "endpoint is closed for send") ||
-		strings.Contains(msg, "websocket: close sent") {
-		return false
+	for _, expected := range expectedCopyErrMessages {
+		if strings.Contains(msg, expected) {
+			return true
+		}
 	}
+	return false
+}
+
+func isExpectedCopyErrUnwrapped(err error) bool {
 	if ne, ok := err.(interface{ Unwrap() error }); ok {
-		return shouldLogCopyErr(ne.Unwrap())
+		return isExpectedCopyErr(ne.Unwrap())
 	}
-	return true
+	return false
 }
 
 type PtyWindow struct {
@@ -84,6 +114,13 @@ type ttyExecer struct {
 
 	// Optional override for tests.
 	serviceRunnerFn func() (ServiceRunner, error)
+}
+
+type ttyPtySession struct {
+	stdin                *os.File
+	tty                  *os.File
+	stdout               *os.File
+	doneWritingToSession chan struct{}
 }
 
 func normalizeProgressMode(mode catchrpc.ProgressMode) catchrpc.ProgressMode {
@@ -132,62 +169,93 @@ func (e *ttyExecer) runAction(action, step string, fn func() error) error {
 }
 
 func (e *ttyExecer) run() error {
-	var doneWritingToSession chan struct{}
 	e.rw = e.rawRW
 	e.bypassPtyInput = e.shouldBypassPtyInput()
-	var closer io.Closer
-	if e.isPty {
-		stdin, tty, err := pty.Open()
-		if err != nil {
-			fmt.Fprintf(e.rw, "Error: %v\n", err)
-			return err
-		}
-		dup, err := syscall.Dup(int(stdin.Fd()))
-		if err != nil {
-			stdin.Close()
-			tty.Close()
-			log.Printf("Error duping pty: %v", err)
-			return err
-		}
-		stdout := os.NewFile(uintptr(dup), stdin.Name())
-
-		e.rw = tty
-		closer = tty
-
-		setWinsize(tty, e.ptyReq.Window.Width, e.ptyReq.Window.Height)
-
-		doneWritingToSession = make(chan struct{})
-		go func() {
-			if c, ok := e.rawRW.(writeCloser); ok {
-				defer c.CloseWrite()
-			}
-			defer stdout.Close()
-			defer close(doneWritingToSession)
-			if _, err := io.Copy(e.rawRW, stdout); shouldLogCopyErr(err) && e.ctx.Err() == nil {
-				log.Printf("Error copying from stdout to session: %v", err)
-			}
-		}()
-		if !e.bypassPtyInput {
-			go func() {
-				defer stdin.Close()
-				if _, err := io.Copy(stdin, e.rawRW); shouldLogCopyErr(err) && e.ctx.Err() == nil {
-					log.Printf("Error copying from session to stdin: %v", err)
-				}
-			}()
-		}
-	}
-
-	err := e.exec()
+	ptySession, err := e.startPtySession()
 	if err != nil {
-		fmt.Fprintf(e.rawRW, "Error: %v\n", err)
+		return err
 	}
-	if closer != nil {
-		closer.Close()
+
+	err = e.exec()
+	if err != nil {
+		writef(e.rawRW, "Error: %v\n", err)
 	}
-	if doneWritingToSession != nil {
-		<-doneWritingToSession
+	if ptySession != nil {
+		ptySession.close()
+		ptySession.wait()
 	}
 	return err
+}
+
+func (e *ttyExecer) startPtySession() (*ttyPtySession, error) {
+	if !e.isPty {
+		return nil, nil
+	}
+
+	stdin, tty, err := pty.Open()
+	if err != nil {
+		writef(e.rw, "Error: %v\n", err)
+		return nil, err
+	}
+	stdout, err := dupPtyFile(stdin)
+	if err != nil {
+		_ = stdin.Close()
+		_ = tty.Close()
+		log.Printf("Error duping pty: %v", err)
+		return nil, err
+	}
+
+	session := &ttyPtySession{
+		stdin:                stdin,
+		tty:                  tty,
+		stdout:               stdout,
+		doneWritingToSession: make(chan struct{}),
+	}
+	e.rw = tty
+	setWinsize(tty, e.ptyReq.Window.Width, e.ptyReq.Window.Height)
+	session.copyOutputToSession(e)
+	if !e.bypassPtyInput {
+		session.copyInputFromSession(e)
+	}
+	return session, nil
+}
+
+func dupPtyFile(stdin *os.File) (*os.File, error) {
+	dup, err := syscall.Dup(int(stdin.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(dup), stdin.Name()), nil
+}
+
+func (s *ttyPtySession) copyOutputToSession(e *ttyExecer) {
+	go func() {
+		if c, ok := e.rawRW.(writeCloser); ok {
+			defer func() { _ = c.CloseWrite() }()
+		}
+		defer func() { _ = s.stdout.Close() }()
+		defer close(s.doneWritingToSession)
+		if _, err := io.Copy(e.rawRW, s.stdout); shouldLogCopyErr(err) && e.ctx.Err() == nil {
+			log.Printf("Error copying from stdout to session: %v", err)
+		}
+	}()
+}
+
+func (s *ttyPtySession) copyInputFromSession(e *ttyExecer) {
+	go func() {
+		defer func() { _ = s.stdin.Close() }()
+		if _, err := io.Copy(s.stdin, e.rawRW); shouldLogCopyErr(err) && e.ctx.Err() == nil {
+			log.Printf("Error copying from session to stdin: %v", err)
+		}
+	}()
+}
+
+func (s *ttyPtySession) close() {
+	_ = s.tty.Close()
+}
+
+func (s *ttyPtySession) wait() {
+	<-s.doneWritingToSession
 }
 
 func (e *ttyExecer) shouldBypassPtyInput() bool {
@@ -228,107 +296,146 @@ func (e *ttyExecer) exec() error {
 	return e.dispatch(e.args)
 }
 
-func (e *ttyExecer) dispatch(args []string) error {
-	cmd := args[0]
-	args = args[1:]
-	switch cmd {
-	case "cron":
+type ttyCommandHandler func(*ttyExecer, []string) error
+
+var ttyCommandHandlers = map[string]ttyCommandHandler{
+	"cron": func(e *ttyExecer, args []string) error {
 		if err := cli.RequireArgsAtLeast("cron", args, 5); err != nil {
 			return err
 		}
 		cronexpr := strings.Join(args[0:5], " ")
 		return e.cronCmdFunc(cronexpr, args[5:])
-	case "disable":
+	},
+	"disable": func(e *ttyExecer, _ []string) error {
 		return e.disableCmdFunc()
-	case "edit":
+	},
+	"edit": func(e *ttyExecer, args []string) error {
 		flags, _, err := cli.ParseEdit(args)
 		if err != nil {
 			return err
 		}
 		return e.editCmdFunc(flags)
-	case "events":
+	},
+	"events": func(e *ttyExecer, args []string) error {
 		flags, _, err := cli.ParseEvents(args)
 		if err != nil {
 			return err
 		}
 		return e.eventsCmdFunc(flags)
-	case "enable":
+	},
+	"enable": func(e *ttyExecer, _ []string) error {
 		return e.enableCmdFunc()
-	case "mount":
+	},
+	"mount": func(e *ttyExecer, args []string) error {
 		flags, mountArgs, err := cli.ParseMount(args)
 		if err != nil {
 			return err
 		}
 		return e.mountCmdFunc(flags, mountArgs)
-	case "ip":
+	},
+	"ip": func(e *ttyExecer, _ []string) error {
 		return e.ipCmdFunc()
-	case "tailscale", "ts":
+	},
+	"tailscale": func(e *ttyExecer, args []string) error {
 		return e.tsCmdFunc(args)
-	case "umount":
+	},
+	"ts": func(e *ttyExecer, args []string) error {
+		return e.tsCmdFunc(args)
+	},
+	"umount": func(e *ttyExecer, args []string) error {
 		return e.umountCmdFunc(args)
-	case "env":
+	},
+	"env": func(e *ttyExecer, args []string) error {
 		return e.envCmdFunc(args)
-	case "logs":
+	},
+	"logs": func(e *ttyExecer, args []string) error {
 		flags, _, err := cli.ParseLogs(args)
 		if err != nil {
 			return err
 		}
 		return e.logsCmdFunc(flags)
-	case "remove":
+	},
+	"remove": func(e *ttyExecer, args []string) error {
 		flags, _, err := cli.ParseRemove(args)
 		if err != nil {
 			return err
 		}
 		return e.removeCmdFunc(flags)
-	case "restart":
+	},
+	"restart": func(e *ttyExecer, _ []string) error {
 		return e.restartCmdFunc()
-	case "rollback":
+	},
+	"rollback": func(e *ttyExecer, _ []string) error {
 		return e.rollbackCmdFunc()
-	case "run":
+	},
+	"run": func(e *ttyExecer, args []string) error {
 		flags, runArgs, err := cli.ParseRun(args)
 		if err != nil {
 			return err
 		}
 		return e.runCmdFunc(flags, runArgs)
-	case "copy":
+	},
+	"copy": func(e *ttyExecer, args []string) error {
 		return e.copyCmdFunc(args)
-	case "docker":
+	},
+	"docker": func(e *ttyExecer, args []string) error {
 		return e.dockerCmdFunc(args)
-	case "stage":
+	},
+	"stage": func(e *ttyExecer, args []string) error {
 		flags, subcmd, stageArgs, err := cli.ParseStage(args)
 		if err != nil {
 			return err
 		}
 		return e.stageCmdFunc(subcmd, flags, stageArgs)
-	case "start":
+	},
+	"start": func(e *ttyExecer, _ []string) error {
 		return e.startCmdFunc()
-	case "status":
+	},
+	"status": func(e *ttyExecer, args []string) error {
 		flags, _, err := cli.ParseStatus(args)
 		if err != nil {
 			return err
 		}
 		return e.statusCmdFunc(flags)
-	case "stop":
+	},
+	"stop": func(e *ttyExecer, _ []string) error {
 		return e.stopCmdFunc()
-	case "version":
+	},
+	"version": func(e *ttyExecer, args []string) error {
 		flags, _, err := cli.ParseVersion(args)
 		if err != nil {
 			return err
 		}
 		if flags.JSON {
-			json.NewEncoder(e.rw).Encode(GetInfoWithInstallUser(e.s.cfg.InstallUser, e.s.cfg.InstallHost))
+			_ = json.NewEncoder(e.rw).Encode(GetInfoWithInstallUser(e.s.cfg.InstallUser, e.s.cfg.InstallHost))
 		} else {
-			fmt.Fprintln(e.rw, Version())
+			writeln(e.rw, Version())
 		}
 		return nil
-	default:
+	},
+}
+
+func (e *ttyExecer) dispatch(args []string) error {
+	cmd := args[0]
+	args = args[1:]
+	handler, ok := ttyCommandHandlers[cmd]
+	if !ok {
 		log.Printf("Unhandled command %q", cmd)
 		return fmt.Errorf("unhandled command %q", cmd)
 	}
+	return handler(e, args)
 }
 
 func (e *ttyExecer) printf(format string, a ...any) {
-	fmt.Fprintf(e.rw, format, a...)
+	writef(e.rw, format, a...)
+}
+
+func writef(w io.Writer, format string, a ...any) {
+	_, _ = fmt.Fprintf(w, format, a...)
+}
+
+func writeln(w io.Writer, a ...any) {
+	_, _ = fmt.Fprintln(w, a...)
 }
 
 func (e *ttyExecer) newCmd(name string, args ...string) *exec.Cmd {
@@ -346,7 +453,7 @@ func (e *ttyExecer) newCmdContext(ctx context.Context, name string, args ...stri
 	if e.isPty && filepath.Base(name) == "docker" && len(args) > 0 && args[0] == "compose" {
 		// Ensure compose starts on a clean line without wrapping stdout/stderr,
 		// so it still detects a TTY and renders its own progress UI.
-		fmt.Fprint(rw, "\r\033[K")
+		_, _ = fmt.Fprint(rw, "\r\033[K")
 	}
 	c.Stdout = rw
 	c.Stderr = rw
@@ -413,7 +520,7 @@ func dockerComposeSubcommand(args []string) string {
 }
 
 func setWinsize(f *os.File, w, h int) {
-	unix.IoctlSetWinsize(int(f.Fd()), syscall.TIOCSWINSZ, &unix.Winsize{
+	_ = unix.IoctlSetWinsize(int(f.Fd()), syscall.TIOCSWINSZ, &unix.Winsize{
 		Row: uint16(h),
 		Col: uint16(w),
 	})

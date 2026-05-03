@@ -10,20 +10,12 @@ cyclop|pkg/catch/installer_service.go|doInstall
 cyclop|pkg/catch/mount.go|umount
 cyclop|pkg/catch/rpc.go|handleEventsWS
 cyclop|pkg/catch/rpc.go|handleExecWS
-cyclop|pkg/catch/run_ui.go|handleKnownMessage
 cyclop|pkg/catch/service_info.go|labelForIP
 cyclop|pkg/catch/service_info.go|serviceIPList
 cyclop|pkg/catch/tsns.go|downloadTailscale
 cyclop|pkg/catch/tsns.go|installTS
 cyclop|pkg/catch/tty_env.go|editEnvCmdFunc
 cyclop|pkg/catch/tty_env.go|envCmdFunc
-cyclop|pkg/catch/tty_exec.go|run
-cyclop|pkg/catch/tty_exec.go|shouldLogCopyErr
-cyclop|pkg/catch/tty_install.go|copyToRemote
-cyclop|pkg/catch/tty_install.go|install
-cyclop|pkg/catch/tty_install.go|normalizeCopyRelPath
-cyclop|pkg/catch/tty_install.go|parseCopyExecArgs
-cyclop|pkg/catch/tty_install.go|stageCmdFunc
 cyclop|pkg/catch/tty_service.go|removeCmdFunc
 cyclop|pkg/catchrpc/client.go|Call
 cyclop|pkg/catchrpc/client.go|Events
@@ -39,18 +31,12 @@ cyclop|pkg/netns/netns.go|InstallYeetNSService
 cyclop|pkg/netns/netns.go|writeNetNSScripts
 cyclop|pkg/registry/containerd.go|GetManifest
 cyclop|pkg/registry/containerd.go|PutManifest
-cyclop|pkg/registry/registry.go|ParseRegistryPath
 cyclop|pkg/svc/docker.go|Statuses
 cyclop|pkg/svc/docker_netns.go|ProjectContainers
 cyclop|pkg/svc/systemd.go|Install
 cyclop|pkg/svc/systemd.go|Uninstall
-cyclop|pkg/yeet/copy_cmd.go|normalizeRemotePath
 cyclop|pkg/yeet/docker.go|pushAllLocalImages
 cyclop|pkg/yeet/exec_remote.go|execRemote
-cyclop|pkg/yeet/info_cmd.go|buildIPGroups
-cyclop|pkg/yeet/info_cmd.go|renderClientSection
-cyclop|pkg/yeet/info_cmd.go|renderNetworkSection
-cyclop|pkg/yeet/info_cmd.go|summarizeStatus
 cyclop|pkg/yeet/init_install_filter.go|Absorb
 cyclop|pkg/yeet/run_changes.go|payloadLabelFromLocal
 cyclop|pkg/yeet/run_changes.go|runWithChanges
@@ -62,7 +48,6 @@ cyclop|pkg/yeet/svc_cmd.go|renderStatusTables
 cyclop|pkg/yeet/svc_cmd.go|runCronFromProjectConfig
 cyclop|pkg/yeet/svc_cmd.go|runFilePayload
 cyclop|pkg/yeet/svc_cmd.go|runFromProjectConfigWithForce
-cyclop|pkg/yeet/tailscale_setup.go|HandleTailscale
 errcheck|cmd/catch/catch.go|doInstall|source:defer inst.Close()|Error return value of `inst.Close` is not checked
 errcheck|cmd/catch/catch.go|doInstall|source:defer ts.Close()|Error return value of `ts.Close` is not checked
 errcheck|cmd/catch/catch.go|initTSNet|source:defer bc.Close()|Error return value of `bc.Close` is not checked
@@ -102,30 +87,6 @@ errcheck|pkg/catch/tty_env.go|(*Server).printEnv|source:fmt.Fprintf(w, "%s\n", b
 errcheck|pkg/catch/tty_env.go|(*ttyExecer).editEnvCmdFunc|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/catch/tty_env.go|(*ttyExecer).editEnvCmdFunc|source:defer fi.Close()|Error return value of `fi.Close` is not checked
 errcheck|pkg/catch/tty_env.go|(*ttyExecer).editEnvCmdFunc|source:defer os.Remove(tmpPath)|Error return value of `os.Remove` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).dispatch|source:fmt.Fprintln(e.rw, Version())|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).dispatch|source:json.NewEncoder(e.rw).Encode(GetInfoWithInstallUser(e.s.cfg.InstallUser, e.s.cfg.InstallHost))|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).newCmdContext|source:fmt.Fprint(rw, "\r\033[K")|Error return value of `fmt.Fprint` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).printf|source:fmt.Fprintf(e.rw, format, a...)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).run|source:closer.Close()|Error return value of `closer.Close` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).run|source:defer c.CloseWrite()|Error return value of `c.CloseWrite` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).run|source:defer stdin.Close()|Error return value of `stdin.Close` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).run|source:defer stdout.Close()|Error return value of `stdout.Close` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).run|source:fmt.Fprintf(e.rawRW, "Error: %v\n", err)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).run|source:fmt.Fprintf(e.rw, "Error: %v\n", err)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).run|source:stdin.Close()|Error return value of `stdin.Close` is not checked
-errcheck|pkg/catch/tty_exec.go|(*ttyExecer).run|source:tty.Close()|Error return value of `tty.Close` is not checked
-errcheck|pkg/catch/tty_exec.go|setWinsize|source:unix.IoctlSetWinsize(int(f.Fd()), syscall.TIOCSWINSZ, &unix.Winsize{|Error return value of `unix.IoctlSetWinsize` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).clearStage|source:fmt.Fprintf(e.rw, "Cleared staged refs for %q (artifacts: %d, images: %d). Removed %d files.\n", e.sn, removedArtifacts, removedImages, removedFiles)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).clearStage|source:fmt.Fprintf(e.rw, "No staged changes for %q\n", e.sn)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).copyFromRemote|source:f.Close()|Error return value of `f.Close` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).copyFromRemote|source:gz.Close()|Error return value of `gz.Close` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).copyToRemote|source:defer gz.Close()|Error return value of `gz.Close` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).copyToRemote|source:defer os.RemoveAll(stageDir)|Error return value of `os.RemoveAll` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).copyToRemote|source:os.Remove(tmpf.Name())|Error return value of `os.Remove` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).copyToRemote|source:tmpf.Close()|Error return value of `tmpf.Close` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).install|source:e.rawCloser.Close()|Error return value of `e.rawCloser.Close` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).stageCmdFunc|source:fmt.Fprintf(e.rw, "%s\n", asJSON(sv))|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_install.go|(*ttyExecer).stageCmdFunc|source:fmt.Fprintf(e.rw, "Staged service %q\n", e.sn)|Error return value of `fmt.Fprintf` is not checked
 errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:defer w.Flush()|Error return value of `w.Flush` is not checked
 errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", status.ServiceName, status.ServiceType, component.Name, component.Status)|Error return value of `fmt.Fprintf` is not checked
 errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:fmt.Fprintf(w, "%s\t%s\t-\t%s\t\n", status.ServiceName, status.ServiceType, component.Status)|Error return value of `fmt.Fprintf` is not checked
@@ -143,16 +104,6 @@ errcheck|pkg/db/db.go|(*Store).saveLocked|source:defer os.Remove(tmp.Name())|Err
 errcheck|pkg/netns/netns.go|InstallYeetNSService|source:defer os.Remove("yeet-ns.env.tmp")|Error return value of `os.Remove` is not checked
 errcheck|pkg/netns/netns.go|InstallYeetNSService|source:defer os.Remove(f)|Error return value of `os.Remove` is not checked
 errcheck|pkg/registry/containerd.go|(*ContainerdCacheStorage).PutManifest|source:s.AbortUpload(ctx, upload.UUID)|Error return value of `s.AbortUpload` is not checked
-errcheck|pkg/registry/errors.go|WriteError|source:json.NewEncoder(w).Encode(resp)|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/registry/registry.go|(*Registry).handleBlobGet|source:defer cw.Close()|Error return value of `cw.Close` is not checked
-errcheck|pkg/registry/registry.go|(*Registry).handleBlobGet|source:defer rc.Close()|Error return value of `rc.Close` is not checked
-errcheck|pkg/registry/registry.go|(*Registry).handleBlobGet|source:io.Copy(w, rc)|Error return value of `io.Copy` is not checked
-errcheck|pkg/registry/registry.go|(*Registry).handleManifestGet|source:defer cw.Close()|Error return value of `cw.Close` is not checked
-errcheck|pkg/registry/registry.go|(*Registry).handleManifestGet|source:defer mf.Data.Close()|Error return value of `mf.Data.Close` is not checked
-errcheck|pkg/registry/registry.go|(*Registry).handleManifestGet|source:io.Copy(w, mf.Data)|Error return value of `io.Copy` is not checked
-errcheck|pkg/registry/registry.go|(*Registry).handleManifestHead|source:defer mf.Data.Close()|Error return value of `mf.Data.Close` is not checked
-errcheck|pkg/registry/registry.go|(*Registry).handleManifestPut|source:req.Body.Close()|Error return value of `req.Body.Close` is not checked
-errcheck|pkg/registry/storage.go|(*FilesystemStorage).DeleteManifest|source:os.Remove(mediaTypePath) // Ignore errors|Error return value of `os.Remove` is not checked
 errcheck|pkg/svc/docker.go|(*DockerComposeService).Remove|source:s.sd.Stop()|Error return value of `s.sd.Stop` is not checked
 errcheck|pkg/svc/docker.go|(*DockerComposeService).Stop|source:s.sd.Stop()|Error return value of `s.sd.Stop` is not checked
 errcheck|pkg/svc/docker.go|(*DockerComposeService).commandContext|source:os.Remove(filepath.Join(s.DataDir, ".env"))|Error return value of `os.Remove` is not checked
@@ -196,8 +147,6 @@ gocognit|pkg/catch/installer_file.go|(*FileInstaller).installOnClose
 gocognit|pkg/catch/rpc.go|(*Server).handleRPC
 gocognit|pkg/catch/systemd.go|(*Server).monitorSystemd
 gocognit|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc
-gocognit|pkg/catch/tty_install.go|(*ttyExecer).clearStage
-gocognit|pkg/catch/tty_install.go|(*ttyExecer).copyFromRemote
 gocognit|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc
 gocognit|pkg/catchrpc/client.go|(*Client).Exec
 gocognit|pkg/cli/cli.go|splitArgsForParsing
@@ -211,7 +160,6 @@ gocognit|pkg/yeet/run_changes.go|detectRunChanges
 gocognit|pkg/yeet/svc_cmd.go|HandleSvcCmd
 gocognit|pkg/yeet/svc_cmd.go|splitRunArgsForParsing
 gocognit|pkg/yeet/svc_cmd.go|splitRunPayloadArgs
-gocyclo|pkg/catch/tty_exec.go|(*ttyExecer).dispatch
 govet|pkg/cli/cli.go|consumesValue|source:for t.Kind() == reflect.Ptr {|inline: Constant reflect.Ptr should be inlined
 govet|pkg/cli/cli.go|flagSpecsFromStruct|source:if t.Kind() == reflect.Ptr {|inline: Constant reflect.Ptr should be inlined
 staticcheck|pkg/catch/installer_file.go|(*FileInstaller).parseNetwork|source:switch {|QF1002: could use tagged switch on net

@@ -290,7 +290,9 @@ func (s *FilesystemStorage) DeleteManifest(ctx context.Context, repo, reference 
 
 	// Also remove media type file
 	mediaTypePath := path + ".mediatype"
-	os.Remove(mediaTypePath) // Ignore errors
+	if err := os.Remove(mediaTypePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete manifest media type: %w", err)
+	}
 
 	return nil
 }

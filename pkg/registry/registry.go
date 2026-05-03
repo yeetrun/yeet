@@ -74,93 +74,96 @@ type RegistryPath struct {
 
 // ParseRegistryPath parses a Docker Registry V2 API path
 func ParseRegistryPath(path string) (*RegistryPath, error) {
-	// Remove leading/trailing slashes
-	path = strings.Trim(path, "/")
-
-	// Split into parts
-	parts := strings.Split(path, "/")
-
-	// Must start with v2
+	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) < 2 || parts[0] != "v2" {
 		return nil, fmt.Errorf("path must start with /v2/")
 	}
-
-	// Need at least: v2, repo, operation
 	if len(parts) < 3 {
 		return nil, fmt.Errorf("path too short")
 	}
 
-	// Find the operation (manifests, blobs, tags)
-	// Repo can have slashes, so we need to find where it ends
-	var opIdx int
-	var op string
-	for i := 1; i < len(parts); i++ {
-		if parts[i] == "manifests" || parts[i] == "blobs" || parts[i] == "tags" {
-			opIdx = i
-			op = parts[i]
-			break
-		}
-	}
-
+	op, opIdx := findRegistryOperation(parts)
 	if op == "" {
 		return nil, fmt.Errorf("no valid operation found (manifests/blobs/tags)")
 	}
 
-	// Everything between v2 and the operation is the repo
 	repo := strings.Join(parts[1:opIdx], "/")
 	if repo == "" {
 		return nil, fmt.Errorf("empty repository name")
 	}
 
-	result := &RegistryPath{
-		Repo: repo,
+	result, err := parseRegistryOperation(parts, op, opIdx)
+	if err != nil {
+		return nil, err
 	}
+	result.Repo = repo
+	return result, nil
+}
 
-	// Parse based on operation type
+func findRegistryOperation(parts []string) (string, int) {
+	for i := 1; i < len(parts); i++ {
+		if isRegistryOperation(parts[i]) {
+			return parts[i], i
+		}
+	}
+	return "", 0
+}
+
+func isRegistryOperation(part string) bool {
+	return part == "manifests" || part == "blobs" || part == "tags"
+}
+
+func parseRegistryOperation(parts []string, op string, opIdx int) (*RegistryPath, error) {
 	switch op {
 	case "manifests":
-		// /v2/<repo>/manifests/<reference>
-		if len(parts) <= opIdx+1 {
-			return nil, fmt.Errorf("manifests path missing reference")
-		}
-		result.Type = PathTypeManifest
-		result.Reference = strings.Join(parts[opIdx+1:], "/")
-
+		return parseManifestPath(parts, opIdx)
 	case "blobs":
-		// /v2/<repo>/blobs/<digest>
-		// /v2/<repo>/blobs/uploads/
-		// /v2/<repo>/blobs/uploads/<uuid>
-		if len(parts) <= opIdx+1 {
-			return nil, fmt.Errorf("blobs path missing subpath")
-		}
-
-		if parts[opIdx+1] == "uploads" {
-			if len(parts) == opIdx+2 {
-				// /v2/<repo>/blobs/uploads/
-				result.Type = PathTypeBlobUploadInit
-			} else {
-				// /v2/<repo>/blobs/uploads/<uuid>
-				result.Type = PathTypeBlobUpload
-				result.Reference = parts[opIdx+2]
-			}
-		} else {
-			// /v2/<repo>/blobs/<digest>
-			result.Type = PathTypeBlob
-			result.Reference = parts[opIdx+1]
-		}
-
+		return parseBlobPath(parts, opIdx)
 	case "tags":
-		// /v2/<repo>/tags/list
-		if len(parts) <= opIdx+1 || parts[opIdx+1] != "list" {
-			return nil, fmt.Errorf("tags path must be tags/list")
-		}
-		result.Type = PathTypeTagsList
-
+		return parseTagsPath(parts, opIdx)
 	default:
 		return nil, fmt.Errorf("unknown operation: %s", op)
 	}
+}
 
-	return result, nil
+func parseManifestPath(parts []string, opIdx int) (*RegistryPath, error) {
+	if len(parts) <= opIdx+1 {
+		return nil, fmt.Errorf("manifests path missing reference")
+	}
+	return &RegistryPath{
+		Type:      PathTypeManifest,
+		Reference: strings.Join(parts[opIdx+1:], "/"),
+	}, nil
+}
+
+func parseBlobPath(parts []string, opIdx int) (*RegistryPath, error) {
+	if len(parts) <= opIdx+1 {
+		return nil, fmt.Errorf("blobs path missing subpath")
+	}
+	if parts[opIdx+1] == "uploads" {
+		return parseBlobUploadPath(parts, opIdx)
+	}
+	return &RegistryPath{
+		Type:      PathTypeBlob,
+		Reference: parts[opIdx+1],
+	}, nil
+}
+
+func parseBlobUploadPath(parts []string, opIdx int) (*RegistryPath, error) {
+	if len(parts) == opIdx+2 {
+		return &RegistryPath{Type: PathTypeBlobUploadInit}, nil
+	}
+	return &RegistryPath{
+		Type:      PathTypeBlobUpload,
+		Reference: parts[opIdx+2],
+	}, nil
+}
+
+func parseTagsPath(parts []string, opIdx int) (*RegistryPath, error) {
+	if len(parts) <= opIdx+1 || parts[opIdx+1] != "list" {
+		return nil, fmt.Errorf("tags path must be tags/list")
+	}
+	return &RegistryPath{Type: PathTypeTagsList}, nil
 }
 
 // setupRoutes configures all OCI Distribution Spec routes.
@@ -259,7 +262,7 @@ func (r *Registry) handleManifestGet(w http.ResponseWriter, req *http.Request, r
 		WriteError(w, http.StatusInternalServerError, ErrCodeManifestInvalid, err.Error(), nil)
 		return
 	}
-	defer mf.Data.Close()
+	defer func() { _ = mf.Data.Close() }()
 
 	// Set required headers
 	if mf.MediaType != "" {
@@ -280,16 +283,24 @@ func (r *Registry) handleManifestGet(w http.ResponseWriter, req *http.Request, r
 		if err != nil {
 			// Fall back to uncompressed on error
 			w.WriteHeader(http.StatusOK)
-			io.Copy(w, mf.Data)
+			if _, err := io.Copy(w, mf.Data); err != nil {
+				r.vlog("copy manifest response failed: %v", err)
+			}
 			return
 		}
-		defer cw.Close()
+		defer func() {
+			if err := cw.Close(); err != nil {
+				r.vlog("close manifest compression writer failed: %v", err)
+			}
+		}()
 
 		w = cw
 	}
 
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, mf.Data)
+	if _, err := io.Copy(w, mf.Data); err != nil {
+		r.vlog("copy manifest response failed: %v", err)
+	}
 }
 
 // handleManifestHead checks if a manifest exists.
@@ -305,7 +316,7 @@ func (r *Registry) handleManifestHead(w http.ResponseWriter, req *http.Request, 
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
-	defer mf.Data.Close()
+	defer func() { _ = mf.Data.Close() }()
 
 	// Set required headers
 	if mf.MediaType != "" {
@@ -337,6 +348,7 @@ func (r *Registry) handleManifestPut(w http.ResponseWriter, req *http.Request, r
 			"failed to decompress request body", nil)
 		return
 	}
+	defer func() { _ = req.Body.Close() }()
 
 	// Read manifest data
 	data, err := io.ReadAll(req.Body)
@@ -344,7 +356,6 @@ func (r *Registry) handleManifestPut(w http.ResponseWriter, req *http.Request, r
 		WriteError(w, http.StatusBadRequest, ErrCodeManifestInvalid, "failed to read manifest", nil)
 		return
 	}
-	req.Body.Close()
 
 	// Get media type from Content-Type header
 	mediaType := req.Header.Get("Content-Type")
@@ -424,7 +435,7 @@ func (r *Registry) handleBlobGet(w http.ResponseWriter, req *http.Request, repo,
 		WriteError(w, http.StatusInternalServerError, ErrCodeBlobUnknown, err.Error(), nil)
 		return
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	size, sizeErr := r.storage.BlobSize(req.Context(), digest)
 
 	// Set required headers
@@ -441,10 +452,16 @@ func (r *Registry) handleBlobGet(w http.ResponseWriter, req *http.Request, repo,
 		if err != nil {
 			// Fall back to uncompressed on error
 			w.WriteHeader(http.StatusOK)
-			io.Copy(w, rc)
+			if _, err := io.Copy(w, rc); err != nil {
+				r.vlog("copy blob response failed: %v", err)
+			}
 			return
 		}
-		defer cw.Close()
+		defer func() {
+			if err := cw.Close(); err != nil {
+				r.vlog("close blob compression writer failed: %v", err)
+			}
+		}()
 
 		w = cw
 	} else if sizeErr == nil {
@@ -452,7 +469,9 @@ func (r *Registry) handleBlobGet(w http.ResponseWriter, req *http.Request, repo,
 	}
 
 	w.WriteHeader(http.StatusOK)
-	io.Copy(w, rc)
+	if _, err := io.Copy(w, rc); err != nil {
+		r.vlog("copy blob response failed: %v", err)
+	}
 }
 
 // handleBlobHead checks if a blob exists.
