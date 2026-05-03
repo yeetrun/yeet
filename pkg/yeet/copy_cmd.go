@@ -39,24 +39,43 @@ type copyRequest struct {
 	Dst       copyEndpoint
 }
 
+type copyDirection int
+
+const (
+	copyDirectionInvalid copyDirection = iota
+	copyDirectionToRemote
+	copyDirectionFromRemote
+)
+
 func runCopyCommand(args []string, cfg *ProjectConfig) error {
 	req, err := parseCopyArgs(args)
 	if err != nil {
 		return err
 	}
-	if req.Src.Remote && req.Dst.Remote {
-		return fmt.Errorf("copy does not support remote-to-remote")
-	}
-	if !req.Src.Remote && !req.Dst.Remote {
-		return fmt.Errorf("copy requires a service endpoint (svc:path)")
-	}
-	if err := applyCopyHostOverride(req, cfg); err != nil {
+	direction, remote, err := classifyCopyEndpoints(req)
+	if err != nil {
 		return err
 	}
-	if req.Src.Remote {
+	if err := applyCopyHostOverrideForEndpoint(remote, cfg); err != nil {
+		return err
+	}
+	if direction == copyDirectionFromRemote {
 		return copyFromRemote(req)
 	}
 	return copyToRemote(req)
+}
+
+func classifyCopyEndpoints(req copyRequest) (copyDirection, copyEndpoint, error) {
+	if req.Src.Remote && req.Dst.Remote {
+		return copyDirectionInvalid, copyEndpoint{}, fmt.Errorf("copy does not support remote-to-remote")
+	}
+	if !req.Src.Remote && !req.Dst.Remote {
+		return copyDirectionInvalid, copyEndpoint{}, fmt.Errorf("copy requires a service endpoint (svc:path)")
+	}
+	if req.Src.Remote {
+		return copyDirectionFromRemote, req.Src, nil
+	}
+	return copyDirectionToRemote, req.Dst, nil
 }
 
 func parseCopyArgs(args []string) (copyRequest, error) {
@@ -237,88 +256,36 @@ func isWindowsDrivePath(raw string) bool {
 	return raw[2] == '\\' || raw[2] == '/'
 }
 
+type copyUpload struct {
+	reader io.ReadCloser
+	args   []string
+}
+
 func copyToRemote(req copyRequest) error {
-	dst := req.Dst
-	if !dst.Remote || dst.Service == "" {
-		return fmt.Errorf("copy destination must be svc:path")
+	dst, err := remoteCopyDestination(req)
+	if err != nil {
+		return err
 	}
-	if dst.Host != "" {
-		SetHostOverride(dst.Host)
-	}
-	srcPath := req.Src.Path
-	if srcPath == "" {
-		return fmt.Errorf("copy requires a source path")
-	}
-	info, err := os.Lstat(srcPath)
+	applyEndpointHostOverride(dst)
+
+	info, err := localCopySourceInfo(req)
 	if err != nil {
 		return err
 	}
 
-	destRel := dst.Path
-	destDir := dst.DirHint
 	report := newCopyReport(req.Verbose)
 	report.Start("sending")
-
-	var reader io.ReadCloser
-	var args []string
-
-	if info.IsDir() {
-		prefix := ""
-		if !hasTrailingSlash(req.Src.Raw) {
-			prefix = filepath.Base(srcPath)
-		}
-		reader, err = tarDirectoryStream(srcPath, prefix, req.Compress, report.OnEntry)
-		if err != nil {
-			return err
-		}
-		args = []string{"copy", "--to", remotePathOrDot(destRel), "--archive"}
-		if req.Compress {
-			args = append(args, "--compress")
-		}
-	} else if req.Archive {
-		destRoot := destRel
-		entryName := filepath.Base(srcPath)
-		if destRel != "" && !destDir {
-			entryName = path.Base(destRel)
-			destRoot = path.Dir(destRel)
-			if destRoot == "." {
-				destRoot = ""
-			}
-		}
-		destRoot, _, err = normalizeRemotePath(destRoot)
-		if err != nil {
-			return fmt.Errorf("invalid copy destination %q", dst.Raw)
-		}
-		reader, err = tarFileStream(srcPath, entryName, req.Compress, report.OnEntry)
-		if err != nil {
-			return err
-		}
-		args = []string{"copy", "--to", remotePathOrDot(destRoot), "--archive"}
-		if req.Compress {
-			args = append(args, "--compress")
-		}
-	} else {
-		if destRel == "" || destDir {
-			destRel = path.Join(destRel, filepath.Base(srcPath))
-		}
-		destRel, _, err = normalizeRemotePath(destRel)
-		if err != nil || destRel == "" {
-			return fmt.Errorf("invalid copy destination %q", dst.Raw)
-		}
-		f, err := os.Open(srcPath)
-		if err != nil {
-			return err
-		}
-		reader = f
-		args = []string{"copy", "--to", destRel}
-		if req.Compress {
-			args = append(args, "--compress")
-		}
+	upload, err := openCopyUpload(req, info, report)
+	if err != nil {
+		return err
 	}
+	return sendCopyUpload(dst, upload, report)
+}
 
-	counter := &countingReader{r: reader}
-	err = execRemoteFn(context.Background(), dst.Service, args, counter, false)
-	closeErr := reader.Close()
+func sendCopyUpload(dst copyEndpoint, upload copyUpload, report *copyReport) error {
+	counter := &countingReader{r: upload.reader}
+	err := execRemoteFn(context.Background(), dst.Service, upload.args, counter, false)
+	closeErr := upload.reader.Close()
 	if err != nil {
 		return err
 	}
@@ -329,20 +296,157 @@ func copyToRemote(req copyRequest) error {
 	return nil
 }
 
-func applyCopyHostOverride(req copyRequest, cfg *ProjectConfig) error {
+func remoteCopyDestination(req copyRequest) (copyEndpoint, error) {
+	if !req.Dst.Remote || req.Dst.Service == "" {
+		return copyEndpoint{}, fmt.Errorf("copy destination must be svc:path")
+	}
+	return req.Dst, nil
+}
+
+func localCopySource(req copyRequest) (string, error) {
+	if req.Src.Path == "" {
+		return "", fmt.Errorf("copy requires a source path")
+	}
+	return req.Src.Path, nil
+}
+
+func localCopySourceInfo(req copyRequest) (os.FileInfo, error) {
+	srcPath, err := localCopySource(req)
+	if err != nil {
+		return nil, err
+	}
+	return os.Lstat(srcPath)
+}
+
+func applyEndpointHostOverride(ep copyEndpoint) {
+	if ep.Host != "" {
+		SetHostOverride(ep.Host)
+	}
+}
+
+func openCopyUpload(req copyRequest, info os.FileInfo, report *copyReport) (copyUpload, error) {
+	if info.IsDir() {
+		return openDirectoryCopyUpload(req, report)
+	}
+	if req.Archive {
+		return openArchiveFileCopyUpload(req, report)
+	}
+	return openPlainFileCopyUpload(req)
+}
+
+func openDirectoryCopyUpload(req copyRequest, report *copyReport) (copyUpload, error) {
+	prefix := sourceDirectoryArchivePrefix(req.Src.Raw, req.Src.Path)
+	reader, err := tarDirectoryStream(req.Src.Path, prefix, req.Compress, report.OnEntry)
+	if err != nil {
+		return copyUpload{}, err
+	}
+	return copyUpload{
+		reader: reader,
+		args:   copyUploadArgs(remotePathOrDot(req.Dst.Path), true, req.Compress),
+	}, nil
+}
+
+func openArchiveFileCopyUpload(req copyRequest, report *copyReport) (copyUpload, error) {
+	destRoot, entryName, err := remoteArchiveFileDestination(req.Dst.Path, req.Dst.DirHint, req.Src.Path)
+	if err != nil {
+		return copyUpload{}, fmt.Errorf("invalid copy destination %q", req.Dst.Raw)
+	}
+	reader, err := tarFileStream(req.Src.Path, entryName, req.Compress, report.OnEntry)
+	if err != nil {
+		return copyUpload{}, err
+	}
+	return copyUpload{
+		reader: reader,
+		args:   copyUploadArgs(remotePathOrDot(destRoot), true, req.Compress),
+	}, nil
+}
+
+func openPlainFileCopyUpload(req copyRequest) (copyUpload, error) {
+	destRel, err := remotePlainFileDestination(req.Dst.Path, req.Dst.DirHint, req.Src.Path)
+	if err != nil {
+		return copyUpload{}, fmt.Errorf("invalid copy destination %q", req.Dst.Raw)
+	}
+	f, err := os.Open(req.Src.Path)
+	if err != nil {
+		return copyUpload{}, err
+	}
+	return copyUpload{
+		reader: f,
+		args:   copyUploadArgs(destRel, false, req.Compress),
+	}, nil
+}
+
+func sourceDirectoryArchivePrefix(raw, srcPath string) string {
+	if hasTrailingSlash(raw) {
+		return ""
+	}
+	return filepath.Base(srcPath)
+}
+
+func remoteArchiveFileDestination(destRel string, destDir bool, srcPath string) (string, string, error) {
+	destRoot := destRel
+	entryName := filepath.Base(srcPath)
+	if destRel != "" && !destDir {
+		entryName = path.Base(destRel)
+		destRoot = path.Dir(destRel)
+		if destRoot == "." {
+			destRoot = ""
+		}
+	}
+	destRoot, _, err := normalizeRemotePath(destRoot)
+	return destRoot, entryName, err
+}
+
+func remotePlainFileDestination(destRel string, destDir bool, srcPath string) (string, error) {
+	if destRel == "" || destDir {
+		destRel = path.Join(destRel, filepath.Base(srcPath))
+	}
+	destRel, _, err := normalizeRemotePath(destRel)
+	if err != nil {
+		return "", err
+	}
+	if destRel == "" {
+		return "", fmt.Errorf("empty remote file path")
+	}
+	return destRel, nil
+}
+
+func copyUploadArgs(dest string, archive bool, compress bool) []string {
+	args := []string{"copy", "--to", dest}
+	if archive {
+		args = append(args, "--archive")
+	}
+	if compress {
+		args = append(args, "--compress")
+	}
+	return args
+}
+
+func applyCopyHostOverrideForEndpoint(remote copyEndpoint, cfg *ProjectConfig) error {
+	if hasActiveHostOverride() {
+		return nil
+	}
+	if applyRemoteEndpointHost(remote) {
+		return nil
+	}
+	return applyConfiguredCopyHost(cfg, remote.Service)
+}
+
+func hasActiveHostOverride() bool {
 	hostOverride, hostOverrideSet := HostOverride()
-	if hostOverrideSet && hostOverride != "" {
-		return nil
+	return hostOverrideSet && hostOverride != ""
+}
+
+func applyRemoteEndpointHost(remote copyEndpoint) bool {
+	if remote.Host == "" {
+		return false
 	}
-	remote := req.Dst
-	if req.Src.Remote {
-		remote = req.Src
-	}
-	if remote.Host != "" {
-		SetHostOverride(remote.Host)
-		return nil
-	}
-	host, err := resolveServiceHost(cfg, remote.Service)
+	SetHostOverride(remote.Host)
+	return true
+}
+
+func applyConfiguredCopyHost(cfg *ProjectConfig, service string) error {
+	host, err := resolveServiceHost(cfg, service)
 	if err != nil {
 		return err
 	}
@@ -353,28 +457,13 @@ func applyCopyHostOverride(req copyRequest, cfg *ProjectConfig) error {
 }
 
 func copyFromRemote(req copyRequest) (err error) {
-	src := req.Src
-	if !src.Remote || src.Service == "" {
-		return fmt.Errorf("copy source must be svc:path")
+	src, err := remoteCopySource(req)
+	if err != nil {
+		return err
 	}
-	if src.Host != "" {
-		SetHostOverride(src.Host)
-	}
-	srcRel := src.Path
-	if srcRel == "" && !src.DirHint {
-		return fmt.Errorf("copy requires a source path")
-	}
-	args := []string{"copy", "--from", remotePathOrDot(srcRel)}
-	if req.Archive {
-		args = append(args, "--archive")
-	}
-	if req.Compress {
-		args = append(args, "--compress")
-	}
-	if req.Recursive && !req.Archive {
-		args = append(args, "--recursive")
-	}
-	reader, done, err := execRemoteStreamFn(context.Background(), src.Service, args, nil)
+	applyEndpointHostOverride(src)
+
+	reader, done, err := execRemoteStreamFn(context.Background(), src.Service, copyDownloadArgs(req), nil)
 	if err != nil {
 		return err
 	}
@@ -384,98 +473,181 @@ func copyFromRemote(req copyRequest) (err error) {
 	report.Start("receiving")
 
 	counter := &countingReader{r: reader}
-	buf := bufio.NewReader(counter)
-	kind, base, err := copyutil.ReadHeader(buf)
-	if err != nil {
-		<-done
-		return err
-	}
-	destPath := req.Dst.Path
-	if destPath == "" {
-		<-done
-		return fmt.Errorf("copy requires a destination path")
-	}
-	destDir := isLocalDirHint(destPath)
-	if !destDir {
-		if st, err := os.Stat(destPath); err == nil && st.IsDir() {
-			destDir = true
-		}
-	}
-
-	payload := io.Reader(buf)
-	var gz *gzip.Reader
-	if req.Compress {
-		var err error
-		gz, err = gzip.NewReader(buf)
-		if err != nil {
-			<-done
-			return err
-		}
-		defer captureCloseError(&err, gz)
-		payload = gz
-	}
-
-	switch kind {
-	case "file":
-		parent := filepath.Dir(destPath)
-		if destDir {
-			parent = destPath
-		}
-		if err := os.MkdirAll(parent, 0o755); err != nil {
-			<-done
-			return err
-		}
-		staged, stageDir, err := extractToTemp(parent, payload, report.OnEntry)
-		if err != nil {
-			<-done
-			return err
-		}
-		defer captureRemoveAllError(&err, stageDir)
-		baseName := base
-		if baseName == "" {
-			baseName = filepath.Base(staged)
-		}
-		outPath := destPath
-		if destDir {
-			outPath = filepath.Join(destPath, baseName)
-		}
-		if err := replaceLocalPath(staged, outPath); err != nil {
-			<-done
-			return err
-		}
-	case "dir":
-		root := destPath
-		if destDir && base != "" && !src.DirHint {
-			root = filepath.Join(destPath, base)
-		}
-		if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
-			<-done
-			return err
-		}
-		stageDir, err := os.MkdirTemp(filepath.Dir(root), "yeet-copy-*")
-		if err != nil {
-			<-done
-			return err
-		}
-		defer captureRemoveAllError(&err, stageDir)
-		if err := copyutil.ExtractTarWithOptions(payload, stageDir, copyutil.ExtractOptions{OnEntry: report.OnEntry}); err != nil {
-			<-done
-			return err
-		}
-		if err := copyutil.MoveTree(stageDir, root); err != nil {
-			<-done
-			return err
-		}
-	default:
-		<-done
-		return fmt.Errorf("invalid copy header")
-	}
-
-	if err := <-done; err != nil {
+	if err := receiveRemoteCopy(req, counter, done, report); err != nil {
 		return err
 	}
 	report.Finish(0, counter.N())
 	return nil
+}
+
+func remoteCopySource(req copyRequest) (copyEndpoint, error) {
+	if !req.Src.Remote || req.Src.Service == "" {
+		return copyEndpoint{}, fmt.Errorf("copy source must be svc:path")
+	}
+	if req.Src.Path == "" && !req.Src.DirHint {
+		return copyEndpoint{}, fmt.Errorf("copy requires a source path")
+	}
+	return req.Src, nil
+}
+
+func copyDownloadArgs(req copyRequest) []string {
+	args := []string{"copy", "--from", remotePathOrDot(req.Src.Path)}
+	if req.Archive {
+		args = append(args, "--archive")
+	}
+	if req.Compress {
+		args = append(args, "--compress")
+	}
+	if req.Recursive && !req.Archive {
+		args = append(args, "--recursive")
+	}
+	return args
+}
+
+func receiveRemoteCopy(req copyRequest, r io.Reader, done <-chan error, report *copyReport) (err error) {
+	receive, err := prepareRemoteCopyReceive(req, r)
+	if err != nil {
+		waitRemoteCopy(done)
+		return err
+	}
+	if receive.closer != nil {
+		defer captureCloseError(&err, receive.closer)
+	}
+	if err := extractRemoteCopyPayload(receive.header, receive.dest, req.Src.DirHint, receive.payload, report.OnEntry); err != nil {
+		waitRemoteCopy(done)
+		return err
+	}
+	return <-done
+}
+
+type remoteCopyReceive struct {
+	header  remoteCopyHeader
+	dest    localCopyTarget
+	payload io.Reader
+	closer  io.Closer
+}
+
+func prepareRemoteCopyReceive(req copyRequest, r io.Reader) (remoteCopyReceive, error) {
+	buf := bufio.NewReader(r)
+	header, err := readRemoteCopyHeader(buf)
+	if err != nil {
+		return remoteCopyReceive{}, err
+	}
+	dest, err := localCopyDestination(req.Dst.Path)
+	if err != nil {
+		return remoteCopyReceive{}, err
+	}
+	payload, closer, err := remoteCopyPayload(buf, req.Compress)
+	if err != nil {
+		return remoteCopyReceive{}, err
+	}
+	return remoteCopyReceive{header: header, dest: dest, payload: payload, closer: closer}, nil
+}
+
+type remoteCopyHeader struct {
+	kind string
+	base string
+}
+
+type localCopyTarget struct {
+	path string
+	dir  bool
+}
+
+func readRemoteCopyHeader(r *bufio.Reader) (remoteCopyHeader, error) {
+	kind, base, err := copyutil.ReadHeader(r)
+	return remoteCopyHeader{kind: kind, base: base}, err
+}
+
+func localCopyDestination(destPath string) (localCopyTarget, error) {
+	if destPath == "" {
+		return localCopyTarget{}, fmt.Errorf("copy requires a destination path")
+	}
+	dest := localCopyTarget{path: destPath, dir: isLocalDirHint(destPath)}
+	if !dest.dir {
+		dest.dir = existingLocalDirectory(destPath)
+	}
+	return dest, nil
+}
+
+func existingLocalDirectory(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && st.IsDir()
+}
+
+func remoteCopyPayload(r *bufio.Reader, compress bool) (io.Reader, io.Closer, error) {
+	if !compress {
+		return r, nil, nil
+	}
+	gz, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, nil, err
+	}
+	return gz, gz, nil
+}
+
+func extractRemoteCopyPayload(header remoteCopyHeader, dest localCopyTarget, sourceDirHint bool, payload io.Reader, observer copyutil.TarObserver) error {
+	switch header.kind {
+	case "file":
+		return extractRemoteFileCopy(dest, header.base, payload, observer)
+	case "dir":
+		return extractRemoteDirCopy(dest, header.base, sourceDirHint, payload, observer)
+	default:
+		return fmt.Errorf("invalid copy header")
+	}
+}
+
+func extractRemoteFileCopy(dest localCopyTarget, base string, payload io.Reader, observer copyutil.TarObserver) (err error) {
+	parent := filepath.Dir(dest.path)
+	if dest.dir {
+		parent = dest.path
+	}
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return err
+	}
+	staged, stageDir, err := extractToTemp(parent, payload, observer)
+	if err != nil {
+		return err
+	}
+	defer captureRemoveAllError(&err, stageDir)
+	return replaceLocalPath(staged, localFileOutputPath(dest, base, staged))
+}
+
+func localFileOutputPath(dest localCopyTarget, base, staged string) string {
+	if !dest.dir {
+		return dest.path
+	}
+	if base == "" {
+		base = filepath.Base(staged)
+	}
+	return filepath.Join(dest.path, base)
+}
+
+func extractRemoteDirCopy(dest localCopyTarget, base string, sourceDirHint bool, payload io.Reader, observer copyutil.TarObserver) (err error) {
+	root := localDirOutputPath(dest, base, sourceDirHint)
+	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
+		return err
+	}
+	stageDir, err := os.MkdirTemp(filepath.Dir(root), "yeet-copy-*")
+	if err != nil {
+		return err
+	}
+	defer captureRemoveAllError(&err, stageDir)
+	if err := copyutil.ExtractTarWithOptions(payload, stageDir, copyutil.ExtractOptions{OnEntry: observer}); err != nil {
+		return err
+	}
+	return copyutil.MoveTree(stageDir, root)
+}
+
+func localDirOutputPath(dest localCopyTarget, base string, sourceDirHint bool) string {
+	if dest.dir && base != "" && !sourceDirHint {
+		return filepath.Join(dest.path, base)
+	}
+	return dest.path
+}
+
+func waitRemoteCopy(done <-chan error) {
+	<-done
 }
 
 func captureCloseError(errp *error, closer io.Closer) {

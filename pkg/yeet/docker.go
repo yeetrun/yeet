@@ -26,41 +26,59 @@ type pushFlagsParsed struct {
 	AllLocal bool `flag:"all-local"`
 }
 
+type pushRequest struct {
+	Service  string
+	Image    string
+	Tag      string
+	AllLocal bool
+}
+
 func HandlePush(ctx context.Context, args []string) error {
+	req, err := parsePushRequest(args)
+	if err != nil {
+		return err
+	}
+	goos, goarch, err := remoteCatchOSAndArch()
+	if err != nil {
+		return err
+	}
+	if req.AllLocal {
+		return pushAllLocalImages(req.Service, goos, goarch)
+	}
+	return pushImage(ctx, req.Service, req.Image, req.Tag)
+}
+
+func parsePushRequest(args []string) (pushRequest, error) {
 	if len(args) == 0 {
-		return errors.New("missing svc argument")
+		return pushRequest{}, errors.New("missing svc argument")
 	}
 	if args[0] == "push" {
 		args = args[1:]
 	}
 	result, err := yargs.ParseFlags[pushFlagsParsed](args)
 	if err != nil {
-		return err
+		return pushRequest{}, err
 	}
 	pos := append([]string{}, result.Args...)
 	if len(result.RemainingArgs) > 0 {
 		pos = append(pos, result.RemainingArgs...)
 	}
 	if len(pos) < 1 {
-		return errors.New("missing svc argument")
+		return pushRequest{}, errors.New("missing svc argument")
 	}
-	goos, goarch, err := remoteCatchOSAndArch()
-	if err != nil {
-		return err
-	}
-	svc := pos[0]
+	req := pushRequest{Service: pos[0], AllLocal: result.Flags.AllLocal}
 	if result.Flags.AllLocal {
-		return pushAllLocalImages(svc, goos, goarch)
+		return req, nil
 	}
 	if len(pos) < 2 {
-		return errors.New("missing image argument")
+		return pushRequest{}, errors.New("missing image argument")
 	}
-	image := pos[1]
-	tag := "latest"
+	req.Image = pos[1]
+	req.Tag = "latest"
 	if result.Flags.Run {
-		tag = "run"
+		req.Tag = "run"
 	}
-	return pushImage(ctx, svc, image, tag)
+	return req, nil
 }
 
 func getDockerHost(ctx context.Context) (string, error) {
@@ -104,6 +122,10 @@ func imageExists(imageName string) bool {
 	return true
 }
 
+type dockerBuild struct {
+	Args []string
+}
+
 func buildDockerImageForRemote(ctx context.Context, dockerfilePath, imageName string) error {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return fmt.Errorf("docker not found")
@@ -112,118 +134,180 @@ func buildDockerImageForRemote(ctx context.Context, dockerfilePath, imageName st
 	if err != nil {
 		return err
 	}
+	build, err := dockerBuildPlan(dockerfilePath, imageName, goos, goarch)
+	if err != nil {
+		return err
+	}
+	return runDockerBuild(ctx, build)
+}
+
+func dockerBuildPlan(dockerfilePath, imageName, goos, goarch string) (dockerBuild, error) {
 	if goos != "linux" {
-		return fmt.Errorf("remote host is not running linux: %s", goos)
+		return dockerBuild{}, fmt.Errorf("remote host is not running linux: %s", goos)
 	}
 	switch goarch {
 	case "amd64", "arm64":
 	default:
-		return fmt.Errorf("remote host is running an unsupported architecture: %s", goarch)
+		return dockerBuild{}, fmt.Errorf("remote host is running an unsupported architecture: %s", goarch)
 	}
 	targetPlatform := fmt.Sprintf("linux/%s", goarch)
 	dockerfileDir := filepath.Dir(dockerfilePath)
-	args := []string{
+	return dockerBuild{Args: []string{
 		"build",
 		"--platform", targetPlatform,
 		"-t", imageName,
 		"-f", dockerfilePath,
 		dockerfileDir,
-	}
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	}}, nil
+}
+
+func runDockerBuild(ctx context.Context, build dockerBuild) error {
+	cmd := exec.CommandContext(ctx, "docker", build.Args...)
 	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if msg := strings.TrimSpace(string(output)); msg != "" {
 			fmt.Fprintf(os.Stderr, "\nDocker build error:\n%s\n", msg)
 		}
-		return fmt.Errorf("docker %s: %w", strings.Join(args, " "), err)
+		return fmt.Errorf("docker %s: %w", strings.Join(build.Args, " "), err)
 	}
 	return nil
 }
 
-func pushImage(ctx context.Context, svc, image, tag string) error {
-	host, err := getDockerHost(ctx)
+func pushImage(ctx context.Context, _ string, image, tag string) error {
+	return pushImageWithDeps(ctx, image, tag, pushImageDeps{
+		host:        getDockerHost,
+		imageExists: imageExists,
+		push:        runDockerPush,
+	})
+}
+
+type pushImageDeps struct {
+	host        func(context.Context) (string, error)
+	imageExists func(string) bool
+	push        func(source, target string) error
+}
+
+func pushImageWithDeps(ctx context.Context, image, tag string, deps pushImageDeps) error {
+	host, err := deps.host(ctx)
 	if err != nil {
 		return err
 	}
-	// Check if the image already exists locally.
-	if !imageExists(image) {
+	if !deps.imageExists(image) {
 		return fmt.Errorf("image %s does not exist", image)
 	}
-	// Extract the repo from the image name
+	imgName, err := pushTargetImageName(host, image, tag)
+	if err != nil {
+		return err
+	}
+	return deps.push(image, imgName)
+}
+
+func pushTargetImageName(host, image, tag string) (string, error) {
+	repo, err := pushRepoName(image)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%s/%s:%s", host, repo, tag), nil
+}
+
+func pushRepoName(image string) (string, error) {
 	repo := image
-	// Strip tag if present
 	if i := strings.LastIndex(repo, ":"); i >= 0 {
 		repo = repo[:i]
 	}
-	// Strip registry host if present
 	parts := strings.SplitN(repo, "/", 2)
 	if len(parts) == 2 {
-		// Check if the first part is a registry host by looking for . or : characters
-		// This matches Docker's reference parsing logic
 		if strings.ContainsAny(parts[0], ".:") {
 			repo = parts[1]
 		}
 	}
-	// Validate repo format
 	if strings.Count(repo, "/") > 1 {
-		return fmt.Errorf("invalid image name %q - repo must be in format 'svc' or 'svc/container'", image)
+		return "", fmt.Errorf("invalid image name %q - repo must be in format 'svc' or 'svc/container'", image)
 	}
+	return repo, nil
+}
 
-	// Format of <fqdn>/<svc>/<svc>:<tag>
-	imgName := fmt.Sprintf("%s/%s:%s", host, repo, tag)
-	if err := do(
-		exec.Command("docker", "tag", image, imgName).Run,
-		cmdutil.NewStdCmd("docker", "push", imgName).Run,
-		exec.Command("docker", "rmi", imgName).Run,
-	); err != nil {
+func runDockerPush(source, target string) error {
+	return do(
+		exec.Command("docker", "tag", source, target).Run,
+		cmdutil.NewStdCmd("docker", "push", target).Run,
+		exec.Command("docker", "rmi", target).Run,
+	)
+}
+
+func pushAllLocalImages(s, goos, goarch string) error {
+	images, err := listLocalImages(s)
+	if err != nil {
 		return err
+	}
+	for _, image := range images {
+		if err := pushLocalImageIfCompatible(s, image, goos, goarch); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func pushAllLocalImages(s, goos, goarch string) error {
+func listLocalImages(s string) ([]string, error) {
 	wild := fmt.Sprintf("%s/%s/*", svc.InternalRegistryHost, s)
 	if _, err := exec.LookPath("docker"); err != nil {
 		log.Printf("docker not found, skipping push of local images")
-		return nil
+		return nil, nil
 	}
 	cmd := exec.Command("docker", "images", "--format", "{{.Repository}}:{{.Tag}}", "--filter", fmt.Sprintf("reference=%s", wild))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if bytes.Contains(output, []byte("Is the docker daemon running?")) {
 			log.Printf("docker daemon not running, skipping push of local images")
-			return nil
+			return nil, nil
 		}
-		return fmt.Errorf("failed to list images: %w (%s)", err, output)
+		return nil, fmt.Errorf("failed to list images: %w (%s)", err, output)
 	}
+	return localImagesFromDockerOutput(output), nil
+}
+
+func localImagesFromDockerOutput(output []byte) []string {
 	trimmed := strings.TrimSpace(string(output))
 	if trimmed == "" {
 		return nil
 	}
 	images := strings.Split(trimmed, "\n")
+	out := make([]string, 0, len(images))
 	for _, image := range images {
 		if image == "" {
 			continue
 		}
-		sys, arch, err := imageSystemAndArch(image)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "skipping, failed to get image arch for %q: %v\n", image, err)
-			continue
-		}
-		if sys != goos {
-			fmt.Fprintf(os.Stderr, "skipping, image %q is for (local) %s, not (remote) %s\n", image, sys, goos)
-			continue
-		}
-		if goarch != arch {
-			fmt.Fprintf(os.Stderr, "skipping, image %q is for (local) %s, not (remote) %s\n", image, arch, goarch)
-			continue
-		}
-		if err := pushImage(context.Background(), s, image, "latest"); err != nil {
-			return err
-		}
+		out = append(out, image)
+	}
+	return out
+}
+
+func pushLocalImageIfCompatible(s, image, goos, goarch string) error {
+	sys, arch, err := imageSystemAndArch(image)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "skipping, failed to get image arch for %q: %v\n", image, err)
+		return nil
+	}
+	shouldPush, skip := localImagePushDecision(image, sys, arch, goos, goarch)
+	if !shouldPush {
+		fmt.Fprintln(os.Stderr, skip)
+		return nil
+	}
+	if err := pushImage(context.Background(), s, image, "latest"); err != nil {
+		return err
 	}
 	return nil
+}
+
+func localImagePushDecision(image, sys, arch, goos, goarch string) (bool, string) {
+	if sys != goos {
+		return false, fmt.Sprintf("skipping, image %q is for (local) %s, not (remote) %s", image, sys, goos)
+	}
+	if goarch != arch {
+		return false, fmt.Sprintf("skipping, image %q is for (local) %s, not (remote) %s", image, arch, goarch)
+	}
+	return true, ""
 }
 
 func imageSystemAndArch(image string) (system, arch string, _ error) {

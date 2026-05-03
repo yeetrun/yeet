@@ -141,6 +141,54 @@ func TestBlobGetReturnsContentAndLength(t *testing.T) {
 	}
 }
 
+func TestBlobUploadInitiateMountsExistingBlob(t *testing.T) {
+	storage := newTestFilesystemStorage(t)
+	_, digest := putTestBlob(t, storage, []byte("mount me"))
+
+	server := httptest.NewServer(NewHandler(storage))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/v2/dest/blobs/uploads?mount="+strings.TrimPrefix(digest, "sha256:")+"&from=src", "", nil)
+	if err != nil {
+		t.Fatalf("POST upload mount: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusCreated)
+	}
+	if got := resp.Header.Get("Docker-Content-Digest"); got != digest {
+		t.Fatalf("Docker-Content-Digest = %q, want %q", got, digest)
+	}
+	if got := resp.Header.Get("Location"); got != "/v2/dest/blobs/"+digest {
+		t.Fatalf("Location = %q, want mounted blob location", got)
+	}
+}
+
+func TestBlobUploadInitiateCreatesSessionWhenMountMissing(t *testing.T) {
+	storage := newTestFilesystemStorage(t)
+	server := httptest.NewServer(NewHandler(storage))
+	defer server.Close()
+
+	resp, err := http.Post(server.URL+"/v2/dest/blobs/uploads?mount=missing&from=src", "", nil)
+	if err != nil {
+		t.Fatalf("POST upload initiate: %v", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusAccepted)
+	}
+	if got := resp.Header.Get("Docker-Upload-UUID"); got == "" {
+		t.Fatalf("Docker-Upload-UUID is empty")
+	}
+	if got := resp.Header.Get("Range"); got != "0-0" {
+		t.Fatalf("Range = %q, want 0-0", got)
+	}
+}
+
 func newTestFilesystemStorage(t *testing.T) *FilesystemStorage {
 	t.Helper()
 	storage, err := NewFilesystemStorage(t.TempDir())

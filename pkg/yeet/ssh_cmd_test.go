@@ -5,7 +5,10 @@
 package yeet
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -108,6 +111,69 @@ func TestParseSSHArgs(t *testing.T) {
 	}
 }
 
+func TestSSHInvocationFromArgsAppliesServiceOverride(t *testing.T) {
+	oldService := serviceOverride
+	defer func() {
+		serviceOverride = oldService
+	}()
+	serviceOverride = "api"
+
+	got, err := sshInvocationFromArgs([]string{"ssh", "--", "uptime"})
+	if err != nil {
+		t.Fatalf("sshInvocationFromArgs: %v", err)
+	}
+	if got.Service != "api" {
+		t.Fatalf("service = %q, want api", got.Service)
+	}
+	if want := []string{"uptime"}; !reflect.DeepEqual(got.Command, want) {
+		t.Fatalf("command = %#v, want %#v", got.Command, want)
+	}
+}
+
+func TestResolveSSHHostFromProjectConfig(t *testing.T) {
+	oldHost := loadedPrefs.DefaultHost
+	oldOverride := hostOverride
+	oldOverrideSet := hostOverrideSet
+	defer func() {
+		loadedPrefs.DefaultHost = oldHost
+		hostOverride = oldOverride
+		hostOverrideSet = oldOverrideSet
+	}()
+	loadedPrefs.DefaultHost = "catch"
+	resetHostOverride()
+
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, projectConfigName), []byte(`
+version = 1
+
+[[services]]
+name = "api"
+host = "hetz"
+`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	oldCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	defer func() {
+		if err := os.Chdir(oldCwd); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	}()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+
+	got, err := resolveSSHHost("api")
+	if err != nil {
+		t.Fatalf("resolveSSHHost: %v", err)
+	}
+	if got != "hetz" {
+		t.Fatalf("host = %q, want hetz", got)
+	}
+}
+
 func TestServiceDataDir(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -137,6 +203,41 @@ func TestServiceDataDirRequiresPathInfo(t *testing.T) {
 	_, err := serviceDataDir("svc", serverInfo{}, catchrpc.ServiceInfoResponse{})
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestServiceShellCommandFromResponseNormalizesQualifiedService(t *testing.T) {
+	gotCommand, gotOptions, err := serviceShellCommandFromResponse(
+		"api@hetz",
+		serverInfo{RootDir: "/srv/yeet"},
+		catchrpc.ServiceInfoResponse{Found: true},
+		[]string{"ls", "-la"},
+		[]string{"-p", "2222"},
+	)
+	if err != nil {
+		t.Fatalf("serviceShellCommandFromResponse: %v", err)
+	}
+	if want := []string{"sh", "-lc", `'cd /srv/yeet/services/api/data && exec ls -la'`}; !reflect.DeepEqual(gotCommand, want) {
+		t.Fatalf("command = %#v, want %#v", gotCommand, want)
+	}
+	if want := []string{"-p", "2222"}; !reflect.DeepEqual(gotOptions, want) {
+		t.Fatalf("options = %#v, want %#v", gotOptions, want)
+	}
+}
+
+func TestServiceShellCommandFromResponseNotFoundIncludesHint(t *testing.T) {
+	_, _, err := serviceShellCommandFromResponse(
+		"api",
+		serverInfo{},
+		catchrpc.ServiceInfoResponse{Found: false, Message: "missing"},
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); !strings.Contains(got, "missing") || !strings.Contains(got, "yeet ssh -- <cmd>") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

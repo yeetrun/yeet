@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
@@ -39,6 +40,83 @@ func TestLabelForIP(t *testing.T) {
 			got := labelForIP(tt.entry, tt.svcIP, tt.tsIface, tt.macIface, tt.hasNetns, tt.serviceType)
 			if got != tt.want {
 				t.Fatalf("labelForIP = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServiceImageInfoFiltersAndSortsServiceImages(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Images: map[db.ImageRepoName]*db.ImageRepo{
+			"api/app": {
+				Refs: map[db.ImageRef]db.ImageManifest{
+					"run":    {BlobHash: "sha256:run", ContentType: "application/vnd.oci.image.manifest.v1+json"},
+					"staged": {BlobHash: "sha256:staged", ContentType: "application/vnd.oci.image.manifest.v1+json"},
+				},
+			},
+			"api/worker": {
+				Refs: map[db.ImageRef]db.ImageManifest{
+					"run": {BlobHash: "sha256:worker", ContentType: "application/vnd.oci.image.manifest.v1+json"},
+				},
+			},
+			"other/app": {
+				Refs: map[db.ImageRef]db.ImageManifest{
+					"run": {BlobHash: "sha256:other", ContentType: "application/vnd.oci.image.manifest.v1+json"},
+				},
+			},
+			"invalid/repo/name": {
+				Refs: map[db.ImageRef]db.ImageManifest{
+					"run": {BlobHash: "sha256:invalid", ContentType: "application/vnd.oci.image.manifest.v1+json"},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	dv, err := server.getDB()
+	if err != nil {
+		t.Fatalf("getDB: %v", err)
+	}
+
+	got := serviceImageInfo(dv, "api")
+	if len(got) != 2 {
+		t.Fatalf("serviceImageInfo returned %d images: %#v", len(got), got)
+	}
+	if got[0].Repo != "api/app" || got[1].Repo != "api/worker" {
+		t.Fatalf("repos not filtered and sorted: %#v", got)
+	}
+	if got[0].Refs["run"].Digest != "sha256:run" || got[0].Refs["staged"].Digest != "sha256:staged" {
+		t.Fatalf("refs missing expected digest metadata: %#v", got[0].Refs)
+	}
+	if serviceImageInfo(nil, "api") != nil {
+		t.Fatalf("nil data view should return nil")
+	}
+	if serviceImageInfo(dv, "") != nil {
+		t.Fatalf("empty service should return nil")
+	}
+}
+
+func TestTailscaleHasValues(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *catchrpc.ServiceTailscale
+		want bool
+	}{
+		{name: "nil", in: nil},
+		{name: "empty", in: &catchrpc.ServiceTailscale{}},
+		{name: "interface", in: &catchrpc.ServiceTailscale{Interface: "ts0"}, want: true},
+		{name: "version", in: &catchrpc.ServiceTailscale{Version: "1.2.3"}, want: true},
+		{name: "exit node", in: &catchrpc.ServiceTailscale{ExitNode: "100.64.0.1"}, want: true},
+		{name: "stable id", in: &catchrpc.ServiceTailscale{StableID: "stable"}, want: true},
+		{name: "tags", in: &catchrpc.ServiceTailscale{Tags: []string{"tag:app"}}, want: true},
+		{name: "blank strings", in: &catchrpc.ServiceTailscale{Interface: " ", Version: "\t"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tailscaleHasValues(tt.in); got != tt.want {
+				t.Fatalf("tailscaleHasValues = %v, want %v", got, tt.want)
 			}
 		})
 	}

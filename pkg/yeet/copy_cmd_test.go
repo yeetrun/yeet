@@ -105,3 +105,104 @@ func TestNormalizeRemotePath(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyCopyEndpoints(t *testing.T) {
+	tests := []struct {
+		name          string
+		req           copyRequest
+		wantDirection copyDirection
+		wantRemote    copyEndpoint
+		wantErr       string
+	}{
+		{
+			name: "local to remote",
+			req: copyRequest{
+				Src: copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Dst: copyEndpoint{Raw: "svc:logs", Path: "logs", Service: "svc", Remote: true},
+			},
+			wantDirection: copyDirectionToRemote,
+			wantRemote:    copyEndpoint{Raw: "svc:logs", Path: "logs", Service: "svc", Remote: true},
+		},
+		{
+			name: "remote to local",
+			req: copyRequest{
+				Src: copyEndpoint{Raw: "svc:logs", Path: "logs", Service: "svc", Remote: true},
+				Dst: copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+			},
+			wantDirection: copyDirectionFromRemote,
+			wantRemote:    copyEndpoint{Raw: "svc:logs", Path: "logs", Service: "svc", Remote: true},
+		},
+		{
+			name: "remote to remote rejected",
+			req: copyRequest{
+				Src: copyEndpoint{Raw: "src:logs", Path: "logs", Service: "src", Remote: true},
+				Dst: copyEndpoint{Raw: "dst:logs", Path: "logs", Service: "dst", Remote: true},
+			},
+			wantErr: "remote-to-remote",
+		},
+		{
+			name: "local to local rejected",
+			req: copyRequest{
+				Src: copyEndpoint{Raw: "a", Path: "a"},
+				Dst: copyEndpoint{Raw: "b", Path: "b"},
+			},
+			wantErr: "requires a service endpoint",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotDirection, gotRemote, err := classifyCopyEndpoints(tt.req)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("expected error containing %q, got %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("classifyCopyEndpoints: %v", err)
+			}
+			if gotDirection != tt.wantDirection {
+				t.Fatalf("direction = %v, want %v", gotDirection, tt.wantDirection)
+			}
+			if !reflect.DeepEqual(gotRemote, tt.wantRemote) {
+				t.Fatalf("remote = %#v, want %#v", gotRemote, tt.wantRemote)
+			}
+		})
+	}
+}
+
+func TestRemoteCopyCommandArgs(t *testing.T) {
+	upload := copyUploadArgs("configs", true, true)
+	if want := []string{"copy", "--to", "configs", "--archive", "--compress"}; !reflect.DeepEqual(upload, want) {
+		t.Fatalf("copyUploadArgs = %#v, want %#v", upload, want)
+	}
+
+	download := copyDownloadArgs(copyRequest{
+		Recursive: true,
+		Archive:   false,
+		Compress:  true,
+		Src:       copyEndpoint{Path: "", DirHint: true},
+	})
+	if want := []string{"copy", "--from", ".", "--compress", "--recursive"}; !reflect.DeepEqual(download, want) {
+		t.Fatalf("copyDownloadArgs = %#v, want %#v", download, want)
+	}
+}
+
+func TestRemoteFileDestinations(t *testing.T) {
+	root, entry, err := remoteArchiveFileDestination("configs/app.yml", false, "/tmp/config.yml")
+	if err != nil {
+		t.Fatalf("remoteArchiveFileDestination: %v", err)
+	}
+	if root != "configs" || entry != "app.yml" {
+		t.Fatalf("archive destination root=%q entry=%q, want configs/app.yml", root, entry)
+	}
+
+	plain, err := remotePlainFileDestination("", true, "/tmp/config.yml")
+	if err != nil {
+		t.Fatalf("remotePlainFileDestination: %v", err)
+	}
+	if plain != "config.yml" {
+		t.Fatalf("plain destination = %q, want config.yml", plain)
+	}
+}

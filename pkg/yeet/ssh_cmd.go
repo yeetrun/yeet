@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,45 +17,104 @@ import (
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
+type sshInvocation struct {
+	Options []string
+	Service string
+	Command []string
+}
+
 func HandleSSH(ctx context.Context, args []string) error {
-	args = trimSSHCommandName(args)
+	sshArgs, err := sshCommandArgs(ctx, args)
+	if err != nil {
+		return err
+	}
+	return runSSHCommand(ctx, sshArgs, os.Stdin, os.Stdout, os.Stderr)
+}
+
+func sshCommandArgs(ctx context.Context, args []string) ([]string, error) {
+	if err := ensureSSHCLI(); err != nil {
+		return nil, err
+	}
+	inv, err := sshInvocationFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	host, info, err := sshHostInfo(ctx, inv.Service)
+	if err != nil {
+		return nil, err
+	}
+	inv, err = withServiceShellCommand(ctx, host, info, inv)
+	if err != nil {
+		return nil, err
+	}
+	return buildSSHArgs(inv.Options, sshTarget(host, info), inv.Command), nil
+}
+
+func ensureSSHCLI() error {
 	if _, err := exec.LookPath("ssh"); err != nil {
 		return fmt.Errorf("ssh CLI not found in PATH")
 	}
+	return nil
+}
 
-	options, service, commandTokens, err := parseSSHArgs(args)
+func sshInvocationFromArgs(args []string) (sshInvocation, error) {
+	options, service, command, err := parseSSHArgs(trimSSHCommandName(args))
 	if err != nil {
-		return err
+		return sshInvocation{}, err
 	}
-	if service == "" && serviceOverride != "" {
-		service = serviceOverride
-	}
+	return sshInvocation{
+		Options: options,
+		Service: sshServiceOrOverride(service),
+		Command: command,
+	}, nil
+}
 
+func sshServiceOrOverride(service string) string {
+	if service == "" && serviceOverride != "" {
+		return serviceOverride
+	}
+	return service
+}
+
+func sshHostInfo(ctx context.Context, service string) (string, serverInfo, error) {
 	host, err := resolveSSHHost(service)
 	if err != nil {
-		return err
+		return "", serverInfo{}, err
 	}
 	if strings.TrimSpace(host) == "" {
-		return fmt.Errorf("no host configured")
+		return "", serverInfo{}, fmt.Errorf("no host configured")
 	}
+	info, err := fetchSSHServerInfo(ctx, host)
+	if err != nil {
+		return "", serverInfo{}, err
+	}
+	return host, info, nil
+}
 
+func fetchSSHServerInfo(ctx context.Context, host string) (serverInfo, error) {
 	var info serverInfo
-	if err := newRPCClient(host).Call(ctx, "catch.Info", nil, &info); err != nil {
-		return err
-	}
+	err := newRPCClient(host).Call(ctx, "catch.Info", nil, &info)
+	return info, err
+}
 
-	if service != "" {
-		commandTokens, options, err = serviceShellCommand(ctx, host, service, info, commandTokens, options)
-		if err != nil {
-			return err
-		}
+func withServiceShellCommand(ctx context.Context, host string, info serverInfo, inv sshInvocation) (sshInvocation, error) {
+	if inv.Service == "" {
+		return inv, nil
 	}
+	command, options, err := serviceShellCommand(ctx, host, inv.Service, info, inv.Command, inv.Options)
+	if err != nil {
+		return sshInvocation{}, err
+	}
+	inv.Command = command
+	inv.Options = options
+	return inv, nil
+}
 
-	sshArgs := buildSSHArgs(options, sshTarget(host, info), commandTokens)
+func runSSHCommand(ctx context.Context, sshArgs []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdin = stdin
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
 	return cmd.Run()
 }
 
@@ -118,53 +178,74 @@ func sshOptionNeedsArg(token string) bool {
 }
 
 func resolveSSHHost(service string) (string, error) {
+	selection := currentSSHHostSelection()
+	svc, svcHost, _ := splitServiceHost(service)
+	if svcHost != "" {
+		return svcHost, nil
+	}
+	if service == "" || selection.overrideSet {
+		return selection.host, nil
+	}
+	return resolveSSHHostFromProject(selection.host, svc)
+}
+
+type sshHostSelection struct {
+	host        string
+	overrideSet bool
+}
+
+func currentSSHHostSelection() sshHostSelection {
 	host := Host()
 	hostOverride, hostOverrideSet := HostOverride()
 	if hostOverrideSet {
 		host = hostOverride
 	}
+	return sshHostSelection{host: host, overrideSet: hostOverrideSet}
+}
 
-	if service == "" {
-		return host, nil
-	}
-
-	svc, svcHost, _ := splitServiceHost(service)
-	if svcHost != "" {
-		return svcHost, nil
-	}
-
+func resolveSSHHostFromProject(host, service string) (string, error) {
 	cfgLoc, err := loadProjectConfigFromCwd()
 	if err != nil {
 		return "", err
 	}
-	if !hostOverrideSet && cfgLoc != nil {
-		resolved, err := resolveServiceHost(cfgLoc.Config, svc)
-		if err != nil {
-			return "", err
-		}
-		if resolved != "" {
-			host = resolved
-		}
+	if cfgLoc == nil {
+		return host, nil
 	}
-	return host, nil
+	resolved, err := resolveServiceHost(cfgLoc.Config, service)
+	if err != nil {
+		return "", err
+	}
+	if resolved == "" {
+		return host, nil
+	}
+	return resolved, nil
 }
 
 func serviceShellCommand(ctx context.Context, host, service string, info serverInfo, command []string, options []string) ([]string, []string, error) {
-	svc, svcHost, _ := splitServiceHost(service)
-	if svcHost != "" {
-		service = svc
-	}
-	resp, err := newRPCClient(host).ServiceInfo(ctx, service)
+	service = baseSSHServiceName(service)
+	resp, err := fetchSSHServiceInfo(ctx, host, service)
 	if err != nil {
 		return nil, nil, err
 	}
+	return serviceShellCommandFromResponse(service, info, resp, command, options)
+}
+
+func baseSSHServiceName(service string) string {
+	svc, svcHost, _ := splitServiceHost(service)
+	if svcHost != "" {
+		return svc
+	}
+	return service
+}
+
+func fetchSSHServiceInfo(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+	return newRPCClient(host).ServiceInfo(ctx, service)
+}
+
+func serviceShellCommandFromResponse(service string, info serverInfo, resp catchrpc.ServiceInfoResponse, command []string, options []string) ([]string, []string, error) {
+	service = baseSSHServiceName(service)
 	if !resp.Found {
-		msg := strings.TrimSpace(resp.Message)
-		if msg == "" {
-			msg = fmt.Sprintf("service %q not found", service)
-		}
-		msg = msg + " (use `yeet ssh -- <cmd>` to run a remote command without a service)"
-		return nil, nil, errors.New(msg)
+		return nil, nil, serviceNotFoundShellError(service, resp.Message)
 	}
 	serviceDir, err := serviceDataDir(service, info, resp)
 	if err != nil {
@@ -172,6 +253,15 @@ func serviceShellCommand(ctx context.Context, host, service string, info serverI
 	}
 	command, options = buildServiceSSHCommand(serviceDir, command, options)
 	return command, options, nil
+}
+
+func serviceNotFoundShellError(service, message string) error {
+	msg := strings.TrimSpace(message)
+	if msg == "" {
+		msg = fmt.Sprintf("service %q not found", service)
+	}
+	msg = msg + " (use `yeet ssh -- <cmd>` to run a remote command without a service)"
+	return errors.New(msg)
 }
 
 func serviceDataDir(service string, info serverInfo, resp catchrpc.ServiceInfoResponse) (string, error) {

@@ -55,21 +55,35 @@ func ReadHeader(r *bufio.Reader) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	line = strings.TrimSpace(line)
-	parts := strings.Fields(line)
-	if len(parts) < 3 || parts[0] != copyHeaderPrefix {
+	return parseCopyHeaderLine(line)
+}
+
+func parseCopyHeaderLine(line string) (string, string, error) {
+	parts := strings.Fields(strings.TrimSpace(line))
+	if !isValidCopyHeaderParts(parts) {
 		return "", "", fmt.Errorf("invalid copy header")
 	}
 	kind := parts[1]
-	enc := parts[2]
+	base, err := decodeCopyHeaderBase(parts[2])
+	if err != nil {
+		return "", "", err
+	}
+	return kind, base, nil
+}
+
+func isValidCopyHeaderParts(parts []string) bool {
+	return len(parts) >= 3 && parts[0] == copyHeaderPrefix
+}
+
+func decodeCopyHeaderBase(enc string) (string, error) {
 	if enc == copyHeaderEmpty {
-		return kind, "", nil
+		return "", nil
 	}
 	raw, err := base64.StdEncoding.DecodeString(enc)
 	if err != nil {
-		return "", "", fmt.Errorf("invalid copy header")
+		return "", fmt.Errorf("invalid copy header")
 	}
-	return kind, string(raw), nil
+	return string(raw), nil
 }
 
 // TarDirectory writes a tar archive of src into w.
