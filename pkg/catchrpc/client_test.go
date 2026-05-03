@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -36,6 +37,78 @@ func splitHostPort(t *testing.T, rawURL string) (string, int) {
 		t.Fatalf("parse port: %v", err)
 	}
 	return host, port
+}
+
+func TestBuildRPCRequestPayloadEncodesParams(t *testing.T) {
+	payload, err := buildRPCRequestPayload("test.echo", 42, map[string]string{"msg": "hi"})
+	if err != nil {
+		t.Fatalf("buildRPCRequestPayload failed: %v", err)
+	}
+
+	var req Request
+	if err := json.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if req.JSONRPC != "2.0" || req.Method != "test.echo" || string(req.ID) != "42" {
+		t.Fatalf("unexpected request metadata: %#v", req)
+	}
+
+	var params map[string]string
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		t.Fatalf("decode params: %v", err)
+	}
+	if params["msg"] != "hi" {
+		t.Fatalf("unexpected params: %#v", params)
+	}
+}
+
+func TestBuildRPCRequestPayloadOmitsNilParams(t *testing.T) {
+	payload, err := buildRPCRequestPayload("test.ping", 7, nil)
+	if err != nil {
+		t.Fatalf("buildRPCRequestPayload failed: %v", err)
+	}
+
+	var req Request
+	if err := json.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(req.Params) != 0 {
+		t.Fatalf("expected params to be omitted, got %q", string(req.Params))
+	}
+}
+
+func TestDecodeRPCResponseDecodesResult(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(bytes.NewBufferString(`{
+			"jsonrpc":"2.0",
+			"id":1,
+			"result":{"msg":"hi"}
+		}`)),
+	}
+
+	var out map[string]string
+	if err := decodeRPCResponse(resp, &out); err != nil {
+		t.Fatalf("decodeRPCResponse failed: %v", err)
+	}
+	if out["msg"] != "hi" {
+		t.Fatalf("unexpected result: %#v", out)
+	}
+}
+
+func TestDecodeRPCResponseReturnsTrimmedHTTPStatusError(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Body:       io.NopCloser(bytes.NewBufferString("  upstream down\n")),
+	}
+
+	err := decodeRPCResponse(resp, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got, want := err.Error(), "rpc status 502: upstream down"; got != want {
+		t.Fatalf("unexpected error: %q", got)
+	}
 }
 
 func TestClientCall(t *testing.T) {
@@ -308,6 +381,72 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) {
 	return f(p)
+}
+
+func TestHandleExecReadMessageWritesBinaryOutput(t *testing.T) {
+	var stdout bytes.Buffer
+	result, err := handleExecReadMessage(websocket.BinaryMessage, []byte("output"), &stdout)
+	if err != nil {
+		t.Fatalf("handleExecReadMessage failed: %v", err)
+	}
+	if result.exit || result.closed {
+		t.Fatalf("unexpected terminal result: %#v", result)
+	}
+	if got := stdout.String(); got != "output" {
+		t.Fatalf("unexpected stdout: %q", got)
+	}
+}
+
+func TestHandleExecReadMessageReturnsExitCode(t *testing.T) {
+	payload, err := json.Marshal(ExecMessage{Type: ExecMsgExit, Code: 23})
+	if err != nil {
+		t.Fatalf("marshal exit message: %v", err)
+	}
+
+	result, err := handleExecReadMessage(websocket.TextMessage, payload, nil)
+	if err != nil {
+		t.Fatalf("handleExecReadMessage failed: %v", err)
+	}
+	if !result.exit || result.exitCode != 23 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestHandleExecReadMessageRejectsInvalidText(t *testing.T) {
+	_, err := handleExecReadMessage(websocket.TextMessage, []byte("{"), nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+func TestDispatchEventDecodesAndCallsHandler(t *testing.T) {
+	var got Event
+	err := dispatchEvent([]byte(`{"time":12,"serviceName":"svc","type":"started"}`), func(ev Event) {
+		got = ev
+	})
+	if err != nil {
+		t.Fatalf("dispatchEvent failed: %v", err)
+	}
+	if got.Time != 12 || got.ServiceName != "svc" || got.Type != "started" {
+		t.Fatalf("unexpected event: %#v", got)
+	}
+}
+
+func TestHandleEventsReadErrorIgnoresExpectedClose(t *testing.T) {
+	err := handleEventsReadError(context.Background(), &websocket.CloseError{Code: websocket.CloseNormalClosure})
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+func TestHandleEventsReadErrorIgnoresCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := handleEventsReadError(ctx, errors.New("read failed"))
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
 }
 
 func TestClientEvents(t *testing.T) {

@@ -5,12 +5,14 @@
 package catch
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/ftdetect"
 )
 
 func TestHostDefaultRouteInterfaceFromProcRoute(t *testing.T) {
@@ -96,6 +98,205 @@ func TestParseNetworkLANExplicitParentOverridesHostDefaultRoute(t *testing.T) {
 	}
 }
 
+func TestParseNetworkAppliesCombinedNetworkOptions(t *testing.T) {
+	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
+	defer func() {
+		hostDefaultRouteInterfaceFn = oldHostDefaultRouteInterfaceFn
+	}()
+	hostDefaultRouteInterfaceFn = func() (string, error) {
+		return "vmbr0", nil
+	}
+
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name:       "existing-svc",
+		SvcNetwork: &db.SvcNetwork{IPv4: netipMustParseAddr(t, "192.168.100.3")},
+	})
+
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{
+				ServiceName: "svc-combined",
+			},
+			Network: NetworkOpts{
+				Interfaces: "ts,svc,lan",
+				Tailscale: TailscaleOpts{
+					Version:  "1.2.3",
+					ExitNode: "100.64.0.1",
+					Tags:     []string{"tag:yeet"},
+					AuthKey:  "tskey-auth",
+				},
+				Macvlan: MacvlanOpts{
+					Parent: "eno1",
+					VLAN:   42,
+					Mac:    "02:00:00:00:00:42",
+				},
+			},
+		},
+	}
+
+	if err := installer.parseNetwork(); err != nil {
+		t.Fatalf("parseNetwork returned error: %v", err)
+	}
+	if installer.tsNet == nil {
+		t.Fatal("expected tailscale config")
+	}
+	if !strings.HasPrefix(installer.tsNet.Interface, "yts-") {
+		t.Fatalf("tailscale interface = %q, want yts-*", installer.tsNet.Interface)
+	}
+	if installer.tsNet.Version != "1.2.3" {
+		t.Fatalf("tailscale version = %q, want %q", installer.tsNet.Version, "1.2.3")
+	}
+	if installer.tsNet.ExitNode != "100.64.0.1" {
+		t.Fatalf("tailscale exit node = %q, want %q", installer.tsNet.ExitNode, "100.64.0.1")
+	}
+	if len(installer.tsNet.Tags) != 1 || installer.tsNet.Tags[0] != "tag:yeet" {
+		t.Fatalf("tailscale tags = %#v, want [tag:yeet]", installer.tsNet.Tags)
+	}
+	if installer.tsAuthKey != "tskey-auth" {
+		t.Fatalf("tailscale auth key = %q, want %q", installer.tsAuthKey, "tskey-auth")
+	}
+	if installer.svcNet == nil {
+		t.Fatal("expected svc network config")
+	}
+	if got := installer.svcNet.IPv4.String(); got != "192.168.100.4" {
+		t.Fatalf("svc ip = %q, want %q", got, "192.168.100.4")
+	}
+	if installer.macvlan == nil {
+		t.Fatal("expected macvlan config")
+	}
+	if !strings.HasPrefix(installer.macvlan.Interface, "ymv-") {
+		t.Fatalf("macvlan interface = %q, want ymv-*", installer.macvlan.Interface)
+	}
+	if installer.macvlan.Parent != "eno1" {
+		t.Fatalf("macvlan parent = %q, want %q", installer.macvlan.Parent, "eno1")
+	}
+	if installer.macvlan.VLAN != 42 {
+		t.Fatalf("macvlan vlan = %d, want %d", installer.macvlan.VLAN, 42)
+	}
+	if installer.macvlan.Mac != "02:00:00:00:00:42" {
+		t.Fatalf("macvlan mac = %q, want %q", installer.macvlan.Mac, "02:00:00:00:00:42")
+	}
+}
+
+func TestRewriteSystemdUnitContentReplacesOnlyExecStart(t *testing.T) {
+	input := strings.Join([]string{
+		"[Unit]",
+		"Description=old app",
+		"",
+		"[Service]",
+		"Environment=MODE=prod",
+		"  ExecStart=/old/app --stale",
+		"ExecStartPost=/bin/true",
+	}, "\n")
+
+	got := rewriteSystemdUnitContent(input, "/srv/app", []string{"--flag", "value"})
+	want := strings.Join([]string{
+		"[Unit]",
+		"Description=old app",
+		"",
+		"[Service]",
+		"Environment=MODE=prod",
+		"ExecStart=/srv/app --flag value",
+		"ExecStartPost=/bin/true",
+		"",
+	}, "\n")
+	if got != want {
+		t.Fatalf("rewritten unit:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestBuildNetNSResolvConfIncludesOptionalSearchDomains(t *testing.T) {
+	got := buildNetNSResolvConf("1.1.1.1", "svc.local example.com")
+	want := "nameserver 1.1.1.1\nsearch svc.local example.com\n"
+	if got != want {
+		t.Fatalf("resolv.conf = %q, want %q", got, want)
+	}
+}
+
+func TestValidatePullPayloadType(t *testing.T) {
+	for _, ft := range []ftdetect.FileType{ftdetect.DockerCompose, ftdetect.Python, ftdetect.TypeScript} {
+		if err := validatePullPayloadType(true, ft); err != nil {
+			t.Fatalf("validatePullPayloadType(true, %v) returned error: %v", ft, err)
+		}
+	}
+	if err := validatePullPayloadType(true, ftdetect.Binary); err == nil {
+		t.Fatal("validatePullPayloadType(true, Binary) returned nil, want error")
+	}
+	if err := validatePullPayloadType(false, ftdetect.Binary); err != nil {
+		t.Fatalf("validatePullPayloadType(false, Binary) returned error: %v", err)
+	}
+}
+
+func TestApplyInstallServiceType(t *testing.T) {
+	tests := []struct {
+		name    string
+		current db.ServiceType
+		plan    fileInstallPlan
+		want    db.ServiceType
+		wantErr bool
+	}{
+		{
+			name: "sets empty service type",
+			plan: fileInstallPlan{
+				detectedServiceType: db.ServiceTypeSystemd,
+			},
+			want: db.ServiceTypeSystemd,
+		},
+		{
+			name:    "keeps matching service type",
+			current: db.ServiceTypeDockerCompose,
+			plan: fileInstallPlan{
+				detectedServiceType: db.ServiceTypeDockerCompose,
+			},
+			want: db.ServiceTypeDockerCompose,
+		},
+		{
+			name:    "ignores empty detected service type",
+			current: db.ServiceTypeSystemd,
+			want:    db.ServiceTypeSystemd,
+		},
+		{
+			name:    "allows systemd to generated compose upgrade",
+			current: db.ServiceTypeSystemd,
+			plan: fileInstallPlan{
+				detectedServiceType:     db.ServiceTypeDockerCompose,
+				allowServiceTypeUpgrade: true,
+			},
+			want: db.ServiceTypeDockerCompose,
+		},
+		{
+			name:    "rejects mismatched service type",
+			current: db.ServiceTypeDockerCompose,
+			plan: fileInstallPlan{
+				detectedServiceType: db.ServiceTypeSystemd,
+			},
+			want:    db.ServiceTypeDockerCompose,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := &db.Service{ServiceType: tt.current}
+			err := applyInstallServiceType(service, tt.plan)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("applyInstallServiceType returned nil, want error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("applyInstallServiceType returned error: %v", err)
+			}
+			if service.ServiceType != tt.want {
+				t.Fatalf("service type = %q, want %q", service.ServiceType, tt.want)
+			}
+		})
+	}
+}
+
 func TestEnsureSystemdUnitRegeneratesCatchUnitWithDockerOrdering(t *testing.T) {
 	server := newTestServer(t)
 	oldUnit := filepath.Join(server.serviceBinDir(CatchService), "catch-old.service")
@@ -150,4 +351,13 @@ func TestEnsureSystemdUnitRegeneratesCatchUnitWithDockerOrdering(t *testing.T) {
 			t.Fatalf("regenerated catch unit missing %q:\n%s", want, got)
 		}
 	}
+}
+
+func netipMustParseAddr(t *testing.T, s string) netip.Addr {
+	t.Helper()
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
+		t.Fatalf("ParseAddr(%q): %v", s, err)
+	}
+	return addr
 }

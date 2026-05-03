@@ -12,12 +12,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 func HandleSSH(ctx context.Context, args []string) error {
-	if len(args) > 0 && args[0] == "ssh" {
-		args = args[1:]
-	}
+	args = trimSSHCommandName(args)
 	if _, err := exec.LookPath("ssh"); err != nil {
 		return fmt.Errorf("ssh CLI not found in PATH")
 	}
@@ -43,12 +43,6 @@ func HandleSSH(ctx context.Context, args []string) error {
 		return err
 	}
 
-	user := strings.TrimSpace(info.InstallUser)
-	target := host
-	if user != "" {
-		target = fmt.Sprintf("%s@%s", user, host)
-	}
-
 	if service != "" {
 		commandTokens, options, err = serviceShellCommand(ctx, host, service, info, commandTokens, options)
 		if err != nil {
@@ -56,13 +50,33 @@ func HandleSSH(ctx context.Context, args []string) error {
 		}
 	}
 
-	sshArgs := append(append([]string{}, options...), target)
-	sshArgs = append(sshArgs, commandTokens...)
+	sshArgs := buildSSHArgs(options, sshTarget(host, info), commandTokens)
 	cmd := exec.CommandContext(ctx, "ssh", sshArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func trimSSHCommandName(args []string) []string {
+	if len(args) > 0 && args[0] == "ssh" {
+		return args[1:]
+	}
+	return args
+}
+
+func sshTarget(host string, info serverInfo) string {
+	user := strings.TrimSpace(info.InstallUser)
+	if user == "" {
+		return host
+	}
+	return fmt.Sprintf("%s@%s", user, host)
+}
+
+func buildSSHArgs(options []string, target string, command []string) []string {
+	sshArgs := append([]string{}, options...)
+	sshArgs = append(sshArgs, target)
+	return append(sshArgs, command...)
 }
 
 func parseSSHArgs(args []string) (options []string, service string, command []string, err error) {
@@ -152,28 +166,43 @@ func serviceShellCommand(ctx context.Context, host, service string, info serverI
 		msg = msg + " (use `yeet ssh -- <cmd>` to run a remote command without a service)"
 		return nil, nil, errors.New(msg)
 	}
+	serviceDir, err := serviceDataDir(service, info, resp)
+	if err != nil {
+		return nil, nil, err
+	}
+	command, options = buildServiceSSHCommand(serviceDir, command, options)
+	return command, options, nil
+}
+
+func serviceDataDir(service string, info serverInfo, resp catchrpc.ServiceInfoResponse) (string, error) {
 	serviceDir := strings.TrimSpace(resp.Info.Paths.Root)
 	if serviceDir == "" {
-		if info.ServicesDir != "" {
-			serviceDir = filepath.Join(info.ServicesDir, service)
-		} else if info.RootDir != "" {
-			serviceDir = filepath.Join(info.RootDir, "services", service)
-		}
+		serviceDir = fallbackServiceRoot(service, info)
 	}
 	if serviceDir == "" {
-		return nil, nil, fmt.Errorf("service %q has no remote path info", service)
+		return "", fmt.Errorf("service %q has no remote path info", service)
 	}
-	serviceDir = filepath.Join(serviceDir, "data")
+	return filepath.Join(serviceDir, "data"), nil
+}
 
+func fallbackServiceRoot(service string, info serverInfo) string {
+	if info.ServicesDir != "" {
+		return filepath.Join(info.ServicesDir, service)
+	}
+	if info.RootDir != "" {
+		return filepath.Join(info.RootDir, "services", service)
+	}
+	return ""
+}
+
+func buildServiceSSHCommand(serviceDir string, command []string, options []string) ([]string, []string) {
 	if len(command) == 0 {
 		options = ensureTTYOption(options)
-	}
-	if len(command) == 0 {
 		cmd := fmt.Sprintf("cd %s && exec ${SHELL:-/bin/sh} -l", shellQuote(serviceDir))
-		return []string{"sh", "-lc", shellQuote(cmd)}, options, nil
+		return []string{"sh", "-lc", shellQuote(cmd)}, options
 	}
 	cmd := fmt.Sprintf("cd %s && exec %s", shellQuote(serviceDir), shellJoin(command))
-	return []string{"sh", "-lc", shellQuote(cmd)}, options, nil
+	return []string{"sh", "-lc", shellQuote(cmd)}, options
 }
 
 func ensureTTYOption(options []string) []string {

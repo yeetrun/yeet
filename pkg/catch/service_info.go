@@ -13,6 +13,8 @@ import (
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
+var listIPv4AddrsFn = listIPv4Addrs
+
 func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {
 	resp := catchrpc.ServiceInfoResponse{}
 	dv, err := s.getDB()
@@ -107,69 +109,95 @@ func serviceNetworkInfo(sv db.ServiceView) catchrpc.ServiceNetwork {
 
 func (s *Server) serviceIPList(sn string, sv db.ServiceView) ([]catchrpc.ServiceIP, error) {
 	if sn == CatchService {
-		if s.cfg.LocalClient == nil {
-			return nil, fmt.Errorf("tailscale client unavailable")
-		}
-		st, err := s.cfg.LocalClient.StatusWithoutPeers(s.ctx)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]catchrpc.ServiceIP, 0, len(st.TailscaleIPs))
-		for _, ip := range st.TailscaleIPs {
-			out = append(out, catchrpc.ServiceIP{
-				Label: "tailscale",
-				IP:    ip.String(),
-			})
-		}
-		return out, nil
+		return s.catchServiceIPList()
 	}
 
-	args := []string{"-o", "-4", "addr", "list"}
-	hasNetns := false
-	if sn != SystemService {
-		if _, ok := sv.AsStruct().Artifacts.Gen(db.ArtifactNetNSService, sv.Generation()); ok {
-			netns := fmt.Sprintf("yeet-%s-ns", sn)
-			args = append([]string{"netns", "exec", netns, "ip"}, args...)
-			hasNetns = true
-		}
-	}
-	raw, err := listIPv4Addrs(args)
+	args, hasNetns := serviceIPListArgs(sn, sv)
+	raw, err := listIPv4AddrsFn(args)
 	if err != nil {
 		return nil, err
 	}
+	return serviceIPListFromEntries(raw, serviceIPLabelConfigFromView(sv, hasNetns)), nil
+}
 
+func (s *Server) catchServiceIPList() ([]catchrpc.ServiceIP, error) {
+	if s.cfg.LocalClient == nil {
+		return nil, fmt.Errorf("tailscale client unavailable")
+	}
+	st, err := s.cfg.LocalClient.StatusWithoutPeers(s.ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]catchrpc.ServiceIP, 0, len(st.TailscaleIPs))
+	for _, ip := range st.TailscaleIPs {
+		out = append(out, catchrpc.ServiceIP{
+			Label: "tailscale",
+			IP:    ip.String(),
+		})
+	}
+	return out, nil
+}
+
+func serviceIPListArgs(sn string, sv db.ServiceView) ([]string, bool) {
+	args := []string{"-o", "-4", "addr", "list"}
+	if sn == SystemService {
+		return args, false
+	}
+	if _, ok := sv.AsStruct().Artifacts.Gen(db.ArtifactNetNSService, sv.Generation()); !ok {
+		return args, false
+	}
+	netns := fmt.Sprintf("yeet-%s-ns", sn)
+	return append([]string{"netns", "exec", netns, "ip"}, args...), true
+}
+
+type serviceIPLabelConfig struct {
+	svcIP       string
+	tsIface     string
+	macIface    string
+	hasNetns    bool
+	serviceType db.ServiceType
+}
+
+func serviceIPLabelConfigFromView(sv db.ServiceView, hasNetns bool) serviceIPLabelConfig {
 	svcIP := ""
 	if svcNet, ok := sv.SvcNetwork().GetOk(); ok && svcNet.IPv4.IsValid() {
 		svcIP = svcNet.IPv4.String()
 	}
-	tsIface := ""
+	cfg := serviceIPLabelConfig{
+		svcIP:       svcIP,
+		hasNetns:    hasNetns,
+		serviceType: sv.ServiceType(),
+	}
 	if ts := sv.TSNet(); ts.Valid() {
-		tsIface = strings.TrimSpace(ts.Interface())
+		cfg.tsIface = strings.TrimSpace(ts.Interface())
 	}
-	macIface := ""
 	if mac, ok := sv.Macvlan().GetOk(); ok {
-		macIface = strings.TrimSpace(mac.Interface)
+		cfg.macIface = strings.TrimSpace(mac.Interface)
 	}
+	return cfg
+}
+
+func serviceIPListFromEntries(raw []ifaceIP, cfg serviceIPLabelConfig) []catchrpc.ServiceIP {
 	out := make([]catchrpc.ServiceIP, 0, len(raw)+1)
 	seenSvc := false
 	for _, entry := range raw {
-		label := labelForIP(entry, svcIP, tsIface, macIface, hasNetns, sv.ServiceType())
+		label := labelForIP(entry, cfg.svcIP, cfg.tsIface, cfg.macIface, cfg.hasNetns, cfg.serviceType)
 		out = append(out, catchrpc.ServiceIP{
 			Label:     label,
 			IP:        entry.IP,
 			Interface: entry.Interface,
 		})
-		if entry.IP == svcIP && svcIP != "" {
+		if entry.IP == cfg.svcIP && cfg.svcIP != "" {
 			seenSvc = true
 		}
 	}
-	if svcIP != "" && !seenSvc {
+	if cfg.svcIP != "" && !seenSvc {
 		out = append(out, catchrpc.ServiceIP{
 			Label: "service",
-			IP:    svcIP,
+			IP:    cfg.svcIP,
 		})
 	}
-	return out, nil
+	return out
 }
 
 func (s *Server) serviceStatusInfo(sn string, sv db.ServiceView) catchrpc.ServiceStatus {
@@ -263,19 +291,8 @@ func labelForIP(entry ifaceIP, svcIP, tsIface, macIface string, hasNetns bool, s
 	if svcIP != "" && entry.IP == svcIP {
 		return "service"
 	}
-	if entry.Interface != "" {
-		if tsIface != "" && entry.Interface == tsIface {
-			return "tailscale"
-		}
-		if strings.HasPrefix(entry.Interface, "yts-") || strings.HasPrefix(entry.Interface, "tailscale") {
-			return "tailscale"
-		}
-		if macIface != "" && entry.Interface == macIface {
-			return "macvlan"
-		}
-		if strings.HasPrefix(entry.Interface, "docker") || strings.HasPrefix(entry.Interface, "br-") {
-			return "docker"
-		}
+	if label := labelForInterface(entry.Interface, tsIface, macIface); label != "" {
+		return label
 	}
 	if serviceType == db.ServiceTypeDockerCompose {
 		return "docker"
@@ -284,4 +301,21 @@ func labelForIP(entry ifaceIP, svcIP, tsIface, macIface string, hasNetns bool, s
 		return "netns"
 	}
 	return "host"
+}
+
+func labelForInterface(iface, tsIface, macIface string) string {
+	switch {
+	case iface == "":
+		return ""
+	case tsIface != "" && iface == tsIface:
+		return "tailscale"
+	case strings.HasPrefix(iface, "yts-"), strings.HasPrefix(iface, "tailscale"):
+		return "tailscale"
+	case macIface != "" && iface == macIface:
+		return "macvlan"
+	case strings.HasPrefix(iface, "docker"), strings.HasPrefix(iface, "br-"):
+		return "docker"
+	default:
+		return ""
+	}
 }

@@ -4,113 +4,175 @@
 
 package yeet
 
-import "testing"
+import (
+	"reflect"
+	"testing"
 
-func TestParseSSHArgs(t *testing.T) {
-	cases := []struct {
-		name    string
-		args    []string
-		options []string
-		service string
-		command []string
-		wantErr bool
+	"github.com/yeetrun/yeet/pkg/catchrpc"
+)
+
+func TestSSHTarget(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		info serverInfo
+		want string
 	}{
-		{name: "empty"},
-		{
-			name:    "options and service",
-			args:    []string{"-i", "id_rsa", "svc"},
-			options: []string{"-i", "id_rsa"},
-			service: "svc",
-		},
-		{
-			name:    "service with command",
-			args:    []string{"svc", "--", "ls", "-la"},
-			options: []string{},
-			service: "svc",
-			command: []string{"ls", "-la"},
-		},
-		{
-			name:    "host command only",
-			args:    []string{"--", "uname", "-a"},
-			options: []string{},
-			service: "",
-			command: []string{"uname", "-a"},
-		},
-		{
-			name:    "reject extra args",
-			args:    []string{"svc", "ls"},
-			wantErr: true,
-		},
+		{name: "host only", host: "catch", want: "catch"},
+		{name: "install user", host: "catch", info: serverInfo{InstallUser: "root"}, want: "root@catch"},
+		{name: "trim user", host: "catch", info: serverInfo{InstallUser: " root "}, want: "root@catch"},
 	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			options, service, command, err := parseSSHArgs(tc.args)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(options) != len(tc.options) {
-				t.Fatalf("options=%v, want %v", options, tc.options)
-			}
-			for i := range options {
-				if options[i] != tc.options[i] {
-					t.Fatalf("options=%v, want %v", options, tc.options)
-				}
-			}
-			if service != tc.service {
-				t.Fatalf("service=%q, want %q", service, tc.service)
-			}
-			if len(command) != len(tc.command) {
-				t.Fatalf("command=%v, want %v", command, tc.command)
-			}
-			for i := range command {
-				if command[i] != tc.command[i] {
-					t.Fatalf("command=%v, want %v", command, tc.command)
-				}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sshTarget(tt.host, tt.info); got != tt.want {
+				t.Fatalf("sshTarget = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestEnsureTTYOption(t *testing.T) {
-	options := ensureTTYOption(nil)
-	if len(options) != 1 || options[0] != "-t" {
-		t.Fatalf("options=%v, want [-t]", options)
+func TestParseSSHArgs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantOptions []string
+		wantService string
+		wantCommand []string
+		wantErr     bool
+	}{
+		{
+			name:        "options only",
+			args:        []string{"-p", "2222", "-o", "StrictHostKeyChecking=no"},
+			wantOptions: []string{"-p", "2222", "-o", "StrictHostKeyChecking=no"},
+		},
+		{
+			name:        "service only",
+			args:        []string{"api"},
+			wantService: "api",
+		},
+		{
+			name:        "service command after delimiter",
+			args:        []string{"api", "--", "systemctl", "status", "api"},
+			wantService: "api",
+			wantCommand: []string{"systemctl", "status", "api"},
+		},
+		{
+			name:        "remote command without service",
+			args:        []string{"--", "uptime"},
+			wantCommand: []string{"uptime"},
+		},
+		{
+			name:        "literal dash can be service",
+			args:        []string{"-"},
+			wantService: "-",
+		},
+		{
+			name:        "short flag without argument stays alone when missing value",
+			args:        []string{"-p"},
+			wantOptions: []string{"-p"},
+		},
+		{
+			name:        "short flag with attached value is not split",
+			args:        []string{"-p2222", "api"},
+			wantOptions: []string{"-p2222"},
+			wantService: "api",
+		},
+		{
+			name:    "implicit command requires delimiter",
+			args:    []string{"api", "uptime"},
+			wantErr: true,
+		},
 	}
-
-	options = ensureTTYOption([]string{"-i", "id_rsa"})
-	if len(options) != 3 || options[2] != "-t" {
-		t.Fatalf("options=%v, want [-i id_rsa -t]", options)
-	}
-
-	options = ensureTTYOption([]string{"-t"})
-	if len(options) != 1 || options[0] != "-t" {
-		t.Fatalf("options=%v, want [-t]", options)
-	}
-
-	options = ensureTTYOption([]string{"-T"})
-	if len(options) != 1 || options[0] != "-T" {
-		t.Fatalf("options=%v, want [-T]", options)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotOptions, gotService, gotCommand, err := parseSSHArgs(tt.args)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseSSHArgs: %v", err)
+			}
+			if !reflect.DeepEqual(gotOptions, tt.wantOptions) {
+				t.Fatalf("options = %#v, want %#v", gotOptions, tt.wantOptions)
+			}
+			if gotService != tt.wantService {
+				t.Fatalf("service = %q, want %q", gotService, tt.wantService)
+			}
+			if !reflect.DeepEqual(gotCommand, tt.wantCommand) {
+				t.Fatalf("command = %#v, want %#v", gotCommand, tt.wantCommand)
+			}
+		})
 	}
 }
 
-func TestShellQuoteJoin(t *testing.T) {
-	if got := shellQuote("simple"); got != "simple" {
-		t.Fatalf("shellQuote(simple)=%q", got)
+func TestServiceDataDir(t *testing.T) {
+	tests := []struct {
+		name    string
+		service string
+		info    serverInfo
+		resp    catchrpc.ServiceInfoResponse
+		want    string
+	}{
+		{name: "server path wins", service: "svc", resp: catchrpc.ServiceInfoResponse{Info: catchrpc.ServiceInfo{Paths: catchrpc.ServicePaths{Root: "/srv/svc"}}}, want: "/srv/svc/data"},
+		{name: "services dir fallback", service: "svc", info: serverInfo{ServicesDir: "/srv/services"}, want: "/srv/services/svc/data"},
+		{name: "root dir fallback", service: "svc", info: serverInfo{RootDir: "/srv/yeet"}, want: "/srv/yeet/services/svc/data"},
 	}
-	if got := shellQuote("a b"); got != "'a b'" {
-		t.Fatalf("shellQuote(space)=%q", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := serviceDataDir(tt.service, tt.info, tt.resp)
+			if err != nil {
+				t.Fatalf("serviceDataDir: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("serviceDataDir = %q, want %q", got, tt.want)
+			}
+		})
 	}
-	if got := shellQuote("can't"); got != "'can'\"'\"'t'" {
-		t.Fatalf("shellQuote(quote)=%q", got)
+}
+
+func TestServiceDataDirRequiresPathInfo(t *testing.T) {
+	_, err := serviceDataDir("svc", serverInfo{}, catchrpc.ServiceInfoResponse{})
+	if err == nil {
+		t.Fatal("expected error")
 	}
-	if got := shellJoin([]string{"echo", "a b"}); got != "echo 'a b'" {
-		t.Fatalf("shellJoin=%q", got)
+}
+
+func TestBuildServiceSSHCommand(t *testing.T) {
+	tests := []struct {
+		name        string
+		serviceDir  string
+		command     []string
+		options     []string
+		wantCommand []string
+		wantOptions []string
+	}{
+		{
+			name:        "interactive shell forces tty",
+			serviceDir:  "/srv/svc/data",
+			wantCommand: []string{"sh", "-lc", `'cd /srv/svc/data && exec ${SHELL:-/bin/sh} -l'`},
+			wantOptions: []string{"-t"},
+		},
+		{
+			name:        "command preserves options",
+			serviceDir:  "/srv/svc data",
+			command:     []string{"echo", "hello world"},
+			options:     []string{"-p", "2222"},
+			wantCommand: []string{"sh", "-lc", `'cd '"'"'/srv/svc data'"'"' && exec echo '"'"'hello world'"'"''`},
+			wantOptions: []string{"-p", "2222"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCommand, gotOptions := buildServiceSSHCommand(tt.serviceDir, tt.command, tt.options)
+			if !reflect.DeepEqual(gotCommand, tt.wantCommand) {
+				t.Fatalf("command = %#v, want %#v", gotCommand, tt.wantCommand)
+			}
+			if !reflect.DeepEqual(gotOptions, tt.wantOptions) {
+				t.Fatalf("options = %#v, want %#v", gotOptions, tt.wantOptions)
+			}
+		})
 	}
 }

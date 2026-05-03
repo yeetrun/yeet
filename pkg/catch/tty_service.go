@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"slices"
 	"strconv"
@@ -59,28 +60,43 @@ func (e *ttyExecer) rollbackCmdFunc() error {
 	defer ui.Stop()
 
 	ui.StartStep("Select generation")
-	_, s, err := e.s.cfg.DB.MutateService(e.sn, func(d *db.Data, s *db.Service) error {
-		if s.Generation == 0 {
-			return fmt.Errorf("no generation to rollback")
-		}
-		minG := s.LatestGeneration - maxGenerations
-		gen := s.Generation - 1
-		if gen < minG {
-			return fmt.Errorf("generation %d is too old, earliest rollback is %d", gen, minG)
-		}
-		if gen == 0 {
-			return fmt.Errorf("generation %d is the oldest, cannot rollback", s.Generation)
-		}
-		s.Generation = gen
-		return nil
-	})
+	gen, err := e.rollbackGeneration()
 	if err != nil {
 		ui.FailStep(err.Error())
 		return fmt.Errorf("failed to rollback service: %w", err)
 	}
-	gen := s.Generation
 	ui.DoneStep(fmt.Sprintf("generation=%d", gen))
 
+	return e.installRollbackGeneration(ui, gen)
+}
+
+func (e *ttyExecer) rollbackGeneration() (int, error) {
+	_, service, err := e.s.cfg.DB.MutateService(e.sn, func(_ *db.Data, s *db.Service) error {
+		return selectPreviousGeneration(s)
+	})
+	if err != nil {
+		return 0, err
+	}
+	return service.Generation, nil
+}
+
+func selectPreviousGeneration(s *db.Service) error {
+	if s.Generation == 0 {
+		return fmt.Errorf("no generation to rollback")
+	}
+	minG := s.LatestGeneration - maxGenerations
+	gen := s.Generation - 1
+	if gen < minG {
+		return fmt.Errorf("generation %d is too old, earliest rollback is %d", gen, minG)
+	}
+	if gen == 0 {
+		return fmt.Errorf("generation %d is the oldest, cannot rollback", s.Generation)
+	}
+	s.Generation = gen
+	return nil
+}
+
+func (e *ttyExecer) installRollbackGeneration(ui *runUI, gen int) error {
 	ui.StartStep("Install generation")
 	cfg := e.installerCfg()
 	i, err := e.s.NewInstaller(cfg)
@@ -155,8 +171,21 @@ func (e *ttyExecer) logsCmdFunc(flags cli.LogsFlags) error {
 }
 
 func (e *ttyExecer) statusCmdFunc(flags cli.StatusFlags) error {
-	formatOut := flags.Format
+	if err := e.ensureServicesAvailable(); err != nil {
+		return err
+	}
+	statuses, render, err := e.statusData()
+	if err != nil {
+		return err
+	}
+	if !render {
+		return nil
+	}
+	sortServiceStatuses(statuses)
+	return renderServiceStatuses(e.rw, flags.Format, statuses)
+}
 
+func (e *ttyExecer) ensureServicesAvailable() error {
 	dv, err := e.s.cfg.DB.Get()
 	if err != nil {
 		return fmt.Errorf("failed to get services: %w", err)
@@ -164,114 +193,174 @@ func (e *ttyExecer) statusCmdFunc(flags cli.StatusFlags) error {
 	if !dv.Valid() {
 		return fmt.Errorf("no services found")
 	}
+	return nil
+}
 
-	var statuses []ServiceStatusData
-
+func (e *ttyExecer) statusData() ([]ServiceStatusData, bool, error) {
 	if e.sn == SystemService {
-		systemdStatuses, err := e.s.SystemdStatuses()
+		statuses, err := e.systemStatusData()
+		return statuses, true, err
+	}
+	status, render, err := e.singleServiceStatusData()
+	if err != nil {
+		return nil, false, err
+	}
+	return []ServiceStatusData{status}, render, nil
+}
+
+func (e *ttyExecer) systemStatusData() ([]ServiceStatusData, error) {
+	statuses, err := e.systemdStatusData()
+	if err != nil {
+		return nil, err
+	}
+	composeStatuses, err := e.dockerComposeStatusData()
+	if err != nil {
+		return nil, err
+	}
+	return append(statuses, composeStatuses...), nil
+}
+
+func (e *ttyExecer) systemdStatusData() ([]ServiceStatusData, error) {
+	systemdStatuses, err := e.s.SystemdStatuses()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get systemd statuses: %w", err)
+	}
+	statuses := make([]ServiceStatusData, 0, len(systemdStatuses))
+	for sn, status := range systemdStatuses {
+		data, err := e.systemdServiceStatusData(sn, status)
 		if err != nil {
-			return fmt.Errorf("failed to get systemd statuses: %w", err)
-		}
-		for sn, status := range systemdStatuses {
-			service, err := e.s.serviceView(sn)
-			if err != nil {
-				return err
-			}
-			statuses = append(statuses, ServiceStatusData{
-				ServiceName: sn,
-				ServiceType: ServiceDataTypeForService(service),
-				ComponentStatus: []ComponentStatusData{
-					{
-						Name:   sn,
-						Status: ComponentStatusFromServiceStatus(status),
-					},
-				},
-			})
-		}
-		composeStatuses, err := e.s.DockerComposeStatuses()
-		if err != nil {
-			return fmt.Errorf("failed to get all docker compose statuses: %w", err)
-		}
-		for sn, cs := range composeStatuses {
-			serviceType := ServiceDataTypeDocker
-			if service, err := e.s.serviceView(sn); err == nil {
-				serviceType = ServiceDataTypeForService(service)
-			}
-			if len(cs) == 0 {
-				statuses = append(statuses, ServiceStatusData{
-					ServiceName: sn,
-					ServiceType: serviceType,
-					ComponentStatus: []ComponentStatusData{
-						{
-							Name:   sn,
-							Status: ComponentStatusUnknown,
-						},
-					},
-				})
-				continue
-			}
-			data := ServiceStatusData{
-				ServiceName:     sn,
-				ServiceType:     serviceType,
-				ComponentStatus: []ComponentStatusData{},
-			}
-			for cn, status := range cs {
-				data.ComponentStatus = append(data.ComponentStatus, ComponentStatusData{
-					Name:   cn,
-					Status: ComponentStatusFromServiceStatus(status),
-				})
-			}
-			statuses = append(statuses, data)
-		}
-	} else {
-		service, err := e.s.serviceView(e.sn)
-		if err != nil {
-			return fmt.Errorf("failed to get service type: %w", err)
-		}
-		st := service.ServiceType()
-		data := ServiceStatusData{
-			ServiceName:     e.sn,
-			ServiceType:     ServiceDataTypeForService(service),
-			ComponentStatus: []ComponentStatusData{},
-		}
-		switch st {
-		case db.ServiceTypeSystemd:
-			status, err := e.s.SystemdStatus(e.sn)
-			if err != nil {
-				return fmt.Errorf("failed to get systemd status: %w", err)
-			}
-			data.ComponentStatus = append(data.ComponentStatus, ComponentStatusData{
-				Name:   e.sn,
-				Status: ComponentStatusFromServiceStatus(status),
-			})
-		case db.ServiceTypeDockerCompose:
-			cs, err := e.s.DockerComposeStatus(e.sn)
-			if err != nil {
-				if err == svc.ErrDockerStatusUnknown {
-					data.ComponentStatus = append(data.ComponentStatus, ComponentStatusData{
-						Name:   e.sn,
-						Status: ComponentStatusUnknown,
-					})
-					break
-				}
-				return fmt.Errorf("failed to get docker compose statuses: %w", err)
-			}
-			if len(cs) == 0 {
-				data.ComponentStatus = append(data.ComponentStatus, ComponentStatusData{
-					Name:   e.sn,
-					Status: ComponentStatusUnknown,
-				})
-				return nil
-			}
-			for cn, status := range cs {
-				data.ComponentStatus = append(data.ComponentStatus, ComponentStatusData{
-					Name:   cn,
-					Status: ComponentStatusFromServiceStatus(status),
-				})
-			}
+			return nil, err
 		}
 		statuses = append(statuses, data)
 	}
+	return statuses, nil
+}
+
+func (e *ttyExecer) systemdServiceStatusData(sn string, status svc.Status) (ServiceStatusData, error) {
+	service, err := e.s.serviceView(sn)
+	if err != nil {
+		return ServiceStatusData{}, err
+	}
+	return serviceStatusWithComponent(sn, ServiceDataTypeForService(service), sn, status), nil
+}
+
+func (e *ttyExecer) dockerComposeStatusData() ([]ServiceStatusData, error) {
+	composeStatuses, err := e.s.DockerComposeStatuses()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all docker compose statuses: %w", err)
+	}
+	statuses := make([]ServiceStatusData, 0, len(composeStatuses))
+	for sn, status := range composeStatuses {
+		statuses = append(statuses, composeServiceStatusData(sn, e.serviceDataTypeOrDocker(sn), status))
+	}
+	return statuses, nil
+}
+
+func (e *ttyExecer) serviceDataTypeOrDocker(sn string) ServiceDataType {
+	if service, err := e.s.serviceView(sn); err == nil {
+		return ServiceDataTypeForService(service)
+	}
+	return ServiceDataTypeDocker
+}
+
+func (e *ttyExecer) singleServiceStatusData() (ServiceStatusData, bool, error) {
+	service, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return ServiceStatusData{}, false, fmt.Errorf("failed to get service type: %w", err)
+	}
+	data := serviceStatusData(e.sn, ServiceDataTypeForService(service))
+	return e.populateSingleServiceStatus(data, service.ServiceType())
+}
+
+func (e *ttyExecer) populateSingleServiceStatus(data ServiceStatusData, serviceType db.ServiceType) (ServiceStatusData, bool, error) {
+	switch serviceType {
+	case db.ServiceTypeSystemd:
+		return e.addSingleSystemdStatus(data)
+	case db.ServiceTypeDockerCompose:
+		return e.addSingleDockerComposeStatus(data)
+	default:
+		return data, true, nil
+	}
+}
+
+func (e *ttyExecer) addSingleSystemdStatus(data ServiceStatusData) (ServiceStatusData, bool, error) {
+	status, err := e.s.SystemdStatus(e.sn)
+	if err != nil {
+		return ServiceStatusData{}, false, fmt.Errorf("failed to get systemd status: %w", err)
+	}
+	data.ComponentStatus = []ComponentStatusData{componentStatusData(e.sn, status)}
+	return data, true, nil
+}
+
+func (e *ttyExecer) addSingleDockerComposeStatus(data ServiceStatusData) (ServiceStatusData, bool, error) {
+	statuses, err := e.s.DockerComposeStatus(e.sn)
+	if err != nil {
+		return e.handleDockerComposeStatusError(data, err)
+	}
+	if len(statuses) == 0 {
+		data.ComponentStatus = []ComponentStatusData{unknownComponentStatus(e.sn)}
+		return data, false, nil
+	}
+	data.ComponentStatus = componentStatuses(statuses)
+	return data, true, nil
+}
+
+func (e *ttyExecer) handleDockerComposeStatusError(data ServiceStatusData, err error) (ServiceStatusData, bool, error) {
+	if err == svc.ErrDockerStatusUnknown {
+		data.ComponentStatus = []ComponentStatusData{unknownComponentStatus(e.sn)}
+		return data, true, nil
+	}
+	return ServiceStatusData{}, false, fmt.Errorf("failed to get docker compose statuses: %w", err)
+}
+
+func serviceStatusData(name string, serviceType ServiceDataType) ServiceStatusData {
+	return ServiceStatusData{
+		ServiceName:     name,
+		ServiceType:     serviceType,
+		ComponentStatus: []ComponentStatusData{},
+	}
+}
+
+func serviceStatusWithComponent(serviceName string, serviceType ServiceDataType, componentName string, status svc.Status) ServiceStatusData {
+	data := serviceStatusData(serviceName, serviceType)
+	data.ComponentStatus = []ComponentStatusData{componentStatusData(componentName, status)}
+	return data
+}
+
+func composeServiceStatusData(serviceName string, serviceType ServiceDataType, statuses svc.DockerComposeStatus) ServiceStatusData {
+	if len(statuses) == 0 {
+		data := serviceStatusData(serviceName, serviceType)
+		data.ComponentStatus = []ComponentStatusData{unknownComponentStatus(serviceName)}
+		return data
+	}
+	data := serviceStatusData(serviceName, serviceType)
+	data.ComponentStatus = componentStatuses(statuses)
+	return data
+}
+
+func componentStatusData(name string, status svc.Status) ComponentStatusData {
+	return ComponentStatusData{
+		Name:   name,
+		Status: ComponentStatusFromServiceStatus(status),
+	}
+}
+
+func unknownComponentStatus(name string) ComponentStatusData {
+	return ComponentStatusData{
+		Name:   name,
+		Status: ComponentStatusUnknown,
+	}
+}
+
+func componentStatuses(statuses svc.DockerComposeStatus) []ComponentStatusData {
+	components := make([]ComponentStatusData, 0, len(statuses))
+	for name, status := range statuses {
+		components = append(components, componentStatusData(name, status))
+	}
+	return components
+}
+
+func sortServiceStatuses(statuses []ServiceStatusData) {
 	slices.SortFunc(statuses, func(a, b ServiceStatusData) int {
 		return strings.Compare(a.ServiceName, b.ServiceName)
 	})
@@ -280,67 +369,125 @@ func (e *ttyExecer) statusCmdFunc(flags cli.StatusFlags) error {
 			return strings.Compare(a.Name, b.Name)
 		})
 	}
+}
 
+func renderServiceStatuses(w io.Writer, formatOut string, statuses []ServiceStatusData) error {
 	if formatOut == "json" {
-		return json.NewEncoder(e.rw).Encode(statuses)
+		return json.NewEncoder(w).Encode(statuses)
 	}
 	if formatOut == "json-pretty" {
-		encoder := json.NewEncoder(e.rw)
+		encoder := json.NewEncoder(w)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(statuses)
 	}
+	return renderServiceStatusTable(w, statuses)
+}
 
-	w := tabwriter.NewWriter(e.rw, 0, 0, 3, ' ', 0)
-	defer w.Flush()
+func renderServiceStatusTable(w io.Writer, statuses []ServiceStatusData) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	if err := writeServiceStatusHeader(tw); err != nil {
+		return err
+	}
+	if err := writeServiceStatusRows(tw, statuses); err != nil {
+		return err
+	}
+	return tw.Flush()
+}
 
-	fmt.Fprintln(w, "SERVICE\tTYPE\tCONTAINER\tSTATUS\t")
+func writeServiceStatusHeader(w io.Writer) error {
+	_, err := fmt.Fprintln(w, "SERVICE\tTYPE\tCONTAINER\tSTATUS\t")
+	return err
+}
 
+func writeServiceStatusRows(w io.Writer, statuses []ServiceStatusData) error {
 	for _, status := range statuses {
-		for _, component := range status.ComponentStatus {
-			if status.ServiceType == ServiceDataTypeDocker {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", status.ServiceName, status.ServiceType, component.Name, component.Status)
-			} else {
-				fmt.Fprintf(w, "%s\t%s\t-\t%s\t\n", status.ServiceName, status.ServiceType, component.Status)
-			}
+		if err := writeServiceStatusComponents(w, status); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
+func writeServiceStatusComponents(w io.Writer, status ServiceStatusData) error {
+	for _, component := range status.ComponentStatus {
+		if err := writeServiceStatusRow(w, status, component); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeServiceStatusRow(w io.Writer, status ServiceStatusData, component ComponentStatusData) error {
+	if status.ServiceType == ServiceDataTypeDocker {
+		_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", status.ServiceName, status.ServiceType, component.Name, component.Status)
+		return err
+	}
+	_, err := fmt.Fprintf(w, "%s\t%s\t-\t%s\t\n", status.ServiceName, status.ServiceType, component.Status)
+	return err
+}
+
 func (e *ttyExecer) removeCmdFunc(flags cli.RemoveFlags) error {
-	if e.sn == SystemService || e.sn == CatchService {
-		return fmt.Errorf("cannot remove system service")
+	if err := e.validateServiceRemoval(); err != nil {
+		return err
 	}
 	runner, err := e.serviceRunner()
 	if err != nil {
-		if errors.Is(err, errNoServiceConfigured) {
-			report, err := e.s.RemoveService(e.sn)
-			if err != nil {
-				return fmt.Errorf("failed to cleanup service %q: %w", e.sn, err)
-			}
-			e.printRemoveWarnings(report)
-			e.printf("service %q not found\n", e.sn)
-			return nil
-		}
-		return fmt.Errorf("failed to get service runner: %w", err)
+		return e.removeServiceWithoutRunner(err)
 	}
-	// Confirm the removal of the service.
-	if !flags.Yes {
-		if ok, err := cmdutil.Confirm(e.rw, e.rw, fmt.Sprintf("Are you sure you want to remove service %q?", e.sn)); err != nil {
-			return fmt.Errorf("failed to confirm removal: %w", err)
-		} else if !ok {
-			return nil
-		}
+	ok, err := e.confirmServiceRemoval(flags.Yes)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
 	}
 
+	e.removeRunner(runner)
+	return e.removeServiceConfig()
+}
+
+func (e *ttyExecer) validateServiceRemoval() error {
+	if e.sn == SystemService || e.sn == CatchService {
+		return fmt.Errorf("cannot remove system service")
+	}
+	return nil
+}
+
+func (e *ttyExecer) removeServiceWithoutRunner(err error) error {
+	if !errors.Is(err, errNoServiceConfigured) {
+		return fmt.Errorf("failed to get service runner: %w", err)
+	}
+	report, err := e.s.RemoveService(e.sn)
+	if err != nil {
+		return fmt.Errorf("failed to cleanup service %q: %w", e.sn, err)
+	}
+	e.printRemoveWarnings(report)
+	e.printf("service %q not found\n", e.sn)
+	return nil
+}
+
+func (e *ttyExecer) confirmServiceRemoval(yes bool) (bool, error) {
+	if yes {
+		return true, nil
+	}
+	ok, err := cmdutil.Confirm(e.rw, e.rw, fmt.Sprintf("Are you sure you want to remove service %q?", e.sn))
+	if err != nil {
+		return false, fmt.Errorf("failed to confirm removal: %w", err)
+	}
+	return ok, nil
+}
+
+func (e *ttyExecer) removeRunner(runner ServiceRunner) {
 	if err := runner.Remove(); err != nil {
 		if errors.Is(err, svc.ErrNotInstalled) {
-			// Systemd service is not installed
 			e.printf("warning: systemd service %q was not installed\n", e.sn)
 		} else {
 			e.printf("warning: failed to stop/remove service %q: %v\n", e.sn, err)
 		}
 	}
+}
+
+func (e *ttyExecer) removeServiceConfig() error {
 	report, err := e.s.RemoveService(e.sn)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup service %q: %w", e.sn, err)
@@ -383,31 +530,47 @@ func (e *ttyExecer) serviceRunner() (ServiceRunner, error) {
 	if e.serviceRunnerFn != nil {
 		return e.serviceRunnerFn()
 	}
+	service, err := e.newServiceRunner()
+	if err != nil {
+		return nil, err
+	}
+	service.SetNewCmd(e.newCmd)
+	return service, nil
+}
+
+func (e *ttyExecer) newServiceRunner() (ServiceRunner, error) {
 	st, err := e.s.serviceType(e.sn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get service type: %w", err)
 	}
-	var service ServiceRunner
+	return e.serviceRunnerForType(st)
+}
+
+func (e *ttyExecer) serviceRunnerForType(st db.ServiceType) (ServiceRunner, error) {
 	switch st {
 	case db.ServiceTypeSystemd:
-		systemd, err := e.s.systemdService(e.sn)
-		if err != nil {
-			return nil, err
-		}
-		service = &systemdServiceRunner{SystemdService: systemd}
+		return e.systemdRunner()
 	case db.ServiceTypeDockerCompose:
-		docker, err := e.s.dockerComposeService(e.sn)
-		if err != nil {
-			return nil, err
-		}
-		service = &dockerComposeServiceRunner{DockerComposeService: docker}
+		return e.dockerComposeRunner()
 	default:
 		return nil, fmt.Errorf("unhandled service type %q", st)
 	}
-	if service != nil {
-		service.SetNewCmd(e.newCmd)
+}
+
+func (e *ttyExecer) systemdRunner() (ServiceRunner, error) {
+	systemd, err := e.s.systemdService(e.sn)
+	if err != nil {
+		return nil, err
 	}
-	return service, nil
+	return &systemdServiceRunner{SystemdService: systemd}, nil
+}
+
+func (e *ttyExecer) dockerComposeRunner() (ServiceRunner, error) {
+	docker, err := e.s.dockerComposeService(e.sn)
+	if err != nil {
+		return nil, err
+	}
+	return &dockerComposeServiceRunner{DockerComposeService: docker}, nil
 }
 
 type systemdServiceRunner struct {
@@ -448,6 +611,17 @@ func (s *systemdServiceRunner) Disable() error {
 }
 
 func (s *systemdServiceRunner) Logs(opts *svc.LogOptions) error {
+	c := s.newCmd("journalctl", systemdLogArgs(s.Name(), opts)...)
+	if err := c.Start(); err != nil {
+		return fmt.Errorf("failed to start journalctl: %w", err)
+	}
+	if err := c.Wait(); err != nil {
+		return fmt.Errorf("failed to wait for journalctl: %w", err)
+	}
+	return nil
+}
+
+func systemdLogArgs(unit string, opts *svc.LogOptions) []string {
 	if opts == nil {
 		opts = &svc.LogOptions{}
 	}
@@ -458,22 +632,14 @@ func (s *systemdServiceRunner) Logs(opts *svc.LogOptions) error {
 	if opts.Lines > 0 {
 		args = append(args, "--lines="+strconv.Itoa(opts.Lines))
 	}
-	args = append(args, "--unit="+s.SystemdService.Name())
-	c := s.newCmd("journalctl", args...)
-	if err := c.Start(); err != nil {
-		return fmt.Errorf("failed to start journalctl: %w", err)
-	}
-	if err := c.Wait(); err != nil {
-		return fmt.Errorf("failed to wait for journalctl: %w", err)
-	}
-	return nil
+	return append(args, "--unit="+unit)
 }
 
 func (s *systemdServiceRunner) Remove() error {
 	if err := s.SystemdService.Stop(); err != nil {
 		return err
 	}
-	return s.SystemdService.Uninstall()
+	return s.Uninstall()
 }
 
 type dockerComposeServiceRunner struct {
