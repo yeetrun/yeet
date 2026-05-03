@@ -18,6 +18,8 @@ import (
 
 const uploadProgressInterval = 120 * time.Millisecond
 
+var uploadCatchCommandFn = exec.Command
+
 func uploadCatchBinary(ui *initUI, bin string, binSize int64, userAtRemote string) (detail string, err error) {
 	file, err := os.Open(bin)
 	if err != nil {
@@ -32,7 +34,7 @@ func uploadCatchBinary(ui *initUI, bin string, binSize int64, userAtRemote strin
 	progress := newUploadProgress(binSize)
 	reader := progress.reader(file)
 
-	cmd := exec.Command("ssh", "-q", "-C", userAtRemote, "cat > ./catch")
+	cmd := uploadCatchCommandFn("ssh", "-q", "-C", userAtRemote, "cat > ./catch")
 	cmd.Stdin = reader
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

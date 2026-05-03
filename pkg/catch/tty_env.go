@@ -135,25 +135,49 @@ func (e *ttyExecer) runEnvCommand(cmd envCommand) error {
 	}
 }
 
+type envEditSession struct {
+	srcPath string
+	tmpPath string
+}
+
 func (e *ttyExecer) editEnvCmdFunc() (retErr error) {
-	sv, err := e.s.serviceView(e.sn)
-	if err != nil {
-		return err
-	}
-	srcPath := latestEnvFilePath(sv)
-	tmpPath, err := copyToTmpFile(srcPath)
+	session, err := e.newEnvEditSession()
 	if err != nil {
 		return err
 	}
 	defer func() {
-		retErr = errors.Join(retErr, removeTempFile(tmpPath))
+		retErr = errors.Join(retErr, removeTempFile(session.tmpPath))
 	}()
 
-	if err := e.editFile(tmpPath); err != nil {
+	return e.runEnvEditSession(session)
+}
+
+func (e *ttyExecer) newEnvEditSession() (envEditSession, error) {
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return envEditSession{}, err
+	}
+	return prepareEnvEditSession(sv)
+}
+
+func prepareEnvEditSession(sv db.ServiceView) (envEditSession, error) {
+	srcPath := latestEnvFilePath(sv)
+	tmpPath, err := copyToTmpFile(srcPath)
+	if err != nil {
+		return envEditSession{}, err
+	}
+	return envEditSession{srcPath: srcPath, tmpPath: tmpPath}, nil
+}
+
+func (e *ttyExecer) runEnvEditSession(session envEditSession) error {
+	if err := e.editFile(session.tmpPath); err != nil {
 		return fmt.Errorf("failed to edit env file: %w", err)
 	}
+	return e.applyEnvEditSession(session)
+}
 
-	changed, err := editedEnvFileChanged(srcPath, tmpPath)
+func (e *ttyExecer) applyEnvEditSession(session envEditSession) error {
+	changed, err := editedEnvFileChanged(session.srcPath, session.tmpPath)
 	if err != nil {
 		return err
 	}
@@ -162,7 +186,7 @@ func (e *ttyExecer) editEnvCmdFunc() (retErr error) {
 		return nil
 	}
 
-	return e.installEditedEnvFile(tmpPath)
+	return e.installEditedEnvFile(session.tmpPath)
 }
 
 func latestEnvFilePath(sv db.ServiceView) string {
@@ -415,30 +439,51 @@ func applyEnvAssignments(contents []byte, assignments []envAssignment) ([]byte, 
 	return joinEnvFileLines(lines, hadTrailingNewline), true, nil
 }
 
+type envSetPlan struct {
+	contents []byte
+	changed  bool
+}
+
 func (e *ttyExecer) envSetCmdFunc(assignments []envAssignment) error {
-	sv, err := e.s.serviceView(e.sn)
+	contents, err := e.currentEnvContents()
 	if err != nil {
 		return err
+	}
+	plan, err := newEnvSetPlan(contents, assignments)
+	if err != nil {
+		return err
+	}
+	return e.runEnvSetPlan(plan)
+}
+
+func (e *ttyExecer) currentEnvContents() ([]byte, error) {
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return nil, err
 	}
 	ef, err := e.s.envFile(sv, false)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	contents, err := readEnvFileIfExists(ef)
-	if err != nil {
-		return err
-	}
+	return readEnvFileIfExists(ef)
+}
+
+func newEnvSetPlan(contents []byte, assignments []envAssignment) (envSetPlan, error) {
 	updated, changed, err := applyEnvAssignments(contents, assignments)
 	if err != nil {
-		return err
+		return envSetPlan{}, err
 	}
-	if !changed {
+	return envSetPlan{contents: updated, changed: changed}, nil
+}
+
+func (e *ttyExecer) runEnvSetPlan(plan envSetPlan) error {
+	if !plan.changed {
 		e.printf("No changes detected\n")
 		return nil
 	}
 	cfg := e.fileInstaller(netFlags{}, nil)
 	cfg.EnvFile = true
-	return e.install("env", bytes.NewReader(updated), cfg)
+	return e.install("env", bytes.NewReader(plan.contents), cfg)
 }
 
 func readEnvFileIfExists(path string) ([]byte, error) {

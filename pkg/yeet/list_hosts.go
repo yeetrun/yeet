@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"tailscale.com/client/local"
+	"tailscale.com/ipn/ipnstate"
 )
 
 func overlaps(a, b []string) bool {
@@ -27,9 +28,26 @@ func overlaps(a, b []string) bool {
 	return false
 }
 
+var (
+	listHostsStatusFn = func(ctx context.Context) (*ipnstate.Status, error) {
+		var lc local.Client
+		return lc.Status(ctx)
+	}
+	listHostsCatchInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		var info serverInfo
+		if err := newRPCClient(host).Call(ctx, "catch.Info", nil, &info); err != nil {
+			return serverInfo{}, err
+		}
+		return info, nil
+	}
+)
+
 func HandleListHosts(ctx context.Context, tags []string) error {
-	var lc local.Client
-	st, err := lc.Status(ctx)
+	return handleListHosts(ctx, tags, os.Stdout)
+}
+
+func handleListHosts(ctx context.Context, tags []string, out io.Writer) error {
+	st, err := listHostsStatusFn(ctx)
 	if err != nil {
 		return err
 	}
@@ -47,19 +65,17 @@ func HandleListHosts(ctx context.Context, tags []string) error {
 		if domain != selfDomain {
 			continue
 		}
-		rpc := newRPCClient(host)
 		infoCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		var info serverInfo
-		if err := rpc.Call(infoCtx, "catch.Info", nil, &info); err != nil {
+		info, err := listHostsCatchInfoFn(infoCtx, host)
+		cancel()
+		if err != nil {
 			log.Printf("failed to get version for %s: %v", host, err)
 			rows = append(rows, listHostRow{Host: host, Version: "unknown", Tags: peer.Tags.AsSlice()})
-			cancel()
 			continue
 		}
-		cancel()
 		rows = append(rows, listHostRow{Host: host, Version: info.Version, Tags: peer.Tags.AsSlice()})
 	}
-	return renderListHosts(os.Stdout, rows)
+	return renderListHosts(out, rows)
 }
 
 type listHostRow struct {

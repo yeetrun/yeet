@@ -371,6 +371,41 @@ func TestLinuxNetNSInspectorProjectContainers(t *testing.T) {
 	}
 }
 
+func TestLinuxNetNSInspectorProjectContainersInspectsProjectIDs(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "docker.log")
+	t.Setenv("HELPER_COMMAND_LOG", logPath)
+	t.Setenv("HELPER_DOCKER_PSQ_OUTPUT", "cid-app\ncid-worker\n")
+	t.Setenv(
+		"HELPER_DOCKER_INSPECT_OUTPUT",
+		strings.Join([]string{
+			"cid-app\tcatch-svc-a_default=endpoint-app",
+			"cid-worker\tbridge=endpoint-worker",
+		}, "\n")+"\n",
+	)
+
+	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+	if _, err := (linuxNetNSInspector{}).ProjectContainers(context.Background(), "catch-svc-a"); err != nil {
+		t.Fatalf("ProjectContainers returned error: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read helper command log: %v", err)
+	}
+	logOutput := string(logBytes)
+	if !strings.Contains(logOutput, "docker\tcompose --project-name catch-svc-a ps -q\n") {
+		t.Fatalf("expected project-scoped compose ps call, got:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "docker\tinspect --format") {
+		t.Fatalf("expected docker inspect call, got:\n%s", logOutput)
+	}
+	if !strings.Contains(logOutput, "cid-app") || !strings.Contains(logOutput, "cid-worker") {
+		t.Fatalf("expected inspect to use project container IDs, got:\n%s", logOutput)
+	}
+}
+
 func TestLinuxNetNSInspectorProjectContainersHandlesContainerWithNoNetworks(t *testing.T) {
 	t.Setenv("HELPER_DOCKER_PSQ_OUTPUT", "cid-empty\n")
 	t.Setenv("HELPER_DOCKER_INSPECT_OUTPUT", "cid-empty\t\n")

@@ -16,7 +16,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
-const systemdSystemDir = "/etc/systemd/system"
+var systemdSystemDir = "/etc/systemd/system"
 
 type systemdMounter struct {
 	e *ttyExecer
@@ -175,7 +175,7 @@ func systemdUnitActive(unit string) bool {
 	return systemdQuietStatus("is-active", "--quiet", unit)
 }
 
-func systemdQuietStatus(args ...string) bool {
+var systemdQuietStatus = func(args ...string) bool {
 	_, err := exec.Command("systemctl", args...).CombinedOutput()
 	return err == nil
 }
@@ -210,7 +210,7 @@ func systemdUmountCommandError(args []string, err error) error {
 	return fmt.Errorf("failed to run systemd command: %v", err)
 }
 
-func runSystemdCommand(args ...string) error {
+var runSystemdCommand = func(args ...string) error {
 	return exec.Command("systemctl", args...).Run()
 }
 

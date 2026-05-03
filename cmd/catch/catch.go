@@ -306,47 +306,151 @@ func verifyContainerdSnapshotterConfig(raw []byte, dockerConfigPath string) erro
 	return nil
 }
 
+const dockerInstallScriptURL = "https://get.docker.com"
+
+type httpDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+type dockerSetupDeps struct {
+	dockerCmd  func() (string, error)
+	confirm    func(io.Reader, io.Writer, string) (bool, error)
+	stdin      io.Reader
+	stderr     io.Writer
+	scriptURL  string
+	httpClient httpDoer
+	runScript  func(string) error
+}
+
 // setupDocker checks if docker is installed and prompts the user to install it.
 func setupDocker() error {
-	if _, err := svc.DockerCmd(); err == nil {
-		// Docker is installed
+	return setupDockerWith(defaultDockerSetupDeps())
+}
+
+func defaultDockerSetupDeps() dockerSetupDeps {
+	return dockerSetupDeps{
+		dockerCmd:  svc.DockerCmd,
+		confirm:    cmdutil.Confirm,
+		stdin:      os.Stdin,
+		stderr:     os.Stderr,
+		scriptURL:  dockerInstallScriptURL,
+		httpClient: http.DefaultClient,
+		runScript:  runDockerInstallScript,
+	}
+}
+
+func setupDockerWith(deps dockerSetupDeps) error {
+	deps = normalizeDockerSetupDeps(deps)
+	if dockerInstalled(deps.dockerCmd) {
 		return nil
 	}
-	fmt.Fprintln(os.Stderr, "Warning: docker is recommended but not installed")
-	ok, err := cmdutil.Confirm(os.Stdin, os.Stderr, "Would you like to install docker?")
+	ok, err := confirmDockerInstall(deps.stdin, deps.stderr, deps.confirm)
 	if err != nil {
-		return fmt.Errorf("failed to confirm: %w", err)
+		return err
 	}
 	if !ok {
 		return nil
 	}
+	return downloadAndRunDockerInstaller(deps)
+}
+
+func normalizeDockerSetupDeps(deps dockerSetupDeps) dockerSetupDeps {
+	defaults := defaultDockerSetupDeps()
+	if deps.dockerCmd == nil {
+		deps.dockerCmd = defaults.dockerCmd
+	}
+	if deps.confirm == nil {
+		deps.confirm = defaults.confirm
+	}
+	if deps.stdin == nil {
+		deps.stdin = defaults.stdin
+	}
+	if deps.stderr == nil {
+		deps.stderr = defaults.stderr
+	}
+	if deps.scriptURL == "" {
+		deps.scriptURL = defaults.scriptURL
+	}
+	if deps.httpClient == nil {
+		deps.httpClient = defaults.httpClient
+	}
+	if deps.runScript == nil {
+		deps.runScript = defaults.runScript
+	}
+	return deps
+}
+
+func dockerInstalled(dockerCmd func() (string, error)) bool {
+	_, err := dockerCmd()
+	return err == nil
+}
+
+func confirmDockerInstall(in io.Reader, out io.Writer, confirm func(io.Reader, io.Writer, string) (bool, error)) (bool, error) {
+	if _, err := fmt.Fprintln(out, "Warning: docker is recommended but not installed"); err != nil {
+		return false, err
+	}
+	ok, err := confirm(in, out, "Would you like to install docker?")
+	if err != nil {
+		return false, fmt.Errorf("failed to confirm: %w", err)
+	}
+	return ok, nil
+}
+
+func downloadAndRunDockerInstaller(deps dockerSetupDeps) error {
+	scriptPath, err := createDockerInstallScript(deps)
+	if err != nil {
+		return err
+	}
+	defer logRemove(scriptPath)
+	return executeDockerInstallScript(deps.runScript, scriptPath)
+}
+
+func createDockerInstallScript(deps dockerSetupDeps) (string, error) {
 	f, err := os.CreateTemp("", "catch-docker-install")
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return "", fmt.Errorf("failed to create temp file: %w", err)
 	}
-	defer logRemove(f.Name())
 	defer logClose("docker install temp file", f)
 
+	if err := downloadDockerInstallScript(deps.httpClient, deps.scriptURL, f); err != nil {
+		logRemove(f.Name())
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		logRemove(f.Name())
+		return "", fmt.Errorf("failed to close temp file: %w", err)
+	}
+	return f.Name(), nil
+}
+
+func downloadDockerInstallScript(client httpDoer, scriptURL string, dst io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req := must.Get(http.NewRequestWithContext(ctx, "GET", "https://get.docker.com", nil))
-	resp, err := http.DefaultClient.Do(req)
+	req, err := http.NewRequestWithContext(ctx, "GET", scriptURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create docker install request: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download docker install script: %w", err)
 	}
 	defer logClose("docker install response body", resp.Body)
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := io.Copy(dst, resp.Body); err != nil {
 		return fmt.Errorf("failed to download docker install script: %w", err)
 	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("failed to close temp file: %w", err)
-	}
+	return nil
+}
 
-	if err := cmdutil.NewStdCmd("sh", f.Name()).Run(); err != nil {
+func executeDockerInstallScript(runScript func(string) error, scriptPath string) error {
+	if err := runScript(scriptPath); err != nil {
 		return fmt.Errorf("failed to run docker install script: %w", err)
 	}
 	return nil
+}
+
+func runDockerInstallScript(scriptPath string) error {
+	return cmdutil.NewStdCmd("sh", scriptPath).Run()
 }
 
 type installMeta struct {
@@ -423,42 +527,168 @@ func readInstallMeta(dataDir string) (installMeta, error) {
 	return meta, nil
 }
 
+type installTSNet interface {
+	Close() error
+}
+
+type catchServiceInstaller interface {
+	io.Writer
+	closeErrorer
+	Fail()
+}
+
+type catchInstallDeps struct {
+	writeInstallMeta func(string) error
+	initTSNet        func(string) installTSNet
+	newInstaller     func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error)
+	executable       func() (string, error)
+	readFile         func(string) ([]byte, error)
+	logf             func(string, ...any)
+	tsnetHost        func() string
+}
+
+type catchInstallPlan struct {
+	serviceName string
+	dataDir     string
+	tsnetHost   string
+}
+
 // doInstall installs the catch binary as a service.
 func doInstall(cfg *catch.Config, dataDir string) (err error) {
-	if err := writeInstallMeta(dataDir); err != nil {
-		log.Printf("warning: failed to record install metadata: %v", err)
+	return doInstallWith(cfg, dataDir, defaultCatchInstallDeps())
+}
+
+func defaultCatchInstallDeps() catchInstallDeps {
+	return catchInstallDeps{
+		writeInstallMeta: writeInstallMeta,
+		initTSNet: func(dataDir string) installTSNet {
+			return initTSNet(dataDir)
+		},
+		newInstaller: newCatchServiceInstaller,
+		executable:   os.Executable,
+		readFile:     os.ReadFile,
+		logf:         log.Printf,
+		tsnetHost: func() string {
+			return *tsnetHost
+		},
 	}
-	// Set up Tailscale
-	ts := initTSNet(dataDir)
-	if ts == nil {
-		return fmt.Errorf("failed to initialize tsnet")
+}
+
+func doInstallWith(cfg *catch.Config, dataDir string, deps catchInstallDeps) (err error) {
+	deps = normalizeCatchInstallDeps(deps)
+	if err := validateCatchInstallConfig(cfg); err != nil {
+		return err
 	}
-	// Close it at the end so that when the systedm service is started, it
+	recordInstallMetadata(dataDir, deps)
+
+	ts, err := startInstallTSNet(dataDir, deps)
+	if err != nil {
+		return err
+	}
+	// Close it at the end so that when the systemd service is started, it
 	// doesn't fight for tsnet.
 	defer assignOrLogClose(&err, "tsnet server", ts)
 
-	server := catch.NewUnstartedServer(cfg)
-	inst, err := catch.NewFileInstaller(server, catch.FileInstallerCfg{
-		InstallerCfg: catch.InstallerCfg{
-			ServiceName: catch.CatchService,
-			Printer:     log.Printf,
-		},
-		Args: []string{
-			fmt.Sprintf("--data-dir=%v", dataDir),
-			fmt.Sprintf("--tsnet-host=%v", *tsnetHost),
-		},
-	})
+	plan := selectCatchInstallMode(dataDir, deps.tsnetHost())
+	if err := validateCatchInstallPlan(plan); err != nil {
+		return err
+	}
+	inst, err := deps.newInstaller(cfg, catchFileInstallerConfig(plan))
 	if err != nil {
 		return fmt.Errorf("failed to create installer: %w", err)
 	}
 	defer assignOrLogClose(&err, "file installer", inst)
 
-	exePath, err := os.Executable()
+	return writeCurrentExecutable(inst, deps)
+}
+
+func normalizeCatchInstallDeps(deps catchInstallDeps) catchInstallDeps {
+	defaults := defaultCatchInstallDeps()
+	if deps.writeInstallMeta == nil {
+		deps.writeInstallMeta = defaults.writeInstallMeta
+	}
+	if deps.initTSNet == nil {
+		deps.initTSNet = defaults.initTSNet
+	}
+	if deps.newInstaller == nil {
+		deps.newInstaller = defaults.newInstaller
+	}
+	if deps.executable == nil {
+		deps.executable = defaults.executable
+	}
+	if deps.readFile == nil {
+		deps.readFile = defaults.readFile
+	}
+	if deps.logf == nil {
+		deps.logf = defaults.logf
+	}
+	if deps.tsnetHost == nil {
+		deps.tsnetHost = defaults.tsnetHost
+	}
+	return deps
+}
+
+func validateCatchInstallConfig(cfg *catch.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("catch config is required")
+	}
+	return nil
+}
+
+func recordInstallMetadata(dataDir string, deps catchInstallDeps) {
+	if err := deps.writeInstallMeta(dataDir); err != nil {
+		deps.logf("warning: failed to record install metadata: %v", err)
+	}
+}
+
+func startInstallTSNet(dataDir string, deps catchInstallDeps) (installTSNet, error) {
+	ts := deps.initTSNet(dataDir)
+	if ts == nil {
+		return nil, fmt.Errorf("failed to initialize tsnet")
+	}
+	return ts, nil
+}
+
+func selectCatchInstallMode(dataDir, tsnetHost string) catchInstallPlan {
+	return catchInstallPlan{
+		serviceName: catch.CatchService,
+		dataDir:     dataDir,
+		tsnetHost:   tsnetHost,
+	}
+}
+
+func validateCatchInstallPlan(plan catchInstallPlan) error {
+	if plan.serviceName == "" {
+		return fmt.Errorf("catch install service name is required")
+	}
+	return nil
+}
+
+func catchFileInstallerConfig(plan catchInstallPlan) catch.FileInstallerCfg {
+	return catch.FileInstallerCfg{
+		InstallerCfg: catch.InstallerCfg{
+			ServiceName: plan.serviceName,
+			Printer:     log.Printf,
+		},
+		Args: []string{
+			fmt.Sprintf("--data-dir=%v", plan.dataDir),
+			fmt.Sprintf("--tsnet-host=%v", plan.tsnetHost),
+		},
+	}
+}
+
+func newCatchServiceInstaller(cfg *catch.Config, installerCfg catch.FileInstallerCfg) (catchServiceInstaller, error) {
+	server := catch.NewUnstartedServer(cfg)
+	return catch.NewFileInstaller(server, installerCfg)
+}
+
+func writeCurrentExecutable(inst catchServiceInstaller, deps catchInstallDeps) error {
+	exePath, err := deps.executable()
 	if err != nil {
 		inst.Fail()
 		return fmt.Errorf("failed to get executable path: %w", err)
 	}
-	exe, err := os.ReadFile(exePath)
+	exe, err := deps.readFile(exePath)
 	if err != nil {
 		inst.Fail()
 		return fmt.Errorf("failed to read executable: %w", err)

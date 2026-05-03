@@ -49,6 +49,46 @@ func TestSplitRunPayloadArgsPreservesFlagScanningBehavior(t *testing.T) {
 	}
 }
 
+func TestSvcCommandFromArgs(t *testing.T) {
+	tests := []struct {
+		name            string
+		args            []string
+		wantCommand     string
+		wantCommandArgs []string
+		wantCheckArgs   []string
+	}{
+		{
+			name:            "default status",
+			args:            nil,
+			wantCommand:     "status",
+			wantCommandArgs: nil,
+			wantCheckArgs:   []string{"status"},
+		},
+		{
+			name:            "explicit command",
+			args:            []string{"logs", "--tail", "10"},
+			wantCommand:     "logs",
+			wantCommandArgs: []string{"--tail", "10"},
+			wantCheckArgs:   []string{"logs", "--tail", "10"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := svcCommandFromArgs(tt.args)
+			if got.Name != tt.wantCommand {
+				t.Fatalf("Name = %q, want %q", got.Name, tt.wantCommand)
+			}
+			if !reflect.DeepEqual(got.Args, tt.wantCommandArgs) {
+				t.Fatalf("Args = %#v, want %#v", got.Args, tt.wantCommandArgs)
+			}
+			if !reflect.DeepEqual(got.CheckArgs, tt.wantCheckArgs) {
+				t.Fatalf("CheckArgs = %#v, want %#v", got.CheckArgs, tt.wantCheckArgs)
+			}
+		})
+	}
+}
+
 func TestBuildStatusRowsHandlesAggregateAndEmptyServices(t *testing.T) {
 	results := []hostStatusData{
 		{
