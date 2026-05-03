@@ -40,6 +40,51 @@ func splitHostPort(t *testing.T, rawURL string) (string, int) {
 	return host, port
 }
 
+func FuzzJSONRPCMessages(f *testing.F) {
+	for _, seed := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"catch.Info"}`,
+		`{"jsonrpc":"2.0","id":"abc","method":"catch.ServiceInfo","params":{"service":"api"}}`,
+		`{"jsonrpc":"2.0","id":1,"result":{"found":true}}`,
+		`{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"method not found","data":"bad"}}`,
+		`{`,
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, raw string) {
+		if len(raw) > 4096 {
+			t.Skip()
+		}
+
+		var req Request
+		if err := json.Unmarshal([]byte(raw), &req); err == nil {
+			assertRawJSONValid(t, "request id", req.ID)
+			assertRawJSONValid(t, "request params", req.Params)
+			if _, err := json.Marshal(req); err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+		}
+
+		var resp Response
+		if err := json.Unmarshal([]byte(raw), &resp); err == nil {
+			assertRawJSONValid(t, "response id", resp.ID)
+			if _, err := json.Marshal(resp); err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+		}
+	})
+}
+
+func assertRawJSONValid(t *testing.T, name string, raw json.RawMessage) {
+	t.Helper()
+	if len(raw) == 0 {
+		return
+	}
+	if !json.Valid(raw) {
+		t.Fatalf("%s raw JSON is invalid: %q", name, string(raw))
+	}
+}
+
 func TestBuildRPCRequestPayloadEncodesParams(t *testing.T) {
 	payload, err := buildRPCRequestPayload("test.echo", 42, map[string]string{"msg": "hi"})
 	if err != nil {

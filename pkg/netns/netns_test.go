@@ -39,7 +39,7 @@ func TestWriteServiceNetNSOrdersBeforeDockerPrereqs(t *testing.T) {
 		t.Fatalf("MkdirAll runDir returned error: %v", err)
 	}
 
-	artifacts, err := WriteServiceNetNS(binDir, runDir, Service{ServiceName: "plex"})
+	artifacts, err := WriteServiceNetNS(binDir, runDir, Service{ServiceName: "media"})
 	if err != nil {
 		t.Fatalf("WriteServiceNetNS returned error: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestWriteServiceNetNSWaitsForNetworkOnlineForMacvlan(t *testing.T) {
 	}
 
 	artifacts, err := WriteServiceNetNS(binDir, runDir, Service{
-		ServiceName:   "plex",
+		ServiceName:   "media",
 		MacvlanParent: "vmbr0",
 	})
 	if err != nil {
@@ -132,7 +132,7 @@ func TestWriteServiceNetNSRequiresTailscaleUnit(t *testing.T) {
 	}
 
 	artifacts, err := WriteServiceNetNS(binDir, runDir, Service{
-		ServiceName:           "plex",
+		ServiceName:           "media",
 		TailscaleTAPInterface: "tap0",
 	})
 	if err != nil {
@@ -144,15 +144,15 @@ func TestWriteServiceNetNSRequiresTailscaleUnit(t *testing.T) {
 	}
 	got := string(raw)
 	for _, want := range []string{
-		"Requires=yeet-ns.service yeet-plex-ts.service\n",
-		"After=yeet-ns.service yeet-plex-ts.service\n",
+		"Requires=yeet-ns.service yeet-media-ts.service\n",
+		"After=yeet-ns.service yeet-media-ts.service\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("unit missing %q:\n%s", want, got)
 		}
 	}
-	if svc := (&Service{ServiceName: "plex"}).ServiceUnit(); svc != "yeet-plex-ns.service" {
-		t.Fatalf("ServiceUnit = %q, want yeet-plex-ns.service", svc)
+	if svc := (&Service{ServiceName: "media"}).ServiceUnit(); svc != "yeet-media-ns.service" {
+		t.Fatalf("ServiceUnit = %q, want yeet-media-ns.service", svc)
 	}
 }
 

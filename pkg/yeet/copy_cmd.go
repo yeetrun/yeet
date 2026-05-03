@@ -231,7 +231,10 @@ func trimRemoteDataPrefix(remotePath string) string {
 	if remotePath == "data" {
 		return ""
 	}
-	return strings.TrimPrefix(remotePath, "data/")
+	if strings.HasPrefix(remotePath, "data/") {
+		return strings.TrimLeft(strings.TrimPrefix(remotePath, "data/"), "/")
+	}
+	return remotePath
 }
 
 func cleanRemotePath(remotePath string) string {

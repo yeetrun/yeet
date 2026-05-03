@@ -12,6 +12,48 @@ import (
 	"github.com/shayne/yargs"
 )
 
+func FuzzParseRemoteArgs(f *testing.F) {
+	for _, seed := range []string{
+		"--net ts --ts-tags tag:a --publish 8080:80 svc",
+		"--pull commit svc -- --literal",
+		"--unknown value arg1",
+		"--lines 10 --follow svc",
+		"-p 9000:9000 --force payload",
+	} {
+		f.Add(seed)
+	}
+
+	f.Fuzz(func(t *testing.T, raw string) {
+		args := fuzzArgs(raw)
+
+		_, _, _ = ParseRun(args)
+		_, _, _, _ = ParseStage(args)
+		_, _, _ = ParseRemove(args)
+		_, _, _ = ParseLogs(args)
+		_, _, _ = ParseStatus(args)
+		_, _, _ = ParseInfo(args)
+	})
+}
+
+func fuzzArgs(raw string) []string {
+	const (
+		maxArgs   = 32
+		maxArgLen = 128
+	)
+	fields := strings.Fields(raw)
+	if len(fields) > maxArgs {
+		fields = fields[:maxArgs]
+	}
+	args := make([]string, len(fields))
+	for i, field := range fields {
+		if len(field) > maxArgLen {
+			field = field[:maxArgLen]
+		}
+		args[i] = field
+	}
+	return args
+}
+
 func TestParseRunFlagsAndArgs(t *testing.T) {
 	args := []string{
 		"--net", "ts",

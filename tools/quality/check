@@ -49,6 +49,9 @@ crap_report="$quality_dir/crap.txt"
 lint_report="$quality_dir/golangci.json"
 lint_text="$quality_dir/golangci.txt"
 
+echo "==> private info scan"
+tools/hooks/private-info-scan
+
 echo "==> go test with coverage"
 go test -coverprofile="$coverage_out" -covermode=atomic ./...
 go tool cover -func="$coverage_out" >"$coverage_summary"
@@ -115,3 +118,6 @@ fi
 if [[ "$lint_status" -ne 0 ]]; then
   echo "golangci-lint reported existing findings covered by the baseline."
 fi
+
+echo "==> quality hotspot ranking"
+go run ./tools/hotspots -write

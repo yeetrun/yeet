@@ -39,6 +39,12 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-commit]
+      - id: yeet-private-info-scan
+        name: yeet private info scan
+        entry: tools/hooks/private-info-scan
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
       - id: yeet-quality
         name: yeet coverage and quality gate
         entry: tools/hooks/quality

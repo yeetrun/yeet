@@ -7,11 +7,62 @@ package yeet
 import (
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func FuzzYeetStringNormalizers(f *testing.F) {
+	for _, seed := range [][2]string{
+		{"", "media@yeet-edge-a"},
+		{".", "media"},
+		{"./logs/app.txt", "@host"},
+		{"data/logs/app.txt", "service@"},
+		{"logs/../state/app.db", "svc@host@tail"},
+		{"../secret", "svc@@host"},
+		{"/etc/passwd", ""},
+		{"data/../secret", "svc@host"},
+	} {
+		f.Add(seed[0], seed[1])
+	}
+
+	f.Fuzz(func(t *testing.T, rawPath, serviceValue string) {
+		rel, _, err := normalizeRemotePath(rawPath)
+		if err == nil {
+			if strings.HasPrefix(rel, "/") {
+				t.Fatalf("normalized path %q is absolute for raw %q", rel, rawPath)
+			}
+			if rel == ".." || strings.HasPrefix(rel, "../") {
+				t.Fatalf("normalized path %q escapes remote root for raw %q", rel, rawPath)
+			}
+			if rel != "" && path.Clean(rel) != rel {
+				t.Fatalf("normalized path %q is not clean for raw %q", rel, rawPath)
+			}
+		}
+
+		service, host, ok := splitServiceHost(serviceValue)
+		if !ok {
+			if service != serviceValue {
+				t.Fatalf("service = %q, want original %q when not qualified", service, serviceValue)
+			}
+			if host != "" {
+				t.Fatalf("host = %q, want empty when not qualified", host)
+			}
+			return
+		}
+		if service == "" {
+			t.Fatalf("service is empty for qualified value %q", serviceValue)
+		}
+		if host == "" {
+			t.Fatalf("host is empty for qualified value %q", serviceValue)
+		}
+		if got := service + "@" + host; got != serviceValue {
+			t.Fatalf("round trip = %q, want %q", got, serviceValue)
+		}
+	})
+}
 
 func TestParseCopyArgs(t *testing.T) {
 	tests := []struct {
@@ -105,6 +156,7 @@ func TestNormalizeRemotePath(t *testing.T) {
 		{name: "slash suffix records directory hint", raw: "logs/", wantPath: "logs", wantDirHint: true},
 		{name: "trims dot slash", raw: "./logs/app.txt", wantPath: "logs/app.txt"},
 		{name: "strips data prefix", raw: "data/logs/app.txt", wantPath: "logs/app.txt"},
+		{name: "strips repeated slash after data prefix", raw: "data//logs/app.txt", wantPath: "logs/app.txt"},
 		{name: "cleans relative path", raw: "logs/../state/app.db", wantPath: "state/app.db"},
 		{name: "rejects absolute path", raw: "/etc/passwd", wantErr: "remote path must be relative"},
 		{name: "rejects parent escape", raw: "../secret", wantErr: "invalid remote path"},

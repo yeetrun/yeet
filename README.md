@@ -64,24 +64,37 @@ mise install
 mise run install-githooks
 ```
 
-Run the same coverage, CRAP, and lint baseline checks manually:
+Run the same deterministic baseline checks manually:
 
 ```bash
 mise run quality
 ```
 
-The quality gate runs `go test` with coverage, checks CRAP hotspots, and runs
-`golangci-lint` with complexity and bug-risk linters. Existing findings are
-tracked in `tools/quality/baseline/`; new findings fail the hook. When a
-hotspot is fixed, refresh the baseline intentionally:
+The quality gate scans for private local references, runs `go test` with
+coverage, checks CRAP hotspots, runs `golangci-lint` with complexity and
+bug-risk linters, and writes a churn/coverage hotspot report to
+`.tmp/quality/hotspots.txt`. Existing findings are tracked in
+`tools/quality/baseline/`; new findings fail the hook. When a hotspot is fixed,
+refresh the baseline intentionally:
 
 ```bash
 mise run quality:baseline
 ```
 
-The long-term quality destination is tracked separately as an industry-standard
-goal: at least 80% total coverage, zero CRAP hotspots, and zero golangci
-findings. Check progress with:
+Heavier empirical checks are available outside the normal pre-commit path:
+
+```bash
+mise run race
+mise run fuzz
+mise run mutation
+mise run hotspots
+```
+
+The long-term quality destination is tracked separately as a heavy
+industry-standard goal: at least 80% total coverage, zero CRAP hotspots, zero
+golangci findings, 80% mutation score on the bounded mutation target set, the
+race detector passing, and at least four active fuzz targets. Check progress
+with:
 
 ```bash
 mise run quality:goal
