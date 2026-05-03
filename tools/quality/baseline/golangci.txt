@@ -209,7 +209,6 @@ errcheck|pkg/svc/systemd.go|(*SystemdService).Uninstall|source:s.run("disable", 
 errcheck|pkg/svc/systemd.go|(*SystemdService).monitorTailscale|source:defer bus.Close()|Error return value of `bus.Close` is not checked
 errcheck|pkg/svc/systemd.go|(*SystemdUnit).writeOutService|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/svc/systemd.go|(*SystemdUnit).writeOutTimer|source:defer f.Close()|Error return value of `f.Close` is not checked
-errcheck|pkg/targz/targz.go|ReadFile|source:defer t.Close()|Error return value of `t.Close` is not checked
 errcheck|pkg/tui/spinner.go|(*Spinner).Start|source:fmt.Fprint(s.out, "\x1b[?25l")|Error return value of `fmt.Fprint` is not checked
 errcheck|pkg/tui/spinner.go|(*Spinner).Stop|source:fmt.Fprint(s.out, "\x1b[?25h")|Error return value of `fmt.Fprint` is not checked
 errcheck|pkg/tui/spinner.go|(*Spinner).Stop|source:fmt.Fprintln(s.out)|Error return value of `fmt.Fprintln` is not checked

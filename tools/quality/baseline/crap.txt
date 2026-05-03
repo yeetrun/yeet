@@ -106,7 +106,6 @@ crap|pkg/svc/systemd.go|(*SystemdService).Install
 crap|pkg/svc/systemd.go|(*SystemdService).Stop
 crap|pkg/svc/systemd.go|(*SystemdService).Uninstall
 crap|pkg/svc/systemd.go|(*SystemdService).monitorTailscale
-crap|pkg/targz/targz.go|ReadFile
 crap|pkg/yeet/copy_cmd.go|copyFromRemote
 crap|pkg/yeet/copy_cmd.go|copyToRemote
 crap|pkg/yeet/copy_cmd.go|parseCopyArgs

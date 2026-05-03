@@ -36,12 +36,16 @@ func New(r io.Reader) (*Reader, error) {
 }
 
 // ReadFile calls f for each entry in the tarball.
-func ReadFile(r io.Reader, f func(*tar.Header, io.Reader) error) error {
+func ReadFile(r io.Reader, f func(*tar.Header, io.Reader) error) (retErr error) {
 	t, err := New(r)
 	if err != nil {
 		return err
 	}
-	defer t.Close()
+	defer func() {
+		if closeErr := t.Close(); retErr == nil {
+			retErr = closeErr
+		}
+	}()
 
 	for {
 		header, err := t.Next()
