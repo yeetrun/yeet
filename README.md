@@ -79,6 +79,14 @@ hotspot is fixed, refresh the baseline intentionally:
 mise run quality:baseline
 ```
 
+The long-term quality destination is tracked separately as an industry-standard
+goal: at least 80% total coverage, zero CRAP hotspots, and zero golangci
+findings. Check progress with:
+
+```bash
+mise run quality:goal
+```
+
 ## High-Level Overview
 
 yeet is a lightweight client + server setup for deploying and managing services on remote Linux machines. The primary use case is running Docker images on a host over Tailscale with a tiny workflow (`yeet run <svc> <image>`).
