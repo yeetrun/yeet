@@ -216,13 +216,21 @@ func renderInfoPlain(w io.Writer, service, host string, hostInfoErr error, hostI
 		if len(section.Rows) == 0 {
 			continue
 		}
-		fmt.Fprintln(w, section.Title)
+		if _, err := fmt.Fprintln(w, section.Title); err != nil {
+			return err
+		}
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 		for _, row := range section.Rows {
-			fmt.Fprintf(tw, "  %s:\t%s\n", row.Label, row.Value)
+			if _, err := fmt.Fprintf(tw, "  %s:\t%s\n", row.Label, row.Value); err != nil {
+				return err
+			}
 		}
-		_ = tw.Flush()
-		fmt.Fprintln(w)
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
 	}
 	return nil
 }

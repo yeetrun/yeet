@@ -55,7 +55,6 @@ crap|pkg/catch/tty_install.go|(*ttyExecer).stageCmdFunc
 crap|pkg/catch/tty_install.go|normalizeCopyRelPath
 crap|pkg/catch/tty_install.go|parseCopyExecArgs
 crap|pkg/catch/tty_ops.go|(*ttyExecer).ipCmdFunc
-crap|pkg/catch/tty_ops.go|(*ttyExecer).mountCmdFunc
 crap|pkg/catch/tty_ops.go|(*ttyExecer).umountCmdFunc
 crap|pkg/catch/tty_ops.go|tailscaleLatestVersionForTrack
 crap|pkg/catch/tty_service.go|(*systemdServiceRunner).Logs
@@ -122,8 +121,6 @@ crap|pkg/yeet/info_cmd.go|renderClientSection
 crap|pkg/yeet/info_cmd.go|renderImagesSection
 crap|pkg/yeet/info_cmd.go|renderNetworkSection
 crap|pkg/yeet/info_cmd.go|renderRuntimeSection
-crap|pkg/yeet/info_cmd.go|renderServerSection
-crap|pkg/yeet/info_cmd.go|renderServiceSection
 crap|pkg/yeet/info_cmd.go|summarizeStatus
 crap|pkg/yeet/init.go|HandleInit
 crap|pkg/yeet/init.go|buildCatch

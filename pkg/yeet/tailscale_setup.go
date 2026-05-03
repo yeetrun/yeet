@@ -75,24 +75,32 @@ func HandleTailscale(ctx context.Context, args []string) error {
 	if !resp.Verified {
 		return fmt.Errorf("tailscale secret written but verification failed")
 	}
-	fmt.Fprintf(os.Stdout, "Tailscale client secret stored on %s (%s).\n", Host(), resp.Path)
-	return nil
+	_, err = fmt.Fprintf(os.Stdout, "Tailscale client secret stored on %s (%s).\n", Host(), resp.Path)
+	return err
 }
 
 func promptTailscaleClientSecret(out io.Writer, in io.Reader) (string, error) {
-	fmt.Fprintln(out, "Tailscale OAuth setup")
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "1) Create a tag for yeet services:")
-	fmt.Fprintln(out, "   https://login.tailscale.com/admin/acls/visual/tags")
-	fmt.Fprintln(out, "   Example: tag:app")
-	fmt.Fprintln(out, "2) Create a trust credential (OAuth client):")
-	fmt.Fprintln(out, "   https://login.tailscale.com/admin/settings/trust-credentials")
-	fmt.Fprintln(out, "   - Scope: Devices -> Core (write)")
-	fmt.Fprintln(out, "   - Tags: select the tag you created (e.g. tag:app)")
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Client secret:")
-	fmt.Fprintln(out, "Paste the client secret and press Enter when done.")
-	fmt.Fprint(out, "> ")
+	for _, line := range []string{
+		"Tailscale OAuth setup",
+		"",
+		"1) Create a tag for yeet services:",
+		"   https://login.tailscale.com/admin/acls/visual/tags",
+		"   Example: tag:app",
+		"2) Create a trust credential (OAuth client):",
+		"   https://login.tailscale.com/admin/settings/trust-credentials",
+		"   - Scope: Devices -> Core (write)",
+		"   - Tags: select the tag you created (e.g. tag:app)",
+		"",
+		"Client secret:",
+		"Paste the client secret and press Enter when done.",
+	} {
+		if _, err := fmt.Fprintln(out, line); err != nil {
+			return "", err
+		}
+	}
+	if _, err := fmt.Fprint(out, "> "); err != nil {
+		return "", err
+	}
 
 	reader := bufio.NewReader(in)
 	line, err := reader.ReadString('\n')
