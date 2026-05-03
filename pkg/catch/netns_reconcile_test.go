@@ -40,21 +40,38 @@ func addTestServices(t *testing.T, s *Server, services ...db.Service) {
 	}
 }
 
-func captureLogs(t *testing.T) *bytes.Buffer {
+type safeLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *safeLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *safeLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func captureLogs(t *testing.T) *safeLogBuffer {
 	t.Helper()
-	var buf bytes.Buffer
+	buf := &safeLogBuffer{}
 	prevWriter := log.Writer()
 	prevFlags := log.Flags()
-	log.SetOutput(&buf)
+	log.SetOutput(buf)
 	log.SetFlags(0)
 	t.Cleanup(func() {
 		log.SetOutput(prevWriter)
 		log.SetFlags(prevFlags)
 	})
-	return &buf
+	return buf
 }
 
-func waitForLogContains(t *testing.T, buf *bytes.Buffer, needle string) string {
+func waitForLogContains(t *testing.T, buf *safeLogBuffer, needle string) string {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
@@ -421,8 +438,9 @@ func TestServerStartLogsRestartedNetNSService(t *testing.T) {
 		t.Fatal("timed out waiting for reconciliation to run")
 	}
 
-	if !strings.Contains(logs.String(), `reconciled stale docker netns for service "docker-netns"; restarted containers`) {
-		t.Fatalf("missing restarted-service log:\n%s", logs.String())
+	out := waitForLogContains(t, logs, `reconciled stale docker netns for service "docker-netns"; restarted containers`)
+	if !strings.Contains(out, `reconciled stale docker netns for service "docker-netns"; restarted containers`) {
+		t.Fatalf("missing restarted-service log:\n%s", out)
 	}
 }
 

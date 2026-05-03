@@ -12,13 +12,13 @@ path.
 
 Today the main `svc` netns path is implemented by:
 
-- [pkg/netns/netns-scripts/yeet-ns](/Users/shayne/code/yeet/pkg/netns/netns-scripts/yeet-ns)
-- [pkg/netns/netns-scripts/service-ns](/Users/shayne/code/yeet/pkg/netns/netns-scripts/service-ns)
-- [pkg/svc/systemd.go](/Users/shayne/code/yeet/pkg/svc/systemd.go)
-- [pkg/catch/installer_file.go](/Users/shayne/code/yeet/pkg/catch/installer_file.go)
+- [pkg/netns/netns-scripts/yeet-ns](../../../pkg/netns/netns-scripts/yeet-ns)
+- [pkg/netns/netns-scripts/service-ns](../../../pkg/netns/netns-scripts/service-ns)
+- [pkg/svc/systemd.go](../../../pkg/svc/systemd.go)
+- [pkg/catch/installer_file.go](../../../pkg/catch/installer_file.go)
 
 That path currently installs firewall rules by appending directly into host
-chains with bare `iptables` calls. On the inspected live host, `pve1`, that
+chains with bare `iptables` calls. On the inspected live host, `edge-a`, that
 path delivered line-rate throughput on a `2.5GbE` link, so the design target is
 not a new datapath. The design target is cleaner firewall ownership and better
 alignment with modern Debian and Ubuntu defaults.
@@ -38,7 +38,7 @@ alignment with modern Debian and Ubuntu defaults.
    `svc` subnet model stay as-is.
 6. The design must support Debian and Ubuntu systems.
 7. Acceptance must include upgrading `catch` and using `yeet` to deploy to
-   `root@pve1` to confirm the new code works end to end.
+   `admin@edge-a` to confirm the new code works end to end.
 
 ### Non-Goals
 
@@ -165,8 +165,8 @@ Add a small firewall abstraction in Go that is responsible for:
 
 The existing namespace topology setup remains where it is today:
 
-- [pkg/netns/netns-scripts/yeet-ns](/Users/shayne/code/yeet/pkg/netns/netns-scripts/yeet-ns)
-- [pkg/netns/netns-scripts/service-ns](/Users/shayne/code/yeet/pkg/netns/netns-scripts/service-ns)
+- [pkg/netns/netns-scripts/yeet-ns](../../../pkg/netns/netns-scripts/yeet-ns)
+- [pkg/netns/netns-scripts/service-ns](../../../pkg/netns/netns-scripts/service-ns)
 
 The firewall behavior should be moved out of ad hoc bare `iptables` shell
 snippets and into a backend-aware control path, even if the shell entrypoints
@@ -209,9 +209,9 @@ Add automated coverage for:
 
 ### Live Validation
 
-Acceptance must include end-to-end testing against the real host `pve1`:
+Acceptance must include end-to-end testing against the real host `edge-a`:
 
-1. Upgrade `catch` on `root@pve1` with the new code.
+1. Upgrade `catch` on `admin@edge-a` with the new code.
 2. Use `yeet` to deploy or update a service that exercises the `svc` netns path.
 3. Verify namespace creation, routes, and yeet-owned firewall objects on the
    host.
@@ -253,7 +253,7 @@ This design is satisfied when:
 3. A legacy-only host still works with a warning.
 4. Yeet-owned firewall objects are cleanly isolated from non-yeet rules.
 5. Repeated install or restart does not duplicate yeet firewall state.
-6. `catch` can be upgraded and a real service can be deployed to `pve1` using
+6. `catch` can be upgraded and a real service can be deployed to `edge-a` using
    `yeet`, with the resulting service network confirmed to function correctly.
 7. Throughput on the tested path remains in line with the host's physical link
    baseline.

@@ -5,6 +5,9 @@
 /Makefile
 /result
 /.tmp
+/.gomu_history.json
+/mutation-report.json
+/mutation-report.txt
 go.work
 go.work.*
 AGENTS.local.md

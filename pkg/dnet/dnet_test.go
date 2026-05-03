@@ -173,7 +173,7 @@ func TestDesiredPortForwardsForNetNSAggregatesAndDedupes(t *testing.T) {
 	data := &db.Data{
 		DockerNetworks: map[string]*db.DockerNetwork{
 			"active": {
-				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				NetNS: "/var/run/netns/yeet-demoapp-ns",
 				Endpoints: map[string]*db.DockerEndpoint{
 					"web": {EndpointID: "web", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
 				},
@@ -182,7 +182,7 @@ func TestDesiredPortForwardsForNetNSAggregatesAndDedupes(t *testing.T) {
 				},
 			},
 			"duplicate": {
-				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				NetNS: "/var/run/netns/yeet-demoapp-ns",
 				Endpoints: map[string]*db.DockerEndpoint{
 					"web-copy": {EndpointID: "web-copy", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
 				},
@@ -191,7 +191,7 @@ func TestDesiredPortForwardsForNetNSAggregatesAndDedupes(t *testing.T) {
 				},
 			},
 			"stale": {
-				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				NetNS: "/var/run/netns/yeet-demoapp-ns",
 				Endpoints: map[string]*db.DockerEndpoint{
 					"old": {EndpointID: "old", IPv4: netip.MustParsePrefix("172.21.0.99/16")},
 				},
@@ -211,7 +211,7 @@ func TestDesiredPortForwardsForNetNSAggregatesAndDedupes(t *testing.T) {
 		},
 	}
 
-	got := desiredPortForwardsForNetNS(data, "/var/run/netns/yeet-hoarder-ns")
+	got := desiredPortForwardsForNetNS(data, "/var/run/netns/yeet-demoapp-ns")
 	want := []portForwardRule{
 		{Proto: "tcp", HostPort: 3000, TargetIP: "172.21.0.4", TargetPort: 3000},
 	}
@@ -265,8 +265,8 @@ func TestDesiredPortForwardsByNetNSGroupsDeterministically(t *testing.T) {
 func TestReconcilePortForwardsFromDataGroupsExistingNetNS(t *testing.T) {
 	data := &db.Data{
 		DockerNetworks: map[string]*db.DockerNetwork{
-			"hoarder": {
-				NetNS: "/var/run/netns/yeet-hoarder-ns",
+			"demoapp": {
+				NetNS: "/var/run/netns/yeet-demoapp-ns",
 				Endpoints: map[string]*db.DockerEndpoint{
 					"web": {EndpointID: "web", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
 				},
@@ -287,7 +287,7 @@ func TestReconcilePortForwardsFromDataGroupsExistingNetNS(t *testing.T) {
 	}
 
 	exists := func(path string) (bool, error) {
-		return path == "/var/run/netns/yeet-hoarder-ns", nil
+		return path == "/var/run/netns/yeet-demoapp-ns", nil
 	}
 	var syncs []capturedPortForwardSync
 	sync := func(netns string, desired []portForwardRule) error {
@@ -303,7 +303,7 @@ func TestReconcilePortForwardsFromDataGroupsExistingNetNS(t *testing.T) {
 	}
 	want := []capturedPortForwardSync{
 		{
-			netns: "/var/run/netns/yeet-hoarder-ns",
+			netns: "/var/run/netns/yeet-demoapp-ns",
 			rules: []portForwardRule{
 				{Proto: "tcp", HostPort: 3000, TargetIP: "172.21.0.4", TargetPort: 3000},
 			},
@@ -601,7 +601,7 @@ func TestCreateEndpointReplaysAggregateNetNSRules(t *testing.T) {
 	p := newTestPlugin(t, &db.Data{
 		DockerNetworks: map[string]*db.DockerNetwork{
 			"active": {
-				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				NetNS: "/var/run/netns/yeet-demoapp-ns",
 				Endpoints: map[string]*db.DockerEndpoint{
 					"web": {EndpointID: "web", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
 				},
@@ -610,7 +610,7 @@ func TestCreateEndpointReplaysAggregateNetNSRules(t *testing.T) {
 				},
 			},
 			"sidecar-network": {
-				NetNS:     "/var/run/netns/yeet-hoarder-ns",
+				NetNS:     "/var/run/netns/yeet-demoapp-ns",
 				Endpoints: map[string]*db.DockerEndpoint{},
 				PortMap:   map[string]*db.EndpointPort{},
 			},
@@ -634,7 +634,7 @@ func TestCreateEndpointReplaysAggregateNetNSRules(t *testing.T) {
 		t.Fatalf("sync count = %d, want 1", len(syncs))
 	}
 	want := capturedPortForwardSync{
-		netns: "/var/run/netns/yeet-hoarder-ns",
+		netns: "/var/run/netns/yeet-demoapp-ns",
 		rules: []portForwardRule{
 			{Proto: "tcp", HostPort: 3000, TargetIP: "172.21.0.4", TargetPort: 3000},
 		},
@@ -648,15 +648,15 @@ func TestProgramExternalConnectivityUpdatesPortMapAndReplaysAggregateRules(t *te
 	var syncs []capturedPortForwardSync
 	p := newTestPlugin(t, &db.Data{
 		DockerNetworks: map[string]*db.DockerNetwork{
-			"hoarder": {
-				NetNS: "/var/run/netns/yeet-hoarder-ns",
+			"demoapp": {
+				NetNS: "/var/run/netns/yeet-demoapp-ns",
 				Endpoints: map[string]*db.DockerEndpoint{
 					"web": {EndpointID: "web", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
 				},
 				PortMap: map[string]*db.EndpointPort{},
 			},
 			"metrics": {
-				NetNS: "/var/run/netns/yeet-hoarder-ns",
+				NetNS: "/var/run/netns/yeet-demoapp-ns",
 				Endpoints: map[string]*db.DockerEndpoint{
 					"api": {EndpointID: "api", IPv4: netip.MustParsePrefix("172.21.0.5/16")},
 				},
@@ -668,7 +668,7 @@ func TestProgramExternalConnectivityUpdatesPortMapAndReplaysAggregateRules(t *te
 	}, &syncs)
 
 	rr := postJSON(t, p.ProgramExternalConnectivity, map[string]any{
-		"NetworkID":  "hoarder",
+		"NetworkID":  "demoapp",
 		"EndpointID": "web",
 		"Options": map[string]any{
 			"com.docker.network.portmap": []map[string]any{
@@ -694,7 +694,7 @@ func TestProgramExternalConnectivityUpdatesPortMapAndReplaysAggregateRules(t *te
 	if err != nil {
 		t.Fatalf("db.Get: %v", err)
 	}
-	got := dv.AsStruct().DockerNetworks["hoarder"].PortMap
+	got := dv.AsStruct().DockerNetworks["demoapp"].PortMap
 	want := map[string]*db.EndpointPort{
 		"6/3000": {EndpointID: "web", Port: 3000},
 	}
@@ -1153,8 +1153,8 @@ func TestRevokeExternalConnectivityRemovesPortMapAndReplaysAggregateRules(t *tes
 	var syncs []capturedPortForwardSync
 	p := newTestPlugin(t, &db.Data{
 		DockerNetworks: map[string]*db.DockerNetwork{
-			"hoarder": {
-				NetNS: "/var/run/netns/yeet-hoarder-ns",
+			"demoapp": {
+				NetNS: "/var/run/netns/yeet-demoapp-ns",
 				Endpoints: map[string]*db.DockerEndpoint{
 					"web": {EndpointID: "web", IPv4: netip.MustParsePrefix("172.21.0.4/16")},
 				},
@@ -1166,7 +1166,7 @@ func TestRevokeExternalConnectivityRemovesPortMapAndReplaysAggregateRules(t *tes
 	}, &syncs)
 
 	rr := postJSON(t, p.RevokeExternalConnectivity, map[string]any{
-		"NetworkID":  "hoarder",
+		"NetworkID":  "demoapp",
 		"EndpointID": "web",
 	})
 	if rr.Code != http.StatusOK {
@@ -1183,7 +1183,7 @@ func TestRevokeExternalConnectivityRemovesPortMapAndReplaysAggregateRules(t *tes
 	if err != nil {
 		t.Fatalf("db.Get: %v", err)
 	}
-	if got := dv.AsStruct().DockerNetworks["hoarder"].PortMap; len(got) != 0 {
+	if got := dv.AsStruct().DockerNetworks["demoapp"].PortMap; len(got) != 0 {
 		t.Fatalf("port map after revoke = %#v, want empty", got)
 	}
 }
@@ -1192,8 +1192,8 @@ func TestRevokeExternalConnectivityUnknownEndpointIsIdempotent(t *testing.T) {
 	var syncs []capturedPortForwardSync
 	p := newTestPlugin(t, &db.Data{
 		DockerNetworks: map[string]*db.DockerNetwork{
-			"hoarder": {
-				NetNS:     "/var/run/netns/yeet-hoarder-ns",
+			"demoapp": {
+				NetNS:     "/var/run/netns/yeet-demoapp-ns",
 				Endpoints: map[string]*db.DockerEndpoint{},
 				PortMap:   map[string]*db.EndpointPort{},
 			},
@@ -1201,7 +1201,7 @@ func TestRevokeExternalConnectivityUnknownEndpointIsIdempotent(t *testing.T) {
 	}, &syncs)
 
 	rr := postJSON(t, p.RevokeExternalConnectivity, map[string]any{
-		"NetworkID":  "hoarder",
+		"NetworkID":  "demoapp",
 		"EndpointID": "missing",
 	})
 	if rr.Code != http.StatusOK {

@@ -84,7 +84,7 @@ func TestDockerPrereqsInstallerWritesTargetAndDockerDropIn(t *testing.T) {
 		},
 	}
 
-	if err := installer.install([]string{"yeet-plex-ns.service"}); err != nil {
+	if err := installer.install([]string{"yeet-media-ns.service"}); err != nil {
 		t.Fatalf("install returned error: %v", err)
 	}
 
@@ -92,7 +92,7 @@ func TestDockerPrereqsInstallerWritesTargetAndDockerDropIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read target returned error: %v", err)
 	}
-	if !strings.Contains(string(targetRaw), "Wants=catch.service yeet-ns.service yeet-plex-ns.service\n") {
+	if !strings.Contains(string(targetRaw), "Wants=catch.service yeet-ns.service yeet-media-ns.service\n") {
 		t.Fatalf("target missing service unit:\n%s", string(targetRaw))
 	}
 	dropInRaw, err := os.ReadFile(filepath.Join(root, "etc/systemd/system/docker.service.d/yeet.conf"))

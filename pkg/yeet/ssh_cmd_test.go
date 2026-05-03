@@ -22,8 +22,8 @@ func TestSSHTarget(t *testing.T) {
 		want string
 	}{
 		{name: "host only", host: "catch", want: "catch"},
-		{name: "install user", host: "catch", info: serverInfo{InstallUser: "root"}, want: "root@catch"},
-		{name: "trim user", host: "catch", info: serverInfo{InstallUser: " root "}, want: "root@catch"},
+		{name: "install user", host: "catch", info: serverInfo{InstallUser: "admin"}, want: "admin@catch"},
+		{name: "trim user", host: "catch", info: serverInfo{InstallUser: " admin "}, want: "admin@catch"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -200,7 +200,7 @@ version = 1
 
 [[services]]
 name = "api"
-host = "hetz"
+host = "edge-b"
 `), 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -221,8 +221,8 @@ host = "hetz"
 	if err != nil {
 		t.Fatalf("resolveSSHHost: %v", err)
 	}
-	if got != "hetz" {
-		t.Fatalf("host = %q, want hetz", got)
+	if got != "edge-b" {
+		t.Fatalf("host = %q, want edge-b", got)
 	}
 }
 
@@ -260,7 +260,7 @@ func TestServiceDataDirRequiresPathInfo(t *testing.T) {
 
 func TestServiceShellCommandFromResponseNormalizesQualifiedService(t *testing.T) {
 	gotCommand, gotOptions, err := serviceShellCommandFromResponse(
-		"api@hetz",
+		"api@edge-b",
 		serverInfo{RootDir: "/srv/yeet"},
 		catchrpc.ServiceInfoResponse{Found: true},
 		[]string{"ls", "-la"},
@@ -341,8 +341,8 @@ func TestBuildServiceSSHCommand(t *testing.T) {
 }
 
 func TestBuildSSHArgs(t *testing.T) {
-	got := buildSSHArgs([]string{"-p", "2222"}, "root@host", []string{"uptime"})
-	want := []string{"-p", "2222", "root@host", "uptime"}
+	got := buildSSHArgs([]string{"-p", "2222"}, "admin@host", []string{"uptime"})
+	want := []string{"-p", "2222", "admin@host", "uptime"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildSSHArgs = %#v, want %#v", got, want)
 	}

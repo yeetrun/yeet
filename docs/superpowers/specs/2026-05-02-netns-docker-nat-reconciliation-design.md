@@ -33,7 +33,7 @@ namespace-local NAT rules drifted or were flushed.
 The Docker network plugin currently flushes namespace-wide NAT chains but
 computes the desired rules from one Docker network at a time.
 
-In [pkg/dnet/dnet.go](/Users/shayne/code/yeet/pkg/dnet/dnet.go),
+In [pkg/dnet/dnet.go](../../../pkg/dnet/dnet.go),
 `syncNetNSPortForwards` owns the whole `YEET_PREROUTING` and `YEET_OUTPUT`
 chains inside a service netns. It flushes both chains before appending desired
 DNAT rules.

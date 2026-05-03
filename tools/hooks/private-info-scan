@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Copyright (c) 2026 AUTHORS All rights reserved.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$repo_root"
+
+go run ./tools/privatescan "$repo_root"

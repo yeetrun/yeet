@@ -588,7 +588,12 @@ func TestApplyTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
 	t.Setenv("SYSTEMCTL_LOG", logPath)
 
 	var out bytes.Buffer
-	execer := &ttyExecer{ctx: context.Background(), s: server, sn: service, rw: &out}
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  service,
+		rw:  readWriter{Reader: strings.NewReader(""), Writer: &out},
+	}
 	if err := execer.applyTSUpdate(current, latest); err != nil {
 		t.Fatalf("applyTSUpdate: %v", err)
 	}
@@ -661,7 +666,13 @@ func TestApplyTSUpdatePropagatesRestartFailure(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	err := (&ttyExecer{ctx: context.Background(), s: server, sn: "svc", rw: &bytes.Buffer{}}).applyTSUpdate("1.92.3", latest)
+	var out bytes.Buffer
+	err := (&ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  "svc",
+		rw:  readWriter{Reader: strings.NewReader(""), Writer: &out},
+	}).applyTSUpdate("1.92.3", latest)
 	if err == nil || !strings.Contains(err.Error(), "failed to restart tailscaled service") {
 		t.Fatalf("applyTSUpdate error = %v", err)
 	}

@@ -49,12 +49,32 @@ go tool cover -func=.tmp/quality/coverage.out | tee .tmp/quality/coverage.txt
 description = "Run tests, coverage, CRAP, and lint quality gates"
 run = "tools/quality/check"
 
+[tasks.race]
+description = "Run the Go test suite with the race detector"
+run = "tools/quality/race"
+
+[tasks.fuzz]
+description = "Run active Go fuzz targets for a bounded time"
+run = "tools/quality/fuzz"
+
+[tasks.mutation]
+description = "Run bounded mutation testing targets"
+run = "tools/quality/mutation"
+
+[tasks."mutation:baseline"]
+description = "Refresh the bounded mutation testing baseline"
+run = "tools/quality/mutation --update-baseline"
+
+[tasks.hotspots]
+description = "Rank code-quality hotspots by churn, coverage, CRAP, and lint signals"
+run = "go run ./tools/hotspots -write"
+
 [tasks.vuln]
 description = "Run the Go vulnerability scanner"
 run = "govulncheck ./..."
 
 [tasks."quality:goal"]
-description = "Run the industry-standard quality goal check"
+description = "Run the heavy industry-standard quality goal check"
 run = "tools/quality/goal"
 
 [tasks."quality:baseline"]
