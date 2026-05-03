@@ -287,7 +287,6 @@ func copyToRemote(req copyRequest) error {
 		if err != nil {
 			return err
 		}
-		defer f.Close()
 		reader = f
 		args = []string{"copy", "--to", destRel}
 		if req.Compress {
@@ -295,10 +294,14 @@ func copyToRemote(req copyRequest) error {
 		}
 	}
 
-	defer reader.Close()
 	counter := &countingReader{r: reader}
-	if err := execRemoteFn(context.Background(), dst.Service, args, counter, false); err != nil {
+	err = execRemoteFn(context.Background(), dst.Service, args, counter, false)
+	closeErr := reader.Close()
+	if err != nil {
 		return err
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	report.Finish(counter.N(), 0)
 	return nil
@@ -327,7 +330,7 @@ func applyCopyHostOverride(req copyRequest, cfg *ProjectConfig) error {
 	return nil
 }
 
-func copyFromRemote(req copyRequest) error {
+func copyFromRemote(req copyRequest) (err error) {
 	src := req.Src
 	if !src.Remote || src.Service == "" {
 		return fmt.Errorf("copy source must be svc:path")
@@ -353,7 +356,7 @@ func copyFromRemote(req copyRequest) error {
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
+	defer captureCloseError(&err, reader)
 
 	report := newCopyReport(req.Verbose)
 	report.Start("receiving")
@@ -386,7 +389,7 @@ func copyFromRemote(req copyRequest) error {
 			<-done
 			return err
 		}
-		defer gz.Close()
+		defer captureCloseError(&err, gz)
 		payload = gz
 	}
 
@@ -405,7 +408,7 @@ func copyFromRemote(req copyRequest) error {
 			<-done
 			return err
 		}
-		defer os.RemoveAll(stageDir)
+		defer captureRemoveAllError(&err, stageDir)
 		baseName := base
 		if baseName == "" {
 			baseName = filepath.Base(staged)
@@ -432,7 +435,7 @@ func copyFromRemote(req copyRequest) error {
 			<-done
 			return err
 		}
-		defer os.RemoveAll(stageDir)
+		defer captureRemoveAllError(&err, stageDir)
 		if err := copyutil.ExtractTarWithOptions(payload, stageDir, copyutil.ExtractOptions{OnEntry: report.OnEntry}); err != nil {
 			<-done
 			return err
@@ -451,6 +454,18 @@ func copyFromRemote(req copyRequest) error {
 	}
 	report.Finish(0, counter.N())
 	return nil
+}
+
+func captureCloseError(errp *error, closer io.Closer) {
+	if closeErr := closer.Close(); *errp == nil && closeErr != nil {
+		*errp = closeErr
+	}
+}
+
+func captureRemoveAllError(errp *error, path string) {
+	if removeErr := os.RemoveAll(path); *errp == nil && removeErr != nil {
+		*errp = removeErr
+	}
 }
 
 func tarDirectoryStream(src string, prefix string, compress bool, observer copyutil.TarObserver) (io.ReadCloser, error) {
@@ -521,7 +536,7 @@ func (r *copyReport) Start(direction string) {
 	if !r.verbose {
 		return
 	}
-	fmt.Fprintf(os.Stdout, "%s incremental file list\n", direction)
+	_, _ = fmt.Fprintf(os.Stdout, "%s incremental file list\n", direction)
 	r.startedAt = time.Now()
 }
 
@@ -537,7 +552,7 @@ func (r *copyReport) OnEntry(entry copyutil.TarEntry) {
 		name += "/"
 	}
 	if name != "" {
-		fmt.Fprintln(os.Stdout, name)
+		_, _ = fmt.Fprintln(os.Stdout, name)
 	}
 }
 
@@ -554,8 +569,8 @@ func (r *copyReport) Finish(sentBytes, receivedBytes int64) {
 	}
 	totalBytes := sentBytes + receivedBytes
 	rate := int64(float64(totalBytes) / elapsed)
-	fmt.Fprintln(os.Stdout, "")
-	fmt.Fprintf(os.Stdout, "sent %s bytes  received %s bytes  %s bytes/sec\n",
+	_, _ = fmt.Fprintln(os.Stdout, "")
+	_, _ = fmt.Fprintf(os.Stdout, "sent %s bytes  received %s bytes  %s bytes/sec\n",
 		formatBytesShort(sentBytes),
 		formatBytesShort(receivedBytes),
 		formatBytesShort(rate),
@@ -564,7 +579,7 @@ func (r *copyReport) Finish(sentBytes, receivedBytes int64) {
 	if totalBytes > 0 {
 		speedup = float64(r.total) / float64(totalBytes)
 	}
-	fmt.Fprintf(os.Stdout, "total size is %s  speedup is %.2f\n", formatBytesShort(r.total), speedup)
+	_, _ = fmt.Fprintf(os.Stdout, "total size is %s  speedup is %.2f\n", formatBytesShort(r.total), speedup)
 }
 
 func formatBytesShort(n int64) string {

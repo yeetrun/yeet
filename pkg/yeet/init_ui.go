@@ -201,7 +201,7 @@ func (u *initUI) Info(msg string) {
 	}
 	u.stopSpinner(true)
 	if u.enabled {
-		fmt.Fprintln(u.out, msg)
+		_, _ = fmt.Fprintln(u.out, msg)
 		return
 	}
 	u.plain.Info(msg)
@@ -217,7 +217,7 @@ func (u *initUI) Warn(msg string) {
 	}
 	u.stopSpinner(true)
 	if u.enabled {
-		fmt.Fprintln(u.out, u.color.Wrap(tui.ColorYellow, msg))
+		_, _ = fmt.Fprintln(u.out, u.color.Wrap(tui.ColorYellow, msg))
 		return
 	}
 	u.plain.Warn(msg)
@@ -233,7 +233,7 @@ func (u *initUI) printHeader() {
 	if host != "" && host != remote {
 		label = fmt.Sprintf("%s (host=%s)", label, host)
 	}
-	fmt.Fprintf(u.out, "[+] %s\n", strings.TrimSpace(label))
+	_, _ = fmt.Fprintf(u.out, "[+] %s\n", strings.TrimSpace(label))
 }
 
 func (u *initUI) newSpinner(text string) *tui.Spinner {
@@ -271,7 +271,7 @@ func (u *initUI) printStatus(status, name, detail string) {
 	if detail != "" {
 		line = fmt.Sprintf("%s (%s)", line, detail)
 	}
-	fmt.Fprintln(u.out, line)
+	_, _ = fmt.Fprintln(u.out, line)
 }
 
 type plainInitUI struct {
@@ -297,18 +297,18 @@ func (p *plainInitUI) MarkHeaderDone() {
 
 func (p *plainInitUI) Info(label string) {
 	p.Header()
-	fmt.Fprintln(p.out, p.line("info", "", label))
+	_, _ = fmt.Fprintln(p.out, p.line("info", "", label))
 }
 
 func (p *plainInitUI) Warn(label string) {
 	p.Header()
-	fmt.Fprintln(p.out, p.line("warn", "", label))
+	_, _ = fmt.Fprintln(p.out, p.line("warn", "", label))
 }
 
 func (p *plainInitUI) StartStep(name string) {
 	p.Header()
 	p.current = name
-	fmt.Fprintln(p.out, p.line("running", name, ""))
+	_, _ = fmt.Fprintln(p.out, p.line("running", name, ""))
 }
 
 func (p *plainInitUI) DoneStep(detail string) {
@@ -316,7 +316,7 @@ func (p *plainInitUI) DoneStep(detail string) {
 	if p.current == "" {
 		return
 	}
-	fmt.Fprintln(p.out, p.line("ok", p.current, detail))
+	_, _ = fmt.Fprintln(p.out, p.line("ok", p.current, detail))
 	p.current = ""
 }
 
@@ -325,7 +325,7 @@ func (p *plainInitUI) FailStep(detail string) {
 	if p.current == "" {
 		return
 	}
-	fmt.Fprintln(p.out, p.line("err", p.current, detail))
+	_, _ = fmt.Fprintln(p.out, p.line("err", p.current, detail))
 	p.current = ""
 }
 

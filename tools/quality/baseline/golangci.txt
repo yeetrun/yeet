@@ -24,8 +24,6 @@ cyclop|pkg/catch/tty_install.go|install
 cyclop|pkg/catch/tty_install.go|normalizeCopyRelPath
 cyclop|pkg/catch/tty_install.go|parseCopyExecArgs
 cyclop|pkg/catch/tty_install.go|stageCmdFunc
-cyclop|pkg/catch/tty_ops.go|mountCmdFunc
-cyclop|pkg/catch/tty_ops.go|tsUpdateCmdFunc
 cyclop|pkg/catch/tty_service.go|removeCmdFunc
 cyclop|pkg/catchrpc/client.go|Call
 cyclop|pkg/catchrpc/client.go|Events
@@ -89,12 +87,6 @@ errcheck|pkg/catch/installer_file.go|rewriteSystemdUnit|source:fmt.Fprintln(out,
 errcheck|pkg/catch/rpc.go|(*Server).handleEventsWS|source:defer conn.Close()|Error return value of `conn.Close` is not checked
 errcheck|pkg/catch/rpc.go|(*Server).handleExecWS|source:defer conn.Close()|Error return value of `conn.Close` is not checked
 errcheck|pkg/catch/rpc.go|(*Server).handleRPC|source:defer r.Body.Close()|Error return value of `r.Body.Close` is not checked
-errcheck|pkg/catch/run_ui.go|(*plainRunUI).DoneStep|source:fmt.Fprintln(p.out, p.line("ok", p.current, detail))|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catch/run_ui.go|(*plainRunUI).FailStep|source:fmt.Fprintln(p.out, p.line("err", p.current, detail))|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catch/run_ui.go|(*plainRunUI).Info|source:fmt.Fprintln(p.out, p.line("info", "", label))|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catch/run_ui.go|(*plainRunUI).StartStep|source:fmt.Fprintln(p.out, p.line("running", name, ""))|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catch/run_ui.go|(*runUI).printHeader|source:fmt.Fprintf(u.out, "[+] %s\n", strings.TrimSpace(label))|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/run_ui.go|(*runUI).printStatus|source:fmt.Fprintln(u.out, line)|Error return value of `fmt.Fprintln` is not checked
 errcheck|pkg/catch/tsns.go|(*Server).downloadTailscale|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/catch/tsns.go|(*Server).downloadTailscale|source:defer resp.Body.Close()|Error return value of `resp.Body.Close` is not checked
 errcheck|pkg/catch/tty_edit.go|(*ttyExecer).editCmdFunc|source:defer f.Close()|Error return value of `f.Close` is not checked
@@ -134,20 +126,6 @@ errcheck|pkg/catch/tty_install.go|(*ttyExecer).copyToRemote|source:tmpf.Close()|
 errcheck|pkg/catch/tty_install.go|(*ttyExecer).install|source:e.rawCloser.Close()|Error return value of `e.rawCloser.Close` is not checked
 errcheck|pkg/catch/tty_install.go|(*ttyExecer).stageCmdFunc|source:fmt.Fprintf(e.rw, "%s\n", asJSON(sv))|Error return value of `fmt.Fprintf` is not checked
 errcheck|pkg/catch/tty_install.go|(*ttyExecer).stageCmdFunc|source:fmt.Fprintf(e.rw, "Staged service %q\n", e.sn)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).ipCmdFunc|source:fmt.Fprintln(e.rw, ip)|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).ipCmdFunc|source:fmt.Fprintln(e.rw, ip.IP)|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).mountCmdFunc|source:defer tw.Flush()|Error return value of `tw.Flush` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).mountCmdFunc|source:fmt.Fprintf(e.rw, "Mounted %s at %s\n", source, target)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).mountCmdFunc|source:fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", v.Name, v.Src, v.Path, v.Type, v.Opts)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).mountCmdFunc|source:fmt.Fprintln(tw, "NAME\tSRC\tPATH\tTYPE\tOPTS")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).tsUpdateCmdFunc|source:fmt.Fprintf(e.rw, "Already up to date (%s)\n", current)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).tsUpdateCmdFunc|source:fmt.Fprintf(e.rw, "Current version: %s (%s track)\n", current, track)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).tsUpdateCmdFunc|source:fmt.Fprintf(e.rw, "Pinned target version: %s\n", latest)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).tsUpdateCmdFunc|source:fmt.Fprintf(e.rw, "Updated tailscale for %s: %s -> %s\n", e.sn, current, latest)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).tsUpdateCmdFunc|source:fmt.Fprintln(e.rw, "Running yeet-managed tailscale update (not official tailscale update).")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catch/tty_ops.go|(*ttyExecer).tsUpdateCmdFunc|source:fmt.Fprintln(e.rw, "Update canceled.")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/catch/tty_ops.go|confirmTSUpdate|source:fmt.Fprintf(rw, "This will update Tailscale from %s to %s. Continue? [y/n] ", from, to)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/catch/tty_ops.go|tailscaleLatestVersionForTrack|source:defer resp.Body.Close()|Error return value of `resp.Body.Close` is not checked
 errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:defer w.Flush()|Error return value of `w.Flush` is not checked
 errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:fmt.Fprintf(w, "%s\t%s\t%s\t%s\t\n", status.ServiceName, status.ServiceType, component.Name, component.Status)|Error return value of `fmt.Fprintf` is not checked
 errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:fmt.Fprintf(w, "%s\t%s\t-\t%s\t\n", status.ServiceName, status.ServiceType, component.Status)|Error return value of `fmt.Fprintf` is not checked
@@ -186,41 +164,15 @@ errcheck|pkg/svc/systemd.go|(*SystemdService).Uninstall|source:s.run("disable", 
 errcheck|pkg/svc/systemd.go|(*SystemdService).monitorTailscale|source:defer bus.Close()|Error return value of `bus.Close` is not checked
 errcheck|pkg/svc/systemd.go|(*SystemdUnit).writeOutService|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/svc/systemd.go|(*SystemdUnit).writeOutTimer|source:defer f.Close()|Error return value of `f.Close` is not checked
-errcheck|pkg/yeet/copy_cmd.go|(*copyReport).Finish|source:fmt.Fprintf(os.Stdout, "sent %s bytes received %s bytes %s bytes/sec\n",|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/yeet/copy_cmd.go|(*copyReport).Finish|source:fmt.Fprintf(os.Stdout, "total size is %s speedup is %.2f\n", formatBytesShort(r.total), speedup)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/yeet/copy_cmd.go|(*copyReport).Finish|source:fmt.Fprintln(os.Stdout, "")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/copy_cmd.go|(*copyReport).OnEntry|source:fmt.Fprintln(os.Stdout, name)|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/copy_cmd.go|(*copyReport).Start|source:fmt.Fprintf(os.Stdout, "%s incremental file list\n", direction)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/yeet/copy_cmd.go|copyFromRemote|source:defer gz.Close()|Error return value of `gz.Close` is not checked
-errcheck|pkg/yeet/copy_cmd.go|copyFromRemote|source:defer os.RemoveAll(stageDir)|Error return value of `os.RemoveAll` is not checked
-errcheck|pkg/yeet/copy_cmd.go|copyFromRemote|source:defer reader.Close()|Error return value of `reader.Close` is not checked
-errcheck|pkg/yeet/copy_cmd.go|copyToRemote|source:defer f.Close()|Error return value of `f.Close` is not checked
-errcheck|pkg/yeet/copy_cmd.go|copyToRemote|source:defer reader.Close()|Error return value of `reader.Close` is not checked
 errcheck|pkg/yeet/exec_remote.go|PrintCLIError|source:fmt.Fprint(w, prefix)|Error return value of `fmt.Fprint` is not checked
 errcheck|pkg/yeet/exec_remote.go|PrintCLIError|source:fmt.Fprintln(w, err)|Error return value of `fmt.Fprintln` is not checked
 errcheck|pkg/yeet/exec_remote.go|execRemote|source:defer proxy.Close()|Error return value of `proxy.Close` is not checked
 errcheck|pkg/yeet/exec_remote.go|execRemote|source:defer termRestoreFn(fd, state)|Error return value is not checked
 errcheck|pkg/yeet/exec_remote.go|handleEventsRPC|source:fmt.Fprintf(os.Stdout, "Received event: %v\n", ev)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/yeet/info_cmd.go|renderInfoPlain|source:fmt.Fprintf(tw, " %s:\t%s\n", row.Label, row.Value)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/yeet/info_cmd.go|renderInfoPlain|source:fmt.Fprintln(w)|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/info_cmd.go|renderInfoPlain|source:fmt.Fprintln(w, section.Title)|Error return value of `fmt.Fprintln` is not checked
 errcheck|pkg/yeet/init.go|initCatch|source:defer os.Remove(bin)|Error return value of `os.Remove` is not checked
 errcheck|pkg/yeet/init_install_filter.go|(*initInstallFilter).writeLine|source:fmt.Fprintln(f.out, msg)|Error return value of `fmt.Fprintln` is not checked
 errcheck|pkg/yeet/init_release.go|fetchGitHubRelease|source:defer resp.Body.Close()|Error return value of `resp.Body.Close` is not checked
-errcheck|pkg/yeet/init_ui.go|(*initUI).Info|source:fmt.Fprintln(u.out, msg)|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/init_ui.go|(*initUI).Warn|source:fmt.Fprintln(u.out, u.color.Wrap(tui.ColorYellow, msg))|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/init_ui.go|(*initUI).printHeader|source:fmt.Fprintf(u.out, "[+] %s\n", strings.TrimSpace(label))|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/yeet/init_ui.go|(*initUI).printStatus|source:fmt.Fprintln(u.out, line)|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/init_ui.go|(*plainInitUI).DoneStep|source:fmt.Fprintln(p.out, p.line("ok", p.current, detail))|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/init_ui.go|(*plainInitUI).FailStep|source:fmt.Fprintln(p.out, p.line("err", p.current, detail))|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/init_ui.go|(*plainInitUI).Info|source:fmt.Fprintln(p.out, p.line("info", "", label))|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/init_ui.go|(*plainInitUI).StartStep|source:fmt.Fprintln(p.out, p.line("running", name, ""))|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/init_ui.go|(*plainInitUI).Warn|source:fmt.Fprintln(p.out, p.line("warn", "", label))|Error return value of `fmt.Fprintln` is not checked
 errcheck|pkg/yeet/init_upload.go|uploadCatchBinary|source:defer file.Close()|Error return value of `file.Close` is not checked
-errcheck|pkg/yeet/list_hosts.go|HandleListHosts|source:defer w.Flush()|Error return value of `w.Flush` is not checked
-errcheck|pkg/yeet/list_hosts.go|HandleListHosts|source:fmt.Fprintf(w, "%s\t%s\t%s\n", host, "unknown", strings.Join(peer.Tags.AsSlice(), ","))|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/yeet/list_hosts.go|HandleListHosts|source:fmt.Fprintf(w, "%s\t%s\t%s\n", host, info.Version, strings.Join(peer.Tags.AsSlice(), ","))|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/yeet/list_hosts.go|HandleListHosts|source:fmt.Fprintln(w, "HOST\tVERSION\tTAGS")|Error return value of `fmt.Fprintln` is not checked
 errcheck|pkg/yeet/payload.go|openPayloadForUpload|source:os.Remove(tmpPath)|Error return value of `os.Remove` is not checked
 errcheck|pkg/yeet/payload.go|openPayloadForUpload|source:payload.Close()|Error return value of `payload.Close` is not checked
 errcheck|pkg/yeet/payload.go|openPayloadForUpload|source:return f, func() { f.Close() }, ft, nil|Error return value of `f.Close` is not checked
@@ -236,19 +188,6 @@ errcheck|pkg/yeet/svc_cmd.go|renderStatusTables|source:fmt.Fprintf(tw, "%s\t%s\t
 errcheck|pkg/yeet/svc_cmd.go|renderStatusTables|source:fmt.Fprintf(tw, "SERVICE\tHOST\tTYPE\t%s\tSTATUS\t\n", header)|Error return value of `fmt.Fprintf` is not checked
 errcheck|pkg/yeet/svc_cmd.go|runEnvCopy|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/yeet/svc_cmd.go|tryRunRemoteImage|source:defer os.RemoveAll(tmpDir)|Error return value of `os.RemoveAll` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|HandleTailscale|source:fmt.Fprintf(os.Stdout, "Tailscale client secret stored on %s (%s).\n", Host(), resp.Path)|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprint(out, "> ")|Error return value of `fmt.Fprint` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, " - Scope: Devices -> Core (write)")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, " - Tags: select the tag you created (e.g. tag:app)")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, " Example: tag:app")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, " https://login.tailscale.com/admin/acls/visual/tags")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, " https://login.tailscale.com/admin/settings/trust-credentials")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, "")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, "1) Create a tag for yeet services:")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, "2) Create a trust credential (OAuth client):")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, "Client secret:")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, "Paste the client secret and press Enter when done.")|Error return value of `fmt.Fprintln` is not checked
-errcheck|pkg/yeet/tailscale_setup.go|promptTailscaleClientSecret|source:fmt.Fprintln(out, "Tailscale OAuth setup")|Error return value of `fmt.Fprintln` is not checked
 gocognit|cmd/yeet/cli_bridge.go|bridgeServiceArgs
 gocognit|cmd/yeet/cli_bridge.go|findServiceIndex
 gocognit|pkg/catch/docker.go|(*Server).monitorDocker

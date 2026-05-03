@@ -23,6 +23,20 @@ import (
 	"tailscale.com/util/mak"
 )
 
+var (
+	checkMountCommand = func(mountType string) error {
+		mountCmd := fmt.Sprintf("/sbin/mount.%s", mountType)
+		_, err := os.Stat(mountCmd)
+		if err != nil {
+			return fmt.Errorf("mount command %q not found", mountCmd)
+		}
+		return nil
+	}
+	mountVolume = func(vol db.Volume) error {
+		return (&systemdMounter{v: vol}).mount()
+	}
+)
+
 func (e *ttyExecer) dockerCmdFunc(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("docker requires a subcommand")
@@ -141,38 +155,25 @@ func (e *ttyExecer) mountCmdFunc(flags cli.MountFlags, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to get services: %w", err)
 		}
-		tw := tabwriter.NewWriter(e.rw, 0, 0, 3, ' ', 0)
-		defer tw.Flush()
-		fmt.Fprintln(tw, "NAME\tSRC\tPATH\tTYPE\tOPTS")
-		for _, v := range dv.AsStruct().Volumes {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", v.Name, v.Src, v.Path, v.Type, v.Opts)
-		}
-		return nil
+		return printMounts(e.rw, dv.AsStruct().Volumes)
 	}
 	if len(args) < 1 || len(args) > 2 {
 		return fmt.Errorf("invalid number of arguments")
 	}
-	source := args[0]
-	_, srcPath, ok := strings.Cut(source, ":")
-	if !ok {
-		return fmt.Errorf("source %q must be in the format host:path", source)
-	}
-	var mountName string
-	if len(args) == 1 {
-		mountName = filepath.Base(srcPath)
-	} else {
-		mountName = args[1]
-	}
+	return e.mountCreateCmdFunc(flags, args)
+}
 
-	if strings.Contains(mountName, "/") {
-		return fmt.Errorf("target cannot contain a /")
+func (e *ttyExecer) mountCreateCmdFunc(flags cli.MountFlags, args []string) error {
+	source := args[0]
+	mountName, err := mountNameFromArgs(args)
+	if err != nil {
+		return err
 	}
 
 	mountType := flags.Type
 	// Check the appropriate mounter is installed by stating /sbin/mount.<type>.
-	mountCmd := fmt.Sprintf("/sbin/mount.%s", mountType)
-	if _, err := os.Stat(mountCmd); err != nil {
-		return fmt.Errorf("mount command %q not found", mountCmd)
+	if err := checkMountCommand(mountType); err != nil {
+		return err
 	}
 
 	opts := flags.Opts
@@ -198,13 +199,45 @@ func (e *ttyExecer) mountCmdFunc(flags cli.MountFlags, args []string) error {
 	if err := e.s.cfg.DB.Set(d); err != nil {
 		return fmt.Errorf("failed to save data: %w", err)
 	}
-	m := &systemdMounter{v: vol}
-
-	if err := m.mount(); err != nil {
+	if err := mountVolume(vol); err != nil {
 		return fmt.Errorf("failed to mount %s at %s: %w", source, target, err)
 	}
 
-	fmt.Fprintf(e.rw, "Mounted %s at %s\n", source, target)
+	if _, err := fmt.Fprintf(e.rw, "Mounted %s at %s\n", source, target); err != nil {
+		return fmt.Errorf("failed to write mount result: %w", err)
+	}
+	return nil
+}
+
+func mountNameFromArgs(args []string) (string, error) {
+	source := args[0]
+	_, srcPath, ok := strings.Cut(source, ":")
+	if !ok {
+		return "", fmt.Errorf("source %q must be in the format host:path", source)
+	}
+	mountName := filepath.Base(srcPath)
+	if len(args) == 2 {
+		mountName = args[1]
+	}
+	if strings.Contains(mountName, "/") {
+		return "", fmt.Errorf("target cannot contain a /")
+	}
+	return mountName, nil
+}
+
+func printMounts(w io.Writer, volumes map[string]*db.Volume) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "NAME\tSRC\tPATH\tTYPE\tOPTS"); err != nil {
+		return fmt.Errorf("failed to write mount header: %w", err)
+	}
+	for _, v := range volumes {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", v.Name, v.Src, v.Path, v.Type, v.Opts); err != nil {
+			return fmt.Errorf("failed to write mount row: %w", err)
+		}
+	}
+	if err := tw.Flush(); err != nil {
+		return fmt.Errorf("failed to flush mounts: %w", err)
+	}
 	return nil
 }
 
@@ -303,7 +336,9 @@ func tailscaleLatestVersionForTrack(track string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("tailscale package lookup failed: %s", resp.Status)
 	}
@@ -322,7 +357,9 @@ func tailscaleLatestVersionForTrack(track string) (string, error) {
 }
 
 func confirmTSUpdate(rw io.ReadWriter, from, to string) (bool, error) {
-	fmt.Fprintf(rw, "This will update Tailscale from %s to %s. Continue? [y/n] ", from, to)
+	if _, err := fmt.Fprintf(rw, "This will update Tailscale from %s to %s. Continue? [y/n] ", from, to); err != nil {
+		return false, fmt.Errorf("failed to write update confirmation prompt: %w", err)
+	}
 	var confirm string
 	_, err := fmt.Fscanln(rw, &confirm)
 	if err != nil {
@@ -335,42 +372,51 @@ func confirmTSUpdate(rw io.ReadWriter, from, to string) (bool, error) {
 }
 
 func (e *ttyExecer) tsUpdateCmdFunc(sv db.ServiceView, args []string) error {
-	target, pinned, err := parseTSUpdateTarget(args)
+	current, track, latest, pinned, err := resolveTSUpdate(sv, args)
 	if err != nil {
 		return err
 	}
-	current := strings.TrimSpace(sv.TSNet().Version())
-	if current == "" {
-		return errors.New("service tailscale version is not set")
-	}
-	track, err := tailscaleTrackFromVersion(current)
-	if err != nil {
+
+	if err := printTSUpdateIntro(e.rw, current, track, latest, pinned); err != nil {
 		return err
-	}
-	latest := target
-	if !pinned {
-		latest, err = tailscaleLatestVersionForTrackFn(track)
-		if err != nil {
-			return fmt.Errorf("failed to resolve latest tailscale version for %s track: %w", track, err)
-		}
-	}
-	fmt.Fprintln(e.rw, "Running yeet-managed tailscale update (not official tailscale update).")
-	fmt.Fprintf(e.rw, "Current version: %s (%s track)\n", current, track)
-	if pinned {
-		fmt.Fprintf(e.rw, "Pinned target version: %s\n", latest)
 	}
 	if latest == current {
-		fmt.Fprintf(e.rw, "Already up to date (%s)\n", current)
-		return nil
+		return printTSUpdateStatus(e.rw, "Already up to date (%s)\n", current)
 	}
 	ok, err := confirmTSUpdate(e.rw, current, latest)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		fmt.Fprintln(e.rw, "Update canceled.")
-		return nil
+		return printTSUpdateStatus(e.rw, "Update canceled.\n")
 	}
+	return e.applyTSUpdate(current, latest)
+}
+
+func resolveTSUpdate(sv db.ServiceView, args []string) (current, track, latest string, pinned bool, err error) {
+	target, pinned, err := parseTSUpdateTarget(args)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	current = strings.TrimSpace(sv.TSNet().Version())
+	if current == "" {
+		return "", "", "", false, errors.New("service tailscale version is not set")
+	}
+	track, err = tailscaleTrackFromVersion(current)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	latest = target
+	if !pinned {
+		latest, err = tailscaleLatestVersionForTrackFn(track)
+		if err != nil {
+			return "", "", "", false, fmt.Errorf("failed to resolve latest tailscale version for %s track: %w", track, err)
+		}
+	}
+	return current, track, latest, pinned, nil
+}
+
+func (e *ttyExecer) applyTSUpdate(current, latest string) error {
 	tsd, err := e.s.getTailscaledBinary(latest)
 	if err != nil {
 		return fmt.Errorf("failed to download tailscaled %s: %w", latest, err)
@@ -382,33 +428,67 @@ func (e *ttyExecer) tsUpdateCmdFunc(sv db.ServiceView, args []string) error {
 	if err := fileutil.CopyFile(tsd, runBinary); err != nil {
 		return fmt.Errorf("failed to replace tailscaled binary: %w", err)
 	}
-	if _, _, err := e.s.cfg.DB.MutateService(e.sn, func(_ *db.Data, s *db.Service) error {
-		if s.TSNet == nil {
-			return errors.New("service is not connected to tailscale")
-		}
-		s.TSNet.Version = latest
-		if s.Artifacts == nil {
-			s.Artifacts = db.ArtifactStore{}
-		}
-		art, ok := s.Artifacts[db.ArtifactTSBinary]
-		if !ok || art == nil {
-			art = &db.Artifact{Refs: map[db.ArtifactRef]string{}}
-			mak.Set(&s.Artifacts, db.ArtifactTSBinary, art)
-		}
-		if art.Refs == nil {
-			art.Refs = map[db.ArtifactRef]string{}
-		}
-		art.Refs[db.ArtifactRef("latest")] = tsd
-		art.Refs[db.Gen(s.Generation)] = tsd
-		return nil
-	}); err != nil {
+	if err := e.persistTSUpdate(latest, tsd); err != nil {
 		return fmt.Errorf("failed to persist tailscale version update: %w", err)
 	}
 	unit := fmt.Sprintf("yeet-%s-ts.service", e.sn)
 	if err := e.newCmd("systemctl", "restart", unit).Run(); err != nil {
 		return fmt.Errorf("failed to restart tailscaled service: %w", err)
 	}
-	fmt.Fprintf(e.rw, "Updated tailscale for %s: %s -> %s\n", e.sn, current, latest)
+	if _, err := fmt.Fprintf(e.rw, "Updated tailscale for %s: %s -> %s\n", e.sn, current, latest); err != nil {
+		return fmt.Errorf("failed to write tailscale update result: %w", err)
+	}
+	return nil
+}
+
+func (e *ttyExecer) persistTSUpdate(latest, tsd string) error {
+	_, _, err := e.s.cfg.DB.MutateService(e.sn, func(_ *db.Data, s *db.Service) error {
+		if s.TSNet == nil {
+			return errors.New("service is not connected to tailscale")
+		}
+		s.TSNet.Version = latest
+		art := ensureTSBinaryArtifact(s)
+		art.Refs[db.ArtifactRef("latest")] = tsd
+		art.Refs[db.Gen(s.Generation)] = tsd
+		return nil
+	})
+	return err
+}
+
+func ensureTSBinaryArtifact(s *db.Service) *db.Artifact {
+	if s.Artifacts == nil {
+		s.Artifacts = db.ArtifactStore{}
+	}
+	art, ok := s.Artifacts[db.ArtifactTSBinary]
+	if !ok || art == nil {
+		art = &db.Artifact{Refs: map[db.ArtifactRef]string{}}
+		mak.Set(&s.Artifacts, db.ArtifactTSBinary, art)
+	}
+	if art.Refs == nil {
+		art.Refs = map[db.ArtifactRef]string{}
+	}
+	return art
+}
+
+func printTSUpdateStatus(w io.Writer, format string, args ...any) error {
+	if _, err := fmt.Fprintf(w, format, args...); err != nil {
+		return fmt.Errorf("failed to write tailscale update status: %w", err)
+	}
+	return nil
+}
+
+func printTSUpdateIntro(w io.Writer, current, track, latest string, pinned bool) error {
+	if _, err := fmt.Fprintln(w, "Running yeet-managed tailscale update (not official tailscale update)."); err != nil {
+		return fmt.Errorf("failed to write tailscale update status: %w", err)
+	}
+	if _, err := fmt.Fprintf(w, "Current version: %s (%s track)\n", current, track); err != nil {
+		return fmt.Errorf("failed to write tailscale update status: %w", err)
+	}
+	if pinned {
+		if _, err := fmt.Fprintf(w, "Pinned target version: %s\n", latest); err != nil {
+			return fmt.Errorf("failed to write tailscale update status: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -418,8 +498,8 @@ func (e *ttyExecer) ipCmdFunc() error {
 		if err != nil {
 			return fmt.Errorf("failed to get IP address: %w", err)
 		}
-		for _, ip := range st.TailscaleIPs {
-			fmt.Fprintln(e.rw, ip)
+		if err := printLines(e.rw, st.TailscaleIPs); err != nil {
+			return fmt.Errorf("failed to write IP address: %w", err)
 		}
 		return nil
 	}
@@ -439,9 +519,26 @@ func (e *ttyExecer) ipCmdFunc() error {
 	if err != nil {
 		return fmt.Errorf("failed to get IP addresses: %w", err)
 	}
+	if err := printIfaceIPs(e.rw, ips); err != nil {
+		return fmt.Errorf("failed to write IP address: %w", err)
+	}
+	return nil
+}
+
+func printIfaceIPs(w io.Writer, ips []ifaceIP) error {
 	for _, ip := range ips {
-		// Skip 127.0.0.1
-		fmt.Fprintln(e.rw, ip.IP)
+		if _, err := fmt.Fprintln(w, ip.IP); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func printLines[T any](w io.Writer, lines []T) error {
+	for _, line := range lines {
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
 	}
 	return nil
 }

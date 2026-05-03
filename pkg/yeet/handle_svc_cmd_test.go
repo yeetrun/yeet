@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -22,6 +23,14 @@ import (
 	"github.com/yeetrun/yeet/pkg/codecutil"
 	"github.com/yeetrun/yeet/pkg/copyutil"
 )
+
+type closeErrorReadCloser struct {
+	io.Reader
+}
+
+func (closeErrorReadCloser) Close() error {
+	return errors.New("close failed")
+}
 
 func TestHandleSvcCmdDefaultsToStatus(t *testing.T) {
 	oldExec := execRemoteFn
@@ -1111,6 +1120,50 @@ func TestHandleSvcCmdCopyDownloadFile(t *testing.T) {
 	}
 	if string(out) != "payload" {
 		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+func TestHandleSvcCmdCopyDownloadReportsReaderCloseError(t *testing.T) {
+	oldStream := execRemoteStreamFn
+	defer func() {
+		execRemoteStreamFn = oldStream
+	}()
+
+	tmp := t.TempDir()
+	dest := filepath.Join(tmp, "out.txt")
+
+	execRemoteStreamFn = func(ctx context.Context, service string, args []string, stdin io.Reader) (io.ReadCloser, <-chan error, error) {
+		srcTmp := t.TempDir()
+		src := filepath.Join(srcTmp, "remote.txt")
+		if err := os.WriteFile(src, []byte("payload"), 0o600); err != nil {
+			return nil, nil, err
+		}
+		var tarBuf bytes.Buffer
+		if err := copyutil.TarFile(&tarBuf, src, "remote.txt"); err != nil {
+			return nil, nil, err
+		}
+		var gzBuf bytes.Buffer
+		gz := gzip.NewWriter(&gzBuf)
+		if _, err := gz.Write(tarBuf.Bytes()); err != nil {
+			_ = gz.Close()
+			return nil, nil, err
+		}
+		if err := gz.Close(); err != nil {
+			return nil, nil, err
+		}
+		var buf bytes.Buffer
+		if err := copyutil.WriteHeader(&buf, "file", "remote.txt"); err != nil {
+			return nil, nil, err
+		}
+		buf.Write(gzBuf.Bytes())
+		done := make(chan error, 1)
+		done <- nil
+		return closeErrorReadCloser{Reader: bytes.NewReader(buf.Bytes())}, done, nil
+	}
+
+	err := HandleSvcCmd([]string{"copy", "svc-a:remote.txt", dest})
+	if err == nil || !strings.Contains(err.Error(), "close failed") {
+		t.Fatalf("expected close error, got %v", err)
 	}
 }
 

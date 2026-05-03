@@ -7,6 +7,7 @@ package yeet
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"slices"
@@ -37,11 +38,7 @@ func HandleListHosts(ctx context.Context, tags []string) error {
 		tags = []string{"tag:catch"}
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-	defer w.Flush()
-
-	fmt.Fprintln(w, "HOST\tVERSION\tTAGS")
-
+	rows := []listHostRow{}
 	for _, peer := range st.Peer {
 		if peer.Tags == nil || !overlaps(peer.Tags.AsSlice(), tags) {
 			continue
@@ -55,12 +52,31 @@ func HandleListHosts(ctx context.Context, tags []string) error {
 		var info serverInfo
 		if err := rpc.Call(infoCtx, "catch.Info", nil, &info); err != nil {
 			log.Printf("failed to get version for %s: %v", host, err)
-			fmt.Fprintf(w, "%s\t%s\t%s\n", host, "unknown", strings.Join(peer.Tags.AsSlice(), ","))
+			rows = append(rows, listHostRow{Host: host, Version: "unknown", Tags: peer.Tags.AsSlice()})
 			cancel()
 			continue
 		}
 		cancel()
-		fmt.Fprintf(w, "%s\t%s\t%s\n", host, info.Version, strings.Join(peer.Tags.AsSlice(), ","))
+		rows = append(rows, listHostRow{Host: host, Version: info.Version, Tags: peer.Tags.AsSlice()})
 	}
-	return nil
+	return renderListHosts(os.Stdout, rows)
+}
+
+type listHostRow struct {
+	Host    string
+	Version string
+	Tags    []string
+}
+
+func renderListHosts(out io.Writer, rows []listHostRow) error {
+	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	if _, err := fmt.Fprintln(w, "HOST\tVERSION\tTAGS"); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if _, err := fmt.Fprintf(w, "%s\t%s\t%s\n", row.Host, row.Version, strings.Join(row.Tags, ",")); err != nil {
+			return err
+		}
+	}
+	return w.Flush()
 }

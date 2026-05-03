@@ -238,7 +238,7 @@ func (u *runUI) printHeader() {
 	if u.service != "" {
 		label = fmt.Sprintf("%s %s", label, u.service)
 	}
-	fmt.Fprintf(u.out, "[+] %s\n", strings.TrimSpace(label))
+	_, _ = fmt.Fprintf(u.out, "[+] %s\n", strings.TrimSpace(label))
 }
 
 func (u *runUI) newSpinner(text string) *tui.Spinner {
@@ -276,7 +276,7 @@ func (u *runUI) printStatus(status, name, detail string) {
 	if detail != "" {
 		line = fmt.Sprintf("%s (%s)", line, detail)
 	}
-	fmt.Fprintln(u.out, line)
+	_, _ = fmt.Fprintln(u.out, line)
 }
 
 type plainRunUI struct {
@@ -301,13 +301,13 @@ func (p *plainRunUI) MarkHeaderDone() {
 
 func (p *plainRunUI) Info(label string) {
 	p.Header()
-	fmt.Fprintln(p.out, p.line("info", "", label))
+	_, _ = fmt.Fprintln(p.out, p.line("info", "", label))
 }
 
 func (p *plainRunUI) StartStep(name string) {
 	p.Header()
 	p.current = name
-	fmt.Fprintln(p.out, p.line("running", name, ""))
+	_, _ = fmt.Fprintln(p.out, p.line("running", name, ""))
 }
 
 func (p *plainRunUI) UpdateDetail(detail string) {
@@ -319,7 +319,7 @@ func (p *plainRunUI) DoneStep(detail string) {
 	if p.current == "" {
 		return
 	}
-	fmt.Fprintln(p.out, p.line("ok", p.current, detail))
+	_, _ = fmt.Fprintln(p.out, p.line("ok", p.current, detail))
 	p.current = ""
 }
 
@@ -328,7 +328,7 @@ func (p *plainRunUI) FailStep(detail string) {
 	if p.current == "" {
 		return
 	}
-	fmt.Fprintln(p.out, p.line("err", p.current, detail))
+	_, _ = fmt.Fprintln(p.out, p.line("err", p.current, detail))
 	p.current = ""
 }
 
