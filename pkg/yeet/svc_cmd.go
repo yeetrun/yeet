@@ -86,195 +86,306 @@ func commandNeedsService(args []string) (bool, error) {
 	return arg.Required, nil
 }
 
-func HandleSvcCmd(args []string) error {
-	cmd := "status"
-	cmdArgs := []string{}
-	if len(args) > 0 {
-		cmd = args[0]
-		cmdArgs = args[1:]
-	}
-	checkArgs := args
-	if len(checkArgs) == 0 {
-		checkArgs = []string{"status"}
-	}
+type svcCommand struct {
+	Name      string
+	Args      []string
+	CheckArgs []string
+	RawArgs   []string
+}
 
-	cfgLoc, err := loadProjectConfigFromCwd()
+func svcCommandFromArgs(args []string) svcCommand {
+	cmd := svcCommand{
+		Name:      "status",
+		CheckArgs: []string{"status"},
+		RawArgs:   args,
+	}
+	if len(args) == 0 {
+		return cmd
+	}
+	cmd.Name = args[0]
+	cmd.Args = args[1:]
+	cmd.CheckArgs = args
+	return cmd
+}
+
+type svcCommandRequest struct {
+	Command         svcCommand
+	Config          *projectConfigLocation
+	HostOverride    string
+	HostOverrideSet bool
+	Service         string
+}
+
+func HandleSvcCmd(args []string) error {
+	req, err := newSvcCommandRequest(args)
 	if err != nil {
 		return err
 	}
+	return handleSvcCommand(context.Background(), req)
+}
 
-	if serviceOverride == "" {
-		needsService, err := commandNeedsService(checkArgs)
-		if err != nil {
-			return err
-		}
-		if needsService {
-			return missingServiceError(checkArgs)
-		}
+func newSvcCommandRequest(args []string) (svcCommandRequest, error) {
+	command := svcCommandFromArgs(args)
+	cfgLoc, err := loadProjectConfigFromCwd()
+	if err != nil {
+		return svcCommandRequest{}, err
+	}
+
+	if err := ensureSvcCommandService(command.CheckArgs); err != nil {
+		return svcCommandRequest{}, err
 	}
 
 	hostOverride, hostOverrideSet := HostOverride()
-	if serviceOverride != "" && !hostOverrideSet && cfgLoc != nil {
-		host, err := resolveServiceHost(cfgLoc.Config, serviceOverride)
-		if err != nil {
-			return err
-		}
-		if host != "" {
-			SetHost(host)
-		}
+	if err := applySvcCommandHost(cfgLoc, hostOverrideSet); err != nil {
+		return svcCommandRequest{}, err
 	}
 
-	svc := getService()
+	return svcCommandRequest{
+		Command:         command,
+		Config:          cfgLoc,
+		HostOverride:    hostOverride,
+		HostOverrideSet: hostOverrideSet,
+		Service:         getService(),
+	}, nil
+}
 
-	// Check for special commands
-	switch cmd {
+func ensureSvcCommandService(checkArgs []string) error {
+	if serviceOverride != "" {
+		return nil
+	}
+	needsService, err := commandNeedsService(checkArgs)
+	if err != nil {
+		return err
+	}
+	if needsService {
+		return missingServiceError(checkArgs)
+	}
+	return nil
+}
+
+func applySvcCommandHost(cfgLoc *projectConfigLocation, hostOverrideSet bool) error {
+	if serviceOverride == "" || hostOverrideSet || cfgLoc == nil || cfgLoc.Config == nil {
+		return nil
+	}
+	host, err := resolveServiceHost(cfgLoc.Config, serviceOverride)
+	if err != nil {
+		return err
+	}
+	if host != "" {
+		SetHost(host)
+	}
+	return nil
+}
+
+func handleSvcCommand(ctx context.Context, req svcCommandRequest) error {
+	switch req.Command.Name {
 	case "env":
-		if len(args) >= 2 && args[1] == "copy" {
-			if len(args) != 3 {
-				return fmt.Errorf("env copy requires a file")
-			}
-			if err := runEnvCopy(args[2]); err != nil {
-				return err
-			}
-			return saveEnvFileConfig(cfgLoc, hostOverride, args[2])
-		}
-		if len(args) >= 2 && args[1] == "set" {
-			if len(args) < 3 {
-				return fmt.Errorf("env set requires at least one KEY=VALUE assignment")
-			}
-			assignments, err := parseEnvAssignments(args[2:])
-			if err != nil {
-				return err
-			}
-			svc := getService()
-			setArgs := []string{"env", "set"}
-			for _, assignment := range assignments {
-				setArgs = append(setArgs, assignment.Key+"="+assignment.Value)
-			}
-			return execRemoteFn(context.Background(), svc, setArgs, nil, true)
-		}
+		return handleSvcEnv(ctx, req)
 	// `run <svc> <file/docker-image> [args...]`
 	case "run":
-		if len(cmdArgs) == 0 {
-			return runFromProjectConfig(cfgLoc, hostOverride)
-		}
-		forceFromConfig, err := shouldRunFromConfigWithForce(cmdArgs)
-		if err != nil {
-			return err
-		}
-		if forceFromConfig {
-			return runFromProjectConfigWithForce(cfgLoc, hostOverride, true)
-		}
-		payload, runArgs, err := splitRunPayloadArgs(cmdArgs)
-		if err != nil {
-			return err
-		}
-		envFileArg, filteredArgs, envFileSet, err := extractEnvFileFlag(runArgs)
-		if err != nil {
-			return err
-		}
-		forceDeploy, filteredArgs, err := extractForceFlag(filteredArgs)
-		if err != nil {
-			return err
-		}
-		entry, hasEntry := serviceEntryForConfig(cfgLoc, hostOverride)
-		if hasEntry {
-			if err := ensureLockedRunFlags(entry, filteredArgs); err != nil {
-				return err
-			}
-		}
-		envFile := envFileArg
-		if envFile == "" && hasEntry && entry.EnvFile != "" && cfgLoc != nil {
-			envFile = resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
-		}
-		if err := runWithChanges(payload, filteredArgs, envFile, entry, forceDeploy); err != nil {
-			return err
-		}
-		normalizedArgs := normalizeRunArgs(filteredArgs)
-		if err := saveRunConfig(cfgLoc, hostOverride, payload, normalizedArgs); err != nil {
-			return err
-		}
-		if envFileSet {
-			if err := saveEnvFileConfig(cfgLoc, hostOverride, envFileArg); err != nil {
-				return err
-			}
-		}
-		return nil
+		return handleSvcRun(req)
 	case "remove":
-		removeFlags, _, err := cli.ParseRemove(cmdArgs)
-		if err != nil {
-			return err
-		}
-		remoteArgs := filterRemoveArgs(cmdArgs)
-		if err := execRemoteFn(context.Background(), svc, append([]string{"remove"}, remoteArgs...), nil, true); err != nil {
-			return err
-		}
-		if removeFlags.CleanConfig {
-			return removeServiceConfig(cfgLoc, hostOverride)
-		}
-		if removeFlags.Yes {
-			return nil
-		}
-		if !hasServiceConfig(cfgLoc, hostOverride) {
-			return nil
-		}
-		ok, err := cmdutil.Confirm(os.Stdin, os.Stdout, fmt.Sprintf("Remove %q from yeet.toml?", svc))
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return nil
-		}
-		return removeServiceConfig(cfgLoc, hostOverride)
+		return handleSvcRemove(ctx, req)
 	// `copy [-avz] <src> <dst>`
 	case "copy":
-		var cfg *ProjectConfig
-		if cfgLoc != nil {
-			cfg = cfgLoc.Config
-		}
-		return runCopyCommand(cmdArgs, cfg)
+		return handleSvcCopy(req)
 	// `cron <svc> <file> <cronexpr>`
 	case "cron":
-		if len(cmdArgs) == 0 {
-			return runCronFromProjectConfig(cfgLoc, hostOverride)
-		}
-		payload := cmdArgs[0]
-		cronArgs := cmdArgs[1:]
-		cronFields, binArgs, err := splitCronArgs(cronArgs)
-		if err != nil {
-			return err
-		}
-		if err := runCron(payload, cronFields, binArgs); err != nil {
-			return err
-		}
-		return saveCronConfig(cfgLoc, hostOverride, payload, cronFields, binArgs)
+		return handleSvcCron(req)
 	// `stage <svc> <file>`
 	case "stage":
-		if len(cmdArgs) == 1 {
-			return runStageBinary(cmdArgs[0])
-		}
+		return handleSvcStage(ctx, req)
 	case cli.CommandEvents:
-		flags, _, err := cli.ParseEvents(cmdArgs)
+		return handleSvcEvents(ctx, req)
+	case "status":
+		return handleStatusCommand(ctx, req.Command.Args, req.Config, req.HostOverrideSet)
+	case "info":
+		return handleInfoCommand(ctx, req.Command.Args, req.Config)
+	}
+
+	return handleSvcRemote(ctx, req)
+}
+
+func handleSvcEnv(ctx context.Context, req svcCommandRequest) error {
+	args := req.Command.RawArgs
+	if len(args) >= 2 && args[1] == "copy" {
+		if len(args) != 3 {
+			return fmt.Errorf("env copy requires a file")
+		}
+		if err := runEnvCopy(args[2]); err != nil {
+			return err
+		}
+		return saveEnvFileConfig(req.Config, req.HostOverride, args[2])
+	}
+	if len(args) >= 2 && args[1] == "set" {
+		if len(args) < 3 {
+			return fmt.Errorf("env set requires at least one KEY=VALUE assignment")
+		}
+		assignments, err := parseEnvAssignments(args[2:])
 		if err != nil {
 			return err
 		}
-		if serviceOverride == "" && !flags.All {
-			return missingServiceError(args)
+		setArgs := []string{"env", "set"}
+		for _, assignment := range assignments {
+			setArgs = append(setArgs, assignment.Key+"="+assignment.Value)
 		}
-		return handleEventsRPC(context.Background(), svc, flags)
-	case "status":
-		return handleStatusCommand(context.Background(), cmdArgs, cfgLoc, hostOverrideSet)
-	case "info":
-		return handleInfoCommand(context.Background(), cmdArgs, cfgLoc)
+		return execRemoteFn(ctx, req.Service, setArgs, nil, true)
 	}
+	return handleSvcRemote(ctx, req)
+}
 
-	// Assume the first argument is a command
-	return execRemoteFn(context.Background(), svc, args, nil, true)
+type parsedSvcRun struct {
+	Payload     string
+	Args        []string
+	EnvFile     string
+	EnvFileArg  string
+	EnvFileSet  bool
+	Entry       ServiceEntry
+	ForceDeploy bool
+}
+
+func handleSvcRun(req svcCommandRequest) error {
+	cmdArgs := req.Command.Args
+	if len(cmdArgs) == 0 {
+		return runFromProjectConfig(req.Config, req.HostOverride)
+	}
+	forceFromConfig, err := shouldRunFromConfigWithForce(cmdArgs)
+	if err != nil {
+		return err
+	}
+	if forceFromConfig {
+		return runFromProjectConfigWithForce(req.Config, req.HostOverride, true)
+	}
+	run, err := parseSvcRun(cmdArgs, req.Config, req.HostOverride)
+	if err != nil {
+		return err
+	}
+	if err := runWithChanges(run.Payload, run.Args, run.EnvFile, run.Entry, run.ForceDeploy); err != nil {
+		return err
+	}
+	if err := saveRunConfig(req.Config, req.HostOverride, run.Payload, normalizeRunArgs(run.Args)); err != nil {
+		return err
+	}
+	if run.EnvFileSet {
+		return saveEnvFileConfig(req.Config, req.HostOverride, run.EnvFileArg)
+	}
+	return nil
+}
+
+func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride string) (parsedSvcRun, error) {
+	payload, runArgs, err := splitRunPayloadArgs(cmdArgs)
+	if err != nil {
+		return parsedSvcRun{}, err
+	}
+	envFileArg, filteredArgs, envFileSet, err := extractEnvFileFlag(runArgs)
+	if err != nil {
+		return parsedSvcRun{}, err
+	}
+	forceDeploy, filteredArgs, err := extractForceFlag(filteredArgs)
+	if err != nil {
+		return parsedSvcRun{}, err
+	}
+	entry, hasEntry := serviceEntryForConfig(cfgLoc, hostOverride)
+	if hasEntry {
+		if err := ensureLockedRunFlags(entry, filteredArgs); err != nil {
+			return parsedSvcRun{}, err
+		}
+	}
+	envFile := envFileArg
+	if envFile == "" && hasEntry && entry.EnvFile != "" && cfgLoc != nil {
+		envFile = resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
+	}
+	return parsedSvcRun{
+		Payload:     payload,
+		Args:        filteredArgs,
+		EnvFile:     envFile,
+		EnvFileArg:  envFileArg,
+		EnvFileSet:  envFileSet,
+		Entry:       entry,
+		ForceDeploy: forceDeploy,
+	}, nil
+}
+
+func handleSvcRemove(ctx context.Context, req svcCommandRequest) error {
+	removeFlags, _, err := cli.ParseRemove(req.Command.Args)
+	if err != nil {
+		return err
+	}
+	remoteArgs := filterRemoveArgs(req.Command.Args)
+	if err := execRemoteFn(ctx, req.Service, append([]string{"remove"}, remoteArgs...), nil, true); err != nil {
+		return err
+	}
+	if removeFlags.CleanConfig {
+		return removeServiceConfig(req.Config, req.HostOverride)
+	}
+	if removeFlags.Yes {
+		return nil
+	}
+	if !hasServiceConfig(req.Config, req.HostOverride) {
+		return nil
+	}
+	ok, err := cmdutil.Confirm(os.Stdin, os.Stdout, fmt.Sprintf("Remove %q from yeet.toml?", req.Service))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	return removeServiceConfig(req.Config, req.HostOverride)
+}
+
+func handleSvcCopy(req svcCommandRequest) error {
+	var cfg *ProjectConfig
+	if req.Config != nil {
+		cfg = req.Config.Config
+	}
+	return runCopyCommand(req.Command.Args, cfg)
+}
+
+func handleSvcCron(req svcCommandRequest) error {
+	cmdArgs := req.Command.Args
+	if len(cmdArgs) == 0 {
+		return runCronFromProjectConfig(req.Config, req.HostOverride)
+	}
+	payload := cmdArgs[0]
+	cronFields, binArgs, err := splitCronArgs(cmdArgs[1:])
+	if err != nil {
+		return err
+	}
+	if err := runCron(payload, cronFields, binArgs); err != nil {
+		return err
+	}
+	return saveCronConfig(req.Config, req.HostOverride, payload, cronFields, binArgs)
+}
+
+func handleSvcStage(ctx context.Context, req svcCommandRequest) error {
+	if len(req.Command.Args) == 1 {
+		return runStageBinary(req.Command.Args[0])
+	}
+	return handleSvcRemote(ctx, req)
+}
+
+func handleSvcEvents(ctx context.Context, req svcCommandRequest) error {
+	flags, _, err := cli.ParseEvents(req.Command.Args)
+	if err != nil {
+		return err
+	}
+	if serviceOverride == "" && !flags.All {
+		return missingServiceError(req.Command.RawArgs)
+	}
+	return handleEventsRPC(ctx, req.Service, flags)
+}
+
+func handleSvcRemote(ctx context.Context, req svcCommandRequest) error {
+	return execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, true)
 }
 
 var tryRunDockerFn = tryRunDocker
 var buildDockerImageForRemoteFn = buildDockerImageForRemote
 var tryRunRemoteImageFn = tryRunRemoteImage
+var imageExistsFn = imageExists
+var pushImageFn = pushImage
+var execRemoteDirectFn = execRemote
 
 func splitRunPayloadArgs(args []string) (string, []string, error) {
 	if len(args) == 0 {
@@ -527,61 +638,120 @@ func tryRunFile(file string, args []string) (ok bool, _ error) {
 	return runFilePayload(file, args, true)
 }
 
+type runFileUpload struct {
+	payload io.ReadCloser
+	cleanup func()
+	ft      ftdetect.FileType
+	goos    string
+	goarch  string
+}
+
 func runFilePayload(file string, args []string, pushLocalImages bool) (ok bool, _ error) {
-	goos, goarch, err := remoteCatchOSAndArchFn()
+	upload, err := prepareRunFileUpload(file, args, pushLocalImages)
 	if err != nil {
 		return false, err
 	}
-	payload, cleanup, ft, err := openPayloadForUpload(file, goos, goarch)
-	if err != nil {
-		return false, err
-	}
-	defer cleanup()
-	if ft == ftdetect.DockerCompose {
-		flags, _, err := cli.ParseRun(args)
-		if err != nil {
-			return false, err
-		}
-		if len(flags.Publish) > 0 && pushLocalImages {
-			return false, fmt.Errorf("-p/--publish is not supported for docker compose payloads")
-		}
-	}
+	defer upload.cleanup()
+
 	svc := getService()
-	if ft == ftdetect.DockerCompose && pushLocalImages {
-		if err := pushAllLocalImagesFn(svc, goos, goarch); err != nil {
-			return false, fmt.Errorf("failed to push all local images: %w", err)
-		}
+	if err := pushRunFileLocalImages(svc, upload, pushLocalImages); err != nil {
+		return false, err
 	}
-	runArgs := append([]string{"run"}, args...)
-	tty := isTerminalFn(int(os.Stdout.Fd()))
-	if err := execRemoteFn(context.Background(), svc, runArgs, payload, tty); err != nil {
-		return false, fmt.Errorf("failed to run service: %w", err)
+	if err := execRunFilePayload(context.Background(), svc, upload.payload, args); err != nil {
+		return false, err
 	}
 	return true, nil
 }
 
+func prepareRunFileUpload(file string, args []string, pushLocalImages bool) (runFileUpload, error) {
+	goos, goarch, err := remoteCatchOSAndArchFn()
+	if err != nil {
+		return runFileUpload{}, err
+	}
+	payload, cleanup, ft, err := openPayloadForUpload(file, goos, goarch)
+	if err != nil {
+		return runFileUpload{}, err
+	}
+	if err := validateRunFileArgs(ft, args, pushLocalImages); err != nil {
+		cleanup()
+		return runFileUpload{}, err
+	}
+	return runFileUpload{
+		payload: payload,
+		cleanup: cleanup,
+		ft:      ft,
+		goos:    goos,
+		goarch:  goarch,
+	}, nil
+}
+
+func validateRunFileArgs(ft ftdetect.FileType, args []string, pushLocalImages bool) error {
+	if ft != ftdetect.DockerCompose {
+		return nil
+	}
+	flags, _, err := cli.ParseRun(args)
+	if err != nil {
+		return err
+	}
+	if len(flags.Publish) > 0 && pushLocalImages {
+		return fmt.Errorf("-p/--publish is not supported for docker compose payloads")
+	}
+	return nil
+}
+
+func pushRunFileLocalImages(svc string, upload runFileUpload, pushLocalImages bool) error {
+	if upload.ft != ftdetect.DockerCompose || !pushLocalImages {
+		return nil
+	}
+	if err := pushAllLocalImagesFn(svc, upload.goos, upload.goarch); err != nil {
+		return fmt.Errorf("failed to push all local images: %w", err)
+	}
+	return nil
+}
+
+func execRunFilePayload(ctx context.Context, svc string, payload io.Reader, args []string) error {
+	runArgs := append([]string{"run"}, args...)
+	tty := isTerminalFn(int(os.Stdout.Fd()))
+	if err := execRemoteFn(ctx, svc, runArgs, payload, tty); err != nil {
+		return fmt.Errorf("failed to run service: %w", err)
+	}
+	return nil
+}
+
 func tryRunDocker(image string, args []string) (ok bool, _ error) {
-	if !imageExists(image) {
+	if !imageExistsFn(image) {
 		// If the image does not exist, it's not an error
 		return false, nil
 	}
 	svc := getService()
-	if err := pushImage(context.Background(), svc, image, "latest"); err != nil {
+	if err := pushImageFn(context.Background(), svc, image, "latest"); err != nil {
 		return false, fmt.Errorf("failed to push image: %w", err)
 	}
-	// If there are more arguments, run `stage <svc> <args...>`
-	if len(args) > 0 {
-		stageArgs := append([]string{"stage"}, args...)
-		if err := execRemote(context.Background(), svc, stageArgs, nil, true); err != nil {
-			fmt.Println("failed to stage args:", err)
-			return false, fmt.Errorf("failed to stage args: %w", err)
-		}
+	if err := stageDockerArgs(context.Background(), svc, args); err != nil {
+		return false, err
 	}
-	// Run stage commit (don't inherit os.Args)
-	if err := execRemote(context.Background(), svc, []string{"stage", "commit"}, nil, true); err != nil {
-		return false, errors.New("failed to run service")
+	if err := commitDockerStage(context.Background(), svc); err != nil {
+		return false, err
 	}
 	return true, nil
+}
+
+func stageDockerArgs(ctx context.Context, svc string, args []string) error {
+	if len(args) > 0 {
+		stageArgs := append([]string{"stage"}, args...)
+		if err := execRemoteDirectFn(ctx, svc, stageArgs, nil, true); err != nil {
+			fmt.Println("failed to stage args:", err)
+			return fmt.Errorf("failed to stage args: %w", err)
+		}
+	}
+	return nil
+}
+
+func commitDockerStage(ctx context.Context, svc string) error {
+	if err := execRemoteDirectFn(ctx, svc, []string{"stage", "commit"}, nil, true); err != nil {
+		return errors.New("failed to run service")
+	}
+	return nil
 }
 
 func runEnvCopy(file string) (err error) {

@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
@@ -160,6 +161,106 @@ func TestDockerComposeStatusesStateMapping(t *testing.T) {
 	}
 }
 
+func TestParseDockerComposeStatusesSkipsMalformedLines(t *testing.T) {
+	got, err := parseDockerComposeStatuses(strings.Join([]string{
+		"app,running",
+		"worker,restarting",
+		"db,exited",
+		"pending,created",
+		"paused,paused",
+		"dead,dead",
+		"removing,removing",
+		"mystery,weird",
+		"malformed",
+		"too,many,fields",
+		"",
+	}, "\n"))
+	if err != nil {
+		t.Fatalf("parseDockerComposeStatuses returned error: %v", err)
+	}
+
+	want := DockerComposeStatus{
+		"app":      StatusRunning,
+		"worker":   StatusRunning,
+		"db":       StatusStopped,
+		"pending":  StatusStopped,
+		"paused":   StatusStopped,
+		"dead":     StatusStopped,
+		"removing": StatusStopped,
+		"mystery":  StatusUnknown,
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("statuses mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestParseDockerComposeStatusesEmptyOutputUnknown(t *testing.T) {
+	_, err := parseDockerComposeStatuses(" \n\t\n")
+	if !errors.Is(err, ErrDockerStatusUnknown) {
+		t.Fatalf("parseDockerComposeStatuses error = %v, want ErrDockerStatusUnknown", err)
+	}
+}
+
+func TestDockerComposeCommandContextRemovesStaleEnvFileWithoutEnvArtifact(t *testing.T) {
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	envPath := filepath.Join(svc.DataDir, ".env")
+	if err := os.WriteFile(envPath, []byte("STALE=1\n"), 0644); err != nil {
+		t.Fatalf("failed to write stale env file: %v", err)
+	}
+
+	if _, err := svc.command("ps"); err != nil {
+		t.Fatalf("command returned error: %v", err)
+	}
+
+	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
+		t.Fatalf("stale env file stat error = %v, want not exist", err)
+	}
+}
+
+func TestDockerComposeStopPropagatesSystemdStopError(t *testing.T) {
+	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,running\n")
+	calls := []cmdCall{}
+	stopErr := errors.New("systemd stop failed")
+	sd := &fakeDockerSystemdService{stopErr: stopErr}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.sd = sd
+
+	err := svc.Stop()
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("Stop error = %v, want systemd stop error", err)
+	}
+	if sd.stopCalls != 1 {
+		t.Fatalf("systemd Stop called %d times, want 1", sd.stopCalls)
+	}
+	if !composeCallHasSubcmd(calls, "stop") {
+		t.Fatalf("expected compose stop command, got %#v", calls)
+	}
+}
+
+func TestDockerComposeRemovePropagatesSystemdStopErrorAfterCleanup(t *testing.T) {
+	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,running\n")
+	calls := []cmdCall{}
+	stopErr := errors.New("systemd stop failed")
+	sd := &fakeDockerSystemdService{stopErr: stopErr}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.sd = sd
+
+	err := svc.Remove()
+	if !errors.Is(err, stopErr) {
+		t.Fatalf("Remove error = %v, want systemd stop error", err)
+	}
+	if sd.stopCalls != 1 {
+		t.Fatalf("systemd Stop called %d times, want 1", sd.stopCalls)
+	}
+	if sd.uninstallCalls != 1 {
+		t.Fatalf("systemd Uninstall called %d times, want 1", sd.uninstallCalls)
+	}
+	assertCallOrder(t, calls,
+		callSpec{composeSubcmd: "ps"},
+		callSpec{composeSubcmd: "down"},
+	)
+}
+
 func TestNewDockerComposeServiceSetsContextAwareCommandFactory(t *testing.T) {
 	tmp := t.TempDir()
 	composePath := filepath.Join(tmp, "compose.yml")
@@ -268,6 +369,38 @@ func recordCmdContext(t *testing.T, base func(string, ...string) *exec.Cmd) func
 	}
 }
 
+type fakeDockerSystemdService struct {
+	stopErr      error
+	uninstallErr error
+	installErr   error
+	startAuxErr  error
+
+	stopCalls      int
+	uninstallCalls int
+}
+
+func (f *fakeDockerSystemdService) Install() error {
+	return f.installErr
+}
+
+func (f *fakeDockerSystemdService) Stop() error {
+	f.stopCalls++
+	return f.stopErr
+}
+
+func (f *fakeDockerSystemdService) Uninstall() error {
+	f.uninstallCalls++
+	return f.uninstallErr
+}
+
+func (f *fakeDockerSystemdService) StartAuxiliaryUnits() error {
+	return f.startAuxErr
+}
+
+func (f *fakeDockerSystemdService) hasArtifact(db.ArtifactName) bool {
+	return false
+}
+
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
@@ -294,6 +427,9 @@ func TestHelperProcess(t *testing.T) {
 		}
 	}
 	actualArgs := cmdArgs[1:]
+	if logPath := os.Getenv("HELPER_COMMAND_LOG"); logPath != "" {
+		appendHelperCommandLog(logPath, cmdArgs[0], actualArgs)
+	}
 	if len(actualArgs) > 0 && actualArgs[0] == "compose" {
 		if composeSubcommand(actualArgs) == "ps" {
 			output := os.Getenv("HELPER_DOCKER_PS_OUTPUT")
@@ -319,6 +455,20 @@ func TestHelperProcess(t *testing.T) {
 		}
 	}
 	os.Exit(0)
+}
+
+func appendHelperCommandLog(path, name string, args []string) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		os.Exit(2)
+	}
+	if _, err := f.WriteString(name + "\t" + strings.Join(args, " ") + "\n"); err != nil {
+		_ = f.Close()
+		os.Exit(2)
+	}
+	if err := f.Close(); err != nil {
+		os.Exit(2)
+	}
 }
 
 type callSpec struct {

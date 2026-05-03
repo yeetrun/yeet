@@ -60,6 +60,18 @@ func (linuxNetNSInspector) ProjectContainers(ctx context.Context, project string
 		return nil, err
 	}
 
+	containerIDs, err := projectContainerIDs(ctx, dockerPath, project)
+	if err != nil {
+		return nil, err
+	}
+	if len(containerIDs) == 0 {
+		return nil, nil
+	}
+
+	return inspectProjectContainers(ctx, dockerPath, project, containerIDs)
+}
+
+func projectContainerIDs(ctx context.Context, dockerPath, project string) ([]string, error) {
 	psCmd := exec.CommandContext(ctx, dockerPath, "compose", "--project-name", project, "ps", "-q")
 	output, err := psCmd.Output()
 	if err != nil {
@@ -68,19 +80,11 @@ func (linuxNetNSInspector) ProjectContainers(ctx context.Context, project string
 		}
 		return nil, fmt.Errorf("docker compose ps -q for %q: %w", project, err)
 	}
+	return splitNonEmptyLines(string(output)), nil
+}
 
-	containerIDs := splitNonEmptyLines(string(output))
-	if len(containerIDs) == 0 {
-		return nil, nil
-	}
-
-	args := []string{
-		"inspect",
-		"--format",
-		`{{.Id}}{{"\t"}}{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s=%s " $name $network.EndpointID}}{{end}}`,
-	}
-	args = append(args, containerIDs...)
-	inspectCmd := exec.CommandContext(ctx, dockerPath, args...)
+func inspectProjectContainers(ctx context.Context, dockerPath, project string, containerIDs []string) ([]composeContainer, error) {
+	inspectCmd := exec.CommandContext(ctx, dockerPath, composeContainerInspectArgs(containerIDs)...)
 	inspectOutput, err := inspectCmd.Output()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -88,28 +92,56 @@ func (linuxNetNSInspector) ProjectContainers(ctx context.Context, project string
 		}
 		return nil, fmt.Errorf("docker inspect for %q: %w", project, err)
 	}
+	return parseComposeContainerInspectOutput(string(inspectOutput))
+}
 
-	lines := splitNonEmptyRawLines(string(inspectOutput))
+func composeContainerInspectArgs(containerIDs []string) []string {
+	args := []string{
+		"inspect",
+		"--format",
+		`{{.Id}}{{"\t"}}{{range $name, $network := .NetworkSettings.Networks}}{{printf "%s=%s " $name $network.EndpointID}}{{end}}`,
+	}
+	return append(args, containerIDs...)
+}
+
+func parseComposeContainerInspectOutput(output string) ([]composeContainer, error) {
+	lines := splitNonEmptyRawLines(output)
 	containers := make([]composeContainer, 0, len(lines))
 	for _, line := range lines {
-		fields := strings.Split(line, "\t")
-		if len(fields) != 2 {
-			return nil, fmt.Errorf("unexpected docker inspect output: %q", line)
+		container, err := parseComposeContainerInspectLine(line)
+		if err != nil {
+			return nil, err
 		}
-		networks := map[string]string{}
-		for _, network := range strings.Fields(fields[1]) {
-			name, endpointID, ok := strings.Cut(network, "=")
-			if !ok {
-				return nil, fmt.Errorf("unexpected docker network entry: %q", network)
-			}
-			networks[name] = endpointID
-		}
-		containers = append(containers, composeContainer{
-			ID:                 fields[0],
-			NetworkEndpointIDs: networks,
-		})
+		containers = append(containers, container)
 	}
 	return containers, nil
+}
+
+func parseComposeContainerInspectLine(line string) (composeContainer, error) {
+	fields := strings.Split(line, "\t")
+	if len(fields) != 2 {
+		return composeContainer{}, fmt.Errorf("unexpected docker inspect output: %q", line)
+	}
+	networks, err := parseComposeNetworkEndpointIDs(fields[1])
+	if err != nil {
+		return composeContainer{}, err
+	}
+	return composeContainer{
+		ID:                 fields[0],
+		NetworkEndpointIDs: networks,
+	}, nil
+}
+
+func parseComposeNetworkEndpointIDs(output string) (map[string]string, error) {
+	networks := map[string]string{}
+	for _, network := range strings.Fields(output) {
+		name, endpointID, ok := strings.Cut(network, "=")
+		if !ok {
+			return nil, fmt.Errorf("unexpected docker network entry: %q", network)
+		}
+		networks[name] = endpointID
+	}
+	return networks, nil
 }
 
 func selectNetNSContainers(containers []composeContainer, network string) []composeContainer {

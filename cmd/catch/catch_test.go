@@ -5,11 +5,19 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/catch"
 )
 
 func TestDetectInstallUserFromEnv(t *testing.T) {
@@ -95,6 +103,288 @@ func TestVerifyContainerdSnapshotterConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSetupDockerSkipsInstallWhenDockerPresent(t *testing.T) {
+	var stderr bytes.Buffer
+	confirmed := false
+	ran := false
+
+	err := setupDockerWith(dockerSetupDeps{
+		dockerCmd: func() (string, error) {
+			return "/usr/bin/docker", nil
+		},
+		confirm: func(io.Reader, io.Writer, string) (bool, error) {
+			confirmed = true
+			return true, nil
+		},
+		stderr:     &stderr,
+		stdin:      strings.NewReader(""),
+		scriptURL:  "http://127.0.0.1/docker.sh",
+		httpClient: http.DefaultClient,
+		runScript: func(string) error {
+			ran = true
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("setupDockerWith returned error: %v", err)
+	}
+	if confirmed {
+		t.Fatalf("setupDockerWith prompted even though docker was available")
+	}
+	if ran {
+		t.Fatalf("setupDockerWith ran installer even though docker was available")
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("setupDockerWith wrote stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestSetupDockerDeclineSkipsInstall(t *testing.T) {
+	var stderr bytes.Buffer
+	ran := false
+
+	err := setupDockerWith(dockerSetupDeps{
+		dockerCmd: func() (string, error) {
+			return "", errors.New("missing")
+		},
+		confirm: func(io.Reader, io.Writer, string) (bool, error) {
+			return false, nil
+		},
+		stderr:     &stderr,
+		stdin:      strings.NewReader("n\n"),
+		scriptURL:  "http://127.0.0.1/docker.sh",
+		httpClient: http.DefaultClient,
+		runScript: func(string) error {
+			ran = true
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("setupDockerWith returned error: %v", err)
+	}
+	if ran {
+		t.Fatalf("setupDockerWith ran installer after declined confirmation")
+	}
+	if got := stderr.String(); !strings.Contains(got, "Warning: docker is recommended but not installed") {
+		t.Fatalf("setupDockerWith stderr = %q, want docker warning", got)
+	}
+}
+
+func TestSetupDockerDownloadsAndRunsConfirmedScript(t *testing.T) {
+	const script = "echo installing docker\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/docker.sh" {
+			t.Fatalf("request path = %q, want /docker.sh", r.URL.Path)
+		}
+		_, _ = io.WriteString(w, script)
+	}))
+	defer server.Close()
+
+	var stderr bytes.Buffer
+	var ranPath string
+	err := setupDockerWith(dockerSetupDeps{
+		dockerCmd: func() (string, error) {
+			return "", errors.New("missing")
+		},
+		confirm: func(io.Reader, io.Writer, string) (bool, error) {
+			return true, nil
+		},
+		stderr:     &stderr,
+		stdin:      strings.NewReader("y\n"),
+		scriptURL:  server.URL + "/docker.sh",
+		httpClient: server.Client(),
+		runScript: func(path string) error {
+			ranPath = path
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if string(raw) != script {
+				return fmt.Errorf("script content = %q, want %q", string(raw), script)
+			}
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("setupDockerWith returned error: %v", err)
+	}
+	if ranPath == "" {
+		t.Fatalf("setupDockerWith did not run installer")
+	}
+	if _, err := os.Stat(ranPath); !os.IsNotExist(err) {
+		t.Fatalf("installer temp path still exists or stat failed: %v", err)
+	}
+}
+
+func TestDoInstallWritesCurrentExecutableWithGeneratedServiceConfig(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := &catch.Config{}
+	ts := &fakeInstallTSNet{}
+	inst := &fakeCatchInstaller{}
+
+	var metaDir string
+	var gotCfg *catch.Config
+	var gotInstallerCfg catch.FileInstallerCfg
+	err := doInstallWith(cfg, dataDir, catchInstallDeps{
+		writeInstallMeta: func(dir string) error {
+			metaDir = dir
+			return nil
+		},
+		initTSNet: func(dir string) installTSNet {
+			if dir != dataDir {
+				t.Fatalf("initTSNet dir = %q, want %q", dir, dataDir)
+			}
+			return ts
+		},
+		newInstaller: func(cfg *catch.Config, installerCfg catch.FileInstallerCfg) (catchServiceInstaller, error) {
+			gotCfg = cfg
+			gotInstallerCfg = installerCfg
+			return inst, nil
+		},
+		executable: func() (string, error) {
+			return "/tmp/catch-bin", nil
+		},
+		readFile: func(path string) ([]byte, error) {
+			if path != "/tmp/catch-bin" {
+				t.Fatalf("readFile path = %q, want /tmp/catch-bin", path)
+			}
+			return []byte("binary"), nil
+		},
+		logf: func(string, ...any) {},
+		tsnetHost: func() string {
+			return "catch-test"
+		},
+	})
+	if err != nil {
+		t.Fatalf("doInstallWith returned error: %v", err)
+	}
+	if metaDir != dataDir {
+		t.Fatalf("writeInstallMeta dir = %q, want %q", metaDir, dataDir)
+	}
+	if gotCfg != cfg {
+		t.Fatalf("newInstaller cfg = %p, want %p", gotCfg, cfg)
+	}
+	if gotInstallerCfg.ServiceName != catch.CatchService {
+		t.Fatalf("installer service = %q, want %q", gotInstallerCfg.ServiceName, catch.CatchService)
+	}
+	wantArgs := []string{
+		fmt.Sprintf("--data-dir=%v", dataDir),
+		"--tsnet-host=catch-test",
+	}
+	if !reflect.DeepEqual(gotInstallerCfg.Args, wantArgs) {
+		t.Fatalf("installer args = %#v, want %#v", gotInstallerCfg.Args, wantArgs)
+	}
+	if got := inst.String(); got != "binary" {
+		t.Fatalf("installer wrote %q, want binary", got)
+	}
+	if inst.failed {
+		t.Fatalf("installer was marked failed")
+	}
+	if !inst.closed {
+		t.Fatalf("installer was not closed")
+	}
+	if !ts.closed {
+		t.Fatalf("tsnet server was not closed")
+	}
+}
+
+func TestDoInstallExecutableErrorFailsInstaller(t *testing.T) {
+	dataDir := t.TempDir()
+	ts := &fakeInstallTSNet{}
+	inst := &fakeCatchInstaller{}
+
+	err := doInstallWith(&catch.Config{}, dataDir, catchInstallDeps{
+		writeInstallMeta: func(string) error { return nil },
+		initTSNet:        func(string) installTSNet { return ts },
+		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
+			return inst, nil
+		},
+		executable: func() (string, error) {
+			return "", errors.New("boom")
+		},
+		readFile: func(string) ([]byte, error) {
+			t.Fatalf("readFile should not be called after executable error")
+			return nil, nil
+		},
+		logf:      func(string, ...any) {},
+		tsnetHost: func() string { return "catch-test" },
+	})
+	if err == nil {
+		t.Fatalf("doInstallWith succeeded")
+	}
+	if !strings.Contains(err.Error(), "failed to get executable path") {
+		t.Fatalf("doInstallWith error = %q, want executable path failure", err)
+	}
+	if !inst.failed {
+		t.Fatalf("installer was not marked failed")
+	}
+	if !inst.closed {
+		t.Fatalf("installer was not closed")
+	}
+	if !ts.closed {
+		t.Fatalf("tsnet server was not closed")
+	}
+}
+
+func TestDoInstallRequiresTSNet(t *testing.T) {
+	newInstallerCalled := false
+	err := doInstallWith(&catch.Config{}, t.TempDir(), catchInstallDeps{
+		writeInstallMeta: func(string) error { return nil },
+		initTSNet:        func(string) installTSNet { return nil },
+		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
+			newInstallerCalled = true
+			return nil, nil
+		},
+		executable: func() (string, error) { return "/tmp/catch-bin", nil },
+		readFile:   func(string) ([]byte, error) { return []byte("binary"), nil },
+		logf:       func(string, ...any) {},
+		tsnetHost:  func() string { return "catch-test" },
+	})
+	if err == nil {
+		t.Fatalf("doInstallWith succeeded")
+	}
+	if !strings.Contains(err.Error(), "failed to initialize tsnet") {
+		t.Fatalf("doInstallWith error = %q, want tsnet failure", err)
+	}
+	if newInstallerCalled {
+		t.Fatalf("newInstaller was called after tsnet initialization failed")
+	}
+}
+
+type fakeInstallTSNet struct {
+	closed   bool
+	closeErr error
+}
+
+func (f *fakeInstallTSNet) Close() error {
+	f.closed = true
+	return f.closeErr
+}
+
+type fakeCatchInstaller struct {
+	bytes.Buffer
+	closed   bool
+	closeErr error
+	failed   bool
+	writeErr error
+}
+
+func (f *fakeCatchInstaller) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return f.Buffer.Write(p)
+}
+
+func (f *fakeCatchInstaller) Close() error {
+	f.closed = true
+	return f.closeErr
+}
+
+func (f *fakeCatchInstaller) Fail() {
+	f.failed = true
 }
 
 func TestHandleSpecialCommand(t *testing.T) {

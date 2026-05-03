@@ -22,6 +22,17 @@ type tailscaleSetupFlagsParsed struct {
 	ClientSecret string `flag:"client-secret" help:"Tailscale OAuth client secret (tskey-client-...)"`
 }
 
+var (
+	handleSvcCmdFn       = HandleSvcCmd
+	tailscaleSetupCallFn = func(ctx context.Context, host string, req catchrpc.TailscaleSetupRequest) (catchrpc.TailscaleSetupResponse, error) {
+		var resp catchrpc.TailscaleSetupResponse
+		if err := newRPCClient(host).Call(ctx, "catch.TailscaleSetup", req, &resp); err != nil {
+			return catchrpc.TailscaleSetupResponse{}, err
+		}
+		return resp, nil
+	}
+)
+
 func parseTailscaleSetupFlags(args []string) (tailscaleSetupFlagsParsed, []string, error) {
 	if len(args) > 0 && args[0] == "tailscale" {
 		args = args[1:]
@@ -42,7 +53,7 @@ func HandleTailscale(ctx context.Context, args []string) error {
 		if flags.ClientSecret != "" {
 			return fmt.Errorf("--client-secret requires --setup")
 		}
-		return HandleSvcCmd(args)
+		return handleSvcCmdFn(args)
 	}
 	if len(remaining) > 0 {
 		return fmt.Errorf("tailscale --setup does not accept additional arguments")
@@ -58,16 +69,17 @@ func HandleTailscale(ctx context.Context, args []string) error {
 		return err
 	}
 
-	var resp catchrpc.TailscaleSetupResponse
-	if err := newRPCClient(Host()).Call(ctx, "catch.TailscaleSetup", catchrpc.TailscaleSetupRequest{
+	host := Host()
+	resp, err := tailscaleSetupCallFn(ctx, host, catchrpc.TailscaleSetupRequest{
 		ClientSecret: secret,
-	}, &resp); err != nil {
+	})
+	if err != nil {
 		return err
 	}
 	if !resp.Verified {
 		return fmt.Errorf("tailscale secret written but verification failed")
 	}
-	_, err = fmt.Fprintf(os.Stdout, "Tailscale client secret stored on %s (%s).\n", Host(), resp.Path)
+	_, err = fmt.Fprintf(os.Stdout, "Tailscale client secret stored on %s (%s).\n", host, resp.Path)
 	return err
 }
 

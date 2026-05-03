@@ -5,7 +5,10 @@
 package catch
 
 import (
+	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/db"
@@ -59,6 +62,105 @@ func TestSystemdMountFilesBuildsMountAndAutomountPaths(t *testing.T) {
 	}
 }
 
+func TestSystemdMounterMountWritesUnitFilesAndEnablesAutomount(t *testing.T) {
+	root := t.TempDir()
+	systemdRoot := filepath.Join(root, "systemd")
+	if err := os.Mkdir(systemdRoot, 0o755); err != nil {
+		t.Fatalf("mkdir systemd root: %v", err)
+	}
+	mountTarget := filepath.Join(root, "mnt", "data")
+	if err := os.Mkdir(filepath.Dir(mountTarget), 0o755); err != nil {
+		t.Fatalf("mkdir mount parent: %v", err)
+	}
+
+	var commands [][]string
+	stubSystemdMountHooks(t, systemdRoot, &commands, nil)
+
+	vol := db.Volume{
+		Name: "data",
+		Src:  "host:/srv/data",
+		Path: mountTarget,
+		Type: "sshfs",
+		Opts: "ro",
+		Deps: "network-online.target",
+	}
+	if err := (&systemdMounter{v: vol}).mount(); err != nil {
+		t.Fatalf("mount failed: %v", err)
+	}
+
+	if info, err := os.Stat(mountTarget); err != nil || !info.IsDir() {
+		t.Fatalf("mount target stat = %v, %v; want directory", info, err)
+	}
+	unitName := translateMountPathToUnitName(mountTarget)
+	mountUnit, err := os.ReadFile(filepath.Join(systemdRoot, unitName+".mount"))
+	if err != nil {
+		t.Fatalf("read mount unit: %v", err)
+	}
+	if got := string(mountUnit); !strings.Contains(got, "Where="+mountTarget) || !strings.Contains(got, "What=host:/srv/data") {
+		t.Fatalf("mount unit content missing volume fields:\n%s", got)
+	}
+	if _, err := os.Stat(filepath.Join(systemdRoot, unitName+".automount")); err != nil {
+		t.Fatalf("stat automount unit: %v", err)
+	}
+
+	wantCommands := [][]string{
+		{"daemon-reload"},
+		{"enable", "--now", unitName + ".automount"},
+	}
+	if !reflect.DeepEqual(commands, wantCommands) {
+		t.Fatalf("systemd commands = %#v, want %#v", commands, wantCommands)
+	}
+}
+
+func TestSystemdMounterUmountStopsActiveUnitsAndRemovesFiles(t *testing.T) {
+	root := t.TempDir()
+	systemdRoot := filepath.Join(root, "systemd")
+	if err := os.Mkdir(systemdRoot, 0o755); err != nil {
+		t.Fatalf("mkdir systemd root: %v", err)
+	}
+	mountTarget := filepath.Join(root, "mnt", "data")
+	if err := os.MkdirAll(mountTarget, 0o755); err != nil {
+		t.Fatalf("mkdir mount target: %v", err)
+	}
+	unitName := translateMountPathToUnitName(mountTarget)
+	for _, suffix := range []string{".mount", ".automount"} {
+		if err := os.WriteFile(filepath.Join(systemdRoot, unitName+suffix), []byte("unit\n"), 0o644); err != nil {
+			t.Fatalf("write unit %s: %v", suffix, err)
+		}
+	}
+
+	var commands [][]string
+	stubSystemdMountHooks(t, systemdRoot, &commands, func(args ...string) bool {
+		if len(args) != 3 || args[1] != "--quiet" {
+			return false
+		}
+		return args[0] == "is-enabled" && args[2] == unitName+".automount" ||
+			args[0] == "is-active" && args[2] == unitName+".mount"
+	})
+
+	if err := (&systemdMounter{v: db.Volume{Path: mountTarget}}).umount(); err != nil {
+		t.Fatalf("umount failed: %v", err)
+	}
+
+	wantCommands := [][]string{
+		{"disable", "--now", unitName + ".automount"},
+		{"stop", unitName + ".mount"},
+		{"daemon-reload"},
+	}
+	if !reflect.DeepEqual(commands, wantCommands) {
+		t.Fatalf("systemd commands = %#v, want %#v", commands, wantCommands)
+	}
+	for _, path := range []string{
+		filepath.Join(systemdRoot, unitName+".mount"),
+		filepath.Join(systemdRoot, unitName+".automount"),
+		mountTarget,
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("expected %s to be removed, stat err = %v", path, err)
+		}
+	}
+}
+
 func TestSystemdUnitCommands(t *testing.T) {
 	cmds := systemdUmountCommands("mnt-data", true, true)
 	want := [][]string{
@@ -78,4 +180,25 @@ func TestSystemdUnitCommands(t *testing.T) {
 			}
 		}
 	}
+}
+
+func stubSystemdMountHooks(t *testing.T, systemdRoot string, commands *[][]string, status func(args ...string) bool) {
+	t.Helper()
+	oldSystemdDir := systemdSystemDir
+	oldRunSystemdCommand := runSystemdCommand
+	oldSystemdQuietStatus := systemdQuietStatus
+	systemdSystemDir = systemdRoot
+	runSystemdCommand = func(args ...string) error {
+		*commands = append(*commands, append([]string(nil), args...))
+		return nil
+	}
+	if status == nil {
+		status = func(args ...string) bool { return false }
+	}
+	systemdQuietStatus = status
+	t.Cleanup(func() {
+		systemdSystemDir = oldSystemdDir
+		runSystemdCommand = oldRunSystemdCommand
+		systemdQuietStatus = oldSystemdQuietStatus
+	})
 }

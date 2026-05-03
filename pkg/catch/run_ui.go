@@ -133,15 +133,22 @@ func (u *runUI) UpdateDetail(detail string) {
 	suspended := u.suspended
 	u.mu.Unlock()
 
-	if !u.enabled || suspended || sp == nil {
+	if !shouldUpdateRunUISpinner(u.enabled, suspended, sp != nil) {
 		u.plain.UpdateDetail(detail)
 		return
 	}
-	text := name
-	if detail != "" {
-		text = fmt.Sprintf("%s %s", name, detail)
+	sp.Update(runUIDetailText(name, detail))
+}
+
+func shouldUpdateRunUISpinner(enabled, suspended, hasSpinner bool) bool {
+	return enabled && !suspended && hasSpinner
+}
+
+func runUIDetailText(name, detail string) string {
+	if detail == "" {
+		return name
 	}
-	sp.Update(text)
+	return fmt.Sprintf("%s %s", name, detail)
 }
 
 func (u *runUI) DoneStep(detail string) {

@@ -30,7 +30,7 @@ func HandleSkirt(ctx context.Context, _ []string) error {
 		x++
 		i := x % p.GetLength()
 		c := colors[x%len(colors)]
-		c.Println(p.GetFrame(i))
+		_, _ = c.Println(p.GetFrame(i))
 		select {
 		case <-ctx.Done():
 			return nil

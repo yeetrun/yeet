@@ -7,8 +7,10 @@ package catch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/cli"
@@ -292,6 +294,39 @@ func TestRunEnvCommandRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestEditEnvCmdFuncReturnsServiceError(t *testing.T) {
+	execer := &ttyExecer{s: newTestServer(t), sn: "missing"}
+
+	err := execer.editEnvCmdFunc()
+	if !errors.Is(err, errServiceNotFound) {
+		t.Fatalf("editEnvCmdFunc error = %v, want errServiceNotFound", err)
+	}
+}
+
+func TestEnvSetCmdFuncNoChange(t *testing.T) {
+	server := newTestServer(t)
+	dir := t.TempDir()
+	latest := filepath.Join(dir, ".env")
+	if err := os.WriteFile(latest, []byte("FOO=one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service := serviceWithEnvArtifacts(latest, "")
+	service.Name = "svc"
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"svc": service}}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	execer := &ttyExecer{s: server, sn: "svc", rw: &out}
+	err := execer.envSetCmdFunc([]envAssignment{{Key: "FOO", Value: "one"}})
+	if err != nil {
+		t.Fatalf("envSetCmdFunc failed: %v", err)
+	}
+	if got := out.String(); got != "No changes detected\n" {
+		t.Fatalf("output = %q", got)
+	}
+}
+
 func TestPrepareEditedEnvFileDetectsNoChangeWithExistingSource(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, ".env")
@@ -308,6 +343,54 @@ func TestPrepareEditedEnvFileDetectsNoChangeWithExistingSource(t *testing.T) {
 	}
 	if changed {
 		t.Fatalf("expected unchanged files")
+	}
+}
+
+func TestPrepareEnvEditSessionCopiesLatestEnvFile(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, ".env")
+	if err := os.WriteFile(src, []byte("FOO=one\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	session, err := prepareEnvEditSession(serviceWithEnvArtifacts(src, "").View())
+	if err != nil {
+		t.Fatalf("prepareEnvEditSession failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Remove(session.tmpPath)
+	})
+
+	if session.srcPath != src {
+		t.Fatalf("session source = %q, want %q", session.srcPath, src)
+	}
+	got, err := os.ReadFile(session.tmpPath)
+	if err != nil {
+		t.Fatalf("read temp env: %v", err)
+	}
+	if string(got) != "FOO=one\n" {
+		t.Fatalf("temp env content = %q", got)
+	}
+}
+
+func TestApplyEnvEditSessionReportsNoChange(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, ".env")
+	tmp := filepath.Join(dir, "tmp.env")
+	for _, path := range []string{src, tmp} {
+		if err := os.WriteFile(path, []byte("FOO=one\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	var out bytes.Buffer
+	execer := &ttyExecer{rw: &out}
+	err := execer.applyEnvEditSession(envEditSession{srcPath: src, tmpPath: tmp})
+	if err != nil {
+		t.Fatalf("applyEnvEditSession failed: %v", err)
+	}
+	if got := out.String(); got != "No changes detected\n" {
+		t.Fatalf("output = %q", got)
 	}
 }
 
@@ -345,5 +428,30 @@ func TestRemoveTempFileReturnsCleanupError(t *testing.T) {
 	err := removeTempFile(filepath.Join(t.TempDir(), "missing"))
 	if err == nil {
 		t.Fatalf("expected remove error")
+	}
+}
+
+func TestNewEnvSetPlanAppliesAssignments(t *testing.T) {
+	plan, err := newEnvSetPlan([]byte("FOO=one\n"), []envAssignment{{Key: "FOO", Value: "two"}})
+	if err != nil {
+		t.Fatalf("newEnvSetPlan failed: %v", err)
+	}
+	if !plan.changed {
+		t.Fatalf("expected changed=true")
+	}
+	if got := string(plan.contents); got != "FOO=two\n" {
+		t.Fatalf("plan contents = %q", got)
+	}
+}
+
+func TestRunEnvSetPlanReportsNoChange(t *testing.T) {
+	var out bytes.Buffer
+	execer := &ttyExecer{rw: &out}
+	err := execer.runEnvSetPlan(envSetPlan{contents: []byte("FOO=one\n")})
+	if err != nil {
+		t.Fatalf("runEnvSetPlan failed: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "No changes detected\n") {
+		t.Fatalf("output = %q", got)
 	}
 }

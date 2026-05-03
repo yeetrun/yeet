@@ -185,34 +185,34 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 	defer ui.Stop()
 
 	ui.StartStep("Check local")
-	source, err := resolveInitCatchSource(opts)
+	source, err := resolveInitCatchSourceFn(opts)
 	if err != nil {
 		ui.FailStep(err.Error())
 		return err
 	}
 	ui.DoneStep(source.localDetail())
 
-	if err := verifyInitSSH(ui, userAtRemote); err != nil {
+	if err := verifyInitSSHFn(ui, userAtRemote); err != nil {
 		return err
 	}
 
-	systemName, goarch, err := detectInitHost(ui, userAtRemote)
+	systemName, goarch, err := detectInitHostFn(ui, userAtRemote)
 	if err != nil {
 		return err
 	}
 
 	if source.useGithub {
-		if err := downloadInitCatch(ui, userAtRemote, systemName, goarch, opts.nightly); err != nil {
+		if err := downloadInitCatchFn(ui, userAtRemote, systemName, goarch, opts.nightly); err != nil {
 			return err
 		}
-	} else if err := buildAndUploadInitCatch(ui, userAtRemote, systemName, goarch, source); err != nil {
+	} else if err := buildAndUploadInitCatchFn(ui, userAtRemote, systemName, goarch, source); err != nil {
 		return err
 	}
 
-	if err := chmodInitCatch(ui, userAtRemote); err != nil {
+	if err := chmodInitCatchFn(ui, userAtRemote); err != nil {
 		return err
 	}
-	return installInitCatch(ui, userAtRemote, useSudo)
+	return installInitCatchFn(ui, userAtRemote, useSudo)
 }
 
 type initCatchSource struct {
@@ -221,6 +221,16 @@ type initCatchSource struct {
 	goVersion string
 	reason    string
 }
+
+var (
+	resolveInitCatchSourceFn  = resolveInitCatchSource
+	verifyInitSSHFn           = verifyInitSSH
+	detectInitHostFn          = detectInitHost
+	downloadInitCatchFn       = downloadInitCatch
+	buildAndUploadInitCatchFn = buildAndUploadInitCatch
+	chmodInitCatchFn          = chmodInitCatch
+	installInitCatchFn        = installInitCatch
+)
 
 func (s initCatchSource) localDetail() string {
 	if s.useGithub {

@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -297,5 +298,28 @@ func TestSaveCronConfigCreatesToml(t *testing.T) {
 		if entry.Args[i] != binArgs[i] {
 			t.Fatalf("args[%d] = %q, want %q", i, entry.Args[i], binArgs[i])
 		}
+	}
+}
+
+func TestProjectConfigAllHostsDedupesTrimsAndSorts(t *testing.T) {
+	cfg := &ProjectConfig{
+		Hosts: []string{" host-b ", "", "host-a", "host-b"},
+		Services: []ServiceEntry{
+			{Name: "svc-a", Host: "host-c"},
+			{Name: "svc-b", Host: " host-a "},
+			{Name: "svc-c", Host: " "},
+		},
+	}
+
+	got := cfg.AllHosts()
+	if gotString := strings.Join(got, ","); gotString != "host-a,host-b,host-c" {
+		t.Fatalf("AllHosts = %#v", got)
+	}
+}
+
+func TestProjectConfigAllHostsNilConfig(t *testing.T) {
+	var cfg *ProjectConfig
+	if got := cfg.AllHosts(); got != nil {
+		t.Fatalf("AllHosts = %#v, want nil", got)
 	}
 }

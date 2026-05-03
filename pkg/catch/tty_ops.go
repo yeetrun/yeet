@@ -35,6 +35,9 @@ var (
 	mountVolume = func(vol db.Volume) error {
 		return (&systemdMounter{v: vol}).mount()
 	}
+	unmountVolume = func(e *ttyExecer, vol db.Volume) error {
+		return (&systemdMounter{e: e, v: vol}).umount()
+	}
 )
 
 func (e *ttyExecer) dockerCmdFunc(args []string) error {
@@ -123,29 +126,44 @@ func (e *ttyExecer) eventsCmdFunc(flags cli.EventsFlags) error {
 }
 
 func (e *ttyExecer) umountCmdFunc(args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("invalid number of arguments")
+	mountName, err := umountNameFromArgs(args)
+	if err != nil {
+		return err
 	}
-	mountName := args[0]
+	d, vol, err := e.unmountVolumeData(mountName)
+	if err != nil {
+		return err
+	}
+	if err := unmountVolume(e, vol); err != nil {
+		return fmt.Errorf("failed to umount %s: %w", vol.Path, err)
+	}
+	return e.deleteUnmountedVolume(d, mountName)
+}
+
+func umountNameFromArgs(args []string) (string, error) {
+	if len(args) != 1 {
+		return "", fmt.Errorf("invalid number of arguments")
+	}
+	return args[0], nil
+}
+
+func (e *ttyExecer) unmountVolumeData(mountName string) (*db.Data, db.Volume, error) {
 	dv, err := e.s.cfg.DB.Get()
 	if err != nil {
-		return fmt.Errorf("failed to get services: %w", err)
+		return nil, db.Volume{}, fmt.Errorf("failed to get services: %w", err)
 	}
 	vol, ok := dv.Volumes().GetOk(mountName)
 	if !ok {
-		return fmt.Errorf("volume %q not found", mountName)
+		return nil, db.Volume{}, fmt.Errorf("volume %q not found", mountName)
 	}
-	m := &systemdMounter{e: e, v: *vol.AsStruct()}
-	if err := m.umount(); err != nil {
-		return fmt.Errorf("failed to umount %s: %w", vol.Path(), err)
-	}
+	return dv.AsStruct(), *vol.AsStruct(), nil
+}
 
-	d := dv.AsStruct()
+func (e *ttyExecer) deleteUnmountedVolume(d *db.Data, mountName string) error {
 	delete(d.Volumes, mountName)
 	if err := e.s.cfg.DB.Set(d); err != nil {
 		return fmt.Errorf("failed to save data: %w", err)
 	}
-
 	return nil
 }
 
@@ -281,7 +299,13 @@ func (e *ttyExecer) runRawTailscaleCmd(sv db.ServiceView, args []string) error {
 	return nil
 }
 
-var tailscaleLatestVersionForTrackFn = tailscaleLatestVersionForTrack
+var (
+	tailscaleLatestVersionForTrackFn = tailscaleLatestVersionForTrack
+	tailscaleTrackHTTPClient         = http.DefaultClient
+	tailscaleTrackMetaURL            = func(track string) string {
+		return fmt.Sprintf("https://pkgs.tailscale.com/%s/?mode=json", track)
+	}
+)
 
 type tailscaleTrackMeta struct {
 	TarballsVersion string `json:"TarballsVersion"`
@@ -327,18 +351,29 @@ func tailscaleTrackFromVersion(ver string) (string, error) {
 }
 
 func tailscaleLatestVersionForTrack(track string) (string, error) {
-	track = strings.TrimSpace(track)
-	if track != "stable" && track != "unstable" {
-		return "", fmt.Errorf("invalid tailscale track %q", track)
+	track, err := normalizeTailscaleTrack(track)
+	if err != nil {
+		return "", err
 	}
-	url := fmt.Sprintf("https://pkgs.tailscale.com/%s/?mode=json", track)
-	resp, err := http.Get(url)
+	resp, err := tailscaleTrackHTTPClient.Get(tailscaleTrackMetaURL(track))
 	if err != nil {
 		return "", err
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
+	return tailscaleTrackVersionFromResponse(resp)
+}
+
+func normalizeTailscaleTrack(track string) (string, error) {
+	track = strings.TrimSpace(track)
+	if track != "stable" && track != "unstable" {
+		return "", fmt.Errorf("invalid tailscale track %q", track)
+	}
+	return track, nil
+}
+
+func tailscaleTrackVersionFromResponse(resp *http.Response) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("tailscale package lookup failed: %s", resp.Status)
 	}
@@ -346,6 +381,10 @@ func tailscaleLatestVersionForTrack(track string) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&meta); err != nil {
 		return "", err
 	}
+	return tailscaleTrackVersionFromMeta(meta)
+}
+
+func tailscaleTrackVersionFromMeta(meta tailscaleTrackMeta) (string, error) {
 	ver := strings.TrimSpace(meta.TarballsVersion)
 	if ver == "" {
 		return "", errors.New("tailscale package lookup returned empty version")
@@ -494,28 +533,14 @@ func printTSUpdateIntro(w io.Writer, current, track, latest string, pinned bool)
 
 func (e *ttyExecer) ipCmdFunc() error {
 	if e.sn == CatchService {
-		st, err := e.s.cfg.LocalClient.StatusWithoutPeers(e.ctx)
-		if err != nil {
-			return fmt.Errorf("failed to get IP address: %w", err)
-		}
-		if err := printLines(e.rw, st.TailscaleIPs); err != nil {
-			return fmt.Errorf("failed to write IP address: %w", err)
-		}
-		return nil
+		return e.printCatchTailscaleIPs()
 	}
 
-	args := []string{"-o", "-4", "addr", "list"}
-	if e.sn != SystemService {
-		sv, err := e.s.serviceView(e.sn)
-		if err != nil {
-			return fmt.Errorf("failed to get service view: %w", err)
-		}
-		if _, ok := sv.AsStruct().Artifacts.Gen(db.ArtifactNetNSService, sv.Generation()); ok {
-			netns := fmt.Sprintf("yeet-%s-ns", e.sn)
-			args = append([]string{"netns", "exec", netns, "ip"}, args...)
-		}
+	args, err := e.ipListArgs()
+	if err != nil {
+		return err
 	}
-	ips, err := listIPv4Addrs(args)
+	ips, err := listIPv4AddrsFn(args)
 	if err != nil {
 		return fmt.Errorf("failed to get IP addresses: %w", err)
 	}
@@ -523,6 +548,33 @@ func (e *ttyExecer) ipCmdFunc() error {
 		return fmt.Errorf("failed to write IP address: %w", err)
 	}
 	return nil
+}
+
+func (e *ttyExecer) printCatchTailscaleIPs() error {
+	if e.s.cfg.LocalClient == nil {
+		return errors.New("tailscale client unavailable")
+	}
+	st, err := e.s.cfg.LocalClient.StatusWithoutPeers(e.ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get IP address: %w", err)
+	}
+	if err := printLines(e.rw, st.TailscaleIPs); err != nil {
+		return fmt.Errorf("failed to write IP address: %w", err)
+	}
+	return nil
+}
+
+func (e *ttyExecer) ipListArgs() ([]string, error) {
+	if e.sn == SystemService {
+		args, _ := serviceIPListArgs(e.sn, db.ServiceView{})
+		return args, nil
+	}
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get service view: %w", err)
+	}
+	args, _ := serviceIPListArgs(e.sn, sv)
+	return args, nil
 }
 
 func printIfaceIPs(w io.Writer, ips []ifaceIP) error {

@@ -7,6 +7,7 @@ package svc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -34,10 +35,18 @@ type DockerComposeService struct {
 	DataDir       string
 	NewCmd        func(name string, arg ...string) *exec.Cmd
 	NewCmdContext func(ctx context.Context, name string, arg ...string) *exec.Cmd
-	sd            *SystemdService
+	sd            dockerSystemdService
 
 	netnsInspector netnsInspector
 	installEnvOnce lazy.SyncValue[error]
+}
+
+type dockerSystemdService interface {
+	Install() error
+	Stop() error
+	Uninstall() error
+	StartAuxiliaryUnits() error
+	hasArtifact(db.ArtifactName) bool
 }
 
 // DockerCmd returns the path to the docker binary.
@@ -58,7 +67,24 @@ func (s *DockerComposeService) commandContext(ctx context.Context, args ...strin
 	if err != nil {
 		return nil, err
 	}
-	nargs := []string{
+
+	nargs, err := s.composeCommandArgs()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.installEnvOnce.Get(s.syncComposeEnvFile); err != nil {
+		return nil, fmt.Errorf("failed to copy env file: %v", err)
+	}
+
+	args = append(nargs, args...)
+	c := s.newDockerCommand(ctx, dockerPath, args...)
+	c.Dir = s.DataDir
+	return c, nil
+}
+
+func (s *DockerComposeService) composeCommandArgs() ([]string, error) {
+	args := []string{
 		"compose",
 		"--project-name", s.projectName(s.Name),
 		"--project-directory", s.DataDir,
@@ -67,34 +93,42 @@ func (s *DockerComposeService) commandContext(ctx context.Context, args ...strin
 	if !ok {
 		return nil, fmt.Errorf("compose file not found")
 	}
-	nargs = append(nargs,
+	args = append(args,
 		"--file", cf,
 	)
 	if cf, ok := s.cfg.Artifacts.Gen(db.ArtifactDockerComposeNetwork, s.cfg.Generation); ok {
-		nargs = append(nargs, "--file", cf)
+		args = append(args, "--file", cf)
 	}
+	return args, nil
+}
 
-	if err := s.installEnvOnce.Get(func() error {
-		if ef, ok := s.cfg.Artifacts.Gen(db.ArtifactEnvFile, s.cfg.Generation); ok {
-			return fileutil.CopyFile(ef, filepath.Join(s.DataDir, ".env"))
-		}
-		os.Remove(filepath.Join(s.DataDir, ".env"))
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("failed to copy env file: %v", err)
+func (s *DockerComposeService) syncComposeEnvFile() error {
+	envPath := filepath.Join(s.DataDir, ".env")
+	if ef, ok := s.cfg.Artifacts.Gen(db.ArtifactEnvFile, s.cfg.Generation); ok {
+		return fileutil.CopyFile(ef, envPath)
 	}
-	args = append(nargs, args...)
-	var c *exec.Cmd
+	return removeStaleComposeEnvFile(envPath)
+}
+
+func removeStaleComposeEnvFile(path string) error {
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		log.Printf("failed to remove stale docker compose env file %s: %v", path, err)
+	}
+	return nil
+}
+
+func (s *DockerComposeService) newDockerCommand(ctx context.Context, dockerPath string, args ...string) *exec.Cmd {
 	switch {
 	case s.NewCmdContext != nil:
-		c = s.NewCmdContext(ctx, dockerPath, args...)
+		return s.NewCmdContext(ctx, dockerPath, args...)
 	case s.NewCmd != nil:
-		c = s.NewCmd(dockerPath, args...)
+		return s.NewCmd(dockerPath, args...)
 	default:
-		c = exec.CommandContext(ctx, dockerPath, args...)
+		return exec.CommandContext(ctx, dockerPath, args...)
 	}
-	c.Dir = s.DataDir
-	return c, nil
 }
 
 func (s *DockerComposeService) runCommand(args ...string) error {
@@ -196,8 +230,11 @@ func (s *DockerComposeService) Remove() error {
 	if err := s.Down(); err != nil {
 		return fmt.Errorf("failed to stop service: %v", err)
 	}
-	s.sd.Stop()
-	return s.sd.Uninstall()
+	stopErr := s.stopSystemdService()
+	if s.sd == nil {
+		return stopErr
+	}
+	return joinErrors(stopErr, s.sd.Uninstall())
 }
 
 func (s *DockerComposeService) Down() error {
@@ -227,8 +264,34 @@ func (s *DockerComposeService) Stop() error {
 	} else if !ok {
 		return nil
 	}
-	s.sd.Stop()
-	return s.runCommand("stop")
+	stopErr := s.stopSystemdService()
+	return joinErrors(s.runCommand("stop"), stopErr)
+}
+
+func (s *DockerComposeService) stopSystemdService() error {
+	if s.sd == nil {
+		return nil
+	}
+	if err := s.sd.Stop(); err != nil {
+		return fmt.Errorf("failed to stop systemd service: %w", err)
+	}
+	return nil
+}
+
+func joinErrors(errs ...error) error {
+	nonNil := make([]error, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			nonNil = append(nonNil, err)
+		}
+	}
+	if len(nonNil) == 0 {
+		return nil
+	}
+	if len(nonNil) == 1 {
+		return nonNil[0]
+	}
+	return errors.Join(nonNil...)
 }
 
 func (s *DockerComposeService) Restart() error {
@@ -333,38 +396,43 @@ func (s *DockerComposeService) Statuses() (DockerComposeStatus, error) {
 		return nil, fmt.Errorf("failed to run docker command: %v (%s)", err, ob)
 	}
 
-	output := string(ob)
+	return parseDockerComposeStatuses(string(ob))
+}
+
+func parseDockerComposeStatuses(output string) (DockerComposeStatus, error) {
 	if strings.TrimSpace(output) == "" {
 		return nil, ErrDockerStatusUnknown
 	}
 
 	statuses := make(DockerComposeStatus)
-	lines := strings.Split(output, "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		fields := strings.Split(line, ",")
-		if len(fields) != 2 {
+	for _, line := range splitNonEmptyLines(output) {
+		cn, status, ok := parseDockerComposeStatusLine(line)
+		if !ok {
 			log.Printf("unexpected docker-compose ps output: %s", line)
 			continue
 		}
-		cn := fields[0]
-		switch fields[1] {
-		case "running":
-			statuses[cn] = StatusRunning
-		case "restarting":
-			statuses[cn] = StatusRunning
-		case "exited":
-			statuses[cn] = StatusStopped
-		case "created", "paused", "dead", "removing":
-			statuses[cn] = StatusStopped
-		default:
-			statuses[cn] = StatusUnknown
-		}
+		statuses[cn] = status
 	}
 	return statuses, nil
+}
+
+func parseDockerComposeStatusLine(line string) (string, Status, bool) {
+	fields := strings.Split(line, ",")
+	if len(fields) != 2 {
+		return "", StatusUnknown, false
+	}
+	return fields[0], dockerComposeStateStatus(fields[1]), true
+}
+
+func dockerComposeStateStatus(state string) Status {
+	switch state {
+	case "running", "restarting":
+		return StatusRunning
+	case "exited", "created", "paused", "dead", "removing":
+		return StatusStopped
+	default:
+		return StatusUnknown
+	}
 }
 
 func (s *DockerComposeService) Logs(opts *LogOptions) error {
