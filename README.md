@@ -48,11 +48,35 @@ curl https://mise.run | sh
 echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
 ```
 
-3) From the repo root, install tools (Go 1.25.5) + bootstrap a host:
+3) From the repo root, install tools (Go 1.26.2) + bootstrap a host:
 
 ```bash
 mise install
 mise run init-host -- root@<host>
+```
+
+## Development Quality Gates
+
+Install the repo hooks once:
+
+```bash
+mise install
+mise run install-githooks
+```
+
+Run the same coverage, CRAP, and lint baseline checks manually:
+
+```bash
+mise run quality
+```
+
+The quality gate runs `go test` with coverage, checks CRAP hotspots, and runs
+`golangci-lint` with complexity and bug-risk linters. Existing findings are
+tracked in `tools/quality/baseline/`; new findings fail the hook. When a
+hotspot is fixed, refresh the baseline intentionally:
+
+```bash
+mise run quality:baseline
 ```
 
 ## High-Level Overview

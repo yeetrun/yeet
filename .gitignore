@@ -4,6 +4,7 @@
 /gomod2nix-template
 /Makefile
 /result
+/.tmp
 go.work
 go.work.*
 AGENTS.local.md

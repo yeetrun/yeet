@@ -1,5 +1,6 @@
 [tools]
 go = "1.26.2"
+golangci-lint = "2.12.1"
 pre-commit = "latest"
 staticcheck = "latest"
 
@@ -27,3 +28,26 @@ pre-commit install --install-hooks \
   --hook-type pre-commit \
   --hook-type prepare-commit-msg
 '''
+
+[tasks.test]
+description = "Run the Go test suite"
+run = "go test ./..."
+
+[tasks.coverage]
+description = "Run tests and write the quality coverage profile"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+mkdir -p .tmp/quality
+go test -coverprofile=.tmp/quality/coverage.out -covermode=atomic ./...
+go tool cover -func=.tmp/quality/coverage.out | tee .tmp/quality/coverage.txt
+'''
+
+[tasks.quality]
+description = "Run tests, coverage, CRAP, and lint quality gates"
+run = "tools/quality/check"
+
+[tasks."quality:baseline"]
+description = "Refresh the current CRAP and lint baselines"
+run = "tools/quality/check --update-baseline"
