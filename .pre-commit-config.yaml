@@ -33,6 +33,12 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-commit]
+      - id: yeet-govulncheck
+        name: yeet govulncheck
+        entry: tools/hooks/govulncheck
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
       - id: yeet-quality
         name: yeet coverage and quality gate
         entry: tools/hooks/quality

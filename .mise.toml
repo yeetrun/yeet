@@ -1,5 +1,6 @@
 [tools]
 go = "1.26.2"
+"go:golang.org/x/vuln/cmd/govulncheck" = "latest"
 golangci-lint = "2.12.1"
 pre-commit = "latest"
 staticcheck = "latest"
@@ -47,6 +48,10 @@ go tool cover -func=.tmp/quality/coverage.out | tee .tmp/quality/coverage.txt
 [tasks.quality]
 description = "Run tests, coverage, CRAP, and lint quality gates"
 run = "tools/quality/check"
+
+[tasks.vuln]
+description = "Run the Go vulnerability scanner"
+run = "govulncheck ./..."
 
 [tasks."quality:goal"]
 description = "Run the industry-standard quality goal check"
