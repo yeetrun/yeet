@@ -473,19 +473,19 @@ Expected: PASS
 )
 ```
 
-### Task 5: Live Verification On `pve1` And `hetz`
+### Task 5: Live Verification On `edge-a` And `edge-b`
 
 **Files:**
 - Modify: none
-- Test: live hosts `yeet-pve1`, `yeet-hetz`
+- Test: live hosts `yeet-edge-a`, `yeet-edge-b`
 
 - [ ] **Step 1: Update `catch` on both hosts**
 
 Run:
 
 ```bash
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet init root@pve1
-CATCH_HOST=yeet-hetz go run ./cmd/yeet init root@hetz
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet init root@edge-a
+CATCH_HOST=yeet-edge-b go run ./cmd/yeet init root@edge-b
 ```
 
 Expected: both hosts install the new catch binary cleanly.
@@ -508,8 +508,8 @@ EOF
 Run:
 
 ```bash
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet run netns-reconcile-check-pve1 "$tmpdir/compose.yml" --net=svc
-CATCH_HOST=yeet-hetz go run ./cmd/yeet run netns-reconcile-check-hetz "$tmpdir/compose.yml" --net=svc
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet run netns-reconcile-check-edge-a "$tmpdir/compose.yml" --net=svc
+CATCH_HOST=yeet-edge-b go run ./cmd/yeet run netns-reconcile-check-edge-b "$tmpdir/compose.yml" --net=svc
 ```
 
 Expected: both services deploy and show as running.
@@ -519,9 +519,9 @@ Expected: both services deploy and show as running.
 Run:
 
 ```bash
-ssh root@pve1 'ns=yeet-netns-reconcile-check-pve1-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-pve1 | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"'
+ssh root@edge-a 'ns=yeet-netns-reconcile-check-edge-a-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-edge-a | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"'
 
-ssh root@hetz 'ns=yeet-netns-reconcile-check-hetz-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-hetz | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"'
+ssh root@edge-b 'ns=yeet-netns-reconcile-check-edge-b-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-edge-b | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"'
 ```
 
 Expected: named and container identities match before the forced refresh.
@@ -531,8 +531,8 @@ Expected: named and container identities match before the forced refresh.
 Run:
 
 ```bash
-ssh root@pve1 'systemctl restart yeet-netns-reconcile-check-pve1-ns.service'
-ssh root@hetz 'systemctl restart yeet-netns-reconcile-check-hetz-ns.service'
+ssh root@edge-a 'systemctl restart yeet-netns-reconcile-check-edge-a-ns.service'
+ssh root@edge-b 'systemctl restart yeet-netns-reconcile-check-edge-b-ns.service'
 ```
 
 Expected before catch reconciliation: the named netns identity changes while the currently running container still shows the old netns identity.
@@ -542,8 +542,8 @@ Expected before catch reconciliation: the named netns identity changes while the
 Run:
 
 ```bash
-ssh root@pve1 'systemctl restart catch'
-ssh root@hetz 'systemctl restart catch'
+ssh root@edge-a 'systemctl restart catch'
+ssh root@edge-b 'systemctl restart catch'
 ```
 
 Expected: catch startup runs the scan and restarts only the affected temp compose service on each host.
@@ -553,9 +553,9 @@ Expected: catch startup runs the scan and restarts only the affected temp compos
 Run:
 
 ```bash
-ssh root@pve1 'ns=yeet-netns-reconcile-check-pve1-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-pve1 | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"; journalctl -u catch --since "5 minutes ago" --no-pager | tail -n 50'
+ssh root@edge-a 'ns=yeet-netns-reconcile-check-edge-a-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-edge-a | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"; journalctl -u catch --since "5 minutes ago" --no-pager | tail -n 50'
 
-ssh root@hetz 'ns=yeet-netns-reconcile-check-hetz-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-hetz | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"; journalctl -u catch --since "5 minutes ago" --no-pager | tail -n 50'
+ssh root@edge-b 'ns=yeet-netns-reconcile-check-edge-b-ns; cid=$(docker ps -q --filter label=com.docker.compose.project=catch-netns-reconcile-check-edge-b | head -n1); pid=$(docker inspect "$cid" --format "{{.State.Pid}}"); printf "named=%s\ncontainer=%s\n" "$(ip netns exec "$ns" readlink /proc/self/ns/net)" "$(readlink /proc/$pid/ns/net)"; journalctl -u catch --since "5 minutes ago" --no-pager | tail -n 50'
 ```
 
 Expected:
@@ -567,8 +567,8 @@ Expected:
 Run:
 
 ```bash
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet restart --service netns-reconcile-check-pve1
-CATCH_HOST=yeet-hetz go run ./cmd/yeet restart --service netns-reconcile-check-hetz
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet restart --service netns-reconcile-check-edge-a
+CATCH_HOST=yeet-edge-b go run ./cmd/yeet restart --service netns-reconcile-check-edge-b
 ```
 
 Expected: both commands succeed without unnecessary extra restarts when the project is already in the correct namespace.
@@ -578,8 +578,8 @@ Expected: both commands succeed without unnecessary extra restarts when the proj
 Run interactively:
 
 ```bash
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet rm netns-reconcile-check-pve1
-CATCH_HOST=yeet-hetz go run ./cmd/yeet rm netns-reconcile-check-hetz
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet rm netns-reconcile-check-edge-a
+CATCH_HOST=yeet-edge-b go run ./cmd/yeet rm netns-reconcile-check-edge-b
 ```
 
 Expected: both services are removed cleanly.

@@ -489,17 +489,17 @@ git status --short
 
 Expected: only the firewall/backend/docs changes appear.
 
-### Task 7: End-To-End Validation On `pve1`
+### Task 7: End-To-End Validation On `edge-a`
 
 **Files:**
 - Verify live host state, no repo file edits expected
 
-- [ ] **Step 1: Upgrade `catch` on `pve1` from the current checkout**
+- [ ] **Step 1: Upgrade `catch` on `edge-a` from the current checkout**
 
 Run:
 
 ```bash
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet init root@pve1
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet init root@edge-a
 ```
 
 Expected: the remote host installs the new `catch` successfully.
@@ -509,7 +509,7 @@ Expected: the remote host installs the new `catch` successfully.
 Run:
 
 ```bash
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet run netfw-check nginx:latest --net=svc
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet run netfw-check nginx:latest --net=svc
 ```
 
 Expected: deploy succeeds and the service reaches running state.
@@ -519,8 +519,8 @@ Expected: deploy succeeds and the service reaches running state.
 Run:
 
 ```bash
-svc_ip=$(CATCH_HOST=yeet-pve1 go run ./cmd/yeet ip netfw-check | tr -d '\r')
-ssh root@pve1 "ip netns list; nft list table ip yeet || true; iptables -S YEET_FORWARD || true; iptables -S YEET_POSTROUTING || true"
+svc_ip=$(CATCH_HOST=yeet-edge-a go run ./cmd/yeet ip netfw-check | tr -d '\r')
+ssh root@edge-a "ip netns list; nft list table ip yeet || true; iptables -S YEET_FORWARD || true; iptables -S YEET_POSTROUTING || true"
 ```
 
 Expected:
@@ -534,8 +534,8 @@ Expected:
 Run:
 
 ```bash
-svc_ip=$(CATCH_HOST=yeet-pve1 go run ./cmd/yeet ip netfw-check | tr -d '\r')
-ssh root@pve1 "curl -fsSI http://${svc_ip}:80 | head -n 1"
+svc_ip=$(CATCH_HOST=yeet-edge-a go run ./cmd/yeet ip netfw-check | tr -d '\r')
+ssh root@edge-a "curl -fsSI http://${svc_ip}:80 | head -n 1"
 ```
 
 Expected: `HTTP/1.1 200 OK` or equivalent success line from nginx.
@@ -545,8 +545,8 @@ Expected: `HTTP/1.1 200 OK` or equivalent success line from nginx.
 Run:
 
 ```bash
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet run netfw-check nginx:latest --net=svc
-ssh root@pve1 "nft list table ip yeet || true; iptables -S YEET_FORWARD || true"
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet run netfw-check nginx:latest --net=svc
+ssh root@edge-a "nft list table ip yeet || true; iptables -S YEET_FORWARD || true"
 ```
 
 Expected: deploy succeeds again and the yeet-owned firewall state is not duplicated.
@@ -556,11 +556,11 @@ Expected: deploy succeeds again and the yeet-owned firewall state is not duplica
 Run:
 
 ```bash
-svc_ip=$(CATCH_HOST=yeet-pve1 go run ./cmd/yeet ip netfw-check | tr -d '\r')
-ssh root@pve1 "rm -f /tmp/iperf-netfw.log; nohup ip netns exec yeet-netfw-check-ns iperf3 -s -1 -B ${svc_ip} -p 25202 > /tmp/iperf-netfw.log 2>&1 < /dev/null &"
-ssh root@pve1 "iptables -t nat -C PREROUTING -i vmbr0 -p tcp --dport 25212 -j DNAT --to-destination ${svc_ip}:25202 2>/dev/null || iptables -t nat -I PREROUTING 1 -i vmbr0 -p tcp --dport 25212 -j DNAT --to-destination ${svc_ip}:25202"
+svc_ip=$(CATCH_HOST=yeet-edge-a go run ./cmd/yeet ip netfw-check | tr -d '\r')
+ssh root@edge-a "rm -f /tmp/iperf-netfw.log; nohup ip netns exec yeet-netfw-check-ns iperf3 -s -1 -B ${svc_ip} -p 25202 > /tmp/iperf-netfw.log 2>&1 < /dev/null &"
+ssh root@edge-a "iptables -t nat -C PREROUTING -i vmbr0 -p tcp --dport 25212 -j DNAT --to-destination ${svc_ip}:25202 2>/dev/null || iptables -t nat -I PREROUTING 1 -i vmbr0 -p tcp --dport 25212 -j DNAT --to-destination ${svc_ip}:25202"
 ssh shayne@macstudio.local 'nix shell nixpkgs#iperf3 -c iperf3 -c 10.0.4.2 -p 25212 -P 4 -t 10 -O 2 -f g'
-ssh root@pve1 "while iptables -t nat -C PREROUTING -i vmbr0 -p tcp --dport 25212 -j DNAT --to-destination ${svc_ip}:25202 2>/dev/null; do iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 25212 -j DNAT --to-destination ${svc_ip}:25202; done"
+ssh root@edge-a "while iptables -t nat -C PREROUTING -i vmbr0 -p tcp --dport 25212 -j DNAT --to-destination ${svc_ip}:25202 2>/dev/null; do iptables -t nat -D PREROUTING -i vmbr0 -p tcp --dport 25212 -j DNAT --to-destination ${svc_ip}:25202; done"
 ```
 
 Expected: the measured throughput stays in line with the previously observed
@@ -572,7 +572,7 @@ is removed after the check.
 Run:
 
 ```bash
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet rm netfw-check --yes --clean-config
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet rm netfw-check --yes --clean-config
 ```
 
 Expected: service is removed and yeet-owned per-service networking artifacts are cleaned up.

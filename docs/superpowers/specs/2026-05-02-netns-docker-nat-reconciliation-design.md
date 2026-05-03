@@ -12,16 +12,16 @@ alone.
 
 ## Problem
 
-After the `pve1` reboot and catch update, `hoarder` was reported as down even
+After the `edge-a` reboot and catch update, `demoapp` was reported as down even
 though the compose containers were running and healthy. The failure was in the
 service network namespace:
 
-- `catch-hoarder-web-1` answered on its container address.
-- `yeet-hoarder-ts.service` repeatedly failed to proxy
+- `catch-demoapp-web-1` answered on its container address.
+- `yeet-demoapp-ts.service` repeatedly failed to proxy
   `127.0.0.1:3000`.
-- `yeet-hoarder-ns` was missing the DNAT rules that map port `3000` to the
-  hoarder web container.
-- Recreating only the hoarder web container caused Docker to re-trigger the
+- `yeet-demoapp-ns` was missing the DNAT rules that map port `3000` to the
+  demoapp web container.
+- Recreating only the demoapp web container caused Docker to re-trigger the
   plugin callbacks and restored the missing DNAT rules.
 
 This means yeet currently has a NAT reconciliation gap. A service can have
@@ -49,8 +49,8 @@ triggered the callback:
 That is the wrong ownership boundary. If a flush affects a whole network
 namespace, the desired input must also represent the whole network namespace.
 
-The live host had multiple persisted hoarder `DockerNetwork` records pointing
-at the same `NetNS`, while Docker itself only had one current hoarder network.
+The live host had multiple persisted demoapp `DockerNetwork` records pointing
+at the same `NetNS`, while Docker itself only had one current demoapp network.
 That stale state shape makes the bug possible, but the code should be correct
 even when stale records exist.
 
@@ -82,7 +82,7 @@ There are two related gaps:
 7. Reconciliation must be idempotent and deterministic.
 8. Existing link-level reconciliation must remain in place for stale netns/veth
    problems.
-9. Acceptance must include live verification on `pve1` against affected
+9. Acceptance must include live verification on `edge-a` against affected
    services.
 
 ### Non-Goals
@@ -244,20 +244,20 @@ go test ./...
 
 ### Live Verification
 
-After deploying updated catch to `pve1`:
+After deploying updated catch to `edge-a`:
 
 1. Confirm affected services still run:
-   - `hoarder`
-   - `plex`
-   - `prowlarr`
-   - `duplicati`
+   - `demoapp`
+   - `media`
+   - `indexer`
+   - `backup`
 2. Confirm their public Tailscale URLs respond where applicable.
-3. Capture hoarder container IDs and uptime before the repair test.
-4. Flush only hoarder's netns `YEET_PREROUTING` and `YEET_OUTPUT` chains.
+3. Capture demoapp container IDs and uptime before the repair test.
+4. Flush only demoapp's netns `YEET_PREROUTING` and `YEET_OUTPUT` chains.
 5. Restart `catch.service`.
-6. Confirm hoarder's DNAT rules are restored without recreating the hoarder
+6. Confirm demoapp's DNAT rules are restored without recreating the demoapp
    containers.
-7. Confirm `https://hoarder.shayne.ts.net` responds.
+7. Confirm `https://demoapp.example.ts.net` responds.
 8. Confirm Docker no longer logs
    `NetworkDriver.RevokeExternalConnectivity: Not implemented` during a
    controlled container stop/start.
@@ -266,8 +266,8 @@ After deploying updated catch to `pve1`:
 
 1. Unit tests cover the stale/shared-netns NAT wipe class.
 2. `go test ./...` passes.
-3. The updated catch binary deployed to `pve1` restores flushed hoarder NAT
-   rules on catch restart without recreating hoarder containers.
+3. The updated catch binary deployed to `edge-a` restores flushed demoapp NAT
+   rules on catch restart without recreating demoapp containers.
 4. Previously affected services remain online after deployment.
 5. Docker lifecycle logs no longer show missing
    `RevokeExternalConnectivity` support.

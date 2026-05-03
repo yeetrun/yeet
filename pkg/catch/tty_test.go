@@ -103,13 +103,13 @@ func TestProgressUIIncludesHostLabel(t *testing.T) {
 		isPty:     true,
 		progress:  catchrpc.ProgressAuto,
 		sn:        "svc-a",
-		hostLabel: "yeet-hetz",
+		hostLabel: "yeet-edge-b",
 	}
 
 	ui := execer.newProgressUI("run")
 	ui.Start()
 
-	if got := buf.String(); !strings.Contains(got, "yeet run svc-a@yeet-hetz") {
+	if got := buf.String(); !strings.Contains(got, "yeet run svc-a@yeet-edge-b") {
 		t.Fatalf("expected host label in header, got %q", got)
 	}
 }

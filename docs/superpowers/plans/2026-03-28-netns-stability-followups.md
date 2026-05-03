@@ -442,31 +442,31 @@ go build ./cmd/yeet
 
 Expected: PASS
 
-- [ ] **Step 4: Deploy and verify on `pve1`**
+- [ ] **Step 4: Deploy and verify on `edge-a`**
 
 Run:
 
 ```bash
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet init root@pve1
+CATCH_HOST=yeet-edge-a go run ./cmd/yeet init root@edge-a
 ```
 
 Verify:
 - `bw.ss.ht` is reachable again through the normal path
 - `ip netns exec yeet-vaultwarden-ns iptables -t nat -S` shows only the app-targeting port `80` DNAT rules
 - restarting `yeet-vaultwarden-ns.service` followed by `systemctl restart catch` does not reintroduce stale sidecar-targeting rules
-- `CATCH_HOST=yeet-pve1 go run ./cmd/yeet status` returns promptly after restart
+- `CATCH_HOST=yeet-edge-a go run ./cmd/yeet status` returns promptly after restart
 - rerun the compose/netns reconciliation acceptance on one representative `svc` docker service such as `smokeping`: restart `yeet-smokeping-ns.service`, confirm the service breaks, restart `catch`, and verify yeet automatically recreates only the affected compose project and restores reachability
 
-- [ ] **Step 5: Deploy and verify on `hetz`**
+- [ ] **Step 5: Deploy and verify on `edge-b`**
 
 Run:
 
 ```bash
-CATCH_HOST=yeet-hetz go run ./cmd/yeet init root@hetz
+CATCH_HOST=yeet-edge-b go run ./cmd/yeet init root@edge-b
 ```
 
 Verify:
-- `CATCH_HOST=yeet-hetz go run ./cmd/yeet status` returns promptly after restart
+- `CATCH_HOST=yeet-edge-b go run ./cmd/yeet status` returns promptly after restart
 - restart one representative `svc` docker namespace (for example `uptime-kuma`) and then restart `catch`
 - catch logs show automatic project reconciliation for the affected service
 - the service becomes reachable again after reconciliation
