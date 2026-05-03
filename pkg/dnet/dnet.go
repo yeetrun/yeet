@@ -34,6 +34,9 @@ type plugin struct {
 	netnsSema syncs.Map[string, *syncs.Semaphore]
 
 	syncPortForwardsFunc func(netns string, desired []portForwardRule) error
+	runInNetNSFunc       func(netns string, f func() error) error
+	runCommandFunc       func(name string, args ...string) error
+	natBackendFunc       func() natRuleBackend
 }
 
 // ErrorResponse represents an error response
@@ -48,60 +51,61 @@ type SuccessResponse struct {
 
 // runInNetNS runs the given function in the given network namespace.
 func (p *plugin) runInNetNS(nsName string, f func() error) error {
-	errChan := make(chan error)
-
+	errChan := make(chan error, 1)
 	go func() {
-		var err error
-		sem, _ := p.netnsSema.LoadOrInit(nsName, func() *syncs.Semaphore { return ptr.To(syncs.NewSemaphore(1)) })
-		sem.Acquire()
-		defer sem.Release()
-		// Lock the OS thread to ensure the netns change affects this goroutine only
-		runtime.LockOSThread()
-		defer func() {
-			if err == nil {
-				runtime.UnlockOSThread()
-			}
-			errChan <- err
-		}()
-
-		// Open the network namespace
-		netnsFile, err := os.Open(nsName)
-		if err != nil {
-			err = fmt.Errorf("failed to open netns: %v", err)
-			return
-		}
-		defer func() { _ = netnsFile.Close() }()
-
-		// Save the current network namespace
-		currentNetns, err := netns.Get()
-		if err != nil {
-			err = fmt.Errorf("failed to get current netns: %v", err)
-			return
-		}
-		defer func() { _ = currentNetns.Close() }()
-
-		// Set the process to the new network namespace
-		if setErr := netns.Set(netns.NsHandle(netnsFile.Fd())); setErr != nil {
-			err = fmt.Errorf("failed to set netns: %v", setErr)
-			return
-		}
-
-		// Execute any additional setup (e.g., setting up interfaces or IP addresses)
-		if execErr := f(); execErr != nil {
-			err = fmt.Errorf("failed to execute command: %v", execErr)
-			return
-		}
-
-		// Restore the original network namespace
-		if restoreErr := netns.Set(currentNetns); restoreErr != nil {
-			err = fmt.Errorf("failed to restore netns: %v", restoreErr)
-			return
-		}
+		errChan <- p.runInNetNSLocked(nsName, f)
 	}()
-
-	// Wait for the goroutine to finish
 	if err := <-errChan; err != nil {
 		return fmt.Errorf("failed to run in netns: %w", err)
+	}
+	return nil
+}
+
+func (p *plugin) runInNetNSLocked(nsName string, f func() error) error {
+	sem, _ := p.netnsSema.LoadOrInit(nsName, func() *syncs.Semaphore { return ptr.To(syncs.NewSemaphore(1)) })
+	sem.Acquire()
+	defer sem.Release()
+
+	runtime.LockOSThread()
+	err := runInNetNSOnLockedThread(nsName, f)
+	if err == nil {
+		runtime.UnlockOSThread()
+	}
+	return err
+}
+
+func runInNetNSOnLockedThread(nsName string, f func() error) error {
+	netnsFile, err := os.Open(nsName)
+	if err != nil {
+		return fmt.Errorf("failed to open netns: %v", err)
+	}
+	defer func() { _ = netnsFile.Close() }()
+
+	currentNetns, err := netns.Get()
+	if err != nil {
+		return fmt.Errorf("failed to get current netns: %v", err)
+	}
+	defer func() { _ = currentNetns.Close() }()
+
+	if err := setNetNS(netns.NsHandle(netnsFile.Fd())); err != nil {
+		return err
+	}
+	if err := f(); err != nil {
+		return fmt.Errorf("failed to execute command: %v", err)
+	}
+	return restoreNetNS(currentNetns)
+}
+
+func setNetNS(handle netns.NsHandle) error {
+	if err := netns.Set(handle); err != nil {
+		return fmt.Errorf("failed to set netns: %v", err)
+	}
+	return nil
+}
+
+func restoreNetNS(handle netns.NsHandle) error {
+	if err := netns.Set(handle); err != nil {
+		return fmt.Errorf("failed to restore netns: %v", err)
 	}
 	return nil
 }
@@ -110,6 +114,38 @@ func writeJSON(w http.ResponseWriter, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("failed to write docker network plugin response: %v", err)
 	}
+}
+
+func decodePluginRequest(w http.ResponseWriter, r *http.Request, v any) bool {
+	body := requestLogger(r)
+	if err := json.Unmarshal(body, v); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+type commandRunner func(name string, args ...string) error
+
+func (p *plugin) commandRunner() commandRunner {
+	if p.runCommandFunc != nil {
+		return p.runCommandFunc
+	}
+	return runCmd
+}
+
+func (p *plugin) natBackend() natRuleBackend {
+	if p.natBackendFunc != nil {
+		return p.natBackendFunc()
+	}
+	return iptablesBackend{}
+}
+
+func (p *plugin) inNetNS(netns string, f func() error) error {
+	if p.runInNetNSFunc != nil {
+		return p.runInNetNSFunc(netns, f)
+	}
+	return p.runInNetNS(netns, f)
 }
 
 func runCmd(name string, args ...string) error {
@@ -176,28 +212,44 @@ func ensureOutputChain() error {
 	return nil
 }
 
-func ensurePostroutingChain() error {
-	if err := runCmd("iptables", "-t", "nat", "-L", postroutingChainName); err != nil {
-		if err := runCmd("iptables", "-t", "nat", "-N", postroutingChainName); err != nil {
-			return err
-		}
+func ensurePostroutingChainWithRunner(run commandRunner) error {
+	if err := ensureNatChain(run, postroutingChainName); err != nil {
+		return err
 	}
-	if err := runCmd("iptables", "-t", "nat", "-C", "POSTROUTING", "-j", postroutingChainName); err != nil {
-		if err := runCmd("iptables", "-t", "nat", "-A", "POSTROUTING", "-j", postroutingChainName); err != nil {
-			return err
-		}
+	rules := []natEnsureRule{
+		{checkChain: "POSTROUTING", addMode: "-A", addChain: "POSTROUTING", args: []string{"-j", postroutingChainName}},
+		{checkChain: postroutingChainName, addMode: "-I", addChain: postroutingChainName, args: []string{"-m", "addrtype", "!", "--src-type", "LOCAL", "-o", "br0", "-j", "RETURN"}},
+		{checkChain: postroutingChainName, addMode: "-A", addChain: postroutingChainName, args: []string{"-j", "MASQUERADE"}},
 	}
-	if err := runCmd("iptables", "-t", "nat", "-C", postroutingChainName, "-m", "addrtype", "!", "--src-type", "LOCAL", "-o", "br0", "-j", "RETURN"); err != nil {
-		if err := runCmd("iptables", "-t", "nat", "-I", postroutingChainName, "-m", "addrtype", "!", "--src-type", "LOCAL", "-o", "br0", "-j", "RETURN"); err != nil {
-			return err
-		}
-	}
-	if err := runCmd("iptables", "-t", "nat", "-C", postroutingChainName, "-j", "MASQUERADE"); err != nil {
-		if err := runCmd("iptables", "-t", "nat", "-A", postroutingChainName, "-j", "MASQUERADE"); err != nil {
+	for _, rule := range rules {
+		if err := ensureNatRule(run, rule); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+type natEnsureRule struct {
+	checkChain string
+	addMode    string
+	addChain   string
+	args       []string
+}
+
+func ensureNatChain(run commandRunner, chain string) error {
+	if err := run("iptables", "-t", "nat", "-L", chain); err == nil {
+		return nil
+	}
+	return run("iptables", "-t", "nat", "-N", chain)
+}
+
+func ensureNatRule(run commandRunner, rule natEnsureRule) error {
+	checkArgs := append([]string{"-t", "nat", "-C", rule.checkChain}, rule.args...)
+	if err := run("iptables", checkArgs...); err == nil {
+		return nil
+	}
+	addArgs := append([]string{"-t", "nat", rule.addMode, rule.addChain}, rule.args...)
+	return run("iptables", addArgs...)
 }
 
 type portForwardRule struct {
@@ -415,7 +467,16 @@ func syncNetNSPortForwards(netns string, desired []portForwardRule, backend natR
 	if err := backend.EnsureChains(); err != nil {
 		return fmt.Errorf("ensure yeet nat chains for %q: %w", netns, err)
 	}
+	if err := deleteLegacyDirectOutputRules(netns, backend); err != nil {
+		return err
+	}
+	if err := replaceManagedPortForwardChains(netns, desired, backend); err != nil {
+		return err
+	}
+	return nil
+}
 
+func deleteLegacyDirectOutputRules(netns string, backend natRuleBackend) error {
 	outputRules, err := backend.ListChain("OUTPUT")
 	if err != nil {
 		return fmt.Errorf("list output rules for %q: %w", netns, err)
@@ -432,7 +493,10 @@ func syncNetNSPortForwards(netns string, desired []portForwardRule, backend natR
 			return fmt.Errorf("delete legacy output rule %q for %q: %w", rule, netns, err)
 		}
 	}
+	return nil
+}
 
+func replaceManagedPortForwardChains(netns string, desired []portForwardRule, backend natRuleBackend) error {
 	if err := backend.FlushChain(preroutingChainName); err != nil {
 		return fmt.Errorf("flush prerouting chain for %q: %w", netns, err)
 	}
@@ -442,6 +506,10 @@ func syncNetNSPortForwards(netns string, desired []portForwardRule, backend natR
 	if err := backend.AppendRule(preroutingChainName, "-i", "br0", "-j", "RETURN"); err != nil {
 		return fmt.Errorf("append bridge guard for %q: %w", netns, err)
 	}
+	return appendDesiredPortForwardRules(netns, desired, backend)
+}
+
+func appendDesiredPortForwardRules(netns string, desired []portForwardRule, backend natRuleBackend) error {
 	for _, rule := range desired {
 		dnat := dnatRuleArgs(rule)
 		if err := backend.AppendRule(preroutingChainName, dnat...); err != nil {
@@ -533,61 +601,78 @@ func (p *plugin) syncCurrentPortForwards(netns string) error {
 		}
 		return p.syncPortForwardsFunc(netns, desired)
 	}
-	return p.runInNetNS(netns, func() error {
+	return p.inNetNS(netns, func() error {
 		desired, err := p.currentPortForwardsForNetNS(netns)
 		if err != nil {
 			return err
 		}
-		return syncNetNSPortForwards(netns, desired, iptablesBackend{})
+		return syncNetNSPortForwards(netns, desired, p.natBackend())
 	})
 }
 
 func (p *plugin) LeaveNetwork(w http.ResponseWriter, r *http.Request) {
-	body := requestLogger(r)
-	var req map[string]any
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	var req endpointNetworkRequest
+	if !decodePluginRequest(w, r, &req) {
 		return
 	}
 
-	nid := req["NetworkID"].(string)
-	eid := req["EndpointID"].(string)
-	ifName := "yv-" + eid[:4]
-	var netns string
-	if _, err := p.db.MutateData(func(d *db.Data) error {
-		n, ok := d.DockerNetworks[nid]
-		if !ok {
-			return fmt.Errorf("network not found")
-		}
-		netns = n.NetNS
-		_, ok = n.Endpoints[eid]
-		if !ok {
-			return fmt.Errorf("endpoint not found")
-		}
-		delete(n.Endpoints, eid)
-		removeEndpointPortMappings(n, eid)
-		return nil
-	}); err != nil {
+	leave, err := p.leaveNetworkState(req.NetworkID, req.EndpointID)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := p.runInNetNS(netns, func() error {
-		var errs []error
-		desired, err := p.currentPortForwardsForNetNS(netns)
-		if err != nil {
-			errs = append(errs, err)
-		} else if err := syncNetNSPortForwards(netns, desired, iptablesBackend{}); err != nil {
-			errs = append(errs, err)
-		}
-		if err := runCmd("ip", "link", "del", ifName); err != nil {
-			errs = append(errs, err)
-		}
-		return errors.Join(errs...)
-	}); err != nil {
+	if err := p.leaveNetwork(leave); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, SuccessResponse{})
+}
+
+type endpointNetworkRequest struct {
+	NetworkID  string `json:"NetworkID"`
+	EndpointID string `json:"EndpointID"`
+}
+
+type leaveNetworkState struct {
+	netns  string
+	ifName string
+}
+
+func (p *plugin) leaveNetworkState(networkID, endpointID string) (leaveNetworkState, error) {
+	var netns string
+	if _, err := p.db.MutateData(func(d *db.Data) error {
+		n, ok := d.DockerNetworks[networkID]
+		if !ok {
+			return fmt.Errorf("network not found")
+		}
+		netns = n.NetNS
+		_, ok = n.Endpoints[endpointID]
+		if !ok {
+			return fmt.Errorf("endpoint not found")
+		}
+		delete(n.Endpoints, endpointID)
+		removeEndpointPortMappings(n, endpointID)
+		return nil
+	}); err != nil {
+		return leaveNetworkState{}, err
+	}
+	return leaveNetworkState{netns: netns, ifName: "yv-" + endpointID[:4]}, nil
+}
+
+func (p *plugin) leaveNetwork(leave leaveNetworkState) error {
+	return p.inNetNS(leave.netns, func() error {
+		var errs []error
+		desired, err := p.currentPortForwardsForNetNS(leave.netns)
+		if err != nil {
+			errs = append(errs, err)
+		} else if err := syncNetNSPortForwards(leave.netns, desired, p.natBackend()); err != nil {
+			errs = append(errs, err)
+		}
+		if err := p.commandRunner()("ip", "link", "del", leave.ifName); err != nil {
+			errs = append(errs, err)
+		}
+		return errors.Join(errs...)
+	})
 }
 
 type portMap struct {
@@ -623,100 +708,127 @@ func setEndpointPortMappings(n *db.DockerNetwork, endpointID string, mappings ma
 	}
 }
 
-func ensureBridge(addr netip.Prefix) error {
-	if err := runCmd("ip", "link", "show", "br0"); err == nil {
+func ensureBridgeWithRunner(addr netip.Prefix, run commandRunner) error {
+	if err := run("ip", "link", "show", "br0"); err == nil {
 		return nil
 	}
-	if err := runCmd("ip", "link", "add", "br0", "type", "bridge"); err != nil {
-		return err
-	}
-	if err := runCmd("ip", "link", "set", "br0", "up"); err != nil {
-		return err
-	}
-	if err := runCmd("ip", "addr", "add", addr.String(), "dev", "br0"); err != nil {
-		return err
-	}
-	if err := runCmd("sysctl", "-w", "net.ipv4.conf.br0.route_localnet=1"); err != nil {
-		return err
+	for _, cmd := range bridgeCreateCommands(addr) {
+		if err := run(cmd.name, cmd.args...); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
+type commandSpec struct {
+	name string
+	args []string
+}
+
+func bridgeCreateCommands(addr netip.Prefix) []commandSpec {
+	return []commandSpec{
+		{name: "ip", args: []string{"link", "add", "br0", "type", "bridge"}},
+		{name: "ip", args: []string{"link", "set", "br0", "up"}},
+		{name: "ip", args: []string{"addr", "add", addr.String(), "dev", "br0"}},
+		{name: "sysctl", args: []string{"-w", "net.ipv4.conf.br0.route_localnet=1"}},
+	}
+}
+
 func (p *plugin) JoinNetwork(w http.ResponseWriter, r *http.Request) {
-	body := requestLogger(r)
 	var req struct {
 		NetworkID  string `json:"NetworkID"`
 		EndpointID string `json:"EndpointID"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if !decodePluginRequest(w, r, &req) {
 		return
 	}
-	nid := req.NetworkID
-	eid := req.EndpointID
 
-	var netns string
-	dv, err := p.db.Get()
+	join, status, err := p.joinNetworkState(req.NetworkID, req.EndpointID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), status)
 		return
 	}
-	d := dv.AsStruct()
-	n, ok := d.DockerNetworks[nid]
-	if !ok {
-		http.Error(w, "network not found", http.StatusBadRequest)
-		return
-	}
-	if _, ok := n.Endpoints[eid]; !ok {
-		http.Error(w, "endpoint not found", http.StatusBadRequest)
-		return
-	}
-	gateway := n.IPv4Gateway.Addr()
-	gatewayPrefix := n.IPv4Gateway
-	netns = n.NetNS
-
-	ifName := "yv-" + eid[:4]
-	peerName := ifName + "p"
-	if err := runCmd("ip", "link", "add", ifName, "type", "veth", "peer", "name", peerName); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := runCmd("ip", "link", "set", ifName, "netns", netns); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	if err := p.runInNetNS(netns, func() error {
-		if err := ensureBridge(gatewayPrefix); err != nil {
-			return err
-		}
-		if err := runCmd("ip", "link", "set", ifName, "master", "br0"); err != nil {
-			return err
-		}
-		if err := runCmd("ip", "link", "set", ifName, "up"); err != nil {
-			return err
-		}
-		if err := ensurePostroutingChain(); err != nil {
-			return err
-		}
-		desired, err := p.currentPortForwardsForNetNS(netns)
-		if err != nil {
-			return err
-		}
-		return syncNetNSPortForwards(netns, desired, iptablesBackend{})
-	}); err != nil {
+	if err := p.joinNetwork(join); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	resp := map[string]any{
 		"InterfaceName": map[string]string{
-			"SrcName":   peerName,
+			"SrcName":   join.peerName,
 			"DstPrefix": "eth",
 		},
-		"Gateway": gateway.String(),
+		"Gateway": join.gateway.String(),
 	}
 	writeJSON(w, resp)
+}
+
+type joinNetworkState struct {
+	netns         string
+	ifName        string
+	peerName      string
+	gateway       netip.Addr
+	gatewayPrefix netip.Prefix
+}
+
+func (p *plugin) joinNetworkState(networkID, endpointID string) (joinNetworkState, int, error) {
+	dv, err := p.db.Get()
+	if err != nil {
+		return joinNetworkState{}, http.StatusInternalServerError, err
+	}
+	n, ok := dv.AsStruct().DockerNetworks[networkID]
+	if !ok {
+		return joinNetworkState{}, http.StatusBadRequest, fmt.Errorf("network not found")
+	}
+	if _, ok := n.Endpoints[endpointID]; !ok {
+		return joinNetworkState{}, http.StatusBadRequest, fmt.Errorf("endpoint not found")
+	}
+	ifName := "yv-" + endpointID[:4]
+	return joinNetworkState{
+		netns:         n.NetNS,
+		ifName:        ifName,
+		peerName:      ifName + "p",
+		gateway:       n.IPv4Gateway.Addr(),
+		gatewayPrefix: n.IPv4Gateway,
+	}, http.StatusOK, nil
+}
+
+func (p *plugin) joinNetwork(join joinNetworkState) error {
+	run := p.commandRunner()
+	if err := addJoinVeth(run, join); err != nil {
+		return err
+	}
+	return p.inNetNS(join.netns, func() error {
+		return p.configureJoinedNetwork(join)
+	})
+}
+
+func addJoinVeth(run commandRunner, join joinNetworkState) error {
+	if err := run("ip", "link", "add", join.ifName, "type", "veth", "peer", "name", join.peerName); err != nil {
+		return err
+	}
+	return run("ip", "link", "set", join.ifName, "netns", join.netns)
+}
+
+func (p *plugin) configureJoinedNetwork(join joinNetworkState) error {
+	run := p.commandRunner()
+	if err := ensureBridgeWithRunner(join.gatewayPrefix, run); err != nil {
+		return err
+	}
+	if err := run("ip", "link", "set", join.ifName, "master", "br0"); err != nil {
+		return err
+	}
+	if err := run("ip", "link", "set", join.ifName, "up"); err != nil {
+		return err
+	}
+	if err := ensurePostroutingChainWithRunner(run); err != nil {
+		return err
+	}
+	desired, err := p.currentPortForwardsForNetNS(join.netns)
+	if err != nil {
+		return err
+	}
+	return syncNetNSPortForwards(join.netns, desired, p.natBackend())
 }
 
 func (p *plugin) DeleteNetwork(w http.ResponseWriter, r *http.Request) {
@@ -745,44 +857,54 @@ func (p *plugin) DeleteNetwork(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, SuccessResponse{})
 }
 
-// CreateNetwork creates a network
-func (p *plugin) CreateNetwork(w http.ResponseWriter, r *http.Request) {
-	body := requestLogger(r)
-	var req struct {
-		NetworkID string `json:"NetworkID"`
-		Options   struct {
-			Generic struct {
-				NetNS string `json:"dev.catchit.netns"`
-			} `json:"com.docker.network.generic"`
-		} `json:"Options"`
-		IPv4Data []struct {
-			AddressSpace string       `json:"AddressSpace"`
-			Gateway      netip.Prefix `json:"Gateway"`
-			Pool         netip.Prefix `json:"Pool"`
-		} `json:"IPv4Data"`
-	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
+type createNetworkRequest struct {
+	NetworkID string `json:"NetworkID"`
+	Options   struct {
+		Generic struct {
+			NetNS string `json:"dev.catchit.netns"`
+		} `json:"com.docker.network.generic"`
+	} `json:"Options"`
+	IPv4Data []struct {
+		AddressSpace string       `json:"AddressSpace"`
+		Gateway      netip.Prefix `json:"Gateway"`
+		Pool         netip.Prefix `json:"Pool"`
+	} `json:"IPv4Data"`
+}
+
+func (req createNetworkRequest) validate() error {
 	if req.Options.Generic.NetNS == "" {
-		http.Error(w, "NetNS is required", http.StatusBadRequest)
-		return
+		return fmt.Errorf("NetNS is required")
 	}
 	if len(req.IPv4Data) == 0 {
-		http.Error(w, "IPv4Data is required", http.StatusBadRequest)
+		return fmt.Errorf("IPv4Data is required")
+	}
+	return nil
+}
+
+func (req createNetworkRequest) dockerNetwork() *db.DockerNetwork {
+	return &db.DockerNetwork{
+		NetNS:       req.Options.Generic.NetNS,
+		NetworkID:   req.NetworkID,
+		IPv4Gateway: req.IPv4Data[0].Gateway,
+		IPv4Range:   req.IPv4Data[0].Pool,
+	}
+}
+
+// CreateNetwork creates a network
+func (p *plugin) CreateNetwork(w http.ResponseWriter, r *http.Request) {
+	var req createNetworkRequest
+	if !decodePluginRequest(w, r, &req) {
+		return
+	}
+	if err := req.validate(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		if _, ok := d.DockerNetworks[req.NetworkID]; ok {
 			return fmt.Errorf("network already exists")
 		}
-		mak.Set(&d.DockerNetworks, req.NetworkID, &db.DockerNetwork{
-			NetNS:       req.Options.Generic.NetNS,
-			NetworkID:   req.NetworkID,
-			IPv4Gateway: req.IPv4Data[0].Gateway,
-			IPv4Range:   req.IPv4Data[0].Pool,
-		})
+		mak.Set(&d.DockerNetworks, req.NetworkID, req.dockerNetwork())
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

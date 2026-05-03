@@ -23,44 +23,59 @@ func findServiceIndex(args []string, start int, flags map[string]cli.FlagSpec) i
 	for i := start; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
-			if i+1 < len(args) {
-				return i + 1
-			}
-			return -1
+			return serviceIndexAfterTerminator(args, i)
 		}
-		if strings.HasPrefix(arg, "--") && len(arg) > 2 {
-			if strings.Contains(arg, "=") {
-				continue
-			}
-			if spec, ok := flags[arg]; ok {
-				if spec.ConsumesValue {
-					i++
-				}
-				continue
-			}
-			continue
-		}
-		if strings.HasPrefix(arg, "-") && arg != "-" {
-			if strings.Contains(arg, "=") {
-				continue
-			}
-			if len(arg) == 2 {
-				if spec, ok := flags[arg]; ok {
-					if spec.ConsumesValue {
-						i++
-					}
-				}
-				continue
-			}
-			// Handle shorthand with attached value (e.g. -n5).
-			if spec, ok := flags[arg[:2]]; ok && spec.ConsumesValue {
-				continue
-			}
+		if skip, ok := flagTokenSkip(arg, flags); ok {
+			i += skip
 			continue
 		}
 		return i
 	}
 	return -1
+}
+
+func serviceIndexAfterTerminator(args []string, idx int) int {
+	if idx+1 < len(args) {
+		return idx + 1
+	}
+	return -1
+}
+
+func flagTokenSkip(arg string, flags map[string]cli.FlagSpec) (int, bool) {
+	if strings.HasPrefix(arg, "--") && len(arg) > 2 {
+		return longFlagSkip(arg, flags), true
+	}
+	if strings.HasPrefix(arg, "-") && arg != "-" {
+		return shortFlagSkip(arg, flags), true
+	}
+	return 0, false
+}
+
+func longFlagSkip(arg string, flags map[string]cli.FlagSpec) int {
+	if strings.Contains(arg, "=") {
+		return 0
+	}
+	if spec, ok := flags[arg]; ok && spec.ConsumesValue {
+		return 1
+	}
+	return 0
+}
+
+func shortFlagSkip(arg string, flags map[string]cli.FlagSpec) int {
+	if strings.Contains(arg, "=") {
+		return 0
+	}
+	if len(arg) == 2 {
+		if spec, ok := flags[arg]; ok && spec.ConsumesValue {
+			return 1
+		}
+		return 0
+	}
+	// Handle shorthand with attached value (e.g. -n5).
+	if spec, ok := flags[arg[:2]]; ok && spec.ConsumesValue {
+		return 0
+	}
+	return 0
 }
 
 func removeArgAt(args []string, idx int) []string {
@@ -80,47 +95,62 @@ func bridgeServiceArgs(args []string, remoteSpecs map[string]map[string]cli.Flag
 	if args[0] == "copy" {
 		return "", "", nil, false
 	}
-	bridged = args
 
 	if override != "" {
-		if _, ok := remoteSpecs[args[0]]; ok {
-			return override, "", bridged, true
-		}
-		if len(args) > 1 {
-			if group, ok := groupSpecs[args[0]]; ok {
-				if _, ok := group[args[1]]; ok {
-					return override, "", bridged, true
-				}
-			}
-		}
-		return "", "", nil, false
+		return bridgeWithOverride(args, remoteSpecs, groupSpecs, override)
 	}
 
 	if flags, ok := remoteSpecs[args[0]]; ok {
-		if idx := findServiceIndex(args, 1, flags); idx != -1 {
-			service, host, _ = splitQualifiedName(args[idx])
-			bridged = removeArgAt(args, idx)
-			return service, host, bridged, true
-		}
-		return "", "", nil, false
+		return bridgeCommandArgs(args, 1, flags)
 	}
 
 	if len(args) > 1 {
-		if group, ok := groupSpecs[args[0]]; ok {
-			if locals, ok := localGroupCommands[args[0]]; ok {
-				if _, ok := locals[args[1]]; ok {
-					return "", "", nil, false
-				}
-			}
-			if flags, ok := group[args[1]]; ok {
-				if idx := findServiceIndex(args, 2, flags); idx != -1 {
-					service, host, _ = splitQualifiedName(args[idx])
-					bridged = removeArgAt(args, idx)
-					return service, host, bridged, true
-				}
-				return "", "", nil, false
-			}
+		return bridgeGroupArgs(args, groupSpecs)
+	}
+	return "", "", nil, false
+}
+
+func bridgeWithOverride(args []string, remoteSpecs map[string]map[string]cli.FlagSpec, groupSpecs map[string]map[string]map[string]cli.FlagSpec, override string) (service string, host string, bridged []string, ok bool) {
+	if _, ok := remoteSpecs[args[0]]; ok {
+		return override, "", args, true
+	}
+	if len(args) <= 1 {
+		return "", "", nil, false
+	}
+	if group, ok := groupSpecs[args[0]]; ok {
+		if _, ok := group[args[1]]; ok {
+			return override, "", args, true
 		}
 	}
 	return "", "", nil, false
+}
+
+func bridgeCommandArgs(args []string, start int, flags map[string]cli.FlagSpec) (service string, host string, bridged []string, ok bool) {
+	idx := findServiceIndex(args, start, flags)
+	if idx == -1 {
+		return "", "", nil, false
+	}
+	service, host, _ = splitQualifiedName(args[idx])
+	return service, host, removeArgAt(args, idx), true
+}
+
+func bridgeGroupArgs(args []string, groupSpecs map[string]map[string]map[string]cli.FlagSpec) (service string, host string, bridged []string, ok bool) {
+	group, ok := groupSpecs[args[0]]
+	if !ok || isLocalGroupCommand(args[0], args[1]) {
+		return "", "", nil, false
+	}
+	flags, ok := group[args[1]]
+	if !ok {
+		return "", "", nil, false
+	}
+	return bridgeCommandArgs(args, 2, flags)
+}
+
+func isLocalGroupCommand(group string, command string) bool {
+	locals, ok := localGroupCommands[group]
+	if !ok {
+		return false
+	}
+	_, ok = locals[command]
+	return ok
 }

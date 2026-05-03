@@ -43,99 +43,192 @@ func (s *Server) printEnv(w io.Writer, sv db.ServiceView, staged bool) error {
 	if err != nil {
 		return fmt.Errorf("failed to read env file: %w", err)
 	}
-	fmt.Fprintf(w, "%s\n", b)
+	if _, err := fmt.Fprintf(w, "%s\n", b); err != nil {
+		return fmt.Errorf("failed to write env file: %w", err)
+	}
 	return nil
 }
 
-func (e *ttyExecer) envCmdFunc(args []string) error {
+type envSubcommand string
+
+const (
+	envSubcommandShow envSubcommand = "show"
+	envSubcommandEdit envSubcommand = "edit"
+	envSubcommandCopy envSubcommand = "copy"
+	envSubcommandSet  envSubcommand = "set"
+)
+
+type envCommand struct {
+	name        envSubcommand
+	showFlags   cli.EnvShowFlags
+	assignments []envAssignment
+}
+
+func envCommandFromArgs(args []string) (envCommand, error) {
 	if len(args) == 0 {
-		return fmt.Errorf("env requires a subcommand")
+		return envCommand{}, fmt.Errorf("env requires a subcommand")
 	}
-	subcmd := args[0]
+	subcmd := envSubcommand(args[0])
 	args = args[1:]
 	switch subcmd {
-	case "show":
-		flags, rest, err := cli.ParseEnvShow(args)
-		if err != nil {
-			return err
-		}
-		if len(rest) > 0 {
-			return fmt.Errorf("env show takes no arguments")
-		}
+	case envSubcommandShow:
+		return parseEnvShowCommand(args)
+	case envSubcommandEdit, envSubcommandCopy:
+		return parseEnvNoArgCommand(subcmd, args)
+	case envSubcommandSet:
+		return parseEnvSetCommand(args)
+	default:
+		return envCommand{}, fmt.Errorf("unknown env command %q", subcmd)
+	}
+}
+
+func parseEnvShowCommand(args []string) (envCommand, error) {
+	flags, rest, err := cli.ParseEnvShow(args)
+	if err != nil {
+		return envCommand{}, err
+	}
+	if len(rest) > 0 {
+		return envCommand{}, fmt.Errorf("env show takes no arguments")
+	}
+	return envCommand{name: envSubcommandShow, showFlags: flags}, nil
+}
+
+func parseEnvNoArgCommand(subcmd envSubcommand, args []string) (envCommand, error) {
+	if len(args) > 0 {
+		return envCommand{}, fmt.Errorf("env %s takes no arguments", subcmd)
+	}
+	return envCommand{name: subcmd}, nil
+}
+
+func parseEnvSetCommand(args []string) (envCommand, error) {
+	assignments, err := parseEnvAssignments(args)
+	if err != nil {
+		return envCommand{}, err
+	}
+	return envCommand{name: envSubcommandSet, assignments: assignments}, nil
+}
+
+func (e *ttyExecer) envCmdFunc(args []string) error {
+	cmd, err := envCommandFromArgs(args)
+	if err != nil {
+		return err
+	}
+	return e.runEnvCommand(cmd)
+}
+
+func (e *ttyExecer) runEnvCommand(cmd envCommand) error {
+	switch cmd.name {
+	case envSubcommandShow:
 		sv, err := e.s.serviceView(e.sn)
 		if err != nil {
 			return err
 		}
-		return e.s.printEnv(e.rw, sv, flags.Staged)
-	case "edit":
-		if len(args) > 0 {
-			return fmt.Errorf("env edit takes no arguments")
-		}
+		return e.s.printEnv(e.rw, sv, cmd.showFlags.Staged)
+	case envSubcommandEdit:
 		return e.editEnvCmdFunc()
-	case "copy":
-		if len(args) > 0 {
-			return fmt.Errorf("env copy takes no arguments")
-		}
+	case envSubcommandCopy:
 		return e.envCopyCmdFunc()
-	case "set":
-		assignments, err := parseEnvAssignments(args)
-		if err != nil {
-			return err
-		}
-		return e.envSetCmdFunc(assignments)
+	case envSubcommandSet:
+		return e.envSetCmdFunc(cmd.assignments)
 	default:
-		return fmt.Errorf("unknown env command %q", subcmd)
+		return fmt.Errorf("unknown env command %q", cmd.name)
 	}
 }
 
-func (e *ttyExecer) editEnvCmdFunc() error {
+func (e *ttyExecer) editEnvCmdFunc() (retErr error) {
 	sv, err := e.s.serviceView(e.sn)
 	if err != nil {
 		return err
 	}
-	af := sv.AsStruct().Artifacts
-	srcPath, _ := af.Latest(db.ArtifactEnvFile)
+	srcPath := latestEnvFilePath(sv)
 	tmpPath, err := copyToTmpFile(srcPath)
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmpPath)
+	defer func() {
+		retErr = errors.Join(retErr, removeTempFile(tmpPath))
+	}()
 
 	if err := e.editFile(tmpPath); err != nil {
 		return fmt.Errorf("failed to edit env file: %w", err)
 	}
 
-	if srcPath != "" {
-		if same, err := fileutil.Identical(srcPath, tmpPath); err != nil {
-			return err
-		} else if same {
-			e.printf("No changes detected\n")
-			return nil
-		}
-	} else {
-		if st, err := os.Stat(tmpPath); err == nil && st.Size() == 0 {
-			e.printf("No changes detected\n")
-			return nil
-		}
+	changed, err := editedEnvFileChanged(srcPath, tmpPath)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		e.printf("No changes detected\n")
+		return nil
 	}
 
+	return e.installEditedEnvFile(tmpPath)
+}
+
+func latestEnvFilePath(sv db.ServiceView) string {
+	af := sv.AsStruct().Artifacts
+	srcPath, _ := af.Latest(db.ArtifactEnvFile)
+	return srcPath
+}
+
+func editedEnvFileChanged(srcPath, tmpPath string) (bool, error) {
+	if srcPath == "" {
+		st, err := os.Stat(tmpPath)
+		if err != nil {
+			return false, fmt.Errorf("failed to stat temp file: %w", err)
+		}
+		return st.Size() != 0, nil
+	}
+	same, err := fileutil.Identical(srcPath, tmpPath)
+	if err != nil {
+		return false, err
+	}
+	return !same, nil
+}
+
+func removeTempFile(path string) error {
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("failed to remove temp file: %w", err)
+	}
+	return nil
+}
+
+func closeEnvFile(f *os.File) error {
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("failed to close temp file: %w", err)
+	}
+	return nil
+}
+
+func (e *ttyExecer) installEditedEnvFile(tmpPath string) (retErr error) {
 	f, err := os.Open(tmpPath)
 	if err != nil {
 		return fmt.Errorf("failed to open temp file: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		retErr = errors.Join(retErr, closeEnvFile(f))
+	}()
 	icfg := e.fileInstaller(netFlags{}, nil)
 	icfg.EnvFile = true
 	fi, err := NewFileInstaller(e.s, icfg)
 	if err != nil {
 		return fmt.Errorf("failed to create installer: %w", err)
 	}
-	defer fi.Close()
+	defer func() {
+		retErr = errors.Join(retErr, closeEnvInstaller(fi))
+	}()
 	if _, err := io.Copy(fi, f); err != nil {
 		fi.Fail()
 		return fmt.Errorf("failed to copy temp file to installer: %w", err)
 	}
 	return fi.Close()
+}
+
+func closeEnvInstaller(fi *FileInstaller) error {
+	if err := fi.Close(); err != nil {
+		return fmt.Errorf("failed to close env installer: %w", err)
+	}
+	return nil
 }
 
 func (e *ttyExecer) envCopyCmdFunc() error {
@@ -331,12 +424,9 @@ func (e *ttyExecer) envSetCmdFunc(assignments []envAssignment) error {
 	if err != nil {
 		return err
 	}
-	var contents []byte
-	if ef != "" {
-		contents, err = os.ReadFile(ef)
-		if err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to read env file: %w", err)
-		}
+	contents, err := readEnvFileIfExists(ef)
+	if err != nil {
+		return err
 	}
 	updated, changed, err := applyEnvAssignments(contents, assignments)
 	if err != nil {
@@ -349,4 +439,15 @@ func (e *ttyExecer) envSetCmdFunc(assignments []envAssignment) error {
 	cfg := e.fileInstaller(netFlags{}, nil)
 	cfg.EnvFile = true
 	return e.install("env", bytes.NewReader(updated), cfg)
+}
+
+func readEnvFileIfExists(path string) ([]byte, error) {
+	if path == "" {
+		return nil, nil
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read env file: %w", err)
+	}
+	return contents, nil
 }

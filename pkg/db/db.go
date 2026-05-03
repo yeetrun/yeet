@@ -300,7 +300,11 @@ func (s *Store) readLocked() (created bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 	jd := json.NewDecoder(f)
 	d := new(Data)
 	if err := jd.Decode(&d); err != nil {
@@ -326,7 +330,7 @@ func (s *Store) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmp.Name())
+	defer removeTempFile(tmp.Name())
 	jc := json.NewEncoder(tmp)
 	jc.SetIndent("", "  ")
 	if err := jc.Encode(s.d); err != nil {
@@ -336,6 +340,12 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	return os.Rename(tmp.Name(), s.file)
+}
+
+func removeTempFile(path string) {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		log.Printf("failed to remove temp database file %s: %v", path, err)
+	}
 }
 
 func (s *Store) MutateData(f func(*Data) error) (*Data, error) {

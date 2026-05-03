@@ -594,63 +594,86 @@ func splitArgsForParsing(args []string, specs map[string]FlagSpec) ([]string, []
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
-			if i+1 < len(args) {
-				return args[:i], args[i+1:]
-			}
-			return args[:i], nil
+			return splitAtArgDelimiter(args, i)
 		}
-		if strings.HasPrefix(arg, "--") && len(arg) > 2 {
-			name := arg
-			if idx := strings.Index(name, "="); idx != -1 {
-				name = name[:idx]
-			}
-			spec, ok := specs[name]
-			if !ok {
-				return args[:i], args[i:]
-			}
-			if spec.ConsumesValue && !strings.Contains(arg, "=") {
-				i++
-			}
-			continue
+		next, ok := nextParseArgIndex(args, i, specs)
+		if !ok {
+			return args[:i], args[i:]
 		}
-		if strings.HasPrefix(arg, "-") && arg != "-" {
-			if strings.Contains(arg, "=") {
-				name := arg[:strings.Index(arg, "=")]
-				if _, ok := specs[name]; ok {
-					continue
-				}
-				return args[:i], args[i:]
-			}
-			if len(arg) == 2 {
-				spec, ok := specs[arg]
-				if !ok {
-					return args[:i], args[i:]
-				}
-				if spec.ConsumesValue {
-					i++
-				}
-				continue
-			}
-			short := "-" + string(arg[1])
-			spec, ok := specs[short]
-			if !ok {
-				return args[:i], args[i:]
-			}
-			if spec.ConsumesValue {
-				continue
-			}
-			continue
-		}
+		i = next
 	}
 	return args, nil
 }
 
+func splitAtArgDelimiter(args []string, i int) ([]string, []string) {
+	if i+1 < len(args) {
+		return args[:i], args[i+1:]
+	}
+	return args[:i], nil
+}
+
+func nextParseArgIndex(args []string, i int, specs map[string]FlagSpec) (int, bool) {
+	arg := args[i]
+	switch {
+	case isLongFlag(arg):
+		return nextLongFlagIndex(arg, i, specs)
+	case isShortFlag(arg):
+		return nextShortFlagIndex(arg, i, specs)
+	default:
+		return i, true
+	}
+}
+
+func isLongFlag(arg string) bool {
+	return strings.HasPrefix(arg, "--") && len(arg) > 2
+}
+
+func isShortFlag(arg string) bool {
+	return strings.HasPrefix(arg, "-") && arg != "-" && !isLongFlag(arg)
+}
+
+func nextLongFlagIndex(arg string, i int, specs map[string]FlagSpec) (int, bool) {
+	name, hasInlineValue := splitInlineFlagValue(arg)
+	spec, ok := specs[name]
+	if !ok {
+		return i, false
+	}
+	if spec.ConsumesValue && !hasInlineValue {
+		return i + 1, true
+	}
+	return i, true
+}
+
+func nextShortFlagIndex(arg string, i int, specs map[string]FlagSpec) (int, bool) {
+	if name, hasInlineValue := splitInlineFlagValue(arg); hasInlineValue {
+		_, ok := specs[name]
+		return i, ok
+	}
+	if len(arg) == 2 {
+		spec, ok := specs[arg]
+		if !ok {
+			return i, false
+		}
+		if spec.ConsumesValue {
+			return i + 1, true
+		}
+		return i, true
+	}
+	_, ok := specs["-"+string(arg[1])]
+	return i, ok
+}
+
+func splitInlineFlagValue(arg string) (name string, hasInlineValue bool) {
+	idx := strings.Index(arg, "=")
+	if idx == -1 {
+		return arg, false
+	}
+	return arg[:idx], true
+}
+
 func flagSpecsFromStruct(v any) map[string]FlagSpec {
 	specs := make(map[string]FlagSpec)
-	t := reflect.TypeOf(v)
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
+	t := indirectType(reflect.TypeOf(v))
 	if t.Kind() != reflect.Struct {
 		return specs
 	}
@@ -673,15 +696,20 @@ func flagSpecsFromStruct(v any) map[string]FlagSpec {
 }
 
 func consumesValue(t reflect.Type) bool {
-	for t.Kind() == reflect.Ptr {
-		t = t.Elem()
-	}
+	t = indirectType(t)
 	switch t.Kind() {
 	case reflect.Bool:
 		return false
 	default:
 		return true
 	}
+}
+
+func indirectType(t reflect.Type) reflect.Type {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t
 }
 
 func RequireArgsAtLeast(subcmd string, args []string, count int) error {

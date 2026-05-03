@@ -83,6 +83,106 @@ func TestParseGlobalFlags(t *testing.T) {
 	}
 }
 
+func TestResolveGlobalOverrides(t *testing.T) {
+	tests := []struct {
+		name     string
+		flags    globalFlagsParsed
+		wantHost string
+		wantSvc  string
+	}{
+		{
+			name:     "host only",
+			flags:    globalFlagsParsed{Host: "catch-a"},
+			wantHost: "catch-a",
+		},
+		{
+			name:    "service only",
+			flags:   globalFlagsParsed{Service: "svc-a"},
+			wantSvc: "svc-a",
+		},
+		{
+			name:     "qualified service overrides host",
+			flags:    globalFlagsParsed{Host: "catch-a", Service: "svc-a@catch-b"},
+			wantHost: "catch-b",
+			wantSvc:  "svc-a",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveGlobalOverrides(tt.flags)
+			if got.host != tt.wantHost {
+				t.Fatalf("host = %q, want %q", got.host, tt.wantHost)
+			}
+			if got.service != tt.wantSvc {
+				t.Fatalf("service = %q, want %q", got.service, tt.wantSvc)
+			}
+		})
+	}
+}
+
+func TestPrepareCommandRoute(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		service     string
+		wantArgs    []string
+		wantHost    string
+		wantService string
+		wantBridged []string
+	}{
+		{
+			name:        "rewrites env set shorthand",
+			args:        []string{"env", "svc-a", "FOO=bar"},
+			wantArgs:    []string{"env", "set", "FOO=bar"},
+			wantService: "svc-a",
+			wantBridged: []string{"env", "set", "FOO=bar"},
+		},
+		{
+			name:        "splits host from command",
+			args:        []string{"status@catch-a", "svc-a"},
+			wantArgs:    []string{"status"},
+			wantHost:    "catch-a",
+			wantService: "svc-a",
+			wantBridged: []string{"status"},
+		},
+		{
+			name:        "events host defaults all services",
+			args:        []string{"events@catch-a"},
+			wantArgs:    []string{"events", "--all"},
+			wantHost:    "catch-a",
+			wantService: "",
+			wantBridged: nil,
+		},
+		{
+			name:        "honors existing service override",
+			args:        []string{"status", "--format", "json"},
+			service:     "svc-override",
+			wantArgs:    []string{"status", "--format", "json"},
+			wantService: "svc-override",
+			wantBridged: []string{"status", "--format", "json"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := prepareCommandRoute(tt.args, tt.service)
+			if !reflect.DeepEqual(got.args, tt.wantArgs) {
+				t.Fatalf("args = %#v, want %#v", got.args, tt.wantArgs)
+			}
+			if got.host != tt.wantHost {
+				t.Fatalf("host = %q, want %q", got.host, tt.wantHost)
+			}
+			if got.service != tt.wantService {
+				t.Fatalf("service = %q, want %q", got.service, tt.wantService)
+			}
+			if !reflect.DeepEqual(got.bridgedArgs, tt.wantBridged) {
+				t.Fatalf("bridgedArgs = %#v, want %#v", got.bridgedArgs, tt.wantBridged)
+			}
+		})
+	}
+}
+
 func TestParseListHostsFlags(t *testing.T) {
 	tests := []struct {
 		name     string

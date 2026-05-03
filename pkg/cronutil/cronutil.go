@@ -9,10 +9,26 @@ import (
 	"strings"
 )
 
+var dayOfWeekMap = map[string]string{
+	"0": "Sun",
+	"1": "Mon",
+	"2": "Tue",
+	"3": "Wed",
+	"4": "Thu",
+	"5": "Fri",
+	"6": "Sat",
+}
+
+type cronSchedule struct {
+	minute     string
+	hour       string
+	dayOfMonth string
+	month      string
+	dayOfWeek  string
+}
+
 // CronToCalender converts a cron expression to a systemd timer calendar event.
 func CronToCalender(cron string) (string, error) {
-	var cal string
-
 	// `cron` is of the form `* * * * *`: "m h dom mon dow".
 	// `cal` is of the form  `* *-*-* *:*`: "dow y-m-d h:M".
 
@@ -27,67 +43,65 @@ func CronToCalender(cron string) (string, error) {
 		return "*-*-* *:*:00", nil
 	}
 
-	minute := parts[0]
-	hour := parts[1]
-	dayOfMonth := parts[2]
-	month := parts[3]
-	dayOfWeek := parts[4]
-
-	// Convert cron minute to systemd minute (add leading zero if needed)
-	if minute != "*" {
-		minute = fmt.Sprintf("%02s", minute)
+	schedule := cronSchedule{
+		minute:     parts[0],
+		hour:       parts[1],
+		dayOfMonth: parts[2],
+		month:      parts[3],
+		dayOfWeek:  parts[4],
 	}
+	schedule.normalize()
+	return schedule.calendar(), nil
+}
 
-	// Convert cron hour to systemd hour (add leading zero if needed)
-	if hour != "*" {
-		hour = fmt.Sprintf("%02s", hour)
+func (s *cronSchedule) normalize() {
+	s.minute = padCronField(s.minute)
+	s.hour = padCronField(s.hour)
+	s.month = normalizeMonth(s.month)
+	s.dayOfMonth, s.minute = normalizeDayOfMonth(s.dayOfMonth, s.minute)
+	s.dayOfWeek = normalizeDayOfWeek(s.dayOfWeek)
+}
+
+func (s cronSchedule) calendar() string {
+	cal := fmt.Sprintf("%s *-%s-%s %s:%s", s.dayOfWeek, s.month, s.dayOfMonth, s.hour, s.minute)
+	return strings.TrimSpace(cal)
+}
+
+func padCronField(value string) string {
+	if value == "*" {
+		return value
 	}
+	return fmt.Sprintf("%02s", value)
+}
 
-	if month != "*" {
-		ms := strings.Split(month, ",")
-		// pad single digit months with a leading zero
-		for i, m := range ms {
-			if len(m) == 1 {
-				ms[i] = "0" + m
-			}
-		}
-		month = strings.Join(ms, ",")
+func normalizeMonth(month string) string {
+	if month == "*" {
+		return month
 	}
+	ms := strings.Split(month, ",")
+	for i, m := range ms {
+		ms[i] = padSingleDigit(m)
+	}
+	return strings.Join(ms, ",")
+}
 
-	// Handle intervals like "*/7" for dayOfMonth
+func normalizeDayOfMonth(dayOfMonth, minute string) (string, string) {
 	if strings.HasPrefix(dayOfMonth, "*/") {
 		minute = fmt.Sprintf("%s%s", minute, strings.TrimPrefix(dayOfMonth, "*"))
-		dayOfMonth = "*"
-	} else if dayOfMonth != "*" {
-		dayOfMonth = fmt.Sprintf("%02s", dayOfMonth)
+		return "*", minute
 	}
+	return padCronField(dayOfMonth), minute
+}
 
-	// Convert month to systemd format (add leading zero if needed)
-	if month != "*" && len(month) == 1 {
-		month = "0" + month
-	}
-
-	// Map dayOfWeek from cron numbers to systemd names (0 = Sunday, 1 = Monday, etc.)
-	dayOfWeekMap := map[string]string{
-		"0": "Sun", "1": "Mon", "2": "Tue", "3": "Wed", "4": "Thu", "5": "Fri", "6": "Sat",
-	}
-
-	// Handle ranges and multiple days for dayOfWeek
+func normalizeDayOfWeek(dayOfWeek string) string {
 	if dayOfWeek == "*" {
-		dayOfWeek = ""
-	} else {
-		dayOfWeek = convertDayOfWeek(dayOfWeek, dayOfWeekMap)
+		return ""
 	}
-
-	// Construct systemd calendar format without seconds
-	cal = fmt.Sprintf("%s *-%s-%s %s:%s", dayOfWeek, month, dayOfMonth, hour, minute)
-	cal = strings.TrimSpace(cal) // Trim leading whitespace if dayOfWeek is empty
-
-	return cal, nil
+	return convertDayOfWeek(dayOfWeek)
 }
 
 // convertDayOfWeek handles day of the week conversion, including ranges and lists.
-func convertDayOfWeek(dayOfWeek string, dayOfWeekMap map[string]string) string {
+func convertDayOfWeek(dayOfWeek string) string {
 	// Handle day ranges like "1-5" (Mon-Fri)
 	if strings.Contains(dayOfWeek, "-") {
 		parts := strings.Split(dayOfWeek, "-")
@@ -114,4 +128,11 @@ func convertDayOfWeek(dayOfWeek string, dayOfWeekMap map[string]string) string {
 
 	// Return as-is if no mapping is found
 	return dayOfWeek
+}
+
+func padSingleDigit(value string) string {
+	if len(value) == 1 {
+		return "0" + value
+	}
+	return value
 }

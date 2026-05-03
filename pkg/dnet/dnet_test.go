@@ -7,6 +7,7 @@ package dnet
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -22,6 +23,22 @@ type fakeNatRuleBackend struct {
 	prerouting []string
 	yeetOutput []string
 	output     []string
+}
+
+type recordedCommand struct {
+	name string
+	args []string
+}
+
+func recordingRunner(commands *[]recordedCommand, missingChecks map[string]bool) commandRunner {
+	return func(name string, args ...string) error {
+		copied := append([]string(nil), args...)
+		*commands = append(*commands, recordedCommand{name: name, args: copied})
+		if missingChecks[name+" "+strings.Join(args, " ")] {
+			return errors.New("missing")
+		}
+		return nil
+	}
 }
 
 func (f *fakeNatRuleBackend) ListChain(chain string) ([]string, error) {
@@ -258,6 +275,71 @@ type capturedPortForwardSync struct {
 	rules []portForwardRule
 }
 
+func TestCreateNetworkStoresDockerNetwork(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{}, &syncs)
+
+	rr := postJSON(t, p.CreateNetwork, map[string]any{
+		"NetworkID": "vaultwarden",
+		"Options": map[string]any{
+			"com.docker.network.generic": map[string]any{
+				"dev.catchit.netns": "/var/run/netns/yeet-vaultwarden-ns",
+			},
+		},
+		"IPv4Data": []map[string]any{
+			{
+				"Gateway": "172.20.0.1/16",
+				"Pool":    "172.20.0.0/16",
+			},
+		},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("CreateNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	dv, err := p.db.Get()
+	if err != nil {
+		t.Fatalf("db.Get: %v", err)
+	}
+	got := dv.AsStruct().DockerNetworks["vaultwarden"]
+	if got == nil {
+		t.Fatal("docker network was not stored")
+	}
+	if got.NetworkID != "vaultwarden" {
+		t.Fatalf("NetworkID = %q, want vaultwarden", got.NetworkID)
+	}
+	if got.NetNS != "/var/run/netns/yeet-vaultwarden-ns" {
+		t.Fatalf("NetNS = %q, want /var/run/netns/yeet-vaultwarden-ns", got.NetNS)
+	}
+	if got.IPv4Gateway != netip.MustParsePrefix("172.20.0.1/16") {
+		t.Fatalf("IPv4Gateway = %v, want 172.20.0.1/16", got.IPv4Gateway)
+	}
+	if got.IPv4Range != netip.MustParsePrefix("172.20.0.0/16") {
+		t.Fatalf("IPv4Range = %v, want 172.20.0.0/16", got.IPv4Range)
+	}
+}
+
+func TestCreateNetworkRejectsMissingNetNS(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{}, &syncs)
+
+	rr := postJSON(t, p.CreateNetwork, map[string]any{
+		"NetworkID": "vaultwarden",
+		"IPv4Data": []map[string]any{
+			{
+				"Gateway": "172.20.0.1/16",
+				"Pool":    "172.20.0.0/16",
+			},
+		},
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("CreateNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "NetNS is required") {
+		t.Fatalf("CreateNetwork body = %q, want NetNS is required", rr.Body.String())
+	}
+}
+
 func newTestPlugin(t *testing.T, data *db.Data, syncs *[]capturedPortForwardSync) *plugin {
 	t.Helper()
 	root := t.TempDir()
@@ -399,6 +481,167 @@ func TestProgramExternalConnectivityUpdatesPortMapAndReplaysAggregateRules(t *te
 	}
 }
 
+func TestJoinNetworkUsesCommandAndNetNSBackends(t *testing.T) {
+	root := t.TempDir()
+	store := db.NewStore(filepath.Join(root, "db.json"), filepath.Join(root, "services"))
+	if err := store.Set(&db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:       "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID:   "vaultwarden",
+				IPv4Gateway: netip.MustParsePrefix("172.20.0.1/16"),
+				IPv4Range:   netip.MustParsePrefix("172.20.0.0/16"),
+				Endpoints: map[string]*db.DockerEndpoint{
+					"abcd1234": {EndpointID: "abcd1234", IPv4: netip.MustParsePrefix("172.20.0.2/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/8080": {EndpointID: "abcd1234", Port: 80},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("store.Set: %v", err)
+	}
+
+	var commands []recordedCommand
+	backend := &fakeNatRuleBackend{}
+	var enteredNetNS []string
+	p := &plugin{
+		db: store,
+		runCommandFunc: recordingRunner(&commands, map[string]bool{
+			"ip link show br0":                                   true,
+			"iptables -t nat -L YEET_POSTROUTING":                true,
+			"iptables -t nat -C POSTROUTING -j YEET_POSTROUTING": true,
+			"iptables -t nat -C YEET_POSTROUTING -m addrtype ! --src-type LOCAL -o br0 -j RETURN": true,
+			"iptables -t nat -C YEET_POSTROUTING -j MASQUERADE":                                   true,
+		}),
+		runInNetNSFunc: func(netns string, f func() error) error {
+			enteredNetNS = append(enteredNetNS, netns)
+			return f()
+		},
+		natBackendFunc: func() natRuleBackend { return backend },
+	}
+
+	rr := postJSON(t, p.JoinNetwork, map[string]any{
+		"NetworkID":  "vaultwarden",
+		"EndpointID": "abcd1234",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("JoinNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if diff := cmp.Diff([]string{"/var/run/netns/yeet-vaultwarden-ns"}, enteredNetNS); diff != "" {
+		t.Fatalf("entered netns mismatch (-want +got):\n%s", diff)
+	}
+
+	var resp struct {
+		InterfaceName map[string]string `json:"InterfaceName"`
+		Gateway       string            `json:"Gateway"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json.Unmarshal response: %v", err)
+	}
+	if diff := cmp.Diff(map[string]string{"SrcName": "yv-abcdp", "DstPrefix": "eth"}, resp.InterfaceName); diff != "" {
+		t.Fatalf("interface response mismatch (-want +got):\n%s", diff)
+	}
+	if resp.Gateway != "172.20.0.1" {
+		t.Fatalf("gateway = %q, want 172.20.0.1", resp.Gateway)
+	}
+
+	wantCommandPrefix := []recordedCommand{
+		{name: "ip", args: []string{"link", "add", "yv-abcd", "type", "veth", "peer", "name", "yv-abcdp"}},
+		{name: "ip", args: []string{"link", "set", "yv-abcd", "netns", "/var/run/netns/yeet-vaultwarden-ns"}},
+		{name: "ip", args: []string{"link", "show", "br0"}},
+		{name: "ip", args: []string{"link", "add", "br0", "type", "bridge"}},
+		{name: "ip", args: []string{"link", "set", "br0", "up"}},
+		{name: "ip", args: []string{"addr", "add", "172.20.0.1/16", "dev", "br0"}},
+		{name: "sysctl", args: []string{"-w", "net.ipv4.conf.br0.route_localnet=1"}},
+		{name: "ip", args: []string{"link", "set", "yv-abcd", "master", "br0"}},
+		{name: "ip", args: []string{"link", "set", "yv-abcd", "up"}},
+	}
+	if len(commands) < len(wantCommandPrefix) {
+		t.Fatalf("command count = %d, want at least %d: %#v", len(commands), len(wantCommandPrefix), commands)
+	}
+	if diff := cmp.Diff(wantCommandPrefix, commands[:len(wantCommandPrefix)], cmp.AllowUnexported(recordedCommand{})); diff != "" {
+		t.Fatalf("command prefix mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{
+		"-A YEET_PREROUTING -i br0 -j RETURN",
+		"-A YEET_PREROUTING -p tcp -m tcp --dport 8080 -j DNAT --to-destination 172.20.0.2:80",
+	}, backend.prerouting); diff != "" {
+		t.Fatalf("prerouting rules mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestLeaveNetworkDeletesEndpointAndSyncsPortForwards(t *testing.T) {
+	root := t.TempDir()
+	store := db.NewStore(filepath.Join(root, "db.json"), filepath.Join(root, "services"))
+	if err := store.Set(&db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"abcd1234": {EndpointID: "abcd1234", IPv4: netip.MustParsePrefix("172.20.0.2/16")},
+					"efgh5678": {EndpointID: "efgh5678", IPv4: netip.MustParsePrefix("172.20.0.3/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/8080": {EndpointID: "abcd1234", Port: 80},
+					"6/9090": {EndpointID: "efgh5678", Port: 90},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("store.Set: %v", err)
+	}
+
+	var commands []recordedCommand
+	backend := &fakeNatRuleBackend{}
+	var enteredNetNS []string
+	p := &plugin{
+		db:             store,
+		runCommandFunc: recordingRunner(&commands, nil),
+		runInNetNSFunc: func(netns string, f func() error) error {
+			enteredNetNS = append(enteredNetNS, netns)
+			return f()
+		},
+		natBackendFunc: func() natRuleBackend { return backend },
+	}
+
+	rr := postJSON(t, p.LeaveNetwork, map[string]any{
+		"NetworkID":  "vaultwarden",
+		"EndpointID": "abcd1234",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("LeaveNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if diff := cmp.Diff([]string{"/var/run/netns/yeet-vaultwarden-ns"}, enteredNetNS); diff != "" {
+		t.Fatalf("entered netns mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]recordedCommand{
+		{name: "ip", args: []string{"link", "del", "yv-abcd"}},
+	}, commands, cmp.AllowUnexported(recordedCommand{})); diff != "" {
+		t.Fatalf("commands mismatch (-want +got):\n%s", diff)
+	}
+	if diff := cmp.Diff([]string{
+		"-A YEET_PREROUTING -i br0 -j RETURN",
+		"-A YEET_PREROUTING -p tcp -m tcp --dport 9090 -j DNAT --to-destination 172.20.0.3:90",
+	}, backend.prerouting); diff != "" {
+		t.Fatalf("prerouting rules mismatch (-want +got):\n%s", diff)
+	}
+
+	dv, err := p.db.Get()
+	if err != nil {
+		t.Fatalf("db.Get: %v", err)
+	}
+	network := dv.AsStruct().DockerNetworks["vaultwarden"]
+	if _, ok := network.Endpoints["abcd1234"]; ok {
+		t.Fatal("endpoint abcd1234 still exists after leave")
+	}
+	if _, ok := network.PortMap["6/8080"]; ok {
+		t.Fatal("port map for abcd1234 still exists after leave")
+	}
+}
+
 func TestEndpointPortMapRejectsPortRanges(t *testing.T) {
 	_, err := endpointPortMap("web", []portMap{
 		{Proto: 6, Port: 3000, HostPort: 3000, HostPortEnd: 3002},
@@ -514,6 +757,69 @@ func TestRemoveEndpointPortMappings(t *testing.T) {
 		"6/81": {EndpointID: "backup", Port: 81},
 	}, network.PortMap, cmp.AllowUnexported(db.EndpointPort{})); diff != "" {
 		t.Fatalf("removeEndpointPortMappings mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestEnsureBridgeSkipsCreateWhenBridgeExists(t *testing.T) {
+	var commands []recordedCommand
+	err := ensureBridgeWithRunner(netip.MustParsePrefix("172.20.0.1/16"), recordingRunner(&commands, nil))
+	if err != nil {
+		t.Fatalf("ensureBridgeWithRunner returned error: %v", err)
+	}
+
+	want := []recordedCommand{
+		{name: "ip", args: []string{"link", "show", "br0"}},
+	}
+	if diff := cmp.Diff(want, commands, cmp.AllowUnexported(recordedCommand{})); diff != "" {
+		t.Fatalf("commands mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestEnsureBridgeCreatesBridgeWhenMissing(t *testing.T) {
+	var commands []recordedCommand
+	err := ensureBridgeWithRunner(netip.MustParsePrefix("172.20.0.1/16"), recordingRunner(&commands, map[string]bool{
+		"ip link show br0": true,
+	}))
+	if err != nil {
+		t.Fatalf("ensureBridgeWithRunner returned error: %v", err)
+	}
+
+	want := []recordedCommand{
+		{name: "ip", args: []string{"link", "show", "br0"}},
+		{name: "ip", args: []string{"link", "add", "br0", "type", "bridge"}},
+		{name: "ip", args: []string{"link", "set", "br0", "up"}},
+		{name: "ip", args: []string{"addr", "add", "172.20.0.1/16", "dev", "br0"}},
+		{name: "sysctl", args: []string{"-w", "net.ipv4.conf.br0.route_localnet=1"}},
+	}
+	if diff := cmp.Diff(want, commands, cmp.AllowUnexported(recordedCommand{})); diff != "" {
+		t.Fatalf("commands mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestEnsurePostroutingChainAddsMissingRules(t *testing.T) {
+	var commands []recordedCommand
+	err := ensurePostroutingChainWithRunner(recordingRunner(&commands, map[string]bool{
+		"iptables -t nat -L YEET_POSTROUTING":                                                 true,
+		"iptables -t nat -C POSTROUTING -j YEET_POSTROUTING":                                  true,
+		"iptables -t nat -C YEET_POSTROUTING -m addrtype ! --src-type LOCAL -o br0 -j RETURN": true,
+		"iptables -t nat -C YEET_POSTROUTING -j MASQUERADE":                                   true,
+	}))
+	if err != nil {
+		t.Fatalf("ensurePostroutingChainWithRunner returned error: %v", err)
+	}
+
+	want := []recordedCommand{
+		{name: "iptables", args: []string{"-t", "nat", "-L", postroutingChainName}},
+		{name: "iptables", args: []string{"-t", "nat", "-N", postroutingChainName}},
+		{name: "iptables", args: []string{"-t", "nat", "-C", "POSTROUTING", "-j", postroutingChainName}},
+		{name: "iptables", args: []string{"-t", "nat", "-A", "POSTROUTING", "-j", postroutingChainName}},
+		{name: "iptables", args: []string{"-t", "nat", "-C", postroutingChainName, "-m", "addrtype", "!", "--src-type", "LOCAL", "-o", "br0", "-j", "RETURN"}},
+		{name: "iptables", args: []string{"-t", "nat", "-I", postroutingChainName, "-m", "addrtype", "!", "--src-type", "LOCAL", "-o", "br0", "-j", "RETURN"}},
+		{name: "iptables", args: []string{"-t", "nat", "-C", postroutingChainName, "-j", "MASQUERADE"}},
+		{name: "iptables", args: []string{"-t", "nat", "-A", postroutingChainName, "-j", "MASQUERADE"}},
+	}
+	if diff := cmp.Diff(want, commands, cmp.AllowUnexported(recordedCommand{})); diff != "" {
+		t.Fatalf("commands mismatch (-want +got):\n%s", diff)
 	}
 }
 

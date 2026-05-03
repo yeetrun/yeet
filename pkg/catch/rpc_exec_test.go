@@ -111,6 +111,39 @@ func TestRPCExecMissingService(t *testing.T) {
 	}
 }
 
+func TestRPCExecInvalidRequest(t *testing.T) {
+	server := newTestServer(t)
+	ts := newTestHTTPServer(t, server)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/rpc/exec"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{`)); err != nil {
+		t.Fatalf("send exec request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	mt, data, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read message: %v", err)
+	}
+	if mt != websocket.TextMessage {
+		t.Fatalf("expected text message, got %d", mt)
+	}
+	var msg catchrpc.ExecMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		t.Fatalf("decode control: %v", err)
+	}
+	if msg.Type != catchrpc.ExecMsgExit || msg.Code != 1 || msg.Error != "invalid exec request" {
+		t.Fatalf("unexpected exit message: %#v", msg)
+	}
+}
+
 func newTestHTTPServer(t *testing.T, server *Server) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(server.RPCMux())

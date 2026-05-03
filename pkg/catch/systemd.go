@@ -32,6 +32,11 @@ var systemdMessageIDs = map[string]ComponentStatus{
 	"c772d24e9a884cbeb9ea12625c306c01": "-", // Config error
 }
 
+type systemdMonitorEntry struct {
+	Unit      string `json:"UNIT"`
+	MessageID string `json:"MESSAGE_ID"`
+}
+
 func (s *Server) monitorSystemd() {
 	ctx := s.ctx
 execLoop:
@@ -54,10 +59,7 @@ execLoop:
 		// Read the output until the context is done.
 		je := json.NewDecoder(stdout)
 		for {
-			var entry struct {
-				Unit      string `json:"UNIT"`
-				MessageID string `json:"MESSAGE_ID"`
-			}
+			var entry systemdMonitorEntry
 			if err := je.Decode(&entry); err != nil {
 				if errors.Is(err, io.EOF) {
 					continue execLoop
@@ -65,55 +67,66 @@ execLoop:
 				log.Printf("failed to unmarshal journal entry: %v", err)
 				continue
 			}
-			if entry.MessageID == "" {
-				continue
-			}
-			status, ok := systemdMessageIDs[entry.MessageID]
-			if !ok {
-				log.Printf("unknown systemd message id: %+v", entry)
-				continue
-			} else if status == "-" {
-				continue
-			}
-			sn, ok := strings.CutSuffix(entry.Unit, ".service")
-			if !ok {
-				continue
-			}
-			sv, err := s.serviceView(sn)
-			if err != nil {
-				if errors.Is(err, errServiceNotFound) {
-					continue
-				}
-				log.Printf("failed to get service view: %v", err)
-				continue
-			}
-
-			s.serviceStatus.mu.Lock()
-			if s.serviceStatus.m == nil {
-				s.serviceStatus.m = make(map[string]map[string]ComponentStatus)
-			}
-			if _, ok := s.serviceStatus.m[sn]; !ok {
-				s.serviceStatus.m[sn] = make(map[string]ComponentStatus)
-			}
-			s.serviceStatus.m[sn][sn] = status
-			s.serviceStatus.mu.Unlock()
-			log.Printf("Service %q status: %v", entry.Unit, status)
-
-			data := ServiceStatusData{
-				ServiceName: sn,
-				ServiceType: ServiceDataTypeForService(sv),
-				ComponentStatus: []ComponentStatusData{
-					{
-						Name:   sn,
-						Status: status,
-					},
-				},
-			}
-			s.PublishEvent(Event{
-				Type:        EventTypeServiceStatusChanged,
-				ServiceName: sn,
-				Data:        EventData{Data: data},
-			})
+			s.handleSystemdMonitorEntry(entry)
 		}
+	}
+}
+
+func (s *Server) handleSystemdMonitorEntry(entry systemdMonitorEntry) bool {
+	sn, status, ok := systemdMonitorStatus(entry)
+	if !ok {
+		return false
+	}
+	sv, err := s.serviceView(sn)
+	if err != nil {
+		if !errors.Is(err, errServiceNotFound) {
+			log.Printf("failed to get service view: %v", err)
+		}
+		return false
+	}
+
+	data := s.updateSystemdComponentStatus(sn, status, ServiceDataTypeForService(sv))
+	log.Printf("Service %q status: %v", entry.Unit, status)
+	s.PublishEvent(Event{
+		Type:        EventTypeServiceStatusChanged,
+		ServiceName: sn,
+		Data:        EventData{Data: data},
+	})
+	return true
+}
+
+func systemdMonitorStatus(entry systemdMonitorEntry) (string, ComponentStatus, bool) {
+	if entry.MessageID == "" {
+		return "", "", false
+	}
+	status, ok := systemdMessageIDs[entry.MessageID]
+	if !ok {
+		log.Printf("unknown systemd message id: %+v", entry)
+		return "", "", false
+	}
+	if status == "-" {
+		return "", "", false
+	}
+	sn, ok := strings.CutSuffix(entry.Unit, ".service")
+	if !ok {
+		return "", "", false
+	}
+	return sn, status, true
+}
+
+func (s *Server) updateSystemdComponentStatus(sn string, status ComponentStatus, serviceType ServiceDataType) ServiceStatusData {
+	s.serviceStatus.mu.Lock()
+	defer s.serviceStatus.mu.Unlock()
+	if s.serviceStatus.m == nil {
+		s.serviceStatus.m = make(map[string]map[string]ComponentStatus)
+	}
+	if _, ok := s.serviceStatus.m[sn]; !ok {
+		s.serviceStatus.m[sn] = make(map[string]ComponentStatus)
+	}
+	s.serviceStatus.m[sn][sn] = status
+	return ServiceStatusData{
+		ServiceName:     sn,
+		ServiceType:     serviceType,
+		ComponentStatus: []ComponentStatusData{{Name: sn, Status: status}},
 	}
 }
