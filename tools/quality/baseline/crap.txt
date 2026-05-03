@@ -79,7 +79,6 @@ crap|pkg/dnet/dnet.go|(*plugin).LeaveNetwork
 crap|pkg/dnet/dnet.go|(*plugin).runInNetNS
 crap|pkg/dnet/dnet.go|ensureBridge
 crap|pkg/dnet/dnet.go|ensurePostroutingChain
-crap|pkg/ftdetect/ftdetect.go|(*file).detect
 crap|pkg/ftdetect/ftdetect.go|(*file).detectArchitectureElf
 crap|pkg/netns/firewall.go|CleanupFirewall
 crap|pkg/netns/firewall.go|EnsureFirewall

@@ -8,6 +8,7 @@ import (
 	"debug/elf"
 	"debug/macho"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -61,40 +62,79 @@ func (f *file) Close() error {
 }
 
 func (f *file) detect() (FileType, error) {
-	// Binary file
-	if is, err := f.detectBinary(); err != nil {
-		return Unknown, fmt.Errorf("failed to detect binary: %w", err)
-	} else if is {
-		log.Printf("Detected binary file")
-		if same, err := f.isSameArch(); err != nil {
-			log.Printf("Failed to check architecture: %v", err)
-			return Unknown, fmt.Errorf("failed to check architecture: %w", err)
-		} else if !same {
-			log.Printf("Architecture mismatch")
-			return Unknown, fmt.Errorf("architecture mismatch")
-		}
-		return Binary, nil
+	if ft, ok, err := f.detectBinaryType(); err != nil || ok {
+		return ft, err
 	}
-	// Zstd file
-	if is, err := f.detectZstd(); err != nil {
-		return Unknown, fmt.Errorf("failed to detect zstd: %w", err)
-	} else if is {
-		return Zstd, nil
+
+	if ft, ok, err := f.detectZstdType(); err != nil || ok {
+		return ft, err
 	}
+
 	if ft, ok := f.detectByName(); ok {
 		return ft, nil
 	}
-	if is, err := f.detectDockerCompose(); err != nil {
-		return Unknown, fmt.Errorf("failed to detect Docker Compose: %w", err)
-	} else if is {
-		return DockerCompose, nil
+
+	if ft, ok, err := f.detectContentType(); err != nil || ok {
+		return ft, err
 	}
-	if is, err := f.detectScript(); err != nil {
-		return Unknown, fmt.Errorf("failed to detect script: %w", err)
-	} else if is {
-		return Script, nil
-	}
+
 	return Unknown, fmt.Errorf("unable to detect file type")
+}
+
+func (f *file) detectBinaryType() (FileType, bool, error) {
+	is, err := f.detectBinary()
+	if err != nil {
+		return Unknown, false, fmt.Errorf("failed to detect binary: %w", err)
+	}
+	if !is {
+		return Unknown, false, nil
+	}
+
+	log.Printf("Detected binary file")
+	same, err := f.isSameArch()
+	if err != nil {
+		log.Printf("Failed to check architecture: %v", err)
+		return Unknown, false, fmt.Errorf("failed to check architecture: %w", err)
+	}
+	if !same {
+		log.Printf("Architecture mismatch")
+		return Unknown, false, fmt.Errorf("architecture mismatch")
+	}
+	return Binary, true, nil
+}
+
+func (f *file) detectZstdType() (FileType, bool, error) {
+	is, err := f.detectZstd()
+	if err != nil {
+		return Unknown, false, fmt.Errorf("failed to detect zstd: %w", err)
+	}
+	if !is {
+		return Unknown, false, nil
+	}
+	return Zstd, true, nil
+}
+
+func (f *file) detectContentType() (FileType, bool, error) {
+	contentDetectors := []struct {
+		name string
+		ft   FileType
+		fn   func() (bool, error)
+	}{
+		{name: "Docker Compose", ft: DockerCompose, fn: f.detectDockerCompose},
+		{name: "script", ft: Script, fn: f.detectScript},
+	}
+
+	for _, detector := range contentDetectors {
+		is, err := detector.fn()
+		if err != nil {
+			return Unknown, false, fmt.Errorf("failed to detect %s: %w", detector.name, err)
+		}
+		if is {
+			return detector.ft, true, nil
+		}
+	}
+
+	return Unknown, false, nil
 }
 
 func (f *file) detectByName() (FileType, bool) {
@@ -158,6 +198,9 @@ func (f *file) detectBinary() (bool, error) {
 	}
 	var magic [4]byte
 	if _, err := io.ReadFull(f.f, magic[:]); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return false, nil
+		}
 		return false, fmt.Errorf("failed to read file: %w", err)
 	}
 	mn := binary.LittleEndian.Uint32(magic[:])
@@ -250,6 +293,9 @@ func (f *file) detectScript() (bool, error) {
 	var bs [2]byte
 	n, err := io.ReadFull(f.f, bs[:])
 	if err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return false, nil
+		}
 		return false, fmt.Errorf("failed to read file: %v", err)
 	}
 
