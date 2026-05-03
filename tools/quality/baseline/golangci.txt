@@ -178,8 +178,6 @@ errcheck|pkg/dnet/dnet.go|(*plugin).runInNetNS|source:defer netnsFile.Close()|Er
 errcheck|pkg/dnet/dnet.go|(*plugin).runInNetNS|source:}()|Error return value is not checked
 errcheck|pkg/dnet/dnet.go|New|source:json.NewEncoder(w).Encode(SuccessResponse{})|Error return value of `(*encoding/json.Encoder).Encode` is not checked
 errcheck|pkg/dnet/dnet.go|New|source:json.NewEncoder(w).Encode(resp)|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/env/env.go|Write|source:defer f.Close()|Error return value of `f.Close` is not checked
-errcheck|pkg/env/env.go|marshalEnv|source:fmt.Fprintf(o, "%s=%s\n", tag, field.Interface())|Error return value of `fmt.Fprintf` is not checked
 errcheck|pkg/netns/netns.go|InstallYeetNSService|source:defer os.Remove("yeet-ns.env.tmp")|Error return value of `os.Remove` is not checked
 errcheck|pkg/netns/netns.go|InstallYeetNSService|source:defer os.Remove(f)|Error return value of `os.Remove` is not checked
 errcheck|pkg/registry/containerd.go|(*ContainerdCacheStorage).PutManifest|source:s.AbortUpload(ctx, upload.UUID)|Error return value of `s.AbortUpload` is not checked
@@ -298,7 +296,6 @@ gocognit|pkg/yeet/svc_cmd.go|splitRunPayloadArgs
 gocyclo|pkg/catch/tty_exec.go|(*ttyExecer).dispatch
 govet|pkg/cli/cli.go|consumesValue|source:for t.Kind() == reflect.Ptr {|inline: Constant reflect.Ptr should be inlined
 govet|pkg/cli/cli.go|flagSpecsFromStruct|source:if t.Kind() == reflect.Ptr {|inline: Constant reflect.Ptr should be inlined
-govet|pkg/env/env.go|marshalEnv|source:if re.Kind() == reflect.Ptr {|inline: Constant reflect.Ptr should be inlined
 staticcheck|pkg/catch/installer_file.go|(*FileInstaller).parseNetwork|source:switch {|QF1002: could use tagged switch on net
 staticcheck|pkg/catch/tty_service.go|(*systemdServiceRunner).Logs|source:args = append(args, "--unit="+s.SystemdService.Name())|QF1008: could remove embedded field "SystemdService" from selector
 staticcheck|pkg/catch/tty_service.go|(*systemdServiceRunner).Remove|source:return s.SystemdService.Uninstall()|QF1008: could remove embedded field "SystemdService" from selector
