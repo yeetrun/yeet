@@ -12,24 +12,24 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-func ZstdCompress(src, dst string) error {
+func ZstdCompress(src, dst string) (retErr error) {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("failed to open source file: %w", err)
 	}
-	defer srcFile.Close()
+	defer captureClose(srcFile, &retErr)
 
 	dstFile, err := os.Create(dst)
 	if err != nil {
 		return fmt.Errorf("failed to create destination file: %w", err)
 	}
-	defer dstFile.Close()
+	defer captureClose(dstFile, &retErr)
 
 	encoder, err := zstd.NewWriter(dstFile)
 	if err != nil {
 		return fmt.Errorf("failed to create zstd encoder: %w", err)
 	}
-	defer encoder.Close()
+	defer captureClose(encoder, &retErr)
 
 	_, err = io.Copy(encoder, srcFile)
 	if err != nil {
@@ -39,18 +39,18 @@ func ZstdCompress(src, dst string) error {
 	return nil
 }
 
-func ZstdDecompress(src, dst string) error {
+func ZstdDecompress(src, dst string) (retErr error) {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("failed to open source file: %w", err)
 	}
-	defer srcFile.Close()
+	defer captureClose(srcFile, &retErr)
 
 	dstFile, err := os.Create(dst)
 	if err != nil {
 		return fmt.Errorf("failed to create destination file: %w", err)
 	}
-	defer dstFile.Close()
+	defer captureClose(dstFile, &retErr)
 
 	decoder, err := zstd.NewReader(nil)
 	if err != nil {
@@ -69,4 +69,14 @@ func ZstdDecompress(src, dst string) error {
 	}
 
 	return nil
+}
+
+type closeErrorer interface {
+	Close() error
+}
+
+func captureClose(closer closeErrorer, retErr *error) {
+	if closeErr := closer.Close(); *retErr == nil {
+		*retErr = closeErr
+	}
 }
