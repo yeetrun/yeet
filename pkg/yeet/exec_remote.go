@@ -121,57 +121,82 @@ func newSessionStdinProxy(stdin *os.File) (*sessionStdinProxy, error) {
 		_ = syscall.Close(dup)
 		return nil, fmt.Errorf("set stdin nonblocking: %w", err)
 	}
-	dupFile := os.NewFile(uintptr(dup), stdin.Name())
 	pr, pw := io.Pipe()
 	proxy := &sessionStdinProxy{
 		r:         pr,
-		dup:       dupFile,
+		dup:       os.NewFile(uintptr(dup), stdin.Name()),
 		done:      make(chan struct{}),
 		stop:      make(chan struct{}),
 		origFlags: origFlags,
 	}
-	go func() {
-		defer close(proxy.done)
-		defer func() {
-			_ = dupFile.Close()
-		}()
-		buf := make([]byte, 4096)
-		for {
-			select {
-			case <-proxy.stop:
-				_ = pw.Close()
-				return
-			default:
-			}
+	go proxy.forwardInput(pw)
+	return proxy, nil
+}
 
-			n, err := dupFile.Read(buf)
-			if n > 0 {
-				if _, werr := pw.Write(buf[:n]); werr != nil {
-					_ = pw.CloseWithError(werr)
-					return
-				}
-			}
-			if err == nil {
-				continue
-			}
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed) {
-				_ = pw.Close()
-				return
-			}
-			if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
-				select {
-				case <-proxy.stop:
-					_ = pw.Close()
-					return
-				case <-time.After(10 * time.Millisecond):
-				}
-				continue
-			}
-			_ = pw.CloseWithError(err)
+func (p *sessionStdinProxy) forwardInput(pw *io.PipeWriter) {
+	defer close(p.done)
+	defer func() {
+		_ = p.dup.Close()
+	}()
+	buf := make([]byte, 4096)
+	for {
+		if p.stopRequested() {
+			_ = pw.Close()
 			return
 		}
-	}()
-	return proxy, nil
+		if !p.copyInputChunk(pw, buf) {
+			return
+		}
+	}
+}
+
+func (p *sessionStdinProxy) stopRequested() bool {
+	select {
+	case <-p.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *sessionStdinProxy) copyInputChunk(pw *io.PipeWriter, buf []byte) bool {
+	n, err := p.dup.Read(buf)
+	if n > 0 {
+		if _, werr := pw.Write(buf[:n]); werr != nil {
+			_ = pw.CloseWithError(werr)
+			return false
+		}
+	}
+	if err == nil {
+		return true
+	}
+	if isTerminalStdinReadError(err) {
+		_ = pw.Close()
+		return false
+	}
+	if isRetryableStdinReadError(err) {
+		return p.waitForInputRetry(pw)
+	}
+	_ = pw.CloseWithError(err)
+	return false
+}
+
+func isTerminalStdinReadError(err error) bool {
+	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed)
+}
+
+func isRetryableStdinReadError(err error) bool {
+	return errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK)
+}
+
+func (p *sessionStdinProxy) waitForInputRetry(pw *io.PipeWriter) bool {
+	select {
+	case <-p.stop:
+		_ = pw.Close()
+		return false
+	case <-time.After(10 * time.Millisecond):
+		return true
+	}
 }
 
 func (p *sessionStdinProxy) Read(b []byte) (int, error) {

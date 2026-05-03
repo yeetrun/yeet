@@ -158,7 +158,10 @@ type envAssignment struct {
 	Value string
 }
 
-var envLineRe = regexp.MustCompile(`^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)\s*=`)
+var (
+	envKeyRe  = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	envLineRe = regexp.MustCompile(`^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_]*)\s*=`)
+)
 
 func parseEnvAssignments(args []string) ([]envAssignment, error) {
 	if len(args) == 0 {
@@ -194,97 +197,129 @@ func splitEnvAssignment(arg string) (string, string, error) {
 	if !isValidEnvKey(key) {
 		return "", "", fmt.Errorf("invalid env key %q", key)
 	}
+	if strings.ContainsAny(value, "\r\n\x00") {
+		return "", "", fmt.Errorf("invalid env value for %q (contains a line break or NUL byte)", key)
+	}
 	return key, value, nil
 }
 
 func isValidEnvKey(key string) bool {
-	if key == "" {
-		return false
-	}
-	for i, r := range key {
-		if i == 0 {
-			if !(r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')) {
-				return false
-			}
-			continue
-		}
-		if !(r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
-			return false
-		}
-	}
-	return true
+	return envKeyRe.MatchString(key)
 }
 
-func applyEnvAssignments(contents []byte, assignments []envAssignment) ([]byte, bool, error) {
-	if len(assignments) == 0 {
-		return contents, false, fmt.Errorf("no env assignments provided")
+type envUpdates struct {
+	values map[string]string
+	order  []string
+}
+
+func newEnvUpdates(assignments []envAssignment) envUpdates {
+	updates := envUpdates{
+		values: make(map[string]string, len(assignments)),
+		order:  make([]string, 0, len(assignments)),
 	}
+	for _, a := range assignments {
+		if _, ok := updates.values[a.Key]; !ok {
+			updates.order = append(updates.order, a.Key)
+		}
+		updates.values[a.Key] = a.Value
+	}
+	return updates
+}
+
+func splitEnvFileLines(contents []byte) ([]string, bool) {
 	raw := string(contents)
 	hadTrailingNewline := strings.HasSuffix(raw, "\n")
 	raw = strings.TrimSuffix(raw, "\n")
-
-	var lines []string
-	if raw != "" {
-		lines = strings.Split(raw, "\n")
+	if raw == "" {
+		return nil, hadTrailingNewline
 	}
+	return strings.Split(raw, "\n"), hadTrailingNewline
+}
 
-	updates := make(map[string]string, len(assignments))
-	order := make([]string, 0, len(assignments))
-	for _, a := range assignments {
-		if _, ok := updates[a.Key]; !ok {
-			order = append(order, a.Key)
-		}
-		updates[a.Key] = a.Value
+type parsedEnvLine struct {
+	prefix string
+	key    string
+}
+
+func parseEnvLine(line string) (parsedEnvLine, bool) {
+	matches := envLineRe.FindStringSubmatch(line)
+	if len(matches) == 0 {
+		return parsedEnvLine{}, false
 	}
+	return parsedEnvLine{prefix: matches[1], key: matches[2]}, true
+}
 
-	updated := make(map[string]bool, len(assignments))
+func rewriteEnvLines(lines []string, updates envUpdates) ([]string, map[string]bool, bool) {
+	updated := make(map[string]bool, len(updates.values))
 	changed := false
-	for i, line := range lines {
-		matches := envLineRe.FindStringSubmatch(line)
-		if len(matches) == 0 {
-			continue
-		}
-		key := matches[2]
-		val, ok := updates[key]
+	for i := 0; i < len(lines); {
+		parsed, ok := parseEnvLine(lines[i])
 		if !ok {
+			i++
 			continue
 		}
+		val, ok := updates.values[parsed.key]
+		if !ok {
+			i++
+			continue
+		}
+		updated[parsed.key] = true
 		if val == "" {
 			lines = append(lines[:i], lines[i+1:]...)
-			i--
 			changed = true
-			updated[key] = true
 			continue
 		}
-		newLine := matches[1] + key + "=" + val
-		if newLine != line {
+		newLine := parsed.prefix + parsed.key + "=" + val
+		if newLine != lines[i] {
 			lines[i] = newLine
 			changed = true
 		}
-		updated[key] = true
+		i++
 	}
+	return lines, updated, changed
+}
 
-	for _, key := range order {
+func appendMissingEnvLines(lines []string, updates envUpdates, updated map[string]bool) ([]string, bool) {
+	changed := false
+	for _, key := range updates.order {
 		if updated[key] {
 			continue
 		}
-		val := updates[key]
+		val := updates.values[key]
 		if val == "" {
 			continue
 		}
 		lines = append(lines, key+"="+val)
 		changed = true
 	}
+	return lines, changed
+}
 
-	if !changed {
-		return contents, false, nil
-	}
-
+func joinEnvFileLines(lines []string, hadTrailingNewline bool) []byte {
 	out := strings.Join(lines, "\n")
 	if out != "" || hadTrailingNewline || len(lines) > 0 {
 		out += "\n"
 	}
-	return []byte(out), true, nil
+	return []byte(out)
+}
+
+func applyEnvAssignments(contents []byte, assignments []envAssignment) ([]byte, bool, error) {
+	if len(assignments) == 0 {
+		return contents, false, fmt.Errorf("no env assignments provided")
+	}
+	lines, hadTrailingNewline := splitEnvFileLines(contents)
+	updates := newEnvUpdates(assignments)
+
+	var changed bool
+	lines, updated, changed := rewriteEnvLines(lines, updates)
+	if appendedLines, appended := appendMissingEnvLines(lines, updates, updated); appended {
+		lines = appendedLines
+		changed = true
+	}
+	if !changed {
+		return contents, false, nil
+	}
+	return joinEnvFileLines(lines, hadTrailingNewline), true, nil
 }
 
 func (e *ttyExecer) envSetCmdFunc(assignments []envAssignment) error {

@@ -33,6 +33,12 @@ repos:
         language: system
         pass_filenames: false
         stages: [pre-commit]
+      - id: yeet-quality
+        name: yeet coverage and quality gate
+        entry: tools/hooks/quality
+        language: system
+        pass_filenames: false
+        stages: [pre-commit]
       - id: yeet-depaware
         name: yeet depaware
         entry: tools/hooks/depaware-check
