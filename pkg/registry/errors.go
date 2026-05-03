@@ -7,6 +7,7 @@ package registry
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 )
 
@@ -69,7 +70,9 @@ func WriteError(w http.ResponseWriter, statusCode int, code, message string, det
 		},
 	}
 
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		log.Printf("error writing registry error response: %v", err)
+	}
 }
 
 // NewError creates a new error descriptor.

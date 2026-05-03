@@ -28,3 +28,56 @@ func TestPlainRunUIOutputsKeyValueLines(t *testing.T) {
 		t.Fatalf("unexpected second line: %q", lines[1])
 	}
 }
+
+func TestRunUIHandlesKnownProgressMessages(t *testing.T) {
+	var buf bytes.Buffer
+	ui := newRunUI(&buf, false, false, "run", "svc-a")
+
+	ui.Printer("Detected binary file")
+	ui.Printer("File received")
+	ui.Printer("Installing service")
+	ui.Printer(`Service "svc-a" installed`)
+	ui.Printer("Service installed: svc-a")
+	ui.Printer("Service restarted: svc-a")
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	want := []string{
+		`action=run service=svc-a status=running step="Detect payload"`,
+		`action=run service=svc-a status=ok step="Detect payload" detail=binary`,
+		`action=run service=svc-a status=running step="Install service"`,
+		`action=run service=svc-a status=ok step="Install service"`,
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("expected %d lines, got %d (%q)", len(want), len(lines), buf.String())
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("line %d = %q, want %q", i, lines[i], want[i])
+		}
+	}
+}
+
+func TestDetectedFileDetail(t *testing.T) {
+	tests := []struct {
+		name string
+		msg  string
+		want string
+		ok   bool
+	}{
+		{name: "detected file", msg: "Detected binary file", want: "binary", ok: true},
+		{name: "wrong prefix", msg: "Found binary file"},
+		{name: "wrong suffix", msg: "Detected binary payload"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := detectedFileDetail(tt.msg)
+			if ok != tt.ok {
+				t.Fatalf("ok = %v, want %v", ok, tt.ok)
+			}
+			if got != tt.want {
+				t.Fatalf("detail = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

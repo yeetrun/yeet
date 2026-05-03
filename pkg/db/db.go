@@ -306,6 +306,9 @@ func (s *Store) readLocked() (created bool, err error) {
 	if err := jd.Decode(&d); err != nil {
 		return false, err
 	}
+	if d == nil {
+		return false, fmt.Errorf("database file %s contains null data", s.file)
+	}
 	s.d = d
 	return false, nil
 }

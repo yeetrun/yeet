@@ -48,22 +48,14 @@ func HandleTailscale(ctx context.Context, args []string) error {
 		return fmt.Errorf("tailscale --setup does not accept additional arguments")
 	}
 
-	secret := strings.TrimSpace(flags.ClientSecret)
-	if secret == "" {
-		if !isTerminalFn(int(os.Stdin.Fd())) {
-			return fmt.Errorf("client secret is required (use --client-secret or run in a TTY)")
-		}
-		secret, err = promptTailscaleClientSecret(os.Stdout, os.Stdin)
-		if err != nil {
-			return err
-		}
-		secret = strings.TrimSpace(secret)
-	}
-	if secret == "" {
-		return fmt.Errorf("client secret is required")
-	}
-	if !strings.HasPrefix(secret, "tskey-client-") {
-		return fmt.Errorf("invalid client secret (expected tskey-client-...)")
+	secret, err := resolveTailscaleClientSecret(
+		flags.ClientSecret,
+		isTerminalFn(int(os.Stdin.Fd())),
+		os.Stdout,
+		os.Stdin,
+	)
+	if err != nil {
+		return err
 	}
 
 	var resp catchrpc.TailscaleSetupResponse
@@ -77,6 +69,27 @@ func HandleTailscale(ctx context.Context, args []string) error {
 	}
 	_, err = fmt.Fprintf(os.Stdout, "Tailscale client secret stored on %s (%s).\n", Host(), resp.Path)
 	return err
+}
+
+func resolveTailscaleClientSecret(secret string, interactive bool, out io.Writer, in io.Reader) (string, error) {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		if !interactive {
+			return "", fmt.Errorf("client secret is required (use --client-secret or run in a TTY)")
+		}
+		prompted, err := promptTailscaleClientSecret(out, in)
+		if err != nil {
+			return "", err
+		}
+		secret = strings.TrimSpace(prompted)
+	}
+	if secret == "" {
+		return "", fmt.Errorf("client secret is required")
+	}
+	if !strings.HasPrefix(secret, "tskey-client-") {
+		return "", fmt.Errorf("invalid client secret (expected tskey-client-...)")
+	}
+	return secret, nil
 }
 
 func promptTailscaleClientSecret(out io.Writer, in io.Reader) (string, error) {

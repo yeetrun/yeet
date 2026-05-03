@@ -64,14 +64,9 @@ func handleInfoCommand(ctx context.Context, args []string, cfgLoc *projectConfig
 	if err != nil {
 		return err
 	}
-	format := strings.TrimSpace(flags.Format)
-	if format == "" {
-		format = "plain"
-	}
-	switch format {
-	case "plain", "text", "json", "json-pretty":
-	default:
-		return fmt.Errorf("unsupported format %q (expected plain, json, or json-pretty)", format)
+	format, err := normalizeInfoFormat(flags.Format)
+	if err != nil {
+		return err
 	}
 
 	service := getService()
@@ -87,24 +82,50 @@ func handleInfoCommand(ctx context.Context, args []string, cfgLoc *projectConfig
 
 	client := buildClientInfo(cfgLoc, service, host, hostInfo, hostInfoErr)
 
-	if format == "json" || format == "json-pretty" {
-		out := infoOutput{
-			Service: service,
-			Host:    host,
-			Client:  client,
-			Server:  serverInfoResp,
-		}
-		if hostInfoErr == nil {
-			out.HostInfo = &hostInfo
-		}
-		enc := json.NewEncoder(os.Stdout)
-		if format == "json-pretty" {
-			enc.SetIndent("", "  ")
-		}
-		return enc.Encode(out)
+	if isInfoJSONFormat(format) {
+		out := newInfoOutput(service, host, hostInfo, hostInfoErr, client, serverInfoResp)
+		return encodeInfoOutput(os.Stdout, format, out)
 	}
 
 	return renderInfoPlain(os.Stdout, service, host, hostInfoErr, hostInfo, client, serverInfoResp)
+}
+
+func normalizeInfoFormat(format string) (string, error) {
+	format = strings.TrimSpace(format)
+	if format == "" {
+		return "plain", nil
+	}
+	switch format {
+	case "plain", "text", "json", "json-pretty":
+		return format, nil
+	default:
+		return "", fmt.Errorf("unsupported format %q (expected plain, json, or json-pretty)", format)
+	}
+}
+
+func isInfoJSONFormat(format string) bool {
+	return format == "json" || format == "json-pretty"
+}
+
+func newInfoOutput(service, host string, hostInfo serverInfo, hostInfoErr error, client clientInfo, server catchrpc.ServiceInfoResponse) infoOutput {
+	out := infoOutput{
+		Service: service,
+		Host:    host,
+		Client:  client,
+		Server:  server,
+	}
+	if hostInfoErr == nil {
+		out.HostInfo = &hostInfo
+	}
+	return out
+}
+
+func encodeInfoOutput(w io.Writer, format string, out infoOutput) error {
+	enc := json.NewEncoder(w)
+	if format == "json-pretty" {
+		enc.SetIndent("", "  ")
+	}
+	return enc.Encode(out)
 }
 
 func buildClientInfo(cfgLoc *projectConfigLocation, service, host string, hostInfo serverInfo, hostInfoErr error) clientInfo {
@@ -270,49 +291,83 @@ func renderServiceSection(service, host string, client clientInfo, server catchr
 }
 
 func renderClientSection(client clientInfo) infoSection {
-	rows := []infoRow{}
+	return infoSection{Title: "Client (yeet.toml)", Rows: clientConfigRows(client)}
+}
+
+func clientConfigRows(client clientInfo) []infoRow {
 	if !client.Found {
 		msg := client.Message
 		if msg == "" {
 			msg = "no local config"
 		}
-		rows = append(rows, infoRow{Label: "Config", Value: msg})
-		return infoSection{Title: "Client (yeet.toml)", Rows: rows}
+		return []infoRow{{Label: "Config", Value: msg}}
 	}
-	if client.Entry != nil && client.Entry.Host != "" {
-		rows = append(rows, infoRow{Label: "Saved host", Value: client.Entry.Host})
+
+	rows := clientSavedRows(client.Entry)
+	rows = append(rows, clientPayloadRows(client.Payload)...)
+	rows = append(rows, clientEntryMetadataRows(client.Entry)...)
+	return rows
+}
+
+func clientSavedRows(entry *clientServiceEntry) []infoRow {
+	if entry == nil {
+		return nil
 	}
-	if client.Entry != nil && client.Entry.Type != "" {
-		rows = append(rows, infoRow{Label: "Saved type", Value: client.Entry.Type})
+	rows := []infoRow{}
+	if entry.Host != "" {
+		rows = append(rows, infoRow{Label: "Saved host", Value: entry.Host})
 	}
-	if client.Payload != nil {
-		if client.Payload.Stored != "" {
-			rows = append(rows, infoRow{Label: "Payload", Value: client.Payload.Stored})
-		}
-		if client.Payload.Kind != "" {
-			rows = append(rows, infoRow{Label: "Payload type", Value: client.Payload.Kind})
-		}
-		if client.Payload.Exists {
-			rows = append(rows, infoRow{Label: "Payload size", Value: formatBytes(client.Payload.SizeBytes)})
-		}
-		if client.Payload.ResolveErr != "" {
-			rows = append(rows, infoRow{Label: "Payload error", Value: client.Payload.ResolveErr})
-		} else if client.Payload.DetectErr != "" {
-			rows = append(rows, infoRow{Label: "Payload detect", Value: client.Payload.DetectErr})
-		}
+	if entry.Type != "" {
+		rows = append(rows, infoRow{Label: "Saved type", Value: entry.Type})
 	}
-	if client.Entry != nil && client.Entry.EnvFile != "" {
-		rows = append(rows, infoRow{Label: "Env file", Value: client.Entry.EnvFile})
+	return rows
+}
+
+func clientPayloadRows(payload *clientPayloadInfo) []infoRow {
+	if payload == nil {
+		return nil
 	}
-	if client.Entry != nil {
-		if len(client.Entry.Args) > 0 {
-			rows = append(rows, infoRow{Label: "Payload args", Value: strings.Join(client.Entry.Args, " ")})
-		}
-		if client.Entry.Schedule != "" {
-			rows = append(rows, infoRow{Label: "Schedule", Value: client.Entry.Schedule})
-		}
+	rows := []infoRow{}
+	if payload.Stored != "" {
+		rows = append(rows, infoRow{Label: "Payload", Value: payload.Stored})
 	}
-	return infoSection{Title: "Client (yeet.toml)", Rows: rows}
+	if payload.Kind != "" {
+		rows = append(rows, infoRow{Label: "Payload type", Value: payload.Kind})
+	}
+	if payload.Exists {
+		rows = append(rows, infoRow{Label: "Payload size", Value: formatBytes(payload.SizeBytes)})
+	}
+	if row, ok := clientPayloadErrorRow(payload); ok {
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func clientPayloadErrorRow(payload *clientPayloadInfo) (infoRow, bool) {
+	if payload.ResolveErr != "" {
+		return infoRow{Label: "Payload error", Value: payload.ResolveErr}, true
+	}
+	if payload.DetectErr != "" {
+		return infoRow{Label: "Payload detect", Value: payload.DetectErr}, true
+	}
+	return infoRow{}, false
+}
+
+func clientEntryMetadataRows(entry *clientServiceEntry) []infoRow {
+	if entry == nil {
+		return nil
+	}
+	rows := []infoRow{}
+	if entry.EnvFile != "" {
+		rows = append(rows, infoRow{Label: "Env file", Value: entry.EnvFile})
+	}
+	if len(entry.Args) > 0 {
+		rows = append(rows, infoRow{Label: "Payload args", Value: strings.Join(entry.Args, " ")})
+	}
+	if entry.Schedule != "" {
+		rows = append(rows, infoRow{Label: "Schedule", Value: entry.Schedule})
+	}
+	return rows
 }
 
 func renderServerSection(server catchrpc.ServiceInfoResponse) infoSection {
@@ -348,65 +403,74 @@ func renderNetworkSection(server catchrpc.ServiceInfoResponse) infoSection {
 		return infoSection{Title: "Network", Rows: nil}
 	}
 	net := server.Info.Network
-	rows := []infoRow{}
-	if net.IPError != "" {
-		rows = append(rows, infoRow{Label: "IPs", Value: fmt.Sprintf("unavailable (%s)", net.IPError)})
-	} else if len(net.IPs) > 0 || net.SvcIP != "" {
-		groups := buildIPGroups(net.IPs, net.SvcIP)
-		if len(groups) == 0 {
-			rows = append(rows, infoRow{Label: "IPs", Value: "none"})
-		} else {
-			rows = append(rows, infoRow{Label: "IPs", Value: ""})
-			for _, group := range groups {
-				rows = append(rows, infoRow{
-					Label: "  " + group.label,
-					Value: strings.Join(group.ips, ", "),
-				})
-			}
-		}
-	} else {
-		rows = append(rows, infoRow{Label: "IPs", Value: "none"})
-	}
-	if net.Tailscale != nil {
-		ts := net.Tailscale
-		desc := ts.Interface
-		if desc == "" {
-			desc = "enabled"
-		}
-		if ts.Version != "" {
-			desc = fmt.Sprintf("%s (ver %s)", desc, ts.Version)
-		}
-		if len(ts.Tags) > 0 {
-			desc = fmt.Sprintf("%s, tags: %s", desc, strings.Join(ts.Tags, ", "))
-		}
-		if ts.ExitNode != "" {
-			desc = fmt.Sprintf("%s, exit: %s", desc, ts.ExitNode)
-		}
-		rows = append(rows, infoRow{Label: "Tailscale", Value: desc})
-	} else {
-		rows = append(rows, infoRow{Label: "Tailscale", Value: "disabled"})
-	}
-	if net.Macvlan != nil {
-		mv := net.Macvlan
-		desc := mv.Interface
-		if desc == "" {
-			desc = "enabled"
-		}
-		parts := []string{desc}
-		if mv.Parent != "" {
-			parts = append(parts, "parent "+mv.Parent)
-		}
-		if mv.VLAN != 0 {
-			parts = append(parts, fmt.Sprintf("vlan %d", mv.VLAN))
-		}
-		if mv.Mac != "" {
-			parts = append(parts, "mac "+mv.Mac)
-		}
-		rows = append(rows, infoRow{Label: "Macvlan", Value: strings.Join(parts, ", ")})
-	} else {
-		rows = append(rows, infoRow{Label: "Macvlan", Value: "disabled"})
-	}
+	rows := networkIPRows(net)
+	rows = append(rows, infoRow{Label: "Tailscale", Value: describeTailscale(net.Tailscale)})
+	rows = append(rows, infoRow{Label: "Macvlan", Value: describeMacvlan(net.Macvlan)})
 	return infoSection{Title: "Network", Rows: rows}
+}
+
+func networkIPRows(net catchrpc.ServiceNetwork) []infoRow {
+	if net.IPError != "" {
+		return []infoRow{{Label: "IPs", Value: fmt.Sprintf("unavailable (%s)", net.IPError)}}
+	}
+	if len(net.IPs) == 0 && net.SvcIP == "" {
+		return []infoRow{{Label: "IPs", Value: "none"}}
+	}
+
+	groups := buildIPGroups(net.IPs, net.SvcIP)
+	if len(groups) == 0 {
+		return []infoRow{{Label: "IPs", Value: "none"}}
+	}
+
+	rows := []infoRow{{Label: "IPs", Value: ""}}
+	for _, group := range groups {
+		rows = append(rows, infoRow{
+			Label: "  " + group.label,
+			Value: strings.Join(group.ips, ", "),
+		})
+	}
+	return rows
+}
+
+func describeTailscale(ts *catchrpc.ServiceTailscale) string {
+	if ts == nil {
+		return "disabled"
+	}
+	desc := ts.Interface
+	if desc == "" {
+		desc = "enabled"
+	}
+	if ts.Version != "" {
+		desc = fmt.Sprintf("%s (ver %s)", desc, ts.Version)
+	}
+	if len(ts.Tags) > 0 {
+		desc = fmt.Sprintf("%s, tags: %s", desc, strings.Join(ts.Tags, ", "))
+	}
+	if ts.ExitNode != "" {
+		desc = fmt.Sprintf("%s, exit: %s", desc, ts.ExitNode)
+	}
+	return desc
+}
+
+func describeMacvlan(mv *catchrpc.ServiceMacvlan) string {
+	if mv == nil {
+		return "disabled"
+	}
+	desc := mv.Interface
+	if desc == "" {
+		desc = "enabled"
+	}
+	parts := []string{desc}
+	if mv.Parent != "" {
+		parts = append(parts, "parent "+mv.Parent)
+	}
+	if mv.VLAN != 0 {
+		parts = append(parts, fmt.Sprintf("vlan %d", mv.VLAN))
+	}
+	if mv.Mac != "" {
+		parts = append(parts, "mac "+mv.Mac)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func renderRuntimeSection(server catchrpc.ServiceInfoResponse) infoSection {
@@ -475,40 +539,47 @@ func summarizeStatus(info catchrpc.ServiceInfo) string {
 	if status.Error != "" {
 		return fmt.Sprintf("unknown (%s)", status.Error)
 	}
-	total := len(status.Components)
-	if total == 0 {
+	components := status.Components
+	total := len(components)
+	switch total {
+	case 0:
 		return "unknown"
+	case 1:
+		return componentStatusOrUnknown(components[0].Status)
 	}
-	if total == 1 {
-		if status.Components[0].Status != "" {
-			return status.Components[0].Status
-		}
-		return "unknown"
-	}
-	counts := make(map[string]int)
-	for _, component := range status.Components {
-		if component.Status == "" {
-			counts["unknown"]++
-			continue
-		}
-		counts[component.Status]++
-	}
-	if counts["running"] == total {
-		return fmt.Sprintf("running (%d)", total)
-	}
-	if counts["stopped"] == total {
-		return fmt.Sprintf("stopped (%d)", total)
-	}
-	if counts["starting"] == total {
-		return fmt.Sprintf("starting (%d)", total)
-	}
-	if counts["stopping"] == total {
-		return fmt.Sprintf("stopping (%d)", total)
+
+	counts := countComponentStatuses(components)
+	if summary, ok := uniformComponentStatusSummary(counts, total); ok {
+		return summary
 	}
 	if counts["running"] > 0 {
 		return fmt.Sprintf("partial (%d/%d)", counts["running"], total)
 	}
 	return fmt.Sprintf("mixed (%d)", total)
+}
+
+func componentStatusOrUnknown(status string) string {
+	if status == "" {
+		return "unknown"
+	}
+	return status
+}
+
+func countComponentStatuses(components []catchrpc.ServiceComponentStatus) map[string]int {
+	counts := make(map[string]int)
+	for _, component := range components {
+		counts[componentStatusOrUnknown(component.Status)]++
+	}
+	return counts
+}
+
+func uniformComponentStatusSummary(counts map[string]int, total int) (string, bool) {
+	for _, status := range []string{"running", "stopped", "starting", "stopping"} {
+		if counts[status] == total {
+			return fmt.Sprintf("%s (%d)", status, total), true
+		}
+	}
+	return "", false
 }
 
 func formatServiceDataType(dt string) string {
@@ -565,70 +636,85 @@ type ipGroup struct {
 	ips   []string
 }
 
+type ipGroupBuilder struct {
+	seen    map[string]struct{}
+	ordered []ipGroup
+	index   map[string]int
+}
+
+func newIPGroupBuilder() *ipGroupBuilder {
+	return &ipGroupBuilder{
+		seen:  make(map[string]struct{}),
+		index: make(map[string]int),
+	}
+}
+
 func buildIPGroups(entries []catchrpc.ServiceIP, svcIP string) []ipGroup {
 	if len(entries) == 0 && svcIP == "" {
 		return nil
 	}
-	seen := make(map[string]struct{})
-	ordered := []ipGroup{}
-	index := make(map[string]int)
-	addGroup := func(label, base, ip string) {
-		if ip == "" {
-			return
-		}
-		key := label + ":" + ip
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		if _, ok := index[label]; !ok {
-			index[label] = len(ordered)
-			ordered = append(ordered, ipGroup{label: label, base: base})
-		}
-		ordered[index[label]].ips = append(ordered[index[label]].ips, ip)
-	}
 
+	builder := newIPGroupBuilder()
 	for _, entry := range entries {
-		base := strings.TrimSpace(entry.Label)
-		if base == "" {
-			base = "ip"
-		}
-		display := base
-		if base != "service" && entry.Interface != "" {
-			display = fmt.Sprintf("%s (%s)", base, entry.Interface)
-		}
-		addGroup(display, base, entry.IP)
+		label, base := ipGroupLabel(entry)
+		builder.add(label, base, entry.IP)
 	}
-	if svcIP != "" {
-		addGroup("service", "service", svcIP)
-	}
+	builder.add("service", "service", svcIP)
 
+	ordered := builder.groups()
 	sort.SliceStable(ordered, func(i, j int) bool {
-		priority := func(label string) int {
-			switch label {
-			case "service":
-				return 0
-			case "tailscale":
-				return 1
-			case "macvlan":
-				return 2
-			case "docker":
-				return 3
-			case "host":
-				return 4
-			case "netns":
-				return 5
-			default:
-				return 6
-			}
-		}
-		pi := priority(ordered[i].base)
-		pj := priority(ordered[j].base)
-		if pi != pj {
-			return pi < pj
-		}
-		return ordered[i].label < ordered[j].label
+		return ipGroupLess(ordered[i], ordered[j])
 	})
 
 	return ordered
+}
+
+func (b *ipGroupBuilder) add(label, base, ip string) {
+	if ip == "" {
+		return
+	}
+	key := label + ":" + ip
+	if _, ok := b.seen[key]; ok {
+		return
+	}
+	b.seen[key] = struct{}{}
+	if _, ok := b.index[label]; !ok {
+		b.index[label] = len(b.ordered)
+		b.ordered = append(b.ordered, ipGroup{label: label, base: base})
+	}
+	b.ordered[b.index[label]].ips = append(b.ordered[b.index[label]].ips, ip)
+}
+
+func (b *ipGroupBuilder) groups() []ipGroup {
+	return b.ordered
+}
+
+func ipGroupLabel(entry catchrpc.ServiceIP) (string, string) {
+	base := strings.TrimSpace(entry.Label)
+	if base == "" {
+		base = "ip"
+	}
+	label := base
+	if base != "service" && entry.Interface != "" {
+		label = fmt.Sprintf("%s (%s)", base, entry.Interface)
+	}
+	return label, base
+}
+
+func ipGroupLess(left, right ipGroup) bool {
+	leftPriority := ipGroupPriority(left.base)
+	rightPriority := ipGroupPriority(right.base)
+	if leftPriority != rightPriority {
+		return leftPriority < rightPriority
+	}
+	return left.label < right.label
+}
+
+func ipGroupPriority(base string) int {
+	for priority, label := range []string{"service", "tailscale", "macvlan", "docker", "host", "netns"} {
+		if base == label {
+			return priority
+		}
+	}
+	return 6
 }

@@ -157,6 +157,59 @@ func TestShouldLogCopyErrReturnsTrueForUnexpectedErrors(t *testing.T) {
 	}
 }
 
+type opaqueCopyErr struct {
+	err error
+}
+
+func (e opaqueCopyErr) Error() string {
+	return "copy failed"
+}
+
+func (e opaqueCopyErr) Unwrap() error {
+	return e.err
+}
+
+func TestIsExpectedCopyErrUnwrapsOpaqueErrors(t *testing.T) {
+	err := opaqueCopyErr{err: errors.New("websocket: close sent")}
+	if !isExpectedCopyErr(err) {
+		t.Fatalf("expected wrapped websocket close to be recognized")
+	}
+}
+
+func TestTTYCommandHandlersCoverDispatchCommands(t *testing.T) {
+	expected := []string{
+		"copy",
+		"cron",
+		"disable",
+		"docker",
+		"edit",
+		"enable",
+		"env",
+		"events",
+		"ip",
+		"logs",
+		"mount",
+		"remove",
+		"restart",
+		"rollback",
+		"run",
+		"stage",
+		"start",
+		"status",
+		"stop",
+		"tailscale",
+		"ts",
+		"umount",
+		"version",
+	}
+
+	for _, name := range expected {
+		if ttyCommandHandlers[name] == nil {
+			t.Fatalf("expected command handler for %q", name)
+		}
+	}
+}
+
 func TestDockerComposeServiceCmdOverridesContextFactoryForTTY(t *testing.T) {
 	server := newTestServer(t)
 	composePath := filepath.Join(t.TempDir(), "compose.yml")
