@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -90,5 +91,44 @@ func TestDetectFileUnknown(t *testing.T) {
 	}
 	if ft != Unknown {
 		t.Fatalf("expected Unknown type, got %v", ft)
+	}
+}
+
+func TestDetectFileShortScript(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run")
+	if err := os.WriteFile(path, []byte("#!"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	ft, err := DetectFile(path, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("DetectFile error: %v", err)
+	}
+	if ft != Script {
+		t.Fatalf("expected Script type, got %v", ft)
+	}
+}
+
+func TestDetectFileShortUnknown(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "readme")
+	if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	ft, err := DetectFile(path, runtime.GOOS, runtime.GOARCH)
+	if err == nil {
+		t.Fatalf("expected error, got nil (type %v)", ft)
+	}
+	if ft != Unknown {
+		t.Fatalf("expected Unknown type, got %v", ft)
+	}
+	if strings.Contains(err.Error(), "failed to detect binary") {
+		t.Fatalf("expected detection miss, got low-level binary error: %v", err)
 	}
 }

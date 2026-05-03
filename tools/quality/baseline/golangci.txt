@@ -35,7 +35,6 @@ cyclop|pkg/copyutil/tar.go|TarFileWithObserver
 cyclop|pkg/cronutil/cronutil.go|CronToCalender
 cyclop|pkg/dnet/dnet.go|JoinNetwork
 cyclop|pkg/dnet/dnet.go|syncNetNSPortForwards
-cyclop|pkg/ftdetect/ftdetect.go|detect
 cyclop|pkg/netns/firewall.go|EnsureFirewall
 cyclop|pkg/netns/firewall.go|VerifyFirewall
 cyclop|pkg/netns/netns.go|InstallYeetNSService
