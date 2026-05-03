@@ -19,7 +19,7 @@ import (
 // CopyFile copies a file from src to dst. It is able to overwrite existing
 // files that are in use. It does this by writing to a temporary file and then
 // moving it into place.
-func CopyFile(src, dst string) error {
+func CopyFile(src, dst string) (retErr error) {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -27,7 +27,7 @@ func CopyFile(src, dst string) error {
 		}
 		return err
 	}
-	defer srcFile.Close()
+	defer closeFile(srcFile, &retErr)
 
 	srcStat, err := srcFile.Stat()
 	if err != nil {
@@ -37,29 +37,51 @@ func CopyFile(src, dst string) error {
 	// We write to a temporary file and then move it into place to avoid issues
 	// with the destination file already existing / being in use.
 	tempDst := dst + ".tmp"
-	dstFile, err := os.OpenFile(tempDst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, srcStat.Mode())
+	if err := writeCopyTempFile(srcFile, tempDst, srcStat.Mode()); err != nil {
+		return err
+	}
+	if err := os.Rename(tempDst, dst); err != nil {
+		_ = os.Remove(tempDst)
+		return err
+	}
+	return nil
+}
+
+func writeCopyTempFile(srcFile *os.File, tempDst string, perm os.FileMode) (retErr error) {
+	dstFile, err := os.OpenFile(tempDst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
 	if err != nil {
 		return err
 	}
+	closed := false
 	defer func() {
-		dstFile.Close()
-		if err == nil {
-			err = os.Rename(tempDst, dst)
+		if !closed {
+			if closeErr := dstFile.Close(); retErr == nil {
+				retErr = closeErr
+			}
 		}
-		if err != nil {
-			os.Remove(tempDst)
+		if retErr != nil {
+			_ = os.Remove(tempDst)
 		}
 	}()
-	if err != nil {
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
 		return err
 	}
-	defer dstFile.Close()
-
-	if _, err = io.Copy(dstFile, srcFile); err != nil {
+	if err := dstFile.Sync(); err != nil {
 		return err
 	}
 
-	return dstFile.Sync()
+	closed = true
+	if err := dstFile.Close(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func closeFile(file *os.File, retErr *error) {
+	if closeErr := file.Close(); *retErr == nil {
+		*retErr = closeErr
+	}
 }
 
 // version returns a version string based on the current time.
@@ -92,7 +114,7 @@ func ApplyVersion(path string) string {
 }
 
 // Identical reports whether the contents of two files are identical.
-func Identical(file1, file2 string) (bool, error) {
+func Identical(file1, file2 string) (same bool, retErr error) {
 	f1, err := os.Open(file1)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -100,7 +122,7 @@ func Identical(file1, file2 string) (bool, error) {
 		}
 		return false, fmt.Errorf("failed to open file1: %w", err)
 	}
-	defer f1.Close()
+	defer closeFile(f1, &retErr)
 
 	f2, err := os.Open(file2)
 	if err != nil {
@@ -109,7 +131,7 @@ func Identical(file1, file2 string) (bool, error) {
 		}
 		return false, fmt.Errorf("failed to open file2: %w", err)
 	}
-	defer f2.Close()
+	defer closeFile(f2, &retErr)
 
 	hasher1 := sha256.New()
 	hasher2 := sha256.New()

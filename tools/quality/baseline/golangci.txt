@@ -185,12 +185,6 @@ errcheck|pkg/dnet/dnet.go|New|source:json.NewEncoder(w).Encode(SuccessResponse{}
 errcheck|pkg/dnet/dnet.go|New|source:json.NewEncoder(w).Encode(resp)|Error return value of `(*encoding/json.Encoder).Encode` is not checked
 errcheck|pkg/env/env.go|Write|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/env/env.go|marshalEnv|source:fmt.Fprintf(o, "%s=%s\n", tag, field.Interface())|Error return value of `fmt.Fprintf` is not checked
-errcheck|pkg/fileutil/fileutil.go|CopyFile|source:defer dstFile.Close()|Error return value of `dstFile.Close` is not checked
-errcheck|pkg/fileutil/fileutil.go|CopyFile|source:defer srcFile.Close()|Error return value of `srcFile.Close` is not checked
-errcheck|pkg/fileutil/fileutil.go|CopyFile|source:dstFile.Close()|Error return value of `dstFile.Close` is not checked
-errcheck|pkg/fileutil/fileutil.go|CopyFile|source:os.Remove(tempDst)|Error return value of `os.Remove` is not checked
-errcheck|pkg/fileutil/fileutil.go|Identical|source:defer f1.Close()|Error return value of `f1.Close` is not checked
-errcheck|pkg/fileutil/fileutil.go|Identical|source:defer f2.Close()|Error return value of `f2.Close` is not checked
 errcheck|pkg/netns/netns.go|InstallYeetNSService|source:defer os.Remove("yeet-ns.env.tmp")|Error return value of `os.Remove` is not checked
 errcheck|pkg/netns/netns.go|InstallYeetNSService|source:defer os.Remove(f)|Error return value of `os.Remove` is not checked
 errcheck|pkg/registry/containerd.go|(*ContainerdCacheStorage).PutManifest|source:s.AbortUpload(ctx, upload.UUID)|Error return value of `s.AbortUpload` is not checked
