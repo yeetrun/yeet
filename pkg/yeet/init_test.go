@@ -5,7 +5,12 @@
 package yeet
 
 import (
+	"context"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -63,6 +68,13 @@ func TestParseInitArgs(t *testing.T) {
 	}
 }
 
+func TestHandleInitReturnsParseErrorsBeforeRemoteWork(t *testing.T) {
+	err := HandleInit(context.Background(), []string{"one", "two"})
+	if err == nil || !strings.Contains(err.Error(), "at most one argument") {
+		t.Fatalf("HandleInit error = %v, want parse error", err)
+	}
+}
+
 func TestBuildCatchCmdDisablesCGOForCrossCompile(t *testing.T) {
 	cmd := buildCatchCmd("amd64", "/tmp/repo")
 
@@ -82,6 +94,31 @@ func TestBuildCatchCmdDisablesCGOForCrossCompile(t *testing.T) {
 		if !strings.Contains(env, want) {
 			t.Fatalf("expected %q in env", want)
 		}
+	}
+}
+
+func TestBuildCatchUsesGoBuildOutput(t *testing.T) {
+	gitRoot := t.TempDir()
+	fakeCommandInPath(t, "go", "printf 'catch-binary' > catch\n")
+
+	bin, size, err := buildCatch("Linux", "ARM64", gitRoot)
+	if err != nil {
+		t.Fatalf("buildCatch error: %v", err)
+	}
+	if bin != filepath.Join(gitRoot, "catch") {
+		t.Fatalf("bin = %q, want catch under git root", bin)
+	}
+	if size != int64(len("catch-binary")) {
+		t.Fatalf("size = %d, want fake binary size", size)
+	}
+}
+
+func TestBuildCatchReportsGoBuildError(t *testing.T) {
+	fakeCommandInPath(t, "go", "printf 'compile failed\\n' >&2\nexit 1\n")
+
+	_, _, err := buildCatch("Linux", "amd64", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "failed to build catch binary") {
+		t.Fatalf("buildCatch error = %v, want build error", err)
 	}
 }
 
@@ -113,6 +150,64 @@ func TestFormatBuildDetail(t *testing.T) {
 	}
 }
 
+func TestShouldUseSudoForInit(t *testing.T) {
+	if shouldUseSudoForInit("root@example.com") {
+		t.Fatal("root install should not require sudo")
+	}
+
+	stderr := captureInitStderr(t, func() {
+		if !shouldUseSudoForInit("admin@example.com") {
+			t.Fatal("non-root install should require sudo")
+		}
+	})
+	if !strings.Contains(stderr, "sudo will be used") {
+		t.Fatalf("stderr = %q, want sudo warning", stderr)
+	}
+}
+
+func TestRemoteCatchInstallArgs(t *testing.T) {
+	oldPrefs := loadedPrefs
+	defer func() { loadedPrefs = oldPrefs }()
+	loadedPrefs.DefaultHost = "catch-host"
+
+	tests := []struct {
+		name         string
+		userAtRemote string
+		useSudo      bool
+		want         []string
+	}{
+		{
+			name:         "root user preserves install env",
+			userAtRemote: "root@example.com",
+			want: []string{
+				"-t", "root@example.com",
+				"env", "CATCH_INSTALL_USER=root", "CATCH_INSTALL_HOST=example.com",
+				"./catch", "--tsnet-host=catch-host", "install",
+			},
+		},
+		{
+			name:         "sudo host only",
+			userAtRemote: "example.com",
+			useSudo:      true,
+			want: []string{
+				"-t", "example.com",
+				"sudo",
+				"env", "CATCH_INSTALL_HOST=example.com",
+				"./catch", "--tsnet-host=catch-host", "install",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := remoteCatchInstallArgs(tt.userAtRemote, tt.useSudo)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("remoteCatchInstallArgs = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCatchInstallEnv(t *testing.T) {
 	tests := []struct {
 		name string
@@ -132,6 +227,167 @@ func TestCatchInstallEnv(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestResolveInitCatchSourceFromGitHub(t *testing.T) {
+	got, err := resolveInitCatchSource(initOptions{fromGithub: true})
+	if err != nil {
+		t.Fatalf("resolveInitCatchSource returned error: %v", err)
+	}
+	if !got.useGithub || got.reason != "using GitHub release" {
+		t.Fatalf("source = %#v, want GitHub release source", got)
+	}
+}
+
+func TestVerifyInitSSHSkipsNonTerminal(t *testing.T) {
+	oldIsTerminal := isTerminalFn
+	defer func() { isTerminalFn = oldIsTerminal }()
+	isTerminalFn = func(int) bool { return false }
+
+	if err := verifyInitSSH(nil, "root@example.com"); err != nil {
+		t.Fatalf("verifyInitSSH returned error: %v", err)
+	}
+}
+
+func TestDetectInitHostUsesRemoteUname(t *testing.T) {
+	fakeSSHInPath(t, "printf 'Linux\\nx86_64\\n'\n")
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+
+	systemName, goarch, err := detectInitHost(ui, "root@example.com")
+	if err != nil {
+		t.Fatalf("detectInitHost error: %v", err)
+	}
+	if systemName != "Linux" || goarch != "amd64" {
+		t.Fatalf("detectInitHost = %s/%s, want Linux/amd64", systemName, goarch)
+	}
+}
+
+func TestRemoteHostOSAndArchRejectsUnexpectedOutput(t *testing.T) {
+	fakeSSHInPath(t, "printf 'Linux\\n'\n")
+
+	_, _, err := remoteHostOSAndArch("root@example.com")
+	if err == nil || !strings.Contains(err.Error(), "unexpected output") {
+		t.Fatalf("remoteHostOSAndArch error = %v, want unexpected output", err)
+	}
+}
+
+func TestPreflightSSHHostKey(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		fakeSSHInPath(t, "exit 0\n")
+		if err := preflightSSHHostKey("root@example.com"); err != nil {
+			t.Fatalf("preflightSSHHostKey error: %v", err)
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		fakeSSHInPath(t, "exit 1\n")
+		err := preflightSSHHostKey("root@example.com")
+		if err == nil || !strings.Contains(err.Error(), "ssh preflight failed") {
+			t.Fatalf("preflightSSHHostKey error = %v, want preflight error", err)
+		}
+	})
+}
+
+func TestChmodInitCatchUsesSSH(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "ssh.log")
+	fakeSSHInPath(t, "printf '%s\\n' \"$*\" > "+strconvQuoteForShell(logFile)+"\n")
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+
+	if err := chmodInitCatch(ui, "root@example.com"); err != nil {
+		t.Fatalf("chmodInitCatch error: %v", err)
+	}
+	b, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("ReadFile ssh log: %v", err)
+	}
+	if got := strings.TrimSpace(string(b)); got != "root@example.com chmod +x ./catch" {
+		t.Fatalf("ssh args = %q", got)
+	}
+}
+
+func TestChmodInitCatchReportsSSHError(t *testing.T) {
+	fakeSSHInPath(t, "exit 1\n")
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+
+	err := chmodInitCatch(ui, "root@example.com")
+	if err == nil || !strings.Contains(err.Error(), "failed to make catch binary executable") {
+		t.Fatalf("chmodInitCatch error = %v, want chmod error", err)
+	}
+}
+
+func TestInstallInitCatchUsesFilteredSSHOutput(t *testing.T) {
+	oldPrefs := loadedPrefs
+	defer func() { loadedPrefs = oldPrefs }()
+	loadedPrefs.DefaultHost = "catch-host"
+	fakeSSHInPath(t, strings.Join([]string{
+		"printf '%s\\n' 'data dir: /srv/yeet'",
+		"printf '%s\\n' 'tsnet running state path /srv/yeet/tsnet/tailscaled.state'",
+		"printf '%s\\n' 'Warning: docker missing'",
+	}, "\n")+"\n")
+	ui := newInitUI(io.Discard, false, true, "catch-host", "root@example.com", catchServiceName)
+
+	if err := installInitCatch(ui, "root@example.com", false); err != nil {
+		t.Fatalf("installInitCatch error: %v", err)
+	}
+}
+
+func TestInstallInitCatchReportsSSHError(t *testing.T) {
+	fakeSSHInPath(t, "exit 1\n")
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+
+	err := installInitCatch(ui, "root@example.com", false)
+	if err == nil || !strings.Contains(err.Error(), "failed to run catch binary") {
+		t.Fatalf("installInitCatch error = %v, want install error", err)
+	}
+}
+
+func TestHasLocalCatchDir(t *testing.T) {
+	tmp := t.TempDir()
+	if hasLocalCatchDir(tmp) {
+		t.Fatal("hasLocalCatchDir = true before cmd/catch exists")
+	}
+	if err := os.MkdirAll(filepath.Join(tmp, "cmd", "catch"), 0o755); err != nil {
+		t.Fatalf("MkdirAll cmd/catch: %v", err)
+	}
+	if !hasLocalCatchDir(tmp) {
+		t.Fatal("hasLocalCatchDir = false after cmd/catch exists")
+	}
+}
+
+func TestLocalCatchRepoRootAndGoVersion(t *testing.T) {
+	root, ok, err := localCatchRepoRoot()
+	if err != nil {
+		t.Fatalf("localCatchRepoRoot error: %v", err)
+	}
+	if !ok {
+		t.Skip("git checkout with cmd/catch not available")
+	}
+	if !hasLocalCatchDir(root) {
+		t.Fatalf("root %q does not contain cmd/catch", root)
+	}
+
+	version, err := localGoVersion(root)
+	if err != nil {
+		t.Fatalf("localGoVersion error: %v", err)
+	}
+	if !strings.HasPrefix(version, "go version ") {
+		t.Fatalf("localGoVersion = %q, want go version output", version)
+	}
+}
+
+func TestRemoveFileBestEffort(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "catch")
+	if err := os.WriteFile(path, []byte("bin"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	removeFileBestEffort(path)
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Stat removed file error = %v, want not exist", err)
+	}
+
+	removeFileBestEffort(filepath.Join(tmp, "missing"))
 }
 
 func TestInitCatchUsesGitHubSource(t *testing.T) {
@@ -320,4 +576,51 @@ func boolString(v bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+func captureInitStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stderr Pipe error: %v", err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = oldStderr
+		_ = r.Close()
+	}()
+
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("stderr close error: %v", err)
+	}
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("stderr ReadAll error: %v", err)
+	}
+	return string(out)
+}
+
+func fakeSSHInPath(t *testing.T, body string) string {
+	t.Helper()
+	return fakeCommandInPath(t, "ssh", body)
+}
+
+func fakeCommandInPath(t *testing.T, name, body string) string {
+	t.Helper()
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake command bin: %v", err)
+	}
+	path := filepath.Join(binDir, name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write fake %s: %v", name, err)
+	}
+	t.Setenv("PATH", binDir)
+	return path
+}
+
+func strconvQuoteForShell(path string) string {
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }

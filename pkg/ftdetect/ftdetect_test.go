@@ -6,6 +6,8 @@ package ftdetect
 
 import (
 	"debug/elf"
+	"debug/macho"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -95,6 +97,54 @@ func TestDetectFileUnknown(t *testing.T) {
 	}
 }
 
+func TestDetectFileMissingFile(t *testing.T) {
+	t.Parallel()
+
+	ft, err := DetectFile(filepath.Join(t.TempDir(), "missing"), runtime.GOOS, runtime.GOARCH)
+	if err == nil {
+		t.Fatalf("expected missing file error, got nil (type %v)", ft)
+	}
+	if ft != Unknown {
+		t.Fatalf("expected Unknown type, got %v", ft)
+	}
+}
+
+func TestDetectFileZstdMagic(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "archive")
+	if err := os.WriteFile(path, []byte{0x28, 0xb5, 0x2f, 0xfd, 0x00}, 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	ft, err := DetectFile(path, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("DetectFile error: %v", err)
+	}
+	if ft != Zstd {
+		t.Fatalf("expected Zstd type, got %v", ft)
+	}
+}
+
+func TestDetectFileDockerComposeByContent(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stack")
+	if err := os.WriteFile(path, []byte("services:\n  app:\n    image: busybox\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	ft, err := DetectFile(path, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		t.Fatalf("DetectFile error: %v", err)
+	}
+	if ft != DockerCompose {
+		t.Fatalf("expected DockerCompose type, got %v", ft)
+	}
+}
+
 func TestDetectFileShortScript(t *testing.T) {
 	t.Parallel()
 
@@ -134,6 +184,61 @@ func TestDetectFileShortUnknown(t *testing.T) {
 	}
 }
 
+func TestDetectBinaryRejectsWrongOSMagic(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	elfPath := filepath.Join(dir, "elf")
+	if err := os.WriteFile(elfPath, []byte{0x7f, 'E', 'L', 'F'}, 0o644); err != nil {
+		t.Fatalf("write ELF magic: %v", err)
+	}
+	elfFile, err := newFile(elfPath)
+	if err != nil {
+		t.Fatalf("newFile ELF: %v", err)
+	}
+	defer elfFile.Close()
+	elfFile.goos = "darwin"
+	if _, _, err := elfFile.detectBinaryType(); err == nil {
+		t.Fatal("detectBinaryType accepted ELF on darwin")
+	}
+
+	machoPath := filepath.Join(dir, "macho")
+	var magic [4]byte
+	binary.LittleEndian.PutUint32(magic[:], macho.Magic64)
+	if err := os.WriteFile(machoPath, magic[:], 0o644); err != nil {
+		t.Fatalf("write Mach-O magic: %v", err)
+	}
+	machoFile, err := newFile(machoPath)
+	if err != nil {
+		t.Fatalf("newFile Mach-O: %v", err)
+	}
+	defer machoFile.Close()
+	machoFile.goos = "linux"
+	if _, _, err := machoFile.detectBinaryType(); err == nil {
+		t.Fatal("detectBinaryType accepted Mach-O on non-darwin")
+	}
+}
+
+func TestDetectBinaryReportsInvalidELFArchitecture(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "elf")
+	if err := os.WriteFile(path, []byte{0x7f, 'E', 'L', 'F'}, 0o644); err != nil {
+		t.Fatalf("write ELF magic: %v", err)
+	}
+	f, err := newFile(path)
+	if err != nil {
+		t.Fatalf("newFile: %v", err)
+	}
+	defer f.Close()
+	f.goos = "linux"
+	f.goarch = runtime.GOARCH
+
+	if _, _, err := f.detectBinaryType(); err == nil {
+		t.Fatal("detectBinaryType succeeded for truncated ELF")
+	}
+}
+
 func TestELFMachineArchitecture(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -152,5 +257,48 @@ func TestELFMachineArchitecture(t *testing.T) {
 				t.Fatalf("elfMachineArchitecture(%v) = %q, want %q", tt.machine, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestHostArchitecture(t *testing.T) {
+	tests := []struct {
+		goarch string
+		want   string
+	}{
+		{goarch: "amd64", want: "x86_64"},
+		{goarch: "386", want: "x86"},
+		{goarch: "arm", want: "ARM"},
+		{goarch: "arm64", want: "ARM64"},
+		{goarch: "mips", want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.goarch, func(t *testing.T) {
+			if got := (&file{goarch: tt.goarch}).hostArchitecture(); got != tt.want {
+				t.Fatalf("hostArchitecture(%q) = %q, want %q", tt.goarch, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileHelperErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	if ft, ok := (&file{}).detectByName(); ok || ft != Unknown {
+		t.Fatalf("empty path detectByName = %v, %v; want Unknown, false", ft, ok)
+	}
+	if err := (&file{}).checkAndSeek0(); err == nil {
+		t.Fatal("checkAndSeek0 succeeded with nil file")
+	}
+	if _, err := (&file{}).detectDockerCompose(); err == nil {
+		t.Fatal("detectDockerCompose succeeded with nil file")
+	}
+	if _, err := (&file{}).detectZstd(); err == nil {
+		t.Fatal("detectZstd succeeded with nil file")
+	}
+	if _, err := (&file{}).detectScript(); err == nil {
+		t.Fatal("detectScript succeeded with nil file")
+	}
+	if _, err := (&file{}).detectArchitectureElf(); err == nil {
+		t.Fatal("detectArchitectureElf succeeded with nil file")
 	}
 }

@@ -51,10 +51,29 @@ func TestResolveReleaseAssetURLs(t *testing.T) {
 	}
 }
 
+func TestGithubReleaseURL(t *testing.T) {
+	if got := githubReleaseURL(false); got != "https://api.github.com/repos/shayne/yeet/releases/latest" {
+		t.Fatalf("latest URL = %q", got)
+	}
+	if got := githubReleaseURL(true); got != "https://api.github.com/repos/shayne/yeet/releases/tags/nightly" {
+		t.Fatalf("nightly URL = %q", got)
+	}
+}
+
+func TestFindGitHubAssetURLRequiresDownloadURL(t *testing.T) {
+	_, err := findGitHubAssetURL([]githubAsset{{Name: "catch-linux-amd64.tar.gz"}}, "catch-linux-amd64.tar.gz")
+	if err == nil || !strings.Contains(err.Error(), "missing download url") {
+		t.Fatalf("findGitHubAssetURL error = %v, want missing URL", err)
+	}
+}
+
 func TestFetchGitHubReleaseFromURL(t *testing.T) {
 	var gotAccept string
+	var gotAuthorization string
+	t.Setenv("GITHUB_TOKEN", "token-123")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAccept = r.Header.Get("Accept")
+		gotAuthorization = r.Header.Get("Authorization")
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"tag_name":"v1.2.3","assets":[{"name":"catch-linux-amd64.tar.gz","browser_download_url":"https://example.com/catch.tgz"}]}`))
 	}))
@@ -70,6 +89,9 @@ func TestFetchGitHubReleaseFromURL(t *testing.T) {
 	if gotAccept != "application/vnd.github+json" {
 		t.Fatalf("Accept = %q", gotAccept)
 	}
+	if gotAuthorization != "Bearer token-123" {
+		t.Fatalf("Authorization = %q", gotAuthorization)
+	}
 }
 
 func TestFetchGitHubReleaseFromURLRequiresTag(t *testing.T) {
@@ -81,5 +103,17 @@ func TestFetchGitHubReleaseFromURLRequiresTag(t *testing.T) {
 	_, err := fetchGitHubReleaseFromURL(server.URL, server.Client())
 	if err == nil || !strings.Contains(err.Error(), "missing release tag") {
 		t.Fatalf("expected missing tag error, got %v", err)
+	}
+}
+
+func TestFetchGitHubReleaseFromURLReportsStatusError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "rate limited", http.StatusForbidden)
+	}))
+	defer server.Close()
+
+	_, err := fetchGitHubReleaseFromURL(server.URL, server.Client())
+	if err == nil || !strings.Contains(err.Error(), "github api error: 403 Forbidden") || !strings.Contains(err.Error(), "rate limited") {
+		t.Fatalf("expected status error, got %v", err)
 	}
 }

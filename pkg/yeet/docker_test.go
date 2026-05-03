@@ -6,6 +6,7 @@ package yeet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -69,6 +70,32 @@ func TestParsePushRequest(t *testing.T) {
 				t.Fatalf("parsePushRequest = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDoStopsOnFirstError(t *testing.T) {
+	wantErr := errors.New("stop")
+	var calls []string
+
+	err := do(
+		func() error {
+			calls = append(calls, "first")
+			return nil
+		},
+		func() error {
+			calls = append(calls, "second")
+			return wantErr
+		},
+		func() error {
+			calls = append(calls, "third")
+			return nil
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("do error = %v, want %v", err, wantErr)
+	}
+	if strings.Join(calls, ",") != "first,second" {
+		t.Fatalf("calls = %#v, want first and second only", calls)
 	}
 }
 
@@ -222,6 +249,210 @@ func TestPushImageWithDepsPlansTagPushAndCleanup(t *testing.T) {
 	}
 }
 
+func TestPushImageWithDepsErrors(t *testing.T) {
+	wantHostErr := errors.New("tailscale unavailable")
+	_, imageExistsErr := pushImageWithDepsErrorCase(t, pushImageDeps{
+		host: func(context.Context) (string, error) {
+			return "", wantHostErr
+		},
+		imageExists: func(string) bool {
+			t.Fatal("imageExists should not be called after host error")
+			return false
+		},
+		push: func(string, string) error {
+			t.Fatal("push should not be called after host error")
+			return nil
+		},
+	})
+	if !errors.Is(imageExistsErr, wantHostErr) {
+		t.Fatalf("host error = %v, want %v", imageExistsErr, wantHostErr)
+	}
+
+	gotImage, missingErr := pushImageWithDepsErrorCase(t, pushImageDeps{
+		host: func(context.Context) (string, error) {
+			return "catch.example.ts.net", nil
+		},
+		imageExists: func(image string) bool {
+			return image == "other:tag"
+		},
+		push: func(string, string) error {
+			t.Fatal("push should not be called when image is missing")
+			return nil
+		},
+	})
+	if gotImage != "app:missing" || missingErr == nil || !strings.Contains(missingErr.Error(), "does not exist") {
+		t.Fatalf("missing image got image=%q error=%v", gotImage, missingErr)
+	}
+
+	wantPushErr := errors.New("push failed")
+	_, pushErr := pushImageWithDepsErrorCase(t, pushImageDeps{
+		host: func(context.Context) (string, error) {
+			return "catch.example.ts.net", nil
+		},
+		imageExists: func(string) bool {
+			return true
+		},
+		push: func(string, string) error {
+			return wantPushErr
+		},
+	})
+	if !errors.Is(pushErr, wantPushErr) {
+		t.Fatalf("push error = %v, want %v", pushErr, wantPushErr)
+	}
+}
+
+func pushImageWithDepsErrorCase(t *testing.T, deps pushImageDeps) (string, error) {
+	t.Helper()
+	image := "app:missing"
+	return image, pushImageWithDeps(context.Background(), image, "latest", deps)
+}
+
+func TestImageExistsUsesDockerImagesOutput(t *testing.T) {
+	fakeDockerInPath(t, `
+if [ "$1" = "images" ]; then
+  if [ "$3" = "present:latest" ]; then
+    printf 'sha256:abc\n'
+  fi
+  exit 0
+fi
+exit 1
+`)
+
+	if !imageExists("present:latest") {
+		t.Fatal("imageExists present image = false, want true")
+	}
+	if imageExists("missing:latest") {
+		t.Fatal("imageExists missing image = true, want false")
+	}
+}
+
+func TestImageExistsReturnsFalseOnDockerError(t *testing.T) {
+	fakeDockerInPath(t, "exit 1\n")
+
+	if imageExists("present:latest") {
+		t.Fatal("imageExists docker error = true, want false")
+	}
+}
+
+func TestListLocalImagesSkipsWhenDockerMissingOrDaemonDown(t *testing.T) {
+	t.Run("docker missing", func(t *testing.T) {
+		t.Setenv("PATH", t.TempDir())
+		got, err := listLocalImages("svc-a")
+		if err != nil {
+			t.Fatalf("listLocalImages error = %v, want nil", err)
+		}
+		if got != nil {
+			t.Fatalf("listLocalImages = %#v, want nil", got)
+		}
+	})
+
+	t.Run("daemon down", func(t *testing.T) {
+		fakeDockerInPath(t, `
+if [ "$1" = "images" ]; then
+  printf 'Is the docker daemon running?\n' >&2
+  exit 1
+fi
+exit 1
+`)
+		got, err := listLocalImages("svc-a")
+		if err != nil {
+			t.Fatalf("listLocalImages error = %v, want nil", err)
+		}
+		if got != nil {
+			t.Fatalf("listLocalImages = %#v, want nil", got)
+		}
+	})
+}
+
+func TestListLocalImagesReportsDockerErrors(t *testing.T) {
+	fakeDockerInPath(t, `
+if [ "$1" = "images" ]; then
+  printf 'unexpected failure\n' >&2
+  exit 1
+fi
+exit 1
+`)
+
+	_, err := listLocalImages("svc-a")
+	if err == nil || !strings.Contains(err.Error(), "failed to list images") {
+		t.Fatalf("listLocalImages error = %v, want docker list error", err)
+	}
+}
+
+func TestListLocalImagesReturnsDockerOutput(t *testing.T) {
+	fakeDockerInPath(t, `
+if [ "$1" = "images" ]; then
+  printf 'registry.internal/svc-a/web:latest\nregistry.internal/svc-a/worker:dev\n'
+  exit 0
+fi
+exit 1
+`)
+
+	got, err := listLocalImages("svc-a")
+	if err != nil {
+		t.Fatalf("listLocalImages error: %v", err)
+	}
+	want := []string{"registry.internal/svc-a/web:latest", "registry.internal/svc-a/worker:dev"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("listLocalImages = %#v, want %#v", got, want)
+	}
+}
+
+func TestPushAllLocalImagesSkipsIncompatibleLocalImages(t *testing.T) {
+	fakeDockerInPath(t, `
+if [ "$1" = "images" ]; then
+  printf 'registry.internal/svc-a/web:latest\n'
+  exit 0
+fi
+if [ "$1" = "inspect" ]; then
+  printf 'darwin,arm64\n'
+  exit 0
+fi
+exit 1
+`)
+
+	if err := pushAllLocalImages("svc-a", "linux", "arm64"); err != nil {
+		t.Fatalf("pushAllLocalImages error = %v, want nil", err)
+	}
+}
+
+func TestRunDockerPushTagsPushesAndRemovesTarget(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "docker.log")
+	fakeDockerInPath(t, fmt.Sprintf(`
+printf '%%s\n' "$*" >> %q
+exit 0
+`, logFile))
+
+	if err := runDockerPush("app:dev", "catch.example/app:latest"); err != nil {
+		t.Fatalf("runDockerPush error: %v", err)
+	}
+	b, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("ReadFile docker log: %v", err)
+	}
+	want := strings.Join([]string{
+		"tag app:dev catch.example/app:latest",
+		"push catch.example/app:latest",
+		"rmi catch.example/app:latest",
+	}, "\n") + "\n"
+	if string(b) != want {
+		t.Fatalf("docker calls = %q, want %q", string(b), want)
+	}
+}
+
+func TestRunDockerPushReturnsDockerError(t *testing.T) {
+	fakeDockerInPath(t, `
+if [ "$1" = "tag" ]; then
+  exit 1
+fi
+exit 0
+`)
+
+	if err := runDockerPush("app:dev", "catch.example/app:latest"); err == nil {
+		t.Fatal("runDockerPush error = nil, want docker error")
+	}
+}
+
 func TestLocalImagesFromDockerOutput(t *testing.T) {
 	got := localImagesFromDockerOutput([]byte("\nrepo/svc/app:latest\n\nrepo/svc/sidecar:dev\n"))
 	want := []string{"repo/svc/app:latest", "repo/svc/sidecar:dev"}
@@ -281,4 +512,66 @@ func TestLocalImagePushDecision(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestImageSystemAndArch(t *testing.T) {
+	fakeDockerInPath(t, `
+if [ "$1" = "inspect" ]; then
+  printf 'linux,arm64\n'
+  exit 0
+fi
+exit 1
+`)
+
+	system, arch, err := imageSystemAndArch("repo/svc/app:latest")
+	if err != nil {
+		t.Fatalf("imageSystemAndArch error: %v", err)
+	}
+	if system != "linux" || arch != "arm64" {
+		t.Fatalf("target = %s/%s, want linux/arm64", system, arch)
+	}
+}
+
+func TestImageSystemAndArchReportsInspectError(t *testing.T) {
+	fakeDockerInPath(t, "exit 1\n")
+
+	_, _, err := imageSystemAndArch("repo/svc/app:latest")
+	if err == nil || !strings.Contains(err.Error(), "failed to inspect image") {
+		t.Fatalf("imageSystemAndArch error = %v, want inspect error", err)
+	}
+}
+
+func TestPushLocalImageIfCompatibleSkipsMismatchedOrUnreadableImages(t *testing.T) {
+	t.Run("mismatched image", func(t *testing.T) {
+		fakeDockerInPath(t, `
+if [ "$1" = "inspect" ]; then
+  printf 'darwin,arm64\n'
+  exit 0
+fi
+exit 1
+`)
+		if err := pushLocalImageIfCompatible("svc-a", "repo/svc/app:latest", "linux", "arm64"); err != nil {
+			t.Fatalf("pushLocalImageIfCompatible error = %v, want nil", err)
+		}
+	})
+
+	t.Run("inspect error", func(t *testing.T) {
+		fakeDockerInPath(t, "exit 1\n")
+		if err := pushLocalImageIfCompatible("svc-a", "repo/svc/app:latest", "linux", "arm64"); err != nil {
+			t.Fatalf("pushLocalImageIfCompatible error = %v, want nil", err)
+		}
+	})
+}
+
+func fakeDockerInPath(t *testing.T, body string) {
+	t.Helper()
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake docker bin: %v", err)
+	}
+	dockerPath := filepath.Join(binDir, "docker")
+	if err := os.WriteFile(dockerPath, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+	t.Setenv("PATH", binDir)
 }

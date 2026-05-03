@@ -21,6 +21,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/svc"
 	"golang.org/x/sys/unix"
 )
 
@@ -113,7 +114,13 @@ type ttyExecer struct {
 	bypassPtyInput bool
 
 	// Optional override for tests.
-	serviceRunnerFn func() (ServiceRunner, error)
+	serviceRunnerFn           func() (ServiceRunner, error)
+	installFunc               func(action string, in io.Reader, cfg FileInstallerCfg) error
+	editFileFunc              func(path string) error
+	systemdStatusFunc         func(string) (svc.Status, error)
+	systemdStatusesFunc       func() (map[string]svc.Status, error)
+	dockerComposeStatusFunc   func(string) (svc.DockerComposeStatus, error)
+	dockerComposeStatusesFunc func() (map[string]svc.DockerComposeStatus, error)
 }
 
 type ttyPtySession struct {

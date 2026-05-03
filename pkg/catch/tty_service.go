@@ -221,7 +221,7 @@ func (e *ttyExecer) systemStatusData() ([]ServiceStatusData, error) {
 }
 
 func (e *ttyExecer) systemdStatusData() ([]ServiceStatusData, error) {
-	systemdStatuses, err := e.s.SystemdStatuses()
+	systemdStatuses, err := e.systemdStatuses()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get systemd statuses: %w", err)
 	}
@@ -245,7 +245,7 @@ func (e *ttyExecer) systemdServiceStatusData(sn string, status svc.Status) (Serv
 }
 
 func (e *ttyExecer) dockerComposeStatusData() ([]ServiceStatusData, error) {
-	composeStatuses, err := e.s.DockerComposeStatuses()
+	composeStatuses, err := e.dockerComposeStatuses()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all docker compose statuses: %w", err)
 	}
@@ -284,7 +284,7 @@ func (e *ttyExecer) populateSingleServiceStatus(data ServiceStatusData, serviceT
 }
 
 func (e *ttyExecer) addSingleSystemdStatus(data ServiceStatusData) (ServiceStatusData, bool, error) {
-	status, err := e.s.SystemdStatus(e.sn)
+	status, err := e.systemdStatus(e.sn)
 	if err != nil {
 		return ServiceStatusData{}, false, fmt.Errorf("failed to get systemd status: %w", err)
 	}
@@ -293,7 +293,7 @@ func (e *ttyExecer) addSingleSystemdStatus(data ServiceStatusData) (ServiceStatu
 }
 
 func (e *ttyExecer) addSingleDockerComposeStatus(data ServiceStatusData) (ServiceStatusData, bool, error) {
-	statuses, err := e.s.DockerComposeStatus(e.sn)
+	statuses, err := e.dockerComposeStatus(e.sn)
 	if err != nil {
 		return e.handleDockerComposeStatusError(data, err)
 	}
@@ -311,6 +311,34 @@ func (e *ttyExecer) handleDockerComposeStatusError(data ServiceStatusData, err e
 		return data, true, nil
 	}
 	return ServiceStatusData{}, false, fmt.Errorf("failed to get docker compose statuses: %w", err)
+}
+
+func (e *ttyExecer) systemdStatus(sn string) (svc.Status, error) {
+	if e.systemdStatusFunc != nil {
+		return e.systemdStatusFunc(sn)
+	}
+	return e.s.SystemdStatus(sn)
+}
+
+func (e *ttyExecer) systemdStatuses() (map[string]svc.Status, error) {
+	if e.systemdStatusesFunc != nil {
+		return e.systemdStatusesFunc()
+	}
+	return e.s.SystemdStatuses()
+}
+
+func (e *ttyExecer) dockerComposeStatus(sn string) (svc.DockerComposeStatus, error) {
+	if e.dockerComposeStatusFunc != nil {
+		return e.dockerComposeStatusFunc(sn)
+	}
+	return e.s.DockerComposeStatus(sn)
+}
+
+func (e *ttyExecer) dockerComposeStatuses() (map[string]svc.DockerComposeStatus, error) {
+	if e.dockerComposeStatusesFunc != nil {
+		return e.dockerComposeStatusesFunc()
+	}
+	return e.s.DockerComposeStatuses()
 }
 
 func serviceStatusData(name string, serviceType ServiceDataType) ServiceStatusData {

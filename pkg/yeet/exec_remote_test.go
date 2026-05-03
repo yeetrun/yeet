@@ -13,6 +13,7 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -26,6 +27,30 @@ import (
 func TestErrorPrefixForRemoteExitRawNewline(t *testing.T) {
 	if got := errorPrefixForRemoteExit(true, '\n', true); got != "\r" {
 		t.Fatalf("expected carriage return prefix, got %q", got)
+	}
+}
+
+func TestErrorPrefixForRemoteExitVariants(t *testing.T) {
+	tests := []struct {
+		name      string
+		rawMode   bool
+		lastByte  byte
+		sawOutput bool
+		want      string
+	}{
+		{name: "not raw"},
+		{name: "no output", rawMode: true},
+		{name: "last carriage return", rawMode: true, sawOutput: true, lastByte: '\r', want: "\n"},
+		{name: "partial line", rawMode: true, sawOutput: true, lastByte: 'x', want: "\r\n"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := errorPrefixForRemoteExit(tt.rawMode, tt.lastByte, tt.sawOutput)
+			if got != tt.want {
+				t.Fatalf("errorPrefixForRemoteExit = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -94,6 +119,76 @@ func TestPayloadNameFromReader(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewRPCClientReturnsClient(t *testing.T) {
+	if client := newRPCClient("catch"); client == nil {
+		t.Fatal("newRPCClient returned nil")
+	}
+}
+
+func TestPayloadNameForStdinIgnoresNilAndProcessStdin(t *testing.T) {
+	if got := payloadNameForStdin(nil); got != "" {
+		t.Fatalf("payloadNameForStdin nil = %q, want empty", got)
+	}
+	if got := payloadNameForStdin(os.Stdin); got != "" {
+		t.Fatalf("payloadNameForStdin os.Stdin = %q, want empty", got)
+	}
+	got := payloadNameForStdin(namedReader{Reader: strings.NewReader("payload"), name: "/tmp/input.txt"})
+	if got != "input.txt" {
+		t.Fatalf("payloadNameForStdin named reader = %q, want input.txt", got)
+	}
+}
+
+func TestTrackingWriterRecordsLastByte(t *testing.T) {
+	tw := &trackingWriter{w: io.Discard}
+	if last, ok := tw.LastByte(); ok || last != 0 {
+		t.Fatalf("LastByte before write = %q %v, want empty", last, ok)
+	}
+	n, err := tw.Write([]byte("abc\n"))
+	if err != nil || n != 4 {
+		t.Fatalf("Write = %d, %v, want 4 nil", n, err)
+	}
+	if last, ok := tw.LastByte(); !ok || last != '\n' {
+		t.Fatalf("LastByte after write = %q %v, want newline true", last, ok)
+	}
+}
+
+func TestTerminalStdinReadErrorHelpers(t *testing.T) {
+	for _, err := range []error{io.EOF, io.ErrClosedPipe, os.ErrClosed} {
+		if !isTerminalStdinReadError(err) {
+			t.Fatalf("isTerminalStdinReadError(%v) = false, want true", err)
+		}
+	}
+	if isTerminalStdinReadError(errors.New("other")) {
+		t.Fatal("isTerminalStdinReadError other = true, want false")
+	}
+	if !isRetryableStdinReadError(syscall.EAGAIN) {
+		t.Fatal("isRetryableStdinReadError EAGAIN = false, want true")
+	}
+	if isRetryableStdinReadError(io.EOF) {
+		t.Fatal("isRetryableStdinReadError EOF = true, want false")
+	}
+}
+
+func TestSessionStdinProxyWaitForInputRetry(t *testing.T) {
+	t.Run("stop closes writer", func(t *testing.T) {
+		_, pw := io.Pipe()
+		p := &sessionStdinProxy{stop: make(chan struct{})}
+		close(p.stop)
+		if p.waitForInputRetry(pw) {
+			t.Fatal("waitForInputRetry = true after stop, want false")
+		}
+	})
+
+	t.Run("timeout retries", func(t *testing.T) {
+		_, pw := io.Pipe()
+		defer pw.Close()
+		p := &sessionStdinProxy{stop: make(chan struct{})}
+		if !p.waitForInputRetry(pw) {
+			t.Fatal("waitForInputRetry = false before stop, want true")
+		}
+	})
 }
 
 func TestSessionStdinProxyCloseUnblocksPendingRead(t *testing.T) {
@@ -252,6 +347,25 @@ func TestExecRemoteBuildsNonTTYRequestWithPayloadName(t *testing.T) {
 	}
 }
 
+func TestRemoteExecExitErrorUsesRawModePrefix(t *testing.T) {
+	restoreExecRemoteGlobals(t)
+	isTerminalFn = func(int) bool { return true }
+
+	if err := remoteExecExitError(0, true, &trackingWriter{w: io.Discard}); err != nil {
+		t.Fatalf("remoteExecExitError zero = %v, want nil", err)
+	}
+
+	out := &trackingWriter{w: io.Discard}
+	if _, err := out.Write([]byte("partial")); err != nil {
+		t.Fatalf("tracking write error: %v", err)
+	}
+	err := remoteExecExitError(5, true, out)
+	var exitErr remoteExitError
+	if !errors.As(err, &exitErr) || exitErr.code != 5 || exitErr.prefix != "\r\n" {
+		t.Fatalf("remoteExecExitError = %#v, want code 5 with raw prefix", err)
+	}
+}
+
 func TestExecRemoteReturnsTerminalRestoreError(t *testing.T) {
 	restoreExecRemoteGlobals(t)
 	loadedPrefs.DefaultHost = "host-a"
@@ -388,6 +502,35 @@ func TestExecRemoteStreamReportsRemoteExit(t *testing.T) {
 	var exitErr remoteExitError
 	if !errors.As(err, &exitErr) || exitErr.code != 7 {
 		t.Fatalf("done error = %v, want remote exit 7", err)
+	}
+}
+
+func TestHandleMountSysExecutesSystemService(t *testing.T) {
+	restoreExecRemoteGlobals(t)
+	loadedPrefs.DefaultHost = "host-a"
+	isTerminalFn = func(int) bool { return false }
+
+	var gotReq catchrpc.ExecRequest
+	newRPCExecClientFn = func(string) rpcExecClient {
+		return fakeExecClient{
+			execFn: func(ctx context.Context, req catchrpc.ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan catchrpc.Resize) (int, error) {
+				gotReq = req
+				return 0, nil
+			},
+		}
+	}
+
+	if err := HandleMountSys(context.Background(), []string{"mount", "tmpfs"}); err != nil {
+		t.Fatalf("HandleMountSys error: %v", err)
+	}
+	if gotReq.Host != "host-a" || gotReq.Service != systemServiceName {
+		t.Fatalf("request host/service = %q/%q, want host-a/%s", gotReq.Host, gotReq.Service, systemServiceName)
+	}
+	if !reflect.DeepEqual(gotReq.Args, []string{"mount", "tmpfs"}) {
+		t.Fatalf("request args = %#v, want mount tmpfs", gotReq.Args)
+	}
+	if gotReq.TTY {
+		t.Fatal("request TTY = true, want false when stdin is not terminal")
 	}
 }
 

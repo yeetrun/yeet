@@ -5,6 +5,9 @@
 package yeet
 
 import (
+	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -65,6 +68,30 @@ func TestParseCopyArgs(t *testing.T) {
 	}
 }
 
+func TestApplyLongCopyFlag(t *testing.T) {
+	tests := []struct {
+		flag string
+		want copyRequest
+	}{
+		{flag: "--recursive", want: copyRequest{Recursive: true}},
+		{flag: "--archive", want: copyRequest{Recursive: true, Archive: true}},
+		{flag: "--compress", want: copyRequest{Compress: true}},
+		{flag: "--verbose", want: copyRequest{Verbose: true}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.flag, func(t *testing.T) {
+			var req copyRequest
+			if err := applyLongCopyFlag(&req, tt.flag); err != nil {
+				t.Fatalf("applyLongCopyFlag error: %v", err)
+			}
+			if req != tt.want {
+				t.Fatalf("request = %#v, want %#v", req, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeRemotePath(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -103,6 +130,24 @@ func TestNormalizeRemotePath(t *testing.T) {
 				t.Fatalf("dirHint = %v, want %v", gotDirHint, tt.wantDirHint)
 			}
 		})
+	}
+}
+
+func TestCopyPathHelpers(t *testing.T) {
+	if got := trimRemoteDataPrefix("data"); got != "" {
+		t.Fatalf("trimRemoteDataPrefix data = %q, want empty", got)
+	}
+	if got := trimRemoteDataPrefix("database/file"); got != "database/file" {
+		t.Fatalf("trimRemoteDataPrefix database = %q, want unchanged", got)
+	}
+	if !isWindowsDrivePath(`C:\Users\me\file.txt`) {
+		t.Fatal("isWindowsDrivePath backslash = false, want true")
+	}
+	if !isWindowsDrivePath("C:/Users/me/file.txt") {
+		t.Fatal("isWindowsDrivePath slash = false, want true")
+	}
+	if isWindowsDrivePath("svc:path") {
+		t.Fatal("isWindowsDrivePath remote spec = true, want false")
 	}
 }
 
@@ -172,6 +217,70 @@ func TestClassifyCopyEndpoints(t *testing.T) {
 	}
 }
 
+func TestApplyCopyHostOverrideForEndpoint(t *testing.T) {
+	oldPrefs := loadedPrefs
+	oldOverride := hostOverride
+	oldOverrideSet := hostOverrideSet
+	defer func() {
+		loadedPrefs = oldPrefs
+		hostOverride = oldOverride
+		hostOverrideSet = oldOverrideSet
+	}()
+
+	cfg := &ProjectConfig{}
+	cfg.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "configured-host"})
+
+	loadedPrefs.DefaultHost = "default-host"
+	resetHostOverride()
+	if err := applyCopyHostOverrideForEndpoint(copyEndpoint{Service: "svc-a"}, cfg); err != nil {
+		t.Fatalf("apply configured host error: %v", err)
+	}
+	if Host() != "configured-host" {
+		t.Fatalf("Host = %q, want configured-host", Host())
+	}
+
+	resetHostOverride()
+	if err := applyCopyHostOverrideForEndpoint(copyEndpoint{Service: "svc-a", Host: "remote-host"}, cfg); err != nil {
+		t.Fatalf("apply remote host error: %v", err)
+	}
+	if got, ok := HostOverride(); !ok || got != "remote-host" {
+		t.Fatalf("HostOverride = %q %v, want remote-host true", got, ok)
+	}
+
+	SetHostOverride("active-host")
+	if err := applyCopyHostOverrideForEndpoint(copyEndpoint{Service: "svc-a", Host: "remote-host"}, cfg); err != nil {
+		t.Fatalf("apply active host error: %v", err)
+	}
+	if got, ok := HostOverride(); !ok || got != "active-host" {
+		t.Fatalf("active HostOverride = %q %v, want active-host true", got, ok)
+	}
+}
+
+func TestCopyEndpointValidationHelpers(t *testing.T) {
+	if _, err := remoteCopyDestination(copyRequest{Dst: copyEndpoint{Path: "logs"}}); err == nil {
+		t.Fatal("remoteCopyDestination local dst error = nil, want error")
+	}
+	if _, err := localCopySource(copyRequest{}); err == nil {
+		t.Fatal("localCopySource empty source error = nil, want error")
+	}
+	if _, err := remoteCopySource(copyRequest{Src: copyEndpoint{Path: "logs"}}); err == nil {
+		t.Fatal("remoteCopySource local src error = nil, want error")
+	}
+	if _, err := remoteCopySource(copyRequest{Src: copyEndpoint{Remote: true}}); err == nil {
+		t.Fatal("remoteCopySource missing service error = nil, want error")
+	}
+	if _, err := remoteCopySource(copyRequest{Src: copyEndpoint{Remote: true, Service: "svc-a"}}); err == nil {
+		t.Fatal("remoteCopySource empty path without dir hint error = nil, want error")
+	}
+	src, err := remoteCopySource(copyRequest{Src: copyEndpoint{Remote: true, Service: "svc-a", DirHint: true}})
+	if err != nil {
+		t.Fatalf("remoteCopySource dir hint error: %v", err)
+	}
+	if src.Service != "svc-a" {
+		t.Fatalf("remote source = %#v, want svc-a", src)
+	}
+}
+
 func TestRemoteCopyCommandArgs(t *testing.T) {
 	upload := copyUploadArgs("configs", true, true)
 	if want := []string{"copy", "--to", "configs", "--archive", "--compress"}; !reflect.DeepEqual(upload, want) {
@@ -205,4 +314,92 @@ func TestRemoteFileDestinations(t *testing.T) {
 	if plain != "config.yml" {
 		t.Fatalf("plain destination = %q, want config.yml", plain)
 	}
+}
+
+func TestOpenPlainFileCopyUpload(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "config.yml")
+	if err := os.WriteFile(src, []byte("key: value\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	upload, err := openPlainFileCopyUpload(copyRequest{
+		Compress: true,
+		Src:      copyEndpoint{Raw: src, Path: src},
+		Dst:      copyEndpoint{Raw: "svc:configs/", Path: "configs", DirHint: true},
+	})
+	if err != nil {
+		t.Fatalf("openPlainFileCopyUpload error: %v", err)
+	}
+	defer upload.reader.Close()
+	if want := []string{"copy", "--to", "configs/config.yml", "--compress"}; !reflect.DeepEqual(upload.args, want) {
+		t.Fatalf("upload args = %#v, want %#v", upload.args, want)
+	}
+	body, err := io.ReadAll(upload.reader)
+	if err != nil {
+		t.Fatalf("ReadAll upload reader: %v", err)
+	}
+	if string(body) != "key: value\n" {
+		t.Fatalf("upload body = %q, want source contents", string(body))
+	}
+}
+
+func TestOpenPlainFileCopyUploadRejectsInvalidDestination(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "config.yml")
+	if err := os.WriteFile(src, []byte("key: value\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile source: %v", err)
+	}
+
+	_, err := openPlainFileCopyUpload(copyRequest{
+		Src: copyEndpoint{Raw: src, Path: src},
+		Dst: copyEndpoint{Raw: "svc:../secret", Path: "../secret"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid copy destination") {
+		t.Fatalf("openPlainFileCopyUpload error = %v, want invalid destination", err)
+	}
+}
+
+func TestLocalOutputPathHelpers(t *testing.T) {
+	if got := localFileOutputPath(localCopyTarget{path: "/tmp/out.txt"}, "base.txt", "/stage/file.txt"); got != "/tmp/out.txt" {
+		t.Fatalf("localFileOutputPath file = %q", got)
+	}
+	if got := localFileOutputPath(localCopyTarget{path: "/tmp/out", dir: true}, "", "/stage/file.txt"); got != filepath.Join("/tmp/out", "file.txt") {
+		t.Fatalf("localFileOutputPath dir fallback = %q", got)
+	}
+	if got := localDirOutputPath(localCopyTarget{path: "/tmp/out", dir: true}, "srcdir", false); got != filepath.Join("/tmp/out", "srcdir") {
+		t.Fatalf("localDirOutputPath named dir = %q", got)
+	}
+	if got := localDirOutputPath(localCopyTarget{path: "/tmp/out", dir: true}, "srcdir", true); got != "/tmp/out" {
+		t.Fatalf("localDirOutputPath source hint = %q", got)
+	}
+}
+
+func TestIsLocalDirHint(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{path: ""},
+		{path: ".", want: true},
+		{path: "./", want: true},
+		{path: "..", want: true},
+		{path: "../", want: true},
+		{path: "logs/", want: true},
+		{path: "logs"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			if got := isLocalDirHint(tt.path); got != tt.want {
+				t.Fatalf("isLocalDirHint(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestWaitRemoteCopyDrainsDone(t *testing.T) {
+	done := make(chan error, 1)
+	done <- nil
+	waitRemoteCopy(done)
 }

@@ -45,6 +45,102 @@ func TestSaveProjectConfigReturnsCloseError(t *testing.T) {
 	}
 }
 
+func TestLoadOrCreateProjectConfigFromCwdCreatesDefaultLocation(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	tmp := t.TempDir()
+	realTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks tmp: %v", err)
+	}
+	if err := os.Chdir(realTmp); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	loc, err := loadOrCreateProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadOrCreateProjectConfigFromCwd error: %v", err)
+	}
+	if loc == nil || loc.Path != filepath.Join(realTmp, projectConfigName) || loc.Dir != realTmp {
+		t.Fatalf("location = %#v, want default location in cwd", loc)
+	}
+	if loc.Config == nil || loc.Config.Version != projectConfigVersion {
+		t.Fatalf("config = %#v, want default version", loc.Config)
+	}
+}
+
+func TestLoadProjectConfigFromDirDefaultsVersionAndReportsParseErrors(t *testing.T) {
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, projectConfigName), []byte(`
+[[services]]
+name = "api"
+host = "host-a"
+`), 0o600); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+	subdir := filepath.Join(tmp, "nested")
+	if err := os.Mkdir(subdir, 0o755); err != nil {
+		t.Fatalf("Mkdir nested: %v", err)
+	}
+
+	loc, err := loadProjectConfigFromDir(subdir)
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromDir error: %v", err)
+	}
+	if loc == nil || loc.Config == nil || loc.Config.Version != projectConfigVersion {
+		t.Fatalf("location = %#v, want config with default version", loc)
+	}
+
+	missing, err := loadProjectConfigFromDir(t.TempDir())
+	if err != nil {
+		t.Fatalf("load missing config error: %v", err)
+	}
+	if missing != nil {
+		t.Fatalf("missing config = %#v, want nil", missing)
+	}
+
+	badDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(badDir, projectConfigName), []byte("bad = ["), 0o600); err != nil {
+		t.Fatalf("WriteFile bad config: %v", err)
+	}
+	_, err = loadProjectConfigFromDir(badDir)
+	if err == nil || !strings.Contains(err.Error(), "failed to parse") {
+		t.Fatalf("bad config error = %v, want parse error", err)
+	}
+}
+
+func TestSaveProjectConfigNoopsNilAndSetsDefaultVersion(t *testing.T) {
+	if err := saveProjectConfig(nil); err != nil {
+		t.Fatalf("saveProjectConfig nil error: %v", err)
+	}
+	if err := saveProjectConfig(&projectConfigLocation{}); err != nil {
+		t.Fatalf("saveProjectConfig nil config error: %v", err)
+	}
+
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{},
+	}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig error: %v", err)
+	}
+	if loc.Config.Version != projectConfigVersion {
+		t.Fatalf("Version = %d, want %d", loc.Config.Version, projectConfigVersion)
+	}
+	b, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatalf("ReadFile saved config: %v", err)
+	}
+	if !strings.Contains(string(b), "version = 1") {
+		t.Fatalf("saved config = %q, want version", string(b))
+	}
+}
+
 func TestRemoveServiceConfig(t *testing.T) {
 	oldService := serviceOverride
 	defer func() {
@@ -321,5 +417,63 @@ func TestProjectConfigAllHostsNilConfig(t *testing.T) {
 	var cfg *ProjectConfig
 	if got := cfg.AllHosts(); got != nil {
 		t.Fatalf("AllHosts = %#v, want nil", got)
+	}
+}
+
+func TestProjectConfigPathResolution(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	tmp := t.TempDir()
+	realTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks tmp: %v", err)
+	}
+	work := filepath.Join(realTmp, "work")
+	configDir := filepath.Join(realTmp, "config")
+	for _, dir := range []string{work, configDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll %s: %v", dir, err)
+		}
+	}
+	if err := os.Chdir(work); err != nil {
+		t.Fatalf("Chdir work: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	absPayload := filepath.Join(work, "app", "run.sh")
+	if got := resolvePayloadPath(configDir, " payload.sh "); got != filepath.Join(configDir, "payload.sh") {
+		t.Fatalf("resolvePayloadPath relative = %q", got)
+	}
+	if got := resolvePayloadPath(configDir, absPayload); got != absPayload {
+		t.Fatalf("resolvePayloadPath absolute = %q, want %q", got, absPayload)
+	}
+	if got := resolvePayloadPath(configDir, " "); got != "" {
+		t.Fatalf("resolvePayloadPath blank = %q, want empty", got)
+	}
+
+	if got := resolveEnvFilePath(configDir, " .env "); got != filepath.Join(configDir, ".env") {
+		t.Fatalf("resolveEnvFilePath relative = %q", got)
+	}
+	if got := resolveEnvFilePath(configDir, " "); got != "" {
+		t.Fatalf("resolveEnvFilePath blank = %q, want empty", got)
+	}
+
+	if got := relativePayloadPath(configDir, "ghcr.io/example/app:latest"); got != "ghcr.io/example/app:latest" {
+		t.Fatalf("relativePayloadPath image = %q", got)
+	}
+	if got := relativePayloadPath(configDir, "app/run.sh"); got != filepath.Join("..", "work", "app", "run.sh") {
+		t.Fatalf("relativePayloadPath relative = %q", got)
+	}
+	if got := relativePayloadPath(configDir, " "); got != "" {
+		t.Fatalf("relativePayloadPath blank = %q", got)
+	}
+
+	if got := relativeEnvFilePath(configDir, ".env"); got != filepath.Join("..", "work", ".env") {
+		t.Fatalf("relativeEnvFilePath relative = %q", got)
+	}
+	if got := relativeEnvFilePath(configDir, " "); got != "" {
+		t.Fatalf("relativeEnvFilePath blank = %q", got)
 	}
 }

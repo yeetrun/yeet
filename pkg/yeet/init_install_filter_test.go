@@ -6,9 +6,18 @@ package yeet
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 )
+
+type initInstallErrWriter struct {
+	err error
+}
+
+func (w initInstallErrWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
 
 func TestInitInstallFilterSummaryAndOutput(t *testing.T) {
 	var buf bytes.Buffer
@@ -37,6 +46,12 @@ func TestInitInstallFilterSummaryAndOutput(t *testing.T) {
 	if detail := filter.SummaryDetail(); detail != wantDetail {
 		t.Fatalf("unexpected detail: %q", detail)
 	}
+	if warning := filter.WarningSummary(); warning != "Warning: docker is recommended but not installed" {
+		t.Fatalf("unexpected warning summary: %q", warning)
+	}
+	if info := filter.InfoSummary(); info != "" {
+		t.Fatalf("unexpected info summary: %q", info)
+	}
 }
 
 func TestInitInstallFilterFlushesPrompt(t *testing.T) {
@@ -50,6 +65,16 @@ func TestInitInstallFilterFlushesPrompt(t *testing.T) {
 
 	if got := buf.String(); got != prompt {
 		t.Fatalf("expected prompt to pass through, got %q", got)
+	}
+}
+
+func TestInitInstallFilterReportsOutputErrors(t *testing.T) {
+	want := errors.New("write failed")
+	filter := newInitInstallFilter(initInstallErrWriter{err: want})
+
+	_, err := filter.Write([]byte("Error: install failed\n"))
+	if !errors.Is(err, want) {
+		t.Fatalf("Write error = %v, want %v", err, want)
 	}
 }
 
@@ -91,5 +116,66 @@ func TestInitInstallSummaryVisibleWarnings(t *testing.T) {
 	want := "Warning: docker is recommended but not installed; Failed to install service: exit status 1"
 	if got := summary.WarningSummary(); got != want {
 		t.Fatalf("warning = %q, want %q", got, want)
+	}
+}
+
+func TestInitInstallSummaryInfoSummaryDedupes(t *testing.T) {
+	summary := initInstallSummary{
+		infos: []string{"next step", "next step", " "},
+	}
+	if got := summary.InfoSummary(); got != "next step" {
+		t.Fatalf("InfoSummary = %q, want next step", got)
+	}
+}
+
+func TestInitInstallLineClassifiers(t *testing.T) {
+	ignored := []string{
+		"NetNS: created",
+		"Requires: docker",
+		"Detected binary file",
+		"File moved to /tmp/catch",
+		"Removed old file: /tmp/catch",
+		"copying catch",
+		"adding unit catch.service",
+		"Installing service catch",
+		"File received",
+		`Service "catch" installed`,
+		"no env artifact found",
+	}
+	for _, msg := range ignored {
+		if !isIgnoredInstallProgressLine(msg) {
+			t.Fatalf("isIgnoredInstallProgressLine(%q) = false, want true", msg)
+		}
+	}
+
+	important := []string{"Warning: docker missing", "Error: install failed", "operation failed", "runtime error"}
+	for _, msg := range important {
+		if !isImportantInitLine(msg) {
+			t.Fatalf("isImportantInitLine(%q) = false, want true", msg)
+		}
+	}
+	if isImportantInitLine("all good") {
+		t.Fatal("isImportantInitLine all good = true, want false")
+	}
+}
+
+func TestShouldFlushPartial(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{input: "   "},
+		{input: "Password:", want: true},
+		{input: "Continue [y/n]", want: true},
+		{input: "Name:", want: true},
+		{input: "ordinary output"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := shouldFlushPartial(tt.input); got != tt.want {
+				t.Fatalf("shouldFlushPartial(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
 	}
 }

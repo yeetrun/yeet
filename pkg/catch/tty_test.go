@@ -123,6 +123,65 @@ func TestShouldBypassPtyInputForCron(t *testing.T) {
 	}
 }
 
+func TestPayloadReaderUsesRawInputWhenBypassingPty(t *testing.T) {
+	raw := strings.NewReader("raw")
+	ptyRW := strings.NewReader("pty")
+	execer := &ttyExecer{
+		rawRW:          readWriter{Reader: raw, Writer: io.Discard},
+		rw:             readWriter{Reader: ptyRW, Writer: io.Discard},
+		bypassPtyInput: true,
+	}
+
+	got, err := io.ReadAll(execer.payloadReader())
+	if err != nil {
+		t.Fatalf("ReadAll payloadReader: %v", err)
+	}
+	if string(got) != "raw" {
+		t.Fatalf("payload = %q, want raw", got)
+	}
+}
+
+func TestPayloadReaderUsesSessionInputByDefault(t *testing.T) {
+	execer := &ttyExecer{
+		rawRW: readWriter{Reader: strings.NewReader("raw"), Writer: io.Discard},
+		rw:    readWriter{Reader: strings.NewReader("pty"), Writer: io.Discard},
+	}
+
+	got, err := io.ReadAll(execer.payloadReader())
+	if err != nil {
+		t.Fatalf("ReadAll payloadReader: %v", err)
+	}
+	if string(got) != "pty" {
+		t.Fatalf("payload = %q, want pty", got)
+	}
+}
+
+func TestProgressSettingsModes(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        catchrpc.ProgressMode
+		isPty       bool
+		wantEnabled bool
+		wantQuiet   bool
+	}{
+		{name: "tty", mode: catchrpc.ProgressTTY, wantEnabled: true},
+		{name: "plain", mode: catchrpc.ProgressPlain},
+		{name: "quiet", mode: catchrpc.ProgressQuiet, wantQuiet: true},
+		{name: "auto pty", mode: catchrpc.ProgressAuto, isPty: true, wantEnabled: true},
+		{name: "auto no pty", mode: catchrpc.ProgressAuto},
+		{name: "invalid", mode: catchrpc.ProgressMode("bad")},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotEnabled, gotQuiet := progressSettings(tc.mode, tc.isPty)
+			if gotEnabled != tc.wantEnabled || gotQuiet != tc.wantQuiet {
+				t.Fatalf("progressSettings = (%v, %v), want (%v, %v)", gotEnabled, gotQuiet, tc.wantEnabled, tc.wantQuiet)
+			}
+		})
+	}
+}
+
 func TestShouldLogCopyErrIgnoresExpectedDisconnects(t *testing.T) {
 	cases := []struct {
 		name string
@@ -207,6 +266,100 @@ func TestTTYCommandHandlersCoverDispatchCommands(t *testing.T) {
 		if ttyCommandHandlers[name] == nil {
 			t.Fatalf("expected command handler for %q", name)
 		}
+	}
+}
+
+func TestExecWithNoArgsReturnsNil(t *testing.T) {
+	for _, args := range [][]string{nil, []string{}} {
+		execer := &ttyExecer{args: args}
+		if err := execer.exec(); err != nil {
+			t.Fatalf("exec(%#v) returned error: %v", args, err)
+		}
+	}
+}
+
+func TestDispatchUnknownCommandReturnsError(t *testing.T) {
+	execer := &ttyExecer{}
+	err := execer.dispatch([]string{"bogus"})
+	if err == nil || !strings.Contains(err.Error(), `unhandled command "bogus"`) {
+		t.Fatalf("dispatch error = %v, want unhandled command", err)
+	}
+}
+
+func TestRunWritesCommandError(t *testing.T) {
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx:   context.Background(),
+		args:  []string{"bogus"},
+		rawRW: &out,
+	}
+
+	err := execer.run()
+	if err == nil || !strings.Contains(err.Error(), `unhandled command "bogus"`) {
+		t.Fatalf("run error = %v, want unhandled command", err)
+	}
+	if got := out.String(); !strings.Contains(got, `Error: unhandled command "bogus"`) {
+		t.Fatalf("run output = %q, want error line", got)
+	}
+}
+
+func TestVersionCommandWritesPlainAndJSON(t *testing.T) {
+	t.Run("plain", func(t *testing.T) {
+		var out bytes.Buffer
+		execer := &ttyExecer{
+			s:  newTestServer(t),
+			rw: &out,
+		}
+		if err := execer.dispatch([]string{"version"}); err != nil {
+			t.Fatalf("version dispatch returned error: %v", err)
+		}
+		if got := strings.TrimSpace(out.String()); got == "" {
+			t.Fatal("expected plain version output")
+		}
+	})
+
+	t.Run("json", func(t *testing.T) {
+		var out bytes.Buffer
+		execer := &ttyExecer{
+			s:  newTestServer(t),
+			rw: &out,
+		}
+		if err := execer.dispatch([]string{"version", "--json"}); err != nil {
+			t.Fatalf("version --json dispatch returned error: %v", err)
+		}
+		if got := out.String(); !strings.Contains(got, `"goos"`) {
+			t.Fatalf("json version output = %q, want goos", got)
+		}
+	})
+}
+
+func TestDockerComposeSubcommandParsesFlagsAndSentinel(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "flag with value", args: []string{"--project-name", "catch-svc", "--file", "compose.yml", "up"}, want: "up"},
+		{name: "flag equals", args: []string{"--project-name=catch-svc", "logs"}, want: "logs"},
+		{name: "sentinel", args: []string{"--", "ps"}, want: "ps"},
+		{name: "dash command", args: []string{"-"}, want: "-"},
+		{name: "missing", args: []string{"--project-name"}, want: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := dockerComposeSubcommand(tc.args); got != tc.want {
+				t.Fatalf("dockerComposeSubcommand = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWriteLnWritesLine(t *testing.T) {
+	var out bytes.Buffer
+	writeln(&out, "hello")
+	if got := out.String(); got != "hello\n" {
+		t.Fatalf("writeln output = %q, want hello newline", got)
 	}
 }
 

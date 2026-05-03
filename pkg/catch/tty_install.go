@@ -50,6 +50,13 @@ func (e *ttyExecer) install(action string, in io.Reader, cfg FileInstallerCfg) (
 	return e.installLinux(action, in, cfg)
 }
 
+func (e *ttyExecer) runInstall(action string, in io.Reader, cfg FileInstallerCfg) error {
+	if e.installFunc != nil {
+		return e.installFunc(action, in, cfg)
+	}
+	return e.install(action, in, cfg)
+}
+
 func (e *ttyExecer) installLinux(action string, in io.Reader, cfg FileInstallerCfg) (retErr error) {
 	ui := e.startInstallUI(action)
 	defer ui.Stop()
@@ -266,7 +273,7 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	}
 	cfg := e.fileInstaller(netFlagsFromRun(flags), argsIn)
 	cfg.Pull = flags.Pull
-	return e.install("run", e.payloadReader(), cfg)
+	return e.runInstall("run", e.payloadReader(), cfg)
 }
 
 func (e *ttyExecer) copyCmdFunc(args []string) error {
@@ -905,5 +912,5 @@ func (e *ttyExecer) cronCmdFunc(cronexpr string, args []string) error {
 		OnCalendar: oncal,
 		Persistent: true, // This should be an option keyvalue in the future
 	}
-	return e.install("cron", e.payloadReader(), cfg)
+	return e.runInstall("cron", e.payloadReader(), cfg)
 }

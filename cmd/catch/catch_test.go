@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,6 +20,135 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/catch"
 )
+
+func TestPrepareDataDirsAndNewCatchConfig(t *testing.T) {
+	root := t.TempDir()
+	paths, err := prepareDataDirs(root)
+	if err != nil {
+		t.Fatalf("prepareDataDirs: %v", err)
+	}
+	for _, dir := range []string{paths.dataDir, paths.registryDir, paths.servicesDir, paths.mountsDir} {
+		st, err := os.Stat(dir)
+		if err != nil {
+			t.Fatalf("stat prepared dir %s: %v", dir, err)
+		}
+		if !st.IsDir() {
+			t.Fatalf("%s is not a directory", dir)
+		}
+	}
+
+	cfg := newCatchConfig(paths, "catch-user", "127.0.0.1:0", filepath.Join(root, "containerd.sock"))
+	if cfg.DefaultUser != "catch-user" || cfg.InstallUser != "catch-user" {
+		t.Fatalf("config users = (%q, %q), want catch-user", cfg.DefaultUser, cfg.InstallUser)
+	}
+	if cfg.RootDir != root || cfg.ServicesRoot != paths.servicesDir || cfg.MountsRoot != paths.mountsDir {
+		t.Fatalf("config paths not wired from prepared dirs: %#v", cfg)
+	}
+	if cfg.DB == nil {
+		t.Fatalf("config DB is nil")
+	}
+}
+
+func TestValidateAndCheckContainerdSocket(t *testing.T) {
+	root := t.TempDir()
+	socket := filepath.Join(root, "containerd.sock")
+	if err := os.WriteFile(socket, []byte("socket placeholder"), 0o600); err != nil {
+		t.Fatalf("write socket placeholder: %v", err)
+	}
+	if err := validateContainerdSocket(socket); err != nil {
+		t.Fatalf("validateContainerdSocket existing file: %v", err)
+	}
+	if err := validateContainerdSocket(""); err == nil || !strings.Contains(err.Error(), "required") {
+		t.Fatalf("empty socket error = %v, want required", err)
+	}
+	if err := validateContainerdSocket(filepath.Join(root, "missing.sock")); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing socket error = %v, want not found", err)
+	}
+
+	dockerCfg := filepath.Join(root, "daemon.json")
+	if err := os.WriteFile(dockerCfg, []byte(`{"features":{"containerd-snapshotter":true}}`), 0o600); err != nil {
+		t.Fatalf("write docker config: %v", err)
+	}
+	if err := checkContainerdSnapshotterEnabled(dockerCfg); err != nil {
+		t.Fatalf("checkContainerdSnapshotterEnabled: %v", err)
+	}
+	if err := checkContainerdSnapshotterEnabled(filepath.Join(root, "missing-daemon.json")); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing docker config error = %v, want missing", err)
+	}
+}
+
+func TestInstallMetaReadWriteAndApply(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CATCH_INSTALL_USER", "install-user")
+	t.Setenv("CATCH_INSTALL_HOST", "install-host")
+
+	if got := installMetaPath(root); got != filepath.Join(root, "install.json") {
+		t.Fatalf("installMetaPath = %q", got)
+	}
+	if got := detectInstallHost(); got != "install-host" {
+		t.Fatalf("detectInstallHost = %q, want install-host", got)
+	}
+	if err := writeInstallMeta(root); err != nil {
+		t.Fatalf("writeInstallMeta: %v", err)
+	}
+	meta, err := readInstallMeta(root)
+	if err != nil {
+		t.Fatalf("readInstallMeta: %v", err)
+	}
+	if meta.InstallUser != "install-user" || meta.InstallHost != "install-host" {
+		t.Fatalf("install meta = %#v", meta)
+	}
+
+	cfg := &catch.Config{InstallUser: "default-user"}
+	applyInstallMeta(cfg, root)
+	if cfg.InstallUser != "install-user" || cfg.InstallHost != "install-host" {
+		t.Fatalf("applyInstallMeta cfg = %#v", cfg)
+	}
+}
+
+func TestHandleLocalCommandVersionAndDefault(t *testing.T) {
+	var out strings.Builder
+	handled, err := handleLocalCommand(nil, &catch.Config{}, t.TempDir(), &out)
+	if err != nil {
+		t.Fatalf("handleLocalCommand nil args: %v", err)
+	}
+	if handled || out.Len() != 0 {
+		t.Fatalf("nil args handled=%v output=%q, want unhandled empty output", handled, out.String())
+	}
+
+	handled, err = handleLocalCommand([]string{"version"}, &catch.Config{}, t.TempDir(), &out)
+	if err != nil {
+		t.Fatalf("handleLocalCommand version: %v", err)
+	}
+	if !handled {
+		t.Fatalf("version command was not handled")
+	}
+	if strings.TrimSpace(out.String()) == "" {
+		t.Fatalf("version command did not write output")
+	}
+}
+
+func TestLoopbackAndTSNetServerConfig(t *testing.T) {
+	if got := loopbackForAddr(netip.MustParseAddr("100.64.0.1")); got != ipv4Loopback {
+		t.Fatalf("IPv4 loopback = %v, want %v", got, ipv4Loopback)
+	}
+	if got := loopbackForAddr(netip.MustParseAddr("fd7a:115c:a1e0::1")); got != ipv6Loopback {
+		t.Fatalf("IPv6 loopback = %v, want %v", got, ipv6Loopback)
+	}
+
+	oldHost, oldPort := *tsnetHost, *tsnetPort
+	defer func() {
+		*tsnetHost = oldHost
+		*tsnetPort = oldPort
+	}()
+	*tsnetHost = "catch-test"
+	*tsnetPort = 4242
+	root := t.TempDir()
+	ts := newTSNetServer(root)
+	if ts.Dir != filepath.Join(root, "tsnet") || ts.Hostname != "catch-test" || ts.Port != 4242 {
+		t.Fatalf("tsnet server = %#v", ts)
+	}
+}
 
 func TestDetectInstallUserFromEnv(t *testing.T) {
 	tests := []struct {
@@ -438,4 +568,53 @@ func TestListenDockerPluginSocketRemovesStaleSocket(t *testing.T) {
 	if got := ln.Addr().String(); got != sock {
 		t.Fatalf("listener addr = %q, want %q", got, sock)
 	}
+}
+
+func TestCloseAndRemoveHelpers(t *testing.T) {
+	var target error
+	closeErr := errors.New("close failed")
+	assignOrLogClose(&target, "test closer", closeErrorerFunc(func() error {
+		return closeErr
+	}))
+	if !errors.Is(target, closeErr) {
+		t.Fatalf("assignOrLogClose target = %v, want closeErr", target)
+	}
+
+	original := errors.New("original")
+	target = original
+	assignOrLogClose(&target, "test closer", closeErrorerFunc(func() error {
+		return closeErr
+	}))
+	if !errors.Is(target, original) {
+		t.Fatalf("assignOrLogClose replaced existing target: %v", target)
+	}
+
+	logClose("closed file", closeErrorerFunc(func() error {
+		return os.ErrClosed
+	}))
+	logClose("clean closer", closeErrorerFunc(func() error {
+		return nil
+	}))
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	logRemove(missing)
+	if err := removeStaleSocket(missing); err != nil {
+		t.Fatalf("removeStaleSocket missing: %v", err)
+	}
+	existing := filepath.Join(t.TempDir(), "stale.sock")
+	if err := os.WriteFile(existing, []byte("stale"), 0o600); err != nil {
+		t.Fatalf("write stale socket: %v", err)
+	}
+	if err := removeStaleSocket(existing); err != nil {
+		t.Fatalf("removeStaleSocket existing: %v", err)
+	}
+	if _, err := os.Stat(existing); !os.IsNotExist(err) {
+		t.Fatalf("stale socket still exists or stat failed: %v", err)
+	}
+}
+
+type closeErrorerFunc func() error
+
+func (f closeErrorerFunc) Close() error {
+	return f()
 }

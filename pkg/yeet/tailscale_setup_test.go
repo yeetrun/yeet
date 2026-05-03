@@ -23,6 +23,14 @@ func (w errWriter) Write([]byte) (int, error) {
 	return 0, w.err
 }
 
+type tailscaleReadErrReader struct {
+	err error
+}
+
+func (r tailscaleReadErrReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
 func TestPromptTailscaleClientSecret(t *testing.T) {
 	var out strings.Builder
 
@@ -47,6 +55,15 @@ func TestPromptTailscaleClientSecretReportsWriteError(t *testing.T) {
 	}
 }
 
+func TestPromptTailscaleClientSecretReportsReadError(t *testing.T) {
+	want := errors.New("read failed")
+
+	_, err := promptTailscaleClientSecret(io.Discard, tailscaleReadErrReader{err: want})
+	if !errors.Is(err, want) {
+		t.Fatalf("promptTailscaleClientSecret error = %v, want %v", err, want)
+	}
+}
+
 func TestResolveTailscaleClientSecret(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -59,6 +76,7 @@ func TestResolveTailscaleClientSecret(t *testing.T) {
 		{name: "provided secret", secret: "  tskey-client-provided  ", want: "tskey-client-provided"},
 		{name: "non tty requires secret", wantErr: "client secret is required"},
 		{name: "prompts interactively", interactive: true, input: "tskey-client-prompted\n", want: "tskey-client-prompted"},
+		{name: "empty prompt rejected", interactive: true, input: "\n", wantErr: "client secret is required"},
 		{name: "rejects invalid prefix", secret: "not-a-client-secret", wantErr: "invalid client secret"},
 	}
 
@@ -174,6 +192,20 @@ func TestHandleTailscaleSetupReportsVerificationFailure(t *testing.T) {
 	err := HandleTailscale(context.Background(), []string{"--setup", "--client-secret", "tskey-client-secret"})
 	if err == nil || !strings.Contains(err.Error(), "verification failed") {
 		t.Fatalf("HandleTailscale error = %v, want verification failure", err)
+	}
+}
+
+func TestHandleTailscaleSetupReportsRPCError(t *testing.T) {
+	oldCall := tailscaleSetupCallFn
+	defer func() { tailscaleSetupCallFn = oldCall }()
+	want := errors.New("rpc failed")
+	tailscaleSetupCallFn = func(context.Context, string, catchrpc.TailscaleSetupRequest) (catchrpc.TailscaleSetupResponse, error) {
+		return catchrpc.TailscaleSetupResponse{}, want
+	}
+
+	err := HandleTailscale(context.Background(), []string{"--setup", "--client-secret", "tskey-client-secret"})
+	if !errors.Is(err, want) {
+		t.Fatalf("HandleTailscale error = %v, want %v", err, want)
 	}
 }
 
