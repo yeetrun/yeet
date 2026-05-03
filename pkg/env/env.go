@@ -12,21 +12,25 @@ import (
 )
 
 // Write writes an environment file with the given name and content.
-func Write(name string, e any) error {
+func Write(name string, e any) (retErr error) {
 	f, err := os.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %v", err)
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); retErr == nil {
+			retErr = closeErr
+		}
+	}()
 	if err := marshalEnv(f, e); err != nil {
 		return fmt.Errorf("failed to marshal env: %v", err)
 	}
-	return f.Close()
+	return nil
 }
 
 func marshalEnv(o io.Writer, e any) error {
 	re := reflect.ValueOf(e)
-	if re.Kind() == reflect.Ptr {
+	if re.Kind() == reflect.Pointer {
 		re = re.Elem()
 	}
 	ret := re.Type()
@@ -39,7 +43,9 @@ func marshalEnv(o io.Writer, e any) error {
 		if field.IsZero() {
 			continue
 		}
-		fmt.Fprintf(o, "%s=%s\n", tag, field.Interface())
+		if _, err := fmt.Fprintf(o, "%s=%v\n", tag, field.Interface()); err != nil {
+			return err
+		}
 	}
 	return nil
 }
