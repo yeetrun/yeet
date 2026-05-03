@@ -162,20 +162,6 @@ errcheck|pkg/copyutil/tar.go|TarFileWithObserver|source:defer tw.Close()|Error r
 errcheck|pkg/copyutil/tar.go|TarFileWithObserver|source:f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/db/db.go|(*Store).readLocked|source:defer f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/db/db.go|(*Store).saveLocked|source:defer os.Remove(tmp.Name())|Error return value of `os.Remove` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).CreateEndpoint|source:json.NewEncoder(w).Encode(SuccessResponse{})|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).CreateNetwork|source:json.NewEncoder(w).Encode(SuccessResponse{})|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).DeleteEndpoint|source:json.NewEncoder(w).Encode(SuccessResponse{})|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).DeleteNetwork|source:json.NewEncoder(w).Encode(SuccessResponse{})|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).JoinNetwork|source:json.NewEncoder(w).Encode(resp)|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).LeaveNetwork|source:json.NewEncoder(w).Encode(SuccessResponse{})|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).PluginActivate|source:json.NewEncoder(w).Encode(resp)|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).ProgramExternalConnectivity|source:json.NewEncoder(w).Encode(SuccessResponse{})|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).RevokeExternalConnectivity|source:json.NewEncoder(w).Encode(SuccessResponse{})|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).runInNetNS|source:defer currentNetns.Close()|Error return value of `currentNetns.Close` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).runInNetNS|source:defer netnsFile.Close()|Error return value of `netnsFile.Close` is not checked
-errcheck|pkg/dnet/dnet.go|(*plugin).runInNetNS|source:}()|Error return value is not checked
-errcheck|pkg/dnet/dnet.go|New|source:json.NewEncoder(w).Encode(SuccessResponse{})|Error return value of `(*encoding/json.Encoder).Encode` is not checked
-errcheck|pkg/dnet/dnet.go|New|source:json.NewEncoder(w).Encode(resp)|Error return value of `(*encoding/json.Encoder).Encode` is not checked
 errcheck|pkg/netns/netns.go|InstallYeetNSService|source:defer os.Remove("yeet-ns.env.tmp")|Error return value of `os.Remove` is not checked
 errcheck|pkg/netns/netns.go|InstallYeetNSService|source:defer os.Remove(f)|Error return value of `os.Remove` is not checked
 errcheck|pkg/registry/containerd.go|(*ContainerdCacheStorage).PutManifest|source:s.AbortUpload(ctx, upload.UUID)|Error return value of `s.AbortUpload` is not checked
