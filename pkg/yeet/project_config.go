@@ -7,6 +7,7 @@ package yeet
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -40,6 +41,10 @@ type projectConfigLocation struct {
 	Path   string
 	Dir    string
 	Config *ProjectConfig
+}
+
+var createProjectConfigFileFn = func(path string) (io.WriteCloser, error) {
+	return os.Create(path)
 }
 
 func loadProjectConfigFromCwd() (*projectConfigLocation, error) {
@@ -116,13 +121,21 @@ func saveProjectConfig(loc *projectConfigLocation) error {
 	if err := os.MkdirAll(filepath.Dir(loc.Path), 0o755); err != nil {
 		return err
 	}
-	f, err := os.Create(loc.Path)
+	f, err := createProjectConfigFileFn(loc.Path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	encoder := toml.NewEncoder(f)
-	return encoder.Encode(loc.Config)
+	return encodeProjectConfig(f, loc.Config)
+}
+
+func encodeProjectConfig(w io.WriteCloser, cfg *ProjectConfig) (err error) {
+	defer func() {
+		if closeErr := w.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
+	encoder := toml.NewEncoder(w)
+	return encoder.Encode(cfg)
 }
 
 func (c *ProjectConfig) AllHosts() []string {

@@ -6,13 +6,255 @@ package yeet
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
+
+type errorWriter struct {
+	err error
+}
+
+func (w errorWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+type closeErrorReader struct {
+	reader io.Reader
+	err    error
+}
+
+func (r *closeErrorReader) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
+
+func (r *closeErrorReader) Close() error {
+	return r.err
+}
+
+func TestDetectRunChangesSummaries(t *testing.T) {
+	oldArch := remoteCatchOSAndArchFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldService := serviceOverride
+	defer func() {
+		remoteCatchOSAndArchFn = oldArch
+		fetchRemoteArtifactHashesFn = oldHashes
+		serviceOverride = oldService
+	}()
+
+	serviceOverride = "svc-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "main.py")
+	if err := os.WriteFile(payload, []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("failed to write payload: %v", err)
+	}
+	envFile := filepath.Join(tmp, "envfile")
+	if err := os.WriteFile(envFile, []byte("KEY=VALUE\n"), 0o600); err != nil {
+		t.Fatalf("failed to write env file: %v", err)
+	}
+	payloadHash, err := hashFileSHA256(payload)
+	if err != nil {
+		t.Fatalf("hash payload: %v", err)
+	}
+	envHash, err := hashFileSHA256(envFile)
+	if err != nil {
+		t.Fatalf("hash env: %v", err)
+	}
+
+	artifact := func(kind, sha string) *catchrpc.ArtifactHash {
+		return &catchrpc.ArtifactHash{Kind: kind, SHA256: sha}
+	}
+
+	tests := []struct {
+		name      string
+		runArgs   []string
+		envFile   string
+		stored    []string
+		response  catchrpc.ArtifactHashesResponse
+		supported bool
+		want      runChangeSummary
+	}{
+		{
+			name:      "args changed only",
+			runArgs:   []string{"--pull"},
+			stored:    nil,
+			response:  catchrpc.ArtifactHashesResponse{Found: true, Payload: artifact("python", payloadHash)},
+			supported: true,
+			want: runChangeSummary{
+				argsChanged:  true,
+				payloadLabel: "python file",
+			},
+		},
+		{
+			name:      "matching hashes have no changes",
+			envFile:   envFile,
+			stored:    []string{},
+			response:  catchrpc.ArtifactHashesResponse{Found: true, Payload: artifact("python", payloadHash), Env: artifact("env file", envHash)},
+			supported: true,
+			want: runChangeSummary{
+				payloadLabel: "python file",
+			},
+		},
+		{
+			name:      "unsupported remote marks hash-backed artifacts changed",
+			envFile:   envFile,
+			stored:    []string{},
+			supported: false,
+			want: runChangeSummary{
+				payloadChanged: true,
+				envChanged:     true,
+				payloadLabel:   "python file",
+			},
+		},
+		{
+			name:      "remote kind labels changed payload",
+			stored:    []string{},
+			response:  catchrpc.ArtifactHashesResponse{Found: true, Payload: artifact("binary", "deadbeef")},
+			supported: true,
+			want: runChangeSummary{
+				payloadChanged: true,
+				payloadLabel:   "binary",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+				if service != "svc-a" {
+					t.Fatalf("service = %q, want svc-a", service)
+				}
+				return tt.response, tt.supported, nil
+			}
+
+			got, err := detectRunChanges(payload, tt.runArgs, tt.envFile, tt.stored)
+			if err != nil {
+				t.Fatalf("detectRunChanges error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("summary = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPayloadLabelFromLocal(t *testing.T) {
+	oldArch := remoteCatchOSAndArchFn
+	defer func() {
+		remoteCatchOSAndArchFn = oldArch
+	}()
+
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+
+	tmp := t.TempDir()
+	write := func(name, contents string) string {
+		t.Helper()
+		path := filepath.Join(tmp, name)
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatalf("failed to write %s: %v", name, err)
+		}
+		return path
+	}
+
+	script := write("run", "#!/bin/sh\necho ok\n")
+	compose := write("compose.yml", "services:\n  app:\n    image: busybox\n")
+	typescript := write("main.ts", "export const x: number = 1;\n")
+	python := write("main.py", "print('ok')\n")
+	unknown := write("readme.txt", "hello\n")
+
+	tests := []struct {
+		name       string
+		payload    string
+		remoteKind string
+		want       string
+	}{
+		{name: "remote kind wins", payload: unknown, remoteKind: "docker-compose", want: "docker compose file"},
+		{name: "script", payload: script, want: "script"},
+		{name: "compose", payload: compose, want: "docker compose file"},
+		{name: "typescript", payload: typescript, want: "typescript file"},
+		{name: "python", payload: python, want: "python file"},
+		{name: "unknown", payload: unknown, want: "payload"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := payloadLabelFromLocal(tt.payload, tt.remoteKind)
+			if got != tt.want {
+				t.Fatalf("payloadLabelFromLocal() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHashReadCloserSHA256ReturnsCloseError(t *testing.T) {
+	closeErr := errors.New("close failed")
+	_, err := hashReadCloserSHA256(&closeErrorReader{
+		reader: strings.NewReader("payload"),
+		err:    closeErr,
+	})
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("hashReadCloserSHA256 error = %v, want %v", err, closeErr)
+	}
+}
+
+func TestRunWithChangesToReturnsStatusWriteError(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldService := serviceOverride
+	defer func() {
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		fetchRemoteArtifactHashesFn = oldHashes
+		serviceOverride = oldService
+	}()
+
+	serviceOverride = "svc-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatalf("failed to write payload: %v", err)
+	}
+	payloadHash, err := hashFileSHA256(payload)
+	if err != nil {
+		t.Fatalf("hash payload: %v", err)
+	}
+
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{
+			Found: true,
+			Payload: &catchrpc.ArtifactHash{
+				Kind:   "script",
+				SHA256: payloadHash,
+			},
+		}, true, nil
+	}
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		t.Fatalf("execRemoteFn should not be called")
+		return nil
+	}
+
+	writeErr := errors.New("stdout failed")
+	err = runWithChangesTo(errorWriter{err: writeErr}, payload, nil, "", ServiceEntry{}, false)
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("runWithChangesTo error = %v, want %v", err, writeErr)
+	}
+}
 
 func TestRunWithChangesNoChangesSkips(t *testing.T) {
 	oldExec := execRemoteFn

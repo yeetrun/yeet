@@ -30,6 +30,14 @@ type runChangeSummary struct {
 	payloadLabel   string
 }
 
+func (s runChangeSummary) hasChanges() bool {
+	return s.payloadChanged || s.envChanged || s.argsChanged
+}
+
+func (s runChangeSummary) requiresRun() bool {
+	return s.payloadChanged || s.argsChanged
+}
+
 func extractEnvFileFlag(args []string) (string, []string, bool, error) {
 	if len(args) == 0 {
 		return "", args, false, nil
@@ -116,11 +124,7 @@ func serviceEntryForConfig(cfgLoc *projectConfigLocation, hostOverride string) (
 	if serviceOverride == "" {
 		return ServiceEntry{}, false
 	}
-	host := strings.TrimSpace(hostOverride)
-	if host == "" {
-		host = Host()
-	}
-	entry, ok := cfgLoc.Config.ServiceEntry(serviceOverride, host)
+	entry, ok := cfgLoc.Config.ServiceEntry(serviceOverride, serviceConfigHost(hostOverride))
 	return entry, ok
 }
 
@@ -130,20 +134,29 @@ func hasServiceConfig(cfgLoc *projectConfigLocation, hostOverride string) bool {
 }
 
 func removeServiceConfig(cfgLoc *projectConfigLocation, hostOverride string) error {
-	if cfgLoc == nil || cfgLoc.Config == nil {
+	cfg, service, host, ok := removableServiceConfig(cfgLoc, hostOverride)
+	if !ok {
 		return nil
 	}
-	if serviceOverride == "" {
+	if !cfg.RemoveServiceEntry(service, host) {
 		return nil
 	}
+	return saveProjectConfig(cfgLoc)
+}
+
+func removableServiceConfig(cfgLoc *projectConfigLocation, hostOverride string) (*ProjectConfig, string, string, bool) {
+	if cfgLoc == nil || cfgLoc.Config == nil || serviceOverride == "" {
+		return nil, "", "", false
+	}
+	return cfgLoc.Config, serviceOverride, serviceConfigHost(hostOverride), true
+}
+
+func serviceConfigHost(hostOverride string) string {
 	host := strings.TrimSpace(hostOverride)
 	if host == "" {
 		host = Host()
 	}
-	if !cfgLoc.Config.RemoveServiceEntry(serviceOverride, host) {
-		return nil
-	}
-	return saveProjectConfig(cfgLoc)
+	return host
 }
 
 func saveEnvFileConfig(cfgLoc *projectConfigLocation, hostOverride string, envFile string) error {
@@ -162,16 +175,12 @@ func saveEnvFileConfig(cfgLoc *projectConfigLocation, hostOverride string, envFi
 			return err
 		}
 	}
-	host := strings.TrimSpace(hostOverride)
-	if host == "" {
-		host = Host()
-	}
 	entry := ServiceEntry{
 		Name:    serviceOverride,
-		Host:    host,
+		Host:    serviceConfigHost(hostOverride),
 		EnvFile: relativeEnvFilePath(loc.Dir, envFile),
 	}
-	if existing, ok := loc.Config.ServiceEntry(serviceOverride, host); ok {
+	if existing, ok := loc.Config.ServiceEntry(serviceOverride, entry.Host); ok {
 		entry.Type = existing.Type
 		entry.Payload = existing.Payload
 		entry.Schedule = existing.Schedule
@@ -211,109 +220,177 @@ func tagsEqual(a, b []string) bool {
 }
 
 func runWithChanges(payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
+	return runWithChangesTo(os.Stdout, payload, runArgs, envFile, entry, forceDeploy)
+}
+
+func runWithChangesTo(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
 	summary, err := detectRunChanges(payload, runArgs, envFile, entry.Args)
 	if err != nil {
 		return err
 	}
-	if !summary.payloadChanged && !summary.envChanged && !summary.argsChanged {
-		if forceDeploy {
-			fmt.Fprintln(os.Stdout, "No changes detected, forcing deploy")
-			return runRun(payload, runArgs)
-		}
-		fmt.Fprintln(os.Stdout, "No changes detected")
-		return nil
+	return applyRunChangeSummary(stdout, payload, runArgs, envFile, summary, forceDeploy)
+}
+
+func applyRunChangeSummary(stdout io.Writer, payload string, runArgs []string, envFile string, summary runChangeSummary, forceDeploy bool) error {
+	if !summary.hasChanges() {
+		return applyUnchangedRun(stdout, payload, runArgs, forceDeploy)
 	}
 	if summary.envChanged {
 		if err := runEnvCopy(envFile); err != nil {
 			return err
 		}
-		fmt.Fprintln(os.Stdout, "Updated env file")
+		if err := writeRunChangeLine(stdout, "Updated env file"); err != nil {
+			return err
+		}
 	}
-	if summary.payloadChanged || summary.argsChanged {
+	if summary.requiresRun() {
 		if err := runRun(payload, runArgs); err != nil {
 			return err
 		}
-		if summary.payloadChanged && summary.payloadLabel != "" {
-			fmt.Fprintf(os.Stdout, "Updated %s\n", summary.payloadLabel)
-		}
-		if summary.argsChanged && !summary.payloadChanged {
-			fmt.Fprintln(os.Stdout, "Updated run config")
-		}
+		return writeRunDeployStatus(stdout, summary)
 	}
 	return nil
 }
 
+func applyUnchangedRun(stdout io.Writer, payload string, runArgs []string, forceDeploy bool) error {
+	if !forceDeploy {
+		return writeRunChangeLine(stdout, "No changes detected")
+	}
+	if err := writeRunChangeLine(stdout, "No changes detected, forcing deploy"); err != nil {
+		return err
+	}
+	return runRun(payload, runArgs)
+}
+
+func writeRunDeployStatus(stdout io.Writer, summary runChangeSummary) error {
+	if summary.payloadChanged && summary.payloadLabel != "" {
+		return writeRunChangeLine(stdout, "Updated %s", summary.payloadLabel)
+	}
+	if summary.argsChanged && !summary.payloadChanged {
+		return writeRunChangeLine(stdout, "Updated run config")
+	}
+	return nil
+}
+
+func writeRunChangeLine(stdout io.Writer, format string, args ...any) error {
+	_, err := fmt.Fprintf(stdout, format+"\n", args...)
+	return err
+}
+
 func detectRunChanges(payload string, runArgs []string, envFile string, storedArgs []string) (runChangeSummary, error) {
-	summary := runChangeSummary{}
-	currentArgs := normalizeRunArgs(runArgs)
+	summary := runChangeSummary{
+		argsChanged: runArgsChanged(normalizeRunArgs(runArgs), storedArgs),
+	}
+	needs := classifyRunChangeNeeds(payload, envFile)
+	remoteHashes, supported, err := fetchHashesForRunChanges(needs)
+	if err != nil {
+		return summary, err
+	}
+	if !supported {
+		return summaryForUnsupportedHashes(summary, payload, needs), nil
+	}
+	return detectHashBackedRunChanges(summary, payload, envFile, remoteHashes, needs)
+}
+
+type runChangeNeeds struct {
+	payloadHash         bool
+	envHash             bool
+	alwaysDeployPayload bool
+}
+
+func classifyRunChangeNeeds(payload string, envFile string) runChangeNeeds {
+	alwaysDeploy := shouldAlwaysDeployPayload(payload)
+	return runChangeNeeds{
+		payloadHash:         !alwaysDeploy,
+		envHash:             strings.TrimSpace(envFile) != "",
+		alwaysDeployPayload: alwaysDeploy,
+	}
+}
+
+func (n runChangeNeeds) remoteHashes() bool {
+	return n.payloadHash || n.envHash
+}
+
+func runArgsChanged(currentArgs []string, storedArgs []string) bool {
 	if storedArgs == nil {
-		if len(currentArgs) > 0 {
-			summary.argsChanged = true
-		}
-	} else if len(currentArgs) == 0 && len(storedArgs) == 0 {
-		summary.argsChanged = false
-	} else {
-		summary.argsChanged = !reflect.DeepEqual(currentArgs, storedArgs)
+		return len(currentArgs) > 0
 	}
-
-	payloadNeedsHash := !shouldAlwaysDeployPayload(payload)
-	envNeedsHash := strings.TrimSpace(envFile) != ""
-
-	var remoteHashes catchrpc.ArtifactHashesResponse
-	if payloadNeedsHash || envNeedsHash {
-		resp, supported, err := fetchRemoteArtifactHashesFn(context.Background(), getService())
-		if err != nil {
-			return summary, err
-		}
-		if !supported {
-			summary.payloadChanged = payloadNeedsHash || shouldAlwaysDeployPayload(payload)
-			summary.envChanged = envNeedsHash
-			if payloadNeedsHash {
-				summary.payloadLabel = payloadLabelFromLocal(payload, "")
-			}
-			return summary, nil
-		}
-		remoteHashes = resp
+	if len(currentArgs) == 0 && len(storedArgs) == 0 {
+		return false
 	}
+	return !reflect.DeepEqual(currentArgs, storedArgs)
+}
 
-	if shouldAlwaysDeployPayload(payload) {
+func fetchHashesForRunChanges(needs runChangeNeeds) (catchrpc.ArtifactHashesResponse, bool, error) {
+	if !needs.remoteHashes() {
+		return catchrpc.ArtifactHashesResponse{}, true, nil
+	}
+	return fetchRemoteArtifactHashesFn(context.Background(), getService())
+}
+
+func summaryForUnsupportedHashes(summary runChangeSummary, payload string, needs runChangeNeeds) runChangeSummary {
+	summary.payloadChanged = needs.payloadHash || needs.alwaysDeployPayload
+	summary.envChanged = needs.envHash
+	if needs.payloadHash {
+		summary.payloadLabel = payloadLabelFromLocal(payload, "")
+	}
+	return summary
+}
+
+func detectHashBackedRunChanges(summary runChangeSummary, payload string, envFile string, remoteHashes catchrpc.ArtifactHashesResponse, needs runChangeNeeds) (runChangeSummary, error) {
+	if needs.alwaysDeployPayload {
 		summary.payloadChanged = true
-		summary.payloadLabel = ""
-	} else if payloadNeedsHash {
-		localHash, err := hashFileSHA256(payload)
+	} else if needs.payloadHash {
+		changed, label, err := detectPayloadHashChange(payload, remoteHashes)
 		if err != nil {
 			return summary, err
 		}
-		remoteHash := ""
-		remoteKind := ""
-		if remoteHashes.Found && remoteHashes.Payload != nil {
-			remoteHash = remoteHashes.Payload.SHA256
-			remoteKind = remoteHashes.Payload.Kind
-		}
-		if remoteHash == "" {
-			summary.payloadChanged = true
-		} else {
-			summary.payloadChanged = localHash != remoteHash
-		}
-		summary.payloadLabel = payloadLabelFromLocal(payload, remoteKind)
+		summary.payloadChanged = changed
+		summary.payloadLabel = label
 	}
-
-	if envNeedsHash {
-		localHash, err := hashFileSHA256(envFile)
+	if needs.envHash {
+		changed, err := detectEnvHashChange(envFile, remoteHashes)
 		if err != nil {
 			return summary, err
 		}
-		remoteHash := ""
-		if remoteHashes.Found && remoteHashes.Env != nil {
-			remoteHash = remoteHashes.Env.SHA256
-		}
-		if remoteHash == "" {
-			summary.envChanged = true
-		} else {
-			summary.envChanged = localHash != remoteHash
-		}
+		summary.envChanged = changed
 	}
 	return summary, nil
+}
+
+func detectPayloadHashChange(payload string, remoteHashes catchrpc.ArtifactHashesResponse) (bool, string, error) {
+	localHash, err := hashFileSHA256(payload)
+	if err != nil {
+		return false, "", err
+	}
+	remoteHash, remoteKind := remotePayloadHash(remoteHashes)
+	return hashChanged(localHash, remoteHash), payloadLabelFromLocal(payload, remoteKind), nil
+}
+
+func detectEnvHashChange(envFile string, remoteHashes catchrpc.ArtifactHashesResponse) (bool, error) {
+	localHash, err := hashFileSHA256(envFile)
+	if err != nil {
+		return false, err
+	}
+	return hashChanged(localHash, remoteEnvHash(remoteHashes)), nil
+}
+
+func hashChanged(localHash, remoteHash string) bool {
+	return remoteHash == "" || localHash != remoteHash
+}
+
+func remotePayloadHash(resp catchrpc.ArtifactHashesResponse) (string, string) {
+	if !resp.Found || resp.Payload == nil {
+		return "", ""
+	}
+	return resp.Payload.SHA256, resp.Payload.Kind
+}
+
+func remoteEnvHash(resp catchrpc.ArtifactHashesResponse) string {
+	if !resp.Found || resp.Env == nil {
+		return ""
+	}
+	return resp.Env.SHA256
 }
 
 func shouldAlwaysDeployPayload(payload string) bool {
@@ -328,49 +405,62 @@ func shouldAlwaysDeployPayload(payload string) bool {
 	return false
 }
 
+var payloadLabelsByFileType = map[ftdetect.FileType]string{
+	ftdetect.Binary:        "binary",
+	ftdetect.Script:        "script",
+	ftdetect.DockerCompose: "docker compose file",
+	ftdetect.TypeScript:    "typescript file",
+	ftdetect.Python:        "python file",
+}
+
+var payloadLabelsByKind = map[string]string{
+	"binary":         "binary",
+	"script":         "script",
+	"docker compose": "docker compose file",
+	"compose":        "docker compose file",
+	"docker-compose": "docker compose file",
+	"typescript":     "typescript file",
+	"ts":             "typescript file",
+	"python":         "python file",
+	"py":             "python file",
+}
+
 func payloadLabelFromLocal(payloadPath, remoteKind string) string {
 	if remoteKind != "" {
 		return payloadLabelFromKind(remoteKind)
 	}
-	goos, goarch, err := remoteCatchOSAndArchFn()
-	if err != nil || goos == "" || goarch == "" {
-		goos, goarch = runtime.GOOS, runtime.GOARCH
-	}
-	ft, err := ftdetect.DetectFile(payloadPath, goos, goarch)
+	ft, err := detectPayloadFileType(payloadPath)
 	if err != nil {
 		return "payload"
 	}
-	switch ft {
-	case ftdetect.Binary:
-		return "binary"
-	case ftdetect.Script:
-		return "script"
-	case ftdetect.DockerCompose:
-		return "docker compose file"
-	case ftdetect.TypeScript:
-		return "typescript file"
-	case ftdetect.Python:
-		return "python file"
-	default:
-		return "payload"
+	return payloadLabelFromFileType(ft)
+}
+
+func detectPayloadFileType(payloadPath string) (ftdetect.FileType, error) {
+	goos, goarch := payloadDetectionTarget()
+	return ftdetect.DetectFile(payloadPath, goos, goarch)
+}
+
+func payloadDetectionTarget() (string, string) {
+	goos, goarch, err := remoteCatchOSAndArchFn()
+	if err != nil || goos == "" || goarch == "" {
+		return runtime.GOOS, runtime.GOARCH
 	}
+	return goos, goarch
+}
+
+func payloadLabelFromFileType(ft ftdetect.FileType) string {
+	if label, ok := payloadLabelsByFileType[ft]; ok {
+		return label
+	}
+	return "payload"
 }
 
 func payloadLabelFromKind(kind string) string {
-	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "binary":
-		return "binary"
-	case "script":
-		return "script"
-	case "docker compose", "compose", "docker-compose":
-		return "docker compose file"
-	case "typescript", "ts":
-		return "typescript file"
-	case "python", "py":
-		return "python file"
-	default:
-		return "payload"
+	if label, ok := payloadLabelsByKind[strings.ToLower(strings.TrimSpace(kind))]; ok {
+		return label
 	}
+	return "payload"
 }
 
 func hashFileSHA256(path string) (string, error) {
@@ -378,9 +468,17 @@ func hashFileSHA256(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	return hashReadCloserSHA256(f)
+}
+
+func hashReadCloserSHA256(r io.ReadCloser) (sum string, err error) {
+	defer func() {
+		if closeErr := r.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
 	hasher := sha256.New()
-	if _, err := io.Copy(hasher, f); err != nil {
+	if _, err := io.Copy(hasher, r); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil

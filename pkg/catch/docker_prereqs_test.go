@@ -110,3 +110,37 @@ func TestDockerPrereqsInstallerWritesTargetAndDockerDropIn(t *testing.T) {
 		t.Fatalf("unexpected systemctl calls (-want +got):\n%s", diff)
 	}
 }
+
+func TestWriteTextFileAtomicallyReplacesContentAndCleansTemp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unit.conf")
+	if err := os.WriteFile(path, []byte("old"), 0600); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+
+	if err := writeTextFileAtomically(path, []byte("new"), 0644); err != nil {
+		t.Fatalf("writeTextFileAtomically returned error: %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if string(raw) != "new" {
+		t.Fatalf("file content = %q, want new", string(raw))
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0644 {
+		t.Fatalf("file mode = %v, want 0644", got)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, "unit.conf.tmp.*"))
+	if err != nil {
+		t.Fatalf("glob temp files: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary files were not cleaned up: %v", matches)
+	}
+}

@@ -56,9 +56,6 @@ func watchResize(ctx context.Context, fd int) <-chan catchrpc.Resize {
 }
 
 func payloadNameFromReader(r io.Reader) string {
-	if r == nil {
-		return ""
-	}
 	type namer interface {
 		Name() string
 	}
@@ -66,7 +63,11 @@ func payloadNameFromReader(r io.Reader) string {
 	if !ok {
 		return ""
 	}
-	name := strings.TrimSpace(n.Name())
+	return payloadNameFromPath(n.Name())
+}
+
+func payloadNameFromPath(name string) string {
+	name = strings.TrimSpace(name)
 	if name == "" {
 		return ""
 	}
@@ -252,83 +253,170 @@ func errorPrefixForRemoteExit(rawMode bool, lastByte byte, sawOutput bool) strin
 }
 
 func PrintCLIError(w io.Writer, err error) {
+	_ = printCLIError(w, err)
+}
+
+func printCLIError(w io.Writer, err error) error {
 	if err == nil {
-		return
+		return nil
 	}
 	var pref errorPrefixer
 	if errors.As(err, &pref) {
 		if prefix := pref.errorPrefix(); prefix != "" {
-			fmt.Fprint(w, prefix)
+			if _, writeErr := io.WriteString(w, prefix); writeErr != nil {
+				return writeErr
+			}
 		}
 	}
-	fmt.Fprintln(w, err)
+	_, writeErr := fmt.Fprintln(w, err)
+	return writeErr
 }
 
-func execRemote(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+type remoteExecCleanup struct {
+	label string
+	fn    func() error
+}
+
+type remoteExecSession struct {
+	req      catchrpc.ExecRequest
+	stdin    io.Reader
+	resizeCh <-chan catchrpc.Resize
+	rawMode  bool
+	cleanups []remoteExecCleanup
+}
+
+func newRemoteExecRequest(host string, service string, args []string, stdin io.Reader, tty bool) catchrpc.ExecRequest {
+	req := catchrpc.ExecRequest{
+		Service:  service,
+		Args:     args,
+		Host:     host,
+		TTY:      tty,
+		Progress: execProgressMode(),
+	}
+	if payload := payloadNameForStdin(stdin); payload != "" {
+		req.PayloadName = payload
+	}
+	return req
+}
+
+func payloadNameForStdin(stdin io.Reader) string {
+	if stdin == nil {
+		return ""
+	}
+	if stdinFile, ok := stdin.(*os.File); ok && stdinFile == os.Stdin {
+		return ""
+	}
+	return payloadNameFromReader(stdin)
+}
+
+func prepareRemoteExecSession(ctx context.Context, host string, service string, args []string, stdin io.Reader, tty bool) (*remoteExecSession, error) {
+	session := &remoteExecSession{
+		req:   newRemoteExecRequest(host, service, args, stdin, applyTTYOverride(tty)),
+		stdin: stdin,
+	}
+	session.configureTTY(ctx)
+	if err := session.prepareTTYStdin(); err != nil {
+		session.close(&err)
+		return nil, err
+	}
+	return session, nil
+}
+
+func (s *remoteExecSession) configureTTY(ctx context.Context) {
+	if !s.req.TTY {
+		return
+	}
+	fd := int(os.Stdin.Fd())
+	if !isTerminalFn(fd) {
+		s.req.TTY = false
+		return
+	}
+	s.applyTerminalSize(fd)
+	s.req.Term = os.Getenv("TERM")
+	if s.stdinNeedsRawMode() {
+		state, err := termMakeRawFn(fd)
+		if err != nil {
+			s.req.TTY = false
+			return
+		}
+		s.rawMode = true
+		s.addCleanup("restore terminal", func() error {
+			return termRestoreFn(fd, state)
+		})
+	}
+	s.resizeCh = watchResize(ctx, fd)
+}
+
+func (s *remoteExecSession) applyTerminalSize(fd int) {
+	cols, rows, err := termGetSizeFn(fd)
+	if err != nil {
+		return
+	}
+	s.req.Cols = cols
+	s.req.Rows = rows
+}
+
+func (s *remoteExecSession) stdinNeedsRawMode() bool {
+	stdinFile, ok := s.stdin.(*os.File)
+	return s.stdin == nil || ok && stdinFile == os.Stdin
+}
+
+func (s *remoteExecSession) prepareTTYStdin() error {
+	if !s.req.TTY {
+		return nil
+	}
+	if s.stdin == nil {
+		s.stdin = os.Stdin
+	}
+	stdinFile, ok := s.stdin.(*os.File)
+	if !ok || stdinFile != os.Stdin {
+		return nil
+	}
+	proxy, err := newSessionStdinProxy(stdinFile)
+	if err != nil {
+		return fmt.Errorf("failed to prepare interactive stdin: %w", err)
+	}
+	s.addCleanup("close interactive stdin", proxy.Close)
+	s.stdin = proxy
+	return nil
+}
+
+func (s *remoteExecSession) addCleanup(label string, fn func() error) {
+	s.cleanups = append(s.cleanups, remoteExecCleanup{label: label, fn: fn})
+}
+
+func (s *remoteExecSession) close(errp *error) {
+	for i := len(s.cleanups) - 1; i >= 0; i-- {
+		if err := s.cleanups[i].fn(); err != nil && *errp == nil {
+			*errp = fmt.Errorf("%s: %w", s.cleanups[i].label, err)
+		}
+	}
+}
+
+func execRemote(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) (err error) {
 	host := Host()
 	client := newRPCExecClientFn(host)
-	tty = applyTTYOverride(tty)
-	req := catchrpc.ExecRequest{
-		Service: service,
-		Args:    args,
-		Host:    host,
-		TTY:     tty,
-	}
-	req.Progress = execProgressMode()
-	if stdin != nil && stdin != os.Stdin {
-		if payload := payloadNameFromReader(stdin); payload != "" {
-			req.PayloadName = payload
-		}
-	}
-	var resizeCh <-chan catchrpc.Resize
-	fd := int(os.Stdin.Fd())
-	rawMode := false
-	if tty && isTerminalFn(fd) {
-		cols, rows, err := termGetSizeFn(fd)
-		if err == nil {
-			req.Cols = cols
-			req.Rows = rows
-		}
-		req.Term = os.Getenv("TERM")
-		if stdin == nil || stdin == os.Stdin {
-			state, err := termMakeRawFn(fd)
-			if err == nil {
-				rawMode = true
-				defer termRestoreFn(fd, state)
-				resizeCh = watchResize(ctx, fd)
-			} else {
-				req.TTY = false
-			}
-		} else {
-			resizeCh = watchResize(ctx, fd)
-		}
-	} else {
-		req.TTY = false
-	}
-	if stdin == nil && req.TTY {
-		stdin = os.Stdin
-	}
-	if req.TTY {
-		if stdinFile, ok := stdin.(*os.File); ok && stdinFile == os.Stdin {
-			proxy, err := newSessionStdinProxy(stdinFile)
-			if err != nil {
-				return fmt.Errorf("failed to prepare interactive stdin: %w", err)
-			}
-			defer proxy.Close()
-			stdin = proxy
-		}
-	}
-	out := &trackingWriter{w: os.Stdout}
-	code, err := client.Exec(ctx, req, stdin, out, resizeCh)
+	session, err := prepareRemoteExecSession(ctx, host, service, args, stdin, tty)
 	if err != nil {
 		return err
 	}
-	if code != 0 {
-		last, saw := out.LastByte()
-		prefix := errorPrefixForRemoteExit(rawMode && isTerminalFn(int(os.Stderr.Fd())), last, saw)
-		return remoteExitError{code: code, prefix: prefix}
+	defer session.close(&err)
+
+	out := &trackingWriter{w: os.Stdout}
+	code, err := client.Exec(ctx, session.req, session.stdin, out, session.resizeCh)
+	if err != nil {
+		return err
 	}
-	return nil
+	return remoteExecExitError(code, session.rawMode, out)
+}
+
+func remoteExecExitError(code int, rawMode bool, out *trackingWriter) error {
+	if code == 0 {
+		return nil
+	}
+	last, saw := out.LastByte()
+	prefix := errorPrefixForRemoteExit(rawMode && isTerminalFn(int(os.Stderr.Fd())), last, saw)
+	return remoteExitError{code: code, prefix: prefix}
 }
 
 var execRemoteFn = execRemote
@@ -346,25 +434,14 @@ var newRPCExecClientFn = func(host string) rpcExecClient {
 
 func execRemoteOutput(ctx context.Context, host string, service string, args []string, stdin io.Reader) ([]byte, error) {
 	client := newRPCExecClientFn(host)
-	req := catchrpc.ExecRequest{
-		Service:  service,
-		Args:     args,
-		Host:     host,
-		TTY:      false,
-		Progress: execProgressMode(),
-	}
-	if stdin != nil && stdin != os.Stdin {
-		if payload := payloadNameFromReader(stdin); payload != "" {
-			req.PayloadName = payload
-		}
-	}
+	req := newRemoteExecRequest(host, service, args, stdin, false)
 	var buf bytes.Buffer
 	code, err := client.Exec(ctx, req, stdin, &buf, nil)
 	if err != nil {
 		return nil, err
 	}
-	if code != 0 {
-		return nil, remoteExitError{code: code}
+	if err := remoteExitCodeError(code); err != nil {
+		return nil, err
 	}
 	return buf.Bytes(), nil
 }
@@ -372,47 +449,70 @@ func execRemoteOutput(ctx context.Context, host string, service string, args []s
 func execRemoteStream(ctx context.Context, service string, args []string, stdin io.Reader) (io.ReadCloser, <-chan error, error) {
 	host := Host()
 	client := newRPCExecClientFn(host)
-	req := catchrpc.ExecRequest{
-		Service:  service,
-		Args:     args,
-		Host:     host,
-		TTY:      false,
-		Progress: execProgressMode(),
-	}
-	if stdin != nil && stdin != os.Stdin {
-		if payload := payloadNameFromReader(stdin); payload != "" {
-			req.PayloadName = payload
-		}
-	}
+	req := newRemoteExecRequest(host, service, args, stdin, false)
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
-	go func() {
-		code, err := client.Exec(ctx, req, stdin, pw, nil)
-		if err != nil {
-			_ = pw.CloseWithError(err)
-			done <- err
-			return
-		}
-		if code != 0 {
-			err := remoteExitError{code: code}
-			_ = pw.CloseWithError(err)
-			done <- err
-			return
-		}
-		_ = pw.Close()
-		done <- nil
-	}()
+	go execRemoteStreamToPipe(ctx, client, req, stdin, pw, done)
 	return pr, done, nil
 }
 
-func handleEventsRPC(ctx context.Context, svc string, flags cli.EventsFlags) error {
-	sub := catchrpc.EventsRequest{All: flags.All}
-	if !flags.All {
-		sub.Service = svc
+func execRemoteStreamToPipe(ctx context.Context, client rpcExecClient, req catchrpc.ExecRequest, stdin io.Reader, pw *io.PipeWriter, done chan<- error) {
+	code, err := client.Exec(ctx, req, stdin, pw, nil)
+	if err == nil {
+		err = remoteExitCodeError(code)
 	}
-	return newRPCExecClientFn(Host()).Events(ctx, sub, func(ev catchrpc.Event) {
-		fmt.Fprintf(os.Stdout, "Received event: %v\n", ev)
+	done <- closeExecStreamPipe(pw, err)
+}
+
+func remoteExitCodeError(code int) error {
+	if code == 0 {
+		return nil
+	}
+	return remoteExitError{code: code}
+}
+
+func closeExecStreamPipe(pw *io.PipeWriter, err error) error {
+	if err != nil {
+		if closeErr := pw.CloseWithError(err); closeErr != nil {
+			return errors.Join(err, fmt.Errorf("close stream: %w", closeErr))
+		}
+		return err
+	}
+	if closeErr := pw.Close(); closeErr != nil {
+		return fmt.Errorf("close stream: %w", closeErr)
+	}
+	return nil
+}
+
+func handleEventsRPC(ctx context.Context, svc string, flags cli.EventsFlags) error {
+	req := eventsRequest(svc, flags)
+	var writeErr error
+	err := newRPCExecClientFn(Host()).Events(ctx, req, func(ev catchrpc.Event) {
+		if writeErr != nil {
+			return
+		}
+		writeErr = writeEvent(os.Stdout, ev)
 	})
+	if err != nil {
+		return err
+	}
+	if writeErr != nil {
+		return fmt.Errorf("write event: %w", writeErr)
+	}
+	return nil
+}
+
+func eventsRequest(svc string, flags cli.EventsFlags) catchrpc.EventsRequest {
+	req := catchrpc.EventsRequest{All: flags.All}
+	if !flags.All {
+		req.Service = svc
+	}
+	return req
+}
+
+func writeEvent(w io.Writer, ev catchrpc.Event) error {
+	_, err := fmt.Fprintf(w, "Received event: %v\n", ev)
+	return err
 }
 
 func HandleMountSys(ctx context.Context, rawArgs []string) error {

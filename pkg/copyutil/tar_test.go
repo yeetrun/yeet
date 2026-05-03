@@ -6,15 +6,52 @@ package copyutil
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestReadHeader(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantKind  string
+		wantBase  string
+		wantError bool
+	}{
+		{name: "empty base", input: "YEETCOPY1 file -\n", wantKind: "file"},
+		{name: "encoded base", input: "YEETCOPY1 dir ZGlyL25hbWU=\n", wantKind: "dir", wantBase: "dir/name"},
+		{name: "surrounding whitespace", input: "  YEETCOPY1 file ZmlsZS50eHQ=  \n", wantKind: "file", wantBase: "file.txt"},
+		{name: "bad prefix", input: "BAD file -\n", wantError: true},
+		{name: "missing field", input: "YEETCOPY1 file\n", wantError: true},
+		{name: "bad base64", input: "YEETCOPY1 file ???\n", wantError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotKind, gotBase, err := ReadHeader(bufio.NewReader(strings.NewReader(tt.input)))
+			if tt.wantError {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ReadHeader: %v", err)
+			}
+			if gotKind != tt.wantKind || gotBase != tt.wantBase {
+				t.Fatalf("ReadHeader = (%q, %q), want (%q, %q)", gotKind, gotBase, tt.wantKind, tt.wantBase)
+			}
+		})
+	}
+}
 
 func TestExtractTarRejectsDangerousPaths(t *testing.T) {
 	tests := []struct {

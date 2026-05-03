@@ -5,10 +5,115 @@
 package yeet
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+type closeErrorBuffer struct {
+	bytes.Buffer
+	err error
+}
+
+func (w *closeErrorBuffer) Close() error {
+	return w.err
+}
+
+func TestSaveProjectConfigReturnsCloseError(t *testing.T) {
+	oldCreate := createProjectConfigFileFn
+	defer func() {
+		createProjectConfigFileFn = oldCreate
+	}()
+
+	closeErr := errors.New("close failed")
+	createProjectConfigFileFn = func(string) (io.WriteCloser, error) {
+		return &closeErrorBuffer{err: closeErr}, nil
+	}
+
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	if err := saveProjectConfig(loc); !errors.Is(err, closeErr) {
+		t.Fatalf("saveProjectConfig error = %v, want %v", err, closeErr)
+	}
+}
+
+func TestRemoveServiceConfig(t *testing.T) {
+	oldService := serviceOverride
+	defer func() {
+		serviceOverride = oldService
+	}()
+
+	tests := []struct {
+		name        string
+		service     string
+		host        string
+		wantSaved   bool
+		wantRemoved bool
+	}{
+		{
+			name:        "removes matching service and host",
+			service:     "svc-a",
+			host:        "host-a",
+			wantSaved:   true,
+			wantRemoved: true,
+		},
+		{
+			name:        "skips missing host",
+			service:     "svc-a",
+			host:        "missing",
+			wantSaved:   false,
+			wantRemoved: false,
+		},
+		{
+			name:        "skips empty service override",
+			service:     "",
+			host:        "host-a",
+			wantSaved:   false,
+			wantRemoved: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serviceOverride = tt.service
+			tmp := t.TempDir()
+			cfg := &ProjectConfig{Version: projectConfigVersion}
+			cfg.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-a", Payload: "run-a"})
+			cfg.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-b", Payload: "run-b"})
+			cfg.SetServiceEntry(ServiceEntry{Name: "svc-b", Host: "host-a", Payload: "run-c"})
+			loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: cfg}
+
+			if err := removeServiceConfig(loc, tt.host); err != nil {
+				t.Fatalf("removeServiceConfig error: %v", err)
+			}
+			_, hasRemovedTarget := loc.Config.ServiceEntry("svc-a", "host-a")
+			if hasRemovedTarget == tt.wantRemoved {
+				t.Fatalf("removed target present = %v, want %v", hasRemovedTarget, !tt.wantRemoved)
+			}
+			if _, ok := loc.Config.ServiceEntry("svc-a", "host-b"); !ok {
+				t.Fatalf("expected svc-a@host-b to remain")
+			}
+			if _, ok := loc.Config.ServiceEntry("svc-b", "host-a"); !ok {
+				t.Fatalf("expected svc-b@host-a to remain")
+			}
+
+			_, statErr := os.Stat(loc.Path)
+			if tt.wantSaved && statErr != nil {
+				t.Fatalf("expected config file to be saved: %v", statErr)
+			}
+			if !tt.wantSaved && !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("expected no saved config file, stat error = %v", statErr)
+			}
+		})
+	}
+}
 
 func TestSaveRunConfigCreatesToml(t *testing.T) {
 	oldService := serviceOverride

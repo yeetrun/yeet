@@ -139,9 +139,13 @@ func TestRegistryLoopbackWriteRejected(t *testing.T) {
 }
 
 type recordingStorage struct {
-	repo      string
-	reference string
-	mediaType string
+	repo            string
+	reference       string
+	mediaType       string
+	deletedRepo     string
+	deletedRef      string
+	deleteManifest  error
+	deleteBlobError error
 }
 
 func (r *recordingStorage) GetBlob(ctx context.Context, digest string) (io.ReadCloser, error) {
@@ -157,7 +161,7 @@ func (r *recordingStorage) BlobExists(ctx context.Context, digest string) bool {
 }
 
 func (r *recordingStorage) DeleteBlob(ctx context.Context, digest string) error {
-	return nil
+	return r.deleteBlobError
 }
 
 func (r *recordingStorage) GetManifest(ctx context.Context, repo, reference string) (*registry.ManifestMetadata, error) {
@@ -176,7 +180,9 @@ func (r *recordingStorage) ManifestExists(ctx context.Context, repo, reference s
 }
 
 func (r *recordingStorage) DeleteManifest(ctx context.Context, repo, reference string) error {
-	return nil
+	r.deletedRepo = repo
+	r.deletedRef = reference
+	return r.deleteManifest
 }
 
 func (r *recordingStorage) NewUpload(ctx context.Context) (*registry.UploadSession, error) {
@@ -218,5 +224,83 @@ func TestInternalRegistryStoragePrefixesRepo(t *testing.T) {
 	wantRepo := svc.InternalRegistryHost + "/svc/app"
 	if rec.repo != wantRepo {
 		t.Fatalf("repo = %q, want %q", rec.repo, wantRepo)
+	}
+}
+
+func TestInternalRegistryDeleteManifestDigestRemovesMatchingRefs(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Images: map[db.ImageRepoName]*db.ImageRepo{
+			"svc/app": {
+				Refs: map[db.ImageRef]db.ImageManifest{
+					"run":    {BlobHash: "sha256:deadbeef"},
+					"staged": {BlobHash: "sha256:deadbeef"},
+					"old":    {BlobHash: "sha256:other"},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	rec := &recordingStorage{}
+	storage := &internalRegistryStorage{s: server, base: rec, repoPrefix: svc.InternalRegistryHost}
+
+	if err := storage.DeleteManifest(context.Background(), "svc/app", "sha256:deadbeef"); err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+	if rec.deletedRepo != svc.InternalRegistryHost+"/svc/app" || rec.deletedRef != "sha256:deadbeef" {
+		t.Fatalf("base delete = (%q, %q), want prefixed digest delete", rec.deletedRepo, rec.deletedRef)
+	}
+
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	refs := dv.AsStruct().Images["svc/app"].Refs
+	if _, ok := refs["run"]; ok {
+		t.Fatalf("run ref should be removed")
+	}
+	if _, ok := refs["staged"]; ok {
+		t.Fatalf("staged ref should be removed")
+	}
+	if _, ok := refs["old"]; !ok {
+		t.Fatalf("unmatched ref should remain")
+	}
+}
+
+func TestInternalRegistryDeleteManifestTagRemovesRef(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Images: map[db.ImageRepoName]*db.ImageRepo{
+			"svc/app": {
+				Refs: map[db.ImageRef]db.ImageManifest{
+					"run": {BlobHash: "sha256:run"},
+					"old": {BlobHash: "sha256:old"},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	rec := &recordingStorage{}
+	storage := &internalRegistryStorage{s: server, base: rec, repoPrefix: svc.InternalRegistryHost}
+
+	if err := storage.DeleteManifest(context.Background(), "svc/app", "run"); err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+	if rec.deletedRepo != svc.InternalRegistryHost+"/svc/app" || rec.deletedRef != "run" {
+		t.Fatalf("base delete = (%q, %q), want prefixed tag delete", rec.deletedRepo, rec.deletedRef)
+	}
+
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	refs := dv.AsStruct().Images["svc/app"].Refs
+	if _, ok := refs["run"]; ok {
+		t.Fatalf("run ref should be removed")
+	}
+	if _, ok := refs["old"]; !ok {
+		t.Fatalf("old ref should remain")
 	}
 }

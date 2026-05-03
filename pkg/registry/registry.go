@@ -511,33 +511,46 @@ func (r *Registry) handleBlobUploadInitiate(w http.ResponseWriter, req *http.Req
 		return
 	}
 
-	// Check for cross-repository blob mount (OCI spec)
-	mountDigest := req.URL.Query().Get("mount")
-	fromRepo := req.URL.Query().Get("from")
-
-	if mountDigest != "" && fromRepo != "" {
-		// Attempt to mount blob from another repository
-		if r.storage.BlobExists(req.Context(), mountDigest) {
-			// Mount successful
-			if !strings.HasPrefix(mountDigest, "sha256:") {
-				mountDigest = "sha256:" + mountDigest
-			}
-			w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", repo, mountDigest))
-			w.Header().Set("Docker-Content-Digest", mountDigest)
-			w.WriteHeader(http.StatusCreated)
-			return
-		}
-		// Fall through to create upload session if mount fails
+	if digest, ok := r.mountedBlobDigest(req); ok {
+		writeMountedBlobResponse(w, repo, digest)
+		return
 	}
 
-	// Create new upload session
 	session, err := r.storage.NewUpload(req.Context())
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, ErrCodeBlobUploadInvalid, err.Error(), nil)
 		return
 	}
 
-	// Return upload URL
+	writeUploadInitiatedResponse(w, repo, session)
+}
+
+func (r *Registry) mountedBlobDigest(req *http.Request) (string, bool) {
+	mountDigest := req.URL.Query().Get("mount")
+	fromRepo := req.URL.Query().Get("from")
+	if mountDigest == "" || fromRepo == "" {
+		return "", false
+	}
+	if !r.storage.BlobExists(req.Context(), mountDigest) {
+		return "", false
+	}
+	return normalizedSHA256Digest(mountDigest), true
+}
+
+func normalizedSHA256Digest(digest string) string {
+	if strings.HasPrefix(digest, "sha256:") {
+		return digest
+	}
+	return "sha256:" + digest
+}
+
+func writeMountedBlobResponse(w http.ResponseWriter, repo, digest string) {
+	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/%s", repo, digest))
+	w.Header().Set("Docker-Content-Digest", digest)
+	w.WriteHeader(http.StatusCreated)
+}
+
+func writeUploadInitiatedResponse(w http.ResponseWriter, repo string, session *UploadSession) {
 	uploadURL := fmt.Sprintf("/v2/%s/blobs/uploads/%s", repo, session.UUID)
 	w.Header().Set("Location", uploadURL)
 	w.Header().Set("Range", "0-0")

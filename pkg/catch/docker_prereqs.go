@@ -6,6 +6,7 @@ package catch
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -129,37 +130,104 @@ func defaultRunSystemctl(args ...string) error {
 
 func writeTextFileIfChanged(path, content string, perm os.FileMode) (bool, error) {
 	raw := []byte(content)
-	prev, err := os.ReadFile(path)
-	if err == nil && bytes.Equal(prev, raw) {
-		return false, nil
+	same, err := textFileContentMatches(path, raw)
+	if err != nil {
+		return false, err
 	}
-	if err != nil && !os.IsNotExist(err) {
-		return false, fmt.Errorf("read %s: %w", path, err)
+	if same {
+		return false, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return false, fmt.Errorf("create parent dir for %s: %w", path, err)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.")
-	if err != nil {
-		return false, fmt.Errorf("create temp file for %s: %w", path, err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(raw); err != nil {
-		tmp.Close()
-		return false, fmt.Errorf("write temp file for %s: %w", path, err)
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return false, fmt.Errorf("chmod temp file for %s: %w", path, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return false, fmt.Errorf("close temp file for %s: %w", path, err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return false, fmt.Errorf("replace %s: %w", path, err)
+	if err := writeTextFileAtomically(path, raw, perm); err != nil {
+		return false, err
 	}
 	return true, nil
+}
+
+func textFileContentMatches(path string, raw []byte) (bool, error) {
+	prev, err := os.ReadFile(path)
+	if err == nil && bytes.Equal(prev, raw) {
+		return true, nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	return false, nil
+}
+
+func writeTextFileAtomically(path string, raw []byte, perm os.FileMode) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp.")
+	if err != nil {
+		return fmt.Errorf("create temp file for %s: %w", path, err)
+	}
+	atomicFile := &atomicTextFile{path: path, tmpName: tmp.Name(), file: tmp}
+	defer atomicFile.cleanup(&err)
+	if err := atomicFile.write(raw, perm); err != nil {
+		return err
+	}
+	if err := atomicFile.close(); err != nil {
+		return err
+	}
+	return atomicFile.replace()
+}
+
+type atomicTextFile struct {
+	path    string
+	tmpName string
+	file    *os.File
+	closed  bool
+}
+
+func (f *atomicTextFile) write(raw []byte, perm os.FileMode) error {
+	if _, err := f.file.Write(raw); err != nil {
+		return fmt.Errorf("write temp file for %s: %w", f.path, err)
+	}
+	if err := f.file.Chmod(perm); err != nil {
+		return fmt.Errorf("chmod temp file for %s: %w", f.path, err)
+	}
+	return nil
+}
+
+func (f *atomicTextFile) close() error {
+	err := f.file.Close()
+	f.closed = true
+	if err != nil {
+		return fmt.Errorf("close temp file for %s: %w", f.path, err)
+	}
+	return nil
+}
+
+func (f *atomicTextFile) replace() error {
+	if err := os.Rename(f.tmpName, f.path); err != nil {
+		return fmt.Errorf("replace %s: %w", f.path, err)
+	}
+	return nil
+}
+
+func (f *atomicTextFile) cleanup(errp *error) {
+	f.closeIfOpen(errp)
+	f.removeOnError(errp)
+}
+
+func (f *atomicTextFile) closeIfOpen(errp *error) {
+	if f.closed {
+		return
+	}
+	if err := f.file.Close(); err != nil {
+		*errp = errors.Join(*errp, fmt.Errorf("close temp file for %s: %w", f.path, err))
+	}
+	f.closed = true
+}
+
+func (f *atomicTextFile) removeOnError(errp *error) {
+	if *errp == nil {
+		return
+	}
+	if err := os.Remove(f.tmpName); err != nil && !os.IsNotExist(err) {
+		*errp = errors.Join(*errp, fmt.Errorf("remove temp file for %s: %w", f.path, err))
+	}
 }
 
 func sortedUniqueUnits(units []string) []string {

@@ -28,6 +28,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/client/local"
 	tsapi "tailscale.com/client/tailscale/v2"
+	"tailscale.com/tailcfg"
 	"tailscale.com/util/set"
 )
 
@@ -235,6 +236,24 @@ func overlaps(a, b []string) bool {
 
 var errUnauthorized = fmt.Errorf("unauthorized connection")
 
+func validateCallerIdentity(serverTags []string, serverUser tailcfg.UserID, callerTags []string, callerUser tailcfg.UserID) error {
+	serverTagged := len(serverTags) > 0
+	callerTagged := len(callerTags) > 0
+	if callerTagged {
+		if serverTagged && overlaps(callerTags, serverTags) {
+			return nil
+		}
+		return errUnauthorized
+	}
+	if serverTagged {
+		return nil
+	}
+	if serverUser == callerUser {
+		return nil
+	}
+	return errUnauthorized
+}
+
 // verifyCaller checks if the caller is authorized to connect to the server.
 //
 // - If the server is tagged and the caller is tagged, it checks if the tags
@@ -256,19 +275,11 @@ func (s *Server) verifyCaller(ctx context.Context, remoteAddr string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get whois: %v", err)
 	}
-	if who.Node.IsTagged() {
-		if st.Self.IsTagged() && overlaps(who.Node.Tags, st.Self.Tags.AsSlice()) {
-			return nil
-		}
-		return errUnauthorized
-	}
+	var selfTags []string
 	if st.Self.IsTagged() {
-		return nil
+		selfTags = st.Self.Tags.AsSlice()
 	}
-	if st.Self.UserID == who.Node.User {
-		return nil
-	}
-	return errUnauthorized
+	return validateCallerIdentity(selfTags, st.Self.UserID, who.Node.Tags, who.Node.User)
 }
 
 func (s *Server) dockerComposeService(sn string) (*svc.DockerComposeService, error) {
@@ -369,33 +380,49 @@ func (s *Server) serviceEnvDir(sn string) string {
 }
 
 func (s *Server) ensureDirs(sn, uname string) error {
-	// Ensure bin and data directories exist.
-	for _, dir := range []string{
-		s.serviceBinDir(sn),
-		s.serviceDataDir(sn),
-		s.serviceEnvDir(sn),
-		s.serviceRunDir(sn),
-	} {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return fmt.Errorf("failed to create bin directory: %w", err)
+	for _, dir := range serviceDirectoryPlan(s.cfg.ServicesRoot, sn) {
+		if err := ensureServiceDir(dir, uname); err != nil {
+			return err
 		}
-		if uname != "" && uname != "root" {
-			u, err := user.Lookup(uname)
-			if err != nil {
-				return fmt.Errorf("failed to lookup user: %w", err)
-			}
-			uid, err := strconv.Atoi(u.Uid)
-			if err != nil {
-				return fmt.Errorf("failed to convert uid to int: %w", err)
-			}
-			gid, err := strconv.Atoi(u.Gid)
-			if err != nil {
-				return fmt.Errorf("failed to convert gid to int: %w", err)
-			}
-			if err := os.Chown(dir, uid, gid); err != nil {
-				return fmt.Errorf("failed to chown directory: %w", err)
-			}
-		}
+	}
+	return nil
+}
+
+func serviceDirectoryPlan(servicesRoot, serviceName string) []string {
+	serviceRoot := filepath.Join(servicesRoot, serviceName)
+	return []string{
+		filepath.Join(serviceRoot, "bin"),
+		filepath.Join(serviceRoot, "data"),
+		filepath.Join(serviceRoot, "env"),
+		filepath.Join(serviceRoot, "run"),
+	}
+}
+
+func ensureServiceDir(dir, uname string) error {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create bin directory: %w", err)
+	}
+	if uname == "" || uname == "root" {
+		return nil
+	}
+	return chownServiceDir(dir, uname)
+}
+
+func chownServiceDir(dir, uname string) error {
+	u, err := user.Lookup(uname)
+	if err != nil {
+		return fmt.Errorf("failed to lookup user: %w", err)
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return fmt.Errorf("failed to convert uid to int: %w", err)
+	}
+	gid, err := strconv.Atoi(u.Gid)
+	if err != nil {
+		return fmt.Errorf("failed to convert gid to int: %w", err)
+	}
+	if err := os.Chown(dir, uid, gid); err != nil {
+		return fmt.Errorf("failed to chown directory: %w", err)
 	}
 	return nil
 }
@@ -428,30 +455,37 @@ func (s *Server) DockerComposeStatuses() (map[string]svc.DockerComposeStatus, er
 	if err != nil {
 		return nil, fmt.Errorf("failed to get db: %v", err)
 	}
-	d := dv.AsStruct()
 	allstatuses := make(map[string]svc.DockerComposeStatus)
-	for sn := range d.Services {
-		stype, err := s.serviceType(sn)
+	for _, sn := range serviceNamesByType(dv.AsStruct().Services, db.ServiceTypeDockerCompose) {
+		statuses, err := s.dockerComposeStatusOrUnknown(sn)
 		if err != nil {
-			if errors.Is(err, errNoServiceConfigured) {
-				continue
-			}
-			log.Printf("failed to get service type: %v", err)
-			allstatuses[sn] = DockerStatusesUnknown
-			continue
-		}
-		if stype != db.ServiceTypeDockerCompose {
-			continue
-		}
-		statuses, err := s.DockerComposeStatus(sn)
-		if err != nil && err == svc.ErrDockerStatusUnknown {
-			allstatuses[sn] = DockerStatusesUnknown
-		} else if err != nil {
 			return nil, err
 		}
 		allstatuses[sn] = statuses
 	}
 	return allstatuses, nil
+}
+
+func (s *Server) dockerComposeStatusOrUnknown(sn string) (svc.DockerComposeStatus, error) {
+	statuses, err := s.DockerComposeStatus(sn)
+	if err == nil {
+		return statuses, nil
+	}
+	if err == svc.ErrDockerStatusUnknown {
+		return DockerStatusesUnknown, nil
+	}
+	return nil, err
+}
+
+func serviceNamesByType(services map[string]*db.Service, serviceType db.ServiceType) []string {
+	names := make([]string, 0, len(services))
+	for name, service := range services {
+		if service.ServiceType == serviceType {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
 }
 
 // SystemdStatus returns the status of the service with the given name.
@@ -472,18 +506,8 @@ func (s *Server) SystemdStatuses() (map[string]svc.Status, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get db: %w", err)
 	}
-	d := dv.AsStruct()
 	statuses := make(map[string]svc.Status)
-	for name := range d.Services {
-		stype, err := s.serviceType(name)
-		if err != nil {
-			log.Printf("failed to get service type: %v", err)
-			statuses[name] = svc.StatusUnknown
-			continue
-		}
-		if stype != db.ServiceTypeSystemd {
-			continue
-		}
+	for _, name := range serviceNamesByType(dv.AsStruct().Services, db.ServiceTypeSystemd) {
 		status, err := s.SystemdStatus(name)
 		if err != nil {
 			statuses[name] = svc.StatusUnknown
@@ -505,29 +529,45 @@ func (s *Server) IsServiceRunning(name string) (bool, error) {
 		}
 		return false, fmt.Errorf("failed to get service type: %w", err)
 	}
-	switch st {
+	return s.isServiceTypeRunning(name, st)
+}
+
+func (s *Server) isServiceTypeRunning(name string, serviceType db.ServiceType) (bool, error) {
+	switch serviceType {
 	case db.ServiceTypeDockerCompose:
-		sts, err := s.DockerComposeStatus(name)
-		if err != nil {
-			if err == svc.ErrDockerStatusUnknown {
-				return false, nil
-			}
-			return false, err
-		}
-		for _, status := range sts {
-			if status == svc.StatusRunning {
-				return true, nil
-			}
-		}
-		return false, nil // No containers are running.
+		return s.isDockerComposeServiceRunning(name)
 	case db.ServiceTypeSystemd:
-		st, err := s.SystemdStatus(name)
-		if err != nil {
-			return false, err
-		}
-		return st == svc.StatusRunning, nil
+		return s.isSystemdServiceRunning(name)
 	}
 	return false, fmt.Errorf("unknown service type")
+}
+
+func (s *Server) isDockerComposeServiceRunning(name string) (bool, error) {
+	sts, err := s.DockerComposeStatus(name)
+	if err != nil {
+		if err == svc.ErrDockerStatusUnknown {
+			return false, nil
+		}
+		return false, err
+	}
+	return dockerComposeStatusRunning(sts), nil
+}
+
+func dockerComposeStatusRunning(statuses svc.DockerComposeStatus) bool {
+	for _, status := range statuses {
+		if status == svc.StatusRunning {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) isSystemdServiceRunning(name string) (bool, error) {
+	st, err := s.SystemdStatus(name)
+	if err != nil {
+		return false, err
+	}
+	return st == svc.StatusRunning, nil
 }
 
 // RemoveService removes the service from the database and attempts to clean up
@@ -535,62 +575,102 @@ func (s *Server) IsServiceRunning(name string) (bool, error) {
 // cleanup warnings separately from fatal errors.
 func (s *Server) RemoveService(name string) (*RemoveReport, error) {
 	report := &RemoveReport{}
-	var tsStableID string
-
-	if running, err := s.IsServiceRunning(name); err != nil {
-		report.addWarning(fmt.Errorf("failed to check if service %q is running: %w", name, err))
-	} else if running {
-		report.addWarning(fmt.Errorf("service %q is still running", name))
-	}
-
-	if sv, err := s.serviceView(name); err == nil {
-		if sv.TSNet().Valid() && !sv.TSNet().StableID().IsZero() {
-			tsStableID = string(sv.TSNet().StableID())
-		}
-	} else if !errors.Is(err, errServiceNotFound) {
-		report.addWarning(fmt.Errorf("failed to load service view for %q: %w", name, err))
-	}
-
-	if _, err := s.cfg.DB.MutateData(func(d *db.Data) error {
-		delete(d.Services, name)
-		return nil
-	}); err != nil {
+	s.addRunningServiceWarning(report, name)
+	tsStableID := s.tailscaleStableIDForService(report, name)
+	if err := s.removeServiceFromDB(name); err != nil {
 		return report, fmt.Errorf("failed to remove service from db: %w", err)
 	}
+	s.publishServiceDeleted(name)
+	s.deleteTailscaleDevice(report, tsStableID)
+	s.removeServiceDirs(report, name)
+	return report, nil
+}
+
+func (s *Server) addRunningServiceWarning(report *RemoveReport, name string) {
+	running, err := s.IsServiceRunning(name)
+	if err != nil {
+		report.addWarning(fmt.Errorf("failed to check if service %q is running: %w", name, err))
+		return
+	}
+	if running {
+		report.addWarning(fmt.Errorf("service %q is still running", name))
+	}
+}
+
+func (s *Server) tailscaleStableIDForService(report *RemoveReport, name string) string {
+	sv, err := s.serviceView(name)
+	if err == nil {
+		return tailscaleStableIDForRemoval(sv)
+	}
+	if !errors.Is(err, errServiceNotFound) {
+		report.addWarning(fmt.Errorf("failed to load service view for %q: %w", name, err))
+	}
+	return ""
+}
+
+func tailscaleStableIDForRemoval(sv db.ServiceView) string {
+	tsnet := sv.TSNet()
+	if !tsnet.Valid() || tsnet.StableID().IsZero() {
+		return ""
+	}
+	return string(tsnet.StableID())
+}
+
+func (s *Server) removeServiceFromDB(name string) error {
+	_, err := s.cfg.DB.MutateData(func(d *db.Data) error {
+		delete(d.Services, name)
+		return nil
+	})
+	return err
+}
+
+func (s *Server) publishServiceDeleted(name string) {
 	s.PublishEvent(Event{
 		Type:        EventTypeServiceDeleted,
 		ServiceName: name,
 	})
+}
 
-	if tsStableID != "" {
-		c, err := tsClient(s.ctx)
-		if err != nil {
-			report.addWarning(fmt.Errorf("failed to get tailscale client: %w", err))
-		} else if err := c.Devices().Delete(s.ctx, tsStableID); err != nil {
-			if tsapi.IsNotFound(err) {
-				log.Printf("tailscale device not found: %v", err)
-			} else {
-				report.addWarning(fmt.Errorf("failed to delete tailscale device: %w", err))
-			}
-		}
+func (s *Server) deleteTailscaleDevice(report *RemoveReport, tsStableID string) {
+	if tsStableID == "" {
+		return
 	}
+	c, err := tsClient(s.ctx)
+	if err != nil {
+		report.addWarning(fmt.Errorf("failed to get tailscale client: %w", err))
+		return
+	}
+	if err := c.Devices().Delete(s.ctx, tsStableID); err != nil {
+		if tsapi.IsNotFound(err) {
+			log.Printf("tailscale device not found: %v", err)
+			return
+		}
+		report.addWarning(fmt.Errorf("failed to delete tailscale device: %w", err))
+	}
+}
 
+func (s *Server) removeServiceDirs(report *RemoveReport, name string) {
 	dirs, err := filepath.Glob(filepath.Join(s.cfg.ServicesRoot, name, "*"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		report.addWarning(fmt.Errorf("failed to list service directories: %w", err))
-		return report, nil
+		return
 	}
-	for _, dir := range dirs {
-		if filepath.Base(dir) == "data" {
-			// Skip data directory.
-			continue
-		}
+	for _, dir := range serviceChildDirsToRemove(dirs) {
 		log.Printf("removing service directory: %v", dir)
 		if err := os.RemoveAll(dir); err != nil {
 			report.addWarning(fmt.Errorf("failed to remove service directory %s: %w", dir, err))
 		}
 	}
-	return report, nil
+}
+
+func serviceChildDirsToRemove(dirs []string) []string {
+	filtered := dirs[:0]
+	for _, dir := range dirs {
+		if filepath.Base(dir) != "data" {
+			filtered = append(filtered, dir)
+		}
+	}
+	return filtered
 }
 
 type RemoveReport struct {

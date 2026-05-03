@@ -86,51 +86,88 @@ func (si *Installer) mutateService(f func(*db.Data, *db.Service) error) (*db.Dat
 
 func (si *Installer) commitGen(gen int) (*db.Data, *db.Service, error) {
 	d, s, err := si.mutateService(func(d *db.Data, s *db.Service) error {
-		var srcRefName string
-		var dstRefs []string
-		if gen == 0 {
-			s.LatestGeneration++
-			s.Generation = s.LatestGeneration
-
-			srcRefName = "staged"
-			dstRefs = append(dstRefs, "latest", string(db.Gen(s.Generation)))
-		} else {
-			srcRefName = string(db.Gen(gen))
-			dstRefs = append(dstRefs, "latest")
-			s.Generation = gen
-		}
-
-		for _, refs := range s.Artifacts {
-			val, ok := refs.Refs[db.ArtifactRef(srcRefName)]
-			if !ok {
-				continue
-			}
-			for _, ref := range dstRefs {
-				refs.Refs[db.ArtifactRef(ref)] = val
-			}
-		}
-
-		for rn, ir := range d.Images {
-			if s, _, _ := strings.Cut(string(rn), "/"); s != si.icfg.ServiceName {
-				log.Printf("skipping image %q", rn)
-				continue
-			}
-			val, ok := ir.Refs[db.ImageRef(srcRefName)]
-			if !ok {
-				log.Printf("image %v:%v not found", rn, srcRefName)
-				continue
-			}
-			for _, ref := range dstRefs {
-				log.Printf("setting image %v:%v to %v:%v", rn, srcRefName, rn, ref)
-				ir.Refs[db.ImageRef(ref)] = val
-			}
-		}
+		commitGeneratedServiceRefs(d, s, si.icfg.ServiceName, generatedServiceCommitForGen(gen, s.LatestGeneration))
 		return nil
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to commit generation: %v", err)
 	}
 	return d, s, nil
+}
+
+type generatedServiceCommit struct {
+	srcRef           string
+	dstRefs          []string
+	generation       int
+	latestGeneration int
+}
+
+func generatedServiceCommitForGen(gen, latestGeneration int) generatedServiceCommit {
+	if gen == 0 {
+		next := latestGeneration + 1
+		return generatedServiceCommit{
+			srcRef:           "staged",
+			dstRefs:          []string{"latest", string(db.Gen(next))},
+			generation:       next,
+			latestGeneration: next,
+		}
+	}
+	return generatedServiceCommit{
+		srcRef:           string(db.Gen(gen)),
+		dstRefs:          []string{"latest"},
+		generation:       gen,
+		latestGeneration: latestGeneration,
+	}
+}
+
+func commitGeneratedServiceRefs(d *db.Data, s *db.Service, serviceName string, commit generatedServiceCommit) {
+	s.LatestGeneration = commit.latestGeneration
+	s.Generation = commit.generation
+	commitArtifactRefs(s.Artifacts, commit)
+	if d != nil {
+		commitImageRefs(d.Images, serviceName, commit)
+	}
+}
+
+func commitArtifactRefs(artifacts db.ArtifactStore, commit generatedServiceCommit) {
+	for _, refs := range artifacts {
+		if refs == nil {
+			continue
+		}
+		val, ok := refs.Refs[db.ArtifactRef(commit.srcRef)]
+		if !ok {
+			continue
+		}
+		for _, ref := range commit.dstRefs {
+			refs.Refs[db.ArtifactRef(ref)] = val
+		}
+	}
+}
+
+func commitImageRefs(images map[db.ImageRepoName]*db.ImageRepo, serviceName string, commit generatedServiceCommit) {
+	for rn, ir := range images {
+		if imageRepoServiceName(rn) != serviceName {
+			log.Printf("skipping image %q", rn)
+			continue
+		}
+		if ir == nil {
+			continue
+		}
+		val, ok := ir.Refs[db.ImageRef(commit.srcRef)]
+		if !ok {
+			log.Printf("image %v:%v not found", rn, commit.srcRef)
+			continue
+		}
+		for _, ref := range commit.dstRefs {
+			log.Printf("setting image %v:%v to %v:%v", rn, commit.srcRef, rn, ref)
+			ir.Refs[db.ImageRef(ref)] = val
+		}
+	}
+}
+
+func imageRepoServiceName(rn db.ImageRepoName) string {
+	serviceName, _, _ := strings.Cut(string(rn), "/")
+	return serviceName
 }
 
 func parseGenRef(ref db.ArtifactRef) (int, bool) {
@@ -147,20 +184,9 @@ func parseGenRef(ref db.ArtifactRef) (int, bool) {
 
 // Prune removes old configurations from the database.
 func (si *Installer) prune() {
-	knownBins := make(set.Set[string])
-	// TODO(maisem): this should not be hardcoded here.
-	knownBins.AddSlice([]string{"netns.env", "env", "main.ts", si.icfg.ServiceName})
+	knownBins := defaultKnownInstallFiles(si.icfg.ServiceName)
 	_, _, err := si.mutateService(func(d *db.Data, s *db.Service) error {
-		minGen := s.LatestGeneration - maxGenerations
-		for _, refs := range s.Artifacts {
-			for ref, p := range refs.Refs {
-				if gen, ok := parseGenRef(ref); !ok || gen >= minGen {
-					knownBins.Add(filepath.Base(p))
-				} else {
-					delete(refs.Refs, ref)
-				}
-			}
-		}
+		pruneServiceArtifacts(s, knownBins)
 		return nil
 	})
 	if err != nil {
@@ -168,19 +194,53 @@ func (si *Installer) prune() {
 		return
 	}
 
-	bd := si.s.serviceBinDir(si.icfg.ServiceName)
-	if err := keepOnlyKnownFilesInDir(bd, knownBins); err != nil {
-		log.Printf("failed to keep only known files in %q: %v", bd, err)
-	}
-	ed := si.s.serviceEnvDir(si.icfg.ServiceName)
-	if err := keepOnlyKnownFilesInDir(ed, knownBins); err != nil {
-		log.Printf("failed to keep only known files in %q: %v", ed, err)
+	si.pruneInstallDirectories(knownBins)
+}
+
+func defaultKnownInstallFiles(serviceName string) set.Set[string] {
+	knownFiles := make(set.Set[string])
+	// TODO(maisem): this should not be hardcoded here.
+	knownFiles.AddSlice([]string{"netns.env", "env", "main.ts", serviceName})
+	return knownFiles
+}
+
+func pruneServiceArtifacts(s *db.Service, knownFiles set.Set[string]) {
+	minGen := s.LatestGeneration - maxGenerations
+	for _, refs := range s.Artifacts {
+		pruneArtifactRefs(refs, minGen, knownFiles)
 	}
 }
 
-func keepOnlyKnownFilesInDir(dir string, known set.Set[string]) error {
-	// Loop over all files in the bin directory and remove any that are not in
-	// the knownBins map.
+func pruneArtifactRefs(refs *db.Artifact, minGen int, knownFiles set.Set[string]) {
+	if refs == nil {
+		return
+	}
+	for ref, p := range refs.Refs {
+		if shouldKeepArtifactRef(ref, minGen) {
+			knownFiles.Add(filepath.Base(p))
+			continue
+		}
+		delete(refs.Refs, ref)
+	}
+}
+
+func shouldKeepArtifactRef(ref db.ArtifactRef, minGen int) bool {
+	gen, ok := parseGenRef(ref)
+	return !ok || gen >= minGen
+}
+
+func (si *Installer) pruneInstallDirectories(knownFiles set.Set[string]) {
+	for _, dir := range []string{
+		si.s.serviceBinDir(si.icfg.ServiceName),
+		si.s.serviceEnvDir(si.icfg.ServiceName),
+	} {
+		if err := pruneInstallDirectory(dir, knownFiles); err != nil {
+			log.Printf("failed to keep only known files in %q: %v", dir, err)
+		}
+	}
+}
+
+func pruneInstallDirectory(dir string, known set.Set[string]) error {
 	files, err := os.ReadDir(dir)
 	if err != nil {
 		return fmt.Errorf("failed to read directory: %w", err)
@@ -231,67 +291,141 @@ func (si *Installer) Install() error {
 	return si.InstallGen(0)
 }
 
-func (si *Installer) doInstall(d *db.Data, s *db.Service) error {
-	if si.icfg.Pull && s.ServiceType != db.ServiceTypeDockerCompose {
+func (si *Installer) doInstall(_ *db.Data, s *db.Service) error {
+	if err := validateInstallRequest(si.icfg.Pull, s.ServiceType); err != nil {
+		return err
+	}
+	if err := si.runInstallPhase(s); err != nil {
+		return err
+	}
+	si.publishInstallEvent(s)
+	return nil
+}
+
+func validateInstallRequest(pull bool, serviceType db.ServiceType) error {
+	if pull && serviceType != db.ServiceTypeDockerCompose {
 		return fmt.Errorf("--pull is only valid for docker compose payloads")
 	}
-	switch s.ServiceType {
-	case db.ServiceTypeSystemd:
-		// Install and start the service.
-		service, err := svc.NewSystemdService(si.s.cfg.DB, s.View(), si.s.serviceRunDir(si.icfg.ServiceName))
-		if err != nil {
-			return fmt.Errorf("failed to create service: %v", err)
-		}
-		if err := service.Install(); err != nil {
-			return fmt.Errorf("failed to install service: %v", err)
-		}
-		if s.Name == CatchService && si.icfg.ClientCloser != nil {
-			_ = si.icfg.ClientCloser.Close()
-		}
-		if err := service.Restart(); err != nil {
-			return fmt.Errorf("failed to restart service: %v", err)
-		}
-	case db.ServiceTypeDockerCompose:
-		if si.icfg.UI != nil {
-			si.icfg.UI.Suspend()
-		}
-		// Check that docker is installed before trying to install
-		if _, err := svc.DockerCmd(); err != nil {
-			return err // svc.ErrDockerNotFound
-		}
-		service, err := svc.NewDockerComposeService(si.s.cfg.DB, s.View(), si.s.serviceDataDir(s.Name), si.s.serviceRunDir(s.Name))
-		if err != nil {
-			return fmt.Errorf("failed to create service: %v", err)
-		}
-		service.NewCmd = si.NewCmd
-		service.NewCmdContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
-			return si.NewCmd(name, args...)
-		}
-		if err := service.InstallWithPull(si.icfg.Pull); err != nil {
-			return fmt.Errorf("failed to install service: %v", err)
-		}
+	return nil
+}
 
-		err = service.UpWithPull(si.icfg.Pull)
-		if err != nil {
-			return fmt.Errorf("failed to up service: %v", err)
-		}
-	default:
-		return fmt.Errorf("unknown service type: %v", s.ServiceType)
+type installPhase func(*Installer, *db.Service) error
+
+func (si *Installer) runInstallPhase(s *db.Service) error {
+	phase, err := installPhaseForServiceType(s.ServiceType)
+	if err != nil {
+		return err
 	}
-	if s.LatestGeneration == 1 {
-		si.s.PublishEvent(Event{
-			Type:        EventTypeServiceCreated,
-			ServiceName: s.Name,
-			Data:        EventData{s.View()},
-		})
-	} else {
-		si.s.PublishEvent(Event{
-			Type:        EventTypeServiceConfigChanged,
-			ServiceName: s.Name,
-			Data:        EventData{s.View()},
-		})
+	return phase(si, s)
+}
+
+func installPhaseForServiceType(serviceType db.ServiceType) (installPhase, error) {
+	switch serviceType {
+	case db.ServiceTypeSystemd:
+		return installSystemdService, nil
+	case db.ServiceTypeDockerCompose:
+		return installDockerComposeService, nil
+	default:
+		return nil, fmt.Errorf("unknown service type: %v", serviceType)
+	}
+}
+
+func installSystemdService(si *Installer, s *db.Service) error {
+	service, err := newSystemdInstallService(si, s)
+	if err != nil {
+		return err
+	}
+	if err := installSystemdUnit(service); err != nil {
+		return err
+	}
+	closeSelfUpdateClient(si, s.Name)
+	return restartSystemdUnit(service)
+}
+
+func newSystemdInstallService(si *Installer, s *db.Service) (*svc.SystemdService, error) {
+	service, err := svc.NewSystemdService(si.s.cfg.DB, s.View(), si.s.serviceRunDir(si.icfg.ServiceName))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create service: %v", err)
+	}
+	return service, nil
+}
+
+func installSystemdUnit(service *svc.SystemdService) error {
+	if err := service.Install(); err != nil {
+		return fmt.Errorf("failed to install service: %v", err)
 	}
 	return nil
+}
+
+func closeSelfUpdateClient(si *Installer, serviceName string) {
+	if serviceName == CatchService && si.icfg.ClientCloser != nil {
+		_ = si.icfg.ClientCloser.Close()
+	}
+}
+
+func restartSystemdUnit(service *svc.SystemdService) error {
+	if err := service.Restart(); err != nil {
+		return fmt.Errorf("failed to restart service: %v", err)
+	}
+	return nil
+}
+
+func installDockerComposeService(si *Installer, s *db.Service) error {
+	si.suspendUI()
+	// Check that docker is installed before trying to install.
+	if _, err := svc.DockerCmd(); err != nil {
+		return err // svc.ErrDockerNotFound
+	}
+	service, err := si.newDockerComposeService(s)
+	if err != nil {
+		return fmt.Errorf("failed to create service: %v", err)
+	}
+	if err := service.InstallWithPull(si.icfg.Pull); err != nil {
+		return fmt.Errorf("failed to install service: %v", err)
+	}
+	if err := service.UpWithPull(si.icfg.Pull); err != nil {
+		return fmt.Errorf("failed to up service: %v", err)
+	}
+	return nil
+}
+
+func (si *Installer) suspendUI() {
+	if si.icfg.UI != nil {
+		si.icfg.UI.Suspend()
+	}
+}
+
+func (si *Installer) newDockerComposeService(s *db.Service) (*svc.DockerComposeService, error) {
+	service, err := svc.NewDockerComposeService(si.s.cfg.DB, s.View(), si.s.serviceDataDir(s.Name), si.s.serviceRunDir(s.Name))
+	if err != nil {
+		return nil, err
+	}
+	si.configureDockerComposeCommands(service)
+	return service, nil
+}
+
+func (si *Installer) configureDockerComposeCommands(service *svc.DockerComposeService) {
+	service.NewCmd = si.NewCmd
+	service.NewCmdContext = si.newCommandContext
+}
+
+func (si *Installer) newCommandContext(_ context.Context, name string, args ...string) *exec.Cmd {
+	return si.NewCmd(name, args...)
+}
+
+func (si *Installer) publishInstallEvent(s *db.Service) {
+	si.s.PublishEvent(Event{
+		Type:        installEventType(s.LatestGeneration),
+		ServiceName: s.Name,
+		Data:        EventData{s.View()},
+	})
+}
+
+func installEventType(latestGeneration int) EventType {
+	if latestGeneration == 1 {
+		return EventTypeServiceCreated
+	}
+	return EventTypeServiceConfigChanged
 }
 
 func asJSON(v any) string {
