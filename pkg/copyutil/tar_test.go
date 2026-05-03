@@ -53,6 +53,41 @@ func TestReadHeader(t *testing.T) {
 	}
 }
 
+func TestWriteHeader(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteHeader(&buf, "file", "dir/file.txt"); err != nil {
+		t.Fatalf("WriteHeader returned error: %v", err)
+	}
+	kind, base, err := ReadHeader(bufio.NewReader(&buf))
+	if err != nil {
+		t.Fatalf("ReadHeader returned error: %v", err)
+	}
+	if kind != "file" || base != "dir/file.txt" {
+		t.Fatalf("header = (%q, %q), want file dir/file.txt", kind, base)
+	}
+
+	buf.Reset()
+	if err := WriteHeader(&buf, "dir", ""); err != nil {
+		t.Fatalf("WriteHeader empty base returned error: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, " -\n") {
+		t.Fatalf("empty base header = %q, want dash marker", got)
+	}
+	if err := WriteHeader(io.Discard, "", "base"); err == nil {
+		t.Fatalf("WriteHeader succeeded with empty kind")
+	}
+}
+
+func TestTarDirectoryRejectsNonDirectory(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	if err := TarDirectory(io.Discard, src, ""); err == nil || !strings.Contains(err.Error(), "expected directory") {
+		t.Fatalf("TarDirectory file error = %v, want expected directory", err)
+	}
+}
+
 func TestExtractTarRejectsDangerousPaths(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -139,6 +174,117 @@ func TestExtractTarExtractsEntriesAndNotifiesObserver(t *testing.T) {
 	}
 	if entries[1].Size != int64(len("hello")) || entries[2].Linkname != "dir/file.txt" {
 		t.Fatalf("observer entries did not include expected metadata: %#v", entries)
+	}
+}
+
+func TestTarFileDefaultsNameAndNotifiesObserver(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(src, []byte("hello"), 0o640); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+
+	var entries []TarEntry
+	var buf bytes.Buffer
+	if err := TarFileWithObserver(&buf, src, "", func(entry TarEntry) {
+		entries = append(entries, entry)
+	}); err != nil {
+		t.Fatalf("TarFileWithObserver returned error: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "file.txt" || entries[0].Size != int64(len("hello")) {
+		t.Fatalf("observer entries = %#v, want file.txt metadata", entries)
+	}
+
+	dest := t.TempDir()
+	if err := ExtractTar(&buf, dest); err != nil {
+		t.Fatalf("ExtractTar returned error: %v", err)
+	}
+	assertFileContents(t, filepath.Join(dest, "file.txt"), "hello")
+}
+
+func TestTarFileRejectsDirectoriesAndMissingFiles(t *testing.T) {
+	if err := TarFile(io.Discard, t.TempDir(), "dir"); err == nil || !strings.Contains(err.Error(), "expected file") {
+		t.Fatalf("TarFile directory error = %v, want expected file", err)
+	}
+	if err := TarFile(io.Discard, filepath.Join(t.TempDir(), "missing"), "missing"); err == nil {
+		t.Fatalf("TarFile succeeded for missing source")
+	}
+}
+
+func TestExtractTarSkipsEmptyEntriesAndRejectsUnsupportedTypes(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	writeTarEntry(t, tw, &tar.Header{Name: ".", Typeflag: tar.TypeDir, Mode: 0o755}, nil)
+	writeTarEntry(t, tw, &tar.Header{Name: "unsupported", Typeflag: tar.TypeXGlobalHeader}, nil)
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	err := ExtractTar(&buf, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "unsupported tar entry") {
+		t.Fatalf("ExtractTar unsupported error = %v, want unsupported tar entry", err)
+	}
+}
+
+func TestExtractTarExtractsHardlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("hardlink metadata varies on windows")
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	writeTarEntry(t, tw, &tar.Header{Name: "file.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len("hello"))}, []byte("hello"))
+	writeTarEntry(t, tw, &tar.Header{Name: "hardlink.txt", Typeflag: tar.TypeLink, Linkname: "file.txt", Mode: 0o644}, nil)
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	dest := t.TempDir()
+	if err := ExtractTar(&buf, dest); err != nil {
+		t.Fatalf("ExtractTar returned error: %v", err)
+	}
+	assertFileContents(t, filepath.Join(dest, "hardlink.txt"), "hello")
+	fileInfo, err := os.Stat(filepath.Join(dest, "file.txt"))
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	linkInfo, err := os.Stat(filepath.Join(dest, "hardlink.txt"))
+	if err != nil {
+		t.Fatalf("stat hardlink: %v", err)
+	}
+	if !os.SameFile(fileInfo, linkInfo) {
+		t.Fatalf("hardlink.txt is not the same file as file.txt")
+	}
+}
+
+func TestExtractTarExtractsFIFO(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("special files are unsupported on windows")
+	}
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	writeTarEntry(t, tw, &tar.Header{Name: "fifo", Typeflag: tar.TypeFifo, Mode: 0o600}, nil)
+	if err := tw.Close(); err != nil {
+		t.Fatalf("close tar: %v", err)
+	}
+
+	dest := t.TempDir()
+	if err := ExtractTar(&buf, dest); err != nil {
+		t.Fatalf("ExtractTar FIFO returned error: %v", err)
+	}
+	info, err := os.Lstat(filepath.Join(dest, "fifo"))
+	if err != nil {
+		t.Fatalf("lstat fifo: %v", err)
+	}
+	if info.Mode()&os.ModeNamedPipe == 0 {
+		t.Fatalf("fifo mode = %v, want named pipe", info.Mode())
+	}
+}
+
+func TestCreateSpecialRejectsUnsupportedType(t *testing.T) {
+	err := createSpecial(filepath.Join(t.TempDir(), "regular"), &tar.Header{Typeflag: tar.TypeReg})
+	if err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("createSpecial unsupported error = %v, want unsupported", err)
 	}
 }
 
@@ -266,6 +412,72 @@ func TestMoveTreeMerges(t *testing.T) {
 	if _, err := os.Stat(stage); err == nil {
 		t.Fatalf("expected stage dir to be removed")
 	}
+}
+
+func TestMoveTreeNoopsAndRenamesWhenDestinationMissing(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	if err := MoveTree("", filepath.Join(root, "ignored")); err != nil {
+		t.Fatalf("MoveTree empty src: %v", err)
+	}
+	if err := MoveTree(src, src); err != nil {
+		t.Fatalf("MoveTree same path: %v", err)
+	}
+
+	dst := filepath.Join(root, "dst")
+	if err := MoveTree(src, dst); err != nil {
+		t.Fatalf("MoveTree rename path: %v", err)
+	}
+	assertFileContents(t, filepath.Join(dst, "file.txt"), "hello")
+	if _, err := os.Stat(src); !os.IsNotExist(err) {
+		t.Fatalf("source after rename stat error = %v, want missing", err)
+	}
+}
+
+func TestMoveTreeReplacesNestedFileDestinationWithDirectory(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	nestedSrc := filepath.Join(src, "nested")
+	if err := os.MkdirAll(nestedSrc, 0o755); err != nil {
+		t.Fatalf("mkdir nested src: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedSrc, "file.txt"), []byte("new"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	dst := filepath.Join(root, "dst")
+	if err := os.Mkdir(dst, 0o755); err != nil {
+		t.Fatalf("mkdir dst: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, "nested"), []byte("old file"), 0o644); err != nil {
+		t.Fatalf("write nested destination file: %v", err)
+	}
+
+	if err := MoveTree(src, dst); err != nil {
+		t.Fatalf("MoveTree returned error: %v", err)
+	}
+	assertFileContents(t, filepath.Join(dst, "nested", "file.txt"), "new")
+}
+
+func TestMoveTreeReplacesConflictingFile(t *testing.T) {
+	stage := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stage, "same.txt"), []byte("new"), 0o600); err != nil {
+		t.Fatalf("write staged file: %v", err)
+	}
+	dest := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dest, "same.txt"), []byte("old"), 0o644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+
+	if err := MoveTree(stage, dest); err != nil {
+		t.Fatalf("MoveTree returned error: %v", err)
+	}
+	assertFileContents(t, filepath.Join(dest, "same.txt"), "new")
 }
 
 func writeTarEntry(t *testing.T, tw *tar.Writer, hdr *tar.Header, body []byte) {

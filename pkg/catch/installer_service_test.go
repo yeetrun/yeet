@@ -6,10 +6,12 @@ package catch
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/db"
@@ -204,5 +206,214 @@ func TestInstallerEventTypeForInstallUsesCreationOnlyForFirstGeneration(t *testi
 	}
 	if got := installEventType(2); got != EventTypeServiceConfigChanged {
 		t.Fatalf("installEventType(2) = %s, want %s", got, EventTypeServiceConfigChanged)
+	}
+}
+
+func TestNewInstallerWiresServerConfigAndCommandFactory(t *testing.T) {
+	server := newTestServer(t)
+	inst, err := server.NewInstaller(InstallerCfg{ServiceName: "api", Pull: true})
+	if err != nil {
+		t.Fatalf("NewInstaller: %v", err)
+	}
+	if inst.s != server {
+		t.Fatal("installer server was not wired")
+	}
+	if inst.icfg.ServiceName != "api" || !inst.icfg.Pull {
+		t.Fatalf("installer cfg = %#v", inst.icfg)
+	}
+	if inst.NewCmd == nil {
+		t.Fatal("NewCmd was not configured")
+	}
+}
+
+func TestInstallerCommitGenMutatesDatabase(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {
+				Name:             "api",
+				LatestGeneration: 1,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{"staged": "/srv/api/bin/api-staged"}},
+				},
+			},
+		},
+		Images: map[db.ImageRepoName]*db.ImageRepo{
+			"api/app": {
+				Refs: map[db.ImageRef]db.ImageManifest{"staged": {BlobHash: "sha256:api"}},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	inst := &Installer{s: server, icfg: InstallerCfg{ServiceName: "api"}}
+	_, service, err := inst.commitGen(0)
+	if err != nil {
+		t.Fatalf("commitGen: %v", err)
+	}
+	if service.Generation != 2 || service.LatestGeneration != 2 {
+		t.Fatalf("generation/latest = %d/%d, want 2/2", service.Generation, service.LatestGeneration)
+	}
+	if service.Artifacts[db.ArtifactBinary].Refs["latest"] != "/srv/api/bin/api-staged" {
+		t.Fatalf("latest artifact not promoted: %#v", service.Artifacts)
+	}
+
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	if got := dv.AsStruct().Images["api/app"].Refs["gen-2"].BlobHash; got != "sha256:api" {
+		t.Fatalf("image gen-2 digest = %q, want sha256:api", got)
+	}
+}
+
+func TestInstallerPruneMutatesRefsAndInstallDirs(t *testing.T) {
+	server := newTestServer(t)
+	for _, dir := range []string{server.serviceBinDir("api"), server.serviceEnvDir("api")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		for _, name := range []string{"api", "current.bin", "old.bin"} {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0o644); err != nil {
+				t.Fatalf("write %s: %v", name, err)
+			}
+		}
+	}
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {
+				Name:             "api",
+				LatestGeneration: 15,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactBinary: {
+						Refs: map[db.ArtifactRef]string{
+							"latest": "/srv/api/bin/current.bin",
+							"gen-4":  "/srv/api/bin/old.bin",
+							"gen-15": "/srv/api/bin/current.bin",
+						},
+					},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	(&Installer{s: server, icfg: InstallerCfg{ServiceName: "api"}}).prune()
+
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	refs := dv.AsStruct().Services["api"].Artifacts[db.ArtifactBinary].Refs
+	if _, ok := refs["gen-4"]; ok {
+		t.Fatalf("old generation was not pruned: %#v", refs)
+	}
+	if _, err := os.Stat(filepath.Join(server.serviceBinDir("api"), "old.bin")); !os.IsNotExist(err) {
+		t.Fatalf("old bin stat err = %v, want not exist", err)
+	}
+	if _, err := os.Stat(filepath.Join(server.serviceEnvDir("api"), "old.bin")); !os.IsNotExist(err) {
+		t.Fatalf("old env stat err = %v, want not exist", err)
+	}
+}
+
+func TestPruneInstallDirectoryReportsReadError(t *testing.T) {
+	err := pruneInstallDirectory(filepath.Join(t.TempDir(), "missing"), set.Set[string]{})
+	if err == nil || !strings.Contains(err.Error(), "failed to read directory") {
+		t.Fatalf("pruneInstallDirectory error = %v", err)
+	}
+}
+
+func TestInstallPhaseSelectionAndValidation(t *testing.T) {
+	if phase, err := installPhaseForServiceType(db.ServiceTypeSystemd); err != nil || phase == nil {
+		t.Fatalf("systemd phase = %v, %v", phase, err)
+	}
+	if phase, err := installPhaseForServiceType(db.ServiceTypeDockerCompose); err != nil || phase == nil {
+		t.Fatalf("docker phase = %v, %v", phase, err)
+	}
+	if _, err := installPhaseForServiceType(db.ServiceType("bogus")); err == nil {
+		t.Fatal("expected unknown service type error")
+	}
+
+	inst := &Installer{}
+	err := inst.doInstall(nil, &db.Service{ServiceType: db.ServiceType("bogus")})
+	if err == nil {
+		t.Fatal("expected unknown service type error")
+	}
+	inst.icfg.Pull = true
+	if err := inst.doInstall(nil, &db.Service{ServiceType: db.ServiceTypeSystemd}); err == nil {
+		t.Fatal("expected pull validation error")
+	}
+}
+
+type recordingCloser struct {
+	closed bool
+	err    error
+}
+
+func (c *recordingCloser) Close() error {
+	c.closed = true
+	return c.err
+}
+
+func TestCloseSelfUpdateClientOnlyClosesCatchService(t *testing.T) {
+	closer := &recordingCloser{err: errors.New("ignored")}
+	inst := &Installer{icfg: InstallerCfg{ClientCloser: closer}}
+
+	closeSelfUpdateClient(inst, "api")
+	if closer.closed {
+		t.Fatal("non-catch service closed client")
+	}
+	closeSelfUpdateClient(inst, CatchService)
+	if !closer.closed {
+		t.Fatal("catch service did not close client")
+	}
+}
+
+type recordingProgressUI struct {
+	suspended bool
+}
+
+func (u *recordingProgressUI) Start()                             {}
+func (u *recordingProgressUI) Stop()                              {}
+func (u *recordingProgressUI) Suspend()                           { u.suspended = true }
+func (u *recordingProgressUI) StartStep(name string)              {}
+func (u *recordingProgressUI) UpdateDetail(detail string)         {}
+func (u *recordingProgressUI) DoneStep(detail string)             {}
+func (u *recordingProgressUI) FailStep(detail string)             {}
+func (u *recordingProgressUI) Printer(format string, args ...any) {}
+
+func TestInstallerSuspendUIUsesConfiguredUI(t *testing.T) {
+	ui := &recordingProgressUI{}
+	(&Installer{icfg: InstallerCfg{UI: ui}}).suspendUI()
+	if !ui.suspended {
+		t.Fatal("UI was not suspended")
+	}
+	(&Installer{}).suspendUI()
+}
+
+func TestPublishInstallEventIncludesServiceView(t *testing.T) {
+	server := newTestServer(t)
+	ch := make(chan Event, 1)
+	handle := server.AddEventListener(ch, nil)
+	defer server.RemoveEventListener(handle)
+	service := &db.Service{Name: "api", LatestGeneration: 2}
+
+	(&Installer{s: server}).publishInstallEvent(service)
+
+	event := <-ch
+	if event.Type != EventTypeServiceConfigChanged || event.ServiceName != "api" {
+		t.Fatalf("event = %#v", event)
+	}
+	if event.Data.Data == nil {
+		t.Fatal("event data missing service view")
+	}
+}
+
+func TestAsJSONReportsMarshalError(t *testing.T) {
+	got := asJSON(make(chan int))
+	if !strings.Contains(got, "failed to marshal") {
+		t.Fatalf("asJSON = %q, want marshal error", got)
 	}
 }

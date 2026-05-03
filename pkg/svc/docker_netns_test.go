@@ -91,6 +91,15 @@ func TestNeedsNetNSRecreate(t *testing.T) {
 			containers: nil,
 			want:       false,
 		},
+		{
+			name:      "short endpoint id requires recreate",
+			linkNames: []string{"lo", "yv-abc"},
+			containers: []composeContainer{{
+				ID:                 "app",
+				NetworkEndpointIDs: map[string]string{"catch-svc-a_default": "abc"},
+			}},
+			want: true,
+		},
 	}
 
 	for _, tc := range cases {
@@ -101,6 +110,58 @@ func TestNeedsNetNSRecreate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDockerComposeServiceReconcileNetNSShortCircuitsWithoutSystemdArtifact(t *testing.T) {
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	svc.netnsInspector = fakeNetNSInspector{projectErr: fmt.Errorf("inspector should not be called")}
+
+	restarted, err := svc.ReconcileNetNS(context.Background())
+	if err != nil {
+		t.Fatalf("ReconcileNetNS returned error: %v", err)
+	}
+	if restarted {
+		t.Fatal("expected no restart without systemd netns artifact")
+	}
+}
+
+func TestDockerComposeServiceReconcileNetNSReturnsInspectorErrors(t *testing.T) {
+	projectErr := errors.New("project containers failed")
+	namedErr := errors.New("named netns failed")
+
+	t.Run("project containers", func(t *testing.T) {
+		svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+		svc.sd = &fakeDockerSystemdService{artifacts: map[db.ArtifactName]bool{db.ArtifactNetNSService: true}}
+		svc.netnsInspector = fakeNetNSInspector{projectErr: projectErr}
+
+		restarted, err := svc.ReconcileNetNS(context.Background())
+		if !errors.Is(err, projectErr) {
+			t.Fatalf("ReconcileNetNS error = %v, want project error", err)
+		}
+		if restarted {
+			t.Fatal("expected no restart on project inspector error")
+		}
+	})
+
+	t.Run("named netns", func(t *testing.T) {
+		svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+		svc.sd = &fakeDockerSystemdService{artifacts: map[db.ArtifactName]bool{db.ArtifactNetNSService: true}}
+		svc.netnsInspector = fakeNetNSInspector{
+			namedErr: namedErr,
+			containers: []composeContainer{{
+				ID:                 "app",
+				NetworkEndpointIDs: map[string]string{"catch-svc-a_default": "abcd1234"},
+			}},
+		}
+
+		restarted, err := svc.ReconcileNetNS(context.Background())
+		if !errors.Is(err, namedErr) {
+			t.Fatalf("ReconcileNetNS error = %v, want named netns error", err)
+		}
+		if restarted {
+			t.Fatal("expected no restart on named inspector error")
+		}
+	})
 }
 
 func TestDockerComposeServiceReconcileNetNS(t *testing.T) {
@@ -327,6 +388,23 @@ func TestDockerComposeServiceUpStartsOnlyAuxiliaryUnits(t *testing.T) {
 	}
 }
 
+func TestParseComposeContainerInspectOutputRejectsMalformedLines(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+	}{
+		{name: "missing tab", line: "cid-app catch-svc-a_default=endpoint-app"},
+		{name: "malformed network", line: "cid-app\tcatch-svc-a_default"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseComposeContainerInspectOutput(tc.line + "\n")
+			if err == nil {
+				t.Fatal("parseComposeContainerInspectOutput returned nil error")
+			}
+		})
+	}
+}
+
 func TestLinuxNetNSInspectorNamedNetNSLinkNames(t *testing.T) {
 	t.Setenv("HELPER_NSENTER_IP_LINK_OUTPUT", strings.Join([]string{
 		"1: lo: <LOOPBACK,UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT group default qlen 1000",
@@ -342,6 +420,16 @@ func TestLinuxNetNSInspectorNamedNetNSLinkNames(t *testing.T) {
 	want := []string{"lo", "br0", "yv-e091"}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("NamedNetNSLinkNames mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestLinuxNetNSInspectorNamedNetNSLinkNamesRejectsMalformedOutput(t *testing.T) {
+	t.Setenv("HELPER_NSENTER_IP_LINK_OUTPUT", "missing-colons\n")
+	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+	_, err := (linuxNetNSInspector{}).NamedNetNSLinkNames(context.Background(), filepath.Join("/var/run/netns", "yeet-svc-a-ns"))
+	if err == nil || !strings.Contains(err.Error(), "unexpected ip link output") {
+		t.Fatalf("NamedNetNSLinkNames error = %v, want malformed output error", err)
 	}
 }
 
@@ -404,6 +492,52 @@ func TestLinuxNetNSInspectorProjectContainersInspectsProjectIDs(t *testing.T) {
 	if !strings.Contains(logOutput, "cid-app") || !strings.Contains(logOutput, "cid-worker") {
 		t.Fatalf("expected inspect to use project container IDs, got:\n%s", logOutput)
 	}
+}
+
+func TestLinuxNetNSInspectorProjectContainersNoIDsSkipsInspect(t *testing.T) {
+	tmp := t.TempDir()
+	logPath := filepath.Join(tmp, "docker.log")
+	t.Setenv("HELPER_COMMAND_LOG", logPath)
+	_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+	got, err := (linuxNetNSInspector{}).ProjectContainers(context.Background(), "catch-svc-a")
+	if err != nil {
+		t.Fatalf("ProjectContainers returned error: %v", err)
+	}
+	if got != nil {
+		t.Fatalf("ProjectContainers = %#v, want nil without project container IDs", got)
+	}
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("failed to read helper command log: %v", err)
+	}
+	logOutput := string(logBytes)
+	if strings.Contains(logOutput, "docker\tinspect") {
+		t.Fatalf("did not expect docker inspect without IDs, got:\n%s", logOutput)
+	}
+}
+
+func TestLinuxNetNSInspectorProjectContainersReturnsDockerErrors(t *testing.T) {
+	t.Run("ps", func(t *testing.T) {
+		t.Setenv("HELPER_DOCKER_FAIL_SUBCOMMAND", "ps")
+		_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+		_, err := (linuxNetNSInspector{}).ProjectContainers(context.Background(), "catch-svc-a")
+		if err == nil || !strings.Contains(err.Error(), "docker compose ps -q") {
+			t.Fatalf("ProjectContainers error = %v, want ps error", err)
+		}
+	})
+
+	t.Run("inspect", func(t *testing.T) {
+		t.Setenv("HELPER_DOCKER_PSQ_OUTPUT", "cid-app\n")
+		t.Setenv("HELPER_DOCKER_FAIL_SUBCOMMAND", "inspect")
+		_ = newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+		_, err := (linuxNetNSInspector{}).ProjectContainers(context.Background(), "catch-svc-a")
+		if err == nil || !strings.Contains(err.Error(), "docker inspect") {
+			t.Fatalf("ProjectContainers error = %v, want inspect error", err)
+		}
+	})
 }
 
 func TestLinuxNetNSInspectorProjectContainersHandlesContainerWithNoNetworks(t *testing.T) {

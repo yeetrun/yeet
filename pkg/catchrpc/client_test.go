@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -77,6 +78,12 @@ func TestBuildRPCRequestPayloadOmitsNilParams(t *testing.T) {
 	}
 }
 
+func TestBuildRPCRequestPayloadRejectsUnmarshalableParams(t *testing.T) {
+	if _, err := buildRPCRequestPayload("test.bad", 1, map[string]any{"bad": make(chan int)}); err == nil {
+		t.Fatalf("buildRPCRequestPayload succeeded for unmarshalable params")
+	}
+}
+
 func TestDecodeRPCResponseDecodesResult(t *testing.T) {
 	resp := &http.Response{
 		StatusCode: http.StatusOK,
@@ -108,6 +115,24 @@ func TestDecodeRPCResponseReturnsTrimmedHTTPStatusError(t *testing.T) {
 	}
 	if got, want := err.Error(), "rpc status 502: upstream down"; got != want {
 		t.Fatalf("unexpected error: %q", got)
+	}
+}
+
+func TestDecodeRPCResponseAndResultErrorPaths(t *testing.T) {
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewBufferString(`{`)),
+	}
+	if err := decodeRPCResponse(resp, nil); err == nil {
+		t.Fatalf("decodeRPCResponse succeeded for malformed JSON")
+	}
+
+	err := decodeRPCResult(Response{Result: map[string]any{"bad": make(chan int)}}, &map[string]string{})
+	if err == nil {
+		t.Fatalf("decodeRPCResult succeeded for unmarshalable result")
+	}
+	if err := decodeRPCResult(Response{Result: map[string]string{"ok": "yes"}}, nil); err != nil {
+		t.Fatalf("decodeRPCResult nil out returned error: %v", err)
 	}
 }
 
@@ -166,6 +191,62 @@ func TestClientCallError(t *testing.T) {
 	var out map[string]string
 	if err := client.Call(context.Background(), "test.nope", nil, &out); err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+func TestClientCallBuildRequestAndTransportErrors(t *testing.T) {
+	client := NewClient("127.0.0.1", 1)
+	if err := client.Call(context.Background(), "test.bad", map[string]any{"bad": make(chan int)}, nil); err == nil {
+		t.Fatalf("Client.Call succeeded for bad params")
+	}
+
+	client = NewClient("127.0.0.1", 1)
+	client.baseURL = "http://[::1"
+	if err := client.Call(context.Background(), "test.bad-url", nil, nil); err == nil {
+		t.Fatalf("Client.Call succeeded for bad base URL")
+	}
+
+	wantErr := errors.New("transport failed")
+	client = NewClient("127.0.0.1", 1)
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, wantErr
+	})}
+	if err := client.Call(context.Background(), "test.transport", nil, nil); !errors.Is(err, wantErr) {
+		t.Fatalf("Client.Call transport error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestServiceInfoCallsRPC(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method != "catch.ServiceInfo" {
+			t.Fatalf("method = %q, want catch.ServiceInfo", req.Method)
+		}
+		var params ServiceInfoRequest
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatalf("decode params: %v", err)
+		}
+		if params.Service != "svc-a" {
+			t.Fatalf("service param = %q, want svc-a", params.Service)
+		}
+		_ = json.NewEncoder(w).Encode(Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result:  ServiceInfoResponse{Info: ServiceInfo{Name: "svc-a"}},
+		})
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	got, err := NewClient(host, port).ServiceInfo(context.Background(), "svc-a")
+	if err != nil {
+		t.Fatalf("ServiceInfo returned error: %v", err)
+	}
+	if got.Info.Name != "svc-a" {
+		t.Fatalf("ServiceInfo info = %#v, want svc-a", got.Info)
 	}
 }
 
@@ -317,6 +398,77 @@ func TestClientExecClosesStdinWhenNil(t *testing.T) {
 	}
 }
 
+func TestClientExecDialError(t *testing.T) {
+	wantErr := errors.New("dial failed")
+	client := NewClient("127.0.0.1", 1)
+	client.wsDialer = &websocket.Dialer{
+		NetDialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, wantErr
+		},
+	}
+	if _, err := client.Exec(context.Background(), ExecRequest{}, nil, nil, nil); !errors.Is(err, wantErr) {
+		t.Fatalf("Exec dial error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestClientExecSendsResizeMessages(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	resizeSeen := make(chan ExecMessage, 1)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("read exec request: %v", err)
+		}
+		for {
+			mt, data, err := conn.ReadMessage()
+			if err != nil {
+				t.Fatalf("read control message: %v", err)
+			}
+			if mt != websocket.TextMessage {
+				continue
+			}
+			var msg ExecMessage
+			if err := json.Unmarshal(data, &msg); err != nil {
+				t.Fatalf("decode control message: %v", err)
+			}
+			if msg.Type == ExecMsgResize {
+				resizeSeen <- msg
+				break
+			}
+		}
+		exit := ExecMessage{Type: ExecMsgExit, Code: 0}
+		payload, _ := json.Marshal(exit)
+		_ = conn.WriteMessage(websocket.TextMessage, payload)
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	client := NewClient(host, port)
+	resizeCh := make(chan Resize, 1)
+	resizeCh <- Resize{Rows: 40, Cols: 120}
+	close(resizeCh)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := client.Exec(ctx, ExecRequest{Service: "svc"}, nil, nil, resizeCh); err != nil {
+		t.Fatalf("Exec returned error: %v", err)
+	}
+	select {
+	case got := <-resizeSeen:
+		if got.Rows != 40 || got.Cols != 120 {
+			t.Fatalf("resize message = %#v, want 40x120", got)
+		}
+	default:
+		t.Fatalf("server did not observe resize message")
+	}
+}
+
 type partialWriter struct {
 	maxChunk int
 	buf      bytes.Buffer
@@ -377,6 +529,15 @@ func TestWriteAllWithRetryReturnsPermanentErrors(t *testing.T) {
 	}
 }
 
+func TestWriteAllWithRetryReturnsShortWriteWhenWriterMakesNoProgress(t *testing.T) {
+	err := writeAllWithRetry(writerFunc(func([]byte) (int, error) {
+		return 0, nil
+	}), []byte("output"))
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("writeAllWithRetry error = %v, want %v", err, io.ErrShortWrite)
+	}
+}
+
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) {
@@ -419,6 +580,74 @@ func TestHandleExecReadMessageRejectsInvalidText(t *testing.T) {
 	}
 }
 
+func TestHandleExecReadMessageNonTerminalCases(t *testing.T) {
+	result, err := handleExecReadMessage(websocket.BinaryMessage, []byte("discarded"), nil)
+	if err != nil {
+		t.Fatalf("binary nil stdout error: %v", err)
+	}
+	if result.exit || result.closed {
+		t.Fatalf("binary nil stdout result = %#v, want non-terminal", result)
+	}
+
+	result, err = handleExecReadMessage(websocket.CloseMessage, nil, nil)
+	if err != nil {
+		t.Fatalf("close message error: %v", err)
+	}
+	if !result.closed {
+		t.Fatalf("close message result = %#v, want closed", result)
+	}
+
+	payload, _ := json.Marshal(ExecMessage{Type: "stdout"})
+	result, err = handleExecReadMessage(websocket.TextMessage, payload, nil)
+	if err != nil {
+		t.Fatalf("non-exit text error: %v", err)
+	}
+	if result.exit || result.closed {
+		t.Fatalf("non-exit text result = %#v, want non-terminal", result)
+	}
+
+	result, err = handleExecReadMessage(websocket.PingMessage, []byte("ping"), nil)
+	if err != nil {
+		t.Fatalf("ping message error: %v", err)
+	}
+	if result.exit || result.closed {
+		t.Fatalf("ping result = %#v, want non-terminal", result)
+	}
+}
+
+func TestHandleExecReadErrorAndWaitResultCases(t *testing.T) {
+	errCh := make(chan error, 1)
+	handleExecReadError(&websocket.CloseError{Code: websocket.CloseNormalClosure}, errCh)
+	if len(errCh) != 0 {
+		t.Fatalf("normal close queued unexpected error")
+	}
+
+	wantErr := errors.New("read failed")
+	handleExecReadError(wantErr, errCh)
+	if got := <-errCh; !errors.Is(got, wantErr) {
+		t.Fatalf("queued read error = %v, want %v", got, wantErr)
+	}
+
+	exitCh := make(chan int)
+	errCh = make(chan error, 1)
+	errCh <- wantErr
+	if _, err := waitExecResult(context.Background(), exitCh, errCh); !errors.Is(err, wantErr) {
+		t.Fatalf("waitExecResult error = %v, want %v", err, wantErr)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := waitExecResult(ctx, exitCh, make(chan error)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitExecResult canceled error = %v, want context.Canceled", err)
+	}
+}
+
+func TestWSBinaryWriterCloseWriteNoops(t *testing.T) {
+	if err := (&wsBinaryWriter{}).CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite returned error: %v", err)
+	}
+}
+
 func TestDispatchEventDecodesAndCallsHandler(t *testing.T) {
 	var got Event
 	err := dispatchEvent([]byte(`{"time":12,"serviceName":"svc","type":"started"}`), func(ev Event) {
@@ -446,6 +675,19 @@ func TestHandleEventsReadErrorIgnoresCanceledContext(t *testing.T) {
 	err := handleEventsReadError(ctx, errors.New("read failed"))
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
+	}
+}
+
+func TestDispatchEventAndEventsReadErrorFailures(t *testing.T) {
+	if err := dispatchEvent([]byte("{"), func(Event) {}); err == nil {
+		t.Fatalf("dispatchEvent succeeded for invalid JSON")
+	}
+	wantErr := errors.New("read failed")
+	if err := handleEventsReadError(context.Background(), wantErr); !errors.Is(err, wantErr) {
+		t.Fatalf("handleEventsReadError = %v, want %v", err, wantErr)
+	}
+	if err := handleEventsReadError(context.Background(), websocket.ErrCloseSent); err != nil {
+		t.Fatalf("handleEventsReadError close sent = %v, want nil", err)
 	}
 }
 
@@ -490,4 +732,49 @@ func TestClientEvents(t *testing.T) {
 	if got.ServiceName != "svc" || got.Type != "started" {
 		t.Fatalf("unexpected event: %#v", got)
 	}
+}
+
+func TestClientEventsDialError(t *testing.T) {
+	wantErr := errors.New("dial failed")
+	client := NewClient("127.0.0.1", 1)
+	client.wsDialer = &websocket.Dialer{
+		NetDialContext: func(context.Context, string, string) (net.Conn, error) {
+			return nil, wantErr
+		},
+	}
+	if err := client.Events(context.Background(), EventsRequest{}, func(Event) {}); !errors.Is(err, wantErr) {
+		t.Fatalf("Events dial error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestClientEventsInvalidEventJSON(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("read events request: %v", err)
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("{"))
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := NewClient(host, port).Events(ctx, EventsRequest{}, func(Event) {
+		t.Fatalf("event handler should not be called for invalid JSON")
+	})
+	if err == nil || !strings.Contains(err.Error(), "unexpected") {
+		t.Fatalf("Events invalid JSON error = %v, want JSON error", err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }

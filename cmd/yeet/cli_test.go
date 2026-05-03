@@ -184,6 +184,24 @@ func TestPrepareCommandRoute(t *testing.T) {
 	}
 }
 
+func TestPrepareCommandRouteShortArgsAndGroupHost(t *testing.T) {
+	got := prepareCommandRoute(nil, "")
+	if len(got.args) != 0 || got.host != "" || got.service != "" || got.bridgedArgs != nil {
+		t.Fatalf("empty route = %#v, want zero route", got)
+	}
+
+	got = prepareCommandRoute([]string{"docker@catch-a", "update", "svc-a"}, "")
+	if got.host != "catch-a" {
+		t.Fatalf("host = %q, want catch-a", got.host)
+	}
+	if !reflect.DeepEqual(got.args, []string{"docker", "update"}) {
+		t.Fatalf("args = %#v, want bridged docker update", got.args)
+	}
+	if got.service != "svc-a" {
+		t.Fatalf("service = %q, want svc-a", got.service)
+	}
+}
+
 func TestBridgeWithOverride(t *testing.T) {
 	remoteSpecs := map[string]map[string]cli.FlagSpec{
 		"status": {},
@@ -244,6 +262,12 @@ func TestBridgeHelpersCoverTerminatorAndShortFlags(t *testing.T) {
 	}
 	if got := removeArgAt([]string{"a", "b"}, 5); !reflect.DeepEqual(got, []string{"a", "b"}) {
 		t.Fatalf("removeArgAt out of range = %#v", got)
+	}
+	if got := removeArgAt([]string{"a", "b"}, 0); !reflect.DeepEqual(got, []string{"b"}) {
+		t.Fatalf("removeArgAt first arg = %#v, want [b]", got)
+	}
+	if skip, ok := flagTokenSkip("--format=json", flags); !ok || skip != 0 {
+		t.Fatalf("flagTokenSkip --format=json = (%d, %v), want (0, true)", skip, ok)
 	}
 }
 
@@ -319,6 +343,29 @@ func TestParseListHostsFlags(t *testing.T) {
 				t.Fatalf("Tags = %#v, want %#v", flags.Tags, tt.wantTags)
 			}
 		})
+	}
+}
+
+func TestApplyGlobalUIFlagsAdditionalModesAndErrors(t *testing.T) {
+	if err := applyGlobalUIFlags(globalFlagsParsed{TTY: true}); err != nil {
+		t.Fatalf("applyGlobalUIFlags tty: %v", err)
+	}
+	if err := applyGlobalUIFlags(globalFlagsParsed{Progress: "not-a-mode"}); err == nil {
+		t.Fatalf("applyGlobalUIFlags succeeded for invalid progress mode")
+	}
+}
+
+func TestRewriteEnvSetArgsNoopCases(t *testing.T) {
+	tests := [][]string{
+		{"env", "svc-a"},
+		{"status", "svc-a", "FOO=bar"},
+		{"env", "svc-a", "FOO"},
+	}
+	for _, args := range tests {
+		got := rewriteEnvSetArgs(append([]string(nil), args...))
+		if !reflect.DeepEqual(got, args) {
+			t.Fatalf("rewriteEnvSetArgs(%v) = %v, want unchanged", args, got)
+		}
 	}
 }
 

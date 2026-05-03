@@ -137,6 +137,129 @@ func TestDockerComposeUpWithoutPull(t *testing.T) {
 	}
 }
 
+func TestDockerComposeUpUsesPullMode(t *testing.T) {
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+
+	if err := svc.Up(); err != nil {
+		t.Fatalf("Up returned error: %v", err)
+	}
+
+	if !composeCallHasSubcmd(calls, "up") {
+		t.Fatalf("expected compose up command, got %#v", calls)
+	}
+	for _, want := range []string{"--pull", "always", "-d"} {
+		if !composeCallHasArg(calls, "up", want) {
+			t.Fatalf("compose up missing %q: %#v", want, calls)
+		}
+	}
+}
+
+func TestDockerComposeCommandFallsBackToNewCmdWithoutContext(t *testing.T) {
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.NewCmdContext = nil
+
+	if _, err := svc.command("ps"); err != nil {
+		t.Fatalf("command returned error: %v", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("recorded %d calls, want 1: %#v", len(calls), calls)
+	}
+}
+
+func TestDockerComposeInstallPrefetchesRunningExternalServiceThenInstalls(t *testing.T) {
+	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,running\n")
+	calls := []cmdCall{}
+	sd := &fakeDockerSystemdService{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.sd = sd
+
+	if err := svc.Install(); err != nil {
+		t.Fatalf("Install returned error: %v", err)
+	}
+
+	assertCallOrder(t, calls,
+		callSpec{composeSubcmd: "ps"},
+		callSpec{composeSubcmd: "pull"},
+		callSpec{composeSubcmd: "down"},
+	)
+	if sd.installCalls != 1 {
+		t.Fatalf("systemd Install called %d times, want 1", sd.installCalls)
+	}
+}
+
+func TestDockerComposeInstallWithPullDisabledSkipsPrePull(t *testing.T) {
+	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,running\n")
+	calls := []cmdCall{}
+	sd := &fakeDockerSystemdService{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.sd = sd
+
+	if err := svc.InstallWithPull(false); err != nil {
+		t.Fatalf("InstallWithPull(false) returned error: %v", err)
+	}
+
+	assertCallOrder(t, calls, callSpec{composeSubcmd: "ps"}, callSpec{composeSubcmd: "down"})
+	if composeCallHasSubcmd(calls, "pull") {
+		t.Fatalf("did not expect compose pull when pull is disabled, got %#v", calls)
+	}
+	if sd.installCalls != 1 {
+		t.Fatalf("systemd Install called %d times, want 1", sd.installCalls)
+	}
+}
+
+func TestDockerComposeInstallWrapsPrePullError(t *testing.T) {
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	delete(svc.cfg.Artifacts, db.ArtifactDockerComposeFile)
+
+	err := svc.Install()
+	if err == nil || !strings.Contains(err.Error(), "failed to pre-pull images") {
+		t.Fatalf("Install error = %v, want pre-pull wrapper", err)
+	}
+}
+
+func TestDockerComposeStartBranches(t *testing.T) {
+	t.Run("compose start without systemd", func(t *testing.T) {
+		calls := []cmdCall{}
+		svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+
+		if err := svc.Start(); err != nil {
+			t.Fatalf("Start returned error: %v", err)
+		}
+		if !composeCallHasSubcmd(calls, "start") {
+			t.Fatalf("expected compose start command, got %#v", calls)
+		}
+	})
+
+	t.Run("auxiliary start error", func(t *testing.T) {
+		calls := []cmdCall{}
+		startErr := errors.New("aux start failed")
+		svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+		svc.sd = &fakeDockerSystemdService{startAuxErr: startErr}
+
+		err := svc.Start()
+		if !errors.Is(err, startErr) {
+			t.Fatalf("Start error = %v, want auxiliary start error", err)
+		}
+		if composeCallHasSubcmd(calls, "start") {
+			t.Fatalf("did not expect compose start after auxiliary error, got %#v", calls)
+		}
+	})
+}
+
+func TestDockerComposeStatusReturnsNotImplemented(t *testing.T) {
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+	status, err := svc.Status()
+	if err == nil || !strings.Contains(err.Error(), "not implemented") {
+		t.Fatalf("Status error = %v, want not implemented", err)
+	}
+	if status != StatusUnknown {
+		t.Fatalf("Status = %v, want %v", status, StatusUnknown)
+	}
+}
+
 func TestDockerComposeStatusesStateMapping(t *testing.T) {
 	t.Setenv("HELPER_DOCKER_PS_OUTPUT", strings.Join([]string{
 		"app,created",
@@ -201,6 +324,84 @@ func TestParseDockerComposeStatusesEmptyOutputUnknown(t *testing.T) {
 	}
 }
 
+func TestDockerComposeCommandCopiesEnvAndIncludesNetworkComposeFile(t *testing.T) {
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	networkPath := filepath.Join(svc.DataDir, "network.yml")
+	envPath := filepath.Join(svc.DataDir, "source.env")
+	if err := os.WriteFile(networkPath, []byte("networks: {}\n"), 0644); err != nil {
+		t.Fatalf("failed to write network compose file: %v", err)
+	}
+	if err := os.WriteFile(envPath, []byte("A=1\n"), 0644); err != nil {
+		t.Fatalf("failed to write env file: %v", err)
+	}
+	svc.cfg.Artifacts[db.ArtifactDockerComposeNetwork] = artifactAt(1, networkPath)
+	svc.cfg.Artifacts[db.ArtifactEnvFile] = artifactAt(1, envPath)
+
+	cmd, err := svc.command("ps")
+	if err != nil {
+		t.Fatalf("command returned error: %v", err)
+	}
+	if cmd.Dir != svc.DataDir {
+		t.Fatalf("command dir = %q, want %q", cmd.Dir, svc.DataDir)
+	}
+	copiedEnv, err := os.ReadFile(filepath.Join(svc.DataDir, ".env"))
+	if err != nil {
+		t.Fatalf("failed to read copied env file: %v", err)
+	}
+	if string(copiedEnv) != "A=1\n" {
+		t.Fatalf("copied env = %q, want A=1", copiedEnv)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("recorded %d calls, want 1: %#v", len(calls), calls)
+	}
+	if countArg(calls[0].args, "--file") != 2 {
+		t.Fatalf("command args should include two --file entries, got %#v", calls[0].args)
+	}
+	if !hasArg(calls[0].args, networkPath) {
+		t.Fatalf("command args missing network compose file %s: %#v", networkPath, calls[0].args)
+	}
+}
+
+func TestDockerComposeRunCommandContextReturnsCommandCreationError(t *testing.T) {
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	delete(svc.cfg.Artifacts, db.ArtifactDockerComposeFile)
+
+	err := svc.runCommandContext(context.Background(), "ps")
+	if err == nil || !strings.Contains(err.Error(), "failed to create docker-compose command") {
+		t.Fatalf("runCommandContext error = %v, want command creation error", err)
+	}
+}
+
+func TestDockerComposeStatusesReturnsDockerCommandError(t *testing.T) {
+	t.Setenv("HELPER_DOCKER_FAIL_SUBCOMMAND", "ps")
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+	_, err := svc.Statuses()
+	if err == nil || !strings.Contains(err.Error(), "failed to run docker command") {
+		t.Fatalf("Statuses error = %v, want docker command error", err)
+	}
+}
+
+func TestDockerComposeAnyRunningAndExistsTreatUnknownStatusAsAbsent(t *testing.T) {
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+
+	running, err := svc.AnyRunning()
+	if err != nil {
+		t.Fatalf("AnyRunning returned error: %v", err)
+	}
+	if running {
+		t.Fatal("AnyRunning = true, want false for unknown status")
+	}
+	exists, err := svc.Exists()
+	if err != nil {
+		t.Fatalf("Exists returned error: %v", err)
+	}
+	if exists {
+		t.Fatal("Exists = true, want false for unknown status")
+	}
+}
+
 func TestDockerComposeCommandContextRemovesStaleEnvFileWithoutEnvArtifact(t *testing.T) {
 	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
 	envPath := filepath.Join(svc.DataDir, ".env")
@@ -214,6 +415,24 @@ func TestDockerComposeCommandContextRemovesStaleEnvFileWithoutEnvArtifact(t *tes
 
 	if _, err := os.Stat(envPath); !os.IsNotExist(err) {
 		t.Fatalf("stale env file stat error = %v, want not exist", err)
+	}
+}
+
+func TestDockerComposeLogsBuildsOptions(t *testing.T) {
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+
+	if err := svc.Logs(&LogOptions{Follow: true, Lines: 42}); err != nil {
+		t.Fatalf("Logs returned error: %v", err)
+	}
+
+	if !composeCallHasSubcmd(calls, "logs") {
+		t.Fatalf("expected compose logs command, got %#v", calls)
+	}
+	for _, want := range []string{"--follow", "--tail", "42"} {
+		if !composeCallHasArg(calls, "logs", want) {
+			t.Fatalf("compose logs missing %q: %#v", want, calls)
+		}
 	}
 }
 
@@ -259,6 +478,19 @@ func TestDockerComposeRemovePropagatesSystemdStopErrorAfterCleanup(t *testing.T)
 		callSpec{composeSubcmd: "ps"},
 		callSpec{composeSubcmd: "down"},
 	)
+}
+
+func TestDockerComposeRemoveJoinsStopAndUninstallErrors(t *testing.T) {
+	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,running\n")
+	stopErr := errors.New("systemd stop failed")
+	uninstallErr := errors.New("systemd uninstall failed")
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
+	svc.sd = &fakeDockerSystemdService{stopErr: stopErr, uninstallErr: uninstallErr}
+
+	err := svc.Remove()
+	if !errors.Is(err, stopErr) || !errors.Is(err, uninstallErr) {
+		t.Fatalf("Remove error = %v, want joined stop and uninstall errors", err)
+	}
 }
 
 func TestNewDockerComposeServiceSetsContextAwareCommandFactory(t *testing.T) {
@@ -374,12 +606,16 @@ type fakeDockerSystemdService struct {
 	uninstallErr error
 	installErr   error
 	startAuxErr  error
+	artifacts    map[db.ArtifactName]bool
 
+	installCalls   int
 	stopCalls      int
 	uninstallCalls int
+	startAuxCalls  int
 }
 
 func (f *fakeDockerSystemdService) Install() error {
+	f.installCalls++
 	return f.installErr
 }
 
@@ -394,11 +630,12 @@ func (f *fakeDockerSystemdService) Uninstall() error {
 }
 
 func (f *fakeDockerSystemdService) StartAuxiliaryUnits() error {
+	f.startAuxCalls++
 	return f.startAuxErr
 }
 
-func (f *fakeDockerSystemdService) hasArtifact(db.ArtifactName) bool {
-	return false
+func (f *fakeDockerSystemdService) hasArtifact(a db.ArtifactName) bool {
+	return f.artifacts[a]
 }
 
 func TestHelperProcess(t *testing.T) {
@@ -429,6 +666,18 @@ func TestHelperProcess(t *testing.T) {
 	actualArgs := cmdArgs[1:]
 	if logPath := os.Getenv("HELPER_COMMAND_LOG"); logPath != "" {
 		appendHelperCommandLog(logPath, cmdArgs[0], actualArgs)
+	}
+	if fail := os.Getenv("HELPER_DOCKER_FAIL_SUBCOMMAND"); fail != "" {
+		subcmd := ""
+		if len(actualArgs) > 0 && actualArgs[0] == "compose" {
+			subcmd = composeSubcommand(actualArgs)
+		} else if len(actualArgs) > 0 {
+			subcmd = actualArgs[0]
+		}
+		if subcmd == fail {
+			os.Stdout.WriteString("docker command failed\n")
+			os.Exit(12)
+		}
 	}
 	if len(actualArgs) > 0 && actualArgs[0] == "compose" {
 		if composeSubcommand(actualArgs) == "ps" {
@@ -530,14 +779,31 @@ func composeCallHasSubcmd(calls []cmdCall, subcmd string) bool {
 func composeCallHasArg(calls []cmdCall, subcmd, arg string) bool {
 	for _, call := range calls {
 		if len(call.args) > 0 && call.args[0] == "compose" && composeSubcommand(call.args) == subcmd {
-			for _, a := range call.args {
-				if a == arg {
-					return true
-				}
+			if hasArg(call.args, arg) {
+				return true
 			}
 		}
 	}
 	return false
+}
+
+func hasArg(args []string, arg string) bool {
+	for _, a := range args {
+		if a == arg {
+			return true
+		}
+	}
+	return false
+}
+
+func countArg(args []string, arg string) int {
+	count := 0
+	for _, a := range args {
+		if a == arg {
+			count++
+		}
+	}
+	return count
 }
 
 func composeSubcommand(args []string) string {

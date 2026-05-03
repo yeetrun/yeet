@@ -736,6 +736,9 @@ func (e *ttyExecer) stageCommitUI(fi *FileInstallerCfg) *runUI {
 }
 
 func (e *ttyExecer) closeNewStageInstaller(fi FileInstallerCfg) error {
+	if e.closeNewStageInstallerFunc != nil {
+		return e.closeNewStageInstallerFunc(fi)
+	}
 	inst, err := NewFileInstaller(e.s, fi)
 	if err != nil {
 		return fmt.Errorf("failed to create installer: %w", err)

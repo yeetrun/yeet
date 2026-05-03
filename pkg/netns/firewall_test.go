@@ -211,6 +211,14 @@ func TestLoadFirewallEnvDetectsBackendWhenUnset(t *testing.T) {
 	}
 }
 
+func TestDetectFirewallBackendReportsNoUsableBackend(t *testing.T) {
+	withFirewallCommandFakes(t, lookupFromSet(nil), outputFromMaps(nil, nil), nil)
+
+	if _, err := DetectFirewallBackend(); err == nil || !strings.Contains(err.Error(), "no usable firewall backend") {
+		t.Fatalf("DetectFirewallBackend error = %v, want no usable backend", err)
+	}
+}
+
 func TestProbeFirewallBackend(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -394,6 +402,22 @@ func TestEnsureFirewallNFTReplacesTableAndLoadsRules(t *testing.T) {
 	}
 }
 
+func TestEnsureVerifyCleanupRejectUnsupportedBackend(t *testing.T) {
+	spec := FirewallSpec{SubnetCIDR: "192.168.100.0/24", BridgeIf: "yeet0"}
+	for name, fn := range map[string]func() error{
+		"ensure":  func() error { return EnsureFirewall(FirewallBackend("pf"), spec) },
+		"verify":  func() error { return VerifyFirewall(FirewallBackend("pf"), spec) },
+		"cleanup": func() error { return CleanupFirewall(FirewallBackend("pf")) },
+	} {
+		if err := fn(); err == nil || !strings.Contains(err.Error(), "unsupported firewall backend") {
+			t.Fatalf("%s unsupported error = %v, want unsupported backend", name, err)
+		}
+	}
+	if got := RenderFirewallRules(FirewallBackend("pf"), spec); got != "" {
+		t.Fatalf("RenderFirewallRules unsupported = %q, want empty", got)
+	}
+}
+
 func TestEnsureFirewallIPTablesInstallsOwnedChainsAndRules(t *testing.T) {
 	var calls []firewallCommandCall
 	spec := FirewallSpec{SubnetCIDR: "192.168.100.0/24", BridgeIf: "yeet0"}
@@ -423,6 +447,27 @@ func TestEnsureFirewallIPTablesInstallsOwnedChainsAndRules(t *testing.T) {
 		if !containsString(got, want) {
 			t.Fatalf("commands missing %q in %#v", want, got)
 		}
+	}
+}
+
+func TestEnsureFirewallIPTablesSkipsExistingRules(t *testing.T) {
+	var calls []firewallCommandCall
+	spec := FirewallSpec{SubnetCIDR: "192.168.100.0/24", BridgeIf: "yeet0"}
+	withFirewallCommandFakes(t, lookupFromSet(map[string]bool{"iptables-nft": true}), func(name string, args ...string) ([]byte, error) {
+		if commandKey(name, args...) == "iptables-nft --version" {
+			return []byte("iptables v1.8.11 (nf_tables)"), nil
+		}
+		return []byte("exists"), nil
+	}, func(input []byte, name string, args ...string) error {
+		calls = append(calls, firewallCommandCall{Name: name, Args: append([]string(nil), args...)})
+		return nil
+	})
+
+	if err := EnsureFirewall(BackendIPTablesNFT, spec); err != nil {
+		t.Fatalf("EnsureFirewall returned error: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("EnsureFirewall ran commands for existing rules: %#v", commandStrings(calls))
 	}
 }
 
@@ -485,6 +530,74 @@ func TestVerifyFirewallIPTablesAcceptsExpectedRules(t *testing.T) {
 	}
 }
 
+func TestVerifyFirewallIPTablesReportsMissingRule(t *testing.T) {
+	spec := FirewallSpec{SubnetCIDR: "192.168.100.0/24", BridgeIf: "yeet0"}
+	withFirewallCommandFakes(t, lookupFromSet(map[string]bool{"iptables-nft": true}), func(name string, args ...string) ([]byte, error) {
+		switch commandKey(name, args...) {
+		case "iptables-nft --version":
+			return []byte("iptables v1.8.11 (nf_tables)"), nil
+		case "iptables-nft -S YEET_FORWARD":
+			return []byte("-A YEET_FORWARD -i wrong0 -j ACCEPT"), nil
+		default:
+			return nil, fmt.Errorf("unexpected command: %s", commandKey(name, args...))
+		}
+	}, nil)
+
+	err := VerifyFirewall(BackendIPTablesNFT, spec)
+	if err == nil || !strings.Contains(err.Error(), "missing yeet forward ingress rule") {
+		t.Fatalf("VerifyFirewall error = %v, want missing ingress rule", err)
+	}
+}
+
+func TestCleanupFirewallNFTDeletesPresentTableAndNoopsWhenMissing(t *testing.T) {
+	t.Run("deletes present table", func(t *testing.T) {
+		var calls []firewallCommandCall
+		withFirewallCommandFakes(t, lookupFromSet(map[string]bool{"nft": true}), func(name string, args ...string) ([]byte, error) {
+			if commandKey(name, args...) == "nft list table ip yeet" {
+				return []byte("table ip yeet {}"), nil
+			}
+			return nil, fmt.Errorf("unexpected command: %s", commandKey(name, args...))
+		}, func(input []byte, name string, args ...string) error {
+			calls = append(calls, firewallCommandCall{Name: name, Args: append([]string(nil), args...)})
+			return nil
+		})
+
+		if err := CleanupFirewall(BackendNFT); err != nil {
+			t.Fatalf("CleanupFirewall NFT returned error: %v", err)
+		}
+		if got := commandStrings(calls); !reflect.DeepEqual(got, []string{"nft delete table ip yeet"}) {
+			t.Fatalf("commands = %#v, want delete table", got)
+		}
+	})
+
+	t.Run("missing command", func(t *testing.T) {
+		withFirewallCommandFakes(t, lookupFromSet(nil), nil, nil)
+		if err := CleanupFirewall(BackendNFT); err == nil || !strings.Contains(err.Error(), "nft command not found") {
+			t.Fatalf("CleanupFirewall missing nft error = %v, want command not found", err)
+		}
+	})
+
+	t.Run("missing table", func(t *testing.T) {
+		var calls []firewallCommandCall
+		withFirewallCommandFakes(t, lookupFromSet(map[string]bool{"nft": true}), func(name string, args ...string) ([]byte, error) {
+			if commandKey(name, args...) == "nft list table ip yeet" {
+				return []byte("Error: No such file or directory"), errors.New("missing")
+			}
+			return nil, fmt.Errorf("unexpected command: %s", commandKey(name, args...))
+		}, func(input []byte, name string, args ...string) error {
+			calls = append(calls, firewallCommandCall{Name: name, Args: append([]string(nil), args...)})
+			return nil
+		})
+
+		if err := CleanupFirewall(BackendNFT); err != nil {
+			t.Fatalf("CleanupFirewall missing table returned error: %v", err)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("CleanupFirewall ran delete for missing table: %#v", commandStrings(calls))
+		}
+	})
+}
+
 func TestCleanupFirewallIPTablesRemovesOwnedRulesAndChains(t *testing.T) {
 	var calls []firewallCommandCall
 	withFirewallCommandFakes(t, lookupFromSet(map[string]bool{"iptables-legacy": true}), func(name string, args ...string) ([]byte, error) {
@@ -513,6 +626,81 @@ func TestCleanupFirewallIPTablesRemovesOwnedRulesAndChains(t *testing.T) {
 			t.Fatalf("commands missing %q in %#v", want, got)
 		}
 	}
+}
+
+func TestFirewallHelperErrorBranches(t *testing.T) {
+	t.Run("nft inspect error includes output", func(t *testing.T) {
+		withFirewallCommandFakes(t, nil, func(name string, args ...string) ([]byte, error) {
+			return []byte("permission denied"), errors.New("exit 1")
+		}, nil)
+		_, err := nftTableExists()
+		if err == nil || !strings.Contains(err.Error(), "permission denied") {
+			t.Fatalf("nftTableExists error = %v, want command output", err)
+		}
+	})
+
+	t.Run("nft inspect error without output", func(t *testing.T) {
+		withFirewallCommandFakes(t, nil, func(name string, args ...string) ([]byte, error) {
+			return nil, errors.New("exit 1")
+		}, nil)
+		_, err := nftTableExists()
+		if err == nil || !strings.Contains(err.Error(), "failed to inspect") {
+			t.Fatalf("nftTableExists empty error = %v, want inspect failure", err)
+		}
+	})
+
+	t.Run("delete iptables helpers ignore missing rules and chains", func(t *testing.T) {
+		var calls []firewallCommandCall
+		withFirewallCommandFakes(t, nil, func(name string, args ...string) ([]byte, error) {
+			return nil, errors.New("missing")
+		}, func(input []byte, name string, args ...string) error {
+			calls = append(calls, firewallCommandCall{Name: name, Args: append([]string(nil), args...)})
+			return nil
+		})
+		if err := deleteIPTablesRuleIfPresent("iptables", "filter", "FORWARD", "-j", "YEET_FORWARD"); err != nil {
+			t.Fatalf("deleteIPTablesRuleIfPresent returned error: %v", err)
+		}
+		if err := deleteIPTablesChain("iptables", "filter", "YEET_FORWARD"); err != nil {
+			t.Fatalf("deleteIPTablesChain returned error: %v", err)
+		}
+		if len(calls) != 0 {
+			t.Fatalf("missing rule/chain caused delete commands: %#v", commandStrings(calls))
+		}
+	})
+
+	t.Run("run firewall steps stops on first error", func(t *testing.T) {
+		calls := 0
+		wantErr := errors.New("step failed")
+		err := runFirewallSteps([]func() error{
+			func() error {
+				calls++
+				return wantErr
+			},
+			func() error {
+				calls++
+				return nil
+			},
+		})
+		if !errors.Is(err, wantErr) || calls != 1 {
+			t.Fatalf("runFirewallSteps error=%v calls=%d, want %v and one call", err, calls, wantErr)
+		}
+	})
+
+	t.Run("command output formats errors", func(t *testing.T) {
+		withFirewallCommandFakes(t, nil, func(name string, args ...string) ([]byte, error) {
+			return []byte("bad output"), errors.New("exit 1")
+		}, nil)
+		if _, err := commandOutput("iptables", "--bad"); err == nil || !strings.Contains(err.Error(), "bad output") {
+			t.Fatalf("commandOutput error = %v, want output", err)
+		}
+
+		withFirewallCommandFakes(t, nil, func(name string, args ...string) ([]byte, error) {
+			return nil, errors.New("exit 1")
+		}, nil)
+		if _, err := commandOutput("iptables", "--bad"); err == nil || !strings.Contains(err.Error(), "failed to run iptables --bad") {
+			t.Fatalf("commandOutput empty error = %v, want command context", err)
+		}
+	})
 }
 
 type firewallCommandCall struct {

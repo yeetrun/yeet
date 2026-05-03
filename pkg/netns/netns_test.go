@@ -5,6 +5,7 @@
 package netns
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,6 +107,55 @@ func TestWriteServiceNetNSWaitsForNetworkOnlineForMacvlan(t *testing.T) {
 	}
 }
 
+func TestWriteServiceNetNSRequiresTailscaleUnit(t *testing.T) {
+	root := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd returned error: %v", err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatalf("Chdir returned error: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldwd); err != nil {
+			t.Fatalf("restore Chdir returned error: %v", err)
+		}
+	})
+
+	binDir := filepath.Join(root, "bin")
+	runDir := filepath.Join(root, "run")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		t.Fatalf("MkdirAll binDir returned error: %v", err)
+	}
+	if err := os.MkdirAll(runDir, 0755); err != nil {
+		t.Fatalf("MkdirAll runDir returned error: %v", err)
+	}
+
+	artifacts, err := WriteServiceNetNS(binDir, runDir, Service{
+		ServiceName:           "plex",
+		TailscaleTAPInterface: "tap0",
+	})
+	if err != nil {
+		t.Fatalf("WriteServiceNetNS returned error: %v", err)
+	}
+	raw, err := os.ReadFile(artifacts[db.ArtifactNetNSService])
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		"Requires=yeet-ns.service yeet-plex-ts.service\n",
+		"After=yeet-ns.service yeet-plex-ts.service\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("unit missing %q:\n%s", want, got)
+		}
+	}
+	if svc := (&Service{ServiceName: "plex"}).ServiceUnit(); svc != "yeet-plex-ns.service" {
+		t.Fatalf("ServiceUnit = %q, want yeet-plex-ns.service", svc)
+	}
+}
+
 func TestWriteNetNSScriptsWritesScriptsAndSkipsIdenticalFiles(t *testing.T) {
 	chdirTemp(t)
 
@@ -143,6 +193,37 @@ func TestWriteNetNSScriptsWritesScriptsAndSkipsIdenticalFiles(t *testing.T) {
 	}
 	if changed {
 		t.Fatal("second writeNetNSScripts() changed = true, want false for identical files")
+	}
+}
+
+func TestWriteYeetNSEnvWritesAndSkipsIdenticalFiles(t *testing.T) {
+	chdirTemp(t)
+	ye := defaultYeetNSEnv(BackendNFT, "/usr/local/bin/catch")
+
+	changed, err := writeYeetNSEnv(ye)
+	if err != nil {
+		t.Fatalf("writeYeetNSEnv returned error: %v", err)
+	}
+	if !changed {
+		t.Fatalf("writeYeetNSEnv changed=false, want true on first write")
+	}
+	raw, err := os.ReadFile("yeet-ns.env")
+	if err != nil {
+		t.Fatalf("ReadFile env returned error: %v", err)
+	}
+	if got := string(raw); !strings.Contains(got, "FIREWALL_BACKEND=nft") || !strings.Contains(got, "CATCH_BIN=/usr/local/bin/catch") {
+		t.Fatalf("env file missing expected values:\n%s", got)
+	}
+
+	changed, err = writeYeetNSEnv(ye)
+	if err != nil {
+		t.Fatalf("second writeYeetNSEnv returned error: %v", err)
+	}
+	if changed {
+		t.Fatalf("second writeYeetNSEnv changed=true, want false for identical env")
+	}
+	if _, err := os.Stat("yeet-ns.env.tmp"); !os.IsNotExist(err) {
+		t.Fatalf("temp env file stat error = %v, want missing", err)
 	}
 }
 
@@ -254,11 +335,90 @@ func TestInstallYeetNSServiceStartsInactiveNamespace(t *testing.T) {
 	}
 }
 
+func TestInstallYeetNSServiceReturnsExecutableError(t *testing.T) {
+	chdirTemp(t)
+	wantErr := errors.New("executable failed")
+	withDetectedFirewallBackend(t, BackendNFT)
+	withInstallYeetNSServiceFakes(t, installYeetNSServiceFakes{
+		executableErr: wantErr,
+		systemdPath:   filepath.Join(t.TempDir(), "yeet-ns.service"),
+		newService: func(db.ServiceView, string) (yeetNSServiceInstaller, error) {
+			t.Fatalf("new service should not be called after executable error")
+			return nil, nil
+		},
+		unitActive: func(string) bool { return false },
+	})
+
+	err := InstallYeetNSService()
+	if err == nil || !strings.Contains(err.Error(), wantErr.Error()) || !strings.Contains(err.Error(), "failed to resolve catch binary path") {
+		t.Fatalf("InstallYeetNSService error = %v, want wrapped %v", err, wantErr)
+	}
+}
+
+func TestInstallYeetNSServicePropagatesInstallerErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		service fakeYeetNSSystemdService
+		factory func() (yeetNSServiceInstaller, error)
+		want    string
+	}{
+		{
+			name: "create service",
+			factory: func() (yeetNSServiceInstaller, error) {
+				return nil, errors.New("create failed")
+			},
+			want: "failed to create service",
+		},
+		{
+			name: "install service",
+			service: fakeYeetNSSystemdService{
+				install: func() error { return errors.New("install failed") },
+				start:   func() error { return nil },
+			},
+			want: "failed to install service",
+		},
+		{
+			name: "start service",
+			service: fakeYeetNSSystemdService{
+				install: func() error { return nil },
+				start:   func() error { return errors.New("start failed") },
+			},
+			want: "failed to start yeet-ns service",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chdirTemp(t)
+			withDetectedFirewallBackend(t, BackendNFT)
+			withInstallYeetNSServiceFakes(t, installYeetNSServiceFakes{
+				catchBin:    "/usr/local/bin/catch",
+				systemdPath: filepath.Join(t.TempDir(), "yeet-ns.service"),
+				newService: func(db.ServiceView, string) (yeetNSServiceInstaller, error) {
+					if tt.factory != nil {
+						return tt.factory()
+					}
+					return tt.service, nil
+				},
+				unitActive: func(string) bool {
+					return false
+				},
+			})
+
+			err := InstallYeetNSService()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("InstallYeetNSService error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 type installYeetNSServiceFakes struct {
-	catchBin    string
-	systemdPath string
-	newService  func(db.ServiceView, string) (yeetNSServiceInstaller, error)
-	unitActive  func(string) bool
+	catchBin      string
+	executableErr error
+	systemdPath   string
+	newService    func(db.ServiceView, string) (yeetNSServiceInstaller, error)
+	unitActive    func(string) bool
 }
 
 type fakeYeetNSSystemdService struct {
@@ -324,6 +484,9 @@ func withInstallYeetNSServiceFakes(t *testing.T, fakes installYeetNSServiceFakes
 	oldNewSystemdService := newYeetNSSystemdService
 	oldSystemdUnitActive := systemdUnitActive
 	executablePath = func() (string, error) {
+		if fakes.executableErr != nil {
+			return "", fakes.executableErr
+		}
 		return fakes.catchBin, nil
 	}
 	systemdUnitPath = func(unit string) string {

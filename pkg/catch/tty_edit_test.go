@@ -6,6 +6,7 @@ package catch
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
@@ -193,6 +195,76 @@ func TestSystemdEditSourceRejectsNoUnits(t *testing.T) {
 	}
 }
 
+func TestPrepareEditSourceVariants(t *testing.T) {
+	server := newTestServer(t)
+	dir := t.TempDir()
+	composePath := filepath.Join(dir, "compose.yml")
+	unitPath := filepath.Join(dir, "svc.service")
+	timerPath := filepath.Join(dir, "svc.timer")
+	if err := os.WriteFile(composePath, []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	if err := os.WriteFile(unitPath, []byte("[Service]\nExecStart=/bin/true\n"), 0o644); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+	if err := os.WriteFile(timerPath, []byte("[Timer]\nOnCalendar=hourly\n"), 0o644); err != nil {
+		t.Fatalf("write timer: %v", err)
+	}
+	seedService(t, server, "svc-compose-edit", db.ServiceTypeDockerCompose, db.ArtifactStore{
+		db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{"latest": composePath}},
+	})
+	seedService(t, server, "svc-systemd-edit", db.ServiceTypeSystemd, db.ArtifactStore{
+		db.ArtifactSystemdUnit:      {Refs: map[db.ArtifactRef]string{"latest": unitPath}},
+		db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": timerPath}},
+	})
+
+	composeView, err := server.serviceView("svc-compose-edit")
+	if err != nil {
+		t.Fatalf("serviceView compose: %v", err)
+	}
+	composeSource, err := prepareEditSource(composeView, db.ServiceTypeDockerCompose, false)
+	if err != nil {
+		t.Fatalf("prepare compose source: %v", err)
+	}
+	if composeSource.path != composePath {
+		t.Fatalf("compose source path = %q, want %q", composeSource.path, composePath)
+	}
+
+	systemdView, err := server.serviceView("svc-systemd-edit")
+	if err != nil {
+		t.Fatalf("serviceView systemd: %v", err)
+	}
+	systemdSource, err := prepareEditSource(systemdView, db.ServiceTypeSystemd, false)
+	if err != nil {
+		t.Fatalf("prepare systemd source: %v", err)
+	}
+	defer systemdSource.cleanupInto(new(error))
+	if !reflect.DeepEqual(systemdSource.systemdUnits, []db.ArtifactName{db.ArtifactSystemdUnit, db.ArtifactSystemdTimerFile}) {
+		t.Fatalf("systemd units = %#v", systemdSource.systemdUnits)
+	}
+
+	configSource, err := prepareEditSource(systemdView, db.ServiceTypeSystemd, true)
+	if err != nil {
+		t.Fatalf("prepare config source: %v", err)
+	}
+	defer configSource.cleanupInto(new(error))
+	configBytes, err := os.ReadFile(configSource.path)
+	if err != nil {
+		t.Fatalf("read config source: %v", err)
+	}
+	if !strings.Contains(string(configBytes), `"Name": "svc-systemd-edit"`) {
+		t.Fatalf("config source = %s, want service JSON", configBytes)
+	}
+
+	unknownSource, err := prepareEditSource(systemdView, db.ServiceType("unknown"), false)
+	if err != nil {
+		t.Fatalf("prepare unknown source: %v", err)
+	}
+	if unknownSource.path != "" || unknownSource.cleanup != nil {
+		t.Fatalf("unknown source = %#v, want empty source", unknownSource)
+	}
+}
+
 func TestCopyToTmpFileCreatesEmptyTempForMissingSource(t *testing.T) {
 	tmpPath, err := copyToTmpFile("")
 	if err != nil {
@@ -279,6 +351,112 @@ func TestRunEditSessionReportsChanges(t *testing.T) {
 	}
 }
 
+func TestRunEditSessionReturnsEditError(t *testing.T) {
+	editErr := fmt.Errorf("editor failed")
+	execer := &ttyExecer{
+		editFileFunc: func(string) error {
+			return editErr
+		},
+	}
+
+	changed, err := execer.runEditSession(&editSession{tmpPath: "/tmp/edit"})
+	if err == nil || !strings.Contains(err.Error(), "failed to edit file") {
+		t.Fatalf("runEditSession error = %v, want edit failure", err)
+	}
+	if changed {
+		t.Fatal("changed = true, want false")
+	}
+}
+
+func TestEditCmdFuncNoChangesCleansTempFileAndSkipsApply(t *testing.T) {
+	server := newTestServer(t)
+	dir := t.TempDir()
+	composePath := filepath.Join(dir, "compose.yml")
+	if err := os.WriteFile(composePath, []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	seedService(t, server, "svc-edit-noop", db.ServiceTypeDockerCompose, db.ArtifactStore{
+		db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{"latest": composePath}},
+	})
+
+	var tmpPath string
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		s:  server,
+		sn: "svc-edit-noop",
+		rw: &out,
+		editFileFunc: func(path string) error {
+			tmpPath = path
+			return nil
+		},
+	}
+
+	if err := execer.editCmdFunc(cli.EditFlags{}); err != nil {
+		t.Fatalf("editCmdFunc returned error: %v", err)
+	}
+	if got := out.String(); got != "No changes detected\n" {
+		t.Fatalf("output = %q, want no changes", got)
+	}
+	if tmpPath == "" {
+		t.Fatal("edit temp path was not captured")
+	}
+	if _, err := os.Stat(tmpPath); !os.IsNotExist(err) {
+		t.Fatalf("temp file stat error = %v, want removed temp", err)
+	}
+}
+
+func TestEditCmdFuncAppliesChangedConfigWithInstallHook(t *testing.T) {
+	server := newTestServer(t)
+	seedService(t, server, "svc-edit-config", db.ServiceTypeSystemd, db.ArtifactStore{
+		db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/svc-edit-config.service"}},
+	})
+
+	var installedGen int
+	execer := &ttyExecer{
+		s:  server,
+		sn: "svc-edit-config",
+		rw: &bytes.Buffer{},
+		editFileFunc: func(path string) error {
+			bs, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			var svc db.Service
+			if err := json.Unmarshal(bs, &svc); err != nil {
+				return err
+			}
+			svc.Generation = 4
+			svc.LatestGeneration = 4
+			out, err := json.Marshal(svc)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(path, out, 0o644)
+		},
+		serviceInstallGenFunc: func(cfg InstallerCfg, gen int) error {
+			if cfg.ServiceName != "svc-edit-config" {
+				t.Fatalf("install service = %q, want svc-edit-config", cfg.ServiceName)
+			}
+			installedGen = gen
+			return nil
+		},
+	}
+
+	if err := execer.editCmdFunc(cli.EditFlags{Config: true}); err != nil {
+		t.Fatalf("editCmdFunc returned error: %v", err)
+	}
+	if installedGen != 4 {
+		t.Fatalf("installed generation = %d, want 4", installedGen)
+	}
+	sv, err := server.serviceView("svc-edit-config")
+	if err != nil {
+		t.Fatalf("serviceView: %v", err)
+	}
+	if got := sv.AsStruct().Generation; got != 4 {
+		t.Fatalf("stored generation = %d, want 4", got)
+	}
+}
+
 func TestEditFileRequiresPTYBeforeRunningCommand(t *testing.T) {
 	execer := &ttyExecer{isPty: false}
 	err := execer.editFile("/tmp/service")
@@ -292,6 +470,100 @@ func TestApplyEditSessionRejectsUnsupportedServiceType(t *testing.T) {
 	err := execer.applyEditSession(&editSession{serviceType: db.ServiceType("unknown")})
 	if err == nil || !strings.Contains(err.Error(), "unsupported service type") {
 		t.Fatalf("applyEditSession error = %v, want unsupported type", err)
+	}
+}
+
+func TestApplyEditedSystemdStagesArtifactsAndInstallsWithHook(t *testing.T) {
+	server := newTestServer(t)
+	dir := t.TempDir()
+	unitPath := filepath.Join(dir, "svc.service")
+	timerPath := filepath.Join(dir, "svc.timer")
+	if err := os.WriteFile(unitPath, []byte("[Service]\nExecStart=/bin/true\n"), 0o644); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+	if err := os.WriteFile(timerPath, []byte("[Timer]\nOnCalendar=hourly\n"), 0o644); err != nil {
+		t.Fatalf("write timer: %v", err)
+	}
+	seedService(t, server, "svc-apply-systemd", db.ServiceTypeSystemd, db.ArtifactStore{
+		db.ArtifactSystemdUnit:      {Refs: map[db.ArtifactRef]string{"latest": unitPath}},
+		db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": timerPath}},
+	})
+
+	tmpPath := filepath.Join(dir, "edited.txt")
+	raw := fmt.Sprintf("%s\n\n[Service]\nExecStart=/bin/false\n\n%s\n\n[Timer]\nOnCalendar=daily\n",
+		fmt.Sprintf(editUnitsSeparator, db.ArtifactSystemdUnit),
+		fmt.Sprintf(editUnitsSeparator, db.ArtifactSystemdTimerFile),
+	)
+	if err := os.WriteFile(tmpPath, []byte(raw), 0o644); err != nil {
+		t.Fatalf("write edited units: %v", err)
+	}
+
+	installed := false
+	execer := &ttyExecer{
+		s:  server,
+		sn: "svc-apply-systemd",
+		serviceInstallFunc: func(cfg InstallerCfg) error {
+			if cfg.ServiceName != "svc-apply-systemd" {
+				t.Fatalf("install service = %q, want svc-apply-systemd", cfg.ServiceName)
+			}
+			installed = true
+			return nil
+		},
+	}
+	af := db.ArtifactStore{
+		db.ArtifactSystemdUnit:      {Refs: map[db.ArtifactRef]string{"latest": unitPath}},
+		db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": timerPath}},
+	}
+	if err := execer.applyEditedSystemd(tmpPath, af, 2); err != nil {
+		t.Fatalf("applyEditedSystemd returned error: %v", err)
+	}
+	if !installed {
+		t.Fatal("expected install hook to be called")
+	}
+
+	sv, err := server.serviceView("svc-apply-systemd")
+	if err != nil {
+		t.Fatalf("serviceView: %v", err)
+	}
+	for name, want := range map[db.ArtifactName]string{
+		db.ArtifactSystemdUnit:      "[Service]\nExecStart=/bin/false",
+		db.ArtifactSystemdTimerFile: "[Timer]\nOnCalendar=daily",
+	} {
+		staged, ok := sv.AsStruct().Artifacts.Staged(name)
+		if !ok {
+			t.Fatalf("missing staged artifact for %s", name)
+		}
+		got, err := os.ReadFile(staged)
+		if err != nil {
+			t.Fatalf("read staged %s: %v", name, err)
+		}
+		if string(got) != want {
+			t.Fatalf("staged %s = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestInstallEditedFileReturnsOpenError(t *testing.T) {
+	err := (&ttyExecer{}).installEditedFile(filepath.Join(t.TempDir(), "missing.yml"))
+	if err == nil || !strings.Contains(err.Error(), "failed to open temp file") {
+		t.Fatalf("installEditedFile error = %v, want open error", err)
+	}
+}
+
+func TestApplyEditedConfigReturnsReadAndJSONErrors(t *testing.T) {
+	execer := &ttyExecer{}
+	err := execer.applyEditedConfig(filepath.Join(t.TempDir(), "missing.json"))
+	if err == nil || !strings.Contains(err.Error(), "failed to read temp file") {
+		t.Fatalf("applyEditedConfig read error = %v, want read failure", err)
+	}
+
+	tmp := filepath.Join(t.TempDir(), "bad.json")
+	if err := os.WriteFile(tmp, []byte("{bad json"), 0o644); err != nil {
+		t.Fatalf("write bad json: %v", err)
+	}
+	err = execer.applyEditedConfig(tmp)
+	if err == nil || !strings.Contains(err.Error(), "failed to unmarshal temp file") {
+		t.Fatalf("applyEditedConfig json error = %v, want unmarshal failure", err)
 	}
 }
 
@@ -331,6 +603,19 @@ func TestStageEditedArtifactRejectsMissingArtifact(t *testing.T) {
 	}
 }
 
+func TestStageEditedArtifactInitializesRefs(t *testing.T) {
+	service := &db.Service{Artifacts: db.ArtifactStore{
+		db.ArtifactSystemdUnit: {},
+	}}
+	if err := stageEditedArtifact(service, db.ArtifactSystemdUnit, "/tmp/new.service"); err != nil {
+		t.Fatalf("stageEditedArtifact returned error: %v", err)
+	}
+	got, ok := service.Artifacts.Staged(db.ArtifactSystemdUnit)
+	if !ok || got != "/tmp/new.service" {
+		t.Fatalf("staged ref = %q, %v; want /tmp/new.service true", got, ok)
+	}
+}
+
 func TestReadEditedSystemdUnitsReadsAndParsesFile(t *testing.T) {
 	tmp := filepath.Join(t.TempDir(), "units.txt")
 	raw := fmt.Sprintf("%s\n\n[Service]\nExecStart=/bin/true\n", fmt.Sprintf(editUnitsSeparator, db.ArtifactSystemdUnit))
@@ -345,5 +630,12 @@ func TestReadEditedSystemdUnitsReadsAndParsesFile(t *testing.T) {
 	want := []systemdEditUnit{{name: db.ArtifactSystemdUnit, content: "[Service]\nExecStart=/bin/true"}}
 	if !reflect.DeepEqual(units, want) {
 		t.Fatalf("units = %#v, want %#v", units, want)
+	}
+}
+
+func TestReadEditedSystemdUnitsReturnsReadError(t *testing.T) {
+	_, err := readEditedSystemdUnits(filepath.Join(t.TempDir(), "missing"), 1)
+	if err == nil || !strings.Contains(err.Error(), "failed to read temp file") {
+		t.Fatalf("readEditedSystemdUnits error = %v, want read failure", err)
 	}
 }

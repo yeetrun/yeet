@@ -141,3 +141,107 @@ func TestShouldUpdateRunUISpinner(t *testing.T) {
 		})
 	}
 }
+
+func TestRunUIQuietSuppressesOutput(t *testing.T) {
+	var buf bytes.Buffer
+	ui := newRunUI(&buf, false, true, "run", "svc-a")
+
+	ui.Start()
+	ui.StartStep(runStepUpload)
+	ui.UpdateDetail("half")
+	ui.DoneStep("done")
+	ui.FailStep("failed")
+	ui.Printer("hello")
+	ui.Suspend()
+	ui.Stop()
+
+	if got := buf.String(); got != "" {
+		t.Fatalf("quiet UI output = %q, want empty", got)
+	}
+}
+
+func TestRunUIStopIsIdempotentAndSuspendSkipsNewSteps(t *testing.T) {
+	var buf bytes.Buffer
+	ui := newRunUI(&buf, false, false, "run", "svc-a")
+
+	ui.StartStep(runStepUpload)
+	ui.Suspend()
+	ui.StartStep(runStepInstall)
+	ui.Stop()
+	ui.Stop()
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("lines = %d %q, want start line only", len(lines), buf.String())
+	}
+	if lines[0] != `action=run service=svc-a status=running step="Upload payload"` {
+		t.Fatalf("start line = %q", lines[0])
+	}
+}
+
+func TestRunUIPlainFailStepAndInfo(t *testing.T) {
+	var buf bytes.Buffer
+	ui := newRunUI(&buf, false, false, "run", "svc-a")
+
+	ui.Printer("custom message")
+	ui.StartStep(runStepInstall)
+	ui.FailStep("boom")
+	ui.FailStep("ignored")
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	want := []string{
+		`action=run service=svc-a status=info detail="custom message"`,
+		`action=run service=svc-a status=running step="Install service"`,
+		`action=run service=svc-a status=err step="Install service" detail=boom`,
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("line count = %d, want %d (%q)", len(lines), len(want), buf.String())
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("line %d = %q, want %q", i, lines[i], want[i])
+		}
+	}
+}
+
+func TestRunUIHeaderAndStatusFormatting(t *testing.T) {
+	var buf bytes.Buffer
+	ui := newRunUI(&buf, false, false, "run", "svc-a")
+
+	ui.printHeader()
+	ui.printStatus("OK", runStepUpload, "done")
+	ui.printStatus("ERR", runStepInstall, "")
+	ui.printStatus("WAIT", runStepDetect, "")
+
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	want := []string{
+		"[+] yeet run svc-a",
+		"✔ Upload payload (done)",
+		"✖ Install service",
+		"WAIT Detect payload",
+	}
+	if len(lines) != len(want) {
+		t.Fatalf("line count = %d, want %d (%q)", len(lines), len(want), buf.String())
+	}
+	for i := range want {
+		if lines[i] != want[i] {
+			t.Fatalf("line %d = %q, want %q", i, lines[i], want[i])
+		}
+	}
+}
+
+func TestPlainRunUIMarkHeaderDoneAndDoneWithoutCurrentAreNoops(t *testing.T) {
+	var buf bytes.Buffer
+	plain := newPlainRunUI(&buf, "run", "svc-a")
+
+	plain.MarkHeaderDone()
+	plain.DoneStep("ignored")
+	plain.FailStep("ignored")
+
+	if got := buf.String(); got != "" {
+		t.Fatalf("plain no-op output = %q, want empty", got)
+	}
+	if !plain.headerDone {
+		t.Fatal("MarkHeaderDone did not mark header done")
+	}
+}

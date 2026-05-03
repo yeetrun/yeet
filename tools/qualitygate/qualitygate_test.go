@@ -6,9 +6,12 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -87,6 +90,31 @@ func Call() {
 	}
 }
 
+func TestParseReportAndGolangCIErrorPaths(t *testing.T) {
+	if got, err := parseGolangCIJSON([]byte(" \n\t")); err != nil || got != nil {
+		t.Fatalf("parseGolangCIJSON empty = %#v, %v; want nil nil", got, err)
+	}
+	if _, err := parseGolangCIJSON([]byte("{")); err == nil {
+		t.Fatalf("parseGolangCIJSON succeeded for invalid JSON")
+	}
+	if _, err := parseReport("unknown", nil); err == nil || !strings.Contains(err.Error(), "unknown report kind") {
+		t.Fatalf("parseReport unknown error = %v, want unknown report kind", err)
+	}
+
+	report := `{"Issues":[{"FromLinter":"staticcheck","Text":"bad","Pos":{"Filename":"","Line":99}}]}`
+	got, err := parseGolangCIJSON([]byte(report))
+	if err != nil {
+		t.Fatalf("parseGolangCIJSON fallback returned error: %v", err)
+	}
+	want := []hotspot{{
+		Key:    "staticcheck|unknown|line:99|bad",
+		Detail: "unknown:99 bad (staticcheck)",
+	}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("fallback hotspot = %#v, want %#v", got, want)
+	}
+}
+
 func TestFunctionAtLineIncludesReceiver(t *testing.T) {
 	source := []byte(`package demo
 
@@ -99,6 +127,71 @@ func (s *Server) Run() error {
 	got := functionAtLine(source, 5)
 	if got != "(*Server).Run" {
 		t.Fatalf("functionAtLine = %q, want %q", got, "(*Server).Run")
+	}
+}
+
+func TestFunctionRangesHandlesParseErrorsAndReceiverForms(t *testing.T) {
+	if got := functionAtLine([]byte("package demo\nfunc {"), 1); got != "" {
+		t.Fatalf("functionAtLine invalid source = %q, want empty", got)
+	}
+
+	source := []byte(`package demo
+
+type Server struct{}
+
+func (s Server) Value() {}
+
+func topLevel() {}
+`)
+	if got := functionAtLine(source, 5); got != "(Server).Value" {
+		t.Fatalf("value receiver functionAtLine = %q, want (Server).Value", got)
+	}
+	if got := functionAtLine(source, 7); got != "topLevel" {
+		t.Fatalf("top-level functionAtLine = %q, want topLevel", got)
+	}
+	if got := functionAtLine(source, 1); got != "" {
+		t.Fatalf("non-function line = %q, want empty", got)
+	}
+}
+
+func TestFallbackIssueLocationPartsVariants(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "demo.go")
+	source := []byte(`package demo
+
+func Run() {
+	println("hello")
+}
+`)
+	if err := os.WriteFile(sourcePath, source, 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+
+	functions := map[string][]funcRange{}
+	withSourceAndFunction := golangCIIssue{
+		Text:        "issue",
+		SourceLines: []string{"\tprintln(\"hello\")"},
+	}
+	withSourceAndFunction.Pos.Filename = sourcePath
+	withSourceAndFunction.Pos.Line = 4
+	if got := fallbackIssueLocationParts(withSourceAndFunction, sourcePath, functions); !reflect.DeepEqual(got, []string{"Run", "source:println(\"hello\")"}) {
+		t.Fatalf("source/function parts = %#v", got)
+	}
+
+	sourceOnly := golangCIIssue{Text: "issue", SourceLines: []string{"a | b"}}
+	sourceOnly.Pos.Line = 100
+	if got := fallbackIssueLocationParts(sourceOnly, "missing.go", functions); !reflect.DeepEqual(got, []string{"source:a / b"}) {
+		t.Fatalf("source-only parts = %#v", got)
+	}
+
+	fnOnly := golangCIIssue{Text: "issue"}
+	fnOnly.Pos.Line = 3
+	if got := fallbackIssueLocationParts(fnOnly, sourcePath, functions); !reflect.DeepEqual(got, []string{"Run", "line:3"}) {
+		t.Fatalf("function-only parts = %#v", got)
+	}
+
+	if got := issueSourceKey(golangCIIssue{SourceLines: []string{" ", "\t"}}); got != "" {
+		t.Fatalf("blank source key = %q, want empty", got)
 	}
 }
 
@@ -119,6 +212,39 @@ func TestCompareHotspotsAllowsBurnDownButRejectsNew(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotResolved, []string{"crap|pkg/gone.go|goneRisk"}) {
 		t.Fatalf("resolved hotspots mismatch: %#v", gotResolved)
+	}
+}
+
+func TestBaselineFilesUniqueAndFirstHelpers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "baseline.txt")
+	hotspots := []hotspot{
+		{Key: "b", Detail: "detail b"},
+		{Key: "a", Detail: "detail a"},
+		{Key: "a", Detail: "detail a duplicate"},
+	}
+	unique := uniqueHotspots(hotspots)
+	if !reflect.DeepEqual(unique, []hotspot{{Key: "a", Detail: "detail a duplicate"}, {Key: "b", Detail: "detail b"}}) {
+		t.Fatalf("uniqueHotspots = %#v", unique)
+	}
+	if err := writeBaselineFile(path, unique); err != nil {
+		t.Fatalf("writeBaselineFile returned error: %v", err)
+	}
+	baseline, err := readBaselineFile(path)
+	if err != nil {
+		t.Fatalf("readBaselineFile returned error: %v", err)
+	}
+	if !baseline["a"] || !baseline["b"] || len(baseline) != 2 {
+		t.Fatalf("baseline = %#v, want a and b", baseline)
+	}
+	if got := firstHotspots(unique, 1); len(got) != 1 || got[0].Key != "a" {
+		t.Fatalf("firstHotspots = %#v, want first a", got)
+	}
+	if got := firstStrings([]string{"a", "b"}, 1); !reflect.DeepEqual(got, []string{"a"}) {
+		t.Fatalf("firstStrings = %#v, want [a]", got)
+	}
+	if got := stripLine("pkg/file.go"); got != "pkg/file.go" {
+		t.Fatalf("stripLine without line = %q", got)
 	}
 }
 
@@ -178,3 +304,55 @@ FAIL   90.0     9            0.0%       newRisk        pkg/new.go:20
 		t.Fatalf("stderr does not mention new hotspot: %s", stderr.String())
 	}
 }
+
+func TestRunCLIUsageAndFailurePaths(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	if code := runCLI(nil, &stdout, &stderr); code != 2 {
+		t.Fatalf("runCLI missing args code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "usage: qualitygate") {
+		t.Fatalf("missing args stderr = %q, want usage", stderr.String())
+	}
+
+	dir := t.TempDir()
+	baselinePath := filepath.Join(dir, "baseline.txt")
+	stderr.Reset()
+	code := runCLI([]string{"-kind", "crap", "-report", filepath.Join(dir, "missing.txt"), "-baseline", baselinePath}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "read report") {
+		t.Fatalf("missing report code=%d stderr=%q, want read report", code, stderr.String())
+	}
+
+	reportPath := filepath.Join(dir, "report.txt")
+	if err := os.WriteFile(reportPath, []byte("not-json"), 0o644); err != nil {
+		t.Fatalf("write report: %v", err)
+	}
+	stderr.Reset()
+	code = runCLI([]string{"-kind", "golangci-json", "-report", reportPath, "-baseline", baselinePath}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "parse report") {
+		t.Fatalf("parse error code=%d stderr=%q, want parse report", code, stderr.String())
+	}
+
+	validReport := filepath.Join(dir, "valid.txt")
+	if err := os.WriteFile(validReport, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write valid report: %v", err)
+	}
+	stderr.Reset()
+	code = runCLI([]string{"-kind", "golangci-json", "-report", validReport, "-baseline", filepath.Join(dir, "missing-baseline.txt")}, &stdout, &stderr)
+	if code != 2 || !strings.Contains(stderr.String(), "read baseline") {
+		t.Fatalf("baseline read code=%d stderr=%q, want read baseline", code, stderr.String())
+	}
+}
+
+func TestWritersIgnoreWriteErrors(t *testing.T) {
+	writef(errorWriter{}, "hello %s", "world")
+	writeLine(errorWriter{}, "hello", "world")
+}
+
+type errorWriter struct{}
+
+func (errorWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
+
+var _ io.Writer = errorWriter{}

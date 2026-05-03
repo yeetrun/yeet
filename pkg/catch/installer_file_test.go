@@ -926,6 +926,374 @@ func TestEnsureSystemdUnitRegeneratesCatchUnitWithDockerOrdering(t *testing.T) {
 	}
 }
 
+func TestHostDefaultRouteInterfaceFromProcRouteReportsErrors(t *testing.T) {
+	routeTable := strings.Join([]string{
+		"Iface\tDestination\tGateway",
+		"malformed",
+		"eth0\t000011AC\t00000000",
+	}, "\n")
+	if _, err := hostDefaultRouteInterfaceFromProcRoute(strings.NewReader(routeTable)); err == nil || !strings.Contains(err.Error(), "default route interface not found") {
+		t.Fatalf("hostDefaultRouteInterfaceFromProcRoute error = %v, want default route not found", err)
+	}
+
+	if _, err := hostDefaultRouteInterfaceFromProcRoute(errorReader{}); err == nil || !strings.Contains(err.Error(), "read failed") {
+		t.Fatalf("hostDefaultRouteInterfaceFromProcRoute error = %v, want reader error", err)
+	}
+}
+
+func TestParseNetworkReportsUnsupportedAndAllocationErrors(t *testing.T) {
+	t.Run("unknown interface", func(t *testing.T) {
+		installer := &FileInstaller{
+			s: newTestServer(t),
+			cfg: FileInstallerCfg{
+				InstallerCfg: InstallerCfg{ServiceName: "bad-net"},
+				Network:      NetworkOpts{Interfaces: "bad"},
+			},
+		}
+		if err := installer.parseNetwork(); err == nil || !strings.Contains(err.Error(), `unknown network: "bad"`) {
+			t.Fatalf("parseNetwork error = %v, want unknown network", err)
+		}
+	})
+
+	t.Run("default route error", func(t *testing.T) {
+		oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
+		hostDefaultRouteInterfaceFn = func() (string, error) {
+			return "", fmt.Errorf("route lookup failed")
+		}
+		t.Cleanup(func() {
+			hostDefaultRouteInterfaceFn = oldHostDefaultRouteInterfaceFn
+		})
+
+		installer := &FileInstaller{
+			s: newTestServer(t),
+			cfg: FileInstallerCfg{
+				InstallerCfg: InstallerCfg{ServiceName: "lan-net"},
+				Network:      NetworkOpts{Interfaces: "lan"},
+			},
+		}
+		if err := installer.parseNetwork(); err == nil || !strings.Contains(err.Error(), "failed to get default route interface") {
+			t.Fatalf("parseNetwork error = %v, want default route failure", err)
+		}
+	})
+
+}
+
+func TestConfigureNetworkAndStageInstallSurfaceErrors(t *testing.T) {
+	installer := &FileInstaller{
+		s: newTestServer(t),
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "missing-dirs"},
+			Network:      NetworkOpts{Interfaces: "svc"},
+		},
+	}
+	if _, err := installer.configureNetwork(); err == nil || !strings.Contains(err.Error(), "failed to write resolv.conf") {
+		t.Fatalf("configureNetwork error = %v, want resolv.conf write failure", err)
+	}
+
+	installer = &FileInstaller{
+		s: newTestServer(t),
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "bad-stage-net"},
+			Network:      NetworkOpts{Interfaces: "bad"},
+		},
+	}
+	if err := installer.configureAndStageInstall(fileInstallPlan{}); err == nil || !strings.Contains(err.Error(), "failed to configure network") {
+		t.Fatalf("configureAndStageInstall error = %v, want wrapped network failure", err)
+	}
+}
+
+func TestNewSystemdUnitAppliesNetworkNamespaceFields(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.ensureDirs("net-systemd", ""); err != nil {
+		t.Fatalf("ensureDirs returned error: %v", err)
+	}
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "net-systemd"},
+			Network:      NetworkOpts{Interfaces: "svc"},
+		},
+	}
+
+	unit, err := installer.newSystemdUnit(filepath.Join(server.serviceRunDir("net-systemd"), "net-systemd"))
+	if err != nil {
+		t.Fatalf("newSystemdUnit returned error: %v", err)
+	}
+	if unit.NetNS != "yeet-net-systemd-ns" {
+		t.Fatalf("unit NetNS = %q, want yeet-net-systemd-ns", unit.NetNS)
+	}
+	if unit.Requires != "yeet-net-systemd-ns.service" {
+		t.Fatalf("unit Requires = %q, want netns service dependency", unit.Requires)
+	}
+	if unit.ResolvConf != "/etc/netns/yeet-net-systemd-ns/resolv.conf" {
+		t.Fatalf("unit ResolvConf = %q, want netns resolv.conf", unit.ResolvConf)
+	}
+}
+
+func TestPrepareNoBinaryInstallVariants(t *testing.T) {
+	emptyInstaller := &FileInstaller{}
+	plan, err := emptyInstaller.prepareNoBinaryInstall()
+	if err != nil {
+		t.Fatalf("prepareNoBinaryInstall with no existing service returned error: %v", err)
+	}
+	if plan.dst != "" || plan.detectedServiceType != "" || plan.allowServiceTypeUpgrade || len(plan.postRenameActions) != 0 {
+		t.Fatalf("plan = %#v, want empty plan", plan)
+	}
+
+	server := newTestServer(t)
+	addTestServices(t, server,
+		db.Service{Name: "compose-existing", ServiceType: db.ServiceTypeDockerCompose},
+		db.Service{Name: "systemd-existing", ServiceType: db.ServiceTypeSystemd},
+	)
+
+	composeInstaller := &FileInstaller{
+		s:               server,
+		cfg:             FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "compose-existing"}},
+		existingService: First(server.serviceView("compose-existing")),
+	}
+	plan, err = composeInstaller.prepareNoBinaryInstall()
+	if err != nil {
+		t.Fatalf("prepareNoBinaryInstall with compose service returned error: %v", err)
+	}
+	if plan.detectedServiceType != db.ServiceTypeDockerCompose || plan.dst != "" {
+		t.Fatalf("compose plan = %#v, want compose type with no file action", plan)
+	}
+
+	systemdInstaller := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "systemd-existing"},
+			StageOnly:    true,
+		},
+		existingService: First(server.serviceView("systemd-existing")),
+	}
+	plan, err = systemdInstaller.prepareNoBinaryInstall()
+	if err != nil {
+		t.Fatalf("prepareNoBinaryInstall with systemd service returned error: %v", err)
+	}
+	if plan.detectedServiceType != db.ServiceTypeSystemd || plan.dst != "" {
+		t.Fatalf("systemd plan = %#v, want systemd type with no file action", plan)
+	}
+}
+
+func TestReuseExistingSystemdUnitBranches(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name:        "reuse-unit",
+		ServiceType: db.ServiceTypeSystemd,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": filepath.Join(t.TempDir(), "unit.service")}},
+		},
+	})
+	installer := &FileInstaller{
+		s:               server,
+		cfg:             FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "reuse-unit"}},
+		existingService: First(server.serviceView("reuse-unit")),
+	}
+	reused, err := installer.reuseExistingSystemdUnit("/srv/reuse-unit")
+	if err != nil {
+		t.Fatalf("reuseExistingSystemdUnit returned error: %v", err)
+	}
+	if !reused {
+		t.Fatal("reuseExistingSystemdUnit returned reused=false, want true")
+	}
+	if installer.artifacts != nil {
+		t.Fatalf("artifacts = %#v, want no rewrite without args", installer.artifacts)
+	}
+
+	addTestServices(t, server, db.Service{
+		Name:        "missing-unit",
+		ServiceType: db.ServiceTypeSystemd,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": filepath.Join(t.TempDir(), "missing.service")}},
+		},
+	})
+	installer = &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "missing-unit"},
+			Args:         []string{"--new"},
+		},
+		existingService: First(server.serviceView("missing-unit")),
+	}
+	reused, err = installer.reuseExistingSystemdUnit("/srv/missing-unit")
+	if err == nil || !strings.Contains(err.Error(), "failed to rewrite systemd unit") {
+		t.Fatalf("reuseExistingSystemdUnit error = %v, want rewrite failure", err)
+	}
+	if reused {
+		t.Fatal("reuseExistingSystemdUnit returned reused=true on rewrite failure")
+	}
+}
+
+func TestPreparePayloadErrorBranches(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "run")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0644); err != nil {
+		t.Fatalf("WriteFile script returned error: %v", err)
+	}
+	installer := &FileInstaller{
+		cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "pull-script", Pull: true}},
+	}
+	if _, err := installer.preparePayloadInstall(script); err == nil || !strings.Contains(err.Error(), "--pull is only valid") {
+		t.Fatalf("preparePayloadInstall error = %v, want pull validation failure", err)
+	}
+
+	if _, err := installer.preparePayloadByType("unused", ftdetect.Unknown); err == nil || !strings.Contains(err.Error(), "unknown file type") {
+		t.Fatalf("preparePayloadByType error = %v, want unknown file type", err)
+	}
+
+	compose := filepath.Join(dir, "compose.yml")
+	if err := os.WriteFile(compose, []byte("services: []\n"), 0644); err != nil {
+		t.Fatalf("WriteFile compose returned error: %v", err)
+	}
+	installer = &FileInstaller{
+		s: newTestServer(t),
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "compose-bad-publish"},
+			Publish:      []string{"8080:80"},
+		},
+	}
+	if _, err := installer.prepareDockerComposePayload(compose); err == nil || !strings.Contains(err.Error(), "failed to apply publish ports") {
+		t.Fatalf("prepareDockerComposePayload error = %v, want publish ports failure", err)
+	}
+}
+
+func TestFileActionErrorBranches(t *testing.T) {
+	logs := captureLogs(t)
+	closeAndLog(errorCloser{}, "closer")
+	if !strings.Contains(logs.String(), "failed to close closer") {
+		t.Fatalf("logs = %q, want close failure", logs.String())
+	}
+
+	dir := t.TempDir()
+	nonEmptyDir := filepath.Join(dir, "non-empty")
+	if err := os.Mkdir(nonEmptyDir, 0755); err != nil {
+		t.Fatalf("Mkdir returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmptyDir, "child"), []byte("x"), 0644); err != nil {
+		t.Fatalf("WriteFile child returned error: %v", err)
+	}
+	removeFileIfExists(nonEmptyDir)
+	if !strings.Contains(logs.String(), "failed to remove") {
+		t.Fatalf("logs = %q, want remove failure", logs.String())
+	}
+
+	installer := &FileInstaller{}
+	if err := installer.installPreparedFile(filepath.Join(dir, "missing"), fileInstallPlan{dst: filepath.Join(dir, "dst")}); err == nil || !strings.Contains(err.Error(), "failed to move file in place") {
+		t.Fatalf("installPreparedFile error = %v, want rename failure", err)
+	}
+
+	binDirFile := filepath.Join(dir, "not-a-dir")
+	if err := os.WriteFile(binDirFile, []byte("x"), 0644); err != nil {
+		t.Fatalf("WriteFile binDirFile returned error: %v", err)
+	}
+	installer = &FileInstaller{
+		s:   newTestServer(t),
+		cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "compose-write-error"}},
+	}
+	if _, err := installer.writeGeneratedComposeFile(binDirFile, "python", pythonComposeFile); err == nil || !strings.Contains(err.Error(), "failed to write python compose file") {
+		t.Fatalf("writeGeneratedComposeFile error = %v, want write failure", err)
+	}
+
+	if err := chmodExecutableAction(filepath.Join(dir, "missing-executable"))(); err == nil || !strings.Contains(err.Error(), "failed to make binary executable") {
+		t.Fatalf("chmodExecutableAction error = %v, want chmod failure", err)
+	}
+}
+
+func TestStageInstallPlanMismatchAndNetworkApplication(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name:        "mismatch",
+		ServiceType: db.ServiceTypeDockerCompose,
+	})
+	installer := &FileInstaller{
+		s:   server,
+		cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "mismatch"}},
+	}
+	if err := installer.stageInstallPlan(fileInstallPlan{detectedServiceType: db.ServiceTypeSystemd}); err == nil || !strings.Contains(err.Error(), "failed to update service") {
+		t.Fatalf("stageInstallPlan error = %v, want service update failure", err)
+	}
+
+	service := &db.Service{}
+	applyInstallNetworks(
+		service,
+		&db.MacvlanNetwork{Interface: "ymv-test", Parent: "eno1"},
+		nil,
+		&db.TailscaleNetwork{Interface: "yts-test", Version: "1.77.33"},
+	)
+	if service.Macvlan == nil || service.Macvlan.Interface != "ymv-test" {
+		t.Fatalf("service macvlan = %#v, want applied macvlan", service.Macvlan)
+	}
+	if service.TSNet == nil || service.TSNet.Interface != "yts-test" {
+		t.Fatalf("service tailscale = %#v, want applied tailscale", service.TSNet)
+	}
+}
+
+func TestTempFilePathInitAndCleanupBranches(t *testing.T) {
+	server := newTestServer(t)
+	installer := &FileInstaller{
+		s:   server,
+		cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "fallback-temp"}},
+	}
+	path := installer.tempFilePath()
+	if !strings.HasPrefix(path, server.serviceBinDir("fallback-temp")+string(filepath.Separator)) || !strings.HasSuffix(path, ".tmp") {
+		t.Fatalf("tempFilePath = %q, want service bin temp path", path)
+	}
+	installer.cleanupTemp()
+
+	existingPath := filepath.Join(t.TempDir(), "existing.tmp")
+	installer = &FileInstaller{tmpPath: existingPath}
+	if err := installer.initTempFile(); err != nil {
+		t.Fatalf("initTempFile with existing tmpPath returned error: %v", err)
+	}
+	if installer.tmpPath != existingPath {
+		t.Fatalf("tmpPath = %q, want preserved %q", installer.tmpPath, existingPath)
+	}
+
+	badServer := newTestServer(t)
+	if err := os.MkdirAll(badServer.serviceRootDir("bad-temp"), 0755); err != nil {
+		t.Fatalf("MkdirAll service root returned error: %v", err)
+	}
+	if err := os.WriteFile(badServer.serviceBinDir("bad-temp"), []byte("not a dir"), 0644); err != nil {
+		t.Fatalf("WriteFile service bin returned error: %v", err)
+	}
+	installer = &FileInstaller{
+		s:   badServer,
+		cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "bad-temp"}},
+	}
+	if err := installer.initTempFile(); err == nil || !strings.Contains(err.Error(), "failed to create temp dir") {
+		t.Fatalf("initTempFile error = %v, want temp dir failure", err)
+	}
+}
+
+func TestNewFileInstallerReportsEnsureDirsError(t *testing.T) {
+	server := newTestServer(t)
+	servicesRoot := filepath.Join(t.TempDir(), "services")
+	if err := os.WriteFile(servicesRoot, []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("WriteFile services root returned error: %v", err)
+	}
+	server.cfg.ServicesRoot = servicesRoot
+
+	_, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "dir-error"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to ensure directories") {
+		t.Fatalf("NewFileInstaller error = %v, want ensure dirs failure", err)
+	}
+}
+
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) {
+	return 0, fmt.Errorf("read failed")
+}
+
+type errorCloser struct{}
+
+func (errorCloser) Close() error {
+	return fmt.Errorf("close failed")
+}
+
 func netipMustParseAddr(t *testing.T, s string) netip.Addr {
 	t.Helper()
 	addr, err := netip.ParseAddr(s)

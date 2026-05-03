@@ -98,19 +98,36 @@ func selectPreviousGeneration(s *db.Service) error {
 
 func (e *ttyExecer) installRollbackGeneration(ui *runUI, gen int) error {
 	ui.StartStep("Install generation")
-	cfg := e.installerCfg()
-	i, err := e.s.NewInstaller(cfg)
-	if err != nil {
-		ui.FailStep(err.Error())
-		return fmt.Errorf("failed to create installer: %w", err)
-	}
-	i.NewCmd = e.newCmd
-	if err := i.InstallGen(gen); err != nil {
+	if err := e.installServiceGeneration(e.installerCfg(), gen); err != nil {
 		ui.FailStep(err.Error())
 		return err
 	}
 	ui.DoneStep(fmt.Sprintf("generation=%d", gen))
 	return nil
+}
+
+func (e *ttyExecer) installService(cfg InstallerCfg) error {
+	if e.serviceInstallFunc != nil {
+		return e.serviceInstallFunc(cfg)
+	}
+	i, err := e.s.NewInstaller(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create installer: %w", err)
+	}
+	i.NewCmd = e.newCmd
+	return i.Install()
+}
+
+func (e *ttyExecer) installServiceGeneration(cfg InstallerCfg, gen int) error {
+	if e.serviceInstallGenFunc != nil {
+		return e.serviceInstallGenFunc(cfg, gen)
+	}
+	i, err := e.s.NewInstaller(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to create installer: %w", err)
+	}
+	i.NewCmd = e.newCmd
+	return i.InstallGen(gen)
 }
 
 func (e *ttyExecer) restartCmdFunc() error {
