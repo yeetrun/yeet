@@ -65,7 +65,6 @@ crap|pkg/catch/tty_service.go|(*ttyExecer).serviceRunner
 crap|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc
 crap|pkg/catchrpc/client.go|(*Client).Exec
 crap|pkg/cli/cli.go|splitArgsForParsing
-crap|pkg/codecutil/codecutil.go|ZstdDecompress
 crap|pkg/copyutil/tar.go|ExtractTarWithOptions
 crap|pkg/copyutil/tar.go|ReadHeader
 crap|pkg/copyutil/tar.go|TarFileWithObserver
