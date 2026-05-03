@@ -109,3 +109,25 @@ func TestServiceDataTypeForService(t *testing.T) {
 		})
 	}
 }
+
+func TestServiceDataTypeFromUnitType(t *testing.T) {
+	tests := []struct {
+		unitType string
+		want     ServiceDataType
+	}{
+		{unitType: "service", want: ServiceDataTypeService},
+		{unitType: "cron", want: ServiceDataTypeCron},
+		{unitType: "docker", want: ServiceDataTypeDocker},
+		{unitType: "binary", want: ServiceDataTypeBinary},
+		{unitType: "typescript", want: ServiceDataTypeTypeScript},
+		{unitType: "python", want: ServiceDataTypePython},
+		{unitType: "wat", want: ServiceDataTypeUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.unitType, func(t *testing.T) {
+			if got := ServiceDataTypeFromUnitType(tt.unitType); got != tt.want {
+				t.Fatalf("ServiceDataTypeFromUnitType(%q) = %q, want %q", tt.unitType, got, tt.want)
+			}
+		})
+	}
+}

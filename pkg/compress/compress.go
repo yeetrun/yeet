@@ -86,78 +86,67 @@ func SelectEncoding(acceptEncoding string) string {
 	if acceptEncoding == "" {
 		return ""
 	}
+	return bestSupportedEncoding(parseAcceptEncoding(acceptEncoding))
+}
 
-	// Parse Accept-Encoding header
-	// Format: "gzip, deflate, br;q=0.9, *;q=0.8"
+func parseAcceptEncoding(acceptEncoding string) map[string]float32 {
 	encodings := strings.Split(acceptEncoding, ",")
-
-	// Track supported encodings with their quality values
 	supported := make(map[string]float32)
-
 	for _, enc := range encodings {
-		enc = strings.TrimSpace(enc)
+		name, quality := parseEncodingQuality(enc)
+		addSupportedEncoding(supported, name, quality)
+	}
+	return supported
+}
 
-		// Split on ';' to separate encoding from quality
-		parts := strings.Split(enc, ";")
-		name := strings.TrimSpace(parts[0])
-		quality := float32(1.0)
+func parseEncodingQuality(encoding string) (string, float32) {
+	parts := strings.Split(encoding, ";")
+	name := strings.TrimSpace(parts[0])
+	quality := float32(1.0)
 
-		// Parse quality value if present
-		if len(parts) > 1 {
-			qPart := strings.TrimSpace(parts[1])
-			if strings.HasPrefix(qPart, "q=") {
-				var q float32
-				if _, err := fmt.Sscanf(qPart, "q=%f", &q); err == nil {
-					quality = q
-				}
-			}
-		}
-
-		// Store supported encodings
-		switch name {
-		case "zstd":
-			supported["zstd"] = quality
-		case "gzip":
-			supported["gzip"] = quality
-		case "deflate":
-			supported["deflate"] = quality
-		case "*":
-			// Wildcard - support all if not explicitly listed
-			if _, ok := supported["zstd"]; !ok {
-				supported["zstd"] = quality
-			}
-			if _, ok := supported["gzip"]; !ok {
-				supported["gzip"] = quality
-			}
-			if _, ok := supported["deflate"]; !ok {
-				supported["deflate"] = quality
+	if len(parts) > 1 {
+		qPart := strings.TrimSpace(parts[1])
+		if strings.HasPrefix(qPart, "q=") {
+			var q float32
+			if _, err := fmt.Sscanf(qPart, "q=%f", &q); err == nil {
+				quality = q
 			}
 		}
 	}
 
-	// Select best encoding (prefer zstd > gzip > deflate for better compression)
+	return name, quality
+}
+
+func addSupportedEncoding(supported map[string]float32, name string, quality float32) {
+	switch name {
+	case "zstd", "gzip", "deflate":
+		supported[name] = quality
+	case "*":
+		addWildcardSupportedEncodings(supported, quality)
+	}
+}
+
+func addWildcardSupportedEncodings(supported map[string]float32, quality float32) {
+	for _, encoding := range []string{"zstd", "gzip", "deflate"} {
+		if _, ok := supported[encoding]; !ok {
+			supported[encoding] = quality
+		}
+	}
+}
+
+func bestSupportedEncoding(supported map[string]float32) string {
 	bestQuality := float32(0)
 	bestEncoding := ""
-
-	// Check in order of preference
-	if q, ok := supported["zstd"]; ok && q > bestQuality {
-		bestQuality = q
-		bestEncoding = "zstd"
-	}
-	if q, ok := supported["gzip"]; ok && q > bestQuality {
-		bestQuality = q
-		bestEncoding = "gzip"
-	}
-	if q, ok := supported["deflate"]; ok && q > bestQuality {
-		bestQuality = q
-		bestEncoding = "deflate"
+	for _, encoding := range []string{"zstd", "gzip", "deflate"} {
+		if q, ok := supported[encoding]; ok && q > bestQuality {
+			bestQuality = q
+			bestEncoding = encoding
+		}
 	}
 
-	// Only use compression if quality > 0
 	if bestQuality > 0 {
 		return bestEncoding
 	}
-
 	return ""
 }
 

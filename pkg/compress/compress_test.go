@@ -84,6 +84,11 @@ func TestSelectEncoding(t *testing.T) {
 			want:           "zstd", // Prefer zstd when wildcard is used
 		},
 		{
+			name:           "wildcard does not override explicit zero",
+			acceptEncoding: "zstd;q=0, *;q=0.8",
+			want:           "gzip",
+		},
+		{
 			name:           "zero quality should not be selected",
 			acceptEncoding: "gzip;q=0",
 			want:           "",

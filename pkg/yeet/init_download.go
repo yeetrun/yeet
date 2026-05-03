@@ -13,32 +13,47 @@ import (
 )
 
 func resolveCatchReleaseAsset(systemName, goarch string, nightly bool) (assetName, assetURL, shaURL, tag string, err error) {
-	goos := strings.ToLower(strings.TrimSpace(systemName))
-	goarch = strings.ToLower(strings.TrimSpace(goarch))
-	if goos != "linux" {
-		return "", "", "", "", fmt.Errorf("remote system is not Linux: %s", systemName)
+	assetName, shaName, err := catchReleaseAssetNames(systemName, goarch)
+	if err != nil {
+		return "", "", "", "", err
 	}
-	if goarch != "amd64" && goarch != "arm64" {
-		return "", "", "", "", fmt.Errorf("remote system has unsupported arch: %s", goarch)
-	}
-
-	assetName = fmt.Sprintf("catch-%s-%s.tar.gz", goos, goarch)
-	shaName := assetName + ".sha256"
 
 	rel, err := fetchGitHubRelease(nightly)
 	if err != nil {
 		return "", "", "", "", err
 	}
-	assetURL, err = findGitHubAssetURL(rel.Assets, assetName)
-	if err != nil {
-		return "", "", "", "", err
-	}
-	shaURL, err = findGitHubAssetURL(rel.Assets, shaName)
+	assetURL, shaURL, err = resolveReleaseAssetURLs(rel.Assets, assetName, shaName)
 	if err != nil {
 		return "", "", "", "", err
 	}
 
 	return assetName, assetURL, shaURL, rel.TagName, nil
+}
+
+func catchReleaseAssetNames(systemName, goarch string) (assetName, shaName string, err error) {
+	goos := strings.ToLower(strings.TrimSpace(systemName))
+	goarch = strings.ToLower(strings.TrimSpace(goarch))
+	if goos != "linux" {
+		return "", "", fmt.Errorf("remote system is not Linux: %s", systemName)
+	}
+	if goarch != "amd64" && goarch != "arm64" {
+		return "", "", fmt.Errorf("remote system has unsupported arch: %s", goarch)
+	}
+
+	assetName = fmt.Sprintf("catch-%s-%s.tar.gz", goos, goarch)
+	return assetName, assetName + ".sha256", nil
+}
+
+func resolveReleaseAssetURLs(assets []githubAsset, assetName, shaName string) (assetURL, shaURL string, err error) {
+	assetURL, err = findGitHubAssetURL(assets, assetName)
+	if err != nil {
+		return "", "", err
+	}
+	shaURL, err = findGitHubAssetURL(assets, shaName)
+	if err != nil {
+		return "", "", err
+	}
+	return assetURL, shaURL, nil
 }
 
 func downloadCatchRelease(ui *initUI, userAtRemote, assetName, assetURL, shaURL string) (string, error) {

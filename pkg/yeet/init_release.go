@@ -35,13 +35,18 @@ type githubAsset struct {
 }
 
 func fetchGitHubRelease(nightly bool) (githubRelease, error) {
+	return fetchGitHubReleaseFromURL(githubReleaseURL(nightly), &http.Client{Timeout: 30 * time.Second})
+}
+
+func githubReleaseURL(nightly bool) string {
 	path := fmt.Sprintf("/repos/%s/%s/releases/latest", githubOwner, githubRepo)
 	if nightly {
 		path = fmt.Sprintf("/repos/%s/%s/releases/tags/nightly", githubOwner, githubRepo)
 	}
-	url := githubAPIBase + path
+	return githubAPIBase + path
+}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+func fetchGitHubReleaseFromURL(url string, client *http.Client) (rel githubRelease, err error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return githubRelease{}, err
@@ -55,14 +60,17 @@ func fetchGitHubRelease(nightly bool) (githubRelease, error) {
 	if err != nil {
 		return githubRelease{}, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return githubRelease{}, fmt.Errorf("github api error: %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
 
-	var rel githubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
 		return githubRelease{}, err
 	}

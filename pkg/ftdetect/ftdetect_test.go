@@ -5,6 +5,7 @@
 package ftdetect
 
 import (
+	"debug/elf"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -130,5 +131,26 @@ func TestDetectFileShortUnknown(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "failed to detect binary") {
 		t.Fatalf("expected detection miss, got low-level binary error: %v", err)
+	}
+}
+
+func TestELFMachineArchitecture(t *testing.T) {
+	tests := []struct {
+		name    string
+		machine elf.Machine
+		want    string
+	}{
+		{name: "amd64", machine: elf.EM_X86_64, want: "x86_64"},
+		{name: "386", machine: elf.EM_386, want: "x86"},
+		{name: "arm", machine: elf.EM_ARM, want: "ARM"},
+		{name: "arm64", machine: elf.EM_AARCH64, want: "ARM64"},
+		{name: "unknown", machine: elf.EM_NONE, want: "unknown"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := elfMachineArchitecture(tt.machine); got != tt.want {
+				t.Fatalf("elfMachineArchitecture(%v) = %q, want %q", tt.machine, got, tt.want)
+			}
+		})
 	}
 }

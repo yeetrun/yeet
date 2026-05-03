@@ -5,13 +5,118 @@
 package copyutil
 
 import (
+	"archive/tar"
 	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
 )
+
+func TestExtractTarRejectsDangerousPaths(t *testing.T) {
+	tests := []struct {
+		name      string
+		entryName string
+		linkName  string
+		typeflag  byte
+	}{
+		{name: "parent traversal", entryName: "../escape.txt", typeflag: tar.TypeReg},
+		{name: "absolute path", entryName: "/escape.txt", typeflag: tar.TypeReg},
+		{name: "hardlink traversal", entryName: "safe-link", linkName: "../escape.txt", typeflag: tar.TypeLink},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tw := tar.NewWriter(&buf)
+			if err := tw.WriteHeader(&tar.Header{
+				Name:     tt.entryName,
+				Linkname: tt.linkName,
+				Typeflag: tt.typeflag,
+				Mode:     0o644,
+			}); err != nil {
+				t.Fatalf("failed to write tar header: %v", err)
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatalf("failed to close tar: %v", err)
+			}
+
+			if err := ExtractTar(&buf, t.TempDir()); err == nil {
+				t.Fatalf("expected dangerous tar path to fail")
+			}
+		})
+	}
+}
+
+func TestExtractTarExtractsEntriesAndNotifiesObserver(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink extraction is platform dependent on windows")
+	}
+
+	modTime := time.Unix(1700000300, 0)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	writeTarEntry(t, tw, &tar.Header{Name: "dir/", Typeflag: tar.TypeDir, Mode: 0o750, ModTime: modTime}, nil)
+	writeTarEntry(t, tw, &tar.Header{Name: "dir/file.txt", Typeflag: tar.TypeReg, Mode: 0o640, Size: int64(len("hello")), ModTime: modTime}, []byte("hello"))
+	writeTarEntry(t, tw, &tar.Header{Name: "link.txt", Typeflag: tar.TypeSymlink, Linkname: "dir/file.txt", Mode: 0o777, ModTime: modTime}, nil)
+	if err := tw.Close(); err != nil {
+		t.Fatalf("failed to close tar: %v", err)
+	}
+
+	var entries []TarEntry
+	dest := t.TempDir()
+	err := ExtractTarWithOptions(&buf, dest, ExtractOptions{
+		OnEntry: func(entry TarEntry) {
+			entries = append(entries, entry)
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to extract tar: %v", err)
+	}
+
+	assertFileContents(t, filepath.Join(dest, "dir", "file.txt"), "hello")
+	if st, err := os.Stat(filepath.Join(dest, "dir")); err != nil {
+		t.Fatalf("failed to stat extracted dir: %v", err)
+	} else if st.Mode().Perm() != 0o750 {
+		t.Fatalf("expected dir mode 0750, got %o", st.Mode().Perm())
+	}
+	target, err := os.Readlink(filepath.Join(dest, "link.txt"))
+	if err != nil {
+		t.Fatalf("failed to read extracted symlink: %v", err)
+	}
+	if target != "dir/file.txt" {
+		t.Fatalf("expected symlink target dir/file.txt, got %q", target)
+	}
+
+	wantNames := []string{"dir", "dir/file.txt", "link.txt"}
+	if len(entries) != len(wantNames) {
+		t.Fatalf("expected %d observer entries, got %d: %#v", len(wantNames), len(entries), entries)
+	}
+	for i, want := range wantNames {
+		if entries[i].Name != want {
+			t.Fatalf("observer entry %d: expected %q, got %q", i, want, entries[i].Name)
+		}
+	}
+	if entries[1].Size != int64(len("hello")) || entries[2].Linkname != "dir/file.txt" {
+		t.Fatalf("observer entries did not include expected metadata: %#v", entries)
+	}
+}
+
+func TestTarFileWithObserverReturnsCloseError(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "file.txt")
+	if err := os.WriteFile(src, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	wantErr := errors.New("close failed")
+	err := TarFileWithObserver(&failAfterWriter{failAfter: 1024, err: wantErr}, src, "file.txt", nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected close error %v, got %v", wantErr, err)
+	}
+}
 
 func TestTarDirectoryPreservesMetadata(t *testing.T) {
 	src := t.TempDir()
@@ -124,4 +229,50 @@ func TestMoveTreeMerges(t *testing.T) {
 	if _, err := os.Stat(stage); err == nil {
 		t.Fatalf("expected stage dir to be removed")
 	}
+}
+
+func writeTarEntry(t *testing.T, tw *tar.Writer, hdr *tar.Header, body []byte) {
+	t.Helper()
+	if hdr.Typeflag == tar.TypeReg && hdr.Size == 0 {
+		hdr.Size = int64(len(body))
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatalf("failed to write tar header %q: %v", hdr.Name, err)
+	}
+	if len(body) == 0 {
+		return
+	}
+	if _, err := tw.Write(body); err != nil {
+		t.Fatalf("failed to write tar body %q: %v", hdr.Name, err)
+	}
+}
+
+func assertFileContents(t *testing.T, filePath, want string) {
+	t.Helper()
+	got, err := os.ReadFile(filePath)
+	if err != nil {
+		t.Fatalf("failed to read %s: %v", filePath, err)
+	}
+	if string(got) != want {
+		t.Fatalf("expected %s contents %q, got %q", filePath, want, string(got))
+	}
+}
+
+type failAfterWriter struct {
+	written   int
+	failAfter int
+	err       error
+}
+
+func (w *failAfterWriter) Write(p []byte) (int, error) {
+	if w.written >= w.failAfter {
+		return 0, w.err
+	}
+	remaining := w.failAfter - w.written
+	if len(p) > remaining {
+		w.written += remaining
+		return remaining, io.ErrShortWrite
+	}
+	w.written += len(p)
+	return len(p), nil
 }

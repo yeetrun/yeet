@@ -29,12 +29,7 @@ func MoveTree(src, dst string) error {
 }
 
 func moveTreeContents(src, dst string, applyMeta bool) error {
-	if st, err := os.Lstat(dst); err == nil && !st.IsDir() {
-		if err := os.RemoveAll(dst); err != nil {
-			return err
-		}
-	}
-	if err := os.MkdirAll(dst, 0o755); err != nil {
+	if err := ensureDirectoryTarget(dst); err != nil {
 		return err
 	}
 	entries, err := os.ReadDir(src)
@@ -49,13 +44,7 @@ func moveTreeContents(src, dst string, applyMeta bool) error {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-			if err := moveTreeContents(srcPath, dstPath, true); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := replacePath(srcPath, dstPath, info); err != nil {
+		if err := moveEntry(srcPath, dstPath, entry, info); err != nil {
 			return err
 		}
 	}
@@ -65,6 +54,22 @@ func moveTreeContents(src, dst string, applyMeta bool) error {
 		}
 	}
 	return os.Remove(src)
+}
+
+func ensureDirectoryTarget(dst string) error {
+	if st, err := os.Lstat(dst); err == nil && !st.IsDir() {
+		if err := os.RemoveAll(dst); err != nil {
+			return err
+		}
+	}
+	return os.MkdirAll(dst, 0o755)
+}
+
+func moveEntry(src, dst string, entry fs.DirEntry, info fs.FileInfo) error {
+	if entry.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return moveTreeContents(src, dst, true)
+	}
+	return replacePath(src, dst, info)
 }
 
 func replacePath(src, dst string, info fs.FileInfo) error {

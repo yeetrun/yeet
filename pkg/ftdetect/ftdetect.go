@@ -254,17 +254,21 @@ func (f *file) detectArchitectureElf() (string, error) {
 		return "", fmt.Errorf("failed to parse ELF file: %v", err)
 	}
 
-	switch elfFile.Machine {
+	return elfMachineArchitecture(elfFile.Machine), nil
+}
+
+func elfMachineArchitecture(machine elf.Machine) string {
+	switch machine {
 	case elf.EM_X86_64:
-		return "x86_64", nil
+		return "x86_64"
 	case elf.EM_386:
-		return "x86", nil
+		return "x86"
 	case elf.EM_ARM:
-		return "ARM", nil
+		return "ARM"
 	case elf.EM_AARCH64:
-		return "ARM64", nil
+		return "ARM64"
 	default:
-		return "unknown", nil
+		return "unknown"
 	}
 }
 
