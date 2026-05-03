@@ -156,7 +156,6 @@ errcheck|pkg/catch/tty_service.go|(*ttyExecer).statusCmdFunc|source:fmt.Fprintln
 errcheck|pkg/catchrpc/client.go|(*Client).Call|source:defer resp.Body.Close()|Error return value of `resp.Body.Close` is not checked
 errcheck|pkg/catchrpc/client.go|(*Client).Events|source:defer conn.Close()|Error return value of `conn.Close` is not checked
 errcheck|pkg/catchrpc/client.go|(*Client).Exec|source:defer conn.Close()|Error return value of `conn.Close` is not checked
-errcheck|pkg/cmdutil/cmdutil.go|Confirm|source:fmt.Fprintf(w, "%s [y/N]: ", msg)|Error return value of `fmt.Fprintf` is not checked
 errcheck|pkg/copyutil/tar.go|ExtractTarWithOptions|source:f.Close()|Error return value of `f.Close` is not checked
 errcheck|pkg/copyutil/tar.go|TarDirectoryWithObserver|source:defer tw.Close()|Error return value of `tw.Close` is not checked
 errcheck|pkg/copyutil/tar.go|TarDirectoryWithObserver|source:f.Close()|Error return value of `f.Close` is not checked
