@@ -27,7 +27,6 @@ crap|pkg/catch/installer_service.go|(*Installer).commitGen
 crap|pkg/catch/installer_service.go|(*Installer).doInstall
 crap|pkg/catch/installer_service.go|(*Installer).prune
 crap|pkg/catch/installer_service.go|unassignedIP
-crap|pkg/catch/ip_util.go|parseIPv4Addrs
 crap|pkg/catch/mount.go|(*systemdMounter).mount
 crap|pkg/catch/mount.go|(*systemdMounter).umount
 crap|pkg/catch/mount.go|translateMountPathToUnitName
