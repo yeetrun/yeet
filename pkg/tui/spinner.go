@@ -86,7 +86,7 @@ func (s *Spinner) Start(msg string) {
 	s.mu.Unlock()
 
 	if s.hideCursor {
-		fmt.Fprint(s.out, "\x1b[?25l")
+		_, _ = fmt.Fprint(s.out, "\x1b[?25l")
 	}
 	s.renderFrame(0, msg)
 	go s.loop()
@@ -121,10 +121,10 @@ func (s *Spinner) Stop(clear bool) {
 	if clear {
 		s.clearLine()
 	} else {
-		fmt.Fprintln(s.out)
+		_, _ = fmt.Fprintln(s.out)
 	}
 	if s.hideCursor {
-		fmt.Fprint(s.out, "\x1b[?25h")
+		_, _ = fmt.Fprint(s.out, "\x1b[?25h")
 	}
 }
 
@@ -169,9 +169,9 @@ func (s *Spinner) renderFrame(idx int, msg string) {
 	if msg != "" {
 		line = line + " " + msg
 	}
-	fmt.Fprintf(s.out, "\r\033[K%s", line)
+	_, _ = fmt.Fprintf(s.out, "\r\033[K%s", line)
 }
 
 func (s *Spinner) clearLine() {
-	fmt.Fprint(s.out, "\r\033[K")
+	_, _ = fmt.Fprint(s.out, "\r\033[K")
 }
