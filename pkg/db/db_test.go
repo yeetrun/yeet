@@ -590,6 +590,107 @@ func TestStoreGetRejectsNullDatabase(t *testing.T) {
 	}
 }
 
+func TestStoreMutateDataLoadsClonesAndPersistsChanges(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", Generation: 1},
+		},
+	})
+	store := NewStore(path, filepath.Join(root, "services"))
+
+	got, err := store.MutateData(func(d *Data) error {
+		d.Services["svc"].Generation = 2
+		d.Volumes = map[string]*Volume{"data": {Name: "data", Path: "/data"}}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Services["svc"].Generation != 2 {
+		t.Fatalf("returned generation = %d, want 2", got.Services["svc"].Generation)
+	}
+
+	got.Services["svc"].Generation = 99
+	onDisk := mustReadData(t, path)
+	if onDisk.Services["svc"].Generation != 2 {
+		t.Fatalf("on-disk generation = %d, want 2", onDisk.Services["svc"].Generation)
+	}
+	if onDisk.Volumes["data"].Path != "/data" {
+		t.Fatalf("on-disk volume path = %q, want /data", onDisk.Volumes["data"].Path)
+	}
+	dv, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dv.AsStruct().Services["svc"].Generation; got != 2 {
+		t.Fatalf("cached generation = %d, want 2", got)
+	}
+}
+
+func TestStoreMutateDataWrapsCallbackErrorsWithoutSaving(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", Generation: 1},
+		},
+	})
+	store := NewStore(path, filepath.Join(root, "services"))
+
+	_, err := store.MutateData(func(d *Data) error {
+		d.Services["svc"].Generation = 2
+		return os.ErrPermission
+	})
+	if err == nil {
+		t.Fatal("MutateData succeeded after callback error")
+	}
+	if got := mustReadData(t, path).Services["svc"].Generation; got != 1 {
+		t.Fatalf("on-disk generation after failed mutation = %d, want 1", got)
+	}
+}
+
+func TestStoreMutateServiceCreatesAndUpdatesServices(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+
+	data, svc, err := store.MutateService("svc", func(d *Data, svc *Service) error {
+		if d.Services["svc"] != svc {
+			t.Fatal("callback service is not stored in data map")
+		}
+		svc.ServiceType = ServiceTypeSystemd
+		svc.Generation = 1
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.Name != "svc" || svc.ServiceType != ServiceTypeSystemd || svc.Generation != 1 {
+		t.Fatalf("created service = %#v, want systemd generation 1", svc)
+	}
+	if data.Services["svc"] != svc {
+		t.Fatal("returned data does not include returned service pointer")
+	}
+
+	_, svc, err = store.MutateService("svc", func(_ *Data, svc *Service) error {
+		svc.Generation++
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.Generation != 2 {
+		t.Fatalf("updated service generation = %d, want 2", svc.Generation)
+	}
+	if got := mustReadData(t, path).Services["svc"].Generation; got != 2 {
+		t.Fatalf("on-disk generation = %d, want 2", got)
+	}
+}
+
 func mustAddr(t *testing.T, s string) netip.Addr {
 	t.Helper()
 	addr, err := netip.ParseAddr(s)

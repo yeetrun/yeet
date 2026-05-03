@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -180,6 +181,98 @@ func TestPrepareCommandRoute(t *testing.T) {
 				t.Fatalf("bridgedArgs = %#v, want %#v", got.bridgedArgs, tt.wantBridged)
 			}
 		})
+	}
+}
+
+func TestBridgeWithOverride(t *testing.T) {
+	remoteSpecs := map[string]map[string]cli.FlagSpec{
+		"status": {},
+	}
+	groupSpecs := map[string]map[string]map[string]cli.FlagSpec{
+		"env": {
+			"get": {},
+		},
+	}
+	tests := []struct {
+		name        string
+		args        []string
+		wantOK      bool
+		wantService string
+		wantBridged []string
+	}{
+		{name: "remote command", args: []string{"status", "--json"}, wantOK: true, wantService: "svc-a", wantBridged: []string{"status", "--json"}},
+		{name: "remote group command", args: []string{"env", "get", "FOO"}, wantOK: true, wantService: "svc-a", wantBridged: []string{"env", "get", "FOO"}},
+		{name: "unknown command", args: []string{"local"}, wantOK: false},
+		{name: "group without subcommand", args: []string{"env"}, wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, _, bridged, ok := bridgeWithOverride(tt.args, remoteSpecs, groupSpecs, "svc-a")
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if service != tt.wantService {
+				t.Fatalf("service = %q, want %q", service, tt.wantService)
+			}
+			if !reflect.DeepEqual(bridged, tt.wantBridged) {
+				t.Fatalf("bridged = %#v, want %#v", bridged, tt.wantBridged)
+			}
+		})
+	}
+}
+
+func TestBridgeHelpersCoverTerminatorAndShortFlags(t *testing.T) {
+	flags := map[string]cli.FlagSpec{
+		"-n":       {ConsumesValue: true},
+		"--format": {ConsumesValue: true},
+	}
+	if got := serviceIndexAfterTerminator([]string{"status", "--", "svc-a"}, 1); got != 2 {
+		t.Fatalf("serviceIndexAfterTerminator = %d, want 2", got)
+	}
+	if got := serviceIndexAfterTerminator([]string{"status", "--"}, 1); got != -1 {
+		t.Fatalf("serviceIndexAfterTerminator without value = %d, want -1", got)
+	}
+	if skip, ok := flagTokenSkip("-n", flags); !ok || skip != 1 {
+		t.Fatalf("flagTokenSkip -n = (%d, %v), want (1, true)", skip, ok)
+	}
+	if skip, ok := flagTokenSkip("-n5", flags); !ok || skip != 0 {
+		t.Fatalf("flagTokenSkip -n5 = (%d, %v), want (0, true)", skip, ok)
+	}
+	if skip, ok := flagTokenSkip("-", flags); ok || skip != 0 {
+		t.Fatalf("flagTokenSkip - = (%d, %v), want (0, false)", skip, ok)
+	}
+	if got := removeArgAt([]string{"a", "b"}, 5); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("removeArgAt out of range = %#v", got)
+	}
+}
+
+func TestGroupHandlersWrapRemoteCommands(t *testing.T) {
+	oldBridgedArgs := bridgedArgs
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	defer func() {
+		bridgedArgs = oldBridgedArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+	}()
+
+	var got []string
+	handleSvcCmdFn = func(args []string) error {
+		got = append([]string(nil), args...)
+		return nil
+	}
+
+	if err := handleDockerGroup(context.Background(), []string{"logs", "svc-a"}); err != nil {
+		t.Fatalf("handleDockerGroup: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"docker", "logs", "svc-a"}) {
+		t.Fatalf("docker group args = %#v", got)
+	}
+
+	if err := handleEnvGroup(context.Background(), []string{"get", "FOO"}); err != nil {
+		t.Fatalf("handleEnvGroup: %v", err)
+	}
+	if !reflect.DeepEqual(got, []string{"env", "get", "FOO"}) {
+		t.Fatalf("env group args = %#v", got)
 	}
 }
 

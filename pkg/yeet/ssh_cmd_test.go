@@ -111,6 +111,28 @@ func TestParseSSHArgs(t *testing.T) {
 	}
 }
 
+func TestEnsureSSHCLIReturnsErrorWhenMissing(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	err := ensureSSHCLI()
+	if err == nil || !strings.Contains(err.Error(), "ssh CLI not found") {
+		t.Fatalf("ensureSSHCLI error = %v, want missing ssh error", err)
+	}
+}
+
+func TestSSHServiceOrOverride(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+	serviceOverride = "override-svc"
+
+	if got := sshServiceOrOverride(""); got != "override-svc" {
+		t.Fatalf("sshServiceOrOverride empty = %q, want override-svc", got)
+	}
+	if got := sshServiceOrOverride("explicit-svc"); got != "explicit-svc" {
+		t.Fatalf("sshServiceOrOverride explicit = %q, want explicit-svc", got)
+	}
+}
+
 func TestSSHInvocationFromArgsAppliesServiceOverride(t *testing.T) {
 	oldService := serviceOverride
 	defer func() {
@@ -127,6 +149,36 @@ func TestSSHInvocationFromArgsAppliesServiceOverride(t *testing.T) {
 	}
 	if want := []string{"uptime"}; !reflect.DeepEqual(got.Command, want) {
 		t.Fatalf("command = %#v, want %#v", got.Command, want)
+	}
+}
+
+func TestResolveSSHHostUsesExplicitAndOverrideHosts(t *testing.T) {
+	oldPrefs := loadedPrefs
+	oldOverride := hostOverride
+	oldOverrideSet := hostOverrideSet
+	defer func() {
+		loadedPrefs = oldPrefs
+		hostOverride = oldOverride
+		hostOverrideSet = oldOverrideSet
+	}()
+	loadedPrefs.DefaultHost = "default-host"
+	resetHostOverride()
+
+	got, err := resolveSSHHost("api@explicit-host")
+	if err != nil {
+		t.Fatalf("resolveSSHHost explicit error: %v", err)
+	}
+	if got != "explicit-host" {
+		t.Fatalf("explicit host = %q, want explicit-host", got)
+	}
+
+	SetHostOverride("override-host")
+	got, err = resolveSSHHost("api")
+	if err != nil {
+		t.Fatalf("resolveSSHHost override error: %v", err)
+	}
+	if got != "override-host" {
+		t.Fatalf("override host = %q, want override-host", got)
 	}
 }
 
@@ -241,6 +293,16 @@ func TestServiceShellCommandFromResponseNotFoundIncludesHint(t *testing.T) {
 	}
 }
 
+func TestServiceNotFoundShellErrorUsesDefaultMessage(t *testing.T) {
+	err := serviceNotFoundShellError("api", " ")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := err.Error(); !strings.Contains(got, `service "api" not found`) || !strings.Contains(got, "yeet ssh -- <cmd>") {
+		t.Fatalf("error = %q, want default not-found message with hint", got)
+	}
+}
+
 func TestBuildServiceSSHCommand(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -273,6 +335,71 @@ func TestBuildServiceSSHCommand(t *testing.T) {
 			}
 			if !reflect.DeepEqual(gotOptions, tt.wantOptions) {
 				t.Fatalf("options = %#v, want %#v", gotOptions, tt.wantOptions)
+			}
+		})
+	}
+}
+
+func TestBuildSSHArgs(t *testing.T) {
+	got := buildSSHArgs([]string{"-p", "2222"}, "root@host", []string{"uptime"})
+	want := []string{"-p", "2222", "root@host", "uptime"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildSSHArgs = %#v, want %#v", got, want)
+	}
+}
+
+func TestTrimSSHCommandName(t *testing.T) {
+	if got := trimSSHCommandName([]string{"ssh", "api"}); !reflect.DeepEqual(got, []string{"api"}) {
+		t.Fatalf("trimSSHCommandName command = %#v, want api", got)
+	}
+	if got := trimSSHCommandName([]string{"api"}); !reflect.DeepEqual(got, []string{"api"}) {
+		t.Fatalf("trimSSHCommandName no command = %#v, want unchanged", got)
+	}
+}
+
+func TestSSHOptionNeedsArg(t *testing.T) {
+	tests := []struct {
+		token string
+		want  bool
+	}{
+		{token: "-p", want: true},
+		{token: "-o", want: true},
+		{token: "-v"},
+		{token: "--"},
+		{token: "-"},
+		{token: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.token, func(t *testing.T) {
+			if got := sshOptionNeedsArg(tt.token); got != tt.want {
+				t.Fatalf("sshOptionNeedsArg(%q) = %v, want %v", tt.token, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEnsureTTYOption(t *testing.T) {
+	tests := []struct {
+		name    string
+		options []string
+		want    []string
+	}{
+		{name: "adds tty", want: []string{"-t"}},
+		{name: "keeps single tty", options: []string{"-t"}, want: []string{"-t"}},
+		{name: "keeps double tty", options: []string{"-tt"}, want: []string{"-tt"}},
+		{name: "keeps disabled tty", options: []string{"-T"}, want: []string{"-T"}},
+		{name: "keeps request tty option pair", options: []string{"-o", "RequestTTY=no"}, want: []string{"-o", "RequestTTY=no"}},
+		{name: "keeps compact request tty option", options: []string{"-oRequestTTY=force"}, want: []string{"-oRequestTTY=force"}},
+		{name: "adds after unrelated option pair", options: []string{"-o", "StrictHostKeyChecking=no"}, want: []string{"-o", "StrictHostKeyChecking=no", "-t"}},
+		{name: "adds after dangling option", options: []string{"-o"}, want: []string{"-o", "-t"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ensureTTYOption(tt.options)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("ensureTTYOption = %#v, want %#v", got, tt.want)
 			}
 		})
 	}

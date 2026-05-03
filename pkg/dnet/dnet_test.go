@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,6 +24,11 @@ type fakeNatRuleBackend struct {
 	prerouting []string
 	yeetOutput []string
 	output     []string
+	ensureErr  error
+	listErr    map[string]error
+	flushErr   map[string]error
+	appendErr  map[string]error
+	deleteErr  map[string]error
 }
 
 type recordedCommand struct {
@@ -42,6 +48,9 @@ func recordingRunner(commands *[]recordedCommand, missingChecks map[string]bool)
 }
 
 func (f *fakeNatRuleBackend) ListChain(chain string) ([]string, error) {
+	if err := f.listErr[chain]; err != nil {
+		return nil, err
+	}
 	switch chain {
 	case preroutingChainName:
 		return append([]string(nil), f.prerouting...), nil
@@ -55,6 +64,9 @@ func (f *fakeNatRuleBackend) ListChain(chain string) ([]string, error) {
 }
 
 func (f *fakeNatRuleBackend) FlushChain(chain string) error {
+	if err := f.flushErr[chain]; err != nil {
+		return err
+	}
 	switch chain {
 	case preroutingChainName:
 		f.prerouting = nil
@@ -65,6 +77,9 @@ func (f *fakeNatRuleBackend) FlushChain(chain string) error {
 }
 
 func (f *fakeNatRuleBackend) AppendRule(chain string, rule ...string) error {
+	if err := f.appendErr[chain]; err != nil {
+		return err
+	}
 	line := "-A " + chain + " " + strings.Join(rule, " ")
 	switch chain {
 	case preroutingChainName:
@@ -78,6 +93,9 @@ func (f *fakeNatRuleBackend) AppendRule(chain string, rule ...string) error {
 }
 
 func (f *fakeNatRuleBackend) DeleteRule(chain string, rule ...string) error {
+	if err := f.deleteErr[chain]; err != nil {
+		return err
+	}
 	line := "-A " + chain + " " + strings.Join(rule, " ")
 	switch chain {
 	case "OUTPUT":
@@ -90,7 +108,7 @@ func (f *fakeNatRuleBackend) DeleteRule(chain string, rule ...string) error {
 	return nil
 }
 
-func (f *fakeNatRuleBackend) EnsureChains() error { return nil }
+func (f *fakeNatRuleBackend) EnsureChains() error { return f.ensureErr }
 
 func deleteRuleLine(lines []string, target string) []string {
 	out := make([]string, 0, len(lines))
@@ -119,6 +137,32 @@ func TestDesiredPortForwardsSkipsStalePortOwners(t *testing.T) {
 	got := desiredPortForwards(network)
 	want := []portForwardRule{
 		{Proto: "tcp", HostPort: 80, TargetIP: "172.20.0.3", TargetPort: 80},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("desiredPortForwards mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDesiredPortForwardsFiltersInvalidMappings(t *testing.T) {
+	if got := desiredPortForwards(nil); got != nil {
+		t.Fatalf("desiredPortForwards(nil) = %#v, want nil", got)
+	}
+
+	network := &db.DockerNetwork{
+		Endpoints: map[string]*db.DockerEndpoint{
+			"app": {EndpointID: "app", IPv4: netip.MustParsePrefix("172.20.0.3/16")},
+		},
+		PortMap: map[string]*db.EndpointPort{
+			"6/80":     nil,
+			"17/53":    {EndpointID: "app", Port: 53},
+			"1/443":    {EndpointID: "app", Port: 443},
+			"not-port": {EndpointID: "app", Port: 1234},
+		},
+	}
+
+	got := desiredPortForwards(network)
+	want := []portForwardRule{
+		{Proto: "udp", HostPort: 53, TargetIP: "172.20.0.3", TargetPort: 53},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("desiredPortForwards mismatch (-want +got):\n%s", diff)
@@ -270,6 +314,82 @@ func TestReconcilePortForwardsFromDataGroupsExistingNetNS(t *testing.T) {
 	}
 }
 
+func TestReconcilePortForwardsFromDataJoinsErrors(t *testing.T) {
+	data := &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"check-error": {
+				NetNS: "/var/run/netns/yeet-check-error-ns",
+			},
+			"sync-error": {
+				NetNS: "/var/run/netns/yeet-sync-error-ns",
+			},
+		},
+	}
+	exists := func(path string) (bool, error) {
+		if path == "/var/run/netns/yeet-check-error-ns" {
+			return false, errors.New("stat failed")
+		}
+		return true, nil
+	}
+	sync := func(netns string, desired []portForwardRule) error {
+		return errors.New("sync failed")
+	}
+
+	err := reconcilePortForwardsFromData(data, exists, sync)
+	if err == nil {
+		t.Fatal("reconcilePortForwardsFromData returned nil error")
+	}
+	if !strings.Contains(err.Error(), `check netns "/var/run/netns/yeet-check-error-ns"`) {
+		t.Fatalf("error = %q, want check netns context", err)
+	}
+	if !strings.Contains(err.Error(), `reconcile port forwards for "/var/run/netns/yeet-sync-error-ns"`) {
+		t.Fatalf("error = %q, want reconcile context", err)
+	}
+}
+
+func TestReconcilePortForwardsRejectsNilStore(t *testing.T) {
+	if err := ReconcilePortForwards(nil); err == nil {
+		t.Fatal("ReconcilePortForwards(nil) returned nil error")
+	}
+}
+
+func TestNetnsPathExists(t *testing.T) {
+	if ok, err := netnsPathExists(""); err != nil || ok {
+		t.Fatalf("netnsPathExists(empty) = %v, %v; want false, nil", ok, err)
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	if ok, err := netnsPathExists(missing); err != nil || ok {
+		t.Fatalf("netnsPathExists(missing) = %v, %v; want false, nil", ok, err)
+	}
+
+	existing := filepath.Join(t.TempDir(), "netns")
+	if err := os.WriteFile(existing, nil, 0o600); err != nil {
+		t.Fatalf("os.WriteFile: %v", err)
+	}
+	if ok, err := netnsPathExists(existing); err != nil || !ok {
+		t.Fatalf("netnsPathExists(existing) = %v, %v; want true, nil", ok, err)
+	}
+}
+
+func TestRunInNetNSMissingPathReturnsError(t *testing.T) {
+	p := &plugin{}
+	called := false
+	err := p.runInNetNS(filepath.Join(t.TempDir(), "missing"), func() error {
+		called = true
+		return nil
+	})
+	if err == nil {
+		t.Fatal("runInNetNS returned nil error")
+	}
+	if called {
+		t.Fatal("runInNetNS called function for missing namespace")
+	}
+	if !strings.Contains(err.Error(), "failed to run in netns") || !strings.Contains(err.Error(), "failed to open netns") {
+		t.Fatalf("runInNetNS error = %q, want wrapped open error", err)
+	}
+}
+
 type capturedPortForwardSync struct {
 	netns string
 	rules []portForwardRule
@@ -340,16 +460,71 @@ func TestCreateNetworkRejectsMissingNetNS(t *testing.T) {
 	}
 }
 
+func TestCreateNetworkRejectsMissingIPv4Data(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{}, &syncs)
+
+	rr := postJSON(t, p.CreateNetwork, map[string]any{
+		"NetworkID": "vaultwarden",
+		"Options": map[string]any{
+			"com.docker.network.generic": map[string]any{
+				"dev.catchit.netns": "/var/run/netns/yeet-vaultwarden-ns",
+			},
+		},
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("CreateNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "IPv4Data is required") {
+		t.Fatalf("CreateNetwork body = %q, want IPv4Data is required", rr.Body.String())
+	}
+}
+
+func TestCreateNetworkRejectsDuplicateNetwork(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:       "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID:   "vaultwarden",
+				IPv4Gateway: netip.MustParsePrefix("172.20.0.1/16"),
+				IPv4Range:   netip.MustParsePrefix("172.20.0.0/16"),
+			},
+		},
+	}, &syncs)
+
+	rr := postJSON(t, p.CreateNetwork, map[string]any{
+		"NetworkID": "vaultwarden",
+		"Options": map[string]any{
+			"com.docker.network.generic": map[string]any{
+				"dev.catchit.netns": "/var/run/netns/yeet-vaultwarden-ns",
+			},
+		},
+		"IPv4Data": []map[string]any{
+			{"Gateway": "172.20.0.1/16", "Pool": "172.20.0.0/16"},
+		},
+	})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("CreateNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "network already exists") {
+		t.Fatalf("CreateNetwork body = %q, want network already exists", rr.Body.String())
+	}
+}
+
+func TestDecodePluginRequestRejectsInvalidJSON(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{}, &syncs)
+
+	rr := postRaw(t, p.CreateNetwork, "{")
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("CreateNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func newTestPlugin(t *testing.T, data *db.Data, syncs *[]capturedPortForwardSync) *plugin {
 	t.Helper()
-	root := t.TempDir()
-	store := db.NewStore(filepath.Join(root, "db.json"), filepath.Join(root, "services"))
-	if data == nil {
-		data = &db.Data{}
-	}
-	if err := store.Set(data); err != nil {
-		t.Fatalf("store.Set: %v", err)
-	}
+	store := newTestStore(t, data)
 	return &plugin{
 		db: store,
 		syncPortForwardsFunc: func(netns string, desired []portForwardRule) error {
@@ -362,6 +537,19 @@ func newTestPlugin(t *testing.T, data *db.Data, syncs *[]capturedPortForwardSync
 	}
 }
 
+func newTestStore(t *testing.T, data *db.Data) *db.Store {
+	t.Helper()
+	root := t.TempDir()
+	store := db.NewStore(filepath.Join(root, "db.json"), filepath.Join(root, "services"))
+	if data == nil {
+		data = &db.Data{}
+	}
+	if err := store.Set(data); err != nil {
+		t.Fatalf("store.Set: %v", err)
+	}
+	return store
+}
+
 func postJSON(t *testing.T, h http.HandlerFunc, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	raw, err := json.Marshal(body)
@@ -372,6 +560,40 @@ func postJSON(t *testing.T, h http.HandlerFunc, body any) *httptest.ResponseReco
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	return rr
+}
+
+func postRaw(t *testing.T, h http.HandlerFunc, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
+}
+
+func installFakeIptables(t *testing.T, scriptBody string) string {
+	t.Helper()
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "iptables.log")
+	scriptPath := filepath.Join(dir, "iptables")
+	script := "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"$IPTABLES_LOG\"\n" + scriptBody
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("os.WriteFile fake iptables: %v", err)
+	}
+	t.Setenv("IPTABLES_LOG", logPath)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+func readCommandLog(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		t.Fatalf("os.ReadFile command log: %v", err)
+	}
+	return splitNonEmptyLines(string(raw))
 }
 
 func TestCreateEndpointReplaysAggregateNetNSRules(t *testing.T) {
@@ -572,6 +794,125 @@ func TestJoinNetworkUsesCommandAndNetNSBackends(t *testing.T) {
 	}
 }
 
+func TestJoinNetworkRejectsMissingNetworkAndEndpoint(t *testing.T) {
+	store := newTestStore(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:       "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID:   "vaultwarden",
+				IPv4Gateway: netip.MustParsePrefix("172.20.0.1/16"),
+				Endpoints:   map[string]*db.DockerEndpoint{},
+			},
+		},
+	})
+	p := &plugin{db: store}
+
+	tests := []struct {
+		name string
+		body map[string]any
+		want string
+	}{
+		{
+			name: "missing network",
+			body: map[string]any{"NetworkID": "missing", "EndpointID": "abcd1234"},
+			want: "network not found",
+		},
+		{
+			name: "missing endpoint",
+			body: map[string]any{"NetworkID": "vaultwarden", "EndpointID": "abcd1234"},
+			want: "endpoint not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := postJSON(t, p.JoinNetwork, tt.body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("JoinNetwork status = %d body=%s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tt.want) {
+				t.Fatalf("JoinNetwork body = %q, want %q", rr.Body.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestJoinNetworkReturnsInternalErrorWhenCommandFails(t *testing.T) {
+	store := newTestStore(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:       "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID:   "vaultwarden",
+				IPv4Gateway: netip.MustParsePrefix("172.20.0.1/16"),
+				Endpoints: map[string]*db.DockerEndpoint{
+					"abcd1234": {EndpointID: "abcd1234", IPv4: netip.MustParsePrefix("172.20.0.2/16")},
+				},
+			},
+		},
+	})
+	p := &plugin{
+		db: store,
+		runCommandFunc: func(name string, args ...string) error {
+			return errors.New("ip link add failed")
+		},
+		runInNetNSFunc: func(netns string, f func() error) error {
+			t.Fatal("runInNetNSFunc should not be called when addJoinVeth fails")
+			return nil
+		},
+	}
+
+	rr := postJSON(t, p.JoinNetwork, map[string]any{
+		"NetworkID":  "vaultwarden",
+		"EndpointID": "abcd1234",
+	})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("JoinNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "ip link add failed") {
+		t.Fatalf("JoinNetwork body = %q, want command error", rr.Body.String())
+	}
+}
+
+func TestJoinNetworkReturnsInternalErrorWhenNetNSEntryFails(t *testing.T) {
+	store := newTestStore(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:       "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID:   "vaultwarden",
+				IPv4Gateway: netip.MustParsePrefix("172.20.0.1/16"),
+				Endpoints: map[string]*db.DockerEndpoint{
+					"abcd1234": {EndpointID: "abcd1234", IPv4: netip.MustParsePrefix("172.20.0.2/16")},
+				},
+			},
+		},
+	})
+	var commands []recordedCommand
+	p := &plugin{
+		db:             store,
+		runCommandFunc: recordingRunner(&commands, nil),
+		runInNetNSFunc: func(netns string, f func() error) error {
+			return errors.New("enter netns failed")
+		},
+	}
+
+	rr := postJSON(t, p.JoinNetwork, map[string]any{
+		"NetworkID":  "vaultwarden",
+		"EndpointID": "abcd1234",
+	})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("JoinNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "enter netns failed") {
+		t.Fatalf("JoinNetwork body = %q, want netns error", rr.Body.String())
+	}
+	want := []recordedCommand{
+		{name: "ip", args: []string{"link", "add", "yv-abcd", "type", "veth", "peer", "name", "yv-abcdp"}},
+		{name: "ip", args: []string{"link", "set", "yv-abcd", "netns", "/var/run/netns/yeet-vaultwarden-ns"}},
+	}
+	if diff := cmp.Diff(want, commands, cmp.AllowUnexported(recordedCommand{})); diff != "" {
+		t.Fatalf("commands mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestLeaveNetworkDeletesEndpointAndSyncsPortForwards(t *testing.T) {
 	root := t.TempDir()
 	store := db.NewStore(filepath.Join(root, "db.json"), filepath.Join(root, "services"))
@@ -642,6 +983,122 @@ func TestLeaveNetworkDeletesEndpointAndSyncsPortForwards(t *testing.T) {
 	}
 }
 
+func TestLeaveNetworkRejectsMissingNetworkAndEndpoint(t *testing.T) {
+	store := newTestStore(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+				Endpoints: map[string]*db.DockerEndpoint{},
+			},
+		},
+	})
+	p := &plugin{db: store}
+
+	tests := []struct {
+		name string
+		body map[string]any
+		want string
+	}{
+		{
+			name: "missing network",
+			body: map[string]any{"NetworkID": "missing", "EndpointID": "abcd1234"},
+			want: "network not found",
+		},
+		{
+			name: "missing endpoint",
+			body: map[string]any{"NetworkID": "vaultwarden", "EndpointID": "abcd1234"},
+			want: "endpoint not found",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rr := postJSON(t, p.LeaveNetwork, tt.body)
+			if rr.Code != http.StatusInternalServerError {
+				t.Fatalf("LeaveNetwork status = %d body=%s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tt.want) {
+				t.Fatalf("LeaveNetwork body = %q, want %q", rr.Body.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestLeaveNetworkReturnsInternalErrorWhenNetNSEntryFails(t *testing.T) {
+	store := newTestStore(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"abcd1234": {EndpointID: "abcd1234", IPv4: netip.MustParsePrefix("172.20.0.2/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/8080": {EndpointID: "abcd1234", Port: 80},
+				},
+			},
+		},
+	})
+	p := &plugin{
+		db:             store,
+		runCommandFunc: recordingRunner(&[]recordedCommand{}, nil),
+		runInNetNSFunc: func(netns string, f func() error) error {
+			return errors.New("enter netns failed")
+		},
+	}
+
+	rr := postJSON(t, p.LeaveNetwork, map[string]any{
+		"NetworkID":  "vaultwarden",
+		"EndpointID": "abcd1234",
+	})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("LeaveNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "enter netns failed") {
+		t.Fatalf("LeaveNetwork body = %q, want netns error", rr.Body.String())
+	}
+}
+
+func TestLeaveNetworkJoinsSyncAndCommandErrors(t *testing.T) {
+	store := newTestStore(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"other": {EndpointID: "other", IPv4: netip.MustParsePrefix("172.20.0.3/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/9090": {EndpointID: "other", Port: 90},
+				},
+			},
+		},
+	})
+	p := &plugin{
+		db: store,
+		runCommandFunc: func(name string, args ...string) error {
+			return errors.New("ip link del failed")
+		},
+		runInNetNSFunc: func(netns string, f func() error) error {
+			return f()
+		},
+		natBackendFunc: func() natRuleBackend {
+			return &fakeNatRuleBackend{ensureErr: errors.New("ensure chains failed")}
+		},
+	}
+
+	err := p.leaveNetwork(leaveNetworkState{
+		netns:  "/var/run/netns/yeet-vaultwarden-ns",
+		ifName: "yv-abcd",
+	})
+	if err == nil {
+		t.Fatal("leaveNetwork returned nil error")
+	}
+	if !strings.Contains(err.Error(), "ensure chains failed") || !strings.Contains(err.Error(), "ip link del failed") {
+		t.Fatalf("leaveNetwork error = %q, want sync and command errors", err)
+	}
+}
+
 func TestEndpointPortMapRejectsPortRanges(t *testing.T) {
 	_, err := endpointPortMap("web", []portMap{
 		{Proto: 6, Port: 3000, HostPort: 3000, HostPortEnd: 3002},
@@ -651,6 +1108,18 @@ func TestEndpointPortMapRejectsPortRanges(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported port range") {
 		t.Fatalf("endpointPortMap error = %q, want unsupported port range", err)
+	}
+}
+
+func TestEndpointPortMapRejectsUnsupportedProtocol(t *testing.T) {
+	_, err := endpointPortMap("web", []portMap{
+		{Proto: 1, Port: 3000, HostPort: 3000},
+	})
+	if err == nil {
+		t.Fatal("endpointPortMap returned nil error for unsupported protocol")
+	}
+	if !strings.Contains(err.Error(), "unsupported protocol") {
+		t.Fatalf("endpointPortMap error = %q, want unsupported protocol", err)
 	}
 }
 
@@ -743,6 +1212,136 @@ func TestRevokeExternalConnectivityUnknownEndpointIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestDeleteNetworkRemovesEmptyNetwork(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+			},
+		},
+	}, &syncs)
+
+	rr := postJSON(t, p.DeleteNetwork, map[string]any{
+		"NetworkID": "vaultwarden",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DeleteNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	dv, err := p.db.Get()
+	if err != nil {
+		t.Fatalf("db.Get: %v", err)
+	}
+	if _, ok := dv.AsStruct().DockerNetworks["vaultwarden"]; ok {
+		t.Fatal("network still exists after delete")
+	}
+}
+
+func TestDeleteNetworkRejectsNetworkWithEndpoints(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"app": {EndpointID: "app", IPv4: netip.MustParsePrefix("172.20.0.2/16")},
+				},
+			},
+		},
+	}, &syncs)
+
+	rr := postJSON(t, p.DeleteNetwork, map[string]any{
+		"NetworkID": "vaultwarden",
+	})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("DeleteNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "network still has endpoints") {
+		t.Fatalf("DeleteNetwork body = %q, want endpoint error", rr.Body.String())
+	}
+}
+
+func TestDeleteEndpointRemovesEndpointAndSyncsPortForwards(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"app":   {EndpointID: "app", IPv4: netip.MustParsePrefix("172.20.0.2/16")},
+					"other": {EndpointID: "other", IPv4: netip.MustParsePrefix("172.20.0.3/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/8080": {EndpointID: "app", Port: 80},
+					"6/9090": {EndpointID: "other", Port: 90},
+				},
+			},
+		},
+	}, &syncs)
+
+	rr := postJSON(t, p.DeleteEndpoint, map[string]any{
+		"NetworkID":  "vaultwarden",
+		"EndpointID": "app",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DeleteEndpoint status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(syncs) != 1 {
+		t.Fatalf("sync count = %d, want 1", len(syncs))
+	}
+	wantRules := []portForwardRule{
+		{Proto: "tcp", HostPort: 9090, TargetIP: "172.20.0.3", TargetPort: 90},
+	}
+	if diff := cmp.Diff(wantRules, syncs[0].rules); diff != "" {
+		t.Fatalf("sync rules mismatch (-want +got):\n%s", diff)
+	}
+	dv, err := p.db.Get()
+	if err != nil {
+		t.Fatalf("db.Get: %v", err)
+	}
+	network := dv.AsStruct().DockerNetworks["vaultwarden"]
+	if _, ok := network.Endpoints["app"]; ok {
+		t.Fatal("endpoint still exists after delete")
+	}
+	if _, ok := network.PortMap["6/8080"]; ok {
+		t.Fatal("port map still exists after delete")
+	}
+}
+
+func TestDeleteEndpointReturnsSyncError(t *testing.T) {
+	store := newTestStore(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"app": {EndpointID: "app", IPv4: netip.MustParsePrefix("172.20.0.2/16")},
+				},
+			},
+		},
+	})
+	p := &plugin{
+		db: store,
+		syncPortForwardsFunc: func(netns string, desired []portForwardRule) error {
+			return errors.New("sync failed")
+		},
+	}
+
+	rr := postJSON(t, p.DeleteEndpoint, map[string]any{
+		"NetworkID":  "vaultwarden",
+		"EndpointID": "app",
+	})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("DeleteEndpoint status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "sync failed") {
+		t.Fatalf("DeleteEndpoint body = %q, want sync error", rr.Body.String())
+	}
+}
+
 func TestRemoveEndpointPortMappings(t *testing.T) {
 	network := &db.DockerNetwork{
 		PortMap: map[string]*db.EndpointPort{
@@ -796,6 +1395,48 @@ func TestEnsureBridgeCreatesBridgeWhenMissing(t *testing.T) {
 	}
 }
 
+func TestWithCommandDefaultsAddsIptablesWait(t *testing.T) {
+	tests := []struct {
+		name string
+		cmd  string
+		args []string
+		want []string
+	}{
+		{
+			name: "non iptables unchanged",
+			cmd:  "ip",
+			args: []string{"link", "show"},
+			want: []string{"link", "show"},
+		},
+		{
+			name: "iptables adds wait",
+			cmd:  "iptables",
+			args: []string{"-t", "nat", "-L"},
+			want: []string{"-w", "-t", "nat", "-L"},
+		},
+		{
+			name: "iptables keeps short wait",
+			cmd:  "iptables",
+			args: []string{"-w", "-t", "nat", "-L"},
+			want: []string{"-w", "-t", "nat", "-L"},
+		},
+		{
+			name: "iptables keeps long wait",
+			cmd:  "iptables",
+			args: []string{"--wait", "-t", "nat", "-L"},
+			want: []string{"--wait", "-t", "nat", "-L"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := withCommandDefaults(tt.cmd, tt.args)
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Fatalf("withCommandDefaults mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
 func TestEnsurePostroutingChainAddsMissingRules(t *testing.T) {
 	var commands []recordedCommand
 	err := ensurePostroutingChainWithRunner(recordingRunner(&commands, map[string]bool{
@@ -820,6 +1461,72 @@ func TestEnsurePostroutingChainAddsMissingRules(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, commands, cmp.AllowUnexported(recordedCommand{})); diff != "" {
 		t.Fatalf("commands mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestIptablesBackendCommandPlanningUsesFakeBinary(t *testing.T) {
+	logPath := installFakeIptables(t, `
+if [ "$*" = "-w -t nat -S YEET_PREROUTING" ]; then
+  printf '%s\n\n' "-A YEET_PREROUTING -i br0 -j RETURN"
+  exit 0
+fi
+case "$*" in
+  "-w -t nat -L YEET_PREROUTING"|"-w -t nat -L YEET_OUTPUT"|"-w -t nat -C PREROUTING -j YEET_PREROUTING"|"-w -t nat -C OUTPUT -o lo -j YEET_OUTPUT")
+    exit 1
+    ;;
+esac
+exit 0
+`)
+	backend := iptablesBackend{}
+
+	rules, err := backend.ListChain(preroutingChainName)
+	if err != nil {
+		t.Fatalf("ListChain: %v", err)
+	}
+	if diff := cmp.Diff([]string{"-A YEET_PREROUTING -i br0 -j RETURN"}, rules); diff != "" {
+		t.Fatalf("ListChain rules mismatch (-want +got):\n%s", diff)
+	}
+	if err := backend.FlushChain(preroutingChainName); err != nil {
+		t.Fatalf("FlushChain: %v", err)
+	}
+	if err := backend.AppendRule(preroutingChainName, "-i", "br0", "-j", "RETURN"); err != nil {
+		t.Fatalf("AppendRule: %v", err)
+	}
+	if err := backend.DeleteRule("OUTPUT", "-o", "lo", "-j", "DNAT"); err != nil {
+		t.Fatalf("DeleteRule: %v", err)
+	}
+	if err := backend.EnsureChains(); err != nil {
+		t.Fatalf("EnsureChains: %v", err)
+	}
+
+	wantCommands := []string{
+		"-w -t nat -S YEET_PREROUTING",
+		"-w -t nat -F YEET_PREROUTING",
+		"-w -t nat -A YEET_PREROUTING -i br0 -j RETURN",
+		"-w -t nat -D OUTPUT -o lo -j DNAT",
+		"-w -t nat -L YEET_PREROUTING",
+		"-w -t nat -N YEET_PREROUTING",
+		"-w -t nat -C PREROUTING -j YEET_PREROUTING",
+		"-w -t nat -A PREROUTING -j YEET_PREROUTING",
+		"-w -t nat -L YEET_OUTPUT",
+		"-w -t nat -N YEET_OUTPUT",
+		"-w -t nat -C OUTPUT -o lo -j YEET_OUTPUT",
+		"-w -t nat -A OUTPUT -o lo -j YEET_OUTPUT",
+	}
+	if diff := cmp.Diff(wantCommands, readCommandLog(t, logPath)); diff != "" {
+		t.Fatalf("iptables commands mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestIptablesBackendListChainWrapsCommandError(t *testing.T) {
+	installFakeIptables(t, "exit 2\n")
+
+	_, err := iptablesBackend{}.ListChain("MISSING")
+	if err == nil {
+		t.Fatal("ListChain returned nil error")
+	}
+	if !strings.Contains(err.Error(), `list chain "MISSING"`) {
+		t.Fatalf("ListChain error = %q, want chain context", err)
 	}
 }
 
@@ -857,5 +1564,133 @@ func TestSyncNetNSPortForwardsRemovesStaleRules(t *testing.T) {
 
 	if len(backend.output) != 0 {
 		t.Fatalf("expected legacy direct OUTPUT rules to be removed, got %#v", backend.output)
+	}
+}
+
+func TestSyncNetNSPortForwardsPropagatesBackendErrors(t *testing.T) {
+	desired := []portForwardRule{
+		{Proto: "tcp", HostPort: 80, TargetIP: "172.20.0.2", TargetPort: 80},
+	}
+	tests := []struct {
+		name    string
+		backend *fakeNatRuleBackend
+		want    string
+	}{
+		{
+			name:    "ensure chains",
+			backend: &fakeNatRuleBackend{ensureErr: errors.New("ensure failed")},
+			want:    "ensure yeet nat chains",
+		},
+		{
+			name:    "list legacy output",
+			backend: &fakeNatRuleBackend{listErr: map[string]error{"OUTPUT": errors.New("list failed")}},
+			want:    "list output rules",
+		},
+		{
+			name: "delete legacy output",
+			backend: &fakeNatRuleBackend{
+				output: []string{
+					"-A OUTPUT -o lo -p tcp -m tcp --dport 80 -j DNAT --to-destination 172.20.0.2:80",
+				},
+				deleteErr: map[string]error{"OUTPUT": errors.New("delete failed")},
+			},
+			want: "delete legacy output rule",
+		},
+		{
+			name:    "flush prerouting",
+			backend: &fakeNatRuleBackend{flushErr: map[string]error{preroutingChainName: errors.New("flush failed")}},
+			want:    "flush prerouting chain",
+		},
+		{
+			name:    "flush output",
+			backend: &fakeNatRuleBackend{flushErr: map[string]error{outputChainName: errors.New("flush failed")}},
+			want:    "flush output chain",
+		},
+		{
+			name:    "append bridge guard",
+			backend: &fakeNatRuleBackend{appendErr: map[string]error{preroutingChainName: errors.New("append failed")}},
+			want:    "append bridge guard",
+		},
+		{
+			name:    "append output rule",
+			backend: &fakeNatRuleBackend{appendErr: map[string]error{outputChainName: errors.New("append failed")}},
+			want:    "append output rule",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := syncNetNSPortForwards("yeet-vaultwarden-ns", desired, tt.backend)
+			if err == nil {
+				t.Fatal("syncNetNSPortForwards returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("syncNetNSPortForwards error = %q, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRuleParsingHelpers(t *testing.T) {
+	if isLegacyDirectOutputRule("-A OUTPUT -o eth0 -j DNAT") {
+		t.Fatal("eth0 output rule detected as legacy loopback rule")
+	}
+	if isLegacyDirectOutputRule("-A INPUT -o lo -j DNAT") {
+		t.Fatal("non-OUTPUT rule detected as legacy output rule")
+	}
+
+	got, err := chainRuleArgs("-A OUTPUT -o lo -j DNAT", "OUTPUT")
+	if err != nil {
+		t.Fatalf("chainRuleArgs: %v", err)
+	}
+	if diff := cmp.Diff([]string{"-o", "lo", "-j", "DNAT"}, got); diff != "" {
+		t.Fatalf("chainRuleArgs mismatch (-want +got):\n%s", diff)
+	}
+	if _, err := chainRuleArgs("-A PREROUTING -j DNAT", "OUTPUT"); err == nil {
+		t.Fatal("chainRuleArgs returned nil error for wrong chain")
+	}
+}
+
+func TestNewRoutesHandleBasicPluginEndpoints(t *testing.T) {
+	handler := New(newTestStore(t, &db.Data{}))
+
+	tests := []struct {
+		path   string
+		status int
+		want   string
+	}{
+		{path: "/Plugin.Activate", status: http.StatusOK, want: `"NetworkDriver"`},
+		{path: "/NetworkDriver.GetCapabilities", status: http.StatusOK, want: `"Scope":"local"`},
+		{path: "/NetworkDriver.EndpointOperInfo", status: http.StatusOK, want: `"Err":""`},
+		{path: "/not-implemented", status: http.StatusNotImplemented, want: "Not implemented"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader("{}"))
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tt.status {
+				t.Fatalf("%s status = %d body=%s", tt.path, rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), tt.want) {
+				t.Fatalf("%s body = %q, want %q", tt.path, rr.Body.String(), tt.want)
+			}
+		})
+	}
+}
+
+type errorReadCloser struct{}
+
+func (errorReadCloser) Read(p []byte) (int, error) {
+	return 0, errors.New("read failed")
+}
+
+func (errorReadCloser) Close() error { return nil }
+
+func TestRequestLoggerHandlesReadError(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Body = errorReadCloser{}
+
+	if got := requestLogger(req); got != nil {
+		t.Fatalf("requestLogger = %#v, want nil", got)
 	}
 }

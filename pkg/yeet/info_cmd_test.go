@@ -5,9 +5,12 @@
 package yeet
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -83,6 +86,105 @@ func TestNormalizeInfoFormat(t *testing.T) {
 				t.Fatalf("normalizeInfoFormat = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsInfoJSONFormat(t *testing.T) {
+	tests := []struct {
+		format string
+		want   bool
+	}{
+		{format: "json", want: true},
+		{format: "json-pretty", want: true},
+		{format: "plain"},
+		{format: "text"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.format, func(t *testing.T) {
+			if got := isInfoJSONFormat(tt.format); got != tt.want {
+				t.Fatalf("isInfoJSONFormat(%q) = %v, want %v", tt.format, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNewInfoOutputIncludesHostInfoOnlyWhenAvailable(t *testing.T) {
+	hostInfo := serverInfo{Version: "v0.2.3", GOOS: "linux", GOARCH: "arm64"}
+	client := clientInfo{Found: true}
+	server := catchrpc.ServiceInfoResponse{Found: true}
+
+	withHost := newInfoOutput("svc", "host-a", hostInfo, nil, client, server)
+	if withHost.HostInfo == nil || withHost.HostInfo.Version != "v0.2.3" {
+		t.Fatalf("HostInfo = %#v, want populated host info", withHost.HostInfo)
+	}
+
+	withoutHost := newInfoOutput("svc", "host-a", hostInfo, errors.New("offline"), client, server)
+	if withoutHost.HostInfo != nil {
+		t.Fatalf("HostInfo = %#v, want nil when host info failed", withoutHost.HostInfo)
+	}
+}
+
+func TestEncodeInfoOutputFormatsJSON(t *testing.T) {
+	out := infoOutput{Service: "svc", Host: "host-a", Client: clientInfo{Found: true}}
+
+	var compact bytes.Buffer
+	if err := encodeInfoOutput(&compact, "json", out); err != nil {
+		t.Fatalf("encodeInfoOutput compact error: %v", err)
+	}
+	var decoded infoOutput
+	if err := json.Unmarshal(compact.Bytes(), &decoded); err != nil {
+		t.Fatalf("compact JSON did not decode: %v\n%s", err, compact.String())
+	}
+	if decoded.Service != "svc" || decoded.Host != "host-a" {
+		t.Fatalf("decoded = %#v, want service and host", decoded)
+	}
+
+	var pretty bytes.Buffer
+	if err := encodeInfoOutput(&pretty, "json-pretty", out); err != nil {
+		t.Fatalf("encodeInfoOutput pretty error: %v", err)
+	}
+	if !strings.Contains(pretty.String(), "\n  \"service\": \"svc\"") {
+		t.Fatalf("pretty output = %q, want indented JSON", pretty.String())
+	}
+}
+
+func TestBuildClientInfo(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &ProjectConfig{}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:     "svc-a",
+		Host:     "host-a",
+		Type:     serviceTypeRun,
+		Payload:  "ghcr.io/example/app:latest",
+		EnvFile:  ".env",
+		Schedule: "@hourly",
+		Args:     []string{"--port", "8080"},
+	})
+	loc := &projectConfigLocation{Path: filepath.Join(dir, projectConfigName), Dir: dir, Config: cfg}
+
+	got := buildClientInfo(loc, "svc-a", "host-a", serverInfo{}, nil)
+	if !got.Found {
+		t.Fatalf("Found = false, want true: %#v", got)
+	}
+	if got.ConfigFile != loc.Path || got.ConfigDir != dir {
+		t.Fatalf("config paths = %q %q, want %q %q", got.ConfigFile, got.ConfigDir, loc.Path, dir)
+	}
+	if got.Entry == nil || got.Entry.Name != "svc-a" || got.Entry.Host != "host-a" || got.Entry.Type != serviceTypeRun {
+		t.Fatalf("Entry = %#v, want saved service entry", got.Entry)
+	}
+	if got.Payload == nil || got.Payload.Kind != "image" || !got.Payload.ImageRef {
+		t.Fatalf("Payload = %#v, want image payload info", got.Payload)
+	}
+
+	missingConfig := buildClientInfo(nil, "svc-a", "host-a", serverInfo{}, nil)
+	if missingConfig.Found || missingConfig.Message != "no yeet.toml found" {
+		t.Fatalf("missing config info = %#v", missingConfig)
+	}
+
+	missingEntry := buildClientInfo(loc, "svc-b", "host-a", serverInfo{}, nil)
+	if missingEntry.Found || missingEntry.Message != "no entry for svc-b@host-a" {
+		t.Fatalf("missing entry info = %#v", missingEntry)
 	}
 }
 
@@ -329,6 +431,23 @@ func TestInfoClientPayloadRows(t *testing.T) {
 	assertInfoRows(t, got, want)
 }
 
+func TestInfoClientConfigRows(t *testing.T) {
+	got := clientConfigRows(clientInfo{})
+	assertInfoRows(t, got, []infoRow{{Label: "Config", Value: "no local config"}})
+
+	got = clientConfigRows(clientInfo{Message: "no entry"})
+	assertInfoRows(t, got, []infoRow{{Label: "Config", Value: "no entry"}})
+
+	got = clientConfigRows(clientInfo{
+		Found: true,
+		Entry: &clientServiceEntry{Host: "host-a", Type: serviceTypeCron},
+	})
+	assertInfoRows(t, got, []infoRow{
+		{Label: "Saved host", Value: "host-a"},
+		{Label: "Saved type", Value: serviceTypeCron},
+	})
+}
+
 func TestInfoClientPayloadRowsPrefersResolveError(t *testing.T) {
 	payload := &clientPayloadInfo{
 		Stored:     "missing",
@@ -360,6 +479,60 @@ func TestInfoClientEntryMetadataRows(t *testing.T) {
 		{Label: "Schedule", Value: "@hourly"},
 	}
 	assertInfoRows(t, got, want)
+}
+
+func TestInfoRenderServerSection(t *testing.T) {
+	got := renderServerSection(catchrpc.ServiceInfoResponse{})
+	if got.Title != "Server (catch)" {
+		t.Fatalf("Title = %q, want Server (catch)", got.Title)
+	}
+	assertInfoRows(t, got.Rows, []infoRow{{Label: "Status", Value: "not installed"}})
+
+	got = renderServerSection(catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info: catchrpc.ServiceInfo{
+			ServiceType:      "docker",
+			Generation:       2,
+			LatestGeneration: 3,
+			Staged:           true,
+			Paths:            catchrpc.ServicePaths{Root: "/srv/yeet/services/app"},
+		},
+	})
+	assertInfoRows(t, got.Rows, []infoRow{
+		{Label: "Service type", Value: "docker"},
+		{Label: "Generation", Value: "2 (latest 3)"},
+		{Label: "Staged changes", Value: "yes"},
+		{Label: "Root dir", Value: "/srv/yeet/services/app"},
+	})
+}
+
+func TestInfoRenderNetworkSection(t *testing.T) {
+	got := renderNetworkSection(catchrpc.ServiceInfoResponse{})
+	if got.Title != "Network" || got.Rows != nil {
+		t.Fatalf("renderNetworkSection not found = %#v, want empty Network section", got)
+	}
+
+	got = renderNetworkSection(catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info: catchrpc.ServiceInfo{
+			Network: catchrpc.ServiceNetwork{
+				SvcIP: "10.0.0.2",
+				Tailscale: &catchrpc.ServiceTailscale{
+					Interface: "tailscale0",
+				},
+				Macvlan: &catchrpc.ServiceMacvlan{
+					Interface: "macvlan0",
+					Parent:    "eth0",
+				},
+			},
+		},
+	})
+	assertInfoRows(t, got.Rows, []infoRow{
+		{Label: "IPs", Value: ""},
+		{Label: "  service", Value: "10.0.0.2"},
+		{Label: "Tailscale", Value: "tailscale0"},
+		{Label: "Macvlan", Value: "macvlan0, parent eth0"},
+	})
 }
 
 func TestInfoRenderRuntimeSection(t *testing.T) {
@@ -449,6 +622,23 @@ func TestInfoRenderImagesSection(t *testing.T) {
 			}
 			assertInfoRows(t, got.Rows, tt.want)
 		})
+	}
+}
+
+func TestInfoFormatClientServiceType(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{serviceTypeCron, "cron service (local config)"},
+		{serviceTypeRun, "run service (local config)"},
+		{"custom", "custom"},
+	}
+
+	for _, tt := range tests {
+		if got := formatClientServiceType(tt.in); got != tt.want {
+			t.Fatalf("formatClientServiceType(%q) = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
 

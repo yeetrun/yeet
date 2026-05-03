@@ -6,12 +6,98 @@ package yeet
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestPrefsHostSettersAndOverrides(t *testing.T) {
+	oldPrefs := loadedPrefs
+	oldService := serviceOverride
+	oldHostOverride := hostOverride
+	oldHostOverrideSet := hostOverrideSet
+	defer func() {
+		loadedPrefs = oldPrefs
+		serviceOverride = oldService
+		hostOverride = oldHostOverride
+		hostOverrideSet = oldHostOverrideSet
+	}()
+	loadedPrefs = prefs{DefaultHost: "host-a"}
+	serviceOverride = ""
+	resetHostOverride()
+
+	SetHost("")
+	if Host() != "host-a" || loadedPrefs.changed {
+		t.Fatalf("empty SetHost changed prefs: %#v", loadedPrefs)
+	}
+	SetHost("host-a")
+	if loadedPrefs.changed {
+		t.Fatalf("same SetHost marked changed: %#v", loadedPrefs)
+	}
+	SetHost("host-b")
+	if Host() != "host-b" || !loadedPrefs.changed {
+		t.Fatalf("SetHost host-b prefs = %#v, want changed host-b", loadedPrefs)
+	}
+	if got, ok := HostOverride(); ok || got != "" {
+		t.Fatalf("HostOverride before set = %q %v, want empty false", got, ok)
+	}
+
+	SetHostOverride("host-c")
+	if got, ok := HostOverride(); !ok || got != "host-c" {
+		t.Fatalf("HostOverride = %q %v, want host-c true", got, ok)
+	}
+	SetServiceOverride("svc-a@host-d")
+	if serviceOverride != "svc-a" {
+		t.Fatalf("serviceOverride = %q, want svc-a", serviceOverride)
+	}
+	if got, ok := HostOverride(); !ok || got != "host-d" {
+		t.Fatalf("HostOverride after service = %q %v, want host-d true", got, ok)
+	}
+}
+
+func TestPrefsLoadReadsHomePrefs(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("HOME", tmp)
+	if err := os.Mkdir(filepath.Join(tmp, ".yeet"), 0o755); err != nil {
+		t.Fatalf("Mkdir .yeet: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmp, ".yeet", "prefs.json"), []byte(`{"defaultHost":"host-a"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile prefs: %v", err)
+	}
+
+	var p prefs
+	if err := p.load(); err != nil {
+		t.Fatalf("prefs.load error: %v", err)
+	}
+	if p.DefaultHost != "host-a" {
+		t.Fatalf("DefaultHost = %q, want host-a", p.DefaultHost)
+	}
+}
+
+func TestPrefsSaveReturnsMkdirError(t *testing.T) {
+	tmp := t.TempDir()
+	parentFile := filepath.Join(tmp, "not-dir")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile parent: %v", err)
+	}
+	oldPrefsFile := prefsFile
+	prefsFile = filepath.Join(parentFile, "prefs.json")
+	t.Cleanup(func() { prefsFile = oldPrefsFile })
+
+	err := (&prefs{DefaultHost: "host-a"}).save()
+	if err == nil {
+		t.Fatal("prefs.save error = nil, want mkdir error")
+	}
+}
+
+func TestAsJSONFallsBackForUnsupportedValues(t *testing.T) {
+	if got := asJSON(complex(1, 2)); got != "(1+2i)" {
+		t.Fatalf("asJSON complex = %q, want fmt fallback", got)
+	}
+}
 
 func TestHandlePrefsWarnsWhenPrefsChanged(t *testing.T) {
 	restore := stubPrefsState(t, prefs{DefaultHost: "host-a", changed: true})
@@ -76,6 +162,29 @@ func TestHandlePrefsSaveWritesPrefsFile(t *testing.T) {
 	}
 	if !strings.Contains(string(b), `"defaultHost": "host-b"`) {
 		t.Fatalf("prefs file = %q, want saved host", b)
+	}
+}
+
+func TestHandlePrefsSaveReportsSaveError(t *testing.T) {
+	tmp := t.TempDir()
+	parentFile := filepath.Join(tmp, "not-dir")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile parent: %v", err)
+	}
+	restore := stubPrefsState(t, prefs{DefaultHost: "host-b", changed: true})
+	defer restore()
+	oldPrefsFile := prefsFile
+	prefsFile = filepath.Join(parentFile, "prefs.json")
+	t.Cleanup(func() { prefsFile = oldPrefsFile })
+
+	_, _, err := capturePrefsOutput(t, func() error {
+		return HandlePrefs(context.Background(), []string{"--save"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to save preferences") {
+		t.Fatalf("HandlePrefs error = %v, want save error", err)
+	}
+	if !errors.Is(err, os.ErrExist) && !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("HandlePrefs error = %v, want filesystem cause", err)
 	}
 }
 

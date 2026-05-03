@@ -7,6 +7,7 @@ package catch
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -291,4 +292,292 @@ func TestClearStageNoChangesReturnsWriteError(t *testing.T) {
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("clearStage error = %v, want %v", err, writeErr)
 	}
+}
+
+func TestHumanReadableBytes(t *testing.T) {
+	tests := []struct {
+		bytes float64
+		want  string
+	}{
+		{bytes: 512, want: "512.00 B"},
+		{bytes: 1024, want: "1024.00 B"},
+		{bytes: 1536, want: "1.50 KB"},
+		{bytes: 2 * 1024 * 1024, want: "2.00 MB"},
+	}
+
+	for _, tc := range tests {
+		if got := humanReadableBytes(tc.bytes); got != tc.want {
+			t.Fatalf("humanReadableBytes(%v) = %q, want %q", tc.bytes, got, tc.want)
+		}
+	}
+}
+
+func TestRunCmdFuncBuildsInstallConfigWithoutLiveInstaller(t *testing.T) {
+	var gotAction string
+	var gotPayload string
+	var gotCfg FileInstallerCfg
+	execer := &ttyExecer{
+		s:              newTestServer(t),
+		sn:             "svc-run",
+		user:           "app",
+		payloadName:    "payload.bin",
+		rawRW:          bytes.NewBufferString("binary-payload"),
+		rw:             &bytes.Buffer{},
+		bypassPtyInput: true,
+		installFunc: func(action string, in io.Reader, cfg FileInstallerCfg) error {
+			gotAction = action
+			payload, err := io.ReadAll(in)
+			if err != nil {
+				t.Fatalf("ReadAll payload: %v", err)
+			}
+			gotPayload = string(payload)
+			gotCfg = cfg
+			return nil
+		},
+	}
+
+	flags := cli.RunFlags{
+		Pull:          true,
+		Net:           "ts",
+		TsVer:         "1.2.3",
+		TsExit:        "exit-node",
+		TsTags:        []string{"tag:web"},
+		TsAuthKey:     "tskey-test",
+		MacvlanParent: "eth0",
+		MacvlanMac:    "02:00:00:00:00:01",
+		MacvlanVlan:   42,
+		Publish:       []string{"8080:80"},
+	}
+	if err := execer.runCmdFunc(flags, []string{"--flag"}); err != nil {
+		t.Fatalf("runCmdFunc returned error: %v", err)
+	}
+
+	if gotAction != "run" {
+		t.Fatalf("action = %q, want run", gotAction)
+	}
+	if gotPayload != "binary-payload" {
+		t.Fatalf("payload = %q, want binary-payload", gotPayload)
+	}
+	if gotCfg.ServiceName != "svc-run" || gotCfg.User != "app" || gotCfg.PayloadName != "payload.bin" {
+		t.Fatalf("installer cfg identity = %#v", gotCfg)
+	}
+	if !gotCfg.Pull {
+		t.Fatal("expected pull flag to be copied")
+	}
+	if !reflect.DeepEqual(gotCfg.Args, []string{"--flag"}) {
+		t.Fatalf("args = %#v, want --flag", gotCfg.Args)
+	}
+	if gotCfg.Network.Interfaces != "ts" || gotCfg.Network.Tailscale.Version != "1.2.3" {
+		t.Fatalf("network cfg = %#v, want tailscale settings", gotCfg.Network)
+	}
+	if gotCfg.Network.Macvlan.Parent != "eth0" || gotCfg.Network.Macvlan.VLAN != 42 {
+		t.Fatalf("macvlan cfg = %#v, want parent eth0 vlan 42", gotCfg.Network.Macvlan)
+	}
+	if !reflect.DeepEqual(gotCfg.Publish, []string{"8080:80"}) {
+		t.Fatalf("publish = %#v, want 8080:80", gotCfg.Publish)
+	}
+}
+
+func TestRunCmdFuncRejectsSystemServiceBeforeInstall(t *testing.T) {
+	called := false
+	execer := &ttyExecer{
+		sn: SystemService,
+		installFunc: func(string, io.Reader, FileInstallerCfg) error {
+			called = true
+			return nil
+		},
+	}
+
+	err := execer.runCmdFunc(cli.RunFlags{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot run, reserved service name") {
+		t.Fatalf("run error = %v, want reserved service name", err)
+	}
+	if called {
+		t.Fatal("install seam was called for reserved system service")
+	}
+}
+
+func TestCronCmdFuncConvertsCronAndInstallsTimer(t *testing.T) {
+	var gotCfg FileInstallerCfg
+	execer := &ttyExecer{
+		s:     newTestServer(t),
+		sn:    "svc-cron",
+		rawRW: bytes.NewBufferString("payload"),
+		rw:    &bytes.Buffer{},
+		installFunc: func(action string, in io.Reader, cfg FileInstallerCfg) error {
+			if action != "cron" {
+				t.Fatalf("action = %q, want cron", action)
+			}
+			gotCfg = cfg
+			return nil
+		},
+	}
+
+	if err := execer.cronCmdFunc("* * * * *", []string{"--hello"}); err != nil {
+		t.Fatalf("cronCmdFunc returned error: %v", err)
+	}
+	if gotCfg.Timer == nil {
+		t.Fatal("expected timer config")
+	}
+	if gotCfg.Timer.OnCalendar != "*-*-* *:*:00" || !gotCfg.Timer.Persistent {
+		t.Fatalf("timer = %#v, want minutely persistent timer", gotCfg.Timer)
+	}
+	if !reflect.DeepEqual(gotCfg.Args, []string{"--hello"}) {
+		t.Fatalf("args = %#v, want --hello", gotCfg.Args)
+	}
+}
+
+func TestCronCmdFuncRejectsInvalidCronBeforeInstall(t *testing.T) {
+	called := false
+	execer := &ttyExecer{
+		installFunc: func(string, io.Reader, FileInstallerCfg) error {
+			called = true
+			return nil
+		},
+	}
+
+	err := execer.cronCmdFunc("* * *", nil)
+	if err == nil || !strings.Contains(err.Error(), "invalid cron expression") {
+		t.Fatalf("cron error = %v, want invalid cron", err)
+	}
+	if called {
+		t.Fatal("install seam was called for invalid cron")
+	}
+}
+
+func TestCopyInstallPayloadCopiesBytesWithoutProgressForEnvFile(t *testing.T) {
+	server := newTestServer(t)
+	inst, err := NewFileInstaller(server, FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "svc-env"}})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	defer func() {
+		inst.Fail()
+		_ = inst.Close()
+	}()
+	ui := newRunUI(io.Discard, false, true, "env", "svc-env")
+	execer := &ttyExecer{ctx: context.Background(), rawCloser: io.NopCloser(bytes.NewReader(nil))}
+
+	if err := execer.copyInstallPayload(strings.NewReader("KEY=value\n"), FileInstallerCfg{EnvFile: true}, ui, inst); err != nil {
+		t.Fatalf("copyInstallPayload returned error: %v", err)
+	}
+	if got := inst.Received(); got != float64(len("KEY=value\n")) {
+		t.Fatalf("received = %v, want payload length", got)
+	}
+}
+
+func TestCopyInitialInstallByteRejectsEmptyPayload(t *testing.T) {
+	server := newTestServer(t)
+	inst, err := NewFileInstaller(server, FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "svc-empty-payload"}})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	defer func() {
+		inst.Fail()
+		_ = inst.Close()
+	}()
+	ui := newRunUI(io.Discard, false, true, "run", "svc-empty-payload")
+
+	err = copyInitialInstallByte(inst, strings.NewReader(""), ui)
+	if err == nil || !strings.Contains(err.Error(), "failed to read binary") {
+		t.Fatalf("copyInitialInstallByte error = %v, want read binary error", err)
+	}
+	if !inst.failed {
+		t.Fatal("installer should be marked failed")
+	}
+}
+
+func TestWaitForInstallUploadStartStopsWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	execer := &ttyExecer{ctx: ctx}
+	ui := newRunUI(io.Discard, false, true, "run", "svc-cancel")
+
+	if execer.waitForInstallUploadStart(ui, make(chan struct{}), make(chan struct{})) {
+		t.Fatal("waitForInstallUploadStart returned true after context cancellation")
+	}
+}
+
+func TestSessionCloserCallsExit(t *testing.T) {
+	closer := &exitRecordingCloser{}
+	if err := (sessionCloser{Closer: closer}).Close(); err != nil {
+		t.Fatalf("sessionCloser returned error: %v", err)
+	}
+	if closer.code != 0 {
+		t.Fatalf("exit code = %d, want 0", closer.code)
+	}
+}
+
+func TestStageCmdFuncRejectsSystemService(t *testing.T) {
+	err := (&ttyExecer{sn: SystemService}).stageCmdFunc("show", cli.StageFlags{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot stage system service") {
+		t.Fatalf("stage error = %v, want system service error", err)
+	}
+}
+
+func TestStageCmdFuncRejectsInvalidSubcommand(t *testing.T) {
+	execer := &ttyExecer{
+		s:  newTestServer(t),
+		sn: "svc-stage-invalid",
+		rw: &bytes.Buffer{},
+	}
+
+	err := execer.stageCmdFunc("bogus", cli.StageFlags{}, nil)
+	if err == nil || !strings.Contains(err.Error(), `invalid argument "bogus"`) {
+		t.Fatalf("stage error = %v, want invalid argument", err)
+	}
+}
+
+func TestComposePathFromArtifactsPrefersStagedComposeFile(t *testing.T) {
+	got, err := composePathFromArtifacts(cdb.ArtifactStore{
+		cdb.ArtifactDockerComposeFile: {
+			Refs: map[cdb.ArtifactRef]string{
+				"latest": "/tmp/latest.yml",
+				"staged": "/tmp/staged.yml",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("composePathFromArtifacts returned error: %v", err)
+	}
+	if got != "/tmp/staged.yml" {
+		t.Fatalf("compose path = %q, want staged", got)
+	}
+}
+
+func TestCopyPayloadCompressionRoundTrip(t *testing.T) {
+	var compressed bytes.Buffer
+	w, closer := copyPayloadWriter(&compressed, true)
+	if _, err := io.WriteString(w, "payload"); err != nil {
+		t.Fatalf("write compressed payload: %v", err)
+	}
+	if err := closePayload(closer); err != nil {
+		t.Fatalf("close compressed payload: %v", err)
+	}
+
+	r, readCloser, err := copyPayloadReader(&compressed, true)
+	if err != nil {
+		t.Fatalf("copyPayloadReader returned error: %v", err)
+	}
+	defer func() {
+		if err := closePayload(readCloser); err != nil {
+			t.Fatalf("close reader: %v", err)
+		}
+	}()
+	got, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read decompressed payload: %v", err)
+	}
+	if string(got) != "payload" {
+		t.Fatalf("payload = %q, want payload", got)
+	}
+}
+
+type exitRecordingCloser struct {
+	code int
+}
+
+func (c *exitRecordingCloser) Close() error { return nil }
+func (c *exitRecordingCloser) Exit(code int) {
+	c.code = code
 }

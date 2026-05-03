@@ -5,6 +5,7 @@
 package yeet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -35,6 +36,88 @@ func (r *closeErrorReader) Read(p []byte) (int, error) {
 
 func (r *closeErrorReader) Close() error {
 	return r.err
+}
+
+func TestExtractEnvFileFlag(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantEnv   string
+		wantArgs  []string
+		wantFound bool
+		wantErr   string
+	}{
+		{name: "empty", wantArgs: nil},
+		{name: "space value", args: []string{"run", "--env-file", ".env", "--flag"}, wantEnv: ".env", wantArgs: []string{"run", "--flag"}, wantFound: true},
+		{name: "equals value", args: []string{"--env-file=.prod", "run"}, wantEnv: ".prod", wantArgs: []string{"run"}, wantFound: true},
+		{name: "delimiter stops parsing", args: []string{"--env-file", ".env", "--", "--env-file", "remote"}, wantEnv: ".env", wantArgs: []string{"--", "--env-file", "remote"}, wantFound: true},
+		{name: "missing value", args: []string{"--env-file"}, wantErr: "requires a value"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotEnv, gotArgs, gotFound, err := extractEnvFileFlag(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("extractEnvFileFlag error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("extractEnvFileFlag error: %v", err)
+			}
+			if gotEnv != tt.wantEnv || gotFound != tt.wantFound || strings.Join(gotArgs, ",") != strings.Join(tt.wantArgs, ",") {
+				t.Fatalf("extractEnvFileFlag = env %q args %#v found %v, want env %q args %#v found %v", gotEnv, gotArgs, gotFound, tt.wantEnv, tt.wantArgs, tt.wantFound)
+			}
+		})
+	}
+}
+
+func TestServiceEntryForConfigAndHasServiceConfig(t *testing.T) {
+	oldService := serviceOverride
+	oldPrefs := loadedPrefs
+	defer func() {
+		serviceOverride = oldService
+		loadedPrefs = oldPrefs
+	}()
+	loadedPrefs.DefaultHost = "host-a"
+	cfg := &ProjectConfig{}
+	cfg.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-a", Payload: "run.sh"})
+	loc := &projectConfigLocation{Config: cfg}
+
+	serviceOverride = ""
+	if hasServiceConfig(loc, "") {
+		t.Fatal("hasServiceConfig without service override = true, want false")
+	}
+
+	serviceOverride = "svc-a"
+	entry, ok := serviceEntryForConfig(loc, "")
+	if !ok || entry.Payload != "run.sh" {
+		t.Fatalf("serviceEntryForConfig = %#v %v, want saved entry", entry, ok)
+	}
+	if !hasServiceConfig(loc, "") {
+		t.Fatal("hasServiceConfig saved entry = false, want true")
+	}
+	if hasServiceConfig(loc, "host-b") {
+		t.Fatal("hasServiceConfig wrong host = true, want false")
+	}
+	if hasServiceConfig(nil, "") {
+		t.Fatal("hasServiceConfig nil config = true, want false")
+	}
+}
+
+func TestSaveEnvFileConfigSkipsEmptyInputs(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+
+	serviceOverride = ""
+	if err := saveEnvFileConfig(nil, "", ".env"); err != nil {
+		t.Fatalf("saveEnvFileConfig empty service error: %v", err)
+	}
+	serviceOverride = "svc-a"
+	if err := saveEnvFileConfig(nil, "", " "); err != nil {
+		t.Fatalf("saveEnvFileConfig empty env error: %v", err)
+	}
 }
 
 func TestDetectRunChangesSummaries(t *testing.T) {
@@ -205,6 +288,81 @@ func TestHashReadCloserSHA256ReturnsCloseError(t *testing.T) {
 	})
 	if !errors.Is(err, closeErr) {
 		t.Fatalf("hashReadCloserSHA256 error = %v, want %v", err, closeErr)
+	}
+}
+
+func TestWriteRunDeployStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		summary runChangeSummary
+		want    string
+	}{
+		{name: "payload label", summary: runChangeSummary{payloadChanged: true, payloadLabel: "python file"}, want: "Updated python file\n"},
+		{name: "args only", summary: runChangeSummary{argsChanged: true}, want: "Updated run config\n"},
+		{name: "no deploy status", summary: runChangeSummary{envChanged: true}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := writeRunDeployStatus(&buf, tt.summary); err != nil {
+				t.Fatalf("writeRunDeployStatus error: %v", err)
+			}
+			if buf.String() != tt.want {
+				t.Fatalf("output = %q, want %q", buf.String(), tt.want)
+			}
+		})
+	}
+}
+
+func TestRunChangeRemoteHashHelpers(t *testing.T) {
+	if got, kind := remotePayloadHash(catchrpc.ArtifactHashesResponse{}); got != "" || kind != "" {
+		t.Fatalf("remotePayloadHash missing = %q %q, want empty", got, kind)
+	}
+	resp := catchrpc.ArtifactHashesResponse{
+		Found:   true,
+		Payload: &catchrpc.ArtifactHash{Kind: "python", SHA256: "payload-sha"},
+		Env:     &catchrpc.ArtifactHash{SHA256: "env-sha"},
+	}
+	if got, kind := remotePayloadHash(resp); got != "payload-sha" || kind != "python" {
+		t.Fatalf("remotePayloadHash = %q %q, want payload-sha python", got, kind)
+	}
+	if got := remoteEnvHash(catchrpc.ArtifactHashesResponse{}); got != "" {
+		t.Fatalf("remoteEnvHash missing = %q, want empty", got)
+	}
+	if got := remoteEnvHash(resp); got != "env-sha" {
+		t.Fatalf("remoteEnvHash = %q, want env-sha", got)
+	}
+}
+
+func TestShouldAlwaysDeployPayload(t *testing.T) {
+	tests := []struct {
+		payload string
+		want    bool
+	}{
+		{payload: "ghcr.io/example/app:latest", want: true},
+		{payload: "/tmp/Dockerfile", want: true},
+		{payload: "/tmp/run.sh"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.payload, func(t *testing.T) {
+			if got := shouldAlwaysDeployPayload(tt.payload); got != tt.want {
+				t.Fatalf("shouldAlwaysDeployPayload(%q) = %v, want %v", tt.payload, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsRPCMethodNotFound(t *testing.T) {
+	if isRPCMethodNotFound(nil) {
+		t.Fatal("isRPCMethodNotFound nil = true, want false")
+	}
+	if !isRPCMethodNotFound(errors.New("rpc error: method not found")) {
+		t.Fatal("isRPCMethodNotFound method-not-found = false, want true")
+	}
+	if isRPCMethodNotFound(errors.New("connection refused")) {
+		t.Fatal("isRPCMethodNotFound other error = true, want false")
 	}
 }
 

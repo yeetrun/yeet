@@ -411,6 +411,9 @@ func createClosedTmpFile() (tmpPath string, retErr error) {
 }
 
 func (e *ttyExecer) editFile(path string) error {
+	if e.editFileFunc != nil {
+		return e.editFileFunc(path)
+	}
 	if !e.isPty {
 		return fmt.Errorf("edit requires a pty, please run with a TTY")
 	}

@@ -457,7 +457,11 @@ func (s *ContainerdCacheStorage) unpackImage(ctx context.Context, img images.Ima
 // ManifestExists checks if a manifest exists in containerd's metadata.
 func (s *ContainerdCacheStorage) ManifestExists(ctx context.Context, repo, reference string) bool {
 	if strings.HasPrefix(reference, "sha256:") {
-		_, err := s.containerdClient.ContentStore().Info(ctx, digest.Digest(reference))
+		cs := s.getContentStore()
+		if cs == nil {
+			return false
+		}
+		_, err := cs.Info(ctx, digest.Digest(reference))
 		return err == nil
 	}
 	imageName := repo + ":" + reference
@@ -474,7 +478,11 @@ func (s *ContainerdCacheStorage) DeleteManifest(ctx context.Context, repo, refer
 }
 
 func (s *ContainerdCacheStorage) deleteManifestContent(ctx context.Context, dg digest.Digest) error {
-	err := s.containerdClient.ContentStore().Delete(ctx, dg)
+	cs := s.getContentStore()
+	if cs == nil {
+		return errors.New("content store unavailable")
+	}
+	err := cs.Delete(ctx, dg)
 	if errors.Is(err, errdefs.ErrNotFound) {
 		return nil
 	}

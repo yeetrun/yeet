@@ -8,6 +8,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -59,6 +61,50 @@ func TestRenderListHostsReportsFlushError(t *testing.T) {
 	err := renderListHosts(failingListHostsWriter{err: want}, []listHostRow{{Host: "host", Version: "v0.1.0", Tags: []string{"tag:catch"}}})
 	if !errors.Is(err, want) {
 		t.Fatalf("renderListHosts error = %v, want %v", err, want)
+	}
+}
+
+func TestHandleListHostsWritesToStdout(t *testing.T) {
+	oldStatus := listHostsStatusFn
+	oldInfo := listHostsCatchInfoFn
+	oldStdout := os.Stdout
+	defer func() {
+		listHostsStatusFn = oldStatus
+		listHostsCatchInfoFn = oldInfo
+		os.Stdout = oldStdout
+	}()
+
+	listHostsStatusFn = func(context.Context) (*ipnstate.Status, error) {
+		return &ipnstate.Status{
+			Self: &ipnstate.PeerStatus{DNSName: "self.tailnet.example."},
+		}, nil
+	}
+	listHostsCatchInfoFn = func(context.Context, string) (serverInfo, error) {
+		t.Fatal("listHostsCatchInfoFn should not be called without peers")
+		return serverInfo{}, nil
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("Pipe error: %v", err)
+	}
+	os.Stdout = w
+
+	runErr := HandleListHosts(context.Background(), nil)
+	if closeErr := w.Close(); closeErr != nil {
+		t.Fatalf("stdout close error: %v", closeErr)
+	}
+	out, readErr := io.ReadAll(r)
+	if readErr != nil {
+		t.Fatalf("ReadAll stdout error: %v", readErr)
+	}
+	if closeErr := r.Close(); closeErr != nil {
+		t.Fatalf("stdout read close error: %v", closeErr)
+	}
+	if runErr != nil {
+		t.Fatalf("HandleListHosts error: %v", runErr)
+	}
+	if !strings.Contains(string(out), "HOST") || !strings.Contains(string(out), "VERSION") {
+		t.Fatalf("stdout = %q, want table header", string(out))
 	}
 }
 
