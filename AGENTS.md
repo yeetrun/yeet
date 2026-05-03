@@ -36,6 +36,18 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Add tests for command bridging, parsing edge cases, and service behavior.
 - Run targeted tests for packages you touch, plus `go test ./...` before PR.
 
+## Quality Standard
+- Treat `main` as release-grade at all times: no known broken tests, red checks, reachable vulnerabilities, private-info leaks, or unreviewed quality regressions.
+- Pre-commit is the deterministic local gate. Run `pre-commit run --all-files` before commits that change code, tooling, docs examples, or release surfaces.
+- `mise run quality` must stay clean: private-info scan, coverage, CRAP, golangci, depaware, and hotspot reporting are the normal ratchet.
+- `mise run quality:goal` is the heavy destination gate. Use it before releases and after meaningful quality-tooling, parser, RPC, concurrency, or service-orchestration changes.
+- Current destination goals: at least 80% total coverage, zero CRAP hotspots, zero golangci findings, race detector clean, at least four active fuzz targets, and at least 80% mutation score on the bounded mutation target set.
+- Do not lower goals, refresh baselines, or mark findings acceptable just to get green. Burn down the issue, add focused tests, or document a technical reason in the relevant review/commit context.
+- Fuzz every parser, normalizer, RPC codec, config reader, path handler, and network-input surface when touched. Commit minimized fuzz corpus files for bugs found by fuzzing.
+- Race detector findings are bugs until proven otherwise. Fix test harness races too; they hide real concurrency failures.
+- Use hotspot ranking to choose quality work: high churn plus low coverage or complexity risk should move to the front of the burn-down queue.
+- Keep public repo content free of private infrastructure details, local machine paths, usernames, hostnames, and private service names unless the user explicitly approves publishing them.
+
 ## Commit & Pull Request Guidelines
 - Commit messages typically follow `area: summary` (e.g., `cmd/yeet: add yargs CLI`).
 - PRs should include:
