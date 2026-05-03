@@ -45,6 +45,12 @@ var expectedCopyErrMessages = []string{
 	"websocket: close sent",
 }
 
+var (
+	openPty          = pty.Open
+	dupPtyFileForTTY = dupPtyFile
+	setWinsizeForTTY = setWinsize
+)
+
 func shouldLogCopyErr(err error) bool {
 	return err != nil && !isExpectedCopyErr(err)
 }
@@ -114,13 +120,16 @@ type ttyExecer struct {
 	bypassPtyInput bool
 
 	// Optional override for tests.
-	serviceRunnerFn           func() (ServiceRunner, error)
-	installFunc               func(action string, in io.Reader, cfg FileInstallerCfg) error
-	editFileFunc              func(path string) error
-	systemdStatusFunc         func(string) (svc.Status, error)
-	systemdStatusesFunc       func() (map[string]svc.Status, error)
-	dockerComposeStatusFunc   func(string) (svc.DockerComposeStatus, error)
-	dockerComposeStatusesFunc func() (map[string]svc.DockerComposeStatus, error)
+	serviceRunnerFn            func() (ServiceRunner, error)
+	installFunc                func(action string, in io.Reader, cfg FileInstallerCfg) error
+	editFileFunc               func(path string) error
+	systemdStatusFunc          func(string) (svc.Status, error)
+	systemdStatusesFunc        func() (map[string]svc.Status, error)
+	dockerComposeStatusFunc    func(string) (svc.DockerComposeStatus, error)
+	dockerComposeStatusesFunc  func() (map[string]svc.DockerComposeStatus, error)
+	serviceInstallFunc         func(InstallerCfg) error
+	serviceInstallGenFunc      func(InstallerCfg, int) error
+	closeNewStageInstallerFunc func(FileInstallerCfg) error
 }
 
 type ttyPtySession struct {
@@ -199,12 +208,12 @@ func (e *ttyExecer) startPtySession() (*ttyPtySession, error) {
 		return nil, nil
 	}
 
-	stdin, tty, err := pty.Open()
+	stdin, tty, err := openPty()
 	if err != nil {
 		writef(e.rw, "Error: %v\n", err)
 		return nil, err
 	}
-	stdout, err := dupPtyFile(stdin)
+	stdout, err := dupPtyFileForTTY(stdin)
 	if err != nil {
 		_ = stdin.Close()
 		_ = tty.Close()
@@ -219,7 +228,7 @@ func (e *ttyExecer) startPtySession() (*ttyPtySession, error) {
 		doneWritingToSession: make(chan struct{}),
 	}
 	e.rw = tty
-	setWinsize(tty, e.ptyReq.Window.Width, e.ptyReq.Window.Height)
+	setWinsizeForTTY(tty, e.ptyReq.Window.Width, e.ptyReq.Window.Height)
 	session.copyOutputToSession(e)
 	if !e.bypassPtyInput {
 		session.copyInputFromSession(e)
@@ -289,7 +298,7 @@ func (e *ttyExecer) ResizeTTY(cols, rows int) {
 		return
 	}
 	if tty, ok := e.rw.(*os.File); ok {
-		setWinsize(tty, cols, rows)
+		setWinsizeForTTY(tty, cols, rows)
 	}
 }
 

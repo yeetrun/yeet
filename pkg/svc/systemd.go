@@ -218,9 +218,10 @@ func closeFile(f *os.File, err *error) {
 }
 
 type SystemdService struct {
-	db     *db.Store
-	cfg    db.ServiceView
-	runDir string
+	db         *db.Store
+	cfg        db.ServiceView
+	runDir     string
+	systemdDir string
 }
 
 func (s *SystemdService) Name() string {
@@ -372,19 +373,26 @@ func (s *SystemdService) tailscaledServiceUnit() string {
 }
 
 func (s *SystemdService) servicePath() string {
-	return "/etc/systemd/system/" + s.serviceUnit()
+	return filepath.Join(s.systemdSystemDir(), s.serviceUnit())
 }
 
 func (s *SystemdService) tailscaledServicePath() string {
-	return "/etc/systemd/system/" + s.tailscaledServiceUnit()
+	return filepath.Join(s.systemdSystemDir(), s.tailscaledServiceUnit())
 }
 
 func (s *SystemdService) timerPath() string {
-	return "/etc/systemd/system/" + s.timerUnit()
+	return filepath.Join(s.systemdSystemDir(), s.timerUnit())
 }
 
 func (s *SystemdService) netnsServicePath() string {
-	return "/etc/systemd/system/" + s.netnsServiceUnit()
+	return filepath.Join(s.systemdSystemDir(), s.netnsServiceUnit())
+}
+
+func (s *SystemdService) systemdSystemDir() string {
+	if s.systemdDir != "" {
+		return s.systemdDir
+	}
+	return "/etc/systemd/system"
 }
 
 func (s *SystemdService) isInstalled() bool {

@@ -8,7 +8,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -240,6 +242,116 @@ func TestInstallTSWritesArtifactsWithoutNetworkWhenAuthKeyProvided(t *testing.T)
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit missing %q:\n%s", want, unit)
 		}
+	}
+}
+
+func TestTailscaleBinaryGettersUseExistingFiles(t *testing.T) {
+	server := newTestServer(t)
+	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
+	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
+		t.Fatalf("mkdir tsd: %v", err)
+	}
+	for _, name := range []string{"tailscale-1.92.3", "tailscaled-1.92.3"} {
+		if err := os.WriteFile(filepath.Join(tsdDir, name), []byte(name), 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	ts, err := server.getTailscaleBinary("1.92.3")
+	if err != nil {
+		t.Fatalf("getTailscaleBinary: %v", err)
+	}
+	if ts != filepath.Join(tsdDir, "tailscale-1.92.3") {
+		t.Fatalf("tailscale path = %q", ts)
+	}
+	tsd, err := server.getTailscaledBinary("1.92.3")
+	if err != nil {
+		t.Fatalf("getTailscaledBinary: %v", err)
+	}
+	if tsd != filepath.Join(tsdDir, "tailscaled-1.92.3") {
+		t.Fatalf("tailscaled path = %q", tsd)
+	}
+}
+
+func TestDownloadTailscaleArchiveReturnsHTTPClientError(t *testing.T) {
+	wantErr := errors.New("dial failed")
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, wantErr
+		}),
+	}
+	err := downloadTailscaleArchive(client, "https://example.test/tailscale.tgz", t.TempDir(), "1.92.3")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("download error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestExtractTailscaleBinaryIgnoresNonBinaryEntries(t *testing.T) {
+	err := extractTailscaleBinary(&tar.Header{Name: "README.md"}, strings.NewReader("readme"), t.TempDir(), "1.92.3")
+	if err != nil {
+		t.Fatalf("extract non-binary: %v", err)
+	}
+}
+
+func TestExtractOauthID(t *testing.T) {
+	id, ok := extractOauthID("tskey-client-abc123-secret")
+	if !ok || id != "abc123" {
+		t.Fatalf("extractOauthID = %q, %v", id, ok)
+	}
+	if id, ok := extractOauthID("tskey-auth-abc123"); ok || id != "" {
+		t.Fatalf("invalid extractOauthID = %q, %v", id, ok)
+	}
+}
+
+func TestTSClientRejectsInvalidSecret(t *testing.T) {
+	dir := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWD)
+	})
+	if err := os.WriteFile("tailscale.key", []byte("not-an-oauth-secret"), 0o600); err != nil {
+		t.Fatalf("write tailscale.key: %v", err)
+	}
+
+	if _, err := tsClient(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid tailscale oauth secret") {
+		t.Fatalf("tsClient error = %v", err)
+	}
+}
+
+func TestResolveTailscaleAuthKeyUsesProvidedKey(t *testing.T) {
+	server := newTestServer(t)
+	key, err := server.resolveTailscaleAuthKey(&db.TailscaleNetwork{Tags: []string{"tag:svc"}}, "tskey-auth-provided")
+	if err != nil {
+		t.Fatalf("resolveTailscaleAuthKey: %v", err)
+	}
+	if key != "tskey-auth-provided" {
+		t.Fatalf("auth key = %q", key)
+	}
+}
+
+func TestWriteTailscaleConfigWithoutExitNode(t *testing.T) {
+	path, err := writeTailscaleConfig(t.TempDir(), "svc", "tskey-auth-test", "")
+	if err != nil {
+		t.Fatalf("writeTailscaleConfig: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var cfg ipn.ConfigVAlpha
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg.ExitNode != nil {
+		t.Fatalf("ExitNode = %#v, want nil", cfg.ExitNode)
+	}
+	if cfg.Hostname == nil || *cfg.Hostname != "svc" {
+		t.Fatalf("Hostname = %#v", cfg.Hostname)
 	}
 }
 

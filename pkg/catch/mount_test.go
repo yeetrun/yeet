@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -179,6 +180,56 @@ func TestSystemdUnitCommands(t *testing.T) {
 				t.Fatalf("command %d = %#v, want %#v", i, cmds[i], want[i])
 			}
 		}
+	}
+}
+
+func TestRunSystemdUmountCommandsWrapsCommandErrors(t *testing.T) {
+	oldRunSystemdCommand := runSystemdCommand
+	defer func() { runSystemdCommand = oldRunSystemdCommand }()
+	cmdErr := errors.New("systemctl failed")
+	runSystemdCommand = func(args ...string) error {
+		return cmdErr
+	}
+
+	err := runSystemdUmountCommands("mnt-data", true, false)
+	if err == nil || !strings.Contains(err.Error(), "failed to disable and stop service") {
+		t.Fatalf("disable error = %v", err)
+	}
+	err = runSystemdUmountCommands("mnt-data", false, true)
+	if err == nil || !strings.Contains(err.Error(), "failed to stop service") {
+		t.Fatalf("stop error = %v", err)
+	}
+}
+
+func TestSystemdUmountCommandErrorFallback(t *testing.T) {
+	cmdErr := errors.New("boom")
+	err := systemdUmountCommandError([]string{"systemctl", "reload"}, cmdErr)
+	if err == nil || !strings.Contains(err.Error(), "failed to run systemd command") {
+		t.Fatalf("fallback error = %v", err)
+	}
+}
+
+func TestRemoveSystemdUnitRemovesExistingAndIgnoresMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unit.service")
+	if err := os.WriteFile(path, []byte("unit"), 0o644); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+	if err := removeSystemdUnit(path); err != nil {
+		t.Fatalf("remove existing: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("removed unit stat err = %v, want not exist", err)
+	}
+	if err := removeSystemdUnit(path); err != nil {
+		t.Fatalf("remove missing: %v", err)
+	}
+}
+
+func TestSystemdMounterMountReportsCreateDirError(t *testing.T) {
+	missingParent := filepath.Join(t.TempDir(), "missing", "data")
+	err := (&systemdMounter{v: db.Volume{Path: missingParent}}).mount()
+	if err == nil || !strings.Contains(err.Error(), "failed to create mount target directory") {
+		t.Fatalf("mount error = %v", err)
 	}
 }
 

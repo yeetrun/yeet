@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
 	"context"
@@ -249,6 +250,114 @@ func TestCopyFromRemoteRequiresRecursiveForDirectory(t *testing.T) {
 	}
 }
 
+func TestCopyCmdFuncRoutesToRemoteCopy(t *testing.T) {
+	server := newTestServer(t)
+	input := bytes.NewBufferString("payload")
+	execer := &ttyExecer{
+		s:  server,
+		sn: "svc-copy-cmd",
+		rw: input,
+	}
+
+	if err := execer.copyCmdFunc([]string{"--to", "data/app/config.txt"}); err != nil {
+		t.Fatalf("copyCmdFunc returned error: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(server.serviceDataDir("svc-copy-cmd"), "app", "config.txt"))
+	if err != nil {
+		t.Fatalf("read copied file: %v", err)
+	}
+	if string(got) != "payload" {
+		t.Fatalf("copied file = %q, want payload", got)
+	}
+}
+
+func TestCopyCmdFuncRoutesRecursiveDirectoryFromRemote(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.ensureDirs("svc-copy-dir", ""); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	srcDir := filepath.Join(server.serviceDataDir("svc-copy-dir"), "logs")
+	if err := os.Mkdir(srcDir, 0o755); err != nil {
+		t.Fatalf("mkdir source dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "app.log"), []byte("line\n"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		s:  server,
+		sn: "svc-copy-dir",
+		rw: &out,
+	}
+
+	if err := execer.copyCmdFunc([]string{"--from", "data/logs", "--recursive"}); err != nil {
+		t.Fatalf("copyCmdFunc returned error: %v", err)
+	}
+
+	br := bufio.NewReader(&out)
+	kind, base, err := copyutil.ReadHeader(br)
+	if err != nil {
+		t.Fatalf("read copy header: %v", err)
+	}
+	if kind != "dir" || base != "logs" {
+		t.Fatalf("copy header = (%q, %q), want (dir, logs)", kind, base)
+	}
+	tr := tar.NewReader(br)
+	found := false
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("read tar payload: %v", err)
+		}
+		if hdr.Name == "app.log" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("tar payload did not include app.log")
+	}
+}
+
+func TestCopyFromRemoteArchivesSingleFile(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.ensureDirs("svc-copy-archive", ""); err != nil {
+		t.Fatalf("ensure dirs: %v", err)
+	}
+	src := filepath.Join(server.serviceDataDir("svc-copy-archive"), "config.yml")
+	if err := os.WriteFile(src, []byte("name: app\n"), 0o644); err != nil {
+		t.Fatalf("write source file: %v", err)
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		s:  server,
+		sn: "svc-copy-archive",
+		rw: &out,
+	}
+
+	if err := execer.copyFromRemote(copyExecArgs{From: "data/config.yml", Archive: true}); err != nil {
+		t.Fatalf("copyFromRemote returned error: %v", err)
+	}
+	br := bufio.NewReader(&out)
+	kind, base, err := copyutil.ReadHeader(br)
+	if err != nil {
+		t.Fatalf("read copy header: %v", err)
+	}
+	if kind != "file" || base != "config.yml" {
+		t.Fatalf("copy header = (%q, %q), want (file, config.yml)", kind, base)
+	}
+	hdr, err := tar.NewReader(br).Next()
+	if err != nil {
+		t.Fatalf("read tar header: %v", err)
+	}
+	if hdr.Name != "config.yml" {
+		t.Fatalf("tar entry = %q, want config.yml", hdr.Name)
+	}
+}
+
 func TestStageShowReturnsWriteError(t *testing.T) {
 	writeErr := errors.New("write failed")
 	execer := &ttyExecer{
@@ -466,6 +575,77 @@ func TestCopyInstallPayloadCopiesBytesWithoutProgressForEnvFile(t *testing.T) {
 	}
 }
 
+func TestCopyInstallPayloadCopiesBytesWithUploadProgress(t *testing.T) {
+	server := newTestServer(t)
+	inst, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "svc-progress"},
+		StageOnly:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	defer func() {
+		inst.Fail()
+		_ = inst.Close()
+	}()
+	ui := newRunUI(io.Discard, false, true, "run", "svc-progress")
+	execer := &ttyExecer{ctx: context.Background(), rawCloser: io.NopCloser(bytes.NewReader(nil))}
+
+	if err := execer.copyInstallPayload(strings.NewReader("binary"), FileInstallerCfg{}, ui, inst); err != nil {
+		t.Fatalf("copyInstallPayload returned error: %v", err)
+	}
+	if got := inst.Received(); got != float64(len("binary")) {
+		t.Fatalf("received = %v, want payload length", got)
+	}
+}
+
+func TestInstallUIInstallerCreationAndClosePaths(t *testing.T) {
+	server := newTestServer(t)
+	execer := &ttyExecer{
+		s:        server,
+		sn:       "svc-ui",
+		rw:       readWriter{Reader: strings.NewReader(""), Writer: io.Discard},
+		progress: "quiet",
+	}
+	ui := execer.startInstallUI("run")
+	defer ui.Stop()
+
+	cfg := FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "svc-ui"},
+		StageOnly:    true,
+		NoBinary:     true,
+	}
+	inst, err := execer.newFileInstallerWithUI(&cfg, ui)
+	if err != nil {
+		t.Fatalf("newFileInstallerWithUI returned error: %v", err)
+	}
+	var retErr error
+	closeInstallerWithUI(inst, ui, &retErr)
+	if retErr != nil {
+		t.Fatalf("closeInstallerWithUI returned error: %v", retErr)
+	}
+
+	badCfg := FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: string(cdb.ArtifactTSBinary)}}
+	if _, err := execer.newFileInstallerWithUI(&badCfg, ui); err == nil || !strings.Contains(err.Error(), "failed to create installer") {
+		t.Fatalf("newFileInstallerWithUI error = %v, want creation failure", err)
+	}
+
+	failingInst, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "svc-ui-fail"},
+		StageOnly:    true,
+		NoBinary:     true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	failingInst.Fail()
+	retErr = nil
+	closeInstallerWithUI(failingInst, ui, &retErr)
+	if retErr == nil || !strings.Contains(retErr.Error(), "installation failed") {
+		t.Fatalf("closeInstallerWithUI error = %v, want installation failed", retErr)
+	}
+}
+
 func TestCopyInitialInstallByteRejectsEmptyPayload(t *testing.T) {
 	server := newTestServer(t)
 	inst, err := NewFileInstaller(server, FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "svc-empty-payload"}})
@@ -487,6 +667,66 @@ func TestCopyInitialInstallByteRejectsEmptyPayload(t *testing.T) {
 	}
 }
 
+func TestCopyRemainingInstallPayloadMarksInstallerFailedOnReadError(t *testing.T) {
+	server := newTestServer(t)
+	inst, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "svc-copy-read-error"},
+		StageOnly:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	defer func() {
+		inst.Fail()
+		_ = inst.Close()
+	}()
+	readErr := errors.New("read failed")
+	ui := newRunUI(io.Discard, false, true, "run", "svc-copy-read-error")
+
+	err = copyRemainingInstallPayload(inst, errReader{err: readErr}, ui)
+	if err == nil || !errors.Is(err, readErr) {
+		t.Fatalf("copyRemainingInstallPayload error = %v, want %v", err, readErr)
+	}
+	if !inst.failed {
+		t.Fatal("installer should be marked failed")
+	}
+}
+
+func TestInstallUploadProgressBranches(t *testing.T) {
+	server := newTestServer(t)
+	inst, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "svc-progress-branches"},
+		StageOnly:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	defer func() {
+		inst.Fail()
+		_ = inst.Close()
+	}()
+	if _, err := inst.Write([]byte("payload")); err != nil {
+		t.Fatalf("write installer payload: %v", err)
+	}
+
+	ui := newRunUI(io.Discard, false, true, "run", "svc-progress-branches")
+	execer := &ttyExecer{ctx: context.Background()}
+	started := make(chan struct{})
+	close(started)
+	if !execer.waitForInstallUploadStart(ui, started, make(chan struct{})) {
+		t.Fatal("waitForInstallUploadStart returned false for started upload")
+	}
+
+	done := make(chan struct{})
+	close(done)
+	if execer.waitForInstallUploadStart(ui, make(chan struct{}), done) {
+		t.Fatal("waitForInstallUploadStart returned true for completed upload")
+	}
+	execer.updateInstallUploadProgressUntilDone(ui, inst, done)
+	updateInstallUploadDetail(ui, inst)
+	finishInstallUploadStep(ui, inst, FileInstallerCfg{})
+}
+
 func TestWaitForInstallUploadStartStopsWhenContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -495,6 +735,19 @@ func TestWaitForInstallUploadStartStopsWhenContextCanceled(t *testing.T) {
 
 	if execer.waitForInstallUploadStart(ui, make(chan struct{}), make(chan struct{})) {
 		t.Fatal("waitForInstallUploadStart returned true after context cancellation")
+	}
+}
+
+func TestWaitForInstallUploadStartTimeoutClosesRawCloser(t *testing.T) {
+	closer := &closeRecorder{}
+	execer := &ttyExecer{ctx: context.Background(), rawCloser: closer}
+	ui := newRunUI(io.Discard, false, true, "run", "svc-timeout")
+
+	if execer.waitForInstallUploadStart(ui, make(chan struct{}), make(chan struct{})) {
+		t.Fatal("waitForInstallUploadStart returned true after timeout")
+	}
+	if !closer.closed {
+		t.Fatal("raw closer was not closed on upload timeout")
 	}
 }
 
@@ -525,6 +778,75 @@ func TestStageCmdFuncRejectsInvalidSubcommand(t *testing.T) {
 	err := execer.stageCmdFunc("bogus", cli.StageFlags{}, nil)
 	if err == nil || !strings.Contains(err.Error(), `invalid argument "bogus"`) {
 		t.Fatalf("stage error = %v, want invalid argument", err)
+	}
+}
+
+func TestStageCmdFuncStagesNoBinaryWithoutLiveInstall(t *testing.T) {
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		s:        newTestServer(t),
+		sn:       "svc-stage",
+		rw:       &out,
+		progress: "quiet",
+	}
+
+	if err := execer.stageCmdFunc("stage", cli.StageFlags{}, nil); err != nil {
+		t.Fatalf("stageCmdFunc returned error: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, `Staged service "svc-stage"`) {
+		t.Fatalf("stage output = %q, want staged message", got)
+	}
+}
+
+func TestCommitStageAppliesPublishWithInstallerHook(t *testing.T) {
+	server := newTestServer(t)
+	dir := t.TempDir()
+	composePath := filepath.Join(dir, "compose.yml")
+	if err := os.WriteFile(composePath, []byte("services:\n  svc-publish:\n    image: nginx\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	seedService(t, server, "svc-publish", cdb.ServiceTypeDockerCompose, cdb.ArtifactStore{
+		cdb.ArtifactDockerComposeFile: {Refs: map[cdb.ArtifactRef]string{"staged": composePath}},
+	})
+	var closedCfg FileInstallerCfg
+	execer := &ttyExecer{
+		ctx:      context.Background(),
+		s:        server,
+		sn:       "svc-publish",
+		rw:       &bytes.Buffer{},
+		progress: "quiet",
+		closeNewStageInstallerFunc: func(cfg FileInstallerCfg) error {
+			closedCfg = cfg
+			return nil
+		},
+	}
+
+	if err := execer.commitStage(cli.StageFlags{Publish: []string{"8080:80"}}, execer.fileInstaller(netFlags{}, nil)); err != nil {
+		t.Fatalf("commitStage returned error: %v", err)
+	}
+	if closedCfg.ServiceName != "svc-publish" {
+		t.Fatalf("closed installer service = %q, want svc-publish", closedCfg.ServiceName)
+	}
+	got, err := os.ReadFile(composePath)
+	if err != nil {
+		t.Fatalf("read compose: %v", err)
+	}
+	if !strings.Contains(string(got), "8080:80") {
+		t.Fatalf("compose = %s, want published port", got)
+	}
+}
+
+func TestApplyStagePublishNoPublishSkipsComposeLookup(t *testing.T) {
+	if err := (&ttyExecer{}).applyStagePublish(cli.StageFlags{}); err != nil {
+		t.Fatalf("applyStagePublish returned error: %v", err)
+	}
+}
+
+func TestComposePathFromArtifactsRejectsMissingCompose(t *testing.T) {
+	for _, af := range []cdb.ArtifactStore{nil, {}} {
+		if _, err := composePathFromArtifacts(af); err == nil || !strings.Contains(err.Error(), "compose file not found") {
+			t.Fatalf("composePathFromArtifacts(%#v) error = %v, want missing compose", af, err)
+		}
 	}
 }
 
@@ -573,6 +895,37 @@ func TestCopyPayloadCompressionRoundTrip(t *testing.T) {
 	}
 }
 
+func TestCopyPayloadReaderReturnsGzipError(t *testing.T) {
+	if _, _, err := copyPayloadReader(strings.NewReader("not gzip"), true); err == nil {
+		t.Fatal("expected gzip reader error")
+	}
+}
+
+func TestCopyFileToRemoteRejectsDirectoryDestination(t *testing.T) {
+	execer := &ttyExecer{}
+	err := execer.copyFileToRemote("dir/", filepath.Join(t.TempDir(), "dir"), false)
+	if err == nil || !strings.Contains(err.Error(), "copy destination must include a file name") {
+		t.Fatalf("copyFileToRemote error = %v, want file name error", err)
+	}
+}
+
+func TestCloseHelpersHandleNilAndCloserErrors(t *testing.T) {
+	var retErr error
+	closeWithError(nil, &retErr, "close failed")
+	if retErr != nil {
+		t.Fatalf("retErr = %v, want nil", retErr)
+	}
+
+	closeErr := errors.New("close failed")
+	closeWithError(errCloser{err: closeErr}, &retErr, "wrapped")
+	if !errors.Is(retErr, closeErr) {
+		t.Fatalf("retErr = %v, want close error", retErr)
+	}
+	closeBestEffort(nil)
+	removeBestEffort(filepath.Join(t.TempDir(), "missing"))
+	removeAllBestEffort(filepath.Join(t.TempDir(), "missing-dir"))
+}
+
 type exitRecordingCloser struct {
 	code int
 }
@@ -580,4 +933,29 @@ type exitRecordingCloser struct {
 func (c *exitRecordingCloser) Close() error { return nil }
 func (c *exitRecordingCloser) Exit(code int) {
 	c.code = code
+}
+
+type errReader struct {
+	err error
+}
+
+func (r errReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+type errCloser struct {
+	err error
+}
+
+func (c errCloser) Close() error {
+	return c.err
+}
+
+type closeRecorder struct {
+	closed bool
+}
+
+func (c *closeRecorder) Close() error {
+	c.closed = true
+	return nil
 }

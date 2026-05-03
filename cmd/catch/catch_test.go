@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catch"
 )
@@ -150,6 +152,63 @@ func TestLoopbackAndTSNetServerConfig(t *testing.T) {
 	}
 }
 
+func TestInitTSNetReturnsNilWhenDisabled(t *testing.T) {
+	oldHost := *tsnetHost
+	t.Cleanup(func() {
+		*tsnetHost = oldHost
+	})
+	*tsnetHost = ""
+
+	if got := initTSNet(t.TempDir()); got != nil {
+		t.Fatalf("initTSNet() = %#v, want nil when tsnet host is empty", got)
+	}
+}
+
+func TestProxyConnPairCopiesBetweenConnections(t *testing.T) {
+	backendApp, backendProxy := net.Pipe()
+	clientApp, clientProxy := net.Pipe()
+	defer backendApp.Close()
+	defer clientApp.Close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for _, conn := range []net.Conn{backendApp, backendProxy, clientApp, clientProxy} {
+		if err := conn.SetDeadline(deadline); err != nil {
+			t.Fatalf("SetDeadline: %v", err)
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		proxyConnPair(backendProxy, clientProxy)
+		close(done)
+	}()
+
+	writeErr := make(chan error, 1)
+	go func() {
+		_, err := clientApp.Write([]byte("ping"))
+		writeErr <- err
+	}()
+
+	buf := make([]byte, len("ping"))
+	if _, err := io.ReadFull(backendApp, buf); err != nil {
+		t.Fatalf("ReadFull backend: %v", err)
+	}
+	if string(buf) != "ping" {
+		t.Fatalf("proxied payload = %q, want ping", string(buf))
+	}
+	if err := <-writeErr; err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	clientApp.Close()
+	backendApp.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("proxyConnPair did not return after peers closed")
+	}
+}
+
 func TestDetectInstallUserFromEnv(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -232,6 +291,25 @@ func TestVerifyContainerdSnapshotterConfig(t *testing.T) {
 				t.Fatalf("verifyContainerdSnapshotterConfig error = %q, want substring %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestCheckContainerdSnapshotterEnabledReadAndParseErrors(t *testing.T) {
+	root := t.TempDir()
+	dirPath := filepath.Join(root, "daemon-dir")
+	if err := os.Mkdir(dirPath, 0o755); err != nil {
+		t.Fatalf("mkdir daemon dir: %v", err)
+	}
+	if err := checkContainerdSnapshotterEnabled(dirPath); err == nil || !strings.Contains(err.Error(), "failed to read") {
+		t.Fatalf("directory config error = %v, want failed to read", err)
+	}
+
+	badJSON := filepath.Join(root, "daemon.json")
+	if err := os.WriteFile(badJSON, []byte("{"), 0o600); err != nil {
+		t.Fatalf("write bad docker config: %v", err)
+	}
+	if err := checkContainerdSnapshotterEnabled(badJSON); err == nil || !strings.Contains(err.Error(), "failed to parse") {
+		t.Fatalf("bad json error = %v, want failed to parse", err)
 	}
 }
 
@@ -345,6 +423,66 @@ func TestSetupDockerDownloadsAndRunsConfirmedScript(t *testing.T) {
 	}
 	if _, err := os.Stat(ranPath); !os.IsNotExist(err) {
 		t.Fatalf("installer temp path still exists or stat failed: %v", err)
+	}
+}
+
+func TestNormalizeDockerSetupDepsFillsDefaults(t *testing.T) {
+	deps := normalizeDockerSetupDeps(dockerSetupDeps{})
+	if deps.dockerCmd == nil || deps.confirm == nil || deps.stdin == nil || deps.stderr == nil ||
+		deps.scriptURL == "" || deps.httpClient == nil || deps.runScript == nil {
+		t.Fatalf("normalizeDockerSetupDeps left default unset: %#v", deps)
+	}
+}
+
+func TestConfirmDockerInstallErrorPaths(t *testing.T) {
+	writeErr := errors.New("write failed")
+	_, err := confirmDockerInstall(strings.NewReader(""), writerFunc(func([]byte) (int, error) {
+		return 0, writeErr
+	}), func(io.Reader, io.Writer, string) (bool, error) {
+		t.Fatalf("confirm should not be called after warning write failure")
+		return false, nil
+	})
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("confirmDockerInstall write error = %v, want %v", err, writeErr)
+	}
+
+	confirmErr := errors.New("confirm failed")
+	var out strings.Builder
+	_, err = confirmDockerInstall(strings.NewReader(""), &out, func(io.Reader, io.Writer, string) (bool, error) {
+		return false, confirmErr
+	})
+	if !errors.Is(err, confirmErr) || !strings.Contains(err.Error(), "failed to confirm") {
+		t.Fatalf("confirmDockerInstall confirm error = %v, want wrapped %v", err, confirmErr)
+	}
+}
+
+func TestDownloadDockerInstallScriptErrorPaths(t *testing.T) {
+	if err := downloadDockerInstallScript(http.DefaultClient, "://bad-url", io.Discard); err == nil || !strings.Contains(err.Error(), "failed to create") {
+		t.Fatalf("bad URL error = %v, want failed to create", err)
+	}
+
+	wantErr := errors.New("network down")
+	err := downloadDockerInstallScript(httpDoerFunc(func(*http.Request) (*http.Response, error) {
+		return nil, wantErr
+	}), "http://example.test/docker.sh", io.Discard)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("download error = %v, want %v", err, wantErr)
+	}
+
+	bodyErr := errors.New("body failed")
+	err = downloadDockerInstallScript(httpDoerFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{Body: io.NopCloser(errReader{err: bodyErr})}, nil
+	}), "http://example.test/docker.sh", io.Discard)
+	if !errors.Is(err, bodyErr) {
+		t.Fatalf("body error = %v, want %v", err, bodyErr)
+	}
+}
+
+func TestExecuteDockerInstallScriptWrapsErrors(t *testing.T) {
+	wantErr := errors.New("script failed")
+	err := executeDockerInstallScript(func(string) error { return wantErr }, "/tmp/install.sh")
+	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "failed to run") {
+		t.Fatalf("executeDockerInstallScript error = %v, want wrapped %v", err, wantErr)
 	}
 }
 
@@ -483,6 +621,89 @@ func TestDoInstallRequiresTSNet(t *testing.T) {
 	}
 }
 
+func TestDoInstallValidationAndInstallerErrors(t *testing.T) {
+	if err := doInstallWith(nil, t.TempDir(), catchInstallDeps{logf: func(string, ...any) {}}); err == nil || !strings.Contains(err.Error(), "catch config is required") {
+		t.Fatalf("nil config error = %v, want config required", err)
+	}
+
+	ts := &fakeInstallTSNet{}
+	wantErr := errors.New("installer failed")
+	err := doInstallWith(&catch.Config{}, t.TempDir(), catchInstallDeps{
+		writeInstallMeta: func(string) error { return nil },
+		initTSNet:        func(string) installTSNet { return ts },
+		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
+			return nil, wantErr
+		},
+		executable: func() (string, error) { return "/tmp/catch-bin", nil },
+		readFile:   func(string) ([]byte, error) { return []byte("binary"), nil },
+		logf:       func(string, ...any) {},
+		tsnetHost:  func() string { return "catch-test" },
+	})
+	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "failed to create installer") {
+		t.Fatalf("installer error = %v, want wrapped %v", err, wantErr)
+	}
+	if !ts.closed {
+		t.Fatalf("tsnet server was not closed after installer error")
+	}
+}
+
+func TestWriteCurrentExecutableReadAndWriteErrorsFailInstaller(t *testing.T) {
+	readErr := errors.New("read failed")
+	inst := &fakeCatchInstaller{}
+	err := writeCurrentExecutable(inst, catchInstallDeps{
+		executable: func() (string, error) { return "/tmp/catch-bin", nil },
+		readFile:   func(string) ([]byte, error) { return nil, readErr },
+	})
+	if !errors.Is(err, readErr) || !inst.failed {
+		t.Fatalf("read error = %v failed=%v, want wrapped read error and failed installer", err, inst.failed)
+	}
+
+	writeErr := errors.New("write failed")
+	inst = &fakeCatchInstaller{writeErr: writeErr}
+	err = writeCurrentExecutable(inst, catchInstallDeps{
+		executable: func() (string, error) { return "/tmp/catch-bin", nil },
+		readFile:   func(string) ([]byte, error) { return []byte("binary"), nil },
+	})
+	if !errors.Is(err, writeErr) || !inst.failed {
+		t.Fatalf("write error = %v failed=%v, want wrapped write error and failed installer", err, inst.failed)
+	}
+}
+
+func TestNormalizeCatchInstallDepsFillsDefaults(t *testing.T) {
+	deps := normalizeCatchInstallDeps(catchInstallDeps{})
+	if deps.writeInstallMeta == nil || deps.initTSNet == nil || deps.newInstaller == nil ||
+		deps.executable == nil || deps.readFile == nil || deps.logf == nil || deps.tsnetHost == nil {
+		t.Fatalf("normalizeCatchInstallDeps left default unset: %#v", deps)
+	}
+}
+
+func TestInstallMetaFallbacksAndErrors(t *testing.T) {
+	t.Setenv("CATCH_INSTALL_HOST", "")
+	if got := detectInstallHost(); got == "" {
+		t.Fatalf("detectInstallHost returned empty fallback hostname")
+	}
+	if got, err := currentUsername(); err != nil || got == "" {
+		t.Fatalf("currentUsername = %q, %v; want non-empty username", got, err)
+	}
+
+	if _, err := readInstallMeta(t.TempDir()); err == nil {
+		t.Fatalf("readInstallMeta succeeded for missing metadata")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(installMetaPath(root), []byte("{"), 0o600); err != nil {
+		t.Fatalf("write invalid install meta: %v", err)
+	}
+	if _, err := readInstallMeta(root); err == nil || !strings.Contains(err.Error(), "unexpected") {
+		t.Fatalf("readInstallMeta invalid error = %v, want JSON error", err)
+	}
+
+	cfg := &catch.Config{InstallUser: "default-user", InstallHost: "default-host"}
+	applyInstallMeta(cfg, t.TempDir())
+	if cfg.InstallUser != "default-user" || cfg.InstallHost != "default-host" {
+		t.Fatalf("applyInstallMeta changed cfg on missing metadata: %#v", cfg)
+	}
+}
+
 type fakeInstallTSNet struct {
 	closed   bool
 	closeErr error
@@ -541,6 +762,15 @@ func TestHandleSpecialCommand(t *testing.T) {
 	if out.Len() != 0 {
 		t.Fatalf("handleSpecialCommand wrote output for no args: %q", out.String())
 	}
+
+	out.Reset()
+	handled, err = handleSpecialCommand([]string{"unknown"}, &out)
+	if err != nil {
+		t.Fatalf("handleSpecialCommand returned error for unknown command: %v", err)
+	}
+	if handled {
+		t.Fatalf("handleSpecialCommand handled unknown command")
+	}
 }
 
 func TestListenDockerPluginSocketRemovesStaleSocket(t *testing.T) {
@@ -570,6 +800,32 @@ func TestListenDockerPluginSocketRemovesStaleSocket(t *testing.T) {
 	}
 }
 
+func TestDockerPluginSocketAndListenErrors(t *testing.T) {
+	if got := dockerPluginSocket(); got != filepath.Join("/run/docker/plugins", "yeet.sock") {
+		t.Fatalf("dockerPluginSocket = %q", got)
+	}
+
+	root := t.TempDir()
+	parentFile := filepath.Join(root, "not-a-dir")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write parent file: %v", err)
+	}
+	if _, err := listenDockerPluginSocket(filepath.Join(parentFile, "yeet.sock")); err == nil || !strings.Contains(err.Error(), "failed to create socket dir") {
+		t.Fatalf("listenDockerPluginSocket parent-file error = %v, want socket dir error", err)
+	}
+
+	nonEmptyDir := filepath.Join(root, "non-empty")
+	if err := os.Mkdir(nonEmptyDir, 0o755); err != nil {
+		t.Fatalf("mkdir non-empty: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmptyDir, "child"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	if err := removeStaleSocket(nonEmptyDir); err == nil || !strings.Contains(err.Error(), "failed to remove stale socket") {
+		t.Fatalf("removeStaleSocket non-empty dir error = %v, want wrapped remove error", err)
+	}
+}
+
 func TestCloseAndRemoveHelpers(t *testing.T) {
 	var target error
 	closeErr := errors.New("close failed")
@@ -595,6 +851,9 @@ func TestCloseAndRemoveHelpers(t *testing.T) {
 	logClose("clean closer", closeErrorerFunc(func() error {
 		return nil
 	}))
+	logClose("failing closer", closeErrorerFunc(func() error {
+		return closeErr
+	}))
 
 	missing := filepath.Join(t.TempDir(), "missing")
 	logRemove(missing)
@@ -617,4 +876,24 @@ type closeErrorerFunc func() error
 
 func (f closeErrorerFunc) Close() error {
 	return f()
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) {
+	return f(p)
+}
+
+type httpDoerFunc func(*http.Request) (*http.Response, error)
+
+func (f httpDoerFunc) Do(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type errReader struct {
+	err error
+}
+
+func (r errReader) Read([]byte) (int, error) {
+	return 0, r.err
 }

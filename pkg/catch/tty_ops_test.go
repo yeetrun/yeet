@@ -10,6 +10,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -456,5 +458,211 @@ func seedTTYOpsVolumes(t *testing.T, server *Server) {
 		return nil
 	}); err != nil {
 		t.Fatalf("seed volumes: %v", err)
+	}
+}
+
+func TestDockerCmdFuncRejectsInvalidForms(t *testing.T) {
+	execer := &ttyExecer{}
+	for _, args := range [][]string{
+		nil,
+		{"bogus"},
+		{"pull", "extra"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if err := execer.dockerCmdFunc(args); err == nil {
+				t.Fatalf("dockerCmdFunc(%v) returned nil error", args)
+			}
+		})
+	}
+}
+
+func TestDockerUpdateCmdFuncFailsBeforeDockerForNonComposeService(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"svc": {Name: "svc", ServiceType: db.ServiceTypeSystemd},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "svc", rw: &out}
+
+	err := execer.dockerUpdateCmdFunc()
+	if err == nil || !strings.Contains(err.Error(), "not a docker compose service") {
+		t.Fatalf("dockerUpdateCmdFunc error = %v", err)
+	}
+	if !strings.Contains(out.String(), `status=err`) {
+		t.Fatalf("progress output = %q", out.String())
+	}
+}
+
+func TestEventsCmdFuncReturnsWhenContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	execer := &ttyExecer{
+		ctx: ctx,
+		s:   newTestServer(t),
+		sn:  "svc",
+		rw:  &bytes.Buffer{},
+	}
+	if err := execer.eventsCmdFunc(cli.EventsFlags{}); err != nil {
+		t.Fatalf("eventsCmdFunc: %v", err)
+	}
+}
+
+func TestTSCmdFuncRejectsUnsupportedServicesAndMissingTSNet(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"svc": {Name: "svc", ServiceType: db.ServiceTypeSystemd},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	for _, name := range []string{SystemService, CatchService} {
+		err := (&ttyExecer{s: server, sn: name}).tsCmdFunc(nil)
+		if err == nil || !strings.Contains(err.Error(), "not supported") {
+			t.Fatalf("tsCmdFunc(%s) error = %v", name, err)
+		}
+	}
+	err := (&ttyExecer{s: server, sn: "svc"}).tsCmdFunc(nil)
+	if err == nil || !strings.Contains(err.Error(), "not connected to tailscale") {
+		t.Fatalf("tsCmdFunc missing tsnet error = %v", err)
+	}
+}
+
+func TestRunRawTailscaleCmdReportsMissingSocketBeforeDownload(t *testing.T) {
+	server := newTestServer(t)
+	sv := (&db.Service{
+		Name:  "svc",
+		TSNet: &db.TailscaleNetwork{Version: "1.92.3"},
+	}).View()
+	err := (&ttyExecer{s: server, sn: "svc"}).runRawTailscaleCmd(sv, []string{"status"})
+	if err == nil || !strings.Contains(err.Error(), "tailscaled socket not found") {
+		t.Fatalf("runRawTailscaleCmd error = %v", err)
+	}
+}
+
+func TestApplyTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
+	server := newTestServer(t)
+	const (
+		service = "svc"
+		current = "1.92.3"
+		latest  = "1.94.0"
+	)
+	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
+	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
+		t.Fatalf("mkdir tsd: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscaled-"+latest), []byte("daemon-new"), 0o755); err != nil {
+		t.Fatalf("write tailscaled: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscale-"+latest), []byte("client-new"), 0o755); err != nil {
+		t.Fatalf("write tailscale: %v", err)
+	}
+	if err := os.MkdirAll(server.serviceRunDir(service), 0o755); err != nil {
+		t.Fatalf("mkdir run: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			service: {
+				Name:       service,
+				Generation: 4,
+				TSNet:      &db.TailscaleNetwork{Version: current},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	logPath := filepath.Join(binDir, "systemctl.log")
+	systemctl := filepath.Join(binDir, "systemctl")
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\n"), 0o755); err != nil {
+		t.Fatalf("write systemctl shim: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SYSTEMCTL_LOG", logPath)
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: service, rw: &out}
+	if err := execer.applyTSUpdate(current, latest); err != nil {
+		t.Fatalf("applyTSUpdate: %v", err)
+	}
+
+	assertFileContent(t, filepath.Join(server.serviceRunDir(service), "tailscaled"), "daemon-new")
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	svcData := dv.AsStruct().Services[service]
+	if svcData.TSNet.Version != latest {
+		t.Fatalf("persisted version = %q, want %q", svcData.TSNet.Version, latest)
+	}
+	refs := svcData.Artifacts[db.ArtifactTSBinary].Refs
+	if refs["latest"] != filepath.Join(tsdDir, "tailscaled-"+latest) || refs[db.Gen(4)] != filepath.Join(tsdDir, "tailscaled-"+latest) {
+		t.Fatalf("tailscale binary refs = %#v", refs)
+	}
+	logRaw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read systemctl log: %v", err)
+	}
+	if strings.TrimSpace(string(logRaw)) != "restart yeet-svc-ts.service" {
+		t.Fatalf("systemctl log = %q", logRaw)
+	}
+	if !strings.Contains(out.String(), "Updated tailscale for svc: 1.92.3 -> 1.94.0") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+func TestPrintLinesAndIfaceIPsReturnWriteErrors(t *testing.T) {
+	writeErr := errors.New("write failed")
+	if err := printLines(failingWriter{err: writeErr}, []string{"a"}); !errors.Is(err, writeErr) {
+		t.Fatalf("printLines error = %v", err)
+	}
+	if err := printIfaceIPs(failingWriter{err: writeErr}, []ifaceIP{{IP: "10.0.0.1"}}); !errors.Is(err, writeErr) {
+		t.Fatalf("printIfaceIPs error = %v", err)
+	}
+}
+
+func TestApplyTSUpdatePropagatesRestartFailure(t *testing.T) {
+	server := newTestServer(t)
+	const latest = "1.94.0"
+	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
+	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
+		t.Fatalf("mkdir tsd: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscaled-"+latest), []byte("daemon-new"), 0o755); err != nil {
+		t.Fatalf("write tailscaled: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscale-"+latest), []byte("client-new"), 0o755); err != nil {
+		t.Fatalf("write tailscale: %v", err)
+	}
+	if err := os.MkdirAll(server.serviceRunDir("svc"), 0o755); err != nil {
+		t.Fatalf("mkdir run: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"svc": {Name: "svc", Generation: 1, TSNet: &db.TailscaleNetwork{Version: "1.92.3"}},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	systemctl := filepath.Join(binDir, "systemctl")
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
+		t.Fatalf("write systemctl shim: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	err := (&ttyExecer{ctx: context.Background(), s: server, sn: "svc", rw: &bytes.Buffer{}}).applyTSUpdate("1.92.3", latest)
+	if err == nil || !strings.Contains(err.Error(), "failed to restart tailscaled service") {
+		t.Fatalf("applyTSUpdate error = %v", err)
 	}
 }

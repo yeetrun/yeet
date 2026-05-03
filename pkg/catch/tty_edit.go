@@ -238,12 +238,7 @@ func (e *ttyExecer) applyEditedConfig(tmpPath string) error {
 	if err != nil {
 		return fmt.Errorf("failed to update service: %w", err)
 	}
-	i, err := e.s.NewInstaller(e.installerCfg())
-	if err != nil {
-		return fmt.Errorf("failed to create installer: %w", err)
-	}
-	i.NewCmd = e.newCmd
-	return i.InstallGen(s2.Generation)
+	return e.installServiceGeneration(e.installerCfg(), s2.Generation)
 }
 
 func (e *ttyExecer) installEditedFile(tmpPath string) (retErr error) {
@@ -289,12 +284,7 @@ func readEditedSystemdUnits(tmpPath string, expectedUnits int) ([]systemdEditUni
 }
 
 func (e *ttyExecer) installEditedSystemd() error {
-	i, err := e.s.NewInstaller(e.installerCfg())
-	if err != nil {
-		return fmt.Errorf("failed to create installer: %w", err)
-	}
-	i.NewCmd = e.newCmd
-	return i.Install()
+	return e.installService(e.installerCfg())
 }
 
 func parseEditedSystemdUnits(bs []byte, expectedUnits int) ([]systemdEditUnit, error) {

@@ -31,6 +31,26 @@ func TestBridgeServiceArgsSkipsFlagValues(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsDoesNotBridgeLocalOrEmptyCommands(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+
+	tests := [][]string{
+		nil,
+		{"copy", "src", "dst"},
+		{"docker", "push", "svc-a", "image:tag"},
+		{"docker"},
+		{"unknown", "svc-a"},
+		{"env", "bogus", "svc-a"},
+	}
+	for _, args := range tests {
+		service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+		if ok || service != "" || host != "" || bridged != nil {
+			t.Fatalf("bridgeServiceArgs(%v) = service=%q host=%q bridged=%v ok=%v, want no bridge", args, service, host, bridged, ok)
+		}
+	}
+}
+
 func TestBridgeServiceArgsServiceHostQualified(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()
@@ -47,6 +67,22 @@ func TestBridgeServiceArgsServiceHostQualified(t *testing.T) {
 	}
 	if got := strings.Join(bridged, " "); got != "status" {
 		t.Fatalf("unexpected bridged args: %s", got)
+	}
+}
+
+func TestBridgeServiceArgsTerminatorTreatsFollowingTokenAsService(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"run", "--force", "--", "svc-a", "--app-flag"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to bridge service after terminator")
+	}
+	if service != "svc-a" || host != "" {
+		t.Fatalf("service=%q host=%q, want svc-a and empty host", service, host)
+	}
+	if got := strings.Join(bridged, " "); got != "run --force -- --app-flag" {
+		t.Fatalf("bridged args = %q", got)
 	}
 }
 

@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -142,5 +143,100 @@ func TestWriteTextFileAtomicallyReplacesContentAndCleansTemp(t *testing.T) {
 	}
 	if len(matches) != 0 {
 		t.Fatalf("temporary files were not cleaned up: %v", matches)
+	}
+}
+
+func TestDockerPrereqsInstallerSkipsReloadWhenFilesUnchanged(t *testing.T) {
+	root := t.TempDir()
+	var calls [][]string
+	installer := dockerPrereqsInstaller{
+		root: root,
+		runSystemctl: func(args ...string) error {
+			calls = append(calls, append([]string(nil), args...))
+			return nil
+		},
+	}
+
+	if err := installer.install([]string{"yeet-api-ns.service"}); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	calls = nil
+	if err := installer.install([]string{"yeet-api-ns.service"}); err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("systemctl calls on unchanged install = %#v, want none", calls)
+	}
+}
+
+func TestDockerPrereqsInstallerReturnsReloadError(t *testing.T) {
+	reloadErr := errors.New("reload failed")
+	installer := dockerPrereqsInstaller{
+		root: t.TempDir(),
+		runSystemctl: func(args ...string) error {
+			return reloadErr
+		},
+	}
+
+	err := installer.install([]string{"yeet-api-ns.service"})
+	if !errors.Is(err, reloadErr) {
+		t.Fatalf("install error = %v, want reload error", err)
+	}
+}
+
+func TestDockerPrereqsInstallerPathDefaultsToRoot(t *testing.T) {
+	got := (dockerPrereqsInstaller{}).path("etc", "systemd")
+	if got != "/etc/systemd" {
+		t.Fatalf("path = %q, want /etc/systemd", got)
+	}
+}
+
+func TestWriteTextFileIfChangedDetectsNoChangeAndReadErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unit.conf")
+	if err := os.WriteFile(path, []byte("same"), 0o644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	changed, err := writeTextFileIfChanged(path, "same", 0o644)
+	if err != nil {
+		t.Fatalf("writeTextFileIfChanged: %v", err)
+	}
+	if changed {
+		t.Fatal("unchanged file reported changed")
+	}
+
+	if _, err := textFileContentMatches(dir, []byte("x")); err == nil {
+		t.Fatal("expected read error for directory path")
+	}
+}
+
+func TestAtomicTextFileCleanupClosesAndRemovesTempOnError(t *testing.T) {
+	dir := t.TempDir()
+	tmp, err := os.CreateTemp(dir, "unit.conf.tmp.")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	tmpName := tmp.Name()
+	writeErr := errors.New("write failed")
+	atomicFile := &atomicTextFile{path: filepath.Join(dir, "unit.conf"), tmpName: tmpName, file: tmp}
+
+	atomicFile.cleanup(&writeErr)
+
+	if !atomicFile.closed {
+		t.Fatal("cleanup did not close temp file")
+	}
+	if _, err := os.Stat(tmpName); !os.IsNotExist(err) {
+		t.Fatalf("temp stat err = %v, want not exist", err)
+	}
+}
+
+func TestSortedUniqueUnitsDropsEmptyAndDeduplicates(t *testing.T) {
+	got := sortedUniqueUnits([]string{"b.service", "", "a.service", "b.service"})
+	want := []string{"a.service", "b.service"}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("sortedUniqueUnits mismatch (-want +got):\n%s", diff)
+	}
+	if got := sortedUniqueUnits(nil); got != nil {
+		t.Fatalf("empty units = %#v, want nil", got)
 	}
 }

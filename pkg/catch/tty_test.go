@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
@@ -120,6 +121,30 @@ func TestShouldBypassPtyInputForCron(t *testing.T) {
 	}
 	if !execer.shouldBypassPtyInput() {
 		t.Fatalf("expected cron to bypass pty input")
+	}
+}
+
+func TestShouldBypassPtyInputModes(t *testing.T) {
+	tests := []struct {
+		name  string
+		isPty bool
+		args  []string
+		want  bool
+	}{
+		{name: "non pty", args: []string{"run"}},
+		{name: "no args", isPty: true},
+		{name: "run", isPty: true, args: []string{"run"}, want: true},
+		{name: "copy", isPty: true, args: []string{"copy"}, want: true},
+		{name: "stage", isPty: true, args: []string{"stage"}, want: true},
+		{name: "version", isPty: true, args: []string{"version"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			execer := &ttyExecer{isPty: tc.isPty, args: tc.args}
+			if got := execer.shouldBypassPtyInput(); got != tc.want {
+				t.Fatalf("shouldBypassPtyInput = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -303,6 +328,192 @@ func TestRunWritesCommandError(t *testing.T) {
 	}
 }
 
+func TestStartPtySessionNoPTYReturnsNil(t *testing.T) {
+	execer := &ttyExecer{isPty: false}
+	session, err := execer.startPtySession()
+	if err != nil {
+		t.Fatalf("startPtySession returned error: %v", err)
+	}
+	if session != nil {
+		t.Fatalf("session = %#v, want nil", session)
+	}
+}
+
+func TestStartPtySessionOpenErrorWritesMessage(t *testing.T) {
+	oldOpenPty := openPty
+	defer func() { openPty = oldOpenPty }()
+	openErr := errors.New("open pty failed")
+	openPty = func() (*os.File, *os.File, error) {
+		return nil, nil, openErr
+	}
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx:   context.Background(),
+		isPty: true,
+		rw:    &out,
+	}
+	session, err := execer.startPtySession()
+	if !errors.Is(err, openErr) {
+		t.Fatalf("startPtySession error = %v, want %v", err, openErr)
+	}
+	if session != nil {
+		t.Fatalf("session = %#v, want nil", session)
+	}
+	if got := out.String(); !strings.Contains(got, "open pty failed") {
+		t.Fatalf("pty error output = %q, want open error", got)
+	}
+}
+
+func TestStartPtySessionDupErrorClosesFiles(t *testing.T) {
+	oldOpenPty := openPty
+	oldDup := dupPtyFileForTTY
+	defer func() {
+		openPty = oldOpenPty
+		dupPtyFileForTTY = oldDup
+	}()
+	stdin, err := os.CreateTemp(t.TempDir(), "stdin-*")
+	if err != nil {
+		t.Fatalf("create stdin: %v", err)
+	}
+	tty, err := os.CreateTemp(t.TempDir(), "tty-*")
+	if err != nil {
+		t.Fatalf("create tty: %v", err)
+	}
+	openPty = func() (*os.File, *os.File, error) {
+		return stdin, tty, nil
+	}
+	dupErr := errors.New("dup failed")
+	dupPtyFileForTTY = func(*os.File) (*os.File, error) {
+		return nil, dupErr
+	}
+
+	execer := &ttyExecer{
+		ctx:   context.Background(),
+		isPty: true,
+		rw:    &bytes.Buffer{},
+	}
+	session, err := execer.startPtySession()
+	if !errors.Is(err, dupErr) {
+		t.Fatalf("startPtySession error = %v, want %v", err, dupErr)
+	}
+	if session != nil {
+		t.Fatalf("session = %#v, want nil", session)
+	}
+	if _, err := stdin.Write([]byte("x")); err == nil {
+		t.Fatal("stdin write succeeded after expected close")
+	}
+	if _, err := tty.Write([]byte("x")); err == nil {
+		t.Fatal("tty write succeeded after expected close")
+	}
+}
+
+func TestTTYPTYSessionCopyOutputToSession(t *testing.T) {
+	stdout, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	raw := &closeWriteRecorder{closeWriteDone: make(chan struct{})}
+	session := &ttyPtySession{
+		stdout:               stdout,
+		doneWritingToSession: make(chan struct{}),
+	}
+	execer := &ttyExecer{
+		ctx:   context.Background(),
+		rawRW: raw,
+	}
+
+	session.copyOutputToSession(execer)
+	if _, err := stdoutWriter.Write([]byte("hello")); err != nil {
+		t.Fatalf("write stdout pipe: %v", err)
+	}
+	if err := stdoutWriter.Close(); err != nil {
+		t.Fatalf("close stdout writer: %v", err)
+	}
+	select {
+	case <-session.doneWritingToSession:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for output copy")
+	}
+	select {
+	case <-raw.closeWriteDone:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for CloseWrite")
+	}
+	if got := raw.String(); got != "hello" {
+		t.Fatalf("copied output = %q, want hello", got)
+	}
+}
+
+func TestTTYPTYSessionCopyInputFromSession(t *testing.T) {
+	stdinReader, stdin, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = stdinReader.Close() }()
+	session := &ttyPtySession{stdin: stdin}
+	execer := &ttyExecer{
+		ctx:   context.Background(),
+		rawRW: readWriter{Reader: strings.NewReader("input"), Writer: io.Discard},
+	}
+
+	session.copyInputFromSession(execer)
+	got, err := io.ReadAll(stdinReader)
+	if err != nil {
+		t.Fatalf("read copied stdin: %v", err)
+	}
+	if string(got) != "input" {
+		t.Fatalf("copied input = %q, want input", got)
+	}
+}
+
+func TestTTYPTYSessionCloseAndWait(t *testing.T) {
+	tty, err := os.CreateTemp(t.TempDir(), "tty-*")
+	if err != nil {
+		t.Fatalf("create tty: %v", err)
+	}
+	done := make(chan struct{})
+	close(done)
+	session := &ttyPtySession{tty: tty, doneWritingToSession: done}
+
+	session.close()
+	session.wait()
+	if _, err := tty.Write([]byte("x")); err == nil {
+		t.Fatal("tty write succeeded after close")
+	}
+}
+
+func TestResizeTTYUsesSetterForPTYFile(t *testing.T) {
+	oldSetWinsize := setWinsizeForTTY
+	defer func() { setWinsizeForTTY = oldSetWinsize }()
+	tty, err := os.CreateTemp(t.TempDir(), "tty-*")
+	if err != nil {
+		t.Fatalf("create tty: %v", err)
+	}
+	defer func() { _ = tty.Close() }()
+	var gotFile *os.File
+	var gotCols, gotRows int
+	setWinsizeForTTY = func(f *os.File, cols, rows int) {
+		gotFile = f
+		gotCols = cols
+		gotRows = rows
+	}
+
+	execer := &ttyExecer{isPty: true, rw: tty}
+	execer.ResizeTTY(120, 40)
+	if gotFile != tty || gotCols != 120 || gotRows != 40 {
+		t.Fatalf("setWinsize call = (%v, %d, %d), want tty 120x40", gotFile, gotCols, gotRows)
+	}
+}
+
+func TestResizeTTYIgnoresNonPTYAndNonFile(t *testing.T) {
+	execer := &ttyExecer{isPty: false, rw: &bytes.Buffer{}}
+	execer.ResizeTTY(80, 24)
+
+	execer = &ttyExecer{isPty: true, rw: &bytes.Buffer{}}
+	execer.ResizeTTY(80, 24)
+}
+
 func TestVersionCommandWritesPlainAndJSON(t *testing.T) {
 	t.Run("plain", func(t *testing.T) {
 		var out bytes.Buffer
@@ -438,4 +649,18 @@ func TestDockerComposeServiceRunnerSetNewCmdAlsoOverridesContextFactory(t *testi
 	if cmd.Stdin != &rw {
 		t.Fatalf("expected runner command context stdin to use session reader, got %T", cmd.Stdin)
 	}
+}
+
+type closeWriteRecorder struct {
+	bytes.Buffer
+	closeWriteDone chan struct{}
+}
+
+func (r *closeWriteRecorder) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (r *closeWriteRecorder) CloseWrite() error {
+	close(r.closeWriteDone)
+	return nil
 }

@@ -455,3 +455,99 @@ func TestRunEnvSetPlanReportsNoChange(t *testing.T) {
 		t.Fatalf("output = %q", got)
 	}
 }
+
+func TestEnvCommandFromArgsRejectsInvalidForms(t *testing.T) {
+	tests := [][]string{
+		nil,
+		{"bogus"},
+		{"show", "extra"},
+		{"copy", "extra"},
+		{"set"},
+		{"set", "NO_EQUALS"},
+		{"set", " BAD=value"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if _, err := envCommandFromArgs(args); err == nil {
+				t.Fatalf("envCommandFromArgs(%v) returned nil error", args)
+			}
+		})
+	}
+}
+
+func TestSplitEnvFileLinesAndJoinPreserveTrailingNewline(t *testing.T) {
+	lines, trailing := splitEnvFileLines([]byte("A=1\nB=2\n"))
+	if !trailing || len(lines) != 2 {
+		t.Fatalf("lines=%#v trailing=%v", lines, trailing)
+	}
+	if got := string(joinEnvFileLines(lines, trailing)); got != "A=1\nB=2\n" {
+		t.Fatalf("joined = %q", got)
+	}
+
+	lines, trailing = splitEnvFileLines(nil)
+	if trailing || len(lines) != 0 {
+		t.Fatalf("empty lines=%#v trailing=%v", lines, trailing)
+	}
+	if got := string(joinEnvFileLines(nil, false)); got != "" {
+		t.Fatalf("empty join = %q", got)
+	}
+}
+
+func TestParseEnvLine(t *testing.T) {
+	parsed, ok := parseEnvLine("  export FOO =bar")
+	if !ok {
+		t.Fatal("expected env line match")
+	}
+	if parsed.prefix != "  export " || parsed.key != "FOO" {
+		t.Fatalf("parsed = %#v", parsed)
+	}
+	if _, ok := parseEnvLine("# FOO=bar"); ok {
+		t.Fatal("comment should not parse as env assignment")
+	}
+}
+
+func TestEditedEnvFileChangedDetectsNewNonEmptyFile(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "tmp.env")
+	if err := os.WriteFile(tmp, []byte("FOO=one\n"), 0o644); err != nil {
+		t.Fatalf("write tmp: %v", err)
+	}
+	changed, err := editedEnvFileChanged("", tmp)
+	if err != nil {
+		t.Fatalf("editedEnvFileChanged: %v", err)
+	}
+	if !changed {
+		t.Fatal("expected non-empty new env file to be changed")
+	}
+}
+
+func TestCloseEnvFileAndReadEnvFileIfExists(t *testing.T) {
+	f, err := os.CreateTemp(t.TempDir(), "env")
+	if err != nil {
+		t.Fatalf("CreateTemp: %v", err)
+	}
+	if err := closeEnvFile(f); err != nil {
+		t.Fatalf("closeEnvFile: %v", err)
+	}
+	if err := closeEnvFile(f); err == nil {
+		t.Fatal("expected second close to report error")
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing.env")
+	contents, err := readEnvFileIfExists(missing)
+	if err != nil {
+		t.Fatalf("read missing env: %v", err)
+	}
+	if contents != nil {
+		t.Fatalf("missing contents = %q, want nil", contents)
+	}
+	if _, err := readEnvFileIfExists(t.TempDir()); err == nil {
+		t.Fatal("expected read error for directory")
+	}
+}
+
+func TestCurrentEnvContentsReturnsServiceError(t *testing.T) {
+	_, err := (&ttyExecer{s: newTestServer(t), sn: "missing"}).currentEnvContents()
+	if !errors.Is(err, errServiceNotFound) {
+		t.Fatalf("currentEnvContents error = %v, want errServiceNotFound", err)
+	}
+}
