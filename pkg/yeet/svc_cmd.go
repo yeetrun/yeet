@@ -280,43 +280,14 @@ func splitRunPayloadArgs(args []string) (string, []string, error) {
 	if len(args) == 0 {
 		return "", nil, fmt.Errorf("run requires a payload")
 	}
-	specs := cli.RemoteFlagSpecs()["run"]
 	payloadIdx := -1
 	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
+		consumed, stop := scanRunFlag(args, &i, false)
+		if stop {
 			break
 		}
-		if strings.HasPrefix(arg, "--") && len(arg) > 2 {
-			name := arg
-			if idx := strings.Index(name, "="); idx != -1 {
-				name = name[:idx]
-			}
-			if spec, ok := specs[name]; ok {
-				if spec.ConsumesValue && !strings.Contains(arg, "=") {
-					i++
-				}
-				continue
-			}
-		}
-		if strings.HasPrefix(arg, "-") && arg != "-" {
-			if strings.Contains(arg, "=") {
-				name := arg[:strings.Index(arg, "=")]
-				if _, ok := specs[name]; ok {
-					continue
-				}
-			} else if len(arg) == 2 {
-				if spec, ok := specs[arg]; ok {
-					if spec.ConsumesValue {
-						i++
-					}
-					continue
-				}
-			} else if short := "-" + string(arg[1]); short != "-" {
-				if spec, ok := specs[short]; ok && spec.ConsumesValue {
-					continue
-				}
-			}
+		if consumed {
+			continue
 		}
 		payloadIdx = i
 		break
@@ -356,59 +327,76 @@ func normalizeRunArgs(args []string) []string {
 }
 
 func splitRunArgsForParsing(args []string) ([]string, []string) {
-	specs := cli.RemoteFlagSpecs()["run"]
 	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--" {
+		consumed, stop := scanRunFlag(args, &i, true)
+		if stop {
 			if i+1 < len(args) {
 				return args[:i], args[i+1:]
 			}
 			return args[:i], nil
 		}
-		if strings.HasPrefix(arg, "--") && len(arg) > 2 {
-			name := arg
-			if idx := strings.Index(name, "="); idx != -1 {
-				name = name[:idx]
-			}
-			spec, ok := specs[name]
-			if !ok {
-				return args[:i], args[i:]
-			}
-			if spec.ConsumesValue && !strings.Contains(arg, "=") {
-				i++
-			}
+		if consumed {
 			continue
 		}
-		if strings.HasPrefix(arg, "-") && arg != "-" {
-			if strings.Contains(arg, "=") {
-				name := arg[:strings.Index(arg, "=")]
-				if _, ok := specs[name]; ok {
-					continue
-				}
-				return args[:i], args[i:]
-			}
-			if len(arg) == 2 {
-				spec, ok := specs[arg]
-				if !ok {
-					return args[:i], args[i:]
-				}
-				if spec.ConsumesValue {
-					i++
-				}
-				continue
-			}
-			short := "-" + string(arg[1])
-			spec, ok := specs[short]
-			if !ok {
-				return args[:i], args[i:]
-			}
-			if spec.ConsumesValue {
-				continue
-			}
-			continue
-		}
+		return args[:i], args[i:]
 	}
 	return args, nil
+}
+
+func scanRunFlag(args []string, idx *int, consumeBundledShort bool) (consumed bool, stop bool) {
+	arg := args[*idx]
+	if arg == "--" {
+		return false, true
+	}
+	if !strings.HasPrefix(arg, "-") || arg == "-" {
+		return false, false
+	}
+	specs := cli.RemoteFlagSpecs()["run"]
+	if strings.HasPrefix(arg, "--") && len(arg) > 2 {
+		return scanLongRunFlag(arg, idx, specs), false
+	}
+	if strings.Contains(arg, "=") {
+		_, ok := specs[flagName(arg)]
+		return ok, false
+	}
+	if len(arg) == 2 {
+		return scanShortRunFlag(arg, idx, specs), false
+	}
+	spec, ok := specs["-"+string(arg[1])]
+	if !ok {
+		return false, false
+	}
+	return consumeBundledShort || spec.ConsumesValue, false
+}
+
+func scanLongRunFlag(arg string, idx *int, specs map[string]cli.FlagSpec) bool {
+	name := flagName(arg)
+	spec, ok := specs[name]
+	if !ok {
+		return false
+	}
+	if spec.ConsumesValue && !strings.Contains(arg, "=") {
+		*idx = *idx + 1
+	}
+	return true
+}
+
+func scanShortRunFlag(arg string, idx *int, specs map[string]cli.FlagSpec) bool {
+	spec, ok := specs[arg]
+	if !ok {
+		return false
+	}
+	if spec.ConsumesValue {
+		*idx = *idx + 1
+	}
+	return true
+}
+
+func flagName(arg string) string {
+	if idx := strings.Index(arg, "="); idx != -1 {
+		return arg[:idx]
+	}
+	return arg
 }
 
 func rehydrateRunArgs(args []string) []string {
@@ -488,7 +476,11 @@ func tryRunRemoteImage(image string, args []string) (ok bool, _ error) {
 	if err != nil {
 		return true, err
 	}
-	defer os.RemoveAll(tmpDir)
+	defer func() {
+		if err := os.RemoveAll(tmpDir); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "failed to remove temporary directory %s: %v\n", tmpDir, err)
+		}
+	}()
 	composePath := filepath.Join(tmpDir, "compose.yml")
 	content := fmt.Sprintf(imageComposeTemplate, svc, image)
 	if err := os.WriteFile(composePath, []byte(content), 0o644); err != nil {
@@ -592,7 +584,7 @@ func tryRunDocker(image string, args []string) (ok bool, _ error) {
 	return true, nil
 }
 
-func runEnvCopy(file string) error {
+func runEnvCopy(file string) (err error) {
 	if file == "" {
 		return fmt.Errorf("env copy requires a file")
 	}
@@ -605,7 +597,11 @@ func runEnvCopy(file string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
 	svc := getService()
 	args := []string{"env", "copy"}
 	if err := execRemoteFn(context.Background(), svc, args, f, false); err != nil {
@@ -662,16 +658,32 @@ func isValidEnvKey(key string) bool {
 	}
 	for i, r := range key {
 		if i == 0 {
-			if !(r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z')) {
+			if !isEnvKeyStart(r) {
 				return false
 			}
 			continue
 		}
-		if !(r == '_' || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9')) {
+		if !isEnvKeyChar(r) {
 			return false
 		}
 	}
 	return true
+}
+
+func isEnvKeyStart(r rune) bool {
+	return r == '_' || isASCIILetter(r)
+}
+
+func isEnvKeyChar(r rune) bool {
+	return isEnvKeyStart(r) || isASCIIDigit(r)
+}
+
+func isASCIILetter(r rune) bool {
+	return r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z'
+}
+
+func isASCIIDigit(r rune) bool {
+	return r >= '0' && r <= '9'
 }
 
 func runCron(file string, cronFields []string, binArgs []string) error {
@@ -767,25 +779,31 @@ func handleStatusCommand(ctx context.Context, args []string, cfgLoc *projectConf
 	if err != nil {
 		return err
 	}
-	format := strings.TrimSpace(flags.Format)
-	if (format == "" || format == "table") && serviceOverride != "" {
+	if shouldRenderStatusTable(flags.Format) && serviceOverride != "" {
 		return renderStatusTableForService(ctx, Host(), serviceOverride)
 	}
-	if serviceOverride == "" && (format == "" || format == "table") {
-		if hostOverrideSet {
-			return statusMultiHost(ctx, []string{Host()}, flags)
-		}
-		if cfgLoc != nil {
-			hosts := cfgLoc.Config.AllHosts()
-			if len(hosts) > 0 {
-				return statusMultiHost(ctx, hosts, flags)
-			}
-		}
-		return statusMultiHost(ctx, []string{Host()}, flags)
+	if serviceOverride == "" && shouldRenderStatusTable(flags.Format) {
+		return statusMultiHost(ctx, statusHosts(cfgLoc, hostOverrideSet), flags)
 	}
 	svc := getService()
 	statusArgs := append([]string{"status"}, args...)
 	return execRemoteFn(ctx, svc, statusArgs, nil, true)
+}
+
+func shouldRenderStatusTable(format string) bool {
+	format = strings.TrimSpace(format)
+	return format == "" || format == "table"
+}
+
+func statusHosts(cfgLoc *projectConfigLocation, hostOverrideSet bool) []string {
+	if hostOverrideSet || cfgLoc == nil {
+		return []string{Host()}
+	}
+	hosts := cfgLoc.Config.AllHosts()
+	if len(hosts) == 0 {
+		return []string{Host()}
+	}
+	return hosts
 }
 
 var fetchStatusForHostFn = fetchStatusForHost
@@ -855,54 +873,21 @@ func renderStatusTableForService(ctx context.Context, host, service string) erro
 
 const statusContainersMaxWidth = 32
 
-func renderStatusTables(w io.Writer, results []hostStatusData, aggregateContainers bool) error {
-	type statusRow struct {
-		Host       string
-		Service    string
-		Type       string
-		Containers string
-		Status     string
-	}
+type statusRow struct {
+	Host       string
+	Service    string
+	Type       string
+	Containers string
+	Status     string
+}
 
+func buildStatusRows(results []hostStatusData, aggregateContainers bool) []statusRow {
 	rows := make([]statusRow, 0)
 	for _, res := range results {
 		for _, status := range res.Services {
-			if aggregateContainers && status.ServiceType == dockerServiceType {
-				rows = append(rows, statusRow{
-					Host:       res.Host,
-					Service:    status.ServiceName,
-					Type:       status.ServiceType,
-					Containers: truncateStatusContainers(formatStatusContainers(status.Components)),
-					Status:     dockerAggregateStatus(status.Components),
-				})
-				continue
-			}
-			if len(status.Components) == 0 {
-				rows = append(rows, statusRow{
-					Host:       res.Host,
-					Service:    status.ServiceName,
-					Type:       status.ServiceType,
-					Containers: "-",
-					Status:     "unknown",
-				})
-				continue
-			}
-			for _, component := range status.Components {
-				container := "-"
-				if status.ServiceType == dockerServiceType {
-					container = component.Name
-				}
-				rows = append(rows, statusRow{
-					Host:       res.Host,
-					Service:    status.ServiceName,
-					Type:       status.ServiceType,
-					Containers: container,
-					Status:     component.Status,
-				})
-			}
+			rows = append(rows, buildStatusRowsForService(res.Host, status, aggregateContainers)...)
 		}
 	}
-
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Service != rows[j].Service {
 			return rows[i].Service < rows[j].Service
@@ -915,15 +900,59 @@ func renderStatusTables(w io.Writer, results []hostStatusData, aggregateContaine
 		}
 		return rows[i].Status < rows[j].Status
 	})
+	return rows
+}
 
+func buildStatusRowsForService(host string, status statusService, aggregateContainers bool) []statusRow {
+	if aggregateContainers && status.ServiceType == dockerServiceType {
+		return []statusRow{{
+			Host:       host,
+			Service:    status.ServiceName,
+			Type:       status.ServiceType,
+			Containers: truncateStatusContainers(formatStatusContainers(status.Components)),
+			Status:     dockerAggregateStatus(status.Components),
+		}}
+	}
+	if len(status.Components) == 0 {
+		return []statusRow{{
+			Host:       host,
+			Service:    status.ServiceName,
+			Type:       status.ServiceType,
+			Containers: "-",
+			Status:     "unknown",
+		}}
+	}
+	rows := make([]statusRow, 0, len(status.Components))
+	for _, component := range status.Components {
+		container := "-"
+		if status.ServiceType == dockerServiceType {
+			container = component.Name
+		}
+		rows = append(rows, statusRow{
+			Host:       host,
+			Service:    status.ServiceName,
+			Type:       status.ServiceType,
+			Containers: container,
+			Status:     component.Status,
+		})
+	}
+	return rows
+}
+
+func renderStatusTables(w io.Writer, results []hostStatusData, aggregateContainers bool) error {
+	rows := buildStatusRows(results, aggregateContainers)
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
 	header := "CONTAINER"
 	if aggregateContainers {
 		header = "CONTAINERS"
 	}
-	fmt.Fprintf(tw, "SERVICE\tHOST\tTYPE\t%s\tSTATUS\t\n", header)
+	if _, err := fmt.Fprintf(tw, "SERVICE\tHOST\tTYPE\t%s\tSTATUS\t\n", header); err != nil {
+		return err
+	}
 	for _, row := range rows {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t\n", row.Service, row.Host, row.Type, row.Containers, row.Status)
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t\n", row.Service, row.Host, row.Type, row.Containers, row.Status); err != nil {
+			return err
+		}
 	}
 	return tw.Flush()
 }
@@ -987,38 +1016,16 @@ func runFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) er
 }
 
 func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride string, forceDeploy bool) error {
-	if serviceOverride == "" {
-		return fmt.Errorf("run requires a service name")
+	stored, err := storedServiceConfig(cfgLoc, hostOverride, "run", serviceTypeRun)
+	if err != nil {
+		return err
 	}
-	if cfgLoc == nil || cfgLoc.Config == nil {
-		return fmt.Errorf("run requires a payload (no %s found)", projectConfigName)
-	}
-	service := serviceOverride
-	host := strings.TrimSpace(hostOverride)
-	if host == "" {
-		hosts := cfgLoc.Config.ServiceHosts(service)
-		if len(hosts) == 0 {
-			return fmt.Errorf("no stored run config for %s", service)
-		}
-		if len(hosts) > 1 {
-			return ambiguousServiceError(service, hosts)
-		}
-		host = hosts[0]
-		SetHost(host)
-	}
-	entry, ok := cfgLoc.Config.ServiceEntry(service, host)
-	if !ok {
-		return fmt.Errorf("no stored run config for %s@%s", service, host)
-	}
-	if entry.Type != "" && entry.Type != serviceTypeRun {
-		return fmt.Errorf("service %s@%s is configured as %s", service, host, entry.Type)
-	}
-	payload := resolvePayloadPath(cfgLoc.Dir, entry.Payload)
+	payload := resolvePayloadPath(cfgLoc.Dir, stored.Entry.Payload)
 	if strings.TrimSpace(payload) == "" {
-		return fmt.Errorf("no payload configured for %s@%s", service, host)
+		return fmt.Errorf("no payload configured for %s@%s", stored.Service, stored.Host)
 	}
-	envFile := resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
-	return runWithChanges(payload, rehydrateRunArgs(entry.Args), envFile, entry, forceDeploy)
+	envFile := resolveEnvFilePath(cfgLoc.Dir, stored.Entry.EnvFile)
+	return runWithChanges(payload, rehydrateRunArgs(stored.Entry.Args), envFile, stored.Entry, forceDeploy)
 }
 
 func shouldRunFromConfigWithForce(args []string) (bool, error) {
@@ -1033,44 +1040,76 @@ func shouldRunFromConfigWithForce(args []string) (bool, error) {
 }
 
 func runCronFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) error {
+	stored, err := storedServiceConfig(cfgLoc, hostOverride, "cron", serviceTypeCron)
+	if err != nil {
+		return err
+	}
+	payload := resolvePayloadPath(cfgLoc.Dir, stored.Entry.Payload)
+	if strings.TrimSpace(payload) == "" {
+		return fmt.Errorf("no payload configured for %s@%s", stored.Service, stored.Host)
+	}
+	cronFields, err := parseCronSchedule(stored.Entry.Schedule)
+	if err != nil {
+		return fmt.Errorf("invalid schedule for %s@%s: %w", stored.Service, stored.Host, err)
+	}
+	return runCron(payload, cronFields, stored.Entry.Args)
+}
+
+type storedService struct {
+	Service string
+	Host    string
+	Entry   ServiceEntry
+}
+
+func storedServiceConfig(cfgLoc *projectConfigLocation, hostOverride, commandName, wantType string) (storedService, error) {
 	if serviceOverride == "" {
-		return fmt.Errorf("cron requires a service name")
+		return storedService{}, fmt.Errorf("%s requires a service name", commandName)
 	}
 	if cfgLoc == nil || cfgLoc.Config == nil {
-		return fmt.Errorf("cron requires a payload (no %s found)", projectConfigName)
+		return storedService{}, fmt.Errorf("%s requires a payload (no %s found)", commandName, projectConfigName)
 	}
 	service := serviceOverride
-	host := strings.TrimSpace(hostOverride)
-	if host == "" {
-		hosts := cfgLoc.Config.ServiceHosts(service)
-		if len(hosts) == 0 {
-			return fmt.Errorf("no stored cron config for %s", service)
-		}
-		if len(hosts) > 1 {
-			return ambiguousServiceError(service, hosts)
-		}
-		host = hosts[0]
-		SetHost(host)
+	host, err := storedServiceHost(cfgLoc.Config, service, hostOverride, commandName)
+	if err != nil {
+		return storedService{}, err
 	}
 	entry, ok := cfgLoc.Config.ServiceEntry(service, host)
 	if !ok {
-		return fmt.Errorf("no stored cron config for %s@%s", service, host)
+		return storedService{}, fmt.Errorf("no stored %s config for %s@%s", commandName, service, host)
 	}
-	if entry.Type != serviceTypeCron {
-		if entry.Type == "" {
-			return fmt.Errorf("service %s@%s is not configured for cron", service, host)
-		}
-		return fmt.Errorf("service %s@%s is configured as %s", service, host, entry.Type)
+	if err := validateStoredServiceType(service, host, entry.Type, commandName, wantType); err != nil {
+		return storedService{}, err
 	}
-	payload := resolvePayloadPath(cfgLoc.Dir, entry.Payload)
-	if strings.TrimSpace(payload) == "" {
-		return fmt.Errorf("no payload configured for %s@%s", service, host)
+	return storedService{Service: service, Host: host, Entry: entry}, nil
+}
+
+func storedServiceHost(cfg *ProjectConfig, service, hostOverride, commandName string) (string, error) {
+	host := strings.TrimSpace(hostOverride)
+	if host != "" {
+		return host, nil
 	}
-	cronFields, err := parseCronSchedule(entry.Schedule)
-	if err != nil {
-		return fmt.Errorf("invalid schedule for %s@%s: %w", service, host, err)
+	hosts := cfg.ServiceHosts(service)
+	if len(hosts) == 0 {
+		return "", fmt.Errorf("no stored %s config for %s", commandName, service)
 	}
-	return runCron(payload, cronFields, entry.Args)
+	if len(hosts) > 1 {
+		return "", ambiguousServiceError(service, hosts)
+	}
+	SetHost(hosts[0])
+	return hosts[0], nil
+}
+
+func validateStoredServiceType(service, host, gotType, commandName, wantType string) error {
+	if commandName == "run" && gotType == "" {
+		return nil
+	}
+	if gotType == wantType {
+		return nil
+	}
+	if commandName == "cron" && gotType == "" {
+		return fmt.Errorf("service %s@%s is not configured for cron", service, host)
+	}
+	return fmt.Errorf("service %s@%s is configured as %s", service, host, gotType)
 }
 
 func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload string, runArgs []string) error {

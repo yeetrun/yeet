@@ -251,6 +251,26 @@ func TestRPCInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestRPCUnknownFieldReturnsParseError(t *testing.T) {
+	server := newTestServer(t)
+	ts := httptest.NewServer(server.RPCMux())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/rpc", "application/json", bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":1,"method":"catch.Info","extra":true}`)))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp catchrpc.Response
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rpcResp.Error == nil || rpcResp.Error.Code != catchrpc.ErrParseError {
+		t.Fatalf("unexpected error: %+v", rpcResp.Error)
+	}
+}
+
 func TestRPCInvalidRequest(t *testing.T) {
 	server := newTestServer(t)
 	ts := httptest.NewServer(server.RPCMux())
@@ -267,6 +287,36 @@ func TestRPCInvalidRequest(t *testing.T) {
 		t.Fatalf("decode response: %v", err)
 	}
 	if rpcResp.Error == nil || rpcResp.Error.Code != catchrpc.ErrInvalidRequest {
+		t.Fatalf("unexpected error: %+v", rpcResp.Error)
+	}
+}
+
+func TestRPCServiceInfoInvalidParams(t *testing.T) {
+	server := newTestServer(t)
+	ts := httptest.NewServer(server.RPCMux())
+	defer ts.Close()
+
+	req := catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "catch.ServiceInfo",
+		Params:  json.RawMessage(`{"service":123}`),
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp, err := http.Post(ts.URL+"/rpc", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp catchrpc.Response
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rpcResp.Error == nil || rpcResp.Error.Code != catchrpc.ErrInvalidParams {
 		t.Fatalf("unexpected error: %+v", rpcResp.Error)
 	}
 }

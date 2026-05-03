@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -52,8 +53,16 @@ func writeRPCResponse(w http.ResponseWriter, resp catchrpc.Response) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func writeRPCError(w http.ResponseWriter, id json.RawMessage, code int, msg string, data any) {
-	resp := catchrpc.Response{
+func newRPCResponse(id json.RawMessage, result any) catchrpc.Response {
+	return catchrpc.Response{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  result,
+	}
+}
+
+func newRPCError(id json.RawMessage, code int, msg string, data any) catchrpc.Response {
+	return catchrpc.Response{
 		JSONRPC: "2.0",
 		ID:      id,
 		Error: &catchrpc.Error{
@@ -62,7 +71,55 @@ func writeRPCError(w http.ResponseWriter, id json.RawMessage, code int, msg stri
 			Data:    data,
 		},
 	}
-	writeRPCResponse(w, resp)
+}
+
+func writeRPCError(w http.ResponseWriter, id json.RawMessage, code int, msg string, data any) {
+	writeRPCResponse(w, newRPCError(id, code, msg, data))
+}
+
+func closeRequestBody(body io.Closer) {
+	if err := body.Close(); err != nil {
+		log.Printf("request body close failed: %v", err)
+	}
+}
+
+func decodeRPCRequest(body io.Reader) (catchrpc.Request, error) {
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+
+	var req catchrpc.Request
+	err := dec.Decode(&req)
+	return req, err
+}
+
+func invalidParamsError(msg string, data any) *catchrpc.Error {
+	return &catchrpc.Error{
+		Code:    catchrpc.ErrInvalidParams,
+		Message: msg,
+		Data:    data,
+	}
+}
+
+func decodeRPCParams(raw json.RawMessage, out any) *catchrpc.Error {
+	if len(raw) == 0 {
+		return invalidParamsError("missing params", nil)
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return invalidParamsError("invalid params", err.Error())
+	}
+	return nil
+}
+
+func validateServiceParam(service string) (string, *catchrpc.Error) {
+	service = strings.TrimSpace(service)
+	if service == "" {
+		return "", invalidParamsError("missing service", nil)
+	}
+	return service, nil
+}
+
+func responseFromRPCError(id json.RawMessage, err *catchrpc.Error) catchrpc.Response {
+	return newRPCError(id, err.Code, err.Message, err.Data)
 }
 
 func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
@@ -74,12 +131,10 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		writeRPCError(w, []byte("null"), catchrpc.ErrInvalidRequest, "empty body", nil)
 		return
 	}
-	defer r.Body.Close()
+	defer closeRequestBody(r.Body)
 
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	var req catchrpc.Request
-	if err := dec.Decode(&req); err != nil {
+	req, err := decodeRPCRequest(r.Body)
+	if err != nil {
 		writeRPCError(w, []byte("null"), catchrpc.ErrParseError, "parse error", err.Error())
 		return
 	}
@@ -91,97 +146,72 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		return // notification
 	}
 
+	writeRPCResponse(w, s.dispatchRPC(req))
+}
+
+func (s *Server) dispatchRPC(req catchrpc.Request) catchrpc.Response {
 	switch req.Method {
 	case "catch.Info":
-		writeRPCResponse(w, catchrpc.Response{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result:  GetInfoWithConfig(&s.cfg),
-		})
+		return newRPCResponse(req.ID, GetInfoWithConfig(&s.cfg))
 	case "catch.ServiceInfo":
-		var params catchrpc.ServiceInfoRequest
-		if len(req.Params) == 0 {
-			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "missing params", nil)
-			return
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "invalid params", err.Error())
-			return
-		}
-		params.Service = strings.TrimSpace(params.Service)
-		if params.Service == "" {
-			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "missing service", nil)
-			return
-		}
-		resp, err := s.serviceInfo(params.Service)
-		if err != nil {
-			writeRPCError(w, req.ID, catchrpc.ErrInternal, "failed to get service info", err.Error())
-			return
-		}
-		writeRPCResponse(w, catchrpc.Response{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result:  resp,
-		})
+		return s.handleRPCServiceInfo(req)
 	case "catch.ArtifactHashes":
-		var params catchrpc.ArtifactHashesRequest
-		if len(req.Params) == 0 {
-			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "missing params", nil)
-			return
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "invalid params", err.Error())
-			return
-		}
-		params.Service = strings.TrimSpace(params.Service)
-		if params.Service == "" {
-			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "missing service", nil)
-			return
-		}
-		resp, err := s.artifactHashes(params.Service)
-		if err != nil {
-			writeRPCError(w, req.ID, catchrpc.ErrInternal, "failed to get artifact hashes", err.Error())
-			return
-		}
-		writeRPCResponse(w, catchrpc.Response{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result:  resp,
-		})
+		return s.handleRPCArtifactHashes(req)
 	case "catch.TailscaleSetup":
-		var params catchrpc.TailscaleSetupRequest
-		if len(req.Params) == 0 {
-			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "missing params", nil)
-			return
-		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			writeRPCError(w, req.ID, catchrpc.ErrInvalidParams, "invalid params", err.Error())
-			return
-		}
-		resp, err := s.setupTailscale(params.ClientSecret)
-		if err != nil {
-			writeRPCError(w, req.ID, catchrpc.ErrInternal, "failed to set tailscale secret", err.Error())
-			return
-		}
-		writeRPCResponse(w, catchrpc.Response{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result:  resp,
-		})
+		return s.handleRPCTailscaleSetup(req)
 	case "catch.ServicesList":
 		list, err := s.listServices()
 		if err != nil {
-			writeRPCError(w, req.ID, catchrpc.ErrInternal, "failed to list services", err.Error())
-			return
+			return newRPCError(req.ID, catchrpc.ErrInternal, "failed to list services", err.Error())
 		}
-		writeRPCResponse(w, catchrpc.Response{
-			JSONRPC: "2.0",
-			ID:      req.ID,
-			Result:  list,
-		})
+		return newRPCResponse(req.ID, list)
 	default:
-		writeRPCError(w, req.ID, catchrpc.ErrMethodNotFound, "method not found", req.Method)
+		return newRPCError(req.ID, catchrpc.ErrMethodNotFound, "method not found", req.Method)
 	}
+}
+
+func (s *Server) handleRPCServiceInfo(req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.ServiceInfoRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	service, rpcErr := validateServiceParam(params.Service)
+	if rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.serviceInfo(service)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to get service info", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
+}
+
+func (s *Server) handleRPCArtifactHashes(req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.ArtifactHashesRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	service, rpcErr := validateServiceParam(params.Service)
+	if rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.artifactHashes(service)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to get artifact hashes", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
+}
+
+func (s *Server) handleRPCTailscaleSetup(req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.TailscaleSetupRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.setupTailscale(params.ClientSecret)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to set tailscale secret", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
 }
 
 type serviceInfo struct {
@@ -235,25 +265,63 @@ func (c wsCloser) Close() error {
 	return c.conn.Close()
 }
 
-func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
+func closeWebSocketConn(conn *websocket.Conn, label string) {
+	if err := conn.Close(); err != nil {
+		if errors.Is(err, net.ErrClosed) || errors.Is(err, websocket.ErrCloseSent) {
+			return
+		}
+		if strings.Contains(err.Error(), "use of closed network connection") {
+			return
+		}
+		log.Printf("%s websocket close failed: %v", label, err)
+	}
+}
+
+func upgradeRPCWebSocket(w http.ResponseWriter, r *http.Request) (*websocket.Conn, bool) {
 	conn, err := rpcUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return nil, false
+	}
+	return conn, true
+}
+
+func writeExecExit(conn *websocket.Conn, code int, errText string) {
+	resp := catchrpc.ExecMessage{Type: catchrpc.ExecMsgExit, Code: code, Error: errText}
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		log.Printf("marshal exec exit failed: %v", err)
 		return
 	}
-	defer conn.Close()
+	_ = conn.WriteMessage(websocket.TextMessage, payload)
+}
 
+func readExecRequest(conn *websocket.Conn) (catchrpc.ExecRequest, bool) {
 	_, data, err := conn.ReadMessage()
 	if err != nil {
-		return
+		return catchrpc.ExecRequest{}, false
 	}
 	var req catchrpc.ExecRequest
 	if err := json.Unmarshal(data, &req); err != nil {
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"exit","code":1,"error":"invalid exec request"}`))
-		return
+		writeExecExit(conn, 1, "invalid exec request")
+		return catchrpc.ExecRequest{}, false
 	}
 	if req.Service == "" {
-		_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"exit","code":1,"error":"missing service"}`))
+		writeExecExit(conn, 1, "missing service")
+		return catchrpc.ExecRequest{}, false
+	}
+	return req, true
+}
+
+func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
+	conn, ok := upgradeRPCWebSocket(w, r)
+	if !ok {
+		return
+	}
+	defer closeWebSocketConn(conn, "exec")
+
+	req, ok := readExecRequest(conn)
+	if !ok {
 		return
 	}
 
@@ -285,98 +353,147 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
+	readDone := pumpExecWebSocketInput(conn, pw, execer, cancel)
+
+	err := execer.run()
+	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	writeExecRunResult(conn, err)
+	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(5*time.Second))
+	closeWebSocketConn(conn, "exec")
+	<-readDone
+}
+
+func pumpExecWebSocketInput(conn *websocket.Conn, pw *io.PipeWriter, execer *ttyExecer, cancel context.CancelFunc) <-chan struct{} {
 	readDone := make(chan struct{})
 	go func() {
 		defer close(readDone)
 		for {
 			mt, msg, err := conn.ReadMessage()
 			if err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					_ = pw.Close()
-					cancel()
-					return
-				}
-				_ = pw.CloseWithError(err)
+				closeExecInput(pw, err)
 				cancel()
 				return
 			}
-			switch mt {
-			case websocket.BinaryMessage:
-				if _, err := pw.Write(msg); err != nil {
-					cancel()
-					return
-				}
-			case websocket.TextMessage:
-				var ctrl catchrpc.ExecMessage
-				if err := json.Unmarshal(msg, &ctrl); err != nil {
-					continue
-				}
-				switch ctrl.Type {
-				case catchrpc.ExecMsgResize:
-					execer.ResizeTTY(ctrl.Cols, ctrl.Rows)
-				case catchrpc.ExecMsgStdinClose:
-					_ = pw.Close()
-				}
+			if !handleExecInputMessage(mt, msg, pw, execer) {
+				cancel()
+				return
 			}
 		}
 	}()
+	return readDone
+}
 
-	err = execer.run()
-	code := 0
-	if err != nil {
-		code = 1
+func closeExecInput(pw *io.PipeWriter, err error) {
+	if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+		_ = pw.Close()
+		return
 	}
-	resp := catchrpc.ExecMessage{Type: catchrpc.ExecMsgExit, Code: code}
-	if err != nil {
-		resp.Error = err.Error()
+	_ = pw.CloseWithError(err)
+}
+
+func handleExecInputMessage(mt int, msg []byte, pw *io.PipeWriter, execer *ttyExecer) bool {
+	switch mt {
+	case websocket.BinaryMessage:
+		_, err := pw.Write(msg)
+		return err == nil
+	case websocket.TextMessage:
+		handleExecControlMessage(msg, pw, execer)
 	}
-	payload, _ := json.Marshal(resp)
-	_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	_ = conn.WriteMessage(websocket.TextMessage, payload)
-	_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(5*time.Second))
-	_ = conn.Close()
-	<-readDone
+	return true
+}
+
+func handleExecControlMessage(msg []byte, pw *io.PipeWriter, execer *ttyExecer) {
+	var ctrl catchrpc.ExecMessage
+	if err := json.Unmarshal(msg, &ctrl); err != nil {
+		return
+	}
+	switch ctrl.Type {
+	case catchrpc.ExecMsgResize:
+		execer.ResizeTTY(ctrl.Cols, ctrl.Rows)
+	case catchrpc.ExecMsgStdinClose:
+		_ = pw.Close()
+	}
+}
+
+func writeExecRunResult(conn *websocket.Conn, err error) {
+	if err == nil {
+		writeExecExit(conn, 0, "")
+		return
+	}
+	writeExecExit(conn, 1, err.Error())
 }
 
 func (s *Server) handleEventsWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := rpcUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	conn, ok := upgradeRPCWebSocket(w, r)
+	if !ok {
 		return
 	}
-	defer conn.Close()
-
-	var sub catchrpc.EventsRequest
-	_, msg, err := conn.ReadMessage()
-	if err == nil && len(msg) > 0 {
-		_ = json.Unmarshal(msg, &sub)
-	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	sub := readEventsSubscription(conn)
+	closeDone := watchEventsWebSocketClose(conn, cancel)
+	defer func() {
+		closeWebSocketConn(conn, "events")
+		<-closeDone
+	}()
 
 	ch := make(chan Event)
-	all := sub.All
-	service := sub.Service
-	h := s.AddEventListener(ch, func(et Event) bool {
-		if all {
-			return true
-		}
-		if service == "" {
-			return false
-		}
-		return et.ServiceName == service
-	})
+	h := s.AddEventListener(ch, eventFilter(sub))
 	defer s.RemoveEventListener(h)
 
 	for {
 		select {
 		case event := <-ch:
-			if err := conn.WriteJSON(event); err != nil {
-				if !errors.Is(err, websocket.ErrCloseSent) {
-					log.Printf("event write failed: %v", err)
-				}
+			if !writeEventMessage(conn, event) {
 				return
 			}
-		case <-r.Context().Done():
+		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+func watchEventsWebSocketClose(conn *websocket.Conn, cancel context.CancelFunc) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				cancel()
+				return
+			}
+		}
+	}()
+	return done
+}
+
+func readEventsSubscription(conn *websocket.Conn) catchrpc.EventsRequest {
+	var sub catchrpc.EventsRequest
+	_, msg, err := conn.ReadMessage()
+	if err == nil && len(msg) > 0 {
+		_ = json.Unmarshal(msg, &sub)
+	}
+	return sub
+}
+
+func eventFilter(sub catchrpc.EventsRequest) func(Event) bool {
+	return func(et Event) bool {
+		if sub.All {
+			return true
+		}
+		if sub.Service == "" {
+			return false
+		}
+		return et.ServiceName == sub.Service
+	}
+}
+
+func writeEventMessage(conn *websocket.Conn, event Event) bool {
+	if err := conn.WriteJSON(event); err != nil {
+		if !errors.Is(err, websocket.ErrCloseSent) {
+			log.Printf("event write failed: %v", err)
+		}
+		return false
+	}
+	return true
 }

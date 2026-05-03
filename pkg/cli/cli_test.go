@@ -172,3 +172,73 @@ func TestParseInfoFlags(t *testing.T) {
 		t.Fatalf("expected no args, got %v", outArgs)
 	}
 }
+
+func TestSplitArgsForParsing(t *testing.T) {
+	specs := map[string]FlagSpec{
+		"--name": {ConsumesValue: true},
+		"--all":  {},
+		"-n":     {ConsumesValue: true},
+		"-a":     {},
+	}
+	tests := []struct {
+		name      string
+		args      []string
+		wantParse []string
+		wantExtra []string
+	}{
+		{
+			name:      "delimiter",
+			args:      []string{"--name", "api", "--", "--remote"},
+			wantParse: []string{"--name", "api"},
+			wantExtra: []string{"--remote"},
+		},
+		{
+			name:      "long value",
+			args:      []string{"--name", "api", "payload"},
+			wantParse: []string{"--name", "api", "payload"},
+		},
+		{
+			name:      "long inline value",
+			args:      []string{"--name=api", "payload"},
+			wantParse: []string{"--name=api", "payload"},
+		},
+		{
+			name:      "unknown long starts extra",
+			args:      []string{"--all", "--remote", "cmd"},
+			wantParse: []string{"--all"},
+			wantExtra: []string{"--remote", "cmd"},
+		},
+		{
+			name:      "short value",
+			args:      []string{"-n", "api", "payload"},
+			wantParse: []string{"-n", "api", "payload"},
+		},
+		{
+			name:      "short inline unknown starts extra",
+			args:      []string{"-x=value", "payload"},
+			wantParse: []string{},
+			wantExtra: []string{"-x=value", "payload"},
+		},
+		{
+			name:      "short cluster validates first flag",
+			args:      []string{"-abc", "payload"},
+			wantParse: []string{"-abc", "payload"},
+		},
+		{
+			name:      "dash is positional",
+			args:      []string{"-", "payload"},
+			wantParse: []string{"-", "payload"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotParse, gotExtra := splitArgsForParsing(tt.args, specs)
+			if !reflect.DeepEqual(gotParse, tt.wantParse) {
+				t.Fatalf("parse args = %#v, want %#v", gotParse, tt.wantParse)
+			}
+			if !reflect.DeepEqual(gotExtra, tt.wantExtra) {
+				t.Fatalf("extra args = %#v, want %#v", gotExtra, tt.wantExtra)
+			}
+		})
+	}
+}

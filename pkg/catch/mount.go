@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"text/template"
 
 	"github.com/yeetrun/yeet/pkg/db"
 )
+
+const systemdSystemDir = "/etc/systemd/system"
 
 type systemdMounter struct {
 	e *ttyExecer
@@ -54,35 +57,21 @@ func (m *systemdMounter) mount() error {
 		return fmt.Errorf("failed to create mount target directory: %v", err)
 	}
 
-	unitName := translateMountPathToUnitName(m.v.Path)
-
-	svcContent := bytes.NewBuffer(nil)
-	if err := systemdMountTemplate.Execute(svcContent, m.v); err != nil {
-		return fmt.Errorf("failed to execute template: %v", err)
+	files, err := systemdMountFiles(systemdSystemDir, m.v)
+	if err != nil {
+		return err
 	}
-
-	svcPath := "/etc/systemd/system/" + unitName + ".mount"
-	if err := os.WriteFile(svcPath, svcContent.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(files.mountPath, files.mountContent, 0644); err != nil {
 		return fmt.Errorf("failed to write service file: %v", err)
 	}
-
-	automountContent := bytes.NewBuffer(nil)
-	if err := systemdAutomountTemplate.Execute(automountContent, m.v); err != nil {
-		return fmt.Errorf("failed to execute template: %v", err)
-	}
-
-	svcPath = "/etc/systemd/system/" + unitName + ".automount"
-	if err := os.WriteFile(svcPath, automountContent.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(files.automountPath, files.automountContent, 0644); err != nil {
 		return fmt.Errorf("failed to write automount file: %v", err)
 	}
 
-	// Reload systemd
-	if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
+	if err := runSystemdCommand("daemon-reload"); err != nil {
 		return fmt.Errorf("failed to reload systemd: %v", err)
 	}
-
-	// Enable and start the mount
-	if err := exec.Command("systemctl", "enable", "--now", unitName+".automount").Run(); err != nil {
+	if err := runSystemdCommand("enable", "--now", files.unitName+".automount"); err != nil {
 		return fmt.Errorf("failed to enable and start service: %v", err)
 	}
 
@@ -91,28 +80,23 @@ func (m *systemdMounter) mount() error {
 
 func (m *systemdMounter) umount() error {
 	unitName := translateMountPathToUnitName(m.v.Path)
-	if _, err := exec.Command("systemctl", "is-enabled", "--quiet", unitName+".automount").CombinedOutput(); err == nil {
-		if err := exec.Command("systemctl", "disable", "--now", unitName+".automount").Run(); err != nil {
-			return fmt.Errorf("failed to disable and stop service: %v", err)
-		}
-	}
-	if _, err := exec.Command("systemctl", "is-active", "--quiet", unitName+".mount").CombinedOutput(); err == nil {
-		if err := exec.Command("systemctl", "stop", unitName+".mount").Run(); err != nil {
-			return fmt.Errorf("failed to stop service: %v", err)
-		}
+	automountEnabled := systemdUnitEnabled(unitName + ".automount")
+	mountActive := systemdUnitActive(unitName + ".mount")
+	if err := runSystemdUmountCommands(unitName, automountEnabled, mountActive); err != nil {
+		return err
 	}
 
-	if err := os.Remove("/etc/systemd/system/" + unitName + ".mount"); err != nil && !os.IsNotExist(err) {
+	if err := removeSystemdUnit(filepath.Join(systemdSystemDir, unitName+".mount")); err != nil {
 		return fmt.Errorf("failed to remove service file: %v", err)
 	}
-	if err := os.Remove("/etc/systemd/system/" + unitName + ".automount"); err != nil && !os.IsNotExist(err) {
+	if err := removeSystemdUnit(filepath.Join(systemdSystemDir, unitName+".automount")); err != nil {
 		return fmt.Errorf("failed to remove automount file: %v", err)
 	}
-	if err := os.Remove(m.v.Path); err != nil && !os.IsNotExist(err) {
+	if err := removeSystemdUnit(m.v.Path); err != nil {
 		return fmt.Errorf("failed to remove mount directory: %v", err)
 	}
 
-	if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
+	if err := runSystemdCommand("daemon-reload"); err != nil {
 		return fmt.Errorf("failed to reload systemd: %v", err)
 	}
 
@@ -130,17 +114,109 @@ func translateMountPathToUnitName(path string) string {
 			sb.WriteRune('-')
 		}
 		for _, c := range part {
-			switch {
-			case c >= 'a' && c <= 'z',
-				c >= 'A' && c <= 'Z',
-				c >= '0' && c <= '9',
-				c == '.', c == '_', c == ':':
+			if isSystemdUnitSafeRune(c) {
 				sb.WriteRune(c)
-			default:
-				fmt.Fprintf(&sb, "\\x%x", c)
+				continue
 			}
+			fmt.Fprintf(&sb, "\\x%x", c)
 		}
 		count++
 	}
 	return sb.String()
+}
+
+func isSystemdUnitSafeRune(c rune) bool {
+	return c >= 'a' && c <= 'z' ||
+		c >= 'A' && c <= 'Z' ||
+		c >= '0' && c <= '9' ||
+		c == '.' || c == '_' || c == ':'
+}
+
+type systemdMountFileSet struct {
+	unitName         string
+	mountPath        string
+	automountPath    string
+	mountContent     []byte
+	automountContent []byte
+}
+
+func systemdMountFiles(root string, vol db.Volume) (systemdMountFileSet, error) {
+	unitName := translateMountPathToUnitName(vol.Path)
+	mountContent, err := renderSystemdTemplate(systemdMountTemplate, vol)
+	if err != nil {
+		return systemdMountFileSet{}, err
+	}
+	automountContent, err := renderSystemdTemplate(systemdAutomountTemplate, vol)
+	if err != nil {
+		return systemdMountFileSet{}, err
+	}
+	return systemdMountFileSet{
+		unitName:         unitName,
+		mountPath:        filepath.Join(root, unitName+".mount"),
+		automountPath:    filepath.Join(root, unitName+".automount"),
+		mountContent:     mountContent,
+		automountContent: automountContent,
+	}, nil
+}
+
+func renderSystemdTemplate(t *template.Template, vol db.Volume) ([]byte, error) {
+	var content bytes.Buffer
+	if err := t.Execute(&content, vol); err != nil {
+		return nil, fmt.Errorf("failed to execute template: %v", err)
+	}
+	return content.Bytes(), nil
+}
+
+func systemdUnitEnabled(unit string) bool {
+	return systemdQuietStatus("is-enabled", "--quiet", unit)
+}
+
+func systemdUnitActive(unit string) bool {
+	return systemdQuietStatus("is-active", "--quiet", unit)
+}
+
+func systemdQuietStatus(args ...string) bool {
+	_, err := exec.Command("systemctl", args...).CombinedOutput()
+	return err == nil
+}
+
+func runSystemdUmountCommands(unitName string, automountEnabled, mountActive bool) error {
+	for _, args := range systemdUmountCommands(unitName, automountEnabled, mountActive) {
+		if err := runSystemdCommand(args[1:]...); err != nil {
+			return systemdUmountCommandError(args, err)
+		}
+	}
+	return nil
+}
+
+func systemdUmountCommands(unitName string, automountEnabled, mountActive bool) [][]string {
+	commands := make([][]string, 0, 2)
+	if automountEnabled {
+		commands = append(commands, []string{"systemctl", "disable", "--now", unitName + ".automount"})
+	}
+	if mountActive {
+		commands = append(commands, []string{"systemctl", "stop", unitName + ".mount"})
+	}
+	return commands
+}
+
+func systemdUmountCommandError(args []string, err error) error {
+	if len(args) >= 2 && args[1] == "disable" {
+		return fmt.Errorf("failed to disable and stop service: %v", err)
+	}
+	if len(args) >= 2 && args[1] == "stop" {
+		return fmt.Errorf("failed to stop service: %v", err)
+	}
+	return fmt.Errorf("failed to run systemd command: %v", err)
+}
+
+func runSystemdCommand(args ...string) error {
+	return exec.Command("systemctl", args...).Run()
+}
+
+func removeSystemdUnit(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

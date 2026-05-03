@@ -15,10 +15,9 @@ import (
 )
 
 var (
-	bridgedArgs     []string
-	handleSvcCmdFn  = yeet.HandleSvcCmd
-	rawArgs         []string
-	serviceOverride string
+	bridgedArgs    []string
+	handleSvcCmdFn = yeet.HandleSvcCmd
+	rawArgs        []string
 )
 
 func main() {
@@ -32,43 +31,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		return
 	}
-	if globalFlags.Host != "" {
-		yeet.SetHostOverride(globalFlags.Host)
-	}
-	if globalFlags.Service != "" {
-		svc, host, ok := splitQualifiedName(globalFlags.Service)
-		if ok && host != "" {
-			yeet.SetHostOverride(host)
-		}
-		serviceOverride = svc
-		yeet.SetServiceOverride(serviceOverride)
-	}
-	helpConfig := buildHelpConfig()
-	args := yargs.ApplyAliases(remaining, helpConfig)
-	args = rewriteEnvSetArgs(args)
-	if host, updated, ok := splitCommandHost(args); ok {
-		if host != "" {
-			yeet.SetHostOverride(host)
-		}
-		args = updated
-		if len(args) == 1 && args[0] == cli.CommandEvents {
-			args = append(args, "--all")
-		}
-	}
 
-	remoteSpecs := cli.RemoteFlagSpecs()
-	groupSpecs := cli.RemoteGroupFlagSpecs()
-	if len(args) > 1 {
-		if svc, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, serviceOverride); ok {
-			serviceOverride = svc
-			yeet.SetServiceOverride(serviceOverride)
-			if host != "" {
-				yeet.SetHostOverride(host)
-			}
-			bridgedArgs = bridged
-			args = bridged
-		}
-	}
+	overrides := resolveGlobalOverrides(globalFlags)
+	applyRuntimeOverrides(overrides)
+	route := prepareCommandRoute(remaining, overrides.service)
+	applyRuntimeOverrides(route.runtimeOverrides)
+	bridgedArgs = route.bridgedArgs
+	args := route.args
 
 	handlers := make(map[string]yargs.SubcommandHandler)
 	for _, name := range cli.RemoteCommandNames() {
@@ -83,9 +52,77 @@ func main() {
 	handlers["ssh"] = yeet.HandleSSH
 	handlers["skirt"] = yeet.HandleSkirt
 
+	helpConfig := buildHelpConfig()
 	groups := buildGroupHandlers()
 	if err := yargs.RunSubcommandsWithGroups(context.Background(), args, helpConfig, globalFlagsParsed{}, handlers, groups); err != nil {
 		yeet.PrintCLIError(os.Stderr, err)
+	}
+}
+
+type runtimeOverrides struct {
+	host    string
+	service string
+}
+
+type commandRoute struct {
+	runtimeOverrides
+	args        []string
+	bridgedArgs []string
+}
+
+func resolveGlobalOverrides(flags globalFlagsParsed) runtimeOverrides {
+	overrides := runtimeOverrides{host: flags.Host}
+	if flags.Service == "" {
+		return overrides
+	}
+	service, host, ok := splitQualifiedName(flags.Service)
+	if ok && host != "" {
+		overrides.host = host
+	}
+	overrides.service = service
+	return overrides
+}
+
+func prepareCommandRoute(remaining []string, service string) commandRoute {
+	args := yargs.ApplyAliases(remaining, buildHelpConfig())
+	args = rewriteEnvSetArgs(args)
+
+	route := commandRoute{
+		runtimeOverrides: runtimeOverrides{service: service},
+		args:             args,
+	}
+	if host, updated, ok := splitCommandHost(args); ok {
+		route.host = host
+		route.args = updated
+		if len(route.args) == 1 && route.args[0] == cli.CommandEvents {
+			route.args = append(route.args, "--all")
+		}
+	}
+	if len(route.args) <= 1 {
+		return route
+	}
+
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	svc, host, bridged, ok := bridgeServiceArgs(route.args, remoteSpecs, groupSpecs, route.service)
+	if !ok {
+		return route
+	}
+	route.service = svc
+	if host != "" {
+		route.host = host
+	}
+	route.bridgedArgs = bridged
+	route.args = bridged
+	return route
+}
+
+func applyRuntimeOverrides(overrides runtimeOverrides) {
+	if overrides.host != "" {
+		yeet.SetHostOverride(overrides.host)
+	}
+	if overrides.service != "" {
+		yeet.SetServiceOverride(overrides.service)
 	}
 }
 
