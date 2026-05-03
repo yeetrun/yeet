@@ -50,7 +50,8 @@ type SuccessResponse struct {
 func (p *plugin) runInNetNS(nsName string, f func() error) error {
 	errChan := make(chan error)
 
-	go func() (err error) {
+	go func() {
+		var err error
 		sem, _ := p.netnsSema.LoadOrInit(nsName, func() *syncs.Semaphore { return ptr.To(syncs.NewSemaphore(1)) })
 		sem.Acquire()
 		defer sem.Release()
@@ -66,33 +67,36 @@ func (p *plugin) runInNetNS(nsName string, f func() error) error {
 		// Open the network namespace
 		netnsFile, err := os.Open(nsName)
 		if err != nil {
-			return fmt.Errorf("failed to open netns: %v", err)
+			err = fmt.Errorf("failed to open netns: %v", err)
+			return
 		}
-		defer netnsFile.Close()
+		defer func() { _ = netnsFile.Close() }()
 
 		// Save the current network namespace
 		currentNetns, err := netns.Get()
 		if err != nil {
-			return fmt.Errorf("failed to get current netns: %v", err)
+			err = fmt.Errorf("failed to get current netns: %v", err)
+			return
 		}
-		defer currentNetns.Close()
+		defer func() { _ = currentNetns.Close() }()
 
 		// Set the process to the new network namespace
-		if err := netns.Set(netns.NsHandle(netnsFile.Fd())); err != nil {
-			return fmt.Errorf("failed to set netns: %v", err)
+		if setErr := netns.Set(netns.NsHandle(netnsFile.Fd())); setErr != nil {
+			err = fmt.Errorf("failed to set netns: %v", setErr)
+			return
 		}
 
 		// Execute any additional setup (e.g., setting up interfaces or IP addresses)
-		if err := f(); err != nil {
-			return fmt.Errorf("failed to execute command: %v", err)
+		if execErr := f(); execErr != nil {
+			err = fmt.Errorf("failed to execute command: %v", execErr)
+			return
 		}
 
 		// Restore the original network namespace
-		if err := netns.Set(currentNetns); err != nil {
-			return fmt.Errorf("failed to restore netns: %v", err)
+		if restoreErr := netns.Set(currentNetns); restoreErr != nil {
+			err = fmt.Errorf("failed to restore netns: %v", restoreErr)
+			return
 		}
-
-		return nil
 	}()
 
 	// Wait for the goroutine to finish
@@ -100,6 +104,12 @@ func (p *plugin) runInNetNS(nsName string, f func() error) error {
 		return fmt.Errorf("failed to run in netns: %w", err)
 	}
 	return nil
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("failed to write docker network plugin response: %v", err)
+	}
 }
 
 func runCmd(name string, args ...string) error {
@@ -577,7 +587,7 @@ func (p *plugin) LeaveNetwork(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	json.NewEncoder(w).Encode(SuccessResponse{})
+	writeJSON(w, SuccessResponse{})
 }
 
 type portMap struct {
@@ -706,7 +716,7 @@ func (p *plugin) JoinNetwork(w http.ResponseWriter, r *http.Request) {
 		},
 		"Gateway": gateway.String(),
 	}
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, resp)
 }
 
 func (p *plugin) DeleteNetwork(w http.ResponseWriter, r *http.Request) {
@@ -732,7 +742,7 @@ func (p *plugin) DeleteNetwork(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	json.NewEncoder(w).Encode(SuccessResponse{})
+	writeJSON(w, SuccessResponse{})
 }
 
 // CreateNetwork creates a network
@@ -778,7 +788,7 @@ func (p *plugin) CreateNetwork(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	json.NewEncoder(w).Encode(SuccessResponse{})
+	writeJSON(w, SuccessResponse{})
 }
 
 // CreateEndpoint creates a network endpoint
@@ -840,7 +850,7 @@ func (p *plugin) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	json.NewEncoder(w).Encode(SuccessResponse{})
+	writeJSON(w, SuccessResponse{})
 }
 
 type endpointConnectivityRequest struct {
@@ -883,7 +893,7 @@ func (p *plugin) ProgramExternalConnectivity(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	json.NewEncoder(w).Encode(SuccessResponse{})
+	writeJSON(w, SuccessResponse{})
 }
 
 func (p *plugin) RevokeExternalConnectivity(w http.ResponseWriter, r *http.Request) {
@@ -910,7 +920,7 @@ func (p *plugin) RevokeExternalConnectivity(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	json.NewEncoder(w).Encode(SuccessResponse{})
+	writeJSON(w, SuccessResponse{})
 }
 
 // DeleteEndpoint deletes a network endpoint
@@ -942,7 +952,7 @@ func (p *plugin) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	json.NewEncoder(w).Encode(SuccessResponse{})
+	writeJSON(w, SuccessResponse{})
 }
 
 // PluginActivate activates the plugin by declaring its capabilities
@@ -952,7 +962,7 @@ func (p *plugin) PluginActivate(w http.ResponseWriter, r *http.Request) {
 		"Implements": {"NetworkDriver"},
 	}
 	fmt.Println("Activating plugin")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, resp)
 }
 
 func requestLogger(r *http.Request) []byte {
@@ -979,7 +989,7 @@ func New(db *db.Store) http.Handler {
 	mux.HandleFunc("/NetworkDriver.Leave", p.LeaveNetwork)
 	mux.HandleFunc("/NetworkDriver.EndpointOperInfo", func(w http.ResponseWriter, r *http.Request) {
 		requestLogger(r)
-		json.NewEncoder(w).Encode(SuccessResponse{})
+		writeJSON(w, SuccessResponse{})
 	})
 	mux.HandleFunc("/NetworkDriver.ProgramExternalConnectivity", p.ProgramExternalConnectivity)
 	mux.HandleFunc("/NetworkDriver.RevokeExternalConnectivity", p.RevokeExternalConnectivity)
@@ -989,7 +999,7 @@ func New(db *db.Store) http.Handler {
 			"Scope":             "local",
 			"ConnectivityScope": "local",
 		}
-		json.NewEncoder(w).Encode(resp)
+		writeJSON(w, resp)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		requestLogger(r)
