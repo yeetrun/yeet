@@ -12,7 +12,9 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/cli"
 )
@@ -73,6 +75,10 @@ func TestRenderDockerOutdatedTables(t *testing.T) {
 			RunningDigest: "sha256:old",
 			LatestDigest:  "sha256:new",
 			Status:        "update available",
+		}, {
+			ServiceName: "api",
+			Status:      "error",
+			Reason:      "scan failed",
 		}},
 	}}
 	var out bytes.Buffer
@@ -84,6 +90,23 @@ func TestRenderDockerOutdatedTables(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output missing %q:\n%s", want, got)
 		}
+	}
+	foundErrorRow := false
+	for _, line := range strings.Split(got, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 7 || fields[0] != "api" {
+			continue
+		}
+		foundErrorRow = true
+		if fields[3] != "-" {
+			t.Fatalf("error row image = %q, want -\n%s", fields[3], got)
+		}
+		if strings.Join(fields[6:], " ") != "error: scan failed" {
+			t.Fatalf("error row status = %q, want error: scan failed\n%s", strings.Join(fields[6:], " "), got)
+		}
+	}
+	if !foundErrorRow {
+		t.Fatalf("error row missing:\n%s", got)
 	}
 }
 
@@ -97,6 +120,51 @@ func TestDockerOutdatedMultiHostReturnsFetchError(t *testing.T) {
 	}
 }
 
+func TestDockerOutdatedMultiHostWaitsForCancelOnFetchError(t *testing.T) {
+	preserveDockerOutdatedGlobals(t)
+	var canceled int32
+	started := make(chan string, 3)
+	finished := make(chan string, 3)
+	fetchDockerOutdatedForHostFn = func(ctx context.Context, host string, service string, flags cli.DockerOutdatedFlags) ([]dockerOutdatedRow, error) {
+		started <- host
+		if host == "host-a" {
+			return nil, errors.New("host failed")
+		}
+		<-ctx.Done()
+		atomic.AddInt32(&canceled, 1)
+		finished <- host
+		return nil, ctx.Err()
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- dockerOutdatedMultiHost(context.Background(), []string{"host-a", "host-b", "host-c"}, "", cli.DockerOutdatedFlags{})
+	}()
+
+	for range 3 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for all fetches to start")
+		}
+	}
+	select {
+	case err := <-errCh:
+		if err == nil {
+			t.Fatal("dockerOutdatedMultiHost error = nil, want fetch error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dockerOutdatedMultiHost did not return after canceling in-flight fetches")
+	}
+	for range 2 {
+		select {
+		case <-finished:
+		default:
+			t.Fatalf("dockerOutdatedMultiHost returned before canceled fetches finished; canceled=%d", atomic.LoadInt32(&canceled))
+		}
+	}
+}
+
 func TestDockerOutdatedMultiHostRejectsInvalidFormat(t *testing.T) {
 	preserveDockerOutdatedGlobals(t)
 	fetchDockerOutdatedForHostFn = func(ctx context.Context, host string, service string, flags cli.DockerOutdatedFlags) ([]dockerOutdatedRow, error) {
@@ -106,6 +174,72 @@ func TestDockerOutdatedMultiHostRejectsInvalidFormat(t *testing.T) {
 	err := dockerOutdatedMultiHost(context.Background(), []string{"host-a"}, "", cli.DockerOutdatedFlags{Format: "xml"})
 	if err == nil || !strings.Contains(err.Error(), `unsupported docker outdated format "xml"`) {
 		t.Fatalf("invalid format error = %v", err)
+	}
+}
+
+func TestHandleSvcCommandDockerOutdatedRejectsConflictingServiceArgs(t *testing.T) {
+	preserveDockerOutdatedGlobals(t)
+	serviceOverride = "svc-a"
+	fetchDockerOutdatedForHostFn = func(ctx context.Context, host string, service string, flags cli.DockerOutdatedFlags) ([]dockerOutdatedRow, error) {
+		t.Fatalf("conflicting service args should fail before fetch")
+		return nil, nil
+	}
+	err := handleSvcCommand(context.Background(), svcCommandRequest{
+		Command: svcCommand{Name: "docker", Args: []string{"outdated", "svc-b"}, RawArgs: []string{"docker", "outdated", "svc-b"}},
+		Config:  nil,
+		Service: "svc-a",
+	})
+	if err == nil || !strings.Contains(err.Error(), "at most one service argument") {
+		t.Fatalf("conflicting service error = %v", err)
+	}
+}
+
+func TestHandleSvcCmdDockerOutdatedRejectsUnbridgedPositionalService(t *testing.T) {
+	preserveDockerOutdatedGlobals(t)
+	useTempSvcCwd(t)
+	fetchDockerOutdatedForHostFn = func(ctx context.Context, host string, service string, flags cli.DockerOutdatedFlags) ([]dockerOutdatedRow, error) {
+		t.Fatalf("unbridged positional service should fail before fetch")
+		return nil, nil
+	}
+	err := HandleSvcCmd([]string{"docker", "outdated", "svc-b"})
+	if err == nil || !strings.Contains(err.Error(), "positional service arguments") {
+		t.Fatalf("unbridged positional service error = %v", err)
+	}
+}
+
+func TestHandleSvcCommandDockerOutdatedScopedJSONUsesRemoteExec(t *testing.T) {
+	for _, format := range []string{"json", "json-pretty"} {
+		t.Run(format, func(t *testing.T) {
+			preserveDockerOutdatedGlobals(t)
+			serviceOverride = "svc-a"
+			fetchDockerOutdatedForHostFn = func(ctx context.Context, host string, service string, flags cli.DockerOutdatedFlags) ([]dockerOutdatedRow, error) {
+				t.Fatalf("scoped %s output should use remote exec, not local fetch", format)
+				return nil, nil
+			}
+			called := false
+			execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+				called = true
+				if service != "svc-a" {
+					t.Fatalf("execRemoteFn service = %q, want svc-a", service)
+				}
+				wantArgs := []string{"docker", "outdated", "--format=" + format}
+				if !reflect.DeepEqual(args, wantArgs) {
+					t.Fatalf("execRemoteFn args = %#v, want %#v", args, wantArgs)
+				}
+				return nil
+			}
+			err := handleSvcCommand(context.Background(), svcCommandRequest{
+				Command: svcCommand{Name: "docker", Args: []string{"outdated", "--format=" + format}, RawArgs: []string{"docker", "outdated", "--format=" + format}},
+				Config:  nil,
+				Service: "svc-a",
+			})
+			if err != nil {
+				t.Fatalf("handleSvcCommand scoped %s: %v", format, err)
+			}
+			if !called {
+				t.Fatal("execRemoteFn was not called")
+			}
+		})
 	}
 }
 
