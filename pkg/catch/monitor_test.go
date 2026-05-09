@@ -5,7 +5,11 @@
 package catch
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
 )
@@ -44,6 +48,58 @@ func TestDockerMonitorEventPublishesStatusTransition(t *testing.T) {
 	}
 	assertComponentStatus(t, data.ComponentStatus, "app", ComponentStatusRunning)
 	assertStoredComponentStatus(t, server, "web", "app", ComponentStatusRunning)
+}
+
+func TestMonitorDockerPublishesDecodedDockerEvents(t *testing.T) {
+	server := newTestServer(t)
+	addTestService(t, server, "web", db.ServiceTypeDockerCompose)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server.ctx = ctx
+	server.cancel = cancel
+
+	events := make(chan Event, 1)
+	handle := server.AddEventListener(events, func(Event) bool {
+		cancel()
+		return true
+	})
+	defer server.RemoveEventListener(handle)
+
+	fakeBin := t.TempDir()
+	dockerPath := filepath.Join(fakeBin, "docker")
+	script := `#!/bin/sh
+if [ "$1" != "events" ] || [ "$2" != "--format=json" ]; then
+  exit 2
+fi
+printf '%s\n' '{"Type":"container","Action":"start","Actor":{"Attributes":{"com.docker.compose.project":"catch-web","com.docker.compose.service":"app"}}}'
+`
+	if err := os.WriteFile(dockerPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake docker: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.monitorDocker()
+	}()
+
+	select {
+	case event := <-events:
+		if event.Type != EventTypeServiceStatusChanged || event.ServiceName != "web" {
+			t.Fatalf("unexpected event: %#v", event)
+		}
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("timed out waiting for docker monitor event")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("monitorDocker did not exit after context cancellation")
+	}
 }
 
 func TestDockerMonitorEventHandlesColonActionAndDestroy(t *testing.T) {
