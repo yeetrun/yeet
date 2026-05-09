@@ -312,6 +312,35 @@ func TestBridgeServiceArgsDockerGroupNoServiceDoesNotBridge(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsDockerOutdatedScoped(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"docker", "outdated", "--format=json", "svc-a"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to recognize docker outdated group command")
+	}
+	if service != "svc-a" {
+		t.Fatalf("service = %q, want svc-a", service)
+	}
+	if host != "" {
+		t.Fatalf("host = %q, want empty", host)
+	}
+	if got := strings.Join(bridged, " "); got != "docker outdated --format=json" {
+		t.Fatalf("bridged = %q, want docker outdated --format=json", got)
+	}
+}
+
+func TestBridgeServiceArgsDockerOutdatedNoServiceDoesNotBridge(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"docker", "outdated", "--format=json"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if ok {
+		t.Fatalf("expected unscoped command to stay local, got service=%q host=%q bridged=%v", service, host, bridged)
+	}
+}
+
 func TestBridgeServiceArgsDockerPushDoesNotBridge(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

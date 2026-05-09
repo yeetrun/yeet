@@ -78,9 +78,10 @@ func buildGroupHandlers() map[string]yargs.Group {
 		"docker": {
 			Description: "Docker compose and registry management",
 			Commands: map[string]yargs.SubcommandHandler{
-				"pull":   handleDockerGroup,
-				"update": handleDockerGroup,
-				"push":   yeet.HandlePush,
+				"pull":     handleDockerGroup,
+				"update":   handleDockerGroup,
+				"outdated": handleDockerGroup,
+				"push":     yeet.HandlePush,
 			},
 		},
 		"env": {

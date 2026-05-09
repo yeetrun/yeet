@@ -319,6 +319,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if reg.Groups["docker"].Commands["push"].Info.Name != "push" {
 		t.Fatalf("registry docker push command = %#v", reg.Groups["docker"].Commands["push"])
 	}
+	if reg.Groups["docker"].Commands["outdated"].Info.Name != "outdated" {
+		t.Fatalf("registry docker outdated command = %#v", reg.Groups["docker"].Commands["outdated"])
+	}
 
 	flags := RemoteFlagSpecs()
 	if !flags["run"]["--net"].ConsumesValue {
@@ -344,6 +347,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	}
 	if groupFlags["docker"]["push"]["--all-local"].ConsumesValue {
 		t.Fatal("docker push --all-local should not consume a value")
+	}
+	if !RemoteGroupFlagSpecs()["docker"]["outdated"]["--format"].ConsumesValue {
+		t.Fatal("docker outdated --format should consume a value")
 	}
 }
 
@@ -409,6 +415,27 @@ func TestParseAdditionalCommandFlags(t *testing.T) {
 		}
 		if flags.Format != "json" || len(args) != 0 {
 			t.Fatalf("ParseStatus format = %#v args=%v, want json no args", flags, args)
+		}
+	})
+
+	t.Run("docker outdated", func(t *testing.T) {
+		flags, args, err := ParseDockerOutdated([]string{"--format=json", "svc"})
+		if err != nil {
+			t.Fatalf("ParseDockerOutdated: %v", err)
+		}
+		if flags.Format != "json" {
+			t.Fatalf("docker outdated format = %q, want json", flags.Format)
+		}
+		if got := strings.Join(args, " "); got != "svc" {
+			t.Fatalf("ParseDockerOutdated args = %q, want svc", got)
+		}
+
+		flags, args, err = ParseDockerOutdated(nil)
+		if err != nil {
+			t.Fatalf("ParseDockerOutdated default: %v", err)
+		}
+		if flags.Format != "table" || len(args) != 0 {
+			t.Fatalf("ParseDockerOutdated default = %#v args=%v, want table no args", flags, args)
 		}
 	})
 

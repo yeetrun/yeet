@@ -200,6 +200,17 @@ func TestPrepareCommandRouteShortArgsAndGroupHost(t *testing.T) {
 	if got.service != "svc-a" {
 		t.Fatalf("service = %q, want svc-a", got.service)
 	}
+
+	got = prepareCommandRoute([]string{"docker@catch-a", "outdated", "svc-a"}, "")
+	if got.host != "catch-a" {
+		t.Fatalf("host = %q, want catch-a", got.host)
+	}
+	if !reflect.DeepEqual(got.args, []string{"docker", "outdated"}) {
+		t.Fatalf("args = %#v, want bridged docker outdated", got.args)
+	}
+	if got.service != "svc-a" {
+		t.Fatalf("service = %q, want svc-a", got.service)
+	}
 }
 
 func TestBridgeWithOverride(t *testing.T) {
@@ -297,6 +308,11 @@ func TestGroupHandlersWrapRemoteCommands(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []string{"env", "get", "FOO"}) {
 		t.Fatalf("env group args = %#v", got)
+	}
+
+	dockerGroup := buildGroupHandlers()["docker"]
+	if _, ok := dockerGroup.Commands["outdated"]; !ok {
+		t.Fatal("docker outdated should be registered in group handlers")
 	}
 }
 
