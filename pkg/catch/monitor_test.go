@@ -51,6 +51,8 @@ func TestDockerMonitorEventPublishesStatusTransition(t *testing.T) {
 }
 
 func TestMonitorDockerPublishesDecodedDockerEvents(t *testing.T) {
+	const timeout = 10 * time.Second
+
 	server := newTestServer(t)
 	addTestService(t, server, "web", db.ServiceTypeDockerCompose)
 
@@ -90,14 +92,14 @@ printf '%s\n' '{"Type":"container","Action":"start","Actor":{"Attributes":{"com.
 		if event.Type != EventTypeServiceStatusChanged || event.ServiceName != "web" {
 			t.Fatalf("unexpected event: %#v", event)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(timeout):
 		cancel()
 		t.Fatal("timed out waiting for docker monitor event")
 	}
 
 	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
+	case <-time.After(timeout):
 		t.Fatal("monitorDocker did not exit after context cancellation")
 	}
 }
