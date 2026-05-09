@@ -76,6 +76,26 @@ func TestImageRepositoryNameNormalizesDockerHubOfficialImages(t *testing.T) {
 	}
 }
 
+func TestImageRepositoryNameKeepsLocalhostRegistryExplicit(t *testing.T) {
+	tests := []struct {
+		image string
+		want  string
+	}{
+		{image: "localhost/app:tag", want: "localhost/app"},
+		{image: "docker.io/localhost/app:tag", want: "docker.io/localhost/app"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.image, func(t *testing.T) {
+			if got := imageRepositoryName(tt.image); got != tt.want {
+				t.Fatalf("imageRepositoryName(%q) = %q, want %q", tt.image, got, tt.want)
+			}
+		})
+	}
+	if imageRepositoryName("localhost/app:tag") == imageRepositoryName("docker.io/localhost/app:tag") {
+		t.Fatal("localhost/app and docker.io/localhost/app should remain distinct")
+	}
+}
+
 func TestSelectRepoDigestForImageMatchesDockerHubEquivalentRefs(t *testing.T) {
 	repoDigests := []string{"docker.io/library/redis@sha256:redis"}
 	for _, image := range []string{
@@ -90,6 +110,18 @@ func TestSelectRepoDigestForImageMatchesDockerHubEquivalentRefs(t *testing.T) {
 				t.Fatalf("digest = %q, want sha256:redis", got)
 			}
 		})
+	}
+}
+
+func TestSelectRepoDigestForImageKeepsLocalhostDistinctFromDockerHub(t *testing.T) {
+	got := selectRepoDigestForImage([]string{"docker.io/localhost/app@sha256:dockerhub"}, "localhost/app:tag")
+	if got != "" {
+		t.Fatalf("digest = %q, want empty", got)
+	}
+
+	got = selectRepoDigestForImage([]string{"localhost/app@sha256:local"}, "localhost/app:tag")
+	if got != "sha256:local" {
+		t.Fatalf("digest = %q, want sha256:local", got)
 	}
 }
 
@@ -145,6 +177,17 @@ func TestPlatformDigestFromRawManifest(t *testing.T) {
 
 func TestPlatformDigestFromRawManifestErrorsOnMatchingEmptyDigest(t *testing.T) {
 	index := []byte(`{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"","platform":{"architecture":"amd64","os":"linux"}}]}`)
+	got, ok, err := platformDigestFromRawManifest(index, "linux", "amd64")
+	if err == nil {
+		t.Fatalf("platform digest error = nil, got digest %q ok=%v", got, ok)
+	}
+	if ok {
+		t.Fatalf("ok = true, want false")
+	}
+}
+
+func TestPlatformDigestFromRawManifestErrorsOnMatchingInvalidDigest(t *testing.T) {
+	index := []byte(`{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:bad","platform":{"architecture":"amd64","os":"linux"}}]}`)
 	got, ok, err := platformDigestFromRawManifest(index, "linux", "amd64")
 	if err == nil {
 		t.Fatalf("platform digest error = nil, got digest %q ok=%v", got, ok)

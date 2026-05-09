@@ -133,7 +133,7 @@ func imageRepositoryName(image string) string {
 	if len(parts) == 1 {
 		return "docker.io/library/" + image
 	}
-	if !strings.ContainsAny(parts[0], ".:") {
+	if isImplicitDockerHubNamespace(parts[0]) {
 		return "docker.io/" + image
 	}
 	if parts[0] == "index.docker.io" {
@@ -146,6 +146,10 @@ func imageRepositoryName(image string) string {
 		return strings.Join(parts, "/")
 	}
 	return image
+}
+
+func isImplicitDockerHubNamespace(firstPathComponent string) bool {
+	return firstPathComponent != "localhost" && !strings.ContainsAny(firstPathComponent, ".:")
 }
 
 func isInternalRegistryImage(image string) bool {
@@ -197,6 +201,9 @@ func platformDigestFromRawManifest(raw []byte, osName, arch string) (string, boo
 			digest := desc.Digest.String()
 			if digest == "" {
 				return "", false, fmt.Errorf("matching manifest descriptor for %s/%s has empty digest", osName, arch)
+			}
+			if err := desc.Digest.Validate(); err != nil {
+				return "", false, fmt.Errorf("matching manifest descriptor for %s/%s has invalid digest %q: %w", osName, arch, digest, err)
 			}
 			return digest, true, nil
 		}
