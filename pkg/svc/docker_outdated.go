@@ -315,7 +315,7 @@ func (s *DockerComposeService) readonlyComposeOutput(ctx context.Context, args .
 	if err != nil {
 		return nil, err
 	}
-	return cmd.Output()
+	return captureCommandOutput(cmd)
 }
 
 func (s *DockerComposeService) dockerOutput(ctx context.Context, args ...string) ([]byte, error) {
@@ -325,6 +325,12 @@ func (s *DockerComposeService) dockerOutput(ctx context.Context, args ...string)
 	}
 	cmd := s.newDockerCommand(ctx, dockerPath, args...)
 	cmd.Dir = s.DataDir
+	return captureCommandOutput(cmd)
+}
+
+func captureCommandOutput(cmd *exec.Cmd) ([]byte, error) {
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	return cmd.Output()
 }
 

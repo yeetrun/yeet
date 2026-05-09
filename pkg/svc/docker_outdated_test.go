@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -220,6 +221,20 @@ func TestDockerImageInspectRowParsesInspectJSON(t *testing.T) {
 	}
 	if len(rows) != 1 || rows[0].ID != "sha256:image" || rows[0].RepoDigests[0] != "docker.io/library/redis@sha256:redis" || rows[0].Architecture != "amd64" || rows[0].OS != "linux" {
 		t.Fatalf("inspect rows = %#v", rows)
+	}
+}
+
+func TestCaptureCommandOutputIgnoresPrewiredSessionOutput(t *testing.T) {
+	cmd := fakeDockerOutputCmd(t, "captured")
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+
+	out, err := captureCommandOutput(cmd)
+	if err != nil {
+		t.Fatalf("captureCommandOutput: %v", err)
+	}
+	if string(out) != "captured" {
+		t.Fatalf("output = %q, want captured", out)
 	}
 }
 
