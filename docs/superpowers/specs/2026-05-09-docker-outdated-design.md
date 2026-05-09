@@ -150,10 +150,10 @@ The comparison should prefer immutable digests:
 3. Resolve upstream digest using Docker registry metadata inspection, preferably
    `docker buildx imagetools inspect --raw` or `docker manifest inspect` through
    a small wrapper that can be unit tested.
-4. For multi-platform manifest lists, compare against the platform-specific
-   manifest digest when the host platform can be determined. If only the index
-   digest is available and the running digest is platform-specific, return
-   `unknown` with a reason instead of reporting a false update.
+4. For multi-platform manifest lists, verify the upstream reference includes
+   the host platform, then compare the upstream reference/index digest to the
+   running `RepoDigests` entry. Do not compare a repository digest to a platform
+   child manifest digest.
 5. Digest-pinned compose images (`image@sha256:...`) are current if the running
    digest matches the pinned digest. They are not checked for tag drift.
 

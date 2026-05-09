@@ -222,7 +222,7 @@ func digestFromManifestBytes(raw []byte) string {
 	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
-func platformDigestFromRawManifest(raw []byte, osName, arch string) (string, bool, error) {
+func upstreamReferenceDigestFromRawManifest(raw []byte, osName, arch string) (string, bool, error) {
 	var index struct {
 		MediaType string               `json:"mediaType"`
 		Manifests []ocispec.Descriptor `json:"manifests"`
@@ -230,21 +230,25 @@ func platformDigestFromRawManifest(raw []byte, osName, arch string) (string, boo
 	if err := json.Unmarshal(raw, &index); err != nil {
 		return "", false, fmt.Errorf("parse manifest: %w", err)
 	}
+	digest := digestFromManifestBytes(raw)
 	if len(index.Manifests) == 0 {
-		return digestFromManifestBytes(raw), true, nil
+		return digest, true, nil
 	}
 	for _, desc := range index.Manifests {
 		if desc.Platform == nil {
 			continue
 		}
 		if desc.Platform.OS == osName && desc.Platform.Architecture == arch {
-			digest := desc.Digest.String()
-			if digest == "" {
+			platformDigest := desc.Digest.String()
+			if platformDigest == "" {
 				return "", false, fmt.Errorf("matching manifest descriptor for %s/%s has empty digest", osName, arch)
 			}
 			if err := desc.Digest.Validate(); err != nil {
-				return "", false, fmt.Errorf("matching manifest descriptor for %s/%s has invalid digest %q: %w", osName, arch, digest, err)
+				return "", false, fmt.Errorf("matching manifest descriptor for %s/%s has invalid digest %q: %w", osName, arch, platformDigest, err)
 			}
+			// Docker image inspect RepoDigests reports the repository digest for the
+			// pulled reference. For multi-platform references this is the index digest,
+			// not the selected platform manifest digest.
 			return digest, true, nil
 		}
 	}
@@ -431,7 +435,7 @@ func (s *DockerComposeService) latestImageDigest(ctx context.Context, image, osN
 	if err != nil {
 		return "", fmt.Errorf("inspect upstream image: %w", err)
 	}
-	digest, ok, err := platformDigestFromRawManifest(raw, osName, arch)
+	digest, ok, err := upstreamReferenceDigestFromRawManifest(raw, osName, arch)
 	if err != nil {
 		return "", err
 	}

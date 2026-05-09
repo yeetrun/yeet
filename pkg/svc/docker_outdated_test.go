@@ -159,20 +159,20 @@ func TestDockerOutdatedCompare(t *testing.T) {
 	}
 }
 
-func TestPlatformDigestFromRawManifest(t *testing.T) {
+func TestUpstreamReferenceDigestFromRawManifest(t *testing.T) {
 	const amdDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const armDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	index := []byte(`{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"` + amdDigest + `","platform":{"architecture":"amd64","os":"linux"}},{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"` + armDigest + `","platform":{"architecture":"arm64","os":"linux"}}]}`)
-	got, ok, err := platformDigestFromRawManifest(index, "linux", "amd64")
+	got, ok, err := upstreamReferenceDigestFromRawManifest(index, "linux", "amd64")
 	if err != nil {
-		t.Fatalf("platform digest: %v", err)
+		t.Fatalf("reference digest: %v", err)
 	}
-	if !ok || got != amdDigest {
-		t.Fatalf("platform digest = %q ok=%v, want %s true", got, ok, amdDigest)
+	if want := digestFromManifestBytes(index); !ok || got != want {
+		t.Fatalf("reference digest = %q ok=%v, want %q true", got, ok, want)
 	}
 
 	manifest := []byte(`{"schemaVersion":2,"config":{"digest":"sha256:config"}}`)
-	got, ok, err = platformDigestFromRawManifest(manifest, "linux", "amd64")
+	got, ok, err = upstreamReferenceDigestFromRawManifest(manifest, "linux", "amd64")
 	if err != nil {
 		t.Fatalf("single manifest digest: %v", err)
 	}
@@ -181,9 +181,9 @@ func TestPlatformDigestFromRawManifest(t *testing.T) {
 	}
 }
 
-func TestPlatformDigestFromRawManifestErrorsOnMatchingEmptyDigest(t *testing.T) {
+func TestUpstreamReferenceDigestFromRawManifestErrorsOnMatchingEmptyDigest(t *testing.T) {
 	index := []byte(`{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"","platform":{"architecture":"amd64","os":"linux"}}]}`)
-	got, ok, err := platformDigestFromRawManifest(index, "linux", "amd64")
+	got, ok, err := upstreamReferenceDigestFromRawManifest(index, "linux", "amd64")
 	if err == nil {
 		t.Fatalf("platform digest error = nil, got digest %q ok=%v", got, ok)
 	}
@@ -192,9 +192,9 @@ func TestPlatformDigestFromRawManifestErrorsOnMatchingEmptyDigest(t *testing.T) 
 	}
 }
 
-func TestPlatformDigestFromRawManifestErrorsOnMatchingInvalidDigest(t *testing.T) {
+func TestUpstreamReferenceDigestFromRawManifestErrorsOnMatchingInvalidDigest(t *testing.T) {
 	index := []byte(`{"schemaVersion":2,"manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"sha256:bad","platform":{"architecture":"amd64","os":"linux"}}]}`)
-	got, ok, err := platformDigestFromRawManifest(index, "linux", "amd64")
+	got, ok, err := upstreamReferenceDigestFromRawManifest(index, "linux", "amd64")
 	if err == nil {
 		t.Fatalf("platform digest error = nil, got digest %q ok=%v", got, ok)
 	}
@@ -301,6 +301,55 @@ func TestDockerComposeOutdatedUsesReadOnlyCommands(t *testing.T) {
 				t.Fatalf("forbidden docker command %q in commands %#v", forbidden, commands)
 			}
 		}
+	}
+}
+
+func TestDockerComposeOutdatedOmitsCurrentMultiPlatformRepositoryDigest(t *testing.T) {
+	tmp := t.TempDir()
+	compose := writeDockerOutdatedFile(t, tmp, "compose.yml", "services:\n  app:\n    image: ghcr.io/acme/app:latest\n")
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake docker binary: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	service := &DockerComposeService{
+		Name:    "web",
+		DataDir: tmp,
+		cfg: testDockerOutdatedServiceConfig{
+			composePath: compose,
+		}.service(),
+	}
+
+	const platformDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	rawIndex := []byte(`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":"` + platformDigest + `","platform":{"architecture":"amd64","os":"linux"}}]}`)
+	repositoryDigest := digestFromManifestBytes(rawIndex)
+	service.NewCmdContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch {
+		case hasOrderedArgs(args, "compose", "config", "--format", "json"):
+			return fakeDockerOutputCmd(t, `{"services":{"app":{"image":"ghcr.io/acme/app:latest"}}}`)
+		case hasOrderedArgs(args, "compose", "ps", "--format=json"):
+			return fakeDockerOutputCmd(t, `[{"ID":"cid","Name":"catch-web-app-1","Service":"app","Image":"ghcr.io/acme/app:latest","State":"running"}]`)
+		case len(args) >= 2 && args[0] == "inspect" && args[1] == "cid":
+			return fakeDockerOutputCmd(t, `[{"Image":"sha256:imageid"}]`)
+		case len(args) >= 2 && args[0] == "image" && args[1] == "inspect":
+			return fakeDockerOutputCmd(t, `[{"Id":"sha256:imageid","RepoDigests":["ghcr.io/acme/app@`+repositoryDigest+`"],"Architecture":"amd64","Os":"linux"}]`)
+		case len(args) >= 4 && args[0] == "buildx" && args[1] == "imagetools" && args[2] == "inspect":
+			if args[3] != "ghcr.io/acme/app:latest" {
+				t.Fatalf("upstream image = %q, want ghcr.io/acme/app:latest", args[3])
+			}
+			return fakeDockerOutputCmd(t, string(rawIndex))
+		default:
+			t.Fatalf("unexpected docker command: docker %v", args)
+			return fakeDockerOutputCmd(t, "")
+		}
+	}
+
+	rows, err := service.Outdated(context.Background(), DockerOutdatedOptions{})
+	if err != nil {
+		t.Fatalf("Outdated: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows = %#v, want current multi-platform image omitted", rows)
 	}
 }
 
