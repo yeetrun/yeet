@@ -204,6 +204,10 @@ type DockerPushArgs struct {
 	Image   string      `pos:"1" help:"Local image ref"`
 }
 
+type DockerOutdatedArgs struct {
+	Service ServiceName `pos:"0?" help:"Service name"`
+}
+
 type ServiceName string
 
 func IsServiceArgSpec(spec yargs.ArgSpec) bool {
@@ -302,6 +306,7 @@ var remoteGroupInfos = map[string]GroupInfo{
 					"yeet docker outdated <svc>",
 					"yeet docker outdated --format=json",
 				},
+				ArgsSchema: DockerOutdatedArgs{},
 			},
 		},
 	},
