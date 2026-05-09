@@ -7,8 +7,14 @@ package svc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 func TestParseComposeImages(t *testing.T) {
@@ -236,6 +242,185 @@ func TestReadonlyComposeCommandContextBuildsComposeCommand(t *testing.T) {
 			t.Fatalf("command args missing %q: %#v", want, calls[0].args)
 		}
 	}
+}
+
+func TestDockerComposeOutdatedUsesReadOnlyCommands(t *testing.T) {
+	tmp := t.TempDir()
+	compose := writeDockerOutdatedFile(t, tmp, "compose.yml", "services:\n  app:\n    image: ghcr.io/acme/app:2\n")
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake docker binary: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	service := &DockerComposeService{
+		Name:    "web",
+		DataDir: tmp,
+		cfg: testDockerOutdatedServiceConfig{
+			composePath: compose,
+		}.service(),
+	}
+
+	var commands [][]string
+	service.NewCmdContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		full := append([]string{name}, args...)
+		commands = append(commands, full)
+		switch {
+		case hasOrderedArgs(args, "compose", "config", "--images"):
+			return fakeDockerOutputCmd(t, "ghcr.io/acme/app:2\n")
+		case hasOrderedArgs(args, "compose", "ps", "--format=json"):
+			return fakeDockerOutputCmd(t, `[{"ID":"cid","Name":"catch-web-app-1","Service":"app","Image":"ghcr.io/acme/app:1","State":"running"}]`)
+		case len(args) >= 2 && args[0] == "inspect" && args[1] == "cid":
+			return fakeDockerOutputCmd(t, `[{"Image":"sha256:imageid"}]`)
+		case len(args) >= 2 && args[0] == "image" && args[1] == "inspect":
+			return fakeDockerOutputCmd(t, `[{"Id":"sha256:imageid","RepoDigests":["ghcr.io/acme/app@sha256:old"],"Architecture":"amd64","Os":"linux"}]`)
+		case len(args) >= 4 && args[0] == "buildx" && args[1] == "imagetools" && args[2] == "inspect":
+			if args[3] != "ghcr.io/acme/app:2" {
+				t.Fatalf("upstream image = %q, want compose-declared ghcr.io/acme/app:2", args[3])
+			}
+			return fakeDockerOutputCmd(t, `{"schemaVersion":2}`)
+		default:
+			return fakeDockerOutputCmd(t, "")
+		}
+	}
+
+	rows, err := service.Outdated(context.Background(), DockerOutdatedOptions{})
+	if err != nil {
+		t.Fatalf("Outdated: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Status != DockerOutdatedUpdateAvailable {
+		t.Fatalf("rows = %#v, want one update row", rows)
+	}
+	if rows[0].Image != "ghcr.io/acme/app:2" {
+		t.Fatalf("row image = %q, want compose-declared ghcr.io/acme/app:2", rows[0].Image)
+	}
+	for _, command := range commands {
+		joined := strings.Join(command, " ")
+		for _, forbidden := range []string{" pull", " up", " update"} {
+			if strings.Contains(joined, forbidden) {
+				t.Fatalf("forbidden docker command %q in commands %#v", forbidden, commands)
+			}
+		}
+	}
+}
+
+func TestDockerComposeOutdatedInternalImageFiltering(t *testing.T) {
+	row := DockerOutdatedRow{ServiceName: "web", ContainerName: "app", Image: InternalRegistryHost + "/web/app:run"}
+	if got := filterDockerOutdatedRow(row, DockerOutdatedOptions{}); got != nil {
+		t.Fatalf("internal image should be skipped for host-wide output: %#v", got)
+	}
+	got := filterDockerOutdatedRow(row, DockerOutdatedOptions{IncludeInternal: true})
+	if got == nil || got.Status != DockerOutdatedUnknown || got.Reason != "internal image" {
+		t.Fatalf("scoped internal image row = %#v, want unknown internal image", got)
+	}
+}
+
+func TestDockerComposeOutdatedSkipsInternalImagesBeforeRegistry(t *testing.T) {
+	tmp := t.TempDir()
+	compose := writeDockerOutdatedFile(t, tmp, "compose.yml", "services:\n  app:\n    image: "+InternalRegistryHost+"/web/app:run\n")
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake docker binary: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	service := &DockerComposeService{
+		Name:    "web",
+		DataDir: tmp,
+		cfg: testDockerOutdatedServiceConfig{
+			composePath: compose,
+		}.service(),
+	}
+	service.NewCmdContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch {
+		case hasOrderedArgs(args, "compose", "config", "--images"):
+			return fakeDockerOutputCmd(t, InternalRegistryHost+"/web/app:run\n")
+		case hasOrderedArgs(args, "compose", "ps", "--format=json"):
+			return fakeDockerOutputCmd(t, `[{"ID":"cid","Name":"catch-web-app-1","Service":"app","Image":"`+InternalRegistryHost+`/web/app:run","State":"running"}]`)
+		default:
+			t.Fatalf("internal image should not trigger docker inspect or registry lookup: docker %v", args)
+			return fakeDockerOutputCmd(t, "")
+		}
+	}
+
+	rows, err := service.Outdated(context.Background(), DockerOutdatedOptions{})
+	if err != nil {
+		t.Fatalf("Outdated host-wide: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("host-wide internal rows = %#v, want none", rows)
+	}
+
+	rows, err = service.Outdated(context.Background(), DockerOutdatedOptions{IncludeInternal: true})
+	if err != nil {
+		t.Fatalf("Outdated scoped: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Status != DockerOutdatedUnknown || rows[0].Reason != "internal image" {
+		t.Fatalf("scoped internal rows = %#v, want one unknown internal image", rows)
+	}
+}
+
+type testDockerOutdatedServiceConfig struct {
+	composePath string
+}
+
+func (c testDockerOutdatedServiceConfig) service() *db.Service {
+	return &db.Service{
+		Name:             "web",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		Generation:       1,
+		LatestGeneration: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactDockerComposeFile: {
+				Refs: map[db.ArtifactRef]string{db.Gen(1): c.composePath},
+			},
+		},
+	}
+}
+
+func writeDockerOutdatedFile(t *testing.T, dir, name, content string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+func fakeDockerOutputCmd(t *testing.T, output string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestDockerOutdatedFakeCommand", "--", output)
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+	return cmd
+}
+
+func TestDockerOutdatedFakeCommand(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	args := os.Args
+	for i, arg := range args {
+		if arg == "--" && i+1 < len(args) {
+			fmt.Print(args[i+1])
+			os.Exit(0)
+		}
+	}
+	os.Exit(0)
+}
+
+func hasOrderedArgs(args []string, want ...string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	next := 0
+	for _, arg := range args {
+		if arg != want[next] {
+			continue
+		}
+		next++
+		if next == len(want) {
+			return true
+		}
+	}
+	return false
 }
 
 func containsString(values []string, want string) bool {

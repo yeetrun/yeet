@@ -211,6 +211,194 @@ func platformDigestFromRawManifest(raw []byte, osName, arch string) (string, boo
 	return "", false, nil
 }
 
+func (s *DockerComposeService) Outdated(ctx context.Context, opts DockerOutdatedOptions) ([]DockerOutdatedRow, error) {
+	images, err := s.composeDeclaredImages(ctx)
+	if err != nil {
+		return nil, err
+	}
+	declared := make(map[string]string, len(images))
+	for _, image := range images {
+		repo := imageRepositoryName(image)
+		if _, ok := declared[repo]; !ok {
+			declared[repo] = image
+		}
+	}
+
+	containers, err := s.composeContainers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows := make([]DockerOutdatedRow, 0, len(containers))
+	for _, container := range containers {
+		if container.State != "" && container.State != "running" {
+			continue
+		}
+		base := dockerOutdatedRowForComposeContainer(s.Name, container)
+		if isInternalRegistryImage(base.Image) {
+			rows = appendFilteredDockerOutdatedRow(rows, base, opts)
+			continue
+		}
+		row := s.outdatedRowForContainer(ctx, container, declared)
+		rows = appendFilteredDockerOutdatedRow(rows, row, opts)
+	}
+	return rows, nil
+}
+
+func appendFilteredDockerOutdatedRow(rows []DockerOutdatedRow, row DockerOutdatedRow, opts DockerOutdatedOptions) []DockerOutdatedRow {
+	filtered := filterDockerOutdatedRow(row, opts)
+	if filtered == nil {
+		return rows
+	}
+	return append(rows, *filtered)
+}
+
+func (s *DockerComposeService) composeDeclaredImages(ctx context.Context) ([]string, error) {
+	out, err := s.readonlyComposeOutput(ctx, "config", "--images")
+	if err != nil {
+		return nil, fmt.Errorf("docker compose config --images: %w", err)
+	}
+	return parseComposeImages(string(out)), nil
+}
+
+func (s *DockerComposeService) composeContainers(ctx context.Context) ([]dockerComposePSRow, error) {
+	out, err := s.readonlyComposeOutput(ctx, "ps", "--format=json")
+	if err != nil {
+		return nil, fmt.Errorf("docker compose ps --format=json: %w", err)
+	}
+	return parseComposePSJSON(out)
+}
+
+func (s *DockerComposeService) readonlyComposeOutput(ctx context.Context, args ...string) ([]byte, error) {
+	cmd, err := s.readonlyComposeCommandContext(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	return cmd.Output()
+}
+
+func (s *DockerComposeService) dockerOutput(ctx context.Context, args ...string) ([]byte, error) {
+	dockerPath, err := DockerCmd()
+	if err != nil {
+		return nil, err
+	}
+	cmd := s.newDockerCommand(ctx, dockerPath, args...)
+	cmd.Dir = s.DataDir
+	return cmd.Output()
+}
+
+func (s *DockerComposeService) outdatedRowForContainer(ctx context.Context, container dockerComposePSRow, declared map[string]string) DockerOutdatedRow {
+	row := dockerOutdatedRowForComposeContainer(s.Name, container)
+	declaredImage, ok := declared[imageRepositoryName(container.Image)]
+	if !ok {
+		row.Status = DockerOutdatedUnknown
+		row.Reason = "image not declared by compose config"
+		return row
+	}
+	row.Image = declaredImage
+	inspect, err := s.inspectContainerImage(ctx, container.ID, declaredImage)
+	if err != nil {
+		row.Status = DockerOutdatedError
+		row.Reason = err.Error()
+		return row
+	}
+	row.RunningDigest = inspect.runningDigest
+	latest, err := s.latestImageDigest(ctx, declaredImage, inspect.os, inspect.architecture)
+	if err != nil {
+		row.Status = DockerOutdatedError
+		row.Reason = err.Error()
+		return row
+	}
+	row.LatestDigest = latest
+	return compareDockerOutdatedRow(row)
+}
+
+func dockerOutdatedRowForComposeContainer(serviceName string, container dockerComposePSRow) DockerOutdatedRow {
+	row := DockerOutdatedRow{
+		ServiceName:   serviceName,
+		ContainerID:   container.ID,
+		ContainerName: container.Service,
+		Image:         container.Image,
+	}
+	if row.ContainerName == "" {
+		row.ContainerName = container.Name
+	}
+	return row
+}
+
+type runningImageInspect struct {
+	runningDigest string
+	os            string
+	architecture  string
+}
+
+func filterDockerOutdatedRow(row DockerOutdatedRow, opts DockerOutdatedOptions) *DockerOutdatedRow {
+	if isInternalRegistryImage(row.Image) {
+		if !opts.IncludeInternal {
+			return nil
+		}
+		row.Status = DockerOutdatedUnknown
+		row.Reason = "internal image"
+		return &row
+	}
+	if row.Status == "" {
+		row = compareDockerOutdatedRow(row)
+	}
+	if row.Status == DockerOutdatedCurrent {
+		return nil
+	}
+	return &row
+}
+
+func (s *DockerComposeService) inspectContainerImage(ctx context.Context, containerID, image string) (runningImageInspect, error) {
+	out, err := s.dockerOutput(ctx, "inspect", containerID)
+	if err != nil {
+		return runningImageInspect{}, fmt.Errorf("docker inspect container: %w", err)
+	}
+	var containers []struct {
+		Image string `json:"Image"`
+	}
+	if err := json.Unmarshal(out, &containers); err != nil {
+		return runningImageInspect{}, fmt.Errorf("parse docker inspect container: %w", err)
+	}
+	if len(containers) == 0 {
+		return runningImageInspect{}, fmt.Errorf("parse docker inspect container: empty result")
+	}
+	imageOut, err := s.dockerOutput(ctx, "image", "inspect", containers[0].Image)
+	if err != nil {
+		return runningImageInspect{}, fmt.Errorf("docker image inspect: %w", err)
+	}
+	var images []dockerImageInspectRow
+	if err := json.Unmarshal(imageOut, &images); err != nil {
+		return runningImageInspect{}, fmt.Errorf("parse docker image inspect: %w", err)
+	}
+	if len(images) == 0 {
+		return runningImageInspect{}, fmt.Errorf("parse docker image inspect: empty result")
+	}
+	return runningImageInspect{
+		runningDigest: selectRepoDigestForImage(images[0].RepoDigests, image),
+		os:            images[0].OS,
+		architecture:  images[0].Architecture,
+	}, nil
+}
+
+func (s *DockerComposeService) latestImageDigest(ctx context.Context, image, osName, arch string) (string, error) {
+	if pinned, digest, ok := strings.Cut(image, "@"); ok && strings.TrimSpace(pinned) != "" && strings.HasPrefix(digest, "sha256:") {
+		return digest, nil
+	}
+	raw, err := s.dockerOutput(ctx, "buildx", "imagetools", "inspect", image, "--raw")
+	if err != nil {
+		return "", fmt.Errorf("inspect upstream image: %w", err)
+	}
+	digest, ok, err := platformDigestFromRawManifest(raw, osName, arch)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("no upstream digest for platform %s/%s", osName, arch)
+	}
+	return digest, nil
+}
+
 func (s *DockerComposeService) readonlyComposeCommandContext(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	dockerPath, err := DockerCmd()
 	if err != nil {
