@@ -466,6 +466,36 @@ func (s *Server) DockerComposeStatuses() (map[string]svc.DockerComposeStatus, er
 	return allstatuses, nil
 }
 
+func (s *Server) DockerComposeOutdated(ctx context.Context, sn string, opts svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error) {
+	service, err := s.dockerComposeService(sn)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get service: %w", err)
+	}
+	return service.Outdated(ctx, opts)
+}
+
+func (s *Server) DockerComposeOutdatedAll(ctx context.Context) ([]svc.DockerOutdatedRow, error) {
+	dv, err := s.getDB()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get db: %v", err)
+	}
+	rows := make([]svc.DockerOutdatedRow, 0)
+	for _, sn := range serviceNamesByType(dv.AsStruct().Services, db.ServiceTypeDockerCompose) {
+		serviceRows, err := s.DockerComposeOutdated(ctx, sn, svc.DockerOutdatedOptions{})
+		if err != nil {
+			rows = append(rows, svc.DockerOutdatedRow{
+				ServiceName: sn,
+				Status:      svc.DockerOutdatedError,
+				Reason:      err.Error(),
+			})
+			continue
+		}
+		rows = append(rows, serviceRows...)
+	}
+	sortDockerOutdatedRows(rows)
+	return rows, nil
+}
+
 func (s *Server) dockerComposeStatusOrUnknown(sn string) (svc.DockerComposeStatus, error) {
 	statuses, err := s.DockerComposeStatus(sn)
 	if err == nil {

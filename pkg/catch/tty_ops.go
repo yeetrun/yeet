@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -46,17 +47,117 @@ func (e *ttyExecer) dockerCmdFunc(args []string) error {
 	}
 	subcmd := args[0]
 	args = args[1:]
-	if len(args) > 0 {
-		return fmt.Errorf("docker %s takes no arguments", subcmd)
-	}
 	switch subcmd {
 	case "pull":
+		if len(args) > 0 {
+			return fmt.Errorf("docker pull takes no arguments")
+		}
 		return e.dockerPullCmdFunc()
 	case "update":
+		if len(args) > 0 {
+			return fmt.Errorf("docker update takes no arguments")
+		}
 		return e.dockerUpdateCmdFunc()
+	case "outdated":
+		flags, remaining, err := cli.ParseDockerOutdated(args)
+		if err != nil {
+			return err
+		}
+		if len(remaining) > 0 {
+			return fmt.Errorf("docker outdated takes no remote arguments")
+		}
+		return e.dockerOutdatedCmdFunc(flags)
 	default:
 		return fmt.Errorf("unknown docker command %q", subcmd)
 	}
+}
+
+func (e *ttyExecer) dockerOutdatedCmdFunc(flags cli.DockerOutdatedFlags) error {
+	var rows []svc.DockerOutdatedRow
+	var err error
+	if e.sn == SystemService {
+		if e.dockerOutdatedAllFunc != nil {
+			rows, err = e.dockerOutdatedAllFunc(e.ctx)
+		} else {
+			rows, err = e.s.DockerComposeOutdatedAll(e.ctx)
+		}
+	} else {
+		st, typeErr := e.s.serviceType(e.sn)
+		if typeErr != nil {
+			return fmt.Errorf("failed to get service type: %w", typeErr)
+		}
+		if st != db.ServiceTypeDockerCompose {
+			return fmt.Errorf("service %q is not a docker compose service", e.sn)
+		}
+		if e.dockerOutdatedFunc != nil {
+			rows, err = e.dockerOutdatedFunc(e.ctx, e.sn, svc.DockerOutdatedOptions{IncludeInternal: true})
+		} else {
+			rows, err = e.s.DockerComposeOutdated(e.ctx, e.sn, svc.DockerOutdatedOptions{IncludeInternal: true})
+		}
+	}
+	if err != nil {
+		return err
+	}
+	sortDockerOutdatedRows(rows)
+	return renderDockerOutdatedRows(e.rw, flags.Format, rows)
+}
+
+func renderDockerOutdatedRows(w io.Writer, formatOut string, rows []svc.DockerOutdatedRow) error {
+	switch strings.TrimSpace(formatOut) {
+	case "json":
+		return json.NewEncoder(w).Encode(rows)
+	case "json-pretty":
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(rows)
+	case "", "table":
+		return renderDockerOutdatedTable(w, rows)
+	default:
+		return fmt.Errorf("unsupported docker outdated format %q", formatOut)
+	}
+}
+
+func renderDockerOutdatedTable(w io.Writer, rows []svc.DockerOutdatedRow) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "SERVICE\tCONTAINER\tIMAGE\tRUNNING\tLATEST\tSTATUS"); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		status := string(row.Status)
+		if row.Reason != "" {
+			status += ": " + row.Reason
+		}
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			row.ServiceName,
+			dash(row.ContainerName),
+			row.Image,
+			dash(row.RunningDigest),
+			dash(row.LatestDigest),
+			status,
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
+func dash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return value
+}
+
+func sortDockerOutdatedRows(rows []svc.DockerOutdatedRow) {
+	slices.SortFunc(rows, func(a, b svc.DockerOutdatedRow) int {
+		if a.ServiceName != b.ServiceName {
+			return strings.Compare(a.ServiceName, b.ServiceName)
+		}
+		if a.ContainerName != b.ContainerName {
+			return strings.Compare(a.ContainerName, b.ContainerName)
+		}
+		return strings.Compare(a.Image, b.Image)
+	})
 }
 
 func (e *ttyExecer) dockerComposeServiceCmd() (*svc.DockerComposeService, error) {
