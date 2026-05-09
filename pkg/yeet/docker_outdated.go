@@ -12,9 +12,11 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 
 	"github.com/yeetrun/yeet/pkg/cli"
+	"golang.org/x/sync/errgroup"
 )
 
 type dockerOutdatedHostData struct {
@@ -53,19 +55,9 @@ func handleDockerOutdatedCommand(ctx context.Context, args []string, cfgLoc *pro
 			Service: getService(),
 		})
 	}
-	flags, remaining, err := cli.ParseDockerOutdated(args[1:])
+	flags, service, err := parseDockerOutdatedLocalArgs(args[1:])
 	if err != nil {
 		return err
-	}
-	if len(remaining) > 1 {
-		return fmt.Errorf("docker outdated takes at most one service")
-	}
-	if _, err := dockerOutdatedFormat(flags.Format); err != nil {
-		return err
-	}
-	service := serviceOverride
-	if len(remaining) == 1 {
-		service = remaining[0]
 	}
 	if service == "" {
 		return dockerOutdatedMultiHost(ctx, statusHosts(cfgLoc, hostOverrideSet), "", flags)
@@ -78,6 +70,26 @@ func handleDockerOutdatedCommand(ctx context.Context, args []string, cfgLoc *pro
 		return renderDockerOutdatedTables(os.Stdout, []dockerOutdatedHostData{{Host: Host(), Rows: rows}})
 	}
 	return execRemoteFn(ctx, service, dockerOutdatedRemoteArgs(flags), nil, true)
+}
+
+func parseDockerOutdatedLocalArgs(args []string) (cli.DockerOutdatedFlags, string, error) {
+	flags, remaining, err := cli.ParseDockerOutdated(args)
+	if err != nil {
+		return cli.DockerOutdatedFlags{}, "", err
+	}
+	if len(remaining) > 1 {
+		return cli.DockerOutdatedFlags{}, "", fmt.Errorf("docker outdated takes at most one service argument")
+	}
+	if len(remaining) == 1 {
+		if serviceOverride != "" {
+			return cli.DockerOutdatedFlags{}, "", fmt.Errorf("docker outdated takes at most one service argument")
+		}
+		return cli.DockerOutdatedFlags{}, "", fmt.Errorf("docker outdated positional service arguments must be resolved before local handling")
+	}
+	if _, err := dockerOutdatedFormat(flags.Format); err != nil {
+		return cli.DockerOutdatedFlags{}, "", err
+	}
+	return flags, serviceOverride, nil
 }
 
 func dockerOutdatedFormat(format string) (string, error) {
@@ -102,27 +114,25 @@ func dockerOutdatedMultiHost(ctx context.Context, hosts []string, service string
 	if err != nil {
 		return err
 	}
-	type hostResult struct {
-		host string
-		rows []dockerOutdatedRow
-		err  error
-	}
 
 	results := make([]dockerOutdatedHostData, 0, len(hosts))
-	ch := make(chan hostResult, len(hosts))
+	var mu sync.Mutex
+	group, groupCtx := errgroup.WithContext(ctx)
 	for _, host := range hosts {
 		host := host
-		go func() {
-			rows, err := fetchDockerOutdatedForHostFn(ctx, host, service, flags)
-			ch <- hostResult{host: host, rows: rows, err: err}
-		}()
+		group.Go(func() error {
+			rows, err := fetchDockerOutdatedForHostFn(groupCtx, host, service, flags)
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			results = append(results, dockerOutdatedHostData{Host: host, Rows: rows})
+			mu.Unlock()
+			return nil
+		})
 	}
-	for range hosts {
-		res := <-ch
-		if res.err != nil {
-			return res.err
-		}
-		results = append(results, dockerOutdatedHostData{Host: res.host, Rows: res.rows})
+	if err := group.Wait(); err != nil {
+		return err
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Host < results[j].Host
