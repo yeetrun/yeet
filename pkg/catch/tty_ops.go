@@ -73,6 +73,9 @@ func (e *ttyExecer) dockerCmdFunc(args []string) error {
 }
 
 func (e *ttyExecer) dockerOutdatedCmdFunc(flags cli.DockerOutdatedFlags) error {
+	if err := validateDockerOutdatedFormat(flags.Format); err != nil {
+		return err
+	}
 	var rows []svc.DockerOutdatedRow
 	var err error
 	if e.sn == SystemService {
@@ -103,7 +106,11 @@ func (e *ttyExecer) dockerOutdatedCmdFunc(flags cli.DockerOutdatedFlags) error {
 }
 
 func renderDockerOutdatedRows(w io.Writer, formatOut string, rows []svc.DockerOutdatedRow) error {
-	switch strings.TrimSpace(formatOut) {
+	formatOut = strings.TrimSpace(formatOut)
+	if err := validateDockerOutdatedFormat(formatOut); err != nil {
+		return err
+	}
+	switch formatOut {
 	case "json":
 		return json.NewEncoder(w).Encode(rows)
 	case "json-pretty":
@@ -112,6 +119,14 @@ func renderDockerOutdatedRows(w io.Writer, formatOut string, rows []svc.DockerOu
 		return encoder.Encode(rows)
 	case "", "table":
 		return renderDockerOutdatedTable(w, rows)
+	}
+	return nil
+}
+
+func validateDockerOutdatedFormat(formatOut string) error {
+	switch strings.TrimSpace(formatOut) {
+	case "", "table", "json", "json-pretty":
+		return nil
 	default:
 		return fmt.Errorf("unsupported docker outdated format %q", formatOut)
 	}
@@ -130,7 +145,7 @@ func renderDockerOutdatedTable(w io.Writer, rows []svc.DockerOutdatedRow) error 
 		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			row.ServiceName,
 			dash(row.ContainerName),
-			row.Image,
+			dash(row.Image),
 			dash(row.RunningDigest),
 			dash(row.LatestDigest),
 			status,

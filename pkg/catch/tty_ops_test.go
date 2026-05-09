@@ -516,6 +516,74 @@ func TestDockerCmdFuncOutdatedParsesFormat(t *testing.T) {
 	}
 }
 
+func TestDockerCmdFuncOutdatedRejectsInvalidFormatBeforeScan(t *testing.T) {
+	server := newTestServer(t)
+	addTestService(t, server, "web", db.ServiceTypeDockerCompose)
+	called := false
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  "web",
+		rw:  &bytes.Buffer{},
+		dockerOutdatedFunc: func(context.Context, string, svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error) {
+			called = true
+			return nil, nil
+		},
+	}
+	err := execer.dockerCmdFunc([]string{"outdated", "--format=jsn"})
+	if err == nil || !strings.Contains(err.Error(), `unsupported docker outdated format "jsn"`) {
+		t.Fatalf("docker outdated invalid format error = %v", err)
+	}
+	if called {
+		t.Fatal("dockerOutdatedFunc called for invalid format")
+	}
+
+	execer.sn = SystemService
+	execer.dockerOutdatedFunc = nil
+	execer.dockerOutdatedAllFunc = func(context.Context) ([]svc.DockerOutdatedRow, error) {
+		called = true
+		return nil, nil
+	}
+	err = execer.dockerCmdFunc([]string{"outdated", "--format=jsn"})
+	if err == nil || !strings.Contains(err.Error(), `unsupported docker outdated format "jsn"`) {
+		t.Fatalf("sys docker outdated invalid format error = %v", err)
+	}
+	if called {
+		t.Fatal("dockerOutdatedAllFunc called for invalid format")
+	}
+}
+
+func TestDockerCmdFuncOutdatedSystemServiceUsesAllHook(t *testing.T) {
+	var out bytes.Buffer
+	called := false
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   newTestServer(t),
+		sn:  SystemService,
+		rw:  &out,
+		dockerOutdatedAllFunc: func(context.Context) ([]svc.DockerOutdatedRow, error) {
+			called = true
+			return []svc.DockerOutdatedRow{
+				{ServiceName: "zeta", ContainerName: "app", Image: "ghcr.io/acme/zeta:latest", Status: svc.DockerOutdatedCurrent},
+				{ServiceName: "alpha", ContainerName: "app", Image: "ghcr.io/acme/alpha:latest", Status: svc.DockerOutdatedUpdateAvailable},
+			}, nil
+		},
+	}
+	if err := execer.dockerCmdFunc([]string{"outdated", "--format=json"}); err != nil {
+		t.Fatalf("dockerCmdFunc sys outdated: %v", err)
+	}
+	if !called {
+		t.Fatal("dockerOutdatedAllFunc was not called")
+	}
+	var rows []svc.DockerOutdatedRow
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("sys outdated JSON invalid: %v\n%s", err, out.String())
+	}
+	if got := []string{rows[0].ServiceName, rows[1].ServiceName}; !reflect.DeepEqual(got, []string{"alpha", "zeta"}) {
+		t.Fatalf("row service order = %v", got)
+	}
+}
+
 func TestDockerOutdatedCmdFuncRejectsNonDockerScopedService(t *testing.T) {
 	server := newTestServer(t)
 	addTestService(t, server, "worker", db.ServiceTypeSystemd)
@@ -529,6 +597,7 @@ func TestDockerOutdatedCmdFuncRejectsNonDockerScopedService(t *testing.T) {
 func TestRenderDockerOutdatedRowsTableAndJSON(t *testing.T) {
 	rows := []svc.DockerOutdatedRow{
 		{ServiceName: "web", ContainerName: "app", Image: "ghcr.io/acme/app:latest", RunningDigest: "sha256:old", LatestDigest: "sha256:new", Status: svc.DockerOutdatedUpdateAvailable},
+		{ServiceName: "api", Status: svc.DockerOutdatedError, Reason: "scan failed"},
 	}
 	var out bytes.Buffer
 	if err := renderDockerOutdatedRows(&out, "table", rows); err != nil {
@@ -536,6 +605,9 @@ func TestRenderDockerOutdatedRowsTableAndJSON(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "SERVICE") || !strings.Contains(out.String(), "update available") {
 		t.Fatalf("table output = %q", out.String())
+	}
+	if !strings.Contains(out.String(), "api") || !strings.Contains(out.String(), "-") || !strings.Contains(out.String(), "error: scan failed") {
+		t.Fatalf("service error row output = %q", out.String())
 	}
 
 	out.Reset()
@@ -546,8 +618,21 @@ func TestRenderDockerOutdatedRowsTableAndJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
 		t.Fatalf("json output invalid: %v", err)
 	}
-	if len(decoded) != 1 || decoded[0].ServiceName != "web" {
+	if len(decoded) != 2 || decoded[0].ServiceName != "web" || decoded[1].ServiceName != "api" {
 		t.Fatalf("decoded rows = %#v", decoded)
+	}
+}
+
+func TestRenderDockerOutdatedRowsPropagatesWriteErrors(t *testing.T) {
+	writeErr := errors.New("write failed")
+	rows := []svc.DockerOutdatedRow{
+		{ServiceName: "web", ContainerName: "app", Image: "ghcr.io/acme/app:latest", Status: svc.DockerOutdatedCurrent},
+	}
+	if err := renderDockerOutdatedRows(failingWriter{err: writeErr}, "table", rows); !errors.Is(err, writeErr) {
+		t.Fatalf("table write error = %v", err)
+	}
+	if err := renderDockerOutdatedRows(failingWriter{err: writeErr}, "json", rows); !errors.Is(err, writeErr) {
+		t.Fatalf("json write error = %v", err)
 	}
 }
 
