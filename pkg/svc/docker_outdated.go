@@ -50,7 +50,6 @@ type dockerComposePSRow struct {
 	State   string `json:"State"`
 }
 
-//lint:ignore U1000 used by follow-up Docker outdated inspection code
 type dockerImageInspectRow struct {
 	ID           string   `json:"Id"`
 	RepoDigests  []string `json:"RepoDigests"`
@@ -130,11 +129,21 @@ func imageRepositoryName(image string) string {
 	if lastColon > lastSlash {
 		image = image[:lastColon]
 	}
-	if strings.Count(image, "/") == 0 {
+	parts := strings.Split(image, "/")
+	if len(parts) == 1 {
 		return "docker.io/library/" + image
 	}
-	if strings.Count(image, "/") == 1 && !strings.ContainsAny(strings.SplitN(image, "/", 2)[0], ".:") {
+	if !strings.ContainsAny(parts[0], ".:") {
 		return "docker.io/" + image
+	}
+	if parts[0] == "index.docker.io" {
+		parts[0] = "docker.io"
+	}
+	if parts[0] == "docker.io" && len(parts) == 2 {
+		return "docker.io/library/" + parts[1]
+	}
+	if parts[0] == "docker.io" {
+		return strings.Join(parts, "/")
 	}
 	return image
 }
@@ -156,9 +165,11 @@ func compareDockerOutdatedRow(row DockerOutdatedRow) DockerOutdatedRow {
 	}
 	if row.RunningDigest == row.LatestDigest {
 		row.Status = DockerOutdatedCurrent
+		row.Reason = ""
 		return row
 	}
 	row.Status = DockerOutdatedUpdateAvailable
+	row.Reason = ""
 	return row
 }
 
@@ -183,13 +194,16 @@ func platformDigestFromRawManifest(raw []byte, osName, arch string) (string, boo
 			continue
 		}
 		if desc.Platform.OS == osName && desc.Platform.Architecture == arch {
-			return desc.Digest.String(), true, nil
+			digest := desc.Digest.String()
+			if digest == "" {
+				return "", false, fmt.Errorf("matching manifest descriptor for %s/%s has empty digest", osName, arch)
+			}
+			return digest, true, nil
 		}
 	}
 	return "", false, nil
 }
 
-//lint:ignore U1000 used by follow-up Docker outdated inspection code
 func (s *DockerComposeService) readonlyComposeCommandContext(ctx context.Context, args ...string) (*exec.Cmd, error) {
 	dockerPath, err := DockerCmd()
 	if err != nil {
