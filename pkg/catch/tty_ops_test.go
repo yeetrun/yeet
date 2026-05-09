@@ -7,6 +7,7 @@ package catch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 )
 
 type failingWriter struct {
@@ -473,6 +475,79 @@ func TestDockerCmdFuncRejectsInvalidForms(t *testing.T) {
 				t.Fatalf("dockerCmdFunc(%v) returned nil error", args)
 			}
 		})
+	}
+}
+
+func TestDockerCmdFuncOutdatedParsesFormat(t *testing.T) {
+	server := newTestServer(t)
+	addTestService(t, server, "web", db.ServiceTypeDockerCompose)
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  "web",
+		rw:  &out,
+		dockerOutdatedFunc: func(ctx context.Context, service string, opts svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error) {
+			if service != "web" {
+				t.Fatalf("service = %q, want web", service)
+			}
+			if !opts.IncludeInternal {
+				t.Fatal("scoped docker outdated should include internal-image unknown rows")
+			}
+			return []svc.DockerOutdatedRow{{
+				ServiceName:   "web",
+				ContainerName: "app",
+				Image:         "ghcr.io/acme/app:latest",
+				RunningDigest: "sha256:old",
+				LatestDigest:  "sha256:new",
+				Status:        svc.DockerOutdatedUpdateAvailable,
+			}}, nil
+		},
+	}
+	if err := execer.dockerCmdFunc([]string{"outdated", "--format=json"}); err != nil {
+		t.Fatalf("dockerCmdFunc outdated: %v", err)
+	}
+	var rows []svc.DockerOutdatedRow
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("outdated JSON invalid: %v\n%s", err, out.String())
+	}
+	if len(rows) != 1 || rows[0].ServiceName != "web" {
+		t.Fatalf("rows = %#v", rows)
+	}
+}
+
+func TestDockerOutdatedCmdFuncRejectsNonDockerScopedService(t *testing.T) {
+	server := newTestServer(t)
+	addTestService(t, server, "worker", db.ServiceTypeSystemd)
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "worker", rw: &bytes.Buffer{}}
+	err := execer.dockerCmdFunc([]string{"outdated"})
+	if err == nil || !strings.Contains(err.Error(), `service "worker" is not a docker compose service`) {
+		t.Fatalf("docker outdated non-docker error = %v", err)
+	}
+}
+
+func TestRenderDockerOutdatedRowsTableAndJSON(t *testing.T) {
+	rows := []svc.DockerOutdatedRow{
+		{ServiceName: "web", ContainerName: "app", Image: "ghcr.io/acme/app:latest", RunningDigest: "sha256:old", LatestDigest: "sha256:new", Status: svc.DockerOutdatedUpdateAvailable},
+	}
+	var out bytes.Buffer
+	if err := renderDockerOutdatedRows(&out, "table", rows); err != nil {
+		t.Fatalf("render table: %v", err)
+	}
+	if !strings.Contains(out.String(), "SERVICE") || !strings.Contains(out.String(), "update available") {
+		t.Fatalf("table output = %q", out.String())
+	}
+
+	out.Reset()
+	if err := renderDockerOutdatedRows(&out, "json", rows); err != nil {
+		t.Fatalf("render json: %v", err)
+	}
+	var decoded []svc.DockerOutdatedRow
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("json output invalid: %v", err)
+	}
+	if len(decoded) != 1 || decoded[0].ServiceName != "web" {
+		t.Fatalf("decoded rows = %#v", decoded)
 	}
 }
 

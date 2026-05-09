@@ -127,6 +127,8 @@ type ttyExecer struct {
 	systemdStatusesFunc        func() (map[string]svc.Status, error)
 	dockerComposeStatusFunc    func(string) (svc.DockerComposeStatus, error)
 	dockerComposeStatusesFunc  func() (map[string]svc.DockerComposeStatus, error)
+	dockerOutdatedFunc         func(context.Context, string, svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error)
+	dockerOutdatedAllFunc      func(context.Context) ([]svc.DockerOutdatedRow, error)
 	serviceInstallFunc         func(InstallerCfg) error
 	serviceInstallGenFunc      func(InstallerCfg, int) error
 	closeNewStageInstallerFunc func(FileInstallerCfg) error
