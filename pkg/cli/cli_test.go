@@ -322,6 +322,13 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if reg.Groups["docker"].Commands["outdated"].Info.Name != "outdated" {
 		t.Fatalf("registry docker outdated command = %#v", reg.Groups["docker"].Commands["outdated"])
 	}
+	outdatedArg, ok := yargs.ArgSpecAt(reg.Groups["docker"].Commands["outdated"].ArgsSchema, 0)
+	if !ok {
+		t.Fatal("docker outdated should expose optional service arg metadata")
+	}
+	if !IsServiceArgSpec(outdatedArg) || outdatedArg.Required {
+		t.Fatalf("docker outdated arg = %#v, want optional ServiceName", outdatedArg)
+	}
 
 	flags := RemoteFlagSpecs()
 	if !flags["run"]["--net"].ConsumesValue {
@@ -436,6 +443,17 @@ func TestParseAdditionalCommandFlags(t *testing.T) {
 		}
 		if flags.Format != "table" || len(args) != 0 {
 			t.Fatalf("ParseDockerOutdated default = %#v args=%v, want table no args", flags, args)
+		}
+
+		flags, args, err = ParseDockerOutdated([]string{"--format=json", "svc", "--", "--raw"})
+		if err != nil {
+			t.Fatalf("ParseDockerOutdated double dash: %v", err)
+		}
+		if flags.Format != "json" {
+			t.Fatalf("docker outdated double dash format = %q, want json", flags.Format)
+		}
+		if got := strings.Join(args, " "); got != "svc --raw" {
+			t.Fatalf("ParseDockerOutdated double dash args = %q, want svc --raw", got)
 		}
 	})
 
