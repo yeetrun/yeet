@@ -10,7 +10,7 @@ import (
 )
 
 func TestParseComposeImages(t *testing.T) {
-	got := parseComposeImages("nginx:1.27\n\nredis:7\n")
+	got := parseComposeImages("  nginx:1.27  \n\nredis:7\nnginx:1.27\n")
 	want := []string{"nginx:1.27", "redis:7"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("parseComposeImages = %#v, want %#v", got, want)
