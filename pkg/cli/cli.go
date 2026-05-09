@@ -84,6 +84,10 @@ type StatusFlags struct {
 	Format string
 }
 
+type DockerOutdatedFlags struct {
+	Format string
+}
+
 type InfoFlags struct {
 	Format string
 }
@@ -158,6 +162,10 @@ type logsFlagsParsed struct {
 }
 
 type statusFlagsParsed struct {
+	Format string `flag:"format" default:"table"`
+}
+
+type dockerOutdatedFlagsParsed struct {
 	Format string `flag:"format" default:"table"`
 }
 
@@ -285,6 +293,16 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"update": {Name: "update", Description: "Pull images and recreate containers for a compose service", Usage: "docker update <svc>", ArgsSchema: ServiceArgs{}},
 			"pull":   {Name: "pull", Description: "Pull images for a compose service without restarting", Usage: "docker pull <svc>", ArgsSchema: ServiceArgs{}},
 			"push":   {Name: "push", Description: "Push a local image into the internal registry", Usage: "docker push <svc> <image> [--run] [--all-local]", ArgsSchema: DockerPushArgs{}},
+			"outdated": {
+				Name:        "outdated",
+				Description: "Show Docker compose containers with upstream image updates",
+				Usage:       "docker outdated [SVC] [--format=table|json|json-pretty]",
+				Examples: []string{
+					"yeet docker outdated",
+					"yeet docker outdated <svc>",
+					"yeet docker outdated --format=json",
+				},
+			},
 		},
 	},
 	"env": {
@@ -303,9 +321,10 @@ var remoteGroupInfos = map[string]GroupInfo{
 // accidentally bridging local-only group commands like docker push.
 var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 	"docker": {
-		"update": {},
-		"pull":   {},
-		"push":   flagSpecsFromStruct(dockerPushFlagsParsed{}),
+		"update":   {},
+		"pull":     {},
+		"push":     flagSpecsFromStruct(dockerPushFlagsParsed{}),
+		"outdated": flagSpecsFromStruct(dockerOutdatedFlagsParsed{}),
 	},
 	"env": {
 		"show": flagSpecsFromStruct(envShowFlagsParsed{}),
@@ -508,6 +527,17 @@ func ParseStatus(args []string) (StatusFlags, []string, error) {
 		return StatusFlags{}, nil, err
 	}
 	flags := StatusFlags{Format: parsed.Flags.Format}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseDockerOutdated(args []string) (DockerOutdatedFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[dockerOutdatedFlagsParsed](parseArgs)
+	if err != nil {
+		return DockerOutdatedFlags{}, nil, err
+	}
+	flags := DockerOutdatedFlags{Format: parsed.Flags.Format}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
 }
