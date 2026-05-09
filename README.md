@@ -48,7 +48,7 @@ curl https://mise.run | sh
 echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
 ```
 
-3) From the repo root, install tools (Go 1.26.2) + bootstrap a host:
+3) From the repo root, install tools (Go 1.26.3) + bootstrap a host:
 
 ```bash
 mise install
