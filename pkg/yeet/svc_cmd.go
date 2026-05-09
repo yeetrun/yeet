@@ -116,6 +116,44 @@ type svcCommandRequest struct {
 	Service         string
 }
 
+type svcCommandHandler func(context.Context, svcCommandRequest) error
+
+var svcCommandHandlers = map[string]svcCommandHandler{
+	"env": func(ctx context.Context, req svcCommandRequest) error {
+		return handleSvcEnv(ctx, req)
+	},
+	"run": func(_ context.Context, req svcCommandRequest) error {
+		return handleSvcRun(req)
+	},
+	"remove": func(ctx context.Context, req svcCommandRequest) error {
+		return handleSvcRemove(ctx, req)
+	},
+	"copy": func(_ context.Context, req svcCommandRequest) error {
+		return handleSvcCopy(req)
+	},
+	"cron": func(_ context.Context, req svcCommandRequest) error {
+		return handleSvcCron(req)
+	},
+	"stage": func(ctx context.Context, req svcCommandRequest) error {
+		return handleSvcStage(ctx, req)
+	},
+	cli.CommandEvents: func(ctx context.Context, req svcCommandRequest) error {
+		return handleSvcEvents(ctx, req)
+	},
+	"status": func(ctx context.Context, req svcCommandRequest) error {
+		return handleStatusCommand(ctx, req.Command.Args, req.Config, req.HostOverrideSet)
+	},
+	"info": func(ctx context.Context, req svcCommandRequest) error {
+		return handleInfoCommand(ctx, req.Command.Args, req.Config)
+	},
+	"docker": func(ctx context.Context, req svcCommandRequest) error {
+		if len(req.Command.Args) > 0 && req.Command.Args[0] == "outdated" {
+			return handleDockerOutdatedCommand(ctx, req.Command.Args, req.Config, req.HostOverrideSet)
+		}
+		return handleSvcRemote(ctx, req)
+	},
+}
+
 func HandleSvcCmd(args []string) error {
 	req, err := newSvcCommandRequest(args)
 	if err != nil {
@@ -178,31 +216,9 @@ func applySvcCommandHost(cfgLoc *projectConfigLocation, hostOverrideSet bool) er
 }
 
 func handleSvcCommand(ctx context.Context, req svcCommandRequest) error {
-	switch req.Command.Name {
-	case "env":
-		return handleSvcEnv(ctx, req)
-	// `run <svc> <file/docker-image> [args...]`
-	case "run":
-		return handleSvcRun(req)
-	case "remove":
-		return handleSvcRemove(ctx, req)
-	// `copy [-avz] <src> <dst>`
-	case "copy":
-		return handleSvcCopy(req)
-	// `cron <svc> <file> <cronexpr>`
-	case "cron":
-		return handleSvcCron(req)
-	// `stage <svc> <file>`
-	case "stage":
-		return handleSvcStage(ctx, req)
-	case cli.CommandEvents:
-		return handleSvcEvents(ctx, req)
-	case "status":
-		return handleStatusCommand(ctx, req.Command.Args, req.Config, req.HostOverrideSet)
-	case "info":
-		return handleInfoCommand(ctx, req.Command.Args, req.Config)
+	if handler, ok := svcCommandHandlers[req.Command.Name]; ok {
+		return handler(ctx, req)
 	}
-
 	return handleSvcRemote(ctx, req)
 }
 
