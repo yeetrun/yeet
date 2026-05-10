@@ -63,27 +63,54 @@ func missingServiceCommandName(args []string) string {
 }
 
 func commandNeedsService(args []string) (bool, error) {
+	skipService, err := commandAllowsMissingService(args)
+	if err != nil || skipService {
+		return false, err
+	}
 	res, ok, err := yargs.ResolveCommandWithRegistry(args, remoteRegistry)
 	if err != nil || !ok {
 		return false, err
 	}
+	skipService, err = resolvedCommandAllowsMissingService(res, args)
+	if err != nil || skipService {
+		return false, err
+	}
+	return resolvedCommandNeedsService(res), nil
+}
+
+func commandAllowsMissingService(args []string) (bool, error) {
+	if len(args) < 2 || args[0] != "docker" || args[1] != "update" {
+		return false, nil
+	}
+	flags, _, err := cli.ParseDockerUpdate(args[2:])
+	if err != nil {
+		return false, err
+	}
+	return flags.Outdated, nil
+}
+
+func resolvedCommandAllowsMissingService(res yargs.ResolvedCommand, args []string) (bool, error) {
 	if len(res.Path) > 0 && res.Path[0] == cli.CommandEvents {
 		flags, _, err := cli.ParseEvents(args[1:])
 		if err != nil {
 			return false, err
 		}
 		if flags.All {
-			return false, nil
+			return true, nil
 		}
 	}
+	return false, nil
+}
+
+func resolvedCommandNeedsService(res yargs.ResolvedCommand) bool {
 	arg, ok := res.PArg(0)
 	if !ok {
-		return false, nil
+		return false
 	}
 	if !cli.IsServiceArgSpec(arg) {
-		return false, nil
+		return false
 	}
-	return arg.Required, nil
+	return arg.Required
 }
 
 type svcCommand struct {
@@ -149,6 +176,9 @@ var svcCommandHandlers = map[string]svcCommandHandler{
 	"docker": func(ctx context.Context, req svcCommandRequest) error {
 		if len(req.Command.Args) > 0 && req.Command.Args[0] == "outdated" {
 			return handleDockerOutdatedCommand(ctx, req.Command.Args, req.Config, req.HostOverrideSet)
+		}
+		if len(req.Command.Args) > 0 && req.Command.Args[0] == "update" {
+			return handleDockerUpdateCommand(ctx, req)
 		}
 		return handleSvcRemote(ctx, req)
 	},

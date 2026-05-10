@@ -160,6 +160,49 @@ func TestDockerOutdatedCompare(t *testing.T) {
 	}
 }
 
+func TestCompactDockerOutdatedImageRef(t *testing.T) {
+	tests := []struct {
+		name  string
+		image string
+		want  string
+	}{
+		{name: "empty", image: "", want: "-"},
+		{name: "registry stripped", image: "lscr.io/linuxserver/plex:latest", want: "linuxserver/plex:latest"},
+		{name: "ghcr stripped", image: "ghcr.io/pocket-id/pocket-id", want: "pocket-id/pocket-id:latest"},
+		{name: "docker hub library stripped", image: "docker.io/library/redis:7", want: "redis:7"},
+		{name: "digest pinned shortened", image: "ghcr.io/acme/app@sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef", want: "acme/app@sha256:1234567890ab"},
+		{name: "long image capped", image: "registry.example.com/very/long/path/to/application/component:2026.05.09-build.123", want: ".../to/application/component:2026.05.09-build.123"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CompactDockerOutdatedImageRef(tt.image); got != tt.want {
+				t.Fatalf("CompactDockerOutdatedImageRef(%q) = %q, want %q", tt.image, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCompactDockerOutdatedStatus(t *testing.T) {
+	tests := []struct {
+		name   string
+		status DockerOutdatedStatus
+		reason string
+		want   string
+	}{
+		{name: "update", status: DockerOutdatedUpdateAvailable, want: "update"},
+		{name: "current", status: DockerOutdatedCurrent, want: "current"},
+		{name: "unknown with reason", status: DockerOutdatedUnknown, reason: "missing running digest", want: "unknown: missing running digest"},
+		{name: "long reason capped", status: DockerOutdatedError, reason: "docker compose config failed because the registry returned a long multiline diagnostic", want: "error: docker compose config failed bec..."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CompactDockerOutdatedStatus(tt.status, tt.reason); got != tt.want {
+				t.Fatalf("CompactDockerOutdatedStatus(%q, %q) = %q, want %q", tt.status, tt.reason, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUpstreamReferenceDigestFromRawManifest(t *testing.T) {
 	const amdDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const armDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

@@ -299,6 +299,25 @@ func TestBridgeServiceArgsDockerGroup(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsDockerUpdateOutdatedScopedForRejection(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"docker", "update", "--outdated", "svc-a@host-a"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to recognize docker update group command")
+	}
+	if service != "svc-a" {
+		t.Fatalf("service = %q, want svc-a", service)
+	}
+	if host != "host-a" {
+		t.Fatalf("host = %q, want host-a", host)
+	}
+	if got := strings.Join(bridged, " "); got != "docker update --outdated" {
+		t.Fatalf("bridged args = %q, want docker update --outdated", got)
+	}
+}
+
 func TestBridgeServiceArgsDockerGroupNoServiceDoesNotBridge(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

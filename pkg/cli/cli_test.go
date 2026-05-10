@@ -355,6 +355,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if groupFlags["docker"]["push"]["--all-local"].ConsumesValue {
 		t.Fatal("docker push --all-local should not consume a value")
 	}
+	if groupFlags["docker"]["update"]["--outdated"].ConsumesValue {
+		t.Fatal("docker update --outdated should not consume a value")
+	}
 	if !RemoteGroupFlagSpecs()["docker"]["outdated"]["--format"].ConsumesValue {
 		t.Fatal("docker outdated --format should consume a value")
 	}
@@ -454,6 +457,30 @@ func TestParseAdditionalCommandFlags(t *testing.T) {
 		}
 		if got := strings.Join(args, " "); got != "svc --raw" {
 			t.Fatalf("ParseDockerOutdated double dash args = %q, want svc --raw", got)
+		}
+	})
+
+	t.Run("docker update", func(t *testing.T) {
+		flags, args, err := ParseDockerUpdate([]string{"--outdated"})
+		if err != nil {
+			t.Fatalf("ParseDockerUpdate: %v", err)
+		}
+		if !flags.Outdated {
+			t.Fatal("docker update --outdated was not parsed")
+		}
+		if len(args) != 0 {
+			t.Fatalf("ParseDockerUpdate args = %q, want none", strings.Join(args, " "))
+		}
+
+		flags, args, err = ParseDockerUpdate([]string{"svc-a"})
+		if err != nil {
+			t.Fatalf("ParseDockerUpdate service: %v", err)
+		}
+		if flags.Outdated {
+			t.Fatal("docker update svc should not set Outdated")
+		}
+		if got := strings.Join(args, " "); got != "svc-a" {
+			t.Fatalf("ParseDockerUpdate service args = %q, want svc-a", got)
 		}
 	})
 

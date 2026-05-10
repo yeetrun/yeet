@@ -134,21 +134,15 @@ func validateDockerOutdatedFormat(formatOut string) error {
 
 func renderDockerOutdatedTable(w io.Writer, rows []svc.DockerOutdatedRow) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "SERVICE\tCONTAINER\tIMAGE\tRUNNING\tLATEST\tSTATUS"); err != nil {
+	if _, err := fmt.Fprintln(tw, "SERVICE\tCONTAINER\tIMAGE\tUPDATE"); err != nil {
 		return err
 	}
 	for _, row := range rows {
-		status := string(row.Status)
-		if row.Reason != "" {
-			status += ": " + row.Reason
-		}
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
 			row.ServiceName,
 			dash(row.ContainerName),
-			dash(row.Image),
-			dash(row.RunningDigest),
-			dash(row.LatestDigest),
-			status,
+			svc.CompactDockerOutdatedImageRef(row.Image),
+			svc.CompactDockerOutdatedStatus(row.Status, row.Reason),
 		); err != nil {
 			return err
 		}
