@@ -603,8 +603,16 @@ func TestRenderDockerOutdatedRowsTableAndJSON(t *testing.T) {
 	if err := renderDockerOutdatedRows(&out, "table", rows); err != nil {
 		t.Fatalf("render table: %v", err)
 	}
-	if !strings.Contains(out.String(), "SERVICE") || !strings.Contains(out.String(), "update available") {
+	if !strings.Contains(out.String(), "SERVICE") || !strings.Contains(out.String(), "UPDATE") || !strings.Contains(out.String(), "update") {
 		t.Fatalf("table output = %q", out.String())
+	}
+	for _, unwanted := range []string{"RUNNING", "LATEST", "sha256:"} {
+		if strings.Contains(out.String(), unwanted) {
+			t.Fatalf("compact table output contains %q:\n%s", unwanted, out.String())
+		}
+	}
+	if !strings.Contains(out.String(), "acme/app:latest") {
+		t.Fatalf("compact image missing from table output = %q", out.String())
 	}
 	if !strings.Contains(out.String(), "api") || !strings.Contains(out.String(), "-") || !strings.Contains(out.String(), "error: scan failed") {
 		t.Fatalf("service error row output = %q", out.String())

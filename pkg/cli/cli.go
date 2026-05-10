@@ -88,6 +88,10 @@ type DockerOutdatedFlags struct {
 	Format string
 }
 
+type DockerUpdateFlags struct {
+	Outdated bool
+}
+
 type InfoFlags struct {
 	Format string
 }
@@ -167,6 +171,10 @@ type statusFlagsParsed struct {
 
 type dockerOutdatedFlagsParsed struct {
 	Format string `flag:"format" default:"table"`
+}
+
+type dockerUpdateFlagsParsed struct {
+	Outdated bool `flag:"outdated"`
 }
 
 type infoFlagsParsed struct {
@@ -294,9 +302,12 @@ var remoteGroupInfos = map[string]GroupInfo{
 		Name:        "docker",
 		Description: "Docker compose and registry management",
 		Commands: map[string]CommandInfo{
-			"update": {Name: "update", Description: "Pull images and recreate containers for a compose service", Usage: "docker update <svc>", ArgsSchema: ServiceArgs{}},
-			"pull":   {Name: "pull", Description: "Pull images for a compose service without restarting", Usage: "docker pull <svc>", ArgsSchema: ServiceArgs{}},
-			"push":   {Name: "push", Description: "Push a local image into the internal registry", Usage: "docker push <svc> <image> [--run] [--all-local]", ArgsSchema: DockerPushArgs{}},
+			"update": {Name: "update", Description: "Pull images and recreate containers for a compose service", Usage: "docker update <svc> | docker update --outdated", ArgsSchema: ServiceArgs{}, Examples: []string{
+				"yeet docker update <svc>",
+				"yeet docker update --outdated",
+			}},
+			"pull": {Name: "pull", Description: "Pull images for a compose service without restarting", Usage: "docker pull <svc>", ArgsSchema: ServiceArgs{}},
+			"push": {Name: "push", Description: "Push a local image into the internal registry", Usage: "docker push <svc> <image> [--run] [--all-local]", ArgsSchema: DockerPushArgs{}},
 			"outdated": {
 				Name:        "outdated",
 				Description: "Show Docker compose containers with upstream image updates",
@@ -326,7 +337,7 @@ var remoteGroupInfos = map[string]GroupInfo{
 // accidentally bridging local-only group commands like docker push.
 var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 	"docker": {
-		"update":   {},
+		"update":   flagSpecsFromStruct(dockerUpdateFlagsParsed{}),
 		"pull":     {},
 		"push":     flagSpecsFromStruct(dockerPushFlagsParsed{}),
 		"outdated": flagSpecsFromStruct(dockerOutdatedFlagsParsed{}),
@@ -543,6 +554,17 @@ func ParseDockerOutdated(args []string) (DockerOutdatedFlags, []string, error) {
 		return DockerOutdatedFlags{}, nil, err
 	}
 	flags := DockerOutdatedFlags{Format: parsed.Flags.Format}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseDockerUpdate(args []string) (DockerUpdateFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[dockerUpdateFlagsParsed](parseArgs)
+	if err != nil {
+		return DockerUpdateFlags{}, nil, err
+	}
+	flags := DockerUpdateFlags{Outdated: parsed.Flags.Outdated}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
 }

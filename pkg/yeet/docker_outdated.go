@@ -7,6 +7,7 @@ package yeet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/svc"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -40,12 +42,11 @@ type dockerOutdatedRenderRow struct {
 	Host      string
 	Container string
 	Image     string
-	Running   string
-	Latest    string
-	Status    string
+	Update    string
 }
 
 var fetchDockerOutdatedForHostFn = fetchDockerOutdatedForHost
+var updateDockerServiceForHostFn = updateDockerServiceForHost
 
 func handleDockerOutdatedCommand(ctx context.Context, args []string, cfgLoc *projectConfigLocation, hostOverrideSet bool) error {
 	if len(args) == 0 || args[0] != "outdated" {
@@ -72,6 +73,20 @@ func handleDockerOutdatedCommand(ctx context.Context, args []string, cfgLoc *pro
 	return execRemoteFn(ctx, service, dockerOutdatedRemoteArgs(flags), nil, true)
 }
 
+func handleDockerUpdateCommand(ctx context.Context, req svcCommandRequest) error {
+	flags, remaining, err := cli.ParseDockerUpdate(req.Command.Args[1:])
+	if err != nil {
+		return err
+	}
+	if !flags.Outdated {
+		return handleSvcRemote(ctx, req)
+	}
+	if len(remaining) > 0 || serviceOverride != "" || (req.Service != "" && req.Service != systemServiceName) {
+		return fmt.Errorf("docker update --outdated does not take a service; use yeet docker update <svc> for one service")
+	}
+	return dockerUpdateOutdatedMultiHost(ctx, statusHosts(req.Config, req.HostOverrideSet))
+}
+
 func parseDockerOutdatedLocalArgs(args []string) (cli.DockerOutdatedFlags, string, error) {
 	flags, remaining, err := cli.ParseDockerOutdated(args)
 	if err != nil {
@@ -90,6 +105,89 @@ func parseDockerOutdatedLocalArgs(args []string) (cli.DockerOutdatedFlags, strin
 		return cli.DockerOutdatedFlags{}, "", err
 	}
 	return flags, serviceOverride, nil
+}
+
+func dockerUpdateOutdatedMultiHost(ctx context.Context, hosts []string) error {
+	hosts = append([]string(nil), hosts...)
+	sort.Strings(hosts)
+	errs := make([]error, 0)
+	for _, host := range hosts {
+		if err := dockerUpdateOutdatedHost(ctx, os.Stdout, host); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func dockerUpdateOutdatedHost(ctx context.Context, w io.Writer, host string) error {
+	rows, err := fetchDockerOutdatedForHostFn(ctx, host, "", cli.DockerOutdatedFlags{})
+	if err != nil {
+		if writeErr := dockerUpdateOutdatedLine(w, "==> %s: error: %v\n", host, err); writeErr != nil {
+			return writeErr
+		}
+		return err
+	}
+	services := outdatedServiceNames(rows)
+	if len(services) == 0 {
+		return dockerUpdateOutdatedLine(w, "==> %s: no updates\n", host)
+	}
+	errs := make([]error, 0)
+	for _, service := range services {
+		if err := dockerUpdateOutdatedLine(w, "==> %s/%s\n", host, service); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := updateDockerServiceForHostFn(ctx, host, service); err != nil {
+			errs = append(errs, err)
+			if writeErr := dockerUpdateOutdatedLine(w, "==> %s/%s failed: %v\n", host, service, err); writeErr != nil {
+				errs = append(errs, writeErr)
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func dockerUpdateOutdatedLine(w io.Writer, format string, args ...any) error {
+	_, err := fmt.Fprintf(w, format, args...)
+	return err
+}
+
+func outdatedServiceNames(rows []dockerOutdatedRow) []string {
+	seen := make(map[string]struct{})
+	for _, row := range rows {
+		if row.Status != string(svc.DockerOutdatedUpdateAvailable) {
+			continue
+		}
+		service := strings.TrimSpace(row.ServiceName)
+		if service == "" {
+			continue
+		}
+		seen[service] = struct{}{}
+	}
+	services := make([]string, 0, len(seen))
+	for service := range seen {
+		services = append(services, service)
+	}
+	sort.Strings(services)
+	return services
+}
+
+func updateDockerServiceForHost(ctx context.Context, host string, service string) error {
+	return withTemporaryHost(host, func() error {
+		if err := execRemoteFn(ctx, service, []string{"docker", "update"}, nil, true); err != nil {
+			return fmt.Errorf("%s/%s: %w", host, service, err)
+		}
+		return nil
+	})
+}
+
+func withTemporaryHost(host string, fn func() error) error {
+	oldPrefs := loadedPrefs
+	loadedPrefs.DefaultHost = host
+	defer func() {
+		loadedPrefs = oldPrefs
+	}()
+	return fn()
 }
 
 func dockerOutdatedFormat(format string) (string, error) {
@@ -166,18 +264,16 @@ func fetchDockerOutdatedForHost(ctx context.Context, host string, service string
 func renderDockerOutdatedTables(w io.Writer, results []dockerOutdatedHostData) error {
 	rows := flattenDockerOutdatedRows(results)
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "SERVICE\tHOST\tCONTAINER\tIMAGE\tRUNNING\tLATEST\tSTATUS"); err != nil {
+	if _, err := fmt.Fprintln(tw, "SERVICE\tHOST\tCONTAINER\tIMAGE\tUPDATE"); err != nil {
 		return err
 	}
 	for _, row := range rows {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
 			row.Service,
 			row.Host,
 			row.Container,
 			row.Image,
-			row.Running,
-			row.Latest,
-			row.Status,
+			row.Update,
 		); err != nil {
 			return err
 		}
@@ -189,18 +285,12 @@ func flattenDockerOutdatedRows(results []dockerOutdatedHostData) []dockerOutdate
 	rows := make([]dockerOutdatedRenderRow, 0)
 	for _, result := range results {
 		for _, row := range result.Rows {
-			status := row.Status
-			if row.Reason != "" {
-				status += ": " + row.Reason
-			}
 			rows = append(rows, dockerOutdatedRenderRow{
 				Service:   row.ServiceName,
 				Host:      result.Host,
 				Container: dash(row.ContainerName),
-				Image:     dash(row.Image),
-				Running:   dash(row.RunningDigest),
-				Latest:    dash(row.LatestDigest),
-				Status:    dash(status),
+				Image:     svc.CompactDockerOutdatedImageRef(row.Image),
+				Update:    svc.CompactDockerOutdatedStatus(svc.DockerOutdatedStatus(row.Status), row.Reason),
 			})
 		}
 	}

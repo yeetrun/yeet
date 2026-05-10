@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -23,8 +24,10 @@ func preserveDockerOutdatedGlobals(t *testing.T) {
 	t.Helper()
 	preserveSvcCommandGlobals(t)
 	oldFetchDockerOutdated := fetchDockerOutdatedForHostFn
+	oldUpdateDockerServiceForHost := updateDockerServiceForHostFn
 	t.Cleanup(func() {
 		fetchDockerOutdatedForHostFn = oldFetchDockerOutdated
+		updateDockerServiceForHostFn = oldUpdateDockerServiceForHost
 	})
 }
 
@@ -71,9 +74,9 @@ func TestRenderDockerOutdatedTables(t *testing.T) {
 		Rows: []dockerOutdatedRow{{
 			ServiceName:   "web",
 			ContainerName: "app",
-			Image:         "ghcr.io/acme/app:latest",
-			RunningDigest: "sha256:old",
-			LatestDigest:  "sha256:new",
+			Image:         "ghcr.io/acme/app:1.2.3",
+			RunningDigest: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+			LatestDigest:  "sha256:2222222222222222222222222222222222222222222222222222222222222222",
 			Status:        "update available",
 		}, {
 			ServiceName: "api",
@@ -86,23 +89,28 @@ func TestRenderDockerOutdatedTables(t *testing.T) {
 		t.Fatalf("render: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"SERVICE", "HOST", "web", "host-a", "update available"} {
+	for _, want := range []string{"SERVICE", "HOST", "CONTAINER", "IMAGE", "UPDATE", "web", "host-a", "acme/app:1.2.3", "update"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"RUNNING", "LATEST", "sha256:"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("compact table output contains %q:\n%s", unwanted, got)
 		}
 	}
 	foundErrorRow := false
 	for _, line := range strings.Split(got, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 7 || fields[0] != "api" {
+		if len(fields) < 5 || fields[0] != "api" {
 			continue
 		}
 		foundErrorRow = true
 		if fields[3] != "-" {
 			t.Fatalf("error row image = %q, want -\n%s", fields[3], got)
 		}
-		if strings.Join(fields[6:], " ") != "error: scan failed" {
-			t.Fatalf("error row status = %q, want error: scan failed\n%s", strings.Join(fields[6:], " "), got)
+		if strings.Join(fields[4:], " ") != "error: scan failed" {
+			t.Fatalf("error row status = %q, want error: scan failed\n%s", strings.Join(fields[4:], " "), got)
 		}
 	}
 	if !foundErrorRow {
@@ -174,6 +182,140 @@ func TestDockerOutdatedMultiHostRejectsInvalidFormat(t *testing.T) {
 	err := dockerOutdatedMultiHost(context.Background(), []string{"host-a"}, "", cli.DockerOutdatedFlags{Format: "xml"})
 	if err == nil || !strings.Contains(err.Error(), `unsupported docker outdated format "xml"`) {
 		t.Fatalf("invalid format error = %v", err)
+	}
+}
+
+func TestCommandNeedsServiceDockerUpdateOutdated(t *testing.T) {
+	needs, err := commandNeedsService([]string{"docker", "update", "--outdated"})
+	if err != nil {
+		t.Fatalf("commandNeedsService: %v", err)
+	}
+	if needs {
+		t.Fatal("docker update --outdated should not require an individual service")
+	}
+}
+
+func TestHandleSvcCommandDockerUpdateOutdatedRejectsService(t *testing.T) {
+	preserveDockerOutdatedGlobals(t)
+	serviceOverride = "svc-a"
+	fetchDockerOutdatedForHostFn = func(ctx context.Context, host string, service string, flags cli.DockerOutdatedFlags) ([]dockerOutdatedRow, error) {
+		t.Fatalf("service-scoped --outdated should fail before scanning")
+		return nil, nil
+	}
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		t.Fatalf("service-scoped --outdated should fail before remote exec")
+		return nil
+	}
+	err := handleSvcCommand(context.Background(), svcCommandRequest{
+		Command: svcCommand{Name: "docker", Args: []string{"update", "--outdated"}, RawArgs: []string{"docker", "update", "--outdated"}},
+		Config:  nil,
+		Service: "svc-a",
+	})
+	if err == nil || !strings.Contains(err.Error(), "docker update --outdated does not take a service") {
+		t.Fatalf("service-scoped --outdated error = %v", err)
+	}
+}
+
+func TestDockerUpdateOutdatedMultiHostUpdatesOnlyUpdateAvailable(t *testing.T) {
+	preserveDockerOutdatedGlobals(t)
+	fetchDockerOutdatedForHostFn = func(ctx context.Context, host string, service string, flags cli.DockerOutdatedFlags) ([]dockerOutdatedRow, error) {
+		if service != "" {
+			t.Fatalf("update --outdated fetch service = %q, want empty", service)
+		}
+		switch host {
+		case "host-a":
+			return []dockerOutdatedRow{
+				{ServiceName: "web", ContainerName: "app", Status: "update available"},
+				{ServiceName: "web", ContainerName: "worker", Status: "update available"},
+				{ServiceName: "db", Status: "unknown", Reason: "missing digest"},
+				{ServiceName: "broken", Status: "error", Reason: "scan failed"},
+			}, nil
+		case "host-b":
+			return []dockerOutdatedRow{{ServiceName: "api", Status: "update available"}}, nil
+		default:
+			t.Fatalf("unexpected host %q", host)
+			return nil, nil
+		}
+	}
+	var updated []string
+	updateDockerServiceForHostFn = func(ctx context.Context, host string, service string) error {
+		updated = append(updated, host+"/"+service)
+		fmt.Printf("compose output for %s/%s\n", host, service)
+		return nil
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return dockerUpdateOutdatedMultiHost(context.Background(), []string{"host-b", "host-a"})
+	})
+	if err != nil {
+		t.Fatalf("dockerUpdateOutdatedMultiHost: %v", err)
+	}
+	if !reflect.DeepEqual(updated, []string{"host-a/web", "host-b/api"}) {
+		t.Fatalf("updated = %#v, want host-a/web and host-b/api", updated)
+	}
+	for _, want := range []string{"==> host-a/web", "compose output for host-a/web", "==> host-b/api", "compose output for host-b/api"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"HOST", "SERVICE", "STATUS"} {
+		if strings.Contains(out, unwanted) {
+			t.Fatalf("output contains summary table header %q:\n%s", unwanted, out)
+		}
+	}
+	if strings.Contains(out, "db") || strings.Contains(out, "broken") {
+		t.Fatalf("unknown/error rows should not be updated:\n%s", out)
+	}
+}
+
+func TestUpdateDockerServiceForHostStreamsRemoteUpdateForHost(t *testing.T) {
+	preserveDockerOutdatedGlobals(t)
+	loadedPrefs.DefaultHost = "default-host"
+	loadedPrefs.changed = false
+
+	var called bool
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		called = true
+		if Host() != "host-a" {
+			t.Fatalf("Host() = %q, want host-a while update runs", Host())
+		}
+		if service != "web" {
+			t.Fatalf("service = %q, want web", service)
+		}
+		if !reflect.DeepEqual(args, []string{"docker", "update"}) {
+			t.Fatalf("args = %#v, want docker update", args)
+		}
+		if stdin != nil {
+			t.Fatalf("stdin = %T, want nil", stdin)
+		}
+		if !tty {
+			t.Fatal("tty = false, want true")
+		}
+		fmt.Print("streamed compose output\n")
+		return nil
+	}
+	execRemoteOutputFn = func(ctx context.Context, host string, service string, args []string, stdin io.Reader) ([]byte, error) {
+		t.Fatalf("update should stream via execRemoteFn, not execRemoteOutputFn")
+		return nil, nil
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return updateDockerServiceForHost(context.Background(), "host-a", "web")
+	})
+	if err != nil {
+		t.Fatalf("updateDockerServiceForHost: %v", err)
+	}
+	if !called {
+		t.Fatal("execRemoteFn was not called")
+	}
+	if !strings.Contains(out, "streamed compose output") {
+		t.Fatalf("streamed output missing:\n%s", out)
+	}
+	if Host() != "default-host" {
+		t.Fatalf("Host() after update = %q, want restored default-host", Host())
+	}
+	if loadedPrefs.changed {
+		t.Fatal("temporary host switch should restore loadedPrefs.changed")
 	}
 }
 

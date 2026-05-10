@@ -196,6 +196,95 @@ func isInternalRegistryImage(image string) bool {
 	return strings.HasPrefix(imageRepositoryName(image), InternalRegistryHost+"/")
 }
 
+func CompactDockerOutdatedImageRef(image string) string {
+	image = strings.TrimSpace(image)
+	if image == "" {
+		return "-"
+	}
+	repo, digest, pinned := strings.Cut(image, "@")
+	repo = compactDockerImageRepository(repo)
+	if pinned {
+		return shortenTail(repo+"@"+compactDockerDigest(digest), 49)
+	}
+	if !dockerImageRefHasTag(repo) {
+		repo += ":latest"
+	}
+	return shortenTail(repo, 49)
+}
+
+func compactDockerImageRepository(repo string) string {
+	repo = strings.TrimSpace(repo)
+	parts := strings.Split(repo, "/")
+	strippedRegistry := false
+	if len(parts) > 1 && isExplicitDockerRegistry(parts[0]) {
+		strippedRegistry = true
+		parts = parts[1:]
+	}
+	if strippedRegistry && len(parts) > 1 && parts[0] == "library" {
+		parts = parts[1:]
+	}
+	return strings.Join(parts, "/")
+}
+
+func isExplicitDockerRegistry(firstPathComponent string) bool {
+	return firstPathComponent == "localhost" ||
+		firstPathComponent == "docker.io" ||
+		firstPathComponent == "index.docker.io" ||
+		strings.ContainsAny(firstPathComponent, ".:")
+}
+
+func dockerImageRefHasTag(image string) bool {
+	lastSlash := strings.LastIndex(image, "/")
+	lastColon := strings.LastIndex(image, ":")
+	return lastColon > lastSlash
+}
+
+func compactDockerDigest(digest string) string {
+	algorithm, encoded, ok := strings.Cut(strings.TrimSpace(digest), ":")
+	if !ok {
+		return shortenTail(digest, 19)
+	}
+	if len(encoded) > 12 {
+		encoded = encoded[:12]
+	}
+	return algorithm + ":" + encoded
+}
+
+func CompactDockerOutdatedStatus(status DockerOutdatedStatus, reason string) string {
+	label := string(status)
+	if status == DockerOutdatedUpdateAvailable {
+		label = "update"
+	}
+	if strings.TrimSpace(label) == "" {
+		label = "-"
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return label
+	}
+	return label + ": " + shortenRight(reason, 35)
+}
+
+func shortenTail(value string, maxLen int) string {
+	if len(value) <= maxLen || maxLen <= 0 {
+		return value
+	}
+	if maxLen <= 3 {
+		return value[len(value)-maxLen:]
+	}
+	return "..." + value[len(value)-(maxLen-3):]
+}
+
+func shortenRight(value string, maxLen int) string {
+	if len(value) <= maxLen || maxLen <= 0 {
+		return value
+	}
+	if maxLen <= 3 {
+		return value[:maxLen]
+	}
+	return value[:maxLen-3] + "..."
+}
+
 func compareDockerOutdatedRow(row DockerOutdatedRow) DockerOutdatedRow {
 	if row.RunningDigest == "" {
 		row.Status = DockerOutdatedUnknown
