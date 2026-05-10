@@ -1,7 +1,7 @@
 [tools]
 go = "1.26.3"
 "go:golang.org/x/vuln/cmd/govulncheck" = "latest"
-golangci-lint = "2.12.1"
+golangci-lint = "2.12.2"
 pre-commit = "latest"
 staticcheck = "latest"
 
