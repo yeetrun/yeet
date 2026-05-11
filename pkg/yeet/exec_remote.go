@@ -136,9 +136,6 @@ func newSessionStdinProxy(stdin *os.File) (*sessionStdinProxy, error) {
 
 func (p *sessionStdinProxy) forwardInput(pw *io.PipeWriter) {
 	defer close(p.done)
-	defer func() {
-		_ = p.dup.Close()
-	}()
 	buf := make([]byte, 4096)
 	for {
 		if p.stopRequested() {
@@ -161,7 +158,7 @@ func (p *sessionStdinProxy) stopRequested() bool {
 }
 
 func (p *sessionStdinProxy) copyInputChunk(pw *io.PipeWriter, buf []byte) bool {
-	n, err := p.dup.Read(buf)
+	n, err := syscall.Read(int(p.dup.Fd()), buf)
 	if n > 0 {
 		if _, werr := pw.Write(buf[:n]); werr != nil {
 			_ = pw.CloseWithError(werr)
@@ -187,7 +184,7 @@ func isTerminalStdinReadError(err error) bool {
 }
 
 func isRetryableStdinReadError(err error) bool {
-	return errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK)
+	return errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EINTR)
 }
 
 func (p *sessionStdinProxy) waitForInputRetry(pw *io.PipeWriter) bool {
@@ -210,10 +207,10 @@ func (p *sessionStdinProxy) Close() error {
 	default:
 		close(p.stop)
 	}
-	_, errFlags := unix.FcntlInt(p.dup.Fd(), unix.F_SETFL, p.origFlags)
 	errRead := p.r.Close()
-	errDup := p.dup.Close()
 	<-p.done
+	_, errFlags := unix.FcntlInt(p.dup.Fd(), unix.F_SETFL, p.origFlags)
+	errDup := p.dup.Close()
 	if errFlags != nil {
 		return errFlags
 	}

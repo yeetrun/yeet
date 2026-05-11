@@ -223,8 +223,18 @@ func TestSessionStdinProxyCloseUnblocksPendingRead(t *testing.T) {
 		done <- err
 	}()
 
-	if err := proxy.Close(); err != nil {
-		t.Fatalf("Close error: %v", err)
+	closed := make(chan error, 1)
+	go func() {
+		closed <- proxy.Close()
+	}()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Close to stop stdin proxy")
 	}
 
 	select {
