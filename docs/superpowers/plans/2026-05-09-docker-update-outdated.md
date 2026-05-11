@@ -137,10 +137,10 @@ Expected: PASS.
 Run:
 
 ```bash
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet --progress plain init root@pve1
-CATCH_HOST=yeet-hetz go run ./cmd/yeet --progress plain init root@hetz
-CATCH_HOST=yeet-pve1 go run ./cmd/yeet --progress plain docker outdated
-CATCH_HOST=yeet-hetz go run ./cmd/yeet --progress plain docker outdated
+CATCH_HOST=catch-host-a go run ./cmd/yeet --progress plain init root@host-a
+CATCH_HOST=catch-host-b go run ./cmd/yeet --progress plain init root@host-b
+CATCH_HOST=catch-host-a go run ./cmd/yeet --progress plain docker outdated
+CATCH_HOST=catch-host-b go run ./cmd/yeet --progress plain docker outdated
 ```
 
 Expected: compact table output on both hosts. Do not run live

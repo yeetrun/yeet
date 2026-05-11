@@ -196,6 +196,24 @@ func TestWriteNetNSScriptsWritesScriptsAndSkipsIdenticalFiles(t *testing.T) {
 	}
 }
 
+func TestServiceNSScriptUsesPerServiceDhclientLeaseFile(t *testing.T) {
+	raw, err := netnsScripts.ReadFile("netns-scripts/service-ns")
+	if err != nil {
+		t.Fatalf("ReadFile embedded service-ns returned error: %v", err)
+	}
+	got := string(raw)
+
+	for _, want := range []string{
+		`DHCP_LEASEFILE="/var/lib/dhcp/dhclient-${SERVICE_NAME}-${MACVLAN_INTERFACE}.leases"`,
+		`DHCP="dhclient -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"`,
+		`DHCP_RELEASE="dhclient -r -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("service-ns missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestWriteYeetNSEnvWritesAndSkipsIdenticalFiles(t *testing.T) {
 	chdirTemp(t)
 	ye := defaultYeetNSEnv(BackendNFT, "/usr/local/bin/catch")

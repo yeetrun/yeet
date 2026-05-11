@@ -13,7 +13,7 @@ The default table output becomes compact:
 
 ```text
 SERVICE  HOST       CONTAINER  IMAGE                         UPDATE
-plex     yeet-pve1  plex       linuxserver/plex:latest       update
+media    host-a     media      linuxserver/media:latest      update
 ```
 
 Scoped remote table output uses the same columns without `HOST`.

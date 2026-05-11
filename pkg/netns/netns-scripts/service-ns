@@ -23,13 +23,14 @@ DHCP_AVAILABLE=true
 DHCP="dhcpcd"
 DHCP_RELEASE="dhcpcd -k"
 DHCP_PIDFILE="/var/run/dhclient-${SERVICE_NAME}-${MACVLAN_INTERFACE}.pid"
+DHCP_LEASEFILE="/var/lib/dhcp/dhclient-${SERVICE_NAME}-${MACVLAN_INTERFACE}.leases"
 
 if ! command -v dhcpcd &> /dev/null; then
     if ! command -v dhclient &> /dev/null; then
         DHCP_AVAILABLE=false
     else
-        DHCP="dhclient -pf ${DHCP_PIDFILE}"
-        DHCP_RELEASE="dhclient -r -pf ${DHCP_PIDFILE}"
+        DHCP="dhclient -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"
+        DHCP_RELEASE="dhclient -r -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"
     fi
 fi
 
