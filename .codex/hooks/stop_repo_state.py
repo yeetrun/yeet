@@ -165,7 +165,27 @@ def stop_issues(root: Path, message: str) -> list[str]:
     if release_trigger:
         issues.extend(release_issues(root, website, sorted(release_versions | head_versions), message, root_status, root_sync, website_status, website_sync))
 
-    return issues
+    return unique_issues(issues)
+
+
+def unique_issues(issues: list[str]) -> list[str]:
+    """Preserve first-seen hook issues while removing repeated findings.
+
+    Some claims intentionally pass through more than one policy gate. For
+    example, "committed and pushed, tagged vX.Y.Z" is both a push claim and a
+    release claim, and both gates care whether the root branch is still ahead of
+    origin. The final Stop prompt should stay terse, so duplicated prose is
+    collapsed at the boundary.
+    """
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for issue in issues:
+        if issue in seen:
+            continue
+        seen.add(issue)
+        unique.append(issue)
+    return unique
 
 
 def release_issues(
