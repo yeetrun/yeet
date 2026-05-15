@@ -88,9 +88,6 @@ Present:
 - Releases: `.codex/skills/yeet-release/SKILL.md`
 - Docs: `.codex/skills/yeet-docs/SKILL.md`
 - RPC flow: `.codex/skills/yeet-rpc/SKILL.md`
-
-Planned for later agent-context tasks:
-
 - Docker workflows: `.codex/skills/yeet-docker/SKILL.md`
 - Quality gates: `.codex/skills/yeet-quality/SKILL.md`
 
