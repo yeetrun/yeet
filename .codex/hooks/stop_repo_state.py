@@ -52,6 +52,7 @@ PUSHED_CLAIM_RE = re.compile(
     r"\b(everything|all changes|changes|work|it|this|root|website|submodule|main|tag|release)\s+"
     r"(is|are|'s|was|were)?\s*(pushed|published)\b"
 )
+COMMITTED_AND_PUSHED_RE = re.compile(r"\b(committed and pushed|pushed and committed)\b")
 CLEAN_CLAIM_RE = re.compile(
     r"\b(working tree|worktree|repo|repository|root repo|root repository|website submodule|submodule|git status|status)\s+"
     r"(is|are|'s|was|were)?\s*(clean|up[- ]to[- ]date)\b"
@@ -146,7 +147,13 @@ def stop_issues(root: Path, message: str) -> list[str]:
         issues.append("website submodule has uncommitted changes that are not mentioned")
     if claims_push and (root_sync.ahead > 0 or root_sync.behind > 0 or not root_sync.has_upstream):
         issues.append(sync_issue("root branch", root_sync))
-    if claims_push and website.exists() and (website_sync.ahead > 0 or website_sync.behind > 0 or not website_sync.has_upstream):
+    explicit_website_claim = "website" in lower or "submodule" in lower
+    if (
+        claims_push
+        and explicit_website_claim
+        and website.exists()
+        and (website_sync.ahead > 0 or website_sync.behind > 0 or not website_sync.has_upstream)
+    ):
         issues.append(sync_issue("website branch", website_sync))
 
     # The release checklist is expensive in attention, not CPU. Only run it for
@@ -198,8 +205,10 @@ def release_issues(
     if website.exists():
         if website_status:
             issues.append("release checklist requires a clean website submodule")
-        if website_sync.ahead > 0 or website_sync.behind > 0 or not website_sync.has_upstream:
+        if website_sync.has_upstream and (website_sync.ahead > 0 or website_sync.behind > 0):
             issues.append(sync_issue("website branch", website_sync))
+        elif not website_sync.has_upstream and not commit_reachable_from_origin(website):
+            issues.append("website commit is not reachable from a fetched origin branch")
         changelog = website / "docs" / "changelog.mdx"
         if not changelog_contains_version(changelog, version):
             issues.append(f"website/docs/changelog.mdx does not include a {version} release heading")
@@ -237,7 +246,7 @@ def claims_committed(lower: str) -> bool:
 
     if claims_any(lower, ("not committed", "uncommitted", "no commit")):
         return False
-    return bool(COMMITTED_CLAIM_RE.search(lower))
+    return bool(COMMITTED_CLAIM_RE.search(lower) or COMMITTED_AND_PUSHED_RE.search(lower))
 
 
 def claims_pushed(lower: str) -> bool:
@@ -245,6 +254,8 @@ def claims_pushed(lower: str) -> bool:
 
     if claims_any(lower, ("not pushed", "unpushed", "no push")):
         return False
+    if COMMITTED_AND_PUSHED_RE.search(lower):
+        return True
     if PUSHED_CLAIM_RE.search(lower):
         return True
     return claims_any(lower, ("matches origin", "matches origin/main", "remote tag is present", "remote tag exists"))
@@ -344,6 +355,18 @@ def remote_tag_exists(root: Path, version: str) -> bool:
 
     out = git_output(root, "ls-remote", "--tags", "origin", f"refs/tags/{version}")
     return bool(out.strip())
+
+
+def commit_reachable_from_origin(root: Path) -> bool:
+    """Return whether HEAD is contained in one of the fetched origin refs.
+
+    Submodules are often checked out detached at the exact commit recorded by
+    the parent repository. In that normal state there is no ``@{upstream}``.
+    For release validation, the useful question is instead whether that detached
+    commit has been fetched from origin, which proves it is not merely local.
+    """
+
+    return bool(git_lines(root, "branch", "-r", "--contains", "HEAD", "--list", "origin/*"))
 
 
 def previous_version_tag(root: Path, version: str) -> str | None:
