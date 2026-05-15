@@ -126,8 +126,10 @@ def stop_issues(root: Path, message: str) -> list[str]:
     lower = claim_message.lower()
     issues: list[str] = []
 
-    # The root repo and the website submodule are both release surfaces. A
-    # pushed or released answer is only true if both are in the expected state.
+    # The root repo and the website submodule are both release surfaces. A root
+    # push claim checks the root branch. A website push claim checks the
+    # submodule separately; a plain "website is clean" claim should not require
+    # the normally detached submodule checkout to have an upstream branch.
     root_status = git_lines(root, "status", "--porcelain")
     root_sync = git_sync(root)
     website = root / "website"
@@ -147,14 +149,11 @@ def stop_issues(root: Path, message: str) -> list[str]:
         issues.append("website submodule has uncommitted changes that are not mentioned")
     if claims_push and (root_sync.ahead > 0 or root_sync.behind > 0 or not root_sync.has_upstream):
         issues.append(sync_issue("root branch", root_sync))
-    explicit_website_claim = "website" in lower or "submodule" in lower
-    if (
-        claims_push
-        and explicit_website_claim
-        and website.exists()
-        and (website_sync.ahead > 0 or website_sync.behind > 0 or not website_sync.has_upstream)
-    ):
-        issues.append(sync_issue("website branch", website_sync))
+    if claims_website_pushed(claim_message) and website.exists():
+        if website_sync.has_upstream and (website_sync.ahead > 0 or website_sync.behind > 0):
+            issues.append(sync_issue("website branch", website_sync))
+        elif not website_sync.has_upstream and not commit_reachable_from_origin(website):
+            issues.append("website commit is not reachable from a fetched origin branch")
 
     # The release checklist is expensive in attention, not CPU. Only run it for
     # a real release assertion or an actual tag on HEAD. A bare version in an
@@ -259,6 +258,15 @@ def claims_pushed(lower: str) -> bool:
     if PUSHED_CLAIM_RE.search(lower):
         return True
     return claims_any(lower, ("matches origin", "matches origin/main", "remote tag is present", "remote tag exists"))
+
+
+def claims_website_pushed(message: str) -> bool:
+    """Return whether a website/submodule line itself claims pushed state."""
+
+    for line in message.lower().splitlines():
+        if ("website" in line or "submodule" in line) and claims_pushed(line):
+            return True
+    return False
 
 
 def claims_clean_state(lower: str) -> bool:
