@@ -78,6 +78,21 @@ Present:
 - Client orchestration: `pkg/yeet/AGENTS.md`
 - Catch server behavior: `pkg/catch/AGENTS.md`
 - Service helpers: `pkg/svc/AGENTS.md`
+- RPC client and wire types: `pkg/catchrpc/AGENTS.md`
+- Command helpers: `pkg/cmdutil/AGENTS.md`
+- Codec helpers: `pkg/codecutil/AGENTS.md`
+- HTTP compression helpers: `pkg/compress/AGENTS.md`
+- Copy and tar helpers: `pkg/copyutil/AGENTS.md`
+- Cron formatting helpers: `pkg/cronutil/AGENTS.md`
+- Catch data store: `pkg/db/AGENTS.md`
+- Docker network plugin: `pkg/dnet/AGENTS.md`
+- Env file writer: `pkg/env/AGENTS.md`
+- File helpers: `pkg/fileutil/AGENTS.md`
+- File type detection: `pkg/ftdetect/AGENTS.md`
+- Network namespace helpers: `pkg/netns/AGENTS.md`
+- OCI registry: `pkg/registry/AGENTS.md`
+- Tar.gz reader: `pkg/targz/AGENTS.md`
+- Terminal UI helpers: `pkg/tui/AGENTS.md`
 - Website docs: `website/AGENTS.md`
 
 ## Repo Skills
