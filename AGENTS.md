@@ -12,6 +12,16 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - `tools/`, `tempfork/`: Supporting tooling and forked dependencies.
 - Tests live alongside code as `*_test.go` files (primarily under `pkg/` and `cmd/`).
 
+## Agent Navigation
+
+- Start with `docs/agent/codebase-map.md` when choosing where to read or edit.
+- Subdirectories may contain their own `AGENTS.md`; read and follow the local
+  file before editing there.
+- Use `.codex/skills` for task workflows such as releases, docs, RPC, Docker,
+  and quality gates.
+- Keep this root file focused on repo-wide policy. Put subsystem-specific rules
+  in the subsystem `AGENTS.md`.
+
 ## Build, Test, and Development Commands
 - `go build ./cmd/yeet` — build the client CLI.
 - `go build ./cmd/catch` — build the server binary.
@@ -28,7 +38,6 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - CLI flags use kebab-case in tags (e.g., `flag:"ts-auth-key"`).
 - Keep functions small and explicit; avoid hidden side effects in CLI parsing.
 - Avoid magic strings; use constants or shared registries for command names/keywords.
-- RPC CLI flow: `yeet` parses global/subcommand routing with `pkg/yargs` and forwards args via `catchrpc.Exec`; `catch` is authoritative for command/flag parsing via `pkg/cli.Parse*` (which uses `pkg/yargs`). Avoid adding per-command structured RPCs unless there is a strong need.
 
 ## Testing Guidelines
 - Use Go’s `testing` package; name tests `TestXxx`.
