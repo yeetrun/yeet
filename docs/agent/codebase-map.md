@@ -77,9 +77,6 @@ Present:
 - CLI entrypoint: `cmd/yeet/AGENTS.md`
 - Catch entrypoint: `cmd/catch/AGENTS.md`
 - CLI parser registry: `pkg/cli/AGENTS.md`
-
-Planned for later agent-context tasks:
-
 - Client orchestration: `pkg/yeet/AGENTS.md`
 - Catch server behavior: `pkg/catch/AGENTS.md`
 - Service helpers: `pkg/svc/AGENTS.md`
