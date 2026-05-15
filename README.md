@@ -75,6 +75,10 @@ guardrails for this repo, not replacements for pre-commit. The Stop hook checks
 final answers that claim clean, pushed, tagged, or released state against git
 and the website submodule release checklist.
 
+Agent navigation docs live in `docs/agent/`. Start with
+`docs/agent/codebase-map.md` when orienting a Codex session to the repository.
+Task-specific workflows live in `.codex/skills/`.
+
 The quality gate scans for private local references, runs `go test` with
 coverage, checks CRAP hotspots, runs `golangci-lint` with complexity and
 bug-risk linters, and writes a churn/coverage hotspot report to
