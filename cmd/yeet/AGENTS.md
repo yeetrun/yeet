@@ -25,7 +25,4 @@ routing. Keep command-line behavior predictable and covered by tests.
 
 - Codebase map: `docs/agent/codebase-map.md`
 - CLI operations skill: `.codex/skills/yeet-cli/SKILL.md`
-
-Planned for later agent-context tasks:
-
 - Docs skill: `.codex/skills/yeet-docs/SKILL.md`

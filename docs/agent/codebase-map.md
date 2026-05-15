@@ -48,12 +48,10 @@ editing.
 - Network namespace and port reconciliation: start in `pkg/catch/netns.go`,
   `pkg/catch/netns_reconcile.go`, and `pkg/catch/compose_ports.go`.
 - Registry behavior: start in `pkg/registry/` and `pkg/catch/registry.go`.
-- Release work: follow the release process in `AGENTS.md`. A dedicated
-  `.codex/skills/yeet-release/SKILL.md` skill and `website/AGENTS.md` local
-  instructions are planned for later agent-context tasks.
-- User-facing docs: follow the Website Docs and Website Changelog Styleguide
-  sections in `AGENTS.md`. A dedicated `.codex/skills/yeet-docs/SKILL.md`
-  skill is planned for a later agent-context task.
+- Release work: use `.codex/skills/yeet-release/SKILL.md` and
+  `website/AGENTS.md`.
+- User-facing docs: use `.codex/skills/yeet-docs/SKILL.md` and
+  `website/AGENTS.md`.
 
 ## Targeted Test Commands
 
@@ -84,13 +82,15 @@ Present:
 
 ## Repo Skills
 
+Present:
+
 - CLI operations: `.codex/skills/yeet-cli/SKILL.md`
-
-Planned for later agent-context tasks:
-
 - Releases: `.codex/skills/yeet-release/SKILL.md`
 - Docs: `.codex/skills/yeet-docs/SKILL.md`
 - RPC flow: `.codex/skills/yeet-rpc/SKILL.md`
+
+Planned for later agent-context tasks:
+
 - Docker workflows: `.codex/skills/yeet-docker/SKILL.md`
 - Quality gates: `.codex/skills/yeet-quality/SKILL.md`
 
