@@ -70,6 +70,11 @@ Run the same deterministic baseline checks manually:
 mise run quality
 ```
 
+Codex project hooks live under `.codex/`. They are lightweight agent-loop
+guardrails for this repo, not replacements for pre-commit. The Stop hook checks
+final answers that claim clean, pushed, tagged, or released state against git
+and the website submodule release checklist.
+
 The quality gate scans for private local references, runs `go test` with
 coverage, checks CRAP hotspots, runs `golangci-lint` with complexity and
 bug-risk linters, and writes a churn/coverage hotspot report to
