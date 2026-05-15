@@ -12,39 +12,39 @@
 
 ## File Structure
 
-- Modify: `AGENTS.md`  
+- Modify: `AGENTS.md`
   Keep repo-wide policy, add pointers to the codebase map and skills, and remove duplicated subsystem details after local `AGENTS.md` files exist.
-- Create: `docs/agent/codebase-map.md`  
+- Create: `docs/agent/codebase-map.md`
   Repository navigation index for Codex agents.
-- Create: `docs/agent/maintenance.md`  
+- Create: `docs/agent/maintenance.md`
   Periodic review checklist for agent context.
-- Create: `cmd/yeet/AGENTS.md`  
+- Create: `cmd/yeet/AGENTS.md`
   Local rules for the client CLI entrypoint and bridge behavior.
-- Create: `cmd/catch/AGENTS.md`  
+- Create: `cmd/catch/AGENTS.md`
   Local rules for the catch command entrypoint.
-- Create: `pkg/cli/AGENTS.md`  
+- Create: `pkg/cli/AGENTS.md`
   Parser, registry, help, and CLI test guidance.
-- Create: `pkg/yeet/AGENTS.md`  
+- Create: `pkg/yeet/AGENTS.md`
   Client orchestration, host/service resolution, project config, and remote exec guidance.
-- Create: `pkg/catch/AGENTS.md`  
+- Create: `pkg/catch/AGENTS.md`
   Catch-side RPC, TTY, Docker/systemd, and live side-effect guidance.
-- Create: `pkg/svc/AGENTS.md`  
+- Create: `pkg/svc/AGENTS.md`
   Service-domain helper guidance for Docker/systemd/networking behavior.
-- Create: `website/AGENTS.md`  
+- Create: `website/AGENTS.md`
   User manual, changelog, and submodule workflow guidance.
-- Modify: `.codex/skills/yeet-cli/SKILL.md`  
+- Modify: `.codex/skills/yeet-cli/SKILL.md`
   Keep the existing CLI operations skill, but link it to the new map and local docs.
-- Create: `.codex/skills/yeet-release/SKILL.md`  
+- Create: `.codex/skills/yeet-release/SKILL.md`
   Release workflow skill.
-- Create: `.codex/skills/yeet-docs/SKILL.md`  
+- Create: `.codex/skills/yeet-docs/SKILL.md`
   Docs/manual/changelog workflow skill.
-- Create: `.codex/skills/yeet-rpc/SKILL.md`  
+- Create: `.codex/skills/yeet-rpc/SKILL.md`
   Client-to-catch RPC workflow skill.
-- Create: `.codex/skills/yeet-docker/SKILL.md`  
+- Create: `.codex/skills/yeet-docker/SKILL.md`
   Docker compose/registry/outdated workflow skill.
-- Create: `.codex/skills/yeet-quality/SKILL.md`  
+- Create: `.codex/skills/yeet-quality/SKILL.md`
   Quality gate and empirical testing workflow skill.
-- Modify: `README.md`  
+- Modify: `README.md`
   Add a short pointer to the agent-context map under the development quality section.
 
 ## Task 1: Add Agent Navigation Docs
