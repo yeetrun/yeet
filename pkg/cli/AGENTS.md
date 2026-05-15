@@ -23,5 +23,8 @@ help text used by both yeet and catch.
 ## Related Context
 
 - Codebase map: `docs/agent/codebase-map.md`
+
+Planned for later agent-context tasks:
+
 - RPC flow skill: `.codex/skills/yeet-rpc/SKILL.md`
 - Docs skill: `.codex/skills/yeet-docs/SKILL.md`
