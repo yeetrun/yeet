@@ -27,7 +27,4 @@ networking, and install helpers.
 
 - Codebase map: `docs/agent/codebase-map.md`
 - RPC flow skill: `.codex/skills/yeet-rpc/SKILL.md`
-
-Planned for later agent-context tasks:
-
 - Docker workflow skill: `.codex/skills/yeet-docker/SKILL.md`

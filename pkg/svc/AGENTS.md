@@ -26,8 +26,5 @@ systemd, network namespaces, and Docker image update checks.
 ## Related Context
 
 - Codebase map: `docs/agent/codebase-map.md`
-
-Planned for later agent-context tasks:
-
 - Docker workflow skill: `.codex/skills/yeet-docker/SKILL.md`
 - Quality skill: `.codex/skills/yeet-quality/SKILL.md`
