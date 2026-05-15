@@ -20,7 +20,4 @@ daemon command.
 ## Related Context
 
 - Codebase map: `docs/agent/codebase-map.md`
-
-Planned for later agent-context tasks:
-
 - Catch server notes: `pkg/catch/AGENTS.md`
