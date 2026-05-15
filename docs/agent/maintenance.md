@@ -6,13 +6,15 @@ Codex/tooling changes.
 ## Checklist
 
 - Root `AGENTS.md` is still lean and repo-wide.
-- Subdirectory `AGENTS.md` files describe local invariants, not broad policy.
-- Skills trigger for the tasks they describe and stay compact.
+- Any subdirectory `AGENTS.md` files describe local invariants, not broad
+  policy.
+- Existing skills trigger for the tasks they describe and stay compact.
 - The Stop hook catches real final-state drift without frequent false positives.
 - `docs/agent/codebase-map.md` points to the current starting files.
 - `.codex/skills/yeet-cli/references/yeet-help-llm.md` matches current help
   output for changed commands.
-- Release, docs, and quality workflows still match `AGENTS.md`.
+- Release, docs, and quality workflows still match `AGENTS.md` and any
+  dedicated skills that have landed.
 - New Codex capabilities have not made local guidance obsolete.
 
 ## When To Update
