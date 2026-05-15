@@ -29,7 +29,4 @@ and status rendering.
 
 - Codebase map: `docs/agent/codebase-map.md`
 - CLI operations skill: `.codex/skills/yeet-cli/SKILL.md`
-
-Planned for later agent-context tasks:
-
 - RPC flow skill: `.codex/skills/yeet-rpc/SKILL.md`

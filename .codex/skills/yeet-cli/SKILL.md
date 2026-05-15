@@ -1,76 +1,39 @@
 ---
 name: yeet-cli
-description: Use for yeet CLI operations like deploying or updating services, restarting/removing services, installing or upgrading catch on a host, and for any request asking how to use yeet commands/options/groups (run, restart, remove, init, docker/env groups, status/logs/info). Also use when the user asks for yeet CLI help output or guidance on CATCH_HOST/--host targeting.
+description: Use for yeet CLI operations like deploying or updating services, restarting/removing services, installing or upgrading catch on a host, checking status/logs/info, and guidance on CATCH_HOST/--host targeting.
 ---
 
 # Yeet CLI
 
-## Overview
+Use this skill for operating yeet from this repository. Prefer `go run
+./cmd/yeet ...` unless the user explicitly asks for an installed binary.
 
-Use this skill to translate user requests into `yeet` CLI commands and to fetch or reference `--help-llm` output for exact syntax. Prefer `go run ./cmd/yeet ...` in this repo unless the user explicitly wants the installed `yeet` binary.
+## Start Here
 
-## Quick Start
+- Read `docs/agent/codebase-map.md` for command ownership.
+- Read `AGENTS.local.md` before live host testing.
+- For exact syntax, use `go run ./cmd/yeet <command> --help-llm`.
+- If help output changes, update
+  `.codex/skills/yeet-cli/references/yeet-help-llm.md`.
 
-- Read command syntax and examples in `references/yeet-help-llm.md`.
-- If any command looks stale, re-run `go run ./cmd/yeet <command> --help-llm` and update the reference file.
+## Common Commands
 
-## Core Tasks
-
-### Deploy or update a service
-
-Use `yeet run` with a service name and payload. Common payloads include a binary, compose file, image, or Dockerfile.
-
-Examples:
-
-```
-go run ./cmd/yeet run <svc> ./bin/<svc> -- --app-flag value
-```
-
-```
-go run ./cmd/yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
+```bash
+go run ./cmd/yeet status
+go run ./cmd/yeet status <svc>
+go run ./cmd/yeet logs <svc>
+go run ./cmd/yeet info <svc>
+go run ./cmd/yeet run <svc> ./compose.yml
+go run ./cmd/yeet docker outdated
+go run ./cmd/yeet docker update <svc>
 ```
 
-```
-go run ./cmd/yeet run <svc> ghcr.io/org/app:latest
-```
+Use `--host=<catch-host>` or `CATCH_HOST=<catch-host>` when the target host is
+not the current default.
 
-If the command requires a host override, use `--host` or set `CATCH_HOST`.
+## Live Testing
 
-### Restart a service
-
-Use `yeet restart` and pass the service name via `--service` if needed.
-
-```
-go run ./cmd/yeet restart --service <svc>
-```
-
-### Remove a service
-
-Use `yeet remove` (alias `rm`) and pass the service name via `--service` if needed.
-
-```
-go run ./cmd/yeet remove --service <svc>
-```
-
-### Install or update catch on a host
-
-Use `yeet init` with the install user and host. This updates the catch server on the target.
-
-```
-go run ./cmd/yeet init root@<host>
-```
-
-You can also run `yeet init` without arguments if a default host/user is configured.
-
-## Related Commands
-
-- `yeet status`, `yeet info`, `yeet logs`, `yeet events` for observing service state.
-- `yeet env` group for env file management.
-- `yeet docker` group for compose and registry operations.
-
-Refer to `references/yeet-help-llm.md` for the authoritative usage text and examples.
-
-## Repo Notes
-
-- The repo’s local guidance for live testing lives in `AGENTS.local.md`.
-- `CATCH_HOST` overrides the default remote host for the client.
+- `yeet init` updates catch on the target host.
+- `yeet run`, `yeet remove`, `yeet restart`, and `yeet docker update` can change
+  running services.
+- Use unique service names for tests and clean them up when finished.
