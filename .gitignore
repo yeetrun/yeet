@@ -11,4 +11,5 @@
 go.work
 go.work.*
 AGENTS.local.md
-.codex/
+.codex/hooks/__pycache__/
+.codex/hooks/*.pyc
