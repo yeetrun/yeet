@@ -1,5 +1,5 @@
 # Yeet CLI --help-llm Outputs
-Generated on 2026-01-09 from this repo using:
+Generated on 2026-05-15 from this repo using:
 - `go run ./cmd/yeet --help-llm`
 - `go run ./cmd/yeet <command> --help-llm`
 - `go run ./cmd/yeet <group> --help-llm`
@@ -11,7 +11,7 @@ If command behavior changes, re-run the help commands and update this file.
 ````
 # yeet CLI Reference
 
-Deploy and manage services on a remote catch host; most commands are forwarded over RPC on your tailnet.
+Deploy/manage services on a remote catch host; commands go over RPC.
 
 ## Usage
 
@@ -57,9 +57,23 @@ Progress output (auto|tty|plain|quiet)
 
 ### `copy`
 
-Copy a local file into a service data dir
+Copy files between local and service data
 
 **Aliases**: `cp`
+
+**Examples**:
+
+```
+yeet copy ./config.yml svc:data/config.yml
+```
+
+```
+yeet copy ./configs/ svc:data/
+```
+
+```
+yeet copy svc:data/configs ./configs
+```
 
 Get detailed help: `yeet copy --help-llm`
 
@@ -107,7 +121,7 @@ Get detailed help: `yeet info --help-llm`
 
 ### `init`
 
-Install catch on a remote host
+Install catch on a remote host (local build or GitHub release)
 
 **Examples**:
 
@@ -183,7 +197,7 @@ Get detailed help: `yeet rollback --help-llm`
 
 ### `run`
 
-Install or update a service from a payload (binary, compose, image, Dockerfile)
+Install/update from a payload (binary, compose, image, Dockerfile)
 
 **Examples**:
 
@@ -200,6 +214,14 @@ yeet run --pull <svc> ./compose.yml
 ```
 
 ```
+yeet run --force <svc> ./compose.yml
+```
+
+```
+yeet run --env-file=prod.env <svc> ./compose.yml
+```
+
+```
 yeet run <svc> ghcr.io/org/app:latest
 ```
 
@@ -211,7 +233,7 @@ Get detailed help: `yeet run --help-llm`
 
 ### `ssh`
 
-Open an SSH session to the host with the install user
+Open SSH to the catch host (optionally into a service dir)
 
 **Examples**:
 
@@ -224,14 +246,22 @@ yeet --host=<host> ssh
 ```
 
 ```
-yeet ssh htop
+yeet ssh <svc>
+```
+
+```
+yeet ssh -- uname -a
+```
+
+```
+yeet ssh <svc> -- ls -la
 ```
 
 Get detailed help: `yeet ssh --help-llm`
 
 ### `stage`
 
-Upload a payload without applying it (use stage show/commit)
+Upload a payload without applying it (use stage show/commit/clear)
 
 **Examples**:
 
@@ -245,6 +275,10 @@ yeet stage <svc> show
 
 ```
 yeet stage <svc> commit
+```
+
+```
+yeet stage <svc> clear
 ```
 
 Get detailed help: `yeet stage --help-llm`
@@ -269,9 +303,23 @@ Get detailed help: `yeet stop --help-llm`
 
 ### `tailscale`
 
-Run a tailscale command
+Configure tailscale OAuth or run tailscale commands in a service netns
 
 **Aliases**: `ts`
+
+**Examples**:
+
+```
+yeet tailscale --setup
+```
+
+```
+yeet tailscale --setup --client-secret=tskey-client-***
+```
+
+```
+yeet tailscale <svc> -- serve --bg 8080
+```
 
 Get detailed help: `yeet tailscale --help-llm`
 
@@ -301,6 +349,7 @@ Docker compose and registry management
 
 **Commands**:
 
+- `docker outdated`: Show Docker compose containers with upstream image updates
 - `docker pull`: Pull images for a compose service without restarting
 - `docker push`: Push a container image to the remote host (optionally run it)
 - `docker update`: Pull images and recreate containers for a compose service
@@ -343,6 +392,7 @@ yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
 - Global help: `yeet --help-llm`
 - Group help: `yeet <group> --help-llm`
 - Command help: `yeet <command> --help-llm`
+
 ````
 
 ## Command: run
@@ -350,7 +400,7 @@ yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
 ````
 # yeet run
 
-Install or update a service from a payload (binary, compose, image, Dockerfile)
+Install/update from a payload (binary, compose, image, Dockerfile)
 
 ## Usage
 
@@ -405,12 +455,22 @@ yeet run --pull <svc> ./compose.yml
 ```
 
 ```
+yeet run --force <svc> ./compose.yml
+```
+
+```
+yeet run --env-file=prod.env <svc> ./compose.yml
+```
+
+```
 yeet run <svc> ghcr.io/org/app:latest
 ```
 
 ```
 yeet run <svc> ./Dockerfile
 ```
+
+
 ````
 
 ## Command: restart
@@ -457,6 +517,8 @@ Disable TTY for remote commands
 Progress output (auto|tty|plain|quiet)
 
 - **Type**: `string`
+
+
 ````
 
 ## Command: remove
@@ -503,6 +565,8 @@ Disable TTY for remote commands
 Progress output (auto|tty|plain|quiet)
 
 - **Type**: `string`
+
+
 ````
 
 ## Command: init
@@ -510,12 +574,12 @@ Progress output (auto|tty|plain|quiet)
 ````
 # yeet init
 
-Install catch on a remote host
+Install catch on a remote host (local build or GitHub release)
 
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] init [OPTIONS] ROOT@HOST
+yeet [GLOBAL_OPTIONS] init [OPTIONS] [--from-github] [--nightly] [ROOT@HOST]
 ```
 
 ## Global Options
@@ -559,6 +623,8 @@ yeet init root@<host>
 ```
 yeet init
 ```
+
+
 ````
 
 ## Group: docker
@@ -608,6 +674,26 @@ Progress output (auto|tty|plain|quiet)
 
 ## Commands
 
+### `docker outdated`
+
+Show Docker compose containers with upstream image updates
+
+**Examples**:
+
+```
+yeet docker outdated
+```
+
+```
+yeet docker outdated <svc>
+```
+
+```
+yeet docker outdated --format=json
+```
+
+Get detailed help: `yeet docker outdated --help-llm`
+
 ### `docker pull`
 
 Pull images for a compose service without restarting
@@ -630,7 +716,19 @@ Get detailed help: `yeet docker push --help-llm`
 
 Pull images and recreate containers for a compose service
 
+**Examples**:
+
+```
+yeet docker update <svc>
+```
+
+```
+yeet docker update --outdated
+```
+
 Get detailed help: `yeet docker update --help-llm`
+
+
 ````
 
 ## Group: env
@@ -703,4 +801,6 @@ Get detailed help: `yeet env set --help-llm`
 Print the current env file
 
 Get detailed help: `yeet env show --help-llm`
+
+
 ````
