@@ -418,9 +418,18 @@ func (s *DockerComposeService) dockerOutput(ctx context.Context, args ...string)
 }
 
 func captureCommandOutput(cmd *exec.Cmd) ([]byte, error) {
+	var stderr bytes.Buffer
 	cmd.Stdout = nil
-	cmd.Stderr = nil
-	return cmd.Output()
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		detail := strings.TrimSpace(stderr.String())
+		if detail != "" {
+			return out, fmt.Errorf("%w: %s", err, detail)
+		}
+		return out, err
+	}
+	return out, nil
 }
 
 func (s *DockerComposeService) outdatedRowForContainer(ctx context.Context, container dockerComposePSRow, declared dockerComposeDeclaredImages) DockerOutdatedRow {

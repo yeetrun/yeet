@@ -21,15 +21,19 @@ var (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	rawArgs = os.Args[1:]
 	globalFlags, remaining, err := parseGlobalFlags(rawArgs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return
+		return 1
 	}
 	if err := applyGlobalUIFlags(globalFlags); err != nil {
 		fmt.Fprintln(os.Stderr, err)
-		return
+		return 1
 	}
 
 	overrides := resolveGlobalOverrides(globalFlags)
@@ -56,7 +60,9 @@ func main() {
 	groups := buildGroupHandlers()
 	if err := yargs.RunSubcommandsWithGroups(context.Background(), args, helpConfig, globalFlagsParsed{}, handlers, groups); err != nil {
 		yeet.PrintCLIError(os.Stderr, err)
+		return 1
 	}
+	return 0
 }
 
 type runtimeOverrides struct {

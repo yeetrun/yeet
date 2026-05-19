@@ -259,13 +259,25 @@ func TestDockerUpdateOutdatedMultiHostUpdatesOnlyUpdateAvailable(t *testing.T) {
 	out, err := captureSvcStdout(t, func() error {
 		return dockerUpdateOutdatedMultiHost(context.Background(), []string{"host-b", "host-a"})
 	})
-	if err != nil {
-		t.Fatalf("dockerUpdateOutdatedMultiHost: %v", err)
+	if err == nil {
+		t.Fatal("dockerUpdateOutdatedMultiHost error = nil, want scan issue error")
+	}
+	for _, want := range []string{"host-a", "2 scan issues"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
 	}
 	if !reflect.DeepEqual(updated, []string{"host-a/web", "host-b/api"}) {
 		t.Fatalf("updated = %#v, want host-a/web and host-b/api", updated)
 	}
-	for _, want := range []string{"==> host-a/web", "compose output for host-a/web", "==> host-b/api", "compose output for host-b/api"} {
+	for _, want := range []string{
+		"==> host-a/web",
+		"compose output for host-a/web",
+		"==> host-a/db skipped: unknown: missing digest",
+		"==> host-a/broken skipped: error: scan failed",
+		"==> host-b/api",
+		"compose output for host-b/api",
+	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output missing %q:\n%s", want, out)
 		}
@@ -275,8 +287,46 @@ func TestDockerUpdateOutdatedMultiHostUpdatesOnlyUpdateAvailable(t *testing.T) {
 			t.Fatalf("output contains summary table header %q:\n%s", unwanted, out)
 		}
 	}
-	if strings.Contains(out, "db") || strings.Contains(out, "broken") {
-		t.Fatalf("unknown/error rows should not be updated:\n%s", out)
+}
+
+func TestDockerUpdateOutdatedHostReportsScanIssuesWhenNoUpdates(t *testing.T) {
+	preserveDockerOutdatedGlobals(t)
+	fetchDockerOutdatedForHostFn = func(ctx context.Context, host string, service string, flags cli.DockerOutdatedFlags) ([]dockerOutdatedRow, error) {
+		if host != "host-a" {
+			t.Fatalf("host = %q, want host-a", host)
+		}
+		return []dockerOutdatedRow{
+			{ServiceName: "radarr", ContainerName: "radarr", Status: "error", Reason: "inspect upstream image: DNS failed"},
+			{ServiceName: "sabnzbd", Status: "unknown", Reason: "missing latest digest"},
+		}, nil
+	}
+	updateDockerServiceForHostFn = func(ctx context.Context, host string, service string) error {
+		t.Fatalf("no updateable services should be updated, got %s/%s", host, service)
+		return nil
+	}
+
+	var out bytes.Buffer
+	err := dockerUpdateOutdatedHost(context.Background(), &out, "host-a")
+	if err == nil {
+		t.Fatal("dockerUpdateOutdatedHost error = nil, want scan issue error")
+	}
+	for _, want := range []string{"host-a", "2 scan issues"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error missing %q: %v", want, err)
+		}
+	}
+	got := out.String()
+	for _, want := range []string{
+		"==> host-a: no updateable services (2 scan issues)",
+		"==> host-a/radarr skipped: error: inspect upstream image: DNS failed",
+		"==> host-a/sabnzbd skipped: unknown: missing latest digest",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "==> host-a: no updates") {
+		t.Fatalf("output should not claim no updates when scan issues exist:\n%s", got)
 	}
 }
 

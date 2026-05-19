@@ -114,9 +114,33 @@ func dockerUpdateOutdatedHost(ctx context.Context, w io.Writer, host string) err
 		return err
 	}
 	services := outdatedServiceNames(rows)
+	issues := dockerOutdatedScanIssues(rows)
 	if len(services) == 0 {
+		return dockerUpdateOutdatedNoUpdateable(w, host, issues)
+	}
+	errs := dockerUpdateOutdatedRunServices(ctx, w, host, services)
+	errs = dockerUpdateOutdatedReportScanIssues(w, host, issues, errs)
+	return errors.Join(errs...)
+}
+
+func dockerUpdateOutdatedLine(w io.Writer, format string, args ...any) error {
+	_, err := fmt.Fprintf(w, format, args...)
+	return err
+}
+
+func dockerUpdateOutdatedNoUpdateable(w io.Writer, host string, issues []dockerOutdatedRow) error {
+	if len(issues) == 0 {
 		return dockerUpdateOutdatedLine(w, "==> %s: no updates\n", host)
 	}
+	errs := make([]error, 0, len(issues)+1)
+	if err := dockerUpdateOutdatedLine(w, "==> %s: no updateable services (%s)\n", host, dockerOutdatedIssueCountLabel(len(issues))); err != nil {
+		errs = append(errs, err)
+	}
+	errs = dockerUpdateOutdatedReportScanIssues(w, host, issues, errs)
+	return errors.Join(errs...)
+}
+
+func dockerUpdateOutdatedRunServices(ctx context.Context, w io.Writer, host string, services []string) []error {
 	errs := make([]error, 0)
 	for _, service := range services {
 		if err := dockerUpdateOutdatedLine(w, "==> %s/%s\n", host, service); err != nil {
@@ -130,12 +154,82 @@ func dockerUpdateOutdatedHost(ctx context.Context, w io.Writer, host string) err
 			}
 		}
 	}
-	return errors.Join(errs...)
+	return errs
 }
 
-func dockerUpdateOutdatedLine(w io.Writer, format string, args ...any) error {
-	_, err := fmt.Fprintf(w, format, args...)
-	return err
+func dockerUpdateOutdatedReportScanIssues(w io.Writer, host string, issues []dockerOutdatedRow, errs []error) []error {
+	for _, issue := range issues {
+		label := dockerOutdatedIssueLabel(host, issue)
+		status := dockerOutdatedIssueStatus(issue)
+		if err := dockerUpdateOutdatedLine(w, "==> %s skipped: %s\n", label, status); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(issues) > 0 {
+		errs = append(errs, dockerOutdatedScanIssueError(host, issues))
+	}
+	return errs
+}
+
+func dockerOutdatedScanIssueError(host string, issues []dockerOutdatedRow) error {
+	return fmt.Errorf("%s: %s", strings.TrimSpace(host), dockerOutdatedIssueCountLabel(len(issues)))
+}
+
+func dockerOutdatedIssueCountLabel(count int) string {
+	if count == 1 {
+		return "1 scan issue"
+	}
+	return fmt.Sprintf("%d scan issues", count)
+}
+
+func dockerOutdatedScanIssues(rows []dockerOutdatedRow) []dockerOutdatedRow {
+	issues := make([]dockerOutdatedRow, 0)
+	for _, row := range rows {
+		switch svc.DockerOutdatedStatus(row.Status) {
+		case svc.DockerOutdatedError, svc.DockerOutdatedUnknown:
+			issues = append(issues, row)
+		}
+	}
+	sort.Slice(issues, func(i, j int) bool {
+		left := dockerOutdatedIssueSortKey(issues[i])
+		right := dockerOutdatedIssueSortKey(issues[j])
+		return left < right
+	})
+	return issues
+}
+
+func dockerOutdatedIssueSortKey(row dockerOutdatedRow) string {
+	return strings.Join([]string{
+		strings.TrimSpace(row.ServiceName),
+		strings.TrimSpace(row.ContainerName),
+		strings.TrimSpace(row.Status),
+		strings.TrimSpace(row.Reason),
+	}, "\x00")
+}
+
+func dockerOutdatedIssueLabel(host string, row dockerOutdatedRow) string {
+	parts := []string{strings.TrimSpace(host)}
+	service := strings.TrimSpace(row.ServiceName)
+	container := strings.TrimSpace(row.ContainerName)
+	if service != "" {
+		parts = append(parts, service)
+	}
+	if container != "" && container != service {
+		parts = append(parts, container)
+	}
+	return strings.Join(parts, "/")
+}
+
+func dockerOutdatedIssueStatus(row dockerOutdatedRow) string {
+	status := strings.TrimSpace(row.Status)
+	if status == "" {
+		status = string(svc.DockerOutdatedUnknown)
+	}
+	reason := strings.TrimSpace(row.Reason)
+	if reason == "" {
+		return status
+	}
+	return status + ": " + reason
 }
 
 func outdatedServiceNames(rows []dockerOutdatedRow) []string {

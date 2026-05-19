@@ -281,6 +281,20 @@ func TestCaptureCommandOutputIgnoresPrewiredSessionOutput(t *testing.T) {
 	}
 }
 
+func TestCaptureCommandOutputIncludesStderrOnFailure(t *testing.T) {
+	cmd := fakeDockerErrorCmd(t, "registry DNS failed\n", 23)
+
+	_, err := captureCommandOutput(cmd)
+	if err == nil {
+		t.Fatal("captureCommandOutput error = nil, want command failure")
+	}
+	for _, want := range []string{"exit status 23", "registry DNS failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want %q", err.Error(), want)
+		}
+	}
+}
+
 func TestReadonlyComposeCommandContextBuildsComposeCommand(t *testing.T) {
 	calls := []cmdCall{}
 	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: redis:7\n", recordCmd(t, &calls))
@@ -647,9 +661,31 @@ func fakeDockerOutputCmd(t *testing.T, output string) *exec.Cmd {
 	return cmd
 }
 
+func fakeDockerErrorCmd(t *testing.T, stderr string, exitCode int) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestDockerOutdatedFakeCommand", "--", "")
+	cmd.Env = append(os.Environ(),
+		"GO_WANT_HELPER_PROCESS=1",
+		"GO_WANT_HELPER_STDERR="+stderr,
+		fmt.Sprintf("GO_WANT_HELPER_EXIT=%d", exitCode),
+	)
+	return cmd
+}
+
 func TestDockerOutdatedFakeCommand(t *testing.T) {
 	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
 		return
+	}
+	if stderr := os.Getenv("GO_WANT_HELPER_STDERR"); stderr != "" {
+		fmt.Fprint(os.Stderr, stderr)
+	}
+	if rawExit := os.Getenv("GO_WANT_HELPER_EXIT"); rawExit != "" {
+		var exitCode int
+		if _, err := fmt.Sscanf(rawExit, "%d", &exitCode); err != nil {
+			fmt.Fprintf(os.Stderr, "invalid helper exit %q: %v", rawExit, err)
+			os.Exit(2)
+		}
+		os.Exit(exitCode)
 	}
 	args := os.Args
 	for i, arg := range args {
