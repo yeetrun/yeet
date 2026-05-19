@@ -194,11 +194,22 @@ func TestPrepareCommandRouteShortArgsAndGroupHost(t *testing.T) {
 	if got.host != "catch-a" {
 		t.Fatalf("host = %q, want catch-a", got.host)
 	}
-	if !reflect.DeepEqual(got.args, []string{"docker", "update"}) {
-		t.Fatalf("args = %#v, want bridged docker update", got.args)
+	if !reflect.DeepEqual(got.args, []string{"docker", "update", "svc-a"}) {
+		t.Fatalf("args = %#v, want unbridged docker update service", got.args)
 	}
-	if got.service != "svc-a" {
-		t.Fatalf("service = %q, want svc-a", got.service)
+	if got.service != "" {
+		t.Fatalf("service = %q, want empty", got.service)
+	}
+
+	got = prepareCommandRoute([]string{"docker@catch-a", "update", "svc-a", "svc-b"}, "")
+	if got.host != "catch-a" {
+		t.Fatalf("host = %q, want catch-a", got.host)
+	}
+	if !reflect.DeepEqual(got.args, []string{"docker", "update", "svc-a", "svc-b"}) {
+		t.Fatalf("args = %#v, want unbridged docker update services", got.args)
+	}
+	if got.service != "" {
+		t.Fatalf("service = %q, want empty", got.service)
 	}
 
 	got = prepareCommandRoute([]string{"docker@catch-a", "outdated", "svc-a"}, "")

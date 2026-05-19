@@ -329,6 +329,13 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if !IsServiceArgSpec(outdatedArg) || outdatedArg.Required {
 		t.Fatalf("docker outdated arg = %#v, want optional ServiceName", outdatedArg)
 	}
+	updateArg, ok := yargs.ArgSpecAt(reg.Groups["docker"].Commands["update"].ArgsSchema, 0)
+	if !ok {
+		t.Fatal("docker update should expose variadic service arg metadata")
+	}
+	if !IsServiceArgSpec(updateArg) || !updateArg.Variadic || updateArg.MinCount != 1 {
+		t.Fatalf("docker update arg = %#v, want variadic []ServiceName with minimum 1", updateArg)
+	}
 
 	flags := RemoteFlagSpecs()
 	if !flags["run"]["--net"].ConsumesValue {
@@ -366,6 +373,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 func TestServiceArgSpecDetection(t *testing.T) {
 	if !IsServiceArgSpec(yargs.ArgSpec{GoType: reflect.TypeOf(ServiceName(""))}) {
 		t.Fatal("ServiceName arg spec was not detected")
+	}
+	if !IsServiceArgSpec(yargs.ArgSpec{GoType: reflect.TypeOf([]ServiceName{})}) {
+		t.Fatal("[]ServiceName arg spec was not detected")
 	}
 	if IsServiceArgSpec(yargs.ArgSpec{GoType: reflect.TypeOf("")}) {
 		t.Fatal("plain string arg spec detected as ServiceName")

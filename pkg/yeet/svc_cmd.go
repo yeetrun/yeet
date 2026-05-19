@@ -82,11 +82,11 @@ func commandAllowsMissingService(args []string) (bool, error) {
 	if len(args) < 2 || args[0] != "docker" || args[1] != "update" {
 		return false, nil
 	}
-	flags, _, err := cli.ParseDockerUpdate(args[2:])
+	flags, remaining, err := cli.ParseDockerUpdate(args[2:])
 	if err != nil {
 		return false, err
 	}
-	return flags.Outdated, nil
+	return flags.Outdated || len(remaining) > 0, nil
 }
 
 func resolvedCommandAllowsMissingService(res yargs.ResolvedCommand, args []string) (bool, error) {
