@@ -285,17 +285,24 @@ func TestBridgeServiceArgsDockerGroup(t *testing.T) {
 	groupSpecs := cli.RemoteGroupFlagSpecs()
 	args := []string{"docker", "update", "svc-a"}
 	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
-	if !ok {
-		t.Fatalf("expected to recognize docker group command")
+	if ok {
+		t.Fatalf("expected variadic docker update to stay unbridged, got service=%q host=%q bridged=%v", service, host, bridged)
 	}
-	if service != "svc-a" {
-		t.Fatalf("expected service svc-a, got %q", service)
+	if service != "" || host != "" || bridged != nil {
+		t.Fatalf("bridge result = service=%q host=%q bridged=%v, want empty", service, host, bridged)
 	}
-	if host != "" {
-		t.Fatalf("expected no host, got %q", host)
+}
+
+func TestBridgeServiceArgsDockerUpdateVariadicDoesNotBridge(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"docker", "update", "svc-a", "svc-b@host-b"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if ok {
+		t.Fatalf("expected variadic docker update to stay unbridged, got service=%q host=%q bridged=%v", service, host, bridged)
 	}
-	if got := strings.Join(bridged, " "); got != "docker update" {
-		t.Fatalf("unexpected bridged args: %s", got)
+	if service != "" || host != "" || bridged != nil {
+		t.Fatalf("bridge result = service=%q host=%q bridged=%v, want empty", service, host, bridged)
 	}
 }
 
@@ -304,17 +311,11 @@ func TestBridgeServiceArgsDockerUpdateOutdatedScopedForRejection(t *testing.T) {
 	groupSpecs := cli.RemoteGroupFlagSpecs()
 	args := []string{"docker", "update", "--outdated", "svc-a@host-a"}
 	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
-	if !ok {
-		t.Fatalf("expected to recognize docker update group command")
+	if ok {
+		t.Fatalf("expected docker update --outdated service arg to stay unbridged, got service=%q host=%q bridged=%v", service, host, bridged)
 	}
-	if service != "svc-a" {
-		t.Fatalf("service = %q, want svc-a", service)
-	}
-	if host != "host-a" {
-		t.Fatalf("host = %q, want host-a", host)
-	}
-	if got := strings.Join(bridged, " "); got != "docker update --outdated" {
-		t.Fatalf("bridged args = %q, want docker update --outdated", got)
+	if service != "" || host != "" || bridged != nil {
+		t.Fatalf("bridge result = service=%q host=%q bridged=%v, want empty", service, host, bridged)
 	}
 }
 

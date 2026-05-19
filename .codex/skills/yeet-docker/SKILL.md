@@ -23,7 +23,7 @@ Use this skill for Docker compose and registry behavior.
 ## Rules
 
 - `yeet run` for compose does not pull images by default.
-- `yeet docker update <svc>` pulls and recreates one compose service.
+- `yeet docker update <svc...>` pulls and recreates selected compose services.
 - `yeet docker outdated` is read-only and should preserve exact digests in JSON.
 - Compact table output should avoid raw digest noise.
 - Internal yeet registry images and upstream registry images have different

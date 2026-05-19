@@ -73,20 +73,6 @@ func handleDockerOutdatedCommand(ctx context.Context, args []string, cfgLoc *pro
 	return execRemoteFn(ctx, service, dockerOutdatedRemoteArgs(flags), nil, true)
 }
 
-func handleDockerUpdateCommand(ctx context.Context, req svcCommandRequest) error {
-	flags, remaining, err := cli.ParseDockerUpdate(req.Command.Args[1:])
-	if err != nil {
-		return err
-	}
-	if !flags.Outdated {
-		return handleSvcRemote(ctx, req)
-	}
-	if len(remaining) > 0 || serviceOverride != "" || (req.Service != "" && req.Service != systemServiceName) {
-		return fmt.Errorf("docker update --outdated does not take a service; use yeet docker update <svc> for one service")
-	}
-	return dockerUpdateOutdatedMultiHost(ctx, statusHosts(req.Config, req.HostOverrideSet))
-}
-
 func parseDockerOutdatedLocalArgs(args []string) (cli.DockerOutdatedFlags, string, error) {
 	flags, remaining, err := cli.ParseDockerOutdated(args)
 	if err != nil {
@@ -170,24 +156,6 @@ func outdatedServiceNames(rows []dockerOutdatedRow) []string {
 	}
 	sort.Strings(services)
 	return services
-}
-
-func updateDockerServiceForHost(ctx context.Context, host string, service string) error {
-	return withTemporaryHost(host, func() error {
-		if err := execRemoteFn(ctx, service, []string{"docker", "update"}, nil, true); err != nil {
-			return fmt.Errorf("%s/%s: %w", host, service, err)
-		}
-		return nil
-	})
-}
-
-func withTemporaryHost(host string, fn func() error) error {
-	oldPrefs := loadedPrefs
-	loadedPrefs.DefaultHost = host
-	defer func() {
-		loadedPrefs = oldPrefs
-	}()
-	return fn()
 }
 
 func dockerOutdatedFormat(format string) (string, error) {

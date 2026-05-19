@@ -216,6 +216,18 @@ func TestHandleSvcCommandDockerUpdateOutdatedRejectsService(t *testing.T) {
 	}
 }
 
+func TestHandleDockerUpdateCommandRejectsServiceOverrideWithInlineServices(t *testing.T) {
+	preserveDockerOutdatedGlobals(t)
+	serviceOverride = "svc-a"
+	err := handleDockerUpdateCommand(context.Background(), svcCommandRequest{
+		Command: svcCommand{Name: "docker", Args: []string{"update", "svc-b"}, RawArgs: []string{"docker", "update", "svc-b"}},
+		Service: "svc-a",
+	})
+	if err == nil || !strings.Contains(err.Error(), "either --service or service arguments") {
+		t.Fatalf("mixed override error = %v, want either --service or service arguments", err)
+	}
+}
+
 func TestDockerUpdateOutdatedMultiHostUpdatesOnlyUpdateAvailable(t *testing.T) {
 	preserveDockerOutdatedGlobals(t)
 	fetchDockerOutdatedForHostFn = func(ctx context.Context, host string, service string, flags cli.DockerOutdatedFlags) ([]dockerOutdatedRow, error) {

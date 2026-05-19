@@ -174,6 +174,13 @@ func TestSvcMissingServiceHelpersCoverGroupsAndEvents(t *testing.T) {
 	if needs {
 		t.Fatalf("events --all needs service = true, want false")
 	}
+	needs, err = commandNeedsService([]string{"docker", "update", "svc-a", "svc-b"})
+	if err != nil {
+		t.Fatalf("commandNeedsService docker update services error: %v", err)
+	}
+	if needs {
+		t.Fatalf("docker update with inline services needs service = true, want false")
+	}
 	if _, err := commandNeedsService([]string{"events", "--all=not-bool"}); err == nil {
 		t.Fatalf("expected parse error for invalid events flag")
 	}

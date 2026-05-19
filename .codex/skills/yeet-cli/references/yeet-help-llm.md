@@ -352,7 +352,7 @@ Docker compose and registry management
 - `docker outdated`: Show Docker compose containers with upstream image updates
 - `docker pull`: Pull images for a compose service without restarting
 - `docker push`: Push a container image to the remote host (optionally run it)
-- `docker update`: Pull images and recreate containers for a compose service
+- `docker update`: Pull images and recreate containers for compose services
 
 Get detailed help: `yeet docker --help-llm`
 
@@ -714,12 +714,20 @@ Get detailed help: `yeet docker push --help-llm`
 
 ### `docker update`
 
-Pull images and recreate containers for a compose service
+Pull images and recreate containers for compose services
 
 **Examples**:
 
 ```
 yeet docker update <svc>
+```
+
+```
+yeet docker update <svc-a> <svc-b>
+```
+
+```
+yeet docker update <svc-a> <svc-b>@<host>
 ```
 
 ```

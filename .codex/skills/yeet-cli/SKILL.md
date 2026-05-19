@@ -25,7 +25,7 @@ go run ./cmd/yeet logs <svc>
 go run ./cmd/yeet info <svc>
 go run ./cmd/yeet run <svc> ./compose.yml
 go run ./cmd/yeet docker outdated
-go run ./cmd/yeet docker update <svc>
+go run ./cmd/yeet docker update <svc...>
 ```
 
 Use `--host=<catch-host>` or `CATCH_HOST=<catch-host>` when the target host is

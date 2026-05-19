@@ -216,10 +216,18 @@ type DockerOutdatedArgs struct {
 	Service ServiceName `pos:"0?" help:"Service name"`
 }
 
+type DockerUpdateArgs struct {
+	Services []ServiceName `pos:"0+" help:"Service names"`
+}
+
 type ServiceName string
 
 func IsServiceArgSpec(spec yargs.ArgSpec) bool {
-	return spec.GoType == reflect.TypeOf(ServiceName(""))
+	serviceType := reflect.TypeOf(ServiceName(""))
+	if spec.GoType == serviceType {
+		return true
+	}
+	return spec.GoType == reflect.SliceOf(serviceType)
 }
 
 var remoteCommandInfos = map[string]CommandInfo{
@@ -302,8 +310,10 @@ var remoteGroupInfos = map[string]GroupInfo{
 		Name:        "docker",
 		Description: "Docker compose and registry management",
 		Commands: map[string]CommandInfo{
-			"update": {Name: "update", Description: "Pull images and recreate containers for a compose service", Usage: "docker update <svc> | docker update --outdated", ArgsSchema: ServiceArgs{}, Examples: []string{
+			"update": {Name: "update", Description: "Pull images and recreate containers for compose services", Usage: "docker update <svc...> | docker update --outdated", ArgsSchema: DockerUpdateArgs{}, Examples: []string{
 				"yeet docker update <svc>",
+				"yeet docker update <svc-a> <svc-b>",
+				"yeet docker update <svc-a> <svc-b>@<host>",
 				"yeet docker update --outdated",
 			}},
 			"pull": {Name: "pull", Description: "Pull images for a compose service without restarting", Usage: "docker pull <svc>", ArgsSchema: ServiceArgs{}},

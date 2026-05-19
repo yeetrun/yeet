@@ -7,6 +7,7 @@ package main
 import (
 	"strings"
 
+	"github.com/shayne/yargs"
 	"github.com/yeetrun/yeet/pkg/cli"
 )
 
@@ -143,7 +144,24 @@ func bridgeGroupArgs(args []string, groupSpecs map[string]map[string]map[string]
 	if !ok {
 		return "", "", nil, false
 	}
+	if isVariadicServiceGroupCommand(args[0], args[1]) {
+		return "", "", nil, false
+	}
 	return bridgeCommandArgs(args, 2, flags)
+}
+
+func isVariadicServiceGroupCommand(group string, command string) bool {
+	reg := cli.RemoteCommandRegistry()
+	groupSpec, ok := reg.Groups[group]
+	if !ok {
+		return false
+	}
+	cmdSpec, ok := groupSpec.Commands[command]
+	if !ok {
+		return false
+	}
+	arg, ok := yargs.ArgSpecAt(cmdSpec.ArgsSchema, 0)
+	return ok && cli.IsServiceArgSpec(arg) && arg.Variadic
 }
 
 func isLocalGroupCommand(group string, command string) bool {
