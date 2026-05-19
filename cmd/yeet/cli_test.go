@@ -6,12 +6,50 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/shayne/yargs"
 	"github.com/yeetrun/yeet/pkg/cli"
 )
+
+func TestRunReturnsFailureWhenCommandReturnsError(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldStderr := os.Stderr
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		os.Stderr = oldStderr
+	})
+
+	stderrFile, err := os.CreateTemp(t.TempDir(), "stderr-*")
+	if err != nil {
+		t.Fatalf("create stderr temp file: %v", err)
+	}
+	os.Stderr = stderrFile
+	os.Args = []string{"yeet", "status"}
+	handleSvcCmdFn = func(args []string) error {
+		return errors.New("command failed")
+	}
+
+	if got := run(); got != 1 {
+		t.Fatalf("run exit code = %d, want 1", got)
+	}
+	if _, err := stderrFile.Seek(0, 0); err != nil {
+		t.Fatalf("seek stderr: %v", err)
+	}
+	rawStderr, err := os.ReadFile(stderrFile.Name())
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if !strings.Contains(string(rawStderr), "command failed") {
+		t.Fatalf("stderr = %q, want command failed", string(rawStderr))
+	}
+}
 
 func TestParseGlobalFlags(t *testing.T) {
 	tests := []struct {

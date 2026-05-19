@@ -146,7 +146,9 @@ include full image digests. To refresh images, use
 image updates. Explicit updates may mix hosts with `yeet docker update foo
 bar@catch-b baz`; unqualified services still use `yeet.toml` or the default
 catch host. Batch updates print a short host/service marker, then stream the
-same output as `yeet docker update <svc>`.
+same output as `yeet docker update <svc>`. If `--outdated` cannot classify a
+reported service because the scan returns unknown or error rows, it prints those
+skipped rows and exits nonzero after running any updateable services.
 If you need to redeploy even when nothing changed, use `yeet run --force <svc> ./compose.yml`.
 With a stored `yeet.toml` payload, `yeet run <svc> --force` also works.
 Note: Docker hosts must enable the containerd snapshotter so pushed images show up locally (see Installation in the docs).
