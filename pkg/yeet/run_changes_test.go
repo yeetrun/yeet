@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -73,38 +74,47 @@ func TestExtractEnvFileFlag(t *testing.T) {
 	}
 }
 
-func TestExtractServiceRootFlag(t *testing.T) {
+func TestExtractServiceRootOptions(t *testing.T) {
 	tests := []struct {
 		name      string
 		args      []string
-		wantRoot  string
+		want      serviceRootOptions
 		wantArgs  []string
 		wantFound bool
 		wantErr   string
 	}{
-		{name: "space value", args: []string{"--service-root", "/srv/apps/svc-a", "--env-file", ".env"}, wantRoot: "/srv/apps/svc-a", wantArgs: []string{"--env-file", ".env"}, wantFound: true},
-		{name: "equals value", args: []string{"--service-root=/srv/apps/svc-a", "--force"}, wantRoot: "/srv/apps/svc-a", wantArgs: []string{"--force"}, wantFound: true},
-		{name: "delimiter stops parsing", args: []string{"--service-root=/srv/apps/svc-a", "--", "--service-root", "remote"}, wantRoot: "/srv/apps/svc-a", wantArgs: []string{"--", "--service-root", "remote"}, wantFound: true},
-		{name: "missing value", args: []string{"--service-root"}, wantErr: "requires a value"},
-		{name: "relative value", args: []string{"--service-root", "apps/svc-a"}, wantErr: "must be absolute"},
+		{name: "path root", args: []string{"--service-root", "/srv/apps/svc-a", "--pull"}, want: serviceRootOptions{Root: "/srv/apps/svc-a"}, wantArgs: []string{"--pull"}, wantFound: true},
+		{name: "zfs root", args: []string{"--service-root=tank/apps/svc-a", "--zfs", "--pull"}, want: serviceRootOptions{Root: "tank/apps/svc-a", ZFS: true}, wantArgs: []string{"--pull"}, wantFound: true},
+		{name: "zfs before root", args: []string{"--zfs", "--service-root", "tank/apps/svc-a"}, want: serviceRootOptions{Root: "tank/apps/svc-a", ZFS: true}, wantArgs: []string{}, wantFound: true},
+		{name: "payload delimiter", args: []string{"--", "--service-root", "payload"}, wantArgs: []string{"--", "--service-root", "payload"}, wantFound: false},
+		{name: "zfs without root", args: []string{"--zfs"}, wantErr: "--zfs requires --service-root"},
+		{name: "relative without zfs", args: []string{"--service-root", "apps/svc-a"}, wantErr: "--service-root must be absolute unless --zfs is set"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotRoot, gotArgs, gotFound, err := extractServiceRootFlag(tt.args)
+			got, gotArgs, gotFound, err := extractServiceRootOptions(tt.args)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("extractServiceRootFlag error = %v, want %q", err, tt.wantErr)
+					t.Fatalf("extractServiceRootOptions error = %v, want %q", err, tt.wantErr)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("extractServiceRootFlag error: %v", err)
+				t.Fatalf("extractServiceRootOptions error: %v", err)
 			}
-			if gotRoot != tt.wantRoot || gotFound != tt.wantFound || strings.Join(gotArgs, ",") != strings.Join(tt.wantArgs, ",") {
-				t.Fatalf("extractServiceRootFlag = root %q args %#v found %v, want root %q args %#v found %v", gotRoot, gotArgs, gotFound, tt.wantRoot, tt.wantArgs, tt.wantFound)
+			if got != tt.want || !reflect.DeepEqual(gotArgs, tt.wantArgs) || gotFound != tt.wantFound {
+				t.Fatalf("extractServiceRootOptions = %#v %#v %v, want %#v %#v %v", got, gotArgs, gotFound, tt.want, tt.wantArgs, tt.wantFound)
 			}
 		})
+	}
+}
+
+func TestRunArgsWithServiceRootOptions(t *testing.T) {
+	got := runArgsWithServiceRootOptions([]string{"--pull"}, serviceRootOptions{Root: "tank/apps/svc-a", ZFS: true})
+	want := []string{"--service-root=tank/apps/svc-a", "--zfs", "--pull"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("runArgsWithServiceRootOptions = %#v, want %#v", got, want)
 	}
 }
 

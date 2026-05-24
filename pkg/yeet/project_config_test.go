@@ -244,7 +244,7 @@ func TestSaveRunConfigCreatesToml(t *testing.T) {
 		Dir:    tmp,
 		Config: &ProjectConfig{Version: projectConfigVersion},
 	}
-	if err := saveRunConfig(loc, "host-a", payload, runArgs, ""); err != nil {
+	if err := saveRunConfig(loc, "host-a", payload, runArgs, "", false); err != nil {
 		t.Fatalf("saveRunConfig error: %v", err)
 	}
 
@@ -304,7 +304,7 @@ func TestSaveRunConfigStoresServiceRoot(t *testing.T) {
 		Config: &ProjectConfig{Version: projectConfigVersion},
 	}
 	serviceRoot := "/srv/apps/svc-a"
-	if err := saveRunConfig(loc, "host-a", payload, []string{"--service-root", serviceRoot, "--pull"}, serviceRoot); err != nil {
+	if err := saveRunConfig(loc, "host-a", payload, []string{"--service-root", serviceRoot, "--pull"}, serviceRoot, false); err != nil {
 		t.Fatalf("saveRunConfig error: %v", err)
 	}
 
@@ -328,6 +328,54 @@ func TestSaveRunConfigStoresServiceRoot(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `service_root = "/srv/apps/svc-a"`) {
 		t.Fatalf("saved config = %q, want service_root", string(raw))
+	}
+}
+
+func TestSaveRunConfigStoresZFSServiceRoot(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	locDir := t.TempDir()
+	loc := &projectConfigLocation{
+		Path: filepath.Join(t.TempDir(), "yeet.toml"),
+		Dir:  locDir,
+		Config: &ProjectConfig{
+			Version: projectConfigVersion,
+		},
+	}
+	serviceOverride = "svc-a"
+	if err := saveRunConfig(loc, "host-a", "ghcr.io/example/app:latest", []string{"--service-root", "tank/apps/svc-a", "--zfs", "--pull"}, "tank/apps/svc-a", true); err != nil {
+		t.Fatalf("saveRunConfig: %v", err)
+	}
+	entry, ok := loc.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("missing saved entry")
+	}
+	if entry.ServiceRoot != "tank/apps/svc-a" {
+		t.Fatalf("service_root = %q, want tank/apps/svc-a", entry.ServiceRoot)
+	}
+	if !entry.ServiceRootZFS {
+		t.Fatal("service_root_zfs = false, want true")
+	}
+	raw, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if !strings.Contains(string(raw), `service_root = "tank/apps/svc-a"`) {
+		t.Fatalf("saved config = %q, want service_root", string(raw))
+	}
+	if !strings.Contains(string(raw), `service_root_zfs = true`) {
+		t.Fatalf("saved config = %q, want service_root_zfs", string(raw))
 	}
 }
 
@@ -361,13 +409,13 @@ func TestSaveRunConfigOverwritesArgs(t *testing.T) {
 	}
 
 	firstArgs := []string{"--", "--flagA", "valueA", "--bool-flag", "posArg"}
-	if err := saveRunConfig(loc, "host-a", payload, firstArgs, ""); err != nil {
+	if err := saveRunConfig(loc, "host-a", payload, firstArgs, "", false); err != nil {
 		t.Fatalf("saveRunConfig error: %v", err)
 	}
 
 	secondArgs := []string{"--", "--flagB", "valueB", "--bool-flag2", "posArg2"}
 	wantArgs := []string{"--flagB", "valueB", "--bool-flag2", "posArg2"}
-	if err := saveRunConfig(loc, "host-a", payload, secondArgs, ""); err != nil {
+	if err := saveRunConfig(loc, "host-a", payload, secondArgs, "", false); err != nil {
 		t.Fatalf("saveRunConfig error: %v", err)
 	}
 

@@ -393,6 +393,39 @@ func TestSvcRunServiceRoot(t *testing.T) {
 	}
 }
 
+func TestSvcRunZFSServiceRoot(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = "app"
+	loc := &projectConfigLocation{
+		Dir: t.TempDir(),
+		Config: &ProjectConfig{
+			Services: []ServiceEntry{{
+				Name:           "app",
+				Host:           Host(),
+				ServiceRoot:    "tank/apps/stored",
+				ServiceRootZFS: true,
+			}},
+		},
+	}
+	run, err := parseSvcRun([]string{"app", "--pull"}, loc, "")
+	if err != nil {
+		t.Fatalf("parseSvcRun stored zfs service-root: %v", err)
+	}
+	if run.ServiceRoot != "tank/apps/stored" || !run.ServiceRootZFS {
+		t.Fatalf("run root = %q zfs=%v, want tank/apps/stored true", run.ServiceRoot, run.ServiceRootZFS)
+	}
+	if !reflect.DeepEqual(run.Args, []string{"--service-root=tank/apps/stored", "--zfs", "--pull"}) {
+		t.Fatalf("run args = %#v", run.Args)
+	}
+	run, err = parseSvcRun([]string{"app", "--service-root", "tank/apps/explicit", "--zfs"}, loc, "")
+	if err != nil {
+		t.Fatalf("parseSvcRun explicit zfs service-root: %v", err)
+	}
+	if run.ServiceRootArg != "tank/apps/explicit" || !run.ServiceRootZFSArg || !run.ServiceRootSet {
+		t.Fatalf("explicit root = %q zfsArg=%v set=%v", run.ServiceRootArg, run.ServiceRootZFSArg, run.ServiceRootSet)
+	}
+}
+
 func TestSvcRunPreservesServiceRootPayloadArgsInSavedConfig(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	useTempSvcCwd(t)
@@ -462,7 +495,7 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 		t.Fatalf("saveProjectConfig error: %v", err)
 	}
 
-	if err := HandleSvcCmd([]string{"service", "set", "--service-root=/srv/apps/svc-a"}); err != nil {
+	if err := HandleSvcCmd([]string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs", "--copy"}); err != nil {
 		t.Fatalf("HandleSvcCmd existing config error: %v", err)
 	}
 	loaded, err := loadProjectConfigFromCwd()
@@ -470,8 +503,8 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 		t.Fatalf("loadProjectConfigFromCwd error: %v", err)
 	}
 	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
-	if !ok || entry.ServiceRoot != "/srv/apps/svc-a" {
-		t.Fatalf("entry = %#v, ok=%v", entry, ok)
+	if !ok || entry.ServiceRoot != "tank/apps/svc-a" || !entry.ServiceRootZFS {
+		t.Fatalf("entry = %#v, want zfs service root", entry)
 	}
 	if len(calls) != 2 || calls[0].tty || calls[1].tty {
 		t.Fatalf("remote calls = %#v, want two non-tty calls", calls)
@@ -1003,7 +1036,7 @@ func TestSvcSaveConfigEarlyReturnsAndCreation(t *testing.T) {
 	useTempSvcCwd(t)
 
 	serviceOverride = ""
-	if err := saveRunConfig(nil, "", "payload", []string{"--pull"}, ""); err != nil {
+	if err := saveRunConfig(nil, "", "payload", []string{"--pull"}, "", false); err != nil {
 		t.Fatalf("saveRunConfig no service error: %v", err)
 	}
 	if err := saveCronConfig(nil, "", "payload", []string{"0", "9", "*", "*", "*"}, nil); err != nil {
@@ -1013,7 +1046,7 @@ func TestSvcSaveConfigEarlyReturnsAndCreation(t *testing.T) {
 	serviceOverride = "svc-a"
 	loadedPrefs.DefaultHost = "host-a"
 	payload := "run.sh"
-	if err := saveRunConfig(nil, "", payload, []string{"--", "--app-flag"}, ""); err != nil {
+	if err := saveRunConfig(nil, "", payload, []string{"--", "--app-flag"}, "", false); err != nil {
 		t.Fatalf("saveRunConfig create error: %v", err)
 	}
 	loaded, err := loadProjectConfigFromCwd()
