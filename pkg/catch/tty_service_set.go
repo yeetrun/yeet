@@ -185,11 +185,21 @@ func (s *Server) migrateServiceRoot(name string, request serviceRootMigrationReq
 	}
 	switch mode {
 	case serviceRootMigrationCopy:
-		if err := s.copyServiceRootMigration(plan.OldRoot, plan.NewRoot); err != nil {
+		if plan.NewRootZFS != "" {
+			err = copyServiceRootMigrationIntoMountedRoot(plan.OldRoot, plan.NewRoot)
+		} else {
+			err = s.copyServiceRootMigration(plan.OldRoot, plan.NewRoot)
+		}
+		if err != nil {
 			return err
 		}
 	case serviceRootMigrationEmpty:
-		if err := createEmptyServiceRoot(plan.NewRoot); err != nil {
+		if plan.NewRootZFS != "" {
+			err = createEmptyMountedServiceRoot(plan.NewRoot)
+		} else {
+			err = createEmptyServiceRoot(plan.NewRoot)
+		}
+		if err != nil {
 			return err
 		}
 	default:
@@ -227,6 +237,40 @@ func (s *Server) copyServiceRootMigration(oldRoot, newRoot string) error {
 	return nil
 }
 
+func copyServiceRootMigrationIntoMountedRoot(oldRoot, newRoot string) error {
+	retrySafeSkeleton, err := mountedRootIsEmptyOrRetrySafeSkeleton(newRoot)
+	if err != nil {
+		return err
+	}
+	stage, err := os.MkdirTemp(newRoot, ".yeet-service-root-")
+	if err != nil {
+		return fmt.Errorf("create migration stage: %w", err)
+	}
+	removeStage := true
+	defer func() {
+		if removeStage {
+			_ = os.RemoveAll(stage)
+		}
+	}()
+
+	if err := copyServiceRootToStage(oldRoot, stage); err != nil {
+		return err
+	}
+	if err := ensureDirsForRoot(stage, ""); err != nil {
+		return err
+	}
+	if retrySafeSkeleton {
+		if err := removeMountedRootServiceLayout(newRoot); err != nil {
+			return err
+		}
+	}
+	if err := copyutil.MoveTree(stage, newRoot); err != nil {
+		return fmt.Errorf("move staged service root contents into place: %w", err)
+	}
+	removeStage = false
+	return nil
+}
+
 func copyServiceRootToStage(srcRoot, stageRoot string) error {
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
@@ -258,6 +302,53 @@ func createEmptyServiceRoot(root string) error {
 		return err
 	}
 	return ensureDirsForRoot(root, "")
+}
+
+func createEmptyMountedServiceRoot(root string) error {
+	retrySafeSkeleton, err := mountedRootIsEmptyOrRetrySafeSkeleton(root)
+	if err != nil {
+		return err
+	}
+	if retrySafeSkeleton {
+		if err := removeMountedRootServiceLayout(root); err != nil {
+			return err
+		}
+	}
+	return ensureDirsForRoot(root, "")
+}
+
+func mountedRootIsEmptyOrRetrySafeSkeleton(root string) (bool, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		return false, fmt.Errorf("failed to stat ZFS mountpoint %q: %w", root, err)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("ZFS mountpoint %q is not a directory", root)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false, fmt.Errorf("failed to read service root %q: %w", root, err)
+	}
+	if len(entries) == 0 {
+		return false, nil
+	}
+	retrySafeSkeleton, err := rootIsRetrySafeServiceRootSkeleton(root, entries)
+	if err != nil {
+		return false, err
+	}
+	if !retrySafeSkeleton {
+		return false, fmt.Errorf("service root %q must be empty", root)
+	}
+	return true, nil
+}
+
+func removeMountedRootServiceLayout(root string) error {
+	for _, dir := range serviceDirectoryPlan(root) {
+		if err := os.RemoveAll(dir); err != nil {
+			return fmt.Errorf("remove retry-safe service root skeleton %q: %w", dir, err)
+		}
+	}
+	return nil
 }
 
 func removeRetrySafeServiceRootSkeleton(root string) error {
