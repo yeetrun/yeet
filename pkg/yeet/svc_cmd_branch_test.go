@@ -659,6 +659,34 @@ func TestServiceSetRemoteFailureDoesNotUpdateSnapshotConfig(t *testing.T) {
 	}
 }
 
+func TestServiceSetInvalidSnapshotConfigDoesNotRunRemote(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		t.Fatalf("unexpected remote exec: service=%q args=%v", service, args)
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+	writeSvcBranchConfig(t, tmp, ServiceEntry{Name: "svc-a", Host: "host-a", Type: serviceTypeRun, Payload: "run.sh"})
+	err := HandleSvcCmd([]string{"service", "set", "--service-root=/srv/app", "--copy", "--snapshot-keep-last=bad"})
+	if err == nil || !strings.Contains(err.Error(), "--snapshot-keep-last must be a positive integer") {
+		t.Fatalf("HandleSvcCmd error = %v, want snapshot keep-last validation", err)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if entry.ServiceRoot != "" || serviceEntryHasSnapshotOverride(entry) {
+		t.Fatalf("entry = %#v, want no local update", entry)
+	}
+}
+
 func TestParseSvcRunControlFlagsExtractsSnapshotOptions(t *testing.T) {
 	flags, err := parseSvcRunControlFlags([]string{
 		"--pull",
@@ -767,6 +795,42 @@ func TestSaveRunConfigPreservesSnapshotOverrides(t *testing.T) {
 	}
 	if entry.Snapshots != "off" || entry.SnapshotKeepLast != 4 || entry.SnapshotMaxAge != "48h" || entry.SnapshotRequired == nil || *entry.SnapshotRequired || !reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) {
 		t.Fatalf("entry = %#v, want preserved snapshot overrides", entry)
+	}
+}
+
+func TestSaveRunConfigReplacesSnapshotOverrides(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	required := true
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:             "svc-a",
+		Host:             "host-a",
+		Type:             serviceTypeRun,
+		Payload:          "old.sh",
+		Snapshots:        "on",
+		SnapshotKeepLast: 7,
+		SnapshotMaxAge:   "168h",
+		SnapshotRequired: &required,
+		SnapshotEvents:   []string{"run", "docker-update"},
+	})
+	if err := saveRunConfig(nil, "", filepath.Join(tmp, "new.sh"), []string{"--snapshots=off", "--snapshot-max-age=24h", "--pull"}, "", false); err != nil {
+		t.Fatalf("saveRunConfig: %v", err)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if entry.Snapshots != "off" || entry.SnapshotMaxAge != "24h" {
+		t.Fatalf("entry = %#v, want explicit snapshot fields", entry)
+	}
+	if entry.SnapshotKeepLast != 0 || entry.SnapshotRequired != nil || len(entry.SnapshotEvents) != 0 {
+		t.Fatalf("entry = %#v, want unspecified snapshot fields cleared", entry)
 	}
 }
 

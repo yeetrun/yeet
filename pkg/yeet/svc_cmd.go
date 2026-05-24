@@ -667,6 +667,9 @@ func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 	if err != nil {
 		return err
 	}
+	if err := validateServiceSetConfigFlags(flags); err != nil {
+		return err
+	}
 	tty := !flags.Copy && !flags.Empty && isTerminalFn(int(os.Stdin.Fd())) && isTerminalFn(int(os.Stdout.Fd()))
 	if err := execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, tty); err != nil {
 		return err
@@ -1769,6 +1772,11 @@ func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, fl
 	}
 	cfgLoc.Config.SetServiceEntry(entry)
 	return true, saveProjectConfig(cfgLoc)
+}
+
+func validateServiceSetConfigFlags(flags cli.ServiceSetFlags) error {
+	entry := ServiceEntry{}
+	return applyServiceSetConfigFlags(&entry, flags)
 }
 
 func applyServiceSetConfigFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) error {
