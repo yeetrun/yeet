@@ -506,8 +506,34 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	if !ok || entry.ServiceRoot != "tank/apps/svc-a" || !entry.ServiceRootZFS {
 		t.Fatalf("entry = %#v, want zfs service root", entry)
 	}
-	if len(calls) != 2 || calls[0].tty || calls[1].tty {
-		t.Fatalf("remote calls = %#v, want two non-tty calls", calls)
+	raw, err := os.ReadFile(filepath.Join(tmp, projectConfigName))
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	if !strings.Contains(string(raw), `service_root_zfs = true`) {
+		t.Fatalf("saved config = %q, want service_root_zfs", string(raw))
+	}
+
+	if err := HandleSvcCmd([]string{"service", "set", "--service-root=/srv/apps/svc-a", "--copy"}); err != nil {
+		t.Fatalf("HandleSvcCmd existing config non-zfs error: %v", err)
+	}
+	loaded, err = loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd non-zfs error: %v", err)
+	}
+	entry, ok = loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok || entry.ServiceRoot != "/srv/apps/svc-a" || entry.ServiceRootZFS {
+		t.Fatalf("entry = %#v, want non-zfs service root", entry)
+	}
+	raw, err = os.ReadFile(filepath.Join(tmp, projectConfigName))
+	if err != nil {
+		t.Fatalf("ReadFile non-zfs config: %v", err)
+	}
+	if strings.Contains(string(raw), `service_root_zfs`) {
+		t.Fatalf("saved config = %q, want service_root_zfs omitted", string(raw))
+	}
+	if len(calls) != 3 || calls[0].tty || calls[1].tty || calls[2].tty {
+		t.Fatalf("remote calls = %#v, want three non-tty calls", calls)
 	}
 }
 

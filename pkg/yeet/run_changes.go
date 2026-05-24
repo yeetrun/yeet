@@ -142,6 +142,9 @@ func parseServiceRootControlArg(args []string, i int, state *serviceRootParseSta
 }
 
 func validateServiceRootOptions(state serviceRootParseState) error {
+	if state.foundRoot && strings.TrimSpace(state.opts.Root) == "" {
+		return fmt.Errorf("--service-root requires a value")
+	}
 	if state.foundZFS && !state.foundRoot {
 		return fmt.Errorf("--zfs requires --service-root")
 	}
