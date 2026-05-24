@@ -60,6 +60,11 @@ type ServiceSetFlags struct {
 	Empty       bool
 }
 
+type ServiceSyncFlags struct {
+	All    bool
+	Config string
+}
+
 type StageFlags struct {
 	Net           string
 	TsVer         string
@@ -154,6 +159,11 @@ type serviceSetFlagsParsed struct {
 	Empty       bool   `flag:"empty"`
 }
 
+type serviceSyncFlagsParsed struct {
+	All    bool   `flag:"all"`
+	Config string `flag:"config"`
+}
+
 type removeFlagsParsed struct {
 	Yes         bool `flag:"yes" short:"y"`
 	CleanConfig bool `flag:"clean-config"`
@@ -224,6 +234,10 @@ const (
 
 type ServiceArgs struct {
 	Service ServiceName `pos:"0" help:"Service name"`
+}
+
+type ServiceSyncArgs struct {
+	Service ServiceName `pos:"0?" help:"Service name"`
 }
 
 type DockerPushArgs struct {
@@ -376,6 +390,17 @@ var remoteGroupInfos = map[string]GroupInfo{
 				},
 				ArgsSchema: ServiceArgs{},
 			},
+			"sync": {
+				Name:        "sync",
+				Description: "Sync local yeet.toml service settings from catch",
+				Usage:       "service sync <svc> [--config=PATH] | service sync --all [--config=PATH]",
+				Examples: []string{
+					"yeet service sync <svc>",
+					"yeet service sync --all",
+					"yeet service sync <svc> --config ~/yeet-services/yeet.toml",
+				},
+				ArgsSchema: ServiceSyncArgs{},
+			},
 		},
 	},
 }
@@ -396,7 +421,8 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"set":  {},
 	},
 	"service": {
-		"set": flagSpecsFromStruct(serviceSetFlagsParsed{}),
+		"set":  flagSpecsFromStruct(serviceSetFlagsParsed{}),
+		"sync": flagSpecsFromStruct(serviceSyncFlagsParsed{}),
 	},
 }
 
@@ -524,6 +550,33 @@ func ParseServiceSet(args []string) (ServiceSetFlags, []string, error) {
 		return ServiceSetFlags{}, nil, fmt.Errorf("cannot use --copy and --empty together")
 	}
 	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseServiceSync(args []string) (ServiceSyncFlags, []string, error) {
+	specs := remoteGroupFlagSpecs["service"]["sync"]
+	parseArgs, extraArgs := splitArgsForParsing(args, specs)
+	parsed, err := parseFlags[serviceSyncFlagsParsed](parseArgs)
+	if err != nil {
+		return ServiceSyncFlags{}, nil, err
+	}
+	flags := ServiceSyncFlags{
+		All:    parsed.Flags.All,
+		Config: strings.TrimSpace(parsed.Flags.Config),
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	if len(argsOut) == 0 {
+		argsOut = nil
+	}
+	if flags.All && len(argsOut) > 0 {
+		return ServiceSyncFlags{}, nil, fmt.Errorf("--all cannot be combined with a service name")
+	}
+	if !flags.All && len(argsOut) == 0 {
+		return ServiceSyncFlags{}, nil, fmt.Errorf("service sync requires a service name or --all")
+	}
+	if len(argsOut) > 1 {
+		return ServiceSyncFlags{}, nil, fmt.Errorf("service sync accepts one service name")
+	}
 	return flags, argsOut, nil
 }
 
