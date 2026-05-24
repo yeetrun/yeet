@@ -13,7 +13,7 @@ import (
 	"tailscale.com/types/views"
 )
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort
 
 // View returns a read-only view of Data.
 func (p *Data) View() DataView {
@@ -84,7 +84,8 @@ func (v *DataView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 
 // DataVersion is the version of the data format. This is used to determine
 // how to parse the data.
-func (v DataView) DataVersion() int { return v.ж.DataVersion }
+func (v DataView) DataVersion() int                     { return v.ж.DataVersion }
+func (v DataView) SnapshotDefaults() SnapshotPolicyView { return v.ж.SnapshotDefaults.View() }
 func (v DataView) Services() views.MapFn[string, *Service, ServiceView] {
 	return views.MapFnOf(v.ж.Services, func(t *Service) ServiceView {
 		return t.View()
@@ -108,11 +109,12 @@ func (v DataView) DockerNetworks() views.MapFn[string, *DockerNetwork, DockerNet
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _DataViewNeedsRegeneration = Data(struct {
-	DataVersion    int
-	Services       map[string]*Service
-	Images         map[ImageRepoName]*ImageRepo
-	Volumes        map[string]*Volume
-	DockerNetworks map[string]*DockerNetwork
+	DataVersion      int
+	SnapshotDefaults *SnapshotPolicy
+	Services         map[string]*Service
+	Images           map[ImageRepoName]*ImageRepo
+	Volumes          map[string]*Volume
+	DockerNetworks   map[string]*DockerNetwork
 }{})
 
 // View returns a read-only view of Service.
@@ -194,6 +196,10 @@ func (v ServiceView) ServiceRoot() string { return v.ж.ServiceRoot }
 // Empty means ServiceRoot is a normal filesystem path or the default root.
 func (v ServiceView) ServiceRootZFS() string { return v.ж.ServiceRootZFS }
 
+// SnapshotPolicy overrides catch snapshot defaults for this service.
+// Nil means all snapshot settings inherit from server defaults.
+func (v ServiceView) SnapshotPolicy() SnapshotPolicyView { return v.ж.SnapshotPolicy.View() }
+
 // Generation is the current generation of the service.
 func (v ServiceView) Generation() int { return v.ж.Generation }
 
@@ -222,12 +228,103 @@ var _ServiceViewNeedsRegeneration = Service(struct {
 	ServiceType      ServiceType
 	ServiceRoot      string
 	ServiceRootZFS   string
+	SnapshotPolicy   *SnapshotPolicy
 	Generation       int
 	LatestGeneration int
 	Artifacts        ArtifactStore
 	SvcNetwork       *SvcNetwork
 	Macvlan          *MacvlanNetwork
 	TSNet            *TailscaleNetwork
+}{})
+
+// View returns a read-only view of SnapshotPolicy.
+func (p *SnapshotPolicy) View() SnapshotPolicyView {
+	return SnapshotPolicyView{ж: p}
+}
+
+// SnapshotPolicyView provides a read-only view over SnapshotPolicy.
+//
+// Its methods should only be called if `Valid()` returns true.
+type SnapshotPolicyView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *SnapshotPolicy
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v SnapshotPolicyView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v SnapshotPolicyView) AsStruct() *SnapshotPolicy {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v SnapshotPolicyView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v SnapshotPolicyView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *SnapshotPolicyView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x SnapshotPolicy
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *SnapshotPolicyView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x SnapshotPolicy
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v SnapshotPolicyView) Enabled() views.ValuePointer[bool] {
+	return views.ValuePointerOf(v.ж.Enabled)
+}
+
+func (v SnapshotPolicyView) KeepLast() views.ValuePointer[int] {
+	return views.ValuePointerOf(v.ж.KeepLast)
+}
+
+func (v SnapshotPolicyView) MaxAge() string              { return v.ж.MaxAge }
+func (v SnapshotPolicyView) Events() views.Slice[string] { return views.SliceOf(v.ж.Events) }
+func (v SnapshotPolicyView) Required() views.ValuePointer[bool] {
+	return views.ValuePointerOf(v.ж.Required)
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _SnapshotPolicyViewNeedsRegeneration = SnapshotPolicy(struct {
+	Enabled  *bool
+	KeepLast *int
+	MaxAge   string
+	Events   []string
+	Required *bool
 }{})
 
 // View returns a read-only view of Volume.

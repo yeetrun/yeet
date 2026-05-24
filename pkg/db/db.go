@@ -15,13 +15,15 @@ import (
 	"tailscale.com/util/mak"
 )
 
-//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort --copyright=false
+//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort --copyright=false
 
 // Data is the full JSON structure of the database.
 type Data struct {
 	// DataVersion is the version of the data format. This is used to determine
 	// how to parse the data.
 	DataVersion int `json:",omitempty"`
+
+	SnapshotDefaults *SnapshotPolicy `json:",omitempty"`
 
 	Services map[string]*Service
 
@@ -117,6 +119,10 @@ type Service struct {
 	// Empty means ServiceRoot is a normal filesystem path or the default root.
 	ServiceRootZFS string `json:",omitempty"`
 
+	// SnapshotPolicy overrides catch snapshot defaults for this service.
+	// Nil means all snapshot settings inherit from server defaults.
+	SnapshotPolicy *SnapshotPolicy `json:",omitempty"`
+
 	// Generation is the current generation of the service.
 	Generation int `json:",omitempty"`
 
@@ -129,6 +135,16 @@ type Service struct {
 	SvcNetwork *SvcNetwork
 	Macvlan    *MacvlanNetwork
 	TSNet      *TailscaleNetwork
+}
+
+// SnapshotPolicy stores either server defaults or per-service overrides.
+// Nil pointer fields mean inherit from the next policy layer.
+type SnapshotPolicy struct {
+	Enabled  *bool    `json:",omitempty"`
+	KeepLast *int     `json:",omitempty"`
+	MaxAge   string   `json:",omitempty"`
+	Events   []string `json:",omitempty"`
+	Required *bool    `json:",omitempty"`
 }
 
 type TailscaleNetwork struct {

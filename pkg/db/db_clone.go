@@ -21,6 +21,7 @@ func (src *Data) Clone() *Data {
 	}
 	dst := new(Data)
 	*dst = *src
+	dst.SnapshotDefaults = src.SnapshotDefaults.Clone()
 	if dst.Services != nil {
 		dst.Services = map[string]*Service{}
 		for k, v := range src.Services {
@@ -66,11 +67,12 @@ func (src *Data) Clone() *Data {
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _DataCloneNeedsRegeneration = Data(struct {
-	DataVersion    int
-	Services       map[string]*Service
-	Images         map[ImageRepoName]*ImageRepo
-	Volumes        map[string]*Volume
-	DockerNetworks map[string]*DockerNetwork
+	DataVersion      int
+	SnapshotDefaults *SnapshotPolicy
+	Services         map[string]*Service
+	Images           map[ImageRepoName]*ImageRepo
+	Volumes          map[string]*Volume
+	DockerNetworks   map[string]*DockerNetwork
 }{})
 
 // Clone makes a deep copy of Service.
@@ -81,6 +83,7 @@ func (src *Service) Clone() *Service {
 	}
 	dst := new(Service)
 	*dst = *src
+	dst.SnapshotPolicy = src.SnapshotPolicy.Clone()
 	if dst.Artifacts != nil {
 		dst.Artifacts = map[ArtifactName]*Artifact{}
 		for k, v := range src.Artifacts {
@@ -107,12 +110,43 @@ var _ServiceCloneNeedsRegeneration = Service(struct {
 	ServiceType      ServiceType
 	ServiceRoot      string
 	ServiceRootZFS   string
+	SnapshotPolicy   *SnapshotPolicy
 	Generation       int
 	LatestGeneration int
 	Artifacts        ArtifactStore
 	SvcNetwork       *SvcNetwork
 	Macvlan          *MacvlanNetwork
 	TSNet            *TailscaleNetwork
+}{})
+
+// Clone makes a deep copy of SnapshotPolicy.
+// The result aliases no memory with the original.
+func (src *SnapshotPolicy) Clone() *SnapshotPolicy {
+	if src == nil {
+		return nil
+	}
+	dst := new(SnapshotPolicy)
+	*dst = *src
+	if dst.Enabled != nil {
+		dst.Enabled = ptr.To(*src.Enabled)
+	}
+	if dst.KeepLast != nil {
+		dst.KeepLast = ptr.To(*src.KeepLast)
+	}
+	dst.Events = append(src.Events[:0:0], src.Events...)
+	if dst.Required != nil {
+		dst.Required = ptr.To(*src.Required)
+	}
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _SnapshotPolicyCloneNeedsRegeneration = SnapshotPolicy(struct {
+	Enabled  *bool
+	KeepLast *int
+	MaxAge   string
+	Events   []string
+	Required *bool
 }{})
 
 // Clone makes a deep copy of Volume.
