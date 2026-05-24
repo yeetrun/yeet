@@ -169,6 +169,34 @@ func runArgsWithServiceRootOptions(args []string, opts serviceRootOptions) []str
 	return out
 }
 
+type snapshotOptions struct {
+	Snapshots string
+	KeepLast  int
+	MaxAge    string
+	Required  *bool
+	Events    []string
+}
+
+func runArgsWithSnapshotOptions(args []string, opts snapshotOptions) []string {
+	out := append([]string{}, args...)
+	if opts.Snapshots != "" {
+		out = append([]string{"--snapshots=" + opts.Snapshots}, out...)
+	}
+	if opts.KeepLast != 0 {
+		out = append([]string{fmt.Sprintf("--snapshot-keep-last=%d", opts.KeepLast)}, out...)
+	}
+	if opts.MaxAge != "" {
+		out = append([]string{"--snapshot-max-age=" + opts.MaxAge}, out...)
+	}
+	if opts.Required != nil {
+		out = append([]string{fmt.Sprintf("--snapshot-required=%t", *opts.Required)}, out...)
+	}
+	if len(opts.Events) != 0 {
+		out = append([]string{"--snapshot-events=" + strings.Join(opts.Events, ",")}, out...)
+	}
+	return out
+}
+
 func extractForceFlag(args []string) (bool, []string, error) {
 	if len(args) == 0 {
 		return false, args, nil
@@ -282,6 +310,13 @@ func saveEnvFileConfig(cfgLoc *projectConfigLocation, hostOverride string, envFi
 	if existing, ok := loc.Config.ServiceEntry(serviceOverride, entry.Host); ok {
 		entry.Type = existing.Type
 		entry.Payload = existing.Payload
+		entry.ServiceRoot = existing.ServiceRoot
+		entry.ServiceRootZFS = existing.ServiceRootZFS
+		entry.Snapshots = existing.Snapshots
+		entry.SnapshotKeepLast = existing.SnapshotKeepLast
+		entry.SnapshotMaxAge = existing.SnapshotMaxAge
+		entry.SnapshotRequired = existing.SnapshotRequired
+		entry.SnapshotEvents = append([]string{}, existing.SnapshotEvents...)
 		entry.Schedule = existing.Schedule
 		entry.Args = existing.Args
 	}
@@ -324,6 +359,13 @@ func runWithChanges(payload string, runArgs []string, envFile string, entry Serv
 
 func runWithChangesTo(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
 	storedArgs := runArgsWithServiceRootOptions(entry.Args, serviceRootOptions{Root: entry.ServiceRoot, ZFS: entry.ServiceRootZFS})
+	storedArgs = runArgsWithSnapshotOptions(storedArgs, snapshotOptions{
+		Snapshots: entry.Snapshots,
+		KeepLast:  entry.SnapshotKeepLast,
+		MaxAge:    entry.SnapshotMaxAge,
+		Required:  entry.SnapshotRequired,
+		Events:    entry.SnapshotEvents,
+	})
 	summary, err := detectRunChanges(payload, runArgs, envFile, storedArgs)
 	if err != nil {
 		return err

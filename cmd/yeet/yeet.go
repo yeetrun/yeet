@@ -156,6 +156,7 @@ func handleServiceGroup(ctx context.Context, args []string) error {
 
 func handleSnapshotsGroup(ctx context.Context, args []string) error {
 	full := append([]string{"snapshots"}, args...)
+	yeet.SetServiceOverride(yeet.SystemServiceName())
 	return handleRemote(ctx, full)
 }
 

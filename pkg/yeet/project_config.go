@@ -28,21 +28,50 @@ type ProjectConfig struct {
 }
 
 type ServiceEntry struct {
-	Name           string   `toml:"name"`
-	Host           string   `toml:"host"`
-	Type           string   `toml:"type,omitempty"`
-	Payload        string   `toml:"payload,omitempty"`
-	EnvFile        string   `toml:"env_file,omitempty"`
-	ServiceRoot    string   `toml:"service_root,omitempty"`
-	ServiceRootZFS bool     `toml:"service_root_zfs,omitempty"`
-	Schedule       string   `toml:"schedule,omitempty"`
-	Args           []string `toml:"args,omitempty"`
+	Name             string   `toml:"name"`
+	Host             string   `toml:"host"`
+	Type             string   `toml:"type,omitempty"`
+	Payload          string   `toml:"payload,omitempty"`
+	EnvFile          string   `toml:"env_file,omitempty"`
+	ServiceRoot      string   `toml:"service_root,omitempty"`
+	ServiceRootZFS   bool     `toml:"service_root_zfs,omitempty"`
+	Snapshots        string   `toml:"snapshots,omitempty"`
+	SnapshotKeepLast int      `toml:"snapshot_keep_last,omitempty"`
+	SnapshotMaxAge   string   `toml:"snapshot_max_age,omitempty"`
+	SnapshotRequired *bool    `toml:"snapshot_required,omitempty"`
+	SnapshotEvents   []string `toml:"snapshot_events,omitempty"`
+	Schedule         string   `toml:"schedule,omitempty"`
+	Args             []string `toml:"args,omitempty"`
 }
 
 type projectConfigLocation struct {
 	Path   string
 	Dir    string
 	Config *ProjectConfig
+}
+
+func (e *ServiceEntry) ClearSnapshotOverride() {
+	e.Snapshots = ""
+	e.SnapshotKeepLast = 0
+	e.SnapshotMaxAge = ""
+	e.SnapshotRequired = nil
+	e.SnapshotEvents = nil
+}
+
+func serviceEntryHasSnapshotOverride(e ServiceEntry) bool {
+	return e.Snapshots != "" || e.SnapshotKeepLast != 0 || e.SnapshotMaxAge != "" || e.SnapshotRequired != nil || len(e.SnapshotEvents) != 0
+}
+
+func cloneBoolPtr(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	copied := *v
+	return &copied
+}
+
+func cloneStringSlice(values []string) []string {
+	return append([]string{}, values...)
 }
 
 var createProjectConfigFileFn = func(path string) (io.WriteCloser, error) {
@@ -243,7 +272,9 @@ func (c *ProjectConfig) ServiceEntry(service, host string) (ServiceEntry, bool) 
 	}
 	for _, entry := range c.Services {
 		if entry.Name == service && entry.Host == host {
-			entry.Args = append([]string{}, entry.Args...)
+			entry.Args = cloneStringSlice(entry.Args)
+			entry.SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
+			entry.SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
 			return entry, true
 		}
 	}
@@ -251,13 +282,15 @@ func (c *ProjectConfig) ServiceEntry(service, host string) (ServiceEntry, bool) 
 }
 
 func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
-	entry.Args = append([]string{}, entry.Args...)
+	entry.Args = cloneStringSlice(entry.Args)
+	entry.SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
+	entry.SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
 	for i := range c.Services {
 		if c.Services[i].Name == entry.Name && c.Services[i].Host == entry.Host {
 			c.Services[i].Type = entry.Type
 			c.Services[i].Payload = entry.Payload
 			c.Services[i].Schedule = entry.Schedule
-			c.Services[i].Args = append([]string{}, entry.Args...)
+			c.Services[i].Args = cloneStringSlice(entry.Args)
 			if entry.EnvFile != "" {
 				c.Services[i].EnvFile = entry.EnvFile
 			}
@@ -265,6 +298,11 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 				c.Services[i].ServiceRoot = entry.ServiceRoot
 				c.Services[i].ServiceRootZFS = entry.ServiceRootZFS
 			}
+			c.Services[i].Snapshots = entry.Snapshots
+			c.Services[i].SnapshotKeepLast = entry.SnapshotKeepLast
+			c.Services[i].SnapshotMaxAge = entry.SnapshotMaxAge
+			c.Services[i].SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
+			c.Services[i].SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
 			c.addHost(entry.Host)
 			sortServiceEntries(c.Services)
 			return

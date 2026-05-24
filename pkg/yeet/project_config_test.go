@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -144,6 +145,39 @@ func TestLoadProjectConfigFromFile(t *testing.T) {
 	}
 	if _, ok := loaded.Config.ServiceEntry("sonarr", "yeet-pve1"); !ok {
 		t.Fatalf("loaded config missing sonarr entry: %#v", loaded.Config)
+	}
+}
+
+func TestProjectConfigSnapshotFieldsRoundTrip(t *testing.T) {
+	required := false
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:             "svc",
+		Host:             "host-a",
+		Type:             serviceTypeRun,
+		Payload:          "compose.yml",
+		ServiceRoot:      "tank/apps/svc",
+		ServiceRootZFS:   true,
+		Snapshots:        "off",
+		SnapshotKeepLast: 3,
+		SnapshotMaxAge:   "72h",
+		SnapshotRequired: &required,
+		SnapshotEvents:   []string{"run"},
+	})
+	loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Dir: t.TempDir(), Config: cfg}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	loaded, err := loadProjectConfigFromFile(loc.Path)
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromFile: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if entry.Snapshots != "off" || entry.SnapshotKeepLast != 3 || entry.SnapshotMaxAge != "72h" || entry.SnapshotRequired == nil || *entry.SnapshotRequired || !reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) {
+		t.Fatalf("entry snapshot fields = %#v", entry)
 	}
 }
 

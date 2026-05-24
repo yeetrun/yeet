@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -276,6 +277,24 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 				t.Fatalf("bridged args = %q, want %q", got, tt.wantBridged)
 			}
 		})
+	}
+}
+
+func TestBridgeServiceArgsServiceSetSnapshotFlags(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	service, host, bridged, ok := bridgeServiceArgs(
+		[]string{"service", "set", "--snapshots=off", "--snapshot-keep-last", "3", "sabnzbd"},
+		remoteSpecs,
+		groupSpecs,
+		"",
+	)
+	if !ok || service != "sabnzbd" || host != "" {
+		t.Fatalf("service=%q host=%q ok=%v", service, host, ok)
+	}
+	want := []string{"service", "set", "--snapshots=off", "--snapshot-keep-last", "3"}
+	if !reflect.DeepEqual(bridged, want) {
+		t.Fatalf("bridged = %#v, want %#v", bridged, want)
 	}
 }
 

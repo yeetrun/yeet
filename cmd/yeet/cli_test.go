@@ -98,6 +98,44 @@ func TestRunServiceSetHelpShowsLeafCommand(t *testing.T) {
 	}
 }
 
+func TestSnapshotsDefaultsHelpShowsSubcommands(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldStdout := os.Stdout
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		os.Stdout = oldStdout
+	})
+
+	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create stdout temp file: %v", err)
+	}
+	os.Stdout = stdoutFile
+	os.Args = []string{"yeet", "snapshots", "--help"}
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("snapshots help should not call handler with args %v", args)
+		return nil
+	}
+
+	if got := run(); got != 0 {
+		t.Fatalf("run exit code = %d, want 0", got)
+	}
+	if _, err := stdoutFile.Seek(0, 0); err != nil {
+		t.Fatalf("seek stdout: %v", err)
+	}
+	rawStdout, err := os.ReadFile(stdoutFile.Name())
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	stdout := string(rawStdout)
+	if !strings.Contains(stdout, "Manage catch ZFS snapshot defaults") ||
+		!strings.Contains(stdout, "defaults") {
+		t.Fatalf("stdout = %q, want snapshots defaults help", stdout)
+	}
+}
+
 func TestParseGlobalFlags(t *testing.T) {
 	tests := []struct {
 		name    string
