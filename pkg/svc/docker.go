@@ -247,15 +247,7 @@ func (s *DockerComposeService) Down() error {
 }
 
 func (s *DockerComposeService) Start() error {
-	if s.sd != nil {
-		if err := s.sd.StartAuxiliaryUnits(); err != nil {
-			return err
-		}
-		if _, err := s.ReconcileNetNS(context.Background()); err != nil {
-			return err
-		}
-	}
-	return s.runCommand("start")
+	return s.UpWithPull(false)
 }
 
 func (s *DockerComposeService) Stop() error {
