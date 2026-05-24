@@ -35,6 +35,7 @@ type serviceRootMigrationRequest struct {
 type serviceRootMigrationPlan struct {
 	ServiceName string
 	OldRoot     string
+	OldRootZFS  string
 	NewRoot     string
 	NewRootZFS  string
 }
@@ -73,6 +74,9 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	if flags.Empty {
 		mode = serviceRootMigrationEmpty
 	}
+	if mode == serviceRootMigrationPrompt && !e.isPty {
+		return serviceRootMigrationModeRequiredError()
+	}
 
 	request := serviceRootMigrationRequest{Root: flags.ServiceRoot, ZFS: flags.ZFS}
 	plan, err := e.s.validateServiceRootMigration(e.sn, request)
@@ -83,7 +87,7 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	if err != nil {
 		return err
 	}
-	return e.s.migrateServiceRoot(plan.ServiceName, request, mode)
+	return e.s.migrateServiceRootWithPlan(plan, mode)
 }
 
 func (e *ttyExecer) confirmServiceRootMigrationMode(mode serviceRootMigrationMode, plan serviceRootMigrationPlan) (serviceRootMigrationMode, error) {
@@ -91,7 +95,7 @@ func (e *ttyExecer) confirmServiceRootMigrationMode(mode serviceRootMigrationMod
 		return mode, nil
 	}
 	if !e.isPty {
-		return 0, fmt.Errorf("service set --service-root requires --copy or --empty when not running interactively")
+		return 0, serviceRootMigrationModeRequiredError()
 	}
 	ok, err := cmdutil.Confirm(e.rw, e.rw, fmt.Sprintf("Copy existing service files from %s to %s?", plan.OldRoot, plan.NewRoot))
 	if err != nil {
@@ -103,18 +107,23 @@ func (e *ttyExecer) confirmServiceRootMigrationMode(mode serviceRootMigrationMod
 	return serviceRootMigrationEmpty, nil
 }
 
+func serviceRootMigrationModeRequiredError() error {
+	return fmt.Errorf("service set --service-root requires --copy or --empty when not running interactively")
+}
+
 func (s *Server) validateServiceRootMigration(name string, request serviceRootMigrationRequest) (serviceRootMigrationPlan, error) {
 	sv, err := s.stoppedServiceForRootMigration(name)
 	if err != nil {
 		return serviceRootMigrationPlan{}, err
 	}
 	oldRoot := filepath.Clean(s.serviceRootFromView(sv))
+	oldRootZFS := sv.ServiceRootZFS()
 	resolved, err := s.resolveServiceRootMigrationRequest(request)
 	if err != nil {
 		return serviceRootMigrationPlan{}, err
 	}
 	newRoot := filepath.Clean(resolved.Root)
-	if err := rejectNoopServiceRootMigration(name, oldRoot, sv.ServiceRootZFS(), newRoot, resolved.Dataset); err != nil {
+	if err := rejectNoopServiceRootMigration(name, oldRoot, oldRootZFS, newRoot, resolved.Dataset); err != nil {
 		return serviceRootMigrationPlan{}, err
 	}
 	if rootsAreNested(oldRoot, newRoot) || rootsAreNested(newRoot, oldRoot) {
@@ -126,7 +135,7 @@ func (s *Server) validateServiceRootMigration(name string, request serviceRootMi
 			return serviceRootMigrationPlan{}, err
 		}
 	}
-	return serviceRootMigrationPlan{ServiceName: name, OldRoot: oldRoot, NewRoot: newRoot, NewRootZFS: resolved.Dataset}, nil
+	return serviceRootMigrationPlan{ServiceName: name, OldRoot: oldRoot, OldRootZFS: oldRootZFS, NewRoot: newRoot, NewRootZFS: resolved.Dataset}, nil
 }
 
 func (s *Server) stoppedServiceForRootMigration(name string) (db.ServiceView, error) {
@@ -183,6 +192,14 @@ func (s *Server) migrateServiceRoot(name string, request serviceRootMigrationReq
 	if err != nil {
 		return err
 	}
+	return s.migrateServiceRootWithPlan(plan, mode)
+}
+
+func (s *Server) migrateServiceRootWithPlan(plan serviceRootMigrationPlan, mode serviceRootMigrationMode) error {
+	if err := s.validateServiceRootMigrationPlanCurrent(plan); err != nil {
+		return err
+	}
+	var err error
 	switch mode {
 	case serviceRootMigrationCopy:
 		if plan.NewRootZFS != "" {
@@ -206,6 +223,17 @@ func (s *Server) migrateServiceRoot(name string, request serviceRootMigrationReq
 		return fmt.Errorf("service root migration mode was not selected")
 	}
 	return s.updateServiceRoot(plan.ServiceName, plan.NewRoot, plan.NewRootZFS)
+}
+
+func (s *Server) validateServiceRootMigrationPlanCurrent(plan serviceRootMigrationPlan) error {
+	sv, err := s.stoppedServiceForRootMigration(plan.ServiceName)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(s.serviceRootFromView(sv)) != filepath.Clean(plan.OldRoot) || sv.ServiceRootZFS() != plan.OldRootZFS {
+		return fmt.Errorf("service root for %q changed during migration planning", plan.ServiceName)
+	}
+	return nil
 }
 
 func (s *Server) copyServiceRootMigration(oldRoot, newRoot string) error {
