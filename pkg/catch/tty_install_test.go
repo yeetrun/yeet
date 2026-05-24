@@ -487,6 +487,29 @@ func TestRunCmdFuncBuildsInstallConfigWithoutLiveInstaller(t *testing.T) {
 	}
 }
 
+func TestRunCmdFuncCopiesServiceRootIntoInstallerConfig(t *testing.T) {
+	var gotCfg FileInstallerCfg
+	execer := &ttyExecer{
+		s:              newTestServer(t),
+		sn:             "svc-run-root",
+		rawRW:          bytes.NewBufferString("binary-payload"),
+		rw:             &bytes.Buffer{},
+		bypassPtyInput: true,
+		installFunc: func(_ string, _ io.Reader, cfg FileInstallerCfg) error {
+			gotCfg = cfg
+			return nil
+		},
+	}
+
+	flags := cli.RunFlags{ServiceRoot: "/srv/apps/svc-run-root"}
+	if err := execer.runCmdFunc(flags, nil); err != nil {
+		t.Fatalf("runCmdFunc returned error: %v", err)
+	}
+	if gotCfg.ServiceRoot != "/srv/apps/svc-run-root" {
+		t.Fatalf("ServiceRoot = %q, want /srv/apps/svc-run-root", gotCfg.ServiceRoot)
+	}
+}
+
 func TestRunCmdFuncRejectsSystemServiceBeforeInstall(t *testing.T) {
 	called := false
 	execer := &ttyExecer{

@@ -344,6 +344,8 @@ func (s *Server) serviceView(sn string) (db.ServiceView, error) {
 type InstallerCfg struct {
 	ServiceName string
 	User        string
+	// ServiceRoot is the requested absolute root directory for this service.
+	ServiceRoot string
 	// Pull forces docker compose services to pull images on install.
 	Pull bool
 	// Printer is a function to print messages to the client.
@@ -391,6 +393,91 @@ func (s *Server) serviceRootDir(sn string) (string, error) {
 		return s.defaultServiceRootDir(sn), nil
 	}
 	return s.serviceRootFromView(sv), nil
+}
+
+func (s *Server) prepareServiceRootForInstall(sn, requested string) (string, error) {
+	sv, err := s.serviceView(sn)
+	if err != nil && !errors.Is(err, errServiceNotFound) {
+		return "", err
+	}
+	if sv.Valid() {
+		effective := s.serviceRootFromView(sv)
+		if requested == "" {
+			return effective, nil
+		}
+		cleaned, err := cleanRequestedServiceRoot(requested)
+		if err != nil {
+			return "", err
+		}
+		if cleaned == filepath.Clean(effective) {
+			return cleaned, nil
+		}
+		return "", fmt.Errorf(
+			"service %q already uses service root %q; change it with: yeet service set %s --service-root=%s",
+			sn,
+			effective,
+			sn,
+			cleaned,
+		)
+	}
+	if requested == "" {
+		return s.defaultServiceRootDir(sn), nil
+	}
+	return validateRequestedServiceRoot(requested)
+}
+
+func validateRequestedServiceRoot(root string) (string, error) {
+	cleaned, err := cleanRequestedServiceRoot(root)
+	if err != nil || cleaned == "" {
+		return cleaned, err
+	}
+	parent := filepath.Dir(cleaned)
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("service root parent %q does not exist", parent)
+		}
+		return "", fmt.Errorf("failed to stat service root parent %q: %w", parent, err)
+	}
+	if !parentInfo.IsDir() {
+		return "", fmt.Errorf("service root parent %q is not a directory", parent)
+	}
+	empty, err := rootIsMissingOrEmpty(cleaned)
+	if err != nil {
+		return "", err
+	}
+	if !empty {
+		return "", fmt.Errorf("service root %q must be empty", cleaned)
+	}
+	return cleaned, nil
+}
+
+func cleanRequestedServiceRoot(root string) (string, error) {
+	if root == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(root) {
+		return "", fmt.Errorf("service root %q must be absolute", root)
+	}
+	return filepath.Clean(root), nil
+}
+
+func rootIsMissingOrEmpty(root string) (bool, error) {
+	info, err := os.Stat(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return false, fmt.Errorf("failed to stat service root %q: %w", root, err)
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("service root %q is a file", root)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false, fmt.Errorf("failed to read service root %q: %w", root, err)
+	}
+	return len(entries) == 0, nil
 }
 
 func (s *Server) serviceBinDir(sn string) string {
