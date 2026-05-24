@@ -1,8 +1,9 @@
 # Yeet CLI --help-llm Outputs
-Generated on 2026-05-15 from this repo using:
+Generated on 2026-05-24 from this repo using:
 - `go run ./cmd/yeet --help-llm`
 - `go run ./cmd/yeet <command> --help-llm`
 - `go run ./cmd/yeet <group> --help-llm`
+- `go run ./cmd/yeet <group> <command> --help-llm`
 
 If command behavior changes, re-run the help commands and update this file.
 
@@ -210,6 +211,10 @@ yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
 ```
 
 ```
+yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs
+```
+
+```
 yeet run --pull <svc> ./compose.yml
 ```
 
@@ -369,6 +374,16 @@ Manage service environment files
 
 Get detailed help: `yeet env --help-llm`
 
+### `service`
+
+Manage service settings
+
+**Commands**:
+
+- `service set`: Set service settings
+
+Get detailed help: `yeet service --help-llm`
+
 ## Examples
 
 ```
@@ -405,7 +420,7 @@ Install/update from a payload (binary, compose, image, Dockerfile)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] run [OPTIONS] SVC PAYLOAD [-- <payload args>]
+yeet [GLOBAL_OPTIONS] run [OPTIONS] SVC PAYLOAD [--service-root=/abs/path|dataset] [--zfs] [-- <payload args>]
 ```
 
 ## Global Options
@@ -451,6 +466,10 @@ yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
 ```
 
 ```
+yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs
+```
+
+```
 yeet run --pull <svc> ./compose.yml
 ```
 
@@ -473,6 +492,390 @@ yeet run <svc> ./Dockerfile
 
 ````
 
+## Command: status
+
+````
+# yeet status
+
+Show status of a service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] status [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: logs
+
+````
+# yeet logs
+
+Show logs of a service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] logs [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: info
+
+````
+# yeet info
+
+Show detailed info about a service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] info [OPTIONS] SVC [--format=plain|json|json-pretty]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: events
+
+````
+# yeet events
+
+Show events for a service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] events [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: ip
+
+````
+# yeet ip
+
+Show the IP addresses of a service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] ip [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: version
+
+````
+# yeet version
+
+Show the version of the Catch server
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] version [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: start
+
+````
+# yeet start
+
+Start a service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] start [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: stop
+
+````
+# yeet stop
+
+Stop a service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] stop [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
 ## Command: restart
 
 ````
@@ -484,6 +887,150 @@ Restart a service
 
 ```
 yeet [GLOBAL_OPTIONS] restart [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: enable
+
+````
+# yeet enable
+
+Enable a service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] enable [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: disable
+
+````
+# yeet disable
+
+Disable a service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] disable [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: edit
+
+````
+# yeet edit
+
+Edit a service
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] edit [OPTIONS]
 ```
 
 ## Global Options
@@ -569,6 +1116,362 @@ Progress output (auto|tty|plain|quiet)
 
 ````
 
+## Command: copy
+
+````
+# yeet copy
+
+Copy files between local and service data
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] copy [OPTIONS] [-avz] <src> <dst>
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet copy ./config.yml svc:data/config.yml
+```
+
+```
+yeet copy ./configs/ svc:data/
+```
+
+```
+yeet copy svc:data/configs ./configs
+```
+
+
+````
+
+## Command: cron
+
+````
+# yeet cron
+
+Install a cron job from a file and 5-field expression
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] cron [OPTIONS] SVC FILE "<cron expr>" [-- <args...>]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo
+```
+
+
+````
+
+## Command: stage
+
+````
+# yeet stage
+
+Upload a payload without applying it (use stage show/commit/clear)
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] stage [OPTIONS] SVC PAYLOAD|show|commit|clear [-- <payload args>]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet stage <svc> ./bin/<svc>
+```
+
+```
+yeet stage <svc> show
+```
+
+```
+yeet stage <svc> commit
+```
+
+```
+yeet stage <svc> clear
+```
+
+
+````
+
+## Command: mount
+
+````
+# yeet mount
+
+Mount a network filesystem on the host (global, not per-service)
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] mount [OPTIONS] SOURCE [name] [--type=nfs] [--opts=defaults]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet mount host:/export data-share --type=nfs --opts=defaults
+```
+
+```
+yeet mount
+```
+
+
+````
+
+## Command: umount
+
+````
+# yeet umount
+
+Unmount a host mount by name
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] umount [OPTIONS] NAME
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet umount data-share
+```
+
+
+````
+
+## Command: tailscale
+
+````
+# yeet tailscale
+
+Configure tailscale OAuth or run tailscale commands in a service netns
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] tailscale [OPTIONS] --setup [--client-secret=...] | <svc> -- <tailscale args...>
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet tailscale --setup
+```
+
+```
+yeet tailscale --setup --client-secret=tskey-client-***
+```
+
+```
+yeet tailscale <svc> -- serve --bg 8080
+```
+
+
+````
+
 ## Command: init
 
 ````
@@ -622,6 +1525,172 @@ yeet init root@<host>
 
 ```
 yeet init
+```
+
+
+````
+
+## Command: list-hosts
+
+````
+# yeet list-hosts
+
+List all hosts with the given tags
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] list-hosts [OPTIONS] [--tags=tag:catch]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: prefs
+
+````
+# yeet prefs
+
+Manage the current preferences
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] prefs [OPTIONS]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Command: ssh
+
+````
+# yeet ssh
+
+Open SSH to the catch host (optionally into a service dir)
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] ssh [OPTIONS] [ssh-opts...] [<svc>] [-- <remote-cmd...>]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet ssh
+```
+
+```
+yeet --host=<host> ssh
+```
+
+```
+yeet ssh <svc>
+```
+
+```
+yeet ssh -- uname -a
+```
+
+```
+yeet ssh <svc> -- ls -la
 ```
 
 
@@ -809,6 +1878,560 @@ Get detailed help: `yeet env set --help-llm`
 Print the current env file
 
 Get detailed help: `yeet env show --help-llm`
+
+
+````
+
+## Group: service
+
+````
+# yeet - service
+
+Manage service settings
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] service COMMAND [OPTIONS] [ARGS...]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Commands
+
+### `service set`
+
+Set service settings
+
+**Examples**:
+
+```
+yeet service set <svc> --service-root=/srv/apps/<svc>
+```
+
+```
+yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy
+```
+
+```
+yeet service set <svc> --service-root=/srv/apps/<svc> --empty
+```
+
+Get detailed help: `yeet service set --help-llm`
+
+
+````
+
+## Group Command: docker outdated
+
+````
+# yeet docker outdated
+
+Show Docker compose containers with upstream image updates
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] docker outdated [SVC] [--format=table|json|json-pretty]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet docker outdated
+```
+
+```
+yeet docker outdated <svc>
+```
+
+```
+yeet docker outdated --format=json
+```
+
+
+````
+
+## Group Command: docker pull
+
+````
+# yeet docker pull
+
+Pull images for a compose service without restarting
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] docker pull <svc>
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Group Command: docker push
+
+````
+# yeet docker push
+
+Push a container image to the remote host (optionally run it)
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] docker push SVC IMAGE [--run] [--all-local]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet docker push <svc> <local-image>:<tag> --run
+```
+
+
+````
+
+## Group Command: docker update
+
+````
+# yeet docker update
+
+Pull images and recreate containers for compose services
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] docker update <svc...> | docker update --outdated
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet docker update <svc>
+```
+
+```
+yeet docker update <svc-a> <svc-b>
+```
+
+```
+yeet docker update <svc-a> <svc-b>@<host>
+```
+
+```
+yeet docker update --outdated
+```
+
+
+````
+
+## Group Command: env copy
+
+````
+# yeet env copy
+
+Upload an env file
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] env copy <svc> <file>
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Group Command: env edit
+
+````
+# yeet env edit
+
+Edit the env file
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] env edit <svc>
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Group Command: env set
+
+````
+# yeet env set
+
+Set env keys
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] env set <svc> KEY=VALUE [KEY=VALUE...]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Group Command: env show
+
+````
+# yeet env show
+
+Print the current env file
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] env show <svc> [--staged]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+
+````
+
+## Group Command: service set
+
+````
+# yeet service set
+
+Set service settings
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] service set <svc> --service-root=/abs/path|dataset [--zfs] [--copy|--empty]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet service set <svc> --service-root=/srv/apps/<svc>
+```
+
+```
+yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy
+```
+
+```
+yeet service set <svc> --service-root=/srv/apps/<svc> --empty
+```
 
 
 ````

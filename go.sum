@@ -268,8 +268,8 @@ github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7
 github.com/safchain/ethtool v0.3.0 h1:gimQJpsI6sc1yIqP/y8GYgiXn/NjgvpM0RNoWLVVmP0=
 github.com/safchain/ethtool v0.3.0/go.mod h1:SA9BwrgyAqNo7M+uaL6IYbxpm5wk3L7Mm6ocLW+CJUs=
 github.com/sergi/go-diff v1.0.0/go.mod h1:0CfEIISq7TuYL3j771MWULgwwjU+GofnZX9QAmXWZgo=
-github.com/shayne/yargs v1.0.1 h1:Si7Q6Jj/jN65lbsSsDv11OLfqwqrnYI9GaMp7TWkjdE=
-github.com/shayne/yargs v1.0.1/go.mod h1:O0hy/gT4h3lrTuk8hcp2XNrFJjpFh1rkkg6YMkzQjCs=
+github.com/shayne/yargs v1.0.2 h1:eG+EkgY0FZ7eGx12N1/XX97a1w0TH6n7XKQnvU03AzA=
+github.com/shayne/yargs v1.0.2/go.mod h1:O0hy/gT4h3lrTuk8hcp2XNrFJjpFh1rkkg6YMkzQjCs=
 github.com/sirupsen/logrus v1.9.3 h1:dueUQJ1C2q9oE3F7wvmSGAaVtTmUizReu6fjN8uqzbQ=
 github.com/sirupsen/logrus v1.9.3/go.mod h1:naHLuLoDiP4jHNo9R0sCBMtWGeIprob74mVsIT4qYEQ=
 github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+wExME=
