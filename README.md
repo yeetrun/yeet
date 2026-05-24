@@ -167,19 +167,20 @@ yeet run vaultwarden ./compose.yml --service-root=/srv/apps/vaultwarden
 ```
 
 `--service-root` is an absolute path on the catch host. Its parent directory
-must already exist; yeet can create the final service directory. The root
+(`/srv/apps` in this example) must already exist; yeet can create the final
+service directory. The root
 contains `bin`, `run`, `env`, and `data`. `yeet run` can choose the initial
 root for a new service, but it cannot move an existing service. To move a
 stopped service root, use:
 
 ```bash
-yeet service set vaultwarden --service-root=/srv/apps/vaultwarden --copy
-yeet service set vaultwarden --service-root=/srv/apps/vaultwarden --empty
+yeet service set vaultwarden --service-root=/mnt/fast/vaultwarden --copy
+yeet service set vaultwarden --service-root=/mnt/fast/vaultwarden --empty
 ```
 
 `yeet service set` leaves the old root in place. Non-interactive migrations
 must choose `--copy` to copy existing files or `--empty` to start with an empty
-root.
+root. For the migration examples above, `/mnt/fast` must already exist.
 
 Less common (registry image or pushing a local image):
 
