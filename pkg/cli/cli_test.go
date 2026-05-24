@@ -379,6 +379,14 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> --service-root=/abs/path [--copy|--empty]" {
 		t.Fatalf("service set usage = %q", reg.Groups["service"].Commands["set"].Info.Usage)
 	}
+	wantServiceSetExamples := []string{
+		"yeet service set <svc> --service-root=/srv/apps/<svc>",
+		"yeet service set <svc> --service-root=/srv/apps/<svc> --copy",
+		"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
+	}
+	if !reflect.DeepEqual(reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples) {
+		t.Fatalf("service set examples = %#v, want %#v", reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples)
+	}
 	outdatedArg, ok := yargs.ArgSpecAt(reg.Groups["docker"].Commands["outdated"].ArgsSchema, 0)
 	if !ok {
 		t.Fatal("docker outdated should expose optional service arg metadata")
