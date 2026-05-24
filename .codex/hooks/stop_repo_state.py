@@ -198,12 +198,12 @@ def release_issues(
     website_status: list[str],
     website_sync: GitSync,
 ) -> list[str]:
-    """Validate the repository's patch-release contract.
+    """Validate the repository's release contract.
 
     ``AGENTS.md`` defines the release ceremony for this repo: update the website
     changelog, commit and push website, commit the submodule pointer, create an
-    annotated patch tag, then push both branch and tag. This function turns that
-    ceremony into observable checks.
+    annotated release tag, then push both branch and tag. This function turns
+    that ceremony into observable checks.
     """
 
     issues: list[str] = []
@@ -245,8 +245,8 @@ def release_issues(
         issues.append(f"remote tag {version} is not pushed to origin")
 
     previous = previous_version_tag(root, version)
-    if previous is not None and not is_patch_bump(previous, version):
-        issues.append(f"{version} is not the next patch release after {previous}")
+    if previous is not None and not is_next_release_after(previous, version):
+        issues.append(f"{version} is not the next release after {previous}")
 
     if version not in message and claims_any(message.lower(), ("release", "tagged", "tag pushed")):
         issues.append(f"final answer mentions a release/tag but does not name {version}")
@@ -431,14 +431,19 @@ def parse_version(version: str) -> tuple[int, int, int] | None:
     return tuple(int(part) for part in match.groups())
 
 
-def is_patch_bump(previous: str, current: str) -> bool:
-    """Return whether ``current`` is exactly one patch after ``previous``."""
+def is_next_release_after(previous: str, current: str) -> bool:
+    """Return whether ``current`` is the next patch, minor, or major release."""
 
     prev = parse_version(previous)
     cur = parse_version(current)
     if prev is None or cur is None:
-        return True
-    return cur == (prev[0], prev[1], prev[2] + 1)
+        return False
+    major, minor, patch = prev
+    return cur in {
+        (major, minor, patch + 1),
+        (major, minor + 1, 0),
+        (major + 1, 0, 0),
+    }
 
 
 def sync_issue(label: str, sync: GitSync) -> str:
