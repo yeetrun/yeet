@@ -381,6 +381,7 @@ Manage service settings
 **Commands**:
 
 - `service set`: Set service settings
+- `service sync`: Sync local yeet.toml service settings from catch
 
 Get detailed help: `yeet service --help-llm`
 
@@ -1948,6 +1949,56 @@ yeet service set <svc> --service-root=/srv/apps/<svc> --empty
 ```
 
 Get detailed help: `yeet service set --help-llm`
+
+### `service sync`
+
+Sync local yeet.toml service settings from catch
+
+**Examples**:
+
+```
+yeet service sync <svc>
+```
+
+```
+yeet service sync --all
+```
+
+```
+yeet service sync <svc> --config ~/yeet-services/yeet.toml
+```
+
+Get detailed help: `yeet service sync --help-llm`
+
+
+````
+
+## Group Command: service sync
+
+````
+# yeet service sync
+
+Sync local yeet.toml service settings from catch
+
+## Usage
+
+```text
+yeet [GLOBAL OPTIONS] service sync <svc> [--config=PATH]
+yeet [GLOBAL OPTIONS] service sync --all [--config=PATH]
+```
+
+## Options
+
+- `--all`: Sync all existing entries in the selected yeet.toml for the target host.
+- `--config`: Path to the yeet.toml file to update.
+
+## Examples
+
+```bash
+yeet service sync <svc>
+yeet service sync --all
+yeet service sync <svc> --config ~/yeet-services/yeet.toml
+```
 
 
 ````
