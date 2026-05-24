@@ -231,11 +231,26 @@ func serviceSyncUsesExplicitConfig(command svcCommand) (bool, error) {
 	if command.Name != "service" || len(command.Args) == 0 || command.Args[0] != "sync" {
 		return false, nil
 	}
-	flags, _, err := cli.ParseServiceSync(command.Args[1:])
-	if err != nil {
-		return false, err
+	return serviceSyncHasConfigArg(command.Args[1:])
+}
+
+func serviceSyncHasConfigArg(args []string) (bool, error) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return false, nil
+		}
+		if arg == "--config" {
+			if i+1 >= len(args) {
+				return false, fmt.Errorf("--config requires a value")
+			}
+			return strings.TrimSpace(args[i+1]) != "", nil
+		}
+		if strings.HasPrefix(arg, "--config=") {
+			return strings.TrimSpace(strings.TrimPrefix(arg, "--config=")) != "", nil
+		}
 	}
-	return strings.TrimSpace(flags.Config) != "", nil
+	return false, nil
 }
 
 func ensureSvcCommandService(checkArgs []string) error {
@@ -453,9 +468,16 @@ func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 		return err
 	}
 	if !updated {
-		return printServiceSetSyncHint(os.Stdout, req.Service)
+		return printServiceSetSyncHint(os.Stdout, req.Service, serviceSetSyncHintHost(req))
 	}
 	return nil
+}
+
+func serviceSetSyncHintHost(req svcCommandRequest) string {
+	if !req.HostOverrideSet {
+		return ""
+	}
+	return strings.TrimSpace(req.HostOverride)
 }
 
 func handleSvcRemove(ctx context.Context, req svcCommandRequest) error {
@@ -1490,18 +1512,22 @@ func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, se
 	return true, saveProjectConfig(cfgLoc)
 }
 
-func printServiceSetSyncHint(w io.Writer, service string) error {
+func printServiceSetSyncHint(w io.Writer, service string, host string) error {
 	if _, err := fmt.Fprintln(w, "Updated catch service settings. No matching yeet.toml entry was updated."); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintln(w, "Run from the project directory, or run:"); err != nil {
 		return err
 	}
+	cmd := "yeet"
+	if host = strings.TrimSpace(host); host != "" {
+		cmd += " --host " + host
+	}
 	if strings.TrimSpace(service) == "" {
-		_, err := fmt.Fprintln(w, "  yeet service sync <svc> --config ~/yeet-services/yeet.toml")
+		_, err := fmt.Fprintf(w, "  %s service sync <svc> --config ~/yeet-services/yeet.toml\n", cmd)
 		return err
 	}
-	_, err := fmt.Fprintf(w, "  yeet service sync %s --config ~/yeet-services/yeet.toml\n", service)
+	_, err := fmt.Fprintf(w, "  %s service sync %s --config ~/yeet-services/yeet.toml\n", cmd, service)
 	return err
 }
 

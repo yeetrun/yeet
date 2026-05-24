@@ -33,7 +33,7 @@ type serviceSyncResult struct {
 }
 
 func handleServiceSync(ctx context.Context, req svcCommandRequest) error {
-	flags, remaining, err := cli.ParseServiceSync(req.Command.Args[1:])
+	flags, remaining, err := parseServiceSyncRequest(req.Command.Args[1:], req.Service)
 	if err != nil {
 		return err
 	}
@@ -62,6 +62,18 @@ func handleServiceSync(ctx context.Context, req svcCommandRequest) error {
 		skipped++
 	}
 	return finishServiceSync(cfgLoc, flags.All, results, updated, skipped)
+}
+
+func parseServiceSyncRequest(args []string, service string) (cli.ServiceSyncFlags, []string, error) {
+	flags, remaining, err := cli.ParseServiceSync(args)
+	if err == nil {
+		return flags, remaining, nil
+	}
+	if strings.TrimSpace(service) == "" || !strings.Contains(err.Error(), "service sync requires a service name or --all") {
+		return cli.ServiceSyncFlags{}, nil, err
+	}
+	argsWithService := append(append([]string{}, args...), strings.TrimSpace(service))
+	return cli.ParseServiceSync(argsWithService)
 }
 
 func finishServiceSync(cfgLoc *projectConfigLocation, all bool, results []serviceSyncResult, updated, skipped int) error {
