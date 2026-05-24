@@ -528,7 +528,7 @@ func (i *FileInstaller) installTailscaleForNetNS(env netns.Service, runTSInNetNS
 		// resolv.conf path should be passed to tailscaled.
 		rc = ""
 	}
-	files, err := i.s.installTS(i.cfg.ServiceName, runTSInNetNS, i.tsNet, i.tsAuthKey, rc)
+	files, err := i.s.installTSAtRoot(i.effectiveServiceRoot(), i.cfg.ServiceName, runTSInNetNS, i.tsNet, i.tsAuthKey, rc)
 	if err != nil {
 		return fmt.Errorf("failed to install tailscale: %v", err)
 	}
