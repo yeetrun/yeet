@@ -50,10 +50,12 @@ type RunFlags struct {
 	Publish       []string
 	EnvFile       string
 	ServiceRoot   string
+	ZFS           bool
 }
 
 type ServiceSetFlags struct {
 	ServiceRoot string
+	ZFS         bool
 	Copy        bool
 	Empty       bool
 }
@@ -142,10 +144,12 @@ type runFlagsParsed struct {
 	Publish       []string `flag:"publish" short:"p"`
 	EnvFile       string   `flag:"env-file"`
 	ServiceRoot   string   `flag:"service-root"`
+	ZFS           bool     `flag:"zfs"`
 }
 
 type serviceSetFlagsParsed struct {
 	ServiceRoot string `flag:"service-root"`
+	ZFS         bool   `flag:"zfs"`
 	Copy        bool   `flag:"copy"`
 	Empty       bool   `flag:"empty"`
 }
@@ -363,10 +367,10 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set service settings",
-				Usage:       "service set <svc> --service-root=/abs/path [--copy|--empty]",
+				Usage:       "service set <svc> --service-root=/abs/path|dataset [--zfs] [--copy|--empty]",
 				Examples: []string{
 					"yeet service set <svc> --service-root=/srv/apps/<svc>",
-					"yeet service set <svc> --service-root=/srv/apps/<svc> --copy",
+					"yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy",
 					"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
 				},
 				ArgsSchema: ServiceArgs{},
@@ -487,6 +491,7 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		Publish:       parsed.Flags.Publish,
 		EnvFile:       parsed.Flags.EnvFile,
 		ServiceRoot:   parsed.Flags.ServiceRoot,
+		ZFS:           parsed.Flags.ZFS,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
@@ -501,14 +506,18 @@ func ParseServiceSet(args []string) (ServiceSetFlags, []string, error) {
 	}
 	flags := ServiceSetFlags{
 		ServiceRoot: strings.TrimSpace(parsed.Flags.ServiceRoot),
+		ZFS:         parsed.Flags.ZFS,
 		Copy:        parsed.Flags.Copy,
 		Empty:       parsed.Flags.Empty,
 	}
 	if flags.ServiceRoot == "" {
+		if flags.ZFS {
+			return ServiceSetFlags{}, nil, fmt.Errorf("--service-root is required when --zfs is set")
+		}
 		return ServiceSetFlags{}, nil, fmt.Errorf("--service-root is required")
 	}
-	if !filepath.IsAbs(flags.ServiceRoot) {
-		return ServiceSetFlags{}, nil, fmt.Errorf("--service-root must be absolute")
+	if !flags.ZFS && !filepath.IsAbs(flags.ServiceRoot) {
+		return ServiceSetFlags{}, nil, fmt.Errorf("--service-root must be absolute unless --zfs is set")
 	}
 	if flags.Copy && flags.Empty {
 		return ServiceSetFlags{}, nil, fmt.Errorf("cannot use --copy and --empty together")

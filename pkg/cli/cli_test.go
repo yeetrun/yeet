@@ -66,7 +66,8 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 		"--macvlan-vlan", "12",
 		"--macvlan-parent", "eth0",
 		"--env-file", "prod.env",
-		"--service-root", "/srv/apps/svc-a",
+		"--service-root", "tank/apps/svc-a",
+		"--zfs",
 		"-p", "8000:8000",
 		"-p", "9000:9000",
 		"--force",
@@ -102,8 +103,11 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	if flags.EnvFile != "prod.env" {
 		t.Errorf("EnvFile = %q, want %q", flags.EnvFile, "prod.env")
 	}
-	if flags.ServiceRoot != "/srv/apps/svc-a" {
-		t.Errorf("ServiceRoot = %q, want %q", flags.ServiceRoot, "/srv/apps/svc-a")
+	if flags.ServiceRoot != "tank/apps/svc-a" {
+		t.Errorf("ServiceRoot = %q, want %q", flags.ServiceRoot, "tank/apps/svc-a")
+	}
+	if !flags.ZFS {
+		t.Errorf("ZFS = false, want true")
 	}
 	if !flags.Pull {
 		t.Errorf("Pull = false, want true")
@@ -217,8 +221,15 @@ func TestParseServiceSetFlags(t *testing.T) {
 			want:    ServiceSetFlags{ServiceRoot: "/srv/apps/svc-a", Empty: true},
 			wantOut: []string{"svc-a"},
 		},
+		{
+			name:    "zfs dataset root",
+			args:    []string{"svc-a", "--service-root=tank/apps/svc-a", "--zfs", "--copy"},
+			want:    ServiceSetFlags{ServiceRoot: "tank/apps/svc-a", ZFS: true, Copy: true},
+			wantOut: []string{"svc-a"},
+		},
 		{name: "missing root", args: []string{"svc-a"}, wantErr: "--service-root is required"},
-		{name: "relative root", args: []string{"svc-a", "--service-root", "apps/svc-a"}, wantErr: "--service-root must be absolute"},
+		{name: "zfs without root", args: []string{"svc-a", "--zfs"}, wantErr: "--service-root is required when --zfs is set"},
+		{name: "relative root without zfs", args: []string{"svc-a", "--service-root", "apps/svc-a"}, wantErr: "--service-root must be absolute unless --zfs is set"},
 		{name: "copy and empty", args: []string{"svc-a", "--service-root", "/srv/apps/svc-a", "--copy", "--empty"}, wantErr: "cannot use --copy and --empty together"},
 	}
 
@@ -376,12 +387,12 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if reg.Groups["service"].Commands["set"].Info.Name != "set" {
 		t.Fatalf("registry service set command = %#v", reg.Groups["service"].Commands["set"])
 	}
-	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> --service-root=/abs/path [--copy|--empty]" {
+	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> --service-root=/abs/path|dataset [--zfs] [--copy|--empty]" {
 		t.Fatalf("service set usage = %q", reg.Groups["service"].Commands["set"].Info.Usage)
 	}
 	wantServiceSetExamples := []string{
 		"yeet service set <svc> --service-root=/srv/apps/<svc>",
-		"yeet service set <svc> --service-root=/srv/apps/<svc> --copy",
+		"yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy",
 		"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
 	}
 	if !reflect.DeepEqual(reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples) {
@@ -412,6 +423,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if !flags["run"]["-p"].ConsumesValue {
 		t.Fatal("run -p should consume a value")
 	}
+	if _, ok := flags["run"]["--zfs"]; !ok {
+		t.Fatal("run --zfs should be registered")
+	}
 
 	groups := RemoteGroupInfos()
 	if groups["env"].Commands["copy"].Aliases[0] != "cp" {
@@ -441,6 +455,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	}
 	if RemoteGroupFlagSpecs()["service"]["set"]["--empty"].ConsumesValue {
 		t.Fatal("service set --empty should not consume a value")
+	}
+	if _, ok := RemoteGroupFlagSpecs()["service"]["set"]["--zfs"]; !ok {
+		t.Fatal("service set --zfs should be registered")
 	}
 }
 
