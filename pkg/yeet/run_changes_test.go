@@ -88,6 +88,8 @@ func TestExtractServiceRootOptions(t *testing.T) {
 		{name: "zfs before root", args: []string{"--zfs", "--service-root", "tank/apps/svc-a"}, want: serviceRootOptions{Root: "tank/apps/svc-a", ZFS: true}, wantArgs: []string{}, wantFound: true},
 		{name: "payload delimiter", args: []string{"--", "--service-root", "payload"}, wantArgs: []string{"--", "--service-root", "payload"}, wantFound: false},
 		{name: "zfs without root", args: []string{"--zfs"}, wantErr: "--zfs requires --service-root"},
+		{name: "blank root with zfs", args: []string{"--service-root=", "--zfs"}, wantErr: "--service-root requires a value"},
+		{name: "space root with zfs", args: []string{"--service-root", " ", "--zfs"}, wantErr: "--service-root requires a value"},
 		{name: "relative without zfs", args: []string{"--service-root", "apps/svc-a"}, wantErr: "--service-root must be absolute unless --zfs is set"},
 	}
 
@@ -131,6 +133,22 @@ func TestDetectRunChangesServiceRootOnly(t *testing.T) {
 	}
 	if !summary.argsChanged || !summary.requiresRun() {
 		t.Fatalf("summary = %#v, want service-root-only args change to require run", summary)
+	}
+}
+
+func TestDetectRunChangesServiceRootZFSOnly(t *testing.T) {
+	oldHashes := fetchRemoteArtifactHashesFn
+	defer func() { fetchRemoteArtifactHashesFn = oldHashes }()
+
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, true, nil
+	}
+	summary, err := detectRunChanges("ghcr.io/example/app:latest", []string{"--service-root=tank/apps/svc-a", "--zfs"}, "", []string{"--service-root=tank/apps/svc-a"})
+	if err != nil {
+		t.Fatalf("detectRunChanges error: %v", err)
+	}
+	if !summary.argsChanged || !summary.requiresRun() {
+		t.Fatalf("summary = %#v, want zfs-only args change to require run", summary)
 	}
 }
 
