@@ -563,7 +563,7 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 	if err != nil {
 		return RunFlags{}, nil, err
 	}
-	if hasExplicitEmptyFlag(parseArgs, "--snapshots") {
+	if hasMissingSnapshotMode(parseArgs) {
 		return RunFlags{}, nil, fmt.Errorf("--snapshots must be on, off, or inherit")
 	}
 	snapshotMode, err := normalizeSnapshotMode(parsed.Flags.Snapshots)
@@ -613,7 +613,7 @@ func ParseServiceSet(args []string) (ServiceSetFlags, []string, error) {
 }
 
 func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string) (ServiceSetFlags, error) {
-	if hasExplicitEmptyFlag(parseArgs, "--snapshots") {
+	if hasMissingSnapshotMode(parseArgs) {
 		return ServiceSetFlags{}, fmt.Errorf("--snapshots must be on, off, or inherit")
 	}
 	snapshotMode, err := normalizeSnapshotMode(parsed.Snapshots)
@@ -642,8 +642,25 @@ func validateServiceSetFlags(flags ServiceSetFlags) error {
 	if err := validateServiceSetRootFlags(flags); err != nil {
 		return err
 	}
+	if err := validateServiceSetMigrationFlags(flags); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateServiceSetMigrationFlags(flags ServiceSetFlags) error {
+	rootChange := flags.ServiceRoot != "" || flags.ZFS
 	if flags.Copy && flags.Empty {
 		return fmt.Errorf("cannot use --copy and --empty together")
+	}
+	if rootChange {
+		return nil
+	}
+	if flags.Copy {
+		return fmt.Errorf("--copy requires --service-root")
+	}
+	if flags.Empty {
+		return fmt.Errorf("--empty requires --service-root")
 	}
 	return nil
 }
@@ -688,7 +705,11 @@ func hasAnySnapshotRunFlag(f runFlagsParsed) bool {
 		strings.TrimSpace(f.SnapshotEvents) != ""
 }
 
-func hasExplicitEmptyFlag(args []string, name string) bool {
+func hasMissingSnapshotMode(args []string) bool {
+	return hasFlagWithoutValue(args, "--snapshots")
+}
+
+func hasFlagWithoutValue(args []string, name string) bool {
 	for i, arg := range args {
 		flagName, hasInlineValue := splitInlineFlagValue(arg)
 		if flagName != name {
@@ -697,11 +718,13 @@ func hasExplicitEmptyFlag(args []string, name string) bool {
 		if hasInlineValue {
 			return strings.TrimSpace(strings.TrimPrefix(arg, name+"=")) == ""
 		}
-		if i+1 < len(args) {
-			return strings.TrimSpace(args[i+1]) == ""
-		}
+		return i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" || isFlagToken(args[i+1])
 	}
 	return false
+}
+
+func isFlagToken(arg string) bool {
+	return isLongFlag(arg) || isShortFlag(arg)
 }
 
 func ParseSnapshotDefaultsShow(args []string) ([]string, error) {
