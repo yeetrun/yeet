@@ -364,6 +364,16 @@ func TestServiceSetZFSMigrationCopy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(serviceDataDirForRoot(oldRoot), "config.txt"), []byte("ok"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.MkdirAll(newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootInfo, err := os.Stat(newRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withServiceSetRootRename(t, func(_, _ string) error {
+		return errors.New("zfs migration must not rename over mountpoint")
+	})
 	server.zfsRunner = fakeZFSRunner(map[string]fakeZFSDataset{
 		"tank/apps/svc": {Mountpoint: newRoot, Exists: true},
 	}).Run
@@ -378,6 +388,13 @@ func TestServiceSetZFSMigrationCopy(t *testing.T) {
 	}
 	assertServiceRoot(t, server, name, newRoot)
 	assertServiceRootZFS(t, server, name, "tank/apps/svc")
+	rootInfoAfter, err := os.Stat(newRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(rootInfo, rootInfoAfter) {
+		t.Fatal("ZFS mountpoint was replaced during copy migration")
+	}
 	if got, err := os.ReadFile(filepath.Join(serviceDataDirForRoot(newRoot), "config.txt")); err != nil || string(got) != "ok" {
 		t.Fatalf("copied config = %q err=%v, want ok nil", got, err)
 	}
@@ -389,6 +406,9 @@ func TestServiceSetZFSMigrationCreatesDatasetAndLeavesDBOnCopyFailure(t *testing
 	oldRoot := filepath.Join(t.TempDir(), "old-missing")
 	newRoot := filepath.Join(t.TempDir(), "new")
 	withServiceSetRootStopped(t)
+	if err := os.MkdirAll(newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	runner := fakeZFSRunner(map[string]fakeZFSDataset{
 		"tank/apps/svc": {Mountpoint: newRoot},
 	})
@@ -408,6 +428,51 @@ func TestServiceSetZFSMigrationCreatesDatasetAndLeavesDBOnCopyFailure(t *testing
 	}
 	assertServiceRoot(t, server, name, oldRoot)
 	assertServiceRootZFS(t, server, name, "")
+}
+
+func TestServiceSetZFSMigrationEmptyUsesMountedRoot(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc"
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	newRoot := filepath.Join(t.TempDir(), "new")
+	withServiceSetRootStopped(t)
+	if err := os.MkdirAll(oldRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rootInfo, err := os.Stat(newRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withServiceSetRootRename(t, func(_, _ string) error {
+		return errors.New("zfs migration must not rename over mountpoint")
+	})
+	server.zfsRunner = fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps/svc": {Mountpoint: newRoot, Exists: true},
+	}).Run
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceRoot = oldRoot
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service root: %v", err)
+	}
+
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: "tank/apps/svc", ZFS: true}, serviceRootMigrationEmpty); err != nil {
+		t.Fatalf("migrateServiceRoot: %v", err)
+	}
+
+	assertServiceRoot(t, server, name, newRoot)
+	assertServiceRootZFS(t, server, name, "tank/apps/svc")
+	assertServiceLayout(t, newRoot)
+	rootInfoAfter, err := os.Stat(newRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(rootInfo, rootInfoAfter) {
+		t.Fatal("ZFS mountpoint was replaced during empty migration")
+	}
 }
 
 func TestServiceSetRejectsNoopAcrossRootTypes(t *testing.T) {
