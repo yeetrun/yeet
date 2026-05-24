@@ -201,30 +201,70 @@ func TestServiceInfoReturnsNotFoundResponse(t *testing.T) {
 	}
 }
 
-func TestServiceInfoPathsRootUsesDBServiceRoot(t *testing.T) {
+func TestServiceInfoPathsIncludeRootIdentity(t *testing.T) {
 	server := newTestServer(t)
 	customRoot := filepath.Join(t.TempDir(), "custom-info")
+	zfsRoot := filepath.Join(t.TempDir(), "zfs-info")
 	if err := server.cfg.DB.Set(&db.Data{
 		Services: map[string]*db.Service{
-			"svc-info": {
-				Name:        "svc-info",
+			"fs-info": {
+				Name:        "fs-info",
 				ServiceType: db.ServiceTypeSystemd,
 				ServiceRoot: customRoot,
+			},
+			"zfs-info": {
+				Name:           "zfs-info",
+				ServiceType:    db.ServiceTypeSystemd,
+				ServiceRoot:    zfsRoot,
+				ServiceRootZFS: "tank/apps/zfs-info",
+			},
+			"default-info": {
+				Name:        "default-info",
+				ServiceType: db.ServiceTypeSystemd,
 			},
 		},
 	}); err != nil {
 		t.Fatalf("DB.Set: %v", err)
 	}
 
-	resp, err := server.serviceInfo("svc-info")
+	fsResp, err := server.serviceInfo("fs-info")
 	if err != nil {
-		t.Fatalf("serviceInfo: %v", err)
+		t.Fatalf("serviceInfo fs-info: %v", err)
 	}
-	if !resp.Found {
-		t.Fatalf("service not found: %#v", resp)
+	if fsResp.Info.Paths.Root != customRoot || fsResp.Info.Paths.EffectiveRoot != customRoot {
+		t.Fatalf("filesystem effective roots = %#v, want %q", fsResp.Info.Paths, customRoot)
 	}
-	if resp.Info.Paths.Root != customRoot {
-		t.Fatalf("Paths.Root = %q, want %q", resp.Info.Paths.Root, customRoot)
+	if fsResp.Info.Paths.ServiceRoot != customRoot {
+		t.Fatalf("filesystem ServiceRoot = %q, want %q", fsResp.Info.Paths.ServiceRoot, customRoot)
+	}
+	if fsResp.Info.Paths.ServiceRootZFS != "" {
+		t.Fatalf("filesystem ServiceRootZFS = %q, want empty", fsResp.Info.Paths.ServiceRootZFS)
+	}
+
+	zfsResp, err := server.serviceInfo("zfs-info")
+	if err != nil {
+		t.Fatalf("serviceInfo zfs-info: %v", err)
+	}
+	if zfsResp.Info.Paths.Root != zfsRoot || zfsResp.Info.Paths.EffectiveRoot != zfsRoot {
+		t.Fatalf("zfs effective roots = %#v, want %q", zfsResp.Info.Paths, zfsRoot)
+	}
+	if zfsResp.Info.Paths.ServiceRoot != zfsRoot {
+		t.Fatalf("zfs ServiceRoot = %q, want %q", zfsResp.Info.Paths.ServiceRoot, zfsRoot)
+	}
+	if zfsResp.Info.Paths.ServiceRootZFS != "tank/apps/zfs-info" {
+		t.Fatalf("zfs ServiceRootZFS = %q, want tank/apps/zfs-info", zfsResp.Info.Paths.ServiceRootZFS)
+	}
+
+	defaultResp, err := server.serviceInfo("default-info")
+	if err != nil {
+		t.Fatalf("serviceInfo default-info: %v", err)
+	}
+	wantDefault := server.defaultServiceRootDir("default-info")
+	if defaultResp.Info.Paths.Root != wantDefault || defaultResp.Info.Paths.EffectiveRoot != wantDefault {
+		t.Fatalf("default effective roots = %#v, want %q", defaultResp.Info.Paths, wantDefault)
+	}
+	if defaultResp.Info.Paths.ServiceRoot != "" || defaultResp.Info.Paths.ServiceRootZFS != "" {
+		t.Fatalf("default stored roots = %#v, want empty stored root fields", defaultResp.Info.Paths)
 	}
 }
 

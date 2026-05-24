@@ -28,6 +28,7 @@ func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {
 		return resp, nil
 	}
 
+	effectiveRoot := s.serviceRootFromView(sv)
 	info := catchrpc.ServiceInfo{
 		Name:             sn,
 		ServiceType:      string(sv.ServiceType()),
@@ -35,7 +36,10 @@ func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {
 		Generation:       sv.Generation(),
 		LatestGeneration: sv.LatestGeneration(),
 		Paths: catchrpc.ServicePaths{
-			Root: s.serviceRootFromView(sv),
+			Root:           effectiveRoot,
+			EffectiveRoot:  effectiveRoot,
+			ServiceRoot:    sv.ServiceRoot(),
+			ServiceRootZFS: sv.ServiceRootZFS(),
 		},
 	}
 
