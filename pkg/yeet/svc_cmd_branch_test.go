@@ -393,6 +393,42 @@ func TestSvcRunServiceRoot(t *testing.T) {
 	}
 }
 
+func TestSvcRunPreservesServiceRootPayloadArgsInSavedConfig(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+		if image != "ghcr.io/example/app:latest" {
+			t.Fatalf("image = %q, want ghcr.io/example/app:latest", image)
+		}
+		if !reflect.DeepEqual(args, []string{"--", "--service-root", "/tmp/app"}) {
+			t.Fatalf("run args = %#v, want payload service-root args after delimiter", args)
+		}
+		return true, nil
+	}
+
+	if err := HandleSvcCmd([]string{"run", "ghcr.io/example/app:latest", "--", "--service-root", "/tmp/app"}); err != nil {
+		t.Fatalf("HandleSvcCmd run error: %v", err)
+	}
+
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd error: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatalf("expected saved service entry")
+	}
+	if entry.ServiceRoot != "" {
+		t.Fatalf("ServiceRoot = %q, want empty", entry.ServiceRoot)
+	}
+	wantArgs := []string{"--service-root", "/tmp/app"}
+	if !reflect.DeepEqual(entry.Args, wantArgs) {
+		t.Fatalf("Args = %#v, want %#v", entry.Args, wantArgs)
+	}
+}
+
 func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)

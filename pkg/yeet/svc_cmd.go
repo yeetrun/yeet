@@ -315,7 +315,7 @@ func handleSvcRun(req svcCommandRequest) error {
 	if err := runWithChanges(run.Payload, run.Args, run.EnvFile, run.Entry, run.ForceDeploy); err != nil {
 		return err
 	}
-	if err := saveRunConfig(req.Config, req.HostOverride, run.Payload, normalizeRunArgs(run.Args), run.ServiceRootArg); err != nil {
+	if err := saveRunConfig(req.Config, req.HostOverride, run.Payload, run.Args, run.ServiceRootArg); err != nil {
 		return err
 	}
 	if run.EnvFileSet {
