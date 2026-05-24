@@ -18,6 +18,9 @@ var localGroupCommands = map[string]map[string]struct{}{
 	"docker": {
 		"push": {},
 	},
+	"service": {
+		"sync": {},
+	},
 }
 
 func findServiceIndex(args []string, start int, flags map[string]cli.FlagSpec) int {

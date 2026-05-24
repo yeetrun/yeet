@@ -39,6 +39,9 @@ func TestBridgeServiceArgsDoesNotBridgeLocalOrEmptyCommands(t *testing.T) {
 		nil,
 		{"copy", "src", "dst"},
 		{"docker", "push", "svc-a", "image:tag"},
+		{"service", "sync", "svc-a"},
+		{"service", "sync", "--all"},
+		{"service", "sync", "--config", "./yeet.toml", "svc-a"},
 		{"docker"},
 		{"unknown", "svc-a"},
 		{"env", "bogus", "svc-a"},
@@ -273,6 +276,16 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 				t.Fatalf("bridged args = %q, want %q", got, tt.wantBridged)
 			}
 		})
+	}
+}
+
+func TestBridgeServiceArgsServiceSyncDoesNotBridge(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"service", "sync", "svc-a", "--config", "./yeet.toml"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if ok || service != "" || host != "" || bridged != nil {
+		t.Fatalf("bridgeServiceArgs service sync = service=%q host=%q bridged=%v ok=%v, want no bridge", service, host, bridged, ok)
 	}
 }
 

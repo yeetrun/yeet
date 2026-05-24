@@ -271,6 +271,65 @@ func TestParseServiceSetFlags(t *testing.T) {
 	}
 }
 
+func TestParseServiceSyncFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    ServiceSyncFlags
+		wantOut []string
+		wantErr string
+	}{
+		{
+			name:    "single service",
+			args:    []string{"sonarr"},
+			want:    ServiceSyncFlags{},
+			wantOut: []string{"sonarr"},
+		},
+		{
+			name:    "all",
+			args:    []string{"--all"},
+			want:    ServiceSyncFlags{All: true},
+			wantOut: nil,
+		},
+		{
+			name:    "config before service",
+			args:    []string{"--config", "./yeet.toml", "sonarr"},
+			want:    ServiceSyncFlags{Config: "./yeet.toml"},
+			wantOut: []string{"sonarr"},
+		},
+		{
+			name:    "config equals",
+			args:    []string{"sonarr", "--config=./yeet.toml"},
+			want:    ServiceSyncFlags{Config: "./yeet.toml"},
+			wantOut: []string{"sonarr"},
+		},
+		{name: "all plus service", args: []string{"--all", "sonarr"}, wantErr: "--all cannot be combined with a service name"},
+		{name: "missing service and all", args: nil, wantErr: "service sync requires a service name or --all"},
+		{name: "too many services", args: []string{"sonarr", "radarr"}, wantErr: "service sync accepts one service name"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, out, err := ParseServiceSync(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseServiceSync error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseServiceSync error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("flags = %#v, want %#v", got, tt.want)
+			}
+			if !reflect.DeepEqual(out, tt.wantOut) {
+				t.Fatalf("args = %#v, want %#v", out, tt.wantOut)
+			}
+		})
+	}
+}
+
 func TestParseInfoFlags(t *testing.T) {
 	flags, outArgs, err := ParseInfo([]string{"--format=json"})
 	if err != nil {
