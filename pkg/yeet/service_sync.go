@@ -61,13 +61,22 @@ func handleServiceSync(ctx context.Context, req svcCommandRequest) error {
 		}
 		skipped++
 	}
+	return finishServiceSync(cfgLoc, flags.All, results, updated, skipped)
+}
+
+func finishServiceSync(cfgLoc *projectConfigLocation, all bool, results []serviceSyncResult, updated, skipped int) error {
 	if updated == 0 {
-		return serviceSyncNoUpdatesError(flags.All, results)
+		if all {
+			if err := renderServiceSyncResults(os.Stdout, cfgLoc.Path, all, results, updated, skipped); err != nil {
+				return err
+			}
+		}
+		return serviceSyncNoUpdatesError(all, results)
 	}
 	if err := saveProjectConfig(cfgLoc); err != nil {
 		return err
 	}
-	return renderServiceSyncResults(os.Stdout, cfgLoc.Path, flags.All, results, updated, skipped)
+	return renderServiceSyncResults(os.Stdout, cfgLoc.Path, all, results, updated, skipped)
 }
 
 func serviceSyncConfig(existing *projectConfigLocation, configPath string) (*projectConfigLocation, error) {

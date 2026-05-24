@@ -7,6 +7,7 @@ package yeet
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,6 +232,37 @@ func TestServiceSyncAllUpdatesAndSkipsMissing(t *testing.T) {
 	}
 	if _, ok := loaded.Config.ServiceEntry("lidarr", "other-host"); !ok {
 		t.Fatalf("other-host entry should be untouched")
+	}
+}
+
+func TestServiceSyncAllReportsSkipsWhenAllRemoteMissing(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	loadedPrefs.DefaultHost = "yeet-pve1"
+	writeSvcBranchConfig(t, tmp,
+		ServiceEntry{Name: "radarr", Host: "yeet-pve1", Type: serviceTypeRun, Payload: "radarr.yml"},
+		ServiceEntry{Name: "sonarr", Host: "yeet-pve1", Type: serviceTypeRun, Payload: "sonarr.yml"},
+	)
+	fetchServiceInfoForSyncFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false, Message: "service not found"}, nil
+	}
+	oldCreate := createProjectConfigFileFn
+	t.Cleanup(func() { createProjectConfigFileFn = oldCreate })
+	createProjectConfigFileFn = func(path string) (io.WriteCloser, error) {
+		t.Fatalf("saveProjectConfig called for %s, want no save when all services are skipped", path)
+		return nil, nil
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return HandleSvcCmd([]string{"service", "sync", "--all"})
+	})
+	if err == nil || !strings.Contains(err.Error(), "no services synced") {
+		t.Fatalf("HandleSvcCmd service sync --all error = %v, want no services synced", err)
+	}
+	if !strings.Contains(out, "Skipped radarr@yeet-pve1: service not found on catch") ||
+		!strings.Contains(out, "Skipped sonarr@yeet-pve1: service not found on catch") ||
+		!strings.Contains(out, "0 updated, 2 skipped") {
+		t.Fatalf("output = %q, want skipped lines and summary", out)
 	}
 }
 
