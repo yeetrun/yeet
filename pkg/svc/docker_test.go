@@ -220,15 +220,18 @@ func TestDockerComposeInstallWrapsPrePullError(t *testing.T) {
 }
 
 func TestDockerComposeStartBranches(t *testing.T) {
-	t.Run("compose start without systemd", func(t *testing.T) {
+	t.Run("compose up without pull so config and mounts are current", func(t *testing.T) {
 		calls := []cmdCall{}
 		svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
 
 		if err := svc.Start(); err != nil {
 			t.Fatalf("Start returned error: %v", err)
 		}
-		if !composeCallHasSubcmd(calls, "start") {
-			t.Fatalf("expected compose start command, got %#v", calls)
+		if !composeCallHasSubcmd(calls, "up") {
+			t.Fatalf("expected compose up command, got %#v", calls)
+		}
+		if composeCallHasArg(calls, "up", "--pull") {
+			t.Fatalf("did not expect compose pull during start, got %#v", calls)
 		}
 	})
 
@@ -242,8 +245,8 @@ func TestDockerComposeStartBranches(t *testing.T) {
 		if !errors.Is(err, startErr) {
 			t.Fatalf("Start error = %v, want auxiliary start error", err)
 		}
-		if composeCallHasSubcmd(calls, "start") {
-			t.Fatalf("did not expect compose start after auxiliary error, got %#v", calls)
+		if composeCallHasSubcmd(calls, "up") {
+			t.Fatalf("did not expect compose up after auxiliary error, got %#v", calls)
 		}
 	})
 }

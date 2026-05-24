@@ -243,6 +243,128 @@ func TestServiceSetRootCopyStagesRenamesUpdatesDBAndLeavesOldRoot(t *testing.T) 
 	assertNoServiceSetStages(t, filepath.Dir(newRoot))
 }
 
+func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {
+	server := newTestServer(t)
+	oldRoot := filepath.Join(t.TempDir(), "old-root")
+	name := seedServiceWithRoot(t, server, oldRoot, "")
+	withServiceSetRootStopped(t)
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatalf("ensure old root: %v", err)
+	}
+	composePath := filepath.Join(serviceBinDirForRoot(oldRoot), "docker-compose.7.yml")
+	oldConfigPath := filepath.Join(serviceDataDirForRoot(oldRoot), "config")
+	oldLongPath := filepath.Join(serviceDataDirForRoot(oldRoot), "long")
+	oldKeyValuePath := filepath.Join(serviceDataDirForRoot(oldRoot), "keyvalue")
+	oldBackupPath := oldRoot + "-backup"
+	composeContent := "services:\n  svc-root:\n    volumes:\n      - " + oldConfigPath + ":/config\n      - config:/named-config\n      - type: bind\n        source: " + oldLongPath + "\n        target: /long\n      - type=bind,source=" + oldKeyValuePath + ",target=/keyvalue\n      - " + oldBackupPath + ":/backup\n"
+	if err := os.WriteFile(composePath, []byte(composeContent), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	tsUnitPath := filepath.Join(serviceBinDirForRoot(oldRoot), "yeet-svc-root-ts.service")
+	tsUnitContent := "[Service]\nExecStart=" + filepath.Join(serviceRunDirForRoot(oldRoot), "tailscaled") + " --socket=" + filepath.Join(serviceRunDirForRoot(oldRoot), "tailscaled.sock") + "\nWorkingDirectory=" + filepath.Join(oldRoot, "tailscale") + "\nEnvironment=BACKUP=" + oldBackupPath + "\n"
+	if err := os.MkdirAll(filepath.Join(oldRoot, "tailscale"), 0o755); err != nil {
+		t.Fatalf("mkdir tailscale: %v", err)
+	}
+	if err := os.WriteFile(tsUnitPath, []byte(tsUnitContent), 0o644); err != nil {
+		t.Fatalf("write ts unit: %v", err)
+	}
+	envPath := filepath.Join(serviceBinDirForRoot(oldRoot), "app.env")
+	envContent := "APP_ROOT=" + oldRoot + "\n"
+	if err := os.WriteFile(envPath, []byte(envContent), 0o644); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeDockerCompose
+		s.Generation = 7
+		s.LatestGeneration = 7
+		s.Artifacts = db.ArtifactStore{
+			db.ArtifactDockerComposeFile: {
+				Refs: map[db.ArtifactRef]string{
+					db.Gen(7): composePath,
+					"latest":  composePath,
+				},
+			},
+			db.ArtifactTSService: {
+				Refs: map[db.ArtifactRef]string{
+					db.Gen(7): tsUnitPath,
+					"latest":  tsUnitPath,
+				},
+			},
+			db.ArtifactEnvFile: {
+				Refs: map[db.ArtifactRef]string{
+					db.Gen(7): envPath,
+					"latest":  envPath,
+				},
+			},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate artifacts: %v", err)
+	}
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+	newEnvPath := filepath.Join(serviceBinDirForRoot(newRoot), "app.env")
+	downCalls := 0
+	withServiceSetRootDockerDown(t, func(_ *Server, service *db.Service, root string) error {
+		downCalls++
+		if service.Name != name {
+			t.Fatalf("docker down service = %q, want %q", service.Name, name)
+		}
+		if filepath.Clean(root) != filepath.Clean(oldRoot) {
+			t.Fatalf("docker down root = %q, want %q", root, oldRoot)
+		}
+		return nil
+	})
+	installCalls := 0
+	withServiceSetRootSystemdInstall(t, func(_ *Server, oldService, updatedService *db.Service, root string) error {
+		installCalls++
+		if filepath.Clean(root) != filepath.Clean(newRoot) {
+			t.Fatalf("systemd install root = %q, want %q", root, newRoot)
+		}
+		if got := oldService.Artifacts[db.ArtifactTSService].Refs[db.Gen(7)]; filepath.Clean(got) != filepath.Clean(tsUnitPath) {
+			t.Fatalf("old systemd artifact path = %q, want %q", got, tsUnitPath)
+		}
+		if got := updatedService.Artifacts[db.ArtifactTSService].Refs[db.Gen(7)]; filepath.Clean(got) != filepath.Clean(filepath.Join(serviceBinDirForRoot(newRoot), "yeet-svc-root-ts.service")) {
+			t.Fatalf("updated systemd artifact path = %q, want new root", got)
+		}
+		return nil
+	})
+
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationCopy); err != nil {
+		t.Fatalf("migrateServiceRoot: %v", err)
+	}
+
+	newComposePath := filepath.Join(serviceBinDirForRoot(newRoot), "docker-compose.7.yml")
+	newTSUnitPath := filepath.Join(serviceBinDirForRoot(newRoot), "yeet-svc-root-ts.service")
+	assertArtifactRef(t, server, name, db.ArtifactDockerComposeFile, db.Gen(7), newComposePath)
+	assertArtifactRef(t, server, name, db.ArtifactDockerComposeFile, "latest", newComposePath)
+	assertArtifactRef(t, server, name, db.ArtifactTSService, db.Gen(7), newTSUnitPath)
+	assertArtifactRef(t, server, name, db.ArtifactTSService, "latest", newTSUnitPath)
+	assertArtifactRef(t, server, name, db.ArtifactEnvFile, db.Gen(7), newEnvPath)
+	assertArtifactRef(t, server, name, db.ArtifactEnvFile, "latest", newEnvPath)
+	assertFileContains(t, newComposePath, filepath.Join(serviceDataDirForRoot(newRoot), "config"))
+	assertFileContains(t, newComposePath, filepath.Join(serviceDataDirForRoot(newRoot), "long"))
+	assertFileContains(t, newComposePath, filepath.Join(serviceDataDirForRoot(newRoot), "keyvalue"))
+	assertFileContains(t, newComposePath, "config:/named-config")
+	assertFileContains(t, newComposePath, oldBackupPath)
+	assertFileNotContains(t, newComposePath, oldConfigPath)
+	assertFileNotContains(t, newComposePath, oldLongPath)
+	assertFileNotContains(t, newComposePath, oldKeyValuePath)
+	assertFileContains(t, newTSUnitPath, filepath.Join(serviceRunDirForRoot(newRoot), "tailscaled"))
+	assertFileContains(t, newTSUnitPath, filepath.Join(serviceRunDirForRoot(newRoot), "tailscaled.sock"))
+	assertFileContains(t, newTSUnitPath, filepath.Join(newRoot, "tailscale"))
+	assertFileContains(t, newTSUnitPath, oldBackupPath)
+	assertFileContents(t, newEnvPath, envContent)
+	assertFileContents(t, composePath, composeContent)
+	assertFileContents(t, tsUnitPath, tsUnitContent)
+	assertFileContents(t, envPath, envContent)
+	if downCalls != 1 {
+		t.Fatalf("docker down calls = %d, want 1", downCalls)
+	}
+	if installCalls != 1 {
+		t.Fatalf("systemd install calls = %d, want 1", installCalls)
+	}
+}
+
 func TestServiceSetRootMigrationUsesFreshValidatedRoot(t *testing.T) {
 	server := newTestServer(t)
 	staleRoot := filepath.Join(t.TempDir(), "stale-root")
@@ -330,6 +452,135 @@ func TestServiceSetRootEmptyCreatesLayoutUpdatesDBWithoutCopyAndLeavesOldRoot(t 
 	assertServiceLayout(t, newRoot)
 	if _, err := os.Stat(filepath.Join(newRoot, "payload.txt")); !os.IsNotExist(err) {
 		t.Fatalf("copied payload stat error = %v, want not exist", err)
+	}
+}
+
+func TestServiceSetRootEmptyClearsOldRootArtifacts(t *testing.T) {
+	server := newTestServer(t)
+	oldRoot := filepath.Join(t.TempDir(), "old-root")
+	name := seedServiceWithRoot(t, server, oldRoot, "")
+	withServiceSetRootStopped(t)
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatalf("ensure old root: %v", err)
+	}
+	composePath := filepath.Join(serviceBinDirForRoot(oldRoot), "docker-compose.3.yml")
+	if err := os.WriteFile(composePath, []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeDockerCompose
+		s.Generation = 3
+		s.LatestGeneration = 3
+		s.Artifacts = db.ArtifactStore{
+			db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{db.Gen(3): composePath, "latest": composePath}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate artifacts: %v", err)
+	}
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+	downCalls := 0
+	withServiceSetRootDockerDown(t, func(_ *Server, service *db.Service, root string) error {
+		downCalls++
+		if service.Name != name {
+			t.Fatalf("docker down service = %q, want %q", service.Name, name)
+		}
+		if filepath.Clean(root) != filepath.Clean(oldRoot) {
+			t.Fatalf("docker down root = %q, want %q", root, oldRoot)
+		}
+		return nil
+	})
+	withServiceSetRootSystemdInstall(t, func(_ *Server, _, _ *db.Service, _ string) error {
+		t.Fatal("systemd install should not run for compose-only artifacts")
+		return nil
+	})
+
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationEmpty); err != nil {
+		t.Fatalf("migrateServiceRoot: %v", err)
+	}
+
+	assertServiceRoot(t, server, name, newRoot)
+	assertServiceLayout(t, newRoot)
+	assertNoArtifacts(t, server, name)
+	assertFileContents(t, composePath, "services: {}\n")
+	if downCalls != 1 {
+		t.Fatalf("docker down calls = %d, want 1", downCalls)
+	}
+}
+
+func TestServiceSetRootEmptyUninstallsOldSystemdAndRefreshesDockerPrereqs(t *testing.T) {
+	server := newTestServer(t)
+	oldRoot := filepath.Join(t.TempDir(), "old-root")
+	name := seedServiceWithRoot(t, server, oldRoot, "")
+	withServiceSetRootStopped(t)
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatalf("ensure old root: %v", err)
+	}
+	composePath := filepath.Join(serviceBinDirForRoot(oldRoot), "docker-compose.4.yml")
+	if err := os.WriteFile(composePath, []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	netnsPath := filepath.Join(serviceBinDirForRoot(oldRoot), "yeet-svc-root-ns.service")
+	if err := os.WriteFile(netnsPath, []byte("[Service]\nExecStart=/bin/true\n"), 0o644); err != nil {
+		t.Fatalf("write netns unit: %v", err)
+	}
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeDockerCompose
+		s.Generation = 4
+		s.LatestGeneration = 4
+		s.Artifacts = db.ArtifactStore{
+			db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{db.Gen(4): composePath}},
+			db.ArtifactNetNSService:      {Refs: map[db.ArtifactRef]string{db.Gen(4): netnsPath}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate artifacts: %v", err)
+	}
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+	withServiceSetRootDockerDown(t, func(_ *Server, _ *db.Service, _ string) error {
+		return nil
+	})
+	uninstallCalls := 0
+	withServiceSetRootSystemdUninstall(t, func(_ *Server, oldService *db.Service, root string) error {
+		uninstallCalls++
+		if filepath.Clean(root) != filepath.Clean(oldRoot) {
+			t.Fatalf("systemd uninstall root = %q, want %q", root, oldRoot)
+		}
+		if got := oldService.Artifacts[db.ArtifactNetNSService].Refs[db.Gen(4)]; filepath.Clean(got) != filepath.Clean(netnsPath) {
+			t.Fatalf("old netns artifact path = %q, want %q", got, netnsPath)
+		}
+		return nil
+	})
+	withServiceSetRootSystemdInstall(t, func(_ *Server, _, _ *db.Service, _ string) error {
+		t.Fatal("systemd install should not run for empty migration")
+		return nil
+	})
+	prereqCalls := 0
+	withServiceSetRootDockerPrereqs(t, func(s *Server) error {
+		prereqCalls++
+		units, err := s.dockerNetNSServiceUnits()
+		if err != nil {
+			return err
+		}
+		for _, unit := range units {
+			if unit == serviceNetNSUnitName(name) {
+				t.Fatalf("docker prereqs still include %q after DB update", unit)
+			}
+		}
+		return nil
+	})
+
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationEmpty); err != nil {
+		t.Fatalf("migrateServiceRoot: %v", err)
+	}
+
+	assertServiceRoot(t, server, name, newRoot)
+	assertNoArtifacts(t, server, name)
+	if uninstallCalls != 1 {
+		t.Fatalf("systemd uninstall calls = %d, want 1", uninstallCalls)
+	}
+	if prereqCalls != 1 {
+		t.Fatalf("docker prereq calls = %d, want 1", prereqCalls)
 	}
 }
 
@@ -734,6 +985,42 @@ func withServiceSetRootRename(t *testing.T, f func(string, string) error) {
 	})
 }
 
+func withServiceSetRootDockerDown(t *testing.T, f func(*Server, *db.Service, string) error) {
+	t.Helper()
+	old := downDockerComposeForRootMigration
+	downDockerComposeForRootMigration = f
+	t.Cleanup(func() {
+		downDockerComposeForRootMigration = old
+	})
+}
+
+func withServiceSetRootSystemdInstall(t *testing.T, f func(*Server, *db.Service, *db.Service, string) error) {
+	t.Helper()
+	old := installSystemdForRootMigration
+	installSystemdForRootMigration = f
+	t.Cleanup(func() {
+		installSystemdForRootMigration = old
+	})
+}
+
+func withServiceSetRootSystemdUninstall(t *testing.T, f func(*Server, *db.Service, string) error) {
+	t.Helper()
+	old := uninstallSystemdForRootMigration
+	uninstallSystemdForRootMigration = f
+	t.Cleanup(func() {
+		uninstallSystemdForRootMigration = old
+	})
+}
+
+func withServiceSetRootDockerPrereqs(t *testing.T, f func(*Server) error) {
+	t.Helper()
+	old := installDockerPrereqs
+	installDockerPrereqs = f
+	t.Cleanup(func() {
+		installDockerPrereqs = old
+	})
+}
+
 func assertServiceRoot(t *testing.T, server *Server, name, want string) {
 	t.Helper()
 	got, err := server.serviceRootDir(name)
@@ -760,6 +1047,44 @@ func assertServiceRootZFS(t *testing.T, server *Server, name, want string) {
 	}
 }
 
+func assertArtifactRef(t *testing.T, server *Server, name string, artifact db.ArtifactName, ref db.ArtifactRef, want string) {
+	t.Helper()
+	d, err := server.getDB()
+	if err != nil {
+		t.Fatalf("getDB: %v", err)
+	}
+	svc, ok := d.Services().GetOk(name)
+	if !ok {
+		t.Fatalf("service %q missing", name)
+	}
+	gotArtifact, ok := svc.Artifacts().GetOk(artifact)
+	if !ok {
+		t.Fatalf("artifact %q missing", artifact)
+	}
+	got, ok := gotArtifact.Refs().GetOk(ref)
+	if !ok {
+		t.Fatalf("artifact %q ref %q missing", artifact, ref)
+	}
+	if filepath.Clean(got) != filepath.Clean(want) {
+		t.Fatalf("artifact %q ref %q = %q, want %q", artifact, ref, got, want)
+	}
+}
+
+func assertNoArtifacts(t *testing.T, server *Server, name string) {
+	t.Helper()
+	d, err := server.getDB()
+	if err != nil {
+		t.Fatalf("getDB: %v", err)
+	}
+	svc, ok := d.Services().GetOk(name)
+	if !ok {
+		t.Fatalf("service %q missing", name)
+	}
+	if got := svc.Artifacts().Len(); got != 0 {
+		t.Fatalf("artifact count = %d, want 0", got)
+	}
+}
+
 func assertFileContents(t *testing.T, path, want string) {
 	t.Helper()
 	got, err := os.ReadFile(path)
@@ -768,6 +1093,28 @@ func assertFileContents(t *testing.T, path, want string) {
 	}
 	if string(got) != want {
 		t.Fatalf("%s contents = %q, want %q", path, string(got), want)
+	}
+}
+
+func assertFileContains(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if !strings.Contains(string(got), want) {
+		t.Fatalf("%s contents = %q, want substring %q", path, string(got), want)
+	}
+}
+
+func assertFileNotContains(t *testing.T, path, unwanted string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	if strings.Contains(string(got), unwanted) {
+		t.Fatalf("%s contents = %q, want no substring %q", path, string(got), unwanted)
 	}
 }
 
