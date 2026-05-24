@@ -5,9 +5,9 @@
 package catch
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,7 +75,7 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	if err != nil {
 		return err
 	}
-	return e.s.migrateServiceRoot(plan.ServiceName, plan.OldRoot, plan.NewRoot, mode)
+	return e.s.migrateServiceRoot(plan.ServiceName, plan.NewRoot, mode)
 }
 
 func (e *ttyExecer) confirmServiceRootMigrationMode(mode serviceRootMigrationMode, plan serviceRootMigrationPlan) (serviceRootMigrationMode, error) {
@@ -138,23 +138,24 @@ func rootsAreNested(parent, child string) bool {
 	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func (s *Server) migrateServiceRoot(name, oldRoot, newRoot string, mode serviceRootMigrationMode) error {
-	if _, err := s.validateServiceRootMigration(name, newRoot); err != nil {
+func (s *Server) migrateServiceRoot(name, newRoot string, mode serviceRootMigrationMode) error {
+	plan, err := s.validateServiceRootMigration(name, newRoot)
+	if err != nil {
 		return err
 	}
 	switch mode {
 	case serviceRootMigrationCopy:
-		if err := s.copyServiceRootMigration(oldRoot, newRoot); err != nil {
+		if err := s.copyServiceRootMigration(plan.OldRoot, plan.NewRoot); err != nil {
 			return err
 		}
 	case serviceRootMigrationEmpty:
-		if err := createEmptyServiceRoot(newRoot); err != nil {
+		if err := createEmptyServiceRoot(plan.NewRoot); err != nil {
 			return err
 		}
 	default:
 		return fmt.Errorf("service root migration mode was not selected")
 	}
-	return s.updateServiceRoot(name, newRoot)
+	return s.updateServiceRoot(plan.ServiceName, plan.NewRoot)
 }
 
 func (s *Server) copyServiceRootMigration(oldRoot, newRoot string) error {
@@ -187,12 +188,27 @@ func (s *Server) copyServiceRootMigration(oldRoot, newRoot string) error {
 }
 
 func copyServiceRootToStage(srcRoot, stageRoot string) error {
-	var buf bytes.Buffer
-	if err := copyutil.TarDirectory(&buf, srcRoot, ""); err != nil {
-		return fmt.Errorf("archive service root: %w", err)
+	pr, pw := io.Pipe()
+	errCh := make(chan error, 1)
+	go func() {
+		if err := copyutil.TarDirectory(pw, srcRoot, ""); err != nil {
+			_ = pw.CloseWithError(err)
+			errCh <- err
+			return
+		}
+		errCh <- pw.Close()
+	}()
+
+	extractErr := copyutil.ExtractTarWithOptions(pr, stageRoot, copyutil.ExtractOptions{})
+	if extractErr != nil {
+		_ = pr.CloseWithError(extractErr)
 	}
-	if err := copyutil.ExtractTarWithOptions(&buf, stageRoot, copyutil.ExtractOptions{}); err != nil {
-		return fmt.Errorf("extract service root archive: %w", err)
+	archiveErr := <-errCh
+	if archiveErr != nil {
+		return fmt.Errorf("archive service root: %w", archiveErr)
+	}
+	if extractErr != nil {
+		return fmt.Errorf("extract service root archive: %w", extractErr)
 	}
 	return nil
 }
