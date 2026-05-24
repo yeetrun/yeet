@@ -156,7 +156,8 @@ func NewUnstartedServer(config *Config) *Server {
 	}
 	s.registry = s.newRegistry()
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
-		return svc.NewDockerComposeService(s.cfg.DB, sv, s.serviceDataDir(sv.Name()), s.serviceRunDir(sv.Name()))
+		root := s.serviceRootFromView(sv)
+		return svc.NewDockerComposeService(s.cfg.DB, sv, serviceDataDirForRoot(root), serviceRunDirForRoot(root))
 	}
 	return s
 }
@@ -291,7 +292,8 @@ func (s *Server) dockerComposeService(sn string) (*svc.DockerComposeService, err
 	if !ok {
 		return nil, errServiceNotFound
 	}
-	service, err := svc.NewDockerComposeService(s.cfg.DB, sv, s.serviceDataDir(sn), s.serviceRunDir(sn))
+	root := s.serviceRootFromView(sv)
+	service, err := svc.NewDockerComposeService(s.cfg.DB, sv, serviceDataDirForRoot(root), serviceRunDirForRoot(root))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load service: %v", err)
 	}
@@ -304,7 +306,8 @@ func (s *Server) systemdService(sn string) (*svc.SystemdService, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get service view: %v", err)
 	}
-	service, err := svc.NewSystemdService(s.cfg.DB, sv, s.serviceRunDir(sn))
+	root := s.serviceRootFromView(sv)
+	service, err := svc.NewSystemdService(s.cfg.DB, sv, serviceRunDirForRoot(root))
 	if err != nil {
 		return nil, fmt.Errorf("failed to load service: %v", err)
 	}
@@ -358,29 +361,60 @@ type InstallerCfg struct {
 	ClientCloser io.Closer `json:"-"`
 }
 
-// serviceRootDir returns the root directory for the given service name.
-func (s *Server) serviceRootDir(sn string) string {
+func (s *Server) defaultServiceRootDir(sn string) string {
 	return filepath.Join(s.cfg.ServicesRoot, sn)
 }
 
+func (s *Server) serviceRootFromView(sv db.ServiceView) string {
+	if !sv.Valid() {
+		return s.defaultServiceRootDir("")
+	}
+	if sv.ServiceRoot() != "" {
+		return sv.ServiceRoot()
+	}
+	return s.defaultServiceRootDir(sv.Name())
+}
+
+// serviceRootDir returns the effective root directory for the given service
+// name. Missing services use the legacy default location.
+func (s *Server) serviceRootDir(sn string) (string, error) {
+	d, err := s.getDB()
+	if err != nil {
+		return "", err
+	}
+	sv, ok := d.Services().GetOk(sn)
+	if !ok {
+		return s.defaultServiceRootDir(sn), nil
+	}
+	return s.serviceRootFromView(sv), nil
+}
+
 func (s *Server) serviceBinDir(sn string) string {
-	return filepath.Join(s.serviceRootDir(sn), "bin")
+	return serviceBinDirForRoot(s.defaultServiceRootDir(sn))
 }
 
 func (s *Server) serviceRunDir(sn string) string {
-	return filepath.Join(s.serviceRootDir(sn), "run")
+	return serviceRunDirForRoot(s.defaultServiceRootDir(sn))
 }
 
 func (s *Server) serviceDataDir(sn string) string {
-	return filepath.Join(s.serviceRootDir(sn), "data")
+	return serviceDataDirForRoot(s.defaultServiceRootDir(sn))
 }
 
 func (s *Server) serviceEnvDir(sn string) string {
-	return filepath.Join(s.serviceRootDir(sn), "env")
+	return serviceEnvDirForRoot(s.defaultServiceRootDir(sn))
 }
 
 func (s *Server) ensureDirs(sn, uname string) error {
-	for _, dir := range serviceDirectoryPlan(s.cfg.ServicesRoot, sn) {
+	root, err := s.serviceRootDir(sn)
+	if err != nil {
+		return err
+	}
+	return ensureDirsForRoot(root, uname)
+}
+
+func ensureDirsForRoot(root, uname string) error {
+	for _, dir := range serviceDirectoryPlan(root) {
 		if err := ensureServiceDir(dir, uname); err != nil {
 			return err
 		}
@@ -388,14 +422,29 @@ func (s *Server) ensureDirs(sn, uname string) error {
 	return nil
 }
 
-func serviceDirectoryPlan(servicesRoot, serviceName string) []string {
-	serviceRoot := filepath.Join(servicesRoot, serviceName)
+func serviceDirectoryPlan(serviceRoot string) []string {
 	return []string{
 		filepath.Join(serviceRoot, "bin"),
 		filepath.Join(serviceRoot, "data"),
 		filepath.Join(serviceRoot, "env"),
 		filepath.Join(serviceRoot, "run"),
 	}
+}
+
+func serviceBinDirForRoot(root string) string {
+	return filepath.Join(root, "bin")
+}
+
+func serviceRunDirForRoot(root string) string {
+	return filepath.Join(root, "run")
+}
+
+func serviceDataDirForRoot(root string) string {
+	return filepath.Join(root, "data")
+}
+
+func serviceEnvDirForRoot(root string) string {
+	return filepath.Join(root, "env")
 }
 
 func ensureServiceDir(dir, uname string) error {
@@ -607,12 +656,17 @@ func (s *Server) RemoveService(name string) (*RemoveReport, error) {
 	report := &RemoveReport{}
 	s.addRunningServiceWarning(report, name)
 	tsStableID := s.tailscaleStableIDForService(report, name)
+	serviceRoot, err := s.serviceRootDir(name)
+	if err != nil {
+		report.addWarning(fmt.Errorf("failed to resolve service root for %q: %w", name, err))
+		serviceRoot = s.defaultServiceRootDir(name)
+	}
 	if err := s.removeServiceFromDB(name); err != nil {
 		return report, fmt.Errorf("failed to remove service from db: %w", err)
 	}
 	s.publishServiceDeleted(name)
 	s.deleteTailscaleDevice(report, tsStableID)
-	s.removeServiceDirs(report, name)
+	s.removeServiceDirs(report, serviceRoot)
 	return report, nil
 }
 
@@ -679,8 +733,8 @@ func (s *Server) deleteTailscaleDevice(report *RemoveReport, tsStableID string) 
 	}
 }
 
-func (s *Server) removeServiceDirs(report *RemoveReport, name string) {
-	dirs, err := filepath.Glob(filepath.Join(s.cfg.ServicesRoot, name, "*"))
+func (s *Server) removeServiceDirs(report *RemoveReport, serviceRoot string) {
+	dirs, err := filepath.Glob(filepath.Join(serviceRoot, "*"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		report.addWarning(fmt.Errorf("failed to list service directories: %w", err))
 		return

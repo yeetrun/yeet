@@ -7,6 +7,7 @@ package catch
 import (
 	"errors"
 	"net/netip"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -197,6 +198,33 @@ func TestServiceInfoReturnsNotFoundResponse(t *testing.T) {
 	}
 	if resp.Found || resp.Message != "service not found" {
 		t.Fatalf("response = %#v", resp)
+	}
+}
+
+func TestServiceInfoPathsRootUsesDBServiceRoot(t *testing.T) {
+	server := newTestServer(t)
+	customRoot := filepath.Join(t.TempDir(), "custom-info")
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"svc-info": {
+				Name:        "svc-info",
+				ServiceType: db.ServiceTypeSystemd,
+				ServiceRoot: customRoot,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	resp, err := server.serviceInfo("svc-info")
+	if err != nil {
+		t.Fatalf("serviceInfo: %v", err)
+	}
+	if !resp.Found {
+		t.Fatalf("service not found: %#v", resp)
+	}
+	if resp.Info.Paths.Root != customRoot {
+		t.Fatalf("Paths.Root = %q, want %q", resp.Info.Paths.Root, customRoot)
 	}
 }
 

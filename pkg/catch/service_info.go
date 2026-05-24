@@ -35,7 +35,7 @@ func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {
 		Generation:       sv.Generation(),
 		LatestGeneration: sv.LatestGeneration(),
 		Paths: catchrpc.ServicePaths{
-			Root: s.serviceRootDir(sn),
+			Root: s.serviceRootFromView(sv),
 		},
 	}
 

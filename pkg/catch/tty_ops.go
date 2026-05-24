@@ -391,7 +391,8 @@ func (e *ttyExecer) tsCmdFunc(args []string) error {
 }
 
 func (e *ttyExecer) runRawTailscaleCmd(sv db.ServiceView, args []string) error {
-	sock := filepath.Join(e.s.serviceRunDir(e.sn), "tailscaled.sock")
+	serviceRoot := e.s.serviceRootFromView(sv)
+	sock := filepath.Join(serviceRunDirForRoot(serviceRoot), "tailscaled.sock")
 	if _, err := os.Stat(sock); err != nil {
 		return fmt.Errorf("tailscaled socket not found: %w", err)
 	}
@@ -573,7 +574,11 @@ func (e *ttyExecer) applyTSUpdate(current, latest string) error {
 	if _, err := e.s.getTailscaleBinary(latest); err != nil {
 		return fmt.Errorf("failed to download tailscale %s: %w", latest, err)
 	}
-	runBinary := filepath.Join(e.s.serviceRunDir(e.sn), "tailscaled")
+	serviceRoot, err := e.s.serviceRootDir(e.sn)
+	if err != nil {
+		return fmt.Errorf("failed to resolve service root: %w", err)
+	}
+	runBinary := filepath.Join(serviceRunDirForRoot(serviceRoot), "tailscaled")
 	if err := fileutil.CopyFile(tsd, runBinary); err != nil {
 		return fmt.Errorf("failed to replace tailscaled binary: %w", err)
 	}

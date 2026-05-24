@@ -250,7 +250,11 @@ func (s *Server) installTS(service string, runInNetNS string, tsNet *db.Tailscal
 	if err != nil {
 		return nil, err
 	}
-	serviceTSDir := filepath.Join(s.serviceRootDir(service), "tailscale")
+	serviceRoot, err := s.serviceRootDir(service)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve service root: %w", err)
+	}
+	serviceTSDir := filepath.Join(serviceRoot, "tailscale")
 	if err := os.MkdirAll(serviceTSDir, 0o755); err != nil {
 		return nil, err
 	}
@@ -260,13 +264,13 @@ func (s *Server) installTS(service string, runInNetNS string, tsNet *db.Tailscal
 	}
 	unit := newTailscaleSystemdUnit(tailscaleInstallPlan{
 		service:       service,
-		runDir:        s.serviceRunDir(service),
+		runDir:        serviceRunDirForRoot(serviceRoot),
 		serviceTSDir:  serviceTSDir,
 		runInNetNS:    runInNetNS,
 		interfaceName: tsNet.Interface,
 		resolvConf:    resolvConf,
 	})
-	artifacts, err := unit.WriteOutUnitFiles(s.serviceBinDir(service))
+	artifacts, err := unit.WriteOutUnitFiles(serviceBinDirForRoot(serviceRoot))
 	if err != nil {
 		return nil, fmt.Errorf("failed to write unit files: %v", err)
 	}
