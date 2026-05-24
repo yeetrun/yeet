@@ -94,6 +94,53 @@ func loadProjectConfigFromDir(startDir string) (*projectConfigLocation, error) {
 	return &projectConfigLocation{Path: path, Dir: filepath.Dir(path), Config: &cfg}, nil
 }
 
+func loadProjectConfigFromFile(path string) (*projectConfigLocation, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("no %s found; run from a project directory or pass --config", projectConfigName)
+	}
+	expanded, err := expandUserConfigPath(path)
+	if err != nil {
+		return nil, err
+	}
+	abs, err := filepath.Abs(expanded)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("no %s found at %s", projectConfigName, abs)
+		}
+		return nil, err
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("%s is a directory; pass the path to %s", abs, projectConfigName)
+	}
+	var cfg ProjectConfig
+	if _, err := toml.DecodeFile(abs, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse %s: %w", abs, err)
+	}
+	if cfg.Version == 0 {
+		cfg.Version = projectConfigVersion
+	}
+	return &projectConfigLocation{Path: abs, Dir: filepath.Dir(abs), Config: &cfg}, nil
+}
+
+func expandUserConfigPath(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	if path == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, path[2:]), nil
+}
+
 func findProjectConfigPath(startDir string) (string, error) {
 	dir := filepath.Clean(startDir)
 	for {
@@ -226,6 +273,23 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 	c.Services = append(c.Services, entry)
 	c.addHost(entry.Host)
 	sortServiceEntries(c.Services)
+}
+
+func (c *ProjectConfig) SetServiceRootForEntry(service, host, root string, zfs bool) bool {
+	if c == nil {
+		return false
+	}
+	root = strings.TrimSpace(root)
+	for i := range c.Services {
+		if c.Services[i].Name != service || c.Services[i].Host != host {
+			continue
+		}
+		c.Services[i].ServiceRoot = root
+		c.Services[i].ServiceRootZFS = root != "" && zfs
+		sortServiceEntries(c.Services)
+		return true
+	}
+	return false
 }
 
 func (c *ProjectConfig) RemoveServiceEntry(service, host string) bool {

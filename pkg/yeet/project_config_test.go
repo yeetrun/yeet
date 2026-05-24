@@ -112,6 +112,51 @@ host = "host-a"
 	}
 }
 
+func TestLoadProjectConfigFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "custom.toml")
+	loc := &projectConfigLocation{
+		Path: path,
+		Dir:  dir,
+		Config: &ProjectConfig{
+			Version: projectConfigVersion,
+			Services: []ServiceEntry{{
+				Name:    "sonarr",
+				Host:    "yeet-pve1",
+				Type:    serviceTypeRun,
+				Payload: "compose.yml",
+			}},
+		},
+	}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+
+	loaded, err := loadProjectConfigFromFile(path)
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromFile: %v", err)
+	}
+	if loaded.Path != path {
+		t.Fatalf("Path = %q, want %q", loaded.Path, path)
+	}
+	if loaded.Dir != dir {
+		t.Fatalf("Dir = %q, want %q", loaded.Dir, dir)
+	}
+	if _, ok := loaded.Config.ServiceEntry("sonarr", "yeet-pve1"); !ok {
+		t.Fatalf("loaded config missing sonarr entry: %#v", loaded.Config)
+	}
+}
+
+func TestLoadProjectConfigFromFileErrors(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := loadProjectConfigFromFile(filepath.Join(dir, "missing.toml")); err == nil || !strings.Contains(err.Error(), "no yeet.toml found at") {
+		t.Fatalf("missing config error = %v, want no yeet.toml found", err)
+	}
+	if _, err := loadProjectConfigFromFile(dir); err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("directory config error = %v, want directory rejection", err)
+	}
+}
+
 func TestSaveProjectConfigNoopsNilAndSetsDefaultVersion(t *testing.T) {
 	if err := saveProjectConfig(nil); err != nil {
 		t.Fatalf("saveProjectConfig nil error: %v", err)
@@ -209,6 +254,38 @@ func TestRemoveServiceConfig(t *testing.T) {
 				t.Fatalf("expected no saved config file, stat error = %v", statErr)
 			}
 		})
+	}
+}
+
+func TestProjectConfigSetServiceRootForEntryCanClear(t *testing.T) {
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:           "sonarr",
+		Host:           "yeet-pve1",
+		Type:           serviceTypeRun,
+		Payload:        "compose.yml",
+		ServiceRoot:    "flash/yeet/sonarr",
+		ServiceRootZFS: true,
+	})
+
+	if !cfg.SetServiceRootForEntry("sonarr", "yeet-pve1", "/srv/apps/sonarr", false) {
+		t.Fatalf("SetServiceRootForEntry filesystem = false, want true")
+	}
+	entry, _ := cfg.ServiceEntry("sonarr", "yeet-pve1")
+	if entry.ServiceRoot != "/srv/apps/sonarr" || entry.ServiceRootZFS {
+		t.Fatalf("filesystem entry = %#v, want root without zfs", entry)
+	}
+
+	if !cfg.SetServiceRootForEntry("sonarr", "yeet-pve1", "", false) {
+		t.Fatalf("SetServiceRootForEntry clear = false, want true")
+	}
+	entry, _ = cfg.ServiceEntry("sonarr", "yeet-pve1")
+	if entry.ServiceRoot != "" || entry.ServiceRootZFS {
+		t.Fatalf("cleared entry = %#v, want empty root and false zfs", entry)
+	}
+
+	if cfg.SetServiceRootForEntry("missing", "yeet-pve1", "/srv/apps/missing", false) {
+		t.Fatalf("SetServiceRootForEntry missing = true, want false")
 	}
 }
 
