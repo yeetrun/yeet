@@ -10,3 +10,7 @@ func getService() string {
 	}
 	return systemServiceName
 }
+
+func SystemServiceName() string {
+	return systemServiceName
+}

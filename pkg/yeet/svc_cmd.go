@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -166,6 +167,9 @@ var svcCommandHandlers = map[string]svcCommandHandler{
 	},
 	"stage": func(ctx context.Context, req svcCommandRequest) error {
 		return handleSvcStage(ctx, req)
+	},
+	"snapshots": func(ctx context.Context, req svcCommandRequest) error {
+		return handleSvcSnapshots(ctx, req)
 	},
 	cli.CommandEvents: func(ctx context.Context, req svcCommandRequest) error {
 		return handleSvcEvents(ctx, req)
@@ -327,6 +331,12 @@ type parsedSvcRun struct {
 	ServiceRootArg    string
 	ServiceRootZFSArg bool
 	ServiceRootSet    bool
+	Snapshots         string
+	SnapshotKeepLast  int
+	SnapshotMaxAge    string
+	SnapshotRequired  *bool
+	SnapshotEvents    []string
+	SnapshotChange    bool
 	Entry             ServiceEntry
 	ForceDeploy       bool
 }
@@ -383,6 +393,7 @@ func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride s
 		serviceRootZFS = entry.ServiceRootZFS
 	}
 	filteredArgs := runArgsWithServiceRootOptions(flags.Args, serviceRootOptions{Root: serviceRoot, ZFS: serviceRootZFS})
+	filteredArgs = runArgsWithSnapshotOptions(filteredArgs, snapshotOptionsForSvcRun(entry, flags))
 	return parsedSvcRun{
 		Payload:           payload,
 		Args:              filteredArgs,
@@ -394,9 +405,34 @@ func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride s
 		ServiceRootArg:    flags.ServiceRootArg,
 		ServiceRootZFSArg: flags.ServiceRootZFSArg,
 		ServiceRootSet:    flags.ServiceRootSet,
+		Snapshots:         flags.Snapshots,
+		SnapshotKeepLast:  flags.SnapshotKeepLast,
+		SnapshotMaxAge:    flags.SnapshotMaxAge,
+		SnapshotRequired:  flags.SnapshotRequired,
+		SnapshotEvents:    flags.SnapshotEvents,
+		SnapshotChange:    flags.SnapshotChange,
 		Entry:             entry,
 		ForceDeploy:       flags.ForceDeploy,
 	}, nil
+}
+
+func snapshotOptionsForSvcRun(entry ServiceEntry, flags svcRunControlFlags) snapshotOptions {
+	if flags.SnapshotChange {
+		return snapshotOptions{
+			Snapshots: flags.Snapshots,
+			KeepLast:  flags.SnapshotKeepLast,
+			MaxAge:    flags.SnapshotMaxAge,
+			Required:  flags.SnapshotRequired,
+			Events:    flags.SnapshotEvents,
+		}
+	}
+	return snapshotOptions{
+		Snapshots: entry.Snapshots,
+		KeepLast:  entry.SnapshotKeepLast,
+		MaxAge:    entry.SnapshotMaxAge,
+		Required:  entry.SnapshotRequired,
+		Events:    entry.SnapshotEvents,
+	}
 }
 
 func ensureSvcRunEntryFlags(entry ServiceEntry, hasEntry bool, args []string) error {
@@ -413,6 +449,12 @@ type svcRunControlFlags struct {
 	ServiceRootArg    string
 	ServiceRootZFSArg bool
 	ServiceRootSet    bool
+	Snapshots         string
+	SnapshotKeepLast  int
+	SnapshotMaxAge    string
+	SnapshotRequired  *bool
+	SnapshotEvents    []string
+	SnapshotChange    bool
 	ForceDeploy       bool
 }
 
@@ -429,6 +471,10 @@ func parseSvcRunControlFlags(runArgs []string) (svcRunControlFlags, error) {
 	if err != nil {
 		return svcRunControlFlags{}, err
 	}
+	snapOpts, filteredArgs, snapshotChange, err := extractSnapshotOptions(filteredArgs)
+	if err != nil {
+		return svcRunControlFlags{}, err
+	}
 	return svcRunControlFlags{
 		Args:              filteredArgs,
 		EnvFileArg:        envFileArg,
@@ -436,8 +482,162 @@ func parseSvcRunControlFlags(runArgs []string) (svcRunControlFlags, error) {
 		ServiceRootArg:    rootOpts.Root,
 		ServiceRootZFSArg: rootOpts.ZFS,
 		ServiceRootSet:    serviceRootSet,
+		Snapshots:         snapOpts.Snapshots,
+		SnapshotKeepLast:  snapOpts.KeepLast,
+		SnapshotMaxAge:    snapOpts.MaxAge,
+		SnapshotRequired:  snapOpts.Required,
+		SnapshotEvents:    snapOpts.Events,
+		SnapshotChange:    snapshotChange,
 		ForceDeploy:       forceDeploy,
 	}, nil
+}
+
+func extractSnapshotOptions(args []string) (snapshotOptions, []string, bool, error) {
+	if len(args) == 0 {
+		return snapshotOptions{}, args, false, nil
+	}
+	out := make([]string, 0, len(args))
+	opts := snapshotOptions{}
+	changed := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+		next, handled, err := parseSnapshotControlArg(args, i, &opts)
+		if err != nil {
+			return snapshotOptions{}, nil, false, err
+		}
+		if handled {
+			changed = true
+			i = next
+			continue
+		}
+		out = append(out, arg)
+	}
+	return opts, out, changed, nil
+}
+
+func parseSnapshotControlArg(args []string, i int, opts *snapshotOptions) (int, bool, error) {
+	for _, name := range snapshotControlFlagNames {
+		value, next, ok, err := snapshotControlFlagValue(args, i, name)
+		if err != nil {
+			return next, false, err
+		}
+		if !ok {
+			continue
+		}
+		if err := applySnapshotControlValue(opts, name, value); err != nil {
+			return i, false, err
+		}
+		return next, true, nil
+	}
+	return i, false, nil
+}
+
+var snapshotControlFlagNames = []string{
+	"--snapshots",
+	"--snapshot-keep-last",
+	"--snapshot-max-age",
+	"--snapshot-required",
+	"--snapshot-events",
+}
+
+func snapshotControlFlagValue(args []string, i int, name string) (string, int, bool, error) {
+	arg := args[i]
+	if strings.HasPrefix(arg, name+"=") {
+		return strings.TrimPrefix(arg, name+"="), i, true, nil
+	}
+	if arg != name {
+		return "", i, false, nil
+	}
+	if i+1 >= len(args) {
+		return "", i, false, snapshotControlMissingValueError(name)
+	}
+	return args[i+1], i + 1, true, nil
+}
+
+func snapshotControlMissingValueError(name string) error {
+	if name == "--snapshots" {
+		return fmt.Errorf("--snapshots must be on, off, or inherit")
+	}
+	return fmt.Errorf("%s requires a value", name)
+}
+
+func applySnapshotControlValue(opts *snapshotOptions, name, value string) error {
+	switch name {
+	case "--snapshots":
+		mode, err := parseSnapshotModeValue(value)
+		if err != nil {
+			return err
+		}
+		opts.Snapshots = mode
+	case "--snapshot-keep-last":
+		n, err := parseOptionalPositiveIntFlag(value, "--snapshot-keep-last")
+		if err != nil {
+			return err
+		}
+		opts.KeepLast = n
+	case "--snapshot-max-age":
+		opts.MaxAge = strings.TrimSpace(value)
+	case "--snapshot-required":
+		v, err := parseOptionalBoolFlag(value, "--snapshot-required")
+		if err != nil {
+			return err
+		}
+		opts.Required = v
+	case "--snapshot-events":
+		opts.Events = splitSnapshotEventList(value)
+	}
+	return nil
+}
+
+func parseSnapshotModeValue(raw string) (string, error) {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	switch raw {
+	case "on", "off", "inherit":
+		return raw, nil
+	default:
+		return "", fmt.Errorf("--snapshots must be on, off, or inherit")
+	}
+}
+
+func parseOptionalBoolFlag(raw, name string) (*bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s value %q", name, raw)
+	}
+	return &v, nil
+}
+
+func parseOptionalPositiveIntFlag(raw, name string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return n, nil
+}
+
+func splitSnapshotEventList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	events := make([]string, 0, len(parts))
+	for _, part := range parts {
+		event := strings.TrimSpace(part)
+		if event == "" {
+			continue
+		}
+		events = append(events, event)
+	}
+	return events
 }
 
 func handleSvcService(ctx context.Context, req svcCommandRequest) error {
@@ -463,7 +663,7 @@ func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 	if err := execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, tty); err != nil {
 		return err
 	}
-	updated, err := saveServiceSetConfig(req.Config, req.HostOverride, flags.ServiceRoot, flags.ZFS)
+	updated, err := saveServiceSetConfig(req.Config, req.HostOverride, flags)
 	if err != nil {
 		return err
 	}
@@ -1373,6 +1573,13 @@ func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride s
 		rehydrateRunArgs(stored.Entry.Args),
 		serviceRootOptions{Root: stored.Entry.ServiceRoot, ZFS: stored.Entry.ServiceRootZFS},
 	)
+	runArgs = runArgsWithSnapshotOptions(runArgs, snapshotOptions{
+		Snapshots: stored.Entry.Snapshots,
+		KeepLast:  stored.Entry.SnapshotKeepLast,
+		MaxAge:    stored.Entry.SnapshotMaxAge,
+		Required:  stored.Entry.SnapshotRequired,
+		Events:    stored.Entry.SnapshotEvents,
+	})
 	return runWithChanges(payload, runArgs, envFile, stored.Entry, forceDeploy)
 }
 
@@ -1480,11 +1687,16 @@ func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload s
 	if err != nil {
 		return err
 	}
+	snapOpts, filteredArgs, snapshotChange, err := extractSnapshotOptions(filteredArgs)
+	if err != nil {
+		return err
+	}
 	if foundServiceRoot && strings.TrimSpace(serviceRoot) == "" {
 		serviceRoot = rootOpts.Root
 		serviceRootZFS = rootOpts.ZFS
 	}
 	payloadRel := relativePayloadPath(loc.Dir, payload)
+	existing, hasExisting := runConfigExistingEntry(loc, host)
 	entry := ServiceEntry{
 		Name:           serviceOverride,
 		Host:           host,
@@ -1494,22 +1706,107 @@ func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload s
 		ServiceRootZFS: serviceRootZFS,
 		Args:           normalizeRunArgs(filteredArgs),
 	}
+	applyRunConfigSnapshotFields(&entry, existing, hasExisting, snapOpts, snapshotChange)
 	loc.Config.SetServiceEntry(entry)
 	return saveProjectConfig(loc)
 }
 
-func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, serviceRoot string, serviceRootZFS bool) (bool, error) {
-	if serviceOverride == "" || strings.TrimSpace(serviceRoot) == "" {
+func runConfigExistingEntry(loc *projectConfigLocation, host string) (ServiceEntry, bool) {
+	if loc == nil || loc.Config == nil {
+		return ServiceEntry{}, false
+	}
+	return loc.Config.ServiceEntry(serviceOverride, strings.TrimSpace(host))
+}
+
+func applyRunConfigSnapshotFields(entry *ServiceEntry, existing ServiceEntry, hasExisting bool, opts snapshotOptions, changed bool) {
+	if hasExisting && !changed && serviceEntryHasSnapshotOverride(existing) {
+		copySnapshotFieldsFromEntry(entry, existing)
+		return
+	}
+	if !changed {
+		return
+	}
+	applySnapshotOptionsToEntry(entry, opts)
+	if entry.Snapshots == "inherit" {
+		entry.ClearSnapshotOverride()
+	}
+}
+
+func copySnapshotFieldsFromEntry(dst *ServiceEntry, src ServiceEntry) {
+	dst.Snapshots = src.Snapshots
+	dst.SnapshotKeepLast = src.SnapshotKeepLast
+	dst.SnapshotMaxAge = src.SnapshotMaxAge
+	dst.SnapshotRequired = cloneBoolPtr(src.SnapshotRequired)
+	dst.SnapshotEvents = cloneStringSlice(src.SnapshotEvents)
+}
+
+func applySnapshotOptionsToEntry(entry *ServiceEntry, opts snapshotOptions) {
+	entry.Snapshots = opts.Snapshots
+	entry.SnapshotKeepLast = opts.KeepLast
+	entry.SnapshotMaxAge = opts.MaxAge
+	entry.SnapshotRequired = cloneBoolPtr(opts.Required)
+	entry.SnapshotEvents = cloneStringSlice(opts.Events)
+}
+
+func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, flags cli.ServiceSetFlags) (bool, error) {
+	if serviceOverride == "" {
 		return false, nil
 	}
 	entry, ok := serviceEntryForConfig(cfgLoc, hostOverride)
 	if !ok {
 		return false, nil
 	}
-	entry.ServiceRoot = strings.TrimSpace(serviceRoot)
-	entry.ServiceRootZFS = serviceRootZFS
+	if err := applyServiceSetConfigFlags(&entry, flags); err != nil {
+		return false, err
+	}
 	cfgLoc.Config.SetServiceEntry(entry)
 	return true, saveProjectConfig(cfgLoc)
+}
+
+func applyServiceSetConfigFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) error {
+	if strings.TrimSpace(flags.ServiceRoot) != "" {
+		entry.ServiceRoot = strings.TrimSpace(flags.ServiceRoot)
+		entry.ServiceRootZFS = flags.ZFS
+	}
+	return applyServiceSetSnapshotFlags(entry, flags)
+}
+
+func applyServiceSetSnapshotFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) error {
+	if !flags.SnapshotChange {
+		return nil
+	}
+	if flags.Snapshots == "inherit" {
+		entry.ClearSnapshotOverride()
+		return nil
+	}
+	return applyServiceSetSnapshotOverride(entry, flags)
+}
+
+func applyServiceSetSnapshotOverride(entry *ServiceEntry, flags cli.ServiceSetFlags) error {
+	if flags.Snapshots != "" {
+		entry.Snapshots = flags.Snapshots
+	}
+	if flags.SnapshotKeepLast != "" {
+		n, err := strconv.Atoi(flags.SnapshotKeepLast)
+		if err != nil || n < 1 {
+			return fmt.Errorf("--snapshot-keep-last must be a positive integer")
+		}
+		entry.SnapshotKeepLast = n
+	}
+	if flags.SnapshotMaxAge != "" {
+		entry.SnapshotMaxAge = flags.SnapshotMaxAge
+	}
+	if flags.SnapshotRequired != "" {
+		v, err := strconv.ParseBool(flags.SnapshotRequired)
+		if err != nil {
+			return fmt.Errorf("invalid --snapshot-required value %q", flags.SnapshotRequired)
+		}
+		entry.SnapshotRequired = &v
+	}
+	if flags.SnapshotEvents != "" {
+		entry.SnapshotEvents = splitSnapshotEventList(flags.SnapshotEvents)
+	}
+	return nil
 }
 
 func printServiceSetSyncHint(w io.Writer, service string, host string) error {

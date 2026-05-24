@@ -483,7 +483,7 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	}
 	isTerminalFn = func(int) bool { return false }
 
-	updated, err := saveServiceSetConfig(nil, "host-a", "/srv/apps/missing", false)
+	updated, err := saveServiceSetConfig(nil, "host-a", cli.ServiceSetFlags{ServiceRoot: "/srv/apps/missing"})
 	if err != nil {
 		t.Fatalf("saveServiceSetConfig nil config error: %v", err)
 	}
@@ -513,7 +513,7 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 		Dir:    tmp,
 		Config: &ProjectConfig{Version: projectConfigVersion},
 	}
-	updated, err = saveServiceSetConfig(missingLoc, "host-a", "/srv/apps/missing", false)
+	updated, err = saveServiceSetConfig(missingLoc, "host-a", cli.ServiceSetFlags{ServiceRoot: "/srv/apps/missing"})
 	if err != nil {
 		t.Fatalf("saveServiceSetConfig missing entry error: %v", err)
 	}
@@ -544,7 +544,7 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	if err := saveProjectConfig(loc); err != nil {
 		t.Fatalf("saveProjectConfig error: %v", err)
 	}
-	updated, err = saveServiceSetConfig(loc, "host-a", "tank/apps/direct", true)
+	updated, err = saveServiceSetConfig(loc, "host-a", cli.ServiceSetFlags{ServiceRoot: "tank/apps/direct", ZFS: true})
 	if err != nil {
 		t.Fatalf("saveServiceSetConfig matching entry error: %v", err)
 	}
@@ -603,6 +603,60 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	}
 	if len(calls) != 4 || calls[0].tty || calls[1].tty || calls[2].tty || calls[3].tty {
 		t.Fatalf("remote calls = %#v, want four non-tty calls", calls)
+	}
+}
+
+func TestServiceSetUpdatesSnapshotConfig(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+	writeSvcBranchConfig(t, tmp, ServiceEntry{Name: "svc-a", Host: "host-a", Type: serviceTypeRun, Payload: "run.sh"})
+	if err := HandleSvcCmd([]string{"service", "set", "--snapshots=off", "--snapshot-keep-last=3", "--snapshot-max-age=72h", "--snapshot-required=false"}); err != nil {
+		t.Fatalf("HandleSvcCmd: %v", err)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if entry.Snapshots != "off" || entry.SnapshotKeepLast != 3 || entry.SnapshotMaxAge != "72h" || entry.SnapshotRequired == nil || *entry.SnapshotRequired {
+		t.Fatalf("entry = %#v", entry)
+	}
+}
+
+func TestParseSvcRunControlFlagsExtractsSnapshotOptions(t *testing.T) {
+	flags, err := parseSvcRunControlFlags([]string{
+		"--pull",
+		"--snapshots=off",
+		"--snapshot-keep-last", "3",
+		"--snapshot-max-age=72h",
+		"--snapshot-required=false",
+		"--snapshot-events=run,docker-update",
+		"--", "--snapshot-events=payload",
+	})
+	if err != nil {
+		t.Fatalf("parseSvcRunControlFlags: %v", err)
+	}
+	if !flags.SnapshotChange {
+		t.Fatal("SnapshotChange = false, want true")
+	}
+	if flags.Snapshots != "off" || flags.SnapshotKeepLast != 3 || flags.SnapshotMaxAge != "72h" || flags.SnapshotRequired == nil || *flags.SnapshotRequired {
+		t.Fatalf("snapshot flags = %#v", flags)
+	}
+	if !reflect.DeepEqual(flags.SnapshotEvents, []string{"run", "docker-update"}) {
+		t.Fatalf("SnapshotEvents = %#v", flags.SnapshotEvents)
+	}
+	wantArgs := []string{"--pull", "--", "--snapshot-events=payload"}
+	if !reflect.DeepEqual(flags.Args, wantArgs) {
+		t.Fatalf("Args = %#v, want %#v", flags.Args, wantArgs)
 	}
 }
 
