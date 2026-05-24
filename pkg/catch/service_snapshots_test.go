@@ -58,6 +58,7 @@ func TestParseSnapshotMaxAge(t *testing.T) {
 		{in: "7d", want: 7 * 24 * time.Hour},
 		{in: "72h", want: 72 * time.Hour},
 		{in: "0", wantErr: "must be positive"},
+		{in: "-1d", wantErr: "must be positive"},
 		{in: "bad", wantErr: "invalid snapshot max age"},
 	}
 	for _, tt := range tests {
@@ -104,6 +105,19 @@ func TestCreateServiceSnapshotCommand(t *testing.T) {
 	}
 	if len(calls) != 1 || !reflect.DeepEqual(calls[0][:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("calls = %#v", calls)
+	}
+}
+
+func TestSnapshotShortNameSanitizesEvent(t *testing.T) {
+	req := snapshotCreateRequest{
+		Event:      snapshotEvent("service root/migration"),
+		Generation: 7,
+		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
+	}
+	got := snapshotShortName(req)
+	want := "yeet-20260524T184233Z-service_root_migration-g7"
+	if got != want {
+		t.Fatalf("snapshotShortName = %q, want %q", got, want)
 	}
 }
 
