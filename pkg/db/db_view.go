@@ -3,10 +3,12 @@
 package db
 
 import (
-	"encoding/json"
+	jsonv1 "encoding/json"
 	"errors"
 	"net/netip"
 
+	jsonv2 "github.com/go-json-experiment/json"
+	"github.com/go-json-experiment/json/jsontext"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/views"
 )
@@ -41,8 +43,17 @@ func (v DataView) AsStruct() *Data {
 	return v.ж.Clone()
 }
 
-func (v DataView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v DataView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
 
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v DataView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
 func (v *DataView) UnmarshalJSON(b []byte) error {
 	if v.ж != nil {
 		return errors.New("already initialized")
@@ -51,33 +62,44 @@ func (v *DataView) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	var x Data
-	if err := json.Unmarshal(b, &x); err != nil {
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
 		return err
 	}
 	v.ж = &x
 	return nil
 }
 
-func (v DataView) DataVersion() int { return v.ж.DataVersion }
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *DataView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x Data
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
 
+// DataVersion is the version of the data format. This is used to determine
+// how to parse the data.
+func (v DataView) DataVersion() int { return v.ж.DataVersion }
 func (v DataView) Services() views.MapFn[string, *Service, ServiceView] {
 	return views.MapFnOf(v.ж.Services, func(t *Service) ServiceView {
 		return t.View()
 	})
 }
-
 func (v DataView) Images() views.MapFn[ImageRepoName, *ImageRepo, ImageRepoView] {
 	return views.MapFnOf(v.ж.Images, func(t *ImageRepo) ImageRepoView {
 		return t.View()
 	})
 }
-
 func (v DataView) Volumes() views.MapFn[string, *Volume, VolumeView] {
 	return views.MapFnOf(v.ж.Volumes, func(t *Volume) VolumeView {
 		return t.View()
 	})
 }
-
 func (v DataView) DockerNetworks() views.MapFn[string, *DockerNetwork, DockerNetworkView] {
 	return views.MapFnOf(v.ж.DockerNetworks, func(t *DockerNetwork) DockerNetworkView {
 		return t.View()
@@ -121,8 +143,17 @@ func (v ServiceView) AsStruct() *Service {
 	return v.ж.Clone()
 }
 
-func (v ServiceView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ServiceView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
 
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ServiceView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
 func (v *ServiceView) UnmarshalJSON(b []byte) error {
 	if v.ж != nil {
 		return errors.New("already initialized")
@@ -131,13 +162,27 @@ func (v *ServiceView) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	var x Service
-	if err := json.Unmarshal(b, &x); err != nil {
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
 		return err
 	}
 	v.ж = &x
 	return nil
 }
 
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ServiceView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x Service
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// Name is the name of the service.
 func (v ServiceView) Name() string             { return v.ж.Name }
 func (v ServiceView) ServiceType() ServiceType { return v.ж.ServiceType }
 
@@ -145,9 +190,13 @@ func (v ServiceView) ServiceType() ServiceType { return v.ж.ServiceType }
 // Empty means filepath.Join(Store.serviceRoot, Name).
 func (v ServiceView) ServiceRoot() string { return v.ж.ServiceRoot }
 
-func (v ServiceView) Generation() int       { return v.ж.Generation }
+// Generation is the current generation of the service.
+func (v ServiceView) Generation() int { return v.ж.Generation }
+
+// LatestGeneration is the latest generation of the service.
 func (v ServiceView) LatestGeneration() int { return v.ж.LatestGeneration }
 
+// Artifacts are the artifacts generated for this service.
 func (v ServiceView) Artifacts() views.MapFn[ArtifactName, *Artifact, ArtifactView] {
 	return views.MapFnOf(v.ж.Artifacts, func(t *Artifact) ArtifactView {
 		return t.View()
@@ -204,8 +253,17 @@ func (v VolumeView) AsStruct() *Volume {
 	return v.ж.Clone()
 }
 
-func (v VolumeView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VolumeView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
 
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VolumeView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
 func (v *VolumeView) UnmarshalJSON(b []byte) error {
 	if v.ж != nil {
 		return errors.New("already initialized")
@@ -214,7 +272,20 @@ func (v *VolumeView) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	var x Volume
-	if err := json.Unmarshal(b, &x); err != nil {
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VolumeView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x Volume
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
 		return err
 	}
 	v.ж = &x
@@ -266,8 +337,17 @@ func (v ImageRepoView) AsStruct() *ImageRepo {
 	return v.ж.Clone()
 }
 
-func (v ImageRepoView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ImageRepoView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
 
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ImageRepoView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
 func (v *ImageRepoView) UnmarshalJSON(b []byte) error {
 	if v.ж != nil {
 		return errors.New("already initialized")
@@ -276,7 +356,20 @@ func (v *ImageRepoView) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	var x ImageRepo
-	if err := json.Unmarshal(b, &x); err != nil {
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ImageRepoView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x ImageRepo
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
 		return err
 	}
 	v.ж = &x
@@ -318,8 +411,17 @@ func (v ArtifactView) AsStruct() *Artifact {
 	return v.ж.Clone()
 }
 
-func (v ArtifactView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ArtifactView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
 
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ArtifactView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
 func (v *ArtifactView) UnmarshalJSON(b []byte) error {
 	if v.ж != nil {
 		return errors.New("already initialized")
@@ -328,13 +430,27 @@ func (v *ArtifactView) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	var x Artifact
-	if err := json.Unmarshal(b, &x); err != nil {
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
 		return err
 	}
 	v.ж = &x
 	return nil
 }
 
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ArtifactView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x Artifact
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// path on disk
 func (v ArtifactView) Refs() views.Map[ArtifactRef, string] { return views.MapOf(v.ж.Refs) }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
@@ -370,8 +486,17 @@ func (v DockerNetworkView) AsStruct() *DockerNetwork {
 	return v.ж.Clone()
 }
 
-func (v DockerNetworkView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v DockerNetworkView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
 
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v DockerNetworkView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
 func (v *DockerNetworkView) UnmarshalJSON(b []byte) error {
 	if v.ж != nil {
 		return errors.New("already initialized")
@@ -380,7 +505,20 @@ func (v *DockerNetworkView) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	var x DockerNetwork
-	if err := json.Unmarshal(b, &x); err != nil {
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *DockerNetworkView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x DockerNetwork
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
 		return err
 	}
 	v.ж = &x
@@ -391,17 +529,18 @@ func (v DockerNetworkView) NetworkID() string         { return v.ж.NetworkID }
 func (v DockerNetworkView) NetNS() string             { return v.ж.NetNS }
 func (v DockerNetworkView) IPv4Gateway() netip.Prefix { return v.ж.IPv4Gateway }
 func (v DockerNetworkView) IPv4Range() netip.Prefix   { return v.ж.IPv4Range }
-
 func (v DockerNetworkView) Endpoints() views.MapFn[string, *DockerEndpoint, DockerEndpointView] {
 	return views.MapFnOf(v.ж.Endpoints, func(t *DockerEndpoint) DockerEndpointView {
 		return t.View()
 	})
 }
 
+// Deprecated: use Endpoints instead.
 func (v DockerNetworkView) EndpointAddrs() views.Map[string, netip.Prefix] {
 	return views.MapOf(v.ж.EndpointAddrs)
 }
 
+// key is "proto/hostport"
 func (v DockerNetworkView) PortMap() views.MapFn[string, *EndpointPort, EndpointPortView] {
 	return views.MapFnOf(v.ж.PortMap, func(t *EndpointPort) EndpointPortView {
 		return t.View()
@@ -447,8 +586,17 @@ func (v DockerEndpointView) AsStruct() *DockerEndpoint {
 	return v.ж.Clone()
 }
 
-func (v DockerEndpointView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v DockerEndpointView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
 
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v DockerEndpointView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
 func (v *DockerEndpointView) UnmarshalJSON(b []byte) error {
 	if v.ж != nil {
 		return errors.New("already initialized")
@@ -457,7 +605,20 @@ func (v *DockerEndpointView) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	var x DockerEndpoint
-	if err := json.Unmarshal(b, &x); err != nil {
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *DockerEndpointView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x DockerEndpoint
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
 		return err
 	}
 	v.ж = &x
@@ -501,8 +662,17 @@ func (v TailscaleNetworkView) AsStruct() *TailscaleNetwork {
 	return v.ж.Clone()
 }
 
-func (v TailscaleNetworkView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v TailscaleNetworkView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
 
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v TailscaleNetworkView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
 func (v *TailscaleNetworkView) UnmarshalJSON(b []byte) error {
 	if v.ж != nil {
 		return errors.New("already initialized")
@@ -511,7 +681,20 @@ func (v *TailscaleNetworkView) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	var x TailscaleNetwork
-	if err := json.Unmarshal(b, &x); err != nil {
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *TailscaleNetworkView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x TailscaleNetwork
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
 		return err
 	}
 	v.ж = &x
@@ -561,8 +744,17 @@ func (v EndpointPortView) AsStruct() *EndpointPort {
 	return v.ж.Clone()
 }
 
-func (v EndpointPortView) MarshalJSON() ([]byte, error) { return json.Marshal(v.ж) }
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v EndpointPortView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
 
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v EndpointPortView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
 func (v *EndpointPortView) UnmarshalJSON(b []byte) error {
 	if v.ж != nil {
 		return errors.New("already initialized")
@@ -571,7 +763,20 @@ func (v *EndpointPortView) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	var x EndpointPort
-	if err := json.Unmarshal(b, &x); err != nil {
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *EndpointPortView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x EndpointPort
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
 		return err
 	}
 	v.ж = &x
