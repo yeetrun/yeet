@@ -313,6 +313,9 @@ func TestSvcRunParsingErrorsAndStoredEnv(t *testing.T) {
 	if _, err := parseSvcRun([]string{"app", "--env-file"}, nil, ""); err == nil || !strings.Contains(err.Error(), "--env-file requires a value") {
 		t.Fatalf("parseSvcRun env error = %v", err)
 	}
+	if _, err := parseSvcRun([]string{"app", "--service-root"}, nil, ""); err == nil || !strings.Contains(err.Error(), "--service-root requires a value") {
+		t.Fatalf("parseSvcRun service-root error = %v", err)
+	}
 	if _, err := parseSvcRun([]string{"app", "--force=maybe"}, nil, ""); err == nil || !strings.Contains(err.Error(), "invalid --force") {
 		t.Fatalf("parseSvcRun force error = %v", err)
 	}
@@ -350,6 +353,92 @@ func TestSvcRunParsingErrorsAndStoredEnv(t *testing.T) {
 	}
 	if !reflect.DeepEqual(run.Args, []string{"--", "--app-flag"}) {
 		t.Fatalf("Args = %#v", run.Args)
+	}
+}
+
+func TestSvcRunServiceRoot(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := t.TempDir()
+	serviceOverride = "svc-a"
+	loc := &projectConfigLocation{Dir: tmp, Config: &ProjectConfig{Version: projectConfigVersion}}
+	loc.Config.SetServiceEntry(ServiceEntry{
+		Name:        "svc-a",
+		Host:        Host(),
+		Type:        serviceTypeRun,
+		Payload:     "app",
+		ServiceRoot: "/srv/apps/stored",
+		Args:        []string{"--pull"},
+	})
+
+	run, err := parseSvcRun([]string{"app", "--env-file", "prod.env", "--force", "--", "--app-flag"}, loc, "")
+	if err != nil {
+		t.Fatalf("parseSvcRun stored service-root error: %v", err)
+	}
+	if run.ServiceRoot != "/srv/apps/stored" || run.ServiceRootArg != "" || run.ServiceRootSet {
+		t.Fatalf("stored service root fields = %#v", run)
+	}
+	if !reflect.DeepEqual(run.Args, []string{"--service-root=/srv/apps/stored", "--", "--app-flag"}) {
+		t.Fatalf("Args = %#v", run.Args)
+	}
+
+	run, err = parseSvcRun([]string{"app", "--service-root", "/srv/apps/explicit", "--pull"}, loc, "")
+	if err != nil {
+		t.Fatalf("parseSvcRun explicit service-root error: %v", err)
+	}
+	if run.ServiceRoot != "/srv/apps/explicit" || run.ServiceRootArg != "/srv/apps/explicit" || !run.ServiceRootSet {
+		t.Fatalf("explicit service root fields = %#v", run)
+	}
+	if !reflect.DeepEqual(run.Args, []string{"--service-root=/srv/apps/explicit", "--pull"}) {
+		t.Fatalf("Args = %#v", run.Args)
+	}
+}
+
+func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+
+	var calls []struct {
+		args []string
+		tty  bool
+	}
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		calls = append(calls, struct {
+			args []string
+			tty  bool
+		}{append([]string{}, args...), tty})
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	if err := HandleSvcCmd([]string{"service", "set", "--service-root=/srv/apps/missing"}); err != nil {
+		t.Fatalf("HandleSvcCmd missing config error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, projectConfigName)); !os.IsNotExist(err) {
+		t.Fatalf("service set without existing entry should not create yeet.toml, stat err=%v", err)
+	}
+
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-a", Type: serviceTypeRun, Payload: "run.sh"})
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: cfg}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig error: %v", err)
+	}
+
+	if err := HandleSvcCmd([]string{"service", "set", "--service-root=/srv/apps/svc-a"}); err != nil {
+		t.Fatalf("HandleSvcCmd existing config error: %v", err)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd error: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok || entry.ServiceRoot != "/srv/apps/svc-a" {
+		t.Fatalf("entry = %#v, ok=%v", entry, ok)
+	}
+	if len(calls) != 2 || calls[0].tty || calls[1].tty {
+		t.Fatalf("remote calls = %#v, want two non-tty calls", calls)
 	}
 }
 
@@ -878,7 +967,7 @@ func TestSvcSaveConfigEarlyReturnsAndCreation(t *testing.T) {
 	useTempSvcCwd(t)
 
 	serviceOverride = ""
-	if err := saveRunConfig(nil, "", "payload", []string{"--pull"}); err != nil {
+	if err := saveRunConfig(nil, "", "payload", []string{"--pull"}, ""); err != nil {
 		t.Fatalf("saveRunConfig no service error: %v", err)
 	}
 	if err := saveCronConfig(nil, "", "payload", []string{"0", "9", "*", "*", "*"}, nil); err != nil {
@@ -888,7 +977,7 @@ func TestSvcSaveConfigEarlyReturnsAndCreation(t *testing.T) {
 	serviceOverride = "svc-a"
 	loadedPrefs.DefaultHost = "host-a"
 	payload := "run.sh"
-	if err := saveRunConfig(nil, "", payload, []string{"--", "--app-flag"}); err != nil {
+	if err := saveRunConfig(nil, "", payload, []string{"--", "--app-flag"}, ""); err != nil {
 		t.Fatalf("saveRunConfig create error: %v", err)
 	}
 	loaded, err := loadProjectConfigFromCwd()

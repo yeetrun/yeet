@@ -28,13 +28,14 @@ type ProjectConfig struct {
 }
 
 type ServiceEntry struct {
-	Name     string   `toml:"name"`
-	Host     string   `toml:"host"`
-	Type     string   `toml:"type,omitempty"`
-	Payload  string   `toml:"payload,omitempty"`
-	EnvFile  string   `toml:"env_file,omitempty"`
-	Schedule string   `toml:"schedule,omitempty"`
-	Args     []string `toml:"args,omitempty"`
+	Name        string   `toml:"name"`
+	Host        string   `toml:"host"`
+	Type        string   `toml:"type,omitempty"`
+	Payload     string   `toml:"payload,omitempty"`
+	EnvFile     string   `toml:"env_file,omitempty"`
+	ServiceRoot string   `toml:"service_root,omitempty"`
+	Schedule    string   `toml:"schedule,omitempty"`
+	Args        []string `toml:"args,omitempty"`
 }
 
 type projectConfigLocation struct {
@@ -211,6 +212,9 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 			c.Services[i].Args = append([]string{}, entry.Args...)
 			if entry.EnvFile != "" {
 				c.Services[i].EnvFile = entry.EnvFile
+			}
+			if entry.ServiceRoot != "" {
+				c.Services[i].ServiceRoot = entry.ServiceRoot
 			}
 			c.addHost(entry.Host)
 			sortServiceEntries(c.Services)

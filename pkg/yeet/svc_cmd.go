@@ -152,6 +152,9 @@ var svcCommandHandlers = map[string]svcCommandHandler{
 	"run": func(_ context.Context, req svcCommandRequest) error {
 		return handleSvcRun(req)
 	},
+	"service": func(ctx context.Context, req svcCommandRequest) error {
+		return handleSvcService(ctx, req)
+	},
 	"remove": func(ctx context.Context, req svcCommandRequest) error {
 		return handleSvcRemove(ctx, req)
 	},
@@ -281,13 +284,16 @@ func handleSvcEnv(ctx context.Context, req svcCommandRequest) error {
 }
 
 type parsedSvcRun struct {
-	Payload     string
-	Args        []string
-	EnvFile     string
-	EnvFileArg  string
-	EnvFileSet  bool
-	Entry       ServiceEntry
-	ForceDeploy bool
+	Payload        string
+	Args           []string
+	EnvFile        string
+	EnvFileArg     string
+	EnvFileSet     bool
+	ServiceRoot    string
+	ServiceRootArg string
+	ServiceRootSet bool
+	Entry          ServiceEntry
+	ForceDeploy    bool
 }
 
 func handleSvcRun(req svcCommandRequest) error {
@@ -309,7 +315,7 @@ func handleSvcRun(req svcCommandRequest) error {
 	if err := runWithChanges(run.Payload, run.Args, run.EnvFile, run.Entry, run.ForceDeploy); err != nil {
 		return err
 	}
-	if err := saveRunConfig(req.Config, req.HostOverride, run.Payload, normalizeRunArgs(run.Args)); err != nil {
+	if err := saveRunConfig(req.Config, req.HostOverride, run.Payload, normalizeRunArgs(run.Args), run.ServiceRootArg); err != nil {
 		return err
 	}
 	if run.EnvFileSet {
@@ -323,33 +329,89 @@ func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride s
 	if err != nil {
 		return parsedSvcRun{}, err
 	}
-	envFileArg, filteredArgs, envFileSet, err := extractEnvFileFlag(runArgs)
-	if err != nil {
-		return parsedSvcRun{}, err
-	}
-	forceDeploy, filteredArgs, err := extractForceFlag(filteredArgs)
+	flags, err := parseSvcRunControlFlags(runArgs)
 	if err != nil {
 		return parsedSvcRun{}, err
 	}
 	entry, hasEntry := serviceEntryForConfig(cfgLoc, hostOverride)
-	if hasEntry {
-		if err := ensureLockedRunFlags(entry, filteredArgs); err != nil {
-			return parsedSvcRun{}, err
-		}
+	if err := ensureSvcRunEntryFlags(entry, hasEntry, flags.Args); err != nil {
+		return parsedSvcRun{}, err
 	}
-	envFile := envFileArg
+	envFile := flags.EnvFileArg
 	if envFile == "" && hasEntry && entry.EnvFile != "" && cfgLoc != nil {
 		envFile = resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
 	}
+	serviceRoot := flags.ServiceRootArg
+	if serviceRoot == "" && hasEntry {
+		serviceRoot = entry.ServiceRoot
+	}
+	filteredArgs := runArgsWithServiceRoot(flags.Args, serviceRoot)
 	return parsedSvcRun{
-		Payload:     payload,
-		Args:        filteredArgs,
-		EnvFile:     envFile,
-		EnvFileArg:  envFileArg,
-		EnvFileSet:  envFileSet,
-		Entry:       entry,
-		ForceDeploy: forceDeploy,
+		Payload:        payload,
+		Args:           filteredArgs,
+		EnvFile:        envFile,
+		EnvFileArg:     flags.EnvFileArg,
+		EnvFileSet:     flags.EnvFileSet,
+		ServiceRoot:    serviceRoot,
+		ServiceRootArg: flags.ServiceRootArg,
+		ServiceRootSet: flags.ServiceRootSet,
+		Entry:          entry,
+		ForceDeploy:    flags.ForceDeploy,
 	}, nil
+}
+
+func ensureSvcRunEntryFlags(entry ServiceEntry, hasEntry bool, args []string) error {
+	if !hasEntry {
+		return nil
+	}
+	return ensureLockedRunFlags(entry, args)
+}
+
+type svcRunControlFlags struct {
+	Args           []string
+	EnvFileArg     string
+	EnvFileSet     bool
+	ServiceRootArg string
+	ServiceRootSet bool
+	ForceDeploy    bool
+}
+
+func parseSvcRunControlFlags(runArgs []string) (svcRunControlFlags, error) {
+	serviceRootArg, filteredArgs, serviceRootSet, err := extractServiceRootFlag(runArgs)
+	if err != nil {
+		return svcRunControlFlags{}, err
+	}
+	envFileArg, filteredArgs, envFileSet, err := extractEnvFileFlag(filteredArgs)
+	if err != nil {
+		return svcRunControlFlags{}, err
+	}
+	forceDeploy, filteredArgs, err := extractForceFlag(filteredArgs)
+	if err != nil {
+		return svcRunControlFlags{}, err
+	}
+	return svcRunControlFlags{
+		Args:           filteredArgs,
+		EnvFileArg:     envFileArg,
+		EnvFileSet:     envFileSet,
+		ServiceRootArg: serviceRootArg,
+		ServiceRootSet: serviceRootSet,
+		ForceDeploy:    forceDeploy,
+	}, nil
+}
+
+func handleSvcService(ctx context.Context, req svcCommandRequest) error {
+	if len(req.Command.Args) == 0 || req.Command.Args[0] != "set" {
+		return handleSvcRemote(ctx, req)
+	}
+	flags, _, err := cli.ParseServiceSet(req.Command.Args[1:])
+	if err != nil {
+		return err
+	}
+	tty := !flags.Copy && !flags.Empty && isTerminalFn(int(os.Stdin.Fd())) && isTerminalFn(int(os.Stdout.Fd()))
+	if err := execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, tty); err != nil {
+		return err
+	}
+	return saveServiceSetConfig(req.Config, req.HostOverride, flags.ServiceRoot)
 }
 
 func handleSvcRemove(ctx context.Context, req svcCommandRequest) error {
@@ -1241,7 +1303,7 @@ func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride s
 		return fmt.Errorf("no payload configured for %s@%s", stored.Service, stored.Host)
 	}
 	envFile := resolveEnvFilePath(cfgLoc.Dir, stored.Entry.EnvFile)
-	return runWithChanges(payload, rehydrateRunArgs(stored.Entry.Args), envFile, stored.Entry, forceDeploy)
+	return runWithChanges(payload, runArgsWithServiceRoot(rehydrateRunArgs(stored.Entry.Args), stored.Entry.ServiceRoot), envFile, stored.Entry, forceDeploy)
 }
 
 func shouldRunFromConfigWithForce(args []string) (bool, error) {
@@ -1328,7 +1390,7 @@ func validateStoredServiceType(service, host, gotType, commandName, wantType str
 	return fmt.Errorf("service %s@%s is configured as %s", service, host, gotType)
 }
 
-func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload string, runArgs []string) error {
+func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload string, runArgs []string, serviceRoot string) error {
 	if serviceOverride == "" {
 		return nil
 	}
@@ -1344,16 +1406,37 @@ func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload s
 	if host == "" {
 		host = Host()
 	}
+	filteredServiceRoot, filteredArgs, foundServiceRoot, err := extractServiceRootFlag(runArgs)
+	if err != nil {
+		return err
+	}
+	if foundServiceRoot && strings.TrimSpace(serviceRoot) == "" {
+		serviceRoot = filteredServiceRoot
+	}
 	payloadRel := relativePayloadPath(loc.Dir, payload)
 	entry := ServiceEntry{
-		Name:    serviceOverride,
-		Host:    host,
-		Type:    "",
-		Payload: payloadRel,
-		Args:    normalizeRunArgs(runArgs),
+		Name:        serviceOverride,
+		Host:        host,
+		Type:        "",
+		Payload:     payloadRel,
+		ServiceRoot: strings.TrimSpace(serviceRoot),
+		Args:        normalizeRunArgs(filteredArgs),
 	}
 	loc.Config.SetServiceEntry(entry)
 	return saveProjectConfig(loc)
+}
+
+func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, serviceRoot string) error {
+	if serviceOverride == "" || strings.TrimSpace(serviceRoot) == "" {
+		return nil
+	}
+	entry, ok := serviceEntryForConfig(cfgLoc, hostOverride)
+	if !ok {
+		return nil
+	}
+	entry.ServiceRoot = strings.TrimSpace(serviceRoot)
+	cfgLoc.Config.SetServiceEntry(entry)
+	return saveProjectConfig(cfgLoc)
 }
 
 func saveCronConfig(cfgLoc *projectConfigLocation, hostOverride string, payload string, cronFields []string, binArgs []string) error {

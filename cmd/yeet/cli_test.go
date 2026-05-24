@@ -201,6 +201,14 @@ func TestPrepareCommandRoute(t *testing.T) {
 			wantService: "svc-override",
 			wantBridged: []string{"status", "--format", "json"},
 		},
+		{
+			name:        "service group host routes service set",
+			args:        []string{"service@catch-a", "set", "svc-a", "--service-root=/srv/apps/svc-a"},
+			wantArgs:    []string{"service", "set", "--service-root=/srv/apps/svc-a"},
+			wantHost:    "catch-a",
+			wantService: "svc-a",
+			wantBridged: []string{"service", "set", "--service-root=/srv/apps/svc-a"},
+		},
 	}
 
 	for _, tt := range tests {

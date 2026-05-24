@@ -66,6 +66,7 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 		"--macvlan-vlan", "12",
 		"--macvlan-parent", "eth0",
 		"--env-file", "prod.env",
+		"--service-root", "/srv/apps/svc-a",
 		"-p", "8000:8000",
 		"-p", "9000:9000",
 		"--force",
@@ -100,6 +101,9 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	}
 	if flags.EnvFile != "prod.env" {
 		t.Errorf("EnvFile = %q, want %q", flags.EnvFile, "prod.env")
+	}
+	if flags.ServiceRoot != "/srv/apps/svc-a" {
+		t.Errorf("ServiceRoot = %q, want %q", flags.ServiceRoot, "/srv/apps/svc-a")
 	}
 	if !flags.Pull {
 		t.Errorf("Pull = false, want true")
@@ -190,6 +194,53 @@ func TestParseRemoveFlags(t *testing.T) {
 	}
 	if len(outArgs) != 0 {
 		t.Fatalf("expected no args, got %v", outArgs)
+	}
+}
+
+func TestParseServiceSetFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    ServiceSetFlags
+		wantOut []string
+		wantErr string
+	}{
+		{
+			name:    "absolute service root with copy",
+			args:    []string{"svc-a", "--service-root=/srv/apps/svc-a", "--copy"},
+			want:    ServiceSetFlags{ServiceRoot: "/srv/apps/svc-a", Copy: true},
+			wantOut: []string{"svc-a"},
+		},
+		{
+			name:    "absolute service root separate value with empty",
+			args:    []string{"--service-root", "/srv/apps/svc-a", "--empty", "svc-a"},
+			want:    ServiceSetFlags{ServiceRoot: "/srv/apps/svc-a", Empty: true},
+			wantOut: []string{"svc-a"},
+		},
+		{name: "missing root", args: []string{"svc-a"}, wantErr: "--service-root is required"},
+		{name: "relative root", args: []string{"svc-a", "--service-root", "apps/svc-a"}, wantErr: "--service-root must be absolute"},
+		{name: "copy and empty", args: []string{"svc-a", "--service-root", "/srv/apps/svc-a", "--copy", "--empty"}, wantErr: "cannot use --copy and --empty together"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, out, err := ParseServiceSet(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseServiceSet error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseServiceSet error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("flags = %#v, want %#v", got, tt.want)
+			}
+			if !reflect.DeepEqual(out, tt.wantOut) {
+				t.Fatalf("args = %#v, want %#v", out, tt.wantOut)
+			}
+		})
 	}
 }
 
@@ -322,6 +373,12 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if reg.Groups["docker"].Commands["outdated"].Info.Name != "outdated" {
 		t.Fatalf("registry docker outdated command = %#v", reg.Groups["docker"].Commands["outdated"])
 	}
+	if reg.Groups["service"].Commands["set"].Info.Name != "set" {
+		t.Fatalf("registry service set command = %#v", reg.Groups["service"].Commands["set"])
+	}
+	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> --service-root=/abs/path [--copy|--empty]" {
+		t.Fatalf("service set usage = %q", reg.Groups["service"].Commands["set"].Info.Usage)
+	}
 	outdatedArg, ok := yargs.ArgSpecAt(reg.Groups["docker"].Commands["outdated"].ArgsSchema, 0)
 	if !ok {
 		t.Fatal("docker outdated should expose optional service arg metadata")
@@ -367,6 +424,15 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	}
 	if !RemoteGroupFlagSpecs()["docker"]["outdated"]["--format"].ConsumesValue {
 		t.Fatal("docker outdated --format should consume a value")
+	}
+	if !RemoteGroupFlagSpecs()["service"]["set"]["--service-root"].ConsumesValue {
+		t.Fatal("service set --service-root should consume a value")
+	}
+	if RemoteGroupFlagSpecs()["service"]["set"]["--copy"].ConsumesValue {
+		t.Fatal("service set --copy should not consume a value")
+	}
+	if RemoteGroupFlagSpecs()["service"]["set"]["--empty"].ConsumesValue {
+		t.Fatal("service set --empty should not consume a value")
 	}
 }
 

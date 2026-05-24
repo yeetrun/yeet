@@ -244,7 +244,7 @@ func TestSaveRunConfigCreatesToml(t *testing.T) {
 		Dir:    tmp,
 		Config: &ProjectConfig{Version: projectConfigVersion},
 	}
-	if err := saveRunConfig(loc, "host-a", payload, runArgs); err != nil {
+	if err := saveRunConfig(loc, "host-a", payload, runArgs, ""); err != nil {
 		t.Fatalf("saveRunConfig error: %v", err)
 	}
 
@@ -272,6 +272,62 @@ func TestSaveRunConfigCreatesToml(t *testing.T) {
 		if entry.Args[i] != wantArgs[i] {
 			t.Fatalf("args[%d] = %q, want %q", i, entry.Args[i], wantArgs[i])
 		}
+	}
+}
+
+func TestSaveRunConfigStoresServiceRoot(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	serviceOverride = "svc-a"
+	payload := filepath.Join(tmp, "apps", "compose.yml")
+	if err := os.MkdirAll(filepath.Dir(payload), 0o755); err != nil {
+		t.Fatalf("MkdirAll error: %v", err)
+	}
+	if err := os.WriteFile(payload, []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	loc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	serviceRoot := "/srv/apps/svc-a"
+	if err := saveRunConfig(loc, "host-a", payload, []string{"--service-root", serviceRoot, "--pull"}, serviceRoot); err != nil {
+		t.Fatalf("saveRunConfig error: %v", err)
+	}
+
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd error: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatalf("expected service config to be saved")
+	}
+	if entry.ServiceRoot != serviceRoot {
+		t.Fatalf("service_root = %q, want %q", entry.ServiceRoot, serviceRoot)
+	}
+	if strings.Join(entry.Args, " ") != "--pull" {
+		t.Fatalf("args = %#v, want only --pull", entry.Args)
+	}
+	raw, err := os.ReadFile(filepath.Join(tmp, projectConfigName))
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	if !strings.Contains(string(raw), `service_root = "/srv/apps/svc-a"`) {
+		t.Fatalf("saved config = %q, want service_root", string(raw))
 	}
 }
 
@@ -305,13 +361,13 @@ func TestSaveRunConfigOverwritesArgs(t *testing.T) {
 	}
 
 	firstArgs := []string{"--", "--flagA", "valueA", "--bool-flag", "posArg"}
-	if err := saveRunConfig(loc, "host-a", payload, firstArgs); err != nil {
+	if err := saveRunConfig(loc, "host-a", payload, firstArgs, ""); err != nil {
 		t.Fatalf("saveRunConfig error: %v", err)
 	}
 
 	secondArgs := []string{"--", "--flagB", "valueB", "--bool-flag2", "posArg2"}
 	wantArgs := []string{"--flagB", "valueB", "--bool-flag2", "posArg2"}
-	if err := saveRunConfig(loc, "host-a", payload, secondArgs); err != nil {
+	if err := saveRunConfig(loc, "host-a", payload, secondArgs, ""); err != nil {
 		t.Fatalf("saveRunConfig error: %v", err)
 	}
 

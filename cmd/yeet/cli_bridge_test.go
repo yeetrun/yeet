@@ -204,6 +204,47 @@ func TestBridgeServiceArgsWithForceFlag(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsServiceSet(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	tests := []struct {
+		name        string
+		args        []string
+		wantService string
+		wantBridged string
+	}{
+		{
+			name:        "inline root after service",
+			args:        []string{"service", "set", "svc-a", "--service-root=/srv/apps/svc-a"},
+			wantService: "svc-a",
+			wantBridged: "service set --service-root=/srv/apps/svc-a",
+		},
+		{
+			name:        "root flag before service",
+			args:        []string{"service", "set", "--service-root", "/srv/apps/svc-a", "svc-a"},
+			wantService: "svc-a",
+			wantBridged: "service set --service-root /srv/apps/svc-a",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, host, bridged, ok := bridgeServiceArgs(tt.args, remoteSpecs, groupSpecs, "")
+			if !ok {
+				t.Fatalf("expected to recognize service set")
+			}
+			if service != tt.wantService {
+				t.Fatalf("service = %q, want %q", service, tt.wantService)
+			}
+			if host != "" {
+				t.Fatalf("host = %q, want empty", host)
+			}
+			if got := strings.Join(bridged, " "); got != tt.wantBridged {
+				t.Fatalf("bridged args = %q, want %q", got, tt.wantBridged)
+			}
+		})
+	}
+}
+
 func TestBridgeServiceArgsUnknownFlagBeforeServiceTreatsNextTokenAsService(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

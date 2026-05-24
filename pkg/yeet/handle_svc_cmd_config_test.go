@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -166,6 +167,60 @@ func TestRunFromProjectConfigRehydratesArgs(t *testing.T) {
 		if gotArgs[i] != wantArgs[i] {
 			t.Fatalf("args[%d] = %q, want %q", i, gotArgs[i], wantArgs[i])
 		}
+	}
+}
+
+func TestRunFromProjectConfigRehydratesServiceRoot(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldService := serviceOverride
+	oldIsTerminal := isTerminalFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	defer func() {
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		serviceOverride = oldService
+		isTerminalFn = oldIsTerminal
+		fetchRemoteArtifactHashesFn = oldHashes
+	}()
+
+	serviceOverride = "rssbot"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "rssbot")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:        "rssbot",
+		Host:        "host-a",
+		Type:        serviceTypeRun,
+		Payload:     "rssbot",
+		ServiceRoot: "/srv/apps/rssbot",
+		Args:        []string{"--pull"},
+	})
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: cfg}
+
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+
+	if err := runFromProjectConfig(loc, "host-a"); err != nil {
+		t.Fatalf("runFromProjectConfig error: %v", err)
+	}
+	wantArgs := []string{"run", "--service-root=/srv/apps/rssbot", "--pull"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
 	}
 }
 

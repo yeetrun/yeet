@@ -6,6 +6,7 @@ package cli
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 
@@ -48,6 +49,13 @@ type RunFlags struct {
 	Force         bool
 	Publish       []string
 	EnvFile       string
+	ServiceRoot   string
+}
+
+type ServiceSetFlags struct {
+	ServiceRoot string
+	Copy        bool
+	Empty       bool
 }
 
 type StageFlags struct {
@@ -133,6 +141,13 @@ type runFlagsParsed struct {
 	Force         bool     `flag:"force"`
 	Publish       []string `flag:"publish" short:"p"`
 	EnvFile       string   `flag:"env-file"`
+	ServiceRoot   string   `flag:"service-root"`
+}
+
+type serviceSetFlagsParsed struct {
+	ServiceRoot string `flag:"service-root"`
+	Copy        bool   `flag:"copy"`
+	Empty       bool   `flag:"empty"`
 }
 
 type removeFlagsParsed struct {
@@ -341,6 +356,13 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set":  {Name: "set", Description: "Set env keys", Usage: "env set <svc> KEY=VALUE [KEY=VALUE...]", ArgsSchema: ServiceArgs{}},
 		},
 	},
+	"service": {
+		Name:        "service",
+		Description: "Manage service settings",
+		Commands: map[string]CommandInfo{
+			"set": {Name: "set", Description: "Set service settings", Usage: "service set <svc> --service-root=/abs/path [--copy|--empty]", ArgsSchema: ServiceArgs{}},
+		},
+	},
 }
 
 // Keep this aligned with remoteGroupInfos and cmd/yeet/cli_bridge.go to avoid
@@ -357,6 +379,9 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"edit": {},
 		"copy": {},
 		"set":  {},
+	},
+	"service": {
+		"set": flagSpecsFromStruct(serviceSetFlagsParsed{}),
 	},
 }
 
@@ -451,6 +476,32 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		Force:         parsed.Flags.Force,
 		Publish:       parsed.Flags.Publish,
 		EnvFile:       parsed.Flags.EnvFile,
+		ServiceRoot:   parsed.Flags.ServiceRoot,
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseServiceSet(args []string) (ServiceSetFlags, []string, error) {
+	specs := remoteGroupFlagSpecs["service"]["set"]
+	parseArgs, extraArgs := splitArgsForParsing(args, specs)
+	parsed, err := parseFlags[serviceSetFlagsParsed](parseArgs)
+	if err != nil {
+		return ServiceSetFlags{}, nil, err
+	}
+	flags := ServiceSetFlags{
+		ServiceRoot: strings.TrimSpace(parsed.Flags.ServiceRoot),
+		Copy:        parsed.Flags.Copy,
+		Empty:       parsed.Flags.Empty,
+	}
+	if flags.ServiceRoot == "" {
+		return ServiceSetFlags{}, nil, fmt.Errorf("--service-root is required")
+	}
+	if !filepath.IsAbs(flags.ServiceRoot) {
+		return ServiceSetFlags{}, nil, fmt.Errorf("--service-root must be absolute")
+	}
+	if flags.Copy && flags.Empty {
+		return ServiceSetFlags{}, nil, fmt.Errorf("cannot use --copy and --empty together")
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
