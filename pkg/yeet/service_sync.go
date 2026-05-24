@@ -187,7 +187,10 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 		result.Skip = "service not found on catch"
 		return result, false, nil
 	}
-	root, zfs := serviceRootForLocalConfig(resp.Info)
+	root, zfs, err := serviceRootForLocalConfig(target.Host, resp.Info)
+	if err != nil {
+		return serviceSyncResult{}, false, err
+	}
 	result.Root = root
 	result.ZFS = zfs
 	if !cfgLoc.Config.SetServiceRootForEntry(target.Service, target.Host, root, zfs) {
@@ -196,14 +199,20 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 	return result, true, nil
 }
 
-func serviceRootForLocalConfig(info catchrpc.ServiceInfo) (string, bool) {
+func serviceRootForLocalConfig(host string, info catchrpc.ServiceInfo) (string, bool, error) {
 	if root := strings.TrimSpace(info.Paths.ServiceRootZFS); root != "" {
-		return root, true
+		return root, true, nil
 	}
 	if root := strings.TrimSpace(info.Paths.ServiceRoot); root != "" {
-		return root, false
+		return root, false, nil
 	}
-	return "", false
+	if root := strings.TrimSpace(info.Paths.EffectiveRoot); root != "" {
+		return "", false, nil
+	}
+	if root := strings.TrimSpace(info.Paths.Root); root != "" {
+		return "", false, fmt.Errorf("catch on %s does not expose service root identity; upgrade catch before running service sync", host)
+	}
+	return "", false, nil
 }
 
 func serviceSyncNoUpdatesError(all bool, results []serviceSyncResult) error {
