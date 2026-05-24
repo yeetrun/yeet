@@ -50,7 +50,7 @@
 - Regenerate: `pkg/db/db_clone.go`
 - Test: `pkg/db/db_test.go` or the existing DB migration/view test file in `pkg/db`
 
-- [ ] **Step 1: Write failing DB tests**
+- [x] **Step 1: Write failing DB tests**
 
 Add tests that prove `ServiceRoot` survives clone/view access and that a v5 DB migrates to the new version without changing existing service roots:
 
@@ -96,7 +96,7 @@ func TestMigrateAddsServiceRootVersion(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the DB tests and verify RED**
+- [x] **Step 2: Run the DB tests and verify RED**
 
 Run:
 
@@ -106,7 +106,7 @@ go test ./pkg/db -run 'Test(ServiceRootCloneAndView|MigrateAddsServiceRootVersio
 
 Expected: FAIL because `Service.ServiceRoot` and `ServiceView.ServiceRoot()` do not exist.
 
-- [ ] **Step 3: Implement the DB field and migrator**
+- [x] **Step 3: Implement the DB field and migrator**
 
 In `pkg/db/db.go`, add the field near `ServiceType`:
 
@@ -132,7 +132,7 @@ func addServiceRoot(d *Data) error {
 }
 ```
 
-- [ ] **Step 4: Regenerate DB view/clone code**
+- [x] **Step 4: Regenerate DB view/clone code**
 
 Run:
 
@@ -142,7 +142,7 @@ go generate ./pkg/db
 
 Expected: generated code changes in `pkg/db/db_view.go` and `pkg/db/db_clone.go`.
 
-- [ ] **Step 5: Run DB tests and commit**
+- [x] **Step 5: Run DB tests and commit**
 
 Run:
 
@@ -177,7 +177,7 @@ git commit -m "pkg/db: store service roots"
 - Modify: `pkg/yeet/svc_cmd_branch_test.go`
 - Modify: `pkg/yeet/run_changes_test.go`
 
-- [ ] **Step 1: Write failing CLI tests**
+- [x] **Step 1: Write failing CLI tests**
 
 Extend `pkg/cli/cli_test.go` so `ParseRun` accepts `--service-root`, and add a service-set parser test:
 
@@ -220,7 +220,7 @@ if !RemoteGroupFlagSpecs()["service"]["set"]["--service-root"].ConsumesValue {
 }
 ```
 
-- [ ] **Step 2: Write failing routing tests**
+- [x] **Step 2: Write failing routing tests**
 
 Add bridge coverage to `cmd/yeet/cli_bridge_test.go`:
 
@@ -258,7 +258,7 @@ if !reflect.DeepEqual(got.args, []string{"service", "set", "--service-root=/srv/
 }
 ```
 
-- [ ] **Step 3: Write failing client config/run tests**
+- [x] **Step 3: Write failing client config/run tests**
 
 Add tests covering separate `service_root` storage and rehydration:
 
@@ -303,7 +303,7 @@ func TestDetectRunChangesServiceRootOnlyRequiresRun(t *testing.T) {
 }
 ```
 
-- [ ] **Step 4: Run targeted tests and verify RED**
+- [x] **Step 4: Run targeted tests and verify RED**
 
 Run:
 
@@ -313,7 +313,7 @@ go test ./pkg/cli ./cmd/yeet ./pkg/yeet -run 'Test(ParseRun|ParseServiceSet|Remo
 
 Expected: FAIL for missing types, parser fields, routing, and `saveRunConfig` signature.
 
-- [ ] **Step 5: Implement CLI metadata and parsers**
+- [x] **Step 5: Implement CLI metadata and parsers**
 
 In `pkg/cli/cli.go`, add:
 
@@ -405,7 +405,7 @@ func ParseServiceSet(args []string) (ServiceSetFlags, []string, error) {
 
 Import `path/filepath` in `pkg/cli/cli.go`.
 
-- [ ] **Step 6: Implement client routing and config**
+- [x] **Step 6: Implement client routing and config**
 
 In `cmd/yeet/cli.go`, add a service group:
 
@@ -563,7 +563,7 @@ func serviceSetWantsTTY(flags cli.ServiceSetFlags) bool {
 
 Implement `updateServiceRootConfigIfPresent` by loading the current service entry and saving only when it exists.
 
-- [ ] **Step 7: Run tests and commit**
+- [x] **Step 7: Run tests and commit**
 
 Run:
 
@@ -595,7 +595,7 @@ git commit -m "cmd/yeet: add service root client plumbing"
 - Modify: `pkg/catch/tsns.go`
 - Modify: catch tests that currently call `serviceRootDir`, `serviceBinDir`, `serviceRunDir`, `serviceDataDir`, `serviceEnvDir`, or `ensureDirs`
 
-- [ ] **Step 1: Write failing path resolver tests**
+- [x] **Step 1: Write failing path resolver tests**
 
 In `pkg/catch/catch_test.go`, add:
 
@@ -636,7 +636,7 @@ func TestServiceRootDirUsesDBServiceRoot(t *testing.T) {
 
 Add a service-info test asserting `Paths.Root` reports the custom root.
 
-- [ ] **Step 2: Run catch path tests and verify RED**
+- [x] **Step 2: Run catch path tests and verify RED**
 
 Run:
 
@@ -646,7 +646,7 @@ go test ./pkg/catch -run 'Test(ServiceDirectoryPlanUsesRoot|ServiceRootDirUsesDB
 
 Expected: FAIL because root helpers are name-only and ignore DB state.
 
-- [ ] **Step 3: Implement effective root helpers**
+- [x] **Step 3: Implement effective root helpers**
 
 In `pkg/catch/catch.go`, replace the root helpers with error-returning effective helpers:
 
@@ -719,7 +719,7 @@ func (s *Server) ensureDirsForRoot(root, uname string) error {
 }
 ```
 
-- [ ] **Step 4: Update catch path consumers**
+- [x] **Step 4: Update catch path consumers**
 
 Use `rg 'service(Root|Bin|Run|Data|Env)Dir|ensureDirs' pkg/catch` and update each caller to either:
 
@@ -771,7 +771,7 @@ func (s *Server) removeServiceDirs(report *RemoveReport, root string) {
 }
 ```
 
-- [ ] **Step 5: Run catch tests and commit**
+- [x] **Step 5: Run catch tests and commit**
 
 Run:
 
@@ -800,7 +800,7 @@ git commit -m "pkg/catch: resolve paths from service roots"
 - Modify: `pkg/catch/installer_file_test.go`
 - Modify: `pkg/catch/tty_install_test.go`
 
-- [ ] **Step 1: Write failing validation tests**
+- [x] **Step 1: Write failing validation tests**
 
 In `pkg/catch/catch_test.go`, add:
 
@@ -844,7 +844,7 @@ In `pkg/catch/installer_file_test.go`, add tests that:
 - Re-running with the same root succeeds.
 - Re-running with a different root fails with an error containing `yeet service set api --service-root=`.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -854,7 +854,7 @@ go test ./pkg/catch -run 'TestValidateRequestedServiceRoot|TestNewFileInstaller.
 
 Expected: FAIL for missing `ServiceRoot` installer config and validation helpers.
 
-- [ ] **Step 3: Add service root to installer config**
+- [x] **Step 3: Add service root to installer config**
 
 In `pkg/catch/catch.go`, add to `InstallerCfg`:
 
@@ -871,7 +871,7 @@ In `pkg/catch/tty_install.go`, when building `FileInstallerCfg` from `cli.RunFla
 
 In `pkg/catch/installer_service.go`, carry `InstallerCfg.ServiceRoot` into any DB mutation that creates or updates `db.Service`.
 
-- [ ] **Step 4: Implement root validation and existing-service rejection**
+- [x] **Step 4: Implement root validation and existing-service rejection**
 
 Add helpers in `pkg/catch/catch.go`:
 
@@ -951,7 +951,7 @@ if cfg.ServiceRoot != "" && cfg.ServiceRoot != s.defaultServiceRootDir(cfg.Servi
 }
 ```
 
-- [ ] **Step 5: Run catch tests and commit**
+- [x] **Step 5: Run catch tests and commit**
 
 Run:
 
@@ -980,7 +980,7 @@ git commit -m "pkg/catch: validate custom service roots on run"
 - Modify: `pkg/catch/remove_test.go`
 - Modify: `pkg/copyutil` only if a new copy helper is needed
 
-- [ ] **Step 1: Write failing service-set tests**
+- [x] **Step 1: Write failing service-set tests**
 
 Create `pkg/catch/tty_service_set_test.go` with focused tests:
 
@@ -1112,7 +1112,7 @@ Add these standalone tests with concrete assertions:
 - `TestServiceSetRootRenameFailureLeavesDBOldRoot`: make the destination parent unwritable when the platform honors mode bits, or create an existing non-empty destination after validation through an injected rename seam; assert the DB still points at the old root.
 - `TestServiceSetRootCopyPreservesModeMtimeAndSymlink`: create a mode `0o700` directory, a file with fixed `mtime`, and a symlink in the old root; run `--copy`; assert mode, mtime, and symlink target in the new root.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -1122,7 +1122,7 @@ go test ./pkg/catch -run 'TestServiceSetRoot' -count=1
 
 Expected: FAIL because `serviceSetCmdFunc` and migration helpers do not exist.
 
-- [ ] **Step 3: Register catch-side command**
+- [x] **Step 3: Register catch-side command**
 
 In `pkg/catch/tty_exec.go`, add:
 
@@ -1193,7 +1193,7 @@ func (e *ttyExecer) serviceCmdFunc(args []string) error {
 }
 ```
 
-- [ ] **Step 4: Implement prompts and migration orchestration**
+- [x] **Step 4: Implement prompts and migration orchestration**
 
 Add:
 
@@ -1272,7 +1272,7 @@ func (s *Server) validateServiceRootMigration(name, dst string) (serviceRootMigr
 }
 ```
 
-- [ ] **Step 5: Implement safe copy and DB update**
+- [x] **Step 5: Implement safe copy and DB update**
 
 Add helpers:
 
@@ -1369,7 +1369,7 @@ func rootsAreNested(parent, child string) bool {
 }
 ```
 
-- [ ] **Step 6: Run migration tests and commit**
+- [x] **Step 6: Run migration tests and commit**
 
 Run:
 
@@ -1396,7 +1396,7 @@ git commit -m "pkg/catch: add service root migration command"
 - Modify: website manual files that document `yeet run`, service management commands, and workflows
 - Modify: website CLI reference files if generated or manually maintained
 
-- [ ] **Step 1: Inspect local website instructions**
+- [x] **Step 1: Inspect local website instructions**
 
 Run:
 
@@ -1407,7 +1407,7 @@ rg -n "yeet run|service root|docker update|env set|remove" README.md website/doc
 
 Expected: locate the manual pages to update.
 
-- [ ] **Step 2: Update docs**
+- [x] **Step 2: Update docs**
 
 Document:
 
@@ -1426,7 +1426,7 @@ Include these behavior points in user-facing language:
 - Moving a root uses `yeet service set`, requires the service to be stopped, and leaves the old root in place.
 - Non-interactive migration requires `--copy` or `--empty`.
 
-- [ ] **Step 3: Run docs checks available locally**
+- [x] **Step 3: Run docs checks available locally**
 
 Run:
 
@@ -1436,7 +1436,7 @@ pre-commit run --all-files
 
 Expected: PASS. If the website has its own package scripts and dependencies are already installed, also run the relevant docs lint command shown by `website/AGENTS.md`.
 
-- [ ] **Step 4: Commit docs**
+- [x] **Step 4: Commit docs**
 
 If website files changed, commit inside the website submodule first:
 
@@ -1469,7 +1469,7 @@ git commit -m "docs: document service roots"
 **Files:**
 - Modify: `docs/superpowers/plans/2026-05-23-service-root.md`
 
-- [ ] **Step 1: Run targeted verification**
+- [x] **Step 1: Run targeted verification**
 
 Run:
 
@@ -1479,7 +1479,7 @@ go test ./pkg/db ./pkg/cli ./cmd/yeet ./pkg/yeet ./pkg/catch ./pkg/copyutil ./pk
 
 Expected: PASS.
 
-- [ ] **Step 2: Run full tests**
+- [x] **Step 2: Run full tests**
 
 Run:
 
@@ -1489,7 +1489,7 @@ go test ./... -count=1
 
 Expected: PASS.
 
-- [ ] **Step 3: Run pre-commit**
+- [x] **Step 3: Run pre-commit**
 
 Run:
 
@@ -1499,11 +1499,11 @@ pre-commit run --all-files
 
 Expected: PASS.
 
-- [ ] **Step 4: Mark plan tasks complete**
+- [x] **Step 4: Mark plan tasks complete**
 
 Edit this plan and check off every completed task step. Do not mark a step done unless its command ran or its code change is present.
 
-- [ ] **Step 5: Commit plan status**
+- [x] **Step 5: Commit plan status**
 
 Run:
 
