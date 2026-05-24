@@ -6,6 +6,8 @@ package catch
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"sort"
@@ -29,6 +31,7 @@ const (
 var (
 	snapshotMaxAgeDaysRE = regexp.MustCompile(`^(-?[0-9]+)d$`)
 	snapshotNameCleaner  = regexp.MustCompile(`[^A-Za-z0-9_.:-]+`)
+	randomSnapshotSuffix = generateRandomSnapshotSuffix
 )
 
 type effectivePolicy struct {
@@ -168,7 +171,29 @@ func createServiceSnapshot(ctx context.Context, runner zfsCommandRunner, req sna
 	if runner == nil {
 		runner = runZFSCommand
 	}
-	snapshotName := req.Dataset + "@" + snapshotShortName(req)
+	shortName := snapshotShortName(req)
+	snapshotName := req.Dataset + "@" + shortName
+	stderr, err := runZFSSnapshot(ctx, runner, req, snapshotName)
+	if err == nil {
+		return snapshotName, nil
+	}
+	if !isZFSSnapshotNameCollision(stderr) {
+		return "", formatZFSCommandError("zfs snapshot "+snapshotName, stderr, err)
+	}
+
+	suffix, suffixErr := randomSnapshotSuffix()
+	if suffixErr != nil {
+		return "", fmt.Errorf("generate snapshot suffix after name collision: %w", suffixErr)
+	}
+	snapshotName = req.Dataset + "@" + shortName + "-" + suffix
+	stderr, err = runZFSSnapshot(ctx, runner, req, snapshotName)
+	if err != nil {
+		return "", formatZFSCommandError("zfs snapshot "+snapshotName, stderr, err)
+	}
+	return snapshotName, nil
+}
+
+func runZFSSnapshot(ctx context.Context, runner zfsCommandRunner, req snapshotCreateRequest, snapshotName string) (string, error) {
 	args := []string{
 		"snapshot",
 		"-o", "com.yeetrun:created-by=catch",
@@ -179,10 +204,7 @@ func createServiceSnapshot(ctx context.Context, runner zfsCommandRunner, req sna
 		snapshotName,
 	}
 	_, stderr, err := runner(ctx, args...)
-	if err != nil {
-		return "", formatZFSCommandError("zfs snapshot "+snapshotName, stderr, err)
-	}
-	return snapshotName, nil
+	return stderr, err
 }
 
 func snapshotShortName(req snapshotCreateRequest) string {
@@ -192,6 +214,19 @@ func snapshotShortName(req snapshotCreateRequest) string {
 	}
 	event := snapshotNameCleaner.ReplaceAllString(string(req.Event), "_")
 	return fmt.Sprintf("yeet-%s-%s-g%d", now.UTC().Format("20060102T150405Z"), event, req.Generation)
+}
+
+func isZFSSnapshotNameCollision(stderr string) bool {
+	stderr = strings.ToLower(stderr)
+	return strings.Contains(stderr, "already exists") || strings.Contains(stderr, "dataset exists")
+}
+
+func generateRandomSnapshotSuffix() (string, error) {
+	var raw [3]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw[:]), nil
 }
 
 func listServiceSnapshots(ctx context.Context, runner zfsCommandRunner, dataset string) ([]listedSnapshot, error) {
