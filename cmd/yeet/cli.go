@@ -96,7 +96,8 @@ func buildGroupHandlers() map[string]yargs.Group {
 		"service": {
 			Description: "Manage service settings",
 			Commands: map[string]yargs.SubcommandHandler{
-				"set": handleServiceGroup,
+				"set":  handleServiceGroup,
+				"sync": handleServiceGroup,
 			},
 		},
 	}
