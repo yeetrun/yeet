@@ -21,6 +21,9 @@ var localGroupCommands = map[string]map[string]struct{}{
 	"service": {
 		"sync": {},
 	},
+	"snapshots": {
+		"defaults": {},
+	},
 }
 
 func findServiceIndex(args []string, start int, flags map[string]cli.FlagSpec) int {

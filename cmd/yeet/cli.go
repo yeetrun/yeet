@@ -100,6 +100,12 @@ func buildGroupHandlers() map[string]yargs.Group {
 				"sync": handleServiceGroup,
 			},
 		},
+		"snapshots": {
+			Description: "Manage catch ZFS snapshot defaults",
+			Commands: map[string]yargs.SubcommandHandler{
+				"defaults": handleSnapshotsGroup,
+			},
+		},
 	}
 }
 

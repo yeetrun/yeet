@@ -36,28 +36,40 @@ type GroupInfo struct {
 }
 
 type RunFlags struct {
-	Net           string
-	TsVer         string
-	TsExit        string
-	TsTags        []string
-	TsAuthKey     string
-	MacvlanMac    string
-	MacvlanVlan   int
-	MacvlanParent string
-	Restart       bool
-	Pull          bool
-	Force         bool
-	Publish       []string
-	EnvFile       string
-	ServiceRoot   string
-	ZFS           bool
+	Net              string
+	TsVer            string
+	TsExit           string
+	TsTags           []string
+	TsAuthKey        string
+	MacvlanMac       string
+	MacvlanVlan      int
+	MacvlanParent    string
+	Restart          bool
+	Pull             bool
+	Force            bool
+	Publish          []string
+	EnvFile          string
+	ServiceRoot      string
+	ZFS              bool
+	Snapshots        string
+	SnapshotKeepLast string
+	SnapshotMaxAge   string
+	SnapshotRequired string
+	SnapshotEvents   string
+	SnapshotChange   bool
 }
 
 type ServiceSetFlags struct {
-	ServiceRoot string
-	ZFS         bool
-	Copy        bool
-	Empty       bool
+	ServiceRoot      string
+	ZFS              bool
+	Copy             bool
+	Empty            bool
+	Snapshots        string
+	SnapshotKeepLast string
+	SnapshotMaxAge   string
+	SnapshotRequired string
+	SnapshotEvents   string
+	SnapshotChange   bool
 }
 
 type ServiceSyncFlags struct {
@@ -129,34 +141,60 @@ type EnvShowFlags struct {
 	Staged bool
 }
 
+type SnapshotDefaultsSetFlags struct {
+	Enabled  string
+	KeepLast string
+	MaxAge   string
+	Events   string
+	Required string
+}
+
+type snapshotDefaultsSetFlagsParsed struct {
+	Enabled  string `flag:"enabled"`
+	KeepLast string `flag:"keep-last"`
+	MaxAge   string `flag:"max-age"`
+	Events   string `flag:"events"`
+	Required string `flag:"required"`
+}
+
 type dockerPushFlagsParsed struct {
 	Run      bool `flag:"run"`
 	AllLocal bool `flag:"all-local"`
 }
 
 type runFlagsParsed struct {
-	Net           string   `flag:"net"`
-	TsVer         string   `flag:"ts-ver"`
-	TsExit        string   `flag:"ts-exit"`
-	TsTags        []string `flag:"ts-tags"`
-	TsAuthKey     string   `flag:"ts-auth-key"`
-	MacvlanMac    string   `flag:"macvlan-mac"`
-	MacvlanVlan   int      `flag:"macvlan-vlan"`
-	MacvlanParent string   `flag:"macvlan-parent"`
-	Restart       bool     `flag:"restart" default:"true"`
-	Pull          bool     `flag:"pull"`
-	Force         bool     `flag:"force"`
-	Publish       []string `flag:"publish" short:"p"`
-	EnvFile       string   `flag:"env-file"`
-	ServiceRoot   string   `flag:"service-root"`
-	ZFS           bool     `flag:"zfs"`
+	Net              string   `flag:"net"`
+	TsVer            string   `flag:"ts-ver"`
+	TsExit           string   `flag:"ts-exit"`
+	TsTags           []string `flag:"ts-tags"`
+	TsAuthKey        string   `flag:"ts-auth-key"`
+	MacvlanMac       string   `flag:"macvlan-mac"`
+	MacvlanVlan      int      `flag:"macvlan-vlan"`
+	MacvlanParent    string   `flag:"macvlan-parent"`
+	Restart          bool     `flag:"restart" default:"true"`
+	Pull             bool     `flag:"pull"`
+	Force            bool     `flag:"force"`
+	Publish          []string `flag:"publish" short:"p"`
+	EnvFile          string   `flag:"env-file"`
+	ServiceRoot      string   `flag:"service-root"`
+	ZFS              bool     `flag:"zfs"`
+	Snapshots        string   `flag:"snapshots"`
+	SnapshotKeepLast string   `flag:"snapshot-keep-last"`
+	SnapshotMaxAge   string   `flag:"snapshot-max-age"`
+	SnapshotRequired string   `flag:"snapshot-required"`
+	SnapshotEvents   string   `flag:"snapshot-events"`
 }
 
 type serviceSetFlagsParsed struct {
-	ServiceRoot string `flag:"service-root"`
-	ZFS         bool   `flag:"zfs"`
-	Copy        bool   `flag:"copy"`
-	Empty       bool   `flag:"empty"`
+	ServiceRoot      string `flag:"service-root"`
+	ZFS              bool   `flag:"zfs"`
+	Copy             bool   `flag:"copy"`
+	Empty            bool   `flag:"empty"`
+	Snapshots        string `flag:"snapshots"`
+	SnapshotKeepLast string `flag:"snapshot-keep-last"`
+	SnapshotMaxAge   string `flag:"snapshot-max-age"`
+	SnapshotRequired string `flag:"snapshot-required"`
+	SnapshotEvents   string `flag:"snapshot-events"`
 }
 
 type serviceSyncFlagsParsed struct {
@@ -285,10 +323,11 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}},
 	"restart":  {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
 	"rollback": {Name: "rollback", Description: "Rollback a service", ArgsSchema: ServiceArgs{}},
-	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [--service-root=/abs/path|dataset] [--zfs] [-- <payload args>]", Examples: []string{
+	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>]", Examples: []string{
 		"yeet run <svc> ./bin/<svc> -- --app-flag value",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
 		"yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs",
+		"yeet run <svc> ./compose.yml --snapshots=off",
 		"yeet run --pull <svc> ./compose.yml",
 		"yeet run --force <svc> ./compose.yml",
 		"yeet run --env-file=prod.env <svc> ./compose.yml",
@@ -382,11 +421,13 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set service settings",
-				Usage:       "service set <svc> --service-root=/abs/path|dataset [--zfs] [--copy|--empty]",
+				Usage:       "service set <svc> [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]",
 				Examples: []string{
 					"yeet service set <svc> --service-root=/srv/apps/<svc>",
 					"yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy",
 					"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
+					"yeet service set <svc> --snapshots=off",
+					"yeet service set <svc> --snapshots=on --snapshot-keep-last=5 --snapshot-max-age=7d",
 				},
 				ArgsSchema: ServiceArgs{},
 			},
@@ -400,6 +441,22 @@ var remoteGroupInfos = map[string]GroupInfo{
 					"yeet service sync <svc> --config ~/yeet-services/yeet.toml",
 				},
 				ArgsSchema: ServiceSyncArgs{},
+			},
+		},
+	},
+	"snapshots": {
+		Name:        "snapshots",
+		Description: "Manage catch ZFS snapshot defaults",
+		Commands: map[string]CommandInfo{
+			"defaults": {
+				Name:        "defaults",
+				Description: "Show or set catch snapshot defaults",
+				Usage:       "snapshots defaults show | snapshots defaults set [--enabled=true|false] [--keep-last=N] [--max-age=7d] [--events=run,docker-update] [--required=true|false]",
+				Examples: []string{
+					"yeet snapshots defaults show",
+					"yeet snapshots defaults set --enabled=false",
+					"yeet snapshots defaults set --enabled=true --keep-last=5 --max-age=7d",
+				},
 			},
 		},
 	},
@@ -423,6 +480,9 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 	"service": {
 		"set":  flagSpecsFromStruct(serviceSetFlagsParsed{}),
 		"sync": flagSpecsFromStruct(serviceSyncFlagsParsed{}),
+	},
+	"snapshots": {
+		"defaults": flagSpecsFromStruct(snapshotDefaultsSetFlagsParsed{}),
 	},
 }
 
@@ -503,22 +563,35 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 	if err != nil {
 		return RunFlags{}, nil, err
 	}
+	if hasExplicitEmptyFlag(parseArgs, "--snapshots") {
+		return RunFlags{}, nil, fmt.Errorf("--snapshots must be on, off, or inherit")
+	}
+	snapshotMode, err := normalizeSnapshotMode(parsed.Flags.Snapshots)
+	if err != nil {
+		return RunFlags{}, nil, err
+	}
 	flags := RunFlags{
-		Net:           parsed.Flags.Net,
-		TsVer:         parsed.Flags.TsVer,
-		TsExit:        parsed.Flags.TsExit,
-		TsTags:        parsed.Flags.TsTags,
-		TsAuthKey:     parsed.Flags.TsAuthKey,
-		MacvlanMac:    parsed.Flags.MacvlanMac,
-		MacvlanVlan:   parsed.Flags.MacvlanVlan,
-		MacvlanParent: parsed.Flags.MacvlanParent,
-		Restart:       parsed.Flags.Restart,
-		Pull:          parsed.Flags.Pull,
-		Force:         parsed.Flags.Force,
-		Publish:       parsed.Flags.Publish,
-		EnvFile:       parsed.Flags.EnvFile,
-		ServiceRoot:   parsed.Flags.ServiceRoot,
-		ZFS:           parsed.Flags.ZFS,
+		Net:              parsed.Flags.Net,
+		TsVer:            parsed.Flags.TsVer,
+		TsExit:           parsed.Flags.TsExit,
+		TsTags:           parsed.Flags.TsTags,
+		TsAuthKey:        parsed.Flags.TsAuthKey,
+		MacvlanMac:       parsed.Flags.MacvlanMac,
+		MacvlanVlan:      parsed.Flags.MacvlanVlan,
+		MacvlanParent:    parsed.Flags.MacvlanParent,
+		Restart:          parsed.Flags.Restart,
+		Pull:             parsed.Flags.Pull,
+		Force:            parsed.Flags.Force,
+		Publish:          parsed.Flags.Publish,
+		EnvFile:          parsed.Flags.EnvFile,
+		ServiceRoot:      parsed.Flags.ServiceRoot,
+		ZFS:              parsed.Flags.ZFS,
+		Snapshots:        snapshotMode,
+		SnapshotKeepLast: strings.TrimSpace(parsed.Flags.SnapshotKeepLast),
+		SnapshotMaxAge:   strings.TrimSpace(parsed.Flags.SnapshotMaxAge),
+		SnapshotRequired: strings.TrimSpace(parsed.Flags.SnapshotRequired),
+		SnapshotEvents:   strings.TrimSpace(parsed.Flags.SnapshotEvents),
+		SnapshotChange:   hasAnySnapshotRunFlag(parsed.Flags),
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
@@ -531,26 +604,129 @@ func ParseServiceSet(args []string) (ServiceSetFlags, []string, error) {
 	if err != nil {
 		return ServiceSetFlags{}, nil, err
 	}
-	flags := ServiceSetFlags{
-		ServiceRoot: strings.TrimSpace(parsed.Flags.ServiceRoot),
-		ZFS:         parsed.Flags.ZFS,
-		Copy:        parsed.Flags.Copy,
-		Empty:       parsed.Flags.Empty,
-	}
-	if flags.ServiceRoot == "" {
-		if flags.ZFS {
-			return ServiceSetFlags{}, nil, fmt.Errorf("--service-root is required when --zfs is set")
-		}
-		return ServiceSetFlags{}, nil, fmt.Errorf("--service-root is required")
-	}
-	if !flags.ZFS && !filepath.IsAbs(flags.ServiceRoot) {
-		return ServiceSetFlags{}, nil, fmt.Errorf("--service-root must be absolute unless --zfs is set")
-	}
-	if flags.Copy && flags.Empty {
-		return ServiceSetFlags{}, nil, fmt.Errorf("cannot use --copy and --empty together")
+	flags, err := serviceSetFlagsFromParsed(parsed.Flags, parseArgs)
+	if err != nil {
+		return ServiceSetFlags{}, nil, err
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
+}
+
+func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string) (ServiceSetFlags, error) {
+	if hasExplicitEmptyFlag(parseArgs, "--snapshots") {
+		return ServiceSetFlags{}, fmt.Errorf("--snapshots must be on, off, or inherit")
+	}
+	snapshotMode, err := normalizeSnapshotMode(parsed.Snapshots)
+	if err != nil {
+		return ServiceSetFlags{}, err
+	}
+	flags := ServiceSetFlags{
+		ServiceRoot:      strings.TrimSpace(parsed.ServiceRoot),
+		ZFS:              parsed.ZFS,
+		Copy:             parsed.Copy,
+		Empty:            parsed.Empty,
+		Snapshots:        snapshotMode,
+		SnapshotKeepLast: strings.TrimSpace(parsed.SnapshotKeepLast),
+		SnapshotMaxAge:   strings.TrimSpace(parsed.SnapshotMaxAge),
+		SnapshotRequired: strings.TrimSpace(parsed.SnapshotRequired),
+		SnapshotEvents:   strings.TrimSpace(parsed.SnapshotEvents),
+		SnapshotChange:   hasAnySnapshotServiceSetFlag(parsed),
+	}
+	if err := validateServiceSetFlags(flags); err != nil {
+		return ServiceSetFlags{}, err
+	}
+	return flags, nil
+}
+
+func validateServiceSetFlags(flags ServiceSetFlags) error {
+	if err := validateServiceSetRootFlags(flags); err != nil {
+		return err
+	}
+	if flags.Copy && flags.Empty {
+		return fmt.Errorf("cannot use --copy and --empty together")
+	}
+	return nil
+}
+
+func validateServiceSetRootFlags(flags ServiceSetFlags) error {
+	rootChange := flags.ServiceRoot != "" || flags.ZFS
+	if rootChange && flags.ServiceRoot == "" {
+		return fmt.Errorf("--service-root is required when --zfs is set")
+	}
+	if rootChange && !flags.ZFS && !filepath.IsAbs(flags.ServiceRoot) {
+		return fmt.Errorf("--service-root must be absolute unless --zfs is set")
+	}
+	if !rootChange && !flags.SnapshotChange {
+		return fmt.Errorf("service set requires --service-root or snapshot settings")
+	}
+	return nil
+}
+
+func normalizeSnapshotMode(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "on", "off", "inherit":
+		return value, nil
+	default:
+		return "", fmt.Errorf("--snapshots must be on, off, or inherit")
+	}
+}
+
+func hasAnySnapshotServiceSetFlag(f serviceSetFlagsParsed) bool {
+	return strings.TrimSpace(f.Snapshots) != "" ||
+		strings.TrimSpace(f.SnapshotKeepLast) != "" ||
+		strings.TrimSpace(f.SnapshotMaxAge) != "" ||
+		strings.TrimSpace(f.SnapshotRequired) != "" ||
+		strings.TrimSpace(f.SnapshotEvents) != ""
+}
+
+func hasAnySnapshotRunFlag(f runFlagsParsed) bool {
+	return strings.TrimSpace(f.Snapshots) != "" ||
+		strings.TrimSpace(f.SnapshotKeepLast) != "" ||
+		strings.TrimSpace(f.SnapshotMaxAge) != "" ||
+		strings.TrimSpace(f.SnapshotRequired) != "" ||
+		strings.TrimSpace(f.SnapshotEvents) != ""
+}
+
+func hasExplicitEmptyFlag(args []string, name string) bool {
+	for i, arg := range args {
+		flagName, hasInlineValue := splitInlineFlagValue(arg)
+		if flagName != name {
+			continue
+		}
+		if hasInlineValue {
+			return strings.TrimSpace(strings.TrimPrefix(arg, name+"=")) == ""
+		}
+		if i+1 < len(args) {
+			return strings.TrimSpace(args[i+1]) == ""
+		}
+	}
+	return false
+}
+
+func ParseSnapshotDefaultsShow(args []string) ([]string, error) {
+	if len(args) != 0 {
+		return nil, fmt.Errorf("snapshots defaults show takes no arguments")
+	}
+	return nil, nil
+}
+
+func ParseSnapshotDefaultsSet(args []string) (SnapshotDefaultsSetFlags, []string, error) {
+	parsed, err := parseFlags[snapshotDefaultsSetFlagsParsed](args)
+	if err != nil {
+		return SnapshotDefaultsSetFlags{}, nil, err
+	}
+	flags := SnapshotDefaultsSetFlags{
+		Enabled:  strings.TrimSpace(parsed.Flags.Enabled),
+		KeepLast: strings.TrimSpace(parsed.Flags.KeepLast),
+		MaxAge:   strings.TrimSpace(parsed.Flags.MaxAge),
+		Events:   strings.TrimSpace(parsed.Flags.Events),
+		Required: strings.TrimSpace(parsed.Flags.Required),
+	}
+	if flags == (SnapshotDefaultsSetFlags{}) {
+		return SnapshotDefaultsSetFlags{}, nil, fmt.Errorf("snapshots defaults set requires at least one setting")
+	}
+	return flags, parsed.Args, nil
 }
 
 func ParseServiceSync(args []string) (ServiceSyncFlags, []string, error) {

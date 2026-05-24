@@ -144,6 +144,19 @@ func TestParseRunAbsoluteServiceRootWithoutZFS(t *testing.T) {
 	}
 }
 
+func TestParseRunSnapshotFlags(t *testing.T) {
+	flags, args, err := ParseRun([]string{"--snapshots=off", "--snapshot-keep-last=3", "--snapshot-max-age=72h", "--snapshot-required=false", "payload.yml"})
+	if err != nil {
+		t.Fatalf("ParseRun: %v", err)
+	}
+	if flags.Snapshots != "off" || flags.SnapshotKeepLast != "3" || flags.SnapshotMaxAge != "72h" || flags.SnapshotRequired != "false" {
+		t.Fatalf("flags = %#v", flags)
+	}
+	if !reflect.DeepEqual(args, []string{"payload.yml"}) {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
 func TestParseRunStopsAtUnknownFlag(t *testing.T) {
 	args := []string{
 		"--net", "ts",
@@ -217,6 +230,25 @@ func TestParseRemoveFlags(t *testing.T) {
 	}
 }
 
+func TestParseSnapshotDefaultsSet(t *testing.T) {
+	flags, args, err := ParseSnapshotDefaultsSet([]string{"--enabled=false", "--keep-last=3", "--max-age=72h", "--events=run,docker-update", "--required=false"})
+	if err != nil {
+		t.Fatalf("ParseSnapshotDefaultsSet: %v", err)
+	}
+	if len(args) != 0 {
+		t.Fatalf("args = %#v, want none", args)
+	}
+	if flags.Enabled != "false" || flags.KeepLast != "3" || flags.MaxAge != "72h" || flags.Events != "run,docker-update" || flags.Required != "false" {
+		t.Fatalf("flags = %#v", flags)
+	}
+}
+
+func TestParseSnapshotDefaultsShowRejectsArgs(t *testing.T) {
+	if _, err := ParseSnapshotDefaultsShow([]string{"extra"}); err == nil || !strings.Contains(err.Error(), "snapshots defaults show takes no arguments") {
+		t.Fatalf("ParseSnapshotDefaultsShow error = %v, want extra args error", err)
+	}
+}
+
 func TestParseServiceSetFlags(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -243,7 +275,7 @@ func TestParseServiceSetFlags(t *testing.T) {
 			want:    ServiceSetFlags{ServiceRoot: "tank/apps/svc-a", ZFS: true, Copy: true},
 			wantOut: []string{"svc-a"},
 		},
-		{name: "missing root", args: []string{"svc-a"}, wantErr: "--service-root is required"},
+		{name: "missing root", args: []string{"svc-a"}, wantErr: "service set requires --service-root or snapshot settings"},
 		{name: "zfs without root", args: []string{"svc-a", "--zfs"}, wantErr: "--service-root is required when --zfs is set"},
 		{name: "relative root without zfs", args: []string{"svc-a", "--service-root", "apps/svc-a"}, wantErr: "--service-root must be absolute unless --zfs is set"},
 		{name: "copy and empty", args: []string{"svc-a", "--service-root", "/srv/apps/svc-a", "--copy", "--empty"}, wantErr: "cannot use --copy and --empty together"},
@@ -268,6 +300,31 @@ func TestParseServiceSetFlags(t *testing.T) {
 				t.Fatalf("args = %#v, want %#v", out, tt.wantOut)
 			}
 		})
+	}
+}
+
+func TestParseServiceSetSnapshotFlags(t *testing.T) {
+	flags, args, err := ParseServiceSet([]string{"svc", "--snapshots=off", "--snapshot-keep-last=3", "--snapshot-max-age=72h", "--snapshot-required=false", "--snapshot-events=run"})
+	if err != nil {
+		t.Fatalf("ParseServiceSet: %v", err)
+	}
+	if len(args) != 1 || args[0] != "svc" {
+		t.Fatalf("args = %#v, want svc", args)
+	}
+	if flags.Snapshots != "off" || flags.SnapshotKeepLast != "3" || flags.SnapshotMaxAge != "72h" || flags.SnapshotRequired != "false" || flags.SnapshotEvents != "run" {
+		t.Fatalf("flags = %#v", flags)
+	}
+}
+
+func TestParseServiceSetSnapshotOnlyDoesNotRequireServiceRoot(t *testing.T) {
+	if _, _, err := ParseServiceSet([]string{"svc", "--snapshots=inherit"}); err != nil {
+		t.Fatalf("ParseServiceSet snapshots-only: %v", err)
+	}
+}
+
+func TestParseServiceSetRejectsEmptySnapshotMode(t *testing.T) {
+	if _, _, err := ParseServiceSet([]string{"svc", "--snapshots="}); err == nil || !strings.Contains(err.Error(), "--snapshots must be on, off, or inherit") {
+		t.Fatalf("ParseServiceSet error = %v, want snapshots value error", err)
 	}
 }
 
@@ -465,16 +522,21 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if reg.Groups["service"].Commands["set"].Info.Name != "set" {
 		t.Fatalf("registry service set command = %#v", reg.Groups["service"].Commands["set"])
 	}
-	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> --service-root=/abs/path|dataset [--zfs] [--copy|--empty]" {
+	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]" {
 		t.Fatalf("service set usage = %q", reg.Groups["service"].Commands["set"].Info.Usage)
 	}
 	wantServiceSetExamples := []string{
 		"yeet service set <svc> --service-root=/srv/apps/<svc>",
 		"yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy",
 		"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
+		"yeet service set <svc> --snapshots=off",
+		"yeet service set <svc> --snapshots=on --snapshot-keep-last=5 --snapshot-max-age=7d",
 	}
 	if !reflect.DeepEqual(reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples) {
 		t.Fatalf("service set examples = %#v, want %#v", reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples)
+	}
+	if reg.Groups["snapshots"].Commands["defaults"].Info.Name != "defaults" {
+		t.Fatalf("registry snapshots defaults command = %#v", reg.Groups["snapshots"].Commands["defaults"])
 	}
 	outdatedArg, ok := yargs.ArgSpecAt(reg.Groups["docker"].Commands["outdated"].ArgsSchema, 0)
 	if !ok {
@@ -536,6 +598,12 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	}
 	if _, ok := RemoteGroupFlagSpecs()["service"]["set"]["--zfs"]; !ok {
 		t.Fatal("service set --zfs should be registered")
+	}
+	if !RemoteGroupFlagSpecs()["service"]["set"]["--snapshots"].ConsumesValue {
+		t.Fatal("service set --snapshots should consume a value")
+	}
+	if !RemoteGroupFlagSpecs()["snapshots"]["defaults"]["--enabled"].ConsumesValue {
+		t.Fatal("snapshots defaults --enabled should consume a value")
 	}
 }
 

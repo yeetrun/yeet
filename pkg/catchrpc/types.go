@@ -117,17 +117,44 @@ type ArtifactHashesResponse struct {
 	Env     *ArtifactHash `json:"env,omitempty"`
 }
 
+type SnapshotPolicy struct {
+	Enabled  *bool    `json:"enabled,omitempty"`
+	KeepLast *int     `json:"keepLast,omitempty"`
+	MaxAge   string   `json:"maxAge,omitempty"`
+	Events   []string `json:"events,omitempty"`
+	Required *bool    `json:"required,omitempty"`
+}
+
+type EffectiveSnapshotPolicy struct {
+	Enabled  bool     `json:"enabled"`
+	KeepLast int      `json:"keepLast"`
+	MaxAge   string   `json:"maxAge"`
+	Events   []string `json:"events,omitempty"`
+	Required bool     `json:"required"`
+}
+
+type ServiceSnapshots struct {
+	Override  *SnapshotPolicy         `json:"override,omitempty"`
+	Effective EffectiveSnapshotPolicy `json:"effective,omitempty"`
+}
+
+type SnapshotDefaultsResponse struct {
+	Defaults  SnapshotPolicy          `json:"defaults,omitempty"`
+	Effective EffectiveSnapshotPolicy `json:"effective,omitempty"`
+}
+
 type ServiceInfo struct {
-	Name             string         `json:"name"`
-	ServiceType      string         `json:"serviceType,omitempty"`
-	DataType         string         `json:"dataType,omitempty"`
-	Generation       int            `json:"generation,omitempty"`
-	LatestGeneration int            `json:"latestGeneration,omitempty"`
-	Staged           bool           `json:"staged,omitempty"`
-	Paths            ServicePaths   `json:"paths,omitempty"`
-	Network          ServiceNetwork `json:"network,omitempty"`
-	Status           ServiceStatus  `json:"status,omitempty"`
-	Images           []ServiceImage `json:"images,omitempty"`
+	Name             string           `json:"name"`
+	ServiceType      string           `json:"serviceType,omitempty"`
+	DataType         string           `json:"dataType,omitempty"`
+	Generation       int              `json:"generation,omitempty"`
+	LatestGeneration int              `json:"latestGeneration,omitempty"`
+	Staged           bool             `json:"staged,omitempty"`
+	Paths            ServicePaths     `json:"paths,omitempty"`
+	Network          ServiceNetwork   `json:"network,omitempty"`
+	Status           ServiceStatus    `json:"status,omitempty"`
+	Images           []ServiceImage   `json:"images,omitempty"`
+	Snapshots        ServiceSnapshots `json:"snapshots,omitempty"`
 }
 
 type ServicePaths struct {
