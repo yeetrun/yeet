@@ -70,6 +70,53 @@ func extractEnvFileFlag(args []string) (string, []string, bool, error) {
 	return envFile, out, found, nil
 }
 
+func extractServiceRootFlag(args []string) (string, []string, bool, error) {
+	if len(args) == 0 {
+		return "", args, false, nil
+	}
+	out := make([]string, 0, len(args))
+	var serviceRoot string
+	found := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+		if arg == "--service-root" {
+			if i+1 >= len(args) {
+				return "", nil, false, fmt.Errorf("--service-root requires a value")
+			}
+			serviceRoot = strings.TrimSpace(args[i+1])
+			found = true
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "--service-root=") {
+			serviceRoot = strings.TrimSpace(strings.TrimPrefix(arg, "--service-root="))
+			found = true
+			continue
+		}
+		out = append(out, arg)
+	}
+	if found && !filepath.IsAbs(serviceRoot) {
+		return "", nil, false, fmt.Errorf("--service-root must be absolute")
+	}
+	return serviceRoot, out, found, nil
+}
+
+func runArgsWithServiceRoot(args []string, serviceRoot string) []string {
+	args = append([]string{}, args...)
+	serviceRoot = strings.TrimSpace(serviceRoot)
+	if serviceRoot == "" {
+		return args
+	}
+	out := make([]string, 0, len(args)+1)
+	out = append(out, "--service-root="+serviceRoot)
+	out = append(out, args...)
+	return out
+}
+
 func extractForceFlag(args []string) (bool, []string, error) {
 	if len(args) == 0 {
 		return false, args, nil
@@ -224,7 +271,7 @@ func runWithChanges(payload string, runArgs []string, envFile string, entry Serv
 }
 
 func runWithChangesTo(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
-	summary, err := detectRunChanges(payload, runArgs, envFile, entry.Args)
+	summary, err := detectRunChanges(payload, runArgs, envFile, runArgsWithServiceRoot(entry.Args, entry.ServiceRoot))
 	if err != nil {
 		return err
 	}

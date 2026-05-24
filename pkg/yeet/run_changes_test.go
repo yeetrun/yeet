@@ -73,6 +73,57 @@ func TestExtractEnvFileFlag(t *testing.T) {
 	}
 }
 
+func TestExtractServiceRootFlag(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantRoot  string
+		wantArgs  []string
+		wantFound bool
+		wantErr   string
+	}{
+		{name: "space value", args: []string{"--service-root", "/srv/apps/svc-a", "--env-file", ".env"}, wantRoot: "/srv/apps/svc-a", wantArgs: []string{"--env-file", ".env"}, wantFound: true},
+		{name: "equals value", args: []string{"--service-root=/srv/apps/svc-a", "--force"}, wantRoot: "/srv/apps/svc-a", wantArgs: []string{"--force"}, wantFound: true},
+		{name: "delimiter stops parsing", args: []string{"--service-root=/srv/apps/svc-a", "--", "--service-root", "remote"}, wantRoot: "/srv/apps/svc-a", wantArgs: []string{"--", "--service-root", "remote"}, wantFound: true},
+		{name: "missing value", args: []string{"--service-root"}, wantErr: "requires a value"},
+		{name: "relative value", args: []string{"--service-root", "apps/svc-a"}, wantErr: "must be absolute"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotRoot, gotArgs, gotFound, err := extractServiceRootFlag(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("extractServiceRootFlag error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("extractServiceRootFlag error: %v", err)
+			}
+			if gotRoot != tt.wantRoot || gotFound != tt.wantFound || strings.Join(gotArgs, ",") != strings.Join(tt.wantArgs, ",") {
+				t.Fatalf("extractServiceRootFlag = root %q args %#v found %v, want root %q args %#v found %v", gotRoot, gotArgs, gotFound, tt.wantRoot, tt.wantArgs, tt.wantFound)
+			}
+		})
+	}
+}
+
+func TestDetectRunChangesServiceRootOnly(t *testing.T) {
+	oldHashes := fetchRemoteArtifactHashesFn
+	defer func() { fetchRemoteArtifactHashesFn = oldHashes }()
+
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, true, nil
+	}
+	summary, err := detectRunChanges("ghcr.io/example/app:latest", []string{"--service-root=/srv/apps/new"}, "", []string{"--service-root=/srv/apps/old"})
+	if err != nil {
+		t.Fatalf("detectRunChanges error: %v", err)
+	}
+	if !summary.argsChanged || !summary.requiresRun() {
+		t.Fatalf("summary = %#v, want service-root-only args change to require run", summary)
+	}
+}
+
 func TestServiceEntryForConfigAndHasServiceConfig(t *testing.T) {
 	oldService := serviceOverride
 	oldPrefs := loadedPrefs
