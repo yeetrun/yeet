@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -26,10 +27,16 @@ const (
 	serviceRootMigrationEmpty
 )
 
+type serviceRootMigrationRequest struct {
+	Root string
+	ZFS  bool
+}
+
 type serviceRootMigrationPlan struct {
 	ServiceName string
 	OldRoot     string
 	NewRoot     string
+	NewRootZFS  string
 }
 
 var (
@@ -67,7 +74,8 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 		mode = serviceRootMigrationEmpty
 	}
 
-	plan, err := e.s.validateServiceRootMigration(e.sn, flags.ServiceRoot)
+	request := serviceRootMigrationRequest{Root: flags.ServiceRoot, ZFS: flags.ZFS}
+	plan, err := e.s.validateServiceRootMigration(e.sn, request)
 	if err != nil {
 		return err
 	}
@@ -75,7 +83,7 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	if err != nil {
 		return err
 	}
-	return e.s.migrateServiceRoot(plan.ServiceName, plan.NewRoot, mode)
+	return e.s.migrateServiceRoot(plan.ServiceName, request, mode)
 }
 
 func (e *ttyExecer) confirmServiceRootMigrationMode(mode serviceRootMigrationMode, plan serviceRootMigrationPlan) (serviceRootMigrationMode, error) {
@@ -95,37 +103,69 @@ func (e *ttyExecer) confirmServiceRootMigrationMode(mode serviceRootMigrationMod
 	return serviceRootMigrationEmpty, nil
 }
 
-func (s *Server) validateServiceRootMigration(name, dst string) (serviceRootMigrationPlan, error) {
-	sv, err := s.serviceView(name)
-	if err != nil {
-		if errors.Is(err, errServiceNotFound) {
-			return serviceRootMigrationPlan{}, fmt.Errorf("service %q not found", name)
-		}
-		return serviceRootMigrationPlan{}, err
-	}
-	running, err := isServiceRunningForRootMigration(s, name)
-	if err != nil {
-		return serviceRootMigrationPlan{}, err
-	}
-	if running {
-		return serviceRootMigrationPlan{}, fmt.Errorf("cannot migrate service root while %q is running", name)
-	}
-	newRoot, err := cleanRequestedServiceRoot(dst)
+func (s *Server) validateServiceRootMigration(name string, request serviceRootMigrationRequest) (serviceRootMigrationPlan, error) {
+	sv, err := s.stoppedServiceForRootMigration(name)
 	if err != nil {
 		return serviceRootMigrationPlan{}, err
 	}
 	oldRoot := filepath.Clean(s.serviceRootFromView(sv))
-	if oldRoot == newRoot {
-		return serviceRootMigrationPlan{}, fmt.Errorf("service root for %q is already %s", name, oldRoot)
+	resolved, err := s.resolveServiceRootMigrationRequest(request)
+	if err != nil {
+		return serviceRootMigrationPlan{}, err
+	}
+	newRoot := filepath.Clean(resolved.Root)
+	if err := rejectNoopServiceRootMigration(name, oldRoot, sv.ServiceRootZFS(), newRoot, resolved.Dataset); err != nil {
+		return serviceRootMigrationPlan{}, err
 	}
 	if rootsAreNested(oldRoot, newRoot) || rootsAreNested(newRoot, oldRoot) {
 		return serviceRootMigrationPlan{}, fmt.Errorf("cannot migrate between nested service roots: %s and %s", oldRoot, newRoot)
 	}
-	newRoot, err = validateRequestedServiceRoot(newRoot)
-	if err != nil {
-		return serviceRootMigrationPlan{}, err
+	if !request.ZFS {
+		newRoot, err = validateRequestedServiceRoot(newRoot)
+		if err != nil {
+			return serviceRootMigrationPlan{}, err
+		}
 	}
-	return serviceRootMigrationPlan{ServiceName: name, OldRoot: oldRoot, NewRoot: newRoot}, nil
+	return serviceRootMigrationPlan{ServiceName: name, OldRoot: oldRoot, NewRoot: newRoot, NewRootZFS: resolved.Dataset}, nil
+}
+
+func (s *Server) stoppedServiceForRootMigration(name string) (db.ServiceView, error) {
+	sv, err := s.serviceView(name)
+	if err != nil {
+		if errors.Is(err, errServiceNotFound) {
+			return db.ServiceView{}, fmt.Errorf("service %q not found", name)
+		}
+		return db.ServiceView{}, err
+	}
+	running, err := isServiceRunningForRootMigration(s, name)
+	if err != nil {
+		return db.ServiceView{}, err
+	}
+	if running {
+		return db.ServiceView{}, fmt.Errorf("cannot migrate service root while %q is running", name)
+	}
+	return sv, nil
+}
+
+func (s *Server) resolveServiceRootMigrationRequest(request serviceRootMigrationRequest) (resolvedServiceRoot, error) {
+	if request.ZFS {
+		return resolveZFSServiceRoot(context.Background(), s.zfsRunner, request.Root, zfsServiceRootTarget)
+	}
+	newRoot, err := cleanRequestedServiceRoot(request.Root)
+	if err != nil {
+		return resolvedServiceRoot{}, err
+	}
+	return resolvedServiceRoot{Root: newRoot}, nil
+}
+
+func rejectNoopServiceRootMigration(name, oldRoot, oldRootZFS, newRoot, newRootZFS string) error {
+	if oldRoot == newRoot && oldRootZFS == newRootZFS {
+		return fmt.Errorf("service root for %q is already %s", name, oldRoot)
+	}
+	if oldRoot == newRoot {
+		return fmt.Errorf("service %q already uses service root %q with a different root type; choose a different target root", name, oldRoot)
+	}
+	return nil
 }
 
 func rootsAreNested(parent, child string) bool {
@@ -138,8 +178,8 @@ func rootsAreNested(parent, child string) bool {
 	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-func (s *Server) migrateServiceRoot(name, newRoot string, mode serviceRootMigrationMode) error {
-	plan, err := s.validateServiceRootMigration(name, newRoot)
+func (s *Server) migrateServiceRoot(name string, request serviceRootMigrationRequest, mode serviceRootMigrationMode) error {
+	plan, err := s.validateServiceRootMigration(name, request)
 	if err != nil {
 		return err
 	}
@@ -155,7 +195,7 @@ func (s *Server) migrateServiceRoot(name, newRoot string, mode serviceRootMigrat
 	default:
 		return fmt.Errorf("service root migration mode was not selected")
 	}
-	return s.updateServiceRoot(plan.ServiceName, plan.NewRoot)
+	return s.updateServiceRoot(plan.ServiceName, plan.NewRoot, plan.NewRootZFS)
 }
 
 func (s *Server) copyServiceRootMigration(oldRoot, newRoot string) error {
@@ -233,13 +273,14 @@ func removeRetrySafeServiceRootSkeleton(root string) error {
 	return nil
 }
 
-func (s *Server) updateServiceRoot(name, newRoot string) error {
+func (s *Server) updateServiceRoot(name, newRoot, newRootZFS string) error {
 	_, err := s.cfg.DB.MutateData(func(d *db.Data) error {
 		svc, ok := d.Services[name]
 		if !ok {
 			return fmt.Errorf("service %q not found", name)
 		}
-		if filepath.Clean(newRoot) == filepath.Clean(s.defaultServiceRootDir(name)) {
+		svc.ServiceRootZFS = newRootZFS
+		if newRootZFS == "" && filepath.Clean(newRoot) == filepath.Clean(s.defaultServiceRootDir(name)) {
 			svc.ServiceRoot = ""
 		} else {
 			svc.ServiceRoot = newRoot
