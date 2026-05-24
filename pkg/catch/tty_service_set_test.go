@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -151,6 +152,35 @@ func TestServiceSetRootNonTTYRequiresCopyOrEmpty(t *testing.T) {
 	err := execer.serviceCmdFunc([]string{"set", "--service-root", newRoot})
 	if err == nil || !strings.Contains(err.Error(), "requires --copy or --empty") {
 		t.Fatalf("serviceSetCmdFunc error = %v, want non-TTY prompt error", err)
+	}
+}
+
+func TestServiceSetZFSNonTTYRequiresModeBeforeDatasetCreate(t *testing.T) {
+	server := newTestServer(t)
+	name := seedServiceWithRoot(t, server, "", "")
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+	withServiceSetRootStopped(t)
+	if err := os.MkdirAll(newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps/svc": {Mountpoint: newRoot},
+	})
+	server.zfsRunner = runner.Run
+	execer := &ttyExecer{
+		ctx:   context.Background(),
+		s:     server,
+		sn:    name,
+		rw:    &bytes.Buffer{},
+		isPty: false,
+	}
+
+	err := execer.serviceCmdFunc([]string{"set", "--service-root", "tank/apps/svc", "--zfs"})
+	if err == nil || !strings.Contains(err.Error(), "requires --copy or --empty") {
+		t.Fatalf("serviceSetCmdFunc error = %v, want non-TTY prompt error", err)
+	}
+	if runner["tank/apps/svc"].Exists {
+		t.Fatal("dataset was created before non-TTY mode validation")
 	}
 }
 
@@ -400,6 +430,58 @@ func TestServiceSetZFSMigrationCopy(t *testing.T) {
 	}
 }
 
+func TestServiceSetZFSMigrationCommandResolvesDatasetOnce(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc"
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	newRoot := filepath.Join(t.TempDir(), "new")
+	withServiceSetRootStopped(t)
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(serviceDataDirForRoot(oldRoot), "config.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(newRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps/svc": {Mountpoint: newRoot, Exists: true},
+	})
+	var calls [][]string
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		calls = append(calls, append([]string{}, args...))
+		return runner.Run(ctx, args...)
+	}
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceRoot = oldRoot
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service root: %v", err)
+	}
+	execer := &ttyExecer{
+		ctx:   context.Background(),
+		s:     server,
+		sn:    name,
+		rw:    &bytes.Buffer{},
+		isPty: false,
+	}
+
+	if err := execer.serviceCmdFunc([]string{"set", "--service-root", "tank/apps/svc", "--zfs", "--copy"}); err != nil {
+		t.Fatalf("serviceCmdFunc: %v", err)
+	}
+
+	wantCalls := [][]string{
+		{"list", "-H", "-o", "name", "tank/apps/svc"},
+		{"get", "-H", "-o", "value", "mountpoint", "tank/apps/svc"},
+	}
+	if !reflect.DeepEqual(calls, wantCalls) {
+		t.Fatalf("zfs calls = %#v, want %#v", calls, wantCalls)
+	}
+	assertServiceRoot(t, server, name, newRoot)
+	assertServiceRootZFS(t, server, name, "tank/apps/svc")
+}
+
 func TestServiceSetZFSMigrationCreatesDatasetAndLeavesDBOnCopyFailure(t *testing.T) {
 	server := newTestServer(t)
 	name := "svc"
@@ -473,6 +555,31 @@ func TestServiceSetZFSMigrationEmptyUsesMountedRoot(t *testing.T) {
 	if !os.SameFile(rootInfo, rootInfoAfter) {
 		t.Fatal("ZFS mountpoint was replaced during empty migration")
 	}
+}
+
+func TestServiceSetMigrationFromZFSToFilesystemClearsDataset(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc"
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	newRoot := filepath.Join(t.TempDir(), "new")
+	withServiceSetRootStopped(t)
+	if err := os.MkdirAll(oldRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceRoot = oldRoot
+		s.ServiceRootZFS = "tank/apps/svc"
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service root: %v", err)
+	}
+
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationEmpty); err != nil {
+		t.Fatalf("migrateServiceRoot: %v", err)
+	}
+
+	assertServiceRoot(t, server, name, newRoot)
+	assertServiceRootZFS(t, server, name, "")
 }
 
 func TestServiceSetRejectsNoopAcrossRootTypes(t *testing.T) {
