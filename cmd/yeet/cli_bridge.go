@@ -11,10 +11,9 @@ import (
 	"github.com/yeetrun/yeet/pkg/cli"
 )
 
-// localGroupCommands lists group commands handled locally (not bridged to catch).
-// Keep this in sync with cmd/yeet/cli.go group handlers and
-// pkg/cli/cli.go remoteGroupInfos/remoteGroupFlagSpecs.
-var localGroupCommands = map[string]map[string]struct{}{
+// serviceBridgeSkippedGroupCommands lists group commands whose positional args
+// should not be treated as service names by service-arg bridging.
+var serviceBridgeSkippedGroupCommands = map[string]map[string]struct{}{
 	"docker": {
 		"push": {},
 	},
@@ -143,7 +142,7 @@ func bridgeCommandArgs(args []string, start int, flags map[string]cli.FlagSpec) 
 
 func bridgeGroupArgs(args []string, groupSpecs map[string]map[string]map[string]cli.FlagSpec) (service string, host string, bridged []string, ok bool) {
 	group, ok := groupSpecs[args[0]]
-	if !ok || isLocalGroupCommand(args[0], args[1]) {
+	if !ok || isServiceBridgeSkippedGroupCommand(args[0], args[1]) {
 		return "", "", nil, false
 	}
 	flags, ok := group[args[1]]
@@ -170,8 +169,8 @@ func isVariadicServiceGroupCommand(group string, command string) bool {
 	return ok && cli.IsServiceArgSpec(arg) && arg.Variadic
 }
 
-func isLocalGroupCommand(group string, command string) bool {
-	locals, ok := localGroupCommands[group]
+func isServiceBridgeSkippedGroupCommand(group string, command string) bool {
+	locals, ok := serviceBridgeSkippedGroupCommands[group]
 	if !ok {
 		return false
 	}

@@ -158,8 +158,15 @@ func TestParseRunSnapshotFlags(t *testing.T) {
 }
 
 func TestParseRunRejectsMissingSnapshotMode(t *testing.T) {
-	if _, _, err := ParseRun([]string{"--snapshots", "payload.yml"}); err == nil || !strings.Contains(err.Error(), "--snapshots must be on, off, or inherit") {
-		t.Fatalf("ParseRun error = %v, want snapshots value error", err)
+	tests := [][]string{
+		{"--snapshots", "payload.yml"},
+		{"--snapshots=off", "--snapshots"},
+		{"--snapshots=off", "--snapshots", "--pull", "payload.yml"},
+	}
+	for _, args := range tests {
+		if _, _, err := ParseRun(args); err == nil || !strings.Contains(err.Error(), "--snapshots must be on, off, or inherit") {
+			t.Fatalf("ParseRun(%#v) error = %v, want snapshots value error", args, err)
+		}
 	}
 }
 
@@ -338,6 +345,8 @@ func TestParseServiceSetRejectsMissingSnapshotMode(t *testing.T) {
 	tests := [][]string{
 		{"svc", "--service-root=/srv/app", "--snapshots"},
 		{"svc", "--service-root=/srv/app", "--snapshots", "--copy"},
+		{"svc", "--service-root=/srv/app", "--snapshots=off", "--snapshots"},
+		{"svc", "--service-root=/srv/app", "--snapshots=off", "--snapshots", "--copy"},
 	}
 	for _, args := range tests {
 		if _, _, err := ParseServiceSet(args); err == nil || !strings.Contains(err.Error(), "--snapshots must be on, off, or inherit") {

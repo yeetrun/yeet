@@ -716,9 +716,14 @@ func hasFlagWithoutValue(args []string, name string) bool {
 			continue
 		}
 		if hasInlineValue {
-			return strings.TrimSpace(strings.TrimPrefix(arg, name+"=")) == ""
+			if strings.TrimSpace(strings.TrimPrefix(arg, name+"=")) == "" {
+				return true
+			}
+			continue
 		}
-		return i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" || isFlagToken(args[i+1])
+		if i+1 >= len(args) || strings.TrimSpace(args[i+1]) == "" || isFlagToken(args[i+1]) {
+			return true
+		}
 	}
 	return false
 }
