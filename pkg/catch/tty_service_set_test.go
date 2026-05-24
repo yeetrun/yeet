@@ -573,6 +573,36 @@ func TestServiceSetRejectsMissingZFSChildNestedUnderOldRootBeforeCreate(t *testi
 	}
 }
 
+func TestServiceSetRejectsMissingZFSChildSamePathDifferentRootTypeBeforeCreate(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc"
+	parentRoot := filepath.Join(t.TempDir(), "apps")
+	oldRoot := filepath.Join(parentRoot, "svc")
+	withServiceSetRootStopped(t)
+	if err := os.MkdirAll(oldRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runner := fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps":     {Mountpoint: parentRoot, Exists: true},
+		"tank/apps/svc": {Mountpoint: oldRoot},
+	})
+	server.zfsRunner = runner.Run
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceRoot = oldRoot
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service root: %v", err)
+	}
+
+	_, err := server.validateServiceRootMigration(name, serviceRootMigrationRequest{Root: "tank/apps/svc", ZFS: true})
+	if err == nil || !strings.Contains(err.Error(), "already uses service root") || !strings.Contains(err.Error(), "different root type") {
+		t.Fatalf("validateServiceRootMigration error = %v, want same path different root type rejection", err)
+	}
+	if runner["tank/apps/svc"].Exists {
+		t.Fatal("child dataset was created before same path different root type rejection")
+	}
+}
+
 func TestServiceSetZFSMigrationEmptyUsesMountedRoot(t *testing.T) {
 	server := newTestServer(t)
 	name := "svc"
