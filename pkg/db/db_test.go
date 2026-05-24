@@ -177,20 +177,28 @@ func TestServiceRootCloneAndView(t *testing.T) {
 		DataVersion: CurrentDataVersion,
 		Services: map[string]*Service{
 			"svc": {
-				Name:        "svc",
-				ServiceType: ServiceTypeDockerCompose,
-				ServiceRoot: "/srv/custom/svc",
+				Name:           "svc",
+				ServiceType:    ServiceTypeDockerCompose,
+				ServiceRoot:    "/tank/apps/svc",
+				ServiceRootZFS: "tank/apps/svc",
 			},
 		},
 	}
 
 	clone := data.Clone()
-	if got := clone.Services["svc"].ServiceRoot; got != "/srv/custom/svc" {
-		t.Fatalf("Clone ServiceRoot = %q, want /srv/custom/svc", got)
+	if got := clone.Services["svc"].ServiceRoot; got != "/tank/apps/svc" {
+		t.Fatalf("Clone ServiceRoot = %q, want /tank/apps/svc", got)
+	}
+	if got := clone.Services["svc"].ServiceRootZFS; got != "tank/apps/svc" {
+		t.Fatalf("Clone ServiceRootZFS = %q, want tank/apps/svc", got)
 	}
 	clone.Services["svc"].ServiceRoot = "/srv/clone/svc"
-	if got := data.Services["svc"].ServiceRoot; got != "/srv/custom/svc" {
+	clone.Services["svc"].ServiceRootZFS = "tank/apps/clone"
+	if got := data.Services["svc"].ServiceRoot; got != "/tank/apps/svc" {
 		t.Fatalf("source ServiceRoot was mutated through clone: %q", got)
+	}
+	if got := data.Services["svc"].ServiceRootZFS; got != "tank/apps/svc" {
+		t.Fatalf("source ServiceRootZFS was mutated through clone: %q", got)
 	}
 
 	view := data.View()
@@ -198,11 +206,17 @@ func TestServiceRootCloneAndView(t *testing.T) {
 	if !ok {
 		t.Fatal("view missing service")
 	}
-	if got := svc.ServiceRoot(); got != "/srv/custom/svc" {
-		t.Fatalf("View ServiceRoot = %q, want /srv/custom/svc", got)
+	if got := svc.ServiceRoot(); got != "/tank/apps/svc" {
+		t.Fatalf("View ServiceRoot = %q, want /tank/apps/svc", got)
 	}
-	if got := view.AsStruct().Services["svc"].ServiceRoot; got != "/srv/custom/svc" {
-		t.Fatalf("View AsStruct ServiceRoot = %q, want /srv/custom/svc", got)
+	if got := svc.ServiceRootZFS(); got != "tank/apps/svc" {
+		t.Fatalf("View ServiceRootZFS = %q, want tank/apps/svc", got)
+	}
+	if got := view.AsStruct().Services["svc"].ServiceRoot; got != "/tank/apps/svc" {
+		t.Fatalf("View AsStruct ServiceRoot = %q, want /tank/apps/svc", got)
+	}
+	if got := view.AsStruct().Services["svc"].ServiceRootZFS; got != "tank/apps/svc" {
+		t.Fatalf("View AsStruct ServiceRootZFS = %q, want tank/apps/svc", got)
 	}
 }
 
@@ -588,6 +602,53 @@ func TestMigrateAddsServiceRootVersion(t *testing.T) {
 	}
 	if got := backup.Services["svc"].ServiceRoot; got != "" {
 		t.Fatalf("backup ServiceRoot = %q, want empty", got)
+	}
+}
+
+func TestMigrateAddsServiceRootZFSVersion(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: 6,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", ServiceRoot: "/srv/apps/svc"},
+		},
+	})
+
+	store := NewStore(path, filepath.Join(root, "services"))
+	dv, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := dv.AsStruct()
+	if got.DataVersion != CurrentDataVersion {
+		t.Fatalf("DataVersion = %d, want %d", got.DataVersion, CurrentDataVersion)
+	}
+	if got := got.Services["svc"].ServiceRoot; got != "/srv/apps/svc" {
+		t.Fatalf("migrated ServiceRoot = %q, want /srv/apps/svc", got)
+	}
+	if got := got.Services["svc"].ServiceRootZFS; got != "" {
+		t.Fatalf("migrated ServiceRootZFS = %q, want empty", got)
+	}
+
+	onDisk := mustReadData(t, path)
+	if onDisk.DataVersion != CurrentDataVersion {
+		t.Fatalf("on-disk DataVersion = %d, want %d", onDisk.DataVersion, CurrentDataVersion)
+	}
+	if got := onDisk.Services["svc"].ServiceRootZFS; got != "" {
+		t.Fatalf("on-disk ServiceRootZFS = %q, want empty", got)
+	}
+
+	backups, err := filepath.Glob(path + ".v6.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("migration backups = %v, want exactly one v6 backup", backups)
+	}
+	backup := mustReadData(t, backups[0])
+	if backup.DataVersion != 6 {
+		t.Fatalf("backup DataVersion = %d, want 6", backup.DataVersion)
 	}
 }
 
