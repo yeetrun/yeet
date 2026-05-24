@@ -109,6 +109,10 @@ type Service struct {
 
 	ServiceType ServiceType
 
+	// ServiceRoot is the absolute service root on the catch host.
+	// Empty means filepath.Join(Store.serviceRoot, Name).
+	ServiceRoot string `json:",omitempty"`
+
 	// Generation is the current generation of the service.
 	Generation int `json:",omitempty"`
 

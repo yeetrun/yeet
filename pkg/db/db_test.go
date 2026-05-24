@@ -172,6 +172,40 @@ func TestServiceCloneDeepCopiesArtifactsNetworksAndTags(t *testing.T) {
 	}
 }
 
+func TestServiceRootCloneAndView(t *testing.T) {
+	data := &Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"svc": {
+				Name:        "svc",
+				ServiceType: ServiceTypeDockerCompose,
+				ServiceRoot: "/srv/custom/svc",
+			},
+		},
+	}
+
+	clone := data.Clone()
+	if got := clone.Services["svc"].ServiceRoot; got != "/srv/custom/svc" {
+		t.Fatalf("Clone ServiceRoot = %q, want /srv/custom/svc", got)
+	}
+	clone.Services["svc"].ServiceRoot = "/srv/clone/svc"
+	if got := data.Services["svc"].ServiceRoot; got != "/srv/custom/svc" {
+		t.Fatalf("source ServiceRoot was mutated through clone: %q", got)
+	}
+
+	view := data.View()
+	svc, ok := view.Services().GetOk("svc")
+	if !ok {
+		t.Fatal("view missing service")
+	}
+	if got := svc.ServiceRoot(); got != "/srv/custom/svc" {
+		t.Fatalf("View ServiceRoot = %q, want /srv/custom/svc", got)
+	}
+	if got := view.AsStruct().Services["svc"].ServiceRoot; got != "/srv/custom/svc" {
+		t.Fatalf("View AsStruct ServiceRoot = %q, want /srv/custom/svc", got)
+	}
+}
+
 func TestDockerNetworkCloneDeepCopiesMapsAndPointers(t *testing.T) {
 	src := &DockerNetwork{
 		NetworkID:   "network-id",
@@ -504,6 +538,56 @@ func TestStoreGetMigratesVersion4EndpointAddrs(t *testing.T) {
 	}
 	if got := backup.DockerNetworks["svc"].EndpointAddrs["endpoint-id"]; got != legacyPrefix {
 		t.Fatalf("backup EndpointAddrs = %s, want %s", got, legacyPrefix)
+	}
+}
+
+func TestMigrateAddsServiceRootVersion(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: 5,
+		Services: map[string]*Service{
+			"svc": {
+				Name:        "svc",
+				ServiceType: ServiceTypeDockerCompose,
+			},
+		},
+	})
+
+	store := NewStore(path, filepath.Join(root, "services"))
+	dv, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := dv.AsStruct()
+	if got.DataVersion != CurrentDataVersion {
+		t.Fatalf("DataVersion = %d, want %d", got.DataVersion, CurrentDataVersion)
+	}
+	if got := got.Services["svc"].ServiceRoot; got != "" {
+		t.Fatalf("migrated ServiceRoot = %q, want empty", got)
+	}
+
+	onDisk := mustReadData(t, path)
+	if onDisk.DataVersion != CurrentDataVersion {
+		t.Fatalf("on-disk DataVersion = %d, want %d", onDisk.DataVersion, CurrentDataVersion)
+	}
+	if got := onDisk.Services["svc"].ServiceRoot; got != "" {
+		t.Fatalf("on-disk ServiceRoot = %q, want empty", got)
+	}
+
+	backups, err := filepath.Glob(path + ".v5.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("migration backups = %v, want exactly one v5 backup", backups)
+	}
+	backup := mustReadData(t, backups[0])
+	if backup.DataVersion != 5 {
+		t.Fatalf("backup DataVersion = %d, want 5", backup.DataVersion)
+	}
+	if got := backup.Services["svc"].ServiceRoot; got != "" {
+		t.Fatalf("backup ServiceRoot = %q, want empty", got)
 	}
 }
 

@@ -140,8 +140,13 @@ func (v *ServiceView) UnmarshalJSON(b []byte) error {
 
 func (v ServiceView) Name() string             { return v.ж.Name }
 func (v ServiceView) ServiceType() ServiceType { return v.ж.ServiceType }
-func (v ServiceView) Generation() int          { return v.ж.Generation }
-func (v ServiceView) LatestGeneration() int    { return v.ж.LatestGeneration }
+
+// ServiceRoot is the absolute service root on the catch host.
+// Empty means filepath.Join(Store.serviceRoot, Name).
+func (v ServiceView) ServiceRoot() string { return v.ж.ServiceRoot }
+
+func (v ServiceView) Generation() int       { return v.ж.Generation }
+func (v ServiceView) LatestGeneration() int { return v.ж.LatestGeneration }
 
 func (v ServiceView) Artifacts() views.MapFn[ArtifactName, *Artifact, ArtifactView] {
 	return views.MapFnOf(v.ж.Artifacts, func(t *Artifact) ArtifactView {
@@ -162,6 +167,7 @@ func (v ServiceView) TSNet() TailscaleNetworkView { return v.ж.TSNet.View() }
 var _ServiceViewNeedsRegeneration = Service(struct {
 	Name             string
 	ServiceType      ServiceType
+	ServiceRoot      string
 	Generation       int
 	LatestGeneration int
 	Artifacts        ArtifactStore
