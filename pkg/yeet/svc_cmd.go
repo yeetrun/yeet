@@ -284,16 +284,18 @@ func handleSvcEnv(ctx context.Context, req svcCommandRequest) error {
 }
 
 type parsedSvcRun struct {
-	Payload        string
-	Args           []string
-	EnvFile        string
-	EnvFileArg     string
-	EnvFileSet     bool
-	ServiceRoot    string
-	ServiceRootArg string
-	ServiceRootSet bool
-	Entry          ServiceEntry
-	ForceDeploy    bool
+	Payload           string
+	Args              []string
+	EnvFile           string
+	EnvFileArg        string
+	EnvFileSet        bool
+	ServiceRoot       string
+	ServiceRootZFS    bool
+	ServiceRootArg    string
+	ServiceRootZFSArg bool
+	ServiceRootSet    bool
+	Entry             ServiceEntry
+	ForceDeploy       bool
 }
 
 func handleSvcRun(req svcCommandRequest) error {
@@ -315,7 +317,7 @@ func handleSvcRun(req svcCommandRequest) error {
 	if err := runWithChanges(run.Payload, run.Args, run.EnvFile, run.Entry, run.ForceDeploy); err != nil {
 		return err
 	}
-	if err := saveRunConfig(req.Config, req.HostOverride, run.Payload, run.Args, run.ServiceRootArg); err != nil {
+	if err := saveRunConfig(req.Config, req.HostOverride, run.Payload, run.Args, run.ServiceRootArg, run.ServiceRootZFSArg); err != nil {
 		return err
 	}
 	if run.EnvFileSet {
@@ -342,21 +344,25 @@ func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride s
 		envFile = resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
 	}
 	serviceRoot := flags.ServiceRootArg
+	serviceRootZFS := flags.ServiceRootZFSArg
 	if serviceRoot == "" && hasEntry {
 		serviceRoot = entry.ServiceRoot
+		serviceRootZFS = entry.ServiceRootZFS
 	}
-	filteredArgs := runArgsWithServiceRoot(flags.Args, serviceRoot)
+	filteredArgs := runArgsWithServiceRootOptions(flags.Args, serviceRootOptions{Root: serviceRoot, ZFS: serviceRootZFS})
 	return parsedSvcRun{
-		Payload:        payload,
-		Args:           filteredArgs,
-		EnvFile:        envFile,
-		EnvFileArg:     flags.EnvFileArg,
-		EnvFileSet:     flags.EnvFileSet,
-		ServiceRoot:    serviceRoot,
-		ServiceRootArg: flags.ServiceRootArg,
-		ServiceRootSet: flags.ServiceRootSet,
-		Entry:          entry,
-		ForceDeploy:    flags.ForceDeploy,
+		Payload:           payload,
+		Args:              filteredArgs,
+		EnvFile:           envFile,
+		EnvFileArg:        flags.EnvFileArg,
+		EnvFileSet:        flags.EnvFileSet,
+		ServiceRoot:       serviceRoot,
+		ServiceRootZFS:    serviceRootZFS,
+		ServiceRootArg:    flags.ServiceRootArg,
+		ServiceRootZFSArg: flags.ServiceRootZFSArg,
+		ServiceRootSet:    flags.ServiceRootSet,
+		Entry:             entry,
+		ForceDeploy:       flags.ForceDeploy,
 	}, nil
 }
 
@@ -368,16 +374,17 @@ func ensureSvcRunEntryFlags(entry ServiceEntry, hasEntry bool, args []string) er
 }
 
 type svcRunControlFlags struct {
-	Args           []string
-	EnvFileArg     string
-	EnvFileSet     bool
-	ServiceRootArg string
-	ServiceRootSet bool
-	ForceDeploy    bool
+	Args              []string
+	EnvFileArg        string
+	EnvFileSet        bool
+	ServiceRootArg    string
+	ServiceRootZFSArg bool
+	ServiceRootSet    bool
+	ForceDeploy       bool
 }
 
 func parseSvcRunControlFlags(runArgs []string) (svcRunControlFlags, error) {
-	serviceRootArg, filteredArgs, serviceRootSet, err := extractServiceRootFlag(runArgs)
+	rootOpts, filteredArgs, serviceRootSet, err := extractServiceRootOptions(runArgs)
 	if err != nil {
 		return svcRunControlFlags{}, err
 	}
@@ -390,12 +397,13 @@ func parseSvcRunControlFlags(runArgs []string) (svcRunControlFlags, error) {
 		return svcRunControlFlags{}, err
 	}
 	return svcRunControlFlags{
-		Args:           filteredArgs,
-		EnvFileArg:     envFileArg,
-		EnvFileSet:     envFileSet,
-		ServiceRootArg: serviceRootArg,
-		ServiceRootSet: serviceRootSet,
-		ForceDeploy:    forceDeploy,
+		Args:              filteredArgs,
+		EnvFileArg:        envFileArg,
+		EnvFileSet:        envFileSet,
+		ServiceRootArg:    rootOpts.Root,
+		ServiceRootZFSArg: rootOpts.ZFS,
+		ServiceRootSet:    serviceRootSet,
+		ForceDeploy:       forceDeploy,
 	}, nil
 }
 
@@ -411,7 +419,7 @@ func handleSvcService(ctx context.Context, req svcCommandRequest) error {
 	if err := execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, tty); err != nil {
 		return err
 	}
-	return saveServiceSetConfig(req.Config, req.HostOverride, flags.ServiceRoot)
+	return saveServiceSetConfig(req.Config, req.HostOverride, flags.ServiceRoot, flags.ZFS)
 }
 
 func handleSvcRemove(ctx context.Context, req svcCommandRequest) error {
@@ -1303,7 +1311,11 @@ func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride s
 		return fmt.Errorf("no payload configured for %s@%s", stored.Service, stored.Host)
 	}
 	envFile := resolveEnvFilePath(cfgLoc.Dir, stored.Entry.EnvFile)
-	return runWithChanges(payload, runArgsWithServiceRoot(rehydrateRunArgs(stored.Entry.Args), stored.Entry.ServiceRoot), envFile, stored.Entry, forceDeploy)
+	runArgs := runArgsWithServiceRootOptions(
+		rehydrateRunArgs(stored.Entry.Args),
+		serviceRootOptions{Root: stored.Entry.ServiceRoot, ZFS: stored.Entry.ServiceRootZFS},
+	)
+	return runWithChanges(payload, runArgs, envFile, stored.Entry, forceDeploy)
 }
 
 func shouldRunFromConfigWithForce(args []string) (bool, error) {
@@ -1390,7 +1402,7 @@ func validateStoredServiceType(service, host, gotType, commandName, wantType str
 	return fmt.Errorf("service %s@%s is configured as %s", service, host, gotType)
 }
 
-func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload string, runArgs []string, serviceRoot string) error {
+func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload string, runArgs []string, serviceRoot string, serviceRootZFS bool) error {
 	if serviceOverride == "" {
 		return nil
 	}
@@ -1406,27 +1418,29 @@ func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload s
 	if host == "" {
 		host = Host()
 	}
-	filteredServiceRoot, filteredArgs, foundServiceRoot, err := extractServiceRootFlag(runArgs)
+	rootOpts, filteredArgs, foundServiceRoot, err := extractServiceRootOptions(runArgs)
 	if err != nil {
 		return err
 	}
 	if foundServiceRoot && strings.TrimSpace(serviceRoot) == "" {
-		serviceRoot = filteredServiceRoot
+		serviceRoot = rootOpts.Root
+		serviceRootZFS = rootOpts.ZFS
 	}
 	payloadRel := relativePayloadPath(loc.Dir, payload)
 	entry := ServiceEntry{
-		Name:        serviceOverride,
-		Host:        host,
-		Type:        "",
-		Payload:     payloadRel,
-		ServiceRoot: strings.TrimSpace(serviceRoot),
-		Args:        normalizeRunArgs(filteredArgs),
+		Name:           serviceOverride,
+		Host:           host,
+		Type:           "",
+		Payload:        payloadRel,
+		ServiceRoot:    strings.TrimSpace(serviceRoot),
+		ServiceRootZFS: serviceRootZFS,
+		Args:           normalizeRunArgs(filteredArgs),
 	}
 	loc.Config.SetServiceEntry(entry)
 	return saveProjectConfig(loc)
 }
 
-func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, serviceRoot string) error {
+func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, serviceRoot string, serviceRootZFS bool) error {
 	if serviceOverride == "" || strings.TrimSpace(serviceRoot) == "" {
 		return nil
 	}
@@ -1435,6 +1449,7 @@ func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, se
 		return nil
 	}
 	entry.ServiceRoot = strings.TrimSpace(serviceRoot)
+	entry.ServiceRootZFS = serviceRootZFS
 	cfgLoc.Config.SetServiceEntry(entry)
 	return saveProjectConfig(cfgLoc)
 }

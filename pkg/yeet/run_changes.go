@@ -70,49 +70,98 @@ func extractEnvFileFlag(args []string) (string, []string, bool, error) {
 	return envFile, out, found, nil
 }
 
-func extractServiceRootFlag(args []string) (string, []string, bool, error) {
+type serviceRootOptions struct {
+	Root string
+	ZFS  bool
+}
+
+type serviceRootParseState struct {
+	opts      serviceRootOptions
+	foundRoot bool
+	foundZFS  bool
+}
+
+func extractServiceRootOptions(args []string) (serviceRootOptions, []string, bool, error) {
 	if len(args) == 0 {
-		return "", args, false, nil
+		return serviceRootOptions{}, args, false, nil
 	}
 	out := make([]string, 0, len(args))
-	var serviceRoot string
-	found := false
+	state := serviceRootParseState{}
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		if arg == "--" {
 			out = append(out, args[i:]...)
 			break
 		}
-		if arg == "--service-root" {
-			if i+1 >= len(args) {
-				return "", nil, false, fmt.Errorf("--service-root requires a value")
-			}
-			serviceRoot = strings.TrimSpace(args[i+1])
-			found = true
-			i++
-			continue
+		next, handled, err := parseServiceRootControlArg(args, i, &state)
+		if err != nil {
+			return serviceRootOptions{}, nil, false, err
 		}
-		if strings.HasPrefix(arg, "--service-root=") {
-			serviceRoot = strings.TrimSpace(strings.TrimPrefix(arg, "--service-root="))
-			found = true
+		if handled {
+			i = next
 			continue
 		}
 		out = append(out, arg)
 	}
-	if found && !filepath.IsAbs(serviceRoot) {
-		return "", nil, false, fmt.Errorf("--service-root must be absolute")
+	if err := validateServiceRootOptions(state); err != nil {
+		return serviceRootOptions{}, nil, false, err
 	}
-	return serviceRoot, out, found, nil
+	return state.opts, out, state.foundRoot || state.foundZFS, nil
 }
 
-func runArgsWithServiceRoot(args []string, serviceRoot string) []string {
+func parseServiceRootControlArg(args []string, i int, state *serviceRootParseState) (int, bool, error) {
+	arg := args[i]
+	switch {
+	case arg == "--zfs":
+		state.opts.ZFS = true
+		state.foundZFS = true
+		return i, true, nil
+	case strings.HasPrefix(arg, "--zfs="):
+		value := strings.TrimPrefix(arg, "--zfs=")
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return i, false, fmt.Errorf("invalid --zfs value %q", value)
+		}
+		state.opts.ZFS = parsed
+		state.foundZFS = true
+		return i, true, nil
+	case arg == "--service-root":
+		if i+1 >= len(args) {
+			return i, false, fmt.Errorf("--service-root requires a value")
+		}
+		state.opts.Root = strings.TrimSpace(args[i+1])
+		state.foundRoot = true
+		return i + 1, true, nil
+	case strings.HasPrefix(arg, "--service-root="):
+		state.opts.Root = strings.TrimSpace(strings.TrimPrefix(arg, "--service-root="))
+		state.foundRoot = true
+		return i, true, nil
+	default:
+		return i, false, nil
+	}
+}
+
+func validateServiceRootOptions(state serviceRootParseState) error {
+	if state.foundZFS && !state.foundRoot {
+		return fmt.Errorf("--zfs requires --service-root")
+	}
+	if state.foundRoot && !state.opts.ZFS && !filepath.IsAbs(state.opts.Root) {
+		return fmt.Errorf("--service-root must be absolute unless --zfs is set")
+	}
+	return nil
+}
+
+func runArgsWithServiceRootOptions(args []string, opts serviceRootOptions) []string {
 	args = append([]string{}, args...)
-	serviceRoot = strings.TrimSpace(serviceRoot)
-	if serviceRoot == "" {
+	opts.Root = strings.TrimSpace(opts.Root)
+	if opts.Root == "" {
 		return args
 	}
-	out := make([]string, 0, len(args)+1)
-	out = append(out, "--service-root="+serviceRoot)
+	out := make([]string, 0, len(args)+2)
+	out = append(out, "--service-root="+opts.Root)
+	if opts.ZFS {
+		out = append(out, "--zfs")
+	}
 	out = append(out, args...)
 	return out
 }
@@ -271,7 +320,8 @@ func runWithChanges(payload string, runArgs []string, envFile string, entry Serv
 }
 
 func runWithChangesTo(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
-	summary, err := detectRunChanges(payload, runArgs, envFile, runArgsWithServiceRoot(entry.Args, entry.ServiceRoot))
+	storedArgs := runArgsWithServiceRootOptions(entry.Args, serviceRootOptions{Root: entry.ServiceRoot, ZFS: entry.ServiceRootZFS})
+	summary, err := detectRunChanges(payload, runArgs, envFile, storedArgs)
 	if err != nil {
 		return err
 	}

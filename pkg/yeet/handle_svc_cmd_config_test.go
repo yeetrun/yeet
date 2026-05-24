@@ -200,12 +200,13 @@ func TestRunFromProjectConfigRehydratesServiceRoot(t *testing.T) {
 	}
 	cfg := &ProjectConfig{Version: projectConfigVersion}
 	cfg.SetServiceEntry(ServiceEntry{
-		Name:        "rssbot",
-		Host:        "host-a",
-		Type:        serviceTypeRun,
-		Payload:     "rssbot",
-		ServiceRoot: "/srv/apps/rssbot",
-		Args:        []string{"--pull"},
+		Name:           "rssbot",
+		Host:           "host-a",
+		Type:           serviceTypeRun,
+		Payload:        "rssbot",
+		ServiceRoot:    "tank/apps/rssbot",
+		ServiceRootZFS: true,
+		Args:           []string{"--pull"},
 	})
 	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: cfg}
 
@@ -218,7 +219,7 @@ func TestRunFromProjectConfigRehydratesServiceRoot(t *testing.T) {
 	if err := runFromProjectConfig(loc, "host-a"); err != nil {
 		t.Fatalf("runFromProjectConfig error: %v", err)
 	}
-	wantArgs := []string{"run", "--service-root=/srv/apps/rssbot", "--pull"}
+	wantArgs := []string{"run", "--service-root=tank/apps/rssbot", "--zfs", "--pull"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
 	}
