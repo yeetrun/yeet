@@ -186,7 +186,7 @@ func (s *Server) resolveZFSServiceRootMigrationRequest(name, requestedDataset, o
 		return resolvedServiceRoot{}, err
 	}
 	if !exists {
-		if err := preflightMissingZFSServiceRootDataset(ctx, runner, oldRoot, dataset); err != nil {
+		if err := preflightMissingZFSServiceRootDataset(ctx, runner, name, oldRoot, oldRootZFS, dataset); err != nil {
 			return resolvedServiceRoot{}, err
 		}
 		if err := zfsCreateDataset(ctx, runner, dataset); err != nil {
@@ -205,7 +205,7 @@ func (s *Server) resolveZFSServiceRootMigrationRequest(name, requestedDataset, o
 	return resolvedServiceRoot{Root: root, Dataset: dataset, ZFS: true}, nil
 }
 
-func preflightMissingZFSServiceRootDataset(ctx context.Context, runner zfsCommandRunner, oldRoot, dataset string) error {
+func preflightMissingZFSServiceRootDataset(ctx context.Context, runner zfsCommandRunner, name, oldRoot, oldRootZFS, dataset string) error {
 	slash := strings.LastIndex(dataset, "/")
 	if slash <= 0 || slash == len(dataset)-1 {
 		return nil
@@ -221,6 +221,9 @@ func preflightMissingZFSServiceRootDataset(ctx context.Context, runner zfsComman
 		return err
 	}
 	predictedRoot := filepath.Join(parentRoot, childName)
+	if err := rejectNoopServiceRootMigration(name, oldRoot, oldRootZFS, predictedRoot, dataset); err != nil {
+		return err
+	}
 	if rootsAreNested(oldRoot, predictedRoot) || rootsAreNested(predictedRoot, oldRoot) {
 		return fmt.Errorf("cannot migrate between nested service roots: %s and %s", oldRoot, predictedRoot)
 	}
