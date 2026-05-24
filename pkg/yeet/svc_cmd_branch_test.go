@@ -46,6 +46,7 @@ func preserveSvcCommandGlobals(t *testing.T) {
 	oldTryDocker := tryRunDockerFn
 	oldTryImage := tryRunRemoteImageFn
 	oldImageExists := imageExistsFn
+	oldFetchServiceInfoForSync := fetchServiceInfoForSyncFn
 	oldService := serviceOverride
 	oldPrefs := loadedPrefs
 	oldIsTerminal := isTerminalFn
@@ -61,6 +62,7 @@ func preserveSvcCommandGlobals(t *testing.T) {
 		tryRunDockerFn = oldTryDocker
 		tryRunRemoteImageFn = oldTryImage
 		imageExistsFn = oldImageExists
+		fetchServiceInfoForSyncFn = oldFetchServiceInfoForSync
 		serviceOverride = oldService
 		loadedPrefs = oldPrefs
 		isTerminalFn = oldIsTerminal
@@ -481,11 +483,38 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	}
 	isTerminalFn = func(int) bool { return false }
 
-	if err := HandleSvcCmd([]string{"service", "set", "--service-root=/srv/apps/missing"}); err != nil {
+	updated, err := saveServiceSetConfig(nil, "host-a", "/srv/apps/missing", false)
+	if err != nil {
+		t.Fatalf("saveServiceSetConfig nil config error: %v", err)
+	}
+	if updated {
+		t.Fatalf("saveServiceSetConfig nil config updated = true, want false")
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return HandleSvcCmd([]string{"service", "set", "--service-root=/srv/apps/missing"})
+	})
+	if err != nil {
 		t.Fatalf("HandleSvcCmd missing config error: %v", err)
+	}
+	if out == "" {
+		t.Fatalf("HandleSvcCmd missing config output = empty, want sync hint")
 	}
 	if _, err := os.Stat(filepath.Join(tmp, projectConfigName)); !os.IsNotExist(err) {
 		t.Fatalf("service set without existing entry should not create yeet.toml, stat err=%v", err)
+	}
+
+	missingLoc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, "missing-entry.toml"),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	updated, err = saveServiceSetConfig(missingLoc, "host-a", "/srv/apps/missing", false)
+	if err != nil {
+		t.Fatalf("saveServiceSetConfig missing entry error: %v", err)
+	}
+	if updated {
+		t.Fatalf("saveServiceSetConfig missing entry updated = true, want false")
 	}
 
 	cfg := &ProjectConfig{Version: projectConfigVersion}
@@ -493,6 +522,13 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: cfg}
 	if err := saveProjectConfig(loc); err != nil {
 		t.Fatalf("saveProjectConfig error: %v", err)
+	}
+	updated, err = saveServiceSetConfig(loc, "host-a", "tank/apps/direct", true)
+	if err != nil {
+		t.Fatalf("saveServiceSetConfig matching entry error: %v", err)
+	}
+	if !updated {
+		t.Fatalf("saveServiceSetConfig matching entry updated = false, want true")
 	}
 
 	if err := HandleSvcCmd([]string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs", "--copy"}); err != nil {
