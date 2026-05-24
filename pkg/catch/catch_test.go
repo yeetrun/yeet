@@ -175,6 +175,60 @@ func TestPrepareServiceRootForInstallZFSExistingSameDataset(t *testing.T) {
 	}
 }
 
+func TestPrepareServiceRootForInstallZFSExistingDifferentDatasetRejects(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name:           "svc",
+		ServiceRoot:    "/tank/old/svc",
+		ServiceRootZFS: "tank/apps/svc",
+	})
+
+	_, err := server.prepareServiceRootForInstall("svc", "tank/apps/other", true)
+	if err == nil {
+		t.Fatal("expected service root mismatch error")
+	}
+	wantHint := "yeet service set svc --service-root=tank/apps/other --zfs"
+	if !strings.Contains(err.Error(), wantHint) {
+		t.Fatalf("prepareServiceRootForInstall error = %v, want hint %q", err, wantHint)
+	}
+}
+
+func TestPrepareServiceRootForInstallZFSExistingFilesystemPathRejects(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name:           "svc",
+		ServiceRoot:    "/tank/old/svc",
+		ServiceRootZFS: "tank/apps/svc",
+	})
+	requestedRoot := filepath.Join(t.TempDir(), "svc")
+
+	_, err := server.prepareServiceRootForInstall("svc", requestedRoot, false)
+	if err == nil {
+		t.Fatal("expected service root type mismatch error")
+	}
+	wantHint := "yeet service set svc --service-root=" + requestedRoot
+	if !strings.Contains(err.Error(), wantHint) {
+		t.Fatalf("prepareServiceRootForInstall error = %v, want hint %q", err, wantHint)
+	}
+}
+
+func TestPrepareServiceRootForInstallFilesystemExistingZFSRequestRejects(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name:        "svc",
+		ServiceRoot: "/srv/apps/svc",
+	})
+
+	_, err := server.prepareServiceRootForInstall("svc", "tank/apps/svc", true)
+	if err == nil {
+		t.Fatal("expected service root type mismatch error")
+	}
+	wantHint := "yeet service set svc --service-root=tank/apps/svc --zfs"
+	if !strings.Contains(err.Error(), wantHint) {
+		t.Fatalf("prepareServiceRootForInstall error = %v, want hint %q", err, wantHint)
+	}
+}
+
 func TestValidateRequestedServiceRoot(t *testing.T) {
 	parent := t.TempDir()
 	emptyExisting := filepath.Join(parent, "empty-existing")
