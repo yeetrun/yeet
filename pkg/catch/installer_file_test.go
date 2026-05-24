@@ -15,6 +15,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/codecutil"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
+	"github.com/yeetrun/yeet/pkg/netns"
 )
 
 func TestHostDefaultRouteInterfaceFromProcRoute(t *testing.T) {
@@ -1226,6 +1227,59 @@ func TestStageInstallPlanMismatchAndNetworkApplication(t *testing.T) {
 	}
 	if service.TSNet == nil || service.TSNet.Interface != "yts-test" {
 		t.Fatalf("service tailscale = %#v, want applied tailscale", service.TSNet)
+	}
+}
+
+func TestInstallerTailscaleInstallUsesResolvedServiceRoot(t *testing.T) {
+	server := newTestServer(t)
+	const (
+		service = "svc-ts-root"
+		version = "1.92.3"
+		authKey = "tskey-auth-test"
+	)
+	customRoot := filepath.Join(t.TempDir(), "custom-root")
+	if err := ensureDirsForRoot(customRoot, ""); err != nil {
+		t.Fatalf("ensureDirsForRoot: %v", err)
+	}
+	if err := ensureDirsForRoot(server.defaultServiceRootDir(service), ""); err != nil {
+		t.Fatalf("ensure default dirs: %v", err)
+	}
+	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
+	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
+		t.Fatalf("mkdir tsd dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscaled-"+version), []byte("daemon"), 0o755); err != nil {
+		t.Fatalf("write tailscaled: %v", err)
+	}
+	installer := &FileInstaller{
+		s:           server,
+		serviceRoot: customRoot,
+		cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{
+			ServiceName: service,
+		}},
+		tsNet: &db.TailscaleNetwork{
+			Interface: "ts0",
+			Version:   version,
+		},
+		tsAuthKey: authKey,
+	}
+
+	err := installer.installTailscaleForNetNS(netns.Service{ServiceName: service}, "yeet-svc-ts-root-ns", false)
+	if err != nil {
+		t.Fatalf("installTailscaleForNetNS: %v", err)
+	}
+
+	for name, path := range installer.artifacts {
+		if name == db.ArtifactTSBinary {
+			continue
+		}
+		if !strings.HasPrefix(path, customRoot+string(filepath.Separator)) {
+			t.Fatalf("artifact %s path = %q, want under %q", name, path, customRoot)
+		}
+	}
+	defaultTailRoot := filepath.Join(server.defaultServiceRootDir(service), "tailscale")
+	if _, err := os.Stat(defaultTailRoot); !os.IsNotExist(err) {
+		t.Fatalf("default tailscale root stat err = %v, want not exist", err)
 	}
 }
 

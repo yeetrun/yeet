@@ -64,6 +64,7 @@ type Server struct {
 	}
 
 	newDockerComposeService func(sv db.ServiceView) (dockerNetNSReconciler, error)
+	serviceRootDirFunc      func(string) (string, error)
 }
 
 type EventListener struct {
@@ -378,6 +379,9 @@ func (s *Server) serviceRootFromView(sv db.ServiceView) string {
 // serviceRootDir returns the effective root directory for the given service
 // name. Missing services use the legacy default location.
 func (s *Server) serviceRootDir(sn string) (string, error) {
+	if s.serviceRootDirFunc != nil {
+		return s.serviceRootDirFunc(sn)
+	}
 	d, err := s.getDB()
 	if err != nil {
 		return "", err
@@ -657,16 +661,19 @@ func (s *Server) RemoveService(name string) (*RemoveReport, error) {
 	s.addRunningServiceWarning(report, name)
 	tsStableID := s.tailscaleStableIDForService(report, name)
 	serviceRoot, err := s.serviceRootDir(name)
+	removeDirs := true
 	if err != nil {
 		report.addWarning(fmt.Errorf("failed to resolve service root for %q: %w", name, err))
-		serviceRoot = s.defaultServiceRootDir(name)
+		removeDirs = false
 	}
 	if err := s.removeServiceFromDB(name); err != nil {
 		return report, fmt.Errorf("failed to remove service from db: %w", err)
 	}
 	s.publishServiceDeleted(name)
 	s.deleteTailscaleDevice(report, tsStableID)
-	s.removeServiceDirs(report, serviceRoot)
+	if removeDirs {
+		s.removeServiceDirs(report, serviceRoot)
+	}
 	return report, nil
 }
 

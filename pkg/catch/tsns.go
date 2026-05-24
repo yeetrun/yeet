@@ -242,6 +242,14 @@ func (s *Server) getTailscaleAuthKey(ctx context.Context, tags []string) (string
 // Tailscale in TAP mode. Otherwise, it runs Tailscale TUN mode in the specified
 // netns. In TUN mode, Tailscale unit will depend on the netns service unit.
 func (s *Server) installTS(service string, runInNetNS string, tsNet *db.TailscaleNetwork, tsAuthKey, resolvConf string) (map[db.ArtifactName]string, error) {
+	serviceRoot, err := s.serviceRootDir(service)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve service root: %w", err)
+	}
+	return s.installTSAtRoot(serviceRoot, service, runInNetNS, tsNet, tsAuthKey, resolvConf)
+}
+
+func (s *Server) installTSAtRoot(serviceRoot, service string, runInNetNS string, tsNet *db.TailscaleNetwork, tsAuthKey, resolvConf string) (map[db.ArtifactName]string, error) {
 	tsAuthKey, err := s.resolveTailscaleAuthKey(tsNet, tsAuthKey)
 	if err != nil {
 		return nil, err
@@ -249,10 +257,6 @@ func (s *Server) installTS(service string, runInNetNS string, tsNet *db.Tailscal
 	tsd, err := s.getTailscaledBinary(tsNet.Version)
 	if err != nil {
 		return nil, err
-	}
-	serviceRoot, err := s.serviceRootDir(service)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve service root: %w", err)
 	}
 	serviceTSDir := filepath.Join(serviceRoot, "tailscale")
 	if err := os.MkdirAll(serviceTSDir, 0o755); err != nil {

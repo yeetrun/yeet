@@ -314,6 +314,57 @@ func TestRemoveServiceRemovesConfigDirsPreservesDataAndPublishesEvent(t *testing
 	}
 }
 
+func TestRemoveServiceSkipsDirectoryCleanupWhenRootResolutionFails(t *testing.T) {
+	server := newTestServer(t)
+	defaultRoot := filepath.Join(server.cfg.ServicesRoot, "api")
+	for _, dir := range []string{"bin", "data", "env", "run"} {
+		if err := os.MkdirAll(filepath.Join(defaultRoot, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {Name: "api", ServiceType: db.ServiceType("unknown")},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	rootErr := errors.New("root lookup failed")
+	server.serviceRootDirFunc = func(string) (string, error) {
+		return "", rootErr
+	}
+
+	report, err := server.RemoveService("api")
+	if err != nil {
+		t.Fatalf("RemoveService: %v", err)
+	}
+	if report == nil || len(report.Warnings) == 0 {
+		t.Fatalf("expected warning for root lookup failure, got %#v", report)
+	}
+	foundRootWarning := false
+	for _, warn := range report.Warnings {
+		if errors.Is(warn, rootErr) {
+			foundRootWarning = true
+			break
+		}
+	}
+	if !foundRootWarning {
+		t.Fatalf("warnings = %#v, want root lookup warning", report.Warnings)
+	}
+	for _, preserved := range []string{"bin", "data", "env", "run"} {
+		if _, err := os.Stat(filepath.Join(defaultRoot, preserved)); err != nil {
+			t.Fatalf("%s dir should remain after root lookup failure: %v", preserved, err)
+		}
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	if dv.Services().Contains("api") {
+		t.Fatal("service remains in db")
+	}
+}
+
 func TestAddWarningIgnoresNil(t *testing.T) {
 	var report RemoveReport
 	report.addWarning(nil)
