@@ -9,6 +9,7 @@ require (
 	github.com/containerd/errdefs v0.3.0
 	github.com/creack/pty v1.1.23
 	github.com/fatih/color v1.18.0
+	github.com/go-json-experiment/json v0.0.0-20250813024750-ebf49471dced
 	github.com/google/addlicense v1.2.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
@@ -70,7 +71,6 @@ require (
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fxamacker/cbor/v2 v2.7.0 // indirect
 	github.com/gaissmai/bart v0.18.0 // indirect
-	github.com/go-json-experiment/json v0.0.0-20250813024750-ebf49471dced // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
