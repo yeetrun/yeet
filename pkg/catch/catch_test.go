@@ -153,6 +153,28 @@ func TestServiceRootDirUsesDBServiceRoot(t *testing.T) {
 	}
 }
 
+func TestPrepareServiceRootForInstallZFSExistingSameDataset(t *testing.T) {
+	server := newTestServer(t)
+	mountpoint := filepath.Join(t.TempDir(), "svc")
+	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mountpoint, "existing-service-file"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server.zfsRunner = fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps/svc": {Mountpoint: mountpoint, Exists: true},
+	}).Run
+	addTestServices(t, server, db.Service{Name: "svc", ServiceRoot: "/old/mount", ServiceRootZFS: "tank/apps/svc"})
+	got, err := server.prepareServiceRootForInstall("svc", "tank/apps/svc", true)
+	if err != nil {
+		t.Fatalf("prepareServiceRootForInstall: %v", err)
+	}
+	if got.Root != mountpoint || got.Dataset != "tank/apps/svc" || !got.ZFS {
+		t.Fatalf("resolved = %#v", got)
+	}
+}
+
 func TestValidateRequestedServiceRoot(t *testing.T) {
 	parent := t.TempDir()
 	emptyExisting := filepath.Join(parent, "empty-existing")

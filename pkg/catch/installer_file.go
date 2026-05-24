@@ -97,7 +97,8 @@ type FileInstaller struct {
 	tmpDir  string
 	tmpPath string
 
-	serviceRoot string
+	serviceRoot    string
+	serviceRootZFS string
 }
 
 func (i *FileInstaller) WriteAt(p []byte, offset int64) (n int, err error) {
@@ -144,11 +145,11 @@ func NewFileInstaller(s *Server, cfg FileInstallerCfg) (*FileInstaller, error) {
 		return nil, fmt.Errorf("%s is a reserved service name", cfg.ServiceName)
 	}
 	existingService := First(s.serviceView(cfg.ServiceName))
-	serviceRoot, err := s.prepareServiceRootForInstall(cfg.ServiceName, cfg.ServiceRoot)
+	resolvedRoot, err := s.prepareServiceRootForInstall(cfg.ServiceName, cfg.ServiceRoot, cfg.ServiceRootZFS)
 	if err != nil {
 		return nil, fmt.Errorf("failed to prepare service root: %w", err)
 	}
-	cfg.ServiceRoot = serviceRoot
+	cfg.ServiceRoot = resolvedRoot.Root
 	i := &FileInstaller{
 		s:   s,
 		cfg: cfg,
@@ -157,12 +158,13 @@ func NewFileInstaller(s *Server, cfg FileInstallerCfg) (*FileInstaller, error) {
 			HalfLife: 250 * time.Millisecond,
 		},
 		existingService: existingService,
-		serviceRoot:     serviceRoot,
+		serviceRoot:     resolvedRoot.Root,
+		serviceRootZFS:  resolvedRoot.Dataset,
 	}
 	if i.cfg.NewCmd == nil {
 		i.cfg.NewCmd = cmdutil.NewStdCmd
 	}
-	if err := ensureDirsForRoot(serviceRoot, cfg.User); err != nil {
+	if err := ensureDirsForRoot(resolvedRoot.Root, cfg.User); err != nil {
 		return nil, fmt.Errorf("failed to ensure directories: %w", err)
 	}
 	if err := i.initTempFile(); err != nil {
@@ -1044,7 +1046,9 @@ func (i *FileInstaller) applyInstallPlanToService(s *db.Service, plan fileInstal
 }
 
 func (i *FileInstaller) applyInstallServiceRoot(s *db.Service) {
-	if filepath.Clean(i.serviceRoot) == filepath.Clean(i.s.defaultServiceRootDir(i.cfg.ServiceName)) {
+	s.ServiceRootZFS = i.serviceRootZFS
+	if filepath.Clean(i.serviceRoot) == filepath.Clean(i.s.defaultServiceRootDir(i.cfg.ServiceName)) && i.serviceRootZFS == "" {
+		s.ServiceRoot = ""
 		return
 	}
 	s.ServiceRoot = i.serviceRoot

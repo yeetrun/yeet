@@ -501,12 +501,15 @@ func TestRunCmdFuncCopiesServiceRootIntoInstallerConfig(t *testing.T) {
 		},
 	}
 
-	flags := cli.RunFlags{ServiceRoot: "/srv/apps/svc-run-root"}
+	flags := cli.RunFlags{ServiceRoot: "tank/apps/svc-run-root", ZFS: true}
 	if err := execer.runCmdFunc(flags, nil); err != nil {
 		t.Fatalf("runCmdFunc returned error: %v", err)
 	}
-	if gotCfg.ServiceRoot != "/srv/apps/svc-run-root" {
-		t.Fatalf("ServiceRoot = %q, want /srv/apps/svc-run-root", gotCfg.ServiceRoot)
+	if gotCfg.ServiceRoot != "tank/apps/svc-run-root" {
+		t.Fatalf("ServiceRoot = %q, want tank/apps/svc-run-root", gotCfg.ServiceRoot)
+	}
+	if !gotCfg.ServiceRootZFS {
+		t.Fatal("ServiceRootZFS = false, want true")
 	}
 }
 

@@ -380,6 +380,44 @@ func TestNewFileInstallerPersistsCustomServiceRoot(t *testing.T) {
 	}
 }
 
+func TestNewFileInstallerPersistsZFSServiceRoot(t *testing.T) {
+	server := newTestServer(t)
+	parent := t.TempDir()
+	mountpoint := filepath.Join(parent, "svc")
+	zfsRunner := fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps/svc": {Mountpoint: mountpoint, Exists: true},
+	})
+	server.zfsRunner = zfsRunner.Run
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{
+			ServiceName:    "svc",
+			User:           "",
+			ServiceRoot:    "tank/apps/svc",
+			ServiceRootZFS: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	if got := installer.serviceRoot; got != mountpoint {
+		t.Fatalf("installer.serviceRoot = %q, want %q", got, mountpoint)
+	}
+	if installer.serviceRootZFS != "tank/apps/svc" {
+		t.Fatalf("installer.serviceRootZFS = %q, want tank/apps/svc", installer.serviceRootZFS)
+	}
+	svc := &db.Service{Name: "svc"}
+	installer.applyInstallServiceRoot(svc)
+	if svc.ServiceRoot != mountpoint {
+		t.Fatalf("ServiceRoot = %q, want %q", svc.ServiceRoot, mountpoint)
+	}
+	if svc.ServiceRootZFS != "tank/apps/svc" {
+		t.Fatalf("ServiceRootZFS = %q, want tank/apps/svc", svc.ServiceRootZFS)
+	}
+	if err := installer.applyInstallPlanToService(&db.Service{Name: "svc"}, fileInstallPlan{}); err != nil {
+		t.Fatalf("applyInstallPlanToService: %v", err)
+	}
+}
+
 func TestNewFileInstallerExistingServiceRootSameRootSucceeds(t *testing.T) {
 	server := newTestServer(t)
 	customRoot := filepath.Join(t.TempDir(), "same-root")
