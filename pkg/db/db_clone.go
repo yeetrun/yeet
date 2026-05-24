@@ -106,6 +106,7 @@ var _ServiceCloneNeedsRegeneration = Service(struct {
 	Name             string
 	ServiceType      ServiceType
 	ServiceRoot      string
+	ServiceRootZFS   string
 	Generation       int
 	LatestGeneration int
 	Artifacts        ArtifactStore

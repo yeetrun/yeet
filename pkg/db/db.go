@@ -113,6 +113,10 @@ type Service struct {
 	// Empty means filepath.Join(Store.serviceRoot, Name).
 	ServiceRoot string `json:",omitempty"`
 
+	// ServiceRootZFS is the ZFS dataset name used to resolve ServiceRoot.
+	// Empty means ServiceRoot is a normal filesystem path or the default root.
+	ServiceRootZFS string `json:",omitempty"`
+
 	// Generation is the current generation of the service.
 	Generation int `json:",omitempty"`
 

@@ -190,6 +190,10 @@ func (v ServiceView) ServiceType() ServiceType { return v.ж.ServiceType }
 // Empty means filepath.Join(Store.serviceRoot, Name).
 func (v ServiceView) ServiceRoot() string { return v.ж.ServiceRoot }
 
+// ServiceRootZFS is the ZFS dataset name used to resolve ServiceRoot.
+// Empty means ServiceRoot is a normal filesystem path or the default root.
+func (v ServiceView) ServiceRootZFS() string { return v.ж.ServiceRootZFS }
+
 // Generation is the current generation of the service.
 func (v ServiceView) Generation() int { return v.ж.Generation }
 
@@ -217,6 +221,7 @@ var _ServiceViewNeedsRegeneration = Service(struct {
 	Name             string
 	ServiceType      ServiceType
 	ServiceRoot      string
+	ServiceRootZFS   string
 	Generation       int
 	LatestGeneration int
 	Artifacts        ArtifactStore
