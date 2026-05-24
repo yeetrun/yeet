@@ -491,15 +491,18 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 		t.Fatalf("saveServiceSetConfig nil config updated = true, want false")
 	}
 
+	SetHostOverride("host-b")
 	out, err := captureSvcStdout(t, func() error {
 		return HandleSvcCmd([]string{"service", "set", "--service-root=/srv/apps/missing"})
 	})
 	if err != nil {
 		t.Fatalf("HandleSvcCmd missing config error: %v", err)
 	}
-	if out == "" {
-		t.Fatalf("HandleSvcCmd missing config output = empty, want sync hint")
+	if !strings.Contains(out, "yeet --host host-b service sync svc-a --config ~/yeet-services/yeet.toml") {
+		t.Fatalf("HandleSvcCmd missing config output = %q, want host-qualified sync hint", out)
 	}
+	resetHostOverride()
+	loadedPrefs.DefaultHost = "host-a"
 	if _, err := os.Stat(filepath.Join(tmp, projectConfigName)); !os.IsNotExist(err) {
 		t.Fatalf("service set without existing entry should not create yeet.toml, stat err=%v", err)
 	}

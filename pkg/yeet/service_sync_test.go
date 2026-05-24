@@ -130,6 +130,79 @@ func TestServiceSyncNamedExplicitConfigIgnoresMalformedCwdConfig(t *testing.T) {
 	}
 }
 
+func TestServiceSyncServiceOverrideUsesCwdConfigWithoutPositionalService(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "sonarr"
+	loadedPrefs.DefaultHost = "yeet-lab"
+	writeSvcBranchConfig(t, tmp, ServiceEntry{Name: "sonarr", Host: "yeet-lab", Type: serviceTypeRun, Payload: "compose.yml"})
+	fetchServiceInfoForSyncFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if host != "yeet-lab" || service != "sonarr" {
+			t.Fatalf("fetch host=%q service=%q, want yeet-lab sonarr", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info:  catchrpc.ServiceInfo{Paths: catchrpc.ServicePaths{ServiceRoot: "/srv/apps/sonarr"}},
+		}, nil
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return HandleSvcCmd([]string{"service", "sync"})
+	})
+	if err != nil {
+		t.Fatalf("HandleSvcCmd service sync with service override: %v", err)
+	}
+	if !strings.Contains(out, "Updated sonarr@yeet-lab") {
+		t.Fatalf("output = %q, want service override sync", out)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, _ := loaded.Config.ServiceEntry("sonarr", "yeet-lab")
+	if entry.ServiceRoot != "/srv/apps/sonarr" {
+		t.Fatalf("entry = %#v, want cwd config updated from service override", entry)
+	}
+}
+
+func TestServiceSyncServiceOverrideUsesExplicitConfigWithoutPositionalService(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	cwd := useTempSvcCwd(t)
+	if err := os.WriteFile(filepath.Join(cwd, projectConfigName), []byte("[[services]\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile cwd config: %v", err)
+	}
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, projectConfigName)
+	loc := &projectConfigLocation{Path: configPath, Dir: configDir, Config: &ProjectConfig{Version: projectConfigVersion}}
+	loc.Config.SetServiceEntry(ServiceEntry{Name: "radarr", Host: "yeet-lab", Type: serviceTypeRun, Payload: "compose.yml"})
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	serviceOverride = "radarr"
+	loadedPrefs.DefaultHost = "yeet-lab"
+	fetchServiceInfoForSyncFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if host != "yeet-lab" || service != "radarr" {
+			t.Fatalf("fetch host=%q service=%q, want yeet-lab radarr", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info:  catchrpc.ServiceInfo{Paths: catchrpc.ServicePaths{ServiceRoot: "/srv/apps/radarr"}},
+		}, nil
+	}
+
+	if err := HandleSvcCmd([]string{"service", "sync", "--config", configPath}); err != nil {
+		t.Fatalf("HandleSvcCmd explicit config with service override: %v", err)
+	}
+	loaded, err := loadProjectConfigFromFile(configPath)
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromFile: %v", err)
+	}
+	entry, _ := loaded.Config.ServiceEntry("radarr", "yeet-lab")
+	if entry.ServiceRoot != "/srv/apps/radarr" {
+		t.Fatalf("entry = %#v, want explicit config updated from service override", entry)
+	}
+}
+
 func TestServiceSyncNamedSupportsHostQualifier(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
