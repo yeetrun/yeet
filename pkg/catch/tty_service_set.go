@@ -118,7 +118,7 @@ func (s *Server) validateServiceRootMigration(name string, request serviceRootMi
 	}
 	oldRoot := filepath.Clean(s.serviceRootFromView(sv))
 	oldRootZFS := sv.ServiceRootZFS()
-	resolved, err := s.resolveServiceRootMigrationRequest(request)
+	resolved, err := s.resolveServiceRootMigrationRequest(name, request, oldRoot, oldRootZFS)
 	if err != nil {
 		return serviceRootMigrationPlan{}, err
 	}
@@ -156,15 +156,76 @@ func (s *Server) stoppedServiceForRootMigration(name string) (db.ServiceView, er
 	return sv, nil
 }
 
-func (s *Server) resolveServiceRootMigrationRequest(request serviceRootMigrationRequest) (resolvedServiceRoot, error) {
+func (s *Server) resolveServiceRootMigrationRequest(name string, request serviceRootMigrationRequest, oldRoot string, oldRootZFS string) (resolvedServiceRoot, error) {
 	if request.ZFS {
-		return resolveZFSServiceRoot(context.Background(), s.zfsRunner, request.Root, zfsServiceRootTarget)
+		return s.resolveZFSServiceRootMigrationRequest(name, request.Root, oldRoot, oldRootZFS)
 	}
 	newRoot, err := cleanRequestedServiceRoot(request.Root)
 	if err != nil {
 		return resolvedServiceRoot{}, err
 	}
 	return resolvedServiceRoot{Root: newRoot}, nil
+}
+
+func (s *Server) resolveZFSServiceRootMigrationRequest(name, requestedDataset, oldRoot, oldRootZFS string) (resolvedServiceRoot, error) {
+	dataset := strings.TrimSpace(requestedDataset)
+	if dataset == "" {
+		return resolvedServiceRoot{}, fmt.Errorf("--service-root is required when --zfs is set")
+	}
+	if oldRootZFS == dataset {
+		return resolvedServiceRoot{}, fmt.Errorf("service %q is already using ZFS dataset %q", name, dataset)
+	}
+
+	runner := s.zfsRunner
+	if runner == nil {
+		runner = runZFSCommand
+	}
+	ctx := context.Background()
+	exists, err := zfsDatasetExists(ctx, runner, dataset)
+	if err != nil {
+		return resolvedServiceRoot{}, err
+	}
+	if !exists {
+		if err := preflightMissingZFSServiceRootDataset(ctx, runner, oldRoot, dataset); err != nil {
+			return resolvedServiceRoot{}, err
+		}
+		if err := zfsCreateDataset(ctx, runner, dataset); err != nil {
+			return resolvedServiceRoot{}, err
+		}
+	}
+
+	mountpoint, err := zfsDatasetMountpoint(ctx, runner, dataset)
+	if err != nil {
+		return resolvedServiceRoot{}, err
+	}
+	root, err := validateZFSMountpoint(mountpoint, zfsServiceRootTarget)
+	if err != nil {
+		return resolvedServiceRoot{}, err
+	}
+	return resolvedServiceRoot{Root: root, Dataset: dataset, ZFS: true}, nil
+}
+
+func preflightMissingZFSServiceRootDataset(ctx context.Context, runner zfsCommandRunner, oldRoot, dataset string) error {
+	slash := strings.LastIndex(dataset, "/")
+	if slash <= 0 || slash == len(dataset)-1 {
+		return nil
+	}
+	parentDataset := dataset[:slash]
+	childName := dataset[slash+1:]
+	parentMountpoint, err := zfsDatasetMountpoint(ctx, runner, parentDataset)
+	if err != nil {
+		return err
+	}
+	parentRoot, err := validateZFSMountpoint(parentMountpoint, zfsServiceRootExisting)
+	if err != nil {
+		return err
+	}
+	predictedRoot := filepath.Join(parentRoot, childName)
+	if rootsAreNested(oldRoot, predictedRoot) || rootsAreNested(predictedRoot, oldRoot) {
+		return fmt.Errorf("cannot migrate between nested service roots: %s and %s", oldRoot, predictedRoot)
+	}
+	_, err = validateRequestedServiceRoot(predictedRoot)
+	return err
 }
 
 func rejectNoopServiceRootMigration(name, oldRoot, oldRootZFS, newRoot, newRootZFS string) error {
