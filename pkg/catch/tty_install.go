@@ -273,6 +273,7 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	}
 	cfg := e.fileInstaller(netFlagsFromRun(flags), argsIn)
 	cfg.ServiceRoot = flags.ServiceRoot
+	cfg.ServiceRootZFS = flags.ZFS
 	cfg.Pull = flags.Pull
 	return e.runInstall("run", e.payloadReader(), cfg)
 }

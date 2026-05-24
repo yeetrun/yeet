@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,7 @@ type Server struct {
 
 	newDockerComposeService func(sv db.ServiceView) (dockerNetNSReconciler, error)
 	serviceRootDirFunc      func(string) (string, error)
+	zfsRunner               zfsCommandRunner
 }
 
 type EventListener struct {
@@ -344,8 +346,11 @@ func (s *Server) serviceView(sn string) (db.ServiceView, error) {
 type InstallerCfg struct {
 	ServiceName string
 	User        string
-	// ServiceRoot is the requested absolute root directory for this service.
+	// ServiceRoot is either an absolute filesystem root or, when ServiceRootZFS
+	// is true, a ZFS dataset name to resolve on the catch host.
 	ServiceRoot string
+	// ServiceRootZFS treats ServiceRoot as a ZFS dataset name.
+	ServiceRootZFS bool
 	// Pull forces docker compose services to pull images on install.
 	Pull bool
 	// Printer is a function to print messages to the client.
@@ -395,24 +400,60 @@ func (s *Server) serviceRootDir(sn string) (string, error) {
 	return s.serviceRootFromView(sv), nil
 }
 
-func (s *Server) prepareServiceRootForInstall(sn, requested string) (string, error) {
+func (s *Server) prepareServiceRootForInstall(sn, requested string, requestedZFS bool) (resolvedServiceRoot, error) {
 	sv, err := s.serviceView(sn)
 	if err != nil && !errors.Is(err, errServiceNotFound) {
-		return "", err
+		return resolvedServiceRoot{}, err
 	}
+	if requestedZFS {
+		return s.prepareZFSServiceRootForInstall(sn, sv, requested)
+	}
+	return s.prepareFilesystemServiceRootForInstall(sn, sv, requested)
+}
+
+func (s *Server) prepareZFSServiceRootForInstall(sn string, sv db.ServiceView, requested string) (resolvedServiceRoot, error) {
+	requestedDataset := strings.TrimSpace(requested)
+	if requestedDataset == "" {
+		return resolvedServiceRoot{}, fmt.Errorf("--service-root is required when --zfs is set")
+	}
+	if !sv.Valid() {
+		return resolveZFSServiceRoot(context.Background(), s.zfsRunner, requestedDataset, zfsServiceRootTarget)
+	}
+	if sv.ServiceRootZFS() == requestedDataset {
+		return resolveZFSServiceRoot(context.Background(), s.zfsRunner, requestedDataset, zfsServiceRootExisting)
+	}
+	return resolvedServiceRoot{}, fmt.Errorf(
+		"service %q already uses service root %q; change it with: yeet service set %s --service-root=%s --zfs",
+		sn,
+		s.serviceRootFromView(sv),
+		sn,
+		requestedDataset,
+	)
+}
+
+func (s *Server) prepareFilesystemServiceRootForInstall(sn string, sv db.ServiceView, requested string) (resolvedServiceRoot, error) {
 	if sv.Valid() {
 		effective := s.serviceRootFromView(sv)
 		if requested == "" {
-			return effective, nil
+			return resolvedServiceRoot{Root: effective, Dataset: sv.ServiceRootZFS(), ZFS: sv.ServiceRootZFS() != ""}, nil
 		}
 		cleaned, err := cleanRequestedServiceRoot(requested)
 		if err != nil {
-			return "", err
+			return resolvedServiceRoot{}, err
+		}
+		if sv.ServiceRootZFS() != "" {
+			return resolvedServiceRoot{}, fmt.Errorf(
+				"service %q already uses ZFS service root %q; change it with: yeet service set %s --service-root=%s",
+				sn,
+				sv.ServiceRootZFS(),
+				sn,
+				cleaned,
+			)
 		}
 		if cleaned == filepath.Clean(effective) {
-			return cleaned, nil
+			return resolvedServiceRoot{Root: cleaned}, nil
 		}
-		return "", fmt.Errorf(
+		return resolvedServiceRoot{}, fmt.Errorf(
 			"service %q already uses service root %q; change it with: yeet service set %s --service-root=%s",
 			sn,
 			effective,
@@ -421,9 +462,13 @@ func (s *Server) prepareServiceRootForInstall(sn, requested string) (string, err
 		)
 	}
 	if requested == "" {
-		return s.defaultServiceRootDir(sn), nil
+		return resolvedServiceRoot{Root: s.defaultServiceRootDir(sn)}, nil
 	}
-	return validateRequestedServiceRoot(requested)
+	root, err := validateRequestedServiceRoot(requested)
+	if err != nil {
+		return resolvedServiceRoot{}, err
+	}
+	return resolvedServiceRoot{Root: root}, nil
 }
 
 func validateRequestedServiceRoot(root string) (string, error) {

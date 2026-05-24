@@ -14,6 +14,46 @@ import (
 	"testing"
 )
 
+type fakeZFSDataset struct {
+	Mountpoint string
+	Exists     bool
+	CreateErr  string
+}
+
+type fakeZFSRunner map[string]fakeZFSDataset
+
+func (f fakeZFSRunner) Run(ctx context.Context, args ...string) (string, string, error) {
+	if len(args) == 5 && reflect.DeepEqual(args[:4], []string{"list", "-H", "-o", "name"}) {
+		ds := args[4]
+		if data, ok := f[ds]; ok && data.Exists {
+			return ds + "\n", "", nil
+		}
+		return "", "dataset does not exist", errZFSCommandFailed
+	}
+	if len(args) == 2 && args[0] == "create" {
+		ds := args[1]
+		data := f[ds]
+		if data.CreateErr != "" {
+			return "", data.CreateErr, errZFSCommandFailed
+		}
+		data.Exists = true
+		if data.Mountpoint == "" {
+			data.Mountpoint = "/" + ds
+		}
+		f[ds] = data
+		return "", "", nil
+	}
+	if len(args) == 6 && reflect.DeepEqual(args[:5], []string{"get", "-H", "-o", "value", "mountpoint"}) {
+		ds := args[5]
+		data, ok := f[ds]
+		if !ok || !data.Exists {
+			return "", "dataset does not exist", errZFSCommandFailed
+		}
+		return data.Mountpoint + "\n", "", nil
+	}
+	return "", "unexpected zfs command: " + strings.Join(args, " "), errZFSCommandFailed
+}
+
 func TestResolveZFSServiceRootExistingDataset(t *testing.T) {
 	parent := filepath.Join(t.TempDir(), "apps")
 	if err := os.MkdirAll(parent, 0o755); err != nil {
