@@ -237,21 +237,56 @@ func TestSnapshotPolicyCloneAndView(t *testing.T) {
 			"svc": {
 				Name: "svc",
 				SnapshotPolicy: &SnapshotPolicy{
-					Enabled: boolPtr(true),
-					MaxAge:  "24h",
+					Enabled:  boolPtr(true),
+					KeepLast: intPtr(2),
+					MaxAge:   "24h",
+					Events:   []string{"deploy"},
+					Required: boolPtr(false),
 				},
 			},
 		},
 	}
 
 	clone := data.Clone()
+	*clone.SnapshotDefaults.Enabled = true
+	*clone.SnapshotDefaults.KeepLast = 9
 	clone.SnapshotDefaults.MaxAge = "1h"
+	clone.SnapshotDefaults.Events[0] = "manual"
+	*clone.SnapshotDefaults.Required = false
+	*clone.Services["svc"].SnapshotPolicy.Enabled = false
+	*clone.Services["svc"].SnapshotPolicy.KeepLast = 8
 	clone.Services["svc"].SnapshotPolicy.MaxAge = "2h"
+	clone.Services["svc"].SnapshotPolicy.Events[0] = "manual"
+	*clone.Services["svc"].SnapshotPolicy.Required = true
+	if got := *data.SnapshotDefaults.Enabled; got != false {
+		t.Fatalf("source SnapshotDefaults.Enabled mutated through clone: %v", got)
+	}
+	if got := *data.SnapshotDefaults.KeepLast; got != 3 {
+		t.Fatalf("source SnapshotDefaults.KeepLast mutated through clone: %d", got)
+	}
 	if got := data.SnapshotDefaults.MaxAge; got != "72h" {
 		t.Fatalf("source SnapshotDefaults.MaxAge mutated through clone: %q", got)
 	}
+	if got := data.SnapshotDefaults.Events[0]; got != "run" {
+		t.Fatalf("source SnapshotDefaults.Events mutated through clone: %q", got)
+	}
+	if got := *data.SnapshotDefaults.Required; got != true {
+		t.Fatalf("source SnapshotDefaults.Required mutated through clone: %v", got)
+	}
+	if got := *data.Services["svc"].SnapshotPolicy.Enabled; got != true {
+		t.Fatalf("source service SnapshotPolicy.Enabled mutated through clone: %v", got)
+	}
+	if got := *data.Services["svc"].SnapshotPolicy.KeepLast; got != 2 {
+		t.Fatalf("source service SnapshotPolicy.KeepLast mutated through clone: %d", got)
+	}
 	if got := data.Services["svc"].SnapshotPolicy.MaxAge; got != "24h" {
 		t.Fatalf("source service SnapshotPolicy.MaxAge mutated through clone: %q", got)
+	}
+	if got := data.Services["svc"].SnapshotPolicy.Events[0]; got != "deploy" {
+		t.Fatalf("source service SnapshotPolicy.Events mutated through clone: %q", got)
+	}
+	if got := *data.Services["svc"].SnapshotPolicy.Required; got != false {
+		t.Fatalf("source service SnapshotPolicy.Required mutated through clone: %v", got)
 	}
 
 	view := data.View()
@@ -723,9 +758,21 @@ func TestMigrateAddsSnapshotPolicyVersion(t *testing.T) {
 	if sv.SnapshotPolicy().Valid() {
 		t.Fatalf("service SnapshotPolicy valid = true, want false for inherited policy")
 	}
+	if got := sv.ServiceRoot(); got != "/srv/apps/svc" {
+		t.Fatalf("migrated ServiceRoot = %q, want /srv/apps/svc", got)
+	}
+	if got := sv.ServiceRootZFS(); got != "tank/apps/svc" {
+		t.Fatalf("migrated ServiceRootZFS = %q, want tank/apps/svc", got)
+	}
 	onDisk := mustReadData(t, path)
 	if onDisk.DataVersion != CurrentDataVersion {
 		t.Fatalf("on-disk DataVersion = %d, want %d", onDisk.DataVersion, CurrentDataVersion)
+	}
+	if got := onDisk.Services["svc"].ServiceRoot; got != "/srv/apps/svc" {
+		t.Fatalf("on-disk ServiceRoot = %q, want /srv/apps/svc", got)
+	}
+	if got := onDisk.Services["svc"].ServiceRootZFS; got != "tank/apps/svc" {
+		t.Fatalf("on-disk ServiceRootZFS = %q, want tank/apps/svc", got)
 	}
 	backups, err := filepath.Glob(path + ".v7.*")
 	if err != nil {
@@ -737,6 +784,12 @@ func TestMigrateAddsSnapshotPolicyVersion(t *testing.T) {
 	backup := mustReadData(t, backups[0])
 	if backup.DataVersion != 7 {
 		t.Fatalf("backup DataVersion = %d, want 7", backup.DataVersion)
+	}
+	if got := backup.Services["svc"].ServiceRoot; got != "/srv/apps/svc" {
+		t.Fatalf("backup ServiceRoot = %q, want /srv/apps/svc", got)
+	}
+	if got := backup.Services["svc"].ServiceRootZFS; got != "tank/apps/svc" {
+		t.Fatalf("backup ServiceRootZFS = %q, want tank/apps/svc", got)
 	}
 }
 
