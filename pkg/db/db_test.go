@@ -290,15 +290,81 @@ func TestSnapshotPolicyCloneAndView(t *testing.T) {
 	}
 
 	view := data.View()
-	if got := view.SnapshotDefaults().MaxAge(); got != "72h" {
+	defaults := view.SnapshotDefaults()
+	if got := defaults.Enabled().Get(); got != false {
+		t.Fatalf("View SnapshotDefaults Enabled = %v, want false", got)
+	}
+	if got := defaults.KeepLast().Get(); got != 3 {
+		t.Fatalf("View SnapshotDefaults KeepLast = %d, want 3", got)
+	}
+	if got := defaults.MaxAge(); got != "72h" {
 		t.Fatalf("View SnapshotDefaults MaxAge = %q, want 72h", got)
+	}
+	if got := defaults.Events(); got.Len() != 2 {
+		t.Fatalf("View SnapshotDefaults Events len = %d, want 2", got.Len())
+	} else if got.At(0) != "run" || got.At(1) != "docker-update" {
+		t.Fatalf("View SnapshotDefaults Events = [%s %s], want [run docker-update]", got.At(0), got.At(1))
+	}
+	if got := defaults.Required().Get(); got != true {
+		t.Fatalf("View SnapshotDefaults Required = %v, want true", got)
 	}
 	sv, ok := view.Services().GetOk("svc")
 	if !ok {
 		t.Fatal("missing service view")
 	}
-	if got := sv.SnapshotPolicy().MaxAge(); got != "24h" {
+	servicePolicy := sv.SnapshotPolicy()
+	if got := servicePolicy.Enabled().Get(); got != true {
+		t.Fatalf("View service SnapshotPolicy Enabled = %v, want true", got)
+	}
+	if got := servicePolicy.KeepLast().Get(); got != 2 {
+		t.Fatalf("View service SnapshotPolicy KeepLast = %d, want 2", got)
+	}
+	if got := servicePolicy.MaxAge(); got != "24h" {
 		t.Fatalf("View service SnapshotPolicy MaxAge = %q, want 24h", got)
+	}
+	if got := servicePolicy.Events(); got.Len() != 1 {
+		t.Fatalf("View service SnapshotPolicy Events len = %d, want 1", got.Len())
+	} else if got.At(0) != "deploy" {
+		t.Fatalf("View service SnapshotPolicy Events = %q, want [deploy]", got.At(0))
+	}
+	if got := servicePolicy.Required().Get(); got != false {
+		t.Fatalf("View service SnapshotPolicy Required = %v, want false", got)
+	}
+
+	viewStruct := view.AsStruct()
+	*viewStruct.SnapshotDefaults.Enabled = true
+	*viewStruct.SnapshotDefaults.KeepLast = 10
+	viewStruct.SnapshotDefaults.Events[0] = "view-struct"
+	*viewStruct.SnapshotDefaults.Required = false
+	if got := *data.SnapshotDefaults.Enabled; got != false {
+		t.Fatalf("source SnapshotDefaults.Enabled mutated through view AsStruct: %v", got)
+	}
+	if got := *data.SnapshotDefaults.KeepLast; got != 3 {
+		t.Fatalf("source SnapshotDefaults.KeepLast mutated through view AsStruct: %d", got)
+	}
+	if got := data.SnapshotDefaults.Events[0]; got != "run" {
+		t.Fatalf("source SnapshotDefaults.Events mutated through view AsStruct: %q", got)
+	}
+	if got := *data.SnapshotDefaults.Required; got != true {
+		t.Fatalf("source SnapshotDefaults.Required mutated through view AsStruct: %v", got)
+	}
+
+	svStruct := sv.AsStruct()
+	*svStruct.SnapshotPolicy.Enabled = false
+	*svStruct.SnapshotPolicy.KeepLast = 11
+	svStruct.SnapshotPolicy.Events[0] = "service-struct"
+	*svStruct.SnapshotPolicy.Required = true
+	if got := *data.Services["svc"].SnapshotPolicy.Enabled; got != true {
+		t.Fatalf("source service SnapshotPolicy.Enabled mutated through view AsStruct: %v", got)
+	}
+	if got := *data.Services["svc"].SnapshotPolicy.KeepLast; got != 2 {
+		t.Fatalf("source service SnapshotPolicy.KeepLast mutated through view AsStruct: %d", got)
+	}
+	if got := data.Services["svc"].SnapshotPolicy.Events[0]; got != "deploy" {
+		t.Fatalf("source service SnapshotPolicy.Events mutated through view AsStruct: %q", got)
+	}
+	if got := *data.Services["svc"].SnapshotPolicy.Required; got != false {
+		t.Fatalf("source service SnapshotPolicy.Required mutated through view AsStruct: %v", got)
 	}
 }
 
