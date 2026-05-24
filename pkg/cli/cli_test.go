@@ -128,6 +128,22 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	}
 }
 
+func TestParseRunAbsoluteServiceRootWithoutZFS(t *testing.T) {
+	flags, outArgs, err := ParseRun([]string{"--service-root=/srv/apps/svc-a", "payload"})
+	if err != nil {
+		t.Fatalf("ParseRun failed: %v", err)
+	}
+	if flags.ServiceRoot != "/srv/apps/svc-a" {
+		t.Fatalf("ServiceRoot = %q, want /srv/apps/svc-a", flags.ServiceRoot)
+	}
+	if flags.ZFS {
+		t.Fatal("ZFS = true, want false")
+	}
+	if !reflect.DeepEqual(outArgs, []string{"payload"}) {
+		t.Fatalf("args = %#v, want %#v", outArgs, []string{"payload"})
+	}
+}
+
 func TestParseRunStopsAtUnknownFlag(t *testing.T) {
 	args := []string{
 		"--net", "ts",
@@ -374,6 +390,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	}
 	if reg.SubCommands["run"].Info.Name != "run" {
 		t.Fatalf("registry run command = %#v", reg.SubCommands["run"])
+	}
+	if !containsString(reg.SubCommands["run"].Info.Examples, "yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs") {
+		t.Fatalf("run examples = %#v, want zfs service-root example", reg.SubCommands["run"].Info.Examples)
 	}
 	if reg.SubCommands["remove"].Info.Aliases[0] != "rm" {
 		t.Fatalf("registry remove aliases = %v, want rm", reg.SubCommands["remove"].Info.Aliases)
