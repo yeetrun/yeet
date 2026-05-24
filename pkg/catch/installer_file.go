@@ -96,6 +96,8 @@ type FileInstaller struct {
 
 	tmpDir  string
 	tmpPath string
+
+	serviceRoot string
 }
 
 func (i *FileInstaller) WriteAt(p []byte, offset int64) (n int, err error) {
@@ -153,20 +155,51 @@ func NewFileInstaller(s *Server, cfg FileInstallerCfg) (*FileInstaller, error) {
 	if i.cfg.NewCmd == nil {
 		i.cfg.NewCmd = cmdutil.NewStdCmd
 	}
-	if err := s.ensureDirs(cfg.ServiceName, cfg.User); err != nil {
+	serviceRoot, err := s.serviceRootDir(cfg.ServiceName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve service root: %w", err)
+	}
+	i.serviceRoot = serviceRoot
+	if err := ensureDirsForRoot(serviceRoot, cfg.User); err != nil {
 		return nil, fmt.Errorf("failed to ensure directories: %w", err)
 	}
 	if err := i.initTempFile(); err != nil {
 		return nil, err
 	}
 	// Create temporary file.
-	var err error
-	i.File, err = os.OpenFile(i.tempFilePath(), os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(i.tempFilePath(), os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		i.cleanupTemp()
 		return nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
+	i.File = file
 	return i, nil
+}
+
+func (i *FileInstaller) serviceBinDir() string {
+	return serviceBinDirForRoot(i.effectiveServiceRoot())
+}
+
+func (i *FileInstaller) serviceRunDir() string {
+	return serviceRunDirForRoot(i.effectiveServiceRoot())
+}
+
+func (i *FileInstaller) serviceDataDir() string {
+	return serviceDataDirForRoot(i.effectiveServiceRoot())
+}
+
+func (i *FileInstaller) serviceEnvDir() string {
+	return serviceEnvDirForRoot(i.effectiveServiceRoot())
+}
+
+func (i *FileInstaller) effectiveServiceRoot() string {
+	if i.serviceRoot != "" {
+		return i.serviceRoot
+	}
+	if i.s == nil {
+		return ""
+	}
+	return i.s.defaultServiceRootDir(i.cfg.ServiceName)
 }
 
 func (i *FileInstaller) printf(format string, args ...interface{}) {
@@ -449,7 +482,7 @@ func (i *FileInstaller) writeNetNSResolvConf(env *netns.Service, resolvConf stri
 	if resolvConf == "" {
 		resolvConf = defaultNetNSResolvConf()
 	}
-	fp := filepath.Join(i.s.serviceBinDir(i.cfg.ServiceName), fileutil.ApplyVersion("resolv.conf"))
+	fp := filepath.Join(i.serviceBinDir(), fileutil.ApplyVersion("resolv.conf"))
 	if err := os.WriteFile(fp, []byte(resolvConf), 0644); err != nil {
 		return fmt.Errorf("failed to write resolv.conf: %v", err)
 	}
@@ -477,8 +510,8 @@ func buildNetNSResolvConf(dns, searchDomains string) string {
 
 func (i *FileInstaller) writeServiceNetNSFiles(env netns.Service) error {
 	files, err := netns.WriteServiceNetNS(
-		i.s.serviceBinDir(i.cfg.ServiceName),
-		i.s.serviceRunDir(i.cfg.ServiceName),
+		i.serviceBinDir(),
+		i.serviceRunDir(),
 		env,
 	)
 	if err != nil {
@@ -510,7 +543,7 @@ func (i *FileInstaller) writeDockerComposeNetwork(env netns.Service) error {
     driver_opts:
       dev.catchit.netns: %q
 `, filepath.Join("/var/run/netns", env.NetNS()))
-	dnf := filepath.Join(i.s.serviceBinDir(i.cfg.ServiceName), "compose.network")
+	dnf := filepath.Join(i.serviceBinDir(), "compose.network")
 	if err := os.WriteFile(dnf, []byte(dockerNet), 0644); err != nil {
 		return fmt.Errorf("failed to write docker compose network: %v", err)
 	}
@@ -621,7 +654,7 @@ func rewriteSystemdUnitContent(unit, exe string, args []string) string {
 }
 
 func (i *FileInstaller) ensureSystemdUnit() error {
-	exe := filepath.Join(i.s.serviceRunDir(i.cfg.ServiceName), i.cfg.ServiceName)
+	exe := filepath.Join(i.serviceRunDir(), i.cfg.ServiceName)
 	if reused, err := i.reuseExistingSystemdUnit(exe); err != nil || reused {
 		return err
 	}
@@ -667,9 +700,9 @@ func (i *FileInstaller) newSystemdUnit(exe string) (*svc.SystemdUnit, error) {
 	su := &svc.SystemdUnit{
 		Name:             i.cfg.ServiceName,
 		Executable:       exe,
-		WorkingDirectory: i.s.serviceDataDir(i.cfg.ServiceName),
+		WorkingDirectory: i.serviceDataDir(),
 		Arguments:        i.cfg.Args,
-		EnvFile:          "-" + filepath.Join(i.s.serviceRunDir(i.cfg.ServiceName), "env"),
+		EnvFile:          "-" + filepath.Join(i.serviceRunDir(), "env"),
 		Timer:            i.cfg.Timer,
 	}
 	if i.cfg.ServiceName == CatchService {
@@ -698,7 +731,7 @@ func (i *FileInstaller) applyNetworkToSystemdUnit(su *svc.SystemdUnit) error {
 func (i *FileInstaller) writeSystemdUnit(su *svc.SystemdUnit) error {
 	log.Printf("NetNS: %v", su.NetNS)
 	log.Printf("Requires: %v", su.Requires)
-	units, err := su.WriteOutUnitFiles(i.s.serviceBinDir(i.cfg.ServiceName))
+	units, err := su.WriteOutUnitFiles(i.serviceBinDir())
 	if err != nil {
 		return fmt.Errorf("failed to write unit files: %v", err)
 	}
@@ -771,7 +804,7 @@ func (i *FileInstaller) prepareInstallPlan(tmppath string) (fileInstallPlan, err
 }
 
 func (i *FileInstaller) prepareEnvFileInstall() fileInstallPlan {
-	dst := filepath.Join(i.s.serviceEnvDir(i.cfg.ServiceName), "env-"+i.version())
+	dst := filepath.Join(i.serviceEnvDir(), "env-"+i.version())
 	mak.Set(&i.artifacts, db.ArtifactEnvFile, dst)
 	return fileInstallPlan{dst: dst}
 }
@@ -888,7 +921,7 @@ func pullSupportedPayloadType(binFT ftdetect.FileType) bool {
 
 func (i *FileInstaller) prepareSystemdPayload(binFT ftdetect.FileType) (fileInstallPlan, error) {
 	i.printDetectedSystemdPayload(binFT)
-	dst := filepath.Join(i.s.serviceBinDir(i.cfg.ServiceName), fmt.Sprintf("%s-%s", i.cfg.ServiceName, i.version()))
+	dst := filepath.Join(i.serviceBinDir(), fmt.Sprintf("%s-%s", i.cfg.ServiceName, i.version()))
 	plan := fileInstallPlan{
 		dst:                 dst,
 		postRenameActions:   []func() error{chmodExecutableAction(dst)},
@@ -925,7 +958,7 @@ func (i *FileInstaller) prepareDockerComposePayload(bin string) (fileInstallPlan
 			return fileInstallPlan{}, fmt.Errorf("failed to apply publish ports: %w", err)
 		}
 	}
-	dst := filepath.Join(i.s.serviceBinDir(i.cfg.ServiceName), fmt.Sprintf("docker-compose.%s.yml", i.version()))
+	dst := filepath.Join(i.serviceBinDir(), fmt.Sprintf("docker-compose.%s.yml", i.version()))
 	mak.Set(&i.artifacts, db.ArtifactDockerComposeFile, dst)
 	return fileInstallPlan{
 		dst:                 dst,
@@ -937,7 +970,7 @@ type composePayloadRenderer func(serviceName, runDir, dataDir string, args []str
 
 func (i *FileInstaller) prepareGeneratedComposePayload(message, payloadName string, artifactName db.ArtifactName, kind string, render composePayloadRenderer) (fileInstallPlan, error) {
 	i.printf(message)
-	binDir := i.s.serviceBinDir(i.cfg.ServiceName)
+	binDir := i.serviceBinDir()
 	dst := filepath.Join(binDir, fmt.Sprintf(payloadName, i.version()))
 
 	composePath, err := i.writeGeneratedComposeFile(binDir, kind, render)
@@ -957,8 +990,8 @@ func (i *FileInstaller) writeGeneratedComposeFile(binDir, kind string, render co
 	composePath := filepath.Join(binDir, fmt.Sprintf("docker-compose.%s.yml", i.version()))
 	composeContent, err := render(
 		i.cfg.ServiceName,
-		i.s.serviceRunDir(i.cfg.ServiceName),
-		i.s.serviceDataDir(i.cfg.ServiceName),
+		i.serviceRunDir(),
+		i.serviceDataDir(),
 		i.cfg.Args,
 		i.cfg.Publish,
 	)
@@ -1070,7 +1103,7 @@ func (i *FileInstaller) tempFilePath() string {
 	if i.tmpPath != "" {
 		return i.tmpPath
 	}
-	return filepath.Join(i.s.serviceBinDir(i.cfg.ServiceName),
+	return filepath.Join(i.serviceBinDir(),
 		fmt.Sprintf("%s-%s.tmp", i.cfg.ServiceName, i.version()))
 }
 
@@ -1157,7 +1190,7 @@ func (i *FileInstaller) initTempFile() error {
 	if i.tmpPath != "" {
 		return nil
 	}
-	tmpDir, err := os.MkdirTemp(i.s.serviceBinDir(i.cfg.ServiceName),
+	tmpDir, err := os.MkdirTemp(i.serviceBinDir(),
 		fmt.Sprintf("%s-%s-", i.cfg.ServiceName, i.version()))
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir: %w", err)

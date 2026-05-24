@@ -286,7 +286,7 @@ func (s *internalRegistryStorage) stageCompose(d *db.Data, svcName, repo string,
 	// If no previous file found or couldn't read it, use template.
 	if composeFile == "" {
 		image := fmt.Sprintf("%s/%s", svc.InternalRegistryHost, repo)
-		composeFile = fmt.Sprintf(composeTemplate, svcName, image, s.s.serviceDataDir(svcName))
+		composeFile = fmt.Sprintf(composeTemplate, svcName, image, s.serviceDataDir(d, svcName))
 	}
 
 	if _, err := io.Copy(inst, strings.NewReader(composeFile)); err != nil {
@@ -298,6 +298,16 @@ func (s *internalRegistryStorage) stageCompose(d *db.Data, svcName, repo string,
 		return fmt.Errorf("failed to close installer: %w", err)
 	}
 	return nil
+}
+
+func (s *internalRegistryStorage) serviceDataDir(d *db.Data, svcName string) string {
+	serviceRoot := s.s.defaultServiceRootDir(svcName)
+	if d != nil {
+		if svc, ok := d.Services[svcName]; ok {
+			serviceRoot = s.s.serviceRootFromView(svc.View())
+		}
+	}
+	return serviceDataDirForRoot(serviceRoot)
 }
 
 func parseRepo(repo string) (string, error) {

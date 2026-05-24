@@ -110,17 +110,46 @@ func TestCallerValidationRules(t *testing.T) {
 	}
 }
 
-func TestEnsureDirsServiceDirectoryPlan(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "services")
-	got := serviceDirectoryPlan(root, "api")
+func TestServiceDirectoryPlanUsesRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "custom-api")
+	got := serviceDirectoryPlan(root)
 	want := []string{
-		filepath.Join(root, "api", "bin"),
-		filepath.Join(root, "api", "data"),
-		filepath.Join(root, "api", "env"),
-		filepath.Join(root, "api", "run"),
+		filepath.Join(root, "bin"),
+		filepath.Join(root, "data"),
+		filepath.Join(root, "env"),
+		filepath.Join(root, "run"),
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("serviceDirectoryPlan = %v, want %v", got, want)
+	}
+}
+
+func TestServiceRootDirUsesDBServiceRoot(t *testing.T) {
+	server := newTestServer(t)
+	customRoot := filepath.Join(t.TempDir(), "custom-api")
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {Name: "api", ServiceRoot: customRoot},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	got, err := server.serviceRootDir("api")
+	if err != nil {
+		t.Fatalf("serviceRootDir: %v", err)
+	}
+	if got != customRoot {
+		t.Fatalf("serviceRootDir = %q, want %q", got, customRoot)
+	}
+
+	got, err = server.serviceRootDir("missing")
+	if err != nil {
+		t.Fatalf("serviceRootDir missing: %v", err)
+	}
+	wantDefault := filepath.Join(server.cfg.ServicesRoot, "missing")
+	if got != wantDefault {
+		t.Fatalf("serviceRootDir missing = %q, want %q", got, wantDefault)
 	}
 }
 
@@ -233,15 +262,19 @@ func TestIsServiceTypeRunningRejectsUnknownType(t *testing.T) {
 
 func TestRemoveServiceRemovesConfigDirsPreservesDataAndPublishesEvent(t *testing.T) {
 	server := newTestServer(t)
-	serviceRoot := server.serviceRootDir("api")
+	serviceRoot := filepath.Join(t.TempDir(), "custom-api")
 	for _, dir := range []string{"bin", "data", "env", "run"} {
 		if err := os.MkdirAll(filepath.Join(serviceRoot, dir), 0o755); err != nil {
 			t.Fatalf("mkdir %s: %v", dir, err)
 		}
 	}
+	defaultRoot := filepath.Join(server.cfg.ServicesRoot, "api")
+	if err := os.MkdirAll(filepath.Join(defaultRoot, "run"), 0o755); err != nil {
+		t.Fatalf("mkdir default run: %v", err)
+	}
 	if err := server.cfg.DB.Set(&db.Data{
 		Services: map[string]*db.Service{
-			"api": {Name: "api", ServiceType: db.ServiceType("unknown")},
+			"api": {Name: "api", ServiceType: db.ServiceType("unknown"), ServiceRoot: serviceRoot},
 		},
 	}); err != nil {
 		t.Fatalf("DB.Set: %v", err)
@@ -275,6 +308,9 @@ func TestRemoveServiceRemovesConfigDirsPreservesDataAndPublishesEvent(t *testing
 	}
 	if _, err := os.Stat(filepath.Join(serviceRoot, "data")); err != nil {
 		t.Fatalf("data dir should remain: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(defaultRoot, "run")); err != nil {
+		t.Fatalf("default root should not be removed: %v", err)
 	}
 }
 

@@ -415,7 +415,11 @@ func (e *ttyExecer) prepareCopyDestination(raw string, allowEmpty bool) (string,
 	if err := e.s.ensureDirs(e.sn, e.user); err != nil {
 		return "", fmt.Errorf("failed to ensure directories: %w", err)
 	}
-	return copyDestinationRoot(e.s.serviceDataDir(e.sn), dest), nil
+	serviceRoot, err := e.s.serviceRootDir(e.sn)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve service root: %w", err)
+	}
+	return copyDestinationRoot(serviceDataDirForRoot(serviceRoot), dest), nil
 }
 
 func copyDestinationRoot(dataDir, dest string) string {
@@ -498,7 +502,11 @@ func (e *ttyExecer) remoteCopySource(raw string) (string, string, os.FileInfo, e
 	if err != nil {
 		return "", "", nil, err
 	}
-	srcPath := copyDestinationRoot(e.s.serviceDataDir(e.sn), src)
+	serviceRoot, err := e.s.serviceRootDir(e.sn)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to resolve service root: %w", err)
+	}
+	srcPath := copyDestinationRoot(serviceDataDirForRoot(serviceRoot), src)
 	info, err := os.Stat(srcPath)
 	if err != nil {
 		return "", "", nil, err

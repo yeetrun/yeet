@@ -22,7 +22,11 @@ func (s *Server) setupTailscale(clientSecret string) (catchrpc.TailscaleSetupRes
 		return catchrpc.TailscaleSetupResponse{}, fmt.Errorf("invalid client secret (expected tskey-client-...)")
 	}
 
-	dataDir := s.serviceDataDir(CatchService)
+	serviceRoot, err := s.serviceRootDir(CatchService)
+	if err != nil {
+		return catchrpc.TailscaleSetupResponse{}, fmt.Errorf("failed to resolve catch service root: %w", err)
+	}
+	dataDir := serviceDataDirForRoot(serviceRoot)
 	if err := os.MkdirAll(dataDir, 0700); err != nil {
 		return catchrpc.TailscaleSetupResponse{}, fmt.Errorf("failed to create catch data dir: %w", err)
 	}

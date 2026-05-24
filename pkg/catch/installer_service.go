@@ -185,7 +185,9 @@ func parseGenRef(ref db.ArtifactRef) (int, bool) {
 // Prune removes old configurations from the database.
 func (si *Installer) prune() {
 	knownBins := defaultKnownInstallFiles(si.icfg.ServiceName)
+	serviceRoot := si.s.defaultServiceRootDir(si.icfg.ServiceName)
 	_, _, err := si.mutateService(func(d *db.Data, s *db.Service) error {
+		serviceRoot = si.s.serviceRootFromView(s.View())
 		pruneServiceArtifacts(s, knownBins)
 		return nil
 	})
@@ -194,7 +196,7 @@ func (si *Installer) prune() {
 		return
 	}
 
-	si.pruneInstallDirectories(knownBins)
+	si.pruneInstallDirectories(serviceRoot, knownBins)
 }
 
 func defaultKnownInstallFiles(serviceName string) set.Set[string] {
@@ -229,10 +231,10 @@ func shouldKeepArtifactRef(ref db.ArtifactRef, minGen int) bool {
 	return !ok || gen >= minGen
 }
 
-func (si *Installer) pruneInstallDirectories(knownFiles set.Set[string]) {
+func (si *Installer) pruneInstallDirectories(serviceRoot string, knownFiles set.Set[string]) {
 	for _, dir := range []string{
-		si.s.serviceBinDir(si.icfg.ServiceName),
-		si.s.serviceEnvDir(si.icfg.ServiceName),
+		serviceBinDirForRoot(serviceRoot),
+		serviceEnvDirForRoot(serviceRoot),
 	} {
 		if err := pruneInstallDirectory(dir, knownFiles); err != nil {
 			log.Printf("failed to keep only known files in %q: %v", dir, err)
@@ -343,7 +345,8 @@ func installSystemdService(si *Installer, s *db.Service) error {
 }
 
 func newSystemdInstallService(si *Installer, s *db.Service) (*svc.SystemdService, error) {
-	service, err := svc.NewSystemdService(si.s.cfg.DB, s.View(), si.s.serviceRunDir(si.icfg.ServiceName))
+	serviceRoot := si.s.serviceRootFromView(s.View())
+	service, err := svc.NewSystemdService(si.s.cfg.DB, s.View(), serviceRunDirForRoot(serviceRoot))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create service: %v", err)
 	}
@@ -396,7 +399,8 @@ func (si *Installer) suspendUI() {
 }
 
 func (si *Installer) newDockerComposeService(s *db.Service) (*svc.DockerComposeService, error) {
-	service, err := svc.NewDockerComposeService(si.s.cfg.DB, s.View(), si.s.serviceDataDir(s.Name), si.s.serviceRunDir(s.Name))
+	serviceRoot := si.s.serviceRootFromView(s.View())
+	service, err := svc.NewDockerComposeService(si.s.cfg.DB, s.View(), serviceDataDirForRoot(serviceRoot), serviceRunDirForRoot(serviceRoot))
 	if err != nil {
 		return nil, err
 	}

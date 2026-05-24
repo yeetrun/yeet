@@ -1251,7 +1251,7 @@ func TestTempFilePathInitAndCleanupBranches(t *testing.T) {
 	}
 
 	badServer := newTestServer(t)
-	if err := os.MkdirAll(badServer.serviceRootDir("bad-temp"), 0755); err != nil {
+	if err := os.MkdirAll(badServer.defaultServiceRootDir("bad-temp"), 0755); err != nil {
 		t.Fatalf("MkdirAll service root returned error: %v", err)
 	}
 	if err := os.WriteFile(badServer.serviceBinDir("bad-temp"), []byte("not a dir"), 0644); err != nil {
