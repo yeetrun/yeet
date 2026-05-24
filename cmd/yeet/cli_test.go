@@ -51,6 +51,53 @@ func TestRunReturnsFailureWhenCommandReturnsError(t *testing.T) {
 	}
 }
 
+func TestRunServiceSetHelpShowsLeafCommand(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldStdout := os.Stdout
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		os.Stdout = oldStdout
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create stdout temp file: %v", err)
+	}
+	os.Stdout = stdoutFile
+	os.Args = []string{"yeet", "service", "set", "--help"}
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("service set help should not call handler with args %v", args)
+		return nil
+	}
+
+	if got := run(); got != 0 {
+		t.Fatalf("run exit code = %d, want 0", got)
+	}
+	if _, err := stdoutFile.Seek(0, 0); err != nil {
+		t.Fatalf("seek stdout: %v", err)
+	}
+	rawStdout, err := os.ReadFile(stdoutFile.Name())
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	stdout := string(rawStdout)
+	if !strings.Contains(stdout, "Set service settings") {
+		t.Fatalf("stdout = %q, want service set command help", stdout)
+	}
+	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> --service-root=/abs/path|dataset [--zfs] [--copy|--empty]") {
+		t.Fatalf("stdout = %q, want service set usage", stdout)
+	}
+	if strings.Contains(stdout, "service COMMAND [ARGS...]") {
+		t.Fatalf("stdout = %q, got group help instead of service set help", stdout)
+	}
+}
+
 func TestParseGlobalFlags(t *testing.T) {
 	tests := []struct {
 		name    string

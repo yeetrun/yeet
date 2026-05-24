@@ -18,7 +18,7 @@ require (
 	github.com/klauspost/compress v1.17.11
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.0
-	github.com/shayne/yargs v1.0.1
+	github.com/shayne/yargs v1.0.2
 	github.com/tailscale/depaware v0.0.0-20251001183927-9c2ad255ef3f
 	github.com/vishvananda/netns v0.0.5
 	golang.org/x/sync v0.20.0
