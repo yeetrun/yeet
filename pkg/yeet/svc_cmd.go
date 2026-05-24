@@ -197,7 +197,7 @@ func HandleSvcCmd(args []string) error {
 
 func newSvcCommandRequest(args []string) (svcCommandRequest, error) {
 	command := svcCommandFromArgs(args)
-	cfgLoc, err := loadProjectConfigFromCwd()
+	cfgLoc, err := loadSvcCommandConfig(command)
 	if err != nil {
 		return svcCommandRequest{}, err
 	}
@@ -218,6 +218,24 @@ func newSvcCommandRequest(args []string) (svcCommandRequest, error) {
 		HostOverrideSet: hostOverrideSet,
 		Service:         getService(),
 	}, nil
+}
+
+func loadSvcCommandConfig(command svcCommand) (*projectConfigLocation, error) {
+	if skip, err := serviceSyncUsesExplicitConfig(command); skip || err != nil {
+		return nil, err
+	}
+	return loadProjectConfigFromCwd()
+}
+
+func serviceSyncUsesExplicitConfig(command svcCommand) (bool, error) {
+	if command.Name != "service" || len(command.Args) == 0 || command.Args[0] != "sync" {
+		return false, nil
+	}
+	flags, _, err := cli.ParseServiceSync(command.Args[1:])
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(flags.Config) != "", nil
 }
 
 func ensureSvcCommandService(checkArgs []string) error {
@@ -408,9 +426,20 @@ func parseSvcRunControlFlags(runArgs []string) (svcRunControlFlags, error) {
 }
 
 func handleSvcService(ctx context.Context, req svcCommandRequest) error {
-	if len(req.Command.Args) == 0 || req.Command.Args[0] != "set" {
+	if len(req.Command.Args) == 0 {
 		return handleSvcRemote(ctx, req)
 	}
+	switch req.Command.Args[0] {
+	case "sync":
+		return handleServiceSync(ctx, req)
+	case "set":
+		return handleServiceSet(ctx, req)
+	default:
+		return handleSvcRemote(ctx, req)
+	}
+}
+
+func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 	flags, _, err := cli.ParseServiceSet(req.Command.Args[1:])
 	if err != nil {
 		return err
@@ -419,7 +448,14 @@ func handleSvcService(ctx context.Context, req svcCommandRequest) error {
 	if err := execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, tty); err != nil {
 		return err
 	}
-	return saveServiceSetConfig(req.Config, req.HostOverride, flags.ServiceRoot, flags.ZFS)
+	updated, err := saveServiceSetConfig(req.Config, req.HostOverride, flags.ServiceRoot, flags.ZFS)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return printServiceSetSyncHint(os.Stdout, req.Service)
+	}
+	return nil
 }
 
 func handleSvcRemove(ctx context.Context, req svcCommandRequest) error {
@@ -1440,18 +1476,33 @@ func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload s
 	return saveProjectConfig(loc)
 }
 
-func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, serviceRoot string, serviceRootZFS bool) error {
+func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, serviceRoot string, serviceRootZFS bool) (bool, error) {
 	if serviceOverride == "" || strings.TrimSpace(serviceRoot) == "" {
-		return nil
+		return false, nil
 	}
 	entry, ok := serviceEntryForConfig(cfgLoc, hostOverride)
 	if !ok {
-		return nil
+		return false, nil
 	}
 	entry.ServiceRoot = strings.TrimSpace(serviceRoot)
 	entry.ServiceRootZFS = serviceRootZFS
 	cfgLoc.Config.SetServiceEntry(entry)
-	return saveProjectConfig(cfgLoc)
+	return true, saveProjectConfig(cfgLoc)
+}
+
+func printServiceSetSyncHint(w io.Writer, service string) error {
+	if _, err := fmt.Fprintln(w, "Updated catch service settings. No matching yeet.toml entry was updated."); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w, "Run from the project directory, or run:"); err != nil {
+		return err
+	}
+	if strings.TrimSpace(service) == "" {
+		_, err := fmt.Fprintln(w, "  yeet service sync <svc> --config ~/yeet-services/yeet.toml")
+		return err
+	}
+	_, err := fmt.Fprintf(w, "  yeet service sync %s --config ~/yeet-services/yeet.toml\n", service)
+	return err
 }
 
 func saveCronConfig(cfgLoc *projectConfigLocation, hostOverride string, payload string, cronFields []string, binArgs []string) error {
