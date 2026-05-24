@@ -184,6 +184,7 @@ a stopped service root, use:
 yeet service set vaultwarden --service-root=/mnt/fast/vaultwarden --copy
 yeet service set vaultwarden --service-root=tank/apps/vaultwarden --zfs --copy
 yeet service set vaultwarden --service-root=/mnt/fast/vaultwarden --empty
+yeet service set vaultwarden --service-root=tank/apps/vaultwarden --zfs --empty
 ```
 
 `yeet service set` leaves the old root in place. Non-interactive migrations
