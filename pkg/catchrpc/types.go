@@ -144,17 +144,17 @@ type SnapshotDefaultsResponse struct {
 }
 
 type ServiceInfo struct {
-	Name             string           `json:"name"`
-	ServiceType      string           `json:"serviceType,omitempty"`
-	DataType         string           `json:"dataType,omitempty"`
-	Generation       int              `json:"generation,omitempty"`
-	LatestGeneration int              `json:"latestGeneration,omitempty"`
-	Staged           bool             `json:"staged,omitempty"`
-	Paths            ServicePaths     `json:"paths,omitempty"`
-	Network          ServiceNetwork   `json:"network,omitempty"`
-	Status           ServiceStatus    `json:"status,omitempty"`
-	Images           []ServiceImage   `json:"images,omitempty"`
-	Snapshots        ServiceSnapshots `json:"snapshots,omitempty"`
+	Name             string            `json:"name"`
+	ServiceType      string            `json:"serviceType,omitempty"`
+	DataType         string            `json:"dataType,omitempty"`
+	Generation       int               `json:"generation,omitempty"`
+	LatestGeneration int               `json:"latestGeneration,omitempty"`
+	Staged           bool              `json:"staged,omitempty"`
+	Paths            ServicePaths      `json:"paths,omitempty"`
+	Network          ServiceNetwork    `json:"network,omitempty"`
+	Status           ServiceStatus     `json:"status,omitempty"`
+	Images           []ServiceImage    `json:"images,omitempty"`
+	Snapshots        *ServiceSnapshots `json:"snapshots,omitempty"`
 }
 
 type ServicePaths struct {

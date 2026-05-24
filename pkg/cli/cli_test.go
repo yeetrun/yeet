@@ -157,6 +157,12 @@ func TestParseRunSnapshotFlags(t *testing.T) {
 	}
 }
 
+func TestParseRunRejectsMissingSnapshotMode(t *testing.T) {
+	if _, _, err := ParseRun([]string{"--snapshots", "payload.yml"}); err == nil || !strings.Contains(err.Error(), "--snapshots must be on, off, or inherit") {
+		t.Fatalf("ParseRun error = %v, want snapshots value error", err)
+	}
+}
+
 func TestParseRunStopsAtUnknownFlag(t *testing.T) {
 	args := []string{
 		"--net", "ts",
@@ -325,6 +331,36 @@ func TestParseServiceSetSnapshotOnlyDoesNotRequireServiceRoot(t *testing.T) {
 func TestParseServiceSetRejectsEmptySnapshotMode(t *testing.T) {
 	if _, _, err := ParseServiceSet([]string{"svc", "--snapshots="}); err == nil || !strings.Contains(err.Error(), "--snapshots must be on, off, or inherit") {
 		t.Fatalf("ParseServiceSet error = %v, want snapshots value error", err)
+	}
+}
+
+func TestParseServiceSetRejectsMissingSnapshotMode(t *testing.T) {
+	tests := [][]string{
+		{"svc", "--service-root=/srv/app", "--snapshots"},
+		{"svc", "--service-root=/srv/app", "--snapshots", "--copy"},
+	}
+	for _, args := range tests {
+		if _, _, err := ParseServiceSet(args); err == nil || !strings.Contains(err.Error(), "--snapshots must be on, off, or inherit") {
+			t.Fatalf("ParseServiceSet(%#v) error = %v, want snapshots value error", args, err)
+		}
+	}
+}
+
+func TestParseServiceSetRejectsCopyEmptyWithoutRootChange(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "copy", args: []string{"svc", "--snapshots=off", "--copy"}, wantErr: "--copy requires --service-root"},
+		{name: "empty", args: []string{"svc", "--snapshots=off", "--empty"}, wantErr: "--empty requires --service-root"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, err := ParseServiceSet(tt.args); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ParseServiceSet error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
