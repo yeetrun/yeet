@@ -204,6 +204,25 @@ func TestBridgeServiceArgsWithForceFlag(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsWithZFSServiceRoot(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"run", "--service-root=tank/apps/svc-a", "--zfs", "svc-a", "./compose.yml"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to recognize remote command")
+	}
+	if service != "svc-a" {
+		t.Fatalf("expected service svc-a, got %q", service)
+	}
+	if host != "" {
+		t.Fatalf("expected no host, got %q", host)
+	}
+	if got := strings.Join(bridged, " "); got != "run --service-root=tank/apps/svc-a --zfs ./compose.yml" {
+		t.Fatalf("unexpected bridged args: %s", got)
+	}
+}
+
 func TestBridgeServiceArgsServiceSet(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

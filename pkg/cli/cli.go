@@ -271,9 +271,10 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}},
 	"restart":  {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
 	"rollback": {Name: "rollback", Description: "Rollback a service", ArgsSchema: ServiceArgs{}},
-	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [-- <payload args>]", Examples: []string{
+	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [--service-root=/abs/path|dataset] [--zfs] [-- <payload args>]", Examples: []string{
 		"yeet run <svc> ./bin/<svc> -- --app-flag value",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
+		"yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs",
 		"yeet run --pull <svc> ./compose.yml",
 		"yeet run --force <svc> ./compose.yml",
 		"yeet run --env-file=prod.env <svc> ./compose.yml",
