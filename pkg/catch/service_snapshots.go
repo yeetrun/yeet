@@ -264,8 +264,8 @@ func parseListedSnapshots(raw string) ([]listedSnapshot, error) {
 	return snapshots, nil
 }
 
-func snapshotsToPrune(snaps []listedSnapshot, policy effectivePolicy, now time.Time, current string) []string {
-	owned := catchOwnedYeetSnapshots(snaps)
+func snapshotsToPrune(snaps []listedSnapshot, service string, policy effectivePolicy, now time.Time, current string) []string {
+	owned := catchOwnedYeetSnapshotsForService(snaps, service)
 	sort.SliceStable(owned, func(i, j int) bool {
 		return owned[i].Created.After(owned[j].Created)
 	})
@@ -289,10 +289,10 @@ func snapshotsToPrune(snaps []listedSnapshot, policy effectivePolicy, now time.T
 	return names
 }
 
-func catchOwnedYeetSnapshots(snaps []listedSnapshot) []listedSnapshot {
+func catchOwnedYeetSnapshotsForService(snaps []listedSnapshot, service string) []listedSnapshot {
 	owned := make([]listedSnapshot, 0, len(snaps))
 	for _, snap := range snaps {
-		if snap.CreatedBy == "catch" && strings.Contains(snap.Name, "@yeet-") {
+		if snap.CreatedBy == "catch" && snap.Service == service && strings.Contains(snap.Name, "@yeet-") {
 			owned = append(owned, snap)
 		}
 	}

@@ -201,6 +201,7 @@ func TestPruneSnapshotSelection(t *testing.T) {
 	now := time.Date(2026, 5, 24, 20, 0, 0, 0, time.UTC)
 	snaps := []listedSnapshot{
 		{Name: "tank/apps/svc@yeet-old", Created: now.Add(-8 * 24 * time.Hour), CreatedBy: "catch", Service: "svc"},
+		{Name: "tank/apps/svc@yeet-other-service-old", Created: now.Add(-9 * 24 * time.Hour), CreatedBy: "catch", Service: "other"},
 		{Name: "tank/apps/svc@manual", Created: now.Add(-30 * 24 * time.Hour), CreatedBy: "", Service: ""},
 		{Name: "tank/apps/svc@yeet-new-1", Created: now.Add(-1 * time.Hour), CreatedBy: "catch", Service: "svc"},
 		{Name: "tank/apps/svc@yeet-new-2", Created: now.Add(-2 * time.Hour), CreatedBy: "catch", Service: "svc"},
@@ -209,7 +210,7 @@ func TestPruneSnapshotSelection(t *testing.T) {
 		{Name: "tank/apps/svc@yeet-new-5", Created: now.Add(-5 * time.Hour), CreatedBy: "catch", Service: "svc"},
 		{Name: "tank/apps/svc@yeet-new-6", Created: now.Add(-6 * time.Hour), CreatedBy: "catch", Service: "svc"},
 	}
-	got := snapshotsToPrune(snaps, effectivePolicy{KeepLast: 5, MaxAge: 7 * 24 * time.Hour}, now, "tank/apps/svc@yeet-new-1")
+	got := snapshotsToPrune(snaps, "svc", effectivePolicy{KeepLast: 5, MaxAge: 7 * 24 * time.Hour}, now, "tank/apps/svc@yeet-new-1")
 	want := []string{"tank/apps/svc@yeet-old", "tank/apps/svc@yeet-new-6"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("snapshotsToPrune = %#v, want %#v", got, want)
