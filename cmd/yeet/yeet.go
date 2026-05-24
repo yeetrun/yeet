@@ -154,6 +154,11 @@ func handleServiceGroup(ctx context.Context, args []string) error {
 	return handleRemote(ctx, full)
 }
 
+func handleSnapshotsGroup(ctx context.Context, args []string) error {
+	full := append([]string{"snapshots"}, args...)
+	return handleRemote(ctx, full)
+}
+
 func handleMountSys(ctx context.Context, _ []string) error {
 	return yeet.HandleMountSys(ctx, rawArgs)
 }

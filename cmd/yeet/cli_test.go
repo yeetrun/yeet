@@ -90,7 +90,7 @@ func TestRunServiceSetHelpShowsLeafCommand(t *testing.T) {
 	if !strings.Contains(stdout, "Set service settings") {
 		t.Fatalf("stdout = %q, want service set command help", stdout)
 	}
-	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> --service-root=/abs/path|dataset [--zfs] [--copy|--empty]") {
+	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit]") {
 		t.Fatalf("stdout = %q, want service set usage", stdout)
 	}
 	if strings.Contains(stdout, "service COMMAND [ARGS...]") {
@@ -263,6 +263,12 @@ func TestPrepareCommandRoute(t *testing.T) {
 			wantService: "svc-a",
 			wantArgs:    []string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs"},
 			wantBridged: []string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs"},
+		},
+		{
+			name:     "snapshots defaults is unscoped remote group",
+			args:     []string{"snapshots@catch-a", "defaults", "show"},
+			wantHost: "catch-a",
+			wantArgs: []string{"snapshots", "defaults", "show"},
 		},
 	}
 
