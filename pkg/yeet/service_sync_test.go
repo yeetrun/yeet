@@ -265,6 +265,44 @@ func TestServiceSyncClearsDefaultRoot(t *testing.T) {
 	}
 }
 
+func TestServiceSyncRejectsLegacyOnlyRootIdentity(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	loadedPrefs.DefaultHost = "yeet-pve1"
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:        "sonarr",
+		Host:        "yeet-pve1",
+		Type:        serviceTypeRun,
+		Payload:     "compose.yml",
+		ServiceRoot: "/srv/custom/sonarr",
+	})
+	fetchServiceInfoForSyncFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if host != "yeet-pve1" || service != "sonarr" {
+			t.Fatalf("fetch host=%q service=%q, want yeet-pve1 sonarr", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{Paths: catchrpc.ServicePaths{
+				Root: "/srv/apps/sonarr",
+			}},
+		}, nil
+	}
+
+	err := HandleSvcCmd([]string{"service", "sync", "sonarr"})
+	wantErr := "catch on yeet-pve1 does not expose service root identity; upgrade catch before running service sync"
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("HandleSvcCmd service sync error = %v, want %q", err, wantErr)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, _ := loaded.Config.ServiceEntry("sonarr", "yeet-pve1")
+	if entry.ServiceRoot != "/srv/custom/sonarr" {
+		t.Fatalf("entry = %#v, want existing service_root preserved", entry)
+	}
+}
+
 func TestServiceSyncAllUpdatesAndSkipsMissing(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
