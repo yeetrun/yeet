@@ -170,6 +170,36 @@ func TestValidateRequestedServiceRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(nonEmptyRoot, "existing"), []byte("data"), 0o644); err != nil {
 		t.Fatalf("write non-empty root file: %v", err)
 	}
+	retrySkeleton := filepath.Join(parent, "retry-skeleton")
+	for _, dir := range []string{"bin", "data", "env", "run"} {
+		if err := os.MkdirAll(filepath.Join(retrySkeleton, dir), 0o755); err != nil {
+			t.Fatalf("mkdir retry skeleton %s: %v", dir, err)
+		}
+	}
+	skeletonWithExtraFile := filepath.Join(parent, "skeleton-extra-file")
+	for _, dir := range []string{"bin", "data", "env", "run"} {
+		if err := os.MkdirAll(filepath.Join(skeletonWithExtraFile, dir), 0o755); err != nil {
+			t.Fatalf("mkdir extra file skeleton %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(skeletonWithExtraFile, "extra"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("write extra file: %v", err)
+	}
+	skeletonWithExtraDir := filepath.Join(parent, "skeleton-extra-dir")
+	for _, dir := range []string{"bin", "data", "env", "run", "logs"} {
+		if err := os.MkdirAll(filepath.Join(skeletonWithExtraDir, dir), 0o755); err != nil {
+			t.Fatalf("mkdir extra dir skeleton %s: %v", dir, err)
+		}
+	}
+	skeletonWithNonEmptyManagedDir := filepath.Join(parent, "skeleton-non-empty-managed")
+	for _, dir := range []string{"bin", "data", "env", "run"} {
+		if err := os.MkdirAll(filepath.Join(skeletonWithNonEmptyManagedDir, dir), 0o755); err != nil {
+			t.Fatalf("mkdir non-empty managed skeleton %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(skeletonWithNonEmptyManagedDir, "bin", "payload"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("write managed dir payload: %v", err)
+	}
 	cleanRoot := filepath.Join(parent, "dirty", "..", "clean-root")
 
 	tests := []struct {
@@ -185,6 +215,10 @@ func TestValidateRequestedServiceRoot(t *testing.T) {
 		{name: "final root is file", root: fileRoot, wantErr: "file"},
 		{name: "final root is non-empty dir", root: nonEmptyRoot, wantErr: "empty"},
 		{name: "final root is empty existing dir", root: emptyExisting, want: emptyExisting},
+		{name: "retry skeleton is allowed", root: retrySkeleton, want: retrySkeleton},
+		{name: "retry skeleton rejects extra file", root: skeletonWithExtraFile, wantErr: "empty"},
+		{name: "retry skeleton rejects extra dir", root: skeletonWithExtraDir, wantErr: "empty"},
+		{name: "retry skeleton rejects non-empty managed dir", root: skeletonWithNonEmptyManagedDir, wantErr: "empty"},
 		{name: "final root is missing", root: filepath.Join(parent, "missing-root"), want: filepath.Join(parent, "missing-root")},
 	}
 

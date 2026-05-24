@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"os"
@@ -309,6 +310,44 @@ func TestNewFileInstallerCreatesDirsUnderCustomServiceRoot(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(server.defaultServiceRootDir("custom-root-svc"), "bin")); !os.IsNotExist(err) {
 		t.Fatalf("default service root was created for custom-root-svc: %v", err)
 	}
+}
+
+func TestNewFileInstallerFailedCustomServiceRootCanRetry(t *testing.T) {
+	server := newTestServer(t)
+	customRoot := filepath.Join(t.TempDir(), "retry-root")
+
+	first, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{
+			ServiceName: "retry-root-svc",
+			ServiceRoot: customRoot,
+		},
+		EnvFile:   true,
+		StageOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("first NewFileInstaller returned error: %v", err)
+	}
+	first.Fail()
+	if err := first.Close(); err == nil || !strings.Contains(err.Error(), "installation failed") {
+		t.Fatalf("first Close error = %v, want installation failed", err)
+	}
+	if _, err := server.serviceView("retry-root-svc"); !errors.Is(err, errServiceNotFound) {
+		t.Fatalf("serviceView after failed install error = %v, want errServiceNotFound", err)
+	}
+
+	second, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{
+			ServiceName: "retry-root-svc",
+			ServiceRoot: customRoot,
+		},
+		EnvFile:   true,
+		StageOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("second NewFileInstaller returned error: %v", err)
+	}
+	second.Fail()
+	_ = second.Close()
 }
 
 func TestNewFileInstallerPersistsCustomServiceRoot(t *testing.T) {

@@ -477,7 +477,39 @@ func rootIsMissingOrEmpty(root string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to read service root %q: %w", root, err)
 	}
-	return len(entries) == 0, nil
+	if len(entries) == 0 {
+		return true, nil
+	}
+	return rootIsRetrySafeServiceRootSkeleton(root, entries)
+}
+
+func rootIsRetrySafeServiceRootSkeleton(root string, entries []os.DirEntry) (bool, error) {
+	allowed := map[string]struct{}{
+		"bin":  {},
+		"data": {},
+		"env":  {},
+		"run":  {},
+	}
+	if len(entries) != len(allowed) {
+		return false, nil
+	}
+	for _, entry := range entries {
+		if _, ok := allowed[entry.Name()]; !ok {
+			return false, nil
+		}
+		if !entry.IsDir() {
+			return false, nil
+		}
+		children, err := os.ReadDir(filepath.Join(root, entry.Name()))
+		if err != nil {
+			return false, fmt.Errorf("failed to read service root child %q: %w", filepath.Join(root, entry.Name()), err)
+		}
+		if len(children) != 0 {
+			return false, nil
+		}
+		delete(allowed, entry.Name())
+	}
+	return len(allowed) == 0, nil
 }
 
 func (s *Server) serviceBinDir(sn string) string {
