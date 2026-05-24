@@ -6,6 +6,7 @@ package catch
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -105,6 +106,81 @@ func TestCreateServiceSnapshotCommand(t *testing.T) {
 	}
 	if len(calls) != 1 || !reflect.DeepEqual(calls[0][:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("calls = %#v", calls)
+	}
+}
+
+func TestCreateServiceSnapshotRetriesNameCollisionWithSuffix(t *testing.T) {
+	oldSuffix := randomSnapshotSuffix
+	randomSnapshotSuffix = func() (string, error) {
+		return "a1b2c3", nil
+	}
+	t.Cleanup(func() {
+		randomSnapshotSuffix = oldSuffix
+	})
+
+	var calls [][]string
+	runner := func(ctx context.Context, args ...string) (string, string, error) {
+		calls = append(calls, append([]string{}, args...))
+		if len(calls) == 1 {
+			return "", "cannot create snapshot 'tank/apps/svc@yeet-20260524T184233Z-run-g12': dataset already exists", errZFSCommandFailed
+		}
+		return "", "", nil
+	}
+	req := snapshotCreateRequest{
+		Service:    "svc",
+		Dataset:    "tank/apps/svc",
+		Event:      snapshotEventRun,
+		Generation: 12,
+		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
+	}
+
+	name, err := createServiceSnapshot(context.Background(), runner, req)
+	if err != nil {
+		t.Fatalf("createServiceSnapshot: %v", err)
+	}
+	if name != "tank/apps/svc@yeet-20260524T184233Z-run-g12-a1b2c3" {
+		t.Fatalf("snapshot = %q", name)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %#v", calls)
+	}
+	if got := calls[0][len(calls[0])-1]; got != "tank/apps/svc@yeet-20260524T184233Z-run-g12" {
+		t.Fatalf("first snapshot target = %q", got)
+	}
+	if got := calls[1][len(calls[1])-1]; got != name {
+		t.Fatalf("second snapshot target = %q, want %q", got, name)
+	}
+}
+
+func TestCreateServiceSnapshotDoesNotRetryNonCollisionError(t *testing.T) {
+	oldSuffix := randomSnapshotSuffix
+	randomSnapshotSuffix = func() (string, error) {
+		t.Fatal("randomSnapshotSuffix should not be called")
+		return "", nil
+	}
+	t.Cleanup(func() {
+		randomSnapshotSuffix = oldSuffix
+	})
+
+	var calls [][]string
+	runner := func(ctx context.Context, args ...string) (string, string, error) {
+		calls = append(calls, append([]string{}, args...))
+		return "", "permission denied", errors.New("zfs failed")
+	}
+	req := snapshotCreateRequest{
+		Service:    "svc",
+		Dataset:    "tank/apps/svc",
+		Event:      snapshotEventRun,
+		Generation: 12,
+		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
+	}
+
+	_, err := createServiceSnapshot(context.Background(), runner, req)
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("createServiceSnapshot error = %v, want permission denied", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls = %#v, want one call", calls)
 	}
 }
 
