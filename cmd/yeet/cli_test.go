@@ -209,6 +209,14 @@ func TestPrepareCommandRoute(t *testing.T) {
 			wantService: "svc-a",
 			wantBridged: []string{"service", "set", "--service-root=/srv/apps/svc-a"},
 		},
+		{
+			name:        "service set zfs root host target",
+			args:        []string{"service@catch-a", "set", "svc-a", "--service-root=tank/apps/svc-a", "--zfs"},
+			wantHost:    "catch-a",
+			wantService: "svc-a",
+			wantArgs:    []string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs"},
+			wantBridged: []string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs"},
+		},
 	}
 
 	for _, tt := range tests {

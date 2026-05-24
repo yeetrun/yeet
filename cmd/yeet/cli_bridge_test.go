@@ -211,32 +211,44 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 		name        string
 		args        []string
 		wantService string
+		wantHost    string
 		wantBridged string
+		wantOK      bool
 	}{
 		{
 			name:        "inline root after service",
 			args:        []string{"service", "set", "svc-a", "--service-root=/srv/apps/svc-a"},
 			wantService: "svc-a",
 			wantBridged: "service set --service-root=/srv/apps/svc-a",
+			wantOK:      true,
 		},
 		{
 			name:        "root flag before service",
 			args:        []string{"service", "set", "--service-root", "/srv/apps/svc-a", "svc-a"},
 			wantService: "svc-a",
 			wantBridged: "service set --service-root /srv/apps/svc-a",
+			wantOK:      true,
+		},
+		{
+			name:        "service set zfs root",
+			args:        []string{"service", "set", "svc-a", "--service-root=tank/apps/svc-a", "--zfs"},
+			wantService: "svc-a",
+			wantHost:    "",
+			wantBridged: "service set --service-root=tank/apps/svc-a --zfs",
+			wantOK:      true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			service, host, bridged, ok := bridgeServiceArgs(tt.args, remoteSpecs, groupSpecs, "")
-			if !ok {
-				t.Fatalf("expected to recognize service set")
+			if ok != tt.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
 			}
 			if service != tt.wantService {
 				t.Fatalf("service = %q, want %q", service, tt.wantService)
 			}
-			if host != "" {
-				t.Fatalf("host = %q, want empty", host)
+			if host != tt.wantHost {
+				t.Fatalf("host = %q, want %q", host, tt.wantHost)
 			}
 			if got := strings.Join(bridged, " "); got != tt.wantBridged {
 				t.Fatalf("bridged args = %q, want %q", got, tt.wantBridged)
