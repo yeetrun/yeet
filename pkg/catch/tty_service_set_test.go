@@ -202,7 +202,7 @@ func TestServiceSetRootCopyStagesRenamesUpdatesDBAndLeavesOldRoot(t *testing.T) 
 	}
 	newRoot := filepath.Join(t.TempDir(), "new-root")
 
-	if err := server.migrateServiceRoot(name, oldRoot, newRoot, serviceRootMigrationCopy); err != nil {
+	if err := server.migrateServiceRoot(name, newRoot, serviceRootMigrationCopy); err != nil {
 		t.Fatalf("migrateServiceRoot: %v", err)
 	}
 
@@ -211,6 +211,43 @@ func TestServiceSetRootCopyStagesRenamesUpdatesDBAndLeavesOldRoot(t *testing.T) 
 	assertFileContents(t, filepath.Join(newRoot, "data", "payload.txt"), "payload")
 	assertServiceLayout(t, newRoot)
 	assertNoServiceSetStages(t, filepath.Dir(newRoot))
+}
+
+func TestServiceSetRootMigrationUsesFreshValidatedRoot(t *testing.T) {
+	server := newTestServer(t)
+	staleRoot := filepath.Join(t.TempDir(), "stale-root")
+	name := seedServiceWithRoot(t, server, staleRoot, "")
+	withServiceSetRootStopped(t)
+	if err := os.MkdirAll(staleRoot, 0o755); err != nil {
+		t.Fatalf("mkdir stale root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(staleRoot, "stale.txt"), []byte("stale"), 0o644); err != nil {
+		t.Fatalf("write stale payload: %v", err)
+	}
+	currentRoot := filepath.Join(t.TempDir(), "current-root")
+	if err := os.MkdirAll(currentRoot, 0o755); err != nil {
+		t.Fatalf("mkdir current root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(currentRoot, "current.txt"), []byte("current"), 0o644); err != nil {
+		t.Fatalf("write current payload: %v", err)
+	}
+	if _, err := server.cfg.DB.MutateData(func(d *db.Data) error {
+		d.Services[name].ServiceRoot = currentRoot
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate current service root: %v", err)
+	}
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+
+	if err := server.migrateServiceRoot(name, newRoot, serviceRootMigrationCopy); err != nil {
+		t.Fatalf("migrateServiceRoot: %v", err)
+	}
+
+	assertServiceRoot(t, server, name, newRoot)
+	assertFileContents(t, filepath.Join(newRoot, "current.txt"), "current")
+	if _, err := os.Stat(filepath.Join(newRoot, "stale.txt")); !os.IsNotExist(err) {
+		t.Fatalf("stale payload stat error = %v, want not exist", err)
+	}
 }
 
 func TestServiceSetRootRenameFailureLeavesDBOldRoot(t *testing.T) {
@@ -230,7 +267,7 @@ func TestServiceSetRootRenameFailureLeavesDBOldRoot(t *testing.T) {
 		return wantErr
 	})
 
-	err := server.migrateServiceRoot(name, oldRoot, newRoot, serviceRootMigrationCopy)
+	err := server.migrateServiceRoot(name, newRoot, serviceRootMigrationCopy)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("migrateServiceRoot error = %v, want %v", err, wantErr)
 	}
@@ -254,7 +291,7 @@ func TestServiceSetRootEmptyCreatesLayoutUpdatesDBWithoutCopyAndLeavesOldRoot(t 
 	}
 	newRoot := filepath.Join(t.TempDir(), "new-root")
 
-	if err := server.migrateServiceRoot(name, oldRoot, newRoot, serviceRootMigrationEmpty); err != nil {
+	if err := server.migrateServiceRoot(name, newRoot, serviceRootMigrationEmpty); err != nil {
 		t.Fatalf("migrateServiceRoot: %v", err)
 	}
 
@@ -291,7 +328,7 @@ func TestServiceSetRootCopyPreservesModeMtimeAndSymlink(t *testing.T) {
 	}
 	newRoot := filepath.Join(t.TempDir(), "new-root")
 
-	if err := server.migrateServiceRoot(name, oldRoot, newRoot, serviceRootMigrationCopy); err != nil {
+	if err := server.migrateServiceRoot(name, newRoot, serviceRootMigrationCopy); err != nil {
 		t.Fatalf("migrateServiceRoot: %v", err)
 	}
 
