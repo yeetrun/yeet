@@ -164,17 +164,25 @@ Custom service root on the catch host:
 
 ```bash
 yeet run vaultwarden ./compose.yml --service-root=/srv/apps/vaultwarden
+yeet run vaultwarden ./compose.yml --service-root=tank/apps/vaultwarden --zfs
 ```
 
-`--service-root` is an absolute path on the catch host. Its parent directory
-(`/srv/apps` in this example) must already exist; yeet can create the final
-service directory. The root
-contains `bin`, `run`, `env`, and `data`. `yeet run` can choose the initial
-root for a new service, but it cannot move an existing service. To move a
-stopped service root, use:
+Without `--zfs`, `--service-root` must be an absolute filesystem path on the
+catch host. With `--zfs`, `--service-root` is a ZFS dataset name such as
+`tank/apps/vaultwarden`; catch accepts an existing dataset or runs
+`zfs create tank/apps/vaultwarden`, then uses the dataset mountpoint as the
+service root. Parent datasets must already exist.
+
+For filesystem paths, the parent directory (`/srv/apps` in this example) must
+already exist; yeet can create the final service directory.
+
+The root contains `bin`, `run`, `env`, and `data`. `yeet run` can choose the
+initial root for a new service, but it cannot move an existing service. To move
+a stopped service root, use:
 
 ```bash
 yeet service set vaultwarden --service-root=/mnt/fast/vaultwarden --copy
+yeet service set vaultwarden --service-root=tank/apps/vaultwarden --zfs --copy
 yeet service set vaultwarden --service-root=/mnt/fast/vaultwarden --empty
 ```
 
