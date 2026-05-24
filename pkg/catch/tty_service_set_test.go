@@ -48,7 +48,7 @@ func TestServiceSetRootRejectsMissingService(t *testing.T) {
 	server := newTestServer(t)
 	newRoot := filepath.Join(t.TempDir(), "new-root")
 
-	_, err := server.validateServiceRootMigration("missing", newRoot)
+	_, err := server.validateServiceRootMigration("missing", serviceRootMigrationRequest{Root: newRoot})
 	if err == nil || !strings.Contains(err.Error(), `service "missing" not found`) {
 		t.Fatalf("validateServiceRootMigration error = %v, want missing service", err)
 	}
@@ -62,7 +62,7 @@ func TestServiceSetRootRejectsRunningService(t *testing.T) {
 		return true, nil
 	})
 
-	_, err := server.validateServiceRootMigration(name, newRoot)
+	_, err := server.validateServiceRootMigration(name, serviceRootMigrationRequest{Root: newRoot})
 	if err == nil || !strings.Contains(err.Error(), `cannot migrate service root while "svc-root" is running`) {
 		t.Fatalf("validateServiceRootMigration error = %v, want running service", err)
 	}
@@ -74,7 +74,7 @@ func TestServiceSetRootRejectsMissingParent(t *testing.T) {
 	withServiceSetRootStopped(t)
 	newRoot := filepath.Join(t.TempDir(), "missing-parent", "new-root")
 
-	_, err := server.validateServiceRootMigration(name, newRoot)
+	_, err := server.validateServiceRootMigration(name, serviceRootMigrationRequest{Root: newRoot})
 	if err == nil || !strings.Contains(err.Error(), "service root parent") {
 		t.Fatalf("validateServiceRootMigration error = %v, want missing parent", err)
 	}
@@ -92,7 +92,7 @@ func TestServiceSetRootRejectsNonEmptyDestination(t *testing.T) {
 		t.Fatalf("write destination file: %v", err)
 	}
 
-	_, err := server.validateServiceRootMigration(name, newRoot)
+	_, err := server.validateServiceRootMigration(name, serviceRootMigrationRequest{Root: newRoot})
 	if err == nil || !strings.Contains(err.Error(), "must be empty") {
 		t.Fatalf("validateServiceRootMigration error = %v, want non-empty destination", err)
 	}
@@ -127,7 +127,7 @@ func TestServiceSetRootRejectsNestedRoots(t *testing.T) {
 				t.Fatalf("mkdir old root: %v", err)
 			}
 
-			_, err := server.validateServiceRootMigration(name, newRoot)
+			_, err := server.validateServiceRootMigration(name, serviceRootMigrationRequest{Root: newRoot})
 			if err == nil || !strings.Contains(err.Error(), "nested") {
 				t.Fatalf("validateServiceRootMigration error = %v, want nested root rejection", err)
 			}
@@ -202,7 +202,7 @@ func TestServiceSetRootCopyStagesRenamesUpdatesDBAndLeavesOldRoot(t *testing.T) 
 	}
 	newRoot := filepath.Join(t.TempDir(), "new-root")
 
-	if err := server.migrateServiceRoot(name, newRoot, serviceRootMigrationCopy); err != nil {
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationCopy); err != nil {
 		t.Fatalf("migrateServiceRoot: %v", err)
 	}
 
@@ -239,7 +239,7 @@ func TestServiceSetRootMigrationUsesFreshValidatedRoot(t *testing.T) {
 	}
 	newRoot := filepath.Join(t.TempDir(), "new-root")
 
-	if err := server.migrateServiceRoot(name, newRoot, serviceRootMigrationCopy); err != nil {
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationCopy); err != nil {
 		t.Fatalf("migrateServiceRoot: %v", err)
 	}
 
@@ -267,7 +267,7 @@ func TestServiceSetRootRenameFailureLeavesDBOldRoot(t *testing.T) {
 		return wantErr
 	})
 
-	err := server.migrateServiceRoot(name, newRoot, serviceRootMigrationCopy)
+	err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationCopy)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("migrateServiceRoot error = %v, want %v", err, wantErr)
 	}
@@ -291,7 +291,7 @@ func TestServiceSetRootEmptyCreatesLayoutUpdatesDBWithoutCopyAndLeavesOldRoot(t 
 	}
 	newRoot := filepath.Join(t.TempDir(), "new-root")
 
-	if err := server.migrateServiceRoot(name, newRoot, serviceRootMigrationEmpty); err != nil {
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationEmpty); err != nil {
 		t.Fatalf("migrateServiceRoot: %v", err)
 	}
 
@@ -328,7 +328,7 @@ func TestServiceSetRootCopyPreservesModeMtimeAndSymlink(t *testing.T) {
 	}
 	newRoot := filepath.Join(t.TempDir(), "new-root")
 
-	if err := server.migrateServiceRoot(name, newRoot, serviceRootMigrationCopy); err != nil {
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationCopy); err != nil {
 		t.Fatalf("migrateServiceRoot: %v", err)
 	}
 
@@ -349,6 +349,87 @@ func TestServiceSetRootCopyPreservesModeMtimeAndSymlink(t *testing.T) {
 	}
 	if target != "payload.txt" {
 		t.Fatalf("copied symlink target = %q, want payload.txt", target)
+	}
+}
+
+func TestServiceSetZFSMigrationCopy(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc"
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	newRoot := filepath.Join(t.TempDir(), "new")
+	withServiceSetRootStopped(t)
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(serviceDataDirForRoot(oldRoot), "config.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	server.zfsRunner = fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps/svc": {Mountpoint: newRoot, Exists: true},
+	}).Run
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceRoot = oldRoot
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service root: %v", err)
+	}
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: "tank/apps/svc", ZFS: true}, serviceRootMigrationCopy); err != nil {
+		t.Fatalf("migrateServiceRoot: %v", err)
+	}
+	assertServiceRoot(t, server, name, newRoot)
+	assertServiceRootZFS(t, server, name, "tank/apps/svc")
+	if got, err := os.ReadFile(filepath.Join(serviceDataDirForRoot(newRoot), "config.txt")); err != nil || string(got) != "ok" {
+		t.Fatalf("copied config = %q err=%v, want ok nil", got, err)
+	}
+}
+
+func TestServiceSetZFSMigrationCreatesDatasetAndLeavesDBOnCopyFailure(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc"
+	oldRoot := filepath.Join(t.TempDir(), "old-missing")
+	newRoot := filepath.Join(t.TempDir(), "new")
+	withServiceSetRootStopped(t)
+	runner := fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps/svc": {Mountpoint: newRoot},
+	})
+	server.zfsRunner = runner.Run
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceRoot = oldRoot
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service root: %v", err)
+	}
+	err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: "tank/apps/svc", ZFS: true}, serviceRootMigrationCopy)
+	if err == nil || !strings.Contains(err.Error(), "archive service root") {
+		t.Fatalf("migrateServiceRoot error = %v, want archive failure", err)
+	}
+	if !runner["tank/apps/svc"].Exists {
+		t.Fatal("dataset was not created before migration failure")
+	}
+	assertServiceRoot(t, server, name, oldRoot)
+	assertServiceRootZFS(t, server, name, "")
+}
+
+func TestServiceSetRejectsNoopAcrossRootTypes(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc"
+	root := filepath.Join(t.TempDir(), "svc")
+	withServiceSetRootStopped(t)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	server.zfsRunner = fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps/svc": {Mountpoint: root, Exists: true},
+	}).Run
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceRoot = root
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service root: %v", err)
+	}
+	_, err := server.validateServiceRootMigration(name, serviceRootMigrationRequest{Root: "tank/apps/svc", ZFS: true})
+	if err == nil || !strings.Contains(err.Error(), "already uses service root") {
+		t.Fatalf("validateServiceRootMigration error = %v, want same path different identity rejection", err)
 	}
 }
 
@@ -398,6 +479,21 @@ func assertServiceRoot(t *testing.T, server *Server, name, want string) {
 	}
 	if filepath.Clean(got) != filepath.Clean(want) {
 		t.Fatalf("service root = %q, want %q", got, want)
+	}
+}
+
+func assertServiceRootZFS(t *testing.T, server *Server, name, want string) {
+	t.Helper()
+	d, err := server.getDB()
+	if err != nil {
+		t.Fatalf("getDB: %v", err)
+	}
+	svc, ok := d.Services().GetOk(name)
+	if !ok {
+		t.Fatalf("service %q missing", name)
+	}
+	if got := svc.ServiceRootZFS(); got != want {
+		t.Fatalf("ServiceRootZFS = %q, want %q", got, want)
 	}
 }
 
