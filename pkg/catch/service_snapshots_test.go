@@ -50,6 +50,28 @@ func TestEffectiveSnapshotPolicyServiceOverride(t *testing.T) {
 	}
 }
 
+func TestEffectiveSnapshotPolicyRejectsInvalidEvents(t *testing.T) {
+	_, err := effectiveSnapshotPolicy(nil, &db.SnapshotPolicy{Events: []string{"bad-event"}})
+	if err == nil || !strings.Contains(err.Error(), `invalid snapshot event "bad-event"`) {
+		t.Fatalf("effectiveSnapshotPolicy error = %v, want invalid event", err)
+	}
+}
+
+func TestEffectiveSnapshotPolicyRejectsEnabledKeepLastBelowOne(t *testing.T) {
+	_, err := effectiveSnapshotPolicy(nil, &db.SnapshotPolicy{KeepLast: intPtr(0)})
+	if err == nil || !strings.Contains(err.Error(), "snapshot keep-last must be at least 1") {
+		t.Fatalf("effectiveSnapshotPolicy error = %v, want keep-last validation", err)
+	}
+
+	got, err := effectiveSnapshotPolicy(nil, &db.SnapshotPolicy{Enabled: boolPtr(false), KeepLast: intPtr(0)})
+	if err != nil {
+		t.Fatalf("effectiveSnapshotPolicy disabled: %v", err)
+	}
+	if got.Enabled || got.KeepLast != 0 {
+		t.Fatalf("disabled policy = %#v, want disabled keep-last 0", got)
+	}
+}
+
 func TestParseSnapshotMaxAge(t *testing.T) {
 	tests := []struct {
 		in      string
@@ -244,6 +266,18 @@ func TestListServiceSnapshotsCommandAndParse(t *testing.T) {
 	}
 }
 
+func TestListServiceSnapshotsWrapsRunnerFailure(t *testing.T) {
+	runner := func(ctx context.Context, args ...string) (string, string, error) {
+		return "", "dataset does not exist", errors.New("zfs failed")
+	}
+
+	_, err := listServiceSnapshots(context.Background(), runner, "tank/apps/svc")
+	want := "zfs list snapshots tank/apps/svc failed: dataset does not exist"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("listServiceSnapshots error = %v, want %q", err, want)
+	}
+}
+
 func TestDestroySnapshotCommand(t *testing.T) {
 	var calls [][]string
 	runner := func(ctx context.Context, args ...string) (string, string, error) {
@@ -257,6 +291,18 @@ func TestDestroySnapshotCommand(t *testing.T) {
 	want := [][]string{{"destroy", "tank/apps/svc@yeet-old"}}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestDestroySnapshotWrapsRunnerFailure(t *testing.T) {
+	runner := func(ctx context.Context, args ...string) (string, string, error) {
+		return "", "permission denied", errors.New("zfs failed")
+	}
+
+	err := destroySnapshot(context.Background(), runner, "tank/apps/svc@yeet-old")
+	want := "zfs destroy tank/apps/svc@yeet-old failed: permission denied"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("destroySnapshot error = %v, want %q", err, want)
 	}
 }
 
