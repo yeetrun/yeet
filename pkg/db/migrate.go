@@ -11,13 +11,14 @@ import (
 	"tailscale.com/util/mak"
 )
 
-const CurrentDataVersion = 7
+const CurrentDataVersion = 8
 
 var migrators = map[int]func(*Data) error{ // Start DataVersion -> NextStep
 	3: reinit,
 	4: addDockerEndpoints,
 	5: addServiceRoot,
 	6: addServiceRootZFS,
+	7: addSnapshotPolicy,
 }
 
 func reinit(d *Data) error {
@@ -43,5 +44,9 @@ func addServiceRoot(d *Data) error {
 }
 
 func addServiceRootZFS(d *Data) error {
+	return nil
+}
+
+func addSnapshotPolicy(d *Data) error {
 	return nil
 }

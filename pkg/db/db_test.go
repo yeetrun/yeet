@@ -220,6 +220,53 @@ func TestServiceRootCloneAndView(t *testing.T) {
 	}
 }
 
+func TestSnapshotPolicyCloneAndView(t *testing.T) {
+	enabled := false
+	required := true
+	keepLast := 3
+	data := &Data{
+		DataVersion: CurrentDataVersion,
+		SnapshotDefaults: &SnapshotPolicy{
+			Enabled:  boolPtr(enabled),
+			KeepLast: intPtr(keepLast),
+			MaxAge:   "72h",
+			Events:   []string{"run", "docker-update"},
+			Required: boolPtr(required),
+		},
+		Services: map[string]*Service{
+			"svc": {
+				Name: "svc",
+				SnapshotPolicy: &SnapshotPolicy{
+					Enabled: boolPtr(true),
+					MaxAge:  "24h",
+				},
+			},
+		},
+	}
+
+	clone := data.Clone()
+	clone.SnapshotDefaults.MaxAge = "1h"
+	clone.Services["svc"].SnapshotPolicy.MaxAge = "2h"
+	if got := data.SnapshotDefaults.MaxAge; got != "72h" {
+		t.Fatalf("source SnapshotDefaults.MaxAge mutated through clone: %q", got)
+	}
+	if got := data.Services["svc"].SnapshotPolicy.MaxAge; got != "24h" {
+		t.Fatalf("source service SnapshotPolicy.MaxAge mutated through clone: %q", got)
+	}
+
+	view := data.View()
+	if got := view.SnapshotDefaults().MaxAge(); got != "72h" {
+		t.Fatalf("View SnapshotDefaults MaxAge = %q, want 72h", got)
+	}
+	sv, ok := view.Services().GetOk("svc")
+	if !ok {
+		t.Fatal("missing service view")
+	}
+	if got := sv.SnapshotPolicy().MaxAge(); got != "24h" {
+		t.Fatalf("View service SnapshotPolicy MaxAge = %q, want 24h", got)
+	}
+}
+
 func TestDockerNetworkCloneDeepCopiesMapsAndPointers(t *testing.T) {
 	src := &DockerNetwork{
 		NetworkID:   "network-id",
@@ -652,6 +699,47 @@ func TestMigrateAddsServiceRootZFSVersion(t *testing.T) {
 	}
 }
 
+func TestMigrateAddsSnapshotPolicyVersion(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: 7,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", ServiceRoot: "/srv/apps/svc", ServiceRootZFS: "tank/apps/svc"},
+		},
+	})
+	store := NewStore(path, filepath.Join(root, "services"))
+	got, err := store.Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DataVersion() != CurrentDataVersion {
+		t.Fatalf("DataVersion = %d, want %d", got.DataVersion(), CurrentDataVersion)
+	}
+	sv, ok := got.Services().GetOk("svc")
+	if !ok {
+		t.Fatal("missing migrated service")
+	}
+	if sv.SnapshotPolicy().Valid() {
+		t.Fatalf("service SnapshotPolicy valid = true, want false for inherited policy")
+	}
+	onDisk := mustReadData(t, path)
+	if onDisk.DataVersion != CurrentDataVersion {
+		t.Fatalf("on-disk DataVersion = %d, want %d", onDisk.DataVersion, CurrentDataVersion)
+	}
+	backups, err := filepath.Glob(path + ".v7.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("migration backups = %v, want exactly one v7 backup", backups)
+	}
+	backup := mustReadData(t, backups[0])
+	if backup.DataVersion != 7 {
+		t.Fatalf("backup DataVersion = %d, want 7", backup.DataVersion)
+	}
+}
+
 func TestArtifactStoreRefs(t *testing.T) {
 	refs := ArtifactStore{
 		ArtifactBinary: {
@@ -863,6 +951,9 @@ func requireDistinctPtr[T any](t *testing.T, name string, got, src *T) {
 		t.Fatalf("%s clone aliases source", name)
 	}
 }
+
+func boolPtr(v bool) *bool { return &v }
+func intPtr(v int) *int    { return &v }
 
 func writeData(t *testing.T, path string, d *Data) {
 	t.Helper()
