@@ -360,7 +360,17 @@ var remoteGroupInfos = map[string]GroupInfo{
 		Name:        "service",
 		Description: "Manage service settings",
 		Commands: map[string]CommandInfo{
-			"set": {Name: "set", Description: "Set service settings", Usage: "service set <svc> --service-root=/abs/path [--copy|--empty]", ArgsSchema: ServiceArgs{}},
+			"set": {
+				Name:        "set",
+				Description: "Set service settings",
+				Usage:       "service set <svc> --service-root=/abs/path [--copy|--empty]",
+				Examples: []string{
+					"yeet service set <svc> --service-root=/srv/apps/<svc>",
+					"yeet service set <svc> --service-root=/srv/apps/<svc> --copy",
+					"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
+				},
+				ArgsSchema: ServiceArgs{},
+			},
 		},
 	},
 }
