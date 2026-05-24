@@ -25,6 +25,13 @@ const (
 	copyHeaderEmpty  = "-"
 )
 
+var (
+	chownPath   = os.Chown
+	lchownPath  = os.Lchown
+	chmodPath   = os.Chmod
+	chtimesPath = os.Chtimes
+)
+
 type TarEntry struct {
 	Name     string
 	Size     int64
@@ -417,16 +424,30 @@ func fileModeForHeader(hdr *tar.Header, defaultMode os.FileMode) os.FileMode {
 }
 
 func applyHeaderMetadata(path string, hdr *tar.Header, isSymlink bool) error {
-	mode := os.FileMode(hdr.Mode)
-	if !isSymlink {
-		if err := os.Chmod(path, mode); err != nil && !shouldIgnorePermError(err) {
+	if err := applyHeaderOwnership(path, hdr, isSymlink); err != nil {
+		return err
+	}
+	if isSymlink {
+		return nil
+	}
+	if err := chmodPath(path, os.FileMode(hdr.Mode)); err != nil && !shouldIgnorePermError(err) {
+		return err
+	}
+	if !hdr.ModTime.IsZero() {
+		if err := chtimesPath(path, hdr.ModTime, hdr.ModTime); err != nil && !shouldIgnoreTimeError(err) {
 			return err
 		}
-		if !hdr.ModTime.IsZero() {
-			if err := os.Chtimes(path, hdr.ModTime, hdr.ModTime); err != nil && !shouldIgnoreTimeError(err) {
-				return err
-			}
-		}
+	}
+	return nil
+}
+
+func applyHeaderOwnership(path string, hdr *tar.Header, isSymlink bool) error {
+	chown := chownPath
+	if isSymlink {
+		chown = lchownPath
+	}
+	if err := chown(path, hdr.Uid, hdr.Gid); err != nil && !shouldIgnorePermError(err) {
+		return err
 	}
 	return nil
 }
@@ -437,11 +458,11 @@ func applyFileInfoMetadata(path string, info fs.FileInfo, isSymlink bool) error 
 	}
 	mode := info.Mode()
 	if !isSymlink {
-		if err := os.Chmod(path, mode); err != nil && !shouldIgnorePermError(err) {
+		if err := chmodPath(path, mode); err != nil && !shouldIgnorePermError(err) {
 			return err
 		}
 		if mt := info.ModTime(); !mt.IsZero() {
-			if err := os.Chtimes(path, mt, mt); err != nil && !shouldIgnoreTimeError(err) {
+			if err := chtimesPath(path, mt, mt); err != nil && !shouldIgnoreTimeError(err) {
 				return err
 			}
 		}

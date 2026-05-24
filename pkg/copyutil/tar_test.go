@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -370,6 +371,113 @@ func TestTarDirectoryPreservesMetadata(t *testing.T) {
 	}
 }
 
+func TestApplyHeaderMetadataPreservesRegularOwnership(t *testing.T) {
+	restore := stubMetadataHooks(t)
+	defer restore()
+
+	var calls []string
+	chownPath = func(path string, uid, gid int) error {
+		if path != "/tmp/file" || uid != 123 || gid != 456 {
+			t.Fatalf("chown = (%q, %d, %d), want (/tmp/file, 123, 456)", path, uid, gid)
+		}
+		calls = append(calls, "chown")
+		return nil
+	}
+	chmodPath = func(path string, mode os.FileMode) error {
+		if path != "/tmp/file" || mode != 0o640 {
+			t.Fatalf("chmod = (%q, %o), want (/tmp/file, 0640)", path, mode)
+		}
+		calls = append(calls, "chmod")
+		return nil
+	}
+	chtimesPath = func(path string, atime, mtime time.Time) error {
+		if path != "/tmp/file" || !mtime.Equal(time.Unix(1700000500, 0)) {
+			t.Fatalf("chtimes = (%q, %v), want (/tmp/file, expected mtime)", path, mtime)
+		}
+		calls = append(calls, "chtimes")
+		return nil
+	}
+
+	err := applyHeaderMetadata("/tmp/file", &tar.Header{
+		Mode:    0o640,
+		Uid:     123,
+		Gid:     456,
+		ModTime: time.Unix(1700000500, 0),
+	}, false)
+	if err != nil {
+		t.Fatalf("applyHeaderMetadata returned error: %v", err)
+	}
+	want := []string{"chown", "chmod", "chtimes"}
+	if strings.Join(calls, ",") != strings.Join(want, ",") {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+}
+
+func TestApplyHeaderMetadataPreservesSymlinkOwnershipOnly(t *testing.T) {
+	restore := stubMetadataHooks(t)
+	defer restore()
+
+	var calls []string
+	lchownPath = func(path string, uid, gid int) error {
+		if path != "/tmp/link" || uid != 321 || gid != 654 {
+			t.Fatalf("lchown = (%q, %d, %d), want (/tmp/link, 321, 654)", path, uid, gid)
+		}
+		calls = append(calls, "lchown")
+		return nil
+	}
+	chmodPath = func(path string, mode os.FileMode) error {
+		t.Fatalf("chmod should not be called for symlinks")
+		return nil
+	}
+	chtimesPath = func(path string, atime, mtime time.Time) error {
+		t.Fatalf("chtimes should not be called for symlinks")
+		return nil
+	}
+
+	err := applyHeaderMetadata("/tmp/link", &tar.Header{
+		Mode:    0o777,
+		Uid:     321,
+		Gid:     654,
+		ModTime: time.Unix(1700000600, 0),
+	}, true)
+	if err != nil {
+		t.Fatalf("applyHeaderMetadata returned error: %v", err)
+	}
+	if strings.Join(calls, ",") != "lchown" {
+		t.Fatalf("calls = %v, want [lchown]", calls)
+	}
+}
+
+func TestApplyHeaderMetadataIgnoresOwnershipPermissionErrors(t *testing.T) {
+	for _, chownErr := range []error{syscall.EPERM, syscall.EACCES, syscall.ENOTSUP} {
+		t.Run(chownErr.Error(), func(t *testing.T) {
+			restore := stubMetadataHooks(t)
+			defer restore()
+
+			chownPath = func(path string, uid, gid int) error {
+				return chownErr
+			}
+			if err := applyHeaderMetadata("/tmp/file", &tar.Header{Mode: 0o600, Uid: 1, Gid: 2}, false); err != nil {
+				t.Fatalf("applyHeaderMetadata returned error: %v", err)
+			}
+		})
+	}
+}
+
+func TestApplyHeaderMetadataReturnsUnexpectedOwnershipError(t *testing.T) {
+	restore := stubMetadataHooks(t)
+	defer restore()
+
+	wantErr := errors.New("chown failed")
+	chownPath = func(path string, uid, gid int) error {
+		return wantErr
+	}
+	err := applyHeaderMetadata("/tmp/file", &tar.Header{Mode: 0o600, Uid: 1, Gid: 2}, false)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("applyHeaderMetadata error = %v, want %v", err, wantErr)
+	}
+}
+
 func TestMoveTreeMerges(t *testing.T) {
 	stage := t.TempDir()
 	if err := os.WriteFile(filepath.Join(stage, "new.txt"), []byte("new"), 0o644); err != nil {
@@ -504,6 +612,24 @@ func assertFileContents(t *testing.T, filePath, want string) {
 	}
 	if string(got) != want {
 		t.Fatalf("expected %s contents %q, got %q", filePath, want, string(got))
+	}
+}
+
+func stubMetadataHooks(t *testing.T) func() {
+	t.Helper()
+	origChown := chownPath
+	origLchown := lchownPath
+	origChmod := chmodPath
+	origChtimes := chtimesPath
+	chownPath = func(path string, uid, gid int) error { return nil }
+	lchownPath = func(path string, uid, gid int) error { return nil }
+	chmodPath = func(path string, mode os.FileMode) error { return nil }
+	chtimesPath = func(path string, atime, mtime time.Time) error { return nil }
+	return func() {
+		chownPath = origChown
+		lchownPath = origLchown
+		chmodPath = origChmod
+		chtimesPath = origChtimes
 	}
 }
 
