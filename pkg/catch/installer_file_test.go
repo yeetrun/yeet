@@ -276,6 +276,119 @@ func TestInstallerCloseStagesEnvFileAndCleansTemp(t *testing.T) {
 	}
 }
 
+func TestNewFileInstallerCreatesDirsUnderCustomServiceRoot(t *testing.T) {
+	server := newTestServer(t)
+	customRoot := filepath.Join(t.TempDir(), "custom-root")
+
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{
+			ServiceName: "custom-root-svc",
+			ServiceRoot: customRoot,
+		},
+		EnvFile:   true,
+		StageOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller returned error: %v", err)
+	}
+	installer.Fail()
+	if err := installer.Close(); err == nil || !strings.Contains(err.Error(), "installation failed") {
+		t.Fatalf("Close error = %v, want installation failed cleanup", err)
+	}
+
+	for _, dir := range []string{"bin", "run", "env", "data"} {
+		path := filepath.Join(customRoot, dir)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", dir, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("%s is not a directory", path)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(server.defaultServiceRootDir("custom-root-svc"), "bin")); !os.IsNotExist(err) {
+		t.Fatalf("default service root was created for custom-root-svc: %v", err)
+	}
+}
+
+func TestNewFileInstallerPersistsCustomServiceRoot(t *testing.T) {
+	server := newTestServer(t)
+	customRoot := filepath.Join(t.TempDir(), "persist-root")
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{
+			ServiceName: "persist-root-svc",
+			ServiceRoot: customRoot,
+		},
+		StageOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller returned error: %v", err)
+	}
+	if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	service := testService(t, server, "persist-root-svc")
+	if service.ServiceRoot != customRoot {
+		t.Fatalf("ServiceRoot = %q, want %q", service.ServiceRoot, customRoot)
+	}
+	binaryPath := stagedArtifactPath(t, service, db.ArtifactBinary)
+	if !strings.HasPrefix(binaryPath, filepath.Join(customRoot, "bin")+string(os.PathSeparator)) {
+		t.Fatalf("binary staged at %q, want under custom root %q", binaryPath, customRoot)
+	}
+}
+
+func TestNewFileInstallerExistingServiceRootSameRootSucceeds(t *testing.T) {
+	server := newTestServer(t)
+	customRoot := filepath.Join(t.TempDir(), "same-root")
+	addTestServices(t, server, db.Service{
+		Name:        "same-root-svc",
+		ServiceRoot: customRoot,
+	})
+
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{
+			ServiceName: "same-root-svc",
+			ServiceRoot: customRoot,
+		},
+		EnvFile:   true,
+		StageOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller returned error: %v", err)
+	}
+	installer.Fail()
+	_ = installer.Close()
+}
+
+func TestNewFileInstallerExistingServiceRootMismatchRejectsWithServiceSetHint(t *testing.T) {
+	server := newTestServer(t)
+	parent := t.TempDir()
+	existingRoot := filepath.Join(parent, "existing-root")
+	requestedRoot := filepath.Join(parent, "requested-root")
+	addTestServices(t, server, db.Service{
+		Name:        "mismatch-root-svc",
+		ServiceRoot: existingRoot,
+	})
+
+	_, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{
+			ServiceName: "mismatch-root-svc",
+			ServiceRoot: requestedRoot,
+		},
+	})
+	if err == nil {
+		t.Fatal("expected service root mismatch error")
+	}
+	wantHint := "yeet service set mismatch-root-svc --service-root=" + requestedRoot
+	if !strings.Contains(err.Error(), wantHint) {
+		t.Fatalf("NewFileInstaller error = %v, want hint %q", err, wantHint)
+	}
+}
+
 func TestInstallerCloseFailedCleansTempAndCachesError(t *testing.T) {
 	var printed []string
 	installer, err := NewFileInstaller(newTestServer(t), FileInstallerCfg{

@@ -272,6 +272,7 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 		return fmt.Errorf("cannot run, reserved service name")
 	}
 	cfg := e.fileInstaller(netFlagsFromRun(flags), argsIn)
+	cfg.ServiceRoot = flags.ServiceRoot
 	cfg.Pull = flags.Pull
 	return e.runInstall("run", e.payloadReader(), cfg)
 }

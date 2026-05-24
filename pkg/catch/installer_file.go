@@ -143,6 +143,12 @@ func NewFileInstaller(s *Server, cfg FileInstallerCfg) (*FileInstaller, error) {
 	if _, ok := reservedServiceNames[cfg.ServiceName]; ok {
 		return nil, fmt.Errorf("%s is a reserved service name", cfg.ServiceName)
 	}
+	existingService := First(s.serviceView(cfg.ServiceName))
+	serviceRoot, err := s.prepareServiceRootForInstall(cfg.ServiceName, cfg.ServiceRoot)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare service root: %w", err)
+	}
+	cfg.ServiceRoot = serviceRoot
 	i := &FileInstaller{
 		s:   s,
 		cfg: cfg,
@@ -150,16 +156,12 @@ func NewFileInstaller(s *Server, cfg FileInstallerCfg) (*FileInstaller, error) {
 		rateVal: rate.Value{
 			HalfLife: 250 * time.Millisecond,
 		},
-		existingService: First(s.serviceView(cfg.ServiceName)),
+		existingService: existingService,
+		serviceRoot:     serviceRoot,
 	}
 	if i.cfg.NewCmd == nil {
 		i.cfg.NewCmd = cmdutil.NewStdCmd
 	}
-	serviceRoot, err := s.serviceRootDir(cfg.ServiceName)
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve service root: %w", err)
-	}
-	i.serviceRoot = serviceRoot
 	if err := ensureDirsForRoot(serviceRoot, cfg.User); err != nil {
 		return nil, fmt.Errorf("failed to ensure directories: %w", err)
 	}
@@ -1035,9 +1037,17 @@ func (i *FileInstaller) applyInstallPlanToService(s *db.Service, plan fileInstal
 	if err := applyInstallServiceType(s, plan); err != nil {
 		return err
 	}
+	i.applyInstallServiceRoot(s)
 	applyInstallNetworks(s, i.macvlan, i.svcNet, i.tsNet)
 	stageArtifacts(s, i.artifacts)
 	return nil
+}
+
+func (i *FileInstaller) applyInstallServiceRoot(s *db.Service) {
+	if filepath.Clean(i.serviceRoot) == filepath.Clean(i.s.defaultServiceRootDir(i.cfg.ServiceName)) {
+		return
+	}
+	s.ServiceRoot = i.serviceRoot
 }
 
 func applyInstallServiceType(s *db.Service, plan fileInstallPlan) error {

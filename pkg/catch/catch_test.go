@@ -153,6 +153,60 @@ func TestServiceRootDirUsesDBServiceRoot(t *testing.T) {
 	}
 }
 
+func TestValidateRequestedServiceRoot(t *testing.T) {
+	parent := t.TempDir()
+	emptyExisting := filepath.Join(parent, "empty-existing")
+	if err := os.Mkdir(emptyExisting, 0o755); err != nil {
+		t.Fatalf("mkdir empty existing root: %v", err)
+	}
+	fileRoot := filepath.Join(parent, "file-root")
+	if err := os.WriteFile(fileRoot, []byte("not a dir"), 0o644); err != nil {
+		t.Fatalf("write file root: %v", err)
+	}
+	nonEmptyRoot := filepath.Join(parent, "non-empty-root")
+	if err := os.Mkdir(nonEmptyRoot, 0o755); err != nil {
+		t.Fatalf("mkdir non-empty root: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(nonEmptyRoot, "existing"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("write non-empty root file: %v", err)
+	}
+	cleanRoot := filepath.Join(parent, "dirty", "..", "clean-root")
+
+	tests := []struct {
+		name    string
+		root    string
+		want    string
+		wantErr string
+	}{
+		{name: "empty", root: "", want: ""},
+		{name: "relative", root: "relative/root", wantErr: "absolute"},
+		{name: "cleans missing final root", root: cleanRoot, want: filepath.Join(parent, "clean-root")},
+		{name: "missing parent", root: filepath.Join(parent, "missing-parent", "svc"), wantErr: "parent"},
+		{name: "final root is file", root: fileRoot, wantErr: "file"},
+		{name: "final root is non-empty dir", root: nonEmptyRoot, wantErr: "empty"},
+		{name: "final root is empty existing dir", root: emptyExisting, want: emptyExisting},
+		{name: "final root is missing", root: filepath.Join(parent, "missing-root"), want: filepath.Join(parent, "missing-root")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validateRequestedServiceRoot(tt.root)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("validateRequestedServiceRoot error = %v, want containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("validateRequestedServiceRoot returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("validateRequestedServiceRoot = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRemoveServiceDirectoryRemovalPlanSkipsData(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "svc")
 	paths := []string{
