@@ -498,7 +498,8 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleSvcCmd missing config error: %v", err)
 	}
-	if !strings.Contains(out, "yeet --host host-b service sync svc-a --config ~/yeet-services/yeet.toml") {
+	if !strings.Contains(out, "No matching yeet.toml entry was updated") ||
+		!strings.Contains(out, "yeet --host host-b service sync svc-a --config ~/yeet-services/yeet.toml") {
 		t.Fatalf("HandleSvcCmd missing config output = %q, want host-qualified sync hint", out)
 	}
 	resetHostOverride()
@@ -520,6 +521,23 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 		t.Fatalf("saveServiceSetConfig missing entry updated = true, want false")
 	}
 
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "svc-other",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "other.sh",
+	})
+	out, err = captureSvcStdout(t, func() error {
+		return HandleSvcCmd([]string{"service", "set", "--service-root=/srv/apps/missing", "--copy"})
+	})
+	if err != nil {
+		t.Fatalf("HandleSvcCmd missing entry config error: %v", err)
+	}
+	if !strings.Contains(out, "No matching yeet.toml entry was updated") ||
+		!strings.Contains(out, "yeet service sync svc-a --config ~/yeet-services/yeet.toml") {
+		t.Fatalf("HandleSvcCmd missing entry config output = %q, want non-host sync hint", out)
+	}
+
 	cfg := &ProjectConfig{Version: projectConfigVersion}
 	cfg.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-a", Type: serviceTypeRun, Payload: "run.sh"})
 	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: cfg}
@@ -534,8 +552,14 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 		t.Fatalf("saveServiceSetConfig matching entry updated = false, want true")
 	}
 
-	if err := HandleSvcCmd([]string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs", "--copy"}); err != nil {
+	out, err = captureSvcStdout(t, func() error {
+		return HandleSvcCmd([]string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs", "--copy"})
+	})
+	if err != nil {
 		t.Fatalf("HandleSvcCmd existing config error: %v", err)
+	}
+	if strings.Contains(out, "No matching yeet.toml entry was updated") {
+		t.Fatalf("HandleSvcCmd existing config output = %q, want no sync hint for matching config", out)
 	}
 	loaded, err := loadProjectConfigFromCwd()
 	if err != nil {
@@ -553,8 +577,14 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 		t.Fatalf("saved config = %q, want service_root_zfs", string(raw))
 	}
 
-	if err := HandleSvcCmd([]string{"service", "set", "--service-root=/srv/apps/svc-a", "--copy"}); err != nil {
+	out, err = captureSvcStdout(t, func() error {
+		return HandleSvcCmd([]string{"service", "set", "--service-root=/srv/apps/svc-a", "--copy"})
+	})
+	if err != nil {
 		t.Fatalf("HandleSvcCmd existing config non-zfs error: %v", err)
+	}
+	if strings.Contains(out, "No matching yeet.toml entry was updated") {
+		t.Fatalf("HandleSvcCmd existing config non-zfs output = %q, want no sync hint for matching config", out)
 	}
 	loaded, err = loadProjectConfigFromCwd()
 	if err != nil {
@@ -571,8 +601,8 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	if strings.Contains(string(raw), `service_root_zfs`) {
 		t.Fatalf("saved config = %q, want service_root_zfs omitted", string(raw))
 	}
-	if len(calls) != 3 || calls[0].tty || calls[1].tty || calls[2].tty {
-		t.Fatalf("remote calls = %#v, want three non-tty calls", calls)
+	if len(calls) != 4 || calls[0].tty || calls[1].tty || calls[2].tty || calls[3].tty {
+		t.Fatalf("remote calls = %#v, want four non-tty calls", calls)
 	}
 }
 
