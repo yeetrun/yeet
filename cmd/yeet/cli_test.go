@@ -102,10 +102,14 @@ func TestSnapshotsDefaultsHelpShowsSubcommands(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
 	oldStdout := os.Stdout
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
 	t.Cleanup(func() {
 		os.Args = oldArgs
 		handleSvcCmdFn = oldHandleSvcCmdFn
 		os.Stdout = oldStdout
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
 	})
 
 	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout-*")

@@ -7,6 +7,7 @@ package yeet
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/yeetrun/yeet/pkg/cli"
 )
@@ -21,8 +22,10 @@ func handleSvcSnapshots(ctx context.Context, req svcCommandRequest) error {
 			return err
 		}
 	case "set":
-		if _, _, err := cli.ParseSnapshotDefaultsSet(req.Command.Args[2:]); err != nil {
+		if _, remaining, err := cli.ParseSnapshotDefaultsSet(req.Command.Args[2:]); err != nil {
 			return err
+		} else if len(remaining) != 0 {
+			return fmt.Errorf("unexpected snapshots defaults args: %s", strings.Join(remaining, " "))
 		}
 	default:
 		return fmt.Errorf("unknown snapshots defaults command %q", req.Command.Args[1])

@@ -555,7 +555,15 @@ func snapshotControlFlagValue(args []string, i int, name string) (string, int, b
 	if i+1 >= len(args) {
 		return "", i, false, snapshotControlMissingValueError(name)
 	}
+	if snapshotSeparateValueMissing(args[i+1]) {
+		return "", i, false, snapshotControlMissingValueError(name)
+	}
 	return args[i+1], i + 1, true, nil
+}
+
+func snapshotSeparateValueMissing(value string) bool {
+	value = strings.TrimSpace(value)
+	return value == "" || value == "--" || strings.HasPrefix(value, "-")
 }
 
 func snapshotControlMissingValueError(name string) error {
