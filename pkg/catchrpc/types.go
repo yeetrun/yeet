@@ -131,7 +131,11 @@ type ServiceInfo struct {
 }
 
 type ServicePaths struct {
-	Root string `json:"root,omitempty"`
+	// Root is the effective filesystem root. It is kept for existing clients.
+	Root           string `json:"root,omitempty"`
+	EffectiveRoot  string `json:"effectiveRoot,omitempty"`
+	ServiceRoot    string `json:"serviceRoot,omitempty"`
+	ServiceRootZFS string `json:"serviceRootZfs,omitempty"`
 }
 
 type ServiceNetwork struct {
