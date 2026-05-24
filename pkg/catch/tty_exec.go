@@ -393,6 +393,9 @@ var ttyCommandHandlers = map[string]ttyCommandHandler{
 		}
 		return e.runCmdFunc(flags, runArgs)
 	},
+	"service": func(e *ttyExecer, args []string) error {
+		return e.serviceCmdFunc(args)
+	},
 	"copy": func(e *ttyExecer, args []string) error {
 		return e.copyCmdFunc(args)
 	},
