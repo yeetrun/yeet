@@ -26,7 +26,10 @@ const (
 	defaultSnapshotKeepLast                         = 5
 )
 
-var snapshotMaxAgeDaysRE = regexp.MustCompile(`^([0-9]+)d$`)
+var (
+	snapshotMaxAgeDaysRE = regexp.MustCompile(`^(-?[0-9]+)d$`)
+	snapshotNameCleaner  = regexp.MustCompile(`[^A-Za-z0-9_.:-]+`)
+)
 
 type effectivePolicy struct {
 	Enabled  bool
@@ -165,11 +168,7 @@ func createServiceSnapshot(ctx context.Context, runner zfsCommandRunner, req sna
 	if runner == nil {
 		runner = runZFSCommand
 	}
-	now := req.Now
-	if now.IsZero() {
-		now = time.Now()
-	}
-	snapshotName := fmt.Sprintf("%s@yeet-%s-%s-g%d", req.Dataset, now.UTC().Format("20060102T150405Z"), req.Event, req.Generation)
+	snapshotName := req.Dataset + "@" + snapshotShortName(req)
 	args := []string{
 		"snapshot",
 		"-o", "com.yeetrun:created-by=catch",
@@ -184,6 +183,15 @@ func createServiceSnapshot(ctx context.Context, runner zfsCommandRunner, req sna
 		return "", formatZFSCommandError("zfs snapshot "+snapshotName, stderr, err)
 	}
 	return snapshotName, nil
+}
+
+func snapshotShortName(req snapshotCreateRequest) string {
+	now := req.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	event := snapshotNameCleaner.ReplaceAllString(string(req.Event), "_")
+	return fmt.Sprintf("yeet-%s-%s-g%d", now.UTC().Format("20060102T150405Z"), event, req.Generation)
 }
 
 func listServiceSnapshots(ctx context.Context, runner zfsCommandRunner, dataset string) ([]listedSnapshot, error) {
