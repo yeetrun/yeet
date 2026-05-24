@@ -191,6 +191,21 @@ yeet service set vaultwarden --service-root=tank/apps/vaultwarden --zfs --empty
 must choose `--copy` to copy existing files or `--empty` to start with an empty
 root. For the migration examples above, `/mnt/fast` must already exist.
 
+If you moved a service from outside the project directory, sync the live root
+identity back into the local TOML replay recipe:
+
+```bash
+yeet service sync vaultwarden
+yeet service sync vaultwarden --config ~/yeet-services/yeet.toml
+yeet service sync --all --config ~/yeet-services/yeet.toml
+```
+
+The catch DB remains the source of truth for the live service. `yeet service
+sync` updates only existing entries in `yeet.toml`; it does not import
+arbitrary catch services because catch does not know the local payload or env
+file paths. For ZFS-backed roots, the local config stores the dataset name with
+`service_root_zfs = true`.
+
 Less common (registry image or pushing a local image):
 
 ```bash
