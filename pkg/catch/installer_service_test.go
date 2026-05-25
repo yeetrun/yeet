@@ -197,6 +197,17 @@ func TestInstallGenSnapshotsBeforeInstallPhase(t *testing.T) {
 		calls = append(calls, strings.Join(args, " "))
 		switch args[0] {
 		case "snapshot":
+			dv, err := server.cfg.DB.Get()
+			if err != nil {
+				t.Fatalf("DB.Get during snapshot: %v", err)
+			}
+			sv, ok := dv.Services().GetOk("api")
+			if !ok {
+				t.Fatal("missing api service during snapshot")
+			}
+			if sv.Generation() != 1 || sv.LatestGeneration() != 1 {
+				t.Fatalf("snapshot ran after generation commit: generation/latest = %d/%d, want 1/1", sv.Generation(), sv.LatestGeneration())
+			}
 			snapshotCreated = true
 			return "", "", nil
 		case "list":
@@ -221,15 +232,111 @@ func TestInstallGenSnapshotsBeforeInstallPhase(t *testing.T) {
 
 	var out bytes.Buffer
 	inst := &Installer{s: server, icfg: InstallerCfg{ServiceName: "api", ClientOut: &out}}
-	_, service, err := inst.commitGen(0)
-	if err != nil {
-		t.Fatalf("commitGen: %v", err)
-	}
-	if err := inst.doInstall(nil, service); err != nil {
-		t.Fatalf("doInstall: %v", err)
+	if err := inst.installGen(0); err != nil {
+		t.Fatalf("installGen: %v", err)
 	}
 	if len(calls) == 0 || !strings.HasPrefix(calls[0], "snapshot ") {
 		t.Fatalf("zfs calls = %#v, want snapshot first", calls)
+	}
+}
+
+func TestInstallGenSnapshotFailureDoesNotCommitGeneration(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {
+				Name:             "api",
+				ServiceType:      db.ServiceTypeSystemd,
+				ServiceRootZFS:   "tank/apps/api",
+				Generation:       1,
+				LatestGeneration: 1,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{"staged": "/srv/api/bin/api-staged"}},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		if args[0] == "snapshot" {
+			return "", "snapshot failed", errZFSCommandFailed
+		}
+		return "", "", nil
+	}
+	oldRunInstallPhase := runInstallPhaseForSnapshot
+	runInstallPhaseForSnapshot = func(_ *Installer, _ *db.Service) error {
+		t.Fatal("install phase ran after required snapshot failure")
+		return nil
+	}
+	t.Cleanup(func() {
+		runInstallPhaseForSnapshot = oldRunInstallPhase
+	})
+
+	inst := &Installer{s: server, icfg: InstallerCfg{ServiceName: "api"}}
+	if err := inst.installGen(0); err == nil || !strings.Contains(err.Error(), "snapshot failed") {
+		t.Fatalf("installGen error = %v, want snapshot failure", err)
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	sv, ok := dv.Services().GetOk("api")
+	if !ok {
+		t.Fatal("missing api service")
+	}
+	if sv.Generation() != 1 || sv.LatestGeneration() != 1 {
+		t.Fatalf("generation/latest = %d/%d, want 1/1", sv.Generation(), sv.LatestGeneration())
+	}
+	if _, ok := sv.Artifacts().Get(db.ArtifactBinary).Refs().GetOk(db.Gen(2)); ok {
+		t.Fatal("gen-2 artifact ref was committed after snapshot failure")
+	}
+}
+
+func TestInstallGenReportsRecoverySnapshotOnInstallFailure(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {
+				Name:             "api",
+				ServiceType:      db.ServiceTypeSystemd,
+				ServiceRootZFS:   "tank/apps/api",
+				Generation:       1,
+				LatestGeneration: 1,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{"staged": "/srv/api/bin/api-staged"}},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		switch args[0] {
+		case "snapshot":
+			return "", "", nil
+		case "list":
+			return "", "", nil
+		default:
+			return "", "unexpected zfs command: " + strings.Join(args, " "), errZFSCommandFailed
+		}
+	}
+	installErr := errors.New("install failed")
+	oldRunInstallPhase := runInstallPhaseForSnapshot
+	runInstallPhaseForSnapshot = func(_ *Installer, _ *db.Service) error {
+		return installErr
+	}
+	t.Cleanup(func() {
+		runInstallPhaseForSnapshot = oldRunInstallPhase
+	})
+
+	var out bytes.Buffer
+	inst := &Installer{s: server, icfg: InstallerCfg{ServiceName: "api", ClientOut: &out}}
+	if err := inst.installGen(0); !errors.Is(err, installErr) {
+		t.Fatalf("installGen error = %v, want %v", err, installErr)
+	}
+	if got := out.String(); !strings.Contains(got, "recovery snapshot: tank/apps/api@yeet-") {
+		t.Fatalf("output = %q, want recovery snapshot", got)
 	}
 }
 
@@ -265,12 +372,8 @@ func TestInstallGenSnapshotsSkipInitialDeploy(t *testing.T) {
 	})
 
 	inst := &Installer{s: server, icfg: InstallerCfg{ServiceName: "api"}}
-	_, service, err := inst.commitGen(0)
-	if err != nil {
-		t.Fatalf("commitGen: %v", err)
-	}
-	if err := inst.doInstall(nil, service); err != nil {
-		t.Fatalf("doInstall: %v", err)
+	if err := inst.installGen(0); err != nil {
+		t.Fatalf("installGen: %v", err)
 	}
 }
 

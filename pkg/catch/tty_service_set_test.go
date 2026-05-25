@@ -1165,6 +1165,54 @@ func TestServiceRootMigrationSnapshotsOldZFSDatasetBeforeMaterializing(t *testin
 	assertServiceRootZFS(t, server, name, "")
 }
 
+func TestServiceRootMigrationReportsRecoverySnapshotOnFailure(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc"
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	newRoot := filepath.Join(t.TempDir(), "new-file")
+	withServiceSetRootStopped(t)
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newRoot, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeSystemd
+		s.ServiceRoot = oldRoot
+		s.ServiceRootZFS = "tank/apps/svc"
+		s.Generation = 2
+		s.LatestGeneration = 2
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service: %v", err)
+	}
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		switch args[0] {
+		case "snapshot":
+			return "", "", nil
+		case "list":
+			return "", "", nil
+		default:
+			return "", "unexpected zfs command: " + strings.Join(args, " "), errZFSCommandFailed
+		}
+	}
+	var out bytes.Buffer
+	plan := serviceRootMigrationPlan{
+		ServiceName: name,
+		OldRoot:     oldRoot,
+		OldRootZFS:  "tank/apps/svc",
+		NewRoot:     newRoot,
+	}
+	err := server.migrateServiceRootWithPlanWriter(plan, serviceRootMigrationEmpty, &out)
+	if err == nil || !strings.Contains(err.Error(), "is a file") {
+		t.Fatalf("migrateServiceRootWithPlanWriter error = %v, want file error", err)
+	}
+	if got := out.String(); !strings.Contains(got, "recovery snapshot: tank/apps/svc@yeet-") {
+		t.Fatalf("output = %q, want recovery snapshot", got)
+	}
+}
+
 func TestServiceSetRejectsNoopAcrossRootTypes(t *testing.T) {
 	server := newTestServer(t)
 	name := "svc"

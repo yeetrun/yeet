@@ -115,7 +115,7 @@ func (e *ttyExecer) serviceSetRoot(flags cli.ServiceSetFlags) error {
 	if err != nil {
 		return err
 	}
-	return e.s.migrateServiceRootWithPlan(plan, mode)
+	return e.s.migrateServiceRootWithPlanWriter(plan, mode, e.rw)
 }
 
 func (s *Server) updateServiceSnapshotPolicy(name string, flags cli.ServiceSetFlags) error {
@@ -426,6 +426,10 @@ func (s *Server) migrateServiceRoot(name string, request serviceRootMigrationReq
 }
 
 func (s *Server) migrateServiceRootWithPlan(plan serviceRootMigrationPlan, mode serviceRootMigrationMode) error {
+	return s.migrateServiceRootWithPlanWriter(plan, mode, io.Discard)
+}
+
+func (s *Server) migrateServiceRootWithPlanWriter(plan serviceRootMigrationPlan, mode serviceRootMigrationMode, w io.Writer) error {
 	oldService, err := s.serviceForRootMigrationPlan(plan)
 	if err != nil {
 		return err
@@ -433,7 +437,7 @@ func (s *Server) migrateServiceRootWithPlan(plan serviceRootMigrationPlan, mode 
 	return s.withServiceSnapshot(context.Background(), snapshotOperation{
 		Service: oldService,
 		Event:   snapshotEventServiceRootMigration,
-		Writer:  io.Discard,
+		Writer:  w,
 		Operation: func() error {
 			if err := s.materializeServiceRootMigration(plan, mode); err != nil {
 				return err
