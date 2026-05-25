@@ -124,6 +124,9 @@ func (s *Server) updateServiceSnapshotPolicy(name string, flags cli.ServiceSetFl
 		if !ok {
 			return fmt.Errorf("service %q not found", name)
 		}
+		if err := validateSnapshotInheritExclusive(flags); err != nil {
+			return err
+		}
 		if flags.Snapshots == "inherit" {
 			service.SnapshotPolicy = nil
 			return nil
@@ -142,10 +145,20 @@ func (s *Server) updateServiceSnapshotPolicy(name string, flags cli.ServiceSetFl
 }
 
 func validateServiceSnapshotFlags(flags cli.ServiceSetFlags) error {
-	if flags.Snapshots == "inherit" {
-		return nil
+	if err := validateSnapshotInheritExclusive(flags); err != nil {
+		return err
 	}
 	return applyServiceSnapshotFlags(&db.SnapshotPolicy{}, flags)
+}
+
+func validateSnapshotInheritExclusive(flags cli.ServiceSetFlags) error {
+	if flags.Snapshots != "inherit" {
+		return nil
+	}
+	if flags.SnapshotKeepLast == "" && flags.SnapshotMaxAge == "" && flags.SnapshotRequired == "" && flags.SnapshotEvents == "" {
+		return nil
+	}
+	return fmt.Errorf("--snapshots=inherit cannot be combined with field-level snapshot flags")
 }
 
 func applyServiceSnapshotFlags(policy *db.SnapshotPolicy, flags cli.ServiceSetFlags) error {

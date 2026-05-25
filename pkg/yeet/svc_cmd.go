@@ -1791,11 +1791,24 @@ func applyServiceSetSnapshotFlags(entry *ServiceEntry, flags cli.ServiceSetFlags
 	if !flags.SnapshotChange {
 		return nil
 	}
+	if err := validateServiceSetSnapshotInheritExclusive(flags); err != nil {
+		return err
+	}
 	if flags.Snapshots == "inherit" {
 		entry.ClearSnapshotOverride()
 		return nil
 	}
 	return applyServiceSetSnapshotOverride(entry, flags)
+}
+
+func validateServiceSetSnapshotInheritExclusive(flags cli.ServiceSetFlags) error {
+	if flags.Snapshots != "inherit" {
+		return nil
+	}
+	if flags.SnapshotKeepLast == "" && flags.SnapshotMaxAge == "" && flags.SnapshotRequired == "" && flags.SnapshotEvents == "" {
+		return nil
+	}
+	return fmt.Errorf("--snapshots=inherit cannot be combined with field-level snapshot flags")
 }
 
 func applyServiceSetSnapshotOverride(entry *ServiceEntry, flags cli.ServiceSetFlags) error {
