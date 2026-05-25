@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/codecutil"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
@@ -449,6 +450,57 @@ func TestNewFileInstallerClearsSnapshotPolicy(t *testing.T) {
 	}
 	if sv.SnapshotPolicy().Valid() {
 		t.Fatalf("SnapshotPolicy = %#v, want nil", sv.SnapshotPolicy().AsStruct())
+	}
+}
+
+func TestNewFileInstallerPatchesSnapshotPolicyFlags(t *testing.T) {
+	server := newTestServer(t)
+	enabled := false
+	keep := 3
+	required := true
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"svc-snapshot-patch": {
+			Name: "svc-snapshot-patch",
+			SnapshotPolicy: &db.SnapshotPolicy{
+				Enabled:  &enabled,
+				KeepLast: &keep,
+				MaxAge:   "72h",
+				Required: &required,
+				Events:   []string{"run"},
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "svc-snapshot-patch"},
+		NoBinary:     true,
+		StageOnly:    true,
+		snapshotPolicyFlags: &cli.ServiceSetFlags{
+			SnapshotKeepLast: "inherit",
+			SnapshotChange:   true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	sv, ok := dv.Services().GetOk("svc-snapshot-patch")
+	if !ok {
+		t.Fatal("missing service")
+	}
+	policy := sv.SnapshotPolicy()
+	if policy.KeepLast().Valid() {
+		t.Fatalf("KeepLast valid = true, want false")
+	}
+	if policy.Enabled().Get() || policy.MaxAge() != "72h" || !policy.Required().Get() || policy.Events().Len() != 1 || policy.Events().At(0) != "run" {
+		t.Fatalf("SnapshotPolicy = %#v, want only keep-last cleared", policy.AsStruct())
 	}
 }
 
