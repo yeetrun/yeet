@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -334,6 +335,47 @@ func TestServiceSyncNilSnapshotOverrideClearsLocalSnapshotFields(t *testing.T) {
 	entry, _ := loaded.Config.ServiceEntry("sonarr", "host-a")
 	if serviceEntryHasSnapshotOverride(entry) {
 		t.Fatalf("entry = %#v, want snapshot override cleared", entry)
+	}
+}
+
+func TestServiceSyncOmittedSnapshotInfoPreservesLocalSnapshotFields(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	required := true
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:             "sonarr",
+		Host:             "host-a",
+		Type:             serviceTypeRun,
+		Payload:          "compose.yml",
+		ServiceRoot:      "/old/root",
+		Snapshots:        "off",
+		SnapshotKeepLast: 3,
+		SnapshotMaxAge:   "72h",
+		SnapshotRequired: &required,
+		SnapshotEvents:   []string{"run"},
+	})
+	fetchServiceInfoForSyncFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			Name:  service,
+			Paths: catchrpc.ServicePaths{ServiceRoot: "/srv/apps/sonarr"},
+		}}, nil
+	}
+	req := svcCommandRequest{Config: mustLoadProjectConfig(t), Service: "sonarr", Command: svcCommand{Args: []string{"sync"}}}
+	if err := handleServiceSync(context.Background(), req); err != nil {
+		t.Fatalf("handleServiceSync: %v", err)
+	}
+	loaded, _ := loadProjectConfigFromCwd()
+	entry, _ := loaded.Config.ServiceEntry("sonarr", "host-a")
+	if entry.ServiceRoot != "/srv/apps/sonarr" {
+		t.Fatalf("ServiceRoot = %q, want synced root", entry.ServiceRoot)
+	}
+	if entry.Snapshots != "off" ||
+		entry.SnapshotKeepLast != 3 ||
+		entry.SnapshotMaxAge != "72h" ||
+		entry.SnapshotRequired == nil ||
+		!*entry.SnapshotRequired ||
+		!reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) {
+		t.Fatalf("entry = %#v, want snapshot override preserved", entry)
 	}
 }
 

@@ -890,6 +890,55 @@ func TestSvcRunSnapshotFieldInheritRunsRemoteAndSavesConfig(t *testing.T) {
 	}
 }
 
+func TestSvcRunExplicitSnapshotFlagsDeployWhenConfigAlreadyMatches(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	payload := filepath.Join(tmp, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	payloadHash, err := hashFileSHA256(payload)
+	if err != nil {
+		t.Fatalf("hash payload: %v", err)
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{
+			Found:   true,
+			Payload: &catchrpc.ArtifactHash{Kind: "script", SHA256: payloadHash},
+		}, true, nil
+	}
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:      "svc-a",
+		Host:      "host-a",
+		Type:      serviceTypeRun,
+		Payload:   "run.sh",
+		Snapshots: "off",
+	})
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		if service != "svc-a" {
+			t.Fatalf("service = %q, want svc-a", service)
+		}
+		gotArgs = append([]string{}, args...)
+		if stdin == nil {
+			t.Fatal("stdin = nil, want payload")
+		}
+		return nil
+	}
+
+	if err := HandleSvcCmd([]string{"run", payload, "--snapshots=off"}); err != nil {
+		t.Fatalf("HandleSvcCmd run error: %v", err)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"run", "--snapshots=off"}) {
+		t.Fatalf("remote args = %#v, want run --snapshots=off", gotArgs)
+	}
+}
+
 func TestParseSvcRunControlFlagsRejectsMissingSnapshotValues(t *testing.T) {
 	tests := []struct {
 		name    string

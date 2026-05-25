@@ -201,19 +201,21 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 	if !cfgLoc.Config.SetServiceRootForEntry(target.Service, target.Host, root, zfs) {
 		return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
 	}
-	snapshotPolicy := serviceSyncSnapshotOverride(resp.Info.Snapshots)
-	applySnapshotPolicyToSyncResult(&result, snapshotPolicy)
-	if !cfgLoc.Config.SetServiceSnapshotsForEntry(target.Service, target.Host, snapshotPolicy) {
-		return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
+	snapshotPolicy, hasSnapshotInfo := serviceSyncSnapshotOverride(resp.Info.Snapshots)
+	if hasSnapshotInfo {
+		applySnapshotPolicyToSyncResult(&result, snapshotPolicy)
+		if !cfgLoc.Config.SetServiceSnapshotsForEntry(target.Service, target.Host, snapshotPolicy) {
+			return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
+		}
 	}
 	return result, true, nil
 }
 
-func serviceSyncSnapshotOverride(snapshots *catchrpc.ServiceSnapshots) *catchrpc.SnapshotPolicy {
+func serviceSyncSnapshotOverride(snapshots *catchrpc.ServiceSnapshots) (*catchrpc.SnapshotPolicy, bool) {
 	if snapshots == nil {
-		return nil
+		return nil, false
 	}
-	return snapshots.Override
+	return snapshots.Override, true
 }
 
 func applySnapshotPolicyToSyncResult(result *serviceSyncResult, policy *catchrpc.SnapshotPolicy) {
