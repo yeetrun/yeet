@@ -26,10 +26,15 @@ type serviceSyncTarget struct {
 }
 
 type serviceSyncResult struct {
-	Target serviceSyncTarget
-	Root   string
-	ZFS    bool
-	Skip   string
+	Target           serviceSyncTarget
+	Root             string
+	ZFS              bool
+	Snapshots        string
+	SnapshotKeepLast int
+	SnapshotMaxAge   string
+	SnapshotRequired *bool
+	SnapshotEvents   []string
+	Skip             string
 }
 
 func handleServiceSync(ctx context.Context, req svcCommandRequest) error {
@@ -196,7 +201,41 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 	if !cfgLoc.Config.SetServiceRootForEntry(target.Service, target.Host, root, zfs) {
 		return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
 	}
+	snapshotPolicy := serviceSyncSnapshotOverride(resp.Info.Snapshots)
+	applySnapshotPolicyToSyncResult(&result, snapshotPolicy)
+	if !cfgLoc.Config.SetServiceSnapshotsForEntry(target.Service, target.Host, snapshotPolicy) {
+		return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
+	}
 	return result, true, nil
+}
+
+func serviceSyncSnapshotOverride(snapshots *catchrpc.ServiceSnapshots) *catchrpc.SnapshotPolicy {
+	if snapshots == nil {
+		return nil
+	}
+	return snapshots.Override
+}
+
+func applySnapshotPolicyToSyncResult(result *serviceSyncResult, policy *catchrpc.SnapshotPolicy) {
+	if policy == nil {
+		return
+	}
+	if policy.Enabled != nil {
+		if *policy.Enabled {
+			result.Snapshots = "on"
+		} else {
+			result.Snapshots = "off"
+		}
+	}
+	if policy.KeepLast != nil {
+		result.SnapshotKeepLast = *policy.KeepLast
+	}
+	result.SnapshotMaxAge = strings.TrimSpace(policy.MaxAge)
+	if policy.Required != nil {
+		required := *policy.Required
+		result.SnapshotRequired = &required
+	}
+	result.SnapshotEvents = append([]string{}, policy.Events...)
 }
 
 func serviceRootForLocalConfig(host string, info catchrpc.ServiceInfo) (string, bool, error) {

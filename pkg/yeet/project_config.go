@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 const (
@@ -328,6 +329,34 @@ func (c *ProjectConfig) SetServiceRootForEntry(service, host, root string, zfs b
 		return true
 	}
 	return false
+}
+
+func (c *ProjectConfig) SetServiceSnapshotsForEntry(service, host string, policy *catchrpc.SnapshotPolicy) bool {
+	entry, ok := c.ServiceEntry(service, host)
+	if !ok {
+		return false
+	}
+	entry.ClearSnapshotOverride()
+	if policy != nil {
+		if policy.Enabled != nil {
+			if *policy.Enabled {
+				entry.Snapshots = "on"
+			} else {
+				entry.Snapshots = "off"
+			}
+		}
+		if policy.KeepLast != nil {
+			entry.SnapshotKeepLast = *policy.KeepLast
+		}
+		entry.SnapshotMaxAge = strings.TrimSpace(policy.MaxAge)
+		if policy.Required != nil {
+			required := *policy.Required
+			entry.SnapshotRequired = &required
+		}
+		entry.SnapshotEvents = append([]string{}, policy.Events...)
+	}
+	c.SetServiceEntry(entry)
+	return true
 }
 
 func (c *ProjectConfig) RemoveServiceEntry(service, host string) bool {

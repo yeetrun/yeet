@@ -513,6 +513,35 @@ func TestRunCmdFuncCopiesServiceRootIntoInstallerConfig(t *testing.T) {
 	}
 }
 
+func TestRunCmdFuncCopiesSnapshotPolicyIntoInstallerConfig(t *testing.T) {
+	var gotCfg FileInstallerCfg
+	execer := &ttyExecer{
+		s:              newTestServer(t),
+		sn:             "svc-run-snapshot",
+		rawRW:          bytes.NewBufferString("binary-payload"),
+		rw:             &bytes.Buffer{},
+		bypassPtyInput: true,
+		installFunc: func(_ string, _ io.Reader, cfg FileInstallerCfg) error {
+			gotCfg = cfg
+			return nil
+		},
+	}
+
+	flags := cli.RunFlags{Snapshots: "off", SnapshotKeepLast: "3", SnapshotMaxAge: "72h", SnapshotRequired: "false", SnapshotChange: true}
+	if err := execer.runCmdFunc(flags, nil); err != nil {
+		t.Fatalf("runCmdFunc returned error: %v", err)
+	}
+	if gotCfg.SnapshotPolicy == nil || gotCfg.SnapshotPolicy.Enabled == nil || *gotCfg.SnapshotPolicy.Enabled {
+		t.Fatalf("SnapshotPolicy Enabled = %#v, want false", gotCfg.SnapshotPolicy)
+	}
+	if gotCfg.SnapshotPolicy.KeepLast == nil || *gotCfg.SnapshotPolicy.KeepLast != 3 || gotCfg.SnapshotPolicy.MaxAge != "72h" {
+		t.Fatalf("SnapshotPolicy = %#v", gotCfg.SnapshotPolicy)
+	}
+	if gotCfg.SnapshotPolicy.Required == nil || *gotCfg.SnapshotPolicy.Required {
+		t.Fatalf("SnapshotPolicy Required = %#v, want false", gotCfg.SnapshotPolicy.Required)
+	}
+}
+
 func TestRunCmdFuncRejectsSystemServiceBeforeInstall(t *testing.T) {
 	called := false
 	execer := &ttyExecer{
