@@ -176,6 +176,31 @@ service root. Parent datasets must already exist.
 For filesystem paths, the parent directory (`/srv/apps` in this example) must
 already exist; yeet can create the final service directory.
 
+ZFS-backed services get yeet-managed snapshots before risky changes. By
+default, catch snapshots before a redeploy, a Docker image update, or a
+ZFS-backed service-root migration; first deploys are skipped because there is
+nothing useful to recover. Snapshot creation is required by default, so the
+change aborts if `zfs snapshot` fails.
+
+The server-wide default is enabled, keeps the newest 5 yeet-created snapshots,
+and prunes yeet-created snapshots older than 7 days:
+
+```bash
+yeet snapshots defaults show
+yeet snapshots defaults set --enabled=false
+yeet snapshots defaults set --enabled=true --keep-last=5 --max-age=7d
+```
+
+Override the snapshot policy for one service with `yeet service set`:
+
+```bash
+yeet service set vaultwarden --snapshots=off
+yeet service set vaultwarden --snapshots=on --snapshot-keep-last=3 --snapshot-max-age=72h
+yeet service set vaultwarden --snapshot-required=false
+yeet service set vaultwarden --snapshot-events=run,docker-update
+yeet service set vaultwarden --snapshots=inherit
+```
+
 The root contains `bin`, `run`, `env`, and `data`. `yeet run` can choose the
 initial root for a new service, but it cannot move an existing service. To move
 a stopped service root, use:
@@ -204,7 +229,9 @@ The catch DB remains the source of truth for the live service. `yeet service
 sync` updates only existing entries in `yeet.toml`; it does not import
 arbitrary catch services because catch does not know the local payload or env
 file paths. For ZFS-backed roots, the local config stores the dataset name with
-`service_root_zfs = true`.
+`service_root_zfs = true`. If a service has snapshot overrides, sync also stores
+the TOML replay fields such as `snapshots`, `snapshot_keep_last`, and
+`snapshot_max_age`.
 
 Less common (registry image or pushing a local image):
 
