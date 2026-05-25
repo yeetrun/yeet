@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -31,7 +32,6 @@ const (
 var (
 	snapshotMaxAgeDaysRE = regexp.MustCompile(`^(-?[0-9]+)d$`)
 	snapshotNameCleaner  = regexp.MustCompile(`[^A-Za-z0-9_.:-]+`)
-	randomSnapshotSuffix = generateRandomSnapshotSuffix
 )
 
 type effectivePolicy struct {
@@ -150,6 +150,9 @@ func parseSnapshotMaxAge(raw string) (time.Duration, error) {
 		if err != nil {
 			return 0, fmt.Errorf("invalid snapshot max age %q", raw)
 		}
+		if days > int(math.MaxInt64/(24*time.Hour)) {
+			return 0, fmt.Errorf("invalid snapshot max age %q", raw)
+		}
 		d := time.Duration(days) * 24 * time.Hour
 		if d <= 0 {
 			return 0, fmt.Errorf("snapshot max age must be positive")
@@ -168,6 +171,10 @@ func parseSnapshotMaxAge(raw string) (time.Duration, error) {
 }
 
 func createServiceSnapshot(ctx context.Context, runner zfsCommandRunner, req snapshotCreateRequest) (string, error) {
+	return createServiceSnapshotWithSuffix(ctx, runner, req, generateRandomSnapshotSuffix)
+}
+
+func createServiceSnapshotWithSuffix(ctx context.Context, runner zfsCommandRunner, req snapshotCreateRequest, suffixFn func() (string, error)) (string, error) {
 	if runner == nil {
 		runner = runZFSCommand
 	}
@@ -181,7 +188,7 @@ func createServiceSnapshot(ctx context.Context, runner zfsCommandRunner, req sna
 		return "", formatZFSCommandError("zfs snapshot "+snapshotName, stderr, err)
 	}
 
-	suffix, suffixErr := randomSnapshotSuffix()
+	suffix, suffixErr := suffixFn()
 	if suffixErr != nil {
 		return "", fmt.Errorf("generate snapshot suffix after name collision: %w", suffixErr)
 	}
@@ -218,7 +225,10 @@ func snapshotShortName(req snapshotCreateRequest) string {
 
 func isZFSSnapshotNameCollision(stderr string) bool {
 	stderr = strings.ToLower(stderr)
-	return strings.Contains(stderr, "already exists") || strings.Contains(stderr, "dataset exists")
+	if !strings.Contains(stderr, "already exists") {
+		return false
+	}
+	return strings.Contains(stderr, "snapshot") || strings.Contains(stderr, "@yeet-")
 }
 
 func generateRandomSnapshotSuffix() (string, error) {
@@ -267,12 +277,18 @@ func parseListedSnapshots(raw string) ([]listedSnapshot, error) {
 func snapshotsToPrune(snaps []listedSnapshot, service string, policy effectivePolicy, now time.Time, current string) []string {
 	owned := catchOwnedYeetSnapshotsForService(snaps, service)
 	sort.SliceStable(owned, func(i, j int) bool {
-		return owned[i].Created.After(owned[j].Created)
+		if !owned[i].Created.Equal(owned[j].Created) {
+			return owned[i].Created.After(owned[j].Created)
+		}
+		return owned[i].Name < owned[j].Name
 	})
 
 	prune := make(map[string]struct{})
 	for i, snap := range owned {
 		if snap.Name == current {
+			continue
+		}
+		if current == "" && i == 0 {
 			continue
 		}
 		if shouldPruneSnapshot(snap, policy, now, i) {
