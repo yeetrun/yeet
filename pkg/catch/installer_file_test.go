@@ -386,9 +386,10 @@ func TestNewFileInstallerPersistsSnapshotPolicy(t *testing.T) {
 	keep := 3
 	required := false
 	installer, err := NewFileInstaller(server, FileInstallerCfg{
-		InstallerCfg: InstallerCfg{ServiceName: "svc-snapshot-policy"},
-		NoBinary:     true,
-		StageOnly:    true,
+		InstallerCfg:         InstallerCfg{ServiceName: "svc-snapshot-policy"},
+		NoBinary:             true,
+		StageOnly:            true,
+		SnapshotPolicyChange: true,
 		SnapshotPolicy: &db.SnapshotPolicy{
 			Enabled:  &enabled,
 			KeepLast: &keep,
@@ -412,6 +413,42 @@ func TestNewFileInstallerPersistsSnapshotPolicy(t *testing.T) {
 	}
 	if sv.SnapshotPolicy().Enabled().Get() || sv.SnapshotPolicy().KeepLast().Get() != 3 || sv.SnapshotPolicy().MaxAge() != "72h" || sv.SnapshotPolicy().Required().Get() {
 		t.Fatalf("SnapshotPolicy = %#v", sv.SnapshotPolicy().AsStruct())
+	}
+}
+
+func TestNewFileInstallerClearsSnapshotPolicy(t *testing.T) {
+	server := newTestServer(t)
+	enabled := false
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"svc-snapshot-clear": {
+			Name:           "svc-snapshot-clear",
+			SnapshotPolicy: &db.SnapshotPolicy{Enabled: &enabled, MaxAge: "72h"},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg:         InstallerCfg{ServiceName: "svc-snapshot-clear"},
+		NoBinary:             true,
+		StageOnly:            true,
+		SnapshotPolicyChange: true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	sv, ok := dv.Services().GetOk("svc-snapshot-clear")
+	if !ok {
+		t.Fatal("missing service")
+	}
+	if sv.SnapshotPolicy().Valid() {
+		t.Fatalf("SnapshotPolicy = %#v, want nil", sv.SnapshotPolicy().AsStruct())
 	}
 }
 

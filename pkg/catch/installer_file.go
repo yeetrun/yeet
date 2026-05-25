@@ -39,12 +39,13 @@ type FileInstallerCfg struct {
 	InstallerCfg
 	EnvFile bool
 
-	Args           []string
-	Network        NetworkOpts
-	StageOnly      bool
-	NoBinary       bool
-	Publish        []string
-	SnapshotPolicy *db.SnapshotPolicy
+	Args                 []string
+	Network              NetworkOpts
+	StageOnly            bool
+	NoBinary             bool
+	Publish              []string
+	SnapshotPolicyChange bool
+	SnapshotPolicy       *db.SnapshotPolicy
 	// PayloadName preserves the original filename for type detection.
 	PayloadName string
 
@@ -1041,8 +1042,12 @@ func (i *FileInstaller) applyInstallPlanToService(s *db.Service, plan fileInstal
 		return err
 	}
 	i.applyInstallServiceRoot(s)
-	if i.cfg.SnapshotPolicy != nil {
-		s.SnapshotPolicy = i.cfg.SnapshotPolicy.Clone()
+	if i.cfg.SnapshotPolicyChange || i.cfg.SnapshotPolicy != nil {
+		if i.cfg.SnapshotPolicy == nil {
+			s.SnapshotPolicy = nil
+		} else {
+			s.SnapshotPolicy = i.cfg.SnapshotPolicy.Clone()
+		}
 	}
 	applyInstallNetworks(s, i.macvlan, i.svcNet, i.tsNet)
 	stageArtifacts(s, i.artifacts)

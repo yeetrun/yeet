@@ -271,7 +271,7 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	if e.sn == SystemService {
 		return fmt.Errorf("cannot run, reserved service name")
 	}
-	policy, err := snapshotPolicyFromRunFlags(flags)
+	policy, policyChange, err := snapshotPolicyFromRunFlags(flags)
 	if err != nil {
 		return err
 	}
@@ -279,15 +279,15 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	cfg.ServiceRoot = flags.ServiceRoot
 	cfg.ServiceRootZFS = flags.ZFS
 	cfg.Pull = flags.Pull
+	cfg.SnapshotPolicyChange = policyChange
 	cfg.SnapshotPolicy = policy
 	return e.runInstall("run", e.payloadReader(), cfg)
 }
 
-func snapshotPolicyFromRunFlags(flags cli.RunFlags) (*db.SnapshotPolicy, error) {
+func snapshotPolicyFromRunFlags(flags cli.RunFlags) (*db.SnapshotPolicy, bool, error) {
 	if !flags.SnapshotChange {
-		return nil, nil
+		return nil, false, nil
 	}
-	policy := &db.SnapshotPolicy{}
 	setFlags := cli.ServiceSetFlags{
 		Snapshots:        flags.Snapshots,
 		SnapshotKeepLast: flags.SnapshotKeepLast,
@@ -297,12 +297,28 @@ func snapshotPolicyFromRunFlags(flags cli.RunFlags) (*db.SnapshotPolicy, error) 
 		SnapshotChange:   true,
 	}
 	if err := validateSnapshotInheritExclusive(setFlags); err != nil {
-		return nil, err
+		return nil, false, err
 	}
+	if setFlags.Snapshots == "inherit" {
+		return nil, true, nil
+	}
+	policy := &db.SnapshotPolicy{}
 	if err := applyServiceSnapshotFlags(policy, setFlags); err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return policy, nil
+	if snapshotPolicyEmpty(policy) {
+		return nil, true, nil
+	}
+	return policy, true, nil
+}
+
+func snapshotPolicyEmpty(policy *db.SnapshotPolicy) bool {
+	return policy == nil ||
+		policy.Enabled == nil &&
+			policy.KeepLast == nil &&
+			strings.TrimSpace(policy.MaxAge) == "" &&
+			policy.Required == nil &&
+			len(policy.Events) == 0
 }
 
 func (e *ttyExecer) copyCmdFunc(args []string) error {
