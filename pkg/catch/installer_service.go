@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand/v2"
 	"net/netip"
@@ -277,15 +278,37 @@ func (si *Installer) InstallGen(gen int) error {
 	if runtime.GOOS == "darwin" {
 		panic("macOS is not supported")
 	}
+	return si.installGen(gen)
+}
 
-	d, s, err := si.commitGen(gen)
+func (si *Installer) installGen(gen int) error {
+	preService, err := si.serviceBeforeInstall()
 	if err != nil {
-		return fmt.Errorf("failed to commit gen: %v", err)
+		return err
+	}
+	if preService != nil {
+		if err := validateInstallRequest(si.icfg.Pull, preService.ServiceType); err != nil {
+			return err
+		}
 	}
 
-	si.prune()
-
-	return si.doInstall(d, s)
+	operation := func() error {
+		d, s, err := si.commitGen(gen)
+		if err != nil {
+			return fmt.Errorf("failed to commit gen: %v", err)
+		}
+		si.prune()
+		return si.doInstall(d, s)
+	}
+	if preService == nil {
+		return operation()
+	}
+	return si.s.withServiceSnapshot(context.Background(), snapshotOperation{
+		Service:   preService,
+		Event:     snapshotEventRun,
+		Writer:    si.snapshotWriter(),
+		Operation: operation,
+	})
 }
 
 // Install installs the service.
@@ -297,16 +320,25 @@ func (si *Installer) doInstall(_ *db.Data, s *db.Service) error {
 	if err := validateInstallRequest(si.icfg.Pull, s.ServiceType); err != nil {
 		return err
 	}
-	if err := si.s.withServiceSnapshot(context.Background(), snapshotOperation{
-		Service:   s,
-		Event:     snapshotEventRun,
-		Writer:    printerFuncWriter{printer: si.icfg.Printer},
-		Operation: func() error { return runInstallPhaseForSnapshot(si, s) },
-	}); err != nil {
+	if err := runInstallPhaseForSnapshot(si, s); err != nil {
 		return err
 	}
 	si.publishInstallEvent(s)
 	return nil
+}
+
+func (si *Installer) serviceBeforeInstall() (*db.Service, error) {
+	if si == nil || si.s == nil {
+		return nil, nil
+	}
+	sv, err := si.s.serviceView(si.icfg.ServiceName)
+	if err != nil {
+		if err == errServiceNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return sv.AsStruct(), nil
 }
 
 func validateInstallRequest(pull bool, serviceType db.ServiceType) error {
@@ -322,6 +354,16 @@ var runInstallPhaseForSnapshot = (*Installer).runInstallPhase
 
 type printerFuncWriter struct {
 	printer func(string, ...any)
+}
+
+func (si *Installer) snapshotWriter() io.Writer {
+	if si.icfg.ClientOut != nil {
+		return si.icfg.ClientOut
+	}
+	if si.icfg.Printer != nil {
+		return printerFuncWriter{printer: si.icfg.Printer}
+	}
+	return nil
 }
 
 func (w printerFuncWriter) Write(p []byte) (int, error) {

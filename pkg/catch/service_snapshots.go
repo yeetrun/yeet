@@ -140,7 +140,7 @@ func (s *Server) finishSnapshotOperation(ctx context.Context, op snapshotOperati
 }
 
 func isInitialRunSnapshot(service *db.Service, event snapshotEvent) bool {
-	return event == snapshotEventRun && service.Generation <= 1 && service.LatestGeneration <= 1
+	return event == snapshotEventRun && service.Generation == 0 && service.LatestGeneration == 0
 }
 
 func writeSnapshotWarning(w io.Writer, format string, args ...any) {
