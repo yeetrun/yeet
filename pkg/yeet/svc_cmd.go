@@ -654,7 +654,7 @@ func applySnapshotControlValue(opts *snapshotOptions, name, value string) error 
 	case "--snapshot-required":
 		return applySnapshotRequiredControlValue(opts, value)
 	case "--snapshot-events":
-		applySnapshotEventsControlValue(opts, value)
+		return applySnapshotEventsControlValue(opts, value)
 	}
 	return nil
 }
@@ -676,6 +676,7 @@ func applySnapshotMaxAgeControlValue(opts *snapshotOptions, value string) {
 		return
 	}
 	opts.MaxAge = strings.TrimSpace(value)
+	opts.MaxAgeInherit = false
 }
 
 func applySnapshotRequiredControlValue(opts *snapshotOptions, value string) error {
@@ -688,13 +689,19 @@ func applySnapshotRequiredControlValue(opts *snapshotOptions, value string) erro
 	return nil
 }
 
-func applySnapshotEventsControlValue(opts *snapshotOptions, value string) {
+func applySnapshotEventsControlValue(opts *snapshotOptions, value string) error {
 	if strings.TrimSpace(value) == "inherit" {
 		opts.EventsInherit = true
 		opts.Events = nil
-		return
+		return nil
 	}
-	opts.Events = splitSnapshotEventList(value)
+	events, err := splitSnapshotEventList(value)
+	if err != nil {
+		return err
+	}
+	opts.Events = events
+	opts.EventsInherit = false
+	return nil
 }
 
 func parseSnapshotModeValue(raw string) (string, error) {
@@ -737,17 +744,17 @@ func parseOptionalPositiveIntOrInheritFlag(raw, name string) (int, bool, error) 
 	return n, false, nil
 }
 
-func splitSnapshotEventList(raw string) []string {
+func splitSnapshotEventList(raw string) ([]string, error) {
 	parts := strings.Split(raw, ",")
 	events := make([]string, 0, len(parts))
 	for _, part := range parts {
 		event := strings.TrimSpace(part)
 		if event == "" {
-			continue
+			return nil, fmt.Errorf("snapshot events must not contain empty values")
 		}
 		events = append(events, event)
 	}
-	return events
+	return events, nil
 }
 
 func handleSvcService(ctx context.Context, req svcCommandRequest) error {
@@ -1979,7 +1986,11 @@ func applyServiceSetSnapshotEvents(entry *ServiceEntry, raw string) error {
 		entry.SnapshotEvents = nil
 		return nil
 	}
-	entry.SnapshotEvents = splitSnapshotEventList(raw)
+	events, err := splitSnapshotEventList(raw)
+	if err != nil {
+		return err
+	}
+	entry.SnapshotEvents = events
 	return nil
 }
 
