@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"math"
 	"regexp"
 	"sort"
@@ -61,6 +62,108 @@ type listedSnapshot struct {
 	Created   time.Time
 	CreatedBy string
 	Service   string
+}
+
+type snapshotOperation struct {
+	Service   *db.Service
+	Event     snapshotEvent
+	Writer    io.Writer
+	Operation func() error
+}
+
+func (s *Server) withServiceSnapshot(ctx context.Context, op snapshotOperation) error {
+	if op.Operation == nil {
+		return nil
+	}
+	if skipsServiceSnapshot(s, op) {
+		return op.Operation()
+	}
+
+	policy, err := s.serviceSnapshotPolicy(op.Service)
+	if err != nil {
+		return err
+	}
+	if !policy.Enabled || !policy.Allows(op.Event) {
+		return op.Operation()
+	}
+
+	now := time.Now()
+	snapshotName, err := s.createSnapshotForOperation(ctx, op, now)
+	if err != nil {
+		if policy.Required {
+			return err
+		}
+		writeSnapshotWarning(op.Writer, "warning: failed to create ZFS snapshot for %q: %v\n", op.Service.Name, err)
+		return op.Operation()
+	}
+
+	opErr := op.Operation()
+	return s.finishSnapshotOperation(ctx, op, policy, now, snapshotName, opErr)
+}
+
+func skipsServiceSnapshot(s *Server, op snapshotOperation) bool {
+	return s == nil ||
+		s.cfg.DB == nil ||
+		op.Service == nil ||
+		strings.TrimSpace(op.Service.ServiceRootZFS) == "" ||
+		isInitialRunSnapshot(op.Service, op.Event)
+}
+
+func (s *Server) serviceSnapshotPolicy(service *db.Service) (effectivePolicy, error) {
+	dv, err := s.cfg.DB.Get()
+	if err != nil {
+		return effectivePolicy{}, err
+	}
+	serverPolicy := snapshotPolicyPtrFromView(dv.SnapshotDefaults())
+	return effectiveSnapshotPolicy(serverPolicy, service.SnapshotPolicy)
+}
+
+func (s *Server) createSnapshotForOperation(ctx context.Context, op snapshotOperation, now time.Time) (string, error) {
+	return createServiceSnapshot(ctx, s.zfsRunner, snapshotCreateRequest{
+		Service:    op.Service.Name,
+		Dataset:    op.Service.ServiceRootZFS,
+		Event:      op.Event,
+		Generation: op.Service.Generation,
+		Now:        now,
+	})
+}
+
+func (s *Server) finishSnapshotOperation(ctx context.Context, op snapshotOperation, policy effectivePolicy, now time.Time, snapshotName string, opErr error) error {
+	if err := s.pruneServiceSnapshots(ctx, op.Service, policy, now, snapshotName); err != nil {
+		writeSnapshotWarning(op.Writer, "warning: failed to prune ZFS snapshots for %q: %v\n", op.Service.Name, err)
+	}
+	if opErr != nil {
+		writeSnapshotWarning(op.Writer, "recovery snapshot: %s\n", snapshotName)
+		return opErr
+	}
+	return nil
+}
+
+func isInitialRunSnapshot(service *db.Service, event snapshotEvent) bool {
+	return event == snapshotEventRun && service.Generation <= 1 && service.LatestGeneration <= 1
+}
+
+func writeSnapshotWarning(w io.Writer, format string, args ...any) {
+	if w == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(w, format, args...)
+}
+
+func (s *Server) pruneServiceSnapshots(ctx context.Context, service *db.Service, policy effectivePolicy, now time.Time, current string) error {
+	if service == nil || strings.TrimSpace(service.ServiceRootZFS) == "" {
+		return nil
+	}
+	snaps, err := listServiceSnapshots(ctx, s.zfsRunner, service.ServiceRootZFS)
+	if err != nil {
+		return err
+	}
+	for _, name := range snapshotsToPrune(snaps, service.Name, policy, now, current) {
+		if err := destroySnapshot(ctx, s.zfsRunner, name); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func effectiveSnapshotPolicy(server, service *db.SnapshotPolicy) (effectivePolicy, error) {

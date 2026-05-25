@@ -41,6 +41,7 @@ var (
 	unmountVolume = func(e *ttyExecer, vol db.Volume) error {
 		return (&systemdMounter{e: e, v: vol}).umount()
 	}
+	dockerComposeUpdate = (*svc.DockerComposeService).Update
 )
 
 func (e *ttyExecer) dockerCmdFunc(args []string) error {
@@ -208,7 +209,17 @@ func (e *ttyExecer) dockerUpdateCmdFunc() error {
 		ui.FailStep(err.Error())
 		return err
 	}
-	if err := docker.Update(); err != nil {
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		ui.FailStep(err.Error())
+		return err
+	}
+	if err := e.s.withServiceSnapshot(e.ctx, snapshotOperation{
+		Service:   sv.AsStruct(),
+		Event:     snapshotEventDockerUpdate,
+		Writer:    e.rw,
+		Operation: func() error { return dockerComposeUpdate(docker) },
+	}); err != nil {
 		ui.FailStep(err.Error())
 		return err
 	}
