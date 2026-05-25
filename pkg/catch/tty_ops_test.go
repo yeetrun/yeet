@@ -756,6 +756,56 @@ func TestRenderDockerOutdatedRowsPropagatesWriteErrors(t *testing.T) {
 	}
 }
 
+func TestDockerUpdateSnapshotsBeforeComposeUpdate(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"svc": {
+				Name:             "svc",
+				ServiceType:      db.ServiceTypeDockerCompose,
+				ServiceRootZFS:   "tank/apps/svc",
+				Generation:       3,
+				LatestGeneration: 3,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	var calls []string
+	snapshotCreated := false
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		switch args[0] {
+		case "snapshot":
+			snapshotCreated = true
+			return "", "", nil
+		case "list":
+			return "", "", nil
+		default:
+			return "", "unexpected zfs command: " + strings.Join(args, " "), errZFSCommandFailed
+		}
+	}
+	oldDockerComposeUpdate := dockerComposeUpdate
+	dockerComposeUpdate = func(_ *svc.DockerComposeService) error {
+		if !snapshotCreated {
+			t.Fatal("docker compose update ran before snapshot was created")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		dockerComposeUpdate = oldDockerComposeUpdate
+	})
+
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "svc", rw: &bytes.Buffer{}}
+	if err := execer.dockerUpdateCmdFunc(); err != nil {
+		t.Fatalf("dockerUpdateCmdFunc: %v", err)
+	}
+	if len(calls) == 0 || !strings.HasPrefix(calls[0], "snapshot ") {
+		t.Fatalf("zfs calls = %#v, want snapshot first", calls)
+	}
+}
+
 func TestDockerUpdateCmdFuncFailsBeforeDockerForNonComposeService(t *testing.T) {
 	server := newTestServer(t)
 	if err := server.cfg.DB.Set(&db.Data{

@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -168,6 +169,108 @@ func TestInstallValidationRejectsPullForNonComposeServices(t *testing.T) {
 	}
 	if err := validateInstallRequest(true, db.ServiceTypeDockerCompose); err != nil {
 		t.Fatalf("validateInstallRequest returned error for compose pull: %v", err)
+	}
+}
+
+func TestInstallGenSnapshotsBeforeInstallPhase(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {
+				Name:             "api",
+				ServiceType:      db.ServiceTypeSystemd,
+				ServiceRootZFS:   "tank/apps/api",
+				Generation:       1,
+				LatestGeneration: 1,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{"staged": "/srv/api/bin/api-staged"}},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	var calls []string
+	snapshotCreated := false
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		switch args[0] {
+		case "snapshot":
+			snapshotCreated = true
+			return "", "", nil
+		case "list":
+			return "", "", nil
+		default:
+			return "", "unexpected zfs command: " + strings.Join(args, " "), errZFSCommandFailed
+		}
+	}
+	oldRunInstallPhase := runInstallPhaseForSnapshot
+	runInstallPhaseForSnapshot = func(_ *Installer, s *db.Service) error {
+		if !snapshotCreated {
+			t.Fatal("install phase ran before snapshot was created")
+		}
+		if s.Generation != 2 || s.LatestGeneration != 2 {
+			t.Fatalf("generation/latest = %d/%d, want 2/2", s.Generation, s.LatestGeneration)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		runInstallPhaseForSnapshot = oldRunInstallPhase
+	})
+
+	var out bytes.Buffer
+	inst := &Installer{s: server, icfg: InstallerCfg{ServiceName: "api", ClientOut: &out}}
+	_, service, err := inst.commitGen(0)
+	if err != nil {
+		t.Fatalf("commitGen: %v", err)
+	}
+	if err := inst.doInstall(nil, service); err != nil {
+		t.Fatalf("doInstall: %v", err)
+	}
+	if len(calls) == 0 || !strings.HasPrefix(calls[0], "snapshot ") {
+		t.Fatalf("zfs calls = %#v, want snapshot first", calls)
+	}
+}
+
+func TestInstallGenSnapshotsSkipInitialDeploy(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {
+				Name:           "api",
+				ServiceType:    db.ServiceTypeSystemd,
+				ServiceRootZFS: "tank/apps/api",
+				Artifacts: db.ArtifactStore{
+					db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{"staged": "/srv/api/bin/api-staged"}},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		t.Fatalf("unexpected zfs command during initial deploy: %v", args)
+		return "", "", nil
+	}
+	oldRunInstallPhase := runInstallPhaseForSnapshot
+	runInstallPhaseForSnapshot = func(_ *Installer, s *db.Service) error {
+		if s.Generation != 1 || s.LatestGeneration != 1 {
+			t.Fatalf("generation/latest = %d/%d, want initial 1/1", s.Generation, s.LatestGeneration)
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		runInstallPhaseForSnapshot = oldRunInstallPhase
+	})
+
+	inst := &Installer{s: server, icfg: InstallerCfg{ServiceName: "api"}}
+	_, service, err := inst.commitGen(0)
+	if err != nil {
+		t.Fatalf("commitGen: %v", err)
+	}
+	if err := inst.doInstall(nil, service); err != nil {
+		t.Fatalf("doInstall: %v", err)
 	}
 }
 

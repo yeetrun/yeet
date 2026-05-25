@@ -297,7 +297,12 @@ func (si *Installer) doInstall(_ *db.Data, s *db.Service) error {
 	if err := validateInstallRequest(si.icfg.Pull, s.ServiceType); err != nil {
 		return err
 	}
-	if err := si.runInstallPhase(s); err != nil {
+	if err := si.s.withServiceSnapshot(context.Background(), snapshotOperation{
+		Service:   s,
+		Event:     snapshotEventRun,
+		Writer:    printerFuncWriter{printer: si.icfg.Printer},
+		Operation: func() error { return runInstallPhaseForSnapshot(si, s) },
+	}); err != nil {
 		return err
 	}
 	si.publishInstallEvent(s)
@@ -312,6 +317,19 @@ func validateInstallRequest(pull bool, serviceType db.ServiceType) error {
 }
 
 type installPhase func(*Installer, *db.Service) error
+
+var runInstallPhaseForSnapshot = (*Installer).runInstallPhase
+
+type printerFuncWriter struct {
+	printer func(string, ...any)
+}
+
+func (w printerFuncWriter) Write(p []byte) (int, error) {
+	if w.printer != nil {
+		w.printer("%s", string(p))
+	}
+	return len(p), nil
+}
 
 func (si *Installer) runInstallPhase(s *db.Service) error {
 	phase, err := installPhaseForServiceType(s.ServiceType)

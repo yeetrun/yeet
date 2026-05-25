@@ -1083,6 +1083,16 @@ func TestServiceSetMigrationFromZFSToFilesystemClearsDataset(t *testing.T) {
 	if err := os.MkdirAll(oldRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		switch args[0] {
+		case "snapshot":
+			return "", "", nil
+		case "list":
+			return "", "", nil
+		default:
+			return "", "unexpected zfs command: " + strings.Join(args, " "), errZFSCommandFailed
+		}
+	}
 	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
 		s.ServiceRoot = oldRoot
 		s.ServiceRootZFS = "tank/apps/svc"
@@ -1095,6 +1105,62 @@ func TestServiceSetMigrationFromZFSToFilesystemClearsDataset(t *testing.T) {
 		t.Fatalf("migrateServiceRoot: %v", err)
 	}
 
+	assertServiceRoot(t, server, name, newRoot)
+	assertServiceRootZFS(t, server, name, "")
+}
+
+func TestServiceRootMigrationSnapshotsOldZFSDatasetBeforeMaterializing(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc"
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	newRoot := filepath.Join(t.TempDir(), "new")
+	withServiceSetRootStopped(t)
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(serviceDataDirForRoot(oldRoot), "config.txt"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeSystemd
+		s.ServiceRoot = oldRoot
+		s.ServiceRootZFS = "tank/apps/svc"
+		s.Generation = 2
+		s.LatestGeneration = 2
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service: %v", err)
+	}
+
+	var order []string
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		switch args[0] {
+		case "snapshot":
+			order = append(order, "snapshot")
+			got := args[len(args)-1]
+			if !strings.HasPrefix(got, "tank/apps/svc@yeet-") {
+				t.Fatalf("snapshot target = %q, want old dataset snapshot", got)
+			}
+			return "", "", nil
+		case "list":
+			return "", "", nil
+		default:
+			return "", "unexpected zfs command: " + strings.Join(args, " "), errZFSCommandFailed
+		}
+	}
+	withServiceSetRootRename(t, func(oldPath, newPath string) error {
+		order = append(order, "rename")
+		return os.Rename(oldPath, newPath)
+	})
+
+	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationCopy); err != nil {
+		t.Fatalf("migrateServiceRoot: %v", err)
+	}
+
+	want := []string{"snapshot", "rename"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("order = %#v, want %#v", order, want)
+	}
 	assertServiceRoot(t, server, name, newRoot)
 	assertServiceRootZFS(t, server, name, "")
 }

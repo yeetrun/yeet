@@ -430,21 +430,28 @@ func (s *Server) migrateServiceRootWithPlan(plan serviceRootMigrationPlan, mode 
 	if err != nil {
 		return err
 	}
-	if err := s.materializeServiceRootMigration(plan, mode); err != nil {
-		return err
-	}
+	return s.withServiceSnapshot(context.Background(), snapshotOperation{
+		Service: oldService,
+		Event:   snapshotEventServiceRootMigration,
+		Writer:  io.Discard,
+		Operation: func() error {
+			if err := s.materializeServiceRootMigration(plan, mode); err != nil {
+				return err
+			}
 
-	updatedService, err := s.updatedServiceForRootMigration(plan, mode, oldService)
-	if err != nil {
-		return err
-	}
-	if err := s.applyServiceRootMigrationRuntimeChanges(plan, mode, oldService, updatedService); err != nil {
-		return err
-	}
-	if err := s.updateMigratedServiceRoot(plan, updatedService); err != nil {
-		return err
-	}
-	return s.refreshServiceRootMigrationPrereqs(oldService, updatedService)
+			updatedService, err := s.updatedServiceForRootMigration(plan, mode, oldService)
+			if err != nil {
+				return err
+			}
+			if err := s.applyServiceRootMigrationRuntimeChanges(plan, mode, oldService, updatedService); err != nil {
+				return err
+			}
+			if err := s.updateMigratedServiceRoot(plan, updatedService); err != nil {
+				return err
+			}
+			return s.refreshServiceRootMigrationPrereqs(oldService, updatedService)
+		},
+	})
 }
 
 func (s *Server) materializeServiceRootMigration(plan serviceRootMigrationPlan, mode serviceRootMigrationMode) error {
