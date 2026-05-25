@@ -496,6 +496,9 @@ func extractSnapshotOptions(args []string) (snapshotOptions, []string, bool, err
 	if len(args) == 0 {
 		return snapshotOptions{}, args, false, nil
 	}
+	if err := validateSnapshotControlInheritExclusive(args); err != nil {
+		return snapshotOptions{}, nil, false, err
+	}
 	out := make([]string, 0, len(args))
 	opts := snapshotOptions{}
 	changed := false
@@ -517,6 +520,49 @@ func extractSnapshotOptions(args []string) (snapshotOptions, []string, bool, err
 		out = append(out, arg)
 	}
 	return opts, out, changed, nil
+}
+
+func validateSnapshotControlInheritExclusive(args []string) error {
+	snapshotsInherit := false
+	fieldFlag := false
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			break
+		}
+		name, value, separate := splitSnapshotControlArg(args, i)
+		if name == "" {
+			continue
+		}
+		if name == "--snapshots" && strings.EqualFold(strings.TrimSpace(value), "inherit") {
+			snapshotsInherit = true
+		}
+		if name != "--snapshots" {
+			fieldFlag = true
+		}
+		if separate {
+			i++
+		}
+	}
+	if snapshotsInherit && fieldFlag {
+		return fmt.Errorf("--snapshots=inherit cannot be combined with field-level snapshot flags")
+	}
+	return nil
+}
+
+func splitSnapshotControlArg(args []string, i int) (name string, value string, separate bool) {
+	arg := args[i]
+	for _, name := range snapshotControlFlagNames {
+		if strings.HasPrefix(arg, name+"=") {
+			return name, strings.TrimPrefix(arg, name+"="), false
+		}
+		if arg == name {
+			if i+1 >= len(args) {
+				return name, "", false
+			}
+			return name, args[i+1], true
+		}
+	}
+	return "", "", false
 }
 
 func parseSnapshotControlArg(args []string, i int, opts *snapshotOptions) (int, bool, error) {

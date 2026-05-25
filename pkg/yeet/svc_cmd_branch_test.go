@@ -754,6 +754,45 @@ func TestParseSvcRunControlFlagsExtractsSnapshotOptions(t *testing.T) {
 	}
 }
 
+func TestSvcRunSnapshotInheritWithFieldFlagDoesNotRunRemoteOrSaveConfig(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+		t.Fatalf("unexpected remote run: image=%q args=%v", image, args)
+		return false, nil
+	}
+	required := true
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:             "svc-a",
+		Host:             "host-a",
+		Type:             serviceTypeRun,
+		Payload:          "old.sh",
+		Snapshots:        "off",
+		SnapshotKeepLast: 3,
+		SnapshotMaxAge:   "72h",
+		SnapshotRequired: &required,
+		SnapshotEvents:   []string{"run"},
+	})
+
+	err := HandleSvcCmd([]string{"run", "ghcr.io/example/app:latest", "--snapshots=inherit", "--snapshot-keep-last=3"})
+	if err == nil || !strings.Contains(err.Error(), "--snapshots=inherit cannot be combined with field-level snapshot flags") {
+		t.Fatalf("HandleSvcCmd error = %v, want mutually exclusive snapshot flags", err)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if entry.Snapshots != "off" || entry.SnapshotKeepLast != 3 || entry.SnapshotMaxAge != "72h" || entry.SnapshotRequired == nil || !*entry.SnapshotRequired || !reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) {
+		t.Fatalf("entry = %#v, want unchanged snapshot config", entry)
+	}
+}
+
 func TestParseSvcRunControlFlagsRejectsMissingSnapshotValues(t *testing.T) {
 	tests := []struct {
 		name    string
