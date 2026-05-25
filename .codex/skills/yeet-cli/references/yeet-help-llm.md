@@ -385,6 +385,16 @@ Manage service settings
 
 Get detailed help: `yeet service --help-llm`
 
+### `snapshots`
+
+Manage catch ZFS snapshot defaults
+
+**Commands**:
+
+- `snapshots defaults`: Show or set catch snapshot defaults
+
+Get detailed help: `yeet snapshots --help-llm`
+
 ## Examples
 
 ```
@@ -421,7 +431,7 @@ Install/update from a payload (binary, compose, image, Dockerfile)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] run [OPTIONS] SVC PAYLOAD [--service-root=/abs/path|dataset] [--zfs] [-- <payload args>]
+yeet [GLOBAL_OPTIONS] run [OPTIONS] SVC PAYLOAD [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>]
 ```
 
 ## Global Options
@@ -468,6 +478,10 @@ yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
 
 ```
 yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs
+```
+
+```
+yeet run <svc> ./compose.yml --snapshots=off
 ```
 
 ```
@@ -1948,6 +1962,14 @@ yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy
 yeet service set <svc> --service-root=/srv/apps/<svc> --empty
 ```
 
+```
+yeet service set <svc> --snapshots=off
+```
+
+```
+yeet service set <svc> --snapshots=on --snapshot-keep-last=5 --snapshot-max-age=7d
+```
+
 Get detailed help: `yeet service set --help-llm`
 
 ### `service sync`
@@ -2435,7 +2457,7 @@ Set service settings
 ## Usage
 
 ```
-yeet [GLOBAL OPTIONS] service set <svc> --service-root=/abs/path|dataset [--zfs] [--copy|--empty]
+yeet [GLOBAL OPTIONS] service set <svc> [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]
 ```
 
 ## Global Options
@@ -2482,6 +2504,146 @@ yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy
 
 ```
 yeet service set <svc> --service-root=/srv/apps/<svc> --empty
+```
+
+```
+yeet service set <svc> --snapshots=off
+```
+
+```
+yeet service set <svc> --snapshots=on --snapshot-keep-last=5 --snapshot-max-age=7d
+```
+
+
+````
+
+## Group: snapshots
+
+````
+# yeet - snapshots
+
+Manage catch ZFS snapshot defaults
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] snapshots COMMAND [OPTIONS] [ARGS...]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Commands
+
+### `snapshots defaults`
+
+Show or set catch snapshot defaults
+
+**Examples**:
+
+```
+yeet snapshots defaults show
+```
+
+```
+yeet snapshots defaults set --enabled=false
+```
+
+```
+yeet snapshots defaults set --enabled=true --keep-last=5 --max-age=7d
+```
+
+Get detailed help: `yeet snapshots defaults --help-llm`
+
+
+````
+
+## Group Command: snapshots defaults
+
+````
+# yeet snapshots defaults
+
+Show or set catch snapshot defaults
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] snapshots defaults show | snapshots defaults set [--enabled=true|false] [--keep-last=N] [--max-age=7d] [--events=run,docker-update] [--required=true|false]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet snapshots defaults show
+```
+
+```
+yeet snapshots defaults set --enabled=false
+```
+
+```
+yeet snapshots defaults set --enabled=true --keep-last=5 --max-age=7d
 ```
 
 
