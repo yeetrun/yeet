@@ -402,6 +402,9 @@ var ttyCommandHandlers = map[string]ttyCommandHandler{
 	"docker": func(e *ttyExecer, args []string) error {
 		return e.dockerCmdFunc(args)
 	},
+	"snapshots": func(e *ttyExecer, args []string) error {
+		return e.snapshotsCmdFunc(args)
+	},
 	"stage": func(e *ttyExecer, args []string) error {
 		flags, subcmd, stageArgs, err := cli.ParseStage(args)
 		if err != nil {

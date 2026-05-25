@@ -140,6 +140,22 @@ func effectiveSnapshotEvents(raw []string) (map[snapshotEvent]struct{}, error) {
 	return events, nil
 }
 
+func parseSnapshotEvents(raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	events := make([]string, 0, len(parts))
+	for _, part := range parts {
+		event := strings.TrimSpace(part)
+		if event == "" {
+			return nil, fmt.Errorf("snapshot events must not contain empty values")
+		}
+		events = append(events, event)
+	}
+	if _, err := effectiveSnapshotEvents(events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
 func parseSnapshotMaxAge(raw string) (time.Duration, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
