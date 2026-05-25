@@ -97,6 +97,24 @@ func TestServiceSetSnapshotOnlyDoesNotRequireStoppedService(t *testing.T) {
 	}
 }
 
+func TestServiceSetSnapshotOnlyRejectsMissingService(t *testing.T) {
+	server := newTestServer(t)
+	name := "missing-snap"
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+
+	err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{Snapshots: "off", SnapshotChange: true})
+	if err == nil || !strings.Contains(err.Error(), `service "missing-snap" not found`) {
+		t.Fatalf("serviceSetCmdFunc error = %v, want missing service", err)
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	if _, ok := dv.Services().GetOk(name); ok {
+		t.Fatalf("service %q was created", name)
+	}
+}
+
 func TestServiceSetSnapshotInheritClearsOverride(t *testing.T) {
 	server := newTestServer(t)
 	name := "svc-snap"
@@ -154,6 +172,40 @@ func TestServiceSetSnapshotFieldInheritClearsOnlyField(t *testing.T) {
 	}
 	if got := policy.Events().Len(); got != 0 {
 		t.Fatalf("Events len = %d, want 0", got)
+	}
+}
+
+func TestServiceSetRootWithInvalidSnapshotDoesNotMigrateRoot(t *testing.T) {
+	server := newTestServer(t)
+	oldRoot := filepath.Join(t.TempDir(), "old-root")
+	name := seedServiceWithRoot(t, server, oldRoot, "")
+	withServiceSetRootStopped(t)
+	if err := os.MkdirAll(filepath.Join(oldRoot, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir old data: %v", err)
+	}
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+	renameCalled := false
+	withServiceSetRootRename(t, func(_, _ string) error {
+		renameCalled = true
+		return nil
+	})
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+
+	err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{
+		ServiceRoot:      newRoot,
+		Copy:             true,
+		SnapshotKeepLast: "bad",
+		SnapshotChange:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--snapshot-keep-last must be a positive integer or inherit") {
+		t.Fatalf("serviceSetCmdFunc error = %v, want snapshot validation", err)
+	}
+	if renameCalled {
+		t.Fatal("root migration rename was called")
+	}
+	assertServiceRoot(t, server, name, oldRoot)
+	if _, err := os.Stat(newRoot); !os.IsNotExist(err) {
+		t.Fatalf("new root stat error = %v, want not exist", err)
 	}
 }
 
