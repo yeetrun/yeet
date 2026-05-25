@@ -62,9 +62,17 @@ func TestSnapshotsDefaultsShow(t *testing.T) {
 	if err := execer.snapshotsCmdFunc([]string{"defaults", "show"}); err != nil {
 		t.Fatalf("snapshotsCmdFunc: %v", err)
 	}
-	got := out.String()
-	if !strings.Contains(got, "enabled = false") || !strings.Contains(got, "keep_last = 3") || !strings.Contains(got, "max_age = \"72h\"") {
-		t.Fatalf("output = %q", got)
+	want := strings.Join([]string{
+		"# effective snapshot defaults",
+		"enabled = false",
+		"keep_last = 3",
+		"max_age = \"72h\"",
+		"events = [\"run\", \"docker-update\", \"service-root-migration\"]",
+		"required = true",
+		"",
+	}, "\n")
+	if got := out.String(); got != want {
+		t.Fatalf("output = %q, want %q", got, want)
 	}
 }
 
@@ -83,6 +91,71 @@ func TestSnapshotsDefaultsSetPersistsPolicy(t *testing.T) {
 	def := dv.SnapshotDefaults()
 	if !def.Valid() || def.Enabled().Get() || def.KeepLast().Get() != 3 || def.MaxAge() != "72h" || def.Required().Get() {
 		t.Fatalf("defaults = %#v", def.AsStruct())
+	}
+}
+
+func TestSnapshotsDefaultsSetInvalidKeepLastRollsBack(t *testing.T) {
+	server := newTestServer(t)
+	seedSnapshotDefaults(t, server)
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	err := execer.snapshotsCmdFunc([]string{"defaults", "set", "--enabled=false", "--keep-last=0"})
+	if err == nil {
+		t.Fatal("snapshotsCmdFunc succeeded with invalid keep-last")
+	}
+	assertSeedSnapshotDefaults(t, server)
+}
+
+func TestSnapshotsDefaultsSetInvalidEventsRollsBack(t *testing.T) {
+	server := newTestServer(t)
+	seedSnapshotDefaults(t, server)
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	err := execer.snapshotsCmdFunc([]string{"defaults", "set", "--enabled=false", "--events=run,bad-event"})
+	if err == nil {
+		t.Fatal("snapshotsCmdFunc succeeded with invalid events")
+	}
+	assertSeedSnapshotDefaults(t, server)
+}
+
+func TestApplySnapshotDefaultsFlagsRejectsNilPolicy(t *testing.T) {
+	err := applySnapshotDefaultsFlags(nil, cli.SnapshotDefaultsSetFlags{Enabled: "false"})
+	if err == nil {
+		t.Fatal("applySnapshotDefaultsFlags succeeded with nil policy")
+	}
+}
+
+func seedSnapshotDefaults(t *testing.T, server *Server) {
+	t.Helper()
+	enabled := true
+	keep := 4
+	required := true
+	if _, err := server.cfg.DB.MutateData(func(d *db.Data) error {
+		d.SnapshotDefaults = &db.SnapshotPolicy{
+			Enabled:  &enabled,
+			KeepLast: &keep,
+			MaxAge:   "48h",
+			Events:   []string{"run"},
+			Required: &required,
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed defaults: %v", err)
+	}
+}
+
+func assertSeedSnapshotDefaults(t *testing.T, server *Server) {
+	t.Helper()
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	def := dv.SnapshotDefaults()
+	if !def.Valid() || !def.Enabled().Get() || def.KeepLast().Get() != 4 || def.MaxAge() != "48h" || !def.Required().Get() {
+		t.Fatalf("defaults = %#v", def.AsStruct())
+	}
+	if got := def.Events().AsSlice(); len(got) != 1 || got[0] != "run" {
+		t.Fatalf("events = %#v", got)
 	}
 }
 

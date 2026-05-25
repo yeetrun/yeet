@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
@@ -76,83 +75,6 @@ func (s *Server) serviceSnapshotInfo(dv *db.DataView, sv db.ServiceView) (catchr
 		Override:  snapshotPolicyRPC(servicePolicy),
 		Effective: effectiveSnapshotPolicyRPCWithPreferred(effective, preferredEffectiveSnapshotMaxAge(serverPolicy, servicePolicy)),
 	}, nil
-}
-
-func snapshotPolicyPtrFromView(view db.SnapshotPolicyView) *db.SnapshotPolicy {
-	if !view.Valid() {
-		return nil
-	}
-	return view.AsStruct()
-}
-
-func snapshotPolicyRPC(policy *db.SnapshotPolicy) *catchrpc.SnapshotPolicy {
-	if policy == nil {
-		return nil
-	}
-	out := &catchrpc.SnapshotPolicy{
-		MaxAge: policy.MaxAge,
-		Events: append([]string(nil), policy.Events...),
-	}
-	if policy.Enabled != nil {
-		out.Enabled = boolPointer(*policy.Enabled)
-	}
-	if policy.KeepLast != nil {
-		out.KeepLast = intPointer(*policy.KeepLast)
-	}
-	if policy.Required != nil {
-		out.Required = boolPointer(*policy.Required)
-	}
-	return out
-}
-
-func effectiveSnapshotPolicyRPCWithPreferred(policy effectivePolicy, preferredMaxAge string) catchrpc.EffectiveSnapshotPolicy {
-	return catchrpc.EffectiveSnapshotPolicy{
-		Enabled:  policy.Enabled,
-		KeepLast: policy.KeepLast,
-		MaxAge:   formatEffectiveSnapshotMaxAge(policy.MaxAge, preferredMaxAge),
-		Events:   effectiveSnapshotEventStrings(policy.Events),
-		Required: policy.Required,
-	}
-}
-
-func preferredEffectiveSnapshotMaxAge(server, service *db.SnapshotPolicy) string {
-	if service != nil && service.MaxAge != "" {
-		return service.MaxAge
-	}
-	if server != nil && server.MaxAge != "" {
-		return server.MaxAge
-	}
-	return "7d"
-}
-
-func formatEffectiveSnapshotMaxAge(maxAge time.Duration, preferred string) string {
-	if preferred != "" {
-		if parsed, err := parseSnapshotMaxAge(preferred); err == nil && parsed == maxAge {
-			return preferred
-		}
-	}
-	if maxAge == defaultSnapshotMaxAge {
-		return "7d"
-	}
-	if maxAge%(24*time.Hour) == 0 {
-		return fmt.Sprintf("%dd", maxAge/(24*time.Hour))
-	}
-	return maxAge.String()
-}
-
-func effectiveSnapshotEventStrings(events map[snapshotEvent]struct{}) []string {
-	ordered := []snapshotEvent{
-		snapshotEventRun,
-		snapshotEventDockerUpdate,
-		snapshotEventServiceRootMigration,
-	}
-	out := make([]string, 0, len(events))
-	for _, event := range ordered {
-		if _, ok := events[event]; ok {
-			out = append(out, string(event))
-		}
-	}
-	return out
 }
 
 func serviceHasStagedChanges(sv db.ServiceView) bool {

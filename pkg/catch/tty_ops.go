@@ -250,6 +250,7 @@ func (e *ttyExecer) showSnapshotDefaults() error {
 	if err != nil {
 		return err
 	}
+	writef(e.rw, "# effective snapshot defaults\n")
 	printSnapshotPolicy(e.rw, effectiveSnapshotPolicyRPCWithPreferred(effective, preferredEffectiveSnapshotMaxAge(defaults, nil)))
 	return nil
 }
@@ -266,7 +267,7 @@ func (e *ttyExecer) setSnapshotDefaults(flags cli.SnapshotDefaultsSetFlags) erro
 
 func applySnapshotDefaultsFlags(policy *db.SnapshotPolicy, flags cli.SnapshotDefaultsSetFlags) error {
 	if policy == nil {
-		policy = &db.SnapshotPolicy{}
+		return fmt.Errorf("snapshot defaults policy is nil")
 	}
 	if err := applySnapshotBoolFlag(&policy.Enabled, "--enabled", flags.Enabled); err != nil {
 		return err

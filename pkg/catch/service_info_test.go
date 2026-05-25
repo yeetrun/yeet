@@ -126,6 +126,92 @@ func TestServiceInfoIncludesSnapshotPolicy(t *testing.T) {
 	}
 }
 
+func TestServiceInfoSnapshotDefaultsInherited(t *testing.T) {
+	server := newTestServer(t)
+	enabled := true
+	keep := 7
+	required := false
+	if err := server.cfg.DB.Set(&db.Data{
+		SnapshotDefaults: &db.SnapshotPolicy{
+			Enabled:  &enabled,
+			KeepLast: &keep,
+			MaxAge:   "14d",
+			Events:   []string{"run", "docker-update"},
+			Required: &required,
+		},
+		Services: map[string]*db.Service{
+			"svc-info": {
+				Name:           "svc-info",
+				ServiceRoot:    "/tank/apps/svc-info",
+				ServiceRootZFS: "tank/apps/svc-info",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	resp, err := server.serviceInfo("svc-info")
+	if err != nil {
+		t.Fatalf("serviceInfo: %v", err)
+	}
+	snapshots := resp.Info.Snapshots
+	if snapshots == nil {
+		t.Fatal("snapshots = nil")
+	}
+	if snapshots.Override != nil {
+		t.Fatalf("override = %#v, want nil", snapshots.Override)
+	}
+	if !snapshots.Effective.Enabled || snapshots.Effective.KeepLast != 7 || snapshots.Effective.MaxAge != "14d" || snapshots.Effective.Required {
+		t.Fatalf("effective = %#v", snapshots.Effective)
+	}
+	if got := snapshots.Effective.Events; len(got) != 2 || got[0] != "run" || got[1] != "docker-update" {
+		t.Fatalf("events = %#v", got)
+	}
+}
+
+func TestServiceInfoSnapshotServiceOverridePrecedence(t *testing.T) {
+	server := newTestServer(t)
+	serverEnabled := true
+	keep := 8
+	required := true
+	serviceEnabled := false
+	if err := server.cfg.DB.Set(&db.Data{
+		SnapshotDefaults: &db.SnapshotPolicy{
+			Enabled:  &serverEnabled,
+			KeepLast: &keep,
+			MaxAge:   "14d",
+			Events:   []string{"run", "docker-update"},
+			Required: &required,
+		},
+		Services: map[string]*db.Service{
+			"svc-info": {
+				Name:           "svc-info",
+				ServiceRoot:    "/tank/apps/svc-info",
+				ServiceRootZFS: "tank/apps/svc-info",
+				SnapshotPolicy: &db.SnapshotPolicy{Enabled: &serviceEnabled, MaxAge: "72h"},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	resp, err := server.serviceInfo("svc-info")
+	if err != nil {
+		t.Fatalf("serviceInfo: %v", err)
+	}
+	snapshots := resp.Info.Snapshots
+	if snapshots == nil || snapshots.Override == nil || snapshots.Override.Enabled == nil || *snapshots.Override.Enabled {
+		t.Fatalf("override = %#v", snapshots)
+	}
+	if snapshots.Override.KeepLast != nil || snapshots.Override.Required != nil || snapshots.Override.MaxAge != "72h" {
+		t.Fatalf("override = %#v", snapshots.Override)
+	}
+	if snapshots.Effective.Enabled || snapshots.Effective.KeepLast != 8 || snapshots.Effective.MaxAge != "72h" || !snapshots.Effective.Required {
+		t.Fatalf("effective = %#v", snapshots.Effective)
+	}
+	if got := snapshots.Effective.Events; len(got) != 2 || got[0] != "run" || got[1] != "docker-update" {
+		t.Fatalf("events = %#v", got)
+	}
+}
+
 func TestTailscaleHasValues(t *testing.T) {
 	tests := []struct {
 		name string
