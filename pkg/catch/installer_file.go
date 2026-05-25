@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/codecutil"
 	"github.com/yeetrun/yeet/pkg/db"
@@ -46,6 +47,7 @@ type FileInstallerCfg struct {
 	Publish              []string
 	SnapshotPolicyChange bool
 	SnapshotPolicy       *db.SnapshotPolicy
+	snapshotPolicyFlags  *cli.ServiceSetFlags
 	// PayloadName preserves the original filename for type detection.
 	PayloadName string
 
@@ -1042,15 +1044,26 @@ func (i *FileInstaller) applyInstallPlanToService(s *db.Service, plan fileInstal
 		return err
 	}
 	i.applyInstallServiceRoot(s)
-	if i.cfg.SnapshotPolicyChange || i.cfg.SnapshotPolicy != nil {
-		if i.cfg.SnapshotPolicy == nil {
-			s.SnapshotPolicy = nil
-		} else {
-			s.SnapshotPolicy = i.cfg.SnapshotPolicy.Clone()
-		}
+	if err := i.applyInstallSnapshotPolicy(s); err != nil {
+		return err
 	}
 	applyInstallNetworks(s, i.macvlan, i.svcNet, i.tsNet)
 	stageArtifacts(s, i.artifacts)
+	return nil
+}
+
+func (i *FileInstaller) applyInstallSnapshotPolicy(s *db.Service) error {
+	if i.cfg.snapshotPolicyFlags != nil {
+		return applySnapshotFlagsToService(s, *i.cfg.snapshotPolicyFlags)
+	}
+	if !i.cfg.SnapshotPolicyChange && i.cfg.SnapshotPolicy == nil {
+		return nil
+	}
+	if i.cfg.SnapshotPolicy == nil {
+		s.SnapshotPolicy = nil
+		return nil
+	}
+	s.SnapshotPolicy = i.cfg.SnapshotPolicy.Clone()
 	return nil
 }
 

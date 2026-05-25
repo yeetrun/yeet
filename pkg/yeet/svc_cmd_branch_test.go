@@ -973,7 +973,7 @@ func TestSaveRunConfigPreservesSnapshotOverrides(t *testing.T) {
 	}
 }
 
-func TestSaveRunConfigReplacesSnapshotOverrides(t *testing.T) {
+func TestSaveRunConfigPatchesSnapshotOverrides(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
 	serviceOverride = "svc-a"
@@ -1001,11 +1001,51 @@ func TestSaveRunConfigReplacesSnapshotOverrides(t *testing.T) {
 	if !ok {
 		t.Fatal("missing service entry")
 	}
-	if entry.Snapshots != "off" || entry.SnapshotMaxAge != "24h" {
-		t.Fatalf("entry = %#v, want explicit snapshot fields", entry)
+	if entry.Snapshots != "off" ||
+		entry.SnapshotKeepLast != 7 ||
+		entry.SnapshotMaxAge != "24h" ||
+		entry.SnapshotRequired == nil ||
+		!*entry.SnapshotRequired ||
+		!reflect.DeepEqual(entry.SnapshotEvents, []string{"run", "docker-update"}) {
+		t.Fatalf("entry = %#v, want patched snapshot fields", entry)
 	}
-	if entry.SnapshotKeepLast != 0 || entry.SnapshotRequired != nil || len(entry.SnapshotEvents) != 0 {
-		t.Fatalf("entry = %#v, want unspecified snapshot fields cleared", entry)
+}
+
+func TestSaveRunConfigFieldInheritPreservesOtherSnapshotOverrides(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	required := true
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:             "svc-a",
+		Host:             "host-a",
+		Type:             serviceTypeRun,
+		Payload:          "old.sh",
+		Snapshots:        "on",
+		SnapshotKeepLast: 7,
+		SnapshotMaxAge:   "168h",
+		SnapshotRequired: &required,
+		SnapshotEvents:   []string{"run", "docker-update"},
+	})
+	if err := saveRunConfig(nil, "", filepath.Join(tmp, "new.sh"), []string{"--snapshot-keep-last=inherit", "--pull"}, "", false); err != nil {
+		t.Fatalf("saveRunConfig: %v", err)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if entry.Snapshots != "on" ||
+		entry.SnapshotKeepLast != 0 ||
+		entry.SnapshotMaxAge != "168h" ||
+		entry.SnapshotRequired == nil ||
+		!*entry.SnapshotRequired ||
+		!reflect.DeepEqual(entry.SnapshotEvents, []string{"run", "docker-update"}) {
+		t.Fatalf("entry = %#v, want only keep-last cleared", entry)
 	}
 }
 

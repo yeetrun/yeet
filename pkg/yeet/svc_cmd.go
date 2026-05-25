@@ -1832,17 +1832,17 @@ func runConfigExistingEntry(loc *projectConfigLocation, host string) (ServiceEnt
 }
 
 func applyRunConfigSnapshotFields(entry *ServiceEntry, existing ServiceEntry, hasExisting bool, opts snapshotOptions, changed bool) {
-	if hasExisting && !changed && serviceEntryHasSnapshotOverride(existing) {
+	if hasExisting && serviceEntryHasSnapshotOverride(existing) {
 		copySnapshotFieldsFromEntry(entry, existing)
-		return
 	}
 	if !changed {
 		return
 	}
-	applySnapshotOptionsToEntry(entry, opts)
-	if entry.Snapshots == "inherit" {
+	if opts.Snapshots == "inherit" {
 		entry.ClearSnapshotOverride()
+		return
 	}
+	applySnapshotOptionsToEntry(entry, opts)
 }
 
 func copySnapshotFieldsFromEntry(dst *ServiceEntry, src ServiceEntry) {
@@ -1854,25 +1854,27 @@ func copySnapshotFieldsFromEntry(dst *ServiceEntry, src ServiceEntry) {
 }
 
 func applySnapshotOptionsToEntry(entry *ServiceEntry, opts snapshotOptions) {
-	entry.Snapshots = opts.Snapshots
+	if opts.Snapshots != "" {
+		entry.Snapshots = opts.Snapshots
+	}
 	if opts.KeepLastInherit {
 		entry.SnapshotKeepLast = 0
-	} else {
+	} else if opts.KeepLast != 0 {
 		entry.SnapshotKeepLast = opts.KeepLast
 	}
 	if opts.MaxAgeInherit {
 		entry.SnapshotMaxAge = ""
-	} else {
+	} else if opts.MaxAge != "" {
 		entry.SnapshotMaxAge = opts.MaxAge
 	}
 	if opts.RequiredInherit {
 		entry.SnapshotRequired = nil
-	} else {
+	} else if opts.Required != nil {
 		entry.SnapshotRequired = cloneBoolPtr(opts.Required)
 	}
 	if opts.EventsInherit {
 		entry.SnapshotEvents = nil
-	} else {
+	} else if len(opts.Events) != 0 {
 		entry.SnapshotEvents = cloneStringSlice(opts.Events)
 	}
 }

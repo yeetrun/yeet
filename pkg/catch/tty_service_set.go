@@ -127,21 +127,28 @@ func (s *Server) updateServiceSnapshotPolicy(name string, flags cli.ServiceSetFl
 		if err := validateSnapshotInheritExclusive(flags); err != nil {
 			return err
 		}
-		if flags.Snapshots == "inherit" {
-			service.SnapshotPolicy = nil
-			return nil
-		}
-		policy := service.SnapshotPolicy
-		if policy == nil {
-			policy = &db.SnapshotPolicy{}
-		}
-		if err := applyServiceSnapshotFlags(policy, flags); err != nil {
-			return err
-		}
-		service.SnapshotPolicy = policy
-		return nil
+		return applySnapshotFlagsToService(service, flags)
 	})
 	return err
+}
+
+func applySnapshotFlagsToService(service *db.Service, flags cli.ServiceSetFlags) error {
+	if err := validateServiceSnapshotFlags(flags); err != nil {
+		return err
+	}
+	if flags.Snapshots == "inherit" {
+		service.SnapshotPolicy = nil
+		return nil
+	}
+	policy := service.SnapshotPolicy
+	if policy == nil {
+		policy = &db.SnapshotPolicy{}
+	}
+	if err := applyServiceSnapshotFlags(policy, flags); err != nil {
+		return err
+	}
+	service.SnapshotPolicy = policy
+	return nil
 }
 
 func validateServiceSnapshotFlags(flags cli.ServiceSetFlags) error {
