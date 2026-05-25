@@ -321,24 +321,28 @@ func handleSvcEnv(ctx context.Context, req svcCommandRequest) error {
 }
 
 type parsedSvcRun struct {
-	Payload           string
-	Args              []string
-	EnvFile           string
-	EnvFileArg        string
-	EnvFileSet        bool
-	ServiceRoot       string
-	ServiceRootZFS    bool
-	ServiceRootArg    string
-	ServiceRootZFSArg bool
-	ServiceRootSet    bool
-	Snapshots         string
-	SnapshotKeepLast  int
-	SnapshotMaxAge    string
-	SnapshotRequired  *bool
-	SnapshotEvents    []string
-	SnapshotChange    bool
-	Entry             ServiceEntry
-	ForceDeploy       bool
+	Payload                 string
+	Args                    []string
+	EnvFile                 string
+	EnvFileArg              string
+	EnvFileSet              bool
+	ServiceRoot             string
+	ServiceRootZFS          bool
+	ServiceRootArg          string
+	ServiceRootZFSArg       bool
+	ServiceRootSet          bool
+	Snapshots               string
+	SnapshotKeepLast        int
+	SnapshotKeepLastInherit bool
+	SnapshotMaxAge          string
+	SnapshotMaxAgeInherit   bool
+	SnapshotRequired        *bool
+	SnapshotRequiredInherit bool
+	SnapshotEvents          []string
+	SnapshotEventsInherit   bool
+	SnapshotChange          bool
+	Entry                   ServiceEntry
+	ForceDeploy             bool
 }
 
 func handleSvcRun(req svcCommandRequest) error {
@@ -395,35 +399,43 @@ func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride s
 	filteredArgs := runArgsWithServiceRootOptions(flags.Args, serviceRootOptions{Root: serviceRoot, ZFS: serviceRootZFS})
 	filteredArgs = runArgsWithSnapshotOptions(filteredArgs, snapshotOptionsForSvcRun(entry, flags))
 	return parsedSvcRun{
-		Payload:           payload,
-		Args:              filteredArgs,
-		EnvFile:           envFile,
-		EnvFileArg:        flags.EnvFileArg,
-		EnvFileSet:        flags.EnvFileSet,
-		ServiceRoot:       serviceRoot,
-		ServiceRootZFS:    serviceRootZFS,
-		ServiceRootArg:    flags.ServiceRootArg,
-		ServiceRootZFSArg: flags.ServiceRootZFSArg,
-		ServiceRootSet:    flags.ServiceRootSet,
-		Snapshots:         flags.Snapshots,
-		SnapshotKeepLast:  flags.SnapshotKeepLast,
-		SnapshotMaxAge:    flags.SnapshotMaxAge,
-		SnapshotRequired:  flags.SnapshotRequired,
-		SnapshotEvents:    flags.SnapshotEvents,
-		SnapshotChange:    flags.SnapshotChange,
-		Entry:             entry,
-		ForceDeploy:       flags.ForceDeploy,
+		Payload:                 payload,
+		Args:                    filteredArgs,
+		EnvFile:                 envFile,
+		EnvFileArg:              flags.EnvFileArg,
+		EnvFileSet:              flags.EnvFileSet,
+		ServiceRoot:             serviceRoot,
+		ServiceRootZFS:          serviceRootZFS,
+		ServiceRootArg:          flags.ServiceRootArg,
+		ServiceRootZFSArg:       flags.ServiceRootZFSArg,
+		ServiceRootSet:          flags.ServiceRootSet,
+		Snapshots:               flags.Snapshots,
+		SnapshotKeepLast:        flags.SnapshotKeepLast,
+		SnapshotKeepLastInherit: flags.SnapshotKeepLastInherit,
+		SnapshotMaxAge:          flags.SnapshotMaxAge,
+		SnapshotMaxAgeInherit:   flags.SnapshotMaxAgeInherit,
+		SnapshotRequired:        flags.SnapshotRequired,
+		SnapshotRequiredInherit: flags.SnapshotRequiredInherit,
+		SnapshotEvents:          flags.SnapshotEvents,
+		SnapshotEventsInherit:   flags.SnapshotEventsInherit,
+		SnapshotChange:          flags.SnapshotChange,
+		Entry:                   entry,
+		ForceDeploy:             flags.ForceDeploy,
 	}, nil
 }
 
 func snapshotOptionsForSvcRun(entry ServiceEntry, flags svcRunControlFlags) snapshotOptions {
 	if flags.SnapshotChange {
 		return snapshotOptions{
-			Snapshots: flags.Snapshots,
-			KeepLast:  flags.SnapshotKeepLast,
-			MaxAge:    flags.SnapshotMaxAge,
-			Required:  flags.SnapshotRequired,
-			Events:    flags.SnapshotEvents,
+			Snapshots:       flags.Snapshots,
+			KeepLast:        flags.SnapshotKeepLast,
+			KeepLastInherit: flags.SnapshotKeepLastInherit,
+			MaxAge:          flags.SnapshotMaxAge,
+			MaxAgeInherit:   flags.SnapshotMaxAgeInherit,
+			Required:        flags.SnapshotRequired,
+			RequiredInherit: flags.SnapshotRequiredInherit,
+			Events:          flags.SnapshotEvents,
+			EventsInherit:   flags.SnapshotEventsInherit,
 		}
 	}
 	return snapshotOptions{
@@ -443,19 +455,23 @@ func ensureSvcRunEntryFlags(entry ServiceEntry, hasEntry bool, args []string) er
 }
 
 type svcRunControlFlags struct {
-	Args              []string
-	EnvFileArg        string
-	EnvFileSet        bool
-	ServiceRootArg    string
-	ServiceRootZFSArg bool
-	ServiceRootSet    bool
-	Snapshots         string
-	SnapshotKeepLast  int
-	SnapshotMaxAge    string
-	SnapshotRequired  *bool
-	SnapshotEvents    []string
-	SnapshotChange    bool
-	ForceDeploy       bool
+	Args                    []string
+	EnvFileArg              string
+	EnvFileSet              bool
+	ServiceRootArg          string
+	ServiceRootZFSArg       bool
+	ServiceRootSet          bool
+	Snapshots               string
+	SnapshotKeepLast        int
+	SnapshotKeepLastInherit bool
+	SnapshotMaxAge          string
+	SnapshotMaxAgeInherit   bool
+	SnapshotRequired        *bool
+	SnapshotRequiredInherit bool
+	SnapshotEvents          []string
+	SnapshotEventsInherit   bool
+	SnapshotChange          bool
+	ForceDeploy             bool
 }
 
 func parseSvcRunControlFlags(runArgs []string) (svcRunControlFlags, error) {
@@ -476,19 +492,23 @@ func parseSvcRunControlFlags(runArgs []string) (svcRunControlFlags, error) {
 		return svcRunControlFlags{}, err
 	}
 	return svcRunControlFlags{
-		Args:              filteredArgs,
-		EnvFileArg:        envFileArg,
-		EnvFileSet:        envFileSet,
-		ServiceRootArg:    rootOpts.Root,
-		ServiceRootZFSArg: rootOpts.ZFS,
-		ServiceRootSet:    serviceRootSet,
-		Snapshots:         snapOpts.Snapshots,
-		SnapshotKeepLast:  snapOpts.KeepLast,
-		SnapshotMaxAge:    snapOpts.MaxAge,
-		SnapshotRequired:  snapOpts.Required,
-		SnapshotEvents:    snapOpts.Events,
-		SnapshotChange:    snapshotChange,
-		ForceDeploy:       forceDeploy,
+		Args:                    filteredArgs,
+		EnvFileArg:              envFileArg,
+		EnvFileSet:              envFileSet,
+		ServiceRootArg:          rootOpts.Root,
+		ServiceRootZFSArg:       rootOpts.ZFS,
+		ServiceRootSet:          serviceRootSet,
+		Snapshots:               snapOpts.Snapshots,
+		SnapshotKeepLast:        snapOpts.KeepLast,
+		SnapshotKeepLastInherit: snapOpts.KeepLastInherit,
+		SnapshotMaxAge:          snapOpts.MaxAge,
+		SnapshotMaxAgeInherit:   snapOpts.MaxAgeInherit,
+		SnapshotRequired:        snapOpts.Required,
+		SnapshotRequiredInherit: snapOpts.RequiredInherit,
+		SnapshotEvents:          snapOpts.Events,
+		SnapshotEventsInherit:   snapOpts.EventsInherit,
+		SnapshotChange:          snapshotChange,
+		ForceDeploy:             forceDeploy,
 	}, nil
 }
 
@@ -628,23 +648,53 @@ func applySnapshotControlValue(opts *snapshotOptions, name, value string) error 
 		}
 		opts.Snapshots = mode
 	case "--snapshot-keep-last":
-		n, err := parseOptionalPositiveIntFlag(value, "--snapshot-keep-last")
-		if err != nil {
-			return err
-		}
-		opts.KeepLast = n
+		return applySnapshotKeepLastControlValue(opts, value)
 	case "--snapshot-max-age":
-		opts.MaxAge = strings.TrimSpace(value)
+		applySnapshotMaxAgeControlValue(opts, value)
 	case "--snapshot-required":
-		v, err := parseOptionalBoolFlag(value, "--snapshot-required")
-		if err != nil {
-			return err
-		}
-		opts.Required = v
+		return applySnapshotRequiredControlValue(opts, value)
 	case "--snapshot-events":
-		opts.Events = splitSnapshotEventList(value)
+		applySnapshotEventsControlValue(opts, value)
 	}
 	return nil
+}
+
+func applySnapshotKeepLastControlValue(opts *snapshotOptions, value string) error {
+	n, inherit, err := parseOptionalPositiveIntOrInheritFlag(value, "--snapshot-keep-last")
+	if err != nil {
+		return err
+	}
+	opts.KeepLast = n
+	opts.KeepLastInherit = inherit
+	return nil
+}
+
+func applySnapshotMaxAgeControlValue(opts *snapshotOptions, value string) {
+	if strings.TrimSpace(value) == "inherit" {
+		opts.MaxAgeInherit = true
+		opts.MaxAge = ""
+		return
+	}
+	opts.MaxAge = strings.TrimSpace(value)
+}
+
+func applySnapshotRequiredControlValue(opts *snapshotOptions, value string) error {
+	v, inherit, err := parseOptionalBoolOrInheritFlag(value, "--snapshot-required")
+	if err != nil {
+		return err
+	}
+	opts.Required = v
+	opts.RequiredInherit = inherit
+	return nil
+}
+
+func applySnapshotEventsControlValue(opts *snapshotOptions, value string) {
+	if strings.TrimSpace(value) == "inherit" {
+		opts.EventsInherit = true
+		opts.Events = nil
+		return
+	}
+	opts.Events = splitSnapshotEventList(value)
 }
 
 func parseSnapshotModeValue(raw string) (string, error) {
@@ -657,28 +707,34 @@ func parseSnapshotModeValue(raw string) (string, error) {
 	}
 }
 
-func parseOptionalBoolFlag(raw, name string) (*bool, error) {
+func parseOptionalBoolOrInheritFlag(raw, name string) (*bool, bool, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil, nil
+		return nil, false, nil
+	}
+	if raw == "inherit" {
+		return nil, true, nil
 	}
 	v, err := strconv.ParseBool(raw)
 	if err != nil {
-		return nil, fmt.Errorf("invalid %s value %q", name, raw)
+		return nil, false, fmt.Errorf("invalid %s value %q", name, raw)
 	}
-	return &v, nil
+	return &v, false, nil
 }
 
-func parseOptionalPositiveIntFlag(raw, name string) (int, error) {
+func parseOptionalPositiveIntOrInheritFlag(raw, name string) (int, bool, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return 0, nil
+		return 0, false, nil
+	}
+	if raw == "inherit" {
+		return 0, true, nil
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 1 {
-		return 0, fmt.Errorf("%s must be a positive integer", name)
+		return 0, false, fmt.Errorf("%s must be a positive integer or inherit", name)
 	}
-	return n, nil
+	return n, false, nil
 }
 
 func splitSnapshotEventList(raw string) []string {
@@ -1799,10 +1855,26 @@ func copySnapshotFieldsFromEntry(dst *ServiceEntry, src ServiceEntry) {
 
 func applySnapshotOptionsToEntry(entry *ServiceEntry, opts snapshotOptions) {
 	entry.Snapshots = opts.Snapshots
-	entry.SnapshotKeepLast = opts.KeepLast
-	entry.SnapshotMaxAge = opts.MaxAge
-	entry.SnapshotRequired = cloneBoolPtr(opts.Required)
-	entry.SnapshotEvents = cloneStringSlice(opts.Events)
+	if opts.KeepLastInherit {
+		entry.SnapshotKeepLast = 0
+	} else {
+		entry.SnapshotKeepLast = opts.KeepLast
+	}
+	if opts.MaxAgeInherit {
+		entry.SnapshotMaxAge = ""
+	} else {
+		entry.SnapshotMaxAge = opts.MaxAge
+	}
+	if opts.RequiredInherit {
+		entry.SnapshotRequired = nil
+	} else {
+		entry.SnapshotRequired = cloneBoolPtr(opts.Required)
+	}
+	if opts.EventsInherit {
+		entry.SnapshotEvents = nil
+	} else {
+		entry.SnapshotEvents = cloneStringSlice(opts.Events)
+	}
 }
 
 func saveServiceSetConfig(cfgLoc *projectConfigLocation, hostOverride string, flags cli.ServiceSetFlags) (bool, error) {

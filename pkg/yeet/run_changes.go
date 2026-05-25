@@ -170,11 +170,15 @@ func runArgsWithServiceRootOptions(args []string, opts serviceRootOptions) []str
 }
 
 type snapshotOptions struct {
-	Snapshots string
-	KeepLast  int
-	MaxAge    string
-	Required  *bool
-	Events    []string
+	Snapshots       string
+	KeepLast        int
+	KeepLastInherit bool
+	MaxAge          string
+	MaxAgeInherit   bool
+	Required        *bool
+	RequiredInherit bool
+	Events          []string
+	EventsInherit   bool
 }
 
 func runArgsWithSnapshotOptions(args []string, opts snapshotOptions) []string {
@@ -182,16 +186,24 @@ func runArgsWithSnapshotOptions(args []string, opts snapshotOptions) []string {
 	if opts.Snapshots != "" {
 		out = append([]string{"--snapshots=" + opts.Snapshots}, out...)
 	}
-	if opts.KeepLast != 0 {
+	if opts.KeepLastInherit {
+		out = append([]string{"--snapshot-keep-last=inherit"}, out...)
+	} else if opts.KeepLast != 0 {
 		out = append([]string{fmt.Sprintf("--snapshot-keep-last=%d", opts.KeepLast)}, out...)
 	}
-	if opts.MaxAge != "" {
+	if opts.MaxAgeInherit {
+		out = append([]string{"--snapshot-max-age=inherit"}, out...)
+	} else if opts.MaxAge != "" {
 		out = append([]string{"--snapshot-max-age=" + opts.MaxAge}, out...)
 	}
-	if opts.Required != nil {
+	if opts.RequiredInherit {
+		out = append([]string{"--snapshot-required=inherit"}, out...)
+	} else if opts.Required != nil {
 		out = append([]string{fmt.Sprintf("--snapshot-required=%t", *opts.Required)}, out...)
 	}
-	if len(opts.Events) != 0 {
+	if opts.EventsInherit {
+		out = append([]string{"--snapshot-events=inherit"}, out...)
+	} else if len(opts.Events) != 0 {
 		out = append([]string{"--snapshot-events=" + strings.Join(opts.Events, ",")}, out...)
 	}
 	return out
