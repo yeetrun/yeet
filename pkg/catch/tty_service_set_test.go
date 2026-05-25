@@ -121,14 +121,21 @@ func TestServiceSetSnapshotFieldInheritClearsOnlyField(t *testing.T) {
 	server := newTestServer(t)
 	name := "svc-snap"
 	keep := 3
+	required := false
 	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
-		name: {Name: name, SnapshotPolicy: &db.SnapshotPolicy{KeepLast: &keep, Events: []string{"run"}}},
+		name: {Name: name, SnapshotPolicy: &db.SnapshotPolicy{KeepLast: &keep, MaxAge: "72h", Required: &required, Events: []string{"run"}}},
 	}}); err != nil {
 		t.Fatalf("DB.Set: %v", err)
 	}
 	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
 	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{SnapshotKeepLast: "inherit", SnapshotChange: true}); err != nil {
 		t.Fatalf("serviceSetCmdFunc keep-last inherit: %v", err)
+	}
+	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{SnapshotMaxAge: "inherit", SnapshotChange: true}); err != nil {
+		t.Fatalf("serviceSetCmdFunc max-age inherit: %v", err)
+	}
+	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{SnapshotRequired: "inherit", SnapshotChange: true}); err != nil {
+		t.Fatalf("serviceSetCmdFunc required inherit: %v", err)
 	}
 	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{SnapshotEvents: "inherit", SnapshotChange: true}); err != nil {
 		t.Fatalf("serviceSetCmdFunc events inherit: %v", err)
@@ -138,6 +145,12 @@ func TestServiceSetSnapshotFieldInheritClearsOnlyField(t *testing.T) {
 	policy := sv.SnapshotPolicy()
 	if policy.KeepLast().Valid() {
 		t.Fatalf("KeepLast valid = true, want false")
+	}
+	if got := policy.MaxAge(); got != "" {
+		t.Fatalf("MaxAge = %q, want empty", got)
+	}
+	if policy.Required().Valid() {
+		t.Fatalf("Required valid = true, want false")
 	}
 	if got := policy.Events().Len(); got != 0 {
 		t.Fatalf("Events len = %d, want 0", got)
