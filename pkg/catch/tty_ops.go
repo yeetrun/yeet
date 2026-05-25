@@ -13,10 +13,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/fileutil"
@@ -212,6 +214,138 @@ func (e *ttyExecer) dockerUpdateCmdFunc() error {
 	}
 	ui.DoneStep("")
 	return nil
+}
+
+func (e *ttyExecer) snapshotsCmdFunc(args []string) error {
+	if len(args) < 2 || args[0] != "defaults" {
+		return fmt.Errorf("snapshots requires defaults show or defaults set")
+	}
+	switch args[1] {
+	case "show":
+		if _, err := cli.ParseSnapshotDefaultsShow(args[2:]); err != nil {
+			return err
+		}
+		return e.showSnapshotDefaults()
+	case "set":
+		flags, rest, err := cli.ParseSnapshotDefaultsSet(args[2:])
+		if err != nil {
+			return err
+		}
+		if len(rest) != 0 {
+			return fmt.Errorf("unexpected snapshots defaults args: %s", strings.Join(rest, " "))
+		}
+		return e.setSnapshotDefaults(flags)
+	default:
+		return fmt.Errorf("unknown snapshots defaults command %q", args[1])
+	}
+}
+
+func (e *ttyExecer) showSnapshotDefaults() error {
+	dv, err := e.s.cfg.DB.Get()
+	if err != nil {
+		return err
+	}
+	defaults := snapshotPolicyPtrFromView(dv.SnapshotDefaults())
+	effective, err := effectiveSnapshotPolicy(defaults, nil)
+	if err != nil {
+		return err
+	}
+	printSnapshotPolicy(e.rw, effectiveSnapshotPolicyRPCWithPreferred(effective, preferredEffectiveSnapshotMaxAge(defaults, nil)))
+	return nil
+}
+
+func (e *ttyExecer) setSnapshotDefaults(flags cli.SnapshotDefaultsSetFlags) error {
+	_, err := e.s.cfg.DB.MutateData(func(d *db.Data) error {
+		if d.SnapshotDefaults == nil {
+			d.SnapshotDefaults = &db.SnapshotPolicy{}
+		}
+		return applySnapshotDefaultsFlags(d.SnapshotDefaults, flags)
+	})
+	return err
+}
+
+func applySnapshotDefaultsFlags(policy *db.SnapshotPolicy, flags cli.SnapshotDefaultsSetFlags) error {
+	if policy == nil {
+		policy = &db.SnapshotPolicy{}
+	}
+	if err := applySnapshotBoolFlag(&policy.Enabled, "--enabled", flags.Enabled); err != nil {
+		return err
+	}
+	if err := applySnapshotKeepLastFlag(policy, flags.KeepLast); err != nil {
+		return err
+	}
+	if err := applySnapshotMaxAgeFlag(policy, flags.MaxAge); err != nil {
+		return err
+	}
+	if err := applySnapshotBoolFlag(&policy.Required, "--required", flags.Required); err != nil {
+		return err
+	}
+	if err := applySnapshotEventsFlag(policy, flags.Events); err != nil {
+		return err
+	}
+	return nil
+}
+
+func applySnapshotBoolFlag(dst **bool, name, value string) error {
+	if value == "" {
+		return nil
+	}
+	v, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("invalid %s value %q", name, value)
+	}
+	*dst = &v
+	return nil
+}
+
+func applySnapshotKeepLastFlag(policy *db.SnapshotPolicy, value string) error {
+	if value == "" {
+		return nil
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 1 {
+		return fmt.Errorf("--keep-last must be a positive integer")
+	}
+	policy.KeepLast = &n
+	return nil
+}
+
+func applySnapshotMaxAgeFlag(policy *db.SnapshotPolicy, value string) error {
+	if value == "" {
+		return nil
+	}
+	if _, err := parseSnapshotMaxAge(value); err != nil {
+		return err
+	}
+	policy.MaxAge = value
+	return nil
+}
+
+func applySnapshotEventsFlag(policy *db.SnapshotPolicy, value string) error {
+	if value == "" {
+		return nil
+	}
+	events, err := parseSnapshotEvents(value)
+	if err != nil {
+		return err
+	}
+	policy.Events = events
+	return nil
+}
+
+func printSnapshotPolicy(w io.Writer, policy catchrpc.EffectiveSnapshotPolicy) {
+	writef(w, "enabled = %t\n", policy.Enabled)
+	writef(w, "keep_last = %d\n", policy.KeepLast)
+	writef(w, "max_age = %q\n", policy.MaxAge)
+	writef(w, "events = [")
+	for i, event := range policy.Events {
+		if i > 0 {
+			writef(w, ", ")
+		}
+		writef(w, "%q", event)
+	}
+	writef(w, "]\n")
+	writef(w, "required = %t\n", policy.Required)
 }
 
 // Add this method to the ttyExecer struct

@@ -101,6 +101,31 @@ func TestServiceImageInfoFiltersAndSortsServiceImages(t *testing.T) {
 	}
 }
 
+func TestServiceInfoIncludesSnapshotPolicy(t *testing.T) {
+	server := newTestServer(t)
+	enabled := false
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"svc-info": {
+			Name:           "svc-info",
+			ServiceRoot:    "/tank/apps/svc-info",
+			ServiceRootZFS: "tank/apps/svc-info",
+			SnapshotPolicy: &db.SnapshotPolicy{Enabled: &enabled, MaxAge: "72h"},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	resp, err := server.serviceInfo("svc-info")
+	if err != nil {
+		t.Fatalf("serviceInfo: %v", err)
+	}
+	if resp.Info.Snapshots == nil || resp.Info.Snapshots.Override == nil || resp.Info.Snapshots.Override.Enabled == nil || *resp.Info.Snapshots.Override.Enabled {
+		t.Fatalf("override = %#v", resp.Info.Snapshots)
+	}
+	if resp.Info.Snapshots.Effective.MaxAge != "72h" {
+		t.Fatalf("effective = %#v", resp.Info.Snapshots.Effective)
+	}
+}
+
 func TestTailscaleHasValues(t *testing.T) {
 	tests := []struct {
 		name string

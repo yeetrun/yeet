@@ -47,6 +47,45 @@ func TestConfirmTSUpdateReturnsPromptWriteError(t *testing.T) {
 	}
 }
 
+func TestSnapshotsDefaultsShow(t *testing.T) {
+	server := newTestServer(t)
+	keep := 3
+	enabled := false
+	if _, err := server.cfg.DB.MutateData(func(d *db.Data) error {
+		d.SnapshotDefaults = &db.SnapshotPolicy{Enabled: &enabled, KeepLast: &keep, MaxAge: "72h"}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed defaults: %v", err)
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.snapshotsCmdFunc([]string{"defaults", "show"}); err != nil {
+		t.Fatalf("snapshotsCmdFunc: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "enabled = false") || !strings.Contains(got, "keep_last = 3") || !strings.Contains(got, "max_age = \"72h\"") {
+		t.Fatalf("output = %q", got)
+	}
+}
+
+func TestSnapshotsDefaultsSetPersistsPolicy(t *testing.T) {
+	server := newTestServer(t)
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	err := execer.snapshotsCmdFunc([]string{"defaults", "set", "--enabled=false", "--keep-last=3", "--max-age=72h", "--required=false"})
+	if err != nil {
+		t.Fatalf("snapshotsCmdFunc: %v", err)
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	def := dv.SnapshotDefaults()
+	if !def.Valid() || def.Enabled().Get() || def.KeepLast().Get() != 3 || def.MaxAge() != "72h" || def.Required().Get() {
+		t.Fatalf("defaults = %#v", def.AsStruct())
+	}
+}
+
 func TestMountCmdListReturnsFlushError(t *testing.T) {
 	server := newTestServer(t)
 	if _, err := server.cfg.DB.MutateData(func(d *db.Data) error {
