@@ -542,6 +542,30 @@ func TestRunCmdFuncCopiesSnapshotPolicyIntoInstallerConfig(t *testing.T) {
 	}
 }
 
+func TestRunCmdFuncRejectsMixedSnapshotInheritBeforeInstall(t *testing.T) {
+	called := false
+	execer := &ttyExecer{
+		s:              newTestServer(t),
+		sn:             "svc-run-snapshot",
+		rawRW:          bytes.NewBufferString("binary-payload"),
+		rw:             &bytes.Buffer{},
+		bypassPtyInput: true,
+		installFunc: func(_ string, _ io.Reader, _ FileInstallerCfg) error {
+			called = true
+			return nil
+		},
+	}
+
+	flags := cli.RunFlags{Snapshots: "inherit", SnapshotKeepLast: "3", SnapshotChange: true}
+	err := execer.runCmdFunc(flags, nil)
+	if err == nil || !strings.Contains(err.Error(), "--snapshots=inherit cannot be combined with field-level snapshot flags") {
+		t.Fatalf("runCmdFunc error = %v, want mutually exclusive snapshot flags", err)
+	}
+	if called {
+		t.Fatal("installFunc was called")
+	}
+}
+
 func TestRunCmdFuncRejectsSystemServiceBeforeInstall(t *testing.T) {
 	called := false
 	execer := &ttyExecer{

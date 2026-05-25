@@ -296,6 +296,9 @@ func snapshotPolicyFromRunFlags(flags cli.RunFlags) (*db.SnapshotPolicy, error) 
 		SnapshotEvents:   flags.SnapshotEvents,
 		SnapshotChange:   true,
 	}
+	if err := validateSnapshotInheritExclusive(setFlags); err != nil {
+		return nil, err
+	}
 	if err := applyServiceSnapshotFlags(policy, setFlags); err != nil {
 		return nil, err
 	}
