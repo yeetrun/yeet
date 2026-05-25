@@ -75,6 +75,11 @@ func (e *ttyExecer) serviceCmdFunc(args []string) error {
 
 func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	rootChange := strings.TrimSpace(flags.ServiceRoot) != "" || flags.ZFS
+	if flags.SnapshotChange {
+		if err := validateServiceSnapshotFlags(flags); err != nil {
+			return err
+		}
+	}
 	if rootChange {
 		if err := e.serviceSetRoot(flags); err != nil {
 			return err
@@ -114,7 +119,11 @@ func (e *ttyExecer) serviceSetRoot(flags cli.ServiceSetFlags) error {
 }
 
 func (s *Server) updateServiceSnapshotPolicy(name string, flags cli.ServiceSetFlags) error {
-	_, _, err := s.cfg.DB.MutateService(name, func(_ *db.Data, service *db.Service) error {
+	_, err := s.cfg.DB.MutateData(func(d *db.Data) error {
+		service, ok := d.Services[name]
+		if !ok {
+			return fmt.Errorf("service %q not found", name)
+		}
 		if flags.Snapshots == "inherit" {
 			service.SnapshotPolicy = nil
 			return nil
@@ -130,6 +139,13 @@ func (s *Server) updateServiceSnapshotPolicy(name string, flags cli.ServiceSetFl
 		return nil
 	})
 	return err
+}
+
+func validateServiceSnapshotFlags(flags cli.ServiceSetFlags) error {
+	if flags.Snapshots == "inherit" {
+		return nil
+	}
+	return applyServiceSnapshotFlags(&db.SnapshotPolicy{}, flags)
 }
 
 func applyServiceSnapshotFlags(policy *db.SnapshotPolicy, flags cli.ServiceSetFlags) error {
