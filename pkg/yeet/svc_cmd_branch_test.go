@@ -871,6 +871,116 @@ func TestServiceSetInheritClearsSnapshotConfig(t *testing.T) {
 	}
 }
 
+func TestServiceSetSnapshotFieldInheritClearsOnlyLocalField(t *testing.T) {
+	tests := []struct {
+		name   string
+		flag   string
+		assert func(t *testing.T, entry ServiceEntry)
+	}{
+		{
+			name: "keep last",
+			flag: "--snapshot-keep-last=inherit",
+			assert: func(t *testing.T, entry ServiceEntry) {
+				t.Helper()
+				if entry.SnapshotKeepLast != 0 {
+					t.Fatalf("SnapshotKeepLast = %d, want 0", entry.SnapshotKeepLast)
+				}
+				if entry.Snapshots != "off" || entry.SnapshotMaxAge != "72h" || entry.SnapshotRequired == nil || !*entry.SnapshotRequired || !reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) {
+					t.Fatalf("entry = %#v, want only keep-last cleared", entry)
+				}
+			},
+		},
+		{
+			name: "max age",
+			flag: "--snapshot-max-age=inherit",
+			assert: func(t *testing.T, entry ServiceEntry) {
+				t.Helper()
+				if entry.SnapshotMaxAge != "" {
+					t.Fatalf("SnapshotMaxAge = %q, want empty", entry.SnapshotMaxAge)
+				}
+				if entry.Snapshots != "off" || entry.SnapshotKeepLast != 3 || entry.SnapshotRequired == nil || !*entry.SnapshotRequired || !reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) {
+					t.Fatalf("entry = %#v, want only max-age cleared", entry)
+				}
+			},
+		},
+		{
+			name: "required",
+			flag: "--snapshot-required=inherit",
+			assert: func(t *testing.T, entry ServiceEntry) {
+				t.Helper()
+				if entry.SnapshotRequired != nil {
+					t.Fatalf("SnapshotRequired = %#v, want nil", entry.SnapshotRequired)
+				}
+				if entry.Snapshots != "off" || entry.SnapshotKeepLast != 3 || entry.SnapshotMaxAge != "72h" || !reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) {
+					t.Fatalf("entry = %#v, want only required cleared", entry)
+				}
+			},
+		},
+		{
+			name: "events",
+			flag: "--snapshot-events=inherit",
+			assert: func(t *testing.T, entry ServiceEntry) {
+				t.Helper()
+				if len(entry.SnapshotEvents) != 0 {
+					t.Fatalf("SnapshotEvents = %#v, want empty", entry.SnapshotEvents)
+				}
+				if entry.Snapshots != "off" || entry.SnapshotKeepLast != 3 || entry.SnapshotMaxAge != "72h" || entry.SnapshotRequired == nil || !*entry.SnapshotRequired {
+					t.Fatalf("entry = %#v, want only events cleared", entry)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preserveSvcCommandGlobals(t)
+			tmp := useTempSvcCwd(t)
+			serviceOverride = "svc-a"
+			loadedPrefs.DefaultHost = "host-a"
+			remoteCalled := false
+			execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+				remoteCalled = true
+				return nil
+			}
+			isTerminalFn = func(int) bool { return false }
+			required := true
+			writeSvcBranchConfig(t, tmp, ServiceEntry{
+				Name:             "svc-a",
+				Host:             "host-a",
+				Type:             serviceTypeRun,
+				Payload:          "run.sh",
+				Snapshots:        "off",
+				SnapshotKeepLast: 3,
+				SnapshotMaxAge:   "72h",
+				SnapshotRequired: &required,
+				SnapshotEvents:   []string{"run"},
+			})
+			if err := HandleSvcCmd([]string{"service", "set", tt.flag}); err != nil {
+				t.Fatalf("HandleSvcCmd: %v", err)
+			}
+			if !remoteCalled {
+				t.Fatal("remote exec was not called")
+			}
+			loaded, err := loadProjectConfigFromCwd()
+			if err != nil {
+				t.Fatalf("loadProjectConfigFromCwd: %v", err)
+			}
+			entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+			if !ok {
+				t.Fatal("missing service entry")
+			}
+			tt.assert(t, entry)
+			raw, err := os.ReadFile(filepath.Join(tmp, projectConfigName))
+			if err != nil {
+				t.Fatalf("ReadFile config: %v", err)
+			}
+			if strings.Contains(string(raw), "inherit") {
+				t.Fatalf("saved config = %q, want no literal inherit", string(raw))
+			}
+		})
+	}
+}
+
 func TestSvcRunFromStoredConfigViaHandle(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)

@@ -1803,25 +1803,50 @@ func applyServiceSetSnapshotOverride(entry *ServiceEntry, flags cli.ServiceSetFl
 		entry.Snapshots = flags.Snapshots
 	}
 	if flags.SnapshotKeepLast != "" {
+		if flags.SnapshotKeepLast == "inherit" {
+			entry.SnapshotKeepLast = 0
+			return applyServiceSetSnapshotTextFields(entry, flags)
+		}
 		n, err := strconv.Atoi(flags.SnapshotKeepLast)
 		if err != nil || n < 1 {
-			return fmt.Errorf("--snapshot-keep-last must be a positive integer")
+			return fmt.Errorf("--snapshot-keep-last must be a positive integer or inherit")
 		}
 		entry.SnapshotKeepLast = n
 	}
+	return applyServiceSetSnapshotTextFields(entry, flags)
+}
+
+func applyServiceSetSnapshotTextFields(entry *ServiceEntry, flags cli.ServiceSetFlags) error {
 	if flags.SnapshotMaxAge != "" {
-		entry.SnapshotMaxAge = flags.SnapshotMaxAge
+		if flags.SnapshotMaxAge == "inherit" {
+			entry.SnapshotMaxAge = ""
+		} else {
+			entry.SnapshotMaxAge = flags.SnapshotMaxAge
+		}
 	}
 	if flags.SnapshotRequired != "" {
+		if flags.SnapshotRequired == "inherit" {
+			entry.SnapshotRequired = nil
+			return applyServiceSetSnapshotEvents(entry, flags.SnapshotEvents)
+		}
 		v, err := strconv.ParseBool(flags.SnapshotRequired)
 		if err != nil {
 			return fmt.Errorf("invalid --snapshot-required value %q", flags.SnapshotRequired)
 		}
 		entry.SnapshotRequired = &v
 	}
-	if flags.SnapshotEvents != "" {
-		entry.SnapshotEvents = splitSnapshotEventList(flags.SnapshotEvents)
+	return applyServiceSetSnapshotEvents(entry, flags.SnapshotEvents)
+}
+
+func applyServiceSetSnapshotEvents(entry *ServiceEntry, raw string) error {
+	if raw == "" {
+		return nil
 	}
+	if raw == "inherit" {
+		entry.SnapshotEvents = nil
+		return nil
+	}
+	entry.SnapshotEvents = splitSnapshotEventList(raw)
 	return nil
 }
 
