@@ -380,6 +380,41 @@ func TestNewFileInstallerPersistsCustomServiceRoot(t *testing.T) {
 	}
 }
 
+func TestNewFileInstallerPersistsSnapshotPolicy(t *testing.T) {
+	server := newTestServer(t)
+	enabled := false
+	keep := 3
+	required := false
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "svc-snapshot-policy"},
+		NoBinary:     true,
+		StageOnly:    true,
+		SnapshotPolicy: &db.SnapshotPolicy{
+			Enabled:  &enabled,
+			KeepLast: &keep,
+			MaxAge:   "72h",
+			Required: &required,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	sv, ok := dv.Services().GetOk("svc-snapshot-policy")
+	if !ok {
+		t.Fatal("missing service")
+	}
+	if sv.SnapshotPolicy().Enabled().Get() || sv.SnapshotPolicy().KeepLast().Get() != 3 || sv.SnapshotPolicy().MaxAge() != "72h" || sv.SnapshotPolicy().Required().Get() {
+		t.Fatalf("SnapshotPolicy = %#v", sv.SnapshotPolicy().AsStruct())
+	}
+}
+
 func TestNewFileInstallerPersistsZFSServiceRoot(t *testing.T) {
 	server := newTestServer(t)
 	parent := t.TempDir()

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
@@ -66,6 +67,80 @@ func TestServiceSetRootRejectsRunningService(t *testing.T) {
 	_, err := server.validateServiceRootMigration(name, serviceRootMigrationRequest{Root: newRoot})
 	if err == nil || !strings.Contains(err.Error(), `cannot migrate service root while "svc-root" is running`) {
 		t.Fatalf("validateServiceRootMigration error = %v, want running service", err)
+	}
+}
+
+func TestServiceSetSnapshotOnlyDoesNotRequireStoppedService(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-snap"
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {Name: name, ServiceRoot: "/srv/apps/svc-snap"},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	oldRunning := isServiceRunningForRootMigration
+	defer func() { isServiceRunningForRootMigration = oldRunning }()
+	isServiceRunningForRootMigration = func(*Server, string) (bool, error) {
+		return true, nil
+	}
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{Snapshots: "off", SnapshotChange: true}); err != nil {
+		t.Fatalf("serviceSetCmdFunc: %v", err)
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	sv, _ := dv.Services().GetOk(name)
+	if got := sv.SnapshotPolicy().Enabled().Get(); got {
+		t.Fatalf("snapshot enabled = true, want false")
+	}
+}
+
+func TestServiceSetSnapshotInheritClearsOverride(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-snap"
+	enabled := false
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {Name: name, SnapshotPolicy: &db.SnapshotPolicy{Enabled: &enabled, MaxAge: "72h"}},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{Snapshots: "inherit", SnapshotChange: true}); err != nil {
+		t.Fatalf("serviceSetCmdFunc: %v", err)
+	}
+	dv, _ := server.cfg.DB.Get()
+	sv, _ := dv.Services().GetOk(name)
+	if sv.SnapshotPolicy().Valid() {
+		t.Fatalf("SnapshotPolicy valid = true, want false")
+	}
+}
+
+func TestServiceSetSnapshotFieldInheritClearsOnlyField(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-snap"
+	keep := 3
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {Name: name, SnapshotPolicy: &db.SnapshotPolicy{KeepLast: &keep, Events: []string{"run"}}},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{SnapshotKeepLast: "inherit", SnapshotChange: true}); err != nil {
+		t.Fatalf("serviceSetCmdFunc keep-last inherit: %v", err)
+	}
+	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{SnapshotEvents: "inherit", SnapshotChange: true}); err != nil {
+		t.Fatalf("serviceSetCmdFunc events inherit: %v", err)
+	}
+	dv, _ := server.cfg.DB.Get()
+	sv, _ := dv.Services().GetOk(name)
+	policy := sv.SnapshotPolicy()
+	if policy.KeepLast().Valid() {
+		t.Fatalf("KeepLast valid = true, want false")
+	}
+	if got := policy.Events().Len(); got != 0 {
+		t.Fatalf("Events len = %d, want 0", got)
 	}
 }
 

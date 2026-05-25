@@ -271,11 +271,35 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	if e.sn == SystemService {
 		return fmt.Errorf("cannot run, reserved service name")
 	}
+	policy, err := snapshotPolicyFromRunFlags(flags)
+	if err != nil {
+		return err
+	}
 	cfg := e.fileInstaller(netFlagsFromRun(flags), argsIn)
 	cfg.ServiceRoot = flags.ServiceRoot
 	cfg.ServiceRootZFS = flags.ZFS
 	cfg.Pull = flags.Pull
+	cfg.SnapshotPolicy = policy
 	return e.runInstall("run", e.payloadReader(), cfg)
+}
+
+func snapshotPolicyFromRunFlags(flags cli.RunFlags) (*db.SnapshotPolicy, error) {
+	if !flags.SnapshotChange {
+		return nil, nil
+	}
+	policy := &db.SnapshotPolicy{}
+	setFlags := cli.ServiceSetFlags{
+		Snapshots:        flags.Snapshots,
+		SnapshotKeepLast: flags.SnapshotKeepLast,
+		SnapshotMaxAge:   flags.SnapshotMaxAge,
+		SnapshotRequired: flags.SnapshotRequired,
+		SnapshotEvents:   flags.SnapshotEvents,
+		SnapshotChange:   true,
+	}
+	if err := applyServiceSnapshotFlags(policy, setFlags); err != nil {
+		return nil, err
+	}
+	return policy, nil
 }
 
 func (e *ttyExecer) copyCmdFunc(args []string) error {

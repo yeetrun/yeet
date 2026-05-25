@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/cli"
@@ -73,6 +74,22 @@ func (e *ttyExecer) serviceCmdFunc(args []string) error {
 }
 
 func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
+	rootChange := strings.TrimSpace(flags.ServiceRoot) != "" || flags.ZFS
+	if rootChange {
+		if err := e.serviceSetRoot(flags); err != nil {
+			return err
+		}
+	}
+	if flags.SnapshotChange {
+		return e.s.updateServiceSnapshotPolicy(e.sn, flags)
+	}
+	if !rootChange {
+		return fmt.Errorf("service set requires --service-root or snapshot settings")
+	}
+	return nil
+}
+
+func (e *ttyExecer) serviceSetRoot(flags cli.ServiceSetFlags) error {
 	mode := serviceRootMigrationPrompt
 	if flags.Copy {
 		mode = serviceRootMigrationCopy
@@ -94,6 +111,113 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 		return err
 	}
 	return e.s.migrateServiceRootWithPlan(plan, mode)
+}
+
+func (s *Server) updateServiceSnapshotPolicy(name string, flags cli.ServiceSetFlags) error {
+	_, _, err := s.cfg.DB.MutateService(name, func(_ *db.Data, service *db.Service) error {
+		if flags.Snapshots == "inherit" {
+			service.SnapshotPolicy = nil
+			return nil
+		}
+		policy := service.SnapshotPolicy
+		if policy == nil {
+			policy = &db.SnapshotPolicy{}
+		}
+		if err := applyServiceSnapshotFlags(policy, flags); err != nil {
+			return err
+		}
+		service.SnapshotPolicy = policy
+		return nil
+	})
+	return err
+}
+
+func applyServiceSnapshotFlags(policy *db.SnapshotPolicy, flags cli.ServiceSetFlags) error {
+	applyServiceSnapshotModeFlag(policy, flags.Snapshots)
+	if err := applyServiceSnapshotKeepLastFlag(policy, flags.SnapshotKeepLast); err != nil {
+		return err
+	}
+	if err := applyServiceSnapshotMaxAgeFlag(policy, flags.SnapshotMaxAge); err != nil {
+		return err
+	}
+	if err := applyServiceSnapshotRequiredFlag(policy, flags.SnapshotRequired); err != nil {
+		return err
+	}
+	return applyServiceSnapshotEventsFlag(policy, flags.SnapshotEvents)
+}
+
+func applyServiceSnapshotModeFlag(policy *db.SnapshotPolicy, value string) {
+	switch value {
+	case "on":
+		v := true
+		policy.Enabled = &v
+	case "off":
+		v := false
+		policy.Enabled = &v
+	}
+}
+
+func applyServiceSnapshotKeepLastFlag(policy *db.SnapshotPolicy, value string) error {
+	if value == "" {
+		return nil
+	}
+	if value == "inherit" {
+		policy.KeepLast = nil
+		return nil
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 1 {
+		return fmt.Errorf("--snapshot-keep-last must be a positive integer or inherit")
+	}
+	policy.KeepLast = &n
+	return nil
+}
+
+func applyServiceSnapshotMaxAgeFlag(policy *db.SnapshotPolicy, value string) error {
+	if value == "" {
+		return nil
+	}
+	if value == "inherit" {
+		policy.MaxAge = ""
+		return nil
+	}
+	if _, err := parseSnapshotMaxAge(value); err != nil {
+		return err
+	}
+	policy.MaxAge = value
+	return nil
+}
+
+func applyServiceSnapshotRequiredFlag(policy *db.SnapshotPolicy, value string) error {
+	if value == "" {
+		return nil
+	}
+	if value == "inherit" {
+		policy.Required = nil
+		return nil
+	}
+	v, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("invalid --snapshot-required value %q", value)
+	}
+	policy.Required = &v
+	return nil
+}
+
+func applyServiceSnapshotEventsFlag(policy *db.SnapshotPolicy, value string) error {
+	if value == "" {
+		return nil
+	}
+	if value == "inherit" {
+		policy.Events = nil
+		return nil
+	}
+	events, err := parseSnapshotEvents(value)
+	if err != nil {
+		return err
+	}
+	policy.Events = events
+	return nil
 }
 
 func (e *ttyExecer) confirmServiceRootMigrationMode(mode serviceRootMigrationMode, plan serviceRootMigrationPlan) (serviceRootMigrationMode, error) {
