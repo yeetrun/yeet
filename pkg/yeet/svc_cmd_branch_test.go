@@ -782,6 +782,31 @@ func TestParseSvcRunControlFlagsExtractsSnapshotFieldInherit(t *testing.T) {
 	}
 }
 
+func TestParseSvcRunControlFlagsExplicitSnapshotFieldOverridesInherit(t *testing.T) {
+	flags, err := parseSvcRunControlFlags([]string{
+		"--snapshot-keep-last=inherit",
+		"--snapshot-keep-last=4",
+		"--snapshot-max-age=inherit",
+		"--snapshot-max-age=48h",
+		"--snapshot-required=inherit",
+		"--snapshot-required=false",
+		"--snapshot-events=inherit",
+		"--snapshot-events=run,docker-update",
+	})
+	if err != nil {
+		t.Fatalf("parseSvcRunControlFlags: %v", err)
+	}
+	if flags.SnapshotKeepLastInherit || flags.SnapshotMaxAgeInherit || flags.SnapshotRequiredInherit || flags.SnapshotEventsInherit {
+		t.Fatalf("snapshot inherit flags = %#v, want explicit values", flags)
+	}
+	if flags.SnapshotKeepLast != 4 || flags.SnapshotMaxAge != "48h" || flags.SnapshotRequired == nil || *flags.SnapshotRequired {
+		t.Fatalf("snapshot values = %#v, want explicit values", flags)
+	}
+	if !reflect.DeepEqual(flags.SnapshotEvents, []string{"run", "docker-update"}) {
+		t.Fatalf("SnapshotEvents = %#v", flags.SnapshotEvents)
+	}
+}
+
 func TestSvcRunSnapshotInheritWithFieldFlagDoesNotRunRemoteOrSaveConfig(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
@@ -970,6 +995,21 @@ func TestParseSvcRunControlFlagsRejectsMissingSnapshotValues(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if _, err := parseSvcRunControlFlags(tt.args); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("parseSvcRunControlFlags(%v) error = %v, want %q", tt.args, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseSvcRunControlFlagsRejectsEmptySnapshotEvents(t *testing.T) {
+	tests := [][]string{
+		{"--snapshot-events=,"},
+		{"--snapshot-events=run,"},
+		{"--snapshot-events", ",docker-update"},
+	}
+	for _, args := range tests {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			if _, err := parseSvcRunControlFlags(args); err == nil || !strings.Contains(err.Error(), "snapshot events must not contain empty values") {
+				t.Fatalf("parseSvcRunControlFlags(%v) error = %v, want empty event error", args, err)
 			}
 		})
 	}
