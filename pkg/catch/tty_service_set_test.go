@@ -135,6 +135,41 @@ func TestServiceSetSnapshotInheritClearsOverride(t *testing.T) {
 	}
 }
 
+func TestServiceSetSnapshotInheritRejectsFieldFlagsBeforeRootMigration(t *testing.T) {
+	server := newTestServer(t)
+	oldRoot := filepath.Join(t.TempDir(), "old-root")
+	name := seedServiceWithRoot(t, server, oldRoot, "")
+	withServiceSetRootStopped(t)
+	if err := os.MkdirAll(filepath.Join(oldRoot, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir old data: %v", err)
+	}
+	newRoot := filepath.Join(t.TempDir(), "new-root")
+	renameCalled := false
+	withServiceSetRootRename(t, func(_, _ string) error {
+		renameCalled = true
+		return nil
+	})
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+
+	err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{
+		ServiceRoot:      newRoot,
+		Copy:             true,
+		Snapshots:        "inherit",
+		SnapshotKeepLast: "bad",
+		SnapshotChange:   true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "--snapshots=inherit cannot be combined with field-level snapshot flags") {
+		t.Fatalf("serviceSetCmdFunc error = %v, want mutually exclusive snapshot flags", err)
+	}
+	if renameCalled {
+		t.Fatal("root migration rename was called")
+	}
+	assertServiceRoot(t, server, name, oldRoot)
+	if _, err := os.Stat(newRoot); !os.IsNotExist(err) {
+		t.Fatalf("new root stat error = %v, want not exist", err)
+	}
+}
+
 func TestServiceSetSnapshotFieldInheritClearsOnlyField(t *testing.T) {
 	server := newTestServer(t)
 	name := "svc-snap"
