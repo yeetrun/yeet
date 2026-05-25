@@ -50,6 +50,25 @@ func TestEffectiveSnapshotPolicyServiceOverride(t *testing.T) {
 	}
 }
 
+func TestEffectiveSnapshotPolicyServerValuesInheritedByNilServiceOverride(t *testing.T) {
+	got, err := effectiveSnapshotPolicy(&db.SnapshotPolicy{
+		Enabled:  boolPtr(false),
+		KeepLast: intPtr(9),
+		MaxAge:   "48h",
+		Events:   []string{"docker-update"},
+		Required: boolPtr(false),
+	}, &db.SnapshotPolicy{})
+	if err != nil {
+		t.Fatalf("effectiveSnapshotPolicy: %v", err)
+	}
+	if got.Enabled || got.KeepLast != 9 || got.MaxAge != 48*time.Hour || got.Required {
+		t.Fatalf("policy = %#v", got)
+	}
+	if got.Allows(snapshotEventRun) || !got.Allows(snapshotEventDockerUpdate) {
+		t.Fatalf("events = %#v", got.Events)
+	}
+}
+
 func TestEffectiveSnapshotPolicyRejectsInvalidEvents(t *testing.T) {
 	_, err := effectiveSnapshotPolicy(nil, &db.SnapshotPolicy{Events: []string{"bad-event"}})
 	if err == nil || !strings.Contains(err.Error(), `invalid snapshot event "bad-event"`) {
@@ -82,6 +101,7 @@ func TestParseSnapshotMaxAge(t *testing.T) {
 		{in: "72h", want: 72 * time.Hour},
 		{in: "0", wantErr: "must be positive"},
 		{in: "-1d", wantErr: "must be positive"},
+		{in: "106752d", wantErr: "invalid snapshot max age"},
 		{in: "bad", wantErr: "invalid snapshot max age"},
 	}
 	for _, tt := range tests {
@@ -132,14 +152,6 @@ func TestCreateServiceSnapshotCommand(t *testing.T) {
 }
 
 func TestCreateServiceSnapshotRetriesNameCollisionWithSuffix(t *testing.T) {
-	oldSuffix := randomSnapshotSuffix
-	randomSnapshotSuffix = func() (string, error) {
-		return "a1b2c3", nil
-	}
-	t.Cleanup(func() {
-		randomSnapshotSuffix = oldSuffix
-	})
-
 	var calls [][]string
 	runner := func(ctx context.Context, args ...string) (string, string, error) {
 		calls = append(calls, append([]string{}, args...))
@@ -156,7 +168,7 @@ func TestCreateServiceSnapshotRetriesNameCollisionWithSuffix(t *testing.T) {
 		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
 	}
 
-	name, err := createServiceSnapshot(context.Background(), runner, req)
+	name, err := createServiceSnapshotWithSuffix(context.Background(), runner, req, staticSnapshotSuffix("a1b2c3"))
 	if err != nil {
 		t.Fatalf("createServiceSnapshot: %v", err)
 	}
@@ -174,16 +186,36 @@ func TestCreateServiceSnapshotRetriesNameCollisionWithSuffix(t *testing.T) {
 	}
 }
 
-func TestCreateServiceSnapshotDoesNotRetryNonCollisionError(t *testing.T) {
-	oldSuffix := randomSnapshotSuffix
-	randomSnapshotSuffix = func() (string, error) {
-		t.Fatal("randomSnapshotSuffix should not be called")
-		return "", nil
+func TestCreateServiceSnapshotRetriesSnapshotAlreadyExistsVariant(t *testing.T) {
+	var calls [][]string
+	runner := func(ctx context.Context, args ...string) (string, string, error) {
+		calls = append(calls, append([]string{}, args...))
+		if len(calls) == 1 {
+			return "", "snapshot tank/apps/svc@yeet-20260524T184233Z-run-g12 already exists", errZFSCommandFailed
+		}
+		return "", "", nil
 	}
-	t.Cleanup(func() {
-		randomSnapshotSuffix = oldSuffix
-	})
+	req := snapshotCreateRequest{
+		Service:    "svc",
+		Dataset:    "tank/apps/svc",
+		Event:      snapshotEventRun,
+		Generation: 12,
+		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
+	}
 
+	name, err := createServiceSnapshotWithSuffix(context.Background(), runner, req, staticSnapshotSuffix("d4e5f6"))
+	if err != nil {
+		t.Fatalf("createServiceSnapshot: %v", err)
+	}
+	if name != "tank/apps/svc@yeet-20260524T184233Z-run-g12-d4e5f6" {
+		t.Fatalf("snapshot = %q", name)
+	}
+	if len(calls) != 2 {
+		t.Fatalf("calls = %#v", calls)
+	}
+}
+
+func TestCreateServiceSnapshotDoesNotRetryNonCollisionError(t *testing.T) {
 	var calls [][]string
 	runner := func(ctx context.Context, args ...string) (string, string, error) {
 		calls = append(calls, append([]string{}, args...))
@@ -197,9 +229,32 @@ func TestCreateServiceSnapshotDoesNotRetryNonCollisionError(t *testing.T) {
 		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
 	}
 
-	_, err := createServiceSnapshot(context.Background(), runner, req)
+	_, err := createServiceSnapshotWithSuffix(context.Background(), runner, req, failSnapshotSuffix(t))
 	if err == nil || !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("createServiceSnapshot error = %v, want permission denied", err)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls = %#v, want one call", calls)
+	}
+}
+
+func TestCreateServiceSnapshotDoesNotRetryNearCollisionError(t *testing.T) {
+	var calls [][]string
+	runner := func(ctx context.Context, args ...string) (string, string, error) {
+		calls = append(calls, append([]string{}, args...))
+		return "", "filesystem tank/apps/svc already exists", errZFSCommandFailed
+	}
+	req := snapshotCreateRequest{
+		Service:    "svc",
+		Dataset:    "tank/apps/svc",
+		Event:      snapshotEventRun,
+		Generation: 12,
+		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
+	}
+
+	_, err := createServiceSnapshotWithSuffix(context.Background(), runner, req, failSnapshotSuffix(t))
+	if err == nil || !strings.Contains(err.Error(), "filesystem tank/apps/svc already exists") {
+		t.Fatalf("createServiceSnapshot error = %v, want filesystem already exists", err)
 	}
 	if len(calls) != 1 {
 		t.Fatalf("calls = %#v, want one call", calls)
@@ -234,6 +289,36 @@ func TestPruneSnapshotSelection(t *testing.T) {
 	}
 	got := snapshotsToPrune(snaps, "svc", effectivePolicy{KeepLast: 5, MaxAge: 7 * 24 * time.Hour}, now, "tank/apps/svc@yeet-new-1")
 	want := []string{"tank/apps/svc@yeet-old", "tank/apps/svc@yeet-new-6"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("snapshotsToPrune = %#v, want %#v", got, want)
+	}
+}
+
+func TestPruneSnapshotSelectionUsesNameTieBreaker(t *testing.T) {
+	now := time.Date(2026, 5, 24, 20, 0, 0, 0, time.UTC)
+	created := now.Add(-time.Hour)
+	snaps := []listedSnapshot{
+		{Name: "tank/apps/svc@yeet-c", Created: created, CreatedBy: "catch", Service: "svc"},
+		{Name: "tank/apps/svc@yeet-a", Created: created, CreatedBy: "catch", Service: "svc"},
+		{Name: "tank/apps/svc@yeet-b", Created: created, CreatedBy: "catch", Service: "svc"},
+	}
+
+	got := snapshotsToPrune(snaps, "svc", effectivePolicy{KeepLast: 2, MaxAge: 7 * 24 * time.Hour}, now, "")
+	want := []string{"tank/apps/svc@yeet-c"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("snapshotsToPrune = %#v, want %#v", got, want)
+	}
+}
+
+func TestPruneSnapshotSelectionKeepsNewestWhenCurrentEmpty(t *testing.T) {
+	now := time.Date(2026, 5, 24, 20, 0, 0, 0, time.UTC)
+	snaps := []listedSnapshot{
+		{Name: "tank/apps/svc@yeet-oldest", Created: now.Add(-10 * time.Hour), CreatedBy: "catch", Service: "svc"},
+		{Name: "tank/apps/svc@yeet-newest", Created: now.Add(-8 * time.Hour), CreatedBy: "catch", Service: "svc"},
+	}
+
+	got := snapshotsToPrune(snaps, "svc", effectivePolicy{KeepLast: 1, MaxAge: time.Hour}, now, "")
+	want := []string{"tank/apps/svc@yeet-oldest"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("snapshotsToPrune = %#v, want %#v", got, want)
 	}
@@ -312,4 +397,17 @@ func boolPtr(v bool) *bool {
 
 func intPtr(v int) *int {
 	return &v
+}
+
+func staticSnapshotSuffix(suffix string) func() (string, error) {
+	return func() (string, error) {
+		return suffix, nil
+	}
+}
+
+func failSnapshotSuffix(t *testing.T) func() (string, error) {
+	return func() (string, error) {
+		t.Fatal("snapshot suffix should not be requested")
+		return "", nil
+	}
 }
