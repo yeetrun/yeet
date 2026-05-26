@@ -359,6 +359,50 @@ func TestSvcRunParsingErrorsAndStoredEnv(t *testing.T) {
 	}
 }
 
+func TestSvcRunPayloadOnlyReusesStoredRunArgs(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = "jellyfin"
+	loc := &projectConfigLocation{Dir: t.TempDir(), Config: &ProjectConfig{Version: projectConfigVersion}}
+	loc.Config.SetServiceEntry(ServiceEntry{
+		Name:    "jellyfin",
+		Host:    Host(),
+		Type:    serviceTypeRun,
+		Payload: "jellyfin/compose.yml",
+		Args:    []string{"--net=svc,ts", "--ts-tags=tag:app", "--pull", "--app-flag"},
+	})
+
+	run, err := parseSvcRun([]string{"jellyfin/compose.yml"}, loc, "")
+	if err != nil {
+		t.Fatalf("parseSvcRun payload-only redeploy error: %v", err)
+	}
+	wantArgs := []string{"--net=svc,ts", "--ts-tags=tag:app", "--pull", "--", "--app-flag"}
+	if !reflect.DeepEqual(run.Args, wantArgs) {
+		t.Fatalf("Args = %#v, want %#v", run.Args, wantArgs)
+	}
+}
+
+func TestSvcRunExplicitArgsInheritStoredLockedRunFlags(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = "jellyfin"
+	loc := &projectConfigLocation{Dir: t.TempDir(), Config: &ProjectConfig{Version: projectConfigVersion}}
+	loc.Config.SetServiceEntry(ServiceEntry{
+		Name:    "jellyfin",
+		Host:    Host(),
+		Type:    serviceTypeRun,
+		Payload: "jellyfin/compose.yml",
+		Args:    []string{"--net=svc,ts", "--ts-tags=tag:app"},
+	})
+
+	run, err := parseSvcRun([]string{"jellyfin/compose.yml", "--pull"}, loc, "")
+	if err != nil {
+		t.Fatalf("parseSvcRun explicit arg redeploy error: %v", err)
+	}
+	wantArgs := []string{"--net=svc,ts", "--ts-tags=tag:app", "--pull"}
+	if !reflect.DeepEqual(run.Args, wantArgs) {
+		t.Fatalf("Args = %#v, want %#v", run.Args, wantArgs)
+	}
+}
+
 func TestSvcRunServiceRoot(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := t.TempDir()

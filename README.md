@@ -151,6 +151,8 @@ reported service because the scan returns unknown or error rows, it prints those
 skipped rows and exits nonzero after running any updateable services.
 If you need to redeploy even when nothing changed, use `yeet run --force <svc> ./compose.yml`.
 With a stored `yeet.toml` payload, `yeet run <svc> --force` also works.
+For an existing service, `yeet run <svc> ./compose.yml` with only a payload
+reuses the saved run options from `yeet.toml` and updates just the payload.
 Note: Docker hosts must enable the containerd snapshotter so pushed images show up locally (see Installation in the docs).
 
 Other common variants (in order of use):

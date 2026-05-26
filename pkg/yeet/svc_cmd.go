@@ -383,20 +383,16 @@ func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride s
 		return parsedSvcRun{}, err
 	}
 	entry, hasEntry := serviceEntryForConfig(cfgLoc, hostOverride)
-	if err := ensureSvcRunEntryFlags(entry, hasEntry, flags.Args); err != nil {
+	effectiveArgs, err := effectiveSvcRunArgs(entry, hasEntry, flags.Args)
+	if err != nil {
 		return parsedSvcRun{}, err
 	}
-	envFile := flags.EnvFileArg
-	if envFile == "" && hasEntry && entry.EnvFile != "" && cfgLoc != nil {
-		envFile = resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
+	if err := ensureSvcRunEntryFlags(entry, hasEntry, effectiveArgs); err != nil {
+		return parsedSvcRun{}, err
 	}
-	serviceRoot := flags.ServiceRootArg
-	serviceRootZFS := flags.ServiceRootZFSArg
-	if serviceRoot == "" && hasEntry {
-		serviceRoot = entry.ServiceRoot
-		serviceRootZFS = entry.ServiceRootZFS
-	}
-	filteredArgs := runArgsWithServiceRootOptions(flags.Args, serviceRootOptions{Root: serviceRoot, ZFS: serviceRootZFS})
+	envFile := svcRunEnvFile(flags, entry, hasEntry, cfgLoc)
+	serviceRoot, serviceRootZFS := svcRunServiceRoot(flags, entry, hasEntry)
+	filteredArgs := runArgsWithServiceRootOptions(effectiveArgs, serviceRootOptions{Root: serviceRoot, ZFS: serviceRootZFS})
 	filteredArgs = runArgsWithSnapshotOptions(filteredArgs, snapshotOptionsForSvcRun(entry, flags))
 	return parsedSvcRun{
 		Payload:                 payload,
@@ -422,6 +418,27 @@ func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride s
 		Entry:                   entry,
 		ForceDeploy:             flags.ForceDeploy,
 	}, nil
+}
+
+func effectiveSvcRunArgs(entry ServiceEntry, hasEntry bool, runArgs []string) ([]string, error) {
+	if !hasEntry {
+		return runArgs, nil
+	}
+	return effectiveRunArgsForExistingEntry(entry, runArgs)
+}
+
+func svcRunEnvFile(flags svcRunControlFlags, entry ServiceEntry, hasEntry bool, cfgLoc *projectConfigLocation) string {
+	if flags.EnvFileArg != "" || !hasEntry || entry.EnvFile == "" || cfgLoc == nil {
+		return flags.EnvFileArg
+	}
+	return resolveEnvFilePath(cfgLoc.Dir, entry.EnvFile)
+}
+
+func svcRunServiceRoot(flags svcRunControlFlags, entry ServiceEntry, hasEntry bool) (string, bool) {
+	if flags.ServiceRootArg != "" || !hasEntry {
+		return flags.ServiceRootArg, flags.ServiceRootZFSArg
+	}
+	return entry.ServiceRoot, entry.ServiceRootZFS
 }
 
 func snapshotOptionsForSvcRun(entry ServiceEntry, flags svcRunControlFlags) snapshotOptions {

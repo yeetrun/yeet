@@ -336,6 +336,54 @@ func saveEnvFileConfig(cfgLoc *projectConfigLocation, hostOverride string, envFi
 	return saveProjectConfig(loc)
 }
 
+func effectiveRunArgsForExistingEntry(entry ServiceEntry, runArgs []string) ([]string, error) {
+	if len(normalizeRunArgs(runArgs)) == 0 {
+		return rehydrateRunArgs(entry.Args), nil
+	}
+	return runArgsWithStoredLockedFlags(entry, runArgs)
+}
+
+func runArgsWithStoredLockedFlags(entry ServiceEntry, runArgs []string) ([]string, error) {
+	storedFlags, _, err := cli.ParseRun(rehydrateRunArgs(entry.Args))
+	if err != nil {
+		return nil, err
+	}
+	prefix := storedLockedRunFlagsPrefix(storedFlags, runArgs)
+	if len(prefix) == 0 {
+		return append([]string{}, runArgs...), nil
+	}
+	out := make([]string, 0, len(prefix)+len(runArgs))
+	out = append(out, prefix...)
+	out = append(out, runArgs...)
+	return out, nil
+}
+
+func storedLockedRunFlagsPrefix(storedFlags cli.RunFlags, runArgs []string) []string {
+	var prefix []string
+	if net := strings.TrimSpace(storedFlags.Net); net != "" && !runArgsHaveFlag(runArgs, "--net") {
+		prefix = append(prefix, "--net="+net)
+	}
+	if len(storedFlags.TsTags) != 0 && !runArgsHaveFlag(runArgs, "--ts-tags") {
+		for _, tag := range storedFlags.TsTags {
+			tag = strings.TrimSpace(tag)
+			if tag != "" {
+				prefix = append(prefix, "--ts-tags="+tag)
+			}
+		}
+	}
+	return prefix
+}
+
+func runArgsHaveFlag(runArgs []string, name string) bool {
+	flagArgs, _ := splitRunArgsForParsing(runArgs)
+	for _, arg := range flagArgs {
+		if flagName(arg) == name {
+			return true
+		}
+	}
+	return false
+}
+
 func ensureLockedRunFlags(entry ServiceEntry, runArgs []string) error {
 	if entry.Name == "" || entry.Host == "" {
 		return nil
