@@ -154,6 +154,7 @@ func NewFileInstaller(s *Server, cfg FileInstallerCfg) (*FileInstaller, error) {
 		return nil, fmt.Errorf("failed to prepare service root: %w", err)
 	}
 	cfg.ServiceRoot = resolvedRoot.Root
+	printServiceRootWarnings(cfg, resolvedRoot.Warnings)
 	i := &FileInstaller{
 		s:   s,
 		cfg: cfg,
@@ -182,6 +183,22 @@ func NewFileInstaller(s *Server, cfg FileInstallerCfg) (*FileInstaller, error) {
 	}
 	i.File = file
 	return i, nil
+}
+
+func printServiceRootWarnings(cfg FileInstallerCfg, warnings []string) {
+	for _, warning := range warnings {
+		warning = strings.TrimSpace(warning)
+		if warning == "" {
+			continue
+		}
+		if cfg.ClientOut != nil {
+			_, _ = fmt.Fprintf(cfg.ClientOut, "warning: %s\n", warning)
+			continue
+		}
+		if cfg.Printer != nil {
+			cfg.Printer("warning: %s", warning)
+		}
+	}
 }
 
 func (i *FileInstaller) serviceBinDir() string {

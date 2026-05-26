@@ -27,9 +27,10 @@ const (
 )
 
 type resolvedServiceRoot struct {
-	Root    string
-	Dataset string
-	ZFS     bool
+	Root     string
+	Dataset  string
+	ZFS      bool
+	Warnings []string
 }
 
 func runZFSCommand(ctx context.Context, args ...string) (string, string, error) {
@@ -57,7 +58,8 @@ func resolveZFSServiceRoot(ctx context.Context, runner zfsCommandRunner, dataset
 	if err != nil {
 		return resolvedServiceRoot{}, err
 	}
-	if !exists {
+	existingDataset := exists
+	if !existingDataset {
 		if err := zfsCreateDataset(ctx, runner, dataset); err != nil {
 			return resolvedServiceRoot{}, err
 		}
@@ -67,11 +69,14 @@ func resolveZFSServiceRoot(ctx context.Context, runner zfsCommandRunner, dataset
 	if err != nil {
 		return resolvedServiceRoot{}, err
 	}
-	root, err := validateZFSMountpoint(mountpoint, mode)
+	root, warnings, err := validateZFSMountpoint(mountpoint, mode, existingDataset)
 	if err != nil {
 		return resolvedServiceRoot{}, err
 	}
-	return resolvedServiceRoot{Root: root, Dataset: dataset, ZFS: true}, nil
+	if mode == zfsServiceRootTarget && existingDataset {
+		warnings = append([]string{fmt.Sprintf("ZFS dataset %q already exists; using existing dataset", dataset)}, warnings...)
+	}
+	return resolvedServiceRoot{Root: root, Dataset: dataset, ZFS: true, Warnings: warnings}, nil
 }
 
 func zfsDatasetExists(ctx context.Context, runner zfsCommandRunner, dataset string) (bool, error) {
@@ -104,27 +109,47 @@ func zfsDatasetMountpoint(ctx context.Context, runner zfsCommandRunner, dataset 
 	return strings.TrimSpace(stdout), nil
 }
 
-func validateZFSMountpoint(mountpoint string, mode zfsServiceRootMode) (string, error) {
+func validateZFSMountpoint(mountpoint string, mode zfsServiceRootMode, existingDataset bool) (string, []string, error) {
 	mountpoint = strings.TrimSpace(mountpoint)
 	if mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {
-		return "", fmt.Errorf("unsupported ZFS mountpoint %q; set a normal mounted mountpoint before using --zfs", mountpoint)
+		return "", nil, fmt.Errorf("unsupported ZFS mountpoint %q; set a normal mounted mountpoint before using --zfs", mountpoint)
 	}
 	if !filepath.IsAbs(mountpoint) {
-		return "", fmt.Errorf("ZFS mountpoint %q must be absolute", mountpoint)
+		return "", nil, fmt.Errorf("ZFS mountpoint %q must be absolute", mountpoint)
 	}
 
 	cleaned := filepath.Clean(mountpoint)
 	if mode == zfsServiceRootExisting {
-		info, err := osStat(cleaned)
-		if err != nil {
-			return "", fmt.Errorf("failed to stat ZFS mountpoint %q: %w", cleaned, err)
-		}
-		if !info.IsDir() {
-			return "", fmt.Errorf("ZFS mountpoint %q is not a directory", cleaned)
-		}
-		return cleaned, nil
+		root, err := validateExistingZFSMountpoint(cleaned)
+		return root, nil, err
 	}
-	return validateRequestedServiceRoot(cleaned)
+	if existingDataset {
+		root, err := validateExistingZFSMountpoint(cleaned)
+		if err != nil {
+			return "", nil, err
+		}
+		empty, err := rootIsMissingOrEmpty(cleaned)
+		if err != nil {
+			return "", nil, err
+		}
+		if !empty {
+			return root, []string{fmt.Sprintf("ZFS service root %q is not empty; deploying into existing contents", root)}, nil
+		}
+		return root, nil, nil
+	}
+	root, err := validateRequestedServiceRoot(cleaned)
+	return root, nil, err
+}
+
+func validateExistingZFSMountpoint(cleaned string) (string, error) {
+	info, err := osStat(cleaned)
+	if err != nil {
+		return "", fmt.Errorf("failed to stat ZFS mountpoint %q: %w", cleaned, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("ZFS mountpoint %q is not a directory", cleaned)
+	}
+	return cleaned, nil
 }
 
 func formatZFSCommandError(command string, stderr string, err error) error {

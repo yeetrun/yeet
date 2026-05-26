@@ -508,6 +508,9 @@ func TestNewFileInstallerPersistsZFSServiceRoot(t *testing.T) {
 	server := newTestServer(t)
 	parent := t.TempDir()
 	mountpoint := filepath.Join(parent, "svc")
+	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
+		t.Fatalf("MkdirAll mountpoint: %v", err)
+	}
 	zfsRunner := fakeZFSRunner(map[string]fakeZFSDataset{
 		"tank/apps/svc": {Mountpoint: mountpoint, Exists: true},
 	})
@@ -539,6 +542,41 @@ func TestNewFileInstallerPersistsZFSServiceRoot(t *testing.T) {
 	}
 	if err := installer.applyInstallPlanToService(&db.Service{Name: "svc"}, fileInstallPlan{}); err != nil {
 		t.Fatalf("applyInstallPlanToService: %v", err)
+	}
+}
+
+func TestNewFileInstallerPrintsZFSServiceRootWarnings(t *testing.T) {
+	server := newTestServer(t)
+	mountpoint := t.TempDir()
+	if err := os.WriteFile(filepath.Join(mountpoint, "existing-service-file"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	server.zfsRunner = fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/apps/svc": {Mountpoint: mountpoint, Exists: true},
+	}).Run
+
+	var out strings.Builder
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{
+			ServiceName:    "svc",
+			ServiceRoot:    "tank/apps/svc",
+			ServiceRootZFS: true,
+			ClientOut:      &out,
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	installer.Fail()
+	_ = installer.Close()
+	got := out.String()
+	for _, want := range []string{
+		`warning: ZFS dataset "tank/apps/svc" already exists`,
+		`warning: ZFS service root "` + mountpoint + `" is not empty`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output = %q, want %q", got, want)
+		}
 	}
 }
 

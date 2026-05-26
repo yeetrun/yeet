@@ -171,7 +171,9 @@ Without `--zfs`, `--service-root` must be an absolute filesystem path on the
 catch host. With `--zfs`, `--service-root` is a ZFS dataset name such as
 `tank/apps/vaultwarden`; catch accepts an existing dataset or runs
 `zfs create tank/apps/vaultwarden`, then uses the dataset mountpoint as the
-service root. Parent datasets must already exist.
+service root. Parent datasets must already exist. If the dataset already
+exists or its mountpoint already contains files, catch prints a warning and
+deploys into it.
 
 For filesystem paths, the parent directory (`/srv/apps` in this example) must
 already exist; yeet can create the final service directory.

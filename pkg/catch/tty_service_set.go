@@ -364,7 +364,7 @@ func (s *Server) resolveZFSServiceRootMigrationRequest(name, requestedDataset, o
 	if err != nil {
 		return resolvedServiceRoot{}, err
 	}
-	root, err := validateZFSMountpoint(mountpoint, zfsServiceRootTarget)
+	root, _, err := validateZFSMountpoint(mountpoint, zfsServiceRootTarget, exists)
 	if err != nil {
 		return resolvedServiceRoot{}, err
 	}
@@ -382,7 +382,7 @@ func preflightMissingZFSServiceRootDataset(ctx context.Context, runner zfsComman
 	if err != nil {
 		return err
 	}
-	parentRoot, err := validateZFSMountpoint(parentMountpoint, zfsServiceRootExisting)
+	parentRoot, _, err := validateZFSMountpoint(parentMountpoint, zfsServiceRootExisting, true)
 	if err != nil {
 		return err
 	}

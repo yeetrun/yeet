@@ -60,6 +60,9 @@ func TestResolveZFSServiceRootExistingDataset(t *testing.T) {
 		t.Fatalf("MkdirAll: %v", err)
 	}
 	mountpoint := filepath.Join(parent, "svc")
+	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
+		t.Fatalf("MkdirAll mountpoint: %v", err)
+	}
 
 	var calls [][]string
 	runner := func(ctx context.Context, args ...string) (string, string, error) {
@@ -87,6 +90,41 @@ func TestResolveZFSServiceRootExistingDataset(t *testing.T) {
 	}
 	if !reflect.DeepEqual(calls, wantCalls) {
 		t.Fatalf("calls = %#v, want %#v", calls, wantCalls)
+	}
+}
+
+func TestResolveZFSServiceRootTargetExistingNonEmptyDatasetWarns(t *testing.T) {
+	mountpoint := t.TempDir()
+	if err := os.WriteFile(filepath.Join(mountpoint, "existing.txt"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	runner := func(ctx context.Context, args ...string) (string, string, error) {
+		switch strings.Join(args, " ") {
+		case "list -H -o name tank/apps/svc":
+			return "tank/apps/svc\n", "", nil
+		case "get -H -o value mountpoint tank/apps/svc":
+			return mountpoint + "\n", "", nil
+		default:
+			return "", "", errors.New("unexpected zfs command")
+		}
+	}
+
+	got, err := resolveZFSServiceRoot(context.Background(), runner, "tank/apps/svc", zfsServiceRootTarget)
+	if err != nil {
+		t.Fatalf("resolveZFSServiceRoot: %v", err)
+	}
+	if got.Root != mountpoint || got.Dataset != "tank/apps/svc" || !got.ZFS {
+		t.Fatalf("resolved = %#v", got)
+	}
+	warnings := strings.Join(got.Warnings, "\n")
+	for _, want := range []string{
+		`ZFS dataset "tank/apps/svc" already exists`,
+		`ZFS service root "` + mountpoint + `" is not empty`,
+	} {
+		if !strings.Contains(warnings, want) {
+			t.Fatalf("warnings = %#v, want %q", got.Warnings, want)
+		}
 	}
 }
 
