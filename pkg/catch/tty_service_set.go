@@ -1015,7 +1015,16 @@ func rootPathBoundaryBefore(content []byte, idx int) bool {
 	if idx == 0 {
 		return true
 	}
+	if content[idx] == '/' && content[idx-1] == '-' && systemdEnvironmentFilePrefixBefore(content, idx-1) {
+		return true
+	}
 	return !isRootPathByte(content[idx-1])
+}
+
+func systemdEnvironmentFilePrefixBefore(content []byte, dashIdx int) bool {
+	lineStart := bytes.LastIndexByte(content[:dashIdx], '\n') + 1
+	prefix := strings.TrimSpace(string(content[lineStart:dashIdx]))
+	return strings.HasSuffix(prefix, "EnvironmentFile=")
 }
 
 func rootPathBoundaryAfter(content []byte, idx int) bool {
