@@ -443,6 +443,11 @@ func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {
 	if err := os.WriteFile(tsUnitPath, []byte(tsUnitContent), 0o644); err != nil {
 		t.Fatalf("write ts unit: %v", err)
 	}
+	systemdUnitPath := filepath.Join(serviceBinDirForRoot(oldRoot), "svc-root.service")
+	systemdUnitContent := "[Service]\nExecStart=" + filepath.Join(serviceRunDirForRoot(oldRoot), "svc-root") + "\nEnvironmentFile=-" + filepath.Join(serviceRunDirForRoot(oldRoot), "env") + "\n"
+	if err := os.WriteFile(systemdUnitPath, []byte(systemdUnitContent), 0o644); err != nil {
+		t.Fatalf("write systemd unit: %v", err)
+	}
 	envPath := filepath.Join(serviceBinDirForRoot(oldRoot), "app.env")
 	envContent := "APP_ROOT=" + oldRoot + "\n"
 	if err := os.WriteFile(envPath, []byte(envContent), 0o644); err != nil {
@@ -463,6 +468,12 @@ func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {
 				Refs: map[db.ArtifactRef]string{
 					db.Gen(7): tsUnitPath,
 					"latest":  tsUnitPath,
+				},
+			},
+			db.ArtifactSystemdUnit: {
+				Refs: map[db.ArtifactRef]string{
+					db.Gen(7): systemdUnitPath,
+					"latest":  systemdUnitPath,
 				},
 			},
 			db.ArtifactEnvFile: {
@@ -510,10 +521,13 @@ func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {
 
 	newComposePath := filepath.Join(serviceBinDirForRoot(newRoot), "docker-compose.7.yml")
 	newTSUnitPath := filepath.Join(serviceBinDirForRoot(newRoot), "yeet-svc-root-ts.service")
+	newSystemdUnitPath := filepath.Join(serviceBinDirForRoot(newRoot), "svc-root.service")
 	assertArtifactRef(t, server, name, db.ArtifactDockerComposeFile, db.Gen(7), newComposePath)
 	assertArtifactRef(t, server, name, db.ArtifactDockerComposeFile, "latest", newComposePath)
 	assertArtifactRef(t, server, name, db.ArtifactTSService, db.Gen(7), newTSUnitPath)
 	assertArtifactRef(t, server, name, db.ArtifactTSService, "latest", newTSUnitPath)
+	assertArtifactRef(t, server, name, db.ArtifactSystemdUnit, db.Gen(7), newSystemdUnitPath)
+	assertArtifactRef(t, server, name, db.ArtifactSystemdUnit, "latest", newSystemdUnitPath)
 	assertArtifactRef(t, server, name, db.ArtifactEnvFile, db.Gen(7), newEnvPath)
 	assertArtifactRef(t, server, name, db.ArtifactEnvFile, "latest", newEnvPath)
 	assertFileContains(t, newComposePath, filepath.Join(serviceDataDirForRoot(newRoot), "config"))
@@ -528,9 +542,13 @@ func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {
 	assertFileContains(t, newTSUnitPath, filepath.Join(serviceRunDirForRoot(newRoot), "tailscaled.sock"))
 	assertFileContains(t, newTSUnitPath, filepath.Join(newRoot, "tailscale"))
 	assertFileContains(t, newTSUnitPath, oldBackupPath)
+	assertFileContains(t, newSystemdUnitPath, "ExecStart="+filepath.Join(serviceRunDirForRoot(newRoot), "svc-root"))
+	assertFileContains(t, newSystemdUnitPath, "EnvironmentFile=-"+filepath.Join(serviceRunDirForRoot(newRoot), "env"))
+	assertFileNotContains(t, newSystemdUnitPath, filepath.Join(serviceRunDirForRoot(oldRoot), "env"))
 	assertFileContents(t, newEnvPath, envContent)
 	assertFileContents(t, composePath, composeContent)
 	assertFileContents(t, tsUnitPath, tsUnitContent)
+	assertFileContents(t, systemdUnitPath, systemdUnitContent)
 	assertFileContents(t, envPath, envContent)
 	if downCalls != 1 {
 		t.Fatalf("docker down calls = %d, want 1", downCalls)
