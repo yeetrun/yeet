@@ -48,6 +48,7 @@ func preserveSvcCommandGlobals(t *testing.T) {
 	oldTryImage := tryRunRemoteImageFn
 	oldImageExists := imageExistsFn
 	oldFetchServiceInfoForSync := fetchServiceInfoForSyncFn
+	oldRunWeb := runWebFn
 	oldService := serviceOverride
 	oldPrefs := loadedPrefs
 	oldIsTerminal := isTerminalFn
@@ -64,6 +65,7 @@ func preserveSvcCommandGlobals(t *testing.T) {
 		tryRunRemoteImageFn = oldTryImage
 		imageExistsFn = oldImageExists
 		fetchServiceInfoForSyncFn = oldFetchServiceInfoForSync
+		runWebFn = oldRunWeb
 		serviceOverride = oldService
 		loadedPrefs = oldPrefs
 		isTerminalFn = oldIsTerminal
@@ -381,12 +383,17 @@ func TestSvcRunPayloadOnlyReusesStoredRunArgs(t *testing.T) {
 	}
 }
 
-func TestSvcRunWebFlagReturnsTemporaryGuard(t *testing.T) {
+func TestSvcRunWebFlagRoutesToLocalWeb(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	serviceOverride = "svc-a"
 	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
 		t.Fatalf("unexpected remote deploy for image=%q args=%v", image, args)
 		return false, nil
+	}
+	var got runWebRequest
+	runWebFn = func(ctx context.Context, req runWebRequest) error {
+		got = req
+		return nil
 	}
 
 	req := svcCommandRequest{
@@ -397,23 +404,30 @@ func TestSvcRunWebFlagReturnsTemporaryGuard(t *testing.T) {
 			RawArgs: []string{"run", "--web", "ghcr.io/example/app:latest"},
 		},
 	}
-	err := handleSvcRun(req)
-	if err == nil || !strings.Contains(err.Error(), "yeet run --web") {
-		t.Fatalf("handleSvcRun --web error = %v, want temporary guard", err)
+	if err := handleSvcRun(req); err != nil {
+		t.Fatalf("handleSvcRun --web error = %v", err)
+	}
+	if got.Service != "svc-a" || !reflect.DeepEqual(got.Args, []string{"ghcr.io/example/app:latest"}) {
+		t.Fatalf("runWeb request = %#v, want service and payload", got)
 	}
 }
 
-func TestHandleSvcCmdRunWebWithoutServiceReturnsTemporaryGuard(t *testing.T) {
+func TestHandleSvcCmdRunWebWithoutServiceRoutesToLocalWeb(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	useTempSvcCwd(t)
 	serviceOverride = ""
 
-	err := HandleSvcCmd([]string{"run", "--web"})
-	if err == nil || !strings.Contains(err.Error(), "yeet run --web") {
-		t.Fatalf("HandleSvcCmd run --web error = %v, want temporary guard", err)
+	var got runWebRequest
+	runWebFn = func(ctx context.Context, req runWebRequest) error {
+		got = req
+		return nil
 	}
-	if strings.Contains(err.Error(), "requires a service name") {
-		t.Fatalf("HandleSvcCmd run --web error = %v, want guard before missing service", err)
+
+	if err := HandleSvcCmd([]string{"run", "--web"}); err != nil {
+		t.Fatalf("HandleSvcCmd run --web error = %v", err)
+	}
+	if len(got.Args) != 0 {
+		t.Fatalf("runWeb request args = %#v, want empty", got.Args)
 	}
 }
 
@@ -447,28 +461,6 @@ func TestSvcRunWebFlagAfterTerminatorDoesNotTriggerGuard(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotArgs, []string{"--", "--web"}) {
 		t.Fatalf("remote image args = %#v, want post-terminator --web", gotArgs)
-	}
-}
-
-func TestRunWebFlagRequestedParsesBoolValues(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want bool
-	}{
-		{name: "bare", args: []string{"--web"}, want: true},
-		{name: "explicit true", args: []string{"--web=true"}, want: true},
-		{name: "explicit false", args: []string{"--web=false"}, want: false},
-		{name: "invalid explicit value", args: []string{"--web=wat"}, want: false},
-		{name: "after terminator", args: []string{"--", "--web"}, want: false},
-		{name: "true after terminator", args: []string{"--", "--web=true"}, want: false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := runWebFlagRequested(tt.args); got != tt.want {
-				t.Fatalf("runWebFlagRequested(%#v) = %v, want %v", tt.args, got, tt.want)
-			}
-		})
 	}
 }
 
