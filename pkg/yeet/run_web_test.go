@@ -222,6 +222,31 @@ func TestRunWebStartsLocalhostServerAndOpensBrowser(t *testing.T) {
 	}
 }
 
+func TestRunWebOpensBrowserForAlreadyCanceledContext(t *testing.T) {
+	oldOpenBrowser := openBrowserFn
+	defer func() { openBrowserFn = oldOpenBrowser }()
+
+	var opened string
+	openBrowserFn = func(rawURL string) error {
+		opened = rawURL
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var out bytes.Buffer
+	err := runWeb(ctx, runWebRequest{Out: &out, Err: io.Discard})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runWeb error = %v, want context canceled", err)
+	}
+	if !strings.HasPrefix(opened, "http://127.0.0.1:") {
+		t.Fatalf("opened = %q, want localhost URL", opened)
+	}
+	if !strings.Contains(out.String(), "Opening http://127.0.0.1:") {
+		t.Fatalf("out = %q, want opening line", out.String())
+	}
+}
+
 func TestRunWebReturnsAfterSuccessfulDeploy(t *testing.T) {
 	oldOpenBrowser := openBrowserFn
 	oldInfo := fetchRunDraftServiceInfoFn
