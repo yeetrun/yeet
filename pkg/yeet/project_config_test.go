@@ -585,6 +585,40 @@ func TestSaveRunConfigOverwritesArgs(t *testing.T) {
 	}
 }
 
+func TestSaveRunConfigClearsStalePayloadKind(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+
+	tmp := t.TempDir()
+	serviceOverride = "svc-a"
+	payload := filepath.Join(tmp, "app")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatalf("WriteFile payload error: %v", err)
+	}
+	loc := &projectConfigLocation{
+		Path: filepath.Join(tmp, projectConfigName),
+		Dir:  tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+			Name:        "svc-a",
+			Host:        "host-a",
+			Type:        serviceTypeRun,
+			Payload:     "app",
+			PayloadKind: "local-image",
+		}}},
+	}
+
+	if err := saveRunConfig(loc, "host-a", payload, nil, "", false); err != nil {
+		t.Fatalf("saveRunConfig error: %v", err)
+	}
+	entry, ok := loc.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("expected service config to be saved")
+	}
+	if entry.PayloadKind != "" {
+		t.Fatalf("PayloadKind = %q, want empty", entry.PayloadKind)
+	}
+}
+
 func TestSaveCronConfigCreatesToml(t *testing.T) {
 	oldService := serviceOverride
 	defer func() { serviceOverride = oldService }()
