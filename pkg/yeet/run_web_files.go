@@ -139,5 +139,5 @@ func runWebLikelyPayload(name string, mode os.FileMode) bool {
 
 func runWebLikelyEnv(name string) bool {
 	base := strings.ToLower(name)
-	return base == ".env" || strings.HasSuffix(base, ".env") || strings.Contains(base, ".env.")
+	return strings.Contains(base, ".env")
 }
