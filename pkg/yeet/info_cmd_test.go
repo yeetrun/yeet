@@ -189,6 +189,27 @@ func TestBuildClientInfo(t *testing.T) {
 	}
 }
 
+func TestBuildClientInfoUsesLocalImagePayloadKind(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &ProjectConfig{}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:        "svc-a",
+		Host:        "host-a",
+		Type:        serviceTypeRun,
+		Payload:     "alpine",
+		PayloadKind: "local-image",
+	})
+	loc := &projectConfigLocation{Path: filepath.Join(dir, projectConfigName), Dir: dir, Config: cfg}
+
+	got := buildClientInfo(loc, "svc-a", "host-a", serverInfo{}, nil)
+	if got.Payload == nil {
+		t.Fatal("Payload = nil, want local image payload info")
+	}
+	if got.Payload.Kind != "local image" || !got.Payload.ImageRef || got.Payload.ResolveErr != "" {
+		t.Fatalf("Payload = %#v, want local image without resolve error", got.Payload)
+	}
+}
+
 func TestInfoInspectPayloadClassifiesConfiguredPayloads(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM alpine\n")

@@ -153,15 +153,24 @@ func buildClientInfo(cfgLoc *projectConfigLocation, service, host string, hostIn
 		Schedule:    entry.Schedule,
 		Args:        entry.Args,
 	}
-	info.Payload = inspectPayload(entry.Payload, cfgLoc.Dir, hostInfo, hostInfoErr)
+	info.Payload = inspectPayloadWithKind(entry.Payload, entry.PayloadKind, cfgLoc.Dir, hostInfo, hostInfoErr)
 	return info
 }
 
 func inspectPayload(payload, configDir string, hostInfo serverInfo, hostInfoErr error) *clientPayloadInfo {
+	return inspectPayloadWithKind(payload, "", configDir, hostInfo, hostInfoErr)
+}
+
+func inspectPayloadWithKind(payload, payloadKind, configDir string, hostInfo serverInfo, hostInfoErr error) *clientPayloadInfo {
 	payload = strings.TrimSpace(payload)
 	info := &clientPayloadInfo{Stored: payload}
 	if payload == "" {
 		info.ResolveErr = "no payload configured"
+		return info
+	}
+	if strings.TrimSpace(payloadKind) == "local-image" {
+		info.Kind = "local image"
+		info.ImageRef = true
 		return info
 	}
 	if looksLikeImageRef(payload) {
