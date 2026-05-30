@@ -324,6 +324,39 @@ func TestProjectConfigSetServiceRootForEntryCanClear(t *testing.T) {
 	}
 }
 
+func TestProjectConfigSetServiceEntryUpdatesPayloadKind(t *testing.T) {
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:        "svc-a",
+		Host:        "host-a",
+		Type:        serviceTypeRun,
+		Payload:     "alpine",
+		PayloadKind: "local-image",
+	})
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:        "svc-a",
+		Host:        "host-a",
+		Type:        serviceTypeRun,
+		Payload:     "compose.yml",
+		PayloadKind: "compose",
+	})
+	entry, _ := cfg.ServiceEntry("svc-a", "host-a")
+	if entry.PayloadKind != "compose" {
+		t.Fatalf("PayloadKind after update = %q, want compose", entry.PayloadKind)
+	}
+
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:    "svc-a",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "run.sh",
+	})
+	entry, _ = cfg.ServiceEntry("svc-a", "host-a")
+	if entry.PayloadKind != "" {
+		t.Fatalf("PayloadKind after clear = %q, want empty", entry.PayloadKind)
+	}
+}
+
 func TestSaveRunConfigCreatesToml(t *testing.T) {
 	oldService := serviceOverride
 	defer func() { serviceOverride = oldService }()
