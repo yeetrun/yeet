@@ -291,6 +291,7 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 		if c.Services[i].Name == entry.Name && c.Services[i].Host == entry.Host {
 			c.Services[i].Type = entry.Type
 			c.Services[i].Payload = entry.Payload
+			c.Services[i].PayloadKind = entry.PayloadKind
 			c.Services[i].Schedule = entry.Schedule
 			c.Services[i].Args = cloneStringSlice(entry.Args)
 			if entry.EnvFile != "" {
