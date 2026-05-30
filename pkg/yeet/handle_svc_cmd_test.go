@@ -523,6 +523,7 @@ func TestHandleSvcCmdRunPullBeforePayload(t *testing.T) {
 	oldService := serviceOverride
 	oldIsTerminal := isTerminalFn
 	oldHashes := fetchRemoteArtifactHashesFn
+	oldFetchRunDraftServiceInfo := fetchRunDraftServiceInfoFn
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("Getwd error: %v", err)
@@ -534,6 +535,7 @@ func TestHandleSvcCmdRunPullBeforePayload(t *testing.T) {
 		serviceOverride = oldService
 		isTerminalFn = oldIsTerminal
 		fetchRemoteArtifactHashesFn = oldHashes
+		fetchRunDraftServiceInfoFn = oldFetchRunDraftServiceInfo
 		_ = os.Chdir(cwd)
 	}()
 
@@ -543,6 +545,9 @@ func TestHandleSvcCmdRunPullBeforePayload(t *testing.T) {
 	}
 	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
 		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
 	}
 	pushAllLocalImagesFn = func(string, string, string) error {
 		return nil

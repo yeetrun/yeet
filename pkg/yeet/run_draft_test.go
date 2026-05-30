@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -21,12 +22,17 @@ func preserveRunDraftGlobals(t *testing.T) {
 	oldHost := hostOverride
 	oldHostSet := hostOverrideSet
 	oldPrefs := loadedPrefs
+	oldFetchRunDraftServiceInfo := fetchRunDraftServiceInfoFn
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
 	t.Setenv("CATCH_HOST", "")
 	t.Cleanup(func() {
 		serviceOverride = oldService
 		hostOverride = oldHost
 		hostOverrideSet = oldHostSet
 		loadedPrefs = oldPrefs
+		fetchRunDraftServiceInfoFn = oldFetchRunDraftServiceInfo
 	})
 }
 
@@ -245,6 +251,30 @@ func TestRunDraftFromCLIRejectsWebForDraftExecution(t *testing.T) {
 
 	if _, err := runDraftFromCLI([]string{"--web", "./compose.yml"}, nil, ""); err == nil {
 		t.Fatal("runDraftFromCLI error = nil, want --web rejection")
+	}
+}
+
+func TestExecuteRunDraftRejectsInvalidDraftBeforeRemote(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldExec := execRemoteFn
+	defer func() {
+		execRemoteFn = oldExec
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		t.Fatalf("unexpected service info call for host=%q service=%q", host, service)
+		return catchrpc.ServiceInfoResponse{}, nil
+	}
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		t.Fatalf("unexpected remote call: service=%q args=%v", service, args)
+		return nil
+	}
+
+	err := executeRunDraft(context.Background(), RunDraft{}, nil, false)
+	if err == nil {
+		t.Fatal("executeRunDraft error = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "invalid run draft") || !strings.Contains(err.Error(), "service is required") {
+		t.Fatalf("executeRunDraft error = %v, want invalid service validation error", err)
 	}
 }
 

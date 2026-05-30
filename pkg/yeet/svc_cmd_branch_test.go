@@ -48,10 +48,14 @@ func preserveSvcCommandGlobals(t *testing.T) {
 	oldTryImage := tryRunRemoteImageFn
 	oldImageExists := imageExistsFn
 	oldFetchServiceInfoForSync := fetchServiceInfoForSyncFn
+	oldFetchRunDraftServiceInfo := fetchRunDraftServiceInfoFn
 	oldRunWeb := runWebFn
 	oldService := serviceOverride
 	oldPrefs := loadedPrefs
 	oldIsTerminal := isTerminalFn
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
 	t.Cleanup(func() {
 		execRemoteFn = oldExec
 		execRemoteOutputFn = oldExecOutput
@@ -65,6 +69,7 @@ func preserveSvcCommandGlobals(t *testing.T) {
 		tryRunRemoteImageFn = oldTryImage
 		imageExistsFn = oldImageExists
 		fetchServiceInfoForSyncFn = oldFetchServiceInfoForSync
+		fetchRunDraftServiceInfoFn = oldFetchRunDraftServiceInfo
 		runWebFn = oldRunWeb
 		serviceOverride = oldService
 		loadedPrefs = oldPrefs

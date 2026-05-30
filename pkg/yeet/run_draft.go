@@ -7,6 +7,7 @@ package yeet
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/cli"
@@ -259,7 +260,17 @@ func runDraftBool(v bool) *bool {
 	return &v
 }
 
-func executeRunDraft(_ context.Context, draft RunDraft, cfgLoc *projectConfigLocation, forceDeploy bool) error {
+func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigLocation, forceDeploy bool) error {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	normalized, validation := validateRunDraft(ctx, draft, cwd)
+	if !validation.OK {
+		return fmt.Errorf("invalid run draft: %s", validation.Errors[0].Message)
+	}
+	draft = normalized
+
 	service := strings.TrimSpace(draft.Service)
 	if service == "" {
 		return fmt.Errorf("service name is required")
