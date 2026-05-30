@@ -54,7 +54,7 @@ func listRunWebFiles(root, rel string) (runWebFileList, error) {
 		}
 		fileEntry, err := newRunWebFileEntry(rootReal, targetReal, entryPath, name)
 		if err != nil {
-			return runWebFileList{}, err
+			continue
 		}
 		out.Entries = append(out.Entries, fileEntry)
 	}
@@ -126,7 +126,11 @@ func cleanRunWebRel(rel string) (string, error) {
 }
 
 func runWebPathInsideRoot(rootReal, targetReal string) bool {
-	return targetReal == rootReal || strings.HasPrefix(targetReal, rootReal+string(filepath.Separator))
+	rel, err := filepath.Rel(rootReal, targetReal)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 func runWebLikelyPayload(name string, mode os.FileMode) bool {

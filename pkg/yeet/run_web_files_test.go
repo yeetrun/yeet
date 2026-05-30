@@ -76,13 +76,43 @@ func TestListRunWebFilesRejectsSymlinkEscape(t *testing.T) {
 func TestListRunWebFilesRejectsListedSymlinkEscape(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
 	if err := os.Symlink(outside, filepath.Join(root, "outside")); err != nil {
 		t.Skipf("symlink not available: %v", err)
 	}
 
-	_, err := listRunWebFiles(root, ".")
-	if err == nil {
-		t.Fatal("listRunWebFiles listed symlink escape succeeded, want error")
+	got, err := listRunWebFiles(root, ".")
+	if err != nil {
+		t.Fatalf("listRunWebFiles: %v", err)
+	}
+	if got.entry("outside") != nil {
+		t.Fatalf("outside entry = %#v, want omitted", got.entry("outside"))
+	}
+	if got.entry("compose.yml") == nil {
+		t.Fatalf("compose.yml entry missing from %#v", got.Entries)
+	}
+}
+
+func TestListRunWebFilesOmitsBrokenSymlinkEntries(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "missing"), filepath.Join(root, "broken")); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	got, err := listRunWebFiles(root, ".")
+	if err != nil {
+		t.Fatalf("listRunWebFiles: %v", err)
+	}
+	if got.entry("broken") != nil {
+		t.Fatalf("broken entry = %#v, want omitted", got.entry("broken"))
+	}
+	if got.entry("compose.yml") == nil {
+		t.Fatalf("compose.yml entry missing from %#v", got.Entries)
 	}
 }
 
@@ -113,5 +143,11 @@ func TestListRunWebFilesClassifiesSafeSymlinkTargets(t *testing.T) {
 	scriptLink := got.entry("script-link")
 	if scriptLink == nil || !scriptLink.LikelyPayload {
 		t.Fatalf("script-link entry = %#v, want likely payload", scriptLink)
+	}
+}
+
+func TestRunWebPathInsideRootAllowsFilesystemRootChildren(t *testing.T) {
+	if !runWebPathInsideRoot(string(filepath.Separator), filepath.Join(string(filepath.Separator), "tmp")) {
+		t.Fatal("runWebPathInsideRoot rejected child of filesystem root")
 	}
 }
