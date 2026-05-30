@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type runWebRequest struct {
@@ -51,6 +52,8 @@ type runWebOptionHints struct {
 
 var openBrowserFn = openBrowser
 var runWebFn = runWeb
+
+const runWebShutdownTimeout = 2 * time.Second
 
 func extractRunWebFlag(args []string) ([]string, bool, error) {
 	out := make([]string, 0, len(args))
@@ -264,7 +267,11 @@ func waitRunWebServer(ctx context.Context, cancelServer context.CancelFunc, serv
 	select {
 	case <-done:
 		cancelServer()
-		_ = server.Close()
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), runWebShutdownTimeout)
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+		}
+		cancelShutdown()
 		_, _ = fmt.Fprintln(out, "Deployment finished. Close the browser tab and return here.")
 		return nil
 	case <-ctx.Done():
