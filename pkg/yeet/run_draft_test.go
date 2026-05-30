@@ -439,6 +439,73 @@ func TestRunFromProjectConfigPreservesStoredRemoteImageRef(t *testing.T) {
 	}
 }
 
+func TestExecuteRunDraftClearsStaleLocalImageKindForAutoFile(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldExec := execRemoteFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldArch := remoteCatchOSAndArchFn
+	oldIsTerminal := isTerminalFn
+	defer func() {
+		execRemoteFn = oldExec
+		fetchRemoteArtifactHashesFn = oldHashes
+		remoteCatchOSAndArchFn = oldArch
+		isTerminalFn = oldIsTerminal
+	}()
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "app")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		_, _ = io.Copy(io.Discard, stdin)
+		return nil
+	}
+	cfgLoc := &projectConfigLocation{
+		Path: filepath.Join(tmp, projectConfigName),
+		Dir:  tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+			Name:        "svc-a",
+			Host:        "host-a",
+			Type:        serviceTypeRun,
+			Payload:     "app",
+			PayloadKind: "local-image",
+		}}},
+	}
+	draft := RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "app",
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	if err := executeRunDraft(context.Background(), draft, cfgLoc, false); err != nil {
+		t.Fatalf("executeRunDraft: %v", err)
+	}
+	entry, ok := cfgLoc.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("saved config missing svc-a@host-a")
+	}
+	if entry.PayloadKind != "" {
+		t.Fatalf("PayloadKind = %q, want cleared", entry.PayloadKind)
+	}
+}
+
 func TestExecuteRunDraftNewOnlyRejectsExistingService(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	oldTryImage := tryRunRemoteImageFn
