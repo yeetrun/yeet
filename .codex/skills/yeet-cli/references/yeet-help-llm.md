@@ -1,5 +1,5 @@
 # Yeet CLI --help-llm Outputs
-Generated on 2026-05-24 from this repo using:
+Generated on 2026-05-30 from this repo using:
 - `go run ./cmd/yeet --help-llm`
 - `go run ./cmd/yeet <command> --help-llm`
 - `go run ./cmd/yeet <group> --help-llm`
@@ -203,6 +203,18 @@ Install/update from a payload (binary, compose, image, Dockerfile)
 **Examples**:
 
 ```
+yeet run --web
+```
+
+```
+yeet run --web <svc>
+```
+
+```
+yeet run --web <svc> ./compose.yml
+```
+
+```
 yeet run <svc> ./bin/<svc> -- --app-flag value
 ```
 
@@ -212,6 +224,10 @@ yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
 
 ```
 yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs
+```
+
+```
+yeet run <svc> ./compose.yml --snapshots=off
 ```
 
 ```
@@ -431,7 +447,7 @@ Install/update from a payload (binary, compose, image, Dockerfile)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] run [OPTIONS] SVC PAYLOAD [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>]
+yeet [GLOBAL_OPTIONS] run [OPTIONS] SVC PAYLOAD [--web] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>]
 ```
 
 ## Global Options
@@ -467,6 +483,18 @@ Progress output (auto|tty|plain|quiet)
 - **Type**: `string`
 
 ## Examples
+
+```
+yeet run --web
+```
+
+```
+yeet run --web <svc>
+```
+
+```
+yeet run --web <svc> ./compose.yml
+```
 
 ```
 yeet run <svc> ./bin/<svc> -- --app-flag value
