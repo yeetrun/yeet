@@ -79,7 +79,6 @@ func TestRunDraftBuildsExistingRunArgs(t *testing.T) {
 			Modes:   []string{"svc", "ts"},
 			TSTags:  []string{"tag:app"},
 			Publish: []string{"8080:80"},
-			Restart: true,
 		},
 		Storage: RunDraftStorage{ServiceRoot: "tank/apps/svc-a", ZFS: true},
 		Snapshots: RunDraftSnapshots{
@@ -93,13 +92,13 @@ func TestRunDraftBuildsExistingRunArgs(t *testing.T) {
 	}
 
 	want := []string{
+		"--snapshot-events=run",
+		"--snapshot-required=false",
+		"--snapshot-max-age=72h",
+		"--snapshot-keep-last=3",
+		"--snapshots=on",
 		"--service-root=tank/apps/svc-a",
 		"--zfs",
-		"--snapshots=on",
-		"--snapshot-keep-last=3",
-		"--snapshot-max-age=72h",
-		"--snapshot-required=false",
-		"--snapshot-events=run",
 		"--net=svc,ts",
 		"--ts-tags=tag:app",
 		"--publish=8080:80",
@@ -111,6 +110,94 @@ func TestRunDraftBuildsExistingRunArgs(t *testing.T) {
 	}
 }
 
+func TestRunDraftFromCLIMatchesParseSvcRunParity(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		entries   []ServiceEntry
+		wantPull  bool
+		wantForce bool
+	}{
+		{
+			name:      "pull and force",
+			args:      []string{"--net=svc", "--pull", "--force", "./compose.yml", "--", "--app-flag"},
+			wantPull:  true,
+			wantForce: true,
+		},
+		{
+			name: "existing stored args",
+			args: []string{"./compose.yml"},
+			entries: []ServiceEntry{{
+				Name:    "svc-a",
+				Host:    "host-a",
+				Type:    serviceTypeRun,
+				Payload: "./compose.yml",
+				Args:    []string{"--net=svc,ts", "--ts-tags=tag:app", "--pull", "--app-flag"},
+			}},
+			wantPull: true,
+		},
+		{
+			name: "existing snapshot overrides",
+			args: []string{"--net=svc", "./compose.yml"},
+			entries: []ServiceEntry{{
+				Name:             "svc-a",
+				Host:             "host-a",
+				Type:             serviceTypeRun,
+				Payload:          "./compose.yml",
+				ServiceRoot:      "tank/apps/svc-a",
+				ServiceRootZFS:   true,
+				Snapshots:        "on",
+				SnapshotKeepLast: 3,
+				SnapshotMaxAge:   "72h",
+				SnapshotRequired: runDraftTestBool(false),
+				SnapshotEvents:   []string{"run"},
+				Args:             []string{"--net=svc"},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preserveRunDraftGlobals(t)
+			serviceOverride = "svc-a"
+			loc := &projectConfigLocation{Dir: t.TempDir(), Config: &ProjectConfig{Version: projectConfigVersion}}
+			for _, entry := range tt.entries {
+				loc.Config.SetServiceEntry(entry)
+			}
+
+			parsed, err := parseSvcRun(tt.args, loc, "host-a")
+			if err != nil {
+				t.Fatalf("parseSvcRun error: %v", err)
+			}
+			draft, err := runDraftFromCLI(tt.args, loc, "host-a")
+			if err != nil {
+				t.Fatalf("runDraftFromCLI error: %v", err)
+			}
+			if got := draft.runArgs(); !reflect.DeepEqual(got, parsed.Args) {
+				t.Fatalf("draft runArgs = %#v, want parseSvcRun args %#v", got, parsed.Args)
+			}
+			if draft.ForceDeploy != parsed.ForceDeploy || draft.ForceDeploy != tt.wantForce {
+				t.Fatalf("ForceDeploy = %v, parseSvcRun = %v, want %v", draft.ForceDeploy, parsed.ForceDeploy, tt.wantForce)
+			}
+			if draft.Pull != tt.wantPull {
+				t.Fatalf("Pull = %v, want %v", draft.Pull, tt.wantPull)
+			}
+		})
+	}
+}
+
+func TestRunDraftRunArgsDefaultsRestartOnForWebDrafts(t *testing.T) {
+	draft := RunDraft{Network: RunDraftNetwork{Modes: []string{"svc"}}}
+	if got, want := draft.runArgs(), []string{"--net=svc"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runArgs() = %#v, want %#v", got, want)
+	}
+
+	draft.Network.Restart = runDraftTestBool(false)
+	if got, want := draft.runArgs(), []string{"--net=svc", "--restart=false"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("runArgs() with explicit restart=false = %#v, want %#v", got, want)
+	}
+}
+
 func TestRunDraftFromCLIRejectsWebForDraftExecution(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	serviceOverride = "svc-a"
@@ -118,4 +205,8 @@ func TestRunDraftFromCLIRejectsWebForDraftExecution(t *testing.T) {
 	if _, err := runDraftFromCLI([]string{"--web", "./compose.yml"}, nil, ""); err == nil {
 		t.Fatal("runDraftFromCLI error = nil, want --web rejection")
 	}
+}
+
+func runDraftTestBool(v bool) *bool {
+	return &v
 }

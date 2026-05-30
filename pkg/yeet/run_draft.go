@@ -17,6 +17,7 @@ type RunDraft struct {
 	Payload        string            `json:"payload"`
 	PayloadKind    string            `json:"payloadKind,omitempty"`
 	EnvFile        string            `json:"envFile,omitempty"`
+	Pull           bool              `json:"pull,omitempty"`
 	EnvFileArg     string            `json:"-"`
 	EnvFileSet     bool              `json:"-"`
 	PayloadArgs    []string          `json:"payloadArgs,omitempty"`
@@ -24,6 +25,7 @@ type RunDraft struct {
 	Storage        RunDraftStorage   `json:"storage"`
 	Snapshots      RunDraftSnapshots `json:"snapshots"`
 	NewServiceOnly bool              `json:"newServiceOnly,omitempty"`
+	ForceDeploy    bool              `json:"forceDeploy,omitempty"`
 	ExistingEntry  ServiceEntry      `json:"-"`
 }
 
@@ -36,7 +38,7 @@ type RunDraftNetwork struct {
 	MacvlanMAC    string   `json:"macvlanMac,omitempty"`
 	MacvlanVLAN   int      `json:"macvlanVlan,omitempty"`
 	MacvlanParent string   `json:"macvlanParent,omitempty"`
-	Restart       bool     `json:"restart"`
+	Restart       *bool    `json:"restart,omitempty"`
 	Publish       []string `json:"publish,omitempty"`
 }
 
@@ -98,23 +100,28 @@ func runDraftFromCLI(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverri
 		Host:          host,
 		Payload:       payload,
 		EnvFile:       envFile,
+		Pull:          effectiveParsed.Pull,
 		EnvFileArg:    flags.EnvFileArg,
 		EnvFileSet:    flags.EnvFileSet,
 		PayloadArgs:   payloadArgsFromRunArgs(effectiveArgs),
 		Network:       runDraftNetworkFromRunFlags(effectiveParsed),
 		Storage:       RunDraftStorage{ServiceRoot: serviceRoot, ZFS: serviceRootZFS},
 		Snapshots:     runDraftSnapshotsFromOptions(snapshots),
+		ForceDeploy:   flags.ForceDeploy,
 		ExistingEntry: entry,
 	}, nil
 }
 
 func (d RunDraft) runArgs() []string {
 	args := runArgsFromDraftNetwork(d.Network)
-	args = runArgsWithDraftSnapshotOptions(args, d.Snapshots)
+	if d.Pull {
+		args = append(args, "--pull")
+	}
 	args = runArgsWithServiceRootOptions(args, serviceRootOptions{
 		Root: d.Storage.ServiceRoot,
 		ZFS:  d.Storage.ZFS,
 	})
+	args = runArgsWithSnapshotOptions(args, runDraftSnapshotOptions(d.Snapshots))
 	if len(d.PayloadArgs) != 0 {
 		args = append(args, "--")
 		args = append(args, d.PayloadArgs...)
@@ -186,8 +193,8 @@ func appendRunDraftRepeatedFlag(args []string, name string, values []string) []s
 	return args
 }
 
-func appendRunDraftRestartFlag(args []string, restart bool) []string {
-	if restart {
+func appendRunDraftRestartFlag(args []string, restart *bool) []string {
+	if restart == nil || *restart {
 		return args
 	}
 	return append(args, "--restart=false")
@@ -203,7 +210,7 @@ func runDraftNetworkFromRunFlags(flags cli.RunFlags) RunDraftNetwork {
 		MacvlanMAC:    flags.MacvlanMac,
 		MacvlanVLAN:   flags.MacvlanVlan,
 		MacvlanParent: flags.MacvlanParent,
-		Restart:       flags.Restart,
+		Restart:       runDraftBool(flags.Restart),
 		Publish:       append([]string{}, flags.Publish...),
 	}
 }
@@ -222,33 +229,20 @@ func runDraftSnapshotsFromOptions(opts snapshotOptions) RunDraftSnapshots {
 	}
 }
 
-func runArgsWithDraftSnapshotOptions(args []string, snapshots RunDraftSnapshots) []string {
-	if snapshots.EventsInherit || len(snapshots.Events) != 0 {
-		args = runArgsWithSnapshotOptions(args, snapshotOptions{
-			Events:        snapshots.Events,
-			EventsInherit: snapshots.EventsInherit,
-		})
+func runDraftSnapshotOptions(snapshots RunDraftSnapshots) snapshotOptions {
+	return snapshotOptions{
+		Snapshots:       snapshots.Mode,
+		KeepLast:        snapshots.KeepLast,
+		KeepLastInherit: snapshots.KeepLastInherit,
+		MaxAge:          snapshots.MaxAge,
+		MaxAgeInherit:   snapshots.MaxAgeInherit,
+		Required:        snapshots.Required,
+		RequiredInherit: snapshots.RequiredInherit,
+		Events:          snapshots.Events,
+		EventsInherit:   snapshots.EventsInherit,
 	}
-	if snapshots.RequiredInherit || snapshots.Required != nil {
-		args = runArgsWithSnapshotOptions(args, snapshotOptions{
-			Required:        snapshots.Required,
-			RequiredInherit: snapshots.RequiredInherit,
-		})
-	}
-	if snapshots.MaxAgeInherit || snapshots.MaxAge != "" {
-		args = runArgsWithSnapshotOptions(args, snapshotOptions{
-			MaxAge:        snapshots.MaxAge,
-			MaxAgeInherit: snapshots.MaxAgeInherit,
-		})
-	}
-	if snapshots.KeepLastInherit || snapshots.KeepLast != 0 {
-		args = runArgsWithSnapshotOptions(args, snapshotOptions{
-			KeepLast:        snapshots.KeepLast,
-			KeepLastInherit: snapshots.KeepLastInherit,
-		})
-	}
-	if snapshots.Mode != "" {
-		args = runArgsWithSnapshotOptions(args, snapshotOptions{Snapshots: snapshots.Mode})
-	}
-	return args
+}
+
+func runDraftBool(v bool) *bool {
+	return &v
 }
