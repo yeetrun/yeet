@@ -322,6 +322,7 @@ func saveEnvFileConfig(cfgLoc *projectConfigLocation, hostOverride string, envFi
 	if existing, ok := loc.Config.ServiceEntry(serviceOverride, entry.Host); ok {
 		entry.Type = existing.Type
 		entry.Payload = existing.Payload
+		entry.PayloadKind = existing.PayloadKind
 		entry.ServiceRoot = existing.ServiceRoot
 		entry.ServiceRootZFS = existing.ServiceRootZFS
 		entry.Snapshots = existing.Snapshots
@@ -420,10 +421,10 @@ func runWithChanges(payload string, runArgs []string, envFile string, entry Serv
 }
 
 func runWithChangesTo(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
-	return runWithChangesToWithRunner(stdout, payload, runArgs, envFile, entry, forceDeploy, runRun)
+	return runWithChangesToWithRunner(stdout, payload, runArgs, envFile, entry, forceDeploy, runRun, false)
 }
 
-func runWithChangesToWithRunner(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadFunc) error {
+func runWithChangesToWithRunner(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadFunc, alwaysDeployPayload bool) error {
 	storedArgs := runArgsWithServiceRootOptions(entry.Args, serviceRootOptions{Root: entry.ServiceRoot, ZFS: entry.ServiceRootZFS})
 	storedArgs = runArgsWithSnapshotOptions(storedArgs, snapshotOptions{
 		Snapshots: entry.Snapshots,
@@ -432,7 +433,7 @@ func runWithChangesToWithRunner(stdout io.Writer, payload string, runArgs []stri
 		Required:  entry.SnapshotRequired,
 		Events:    entry.SnapshotEvents,
 	})
-	summary, err := detectRunChanges(payload, runArgs, envFile, storedArgs)
+	summary, err := detectRunChangesWithOptions(payload, runArgs, envFile, storedArgs, alwaysDeployPayload)
 	if err != nil {
 		return err
 	}
@@ -486,10 +487,18 @@ func writeRunChangeLine(stdout io.Writer, format string, args ...any) error {
 }
 
 func detectRunChanges(payload string, runArgs []string, envFile string, storedArgs []string) (runChangeSummary, error) {
+	return detectRunChangesWithOptions(payload, runArgs, envFile, storedArgs, false)
+}
+
+func detectRunChangesWithOptions(payload string, runArgs []string, envFile string, storedArgs []string, alwaysDeployPayload bool) (runChangeSummary, error) {
 	summary := runChangeSummary{
 		argsChanged: runArgsChanged(normalizeRunArgs(runArgs), storedArgs),
 	}
 	needs := classifyRunChangeNeeds(payload, envFile)
+	if alwaysDeployPayload {
+		needs.payloadHash = false
+		needs.alwaysDeployPayload = true
+	}
 	remoteHashes, supported, err := fetchHashesForRunChanges(needs)
 	if err != nil {
 		return summary, err
@@ -603,6 +612,9 @@ func remoteEnvHash(resp catchrpc.ArtifactHashesResponse) string {
 
 func shouldAlwaysDeployPayload(payload string) bool {
 	if looksLikeImageRef(payload) || looksLikeRunDraftLocalImageName(payload) {
+		if st, err := os.Stat(payload); err == nil && !st.IsDir() {
+			return false
+		}
 		// TODO: add change detection for image refs.
 		return true
 	}

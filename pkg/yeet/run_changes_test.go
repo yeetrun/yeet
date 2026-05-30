@@ -415,6 +415,12 @@ func TestRunChangeRemoteHashHelpers(t *testing.T) {
 }
 
 func TestShouldAlwaysDeployPayload(t *testing.T) {
+	tmp := t.TempDir()
+	extensionlessFile := filepath.Join(tmp, "myapp")
+	if err := os.WriteFile(extensionlessFile, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatalf("write extensionless file: %v", err)
+	}
+
 	tests := []struct {
 		payload string
 		want    bool
@@ -428,6 +434,7 @@ func TestShouldAlwaysDeployPayload(t *testing.T) {
 		{payload: "/tmp/Dockerfile", want: true},
 		{payload: "/tmp/run.sh"},
 		{payload: "./compose.yml"},
+		{payload: extensionlessFile},
 	}
 
 	for _, tt := range tests {

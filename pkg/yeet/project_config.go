@@ -33,6 +33,7 @@ type ServiceEntry struct {
 	Host             string   `toml:"host"`
 	Type             string   `toml:"type,omitempty"`
 	Payload          string   `toml:"payload,omitempty"`
+	PayloadKind      string   `toml:"payload_kind,omitempty"`
 	EnvFile          string   `toml:"env_file,omitempty"`
 	ServiceRoot      string   `toml:"service_root,omitempty"`
 	ServiceRootZFS   bool     `toml:"service_root_zfs,omitempty"`
@@ -413,6 +414,13 @@ func resolvePayloadPath(configDir, payload string) string {
 	return filepath.Join(configDir, payload)
 }
 
+func resolvePayloadPathForEntry(configDir string, entry ServiceEntry) string {
+	if strings.TrimSpace(entry.PayloadKind) == "local-image" {
+		return strings.TrimSpace(entry.Payload)
+	}
+	return resolvePayloadPath(configDir, entry.Payload)
+}
+
 func resolveEnvFilePath(configDir, envFile string) string {
 	envFile = strings.TrimSpace(envFile)
 	if envFile == "" {
@@ -425,8 +433,15 @@ func resolveEnvFilePath(configDir, envFile string) string {
 }
 
 func relativePayloadPath(configDir, payload string) string {
+	return relativePayloadPathForKind(configDir, payload, "")
+}
+
+func relativePayloadPathForKind(configDir, payload string, payloadKind string) string {
 	payload = strings.TrimSpace(payload)
 	if payload == "" {
+		return payload
+	}
+	if strings.TrimSpace(payloadKind) == "local-image" {
 		return payload
 	}
 	if looksLikeImageRef(payload) {

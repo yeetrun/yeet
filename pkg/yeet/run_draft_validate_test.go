@@ -548,6 +548,7 @@ func TestValidateRunDraftRejectsInvalidZFSDatasetNames(t *testing.T) {
 		"tank/apps/svc@snap",
 		"tank/apps/svc#bookmark",
 		"tank/apps/bad name",
+		strings.Repeat("a", 256),
 	}
 
 	for _, serviceRoot := range tests {

@@ -156,6 +156,7 @@ func TestProjectConfigSnapshotFieldsRoundTrip(t *testing.T) {
 		Host:             "host-a",
 		Type:             serviceTypeRun,
 		Payload:          "compose.yml",
+		PayloadKind:      "compose",
 		ServiceRoot:      "tank/apps/svc",
 		ServiceRootZFS:   true,
 		Snapshots:        "off",
@@ -176,7 +177,7 @@ func TestProjectConfigSnapshotFieldsRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("missing service entry")
 	}
-	if entry.Snapshots != "off" || entry.SnapshotKeepLast != 3 || entry.SnapshotMaxAge != "72h" || entry.SnapshotRequired == nil || *entry.SnapshotRequired || !reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) {
+	if entry.PayloadKind != "compose" || entry.Snapshots != "off" || entry.SnapshotKeepLast != 3 || entry.SnapshotMaxAge != "72h" || entry.SnapshotRequired == nil || *entry.SnapshotRequired || !reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) {
 		t.Fatalf("entry snapshot fields = %#v", entry)
 	}
 }
