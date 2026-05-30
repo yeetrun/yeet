@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -269,14 +270,23 @@ func TestRunWebReturnsAfterSuccessfulDeploy(t *testing.T) {
 		t.Fatalf("write payload: %v", err)
 	}
 
+	postResult := make(chan runWebHTTPResult, 1)
 	openBrowserFn = func(rawURL string) error {
 		go func() {
 			parsed, err := url.Parse(rawURL)
 			if err != nil {
+				postResult <- runWebHTTPResult{err: err}
 				return
 			}
 			parsed.Path = "/api/deploy"
-			_, _ = http.Post(parsed.String(), "application/json", strings.NewReader(`{"service":"svc-a","host":"host-a","payload":"run.sh"}`))
+			resp, err := http.Post(parsed.String(), "application/json", strings.NewReader(`{"service":"svc-a","host":"host-a","payload":"run.sh"}`))
+			if err != nil {
+				postResult <- runWebHTTPResult{err: err}
+				return
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			postResult <- runWebHTTPResult{status: resp.StatusCode, body: string(body), err: err}
 		}()
 		return nil
 	}
@@ -288,8 +298,78 @@ func TestRunWebReturnsAfterSuccessfulDeploy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runWeb error = %v, want nil", err)
 	}
+	result := readRunWebHTTPResult(t, postResult)
+	if result.err != nil {
+		t.Fatalf("deploy post error = %v", result.err)
+	}
+	if result.status != http.StatusOK {
+		t.Fatalf("deploy post status = %d body=%s, want 200", result.status, result.body)
+	}
+	if !strings.Contains(result.body, "Service deployed. Close this tab and return to the terminal.") {
+		t.Fatalf("deploy post body = %s, want success message", result.body)
+	}
 	if !strings.Contains(out.String(), "Deployment finished") {
 		t.Fatalf("output = %q, want deployment finished message", out.String())
+	}
+}
+
+func TestWaitRunWebServerDrainsDoneResponseBeforeShutdown(t *testing.T) {
+	done := make(chan struct{})
+	var doneOnce sync.Once
+	handlerStarted := make(chan struct{})
+	handlerRelease := make(chan struct{})
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			doneOnce.Do(func() { close(done) })
+			close(handlerStarted)
+			<-handlerRelease
+			_, _ = io.WriteString(w, "ok")
+		}),
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Serve(listener)
+	}()
+
+	getResult := make(chan runWebHTTPResult, 1)
+	go func() {
+		resp, err := http.Get("http://" + listener.Addr().String())
+		if err != nil {
+			getResult <- runWebHTTPResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		getResult <- runWebHTTPResult{status: resp.StatusCode, body: string(body), err: err}
+	}()
+
+	select {
+	case <-handlerStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for handler to start")
+	}
+	go func() {
+		time.Sleep(25 * time.Millisecond)
+		close(handlerRelease)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	err = waitRunWebServer(ctx, cancel, server, errCh, done, io.Discard)
+	if err != nil {
+		t.Fatalf("waitRunWebServer error = %v, want nil", err)
+	}
+	result := readRunWebHTTPResult(t, getResult)
+	if result.err != nil {
+		t.Fatalf("get error = %v", result.err)
+	}
+	if result.status != http.StatusOK || result.body != "ok" {
+		t.Fatalf("get result = status %d body %q, want 200 ok", result.status, result.body)
 	}
 }
 
@@ -355,6 +435,23 @@ func TestRunWebReturnsAfterDeployWithActiveValidate(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Deployment finished") {
 		t.Fatalf("output = %q, want deployment finished message", out.String())
+	}
+}
+
+type runWebHTTPResult struct {
+	status int
+	body   string
+	err    error
+}
+
+func readRunWebHTTPResult(t *testing.T, ch <-chan runWebHTTPResult) runWebHTTPResult {
+	t.Helper()
+	select {
+	case result := <-ch:
+		return result
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for HTTP result")
+		return runWebHTTPResult{}
 	}
 }
 
