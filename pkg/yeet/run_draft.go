@@ -5,6 +5,7 @@
 package yeet
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
@@ -256,4 +257,41 @@ func runDraftSnapshotOptions(snapshots RunDraftSnapshots) snapshotOptions {
 
 func runDraftBool(v bool) *bool {
 	return &v
+}
+
+func executeRunDraft(_ context.Context, draft RunDraft, cfgLoc *projectConfigLocation, forceDeploy bool) error {
+	service := strings.TrimSpace(draft.Service)
+	if service == "" {
+		return fmt.Errorf("service name is required")
+	}
+
+	prevService := serviceOverride
+	prevHost := hostOverride
+	prevHostSet := hostOverrideSet
+	prevPrefs := loadedPrefs
+	serviceOverride = service
+	host := strings.TrimSpace(draft.Host)
+	if host != "" {
+		hostOverride = host
+		hostOverrideSet = true
+		loadedPrefs.DefaultHost = host
+	}
+	defer func() {
+		serviceOverride = prevService
+		hostOverride = prevHost
+		hostOverrideSet = prevHostSet
+		loadedPrefs = prevPrefs
+	}()
+
+	runArgs := draft.runArgs()
+	if err := runWithChanges(draft.Payload, runArgs, draft.EnvFile, draft.ExistingEntry, forceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
+		return err
+	}
+	if err := saveRunConfig(cfgLoc, host, draft.Payload, runArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS); err != nil {
+		return err
+	}
+	if draft.EnvFileSet {
+		return saveEnvFileConfig(cfgLoc, host, draft.EnvFileArg)
+	}
+	return nil
 }

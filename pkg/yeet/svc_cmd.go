@@ -365,20 +365,11 @@ func handleSvcRun(req svcCommandRequest) error {
 	if forceFromConfig {
 		return runFromProjectConfigWithForce(req.Config, req.HostOverride, true)
 	}
-	run, err := parseSvcRun(cmdArgs, req.Config, req.HostOverride)
+	draft, err := runDraftFromCLI(cmdArgs, req.Config, req.HostOverride)
 	if err != nil {
 		return err
 	}
-	if err := runWithChanges(run.Payload, run.Args, run.EnvFile, run.Entry, run.ForceDeploy || run.SnapshotChange); err != nil {
-		return err
-	}
-	if err := saveRunConfig(req.Config, req.HostOverride, run.Payload, run.Args, run.ServiceRootArg, run.ServiceRootZFSArg); err != nil {
-		return err
-	}
-	if run.EnvFileSet {
-		return saveEnvFileConfig(req.Config, req.HostOverride, run.EnvFileArg)
-	}
-	return nil
+	return executeRunDraft(context.Background(), draft, req.Config, false)
 }
 
 func runWebFlagRequested(args []string) bool {
