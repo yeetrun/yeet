@@ -80,9 +80,11 @@ func commandNeedsService(args []string) (bool, error) {
 }
 
 func commandAllowsMissingService(args []string) (bool, error) {
-	if len(args) >= 1 && args[0] == "run" && runWebFlagRequested(args[1:]) {
-		// Temporary guard path until local web-run routing owns service resolution.
-		return true, nil
+	if len(args) >= 1 && args[0] == "run" {
+		_, web, err := extractRunWebFlag(args[1:])
+		if err != nil || web {
+			return web, err
+		}
 	}
 	if len(args) < 2 || args[0] != "docker" || args[1] != "update" {
 		return false, nil
@@ -351,10 +353,21 @@ type parsedSvcRun struct {
 
 func handleSvcRun(req svcCommandRequest) error {
 	cmdArgs := req.Command.Args
-	if runWebFlagRequested(cmdArgs) {
-		// Temporary guard until the local web-run handler owns this flag.
-		return fmt.Errorf("yeet run --web is not available yet; web deploy routing is not implemented")
+	webArgs, web, err := extractRunWebFlag(cmdArgs)
+	if err != nil {
+		return err
 	}
+	if web {
+		return runWebFn(context.Background(), runWebRequest{
+			Args:         webArgs,
+			Config:       req.Config,
+			HostOverride: req.HostOverride,
+			Service:      req.Service,
+			Out:          os.Stdout,
+			Err:          os.Stderr,
+		})
+	}
+	cmdArgs = webArgs
 	if len(cmdArgs) == 0 {
 		return runFromProjectConfig(req.Config, req.HostOverride)
 	}
@@ -370,24 +383,6 @@ func handleSvcRun(req svcCommandRequest) error {
 		return err
 	}
 	return executeRunDraft(context.Background(), draft, req.Config, false)
-}
-
-func runWebFlagRequested(args []string) bool {
-	for _, arg := range args {
-		if arg == "--" {
-			break
-		}
-		if arg == "--web" {
-			return true
-		}
-		if value, ok := strings.CutPrefix(arg, "--web="); ok {
-			parsed, err := strconv.ParseBool(value)
-			if err == nil && parsed {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride string) (parsedSvcRun, error) {

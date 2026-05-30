@@ -1,0 +1,201 @@
+// Copyright (c) 2025 AUTHORS All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package yeet
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"runtime"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+type runWebRequest struct {
+	Args         []string
+	Config       *projectConfigLocation
+	HostOverride string
+	Service      string
+	Out          io.Writer
+	Err          io.Writer
+}
+
+type runWebBootstrap struct {
+	CWD          string            `json:"cwd"`
+	ConfigPath   string            `json:"configPath,omitempty"`
+	Hosts        []string          `json:"hosts"`
+	SelectedHost string            `json:"selectedHost"`
+	Prefill      runWebPrefill     `json:"prefill"`
+	Options      runWebOptionHints `json:"options"`
+}
+
+type runWebPrefill struct {
+	Service string `json:"service,omitempty"`
+	Payload string `json:"payload,omitempty"`
+}
+
+type runWebOptionHints struct {
+	NetworkModes  []string `json:"networkModes"`
+	SnapshotModes []string `json:"snapshotModes"`
+}
+
+var openBrowserFn = openBrowser
+var runWebFn = runWeb
+
+func extractRunWebFlag(args []string) ([]string, bool, error) {
+	out := make([]string, 0, len(args))
+	web := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+		if arg == "--web" {
+			web = true
+			continue
+		}
+		if value, ok := strings.CutPrefix(arg, "--web="); ok {
+			parsed, err := strconv.ParseBool(value)
+			if err != nil {
+				return nil, false, fmt.Errorf("invalid --web value %q", value)
+			}
+			web = parsed
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out, web, nil
+}
+
+func newRunWebBootstrap(cfg *projectConfigLocation, hostOverride string, args []string) runWebBootstrap {
+	cwd, _ := os.Getwd()
+	selected := strings.TrimSpace(hostOverride)
+	if selected == "" {
+		selected = Host()
+	}
+	boot := runWebBootstrap{
+		CWD:          cwd,
+		Hosts:        runWebHostCandidates(cfg, hostOverride),
+		SelectedHost: selected,
+		Prefill:      runWebPrefillFromArgs(args),
+		Options: runWebOptionHints{
+			NetworkModes:  []string{"host", "svc", "ts", "lan", "macvlan"},
+			SnapshotModes: []string{"inherit", "on", "off"},
+		},
+	}
+	if cfg != nil {
+		boot.ConfigPath = cfg.Path
+	}
+	return boot
+}
+
+func runWebPrefillFromArgs(args []string) runWebPrefill {
+	prefill := runWebPrefill{Service: strings.TrimSpace(serviceOverride)}
+	if len(args) == 0 {
+		return prefill
+	}
+	if prefill.Service != "" {
+		if args[0] == prefill.Service && len(args) > 1 {
+			prefill.Payload = args[1]
+			return prefill
+		}
+		prefill.Payload = args[0]
+		return prefill
+	}
+	if len(args) > 1 {
+		prefill.Service = args[0]
+		prefill.Payload = args[1]
+		return prefill
+	}
+	prefill.Payload = args[0]
+	return prefill
+}
+
+func runWebHostCandidates(cfg *projectConfigLocation, hostOverride string) []string {
+	seen := make(map[string]struct{})
+	add := func(host string) {
+		host = strings.TrimSpace(host)
+		if host != "" {
+			seen[host] = struct{}{}
+		}
+	}
+	add(os.Getenv("CATCH_HOST"))
+	add(hostOverride)
+	add(Host())
+	if cfg != nil && cfg.Config != nil {
+		for _, host := range cfg.Config.AllHosts() {
+			add(host)
+		}
+	}
+	hosts := make([]string, 0, len(seen))
+	for host := range seen {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+func newRunWebToken() (string, error) {
+	var b [24]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+func openBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return fmt.Errorf("opening a browser is unsupported on %s", runtime.GOOS)
+	}
+	return cmd.Start()
+}
+
+func runWeb(ctx context.Context, req runWebRequest) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+	token, err := newRunWebToken()
+	if err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = listener.Close() }()
+
+	bootstrap := newRunWebBootstrap(req.Config, req.HostOverride, req.Args)
+	_ = bootstrap
+
+	url := fmt.Sprintf("http://%s/?token=%s", listener.Addr().String(), token)
+	if err := openBrowserFn(url); err != nil {
+		return fmt.Errorf("open browser: %w", err)
+	}
+	out := req.Out
+	if out == nil {
+		out = os.Stdout
+	}
+	if _, err := fmt.Fprintf(out, "Opening yeet web run at %s\nIf the browser does not open, paste this URL into your browser.\n", url); err != nil {
+		return err
+	}
+	return fmt.Errorf("web run server is not implemented yet")
+}
