@@ -409,6 +409,9 @@ func resolvePayloadPath(configDir, payload string) string {
 	if payload == "" {
 		return payload
 	}
+	if looksLikeImageRef(payload) {
+		return payload
+	}
 	if filepath.IsAbs(payload) {
 		return payload
 	}

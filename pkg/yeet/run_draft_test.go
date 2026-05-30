@@ -406,6 +406,39 @@ func TestRunFromProjectConfigUsesStoredLocalImagePayloadKind(t *testing.T) {
 	}
 }
 
+func TestRunFromProjectConfigPreservesStoredRemoteImageRef(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldTryImage := tryRunRemoteImageFn
+	defer func() {
+		tryRunRemoteImageFn = oldTryImage
+	}()
+	serviceOverride = "svc-a"
+	var gotImage string
+	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+		gotImage = image
+		return true, nil
+	}
+
+	tmp := t.TempDir()
+	cfgLoc := &projectConfigLocation{
+		Path: filepath.Join(tmp, projectConfigName),
+		Dir:  tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+			Name:    "svc-a",
+			Host:    "host-a",
+			Type:    serviceTypeRun,
+			Payload: "ghcr.io/example/app:latest",
+		}}},
+	}
+
+	if err := runFromProjectConfig(cfgLoc, "host-a"); err != nil {
+		t.Fatalf("runFromProjectConfig: %v", err)
+	}
+	if gotImage != "ghcr.io/example/app:latest" {
+		t.Fatalf("remote image = %q, want raw image ref", gotImage)
+	}
+}
+
 func TestExecuteRunDraftNewOnlyRejectsExistingService(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	oldTryImage := tryRunRemoteImageFn

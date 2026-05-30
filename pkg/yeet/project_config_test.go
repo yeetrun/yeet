@@ -698,6 +698,9 @@ func TestProjectConfigPathResolution(t *testing.T) {
 	if got := resolvePayloadPath(configDir, absPayload); got != absPayload {
 		t.Fatalf("resolvePayloadPath absolute = %q, want %q", got, absPayload)
 	}
+	if got := resolvePayloadPath(configDir, "ghcr.io/example/app:latest"); got != "ghcr.io/example/app:latest" {
+		t.Fatalf("resolvePayloadPath image = %q, want raw image ref", got)
+	}
 	if got := resolvePayloadPath(configDir, " "); got != "" {
 		t.Fatalf("resolvePayloadPath blank = %q, want empty", got)
 	}
