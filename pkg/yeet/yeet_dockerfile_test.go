@@ -22,13 +22,17 @@ func TestTryRunDockerfileBuildsAndDelegates(t *testing.T) {
 	prevSvc := serviceOverride
 	prevBuild := buildDockerImageForRemoteFn
 	prevTry := tryRunDockerFn
+	prevRemove := removeDockerImageFn
 	defer func() {
 		serviceOverride = prevSvc
 		buildDockerImageForRemoteFn = prevBuild
 		tryRunDockerFn = prevTry
+		removeDockerImageFn = prevRemove
 	}()
 
 	serviceOverride = "svc"
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "dockerfile")
 	var gotBuildPath, gotBuildImage string
 	buildDockerImageForRemoteFn = func(ctx context.Context, path, image string) error {
 		gotBuildPath = path
@@ -40,8 +44,13 @@ func TestTryRunDockerfileBuildsAndDelegates(t *testing.T) {
 		gotRunImage = image
 		return true, nil
 	}
+	removeContextSeen := false
+	removeDockerImageFn = func(ctx context.Context, image string) error {
+		removeContextSeen = ctx.Value(contextKey{}) == "dockerfile"
+		return nil
+	}
 
-	ok, err := tryRunDockerfile(df, []string{"--net=svc"})
+	ok, err := tryRunDockerfileContext(ctx, df, []string{"--net=svc"})
 	if err != nil {
 		t.Fatalf("tryRunDockerfile returned error: %v", err)
 	}
@@ -56,6 +65,9 @@ func TestTryRunDockerfileBuildsAndDelegates(t *testing.T) {
 	}
 	if gotRunImage != gotBuildImage {
 		t.Fatalf("run image = %q, want %q", gotRunImage, gotBuildImage)
+	}
+	if !removeContextSeen {
+		t.Fatal("remove docker image did not receive tryRunDockerfile context")
 	}
 }
 

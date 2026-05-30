@@ -677,7 +677,7 @@ func TestExecuteRunDraftPassesContextToLocalDockerWork(t *testing.T) {
 		pushImageFn = oldPushImage
 		execRemoteDirectFn = oldExecDirect
 	}()
-	imageExistsFn = func(string) bool { return true }
+	imageExistsFn = func(context.Context, string) bool { return true }
 
 	type contextKey struct{}
 	ctx := context.WithValue(context.Background(), contextKey{}, "web-run")

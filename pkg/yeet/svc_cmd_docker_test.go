@@ -86,7 +86,7 @@ func TestTryRunDockerDecisions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pushCalled := false
 			var execCalls [][]string
-			imageExistsFn = func(image string) bool {
+			imageExistsFn = func(ctx context.Context, image string) bool {
 				if image != "app:latest" {
 					t.Fatalf("imageExists image = %q, want app:latest", image)
 				}

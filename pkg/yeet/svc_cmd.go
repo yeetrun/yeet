@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -916,6 +915,7 @@ var tryRunRemoteImageFn = tryRunRemoteImageContext
 var imageExistsFn = imageExists
 var pushImageFn = pushImage
 var execRemoteDirectFn = execRemote
+var removeDockerImageFn = removeDockerImage
 
 func splitRunPayloadArgs(args []string) (string, []string, error) {
 	if len(args) == 0 {
@@ -1104,7 +1104,7 @@ func tryRunDockerfileContext(ctx context.Context, path string, args []string) (o
 		return true, err
 	}
 	ok, err := tryRunDockerFn(ctx, imageName, args)
-	_ = exec.Command("docker", "rmi", imageName).Run()
+	_ = removeDockerImageFn(ctx, imageName)
 	return ok, err
 }
 
@@ -1272,7 +1272,7 @@ func tryRunDocker(image string, args []string) (ok bool, _ error) {
 }
 
 func tryRunDockerContext(ctx context.Context, image string, args []string) (ok bool, _ error) {
-	if !imageExistsFn(image) {
+	if !imageExistsFn(ctx, image) {
 		// If the image does not exist, it's not an error
 		return false, nil
 	}
