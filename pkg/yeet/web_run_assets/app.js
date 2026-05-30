@@ -5,12 +5,16 @@
  */
 
 const params = new URLSearchParams(window.location.search);
-const token = params.get("token") || "";
+const token = window.__YEET_TOKEN__ || params.get("token") || "";
+if (params.has("token")) {
+  window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
+}
 const state = {
   bootstrap: null,
   currentDir: ".",
   validateSeq: 0,
   validateTimer: null,
+  phase: "editing",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -237,6 +241,7 @@ async function bootstrap() {
 }
 
 function update() {
+  if (state.phase !== "editing") return;
   const draft = buildDraft();
   updatePreview(draft);
   $("deployButton").disabled = true;
@@ -251,6 +256,7 @@ function firstValidationMessage(validation) {
 }
 
 async function validate(draft) {
+  if (state.phase !== "editing") return;
   const seq = ++state.validateSeq;
   setStatus("Validating");
   try {
@@ -259,6 +265,7 @@ async function validate(draft) {
       body: JSON.stringify(draft),
     });
     if (seq !== state.validateSeq) return;
+    if (state.phase !== "editing") return;
     if (!res.ok) {
       setStatus(await res.text(), "error");
       $("hostStatus").textContent = "Validation failed";
@@ -272,6 +279,7 @@ async function validate(draft) {
     else setStatus(firstValidationMessage(data.validation) || "Invalid", "error");
   } catch (err) {
     if (seq !== state.validateSeq) return;
+    if (state.phase !== "editing") return;
     setStatus(String(err), "error");
     $("hostStatus").textContent = "Validation failed";
   }
@@ -279,7 +287,11 @@ async function validate(draft) {
 
 async function deploy(event) {
   event.preventDefault();
+  if (state.phase !== "editing") return;
   const draft = buildDraft();
+  state.phase = "deploying";
+  state.validateSeq += 1;
+  window.clearTimeout(state.validateTimer);
   $("deployButton").disabled = true;
   setStatus("Deploying");
   try {
@@ -288,6 +300,7 @@ async function deploy(event) {
       body: JSON.stringify(draft),
     });
     if (res.ok) {
+      state.phase = "done";
       setStatus("Done. Close this tab and return to the terminal.", "done");
       $("hostStatus").textContent = "Deployed";
       return;
@@ -299,8 +312,10 @@ async function deploy(event) {
     } else {
       setStatus(await res.text(), "error");
     }
+    state.phase = "editing";
     $("deployButton").disabled = false;
   } catch (err) {
+    state.phase = "editing";
     setStatus(String(err), "error");
     $("deployButton").disabled = false;
   }
@@ -309,6 +324,7 @@ async function deploy(event) {
 function showTooltip(target) {
   const tip = $("tooltip");
   tip.textContent = target.dataset.help || "";
+  target.setAttribute("aria-describedby", "tooltip");
   const rect = target.getBoundingClientRect();
   const left = Math.min(rect.left, window.innerWidth - 332);
   tip.style.left = `${Math.max(12, left)}px`;
@@ -317,6 +333,9 @@ function showTooltip(target) {
 }
 
 function hideTooltip() {
+  document.querySelectorAll(".help[aria-describedby='tooltip']").forEach((button) => {
+    button.removeAttribute("aria-describedby");
+  });
   $("tooltip").hidden = true;
 }
 
