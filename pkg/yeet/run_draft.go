@@ -24,8 +24,11 @@ type RunDraft struct {
 	Network        RunDraftNetwork   `json:"network"`
 	Storage        RunDraftStorage   `json:"storage"`
 	Snapshots      RunDraftSnapshots `json:"snapshots"`
+	SnapshotChange bool              `json:"-"`
 	NewServiceOnly bool              `json:"newServiceOnly,omitempty"`
 	ForceDeploy    bool              `json:"forceDeploy,omitempty"`
+	RunArgs        []string          `json:"-"`
+	RunArgsSet     bool              `json:"-"`
 	ExistingEntry  ServiceEntry      `json:"-"`
 }
 
@@ -90,29 +93,37 @@ func runDraftFromCLI(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverri
 	envFile := svcRunEnvFile(flags, entry, hasEntry, cfgLoc)
 	serviceRoot, serviceRootZFS := svcRunServiceRoot(flags, entry, hasEntry)
 	snapshots := snapshotOptionsForSvcRun(entry, flags)
+	filteredArgs := runArgsWithServiceRootOptions(effectiveArgs, serviceRootOptions{Root: serviceRoot, ZFS: serviceRootZFS})
+	filteredArgs = runArgsWithSnapshotOptions(filteredArgs, snapshots)
 	host := strings.TrimSpace(hostOverride)
 	if host == "" {
 		host = Host()
 	}
 
 	return RunDraft{
-		Service:       getService(),
-		Host:          host,
-		Payload:       payload,
-		EnvFile:       envFile,
-		Pull:          effectiveParsed.Pull,
-		EnvFileArg:    flags.EnvFileArg,
-		EnvFileSet:    flags.EnvFileSet,
-		PayloadArgs:   payloadArgsFromRunArgs(effectiveArgs),
-		Network:       runDraftNetworkFromRunFlags(effectiveParsed),
-		Storage:       RunDraftStorage{ServiceRoot: serviceRoot, ZFS: serviceRootZFS},
-		Snapshots:     runDraftSnapshotsFromOptions(snapshots),
-		ForceDeploy:   flags.ForceDeploy,
-		ExistingEntry: entry,
+		Service:        getService(),
+		Host:           host,
+		Payload:        payload,
+		EnvFile:        envFile,
+		Pull:           effectiveParsed.Pull,
+		EnvFileArg:     flags.EnvFileArg,
+		EnvFileSet:     flags.EnvFileSet,
+		PayloadArgs:    payloadArgsFromRunArgs(effectiveArgs),
+		Network:        runDraftNetworkFromRunFlags(effectiveParsed),
+		Storage:        RunDraftStorage{ServiceRoot: serviceRoot, ZFS: serviceRootZFS},
+		Snapshots:      runDraftSnapshotsFromOptions(snapshots),
+		SnapshotChange: flags.SnapshotChange,
+		ForceDeploy:    flags.ForceDeploy,
+		RunArgs:        append([]string{}, filteredArgs...),
+		RunArgsSet:     true,
+		ExistingEntry:  entry,
 	}, nil
 }
 
 func (d RunDraft) runArgs() []string {
+	if d.RunArgsSet {
+		return append([]string{}, d.RunArgs...)
+	}
 	args := runArgsFromDraftNetwork(d.Network)
 	if d.Pull {
 		args = append(args, "--pull")

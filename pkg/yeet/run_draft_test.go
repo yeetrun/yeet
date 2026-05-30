@@ -112,11 +112,12 @@ func TestRunDraftBuildsExistingRunArgs(t *testing.T) {
 
 func TestRunDraftFromCLIMatchesParseSvcRunParity(t *testing.T) {
 	tests := []struct {
-		name      string
-		args      []string
-		entries   []ServiceEntry
-		wantPull  bool
-		wantForce bool
+		name               string
+		args               []string
+		entries            []ServiceEntry
+		wantPull           bool
+		wantForce          bool
+		wantSnapshotChange bool
 	}{
 		{
 			name:      "pull and force",
@@ -137,6 +138,22 @@ func TestRunDraftFromCLIMatchesParseSvcRunParity(t *testing.T) {
 			wantPull: true,
 		},
 		{
+			name: "existing stored args in noncanonical order",
+			args: []string{"./compose.yml"},
+			entries: []ServiceEntry{{
+				Name:    "svc-a",
+				Host:    "host-a",
+				Type:    serviceTypeRun,
+				Payload: "./compose.yml",
+				Args:    []string{"--pull", "--net=svc"},
+			}},
+			wantPull: true,
+		},
+		{
+			name: "explicit default restart flag",
+			args: []string{"--net=svc", "--restart=true", "./compose.yml"},
+		},
+		{
 			name: "existing snapshot overrides",
 			args: []string{"--net=svc", "./compose.yml"},
 			entries: []ServiceEntry{{
@@ -153,6 +170,19 @@ func TestRunDraftFromCLIMatchesParseSvcRunParity(t *testing.T) {
 				SnapshotEvents:   []string{"run"},
 				Args:             []string{"--net=svc"},
 			}},
+		},
+		{
+			name: "explicit snapshot flag matching stored config",
+			args: []string{"--net=svc", "--snapshots=on", "./compose.yml"},
+			entries: []ServiceEntry{{
+				Name:      "svc-a",
+				Host:      "host-a",
+				Type:      serviceTypeRun,
+				Payload:   "./compose.yml",
+				Snapshots: "on",
+				Args:      []string{"--net=svc"},
+			}},
+			wantSnapshotChange: true,
 		},
 	}
 
@@ -178,6 +208,9 @@ func TestRunDraftFromCLIMatchesParseSvcRunParity(t *testing.T) {
 			}
 			if draft.ForceDeploy != parsed.ForceDeploy || draft.ForceDeploy != tt.wantForce {
 				t.Fatalf("ForceDeploy = %v, parseSvcRun = %v, want %v", draft.ForceDeploy, parsed.ForceDeploy, tt.wantForce)
+			}
+			if draft.SnapshotChange != parsed.SnapshotChange || draft.SnapshotChange != tt.wantSnapshotChange {
+				t.Fatalf("SnapshotChange = %v, parseSvcRun = %v, want %v", draft.SnapshotChange, parsed.SnapshotChange, tt.wantSnapshotChange)
 			}
 			if draft.Pull != tt.wantPull {
 				t.Fatalf("Pull = %v, want %v", draft.Pull, tt.wantPull)
