@@ -35,25 +35,9 @@ func (l runWebFileList) entry(name string) *runWebFileEntry {
 }
 
 func listRunWebFiles(root, rel string) (runWebFileList, error) {
-	rootReal, err := filepath.EvalSymlinks(root)
+	rootReal, rel, targetReal, err := resolveRunWebListTarget(root, rel)
 	if err != nil {
 		return runWebFileList{}, err
-	}
-	rootReal = filepath.Clean(rootReal)
-
-	rel, err = cleanRunWebRel(rel)
-	if err != nil {
-		return runWebFileList{}, err
-	}
-
-	target := filepath.Join(rootReal, rel)
-	targetReal, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		return runWebFileList{}, err
-	}
-	targetReal = filepath.Clean(targetReal)
-	if !runWebPathInsideRoot(rootReal, targetReal) {
-		return runWebFileList{}, fmt.Errorf("path escapes project root")
 	}
 
 	entries, err := os.ReadDir(targetReal)
@@ -68,17 +52,11 @@ func listRunWebFiles(root, rel string) (runWebFileList, error) {
 		if rel == "." {
 			entryPath = name
 		}
-		info, err := entry.Info()
+		fileEntry, err := newRunWebFileEntry(rootReal, targetReal, entryPath, name)
 		if err != nil {
 			return runWebFileList{}, err
 		}
-		out.Entries = append(out.Entries, runWebFileEntry{
-			Name:          name,
-			Path:          entryPath,
-			Dir:           entry.IsDir(),
-			LikelyPayload: runWebLikelyPayload(name, info.Mode()),
-			LikelyEnv:     runWebLikelyEnv(name),
-		})
+		out.Entries = append(out.Entries, fileEntry)
 	}
 
 	sort.Slice(out.Entries, func(i, j int) bool {
@@ -89,6 +67,51 @@ func listRunWebFiles(root, rel string) (runWebFileList, error) {
 	})
 
 	return out, nil
+}
+
+func resolveRunWebListTarget(root, rel string) (string, string, string, error) {
+	rootReal, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", "", "", err
+	}
+	rootReal = filepath.Clean(rootReal)
+
+	rel, err = cleanRunWebRel(rel)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	targetReal, err := filepath.EvalSymlinks(filepath.Join(rootReal, rel))
+	if err != nil {
+		return "", "", "", err
+	}
+	targetReal = filepath.Clean(targetReal)
+	if !runWebPathInsideRoot(rootReal, targetReal) {
+		return "", "", "", fmt.Errorf("path escapes project root")
+	}
+	return rootReal, rel, targetReal, nil
+}
+
+func newRunWebFileEntry(rootReal, targetReal, entryPath, name string) (runWebFileEntry, error) {
+	entryReal, err := filepath.EvalSymlinks(filepath.Join(targetReal, name))
+	if err != nil {
+		return runWebFileEntry{}, err
+	}
+	entryReal = filepath.Clean(entryReal)
+	if !runWebPathInsideRoot(rootReal, entryReal) {
+		return runWebFileEntry{}, fmt.Errorf("path escapes project root")
+	}
+	info, err := os.Stat(entryReal)
+	if err != nil {
+		return runWebFileEntry{}, err
+	}
+	return runWebFileEntry{
+		Name:          name,
+		Path:          entryPath,
+		Dir:           info.IsDir(),
+		LikelyPayload: runWebLikelyPayload(name, info.Mode()),
+		LikelyEnv:     runWebLikelyEnv(name),
+	}, nil
 }
 
 func cleanRunWebRel(rel string) (string, error) {
