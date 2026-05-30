@@ -295,7 +295,7 @@ func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigL
 	}()
 
 	runArgs := draft.runArgs()
-	if err := runWithChanges(draft.Payload, runArgs, draft.EnvFile, draft.ExistingEntry, forceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
+	if err := runDraftWithChanges(draft, runArgs, forceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
 		return err
 	}
 	if err := saveRunConfig(cfgLoc, host, draft.Payload, runArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS); err != nil {
@@ -305,4 +305,21 @@ func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigL
 		return saveEnvFileConfig(cfgLoc, host, draft.EnvFileArg)
 	}
 	return nil
+}
+
+func runDraftWithChanges(draft RunDraft, runArgs []string, forceDeploy bool) error {
+	runner := runPayloadFunc(runRun)
+	if draft.PayloadKind == "local-image" {
+		runner = runLocalImagePayload
+	}
+	return runWithChangesToWithRunner(os.Stdout, draft.Payload, runArgs, draft.EnvFile, draft.ExistingEntry, forceDeploy, runner)
+}
+
+func runLocalImagePayload(payload string, args []string) error {
+	if ok, err := tryRunDockerFn(payload, args); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	return fmt.Errorf("unknown local Docker image: %s", payload)
 }

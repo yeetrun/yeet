@@ -96,7 +96,7 @@ func TestValidateRunDraftPayloadKindFileStatsImageLikePayload(t *testing.T) {
 func TestValidateRunDraftAutoPayloadKindAcceptsUntaggedLocalImageStylePayload(t *testing.T) {
 	for _, kind := range []string{"", "auto"} {
 		t.Run("kind="+kind, func(t *testing.T) {
-			for _, payload := range []string{"alpine", "myapp"} {
+			for _, payload := range []string{"alpine", "myapp", "registry.local/team/app", "registry.local:5000/team/app"} {
 				t.Run(payload, func(t *testing.T) {
 					draft := RunDraft{
 						Service:     "svc-a",

@@ -413,11 +413,17 @@ func tagsEqual(a, b []string) bool {
 	return reflect.DeepEqual(aa, bb)
 }
 
+type runPayloadFunc func(string, []string) error
+
 func runWithChanges(payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
 	return runWithChangesTo(os.Stdout, payload, runArgs, envFile, entry, forceDeploy)
 }
 
 func runWithChangesTo(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
+	return runWithChangesToWithRunner(stdout, payload, runArgs, envFile, entry, forceDeploy, runRun)
+}
+
+func runWithChangesToWithRunner(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadFunc) error {
 	storedArgs := runArgsWithServiceRootOptions(entry.Args, serviceRootOptions{Root: entry.ServiceRoot, ZFS: entry.ServiceRootZFS})
 	storedArgs = runArgsWithSnapshotOptions(storedArgs, snapshotOptions{
 		Snapshots: entry.Snapshots,
@@ -430,12 +436,12 @@ func runWithChangesTo(stdout io.Writer, payload string, runArgs []string, envFil
 	if err != nil {
 		return err
 	}
-	return applyRunChangeSummary(stdout, payload, runArgs, envFile, summary, forceDeploy)
+	return applyRunChangeSummary(stdout, payload, runArgs, envFile, summary, forceDeploy, runner)
 }
 
-func applyRunChangeSummary(stdout io.Writer, payload string, runArgs []string, envFile string, summary runChangeSummary, forceDeploy bool) error {
+func applyRunChangeSummary(stdout io.Writer, payload string, runArgs []string, envFile string, summary runChangeSummary, forceDeploy bool, runner runPayloadFunc) error {
 	if !summary.hasChanges() {
-		return applyUnchangedRun(stdout, payload, runArgs, forceDeploy)
+		return applyUnchangedRun(stdout, payload, runArgs, forceDeploy, runner)
 	}
 	if summary.envChanged {
 		if err := runEnvCopy(envFile); err != nil {
@@ -446,7 +452,7 @@ func applyRunChangeSummary(stdout io.Writer, payload string, runArgs []string, e
 		}
 	}
 	if summary.requiresRun() {
-		if err := runRun(payload, runArgs); err != nil {
+		if err := runner(payload, runArgs); err != nil {
 			return err
 		}
 		return writeRunDeployStatus(stdout, summary)
@@ -454,14 +460,14 @@ func applyRunChangeSummary(stdout io.Writer, payload string, runArgs []string, e
 	return nil
 }
 
-func applyUnchangedRun(stdout io.Writer, payload string, runArgs []string, forceDeploy bool) error {
+func applyUnchangedRun(stdout io.Writer, payload string, runArgs []string, forceDeploy bool, runner runPayloadFunc) error {
 	if !forceDeploy {
 		return writeRunChangeLine(stdout, "No changes detected")
 	}
 	if err := writeRunChangeLine(stdout, "No changes detected, forcing deploy"); err != nil {
 		return err
 	}
-	return runRun(payload, runArgs)
+	return runner(payload, runArgs)
 }
 
 func writeRunDeployStatus(stdout io.Writer, summary runChangeSummary) error {

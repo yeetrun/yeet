@@ -312,6 +312,53 @@ func TestExecuteRunDraftSkipsServiceInfoOutsideNewOnlyMode(t *testing.T) {
 	}
 }
 
+func TestExecuteRunDraftLocalImagePayloadKindUsesLocalDocker(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldTryImage := tryRunRemoteImageFn
+	oldTryDocker := tryRunDockerFn
+	defer func() {
+		tryRunRemoteImageFn = oldTryImage
+		tryRunDockerFn = oldTryDocker
+	}()
+	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+		t.Fatalf("unexpected remote image run: image=%q args=%v", image, args)
+		return false, nil
+	}
+	var gotImage string
+	var gotArgs []string
+	tryRunDockerFn = func(image string, args []string) (bool, error) {
+		gotImage = image
+		gotArgs = append([]string{}, args...)
+		return true, nil
+	}
+
+	tmp := t.TempDir()
+	cfgLoc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	draft := RunDraft{
+		Service:     "svc-a",
+		Host:        "host-a",
+		Payload:     "repo/svc/app:latest",
+		PayloadKind: "local-image",
+		Network: RunDraftNetwork{
+			Modes: []string{"svc"},
+		},
+	}
+
+	if err := executeRunDraft(context.Background(), draft, cfgLoc, false); err != nil {
+		t.Fatalf("executeRunDraft: %v", err)
+	}
+	if gotImage != draft.Payload {
+		t.Fatalf("local image = %q, want %q", gotImage, draft.Payload)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"--net=svc"}) {
+		t.Fatalf("local image args = %#v, want --net=svc", gotArgs)
+	}
+}
+
 func TestExecuteRunDraftNewOnlyRejectsExistingService(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	oldTryImage := tryRunRemoteImageFn

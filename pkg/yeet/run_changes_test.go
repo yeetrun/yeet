@@ -423,6 +423,8 @@ func TestShouldAlwaysDeployPayload(t *testing.T) {
 		{payload: "alpine", want: true},
 		{payload: "myapp", want: true},
 		{payload: "repo/myapp", want: true},
+		{payload: "registry.local/team/app", want: true},
+		{payload: "registry.local:5000/team/app", want: true},
 		{payload: "/tmp/Dockerfile", want: true},
 		{payload: "/tmp/run.sh"},
 		{payload: "./compose.yml"},
