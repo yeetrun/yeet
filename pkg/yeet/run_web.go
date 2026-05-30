@@ -185,11 +185,6 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
 	token, err := newRunWebToken()
 	if err != nil {
 		return err
