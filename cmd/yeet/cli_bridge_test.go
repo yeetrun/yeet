@@ -227,6 +227,23 @@ func TestBridgeServiceArgsWithZFSServiceRoot(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsRunWeb(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"run", "--web", "svc-a", "./compose.yml"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatal("bridgeServiceArgs ok=false, want true")
+	}
+	if service != "svc-a" || host != "" {
+		t.Fatalf("service/host = %q/%q, want svc-a/empty", service, host)
+	}
+	want := []string{"run", "--web", "./compose.yml"}
+	if !reflect.DeepEqual(bridged, want) {
+		t.Fatalf("bridged = %#v, want %#v", bridged, want)
+	}
+}
+
 func TestBridgeServiceArgsServiceSet(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

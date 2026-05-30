@@ -157,6 +157,19 @@ func TestParseRunSnapshotFlags(t *testing.T) {
 	}
 }
 
+func TestParseRunWebFlag(t *testing.T) {
+	flags, args, err := ParseRun([]string{"--web", "payload.yml"})
+	if err != nil {
+		t.Fatalf("ParseRun: %v", err)
+	}
+	if !flags.Web {
+		t.Fatal("Web = false, want true")
+	}
+	if !reflect.DeepEqual(args, []string{"payload.yml"}) {
+		t.Fatalf("args = %#v, want payload", args)
+	}
+}
+
 func TestParseRunRejectsMissingSnapshotMode(t *testing.T) {
 	tests := [][]string{
 		{"--snapshots", "payload.yml"},
@@ -610,6 +623,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	}
 	if _, ok := flags["run"]["--zfs"]; !ok {
 		t.Fatal("run --zfs should be registered")
+	}
+	if flags["run"]["--web"].ConsumesValue {
+		t.Fatal("run --web should not consume a value")
 	}
 
 	groups := RemoteGroupInfos()
