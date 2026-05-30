@@ -7,7 +7,9 @@ package yeet
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
+	"net/http"
 	"net/url"
 	"reflect"
 	"strings"
@@ -158,28 +160,47 @@ func TestSvcRunWebRoutesToLocalWeb(t *testing.T) {
 	}
 }
 
-func TestRunWebWritesLocalhostPlaceholderWithoutOpeningBrowser(t *testing.T) {
+func TestRunWebStartsLocalhostServerAndOpensBrowser(t *testing.T) {
 	oldOpenBrowser := openBrowserFn
 	defer func() { openBrowserFn = oldOpenBrowser }()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	var opened string
+	var openErr error
 	openBrowserFn = func(rawURL string) error {
 		opened = rawURL
+		resp, err := http.Get(rawURL)
+		if err != nil {
+			openErr = err
+			cancel()
+			return nil
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			openErr = errors.New(resp.Status)
+		}
+		cancel()
 		return nil
 	}
 
 	var out bytes.Buffer
-	err := runWeb(context.Background(), runWebRequest{
+	err := runWeb(ctx, runWebRequest{
 		Args: []string{"./compose.yml"},
 		Out:  &out,
 	})
-	if err == nil || !strings.Contains(err.Error(), "web run server is not implemented yet") {
-		t.Fatalf("runWeb error = %v, want placeholder", err)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runWeb error = %v, want context canceled", err)
 	}
 	if opened != "" {
-		t.Fatalf("openBrowserFn called with %q, want no browser side effect", opened)
+		if openErr != nil {
+			t.Fatalf("open browser probe: %v", openErr)
+		}
+	} else {
+		t.Fatal("openBrowserFn was not called")
 	}
-	rawURL := runWebPlaceholderURL(t, out.String())
+	rawURL := runWebOpeningURL(t, out.String())
 	parsed, parseErr := url.Parse(rawURL)
 	if parseErr != nil {
 		t.Fatalf("url.Parse(%q): %v", rawURL, parseErr)
@@ -195,7 +216,7 @@ func TestRunWebWritesLocalhostPlaceholderWithoutOpeningBrowser(t *testing.T) {
 	}
 }
 
-func runWebPlaceholderURL(t *testing.T, output string) string {
+func runWebOpeningURL(t *testing.T, output string) string {
 	t.Helper()
 	for _, field := range strings.Fields(output) {
 		if strings.HasPrefix(field, "http://127.0.0.1:") {

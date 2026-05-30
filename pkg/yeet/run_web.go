@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"runtime"
@@ -189,22 +190,68 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	if err != nil {
 		return err
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	server, listener, errCh, url, err := startRunWebServer(req, token)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = listener.Close() }()
 
-	bootstrap := newRunWebBootstrap(req.Config, req.HostOverride, req.Service, req.Args)
-	_ = bootstrap
-
-	url := fmt.Sprintf("http://%s/?token=%s", listener.Addr().String(), token)
 	out := req.Out
 	if out == nil {
 		out = os.Stdout
 	}
-	if _, err := fmt.Fprintf(out, "yeet web run server is not implemented yet.\nLocal placeholder URL: %s\n", url); err != nil {
+	if _, err := fmt.Fprintf(out, "Opening %s\n", url); err != nil {
 		return err
 	}
-	return fmt.Errorf("web run server is not implemented yet")
+	openRunWebBrowser(url, req.Err)
+
+	return waitRunWebServer(ctx, server, errCh)
+}
+
+func startRunWebServer(req runWebRequest, token string) (*http.Server, net.Listener, <-chan error, string, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, nil, nil, "", err
+	}
+	bootstrap := newRunWebBootstrap(req.Config, req.HostOverride, req.Service, req.Args)
+	cwd, err := os.Getwd()
+	if err != nil {
+		_ = listener.Close()
+		return nil, nil, nil, "", err
+	}
+	handler := newRunWebServer(runWebServerConfig{
+		Token:     token,
+		Root:      cwd,
+		Bootstrap: bootstrap,
+		Config:    req.Config,
+	})
+	server := &http.Server{Handler: handler}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Serve(listener)
+	}()
+	url := fmt.Sprintf("http://%s/?token=%s", listener.Addr().String(), token)
+	return server, listener, errCh, url, nil
+}
+
+func openRunWebBrowser(url string, errOut io.Writer) {
+	if err := openBrowserFn(url); err != nil {
+		if errOut == nil {
+			errOut = os.Stderr
+		}
+		_, _ = fmt.Fprintf(errOut, "failed to open browser: %v\n", err)
+	}
+}
+
+func waitRunWebServer(ctx context.Context, server *http.Server, errCh <-chan error) error {
+	select {
+	case <-ctx.Done():
+		_ = server.Shutdown(context.Background())
+		return ctx.Err()
+	case err := <-errCh:
+		if err == http.ErrServerClosed {
+			return nil
+		}
+		return err
+	}
 }
