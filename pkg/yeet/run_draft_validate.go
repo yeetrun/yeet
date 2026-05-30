@@ -11,16 +11,19 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/ftdetect"
 )
 
 var (
 	runDraftSnapshotMaxAgeDaysRE = regexp.MustCompile(`^(-?[0-9]+)d$`)
 	runDraftZFSDatasetPartRE     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
+	runDraftLocalImageNameRE     = regexp.MustCompile(`^[a-z0-9]+([_-][a-z0-9]+)*(/[a-z0-9]+([_-][a-z0-9]+)*)*$`)
 )
 
 type RunDraftValidationResult struct {
@@ -284,19 +287,65 @@ func normalizeRunDraftPayload(cwd, payload, kind string) (string, error) {
 	payload = strings.TrimSpace(payload)
 	switch kind {
 	case "", "auto":
-		if looksLikeImageRef(payload) {
-			return payload, nil
-		}
+		return normalizeAutoRunDraftPayload(cwd, payload)
+	case "file":
 		return normalizeExistingRunDraftPath(cwd, payload)
-	case "file", "compose", "dockerfile":
-		return normalizeExistingRunDraftPath(cwd, payload)
-	case "remote-image", "local-image":
+	case "compose":
+		return normalizeRunDraftComposePayload(cwd, payload)
+	case "dockerfile":
+		return normalizeRunDraftDockerfilePayload(cwd, payload)
+	case "remote-image":
 		if !looksLikeRunDraftImageRef(payload) {
 			return "", fmt.Errorf("payload must be a Docker image reference for payloadKind %q", kind)
 		}
 		return payload, nil
+	case "local-image":
+		if !looksLikeRunDraftImageRef(payload) && !looksLikeRunDraftLocalImageName(payload) {
+			return "", fmt.Errorf("payload must be a Docker image reference or local image name for payloadKind %q", kind)
+		}
+		return payload, nil
 	}
 	return "", fmt.Errorf("unknown payload kind %q", kind)
+}
+
+func normalizeAutoRunDraftPayload(cwd, payload string) (string, error) {
+	if looksLikeRunDraftImageRef(payload) {
+		return payload, nil
+	}
+	normalized, err := normalizeExistingRunDraftPath(cwd, payload)
+	if err == nil {
+		return normalized, nil
+	}
+	if looksLikeRunDraftLocalImageName(payload) {
+		return payload, nil
+	}
+	return "", err
+}
+
+func normalizeRunDraftDockerfilePayload(cwd, payload string) (string, error) {
+	normalized, err := normalizeExistingRunDraftPath(cwd, payload)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Base(normalized) != "Dockerfile" {
+		return "", fmt.Errorf("payloadKind %q requires a file named Dockerfile", "dockerfile")
+	}
+	return normalized, nil
+}
+
+func normalizeRunDraftComposePayload(cwd, payload string) (string, error) {
+	normalized, err := normalizeExistingRunDraftPath(cwd, payload)
+	if err != nil {
+		return "", err
+	}
+	ft, err := ftdetect.DetectFile(normalized, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return "", fmt.Errorf("payloadKind %q requires a Docker Compose file: %w", "compose", err)
+	}
+	if ft != ftdetect.DockerCompose {
+		return "", fmt.Errorf("payloadKind %q requires a Docker Compose file", "compose")
+	}
+	return normalized, nil
 }
 
 func looksLikeRunDraftImageRef(payload string) bool {
@@ -304,6 +353,22 @@ func looksLikeRunDraftImageRef(payload string) bool {
 		return false
 	}
 	return looksLikeImageRef(payload)
+}
+
+func looksLikeRunDraftLocalImageName(payload string) bool {
+	if payload == "" {
+		return false
+	}
+	if filepath.IsAbs(payload) || strings.HasPrefix(payload, "./") || strings.HasPrefix(payload, "../") {
+		return false
+	}
+	if strings.ContainsAny(payload, " \t\n\r:@\\") {
+		return false
+	}
+	if strings.HasPrefix(payload, "http://") || strings.HasPrefix(payload, "https://") {
+		return false
+	}
+	return runDraftLocalImageNameRE.MatchString(payload)
 }
 
 func unknownPayloadKind(kind string) bool {

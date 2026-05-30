@@ -93,6 +93,31 @@ func TestValidateRunDraftPayloadKindFileStatsImageLikePayload(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftAutoPayloadKindAcceptsUntaggedLocalImageStylePayload(t *testing.T) {
+	for _, kind := range []string{"", "auto"} {
+		t.Run("kind="+kind, func(t *testing.T) {
+			for _, payload := range []string{"alpine", "myapp"} {
+				t.Run(payload, func(t *testing.T) {
+					draft := RunDraft{
+						Service:     "svc-a",
+						Host:        "host-a",
+						Payload:     payload,
+						PayloadKind: kind,
+					}
+					normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+					if !validation.OK {
+						t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+					}
+					if normalized.Payload != payload {
+						t.Fatalf("payload = %q, want %q", normalized.Payload, payload)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestValidateRunDraftRemoteImagePayloadKind(t *testing.T) {
 	t.Run("accepts image ref", func(t *testing.T) {
 		draft := RunDraft{
@@ -155,6 +180,23 @@ func TestValidateRunDraftRemoteImagePayloadKind(t *testing.T) {
 		}
 	})
 
+	t.Run("rejects untagged local image name", func(t *testing.T) {
+		draft := RunDraft{
+			Service:     "svc-a",
+			Host:        "host-a",
+			Payload:     "alpine",
+			PayloadKind: "remote-image",
+		}
+		_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+		if validation.OK {
+			t.Fatal("validation OK = true, want false")
+		}
+		if got := validation.fieldError("payload"); !strings.Contains(got, "image") {
+			t.Fatalf("payload error = %q, want image", got)
+		}
+	})
+
 	t.Run("rejects malformed ref", func(t *testing.T) {
 		draft := RunDraft{
 			Service:     "svc-a",
@@ -174,20 +216,116 @@ func TestValidateRunDraftRemoteImagePayloadKind(t *testing.T) {
 }
 
 func TestValidateRunDraftLocalImagePayloadKindDoesNotStatDockerStylePayload(t *testing.T) {
-	draft := RunDraft{
-		Service:     "svc-a",
-		Host:        "host-a",
-		Payload:     "repo/svc/app:latest",
-		PayloadKind: "local-image",
-	}
-	normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+	for _, payload := range []string{"alpine", "myapp", "repo/svc/app:latest"} {
+		t.Run(payload, func(t *testing.T) {
+			draft := RunDraft{
+				Service:     "svc-a",
+				Host:        "host-a",
+				Payload:     payload,
+				PayloadKind: "local-image",
+			}
+			normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
 
-	if !validation.OK {
-		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+			if !validation.OK {
+				t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+			}
+			if normalized.Payload != draft.Payload {
+				t.Fatalf("payload = %q, want %q", normalized.Payload, draft.Payload)
+			}
+		})
 	}
-	if normalized.Payload != draft.Payload {
-		t.Fatalf("payload = %q, want %q", normalized.Payload, draft.Payload)
+}
+
+func TestValidateRunDraftDockerfilePayloadKind(t *testing.T) {
+	tmp := t.TempDir()
+	notDockerfile := filepath.Join(tmp, "Containerfile")
+	if err := os.WriteFile(notDockerfile, []byte("FROM alpine\n"), 0o644); err != nil {
+		t.Fatalf("write non-Dockerfile: %v", err)
 	}
+	dockerfile := filepath.Join(tmp, "Dockerfile")
+	if err := os.WriteFile(dockerfile, []byte("FROM alpine\n"), 0o644); err != nil {
+		t.Fatalf("write Dockerfile: %v", err)
+	}
+
+	t.Run("rejects non-Dockerfile file", func(t *testing.T) {
+		draft := RunDraft{
+			Service:     "svc-a",
+			Host:        "host-a",
+			Payload:     "Containerfile",
+			PayloadKind: "dockerfile",
+		}
+		_, validation := validateRunDraft(context.Background(), draft, tmp)
+
+		if validation.OK {
+			t.Fatal("validation OK = true, want false")
+		}
+		if got := validation.fieldError("payload"); !strings.Contains(got, "Dockerfile") {
+			t.Fatalf("payload error = %q, want Dockerfile", got)
+		}
+	})
+
+	t.Run("accepts Dockerfile", func(t *testing.T) {
+		draft := RunDraft{
+			Service:     "svc-a",
+			Host:        "host-a",
+			Payload:     "Dockerfile",
+			PayloadKind: "dockerfile",
+		}
+		normalized, validation := validateRunDraft(context.Background(), draft, tmp)
+
+		if !validation.OK {
+			t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+		}
+		if normalized.Payload != dockerfile {
+			t.Fatalf("payload = %q, want %q", normalized.Payload, dockerfile)
+		}
+	})
+}
+
+func TestValidateRunDraftComposePayloadKind(t *testing.T) {
+	tmp := t.TempDir()
+	notCompose := filepath.Join(tmp, "app.txt")
+	if err := os.WriteFile(notCompose, []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("write non-compose: %v", err)
+	}
+	compose := filepath.Join(tmp, "compose.yml")
+	if err := os.WriteFile(compose, []byte("services:\n  app:\n    image: alpine\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+
+	t.Run("rejects non-compose file", func(t *testing.T) {
+		draft := RunDraft{
+			Service:     "svc-a",
+			Host:        "host-a",
+			Payload:     "app.txt",
+			PayloadKind: "compose",
+		}
+		_, validation := validateRunDraft(context.Background(), draft, tmp)
+
+		if validation.OK {
+			t.Fatal("validation OK = true, want false")
+		}
+		if got := validation.fieldError("payload"); !strings.Contains(got, "Docker Compose") {
+			t.Fatalf("payload error = %q, want Docker Compose", got)
+		}
+	})
+
+	t.Run("accepts compose file", func(t *testing.T) {
+		draft := RunDraft{
+			Service:     "svc-a",
+			Host:        "host-a",
+			Payload:     "compose.yml",
+			PayloadKind: "compose",
+		}
+		normalized, validation := validateRunDraft(context.Background(), draft, tmp)
+
+		if !validation.OK {
+			t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+		}
+		if normalized.Payload != compose {
+			t.Fatalf("payload = %q, want %q", normalized.Payload, compose)
+		}
+	})
 }
 
 func TestValidateRunDraftRejectsUnknownPayloadKind(t *testing.T) {
