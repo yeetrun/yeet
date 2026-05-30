@@ -596,7 +596,7 @@ func remoteEnvHash(resp catchrpc.ArtifactHashesResponse) string {
 }
 
 func shouldAlwaysDeployPayload(payload string) bool {
-	if looksLikeImageRef(payload) {
+	if looksLikeImageRef(payload) || looksLikeRunDraftLocalImageName(payload) {
 		// TODO: add change detection for image refs.
 		return true
 	}
