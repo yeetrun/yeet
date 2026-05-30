@@ -313,7 +313,7 @@ func TestRunUsesRunCommandWithStdin(t *testing.T) {
 	remoteCatchOSAndArchFn = func() (string, string, error) {
 		return "linux", "amd64", nil
 	}
-	pushAllLocalImagesFn = func(string, string, string) error {
+	pushAllLocalImagesFn = func(context.Context, string, string, string) error {
 		return nil
 	}
 	isTerminalFn = func(int) bool { return false }
@@ -434,7 +434,7 @@ func TestRunComposeTTYDependsOnTerminal(t *testing.T) {
 	remoteCatchOSAndArchFn = func() (string, string, error) {
 		return "linux", "amd64", nil
 	}
-	pushAllLocalImagesFn = func(string, string, string) error {
+	pushAllLocalImagesFn = func(context.Context, string, string, string) error {
 		return nil
 	}
 
@@ -549,7 +549,7 @@ func TestHandleSvcCmdRunPullBeforePayload(t *testing.T) {
 	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
 		return catchrpc.ServiceInfoResponse{Found: false}, nil
 	}
-	pushAllLocalImagesFn = func(string, string, string) error {
+	pushAllLocalImagesFn = func(context.Context, string, string, string) error {
 		return nil
 	}
 	isTerminalFn = func(int) bool { return false }
@@ -668,7 +668,7 @@ func TestRunRemoteImageUsesComposePayload(t *testing.T) {
 	remoteCatchOSAndArchFn = func() (string, string, error) {
 		return "linux", "amd64", nil
 	}
-	pushAllLocalImagesFn = func(string, string, string) error {
+	pushAllLocalImagesFn = func(context.Context, string, string, string) error {
 		return nil
 	}
 	isTerminalFn = func(int) bool { return false }
@@ -730,7 +730,7 @@ func TestRunRemoteImageWithPublish(t *testing.T) {
 	remoteCatchOSAndArchFn = func() (string, string, error) {
 		return "linux", "amd64", nil
 	}
-	pushAllLocalImagesFn = func(string, string, string) error {
+	pushAllLocalImagesFn = func(context.Context, string, string, string) error {
 		return nil
 	}
 	isTerminalFn = func(int) bool { return false }

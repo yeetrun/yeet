@@ -1252,7 +1252,7 @@ func pushRunFileLocalImages(ctx context.Context, svc string, upload runFileUploa
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := pushAllLocalImagesFn(svc, upload.goos, upload.goarch); err != nil {
+	if err := pushAllLocalImagesFn(ctx, svc, upload.goos, upload.goarch); err != nil {
 		return fmt.Errorf("failed to push all local images: %w", err)
 	}
 	return ctx.Err()

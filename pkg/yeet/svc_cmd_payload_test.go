@@ -82,7 +82,7 @@ func TestRunFilePayloadComposeBranches(t *testing.T) {
 			}
 
 			pushCalled := false
-			pushAllLocalImagesFn = func(service, goos, goarch string) error {
+			pushAllLocalImagesFn = func(ctx context.Context, service, goos, goarch string) error {
 				pushCalled = true
 				if service != "svc-a" || goos != "linux" || goarch != "amd64" {
 					t.Fatalf("pushAllLocalImagesFn = (%q, %q, %q), want (svc-a, linux, amd64)", service, goos, goarch)
