@@ -325,7 +325,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}},
 	"restart":  {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
 	"rollback": {Name: "rollback", Description: "Rollback a service", ArgsSchema: ServiceArgs{}},
-	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [--web] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>]", Examples: []string{
+	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC [PAYLOAD] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
 		"yeet run --web",
 		"yeet run --web <svc>",
 		"yeet run --web <svc> ./compose.yml",
