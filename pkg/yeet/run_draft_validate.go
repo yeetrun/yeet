@@ -264,12 +264,11 @@ func validateRunDraftSnapshotMaxAgeValue(raw string) error {
 		if err != nil {
 			return fmt.Errorf("invalid snapshot max age %q", raw)
 		}
+		if days <= 0 {
+			return fmt.Errorf("snapshot max age must be positive")
+		}
 		if days > int(math.MaxInt64/(24*time.Hour)) {
 			return fmt.Errorf("invalid snapshot max age %q", raw)
-		}
-		d := time.Duration(days) * 24 * time.Hour
-		if d <= 0 {
-			return fmt.Errorf("snapshot max age must be positive")
 		}
 		return nil
 	}

@@ -457,6 +457,18 @@ func TestValidateRunDraftRejectsInvalidSnapshotFields(t *testing.T) {
 			wantErr: "positive",
 		},
 		{
+			name:    "overflowing negative day max age",
+			snap:    RunDraftSnapshots{MaxAge: "-106752d"},
+			field:   "snapshots.maxAge",
+			wantErr: "positive",
+		},
+		{
+			name:    "overflowing positive day max age",
+			snap:    RunDraftSnapshots{MaxAge: "106752d"},
+			field:   "snapshots.maxAge",
+			wantErr: "invalid",
+		},
+		{
 			name:    "max age with inherit",
 			snap:    RunDraftSnapshots{MaxAge: "7d", MaxAgeInherit: true},
 			field:   "snapshots.maxAge",
