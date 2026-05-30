@@ -420,8 +420,12 @@ func TestShouldAlwaysDeployPayload(t *testing.T) {
 		want    bool
 	}{
 		{payload: "ghcr.io/example/app:latest", want: true},
+		{payload: "alpine", want: true},
+		{payload: "myapp", want: true},
+		{payload: "repo/myapp", want: true},
 		{payload: "/tmp/Dockerfile", want: true},
 		{payload: "/tmp/run.sh"},
+		{payload: "./compose.yml"},
 	}
 
 	for _, tt := range tests {
