@@ -116,7 +116,7 @@ func TestRunFromProjectConfigRehydratesArgs(t *testing.T) {
 	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
 		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
 	}
-	pushAllLocalImagesFn = func(string, string, string) error {
+	pushAllLocalImagesFn = func(context.Context, string, string, string) error {
 		return nil
 	}
 	isTerminalFn = func(int) bool { return false }

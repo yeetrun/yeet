@@ -43,7 +43,7 @@ func HandlePush(ctx context.Context, args []string) error {
 		return err
 	}
 	if req.AllLocal {
-		return pushAllLocalImages(req.Service, goos, goarch)
+		return pushAllLocalImages(ctx, req.Service, goos, goarch)
 	}
 	return pushImage(ctx, req.Service, req.Image, req.Tag)
 }
@@ -185,7 +185,7 @@ func pushImage(ctx context.Context, _ string, image, tag string) error {
 type pushImageDeps struct {
 	host        func(context.Context) (string, error)
 	imageExists func(string) bool
-	push        func(source, target string) error
+	push        func(context.Context, string, string) error
 }
 
 func pushImageWithDeps(ctx context.Context, image, tag string, deps pushImageDeps) error {
@@ -200,7 +200,7 @@ func pushImageWithDeps(ctx context.Context, image, tag string, deps pushImageDep
 	if err != nil {
 		return err
 	}
-	return deps.push(image, imgName)
+	return deps.push(ctx, image, imgName)
 }
 
 func pushTargetImageName(host, image, tag string) (string, error) {
@@ -228,34 +228,34 @@ func pushRepoName(image string) (string, error) {
 	return repo, nil
 }
 
-func runDockerPush(source, target string) error {
+func runDockerPush(ctx context.Context, source, target string) error {
 	return do(
-		exec.Command("docker", "tag", source, target).Run,
-		cmdutil.NewStdCmd("docker", "push", target).Run,
-		exec.Command("docker", "rmi", target).Run,
+		func() error { return exec.CommandContext(ctx, "docker", "tag", source, target).Run() },
+		func() error { return cmdutil.NewStdCmdContext(ctx, "docker", "push", target).Run() },
+		func() error { return exec.CommandContext(ctx, "docker", "rmi", target).Run() },
 	)
 }
 
-func pushAllLocalImages(s, goos, goarch string) error {
-	images, err := listLocalImages(s)
+func pushAllLocalImages(ctx context.Context, s, goos, goarch string) error {
+	images, err := listLocalImages(ctx, s)
 	if err != nil {
 		return err
 	}
 	for _, image := range images {
-		if err := pushLocalImageIfCompatible(s, image, goos, goarch); err != nil {
+		if err := pushLocalImageIfCompatible(ctx, s, image, goos, goarch); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func listLocalImages(s string) ([]string, error) {
+func listLocalImages(ctx context.Context, s string) ([]string, error) {
 	wild := fmt.Sprintf("%s/%s/*", svc.InternalRegistryHost, s)
 	if _, err := exec.LookPath("docker"); err != nil {
 		log.Printf("docker not found, skipping push of local images")
 		return nil, nil
 	}
-	cmd := exec.Command("docker", "images", "--format", "{{.Repository}}:{{.Tag}}", "--filter", fmt.Sprintf("reference=%s", wild))
+	cmd := exec.CommandContext(ctx, "docker", "images", "--format", "{{.Repository}}:{{.Tag}}", "--filter", fmt.Sprintf("reference=%s", wild))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if bytes.Contains(output, []byte("Is the docker daemon running?")) {
@@ -283,8 +283,8 @@ func localImagesFromDockerOutput(output []byte) []string {
 	return out
 }
 
-func pushLocalImageIfCompatible(s, image, goos, goarch string) error {
-	sys, arch, err := imageSystemAndArch(image)
+func pushLocalImageIfCompatible(ctx context.Context, s, image, goos, goarch string) error {
+	sys, arch, err := imageSystemAndArch(ctx, image)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skipping, failed to get image arch for %q: %v\n", image, err)
 		return nil
@@ -294,7 +294,7 @@ func pushLocalImageIfCompatible(s, image, goos, goarch string) error {
 		fmt.Fprintln(os.Stderr, skip)
 		return nil
 	}
-	if err := pushImage(context.Background(), s, image, "latest"); err != nil {
+	if err := pushImage(ctx, s, image, "latest"); err != nil {
 		return err
 	}
 	return nil
@@ -310,8 +310,8 @@ func localImagePushDecision(image, sys, arch, goos, goarch string) (bool, string
 	return true, ""
 }
 
-func imageSystemAndArch(image string) (system, arch string, _ error) {
-	cmd := exec.Command("docker", "inspect", "--format", "{{.Os}},{{.Architecture}}", image)
+func imageSystemAndArch(ctx context.Context, image string) (system, arch string, _ error) {
+	cmd := exec.CommandContext(ctx, "docker", "inspect", "--format", "{{.Os}},{{.Architecture}}", image)
 	output, err := cmd.Output()
 	if err != nil {
 		return "", "", fmt.Errorf("failed to inspect image: %w", err)
