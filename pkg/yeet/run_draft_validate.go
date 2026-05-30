@@ -23,7 +23,7 @@ import (
 var (
 	runDraftSnapshotMaxAgeDaysRE = regexp.MustCompile(`^(-?[0-9]+)d$`)
 	runDraftZFSDatasetPartRE     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
-	runDraftLocalImageNameRE     = regexp.MustCompile(`^[a-z0-9]+([_-][a-z0-9]+)*(/[a-z0-9]+([_-][a-z0-9]+)*)*$`)
+	runDraftLocalImageNameRE     = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$`)
 )
 
 type RunDraftValidationResult struct {
@@ -362,7 +362,7 @@ func looksLikeRunDraftLocalImageName(payload string) bool {
 	if filepath.IsAbs(payload) || strings.HasPrefix(payload, "./") || strings.HasPrefix(payload, "../") {
 		return false
 	}
-	if strings.ContainsAny(payload, " \t\n\r:@\\") {
+	if strings.ContainsAny(payload, " \t\n\r@\\") {
 		return false
 	}
 	if strings.HasPrefix(payload, "http://") || strings.HasPrefix(payload, "https://") {
