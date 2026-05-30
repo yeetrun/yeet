@@ -6,10 +6,17 @@ package yeet
 
 import (
 	"context"
+	"embed"
 	"encoding/json"
+	"io/fs"
 	"net/http"
+	"path"
+	"strings"
 	"sync"
 )
+
+//go:embed web_run_assets/*
+var webRunAssets embed.FS
 
 type runWebServerConfig struct {
 	Token      string
@@ -138,12 +145,39 @@ func (s *runWebServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *runWebServer) handleStatic(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	assetPath := path.Clean("/" + r.URL.Path)
+	assetPath = path.Clean(assetPath[1:])
+	if assetPath == "." {
+		assetPath = "index.html"
+	}
+	if assetPath == "index.html" {
+		s.serveIndex(w)
+		return
+	}
+	sub, err := fs.Sub(webRunAssets, "web_run_assets")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if _, err := fs.Stat(sub, assetPath); err != nil {
 		http.NotFound(w, r)
 		return
 	}
+	http.ServeFileFS(w, r, sub, assetPath)
+}
+
+func (s *runWebServer) serveIndex(w http.ResponseWriter) {
+	b, err := fs.ReadFile(webRunAssets, "web_run_assets/index.html")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte("<!doctype html><title>yeet run</title><main id=\"app\"></main>"))
+	_, _ = w.Write([]byte(strings.ReplaceAll(string(b), "__YEET_TOKEN__", s.cfg.Token)))
 }
 
 func decodeRunWebDraft(w http.ResponseWriter, r *http.Request) (RunDraft, bool) {
