@@ -14,7 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
@@ -135,6 +137,107 @@ func TestRunWebAPIDeployRepeatsValidation(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "already exists") {
 		t.Fatalf("deploy body = %s, want already exists", rec.Body.String())
+	}
+}
+
+func TestRunWebAPIDeployIsSingleUse(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce sync.Once
+	var mu sync.Mutex
+	execCount := 0
+	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+		mu.Lock()
+		execCount++
+		mu.Unlock()
+		startOnce.Do(func() { close(started) })
+		<-release
+		return nil
+	}
+
+	root := t.TempDir()
+	payload := filepath.Join(root, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root})
+	draft := RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"}
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		firstDone <- runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first deploy to start")
+	}
+
+	second := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
+	if second.Code != http.StatusConflict {
+		t.Fatalf("second deploy status = %d, want 409 body=%s", second.Code, second.Body.String())
+	}
+	close(release)
+	first := <-firstDone
+	if first.Code != http.StatusOK {
+		t.Fatalf("first deploy status = %d, want 200 body=%s", first.Code, first.Body.String())
+	}
+
+	third := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
+	if third.Code != http.StatusConflict {
+		t.Fatalf("third deploy status = %d, want 409 body=%s", third.Code, third.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if execCount != 1 {
+		t.Fatalf("executeRunDraftFn calls = %d, want 1", execCount)
+	}
+}
+
+func TestRunWebAPIDeployUsesConfiguredContext(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+			return context.DeadlineExceeded
+		}
+	}
+
+	root := t.TempDir()
+	payload := filepath.Join(root, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, Context: ctx})
+
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("deploy status = %d, want 500 body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "context canceled") {
+		t.Fatalf("deploy body = %s, want context canceled", rec.Body.String())
 	}
 }
 

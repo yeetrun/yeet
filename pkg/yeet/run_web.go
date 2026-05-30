@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type runWebRequest struct {
@@ -181,6 +182,9 @@ func openBrowser(url string) error {
 }
 
 func runWeb(ctx context.Context, req runWebRequest) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -190,7 +194,7 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	if err != nil {
 		return err
 	}
-	server, listener, errCh, url, err := startRunWebServer(req, token)
+	server, listener, errCh, done, url, err := startRunWebServer(ctx, req, token)
 	if err != nil {
 		return err
 	}
@@ -205,33 +209,44 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	}
 	openRunWebBrowser(url, req.Err)
 
-	return waitRunWebServer(ctx, server, errCh)
+	return waitRunWebServer(ctx, server, errCh, done, out)
 }
 
-func startRunWebServer(req runWebRequest, token string) (*http.Server, net.Listener, <-chan error, string, error) {
+func startRunWebServer(ctx context.Context, req runWebRequest, token string) (*http.Server, net.Listener, <-chan error, <-chan struct{}, string, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return nil, nil, nil, "", err
+		return nil, nil, nil, nil, "", err
 	}
 	bootstrap := newRunWebBootstrap(req.Config, req.HostOverride, req.Service, req.Args)
 	cwd, err := os.Getwd()
 	if err != nil {
 		_ = listener.Close()
-		return nil, nil, nil, "", err
+		return nil, nil, nil, nil, "", err
 	}
+	done := make(chan struct{})
+	var doneOnce sync.Once
 	handler := newRunWebServer(runWebServerConfig{
 		Token:     token,
 		Root:      cwd,
 		Bootstrap: bootstrap,
 		Config:    req.Config,
+		Context:   ctx,
+		OnComplete: func() {
+			doneOnce.Do(func() { close(done) })
+		},
 	})
-	server := &http.Server{Handler: handler}
+	server := &http.Server{
+		Handler: handler,
+		BaseContext: func(net.Listener) context.Context {
+			return ctx
+		},
+	}
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- server.Serve(listener)
 	}()
 	url := fmt.Sprintf("http://%s/?token=%s", listener.Addr().String(), token)
-	return server, listener, errCh, url, nil
+	return server, listener, errCh, done, url, nil
 }
 
 func openRunWebBrowser(url string, errOut io.Writer) {
@@ -243,10 +258,14 @@ func openRunWebBrowser(url string, errOut io.Writer) {
 	}
 }
 
-func waitRunWebServer(ctx context.Context, server *http.Server, errCh <-chan error) error {
+func waitRunWebServer(ctx context.Context, server *http.Server, errCh <-chan error, done <-chan struct{}, out io.Writer) error {
 	select {
-	case <-ctx.Done():
+	case <-done:
 		_ = server.Shutdown(context.Background())
+		_, _ = fmt.Fprintln(out, "Deployment finished. Close the browser tab and return here.")
+		return nil
+	case <-ctx.Done():
+		_ = server.Close()
 		return ctx.Err()
 	case err := <-errCh:
 		if err == http.ErrServerClosed {

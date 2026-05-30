@@ -8,19 +8,32 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 )
 
 type runWebServerConfig struct {
-	Token     string
-	Root      string
-	Bootstrap runWebBootstrap
-	Config    *projectConfigLocation
+	Token      string
+	Root       string
+	Bootstrap  runWebBootstrap
+	Config     *projectConfigLocation
+	Context    context.Context
+	OnComplete func()
 }
 
 type runWebServer struct {
-	cfg runWebServerConfig
-	mux *http.ServeMux
+	cfg         runWebServerConfig
+	mux         *http.ServeMux
+	deployMu    sync.Mutex
+	deployState runWebDeployState
 }
+
+type runWebDeployState int
+
+const (
+	runWebDeployReady runWebDeployState = iota
+	runWebDeployRunning
+	runWebDeployComplete
+)
 
 func newRunWebServer(cfg runWebServerConfig) http.Handler {
 	s := &runWebServer{cfg: cfg, mux: http.NewServeMux()}
@@ -82,7 +95,9 @@ func (s *runWebServer) handleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	draft.NewServiceOnly = true
-	normalized, result := validateRunDraft(r.Context(), draft, s.cfg.Root)
+	ctx, cancel := runWebHandlerContext(s.cfg.Context, r.Context())
+	defer cancel()
+	normalized, result := validateRunDraft(ctx, draft, s.cfg.Root)
 	writeRunWebJSON(w, http.StatusOK, map[string]any{"draft": normalized, "validation": result})
 }
 
@@ -95,8 +110,17 @@ func (s *runWebServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if ok, status, message := s.beginDeploy(); !ok {
+		http.Error(w, message, status)
+		return
+	}
+	deployed := false
+	defer func() { s.finishDeploy(deployed) }()
+
 	draft.NewServiceOnly = true
-	normalized, result := validateRunDraft(r.Context(), draft, s.cfg.Root)
+	ctx, cancel := runWebHandlerContext(s.cfg.Context, r.Context())
+	defer cancel()
+	normalized, result := validateRunDraft(ctx, draft, s.cfg.Root)
 	if !result.OK {
 		writeRunWebJSON(w, http.StatusBadRequest, map[string]any{"draft": normalized, "validation": result})
 		return
@@ -105,10 +129,11 @@ func (s *runWebServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		normalized.EnvFileSet = true
 		normalized.EnvFileArg = normalized.EnvFile
 	}
-	if err := executeRunDraftFn(context.Background(), normalized, s.cfg.Config, false); err != nil {
+	if err := executeRunDraftFn(ctx, normalized, s.cfg.Config, false); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	deployed = true
 	writeRunWebJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "Service deployed. Close this tab and return to the terminal."})
 }
 
@@ -134,4 +159,50 @@ func writeRunWebJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (s *runWebServer) beginDeploy() (bool, int, string) {
+	s.deployMu.Lock()
+	defer s.deployMu.Unlock()
+	switch s.deployState {
+	case runWebDeployRunning:
+		return false, http.StatusConflict, "deployment already in progress"
+	case runWebDeployComplete:
+		return false, http.StatusConflict, "deployment already completed"
+	default:
+		s.deployState = runWebDeployRunning
+		return true, http.StatusOK, ""
+	}
+}
+
+func (s *runWebServer) finishDeploy(deployed bool) {
+	s.deployMu.Lock()
+	if deployed {
+		s.deployState = runWebDeployComplete
+	} else {
+		s.deployState = runWebDeployReady
+	}
+	s.deployMu.Unlock()
+
+	if deployed && s.cfg.OnComplete != nil {
+		go s.cfg.OnComplete()
+	}
+}
+
+func runWebHandlerContext(parent context.Context, request context.Context) (context.Context, context.CancelFunc) {
+	if request == nil {
+		request = context.Background()
+	}
+	if parent == nil {
+		return request, func() {}
+	}
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-request.Done():
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
