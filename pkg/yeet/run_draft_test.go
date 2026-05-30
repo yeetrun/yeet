@@ -278,6 +278,76 @@ func TestExecuteRunDraftRejectsInvalidDraftBeforeRemote(t *testing.T) {
 	}
 }
 
+func TestExecuteRunDraftSkipsServiceInfoOutsideNewOnlyMode(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldTryImage := tryRunRemoteImageFn
+	defer func() {
+		tryRunRemoteImageFn = oldTryImage
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		t.Fatalf("unexpected service info call for host=%q service=%q", host, service)
+		return catchrpc.ServiceInfoResponse{}, nil
+	}
+	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+		if image != "ghcr.io/example/app:latest" {
+			t.Fatalf("image = %q, want ghcr.io/example/app:latest", image)
+		}
+		return true, nil
+	}
+
+	tmp := t.TempDir()
+	cfgLoc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	draft := RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "ghcr.io/example/app:latest",
+	}
+
+	if err := executeRunDraft(context.Background(), draft, cfgLoc, false); err != nil {
+		t.Fatalf("executeRunDraft: %v", err)
+	}
+}
+
+func TestExecuteRunDraftNewOnlyRejectsExistingService(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldTryImage := tryRunRemoteImageFn
+	defer func() {
+		tryRunRemoteImageFn = oldTryImage
+	}()
+	calls := 0
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		calls++
+		if host != "host-a" || service != "svc-a" {
+			t.Fatalf("service info host=%q service=%q, want host-a svc-a", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{Found: true}, nil
+	}
+	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+		t.Fatalf("unexpected image run: image=%q args=%v", image, args)
+		return false, nil
+	}
+
+	err := executeRunDraft(context.Background(), RunDraft{
+		Service:        "svc-a",
+		Host:           "host-a",
+		Payload:        "ghcr.io/example/app:latest",
+		NewServiceOnly: true,
+	}, nil, false)
+	if err == nil {
+		t.Fatal("executeRunDraft error = nil, want existing service validation error")
+	}
+	if !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("executeRunDraft error = %v, want already exists", err)
+	}
+	if calls != 1 {
+		t.Fatalf("service info calls = %d, want 1", calls)
+	}
+}
+
 func TestExecuteRunDraftUsesExistingRunPathAndSavesConfig(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	oldExec := execRemoteFn

@@ -52,11 +52,18 @@ var fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string)
 }
 
 func validateRunDraft(ctx context.Context, draft RunDraft, cwd string) (RunDraft, RunDraftValidationResult) {
+	draft, result := validateRunDraftLocal(draft, cwd)
+	if draft.NewServiceOnly {
+		validateRunDraftService(ctx, draft, &result)
+	}
+	return draft, result
+}
+
+func validateRunDraftLocal(draft RunDraft, cwd string) (RunDraft, RunDraftValidationResult) {
 	result := RunDraftValidationResult{OK: true}
 
 	draft = trimRunDraftFields(draft)
 	validateRunDraftRequired(draft, &result)
-	validateRunDraftService(ctx, draft, &result)
 	validateRunDraftPaths(cwd, &draft, &result)
 	validateRunDraftStorage(&draft, &result)
 	validateRunDraftSnapshots(&draft, &result)
@@ -121,6 +128,8 @@ func validateRunDraftStorage(draft *RunDraft, result *RunDraftValidationResult) 
 	if draft.Storage.ZFS {
 		if draft.Storage.ServiceRoot == "" {
 			result.addError("serviceRoot", "service root or ZFS dataset is required when zfs is enabled")
+		} else if filepath.IsAbs(draft.Storage.ServiceRoot) {
+			result.addError("serviceRoot", "zfs service root expects a dataset name, not an absolute path")
 		}
 	} else if draft.Storage.ServiceRoot != "" {
 		if !filepath.IsAbs(draft.Storage.ServiceRoot) {
@@ -132,6 +141,16 @@ func validateRunDraftStorage(draft *RunDraft, result *RunDraftValidationResult) 
 }
 
 func validateRunDraftSnapshots(draft *RunDraft, result *RunDraftValidationResult) {
+	if draft.Snapshots.KeepLast < 0 {
+		result.addError("snapshots.keepLast", "snapshot keep last cannot be negative")
+	}
+	if draft.Snapshots.KeepLast != 0 && draft.Snapshots.KeepLastInherit {
+		result.addError("snapshots.keepLast", "snapshot keep last cannot be combined with inherit")
+	}
+	if draft.Snapshots.EventsInherit && len(draft.Snapshots.Events) != 0 {
+		result.addError("snapshots.events", "snapshot events cannot be combined with inherit")
+	}
+	draft.Snapshots.Events = trimRunDraftSnapshotEvents(draft.Snapshots.Events, result)
 	if draft.Snapshots.Mode != "" {
 		mode, err := parseSnapshotModeValue(draft.Snapshots.Mode)
 		if err != nil {
@@ -140,6 +159,22 @@ func validateRunDraftSnapshots(draft *RunDraft, result *RunDraftValidationResult
 			draft.Snapshots.Mode = mode
 		}
 	}
+}
+
+func trimRunDraftSnapshotEvents(events []string, result *RunDraftValidationResult) []string {
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(events))
+	for i, event := range events {
+		event = strings.TrimSpace(event)
+		if event == "" {
+			result.addError("snapshots.events", "snapshot event at index %d must not be empty", i)
+			continue
+		}
+		out = append(out, event)
+	}
+	return out
 }
 
 func normalizeRunDraftPayload(cwd, payload string) (string, error) {
