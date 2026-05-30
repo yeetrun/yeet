@@ -1720,7 +1720,7 @@ func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride s
 	if err != nil {
 		return err
 	}
-	payload := resolvePayloadPath(cfgLoc.Dir, stored.Entry.Payload)
+	payload := resolvePayloadPathForEntry(cfgLoc.Dir, stored.Entry)
 	if strings.TrimSpace(payload) == "" {
 		return fmt.Errorf("no payload configured for %s@%s", stored.Service, stored.Host)
 	}
@@ -1736,6 +1736,9 @@ func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride s
 		Required:  stored.Entry.SnapshotRequired,
 		Events:    stored.Entry.SnapshotEvents,
 	})
+	if strings.TrimSpace(stored.Entry.PayloadKind) == "local-image" {
+		return runWithChangesToWithRunner(os.Stdout, payload, runArgs, envFile, stored.Entry, forceDeploy, runLocalImagePayload, true)
+	}
 	return runWithChanges(payload, runArgs, envFile, stored.Entry, forceDeploy)
 }
 
@@ -1824,22 +1827,19 @@ func validateStoredServiceType(service, host, gotType, commandName, wantType str
 }
 
 func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload string, runArgs []string, serviceRoot string, serviceRootZFS bool) error {
+	return saveRunConfigWithPayloadKind(cfgLoc, hostOverride, payload, "", runArgs, serviceRoot, serviceRootZFS)
+}
+
+func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride string, payload string, payloadKind string, runArgs []string, serviceRoot string, serviceRootZFS bool) error {
 	if serviceOverride == "" {
 		return nil
 	}
-	loc := cfgLoc
-	if loc == nil {
-		var err error
-		loc, err = loadOrCreateProjectConfigFromCwd()
-		if err != nil {
-			return err
-		}
+	loc, err := runConfigLocation(cfgLoc)
+	if err != nil {
+		return err
 	}
-	host := strings.TrimSpace(hostOverride)
-	if host == "" {
-		host = Host()
-	}
-	rootOpts, filteredArgs, foundServiceRoot, err := extractServiceRootOptions(runArgs)
+	host := runConfigHost(hostOverride)
+	serviceRoot, serviceRootZFS, filteredArgs, err := runConfigServiceRoot(runArgs, serviceRoot, serviceRootZFS)
 	if err != nil {
 		return err
 	}
@@ -1847,17 +1847,16 @@ func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload s
 	if err != nil {
 		return err
 	}
-	if foundServiceRoot && strings.TrimSpace(serviceRoot) == "" {
-		serviceRoot = rootOpts.Root
-		serviceRootZFS = rootOpts.ZFS
-	}
-	payloadRel := relativePayloadPath(loc.Dir, payload)
+	payloadKind = strings.TrimSpace(payloadKind)
+	payloadRel := relativePayloadPathForKind(loc.Dir, payload, payloadKind)
 	existing, hasExisting := runConfigExistingEntry(loc, host)
+	payloadKind = runConfigPayloadKind(payloadKind, payloadRel, existing, hasExisting)
 	entry := ServiceEntry{
 		Name:           serviceOverride,
 		Host:           host,
 		Type:           "",
 		Payload:        payloadRel,
+		PayloadKind:    payloadKind,
 		ServiceRoot:    strings.TrimSpace(serviceRoot),
 		ServiceRootZFS: serviceRootZFS,
 		Args:           normalizeRunArgs(filteredArgs),
@@ -1865,6 +1864,43 @@ func saveRunConfig(cfgLoc *projectConfigLocation, hostOverride string, payload s
 	applyRunConfigSnapshotFields(&entry, existing, hasExisting, snapOpts, snapshotChange)
 	loc.Config.SetServiceEntry(entry)
 	return saveProjectConfig(loc)
+}
+
+func runConfigLocation(cfgLoc *projectConfigLocation) (*projectConfigLocation, error) {
+	if cfgLoc != nil {
+		return cfgLoc, nil
+	}
+	return loadOrCreateProjectConfigFromCwd()
+}
+
+func runConfigHost(hostOverride string) string {
+	host := strings.TrimSpace(hostOverride)
+	if host == "" {
+		return Host()
+	}
+	return host
+}
+
+func runConfigServiceRoot(runArgs []string, serviceRoot string, serviceRootZFS bool) (string, bool, []string, error) {
+	rootOpts, filteredArgs, foundServiceRoot, err := extractServiceRootOptions(runArgs)
+	if err != nil {
+		return "", false, nil, err
+	}
+	if foundServiceRoot && strings.TrimSpace(serviceRoot) == "" {
+		return rootOpts.Root, rootOpts.ZFS, filteredArgs, nil
+	}
+	return serviceRoot, serviceRootZFS, filteredArgs, nil
+}
+
+func runConfigPayloadKind(explicitKind string, payloadRel string, existing ServiceEntry, hasExisting bool) string {
+	explicitKind = strings.TrimSpace(explicitKind)
+	if explicitKind != "" {
+		return explicitKind
+	}
+	if hasExisting && existing.PayloadKind != "" && existing.Payload == payloadRel {
+		return existing.PayloadKind
+	}
+	return ""
 }
 
 func runConfigExistingEntry(loc *projectConfigLocation, host string) (ServiceEntry, bool) {

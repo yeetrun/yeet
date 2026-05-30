@@ -357,6 +357,53 @@ func TestExecuteRunDraftLocalImagePayloadKindUsesLocalDocker(t *testing.T) {
 	if !reflect.DeepEqual(gotArgs, []string{"--net=svc"}) {
 		t.Fatalf("local image args = %#v, want --net=svc", gotArgs)
 	}
+	entry, ok := cfgLoc.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("saved config missing svc-a@host-a")
+	}
+	if entry.Payload != draft.Payload || entry.PayloadKind != "local-image" {
+		t.Fatalf("saved entry payload/kind = %q/%q, want %q/local-image", entry.Payload, entry.PayloadKind, draft.Payload)
+	}
+}
+
+func TestRunFromProjectConfigUsesStoredLocalImagePayloadKind(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldTryImage := tryRunRemoteImageFn
+	oldTryDocker := tryRunDockerFn
+	defer func() {
+		tryRunRemoteImageFn = oldTryImage
+		tryRunDockerFn = oldTryDocker
+	}()
+	serviceOverride = "svc-a"
+	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+		t.Fatalf("unexpected remote image run: image=%q args=%v", image, args)
+		return false, nil
+	}
+	var gotImage string
+	tryRunDockerFn = func(image string, args []string) (bool, error) {
+		gotImage = image
+		return true, nil
+	}
+
+	tmp := t.TempDir()
+	cfgLoc := &projectConfigLocation{
+		Path: filepath.Join(tmp, projectConfigName),
+		Dir:  tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+			Name:        "svc-a",
+			Host:        "host-a",
+			Type:        serviceTypeRun,
+			Payload:     "alpine",
+			PayloadKind: "local-image",
+		}}},
+	}
+
+	if err := runFromProjectConfig(cfgLoc, "host-a"); err != nil {
+		t.Fatalf("runFromProjectConfig: %v", err)
+	}
+	if gotImage != "alpine" {
+		t.Fatalf("local image = %q, want alpine", gotImage)
+	}
 }
 
 func TestExecuteRunDraftNewOnlyRejectsExistingService(t *testing.T) {

@@ -39,13 +39,14 @@ type clientInfo struct {
 }
 
 type clientServiceEntry struct {
-	Name     string   `json:"name"`
-	Host     string   `json:"host"`
-	Type     string   `json:"type,omitempty"`
-	Payload  string   `json:"payload,omitempty"`
-	EnvFile  string   `json:"envFile,omitempty"`
-	Schedule string   `json:"schedule,omitempty"`
-	Args     []string `json:"args,omitempty"`
+	Name        string   `json:"name"`
+	Host        string   `json:"host"`
+	Type        string   `json:"type,omitempty"`
+	Payload     string   `json:"payload,omitempty"`
+	PayloadKind string   `json:"payloadKind,omitempty"`
+	EnvFile     string   `json:"envFile,omitempty"`
+	Schedule    string   `json:"schedule,omitempty"`
+	Args        []string `json:"args,omitempty"`
 }
 
 type clientPayloadInfo struct {
@@ -143,13 +144,14 @@ func buildClientInfo(cfgLoc *projectConfigLocation, service, host string, hostIn
 	}
 	info.Found = true
 	info.Entry = &clientServiceEntry{
-		Name:     entry.Name,
-		Host:     entry.Host,
-		Type:     entry.Type,
-		Payload:  entry.Payload,
-		EnvFile:  entry.EnvFile,
-		Schedule: entry.Schedule,
-		Args:     entry.Args,
+		Name:        entry.Name,
+		Host:        entry.Host,
+		Type:        entry.Type,
+		Payload:     entry.Payload,
+		PayloadKind: entry.PayloadKind,
+		EnvFile:     entry.EnvFile,
+		Schedule:    entry.Schedule,
+		Args:        entry.Args,
 	}
 	info.Payload = inspectPayload(entry.Payload, cfgLoc.Dir, hostInfo, hostInfoErr)
 	return info

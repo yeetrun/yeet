@@ -298,7 +298,7 @@ func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigL
 	if err := runDraftWithChanges(draft, runArgs, forceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
 		return err
 	}
-	if err := saveRunConfig(cfgLoc, host, draft.Payload, runArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS); err != nil {
+	if err := saveRunConfigWithPayloadKind(cfgLoc, host, draft.Payload, draft.PayloadKind, runArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS); err != nil {
 		return err
 	}
 	if draft.EnvFileSet {
@@ -312,7 +312,7 @@ func runDraftWithChanges(draft RunDraft, runArgs []string, forceDeploy bool) err
 	if draft.PayloadKind == "local-image" {
 		runner = runLocalImagePayload
 	}
-	return runWithChangesToWithRunner(os.Stdout, draft.Payload, runArgs, draft.EnvFile, draft.ExistingEntry, forceDeploy, runner)
+	return runWithChangesToWithRunner(os.Stdout, draft.Payload, runArgs, draft.EnvFile, draft.ExistingEntry, forceDeploy, runner, draft.PayloadKind == "local-image")
 }
 
 func runLocalImagePayload(payload string, args []string) error {

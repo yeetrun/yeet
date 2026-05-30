@@ -153,13 +153,14 @@ func TestBuildClientInfo(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &ProjectConfig{}
 	cfg.SetServiceEntry(ServiceEntry{
-		Name:     "svc-a",
-		Host:     "host-a",
-		Type:     serviceTypeRun,
-		Payload:  "ghcr.io/example/app:latest",
-		EnvFile:  ".env",
-		Schedule: "@hourly",
-		Args:     []string{"--port", "8080"},
+		Name:        "svc-a",
+		Host:        "host-a",
+		Type:        serviceTypeRun,
+		Payload:     "ghcr.io/example/app:latest",
+		PayloadKind: "remote-image",
+		EnvFile:     ".env",
+		Schedule:    "@hourly",
+		Args:        []string{"--port", "8080"},
 	})
 	loc := &projectConfigLocation{Path: filepath.Join(dir, projectConfigName), Dir: dir, Config: cfg}
 
@@ -170,7 +171,7 @@ func TestBuildClientInfo(t *testing.T) {
 	if got.ConfigFile != loc.Path || got.ConfigDir != dir {
 		t.Fatalf("config paths = %q %q, want %q %q", got.ConfigFile, got.ConfigDir, loc.Path, dir)
 	}
-	if got.Entry == nil || got.Entry.Name != "svc-a" || got.Entry.Host != "host-a" || got.Entry.Type != serviceTypeRun {
+	if got.Entry == nil || got.Entry.Name != "svc-a" || got.Entry.Host != "host-a" || got.Entry.Type != serviceTypeRun || got.Entry.PayloadKind != "remote-image" {
 		t.Fatalf("Entry = %#v, want saved service entry", got.Entry)
 	}
 	if got.Payload == nil || got.Payload.Kind != "image" || !got.Payload.ImageRef {

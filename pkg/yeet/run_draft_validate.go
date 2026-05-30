@@ -125,11 +125,12 @@ func validateRunDraftPaths(cwd string, draft *RunDraft, result *RunDraftValidati
 		result.addError("payloadKind", "unknown payload kind %q", draft.PayloadKind)
 	}
 	if draft.Payload != "" && payloadKindOK {
-		payload, err := normalizeRunDraftPayload(cwd, draft.Payload, draft.PayloadKind)
+		payload, payloadKind, err := normalizeRunDraftPayload(cwd, draft.Payload, draft.PayloadKind)
 		if err != nil {
 			result.addError("payload", "%v", err)
 		} else {
 			draft.Payload = payload
+			draft.PayloadKind = payloadKind
 		}
 	}
 
@@ -282,69 +283,70 @@ func validateRunDraftSnapshotMaxAgeValue(raw string) error {
 	return nil
 }
 
-func normalizeRunDraftPayload(cwd, payload, kind string) (string, error) {
+func normalizeRunDraftPayload(cwd, payload, kind string) (string, string, error) {
 	payload = strings.TrimSpace(payload)
 	switch kind {
 	case "", "auto":
 		return normalizeAutoRunDraftPayload(cwd, payload)
 	case "file":
-		return normalizeExistingRunDraftPath(cwd, payload)
+		normalized, err := normalizeExistingRunDraftPath(cwd, payload)
+		return normalized, kind, err
 	case "compose":
 		return normalizeRunDraftComposePayload(cwd, payload)
 	case "dockerfile":
 		return normalizeRunDraftDockerfilePayload(cwd, payload)
 	case "remote-image":
 		if !looksLikeRunDraftImageRef(payload) {
-			return "", fmt.Errorf("payload must be a Docker image reference for payloadKind %q", kind)
+			return "", kind, fmt.Errorf("payload must be a Docker image reference for payloadKind %q", kind)
 		}
-		return payload, nil
+		return payload, kind, nil
 	case "local-image":
 		if !looksLikeRunDraftImageRef(payload) && !looksLikeRunDraftLocalImageName(payload) {
-			return "", fmt.Errorf("payload must be a Docker image reference or local image name for payloadKind %q", kind)
+			return "", kind, fmt.Errorf("payload must be a Docker image reference or local image name for payloadKind %q", kind)
 		}
-		return payload, nil
+		return payload, kind, nil
 	}
-	return "", fmt.Errorf("unknown payload kind %q", kind)
+	return "", kind, fmt.Errorf("unknown payload kind %q", kind)
 }
 
-func normalizeAutoRunDraftPayload(cwd, payload string) (string, error) {
+func normalizeAutoRunDraftPayload(cwd, payload string) (string, string, error) {
 	if looksLikeRunDraftImageRef(payload) {
-		return payload, nil
+		return payload, "", nil
 	}
 	normalized, err := normalizeExistingRunDraftPath(cwd, payload)
 	if err == nil {
-		return normalized, nil
+		return normalized, "", nil
 	}
 	if looksLikeRunDraftLocalImageName(payload) {
-		return payload, nil
+		return payload, "local-image", nil
 	}
-	return "", err
+	return "", "", err
 }
 
-func normalizeRunDraftDockerfilePayload(cwd, payload string) (string, error) {
+func normalizeRunDraftDockerfilePayload(cwd, payload string) (string, string, error) {
 	normalized, err := normalizeExistingRunDraftPath(cwd, payload)
 	if err != nil {
-		return "", err
+		return "", "dockerfile", err
 	}
 	if filepath.Base(normalized) != "Dockerfile" {
-		return "", fmt.Errorf("payloadKind %q requires a file named Dockerfile", "dockerfile")
+		return "", "dockerfile", fmt.Errorf("payloadKind %q requires a file named Dockerfile", "dockerfile")
 	}
-	return normalized, nil
+	return normalized, "dockerfile", nil
 }
 
-func normalizeRunDraftComposePayload(cwd, payload string) (string, error) {
+func normalizeRunDraftComposePayload(cwd, payload string) (string, string, error) {
 	normalized, err := normalizeExistingRunDraftPath(cwd, payload)
 	if err != nil {
-		return "", err
+		return "", "compose", err
 	}
 	ft, err := ftdetect.DetectFile(normalized, runtime.GOOS, runtime.GOARCH)
 	if err != nil {
-		return "", fmt.Errorf("payloadKind %q requires a Docker Compose file: %w", "compose", err)
+		return "", "compose", fmt.Errorf("payloadKind %q requires a Docker Compose file: %w", "compose", err)
 	}
 	if ft != ftdetect.DockerCompose {
-		return "", fmt.Errorf("payloadKind %q requires a Docker Compose file", "compose")
+		return "", "compose", fmt.Errorf("payloadKind %q requires a Docker Compose file", "compose")
 	}
-	return normalized, nil
+	return normalized, "compose", nil
 }
 
 func looksLikeRunDraftImageRef(payload string) bool {
@@ -380,6 +382,9 @@ func unknownPayloadKind(kind string) bool {
 }
 
 func validateRunDraftZFSDatasetName(dataset string) error {
+	if len(dataset) > 255 {
+		return fmt.Errorf("zfs service root dataset name must be 255 characters or fewer")
+	}
 	if strings.HasPrefix(dataset, "/") || strings.HasSuffix(dataset, "/") {
 		return fmt.Errorf("zfs service root expects a dataset name without leading or trailing slash")
 	}
