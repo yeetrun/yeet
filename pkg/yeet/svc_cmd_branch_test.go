@@ -450,6 +450,28 @@ func TestSvcRunWebFlagAfterTerminatorDoesNotTriggerGuard(t *testing.T) {
 	}
 }
 
+func TestRunWebFlagRequestedParsesBoolValues(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "bare", args: []string{"--web"}, want: true},
+		{name: "explicit true", args: []string{"--web=true"}, want: true},
+		{name: "explicit false", args: []string{"--web=false"}, want: false},
+		{name: "invalid explicit value", args: []string{"--web=wat"}, want: false},
+		{name: "after terminator", args: []string{"--", "--web"}, want: false},
+		{name: "true after terminator", args: []string{"--", "--web=true"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runWebFlagRequested(tt.args); got != tt.want {
+				t.Fatalf("runWebFlagRequested(%#v) = %v, want %v", tt.args, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSvcRunExplicitArgsInheritStoredLockedRunFlags(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	serviceOverride = "jellyfin"

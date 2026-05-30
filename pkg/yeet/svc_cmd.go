@@ -386,8 +386,14 @@ func runWebFlagRequested(args []string) bool {
 		if arg == "--" {
 			break
 		}
-		if arg == "--web" || strings.HasPrefix(arg, "--web=") {
+		if arg == "--web" {
 			return true
+		}
+		if value, ok := strings.CutPrefix(arg, "--web="); ok {
+			parsed, err := strconv.ParseBool(value)
+			if err == nil && parsed {
+				return true
+			}
 		}
 	}
 	return false
