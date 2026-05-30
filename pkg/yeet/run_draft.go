@@ -260,6 +260,8 @@ func runDraftBool(v bool) *bool {
 	return &v
 }
 
+var executeRunDraftFn = executeRunDraft
+
 func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigLocation, forceDeploy bool) error {
 	cwd, err := os.Getwd()
 	if err != nil {
