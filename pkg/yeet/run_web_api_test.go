@@ -91,12 +91,22 @@ func TestRunWebAPIStaticAssetsRequireAuth(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
 		t.Fatalf("Content-Type = %q, want javascript", ct)
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	req.AddCookie(&http.Cookie{Name: runWebTokenCookieName, Value: "secret"})
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cookie auth status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestRunWebAPIStaticIndexDoesNotSpreadTokenToAssets(t *testing.T) {
 	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
 
-	rec := runWebAPIRequest(t, s, http.MethodGet, "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/?token=secret", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("index status = %d, want 200 body=%s", rec.Code, rec.Body.String())
 	}
@@ -106,11 +116,26 @@ func TestRunWebAPIStaticIndexDoesNotSpreadTokenToAssets(t *testing.T) {
 			t.Fatalf("index contains %q; body=%s", forbidden, body)
 		}
 	}
-	if !strings.Contains(body, "window.__YEET_TOKEN__") || !strings.Contains(body, "secret") {
-		t.Fatalf("index body missing token bootstrap: %s", body)
+	if strings.Contains(body, "secret") {
+		t.Fatalf("index body leaked token: %s", body)
+	}
+	if !strings.Contains(body, "history.replaceState") {
+		t.Fatalf("index body missing token removal script: %s", body)
 	}
 	if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
 		t.Fatalf("Referrer-Policy = %q, want no-referrer", got)
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != runWebTokenCookieName || cookies[0].Value != "secret" || !cookies[0].HttpOnly {
+		t.Fatalf("cookies = %#v, want http-only token cookie", cookies)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/styles.css", nil)
+	req.AddCookie(cookies[0])
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cookie asset status = %d, want 200 body=%s", rec.Code, rec.Body.String())
 	}
 }
 
