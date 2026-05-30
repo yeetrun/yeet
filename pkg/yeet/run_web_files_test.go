@@ -18,6 +18,12 @@ func TestListRunWebFilesListsCwdEntriesAndMarksLikelyPayloads(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("A=B\n"), 0o644); err != nil {
 		t.Fatalf("write env: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(root, ".envrc"), []byte("export A=B\n"), 0o644); err != nil {
+		t.Fatalf("write envrc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "prod.env.local"), []byte("A=B\n"), 0o644); err != nil {
+		t.Fatalf("write env local: %v", err)
+	}
 	if err := os.Mkdir(filepath.Join(root, "nested"), 0o755); err != nil {
 		t.Fatalf("mkdir nested: %v", err)
 	}
@@ -26,8 +32,8 @@ func TestListRunWebFilesListsCwdEntriesAndMarksLikelyPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listRunWebFiles: %v", err)
 	}
-	if len(got.Entries) != 3 {
-		t.Fatalf("entries = %#v, want 3", got.Entries)
+	if len(got.Entries) != 5 {
+		t.Fatalf("entries = %#v, want 5", got.Entries)
 	}
 	compose := got.entry("compose.yml")
 	if compose == nil || !compose.LikelyPayload {
@@ -36,6 +42,14 @@ func TestListRunWebFilesListsCwdEntriesAndMarksLikelyPayloads(t *testing.T) {
 	env := got.entry(".env")
 	if env == nil || !env.LikelyEnv {
 		t.Fatalf("env entry = %#v, want likely env", env)
+	}
+	envrc := got.entry(".envrc")
+	if envrc == nil || !envrc.LikelyEnv {
+		t.Fatalf("envrc entry = %#v, want likely env", envrc)
+	}
+	envLocal := got.entry("prod.env.local")
+	if envLocal == nil || !envLocal.LikelyEnv {
+		t.Fatalf("prod.env.local entry = %#v, want likely env", envLocal)
 	}
 }
 
