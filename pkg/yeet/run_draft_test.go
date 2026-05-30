@@ -5,8 +5,14 @@
 package yeet
 
 import (
+	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 func preserveRunDraftGlobals(t *testing.T) {
@@ -14,11 +20,13 @@ func preserveRunDraftGlobals(t *testing.T) {
 	oldService := serviceOverride
 	oldHost := hostOverride
 	oldHostSet := hostOverrideSet
+	oldPrefs := loadedPrefs
 	t.Setenv("CATCH_HOST", "")
 	t.Cleanup(func() {
 		serviceOverride = oldService
 		hostOverride = oldHost
 		hostOverrideSet = oldHostSet
+		loadedPrefs = oldPrefs
 	})
 }
 
@@ -237,6 +245,268 @@ func TestRunDraftFromCLIRejectsWebForDraftExecution(t *testing.T) {
 
 	if _, err := runDraftFromCLI([]string{"--web", "./compose.yml"}, nil, ""); err == nil {
 		t.Fatal("runDraftFromCLI error = nil, want --web rejection")
+	}
+}
+
+func TestExecuteRunDraftUsesExistingRunPathAndSavesConfig(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldExec := execRemoteFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldArch := remoteCatchOSAndArchFn
+	oldIsTerminal := isTerminalFn
+	defer func() {
+		execRemoteFn = oldExec
+		fetchRemoteArtifactHashesFn = oldHashes
+		remoteCatchOSAndArchFn = oldArch
+		isTerminalFn = oldIsTerminal
+	}()
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "catch"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	cfgLoc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	var gotService string
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotService = service
+		gotArgs = append([]string{}, args...)
+		_, _ = io.Copy(io.Discard, stdin)
+		return nil
+	}
+	draft := RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: payload,
+		Network: RunDraftNetwork{
+			Modes:   []string{"svc"},
+			Restart: runDraftTestBool(true),
+		},
+		PayloadArgs: []string{"--hello"},
+	}
+	if err := executeRunDraft(context.Background(), draft, cfgLoc, false); err != nil {
+		t.Fatalf("executeRunDraft: %v", err)
+	}
+	if gotService != "svc-a" {
+		t.Fatalf("service = %q, want svc-a", gotService)
+	}
+	wantArgs := []string{"run", "--net=svc", "--", "--hello"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
+	}
+	entry, ok := cfgLoc.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("saved config missing svc-a@host-a")
+	}
+	if entry.Payload != "run.sh" {
+		t.Fatalf("saved payload = %q, want run.sh", entry.Payload)
+	}
+	if Host() != "catch" {
+		t.Fatalf("default host = %q, want unchanged catch", Host())
+	}
+}
+
+func TestExecuteRunDraftForcesDeployFromCallDraftOrSnapshot(t *testing.T) {
+	tests := []struct {
+		name           string
+		forceDeploy    bool
+		draftForce     bool
+		snapshotChange bool
+		wantCalls      int
+	}{
+		{name: "no force", wantCalls: 0},
+		{name: "call force", forceDeploy: true, wantCalls: 1},
+		{name: "draft force", draftForce: true, wantCalls: 1},
+		{name: "snapshot change", snapshotChange: true, wantCalls: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preserveRunDraftGlobals(t)
+			oldExec := execRemoteFn
+			oldHashes := fetchRemoteArtifactHashesFn
+			oldArch := remoteCatchOSAndArchFn
+			oldIsTerminal := isTerminalFn
+			defer func() {
+				execRemoteFn = oldExec
+				fetchRemoteArtifactHashesFn = oldHashes
+				remoteCatchOSAndArchFn = oldArch
+				isTerminalFn = oldIsTerminal
+			}()
+			remoteCatchOSAndArchFn = func() (string, string, error) {
+				return "linux", "amd64", nil
+			}
+			isTerminalFn = func(int) bool { return false }
+
+			tmp := t.TempDir()
+			payload := filepath.Join(tmp, "run.sh")
+			if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			payloadHash, err := hashFileSHA256(payload)
+			if err != nil {
+				t.Fatalf("hash payload: %v", err)
+			}
+			fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+				return catchrpc.ArtifactHashesResponse{
+					Found: true,
+					Payload: &catchrpc.ArtifactHash{
+						Kind:   "script",
+						SHA256: payloadHash,
+					},
+				}, true, nil
+			}
+
+			var calls [][]string
+			execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+				calls = append(calls, append([]string{}, args...))
+				_, _ = io.Copy(io.Discard, stdin)
+				return nil
+			}
+			cfgLoc := &projectConfigLocation{
+				Path:   filepath.Join(tmp, projectConfigName),
+				Dir:    tmp,
+				Config: &ProjectConfig{Version: projectConfigVersion},
+			}
+			draft := RunDraft{
+				Service:        "svc-a",
+				Host:           "host-a",
+				Payload:        payload,
+				ForceDeploy:    tt.draftForce,
+				SnapshotChange: tt.snapshotChange,
+				ExistingEntry:  ServiceEntry{Args: nil},
+			}
+
+			if err := executeRunDraft(context.Background(), draft, cfgLoc, tt.forceDeploy); err != nil {
+				t.Fatalf("executeRunDraft: %v", err)
+			}
+			if len(calls) != tt.wantCalls {
+				t.Fatalf("remote calls = %d, want %d", len(calls), tt.wantCalls)
+			}
+			if len(calls) > 0 && !reflect.DeepEqual(calls[0], []string{"run"}) {
+				t.Fatalf("remote call args = %#v, want [run]", calls[0])
+			}
+		})
+	}
+}
+
+func TestExecuteRunDraftSavesEnvFileOnlyWhenExplicitlySet(t *testing.T) {
+	tests := []struct {
+		name       string
+		envFileSet bool
+		wantEnv    string
+	}{
+		{name: "stored env preserved", wantEnv: "stored.env"},
+		{name: "explicit env saved", envFileSet: true, wantEnv: "explicit.env"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			preserveRunDraftGlobals(t)
+			oldExec := execRemoteFn
+			oldHashes := fetchRemoteArtifactHashesFn
+			oldArch := remoteCatchOSAndArchFn
+			oldIsTerminal := isTerminalFn
+			defer func() {
+				execRemoteFn = oldExec
+				fetchRemoteArtifactHashesFn = oldHashes
+				remoteCatchOSAndArchFn = oldArch
+				isTerminalFn = oldIsTerminal
+			}()
+			remoteCatchOSAndArchFn = func() (string, string, error) {
+				return "linux", "amd64", nil
+			}
+			isTerminalFn = func(int) bool { return false }
+
+			tmp := t.TempDir()
+			payload := filepath.Join(tmp, "run.sh")
+			if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+				t.Fatalf("write payload: %v", err)
+			}
+			storedEnv := filepath.Join(tmp, "stored.env")
+			if err := os.WriteFile(storedEnv, []byte("KEY=stored\n"), 0o600); err != nil {
+				t.Fatalf("write stored env: %v", err)
+			}
+			explicitEnv := filepath.Join(tmp, "explicit.env")
+			if err := os.WriteFile(explicitEnv, []byte("KEY=explicit\n"), 0o600); err != nil {
+				t.Fatalf("write explicit env: %v", err)
+			}
+			envForRun := storedEnv
+			if tt.envFileSet {
+				envForRun = explicitEnv
+			}
+			payloadHash, err := hashFileSHA256(payload)
+			if err != nil {
+				t.Fatalf("hash payload: %v", err)
+			}
+			envHash, err := hashFileSHA256(envForRun)
+			if err != nil {
+				t.Fatalf("hash env: %v", err)
+			}
+			fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+				return catchrpc.ArtifactHashesResponse{
+					Found: true,
+					Payload: &catchrpc.ArtifactHash{
+						Kind:   "script",
+						SHA256: payloadHash,
+					},
+					Env: &catchrpc.ArtifactHash{
+						Kind:   "env file",
+						SHA256: envHash,
+					},
+				}, true, nil
+			}
+
+			execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+				t.Fatalf("unexpected remote call: service=%q args=%v", service, args)
+				return nil
+			}
+			cfgLoc := &projectConfigLocation{
+				Path: filepath.Join(tmp, projectConfigName),
+				Dir:  tmp,
+				Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+					Name:    "svc-a",
+					Host:    "host-a",
+					Type:    serviceTypeRun,
+					Payload: "run.sh",
+					EnvFile: "stored.env",
+				}}},
+			}
+			draft := RunDraft{
+				Service:       "svc-a",
+				Host:          "host-a",
+				Payload:       payload,
+				EnvFile:       envForRun,
+				EnvFileArg:    explicitEnv,
+				EnvFileSet:    tt.envFileSet,
+				ExistingEntry: ServiceEntry{EnvFile: "stored.env"},
+			}
+
+			if err := executeRunDraft(context.Background(), draft, cfgLoc, false); err != nil {
+				t.Fatalf("executeRunDraft: %v", err)
+			}
+			entry, ok := cfgLoc.Config.ServiceEntry("svc-a", "host-a")
+			if !ok {
+				t.Fatal("saved config missing svc-a@host-a")
+			}
+			if entry.EnvFile != tt.wantEnv {
+				t.Fatalf("EnvFile = %q, want %q", entry.EnvFile, tt.wantEnv)
+			}
+		})
 	}
 }
 
