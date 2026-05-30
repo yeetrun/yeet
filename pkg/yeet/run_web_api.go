@@ -18,6 +18,8 @@ import (
 //go:embed web_run_assets/*
 var webRunAssets embed.FS
 
+const runWebTokenCookieName = "yeet_run_token"
+
 type runWebServerConfig struct {
 	Token      string
 	Root       string
@@ -58,6 +60,7 @@ func (s *runWebServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	s.setAuthCookie(w, r)
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -65,7 +68,24 @@ func (s *runWebServer) authorized(r *http.Request) bool {
 	if s.cfg.Token == "" {
 		return false
 	}
-	return r.Header.Get("X-Yeet-Run-Token") == s.cfg.Token || r.URL.Query().Get("token") == s.cfg.Token
+	if r.Header.Get("X-Yeet-Run-Token") == s.cfg.Token || r.URL.Query().Get("token") == s.cfg.Token {
+		return true
+	}
+	cookie, err := r.Cookie(runWebTokenCookieName)
+	return err == nil && cookie.Value == s.cfg.Token
+}
+
+func (s *runWebServer) setAuthCookie(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Yeet-Run-Token") != s.cfg.Token && r.URL.Query().Get("token") != s.cfg.Token {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     runWebTokenCookieName,
+		Value:    s.cfg.Token,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	})
 }
 
 func (s *runWebServer) handleBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -178,17 +198,14 @@ func (s *runWebServer) serveIndex(w http.ResponseWriter) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	tokenScript := `<script>window.__YEET_TOKEN__ = ` + jsonQuote(s.cfg.Token) + `;</script>`
-	_, _ = w.Write([]byte(strings.ReplaceAll(string(b), "__YEET_TOKEN_SCRIPT__", tokenScript)))
+	_, _ = w.Write([]byte(strings.ReplaceAll(string(b), "__YEET_SESSION_SCRIPT__", runWebIndexSessionScript)))
 }
 
-func jsonQuote(value string) string {
-	b, err := json.Marshal(value)
-	if err != nil {
-		return `""`
-	}
-	return string(b)
+const runWebIndexSessionScript = `<script>
+if (new URLSearchParams(window.location.search).has("token")) {
+  window.history.replaceState(null, "", window.location.pathname + window.location.hash);
 }
+</script>`
 
 func decodeRunWebDraft(w http.ResponseWriter, r *http.Request) (RunDraft, bool) {
 	var draft RunDraft

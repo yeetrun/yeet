@@ -5,10 +5,7 @@
  */
 
 const params = new URLSearchParams(window.location.search);
-const token = window.__YEET_TOKEN__ || params.get("token") || "";
-if (params.has("token")) {
-  window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
-}
+const token = params.get("token") || "";
 const state = {
   bootstrap: null,
   currentDir: ".",
@@ -20,13 +17,14 @@ const state = {
 const $ = (id) => document.getElementById(id);
 
 function api(path, options = {}) {
+  const headers = {
+    "Content-Type": "application/json",
+    ...(options.headers || {}),
+  };
+  if (token) headers["X-Yeet-Run-Token"] = token;
   return fetch(path, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Yeet-Run-Token": token,
-      ...(options.headers || {}),
-    },
+    headers,
   });
 }
 
@@ -236,7 +234,7 @@ async function bootstrap() {
   renderSnapshotModes(state.bootstrap.options?.snapshotModes || ["inherit", "on", "off"]);
   await loadFiles(".");
   $("service").focus();
-  if ($("service").value && !$("payload").value) $("payload").focus();
+  if ($("service").value) $("payload").focus();
   update();
 }
 
