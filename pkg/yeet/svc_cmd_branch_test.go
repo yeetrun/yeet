@@ -381,6 +381,28 @@ func TestSvcRunPayloadOnlyReusesStoredRunArgs(t *testing.T) {
 	}
 }
 
+func TestSvcRunWebFlagReturnsTemporaryGuard(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = "svc-a"
+	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+		t.Fatalf("unexpected remote deploy for image=%q args=%v", image, args)
+		return false, nil
+	}
+
+	req := svcCommandRequest{
+		Service: "svc-a",
+		Command: svcCommand{
+			Name:    "run",
+			Args:    []string{"--web", "ghcr.io/example/app:latest"},
+			RawArgs: []string{"run", "--web", "ghcr.io/example/app:latest"},
+		},
+	}
+	err := handleSvcRun(req)
+	if err == nil || !strings.Contains(err.Error(), "yeet run --web") {
+		t.Fatalf("handleSvcRun --web error = %v, want temporary guard", err)
+	}
+}
+
 func TestSvcRunExplicitArgsInheritStoredLockedRunFlags(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	serviceOverride = "jellyfin"

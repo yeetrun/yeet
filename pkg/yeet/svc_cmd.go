@@ -347,6 +347,10 @@ type parsedSvcRun struct {
 
 func handleSvcRun(req svcCommandRequest) error {
 	cmdArgs := req.Command.Args
+	if runWebFlagRequested(cmdArgs) {
+		// Temporary guard until the local web-run handler owns this flag.
+		return fmt.Errorf("yeet run --web is not available yet; web deploy routing is not implemented")
+	}
 	if len(cmdArgs) == 0 {
 		return runFromProjectConfig(req.Config, req.HostOverride)
 	}
@@ -371,6 +375,18 @@ func handleSvcRun(req svcCommandRequest) error {
 		return saveEnvFileConfig(req.Config, req.HostOverride, run.EnvFileArg)
 	}
 	return nil
+}
+
+func runWebFlagRequested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--web" || strings.HasPrefix(arg, "--web=") {
+			return true
+		}
+	}
+	return false
 }
 
 func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride string) (parsedSvcRun, error) {
