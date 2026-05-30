@@ -403,6 +403,53 @@ func TestSvcRunWebFlagReturnsTemporaryGuard(t *testing.T) {
 	}
 }
 
+func TestHandleSvcCmdRunWebWithoutServiceReturnsTemporaryGuard(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	useTempSvcCwd(t)
+	serviceOverride = ""
+
+	err := HandleSvcCmd([]string{"run", "--web"})
+	if err == nil || !strings.Contains(err.Error(), "yeet run --web") {
+		t.Fatalf("HandleSvcCmd run --web error = %v, want temporary guard", err)
+	}
+	if strings.Contains(err.Error(), "requires a service name") {
+		t.Fatalf("HandleSvcCmd run --web error = %v, want guard before missing service", err)
+	}
+}
+
+func TestSvcRunWebFlagAfterTerminatorDoesNotTriggerGuard(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+
+	var gotImage string
+	var gotArgs []string
+	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+		gotImage = image
+		gotArgs = append([]string{}, args...)
+		return true, nil
+	}
+
+	req := svcCommandRequest{
+		Service: "svc-a",
+		Command: svcCommand{
+			Name:    "run",
+			Args:    []string{"ghcr.io/example/app:latest", "--", "--web"},
+			RawArgs: []string{"run", "ghcr.io/example/app:latest", "--", "--web"},
+		},
+	}
+	err := handleSvcRun(req)
+	if err != nil {
+		t.Fatalf("handleSvcRun post-terminator --web error = %v, want no guard", err)
+	}
+	if gotImage != "ghcr.io/example/app:latest" {
+		t.Fatalf("remote image = %q, want ghcr.io/example/app:latest", gotImage)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"--", "--web"}) {
+		t.Fatalf("remote image args = %#v, want post-terminator --web", gotArgs)
+	}
+}
+
 func TestSvcRunExplicitArgsInheritStoredLockedRunFlags(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	serviceOverride = "jellyfin"

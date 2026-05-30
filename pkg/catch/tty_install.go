@@ -268,6 +268,10 @@ func (e *ttyExecer) installerCfg() InstallerCfg {
 }
 
 func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
+	if flags.Web {
+		// Temporary guard until --web is routed locally instead of forwarded to catch.
+		return fmt.Errorf("run --web is not available on catch; web deploy routing is not implemented")
+	}
 	if e.sn == SystemService {
 		return fmt.Errorf("cannot run, reserved service name")
 	}

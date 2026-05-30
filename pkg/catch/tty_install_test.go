@@ -648,6 +648,29 @@ func TestRunCmdFuncRejectsSystemServiceBeforeInstall(t *testing.T) {
 	}
 }
 
+func TestRunCommandRejectsWebFlagBeforeInstall(t *testing.T) {
+	called := false
+	execer := &ttyExecer{
+		s:              newTestServer(t),
+		sn:             "svc-web",
+		rawRW:          bytes.NewBufferString("payload"),
+		rw:             &bytes.Buffer{},
+		bypassPtyInput: true,
+		installFunc: func(string, io.Reader, FileInstallerCfg) error {
+			called = true
+			return nil
+		},
+	}
+
+	err := execer.dispatch([]string{"run", "--web", "--flag"})
+	if err == nil || !strings.Contains(err.Error(), "run --web") {
+		t.Fatalf("dispatch run --web error = %v, want web guard", err)
+	}
+	if called {
+		t.Fatal("install seam was called for run --web")
+	}
+}
+
 func TestCronCmdFuncConvertsCronAndInstallsTimer(t *testing.T) {
 	var gotCfg FileInstallerCfg
 	execer := &ttyExecer{

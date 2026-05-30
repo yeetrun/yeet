@@ -80,6 +80,10 @@ func commandNeedsService(args []string) (bool, error) {
 }
 
 func commandAllowsMissingService(args []string) (bool, error) {
+	if len(args) >= 1 && args[0] == "run" && runWebFlagRequested(args[1:]) {
+		// Temporary guard path until local web-run routing owns service resolution.
+		return true, nil
+	}
 	if len(args) < 2 || args[0] != "docker" || args[1] != "update" {
 		return false, nil
 	}
