@@ -447,7 +447,7 @@ Install/update from a payload (binary, compose, image, Dockerfile)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] run [OPTIONS] SVC PAYLOAD [--web] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>]
+yeet [GLOBAL_OPTIONS] run [OPTIONS] SVC [PAYLOAD] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]
 ```
 
 ## Global Options

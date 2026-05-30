@@ -565,6 +565,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if reg.SubCommands["run"].Info.Name != "run" {
 		t.Fatalf("registry run command = %#v", reg.SubCommands["run"])
 	}
+	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
+		t.Fatalf("run usage = %q", got)
+	}
 	if !containsString(reg.SubCommands["run"].Info.Examples, "yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs") {
 		t.Fatalf("run examples = %#v, want zfs service-root example", reg.SubCommands["run"].Info.Examples)
 	}
