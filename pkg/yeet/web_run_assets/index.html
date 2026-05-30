@@ -1,0 +1,137 @@
+<!doctype html>
+<!--
+ Copyright (c) 2025 AUTHORS All rights reserved.
+ Use of this source code is governed by a BSD-style
+ license that can be found in the LICENSE file.
+-->
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>yeet web run</title>
+    <link rel="stylesheet" href="/styles.css?token=__YEET_TOKEN__">
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/?token=__YEET_TOKEN__" aria-label="yeet web run">
+        <img src="/yeet-mark.svg?token=__YEET_TOKEN__" alt="" aria-hidden="true">
+        <span>yeet</span>
+      </a>
+      <div class="project" id="projectLabel">Project</div>
+      <div class="host-status" id="hostStatus" role="status">Waiting for input</div>
+    </header>
+
+    <main class="shell">
+      <form id="deployForm" class="deploy-form">
+        <section class="panel primary-panel" aria-labelledby="deployTitle">
+          <div class="section-heading">
+            <h1 id="deployTitle">Deploy a new service</h1>
+            <p id="configLabel">yeet.toml recipe</p>
+          </div>
+
+          <label for="service">
+            <span>Service <button type="button" class="help" data-help="Unique service name on the selected catch host." aria-label="Help for service">?</button></span>
+            <input id="service" name="service" autocomplete="off" spellcheck="false" required>
+          </label>
+
+          <label for="host">
+            <span>Host <button type="button" class="help" data-help="Target catch host from CATCH_HOST, yeet.toml, or prefs." aria-label="Help for host">?</button></span>
+            <input id="host" name="host" list="hostOptions" autocomplete="off" spellcheck="false" required>
+          </label>
+          <datalist id="hostOptions"></datalist>
+
+          <label for="payload">
+            <span>Payload <button type="button" class="help" data-help="A project file, Dockerfile, compose file, executable, or image reference." aria-label="Help for payload">?</button></span>
+            <input id="payload" name="payload" autocomplete="off" spellcheck="false" required>
+          </label>
+
+          <div class="browser-head">
+            <span id="browserDir">.</span>
+            <button type="button" id="upButton" class="quiet-button">Up</button>
+          </div>
+          <div class="file-browser" id="fileBrowser" aria-label="Project files"></div>
+
+          <label for="envFile">
+            <span>Env file <button type="button" class="help" data-help="Optional environment file to upload with this service." aria-label="Help for env file">?</button></span>
+            <input id="envFile" name="envFile" autocomplete="off" spellcheck="false">
+          </label>
+
+          <label for="payloadArgs">
+            <span>Payload args <button type="button" class="help" data-help="Arguments passed after -- to the deployed payload." aria-label="Help for payload args">?</button></span>
+            <input id="payloadArgs" name="payloadArgs" autocomplete="off" spellcheck="false" placeholder="--flag value">
+          </label>
+        </section>
+
+        <section class="panel options-panel" aria-labelledby="optionsTitle">
+          <div class="section-heading">
+            <h2 id="optionsTitle">Deploy options</h2>
+            <p>First run only</p>
+          </div>
+
+          <fieldset>
+            <legend>Network <button type="button" class="help" data-help="Select one or more network modes for the service." aria-label="Help for network modes">?</button></legend>
+            <div class="checks" id="networkModes"></div>
+          </fieldset>
+
+          <label for="tsTags">
+            <span>Tailscale tags <button type="button" class="help" data-help="Comma-separated tags such as tag:app." aria-label="Help for Tailscale tags">?</button></span>
+            <input id="tsTags" name="tsTags" autocomplete="off" spellcheck="false">
+          </label>
+
+          <label for="tsAuthKey">
+            <span>Tailscale auth key <button type="button" class="help" data-help="Secret auth key for per-service Tailscale enrollment." aria-label="Help for Tailscale auth key">?</button></span>
+            <input id="tsAuthKey" name="tsAuthKey" type="password" autocomplete="off">
+          </label>
+
+          <label for="publish">
+            <span>Publish ports <button type="button" class="help" data-help="Comma-separated port mappings such as 8080:80." aria-label="Help for published ports">?</button></span>
+            <input id="publish" name="publish" autocomplete="off" spellcheck="false">
+          </label>
+
+          <div class="split-fields">
+            <label for="serviceRoot">
+              <span>Service root <button type="button" class="help" data-help="Absolute filesystem path, or dataset name when ZFS is enabled." aria-label="Help for service root">?</button></span>
+              <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="checkline" for="zfs">
+              <input id="zfs" name="zfs" type="checkbox">
+              <span>ZFS dataset</span>
+            </label>
+          </div>
+
+          <fieldset>
+            <legend>Snapshots <button type="button" class="help" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></legend>
+            <div class="split-fields">
+              <label for="snapshots">
+                <span>Mode</span>
+                <select id="snapshots" name="snapshots"></select>
+              </label>
+              <label for="snapshotKeepLast">
+                <span>Keep last</span>
+                <input id="snapshotKeepLast" name="snapshotKeepLast" inputmode="numeric" autocomplete="off">
+              </label>
+            </div>
+            <label for="snapshotMaxAge">
+              <span>Max age</span>
+              <input id="snapshotMaxAge" name="snapshotMaxAge" autocomplete="off" spellcheck="false" placeholder="7d or 72h">
+            </label>
+            <label for="snapshotEvents">
+              <span>Events</span>
+              <input id="snapshotEvents" name="snapshotEvents" autocomplete="off" spellcheck="false" placeholder="run,docker-update">
+            </label>
+          </fieldset>
+        </section>
+
+        <section class="action-row" aria-label="Deploy action">
+          <code id="commandPreview">yeet run</code>
+          <span id="formStatus" role="status">Fill required fields</span>
+          <button id="deployButton" type="submit" disabled>Deploy</button>
+        </section>
+      </form>
+    </main>
+
+    <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+    <script src="/app.js?token=__YEET_TOKEN__" defer></script>
+  </body>
+</html>
