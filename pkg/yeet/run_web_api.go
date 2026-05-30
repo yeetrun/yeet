@@ -53,6 +53,7 @@ func newRunWebServer(cfg runWebServerConfig) http.Handler {
 }
 
 func (s *runWebServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Referrer-Policy", "no-referrer")
 	if !s.authorized(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -177,7 +178,16 @@ func (s *runWebServer) serveIndex(w http.ResponseWriter) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(strings.ReplaceAll(string(b), "__YEET_TOKEN__", s.cfg.Token)))
+	tokenScript := `<script>window.__YEET_TOKEN__ = ` + jsonQuote(s.cfg.Token) + `;</script>`
+	_, _ = w.Write([]byte(strings.ReplaceAll(string(b), "__YEET_TOKEN_SCRIPT__", tokenScript)))
+}
+
+func jsonQuote(value string) string {
+	b, err := json.Marshal(value)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
 }
 
 func decodeRunWebDraft(w http.ResponseWriter, r *http.Request) (RunDraft, bool) {

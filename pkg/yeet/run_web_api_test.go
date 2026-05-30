@@ -72,6 +72,67 @@ func TestRunWebAPIBootstrapAndFiles(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIStaticAssetsRequireAuth(t *testing.T) {
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
+
+	req := httptest.NewRequest(http.MethodGet, "/app.js", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want 401", rec.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/app.js?token=secret", nil)
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("authorized status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "javascript") {
+		t.Fatalf("Content-Type = %q, want javascript", ct)
+	}
+}
+
+func TestRunWebAPIStaticIndexDoesNotSpreadTokenToAssets(t *testing.T) {
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
+
+	rec := runWebAPIRequest(t, s, http.MethodGet, "/", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("index status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, forbidden := range []string{"/styles.css?token=", "/app.js?token=", "/yeet-mark.svg?token=", "href=\"/?token="} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("index contains %q; body=%s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, "window.__YEET_TOKEN__") || !strings.Contains(body, "secret") {
+		t.Fatalf("index body missing token bootstrap: %s", body)
+	}
+	if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Fatalf("Referrer-Policy = %q, want no-referrer", got)
+	}
+}
+
+func TestRunWebAPIStaticRejectsBadMethodsAndTraversal(t *testing.T) {
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
+
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/app.js", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("post static status = %d, want 405", rec.Code)
+	}
+
+	for _, target := range []string{"/%2e%2e/run_web_api.go", "/assets/%2e%2e/run_web_api.go"} {
+		req := httptest.NewRequest(http.MethodGet, target, nil)
+		req.Header.Set("X-Yeet-Run-Token", "secret")
+		rec = httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d, want 404 body=%s", target, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestRunWebAPIValidateAndDeploy(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
 	oldExecDraft := executeRunDraftFn
