@@ -94,6 +94,16 @@ func TestRunWebBootstrapPrefillUsesRequestServiceAndRunFlags(t *testing.T) {
 	}
 }
 
+func TestRunWebBootstrapPrefillKeepsPayloadMatchingService(t *testing.T) {
+	boot := newRunWebBootstrap(nil, "", "redis", []string{"redis"})
+	if boot.Prefill.Service != "redis" {
+		t.Fatalf("Prefill.Service = %q, want redis", boot.Prefill.Service)
+	}
+	if boot.Prefill.Payload != "redis" {
+		t.Fatalf("Prefill.Payload = %q, want redis", boot.Prefill.Payload)
+	}
+}
+
 func TestSvcRunWebRoutesToLocalWeb(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	serviceOverride = "svc-a"

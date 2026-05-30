@@ -109,9 +109,9 @@ func runWebPrefillFromArgs(service string, args []string) runWebPrefill {
 			return prefill
 		}
 		if payload == prefill.Service {
-			payload, _, err = splitRunPayloadArgs(runArgs)
-			if err != nil {
-				return prefill
+			nextPayload, _, err := splitRunPayloadArgs(runArgs)
+			if err == nil {
+				payload = nextPayload
 			}
 		}
 		prefill.Payload = payload
