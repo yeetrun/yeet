@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -115,7 +116,7 @@ func TestSvcRunWebRoutesToLocalWeb(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	serviceOverride = "svc-a"
 	cfg := &projectConfigLocation{Dir: t.TempDir(), Config: &ProjectConfig{Version: projectConfigVersion}}
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		t.Fatalf("tryRunRemoteImageFn called for web run image=%q args=%#v", image, args)
 		return false, nil
 	}
@@ -251,6 +252,71 @@ func TestRunWebReturnsAfterSuccessfulDeploy(t *testing.T) {
 			}
 			parsed.Path = "/api/deploy"
 			_, _ = http.Post(parsed.String(), "application/json", strings.NewReader(`{"service":"svc-a","host":"host-a","payload":"run.sh"}`))
+		}()
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	err := runWeb(ctx, runWebRequest{Out: &out, Err: io.Discard})
+	if err != nil {
+		t.Fatalf("runWeb error = %v, want nil", err)
+	}
+	if !strings.Contains(out.String(), "Deployment finished") {
+		t.Fatalf("output = %q, want deployment finished message", out.String())
+	}
+}
+
+func TestRunWebReturnsAfterDeployWithActiveValidate(t *testing.T) {
+	oldOpenBrowser := openBrowserFn
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftFn
+	defer func() {
+		openBrowserFn = oldOpenBrowser
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftFn = oldExecDraft
+	}()
+
+	validateStarted := make(chan struct{})
+	var validateOnce sync.Once
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if service == "stuck-validate" {
+			validateOnce.Do(func() { close(validateStarted) })
+			<-ctx.Done()
+			return catchrpc.ServiceInfoResponse{}, ctx.Err()
+		}
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+		return nil
+	}
+
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	openBrowserFn = func(rawURL string) error {
+		go func() {
+			parsed, err := url.Parse(rawURL)
+			if err != nil {
+				return
+			}
+			validateURL := *parsed
+			validateURL.Path = "/api/validate"
+			go func() {
+				_, _ = http.Post(validateURL.String(), "application/json", strings.NewReader(`{"service":"stuck-validate","host":"host-a","payload":"run.sh"}`))
+			}()
+			select {
+			case <-validateStarted:
+			case <-time.After(time.Second):
+				return
+			}
+			deployURL := *parsed
+			deployURL.Path = "/api/deploy"
+			_, _ = http.Post(deployURL.String(), "application/json", strings.NewReader(`{"service":"svc-a","host":"host-a","payload":"run.sh"}`))
 		}()
 		return nil
 	}

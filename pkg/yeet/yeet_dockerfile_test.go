@@ -36,7 +36,7 @@ func TestTryRunDockerfileBuildsAndDelegates(t *testing.T) {
 		return nil
 	}
 	var gotRunImage string
-	tryRunDockerFn = func(image string, args []string) (bool, error) {
+	tryRunDockerFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		gotRunImage = image
 		return true, nil
 	}

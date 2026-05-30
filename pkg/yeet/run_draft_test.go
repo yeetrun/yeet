@@ -288,7 +288,7 @@ func TestExecuteRunDraftSkipsServiceInfoOutsideNewOnlyMode(t *testing.T) {
 		t.Fatalf("unexpected service info call for host=%q service=%q", host, service)
 		return catchrpc.ServiceInfoResponse{}, nil
 	}
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		if image != "ghcr.io/example/app:latest" {
 			t.Fatalf("image = %q, want ghcr.io/example/app:latest", image)
 		}
@@ -320,13 +320,13 @@ func TestExecuteRunDraftLocalImagePayloadKindUsesLocalDocker(t *testing.T) {
 		tryRunRemoteImageFn = oldTryImage
 		tryRunDockerFn = oldTryDocker
 	}()
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		t.Fatalf("unexpected remote image run: image=%q args=%v", image, args)
 		return false, nil
 	}
 	var gotImage string
 	var gotArgs []string
-	tryRunDockerFn = func(image string, args []string) (bool, error) {
+	tryRunDockerFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		gotImage = image
 		gotArgs = append([]string{}, args...)
 		return true, nil
@@ -375,12 +375,12 @@ func TestRunFromProjectConfigUsesStoredLocalImagePayloadKind(t *testing.T) {
 		tryRunDockerFn = oldTryDocker
 	}()
 	serviceOverride = "svc-a"
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		t.Fatalf("unexpected remote image run: image=%q args=%v", image, args)
 		return false, nil
 	}
 	var gotImage string
-	tryRunDockerFn = func(image string, args []string) (bool, error) {
+	tryRunDockerFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		gotImage = image
 		return true, nil
 	}
@@ -414,7 +414,7 @@ func TestRunFromProjectConfigPreservesStoredRemoteImageRef(t *testing.T) {
 	}()
 	serviceOverride = "svc-a"
 	var gotImage string
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		gotImage = image
 		return true, nil
 	}
@@ -520,7 +520,7 @@ func TestExecuteRunDraftNewOnlyRejectsExistingService(t *testing.T) {
 		}
 		return catchrpc.ServiceInfoResponse{Found: true}, nil
 	}
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		t.Fatalf("unexpected image run: image=%q args=%v", image, args)
 		return false, nil
 	}
@@ -611,6 +611,119 @@ func TestExecuteRunDraftUsesExistingRunPathAndSavesConfig(t *testing.T) {
 	}
 	if Host() != "catch" {
 		t.Fatalf("default host = %q, want unchanged catch", Host())
+	}
+}
+
+func TestExecuteRunDraftPassesContextToRemoteRunWork(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldExec := execRemoteFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldArch := remoteCatchOSAndArchFn
+	oldIsTerminal := isTerminalFn
+	defer func() {
+		execRemoteFn = oldExec
+		fetchRemoteArtifactHashesFn = oldHashes
+		remoteCatchOSAndArchFn = oldArch
+		isTerminalFn = oldIsTerminal
+	}()
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "web-run")
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	cfgLoc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+
+	hashContextSeen := false
+	execContextSeen := false
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		hashContextSeen = ctx.Value(contextKey{}) == "web-run"
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		execContextSeen = ctx.Value(contextKey{}) == "web-run"
+		_, _ = io.Copy(io.Discard, stdin)
+		return nil
+	}
+
+	if err := executeRunDraft(ctx, RunDraft{Service: "svc-a", Host: "host-a", Payload: payload}, cfgLoc, false); err != nil {
+		t.Fatalf("executeRunDraft: %v", err)
+	}
+	if !hashContextSeen {
+		t.Fatal("artifact hash lookup did not receive executeRunDraft context")
+	}
+	if !execContextSeen {
+		t.Fatal("remote run did not receive executeRunDraft context")
+	}
+}
+
+func TestExecuteRunDraftPassesContextToLocalDockerWork(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldImageExists := imageExistsFn
+	oldPushImage := pushImageFn
+	oldExecDirect := execRemoteDirectFn
+	defer func() {
+		imageExistsFn = oldImageExists
+		pushImageFn = oldPushImage
+		execRemoteDirectFn = oldExecDirect
+	}()
+	imageExistsFn = func(string) bool { return true }
+
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "web-run")
+	pushContextSeen := false
+	stageContextSeen := false
+	commitContextSeen := false
+	pushImageFn = func(ctx context.Context, service, image, tag string) error {
+		pushContextSeen = ctx.Value(contextKey{}) == "web-run"
+		return nil
+	}
+	execRemoteDirectFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		if len(args) >= 2 && args[0] == "stage" && args[1] == "commit" {
+			commitContextSeen = ctx.Value(contextKey{}) == "web-run"
+		} else {
+			stageContextSeen = ctx.Value(contextKey{}) == "web-run"
+		}
+		return nil
+	}
+
+	tmp := t.TempDir()
+	cfgLoc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	draft := RunDraft{
+		Service:     "svc-a",
+		Host:        "host-a",
+		Payload:     "localapp",
+		PayloadKind: "local-image",
+		Network: RunDraftNetwork{
+			Modes: []string{"svc"},
+		},
+	}
+
+	if err := executeRunDraft(ctx, draft, cfgLoc, false); err != nil {
+		t.Fatalf("executeRunDraft: %v", err)
+	}
+	if !pushContextSeen {
+		t.Fatal("local image push did not receive executeRunDraft context")
+	}
+	if !stageContextSeen {
+		t.Fatal("docker args stage did not receive executeRunDraft context")
+	}
+	if !commitContextSeen {
+		t.Fatal("docker stage commit did not receive executeRunDraft context")
 	}
 }
 

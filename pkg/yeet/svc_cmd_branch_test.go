@@ -391,7 +391,7 @@ func TestSvcRunPayloadOnlyReusesStoredRunArgs(t *testing.T) {
 func TestSvcRunWebFlagRoutesToLocalWeb(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	serviceOverride = "svc-a"
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		t.Fatalf("unexpected remote deploy for image=%q args=%v", image, args)
 		return false, nil
 	}
@@ -460,7 +460,7 @@ func TestSvcRunWebFlagAfterTerminatorDoesNotTriggerGuard(t *testing.T) {
 
 	var gotImage string
 	var gotArgs []string
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		gotImage = image
 		gotArgs = append([]string{}, args...)
 		return true, nil
@@ -583,7 +583,7 @@ func TestSvcRunPreservesServiceRootPayloadArgsInSavedConfig(t *testing.T) {
 	useTempSvcCwd(t)
 	serviceOverride = "svc-a"
 	loadedPrefs.DefaultHost = "host-a"
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		if image != "ghcr.io/example/app:latest" {
 			t.Fatalf("image = %q, want ghcr.io/example/app:latest", image)
 		}
@@ -961,7 +961,7 @@ func TestSvcRunSnapshotInheritWithFieldFlagDoesNotRunRemoteOrSaveConfig(t *testi
 	tmp := useTempSvcCwd(t)
 	serviceOverride = "svc-a"
 	loadedPrefs.DefaultHost = "host-a"
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		t.Fatalf("unexpected remote run: image=%q args=%v", image, args)
 		return false, nil
 	}
@@ -1013,7 +1013,7 @@ func TestSvcRunSnapshotFieldInheritRunsRemoteAndSavesConfig(t *testing.T) {
 		SnapshotEvents:   []string{"run"},
 	})
 	var gotArgs []string
-	tryRunRemoteImageFn = func(image string, args []string) (bool, error) {
+	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		if image != "ghcr.io/example/app:latest" {
 			t.Fatalf("image = %q, want ghcr.io/example/app:latest", image)
 		}
