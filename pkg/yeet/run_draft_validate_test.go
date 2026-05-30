@@ -76,6 +76,137 @@ func TestValidateRunDraftAcceptsNewServiceAndExistingFilePayload(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftPayloadKindFileStatsImageLikePayload(t *testing.T) {
+	draft := RunDraft{
+		Service:     "svc-a",
+		Host:        "host-a",
+		Payload:     "ghcr.io/example/app:latest",
+		PayloadKind: "file",
+	}
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := validation.fieldError("payload"); !strings.Contains(got, "does not exist") {
+		t.Fatalf("payload error = %q, want does not exist", got)
+	}
+}
+
+func TestValidateRunDraftRemoteImagePayloadKind(t *testing.T) {
+	t.Run("accepts image ref", func(t *testing.T) {
+		draft := RunDraft{
+			Service:     "svc-a",
+			Host:        "host-a",
+			Payload:     "ghcr.io/example/app:latest",
+			PayloadKind: "remote-image",
+		}
+		normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+		if !validation.OK {
+			t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+		}
+		if normalized.Payload != draft.Payload {
+			t.Fatalf("payload = %q, want %q", normalized.Payload, draft.Payload)
+		}
+	})
+
+	t.Run("rejects local path", func(t *testing.T) {
+		tmp := t.TempDir()
+		composePath := filepath.Join(tmp, "compose.yml")
+		if err := os.WriteFile(composePath, []byte("services: {}\n"), 0o644); err != nil {
+			t.Fatalf("write compose: %v", err)
+		}
+		draft := RunDraft{
+			Service:     "svc-a",
+			Host:        "host-a",
+			Payload:     "compose.yml",
+			PayloadKind: "remote-image",
+		}
+		_, validation := validateRunDraft(context.Background(), draft, tmp)
+
+		if validation.OK {
+			t.Fatal("validation OK = true, want false")
+		}
+		if got := validation.fieldError("payload"); !strings.Contains(got, "image") {
+			t.Fatalf("payload error = %q, want image", got)
+		}
+	})
+
+	t.Run("rejects absolute local path with image-like tag", func(t *testing.T) {
+		tmp := t.TempDir()
+		imageLikePath := filepath.Join(tmp, "compose:latest")
+		if err := os.WriteFile(imageLikePath, []byte("services: {}\n"), 0o644); err != nil {
+			t.Fatalf("write compose: %v", err)
+		}
+		draft := RunDraft{
+			Service:     "svc-a",
+			Host:        "host-a",
+			Payload:     imageLikePath,
+			PayloadKind: "remote-image",
+		}
+		_, validation := validateRunDraft(context.Background(), draft, tmp)
+
+		if validation.OK {
+			t.Fatal("validation OK = true, want false")
+		}
+		if got := validation.fieldError("payload"); !strings.Contains(got, "image") {
+			t.Fatalf("payload error = %q, want image", got)
+		}
+	})
+
+	t.Run("rejects malformed ref", func(t *testing.T) {
+		draft := RunDraft{
+			Service:     "svc-a",
+			Host:        "host-a",
+			Payload:     "not-an-image",
+			PayloadKind: "remote-image",
+		}
+		_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+		if validation.OK {
+			t.Fatal("validation OK = true, want false")
+		}
+		if got := validation.fieldError("payload"); !strings.Contains(got, "image") {
+			t.Fatalf("payload error = %q, want image", got)
+		}
+	})
+}
+
+func TestValidateRunDraftLocalImagePayloadKindDoesNotStatDockerStylePayload(t *testing.T) {
+	draft := RunDraft{
+		Service:     "svc-a",
+		Host:        "host-a",
+		Payload:     "repo/svc/app:latest",
+		PayloadKind: "local-image",
+	}
+	normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if !validation.OK {
+		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+	}
+	if normalized.Payload != draft.Payload {
+		t.Fatalf("payload = %q, want %q", normalized.Payload, draft.Payload)
+	}
+}
+
+func TestValidateRunDraftRejectsUnknownPayloadKind(t *testing.T) {
+	draft := RunDraft{
+		Service:     "svc-a",
+		Host:        "host-a",
+		Payload:     "ghcr.io/example/app:latest",
+		PayloadKind: "archive",
+	}
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := validation.fieldError("payloadKind"); !strings.Contains(got, "unknown") {
+		t.Fatalf("payloadKind error = %q, want unknown", got)
+	}
+}
+
 func TestValidateRunDraftRejectsInvalidRootsAndEnvFile(t *testing.T) {
 	stubRunDraftServiceInfo(t, func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
 		return catchrpc.ServiceInfoResponse{Found: false}, nil
@@ -123,6 +254,27 @@ func TestValidateRunDraftReportsHostError(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftSkipsServiceInfoWhenLocalValidationFails(t *testing.T) {
+	stubRunDraftServiceInfo(t, func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		t.Fatalf("unexpected service info call for host=%q service=%q", host, service)
+		return catchrpc.ServiceInfoResponse{}, nil
+	})
+
+	draft := RunDraft{
+		Service:        "svc-a",
+		Host:           "host-a",
+		NewServiceOnly: true,
+	}
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := validation.fieldError("payload"); got == "" {
+		t.Fatal("payload error = empty, want missing payload error")
+	}
+}
+
 func TestValidateRunDraftRejectsInvalidSnapshotFields(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -154,6 +306,42 @@ func TestValidateRunDraftRejectsInvalidSnapshotFields(t *testing.T) {
 			field:   "snapshots.events",
 			wantErr: "inherit",
 		},
+		{
+			name:    "invalid max age",
+			snap:    RunDraftSnapshots{MaxAge: "forever"},
+			field:   "snapshots.maxAge",
+			wantErr: "invalid",
+		},
+		{
+			name:    "non-positive max age",
+			snap:    RunDraftSnapshots{MaxAge: "0h"},
+			field:   "snapshots.maxAge",
+			wantErr: "positive",
+		},
+		{
+			name:    "max age with inherit",
+			snap:    RunDraftSnapshots{MaxAge: "7d", MaxAgeInherit: true},
+			field:   "snapshots.maxAge",
+			wantErr: "inherit",
+		},
+		{
+			name:    "required with inherit",
+			snap:    RunDraftSnapshots{Required: runDraftTestBool(true), RequiredInherit: true},
+			field:   "snapshots.required",
+			wantErr: "inherit",
+		},
+		{
+			name:    "invalid event",
+			snap:    RunDraftSnapshots{Events: []string{"run", "backup"}},
+			field:   "snapshots.events",
+			wantErr: "invalid",
+		},
+		{
+			name:    "inherit mode with override",
+			snap:    RunDraftSnapshots{Mode: "inherit", MaxAge: "72h"},
+			field:   "snapshots.mode",
+			wantErr: "inherit",
+		},
 	}
 
 	for _, tt := range tests {
@@ -180,26 +368,74 @@ func TestValidateRunDraftRejectsInvalidSnapshotFields(t *testing.T) {
 	}
 }
 
-func TestValidateRunDraftRejectsZFSAbsoluteServiceRoot(t *testing.T) {
-	stubRunDraftServiceInfo(t, func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
-		return catchrpc.ServiceInfoResponse{Found: false}, nil
-	})
+func TestValidateRunDraftAcceptsValidSnapshotFields(t *testing.T) {
+	draft := RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "ghcr.io/example/app:latest",
+		Snapshots: RunDraftSnapshots{
+			Mode:     "on",
+			MaxAge:   "7d",
+			Events:   []string{"run", "docker-update", "service-root-migration"},
+			Required: runDraftTestBool(false),
+		},
+	}
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
 
+	if !validation.OK {
+		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+	}
+}
+
+func TestValidateRunDraftRejectsInvalidZFSDatasetNames(t *testing.T) {
+	tests := []string{
+		"/tank/apps/svc-a",
+		"tank/apps/",
+		"/tank/apps",
+		"tank//apps",
+		"tank/./apps",
+		"tank/../apps",
+		"tank/apps/svc@snap",
+		"tank/apps/svc#bookmark",
+		"tank/apps/bad name",
+	}
+
+	for _, serviceRoot := range tests {
+		t.Run(serviceRoot, func(t *testing.T) {
+			draft := RunDraft{
+				Service: "svc-a",
+				Host:    "host-a",
+				Payload: "ghcr.io/example/app:latest",
+				Storage: RunDraftStorage{
+					ServiceRoot: serviceRoot,
+					ZFS:         true,
+				},
+			}
+			_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+			if validation.OK {
+				t.Fatal("validation OK = true, want false")
+			}
+			if got := validation.fieldError("serviceRoot"); !strings.Contains(got, "dataset") {
+				t.Fatalf("serviceRoot error = %q, want dataset", got)
+			}
+		})
+	}
+}
+
+func TestValidateRunDraftAcceptsZFSDatasetName(t *testing.T) {
 	draft := RunDraft{
 		Service: "svc-a",
 		Host:    "host-a",
 		Payload: "ghcr.io/example/app:latest",
 		Storage: RunDraftStorage{
-			ServiceRoot: "/tank/apps/svc-a",
+			ServiceRoot: "tank/apps/vaultwarden",
 			ZFS:         true,
 		},
 	}
 	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
 
-	if validation.OK {
-		t.Fatal("validation OK = true, want false")
-	}
-	if got := validation.fieldError("serviceRoot"); !strings.Contains(got, "dataset name") {
-		t.Fatalf("serviceRoot error = %q, want dataset name", got)
+	if !validation.OK {
+		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
 	}
 }

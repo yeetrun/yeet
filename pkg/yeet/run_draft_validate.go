@@ -7,11 +7,20 @@ package yeet
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
+)
+
+var (
+	runDraftSnapshotMaxAgeDaysRE = regexp.MustCompile(`^(-?[0-9]+)d$`)
+	runDraftZFSDatasetPartRE     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]*$`)
 )
 
 type RunDraftValidationResult struct {
@@ -53,7 +62,7 @@ var fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string)
 
 func validateRunDraft(ctx context.Context, draft RunDraft, cwd string) (RunDraft, RunDraftValidationResult) {
 	draft, result := validateRunDraftLocal(draft, cwd)
-	if draft.NewServiceOnly {
+	if result.OK && draft.NewServiceOnly {
 		validateRunDraftService(ctx, draft, &result)
 	}
 	return draft, result
@@ -75,9 +84,11 @@ func trimRunDraftFields(draft RunDraft) RunDraft {
 	draft.Service = strings.TrimSpace(draft.Service)
 	draft.Host = strings.TrimSpace(draft.Host)
 	draft.Payload = strings.TrimSpace(draft.Payload)
+	draft.PayloadKind = strings.ToLower(strings.TrimSpace(draft.PayloadKind))
 	draft.EnvFile = strings.TrimSpace(draft.EnvFile)
 	draft.Storage.ServiceRoot = strings.TrimSpace(draft.Storage.ServiceRoot)
 	draft.Snapshots.Mode = strings.TrimSpace(draft.Snapshots.Mode)
+	draft.Snapshots.MaxAge = strings.TrimSpace(draft.Snapshots.MaxAge)
 	return draft
 }
 
@@ -105,8 +116,13 @@ func validateRunDraftService(ctx context.Context, draft RunDraft, result *RunDra
 }
 
 func validateRunDraftPaths(cwd string, draft *RunDraft, result *RunDraftValidationResult) {
-	if draft.Payload != "" {
-		payload, err := normalizeRunDraftPayload(cwd, draft.Payload)
+	payloadKindOK := true
+	if unknownPayloadKind(draft.PayloadKind) {
+		payloadKindOK = false
+		result.addError("payloadKind", "unknown payload kind %q", draft.PayloadKind)
+	}
+	if draft.Payload != "" && payloadKindOK {
+		payload, err := normalizeRunDraftPayload(cwd, draft.Payload, draft.PayloadKind)
 		if err != nil {
 			result.addError("payload", "%v", err)
 		} else {
@@ -130,6 +146,8 @@ func validateRunDraftStorage(draft *RunDraft, result *RunDraftValidationResult) 
 			result.addError("serviceRoot", "service root or ZFS dataset is required when zfs is enabled")
 		} else if filepath.IsAbs(draft.Storage.ServiceRoot) {
 			result.addError("serviceRoot", "zfs service root expects a dataset name, not an absolute path")
+		} else if err := validateRunDraftZFSDatasetName(draft.Storage.ServiceRoot); err != nil {
+			result.addError("serviceRoot", "%v", err)
 		}
 	} else if draft.Storage.ServiceRoot != "" {
 		if !filepath.IsAbs(draft.Storage.ServiceRoot) {
@@ -141,24 +159,71 @@ func validateRunDraftStorage(draft *RunDraft, result *RunDraftValidationResult) 
 }
 
 func validateRunDraftSnapshots(draft *RunDraft, result *RunDraftValidationResult) {
-	if draft.Snapshots.KeepLast < 0 {
+	mode := validateRunDraftSnapshotMode(draft, result)
+	validateRunDraftSnapshotKeepLast(draft.Snapshots, result)
+	validateRunDraftSnapshotMaxAge(draft.Snapshots, result)
+	validateRunDraftSnapshotRequired(draft.Snapshots, result)
+	validateRunDraftSnapshotEvents(draft, result)
+	if mode == "inherit" && runDraftSnapshotsHasFieldOverrides(draft.Snapshots) {
+		result.addError("snapshots.mode", "snapshots inherit cannot be combined with field-level snapshot overrides")
+	}
+}
+
+func validateRunDraftSnapshotKeepLast(snapshots RunDraftSnapshots, result *RunDraftValidationResult) {
+	if snapshots.KeepLast < 0 {
 		result.addError("snapshots.keepLast", "snapshot keep last cannot be negative")
 	}
-	if draft.Snapshots.KeepLast != 0 && draft.Snapshots.KeepLastInherit {
+	if snapshots.KeepLast != 0 && snapshots.KeepLastInherit {
 		result.addError("snapshots.keepLast", "snapshot keep last cannot be combined with inherit")
 	}
+}
+
+func validateRunDraftSnapshotMaxAge(snapshots RunDraftSnapshots, result *RunDraftValidationResult) {
+	if snapshots.MaxAge != "" && snapshots.MaxAgeInherit {
+		result.addError("snapshots.maxAge", "snapshot max age cannot be combined with inherit")
+	}
+	if snapshots.MaxAge != "" {
+		if err := validateRunDraftSnapshotMaxAgeValue(snapshots.MaxAge); err != nil {
+			result.addError("snapshots.maxAge", "%v", err)
+		}
+	}
+}
+
+func validateRunDraftSnapshotRequired(snapshots RunDraftSnapshots, result *RunDraftValidationResult) {
+	if snapshots.Required != nil && snapshots.RequiredInherit {
+		result.addError("snapshots.required", "snapshot required cannot be combined with inherit")
+	}
+}
+
+func validateRunDraftSnapshotEvents(draft *RunDraft, result *RunDraftValidationResult) {
 	if draft.Snapshots.EventsInherit && len(draft.Snapshots.Events) != 0 {
 		result.addError("snapshots.events", "snapshot events cannot be combined with inherit")
 	}
 	draft.Snapshots.Events = trimRunDraftSnapshotEvents(draft.Snapshots.Events, result)
-	if draft.Snapshots.Mode != "" {
-		mode, err := parseSnapshotModeValue(draft.Snapshots.Mode)
-		if err != nil {
-			result.addError("snapshots.mode", "%v", err)
-		} else {
-			draft.Snapshots.Mode = mode
-		}
+}
+
+func validateRunDraftSnapshotMode(draft *RunDraft, result *RunDraftValidationResult) string {
+	if draft.Snapshots.Mode == "" {
+		return ""
 	}
+	mode, err := parseSnapshotModeValue(draft.Snapshots.Mode)
+	if err != nil {
+		result.addError("snapshots.mode", "%v", err)
+		return ""
+	}
+	draft.Snapshots.Mode = mode
+	return mode
+}
+
+func runDraftSnapshotsHasFieldOverrides(snapshots RunDraftSnapshots) bool {
+	return snapshots.KeepLast != 0 ||
+		snapshots.KeepLastInherit ||
+		snapshots.MaxAge != "" ||
+		snapshots.MaxAgeInherit ||
+		snapshots.Required != nil ||
+		snapshots.RequiredInherit ||
+		len(snapshots.Events) != 0 ||
+		snapshots.EventsInherit
 }
 
 func trimRunDraftSnapshotEvents(events []string, result *RunDraftValidationResult) []string {
@@ -172,17 +237,100 @@ func trimRunDraftSnapshotEvents(events []string, result *RunDraftValidationResul
 			result.addError("snapshots.events", "snapshot event at index %d must not be empty", i)
 			continue
 		}
+		if !validRunDraftSnapshotEvent(event) {
+			result.addError("snapshots.events", "invalid snapshot event %q", event)
+			continue
+		}
 		out = append(out, event)
 	}
 	return out
 }
 
-func normalizeRunDraftPayload(cwd, payload string) (string, error) {
+func validRunDraftSnapshotEvent(event string) bool {
+	switch event {
+	case "run", "docker-update", "service-root-migration":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateRunDraftSnapshotMaxAgeValue(raw string) error {
+	if match := runDraftSnapshotMaxAgeDaysRE.FindStringSubmatch(raw); match != nil {
+		days, err := strconv.Atoi(match[1])
+		if err != nil {
+			return fmt.Errorf("invalid snapshot max age %q", raw)
+		}
+		if days > int(math.MaxInt64/(24*time.Hour)) {
+			return fmt.Errorf("invalid snapshot max age %q", raw)
+		}
+		d := time.Duration(days) * 24 * time.Hour
+		if d <= 0 {
+			return fmt.Errorf("snapshot max age must be positive")
+		}
+		return nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("invalid snapshot max age %q", raw)
+	}
+	if d <= 0 {
+		return fmt.Errorf("snapshot max age must be positive")
+	}
+	return nil
+}
+
+func normalizeRunDraftPayload(cwd, payload, kind string) (string, error) {
 	payload = strings.TrimSpace(payload)
-	if looksLikeImageRef(payload) {
+	switch kind {
+	case "", "auto":
+		if looksLikeImageRef(payload) {
+			return payload, nil
+		}
+		return normalizeExistingRunDraftPath(cwd, payload)
+	case "file", "compose", "dockerfile":
+		return normalizeExistingRunDraftPath(cwd, payload)
+	case "remote-image", "local-image":
+		if !looksLikeRunDraftImageRef(payload) {
+			return "", fmt.Errorf("payload must be a Docker image reference for payloadKind %q", kind)
+		}
 		return payload, nil
 	}
-	return normalizeExistingRunDraftPath(cwd, payload)
+	return "", fmt.Errorf("unknown payload kind %q", kind)
+}
+
+func looksLikeRunDraftImageRef(payload string) bool {
+	if filepath.IsAbs(payload) || strings.HasPrefix(payload, "./") || strings.HasPrefix(payload, "../") {
+		return false
+	}
+	return looksLikeImageRef(payload)
+}
+
+func unknownPayloadKind(kind string) bool {
+	switch kind {
+	case "", "auto", "file", "compose", "dockerfile", "remote-image", "local-image":
+		return false
+	default:
+		return true
+	}
+}
+
+func validateRunDraftZFSDatasetName(dataset string) error {
+	if strings.HasPrefix(dataset, "/") || strings.HasSuffix(dataset, "/") {
+		return fmt.Errorf("zfs service root expects a dataset name without leading or trailing slash")
+	}
+	if strings.ContainsAny(dataset, "@#") {
+		return fmt.Errorf("zfs service root expects a dataset name, not snapshot or bookmark syntax")
+	}
+	for _, part := range strings.Split(dataset, "/") {
+		if part == "" || part == "." || part == ".." {
+			return fmt.Errorf("zfs service root contains invalid dataset component %q", part)
+		}
+		if !runDraftZFSDatasetPartRE.MatchString(part) {
+			return fmt.Errorf("zfs service root contains malformed dataset component %q", part)
+		}
+	}
+	return nil
 }
 
 func normalizeExistingRunDraftPath(cwd, path string) (string, error) {
