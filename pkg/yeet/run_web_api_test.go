@@ -102,7 +102,7 @@ func TestRunWebAPIStaticAssetsRequireAuth(t *testing.T) {
 }
 
 func TestRunWebAPIStaticIndexDoesNotSpreadTokenToAssets(t *testing.T) {
-	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
+	s := newRunWebServer(runWebServerConfig{Token: "secret", CSRFToken: "csrf-value", Root: t.TempDir()})
 
 	req := httptest.NewRequest(http.MethodGet, "/?token=secret", nil)
 	rec := httptest.NewRecorder()
@@ -122,6 +122,9 @@ func TestRunWebAPIStaticIndexDoesNotSpreadTokenToAssets(t *testing.T) {
 	if !strings.Contains(body, "history.replaceState") {
 		t.Fatalf("index body missing token removal script: %s", body)
 	}
+	if !strings.Contains(body, "window.__YEET_CSRF_TOKEN__") {
+		t.Fatalf("index body missing csrf script: %s", body)
+	}
 	if got := rec.Header().Get("Referrer-Policy"); got != "no-referrer" {
 		t.Fatalf("Referrer-Policy = %q, want no-referrer", got)
 	}
@@ -136,6 +139,36 @@ func TestRunWebAPIStaticIndexDoesNotSpreadTokenToAssets(t *testing.T) {
 	s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("cookie asset status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRunWebAPIUnsafeRequestsNeedTokenOrCSRFHeader(t *testing.T) {
+	s := newRunWebServer(runWebServerConfig{Token: "secret", CSRFToken: "csrf-value", Root: t.TempDir()})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/validate", strings.NewReader(`{}`))
+	req.AddCookie(&http.Cookie{Name: runWebTokenCookieName, Value: "secret"})
+	req.Header.Set("Origin", "http://127.0.0.1:9999")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cookie-only unsafe status = %d, want 403 body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/validate", strings.NewReader(`{}`))
+	req.AddCookie(&http.Cookie{Name: runWebTokenCookieName, Value: "secret"})
+	req.Header.Set("Origin", "http://127.0.0.1:9999")
+	req.Header.Set("X-Yeet-Run-CSRF", "csrf-value")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("csrf unsafe status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/validate?token=secret", strings.NewReader(`{}`))
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("query-token unsafe status = %d, want 200 body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -155,6 +188,47 @@ func TestRunWebAPIStaticRejectsBadMethodsAndTraversal(t *testing.T) {
 		if rec.Code != http.StatusNotFound {
 			t.Fatalf("%s status = %d, want 404 body=%s", target, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+func TestRunWebAPIRedactsTSAuthKeyInValidationResponses(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	defer func() { fetchRunDraftServiceInfoFn = oldInfo }()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+
+	root := t.TempDir()
+	payload := filepath.Join(root, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root})
+	draft := RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "run.sh",
+		Network: RunDraftNetwork{
+			TSAuthKey: "tskey-secret",
+		},
+	}
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/validate", draft)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "tskey-secret") {
+		t.Fatalf("validate body leaked ts auth key: %s", rec.Body.String())
+	}
+
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true}, nil
+	}
+	rec = runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("deploy status = %d, want 400 body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "tskey-secret") {
+		t.Fatalf("deploy body leaked ts auth key: %s", rec.Body.String())
 	}
 }
 

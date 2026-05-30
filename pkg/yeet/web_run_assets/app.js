@@ -6,6 +6,7 @@
 
 const params = new URLSearchParams(window.location.search);
 const token = params.get("token") || "";
+const csrfToken = window.__YEET_CSRF_TOKEN__ || "";
 const state = {
   bootstrap: null,
   currentDir: ".",
@@ -22,6 +23,7 @@ function api(path, options = {}) {
     ...(options.headers || {}),
   };
   if (token) headers["X-Yeet-Run-Token"] = token;
+  if (csrfToken) headers["X-Yeet-Run-CSRF"] = csrfToken;
   return fetch(path, {
     ...options,
     headers,
@@ -253,6 +255,12 @@ function firstValidationMessage(validation) {
   return "";
 }
 
+function redactValidationDraft(draft) {
+  const copy = JSON.parse(JSON.stringify(draft));
+  if (copy.network) delete copy.network.tsAuthKey;
+  return copy;
+}
+
 async function validate(draft) {
   if (state.phase !== "editing") return;
   const seq = ++state.validateSeq;
@@ -260,7 +268,7 @@ async function validate(draft) {
   try {
     const res = await api("/api/validate", {
       method: "POST",
-      body: JSON.stringify(draft),
+      body: JSON.stringify(redactValidationDraft(draft)),
     });
     if (seq !== state.validateSeq) return;
     if (state.phase !== "editing") return;

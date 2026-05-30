@@ -22,6 +22,7 @@ const runWebTokenCookieName = "yeet_run_token"
 
 type runWebServerConfig struct {
 	Token      string
+	CSRFToken  string
 	Root       string
 	Bootstrap  runWebBootstrap
 	Config     *projectConfigLocation
@@ -60,6 +61,10 @@ func (s *runWebServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	if !s.unsafeAuthorized(r) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
 	s.setAuthCookie(w, r)
 	s.mux.ServeHTTP(w, r)
 }
@@ -73,6 +78,17 @@ func (s *runWebServer) authorized(r *http.Request) bool {
 	}
 	cookie, err := r.Cookie(runWebTokenCookieName)
 	return err == nil && cookie.Value == s.cfg.Token
+}
+
+func (s *runWebServer) unsafeAuthorized(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	if r.Header.Get("X-Yeet-Run-Token") == s.cfg.Token || r.URL.Query().Get("token") == s.cfg.Token {
+		return true
+	}
+	return s.cfg.CSRFToken != "" && r.Header.Get("X-Yeet-Run-CSRF") == s.cfg.CSRFToken
 }
 
 func (s *runWebServer) setAuthCookie(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +142,7 @@ func (s *runWebServer) handleValidate(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := runWebHandlerContext(s.cfg.Context, r.Context())
 	defer cancel()
 	normalized, result := validateRunDraft(ctx, draft, s.cfg.Root)
-	writeRunWebJSON(w, http.StatusOK, map[string]any{"draft": normalized, "validation": result})
+	writeRunWebJSON(w, http.StatusOK, map[string]any{"draft": redactRunWebDraftSecrets(normalized), "validation": result})
 }
 
 func (s *runWebServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
@@ -150,7 +166,7 @@ func (s *runWebServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	normalized, result := validateRunDraft(ctx, draft, s.cfg.Root)
 	if !result.OK {
-		writeRunWebJSON(w, http.StatusBadRequest, map[string]any{"draft": normalized, "validation": result})
+		writeRunWebJSON(w, http.StatusBadRequest, map[string]any{"draft": redactRunWebDraftSecrets(normalized), "validation": result})
 		return
 	}
 	if normalized.EnvFile != "" {
@@ -198,10 +214,16 @@ func (s *runWebServer) serveIndex(w http.ResponseWriter) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(strings.ReplaceAll(string(b), "__YEET_SESSION_SCRIPT__", runWebIndexSessionScript)))
+	_, _ = w.Write([]byte(strings.ReplaceAll(string(b), "__YEET_SESSION_SCRIPT__", runWebIndexSessionScript(s.cfg.CSRFToken))))
 }
 
-const runWebIndexSessionScript = `<script>
+func runWebIndexSessionScript(csrfToken string) string {
+	encoded, _ := json.Marshal(csrfToken)
+	return strings.ReplaceAll(runWebIndexSessionScriptTemplate, "__YEET_CSRF_VALUE__", string(encoded))
+}
+
+const runWebIndexSessionScriptTemplate = `<script>
+window.__YEET_CSRF_TOKEN__ = __YEET_CSRF_VALUE__;
 if (new URLSearchParams(window.location.search).has("token")) {
   window.history.replaceState(null, "", window.location.pathname + window.location.hash);
 }
@@ -214,6 +236,11 @@ func decodeRunWebDraft(w http.ResponseWriter, r *http.Request) (RunDraft, bool) 
 		return RunDraft{}, false
 	}
 	return draft, true
+}
+
+func redactRunWebDraftSecrets(draft RunDraft) RunDraft {
+	draft.Network.TSAuthKey = ""
+	return draft
 }
 
 func writeRunWebJSON(w http.ResponseWriter, status int, v any) {

@@ -194,9 +194,13 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	if err != nil {
 		return err
 	}
+	csrfToken, err := newRunWebToken()
+	if err != nil {
+		return err
+	}
 	serverCtx, cancelServer := context.WithCancel(ctx)
 	defer cancelServer()
-	server, listener, errCh, done, url, err := startRunWebServer(serverCtx, req, token)
+	server, listener, errCh, done, url, err := startRunWebServer(serverCtx, req, token, csrfToken)
 	if err != nil {
 		return err
 	}
@@ -214,7 +218,7 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	return waitRunWebServer(ctx, cancelServer, server, errCh, done, out)
 }
 
-func startRunWebServer(ctx context.Context, req runWebRequest, token string) (*http.Server, net.Listener, <-chan error, <-chan struct{}, string, error) {
+func startRunWebServer(ctx context.Context, req runWebRequest, token string, csrfToken string) (*http.Server, net.Listener, <-chan error, <-chan struct{}, string, error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, nil, nil, nil, "", err
@@ -229,6 +233,7 @@ func startRunWebServer(ctx context.Context, req runWebRequest, token string) (*h
 	var doneOnce sync.Once
 	handler := newRunWebServer(runWebServerConfig{
 		Token:     token,
+		CSRFToken: csrfToken,
 		Root:      cwd,
 		Bootstrap: bootstrap,
 		Config:    req.Config,
