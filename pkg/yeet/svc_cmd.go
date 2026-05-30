@@ -1850,7 +1850,6 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 	payloadKind = strings.TrimSpace(payloadKind)
 	payloadRel := relativePayloadPathForKind(loc.Dir, payload, payloadKind)
 	existing, hasExisting := runConfigExistingEntry(loc, host)
-	payloadKind = runConfigPayloadKind(payloadKind, payloadRel, existing, hasExisting)
 	entry := ServiceEntry{
 		Name:           serviceOverride,
 		Host:           host,
@@ -1890,17 +1889,6 @@ func runConfigServiceRoot(runArgs []string, serviceRoot string, serviceRootZFS b
 		return rootOpts.Root, rootOpts.ZFS, filteredArgs, nil
 	}
 	return serviceRoot, serviceRootZFS, filteredArgs, nil
-}
-
-func runConfigPayloadKind(explicitKind string, payloadRel string, existing ServiceEntry, hasExisting bool) string {
-	explicitKind = strings.TrimSpace(explicitKind)
-	if explicitKind != "" {
-		return explicitKind
-	}
-	if hasExisting && existing.PayloadKind != "" && existing.Payload == payloadRel {
-		return existing.PayloadKind
-	}
-	return ""
 }
 
 func runConfigExistingEntry(loc *projectConfigLocation, host string) (ServiceEntry, bool) {
