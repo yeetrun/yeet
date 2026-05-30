@@ -624,7 +624,11 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if _, ok := flags["run"]["--zfs"]; !ok {
 		t.Fatal("run --zfs should be registered")
 	}
-	if flags["run"]["--web"].ConsumesValue {
+	spec, ok := flags["run"]["--web"]
+	if !ok {
+		t.Fatal("run --web should be registered")
+	}
+	if spec.ConsumesValue {
 		t.Fatal("run --web should not consume a value")
 	}
 
