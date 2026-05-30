@@ -910,9 +910,9 @@ func handleSvcRemote(ctx context.Context, req svcCommandRequest) error {
 	return execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, true)
 }
 
-var tryRunDockerFn = tryRunDocker
+var tryRunDockerFn = tryRunDockerContext
 var buildDockerImageForRemoteFn = buildDockerImageForRemote
-var tryRunRemoteImageFn = tryRunRemoteImage
+var tryRunRemoteImageFn = tryRunRemoteImageContext
 var imageExistsFn = imageExists
 var pushImageFn = pushImage
 var execRemoteDirectFn = execRemote
@@ -1057,22 +1057,26 @@ func rehydrateRunArgs(args []string) []string {
 }
 
 func runRun(payload string, args []string) error {
-	if ok, err := tryRunDockerfile(payload, args); err != nil {
+	return runRunContext(context.Background(), payload, args)
+}
+
+func runRunContext(ctx context.Context, payload string, args []string) error {
+	if ok, err := tryRunDockerfileContext(ctx, payload, args); err != nil {
 		return err
 	} else if ok {
 		return nil
 	}
-	if ok, err := tryRunFile(payload, args); err != nil {
+	if ok, err := tryRunFileContext(ctx, payload, args); err != nil {
 		return err
 	} else if ok {
 		return nil
 	}
-	if ok, err := tryRunRemoteImageFn(payload, args); err != nil {
+	if ok, err := tryRunRemoteImageFn(ctx, payload, args); err != nil {
 		return err
 	} else if ok {
 		return nil
 	}
-	if ok, err := tryRunDockerFn(payload, args); err != nil {
+	if ok, err := tryRunDockerFn(ctx, payload, args); err != nil {
 		return err
 	} else if ok {
 		return nil
@@ -1081,6 +1085,10 @@ func runRun(payload string, args []string) error {
 }
 
 func tryRunDockerfile(path string, args []string) (ok bool, _ error) {
+	return tryRunDockerfileContext(context.Background(), path, args)
+}
+
+func tryRunDockerfileContext(ctx context.Context, path string, args []string) (ok bool, _ error) {
 	if filepath.Base(path) != "Dockerfile" {
 		return false, nil
 	}
@@ -1092,10 +1100,10 @@ func tryRunDockerfile(path string, args []string) (ok bool, _ error) {
 	svc := getService()
 	tag := fmt.Sprintf("yeet-build-%d", time.Now().UnixNano())
 	imageName := fmt.Sprintf("%s:%s", svc, tag)
-	if err := buildDockerImageForRemoteFn(context.Background(), path, imageName); err != nil {
+	if err := buildDockerImageForRemoteFn(ctx, path, imageName); err != nil {
 		return true, err
 	}
-	ok, err := tryRunDockerFn(imageName, args)
+	ok, err := tryRunDockerFn(ctx, imageName, args)
 	_ = exec.Command("docker", "rmi", imageName).Run()
 	return ok, err
 }
@@ -1109,6 +1117,10 @@ const imageComposeTemplate = `services:
 `
 
 func tryRunRemoteImage(image string, args []string) (ok bool, _ error) {
+	return tryRunRemoteImageContext(context.Background(), image, args)
+}
+
+func tryRunRemoteImageContext(ctx context.Context, image string, args []string) (ok bool, _ error) {
 	if !looksLikeImageRef(image) {
 		return false, nil
 	}
@@ -1127,7 +1139,7 @@ func tryRunRemoteImage(image string, args []string) (ok bool, _ error) {
 	if err := os.WriteFile(composePath, []byte(content), 0o644); err != nil {
 		return true, err
 	}
-	return runFilePayload(composePath, args, false)
+	return runFilePayloadContext(ctx, composePath, args, false)
 }
 
 func looksLikeImageRef(payload string) bool {
@@ -1153,7 +1165,7 @@ func looksLikeImageRef(payload string) bool {
 	return tag != "" && !strings.Contains(tag, "/")
 }
 
-func tryRunFile(file string, args []string) (ok bool, _ error) {
+func tryRunFileContext(ctx context.Context, file string, args []string) (ok bool, _ error) {
 	if st, err := os.Stat(file); os.IsNotExist(err) || st != nil && st.IsDir() {
 		// If the file does not exist or is a directory, it's not an error
 		// (yet), it could be another deployment method (i.e. docker)
@@ -1165,7 +1177,7 @@ func tryRunFile(file string, args []string) (ok bool, _ error) {
 		// If it's a different error, return it
 		return false, err
 	}
-	return runFilePayload(file, args, true)
+	return runFilePayloadContext(ctx, file, args, true)
 }
 
 type runFileUpload struct {
@@ -1177,6 +1189,10 @@ type runFileUpload struct {
 }
 
 func runFilePayload(file string, args []string, pushLocalImages bool) (ok bool, _ error) {
+	return runFilePayloadContext(context.Background(), file, args, pushLocalImages)
+}
+
+func runFilePayloadContext(ctx context.Context, file string, args []string, pushLocalImages bool) (ok bool, _ error) {
 	upload, err := prepareRunFileUpload(file, args, pushLocalImages)
 	if err != nil {
 		return false, err
@@ -1184,10 +1200,10 @@ func runFilePayload(file string, args []string, pushLocalImages bool) (ok bool, 
 	defer upload.cleanup()
 
 	svc := getService()
-	if err := pushRunFileLocalImages(svc, upload, pushLocalImages); err != nil {
+	if err := pushRunFileLocalImages(ctx, svc, upload, pushLocalImages); err != nil {
 		return false, err
 	}
-	if err := execRunFilePayload(context.Background(), svc, upload.payload, args); err != nil {
+	if err := execRunFilePayload(ctx, svc, upload.payload, args); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1229,14 +1245,17 @@ func validateRunFileArgs(ft ftdetect.FileType, args []string, pushLocalImages bo
 	return nil
 }
 
-func pushRunFileLocalImages(svc string, upload runFileUpload, pushLocalImages bool) error {
+func pushRunFileLocalImages(ctx context.Context, svc string, upload runFileUpload, pushLocalImages bool) error {
 	if upload.ft != ftdetect.DockerCompose || !pushLocalImages {
 		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := pushAllLocalImagesFn(svc, upload.goos, upload.goarch); err != nil {
 		return fmt.Errorf("failed to push all local images: %w", err)
 	}
-	return nil
+	return ctx.Err()
 }
 
 func execRunFilePayload(ctx context.Context, svc string, payload io.Reader, args []string) error {
@@ -1249,18 +1268,22 @@ func execRunFilePayload(ctx context.Context, svc string, payload io.Reader, args
 }
 
 func tryRunDocker(image string, args []string) (ok bool, _ error) {
+	return tryRunDockerContext(context.Background(), image, args)
+}
+
+func tryRunDockerContext(ctx context.Context, image string, args []string) (ok bool, _ error) {
 	if !imageExistsFn(image) {
 		// If the image does not exist, it's not an error
 		return false, nil
 	}
 	svc := getService()
-	if err := pushImageFn(context.Background(), svc, image, "latest"); err != nil {
+	if err := pushImageFn(ctx, svc, image, "latest"); err != nil {
 		return false, fmt.Errorf("failed to push image: %w", err)
 	}
-	if err := stageDockerArgs(context.Background(), svc, args); err != nil {
+	if err := stageDockerArgs(ctx, svc, args); err != nil {
 		return false, err
 	}
-	if err := commitDockerStage(context.Background(), svc); err != nil {
+	if err := commitDockerStage(ctx, svc); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1284,7 +1307,11 @@ func commitDockerStage(ctx context.Context, svc string) error {
 	return nil
 }
 
-func runEnvCopy(file string) (err error) {
+func runEnvCopy(file string) error {
+	return runEnvCopyContext(context.Background(), file)
+}
+
+func runEnvCopyContext(ctx context.Context, file string) (err error) {
 	if file == "" {
 		return fmt.Errorf("env copy requires a file")
 	}
@@ -1304,7 +1331,7 @@ func runEnvCopy(file string) (err error) {
 	}()
 	svc := getService()
 	args := []string{"env", "copy"}
-	if err := execRemoteFn(context.Background(), svc, args, f, false); err != nil {
+	if err := execRemoteFn(ctx, svc, args, f, false); err != nil {
 		return err
 	}
 	return nil

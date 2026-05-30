@@ -631,6 +631,71 @@ func TestRunWithChangesEnvOnly(t *testing.T) {
 	}
 }
 
+func TestRunWithChangesContextEnvOnly(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldService := serviceOverride
+	defer func() {
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		fetchRemoteArtifactHashesFn = oldHashes
+		serviceOverride = oldService
+	}()
+
+	serviceOverride = "svc-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatalf("failed to write payload: %v", err)
+	}
+	envFile := filepath.Join(tmp, "envfile")
+	if err := os.WriteFile(envFile, []byte("KEY=VALUE\n"), 0o600); err != nil {
+		t.Fatalf("failed to write env file: %v", err)
+	}
+	payloadHash, err := hashFileSHA256(payload)
+	if err != nil {
+		t.Fatalf("hash payload: %v", err)
+	}
+
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "web-run")
+	hashContextSeen := false
+	execContextSeen := false
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		hashContextSeen = ctx.Value(contextKey{}) == "web-run"
+		return catchrpc.ArtifactHashesResponse{
+			Found: true,
+			Payload: &catchrpc.ArtifactHash{
+				Kind:   "binary",
+				SHA256: payloadHash,
+			},
+			Env: &catchrpc.ArtifactHash{
+				Kind:   "env file",
+				SHA256: "deadbeef",
+			},
+		}, true, nil
+	}
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		execContextSeen = ctx.Value(contextKey{}) == "web-run"
+		return nil
+	}
+
+	if err := runWithChangesContext(ctx, payload, nil, envFile, ServiceEntry{}, false); err != nil {
+		t.Fatalf("runWithChangesContext error: %v", err)
+	}
+	if !hashContextSeen {
+		t.Fatal("artifact hash lookup did not receive runWithChangesContext context")
+	}
+	if !execContextSeen {
+		t.Fatal("env copy did not receive runWithChangesContext context")
+	}
+}
+
 func TestRunWithChangesNoChangesForceDeploys(t *testing.T) {
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn

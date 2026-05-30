@@ -194,7 +194,9 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	if err != nil {
 		return err
 	}
-	server, listener, errCh, done, url, err := startRunWebServer(ctx, req, token)
+	serverCtx, cancelServer := context.WithCancel(ctx)
+	defer cancelServer()
+	server, listener, errCh, done, url, err := startRunWebServer(serverCtx, req, token)
 	if err != nil {
 		return err
 	}
@@ -209,7 +211,7 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	}
 	openRunWebBrowser(url, req.Err)
 
-	return waitRunWebServer(ctx, server, errCh, done, out)
+	return waitRunWebServer(ctx, cancelServer, server, errCh, done, out)
 }
 
 func startRunWebServer(ctx context.Context, req runWebRequest, token string) (*http.Server, net.Listener, <-chan error, <-chan struct{}, string, error) {
@@ -258,13 +260,15 @@ func openRunWebBrowser(url string, errOut io.Writer) {
 	}
 }
 
-func waitRunWebServer(ctx context.Context, server *http.Server, errCh <-chan error, done <-chan struct{}, out io.Writer) error {
+func waitRunWebServer(ctx context.Context, cancelServer context.CancelFunc, server *http.Server, errCh <-chan error, done <-chan struct{}, out io.Writer) error {
 	select {
 	case <-done:
-		_ = server.Shutdown(context.Background())
+		cancelServer()
+		_ = server.Close()
 		_, _ = fmt.Fprintln(out, "Deployment finished. Close the browser tab and return here.")
 		return nil
 	case <-ctx.Done():
+		cancelServer()
 		_ = server.Close()
 		return ctx.Err()
 	case err := <-errCh:

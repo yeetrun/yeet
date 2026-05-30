@@ -415,16 +415,32 @@ func tagsEqual(a, b []string) bool {
 }
 
 type runPayloadFunc func(string, []string) error
+type runPayloadContextFunc func(context.Context, string, []string) error
 
 func runWithChanges(payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
-	return runWithChangesTo(os.Stdout, payload, runArgs, envFile, entry, forceDeploy)
+	return runWithChangesContext(context.Background(), payload, runArgs, envFile, entry, forceDeploy)
 }
 
 func runWithChangesTo(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
-	return runWithChangesToWithRunner(stdout, payload, runArgs, envFile, entry, forceDeploy, runRun, false)
+	return runWithChangesToContext(context.Background(), stdout, payload, runArgs, envFile, entry, forceDeploy)
+}
+
+func runWithChangesContext(ctx context.Context, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
+	return runWithChangesToContext(ctx, os.Stdout, payload, runArgs, envFile, entry, forceDeploy)
+}
+
+func runWithChangesToContext(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
+	return runWithChangesToWithContextRunner(ctx, stdout, payload, runArgs, envFile, entry, forceDeploy, runRunContext, false)
 }
 
 func runWithChangesToWithRunner(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadFunc, alwaysDeployPayload bool) error {
+	contextRunner := func(_ context.Context, payload string, runArgs []string) error {
+		return runner(payload, runArgs)
+	}
+	return runWithChangesToWithContextRunner(context.Background(), stdout, payload, runArgs, envFile, entry, forceDeploy, contextRunner, alwaysDeployPayload)
+}
+
+func runWithChangesToWithContextRunner(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadContextFunc, alwaysDeployPayload bool) error {
 	storedArgs := runArgsWithServiceRootOptions(entry.Args, serviceRootOptions{Root: entry.ServiceRoot, ZFS: entry.ServiceRootZFS})
 	storedArgs = runArgsWithSnapshotOptions(storedArgs, snapshotOptions{
 		Snapshots: entry.Snapshots,
@@ -433,19 +449,19 @@ func runWithChangesToWithRunner(stdout io.Writer, payload string, runArgs []stri
 		Required:  entry.SnapshotRequired,
 		Events:    entry.SnapshotEvents,
 	})
-	summary, err := detectRunChangesWithOptions(payload, runArgs, envFile, storedArgs, alwaysDeployPayload)
+	summary, err := detectRunChangesWithOptions(ctx, payload, runArgs, envFile, storedArgs, alwaysDeployPayload)
 	if err != nil {
 		return err
 	}
-	return applyRunChangeSummary(stdout, payload, runArgs, envFile, summary, forceDeploy, runner)
+	return applyRunChangeSummary(ctx, stdout, payload, runArgs, envFile, summary, forceDeploy, runner)
 }
 
-func applyRunChangeSummary(stdout io.Writer, payload string, runArgs []string, envFile string, summary runChangeSummary, forceDeploy bool, runner runPayloadFunc) error {
+func applyRunChangeSummary(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, summary runChangeSummary, forceDeploy bool, runner runPayloadContextFunc) error {
 	if !summary.hasChanges() {
-		return applyUnchangedRun(stdout, payload, runArgs, forceDeploy, runner)
+		return applyUnchangedRun(ctx, stdout, payload, runArgs, forceDeploy, runner)
 	}
 	if summary.envChanged {
-		if err := runEnvCopy(envFile); err != nil {
+		if err := runEnvCopyContext(ctx, envFile); err != nil {
 			return err
 		}
 		if err := writeRunChangeLine(stdout, "Updated env file"); err != nil {
@@ -453,7 +469,7 @@ func applyRunChangeSummary(stdout io.Writer, payload string, runArgs []string, e
 		}
 	}
 	if summary.requiresRun() {
-		if err := runner(payload, runArgs); err != nil {
+		if err := runner(ctx, payload, runArgs); err != nil {
 			return err
 		}
 		return writeRunDeployStatus(stdout, summary)
@@ -461,14 +477,14 @@ func applyRunChangeSummary(stdout io.Writer, payload string, runArgs []string, e
 	return nil
 }
 
-func applyUnchangedRun(stdout io.Writer, payload string, runArgs []string, forceDeploy bool, runner runPayloadFunc) error {
+func applyUnchangedRun(ctx context.Context, stdout io.Writer, payload string, runArgs []string, forceDeploy bool, runner runPayloadContextFunc) error {
 	if !forceDeploy {
 		return writeRunChangeLine(stdout, "No changes detected")
 	}
 	if err := writeRunChangeLine(stdout, "No changes detected, forcing deploy"); err != nil {
 		return err
 	}
-	return runner(payload, runArgs)
+	return runner(ctx, payload, runArgs)
 }
 
 func writeRunDeployStatus(stdout io.Writer, summary runChangeSummary) error {
@@ -487,10 +503,10 @@ func writeRunChangeLine(stdout io.Writer, format string, args ...any) error {
 }
 
 func detectRunChanges(payload string, runArgs []string, envFile string, storedArgs []string) (runChangeSummary, error) {
-	return detectRunChangesWithOptions(payload, runArgs, envFile, storedArgs, false)
+	return detectRunChangesWithOptions(context.Background(), payload, runArgs, envFile, storedArgs, false)
 }
 
-func detectRunChangesWithOptions(payload string, runArgs []string, envFile string, storedArgs []string, alwaysDeployPayload bool) (runChangeSummary, error) {
+func detectRunChangesWithOptions(ctx context.Context, payload string, runArgs []string, envFile string, storedArgs []string, alwaysDeployPayload bool) (runChangeSummary, error) {
 	summary := runChangeSummary{
 		argsChanged: runArgsChanged(normalizeRunArgs(runArgs), storedArgs),
 	}
@@ -499,7 +515,7 @@ func detectRunChangesWithOptions(payload string, runArgs []string, envFile strin
 		needs.payloadHash = false
 		needs.alwaysDeployPayload = true
 	}
-	remoteHashes, supported, err := fetchHashesForRunChanges(needs)
+	remoteHashes, supported, err := fetchHashesForRunChanges(ctx, needs)
 	if err != nil {
 		return summary, err
 	}
@@ -538,11 +554,11 @@ func runArgsChanged(currentArgs []string, storedArgs []string) bool {
 	return !reflect.DeepEqual(currentArgs, storedArgs)
 }
 
-func fetchHashesForRunChanges(needs runChangeNeeds) (catchrpc.ArtifactHashesResponse, bool, error) {
+func fetchHashesForRunChanges(ctx context.Context, needs runChangeNeeds) (catchrpc.ArtifactHashesResponse, bool, error) {
 	if !needs.remoteHashes() {
 		return catchrpc.ArtifactHashesResponse{}, true, nil
 	}
-	return fetchRemoteArtifactHashesFn(context.Background(), getService())
+	return fetchRemoteArtifactHashesFn(ctx, getService())
 }
 
 func summaryForUnsupportedHashes(summary runChangeSummary, payload string, needs runChangeNeeds) runChangeSummary {
