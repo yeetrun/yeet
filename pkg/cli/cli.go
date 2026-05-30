@@ -47,6 +47,7 @@ type RunFlags struct {
 	Restart          bool
 	Pull             bool
 	Force            bool
+	Web              bool
 	Publish          []string
 	EnvFile          string
 	ServiceRoot      string
@@ -174,6 +175,7 @@ type runFlagsParsed struct {
 	Restart          bool     `flag:"restart" default:"true"`
 	Pull             bool     `flag:"pull"`
 	Force            bool     `flag:"force"`
+	Web              bool     `flag:"web"`
 	Publish          []string `flag:"publish" short:"p"`
 	EnvFile          string   `flag:"env-file"`
 	ServiceRoot      string   `flag:"service-root"`
@@ -323,7 +325,10 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}},
 	"restart":  {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
 	"rollback": {Name: "rollback", Description: "Rollback a service", ArgsSchema: ServiceArgs{}},
-	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>]", Examples: []string{
+	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC PAYLOAD [--web] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>]", Examples: []string{
+		"yeet run --web",
+		"yeet run --web <svc>",
+		"yeet run --web <svc> ./compose.yml",
 		"yeet run <svc> ./bin/<svc> -- --app-flag value",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
 		"yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs",
@@ -582,6 +587,7 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		Restart:          parsed.Flags.Restart,
 		Pull:             parsed.Flags.Pull,
 		Force:            parsed.Flags.Force,
+		Web:              parsed.Flags.Web,
 		Publish:          parsed.Flags.Publish,
 		EnvFile:          parsed.Flags.EnvFile,
 		ServiceRoot:      parsed.Flags.ServiceRoot,
