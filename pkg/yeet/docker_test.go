@@ -229,7 +229,7 @@ func TestPushImageWithDepsPlansTagPushAndCleanup(t *testing.T) {
 		host: func(context.Context) (string, error) {
 			return "catch.example.ts.net", nil
 		},
-		imageExists: func(image string) bool {
+		imageExists: func(ctx context.Context, image string) bool {
 			return image == "registry.example.com/team/app:v1"
 		},
 		push: func(ctx context.Context, source, target string) error {
@@ -255,7 +255,7 @@ func TestPushImageWithDepsErrors(t *testing.T) {
 		host: func(context.Context) (string, error) {
 			return "", wantHostErr
 		},
-		imageExists: func(string) bool {
+		imageExists: func(context.Context, string) bool {
 			t.Fatal("imageExists should not be called after host error")
 			return false
 		},
@@ -272,7 +272,7 @@ func TestPushImageWithDepsErrors(t *testing.T) {
 		host: func(context.Context) (string, error) {
 			return "catch.example.ts.net", nil
 		},
-		imageExists: func(image string) bool {
+		imageExists: func(ctx context.Context, image string) bool {
 			return image == "other:tag"
 		},
 		push: func(context.Context, string, string) error {
@@ -289,7 +289,7 @@ func TestPushImageWithDepsErrors(t *testing.T) {
 		host: func(context.Context) (string, error) {
 			return "catch.example.ts.net", nil
 		},
-		imageExists: func(string) bool {
+		imageExists: func(context.Context, string) bool {
 			return true
 		},
 		push: func(context.Context, string, string) error {
@@ -318,10 +318,10 @@ fi
 exit 1
 `)
 
-	if !imageExists("present:latest") {
+	if !imageExists(context.Background(), "present:latest") {
 		t.Fatal("imageExists present image = false, want true")
 	}
-	if imageExists("missing:latest") {
+	if imageExists(context.Background(), "missing:latest") {
 		t.Fatal("imageExists missing image = true, want false")
 	}
 }
@@ -329,8 +329,18 @@ exit 1
 func TestImageExistsReturnsFalseOnDockerError(t *testing.T) {
 	fakeDockerInPath(t, "exit 1\n")
 
-	if imageExists("present:latest") {
+	if imageExists(context.Background(), "present:latest") {
 		t.Fatal("imageExists docker error = true, want false")
+	}
+}
+
+func TestImageExistsHonorsContextCancellation(t *testing.T) {
+	fakeDockerInPath(t, "sleep 10\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if imageExists(ctx, "present:latest") {
+		t.Fatal("imageExists canceled context = true, want false")
 	}
 }
 

@@ -1797,7 +1797,7 @@ func TestSvcRunPayloadScanningAndFallbacks(t *testing.T) {
 
 	preserveSvcCommandGlobals(t)
 	serviceOverride = "svc-a"
-	imageExistsFn = func(string) bool { return false }
+	imageExistsFn = func(context.Context, string) bool { return false }
 	if err := runRun("not-a-known-payload", nil); err == nil || !strings.Contains(err.Error(), "unknown payload") {
 		t.Fatalf("runRun unknown error = %v", err)
 	}

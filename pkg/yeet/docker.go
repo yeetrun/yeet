@@ -110,9 +110,9 @@ func do(f ...func() error) error {
 	return nil
 }
 
-func imageExists(imageName string) bool {
+func imageExists(ctx context.Context, imageName string) bool {
 	// Execute the Docker command to list images
-	cmd := exec.Command("docker", "images", "-q", imageName)
+	cmd := exec.CommandContext(ctx, "docker", "images", "-q", imageName)
 	output, err := cmd.Output()
 
 	// If there's an error or no output, the image doesn't exist
@@ -184,7 +184,7 @@ func pushImage(ctx context.Context, _ string, image, tag string) error {
 
 type pushImageDeps struct {
 	host        func(context.Context) (string, error)
-	imageExists func(string) bool
+	imageExists func(context.Context, string) bool
 	push        func(context.Context, string, string) error
 }
 
@@ -193,7 +193,7 @@ func pushImageWithDeps(ctx context.Context, image, tag string, deps pushImageDep
 	if err != nil {
 		return err
 	}
-	if !deps.imageExists(image) {
+	if !deps.imageExists(ctx, image) {
 		return fmt.Errorf("image %s does not exist", image)
 	}
 	imgName, err := pushTargetImageName(host, image, tag)
@@ -232,8 +232,12 @@ func runDockerPush(ctx context.Context, source, target string) error {
 	return do(
 		func() error { return exec.CommandContext(ctx, "docker", "tag", source, target).Run() },
 		func() error { return cmdutil.NewStdCmdContext(ctx, "docker", "push", target).Run() },
-		func() error { return exec.CommandContext(ctx, "docker", "rmi", target).Run() },
+		func() error { return removeDockerImage(ctx, target) },
 	)
+}
+
+func removeDockerImage(ctx context.Context, image string) error {
+	return exec.CommandContext(ctx, "docker", "rmi", image).Run()
 }
 
 func pushAllLocalImages(ctx context.Context, s, goos, goarch string) error {
