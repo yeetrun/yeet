@@ -429,6 +429,9 @@ func TestHandleSvcCmdRunWebWithoutServiceRoutesToLocalWeb(t *testing.T) {
 	if len(got.Args) != 0 {
 		t.Fatalf("runWeb request args = %#v, want empty", got.Args)
 	}
+	if got.Service != "" {
+		t.Fatalf("runWeb request service = %q, want empty", got.Service)
+	}
 }
 
 func TestHandleSvcCmdRunWebInvalidBoolReturnsParseError(t *testing.T) {
