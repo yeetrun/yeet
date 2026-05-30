@@ -11,9 +11,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 func TestExtractRunWebFlag(t *testing.T) {
@@ -213,6 +218,52 @@ func TestRunWebStartsLocalhostServerAndOpensBrowser(t *testing.T) {
 	}
 	if token := parsed.Query().Get("token"); len(token) != 48 {
 		t.Fatalf("token length = %d, want 48", len(token))
+	}
+}
+
+func TestRunWebReturnsAfterSuccessfulDeploy(t *testing.T) {
+	oldOpenBrowser := openBrowserFn
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftFn
+	defer func() {
+		openBrowserFn = oldOpenBrowser
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+		return nil
+	}
+
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	openBrowserFn = func(rawURL string) error {
+		go func() {
+			parsed, err := url.Parse(rawURL)
+			if err != nil {
+				return
+			}
+			parsed.Path = "/api/deploy"
+			_, _ = http.Post(parsed.String(), "application/json", strings.NewReader(`{"service":"svc-a","host":"host-a","payload":"run.sh"}`))
+		}()
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	err := runWeb(ctx, runWebRequest{Out: &out, Err: io.Discard})
+	if err != nil {
+		t.Fatalf("runWeb error = %v, want nil", err)
+	}
+	if !strings.Contains(out.String(), "Deployment finished") {
+		t.Fatalf("output = %q, want deployment finished message", out.String())
 	}
 }
 
