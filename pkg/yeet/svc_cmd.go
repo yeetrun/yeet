@@ -362,7 +362,7 @@ func handleSvcRun(req svcCommandRequest) error {
 			Args:         webArgs,
 			Config:       req.Config,
 			HostOverride: req.HostOverride,
-			Service:      req.Service,
+			Service:      runWebRequestService(req.Service),
 			Out:          os.Stdout,
 			Err:          os.Stderr,
 		})
@@ -383,6 +383,13 @@ func handleSvcRun(req svcCommandRequest) error {
 		return err
 	}
 	return executeRunDraft(context.Background(), draft, req.Config, false)
+}
+
+func runWebRequestService(service string) string {
+	if serviceOverride == "" && service == systemServiceName {
+		return ""
+	}
+	return service
 }
 
 func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride string) (parsedSvcRun, error) {
