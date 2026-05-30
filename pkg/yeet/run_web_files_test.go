@@ -58,3 +58,46 @@ func TestListRunWebFilesRejectsSymlinkEscape(t *testing.T) {
 		t.Fatal("listRunWebFiles symlink escape succeeded, want error")
 	}
 }
+
+func TestListRunWebFilesRejectsListedSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "outside")); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	_, err := listRunWebFiles(root, ".")
+	if err == nil {
+		t.Fatal("listRunWebFiles listed symlink escape succeeded, want error")
+	}
+}
+
+func TestListRunWebFilesClassifiesSafeSymlinkTargets(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "real-dir"), 0o755); err != nil {
+		t.Fatalf("mkdir real-dir: %v", err)
+	}
+	script := filepath.Join(root, "real-script")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "real-dir"), filepath.Join(root, "dir-link")); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+	if err := os.Symlink(script, filepath.Join(root, "script-link")); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	got, err := listRunWebFiles(root, ".")
+	if err != nil {
+		t.Fatalf("listRunWebFiles: %v", err)
+	}
+	dirLink := got.entry("dir-link")
+	if dirLink == nil || !dirLink.Dir {
+		t.Fatalf("dir-link entry = %#v, want directory", dirLink)
+	}
+	scriptLink := got.entry("script-link")
+	if scriptLink == nil || !scriptLink.LikelyPayload {
+		t.Fatalf("script-link entry = %#v, want likely payload", scriptLink)
+	}
+}
