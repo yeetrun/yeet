@@ -76,7 +76,7 @@ func extractRunWebFlag(args []string) ([]string, bool, error) {
 	return out, web, nil
 }
 
-func newRunWebBootstrap(cfg *projectConfigLocation, hostOverride string, args []string) runWebBootstrap {
+func newRunWebBootstrap(cfg *projectConfigLocation, hostOverride string, service string, args []string) runWebBootstrap {
 	cwd, _ := os.Getwd()
 	selected := strings.TrimSpace(hostOverride)
 	if selected == "" {
@@ -86,7 +86,7 @@ func newRunWebBootstrap(cfg *projectConfigLocation, hostOverride string, args []
 		CWD:          cwd,
 		Hosts:        runWebHostCandidates(cfg, hostOverride),
 		SelectedHost: selected,
-		Prefill:      runWebPrefillFromArgs(args),
+		Prefill:      runWebPrefillFromArgs(service, args),
 		Options: runWebOptionHints{
 			NetworkModes:  []string{"host", "svc", "ts", "lan", "macvlan"},
 			SnapshotModes: []string{"inherit", "on", "off"},
@@ -98,25 +98,37 @@ func newRunWebBootstrap(cfg *projectConfigLocation, hostOverride string, args []
 	return boot
 }
 
-func runWebPrefillFromArgs(args []string) runWebPrefill {
-	prefill := runWebPrefill{Service: strings.TrimSpace(serviceOverride)}
+func runWebPrefillFromArgs(service string, args []string) runWebPrefill {
+	prefill := runWebPrefill{Service: strings.TrimSpace(service)}
 	if len(args) == 0 {
 		return prefill
 	}
 	if prefill.Service != "" {
-		if args[0] == prefill.Service && len(args) > 1 {
-			prefill.Payload = args[1]
+		payload, runArgs, err := splitRunPayloadArgs(args)
+		if err != nil {
 			return prefill
 		}
-		prefill.Payload = args[0]
+		if payload == prefill.Service {
+			payload, _, err = splitRunPayloadArgs(runArgs)
+			if err != nil {
+				return prefill
+			}
+		}
+		prefill.Payload = payload
 		return prefill
 	}
-	if len(args) > 1 {
-		prefill.Service = args[0]
-		prefill.Payload = args[1]
+
+	first, runArgs, err := splitRunPayloadArgs(args)
+	if err != nil {
 		return prefill
 	}
-	prefill.Payload = args[0]
+	second, _, err := splitRunPayloadArgs(runArgs)
+	if err != nil {
+		prefill.Payload = first
+		return prefill
+	}
+	prefill.Service = first
+	prefill.Payload = second
 	return prefill
 }
 
@@ -183,18 +195,15 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	}
 	defer func() { _ = listener.Close() }()
 
-	bootstrap := newRunWebBootstrap(req.Config, req.HostOverride, req.Args)
+	bootstrap := newRunWebBootstrap(req.Config, req.HostOverride, req.Service, req.Args)
 	_ = bootstrap
 
 	url := fmt.Sprintf("http://%s/?token=%s", listener.Addr().String(), token)
-	if err := openBrowserFn(url); err != nil {
-		return fmt.Errorf("open browser: %w", err)
-	}
 	out := req.Out
 	if out == nil {
 		out = os.Stdout
 	}
-	if _, err := fmt.Fprintf(out, "Opening yeet web run at %s\nIf the browser does not open, paste this URL into your browser.\n", url); err != nil {
+	if _, err := fmt.Fprintf(out, "yeet web run server is not implemented yet.\nLocal placeholder URL: %s\n", url); err != nil {
 		return err
 	}
 	return fmt.Errorf("web run server is not implemented yet")
