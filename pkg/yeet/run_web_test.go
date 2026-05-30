@@ -57,7 +57,7 @@ func TestRunWebBootstrapUsesProjectHostsEnvAndPrefs(t *testing.T) {
 	oldService := serviceOverride
 	defer func() { loadedPrefs = oldPrefs; serviceOverride = oldService }()
 	loadedPrefs.DefaultHost = "prefs-host"
-	serviceOverride = "svc-a"
+	serviceOverride = "global-svc"
 	t.Setenv("CATCH_HOST", "env-host")
 	cfg := &projectConfigLocation{
 		Dir: t.TempDir(),
@@ -67,7 +67,7 @@ func TestRunWebBootstrapUsesProjectHostsEnvAndPrefs(t *testing.T) {
 			Services: []ServiceEntry{{Name: "svc-a", Host: "service-host"}},
 		},
 	}
-	boot := newRunWebBootstrap(cfg, "override-host", []string{"svc-a", "./compose.yml"})
+	boot := newRunWebBootstrap(cfg, "override-host", "svc-a", []string{"svc-a", "./compose.yml"})
 	wantHosts := []string{"env-host", "override-host", "prefs-host", "service-host", "toml-host"}
 	if !reflect.DeepEqual(boot.Hosts, wantHosts) {
 		t.Fatalf("hosts = %#v, want %#v", boot.Hosts, wantHosts)
@@ -77,6 +77,20 @@ func TestRunWebBootstrapUsesProjectHostsEnvAndPrefs(t *testing.T) {
 	}
 	if boot.Prefill.Service != "svc-a" || boot.Prefill.Payload != "./compose.yml" {
 		t.Fatalf("Prefill = %#v, want service/payload", boot.Prefill)
+	}
+}
+
+func TestRunWebBootstrapPrefillUsesRequestServiceAndRunFlags(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+	serviceOverride = "global-svc"
+
+	boot := newRunWebBootstrap(nil, "", "svc-a", []string{"--net=svc", "./compose.yml"})
+	if boot.Prefill.Service != "svc-a" {
+		t.Fatalf("Prefill.Service = %q, want request service", boot.Prefill.Service)
+	}
+	if boot.Prefill.Payload != "./compose.yml" {
+		t.Fatalf("Prefill.Payload = %q, want flag-aware payload", boot.Prefill.Payload)
 	}
 }
 
@@ -134,7 +148,7 @@ func TestSvcRunWebRoutesToLocalWeb(t *testing.T) {
 	}
 }
 
-func TestRunWebOpensLocalhostURLAndReturnsPlaceholder(t *testing.T) {
+func TestRunWebWritesLocalhostPlaceholderWithoutOpeningBrowser(t *testing.T) {
 	oldOpenBrowser := openBrowserFn
 	defer func() { openBrowserFn = oldOpenBrowser }()
 
@@ -152,23 +166,32 @@ func TestRunWebOpensLocalhostURLAndReturnsPlaceholder(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "web run server is not implemented yet") {
 		t.Fatalf("runWeb error = %v, want placeholder", err)
 	}
-	if opened == "" {
-		t.Fatal("openBrowserFn was not called")
+	if opened != "" {
+		t.Fatalf("openBrowserFn called with %q, want no browser side effect", opened)
 	}
-	parsed, parseErr := url.Parse(opened)
+	rawURL := runWebPlaceholderURL(t, out.String())
+	parsed, parseErr := url.Parse(rawURL)
 	if parseErr != nil {
-		t.Fatalf("url.Parse(%q): %v", opened, parseErr)
+		t.Fatalf("url.Parse(%q): %v", rawURL, parseErr)
 	}
 	if parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" {
-		t.Fatalf("opened URL = %q, want localhost http URL", opened)
+		t.Fatalf("placeholder URL = %q, want localhost http URL", rawURL)
 	}
 	if parsed.Port() == "" {
-		t.Fatalf("opened URL = %q, want allocated port", opened)
+		t.Fatalf("placeholder URL = %q, want allocated port", rawURL)
 	}
 	if token := parsed.Query().Get("token"); len(token) != 48 {
 		t.Fatalf("token length = %d, want 48", len(token))
 	}
-	if !strings.Contains(out.String(), opened) {
-		t.Fatalf("output = %q, want opened URL", out.String())
+}
+
+func runWebPlaceholderURL(t *testing.T, output string) string {
+	t.Helper()
+	for _, field := range strings.Fields(output) {
+		if strings.HasPrefix(field, "http://127.0.0.1:") {
+			return strings.TrimSpace(field)
+		}
 	}
+	t.Fatalf("output = %q, want localhost URL", output)
+	return ""
 }

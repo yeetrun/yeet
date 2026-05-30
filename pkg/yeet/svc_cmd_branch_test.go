@@ -431,6 +431,20 @@ func TestHandleSvcCmdRunWebWithoutServiceRoutesToLocalWeb(t *testing.T) {
 	}
 }
 
+func TestHandleSvcCmdRunWebInvalidBoolReturnsParseError(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	useTempSvcCwd(t)
+	serviceOverride = ""
+
+	err := HandleSvcCmd([]string{"run", "--web=wat"})
+	if err == nil || !strings.Contains(err.Error(), "invalid --web value") {
+		t.Fatalf("HandleSvcCmd run --web=wat error = %v, want invalid web value", err)
+	}
+	if strings.Contains(err.Error(), "requires a service name") {
+		t.Fatalf("HandleSvcCmd run --web=wat error = %v, want parse error before missing service", err)
+	}
+}
+
 func TestSvcRunWebFlagAfterTerminatorDoesNotTriggerGuard(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	useTempSvcCwd(t)
