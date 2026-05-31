@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -138,6 +139,56 @@ func TestRunWebJobSubscribeCancelClosesDoneAndChannel(t *testing.T) {
 	cancel()
 
 	assertRunWebJobSubscriptionClosed(t, ch, done)
+}
+
+func TestRunWebJobSubscriberCloseEventuallyPrintsBrowserCloseNotice(t *testing.T) {
+	var notice runWebLockedBuffer
+	job := newRunWebJob("job-a", runWebJobConfig{Notice: &notice})
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, done := job.subscribe(ctx, 0)
+
+	cancel()
+	assertRunWebJobSubscriptionClosed(t, ch, done)
+	waitRunWebNotice(t, &notice, runWebBrowserClosedMessage)
+
+	ctx, cancel = context.WithCancel(context.Background())
+	ch, done = job.subscribe(ctx, 0)
+	cancel()
+	assertRunWebJobSubscriptionClosed(t, ch, done)
+	waitRunWebNotice(t, &notice, runWebBrowserClosedMessage)
+}
+
+func TestRunWebJobSubscriberCloseAfterSuccessDoesNotPrintBrowserCloseNotice(t *testing.T) {
+	var notice runWebLockedBuffer
+	job := newRunWebJob("job-a", runWebJobConfig{Notice: &notice})
+	ctx, cancel := context.WithCancel(context.Background())
+	ch, done := job.subscribe(ctx, 0)
+
+	cancel()
+	assertRunWebJobSubscriptionClosed(t, ch, done)
+	job.finish(nil)
+	assertNoRunWebNoticeAfter(t, &notice, 850*time.Millisecond)
+}
+
+func TestRunWebJobSubscriberCloseDoesNotPrintBrowserCloseNoticeWhenAnotherSubscriberRemains(t *testing.T) {
+	var notice runWebLockedBuffer
+	job := newRunWebJob("job-a", runWebJobConfig{Notice: &notice})
+	firstCtx, firstCancel := context.WithCancel(context.Background())
+	firstCh, firstDone := job.subscribe(firstCtx, 0)
+	secondCtx, secondCancel := context.WithCancel(context.Background())
+	secondCh, secondDone := job.subscribe(secondCtx, 0)
+	defer func() {
+		secondCancel()
+		<-secondDone
+	}()
+
+	firstCancel()
+	assertRunWebJobSubscriptionClosed(t, firstCh, firstDone)
+	assertNoRunWebNoticeAfter(t, &notice, 850*time.Millisecond)
+
+	secondCancel()
+	assertRunWebJobSubscriptionClosed(t, secondCh, secondDone)
+	waitRunWebNotice(t, &notice, runWebBrowserClosedMessage)
 }
 
 func TestRunWebJobFinishIsIdempotent(t *testing.T) {
@@ -406,10 +457,54 @@ func assertRunWebJobSubscriptionClosed(t *testing.T, ch <-chan runWebStreamEvent
 	}
 }
 
+func waitRunWebNotice(t *testing.T, notice interface{ String() string }, want string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if got := notice.String(); got == want {
+			return
+		} else if got != "" && got != want {
+			t.Fatalf("notice = %q, want %q", got, want)
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline:
+			t.Fatalf("timed out waiting for notice %q; got %q", want, notice.String())
+		}
+	}
+}
+
+func assertNoRunWebNoticeAfter(t *testing.T, notice interface{ String() string }, d time.Duration) {
+	t.Helper()
+	time.Sleep(d)
+	if got := notice.String(); got != "" {
+		t.Fatalf("notice = %q, want none", got)
+	}
+}
+
 type errRunWebJobWriter struct {
 	err error
 }
 
 func (w errRunWebJobWriter) Write([]byte) (int, error) {
 	return 0, w.err
+}
+
+type runWebLockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *runWebLockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *runWebLockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
