@@ -424,6 +424,7 @@ func remoteExecExitError(code int, rawMode bool, out *trackingWriter) error {
 }
 
 var execRemoteFn = execRemote
+var execRemoteToFn = execRemoteTo
 var execRemoteOutputFn = execRemoteOutput
 var execRemoteStreamFn = execRemoteStream
 var remoteCatchOSAndArchFn = remoteCatchOSAndArch

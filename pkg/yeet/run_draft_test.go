@@ -278,6 +278,61 @@ func TestExecuteRunDraftRejectsInvalidDraftBeforeRemote(t *testing.T) {
 	}
 }
 
+func TestExecuteRunDraftWithOptionsWritesDeployOutputToProvidedWriter(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldExecTo := execRemoteToFn
+	oldRemoteArch := remoteCatchOSAndArchFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	defer func() {
+		execRemoteToFn = oldExecTo
+		remoteCatchOSAndArchFn = oldRemoteArch
+		fetchRemoteArtifactHashesFn = oldHashes
+	}()
+
+	serviceOverride = "svc-a"
+	hostOverride = "host-a"
+	hostOverrideSet = true
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+	execRemoteToFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		if service != "svc-a" {
+			t.Fatalf("execRemoteToFn service = %q, want svc-a", service)
+		}
+		if _, err := io.WriteString(stdout, "installing service\n"); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	tmpDir := t.TempDir()
+	payload := filepath.Join(tmpDir, "compose.yml")
+	if err := os.WriteFile(payload, []byte("services:\n  svc-a:\n    image: alpine:latest\n"), 0o644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	cfgLoc := &projectConfigLocation{
+		Path:   filepath.Join(tmpDir, projectConfigName),
+		Dir:    tmpDir,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+
+	var out strings.Builder
+	err := executeRunDraftWithOptions(context.Background(), RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: payload,
+	}, cfgLoc, runDraftExecuteOptions{Stdout: &out, ForceDeploy: true})
+	if err != nil {
+		t.Fatalf("executeRunDraftWithOptions: %v", err)
+	}
+	if !strings.Contains(out.String(), "installing service") {
+		t.Fatalf("stdout = %q, want deploy output", out.String())
+	}
+}
+
 func TestExecuteRunDraftSkipsServiceInfoOutsideNewOnlyMode(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	oldTryImage := tryRunRemoteImageFn

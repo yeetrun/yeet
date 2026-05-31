@@ -1084,11 +1084,43 @@ func runRunContext(ctx context.Context, payload string, args []string) error {
 	return fmt.Errorf("unknown payload: %s", payload)
 }
 
+func runRunContextWithOutput(ctx context.Context, stdout io.Writer, payload string, args []string) error {
+	if isStdoutWriter(stdout) {
+		return runRunContext(ctx, payload, args)
+	}
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	for _, try := range runContextWithOutputAttempts {
+		ok, err := try(ctx, stdout, payload, args)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown payload: %s", payload)
+}
+
+type runContextWithOutputAttempt func(context.Context, io.Writer, string, []string) (bool, error)
+
+var runContextWithOutputAttempts = []runContextWithOutputAttempt{
+	tryRunDockerfileContextWithOutput,
+	tryRunFileContextWithOutput,
+	tryRunRemoteImageContextWithOutput,
+	tryRunDockerContextWithOutput,
+}
+
 func tryRunDockerfile(path string, args []string) (ok bool, _ error) {
 	return tryRunDockerfileContext(context.Background(), path, args)
 }
 
 func tryRunDockerfileContext(ctx context.Context, path string, args []string) (ok bool, _ error) {
+	return tryRunDockerfileContextWithOutput(ctx, os.Stdout, path, args)
+}
+
+func tryRunDockerfileContextWithOutput(ctx context.Context, stdout io.Writer, path string, args []string) (ok bool, _ error) {
 	if filepath.Base(path) != "Dockerfile" {
 		return false, nil
 	}
@@ -1103,9 +1135,15 @@ func tryRunDockerfileContext(ctx context.Context, path string, args []string) (o
 	if err := buildDockerImageForRemoteFn(ctx, path, imageName); err != nil {
 		return true, err
 	}
-	ok, err := tryRunDockerFn(ctx, imageName, args)
+	var runOK bool
+	var err error
+	if isStdoutWriter(stdout) {
+		runOK, err = tryRunDockerFn(ctx, imageName, args)
+	} else {
+		runOK, err = tryRunDockerContextWithOutput(ctx, stdout, imageName, args)
+	}
 	_ = removeDockerImageFn(ctx, imageName)
-	return ok, err
+	return runOK, err
 }
 
 const imageComposeTemplate = `services:
@@ -1121,6 +1159,10 @@ func tryRunRemoteImage(image string, args []string) (ok bool, _ error) {
 }
 
 func tryRunRemoteImageContext(ctx context.Context, image string, args []string) (ok bool, _ error) {
+	return tryRunRemoteImageContextWithOutput(ctx, os.Stdout, image, args)
+}
+
+func tryRunRemoteImageContextWithOutput(ctx context.Context, stdout io.Writer, image string, args []string) (ok bool, _ error) {
 	if !looksLikeImageRef(image) {
 		return false, nil
 	}
@@ -1139,7 +1181,7 @@ func tryRunRemoteImageContext(ctx context.Context, image string, args []string) 
 	if err := os.WriteFile(composePath, []byte(content), 0o644); err != nil {
 		return true, err
 	}
-	return runFilePayloadContext(ctx, composePath, args, false)
+	return runFilePayloadContextWithOutput(ctx, stdout, composePath, args, false)
 }
 
 func looksLikeImageRef(payload string) bool {
@@ -1166,6 +1208,10 @@ func looksLikeImageRef(payload string) bool {
 }
 
 func tryRunFileContext(ctx context.Context, file string, args []string) (ok bool, _ error) {
+	return tryRunFileContextWithOutput(ctx, os.Stdout, file, args)
+}
+
+func tryRunFileContextWithOutput(ctx context.Context, stdout io.Writer, file string, args []string) (ok bool, _ error) {
 	if st, err := os.Stat(file); os.IsNotExist(err) || st != nil && st.IsDir() {
 		// If the file does not exist or is a directory, it's not an error
 		// (yet), it could be another deployment method (i.e. docker)
@@ -1177,7 +1223,7 @@ func tryRunFileContext(ctx context.Context, file string, args []string) (ok bool
 		// If it's a different error, return it
 		return false, err
 	}
-	return runFilePayloadContext(ctx, file, args, true)
+	return runFilePayloadContextWithOutput(ctx, stdout, file, args, true)
 }
 
 type runFileUpload struct {
@@ -1193,6 +1239,10 @@ func runFilePayload(file string, args []string, pushLocalImages bool) (ok bool, 
 }
 
 func runFilePayloadContext(ctx context.Context, file string, args []string, pushLocalImages bool) (ok bool, _ error) {
+	return runFilePayloadContextWithOutput(ctx, os.Stdout, file, args, pushLocalImages)
+}
+
+func runFilePayloadContextWithOutput(ctx context.Context, stdout io.Writer, file string, args []string, pushLocalImages bool) (ok bool, _ error) {
 	upload, err := prepareRunFileUpload(file, args, pushLocalImages)
 	if err != nil {
 		return false, err
@@ -1203,8 +1253,14 @@ func runFilePayloadContext(ctx context.Context, file string, args []string, push
 	if err := pushRunFileLocalImages(ctx, svc, upload, pushLocalImages); err != nil {
 		return false, err
 	}
-	if err := execRunFilePayload(ctx, svc, upload.payload, args); err != nil {
-		return false, err
+	var runErr error
+	if isStdoutWriter(stdout) {
+		runErr = execRunFilePayload(ctx, svc, upload.payload, args)
+	} else {
+		runErr = execRunFilePayloadWithOutput(ctx, stdout, svc, upload.payload, args)
+	}
+	if runErr != nil {
+		return false, runErr
 	}
 	return true, nil
 }
@@ -1259,9 +1315,22 @@ func pushRunFileLocalImages(ctx context.Context, svc string, upload runFileUploa
 }
 
 func execRunFilePayload(ctx context.Context, svc string, payload io.Reader, args []string) error {
+	return execRunFilePayloadWithOutput(ctx, os.Stdout, svc, payload, args)
+}
+
+func execRunFilePayloadWithOutput(ctx context.Context, stdout io.Writer, svc string, payload io.Reader, args []string) error {
+	if stdout == nil {
+		stdout = io.Discard
+	}
 	runArgs := append([]string{"run"}, args...)
-	tty := isTerminalFn(int(os.Stdout.Fd()))
-	if err := execRemoteFn(ctx, svc, runArgs, payload, tty); err != nil {
+	tty := isWriterTerminal(stdout)
+	if isStdoutWriter(stdout) {
+		if err := execRemoteFn(ctx, svc, runArgs, payload, tty); err != nil {
+			return fmt.Errorf("failed to run service: %w", err)
+		}
+		return nil
+	}
+	if err := execRemoteToFn(ctx, svc, runArgs, payload, tty, stdout); err != nil {
 		return fmt.Errorf("failed to run service: %w", err)
 	}
 	return nil
@@ -1272,6 +1341,10 @@ func tryRunDocker(image string, args []string) (ok bool, _ error) {
 }
 
 func tryRunDockerContext(ctx context.Context, image string, args []string) (ok bool, _ error) {
+	return tryRunDockerContextWithOutput(ctx, os.Stdout, image, args)
+}
+
+func tryRunDockerContextWithOutput(ctx context.Context, stdout io.Writer, image string, args []string) (ok bool, _ error) {
 	if !imageExistsFn(ctx, image) {
 		// If the image does not exist, it's not an error
 		return false, nil
@@ -1280,19 +1353,43 @@ func tryRunDockerContext(ctx context.Context, image string, args []string) (ok b
 	if err := pushImageFn(ctx, svc, image, "latest"); err != nil {
 		return false, fmt.Errorf("failed to push image: %w", err)
 	}
-	if err := stageDockerArgs(ctx, svc, args); err != nil {
+	var err error
+	if isStdoutWriter(stdout) {
+		err = stageDockerArgs(ctx, svc, args)
+	} else {
+		err = stageDockerArgsWithOutput(ctx, stdout, svc, args)
+	}
+	if err != nil {
 		return false, err
 	}
-	if err := commitDockerStage(ctx, svc); err != nil {
+	if isStdoutWriter(stdout) {
+		err = commitDockerStage(ctx, svc)
+	} else {
+		err = commitDockerStageWithOutput(ctx, stdout, svc)
+	}
+	if err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
 func stageDockerArgs(ctx context.Context, svc string, args []string) error {
+	return stageDockerArgsWithOutput(ctx, os.Stdout, svc, args)
+}
+
+func stageDockerArgsWithOutput(ctx context.Context, stdout io.Writer, svc string, args []string) error {
+	if stdout == nil {
+		stdout = io.Discard
+	}
 	if len(args) > 0 {
 		stageArgs := append([]string{"stage"}, args...)
-		if err := execRemoteDirectFn(ctx, svc, stageArgs, nil, true); err != nil {
+		var err error
+		if isStdoutWriter(stdout) {
+			err = execRemoteDirectFn(ctx, svc, stageArgs, nil, true)
+		} else {
+			err = execRemoteToFn(ctx, svc, stageArgs, nil, true, stdout)
+		}
+		if err != nil {
 			fmt.Println("failed to stage args:", err)
 			return fmt.Errorf("failed to stage args: %w", err)
 		}
@@ -1301,10 +1398,36 @@ func stageDockerArgs(ctx context.Context, svc string, args []string) error {
 }
 
 func commitDockerStage(ctx context.Context, svc string) error {
-	if err := execRemoteDirectFn(ctx, svc, []string{"stage", "commit"}, nil, true); err != nil {
+	return commitDockerStageWithOutput(ctx, os.Stdout, svc)
+}
+
+func commitDockerStageWithOutput(ctx context.Context, stdout io.Writer, svc string) error {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	var err error
+	if isStdoutWriter(stdout) {
+		err = execRemoteDirectFn(ctx, svc, []string{"stage", "commit"}, nil, true)
+	} else {
+		err = execRemoteToFn(ctx, svc, []string{"stage", "commit"}, nil, true, stdout)
+	}
+	if err != nil {
 		return errors.New("failed to run service")
 	}
 	return nil
+}
+
+func isStdoutWriter(stdout io.Writer) bool {
+	f, ok := stdout.(*os.File)
+	return ok && f == os.Stdout
+}
+
+func isWriterTerminal(stdout io.Writer) bool {
+	f, ok := stdout.(*os.File)
+	if !ok {
+		return false
+	}
+	return isTerminalFn(int(f.Fd()))
 }
 
 func runEnvCopy(file string) error {

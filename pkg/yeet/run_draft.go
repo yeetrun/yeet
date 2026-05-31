@@ -7,6 +7,7 @@ package yeet
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -262,7 +263,19 @@ func runDraftBool(v bool) *bool {
 
 var executeRunDraftFn = executeRunDraft
 
+type runDraftExecuteOptions struct {
+	Stdout      io.Writer
+	ForceDeploy bool
+}
+
 func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigLocation, forceDeploy bool) error {
+	return executeRunDraftWithOptions(ctx, draft, cfgLoc, runDraftExecuteOptions{
+		Stdout:      os.Stdout,
+		ForceDeploy: forceDeploy,
+	})
+}
+
+func executeRunDraftWithOptions(ctx context.Context, draft RunDraft, cfgLoc *projectConfigLocation, opts runDraftExecuteOptions) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -297,9 +310,20 @@ func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigL
 	}()
 
 	runArgs := draft.runArgs()
-	if err := runDraftWithChanges(ctx, draft, runArgs, forceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
+	if err := executeRunDraftOutput(ctx, opts.Stdout, draft, runArgs, opts.ForceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
 		return err
 	}
+	return saveRunDraftExecutionConfig(cfgLoc, host, draft, runArgs)
+}
+
+func executeRunDraftOutput(ctx context.Context, stdout io.Writer, draft RunDraft, runArgs []string, forceDeploy bool) error {
+	if isStdoutWriter(stdout) {
+		return runDraftWithChanges(ctx, draft, runArgs, forceDeploy)
+	}
+	return runDraftWithChangesTo(ctx, stdout, draft, runArgs, forceDeploy)
+}
+
+func saveRunDraftExecutionConfig(cfgLoc *projectConfigLocation, host string, draft RunDraft, runArgs []string) error {
 	configRunArgs := runArgsWithoutSensitiveRunOptions(runArgs)
 	if err := saveRunConfigWithPayloadKind(cfgLoc, host, draft.Payload, draft.PayloadKind, configRunArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS); err != nil {
 		return err
@@ -333,11 +357,22 @@ func runArgsWithoutSensitiveRunOptions(args []string) []string {
 }
 
 func runDraftWithChanges(ctx context.Context, draft RunDraft, runArgs []string, forceDeploy bool) error {
-	runner := runPayloadContextFunc(runRunContext)
-	if draft.PayloadKind == "local-image" {
-		runner = runLocalImagePayloadContext
+	return runDraftWithChangesTo(ctx, os.Stdout, draft, runArgs, forceDeploy)
+}
+
+func runDraftWithChangesTo(ctx context.Context, stdout io.Writer, draft RunDraft, runArgs []string, forceDeploy bool) error {
+	if stdout == nil {
+		stdout = io.Discard
 	}
-	return runWithChangesToWithContextRunner(ctx, os.Stdout, draft.Payload, runArgs, draft.EnvFile, draft.ExistingEntry, forceDeploy, runner, draft.PayloadKind == "local-image")
+	runner := func(ctx context.Context, payload string, args []string) error {
+		return runRunContextWithOutput(ctx, stdout, payload, args)
+	}
+	if draft.PayloadKind == "local-image" {
+		runner = func(ctx context.Context, payload string, args []string) error {
+			return runLocalImagePayloadContextWithOutput(ctx, stdout, payload, args)
+		}
+	}
+	return runWithChangesToWithContextRunner(ctx, stdout, draft.Payload, runArgs, draft.EnvFile, draft.ExistingEntry, forceDeploy, runner, draft.PayloadKind == "local-image")
 }
 
 func runLocalImagePayload(payload string, args []string) error {
@@ -346,6 +381,18 @@ func runLocalImagePayload(payload string, args []string) error {
 
 func runLocalImagePayloadContext(ctx context.Context, payload string, args []string) error {
 	if ok, err := tryRunDockerFn(ctx, payload, args); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	return fmt.Errorf("unknown local Docker image: %s", payload)
+}
+
+func runLocalImagePayloadContextWithOutput(ctx context.Context, stdout io.Writer, payload string, args []string) error {
+	if isStdoutWriter(stdout) {
+		return runLocalImagePayloadContext(ctx, payload, args)
+	}
+	if ok, err := tryRunDockerContextWithOutput(ctx, stdout, payload, args); err != nil {
 		return err
 	} else if ok {
 		return nil
