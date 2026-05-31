@@ -912,6 +912,14 @@ func handleSvcRemote(ctx context.Context, req svcCommandRequest) error {
 var tryRunDockerFn = tryRunDockerContext
 var buildDockerImageForRemoteFn = buildDockerImageForRemote
 var tryRunRemoteImageFn = tryRunRemoteImageContext
+var tryRunDockerfileWithOutputFn = tryRunDockerfileContextWithOutput
+var tryRunFileWithOutputFn = tryRunFileContextWithOutput
+var tryRunRemoteImageWithOutputFn = tryRunRemoteImageContextWithOutput
+var tryRunDockerWithOutputFn = tryRunDockerContextWithOutput
+var runFilePayloadWithOutputFn = runFilePayloadContextWithOutput
+var execRunFilePayloadWithOutputFn = execRunFilePayloadWithOutput
+var stageDockerArgsWithOutputFn = stageDockerArgsWithOutput
+var commitDockerStageWithOutputFn = commitDockerStageWithOutput
 var imageExistsFn = imageExists
 var pushImageFn = pushImage
 var execRemoteDirectFn = execRemote
@@ -1091,7 +1099,13 @@ func runRunContextWithOutput(ctx context.Context, stdout io.Writer, payload stri
 	if stdout == nil {
 		stdout = io.Discard
 	}
-	for _, try := range runContextWithOutputAttempts {
+	attempts := []runContextWithOutputAttempt{
+		tryRunDockerfileWithOutputFn,
+		tryRunFileWithOutputFn,
+		tryRunRemoteImageWithOutputFn,
+		tryRunDockerWithOutputFn,
+	}
+	for _, try := range attempts {
 		ok, err := try(ctx, stdout, payload, args)
 		if err != nil {
 			return err
@@ -1104,13 +1118,6 @@ func runRunContextWithOutput(ctx context.Context, stdout io.Writer, payload stri
 }
 
 type runContextWithOutputAttempt func(context.Context, io.Writer, string, []string) (bool, error)
-
-var runContextWithOutputAttempts = []runContextWithOutputAttempt{
-	tryRunDockerfileContextWithOutput,
-	tryRunFileContextWithOutput,
-	tryRunRemoteImageContextWithOutput,
-	tryRunDockerContextWithOutput,
-}
 
 func tryRunDockerfile(path string, args []string) (ok bool, _ error) {
 	return tryRunDockerfileContext(context.Background(), path, args)
@@ -1140,7 +1147,7 @@ func tryRunDockerfileContextWithOutput(ctx context.Context, stdout io.Writer, pa
 	if isStdoutWriter(stdout) {
 		runOK, err = tryRunDockerFn(ctx, imageName, args)
 	} else {
-		runOK, err = tryRunDockerContextWithOutput(ctx, stdout, imageName, args)
+		runOK, err = tryRunDockerWithOutputFn(ctx, stdout, imageName, args)
 	}
 	_ = removeDockerImageFn(ctx, imageName)
 	return runOK, err
@@ -1181,7 +1188,7 @@ func tryRunRemoteImageContextWithOutput(ctx context.Context, stdout io.Writer, i
 	if err := os.WriteFile(composePath, []byte(content), 0o644); err != nil {
 		return true, err
 	}
-	return runFilePayloadContextWithOutput(ctx, stdout, composePath, args, false)
+	return runFilePayloadWithOutputFn(ctx, stdout, composePath, args, false)
 }
 
 func looksLikeImageRef(payload string) bool {
@@ -1223,7 +1230,7 @@ func tryRunFileContextWithOutput(ctx context.Context, stdout io.Writer, file str
 		// If it's a different error, return it
 		return false, err
 	}
-	return runFilePayloadContextWithOutput(ctx, stdout, file, args, true)
+	return runFilePayloadWithOutputFn(ctx, stdout, file, args, true)
 }
 
 type runFileUpload struct {
@@ -1257,7 +1264,7 @@ func runFilePayloadContextWithOutput(ctx context.Context, stdout io.Writer, file
 	if isStdoutWriter(stdout) {
 		runErr = execRunFilePayload(ctx, svc, upload.payload, args)
 	} else {
-		runErr = execRunFilePayloadWithOutput(ctx, stdout, svc, upload.payload, args)
+		runErr = execRunFilePayloadWithOutputFn(ctx, stdout, svc, upload.payload, args)
 	}
 	if runErr != nil {
 		return false, runErr
@@ -1357,7 +1364,7 @@ func tryRunDockerContextWithOutput(ctx context.Context, stdout io.Writer, image 
 	if isStdoutWriter(stdout) {
 		err = stageDockerArgs(ctx, svc, args)
 	} else {
-		err = stageDockerArgsWithOutput(ctx, stdout, svc, args)
+		err = stageDockerArgsWithOutputFn(ctx, stdout, svc, args)
 	}
 	if err != nil {
 		return false, err
@@ -1365,7 +1372,7 @@ func tryRunDockerContextWithOutput(ctx context.Context, stdout io.Writer, image 
 	if isStdoutWriter(stdout) {
 		err = commitDockerStage(ctx, svc)
 	} else {
-		err = commitDockerStageWithOutput(ctx, stdout, svc)
+		err = commitDockerStageWithOutputFn(ctx, stdout, svc)
 	}
 	if err != nil {
 		return false, err
@@ -1390,7 +1397,9 @@ func stageDockerArgsWithOutput(ctx context.Context, stdout io.Writer, svc string
 			err = execRemoteToFn(ctx, svc, stageArgs, nil, true, stdout)
 		}
 		if err != nil {
-			fmt.Println("failed to stage args:", err)
+			if _, writeErr := fmt.Fprintln(stdout, "failed to stage args:", err); writeErr != nil {
+				return errors.Join(fmt.Errorf("failed to stage args: %w", err), fmt.Errorf("write stage failure: %w", writeErr))
+			}
 			return fmt.Errorf("failed to stage args: %w", err)
 		}
 	}
