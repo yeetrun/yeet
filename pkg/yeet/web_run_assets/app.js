@@ -137,7 +137,10 @@ function shell(value) {
 
 function updatePreview(draft) {
   const parts = ["yeet", "run"];
-  if (draft.service) parts.push(shell(draft.service));
+  const serviceTarget = draft.service && draft.host && !draft.service.includes("@")
+    ? `${draft.service}@${draft.host}`
+    : draft.service;
+  if (serviceTarget) parts.push(shell(serviceTarget));
   if (draft.payload) parts.push(shell(draft.payload));
   if (draft.envFile) parts.push(`--env-file=${shell(draft.envFile)}`);
   for (const mode of draft.network.modes) parts.push(`--net=${shell(mode)}`);
@@ -341,48 +344,176 @@ function hidePicker() {
 function createTerminalRenderer(output) {
   const decoder = new TextDecoder();
   let lines = [""];
+  let row = 0;
+  let col = 0;
   let ansiState = "normal";
+  let csi = "";
 
-  function stripANSI(text) {
-    let clean = "";
-    for (const char of text) {
-      if (ansiState === "normal") {
-        if (char === "\x1B") {
-          ansiState = "esc";
-          continue;
-        }
-        clean += char;
-        continue;
-      }
-      if (ansiState === "esc") {
-        if (char === "[") {
-          ansiState = "csi";
-          continue;
-        }
-        if (char === "]") {
-          ansiState = "osc";
-          continue;
-        }
-        ansiState = "normal";
-        continue;
-      }
-      if (ansiState === "csi") {
-        if (char >= "@" && char <= "~") ansiState = "normal";
-        continue;
-      }
-      if (ansiState === "osc") {
-        if (char === "\x07") {
-          ansiState = "normal";
-          continue;
-        }
-        if (char === "\x1B") ansiState = "oscEsc";
-        continue;
-      }
-      if (ansiState === "oscEsc") {
-        ansiState = char === "\\" ? "normal" : "osc";
-      }
+  function ensureLine() {
+    while (lines.length <= row) lines.push("");
+  }
+
+  function eraseLine(mode) {
+    ensureLine();
+    if (mode === 1) {
+      lines[row] = `${" ".repeat(Math.min(col, lines[row].length))}${lines[row].slice(col)}`;
+      return;
     }
-    return clean;
+    if (mode === 2) {
+      lines[row] = "";
+      return;
+    }
+    lines[row] = lines[row].slice(0, col);
+  }
+
+  function eraseDisplay(mode) {
+    ensureLine();
+    if (mode === 2 || mode === 3) {
+      lines = [""];
+      row = 0;
+      col = 0;
+      return;
+    }
+    if (mode === 1) {
+      for (let i = 0; i < row; i += 1) lines[i] = "";
+      lines[row] = `${" ".repeat(Math.min(col, lines[row].length))}${lines[row].slice(col)}`;
+      return;
+    }
+    lines[row] = lines[row].slice(0, col);
+    lines = lines.slice(0, row + 1);
+  }
+
+  function numbers(raw) {
+    return raw
+      .replace(/^\?/, "")
+      .split(";")
+      .filter((part) => part !== "")
+      .map((part) => Number.parseInt(part, 10))
+      .filter((num) => !Number.isNaN(num));
+  }
+
+  function firstNumber(raw, fallback) {
+    const parsed = numbers(raw);
+    return parsed.length ? parsed[0] : fallback;
+  }
+
+  function handleCSI(sequence) {
+    const command = sequence[sequence.length - 1];
+    const raw = sequence.slice(0, -1);
+    const parsed = numbers(raw);
+    const amount = parsed.length ? parsed[0] : 1;
+    switch (command) {
+      case "A":
+        row = Math.max(0, row - amount);
+        break;
+      case "B":
+        row += amount;
+        ensureLine();
+        break;
+      case "C":
+        col += amount;
+        break;
+      case "D":
+        col = Math.max(0, col - amount);
+        break;
+      case "E":
+        row += amount;
+        col = 0;
+        ensureLine();
+        break;
+      case "F":
+        row = Math.max(0, row - amount);
+        col = 0;
+        break;
+      case "G":
+        col = Math.max(0, firstNumber(raw, 1) - 1);
+        break;
+      case "H":
+      case "f":
+        row = Math.max(0, (parsed[0] || 1) - 1);
+        col = Math.max(0, (parsed[1] || 1) - 1);
+        ensureLine();
+        break;
+      case "J":
+        eraseDisplay(parsed.length ? parsed[0] : 0);
+        break;
+      case "K":
+        eraseLine(parsed.length ? parsed[0] : 0);
+        break;
+      default:
+        break;
+    }
+  }
+
+  function writeChar(char) {
+    ensureLine();
+    const line = lines[row];
+    const padded = col > line.length ? `${line}${" ".repeat(col - line.length)}` : line;
+    lines[row] = `${padded.slice(0, col)}${char}${padded.slice(col + 1)}`;
+    col += 1;
+  }
+
+  function applyChar(char) {
+    if (ansiState === "normal") {
+      if (char === "\x1B") {
+        ansiState = "esc";
+        return;
+      }
+      if (char === "\r") {
+        col = 0;
+        return;
+      }
+      if (char === "\n") {
+        row += 1;
+        col = 0;
+        ensureLine();
+        return;
+      }
+      if (char === "\b") {
+        col = Math.max(0, col - 1);
+        return;
+      }
+      if (char === "\t") {
+        const spaces = 8 - (col % 8);
+        for (let i = 0; i < spaces; i += 1) writeChar(" ");
+        return;
+      }
+      if (char >= " ") writeChar(char);
+      return;
+    }
+    if (ansiState === "esc") {
+      if (char === "[") {
+        csi = "";
+        ansiState = "csi";
+        return;
+      }
+      if (char === "]") {
+        ansiState = "osc";
+        return;
+      }
+      ansiState = "normal";
+      return;
+    }
+    if (ansiState === "csi") {
+      csi += char;
+      if (char >= "@" && char <= "~") {
+        handleCSI(csi);
+        csi = "";
+        ansiState = "normal";
+      }
+      return;
+    }
+    if (ansiState === "osc") {
+      if (char === "\x07") {
+        ansiState = "normal";
+        return;
+      }
+      if (char === "\x1B") ansiState = "oscEsc";
+      return;
+    }
+    if (ansiState === "oscEsc") {
+      ansiState = char === "\\" ? "normal" : "osc";
+    }
   }
 
   function render(shouldStick) {
@@ -391,17 +522,7 @@ function createTerminalRenderer(output) {
   }
 
   function applyText(text) {
-    for (const char of stripANSI(text)) {
-      if (char === "\r") {
-        lines[lines.length - 1] = "";
-        continue;
-      }
-      if (char === "\n") {
-        lines.push("");
-        continue;
-      }
-      lines[lines.length - 1] += char;
-    }
+    for (const char of text) applyChar(char);
   }
 
   return {
@@ -412,7 +533,10 @@ function createTerminalRenderer(output) {
     },
     clear() {
       lines = [""];
+      row = 0;
+      col = 0;
       ansiState = "normal";
+      csi = "";
       output.textContent = "";
       output.scrollTop = 0;
     },
@@ -724,13 +848,6 @@ $("upButton").addEventListener("click", () => loadFiles(parentDir(state.currentD
 $("host").addEventListener("focus", showHostPicker);
 $("host").addEventListener("click", showHostPicker);
 $("hostPickerButton").addEventListener("click", showHostPicker);
-$("terminalCopy").addEventListener("click", async () => {
-  try {
-    if (navigator.clipboard) await navigator.clipboard.writeText(state.terminal?.text() || "");
-  } catch {
-    // Clipboard access is optional in non-secure browser contexts.
-  }
-});
 $("terminalExpand").addEventListener("click", () => {
   const sheet = $("terminalSheet");
   const expanded = sheet.dataset.expanded !== "true";
