@@ -528,6 +528,7 @@ legend {
   border-radius: 8px 8px 0 0;
   background: oklch(0.14 0.011 165);
   box-shadow: 0 -16px 42px color-mix(in oklch, var(--canvas) 70%, transparent);
+  overflow: hidden;
 }
 
 .terminal-sheet[hidden] {
