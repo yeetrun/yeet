@@ -132,6 +132,108 @@ func TestRunFilePayloadComposeBranches(t *testing.T) {
 	}
 }
 
+func TestRunRunContextWithOutputUsesWriterAwarePayloadSeams(t *testing.T) {
+	oldDockerfile := tryRunDockerfileWithOutputFn
+	oldFile := tryRunFileWithOutputFn
+	oldRemoteImage := tryRunRemoteImageWithOutputFn
+	oldDocker := tryRunDockerWithOutputFn
+	defer func() {
+		tryRunDockerfileWithOutputFn = oldDockerfile
+		tryRunFileWithOutputFn = oldFile
+		tryRunRemoteImageWithOutputFn = oldRemoteImage
+		tryRunDockerWithOutputFn = oldDocker
+	}()
+
+	tryRunDockerfileWithOutputFn = func(ctx context.Context, stdout io.Writer, payload string, args []string) (bool, error) {
+		return false, nil
+	}
+	tryRunFileWithOutputFn = func(ctx context.Context, stdout io.Writer, payload string, args []string) (bool, error) {
+		return false, nil
+	}
+	tryRunRemoteImageWithOutputFn = func(ctx context.Context, stdout io.Writer, payload string, args []string) (bool, error) {
+		if payload != "registry.example/app:latest" {
+			t.Fatalf("payload = %q, want registry.example/app:latest", payload)
+		}
+		_, _ = io.WriteString(stdout, "remote image output\n")
+		return true, nil
+	}
+	tryRunDockerWithOutputFn = func(ctx context.Context, stdout io.Writer, payload string, args []string) (bool, error) {
+		t.Fatalf("docker fallback should not run")
+		return false, nil
+	}
+
+	var out strings.Builder
+	if err := runRunContextWithOutput(context.Background(), &out, "registry.example/app:latest", nil); err != nil {
+		t.Fatalf("runRunContextWithOutput: %v", err)
+	}
+	if got := out.String(); got != "remote image output\n" {
+		t.Fatalf("output = %q, want remote image output", got)
+	}
+}
+
+func TestRunLocalImagePayloadContextWithOutputUsesWriterAwareDockerSeam(t *testing.T) {
+	oldDocker := tryRunDockerWithOutputFn
+	defer func() {
+		tryRunDockerWithOutputFn = oldDocker
+	}()
+
+	tryRunDockerWithOutputFn = func(ctx context.Context, stdout io.Writer, payload string, args []string) (bool, error) {
+		if payload != "local/app:latest" {
+			t.Fatalf("payload = %q, want local/app:latest", payload)
+		}
+		_, _ = io.WriteString(stdout, "local image output\n")
+		return true, nil
+	}
+
+	var out strings.Builder
+	if err := runLocalImagePayloadContextWithOutput(context.Background(), &out, "local/app:latest", []string{"--net=svc"}); err != nil {
+		t.Fatalf("runLocalImagePayloadContextWithOutput: %v", err)
+	}
+	if got := out.String(); got != "local image output\n" {
+		t.Fatalf("output = %q, want local image output", got)
+	}
+}
+
+func TestStageDockerArgsWithOutputWritesFailureToProvidedWriter(t *testing.T) {
+	oldExec := execRemoteToFn
+	defer func() {
+		execRemoteToFn = oldExec
+	}()
+
+	execRemoteToFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		return errors.New("stage failed")
+	}
+
+	var out strings.Builder
+	err := stageDockerArgsWithOutput(context.Background(), &out, "svc-a", []string{"--net=svc"})
+	if err == nil || !strings.Contains(err.Error(), "failed to stage args") {
+		t.Fatalf("error = %v, want failed to stage args", err)
+	}
+	if got := out.String(); !strings.Contains(got, "failed to stage args: stage failed") {
+		t.Fatalf("output = %q, want stage failure", got)
+	}
+}
+
+func TestStageDockerArgsWithOutputReturnsWriterFailure(t *testing.T) {
+	oldExec := execRemoteToFn
+	defer func() {
+		execRemoteToFn = oldExec
+	}()
+
+	execRemoteToFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		return errors.New("stage failed")
+	}
+
+	writeErr := errors.New("write failed")
+	err := stageDockerArgsWithOutput(context.Background(), errorWriter{err: writeErr}, "svc-a", []string{"--net=svc"})
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("error = %v, want writer error", err)
+	}
+	if !strings.Contains(err.Error(), "failed to stage args") {
+		t.Fatalf("error = %v, want stage failure context", err)
+	}
+}
+
 func TestRunFilePayloadErrorPaths(t *testing.T) {
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn

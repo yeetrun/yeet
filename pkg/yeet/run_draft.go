@@ -392,7 +392,7 @@ func runLocalImagePayloadContextWithOutput(ctx context.Context, stdout io.Writer
 	if isStdoutWriter(stdout) {
 		return runLocalImagePayloadContext(ctx, payload, args)
 	}
-	if ok, err := tryRunDockerContextWithOutput(ctx, stdout, payload, args); err != nil {
+	if ok, err := tryRunDockerWithOutputFn(ctx, stdout, payload, args); err != nil {
 		return err
 	} else if ok {
 		return nil
