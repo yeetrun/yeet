@@ -251,7 +251,31 @@ legend {
 }
 
 .host-picker-trigger {
-  min-width: 72px;
+  width: 42px;
+  min-height: 40px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: oklch(0.15 0.012 165);
+}
+
+.host-picker-trigger:hover,
+.host-picker-trigger:focus-visible {
+  border-color: var(--line-strong);
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.host-picker-chev {
+  width: 9px;
+  height: 9px;
+  margin-top: -3px;
+  border-right: 2px solid currentcolor;
+  border-bottom: 2px solid currentcolor;
+  transform: rotate(45deg);
 }
 
 .host-picker {
