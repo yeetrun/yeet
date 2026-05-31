@@ -547,7 +547,7 @@ func TestRunWebAPISessionClosedWritesNoticeForFailedIncompleteJob(t *testing.T) 
 
 	for i := 0; i < 2; i++ {
 		closed := runWebAPIRequest(t, s, http.MethodPost, "/api/session/closed", nil)
-		if closed.Code != http.StatusOK {
+		if closed.Code != http.StatusNoContent {
 			t.Fatalf("closed status = %d body=%s", closed.Code, closed.Body.String())
 		}
 	}
@@ -588,7 +588,7 @@ func TestRunWebAPISessionClosedWritesNoticeOnceForIncompleteActiveJob(t *testing
 	}
 	for i := 0; i < 2; i++ {
 		closed := runWebAPIRequest(t, s, http.MethodPost, "/api/session/closed", nil)
-		if closed.Code != http.StatusOK {
+		if closed.Code != http.StatusNoContent {
 			t.Fatalf("closed status = %d body=%s", closed.Code, closed.Body.String())
 		}
 	}
@@ -598,7 +598,7 @@ func TestRunWebAPISessionClosedWritesNoticeOnceForIncompleteActiveJob(t *testing
 	close(release)
 	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
 	closed := runWebAPIRequest(t, s, http.MethodPost, "/api/session/closed", nil)
-	if closed.Code != http.StatusOK {
+	if closed.Code != http.StatusNoContent {
 		t.Fatalf("closed after finish status = %d body=%s", closed.Code, closed.Body.String())
 	}
 	if got := notices.String(); got != runWebBrowserClosedMessage {

@@ -11,6 +11,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"time"
 )
 
 type runWebJobState string
@@ -31,6 +32,7 @@ const (
 const (
 	defaultRunWebJobBufferLimit   = 1 << 20
 	defaultRunWebSubscriberBuffer = 64
+	runWebSubscriberCloseDebounce = 750 * time.Millisecond
 	runWebOutputOmittedMessage    = "[older output omitted]\n"
 	runWebBrowserClosedMessage    = "Browser tab closed. Press Ctrl-C to quit.\n"
 )
@@ -356,12 +358,29 @@ func (j *runWebJob) retainedOutputContainsLocked(s string) bool {
 
 func (j *runWebJob) unsubscribe(sub *runWebJobSubscriber) {
 	j.mu.Lock()
-	defer j.mu.Unlock()
 	if _, ok := j.subscribers[sub]; !ok {
+		j.mu.Unlock()
 		return
 	}
 	delete(j.subscribers, sub)
 	sub.close()
+	j.mu.Unlock()
+	j.noteSubscriberClosed()
+}
+
+func (j *runWebJob) noteSubscriberClosed() {
+	go func() {
+		timer := time.NewTimer(runWebSubscriberCloseDebounce)
+		defer timer.Stop()
+		<-timer.C
+
+		j.mu.Lock()
+		shouldNotice := len(j.subscribers) == 0 && j.state != runWebJobSucceeded
+		j.mu.Unlock()
+		if shouldNotice {
+			j.browserClosed()
+		}
+	}()
 }
 
 func (sub *runWebJobSubscriber) close() {

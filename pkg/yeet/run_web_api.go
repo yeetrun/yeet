@@ -309,7 +309,7 @@ func (s *runWebServer) handleSessionClosed(w http.ResponseWriter, r *http.Reques
 	if job != nil && !complete {
 		job.browserClosed()
 	}
-	writeRunWebJSON(w, http.StatusOK, map[string]any{"ok": true})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *runWebServer) handleStatic(w http.ResponseWriter, r *http.Request) {
