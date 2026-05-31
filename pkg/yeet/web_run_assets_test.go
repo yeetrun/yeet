@@ -6,6 +6,7 @@ package yeet
 
 import (
 	"io/fs"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -34,12 +35,20 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 
 	for _, id := range []string{
 		`id="hostDefault"`,
+		`id="hostPicker"`,
+		`id="hostPickerButton"`,
 		`id="tsVersion"`,
 		`id="tsExitNode"`,
 		`id="macvlanParent"`,
 		`id="macvlanVlan"`,
 		`id="macvlanMac"`,
 		`id="snapshotRequired"`,
+		`id="terminalSheet"`,
+		`id="terminalOutput"`,
+		`id="terminalStatus"`,
+		`id="terminalCopy"`,
+		`id="terminalExpand"`,
+		`id="terminalSubtitle"`,
 		`id="payloadPicker"`,
 		`id="envFilePicker"`,
 		`id="filePicker"`,
@@ -84,10 +93,26 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"activePicker",
 		"showPicker",
 		"hidePicker",
+		"EventSource",
+		"/api/session/closed",
+		"TextDecoder",
+		"setDeployMode",
+		"checkDeployStatus",
+		"recoverDeployStream",
+		"collapseTerminal",
+		"createTerminalRenderer",
+		"showHostPicker",
+		"hideHostPicker",
 		"updateServiceRootPlaceholder",
 	} {
 		if !strings.Contains(string(app), snippet) {
 			t.Fatalf("app missing behavior hook %s", snippet)
 		}
+	}
+	if strings.Contains(string(index), "<datalist") {
+		t.Fatal("index still contains native datalist markup")
+	}
+	if regexp.MustCompile(`\slist\s*=`).Match(index) {
+		t.Fatal("index still contains native input list attribute")
 	}
 }

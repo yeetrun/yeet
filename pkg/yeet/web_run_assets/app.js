@@ -14,6 +14,9 @@ const state = {
   validateTimer: null,
   phase: "editing",
   activePicker: "",
+  deployJobId: "",
+  deployEvents: null,
+  terminal: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -163,6 +166,12 @@ function setStatus(message, tone = "") {
   else delete $("formStatus").dataset.tone;
 }
 
+function setTerminalStatus(message, tone = "") {
+  $("terminalStatus").textContent = message;
+  if (tone) $("terminalStatus").dataset.tone = tone;
+  else delete $("terminalStatus").dataset.tone;
+}
+
 const networkModeLabels = {
   svc: "Service",
   ts: "Tailscale",
@@ -183,6 +192,42 @@ function renderNetworkModes(modes) {
     return label;
   });
   $("networkModes").replaceChildren(...rows);
+}
+
+function renderHostPicker(hosts) {
+  const current = $("host").value.trim();
+  const rows = hosts.map((host) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "host-option";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(host === current));
+    button.textContent = host;
+    button.addEventListener("click", () => {
+      $("host").value = host;
+      hideHostPicker();
+      update();
+    });
+    return button;
+  });
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "No hosts found";
+    rows.push(empty);
+  }
+  $("hostPicker").replaceChildren(...rows);
+}
+
+function showHostPicker() {
+  renderHostPicker(state.bootstrap?.hosts || []);
+  $("hostPicker").hidden = false;
+  $("host").setAttribute("aria-expanded", "true");
+}
+
+function hideHostPicker() {
+  $("hostPicker").hidden = true;
+  $("host").setAttribute("aria-expanded", "false");
 }
 
 function syncNetworkUI() {
@@ -293,6 +338,202 @@ function hidePicker() {
   $("filePicker").hidden = true;
 }
 
+function createTerminalRenderer(output) {
+  const decoder = new TextDecoder();
+  let lines = [""];
+  let ansiState = "normal";
+
+  function stripANSI(text) {
+    let clean = "";
+    for (const char of text) {
+      if (ansiState === "normal") {
+        if (char === "\x1B") {
+          ansiState = "esc";
+          continue;
+        }
+        clean += char;
+        continue;
+      }
+      if (ansiState === "esc") {
+        if (char === "[") {
+          ansiState = "csi";
+          continue;
+        }
+        if (char === "]") {
+          ansiState = "osc";
+          continue;
+        }
+        ansiState = "normal";
+        continue;
+      }
+      if (ansiState === "csi") {
+        if (char >= "@" && char <= "~") ansiState = "normal";
+        continue;
+      }
+      if (ansiState === "osc") {
+        if (char === "\x07") {
+          ansiState = "normal";
+          continue;
+        }
+        if (char === "\x1B") ansiState = "oscEsc";
+        continue;
+      }
+      if (ansiState === "oscEsc") {
+        ansiState = char === "\\" ? "normal" : "osc";
+      }
+    }
+    return clean;
+  }
+
+  function render(shouldStick) {
+    output.textContent = lines.join("\n");
+    if (shouldStick) output.scrollTop = output.scrollHeight;
+  }
+
+  function applyText(text) {
+    for (const char of stripANSI(text)) {
+      if (char === "\r") {
+        lines[lines.length - 1] = "";
+        continue;
+      }
+      if (char === "\n") {
+        lines.push("");
+        continue;
+      }
+      lines[lines.length - 1] += char;
+    }
+  }
+
+  return {
+    write(bytes) {
+      const shouldStick = output.scrollTop + output.clientHeight >= output.scrollHeight - 8;
+      applyText(decoder.decode(bytes, { stream: true }));
+      render(shouldStick);
+    },
+    clear() {
+      lines = [""];
+      ansiState = "normal";
+      output.textContent = "";
+      output.scrollTop = 0;
+    },
+    text() {
+      return lines.join("\n");
+    },
+  };
+}
+
+function showTerminal(draft) {
+  if (!state.terminal) state.terminal = createTerminalRenderer($("terminalOutput"));
+  state.terminal.clear();
+  $("terminalSheet").hidden = false;
+  document.body.dataset.terminalVisible = "true";
+  $("terminalSubtitle").textContent = `${draft.service || "service"} on ${draft.host || "host"}`;
+  setTerminalStatus("Connecting", "");
+}
+
+function collapseTerminal() {
+  const sheet = $("terminalSheet");
+  sheet.dataset.expanded = "false";
+  $("terminalExpand").textContent = "Expand";
+  $("terminalExpand").setAttribute("aria-expanded", "false");
+}
+
+function setDeployMode(enabled) {
+  document.querySelectorAll("#deployForm input, #deployForm select, #deployForm button").forEach((el) => {
+    if (el.id === "deployButton") return;
+    el.disabled = enabled;
+  });
+}
+
+function decodeOutputChunk(data) {
+  const payload = JSON.parse(data);
+  if (payload.encoding === "base64") {
+    const raw = window.atob(payload.chunk || "");
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+    return bytes;
+  }
+  return new TextEncoder().encode(payload.chunk || "");
+}
+
+function closeDeployStream() {
+  if (!state.deployEvents) return;
+  state.deployEvents.close();
+  state.deployEvents = null;
+}
+
+function finishDeployStream(status) {
+  closeDeployStream();
+  if (status.state === "succeeded") {
+    state.phase = "done";
+    setDeployMode(true);
+    $("deployButton").disabled = true;
+    setTerminalStatus("Deployed", "done");
+    setStatus("Deployed. Close this tab and return to the terminal.", "done");
+    $("hostStatus").textContent = "Deployed";
+    return;
+  }
+  if (status.state === "failed") {
+    state.phase = "editing";
+    setDeployMode(false);
+    collapseTerminal();
+    setTerminalStatus("Failed", "error");
+    $("hostStatus").textContent = "";
+    update();
+    setStatus(status.error || "Deploy failed. Fix the form and retry.", "error");
+  }
+}
+
+async function checkDeployStatus(jobId) {
+  const res = await api(`/api/deploy/${encodeURIComponent(jobId)}/status`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function recoverDeployStream(jobId) {
+  closeDeployStream();
+  setTerminalStatus("Output stream lost", "error");
+  try {
+    const status = await checkDeployStatus(jobId);
+    if (status.state === "succeeded" || status.state === "failed") {
+      finishDeployStream(status);
+      return;
+    }
+  } catch {
+    // Fall through to unlock the form when recovery status cannot be fetched.
+  }
+  if (state.phase !== "deploying") return;
+  state.phase = "editing";
+  setDeployMode(false);
+  $("hostStatus").textContent = "";
+  update();
+  setStatus("Output stream was lost; the terminal deploy may still be running. Edit and retry if needed.", "error");
+}
+
+function followDeployStream(jobId) {
+  closeDeployStream();
+  const events = new EventSource(`/api/deploy/${encodeURIComponent(jobId)}/stream`);
+  state.deployEvents = events;
+  events.addEventListener("open", () => {
+    setTerminalStatus("Streaming", "ready");
+  });
+  events.addEventListener("output", (event) => {
+    try {
+      state.terminal.write(decodeOutputChunk(event.data));
+    } catch (err) {
+      setTerminalStatus(`Output decode failed: ${err}`, "error");
+    }
+  });
+  events.addEventListener("status", (event) => {
+    const status = JSON.parse(event.data);
+    finishDeployStream(status);
+  });
+  events.addEventListener("error", () => {
+    if (state.phase !== "deploying") return;
+    recoverDeployStream(jobId);
+  });
+}
+
 async function bootstrap() {
   const res = await api("/api/bootstrap");
   if (!res.ok) throw new Error(await res.text());
@@ -301,12 +542,7 @@ async function bootstrap() {
   $("configLabel").textContent = state.bootstrap.configPath || "yeet.toml recipe";
   $("host").value = state.bootstrap.selectedHost || "";
 
-  const hostOptions = (state.bootstrap.hosts || []).map((host) => {
-    const option = document.createElement("option");
-    option.value = host;
-    return option;
-  });
-  $("hostOptions").replaceChildren(...hostOptions);
+  renderHostPicker(state.bootstrap.hosts || []);
 
   $("service").value = state.bootstrap.prefill?.service || "";
   $("payload").value = state.bootstrap.prefill?.payload || "";
@@ -422,6 +658,8 @@ async function deploy(event) {
   state.validateSeq += 1;
   window.clearTimeout(state.validateTimer);
   $("deployButton").disabled = true;
+  setDeployMode(true);
+  showTerminal(draft);
   setStatus("Deploying");
   try {
     const res = await api("/api/deploy", {
@@ -429,25 +667,34 @@ async function deploy(event) {
       body: JSON.stringify(draft),
     });
     if (res.ok) {
-      state.phase = "done";
-      setStatus("Done. Close this tab and return to the terminal.", "done");
-      $("hostStatus").textContent = "Deployed";
+      const data = await res.json();
+      state.deployJobId = data.jobId || "";
+      setTerminalStatus("Starting", "");
+      followDeployStream(state.deployJobId);
       return;
     }
     const contentType = res.headers.get("Content-Type") || "";
+    let validation = null;
+    let message = "";
     if (contentType.includes("application/json")) {
       const data = await res.json();
-      applyValidationErrors(data.validation);
-      setStatus(firstValidationMessage(data.validation) || "Deploy failed", "error");
+      validation = data.validation;
+      message = firstValidationMessage(validation) || "Deploy failed";
     } else {
-      setStatus(await res.text(), "error");
+      message = await res.text();
     }
     state.phase = "editing";
-    $("deployButton").disabled = false;
+    setDeployMode(false);
+    setTerminalStatus("Failed", "error");
+    update();
+    if (validation) applyValidationErrors(validation);
+    setStatus(message, "error");
   } catch (err) {
     state.phase = "editing";
+    setDeployMode(false);
+    setTerminalStatus("Failed", "error");
+    update();
     setStatus(String(err), "error");
-    $("deployButton").disabled = false;
   }
 }
 
@@ -474,6 +721,23 @@ document.addEventListener("input", (event) => {
 });
 $("deployForm").addEventListener("submit", deploy);
 $("upButton").addEventListener("click", () => loadFiles(parentDir(state.currentDir)));
+$("host").addEventListener("focus", showHostPicker);
+$("host").addEventListener("click", showHostPicker);
+$("hostPickerButton").addEventListener("click", showHostPicker);
+$("terminalCopy").addEventListener("click", async () => {
+  try {
+    if (navigator.clipboard) await navigator.clipboard.writeText(state.terminal?.text() || "");
+  } catch {
+    // Clipboard access is optional in non-secure browser contexts.
+  }
+});
+$("terminalExpand").addEventListener("click", () => {
+  const sheet = $("terminalSheet");
+  const expanded = sheet.dataset.expanded !== "true";
+  sheet.dataset.expanded = String(expanded);
+  $("terminalExpand").textContent = expanded ? "Collapse" : "Expand";
+  $("terminalExpand").setAttribute("aria-expanded", String(expanded));
+});
 document.querySelectorAll("[data-picker-target]").forEach((el) => {
   el.addEventListener("focus", () => showPicker(el.dataset.pickerTarget));
   el.addEventListener("click", () => showPicker(el.dataset.pickerTarget));
@@ -482,12 +746,23 @@ document.addEventListener("click", (event) => {
   if (event.target.closest("#filePicker") || event.target.closest("[data-picker-target]")) return;
   hidePicker();
 });
+document.addEventListener("click", (event) => {
+  if (event.target.closest("#hostPicker") || event.target.closest(".host-picker-field")) return;
+  hideHostPicker();
+});
 document.addEventListener("focusin", (event) => {
   if (event.target.closest("#filePicker") || event.target.closest("[data-picker-target]")) return;
   hidePicker();
 });
+document.addEventListener("focusin", (event) => {
+  if (event.target.closest("#hostPicker") || event.target.closest(".host-picker-field")) return;
+  hideHostPicker();
+});
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") hidePicker();
+  if (event.key === "Escape") {
+    hidePicker();
+    hideHostPicker();
+  }
 });
 document.addEventListener("mouseover", (event) => {
   const target = event.target.closest(".help");
@@ -502,6 +777,22 @@ document.addEventListener("focusin", (event) => {
 });
 document.addEventListener("focusout", (event) => {
   if (event.target.closest(".help")) hideTooltip();
+});
+window.addEventListener("pagehide", () => {
+  if (state.phase === "done") return;
+  const url = token ? `/api/session/closed?token=${encodeURIComponent(token)}` : "/api/session/closed";
+  if (navigator.sendBeacon && token) {
+    navigator.sendBeacon(url);
+    return;
+  }
+  fetch("/api/session/closed", {
+    method: "POST",
+    keepalive: true,
+    headers: {
+      ...(token ? { "X-Yeet-Run-Token": token } : {}),
+      ...(csrfToken ? { "X-Yeet-Run-CSRF": csrfToken } : {}),
+    },
+  }).catch(() => {});
 });
 
 bootstrap().catch((err) => {
