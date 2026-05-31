@@ -97,6 +97,7 @@ test("web run terminal renders CRLF TTY output", async ({ page }, testInfo) => {
   await page.click("#deployButton");
   await page.waitForFunction(() => document.querySelector("#terminalStatus")?.textContent === "Deployed");
 
+  await expect(page.locator("#terminalSheet")).toHaveCSS("overflow", "hidden");
   await page.screenshot({ path: path.join(testInfo.outputDir, "web-terminal.png"), fullPage: true });
   const output = await page.locator("#terminalOutput").textContent();
 
