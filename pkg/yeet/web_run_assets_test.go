@@ -37,6 +37,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`id="hostDefault"`,
 		`id="hostPicker"`,
 		`id="hostPickerButton"`,
+		`class="host-picker-chev"`,
 		`id="tsVersion"`,
 		`id="tsExitNode"`,
 		`id="macvlanParent"`,
@@ -104,10 +105,14 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"showHostPicker",
 		"hideHostPicker",
 		"updateServiceRootPlaceholder",
+		"const rows = hosts.map((host) => {",
 	} {
 		if !strings.Contains(string(app), snippet) {
 			t.Fatalf("app missing behavior hook %s", snippet)
 		}
+	}
+	if strings.Contains(string(index)+string(app), "hostOptions") {
+		t.Fatal("web assets still contain native hostOptions datalist behavior")
 	}
 	if strings.Contains(string(index), "<datalist") {
 		t.Fatal("index still contains native datalist markup")

@@ -41,7 +41,9 @@
             <span>Host <button type="button" class="help" data-help="Target catch host from CATCH_HOST, yeet.toml, or prefs." aria-label="Help for host">?</button></span>
             <div class="host-picker-field">
               <input id="host" name="host" autocomplete="off" spellcheck="false" required aria-haspopup="listbox" aria-expanded="false">
-              <button type="button" id="hostPickerButton" class="quiet-button host-picker-trigger" aria-label="Choose host" aria-controls="hostPicker">Choose</button>
+              <button type="button" id="hostPickerButton" class="host-picker-trigger" aria-label="Choose host" aria-controls="hostPicker">
+                <span class="host-picker-chev" aria-hidden="true"></span>
+              </button>
               <div id="hostPicker" class="host-picker" role="listbox" hidden></div>
             </div>
             <span class="field-error" id="hostError"></span>
