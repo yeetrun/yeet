@@ -7,6 +7,7 @@ package catch
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -45,6 +46,9 @@ func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {
 
 	info.Staged = serviceHasStagedChanges(sv)
 	info.Network = serviceNetworkInfo(sv)
+	portInfo := servicePublishPortInfo(sn, sv)
+	info.Network.Ports = portInfo.Ports
+	info.Network.PortsPresent = portInfo.PortsPresent
 	ips, ipErr := s.serviceIPList(sn, sv)
 	if ipErr != nil {
 		info.Network.IPError = ipErr.Error()
@@ -62,6 +66,80 @@ func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {
 	resp.Found = true
 	resp.Info = info
 	return resp, nil
+}
+
+func servicePublishPortInfo(serviceName string, sv db.ServiceView) catchrpc.ServiceNetwork {
+	out := catchrpc.ServiceNetwork{PortsPresent: true}
+	ports := normalizePublish(sv.Publish().AsSlice())
+	if len(ports) == 0 {
+		composePath, ok := serviceComposePathForPublish(sv.AsStruct())
+		if ok {
+			if composePorts, err := readComposePorts(composePath, serviceName); err == nil {
+				ports = composePorts
+			}
+		}
+	}
+	out.Ports = servicePortsFromPublish(ports)
+	return out
+}
+
+func servicePortsFromPublish(ports []string) []catchrpc.ServicePort {
+	out := make([]catchrpc.ServicePort, 0, len(ports))
+	for _, port := range normalizePublish(ports) {
+		out = append(out, servicePortFromPublish(port))
+	}
+	return out
+}
+
+func servicePortFromPublish(port string) catchrpc.ServicePort {
+	protocol := "tcp"
+	base := port
+	if before, after, ok := strings.Cut(port, "/"); ok {
+		base = before
+		protocol = strings.ToLower(strings.TrimSpace(after))
+		if protocol == "" {
+			protocol = "tcp"
+		}
+	}
+	parts := strings.Split(base, ":")
+	switch len(parts) {
+	case 2:
+		hostPort, err := parseServicePortNumber(parts[0])
+		if err != nil {
+			break
+		}
+		containerPort, err := parseServicePortNumber(parts[1])
+		if err != nil {
+			break
+		}
+		return catchrpc.ServicePort{HostPort: hostPort, ContainerPort: containerPort, Protocol: protocol}
+	case 3:
+		hostPort, err := parseServicePortNumber(parts[1])
+		if err != nil {
+			break
+		}
+		containerPort, err := parseServicePortNumber(parts[2])
+		if err != nil {
+			break
+		}
+		hostIP := strings.TrimSpace(parts[0])
+		if hostIP == "" {
+			break
+		}
+		return catchrpc.ServicePort{HostIP: hostIP, HostPort: hostPort, ContainerPort: containerPort, Protocol: protocol}
+	}
+	return catchrpc.ServicePort{Raw: port}
+}
+
+func parseServicePortNumber(value string) (uint16, error) {
+	n, err := strconv.ParseUint(strings.TrimSpace(value), 10, 16)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("port must be positive")
+	}
+	return uint16(n), nil
 }
 
 func (s *Server) serviceSnapshotInfo(dv *db.DataView, sv db.ServiceView) (catchrpc.ServiceSnapshots, error) {

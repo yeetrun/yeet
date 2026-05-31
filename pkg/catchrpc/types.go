@@ -169,8 +169,88 @@ type ServiceNetwork struct {
 	SvcIP     string            `json:"svcIp,omitempty"`
 	IPs       []ServiceIP       `json:"ips,omitempty"`
 	IPError   string            `json:"ipError,omitempty"`
+	Ports     []ServicePort     `json:"ports,omitempty"`
 	Macvlan   *ServiceMacvlan   `json:"macvlan,omitempty"`
 	Tailscale *ServiceTailscale `json:"tailscale,omitempty"`
+
+	PortsPresent bool `json:"-"`
+}
+
+type serviceNetworkJSON struct {
+	SvcIP     string            `json:"svcIp,omitempty"`
+	IPs       []ServiceIP       `json:"ips,omitempty"`
+	IPError   string            `json:"ipError,omitempty"`
+	Ports     []ServicePort     `json:"ports,omitempty"`
+	Macvlan   *ServiceMacvlan   `json:"macvlan,omitempty"`
+	Tailscale *ServiceTailscale `json:"tailscale,omitempty"`
+}
+
+type serviceNetworkJSONWithPorts struct {
+	SvcIP     string            `json:"svcIp,omitempty"`
+	IPs       []ServiceIP       `json:"ips,omitempty"`
+	IPError   string            `json:"ipError,omitempty"`
+	Ports     []ServicePort     `json:"ports"`
+	Macvlan   *ServiceMacvlan   `json:"macvlan,omitempty"`
+	Tailscale *ServiceTailscale `json:"tailscale,omitempty"`
+}
+
+func (n ServiceNetwork) MarshalJSON() ([]byte, error) {
+	if n.PortsPresent || len(n.Ports) != 0 {
+		ports := n.Ports
+		if ports == nil {
+			ports = []ServicePort{}
+		}
+		return json.Marshal(serviceNetworkJSONWithPorts{
+			SvcIP:     n.SvcIP,
+			IPs:       n.IPs,
+			IPError:   n.IPError,
+			Ports:     ports,
+			Macvlan:   n.Macvlan,
+			Tailscale: n.Tailscale,
+		})
+	}
+	return json.Marshal(serviceNetworkJSON{
+		SvcIP:     n.SvcIP,
+		IPs:       n.IPs,
+		IPError:   n.IPError,
+		Macvlan:   n.Macvlan,
+		Tailscale: n.Tailscale,
+	})
+}
+
+func (n *ServiceNetwork) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	var decoded serviceNetworkJSON
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*n = ServiceNetwork{
+		SvcIP:        decoded.SvcIP,
+		IPs:          decoded.IPs,
+		IPError:      decoded.IPError,
+		Ports:        decoded.Ports,
+		Macvlan:      decoded.Macvlan,
+		Tailscale:    decoded.Tailscale,
+		PortsPresent: false,
+	}
+	if _, ok := raw["ports"]; ok {
+		n.PortsPresent = true
+		if n.Ports == nil {
+			n.Ports = []ServicePort{}
+		}
+	}
+	return nil
+}
+
+type ServicePort struct {
+	HostIP        string `json:"hostIp,omitempty"`
+	HostPort      uint16 `json:"hostPort"`
+	ContainerPort uint16 `json:"containerPort"`
+	Protocol      string `json:"protocol,omitempty"`
+	Raw           string `json:"raw,omitempty"`
 }
 
 type ServiceIP struct {

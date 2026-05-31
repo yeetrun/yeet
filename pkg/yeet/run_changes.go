@@ -209,6 +209,129 @@ func runArgsWithSnapshotOptions(args []string, opts snapshotOptions) []string {
 	return out
 }
 
+type publishOptions struct {
+	Ports   []string
+	Reset   bool
+	Changed bool
+}
+
+func runArgsWithPublishOptions(args []string, ports []string) []string {
+	normalized := normalizePublishPorts(ports)
+	if len(normalized) == 0 {
+		return append([]string{}, args...)
+	}
+	out := make([]string, 0, len(args)+len(normalized)*2)
+	for _, port := range normalized {
+		out = append(out, "-p", port)
+	}
+	out = append(out, args...)
+	return out
+}
+
+func extractPublishOptions(args []string) (publishOptions, []string, error) {
+	if len(args) == 0 {
+		return publishOptions{}, args, nil
+	}
+	out := make([]string, 0, len(args))
+	opts := publishOptions{}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
+		handled, consumed, err := parsePublishOptionArg(args, i, &opts)
+		if err != nil {
+			return publishOptions{}, nil, err
+		}
+		if handled {
+			i += consumed
+			continue
+		}
+		out = append(out, arg)
+	}
+	opts.Ports = normalizePublishPorts(opts.Ports)
+	return opts, out, nil
+}
+
+func parsePublishOptionArg(args []string, i int, opts *publishOptions) (bool, int, error) {
+	arg := args[i]
+	if arg == "-p" || arg == "--publish" {
+		consumed, err := consumePublishValue(args, i, opts)
+		return true, consumed, err
+	}
+	if value, ok := publishEqualsValue(arg); ok {
+		addPublishPort(opts, value)
+		return true, 0, nil
+	}
+	if arg == "--publish-reset" {
+		opts.Reset = true
+		opts.Changed = true
+		return true, 0, nil
+	}
+	if strings.HasPrefix(arg, "--publish-reset=") {
+		return parsePublishResetValue(arg, opts)
+	}
+	return false, 0, nil
+}
+
+func consumePublishValue(args []string, i int, opts *publishOptions) (int, error) {
+	arg := args[i]
+	if i+1 >= len(args) {
+		return 0, fmt.Errorf("%s requires a value", arg)
+	}
+	addPublishPort(opts, args[i+1])
+	return 1, nil
+}
+
+func publishEqualsValue(arg string) (string, bool) {
+	switch {
+	case strings.HasPrefix(arg, "-p="):
+		return strings.TrimPrefix(arg, "-p="), true
+	case strings.HasPrefix(arg, "--publish="):
+		return strings.TrimPrefix(arg, "--publish="), true
+	default:
+		return "", false
+	}
+}
+
+func addPublishPort(opts *publishOptions, value string) {
+	opts.Ports = append(opts.Ports, value)
+	opts.Changed = true
+}
+
+func parsePublishResetValue(arg string, opts *publishOptions) (bool, int, error) {
+	value := strings.TrimPrefix(arg, "--publish-reset=")
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return true, 0, fmt.Errorf("invalid --publish-reset value %q", value)
+	}
+	opts.Reset = parsed
+	opts.Changed = opts.Changed || parsed
+	return true, 0, nil
+}
+
+func normalizePublishPorts(ports []string) []string {
+	out := make([]string, 0, len(ports))
+	for _, port := range ports {
+		if trimmed := strings.TrimSpace(port); trimmed != "" {
+			out = append(out, normalizePublishPort(trimmed))
+		}
+	}
+	return out
+}
+
+func normalizePublishPort(port string) string {
+	switch {
+	case strings.HasSuffix(strings.ToLower(port), "/tcp"):
+		return port[:len(port)-len("/tcp")]
+	case strings.HasSuffix(strings.ToLower(port), "/udp"):
+		return port[:len(port)-len("/udp")] + "/udp"
+	default:
+		return port
+	}
+}
+
 func extractForceFlag(args []string) (bool, []string, error) {
 	if len(args) == 0 {
 		return false, args, nil
@@ -330,6 +453,7 @@ func saveEnvFileConfig(cfgLoc *projectConfigLocation, hostOverride string, envFi
 		entry.SnapshotMaxAge = existing.SnapshotMaxAge
 		entry.SnapshotRequired = existing.SnapshotRequired
 		entry.SnapshotEvents = append([]string{}, existing.SnapshotEvents...)
+		entry.Ports = append([]string{}, existing.Ports...)
 		entry.Schedule = existing.Schedule
 		entry.Args = existing.Args
 	}
@@ -339,9 +463,32 @@ func saveEnvFileConfig(cfgLoc *projectConfigLocation, hostOverride string, envFi
 
 func effectiveRunArgsForExistingEntry(entry ServiceEntry, runArgs []string) ([]string, error) {
 	if len(normalizeRunArgs(runArgs)) == 0 {
-		return rehydrateRunArgs(entry.Args), nil
+		return runArgsWithPublishOptions(rehydrateRunArgs(entry.Args), effectiveServiceEntryPorts(entry)), nil
 	}
-	return runArgsWithStoredLockedFlags(entry, runArgs)
+	out, err := runArgsWithStoredLockedFlags(entry, runArgs)
+	if err != nil {
+		return nil, err
+	}
+	publish, _, err := extractPublishOptions(runArgs)
+	if err != nil {
+		return nil, err
+	}
+	if publish.Changed {
+		return out, nil
+	}
+	return runArgsWithPublishOptions(out, effectiveServiceEntryPorts(entry)), nil
+}
+
+func effectiveServiceEntryPorts(entry ServiceEntry) []string {
+	ports := normalizePublishPorts(entry.Ports)
+	if len(ports) != 0 {
+		return ports
+	}
+	legacy, _, err := extractPublishOptions(rehydrateRunArgs(entry.Args))
+	if err != nil {
+		return nil
+	}
+	return legacy.Ports
 }
 
 func runArgsWithStoredLockedFlags(entry ServiceEntry, runArgs []string) ([]string, error) {

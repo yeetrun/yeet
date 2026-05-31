@@ -7,6 +7,7 @@ package catch
 import (
 	"errors"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -376,6 +377,49 @@ func TestServiceInfoPathsIncludeRootIdentity(t *testing.T) {
 	}
 	if defaultResp.Info.Paths.ServiceRoot != "" || defaultResp.Info.Paths.ServiceRootZFS != "" {
 		t.Fatalf("default stored roots = %#v, want empty stored root fields", defaultResp.Info.Paths)
+	}
+}
+
+func TestServicePublishPortInfoUsesDBPublish(t *testing.T) {
+	info := servicePublishPortInfo("svc-info", (&db.Service{
+		Name:    "svc-info",
+		Publish: []string{"80:80", "127.0.0.1:8080:80/udp"},
+	}).View())
+
+	if !info.PortsPresent {
+		t.Fatalf("PortsPresent = false, want true")
+	}
+	if len(info.Ports) != 2 {
+		t.Fatalf("Ports = %#v, want 2 entries", info.Ports)
+	}
+	if info.Ports[0].HostPort != 80 || info.Ports[0].ContainerPort != 80 || info.Ports[0].Protocol != "tcp" {
+		t.Fatalf("first port = %#v, want 80/tcp", info.Ports[0])
+	}
+	if info.Ports[1].HostIP != "127.0.0.1" || info.Ports[1].HostPort != 8080 || info.Ports[1].ContainerPort != 80 || info.Ports[1].Protocol != "udp" {
+		t.Fatalf("second port = %#v, want host-ip udp mapping", info.Ports[1])
+	}
+}
+
+func TestServicePublishPortInfoFallsBackToComposeArtifact(t *testing.T) {
+	tmp := t.TempDir()
+	composePath := filepath.Join(tmp, "compose.yml")
+	if err := os.WriteFile(composePath, []byte("services:\n  svc-info:\n    image: nginx\n    ports:\n      - 443:443/tcp\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	info := servicePublishPortInfo("svc-info", (&db.Service{
+		Name:             "svc-info",
+		Generation:       1,
+		LatestGeneration: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): composePath}},
+		},
+	}).View())
+
+	if !info.PortsPresent || len(info.Ports) != 1 {
+		t.Fatalf("info = %#v, want fallback compose port", info)
+	}
+	if info.Ports[0].HostPort != 443 || info.Ports[0].ContainerPort != 443 || info.Ports[0].Protocol != "tcp" {
+		t.Fatalf("port = %#v, want 443/tcp", info.Ports[0])
 	}
 }
 

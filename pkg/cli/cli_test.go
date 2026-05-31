@@ -70,6 +70,7 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 		"--zfs",
 		"-p", "8000:8000",
 		"-p", "9000:9000",
+		"--publish-reset",
 		"--force",
 		"--pull",
 		"arg1", "arg2",
@@ -114,6 +115,9 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	}
 	if !flags.Force {
 		t.Errorf("Force = false, want true")
+	}
+	if !flags.PublishReset {
+		t.Errorf("PublishReset = false, want true")
 	}
 	wantTags := []string{"tag:a", "tag:b"}
 	if !reflect.DeepEqual(flags.TsTags, wantTags) {
@@ -301,7 +305,7 @@ func TestParseServiceSetFlags(t *testing.T) {
 			want:    ServiceSetFlags{ServiceRoot: "tank/apps/svc-a", ZFS: true, Copy: true},
 			wantOut: []string{"svc-a"},
 		},
-		{name: "missing root", args: []string{"svc-a"}, wantErr: "service set requires --service-root or snapshot settings"},
+		{name: "missing root", args: []string{"svc-a"}, wantErr: "service set requires --service-root, snapshot settings, or published ports"},
 		{name: "zfs without root", args: []string{"svc-a", "--zfs"}, wantErr: "--service-root is required when --zfs is set"},
 		{name: "relative root without zfs", args: []string{"svc-a", "--service-root", "apps/svc-a"}, wantErr: "--service-root must be absolute unless --zfs is set"},
 		{name: "copy and empty", args: []string{"svc-a", "--service-root", "/srv/apps/svc-a", "--copy", "--empty"}, wantErr: "cannot use --copy and --empty together"},
@@ -319,7 +323,7 @@ func TestParseServiceSetFlags(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ParseServiceSet error: %v", err)
 			}
-			if got != tt.want {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("flags = %#v, want %#v", got, tt.want)
 			}
 			if !reflect.DeepEqual(out, tt.wantOut) {
@@ -339,6 +343,31 @@ func TestParseServiceSetSnapshotFlags(t *testing.T) {
 	}
 	if flags.Snapshots != "off" || flags.SnapshotKeepLast != "3" || flags.SnapshotMaxAge != "72h" || flags.SnapshotRequired != "false" || flags.SnapshotEvents != "run" {
 		t.Fatalf("flags = %#v", flags)
+	}
+}
+
+func TestParseServiceSetPublishFlags(t *testing.T) {
+	flags, args, err := ParseServiceSet([]string{"svc", "-p", "80:80", "--publish", "443:443", "--publish-reset"})
+	if err != nil {
+		t.Fatalf("ParseServiceSet: %v", err)
+	}
+	if len(args) != 1 || args[0] != "svc" {
+		t.Fatalf("args = %#v, want svc", args)
+	}
+	if !reflect.DeepEqual(flags.Publish, []string{"80:80", "443:443"}) {
+		t.Fatalf("Publish = %#v, want two ports", flags.Publish)
+	}
+	if !flags.PublishReset {
+		t.Fatal("PublishReset = false, want true")
+	}
+}
+
+func TestParseServiceSetPublishOnlyDoesNotRequireServiceRoot(t *testing.T) {
+	if _, _, err := ParseServiceSet([]string{"svc", "-p", "80:80"}); err != nil {
+		t.Fatalf("ParseServiceSet publish-only: %v", err)
+	}
+	if _, _, err := ParseServiceSet([]string{"svc", "--publish-reset"}); err != nil {
+		t.Fatalf("ParseServiceSet publish-reset-only: %v", err)
 	}
 }
 
@@ -565,7 +594,7 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if reg.SubCommands["run"].Info.Name != "run" {
 		t.Fatalf("registry run command = %#v", reg.SubCommands["run"])
 	}
-	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
+	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
 		t.Fatalf("run usage = %q", got)
 	}
 	if !containsString(reg.SubCommands["run"].Info.Examples, "yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs") {
@@ -583,10 +612,13 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if reg.Groups["service"].Commands["set"].Info.Name != "set" {
 		t.Fatalf("registry service set command = %#v", reg.Groups["service"].Commands["set"])
 	}
-	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]" {
+	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]" {
 		t.Fatalf("service set usage = %q", reg.Groups["service"].Commands["set"].Info.Usage)
 	}
 	wantServiceSetExamples := []string{
+		"yeet service set <svc> -p 80:80 -p 443:443",
+		"yeet service set <svc> --publish-reset -p 443:443",
+		"yeet service set <svc> --publish-reset",
 		"yeet service set <svc> --service-root=/srv/apps/<svc>",
 		"yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy",
 		"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
@@ -623,6 +655,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	}
 	if !flags["run"]["-p"].ConsumesValue {
 		t.Fatal("run -p should consume a value")
+	}
+	if flags["run"]["--publish-reset"].ConsumesValue {
+		t.Fatal("run --publish-reset should not consume a value")
 	}
 	if _, ok := flags["run"]["--zfs"]; !ok {
 		t.Fatal("run --zfs should be registered")

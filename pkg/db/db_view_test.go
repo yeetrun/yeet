@@ -38,6 +38,9 @@ func TestViewAccessorsExposeDataWithoutMutableStructs(t *testing.T) {
 		svc.LatestGeneration() != 3 {
 		t.Fatalf("service scalar accessors returned unexpected values: %#v", svc.AsStruct())
 	}
+	if svc.Publish().Len() != 2 || svc.Publish().At(0) != "80:80" || svc.Publish().At(1) != "443:443" {
+		t.Fatalf("service publish ports = %#v, want 80:80/443:443", svc.Publish())
+	}
 	artifacts := svc.Artifacts()
 	if got := artifacts.Get(ArtifactBinary).Refs().Get("latest"); got != "/srv/svc/latest" {
 		t.Fatalf("artifact latest ref = %q, want /srv/svc/latest", got)
@@ -104,6 +107,7 @@ func TestViewAsStructReturnsDeepCopies(t *testing.T) {
 		t.Fatalf("DataView.AsStruct differs from source:\nclone=%#v\nsource=%#v", clone, data)
 	}
 	clone.Services["svc"].Artifacts[ArtifactBinary].Refs["latest"] = "/srv/clone/latest"
+	clone.Services["svc"].Publish[0] = "8080:80"
 	clone.Services["svc"].TSNet.Tags[0] = "tag:clone"
 	clone.Images["repo"].Refs["latest"] = ImageManifest{BlobHash: "sha256:clone"}
 	clone.Volumes["data"].Path = "/clone"
@@ -112,6 +116,9 @@ func TestViewAsStructReturnsDeepCopies(t *testing.T) {
 
 	if got := data.Services["svc"].Artifacts[ArtifactBinary].Refs["latest"]; got != "/srv/svc/latest" {
 		t.Fatalf("source artifact ref mutated through DataView.AsStruct: %q", got)
+	}
+	if got := data.Services["svc"].Publish[0]; got != "80:80" {
+		t.Fatalf("source publish port mutated through DataView.AsStruct: %q", got)
 	}
 	if got := data.Services["svc"].TSNet.Tags[0]; got != "tag:svc" {
 		t.Fatalf("source tailscale tags mutated through DataView.AsStruct: %q", got)
@@ -131,8 +138,12 @@ func TestViewAsStructReturnsDeepCopies(t *testing.T) {
 
 	svcClone := view.Services().Get("svc").AsStruct()
 	svcClone.Name = "clone"
+	svcClone.Publish[0] = "8080:80"
 	if got := data.Services["svc"].Name; got != "svc" {
 		t.Fatalf("source service name mutated through ServiceView.AsStruct: %q", got)
+	}
+	if got := data.Services["svc"].Publish[0]; got != "80:80" {
+		t.Fatalf("source publish port mutated through ServiceView.AsStruct: %q", got)
 	}
 	imageClone := view.Images().Get("repo").AsStruct()
 	imageClone.Refs["new"] = ImageManifest{BlobHash: "sha256:new"}
@@ -168,6 +179,30 @@ func TestViewAsStructReturnsDeepCopies(t *testing.T) {
 	artifactClone.Refs["latest"] = "/srv/clone/latest"
 	if got := data.Services["svc"].Artifacts[ArtifactBinary].Refs["latest"]; got != "/srv/svc/latest" {
 		t.Fatalf("source artifact mutated through ArtifactView.AsStruct: %q", got)
+	}
+}
+
+func TestServicePublishViewAndClone(t *testing.T) {
+	service := &Service{
+		Name:    "svc",
+		Publish: []string{"80:80", "443:443"},
+	}
+
+	view := service.View()
+	if got := view.Publish(); got.Len() != 2 || got.At(0) != "80:80" || got.At(1) != "443:443" {
+		t.Fatalf("ServiceView.Publish = %#v, want 80:80/443:443", got)
+	}
+
+	clone := service.Clone()
+	clone.Publish[0] = "8080:80"
+	if got := service.Publish[0]; got != "80:80" {
+		t.Fatalf("source publish port mutated through Service.Clone: %q", got)
+	}
+
+	viewClone := view.AsStruct()
+	viewClone.Publish[1] = "8443:443"
+	if got := service.Publish[1]; got != "443:443" {
+		t.Fatalf("source publish port mutated through ServiceView.AsStruct: %q", got)
 	}
 }
 
@@ -353,6 +388,7 @@ func sampleViewData(t *testing.T) *Data {
 				ServiceType:      ServiceTypeDockerCompose,
 				Generation:       2,
 				LatestGeneration: 3,
+				Publish:          []string{"80:80", "443:443"},
 				Artifacts: ArtifactStore{
 					ArtifactBinary: {Refs: map[ArtifactRef]string{"latest": "/srv/svc/latest"}},
 				},

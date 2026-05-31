@@ -18,6 +18,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 )
 
 func TestServiceSetRootRegistersTTYCommand(t *testing.T) {
@@ -167,6 +168,306 @@ func TestServiceSetSnapshotInheritRejectsFieldFlagsBeforeRootMigration(t *testin
 	assertServiceRoot(t, server, name, oldRoot)
 	if _, err := os.Stat(newRoot); !os.IsNotExist(err) {
 		t.Fatalf("new root stat error = %v, want not exist", err)
+	}
+}
+
+func TestServiceSetPublishUpdatesComposeGenerationAndDB(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-publish"
+	root := t.TempDir()
+	composePath := filepath.Join(serviceBinDirForRoot(root), "docker-compose.1.yml")
+	if err := os.MkdirAll(filepath.Dir(composePath), 0o755); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	composeContent := "services:\n  svc-publish:\n    image: nginx:latest\n    ports:\n      - 80:80\n"
+	if err := os.WriteFile(composePath, []byte(composeContent), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {
+			Name:             name,
+			ServiceType:      db.ServiceTypeDockerCompose,
+			ServiceRoot:      root,
+			Generation:       1,
+			LatestGeneration: 1,
+			Publish:          []string{"80:80"},
+			Artifacts: db.ArtifactStore{
+				db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): composePath, "latest": composePath}},
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	upCalled := false
+	withServiceSetPublishComposeUp(t, func(_ *svc.DockerComposeService) error {
+		upCalled = true
+		return nil
+	})
+
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{Publish: []string{"80:80", "443:443"}}); err != nil {
+		t.Fatalf("serviceSetCmdFunc: %v", err)
+	}
+	if !upCalled {
+		t.Fatal("docker compose up was not called")
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatalf("DB.Get: %v", err)
+	}
+	sv, ok := dv.Services().GetOk(name)
+	if !ok {
+		t.Fatal("missing service")
+	}
+	if sv.Generation() != 2 || sv.LatestGeneration() != 2 {
+		t.Fatalf("generation/latest = %d/%d, want 2/2", sv.Generation(), sv.LatestGeneration())
+	}
+	if got := sv.Publish().AsSlice(); !reflect.DeepEqual(got, []string{"80:80", "443:443"}) {
+		t.Fatalf("Publish = %#v, want updated ports", got)
+	}
+	artifact, ok := sv.Artifacts().GetOk(db.ArtifactDockerComposeFile)
+	if !ok {
+		t.Fatal("missing compose artifact")
+	}
+	newComposePath, ok := artifact.Refs().GetOk(db.Gen(2))
+	if !ok {
+		t.Fatal("missing compose gen-2 ref")
+	}
+	if filepath.Clean(newComposePath) == filepath.Clean(composePath) {
+		t.Fatalf("new compose path = old path %q, want new durable artifact", newComposePath)
+	}
+	assertArtifactRef(t, server, name, db.ArtifactDockerComposeFile, "latest", newComposePath)
+	newPorts, err := readComposePorts(newComposePath, name)
+	if err != nil {
+		t.Fatalf("read new compose ports: %v", err)
+	}
+	if !reflect.DeepEqual(newPorts, []string{"80:80", "443:443"}) {
+		t.Fatalf("new compose ports = %#v", newPorts)
+	}
+	oldPorts, err := readComposePorts(composePath, name)
+	if err != nil {
+		t.Fatalf("read old compose ports: %v", err)
+	}
+	if !reflect.DeepEqual(oldPorts, []string{"80:80"}) {
+		t.Fatalf("old compose ports = %#v, want unchanged", oldPorts)
+	}
+}
+
+func TestCurrentServiceArtifactPath(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		artifact         *db.Artifact
+		generation       int
+		latestGeneration int
+		wantPath         string
+		wantOK           bool
+	}{
+		{
+			name:   "nil artifact",
+			wantOK: false,
+		},
+		{
+			name: "current generation wins",
+			artifact: &db.Artifact{Refs: map[db.ArtifactRef]string{
+				db.Gen(1): "/old",
+				db.Gen(2): "/current",
+				"latest":  "/latest",
+			}},
+			generation:       2,
+			latestGeneration: 3,
+			wantPath:         "/current",
+			wantOK:           true,
+		},
+		{
+			name: "latest generation fallback",
+			artifact: &db.Artifact{Refs: map[db.ArtifactRef]string{
+				db.Gen(3): "/latest-gen",
+				"latest":  "/latest",
+			}},
+			generation:       2,
+			latestGeneration: 3,
+			wantPath:         "/latest-gen",
+			wantOK:           true,
+		},
+		{
+			name: "latest alias fallback",
+			artifact: &db.Artifact{Refs: map[db.ArtifactRef]string{
+				"latest": "/latest",
+			}},
+			generation:       2,
+			latestGeneration: 2,
+			wantPath:         "/latest",
+			wantOK:           true,
+		},
+		{
+			name: "missing refs",
+			artifact: &db.Artifact{Refs: map[db.ArtifactRef]string{
+				db.Gen(1): "/old",
+			}},
+			generation:       2,
+			latestGeneration: 3,
+			wantOK:           false,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			gotPath, gotOK := currentServiceArtifactPath(tt.artifact, tt.generation, tt.latestGeneration)
+			if gotPath != tt.wantPath || gotOK != tt.wantOK {
+				t.Fatalf("currentServiceArtifactPath() = %q, %v, want %q, %v", gotPath, gotOK, tt.wantPath, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestServiceSetPublishRejectsOmittedExistingPortWithoutReset(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-publish"
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {
+			Name:        name,
+			ServiceType: db.ServiceTypeDockerCompose,
+			Publish:     []string{"80:80"},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	upCalled := false
+	withServiceSetPublishComposeUp(t, func(_ *svc.DockerComposeService) error {
+		upCalled = true
+		return nil
+	})
+
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+	err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{Publish: []string{"443:443"}})
+	if err == nil || !strings.Contains(err.Error(), "changing published ports would remove existing mappings") || !strings.Contains(err.Error(), "80:80") {
+		t.Fatalf("serviceSetCmdFunc error = %v, want omitted port error", err)
+	}
+	if upCalled {
+		t.Fatal("docker compose up was called after rejected publish change")
+	}
+}
+
+func TestServiceSetPublishResetReplacesAndClearsPorts(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		flags     cli.ServiceSetFlags
+		wantPorts []string
+	}{
+		{
+			name:      "replace",
+			flags:     cli.ServiceSetFlags{Publish: []string{"443:443"}, PublishReset: true},
+			wantPorts: []string{"443:443"},
+		},
+		{
+			name:      "clear",
+			flags:     cli.ServiceSetFlags{PublishReset: true},
+			wantPorts: []string{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			serviceName := "svc-publish"
+			root := t.TempDir()
+			composePath := filepath.Join(serviceBinDirForRoot(root), "docker-compose.1.yml")
+			if err := os.MkdirAll(filepath.Dir(composePath), 0o755); err != nil {
+				t.Fatalf("mkdir bin dir: %v", err)
+			}
+			if err := os.WriteFile(composePath, []byte("services:\n  svc-publish:\n    image: nginx:latest\n    ports:\n      - 80:80\n"), 0o644); err != nil {
+				t.Fatalf("write compose: %v", err)
+			}
+			if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+				serviceName: {
+					Name:             serviceName,
+					ServiceType:      db.ServiceTypeDockerCompose,
+					ServiceRoot:      root,
+					Generation:       1,
+					LatestGeneration: 1,
+					Publish:          []string{"80:80"},
+					Artifacts: db.ArtifactStore{
+						db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): composePath, "latest": composePath}},
+					},
+				},
+			}}); err != nil {
+				t.Fatalf("DB.Set: %v", err)
+			}
+			upCalled := false
+			withServiceSetPublishComposeUp(t, func(_ *svc.DockerComposeService) error {
+				upCalled = true
+				return nil
+			})
+
+			execer := &ttyExecer{s: server, sn: serviceName, rw: &bytes.Buffer{}, isPty: false}
+			if err := execer.serviceSetCmdFunc(tt.flags); err != nil {
+				t.Fatalf("serviceSetCmdFunc: %v", err)
+			}
+			if !upCalled {
+				t.Fatal("docker compose up was not called")
+			}
+			dv, err := server.cfg.DB.Get()
+			if err != nil {
+				t.Fatalf("DB.Get: %v", err)
+			}
+			sv, _ := dv.Services().GetOk(serviceName)
+			if got := sv.Publish().AsSlice(); len(got) != len(tt.wantPorts) || (len(tt.wantPorts) != 0 && !reflect.DeepEqual(got, tt.wantPorts)) {
+				t.Fatalf("Publish = %#v, want %#v", got, tt.wantPorts)
+			}
+			artifact, _ := sv.Artifacts().GetOk(db.ArtifactDockerComposeFile)
+			newComposePath, _ := artifact.Refs().GetOk(db.Gen(2))
+			gotPorts, err := readComposePorts(newComposePath, serviceName)
+			if err != nil {
+				t.Fatalf("read compose ports: %v", err)
+			}
+			if len(gotPorts) != len(tt.wantPorts) || (len(tt.wantPorts) != 0 && !reflect.DeepEqual(gotPorts, tt.wantPorts)) {
+				t.Fatalf("compose ports = %#v, want %#v", gotPorts, tt.wantPorts)
+			}
+		})
+	}
+}
+
+func TestServiceSetPublishFallsBackToComposePorts(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-publish"
+	root := t.TempDir()
+	composePath := filepath.Join(serviceBinDirForRoot(root), "docker-compose.1.yml")
+	if err := os.MkdirAll(filepath.Dir(composePath), 0o755); err != nil {
+		t.Fatalf("mkdir bin dir: %v", err)
+	}
+	if err := os.WriteFile(composePath, []byte("services:\n  svc-publish:\n    image: nginx:latest\n    ports:\n      - 80:80\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {
+			Name:             name,
+			ServiceType:      db.ServiceTypeDockerCompose,
+			ServiceRoot:      root,
+			Generation:       1,
+			LatestGeneration: 1,
+			Artifacts: db.ArtifactStore{
+				db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): composePath, "latest": composePath}},
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+	err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{Publish: []string{"443:443"}})
+	if err == nil || !strings.Contains(err.Error(), "80:80") {
+		t.Fatalf("serviceSetCmdFunc error = %v, want compose fallback omitted port error", err)
+	}
+}
+
+func TestServiceSetPublishRejectsNonComposeService(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-systemd"
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {Name: name, ServiceType: db.ServiceTypeSystemd},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+	err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{Publish: []string{"80:80"}})
+	if err == nil || !strings.Contains(err.Error(), `service "svc-systemd" is not a docker compose service`) {
+		t.Fatalf("serviceSetCmdFunc error = %v, want non-compose rejection", err)
 	}
 }
 
@@ -1325,6 +1626,15 @@ func withServiceSetRootDockerPrereqs(t *testing.T, f func(*Server) error) {
 	installDockerPrereqs = f
 	t.Cleanup(func() {
 		installDockerPrereqs = old
+	})
+}
+
+func withServiceSetPublishComposeUp(t *testing.T, f func(*svc.DockerComposeService) error) {
+	t.Helper()
+	old := upDockerComposeForServiceSet
+	upDockerComposeForServiceSet = f
+	t.Cleanup(func() {
+		upDockerComposeForServiceSet = old
 	})
 }
 

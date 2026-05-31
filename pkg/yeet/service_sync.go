@@ -34,6 +34,8 @@ type serviceSyncResult struct {
 	SnapshotMaxAge   string
 	SnapshotRequired *bool
 	SnapshotEvents   []string
+	Ports            []string
+	PortsSynced      bool
 	Skip             string
 }
 
@@ -208,7 +210,58 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 			return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
 		}
 	}
+	if resp.Info.Network.PortsPresent {
+		ports := servicePortsForConfig(resp.Info.Network.Ports)
+		result.Ports = ports
+		result.PortsSynced = true
+		if !setServicePortsForEntry(cfgLoc.Config, target.Service, target.Host, ports) {
+			return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
+		}
+	}
 	return result, true, nil
+}
+
+func setServicePortsForEntry(cfg *ProjectConfig, service, host string, ports []string) bool {
+	entry, ok := cfg.ServiceEntry(service, host)
+	if !ok {
+		return false
+	}
+	entry.Ports = normalizePublishPorts(ports)
+	cfg.SetServiceEntry(entry)
+	return true
+}
+
+func servicePortsForConfig(ports []catchrpc.ServicePort) []string {
+	out := make([]string, 0, len(ports))
+	for _, port := range ports {
+		if raw := strings.TrimSpace(port.Raw); raw != "" {
+			out = append(out, raw)
+			continue
+		}
+		mapping := servicePortForConfig(port)
+		if mapping != "" {
+			out = append(out, mapping)
+		}
+	}
+	return normalizePublishPorts(out)
+}
+
+func servicePortForConfig(port catchrpc.ServicePort) string {
+	if port.HostPort == 0 || port.ContainerPort == 0 {
+		return ""
+	}
+	protocol := strings.TrimSpace(port.Protocol)
+	if protocol == "" {
+		protocol = "tcp"
+	}
+	mapping := fmt.Sprintf("%d:%d", port.HostPort, port.ContainerPort)
+	if strings.TrimSpace(port.HostIP) != "" {
+		mapping = strings.TrimSpace(port.HostIP) + ":" + mapping
+	}
+	if protocol != "tcp" {
+		mapping += "/" + protocol
+	}
+	return mapping
 }
 
 func serviceSyncSnapshotOverride(snapshots *catchrpc.ServiceSnapshots) (*catchrpc.SnapshotPolicy, bool) {
@@ -304,6 +357,24 @@ func renderServiceSyncDetail(w io.Writer, configPath string, target string, resu
 	} else if _, err := fmt.Fprintf(w, "  service_root = %q\n", result.Root); err != nil {
 		return err
 	}
-	_, err := fmt.Fprintf(w, "  service_root_zfs = %t\n", result.ZFS)
-	return err
+	if _, err := fmt.Fprintf(w, "  service_root_zfs = %t\n", result.ZFS); err != nil {
+		return err
+	}
+	if result.PortsSynced {
+		if _, err := fmt.Fprintf(w, "  ports = [%s]\n", formatServiceSyncPorts(result.Ports)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func formatServiceSyncPorts(ports []string) string {
+	if len(ports) == 0 {
+		return ""
+	}
+	quoted := make([]string, 0, len(ports))
+	for _, port := range ports {
+		quoted = append(quoted, fmt.Sprintf("%q", port))
+	}
+	return strings.Join(quoted, ", ")
 }

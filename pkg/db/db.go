@@ -129,6 +129,9 @@ type Service struct {
 	// LatestGeneration is the latest generation of the service.
 	LatestGeneration int `json:",omitempty"`
 
+	// Publish lists Docker Compose short-syntax port mappings for the service.
+	Publish []string `json:",omitempty"`
+
 	// Artifacts are the artifacts generated for this service.
 	Artifacts ArtifactStore
 

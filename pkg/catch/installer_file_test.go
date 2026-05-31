@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -734,7 +735,7 @@ func TestInstallerCloseStagesGeneratedPythonComposeWithNetworkArtifacts(t *testi
 			Interfaces: "svc",
 		},
 		StageOnly:   true,
-		Publish:     []string{"8080:8080"},
+		Publish:     []string{"8080:8080/tcp", "5353:5353/UDP"},
 		PayloadName: "/client/path/main.py",
 	})
 	if err != nil {
@@ -775,12 +776,17 @@ func TestInstallerCloseStagesGeneratedPythonComposeWithNetworkArtifacts(t *testi
 		"- --port",
 		"- \"8080\"",
 		"- 8080:8080",
+		"- 5353:5353/udp",
 		fmt.Sprintf("%s:/data", server.serviceDataDir("py-svc")),
 		fmt.Sprintf("%s:/main.py:ro", filepath.Join(server.serviceRunDir("py-svc"), "main.py")),
 	} {
 		if !strings.Contains(compose, want) {
 			t.Fatalf("generated compose missing %q:\n%s", want, compose)
 		}
+	}
+
+	if !reflect.DeepEqual(service.Publish, []string{"8080:8080", "5353:5353/udp"}) {
+		t.Fatalf("Publish = %#v, want normalized publish ports", service.Publish)
 	}
 
 	resolvPath := stagedArtifactPath(t, service, db.ArtifactNetNSResolv)
@@ -860,7 +866,7 @@ func TestInstallerCloseStagesDockerComposePayloadAndPublishPorts(t *testing.T) {
 	installer, err := NewFileInstaller(server, FileInstallerCfg{
 		InstallerCfg: InstallerCfg{ServiceName: "compose-svc"},
 		StageOnly:    true,
-		Publish:      []string{"127.0.0.1:8080:80", "  "},
+		Publish:      []string{"127.0.0.1:8080:80/tcp", "  "},
 		PayloadName:  "compose.yml",
 	})
 	if err != nil {
@@ -893,6 +899,9 @@ func TestInstallerCloseStagesDockerComposePayloadAndPublishPorts(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("staged compose missing %q:\n%s", want, got)
 		}
+	}
+	if !reflect.DeepEqual(service.Publish, []string{"127.0.0.1:8080:80"}) {
+		t.Fatalf("Publish = %#v, want normalized publish ports", service.Publish)
 	}
 }
 

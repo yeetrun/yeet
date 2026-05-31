@@ -782,6 +782,115 @@ func TestServiceSetUpdatesSnapshotConfig(t *testing.T) {
 	}
 }
 
+func TestServiceSetPublishUpdatesConfig(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "svc-a",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "run.sh",
+		Ports:   []string{"80:80"},
+		Args:    []string{"--pull"},
+	})
+
+	if err := HandleSvcCmd([]string{"service", "set", "-p", "80:80/tcp", "-p", "443:443"}); err != nil {
+		t.Fatalf("HandleSvcCmd: %v", err)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"service", "set", "-p", "80:80/tcp", "-p", "443:443"}) {
+		t.Fatalf("remote args = %#v", gotArgs)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if !reflect.DeepEqual(entry.Ports, []string{"80:80", "443:443"}) {
+		t.Fatalf("ports = %#v, want 80 and 443", entry.Ports)
+	}
+	if !reflect.DeepEqual(entry.Args, []string{"--pull"}) {
+		t.Fatalf("args = %#v, want unchanged", entry.Args)
+	}
+}
+
+func TestServiceSetPublishRejectsOmittedExistingPortWithoutReset(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		t.Fatalf("unexpected remote exec: service=%q args=%v", service, args)
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "svc-a",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "run.sh",
+		Ports:   []string{"80:80"},
+	})
+
+	err := HandleSvcCmd([]string{"service", "set", "-p", "443:443"})
+	if err == nil {
+		t.Fatal("HandleSvcCmd error = nil, want missing publish port error")
+	}
+	for _, want := range []string{
+		"changing published ports would remove existing mappings",
+		"80:80",
+		"yeet service set svc-a -p 80:80 -p 443:443",
+		"yeet service set svc-a --publish-reset -p 443:443",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want containing %q", err.Error(), want)
+		}
+	}
+}
+
+func TestServiceSetPublishResetClearsConfig(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "svc-a",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "run.sh",
+		Ports:   []string{"80:80"},
+	})
+
+	if err := HandleSvcCmd([]string{"service", "set", "--publish-reset"}); err != nil {
+		t.Fatalf("HandleSvcCmd: %v", err)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if len(entry.Ports) != 0 {
+		t.Fatalf("ports = %#v, want cleared", entry.Ports)
+	}
+}
+
 func TestServiceSetRemoteFailureDoesNotUpdateSnapshotConfig(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
@@ -901,6 +1010,54 @@ func TestParseSvcRunControlFlagsExtractsSnapshotOptions(t *testing.T) {
 	wantArgs := []string{"--pull", "--", "--snapshot-events=payload"}
 	if !reflect.DeepEqual(flags.Args, wantArgs) {
 		t.Fatalf("Args = %#v, want %#v", flags.Args, wantArgs)
+	}
+}
+
+func TestParseSvcRunRehydratesStoredPorts(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	loc := writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "svc-a",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "run.sh",
+		Ports:   []string{"80:80"},
+		Args:    []string{"--pull"},
+	})
+
+	parsed, err := parseSvcRun([]string{"run.sh"}, loc, "host-a")
+	if err != nil {
+		t.Fatalf("parseSvcRun: %v", err)
+	}
+	want := []string{"-p", "80:80", "--pull"}
+	if !reflect.DeepEqual(parsed.Args, want) {
+		t.Fatalf("args = %#v, want %#v", parsed.Args, want)
+	}
+}
+
+func TestParseSvcRunRejectsOmittedExistingPublishPort(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	loc := writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "svc-a",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "run.sh",
+		Ports:   []string{"80:80"},
+	})
+
+	_, err := parseSvcRun([]string{"run.sh", "-p", "443:443"}, loc, "host-a")
+	if err == nil {
+		t.Fatal("parseSvcRun error = nil, want missing publish port error")
+	}
+	if !strings.Contains(err.Error(), "changing published ports would remove existing mappings") ||
+		!strings.Contains(err.Error(), "yeet run svc-a -p 80:80 -p 443:443 run.sh") ||
+		!strings.Contains(err.Error(), "yeet run svc-a --publish-reset -p 443:443 run.sh") {
+		t.Fatalf("parseSvcRun error = %q", err.Error())
 	}
 }
 

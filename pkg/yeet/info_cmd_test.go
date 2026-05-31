@@ -161,6 +161,7 @@ func TestBuildClientInfo(t *testing.T) {
 		EnvFile:     ".env",
 		Schedule:    "@hourly",
 		Args:        []string{"--port", "8080"},
+		Ports:       []string{"80:80"},
 	})
 	loc := &projectConfigLocation{Path: filepath.Join(dir, projectConfigName), Dir: dir, Config: cfg}
 
@@ -176,6 +177,9 @@ func TestBuildClientInfo(t *testing.T) {
 	}
 	if got.Payload == nil || got.Payload.Kind != "image" || !got.Payload.ImageRef {
 		t.Fatalf("Payload = %#v, want image payload info", got.Payload)
+	}
+	if got.Entry == nil || len(got.Entry.Ports) != 1 || got.Entry.Ports[0] != "80:80" {
+		t.Fatalf("Entry ports = %#v, want saved publish ports", got.Entry)
 	}
 
 	missingConfig := buildClientInfo(nil, "svc-a", "host-a", serverInfo{}, nil)
@@ -491,6 +495,7 @@ func TestInfoClientEntryMetadataRows(t *testing.T) {
 	entry := &clientServiceEntry{
 		EnvFile:  ".env",
 		Args:     []string{"--port", "8080"},
+		Ports:    []string{"80:80"},
 		Schedule: "@hourly",
 	}
 
@@ -498,6 +503,7 @@ func TestInfoClientEntryMetadataRows(t *testing.T) {
 	want := []infoRow{
 		{Label: "Env file", Value: ".env"},
 		{Label: "Payload args", Value: "--port 8080"},
+		{Label: "Published ports", Value: "80:80"},
 		{Label: "Schedule", Value: "@hourly"},
 	}
 	assertInfoRows(t, got, want)
@@ -538,7 +544,12 @@ func TestInfoRenderNetworkSection(t *testing.T) {
 		Found: true,
 		Info: catchrpc.ServiceInfo{
 			Network: catchrpc.ServiceNetwork{
-				SvcIP: "10.0.0.2",
+				SvcIP:        "10.0.0.2",
+				PortsPresent: true,
+				Ports: []catchrpc.ServicePort{
+					{HostPort: 80, ContainerPort: 80, Protocol: "tcp"},
+					{HostIP: "127.0.0.1", HostPort: 8443, ContainerPort: 443, Protocol: "tcp"},
+				},
 				Tailscale: &catchrpc.ServiceTailscale{
 					Interface: "tailscale0",
 				},
@@ -552,6 +563,7 @@ func TestInfoRenderNetworkSection(t *testing.T) {
 	assertInfoRows(t, got.Rows, []infoRow{
 		{Label: "IPs", Value: ""},
 		{Label: "  service", Value: "10.0.0.2"},
+		{Label: "Ports", Value: "80/tcp -> 80/tcp, 127.0.0.1:8443/tcp -> 443/tcp"},
 		{Label: "Tailscale", Value: "tailscale0"},
 		{Label: "Macvlan", Value: "macvlan0, parent eth0"},
 	})

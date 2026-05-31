@@ -379,6 +379,68 @@ func TestServiceSyncOmittedSnapshotInfoPreservesLocalSnapshotFields(t *testing.T
 	}
 }
 
+func TestServiceSyncWritesPortsFromCatch(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "sonarr",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "compose.yml",
+		Ports:   []string{"80:80"},
+	})
+	fetchServiceInfoForSyncFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			Name:  service,
+			Paths: catchrpc.ServicePaths{ServiceRoot: "/srv/apps/sonarr"},
+			Network: catchrpc.ServiceNetwork{
+				PortsPresent: true,
+				Ports: []catchrpc.ServicePort{
+					{HostPort: 443, ContainerPort: 443, Protocol: "tcp"},
+					{HostIP: "127.0.0.1", HostPort: 8080, ContainerPort: 80, Protocol: "udp"},
+				},
+			},
+		}}, nil
+	}
+	req := svcCommandRequest{Config: mustLoadProjectConfig(t), Service: "sonarr", Command: svcCommand{Args: []string{"sync"}}}
+	if err := handleServiceSync(context.Background(), req); err != nil {
+		t.Fatalf("handleServiceSync: %v", err)
+	}
+	loaded, _ := loadProjectConfigFromCwd()
+	entry, _ := loaded.Config.ServiceEntry("sonarr", "host-a")
+	if !reflect.DeepEqual(entry.Ports, []string{"443:443", "127.0.0.1:8080:80/udp"}) {
+		t.Fatalf("Ports = %#v, want synced catch ports", entry.Ports)
+	}
+}
+
+func TestServiceSyncOmittedPortsPreservesLocalPorts(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "sonarr",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "compose.yml",
+		Ports:   []string{"80:80"},
+	})
+	fetchServiceInfoForSyncFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			Name:    service,
+			Paths:   catchrpc.ServicePaths{ServiceRoot: "/srv/apps/sonarr"},
+			Network: catchrpc.ServiceNetwork{},
+		}}, nil
+	}
+	req := svcCommandRequest{Config: mustLoadProjectConfig(t), Service: "sonarr", Command: svcCommand{Args: []string{"sync"}}}
+	if err := handleServiceSync(context.Background(), req); err != nil {
+		t.Fatalf("handleServiceSync: %v", err)
+	}
+	loaded, _ := loadProjectConfigFromCwd()
+	entry, _ := loaded.Config.ServiceEntry("sonarr", "host-a")
+	if !reflect.DeepEqual(entry.Ports, []string{"80:80"}) {
+		t.Fatalf("Ports = %#v, want local ports preserved", entry.Ports)
+	}
+}
+
 func TestServiceSyncRejectsLegacyOnlyRootIdentity(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)

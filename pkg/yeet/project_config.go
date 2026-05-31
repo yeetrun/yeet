@@ -42,6 +42,7 @@ type ServiceEntry struct {
 	SnapshotMaxAge   string   `toml:"snapshot_max_age,omitempty"`
 	SnapshotRequired *bool    `toml:"snapshot_required,omitempty"`
 	SnapshotEvents   []string `toml:"snapshot_events,omitempty"`
+	Ports            []string `toml:"ports,omitempty"`
 	Schedule         string   `toml:"schedule,omitempty"`
 	Args             []string `toml:"args,omitempty"`
 }
@@ -277,6 +278,7 @@ func (c *ProjectConfig) ServiceEntry(service, host string) (ServiceEntry, bool) 
 			entry.Args = cloneStringSlice(entry.Args)
 			entry.SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
 			entry.SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
+			entry.Ports = cloneStringSlice(entry.Ports)
 			return entry, true
 		}
 	}
@@ -287,6 +289,7 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 	entry.Args = cloneStringSlice(entry.Args)
 	entry.SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
 	entry.SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
+	entry.Ports = cloneStringSlice(entry.Ports)
 	for i := range c.Services {
 		if c.Services[i].Name == entry.Name && c.Services[i].Host == entry.Host {
 			c.Services[i].Type = entry.Type
@@ -306,6 +309,7 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 			c.Services[i].SnapshotMaxAge = entry.SnapshotMaxAge
 			c.Services[i].SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
 			c.Services[i].SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
+			c.Services[i].Ports = cloneStringSlice(entry.Ports)
 			c.addHost(entry.Host)
 			sortServiceEntries(c.Services)
 			return

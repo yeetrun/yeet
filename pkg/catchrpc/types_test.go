@@ -39,3 +39,29 @@ func TestServiceInfoSnapshotsIncludePopulated(t *testing.T) {
 		t.Fatalf("ServiceInfo JSON = %s, want snapshots field", raw)
 	}
 }
+
+func TestServiceNetworkPortsPresenceRoundTrip(t *testing.T) {
+	raw, err := json.Marshal(ServiceNetwork{PortsPresent: true})
+	if err != nil {
+		t.Fatalf("Marshal ServiceNetwork: %v", err)
+	}
+	if !strings.Contains(string(raw), `"ports":[]`) {
+		t.Fatalf("ServiceNetwork JSON = %s, want empty ports field", raw)
+	}
+
+	var withPorts ServiceNetwork
+	if err := json.Unmarshal([]byte(`{"ports":[{"hostPort":80,"containerPort":80,"protocol":"tcp"}]}`), &withPorts); err != nil {
+		t.Fatalf("Unmarshal with ports: %v", err)
+	}
+	if !withPorts.PortsPresent || len(withPorts.Ports) != 1 || withPorts.Ports[0].Protocol != "tcp" {
+		t.Fatalf("withPorts = %#v, want present tcp port", withPorts)
+	}
+
+	var omitted ServiceNetwork
+	if err := json.Unmarshal([]byte(`{"svcIp":"192.168.100.2"}`), &omitted); err != nil {
+		t.Fatalf("Unmarshal omitted ports: %v", err)
+	}
+	if omitted.PortsPresent {
+		t.Fatalf("omitted = %#v, want PortsPresent false", omitted)
+	}
+}

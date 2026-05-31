@@ -401,6 +401,11 @@ func parseSvcRun(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverride s
 		return parsedSvcRun{}, err
 	}
 	entry, hasEntry := serviceEntryForConfig(cfgLoc, hostOverride)
+	if hasEntry {
+		if err := ensureRunPublishPortsRetained(entry, flags.Args, payload); err != nil {
+			return parsedSvcRun{}, err
+		}
+	}
 	effectiveArgs, err := effectiveSvcRunArgs(entry, hasEntry, flags.Args)
 	if err != nil {
 		return parsedSvcRun{}, err
@@ -814,13 +819,16 @@ func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 	if err := validateServiceSetConfigFlags(flags); err != nil {
 		return err
 	}
+	if err := ensureServiceSetPublishPortsRetained(req.Config, req.HostOverride, req.Service, flags); err != nil {
+		return err
+	}
 	tty := !flags.Copy && !flags.Empty && isTerminalFn(int(os.Stdin.Fd())) && isTerminalFn(int(os.Stdout.Fd()))
 	if err := execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, tty); err != nil {
 		return err
 	}
 	updated, err := saveServiceSetConfig(req.Config, req.HostOverride, flags)
 	if err != nil {
-		return err
+		return fmt.Errorf("updated catch service settings, but failed to update %s: %w", projectConfigName, err)
 	}
 	if !updated {
 		return printServiceSetSyncHint(os.Stdout, req.Service, serviceSetSyncHintHost(req))
@@ -907,6 +915,86 @@ func handleSvcEvents(ctx context.Context, req svcCommandRequest) error {
 
 func handleSvcRemote(ctx context.Context, req svcCommandRequest) error {
 	return execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, true)
+}
+
+func ensureRunPublishPortsRetained(entry ServiceEntry, args []string, payload string) error {
+	publish, _, err := extractPublishOptions(args)
+	if err != nil {
+		return err
+	}
+	if !publish.Changed || publish.Reset {
+		return nil
+	}
+	return ensurePublishPortsRetained(effectiveServiceEntryPorts(entry), publish.Ports, publishGuardCommand{
+		Base:    []string{"yeet", "run", entry.Name},
+		Current: publish.Ports,
+		Suffix:  []string{payload},
+	})
+}
+
+func ensureServiceSetPublishPortsRetained(cfgLoc *projectConfigLocation, hostOverride string, service string, flags cli.ServiceSetFlags) error {
+	if len(flags.Publish) == 0 && !flags.PublishReset {
+		return nil
+	}
+	if flags.PublishReset {
+		return nil
+	}
+	entry, ok := serviceEntryForConfig(cfgLoc, hostOverride)
+	if !ok {
+		return nil
+	}
+	return ensurePublishPortsRetained(effectiveServiceEntryPorts(entry), flags.Publish, publishGuardCommand{
+		Base:    []string{"yeet", "service", "set", service},
+		Current: flags.Publish,
+	})
+}
+
+type publishGuardCommand struct {
+	Base    []string
+	Current []string
+	Suffix  []string
+}
+
+func ensurePublishPortsRetained(existingPorts, desiredPorts []string, command publishGuardCommand) error {
+	existingPorts = normalizePublishPorts(existingPorts)
+	if len(existingPorts) == 0 {
+		return nil
+	}
+	desiredPorts = normalizePublishPorts(desiredPorts)
+	missing := missingPublishPorts(existingPorts, desiredPorts)
+	if len(missing) == 0 {
+		return nil
+	}
+	keepPorts := append(append([]string{}, existingPorts...), desiredPorts...)
+	return fmt.Errorf("changing published ports would remove existing mappings:\n  %s\n\nTo keep them, include them explicitly:\n  %s\n\nTo replace the published port list, re-run with --publish-reset:\n  %s",
+		strings.Join(missing, "\n  "),
+		formatPublishGuardCommand(command.Base, keepPorts, nil, command.Suffix),
+		formatPublishGuardCommand(command.Base, desiredPorts, []string{"--publish-reset"}, command.Suffix),
+	)
+}
+
+func missingPublishPorts(existingPorts, desiredPorts []string) []string {
+	desired := make(map[string]struct{}, len(desiredPorts))
+	for _, port := range desiredPorts {
+		desired[port] = struct{}{}
+	}
+	missing := make([]string, 0)
+	for _, port := range existingPorts {
+		if _, ok := desired[port]; !ok {
+			missing = append(missing, port)
+		}
+	}
+	return missing
+}
+
+func formatPublishGuardCommand(base []string, ports []string, extra []string, suffix []string) string {
+	parts := append([]string{}, base...)
+	parts = append(parts, extra...)
+	for _, port := range normalizePublishPorts(ports) {
+		parts = append(parts, "-p", port)
+	}
+	parts = append(parts, suffix...)
+	return strings.Join(parts, " ")
 }
 
 var tryRunDockerFn = tryRunDockerContext
@@ -1915,10 +2003,8 @@ func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride s
 		return fmt.Errorf("no payload configured for %s@%s", stored.Service, stored.Host)
 	}
 	envFile := resolveEnvFilePath(cfgLoc.Dir, stored.Entry.EnvFile)
-	runArgs := runArgsWithServiceRootOptions(
-		rehydrateRunArgs(stored.Entry.Args),
-		serviceRootOptions{Root: stored.Entry.ServiceRoot, ZFS: stored.Entry.ServiceRootZFS},
-	)
+	runArgs := runArgsWithPublishOptions(rehydrateRunArgs(stored.Entry.Args), stored.Entry.Ports)
+	runArgs = runArgsWithServiceRootOptions(runArgs, serviceRootOptions{Root: stored.Entry.ServiceRoot, ZFS: stored.Entry.ServiceRootZFS})
 	runArgs = runArgsWithSnapshotOptions(runArgs, snapshotOptions{
 		Snapshots: stored.Entry.Snapshots,
 		KeepLast:  stored.Entry.SnapshotKeepLast,
@@ -2033,13 +2119,21 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 	if err != nil {
 		return err
 	}
+	publish, filteredArgs, err := extractPublishOptions(filteredArgs)
+	if err != nil {
+		return err
+	}
+	existing, hasExisting := runConfigExistingEntry(loc, host)
+	ports := publish.Ports
+	if !publish.Changed && hasExisting {
+		ports = effectiveServiceEntryPorts(existing)
+	}
 	snapOpts, filteredArgs, snapshotChange, err := extractSnapshotOptions(filteredArgs)
 	if err != nil {
 		return err
 	}
 	payloadKind = strings.TrimSpace(payloadKind)
 	payloadRel := relativePayloadPathForKind(loc.Dir, payload, payloadKind)
-	existing, hasExisting := runConfigExistingEntry(loc, host)
 	entry := ServiceEntry{
 		Name:           serviceOverride,
 		Host:           host,
@@ -2048,6 +2142,7 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 		PayloadKind:    payloadKind,
 		ServiceRoot:    strings.TrimSpace(serviceRoot),
 		ServiceRootZFS: serviceRootZFS,
+		Ports:          normalizePublishPorts(ports),
 		Args:           normalizeRunArgs(filteredArgs),
 	}
 	applyRunConfigSnapshotFields(&entry, existing, hasExisting, snapOpts, snapshotChange)
@@ -2160,6 +2255,9 @@ func applyServiceSetConfigFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) 
 	if strings.TrimSpace(flags.ServiceRoot) != "" {
 		entry.ServiceRoot = strings.TrimSpace(flags.ServiceRoot)
 		entry.ServiceRootZFS = flags.ZFS
+	}
+	if len(flags.Publish) != 0 || flags.PublishReset {
+		entry.Ports = normalizePublishPorts(flags.Publish)
 	}
 	return applyServiceSetSnapshotFlags(entry, flags)
 }
