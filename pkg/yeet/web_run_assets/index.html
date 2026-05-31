@@ -39,10 +39,13 @@
 
           <label for="host" data-field="host">
             <span>Host <button type="button" class="help" data-help="Target catch host from CATCH_HOST, yeet.toml, or prefs." aria-label="Help for host">?</button></span>
-            <input id="host" name="host" list="hostOptions" autocomplete="off" spellcheck="false" required>
+            <div class="host-picker-field">
+              <input id="host" name="host" autocomplete="off" spellcheck="false" required aria-haspopup="listbox" aria-expanded="false">
+              <button type="button" id="hostPickerButton" class="quiet-button host-picker-trigger" aria-label="Choose host" aria-controls="hostPicker">Choose</button>
+              <div id="hostPicker" class="host-picker" role="listbox" hidden></div>
+            </div>
             <span class="field-error" id="hostError"></span>
           </label>
-          <datalist id="hostOptions"></datalist>
 
           <label for="payload" data-field="payload">
             <span>Payload <button type="button" class="help" data-help="A project file, Dockerfile, compose file, executable, or image reference." aria-label="Help for payload">?</button></span>
@@ -180,6 +183,19 @@
         </section>
       </form>
     </main>
+
+    <section id="terminalSheet" class="terminal-sheet" aria-labelledby="terminalTitle" hidden>
+      <div class="terminal-head">
+        <div class="terminal-copy">
+          <h2 id="terminalTitle">Deploy output</h2>
+          <p id="terminalSubtitle">Waiting for terminal output</p>
+        </div>
+        <span id="terminalStatus" class="terminal-status" role="status">Idle</span>
+        <button type="button" id="terminalCopy" class="quiet-button">Copy</button>
+        <button type="button" id="terminalExpand" class="quiet-button" aria-expanded="false">Expand</button>
+      </div>
+      <pre id="terminalOutput" tabindex="0" aria-live="polite"></pre>
+    </section>
 
     <div class="field-picker" id="filePicker" role="listbox" hidden>
       <div class="browser-head">

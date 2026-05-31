@@ -235,7 +235,8 @@ legend {
   color: var(--brand);
 }
 
-.picker-field {
+.picker-field,
+.host-picker-field {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
@@ -243,6 +244,51 @@ legend {
 
 .picker-trigger {
   min-width: 58px;
+}
+
+.host-picker-field {
+  position: relative;
+}
+
+.host-picker-trigger {
+  min-width: 72px;
+}
+
+.host-picker {
+  position: absolute;
+  z-index: 14;
+  top: calc(100% - 1px);
+  right: 0;
+  left: 0;
+  display: grid;
+  gap: 4px;
+  padding: 7px;
+  border: 1px solid var(--line-strong);
+  border-top-color: var(--line);
+  border-radius: 0 0 8px 8px;
+  background: oklch(0.15 0.012 165);
+  box-shadow: 0 16px 34px color-mix(in oklch, var(--canvas) 72%, transparent);
+}
+
+.host-picker[hidden] {
+  display: none;
+}
+
+.host-option {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
+.host-option:hover,
+.host-option:focus-visible,
+.host-option[aria-selected="true"] {
+  background: var(--surface-2);
 }
 
 .browser-head {
@@ -446,6 +492,91 @@ legend {
   background: color-mix(in oklch, var(--canvas) 94%, var(--surface));
 }
 
+.terminal-sheet {
+  position: fixed;
+  right: 24px;
+  bottom: 74px;
+  left: 24px;
+  z-index: 12;
+  max-width: 1180px;
+  margin: 0 auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px 8px 0 0;
+  background: oklch(0.14 0.011 165);
+  box-shadow: 0 -16px 42px color-mix(in oklch, var(--canvas) 70%, transparent);
+}
+
+.terminal-sheet[hidden] {
+  display: none;
+}
+
+.terminal-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in oklch, var(--surface) 62%, var(--canvas));
+}
+
+.terminal-copy {
+  min-width: 0;
+}
+
+.terminal-copy h2 {
+  font-size: 15px;
+  line-height: 1.25;
+}
+
+.terminal-copy p {
+  overflow: hidden;
+  color: var(--quiet);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-status {
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.terminal-status[data-tone="ready"] {
+  color: var(--accent);
+}
+
+.terminal-status[data-tone="error"] {
+  color: var(--danger);
+}
+
+.terminal-status[data-tone="done"] {
+  color: var(--brand);
+}
+
+#terminalOutput {
+  height: 150px;
+  max-height: 42vh;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  color: oklch(0.89 0.018 155);
+  background: oklch(0.115 0.01 165);
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.terminal-sheet[data-expanded="true"] #terminalOutput {
+  height: min(56vh, 520px);
+}
+
+body[data-terminal-visible="true"] .shell {
+  margin-bottom: 280px;
+}
+
 #commandPreview {
   min-width: 0;
   overflow: hidden;
@@ -530,6 +661,20 @@ legend {
   .root-control,
   .picker-field {
     grid-template-columns: 1fr;
+  }
+
+  .terminal-sheet {
+    right: 12px;
+    bottom: 148px;
+    left: 12px;
+  }
+
+  .terminal-head {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .terminal-status {
+    grid-column: 1 / -1;
   }
 
   .action-row {
