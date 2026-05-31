@@ -93,7 +93,7 @@ func newRunWebBootstrap(cfg *projectConfigLocation, hostOverride string, service
 		SelectedHost: selected,
 		Prefill:      runWebPrefillFromArgs(service, args),
 		Options: runWebOptionHints{
-			NetworkModes:  []string{"host", "svc", "ts", "lan", "macvlan"},
+			NetworkModes:  []string{"svc", "ts", "lan"},
 			SnapshotModes: []string{"inherit", "on", "off"},
 		},
 	}

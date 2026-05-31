@@ -89,6 +89,14 @@ func TestRunWebBootstrapUsesProjectHostsEnvAndPrefs(t *testing.T) {
 	}
 }
 
+func TestRunWebBootstrapNetworkModesMatchCatchModes(t *testing.T) {
+	boot := newRunWebBootstrap(nil, "", "", nil)
+	want := []string{"svc", "ts", "lan"}
+	if !reflect.DeepEqual(boot.Options.NetworkModes, want) {
+		t.Fatalf("network modes = %#v, want %#v", boot.Options.NetworkModes, want)
+	}
+}
+
 func TestRunWebBootstrapPrefillUsesRequestServiceAndRunFlags(t *testing.T) {
 	oldService := serviceOverride
 	defer func() { serviceOverride = oldService }()

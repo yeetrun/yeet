@@ -300,13 +300,36 @@ func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigL
 	if err := runDraftWithChanges(ctx, draft, runArgs, forceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
 		return err
 	}
-	if err := saveRunConfigWithPayloadKind(cfgLoc, host, draft.Payload, draft.PayloadKind, runArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS); err != nil {
+	configRunArgs := runArgsWithoutSensitiveRunOptions(runArgs)
+	if err := saveRunConfigWithPayloadKind(cfgLoc, host, draft.Payload, draft.PayloadKind, configRunArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS); err != nil {
 		return err
 	}
 	if draft.EnvFileSet {
 		return saveEnvFileConfig(cfgLoc, host, draft.EnvFileArg)
 	}
 	return nil
+}
+
+func runArgsWithoutSensitiveRunOptions(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			return out
+		}
+		if arg == "--ts-auth-key" {
+			if i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--ts-auth-key=") {
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
 }
 
 func runDraftWithChanges(ctx context.Context, draft RunDraft, runArgs []string, forceDeploy bool) error {

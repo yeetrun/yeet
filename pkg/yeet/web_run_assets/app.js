@@ -79,6 +79,7 @@ function splitArgs(raw) {
 function buildDraft() {
   const restart = true;
   // Future redeploy support can add pull/force once the web flow allows existing services.
+  const snapshotRequired = snapshotRequiredValue();
   return {
     service: $("service").value.trim(),
     host: $("host").value.trim(),
@@ -87,8 +88,13 @@ function buildDraft() {
     payloadArgs: splitArgs($("payloadArgs").value),
     network: {
       modes: [...document.querySelectorAll("input[name='net']:checked")].map((el) => el.value),
+      tsVersion: $("tsVersion").value.trim(),
+      tsExitNode: $("tsExitNode").value.trim(),
       tsTags: splitCSV($("tsTags").value),
       tsAuthKey: $("tsAuthKey").value,
+      macvlanMac: $("macvlanMac").value.trim(),
+      macvlanVlan: Number.parseInt($("macvlanVlan").value, 10) || 0,
+      macvlanParent: $("macvlanParent").value.trim(),
       publish: splitCSV($("publish").value),
       restart,
     },
@@ -100,9 +106,17 @@ function buildDraft() {
       mode: $("snapshots").value,
       keepLast: Number.parseInt($("snapshotKeepLast").value, 10) || 0,
       maxAge: $("snapshotMaxAge").value.trim(),
+      required: snapshotRequired,
       events: splitCSV($("snapshotEvents").value),
     },
   };
+}
+
+function snapshotRequiredValue() {
+  const value = $("snapshotRequired").value;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return undefined;
 }
 
 function shell(value) {
@@ -116,14 +130,20 @@ function updatePreview(draft) {
   if (draft.payload) parts.push(shell(draft.payload));
   if (draft.envFile) parts.push(`--env-file=${shell(draft.envFile)}`);
   for (const mode of draft.network.modes) parts.push(`--net=${shell(mode)}`);
+  if (draft.network.tsVersion) parts.push(`--ts-ver=${shell(draft.network.tsVersion)}`);
+  if (draft.network.tsExitNode) parts.push(`--ts-exit=${shell(draft.network.tsExitNode)}`);
   for (const tag of draft.network.tsTags) parts.push(`--ts-tags=${shell(tag)}`);
   if (draft.network.tsAuthKey) parts.push("--ts-auth-key=<hidden>");
+  if (draft.network.macvlanParent) parts.push(`--macvlan-parent=${shell(draft.network.macvlanParent)}`);
+  if (draft.network.macvlanVlan) parts.push(`--macvlan-vlan=${draft.network.macvlanVlan}`);
+  if (draft.network.macvlanMac) parts.push(`--macvlan-mac=${shell(draft.network.macvlanMac)}`);
   for (const port of draft.network.publish) parts.push(`--publish=${shell(port)}`);
   if (draft.storage.serviceRoot) parts.push(`--service-root=${shell(draft.storage.serviceRoot)}`);
   if (draft.storage.zfs) parts.push("--zfs");
   if (draft.snapshots.mode) parts.push(`--snapshots=${shell(draft.snapshots.mode)}`);
   if (draft.snapshots.keepLast) parts.push(`--snapshot-keep-last=${draft.snapshots.keepLast}`);
   if (draft.snapshots.maxAge) parts.push(`--snapshot-max-age=${shell(draft.snapshots.maxAge)}`);
+  if (draft.snapshots.required !== undefined) parts.push(`--snapshot-required=${draft.snapshots.required}`);
   for (const event of draft.snapshots.events) parts.push(`--snapshot-events=${shell(event)}`);
   if (draft.payloadArgs.length) parts.push("--", ...draft.payloadArgs.map(shell));
   $("commandPreview").textContent = parts.join(" ");
@@ -160,6 +180,21 @@ function renderSnapshotModes(modes) {
     option.textContent = mode;
     return option;
   }));
+}
+
+function renderSnapshotRequiredOptions() {
+  $("snapshotRequired").replaceChildren(
+    option("inherit", ""),
+    option("required", "true"),
+    option("optional", "false"),
+  );
+}
+
+function option(label, value) {
+  const item = document.createElement("option");
+  item.textContent = label;
+  item.value = value;
+  return item;
 }
 
 function parentDir(dir) {
@@ -232,8 +267,9 @@ async function bootstrap() {
 
   $("service").value = state.bootstrap.prefill?.service || "";
   $("payload").value = state.bootstrap.prefill?.payload || "";
-  renderNetworkModes(state.bootstrap.options?.networkModes || ["host", "svc", "ts", "lan", "macvlan"]);
+  renderNetworkModes(state.bootstrap.options?.networkModes || ["svc", "ts", "lan"]);
   renderSnapshotModes(state.bootstrap.options?.snapshotModes || ["inherit", "on", "off"]);
+  renderSnapshotRequiredOptions();
   await loadFiles(".");
   $("service").focus();
   if ($("service").value) $("payload").focus();

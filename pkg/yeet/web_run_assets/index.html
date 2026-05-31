@@ -85,10 +85,39 @@
             <input id="tsAuthKey" name="tsAuthKey" type="password" autocomplete="off">
           </label>
 
+          <div class="split-fields">
+            <label for="tsVersion">
+              <span>Tailscale version <button type="button" class="help" data-help="Optional Tailscale version for the service sidecar." aria-label="Help for Tailscale version">?</button></span>
+              <input id="tsVersion" name="tsVersion" autocomplete="off" spellcheck="false">
+            </label>
+            <label for="tsExitNode">
+              <span>Exit node <button type="button" class="help" data-help="Optional Tailscale exit node used by the service." aria-label="Help for Tailscale exit node">?</button></span>
+              <input id="tsExitNode" name="tsExitNode" autocomplete="off" spellcheck="false">
+            </label>
+          </div>
+
           <label for="publish">
             <span>Publish ports <button type="button" class="help" data-help="Comma-separated port mappings such as 8080:80." aria-label="Help for published ports">?</button></span>
             <input id="publish" name="publish" autocomplete="off" spellcheck="false">
           </label>
+
+          <fieldset>
+            <legend>LAN options <button type="button" class="help" data-help="Optional macvlan settings used when the lan network mode is selected." aria-label="Help for LAN options">?</button></legend>
+            <div class="split-fields">
+              <label for="macvlanParent">
+                <span>Parent</span>
+                <input id="macvlanParent" name="macvlanParent" autocomplete="off" spellcheck="false" placeholder="eth0">
+              </label>
+              <label for="macvlanVlan">
+                <span>VLAN</span>
+                <input id="macvlanVlan" name="macvlanVlan" inputmode="numeric" autocomplete="off">
+              </label>
+            </div>
+            <label for="macvlanMac">
+              <span>MAC address</span>
+              <input id="macvlanMac" name="macvlanMac" autocomplete="off" spellcheck="false" placeholder="02:00:00:00:00:07">
+            </label>
+          </fieldset>
 
           <div class="split-fields">
             <label for="serviceRoot">
@@ -116,6 +145,10 @@
             <label for="snapshotMaxAge">
               <span>Max age</span>
               <input id="snapshotMaxAge" name="snapshotMaxAge" autocomplete="off" spellcheck="false" placeholder="7d or 72h">
+            </label>
+            <label for="snapshotRequired">
+              <span>Required</span>
+              <select id="snapshotRequired" name="snapshotRequired"></select>
             </label>
             <label for="snapshotEvents">
               <span>Events</span>
