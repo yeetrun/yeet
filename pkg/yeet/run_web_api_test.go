@@ -439,6 +439,50 @@ func TestRunWebAPIDeployStreamMirrorsStderr(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIDeployKeepsTerminalBackedOutputTTY(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	oldIsTerminal := isTerminalFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+		isTerminalFn = oldIsTerminal
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	defer func() { _ = stdoutR.Close() }()
+	defer func() { _ = stdoutW.Close() }()
+	isTerminalFn = func(fd int) bool {
+		return fd == int(stdoutW.Fd())
+	}
+	gotTTY := make(chan bool, 1)
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		gotTTY <- isWriterTerminal(opts.Stdout)
+		return nil
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, Out: stdoutW})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
+
+	select {
+	case tty := <-gotTTY:
+		if !tty {
+			t.Fatal("web deploy stdout was not terminal-backed; catch would render plain progress instead of TTY output")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for deploy execution")
+	}
+}
+
 func TestRunWebAPISuccessfulJobCompletesAndRejectsFurtherDeploys(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
 	oldExecDraft := executeRunDraftWithOptionsFn

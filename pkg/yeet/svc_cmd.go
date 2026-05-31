@@ -1436,7 +1436,15 @@ func isStdoutWriter(stdout io.Writer) bool {
 	return ok && f == os.Stdout
 }
 
+type terminalFileWriter interface {
+	terminalFile() *os.File
+}
+
 func isWriterTerminal(stdout io.Writer) bool {
+	if w, ok := stdout.(terminalFileWriter); ok {
+		f := w.terminalFile()
+		return f != nil && isTerminalFn(int(f.Fd()))
+	}
 	f, ok := stdout.(*os.File)
 	if !ok {
 		return false

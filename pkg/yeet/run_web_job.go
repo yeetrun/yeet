@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -197,6 +198,14 @@ func (j *runWebJob) browserClosed() {
 	j.noticeOnce.Do(func() {
 		_, _ = io.WriteString(j.notice, runWebBrowserClosedMessage)
 	})
+}
+
+func (j *runWebJob) terminalFile() *os.File {
+	f, ok := j.stdout.(*os.File)
+	if !ok {
+		return nil
+	}
+	return f
 }
 
 func (ev runWebStreamEvent) ssePayload() (eventName string, data []byte, err error) {
