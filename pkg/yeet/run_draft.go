@@ -261,8 +261,6 @@ func runDraftBool(v bool) *bool {
 	return &v
 }
 
-var executeRunDraftFn = executeRunDraft
-
 type runDraftExecuteOptions struct {
 	Stdout      io.Writer
 	ForceDeploy bool

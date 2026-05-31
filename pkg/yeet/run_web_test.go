@@ -279,16 +279,16 @@ func TestRunWebOpensBrowserForAlreadyCanceledContext(t *testing.T) {
 func TestRunWebReturnsAfterSuccessfulDeploy(t *testing.T) {
 	oldOpenBrowser := openBrowserFn
 	oldInfo := fetchRunDraftServiceInfoFn
-	oldExecDraft := executeRunDraftFn
+	oldExecDraft := executeRunDraftWithOptionsFn
 	defer func() {
 		openBrowserFn = oldOpenBrowser
 		fetchRunDraftServiceInfoFn = oldInfo
-		executeRunDraftFn = oldExecDraft
+		executeRunDraftWithOptionsFn = oldExecDraft
 	}()
 	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
 		return catchrpc.ServiceInfoResponse{Found: false}, nil
 	}
-	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
 		return nil
 	}
 
@@ -333,8 +333,8 @@ func TestRunWebReturnsAfterSuccessfulDeploy(t *testing.T) {
 	if result.status != http.StatusOK {
 		t.Fatalf("deploy post status = %d body=%s, want 200", result.status, result.body)
 	}
-	if !strings.Contains(result.body, "Service deployed. Close this tab and return to the terminal.") {
-		t.Fatalf("deploy post body = %s, want success message", result.body)
+	if !strings.Contains(result.body, `"ok":true`) || !strings.Contains(result.body, `"jobId":"`) {
+		t.Fatalf("deploy post body = %s, want job-start response", result.body)
 	}
 	if !strings.Contains(out.String(), "Deployment finished") {
 		t.Fatalf("output = %q, want deployment finished message", out.String())
@@ -404,11 +404,11 @@ func TestWaitRunWebServerDrainsDoneResponseBeforeShutdown(t *testing.T) {
 func TestRunWebReturnsAfterDeployWithActiveValidate(t *testing.T) {
 	oldOpenBrowser := openBrowserFn
 	oldInfo := fetchRunDraftServiceInfoFn
-	oldExecDraft := executeRunDraftFn
+	oldExecDraft := executeRunDraftWithOptionsFn
 	defer func() {
 		openBrowserFn = oldOpenBrowser
 		fetchRunDraftServiceInfoFn = oldInfo
-		executeRunDraftFn = oldExecDraft
+		executeRunDraftWithOptionsFn = oldExecDraft
 	}()
 
 	validateStarted := make(chan struct{})
@@ -421,7 +421,7 @@ func TestRunWebReturnsAfterDeployWithActiveValidate(t *testing.T) {
 		}
 		return catchrpc.ServiceInfoResponse{Found: false}, nil
 	}
-	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
 		return nil
 	}
 

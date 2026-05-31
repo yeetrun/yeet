@@ -7,12 +7,15 @@ package yeet
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -234,17 +237,19 @@ func TestRunWebAPIRedactsTSAuthKeyInValidationResponses(t *testing.T) {
 
 func TestRunWebAPIValidateAndDeploy(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
-	oldExecDraft := executeRunDraftFn
+	oldExecDraft := executeRunDraftWithOptionsFn
 	defer func() {
 		fetchRunDraftServiceInfoFn = oldInfo
-		executeRunDraftFn = oldExecDraft
+		executeRunDraftWithOptionsFn = oldExecDraft
 	}()
 	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
 		return catchrpc.ServiceInfoResponse{Found: false}, nil
 	}
 	var deployed RunDraft
-	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+	done := make(chan struct{})
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
 		deployed = draft
+		close(done)
 		return nil
 	}
 	root := t.TempDir()
@@ -273,14 +278,331 @@ func TestRunWebAPIValidateAndDeploy(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("deploy status = %d body=%s", rec.Code, rec.Body.String())
 	}
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for background deploy")
+	}
 	if deployed.Service != "svc-a" || deployed.Host != "host-a" || deployed.Payload != payload || !deployed.NewServiceOnly {
 		t.Fatalf("deployed = %#v, want normalized new-service draft", deployed)
 	}
 	if deployed.EnvFile != envFile || !deployed.EnvFileSet || deployed.EnvFileArg != envFile {
 		t.Fatalf("deployed env = file:%q set:%v arg:%q, want normalized explicit env", deployed.EnvFile, deployed.EnvFileSet, deployed.EnvFileArg)
 	}
-	if !strings.Contains(rec.Body.String(), "Service deployed. Close this tab and return to the terminal.") {
-		t.Fatalf("deploy body = %s, want success message", rec.Body.String())
+	status := runWebAPIRequest(t, s, http.MethodGet, "/api/deploy/"+jobID+"/status", nil)
+	if status.Code != http.StatusOK {
+		t.Fatalf("status code = %d body=%s", status.Code, status.Body.String())
+	}
+	if !strings.Contains(status.Body.String(), `"state":"succeeded"`) {
+		t.Fatalf("status body = %s, want succeeded", status.Body.String())
+	}
+}
+
+func TestRunWebAPIDeployStartsJobWithoutWaitingForCompletion(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startedOnce sync.Once
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		startedOnce.Do(func() { close(started) })
+		<-release
+		return nil
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root})
+
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	startedResp := decodeRunWebDeployStarted(t, rec)
+	if !startedResp.OK || startedResp.JobID == "" {
+		t.Fatalf("deploy response = %#v, want ok with job ID", startedResp)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for background deploy to start")
+	}
+	close(release)
+	waitRunWebJobState(t, s, startedResp.JobID, runWebJobSucceeded)
+}
+
+func TestRunWebAPIDeployStreamReplaysOutputAndStatus(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		_, _ = io.WriteString(opts.Stdout, "deploying\n")
+		return nil
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	var terminal bytes.Buffer
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, Out: &terminal})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
+
+	stream := runWebAPIRequest(t, s, http.MethodGet, "/api/deploy/"+jobID+"/stream", nil)
+	if stream.Code != http.StatusOK {
+		t.Fatalf("stream status = %d body=%s", stream.Code, stream.Body.String())
+	}
+	if ct := stream.Header().Get("Content-Type"); !strings.Contains(ct, "text/event-stream") {
+		t.Fatalf("stream Content-Type = %q, want text/event-stream", ct)
+	}
+	events := parseRunWebSSE(t, stream.Body.String())
+	if len(events) != 2 {
+		t.Fatalf("events = %#v, want output and status", events)
+	}
+	if events[0].Name != "output" || events[0].ID == "" {
+		t.Fatalf("first event = %#v, want output with id", events[0])
+	}
+	var output struct {
+		Encoding string `json:"encoding"`
+		Chunk    string `json:"chunk"`
+	}
+	if err := json.Unmarshal([]byte(events[0].Data), &output); err != nil {
+		t.Fatalf("decode output data: %v", err)
+	}
+	chunk, err := base64.StdEncoding.DecodeString(output.Chunk)
+	if err != nil {
+		t.Fatalf("decode output chunk: %v", err)
+	}
+	if output.Encoding != "base64" || string(chunk) != "deploying\n" {
+		t.Fatalf("output event = %#v chunk=%q, want deploying", output, string(chunk))
+	}
+	if events[1].Name != "status" || !strings.Contains(events[1].Data, `"state":"succeeded"`) {
+		t.Fatalf("second event = %#v, want succeeded status", events[1])
+	}
+	if terminal.String() != "deploying\n" {
+		t.Fatalf("terminal output = %q, want deploying", terminal.String())
+	}
+}
+
+func TestRunWebAPISuccessfulJobCompletesAndRejectsFurtherDeploys(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		return nil
+	}
+	completed := make(chan struct{})
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, OnComplete: func() { close(completed) }})
+	draft := RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"}
+
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for OnComplete")
+	}
+	again := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
+	if again.Code != http.StatusConflict {
+		t.Fatalf("second deploy status = %d, want 409 body=%s", again.Code, again.Body.String())
+	}
+}
+
+func TestRunWebAPISuccessIsNotPublishedBeforeServerIsComplete(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	release := make(chan struct{})
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		<-release
+		return nil
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	handler := newRunWebServer(runWebServerConfig{Token: "secret", Root: root})
+	server := handler.(*runWebServer)
+	rec := runWebAPIRequest(t, handler, http.MethodPost, "/api/deploy", RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	job, ok := server.lookupJob(jobID)
+	if !ok {
+		t.Fatalf("job %q not found", jobID)
+	}
+
+	server.deployMu.Lock()
+	close(release)
+	select {
+	case <-job.done:
+		server.deployMu.Unlock()
+		t.Fatal("job published terminal success before server completion could be marked")
+	case <-time.After(25 * time.Millisecond):
+	}
+	if status := job.status(); status.State == runWebJobSucceeded {
+		server.deployMu.Unlock()
+		t.Fatalf("job status = %s while server completion lock is held, want not externally succeeded", status.State)
+	}
+	server.deployMu.Unlock()
+
+	status := waitRunWebJobState(t, handler, jobID, runWebJobSucceeded)
+	if status.State != runWebJobSucceeded {
+		t.Fatalf("status = %#v, want succeeded", status)
+	}
+	server.deployMu.Lock()
+	complete := server.complete
+	server.deployMu.Unlock()
+	if !complete {
+		t.Fatal("server complete = false after job succeeded")
+	}
+}
+
+func TestRunWebAPIFailedJobAllowsRetry(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	var mu sync.Mutex
+	calls := 0
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			return errors.New("deploy failed")
+		}
+		return nil
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root})
+	draft := RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"}
+
+	first := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
+	firstID := decodeRunWebDeployStarted(t, first).JobID
+	waitRunWebJobState(t, s, firstID, runWebJobFailed)
+	second := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
+	secondID := decodeRunWebDeployStarted(t, second).JobID
+	if secondID == firstID {
+		t.Fatalf("second job id = %q, want new job id", secondID)
+	}
+	waitRunWebJobState(t, s, secondID, runWebJobSucceeded)
+}
+
+func TestRunWebAPISessionClosedWritesNoticeForFailedIncompleteJob(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		return errors.New("deploy failed")
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	var notices bytes.Buffer
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, Err: &notices})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	waitRunWebJobState(t, s, jobID, runWebJobFailed)
+
+	for i := 0; i < 2; i++ {
+		closed := runWebAPIRequest(t, s, http.MethodPost, "/api/session/closed", nil)
+		if closed.Code != http.StatusOK {
+			t.Fatalf("closed status = %d body=%s", closed.Code, closed.Body.String())
+		}
+	}
+	if got := notices.String(); got != runWebBrowserClosedMessage {
+		t.Fatalf("notice output = %q, want exactly one close notice after failed incomplete job", got)
+	}
+}
+
+func TestRunWebAPISessionClosedWritesNoticeOnceForIncompleteActiveJob(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var startedOnce sync.Once
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		startedOnce.Do(func() { close(started) })
+		<-release
+		return nil
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	var notices bytes.Buffer
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, Err: &notices})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for deploy")
+	}
+	for i := 0; i < 2; i++ {
+		closed := runWebAPIRequest(t, s, http.MethodPost, "/api/session/closed", nil)
+		if closed.Code != http.StatusOK {
+			t.Fatalf("closed status = %d body=%s", closed.Code, closed.Body.String())
+		}
+	}
+	if got := notices.String(); got != runWebBrowserClosedMessage {
+		t.Fatalf("notice output = %q, want exactly one close notice", got)
+	}
+	close(release)
+	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
+	closed := runWebAPIRequest(t, s, http.MethodPost, "/api/session/closed", nil)
+	if closed.Code != http.StatusOK {
+		t.Fatalf("closed after finish status = %d body=%s", closed.Code, closed.Body.String())
+	}
+	if got := notices.String(); got != runWebBrowserClosedMessage {
+		t.Fatalf("notice after finish = %q, want unchanged", got)
 	}
 }
 
@@ -302,10 +624,10 @@ func TestRunWebAPIDeployRepeatsValidation(t *testing.T) {
 
 func TestRunWebAPIDeployIsSingleUse(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
-	oldExecDraft := executeRunDraftFn
+	oldExecDraft := executeRunDraftWithOptionsFn
 	defer func() {
 		fetchRunDraftServiceInfoFn = oldInfo
-		executeRunDraftFn = oldExecDraft
+		executeRunDraftWithOptionsFn = oldExecDraft
 	}()
 	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
 		return catchrpc.ServiceInfoResponse{Found: false}, nil
@@ -316,7 +638,7 @@ func TestRunWebAPIDeployIsSingleUse(t *testing.T) {
 	var startOnce sync.Once
 	var mu sync.Mutex
 	execCount := 0
-	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
 		mu.Lock()
 		execCount++
 		mu.Unlock()
@@ -352,6 +674,8 @@ func TestRunWebAPIDeployIsSingleUse(t *testing.T) {
 	if first.Code != http.StatusOK {
 		t.Fatalf("first deploy status = %d, want 200 body=%s", first.Code, first.Body.String())
 	}
+	firstID := decodeRunWebDeployStarted(t, first).JobID
+	waitRunWebJobState(t, s, firstID, runWebJobSucceeded)
 
 	third := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
 	if third.Code != http.StatusConflict {
@@ -360,21 +684,21 @@ func TestRunWebAPIDeployIsSingleUse(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if execCount != 1 {
-		t.Fatalf("executeRunDraftFn calls = %d, want 1", execCount)
+		t.Fatalf("executeRunDraftWithOptionsFn calls = %d, want 1", execCount)
 	}
 }
 
 func TestRunWebAPIDeployUsesConfiguredContext(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
-	oldExecDraft := executeRunDraftFn
+	oldExecDraft := executeRunDraftWithOptionsFn
 	defer func() {
 		fetchRunDraftServiceInfoFn = oldInfo
-		executeRunDraftFn = oldExecDraft
+		executeRunDraftWithOptionsFn = oldExecDraft
 	}()
 	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
 		return catchrpc.ServiceInfoResponse{Found: false}, nil
 	}
-	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -393,25 +717,26 @@ func TestRunWebAPIDeployUsesConfiguredContext(t *testing.T) {
 	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, Context: ctx})
 
 	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("deploy status = %d, want 500 body=%s", rec.Code, rec.Body.String())
-	}
-	if !strings.Contains(rec.Body.String(), "context canceled") {
-		t.Fatalf("deploy body = %s, want context canceled", rec.Body.String())
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	status := waitRunWebJobState(t, s, jobID, runWebJobFailed)
+	if !strings.Contains(status.Error, "context canceled") {
+		t.Fatalf("status error = %q, want context canceled", status.Error)
 	}
 }
 
 func TestRunWebAPIDeployIgnoresCanceledRequestContext(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
-	oldExecDraft := executeRunDraftFn
+	oldExecDraft := executeRunDraftWithOptionsFn
 	defer func() {
 		fetchRunDraftServiceInfoFn = oldInfo
-		executeRunDraftFn = oldExecDraft
+		executeRunDraftWithOptionsFn = oldExecDraft
 	}()
 	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
 		return catchrpc.ServiceInfoResponse{Found: false}, nil
 	}
-	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+	done := make(chan struct{})
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		defer close(done)
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -439,6 +764,34 @@ func TestRunWebAPIDeployIgnoresCanceledRequestContext(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("deploy status = %d, want 200 body=%s", rec.Code, rec.Body.String())
 	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for background deploy")
+	}
+}
+
+func TestRunWebAPIDeployJobUnknownAndBadMethods(t *testing.T) {
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
+
+	tests := []struct {
+		method string
+		path   string
+		want   int
+	}{
+		{method: http.MethodGet, path: "/api/deploy/missing/status", want: http.StatusNotFound},
+		{method: http.MethodGet, path: "/api/deploy/missing/stream", want: http.StatusNotFound},
+		{method: http.MethodPost, path: "/api/deploy/missing/stream", want: http.StatusMethodNotAllowed},
+		{method: http.MethodPost, path: "/api/deploy/missing/status", want: http.StatusMethodNotAllowed},
+		{method: http.MethodGet, path: "/api/deploy", want: http.StatusMethodNotAllowed},
+		{method: http.MethodGet, path: "/api/session/closed", want: http.StatusMethodNotAllowed},
+	}
+	for _, tt := range tests {
+		rec := runWebAPIRequest(t, s, tt.method, tt.path, nil)
+		if rec.Code != tt.want {
+			t.Fatalf("%s %s status = %d, want %d body=%s", tt.method, tt.path, rec.Code, tt.want, rec.Body.String())
+		}
+	}
 }
 
 func runWebAPIRequest(t *testing.T, handler http.Handler, method, path string, body any) *httptest.ResponseRecorder {
@@ -456,4 +809,89 @@ func runWebAPIRequest(t *testing.T, handler http.Handler, method, path string, b
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	return rec
+}
+
+type runWebDeployStartedResponse struct {
+	OK    bool   `json:"ok"`
+	JobID string `json:"jobId"`
+}
+
+func decodeRunWebDeployStarted(t *testing.T, rec *httptest.ResponseRecorder) runWebDeployStartedResponse {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	var response runWebDeployStartedResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode deploy response %q: %v", rec.Body.String(), err)
+	}
+	if !response.OK || response.JobID == "" {
+		t.Fatalf("deploy response = %#v, want ok job ID", response)
+	}
+	return response
+}
+
+func waitRunWebJobState(t *testing.T, handler http.Handler, jobID string, want runWebJobState) runWebJobStatus {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	var last runWebJobStatus
+	for time.Now().Before(deadline) {
+		rec := runWebAPIRequest(t, handler, http.MethodGet, "/api/deploy/"+jobID+"/status", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &last); err != nil {
+			t.Fatalf("decode status %q: %v", rec.Body.String(), err)
+		}
+		if last.State == want {
+			return last
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for job %s state %s, last=%#v", jobID, want, last)
+	return runWebJobStatus{}
+}
+
+type runWebSSETestEvent struct {
+	Name string
+	ID   string
+	Data string
+}
+
+func parseRunWebSSE(t *testing.T, body string) []runWebSSETestEvent {
+	t.Helper()
+	blocks := strings.Split(strings.TrimSpace(body), "\n\n")
+	events := make([]runWebSSETestEvent, 0, len(blocks))
+	for _, block := range blocks {
+		if strings.TrimSpace(block) == "" {
+			continue
+		}
+		var ev runWebSSETestEvent
+		for _, line := range strings.Split(block, "\n") {
+			key, value, ok := strings.Cut(line, ": ")
+			if !ok {
+				continue
+			}
+			switch key {
+			case "event":
+				ev.Name = value
+			case "id":
+				ev.ID = value
+				if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+					t.Fatalf("event id %q is not int64: %v", value, err)
+				}
+			case "data":
+				ev.Data = value
+			}
+		}
+		events = append(events, ev)
+	}
+	return events
+}
+
+func writeRunWebTestPayload(t *testing.T, root string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
 }

@@ -200,6 +200,12 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if req.Out == nil {
+		req.Out = os.Stdout
+	}
+	if req.Err == nil {
+		req.Err = os.Stderr
+	}
 	token, err := newRunWebToken()
 	if err != nil {
 		return err
@@ -217,9 +223,6 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 	defer func() { _ = listener.Close() }()
 
 	out := req.Out
-	if out == nil {
-		out = os.Stdout
-	}
 	if _, err := fmt.Fprintf(out, "Opening %s\n", url); err != nil {
 		return err
 	}
@@ -248,6 +251,8 @@ func startRunWebServer(ctx context.Context, req runWebRequest, token string, csr
 		Bootstrap: bootstrap,
 		Config:    req.Config,
 		Context:   ctx,
+		Out:       req.Out,
+		Err:       req.Err,
 		OnComplete: func() {
 			doneOnce.Do(func() { close(done) })
 		},
