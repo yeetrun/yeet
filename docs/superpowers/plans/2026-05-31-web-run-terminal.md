@@ -38,7 +38,7 @@
 - Modify `pkg/yeet/web_run_assets/styles.css`
   - Style the compact terminal sheet, expanded state, status tones, and copy/expand controls.
 - Modify `pkg/yeet/web_run_assets/app.js`
-  - Start deploy jobs, follow SSE streams, render output, send tab-close notification, and unlock the form on runtime failure.
+  - Start deploy jobs, follow SSE streams, render output, send tab-close notification, unlock the form on runtime failure, and replace the native host datalist with a custom on-theme host picker.
 - Modify `pkg/yeet/web_run_assets_test.go`
   - Assert the embedded assets expose terminal UI and stream behavior hooks.
 - Modify website docs after implementation:
@@ -1286,15 +1286,20 @@ for _, want := range []string{
 	`id="terminalStatus"`,
 	`id="terminalCopy"`,
 	`id="terminalExpand"`,
+	`id="hostPicker"`,
 	`EventSource`,
 	`/api/session/closed`,
 	`TextDecoder`,
 	`setDeployMode`,
 	`createTerminalRenderer`,
+	`showHostPicker`,
 } {
 	if !strings.Contains(index+app, want) {
 		t.Fatalf("web run assets missing %q", want)
 	}
+}
+if strings.Contains(index, `<datalist id="hostOptions"`) {
+	t.Fatal("web run host picker should not use native datalist prefix filtering")
 }
 ```
 
@@ -1308,7 +1313,127 @@ go test ./pkg/yeet -run TestWebRunAssetsExposeFirstDeployFields -count=1
 
 Expected: fail because terminal markup and stream client are missing.
 
-- [ ] **Step 3: Add terminal sheet markup**
+- [ ] **Step 3: Replace host datalist with custom host picker markup**
+
+In `pkg/yeet/web_run_assets/index.html`, replace the host input and datalist
+with a picker field that always shows all known hosts:
+
+```html
+          <label for="host" data-field="host">
+            <span>Host <button type="button" class="help" data-help="Target catch host from CATCH_HOST, yeet.toml, or prefs." aria-label="Help for host">?</button></span>
+            <div class="picker-field host-picker-field">
+              <input id="host" name="host" autocomplete="off" spellcheck="false" required aria-haspopup="listbox" aria-expanded="false">
+              <button type="button" id="hostPickerButton" class="quiet-button picker-trigger" aria-label="Choose host">Choose</button>
+            </div>
+            <div class="host-picker" id="hostPicker" role="listbox" hidden></div>
+            <span class="field-error" id="hostError"></span>
+          </label>
+```
+
+Do not keep `<datalist id="hostOptions">`. Native datalist prefix-filters and
+renders as an unthemed browser popup, which is not acceptable for this UI.
+
+- [ ] **Step 4: Add host picker JS**
+
+In `pkg/yeet/web_run_assets/app.js`, remove all code that populates
+`hostOptions`. Add these helpers:
+
+```js
+function renderHostPicker(hosts) {
+  const picker = $("hostPicker");
+  const rows = (hosts || []).map((host) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "host-option";
+    button.setAttribute("role", "option");
+    button.textContent = host;
+    button.addEventListener("click", () => {
+      $("host").value = host;
+      hideHostPicker();
+      update();
+    });
+    return button;
+  });
+  picker.replaceChildren(...rows);
+}
+
+function showHostPicker() {
+  const picker = $("hostPicker");
+  picker.hidden = false;
+  $("host").setAttribute("aria-expanded", "true");
+}
+
+function hideHostPicker() {
+  $("hostPicker").hidden = true;
+  $("host").setAttribute("aria-expanded", "false");
+}
+```
+
+In `bootstrap()`, replace the `hostOptions` datalist population with:
+
+```js
+renderHostPicker(state.bootstrap.hosts || []);
+```
+
+Wire events:
+
+```js
+$("host").addEventListener("focus", showHostPicker);
+$("host").addEventListener("click", showHostPicker);
+$("hostPickerButton").addEventListener("click", showHostPicker);
+document.addEventListener("click", (event) => {
+  if (event.target.closest("#hostPicker") || event.target.closest("#host") || event.target.closest("#hostPickerButton")) return;
+  hideHostPicker();
+});
+```
+
+The picker must always display every known host from bootstrap, regardless of
+the current text in the host input.
+
+- [ ] **Step 5: Add host picker CSS**
+
+In `pkg/yeet/web_run_assets/styles.css`, add:
+
+```css
+.host-picker-field {
+  position: relative;
+}
+
+.host-picker {
+  margin-top: -5px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+  background: oklch(0.15 0.012 165);
+  box-shadow: 0 14px 32px color-mix(in oklch, var(--canvas) 72%, transparent);
+}
+
+.host-picker[hidden] {
+  display: none;
+}
+
+.host-option {
+  width: 100%;
+  min-height: 36px;
+  display: block;
+  padding: 8px 10px;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+
+.host-option:hover,
+.host-option:focus-visible {
+  background: var(--surface-2);
+}
+```
+
+The visual result should look like the host field extending downward into a
+small themed option list, not a white browser tooltip.
+
+- [ ] **Step 6: Add terminal sheet markup**
 
 In `pkg/yeet/web_run_assets/index.html`, add this before the file picker:
 
@@ -1327,7 +1452,7 @@ In `pkg/yeet/web_run_assets/index.html`, add this before the file picker:
     </section>
 ```
 
-- [ ] **Step 4: Add terminal sheet CSS**
+- [ ] **Step 7: Add terminal sheet CSS**
 
 In `pkg/yeet/web_run_assets/styles.css`, add:
 
@@ -1409,7 +1534,7 @@ In `pkg/yeet/web_run_assets/styles.css`, add:
 }
 ```
 
-- [ ] **Step 5: Add terminal renderer and stream client**
+- [ ] **Step 8: Add terminal renderer and stream client**
 
 In `pkg/yeet/web_run_assets/app.js`, add state:
 
@@ -1580,7 +1705,7 @@ $("terminalExpand").addEventListener("click", () => {
 });
 ```
 
-- [ ] **Step 6: Run JS and asset checks**
+- [ ] **Step 9: Run JS and asset checks**
 
 Run:
 
@@ -1591,7 +1716,7 @@ go test ./pkg/yeet -run TestWebRunAssetsExposeFirstDeployFields -count=1
 
 Expected: both pass.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add pkg/yeet/web_run_assets/index.html pkg/yeet/web_run_assets/styles.css pkg/yeet/web_run_assets/app.js pkg/yeet/web_run_assets_test.go
