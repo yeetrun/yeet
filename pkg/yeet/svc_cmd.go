@@ -824,7 +824,7 @@ func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 	}
 	tty := !flags.Copy && !flags.Empty && isTerminalFn(int(os.Stdin.Fd())) && isTerminalFn(int(os.Stdout.Fd()))
 	if err := execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, tty); err != nil {
-		return err
+		return wrapServiceSetRemoteError(err, flags)
 	}
 	updated, err := saveServiceSetConfig(req.Config, req.HostOverride, flags)
 	if err != nil {
@@ -834,6 +834,21 @@ func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 		return printServiceSetSyncHint(os.Stdout, req.Service, serviceSetSyncHintHost(req))
 	}
 	return nil
+}
+
+func wrapServiceSetRemoteError(err error, flags cli.ServiceSetFlags) error {
+	if err == nil || !serviceSetPublishChanged(flags) {
+		return err
+	}
+	var exitErr remoteExitError
+	if !errors.As(err, &exitErr) {
+		return err
+	}
+	return fmt.Errorf("%w\npublished-port changes require catch v0.4.3 or newer; if the remote output says service set requires --service-root or snapshot settings, run `yeet init` for this host and retry", err)
+}
+
+func serviceSetPublishChanged(flags cli.ServiceSetFlags) bool {
+	return len(flags.Publish) != 0 || flags.PublishReset
 }
 
 func serviceSetSyncHintHost(req svcCommandRequest) string {

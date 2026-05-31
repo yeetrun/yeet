@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -57,10 +58,63 @@ func TestWriteCreatesEnvFile(t *testing.T) {
 	}
 }
 
+func TestWriteReportsCreateFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "app.env")
+
+	err := Write(path, &testEnv{Name: "yeet"})
+	if err == nil {
+		t.Fatal("Write error = nil, want create failure")
+	}
+	if !strings.Contains(err.Error(), "failed to create file") {
+		t.Fatalf("Write error = %v, want create context", err)
+	}
+}
+
+func TestWriteEnvFileReturnsCloseError(t *testing.T) {
+	wantErr := errors.New("close failed")
+
+	err := writeEnvFile(&testEnvWriteCloser{closeErr: wantErr}, testEnv{Name: "yeet"})
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("writeEnvFile error = %v, want close error %v", err, wantErr)
+	}
+}
+
+func TestWriteEnvFilePreservesMarshalError(t *testing.T) {
+	writeErr := errors.New("write failed")
+	closeErr := errors.New("close failed")
+
+	err := writeEnvFile(&testEnvWriteCloser{writeErr: writeErr, closeErr: closeErr}, testEnv{Name: "yeet"})
+
+	if err == nil || !strings.Contains(err.Error(), "failed to marshal env") || !strings.Contains(err.Error(), writeErr.Error()) {
+		t.Fatalf("writeEnvFile error = %v, want marshal write error", err)
+	}
+	if strings.Contains(err.Error(), closeErr.Error()) {
+		t.Fatalf("writeEnvFile error = %v, should preserve marshal error over close error", err)
+	}
+}
+
 type failingWriter struct {
 	err error
 }
 
 func (w failingWriter) Write([]byte) (int, error) {
 	return 0, w.err
+}
+
+type testEnvWriteCloser struct {
+	bytes.Buffer
+	writeErr error
+	closeErr error
+}
+
+func (w *testEnvWriteCloser) Write(p []byte) (int, error) {
+	if w.writeErr != nil {
+		return 0, w.writeErr
+	}
+	return w.Buffer.Write(p)
+}
+
+func (w *testEnvWriteCloser) Close() error {
+	return w.closeErr
 }

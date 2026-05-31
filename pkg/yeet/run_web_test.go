@@ -7,6 +7,7 @@ package yeet
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -338,6 +339,99 @@ func TestRunWebReturnsAfterSuccessfulDeploy(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "Deployment finished") {
 		t.Fatalf("output = %q, want deployment finished message", out.String())
+	}
+}
+
+func TestRunWebKeepsServerAliveForTerminalStatusAfterFastDeploy(t *testing.T) {
+	oldOpenBrowser := openBrowserFn
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		openBrowserFn = oldOpenBrowser
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		_, _ = io.WriteString(opts.Stdout, "deploying\n")
+		return nil
+	}
+
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.WriteFile(filepath.Join(root, "run.sh"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	streamResult := make(chan runWebHTTPResult, 1)
+	openBrowserFn = func(rawURL string) error {
+		go func() {
+			parsed, err := url.Parse(rawURL)
+			if err != nil {
+				streamResult <- runWebHTTPResult{err: err}
+				return
+			}
+			deployURL := *parsed
+			deployURL.Path = "/api/deploy"
+			resp, err := http.Post(deployURL.String(), "application/json", strings.NewReader(`{"service":"svc-a","host":"host-a","payload":"run.sh"}`))
+			if err != nil {
+				streamResult <- runWebHTTPResult{err: err}
+				return
+			}
+			body, readErr := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				streamResult <- runWebHTTPResult{err: readErr}
+				return
+			}
+			if resp.StatusCode != http.StatusOK {
+				streamResult <- runWebHTTPResult{status: resp.StatusCode, body: string(body)}
+				return
+			}
+			var started runWebDeployStartedResponse
+			if err := json.Unmarshal(body, &started); err != nil {
+				streamResult <- runWebHTTPResult{err: err, body: string(body)}
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+			streamURL := *parsed
+			streamURL.Path = "/api/deploy/" + url.PathEscape(started.JobID) + "/stream"
+			resp, err = http.Get(streamURL.String())
+			if err != nil {
+				streamResult <- runWebHTTPResult{err: err}
+				return
+			}
+			body, readErr = io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			streamResult <- runWebHTTPResult{status: resp.StatusCode, body: string(body), err: readErr}
+		}()
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var out bytes.Buffer
+	err := runWeb(ctx, runWebRequest{Out: &out, Err: io.Discard})
+	if err != nil {
+		t.Fatalf("runWeb error = %v, want nil", err)
+	}
+	result := readRunWebHTTPResult(t, streamResult)
+	if result.err != nil {
+		t.Fatalf("stream error = %v", result.err)
+	}
+	if result.status != http.StatusOK {
+		t.Fatalf("stream status = %d body=%s, want 200", result.status, result.body)
+	}
+	events := parseRunWebSSE(t, result.body)
+	output := decodeRunWebOutputText(t, events)
+	if !strings.Contains(output, "deploying\n") {
+		t.Fatalf("stream output = %q, want deploying line", output)
+	}
+	last := events[len(events)-1]
+	if last.Name != "status" || !strings.Contains(last.Data, `"state":"succeeded"`) {
+		t.Fatalf("last event = %#v, want succeeded status", last)
 	}
 }
 

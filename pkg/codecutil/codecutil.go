@@ -12,6 +12,14 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+var (
+	newZstdWriter    = zstd.NewWriter
+	newZstdReader    = zstd.NewReader
+	resetZstdDecoder = func(decoder *zstd.Decoder, r io.Reader) error {
+		return decoder.Reset(r)
+	}
+)
+
 func ZstdCompress(src, dst string) (retErr error) {
 	srcFile, err := os.Open(src)
 	if err != nil {
@@ -25,7 +33,7 @@ func ZstdCompress(src, dst string) (retErr error) {
 	}
 	defer captureClose(dstFile, &retErr)
 
-	encoder, err := zstd.NewWriter(dstFile)
+	encoder, err := newZstdWriter(dstFile)
 	if err != nil {
 		return fmt.Errorf("failed to create zstd encoder: %w", err)
 	}
@@ -52,13 +60,13 @@ func ZstdDecompress(src, dst string) (retErr error) {
 	}
 	defer captureClose(dstFile, &retErr)
 
-	decoder, err := zstd.NewReader(nil)
+	decoder, err := newZstdReader(nil)
 	if err != nil {
 		return fmt.Errorf("failed to create zstd decoder: %w", err)
 	}
 	defer decoder.Close()
 
-	err = decoder.Reset(srcFile)
+	err = resetZstdDecoder(decoder, srcFile)
 	if err != nil {
 		return fmt.Errorf("failed to reset decoder: %w", err)
 	}

@@ -17,6 +17,15 @@ func Write(name string, e any) (retErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to create file: %v", err)
 	}
+	return writeEnvFile(f, e)
+}
+
+type envWriteCloser interface {
+	io.Writer
+	Close() error
+}
+
+func writeEnvFile(f envWriteCloser, e any) (retErr error) {
 	defer func() {
 		if closeErr := f.Close(); retErr == nil {
 			retErr = closeErr

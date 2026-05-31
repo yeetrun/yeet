@@ -253,6 +253,25 @@ func TestServiceSetPublishUpdatesComposeGenerationAndDB(t *testing.T) {
 	}
 }
 
+func TestServiceSetCommandAcceptsPublishOnly(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-publish"
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {
+			Name:        name,
+			ServiceType: db.ServiceTypeDockerCompose,
+			Publish:     []string{"80:80"},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	execer := &ttyExecer{s: server, sn: name, rw: &bytes.Buffer{}, isPty: false}
+
+	if err := execer.serviceCmdFunc([]string{"set", "-p", "80:80"}); err != nil {
+		t.Fatalf("serviceCmdFunc publish-only: %v", err)
+	}
+}
+
 func TestCurrentServiceArtifactPath(t *testing.T) {
 	for _, tt := range []struct {
 		name             string

@@ -824,6 +824,34 @@ func TestServiceSetPublishUpdatesConfig(t *testing.T) {
 	}
 }
 
+func TestServiceSetPublishRemoteExitMentionsCatchVersion(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		return remoteExitError{code: 1}
+	}
+	isTerminalFn = func(int) bool { return false }
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "svc-a",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "run.sh",
+		Ports:   []string{"80:80"},
+	})
+
+	err := HandleSvcCmd([]string{"service", "set", "-p", "80:80"})
+	if err == nil {
+		t.Fatal("HandleSvcCmd error = nil, want remote exit")
+	}
+	for _, want := range []string{"remote exit 1", "published-port changes require catch v0.4.3 or newer", "yeet init"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want containing %q", err.Error(), want)
+		}
+	}
+}
+
 func TestServiceSetPublishRejectsOmittedExistingPortWithoutReset(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
