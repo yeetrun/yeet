@@ -89,6 +89,26 @@ func TestRunWebBootstrapUsesProjectHostsEnvAndPrefs(t *testing.T) {
 	}
 }
 
+func TestRunWebBootstrapSelectsProjectHostBeforeDefaultPrefs(t *testing.T) {
+	oldPrefs := loadedPrefs
+	defer func() { loadedPrefs = oldPrefs }()
+	loadedPrefs.DefaultHost = "catch"
+	t.Setenv("CATCH_HOST", "")
+	cfg := &projectConfigLocation{
+		Dir: t.TempDir(),
+		Config: &ProjectConfig{
+			Version: projectConfigVersion,
+			Hosts:   []string{"yeet-lab", "yeet-cloud"},
+		},
+	}
+
+	boot := newRunWebBootstrap(cfg, "", "", nil)
+
+	if boot.SelectedHost != "yeet-cloud" {
+		t.Fatalf("SelectedHost = %q, want first project host yeet-cloud", boot.SelectedHost)
+	}
+}
+
 func TestRunWebBootstrapNetworkModesMatchCatchModes(t *testing.T) {
 	boot := newRunWebBootstrap(nil, "", "", nil)
 	want := []string{"svc", "ts", "lan"}

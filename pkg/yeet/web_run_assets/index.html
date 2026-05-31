@@ -20,7 +20,7 @@
         <span>yeet</span>
       </a>
       <div class="project" id="projectLabel">Project</div>
-      <div class="host-status" id="hostStatus" role="status">Waiting for input</div>
+      <div class="host-status" id="hostStatus" role="status"></div>
     </header>
 
     <main class="shell">
@@ -31,37 +31,48 @@
             <p id="configLabel">yeet.toml recipe</p>
           </div>
 
-          <label for="service">
+          <label for="service" data-field="service">
             <span>Service <button type="button" class="help" data-help="Unique service name on the selected catch host." aria-label="Help for service">?</button></span>
             <input id="service" name="service" autocomplete="off" spellcheck="false" required>
+            <span class="field-error" id="serviceError"></span>
           </label>
 
-          <label for="host">
+          <label for="host" data-field="host">
             <span>Host <button type="button" class="help" data-help="Target catch host from CATCH_HOST, yeet.toml, or prefs." aria-label="Help for host">?</button></span>
             <input id="host" name="host" list="hostOptions" autocomplete="off" spellcheck="false" required>
+            <span class="field-error" id="hostError"></span>
           </label>
           <datalist id="hostOptions"></datalist>
 
-          <label for="payload">
+          <label for="payload" data-field="payload">
             <span>Payload <button type="button" class="help" data-help="A project file, Dockerfile, compose file, executable, or image reference." aria-label="Help for payload">?</button></span>
-            <input id="payload" name="payload" autocomplete="off" spellcheck="false" required>
+            <div class="picker-field">
+              <input id="payload" name="payload" autocomplete="off" spellcheck="false" required data-picker-target="payload" aria-haspopup="listbox">
+              <button type="button" id="payloadPicker" class="quiet-button picker-trigger" data-picker-target="payload">Pick</button>
+            </div>
+            <span class="field-error" id="payloadError"></span>
           </label>
 
-          <div class="browser-head">
-            <span id="browserDir">.</span>
-            <button type="button" id="upButton" class="quiet-button">Up</button>
-          </div>
-          <div class="file-browser" id="fileBrowser" aria-label="Project files"></div>
-
-          <label for="envFile">
+          <label for="envFile" data-field="envFile">
             <span>Env file <button type="button" class="help" data-help="Optional environment file to upload with this service." aria-label="Help for env file">?</button></span>
-            <input id="envFile" name="envFile" autocomplete="off" spellcheck="false">
+            <div class="picker-field">
+              <input id="envFile" name="envFile" autocomplete="off" spellcheck="false" data-picker-target="envFile" aria-haspopup="listbox">
+              <button type="button" id="envFilePicker" class="quiet-button picker-trigger" data-picker-target="envFile">Pick</button>
+            </div>
+            <span class="field-error" id="envFileError"></span>
           </label>
 
-          <label for="payloadArgs">
-            <span>Payload args <button type="button" class="help" data-help="Arguments passed after -- to the deployed payload." aria-label="Help for payload args">?</button></span>
-            <input id="payloadArgs" name="payloadArgs" autocomplete="off" spellcheck="false" placeholder="--flag value">
-          </label>
+          <div class="root-control">
+            <label for="serviceRoot" data-field="serviceRoot">
+              <span>Service root <button type="button" class="help" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></span>
+              <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false">
+              <span class="field-error" id="serviceRootError"></span>
+            </label>
+            <label class="zfs-toggle" for="zfs">
+              <input id="zfs" name="zfs" type="checkbox">
+              <span>ZFS dataset</span>
+            </label>
+          </div>
         </section>
 
         <section class="panel options-panel" aria-labelledby="optionsTitle">
@@ -72,28 +83,36 @@
 
           <fieldset>
             <legend>Network <button type="button" class="help" data-help="Select one or more network modes for the service." aria-label="Help for network modes">?</button></legend>
+            <label class="check-pill is-default" for="hostDefault">
+              <input id="hostDefault" type="checkbox" checked disabled>
+              <span>Host</span>
+            </label>
             <div class="checks" id="networkModes"></div>
           </fieldset>
 
-          <label for="tsTags">
-            <span>Tailscale tags <button type="button" class="help" data-help="Comma-separated tags such as tag:app." aria-label="Help for Tailscale tags">?</button></span>
-            <input id="tsTags" name="tsTags" autocomplete="off" spellcheck="false">
-          </label>
-
-          <label for="tsAuthKey">
-            <span>Tailscale auth key <button type="button" class="help" data-help="Secret auth key for per-service Tailscale enrollment." aria-label="Help for Tailscale auth key">?</button></span>
-            <input id="tsAuthKey" name="tsAuthKey" type="password" autocomplete="off">
-          </label>
-
-          <div class="split-fields">
-            <label for="tsVersion">
-              <span>Tailscale version <button type="button" class="help" data-help="Optional Tailscale version for the service sidecar." aria-label="Help for Tailscale version">?</button></span>
-              <input id="tsVersion" name="tsVersion" autocomplete="off" spellcheck="false">
+          <div id="tsOptions" class="conditional-options" hidden>
+            <label for="tsTags">
+              <span>Tailscale tags <button type="button" class="help" data-help="Comma-separated tags such as tag:app." aria-label="Help for Tailscale tags">?</button></span>
+              <input id="tsTags" name="tsTags" autocomplete="off" spellcheck="false" placeholder="tag:app">
             </label>
-            <label for="tsExitNode">
-              <span>Exit node <button type="button" class="help" data-help="Optional Tailscale exit node used by the service." aria-label="Help for Tailscale exit node">?</button></span>
-              <input id="tsExitNode" name="tsExitNode" autocomplete="off" spellcheck="false">
-            </label>
+
+            <details class="advanced-block" id="tsAdvanced">
+              <summary>Tailscale settings <button type="button" class="help" data-help="Optional enrollment, version, and exit node settings." aria-label="Help for Tailscale settings">?</button></summary>
+              <label for="tsAuthKey">
+                <span>Auth key</span>
+                <input id="tsAuthKey" name="tsAuthKey" type="password" autocomplete="off">
+              </label>
+              <div class="split-fields">
+                <label for="tsVersion">
+                  <span>Version</span>
+                  <input id="tsVersion" name="tsVersion" autocomplete="off" spellcheck="false">
+                </label>
+                <label for="tsExitNode">
+                  <span>Exit node</span>
+                  <input id="tsExitNode" name="tsExitNode" autocomplete="off" spellcheck="false">
+                </label>
+              </div>
+            </details>
           </div>
 
           <label for="publish">
@@ -101,8 +120,8 @@
             <input id="publish" name="publish" autocomplete="off" spellcheck="false">
           </label>
 
-          <fieldset>
-            <legend>LAN options <button type="button" class="help" data-help="Optional macvlan settings used when the lan network mode is selected." aria-label="Help for LAN options">?</button></legend>
+          <details class="advanced-block" id="lanOptions" hidden>
+            <summary>LAN settings <button type="button" class="help" data-help="Optional macvlan settings used when the LAN network mode is selected." aria-label="Help for LAN settings">?</button></summary>
             <div class="split-fields">
               <label for="macvlanParent">
                 <span>Parent</span>
@@ -117,21 +136,10 @@
               <span>MAC address</span>
               <input id="macvlanMac" name="macvlanMac" autocomplete="off" spellcheck="false" placeholder="02:00:00:00:00:07">
             </label>
-          </fieldset>
+          </details>
 
-          <div class="split-fields">
-            <label for="serviceRoot">
-              <span>Service root <button type="button" class="help" data-help="Absolute filesystem path, or dataset name when ZFS is enabled." aria-label="Help for service root">?</button></span>
-              <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false">
-            </label>
-            <label class="checkline" for="zfs">
-              <input id="zfs" name="zfs" type="checkbox">
-              <span>ZFS dataset</span>
-            </label>
-          </div>
-
-          <fieldset>
-            <legend>Snapshots <button type="button" class="help" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></legend>
+          <details class="advanced-block">
+            <summary>Snapshots <button type="button" class="help" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></summary>
             <div class="split-fields">
               <label for="snapshots">
                 <span>Mode</span>
@@ -154,7 +162,15 @@
               <span>Events</span>
               <input id="snapshotEvents" name="snapshotEvents" autocomplete="off" spellcheck="false" placeholder="run,docker-update">
             </label>
-          </fieldset>
+          </details>
+
+          <details class="advanced-block">
+            <summary>Payload args <button type="button" class="help" data-help="Arguments passed after -- to the deployed payload." aria-label="Help for payload args">?</button></summary>
+            <label for="payloadArgs">
+              <span>Arguments</span>
+              <input id="payloadArgs" name="payloadArgs" autocomplete="off" spellcheck="false" placeholder="--flag value">
+            </label>
+          </details>
         </section>
 
         <section class="action-row" aria-label="Deploy action">
@@ -164,6 +180,14 @@
         </section>
       </form>
     </main>
+
+    <div class="field-picker" id="filePicker" role="listbox" hidden>
+      <div class="browser-head">
+        <span id="browserDir">.</span>
+        <button type="button" id="upButton" class="quiet-button">Up</button>
+      </div>
+      <div id="fileBrowser" class="picker-list" aria-label="Project files"></div>
+    </div>
 
     <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
     <script src="/app.js" defer></script>

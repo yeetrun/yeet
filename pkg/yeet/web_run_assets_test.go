@@ -33,12 +33,21 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	}
 
 	for _, id := range []string{
+		`id="hostDefault"`,
 		`id="tsVersion"`,
 		`id="tsExitNode"`,
 		`id="macvlanParent"`,
 		`id="macvlanVlan"`,
 		`id="macvlanMac"`,
 		`id="snapshotRequired"`,
+		`id="payloadPicker"`,
+		`id="envFilePicker"`,
+		`id="filePicker"`,
+		`<summary>Tailscale settings`,
+		`<summary>LAN settings`,
+		`<summary>Snapshots`,
+		`<summary>Payload args`,
+		`placeholder="tag:app"`,
 	} {
 		if !strings.Contains(string(index), id) {
 			t.Fatalf("index missing %s", id)
@@ -60,6 +69,25 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	} {
 		if !strings.Contains(string(app), snippet) {
 			t.Fatalf("app missing %s", snippet)
+		}
+	}
+	for _, forbidden := range []string{
+		"Needs attention",
+		`<div class="file-browser" id="fileBrowser"`,
+	} {
+		if strings.Contains(string(index)+string(app), forbidden) {
+			t.Fatalf("web assets still contain %q", forbidden)
+		}
+	}
+	for _, snippet := range []string{
+		"syncNetworkUI",
+		"activePicker",
+		"showPicker",
+		"hidePicker",
+		"updateServiceRootPlaceholder",
+	} {
+		if !strings.Contains(string(app), snippet) {
+			t.Fatalf("app missing behavior hook %s", snippet)
 		}
 	}
 }
