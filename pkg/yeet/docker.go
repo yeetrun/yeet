@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -127,6 +128,10 @@ type dockerBuild struct {
 }
 
 func buildDockerImageForRemote(ctx context.Context, dockerfilePath, imageName string) error {
+	return buildDockerImageForRemoteWithOutput(ctx, dockerfilePath, imageName, os.Stderr)
+}
+
+func buildDockerImageForRemoteWithOutput(ctx context.Context, dockerfilePath, imageName string, stderr io.Writer) error {
 	if _, err := exec.LookPath("docker"); err != nil {
 		return fmt.Errorf("docker not found")
 	}
@@ -138,7 +143,7 @@ func buildDockerImageForRemote(ctx context.Context, dockerfilePath, imageName st
 	if err != nil {
 		return err
 	}
-	return runDockerBuild(ctx, build)
+	return runDockerBuildWithOutput(ctx, build, stderr)
 }
 
 func dockerBuildPlan(dockerfilePath, imageName, goos, goarch string) (dockerBuild, error) {
@@ -161,15 +166,21 @@ func dockerBuildPlan(dockerfilePath, imageName, goos, goarch string) (dockerBuil
 	}}, nil
 }
 
-func runDockerBuild(ctx context.Context, build dockerBuild) error {
+func runDockerBuildWithOutput(ctx context.Context, build dockerBuild, stderr io.Writer) error {
+	if stderr == nil {
+		stderr = io.Discard
+	}
 	cmd := exec.CommandContext(ctx, "docker", build.Args...)
 	cmd.Env = append(os.Environ(), "DOCKER_BUILDKIT=1")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
+		buildErr := fmt.Errorf("docker %s: %w", strings.Join(build.Args, " "), err)
 		if msg := strings.TrimSpace(string(output)); msg != "" {
-			fmt.Fprintf(os.Stderr, "\nDocker build error:\n%s\n", msg)
+			if _, writeErr := fmt.Fprintf(stderr, "\nDocker build error:\n%s\n", msg); writeErr != nil {
+				return errors.Join(buildErr, fmt.Errorf("write docker build error: %w", writeErr))
+			}
 		}
-		return fmt.Errorf("docker %s: %w", strings.Join(build.Args, " "), err)
+		return buildErr
 	}
 	return nil
 }

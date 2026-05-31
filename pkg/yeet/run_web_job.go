@@ -138,9 +138,11 @@ func (j *runWebJob) finish(err error) {
 			j.state = runWebJobFailed
 			j.errText = err.Error()
 			if !j.retainedOutputContainsLocked(j.errText) {
+				line := []byte("Error: " + j.errText + "\n")
+				_, _ = j.stdout.Write(line)
 				ev := runWebStreamEvent{
 					Type:  runWebStreamOutput,
-					Chunk: []byte("Error: " + j.errText + "\n"),
+					Chunk: line,
 				}
 				ev = j.appendOutputLocked(ev)
 				j.broadcastLocked(ev)
@@ -276,6 +278,8 @@ func (j *runWebJob) broadcastLocked(ev runWebStreamEvent) {
 		select {
 		case sub.live <- ev:
 		default:
+			delete(j.subscribers, sub)
+			sub.close()
 		}
 	}
 }
