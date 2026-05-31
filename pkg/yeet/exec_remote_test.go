@@ -318,6 +318,52 @@ func restoreExecRemoteGlobals(t *testing.T) {
 	})
 }
 
+func TestExecRemoteToWritesClientOutputToProvidedWriter(t *testing.T) {
+	oldClient := newRPCExecClientFn
+	oldHost := hostOverride
+	oldHostSet := hostOverrideSet
+	defer func() {
+		newRPCExecClientFn = oldClient
+		hostOverride = oldHost
+		hostOverrideSet = oldHostSet
+	}()
+
+	hostOverride = "host-a"
+	hostOverrideSet = true
+	newRPCExecClientFn = func(host string) rpcExecClient {
+		if host != "host-a" {
+			t.Fatalf("host = %q, want host-a", host)
+		}
+		return rpcExecClientFunc(func(ctx context.Context, req catchrpc.ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan catchrpc.Resize) (int, error) {
+			if req.Service != "svc-a" {
+				t.Fatalf("service = %q, want svc-a", req.Service)
+			}
+			if _, err := stdout.Write([]byte("remote output\n")); err != nil {
+				t.Fatalf("write stdout: %v", err)
+			}
+			return 0, nil
+		})
+	}
+
+	var out bytes.Buffer
+	if err := execRemoteTo(context.Background(), "svc-a", []string{"status"}, nil, false, &out); err != nil {
+		t.Fatalf("execRemoteTo: %v", err)
+	}
+	if got := out.String(); got != "remote output\n" {
+		t.Fatalf("output = %q, want remote output", got)
+	}
+}
+
+type rpcExecClientFunc func(context.Context, catchrpc.ExecRequest, io.Reader, io.Writer, <-chan catchrpc.Resize) (int, error)
+
+func (f rpcExecClientFunc) Exec(ctx context.Context, req catchrpc.ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan catchrpc.Resize) (int, error) {
+	return f(ctx, req, stdin, stdout, resizeCh)
+}
+
+func (f rpcExecClientFunc) Events(context.Context, catchrpc.EventsRequest, func(catchrpc.Event)) error {
+	return errors.New("events not implemented in test")
+}
+
 func TestExecRemoteBuildsNonTTYRequestWithPayloadName(t *testing.T) {
 	restoreExecRemoteGlobals(t)
 	loadedPrefs.DefaultHost = "host-a"
