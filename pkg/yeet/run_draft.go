@@ -263,12 +263,14 @@ func runDraftBool(v bool) *bool {
 
 type runDraftExecuteOptions struct {
 	Stdout      io.Writer
+	Stderr      io.Writer
 	ForceDeploy bool
 }
 
 func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigLocation, forceDeploy bool) error {
 	return executeRunDraftWithOptions(ctx, draft, cfgLoc, runDraftExecuteOptions{
 		Stdout:      os.Stdout,
+		Stderr:      os.Stderr,
 		ForceDeploy: forceDeploy,
 	})
 }

@@ -351,6 +351,30 @@ func TestRunWebJobSlowSubscriberDoesNotBlockWrite(t *testing.T) {
 	}
 }
 
+func TestRunWebJobDisconnectsBackpressuredSubscriberForReplay(t *testing.T) {
+	job := newRunWebJob("job-a", runWebJobConfig{SubscriberBuffer: 1})
+	sub := &runWebJobSubscriber{live: make(chan runWebStreamEvent, 1)}
+	sub.live <- runWebStreamEvent{ID: 1, Type: runWebStreamOutput, Chunk: []byte("queued\n")}
+
+	job.mu.Lock()
+	job.subscribers[sub] = struct{}{}
+	ev := job.appendOutputLocked(runWebStreamEvent{Type: runWebStreamOutput, Chunk: []byte("replay me\n")})
+	job.broadcastLocked(ev)
+	_, subscribed := job.subscribers[sub]
+	job.mu.Unlock()
+
+	if subscribed {
+		t.Fatal("backpressured subscriber remained subscribed; want disconnect so EventSource can replay")
+	}
+	got, ok := <-sub.live
+	if !ok || string(got.Chunk) != "queued\n" {
+		t.Fatalf("queued event = %#v ok=%v, want queued output before close", got, ok)
+	}
+	if _, ok := <-sub.live; ok {
+		t.Fatal("backpressured subscriber channel is still open")
+	}
+}
+
 func TestRunWebJobBrowserCloseNoticePrintsExactlyOnce(t *testing.T) {
 	var notice bytes.Buffer
 	job := newRunWebJob("job-a", runWebJobConfig{Notice: &notice})

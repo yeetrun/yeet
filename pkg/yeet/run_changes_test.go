@@ -506,6 +506,48 @@ func TestRunWithChangesToReturnsStatusWriteError(t *testing.T) {
 	}
 }
 
+func TestApplyRunChangeSummaryCopiesEnvFileToProvidedOutput(t *testing.T) {
+	oldExec := execRemoteFn
+	oldExecTo := execRemoteToFn
+	oldService := serviceOverride
+	defer func() {
+		execRemoteFn = oldExec
+		execRemoteToFn = oldExecTo
+		serviceOverride = oldService
+	}()
+
+	serviceOverride = "svc-a"
+	tmp := t.TempDir()
+	envFile := filepath.Join(tmp, ".env")
+	if err := os.WriteFile(envFile, []byte("A=B\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		return errors.New("execRemoteFn should not be called for output-aware env copy")
+	}
+	execRemoteToFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		if service != "svc-a" || !reflect.DeepEqual(args, []string{"env", "copy"}) || tty {
+			t.Fatalf("execRemoteToFn = service %q args %#v tty %v, want svc-a env copy false", service, args, tty)
+		}
+		_, _ = io.Copy(io.Discard, stdin)
+		_, err := io.WriteString(stdout, "env copy output\n")
+		return err
+	}
+	runner := func(ctx context.Context, payload string, runArgs []string) error {
+		t.Fatal("runner should not be called for env-only change")
+		return nil
+	}
+
+	var out bytes.Buffer
+	err := applyRunChangeSummary(context.Background(), &out, "run.sh", nil, envFile, runChangeSummary{envChanged: true}, false, runner)
+	if err != nil {
+		t.Fatalf("applyRunChangeSummary: %v", err)
+	}
+	if got, want := out.String(), "env copy output\nUpdated env file\n"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
 func TestRunWithChangesNoChangesSkips(t *testing.T) {
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn

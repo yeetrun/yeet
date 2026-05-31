@@ -461,7 +461,7 @@ func applyRunChangeSummary(ctx context.Context, stdout io.Writer, payload string
 		return applyUnchangedRun(ctx, stdout, payload, runArgs, forceDeploy, runner)
 	}
 	if summary.envChanged {
-		if err := runEnvCopyContext(ctx, envFile); err != nil {
+		if err := runEnvCopyContextWithOutput(ctx, stdout, envFile); err != nil {
 			return err
 		}
 		if err := writeRunChangeLine(stdout, "Updated env file"); err != nil {

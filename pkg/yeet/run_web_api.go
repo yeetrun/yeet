@@ -211,7 +211,7 @@ func (s *runWebServer) runDeployJob(ctx context.Context, draft RunDraft, job *ru
 		draft.EnvFileSet = true
 		draft.EnvFileArg = draft.EnvFile
 	}
-	err := executeRunDraftWithOptionsFn(ctx, draft, s.cfg.Config, runDraftExecuteOptions{Stdout: job})
+	err := executeRunDraftWithOptionsFn(ctx, draft, s.cfg.Config, runDraftExecuteOptions{Stdout: job, Stderr: job})
 	if err != nil {
 		job.finish(err)
 		return

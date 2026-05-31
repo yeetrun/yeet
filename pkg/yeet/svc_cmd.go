@@ -911,6 +911,7 @@ func handleSvcRemote(ctx context.Context, req svcCommandRequest) error {
 
 var tryRunDockerFn = tryRunDockerContext
 var buildDockerImageForRemoteFn = buildDockerImageForRemote
+var buildDockerImageForRemoteWithOutputFn = buildDockerImageForRemoteWithOutput
 var tryRunRemoteImageFn = tryRunRemoteImageContext
 var tryRunDockerfileWithOutputFn = tryRunDockerfileContextWithOutput
 var tryRunFileWithOutputFn = tryRunFileContextWithOutput
@@ -1139,7 +1140,11 @@ func tryRunDockerfileContextWithOutput(ctx context.Context, stdout io.Writer, pa
 	svc := getService()
 	tag := fmt.Sprintf("yeet-build-%d", time.Now().UnixNano())
 	imageName := fmt.Sprintf("%s:%s", svc, tag)
-	if err := buildDockerImageForRemoteFn(ctx, path, imageName); err != nil {
+	if isStdoutWriter(stdout) {
+		if err := buildDockerImageForRemoteFn(ctx, path, imageName); err != nil {
+			return true, err
+		}
+	} else if err := buildDockerImageForRemoteWithOutputFn(ctx, path, imageName, stdout); err != nil {
 		return true, err
 	}
 	var runOK bool
@@ -1444,6 +1449,24 @@ func runEnvCopy(file string) error {
 }
 
 func runEnvCopyContext(ctx context.Context, file string) (err error) {
+	return runEnvCopyContextWithExec(ctx, file, func(ctx context.Context, svc string, args []string, stdin io.Reader, tty bool) error {
+		return execRemoteFn(ctx, svc, args, stdin, tty)
+	})
+}
+
+func runEnvCopyContextWithOutput(ctx context.Context, stdout io.Writer, file string) error {
+	if isStdoutWriter(stdout) {
+		return runEnvCopyContext(ctx, file)
+	}
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	return runEnvCopyContextWithExec(ctx, file, func(ctx context.Context, svc string, args []string, stdin io.Reader, tty bool) error {
+		return execRemoteToFn(ctx, svc, args, stdin, tty, stdout)
+	})
+}
+
+func runEnvCopyContextWithExec(ctx context.Context, file string, execFn func(context.Context, string, []string, io.Reader, bool) error) (err error) {
 	if file == "" {
 		return fmt.Errorf("env copy requires a file")
 	}
@@ -1463,7 +1486,7 @@ func runEnvCopyContext(ctx context.Context, file string) (err error) {
 	}()
 	svc := getService()
 	args := []string{"env", "copy"}
-	if err := execRemoteFn(ctx, svc, args, f, false); err != nil {
+	if err := execFn(ctx, svc, args, f, false); err != nil {
 		return err
 	}
 	return nil

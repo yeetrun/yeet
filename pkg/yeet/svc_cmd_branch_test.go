@@ -1838,6 +1838,26 @@ func TestSvcDockerfileAndRemoteImageErrorBranches(t *testing.T) {
 		t.Fatalf("tryRunDockerfile build error = %v %v, want ok and %v", ok, err, buildErr)
 	}
 
+	oldBuildWithOutput := buildDockerImageForRemoteWithOutputFn
+	defer func() { buildDockerImageForRemoteWithOutputFn = oldBuildWithOutput }()
+	buildDockerImageForRemoteFn = func(ctx context.Context, dockerfilePath, imageName string) error {
+		return errors.New("non-output build should not be used")
+	}
+	buildDockerImageForRemoteWithOutputFn = func(ctx context.Context, dockerfilePath, imageName string, stderr io.Writer) error {
+		if dockerfilePath != dockerfile {
+			t.Fatalf("dockerfile path = %q, want %q", dockerfilePath, dockerfile)
+		}
+		_, _ = io.WriteString(stderr, "docker build stderr\n")
+		return buildErr
+	}
+	var out bytes.Buffer
+	if ok, err := tryRunDockerfileContextWithOutput(context.Background(), &out, dockerfile, nil); !ok || !errors.Is(err, buildErr) {
+		t.Fatalf("tryRunDockerfileContextWithOutput build error = %v %v, want ok and %v", ok, err, buildErr)
+	}
+	if got := out.String(); got != "docker build stderr\n" {
+		t.Fatalf("docker build output = %q, want stderr", got)
+	}
+
 	remoteCatchOSAndArchFn = func() (string, string, error) {
 		return "", "", errors.New("arch unavailable")
 	}

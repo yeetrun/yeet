@@ -398,6 +398,47 @@ func TestRunWebAPIDeployStreamReplaysOutputAndStatus(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIDeployStreamMirrorsStderr(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		if opts.Stderr == nil {
+			return errors.New("stderr writer was nil")
+		}
+		_, _ = io.WriteString(opts.Stderr, "stderr writer line\n")
+		return errors.New("deploy failed")
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	var terminal bytes.Buffer
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, Out: &terminal})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	waitRunWebJobState(t, s, jobID, runWebJobFailed)
+
+	stream := runWebAPIRequest(t, s, http.MethodGet, "/api/deploy/"+jobID+"/stream", nil)
+	if stream.Code != http.StatusOK {
+		t.Fatalf("stream status = %d body=%s", stream.Code, stream.Body.String())
+	}
+	output := decodeRunWebOutputText(t, parseRunWebSSE(t, stream.Body.String()))
+	for _, want := range []string{"stderr writer line\n", "Error: deploy failed\n"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stream output missing %q:\n%s", want, output)
+		}
+		if !strings.Contains(terminal.String(), want) {
+			t.Fatalf("terminal output missing %q:\n%s", want, terminal.String())
+		}
+	}
+}
+
 func TestRunWebAPISuccessfulJobCompletesAndRejectsFurtherDeploys(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
 	oldExecDraft := executeRunDraftWithOptionsFn
@@ -887,6 +928,32 @@ func parseRunWebSSE(t *testing.T, body string) []runWebSSETestEvent {
 		events = append(events, ev)
 	}
 	return events
+}
+
+func decodeRunWebOutputText(t *testing.T, events []runWebSSETestEvent) string {
+	t.Helper()
+	var out strings.Builder
+	for _, ev := range events {
+		if ev.Name != string(runWebStreamOutput) {
+			continue
+		}
+		var output struct {
+			Encoding string `json:"encoding"`
+			Chunk    string `json:"chunk"`
+		}
+		if err := json.Unmarshal([]byte(ev.Data), &output); err != nil {
+			t.Fatalf("decode output event %q: %v", ev.Data, err)
+		}
+		if output.Encoding != "base64" {
+			t.Fatalf("output encoding = %q, want base64", output.Encoding)
+		}
+		chunk, err := base64.StdEncoding.DecodeString(output.Chunk)
+		if err != nil {
+			t.Fatalf("decode output chunk %q: %v", output.Chunk, err)
+		}
+		out.Write(chunk)
+	}
+	return out.String()
 }
 
 func writeRunWebTestPayload(t *testing.T, root string) {
