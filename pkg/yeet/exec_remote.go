@@ -390,8 +390,18 @@ func (s *remoteExecSession) close(errp *error) {
 	}
 }
 
-func execRemote(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) (err error) {
+func execRemote(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+	return execRemoteTo(ctx, service, args, stdin, tty, os.Stdout)
+}
+
+func execRemoteTo(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) (err error) {
+	if stdout == nil {
+		stdout = io.Discard
+	}
 	host := Host()
+	if override, ok := HostOverride(); ok && override != "" {
+		host = override
+	}
 	client := newRPCExecClientFn(host)
 	session, err := prepareRemoteExecSession(ctx, host, service, args, stdin, tty)
 	if err != nil {
@@ -399,7 +409,7 @@ func execRemote(ctx context.Context, service string, args []string, stdin io.Rea
 	}
 	defer session.close(&err)
 
-	out := &trackingWriter{w: os.Stdout}
+	out := &trackingWriter{w: stdout}
 	code, err := client.Exec(ctx, session.req, session.stdin, out, session.resizeCh)
 	if err != nil {
 		return err
