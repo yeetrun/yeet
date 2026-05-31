@@ -319,17 +319,9 @@ func restoreExecRemoteGlobals(t *testing.T) {
 }
 
 func TestExecRemoteToWritesClientOutputToProvidedWriter(t *testing.T) {
-	oldClient := newRPCExecClientFn
-	oldHost := hostOverride
-	oldHostSet := hostOverrideSet
-	defer func() {
-		newRPCExecClientFn = oldClient
-		hostOverride = oldHost
-		hostOverrideSet = oldHostSet
-	}()
+	restoreExecRemoteGlobals(t)
+	loadedPrefs.DefaultHost = "host-a"
 
-	hostOverride = "host-a"
-	hostOverrideSet = true
 	newRPCExecClientFn = func(host string) rpcExecClient {
 		if host != "host-a" {
 			t.Fatalf("host = %q, want host-a", host)

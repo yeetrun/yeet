@@ -399,9 +399,6 @@ func execRemoteTo(ctx context.Context, service string, args []string, stdin io.R
 		stdout = io.Discard
 	}
 	host := Host()
-	if override, ok := HostOverride(); ok && override != "" {
-		host = override
-	}
 	client := newRPCExecClientFn(host)
 	session, err := prepareRemoteExecSession(ctx, host, service, args, stdin, tty)
 	if err != nil {
