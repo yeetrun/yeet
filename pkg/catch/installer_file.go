@@ -776,6 +776,8 @@ type fileInstallPlan struct {
 	postRenameActions       []func() error
 	detectedServiceType     db.ServiceType
 	allowServiceTypeUpgrade bool
+	publish                 []string
+	publishSet              bool
 }
 
 func (i *FileInstaller) installOnClose() error {
@@ -983,11 +985,21 @@ func (i *FileInstaller) prepareDockerComposePayload(bin string) (fileInstallPlan
 			return fileInstallPlan{}, fmt.Errorf("failed to apply publish ports: %w", err)
 		}
 	}
+	publish, err := readComposePorts(bin, i.cfg.ServiceName)
+	if err != nil {
+		if len(i.cfg.Publish) > 0 {
+			return fileInstallPlan{}, fmt.Errorf("failed to read publish ports: %w", err)
+		}
+		publish = nil
+	}
+	publishSet := err == nil || len(i.cfg.Publish) > 0
 	dst := filepath.Join(i.serviceBinDir(), fmt.Sprintf("docker-compose.%s.yml", i.version()))
 	mak.Set(&i.artifacts, db.ArtifactDockerComposeFile, dst)
 	return fileInstallPlan{
 		dst:                 dst,
 		detectedServiceType: db.ServiceTypeDockerCompose,
+		publish:             publish,
+		publishSet:          publishSet,
 	}, nil
 }
 
@@ -1008,6 +1020,8 @@ func (i *FileInstaller) prepareGeneratedComposePayload(message, payloadName stri
 		dst:                     dst,
 		detectedServiceType:     db.ServiceTypeDockerCompose,
 		allowServiceTypeUpgrade: true,
+		publish:                 normalizePublish(i.cfg.Publish),
+		publishSet:              true,
 	}, nil
 }
 
@@ -1065,8 +1079,15 @@ func (i *FileInstaller) applyInstallPlanToService(s *db.Service, plan fileInstal
 		return err
 	}
 	applyInstallNetworks(s, i.macvlan, i.svcNet, i.tsNet)
+	applyInstallPublish(s, plan)
 	stageArtifacts(s, i.artifacts)
 	return nil
+}
+
+func applyInstallPublish(s *db.Service, plan fileInstallPlan) {
+	if plan.detectedServiceType == db.ServiceTypeDockerCompose && plan.publishSet {
+		s.Publish = normalizePublish(plan.publish)
+	}
 }
 
 func (i *FileInstaller) applyInstallSnapshotPolicy(s *db.Service) error {

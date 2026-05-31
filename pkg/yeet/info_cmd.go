@@ -47,6 +47,7 @@ type clientServiceEntry struct {
 	EnvFile     string   `json:"envFile,omitempty"`
 	Schedule    string   `json:"schedule,omitempty"`
 	Args        []string `json:"args,omitempty"`
+	Ports       []string `json:"ports,omitempty"`
 }
 
 type clientPayloadInfo struct {
@@ -152,6 +153,7 @@ func buildClientInfo(cfgLoc *projectConfigLocation, service, host string, hostIn
 		EnvFile:     entry.EnvFile,
 		Schedule:    entry.Schedule,
 		Args:        entry.Args,
+		Ports:       entry.Ports,
 	}
 	info.Payload = inspectPayloadWithKind(entry.Payload, entry.PayloadKind, cfgLoc.Dir, hostInfo, hostInfoErr)
 	return info
@@ -375,6 +377,9 @@ func clientEntryMetadataRows(entry *clientServiceEntry) []infoRow {
 	if len(entry.Args) > 0 {
 		rows = append(rows, infoRow{Label: "Payload args", Value: strings.Join(entry.Args, " ")})
 	}
+	if len(entry.Ports) > 0 {
+		rows = append(rows, infoRow{Label: "Published ports", Value: strings.Join(entry.Ports, ", ")})
+	}
 	if entry.Schedule != "" {
 		rows = append(rows, infoRow{Label: "Schedule", Value: entry.Schedule})
 	}
@@ -415,6 +420,7 @@ func renderNetworkSection(server catchrpc.ServiceInfoResponse) infoSection {
 	}
 	net := server.Info.Network
 	rows := networkIPRows(net)
+	rows = append(rows, networkPortRows(net)...)
 	rows = append(rows, infoRow{Label: "Tailscale", Value: describeTailscale(net.Tailscale)})
 	rows = append(rows, infoRow{Label: "Macvlan", Value: describeMacvlan(net.Macvlan)})
 	return infoSection{Title: "Network", Rows: rows}
@@ -441,6 +447,47 @@ func networkIPRows(net catchrpc.ServiceNetwork) []infoRow {
 		})
 	}
 	return rows
+}
+
+func networkPortRows(net catchrpc.ServiceNetwork) []infoRow {
+	if !net.PortsPresent {
+		return nil
+	}
+	if len(net.Ports) == 0 {
+		return []infoRow{{Label: "Ports", Value: "none"}}
+	}
+	ports := make([]string, 0, len(net.Ports))
+	for _, port := range net.Ports {
+		ports = append(ports, formatServicePort(port))
+	}
+	return []infoRow{{Label: "Ports", Value: strings.Join(ports, ", ")}}
+}
+
+func formatServicePort(port catchrpc.ServicePort) string {
+	if strings.TrimSpace(port.Raw) != "" {
+		return strings.TrimSpace(port.Raw)
+	}
+	protocol := strings.TrimSpace(port.Protocol)
+	if protocol == "" {
+		protocol = "tcp"
+	}
+	host := formatPortEndpoint(port.HostIP, port.HostPort, protocol)
+	container := formatPortEndpoint("", port.ContainerPort, protocol)
+	if host == "" || container == "" {
+		return ""
+	}
+	return host + " -> " + container
+}
+
+func formatPortEndpoint(hostIP string, port uint16, protocol string) string {
+	if port == 0 {
+		return ""
+	}
+	value := fmt.Sprintf("%d/%s", port, protocol)
+	if strings.TrimSpace(hostIP) != "" {
+		return strings.TrimSpace(hostIP) + ":" + value
+	}
+	return value
 }
 
 func describeTailscale(ts *catchrpc.ServiceTailscale) string {

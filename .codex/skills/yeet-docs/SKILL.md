@@ -29,5 +29,5 @@ Use this skill when a change affects what users run or read.
 
 ```bash
 git -C website diff --check
-rg -n "private-host|/Users/" README.md website/docs .codex/skills
+rg -n "private[-]host|/User[s]/" README.md website/docs .codex/skills
 ```

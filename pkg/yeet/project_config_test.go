@@ -6,6 +6,7 @@ package yeet
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 type closeErrorBuffer struct {
@@ -164,6 +167,7 @@ func TestProjectConfigSnapshotFieldsRoundTrip(t *testing.T) {
 		SnapshotMaxAge:   "72h",
 		SnapshotRequired: &required,
 		SnapshotEvents:   []string{"run"},
+		Ports:            []string{"80:80", "443:443"},
 	})
 	loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Dir: t.TempDir(), Config: cfg}
 	if err := saveProjectConfig(loc); err != nil {
@@ -177,8 +181,15 @@ func TestProjectConfigSnapshotFieldsRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("missing service entry")
 	}
-	if entry.PayloadKind != "compose" || entry.Snapshots != "off" || entry.SnapshotKeepLast != 3 || entry.SnapshotMaxAge != "72h" || entry.SnapshotRequired == nil || *entry.SnapshotRequired || !reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) {
+	if entry.PayloadKind != "compose" || entry.Snapshots != "off" || entry.SnapshotKeepLast != 3 || entry.SnapshotMaxAge != "72h" || entry.SnapshotRequired == nil || *entry.SnapshotRequired || !reflect.DeepEqual(entry.SnapshotEvents, []string{"run"}) || !reflect.DeepEqual(entry.Ports, []string{"80:80", "443:443"}) {
 		t.Fatalf("entry snapshot fields = %#v", entry)
+	}
+	raw, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	if !strings.Contains(string(raw), `ports = ["80:80", "443:443"]`) {
+		t.Fatalf("saved config = %q, want ports", string(raw))
 	}
 }
 
@@ -473,6 +484,173 @@ func TestSaveRunConfigStoresServiceRoot(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `service_root = "/srv/apps/svc-a"`) {
 		t.Fatalf("saved config = %q, want service_root", string(raw))
+	}
+}
+
+func TestSaveRunConfigStoresPublishPortsOutsideArgs(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	serviceOverride = "svc-a"
+	payload := filepath.Join(tmp, "apps", "compose.yml")
+	if err := os.MkdirAll(filepath.Dir(payload), 0o755); err != nil {
+		t.Fatalf("MkdirAll error: %v", err)
+	}
+	if err := os.WriteFile(payload, []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+
+	loc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	if err := saveRunConfig(loc, "host-a", payload, []string{"-p", "80:80/tcp", "--publish=443:443/UDP", "--pull"}, "", false); err != nil {
+		t.Fatalf("saveRunConfig error: %v", err)
+	}
+
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd error: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatalf("expected service config to be saved")
+	}
+	if !reflect.DeepEqual(entry.Ports, []string{"80:80", "443:443/udp"}) {
+		t.Fatalf("ports = %#v, want publish ports", entry.Ports)
+	}
+	if !reflect.DeepEqual(entry.Args, []string{"--pull"}) {
+		t.Fatalf("args = %#v, want publish flags removed", entry.Args)
+	}
+}
+
+func TestSaveRunConfigMigratesLegacyPublishArgsToPorts(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+
+	tmp := t.TempDir()
+	serviceOverride = "svc-a"
+	payload := filepath.Join(tmp, "apps", "compose.yml")
+	if err := os.MkdirAll(filepath.Dir(payload), 0o755); err != nil {
+		t.Fatalf("MkdirAll error: %v", err)
+	}
+	if err := os.WriteFile(payload, []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+	loc := &projectConfigLocation{
+		Path: filepath.Join(tmp, projectConfigName),
+		Dir:  tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+			Name:    "svc-a",
+			Host:    "host-a",
+			Payload: "apps/compose.yml",
+			Args:    []string{"--publish=80:80/tcp", "-p", "443:443/TCP", "--pull"},
+		}}},
+	}
+
+	if err := saveRunConfig(loc, "host-a", payload, []string{"--pull"}, "", false); err != nil {
+		t.Fatalf("saveRunConfig error: %v", err)
+	}
+	entry, ok := loc.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatalf("expected service config to be saved")
+	}
+	if !reflect.DeepEqual(entry.Ports, []string{"80:80", "443:443"}) {
+		t.Fatalf("ports = %#v, want migrated legacy publish args", entry.Ports)
+	}
+	if !reflect.DeepEqual(entry.Args, []string{"--pull"}) {
+		t.Fatalf("args = %#v, want publish flags removed", entry.Args)
+	}
+}
+
+func TestSaveRunConfigPublishResetClearsPorts(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+
+	tmp := t.TempDir()
+	serviceOverride = "svc-a"
+	payload := filepath.Join(tmp, "apps", "compose.yml")
+	if err := os.MkdirAll(filepath.Dir(payload), 0o755); err != nil {
+		t.Fatalf("MkdirAll error: %v", err)
+	}
+	if err := os.WriteFile(payload, []byte("test"), 0o644); err != nil {
+		t.Fatalf("WriteFile error: %v", err)
+	}
+	loc := &projectConfigLocation{
+		Path: filepath.Join(tmp, projectConfigName),
+		Dir:  tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+			Name:    "svc-a",
+			Host:    "host-a",
+			Payload: "apps/compose.yml",
+			Ports:   []string{"80:80"},
+			Args:    []string{"--pull"},
+		}}},
+	}
+
+	if err := saveRunConfig(loc, "host-a", payload, []string{"--publish-reset", "--pull"}, "", false); err != nil {
+		t.Fatalf("saveRunConfig error: %v", err)
+	}
+	entry, ok := loc.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatalf("expected service config to be saved")
+	}
+	if len(entry.Ports) != 0 {
+		t.Fatalf("ports = %#v, want cleared", entry.Ports)
+	}
+	if !reflect.DeepEqual(entry.Args, []string{"--pull"}) {
+		t.Fatalf("args = %#v, want publish reset removed", entry.Args)
+	}
+}
+
+func TestRunFromProjectConfigRehydratesPorts(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	payload := filepath.Join(tmp, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatalf("WriteFile payload: %v", err)
+	}
+	loc := writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "svc-a",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "run.sh",
+		Ports:   []string{"80:80", "443:443"},
+		Args:    []string{"--pull"},
+	})
+
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+	if err := runFromProjectConfig(loc, "host-a"); err != nil {
+		t.Fatalf("runFromProjectConfig: %v", err)
+	}
+	want := []string{"run", "-p", "80:80", "-p", "443:443", "--pull"}
+	if !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("args = %#v, want %#v", gotArgs, want)
 	}
 }
 

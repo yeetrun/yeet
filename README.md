@@ -160,7 +160,24 @@ Other common variants (in order of use):
 ```bash
 yeet run <svc> ./Dockerfile
 yeet run <svc> ./bin/<svc> -- --app-flag value
+yeet run -p 80:80 <svc> nginx:latest
 ```
+
+Published ports supplied with `yeet run -p/--publish` are stored in
+`yeet.toml` and replayed on future runs. To change ports after deployment, pass
+the complete desired list to `yeet service set`:
+
+```bash
+yeet service set <svc> -p 80:80 -p 443:443
+yeet service set <svc> --publish-reset -p 443:443
+yeet service set <svc> --publish-reset
+```
+
+If a service already has `80:80` and you run only `-p 443:443`, yeet refuses the
+change so you do not accidentally drop `80:80`. Include existing mappings to
+keep them, or use `--publish-reset` to acknowledge replacement. `yeet info
+<svc>` shows live published ports; `--format=json` includes structured port
+data.
 
 Custom service root on the catch host:
 
@@ -235,7 +252,8 @@ arbitrary catch services because catch does not know the local payload or env
 file paths. For ZFS-backed roots, the local config stores the dataset name with
 `service_root_zfs = true`. If a service has snapshot overrides, sync also stores
 the TOML replay fields such as `snapshots`, `snapshot_keep_last`, and
-`snapshot_max_age`.
+`snapshot_max_age`. Sync also mirrors live published ports when catch reports
+them.
 
 Less common (registry image or pushing a local image):
 

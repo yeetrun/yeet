@@ -206,6 +206,9 @@ func (v ServiceView) Generation() int { return v.ж.Generation }
 // LatestGeneration is the latest generation of the service.
 func (v ServiceView) LatestGeneration() int { return v.ж.LatestGeneration }
 
+// Publish lists Docker Compose short-syntax port mappings for the service.
+func (v ServiceView) Publish() views.Slice[string] { return views.SliceOf(v.ж.Publish) }
+
 // Artifacts are the artifacts generated for this service.
 func (v ServiceView) Artifacts() views.MapFn[ArtifactName, *Artifact, ArtifactView] {
 	return views.MapFnOf(v.ж.Artifacts, func(t *Artifact) ArtifactView {
@@ -231,6 +234,7 @@ var _ServiceViewNeedsRegeneration = Service(struct {
 	SnapshotPolicy   *SnapshotPolicy
 	Generation       int
 	LatestGeneration int
+	Publish          []string
 	Artifacts        ArtifactStore
 	SvcNetwork       *SvcNetwork
 	Macvlan          *MacvlanNetwork

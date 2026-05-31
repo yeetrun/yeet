@@ -920,7 +920,22 @@ func (e *ttyExecer) applyPublishToCompose(publish []string) error {
 	if err != nil {
 		return err
 	}
-	return updateComposePorts(path, e.sn, publish)
+	if err := updateComposePorts(path, e.sn, publish); err != nil {
+		return err
+	}
+	return e.s.recordServicePublish(e.sn, publish)
+}
+
+func (s *Server) recordServicePublish(name string, publish []string) error {
+	_, err := s.cfg.DB.MutateData(func(d *db.Data) error {
+		service, ok := d.Services[name]
+		if !ok {
+			return fmt.Errorf("service %q not found", name)
+		}
+		service.Publish = normalizePublish(publish)
+		return nil
+	})
+	return err
 }
 
 func (e *ttyExecer) composePathForPublish() (string, error) {

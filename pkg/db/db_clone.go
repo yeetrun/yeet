@@ -84,6 +84,7 @@ func (src *Service) Clone() *Service {
 	dst := new(Service)
 	*dst = *src
 	dst.SnapshotPolicy = src.SnapshotPolicy.Clone()
+	dst.Publish = append(src.Publish[:0:0], src.Publish...)
 	if dst.Artifacts != nil {
 		dst.Artifacts = map[ArtifactName]*Artifact{}
 		for k, v := range src.Artifacts {
@@ -113,6 +114,7 @@ var _ServiceCloneNeedsRegeneration = Service(struct {
 	SnapshotPolicy   *SnapshotPolicy
 	Generation       int
 	LatestGeneration int
+	Publish          []string
 	Artifacts        ArtifactStore
 	SvcNetwork       *SvcNetwork
 	Macvlan          *MacvlanNetwork

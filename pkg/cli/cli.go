@@ -49,6 +49,7 @@ type RunFlags struct {
 	Force            bool
 	Web              bool
 	Publish          []string
+	PublishReset     bool
 	EnvFile          string
 	ServiceRoot      string
 	ZFS              bool
@@ -65,6 +66,8 @@ type ServiceSetFlags struct {
 	ZFS              bool
 	Copy             bool
 	Empty            bool
+	Publish          []string
+	PublishReset     bool
 	Snapshots        string
 	SnapshotKeepLast string
 	SnapshotMaxAge   string
@@ -177,6 +180,7 @@ type runFlagsParsed struct {
 	Force            bool     `flag:"force"`
 	Web              bool     `flag:"web"`
 	Publish          []string `flag:"publish" short:"p"`
+	PublishReset     bool     `flag:"publish-reset"`
 	EnvFile          string   `flag:"env-file"`
 	ServiceRoot      string   `flag:"service-root"`
 	ZFS              bool     `flag:"zfs"`
@@ -188,15 +192,17 @@ type runFlagsParsed struct {
 }
 
 type serviceSetFlagsParsed struct {
-	ServiceRoot      string `flag:"service-root"`
-	ZFS              bool   `flag:"zfs"`
-	Copy             bool   `flag:"copy"`
-	Empty            bool   `flag:"empty"`
-	Snapshots        string `flag:"snapshots"`
-	SnapshotKeepLast string `flag:"snapshot-keep-last"`
-	SnapshotMaxAge   string `flag:"snapshot-max-age"`
-	SnapshotRequired string `flag:"snapshot-required"`
-	SnapshotEvents   string `flag:"snapshot-events"`
+	ServiceRoot      string   `flag:"service-root"`
+	ZFS              bool     `flag:"zfs"`
+	Copy             bool     `flag:"copy"`
+	Empty            bool     `flag:"empty"`
+	Publish          []string `flag:"publish" short:"p"`
+	PublishReset     bool     `flag:"publish-reset"`
+	Snapshots        string   `flag:"snapshots"`
+	SnapshotKeepLast string   `flag:"snapshot-keep-last"`
+	SnapshotMaxAge   string   `flag:"snapshot-max-age"`
+	SnapshotRequired string   `flag:"snapshot-required"`
+	SnapshotEvents   string   `flag:"snapshot-events"`
 }
 
 type serviceSyncFlagsParsed struct {
@@ -314,7 +320,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"edit":    {Name: "edit", Description: "Edit a service", ArgsSchema: ServiceArgs{}},
 	"enable":  {Name: "enable", Description: "Enable a service", ArgsSchema: ServiceArgs{}},
 	"events":  {Name: "events", Description: "Show events for a service"},
-	"info":    {Name: "info", Description: "Show detailed info about a service", Usage: "SVC [--format=plain|json|json-pretty]", ArgsSchema: ServiceArgs{}},
+	"info":    {Name: "info", Description: "Show detailed info about a service, including published ports", Usage: "SVC [--format=plain|json|json-pretty]", ArgsSchema: ServiceArgs{}},
 	"logs":    {Name: "logs", Description: "Show logs of a service", ArgsSchema: ServiceArgs{}},
 	"mount": {Name: "mount", Description: "Mount a network filesystem on the host (global, not per-service)", Usage: "SOURCE [name] [--type=nfs] [--opts=defaults]", Examples: []string{
 		"yeet mount host:/export data-share --type=nfs --opts=defaults",
@@ -325,11 +331,13 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}},
 	"restart":  {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
 	"rollback": {Name: "rollback", Description: "Rollback a service", ArgsSchema: ServiceArgs{}},
-	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC [PAYLOAD] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
+	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC [PAYLOAD] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
 		"yeet run --web",
 		"yeet run --web <svc>",
 		"yeet run --web <svc> ./compose.yml",
 		"yeet run <svc> ./bin/<svc> -- --app-flag value",
+		"yeet run -p 80:80 <svc> nginx:latest",
+		"yeet run --publish-reset -p 443:443 <svc> nginx:latest",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
 		"yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs",
 		"yeet run <svc> ./compose.yml --snapshots=off",
@@ -426,8 +434,11 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set service settings",
-				Usage:       "service set <svc> [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]",
+				Usage:       "service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]",
 				Examples: []string{
+					"yeet service set <svc> -p 80:80 -p 443:443",
+					"yeet service set <svc> --publish-reset -p 443:443",
+					"yeet service set <svc> --publish-reset",
 					"yeet service set <svc> --service-root=/srv/apps/<svc>",
 					"yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy",
 					"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
@@ -588,7 +599,8 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		Pull:             parsed.Flags.Pull,
 		Force:            parsed.Flags.Force,
 		Web:              parsed.Flags.Web,
-		Publish:          parsed.Flags.Publish,
+		Publish:          orderedFlagValues(parseArgs, "--publish", "-p"),
+		PublishReset:     parsed.Flags.PublishReset,
 		EnvFile:          parsed.Flags.EnvFile,
 		ServiceRoot:      parsed.Flags.ServiceRoot,
 		ZFS:              parsed.Flags.ZFS,
@@ -631,6 +643,8 @@ func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string)
 		ZFS:              parsed.ZFS,
 		Copy:             parsed.Copy,
 		Empty:            parsed.Empty,
+		Publish:          orderedFlagValues(parseArgs, "--publish", "-p"),
+		PublishReset:     parsed.PublishReset,
 		Snapshots:        snapshotMode,
 		SnapshotKeepLast: strings.TrimSpace(parsed.SnapshotKeepLast),
 		SnapshotMaxAge:   strings.TrimSpace(parsed.SnapshotMaxAge),
@@ -655,7 +669,7 @@ func validateServiceSetFlags(flags ServiceSetFlags) error {
 }
 
 func validateServiceSetMigrationFlags(flags ServiceSetFlags) error {
-	rootChange := flags.ServiceRoot != "" || flags.ZFS
+	rootChange := hasServiceSetRootChange(flags)
 	if flags.Copy && flags.Empty {
 		return fmt.Errorf("cannot use --copy and --empty together")
 	}
@@ -672,17 +686,39 @@ func validateServiceSetMigrationFlags(flags ServiceSetFlags) error {
 }
 
 func validateServiceSetRootFlags(flags ServiceSetFlags) error {
-	rootChange := flags.ServiceRoot != "" || flags.ZFS
-	if rootChange && flags.ServiceRoot == "" {
-		return fmt.Errorf("--service-root is required when --zfs is set")
+	rootChange := hasServiceSetRootChange(flags)
+	if err := validateServiceSetRootValue(flags, rootChange); err != nil {
+		return err
 	}
-	if rootChange && !flags.ZFS && !filepath.IsAbs(flags.ServiceRoot) {
-		return fmt.Errorf("--service-root must be absolute unless --zfs is set")
-	}
-	if !rootChange && !flags.SnapshotChange {
-		return fmt.Errorf("service set requires --service-root or snapshot settings")
+	if !serviceSetHasChange(flags, rootChange) {
+		return fmt.Errorf("service set requires --service-root, snapshot settings, or published ports")
 	}
 	return nil
+}
+
+func hasServiceSetRootChange(flags ServiceSetFlags) bool {
+	return flags.ServiceRoot != "" || flags.ZFS
+}
+
+func hasServiceSetPublishChange(flags ServiceSetFlags) bool {
+	return len(flags.Publish) != 0 || flags.PublishReset
+}
+
+func validateServiceSetRootValue(flags ServiceSetFlags, rootChange bool) error {
+	if !rootChange {
+		return nil
+	}
+	if flags.ServiceRoot == "" {
+		return fmt.Errorf("--service-root is required when --zfs is set")
+	}
+	if !flags.ZFS && !filepath.IsAbs(flags.ServiceRoot) {
+		return fmt.Errorf("--service-root must be absolute unless --zfs is set")
+	}
+	return nil
+}
+
+func serviceSetHasChange(flags ServiceSetFlags, rootChange bool) bool {
+	return rootChange || flags.SnapshotChange || hasServiceSetPublishChange(flags)
 }
 
 func normalizeSnapshotMode(value string) (string, error) {
@@ -732,6 +768,25 @@ func hasFlagWithoutValue(args []string, name string) bool {
 		}
 	}
 	return false
+}
+
+func orderedFlagValues(args []string, longName, shortName string) []string {
+	var values []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == longName || arg == shortName:
+			if i+1 < len(args) {
+				values = append(values, args[i+1])
+				i++
+			}
+		case strings.HasPrefix(arg, longName+"="):
+			values = append(values, strings.TrimPrefix(arg, longName+"="))
+		case shortName != "" && strings.HasPrefix(arg, shortName+"="):
+			values = append(values, strings.TrimPrefix(arg, shortName+"="))
+		}
+	}
+	return values
 }
 
 func isFlagToken(arg string) bool {

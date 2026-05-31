@@ -447,7 +447,7 @@ Install/update from a payload (binary, compose, image, Dockerfile)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] run [OPTIONS] SVC [PAYLOAD] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]
+yeet [GLOBAL_OPTIONS] run [OPTIONS] SVC [PAYLOAD] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]
 ```
 
 ## Global Options
@@ -498,6 +498,14 @@ yeet run --web <svc> ./compose.yml
 
 ```
 yeet run <svc> ./bin/<svc> -- --app-flag value
+```
+
+```
+yeet run -p 80:80 <svc> nginx:latest
+```
+
+```
+yeet run --publish-reset -p 443:443 <svc> nginx:latest
 ```
 
 ```
@@ -1979,6 +1987,18 @@ Set service settings
 **Examples**:
 
 ```
+yeet service set <svc> -p 80:80 -p 443:443
+```
+
+```
+yeet service set <svc> --publish-reset -p 443:443
+```
+
+```
+yeet service set <svc> --publish-reset
+```
+
+```
 yeet service set <svc> --service-root=/srv/apps/<svc>
 ```
 
@@ -2485,7 +2505,7 @@ Set service settings
 ## Usage
 
 ```
-yeet [GLOBAL OPTIONS] service set <svc> [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]
+yeet [GLOBAL OPTIONS] service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]
 ```
 
 ## Global Options
@@ -2521,6 +2541,18 @@ Progress output (auto|tty|plain|quiet)
 - **Type**: `string`
 
 ## Examples
+
+```
+yeet service set <svc> -p 80:80 -p 443:443
+```
+
+```
+yeet service set <svc> --publish-reset -p 443:443
+```
+
+```
+yeet service set <svc> --publish-reset
+```
 
 ```
 yeet service set <svc> --service-root=/srv/apps/<svc>

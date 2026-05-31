@@ -52,6 +52,9 @@ var (
 	downDockerComposeForRootMigration = (*Server).downDockerComposeForRootMigration
 	installSystemdForRootMigration    = (*Server).installSystemdForRootMigration
 	uninstallSystemdForRootMigration  = (*Server).uninstallSystemdForRootMigration
+	upDockerComposeForServiceSet      = func(compose *svc.DockerComposeService) error {
+		return compose.Start()
+	}
 )
 
 func (e *ttyExecer) serviceCmdFunc(args []string) error {
@@ -74,24 +77,339 @@ func (e *ttyExecer) serviceCmdFunc(args []string) error {
 }
 
 func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
-	rootChange := strings.TrimSpace(flags.ServiceRoot) != "" || flags.ZFS
-	if flags.SnapshotChange {
-		if err := validateServiceSnapshotFlags(flags); err != nil {
-			return err
-		}
+	changes := serviceSetChangesFromFlags(flags)
+	if !changes.any() {
+		return fmt.Errorf("service set requires --service-root, snapshot settings, or published ports")
 	}
-	if rootChange {
-		if err := e.serviceSetRoot(flags); err != nil {
-			return err
-		}
+	if err := validateServiceSetSnapshotChange(flags, changes); err != nil {
+		return err
 	}
-	if flags.SnapshotChange {
+	if err := e.applyServiceSetRootChange(flags, changes); err != nil {
+		return err
+	}
+	if err := e.applyServiceSetPublishChange(flags, changes); err != nil {
+		return err
+	}
+	if changes.snapshot {
 		return e.s.updateServiceSnapshotPolicy(e.sn, flags)
 	}
-	if !rootChange {
-		return fmt.Errorf("service set requires --service-root or snapshot settings")
+	return nil
+}
+
+type serviceSetChanges struct {
+	root     bool
+	publish  bool
+	snapshot bool
+}
+
+func serviceSetChangesFromFlags(flags cli.ServiceSetFlags) serviceSetChanges {
+	return serviceSetChanges{
+		root:     strings.TrimSpace(flags.ServiceRoot) != "" || flags.ZFS,
+		publish:  len(flags.Publish) != 0 || flags.PublishReset,
+		snapshot: flags.SnapshotChange,
+	}
+}
+
+func (c serviceSetChanges) any() bool {
+	return c.root || c.publish || c.snapshot
+}
+
+func validateServiceSetSnapshotChange(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
+	if !changes.snapshot {
+		return nil
+	}
+	return validateServiceSnapshotFlags(flags)
+}
+
+func (e *ttyExecer) applyServiceSetRootChange(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
+	if !changes.root {
+		return nil
+	}
+	return e.serviceSetRoot(flags)
+}
+
+func (e *ttyExecer) applyServiceSetPublishChange(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
+	if !changes.publish {
+		return nil
+	}
+	return e.s.updateServicePublish(e.sn, flags)
+}
+
+func (s *Server) updateServicePublish(name string, flags cli.ServiceSetFlags) error {
+	changed, err := s.updateServicePublishData(name, flags)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	return s.restartServicePublish(name)
+}
+
+func (s *Server) updateServicePublishData(name string, flags cli.ServiceSetFlags) (bool, error) {
+	var changed bool
+	_, err := s.cfg.DB.MutateData(func(d *db.Data) error {
+		service, err := serviceForPublishUpdate(d, name)
+		if err != nil {
+			return err
+		}
+		changed, err = s.applyServicePublishUpdate(service, name, flags)
+		return err
+	})
+	return changed, err
+}
+
+func serviceForPublishUpdate(d *db.Data, name string) (*db.Service, error) {
+	service, ok := d.Services[name]
+	if !ok {
+		return nil, fmt.Errorf("service %q not found", name)
+	}
+	if service.ServiceType != db.ServiceTypeDockerCompose {
+		return nil, fmt.Errorf("service %q is not a docker compose service", name)
+	}
+	return service, nil
+}
+
+func (s *Server) applyServicePublishUpdate(service *db.Service, name string, flags cli.ServiceSetFlags) (bool, error) {
+	current, err := currentServicePublishPorts(service, name)
+	if err != nil {
+		return false, err
+	}
+	desired := normalizePublish(flags.Publish)
+	if err := validateServicePublishReplacement(name, current, desired, flags.PublishReset); err != nil {
+		return false, err
+	}
+	if servicePublishAlreadyCurrent(service, current, desired) {
+		service.Publish = desired
+		return false, nil
+	}
+
+	root := s.serviceRootFromView(service.View())
+	composePath, nextGen, err := writeServiceSetPublishCompose(service, root, name, desired)
+	if err != nil {
+		return false, err
+	}
+	promoteServicePublishGeneration(service, nextGen, composePath, desired)
+	return true, nil
+}
+
+func validateServicePublishReplacement(serviceName string, current, desired []string, reset bool) error {
+	if reset {
+		return nil
+	}
+	if missing := missingServicePublishPorts(current, desired); len(missing) != 0 {
+		return serviceSetPublishMissingPortsError(serviceName, current, desired, missing)
 	}
 	return nil
+}
+
+func servicePublishAlreadyCurrent(service *db.Service, current, desired []string) bool {
+	return equalStringSlices(normalizePublish(service.Publish), desired) && equalStringSlices(current, desired)
+}
+
+func (s *Server) restartServicePublish(name string) error {
+	compose, err := s.dockerComposeService(name)
+	if err != nil {
+		return err
+	}
+	if err := upDockerComposeForServiceSet(compose); err != nil {
+		return fmt.Errorf("failed to start docker compose service: %w", err)
+	}
+	return nil
+}
+
+func currentServicePublishPorts(service *db.Service, serviceName string) ([]string, error) {
+	if ports := normalizePublish(service.Publish); len(ports) != 0 {
+		return ports, nil
+	}
+	composePath, ok := serviceComposePathForPublish(service)
+	if !ok {
+		return nil, nil
+	}
+	return readComposePorts(composePath, serviceName)
+}
+
+func writeServiceSetPublishCompose(service *db.Service, root, serviceName string, publish []string) (string, int, error) {
+	src, ok := serviceComposePathForPublish(service)
+	if !ok {
+		return "", 0, fmt.Errorf("compose file not found for service %q", serviceName)
+	}
+	nextGen := nextServicePublishGeneration(service, src, root)
+	dst := servicePublishComposePath(root, nextGen)
+	content, err := os.ReadFile(src)
+	if err != nil {
+		return "", 0, err
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return "", 0, err
+	}
+	if err := os.WriteFile(dst, content, 0o644); err != nil {
+		return "", 0, err
+	}
+	if err := updateComposePorts(dst, serviceName, publish); err != nil {
+		return "", 0, err
+	}
+	return dst, nextGen, nil
+}
+
+func serviceComposePathForPublish(service *db.Service) (string, bool) {
+	if service == nil {
+		return "", false
+	}
+	if service.Generation != 0 {
+		if path, ok := service.Artifacts.Gen(db.ArtifactDockerComposeFile, service.Generation); ok {
+			return path, true
+		}
+	}
+	if service.LatestGeneration != 0 && service.LatestGeneration != service.Generation {
+		if path, ok := service.Artifacts.Gen(db.ArtifactDockerComposeFile, service.LatestGeneration); ok {
+			return path, true
+		}
+	}
+	return service.Artifacts.Latest(db.ArtifactDockerComposeFile)
+}
+
+func nextServicePublishGeneration(service *db.Service, src, root string) int {
+	next := service.LatestGeneration
+	if service.Generation > next {
+		next = service.Generation
+	}
+	next++
+	if next < 1 {
+		next = 1
+	}
+	for filepath.Clean(servicePublishComposePath(root, next)) == filepath.Clean(src) {
+		next++
+	}
+	return next
+}
+
+func servicePublishComposePath(root string, gen int) string {
+	return filepath.Join(serviceBinDirForRoot(root), fmt.Sprintf("docker-compose.%d.yml", gen))
+}
+
+func promoteServicePublishGeneration(service *db.Service, gen int, composePath string, publish []string) {
+	if service.Artifacts == nil {
+		service.Artifacts = db.ArtifactStore{}
+	}
+	oldGeneration := service.Generation
+	oldLatestGeneration := service.LatestGeneration
+	for name, artifact := range service.Artifacts {
+		if artifact == nil {
+			continue
+		}
+		if artifact.Refs == nil {
+			artifact.Refs = map[db.ArtifactRef]string{}
+		}
+		if name == db.ArtifactDockerComposeFile {
+			continue
+		}
+		if path, ok := currentServiceArtifactPath(artifact, oldGeneration, oldLatestGeneration); ok {
+			artifact.Refs[db.Gen(gen)] = path
+			artifact.Refs["latest"] = path
+		}
+	}
+	setServiceArtifactRef(service, db.ArtifactDockerComposeFile, gen, composePath)
+	service.Publish = normalizePublish(publish)
+	service.Generation = gen
+	service.LatestGeneration = gen
+}
+
+func currentServiceArtifactPath(artifact *db.Artifact, generation, latestGeneration int) (string, bool) {
+	if artifact == nil {
+		return "", false
+	}
+	if generation != 0 {
+		if path, ok := artifact.Refs[db.Gen(generation)]; ok {
+			return path, true
+		}
+	}
+	if latestGeneration != 0 && latestGeneration != generation {
+		if path, ok := artifact.Refs[db.Gen(latestGeneration)]; ok {
+			return path, true
+		}
+	}
+	path, ok := artifact.Refs["latest"]
+	return path, ok
+}
+
+func setServiceArtifactRef(service *db.Service, name db.ArtifactName, gen int, path string) {
+	artifact, ok := service.Artifacts[name]
+	if !ok || artifact == nil {
+		artifact = &db.Artifact{}
+		service.Artifacts[name] = artifact
+	}
+	if artifact.Refs == nil {
+		artifact.Refs = map[db.ArtifactRef]string{}
+	}
+	artifact.Refs[db.Gen(gen)] = path
+	artifact.Refs["latest"] = path
+}
+
+func missingServicePublishPorts(current, desired []string) []string {
+	desiredSet := map[string]bool{}
+	for _, port := range desired {
+		desiredSet[port] = true
+	}
+	var missing []string
+	for _, port := range current {
+		if !desiredSet[port] {
+			missing = append(missing, port)
+		}
+	}
+	return missing
+}
+
+func serviceSetPublishMissingPortsError(serviceName string, current, desired, missing []string) error {
+	return fmt.Errorf(
+		"changing published ports would remove existing mappings:\n  %s\n\nTo keep them, include them explicitly:\n  %s\n\nTo replace the published port list, re-run with --publish-reset:\n  %s",
+		strings.Join(missing, "\n  "),
+		formatServiceSetPublishCommand(serviceName, false, retainedServicePublishPorts(current, desired)),
+		formatServiceSetPublishCommand(serviceName, true, desired),
+	)
+}
+
+func retainedServicePublishPorts(current, desired []string) []string {
+	seen := map[string]bool{}
+	retained := make([]string, 0, len(current)+len(desired))
+	for _, port := range current {
+		if seen[port] {
+			continue
+		}
+		seen[port] = true
+		retained = append(retained, port)
+	}
+	for _, port := range desired {
+		if seen[port] {
+			continue
+		}
+		seen[port] = true
+		retained = append(retained, port)
+	}
+	return retained
+}
+
+func formatServiceSetPublishCommand(serviceName string, reset bool, ports []string) string {
+	args := []string{"yeet", "service", "set", serviceName}
+	if reset {
+		args = append(args, "--publish-reset")
+	}
+	for _, port := range ports {
+		args = append(args, "-p", port)
+	}
+	return strings.Join(args, " ")
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func (e *ttyExecer) serviceSetRoot(flags cli.ServiceSetFlags) error {

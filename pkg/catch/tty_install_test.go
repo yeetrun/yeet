@@ -999,6 +999,10 @@ func TestCommitStageAppliesPublishWithInstallerHook(t *testing.T) {
 	if !strings.Contains(string(got), "8080:80") {
 		t.Fatalf("compose = %s, want published port", got)
 	}
+	service := testService(t, server, "svc-publish")
+	if !reflect.DeepEqual(service.Publish, []string{"8080:80"}) {
+		t.Fatalf("Publish = %#v, want published port", service.Publish)
+	}
 }
 
 func TestApplyStagePublishNoPublishSkipsComposeLookup(t *testing.T) {
