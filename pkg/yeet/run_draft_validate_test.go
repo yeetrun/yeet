@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -73,6 +74,62 @@ func TestValidateRunDraftAcceptsNewServiceAndExistingFilePayload(t *testing.T) {
 	}
 	if normalized.Payload != composePath {
 		t.Fatalf("payload = %q, want %q", normalized.Payload, composePath)
+	}
+}
+
+func TestValidateRunDraftRejectsUnsupportedNetworkModes(t *testing.T) {
+	draft := RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "ghcr.io/example/app:latest",
+		Network: RunDraftNetwork{
+			Modes: []string{"svc", "host", "macvlan"},
+		},
+	}
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := validation.fieldError("network.modes"); !strings.Contains(got, `unsupported network mode "host"`) {
+		t.Fatalf("network.modes error = %q, want unsupported host", got)
+	}
+}
+
+func TestValidateRunDraftNormalizesNetworkFields(t *testing.T) {
+	draft := RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "ghcr.io/example/app:latest",
+		Network: RunDraftNetwork{
+			Modes:         []string{" svc ", "ts", "", "lan", "svc"},
+			TSVersion:     " 1.2.3 ",
+			TSExitNode:    " exit-node ",
+			TSTags:        []string{" tag:app ", ""},
+			MacvlanMAC:    " 02:00:00:00:00:07 ",
+			MacvlanParent: " eno1 ",
+			Publish:       []string{" 8080:80 ", ""},
+		},
+	}
+	normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if !validation.OK {
+		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+	}
+	if got, want := normalized.Network.Modes, []string{"svc", "ts", "lan"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("network modes = %#v, want %#v", got, want)
+	}
+	if normalized.Network.TSVersion != "1.2.3" || normalized.Network.TSExitNode != "exit-node" {
+		t.Fatalf("tailscale fields = %q/%q, want trimmed", normalized.Network.TSVersion, normalized.Network.TSExitNode)
+	}
+	if got, want := normalized.Network.TSTags, []string{"tag:app"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ts tags = %#v, want %#v", got, want)
+	}
+	if normalized.Network.MacvlanMAC != "02:00:00:00:00:07" || normalized.Network.MacvlanParent != "eno1" {
+		t.Fatalf("macvlan fields = %q/%q, want trimmed", normalized.Network.MacvlanMAC, normalized.Network.MacvlanParent)
+	}
+	if got, want := normalized.Network.Publish, []string{"8080:80"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("publish = %#v, want %#v", got, want)
 	}
 }
 

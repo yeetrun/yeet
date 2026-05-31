@@ -401,6 +401,46 @@ func TestRunWebAPIDeployUsesConfiguredContext(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIDeployIgnoresCanceledRequestContext(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, force bool) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	root := t.TempDir()
+	payload := filepath.Join(root, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, Context: context.Background()})
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"}); err != nil {
+		t.Fatalf("encode draft: %v", err)
+	}
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/api/deploy", &buf).WithContext(requestCtx)
+	req.Header.Set("X-Yeet-Run-Token", "secret")
+	rec := httptest.NewRecorder()
+
+	s.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func runWebAPIRequest(t *testing.T, handler http.Handler, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var r io.Reader

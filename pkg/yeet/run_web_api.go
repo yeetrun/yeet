@@ -162,7 +162,7 @@ func (s *runWebServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	defer func() { s.finishDeploy(deployed) }()
 
 	draft.NewServiceOnly = true
-	ctx, cancel := runWebHandlerContext(s.cfg.Context, r.Context())
+	ctx, cancel := runWebDeployContext(s.cfg.Context)
 	defer cancel()
 	normalized, result := validateRunDraft(ctx, draft, s.cfg.Root)
 	if !result.OK {
@@ -293,4 +293,11 @@ func runWebHandlerContext(parent context.Context, request context.Context) (cont
 		}
 	}()
 	return ctx, cancel
+}
+
+func runWebDeployContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		return context.WithCancel(context.Background())
+	}
+	return context.WithCancel(parent)
 }

@@ -77,6 +77,7 @@ func validateRunDraftLocal(draft RunDraft, cwd string) (RunDraft, RunDraftValida
 	draft = trimRunDraftFields(draft)
 	validateRunDraftRequired(draft, &result)
 	validateRunDraftPaths(cwd, &draft, &result)
+	validateRunDraftNetwork(&draft, &result)
 	validateRunDraftStorage(&draft, &result)
 	validateRunDraftSnapshots(&draft, &result)
 
@@ -93,6 +94,64 @@ func trimRunDraftFields(draft RunDraft) RunDraft {
 	draft.Snapshots.Mode = strings.TrimSpace(draft.Snapshots.Mode)
 	draft.Snapshots.MaxAge = strings.TrimSpace(draft.Snapshots.MaxAge)
 	return draft
+}
+
+func validateRunDraftNetwork(draft *RunDraft, result *RunDraftValidationResult) {
+	draft.Network.Modes = normalizeRunDraftNetworkModes(draft.Network.Modes, result)
+	draft.Network.TSVersion = strings.TrimSpace(draft.Network.TSVersion)
+	draft.Network.TSExitNode = strings.TrimSpace(draft.Network.TSExitNode)
+	draft.Network.TSTags = trimNonEmptyStrings(draft.Network.TSTags)
+	draft.Network.TSAuthKey = strings.TrimSpace(draft.Network.TSAuthKey)
+	draft.Network.MacvlanMAC = strings.TrimSpace(draft.Network.MacvlanMAC)
+	draft.Network.MacvlanParent = strings.TrimSpace(draft.Network.MacvlanParent)
+	draft.Network.Publish = trimNonEmptyStrings(draft.Network.Publish)
+}
+
+func normalizeRunDraftNetworkModes(modes []string, result *RunDraftValidationResult) []string {
+	if len(modes) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(modes))
+	out := make([]string, 0, len(modes))
+	for _, raw := range modes {
+		mode := strings.TrimSpace(raw)
+		if mode == "" {
+			continue
+		}
+		if !validRunDraftNetworkMode(mode) {
+			result.addError("network.modes", "unsupported network mode %q", mode)
+			continue
+		}
+		if seen[mode] {
+			continue
+		}
+		seen[mode] = true
+		out = append(out, mode)
+	}
+	return out
+}
+
+func validRunDraftNetworkMode(mode string) bool {
+	switch mode {
+	case "svc", "ts", "lan":
+		return true
+	default:
+		return false
+	}
+}
+
+func trimNonEmptyStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func validateRunDraftRequired(draft RunDraft, result *RunDraftValidationResult) {

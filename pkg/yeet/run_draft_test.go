@@ -614,6 +614,71 @@ func TestExecuteRunDraftUsesExistingRunPathAndSavesConfig(t *testing.T) {
 	}
 }
 
+func TestExecuteRunDraftPassesTSAuthKeyButDoesNotSaveIt(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldExec := execRemoteFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldArch := remoteCatchOSAndArchFn
+	oldIsTerminal := isTerminalFn
+	defer func() {
+		execRemoteFn = oldExec
+		fetchRemoteArtifactHashesFn = oldHashes
+		remoteCatchOSAndArchFn = oldArch
+		isTerminalFn = oldIsTerminal
+	}()
+	serviceOverride = "svc-a"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	cfgLoc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotArgs = append([]string{}, args...)
+		_, _ = io.Copy(io.Discard, stdin)
+		return nil
+	}
+	draft := RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: payload,
+		Network: RunDraftNetwork{
+			Modes:     []string{"ts"},
+			TSAuthKey: "tskey-secret",
+		},
+	}
+
+	if err := executeRunDraft(context.Background(), draft, cfgLoc, false); err != nil {
+		t.Fatalf("executeRunDraft: %v", err)
+	}
+	if got := strings.Join(gotArgs, " "); !strings.Contains(got, "--ts-auth-key=tskey-secret") {
+		t.Fatalf("remote args = %#v, want ts auth key passed", gotArgs)
+	}
+	entry, ok := cfgLoc.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("saved config missing svc-a@host-a")
+	}
+	if got := strings.Join(entry.Args, " "); strings.Contains(got, "tskey-secret") || strings.Contains(got, "--ts-auth-key") {
+		t.Fatalf("saved args leaked ts auth key: %#v", entry.Args)
+	}
+	if got, want := entry.Args, []string{"--net=ts"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("saved args = %#v, want %#v", got, want)
+	}
+}
+
 func TestExecuteRunDraftPassesContextToRemoteRunWork(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	oldExec := execRemoteFn
