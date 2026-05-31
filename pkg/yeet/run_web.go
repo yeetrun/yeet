@@ -83,14 +83,10 @@ func extractRunWebFlag(args []string) ([]string, bool, error) {
 
 func newRunWebBootstrap(cfg *projectConfigLocation, hostOverride string, service string, args []string) runWebBootstrap {
 	cwd, _ := os.Getwd()
-	selected := strings.TrimSpace(hostOverride)
-	if selected == "" {
-		selected = Host()
-	}
 	boot := runWebBootstrap{
 		CWD:          cwd,
 		Hosts:        runWebHostCandidates(cfg, hostOverride),
-		SelectedHost: selected,
+		SelectedHost: runWebSelectedHost(cfg, hostOverride),
 		Prefill:      runWebPrefillFromArgs(service, args),
 		Options: runWebOptionHints{
 			NetworkModes:  []string{"svc", "ts", "lan"},
@@ -101,6 +97,22 @@ func newRunWebBootstrap(cfg *projectConfigLocation, hostOverride string, service
 		boot.ConfigPath = cfg.Path
 	}
 	return boot
+}
+
+func runWebSelectedHost(cfg *projectConfigLocation, hostOverride string) string {
+	if host := strings.TrimSpace(hostOverride); host != "" {
+		return host
+	}
+	if host := strings.TrimSpace(os.Getenv("CATCH_HOST")); host != "" {
+		return host
+	}
+	if cfg != nil && cfg.Config != nil {
+		hosts := cfg.Config.AllHosts()
+		if len(hosts) != 0 {
+			return hosts[0]
+		}
+	}
+	return Host()
 }
 
 func runWebPrefillFromArgs(service string, args []string) runWebPrefill {

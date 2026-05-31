@@ -91,6 +91,10 @@ button:disabled {
   white-space: nowrap;
 }
 
+.host-status:empty {
+  display: none;
+}
+
 .shell {
   max-width: 1180px;
   margin: 28px auto 96px;
@@ -183,6 +187,19 @@ button:focus-visible {
   outline-offset: 2px;
 }
 
+input[data-invalid="true"],
+select[data-invalid="true"] {
+  border-color: color-mix(in oklch, var(--danger) 70%, var(--line));
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--danger) 35%, transparent);
+}
+
+.field-error {
+  min-height: 16px;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 fieldset {
   min-width: 0;
   margin: 16px 0 0;
@@ -198,18 +215,34 @@ legend {
 }
 
 .help {
-  width: 22px;
-  height: 22px;
+  width: 18px;
+  height: 18px;
   display: inline-grid;
   place-items: center;
   padding: 0;
-  border: 0;
+  border: 1px solid color-mix(in oklch, var(--muted) 55%, transparent);
   border-radius: 50%;
-  color: oklch(0.16 0.02 160);
-  background: var(--brand);
-  font-size: 13px;
-  font-weight: 800;
+  color: var(--muted);
+  background: transparent;
+  font-size: 11px;
+  font-weight: 700;
   line-height: 1;
+}
+
+.help:hover,
+.help:focus-visible {
+  border-color: var(--brand);
+  color: var(--brand);
+}
+
+.picker-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.picker-trigger {
+  min-width: 58px;
 }
 
 .browser-head {
@@ -231,9 +264,20 @@ legend {
   background: transparent;
 }
 
-.file-browser {
-  min-height: 198px;
-  max-height: 292px;
+.field-picker {
+  position: fixed;
+  z-index: 15;
+  max-width: min(620px, calc(100vw - 24px));
+  padding: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: oklch(0.17 0.014 165);
+  box-shadow: 0 18px 42px color-mix(in oklch, var(--canvas) 70%, transparent);
+}
+
+.picker-list {
+  min-height: 180px;
+  max-height: 286px;
   overflow: auto;
   margin-top: 7px;
   padding: 7px;
@@ -304,8 +348,78 @@ legend {
   background: oklch(0.18 0.012 165);
 }
 
+.check-pill.is-default {
+  display: inline-flex;
+  margin: 0 8px 8px 0;
+  color: var(--quiet);
+}
+
 .check-pill input,
 .checkline input {
+  width: 16px;
+  min-height: 16px;
+  accent-color: var(--brand);
+}
+
+.conditional-options {
+  margin-top: 12px;
+}
+
+.advanced-block {
+  margin-top: 14px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--surface) 88%, var(--canvas));
+}
+
+.advanced-block > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 42px;
+  padding: 0 12px;
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.advanced-block[open] {
+  padding-bottom: 12px;
+}
+
+.advanced-block[open] > summary {
+  margin-bottom: 2px;
+}
+
+.advanced-block > label,
+.advanced-block > .split-fields {
+  margin-right: 12px;
+  margin-left: 12px;
+}
+
+.root-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.zfs-toggle {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: oklch(0.18 0.012 165);
+  white-space: nowrap;
+}
+
+.zfs-toggle input {
   width: 16px;
   min-height: 16px;
   accent-color: var(--brand);
@@ -412,7 +526,9 @@ legend {
   }
 
   .deploy-form,
-  .split-fields {
+  .split-fields,
+  .root-control,
+  .picker-field {
     grid-template-columns: 1fr;
   }
 

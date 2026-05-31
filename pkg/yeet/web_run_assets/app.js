@@ -13,6 +13,7 @@ const state = {
   validateSeq: 0,
   validateTimer: null,
   phase: "editing",
+  activePicker: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -80,6 +81,9 @@ function buildDraft() {
   const restart = true;
   // Future redeploy support can add pull/force once the web flow allows existing services.
   const snapshotRequired = snapshotRequiredValue();
+  const modes = selectedNetworkModes();
+  const hasTailscale = modes.includes("ts");
+  const hasLAN = modes.includes("lan");
   return {
     service: $("service").value.trim(),
     host: $("host").value.trim(),
@@ -87,14 +91,14 @@ function buildDraft() {
     envFile: $("envFile").value.trim(),
     payloadArgs: splitArgs($("payloadArgs").value),
     network: {
-      modes: [...document.querySelectorAll("input[name='net']:checked")].map((el) => el.value),
-      tsVersion: $("tsVersion").value.trim(),
-      tsExitNode: $("tsExitNode").value.trim(),
-      tsTags: splitCSV($("tsTags").value),
-      tsAuthKey: $("tsAuthKey").value,
-      macvlanMac: $("macvlanMac").value.trim(),
-      macvlanVlan: Number.parseInt($("macvlanVlan").value, 10) || 0,
-      macvlanParent: $("macvlanParent").value.trim(),
+      modes,
+      tsVersion: hasTailscale ? $("tsVersion").value.trim() : "",
+      tsExitNode: hasTailscale ? $("tsExitNode").value.trim() : "",
+      tsTags: hasTailscale ? splitCSV($("tsTags").value) : [],
+      tsAuthKey: hasTailscale ? $("tsAuthKey").value : "",
+      macvlanMac: hasLAN ? $("macvlanMac").value.trim() : "",
+      macvlanVlan: hasLAN ? Number.parseInt($("macvlanVlan").value, 10) || 0 : 0,
+      macvlanParent: hasLAN ? $("macvlanParent").value.trim() : "",
       publish: splitCSV($("publish").value),
       restart,
     },
@@ -110,6 +114,10 @@ function buildDraft() {
       events: splitCSV($("snapshotEvents").value),
     },
   };
+}
+
+function selectedNetworkModes() {
+  return [...document.querySelectorAll("input[name='net']:checked")].map((el) => el.value);
 }
 
 function snapshotRequiredValue() {
@@ -155,6 +163,12 @@ function setStatus(message, tone = "") {
   else delete $("formStatus").dataset.tone;
 }
 
+const networkModeLabels = {
+  svc: "Service",
+  ts: "Tailscale",
+  lan: "LAN",
+};
+
 function renderNetworkModes(modes) {
   const rows = modes.map((mode) => {
     const label = document.createElement("label");
@@ -164,11 +178,23 @@ function renderNetworkModes(modes) {
     input.name = "net";
     input.value = mode;
     const span = document.createElement("span");
-    span.textContent = mode;
+    span.textContent = networkModeLabels[mode] || mode;
     label.append(input, span);
     return label;
   });
   $("networkModes").replaceChildren(...rows);
+}
+
+function syncNetworkUI() {
+  const modes = selectedNetworkModes();
+  $("hostDefault").checked = modes.length === 0;
+  $("tsOptions").hidden = !modes.includes("ts");
+  $("lanOptions").hidden = !modes.includes("lan");
+}
+
+function updateServiceRootPlaceholder() {
+  const service = $("service").value.trim() || "<service>";
+  $("serviceRoot").placeholder = $("zfs").checked ? `tank/apps/${service}` : `/root/data/services/${service}`;
 }
 
 function renderSnapshotModes(modes) {
@@ -234,8 +260,9 @@ async function loadFiles(dir) {
         loadFiles(entry.path);
         return;
       }
-      if (entry.likelyEnv) $("envFile").value = entry.path;
+      if (state.activePicker === "envFile") $("envFile").value = entry.path;
       else $("payload").value = entry.path;
+      hidePicker();
       update();
     });
     return button;
@@ -248,6 +275,22 @@ async function loadFiles(dir) {
     rows.push(empty);
   }
   $("fileBrowser").replaceChildren(...rows);
+}
+
+function showPicker(field) {
+  state.activePicker = field;
+  const input = $(field);
+  const picker = $("filePicker");
+  const rect = input.getBoundingClientRect();
+  picker.style.left = `${Math.max(12, rect.left)}px`;
+  picker.style.top = `${Math.min(window.innerHeight - 340, rect.bottom + 6)}px`;
+  picker.style.width = `${Math.max(360, rect.width)}px`;
+  picker.hidden = false;
+}
+
+function hidePicker() {
+  state.activePicker = "";
+  $("filePicker").hidden = true;
 }
 
 async function bootstrap() {
@@ -271,6 +314,8 @@ async function bootstrap() {
   renderSnapshotModes(state.bootstrap.options?.snapshotModes || ["inherit", "on", "off"]);
   renderSnapshotRequiredOptions();
   await loadFiles(".");
+  syncNetworkUI();
+  updateServiceRootPlaceholder();
   $("service").focus();
   if ($("service").value) $("payload").focus();
   update();
@@ -278,6 +323,9 @@ async function bootstrap() {
 
 function update() {
   if (state.phase !== "editing") return;
+  syncNetworkUI();
+  updateServiceRootPlaceholder();
+  clearValidationErrors();
   const draft = buildDraft();
   updatePreview(draft);
   $("deployButton").disabled = true;
@@ -289,6 +337,44 @@ function firstValidationMessage(validation) {
   if (validation?.errors?.length) return validation.errors[0].message;
   if (validation?.warnings?.length) return validation.warnings[0].message;
   return "";
+}
+
+const validationFieldIDs = {
+  service: "service",
+  host: "host",
+  payload: "payload",
+  envFile: "envFile",
+  serviceRoot: "serviceRoot",
+  "network.modes": "hostDefault",
+  "snapshots.mode": "snapshots",
+  "snapshots.keepLast": "snapshotKeepLast",
+  "snapshots.maxAge": "snapshotMaxAge",
+  "snapshots.required": "snapshotRequired",
+  "snapshots.events": "snapshotEvents",
+};
+
+function clearValidationErrors() {
+  document.querySelectorAll("[data-invalid='true']").forEach((el) => {
+    delete el.dataset.invalid;
+    el.removeAttribute("aria-invalid");
+  });
+  document.querySelectorAll(".field-error").forEach((el) => {
+    el.textContent = "";
+  });
+}
+
+function applyValidationErrors(validation) {
+  clearValidationErrors();
+  for (const err of validation?.errors || []) {
+    const id = validationFieldIDs[err.field];
+    if (!id) continue;
+    const input = $(id);
+    if (!input) continue;
+    input.dataset.invalid = "true";
+    input.setAttribute("aria-invalid", "true");
+    const message = $(`${id}Error`);
+    if (message) message.textContent = err.message;
+  }
 }
 
 function redactValidationDraft(draft) {
@@ -310,20 +396,21 @@ async function validate(draft) {
     if (state.phase !== "editing") return;
     if (!res.ok) {
       setStatus(await res.text(), "error");
-      $("hostStatus").textContent = "Validation failed";
+      $("hostStatus").textContent = "";
       return;
     }
     const data = await res.json();
     const ok = Boolean(data.validation?.ok);
     $("deployButton").disabled = !ok;
-    $("hostStatus").textContent = ok ? "Host ready" : "Needs attention";
+    $("hostStatus").textContent = ok ? "Ready" : "";
+    applyValidationErrors(data.validation);
     if (ok) setStatus("Ready", "ready");
     else setStatus(firstValidationMessage(data.validation) || "Invalid", "error");
   } catch (err) {
     if (seq !== state.validateSeq) return;
     if (state.phase !== "editing") return;
     setStatus(String(err), "error");
-    $("hostStatus").textContent = "Validation failed";
+    $("hostStatus").textContent = "";
   }
 }
 
@@ -350,6 +437,7 @@ async function deploy(event) {
     const contentType = res.headers.get("Content-Type") || "";
     if (contentType.includes("application/json")) {
       const data = await res.json();
+      applyValidationErrors(data.validation);
       setStatus(firstValidationMessage(data.validation) || "Deploy failed", "error");
     } else {
       setStatus(await res.text(), "error");
@@ -386,6 +474,21 @@ document.addEventListener("input", (event) => {
 });
 $("deployForm").addEventListener("submit", deploy);
 $("upButton").addEventListener("click", () => loadFiles(parentDir(state.currentDir)));
+document.querySelectorAll("[data-picker-target]").forEach((el) => {
+  el.addEventListener("focus", () => showPicker(el.dataset.pickerTarget));
+  el.addEventListener("click", () => showPicker(el.dataset.pickerTarget));
+});
+document.addEventListener("click", (event) => {
+  if (event.target.closest("#filePicker") || event.target.closest("[data-picker-target]")) return;
+  hidePicker();
+});
+document.addEventListener("focusin", (event) => {
+  if (event.target.closest("#filePicker") || event.target.closest("[data-picker-target]")) return;
+  hidePicker();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") hidePicker();
+});
 document.addEventListener("mouseover", (event) => {
   const target = event.target.closest(".help");
   if (target) showTooltip(target);
