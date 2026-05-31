@@ -47,7 +47,6 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`id="terminalSheet"`,
 		`id="terminalOutput"`,
 		`id="terminalStatus"`,
-		`id="terminalCopy"`,
 		`id="terminalExpand"`,
 		`id="terminalSubtitle"`,
 		`id="payloadPicker"`,
@@ -83,6 +82,8 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"Needs attention",
+		`id="terminalCopy"`,
+		"terminalCopy",
 		`<div class="file-browser" id="fileBrowser"`,
 	} {
 		if strings.Contains(string(index)+string(app), forbidden) {
@@ -102,6 +103,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"recoverDeployStream",
 		"collapseTerminal",
 		"createTerminalRenderer",
+		"handleCSI",
 		"showHostPicker",
 		"hideHostPicker",
 		"updateServiceRootPlaceholder",

@@ -4,6 +4,7 @@
 /gomod2nix-template
 /Makefile
 /result
+/test-results
 /.tmp
 /.gomu_history.json
 /mutation-report.json
