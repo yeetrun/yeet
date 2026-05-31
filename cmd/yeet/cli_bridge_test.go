@@ -277,6 +277,14 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 			wantBridged: "service set --service-root=tank/apps/svc-a --zfs",
 			wantOK:      true,
 		},
+		{
+			name:        "service set publish shorthand",
+			args:        []string{"service", "set", "svc-a", "-p", "80:80"},
+			wantService: "svc-a",
+			wantHost:    "",
+			wantBridged: "service set -p 80:80",
+			wantOK:      true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

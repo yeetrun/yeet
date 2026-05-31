@@ -53,7 +53,10 @@ type runWebOptionHints struct {
 var openBrowserFn = openBrowser
 var runWebFn = runWeb
 
-const runWebShutdownTimeout = 2 * time.Second
+const (
+	runWebCompletionGracePeriod   = 500 * time.Millisecond
+	runWebCompletionShutdownLimit = 250 * time.Millisecond
+)
 
 func extractRunWebFlag(args []string) ([]string, bool, error) {
 	out := make([]string, 0, len(args))
@@ -283,12 +286,12 @@ func openRunWebBrowser(url string, errOut io.Writer) {
 func waitRunWebServer(ctx context.Context, cancelServer context.CancelFunc, server *http.Server, errCh <-chan error, done <-chan struct{}, out io.Writer) error {
 	select {
 	case <-done:
-		cancelServer()
-		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), runWebShutdownTimeout)
-		if err := server.Shutdown(shutdownCtx); err != nil {
+		if err := waitRunWebCompletionGrace(ctx); err != nil {
+			cancelServer()
 			_ = server.Close()
+			return err
 		}
-		cancelShutdown()
+		shutdownRunWebServerAfterCompletion(cancelServer, server)
 		_, _ = fmt.Fprintln(out, "Deployment finished. Close the browser tab and return here.")
 		return nil
 	case <-ctx.Done():
@@ -300,5 +303,26 @@ func waitRunWebServer(ctx context.Context, cancelServer context.CancelFunc, serv
 			return nil
 		}
 		return err
+	}
+}
+
+func waitRunWebCompletionGrace(ctx context.Context) error {
+	timer := time.NewTimer(runWebCompletionGracePeriod)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func shutdownRunWebServerAfterCompletion(cancelServer context.CancelFunc, server *http.Server) {
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), runWebCompletionShutdownLimit)
+	err := server.Shutdown(shutdownCtx)
+	cancelShutdown()
+	cancelServer()
+	if err != nil {
+		_ = server.Close()
 	}
 }
