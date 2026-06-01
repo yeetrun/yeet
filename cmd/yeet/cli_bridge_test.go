@@ -541,6 +541,25 @@ func TestBridgeServiceArgsEnvSetGroup(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsVMConsoleGroup(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"vm", "console", "devbox@host-a"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to recognize vm console group command")
+	}
+	if service != "devbox" {
+		t.Fatalf("expected service devbox, got %q", service)
+	}
+	if host != "host-a" {
+		t.Fatalf("expected host host-a, got %q", host)
+	}
+	if got := strings.Join(bridged, " "); got != "vm console" {
+		t.Fatalf("unexpected bridged args: %s", got)
+	}
+}
+
 func TestBridgeServiceArgsLogsServiceBeforeFollowFlag(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

@@ -333,17 +333,18 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
 	rw := readWriter{Reader: pr, Writer: writer}
 
 	execer := &ttyExecer{
-		ctx:         ctx,
-		s:           s,
-		args:        req.Args,
-		sn:          req.Service,
-		hostLabel:   req.Host,
-		user:        req.User,
-		payloadName: req.PayloadName,
-		progress:    req.Progress,
-		rawRW:       rw,
-		rawCloser:   wsCloser{conn: conn},
-		isPty:       req.TTY,
+		ctx:                ctx,
+		s:                  s,
+		args:               req.Args,
+		sn:                 req.Service,
+		hostLabel:          req.Host,
+		user:               req.User,
+		payloadName:        req.PayloadName,
+		vmSSHAuthorizedKey: req.VMSSHKey,
+		progress:           req.Progress,
+		rawRW:              rw,
+		rawCloser:          wsCloser{conn: conn},
+		isPty:              req.TTY,
 		ptyReq: PtySpec{
 			Term: req.Term,
 			Window: PtyWindow{

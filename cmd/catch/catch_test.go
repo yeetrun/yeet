@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -127,6 +128,40 @@ func TestHandleLocalCommandVersionAndDefault(t *testing.T) {
 	}
 	if strings.TrimSpace(out.String()) == "" {
 		t.Fatalf("version command did not write output")
+	}
+}
+
+func TestHandleSpecialCommandVMRun(t *testing.T) {
+	oldRun := runVMConsoleProxy
+	defer func() { runVMConsoleProxy = oldRun }()
+
+	var got catch.VMConsoleProxyConfig
+	runVMConsoleProxy = func(_ context.Context, cfg catch.VMConsoleProxyConfig) error {
+		got = cfg
+		return nil
+	}
+
+	handled, err := handleSpecialCommand([]string{
+		"vm-run",
+		"--firecracker", "/srv/firecracker",
+		"--api-sock", "/run/fc.sock",
+		"--config-file", "/run/fc.json",
+		"--console-sock", "/run/serial.sock",
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("handleSpecialCommand: %v", err)
+	}
+	if !handled {
+		t.Fatal("vm-run was not handled")
+	}
+	want := catch.VMConsoleProxyConfig{
+		Firecracker:   "/srv/firecracker",
+		APISocket:     "/run/fc.sock",
+		ConfigFile:    "/run/fc.json",
+		ConsoleSocket: "/run/serial.sock",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("config = %#v, want %#v", got, want)
 	}
 }
 

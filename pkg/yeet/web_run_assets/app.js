@@ -87,12 +87,20 @@ function buildDraft() {
   const modes = selectedNetworkModes();
   const hasTailscale = modes.includes("ts");
   const hasLAN = modes.includes("lan");
+  const payload = $("payload").value.trim();
+  const vmPayload = isVMPayload(payload);
   return {
     service: $("service").value.trim(),
     host: $("host").value.trim(),
-    payload: $("payload").value.trim(),
+    payload,
+    payloadKind: vmPayload ? "vm" : "",
     envFile: $("envFile").value.trim(),
-    payloadArgs: splitArgs($("payloadArgs").value),
+    payloadArgs: vmPayload ? [] : splitArgs($("payloadArgs").value),
+    vm: vmPayload ? {
+      cpus: Number.parseInt($("vmCPUs").value, 10) || 0,
+      memory: $("vmMemory").value.trim(),
+      disk: $("vmDisk").value.trim(),
+    } : {},
     network: {
       modes,
       tsVersion: hasTailscale ? $("tsVersion").value.trim() : "",
@@ -117,6 +125,10 @@ function buildDraft() {
       events: splitCSV($("snapshotEvents").value),
     },
   };
+}
+
+function isVMPayload(payload) {
+  return payload.trim() === "vm://ubuntu/26.04";
 }
 
 function selectedNetworkModes() {
@@ -154,6 +166,9 @@ function updatePreview(draft) {
   for (const port of draft.network.publish) parts.push(`--publish=${shell(port)}`);
   if (draft.storage.serviceRoot) parts.push(`--service-root=${shell(draft.storage.serviceRoot)}`);
   if (draft.storage.zfs) parts.push("--zfs");
+  if (draft.vm?.cpus) parts.push(`--cpus=${draft.vm.cpus}`);
+  if (draft.vm?.memory) parts.push(`--memory=${shell(draft.vm.memory)}`);
+  if (draft.vm?.disk) parts.push(`--disk=${shell(draft.vm.disk)}`);
   if (draft.snapshots.mode) parts.push(`--snapshots=${shell(draft.snapshots.mode)}`);
   if (draft.snapshots.keepLast) parts.push(`--snapshot-keep-last=${draft.snapshots.keepLast}`);
   if (draft.snapshots.maxAge) parts.push(`--snapshot-max-age=${shell(draft.snapshots.maxAge)}`);
@@ -234,10 +249,20 @@ function hideHostPicker() {
 }
 
 function syncNetworkUI() {
+  const vmPayload = isVMPayload($("payload").value);
+  document.querySelectorAll("input[name='net']").forEach((input) => {
+    if (input.value === "ts") {
+      input.disabled = vmPayload;
+      if (vmPayload) input.checked = false;
+    }
+  });
   const modes = selectedNetworkModes();
+  $("hostDefault").disabled = true;
   $("hostDefault").checked = modes.length === 0;
   $("tsOptions").hidden = !modes.includes("ts");
   $("lanOptions").hidden = !modes.includes("lan");
+  $("vmOptions").hidden = !vmPayload;
+  $("payloadArgsBlock").hidden = vmPayload;
 }
 
 function updateServiceRootPlaceholder() {
@@ -706,6 +731,9 @@ const validationFieldIDs = {
   envFile: "envFile",
   serviceRoot: "serviceRoot",
   "network.modes": "hostDefault",
+  "vm.cpus": "vmCPUs",
+  "vm.memory": "vmMemory",
+  "vm.disk": "vmDisk",
   "snapshots.mode": "snapshots",
   "snapshots.keepLast": "snapshotKeepLast",
   "snapshots.maxAge": "snapshotMaxAge",

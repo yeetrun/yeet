@@ -50,6 +50,8 @@ var (
 	ipv6Loopback = netip.MustParseAddr("::1")
 )
 
+var runVMConsoleProxy = catch.RunVMConsoleProxy
+
 // initTSNet initializes and returns a tsnet.Server if tsnetHost is set.
 func initTSNet(dataDir string) *tsnet.Server {
 	if *tsnetHost == "" {
@@ -150,9 +152,28 @@ func handleSpecialCommand(args []string, out io.Writer) (bool, error) {
 		return true, writeLine(out, "yes")
 	case "netns-firewall":
 		return true, handleNetNSFirewallCommand(args[1:])
+	case "vm-run":
+		return true, handleVMRunCommand(args[1:])
 	default:
 		return false, nil
 	}
+}
+
+func handleVMRunCommand(args []string) error {
+	fs := flag.NewFlagSet("vm-run", flag.ContinueOnError)
+	firecracker := fs.String("firecracker", "", "firecracker binary path")
+	apiSock := fs.String("api-sock", "", "firecracker API socket path")
+	configFile := fs.String("config-file", "", "firecracker config file path")
+	consoleSock := fs.String("console-sock", "", "VM serial console socket path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return runVMConsoleProxy(context.Background(), catch.VMConsoleProxyConfig{
+		Firecracker:   *firecracker,
+		APISocket:     *apiSock,
+		ConfigFile:    *configFile,
+		ConsoleSocket: *consoleSock,
+	})
 }
 
 type catchPaths struct {

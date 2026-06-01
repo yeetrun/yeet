@@ -1,5 +1,5 @@
 # Yeet CLI --help-llm Outputs
-Generated on 2026-05-30 from this repo using:
+Generated on 2026-05-31 from this repo using:
 - `go run ./cmd/yeet --help-llm`
 - `go run ./cmd/yeet <command> --help-llm`
 - `go run ./cmd/yeet <group> --help-llm`
@@ -198,7 +198,7 @@ Get detailed help: `yeet rollback --help-llm`
 
 ### `run`
 
-Install/update from a payload (binary, compose, image, Dockerfile)
+Install/update from a payload (binary, compose, image, Dockerfile, VM)
 
 **Examples**:
 
@@ -220,6 +220,10 @@ yeet run <svc> ./bin/<svc> -- --app-flag value
 
 ```
 yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
+```
+
+```
+yeet run <svc> vm://ubuntu/26.04 --net=svc
 ```
 
 ```
@@ -411,6 +415,16 @@ Manage catch ZFS snapshot defaults
 
 Get detailed help: `yeet snapshots --help-llm`
 
+### `vm`
+
+Manage VM-specific commands
+
+**Commands**:
+
+- `vm console`: Stream VM serial console output
+
+Get detailed help: `yeet vm --help-llm`
+
 ## Examples
 
 ```
@@ -442,7 +456,7 @@ yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
 ````
 # yeet run
 
-Install/update from a payload (binary, compose, image, Dockerfile)
+Install/update from a payload (binary, compose, image, Dockerfile, VM)
 
 ## Usage
 
@@ -510,6 +524,10 @@ yeet run --publish-reset -p 443:443 <svc> nginx:latest
 
 ```
 yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
+```
+
+```
+yeet run <svc> vm://ubuntu/26.04 --net=svc
 ```
 
 ```
@@ -1129,8 +1147,37 @@ Remove a service
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] remove [OPTIONS]
+yeet [GLOBAL_OPTIONS] remove <SERVICE> [OPTIONS]
 ```
+
+## Arguments
+
+### `SERVICE`
+
+Service name
+
+- **Type**: `cli.ServiceName`
+- **Required**: true
+
+## Options
+
+### `--yes` (short: `-y`)
+
+Skip the removal prompt
+
+- **Type**: `bool`
+
+### `--clean-config`
+
+Delete the matching yeet.toml entry without prompting
+
+- **Type**: `bool`
+
+### `--clean-data`
+
+Delete service data instead of preserving data/
+
+- **Type**: `bool`
 
 ## Global Options
 
@@ -2705,6 +2752,110 @@ yeet snapshots defaults set --enabled=false
 ```
 yeet snapshots defaults set --enabled=true --keep-last=5 --max-age=7d
 ```
+
+
+````
+
+## Group: vm
+
+````
+# yeet - vm
+
+Manage VM-specific commands
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] vm COMMAND [OPTIONS] [ARGS...]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Commands
+
+### `vm console`
+
+Stream VM serial console output
+
+Get detailed help: `yeet vm console --help-llm`
+
+
+````
+
+## Group Command: vm console
+
+````
+# yeet vm console
+
+Stream VM serial console output
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] vm console <svc>
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
 
 
 ````

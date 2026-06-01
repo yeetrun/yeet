@@ -102,6 +102,7 @@ func (src *Service) Clone() *Service {
 		dst.Macvlan = ptr.To(*src.Macvlan)
 	}
 	dst.TSNet = src.TSNet.Clone()
+	dst.VM = src.VM.Clone()
 	return dst
 }
 
@@ -119,6 +120,7 @@ var _ServiceCloneNeedsRegeneration = Service(struct {
 	SvcNetwork       *SvcNetwork
 	Macvlan          *MacvlanNetwork
 	TSNet            *TailscaleNetwork
+	VM               *VMConfig
 }{})
 
 // Clone makes a deep copy of SnapshotPolicy.
@@ -302,4 +304,142 @@ func (src *EndpointPort) Clone() *EndpointPort {
 var _EndpointPortCloneNeedsRegeneration = EndpointPort(struct {
 	EndpointID string
 	Port       uint16
+}{})
+
+// Clone makes a deep copy of VMConfig.
+// The result aliases no memory with the original.
+func (src *VMConfig) Clone() *VMConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMConfig)
+	*dst = *src
+	dst.Networks = append(src.Networks[:0:0], src.Networks...)
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMConfigCloneNeedsRegeneration = VMConfig(struct {
+	Runtime     string
+	Image       VMImageConfig
+	CPUs        int
+	MemoryBytes int64
+	Disk        VMDiskConfig
+	Networks    []VMNetworkConfig
+	SSH         VMSSHConfig
+	Console     VMConsoleConfig
+	Sockets     VMSocketConfig
+	PIDFile     string
+	SetupState  string
+}{})
+
+// Clone makes a deep copy of VMImageConfig.
+// The result aliases no memory with the original.
+func (src *VMImageConfig) Clone() *VMImageConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMImageConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMImageConfigCloneNeedsRegeneration = VMImageConfig(struct {
+	Payload string
+	Version string
+	Digest  string
+	Kernel  string
+	RootFS  string
+}{})
+
+// Clone makes a deep copy of VMDiskConfig.
+// The result aliases no memory with the original.
+func (src *VMDiskConfig) Clone() *VMDiskConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMDiskConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMDiskConfigCloneNeedsRegeneration = VMDiskConfig(struct {
+	Backend string
+	Bytes   int64
+	Path    string
+}{})
+
+// Clone makes a deep copy of VMNetworkConfig.
+// The result aliases no memory with the original.
+func (src *VMNetworkConfig) Clone() *VMNetworkConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMNetworkConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMNetworkConfigCloneNeedsRegeneration = VMNetworkConfig(struct {
+	Mode      string
+	Interface string
+	Tap       string
+	MAC       string
+	IP        netip.Addr
+	Parent    string
+	VLAN      int
+}{})
+
+// Clone makes a deep copy of VMSSHConfig.
+// The result aliases no memory with the original.
+func (src *VMSSHConfig) Clone() *VMSSHConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMSSHConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMSSHConfigCloneNeedsRegeneration = VMSSHConfig(struct {
+	User       string
+	KeyRef     string
+	KnownHosts string
+}{})
+
+// Clone makes a deep copy of VMConsoleConfig.
+// The result aliases no memory with the original.
+func (src *VMConsoleConfig) Clone() *VMConsoleConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMConsoleConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMConsoleConfigCloneNeedsRegeneration = VMConsoleConfig(struct {
+	SocketPath string
+	LogPath    string
+}{})
+
+// Clone makes a deep copy of VMSocketConfig.
+// The result aliases no memory with the original.
+func (src *VMSocketConfig) Clone() *VMSocketConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMSocketConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMSocketConfigCloneNeedsRegeneration = VMSocketConfig(struct {
+	APISocketPath string
 }{})

@@ -17,12 +17,17 @@ if [[ "${1:-}" == "--check" ]]; then
 fi
 
 # Apply/check BSD headers across tracked source files.
+paths=(cmd pkg tools)
+if [[ -d example ]]; then
+  paths+=(example)
+fi
+
 set +e
 go run github.com/google/addlicense $check_mode \
   -l bsd \
   -c "AUTHORS" \
   -y 2025 \
-  cmd pkg tools example
+  "${paths[@]}"
 status=$?
 set -e
 
@@ -32,7 +37,7 @@ if [[ $status -ne 0 && "$auto_fix" == "true" ]]; then
     -l bsd \
     -c "AUTHORS" \
     -y 2025 \
-    cmd pkg tools example
+    "${paths[@]}"
   echo "License headers added. Please stage the changes and retry the commit."
   exit 1
 fi

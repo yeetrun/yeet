@@ -1016,6 +1016,7 @@ var tryRunDockerFn = tryRunDockerContext
 var buildDockerImageForRemoteFn = buildDockerImageForRemote
 var buildDockerImageForRemoteWithOutputFn = buildDockerImageForRemoteWithOutput
 var tryRunRemoteImageFn = tryRunRemoteImageContext
+var tryRunVMPayloadWithOutputFn = tryRunVMPayloadContextWithOutput
 var tryRunDockerfileWithOutputFn = tryRunDockerfileContextWithOutput
 var tryRunFileWithOutputFn = tryRunFileContextWithOutput
 var tryRunRemoteImageWithOutputFn = tryRunRemoteImageContextWithOutput
@@ -1173,27 +1174,28 @@ func runRun(payload string, args []string) error {
 }
 
 func runRunContext(ctx context.Context, payload string, args []string) error {
-	if ok, err := tryRunDockerfileContext(ctx, payload, args); err != nil {
-		return err
-	} else if ok {
-		return nil
-	}
-	if ok, err := tryRunFileContext(ctx, payload, args); err != nil {
-		return err
-	} else if ok {
-		return nil
-	}
-	if ok, err := tryRunRemoteImageFn(ctx, payload, args); err != nil {
-		return err
-	} else if ok {
-		return nil
-	}
-	if ok, err := tryRunDockerFn(ctx, payload, args); err != nil {
-		return err
-	} else if ok {
-		return nil
+	for _, attempt := range runContextAttempts() {
+		ok, err := attempt(ctx, payload, args)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
 	}
 	return fmt.Errorf("unknown payload: %s", payload)
+}
+
+type runContextAttempt func(context.Context, string, []string) (bool, error)
+
+func runContextAttempts() []runContextAttempt {
+	return []runContextAttempt{
+		tryRunVMPayloadContext,
+		tryRunDockerfileContext,
+		tryRunFileContext,
+		tryRunRemoteImageFn,
+		tryRunDockerFn,
+	}
 }
 
 func runRunContextWithOutput(ctx context.Context, stdout io.Writer, payload string, args []string) error {
@@ -1204,6 +1206,7 @@ func runRunContextWithOutput(ctx context.Context, stdout io.Writer, payload stri
 		stdout = io.Discard
 	}
 	attempts := []runContextWithOutputAttempt{
+		tryRunVMPayloadWithOutputFn,
 		tryRunDockerfileWithOutputFn,
 		tryRunFileWithOutputFn,
 		tryRunRemoteImageWithOutputFn,
@@ -1222,6 +1225,29 @@ func runRunContextWithOutput(ctx context.Context, stdout io.Writer, payload stri
 }
 
 type runContextWithOutputAttempt func(context.Context, io.Writer, string, []string) (bool, error)
+
+func tryRunVMPayloadContext(ctx context.Context, payload string, args []string) (bool, error) {
+	return tryRunVMPayloadContextWithOutput(ctx, os.Stdout, payload, args)
+}
+
+func tryRunVMPayloadContextWithOutput(ctx context.Context, stdout io.Writer, payload string, args []string) (bool, error) {
+	if !isVMPayload(payload) {
+		return false, nil
+	}
+	flagArgs, payloadArgs := splitRunArgsForParsing(args)
+	if len(payloadArgs) != 0 {
+		return true, fmt.Errorf("VM payloads do not accept payload args")
+	}
+	remoteArgs := append([]string{"run"}, flagArgs...)
+	remoteArgs = append(remoteArgs, payload)
+	if isStdoutWriter(stdout) {
+		return true, execRemoteDirectFn(ctx, getService(), remoteArgs, nil, true)
+	}
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	return true, execRemoteToFn(ctx, getService(), remoteArgs, nil, true, stdout)
+}
 
 func tryRunDockerfile(path string, args []string) (ok bool, _ error) {
 	return tryRunDockerfileContext(context.Background(), path, args)
@@ -2009,7 +2035,7 @@ func runFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string) er
 }
 
 func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride string, forceDeploy bool) error {
-	stored, err := storedServiceConfig(cfgLoc, hostOverride, "run", serviceTypeRun)
+	stored, err := storedRunServiceConfig(cfgLoc, hostOverride)
 	if err != nil {
 		return err
 	}
@@ -2030,7 +2056,25 @@ func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride s
 	if strings.TrimSpace(stored.Entry.PayloadKind) == "local-image" {
 		return runWithChangesToWithRunner(os.Stdout, payload, runArgs, envFile, stored.Entry, forceDeploy, runLocalImagePayload, true)
 	}
+	if strings.TrimSpace(stored.Entry.Type) == serviceTypeVM {
+		runner := func(ctx context.Context, payload string, args []string) error {
+			return runVMPayloadContextWithOutput(ctx, os.Stdout, payload, args)
+		}
+		return runWithChangesToWithContextRunner(context.Background(), os.Stdout, payload, runArgs, envFile, stored.Entry, forceDeploy, runner, true)
+	}
 	return runWithChanges(payload, runArgs, envFile, stored.Entry, forceDeploy)
+}
+
+func storedRunServiceConfig(cfgLoc *projectConfigLocation, hostOverride string) (storedService, error) {
+	stored, err := storedServiceConfigWithoutTypeCheck(cfgLoc, hostOverride, "run")
+	if err != nil {
+		return storedService{}, err
+	}
+	gotType := strings.TrimSpace(stored.Entry.Type)
+	if gotType == "" || gotType == serviceTypeRun || gotType == serviceTypeVM {
+		return stored, nil
+	}
+	return storedService{}, validateStoredServiceType(stored.Service, stored.Host, gotType, "run", serviceTypeRun)
 }
 
 func shouldRunFromConfigWithForce(args []string) (bool, error) {
@@ -2067,6 +2111,17 @@ type storedService struct {
 }
 
 func storedServiceConfig(cfgLoc *projectConfigLocation, hostOverride, commandName, wantType string) (storedService, error) {
+	stored, err := storedServiceConfigWithoutTypeCheck(cfgLoc, hostOverride, commandName)
+	if err != nil {
+		return storedService{}, err
+	}
+	if err := validateStoredServiceType(stored.Service, stored.Host, stored.Entry.Type, commandName, wantType); err != nil {
+		return storedService{}, err
+	}
+	return stored, nil
+}
+
+func storedServiceConfigWithoutTypeCheck(cfgLoc *projectConfigLocation, hostOverride, commandName string) (storedService, error) {
 	if serviceOverride == "" {
 		return storedService{}, fmt.Errorf("%s requires a service name", commandName)
 	}
@@ -2081,9 +2136,6 @@ func storedServiceConfig(cfgLoc *projectConfigLocation, hostOverride, commandNam
 	entry, ok := cfgLoc.Config.ServiceEntry(service, host)
 	if !ok {
 		return storedService{}, fmt.Errorf("no stored %s config for %s@%s", commandName, service, host)
-	}
-	if err := validateStoredServiceType(service, host, entry.Type, commandName, wantType); err != nil {
-		return storedService{}, err
 	}
 	return storedService{Service: service, Host: host, Entry: entry}, nil
 }
@@ -2148,11 +2200,16 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 		return err
 	}
 	payloadKind = strings.TrimSpace(payloadKind)
+	entryType := ""
+	if payloadKind == serviceTypeVM || isVMPayload(payload) {
+		entryType = serviceTypeVM
+		payloadKind = serviceTypeVM
+	}
 	payloadRel := relativePayloadPathForKind(loc.Dir, payload, payloadKind)
 	entry := ServiceEntry{
 		Name:           serviceOverride,
 		Host:           host,
-		Type:           "",
+		Type:           entryType,
 		Payload:        payloadRel,
 		PayloadKind:    payloadKind,
 		ServiceRoot:    strings.TrimSpace(serviceRoot),

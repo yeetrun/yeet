@@ -170,26 +170,38 @@ func inspectPayloadWithKind(payload, payloadKind, configDir string, hostInfo ser
 		info.ResolveErr = "no payload configured"
 		return info
 	}
-	if strings.TrimSpace(payloadKind) == "local-image" {
+	if classifyFilelessPayload(info, payload, payloadKind) {
+		return info
+	}
+	return inspectLocalPayload(info, payload, configDir, hostInfo, hostInfoErr)
+}
+
+func classifyFilelessPayload(info *clientPayloadInfo, payload, payloadKind string) bool {
+	switch {
+	case strings.TrimSpace(payloadKind) == "local-image":
 		info.Kind = "local image"
 		info.ImageRef = true
-		return info
-	}
-	if looksLikeImageRef(payload) {
+	case strings.TrimSpace(payloadKind) == serviceTypeVM || isVMPayload(payload):
+		info.Kind = serviceTypeVM
+	case looksLikeImageRef(payload):
 		info.Kind = "image"
 		info.ImageRef = true
-		return info
+	default:
+		return false
 	}
-	resolved := resolvePayloadPath(configDir, payload)
-	info.Resolved = resolved
-	st, err := os.Stat(resolved)
+	return true
+}
+
+func inspectLocalPayload(info *clientPayloadInfo, payload, configDir string, hostInfo serverInfo, hostInfoErr error) *clientPayloadInfo {
+	info.Resolved = resolvePayloadPath(configDir, payload)
+	st, err := os.Stat(info.Resolved)
 	if err != nil {
 		info.ResolveErr = err.Error()
 		return info
 	}
 	info.Exists = true
 	info.SizeBytes = st.Size()
-	if filepath.Base(resolved) == "Dockerfile" {
+	if filepath.Base(info.Resolved) == "Dockerfile" {
 		info.Kind = "dockerfile"
 		return info
 	}
@@ -197,7 +209,7 @@ func inspectPayloadWithKind(payload, payloadKind, configDir string, hostInfo ser
 	if hostInfoErr != nil || goos == "" || goarch == "" {
 		goos, goarch = runtime.GOOS, runtime.GOARCH
 	}
-	ft, err := ftdetect.DetectFile(resolved, goos, goarch)
+	ft, err := ftdetect.DetectFile(info.Resolved, goos, goarch)
 	if err != nil {
 		info.DetectErr = err.Error()
 		info.Kind = "unknown"
@@ -240,6 +252,7 @@ func renderInfoPlain(w io.Writer, service, host string, hostInfoErr error, hostI
 	sections := []infoSection{
 		renderHostSection(host, hostInfoErr, hostInfo),
 		renderServiceSection(service, host, client, server),
+		renderVMSection(server),
 		renderClientSection(client),
 		renderServerSection(server),
 		renderNetworkSection(server),
@@ -301,6 +314,118 @@ func renderServiceSection(service, host string, client clientInfo, server catchr
 	}
 	rows = append(rows, infoRow{Label: "Status", Value: status})
 	return infoSection{Title: "Service", Rows: rows}
+}
+
+func renderVMSection(server catchrpc.ServiceInfoResponse) infoSection {
+	if !server.Found || server.Info.VM == nil {
+		return infoSection{Title: "VM", Rows: nil}
+	}
+	vm := server.Info.VM
+	rows := vmInfoRows(vm)
+	return infoSection{Title: "VM", Rows: rows}
+}
+
+func vmInfoRows(vm *catchrpc.ServiceVM) []infoRow {
+	candidates := []infoRow{
+		{Label: "Runtime", Value: vm.Runtime},
+		{Label: "Image", Value: formatVMImage(vm)},
+		{Label: "CPU", Value: formatVMCPU(vm.CPUs)},
+		{Label: "Memory", Value: formatOptionalBytes(vm.MemoryBytes)},
+		{Label: "Disk", Value: formatVMDisk(vm)},
+		{Label: "Console", Value: formatOptionalVMConsole(vm.Console)},
+		{Label: "SSH", Value: formatVMSSH(vm.SSH)},
+		{Label: "Setup", Value: vm.SetupState},
+	}
+	rows := make([]infoRow, 0, len(candidates))
+	for _, row := range candidates {
+		if row.Value != "" {
+			rows = append(rows, row)
+		}
+	}
+	return rows
+}
+
+func formatVMCPU(cpus int) string {
+	if cpus == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d", cpus)
+}
+
+func formatOptionalBytes(bytes int64) string {
+	if bytes == 0 {
+		return ""
+	}
+	return formatBytes(bytes)
+}
+
+func formatOptionalVMConsole(console *catchrpc.ServiceVMConsole) string {
+	if console == nil {
+		return ""
+	}
+	return formatVMConsole(console)
+}
+
+func formatVMImage(vm *catchrpc.ServiceVM) string {
+	if vm == nil {
+		return ""
+	}
+	switch {
+	case vm.Image != "" && vm.ImageVersion != "":
+		return fmt.Sprintf("%s (%s)", vm.Image, vm.ImageVersion)
+	case vm.Image != "":
+		return vm.Image
+	case vm.ImageVersion != "":
+		return vm.ImageVersion
+	default:
+		return ""
+	}
+}
+
+func formatVMDisk(vm *catchrpc.ServiceVM) string {
+	if vm == nil {
+		return ""
+	}
+	parts := []string{}
+	if vm.DiskBytes != 0 {
+		parts = append(parts, formatBytes(vm.DiskBytes))
+	}
+	if vm.DiskBackend != "" {
+		parts = append(parts, vm.DiskBackend)
+	}
+	if vm.DiskPath != "" {
+		parts = append(parts, vm.DiskPath)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func formatVMConsole(console *catchrpc.ServiceVMConsole) string {
+	if console == nil {
+		return ""
+	}
+	if !console.Available {
+		return "unavailable"
+	}
+	if console.SocketPath != "" {
+		return "available (" + console.SocketPath + ")"
+	}
+	return "available"
+}
+
+func formatVMSSH(ssh *catchrpc.ServiceVMSSH) string {
+	if ssh == nil {
+		return ""
+	}
+	if ssh.User != "" && ssh.Host != "" {
+		return ssh.User + "@" + ssh.Host
+	}
+	if ssh.Host != "" {
+		return ssh.Host
+	}
+	if ssh.User != "" {
+		return ssh.User
+	}
+	return ""
 }
 
 func renderClientSection(client clientInfo) infoSection {
@@ -654,6 +779,8 @@ func formatServiceDataType(dt string) string {
 		return "typescript service"
 	case "python":
 		return "python service"
+	case "vm":
+		return "VM"
 	default:
 		return dt
 	}

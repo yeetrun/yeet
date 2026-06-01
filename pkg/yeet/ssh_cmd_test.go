@@ -260,6 +260,7 @@ func TestServiceDataDirRequiresPathInfo(t *testing.T) {
 
 func TestServiceShellCommandFromResponseNormalizesQualifiedService(t *testing.T) {
 	gotCommand, gotOptions, err := serviceShellCommandFromResponse(
+		"edge-b",
 		"api@edge-b",
 		serverInfo{RootDir: "/srv/yeet"},
 		catchrpc.ServiceInfoResponse{Found: true},
@@ -277,8 +278,220 @@ func TestServiceShellCommandFromResponseNormalizesQualifiedService(t *testing.T)
 	}
 }
 
+func TestServiceShellCommandForVMUsesGuestSSH(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	gotCommand, gotOptions, err := serviceShellCommandFromResponse(
+		"yeet-pve1",
+		"devbox",
+		serverInfo{InstallUser: "root"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+				},
+			},
+		},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("serviceShellCommandFromResponse: %v", err)
+	}
+	if len(gotCommand) != 0 {
+		t.Fatalf("command = %#v, want empty", gotCommand)
+	}
+	wantOptions := []string{
+		"-l", "ubuntu",
+		"-o", "HostName=192.168.100.12",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts"),
+		"-o", "HostKeyAlias=yeet-vm-devbox@yeet-pve1",
+		"-o", "ProxyCommand=ssh -W %h:%p root@yeet-pve1",
+	}
+	if !reflect.DeepEqual(gotOptions, wantOptions) {
+		t.Fatalf("options = %#v, want %#v", gotOptions, wantOptions)
+	}
+}
+
+func TestServiceShellCommandForVMLANNetworkDoesNotProxy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	gotCommand, gotOptions, err := serviceShellCommandFromResponse(
+		"yeet-pve1",
+		"devbox",
+		serverInfo{InstallUser: "root"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				VM: &catchrpc.ServiceVM{
+					SSH:      &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "10.0.4.80"},
+					Networks: []catchrpc.ServiceVMNetwork{{Mode: "lan", IP: "10.0.4.80"}},
+				},
+			},
+		},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("serviceShellCommandFromResponse: %v", err)
+	}
+	if len(gotCommand) != 0 {
+		t.Fatalf("command = %#v, want empty", gotCommand)
+	}
+	wantOptions := []string{
+		"-l", "ubuntu",
+		"-o", "HostName=10.0.4.80",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts"),
+	}
+	if !reflect.DeepEqual(gotOptions, wantOptions) {
+		t.Fatalf("options = %#v, want %#v", gotOptions, wantOptions)
+	}
+}
+
+func TestServiceShellCommandForVMKeepsUserStrictHostKeyChecking(t *testing.T) {
+	_, gotOptions, err := serviceShellCommandFromResponse(
+		"yeet-pve1",
+		"devbox",
+		serverInfo{InstallUser: "root"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+				},
+			},
+		},
+		nil,
+		[]string{"-o", "StrictHostKeyChecking=no"},
+	)
+	if err != nil {
+		t.Fatalf("serviceShellCommandFromResponse: %v", err)
+	}
+	if strings.Count(strings.Join(gotOptions, "\n"), "StrictHostKeyChecking") != 1 {
+		t.Fatalf("options = %#v, want one StrictHostKeyChecking option", gotOptions)
+	}
+}
+
+func TestServiceShellCommandForVMUsesYeetKnownHostsFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	_, gotOptions, err := serviceShellCommandFromResponse(
+		"yeet-pve1",
+		"devbox",
+		serverInfo{InstallUser: "root"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+				},
+			},
+		},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("serviceShellCommandFromResponse: %v", err)
+	}
+	want := "UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts")
+	if !sshOptionsContainValue(gotOptions, want) {
+		t.Fatalf("options = %#v, want %q", gotOptions, want)
+	}
+}
+
+func TestServiceShellCommandForVMKeepsUserKnownHostsFile(t *testing.T) {
+	_, gotOptions, err := serviceShellCommandFromResponse(
+		"yeet-pve1",
+		"devbox",
+		serverInfo{InstallUser: "root"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+				},
+			},
+		},
+		nil,
+		[]string{"-o", "UserKnownHostsFile=/tmp/custom-known-hosts"},
+	)
+	if err != nil {
+		t.Fatalf("serviceShellCommandFromResponse: %v", err)
+	}
+	if strings.Count(strings.Join(gotOptions, "\n"), "UserKnownHostsFile") != 1 {
+		t.Fatalf("options = %#v, want one UserKnownHostsFile option", gotOptions)
+	}
+	if !sshOptionsContainValue(gotOptions, "UserKnownHostsFile=/tmp/custom-known-hosts") {
+		t.Fatalf("options = %#v, want custom known_hosts file", gotOptions)
+	}
+}
+
+func TestEnsureVMSSHKnownHostsDirCreatesYeetDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	knownHosts := filepath.Join(home, ".yeet", "known_hosts")
+
+	if err := ensureVMSSHKnownHostsDir([]string{"-o", "UserKnownHostsFile=" + knownHosts}); err != nil {
+		t.Fatalf("ensureVMSSHKnownHostsDir: %v", err)
+	}
+	if st, err := os.Stat(filepath.Dir(knownHosts)); err != nil || !st.IsDir() {
+		t.Fatalf("known_hosts dir stat = %v, %v; want dir", st, err)
+	}
+}
+
+func TestServiceShellCommandForVMRequiresGuestHost(t *testing.T) {
+	_, _, err := serviceShellCommandFromResponse(
+		"yeet-pve1",
+		"devbox",
+		serverInfo{},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				VM:          &catchrpc.ServiceVM{SSH: &catchrpc.ServiceVMSSH{User: "ubuntu"}},
+			},
+		},
+		nil,
+		nil,
+	)
+	if err == nil {
+		t.Fatal("expected missing VM SSH host error")
+	}
+	if got := err.Error(); !strings.Contains(got, "no SSH address") || !strings.Contains(got, "yeet vm console devbox") {
+		t.Fatalf("error = %q, want missing SSH address with console hint", got)
+	}
+}
+
+func sshOptionsContainValue(options []string, value string) bool {
+	for i, opt := range options {
+		if opt == "-o" && i+1 < len(options) && options[i+1] == value {
+			return true
+		}
+		if strings.HasPrefix(opt, "-o") && opt[2:] == value {
+			return true
+		}
+	}
+	return false
+}
+
 func TestServiceShellCommandFromResponseNotFoundIncludesHint(t *testing.T) {
 	_, _, err := serviceShellCommandFromResponse(
+		"catch",
 		"api",
 		serverInfo{},
 		catchrpc.ServiceInfoResponse{Found: false, Message: "missing"},
@@ -348,6 +561,21 @@ func TestBuildSSHArgs(t *testing.T) {
 	}
 }
 
+func TestSSHArgsFromInvocationUsesHostNameOverrideTarget(t *testing.T) {
+	got := sshArgsFromInvocation("yeet-pve1", serverInfo{InstallUser: "root"}, sshInvocation{
+		Service: "devbox",
+		Options: []string{
+			"-l", "ubuntu",
+			"-o", "HostName=192.168.100.12",
+		},
+		Command: []string{"hostname"},
+	})
+	want := []string{"-l", "ubuntu", "-o", "HostName=192.168.100.12", "yeet-pve1", "hostname"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sshArgsFromInvocation = %#v, want %#v", got, want)
+	}
+}
+
 func TestTrimSSHCommandName(t *testing.T) {
 	if got := trimSSHCommandName([]string{"ssh", "api"}); !reflect.DeepEqual(got, []string{"api"}) {
 		t.Fatalf("trimSSHCommandName command = %#v, want api", got)
@@ -400,6 +628,29 @@ func TestEnsureTTYOption(t *testing.T) {
 			got := ensureTTYOption(tt.options)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("ensureTTYOption = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHasSSHUserOption(t *testing.T) {
+	tests := []struct {
+		name    string
+		options []string
+		want    bool
+	}{
+		{name: "none", options: []string{"-p", "2222"}},
+		{name: "short pair", options: []string{"-l", "ubuntu"}, want: true},
+		{name: "short compact", options: []string{"-lubuntu"}, want: true},
+		{name: "option pair", options: []string{"-o", "User=ubuntu"}, want: true},
+		{name: "option compact", options: []string{"-oUser=ubuntu"}, want: true},
+		{name: "dangling option", options: []string{"-o"}},
+		{name: "unrelated option", options: []string{"-o", "HostName=192.0.2.10"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := hasSSHUserOption(tt.options); got != tt.want {
+				t.Fatalf("hasSSHUserOption(%#v) = %v, want %v", tt.options, got, tt.want)
 			}
 		})
 	}

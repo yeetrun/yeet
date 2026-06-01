@@ -206,6 +206,47 @@ func TestServiceActionCommandsUseRunner(t *testing.T) {
 	}
 }
 
+func TestVMActionCommandsUseVMProgressLabels(t *testing.T) {
+	server := newTestServer(t)
+	seedService(t, server, "devbox", db.ServiceTypeVM, nil)
+
+	tests := []struct {
+		name string
+		run  func(*ttyExecer) error
+		want string
+	}{
+		{name: "start", run: (*ttyExecer).startCmdFunc, want: `step="Start VM"`},
+		{name: "stop", run: (*ttyExecer).stopCmdFunc, want: `step="Stop VM"`},
+		{name: "restart", run: (*ttyExecer).restartCmdFunc, want: `step="Restart VM"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			runner := &recordingServiceRunner{}
+			execer := &ttyExecer{
+				ctx:      context.Background(),
+				s:        server,
+				sn:       "devbox",
+				rw:       &out,
+				progress: catchrpc.ProgressPlain,
+				serviceRunnerFn: func() (ServiceRunner, error) {
+					return runner, nil
+				},
+			}
+
+			if err := tc.run(execer); err != nil {
+				t.Fatalf("%s command returned error: %v", tc.name, err)
+			}
+			if got := out.String(); !strings.Contains(got, tc.want) {
+				t.Fatalf("progress output = %q, want %q", got, tc.want)
+			}
+			if got := out.String(); strings.Contains(got, "Start service") || strings.Contains(got, "Stop service") || strings.Contains(got, "Restart service") {
+				t.Fatalf("progress output = %q, did not expect generic service step label", got)
+			}
+		})
+	}
+}
+
 func TestServiceActionCommandsRejectReservedNames(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -370,6 +411,7 @@ func TestStatusCmdFuncRendersSystemStatusesWithoutLiveCommands(t *testing.T) {
 	seedService(t, server, "timer", db.ServiceTypeSystemd, db.ArtifactStore{
 		db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/timer.timer"}},
 	})
+	seedService(t, server, "devbox", db.ServiceTypeVM, nil)
 	seedService(t, server, "web", db.ServiceTypeDockerCompose, db.ArtifactStore{
 		db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/compose.yml"}},
 	})
@@ -382,6 +424,12 @@ func TestStatusCmdFuncRendersSystemStatusesWithoutLiveCommands(t *testing.T) {
 		systemdStatusesFunc: func() (map[string]svc.Status, error) {
 			return map[string]svc.Status{"timer": svc.StatusStopped}, nil
 		},
+		systemdStatusFunc: func(sn string) (svc.Status, error) {
+			if sn != "yeet-vm-devbox.service" {
+				t.Fatalf("systemd status service = %q, want yeet-vm-devbox.service", sn)
+			}
+			return svc.StatusRunning, nil
+		},
 		dockerComposeStatusesFunc: func() (map[string]svc.DockerComposeStatus, error) {
 			return map[string]svc.DockerComposeStatus{
 				"web": {"api": svc.StatusRunning},
@@ -393,13 +441,16 @@ func TestStatusCmdFuncRendersSystemStatusesWithoutLiveCommands(t *testing.T) {
 		t.Fatalf("statusCmdFunc returned error: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 3 {
-		t.Fatalf("status lines = %d, want 3\n%s", len(lines), out.String())
+	if len(lines) != 4 {
+		t.Fatalf("status lines = %d, want 4\n%s", len(lines), out.String())
 	}
-	if got := strings.Fields(lines[1]); !reflect.DeepEqual(got, []string{"timer", "cron", "-", "stopped"}) {
+	if got := strings.Fields(lines[1]); !reflect.DeepEqual(got, []string{"devbox", "vm", "-", "running"}) {
+		t.Fatalf("devbox row = %#v\n%s", got, out.String())
+	}
+	if got := strings.Fields(lines[2]); !reflect.DeepEqual(got, []string{"timer", "cron", "-", "stopped"}) {
 		t.Fatalf("timer row = %#v\n%s", got, out.String())
 	}
-	if got := strings.Fields(lines[2]); !reflect.DeepEqual(got, []string{"web", "docker", "api", "running"}) {
+	if got := strings.Fields(lines[3]); !reflect.DeepEqual(got, []string{"web", "docker", "api", "running"}) {
 		t.Fatalf("web row = %#v\n%s", got, out.String())
 	}
 }
@@ -546,6 +597,37 @@ func TestStatusCmdFuncWithEmptyDBRendersEmptyTable(t *testing.T) {
 	}
 }
 
+func TestSingleServiceStatusDataForVMUsesVMSystemdUnit(t *testing.T) {
+	server := newTestServer(t)
+	seedService(t, server, "devbox", db.ServiceTypeVM, nil)
+
+	execer := &ttyExecer{
+		s:  server,
+		sn: "devbox",
+		systemdStatusFunc: func(sn string) (svc.Status, error) {
+			if sn != "yeet-vm-devbox.service" {
+				t.Fatalf("systemd status service = %q, want yeet-vm-devbox.service", sn)
+			}
+			return svc.StatusRunning, nil
+		},
+	}
+
+	status, render, err := execer.singleServiceStatusData()
+	if err != nil {
+		t.Fatalf("singleServiceStatusData: %v", err)
+	}
+	if !render {
+		t.Fatal("render = false, want true")
+	}
+	if status.ServiceType != ServiceDataTypeVM {
+		t.Fatalf("service type = %s, want vm", status.ServiceType)
+	}
+	want := []ComponentStatusData{{Name: "devbox", Status: ComponentStatusRunning}}
+	if !reflect.DeepEqual(status.ComponentStatus, want) {
+		t.Fatalf("component status = %#v, want %#v", status.ComponentStatus, want)
+	}
+}
+
 func TestRenderServiceStatusesJSON(t *testing.T) {
 	statuses := []ServiceStatusData{
 		serviceStatusWithComponent("web", ServiceDataTypeDocker, "api", svc.StatusRunning),
@@ -618,7 +700,7 @@ func TestRemoveServiceWithoutRunnerCleansConfig(t *testing.T) {
 		rw: &out,
 	}
 
-	if err := execer.removeServiceWithoutRunner(errNoServiceConfigured); err != nil {
+	if err := execer.removeServiceWithoutRunner(cli.RemoveFlags{}, errNoServiceConfigured); err != nil {
 		t.Fatalf("removeServiceWithoutRunner returned error: %v", err)
 	}
 	if got := out.String(); !strings.Contains(got, `service "missing" not found`) {
@@ -669,6 +751,28 @@ func TestRemoveCmdFuncReturnsRunnerSetupError(t *testing.T) {
 	}
 }
 
+func TestRemoveCmdFuncRemovesPartialUnknownService(t *testing.T) {
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("partial", func(_ *db.Data, s *db.Service) error {
+		s.SvcNetwork = &db.SvcNetwork{IPv4: netipMustParseAddr(t, "192.168.100.10")}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed partial service: %v", err)
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{s: server, sn: "partial", rw: &out}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{Yes: true}); err != nil {
+		t.Fatalf("removeCmdFunc returned error: %v", err)
+	}
+	if _, err := server.serviceView("partial"); !errors.Is(err, errServiceNotFound) {
+		t.Fatalf("serviceView error = %v, want service not found", err)
+	}
+	if !strings.Contains(out.String(), "warning:") {
+		t.Fatalf("output = %q, want warning for partial service", out.String())
+	}
+}
+
 func TestRemoveCmdFuncDeclineSkipsRunnerRemoval(t *testing.T) {
 	runner := &recordingServiceRunner{}
 	execer := &ttyExecer{
@@ -703,6 +807,29 @@ func TestConfirmServiceRemovalCanDecline(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "Are you sure") {
 		t.Fatalf("prompt output = %q, want confirmation prompt", got)
+	}
+}
+
+func TestConfirmVMRemovalUsesVMLabel(t *testing.T) {
+	server := newTestServer(t)
+	seedService(t, server, "devbox", db.ServiceTypeVM, nil)
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		s:  server,
+		sn: "devbox",
+		rw: readWriter{Reader: strings.NewReader("n\n"), Writer: &out},
+	}
+
+	ok, err := execer.confirmServiceRemoval(false)
+	if err != nil {
+		t.Fatalf("confirmServiceRemoval returned error: %v", err)
+	}
+	if ok {
+		t.Fatal("confirmServiceRemoval = true, want false")
+	}
+	if got := out.String(); !strings.Contains(got, `remove VM "devbox"`) {
+		t.Fatalf("prompt output = %q, want VM removal prompt", got)
 	}
 }
 

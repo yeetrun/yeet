@@ -18,6 +18,7 @@ const (
 	ServiceDataTypeService    ServiceDataType = "service"
 	ServiceDataTypeCron       ServiceDataType = "cron"
 	ServiceDataTypeDocker     ServiceDataType = "docker"
+	ServiceDataTypeVM         ServiceDataType = "vm"
 	ServiceDataTypeBinary     ServiceDataType = "binary"
 	ServiceDataTypeTypeScript ServiceDataType = "typescript"
 	ServiceDataTypePython     ServiceDataType = "python"
@@ -61,6 +62,8 @@ func ServiceDataTypeFromServiceType(st db.ServiceType) ServiceDataType {
 		return ServiceDataTypeService
 	case db.ServiceTypeDockerCompose:
 		return ServiceDataTypeDocker
+	case db.ServiceTypeVM:
+		return ServiceDataTypeVM
 	default:
 		return ServiceDataTypeUnknown
 	}
@@ -108,6 +111,8 @@ func ServiceDataTypeFromUnitType(unitType string) ServiceDataType {
 		return ServiceDataTypeCron
 	case "docker":
 		return ServiceDataTypeDocker
+	case "vm":
+		return ServiceDataTypeVM
 	case "binary":
 		return ServiceDataTypeBinary
 	case "typescript":

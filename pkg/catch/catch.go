@@ -41,6 +41,10 @@ const (
 )
 
 var DockerStatusesUnknown = svc.DockerComposeStatus{}
+var serverVMStatusFunc = func(name string) (svc.Status, error) {
+	runner := &vmRunner{name: name}
+	return runner.Status()
+}
 
 var installYeetNSService = netns.InstallYeetNSService
 var reconcileDockerNetNSPortForwards = dnet.ReconcilePortForwards
@@ -565,6 +569,14 @@ func (s *Server) serviceRunDir(sn string) string {
 	return serviceRunDirForRoot(s.defaultServiceRootDir(sn))
 }
 
+func (s *Server) catchRunnerPath() string {
+	root, err := s.serviceRootDir(CatchService)
+	if err != nil {
+		root = s.defaultServiceRootDir(CatchService)
+	}
+	return filepath.Join(serviceRunDirForRoot(root), "catch")
+}
+
 func (s *Server) serviceDataDir(sn string) string {
 	return serviceDataDirForRoot(s.defaultServiceRootDir(sn))
 }
@@ -785,6 +797,8 @@ func (s *Server) isServiceTypeRunning(name string, serviceType db.ServiceType) (
 		return s.isDockerComposeServiceRunning(name)
 	case db.ServiceTypeSystemd:
 		return s.isSystemdServiceRunning(name)
+	case db.ServiceTypeVM:
+		return s.isVMServiceRunning(name)
 	}
 	return false, fmt.Errorf("unknown service type")
 }
@@ -817,13 +831,31 @@ func (s *Server) isSystemdServiceRunning(name string) (bool, error) {
 	return st == svc.StatusRunning, nil
 }
 
+func (s *Server) isVMServiceRunning(name string) (bool, error) {
+	st, err := serverVMStatusFunc(name)
+	if err != nil {
+		return false, err
+	}
+	return st == svc.StatusRunning, nil
+}
+
+type RemoveOptions struct {
+	CleanData bool
+}
+
 // RemoveService removes the service from the database and attempts to clean up
 // related files/devices. It always removes the DB entry if possible, returning
 // cleanup warnings separately from fatal errors.
 func (s *Server) RemoveService(name string) (*RemoveReport, error) {
+	return s.RemoveServiceWithOptions(name, RemoveOptions{})
+}
+
+// RemoveServiceWithOptions removes the service with optional cleanup behavior.
+func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*RemoveReport, error) {
 	report := &RemoveReport{}
 	s.addRunningServiceWarning(report, name)
 	tsStableID := s.tailscaleStableIDForService(report, name)
+	serviceRootZFS := s.serviceRootZFSForRemoval(report, name)
 	serviceRoot, err := s.serviceRootDir(name)
 	removeDirs := true
 	if err != nil {
@@ -836,7 +868,10 @@ func (s *Server) RemoveService(name string) (*RemoveReport, error) {
 	s.publishServiceDeleted(name)
 	s.deleteTailscaleDevice(report, tsStableID)
 	if removeDirs {
-		s.removeServiceDirs(report, serviceRoot)
+		if opts.CleanData {
+			s.destroyServiceRootZFS(report, serviceRootZFS)
+		}
+		s.removeServiceDirs(report, serviceRoot, opts.CleanData)
 	}
 	return report, nil
 }
@@ -869,6 +904,17 @@ func tailscaleStableIDForRemoval(sv db.ServiceView) string {
 		return ""
 	}
 	return string(tsnet.StableID())
+}
+
+func (s *Server) serviceRootZFSForRemoval(report *RemoveReport, name string) string {
+	sv, err := s.serviceView(name)
+	if err == nil {
+		return sv.ServiceRootZFS()
+	}
+	if !errors.Is(err, errServiceNotFound) {
+		report.addWarning(fmt.Errorf("failed to load service ZFS root for %q: %w", name, err))
+	}
+	return ""
 }
 
 func (s *Server) removeServiceFromDB(name string) error {
@@ -904,13 +950,27 @@ func (s *Server) deleteTailscaleDevice(report *RemoveReport, tsStableID string) 
 	}
 }
 
-func (s *Server) removeServiceDirs(report *RemoveReport, serviceRoot string) {
+func (s *Server) destroyServiceRootZFS(report *RemoveReport, dataset string) {
+	if strings.TrimSpace(dataset) == "" {
+		return
+	}
+	runner := s.zfsRunner
+	if runner == nil {
+		runner = runZFSCommand
+	}
+	_, stderr, err := runner(context.Background(), "destroy", "-r", dataset)
+	if err != nil {
+		report.addWarning(formatZFSCommandError("zfs destroy "+dataset, stderr, err))
+	}
+}
+
+func (s *Server) removeServiceDirs(report *RemoveReport, serviceRoot string, cleanData bool) {
 	dirs, err := filepath.Glob(filepath.Join(serviceRoot, "*"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		report.addWarning(fmt.Errorf("failed to list service directories: %w", err))
 		return
 	}
-	for _, dir := range serviceChildDirsToRemove(dirs) {
+	for _, dir := range serviceChildDirsToRemove(dirs, cleanData) {
 		log.Printf("removing service directory: %v", dir)
 		if err := os.RemoveAll(dir); err != nil {
 			report.addWarning(fmt.Errorf("failed to remove service directory %s: %w", dir, err))
@@ -918,10 +978,10 @@ func (s *Server) removeServiceDirs(report *RemoveReport, serviceRoot string) {
 	}
 }
 
-func serviceChildDirsToRemove(dirs []string) []string {
+func serviceChildDirsToRemove(dirs []string, cleanData bool) []string {
 	filtered := dirs[:0]
 	for _, dir := range dirs {
-		if filepath.Base(dir) != "data" {
+		if cleanData || filepath.Base(dir) != "data" {
 			filtered = append(filtered, dir)
 		}
 	}

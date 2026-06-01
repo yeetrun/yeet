@@ -774,6 +774,9 @@ func remoteEnvHash(resp catchrpc.ArtifactHashesResponse) string {
 }
 
 func shouldAlwaysDeployPayload(payload string) bool {
+	if isVMPayload(payload) {
+		return true
+	}
 	if looksLikeImageRef(payload) || looksLikeRunDraftLocalImageName(payload) {
 		if st, err := os.Stat(payload); err == nil && !st.IsDir() {
 			return false

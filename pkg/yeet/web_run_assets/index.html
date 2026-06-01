@@ -143,6 +143,27 @@
             </label>
           </details>
 
+          <details class="advanced-block" id="vmOptions" hidden>
+            <summary>VM settings <button type="button" class="help" data-help="Optional CPU, memory, and disk overrides for vm://ubuntu/26.04." aria-label="Help for VM settings">?</button></summary>
+            <div class="split-fields vm-fields">
+              <label for="vmCPUs" data-field="vm.cpus">
+                <span>vCPU</span>
+                <input id="vmCPUs" name="vmCPUs" inputmode="numeric" autocomplete="off" placeholder="auto">
+                <span class="field-error" id="vmCPUsError"></span>
+              </label>
+              <label for="vmMemory" data-field="vm.memory">
+                <span>Memory</span>
+                <input id="vmMemory" name="vmMemory" autocomplete="off" spellcheck="false" placeholder="2g">
+                <span class="field-error" id="vmMemoryError"></span>
+              </label>
+            </div>
+            <label for="vmDisk" data-field="vm.disk">
+              <span>Disk</span>
+              <input id="vmDisk" name="vmDisk" autocomplete="off" spellcheck="false" placeholder="64g">
+              <span class="field-error" id="vmDiskError"></span>
+            </label>
+          </details>
+
           <details class="advanced-block">
             <summary>Snapshots <button type="button" class="help" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></summary>
             <div class="split-fields">
@@ -169,7 +190,7 @@
             </label>
           </details>
 
-          <details class="advanced-block">
+          <details class="advanced-block" id="payloadArgsBlock">
             <summary>Payload args <button type="button" class="help" data-help="Arguments passed after -- to the deployed payload." aria-label="Help for payload args">?</button></summary>
             <label for="payloadArgs">
               <span>Arguments</span>

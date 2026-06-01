@@ -57,6 +57,43 @@ func TestRenderInfoPlainReportsTabwriterFlushError(t *testing.T) {
 	}
 }
 
+func TestRenderInfoPlainIncludesVMSection(t *testing.T) {
+	server := catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info: catchrpc.ServiceInfo{
+			DataType:    "vm",
+			ServiceType: "vm",
+			VM: &catchrpc.ServiceVM{
+				Runtime:     "firecracker",
+				Image:       "vm://ubuntu/26.04",
+				CPUs:        4,
+				MemoryBytes: 4 << 30,
+				DiskBytes:   128 << 30,
+				SSH:         &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+				Console:     &catchrpc.ServiceVMConsole{Available: true},
+				SetupState:  "ready",
+			},
+		},
+	}
+
+	var out bytes.Buffer
+	if err := renderInfoPlain(&out, "devbox", "host", nil, serverInfo{}, clientInfo{}, server); err != nil {
+		t.Fatalf("renderInfoPlain: %v", err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"VM\n",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("rendered info missing %q:\n%s", want, text)
+		}
+	}
+	assertPlainRow(t, text, "Type", "VM")
+	assertPlainRow(t, text, "Runtime", "firecracker")
+	assertPlainRow(t, text, "CPU", "4")
+	assertPlainRow(t, text, "SSH", "ubuntu@192.168.100.12")
+}
+
 func TestNormalizeInfoFormat(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -214,6 +251,27 @@ func TestBuildClientInfoUsesLocalImagePayloadKind(t *testing.T) {
 	}
 }
 
+func TestBuildClientInfoUsesVMPayloadKind(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &ProjectConfig{}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:        "devbox",
+		Host:        "yeet-pve1",
+		Type:        serviceTypeVM,
+		Payload:     "vm://ubuntu/26.04",
+		PayloadKind: serviceTypeVM,
+	})
+	loc := &projectConfigLocation{Path: filepath.Join(dir, projectConfigName), Dir: dir, Config: cfg}
+
+	got := buildClientInfo(loc, "devbox", "yeet-pve1", serverInfo{}, nil)
+	if got.Payload == nil {
+		t.Fatal("Payload = nil, want VM payload info")
+	}
+	if got.Payload.Kind != "vm" || got.Payload.ImageRef || got.Payload.ResolveErr != "" {
+		t.Fatalf("Payload = %#v, want VM payload without local path resolution", got.Payload)
+	}
+}
+
 func TestInfoInspectPayloadClassifiesConfiguredPayloads(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "Dockerfile"), "FROM alpine\n")
@@ -286,6 +344,7 @@ func TestInfoFormatServiceDataType(t *testing.T) {
 		{"binary", "systemd binary service"},
 		{"typescript", "typescript service"},
 		{"python", "python service"},
+		{"vm", "VM"},
 		{"custom", "custom"},
 	}
 
@@ -693,6 +752,17 @@ func assertInfoRows(t *testing.T, got, want []infoRow) {
 			t.Fatalf("row %d = %#v, want %#v\n got: %#v\nwant: %#v", i, got[i], want[i], got, want)
 		}
 	}
+}
+
+func assertPlainRow(t *testing.T, text, label, value string) {
+	t.Helper()
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[0] == label+":" && strings.Join(fields[1:], " ") == value {
+			return
+		}
+	}
+	t.Fatalf("rendered info missing row %s=%q:\n%s", label, value, text)
 }
 
 func assertIPGroups(t *testing.T, got, want []ipGroup) {

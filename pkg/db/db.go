@@ -15,7 +15,7 @@ import (
 	"tailscale.com/util/mak"
 )
 
-//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort --copyright=false
+//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig --copyright=false
 
 // Data is the full JSON structure of the database.
 type Data struct {
@@ -102,6 +102,7 @@ type ServiceType string
 const (
 	ServiceTypeDockerCompose ServiceType = "docker-compose"
 	ServiceTypeSystemd       ServiceType = "systemd"
+	ServiceTypeVM            ServiceType = "vm"
 )
 
 // Service is the configuration for one service.
@@ -138,6 +139,63 @@ type Service struct {
 	SvcNetwork *SvcNetwork
 	Macvlan    *MacvlanNetwork
 	TSNet      *TailscaleNetwork
+	VM         *VMConfig `json:",omitempty"`
+}
+
+type VMConfig struct {
+	Runtime string
+	Image   VMImageConfig
+	CPUs    int
+
+	MemoryBytes int64
+	Disk        VMDiskConfig
+
+	Networks []VMNetworkConfig
+	SSH      VMSSHConfig
+	Console  VMConsoleConfig
+	Sockets  VMSocketConfig
+
+	PIDFile    string `json:",omitempty"`
+	SetupState string `json:",omitempty"`
+}
+
+type VMImageConfig struct {
+	Payload string
+	Version string
+	Digest  string
+	Kernel  string
+	RootFS  string
+}
+
+type VMDiskConfig struct {
+	Backend string
+	Bytes   int64
+	Path    string
+}
+
+type VMNetworkConfig struct {
+	Mode      string
+	Interface string
+	Tap       string
+	MAC       string
+	IP        netip.Addr
+	Parent    string
+	VLAN      int
+}
+
+type VMSSHConfig struct {
+	User       string
+	KeyRef     string `json:",omitempty"`
+	KnownHosts string `json:",omitempty"`
+}
+
+type VMConsoleConfig struct {
+	SocketPath string
+	LogPath    string
+}
+
+type VMSocketConfig struct {
+	APISocketPath string
 }
 
 // SnapshotPolicy stores either server defaults or per-service overrides.

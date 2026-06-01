@@ -133,6 +133,64 @@ func TestValidateRunDraftNormalizesNetworkFields(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftAcceptsVMPayload(t *testing.T) {
+	draft := RunDraft{
+		Service: "devbox",
+		Host:    "yeet-pve1",
+		Payload: "vm://ubuntu/26.04",
+		VM: RunDraftVM{
+			CPUs:   4,
+			Memory: "4g",
+			Disk:   "128g",
+		},
+		Network: RunDraftNetwork{Modes: []string{"svc", "lan"}},
+	}
+	normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+	if !validation.OK {
+		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+	}
+	if normalized.PayloadKind != "vm" {
+		t.Fatalf("PayloadKind = %q, want vm", normalized.PayloadKind)
+	}
+	if normalized.Payload != "vm://ubuntu/26.04" {
+		t.Fatalf("Payload = %q", normalized.Payload)
+	}
+}
+
+func TestValidateRunDraftRejectsTailscaleForVM(t *testing.T) {
+	draft := RunDraft{
+		Service: "devbox",
+		Host:    "yeet-pve1",
+		Payload: "vm://ubuntu/26.04",
+		Network: RunDraftNetwork{
+			Modes: []string{"svc", "ts"},
+		},
+	}
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := validation.fieldError("network.modes"); !strings.Contains(got, `VM network mode "ts"`) {
+		t.Fatalf("network.modes error = %q, want VM ts rejection", got)
+	}
+}
+
+func TestValidateRunDraftRejectsVMFlagsForNonVMPayload(t *testing.T) {
+	draft := RunDraft{
+		Service: "api",
+		Host:    "yeet-pve1",
+		Payload: "ghcr.io/example/api:latest",
+		VM:      RunDraftVM{CPUs: 2},
+	}
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := validation.fieldError("vm.cpus"); !strings.Contains(got, "only valid for VM payloads") {
+		t.Fatalf("vm.cpus error = %q", got)
+	}
+}
+
 func TestValidateRunDraftPayloadKindFileStatsImageLikePayload(t *testing.T) {
 	draft := RunDraft{
 		Service:     "svc-a",

@@ -1,0 +1,334 @@
+// Copyright (c) 2025 AUTHORS All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package catch
+
+import (
+	"context"
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestVMRawDiskPlanUsesSparseQemuImage(t *testing.T) {
+	plan := vmDiskPlan{
+		Service:    "devbox",
+		Backend:    vmDiskBackendRaw,
+		Path:       "/srv/yeet/services/devbox/data/rootfs.raw",
+		Bytes:      32 << 30,
+		BaseRootFS: "/srv/yeet/images/ubuntu/rootfs.ext4",
+	}
+	cmds, err := plan.Commands()
+	if err != nil {
+		t.Fatalf("Commands: %v", err)
+	}
+	want := [][]string{
+		{"qemu-img", "create", "-f", "raw", plan.Path, "34359738368"},
+		{"cp", "--reflink=auto", "--sparse=always", plan.BaseRootFS, plan.Path},
+		{"truncate", "-s", "34359738368", plan.Path},
+		{"resize2fs", plan.Path},
+	}
+	if !reflect.DeepEqual(cmds, want) {
+		t.Fatalf("commands = %#v, want %#v", cmds, want)
+	}
+}
+
+func TestVMZVOLPlanCreatesSparseClone(t *testing.T) {
+	plan := vmDiskPlan{
+		Service:      "devbox",
+		Backend:      vmDiskBackendZVOL,
+		Path:         "flash/yeet/vms/devbox/root",
+		Bytes:        128 << 30,
+		BaseBytes:    2 << 30,
+		BaseRootFS:   "/srv/yeet/images/ubuntu/rootfs.ext4",
+		BaseDataset:  "flash/yeet/base/ubuntu-26.04",
+		ImageVersion: "ubuntu-26.04-amd64-v0",
+	}
+	base, err := plan.ZVOLBaseSteps()
+	if err != nil {
+		t.Fatalf("ZVOLBaseSteps: %v", err)
+	}
+	wantBase := []vmDiskPlanStep{
+		{Phase: vmDiskPhaseZVOLBase, Command: []string{"zfs", "create", "-p", "flash/yeet/base"}},
+		{Phase: vmDiskPhaseZVOLBase, Command: []string{"zfs", "create", "-s", "-V", "2147483648", plan.BaseDataset}},
+		{Phase: vmDiskPhaseZVOLBase, Command: []string{"udevadm", "settle", "--timeout=10"}},
+		{Phase: vmDiskPhaseZVOLBase, Command: []string{"dd", "if=" + plan.BaseRootFS, "of=/dev/zvol/" + plan.BaseDataset, "bs=16M", "status=none"}},
+		{Phase: vmDiskPhaseZVOLBase, Command: []string{"zfs", "snapshot", "flash/yeet/base/ubuntu-26.04@ubuntu-26.04-amd64-v0"}},
+	}
+	if !reflect.DeepEqual(base, wantBase) {
+		t.Fatalf("base steps = %#v, want %#v", base, wantBase)
+	}
+	clone, err := plan.ZVOLCloneSteps()
+	if err != nil {
+		t.Fatalf("ZVOLCloneSteps: %v", err)
+	}
+	wantClone := []vmDiskPlanStep{
+		{Phase: vmDiskPhaseZVOLClone, Command: []string{"zfs", "create", "-p", "flash/yeet/vms/devbox"}},
+		{Phase: vmDiskPhaseZVOLClone, Command: []string{"zfs", "clone", "flash/yeet/base/ubuntu-26.04@ubuntu-26.04-amd64-v0", plan.Path}},
+		{Phase: vmDiskPhaseZVOLClone, Command: []string{"zfs", "set", "volsize=137438953472", plan.Path}},
+		{Phase: vmDiskPhaseZVOLClone, Command: []string{"udevadm", "settle", "--timeout=10"}},
+		{Phase: vmDiskPhaseZVOLClone, Command: []string{"resize2fs", "/dev/zvol/" + plan.Path}},
+	}
+	if !reflect.DeepEqual(clone, wantClone) {
+		t.Fatalf("clone steps = %#v, want %#v", clone, wantClone)
+	}
+	steps, err := plan.Steps()
+	if err != nil {
+		t.Fatalf("Steps: %v", err)
+	}
+	wantSteps := append(append([]vmDiskPlanStep(nil), wantBase...), wantClone...)
+	if !reflect.DeepEqual(steps, wantSteps) {
+		t.Fatalf("steps = %#v, want %#v", steps, wantSteps)
+	}
+	if cmds, err := plan.Commands(); err == nil || cmds != nil {
+		t.Fatalf("zvol Commands() = %#v, %v; want nil commands and phased-plan error", cmds, err)
+	}
+}
+
+func TestVMZVOLCloneStepsResizeFilesystemAfterExpandingVolume(t *testing.T) {
+	plan := vmDiskPlan{
+		Service:      "devbox",
+		Backend:      vmDiskBackendZVOL,
+		Path:         "flash/yeet/vms/devbox/root",
+		Bytes:        128 << 30,
+		BaseBytes:    2 << 30,
+		BaseRootFS:   "/srv/yeet/images/ubuntu/rootfs.ext4",
+		BaseDataset:  "flash/yeet/base/ubuntu-26.04",
+		ImageVersion: "ubuntu-26.04-amd64-v0",
+	}
+
+	clone, err := plan.ZVOLCloneSteps()
+	if err != nil {
+		t.Fatalf("ZVOLCloneSteps: %v", err)
+	}
+	got := clone[len(clone)-1].Command
+	want := []string{"resize2fs", "/dev/zvol/flash/yeet/vms/devbox/root"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("last clone command = %#v, want filesystem resize %#v", got, want)
+	}
+}
+
+func TestVMZVOLPlanCreatesParentDatasets(t *testing.T) {
+	plan := vmDiskPlan{
+		Service:      "devbox",
+		Backend:      vmDiskBackendZVOL,
+		Path:         "flash/yeet/vms/devbox/vm/d-ea1055/root",
+		Bytes:        128 << 30,
+		BaseBytes:    2 << 30,
+		BaseRootFS:   "/srv/yeet/images/ubuntu/rootfs.ext4",
+		BaseDataset:  "flash/yeet/vms/devbox/base/ubuntu-26.04-amd64-v0",
+		ImageVersion: "ubuntu-26.04-amd64-v0",
+	}
+	base, err := plan.ZVOLBaseSteps()
+	if err != nil {
+		t.Fatalf("ZVOLBaseSteps: %v", err)
+	}
+	if !reflect.DeepEqual(base[0].Command, []string{"zfs", "create", "-p", "flash/yeet/vms/devbox/base"}) {
+		t.Fatalf("first base command = %#v, want parent dataset create", base[0].Command)
+	}
+	clone, err := plan.ZVOLCloneSteps()
+	if err != nil {
+		t.Fatalf("ZVOLCloneSteps: %v", err)
+	}
+	if !reflect.DeepEqual(clone[0].Command, []string{"zfs", "create", "-p", "flash/yeet/vms/devbox/vm/d-ea1055"}) {
+		t.Fatalf("first clone command = %#v, want parent dataset create", clone[0].Command)
+	}
+}
+
+func TestVMZVOLBaseStepsAreSharedAcrossVMClones(t *testing.T) {
+	base := vmDiskPlan{
+		Service:      "devbox",
+		Backend:      vmDiskBackendZVOL,
+		Path:         "flash/yeet/vms/devbox/root",
+		Bytes:        128 << 30,
+		BaseBytes:    2 << 30,
+		BaseRootFS:   "/srv/yeet/images/ubuntu/rootfs.ext4",
+		BaseDataset:  "flash/yeet/base/ubuntu-26.04",
+		ImageVersion: "ubuntu-26.04-amd64-v0",
+	}
+	other := base
+	other.Service = "worker"
+	other.Path = "flash/yeet/vms/worker/root"
+	other.Bytes = 64 << 30
+
+	baseSteps, err := base.ZVOLBaseSteps()
+	if err != nil {
+		t.Fatalf("base ZVOLBaseSteps: %v", err)
+	}
+	otherBaseSteps, err := other.ZVOLBaseSteps()
+	if err != nil {
+		t.Fatalf("other ZVOLBaseSteps: %v", err)
+	}
+	if !reflect.DeepEqual(baseSteps, otherBaseSteps) {
+		t.Fatalf("base setup differs between VMs:\n%#v\n%#v", baseSteps, otherBaseSteps)
+	}
+
+	cloneSteps, err := base.ZVOLCloneSteps()
+	if err != nil {
+		t.Fatalf("base ZVOLCloneSteps: %v", err)
+	}
+	otherCloneSteps, err := other.ZVOLCloneSteps()
+	if err != nil {
+		t.Fatalf("other ZVOLCloneSteps: %v", err)
+	}
+	if reflect.DeepEqual(cloneSteps, otherCloneSteps) {
+		t.Fatalf("clone setup should differ by target path: %#v", cloneSteps)
+	}
+}
+
+func TestValidateVMDiskPlanRejectsInvalidZVOL(t *testing.T) {
+	valid := vmDiskPlan{
+		Service:      "devbox",
+		Backend:      vmDiskBackendZVOL,
+		Path:         "flash/yeet/vms/devbox/root",
+		Bytes:        128 << 30,
+		BaseRootFS:   "/srv/yeet/images/ubuntu/rootfs.ext4",
+		BaseDataset:  "flash/yeet/base/ubuntu-26.04",
+		ImageVersion: "ubuntu-26.04-amd64-v0",
+	}
+	tests := []struct {
+		name string
+		edit func(*vmDiskPlan)
+	}{
+		{name: "empty base dataset", edit: func(p *vmDiskPlan) { p.BaseDataset = "" }},
+		{name: "empty image version", edit: func(p *vmDiskPlan) { p.ImageVersion = "" }},
+		{name: "empty path", edit: func(p *vmDiskPlan) { p.Path = "" }},
+		{name: "base dataset snapshot", edit: func(p *vmDiskPlan) { p.BaseDataset = "flash/base@old" }},
+		{name: "image version bookmark", edit: func(p *vmDiskPlan) { p.ImageVersion = "ubuntu#old" }},
+		{name: "path parent traversal", edit: func(p *vmDiskPlan) { p.Path = "flash/../root" }},
+		{name: "path absolute", edit: func(p *vmDiskPlan) { p.Path = "/flash/yeet/vms/devbox/root" }},
+		{name: "target matches base", edit: func(p *vmDiskPlan) { p.Path = p.BaseDataset }},
+		{name: "target invalid component", edit: func(p *vmDiskPlan) { p.Path = "flash/yeet/vms/dev box/root" }},
+		{name: "dot component", edit: func(p *vmDiskPlan) { p.BaseDataset = "flash/./base" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := valid
+			tt.edit(&plan)
+			if err := plan.Validate(); err == nil {
+				t.Fatal("expected validation error")
+			}
+			if cmds, err := plan.Commands(); err == nil || cmds != nil {
+				t.Fatalf("Commands() = %#v, %v; want nil commands and error", cmds, err)
+			}
+		})
+	}
+}
+
+func TestValidateVMDiskPlanRejectsInvalidRaw(t *testing.T) {
+	tests := []vmDiskPlan{
+		{Backend: vmDiskBackendRaw, Path: "", Bytes: 32 << 30, BaseRootFS: "/srv/yeet/images/ubuntu/rootfs.ext4"},
+		{Backend: vmDiskBackendRaw, Path: "/srv/yeet/services/devbox/data/rootfs.raw", Bytes: 0, BaseRootFS: "/srv/yeet/images/ubuntu/rootfs.ext4"},
+		{Backend: vmDiskBackendRaw, Path: "/srv/yeet/services/devbox/data/rootfs.raw", Bytes: 32 << 30, BaseRootFS: ""},
+	}
+	for _, plan := range tests {
+		if err := plan.Validate(); err == nil {
+			t.Fatalf("expected validation error for %#v", plan)
+		}
+	}
+}
+
+func TestRejectVMDiskShrink(t *testing.T) {
+	err := validateVMDiskResize(128<<30, 64<<30)
+	if err == nil {
+		t.Fatal("expected disk shrink rejection")
+	}
+}
+
+func TestRunVMDiskPlanPreservesDiskOnSetupError(t *testing.T) {
+	plan := vmDiskPlan{
+		Service:    "devbox",
+		Backend:    vmDiskBackendRaw,
+		Path:       "/srv/yeet/services/devbox/data/rootfs.raw",
+		Bytes:      32 << 30,
+		BaseRootFS: "/srv/yeet/images/ubuntu/rootfs.ext4",
+	}
+	boom := errors.New("boom")
+	err := runVMDiskPlanWithRunner(context.Background(), plan, func(context.Context, []string) error {
+		return boom
+	})
+	var incomplete vmSetupIncompleteError
+	if !errors.As(err, &incomplete) {
+		t.Fatalf("error = %T %v, want vmSetupIncompleteError", err, err)
+	}
+	if incomplete.DiskPath != plan.Path {
+		t.Fatalf("disk path = %q, want %q", incomplete.DiskPath, plan.Path)
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("error does not wrap original error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "qemu-img create -f raw /srv/yeet/services/devbox/data/rootfs.raw 34359738368") {
+		t.Fatalf("error missing failed command: %v", err)
+	}
+}
+
+func TestRunVMProvisionDiskPlanSkipsExistingZVOLBaseSnapshot(t *testing.T) {
+	plan := vmDiskPlan{
+		Service:      "devbox",
+		Backend:      vmDiskBackendZVOL,
+		Path:         "flash/yeet/vms/devbox/root",
+		Bytes:        128 << 30,
+		BaseBytes:    2 << 30,
+		BaseRootFS:   "/srv/yeet/images/ubuntu/rootfs.ext4",
+		BaseDataset:  "flash/yeet/base/ubuntu-26.04",
+		ImageVersion: "ubuntu-26.04-amd64-v0",
+	}
+	var commands [][]string
+	err := runVMProvisionDiskPlan(context.Background(), plan, func(_ context.Context, command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runVMProvisionDiskPlan: %v", err)
+	}
+	wantPrefix := []string{"zfs", "list", "-H", "-o", "name", "flash/yeet/base/ubuntu-26.04@ubuntu-26.04-amd64-v0"}
+	if !reflect.DeepEqual(commands[0], wantPrefix) {
+		t.Fatalf("first command = %#v, want %#v", commands[0], wantPrefix)
+	}
+	for _, command := range commands[1:] {
+		if len(command) > 3 && command[0] == "zfs" && command[1] == "create" && command[2] == "-s" {
+			t.Fatalf("zvol base create should be skipped when snapshot exists: %#v", commands)
+		}
+		if len(command) > 0 && command[0] == "dd" {
+			t.Fatalf("zvol base dd should be skipped when snapshot exists: %#v", commands)
+		}
+	}
+	if gotLast := commands[len(commands)-1]; !reflect.DeepEqual(gotLast, []string{"resize2fs", "/dev/zvol/" + plan.Path}) {
+		t.Fatalf("last command = %#v, want zvol filesystem resize", gotLast)
+	}
+}
+
+func TestRunVMProvisionDiskPlanCreatesMissingZVOLBase(t *testing.T) {
+	plan := vmDiskPlan{
+		Service:      "devbox",
+		Backend:      vmDiskBackendZVOL,
+		Path:         "flash/yeet/vms/devbox/root",
+		Bytes:        128 << 30,
+		BaseBytes:    2 << 30,
+		BaseRootFS:   "/srv/yeet/images/ubuntu/rootfs.ext4",
+		BaseDataset:  "flash/yeet/base/ubuntu-26.04",
+		ImageVersion: "ubuntu-26.04-amd64-v0",
+	}
+	var commands [][]string
+	err := runVMProvisionDiskPlan(context.Background(), plan, func(_ context.Context, command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		if len(commands) == 1 {
+			return errors.New("snapshot missing")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("runVMProvisionDiskPlan: %v", err)
+	}
+	if len(commands) < 6 {
+		t.Fatalf("commands = %#v, want base and clone steps", commands)
+	}
+	if !reflect.DeepEqual(commands[1], []string{"zfs", "create", "-p", "flash/yeet/base"}) {
+		t.Fatalf("base parent command = %#v", commands[1])
+	}
+	if !reflect.DeepEqual(commands[2], []string{"zfs", "create", "-s", "-V", "2147483648", plan.BaseDataset}) {
+		t.Fatalf("base create command = %#v", commands[2])
+	}
+}

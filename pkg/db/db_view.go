@@ -13,7 +13,7 @@ import (
 	"tailscale.com/types/views"
 )
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig
 
 // View returns a read-only view of Data.
 func (p *Data) View() DataView {
@@ -224,6 +224,7 @@ func (v ServiceView) Macvlan() views.ValuePointer[MacvlanNetwork] {
 }
 
 func (v ServiceView) TSNet() TailscaleNetworkView { return v.ж.TSNet.View() }
+func (v ServiceView) VM() VMConfigView            { return v.ж.VM.View() }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _ServiceViewNeedsRegeneration = Service(struct {
@@ -239,6 +240,7 @@ var _ServiceViewNeedsRegeneration = Service(struct {
 	SvcNetwork       *SvcNetwork
 	Macvlan          *MacvlanNetwork
 	TSNet            *TailscaleNetwork
+	VM               *VMConfig
 }{})
 
 // View returns a read-only view of SnapshotPolicy.
@@ -896,4 +898,572 @@ func (v EndpointPortView) Port() uint16       { return v.ж.Port }
 var _EndpointPortViewNeedsRegeneration = EndpointPort(struct {
 	EndpointID string
 	Port       uint16
+}{})
+
+// View returns a read-only view of VMConfig.
+func (p *VMConfig) View() VMConfigView {
+	return VMConfigView{ж: p}
+}
+
+// VMConfigView provides a read-only view over VMConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMConfigView) AsStruct() *VMConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMConfigView) Runtime() string                        { return v.ж.Runtime }
+func (v VMConfigView) Image() VMImageConfig                   { return v.ж.Image }
+func (v VMConfigView) CPUs() int                              { return v.ж.CPUs }
+func (v VMConfigView) MemoryBytes() int64                     { return v.ж.MemoryBytes }
+func (v VMConfigView) Disk() VMDiskConfig                     { return v.ж.Disk }
+func (v VMConfigView) Networks() views.Slice[VMNetworkConfig] { return views.SliceOf(v.ж.Networks) }
+func (v VMConfigView) SSH() VMSSHConfig                       { return v.ж.SSH }
+func (v VMConfigView) Console() VMConsoleConfig               { return v.ж.Console }
+func (v VMConfigView) Sockets() VMSocketConfig                { return v.ж.Sockets }
+func (v VMConfigView) PIDFile() string                        { return v.ж.PIDFile }
+func (v VMConfigView) SetupState() string                     { return v.ж.SetupState }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMConfigViewNeedsRegeneration = VMConfig(struct {
+	Runtime     string
+	Image       VMImageConfig
+	CPUs        int
+	MemoryBytes int64
+	Disk        VMDiskConfig
+	Networks    []VMNetworkConfig
+	SSH         VMSSHConfig
+	Console     VMConsoleConfig
+	Sockets     VMSocketConfig
+	PIDFile     string
+	SetupState  string
+}{})
+
+// View returns a read-only view of VMImageConfig.
+func (p *VMImageConfig) View() VMImageConfigView {
+	return VMImageConfigView{ж: p}
+}
+
+// VMImageConfigView provides a read-only view over VMImageConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMImageConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMImageConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMImageConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMImageConfigView) AsStruct() *VMImageConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMImageConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMImageConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMImageConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMImageConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMImageConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMImageConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMImageConfigView) Payload() string { return v.ж.Payload }
+func (v VMImageConfigView) Version() string { return v.ж.Version }
+func (v VMImageConfigView) Digest() string  { return v.ж.Digest }
+func (v VMImageConfigView) Kernel() string  { return v.ж.Kernel }
+func (v VMImageConfigView) RootFS() string  { return v.ж.RootFS }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMImageConfigViewNeedsRegeneration = VMImageConfig(struct {
+	Payload string
+	Version string
+	Digest  string
+	Kernel  string
+	RootFS  string
+}{})
+
+// View returns a read-only view of VMDiskConfig.
+func (p *VMDiskConfig) View() VMDiskConfigView {
+	return VMDiskConfigView{ж: p}
+}
+
+// VMDiskConfigView provides a read-only view over VMDiskConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMDiskConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMDiskConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMDiskConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMDiskConfigView) AsStruct() *VMDiskConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMDiskConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMDiskConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMDiskConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMDiskConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMDiskConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMDiskConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMDiskConfigView) Backend() string { return v.ж.Backend }
+func (v VMDiskConfigView) Bytes() int64    { return v.ж.Bytes }
+func (v VMDiskConfigView) Path() string    { return v.ж.Path }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMDiskConfigViewNeedsRegeneration = VMDiskConfig(struct {
+	Backend string
+	Bytes   int64
+	Path    string
+}{})
+
+// View returns a read-only view of VMNetworkConfig.
+func (p *VMNetworkConfig) View() VMNetworkConfigView {
+	return VMNetworkConfigView{ж: p}
+}
+
+// VMNetworkConfigView provides a read-only view over VMNetworkConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMNetworkConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMNetworkConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMNetworkConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMNetworkConfigView) AsStruct() *VMNetworkConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMNetworkConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMNetworkConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMNetworkConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMNetworkConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMNetworkConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMNetworkConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMNetworkConfigView) Mode() string      { return v.ж.Mode }
+func (v VMNetworkConfigView) Interface() string { return v.ж.Interface }
+func (v VMNetworkConfigView) Tap() string       { return v.ж.Tap }
+func (v VMNetworkConfigView) MAC() string       { return v.ж.MAC }
+func (v VMNetworkConfigView) IP() netip.Addr    { return v.ж.IP }
+func (v VMNetworkConfigView) Parent() string    { return v.ж.Parent }
+func (v VMNetworkConfigView) VLAN() int         { return v.ж.VLAN }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMNetworkConfigViewNeedsRegeneration = VMNetworkConfig(struct {
+	Mode      string
+	Interface string
+	Tap       string
+	MAC       string
+	IP        netip.Addr
+	Parent    string
+	VLAN      int
+}{})
+
+// View returns a read-only view of VMSSHConfig.
+func (p *VMSSHConfig) View() VMSSHConfigView {
+	return VMSSHConfigView{ж: p}
+}
+
+// VMSSHConfigView provides a read-only view over VMSSHConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMSSHConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMSSHConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMSSHConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMSSHConfigView) AsStruct() *VMSSHConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMSSHConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMSSHConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMSSHConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMSSHConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMSSHConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMSSHConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMSSHConfigView) User() string       { return v.ж.User }
+func (v VMSSHConfigView) KeyRef() string     { return v.ж.KeyRef }
+func (v VMSSHConfigView) KnownHosts() string { return v.ж.KnownHosts }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMSSHConfigViewNeedsRegeneration = VMSSHConfig(struct {
+	User       string
+	KeyRef     string
+	KnownHosts string
+}{})
+
+// View returns a read-only view of VMConsoleConfig.
+func (p *VMConsoleConfig) View() VMConsoleConfigView {
+	return VMConsoleConfigView{ж: p}
+}
+
+// VMConsoleConfigView provides a read-only view over VMConsoleConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMConsoleConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMConsoleConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMConsoleConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMConsoleConfigView) AsStruct() *VMConsoleConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMConsoleConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMConsoleConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMConsoleConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMConsoleConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMConsoleConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMConsoleConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMConsoleConfigView) SocketPath() string { return v.ж.SocketPath }
+func (v VMConsoleConfigView) LogPath() string    { return v.ж.LogPath }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMConsoleConfigViewNeedsRegeneration = VMConsoleConfig(struct {
+	SocketPath string
+	LogPath    string
+}{})
+
+// View returns a read-only view of VMSocketConfig.
+func (p *VMSocketConfig) View() VMSocketConfigView {
+	return VMSocketConfigView{ж: p}
+}
+
+// VMSocketConfigView provides a read-only view over VMSocketConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMSocketConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMSocketConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMSocketConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMSocketConfigView) AsStruct() *VMSocketConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMSocketConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMSocketConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMSocketConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMSocketConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMSocketConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMSocketConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMSocketConfigView) APISocketPath() string { return v.ж.APISocketPath }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMSocketConfigViewNeedsRegeneration = VMSocketConfig(struct {
+	APISocketPath string
 }{})
