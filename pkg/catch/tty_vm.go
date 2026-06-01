@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/cli"
@@ -42,8 +43,21 @@ func (e *ttyExecer) vmCmdFunc(args []string) error {
 			return fmt.Errorf("vm console takes no remote arguments")
 		}
 		return e.vmConsoleCmdFunc()
+	case "images":
+		flags, remaining, err := cli.ParseVMImages(args[1:])
+		if err != nil {
+			return err
+		}
+		return e.vmImagesCmdFunc(flags, remaining)
 	default:
 		return fmt.Errorf("unknown vm command %q", args[0])
+	}
+}
+
+func (e *ttyExecer) vmImageCache() vmImageCache {
+	return vmImageCache{
+		Root:        filepath.Join(e.s.cfg.RootDir, "vm-images"),
+		ManifestURL: defaultVMImageManifestURL,
 	}
 }
 
