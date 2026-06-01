@@ -794,8 +794,11 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	if _, ok := RemoteGroupFlagSpecs()["vm"]["images"]; !ok {
 		t.Fatal("vm images flag spec missing")
 	}
+	if !RemoteGroupFlagSpecs()["vm"]["images"]["--format"].ConsumesValue {
+		t.Fatal("vm images --format should consume a value")
+	}
 	if !RemoteGroupFlagSpecs()["vm"]["images"]["--output"].ConsumesValue {
-		t.Fatal("vm images --output should consume a value")
+		t.Fatal("vm images --output alias should consume a value")
 	}
 }
 
@@ -928,24 +931,32 @@ func TestParseAdditionalCommandFlags(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseVMImages default: %v", err)
 		}
-		if flags.Output != "table" || len(args) != 0 {
+		if flags.Format != "table" || len(args) != 0 {
 			t.Fatalf("ParseVMImages default = %#v args=%v, want table no args", flags, args)
 		}
 
-		flags, args, err = ParseVMImages([]string{"--output=json"})
+		flags, args, err = ParseVMImages([]string{"--format=json"})
 		if err != nil {
-			t.Fatalf("ParseVMImages output: %v", err)
+			t.Fatalf("ParseVMImages format: %v", err)
 		}
-		if flags.Output != "json" || len(args) != 0 {
-			t.Fatalf("ParseVMImages output = %#v args=%v, want json no args", flags, args)
+		if flags.Format != "json" || len(args) != 0 {
+			t.Fatalf("ParseVMImages format = %#v args=%v, want json no args", flags, args)
+		}
+
+		flags, args, err = ParseVMImages([]string{"--output=json-pretty"})
+		if err != nil {
+			t.Fatalf("ParseVMImages output alias: %v", err)
+		}
+		if flags.Format != "json-pretty" || len(args) != 0 {
+			t.Fatalf("ParseVMImages output alias = %#v args=%v, want json-pretty no args", flags, args)
 		}
 
 		flags, args, err = ParseVMImages([]string{"update", "--output", "json-pretty"})
 		if err != nil {
 			t.Fatalf("ParseVMImages update: %v", err)
 		}
-		if flags.Output != "json-pretty" {
-			t.Fatalf("VMImages output = %q, want json-pretty", flags.Output)
+		if flags.Format != "json-pretty" {
+			t.Fatalf("VMImages format = %q, want json-pretty", flags.Format)
 		}
 		if !reflect.DeepEqual(args, []string{"update"}) {
 			t.Fatalf("ParseVMImages args = %#v, want update", args)
@@ -1015,7 +1026,7 @@ func TestParseFlagErrors(t *testing.T) {
 	if _, _, err := ParseRun([]string{"--macvlan-vlan", "not-an-int"}); err == nil {
 		t.Fatal("ParseRun succeeded with invalid int")
 	}
-	if _, _, err := ParseVMImages([]string{"--output=xml"}); err == nil || !strings.Contains(err.Error(), "--output must be table, json, or json-pretty") {
+	if _, _, err := ParseVMImages([]string{"--format=xml"}); err == nil || !strings.Contains(err.Error(), "--format must be table, json, or json-pretty") {
 		t.Fatalf("ParseVMImages invalid output error = %v", err)
 	}
 	if _, _, err := ParseLogs([]string{"--lines", "not-an-int"}); err == nil {

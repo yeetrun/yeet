@@ -131,7 +131,7 @@ type DockerUpdateFlags struct {
 }
 
 type VMImagesFlags struct {
-	Output string
+	Format string
 }
 
 type InfoFlags struct {
@@ -269,7 +269,8 @@ type dockerUpdateFlagsParsed struct {
 }
 
 type vmImagesFlagsParsed struct {
-	Output string `flag:"output" default:"table"`
+	Format string `flag:"format" default:"table"`
+	Output string `flag:"output"`
 }
 
 type infoFlagsParsed struct {
@@ -451,12 +452,12 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"images": {
 				Name:        "images",
 				Description: "Show or refresh VM image cache state",
-				Usage:       "vm images [update] [--output=table|json|json-pretty]",
+				Usage:       "vm images [update] [--format=table|json|json-pretty]",
 				Examples: []string{
 					"yeet vm images",
-					"yeet vm images --output=json",
+					"yeet vm images --format=json",
 					"yeet vm images update",
-					"yeet vm images update --output=json-pretty",
+					"yeet vm images update --format=json-pretty",
 				},
 				ArgsSchema:  VMImagesArgs{},
 				FlagsSchema: vmImagesFlagsParsed{},
@@ -1071,11 +1072,15 @@ func ParseVMImages(args []string) (VMImagesFlags, []string, error) {
 	if err != nil {
 		return VMImagesFlags{}, nil, err
 	}
-	output, err := normalizeOutputFormat("--output", parsed.Flags.Output)
+	formatRaw := parsed.Flags.Format
+	if strings.TrimSpace(parsed.Flags.Output) != "" {
+		formatRaw = parsed.Flags.Output
+	}
+	format, err := normalizeOutputFormat("--format", formatRaw)
 	if err != nil {
 		return VMImagesFlags{}, nil, err
 	}
-	flags := VMImagesFlags{Output: output}
+	flags := VMImagesFlags{Format: format}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
 }
