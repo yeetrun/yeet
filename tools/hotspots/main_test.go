@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -52,6 +53,33 @@ func TestBuildReportWithMissingInputs(t *testing.T) {
 	}
 	if !strings.Contains(report, "No hotspots found from available inputs.") {
 		t.Fatalf("report = %q, want no hotspots message", report)
+	}
+}
+
+func TestBuildReportIgnoresInheritedGitEnvironment(t *testing.T) {
+	repo := t.TempDir()
+	mustWrite(t, filepath.Join(repo, "pkg/risk.go"), []byte("package risk\n"))
+	runGit(t, repo, "init")
+	runGit(t, repo, "add", ".")
+	runGit(t, repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture")
+
+	dir := t.TempDir()
+	t.Setenv("GIT_DIR", filepath.Join(repo, ".git"))
+	t.Setenv("GIT_WORK_TREE", repo)
+
+	report, err := buildReport(options{
+		Root:         dir,
+		CoveragePath: "missing-cover.out",
+		GolangCIPath: "missing-golangci.json",
+		CRAPPath:     "missing-crap.txt",
+		Limit:        10,
+		ChurnCommits: 1,
+	})
+	if err != nil {
+		t.Fatalf("buildReport returned error: %v", err)
+	}
+	if !strings.Contains(report, "git-churn=no coverage=no golangci=no crap=no") {
+		t.Fatalf("report inputs = %q, want inherited git env ignored", report)
 	}
 }
 
@@ -180,5 +208,15 @@ func mustWrite(t *testing.T, path string, b []byte) {
 	}
 	if err := os.WriteFile(path, b, 0o644); err != nil {
 		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = withoutLocalGitEnv(os.Environ())
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
 }

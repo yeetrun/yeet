@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/shayne/yargs"
 	"github.com/yeetrun/yeet/pkg/cli"
@@ -43,6 +44,11 @@ func run() int {
 	bridgedArgs = route.bridgedArgs
 	args := route.args
 
+	helpConfig := buildHelpConfig()
+	if handleSchemaBackedHelp(args, helpConfig) {
+		return 0
+	}
+
 	handlers := make(map[string]yargs.SubcommandHandler)
 	for _, name := range cli.RemoteCommandNames() {
 		handlers[name] = handleRemote
@@ -56,13 +62,91 @@ func run() int {
 	handlers["ssh"] = yeet.HandleSSH
 	handlers["skirt"] = yeet.HandleSkirt
 
-	helpConfig := buildHelpConfig()
 	groups := buildGroupHandlers()
 	if err := yargs.RunSubcommandsWithGroups(context.Background(), args, helpConfig, globalFlagsParsed{}, handlers, groups); err != nil {
 		yeet.PrintCLIError(os.Stderr, err)
 		return 1
 	}
 	return 0
+}
+
+func handleSchemaBackedHelp(args []string, config yargs.HelpConfig) bool {
+	if len(args) == 0 {
+		return false
+	}
+	if args[0] == "help" && len(args) > 1 {
+		target := yargs.ApplyAliases(args[1:], config)
+		return printSchemaBackedHelp(target, config, false)
+	}
+	if hasLLMHelpFlag(args) {
+		return printSchemaBackedHelp(args, config, true)
+	}
+	if hasHumanHelpFlag(args) {
+		return printSchemaBackedHelp(args, config, false)
+	}
+	return false
+}
+
+func printSchemaBackedHelp(args []string, config yargs.HelpConfig, llm bool) bool {
+	if len(args) == 0 {
+		return false
+	}
+	cmd := args[0]
+	info, ok := cli.RemoteCommandInfo(cmd)
+	if !ok || (info.FlagsSchema == nil && info.ArgsSchema == nil) {
+		return false
+	}
+	flagsSchema := info.FlagsSchema
+	if flagsSchema == nil {
+		flagsSchema = struct{}{}
+	}
+	argsSchema := info.ArgsSchema
+	if argsSchema == nil {
+		argsSchema = struct{}{}
+	}
+	if llm {
+		fmt.Print(yargs.GenerateSubCommandHelpLLM(config, cmd, globalFlagsParsed{}, flagsSchema, argsSchema))
+		return true
+	}
+	fmt.Print(stripMarkdownAliasBlock(yargs.GenerateSubCommandHelp(config, cmd, globalFlagsParsed{}, flagsSchema, argsSchema)))
+	return true
+}
+
+func hasHumanHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLLMHelpFlag(args []string) bool {
+	for _, arg := range args {
+		if arg == "--help-llm" {
+			return true
+		}
+	}
+	return false
+}
+
+func stripMarkdownAliasBlock(text string) string {
+	lines := strings.SplitAfter(text, "\n")
+	out := make([]string, 0, len(lines))
+	skipBlank := false
+	for _, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "**Aliases**:") {
+			skipBlank = true
+			continue
+		}
+		if skipBlank && strings.TrimSpace(line) == "" {
+			skipBlank = false
+			continue
+		}
+		skipBlank = false
+		out = append(out, line)
+	}
+	return strings.Join(out, "")
 }
 
 type runtimeOverrides struct {
@@ -141,6 +225,11 @@ func handleRemote(_ context.Context, args []string) error {
 
 func handleDockerGroup(ctx context.Context, args []string) error {
 	full := append([]string{"docker"}, args...)
+	return handleRemote(ctx, full)
+}
+
+func handleVMGroup(ctx context.Context, args []string) error {
+	full := append([]string{"vm"}, args...)
 	return handleRemote(ctx, full)
 }
 

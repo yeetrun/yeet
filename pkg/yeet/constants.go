@@ -10,4 +10,5 @@ const (
 	dockerServiceType = "docker"
 	serviceTypeRun    = "run"
 	serviceTypeCron   = "cron"
+	serviceTypeVM     = "vm"
 )

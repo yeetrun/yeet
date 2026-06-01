@@ -65,3 +65,46 @@ func TestServiceNetworkPortsPresenceRoundTrip(t *testing.T) {
 		t.Fatalf("omitted = %#v, want PortsPresent false", omitted)
 	}
 }
+
+func TestServiceInfoVMJSONRoundTrip(t *testing.T) {
+	info := ServiceInfo{
+		Name: "devbox",
+		VM: &ServiceVM{
+			Runtime:      "firecracker",
+			Image:        "vm://ubuntu/26.04",
+			ImageVersion: "ubuntu-26.04-amd64-v0",
+			CPUs:         4,
+			MemoryBytes:  4 << 30,
+			DiskBytes:    128 << 30,
+			DiskBackend:  "zvol",
+			DiskPath:     "flash/yeet/vms/devbox/root",
+			SSH:          &ServiceVMSSH{User: "ubuntu", Host: "devbox.local"},
+			Console:      &ServiceVMConsole{Available: true, SocketPath: "/run/yeet/devbox/serial.sock"},
+			Networks:     []ServiceVMNetwork{{Mode: "svc", Interface: "tap0", IP: "10.0.0.10", MAC: "02:00:00:00:00:10"}},
+			SetupState:   "ready",
+		},
+	}
+	raw, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("Marshal ServiceInfo: %v", err)
+	}
+	for _, want := range []string{
+		`"vm"`,
+		`"imageVersion":"ubuntu-26.04-amd64-v0"`,
+		`"memoryBytes":4294967296`,
+		`"diskBackend":"zvol"`,
+		`"socketPath":"/run/yeet/devbox/serial.sock"`,
+		`"setupState":"ready"`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("ServiceInfo JSON = %s, want %s", raw, want)
+		}
+	}
+	var roundTrip ServiceInfo
+	if err := json.Unmarshal(raw, &roundTrip); err != nil {
+		t.Fatalf("Unmarshal ServiceInfo: %v", err)
+	}
+	if roundTrip.VM == nil || roundTrip.VM.Image != "vm://ubuntu/26.04" || roundTrip.VM.SSH.User != "ubuntu" || !roundTrip.VM.Console.Available {
+		t.Fatalf("round trip VM = %#v", roundTrip.VM)
+	}
+}

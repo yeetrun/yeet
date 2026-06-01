@@ -423,6 +423,9 @@ func resolvePayloadPath(configDir, payload string) string {
 }
 
 func resolvePayloadPathForEntry(configDir string, entry ServiceEntry) string {
+	if strings.TrimSpace(entry.PayloadKind) == serviceTypeVM || isVMPayload(entry.Payload) {
+		return strings.TrimSpace(entry.Payload)
+	}
 	if strings.TrimSpace(entry.PayloadKind) == "local-image" {
 		return strings.TrimSpace(entry.Payload)
 	}
@@ -447,6 +450,9 @@ func relativePayloadPath(configDir, payload string) string {
 func relativePayloadPathForKind(configDir, payload string, payloadKind string) string {
 	payload = strings.TrimSpace(payload)
 	if payload == "" {
+		return payload
+	}
+	if strings.TrimSpace(payloadKind) == serviceTypeVM || isVMPayload(payload) {
 		return payload
 	}
 	if strings.TrimSpace(payloadKind) == "local-image" {

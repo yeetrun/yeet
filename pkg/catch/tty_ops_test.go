@@ -47,6 +47,90 @@ func TestConfirmTSUpdateReturnsPromptWriteError(t *testing.T) {
 	}
 }
 
+func TestRunCmdDispatchesVMPayload(t *testing.T) {
+	server := newTestServer(t)
+	var called bool
+	oldRunVM := runVMCmdFunc
+	defer func() { runVMCmdFunc = oldRunVM }()
+	runVMCmdFunc = func(e *ttyExecer, flags cli.RunFlags, payload string) error {
+		called = true
+		if payload != vmUbuntu2604Payload {
+			t.Fatalf("payload = %q", payload)
+		}
+		if flags.Net != "svc" || flags.CPUs != 4 {
+			t.Fatalf("flags = %#v", flags)
+		}
+		return nil
+	}
+
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "devbox", rw: &bytes.Buffer{}}
+	if err := execer.runCmdFunc(cli.RunFlags{Net: "svc", CPUs: 4}, []string{vmUbuntu2604Payload}); err != nil {
+		t.Fatalf("runCmdFunc: %v", err)
+	}
+	if !called {
+		t.Fatal("VM run function was not called")
+	}
+}
+
+func TestVMConsoleRejectsNonVMService(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.cfg.DB.MutateData(func(d *db.Data) error {
+		d.Services = map[string]*db.Service{
+			"api": {Name: "api", ServiceType: db.ServiceTypeDockerCompose},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "api", rw: &bytes.Buffer{}}
+	err := execer.vmCmdFunc([]string{"console"})
+	if err == nil || !strings.Contains(err.Error(), `vm console requires type "vm"`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestVMConsoleRejectsMissingSocket(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.cfg.DB.MutateData(func(d *db.Data) error {
+		d.Services = map[string]*db.Service{
+			"devbox": {Name: "devbox", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "devbox", rw: &bytes.Buffer{}}
+	err := execer.vmCmdFunc([]string{"console"})
+	if err == nil || !strings.Contains(err.Error(), `service "devbox" has no VM console socket`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestVMConsoleSocketNotConnectedIncludesPath(t *testing.T) {
+	server := newTestServer(t)
+	socketPath := filepath.Join(t.TempDir(), "serial.sock")
+	if err := os.WriteFile(socketPath, []byte("not a socket"), 0o600); err != nil {
+		t.Fatalf("write socket placeholder: %v", err)
+	}
+	if _, err := server.cfg.DB.MutateData(func(d *db.Data) error {
+		d.Services = map[string]*db.Service{
+			"devbox": {
+				Name:        "devbox",
+				ServiceType: db.ServiceTypeVM,
+				VM:          &db.VMConfig{Console: db.VMConsoleConfig{SocketPath: socketPath}},
+			},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "devbox", rw: &bytes.Buffer{}}
+	err := execer.vmCmdFunc([]string{"console"})
+	if err == nil || !strings.Contains(err.Error(), "connect VM console socket "+socketPath) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestSnapshotsDefaultsShow(t *testing.T) {
 	server := newTestServer(t)
 	keep := 3

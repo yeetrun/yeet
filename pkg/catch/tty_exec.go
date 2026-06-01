@@ -102,18 +102,19 @@ type PtySpec struct {
 
 type ttyExecer struct {
 	// Inputs
-	ctx         context.Context
-	args        []string
-	s           *Server
-	sn          string
-	hostLabel   string
-	user        string
-	payloadName string
-	progress    catchrpc.ProgressMode
-	rawRW       io.ReadWriter
-	rawCloser   io.Closer
-	isPty       bool
-	ptyReq      PtySpec
+	ctx                context.Context
+	args               []string
+	s                  *Server
+	sn                 string
+	hostLabel          string
+	user               string
+	payloadName        string
+	vmSSHAuthorizedKey string
+	progress           catchrpc.ProgressMode
+	rawRW              io.ReadWriter
+	rawCloser          io.Closer
+	isPty              bool
+	ptyReq             PtySpec
 
 	// Assigned during run
 	rw             io.ReadWriter // May be a pty
@@ -206,7 +207,7 @@ func (e *ttyExecer) run() error {
 }
 
 func (e *ttyExecer) startPtySession() (*ttyPtySession, error) {
-	if !e.isPty {
+	if !e.shouldStartPtySession() {
 		return nil, nil
 	}
 
@@ -236,6 +237,14 @@ func (e *ttyExecer) startPtySession() (*ttyPtySession, error) {
 		session.copyInputFromSession(e)
 	}
 	return session, nil
+}
+
+func (e *ttyExecer) shouldStartPtySession() bool {
+	return e.isPty && !e.isTransparentTTYCommand()
+}
+
+func (e *ttyExecer) isTransparentTTYCommand() bool {
+	return len(e.args) == 2 && e.args[0] == "vm" && e.args[1] == "console"
 }
 
 func dupPtyFile(stdin *os.File) (*os.File, error) {
@@ -359,6 +368,9 @@ var ttyCommandHandlers = map[string]ttyCommandHandler{
 	},
 	"ts": func(e *ttyExecer, args []string) error {
 		return e.tsCmdFunc(args)
+	},
+	"vm": func(e *ttyExecer, args []string) error {
+		return e.vmCmdFunc(args)
 	},
 	"umount": func(e *ttyExecer, args []string) error {
 		return e.umountCmdFunc(args)

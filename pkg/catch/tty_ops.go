@@ -796,6 +796,9 @@ func (e *ttyExecer) ipCmdFunc() error {
 	if e.sn == CatchService {
 		return e.printCatchTailscaleIPs()
 	}
+	if handled, err := e.printVMIPs(); handled {
+		return err
+	}
 
 	args, err := e.ipListArgs()
 	if err != nil {
@@ -809,6 +812,26 @@ func (e *ttyExecer) ipCmdFunc() error {
 		return fmt.Errorf("failed to write IP address: %w", err)
 	}
 	return nil
+}
+
+func (e *ttyExecer) printVMIPs() (bool, error) {
+	if e.sn == SystemService {
+		return false, nil
+	}
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil || sv.ServiceType() != db.ServiceTypeVM {
+		return false, nil
+	}
+	ips, err := e.s.serviceIPList(e.sn, sv)
+	if err != nil {
+		return true, fmt.Errorf("failed to get IP addresses: %w", err)
+	}
+	for _, ip := range ips {
+		if _, err := fmt.Fprintln(e.rw, ip.IP); err != nil {
+			return true, fmt.Errorf("failed to write IP address: %w", err)
+		}
+	}
+	return true, nil
 }
 
 func (e *ttyExecer) printCatchTailscaleIPs() error {

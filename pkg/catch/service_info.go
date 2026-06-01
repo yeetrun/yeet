@@ -6,15 +6,25 @@ package catch
 
 import (
 	"fmt"
+	"net/netip"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 )
 
 var listIPv4AddrsFn = listIPv4Addrs
+var serviceVMStatusFn = serviceVMStatus
+var discoverVMLANIPsFn = discoverVMLANIPs
+
+func serviceVMStatus(sn string) (svc.Status, error) {
+	runner := &vmRunner{name: sn}
+	return runner.Status()
+}
 
 func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {
 	resp := catchrpc.ServiceInfoResponse{}
@@ -57,6 +67,11 @@ func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {
 	}
 	info.Status = s.serviceStatusInfo(sn, sv)
 	info.Images = serviceImageInfo(dv, sn)
+	var vmLANIPs map[string]string
+	if sv.ServiceType() == db.ServiceTypeVM {
+		vmLANIPs = discoverVMLANIPsFn(sn, sv.VM())
+		info.VM = serviceVMInfo(sv.VM(), vmLANIPs)
+	}
 	snapshots, err := s.serviceSnapshotInfo(dv, sv)
 	if err != nil {
 		return resp, err
@@ -182,6 +197,9 @@ func serviceNetworkInfo(sv db.ServiceView) catchrpc.ServiceNetwork {
 	if svcNet, ok := sv.SvcNetwork().GetOk(); ok && svcNet.IPv4.IsValid() {
 		out.SvcIP = svcNet.IPv4.String()
 	}
+	if out.SvcIP == "" && sv.ServiceType() == db.ServiceTypeVM {
+		out.SvcIP = vmSvcIPFromNetworks(sv.VM())
+	}
 	if macvlan, ok := sv.Macvlan().GetOk(); ok {
 		out.Macvlan = &catchrpc.ServiceMacvlan{
 			Interface: macvlan.Interface,
@@ -207,9 +225,114 @@ func serviceNetworkInfo(sv db.ServiceView) catchrpc.ServiceNetwork {
 	return out
 }
 
+func vmSvcIPFromNetworks(vm db.VMConfigView) string {
+	if !vm.Valid() {
+		return ""
+	}
+	for _, network := range vm.Networks().AsSlice() {
+		if network.Mode == "svc" && network.IP.IsValid() {
+			return network.IP.String()
+		}
+	}
+	return ""
+}
+
+func serviceVMInfo(vm db.VMConfigView, discovered map[string]string) *catchrpc.ServiceVM {
+	if !vm.Valid() {
+		return nil
+	}
+	image := vm.Image()
+	disk := vm.Disk()
+	ssh := vm.SSH()
+	console := vm.Console()
+	socketPath := strings.TrimSpace(console.SocketPath)
+	out := &catchrpc.ServiceVM{
+		Runtime:      vm.Runtime(),
+		Image:        image.Payload,
+		ImageVersion: image.Version,
+		CPUs:         vm.CPUs(),
+		MemoryBytes:  vm.MemoryBytes(),
+		DiskBytes:    disk.Bytes,
+		DiskBackend:  disk.Backend,
+		DiskPath:     disk.Path,
+		Console: &catchrpc.ServiceVMConsole{
+			Available:  socketPath != "",
+			SocketPath: socketPath,
+		},
+		SetupState: vm.SetupState(),
+	}
+	if strings.TrimSpace(ssh.User) != "" {
+		out.SSH = &catchrpc.ServiceVMSSH{User: ssh.User, Host: vmSSHHostFromNetworks(vm, discovered)}
+	}
+	for _, network := range vm.Networks().AsSlice() {
+		out.Networks = append(out.Networks, serviceVMNetworkInfo(network, discovered))
+	}
+	return out
+}
+
+func vmSSHHostFromNetworks(vm db.VMConfigView, discovered map[string]string) string {
+	if svcIP := vmSvcIPFromNetworks(vm); svcIP != "" {
+		return svcIP
+	}
+	for _, network := range vm.Networks().AsSlice() {
+		if ip := serviceVMNetworkIP(network, discovered); ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+func serviceVMNetworkInfo(network db.VMNetworkConfig, discovered map[string]string) catchrpc.ServiceVMNetwork {
+	out := catchrpc.ServiceVMNetwork{
+		Mode:      network.Mode,
+		Interface: network.Interface,
+		MAC:       network.MAC,
+	}
+	if ip := serviceVMNetworkIP(network, discovered); ip != "" {
+		out.IP = ip
+	}
+	return out
+}
+
+func serviceVMNetworkIP(network db.VMNetworkConfig, discovered map[string]string) string {
+	if network.IP.IsValid() {
+		return network.IP.String()
+	}
+	return discovered[strings.TrimSpace(network.Interface)]
+}
+
+func serviceVMNetworkIPs(vm db.VMConfigView, discovered map[string]string) []catchrpc.ServiceIP {
+	if !vm.Valid() {
+		return nil
+	}
+	var out []catchrpc.ServiceIP
+	for _, network := range vm.Networks().AsSlice() {
+		ip := serviceVMNetworkIP(network, discovered)
+		if ip == "" {
+			continue
+		}
+		label := "vm"
+		switch network.Mode {
+		case "svc":
+			label = "service"
+		case "lan":
+			label = "lan"
+		}
+		out = append(out, catchrpc.ServiceIP{
+			Label:     label,
+			IP:        ip,
+			Interface: network.Interface,
+		})
+	}
+	return out
+}
+
 func (s *Server) serviceIPList(sn string, sv db.ServiceView) ([]catchrpc.ServiceIP, error) {
 	if sn == CatchService {
 		return s.catchServiceIPList()
+	}
+	if sv.ServiceType() == db.ServiceTypeVM {
+		return serviceVMNetworkIPs(sv.VM(), discoverVMLANIPsFn(sn, sv.VM())), nil
 	}
 
 	args, hasNetns := serviceIPListArgs(sn, sv)
@@ -218,6 +341,74 @@ func (s *Server) serviceIPList(sn string, sv db.ServiceView) ([]catchrpc.Service
 		return nil, err
 	}
 	return serviceIPListFromEntries(raw, serviceIPLabelConfigFromView(sv, hasNetns)), nil
+}
+
+func discoverVMLANIPs(service string, vm db.VMConfigView) map[string]string {
+	out := parseVMGuestIPReports(vmJournalOutput(service))
+	for _, network := range vm.Networks().AsSlice() {
+		if network.Mode != "lan" || serviceVMNetworkIP(network, out) != "" {
+			continue
+		}
+		if ip := vmLANIPFromNeighbor(network); ip != "" {
+			out[strings.TrimSpace(network.Interface)] = ip
+		}
+	}
+	return out
+}
+
+func vmJournalOutput(service string) []byte {
+	out, err := exec.Command("journalctl", "-u", vmSystemdUnitName(service), "-o", "cat", "--no-pager", "-n", "1000").Output()
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+func vmLANIPFromNeighbor(network db.VMNetworkConfig) string {
+	parent := strings.TrimSpace(network.Parent)
+	mac := strings.TrimSpace(network.MAC)
+	if parent == "" || mac == "" {
+		return ""
+	}
+	out, err := exec.Command("ip", "-4", "neigh", "show", "dev", parent).Output()
+	if err != nil {
+		return ""
+	}
+	return parseIPNeighForMAC(out, mac)
+}
+
+func parseVMGuestIPReports(raw []byte) map[string]string {
+	out := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[0] != "yeet-ip" {
+			continue
+		}
+		if _, err := netip.ParseAddr(fields[2]); err != nil {
+			continue
+		}
+		out[fields[1]] = fields[2]
+	}
+	return out
+}
+
+func parseIPNeighForMAC(raw []byte, mac string) string {
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		if _, err := netip.ParseAddr(fields[0]); err != nil {
+			continue
+		}
+		for i := 1; i+1 < len(fields); i++ {
+			if fields[i] == "lladdr" && strings.ToLower(fields[i+1]) == mac {
+				return fields[0]
+			}
+		}
+	}
+	return ""
 }
 
 func (s *Server) catchServiceIPList() ([]catchrpc.ServiceIP, error) {
@@ -322,6 +513,16 @@ func (s *Server) serviceStatusInfo(sn string, sv db.ServiceView) catchrpc.Servic
 		}
 	case db.ServiceTypeSystemd:
 		status, err := s.SystemdStatus(sn)
+		if err != nil {
+			out.Error = err.Error()
+			return out
+		}
+		out.Components = append(out.Components, catchrpc.ServiceComponentStatus{
+			Name:   sn,
+			Status: string(ComponentStatusFromServiceStatus(status)),
+		})
+	case db.ServiceTypeVM:
+		status, err := serviceVMStatusFn(sn)
 		if err != nil {
 			out.Error = err.Error()
 			return out

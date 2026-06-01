@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
@@ -316,6 +317,34 @@ func restoreExecRemoteGlobals(t *testing.T) {
 		loadedPrefs = oldPrefs
 		execUIOverrides = oldUI
 	})
+}
+
+func TestNewRemoteExecRequestAddsLocalSSHKeyForVMRun(t *testing.T) {
+	tmp := t.TempDir()
+	sshDir := filepath.Join(tmp, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		t.Fatalf("mkdir .ssh: %v", err)
+	}
+	wantKey := "ssh-ed25519 AAAATEST local@example"
+	if err := os.WriteFile(filepath.Join(sshDir, "id_ed25519.pub"), []byte(wantKey+"\n"), 0o600); err != nil {
+		t.Fatalf("write public key: %v", err)
+	}
+	t.Setenv("HOME", tmp)
+	t.Setenv("YEET_VM_SSH_KEY", "")
+
+	req := newRemoteExecRequest("yeet-lab", "devbox", []string{"run", "vm://ubuntu/26.04"}, nil, false)
+	if req.VMSSHKey != wantKey {
+		t.Fatalf("VMSSHKey = %q, want local public key", req.VMSSHKey)
+	}
+}
+
+func TestNewRemoteExecRequestSkipsLocalSSHKeyForNonVMRun(t *testing.T) {
+	t.Setenv("YEET_VM_SSH_KEY", "ssh-ed25519 AAAATEST local@example")
+
+	req := newRemoteExecRequest("yeet-lab", "api", []string{"run", "ghcr.io/example/api:latest"}, nil, false)
+	if req.VMSSHKey != "" {
+		t.Fatalf("VMSSHKey = %q, want empty for non-VM run", req.VMSSHKey)
+	}
 }
 
 func TestExecRemoteToWritesClientOutputToProvidedWriter(t *testing.T) {

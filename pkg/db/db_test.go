@@ -172,6 +172,31 @@ func TestServiceCloneDeepCopiesArtifactsNetworksAndTags(t *testing.T) {
 	}
 }
 
+func TestVMServiceClonePreservesVMConfig(t *testing.T) {
+	svc := &Service{
+		Name:        "devbox",
+		ServiceType: ServiceTypeVM,
+		VM: &VMConfig{
+			Runtime:     "firecracker",
+			Image:       VMImageConfig{Payload: "vm://ubuntu/26.04", Version: "ubuntu-26.04-amd64-v0"},
+			CPUs:        4,
+			MemoryBytes: 4 << 30,
+			Disk:        VMDiskConfig{Backend: "zvol", Bytes: 128 << 30, Path: "flash/yeet/vms/devbox/root"},
+			SSH:         VMSSHConfig{User: "ubuntu"},
+			Console:     VMConsoleConfig{SocketPath: "/run/yeet/devbox/serial.sock"},
+			SetupState:  "ready",
+		},
+	}
+	cloned := svc.Clone()
+	if cloned.VM == nil || cloned.VM.Image.Payload != "vm://ubuntu/26.04" || cloned.VM.CPUs != 4 {
+		t.Fatalf("cloned VM = %#v", cloned.VM)
+	}
+	cloned.VM.CPUs = 2
+	if svc.VM.CPUs != 4 {
+		t.Fatalf("source mutated, cpus = %d", svc.VM.CPUs)
+	}
+}
+
 func TestServiceRootCloneAndView(t *testing.T) {
 	data := &Data{
 		DataVersion: CurrentDataVersion,
@@ -856,6 +881,56 @@ func TestMigrateAddsSnapshotPolicyVersion(t *testing.T) {
 	}
 	if got := backup.Services["svc"].ServiceRootZFS; got != "tank/apps/svc" {
 		t.Fatalf("backup ServiceRootZFS = %q, want tank/apps/svc", got)
+	}
+}
+
+func TestMigrateAddsVMServiceConfigVersion(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: 8,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", ServiceType: ServiceTypeSystemd, ServiceRoot: "/srv/apps/svc"},
+		},
+	})
+	store := NewStore(path, filepath.Join(root, "services"))
+	got, err := store.Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DataVersion() != CurrentDataVersion {
+		t.Fatalf("DataVersion = %d, want %d", got.DataVersion(), CurrentDataVersion)
+	}
+	sv, ok := got.Services().GetOk("svc")
+	if !ok {
+		t.Fatal("missing migrated service")
+	}
+	if sv.VM().Valid() {
+		t.Fatalf("service VM valid = true, want false")
+	}
+	if got := sv.ServiceRoot(); got != "/srv/apps/svc" {
+		t.Fatalf("migrated ServiceRoot = %q, want /srv/apps/svc", got)
+	}
+	onDisk := mustReadData(t, path)
+	if onDisk.DataVersion != CurrentDataVersion {
+		t.Fatalf("on-disk DataVersion = %d, want %d", onDisk.DataVersion, CurrentDataVersion)
+	}
+	if got := onDisk.Services["svc"].ServiceRoot; got != "/srv/apps/svc" {
+		t.Fatalf("on-disk ServiceRoot = %q, want /srv/apps/svc", got)
+	}
+	backups, err := filepath.Glob(path + ".v8.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("migration backups = %v, want exactly one v8 backup", backups)
+	}
+	backup := mustReadData(t, backups[0])
+	if backup.DataVersion != 8 {
+		t.Fatalf("backup DataVersion = %d, want 8", backup.DataVersion)
+	}
+	if got := backup.Services["svc"].ServiceRoot; got != "/srv/apps/svc" {
+		t.Fatalf("backup ServiceRoot = %q, want /srv/apps/svc", got)
 	}
 }
 

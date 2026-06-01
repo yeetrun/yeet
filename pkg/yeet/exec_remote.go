@@ -293,7 +293,85 @@ func newRemoteExecRequest(host string, service string, args []string, stdin io.R
 	if payload := payloadNameForStdin(stdin); payload != "" {
 		req.PayloadName = payload
 	}
+	if key := localVMSSHKeyForRemoteArgs(args); key != "" {
+		req.VMSSHKey = key
+	}
 	return req
+}
+
+func localVMSSHKeyForRemoteArgs(args []string) string {
+	if !remoteArgsContainVMPayload(args) {
+		return ""
+	}
+	key, err := defaultLocalVMSSHKey()
+	if err != nil {
+		return ""
+	}
+	return key
+}
+
+func remoteArgsContainVMPayload(args []string) bool {
+	for _, arg := range args {
+		if isVMPayload(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultLocalVMSSHKey() (string, error) {
+	if key, ok := normalizeLocalVMPublicKeyLine(os.Getenv("YEET_VM_SSH_KEY")); ok {
+		return key, nil
+	}
+	home := strings.TrimSpace(os.Getenv("HOME"))
+	if home == "" {
+		return "", fmt.Errorf("HOME is not set")
+	}
+	for _, name := range []string{"id_ed25519.pub", "id_ecdsa.pub", "id_rsa.pub"} {
+		key, err := firstLocalVMPublicKeyFromFile(filepath.Join(home, ".ssh", name))
+		if err == nil {
+			return key, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("no local SSH public key found")
+}
+
+func firstLocalVMPublicKeyFromFile(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if key, ok := normalizeLocalVMPublicKeyLine(line); ok {
+			return key, nil
+		}
+	}
+	return "", fmt.Errorf("no SSH public key found in %s", path)
+}
+
+func normalizeLocalVMPublicKeyLine(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", false
+	}
+	fields := strings.Fields(line)
+	for i, field := range fields {
+		if !isLocalVMSSHKeyType(field) || i+1 >= len(fields) {
+			continue
+		}
+		return strings.Join(fields[i:], " "), true
+	}
+	return "", false
+}
+
+func isLocalVMSSHKeyType(value string) bool {
+	return strings.HasPrefix(value, "ssh-") ||
+		strings.HasPrefix(value, "ecdsa-sha2-") ||
+		strings.HasPrefix(value, "sk-ssh-") ||
+		strings.HasPrefix(value, "sk-ecdsa-")
 }
 
 func payloadNameForStdin(stdin io.Reader) string {

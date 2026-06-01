@@ -84,6 +84,12 @@ func buildGroupHandlers() map[string]yargs.Group {
 				"push":     yeet.HandlePush,
 			},
 		},
+		"vm": {
+			Description: "Manage VM-specific commands",
+			Commands: map[string]yargs.SubcommandHandler{
+				"console": handleVMGroup,
+			},
+		},
 		"env": {
 			Description: "Manage service environment files",
 			Commands: map[string]yargs.SubcommandHandler{

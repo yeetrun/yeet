@@ -174,6 +174,28 @@ func TestParseRunWebFlag(t *testing.T) {
 	}
 }
 
+func TestParseRunVMFlags(t *testing.T) {
+	flags, args, err := ParseRun([]string{
+		"--cpus=4",
+		"--memory=4g",
+		"--disk=128g",
+		"--net=svc,lan",
+		"vm://ubuntu/26.04",
+	})
+	if err != nil {
+		t.Fatalf("ParseRun: %v", err)
+	}
+	if flags.CPUs != 4 || flags.Memory != "4g" || flags.Disk != "128g" {
+		t.Fatalf("VM flags = cpus %d memory %q disk %q", flags.CPUs, flags.Memory, flags.Disk)
+	}
+	if flags.Net != "svc,lan" {
+		t.Fatalf("Net = %q, want svc,lan", flags.Net)
+	}
+	if !reflect.DeepEqual(args, []string{"vm://ubuntu/26.04"}) {
+		t.Fatalf("args = %#v", args)
+	}
+}
+
 func TestParseRunRejectsMissingSnapshotMode(t *testing.T) {
 	tests := [][]string{
 		{"--snapshots", "payload.yml"},
@@ -245,7 +267,7 @@ func TestParseEnvShowFlags(t *testing.T) {
 }
 
 func TestParseRemoveFlags(t *testing.T) {
-	flags, outArgs, err := ParseRemove([]string{"-y", "--clean-config"})
+	flags, outArgs, err := ParseRemove([]string{"-y", "--clean-config", "--clean-data"})
 	if err != nil {
 		t.Fatalf("ParseRemove failed: %v", err)
 	}
@@ -254,6 +276,9 @@ func TestParseRemoveFlags(t *testing.T) {
 	}
 	if !flags.CleanConfig {
 		t.Fatalf("CleanConfig = false, want true")
+	}
+	if !flags.CleanData {
+		t.Fatalf("CleanData = false, want true")
 	}
 	if len(outArgs) != 0 {
 		t.Fatalf("expected no args, got %v", outArgs)
@@ -707,6 +732,19 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	}
 	if !RemoteGroupFlagSpecs()["snapshots"]["defaults"]["--enabled"].ConsumesValue {
 		t.Fatal("snapshots defaults --enabled should consume a value")
+	}
+}
+
+func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
+	group, ok := RemoteGroupInfos()["vm"]
+	if !ok {
+		t.Fatal("vm group missing")
+	}
+	if _, ok := group.Commands["console"]; !ok {
+		t.Fatal("vm console command missing")
+	}
+	if _, ok := RemoteGroupFlagSpecs()["vm"]["console"]; !ok {
+		t.Fatal("vm console flag spec missing")
 	}
 }
 

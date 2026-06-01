@@ -502,6 +502,10 @@ legend {
   align-items: end;
 }
 
+.vm-fields {
+  grid-template-columns: minmax(120px, 0.42fr) minmax(0, 1fr);
+}
+
 .action-row {
   position: fixed;
   right: 0;

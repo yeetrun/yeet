@@ -124,6 +124,47 @@ func TestRunDraftBuildsExistingRunArgs(t *testing.T) {
 	}
 }
 
+func TestRunDraftFromCLIParsesVMOptions(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	serviceOverride = "devbox"
+	hostOverride = "host-a"
+	hostOverrideSet = true
+
+	loc := &projectConfigLocation{Dir: t.TempDir(), Config: &ProjectConfig{Version: projectConfigVersion}}
+	draft, err := runDraftFromCLI([]string{
+		"--cpus=4",
+		"--memory=4g",
+		"--disk=128g",
+		"vm://ubuntu/26.04",
+	}, loc, "host-a")
+	if err != nil {
+		t.Fatalf("runDraftFromCLI error: %v", err)
+	}
+	if draft.VM.CPUs != 4 || draft.VM.Memory != "4g" || draft.VM.Disk != "128g" {
+		t.Fatalf("VM = %#v, want cpus=4 memory=4g disk=128g", draft.VM)
+	}
+}
+
+func TestRunDraftBuildsVMRunArgs(t *testing.T) {
+	draft := RunDraft{
+		Service: "devbox",
+		Host:    "host-a",
+		Payload: "vm://ubuntu/26.04",
+		Network: RunDraftNetwork{
+			Modes: []string{"svc", "lan"},
+		},
+		VM: RunDraftVM{
+			CPUs:   4,
+			Memory: "4g",
+			Disk:   "128g",
+		},
+	}
+	want := []string{"--net=svc,lan", "--cpus=4", "--memory=4g", "--disk=128g"}
+	if got := draft.runArgs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("runArgs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestRunDraftFromCLIMatchesParseSvcRunParity(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -418,6 +459,103 @@ func TestExecuteRunDraftLocalImagePayloadKindUsesLocalDocker(t *testing.T) {
 	}
 	if entry.Payload != draft.Payload || entry.PayloadKind != "local-image" {
 		t.Fatalf("saved entry payload/kind = %q/%q, want %q/local-image", entry.Payload, entry.PayloadKind, draft.Payload)
+	}
+}
+
+func TestRunDraftVMPayloadUsesVMRunnerAndSavesVMType(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldVM := tryRunVMPayloadWithOutputFn
+	defer func() { tryRunVMPayloadWithOutputFn = oldVM }()
+
+	var gotPayload string
+	var gotArgs []string
+	tryRunVMPayloadWithOutputFn = func(ctx context.Context, stdout io.Writer, payload string, args []string) (bool, error) {
+		gotPayload = payload
+		gotArgs = append([]string{}, args...)
+		return true, nil
+	}
+
+	serviceOverride = "devbox"
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+
+	draft, err := runDraftFromCLI([]string{"vm://ubuntu/26.04", "--net=svc", "--cpus=4"}, loc, "yeet-lab")
+	if err != nil {
+		t.Fatalf("runDraftFromCLI: %v", err)
+	}
+	if err := executeRunDraftWithOptions(context.Background(), draft, loc, runDraftExecuteOptions{Stdout: io.Discard}); err != nil {
+		t.Fatalf("executeRunDraftWithOptions: %v", err)
+	}
+
+	if gotPayload != "vm://ubuntu/26.04" {
+		t.Fatalf("payload = %q", gotPayload)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"--net=svc", "--cpus=4"}) {
+		t.Fatalf("args = %#v", gotArgs)
+	}
+	entry, ok := loc.Config.ServiceEntry("devbox", "yeet-lab")
+	if !ok {
+		t.Fatal("missing stored entry")
+	}
+	if entry.Type != serviceTypeVM {
+		t.Fatalf("entry type = %q, want vm", entry.Type)
+	}
+}
+
+func TestRunFromProjectConfigReplaysStoredVMFilelessly(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldVM := tryRunVMPayloadWithOutputFn
+	oldFilePayload := runFilePayloadWithOutputFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	defer func() {
+		tryRunVMPayloadWithOutputFn = oldVM
+		runFilePayloadWithOutputFn = oldFilePayload
+		fetchRemoteArtifactHashesFn = oldHashes
+	}()
+
+	serviceOverride = "devbox"
+	var gotPayload string
+	var gotArgs []string
+	tryRunVMPayloadWithOutputFn = func(ctx context.Context, stdout io.Writer, payload string, args []string) (bool, error) {
+		gotPayload = payload
+		gotArgs = append([]string{}, args...)
+		return true, nil
+	}
+	runFilePayloadWithOutputFn = func(ctx context.Context, stdout io.Writer, file string, args []string, pushLocalImages bool) (bool, error) {
+		t.Fatalf("unexpected local file runner: file=%q args=%#v", file, args)
+		return false, nil
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		t.Fatalf("unexpected artifact hash fetch for VM replay")
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+
+	tmp := t.TempDir()
+	cfgLoc := &projectConfigLocation{
+		Path: filepath.Join(tmp, projectConfigName),
+		Dir:  tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+			Name:        "devbox",
+			Host:        "yeet-lab",
+			Type:        serviceTypeVM,
+			PayloadKind: serviceTypeVM,
+			Payload:     "vm://ubuntu/26.04",
+			Args:        []string{"--net=svc", "--cpus=4"},
+		}}},
+	}
+
+	if err := runFromProjectConfigWithForce(cfgLoc, "yeet-lab", false); err != nil {
+		t.Fatalf("runFromProjectConfigWithForce: %v", err)
+	}
+	if gotPayload != "vm://ubuntu/26.04" {
+		t.Fatalf("payload = %q, want vm://ubuntu/26.04", gotPayload)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"--net=svc", "--cpus=4"}) {
+		t.Fatalf("args = %#v, want --net=svc --cpus=4", gotArgs)
 	}
 }
 

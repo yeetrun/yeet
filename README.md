@@ -179,6 +179,26 @@ keep them, or use `--publish-reset` to acknowledge replacement. `yeet info
 <svc>` shows live published ports; `--format=json` includes structured port
 data.
 
+## Experimental VMs
+
+VM support is experimental and requires a Linux host with KVM available. The v0
+VM path uses the yeet-owned Ubuntu 26.04 image bundle published at
+`github.com/yeetrun/yeet-vm-images`, and services saved from VM payloads use the
+service type `vm`.
+
+```bash
+yeet run devbox vm://ubuntu/26.04 --net=svc
+yeet vm console devbox
+yeet ssh devbox
+yeet rm --clean-data devbox
+```
+
+For `--net=svc`, `yeet ssh <svc>` proxies through the yeet host to reach the
+guest's private service-network IP. `yeet vm console <svc>` streams the guest
+serial output and is useful for boot diagnostics; use SSH for an interactive
+guest shell. The default `ubuntu` guest user has passwordless sudo. Use
+`--clean-data` when removing a VM if you want to delete the guest disk too.
+
 Custom service root on the catch host:
 
 ```bash

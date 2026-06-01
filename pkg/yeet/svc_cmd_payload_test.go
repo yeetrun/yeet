@@ -171,6 +171,54 @@ func TestRunRunContextWithOutputUsesWriterAwarePayloadSeams(t *testing.T) {
 	}
 }
 
+func TestTryRunVMPayloadExecsRemoteRunWithPayloadArgument(t *testing.T) {
+	oldExec := execRemoteDirectFn
+	defer func() { execRemoteDirectFn = oldExec }()
+
+	var gotSvc string
+	var gotArgs []string
+	execRemoteDirectFn = func(ctx context.Context, svc string, args []string, stdin io.Reader, tty bool) error {
+		gotSvc = svc
+		gotArgs = append([]string{}, args...)
+		if stdin != nil {
+			t.Fatalf("stdin = %#v, want nil", stdin)
+		}
+		if !tty {
+			t.Fatal("tty = false, want true")
+		}
+		return nil
+	}
+
+	oldService := serviceOverride
+	serviceOverride = "devbox"
+	defer func() { serviceOverride = oldService }()
+
+	ok, err := tryRunVMPayloadContext(context.Background(), "vm://ubuntu/26.04", []string{"--net=svc", "--cpus=4"})
+	if err != nil {
+		t.Fatalf("tryRunVMPayloadContext: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if gotSvc != "devbox" {
+		t.Fatalf("service = %q", gotSvc)
+	}
+	wantArgs := []string{"run", "--net=svc", "--cpus=4", "vm://ubuntu/26.04"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
+	}
+}
+
+func TestTryRunVMPayloadRejectsPayloadArgs(t *testing.T) {
+	ok, err := tryRunVMPayloadContext(context.Background(), "vm://ubuntu/26.04", []string{"--net=svc", "--", "--inside"})
+	if !ok {
+		t.Fatal("ok = false, want true for VM payload")
+	}
+	if err == nil || !strings.Contains(err.Error(), "VM payloads do not accept payload args") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRunLocalImagePayloadContextWithOutputUsesWriterAwareDockerSeam(t *testing.T) {
 	oldDocker := tryRunDockerWithOutputFn
 	defer func() {

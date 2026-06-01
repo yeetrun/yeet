@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -326,7 +327,7 @@ func TestRemoveServiceDirectoryRemovalPlanSkipsData(t *testing.T) {
 		filepath.Join(root, "run"),
 	}
 
-	got := serviceChildDirsToRemove(paths)
+	got := serviceChildDirsToRemove(paths, false)
 	want := []string{
 		filepath.Join(root, "bin"),
 		filepath.Join(root, "env"),
@@ -334,6 +335,124 @@ func TestRemoveServiceDirectoryRemovalPlanSkipsData(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("serviceChildDirsToRemove = %v, want %v", got, want)
+	}
+}
+
+func TestRemoveServiceDirectoryRemovalPlanIncludesDataWhenCleanData(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "svc")
+	paths := []string{
+		filepath.Join(root, "bin"),
+		filepath.Join(root, "data"),
+		filepath.Join(root, "env"),
+		filepath.Join(root, "run"),
+	}
+
+	got := serviceChildDirsToRemove(paths, true)
+	if !slices.Equal(got, paths) {
+		t.Fatalf("serviceChildDirsToRemove = %v, want %v", got, paths)
+	}
+}
+
+func TestRemoveServiceCleanDataRemovesDataDir(t *testing.T) {
+	server := newTestServer(t)
+	serviceRoot := filepath.Join(server.cfg.ServicesRoot, "api")
+	for _, dir := range []string{"bin", "data", "env", "run"} {
+		if err := os.MkdirAll(filepath.Join(serviceRoot, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(serviceRoot, "data", "rootfs.raw"), []byte("disk"), 0o644); err != nil {
+		t.Fatalf("write disk: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {Name: "api", ServiceType: db.ServiceType("unknown")},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	report, err := server.RemoveServiceWithOptions("api", RemoveOptions{CleanData: true})
+	if err != nil {
+		t.Fatalf("RemoveServiceWithOptions: %v", err)
+	}
+	if report == nil {
+		t.Fatal("expected remove report")
+	}
+	for _, removed := range []string{"bin", "data", "env", "run"} {
+		if _, err := os.Stat(filepath.Join(serviceRoot, removed)); !os.IsNotExist(err) {
+			t.Fatalf("%s stat err = %v, want not exist", removed, err)
+		}
+	}
+}
+
+func TestRemoveServiceCleanDataDestroysZFSServiceRoot(t *testing.T) {
+	server := newTestServer(t)
+	var zfsCalls [][]string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		zfsCalls = append(zfsCalls, append([]string(nil), args...))
+		return "", "", nil
+	}
+	serviceRoot := filepath.Join(server.cfg.ServicesRoot, "api")
+	if err := os.MkdirAll(filepath.Join(serviceRoot, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {
+				Name:           "api",
+				ServiceType:    db.ServiceType("unknown"),
+				ServiceRoot:    serviceRoot,
+				ServiceRootZFS: "tank/apps/api",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	if _, err := server.RemoveServiceWithOptions("api", RemoveOptions{CleanData: true}); err != nil {
+		t.Fatalf("RemoveServiceWithOptions: %v", err)
+	}
+	want := [][]string{{"destroy", "-r", "tank/apps/api"}}
+	if !reflect.DeepEqual(zfsCalls, want) {
+		t.Fatalf("zfs calls = %#v, want %#v", zfsCalls, want)
+	}
+}
+
+func TestRemoveServiceCleanDataContinuesWhenZFSDestroyFails(t *testing.T) {
+	server := newTestServer(t)
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		return "", "busy", errors.New("zfs failed")
+	}
+	serviceRoot := filepath.Join(server.cfg.ServicesRoot, "api")
+	if err := os.MkdirAll(filepath.Join(serviceRoot, "data"), 0o755); err != nil {
+		t.Fatalf("mkdir data: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"api": {
+				Name:           "api",
+				ServiceType:    db.ServiceType("unknown"),
+				ServiceRoot:    serviceRoot,
+				ServiceRootZFS: "tank/apps/api",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	report, err := server.RemoveServiceWithOptions("api", RemoveOptions{CleanData: true})
+	if err != nil {
+		t.Fatalf("RemoveServiceWithOptions: %v", err)
+	}
+	found := false
+	for _, warn := range report.Warnings {
+		if strings.Contains(warn.Error(), "zfs destroy tank/apps/api") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %#v, want zfs destroy warning", report.Warnings)
 	}
 }
 
@@ -421,6 +540,27 @@ func TestEnsureServiceDirCreatesDirAndSkipsRootChown(t *testing.T) {
 func TestIsServiceTypeRunningRejectsUnknownType(t *testing.T) {
 	if _, err := newTestServer(t).isServiceTypeRunning("svc", db.ServiceType("bogus")); err == nil {
 		t.Fatal("expected unknown service type error")
+	}
+}
+
+func TestIsServiceTypeRunningSupportsVM(t *testing.T) {
+	old := serverVMStatusFunc
+	defer func() { serverVMStatusFunc = old }()
+	var gotName string
+	serverVMStatusFunc = func(name string) (svc.Status, error) {
+		gotName = name
+		return svc.StatusRunning, nil
+	}
+
+	running, err := newTestServer(t).isServiceTypeRunning("devbox", db.ServiceTypeVM)
+	if err != nil {
+		t.Fatalf("isServiceTypeRunning: %v", err)
+	}
+	if !running {
+		t.Fatal("running = false, want true")
+	}
+	if gotName != "devbox" {
+		t.Fatalf("vm status name = %q, want devbox", gotName)
 	}
 }
 

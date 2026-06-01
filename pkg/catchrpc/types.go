@@ -54,6 +54,7 @@ type ExecRequest struct {
 	Term        string       `json:"term,omitempty"`
 	Rows        int          `json:"rows,omitempty"`
 	Cols        int          `json:"cols,omitempty"`
+	VMSSHKey    string       `json:"vmSshKey,omitempty"`
 }
 
 type ExecMessage struct {
@@ -154,7 +155,40 @@ type ServiceInfo struct {
 	Network          ServiceNetwork    `json:"network,omitempty"`
 	Status           ServiceStatus     `json:"status,omitempty"`
 	Images           []ServiceImage    `json:"images,omitempty"`
+	VM               *ServiceVM        `json:"vm,omitempty"`
 	Snapshots        *ServiceSnapshots `json:"snapshots,omitempty"`
+}
+
+type ServiceVM struct {
+	Runtime      string             `json:"runtime,omitempty"`
+	Image        string             `json:"image,omitempty"`
+	ImageVersion string             `json:"imageVersion,omitempty"`
+	CPUs         int                `json:"cpus,omitempty"`
+	MemoryBytes  int64              `json:"memoryBytes,omitempty"`
+	DiskBytes    int64              `json:"diskBytes,omitempty"`
+	DiskBackend  string             `json:"diskBackend,omitempty"`
+	DiskPath     string             `json:"diskPath,omitempty"`
+	SSH          *ServiceVMSSH      `json:"ssh,omitempty"`
+	Console      *ServiceVMConsole  `json:"console,omitempty"`
+	Networks     []ServiceVMNetwork `json:"networks,omitempty"`
+	SetupState   string             `json:"setupState,omitempty"`
+}
+
+type ServiceVMSSH struct {
+	User string `json:"user,omitempty"`
+	Host string `json:"host,omitempty"`
+}
+
+type ServiceVMConsole struct {
+	Available  bool   `json:"available"`
+	SocketPath string `json:"socketPath,omitempty"`
+}
+
+type ServiceVMNetwork struct {
+	Mode      string `json:"mode,omitempty"`
+	Interface string `json:"interface,omitempty"`
+	IP        string `json:"ip,omitempty"`
+	MAC       string `json:"mac,omitempty"`
 }
 
 type ServicePaths struct {

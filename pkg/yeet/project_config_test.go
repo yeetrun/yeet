@@ -193,6 +193,32 @@ func TestProjectConfigSnapshotFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveRunConfigStoresVMType(t *testing.T) {
+	oldService := serviceOverride
+	serviceOverride = "devbox"
+	defer func() { serviceOverride = oldService }()
+
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	if err := saveRunConfigWithPayloadKind(loc, "yeet-lab", "vm://ubuntu/26.04", serviceTypeVM, []string{"--net=svc", "--cpus=4"}, "", false); err != nil {
+		t.Fatalf("saveRunConfigWithPayloadKind: %v", err)
+	}
+	entry, ok := loc.Config.ServiceEntry("devbox", "yeet-lab")
+	if !ok {
+		t.Fatal("missing devbox entry")
+	}
+	if entry.Type != serviceTypeVM {
+		t.Fatalf("type = %q, want vm", entry.Type)
+	}
+	if entry.PayloadKind != serviceTypeVM {
+		t.Fatalf("payload kind = %q, want vm", entry.PayloadKind)
+	}
+}
+
 func TestLoadProjectConfigFromFileErrors(t *testing.T) {
 	dir := t.TempDir()
 	if _, err := loadProjectConfigFromFile(filepath.Join(dir, "missing.toml")); err == nil || !strings.Contains(err.Error(), "no yeet.toml found at") {

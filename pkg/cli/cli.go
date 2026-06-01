@@ -26,6 +26,8 @@ type CommandInfo struct {
 	Aliases     []string
 	// ArgsSchema optionally defines positional args via `pos` tags.
 	ArgsSchema any
+	// FlagsSchema optionally defines command flags via `flag` tags.
+	FlagsSchema any
 }
 
 type GroupInfo struct {
@@ -36,6 +38,9 @@ type GroupInfo struct {
 }
 
 type RunFlags struct {
+	CPUs             int
+	Memory           string
+	Disk             string
 	Net              string
 	TsVer            string
 	TsExit           string
@@ -109,6 +114,7 @@ type LogsFlags struct {
 type RemoveFlags struct {
 	Yes         bool
 	CleanConfig bool
+	CleanData   bool
 }
 
 type StatusFlags struct {
@@ -167,6 +173,9 @@ type dockerPushFlagsParsed struct {
 }
 
 type runFlagsParsed struct {
+	CPUs             int      `flag:"cpus"`
+	Memory           string   `flag:"memory"`
+	Disk             string   `flag:"disk"`
 	Net              string   `flag:"net"`
 	TsVer            string   `flag:"ts-ver"`
 	TsExit           string   `flag:"ts-exit"`
@@ -211,8 +220,9 @@ type serviceSyncFlagsParsed struct {
 }
 
 type removeFlagsParsed struct {
-	Yes         bool `flag:"yes" short:"y"`
-	CleanConfig bool `flag:"clean-config"`
+	Yes         bool `flag:"yes" short:"y" help:"Skip the removal prompt"`
+	CleanConfig bool `flag:"clean-config" help:"Delete the matching yeet.toml entry without prompting"`
+	CleanData   bool `flag:"clean-data" help:"Delete service data instead of preserving data/"`
 }
 
 type stageFlagsParsed struct {
@@ -328,10 +338,10 @@ var remoteCommandInfos = map[string]CommandInfo{
 	}},
 	"ip":       {Name: "ip", Description: "Show the IP addresses of a service"},
 	"umount":   {Name: "umount", Description: "Unmount a host mount by name", Usage: "NAME", Examples: []string{"yeet umount data-share"}},
-	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}},
+	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}, FlagsSchema: removeFlagsParsed{}},
 	"restart":  {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
 	"rollback": {Name: "rollback", Description: "Rollback a service", ArgsSchema: ServiceArgs{}},
-	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile)", Usage: "SVC [PAYLOAD] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
+	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile, VM)", Usage: "SVC [PAYLOAD] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
 		"yeet run --web",
 		"yeet run --web <svc>",
 		"yeet run --web <svc> ./compose.yml",
@@ -339,6 +349,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 		"yeet run -p 80:80 <svc> nginx:latest",
 		"yeet run --publish-reset -p 443:443 <svc> nginx:latest",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
+		"yeet run <svc> vm://ubuntu/26.04 --net=svc",
 		"yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs",
 		"yeet run <svc> ./compose.yml --snapshots=off",
 		"yeet run --pull <svc> ./compose.yml",
@@ -417,6 +428,13 @@ var remoteGroupInfos = map[string]GroupInfo{
 			},
 		},
 	},
+	"vm": {
+		Name:        "vm",
+		Description: "Manage VM-specific commands",
+		Commands: map[string]CommandInfo{
+			"console": {Name: "console", Description: "Stream VM serial console output", Usage: "vm console <svc>", ArgsSchema: ServiceArgs{}},
+		},
+	},
 	"env": {
 		Name:        "env",
 		Description: "Manage service environment files",
@@ -487,6 +505,9 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"push":     flagSpecsFromStruct(dockerPushFlagsParsed{}),
 		"outdated": flagSpecsFromStruct(dockerOutdatedFlagsParsed{}),
 	},
+	"vm": {
+		"console": {},
+	},
 	"env": {
 		"show": flagSpecsFromStruct(envShowFlagsParsed{}),
 		"edit": {},
@@ -512,6 +533,20 @@ func RemoteCommandNames() []string {
 
 func RemoteCommandInfos() map[string]CommandInfo {
 	return remoteCommandInfos
+}
+
+func RemoteCommandInfo(name string) (CommandInfo, bool) {
+	info, ok := remoteCommandInfos[name]
+	return info, ok
+}
+
+func RemoteGroupCommandInfo(groupName, commandName string) (CommandInfo, bool) {
+	group, ok := remoteGroupInfos[groupName]
+	if !ok {
+		return CommandInfo{}, false
+	}
+	info, ok := group.Commands[commandName]
+	return info, ok
 }
 
 func RemoteCommandRegistry() yargs.Registry {
@@ -587,6 +622,9 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		return RunFlags{}, nil, err
 	}
 	flags := RunFlags{
+		CPUs:             parsed.Flags.CPUs,
+		Memory:           strings.TrimSpace(parsed.Flags.Memory),
+		Disk:             strings.TrimSpace(parsed.Flags.Disk),
 		Net:              parsed.Flags.Net,
 		TsVer:            parsed.Flags.TsVer,
 		TsExit:           parsed.Flags.TsExit,
@@ -854,6 +892,7 @@ func ParseRemove(args []string) (RemoveFlags, []string, error) {
 	flags := RemoveFlags{
 		Yes:         parsed.Flags.Yes,
 		CleanConfig: parsed.Flags.CleanConfig,
+		CleanData:   parsed.Flags.CleanData,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil

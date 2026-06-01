@@ -24,6 +24,7 @@ type RunDraft struct {
 	EnvFileArg     string            `json:"-"`
 	EnvFileSet     bool              `json:"-"`
 	PayloadArgs    []string          `json:"payloadArgs,omitempty"`
+	VM             RunDraftVM        `json:"vm,omitempty"`
 	Network        RunDraftNetwork   `json:"network"`
 	Storage        RunDraftStorage   `json:"storage"`
 	Snapshots      RunDraftSnapshots `json:"snapshots"`
@@ -46,6 +47,12 @@ type RunDraftNetwork struct {
 	MacvlanParent string   `json:"macvlanParent,omitempty"`
 	Restart       *bool    `json:"restart,omitempty"`
 	Publish       []string `json:"publish,omitempty"`
+}
+
+type RunDraftVM struct {
+	CPUs   int    `json:"cpus,omitempty"`
+	Memory string `json:"memory,omitempty"`
+	Disk   string `json:"disk,omitempty"`
 }
 
 type RunDraftStorage struct {
@@ -112,6 +119,7 @@ func runDraftFromCLI(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverri
 		EnvFileArg:     flags.EnvFileArg,
 		EnvFileSet:     flags.EnvFileSet,
 		PayloadArgs:    payloadArgsFromRunArgs(effectiveArgs),
+		VM:             runDraftVMFromRunFlags(effectiveParsed),
 		Network:        runDraftNetworkFromRunFlags(effectiveParsed),
 		Storage:        RunDraftStorage{ServiceRoot: serviceRoot, ZFS: serviceRootZFS},
 		Snapshots:      runDraftSnapshotsFromOptions(snapshots),
@@ -136,6 +144,7 @@ func (d RunDraft) runArgs() []string {
 		ZFS:  d.Storage.ZFS,
 	})
 	args = runArgsWithSnapshotOptions(args, runDraftSnapshotOptions(d.Snapshots))
+	args = appendRunDraftVMArgs(args, d.VM)
 	if len(d.PayloadArgs) != 0 {
 		args = append(args, "--")
 		args = append(args, d.PayloadArgs...)
@@ -197,6 +206,14 @@ func appendRunDraftIntFlag(args []string, name string, value int) []string {
 	return append(args, fmt.Sprintf("%s=%d", name, value))
 }
 
+func appendRunDraftVMArgs(args []string, vm RunDraftVM) []string {
+	if vm.CPUs != 0 {
+		args = append(args, fmt.Sprintf("--cpus=%d", vm.CPUs))
+	}
+	args = appendRunDraftStringFlag(args, "--memory", vm.Memory)
+	return appendRunDraftStringFlag(args, "--disk", vm.Disk)
+}
+
 func appendRunDraftRepeatedFlag(args []string, name string, values []string) []string {
 	for _, value := range values {
 		value = strings.TrimSpace(value)
@@ -212,6 +229,14 @@ func appendRunDraftRestartFlag(args []string, restart *bool) []string {
 		return args
 	}
 	return append(args, "--restart=false")
+}
+
+func runDraftVMFromRunFlags(flags cli.RunFlags) RunDraftVM {
+	return RunDraftVM{
+		CPUs:   flags.CPUs,
+		Memory: strings.TrimSpace(flags.Memory),
+		Disk:   strings.TrimSpace(flags.Disk),
+	}
 }
 
 func runDraftNetworkFromRunFlags(flags cli.RunFlags) RunDraftNetwork {
@@ -372,7 +397,13 @@ func runDraftWithChangesTo(ctx context.Context, stdout io.Writer, draft RunDraft
 			return runLocalImagePayloadContextWithOutput(ctx, stdout, payload, args)
 		}
 	}
-	return runWithChangesToWithContextRunner(ctx, stdout, draft.Payload, runArgs, draft.EnvFile, draft.ExistingEntry, forceDeploy, runner, draft.PayloadKind == "local-image")
+	if draft.PayloadKind == serviceTypeVM {
+		runner = func(ctx context.Context, payload string, args []string) error {
+			return runVMPayloadContextWithOutput(ctx, stdout, payload, args)
+		}
+	}
+	alwaysDeploy := draft.PayloadKind == "local-image" || draft.PayloadKind == serviceTypeVM
+	return runWithChangesToWithContextRunner(ctx, stdout, draft.Payload, runArgs, draft.EnvFile, draft.ExistingEntry, forceDeploy, runner, alwaysDeploy)
 }
 
 func runLocalImagePayload(payload string, args []string) error {
@@ -398,4 +429,15 @@ func runLocalImagePayloadContextWithOutput(ctx context.Context, stdout io.Writer
 		return nil
 	}
 	return fmt.Errorf("unknown local Docker image: %s", payload)
+}
+
+func runVMPayloadContextWithOutput(ctx context.Context, stdout io.Writer, payload string, args []string) error {
+	ok, err := tryRunVMPayloadWithOutputFn(ctx, stdout, payload, args)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("unknown VM payload: %s", payload)
+	}
+	return nil
 }

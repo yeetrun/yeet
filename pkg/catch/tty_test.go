@@ -339,6 +339,24 @@ func TestStartPtySessionNoPTYReturnsNil(t *testing.T) {
 	}
 }
 
+func TestStartPtySessionSkipsPTYForVMConsole(t *testing.T) {
+	oldOpenPty := openPty
+	defer func() { openPty = oldOpenPty }()
+	openPty = func() (*os.File, *os.File, error) {
+		t.Fatal("vm console should not open catch wrapper PTY")
+		return nil, nil, nil
+	}
+
+	execer := &ttyExecer{isPty: true, args: []string{"vm", "console"}}
+	session, err := execer.startPtySession()
+	if err != nil {
+		t.Fatalf("startPtySession returned error: %v", err)
+	}
+	if session != nil {
+		t.Fatalf("session = %#v, want nil", session)
+	}
+}
+
 func TestStartPtySessionOpenErrorWritesMessage(t *testing.T) {
 	oldOpenPty := openPty
 	defer func() { openPty = oldOpenPty }()

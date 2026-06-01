@@ -98,6 +98,14 @@ func TestServiceDataTypeForService(t *testing.T) {
 			},
 			want: ServiceDataTypeDocker,
 		},
+		{
+			name: "vm",
+			service: &db.Service{
+				Name:        "svc-vm",
+				ServiceType: db.ServiceTypeVM,
+			},
+			want: ServiceDataTypeVM,
+		},
 	}
 
 	for _, tc := range cases {
@@ -118,6 +126,7 @@ func TestServiceDataTypeFromUnitType(t *testing.T) {
 		{unitType: "service", want: ServiceDataTypeService},
 		{unitType: "cron", want: ServiceDataTypeCron},
 		{unitType: "docker", want: ServiceDataTypeDocker},
+		{unitType: "vm", want: ServiceDataTypeVM},
 		{unitType: "binary", want: ServiceDataTypeBinary},
 		{unitType: "typescript", want: ServiceDataTypeTypeScript},
 		{unitType: "python", want: ServiceDataTypePython},

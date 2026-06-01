@@ -202,6 +202,7 @@ func signalsFor(signals map[string]*signal, path string) *signal {
 func gitChurn(root string, commits int) (map[string]int, bool) {
 	cmd := exec.Command("git", "log", "--name-only", "--format=", fmt.Sprintf("--max-count=%d", commits), "--", ".")
 	cmd.Dir = root
+	cmd.Env = withoutLocalGitEnv(os.Environ())
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, false
@@ -216,6 +217,29 @@ func gitChurn(root string, commits int) (map[string]int, bool) {
 		churn[path]++
 	}
 	return churn, true
+}
+
+func withoutLocalGitEnv(env []string) []string {
+	local := map[string]struct{}{
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES": {},
+		"GIT_COMMON_DIR":                   {},
+		"GIT_DIR":                          {},
+		"GIT_INDEX_FILE":                   {},
+		"GIT_NAMESPACE":                    {},
+		"GIT_OBJECT_DIRECTORY":             {},
+		"GIT_PREFIX":                       {},
+		"GIT_QUARANTINE_PATH":              {},
+		"GIT_WORK_TREE":                    {},
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, ok := local[key]; ok {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func readCoverage(path string) (map[string]float64, bool, error) {

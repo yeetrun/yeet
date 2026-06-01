@@ -14,6 +14,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/tailcfg"
 )
 
@@ -210,6 +211,90 @@ func TestServiceInfoSnapshotServiceOverridePrecedence(t *testing.T) {
 	}
 	if got := snapshots.Effective.Events; len(got) != 2 || got[0] != "run" || got[1] != "docker-update" {
 		t.Fatalf("events = %#v", got)
+	}
+}
+
+func TestServiceInfoIncludesVMConfig(t *testing.T) {
+	server := newTestServer(t)
+	oldListIPv4Addrs := listIPv4AddrsFn
+	defer func() { listIPv4AddrsFn = oldListIPv4Addrs }()
+	listIPv4AddrsFn = func(args []string) ([]ifaceIP, error) {
+		return nil, nil
+	}
+	oldServiceVMStatus := serviceVMStatusFn
+	defer func() { serviceVMStatusFn = oldServiceVMStatus }()
+	serviceVMStatusFn = func(sn string) (svc.Status, error) {
+		if sn != "devbox" {
+			t.Fatalf("VM status service = %q, want devbox", sn)
+		}
+		return svc.StatusRunning, nil
+	}
+
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"devbox": {
+			Name:        "devbox",
+			ServiceType: db.ServiceTypeVM,
+			VM: &db.VMConfig{
+				Runtime:     "firecracker",
+				Image:       db.VMImageConfig{Payload: vmUbuntu2604Payload, Version: "ubuntu-26.04-amd64-v0"},
+				CPUs:        4,
+				MemoryBytes: 4 << 30,
+				Disk:        db.VMDiskConfig{Backend: "zvol", Bytes: 128 << 30, Path: "flash/yeet/vms/devbox/root"},
+				Networks: []db.VMNetworkConfig{{
+					Mode:      "svc",
+					Interface: "tap-devbox",
+					IP:        netip.MustParseAddr("10.0.0.42"),
+					MAC:       "02:00:00:00:00:42",
+				}},
+				SSH:        db.VMSSHConfig{User: "ubuntu"},
+				Console:    db.VMConsoleConfig{SocketPath: "/run/yeet/devbox/serial.sock"},
+				SetupState: "ready",
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	resp, err := server.serviceInfo("devbox")
+	if err != nil {
+		t.Fatalf("serviceInfo: %v", err)
+	}
+	vm := resp.Info.VM
+	if vm == nil {
+		t.Fatal("VM info = nil")
+	}
+	if resp.Info.DataType != "vm" {
+		t.Fatalf("data type = %q, want vm", resp.Info.DataType)
+	}
+	if resp.Info.Status.Error != "" {
+		t.Fatalf("status error = %q, want empty", resp.Info.Status.Error)
+	}
+	if len(resp.Info.Status.Components) != 1 || resp.Info.Status.Components[0].Name != "devbox" || resp.Info.Status.Components[0].Status != "running" {
+		t.Fatalf("status components = %#v", resp.Info.Status.Components)
+	}
+	if vm.Runtime != "firecracker" || vm.Image != vmUbuntu2604Payload || vm.ImageVersion != "ubuntu-26.04-amd64-v0" {
+		t.Fatalf("VM image/runtime = %#v", vm)
+	}
+	if vm.CPUs != 4 || vm.MemoryBytes != 4<<30 || vm.DiskBytes != 128<<30 || vm.DiskBackend != "zvol" || vm.DiskPath != "flash/yeet/vms/devbox/root" {
+		t.Fatalf("VM resources/disk = %#v", vm)
+	}
+	if vm.SSH == nil || vm.SSH.User != "ubuntu" || vm.SSH.Host != "10.0.0.42" {
+		t.Fatalf("VM SSH = %#v", vm.SSH)
+	}
+	if vm.Console == nil || !vm.Console.Available || vm.Console.SocketPath != "/run/yeet/devbox/serial.sock" {
+		t.Fatalf("VM console = %#v", vm.Console)
+	}
+	if len(vm.Networks) != 1 || vm.Networks[0].Mode != "svc" || vm.Networks[0].Interface != "tap-devbox" || vm.Networks[0].IP != "10.0.0.42" || vm.Networks[0].MAC != "02:00:00:00:00:42" {
+		t.Fatalf("VM networks = %#v", vm.Networks)
+	}
+	if resp.Info.Network.SvcIP != "10.0.0.42" {
+		t.Fatalf("generic svc IP = %q, want 10.0.0.42", resp.Info.Network.SvcIP)
+	}
+	if len(resp.Info.Network.IPs) != 1 || resp.Info.Network.IPs[0].Label != "service" || resp.Info.Network.IPs[0].IP != "10.0.0.42" || resp.Info.Network.IPs[0].Interface != "tap-devbox" {
+		t.Fatalf("generic network IPs = %#v", resp.Info.Network.IPs)
+	}
+	if vm.SetupState != "ready" {
+		t.Fatalf("VM setup state = %q", vm.SetupState)
 	}
 }
 

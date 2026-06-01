@@ -22,17 +22,20 @@ import (
 	"github.com/yeetrun/yeet/pkg/svc"
 )
 
+var errUnhandledServiceType = errors.New("unhandled service type")
+
 func (e *ttyExecer) startCmdFunc() error {
 	if e.sn == SystemService || e.sn == CatchService {
 		return fmt.Errorf("cannot start system service")
 	}
-	return e.runAction("start", "Start service", func() error {
+	target := e.managedTargetLabel()
+	return e.runAction("start", "Start "+target, func() error {
 		runner, err := e.serviceRunner()
 		if err != nil {
 			return fmt.Errorf("failed to get service runner: %w", err)
 		}
 		if err := runner.Start(); err != nil {
-			return fmt.Errorf("failed to start service: %w", err)
+			return fmt.Errorf("failed to start %s: %w", target, err)
 		}
 		return nil
 	})
@@ -42,13 +45,14 @@ func (e *ttyExecer) stopCmdFunc() error {
 	if e.sn == SystemService || e.sn == CatchService {
 		return fmt.Errorf("cannot stop system service")
 	}
-	return e.runAction("stop", "Stop service", func() error {
+	target := e.managedTargetLabel()
+	return e.runAction("stop", "Stop "+target, func() error {
 		runner, err := e.serviceRunner()
 		if err != nil {
 			return fmt.Errorf("failed to get service runner: %w", err)
 		}
 		if err := runner.Stop(); err != nil {
-			return fmt.Errorf("failed to stop service: %w", err)
+			return fmt.Errorf("failed to stop %s: %w", target, err)
 		}
 		return nil
 	})
@@ -131,13 +135,14 @@ func (e *ttyExecer) installServiceGeneration(cfg InstallerCfg, gen int) error {
 }
 
 func (e *ttyExecer) restartCmdFunc() error {
-	return e.runAction("restart", "Restart service", func() error {
+	target := e.managedTargetLabel()
+	return e.runAction("restart", "Restart "+target, func() error {
 		runner, err := e.serviceRunner()
 		if err != nil {
 			return fmt.Errorf("failed to get service runner: %w", err)
 		}
 		if err := runner.Restart(); err != nil {
-			return fmt.Errorf("failed to restart service: %w", err)
+			return fmt.Errorf("failed to restart %s: %w", target, err)
 		}
 		return nil
 	})
@@ -234,7 +239,12 @@ func (e *ttyExecer) systemStatusData() ([]ServiceStatusData, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(statuses, composeStatuses...), nil
+	vmStatuses, err := e.vmStatusData()
+	if err != nil {
+		return nil, err
+	}
+	statuses = append(statuses, composeStatuses...)
+	return append(statuses, vmStatuses...), nil
 }
 
 func (e *ttyExecer) systemdStatusData() ([]ServiceStatusData, error) {
@@ -273,6 +283,23 @@ func (e *ttyExecer) dockerComposeStatusData() ([]ServiceStatusData, error) {
 	return statuses, nil
 }
 
+func (e *ttyExecer) vmStatusData() ([]ServiceStatusData, error) {
+	dv, err := e.s.getDB()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get VM services: %w", err)
+	}
+	names := serviceNamesByType(dv.AsStruct().Services, db.ServiceTypeVM)
+	statuses := make([]ServiceStatusData, 0, len(names))
+	for _, sn := range names {
+		status, err := e.vmStatus(sn)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get VM status for %s: %w", sn, err)
+		}
+		statuses = append(statuses, serviceStatusWithComponent(sn, ServiceDataTypeVM, sn, status))
+	}
+	return statuses, nil
+}
+
 func (e *ttyExecer) serviceDataTypeOrDocker(sn string) ServiceDataType {
 	if service, err := e.s.serviceView(sn); err == nil {
 		return ServiceDataTypeForService(service)
@@ -295,6 +322,8 @@ func (e *ttyExecer) populateSingleServiceStatus(data ServiceStatusData, serviceT
 		return e.addSingleSystemdStatus(data)
 	case db.ServiceTypeDockerCompose:
 		return e.addSingleDockerComposeStatus(data)
+	case db.ServiceTypeVM:
+		return e.addSingleVMStatus(data)
 	default:
 		return data, true, nil
 	}
@@ -322,6 +351,15 @@ func (e *ttyExecer) addSingleDockerComposeStatus(data ServiceStatusData) (Servic
 	return data, true, nil
 }
 
+func (e *ttyExecer) addSingleVMStatus(data ServiceStatusData) (ServiceStatusData, bool, error) {
+	status, err := e.vmStatus(e.sn)
+	if err != nil {
+		return ServiceStatusData{}, false, fmt.Errorf("failed to get VM status: %w", err)
+	}
+	data.ComponentStatus = []ComponentStatusData{componentStatusData(e.sn, status)}
+	return data, true, nil
+}
+
 func (e *ttyExecer) handleDockerComposeStatusError(data ServiceStatusData, err error) (ServiceStatusData, bool, error) {
 	if err == svc.ErrDockerStatusUnknown {
 		data.ComponentStatus = []ComponentStatusData{unknownComponentStatus(e.sn)}
@@ -335,6 +373,15 @@ func (e *ttyExecer) systemdStatus(sn string) (svc.Status, error) {
 		return e.systemdStatusFunc(sn)
 	}
 	return e.s.SystemdStatus(sn)
+}
+
+func (e *ttyExecer) vmStatus(sn string) (svc.Status, error) {
+	if e.systemdStatusFunc != nil {
+		return e.systemdStatusFunc(vmSystemdUnitName(sn))
+	}
+	runner := &vmRunner{name: sn}
+	runner.SetNewCmd(e.newCmd)
+	return runner.Status()
 }
 
 func (e *ttyExecer) systemdStatuses() (map[string]svc.Status, error) {
@@ -477,7 +524,7 @@ func (e *ttyExecer) removeCmdFunc(flags cli.RemoveFlags) error {
 	}
 	runner, err := e.serviceRunner()
 	if err != nil {
-		return e.removeServiceWithoutRunner(err)
+		return e.removeServiceWithoutRunner(flags, err)
 	}
 	ok, err := e.confirmServiceRemoval(flags.Yes)
 	if err != nil {
@@ -488,7 +535,7 @@ func (e *ttyExecer) removeCmdFunc(flags cli.RemoveFlags) error {
 	}
 
 	e.removeRunner(runner)
-	return e.removeServiceConfig()
+	return e.removeServiceConfig(flags)
 }
 
 func (e *ttyExecer) validateServiceRemoval() error {
@@ -498,16 +545,19 @@ func (e *ttyExecer) validateServiceRemoval() error {
 	return nil
 }
 
-func (e *ttyExecer) removeServiceWithoutRunner(err error) error {
-	if !errors.Is(err, errNoServiceConfigured) {
+func (e *ttyExecer) removeServiceWithoutRunner(flags cli.RemoveFlags, err error) error {
+	if !errors.Is(err, errNoServiceConfigured) && !errors.Is(err, errUnhandledServiceType) {
 		return fmt.Errorf("failed to get service runner: %w", err)
 	}
-	report, err := e.s.RemoveService(e.sn)
+	runnerErr := err
+	report, err := e.s.RemoveServiceWithOptions(e.sn, RemoveOptions{CleanData: flags.CleanData})
 	if err != nil {
-		return fmt.Errorf("failed to cleanup service %q: %w", e.sn, err)
+		return fmt.Errorf("failed to cleanup %s %q: %w", e.managedTargetLabel(), e.sn, err)
 	}
 	e.printRemoveWarnings(report)
-	e.printf("service %q not found\n", e.sn)
+	if errors.Is(runnerErr, errNoServiceConfigured) {
+		e.printf("service %q not found\n", e.sn)
+	}
 	return nil
 }
 
@@ -515,7 +565,7 @@ func (e *ttyExecer) confirmServiceRemoval(yes bool) (bool, error) {
 	if yes {
 		return true, nil
 	}
-	ok, err := cmdutil.Confirm(e.rw, e.rw, fmt.Sprintf("Are you sure you want to remove service %q?", e.sn))
+	ok, err := cmdutil.Confirm(e.rw, e.rw, fmt.Sprintf("Are you sure you want to remove %s %q?", e.managedTargetLabel(), e.sn))
 	if err != nil {
 		return false, fmt.Errorf("failed to confirm removal: %w", err)
 	}
@@ -525,20 +575,34 @@ func (e *ttyExecer) confirmServiceRemoval(yes bool) (bool, error) {
 func (e *ttyExecer) removeRunner(runner ServiceRunner) {
 	if err := runner.Remove(); err != nil {
 		if errors.Is(err, svc.ErrNotInstalled) {
-			e.printf("warning: systemd service %q was not installed\n", e.sn)
+			e.printf("warning: %s %q was not installed\n", e.managedTargetLabel(), e.sn)
 		} else {
-			e.printf("warning: failed to stop/remove service %q: %v\n", e.sn, err)
+			e.printf("warning: failed to stop/remove %s %q: %v\n", e.managedTargetLabel(), e.sn, err)
 		}
 	}
 }
 
-func (e *ttyExecer) removeServiceConfig() error {
-	report, err := e.s.RemoveService(e.sn)
+func (e *ttyExecer) removeServiceConfig(flags cli.RemoveFlags) error {
+	report, err := e.s.RemoveServiceWithOptions(e.sn, RemoveOptions{CleanData: flags.CleanData})
 	if err != nil {
-		return fmt.Errorf("failed to cleanup service %q: %w", e.sn, err)
+		return fmt.Errorf("failed to cleanup %s %q: %w", e.managedTargetLabel(), e.sn, err)
 	}
 	e.printRemoveWarnings(report)
 	return nil
+}
+
+func (e *ttyExecer) managedTargetLabel() string {
+	if e.s == nil {
+		return "service"
+	}
+	service, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return "service"
+	}
+	if service.ServiceType() == db.ServiceTypeVM {
+		return "VM"
+	}
+	return "service"
 }
 
 func (e *ttyExecer) printRemoveWarnings(report *RemoveReport) {
@@ -597,8 +661,10 @@ func (e *ttyExecer) serviceRunnerForType(st db.ServiceType) (ServiceRunner, erro
 		return e.systemdRunner()
 	case db.ServiceTypeDockerCompose:
 		return e.dockerComposeRunner()
+	case db.ServiceTypeVM:
+		return &vmRunner{name: e.sn}, nil
 	default:
-		return nil, fmt.Errorf("unhandled service type %q", st)
+		return nil, fmt.Errorf("%w %q", errUnhandledServiceType, st)
 	}
 }
 

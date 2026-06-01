@@ -26,6 +26,8 @@ var (
 	runDraftLocalImageNameRE     = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$`)
 )
 
+const vmUbuntu2604Payload = "vm://ubuntu/26.04"
+
 type RunDraftValidationResult struct {
 	OK       bool                        `json:"ok"`
 	Errors   []RunDraftValidationError   `json:"errors,omitempty"`
@@ -77,6 +79,7 @@ func validateRunDraftLocal(draft RunDraft, cwd string) (RunDraft, RunDraftValida
 	draft = trimRunDraftFields(draft)
 	validateRunDraftRequired(draft, &result)
 	validateRunDraftPaths(cwd, &draft, &result)
+	validateRunDraftVM(&draft, &result)
 	validateRunDraftNetwork(&draft, &result)
 	validateRunDraftStorage(&draft, &result)
 	validateRunDraftSnapshots(&draft, &result)
@@ -90,6 +93,8 @@ func trimRunDraftFields(draft RunDraft) RunDraft {
 	draft.Payload = strings.TrimSpace(draft.Payload)
 	draft.PayloadKind = strings.ToLower(strings.TrimSpace(draft.PayloadKind))
 	draft.EnvFile = strings.TrimSpace(draft.EnvFile)
+	draft.VM.Memory = strings.TrimSpace(draft.VM.Memory)
+	draft.VM.Disk = strings.TrimSpace(draft.VM.Disk)
 	draft.Storage.ServiceRoot = strings.TrimSpace(draft.Storage.ServiceRoot)
 	draft.Snapshots.Mode = strings.TrimSpace(draft.Snapshots.Mode)
 	draft.Snapshots.MaxAge = strings.TrimSpace(draft.Snapshots.MaxAge)
@@ -105,6 +110,37 @@ func validateRunDraftNetwork(draft *RunDraft, result *RunDraftValidationResult) 
 	draft.Network.MacvlanMAC = strings.TrimSpace(draft.Network.MacvlanMAC)
 	draft.Network.MacvlanParent = strings.TrimSpace(draft.Network.MacvlanParent)
 	draft.Network.Publish = trimNonEmptyStrings(draft.Network.Publish)
+	if draft.PayloadKind == serviceTypeVM {
+		validateRunDraftVMNetworkModes(draft.Network.Modes, result)
+	}
+}
+
+func validateRunDraftVMNetworkModes(modes []string, result *RunDraftValidationResult) {
+	for _, mode := range modes {
+		switch mode {
+		case "svc", "lan":
+		default:
+			result.addError("network.modes", "VM network mode %q is unsupported; supported modes: svc, lan", mode)
+		}
+	}
+}
+
+func validateRunDraftVM(draft *RunDraft, result *RunDraftValidationResult) {
+	if draft.VM.CPUs < 0 {
+		result.addError("vm.cpus", "vm cpus must be a positive value")
+	}
+	if draft.PayloadKind == serviceTypeVM {
+		return
+	}
+	if draft.VM.CPUs != 0 {
+		result.addError("vm.cpus", "--cpus is only valid for VM payloads")
+	}
+	if draft.VM.Memory != "" {
+		result.addError("vm.memory", "--memory is only valid for VM payloads")
+	}
+	if draft.VM.Disk != "" {
+		result.addError("vm.disk", "--disk is only valid for VM payloads")
+	}
 }
 
 func normalizeRunDraftNetworkModes(modes []string, result *RunDraftValidationResult) []string {
@@ -344,31 +380,84 @@ func validateRunDraftSnapshotMaxAgeValue(raw string) error {
 
 func normalizeRunDraftPayload(cwd, payload, kind string) (string, string, error) {
 	payload = strings.TrimSpace(payload)
-	switch kind {
-	case "", "auto":
-		return normalizeAutoRunDraftPayload(cwd, payload)
-	case "file":
-		normalized, err := normalizeExistingRunDraftPath(cwd, payload)
-		return normalized, kind, err
-	case "compose":
-		return normalizeRunDraftComposePayload(cwd, payload)
-	case "dockerfile":
-		return normalizeRunDraftDockerfilePayload(cwd, payload)
-	case "remote-image":
-		if !looksLikeRunDraftImageRef(payload) {
-			return "", kind, fmt.Errorf("payload must be a Docker image reference for payloadKind %q", kind)
-		}
-		return payload, kind, nil
-	case "local-image":
-		if !looksLikeRunDraftImageRef(payload) && !looksLikeRunDraftLocalImageName(payload) {
-			return "", kind, fmt.Errorf("payload must be a Docker image reference or local image name for payloadKind %q", kind)
-		}
-		return payload, kind, nil
+	if isVMPayload(payload) || kind == serviceTypeVM {
+		return normalizeVMRunDraftPayload(payload, kind)
 	}
-	return "", kind, fmt.Errorf("unknown payload kind %q", kind)
+	normalizer, ok := runDraftPayloadNormalizer(kind)
+	if !ok {
+		return "", kind, fmt.Errorf("unknown payload kind %q", kind)
+	}
+	return normalizer(cwd, payload, kind)
+}
+
+type runDraftPayloadNormalizerFunc func(cwd, payload, kind string) (string, string, error)
+
+func runDraftPayloadNormalizer(kind string) (runDraftPayloadNormalizerFunc, bool) {
+	normalizers := map[string]runDraftPayloadNormalizerFunc{
+		"":             normalizeAutoRunDraftPayloadKind,
+		"auto":         normalizeAutoRunDraftPayloadKind,
+		"file":         normalizeFileRunDraftPayloadKind,
+		"compose":      normalizeComposeRunDraftPayloadKind,
+		"dockerfile":   normalizeDockerfileRunDraftPayloadKind,
+		"remote-image": normalizeRemoteImageRunDraftPayloadKind,
+		"local-image":  normalizeLocalImageRunDraftPayloadKind,
+	}
+	normalizer, ok := normalizers[kind]
+	return normalizer, ok
+}
+
+func normalizeAutoRunDraftPayloadKind(cwd, payload, _ string) (string, string, error) {
+	return normalizeAutoRunDraftPayload(cwd, payload)
+}
+
+func normalizeFileRunDraftPayloadKind(cwd, payload, kind string) (string, string, error) {
+	normalized, err := normalizeExistingRunDraftPath(cwd, payload)
+	return normalized, kind, err
+}
+
+func normalizeComposeRunDraftPayloadKind(cwd, payload, _ string) (string, string, error) {
+	return normalizeRunDraftComposePayload(cwd, payload)
+}
+
+func normalizeDockerfileRunDraftPayloadKind(cwd, payload, _ string) (string, string, error) {
+	return normalizeRunDraftDockerfilePayload(cwd, payload)
+}
+
+func normalizeRemoteImageRunDraftPayloadKind(_ string, payload, kind string) (string, string, error) {
+	if !looksLikeRunDraftImageRef(payload) {
+		return "", kind, fmt.Errorf("payload must be a Docker image reference for payloadKind %q", kind)
+	}
+	return payload, kind, nil
+}
+
+func normalizeLocalImageRunDraftPayloadKind(_ string, payload, kind string) (string, string, error) {
+	if !looksLikeRunDraftImageRef(payload) && !looksLikeRunDraftLocalImageName(payload) {
+		return "", kind, fmt.Errorf("payload must be a Docker image reference or local image name for payloadKind %q", kind)
+	}
+	return payload, kind, nil
+}
+
+func normalizeVMRunDraftPayload(payload, kind string) (string, string, error) {
+	switch {
+	case kind == serviceTypeVM && !isVMPayload(payload):
+		return "", kind, fmt.Errorf("payloadKind %q requires %s", kind, vmUbuntu2604Payload)
+	case kind == serviceTypeVM:
+		return payload, serviceTypeVM, nil
+	case kind == "" || kind == "auto":
+		return payload, serviceTypeVM, nil
+	default:
+		return "", kind, fmt.Errorf("payload %q requires payloadKind %q", payload, serviceTypeVM)
+	}
+}
+
+func isVMPayload(payload string) bool {
+	return strings.TrimSpace(payload) == vmUbuntu2604Payload
 }
 
 func normalizeAutoRunDraftPayload(cwd, payload string) (string, string, error) {
+	if isVMPayload(payload) {
+		return strings.TrimSpace(payload), serviceTypeVM, nil
+	}
 	if looksLikeRunDraftImageRef(payload) {
 		return payload, "", nil
 	}
@@ -433,7 +522,7 @@ func looksLikeRunDraftLocalImageName(payload string) bool {
 
 func unknownPayloadKind(kind string) bool {
 	switch kind {
-	case "", "auto", "file", "compose", "dockerfile", "remote-image", "local-image":
+	case "", "auto", "file", "compose", "dockerfile", "remote-image", "local-image", serviceTypeVM:
 		return false
 	default:
 		return true
