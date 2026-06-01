@@ -17,6 +17,9 @@ var serviceBridgeSkippedGroupCommands = map[string]map[string]struct{}{
 	"docker": {
 		"push": {},
 	},
+	"vm": {
+		"images": {},
+	},
 	"service": {
 		"sync": {},
 	},
