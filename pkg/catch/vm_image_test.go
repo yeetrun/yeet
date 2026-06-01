@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -121,6 +122,251 @@ func TestVMImageCacheDownloadsOptionalInitrdArtifact(t *testing.T) {
 	}
 	if got, err := os.ReadFile(image.InitrdPath); err != nil || string(got) != string(initrd) {
 		t.Fatalf("initrd content = %q, %v; want %q", got, err, initrd)
+	}
+}
+
+func TestResolveVMImagePayload(t *testing.T) {
+	wantManifestURL := "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json"
+	if defaultVMImageManifestURL != wantManifestURL {
+		t.Fatalf("default manifest URL = %q, want %q", defaultVMImageManifestURL, wantManifestURL)
+	}
+
+	got, err := resolveVMImagePayload(vmUbuntu2604Payload)
+	if err != nil {
+		t.Fatalf("resolveVMImagePayload: %v", err)
+	}
+	if got != wantManifestURL {
+		t.Fatalf("manifest URL = %q, want %q", got, wantManifestURL)
+	}
+
+	_, err = resolveVMImagePayload("vm://debian/13")
+	if err == nil {
+		t.Fatal("resolveVMImagePayload returned nil error for unsupported payload")
+	}
+	if !strings.Contains(err.Error(), "unsupported VM image payload") || !strings.Contains(err.Error(), "vm://debian/13") || !strings.Contains(err.Error(), vmUbuntu2604Payload) {
+		t.Fatalf("error = %v, want unsupported payload with supported value", err)
+	}
+}
+
+func TestVMImageCacheInspectMissing(t *testing.T) {
+	latest := vmImageTestManifest("ubuntu-26.04-amd64-v2", vmImageTestContents())
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/manifest.json" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(latest)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	cache := vmImageCache{Root: root, ManifestURL: server.URL + "/manifest.json"}
+	got, inspectedManifest, err := cache.Inspect(context.Background(), vmUbuntu2604Payload)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !reflect.DeepEqual(inspectedManifest, latest) {
+		t.Fatalf("manifest = %#v, want %#v", inspectedManifest, latest)
+	}
+	if got.State != vmImageCacheMissing {
+		t.Fatalf("state = %q, want %q", got.State, vmImageCacheMissing)
+	}
+	if got.Payload != vmUbuntu2604Payload || got.CachedVersion != "" || got.LatestVersion != latest.Version {
+		t.Fatalf("state versions = %#v", got)
+	}
+	if got.CachePath != filepath.Join(root, latest.Version) {
+		t.Fatalf("cache path = %q, want latest version dir", got.CachePath)
+	}
+	if got.ManifestURL != server.URL+"/manifest.json" {
+		t.Fatalf("manifest URL = %q", got.ManifestURL)
+	}
+}
+
+func TestVMImageCacheInspectStaleWhenCachedVersionDiffers(t *testing.T) {
+	contents := vmImageTestContents()
+	latest := vmImageTestManifest("ubuntu-26.04-amd64-v2", contents)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/manifest.json" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(latest)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	cached := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
+	cachedDir := writeCachedVMImageManifest(t, root, cached)
+	writeCachedVMImageArtifacts(t, cachedDir, contents)
+
+	cache := vmImageCache{Root: root, ManifestURL: server.URL + "/manifest.json"}
+	got, inspectedManifest, err := cache.Inspect(context.Background(), vmUbuntu2604Payload)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !reflect.DeepEqual(inspectedManifest, latest) {
+		t.Fatalf("manifest = %#v, want %#v", inspectedManifest, latest)
+	}
+	if got.State != vmImageCacheStale {
+		t.Fatalf("state = %q, want %q", got.State, vmImageCacheStale)
+	}
+	if got.CachedVersion != cached.Version || got.LatestVersion != latest.Version {
+		t.Fatalf("versions = cached %q latest %q", got.CachedVersion, got.LatestVersion)
+	}
+	if got.CachePath != filepath.Join(root, latest.Version) {
+		t.Fatalf("cache path = %q, want latest version dir", got.CachePath)
+	}
+}
+
+func TestVMImageCacheInspectStaleWhenLatestArtifactsIncomplete(t *testing.T) {
+	contents := vmImageTestContents()
+	latest := vmImageTestManifest("ubuntu-26.04-amd64-v2", contents)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/manifest.json" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(latest)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	latestDir := writeCachedVMImageManifest(t, root, latest)
+	if err := os.WriteFile(filepath.Join(latestDir, latest.Kernel), contents[latest.Kernel], 0o644); err != nil {
+		t.Fatalf("write kernel: %v", err)
+	}
+
+	cache := vmImageCache{Root: root, ManifestURL: server.URL + "/manifest.json"}
+	got, inspectedManifest, err := cache.Inspect(context.Background(), vmUbuntu2604Payload)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !reflect.DeepEqual(inspectedManifest, latest) {
+		t.Fatalf("manifest = %#v, want %#v", inspectedManifest, latest)
+	}
+	if got.State != vmImageCacheStale {
+		t.Fatalf("state = %q, want %q", got.State, vmImageCacheStale)
+	}
+	if got.CachedVersion != latest.Version || got.LatestVersion != latest.Version {
+		t.Fatalf("versions = cached %q latest %q", got.CachedVersion, got.LatestVersion)
+	}
+}
+
+func TestVMImageCacheInspectCurrent(t *testing.T) {
+	contents := vmImageTestContents()
+	latest := vmImageTestManifest("ubuntu-26.04-amd64-v2", contents)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/manifest.json" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(latest)
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	latestDir := writeCachedVMImageManifest(t, root, latest)
+	writeCachedVMImageArtifacts(t, latestDir, contents)
+
+	cache := vmImageCache{Root: root, ManifestURL: server.URL + "/manifest.json"}
+	got, inspectedManifest, err := cache.Inspect(context.Background(), vmUbuntu2604Payload)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if !reflect.DeepEqual(inspectedManifest, latest) {
+		t.Fatalf("manifest = %#v, want %#v", inspectedManifest, latest)
+	}
+	if got.State != vmImageCacheCurrent {
+		t.Fatalf("state = %q, want %q", got.State, vmImageCacheCurrent)
+	}
+	if got.CachedVersion != latest.Version || got.LatestVersion != latest.Version {
+		t.Fatalf("versions = cached %q latest %q", got.CachedVersion, got.LatestVersion)
+	}
+}
+
+func TestCachedVMImageManifestSelectsHighestValidCachedManifest(t *testing.T) {
+	root := t.TempDir()
+	contents := vmImageTestContents()
+	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v1", contents))
+	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v10", contents))
+	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v2", contents))
+
+	got, dir, ok, err := latestCachedVMImageManifest(root)
+	if err != nil {
+		t.Fatalf("latestCachedVMImageManifest: %v", err)
+	}
+	if !ok {
+		t.Fatal("latestCachedVMImageManifest found no cached manifest")
+	}
+	if got.Version != "ubuntu-26.04-amd64-v10" {
+		t.Fatalf("version = %q, want highest valid manifest", got.Version)
+	}
+	if dir != filepath.Join(root, got.Version) {
+		t.Fatalf("dir = %q, want matching cache dir", dir)
+	}
+}
+
+func TestCachedVMImageManifestIgnoresInvalidCachedManifests(t *testing.T) {
+	root := t.TempDir()
+	invalidDir := filepath.Join(root, "ubuntu-26.04-amd64-v99")
+	if err := os.MkdirAll(invalidDir, 0o755); err != nil {
+		t.Fatalf("mkdir invalid cache dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(invalidDir, "manifest.json"), []byte(`{"version":"ubuntu-26.04-amd64-v99"}`), 0o644); err != nil {
+		t.Fatalf("write invalid manifest: %v", err)
+	}
+	contents := vmImageTestContents()
+	valid := vmImageTestManifest("ubuntu-26.04-amd64-v2", contents)
+	writeCachedVMImageManifest(t, root, valid)
+
+	got, _, ok, err := latestCachedVMImageManifest(root)
+	if err != nil {
+		t.Fatalf("latestCachedVMImageManifest: %v", err)
+	}
+	if !ok {
+		t.Fatal("latestCachedVMImageManifest found no cached manifest")
+	}
+	if got.Version != valid.Version {
+		t.Fatalf("version = %q, want valid manifest", got.Version)
+	}
+}
+
+func TestCachedVMImageArtifactsReady(t *testing.T) {
+	dir := t.TempDir()
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v2", contents)
+	manifest.Initrd = "initrd.img"
+	contents[manifest.Initrd] = []byte("initrd")
+	manifest.Checksums[manifest.Initrd] = testSHA256Hex(contents[manifest.Initrd])
+
+	if cachedVMImageArtifactsReady(dir, manifest) {
+		t.Fatal("cachedVMImageArtifactsReady = true with no artifacts")
+	}
+	for _, name := range manifest.artifactNames() {
+		if err := os.WriteFile(filepath.Join(dir, name), contents[name], 0o644); err != nil {
+			t.Fatalf("write artifact %s: %v", name, err)
+		}
+	}
+	if !cachedVMImageArtifactsReady(dir, manifest) {
+		t.Fatal("cachedVMImageArtifactsReady = false with matching artifacts")
+	}
+	if err := os.WriteFile(filepath.Join(dir, manifest.RootFS), []byte("corrupt"), 0o644); err != nil {
+		t.Fatalf("corrupt rootfs: %v", err)
+	}
+	if cachedVMImageArtifactsReady(dir, manifest) {
+		t.Fatal("cachedVMImageArtifactsReady = true with checksum mismatch")
+	}
+}
+
+func TestVMImageCacheArtifactURLFromLatestManifestRoute(t *testing.T) {
+	cache := vmImageCache{ManifestURL: "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json"}
+	got, err := cache.artifactURL("vmlinux")
+	if err != nil {
+		t.Fatalf("artifactURL: %v", err)
+	}
+	want := "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/vmlinux"
+	if got != want {
+		t.Fatalf("artifact URL = %q, want %q", got, want)
 	}
 }
 
@@ -377,4 +623,52 @@ func TestVMImageCacheRejectsUnsafeVersionNames(t *testing.T) {
 			}
 		})
 	}
+}
+
+func vmImageTestContents() map[string][]byte {
+	return map[string][]byte{
+		"vmlinux":         []byte("kernel"),
+		"rootfs.ext4.zst": []byte("rootfs"),
+		"firecracker":     []byte("firecracker"),
+	}
+}
+
+func vmImageTestManifest(version string, contents map[string][]byte) vmImageManifest {
+	return vmImageManifest{
+		Name:         "yeet-ubuntu-26.04",
+		Version:      version,
+		Architecture: "amd64",
+		Kernel:       "vmlinux",
+		RootFS:       "rootfs.ext4.zst",
+		Firecracker:  "firecracker",
+		RootFSSize:   2147483648,
+		Checksums: map[string]string{
+			"vmlinux":         testSHA256Hex(contents["vmlinux"]),
+			"rootfs.ext4.zst": testSHA256Hex(contents["rootfs.ext4.zst"]),
+			"firecracker":     testSHA256Hex(contents["firecracker"]),
+		},
+	}
+}
+
+func writeCachedVMImageManifest(t *testing.T, root string, manifest vmImageManifest) string {
+	t.Helper()
+	dir := filepath.Join(root, manifest.Version)
+	if err := writeManifestFile(filepath.Join(dir, "manifest.json"), manifest); err != nil {
+		t.Fatalf("write cached manifest: %v", err)
+	}
+	return dir
+}
+
+func writeCachedVMImageArtifacts(t *testing.T, dir string, contents map[string][]byte) {
+	t.Helper()
+	for name, content := range contents {
+		if err := os.WriteFile(filepath.Join(dir, name), content, 0o644); err != nil {
+			t.Fatalf("write cached artifact %s: %v", name, err)
+		}
+	}
+}
+
+func testSHA256Hex(content []byte) string {
+	sum := sha256.Sum256(content)
+	return hex.EncodeToString(sum[:])
 }
