@@ -284,6 +284,31 @@ func TestVMImageCacheInspectCurrent(t *testing.T) {
 	}
 }
 
+func TestVMImageCacheStateJSONUsesPublicFieldNames(t *testing.T) {
+	raw, err := json.Marshal(vmImageCacheState{
+		Payload:       vmUbuntu2604Payload,
+		CachedVersion: "ubuntu-26.04-amd64-v1",
+		LatestVersion: "ubuntu-26.04-amd64-v2",
+		State:         vmImageCacheStale,
+		CachePath:     "/var/lib/yeet/vm-images/ubuntu-26.04-amd64-v2",
+		ManifestURL:   defaultVMImageManifestURL,
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{"cachedVersion", "latestVersion", "cachePath", "manifestURL"} {
+		if !strings.Contains(text, `"`+want+`"`) {
+			t.Fatalf("json %s missing %q", text, want)
+		}
+	}
+	for _, unwanted := range []string{"cached_version", "latest_version", "cache_path", "manifest_url"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("json %s contains legacy field %q", text, unwanted)
+		}
+	}
+}
+
 func TestCachedVMImageManifestSelectsHighestValidCachedManifest(t *testing.T) {
 	root := t.TempDir()
 	contents := vmImageTestContents()

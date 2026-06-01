@@ -54,11 +54,11 @@ type vmImageCache struct {
 
 type vmImageCacheState struct {
 	Payload       string `json:"payload"`
-	CachedVersion string `json:"cached_version,omitempty"`
-	LatestVersion string `json:"latest_version"`
+	CachedVersion string `json:"cachedVersion,omitempty"`
+	LatestVersion string `json:"latestVersion"`
 	State         string `json:"state"`
-	CachePath     string `json:"cache_path"`
-	ManifestURL   string `json:"manifest_url"`
+	CachePath     string `json:"cachePath"`
+	ManifestURL   string `json:"manifestURL"`
 }
 
 type vmImagePaths struct {
