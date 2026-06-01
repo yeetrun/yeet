@@ -19,6 +19,7 @@ import (
 var vmGuestNetworkNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 var vmHostnamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 var vmUserPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
+var vmGuestChown = os.Chown
 
 type vmMetadataConfig struct {
 	Hostname string
@@ -299,11 +300,125 @@ func writeVMGuestBaseFiles(root string, cfg vmMetadataConfig) error {
 }
 
 func writeVMGuestSSHAccess(root string, cfg vmMetadataConfig) error {
+	if err := ensureVMGuestLoginUser(root, cfg.User); err != nil {
+		return err
+	}
 	if err := writeVMGuestAuthorizedKeys(root, "root", cfg.SSHKey, 0, 0, false); err != nil {
 		return err
 	}
 	uid, gid, ok := vmGuestUserIDs(root, cfg.User)
 	return writeVMGuestAuthorizedKeys(root, cfg.User, cfg.SSHKey, uid, gid, ok)
+}
+
+func ensureVMGuestLoginUser(root, userName string) error {
+	uid, gid, ok := vmGuestUserIDs(root, userName)
+	if !ok {
+		var err error
+		uid, gid, err = appendVMGuestLoginUser(root, userName)
+		if err != nil {
+			return err
+		}
+	}
+	home := filepath.Join(root, "home", userName)
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return err
+	}
+	if err := vmGuestChown(home, uid, gid); err != nil {
+		return err
+	}
+	return os.Chmod(home, 0o755)
+}
+
+func appendVMGuestLoginUser(root, userName string) (int, int, error) {
+	uid, gid, err := nextVMGuestUserIDs(root)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := appendVMGuestAccountFileLine(root, "etc/passwd", fmt.Sprintf("%s:x:%d:%d:Ubuntu:/home/%s:/bin/bash", userName, uid, gid, userName), 0o644, userName); err != nil {
+		return 0, 0, err
+	}
+	if err := appendVMGuestAccountFileLine(root, "etc/group", fmt.Sprintf("%s:x:%d:", userName, gid), 0o644, userName); err != nil {
+		return 0, 0, err
+	}
+	if err := appendVMGuestAccountFileLine(root, "etc/shadow", fmt.Sprintf("%s:*:1:0:99999:7:::", userName), 0o600, userName); err != nil {
+		return 0, 0, err
+	}
+	if err := appendVMGuestAccountFileLine(root, "etc/gshadow", fmt.Sprintf("%s:!::", userName), 0o600, userName); err != nil {
+		return 0, 0, err
+	}
+	return uid, gid, nil
+}
+
+func appendVMGuestAccountFileLine(root, rel, line string, mode os.FileMode, key string) error {
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	raw, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if vmGuestColonFileHasKey(raw, key) {
+		return nil
+	}
+	if len(raw) > 0 && raw[len(raw)-1] != '\n' {
+		raw = append(raw, '\n')
+	}
+	raw = append(raw, line...)
+	raw = append(raw, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, raw, mode); err != nil {
+		return err
+	}
+	return os.Chmod(path, mode)
+}
+
+func vmGuestColonFileHasKey(raw []byte, key string) bool {
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.SplitN(line, ":", 2)
+		if len(fields) > 0 && fields[0] == key {
+			return true
+		}
+	}
+	return false
+}
+
+func nextVMGuestUserIDs(root string) (int, int, error) {
+	usedUIDs, err := vmGuestUsedIDs(filepath.Join(root, "etc", "passwd"), 2)
+	if err != nil {
+		return 0, 0, err
+	}
+	usedGIDs, err := vmGuestUsedIDs(filepath.Join(root, "etc", "group"), 2)
+	if err != nil {
+		return 0, 0, err
+	}
+	for id := 1000; id < 60000; id++ {
+		if !usedUIDs[id] && !usedGIDs[id] {
+			return id, id, nil
+		}
+	}
+	return 0, 0, fmt.Errorf("no available VM guest user ID")
+}
+
+func vmGuestUsedIDs(path string, field int) (map[int]bool, error) {
+	used := map[int]bool{}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return used, nil
+		}
+		return nil, err
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) <= field {
+			continue
+		}
+		id, err := strconv.Atoi(fields[field])
+		if err == nil {
+			used[id] = true
+		}
+	}
+	return used, nil
 }
 
 func writeVMGuestPrivileges(root, user string) error {
@@ -402,10 +517,10 @@ func writeVMGuestAuthorizedKeys(root, userName, key string, uid, gid int, chown 
 		return err
 	}
 	if chown {
-		if err := os.Chown(dir, uid, gid); err != nil {
+		if err := vmGuestChown(dir, uid, gid); err != nil {
 			return err
 		}
-		if err := os.Chown(path, uid, gid); err != nil {
+		if err := vmGuestChown(path, uid, gid); err != nil {
 			return err
 		}
 	}

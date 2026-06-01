@@ -220,6 +220,7 @@ func TestDefaultVMSSHKeyReportsInvalidAuthorizedKeys(t *testing.T) {
 
 func TestWriteVMGuestMetadataFiles(t *testing.T) {
 	root := t.TempDir()
+	stubVMGuestChown(t)
 	cfg := validVMMetadataConfig()
 	if err := writeVMGuestMetadataFiles(root, cfg); err != nil {
 		t.Fatalf("writeVMGuestMetadataFiles: %v", err)
@@ -244,6 +245,23 @@ func TestWriteVMGuestMetadataFiles(t *testing.T) {
 	if target, err := os.Readlink(filepath.Join(root, "etc", "systemd", "system", "systemd-networkd-wait-online.service")); err != nil || target != "/dev/null" {
 		t.Fatalf("systemd-networkd-wait-online mask = %q, %v; want /dev/null", target, err)
 	}
+}
+
+func TestWriteVMGuestMetadataFilesCreatesMissingLoginUser(t *testing.T) {
+	root := t.TempDir()
+	stubVMGuestChown(t)
+	seedVMGuestAccountFiles(t, root)
+
+	cfg := validVMMetadataConfig()
+	if err := writeVMGuestMetadataFiles(root, cfg); err != nil {
+		t.Fatalf("writeVMGuestMetadataFiles: %v", err)
+	}
+
+	assertFileContains(t, filepath.Join(root, "etc", "passwd"), "ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash")
+	assertFileContains(t, filepath.Join(root, "etc", "group"), "ubuntu:x:1000:")
+	assertFileContains(t, filepath.Join(root, "etc", "shadow"), "ubuntu:*:")
+	assertFileContains(t, filepath.Join(root, "etc", "gshadow"), "ubuntu:!::")
+	assertFileContains(t, filepath.Join(root, "home", "ubuntu", ".ssh", "authorized_keys"), "ssh-ed25519 AAAATEST")
 }
 
 func TestInjectVMMetadataIntoRootFSMountsAndUnmounts(t *testing.T) {
@@ -381,6 +399,38 @@ func validVMMetadataConfig() vmMetadataConfig {
 			{Name: "eth0", Mode: "svc", Address: "192.168.100.12/24", Gateway: "192.168.100.254"},
 			{Name: "eth1", Mode: "lan", DHCP: true},
 		},
+	}
+}
+
+func stubVMGuestChown(t *testing.T) {
+	t.Helper()
+	old := vmGuestChown
+	t.Cleanup(func() { vmGuestChown = old })
+	vmGuestChown = func(string, int, int) error {
+		return nil
+	}
+}
+
+func seedVMGuestAccountFiles(t *testing.T, root string) {
+	t.Helper()
+	files := map[string]string{
+		"etc/passwd":  "root:x:0:0:root:/root:/bin/bash\n",
+		"etc/group":   "root:x:0:\nsudo:x:27:\n",
+		"etc/shadow":  "root:*:1:0:99999:7:::\n",
+		"etc/gshadow": "root:*::\nsudo:*::\n",
+	}
+	for rel, data := range files {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		mode := os.FileMode(0o644)
+		if strings.Contains(filepath.Base(path), "shadow") {
+			mode = 0o600
+		}
+		if err := os.WriteFile(path, []byte(data), mode); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
 	}
 }
 

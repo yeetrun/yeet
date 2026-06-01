@@ -30,7 +30,7 @@ func TestVMImageCacheDownloadsAndVerifiesManifestArtifacts(t *testing.T) {
 		case "/manifest.json":
 			_, _ = w.Write([]byte(`{
 				"name":"yeet-ubuntu-26.04",
-				"version":"ubuntu-26.04-amd64-v0",
+				"version":"ubuntu-26.04-amd64-v1",
 				"architecture":"amd64",
 				"kernel":"vmlinux",
 				"rootfs":"rootfs.ext4.zst",
@@ -69,6 +69,61 @@ func TestVMImageCacheDownloadsAndVerifiesManifestArtifacts(t *testing.T) {
 	}
 }
 
+func TestVMImageCacheDownloadsOptionalInitrdArtifact(t *testing.T) {
+	rootfs := []byte("rootfs")
+	kernel := []byte("kernel")
+	initrd := []byte("initrd")
+	fc := []byte("firecracker")
+	sum := func(b []byte) string {
+		h := sha256.Sum256(b)
+		return hex.EncodeToString(h[:])
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write([]byte(`{
+				"name":"yeet-ubuntu-26.04",
+				"version":"ubuntu-26.04-amd64-v1",
+				"architecture":"amd64",
+				"kernel":"vmlinux",
+				"initrd":"initrd.img",
+				"rootfs":"rootfs.ext4.zst",
+				"firecracker":"firecracker",
+				"rootfs_size":2376073216,
+				"checksums":{
+					"vmlinux":"` + sum(kernel) + `",
+					"initrd.img":"` + sum(initrd) + `",
+					"rootfs.ext4.zst":"` + sum(rootfs) + `",
+					"firecracker":"` + sum(fc) + `"
+				}
+			}`))
+		case "/vmlinux":
+			_, _ = w.Write(kernel)
+		case "/initrd.img":
+			_, _ = w.Write(initrd)
+		case "/rootfs.ext4.zst":
+			_, _ = w.Write(rootfs)
+		case "/firecracker":
+			_, _ = w.Write(fc)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cache := vmImageCache{Root: t.TempDir(), ManifestURL: server.URL + "/manifest.json"}
+	image, err := cache.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if image.InitrdPath == "" || filepath.Base(image.InitrdPath) != "initrd.img" {
+		t.Fatalf("initrd path = %q, want downloaded initrd.img", image.InitrdPath)
+	}
+	if got, err := os.ReadFile(image.InitrdPath); err != nil || string(got) != string(initrd) {
+		t.Fatalf("initrd content = %q, %v; want %q", got, err, initrd)
+	}
+}
+
 func TestEnsureVMImageAssetPreparesCompressedRootFS(t *testing.T) {
 	emptySum := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +131,7 @@ func TestEnsureVMImageAssetPreparesCompressedRootFS(t *testing.T) {
 		case "/manifest.json":
 			_, _ = w.Write([]byte(`{
 				"name":"yeet-ubuntu-26.04",
-				"version":"ubuntu-26.04-amd64-v0",
+				"version":"ubuntu-26.04-amd64-v1",
 				"architecture":"amd64",
 				"kernel":"vmlinux",
 				"rootfs":"rootfs.ext4.zst",
@@ -96,7 +151,7 @@ func TestEnsureVMImageAssetPreparesCompressedRootFS(t *testing.T) {
 	defer server.Close()
 
 	root := t.TempDir()
-	versionDir := filepath.Join(root, "ubuntu-26.04-amd64-v0")
+	versionDir := filepath.Join(root, "ubuntu-26.04-amd64-v1")
 	if err := os.MkdirAll(versionDir, 0o755); err != nil {
 		t.Fatalf("mkdir version dir: %v", err)
 	}
@@ -155,7 +210,7 @@ func TestVMImageCacheRejectsChecksumMismatch(t *testing.T) {
 		case "/manifest.json":
 			_, _ = w.Write([]byte(`{
 				"name":"yeet-ubuntu-26.04",
-				"version":"ubuntu-26.04-amd64-v0",
+				"version":"ubuntu-26.04-amd64-v1",
 				"architecture":"amd64",
 				"kernel":"vmlinux",
 				"rootfs":"rootfs.ext4.zst",
@@ -198,7 +253,7 @@ func TestVMImageCachePreservesCachedArtifactWhenRefreshChecksumFails(t *testing.
 		case "/manifest.json":
 			_, _ = w.Write([]byte(`{
 				"name":"yeet-ubuntu-26.04",
-				"version":"ubuntu-26.04-amd64-v0",
+				"version":"ubuntu-26.04-amd64-v1",
 				"architecture":"amd64",
 				"kernel":"vmlinux",
 				"rootfs":"rootfs.ext4.zst",
@@ -223,7 +278,7 @@ func TestVMImageCachePreservesCachedArtifactWhenRefreshChecksumFails(t *testing.
 	defer server.Close()
 
 	root := t.TempDir()
-	kernelPath := filepath.Join(root, "ubuntu-26.04-amd64-v0", "vmlinux")
+	kernelPath := filepath.Join(root, "ubuntu-26.04-amd64-v1", "vmlinux")
 	if err := os.MkdirAll(filepath.Dir(kernelPath), 0o755); err != nil {
 		t.Fatalf("mkdir cache: %v", err)
 	}
@@ -313,7 +368,7 @@ func TestVMImageCacheRejectsUnsafeArtifactNames(t *testing.T) {
 }
 
 func TestVMImageCacheRejectsUnsafeVersionNames(t *testing.T) {
-	tests := []string{".", " ubuntu-26.04-amd64-v0", "ubuntu-26.04-amd64-v0 "}
+	tests := []string{".", " ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v1 "}
 	for _, version := range tests {
 		t.Run(version, func(t *testing.T) {
 			err := validateVMImageCacheDirName(version)

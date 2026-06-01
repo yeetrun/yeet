@@ -14,6 +14,7 @@ func TestRenderFirecrackerConfig(t *testing.T) {
 	cfg := firecrackerConfig{
 		BootSource: firecrackerBootSource{
 			KernelImagePath: "/srv/images/vmlinux",
+			InitrdPath:      "/srv/images/initrd.img",
 			BootArgs:        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
 		},
 		Drives: []firecrackerDrive{{
@@ -37,10 +38,31 @@ func TestRenderFirecrackerConfig(t *testing.T) {
 		t.Fatalf("invalid JSON: %s", string(raw))
 	}
 	text := string(raw)
-	for _, want := range []string{"kernel_image_path", "vmlinux", "vcpu_count", "mem_size_mib", "yvm-abcd-s0"} {
+	for _, want := range []string{"kernel_image_path", "vmlinux", "initrd_path", "initrd.img", "vcpu_count", "mem_size_mib", "yvm-abcd-s0"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestRenderFirecrackerConfigOmitsEmptyInitrd(t *testing.T) {
+	raw, err := renderFirecrackerConfig(firecrackerConfig{
+		BootSource: firecrackerBootSource{
+			KernelImagePath: "/srv/images/vmlinux",
+			BootArgs:        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
+		},
+		Drives: []firecrackerDrive{{
+			DriveID:      "rootfs",
+			PathOnHost:   "/srv/vms/devbox/rootfs.raw",
+			IsRootDevice: true,
+		}},
+		MachineConfig: firecrackerMachineConfig{VCPUCount: 2, MemSizeMib: 2048},
+	})
+	if err != nil {
+		t.Fatalf("renderFirecrackerConfig: %v", err)
+	}
+	if strings.Contains(string(raw), "initrd_path") {
+		t.Fatalf("config includes empty initrd_path:\n%s", raw)
 	}
 }
 

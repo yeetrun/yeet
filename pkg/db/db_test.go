@@ -178,7 +178,7 @@ func TestVMServiceClonePreservesVMConfig(t *testing.T) {
 		ServiceType: ServiceTypeVM,
 		VM: &VMConfig{
 			Runtime:     "firecracker",
-			Image:       VMImageConfig{Payload: "vm://ubuntu/26.04", Version: "ubuntu-26.04-amd64-v0"},
+			Image:       VMImageConfig{Payload: "vm://ubuntu/26.04", Version: "ubuntu-26.04-amd64-v1"},
 			CPUs:        4,
 			MemoryBytes: 4 << 30,
 			Disk:        VMDiskConfig{Backend: "zvol", Bytes: 128 << 30, Path: "flash/yeet/vms/devbox/root"},

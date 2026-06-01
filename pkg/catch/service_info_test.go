@@ -236,7 +236,7 @@ func TestServiceInfoIncludesVMConfig(t *testing.T) {
 			ServiceType: db.ServiceTypeVM,
 			VM: &db.VMConfig{
 				Runtime:     "firecracker",
-				Image:       db.VMImageConfig{Payload: vmUbuntu2604Payload, Version: "ubuntu-26.04-amd64-v0"},
+				Image:       db.VMImageConfig{Payload: vmUbuntu2604Payload, Version: "ubuntu-26.04-amd64-v1"},
 				CPUs:        4,
 				MemoryBytes: 4 << 30,
 				Disk:        db.VMDiskConfig{Backend: "zvol", Bytes: 128 << 30, Path: "flash/yeet/vms/devbox/root"},
@@ -272,7 +272,7 @@ func TestServiceInfoIncludesVMConfig(t *testing.T) {
 	if len(resp.Info.Status.Components) != 1 || resp.Info.Status.Components[0].Name != "devbox" || resp.Info.Status.Components[0].Status != "running" {
 		t.Fatalf("status components = %#v", resp.Info.Status.Components)
 	}
-	if vm.Runtime != "firecracker" || vm.Image != vmUbuntu2604Payload || vm.ImageVersion != "ubuntu-26.04-amd64-v0" {
+	if vm.Runtime != "firecracker" || vm.Image != vmUbuntu2604Payload || vm.ImageVersion != "ubuntu-26.04-amd64-v1" {
 		t.Fatalf("VM image/runtime = %#v", vm)
 	}
 	if vm.CPUs != 4 || vm.MemoryBytes != 4<<30 || vm.DiskBytes != 128<<30 || vm.DiskBackend != "zvol" || vm.DiskPath != "flash/yeet/vms/devbox/root" {
