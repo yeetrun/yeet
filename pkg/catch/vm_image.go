@@ -21,8 +21,14 @@ import (
 	"strings"
 )
 
-const defaultVMImageVersion = "ubuntu-26.04-amd64-v1"
-const defaultVMImageManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/download/" + defaultVMImageVersion + "/manifest.json"
+const (
+	defaultVMImageVersion     = "ubuntu-26.04-amd64-v1"
+	defaultVMImageManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json"
+
+	vmImageCacheMissing = "missing"
+	vmImageCacheCurrent = "current"
+	vmImageCacheStale   = "stale"
+)
 
 var vmImageSafeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 var prepareVMRootFSFunc = prepareVMRootFS
@@ -46,6 +52,15 @@ type vmImageCache struct {
 	Client      *http.Client
 }
 
+type vmImageCacheState struct {
+	Payload       string `json:"payload"`
+	CachedVersion string `json:"cached_version,omitempty"`
+	LatestVersion string `json:"latest_version"`
+	State         string `json:"state"`
+	CachePath     string `json:"cache_path"`
+	ManifestURL   string `json:"manifest_url"`
+}
+
 type vmImagePaths struct {
 	Manifest        string
 	Dir             string
@@ -66,6 +81,18 @@ func (a vmImageAsset) DiskRootFSPath() string {
 		return a.PreparedRootFSPath
 	}
 	return a.Paths.RootFSPath
+}
+
+func resolveVMImagePayload(payload string) (string, error) {
+	payload = strings.TrimSpace(payload)
+	switch payload {
+	case vmUbuntu2604Payload:
+		return defaultVMImageManifestURL, nil
+	case "":
+		return "", fmt.Errorf("VM image payload is required")
+	default:
+		return "", fmt.Errorf("unsupported VM image payload %q (supported: %s)", payload, vmUbuntu2604Payload)
+	}
 }
 
 func ensureVMImageAsset(ctx context.Context, cache vmImageCache) (vmImageAsset, error) {
@@ -191,6 +218,54 @@ func (c vmImageCache) Ensure(ctx context.Context) (vmImagePaths, error) {
 	return paths, nil
 }
 
+func (c vmImageCache) Inspect(ctx context.Context, payload string) (vmImageCacheState, vmImageManifest, error) {
+	payload = strings.TrimSpace(payload)
+	upstreamManifestURL, err := resolveVMImagePayload(payload)
+	if err != nil {
+		return vmImageCacheState{}, vmImageManifest{}, err
+	}
+	cache := c.withManifestURL(upstreamManifestURL)
+	manifestURL := cache.manifestURL()
+	latestManifest, err := cache.fetchManifest(ctx)
+	if err != nil {
+		return vmImageCacheState{}, vmImageManifest{}, err
+	}
+	if err := latestManifest.validate(); err != nil {
+		return vmImageCacheState{}, vmImageManifest{}, err
+	}
+	root := strings.TrimSpace(cache.Root)
+	if root == "" {
+		return vmImageCacheState{}, vmImageManifest{}, fmt.Errorf("VM image cache root is required")
+	}
+
+	state := vmImageCacheState{
+		Payload:       payload,
+		LatestVersion: latestManifest.Version,
+		State:         vmImageCacheMissing,
+		CachePath:     filepath.Join(root, latestManifest.Version),
+		ManifestURL:   manifestURL,
+	}
+	cachedManifest, cachedDir, ok, err := latestCachedVMImageManifest(root)
+	if err != nil {
+		return vmImageCacheState{}, vmImageManifest{}, err
+	}
+	if !ok {
+		return state, latestManifest, nil
+	}
+
+	state.CachedVersion = cachedManifest.Version
+	if cachedManifest.Version != latestManifest.Version {
+		state.State = vmImageCacheStale
+		return state, latestManifest, nil
+	}
+	if cachedVMImageArtifactsReady(cachedDir, latestManifest) {
+		state.State = vmImageCacheCurrent
+		return state, latestManifest, nil
+	}
+	state.State = vmImageCacheStale
+	return state, latestManifest, nil
+}
+
 func (c vmImageCache) ensureArtifacts(ctx context.Context, dir string, manifest vmImageManifest) (vmImagePaths, error) {
 	kernelPath, err := c.ensureArtifact(ctx, dir, manifest, manifest.Kernel)
 	if err != nil {
@@ -224,10 +299,7 @@ func (c vmImageCache) ensureArtifacts(ctx context.Context, dir string, manifest 
 }
 
 func (c vmImageCache) fetchManifest(ctx context.Context) (vmImageManifest, error) {
-	manifestURL := strings.TrimSpace(c.ManifestURL)
-	if manifestURL == "" {
-		manifestURL = defaultVMImageManifestURL
-	}
+	manifestURL := c.manifestURL()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
 	if err != nil {
 		return vmImageManifest{}, fmt.Errorf("create VM image manifest request: %w", err)
@@ -285,6 +357,21 @@ func (c vmImageCache) httpClient() *http.Client {
 		return c.Client
 	}
 	return http.DefaultClient
+}
+
+func (c vmImageCache) manifestURL() string {
+	manifestURL := strings.TrimSpace(c.ManifestURL)
+	if manifestURL != "" {
+		return manifestURL
+	}
+	return defaultVMImageManifestURL
+}
+
+func (c vmImageCache) withManifestURL(manifestURL string) vmImageCache {
+	if strings.TrimSpace(c.ManifestURL) == "" {
+		c.ManifestURL = strings.TrimSpace(manifestURL)
+	}
+	return c
 }
 
 func (c vmImageCache) downloadArtifactResponse(ctx context.Context, rawURL string) (*http.Response, error) {
@@ -359,10 +446,7 @@ func (c vmImageCache) artifactURL(artifactName string) (string, error) {
 	if err := validateVMImageArtifactName(artifactName); err != nil {
 		return "", err
 	}
-	manifestURL := strings.TrimSpace(c.ManifestURL)
-	if manifestURL == "" {
-		manifestURL = defaultVMImageManifestURL
-	}
+	manifestURL := c.manifestURL()
 	u, err := url.Parse(manifestURL)
 	if err != nil {
 		return "", fmt.Errorf("parse VM image manifest URL: %w", err)
@@ -431,6 +515,181 @@ func (m vmImageManifest) artifactNames() []string {
 		names = append(names, m.Initrd)
 	}
 	return append(names, m.RootFS, m.Firecracker)
+}
+
+func latestCachedVMImageManifest(root string) (vmImageManifest, string, bool, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return vmImageManifest{}, "", false, fmt.Errorf("VM image cache root is required")
+	}
+	entries, err := readVMImageCacheEntries(root)
+	if err != nil {
+		return vmImageManifest{}, "", false, err
+	}
+
+	var best vmImageManifest
+	var bestDir string
+	found := false
+	for _, entry := range entries {
+		manifest, dir, ok, err := cachedVMImageManifestFromEntry(root, entry)
+		if err != nil {
+			return vmImageManifest{}, "", false, err
+		}
+		if !ok {
+			continue
+		}
+		if !found || compareVMImageVersions(manifest.Version, best.Version) > 0 {
+			best = manifest
+			bestDir = dir
+			found = true
+		}
+	}
+	return best, bestDir, found, nil
+}
+
+func readVMImageCacheEntries(root string) ([]os.DirEntry, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read VM image cache root: %w", err)
+	}
+	return entries, nil
+}
+
+func cachedVMImageManifestFromEntry(root string, entry os.DirEntry) (vmImageManifest, string, bool, error) {
+	if !entry.IsDir() {
+		return vmImageManifest{}, "", false, nil
+	}
+	dirName := entry.Name()
+	if err := validateVMImageCacheDirName(dirName); err != nil {
+		return vmImageManifest{}, "", false, nil
+	}
+	dir := filepath.Join(root, dirName)
+	manifest, ok, err := readCachedVMImageManifest(dir)
+	if err != nil || !ok || manifest.Version != dirName {
+		return vmImageManifest{}, "", false, err
+	}
+	return manifest, dir, true, nil
+}
+
+func readCachedVMImageManifest(dir string) (vmImageManifest, bool, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return vmImageManifest{}, false, nil
+		}
+		return vmImageManifest{}, false, fmt.Errorf("read cached VM image manifest: %w", err)
+	}
+	var manifest vmImageManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return vmImageManifest{}, false, nil
+	}
+	if err := manifest.validate(); err != nil {
+		return vmImageManifest{}, false, nil
+	}
+	return manifest, true, nil
+}
+
+func cachedVMImageArtifactsReady(dir string, manifest vmImageManifest) bool {
+	if strings.TrimSpace(dir) == "" {
+		return false
+	}
+	for _, artifactName := range manifest.artifactNames() {
+		if err := validateVMImageArtifactName(artifactName); err != nil {
+			return false
+		}
+		want := strings.TrimSpace(manifest.Checksums[artifactName])
+		if want == "" {
+			return false
+		}
+		got, err := sha256File(filepath.Join(dir, artifactName))
+		if err != nil || !strings.EqualFold(got, want) {
+			return false
+		}
+	}
+	return true
+}
+
+func compareVMImageVersions(a, b string) int {
+	if a == b {
+		return 0
+	}
+	ai, bi := 0, 0
+	for ai < len(a) && bi < len(b) {
+		at, an, nextA := nextVMImageVersionToken(a, ai)
+		bt, bn, nextB := nextVMImageVersionToken(b, bi)
+		if cmp := compareVMImageVersionTokens(at, an, bt, bn); cmp != 0 {
+			return cmp
+		}
+		ai, bi = nextA, nextB
+	}
+	return compareVMImageVersionRemainder(ai, len(a), bi, len(b))
+}
+
+func compareVMImageVersionTokens(a string, aNumber bool, b string, bNumber bool) int {
+	if aNumber && bNumber {
+		return compareVMImageVersionNumbers(a, b)
+	}
+	return compareVMImageVersionStrings(a, b)
+}
+
+func compareVMImageVersionStrings(a, b string) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+func compareVMImageVersionRemainder(ai, aLen, bi, bLen int) int {
+	if ai == aLen && bi == bLen {
+		return 0
+	}
+	if ai == aLen {
+		return -1
+	}
+	return 1
+}
+
+func nextVMImageVersionToken(version string, start int) (string, bool, int) {
+	isNumber := isASCIIDigit(version[start])
+	end := start + 1
+	for end < len(version) && isASCIIDigit(version[end]) == isNumber {
+		end++
+	}
+	return version[start:end], isNumber, end
+}
+
+func compareVMImageVersionNumbers(a, b string) int {
+	a = strings.TrimLeft(a, "0")
+	b = strings.TrimLeft(b, "0")
+	if a == "" {
+		a = "0"
+	}
+	if b == "" {
+		b = "0"
+	}
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+func isASCIIDigit(b byte) bool {
+	return b >= '0' && b <= '9'
 }
 
 func validateVMImageCacheDirName(name string) error {
