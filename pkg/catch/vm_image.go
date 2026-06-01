@@ -21,7 +21,8 @@ import (
 	"strings"
 )
 
-const defaultVMImageManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-v0/manifest.json"
+const defaultVMImageVersion = "ubuntu-26.04-amd64-v1"
+const defaultVMImageManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/download/" + defaultVMImageVersion + "/manifest.json"
 
 var vmImageSafeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 var prepareVMRootFSFunc = prepareVMRootFS
@@ -32,6 +33,7 @@ type vmImageManifest struct {
 	Version      string            `json:"version"`
 	Architecture string            `json:"architecture"`
 	Kernel       string            `json:"kernel"`
+	Initrd       string            `json:"initrd,omitempty"`
 	RootFS       string            `json:"rootfs"`
 	Firecracker  string            `json:"firecracker"`
 	RootFSSize   int64             `json:"rootfs_size"`
@@ -48,6 +50,7 @@ type vmImagePaths struct {
 	Manifest        string
 	Dir             string
 	KernelPath      string
+	InitrdPath      string
 	RootFSPath      string
 	FirecrackerPath string
 }
@@ -175,9 +178,30 @@ func (c vmImageCache) Ensure(ctx context.Context) (vmImagePaths, error) {
 	}
 
 	manifestPath := filepath.Join(dir, "manifest.json")
+	paths, err := c.ensureArtifacts(ctx, dir, manifest)
+	if err != nil {
+		return vmImagePaths{}, err
+	}
+	paths.Manifest = manifestPath
+	paths.Dir = dir
+	if err := writeManifestFile(manifestPath, manifest); err != nil {
+		return vmImagePaths{}, err
+	}
+
+	return paths, nil
+}
+
+func (c vmImageCache) ensureArtifacts(ctx context.Context, dir string, manifest vmImageManifest) (vmImagePaths, error) {
 	kernelPath, err := c.ensureArtifact(ctx, dir, manifest, manifest.Kernel)
 	if err != nil {
 		return vmImagePaths{}, err
+	}
+	var initrdPath string
+	if strings.TrimSpace(manifest.Initrd) != "" {
+		initrdPath, err = c.ensureArtifact(ctx, dir, manifest, manifest.Initrd)
+		if err != nil {
+			return vmImagePaths{}, err
+		}
 	}
 	rootFSPath, err := c.ensureArtifact(ctx, dir, manifest, manifest.RootFS)
 	if err != nil {
@@ -190,14 +214,10 @@ func (c vmImageCache) Ensure(ctx context.Context) (vmImagePaths, error) {
 	if err := os.Chmod(firecrackerPath, 0o755); err != nil {
 		return vmImagePaths{}, fmt.Errorf("chmod firecracker: %w", err)
 	}
-	if err := writeManifestFile(manifestPath, manifest); err != nil {
-		return vmImagePaths{}, err
-	}
 
 	return vmImagePaths{
-		Manifest:        manifestPath,
-		Dir:             dir,
 		KernelPath:      kernelPath,
+		InitrdPath:      initrdPath,
 		RootFSPath:      rootFSPath,
 		FirecrackerPath: firecrackerPath,
 	}, nil
@@ -387,7 +407,7 @@ func (m vmImageManifest) validateRequiredFields() error {
 }
 
 func (m vmImageManifest) validateArtifactChecksums() error {
-	for _, artifactName := range []string{m.Kernel, m.RootFS, m.Firecracker} {
+	for _, artifactName := range m.artifactNames() {
 		if err := validateVMImageArtifactName(artifactName); err != nil {
 			return err
 		}
@@ -403,6 +423,14 @@ func (m vmImageManifest) validateArtifactChecksums() error {
 		}
 	}
 	return nil
+}
+
+func (m vmImageManifest) artifactNames() []string {
+	names := []string{m.Kernel}
+	if strings.TrimSpace(m.Initrd) != "" {
+		names = append(names, m.Initrd)
+	}
+	return append(names, m.RootFS, m.Firecracker)
 }
 
 func validateVMImageCacheDirName(name string) error {

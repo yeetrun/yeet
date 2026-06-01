@@ -84,7 +84,7 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	if vm.SetupState != "ready" {
 		t.Fatalf("SetupState = %q, want ready", vm.SetupState)
 	}
-	if vm.Runtime != vmRuntimeFirecracker || vm.Image.Payload != vmUbuntu2604Payload || vm.Image.Version != "ubuntu-26.04-amd64-v0" {
+	if vm.Runtime != vmRuntimeFirecracker || vm.Image.Payload != vmUbuntu2604Payload || vm.Image.Version != defaultVMImageVersion {
 		t.Fatalf("VM image/runtime = %#v", vm)
 	}
 	if vm.CPUs != 2 || vm.MemoryBytes != 2<<30 || vm.Disk.Bytes != 16<<30 || vm.Disk.Backend != vmDiskBackendRaw {
@@ -128,6 +128,27 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	if !reflect.DeepEqual(*systemctlCalls, wantSystemctl) {
 		t.Fatalf("systemctl calls = %#v, want %#v", *systemctlCalls, wantSystemctl)
 	}
+}
+
+func TestRunVMProvisionIncludesInitrdPathWhenImageHasInitrd(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	vmProvisionImageEnsureFunc = func(context.Context, vmImageCache) (vmImageAsset, error) {
+		asset, err := fakeVMImageAsset(t)
+		if err != nil {
+			return vmImageAsset{}, err
+		}
+		asset.Paths.InitrdPath = filepath.Join(asset.Paths.Dir, "initrd.img")
+		asset.Manifest.Initrd = "initrd.img"
+		return asset, nil
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: false}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), `"initrd_path": "`)
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "initrd.img")
 }
 
 func TestRunVMPrintsProgressAndNextCommands(t *testing.T) {
@@ -211,7 +232,7 @@ func TestRunVMZVOLProvisionUsesDevicePathForFirecracker(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), `"path_on_host": "`+wantDevice+`"`)
 	foundClone := false
 	for _, command := range diskCommands {
-		if reflect.DeepEqual(command, []string{"zfs", "clone", serviceDataset + "/base/ubuntu-26.04-amd64-v0@ubuntu-26.04-amd64-v0", wantDataset}) {
+		if reflect.DeepEqual(command, []string{"zfs", "clone", serviceDataset + "/base/" + defaultVMImageVersion + "@" + defaultVMImageVersion, wantDataset}) {
 			foundClone = true
 		}
 	}
@@ -431,7 +452,7 @@ func fakeVMImageAsset(t *testing.T) (vmImageAsset, error) {
 		PreparedRootFSPath: filepath.Join(dir, "rootfs.ext4"),
 		Manifest: vmImageManifest{
 			Name:         "ubuntu",
-			Version:      "ubuntu-26.04-amd64-v0",
+			Version:      defaultVMImageVersion,
 			Architecture: "x86_64",
 			Kernel:       "vmlinux",
 			RootFS:       "rootfs.ext4.zst",

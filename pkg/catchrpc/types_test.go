@@ -72,7 +72,7 @@ func TestServiceInfoVMJSONRoundTrip(t *testing.T) {
 		VM: &ServiceVM{
 			Runtime:      "firecracker",
 			Image:        "vm://ubuntu/26.04",
-			ImageVersion: "ubuntu-26.04-amd64-v0",
+			ImageVersion: "ubuntu-26.04-amd64-v1",
 			CPUs:         4,
 			MemoryBytes:  4 << 30,
 			DiskBytes:    128 << 30,
@@ -90,7 +90,7 @@ func TestServiceInfoVMJSONRoundTrip(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"vm"`,
-		`"imageVersion":"ubuntu-26.04-amd64-v0"`,
+		`"imageVersion":"ubuntu-26.04-amd64-v1"`,
 		`"memoryBytes":4294967296`,
 		`"diskBackend":"zvol"`,
 		`"socketPath":"/run/yeet/devbox/serial.sock"`,
