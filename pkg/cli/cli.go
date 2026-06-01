@@ -53,6 +53,7 @@ type RunFlags struct {
 	Pull             bool
 	Force            bool
 	Web              bool
+	ImagePolicy      string
 	Publish          []string
 	PublishReset     bool
 	EnvFile          string
@@ -129,6 +130,10 @@ type DockerUpdateFlags struct {
 	Outdated bool
 }
 
+type VMImagesFlags struct {
+	Output string
+}
+
 type InfoFlags struct {
 	Format string
 }
@@ -188,6 +193,7 @@ type runFlagsParsed struct {
 	Pull             bool     `flag:"pull"`
 	Force            bool     `flag:"force"`
 	Web              bool     `flag:"web"`
+	ImagePolicy      string   `flag:"image-policy"`
 	Publish          []string `flag:"publish" short:"p"`
 	PublishReset     bool     `flag:"publish-reset"`
 	EnvFile          string   `flag:"env-file"`
@@ -262,6 +268,10 @@ type dockerUpdateFlagsParsed struct {
 	Outdated bool `flag:"outdated"`
 }
 
+type vmImagesFlagsParsed struct {
+	Output string `flag:"output" default:"table"`
+}
+
 type infoFlagsParsed struct {
 	Format string `flag:"format" default:"plain"`
 }
@@ -309,6 +319,10 @@ type DockerUpdateArgs struct {
 	Services []ServiceName `pos:"0+" help:"Service names"`
 }
 
+type VMImagesArgs struct {
+	Action string `pos:"0?" help:"Action (update)"`
+}
+
 type ServiceName string
 
 func IsServiceArgSpec(spec yargs.ArgSpec) bool {
@@ -350,6 +364,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 		"yeet run --publish-reset -p 443:443 <svc> nginx:latest",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
 		"yeet run <svc> vm://ubuntu/26.04 --net=svc",
+		"yeet run <svc> vm://ubuntu/26.04 --image-policy=update",
 		"yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs",
 		"yeet run <svc> ./compose.yml --snapshots=off",
 		"yeet run --pull <svc> ./compose.yml",
@@ -433,6 +448,19 @@ var remoteGroupInfos = map[string]GroupInfo{
 		Description: "Manage VM-specific commands",
 		Commands: map[string]CommandInfo{
 			"console": {Name: "console", Description: "Stream VM serial console output", Usage: "vm console <svc>", ArgsSchema: ServiceArgs{}},
+			"images": {
+				Name:        "images",
+				Description: "Show or refresh VM image cache state",
+				Usage:       "vm images [update] [--output=table|json|json-pretty]",
+				Examples: []string{
+					"yeet vm images",
+					"yeet vm images --output=json",
+					"yeet vm images update",
+					"yeet vm images update --output=json-pretty",
+				},
+				ArgsSchema:  VMImagesArgs{},
+				FlagsSchema: vmImagesFlagsParsed{},
+			},
 		},
 	},
 	"env": {
@@ -507,6 +535,7 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 	},
 	"vm": {
 		"console": {},
+		"images":  flagSpecsFromStruct(vmImagesFlagsParsed{}),
 	},
 	"env": {
 		"show": flagSpecsFromStruct(envShowFlagsParsed{}),
@@ -621,6 +650,10 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 	if err != nil {
 		return RunFlags{}, nil, err
 	}
+	imagePolicy, err := normalizeVMImagePolicy(parsed.Flags.ImagePolicy)
+	if err != nil {
+		return RunFlags{}, nil, err
+	}
 	flags := RunFlags{
 		CPUs:             parsed.Flags.CPUs,
 		Memory:           strings.TrimSpace(parsed.Flags.Memory),
@@ -637,6 +670,7 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		Pull:             parsed.Flags.Pull,
 		Force:            parsed.Flags.Force,
 		Web:              parsed.Flags.Web,
+		ImagePolicy:      imagePolicy,
 		Publish:          orderedFlagValues(parseArgs, "--publish", "-p"),
 		PublishReset:     parsed.Flags.PublishReset,
 		EnvFile:          parsed.Flags.EnvFile,
@@ -766,6 +800,30 @@ func normalizeSnapshotMode(value string) (string, error) {
 		return value, nil
 	default:
 		return "", fmt.Errorf("--snapshots must be on, off, or inherit")
+	}
+}
+
+func normalizeVMImagePolicy(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "":
+		return "prompt", nil
+	case "prompt", "update", "cached":
+		return value, nil
+	default:
+		return "", fmt.Errorf("--image-policy must be prompt, update, or cached")
+	}
+}
+
+func normalizeOutputFormat(flagName, value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "table":
+		return "table", nil
+	case "json", "json-pretty":
+		return value, nil
+	default:
+		return "", fmt.Errorf("%s must be table, json, or json-pretty", flagName)
 	}
 }
 
@@ -1003,6 +1061,21 @@ func ParseDockerUpdate(args []string) (DockerUpdateFlags, []string, error) {
 		return DockerUpdateFlags{}, nil, err
 	}
 	flags := DockerUpdateFlags{Outdated: parsed.Flags.Outdated}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseVMImages(args []string) (VMImagesFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[vmImagesFlagsParsed](parseArgs)
+	if err != nil {
+		return VMImagesFlags{}, nil, err
+	}
+	output, err := normalizeOutputFormat("--output", parsed.Flags.Output)
+	if err != nil {
+		return VMImagesFlags{}, nil, err
+	}
+	flags := VMImagesFlags{Output: output}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
 }

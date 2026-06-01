@@ -196,6 +196,45 @@ func TestParseRunVMFlags(t *testing.T) {
 	}
 }
 
+func TestParseRunVMImagePolicy(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "default", args: []string{"vm://ubuntu/26.04"}, want: "prompt"},
+		{name: "prompt", args: []string{"--image-policy=prompt", "vm://ubuntu/26.04"}, want: "prompt"},
+		{name: "update", args: []string{"--image-policy=update", "vm://ubuntu/26.04"}, want: "update"},
+		{name: "cached", args: []string{"--image-policy=cached", "vm://ubuntu/26.04"}, want: "cached"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags, args, err := ParseRun(tt.args)
+			if err != nil {
+				t.Fatalf("ParseRun: %v", err)
+			}
+			if flags.ImagePolicy != tt.want {
+				t.Fatalf("ImagePolicy = %q, want %q", flags.ImagePolicy, tt.want)
+			}
+			if !reflect.DeepEqual(args, []string{"vm://ubuntu/26.04"}) {
+				t.Fatalf("args = %#v, want VM payload", args)
+			}
+		})
+	}
+}
+
+func TestParseRunRejectsInvalidVMImagePolicy(t *testing.T) {
+	_, _, err := ParseRun([]string{"--image-policy=always", "vm://ubuntu/26.04"})
+	if err == nil {
+		t.Fatal("ParseRun succeeded with invalid image policy")
+	}
+	for _, want := range []string{"image-policy", "prompt", "update", "cached"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("ParseRun error = %q, want %q", err.Error(), want)
+		}
+	}
+}
+
 func TestParseRunRejectsMissingSnapshotMode(t *testing.T) {
 	tests := [][]string{
 		{"--snapshots", "payload.yml"},
@@ -687,6 +726,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if _, ok := flags["run"]["--zfs"]; !ok {
 		t.Fatal("run --zfs should be registered")
 	}
+	if !flags["run"]["--image-policy"].ConsumesValue {
+		t.Fatal("run --image-policy should consume a value")
+	}
 	spec, ok := flags["run"]["--web"]
 	if !ok {
 		t.Fatal("run --web should be registered")
@@ -745,6 +787,15 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	}
 	if _, ok := RemoteGroupFlagSpecs()["vm"]["console"]; !ok {
 		t.Fatal("vm console flag spec missing")
+	}
+	if _, ok := group.Commands["images"]; !ok {
+		t.Fatal("vm images command missing")
+	}
+	if _, ok := RemoteGroupFlagSpecs()["vm"]["images"]; !ok {
+		t.Fatal("vm images flag spec missing")
+	}
+	if !RemoteGroupFlagSpecs()["vm"]["images"]["--output"].ConsumesValue {
+		t.Fatal("vm images --output should consume a value")
 	}
 }
 
@@ -872,6 +923,35 @@ func TestParseAdditionalCommandFlags(t *testing.T) {
 		}
 	})
 
+	t.Run("vm images", func(t *testing.T) {
+		flags, args, err := ParseVMImages(nil)
+		if err != nil {
+			t.Fatalf("ParseVMImages default: %v", err)
+		}
+		if flags.Output != "table" || len(args) != 0 {
+			t.Fatalf("ParseVMImages default = %#v args=%v, want table no args", flags, args)
+		}
+
+		flags, args, err = ParseVMImages([]string{"--output=json"})
+		if err != nil {
+			t.Fatalf("ParseVMImages output: %v", err)
+		}
+		if flags.Output != "json" || len(args) != 0 {
+			t.Fatalf("ParseVMImages output = %#v args=%v, want json no args", flags, args)
+		}
+
+		flags, args, err = ParseVMImages([]string{"update", "--output", "json-pretty"})
+		if err != nil {
+			t.Fatalf("ParseVMImages update: %v", err)
+		}
+		if flags.Output != "json-pretty" {
+			t.Fatalf("VMImages output = %q, want json-pretty", flags.Output)
+		}
+		if !reflect.DeepEqual(args, []string{"update"}) {
+			t.Fatalf("ParseVMImages args = %#v, want update", args)
+		}
+	})
+
 	t.Run("events", func(t *testing.T) {
 		flags, args, err := ParseEvents([]string{"--all", "svc"})
 		if err != nil {
@@ -934,6 +1014,9 @@ func TestParseAdditionalCommandFlags(t *testing.T) {
 func TestParseFlagErrors(t *testing.T) {
 	if _, _, err := ParseRun([]string{"--macvlan-vlan", "not-an-int"}); err == nil {
 		t.Fatal("ParseRun succeeded with invalid int")
+	}
+	if _, _, err := ParseVMImages([]string{"--output=xml"}); err == nil || !strings.Contains(err.Error(), "--output must be table, json, or json-pretty") {
+		t.Fatalf("ParseVMImages invalid output error = %v", err)
 	}
 	if _, _, err := ParseLogs([]string{"--lines", "not-an-int"}); err == nil {
 		t.Fatal("ParseLogs succeeded with invalid int")
