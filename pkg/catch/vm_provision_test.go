@@ -198,6 +198,44 @@ func TestRunVMUsesExecRequestSSHKey(t *testing.T) {
 	}
 }
 
+func TestVMZVOLBaseDatasetUsesServiceRootPool(t *testing.T) {
+	root := resolvedServiceRoot{
+		Root:    "/flash/yeet/vms/devbox",
+		Dataset: "flash/yeet/vms/devbox",
+		ZFS:     true,
+	}
+
+	got := vmZVOLBaseDataset(root, "ubuntu-26.04-amd64-v1")
+	want := "flash/yeet/vm-images/ubuntu-26.04-amd64-v1/root"
+	if got != want {
+		t.Fatalf("vmZVOLBaseDataset = %q, want %q", got, want)
+	}
+}
+
+func TestVMZVOLBaseDatasetUsesTargetPoolForDifferentServiceRoot(t *testing.T) {
+	root := resolvedServiceRoot{
+		Root:    "/tank/apps/devbox",
+		Dataset: "tank/apps/devbox",
+		ZFS:     true,
+	}
+
+	got := vmZVOLBaseDataset(root, "ubuntu-26.04-amd64-v2")
+	want := "tank/yeet/vm-images/ubuntu-26.04-amd64-v2/root"
+	if got != want {
+		t.Fatalf("vmZVOLBaseDataset = %q, want %q", got, want)
+	}
+}
+
+func TestVMZVOLBaseDatasetFallbackForMissingDataset(t *testing.T) {
+	root := resolvedServiceRoot{Root: "/srv/yeet/services/devbox"}
+
+	got := vmZVOLBaseDataset(root, "ubuntu-26.04-amd64-v1")
+	want := "yeet/vm-images/ubuntu-26.04-amd64-v1/root"
+	if got != want {
+		t.Fatalf("vmZVOLBaseDataset = %q, want %q", got, want)
+	}
+}
+
 func TestRunVMZVOLProvisionUsesDevicePathForFirecracker(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
@@ -226,18 +264,23 @@ func TestRunVMZVOLProvisionUsesDevicePathForFirecracker(t *testing.T) {
 	}
 	wantDataset := serviceDataset + "/vm/" + shortVMName("svc") + "/root"
 	wantDevice := "/dev/zvol/" + wantDataset
+	wantBase := "flash/yeet/vm-images/" + defaultVMImageVersion + "/root"
+	wantSnapshot := wantBase + "@" + defaultVMImageVersion
 	if svc.VM.Disk.Path != wantDevice {
 		t.Fatalf("db disk path = %q, want %q", svc.VM.Disk.Path, wantDevice)
 	}
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), `"path_on_host": "`+wantDevice+`"`)
 	foundClone := false
 	for _, command := range diskCommands {
-		if reflect.DeepEqual(command, []string{"zfs", "clone", serviceDataset + "/base/" + defaultVMImageVersion + "@" + defaultVMImageVersion, wantDataset}) {
+		if reflect.DeepEqual(command, []string{"zfs", "clone", wantSnapshot, wantDataset}) {
 			foundClone = true
+		}
+		if len(command) >= 3 && strings.Contains(strings.Join(command, " "), serviceDataset+"/base/") {
+			t.Fatalf("disk command used legacy per-service base: %#v", command)
 		}
 	}
 	if !foundClone {
-		t.Fatalf("clone command for dataset %q not found in %#v", wantDataset, diskCommands)
+		t.Fatalf("clone command from %q to %q not found in %#v", wantSnapshot, wantDataset, diskCommands)
 	}
 }
 
