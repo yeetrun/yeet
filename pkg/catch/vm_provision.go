@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -190,7 +191,7 @@ func (e *ttyExecer) selectStaleVMProvisionImage(ctx context.Context, cache vmIma
 		if !e.isPty || e.rw == nil {
 			return vmImageAsset{}, staleVMImagePolicyError(payload, state, latestManifest)
 		}
-		update, err := cmdutil.Confirm(e.rw, e.rw, staleVMImagePrompt(payload, state, latestManifest))
+		update, err := cmdutil.Confirm(e.confirmationReader(), e.rw, staleVMImagePrompt(payload, state, latestManifest))
 		if err != nil {
 			return vmImageAsset{}, err
 		}
@@ -201,6 +202,13 @@ func (e *ttyExecer) selectStaleVMProvisionImage(ctx context.Context, cache vmIma
 	default:
 		return vmImageAsset{}, fmt.Errorf("--image-policy must be prompt, update, or cached")
 	}
+}
+
+func (e *ttyExecer) confirmationReader() io.Reader {
+	if e.bypassPtyInput && e.rawRW != nil {
+		return e.rawRW
+	}
+	return e.rw
 }
 
 func staleVMImagePrompt(payload string, state vmImageCacheState, latestManifest vmImageManifest) string {
