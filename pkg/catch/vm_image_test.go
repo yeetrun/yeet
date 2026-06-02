@@ -14,7 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -123,6 +125,67 @@ func TestVMImageCacheDownloadsOptionalInitrdArtifact(t *testing.T) {
 	if got, err := os.ReadFile(image.InitrdPath); err != nil || string(got) != string(initrd) {
 		t.Fatalf("initrd content = %q, %v; want %q", got, err, initrd)
 	}
+}
+
+func TestVMImageDownloadUpdatesProgressDetail(t *testing.T) {
+	content := []byte(strings.Repeat("x", 2048))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/vmlinux" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		_, _ = w.Write(content)
+	}))
+	defer server.Close()
+
+	ui := &recordingVMImageProgressUI{}
+	progress := newByteProgress(0)
+	cache := vmImageCache{Root: t.TempDir()}
+	dst := filepath.Join(t.TempDir(), "vmlinux")
+	if err := cache.downloadVerifiedFile(context.Background(), server.URL+"/vmlinux", dst, "vmlinux", testSHA256Hex(content), progress, ui); err != nil {
+		t.Fatalf("downloadVerifiedFile: %v", err)
+	}
+	if got := progress.seen.Load(); got != int64(len(content)) {
+		t.Fatalf("download progress seen = %d, want %d", got, len(content))
+	}
+	assertVMImageProgressDetail(t, ui.detailsSnapshot(), "100% 2.00 KB/2.00 KB")
+}
+
+func TestDefaultVMImageEnsureFuncUpdatesProgress(t *testing.T) {
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
+	server := newVMImageArtifactTestServer(t, manifest, contents)
+	defer server.Close()
+
+	oldPrepare := prepareVMRootFSFunc
+	t.Cleanup(func() { prepareVMRootFSFunc = oldPrepare })
+	prepareVMRootFSFunc = func(_ context.Context, source string) (string, error) {
+		return source, nil
+	}
+
+	ui := &recordingVMImageProgressUI{}
+	cache := vmImageCache{Root: t.TempDir(), ManifestURL: server.URL + "/manifest.json"}
+	asset, err := vmImageEnsureFunc(context.Background(), cache, vmUbuntu2604Payload, ui)
+	if err != nil {
+		t.Fatalf("vmImageEnsureFunc: %v", err)
+	}
+	if asset.Manifest.Version != manifest.Version {
+		t.Fatalf("asset version = %q, want %q", asset.Manifest.Version, manifest.Version)
+	}
+	if got := ui.stepNames(); !reflect.DeepEqual(got, []string{"Download VM image"}) {
+		t.Fatalf("progress steps = %#v, want Download VM image", got)
+	}
+	if got := ui.startStopCounts(); got.starts != 1 || got.stops != 1 {
+		t.Fatalf("progress start/stop = %#v, want one start and stop", got)
+	}
+	if got := ui.failuresSnapshot(); len(got) != 0 {
+		t.Fatalf("progress failures = %#v, want none", got)
+	}
+	if got := ui.doneSnapshot(); len(got) != 1 || !strings.Contains(got[0], " @ ") {
+		t.Fatalf("progress done = %#v, want final byte rate detail", got)
+	}
+	assertVMImageProgressDetail(t, ui.detailsSnapshot(), "100%")
 }
 
 func TestResolveVMImagePayload(t *testing.T) {
@@ -696,4 +759,120 @@ func writeCachedVMImageArtifacts(t *testing.T, dir string, contents map[string][
 func testSHA256Hex(content []byte) string {
 	sum := sha256.Sum256(content)
 	return hex.EncodeToString(sum[:])
+}
+
+func newVMImageArtifactTestServer(t *testing.T, manifest vmImageManifest, contents map[string][]byte) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/manifest.json" {
+			if err := json.NewEncoder(w).Encode(manifest); err != nil {
+				t.Fatalf("encode manifest: %v", err)
+			}
+			return
+		}
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		content, ok := contents[name]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Length", strconv.Itoa(len(content)))
+		_, _ = w.Write(content)
+	}))
+}
+
+type recordingVMImageProgressUI struct {
+	mu      sync.Mutex
+	starts  int
+	stops   int
+	steps   []string
+	details []string
+	done    []string
+	fails   []string
+}
+
+func (u *recordingVMImageProgressUI) Start() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.starts++
+}
+
+func (u *recordingVMImageProgressUI) Stop() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.stops++
+}
+
+func (u *recordingVMImageProgressUI) Suspend() {}
+
+func (u *recordingVMImageProgressUI) StartStep(name string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.steps = append(u.steps, name)
+}
+
+func (u *recordingVMImageProgressUI) UpdateDetail(detail string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.details = append(u.details, detail)
+}
+
+func (u *recordingVMImageProgressUI) DoneStep(detail string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.done = append(u.done, detail)
+}
+
+func (u *recordingVMImageProgressUI) FailStep(detail string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.fails = append(u.fails, detail)
+}
+
+func (u *recordingVMImageProgressUI) Printer(format string, args ...any) {}
+
+func (u *recordingVMImageProgressUI) detailsSnapshot() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]string(nil), u.details...)
+}
+
+func (u *recordingVMImageProgressUI) stepNames() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]string(nil), u.steps...)
+}
+
+func (u *recordingVMImageProgressUI) failuresSnapshot() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]string(nil), u.fails...)
+}
+
+func (u *recordingVMImageProgressUI) doneSnapshot() []string {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]string(nil), u.done...)
+}
+
+func (u *recordingVMImageProgressUI) startStopCounts() struct {
+	starts int
+	stops  int
+} {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return struct {
+		starts int
+		stops  int
+	}{starts: u.starts, stops: u.stops}
+}
+
+func assertVMImageProgressDetail(t *testing.T, details []string, want string) {
+	t.Helper()
+	for _, detail := range details {
+		if strings.Contains(detail, want) {
+			return
+		}
+	}
+	t.Fatalf("progress details %#v missing %q", details, want)
 }

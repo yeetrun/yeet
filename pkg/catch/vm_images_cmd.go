@@ -23,11 +23,7 @@ var vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload s
 }
 
 var vmImageEnsureFunc = func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
-	manifestURL, err := resolveVMImagePayload(payload)
-	if err != nil {
-		return vmImageAsset{}, err
-	}
-	return ensureVMImageAsset(ctx, cache.withManifestURL(manifestURL))
+	return ensureVMImageAssetWithProgress(ctx, cache, payload, ui)
 }
 
 func (e *ttyExecer) vmImagesCmdFunc(flags cli.VMImagesFlags, args []string) error {
