@@ -388,6 +388,27 @@ func TestRunVMProvisionDiskPlanReportsBaseProgressWhenSnapshotMissing(t *testing
 	}
 }
 
+func TestRunVMProvisionDiskPlanIncludesPhaseInSetupError(t *testing.T) {
+	plan := testZVOLProgressDiskPlan()
+	wantErr := errors.New("write failed")
+
+	err := runVMProvisionDiskPlanWithProgress(context.Background(), plan, func(_ context.Context, command []string) error {
+		if len(command) > 0 && command[0] == "dd" {
+			return wantErr
+		}
+		if len(command) == 6 && command[0] == "zfs" && command[1] == "list" {
+			return errors.New("snapshot missing")
+		}
+		return nil
+	}, nil)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want wrapped write failure", err)
+	}
+	if !strings.Contains(err.Error(), "Writing image to ZFS base") {
+		t.Fatalf("error missing phase label: %v", err)
+	}
+}
+
 func testZVOLProgressDiskPlan() vmDiskPlan {
 	return vmDiskPlan{
 		Service:      "devbox",

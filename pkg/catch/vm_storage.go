@@ -49,16 +49,18 @@ type vmSetupIncompleteError struct {
 
 func (e vmSetupIncompleteError) Error() string {
 	command := formatVMCommandArgv(e.Command)
-	if e.DiskPath == "" {
-		if command == "" {
-			return fmt.Sprintf("VM setup incomplete: %v", e.Err)
-		}
-		return fmt.Sprintf("VM setup incomplete after %s: %v", command, e.Err)
+	parts := []string{"VM setup incomplete"}
+	phase := vmDiskProgressLabel(e.Phase)
+	if phase != "" {
+		parts = append(parts, "during "+phase)
 	}
-	if command == "" {
-		return fmt.Sprintf("VM setup incomplete for disk %s: %v", e.DiskPath, e.Err)
+	if e.DiskPath != "" {
+		parts = append(parts, "for disk "+e.DiskPath)
 	}
-	return fmt.Sprintf("VM setup incomplete for disk %s after %s: %v", e.DiskPath, command, e.Err)
+	if command != "" {
+		parts = append(parts, "after "+command)
+	}
+	return fmt.Sprintf("%s: %v", strings.Join(parts, " "), e.Err)
 }
 
 func (e vmSetupIncompleteError) Unwrap() error {
