@@ -284,6 +284,44 @@ func TestRunVMZVOLProvisionUsesDevicePathForFirecracker(t *testing.T) {
 	}
 }
 
+func TestRunVMZVOLProvisionPrintsDiskSubsteps(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var out bytes.Buffer
+	execer.rw = &out
+	serviceDataset := "flash/yeet/vms/devbox"
+	if err := os.MkdirAll(serviceRoot, 0o755); err != nil {
+		t.Fatalf("mkdir service root: %v", err)
+	}
+	server.zfsRunner = fakeZFSRunner(map[string]fakeZFSDataset{
+		serviceDataset: {Mountpoint: serviceRoot, Exists: true},
+	}).Run
+	var diskCommands [][]string
+	vmProvisionDiskRunner = func(_ context.Context, cmd []string) error {
+		diskCommands = append(diskCommands, append([]string(nil), cmd...))
+		if len(diskCommands) == 1 {
+			return errors.New("snapshot missing")
+		}
+		return nil
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", ZFS: true, ServiceRoot: serviceDataset}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+
+	text := out.String()
+	for _, want := range []string{
+		"Preparing ZFS image base",
+		"Writing image to ZFS base",
+		"Cloning VM disk",
+		"Expanding filesystem",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("output missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestRunVMUsesPreparedRootFSForDiskProvisioning(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")

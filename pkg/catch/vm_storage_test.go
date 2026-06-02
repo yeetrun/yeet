@@ -51,11 +51,11 @@ func TestVMZVOLPlanCreatesSparseClone(t *testing.T) {
 		t.Fatalf("ZVOLBaseSteps: %v", err)
 	}
 	wantBase := []vmDiskPlanStep{
-		{Phase: vmDiskPhaseZVOLBase, Command: []string{"zfs", "create", "-p", "flash/yeet/base"}},
-		{Phase: vmDiskPhaseZVOLBase, Command: []string{"zfs", "create", "-s", "-V", "2147483648", plan.BaseDataset}},
-		{Phase: vmDiskPhaseZVOLBase, Command: []string{"udevadm", "settle", "--timeout=10"}},
-		{Phase: vmDiskPhaseZVOLBase, Command: []string{"dd", "if=" + plan.BaseRootFS, "of=/dev/zvol/" + plan.BaseDataset, "bs=16M", "status=none"}},
-		{Phase: vmDiskPhaseZVOLBase, Command: []string{"zfs", "snapshot", "flash/yeet/base/ubuntu-26.04@ubuntu-26.04-amd64-v1"}},
+		{Phase: vmDiskPhaseZVOLBasePrepare, Command: []string{"zfs", "create", "-p", "flash/yeet/base"}},
+		{Phase: vmDiskPhaseZVOLBasePrepare, Command: []string{"zfs", "create", "-s", "-V", "2147483648", plan.BaseDataset}},
+		{Phase: vmDiskPhaseZVOLBasePrepare, Command: []string{"udevadm", "settle", "--timeout=10"}},
+		{Phase: vmDiskPhaseZVOLBaseWrite, Command: []string{"dd", "if=" + plan.BaseRootFS, "of=/dev/zvol/" + plan.BaseDataset, "bs=16M", "status=none"}},
+		{Phase: vmDiskPhaseZVOLBaseWrite, Command: []string{"zfs", "snapshot", "flash/yeet/base/ubuntu-26.04@ubuntu-26.04-amd64-v1"}},
 	}
 	if !reflect.DeepEqual(base, wantBase) {
 		t.Fatalf("base steps = %#v, want %#v", base, wantBase)
@@ -69,7 +69,7 @@ func TestVMZVOLPlanCreatesSparseClone(t *testing.T) {
 		{Phase: vmDiskPhaseZVOLClone, Command: []string{"zfs", "clone", "flash/yeet/base/ubuntu-26.04@ubuntu-26.04-amd64-v1", plan.Path}},
 		{Phase: vmDiskPhaseZVOLClone, Command: []string{"zfs", "set", "volsize=137438953472", plan.Path}},
 		{Phase: vmDiskPhaseZVOLClone, Command: []string{"udevadm", "settle", "--timeout=10"}},
-		{Phase: vmDiskPhaseZVOLClone, Command: []string{"resize2fs", "/dev/zvol/" + plan.Path}},
+		{Phase: vmDiskPhaseZVOLResize, Command: []string{"resize2fs", "/dev/zvol/" + plan.Path}},
 	}
 	if !reflect.DeepEqual(clone, wantClone) {
 		t.Fatalf("clone steps = %#v, want %#v", clone, wantClone)
@@ -330,5 +330,73 @@ func TestRunVMProvisionDiskPlanCreatesMissingZVOLBase(t *testing.T) {
 	}
 	if !reflect.DeepEqual(commands[2], []string{"zfs", "create", "-s", "-V", "2147483648", plan.BaseDataset}) {
 		t.Fatalf("base create command = %#v", commands[2])
+	}
+}
+
+func TestRunVMProvisionDiskPlanReportsOnlyCloneProgressWhenBaseExists(t *testing.T) {
+	plan := testZVOLProgressDiskPlan()
+	var labels []string
+	var commands [][]string
+
+	err := runVMProvisionDiskPlanWithProgress(context.Background(), plan, func(_ context.Context, command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}, func(label string) {
+		labels = append(labels, label)
+	})
+	if err != nil {
+		t.Fatalf("runVMProvisionDiskPlanWithProgress: %v", err)
+	}
+
+	wantLabels := []string{"Cloning VM disk", "Expanding filesystem"}
+	if !reflect.DeepEqual(labels, wantLabels) {
+		t.Fatalf("labels = %#v, want %#v", labels, wantLabels)
+	}
+	for _, command := range commands {
+		if len(command) > 0 && command[0] == "dd" {
+			t.Fatalf("base image write should be skipped when snapshot exists: %#v", commands)
+		}
+	}
+}
+
+func TestRunVMProvisionDiskPlanReportsBaseProgressWhenSnapshotMissing(t *testing.T) {
+	plan := testZVOLProgressDiskPlan()
+	var labels []string
+	var commands [][]string
+
+	err := runVMProvisionDiskPlanWithProgress(context.Background(), plan, func(_ context.Context, command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		if len(commands) == 1 {
+			return errors.New("snapshot missing")
+		}
+		return nil
+	}, func(label string) {
+		labels = append(labels, label)
+	})
+	if err != nil {
+		t.Fatalf("runVMProvisionDiskPlanWithProgress: %v", err)
+	}
+
+	wantLabels := []string{
+		"Preparing ZFS image base",
+		"Writing image to ZFS base",
+		"Cloning VM disk",
+		"Expanding filesystem",
+	}
+	if !reflect.DeepEqual(labels, wantLabels) {
+		t.Fatalf("labels = %#v, want %#v", labels, wantLabels)
+	}
+}
+
+func testZVOLProgressDiskPlan() vmDiskPlan {
+	return vmDiskPlan{
+		Service:      "devbox",
+		Backend:      vmDiskBackendZVOL,
+		Path:         "flash/yeet/vms/devbox/vm/d-ea1055/root",
+		Bytes:        128 << 30,
+		BaseBytes:    2 << 30,
+		BaseRootFS:   "/srv/yeet/images/ubuntu/rootfs.ext4",
+		BaseDataset:  "flash/yeet/vm-images/ubuntu-26.04-amd64-v1/root",
+		ImageVersion: "ubuntu-26.04-amd64-v1",
 	}
 }
