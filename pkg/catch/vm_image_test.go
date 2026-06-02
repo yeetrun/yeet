@@ -188,6 +188,42 @@ func TestDefaultVMImageEnsureFuncUpdatesProgress(t *testing.T) {
 	assertVMImageProgressDetail(t, ui.detailsSnapshot(), "100%")
 }
 
+func TestDefaultVMImageEnsureFuncSkipsDownloadProgressWhenCurrent(t *testing.T) {
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
+	server := newVMImageArtifactTestServer(t, manifest, contents)
+	defer server.Close()
+
+	oldPrepare := prepareVMRootFSFunc
+	t.Cleanup(func() { prepareVMRootFSFunc = oldPrepare })
+	prepareVMRootFSFunc = func(_ context.Context, source string) (string, error) {
+		return source, nil
+	}
+
+	root := t.TempDir()
+	dir := writeCachedVMImageManifest(t, root, manifest)
+	writeCachedVMImageArtifacts(t, dir, contents)
+
+	ui := &recordingVMImageProgressUI{}
+	cache := vmImageCache{Root: root, ManifestURL: server.URL + "/manifest.json"}
+	asset, err := vmImageEnsureFunc(context.Background(), cache, vmUbuntu2604Payload, ui)
+	if err != nil {
+		t.Fatalf("vmImageEnsureFunc: %v", err)
+	}
+	if asset.Manifest.Version != manifest.Version {
+		t.Fatalf("asset version = %q, want %q", asset.Manifest.Version, manifest.Version)
+	}
+	if got := ui.stepNames(); len(got) != 0 {
+		t.Fatalf("progress steps = %#v, want none for current cache", got)
+	}
+	if got := ui.startStopCounts(); got.starts != 0 || got.stops != 0 {
+		t.Fatalf("progress start/stop = %#v, want none for current cache", got)
+	}
+	if got := ui.doneSnapshot(); len(got) != 0 {
+		t.Fatalf("progress done = %#v, want none for current cache", got)
+	}
+}
+
 func TestResolveVMImagePayload(t *testing.T) {
 	wantManifestURL := "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json"
 	if defaultVMImageManifestURL != wantManifestURL {

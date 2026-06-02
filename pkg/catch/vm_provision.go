@@ -159,8 +159,10 @@ func (e *ttyExecer) selectVMProvisionImage(ctx context.Context, flags cli.RunFla
 		return vmImageAsset{}, err
 	}
 	switch state.State {
-	case vmImageCacheMissing, vmImageCacheCurrent:
+	case vmImageCacheMissing:
 		return vmImageEnsureFunc(ctx, cache, payload, ui)
+	case vmImageCacheCurrent:
+		return cachedVMImageAsset(ctx, cache, state.CachedVersion)
 	case vmImageCacheStale:
 		return e.selectStaleVMProvisionImage(ctx, cache, payload, policy, state, latestManifest, ui)
 	default:

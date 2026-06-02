@@ -40,6 +40,8 @@ const (
 	CatchService = "catch"
 )
 
+var zfsDestroyRetryDelay = 250 * time.Millisecond
+
 var DockerStatusesUnknown = svc.DockerComposeStatus{}
 var serverVMStatusFunc = func(name string) (svc.Status, error) {
 	runner := &vmRunner{name: name}
@@ -844,8 +846,10 @@ type RemoveOptions struct {
 }
 
 // RemoveService removes the service from the database and attempts to clean up
-// related files/devices. It always removes the DB entry if possible, returning
-// cleanup warnings separately from fatal errors.
+// related files/devices. Cleanup warnings are reported separately from fatal
+// errors. A requested ZFS clean-data destroy must succeed before the DB entry is
+// removed, otherwise users can lose the normal recovery path for retrying
+// cleanup.
 func (s *Server) RemoveService(name string) (*RemoveReport, error) {
 	return s.RemoveServiceWithOptions(name, RemoveOptions{})
 }
@@ -862,15 +866,17 @@ func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*Rem
 		report.addWarning(fmt.Errorf("failed to resolve service root for %q: %w", name, err))
 		removeDirs = false
 	}
+	if removeDirs && opts.CleanData {
+		if err := s.destroyServiceRootZFS(serviceRootZFS); err != nil {
+			return report, err
+		}
+	}
 	if err := s.removeServiceFromDB(name); err != nil {
 		return report, fmt.Errorf("failed to remove service from db: %w", err)
 	}
 	s.publishServiceDeleted(name)
 	s.deleteTailscaleDevice(report, tsStableID)
 	if removeDirs {
-		if opts.CleanData {
-			s.destroyServiceRootZFS(report, serviceRootZFS)
-		}
 		s.removeServiceDirs(report, serviceRoot, opts.CleanData)
 	}
 	return report, nil
@@ -950,18 +956,29 @@ func (s *Server) deleteTailscaleDevice(report *RemoveReport, tsStableID string) 
 	}
 }
 
-func (s *Server) destroyServiceRootZFS(report *RemoveReport, dataset string) {
+func (s *Server) destroyServiceRootZFS(dataset string) error {
 	if strings.TrimSpace(dataset) == "" {
-		return
+		return nil
 	}
 	runner := s.zfsRunner
 	if runner == nil {
 		runner = runZFSCommand
 	}
-	_, stderr, err := runner(context.Background(), "destroy", "-r", dataset)
-	if err != nil {
-		report.addWarning(formatZFSCommandError("zfs destroy "+dataset, stderr, err))
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		_, stderr, err := runner(context.Background(), "destroy", "-R", dataset)
+		if err == nil {
+			return nil
+		}
+		lastErr = formatZFSCommandError("zfs destroy -R "+dataset, stderr, err)
+		if !strings.Contains(stderr, "dataset is busy") {
+			break
+		}
+		if zfsDestroyRetryDelay > 0 {
+			time.Sleep(zfsDestroyRetryDelay)
+		}
 	}
+	return lastErr
 }
 
 func (s *Server) removeServiceDirs(report *RemoveReport, serviceRoot string, cleanData bool) {
