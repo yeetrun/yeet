@@ -188,16 +188,29 @@ service type `vm`.
 
 ```bash
 yeet run devbox vm://ubuntu/26.04 --net=svc
+yeet vm images
+yeet vm images update
 yeet vm console devbox
 yeet ssh devbox
 yeet rm --clean-data devbox
 ```
 
+VM image bundles are cached on each catch host. `yeet vm images` shows whether
+the cached image is current, stale, or missing; `yeet vm images update`
+refreshes the host cache used for future VM creates. A missing image is
+downloaded automatically on the first VM create. Existing VM disks are not
+rewritten. When creating a VM with a stale cached image, interactive runs prompt
+by default; non-interactive runs require `--image-policy=update` or
+`--image-policy=cached`.
+
 For `--net=svc`, `yeet ssh <svc>` proxies through the yeet host to reach the
 guest's private service-network IP. `yeet vm console <svc>` streams the guest
 serial output and is useful for boot diagnostics; use SSH for an interactive
-guest shell. The default `ubuntu` guest user has passwordless sudo. Use
-`--clean-data` when removing a VM if you want to delete the guest disk too.
+guest shell. For yeet-managed VM aliases in `~/.yeet/known_hosts`,
+`yeet ssh <svc>` repairs a stale host key and retries once after a VM is
+recreated; it does not edit normal `~/.ssh/known_hosts` entries. The default
+`ubuntu` guest user has passwordless sudo. Use `--clean-data` when removing a
+VM if you want to delete the guest disk too.
 
 Custom service root on the catch host:
 
