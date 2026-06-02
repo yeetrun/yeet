@@ -14,12 +14,12 @@ import (
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
 var (
 	vmProvisionHostProfileFunc  func(*ttyExecer, resolvedServiceRoot, int64) (vmHostProfile, error)
-	vmProvisionImageEnsureFunc  func(context.Context, vmImageCache) (vmImageAsset, error)
 	vmProvisionDiskRunner       vmCommandRunner
 	vmProvisionNetworkRunner    vmNetworkCommandRunner
 	vmProvisionMetadataInjector func(context.Context, string, vmMetadataConfig) error
@@ -67,7 +67,7 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 			retErr = errors.Join(retErr, fmt.Errorf("rollback VM service reservation: %w", err))
 		}
 	}()
-	inputs, err := e.vmProvisionInputs(flags)
+	inputs, err := e.vmProvisionInputs(flags, payload)
 	if err != nil {
 		return err
 	}
@@ -96,7 +96,7 @@ type vmProvisionInputs struct {
 	SSHKey      string
 }
 
-func (e *ttyExecer) vmProvisionInputs(flags cli.RunFlags) (vmProvisionInputs, error) {
+func (e *ttyExecer) vmProvisionInputs(flags cli.RunFlags, payload string) (vmProvisionInputs, error) {
 	ctx := e.vmProvisionContext()
 	resolvedRoot, err := e.prepareVMServiceRoot(flags)
 	if err != nil {
@@ -110,7 +110,7 @@ func (e *ttyExecer) vmProvisionInputs(flags cli.RunFlags) (vmProvisionInputs, er
 	if err != nil {
 		return vmProvisionInputs{}, err
 	}
-	image, err := e.ensureVMProvisionImage(ctx)
+	image, err := e.selectVMProvisionImage(ctx, flags, payload, e.newProgressUI("vm image"))
 	if err != nil {
 		return vmProvisionInputs{}, err
 	}
@@ -147,15 +147,131 @@ func (e *ttyExecer) vmProvisionShape(resolvedRoot resolvedServiceRoot, flags cli
 	return vmShapeFromRunFlags(profile, flags)
 }
 
-func (e *ttyExecer) ensureVMProvisionImage(ctx context.Context) (vmImageAsset, error) {
-	ensureImage := vmProvisionImageEnsureFunc
-	if ensureImage == nil {
-		ensureImage = ensureVMImageAsset
+func (e *ttyExecer) selectVMProvisionImage(ctx context.Context, flags cli.RunFlags, payload string, ui ProgressUI) (vmImageAsset, error) {
+	policy, err := normalizeVMProvisionImagePolicy(flags.ImagePolicy)
+	if err != nil {
+		return vmImageAsset{}, err
 	}
-	return ensureImage(ctx, vmImageCache{
-		Root:        filepath.Join(e.s.cfg.RootDir, "vm-images"),
-		ManifestURL: defaultVMImageManifestURL,
-	})
+	cache := e.vmImageCache()
+	state, latestManifest, err := vmImageInspectFunc(ctx, cache, payload)
+	if err != nil {
+		return vmImageAsset{}, err
+	}
+	switch state.State {
+	case vmImageCacheMissing, vmImageCacheCurrent:
+		return vmImageEnsureFunc(ctx, cache, payload, ui)
+	case vmImageCacheStale:
+		return e.selectStaleVMProvisionImage(ctx, cache, payload, policy, state, latestManifest, ui)
+	default:
+		return vmImageAsset{}, fmt.Errorf("unknown VM image cache state %q for %s", state.State, payload)
+	}
+}
+
+func normalizeVMProvisionImagePolicy(policy string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "", "prompt":
+		return "prompt", nil
+	case "update":
+		return "update", nil
+	case "cached":
+		return "cached", nil
+	default:
+		return "", fmt.Errorf("--image-policy must be prompt, update, or cached")
+	}
+}
+
+func (e *ttyExecer) selectStaleVMProvisionImage(ctx context.Context, cache vmImageCache, payload, policy string, state vmImageCacheState, latestManifest vmImageManifest, ui ProgressUI) (vmImageAsset, error) {
+	switch policy {
+	case "update":
+		return vmImageEnsureFunc(ctx, cache, payload, ui)
+	case "cached":
+		return cachedVMImageAsset(ctx, cache, state.CachedVersion)
+	case "prompt":
+		if !e.isPty || e.rw == nil {
+			return vmImageAsset{}, staleVMImagePolicyError(payload, state, latestManifest)
+		}
+		update, err := cmdutil.Confirm(e.rw, e.rw, staleVMImagePrompt(payload, state, latestManifest))
+		if err != nil {
+			return vmImageAsset{}, err
+		}
+		if update {
+			return vmImageEnsureFunc(ctx, cache, payload, ui)
+		}
+		return cachedVMImageAsset(ctx, cache, state.CachedVersion)
+	default:
+		return vmImageAsset{}, fmt.Errorf("--image-policy must be prompt, update, or cached")
+	}
+}
+
+func staleVMImagePrompt(payload string, state vmImageCacheState, latestManifest vmImageManifest) string {
+	return fmt.Sprintf("VM image %s has cached version %s; latest is %s. Update now?", payload, vmImageVersionForMessage(state.CachedVersion), vmImageVersionForMessage(vmLatestVersionForMessage(state, latestManifest)))
+}
+
+func staleVMImagePolicyError(payload string, state vmImageCacheState, latestManifest vmImageManifest) error {
+	return fmt.Errorf("VM image cache for %s is stale: cached version %s, latest version %s; rerun with --image-policy=update to download the latest image or --image-policy=cached to use the cached image (or run yeet vm images update)", payload, vmImageVersionForMessage(state.CachedVersion), vmImageVersionForMessage(vmLatestVersionForMessage(state, latestManifest)))
+}
+
+func vmLatestVersionForMessage(state vmImageCacheState, latestManifest vmImageManifest) string {
+	if strings.TrimSpace(state.LatestVersion) != "" {
+		return state.LatestVersion
+	}
+	return latestManifest.Version
+}
+
+func vmImageVersionForMessage(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return "unknown"
+	}
+	return version
+}
+
+func cachedVMImageAsset(ctx context.Context, cache vmImageCache, version string) (vmImageAsset, error) {
+	root := strings.TrimSpace(cache.Root)
+	if root == "" {
+		return vmImageAsset{}, fmt.Errorf("VM image cache root is required")
+	}
+	version = strings.TrimSpace(version)
+	if err := validateVMImageCacheDirName(version); err != nil {
+		return vmImageAsset{}, err
+	}
+	dir := filepath.Join(root, version)
+	manifest, ok, err := readCachedVMImageManifest(dir)
+	if err != nil {
+		return vmImageAsset{}, err
+	}
+	if !ok {
+		return vmImageAsset{}, fmt.Errorf("cached VM image %s is not available; run yeet vm images update or rerun with --image-policy=update", version)
+	}
+	if manifest.Version != version {
+		return vmImageAsset{}, fmt.Errorf("cached VM image manifest version %q does not match cache version %q", manifest.Version, version)
+	}
+	if !cachedVMImageArtifactsReady(dir, manifest) {
+		return vmImageAsset{}, fmt.Errorf("cached VM image %s is incomplete; run yeet vm images update or rerun with --image-policy=update", version)
+	}
+	paths := cachedVMImagePaths(dir, manifest)
+	if err := os.Chmod(paths.FirecrackerPath, 0o755); err != nil {
+		return vmImageAsset{}, fmt.Errorf("chmod cached firecracker: %w", err)
+	}
+	preparedRootFS, err := prepareVMRootFSFunc(ctx, paths.RootFSPath)
+	if err != nil {
+		return vmImageAsset{}, err
+	}
+	return vmImageAsset{Paths: paths, PreparedRootFSPath: preparedRootFS, Manifest: manifest}, nil
+}
+
+func cachedVMImagePaths(dir string, manifest vmImageManifest) vmImagePaths {
+	paths := vmImagePaths{
+		Manifest:        filepath.Join(dir, "manifest.json"),
+		Dir:             dir,
+		KernelPath:      filepath.Join(dir, manifest.Kernel),
+		RootFSPath:      filepath.Join(dir, manifest.RootFS),
+		FirecrackerPath: filepath.Join(dir, manifest.Firecracker),
+	}
+	if strings.TrimSpace(manifest.Initrd) != "" {
+		paths.InitrdPath = filepath.Join(dir, manifest.Initrd)
+	}
+	return paths
 }
 
 func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan, payload string, restart bool) error {

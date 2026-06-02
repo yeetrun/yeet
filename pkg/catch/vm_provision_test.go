@@ -22,7 +22,7 @@ import (
 func TestRunVMStagesDBAfterArtifacts(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
-	vmProvisionImageEnsureFunc = func(context.Context, vmImageCache) (vmImageAsset, error) {
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
 		return vmImageAsset{}, fmt.Errorf("image manifest missing kernel")
 	}
 
@@ -133,7 +133,7 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 func TestRunVMProvisionIncludesInitrdPathWhenImageHasInitrd(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
-	vmProvisionImageEnsureFunc = func(context.Context, vmImageCache) (vmImageAsset, error) {
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
 		asset, err := fakeVMImageAsset(t)
 		if err != nil {
 			return vmImageAsset{}, err
@@ -345,6 +345,190 @@ func TestRunVMRollsBackNewServiceReservationOnProvisionFailure(t *testing.T) {
 	}
 }
 
+func TestRunVMStaleImageDefaultNonInteractiveFailsWithoutEnsure(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMProvisionImageState(t, staleVMProvisionImageState("ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v2"))
+	ensureCalled := false
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		ensureCalled = true
+		return vmImageAsset{}, fmt.Errorf("ensure should not be called")
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc"}, vmUbuntu2604Payload)
+	if err == nil {
+		t.Fatal("runVM error = nil, want stale image policy error")
+	}
+	for _, want := range []string{"ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v2", "--image-policy=update", "--image-policy=cached", "yeet vm images update"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("stale image error missing %q: %v", want, err)
+		}
+	}
+	if ensureCalled {
+		t.Fatal("ensure was called for non-interactive stale prompt policy")
+	}
+	assertNoReadyVM(t, server, "svc")
+}
+
+func TestRunVMStaleImageUpdatePolicyEnsuresLatest(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMProvisionImageState(t, staleVMProvisionImageState("ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v2"))
+	ensureCalled := false
+	vmImageEnsureFunc = func(_ context.Context, _ vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
+		ensureCalled = true
+		if payload != vmUbuntu2604Payload {
+			t.Fatalf("ensure payload = %q, want %q", payload, vmUbuntu2604Payload)
+		}
+		if ui == nil {
+			t.Fatal("ensure UI is nil")
+		}
+		return fakeVMImageAssetVersion(t, "ubuntu-26.04-amd64-v2")
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", ImagePolicy: "update"}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if !ensureCalled {
+		t.Fatal("ensure was not called for update policy")
+	}
+	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v2")
+}
+
+func TestRunVMCachedImagePolicyUsesCachedStaleVersion(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	seedCachedVMProvisionImage(t, server, "ubuntu-26.04-amd64-v1")
+	stubVMProvisionImageState(t, staleVMProvisionImageState("ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v2"))
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		return vmImageAsset{}, fmt.Errorf("ensure should not be called")
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", ImagePolicy: "cached"}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v1")
+}
+
+func TestRunVMStaleImageTTYPromptYesEnsuresLatest(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMProvisionImageState(t, staleVMProvisionImageState("ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v2"))
+	var out bytes.Buffer
+	execer.rw = readWriter{Reader: strings.NewReader("y\n"), Writer: &out}
+	execer.isPty = true
+	ensureCalled := false
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		ensureCalled = true
+		return fakeVMImageAssetVersion(t, "ubuntu-26.04-amd64-v2")
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc"}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if !ensureCalled {
+		t.Fatal("ensure was not called after prompt confirmation")
+	}
+	if !strings.Contains(out.String(), "Update now?") {
+		t.Fatalf("prompt output = %q, want update prompt", out.String())
+	}
+	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v2")
+}
+
+func TestRunVMStaleImageTTYPromptNoUsesCachedVersion(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	seedCachedVMProvisionImage(t, server, "ubuntu-26.04-amd64-v1")
+	stubVMProvisionImageState(t, staleVMProvisionImageState("ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v2"))
+	var out bytes.Buffer
+	execer.rw = readWriter{Reader: strings.NewReader("n\n"), Writer: &out}
+	execer.isPty = true
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		return vmImageAsset{}, fmt.Errorf("ensure should not be called")
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc"}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if !strings.Contains(out.String(), "ubuntu-26.04-amd64-v2") {
+		t.Fatalf("prompt output = %q, want latest version", out.String())
+	}
+	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v1")
+}
+
+func TestRunVMMissingImageAutomaticallyEnsures(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMProvisionImageState(t, vmImageCacheState{
+		Payload:       vmUbuntu2604Payload,
+		LatestVersion: "ubuntu-26.04-amd64-v2",
+		State:         vmImageCacheMissing,
+		CachePath:     filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-26.04-amd64-v2"),
+		ManifestURL:   defaultVMImageManifestURL,
+	})
+	ensureCalled := false
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		ensureCalled = true
+		return fakeVMImageAssetVersion(t, "ubuntu-26.04-amd64-v2")
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc"}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if !ensureCalled {
+		t.Fatal("ensure was not called for missing image cache")
+	}
+	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v2")
+}
+
+func TestRunVMCurrentImageAutomaticallyEnsures(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMProvisionImageState(t, vmImageCacheState{
+		Payload:       vmUbuntu2604Payload,
+		CachedVersion: "ubuntu-26.04-amd64-v2",
+		LatestVersion: "ubuntu-26.04-amd64-v2",
+		State:         vmImageCacheCurrent,
+		CachePath:     filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-26.04-amd64-v2"),
+		ManifestURL:   defaultVMImageManifestURL,
+	})
+	ensureCalled := false
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		ensureCalled = true
+		return fakeVMImageAssetVersion(t, "ubuntu-26.04-amd64-v2")
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc"}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if !ensureCalled {
+		t.Fatal("ensure was not called for current image cache")
+	}
+	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v2")
+}
+
+func TestRunVMUnknownImageCacheStateErrors(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMProvisionImageState(t, vmImageCacheState{
+		Payload:       vmUbuntu2604Payload,
+		CachedVersion: "ubuntu-26.04-amd64-v1",
+		LatestVersion: "ubuntu-26.04-amd64-v2",
+		State:         "confused",
+		CachePath:     filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-26.04-amd64-v1"),
+		ManifestURL:   defaultVMImageManifestURL,
+	})
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		return vmImageAsset{}, fmt.Errorf("ensure should not be called")
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc"}, vmUbuntu2604Payload)
+	if err == nil || !strings.Contains(err.Error(), `unknown VM image cache state "confused"`) {
+		t.Fatalf("runVM error = %v, want unknown image cache state", err)
+	}
+	assertNoReadyVM(t, server, "svc")
+}
+
 func TestReserveVMServiceNetworkAllocatesInsideMutation(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
@@ -388,22 +572,26 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	execer := &ttyExecer{s: server, sn: service, ctx: context.Background()}
 	server.cfg.ServicesRoot = filepath.Dir(serviceRoot)
 	oldHostProfile := vmProvisionHostProfileFunc
-	oldImageEnsure := vmProvisionImageEnsureFunc
+	oldImageInspect := vmImageInspectFunc
+	oldImageEnsure := vmImageEnsureFunc
 	oldDiskRunner := vmProvisionDiskRunner
 	oldNetworkRunner := vmProvisionNetworkRunner
 	oldMetadataInjector := vmProvisionMetadataInjector
 	oldSSHKey := vmProvisionSSHKeyFunc
 	oldSystemdDir := vmProvisionSystemdDir
 	oldSystemctl := vmProvisionSystemctlFunc
+	oldPrepareRootFS := prepareVMRootFSFunc
 	t.Cleanup(func() {
 		vmProvisionHostProfileFunc = oldHostProfile
-		vmProvisionImageEnsureFunc = oldImageEnsure
+		vmImageInspectFunc = oldImageInspect
+		vmImageEnsureFunc = oldImageEnsure
 		vmProvisionDiskRunner = oldDiskRunner
 		vmProvisionNetworkRunner = oldNetworkRunner
 		vmProvisionMetadataInjector = oldMetadataInjector
 		vmProvisionSSHKeyFunc = oldSSHKey
 		vmProvisionSystemdDir = oldSystemdDir
 		vmProvisionSystemctlFunc = oldSystemctl
+		prepareVMRootFSFunc = oldPrepareRootFS
 	})
 	vmProvisionHostProfileFunc = func(_ *ttyExecer, resolved resolvedServiceRoot, runningVMBytes int64) (vmHostProfile, error) {
 		if resolved.Root != serviceRoot {
@@ -419,8 +607,21 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 			RunningVMBytes: runningVMBytes,
 		}, nil
 	}
-	vmProvisionImageEnsureFunc = func(context.Context, vmImageCache) (vmImageAsset, error) {
+	vmImageInspectFunc = func(context.Context, vmImageCache, string) (vmImageCacheState, vmImageManifest, error) {
+		return vmImageCacheState{
+			Payload:       vmUbuntu2604Payload,
+			CachedVersion: defaultVMImageVersion,
+			LatestVersion: defaultVMImageVersion,
+			State:         vmImageCacheCurrent,
+			CachePath:     filepath.Join(server.cfg.RootDir, "vm-images", defaultVMImageVersion),
+			ManifestURL:   defaultVMImageManifestURL,
+		}, vmImageManifest{Version: defaultVMImageVersion}, nil
+	}
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
 		return fakeVMImageAsset(t)
+	}
+	prepareVMRootFSFunc = func(_ context.Context, source string) (string, error) {
+		return strings.TrimSuffix(source, ".zst"), nil
 	}
 	vmProvisionDiskRunner = func(context.Context, []string) error { return nil }
 	vmProvisionNetworkRunner = func([]string) error { return nil }
@@ -439,6 +640,11 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 
 func fakeVMImageAsset(t *testing.T) (vmImageAsset, error) {
 	t.Helper()
+	return fakeVMImageAssetVersion(t, defaultVMImageVersion)
+}
+
+func fakeVMImageAssetVersion(t *testing.T, version string) (vmImageAsset, error) {
+	t.Helper()
 	dir := t.TempDir()
 	paths := vmImagePaths{
 		Manifest:        filepath.Join(dir, "manifest.json"),
@@ -452,7 +658,7 @@ func fakeVMImageAsset(t *testing.T) (vmImageAsset, error) {
 		PreparedRootFSPath: filepath.Join(dir, "rootfs.ext4"),
 		Manifest: vmImageManifest{
 			Name:         "ubuntu",
-			Version:      defaultVMImageVersion,
+			Version:      version,
 			Architecture: "x86_64",
 			Kernel:       "vmlinux",
 			RootFS:       "rootfs.ext4.zst",
@@ -460,6 +666,50 @@ func fakeVMImageAsset(t *testing.T) (vmImageAsset, error) {
 			RootFSSize:   2 << 30,
 		},
 	}, nil
+}
+
+func staleVMProvisionImageState(cachedVersion, latestVersion string) vmImageCacheState {
+	return vmImageCacheState{
+		Payload:       vmUbuntu2604Payload,
+		CachedVersion: cachedVersion,
+		LatestVersion: latestVersion,
+		State:         vmImageCacheStale,
+		CachePath:     filepath.Join("vm-images", cachedVersion),
+		ManifestURL:   defaultVMImageManifestURL,
+	}
+}
+
+func stubVMProvisionImageState(t *testing.T, state vmImageCacheState) {
+	t.Helper()
+	vmImageInspectFunc = func(_ context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
+		if payload != vmUbuntu2604Payload {
+			t.Fatalf("inspect payload = %q, want %q", payload, vmUbuntu2604Payload)
+		}
+		if strings.TrimSpace(cache.Root) == "" {
+			t.Fatal("inspect cache root is empty")
+		}
+		return state, vmImageManifest{Version: state.LatestVersion}, nil
+	}
+}
+
+func seedCachedVMProvisionImage(t *testing.T, server *Server, version string) {
+	t.Helper()
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest(version, contents)
+	root := filepath.Join(server.cfg.RootDir, "vm-images")
+	dir := writeCachedVMImageManifest(t, root, manifest)
+	writeCachedVMImageArtifacts(t, dir, contents)
+}
+
+func assertVMImageVersion(t *testing.T, server *Server, service, version string) {
+	t.Helper()
+	svc := getTestService(t, server, service)
+	if svc.VM == nil {
+		t.Fatal("VM config is nil")
+	}
+	if svc.VM.Image.Version != version {
+		t.Fatalf("VM image version = %q, want %q", svc.VM.Image.Version, version)
+	}
 }
 
 func assertNoReadyVM(t *testing.T, server *Server, service string) {
