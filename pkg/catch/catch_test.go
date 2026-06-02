@@ -419,6 +419,52 @@ func TestRemoveServiceCleanDataDestroysZFSServiceRoot(t *testing.T) {
 	}
 }
 
+func TestRemoveVMCleanDataDestroysServiceRootNotSharedImageBase(t *testing.T) {
+	server := newTestServer(t)
+	name := "devbox"
+	serviceRoot := filepath.Join(server.cfg.ServicesRoot, name)
+	if err := os.MkdirAll(serviceRoot, 0o755); err != nil {
+		t.Fatalf("mkdir service root: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {
+			Name:           name,
+			ServiceType:    db.ServiceTypeVM,
+			ServiceRoot:    serviceRoot,
+			ServiceRootZFS: "flash/yeet/vms/devbox",
+			VM: &db.VMConfig{
+				Image: db.VMImageConfig{Payload: vmUbuntu2604Payload, Version: defaultVMImageVersion},
+				Disk: db.VMDiskConfig{
+					Backend: vmDiskBackendZVOL,
+					Bytes:   128 << 30,
+					Path:    "/dev/zvol/flash/yeet/vms/devbox/vm/d-ea1055/root",
+				},
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+	var calls [][]string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return "", "", nil
+	}
+
+	if _, err := server.RemoveServiceWithOptions(name, RemoveOptions{CleanData: true}); err != nil {
+		t.Fatalf("RemoveServiceWithOptions: %v", err)
+	}
+
+	want := [][]string{{"destroy", "-R", "flash/yeet/vms/devbox"}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("zfs calls = %#v, want %#v", calls, want)
+	}
+	for _, call := range calls {
+		if strings.Contains(strings.Join(call, " "), "flash/yeet/vm-images") {
+			t.Fatalf("cleanup touched shared image base: %#v", calls)
+		}
+	}
+}
+
 func TestRemoveServiceCleanDataFailsBeforeDBRemovalWhenZFSDestroyFails(t *testing.T) {
 	server := newTestServer(t)
 	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {

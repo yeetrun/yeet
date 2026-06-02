@@ -266,6 +266,9 @@ func TestRunVMZVOLProvisionUsesDevicePathForFirecracker(t *testing.T) {
 	wantDevice := "/dev/zvol/" + wantDataset
 	wantBase := "flash/yeet/vm-images/" + defaultVMImageVersion + "/root"
 	wantSnapshot := wantBase + "@" + defaultVMImageVersion
+	if strings.HasPrefix(wantBase, serviceDataset+"/") {
+		t.Fatalf("shared base %q must not be under service root dataset %q", wantBase, serviceDataset)
+	}
 	if svc.VM.Disk.Path != wantDevice {
 		t.Fatalf("db disk path = %q, want %q", svc.VM.Disk.Path, wantDevice)
 	}
