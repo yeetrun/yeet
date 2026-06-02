@@ -163,7 +163,7 @@ func runSSHPlan(ctx context.Context, plan sshExecutionPlan, stdin io.Reader, std
 	if firstErr == nil {
 		return nil
 	}
-	if !looksLikeSSHChangedHostKeyError(stderrBuf.String()) {
+	if !shouldRepairSSHKnownHostError(stderrBuf.String(), *plan.KnownHostRepair) {
 		return firstErr
 	}
 	if err := removeSSHKnownHostFunc(ctx, plan.KnownHostRepair.Alias, plan.KnownHostRepair.KnownHostsFile); err != nil {
@@ -197,11 +197,55 @@ func removeSSHKnownHost(ctx context.Context, alias, knownHosts string) error {
 	return fmt.Errorf("remove stale VM SSH host key %q from %s: %w", alias, knownHosts, err)
 }
 
-func looksLikeSSHChangedHostKeyError(output string) bool {
-	output = strings.ToLower(output)
-	return strings.Contains(output, "remote host identification has changed") ||
-		(strings.Contains(output, "offending") && strings.Contains(output, "key in")) ||
-		strings.Contains(output, "host key verification failed")
+func shouldRepairSSHKnownHostError(output string, repair sshKnownHostRepair) bool {
+	if !strings.Contains(strings.ToLower(output), "remote host identification has changed") {
+		return false
+	}
+	return sshChangedHostKeyOutputReferencesKnownHosts(output, repair.KnownHostsFile)
+}
+
+func sshChangedHostKeyOutputReferencesKnownHosts(output, knownHosts string) bool {
+	knownHosts = filepath.Clean(strings.TrimSpace(knownHosts))
+	if knownHosts == "." {
+		return false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		offendingPath, ok := sshOffendingKeyPath(line)
+		if !ok {
+			continue
+		}
+		if filepath.Clean(offendingPath) == knownHosts {
+			return true
+		}
+	}
+	return false
+}
+
+func sshOffendingKeyPath(line string) (string, bool) {
+	lower := strings.ToLower(line)
+	const marker = " key in "
+	idx := strings.Index(lower, marker)
+	if idx < 0 || !strings.Contains(lower[:idx], "offending") {
+		return "", false
+	}
+	path := strings.TrimSpace(line[idx+len(marker):])
+	if colon := strings.LastIndex(path, ":"); colon >= 0 && asciiDigitsOnly(path[colon+1:]) {
+		path = path[:colon]
+	}
+	path = strings.TrimSpace(path)
+	return path, path != ""
+}
+
+func asciiDigitsOnly(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, ch := range s {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func trimSSHCommandName(args []string) []string {

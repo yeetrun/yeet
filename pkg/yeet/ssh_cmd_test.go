@@ -564,6 +564,21 @@ func TestRunSSHPlanDoesNotRepairHostLevelSSH(t *testing.T) {
 
 func TestRunSSHPlanDoesNotRetryUnrelatedSSHError(t *testing.T) {
 	_, plan := testSSHExecutionPlan(t, []string{"ssh", "devbox"}, vmSSHRepairServiceInfo())
+	assertSSHPlanDoesNotRepairOnStderr(t, plan, "ssh: connect to host 192.168.100.12 port 22: Connection refused\n")
+}
+
+func TestRunSSHPlanDoesNotRepairBareHostKeyVerificationFailure(t *testing.T) {
+	_, plan := testSSHExecutionPlan(t, []string{"ssh", "devbox"}, vmSSHRepairServiceInfo())
+	assertSSHPlanDoesNotRepairOnStderr(t, plan, "Host key verification failed.\n")
+}
+
+func TestRunSSHPlanDoesNotRepairChangedHostKeyFromOtherKnownHostsFile(t *testing.T) {
+	home, plan := testSSHExecutionPlan(t, []string{"ssh", "devbox"}, vmSSHRepairServiceInfo())
+	assertSSHPlanDoesNotRepairOnStderr(t, plan, changedHostKeySSHOutput(filepath.Join(home, ".ssh", "known_hosts")))
+}
+
+func assertSSHPlanDoesNotRepairOnStderr(t *testing.T, plan sshExecutionPlan, stderrText string) {
+	t.Helper()
 	if plan.KnownHostRepair == nil {
 		t.Fatal("KnownHostRepair = nil, want VM repair metadata")
 	}
@@ -572,7 +587,7 @@ func TestRunSSHPlanDoesNotRetryUnrelatedSSHError(t *testing.T) {
 	runs := 0
 	stubRunSSHCommand(t, func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		runs++
-		_, _ = io.WriteString(stderr, "ssh: connect to host 192.168.100.12 port 22: Connection refused\n")
+		_, _ = io.WriteString(stderr, stderrText)
 		return runErr
 	})
 	removeCalled := false
@@ -589,7 +604,7 @@ func TestRunSSHPlanDoesNotRetryUnrelatedSSHError(t *testing.T) {
 		t.Fatalf("ssh runs = %d, want 1", runs)
 	}
 	if removeCalled {
-		t.Fatal("remove called for unrelated SSH error")
+		t.Fatal("remove called for SSH error outside yeet's generated known_hosts entry")
 	}
 }
 
