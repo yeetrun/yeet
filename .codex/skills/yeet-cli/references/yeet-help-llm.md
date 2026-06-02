@@ -1,5 +1,5 @@
 # Yeet CLI --help-llm Outputs
-Generated on 2026-05-31 from this repo using:
+Generated on 2026-06-02 from this repo using:
 - `go run ./cmd/yeet --help-llm`
 - `go run ./cmd/yeet <command> --help-llm`
 - `go run ./cmd/yeet <group> --help-llm`
@@ -219,11 +219,23 @@ yeet run <svc> ./bin/<svc> -- --app-flag value
 ```
 
 ```
+yeet run -p 80:80 <svc> nginx:latest
+```
+
+```
+yeet run --publish-reset -p 443:443 <svc> nginx:latest
+```
+
+```
 yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
 ```
 
 ```
 yeet run <svc> vm://ubuntu/26.04 --net=svc
+```
+
+```
+yeet run <svc> vm://ubuntu/26.04 --image-policy=update
 ```
 
 ```
@@ -422,6 +434,7 @@ Manage VM-specific commands
 **Commands**:
 
 - `vm console`: Stream VM serial console output
+- `vm images`: Show or refresh VM image cache state
 
 Get detailed help: `yeet vm --help-llm`
 
@@ -528,6 +541,10 @@ yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
 
 ```
 yeet run <svc> vm://ubuntu/26.04 --net=svc
+```
+
+```
+yeet run <svc> vm://ubuntu/26.04 --image-policy=update
 ```
 
 ```
@@ -2809,6 +2826,30 @@ Stream VM serial console output
 
 Get detailed help: `yeet vm console --help-llm`
 
+### `vm images`
+
+Show or refresh VM image cache state
+
+**Examples**:
+
+```
+yeet vm images
+```
+
+```
+yeet vm images --format=json
+```
+
+```
+yeet vm images update
+```
+
+```
+yeet vm images update --format=json-pretty
+```
+
+Get detailed help: `yeet vm images --help-llm`
+
 
 ````
 
@@ -2856,6 +2897,72 @@ Disable TTY for remote commands
 Progress output (auto|tty|plain|quiet)
 
 - **Type**: `string`
+
+
+````
+
+## Group Command: vm images
+
+````
+# yeet vm images
+
+Show or refresh VM image cache state
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] vm images [update] [--format=table|json|json-pretty]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet vm images
+```
+
+```
+yeet vm images --format=json
+```
+
+```
+yeet vm images update
+```
+
+```
+yeet vm images update --format=json-pretty
+```
 
 
 ````
