@@ -43,7 +43,7 @@ func (e *ttyExecer) vmImagesCmdFunc(flags cli.VMImagesFlags, args []string) erro
 
 func (e *ttyExecer) vmImagesUpdateCmdFunc(flags cli.VMImagesFlags) error {
 	cache := e.vmImageCache()
-	asset, err := vmImageEnsureFunc(e.vmImagesContext(), cache, vmUbuntu2604Payload, e.newProgressUI("vm images"))
+	asset, err := vmImageEnsureFunc(e.vmImagesContext(), cache, vmUbuntu2604Payload, e.vmImagesProgressUI(flags))
 	if err != nil {
 		return err
 	}
@@ -59,6 +59,15 @@ func (e *ttyExecer) vmImagesUpdateCmdFunc(flags cli.VMImagesFlags) error {
 		state.CachePath = filepath.Join(cache.Root, state.CachedVersion)
 	}
 	return renderVMImageCacheState(e.rw, flags.Format, state)
+}
+
+func (e *ttyExecer) vmImagesProgressUI(flags cli.VMImagesFlags) ProgressUI {
+	switch strings.TrimSpace(flags.Format) {
+	case "json", "json-pretty":
+		return nil
+	default:
+		return e.newProgressUI("vm images")
+	}
 }
 
 func (e *ttyExecer) vmImagesContext() context.Context {
