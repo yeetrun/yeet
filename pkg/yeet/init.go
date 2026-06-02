@@ -7,6 +7,7 @@ package yeet
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -355,6 +356,13 @@ func chmodInitCatch(ui *initUI, userAtRemote string) error {
 }
 
 func installInitCatch(ui *initUI, userAtRemote string, useSudo bool) error {
+	if !useSudo {
+		return installInitCatchDetached(ui, userAtRemote)
+	}
+	return installInitCatchDirect(ui, userAtRemote, useSudo)
+}
+
+func installInitCatchDirect(ui *initUI, userAtRemote string, useSudo bool) error {
 	cmd := exec.Command("ssh", remoteCatchInstallArgs(userAtRemote, useSudo)...)
 	cmd.Stdin = os.Stdin
 	ui.Suspend()
@@ -375,8 +383,132 @@ func installInitCatch(ui *initUI, userAtRemote string, useSudo bool) error {
 	return nil
 }
 
-func remoteCatchInstallArgs(userAtRemote string, useSudo bool) []string {
-	args := append(make([]string, 0, 7), "-t", userAtRemote)
+type initInstallSession struct {
+	LogPath    string
+	StatusPath string
+}
+
+var (
+	initInstallPollInterval = 500 * time.Millisecond
+	initInstallTimeout      = 5 * time.Minute
+	initInstallSSHTimeout   = 10 * time.Second
+)
+
+func installInitCatchDetached(ui *initUI, userAtRemote string) error {
+	session := newInitInstallSession()
+	ui.Suspend()
+	filter := newInitInstallFilter(os.Stdout)
+	if err := launchDetachedInitCatchInstall(userAtRemote, session); err != nil {
+		ui.FailStep("install failed")
+		return fmt.Errorf("failed to run catch binary on remote host")
+	}
+	status, err := waitDetachedInitCatchInstall(userAtRemote, session, filter)
+	cleanupDetachedInitCatchInstall(userAtRemote, session)
+	if err != nil {
+		ui.FailStep("install failed")
+		return err
+	}
+	if strings.TrimSpace(status) != "0" {
+		ui.FailStep("install failed")
+		return fmt.Errorf("failed to run catch binary on remote host")
+	}
+	ui.DoneStep(filter.SummaryDetail())
+	if warn := filter.WarningSummary(); warn != "" {
+		ui.Warn(warn)
+	}
+	if info := filter.InfoSummary(); info != "" {
+		ui.Info(info)
+	}
+	return nil
+}
+
+func newInitInstallSession() initInstallSession {
+	id := fmt.Sprintf("yeet-catch-install-%d-%d", os.Getpid(), time.Now().UnixNano())
+	return initInstallSession{
+		LogPath:    "/tmp/" + id + ".log",
+		StatusPath: "/tmp/" + id + ".status",
+	}
+}
+
+func launchDetachedInitCatchInstall(userAtRemote string, session initInstallSession) error {
+	cmd := exec.Command("ssh", userAtRemote, detachedInitCatchInstallScript(userAtRemote, session))
+	cmd.Stdin = nil
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	return cmd.Run()
+}
+
+func detachedInitCatchInstallScript(userAtRemote string, session initInstallSession) string {
+	install := shellJoin(remoteCatchInstallCommand(userAtRemote, false))
+	logPath := shellQuote(session.LogPath)
+	statusPath := shellQuote(session.StatusPath)
+	body := fmt.Sprintf("%s >%s 2>&1; code=$?; printf \"%%s\" \"$code\" >%s", install, logPath, statusPath)
+	return fmt.Sprintf(
+		"rm -f %s %s; nohup sh -c %s >/dev/null 2>&1 </dev/null &",
+		logPath,
+		statusPath,
+		shellQuote(body),
+	)
+}
+
+func waitDetachedInitCatchInstall(userAtRemote string, session initInstallSession, filter *initInstallFilter) (string, error) {
+	deadline := time.Now().Add(initInstallTimeout)
+	var lastReadErr error
+	for {
+		status, err := readRemoteInitInstallFile(userAtRemote, session.StatusPath)
+		if err != nil {
+			lastReadErr = err
+		} else if strings.TrimSpace(status) != "" {
+			if err := writeRemoteInitInstallLog(userAtRemote, session, filter); err != nil {
+				return "", err
+			}
+			return strings.TrimSpace(status), nil
+		}
+		if time.Now().After(deadline) {
+			if lastReadErr != nil {
+				return "", fmt.Errorf("timed out waiting for catch install to finish: %w", lastReadErr)
+			}
+			return "", fmt.Errorf("timed out waiting for catch install to finish")
+		}
+		time.Sleep(initInstallPollInterval)
+	}
+}
+
+func writeRemoteInitInstallLog(userAtRemote string, session initInstallSession, filter *initInstallFilter) error {
+	logRaw, err := readRemoteInitInstallFile(userAtRemote, session.LogPath)
+	if err != nil {
+		return fmt.Errorf("failed to read remote install log: %w", err)
+	}
+	if logRaw == "" {
+		return nil
+	}
+	_, err = filter.Write([]byte(logRaw))
+	return err
+}
+
+func readRemoteInitInstallFile(userAtRemote, path string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), initInstallSSHTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ssh", userAtRemote, "cat "+shellQuote(path)+" 2>/dev/null || true")
+	output, err := cmd.Output()
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(output), nil
+}
+
+func cleanupDetachedInitCatchInstall(userAtRemote string, session initInstallSession) {
+	ctx, cancel := context.WithTimeout(context.Background(), initInstallSSHTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "ssh", userAtRemote, "rm -f "+shellQuote(session.LogPath)+" "+shellQuote(session.StatusPath))
+	_ = cmd.Run()
+}
+
+func remoteCatchInstallCommand(userAtRemote string, useSudo bool) []string {
+	args := []string{}
 	if useSudo {
 		args = append(args, "sudo")
 	}
@@ -386,6 +518,11 @@ func remoteCatchInstallArgs(userAtRemote string, useSudo bool) []string {
 		args = append(args, installEnv...)
 	}
 	return append(args, "./catch", fmt.Sprintf("--tsnet-host=%v", Host()), "install")
+}
+
+func remoteCatchInstallArgs(userAtRemote string, useSudo bool) []string {
+	args := append(make([]string, 0, 7), "-t", userAtRemote)
+	return append(args, remoteCatchInstallCommand(userAtRemote, useSudo)...)
 }
 
 func catchInstallEnv(userAtRemote string) []string {

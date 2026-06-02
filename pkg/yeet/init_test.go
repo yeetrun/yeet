@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseInitArgs(t *testing.T) {
@@ -319,15 +320,44 @@ func TestInstallInitCatchUsesFilteredSSHOutput(t *testing.T) {
 	oldPrefs := loadedPrefs
 	defer func() { loadedPrefs = oldPrefs }()
 	loadedPrefs.DefaultHost = "catch-host"
+	logFile := filepath.Join(t.TempDir(), "ssh.log")
 	fakeSSHInPath(t, strings.Join([]string{
-		"printf '%s\\n' 'data dir: /srv/yeet'",
-		"printf '%s\\n' 'tsnet running state path /srv/yeet/tsnet/tailscaled.state'",
-		"printf '%s\\n' 'Warning: docker missing'",
+		"printf '%s\\n' \"$*\" >> " + strconvQuoteForShell(logFile),
+		"case \"$*\" in",
+		"  *'.status'*) printf '0' ;;",
+		"  *'.log'*)",
+		"    printf '%s\\n' 'data dir: /srv/yeet'",
+		"    printf '%s\\n' 'tsnet running state path /srv/yeet/tsnet/tailscaled.state'",
+		"    printf '%s\\n' 'Warning: docker missing'",
+		"    ;;",
+		"esac",
 	}, "\n")+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch-host", "root@example.com", catchServiceName)
 
 	if err := installInitCatch(ui, "root@example.com", false); err != nil {
 		t.Fatalf("installInitCatch error: %v", err)
+	}
+	raw, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("ReadFile ssh log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) < 3 {
+		t.Fatalf("ssh calls = %#v, want launch, status, log calls", lines)
+	}
+	if strings.Contains(lines[0], " -t ") || strings.HasPrefix(lines[0], "-t ") {
+		t.Fatalf("async install launch should not force a TTY: %q", lines[0])
+	}
+	for _, want := range []string{"root@example.com", "nohup", "CATCH_INSTALL_USER=root", "CATCH_INSTALL_HOST=example.com", "--tsnet-host=catch-host"} {
+		if !strings.Contains(lines[0], want) {
+			t.Fatalf("launch ssh call missing %q: %q", want, lines[0])
+		}
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), ".status") {
+		t.Fatalf("ssh calls missing status poll: %#v", lines)
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), ".log") {
+		t.Fatalf("ssh calls missing log fetch: %#v", lines)
 	}
 }
 
@@ -338,6 +368,45 @@ func TestInstallInitCatchReportsSSHError(t *testing.T) {
 	err := installInitCatch(ui, "root@example.com", false)
 	if err == nil || !strings.Contains(err.Error(), "failed to run catch binary") {
 		t.Fatalf("installInitCatch error = %v, want install error", err)
+	}
+}
+
+func TestInstallInitCatchReportsRemoteInstallStatusError(t *testing.T) {
+	fakeSSHInPath(t, strings.Join([]string{
+		"case \"$*\" in",
+		"  *'.status'*) printf '7' ;;",
+		"  *'.log'*) printf '%s\\n' 'remote install failed' ;;",
+		"esac",
+	}, "\n")+"\n")
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+
+	err := installInitCatch(ui, "root@example.com", false)
+	if err == nil || !strings.Contains(err.Error(), "failed to run catch binary") {
+		t.Fatalf("installInitCatch error = %v, want install error", err)
+	}
+}
+
+func TestInstallInitCatchRetriesHungStatusPoll(t *testing.T) {
+	restore := overrideInitInstallTiming(t, time.Millisecond, 200*time.Millisecond, 20*time.Millisecond)
+	defer restore()
+	tmp := t.TempDir()
+	counter := filepath.Join(tmp, "status-count")
+	fakeSSHInPath(t, strings.Join([]string{
+		"case \"$*\" in",
+		"  *cat*'.status'*)",
+		"    if [ ! -f " + strconvQuoteForShell(counter) + " ]; then",
+		"      printf 1 > " + strconvQuoteForShell(counter),
+		"      sleep 1",
+		"    fi",
+		"    printf '0'",
+		"    ;;",
+		"  *'.log'*) printf '%s\\n' 'Service \"catch\" installed' ;;",
+		"esac",
+	}, "\n")+"\n")
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+
+	if err := installInitCatch(ui, "root@example.com", false); err != nil {
+		t.Fatalf("installInitCatch error: %v", err)
 	}
 }
 
@@ -576,6 +645,21 @@ func boolString(v bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+func overrideInitInstallTiming(t *testing.T, pollInterval, installTimeout, sshTimeout time.Duration) func() {
+	t.Helper()
+	oldPollInterval := initInstallPollInterval
+	oldInstallTimeout := initInstallTimeout
+	oldSSHTimeout := initInstallSSHTimeout
+	initInstallPollInterval = pollInterval
+	initInstallTimeout = installTimeout
+	initInstallSSHTimeout = sshTimeout
+	return func() {
+		initInstallPollInterval = oldPollInterval
+		initInstallTimeout = oldInstallTimeout
+		initInstallSSHTimeout = oldSSHTimeout
+	}
 }
 
 func captureInitStderr(t *testing.T, fn func()) string {
