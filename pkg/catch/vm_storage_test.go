@@ -9,7 +9,9 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestVMRawDiskPlanUsesSparseQemuImage(t *testing.T) {
@@ -314,8 +316,11 @@ func TestRunVMProvisionDiskPlanCreatesMissingZVOLBase(t *testing.T) {
 	var commands [][]string
 	err := runVMProvisionDiskPlan(context.Background(), plan, func(_ context.Context, command []string) error {
 		commands = append(commands, append([]string(nil), command...))
-		if len(commands) == 1 {
+		if isZFSListSnapshotCommand(command, plan) {
 			return errors.New("snapshot missing")
+		}
+		if isZFSListBaseDatasetCommand(command, plan) {
+			return errors.New("base missing")
 		}
 		return nil
 	})
@@ -325,11 +330,140 @@ func TestRunVMProvisionDiskPlanCreatesMissingZVOLBase(t *testing.T) {
 	if len(commands) < 6 {
 		t.Fatalf("commands = %#v, want base and clone steps", commands)
 	}
-	if !reflect.DeepEqual(commands[1], []string{"zfs", "create", "-p", "flash/yeet/base"}) {
-		t.Fatalf("base parent command = %#v", commands[1])
+	parentIndex := commandIndex(commands, []string{"zfs", "create", "-p", "flash/yeet/base"})
+	createIndex := firstCommandIndex(commands, func(command []string) bool {
+		return isZVOLBaseCreateCommand(command, plan)
+	})
+	if parentIndex < 0 {
+		t.Fatalf("base parent command not found in %#v", commands)
 	}
-	if !reflect.DeepEqual(commands[2], []string{"zfs", "create", "-s", "-V", "2147483648", plan.BaseDataset}) {
-		t.Fatalf("base create command = %#v", commands[2])
+	if createIndex < 0 {
+		t.Fatalf("base create command not found in %#v", commands)
+	}
+	if parentIndex > createIndex {
+		t.Fatalf("base parent created after base zvol: %#v", commands)
+	}
+}
+
+func TestRunVMProvisionDiskPlanRecreatesOrphanedZVOLBase(t *testing.T) {
+	plan := testZVOLProgressDiskPlan()
+	var commands [][]string
+	destroyed := false
+
+	err := runVMProvisionDiskPlanWithProgress(context.Background(), plan, func(_ context.Context, command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		switch {
+		case isZFSListSnapshotCommand(command, plan):
+			return errors.New("snapshot missing")
+		case isZFSListBaseDatasetCommand(command, plan):
+			return nil
+		case reflect.DeepEqual(command, []string{"zfs", "destroy", "-f", plan.BaseDataset}):
+			destroyed = true
+			return nil
+		case isZVOLBaseCreateCommand(command, plan):
+			if !destroyed {
+				return errors.New("dataset already exists")
+			}
+		}
+		return nil
+	}, nil)
+	if err != nil {
+		t.Fatalf("runVMProvisionDiskPlanWithProgress: %v\ncommands = %#v", err, commands)
+	}
+
+	destroyIndex := commandIndex(commands, []string{"zfs", "destroy", "-f", plan.BaseDataset})
+	createIndex := firstCommandIndex(commands, func(command []string) bool {
+		return isZVOLBaseCreateCommand(command, plan)
+	})
+	if destroyIndex < 0 {
+		t.Fatalf("orphaned base destroy command not found in %#v", commands)
+	}
+	if createIndex < 0 {
+		t.Fatalf("base create command not found in %#v", commands)
+	}
+	if destroyIndex > createIndex {
+		t.Fatalf("orphaned base destroyed after recreate: %#v", commands)
+	}
+}
+
+func TestRunVMProvisionDiskPlanSerializesConcurrentZVOLBaseCreation(t *testing.T) {
+	plan := testZVOLProgressDiskPlan()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var mu sync.Mutex
+	snapshotChecks := 0
+	snapshotCreated := false
+	baseCreates := 0
+	baseWrites := 0
+	bothColdChecks := make(chan struct{})
+
+	runner := func(ctx context.Context, command []string) error {
+		if isZFSListSnapshotCommand(command, plan) {
+			mu.Lock()
+			if snapshotCreated {
+				mu.Unlock()
+				return nil
+			}
+			snapshotChecks++
+			if snapshotChecks == 2 {
+				close(bothColdChecks)
+			}
+			mu.Unlock()
+
+			select {
+			case <-bothColdChecks:
+				return errors.New("snapshot missing")
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		if isZFSListBaseDatasetCommand(command, plan) {
+			return errors.New("base missing")
+		}
+		if isZVOLBaseCreateCommand(command, plan) {
+			mu.Lock()
+			defer mu.Unlock()
+			baseCreates++
+			if baseCreates > 1 {
+				return errors.New("base already created")
+			}
+			return nil
+		}
+		if len(command) > 0 && command[0] == "dd" {
+			mu.Lock()
+			baseWrites++
+			mu.Unlock()
+		}
+		if reflect.DeepEqual(command, []string{"zfs", "snapshot", plan.ZVOLSnapshotName()}) {
+			mu.Lock()
+			snapshotCreated = true
+			mu.Unlock()
+		}
+		return nil
+	}
+
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			errs <- runVMProvisionDiskPlanWithProgress(ctx, plan, runner, nil)
+		}()
+	}
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatalf("runVMProvisionDiskPlanWithProgress: %v", err)
+		}
+	}
+
+	mu.Lock()
+	gotCreates := baseCreates
+	gotWrites := baseWrites
+	mu.Unlock()
+	if gotCreates != 1 {
+		t.Fatalf("base creates = %d, want 1", gotCreates)
+	}
+	if gotWrites != 1 {
+		t.Fatalf("base writes = %d, want 1", gotWrites)
 	}
 }
 
@@ -366,8 +500,11 @@ func TestRunVMProvisionDiskPlanReportsBaseProgressWhenSnapshotMissing(t *testing
 
 	err := runVMProvisionDiskPlanWithProgress(context.Background(), plan, func(_ context.Context, command []string) error {
 		commands = append(commands, append([]string(nil), command...))
-		if len(commands) == 1 {
+		if isZFSListSnapshotCommand(command, plan) {
 			return errors.New("snapshot missing")
+		}
+		if isZFSListBaseDatasetCommand(command, plan) {
+			return errors.New("base missing")
 		}
 		return nil
 	}, func(label string) {
@@ -420,4 +557,31 @@ func testZVOLProgressDiskPlan() vmDiskPlan {
 		BaseDataset:  "flash/yeet/vm-images/ubuntu-26.04-amd64-v1/root",
 		ImageVersion: "ubuntu-26.04-amd64-v1",
 	}
+}
+
+func isZFSListSnapshotCommand(command []string, plan vmDiskPlan) bool {
+	return reflect.DeepEqual(command, []string{"zfs", "list", "-H", "-o", "name", plan.ZVOLSnapshotName()})
+}
+
+func isZFSListBaseDatasetCommand(command []string, plan vmDiskPlan) bool {
+	return reflect.DeepEqual(command, []string{"zfs", "list", "-H", "-o", "name", plan.BaseDataset})
+}
+
+func isZVOLBaseCreateCommand(command []string, plan vmDiskPlan) bool {
+	return reflect.DeepEqual(command, []string{"zfs", "create", "-s", "-V", "2147483648", plan.BaseDataset})
+}
+
+func commandIndex(commands [][]string, want []string) int {
+	return firstCommandIndex(commands, func(command []string) bool {
+		return reflect.DeepEqual(command, want)
+	})
+}
+
+func firstCommandIndex(commands [][]string, match func([]string) bool) int {
+	for idx, command := range commands {
+		if match(command) {
+			return idx
+		}
+	}
+	return -1
 }
