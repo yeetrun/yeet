@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 const (
@@ -96,7 +97,35 @@ func resolveVMImagePayload(payload string) (string, error) {
 }
 
 func ensureVMImageAsset(ctx context.Context, cache vmImageCache) (vmImageAsset, error) {
-	paths, err := cache.Ensure(ctx)
+	return ensureVMImageAssetFromCache(ctx, cache, nil, nil)
+}
+
+func ensureVMImageAssetWithProgress(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (asset vmImageAsset, retErr error) {
+	manifestURL, err := resolveVMImagePayload(payload)
+	if err != nil {
+		return vmImageAsset{}, err
+	}
+	cache = cache.withManifestURL(manifestURL)
+
+	var progress *byteProgress
+	if ui != nil {
+		progress = newByteProgress(0)
+		ui.Start()
+		ui.StartStep("Download VM image")
+		defer func() {
+			if retErr != nil {
+				ui.FailStep(retErr.Error())
+			} else {
+				ui.DoneStep(progress.finalDetail())
+			}
+			ui.Stop()
+		}()
+	}
+	return ensureVMImageAssetFromCache(ctx, cache, progress, ui)
+}
+
+func ensureVMImageAssetFromCache(ctx context.Context, cache vmImageCache, progress *byteProgress, ui ProgressUI) (vmImageAsset, error) {
+	paths, err := cache.ensure(ctx, progress, ui)
 	if err != nil {
 		return vmImageAsset{}, err
 	}
@@ -188,6 +217,10 @@ func readyVMRootFS(target, source string) bool {
 }
 
 func (c vmImageCache) Ensure(ctx context.Context) (vmImagePaths, error) {
+	return c.ensure(ctx, nil, nil)
+}
+
+func (c vmImageCache) ensure(ctx context.Context, progress *byteProgress, ui ProgressUI) (vmImagePaths, error) {
 	manifest, err := c.fetchManifest(ctx)
 	if err != nil {
 		return vmImagePaths{}, err
@@ -205,7 +238,7 @@ func (c vmImageCache) Ensure(ctx context.Context) (vmImagePaths, error) {
 	}
 
 	manifestPath := filepath.Join(dir, "manifest.json")
-	paths, err := c.ensureArtifacts(ctx, dir, manifest)
+	paths, err := c.ensureArtifacts(ctx, dir, manifest, progress, ui)
 	if err != nil {
 		return vmImagePaths{}, err
 	}
@@ -266,23 +299,23 @@ func (c vmImageCache) Inspect(ctx context.Context, payload string) (vmImageCache
 	return state, latestManifest, nil
 }
 
-func (c vmImageCache) ensureArtifacts(ctx context.Context, dir string, manifest vmImageManifest) (vmImagePaths, error) {
-	kernelPath, err := c.ensureArtifact(ctx, dir, manifest, manifest.Kernel)
+func (c vmImageCache) ensureArtifacts(ctx context.Context, dir string, manifest vmImageManifest, progress *byteProgress, ui ProgressUI) (vmImagePaths, error) {
+	kernelPath, err := c.ensureArtifact(ctx, dir, manifest, manifest.Kernel, progress, ui)
 	if err != nil {
 		return vmImagePaths{}, err
 	}
 	var initrdPath string
 	if strings.TrimSpace(manifest.Initrd) != "" {
-		initrdPath, err = c.ensureArtifact(ctx, dir, manifest, manifest.Initrd)
+		initrdPath, err = c.ensureArtifact(ctx, dir, manifest, manifest.Initrd, progress, ui)
 		if err != nil {
 			return vmImagePaths{}, err
 		}
 	}
-	rootFSPath, err := c.ensureArtifact(ctx, dir, manifest, manifest.RootFS)
+	rootFSPath, err := c.ensureArtifact(ctx, dir, manifest, manifest.RootFS, progress, ui)
 	if err != nil {
 		return vmImagePaths{}, err
 	}
-	firecrackerPath, err := c.ensureArtifact(ctx, dir, manifest, manifest.Firecracker)
+	firecrackerPath, err := c.ensureArtifact(ctx, dir, manifest, manifest.Firecracker, progress, ui)
 	if err != nil {
 		return vmImagePaths{}, err
 	}
@@ -319,7 +352,7 @@ func (c vmImageCache) fetchManifest(ctx context.Context) (vmImageManifest, error
 	return manifest, nil
 }
 
-func (c vmImageCache) ensureArtifact(ctx context.Context, dir string, manifest vmImageManifest, artifactName string) (string, error) {
+func (c vmImageCache) ensureArtifact(ctx context.Context, dir string, manifest vmImageManifest, artifactName string, progress *byteProgress, ui ProgressUI) (string, error) {
 	if err := validateVMImageArtifactName(artifactName); err != nil {
 		return "", err
 	}
@@ -337,19 +370,64 @@ func (c vmImageCache) ensureArtifact(ctx context.Context, dir string, manifest v
 	if err != nil {
 		return "", err
 	}
-	if err := c.downloadVerifiedFile(ctx, artifactURL, dst, artifactName, want); err != nil {
+	if err := c.downloadVerifiedFile(ctx, artifactURL, dst, artifactName, want, progress, ui); err != nil {
 		return "", err
 	}
 	return dst, nil
 }
 
-func (c vmImageCache) downloadVerifiedFile(ctx context.Context, rawURL, dst, artifactName, want string) error {
+func (c vmImageCache) downloadVerifiedFile(ctx context.Context, rawURL, dst, artifactName, want string, progress *byteProgress, ui ProgressUI) error {
 	resp, err := c.downloadArtifactResponse(ctx, rawURL)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return installVerifiedVMImageArtifact(resp.Body, dst, artifactName, want)
+	reader := io.Reader(resp.Body)
+	if progress != nil {
+		reader = progress.reader(reader)
+	}
+	var detailProgress *byteProgress
+	var stopProgress func()
+	if ui != nil {
+		total := int64(0)
+		if resp.ContentLength > 0 {
+			total = resp.ContentLength
+		}
+		detailProgress = newByteProgress(total)
+		reader = detailProgress.reader(reader)
+		stopProgress = startByteProgressUpdates(ui, detailProgress)
+		defer stopProgress()
+	}
+	if err := installVerifiedVMImageArtifact(reader, dst, artifactName, want); err != nil {
+		return err
+	}
+	if detailProgress != nil {
+		ui.UpdateDetail(detailProgress.detail())
+	}
+	return nil
+}
+
+func startByteProgressUpdates(ui ProgressUI, progress *byteProgress) func() {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(byteProgressInterval)
+		defer ticker.Stop()
+		ui.UpdateDetail(progress.detail())
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				ui.UpdateDetail(progress.detail())
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-stopped
+	}
 }
 
 func (c vmImageCache) httpClient() *http.Client {
