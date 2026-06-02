@@ -509,6 +509,7 @@ func TestRunSSHPlanRepairsVMKnownHostAliasAndRetries(t *testing.T) {
 			_, _ = io.WriteString(stderr, changedHostKeySSHOutput(wantKnownHosts))
 			return firstErr
 		}
+		_, _ = io.WriteString(stderr, "Warning: Permanently added 'yeet-vm-devbox@yeet-lab' (ED25519) to the list of known hosts.\n")
 		return nil
 	})
 	var removedAlias, removedKnownHosts string
@@ -531,8 +532,11 @@ func TestRunSSHPlanRepairsVMKnownHostAliasAndRetries(t *testing.T) {
 	if removedAlias != wantAlias || removedKnownHosts != wantKnownHosts {
 		t.Fatalf("removed %q from %q, want %q from %q", removedAlias, removedKnownHosts, wantAlias, wantKnownHosts)
 	}
-	if !strings.Contains(stderr.String(), "REMOTE HOST IDENTIFICATION HAS CHANGED") {
-		t.Fatalf("stderr = %q, want forwarded host-key warning", stderr.String())
+	if strings.Contains(stderr.String(), "REMOTE HOST IDENTIFICATION HAS CHANGED") {
+		t.Fatalf("stderr = %q, want stale host-key warning suppressed", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Permanently added") {
+		t.Fatalf("stderr = %q, want retry stderr forwarded", stderr.String())
 	}
 }
 
@@ -596,7 +600,8 @@ func assertSSHPlanDoesNotRepairOnStderr(t *testing.T, plan sshExecutionPlan, std
 		return nil
 	})
 
-	err := runSSHPlan(context.Background(), plan, nil, io.Discard, io.Discard)
+	var stderr bytes.Buffer
+	err := runSSHPlan(context.Background(), plan, nil, io.Discard, &stderr)
 	if !errors.Is(err, runErr) {
 		t.Fatalf("runSSHPlan error = %v, want %v", err, runErr)
 	}
@@ -605,6 +610,9 @@ func assertSSHPlanDoesNotRepairOnStderr(t *testing.T, plan sshExecutionPlan, std
 	}
 	if removeCalled {
 		t.Fatal("remove called for SSH error outside yeet's generated known_hosts entry")
+	}
+	if !strings.Contains(stderr.String(), stderrText) {
+		t.Fatalf("stderr = %q, want replayed SSH stderr %q", stderr.String(), stderrText)
 	}
 }
 

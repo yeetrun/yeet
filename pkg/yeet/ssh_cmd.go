@@ -159,17 +159,26 @@ func runSSHPlan(ctx context.Context, plan sshExecutionPlan, stdin io.Reader, std
 	}
 
 	var stderrBuf bytes.Buffer
-	firstErr := runSSHCommandFunc(ctx, plan.Args, stdin, stdout, io.MultiWriter(writerOrDiscard(stderr), &stderrBuf))
+	firstErr := runSSHCommandFunc(ctx, plan.Args, stdin, stdout, &stderrBuf)
 	if firstErr == nil {
+		replaySSHStderr(&stderrBuf, stderr)
 		return nil
 	}
 	if !shouldRepairSSHKnownHostError(stderrBuf.String(), *plan.KnownHostRepair) {
+		replaySSHStderr(&stderrBuf, stderr)
 		return firstErr
 	}
 	if err := removeSSHKnownHostFunc(ctx, plan.KnownHostRepair.Alias, plan.KnownHostRepair.KnownHostsFile); err != nil {
 		return err
 	}
 	return runSSHCommandFunc(ctx, plan.Args, stdin, stdout, stderr)
+}
+
+func replaySSHStderr(buf *bytes.Buffer, stderr io.Writer) {
+	if buf == nil || buf.Len() == 0 {
+		return
+	}
+	_, _ = buf.WriteTo(writerOrDiscard(stderr))
 }
 
 func (p sshExecutionPlan) canRepairKnownHost() bool {
