@@ -106,6 +106,15 @@ func ensureVMImageAssetWithProgress(ctx context.Context, cache vmImageCache, pay
 		return vmImageAsset{}, err
 	}
 	cache = cache.withManifestURL(manifestURL)
+	if ui != nil {
+		state, _, err := cache.Inspect(ctx, payload)
+		if err != nil {
+			return vmImageAsset{}, err
+		}
+		if state.State == vmImageCacheCurrent {
+			return cachedVMImageAsset(ctx, cache, state.CachedVersion)
+		}
+	}
 
 	var progress *byteProgress
 	if ui != nil {

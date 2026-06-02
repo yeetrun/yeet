@@ -413,16 +413,16 @@ func TestRemoveServiceCleanDataDestroysZFSServiceRoot(t *testing.T) {
 	if _, err := server.RemoveServiceWithOptions("api", RemoveOptions{CleanData: true}); err != nil {
 		t.Fatalf("RemoveServiceWithOptions: %v", err)
 	}
-	want := [][]string{{"destroy", "-r", "tank/apps/api"}}
+	want := [][]string{{"destroy", "-R", "tank/apps/api"}}
 	if !reflect.DeepEqual(zfsCalls, want) {
 		t.Fatalf("zfs calls = %#v, want %#v", zfsCalls, want)
 	}
 }
 
-func TestRemoveServiceCleanDataContinuesWhenZFSDestroyFails(t *testing.T) {
+func TestRemoveServiceCleanDataFailsBeforeDBRemovalWhenZFSDestroyFails(t *testing.T) {
 	server := newTestServer(t)
 	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
-		return "", "busy", errors.New("zfs failed")
+		return "", "permission denied", errors.New("zfs failed")
 	}
 	serviceRoot := filepath.Join(server.cfg.ServicesRoot, "api")
 	if err := os.MkdirAll(filepath.Join(serviceRoot, "data"), 0o755); err != nil {
@@ -441,18 +441,42 @@ func TestRemoveServiceCleanDataContinuesWhenZFSDestroyFails(t *testing.T) {
 		t.Fatalf("DB.Set: %v", err)
 	}
 
-	report, err := server.RemoveServiceWithOptions("api", RemoveOptions{CleanData: true})
-	if err != nil {
-		t.Fatalf("RemoveServiceWithOptions: %v", err)
+	_, err := server.RemoveServiceWithOptions("api", RemoveOptions{CleanData: true})
+	if err == nil {
+		t.Fatal("RemoveServiceWithOptions returned nil error")
 	}
-	found := false
-	for _, warn := range report.Warnings {
-		if strings.Contains(warn.Error(), "zfs destroy tank/apps/api") {
-			found = true
+	if !strings.Contains(err.Error(), "zfs destroy -R tank/apps/api") || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("RemoveServiceWithOptions error = %v, want zfs destroy failure", err)
+	}
+	if _, err := server.serviceView("api"); err != nil {
+		t.Fatalf("serviceView after failed cleanup = %v, want service retained for retry", err)
+	}
+}
+
+func TestDestroyServiceRootZFSRetriesBusyDestroy(t *testing.T) {
+	server := newTestServer(t)
+	oldDelay := zfsDestroyRetryDelay
+	zfsDestroyRetryDelay = 0
+	t.Cleanup(func() { zfsDestroyRetryDelay = oldDelay })
+
+	var zfsCalls [][]string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		zfsCalls = append(zfsCalls, append([]string(nil), args...))
+		if len(zfsCalls) == 1 {
+			return "", "cannot destroy 'tank/apps/api': dataset is busy", errors.New("zfs failed")
 		}
+		return "", "", nil
 	}
-	if !found {
-		t.Fatalf("warnings = %#v, want zfs destroy warning", report.Warnings)
+
+	if err := server.destroyServiceRootZFS("tank/apps/api"); err != nil {
+		t.Fatalf("destroyServiceRootZFS: %v", err)
+	}
+	want := [][]string{
+		{"destroy", "-R", "tank/apps/api"},
+		{"destroy", "-R", "tank/apps/api"},
+	}
+	if !reflect.DeepEqual(zfsCalls, want) {
+		t.Fatalf("zfs calls = %#v, want %#v", zfsCalls, want)
 	}
 }
 

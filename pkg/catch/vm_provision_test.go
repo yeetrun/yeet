@@ -512,9 +512,18 @@ func TestRunVMMissingImageAutomaticallyEnsures(t *testing.T) {
 	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v2")
 }
 
-func TestRunVMCurrentImageAutomaticallyEnsures(t *testing.T) {
+func TestRunVMCurrentImageUsesCachedAssetWithoutEnsuring(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v2", contents)
+	dir := writeCachedVMImageManifest(t, filepath.Join(server.cfg.RootDir, "vm-images"), manifest)
+	writeCachedVMImageArtifacts(t, dir, contents)
+	oldPrepareRootFS := prepareVMRootFSFunc
+	t.Cleanup(func() { prepareVMRootFSFunc = oldPrepareRootFS })
+	prepareVMRootFSFunc = func(_ context.Context, source string) (string, error) {
+		return source, nil
+	}
 	stubVMProvisionImageState(t, vmImageCacheState{
 		Payload:       vmUbuntu2604Payload,
 		CachedVersion: "ubuntu-26.04-amd64-v2",
@@ -523,17 +532,13 @@ func TestRunVMCurrentImageAutomaticallyEnsures(t *testing.T) {
 		CachePath:     filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-26.04-amd64-v2"),
 		ManifestURL:   defaultVMImageManifestURL,
 	})
-	ensureCalled := false
 	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
-		ensureCalled = true
-		return fakeVMImageAssetVersion(t, "ubuntu-26.04-amd64-v2")
+		t.Fatal("vmImageEnsureFunc called for current VM image cache")
+		return vmImageAsset{}, nil
 	}
 
 	if err := execer.runVM(cli.RunFlags{Net: "svc"}, vmUbuntu2604Payload); err != nil {
 		t.Fatalf("runVM: %v", err)
-	}
-	if !ensureCalled {
-		t.Fatal("ensure was not called for current image cache")
 	}
 	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v2")
 }
@@ -641,9 +646,8 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	vmImageInspectFunc = func(context.Context, vmImageCache, string) (vmImageCacheState, vmImageManifest, error) {
 		return vmImageCacheState{
 			Payload:       vmUbuntu2604Payload,
-			CachedVersion: defaultVMImageVersion,
 			LatestVersion: defaultVMImageVersion,
-			State:         vmImageCacheCurrent,
+			State:         vmImageCacheMissing,
 			CachePath:     filepath.Join(server.cfg.RootDir, "vm-images", defaultVMImageVersion),
 			ManifestURL:   defaultVMImageManifestURL,
 		}, vmImageManifest{Version: defaultVMImageVersion}, nil
