@@ -493,9 +493,15 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, resolvedRoot resolved
 }
 
 func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvisionPlan) error {
-	e.vmProgressf("Preparing disk...\n")
-	if err := runVMProvisionDiskPlan(ctx, plan.Disk, vmProvisionDiskRunner); err != nil {
-		return err
+	if plan.Disk.Backend == vmDiskBackendZVOL {
+		if err := runVMProvisionDiskPlanWithProgress(ctx, plan.Disk, vmProvisionDiskRunner, e.vmDiskProgressf); err != nil {
+			return err
+		}
+	} else {
+		e.vmProgressf("Preparing disk...\n")
+		if err := runVMProvisionDiskPlan(ctx, plan.Disk, vmProvisionDiskRunner); err != nil {
+			return err
+		}
 	}
 	if err := writeVMMetadata(plan.ServiceRoot.Root, plan.Metadata); err != nil {
 		return fmt.Errorf("write VM metadata: %w", err)
@@ -520,6 +526,10 @@ func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvis
 		return fmt.Errorf("stage VM systemd unit: %w", err)
 	}
 	return nil
+}
+
+func (e *ttyExecer) vmDiskProgressf(label string) {
+	e.vmProgressf("%s...\n", label)
 }
 
 func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string) error {

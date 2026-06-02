@@ -15,9 +15,11 @@ import (
 var vmZFSDatasetComponentPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 
 const (
-	vmDiskPhaseRaw       = "raw"
-	vmDiskPhaseZVOLBase  = "zvol-base"
-	vmDiskPhaseZVOLClone = "zvol-clone"
+	vmDiskPhaseRaw             = "raw"
+	vmDiskPhaseZVOLBasePrepare = "zvol-base-prepare"
+	vmDiskPhaseZVOLBaseWrite   = "zvol-base-write"
+	vmDiskPhaseZVOLClone       = "zvol-clone"
+	vmDiskPhaseZVOLResize      = "zvol-resize"
 )
 
 type vmDiskPlan struct {
@@ -40,6 +42,7 @@ type vmCommandRunner func(context.Context, []string) error
 
 type vmSetupIncompleteError struct {
 	DiskPath string
+	Phase    string
 	Command  []string
 	Err      error
 }
@@ -60,6 +63,23 @@ func (e vmSetupIncompleteError) Error() string {
 
 func (e vmSetupIncompleteError) Unwrap() error {
 	return e.Err
+}
+
+func vmDiskProgressLabel(phase string) string {
+	switch phase {
+	case vmDiskPhaseRaw:
+		return "Preparing disk"
+	case vmDiskPhaseZVOLBasePrepare:
+		return "Preparing ZFS image base"
+	case vmDiskPhaseZVOLBaseWrite:
+		return "Writing image to ZFS base"
+	case vmDiskPhaseZVOLClone:
+		return "Cloning VM disk"
+	case vmDiskPhaseZVOLResize:
+		return "Expanding filesystem"
+	default:
+		return ""
+	}
 }
 
 func (p vmDiskPlan) Validate() error {
@@ -179,11 +199,11 @@ func (p vmDiskPlan) ZVOLBaseSteps() ([]vmDiskPlanStep, error) {
 	}
 	snap := p.ZVOLSnapshotName()
 	size := fmt.Sprintf("%d", p.zvolBaseBytes())
-	return append(zfsParentDatasetSteps(vmDiskPhaseZVOLBase, p.BaseDataset),
-		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBase, Command: []string{"zfs", "create", "-s", "-V", size, p.BaseDataset}},
-		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBase, Command: vmZVOLSettleCommand()},
-		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBase, Command: []string{"dd", "if=" + p.BaseRootFS, "of=/dev/zvol/" + p.BaseDataset, "bs=16M", "status=none"}},
-		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBase, Command: []string{"zfs", "snapshot", snap}},
+	return append(zfsParentDatasetSteps(vmDiskPhaseZVOLBasePrepare, p.BaseDataset),
+		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBasePrepare, Command: []string{"zfs", "create", "-s", "-V", size, p.BaseDataset}},
+		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBasePrepare, Command: vmZVOLSettleCommand()},
+		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBaseWrite, Command: []string{"dd", "if=" + p.BaseRootFS, "of=/dev/zvol/" + p.BaseDataset, "bs=16M", "status=none"}},
+		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBaseWrite, Command: []string{"zfs", "snapshot", snap}},
 	), nil
 }
 
@@ -207,7 +227,7 @@ func (p vmDiskPlan) ZVOLCloneSteps() ([]vmDiskPlanStep, error) {
 		vmDiskPlanStep{Phase: vmDiskPhaseZVOLClone, Command: []string{"zfs", "clone", snap, p.Path}},
 		vmDiskPlanStep{Phase: vmDiskPhaseZVOLClone, Command: []string{"zfs", "set", "volsize=" + size, p.Path}},
 		vmDiskPlanStep{Phase: vmDiskPhaseZVOLClone, Command: vmZVOLSettleCommand()},
-		vmDiskPlanStep{Phase: vmDiskPhaseZVOLClone, Command: []string{"resize2fs", vmDiskPathForRuntime(p)}},
+		vmDiskPlanStep{Phase: vmDiskPhaseZVOLResize, Command: []string{"resize2fs", vmDiskPathForRuntime(p)}},
 	), nil
 }
 
@@ -261,15 +281,23 @@ func runVMDiskPlanWithRunner(ctx context.Context, plan vmDiskPlan, runner vmComm
 	if err != nil {
 		return err
 	}
-	return runVMDiskStepsWithRunner(ctx, plan, steps, runner)
+	return runVMDiskStepsWithRunner(ctx, plan, steps, runner, nil)
 }
 
 func runVMProvisionDiskPlan(ctx context.Context, plan vmDiskPlan, runner vmCommandRunner) error {
+	return runVMProvisionDiskPlanWithProgress(ctx, plan, runner, nil)
+}
+
+func runVMProvisionDiskPlanWithProgress(ctx context.Context, plan vmDiskPlan, runner vmCommandRunner, progress func(string)) error {
 	if runner == nil {
 		runner = runVMCommand
 	}
 	if plan.Backend != vmDiskBackendZVOL {
-		return runVMDiskPlanWithRunner(ctx, plan, runner)
+		steps, err := plan.Steps()
+		if err != nil {
+			return err
+		}
+		return runVMDiskStepsWithRunner(ctx, plan, steps, runner, progress)
 	}
 	if err := plan.Validate(); err != nil {
 		return err
@@ -289,14 +317,20 @@ func runVMProvisionDiskPlan(ctx context.Context, plan vmDiskPlan, runner vmComma
 		return err
 	}
 	steps = append(steps, clone...)
-	return runVMDiskStepsWithRunner(ctx, plan, steps, runner)
+	return runVMDiskStepsWithRunner(ctx, plan, steps, runner, progress)
 }
 
-func runVMDiskStepsWithRunner(ctx context.Context, plan vmDiskPlan, steps []vmDiskPlanStep, runner vmCommandRunner) error {
+func runVMDiskStepsWithRunner(ctx context.Context, plan vmDiskPlan, steps []vmDiskPlanStep, runner vmCommandRunner, progress func(string)) error {
+	lastLabel := ""
 	for _, step := range steps {
+		label := vmDiskProgressLabel(step.Phase)
+		if progress != nil && label != "" && label != lastLabel {
+			progress(label)
+			lastLabel = label
+		}
 		command := step.Command
 		if err := runner(ctx, command); err != nil {
-			return vmSetupIncompleteError{DiskPath: plan.Path, Command: append([]string(nil), command...), Err: err}
+			return vmSetupIncompleteError{DiskPath: plan.Path, Phase: step.Phase, Command: append([]string(nil), command...), Err: err}
 		}
 	}
 	return nil
