@@ -784,10 +784,22 @@ func vmLANParentIsBridge(parent string) bool {
 
 func vmZVOLBaseDataset(root resolvedServiceRoot, version string) string {
 	dataset := strings.Trim(root.Dataset, "/")
-	if dataset == "" {
-		dataset = "yeet/vm-images"
+	pool := vmZVOLPoolName(dataset)
+	if pool == "" {
+		return "yeet/vm-images/" + version + "/root"
 	}
-	return dataset + "/base/" + version
+	return pool + "/yeet/vm-images/" + version + "/root"
+}
+
+func vmZVOLPoolName(dataset string) string {
+	dataset = strings.Trim(dataset, "/")
+	if dataset == "" {
+		return ""
+	}
+	if idx := strings.Index(dataset, "/"); idx > 0 {
+		return dataset[:idx]
+	}
+	return dataset
 }
 
 func vmZVOLRootDataset(root resolvedServiceRoot, service string) string {
