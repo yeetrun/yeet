@@ -435,6 +435,37 @@ func TestRunVMStaleImageTTYPromptYesEnsuresLatest(t *testing.T) {
 	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v2")
 }
 
+func TestRunVMStaleImageTTYPromptReadsRawInputWhenPtyInputBypassed(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMProvisionImageState(t, staleVMProvisionImageState("ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v2"))
+	var ptyOut bytes.Buffer
+	var rawOut bytes.Buffer
+	execer.rw = readWriter{Reader: strings.NewReader(""), Writer: &ptyOut}
+	execer.rawRW = readWriter{Reader: strings.NewReader("y\n"), Writer: &rawOut}
+	execer.isPty = true
+	execer.bypassPtyInput = true
+	ensureCalled := false
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		ensureCalled = true
+		return fakeVMImageAssetVersion(t, "ubuntu-26.04-amd64-v2")
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc"}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if !ensureCalled {
+		t.Fatal("ensure was not called after raw input confirmation")
+	}
+	if !strings.Contains(ptyOut.String(), "Update now?") {
+		t.Fatalf("pty output = %q, want update prompt", ptyOut.String())
+	}
+	if rawOut.Len() != 0 {
+		t.Fatalf("raw output = %q, want prompt written to pty output only", rawOut.String())
+	}
+	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v2")
+}
+
 func TestRunVMStaleImageTTYPromptNoUsesCachedVersion(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
