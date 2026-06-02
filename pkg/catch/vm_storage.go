@@ -6,10 +6,19 @@ package catch
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var vmZFSDatasetComponentPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
@@ -39,6 +48,8 @@ type vmDiskPlanStep struct {
 }
 
 type vmCommandRunner func(context.Context, []string) error
+
+var vmZVOLBaseMutexes sync.Map
 
 type vmSetupIncompleteError struct {
 	DiskPath string
@@ -304,13 +315,18 @@ func runVMProvisionDiskPlanWithProgress(ctx context.Context, plan vmDiskPlan, ru
 	if err := plan.Validate(); err != nil {
 		return err
 	}
-	check := []string{"zfs", "list", "-H", "-o", "name", plan.ZVOLSnapshotName()}
-	baseExists := runner(ctx, check) == nil
-	var steps []vmDiskPlanStep
-	var err error
-	if !baseExists {
-		steps, err = plan.ZVOLBaseSteps()
-		if err != nil {
+	check := zfsListNameCommand(plan.ZVOLSnapshotName())
+	if runner(ctx, check) != nil {
+		if err := withVMZVOLBaseLock(ctx, plan, func() error {
+			if runner(ctx, check) == nil {
+				return nil
+			}
+			steps, err := zvolBasePreparationSteps(ctx, plan, runner)
+			if err != nil {
+				return err
+			}
+			return runVMDiskStepsWithRunner(ctx, plan, steps, runner, progress)
+		}); err != nil {
 			return err
 		}
 	}
@@ -318,8 +334,83 @@ func runVMProvisionDiskPlanWithProgress(ctx context.Context, plan vmDiskPlan, ru
 	if err != nil {
 		return err
 	}
-	steps = append(steps, clone...)
-	return runVMDiskStepsWithRunner(ctx, plan, steps, runner, progress)
+	return runVMDiskStepsWithRunner(ctx, plan, clone, runner, progress)
+}
+
+func zvolBasePreparationSteps(ctx context.Context, plan vmDiskPlan, runner vmCommandRunner) ([]vmDiskPlanStep, error) {
+	steps, err := plan.ZVOLBaseSteps()
+	if err != nil {
+		return nil, err
+	}
+	if runner(ctx, zfsListNameCommand(plan.BaseDataset)) != nil {
+		return steps, nil
+	}
+	recovery := []vmDiskPlanStep{
+		{Phase: vmDiskPhaseZVOLBasePrepare, Command: []string{"zfs", "destroy", "-f", plan.BaseDataset}},
+	}
+	return append(recovery, steps...), nil
+}
+
+func zfsListNameCommand(name string) []string {
+	return []string{"zfs", "list", "-H", "-o", "name", name}
+}
+
+func withVMZVOLBaseLock(ctx context.Context, plan vmDiskPlan, fn func() error) error {
+	lockKey := plan.ZVOLSnapshotName()
+	mutex := vmZVOLBaseMutex(lockKey)
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	unlock, err := acquireVMZVOLBaseFileLock(ctx, lockKey)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return fn()
+}
+
+func vmZVOLBaseMutex(lockKey string) *sync.Mutex {
+	value, _ := vmZVOLBaseMutexes.LoadOrStore(lockKey, &sync.Mutex{})
+	return value.(*sync.Mutex)
+}
+
+func acquireVMZVOLBaseFileLock(ctx context.Context, lockKey string) (func(), error) {
+	lockPath := vmZVOLBaseLockPath(lockKey)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return nil, fmt.Errorf("create VM image base lock dir: %w", err)
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open VM image base lock: %w", err)
+	}
+	for {
+		err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return func() {
+				_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
+				_ = file.Close()
+			}, nil
+		}
+		if !isVMZVOLBaseLockBusy(err) {
+			_ = file.Close()
+			return nil, fmt.Errorf("lock VM image base: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func vmZVOLBaseLockPath(lockKey string) string {
+	sum := sha256.Sum256([]byte(lockKey))
+	return filepath.Join(os.TempDir(), "yeet-vm-image-locks", hex.EncodeToString(sum[:])+".lock")
+}
+
+func isVMZVOLBaseLockBusy(err error) bool {
+	return errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN)
 }
 
 func runVMDiskStepsWithRunner(ctx context.Context, plan vmDiskPlan, steps []vmDiskPlanStep, runner vmCommandRunner, progress func(string)) error {

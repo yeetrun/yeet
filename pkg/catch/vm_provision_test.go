@@ -249,8 +249,11 @@ func TestRunVMZVOLProvisionUsesDevicePathForFirecracker(t *testing.T) {
 	var diskCommands [][]string
 	vmProvisionDiskRunner = func(_ context.Context, cmd []string) error {
 		diskCommands = append(diskCommands, append([]string(nil), cmd...))
-		if len(diskCommands) == 1 {
-			return errors.New("snapshot missing")
+		if len(cmd) >= 2 && cmd[0] == "zfs" && cmd[1] == "list" {
+			if strings.Contains(strings.Join(cmd, " "), "@") {
+				return errors.New("snapshot missing")
+			}
+			return errors.New("base missing")
 		}
 		return nil
 	}
@@ -302,8 +305,11 @@ func TestRunVMZVOLProvisionPrintsDiskSubsteps(t *testing.T) {
 	var diskCommands [][]string
 	vmProvisionDiskRunner = func(_ context.Context, cmd []string) error {
 		diskCommands = append(diskCommands, append([]string(nil), cmd...))
-		if len(diskCommands) == 1 {
-			return errors.New("snapshot missing")
+		if len(cmd) >= 2 && cmd[0] == "zfs" && cmd[1] == "list" {
+			if strings.Contains(strings.Join(cmd, " "), "@") {
+				return errors.New("snapshot missing")
+			}
+			return errors.New("base missing")
 		}
 		return nil
 	}
@@ -320,7 +326,7 @@ func TestRunVMZVOLProvisionPrintsDiskSubsteps(t *testing.T) {
 		"Expanding filesystem",
 	} {
 		if !strings.Contains(text, want) {
-			t.Fatalf("output missing %q:\n%s", want, text)
+			t.Fatalf("output missing %q:\n%s\ndisk commands: %#v", want, text, diskCommands)
 		}
 	}
 }
