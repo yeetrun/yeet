@@ -197,11 +197,17 @@ yeet rm --clean-data devbox
 
 VM image bundles are cached on each catch host. `yeet vm images` shows whether
 the cached image is current, stale, or missing; `yeet vm images update`
-refreshes the host cache used for future VM creates. A missing image is
+refreshes the host file cache used for future VM creates. A missing image is
 downloaded automatically on the first VM create. Existing VM disks are not
 rewritten. When creating a VM with a stale cached image, interactive runs prompt
 by default; non-interactive runs require `--image-policy=update` or
 `--image-policy=cached`.
+
+For ZFS-backed VMs, the first VM created on a pool for an image version prepares
+a shared ZFS image base on that pool. Later VMs on the same pool and image
+version clone that shared base instead of writing the root filesystem again.
+`yeet rm --clean-data devbox` removes the VM's service data and clone, not the
+shared image base.
 
 For `--net=svc`, `yeet ssh <svc>` proxies through the yeet host to reach the
 guest's private service-network IP. `yeet vm console <svc>` streams the guest

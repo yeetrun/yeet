@@ -627,6 +627,33 @@ func TestRunVMCurrentImageUsesCachedAssetWithoutEnsuring(t *testing.T) {
 	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v2")
 }
 
+func TestRunVMCurrentImageDoesNotPrintDownloadProgress(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var out bytes.Buffer
+	execer.rw = &out
+	seedCachedVMProvisionImage(t, server, defaultVMImageVersion)
+	stubVMProvisionImageState(t, vmImageCacheState{
+		Payload:       vmUbuntu2604Payload,
+		CachedVersion: defaultVMImageVersion,
+		LatestVersion: defaultVMImageVersion,
+		State:         vmImageCacheCurrent,
+		CachePath:     filepath.Join(server.cfg.RootDir, "vm-images", defaultVMImageVersion),
+		ManifestURL:   defaultVMImageManifestURL,
+	})
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		t.Fatal("vmImageEnsureFunc called for current VM image cache")
+		return vmImageAsset{}, nil
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: false}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if strings.Contains(out.String(), "Download VM image") {
+		t.Fatalf("current cache printed download progress:\n%s", out.String())
+	}
+}
+
 func TestRunVMUnknownImageCacheStateErrors(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
