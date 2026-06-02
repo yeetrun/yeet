@@ -5,6 +5,10 @@
 package yeet
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -477,6 +481,170 @@ func TestServiceShellCommandForVMRequiresGuestHost(t *testing.T) {
 	}
 }
 
+func TestRunSSHPlanRepairsVMKnownHostAliasAndRetries(t *testing.T) {
+	home, plan := testSSHExecutionPlan(t, []string{"ssh", "devbox"}, vmSSHRepairServiceInfo())
+	wantAlias := "yeet-vm-devbox@yeet-lab"
+	wantKnownHosts := filepath.Join(home, ".yeet", "known_hosts")
+	if plan.KnownHostRepair == nil {
+		t.Fatal("KnownHostRepair = nil, want VM repair metadata")
+	}
+	if plan.KnownHostRepair.Alias != wantAlias {
+		t.Fatalf("repair alias = %q, want %q", plan.KnownHostRepair.Alias, wantAlias)
+	}
+	if plan.KnownHostRepair.KnownHostsFile != wantKnownHosts {
+		t.Fatalf("repair known_hosts = %q, want %q", plan.KnownHostRepair.KnownHostsFile, wantKnownHosts)
+	}
+	if !sshOptionsContainValue(plan.Args, "HostKeyAlias="+wantAlias) {
+		t.Fatalf("args = %#v, want generated HostKeyAlias", plan.Args)
+	}
+	if !sshOptionsContainValue(plan.Args, "UserKnownHostsFile="+wantKnownHosts) {
+		t.Fatalf("args = %#v, want yeet known_hosts file", plan.Args)
+	}
+
+	var runs [][]string
+	firstErr := errors.New("first ssh failed")
+	stubRunSSHCommand(t, func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+		runs = append(runs, append([]string{}, args...))
+		if len(runs) == 1 {
+			_, _ = io.WriteString(stderr, changedHostKeySSHOutput(wantKnownHosts))
+			return firstErr
+		}
+		return nil
+	})
+	var removedAlias, removedKnownHosts string
+	stubRemoveSSHKnownHost(t, func(ctx context.Context, alias, knownHosts string) error {
+		removedAlias = alias
+		removedKnownHosts = knownHosts
+		return nil
+	})
+
+	var stderr bytes.Buffer
+	if err := runSSHPlan(context.Background(), plan, nil, io.Discard, &stderr); err != nil {
+		t.Fatalf("runSSHPlan: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("ssh runs = %d, want 2", len(runs))
+	}
+	if !reflect.DeepEqual(runs[0], plan.Args) || !reflect.DeepEqual(runs[1], plan.Args) {
+		t.Fatalf("runs = %#v, want both with plan args %#v", runs, plan.Args)
+	}
+	if removedAlias != wantAlias || removedKnownHosts != wantKnownHosts {
+		t.Fatalf("removed %q from %q, want %q from %q", removedAlias, removedKnownHosts, wantAlias, wantKnownHosts)
+	}
+	if !strings.Contains(stderr.String(), "REMOTE HOST IDENTIFICATION HAS CHANGED") {
+		t.Fatalf("stderr = %q, want forwarded host-key warning", stderr.String())
+	}
+}
+
+func TestRunSSHPlanDoesNotRepairCustomUserKnownHostsFile(t *testing.T) {
+	_, plan := testSSHExecutionPlan(t, []string{"ssh", "-o", "UserKnownHostsFile=/tmp/custom-known-hosts", "devbox"}, vmSSHRepairServiceInfo())
+	assertNoSSHRepairOnChangedHostKey(t, plan)
+}
+
+func TestRunSSHPlanDoesNotRepairCustomHostKeyAlias(t *testing.T) {
+	_, plan := testSSHExecutionPlan(t, []string{"ssh", "-o", "HostKeyAlias=custom-devbox", "devbox"}, vmSSHRepairServiceInfo())
+	assertNoSSHRepairOnChangedHostKey(t, plan)
+}
+
+func TestRunSSHPlanDoesNotRepairNonVMServiceCommand(t *testing.T) {
+	_, plan := testSSHExecutionPlan(t, []string{"ssh", "api"}, catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info:  catchrpc.ServiceInfo{Paths: catchrpc.ServicePaths{Root: "/srv/api"}},
+	})
+	assertNoSSHRepairOnChangedHostKey(t, plan)
+}
+
+func TestRunSSHPlanDoesNotRepairHostLevelSSH(t *testing.T) {
+	_, plan := testSSHExecutionPlanWithServiceInfo(t, []string{"ssh", "--", "uptime"}, func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		t.Fatalf("fetchSSHServiceInfoFunc called for host-level ssh with host=%q service=%q", host, service)
+		return catchrpc.ServiceInfoResponse{}, nil
+	})
+	assertNoSSHRepairOnChangedHostKey(t, plan)
+}
+
+func TestRunSSHPlanDoesNotRetryUnrelatedSSHError(t *testing.T) {
+	_, plan := testSSHExecutionPlan(t, []string{"ssh", "devbox"}, vmSSHRepairServiceInfo())
+	if plan.KnownHostRepair == nil {
+		t.Fatal("KnownHostRepair = nil, want VM repair metadata")
+	}
+
+	runErr := errors.New("ssh failed")
+	runs := 0
+	stubRunSSHCommand(t, func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+		runs++
+		_, _ = io.WriteString(stderr, "ssh: connect to host 192.168.100.12 port 22: Connection refused\n")
+		return runErr
+	})
+	removeCalled := false
+	stubRemoveSSHKnownHost(t, func(ctx context.Context, alias, knownHosts string) error {
+		removeCalled = true
+		return nil
+	})
+
+	err := runSSHPlan(context.Background(), plan, nil, io.Discard, io.Discard)
+	if !errors.Is(err, runErr) {
+		t.Fatalf("runSSHPlan error = %v, want %v", err, runErr)
+	}
+	if runs != 1 {
+		t.Fatalf("ssh runs = %d, want 1", runs)
+	}
+	if removeCalled {
+		t.Fatal("remove called for unrelated SSH error")
+	}
+}
+
+func TestRunSSHPlanReturnsRemovalErrorWithoutRetry(t *testing.T) {
+	home, plan := testSSHExecutionPlan(t, []string{"ssh", "devbox"}, vmSSHRepairServiceInfo())
+	removeErr := errors.New("remove failed")
+	runs := 0
+	stubRunSSHCommand(t, func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+		runs++
+		_, _ = io.WriteString(stderr, changedHostKeySSHOutput(filepath.Join(home, ".yeet", "known_hosts")))
+		return errors.New("first ssh failed")
+	})
+	stubRemoveSSHKnownHost(t, func(ctx context.Context, alias, knownHosts string) error {
+		return removeErr
+	})
+
+	err := runSSHPlan(context.Background(), plan, nil, io.Discard, io.Discard)
+	if !errors.Is(err, removeErr) {
+		t.Fatalf("runSSHPlan error = %v, want %v", err, removeErr)
+	}
+	if runs != 1 {
+		t.Fatalf("ssh runs = %d, want 1", runs)
+	}
+}
+
+func TestRunSSHPlanReturnsRetryError(t *testing.T) {
+	home, plan := testSSHExecutionPlan(t, []string{"ssh", "devbox"}, vmSSHRepairServiceInfo())
+	retryErr := errors.New("retry failed")
+	runs := 0
+	stubRunSSHCommand(t, func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+		runs++
+		if runs == 1 {
+			_, _ = io.WriteString(stderr, changedHostKeySSHOutput(filepath.Join(home, ".yeet", "known_hosts")))
+			return errors.New("first ssh failed")
+		}
+		return retryErr
+	})
+	removals := 0
+	stubRemoveSSHKnownHost(t, func(ctx context.Context, alias, knownHosts string) error {
+		removals++
+		return nil
+	})
+
+	err := runSSHPlan(context.Background(), plan, nil, io.Discard, io.Discard)
+	if !errors.Is(err, retryErr) {
+		t.Fatalf("runSSHPlan error = %v, want %v", err, retryErr)
+	}
+	if runs != 2 {
+		t.Fatalf("ssh runs = %d, want 2", runs)
+	}
+	if removals != 1 {
+		t.Fatalf("removals = %d, want 1", removals)
+	}
+}
+
 func sshOptionsContainValue(options []string, value string) bool {
 	for i, opt := range options {
 		if opt == "-o" && i+1 < len(options) && options[i+1] == value {
@@ -654,4 +822,139 @@ func TestHasSSHUserOption(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testSSHExecutionPlan(t *testing.T, args []string, serviceInfo catchrpc.ServiceInfoResponse) (string, sshExecutionPlan) {
+	t.Helper()
+	return testSSHExecutionPlanWithServiceInfo(t, args, func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return serviceInfo, nil
+	})
+}
+
+func testSSHExecutionPlanWithServiceInfo(
+	t *testing.T,
+	args []string,
+	serviceInfoFn func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error),
+) (string, sshExecutionPlan) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	sshDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sshDir, "ssh"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatalf("write fake ssh: %v", err)
+	}
+	t.Setenv("PATH", sshDir)
+
+	oldPrefs := loadedPrefs
+	oldServiceOverride := serviceOverride
+	oldHostOverride := hostOverride
+	oldHostOverrideSet := hostOverrideSet
+	loadedPrefs = prefs{DefaultHost: "yeet-lab"}
+	serviceOverride = ""
+	resetHostOverride()
+	t.Cleanup(func() {
+		loadedPrefs = oldPrefs
+		serviceOverride = oldServiceOverride
+		hostOverride = oldHostOverride
+		hostOverrideSet = oldHostOverrideSet
+	})
+
+	oldCwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get cwd: %v", err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldCwd); err != nil {
+			t.Errorf("restore cwd: %v", err)
+		}
+	})
+
+	oldFetchServerInfo := fetchSSHServerInfoFunc
+	oldFetchServiceInfo := fetchSSHServiceInfoFunc
+	fetchSSHServerInfoFunc = func(ctx context.Context, host string) (serverInfo, error) {
+		if host != "yeet-lab" {
+			t.Fatalf("fetchSSHServerInfoFunc host = %q, want yeet-lab", host)
+		}
+		return serverInfo{InstallUser: "root"}, nil
+	}
+	fetchSSHServiceInfoFunc = serviceInfoFn
+	t.Cleanup(func() {
+		fetchSSHServerInfoFunc = oldFetchServerInfo
+		fetchSSHServiceInfoFunc = oldFetchServiceInfo
+	})
+
+	plan, err := sshExecutionPlanForArgs(context.Background(), args)
+	if err != nil {
+		t.Fatalf("sshExecutionPlanForArgs: %v", err)
+	}
+	return home, plan
+}
+
+func stubRunSSHCommand(t *testing.T, fn sshCommandRunner) {
+	t.Helper()
+	old := runSSHCommandFunc
+	runSSHCommandFunc = fn
+	t.Cleanup(func() {
+		runSSHCommandFunc = old
+	})
+}
+
+func stubRemoveSSHKnownHost(t *testing.T, fn sshKnownHostRemover) {
+	t.Helper()
+	old := removeSSHKnownHostFunc
+	removeSSHKnownHostFunc = fn
+	t.Cleanup(func() {
+		removeSSHKnownHostFunc = old
+	})
+}
+
+func vmSSHRepairServiceInfo() catchrpc.ServiceInfoResponse {
+	return catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info: catchrpc.ServiceInfo{
+			ServiceType: serviceTypeVM,
+			Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+			VM: &catchrpc.ServiceVM{
+				SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+			},
+		},
+	}
+}
+
+func assertNoSSHRepairOnChangedHostKey(t *testing.T, plan sshExecutionPlan) {
+	t.Helper()
+	if plan.KnownHostRepair != nil {
+		t.Fatalf("KnownHostRepair = %#v, want nil", plan.KnownHostRepair)
+	}
+	runErr := errors.New("ssh failed")
+	runs := 0
+	stubRunSSHCommand(t, func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+		runs++
+		_, _ = io.WriteString(stderr, changedHostKeySSHOutput("/tmp/known_hosts"))
+		return runErr
+	})
+	stubRemoveSSHKnownHost(t, func(ctx context.Context, alias, knownHosts string) error {
+		t.Fatalf("removeSSHKnownHostFunc called with alias=%q knownHosts=%q", alias, knownHosts)
+		return nil
+	})
+
+	err := runSSHPlan(context.Background(), plan, nil, io.Discard, io.Discard)
+	if !errors.Is(err, runErr) {
+		t.Fatalf("runSSHPlan error = %v, want %v", err, runErr)
+	}
+	if runs != 1 {
+		t.Fatalf("ssh runs = %d, want 1", runs)
+	}
+}
+
+func changedHostKeySSHOutput(knownHosts string) string {
+	return "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n" +
+		"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n" +
+		"Offending ED25519 key in " + knownHosts + ":1\n" +
+		"Host key verification failed.\n"
 }

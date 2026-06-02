@@ -5,6 +5,7 @@
 package yeet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -23,42 +24,65 @@ type sshInvocation struct {
 	Command []string
 }
 
+type sshExecutionPlan struct {
+	Args            []string
+	KnownHostRepair *sshKnownHostRepair
+}
+
+type sshKnownHostRepair struct {
+	Alias          string
+	KnownHostsFile string
+}
+
+type sshCommandRunner func(context.Context, []string, io.Reader, io.Writer, io.Writer) error
+type sshKnownHostRemover func(context.Context, string, string) error
+
+var (
+	runSSHCommandFunc       sshCommandRunner    = runSSHCommand
+	removeSSHKnownHostFunc  sshKnownHostRemover = removeSSHKnownHost
+	fetchSSHServerInfoFunc                      = fetchSSHServerInfo
+	fetchSSHServiceInfoFunc                     = fetchSSHServiceInfo
+)
+
 func HandleSSH(ctx context.Context, args []string) error {
-	sshArgs, err := sshCommandArgs(ctx, args)
+	plan, err := sshExecutionPlanForArgs(ctx, args)
 	if err != nil {
 		return err
 	}
-	return runSSHCommand(ctx, sshArgs, os.Stdin, os.Stdout, os.Stderr)
+	return runSSHPlan(ctx, plan, os.Stdin, os.Stdout, os.Stderr)
 }
 
-func sshCommandArgs(ctx context.Context, args []string) ([]string, error) {
+func sshExecutionPlanForArgs(ctx context.Context, args []string) (sshExecutionPlan, error) {
 	if err := ensureSSHCLI(); err != nil {
-		return nil, err
+		return sshExecutionPlan{}, err
 	}
-	host, info, inv, err := resolvedSSHInvocation(ctx, args)
+	host, info, inv, repair, err := resolvedSSHInvocation(ctx, args)
 	if err != nil {
-		return nil, err
+		return sshExecutionPlan{}, err
 	}
-	return sshArgsFromInvocation(host, info, inv), nil
+	return sshExecutionPlan{
+		Args:            sshArgsFromInvocation(host, info, inv),
+		KnownHostRepair: repair,
+	}, nil
 }
 
-func resolvedSSHInvocation(ctx context.Context, args []string) (string, serverInfo, sshInvocation, error) {
+func resolvedSSHInvocation(ctx context.Context, args []string) (string, serverInfo, sshInvocation, *sshKnownHostRepair, error) {
 	inv, err := sshInvocationFromArgs(args)
 	if err != nil {
-		return "", serverInfo{}, sshInvocation{}, err
+		return "", serverInfo{}, sshInvocation{}, nil, err
 	}
 	host, info, err := sshHostInfo(ctx, inv.Service)
 	if err != nil {
-		return "", serverInfo{}, sshInvocation{}, err
+		return "", serverInfo{}, sshInvocation{}, nil, err
 	}
-	inv, err = withServiceShellCommand(ctx, host, info, inv)
+	inv, repair, err := withServiceShellCommand(ctx, host, info, inv)
 	if err != nil {
-		return "", serverInfo{}, sshInvocation{}, err
+		return "", serverInfo{}, sshInvocation{}, nil, err
 	}
 	if err := ensureVMSSHKnownHostsDir(inv.Options); err != nil {
-		return "", serverInfo{}, sshInvocation{}, err
+		return "", serverInfo{}, sshInvocation{}, nil, err
 	}
-	return host, info, inv, nil
+	return host, info, inv, repair, nil
 }
 
 func ensureSSHCLI() error {
@@ -95,7 +119,7 @@ func sshHostInfo(ctx context.Context, service string) (string, serverInfo, error
 	if strings.TrimSpace(host) == "" {
 		return "", serverInfo{}, fmt.Errorf("no host configured")
 	}
-	info, err := fetchSSHServerInfo(ctx, host)
+	info, err := fetchSSHServerInfoFunc(ctx, host)
 	if err != nil {
 		return "", serverInfo{}, err
 	}
@@ -108,17 +132,17 @@ func fetchSSHServerInfo(ctx context.Context, host string) (serverInfo, error) {
 	return info, err
 }
 
-func withServiceShellCommand(ctx context.Context, host string, info serverInfo, inv sshInvocation) (sshInvocation, error) {
+func withServiceShellCommand(ctx context.Context, host string, info serverInfo, inv sshInvocation) (sshInvocation, *sshKnownHostRepair, error) {
 	if inv.Service == "" {
-		return inv, nil
+		return inv, nil, nil
 	}
-	command, options, err := serviceShellCommand(ctx, host, inv.Service, info, inv.Command, inv.Options)
+	command, options, repair, err := serviceShellCommand(ctx, host, inv.Service, info, inv.Command, inv.Options)
 	if err != nil {
-		return sshInvocation{}, err
+		return sshInvocation{}, nil, err
 	}
 	inv.Command = command
 	inv.Options = options
-	return inv, nil
+	return inv, repair, nil
 }
 
 func runSSHCommand(ctx context.Context, sshArgs []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -127,6 +151,57 @@ func runSSHCommand(ctx context.Context, sshArgs []string, stdin io.Reader, stdou
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	return cmd.Run()
+}
+
+func runSSHPlan(ctx context.Context, plan sshExecutionPlan, stdin io.Reader, stdout, stderr io.Writer) error {
+	if !plan.canRepairKnownHost() {
+		return runSSHCommandFunc(ctx, plan.Args, stdin, stdout, stderr)
+	}
+
+	var stderrBuf bytes.Buffer
+	firstErr := runSSHCommandFunc(ctx, plan.Args, stdin, stdout, io.MultiWriter(writerOrDiscard(stderr), &stderrBuf))
+	if firstErr == nil {
+		return nil
+	}
+	if !looksLikeSSHChangedHostKeyError(stderrBuf.String()) {
+		return firstErr
+	}
+	if err := removeSSHKnownHostFunc(ctx, plan.KnownHostRepair.Alias, plan.KnownHostRepair.KnownHostsFile); err != nil {
+		return err
+	}
+	return runSSHCommandFunc(ctx, plan.Args, stdin, stdout, stderr)
+}
+
+func (p sshExecutionPlan) canRepairKnownHost() bool {
+	return p.KnownHostRepair != nil &&
+		strings.TrimSpace(p.KnownHostRepair.Alias) != "" &&
+		strings.TrimSpace(p.KnownHostRepair.KnownHostsFile) != ""
+}
+
+func writerOrDiscard(w io.Writer) io.Writer {
+	if w == nil {
+		return io.Discard
+	}
+	return w
+}
+
+func removeSSHKnownHost(ctx context.Context, alias, knownHosts string) error {
+	cmd := exec.CommandContext(ctx, "ssh-keygen", "-R", alias, "-f", knownHosts)
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	if msg := strings.TrimSpace(string(output)); msg != "" {
+		return fmt.Errorf("remove stale VM SSH host key %q from %s: %w: %s", alias, knownHosts, err, msg)
+	}
+	return fmt.Errorf("remove stale VM SSH host key %q from %s: %w", alias, knownHosts, err)
+}
+
+func looksLikeSSHChangedHostKeyError(output string) bool {
+	output = strings.ToLower(output)
+	return strings.Contains(output, "remote host identification has changed") ||
+		(strings.Contains(output, "offending") && strings.Contains(output, "key in")) ||
+		strings.Contains(output, "host key verification failed")
 }
 
 func trimSSHCommandName(args []string) []string {
@@ -244,13 +319,13 @@ func resolveSSHHostFromProject(host, service string) (string, error) {
 	return resolved, nil
 }
 
-func serviceShellCommand(ctx context.Context, host, service string, info serverInfo, command []string, options []string) ([]string, []string, error) {
+func serviceShellCommand(ctx context.Context, host, service string, info serverInfo, command []string, options []string) ([]string, []string, *sshKnownHostRepair, error) {
 	service = baseSSHServiceName(service)
-	resp, err := fetchSSHServiceInfo(ctx, host, service)
+	resp, err := fetchSSHServiceInfoFunc(ctx, host, service)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return serviceShellCommandFromResponse(host, service, info, resp, command, options)
+	return serviceShellCommandPlanFromResponse(host, service, info, resp, command, options)
 }
 
 func baseSSHServiceName(service string) string {
@@ -266,34 +341,56 @@ func fetchSSHServiceInfo(ctx context.Context, host, service string) (catchrpc.Se
 }
 
 func serviceShellCommandFromResponse(host, service string, info serverInfo, resp catchrpc.ServiceInfoResponse, command []string, options []string) ([]string, []string, error) {
+	command, options, _, err := serviceShellCommandPlanFromResponse(host, service, info, resp, command, options)
+	return command, options, err
+}
+
+func serviceShellCommandPlanFromResponse(host, service string, info serverInfo, resp catchrpc.ServiceInfoResponse, command []string, options []string) ([]string, []string, *sshKnownHostRepair, error) {
 	service = baseSSHServiceName(service)
 	if !resp.Found {
-		return nil, nil, serviceNotFoundShellError(service, resp.Message)
+		return nil, nil, nil, serviceNotFoundShellError(service, resp.Message)
 	}
 	if resp.Info.ServiceType == serviceTypeVM {
-		vmOptions, err := buildVMSSHOptions(host, info, service, resp, options)
+		vmPlan, err := buildVMSSHOptionsPlan(host, info, service, resp, options)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return command, vmOptions, nil
+		return command, vmPlan.Options, vmPlan.KnownHostRepair, nil
 	}
 	serviceDir, err := serviceDataDir(service, info, resp)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	command, options = buildServiceSSHCommand(serviceDir, command, options)
-	return command, options, nil
+	return command, options, nil, nil
 }
 
-func buildVMSSHOptions(proxyHost string, info serverInfo, service string, resp catchrpc.ServiceInfoResponse, options []string) ([]string, error) {
+type vmSSHOptionsPlan struct {
+	Options         []string
+	KnownHostRepair *sshKnownHostRepair
+}
+
+func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, resp catchrpc.ServiceInfoResponse, options []string) (vmSSHOptionsPlan, error) {
 	out := append([]string{}, options...)
 	target := vmSSHTarget(resp)
 	if target.Host == "" && !hasSSHHostNameOption(out) {
-		return nil, fmt.Errorf("VM %q has no SSH address yet; use `yeet vm console %s`", service, service)
+		return vmSSHOptionsPlan{}, fmt.Errorf("VM %q has no SSH address yet; use `yeet vm console %s`", service, service)
 	}
+	knownHosts := vmSSHKnownHostsFile()
+	addYeetKnownHosts := knownHosts != "" && !hasSSHUserKnownHostsFileOption(out)
+	alias := vmSSHHostKeyAlias(service, proxyHost)
+	addGeneratedAlias := target.Proxy && !hasSSHHostKeyAliasOption(out)
+
 	out = appendVMSSHBaseOptions(out, target)
 	out = appendVMSSHProxyOptions(out, target, service, proxyHost, info)
-	return out, nil
+	plan := vmSSHOptionsPlan{Options: out}
+	if addYeetKnownHosts && addGeneratedAlias && knownHosts == vmSSHKnownHostsFile() && alias == vmSSHHostKeyAlias(service, proxyHost) {
+		plan.KnownHostRepair = &sshKnownHostRepair{
+			Alias:          alias,
+			KnownHostsFile: knownHosts,
+		}
+	}
+	return plan, nil
 }
 
 func appendVMSSHBaseOptions(options []string, target vmSSHTargetInfo) []string {
