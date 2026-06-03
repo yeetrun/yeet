@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -376,6 +377,82 @@ func TestRunVMRestartFlagControlsSystemctlRestart(t *testing.T) {
 	}
 }
 
+func TestRunVMWaitsForGuestReadinessBeforeNextCommands(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var out bytes.Buffer
+	execer.rw = &out
+	var captured bool
+	var waited bool
+	vmProvisionGuestReadyBoundaryFunc = func(ctx context.Context, service string) (vmGuestReadyBoundary, error) {
+		if service != "devbox" {
+			t.Fatalf("boundary service = %q, want devbox", service)
+		}
+		captured = true
+		return vmGuestReadyBoundary{Cursor: "s/abc"}, nil
+	}
+	vmProvisionGuestReadyWaitFunc = func(ctx context.Context, service string, network vmNetworkPlan, boundary vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+		waited = true
+		if !captured {
+			t.Fatal("wait called before boundary capture")
+		}
+		if boundary.Cursor != "s/abc" {
+			t.Fatalf("boundary = %#v, want cursor", boundary)
+		}
+		return vmGuestReadyReport{Interface: "eth0", IP: netip.MustParseAddr("192.168.100.4")}, nil
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: true}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if !captured || !waited {
+		t.Fatalf("captured=%v waited=%v, want both true", captured, waited)
+	}
+	text := out.String()
+	waitIdx := strings.Index(text, "Waiting for guest readiness")
+	runIdx := strings.Index(text, "VM devbox is running")
+	if waitIdx < 0 || runIdx < 0 || waitIdx > runIdx {
+		t.Fatalf("output order wrong:\n%s", text)
+	}
+}
+
+func TestRunVMSkipsGuestReadinessWhenRestartFalse(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	vmProvisionGuestReadyBoundaryFunc = func(context.Context, string) (vmGuestReadyBoundary, error) {
+		t.Fatal("boundary should not be captured when restart=false")
+		return vmGuestReadyBoundary{}, nil
+	}
+	vmProvisionGuestReadyWaitFunc = func(context.Context, string, vmNetworkPlan, vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+		t.Fatal("readiness should not be waited when restart=false")
+		return vmGuestReadyReport{}, nil
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: false}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+}
+
+func TestRunVMGuestReadinessFailureKeepsCommittedVM(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	vmProvisionGuestReadyBoundaryFunc = func(context.Context, string) (vmGuestReadyBoundary, error) {
+		return vmGuestReadyBoundary{}, nil
+	}
+	vmProvisionGuestReadyWaitFunc = func(context.Context, string, vmNetworkPlan, vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+		return vmGuestReadyReport{}, errors.New("guest readiness timeout")
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc", Restart: true}, vmUbuntu2604Payload)
+	if err == nil || !strings.Contains(err.Error(), "guest readiness timeout") {
+		t.Fatalf("runVM error = %v, want guest readiness timeout", err)
+	}
+	svc := getTestService(t, server, "devbox")
+	if svc.VM == nil || svc.VM.SetupState != "ready" {
+		t.Fatalf("VM after readiness failure = %#v, want committed ready VM for console recovery", svc.VM)
+	}
+}
+
 func TestRunVMKeepsReadyWhenRestartFailsAfterCommit(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
@@ -734,6 +811,8 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	oldSystemdDir := vmProvisionSystemdDir
 	oldSystemctl := vmProvisionSystemctlFunc
 	oldPrepareRootFS := prepareVMRootFSFunc
+	oldGuestReadyBoundary := vmProvisionGuestReadyBoundaryFunc
+	oldGuestReadyWait := vmProvisionGuestReadyWaitFunc
 	t.Cleanup(func() {
 		vmProvisionHostProfileFunc = oldHostProfile
 		vmImageInspectFunc = oldImageInspect
@@ -745,6 +824,8 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 		vmProvisionSystemdDir = oldSystemdDir
 		vmProvisionSystemctlFunc = oldSystemctl
 		prepareVMRootFSFunc = oldPrepareRootFS
+		vmProvisionGuestReadyBoundaryFunc = oldGuestReadyBoundary
+		vmProvisionGuestReadyWaitFunc = oldGuestReadyWait
 	})
 	vmProvisionHostProfileFunc = func(_ *ttyExecer, resolved resolvedServiceRoot, runningVMBytes int64) (vmHostProfile, error) {
 		if resolved.Root != serviceRoot {
@@ -786,6 +867,12 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	vmProvisionSystemctlFunc = func(args ...string) error {
 		systemctlCalls = append(systemctlCalls, append([]string(nil), args...))
 		return nil
+	}
+	vmProvisionGuestReadyBoundaryFunc = func(context.Context, string) (vmGuestReadyBoundary, error) {
+		return vmGuestReadyBoundary{}, nil
+	}
+	vmProvisionGuestReadyWaitFunc = func(context.Context, string, vmNetworkPlan, vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+		return vmGuestReadyReport{}, nil
 	}
 	return execer, serviceRoot, systemdDir, &systemctlCalls
 }
