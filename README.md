@@ -195,6 +195,10 @@ yeet ssh devbox
 yeet rm --clean-data devbox
 ```
 
+When `yeet run` starts a VM, it waits for the guest to report SSH-era readiness
+and an IPv4 address before printing the next `yeet ssh` command. If the guest
+does not report readiness, use `yeet vm console <svc>` for boot diagnostics.
+
 VM image bundles are cached on each catch host. `yeet vm images` shows whether
 the cached image is current, stale, or missing; `yeet vm images update`
 refreshes the host file cache used for future VM creates. A missing image is
