@@ -16,10 +16,11 @@ func TestParseVMGuestIPReports(t *testing.T) {
 	got := parseVMGuestIPReports([]byte(`
 guest-ready
 yeet-ip eth0 10.0.4.123
+yeet-ready eth0 10.0.4.178
 yeet-ip eth1 192.168.100.12
 `))
-	if got["eth0"] != "10.0.4.123" || got["eth1"] != "192.168.100.12" {
-		t.Fatalf("reports = %#v, want eth0 and eth1 IPs", got)
+	if got["eth0"] != "10.0.4.178" || got["eth1"] != "192.168.100.12" {
+		t.Fatalf("reports = %#v, want eth0 ready IP and eth1 IP", got)
 	}
 }
 

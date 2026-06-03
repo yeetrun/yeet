@@ -443,9 +443,9 @@ func writeVMGuestReadyUnit(root string) error {
 }
 
 const vmGuestReadyService = `[Unit]
-Description=yeet guest ready marker
-After=network.target ssh.service serial-getty@ttyS0.service
-Wants=network.target ssh.service serial-getty@ttyS0.service
+Description=yeet-ready guest marker
+After=network-online.target ssh.service serial-getty@ttyS0.service
+Wants=network-online.target ssh.service serial-getty@ttyS0.service
 
 [Service]
 Type=oneshot
@@ -457,22 +457,24 @@ WantedBy=multi-user.target
 `
 
 const vmGuestReadyScript = `#!/bin/sh
-echo guest-ready >/dev/ttyS0
-command -v logger >/dev/null && logger guest-ready || true
-(
-	seen=""
-	i=0
-	while [ "$i" -lt 60 ]; do
-		report="$(ip -o -4 addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); print "yeet-ip " $2 " " a[1] }')"
-		if [ -n "$report" ] && [ "$report" != "$seen" ]; then
-			printf '%s\n' "$report" >/dev/ttyS0
-			seen="$report"
-		fi
-		i=$((i + 1))
-		sleep 1
-	done
-) &
-exit 0
+i=0
+while [ "$i" -lt 60 ]; do
+	report="$(ip -o -4 addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); print $2 " " a[1] }')"
+	if [ -n "$report" ]; then
+		printf '%s\n' "$report" | while read -r iface ip; do
+			printf 'yeet-ip %s %s\n' "$iface" "$ip" >/dev/ttyS0
+		done
+		first="$(printf '%s\n' "$report" | head -n 1)"
+		set -- $first
+		printf 'yeet-ready %s %s\n' "$1" "$2" >/dev/ttyS0
+		command -v logger >/dev/null && logger "yeet-ready $1 $2" || true
+		exit 0
+	fi
+	i=$((i + 1))
+	sleep 1
+done
+echo yeet-ready-timeout >/dev/ttyS0
+exit 1
 `
 
 func writeVMGuestSerialAutologin(root, user string) error {

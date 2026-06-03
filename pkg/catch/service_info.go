@@ -381,7 +381,7 @@ func parseVMGuestIPReports(raw []byte) map[string]string {
 	out := map[string]string{}
 	for _, line := range strings.Split(string(raw), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 3 || fields[0] != "yeet-ip" {
+		if len(fields) != 3 || (fields[0] != "yeet-ip" && fields[0] != "yeet-ready") {
 			continue
 		}
 		if _, err := netip.ParseAddr(fields[2]); err != nil {
