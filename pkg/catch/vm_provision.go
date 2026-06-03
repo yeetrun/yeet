@@ -20,13 +20,15 @@ import (
 )
 
 var (
-	vmProvisionHostProfileFunc  func(*ttyExecer, resolvedServiceRoot, int64) (vmHostProfile, error)
-	vmProvisionDiskRunner       vmCommandRunner
-	vmProvisionNetworkRunner    vmNetworkCommandRunner
-	vmProvisionMetadataInjector func(context.Context, string, vmMetadataConfig) error
-	vmProvisionSSHKeyFunc       func() (string, error)
-	vmProvisionSystemdDir       string
-	vmProvisionSystemctlFunc    func(args ...string) error
+	vmProvisionHostProfileFunc        func(*ttyExecer, resolvedServiceRoot, int64) (vmHostProfile, error)
+	vmProvisionDiskRunner             vmCommandRunner
+	vmProvisionNetworkRunner          vmNetworkCommandRunner
+	vmProvisionMetadataInjector       func(context.Context, string, vmMetadataConfig) error
+	vmProvisionSSHKeyFunc             func() (string, error)
+	vmProvisionSystemdDir             string
+	vmProvisionSystemctlFunc          func(args ...string) error
+	vmProvisionGuestReadyBoundaryFunc = captureVMGuestReadyBoundary
+	vmProvisionGuestReadyWaitFunc     = waitVMGuestReady
 )
 
 type vmProvisionPlan struct {
@@ -295,13 +297,34 @@ func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan,
 		return err
 	}
 	if restart {
-		e.vmProgressf("Starting VM...\n")
-		if err := e.restartVMSystemdUnit(plan); err != nil {
+		if err := e.startVMAfterProvision(ctx, plan); err != nil {
 			return err
 		}
 	}
 	e.printVMNextCommands(plan, restart)
 	return nil
+}
+
+func (e *ttyExecer) startVMAfterProvision(ctx context.Context, plan vmProvisionPlan) error {
+	captureBoundary := vmProvisionGuestReadyBoundaryFunc
+	if captureBoundary == nil {
+		captureBoundary = captureVMGuestReadyBoundary
+	}
+	readyBoundary, err := captureBoundary(ctx, plan.Service)
+	if err != nil {
+		return err
+	}
+	e.vmProgressf("Starting VM...\n")
+	if err := e.restartVMSystemdUnit(plan); err != nil {
+		return err
+	}
+	e.vmProgressf("Waiting for guest readiness...\n")
+	waitReady := vmProvisionGuestReadyWaitFunc
+	if waitReady == nil {
+		waitReady = waitVMGuestReady
+	}
+	_, err = waitReady(ctx, plan.Service, plan.Network, readyBoundary)
+	return err
 }
 
 func (e *ttyExecer) serviceExists() (bool, error) {
