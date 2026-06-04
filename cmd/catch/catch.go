@@ -50,7 +50,10 @@ var (
 	ipv6Loopback = netip.MustParseAddr("::1")
 )
 
-var runVMConsoleProxy = catch.RunVMConsoleProxy
+var (
+	runVMConsoleProxy = catch.RunVMConsoleProxy
+	exitProcess       = os.Exit
+)
 
 // initTSNet initializes and returns a tsnet.Server if tsnetHost is set.
 func initTSNet(dataDir string) *tsnet.Server {
@@ -168,12 +171,17 @@ func handleVMRunCommand(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	return runVMConsoleProxy(context.Background(), catch.VMConsoleProxyConfig{
+	err := runVMConsoleProxy(context.Background(), catch.VMConsoleProxyConfig{
 		Firecracker:   *firecracker,
 		APISocket:     *apiSock,
 		ConfigFile:    *configFile,
 		ConsoleSocket: *consoleSock,
 	})
+	if errors.Is(err, catch.ErrVMGuestReboot) {
+		exitProcess(catch.VMGuestRebootExitCode)
+		return nil
+	}
+	return err
 }
 
 type catchPaths struct {

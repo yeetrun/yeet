@@ -25,6 +25,7 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 		"ExecStartPre=/bin/rm -f /srv/vms/devbox/run/firecracker.sock /srv/vms/devbox/run/serial.sock",
 		"ExecStart=/srv/catch/run/catch vm-run --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
 		"Restart=on-failure",
+		"RestartForceExitStatus=75",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit missing %q:\n%s", want, unit)

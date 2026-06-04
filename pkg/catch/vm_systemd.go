@@ -28,6 +28,7 @@ WorkingDirectory=%s
 ExecStartPre=/bin/rm -f %s %s
 ExecStart=%s vm-run --firecracker %s --api-sock %s --config-file %s --console-sock %s
 Restart=on-failure
+RestartForceExitStatus=75
 RestartSec=1
 KillMode=mixed
 TimeoutStopSec=10

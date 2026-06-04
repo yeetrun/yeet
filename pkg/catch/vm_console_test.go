@@ -238,6 +238,56 @@ sleep 30
 	}
 }
 
+func TestVMGuestShutdownLogClassifiesShutdownKinds(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []string
+		want  vmGuestStopKind
+	}{
+		{name: "halt", input: []string{"[ 1.0] reboot: System halted\n"}, want: vmGuestStopHalt},
+		{name: "power down", input: []string{"[ 1.0] reboot: Power down\n"}, want: vmGuestStopHalt},
+		{name: "reboot", input: []string{"[ 1.0] reboot: Restarting system\n"}, want: vmGuestStopReboot},
+		{name: "chunked reboot", input: []string{"[ 1.0] reboot: Restart", "ing system\n"}, want: vmGuestStopReboot},
+		{name: "ordinary output", input: []string{"Welcome to Ubuntu\n"}, want: vmGuestStopNone},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var log vmGuestShutdownLog
+			got := vmGuestStopNone
+			for _, chunk := range tt.input {
+				got = log.observe([]byte(chunk))
+			}
+			if got != tt.want {
+				t.Fatalf("shutdown kind = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunVMConsoleProxyReturnsRebootErrorWhenGuestRestarts(t *testing.T) {
+	dir := shortUnixSocketDirForTest(t)
+	fakeFirecracker := filepath.Join(dir, "firecracker")
+	script := `#!/bin/sh
+printf '[ 1.0] reboot: Restarting system\n'
+sleep 30
+`
+	if err := os.WriteFile(fakeFirecracker, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake firecracker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
+		Firecracker:   fakeFirecracker,
+		APISocket:     filepath.Join(dir, "firecracker.sock"),
+		ConfigFile:    filepath.Join(dir, "firecracker.json"),
+		ConsoleSocket: filepath.Join(dir, "serial.sock"),
+	})
+	if !errors.Is(err, ErrVMGuestReboot) {
+		t.Fatalf("RunVMConsoleProxy error = %v, want ErrVMGuestReboot", err)
+	}
+}
+
 func dialUnixSocketForTest(t *testing.T, socketPath string) net.Conn {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
