@@ -6,11 +6,12 @@
 set -euo pipefail
 
 profile="${YEET_VM_IMAGE_PROFILE:-fast}"
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v3}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v4}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
 kernel_version_override="${YEET_VM_KERNEL_VERSION:-}"
+guest_init_path="${YEET_VM_INIT_PATH:-}"
 
 ubuntu_base_url="${UBUNTU_CLOUD_BASE_URL:-https://cloud-images.ubuntu.com/resolute/current}"
 ubuntu_image="${UBUNTU_CLOUD_IMAGE:-resolute-server-cloudimg-amd64.tar.gz}"
@@ -52,6 +53,14 @@ if [ "$profile" = "fast" ]; then
 	fi
 	if [ ! -r "$kernel_path" ]; then
 		echo "YEET_VM_KERNEL_PATH is not readable: $kernel_path" >&2
+		exit 1
+	fi
+	if [ -z "$guest_init_path" ]; then
+		echo "YEET_VM_INIT_PATH is required for the fast profile" >&2
+		exit 1
+	fi
+	if [ ! -x "$guest_init_path" ]; then
+		echo "YEET_VM_INIT_PATH is not executable: $guest_init_path" >&2
 		exit 1
 	fi
 	if [ "$(id -u)" != 0 ]; then
@@ -197,6 +206,16 @@ The fast yeet VM image profile intentionally does not support snap packages.
 Snap support requires a separate image profile with measured kernel,
 filesystem, boot-time, and confinement choices.
 EOF
+	cat >"$root/usr/share/doc/yeet-vm-image/init.md" <<'EOF'
+# Yeet VM Init
+
+Fast yeet VM images boot through `/usr/local/lib/yeet-vm/yeet-init`.
+The init shim performs small pre-systemd setup, reports the first kernel
+configured IPv4 address on the serial console, and then execs systemd as PID 1.
+
+SSH remains managed by systemd through `yeet-sshd.service`; `yeet run` waits for
+the systemd-backed `yeet-guest-ready.service` marker before returning.
+EOF
 }
 
 customize_fast_rootfs() {
@@ -215,6 +234,8 @@ customize_fast_rootfs() {
 	mount --bind /run "$rootfs_mount/run"
 
 	write_fast_rootfs_policy_files "$rootfs_mount"
+	install -d -m 0755 "$rootfs_mount/usr/local/lib/yeet-vm"
+	install -m 0755 "$guest_init_path" "$rootfs_mount/usr/local/lib/yeet-vm/yeet-init"
 	cat >"$rootfs_mount/usr/sbin/policy-rc.d" <<'EOF'
 #!/bin/sh
 exit 101
@@ -224,7 +245,7 @@ EOF
 	chroot "$rootfs_mount" /bin/sh <<'EOF'
 set -e
 export DEBIAN_FRONTEND=noninteractive
-packages="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | awk '/^(linux-image-|linux-modules-|linux-modules-extra-|linux-headers-|linux-generic|linux-virtual|grub-|shim-signed$|initramfs-tools|snapd$|snap-confine$|squashfs-tools$)/ { print }')"
+packages="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | awk '/^(linux-image-|linux-modules-|linux-modules-extra-|linux-headers-|linux-generic|linux-virtual|grub-|shim-signed$|initramfs-tools|snapd$|snap-confine$|squashfs-tools$|cloud-init$|pollinate$|apport$|apport-symptoms$|modemmanager$|udisks2$|multipath-tools$|lvm2$|rsyslog$|ufw$|unattended-upgrades$|open-vm-tools$|open-vm-tools-desktop$|vgauth$)/ { print }')"
 if [ -n "$packages" ]; then
 	apt-get purge -y $packages
 fi
@@ -235,6 +256,29 @@ mkdir -p /etc/systemd/system
 ln -sf /dev/null /etc/systemd/system/snapd.service
 ln -sf /dev/null /etc/systemd/system/snapd.socket
 ln -sf /dev/null /etc/systemd/system/snapd.seeded.service
+rm -rf /etc/netplan
+mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/system/timers.target.wants /etc/systemd/network
+ln -sf /usr/lib/systemd/system/systemd-networkd.service /etc/systemd/system/multi-user.target.wants/systemd-networkd.service
+ln -sf /usr/lib/systemd/system/systemd-resolved.service /etc/systemd/system/multi-user.target.wants/systemd-resolved.service
+ln -sf /usr/lib/systemd/system/multi-user.target /etc/systemd/system/default.target
+for unit in \
+	apt-daily.timer \
+	apt-daily-upgrade.timer \
+	e2scrub_all.timer \
+	fstrim.timer \
+	man-db.timer \
+	motd-news.timer \
+	pollinate.service \
+	cloud-init.service \
+	cloud-config.service \
+	cloud-final.service \
+	NetworkManager.service \
+	NetworkManager-wait-online.service \
+	systemd-networkd-wait-online.service
+do
+	ln -sf /dev/null "/etc/systemd/system/$unit"
+done
+ldconfig
 EOF
 	rm -f "$rootfs_mount/usr/sbin/policy-rc.d"
 	cleanup_rootfs_mount
@@ -275,9 +319,15 @@ source_image_sha="$(sha256sum "$out_dir/rootfs.ext4" | awk '{ print $1 }')"
 build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 snap_support=false
 kernel_policy="yeet-managed"
+guest_init="/usr/local/lib/yeet-vm/yeet-init"
+guest_init_sha=""
+if [ "$profile" = "fast" ]; then
+	guest_init_sha="$(sha256sum "$guest_init_path" | awk '{ print $1 }')"
+fi
 if [ "$profile" = "stock" ]; then
 	snap_support=true
 	kernel_policy="ubuntu-kernel-with-initrd"
+	guest_init=""
 fi
 initrd_manifest_line=""
 initrd_checksum_line=""
@@ -295,6 +345,8 @@ cat >"$out_dir/manifest.json" <<JSON
   "image_profile": "$profile",
   "kernel_policy": "$kernel_policy",
   "snap_support": $snap_support,
+  "guest_init": "$guest_init",
+  "guest_init_sha256": "$guest_init_sha",
   "kernel": "vmlinux",
 $initrd_manifest_line
   "rootfs": "rootfs.ext4.zst",
