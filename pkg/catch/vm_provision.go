@@ -529,11 +529,19 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, resolvedRoot resolved
 		systemdDir = vmSystemdSystemDir
 	}
 
+	fastBoot := vmImageSupportsFastBoot(image.Manifest)
+	bootArgs := vmLegacyKernelBootArgs
+	if fastBoot {
+		bootArgs, err = vmKernelBootArgs(e.sn, networkPlan)
+		if err != nil {
+			return vmProvisionPlan{}, err
+		}
+	}
 	firecrackerConfig, err := renderFirecrackerConfig(firecrackerConfig{
 		BootSource: firecrackerBootSource{
 			KernelImagePath: image.Paths.KernelPath,
 			InitrdPath:      image.Paths.InitrdPath,
-			BootArgs:        vmKernelBootArgs(e.sn, networkPlan),
+			BootArgs:        bootArgs,
 		},
 		Drives: []firecrackerDrive{{
 			DriveID:      "rootfs",
@@ -569,7 +577,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, resolvedRoot resolved
 		DiskPath:               diskPath,
 		Network:                networkPlan,
 		SvcNetwork:             svcNet,
-		Metadata:               vmMetadataConfig{Hostname: e.sn, User: "ubuntu", SSHKey: sshKey, Networks: networkPlan.MetadataNetworks(), HostKeyDir: filepath.Join(resolvedRoot.Root, "metadata", "ssh-host-keys")},
+		Metadata:               vmMetadataConfig{Hostname: e.sn, User: "ubuntu", SSHKey: sshKey, Networks: networkPlan.MetadataNetworks(), FastBoot: fastBoot, HostKeyDir: filepath.Join(resolvedRoot.Root, "metadata", "ssh-host-keys")},
 		FirecrackerConfigPath:  firecrackerPath,
 		FirecrackerConfig:      firecrackerConfig,
 		SystemdUnitStagePath:   filepath.Join(binDir, unitName),

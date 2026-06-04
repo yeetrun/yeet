@@ -26,6 +26,7 @@ type vmMetadataConfig struct {
 	User     string
 	SSHKey   string
 	Networks []vmGuestNetwork
+	FastBoot bool
 
 	HostKeyDir string
 }
@@ -276,7 +277,7 @@ func writeVMGuestMetadataFiles(root string, cfg vmMetadataConfig) error {
 	if err := writeVMGuestSerialAutologin(root, cfg.User); err != nil {
 		return err
 	}
-	if err := writeVMGuestReadyUnit(root); err != nil {
+	if err := writeVMGuestReadyUnit(root, cfg.FastBoot); err != nil {
 		return err
 	}
 	if err := writeVMGuestGrowRootUnit(root); err != nil {
@@ -286,6 +287,30 @@ func writeVMGuestMetadataFiles(root string, cfg vmMetadataConfig) error {
 }
 
 func writeVMGuestBaseFiles(root string, cfg vmMetadataConfig) error {
+	if !cfg.FastBoot {
+		return writeVMGuestLegacyBaseFiles(root, cfg)
+	}
+	return writeVMGuestFastBaseFiles(root, cfg)
+}
+
+func writeVMGuestLegacyBaseFiles(root string, cfg vmMetadataConfig) error {
+	files := []struct {
+		rel  string
+		data []byte
+		mode os.FileMode
+	}{
+		{rel: "etc/hostname", data: []byte(cfg.Hostname + "\n"), mode: 0o644},
+		{rel: "etc/netplan/99-yeet.yaml", data: []byte(renderVMNetworkYAML(cfg.Networks)), mode: 0o644},
+	}
+	for _, file := range files {
+		if err := writeVMGuestFile(root, file.rel, file.data, file.mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeVMGuestFastBaseFiles(root string, cfg vmMetadataConfig) error {
 	if err := writeVMGuestFile(root, "etc/hostname", []byte(cfg.Hostname+"\n"), 0o644); err != nil {
 		return err
 	}
@@ -445,9 +470,18 @@ func writeVMGuestPrivileges(root, user string) error {
 	return writeVMGuestFile(root, "etc/sysctl.d/90-yeet-vm.conf", []byte("net.ipv4.ping_group_range = 0 2147483647\n"), 0o644)
 }
 
-func writeVMGuestReadyUnit(root string) error {
+func writeVMGuestReadyUnit(root string, fastBoot bool) error {
 	if err := writeVMGuestFile(root, "usr/local/lib/yeet-vm/guest-ready", []byte(vmGuestReadyScript), 0o755); err != nil {
 		return err
+	}
+	if !fastBoot {
+		if err := writeVMGuestFile(root, "etc/systemd/system/yeet-guest-ready.service", []byte(vmGuestLegacyReadyService), 0o644); err != nil {
+			return err
+		}
+		if err := writeVMGuestSystemdSymlink(root, "multi-user.target.wants/yeet-guest-ready.service", "../yeet-guest-ready.service"); err != nil {
+			return err
+		}
+		return writeVMGuestSystemdSymlink(root, "multi-user.target.wants/ssh.service", "/usr/lib/systemd/system/ssh.service")
 	}
 	if err := writeVMGuestFile(root, "etc/systemd/system/yeet-sshd.service", []byte(vmGuestSSHDService), 0o644); err != nil {
 		return err
@@ -491,6 +525,20 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 `
 
+const vmGuestLegacyReadyService = `[Unit]
+Description=yeet-ready guest marker
+After=network-online.target ssh.service serial-getty@ttyS0.service
+Wants=network-online.target ssh.service serial-getty@ttyS0.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/yeet-vm/guest-ready
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+`
+
 const vmGuestSSHDService = `[Unit]
 Description=yeet early SSH daemon
 DefaultDependencies=no
@@ -512,32 +560,34 @@ WantedBy=multi-user.target
 `
 
 const vmGuestReadyScript = `#!/bin/sh
+vm_guest_ssh_ready() {
+	ss -H -ltn 'sport = :22' 2>/dev/null | grep -q .
+}
+
+emit_yeet_ready() {
+	report="$1"
+	printf '%s\n' "$report" | while read -r iface ip; do
+		printf 'yeet-ip %s %s\n' "$iface" "$ip" >/dev/ttyS0
+	done
+	first="$(printf '%s\n' "$report" | head -n 1)"
+	set -- $first
+	printf 'yeet-ready %s %s\n' "$1" "$2" >/dev/ttyS0
+	command -v logger >/dev/null && logger "yeet-ready $1 $2" || true
+	exit 0
+}
+
 for _ in $(seq 1 100); do
 	report="$(ip -o -4 addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); print $2 " " a[1] }')"
-	if [ -n "$report" ]; then
-		printf '%s\n' "$report" | while read -r iface ip; do
-			printf 'yeet-ip %s %s\n' "$iface" "$ip" >/dev/ttyS0
-		done
-		first="$(printf '%s\n' "$report" | head -n 1)"
-		set -- $first
-		printf 'yeet-ready %s %s\n' "$1" "$2" >/dev/ttyS0
-		command -v logger >/dev/null && logger "yeet-ready $1 $2" || true
-		exit 0
+	if [ -n "$report" ] && vm_guest_ssh_ready; then
+		emit_yeet_ready "$report"
 	fi
 	sleep 0.05
 done
 i=0
 while [ "$i" -lt 55 ]; do
 	report="$(ip -o -4 addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); print $2 " " a[1] }')"
-	if [ -n "$report" ]; then
-		printf '%s\n' "$report" | while read -r iface ip; do
-			printf 'yeet-ip %s %s\n' "$iface" "$ip" >/dev/ttyS0
-		done
-		first="$(printf '%s\n' "$report" | head -n 1)"
-		set -- $first
-		printf 'yeet-ready %s %s\n' "$1" "$2" >/dev/ttyS0
-		command -v logger >/dev/null && logger "yeet-ready $1 $2" || true
-		exit 0
+	if [ -n "$report" ] && vm_guest_ssh_ready; then
+		emit_yeet_ready "$report"
 	fi
 	i=$((i + 1))
 	sleep 1

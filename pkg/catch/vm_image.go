@@ -41,6 +41,7 @@ type vmImageManifest struct {
 	Architecture        string            `json:"architecture"`
 	ImageProfile        string            `json:"image_profile,omitempty"`
 	KernelPolicy        string            `json:"kernel_policy,omitempty"`
+	GuestInit           string            `json:"guest_init,omitempty"`
 	SnapSupport         *bool             `json:"snap_support,omitempty"`
 	Kernel              string            `json:"kernel"`
 	Initrd              string            `json:"initrd,omitempty"`
@@ -88,6 +89,10 @@ func (a vmImageAsset) DiskRootFSPath() string {
 		return a.PreparedRootFSPath
 	}
 	return a.Paths.RootFSPath
+}
+
+func vmImageSupportsFastBoot(manifest vmImageManifest) bool {
+	return strings.TrimSpace(manifest.GuestInit) == vmGuestInitPath
 }
 
 func resolveVMImagePayload(payload string) (string, error) {
