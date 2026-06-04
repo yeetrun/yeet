@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/yeetrun/yeet/pkg/svc"
 )
@@ -89,6 +90,9 @@ func (r *vmRunner) Disable() error {
 
 func (r *vmRunner) Remove() error {
 	disableErr := r.systemctl("disable", "--now", r.unit())
+	if vmSystemdUnitMissingError(disableErr, r.unit()) {
+		disableErr = nil
+	}
 	removeErr := os.Remove(r.unitPath())
 	if os.IsNotExist(removeErr) {
 		removeErr = nil
@@ -98,6 +102,15 @@ func (r *vmRunner) Remove() error {
 	}
 	reloadErr := r.systemctl("daemon-reload")
 	return errors.Join(disableErr, removeErr, reloadErr)
+}
+
+func vmSystemdUnitMissingError(err error, unit string) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, strings.ToLower(unit)) &&
+		(strings.Contains(message, "does not exist") || strings.Contains(message, "could not be found"))
 }
 
 func (r *vmRunner) Logs(opts *svc.LogOptions) error {

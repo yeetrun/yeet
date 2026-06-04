@@ -347,6 +347,15 @@ func TestNewRemoteExecRequestSkipsLocalSSHKeyForNonVMRun(t *testing.T) {
 	}
 }
 
+func TestNewRemoteExecRequestPropagatesTraceEnv(t *testing.T) {
+	t.Setenv("YEET_TRACE", "1")
+
+	req := newRemoteExecRequest("yeet-lab", "devbox", []string{"run", "vm://ubuntu/26.04"}, nil, false)
+	if !req.Trace {
+		t.Fatal("Trace = false, want true")
+	}
+}
+
 func TestExecRemoteToWritesClientOutputToProvidedWriter(t *testing.T) {
 	restoreExecRemoteGlobals(t)
 	loadedPrefs.DefaultHost = "host-a"

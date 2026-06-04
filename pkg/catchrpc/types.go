@@ -55,6 +55,7 @@ type ExecRequest struct {
 	Rows        int          `json:"rows,omitempty"`
 	Cols        int          `json:"cols,omitempty"`
 	VMSSHKey    string       `json:"vmSshKey,omitempty"`
+	Trace       bool         `json:"trace,omitempty"`
 }
 
 type ExecMessage struct {

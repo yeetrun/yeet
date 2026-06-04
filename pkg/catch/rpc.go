@@ -342,6 +342,7 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
 		payloadName:        req.PayloadName,
 		vmSSHAuthorizedKey: req.VMSSHKey,
 		progress:           req.Progress,
+		trace:              req.Trace,
 		rawRW:              rw,
 		rawCloser:          wsCloser{conn: conn},
 		isPty:              req.TTY,

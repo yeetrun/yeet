@@ -279,6 +279,9 @@ func writeVMGuestMetadataFiles(root string, cfg vmMetadataConfig) error {
 	if err := writeVMGuestReadyUnit(root); err != nil {
 		return err
 	}
+	if err := writeVMGuestGrowRootUnit(root); err != nil {
+		return err
+	}
 	return maskVMGuestSystemdUnit(root, "systemd-networkd-wait-online.service")
 }
 
@@ -442,6 +445,16 @@ func writeVMGuestReadyUnit(root string) error {
 	return writeVMGuestSystemdSymlink(root, "multi-user.target.wants/ssh.service", "/usr/lib/systemd/system/ssh.service")
 }
 
+func writeVMGuestGrowRootUnit(root string) error {
+	if err := writeVMGuestFile(root, "usr/local/lib/yeet-vm/grow-root", []byte(vmGuestGrowRootScript), 0o755); err != nil {
+		return err
+	}
+	if err := writeVMGuestFile(root, "etc/systemd/system/yeet-grow-root.service", []byte(vmGuestGrowRootService), 0o644); err != nil {
+		return err
+	}
+	return writeVMGuestSystemdSymlink(root, "multi-user.target.wants/yeet-grow-root.service", "../yeet-grow-root.service")
+}
+
 const vmGuestReadyService = `[Unit]
 Description=yeet-ready guest marker
 After=network-online.target ssh.service serial-getty@ttyS0.service
@@ -475,6 +488,47 @@ while [ "$i" -lt 60 ]; do
 done
 echo yeet-ready-timeout >/dev/ttyS0
 exit 1
+`
+
+const vmGuestGrowRootService = `[Unit]
+Description=yeet grow root filesystem
+After=yeet-guest-ready.service
+Wants=yeet-guest-ready.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/lib/yeet-vm/grow-root
+Nice=10
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=multi-user.target
+`
+
+const vmGuestGrowRootScript = `#!/bin/sh
+root_source="$(findmnt -n -o SOURCE / 2>/dev/null || true)"
+root_fstype="$(findmnt -n -o FSTYPE / 2>/dev/null || true)"
+
+case "$root_source" in
+	/dev/*) ;;
+	*) exit 0 ;;
+esac
+
+if [ "$root_fstype" != "ext4" ]; then
+	exit 0
+fi
+
+if ! command -v resize2fs >/dev/null 2>&1; then
+	exit 0
+fi
+
+if resize2fs "$root_source"; then
+	command -v logger >/dev/null 2>&1 && logger "yeet-grow-root complete $root_source" || true
+	exit 0
+fi
+
+command -v logger >/dev/null 2>&1 && logger "yeet-grow-root failed $root_source" || true
+exit 0
 `
 
 func writeVMGuestSerialAutologin(root, user string) error {

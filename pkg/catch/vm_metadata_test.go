@@ -235,10 +235,15 @@ func TestWriteVMGuestMetadataFiles(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "network-online.target")
 	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "guest-ready"), "yeet-ready")
 	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "guest-ready"), "ip -o -4 addr show scope global")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-grow-root.service"), "After=yeet-guest-ready.service")
+	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "grow-root"), "resize2fs")
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "serial-getty@ttyS0.service.d", "10-yeet-autologin.conf"), "--autologin ubuntu")
 	assertFileMode(t, filepath.Join(root, "etc", "sudoers.d", "90-yeet-vm-ubuntu"), 0o440)
 	if _, err := os.Lstat(filepath.Join(root, "etc", "systemd", "system", "multi-user.target.wants", "yeet-guest-ready.service")); err != nil {
 		t.Fatalf("guest-ready enable symlink missing: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "etc", "systemd", "system", "multi-user.target.wants", "yeet-grow-root.service")); err != nil {
+		t.Fatalf("grow-root enable symlink missing: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "etc", "systemd", "system", "multi-user.target.wants", "ssh.service")); err != nil {
 		t.Fatalf("ssh.service enable symlink missing: %v", err)

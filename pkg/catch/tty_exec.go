@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -111,6 +112,7 @@ type ttyExecer struct {
 	payloadName        string
 	vmSSHAuthorizedKey string
 	progress           catchrpc.ProgressMode
+	trace              bool
 	rawRW              io.ReadWriter
 	rawCloser          io.Closer
 	isPty              bool
@@ -119,6 +121,7 @@ type ttyExecer struct {
 	// Assigned during run
 	rw             io.ReadWriter // May be a pty
 	bypassPtyInput bool
+	traceStart     time.Time
 
 	// Optional override for tests.
 	serviceRunnerFn            func() (ServiceRunner, error)
@@ -189,6 +192,10 @@ func (e *ttyExecer) runAction(action, step string, fn func() error) error {
 
 func (e *ttyExecer) run() error {
 	e.rw = e.rawRW
+	if e.trace {
+		e.traceStart = time.Now()
+		e.tracef("exec start service=%s args=%s pty=%v", e.sn, strings.Join(e.args, " "), e.isPty)
+	}
 	e.bypassPtyInput = e.shouldBypassPtyInput()
 	ptySession, err := e.startPtySession()
 	if err != nil {

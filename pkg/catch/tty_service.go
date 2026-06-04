@@ -519,14 +519,21 @@ func writeServiceStatusRow(w io.Writer, status ServiceStatusData, component Comp
 }
 
 func (e *ttyExecer) removeCmdFunc(flags cli.RemoveFlags) error {
+	doneValidate := e.traceBlock("remove validate")
 	if err := e.validateServiceRemoval(); err != nil {
+		doneValidate()
 		return err
 	}
+	doneValidate()
+	doneRunnerLookup := e.traceBlock("remove service runner")
 	runner, err := e.serviceRunner()
+	doneRunnerLookup()
 	if err != nil {
 		return e.removeServiceWithoutRunner(flags, err)
 	}
+	doneConfirm := e.traceBlock("remove confirm")
 	ok, err := e.confirmServiceRemoval(flags.Yes)
+	doneConfirm()
 	if err != nil {
 		return err
 	}
@@ -534,7 +541,9 @@ func (e *ttyExecer) removeCmdFunc(flags cli.RemoveFlags) error {
 		return nil
 	}
 
+	doneRunnerRemove := e.traceBlock("remove runner")
 	e.removeRunner(runner)
+	doneRunnerRemove()
 	return e.removeServiceConfig(flags)
 }
 
@@ -550,7 +559,7 @@ func (e *ttyExecer) removeServiceWithoutRunner(flags cli.RemoveFlags, err error)
 		return fmt.Errorf("failed to get service runner: %w", err)
 	}
 	runnerErr := err
-	report, err := e.s.RemoveServiceWithOptions(e.sn, RemoveOptions{CleanData: flags.CleanData})
+	report, err := e.s.RemoveServiceWithOptions(e.sn, RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
 	if err != nil {
 		return fmt.Errorf("failed to cleanup %s %q: %w", e.managedTargetLabel(), e.sn, err)
 	}
@@ -583,7 +592,7 @@ func (e *ttyExecer) removeRunner(runner ServiceRunner) {
 }
 
 func (e *ttyExecer) removeServiceConfig(flags cli.RemoveFlags) error {
-	report, err := e.s.RemoveServiceWithOptions(e.sn, RemoveOptions{CleanData: flags.CleanData})
+	report, err := e.s.RemoveServiceWithOptions(e.sn, RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
 	if err != nil {
 		return fmt.Errorf("failed to cleanup %s %q: %w", e.managedTargetLabel(), e.sn, err)
 	}
