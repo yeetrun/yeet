@@ -1,0 +1,8 @@
+[package]
+name = "yeet-init"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-2-Clause"
+
+[dependencies]
+libc = "0.2"
