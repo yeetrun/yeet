@@ -6,7 +6,7 @@ built without loadable modules, v6 also masks module-load/modprobe units.
 
 ## Goal
 
-Build the next fast Ubuntu VM image as `ubuntu-26.04-amd64-v5` by trimming
+Build the next fast Ubuntu VM image as `ubuntu-26.04-amd64-v6` by trimming
 remaining measured boot work from the v4 image while preserving yeet's
 long-lived Ubuntu VM model: direct kernel boot, `yeet-init`, systemd-managed SSH
 readiness, passwordless sudo for the default user, and normal apt behavior for
@@ -40,14 +40,14 @@ This is an image-build change first:
 - Root repo image scripts and docs under `tools/vm-image/`.
 - Mirrored image-builder repo scripts and workflow defaults under
   `/Users/shayne/code/yeet-vm-images`.
-- Root catch default image version after the v5 image exists and is verified.
+- Root catch default image version after the v6 image exists and is verified.
 - User-facing docs only where they mention the current fast image version or
   boot profile behavior.
 
 No catch RPC, VM readiness, ZFS clone, SSH host-key, or reboot behavior changes
 are planned in this pass.
 
-## v5 Cleanup Set
+## v6 Cleanup Set
 
 ### Purge Packages
 
@@ -107,10 +107,10 @@ change.
 
 ## Versioning
 
-Publish the image as `ubuntu-26.04-amd64-v5`.
+Publish the image as `ubuntu-26.04-amd64-v6`.
 
-After the v5 GitHub image workflow succeeds and live `pve1` validation passes,
-change the catch default Ubuntu VM image version from v4 to v5. This avoids
+After the v6 GitHub image workflow succeeds and live `pve1` validation passes,
+change the catch default Ubuntu VM image version from v4 to v6. This avoids
 pointing users at an unpublished image.
 
 ## Validation
@@ -125,10 +125,10 @@ Local checks:
 
 Image workflow checks:
 
-- Build v5 from a pushed yeet commit.
+- Build v6 from a pushed yeet commit.
 - Verify manifest image version, no initrd, guest init metadata, kernel IP_PNP,
   manifest checksums, and embedded `yeet-init`.
-- Add rootfs verification for the v5 cleanup set where cheap:
+- Add rootfs verification for the cleanup set where cheap:
   - removed package status for `netplan.io`, `networkd-dispatcher`, `chrony`,
     and `sysstat`;
   - masks for representative units such as `ldconfig.service`,
@@ -138,8 +138,8 @@ Image workflow checks:
 Live `pve1` checks:
 
 - Build local yeet and install catch.
-- Create a fresh v5 ZFS/LAN VM with `--disk=128g`.
-- Confirm `yeet run` uses `ubuntu-26.04-amd64-v5`.
+- Create a fresh v6 ZFS/LAN VM with `--disk=128g`.
+- Confirm `yeet run` uses `ubuntu-26.04-amd64-v6`.
 - Confirm immediate `yeet ssh <svc> -- true`.
 - Capture `systemd-analyze`, blame, dmesg tail, and guest service state.
 - Verify guest reboot recovery.
@@ -155,6 +155,6 @@ Live `pve1` checks:
 - The warmed ZFS create path stays near the v4 result unless guest readiness is
   the only material change.
 
-If v5 does not materially improve userspace, keep the robust cleanup only if it
+If v6 does not materially improve userspace, keep the robust cleanup only if it
 removes measurable dead weight without hurting behavior; otherwise revert the
 questionable part and preserve the measurement.
