@@ -6,7 +6,7 @@
 set -euo pipefail
 
 profile="${YEET_VM_IMAGE_PROFILE:-fast}"
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v4}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v5}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
@@ -245,7 +245,7 @@ EOF
 	chroot "$rootfs_mount" /bin/sh <<'EOF'
 set -e
 export DEBIAN_FRONTEND=noninteractive
-packages="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | awk '/^(linux-image-|linux-modules-|linux-modules-extra-|linux-headers-|linux-generic|linux-virtual|grub-|shim-signed$|initramfs-tools|snapd$|snap-confine$|squashfs-tools$|cloud-init$|pollinate$|apport$|apport-symptoms$|modemmanager$|udisks2$|multipath-tools$|lvm2$|rsyslog$|ufw$|unattended-upgrades$|open-vm-tools$|open-vm-tools-desktop$|vgauth$)/ { print }')"
+packages="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | awk '/^(linux-image-|linux-modules-|linux-modules-extra-|linux-headers-|linux-generic|linux-virtual|grub-|shim-signed$|initramfs-tools|snapd$|snap-confine$|squashfs-tools$|cloud-init$|pollinate$|apport$|apport-symptoms$|modemmanager$|udisks2$|multipath-tools$|lvm2$|rsyslog$|ufw$|unattended-upgrades$|open-vm-tools$|open-vm-tools-desktop$|vgauth$|netplan.io$|networkd-dispatcher$|sysstat$|chrony$|plymouth$|plymouth-|keyboard-configuration$|console-setup$)/ { print }')"
 if [ -n "$packages" ]; then
 	apt-get purge -y $packages
 fi
@@ -260,11 +260,15 @@ rm -rf /etc/netplan
 mkdir -p /etc/systemd/system/multi-user.target.wants /etc/systemd/system/timers.target.wants /etc/systemd/network
 ln -sf /usr/lib/systemd/system/systemd-networkd.service /etc/systemd/system/multi-user.target.wants/systemd-networkd.service
 ln -sf /usr/lib/systemd/system/systemd-resolved.service /etc/systemd/system/multi-user.target.wants/systemd-resolved.service
+if [ -e /usr/lib/systemd/system/systemd-timesyncd.service ]; then
+	ln -sf /usr/lib/systemd/system/systemd-timesyncd.service /etc/systemd/system/multi-user.target.wants/systemd-timesyncd.service
+fi
 ln -sf /usr/lib/systemd/system/multi-user.target /etc/systemd/system/default.target
 for unit in \
 	apt-daily.timer \
 	apt-daily-upgrade.timer \
 	e2scrub_all.timer \
+	e2scrub_reap.service \
 	fstrim.timer \
 	man-db.timer \
 	motd-news.timer \
@@ -274,7 +278,26 @@ for unit in \
 	cloud-final.service \
 	NetworkManager.service \
 	NetworkManager-wait-online.service \
-	systemd-networkd-wait-online.service
+	systemd-networkd-wait-online.service \
+	netplan-configure.service \
+	networkd-dispatcher.service \
+	sysstat.service \
+	sysstat-collect.timer \
+	sysstat-summary.timer \
+	chrony.service \
+	ldconfig.service \
+	keyboard-setup.service \
+	console-setup.service \
+	plymouth-start.service \
+	plymouth-read-write.service \
+	plymouth-quit.service \
+	plymouth-quit-wait.service \
+	plymouth-halt.service \
+	plymouth-kexec.service \
+	plymouth-poweroff.service \
+	plymouth-reboot.service \
+	plymouth-switch-root.service \
+	plymouth-switch-root-initramfs.service
 do
 	ln -sf /dev/null "/etc/systemd/system/$unit"
 done
