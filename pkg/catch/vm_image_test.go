@@ -140,7 +140,7 @@ func TestVMImageCachePreservesImagePolicyMetadata(t *testing.T) {
 		case "/manifest.json":
 			_, _ = w.Write([]byte(`{
 				"name":"yeet-ubuntu-26.04",
-				"version":"ubuntu-26.04-amd64-v3",
+				"version":"ubuntu-26.04-amd64-v4",
 				"architecture":"x86_64",
 				"image_profile":"fast",
 				"kernel_policy":"yeet-managed",
@@ -197,6 +197,12 @@ func TestVMImageCachePreservesImagePolicyMetadata(t *testing.T) {
 	}
 	if manifest.Initrd != "" || image.InitrdPath != "" {
 		t.Fatalf("initrd = manifest %q path %q, want omitted", manifest.Initrd, image.InitrdPath)
+	}
+}
+
+func TestDefaultVMImageVersionUsesLatestFastBundle(t *testing.T) {
+	if defaultVMImageVersion != "ubuntu-26.04-amd64-v4" {
+		t.Fatalf("default VM image version = %q, want ubuntu-26.04-amd64-v4", defaultVMImageVersion)
 	}
 }
 
@@ -333,7 +339,7 @@ func TestResolveVMImagePayload(t *testing.T) {
 }
 
 func TestVMImageCacheInspectMissing(t *testing.T) {
-	latest := vmImageTestManifest("ubuntu-26.04-amd64-v3", vmImageTestContents())
+	latest := vmImageTestManifest(defaultVMImageVersion, vmImageTestContents())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/manifest.json" {
 			http.NotFound(w, r)
@@ -404,7 +410,7 @@ func TestVMImageCacheInspectStaleWhenCachedVersionDiffers(t *testing.T) {
 
 func TestVMImageCacheInspectStaleWhenLatestArtifactsIncomplete(t *testing.T) {
 	contents := vmImageTestContents()
-	latest := vmImageTestManifest("ubuntu-26.04-amd64-v3", contents)
+	latest := vmImageTestManifest(defaultVMImageVersion, contents)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/manifest.json" {
 			http.NotFound(w, r)
@@ -438,7 +444,7 @@ func TestVMImageCacheInspectStaleWhenLatestArtifactsIncomplete(t *testing.T) {
 
 func TestVMImageCacheInspectCurrent(t *testing.T) {
 	contents := vmImageTestContents()
-	latest := vmImageTestManifest("ubuntu-26.04-amd64-v3", contents)
+	latest := vmImageTestManifest(defaultVMImageVersion, contents)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/manifest.json" {
 			http.NotFound(w, r)
