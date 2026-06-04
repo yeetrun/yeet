@@ -1,4 +1,8 @@
-# Yeet VM v5 Service Trim Design
+# Yeet VM v5/v6 Service Trim Design
+
+Execution note: live v5 testing on `pve1` validated the service trim and
+exposed one additional low-risk optimization. Because the yeet-managed kernel is
+built without loadable modules, v6 also masks module-load/modprobe units.
 
 ## Goal
 
@@ -94,11 +98,12 @@ pollinate, NetworkManager, and networkd wait-online. Keep those masks.
 
 ### Deferred Masks
 
-Do not mask `modprobe@.service`, `systemd-modules-load.service`, or udev units
-in this pass. They are tempting because exe.dev masks them, but they are lower
-confidence for a general Ubuntu VM image. Revisit only after v5 measurements
-show they are still material and guest functionality remains correct without
-them.
+Do not mask udev units in this pass. v5 intentionally left
+`modprobe@.service` and `systemd-modules-load.service` intact for caution. Live
+v5 measurements showed those units only perform impossible module-load work
+under the no-modules yeet kernel, and guest reboot/readiness still worked after
+masking them, so v6 masks module-load/modprobe units as a separate measured
+change.
 
 ## Versioning
 
