@@ -207,9 +207,11 @@ rewritten. When creating a VM with a stale cached image, interactive runs prompt
 by default; non-interactive runs require `--image-policy=update` or
 `--image-policy=cached`.
 
-The fast Ubuntu VM image uses a yeet-managed Firecracker kernel supplied by the
-image bundle. Guest apt upgrades do not manage the boot kernel, bootloader, or
-initrd, and snap packages are not supported in that fast image profile.
+The default Ubuntu VM image is optimized for Firecracker direct kernel boot. It
+uses a yeet-managed kernel and init shim, starts SSH through a yeet-managed
+systemd unit, and intentionally does not support snap packages in the fast
+profile. Publish a new yeet VM image bundle to update the guest boot kernel or
+init path.
 
 For ZFS-backed VMs, the first VM created on a pool for an image version prepares
 a shared ZFS image base on that pool. Later VMs on the same pool and image
