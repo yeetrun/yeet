@@ -195,7 +195,7 @@ yeet ssh devbox
 yeet rm --clean-data devbox
 ```
 
-When `yeet run` starts a VM, it waits for the guest to report SSH-era readiness
+When `yeet run` starts a VM, it waits for the guest to report SSH readiness
 and an IPv4 address before printing the next `yeet ssh` command. If the guest
 does not report readiness, use `yeet vm console <svc>` for boot diagnostics.
 
