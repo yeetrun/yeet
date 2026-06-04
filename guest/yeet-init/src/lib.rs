@@ -82,6 +82,11 @@ pub fn current_ipv4(iface: &str) -> Option<String> {
         .args(["-o", "-4", "addr", "show", "dev", iface, "scope", "global"])
         .output()
         .or_else(|_| {
+            Command::new("/usr/sbin/ip")
+                .args(["-o", "-4", "addr", "show", "dev", iface, "scope", "global"])
+                .output()
+        })
+        .or_else(|_| {
             Command::new("/sbin/ip")
                 .args(["-o", "-4", "addr", "show", "dev", iface, "scope", "global"])
                 .output()
@@ -125,15 +130,44 @@ pub fn prepare_runtime_dirs() -> io::Result<()> {
 }
 
 pub fn run_before_systemd(cmdline: &str) -> io::Result<()> {
+    run_before_systemd_with(
+        cmdline,
+        Path::new(SERIAL_TTY),
+        prepare_runtime_dirs,
+        set_hostname,
+        wait_for_ipv4,
+        write_serial,
+    )
+}
+
+fn run_before_systemd_with<Prepare, SetHostname, WaitForIPv4, WriteSerial>(
+    cmdline: &str,
+    serial_path: &Path,
+    mut prepare_runtime_dirs: Prepare,
+    mut set_hostname: SetHostname,
+    mut wait_for_ipv4: WaitForIPv4,
+    mut write_serial: WriteSerial,
+) -> io::Result<()>
+where
+    Prepare: FnMut() -> io::Result<()>,
+    SetHostname: FnMut(&str) -> io::Result<()>,
+    WaitForIPv4: FnMut(&str, Duration) -> Option<String>,
+    WriteSerial: FnMut(&Path, &str) -> io::Result<()>,
+{
     let cfg = BootConfig::from_cmdline(cmdline);
     prepare_runtime_dirs()?;
     if let Some(hostname) = cfg.hostname.as_deref()
         && !hostname.is_empty()
     {
-        set_hostname(hostname)?;
+        if let Err(err) = set_hostname(hostname) {
+            let _ = write_serial(
+                serial_path,
+                &format!("yeet-init-error set hostname: {err}\n"),
+            );
+        }
     }
     if let Some(ip) = wait_for_ipv4(&cfg.interface, Duration::from_millis(1500)) {
-        let _ = write_serial(Path::new(SERIAL_TTY), &serial_ip_line(&cfg.interface, &ip));
+        let _ = write_serial(serial_path, &serial_ip_line(&cfg.interface, &ip));
     }
     Ok(())
 }
@@ -145,16 +179,30 @@ pub fn exec_systemd() -> io::Error {
 }
 
 pub fn run() -> io::Result<()> {
-    let cmdline = fs::read_to_string("/proc/cmdline")?;
+    let cmdline = read_cmdline_or_empty(Path::new("/proc/cmdline"), Path::new(SERIAL_TTY));
     if let Err(err) = run_before_systemd(&cmdline) {
         let _ = write_serial(Path::new(SERIAL_TTY), &format!("yeet-init-error {err}\n"));
     }
     Err(exec_systemd())
 }
 
+fn read_cmdline_or_empty(cmdline_path: &Path, serial_path: &Path) -> String {
+    match fs::read_to_string(cmdline_path) {
+        Ok(cmdline) => cmdline,
+        Err(err) => {
+            let _ = write_serial(
+                serial_path,
+                &format!("yeet-init-error read cmdline: {err}\n"),
+            );
+            String::new()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
 
     #[test]
     fn parses_cmdline_values() {
@@ -200,5 +248,53 @@ mod tests {
             serial_ip_line("eth0", "10.0.4.178"),
             "yeet-ip eth0 10.0.4.178\n"
         );
+    }
+
+    #[test]
+    fn missing_cmdline_falls_back_to_empty_and_logs_error() {
+        let dir = std::env::temp_dir().join(format!("yeet-init-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let missing_cmdline = dir.join("missing-cmdline");
+        let serial = dir.join("serial");
+        fs::write(&serial, "").expect("create serial file");
+
+        let got = read_cmdline_or_empty(&missing_cmdline, &serial);
+
+        assert_eq!(got, "");
+        let log = fs::read_to_string(&serial).expect("read serial file");
+        assert!(log.contains("yeet-init-error read cmdline:"));
+    }
+
+    #[test]
+    fn hostname_failure_logs_and_still_reports_ip() {
+        let writes = RefCell::new(Vec::new());
+        let set_hostname_calls = RefCell::new(Vec::new());
+
+        run_before_systemd_with(
+            "yeet.hostname=bad-host yeet.iface=eth9",
+            Path::new("/dev/test-serial"),
+            || Ok(()),
+            |name| {
+                set_hostname_calls.borrow_mut().push(name.to_string());
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "no cap"))
+            },
+            |iface, timeout| {
+                assert_eq!(iface, "eth9");
+                assert_eq!(timeout, Duration::from_millis(1500));
+                Some("10.0.4.9".to_string())
+            },
+            |path, line| {
+                assert_eq!(path, Path::new("/dev/test-serial"));
+                writes.borrow_mut().push(line.to_string());
+                Ok(())
+            },
+        )
+        .expect("run before systemd");
+
+        assert_eq!(set_hostname_calls.borrow().as_slice(), ["bad-host"]);
+        let writes = writes.borrow();
+        assert_eq!(writes.len(), 2);
+        assert!(writes[0].contains("yeet-init-error set hostname:"));
+        assert_eq!(writes[1], "yeet-ip eth9 10.0.4.9\n");
     }
 }
