@@ -1,10 +1,10 @@
-# Yeet VM v5 Service Trim Implementation Plan
+# Yeet VM v5/v6 Service Trim Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Publish and adopt `ubuntu-26.04-amd64-v5` with a more aggressively trimmed fast Ubuntu rootfs that removes measured v4 boot overhead while preserving yeet VM behavior.
+**Goal:** Publish and adopt the next fast Ubuntu rootfs with a more aggressively trimmed service set that removes measured v4 boot overhead while preserving yeet VM behavior. This began as `ubuntu-26.04-amd64-v5`; live v5 testing added one safe follow-up, so the adopted image is expected to be v6.
 
-**Architecture:** Keep this pass image-first. Update the root and image-repo build scripts to purge/mask only high-confidence residual Ubuntu services, harden workflow verification for the cleanup set, publish v5, live-test it on `lab-host`, then bump the catch default/docs to v5 after the image exists.
+**Architecture:** Keep this pass image-first. Update the root and image-repo build scripts to purge/mask only high-confidence residual Ubuntu services, harden workflow verification for the cleanup set, publish and live-test the image on `lab-host`, then bump the catch default/docs after the image exists.
 
 **Tech Stack:** Bash, Go, GitHub Actions, debugfs, systemd, Firecracker, ZFS live validation.
 
@@ -15,16 +15,16 @@
 - v4 guest boot on `lab-host`: `1.151s` kernel + `2.205s` userspace = `3.356s`.
 - v4 warmed ZFS create: `6.353s` wall, `88ms` disk clone, `3.613s` guest readiness wait.
 - v4 top remaining userspace entries included `networkd-dispatcher.service`, `chrony.service`, `ldconfig.service`, `keyboard-setup.service`, `netplan-configure.service`, `sysstat.service`, and `e2scrub_reap.service`.
-- exe.dev reference keeps only a very small running set and either removes or masks several of those units, but also masks lower-confidence udev/module units that this pass intentionally defers.
+- exe.dev reference keeps only a very small running set and either removes or masks several of those units. v5 deferred udev/module masks; live v5 testing showed module-load/modprobe masks are safe for the no-modules yeet kernel, while udev remains deferred.
 
 ## File Structure
 
 ### Root repo: `/Users/shayne/code/yeet`
 
-- Modify `tools/vm-image/build-ubuntu-26.04.sh`: default v5 image version; purge and mask high-confidence residual services; enable `systemd-timesyncd` if already installed.
-- Modify `tools/vm-image/README.md`: update current fast bundle version and list v5 trim behavior.
-- Later modify `pkg/catch/vm_image.go`: change `defaultVMImageVersion` to v5 after the release is verified.
-- Later modify root VM image tests under `pkg/catch/`: update default-version assertions and default-image fixtures from v4 to v5.
+- Modify `tools/vm-image/build-ubuntu-26.04.sh`: default v6 image version; purge and mask high-confidence residual services; mask module-load/modprobe units; enable `systemd-timesyncd` if already installed.
+- Modify `tools/vm-image/README.md`: update current fast bundle version and list v6 trim behavior.
+- Later modify `pkg/catch/vm_image.go`: change `defaultVMImageVersion` to v6 after the release is verified.
+- Later modify root VM image tests under `pkg/catch/`: update default-version assertions and default-image fixtures from v4 to v6.
 - Later modify user-facing docs if they mention the current fast bundle version.
 
 ### Image builder repo: `/Users/shayne/code/yeet-vm-images`
@@ -120,8 +120,8 @@ do
 done
 ```
 
-Leave `modprobe@.service`, `systemd-modules-load.service`, and udev units
-unmasked.
+For v6, additionally mask module-load/modprobe units because the yeet-managed
+kernel is built without loadable modules. Keep udev units unmasked.
 
 - [ ] **Step 5: Update the root image README**
 

@@ -6,7 +6,7 @@
 set -euo pipefail
 
 profile="${YEET_VM_IMAGE_PROFILE:-fast}"
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v5}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v6}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
@@ -278,7 +278,13 @@ for unit in \
 	cloud-final.service \
 	NetworkManager.service \
 	NetworkManager-wait-online.service \
+	systemd-modules-load.service \
 	systemd-networkd-wait-online.service \
+	modprobe@.service \
+	modprobe@configfs.service \
+	modprobe@drm.service \
+	modprobe@efi_pstore.service \
+	modprobe@fuse.service \
 	netplan-configure.service \
 	networkd-dispatcher.service \
 	sysstat.service \
