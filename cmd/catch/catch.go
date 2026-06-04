@@ -259,7 +259,7 @@ func handleLocalCommand(args []string, scfg *catch.Config, dataDir string, out i
 		if err := doInstall(scfg, dataDir); err != nil {
 			return true, fmt.Errorf("failed to install: %w", err)
 		}
-		return true, setupDocker()
+		return true, errors.Join(setupDocker(), setupVMHost())
 	default:
 		return false, nil
 	}

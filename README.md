@@ -111,9 +111,12 @@ mise run quality:goal
 
 ## High-Level Overview
 
-yeet is a lightweight client + server setup for deploying and managing services on remote Linux machines. The primary use case is running Docker images on a host over Tailscale with a tiny workflow (`yeet run <svc> <image>`).
+yeet is a lightweight client + server setup for deploying and managing services
+on remote Linux machines. It runs containers, host services, cron jobs, and
+Firecracker-backed Ubuntu VMs through the same small workflow.
 
 - Run Docker images or Compose stacks on a remote host
+- Create long-lived Ubuntu VMs with `yeet run <vm> vm://ubuntu/26.04`
 - Push locally-built images into an internal registry when you need them
 - Manage service lifecycle (start/stop/restart/logs/status)
 - Push updates over Tailscale RPC
@@ -179,12 +182,12 @@ keep them, or use `--publish-reset` to acknowledge replacement. `yeet info
 <svc>` shows live published ports; `--format=json` includes structured port
 data.
 
-## Experimental VMs
+## VMs
 
-VM support is experimental and requires a Linux host with KVM available. The v0
-VM path uses the yeet-owned Ubuntu 26.04 image bundle published at
-`github.com/yeetrun/yeet-vm-images`, and services saved from VM payloads use the
-service type `vm`.
+VM support requires a Linux host with KVM available. The VM path uses the
+yeet-owned Ubuntu 26.04 image bundle published at
+`github.com/yeetrun/yeet-vm-images`, and services saved from VM payloads use
+the service type `vm`.
 
 ```bash
 yeet run devbox vm://ubuntu/26.04 --net=svc
@@ -194,6 +197,11 @@ yeet vm console devbox
 yeet ssh devbox
 yeet rm --clean-data devbox
 ```
+
+During `yeet init`, catch checks the host for KVM, TUN/TAP, and required VM
+tooling (`qemu-img`, `zstd`, `e2fsck`, `resize2fs`, `mount`, `umount`, and
+`ip`). On Debian/Ubuntu hosts with `apt-get`, interactive installs can offer to
+install missing VM packages. ZFS is optional unless you create VMs with `--zfs`.
 
 When `yeet run` starts a VM, it waits for the guest to report SSH readiness
 and an IPv4 address before printing the next `yeet ssh` command. If the guest
@@ -330,7 +338,7 @@ and trust credential, then writes the secret to the catch host for you.
 The docs site is the user manual and the source of truth for behavior and workflows:
 
 - [Quick Start](https://yeetrun.com/docs/getting-started/quick-start)
-- [Workflows](https://yeetrun.com/docs/operations/workflows) (Docker-first walkthroughs)
+- [Workflows](https://yeetrun.com/docs/operations/workflows) (containers, VMs, and host services)
 - [Installation](https://yeetrun.com/docs/getting-started/installation)
 - [Architecture](https://yeetrun.com/docs/concepts/architecture)
 - [CLI Overview](https://yeetrun.com/docs/cli/cli-overview)
