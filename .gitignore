@@ -6,6 +6,7 @@
 /result
 /test-results
 /.tmp
+/guest/yeet-init/target
 /.gomu_history.json
 /mutation-report.json
 /mutation-report.txt
