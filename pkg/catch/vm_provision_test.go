@@ -118,6 +118,9 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), `"kernel_image_path"`)
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), vm.Disk.Path)
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "init=/usr/local/lib/yeet-vm/yeet-init")
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "ip=192.168.100.")
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "yeet.hostname=svc")
 	assertFileContains(t, filepath.Join(serviceRoot, "metadata", "hostname"), "svc")
 	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("svc")), "ExecStart=")
 	assertFileContains(t, filepath.Join(systemdDir, vmSystemdUnitName("svc")), "--api-sock")

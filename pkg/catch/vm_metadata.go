@@ -286,20 +286,33 @@ func writeVMGuestMetadataFiles(root string, cfg vmMetadataConfig) error {
 }
 
 func writeVMGuestBaseFiles(root string, cfg vmMetadataConfig) error {
-	files := []struct {
-		rel  string
-		data []byte
-		mode os.FileMode
-	}{
-		{rel: "etc/hostname", data: []byte(cfg.Hostname + "\n"), mode: 0o644},
-		{rel: "etc/netplan/99-yeet.yaml", data: []byte(renderVMNetworkYAML(cfg.Networks)), mode: 0o644},
+	if err := writeVMGuestFile(root, "etc/hostname", []byte(cfg.Hostname+"\n"), 0o644); err != nil {
+		return err
 	}
-	for _, file := range files {
-		if err := writeVMGuestFile(root, file.rel, file.data, file.mode); err != nil {
+	for _, network := range cfg.Networks {
+		rel := filepath.Join("etc", "systemd", "network", "10-yeet-"+network.Name+".network")
+		if err := writeVMGuestFile(root, rel, []byte(renderVMNetworkdUnit(network)), 0o644); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func renderVMNetworkdUnit(network vmGuestNetwork) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[Match]\nName=%s\n\n[Network]\n", network.Name)
+	if network.DHCP {
+		b.WriteString("DHCP=ipv4\n")
+	} else {
+		fmt.Fprintf(&b, "Address=%s\n", network.Address)
+		if network.Gateway != "" {
+			fmt.Fprintf(&b, "Gateway=%s\n", network.Gateway)
+		}
+	}
+	for _, ns := range vmGuestNetworkNameservers(network) {
+		fmt.Fprintf(&b, "DNS=%s\n", ns)
+	}
+	return b.String()
 }
 
 func writeVMGuestSSHAccess(root string, cfg vmMetadataConfig) error {
@@ -436,13 +449,22 @@ func writeVMGuestReadyUnit(root string) error {
 	if err := writeVMGuestFile(root, "usr/local/lib/yeet-vm/guest-ready", []byte(vmGuestReadyScript), 0o755); err != nil {
 		return err
 	}
+	if err := writeVMGuestFile(root, "etc/systemd/system/yeet-sshd.service", []byte(vmGuestSSHDService), 0o644); err != nil {
+		return err
+	}
 	if err := writeVMGuestFile(root, "etc/systemd/system/yeet-guest-ready.service", []byte(vmGuestReadyService), 0o644); err != nil {
+		return err
+	}
+	if err := writeVMGuestSystemdSymlink(root, "multi-user.target.wants/yeet-sshd.service", "../yeet-sshd.service"); err != nil {
 		return err
 	}
 	if err := writeVMGuestSystemdSymlink(root, "multi-user.target.wants/yeet-guest-ready.service", "../yeet-guest-ready.service"); err != nil {
 		return err
 	}
-	return writeVMGuestSystemdSymlink(root, "multi-user.target.wants/ssh.service", "/usr/lib/systemd/system/ssh.service")
+	if err := maskVMGuestSystemdUnit(root, "ssh.service"); err != nil {
+		return err
+	}
+	return maskVMGuestSystemdUnit(root, "ssh.socket")
 }
 
 func writeVMGuestGrowRootUnit(root string) error {
@@ -457,8 +479,8 @@ func writeVMGuestGrowRootUnit(root string) error {
 
 const vmGuestReadyService = `[Unit]
 Description=yeet-ready guest marker
-After=network-online.target ssh.service serial-getty@ttyS0.service
-Wants=network-online.target ssh.service serial-getty@ttyS0.service
+After=yeet-sshd.service
+Wants=yeet-sshd.service
 
 [Service]
 Type=oneshot
@@ -469,9 +491,43 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 `
 
+const vmGuestSSHDService = `[Unit]
+Description=yeet early SSH daemon
+DefaultDependencies=no
+After=local-fs.target systemd-sysusers.service network.target
+Before=multi-user.target
+Wants=network.target
+ConditionPathExists=/usr/sbin/sshd
+
+[Service]
+Type=exec
+RuntimeDirectory=sshd
+ExecStartPre=/usr/sbin/sshd -t
+ExecStart=/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target
+`
+
 const vmGuestReadyScript = `#!/bin/sh
+for _ in $(seq 1 100); do
+	report="$(ip -o -4 addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); print $2 " " a[1] }')"
+	if [ -n "$report" ]; then
+		printf '%s\n' "$report" | while read -r iface ip; do
+			printf 'yeet-ip %s %s\n' "$iface" "$ip" >/dev/ttyS0
+		done
+		first="$(printf '%s\n' "$report" | head -n 1)"
+		set -- $first
+		printf 'yeet-ready %s %s\n' "$1" "$2" >/dev/ttyS0
+		command -v logger >/dev/null && logger "yeet-ready $1 $2" || true
+		exit 0
+	fi
+	sleep 0.05
+done
 i=0
-while [ "$i" -lt 60 ]; do
+while [ "$i" -lt 55 ]; do
 	report="$(ip -o -4 addr show scope global 2>/dev/null | awk '{ split($4, a, "/"); print $2 " " a[1] }')"
 	if [ -n "$report" ]; then
 		printf '%s\n' "$report" | while read -r iface ip; do

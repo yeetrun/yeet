@@ -226,13 +226,22 @@ func TestWriteVMGuestMetadataFiles(t *testing.T) {
 		t.Fatalf("writeVMGuestMetadataFiles: %v", err)
 	}
 	assertFileContains(t, filepath.Join(root, "etc", "hostname"), "devbox")
-	assertFileContains(t, filepath.Join(root, "etc", "netplan", "99-yeet.yaml"), "192.168.100.12/24")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "network", "10-yeet-eth0.network"), "[Match]")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "network", "10-yeet-eth0.network"), "Name=eth0")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "network", "10-yeet-eth0.network"), "Address=192.168.100.12/24")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "network", "10-yeet-eth1.network"), "DHCP=ipv4")
 	assertFileContains(t, filepath.Join(root, "home", "ubuntu", ".ssh", "authorized_keys"), "ssh-ed25519 AAAATEST")
 	assertFileContains(t, filepath.Join(root, "root", ".ssh", "authorized_keys"), "ssh-ed25519 AAAATEST")
 	assertFileContains(t, filepath.Join(root, "etc", "sudoers.d", "90-yeet-vm-ubuntu"), "ubuntu ALL=(ALL) NOPASSWD:ALL")
 	assertFileContains(t, filepath.Join(root, "etc", "sysctl.d", "90-yeet-vm.conf"), "net.ipv4.ping_group_range = 0 2147483647")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-sshd.service"), "ExecStart=/usr/sbin/sshd -D -e -f /etc/ssh/sshd_config")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-sshd.service"), "Restart=always")
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "yeet-ready")
-	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "network-online.target")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "After=yeet-sshd.service")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "Wants=yeet-sshd.service")
+	assertFileNotContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "network-online.target")
+	assertFileNotContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "ssh.service")
+	assertFileNotContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "serial-getty")
 	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "guest-ready"), "yeet-ready")
 	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "guest-ready"), "ip -o -4 addr show scope global")
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-grow-root.service"), "After=yeet-guest-ready.service")
@@ -245,8 +254,14 @@ func TestWriteVMGuestMetadataFiles(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(root, "etc", "systemd", "system", "multi-user.target.wants", "yeet-grow-root.service")); err != nil {
 		t.Fatalf("grow-root enable symlink missing: %v", err)
 	}
-	if _, err := os.Lstat(filepath.Join(root, "etc", "systemd", "system", "multi-user.target.wants", "ssh.service")); err != nil {
-		t.Fatalf("ssh.service enable symlink missing: %v", err)
+	if _, err := os.Lstat(filepath.Join(root, "etc", "systemd", "system", "multi-user.target.wants", "yeet-sshd.service")); err != nil {
+		t.Fatalf("yeet-sshd enable symlink missing: %v", err)
+	}
+	for _, unit := range []string{"ssh.service", "ssh.socket"} {
+		target, err := os.Readlink(filepath.Join(root, "etc", "systemd", "system", unit))
+		if err != nil || target != "/dev/null" {
+			t.Fatalf("%s mask = %q, %v; want /dev/null", unit, target, err)
+		}
 	}
 	if target, err := os.Readlink(filepath.Join(root, "etc", "systemd", "system", "systemd-networkd-wait-online.service")); err != nil || target != "/dev/null" {
 		t.Fatalf("systemd-networkd-wait-online mask = %q, %v; want /dev/null", target, err)

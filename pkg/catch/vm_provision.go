@@ -533,7 +533,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, resolvedRoot resolved
 		BootSource: firecrackerBootSource{
 			KernelImagePath: image.Paths.KernelPath,
 			InitrdPath:      image.Paths.InitrdPath,
-			BootArgs:        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
+			BootArgs:        vmKernelBootArgs(e.sn, networkPlan),
 		},
 		Drives: []firecrackerDrive{{
 			DriveID:      "rootfs",
