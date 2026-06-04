@@ -158,13 +158,12 @@ where
     prepare_runtime_dirs()?;
     if let Some(hostname) = cfg.hostname.as_deref()
         && !hostname.is_empty()
+        && let Err(err) = set_hostname(hostname)
     {
-        if let Err(err) = set_hostname(hostname) {
-            let _ = write_serial(
-                serial_path,
-                &format!("yeet-init-error set hostname: {err}\n"),
-            );
-        }
+        let _ = write_serial(
+            serial_path,
+            &format!("yeet-init-error set hostname: {err}\n"),
+        );
     }
     if let Some(ip) = wait_for_ipv4(&cfg.interface, Duration::from_millis(1500)) {
         let _ = write_serial(serial_path, &serial_ip_line(&cfg.interface, &ip));
