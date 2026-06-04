@@ -196,6 +196,7 @@ func (p vmDiskPlan) rawSteps() []vmDiskPlanStep {
 		{Phase: vmDiskPhaseRaw, Command: []string{"qemu-img", "create", "-f", "raw", p.Path, size}},
 		{Phase: vmDiskPhaseRaw, Command: []string{"cp", "--reflink=auto", "--sparse=always", p.BaseRootFS, p.Path}},
 		{Phase: vmDiskPhaseRaw, Command: []string{"truncate", "-s", size, p.Path}},
+		{Phase: vmDiskPhaseRaw, Command: []string{"e2fsck", "-pf", p.Path}},
 		{Phase: vmDiskPhaseRaw, Command: []string{"resize2fs", p.Path}},
 	}
 }
@@ -417,11 +418,22 @@ func runVMCommand(ctx context.Context, command []string) error {
 	if err == nil {
 		return nil
 	}
+	if isVMCommandAcceptableExit(command, err) {
+		return nil
+	}
 	stderr := strings.TrimSpace(string(output))
 	if stderr == "" {
 		return fmt.Errorf("run %s: %w", formatVMCommandArgv(command), err)
 	}
 	return fmt.Errorf("run %s: %w: %s", formatVMCommandArgv(command), err, stderr)
+}
+
+func isVMCommandAcceptableExit(command []string, err error) bool {
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || len(command) == 0 {
+		return false
+	}
+	return command[0] == "e2fsck" && exitErr.ExitCode() == 1
 }
 
 func formatVMCommandArgv(command []string) string {
