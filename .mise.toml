@@ -1,5 +1,6 @@
 [tools]
 go = "1.26.4"
+rust = "stable"
 "go:golang.org/x/vuln/cmd/govulncheck" = "latest"
 golangci-lint = "2.12.2"
 pre-commit = "latest"
@@ -33,6 +34,37 @@ pre-commit install --install-hooks \
 [tasks.test]
 description = "Run the Go test suite"
 run = "go test ./..."
+
+[tasks."guest:init:test"]
+description = "Run yeet-init Rust tests"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" == "Darwin" ]] && command -v xcrun >/dev/null 2>&1; then
+  case "$(rustc -vV | awk '/^host:/ {print $2}')" in
+    aarch64-apple-darwin)
+      export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$(xcrun --find cc)"
+      ;;
+    x86_64-apple-darwin)
+      export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER="$(xcrun --find cc)"
+      ;;
+  esac
+fi
+
+cargo test --manifest-path guest/yeet-init/Cargo.toml
+'''
+
+[tasks."guest:init:build"]
+description = "Build static yeet-init for the VM image"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+rustup target add x86_64-unknown-linux-musl
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER:-rust-lld}"
+cargo build --manifest-path guest/yeet-init/Cargo.toml --release --target x86_64-unknown-linux-musl
+'''
 
 [tasks.coverage]
 description = "Run tests and write the quality coverage profile"
