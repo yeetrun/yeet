@@ -83,22 +83,22 @@ func TestVMImagesCmdJSONShowsCacheStateObject(t *testing.T) {
 
 func TestVMImagesCmdUpdateEnsuresImageAndPrintsState(t *testing.T) {
 	server := newTestServer(t)
-	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-26.04-amd64-v3")
+	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", defaultVMImageVersion)
 	var ensuredPayload string
 	restoreEnsure := stubVMImageEnsure(t, func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
 		ensuredPayload = payload
 		return vmImageAsset{
 			Paths: vmImagePaths{Dir: cachePath},
 			Manifest: vmImageManifest{
-				Version: "ubuntu-26.04-amd64-v3",
+				Version: defaultVMImageVersion,
 			},
 		}, nil
 	})
 	defer restoreEnsure()
 	restoreInspect := stubVMImageInspect(t, vmImageCacheState{
 		Payload:       vmUbuntu2604Payload,
-		CachedVersion: "ubuntu-26.04-amd64-v3",
-		LatestVersion: "ubuntu-26.04-amd64-v3",
+		CachedVersion: defaultVMImageVersion,
+		LatestVersion: defaultVMImageVersion,
 		State:         vmImageCacheCurrent,
 		CachePath:     cachePath,
 		ManifestURL:   defaultVMImageManifestURL,
@@ -114,7 +114,7 @@ func TestVMImagesCmdUpdateEnsuresImageAndPrintsState(t *testing.T) {
 		t.Fatalf("ensure payload = %q, want %q", ensuredPayload, vmUbuntu2604Payload)
 	}
 	got := out.String()
-	for _, want := range []string{vmImageCacheCurrent, "ubuntu-26.04-amd64-v3", cachePath} {
+	for _, want := range []string{vmImageCacheCurrent, defaultVMImageVersion, cachePath} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("update output missing %q:\n%s", want, got)
 		}
@@ -123,7 +123,7 @@ func TestVMImagesCmdUpdateEnsuresImageAndPrintsState(t *testing.T) {
 
 func TestVMImagesCmdUpdateJSONSuppressesProgress(t *testing.T) {
 	server := newTestServer(t)
-	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-26.04-amd64-v3")
+	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", defaultVMImageVersion)
 	restoreEnsure := stubVMImageEnsure(t, func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
 		if ui != nil {
 			ui.Start()
@@ -135,7 +135,7 @@ func TestVMImagesCmdUpdateJSONSuppressesProgress(t *testing.T) {
 		return vmImageAsset{
 			Paths: vmImagePaths{Dir: cachePath},
 			Manifest: vmImageManifest{
-				Version: "ubuntu-26.04-amd64-v3",
+				Version: defaultVMImageVersion,
 			},
 		}, nil
 	})
@@ -151,7 +151,7 @@ func TestVMImagesCmdUpdateJSONSuppressesProgress(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, out.String())
 	}
-	if got.State != vmImageCacheCurrent || got.LatestVersion != "ubuntu-26.04-amd64-v3" || got.CachePath != cachePath {
+	if got.State != vmImageCacheCurrent || got.LatestVersion != defaultVMImageVersion || got.CachePath != cachePath {
 		t.Fatalf("json state = %#v", got)
 	}
 	if strings.Contains(out.String(), "progress should not precede json") {
