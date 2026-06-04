@@ -5,9 +5,12 @@
 
 set -euo pipefail
 
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v1}"
+profile="${YEET_VM_IMAGE_PROFILE:-fast}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v3}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
+kernel_path="${YEET_VM_KERNEL_PATH:-}"
+kernel_version_override="${YEET_VM_KERNEL_VERSION:-}"
 
 ubuntu_base_url="${UBUNTU_CLOUD_BASE_URL:-https://cloud-images.ubuntu.com/resolute/current}"
 ubuntu_image="${UBUNTU_CLOUD_IMAGE:-resolute-server-cloudimg-amd64.tar.gz}"
@@ -29,6 +32,34 @@ for cmd in awk chmod cp curl date debugfs file find grep install mkdir mktemp sh
 	require "$cmd"
 done
 
+case "$profile" in
+fast | stock)
+	;;
+*)
+	echo "unsupported YEET_VM_IMAGE_PROFILE=$profile (expected fast or stock)" >&2
+	exit 1
+	;;
+esac
+
+if [ "$profile" = "fast" ]; then
+	for cmd in chroot id mount mountpoint umount; do
+		require "$cmd"
+	done
+	if [ -z "$kernel_path" ]; then
+		echo "YEET_VM_KERNEL_PATH is required for the fast profile" >&2
+		echo "Set YEET_VM_IMAGE_PROFILE=stock to build the old Ubuntu-kernel/initrd image." >&2
+		exit 1
+	fi
+	if [ ! -r "$kernel_path" ]; then
+		echo "YEET_VM_KERNEL_PATH is not readable: $kernel_path" >&2
+		exit 1
+	fi
+	if [ "$(id -u)" != 0 ]; then
+		echo "the fast profile must run as root so it can mount and customize the rootfs" >&2
+		exit 1
+	fi
+fi
+
 if [ -z "$work_dir" ]; then
 	work_dir="$(mktemp -d)"
 	cleanup_work=1
@@ -37,7 +68,23 @@ else
 	cleanup_work=0
 fi
 
+rootfs_mount=""
+cleanup_rootfs_mount() {
+	if [ -z "$rootfs_mount" ]; then
+		return
+	fi
+	for rel in run sys proc dev; do
+		if mountpoint -q "$rootfs_mount/$rel" 2>/dev/null; then
+			umount "$rootfs_mount/$rel" || true
+		fi
+	done
+	if mountpoint -q "$rootfs_mount" 2>/dev/null; then
+		umount "$rootfs_mount" || true
+	fi
+}
+
 cleanup() {
+	cleanup_rootfs_mount
 	if [ "${cleanup_work:-0}" = 1 ]; then
 		rm -rf "$work_dir"
 	fi
@@ -69,29 +116,130 @@ if [ -z "$rootfs_source" ]; then
 	exit 1
 fi
 
-kernel_version="${UBUNTU_KERNEL_VERSION:-}"
-if [ -z "$kernel_version" ]; then
-	kernel_version="$(
-		debugfs -R "ls -p /boot" "$rootfs_source" 2>/dev/null |
-			awk -F/ '$6 ~ /^vmlinuz-[0-9].*-generic$/ { sub(/^vmlinuz-/, "", $6); print $6; exit }'
-	)"
-fi
-if [ -z "$kernel_version" ]; then
-	echo "could not detect Ubuntu kernel version in $rootfs_source" >&2
-	exit 1
-fi
+ubuntu_kernel_version=""
+kernel_version=""
+kernel_source=""
+initrd_artifact=""
 
-echo "Extracting Ubuntu kernel $kernel_version..."
-debugfs -R "dump -p /boot/vmlinuz-$kernel_version $work_dir/vmlinuz-$kernel_version" "$rootfs_source" >/dev/null 2>&1
-debugfs -R "dump -p /boot/initrd.img-$kernel_version $work_dir/initrd.img" "$rootfs_source" >/dev/null 2>&1
-curl -fsSL --retry 3 -o "$work_dir/extract-vmlinux" "$extract_vmlinux_url"
-chmod +x "$work_dir/extract-vmlinux"
-"$work_dir/extract-vmlinux" "$work_dir/vmlinuz-$kernel_version" >"$work_dir/vmlinux"
+detect_ubuntu_kernel_version() {
+	local source="$1"
+	if [ -n "${UBUNTU_KERNEL_VERSION:-}" ]; then
+		printf '%s\n' "$UBUNTU_KERNEL_VERSION"
+		return
+	fi
+	debugfs -R "ls -p /boot" "$source" 2>/dev/null |
+		awk -F/ '$6 ~ /^vmlinuz-[0-9].*-generic$/ { sub(/^vmlinuz-/, "", $6); print $6; exit }'
+}
+
+extract_ubuntu_kernel() {
+	ubuntu_kernel_version="$(detect_ubuntu_kernel_version "$rootfs_source")"
+	if [ -z "$ubuntu_kernel_version" ]; then
+		echo "could not detect Ubuntu kernel version in $rootfs_source" >&2
+		exit 1
+	fi
+	kernel_version="$ubuntu_kernel_version"
+	kernel_source="ubuntu-cloud-image"
+	initrd_artifact="initrd.img"
+
+	echo "Extracting Ubuntu kernel $ubuntu_kernel_version..."
+	debugfs -R "dump -p /boot/vmlinuz-$ubuntu_kernel_version $work_dir/vmlinuz-$ubuntu_kernel_version" "$rootfs_source" >/dev/null 2>&1
+	debugfs -R "dump -p /boot/initrd.img-$ubuntu_kernel_version $work_dir/initrd.img" "$rootfs_source" >/dev/null 2>&1
+	curl -fsSL --retry 3 -o "$work_dir/extract-vmlinux" "$extract_vmlinux_url"
+	chmod +x "$work_dir/extract-vmlinux"
+	"$work_dir/extract-vmlinux" "$work_dir/vmlinuz-$ubuntu_kernel_version" >"$work_dir/vmlinux"
+}
+
+install_provided_kernel() {
+	kernel_source="yeet-managed"
+	kernel_version="$kernel_version_override"
+	if [ -z "$kernel_version" ]; then
+		kernel_version="$(basename "$kernel_path")"
+	fi
+
+	echo "Installing yeet-managed kernel $kernel_version..."
+	install -m 0644 "$kernel_path" "$work_dir/vmlinux"
+}
+
+case "$profile" in
+fast)
+	install_provided_kernel
+	;;
+stock)
+	extract_ubuntu_kernel
+	;;
+esac
+
 if ! file "$work_dir/vmlinux" | grep -q "ELF 64-bit"; then
 	echo "extracted vmlinux is not an x86_64 ELF kernel" >&2
 	file "$work_dir/vmlinux" >&2
 	exit 1
 fi
+
+write_fast_rootfs_policy_files() {
+	local root="$1"
+	install -d -m 0755 "$root/etc/apt/preferences.d" "$root/usr/share/doc/yeet-vm-image"
+	cat >"$root/etc/apt/preferences.d/99-yeet-managed-kernel" <<'EOF'
+Package: linux-image-* linux-modules-* linux-modules-extra-* linux-headers-* linux-generic* linux-virtual* grub-* shim-signed initramfs-tools initramfs-tools-* snapd snap-confine squashfs-tools
+Pin: version *
+Pin-Priority: -1
+EOF
+	cat >"$root/usr/share/doc/yeet-vm-image/kernel.md" <<'EOF'
+# Yeet VM Kernel
+
+This image boots with Firecracker direct kernel boot. The kernel is supplied by
+the yeet VM image bundle manifest, not by packages installed inside the guest.
+
+Guest apt upgrades intentionally do not install Ubuntu kernel, bootloader, or
+initramfs packages. To update the boot kernel, publish a new yeet VM image
+bundle and create VMs from that image version.
+
+The fast yeet VM image profile intentionally does not support snap packages.
+Snap support requires a separate image profile with measured kernel,
+filesystem, boot-time, and confinement choices.
+EOF
+}
+
+customize_fast_rootfs() {
+	local rootfs="$1"
+	rootfs_mount="$work_dir/rootfs-mount"
+	mkdir -p "$rootfs_mount"
+
+	echo "Customizing rootfs for yeet-managed kernel policy..."
+	mount -o loop,rw "$rootfs" "$rootfs_mount"
+	for rel in dev proc sys run; do
+		mkdir -p "$rootfs_mount/$rel"
+	done
+	mount --bind /dev "$rootfs_mount/dev"
+	mount -t proc proc "$rootfs_mount/proc"
+	mount -t sysfs sysfs "$rootfs_mount/sys"
+	mount --bind /run "$rootfs_mount/run"
+
+	write_fast_rootfs_policy_files "$rootfs_mount"
+	cat >"$rootfs_mount/usr/sbin/policy-rc.d" <<'EOF'
+#!/bin/sh
+exit 101
+EOF
+	chmod +x "$rootfs_mount/usr/sbin/policy-rc.d"
+
+	chroot "$rootfs_mount" /bin/sh <<'EOF'
+set -e
+export DEBIAN_FRONTEND=noninteractive
+packages="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | awk '/^(linux-image-|linux-modules-|linux-modules-extra-|linux-headers-|linux-generic|linux-virtual|grub-|shim-signed$|initramfs-tools|snapd$|snap-confine$|squashfs-tools$)/ { print }')"
+if [ -n "$packages" ]; then
+	apt-get purge -y $packages
+fi
+apt-get autoremove -y --purge
+apt-get clean
+rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/snapd/* /var/lib/snapd/cache/*
+mkdir -p /etc/systemd/system
+ln -sf /dev/null /etc/systemd/system/snapd.service
+ln -sf /dev/null /etc/systemd/system/snapd.socket
+ln -sf /dev/null /etc/systemd/system/snapd.seeded.service
+EOF
+	rm -f "$rootfs_mount/usr/sbin/policy-rc.d"
+	cleanup_rootfs_mount
+	rootfs_mount=""
+}
 
 echo "Downloading Firecracker $firecracker_version..."
 curl -fL --retry 3 -o "$work_dir/$firecracker_tgz" "$firecracker_url"
@@ -104,8 +252,17 @@ fc_dir="$work_dir/release-${firecracker_version}-${firecracker_arch}"
 
 install -m 0644 "$rootfs_source" "$out_dir/rootfs.ext4"
 install -m 0644 "$work_dir/vmlinux" "$out_dir/vmlinux"
-install -m 0644 "$work_dir/initrd.img" "$out_dir/initrd.img"
+if [ "$profile" = "fast" ] && [ -r "$(dirname "$kernel_path")/kernel.config" ]; then
+	install -m 0644 "$(dirname "$kernel_path")/kernel.config" "$out_dir/kernel.config"
+fi
+if [ -n "$initrd_artifact" ]; then
+	install -m 0644 "$work_dir/initrd.img" "$out_dir/initrd.img"
+fi
 install -m 0755 "$fc_dir/firecracker-${firecracker_version}-${firecracker_arch}" "$out_dir/firecracker"
+
+if [ "$profile" = "fast" ]; then
+	customize_fast_rootfs "$out_dir/rootfs.ext4"
+fi
 
 echo "Compressing rootfs..."
 zstd -T0 "-$zstd_level" -f --no-progress -o "$out_dir/rootfs.ext4.zst" "$out_dir/rootfs.ext4"
@@ -113,35 +270,52 @@ zstd -T0 "-$zstd_level" -f --no-progress -o "$out_dir/rootfs.ext4.zst" "$out_dir
 rootfs_size="$(stat -c %s "$out_dir/rootfs.ext4")"
 rootfs_sha="$(sha256sum "$out_dir/rootfs.ext4.zst" | awk '{ print $1 }')"
 kernel_sha="$(sha256sum "$out_dir/vmlinux" | awk '{ print $1 }')"
-initrd_sha="$(sha256sum "$out_dir/initrd.img" | awk '{ print $1 }')"
 firecracker_sha="$(sha256sum "$out_dir/firecracker" | awk '{ print $1 }')"
 source_image_sha="$(sha256sum "$out_dir/rootfs.ext4" | awk '{ print $1 }')"
 build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+snap_support=false
+kernel_policy="yeet-managed"
+if [ "$profile" = "stock" ]; then
+	snap_support=true
+	kernel_policy="ubuntu-kernel-with-initrd"
+fi
+initrd_manifest_line=""
+initrd_checksum_line=""
+if [ -n "$initrd_artifact" ]; then
+	initrd_sha="$(sha256sum "$out_dir/initrd.img" | awk '{ print $1 }')"
+	initrd_manifest_line='  "initrd": "initrd.img",'
+	initrd_checksum_line='    "initrd.img": "'"$initrd_sha"'",'
+fi
 
 cat >"$out_dir/manifest.json" <<JSON
 {
   "name": "yeet-ubuntu-26.04",
   "version": "$version",
   "architecture": "x86_64",
+  "image_profile": "$profile",
+  "kernel_policy": "$kernel_policy",
+  "snap_support": $snap_support,
   "kernel": "vmlinux",
-  "initrd": "initrd.img",
+$initrd_manifest_line
   "rootfs": "rootfs.ext4.zst",
   "firecracker": "firecracker",
   "rootfs_size": $rootfs_size,
-  "ubuntu_kernel_version": "$kernel_version",
+  "kernel_version": "$kernel_version",
+  "ubuntu_kernel_version": "$ubuntu_kernel_version",
   "provenance": {
     "build_time": "$build_time",
     "ubuntu_cloud_image_url": "$ubuntu_base_url/$ubuntu_image",
     "ubuntu_cloud_image_sha256": "$actual_image_sha",
     "ubuntu_cloud_sha256sums_url": "$ubuntu_base_url/SHA256SUMS",
     "ubuntu_rootfs_sha256": "$source_image_sha",
+    "kernel_source": "$kernel_source",
     "extract_vmlinux_url": "$extract_vmlinux_url",
     "firecracker_version": "$firecracker_version",
     "firecracker_url": "$firecracker_url"
   },
   "checksums": {
     "vmlinux": "$kernel_sha",
-    "initrd.img": "$initrd_sha",
+$initrd_checksum_line
     "rootfs.ext4.zst": "$rootfs_sha",
     "firecracker": "$firecracker_sha"
   }
@@ -150,11 +324,20 @@ JSON
 
 (
 	cd "$out_dir"
-	sha256sum manifest.json vmlinux initrd.img rootfs.ext4.zst firecracker >checksums.txt
+	checksum_files=(manifest.json vmlinux)
+	if [ -n "$initrd_artifact" ]; then
+		checksum_files+=(initrd.img)
+	fi
+	checksum_files+=(rootfs.ext4.zst firecracker)
+	if [ -f kernel.config ]; then
+		checksum_files+=(kernel.config)
+	fi
+	sha256sum "${checksum_files[@]}" >checksums.txt
 )
 
 rm -f "$out_dir/rootfs.ext4"
 
 echo "Wrote VM image bundle to $out_dir"
 echo "Version: $version"
-echo "Ubuntu kernel: $kernel_version"
+echo "Profile: $profile"
+echo "Kernel: $kernel_version"

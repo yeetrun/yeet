@@ -526,6 +526,87 @@ func TestDestroyServiceRootZFSRetriesBusyDestroy(t *testing.T) {
 	}
 }
 
+func TestDestroyServiceRootZFSTreatsMissingDatasetAsCleaned(t *testing.T) {
+	server := newTestServer(t)
+	var zfsCalls [][]string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		zfsCalls = append(zfsCalls, append([]string(nil), args...))
+		return "", "cannot open 'tank/apps/api': dataset does not exist", errors.New("zfs failed")
+	}
+
+	if err := server.destroyServiceRootZFS("tank/apps/api"); err != nil {
+		t.Fatalf("destroyServiceRootZFS: %v", err)
+	}
+	want := [][]string{{"destroy", "-R", "tank/apps/api"}}
+	if !reflect.DeepEqual(zfsCalls, want) {
+		t.Fatalf("zfs calls = %#v, want %#v", zfsCalls, want)
+	}
+}
+
+func TestDestroyServiceRootZFSSucceedsWhenBusyRetryFindsDatasetMissing(t *testing.T) {
+	server := newTestServer(t)
+	oldDelay := zfsDestroyRetryDelay
+	zfsDestroyRetryDelay = 0
+	t.Cleanup(func() { zfsDestroyRetryDelay = oldDelay })
+
+	var zfsCalls [][]string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		zfsCalls = append(zfsCalls, append([]string(nil), args...))
+		if len(zfsCalls) == 1 {
+			return "", "cannot destroy 'tank/apps/api/root': dataset is busy", errors.New("zfs failed")
+		}
+		return "", "cannot open 'tank/apps/api': dataset does not exist", errors.New("zfs failed")
+	}
+
+	if err := server.destroyServiceRootZFS("tank/apps/api"); err != nil {
+		t.Fatalf("destroyServiceRootZFS: %v", err)
+	}
+	want := [][]string{
+		{"destroy", "-R", "tank/apps/api"},
+		{"destroy", "-R", "tank/apps/api"},
+	}
+	if !reflect.DeepEqual(zfsCalls, want) {
+		t.Fatalf("zfs calls = %#v, want %#v", zfsCalls, want)
+	}
+}
+
+func TestDestroyServiceRootZFSSettlesAndKeepsRetryingBusyDestroy(t *testing.T) {
+	server := newTestServer(t)
+	oldDelay := zfsDestroyRetryDelay
+	zfsDestroyRetryDelay = 0
+	oldMaxAttempts := zfsDestroyMaxAttempts
+	zfsDestroyMaxAttempts = 4
+	var settleCalls int
+	oldSettle := zfsDestroySettleFunc
+	zfsDestroySettleFunc = func(context.Context) {
+		settleCalls++
+	}
+	t.Cleanup(func() {
+		zfsDestroyRetryDelay = oldDelay
+		zfsDestroyMaxAttempts = oldMaxAttempts
+		zfsDestroySettleFunc = oldSettle
+	})
+
+	var zfsCalls [][]string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		zfsCalls = append(zfsCalls, append([]string(nil), args...))
+		if len(zfsCalls) < 4 {
+			return "", "cannot destroy 'tank/apps/api/root': dataset is busy", errors.New("zfs failed")
+		}
+		return "", "", nil
+	}
+
+	if err := server.destroyServiceRootZFS("tank/apps/api"); err != nil {
+		t.Fatalf("destroyServiceRootZFS: %v", err)
+	}
+	if len(zfsCalls) != 4 {
+		t.Fatalf("zfs calls = %d, want 4: %#v", len(zfsCalls), zfsCalls)
+	}
+	if settleCalls != 3 {
+		t.Fatalf("settle calls = %d, want 3", settleCalls)
+	}
+}
+
 func TestRemoveServiceTailscaleStableIDDecision(t *testing.T) {
 	stableID := tailcfg.StableNodeID("node-123")
 	withID := (&db.Service{

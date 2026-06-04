@@ -207,6 +207,10 @@ rewritten. When creating a VM with a stale cached image, interactive runs prompt
 by default; non-interactive runs require `--image-policy=update` or
 `--image-policy=cached`.
 
+The fast Ubuntu VM image uses a yeet-managed Firecracker kernel supplied by the
+image bundle. Guest apt upgrades do not manage the boot kernel, bootloader, or
+initrd, and snap packages are not supported in that fast image profile.
+
 For ZFS-backed VMs, the first VM created on a pool for an image version prepares
 a shared ZFS image base on that pool. Later VMs on the same pool and image
 version clone that shared base instead of writing the root filesystem again.

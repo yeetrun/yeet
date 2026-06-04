@@ -28,7 +28,6 @@ const (
 	vmDiskPhaseZVOLBasePrepare = "zvol-base-prepare"
 	vmDiskPhaseZVOLBaseWrite   = "zvol-base-write"
 	vmDiskPhaseZVOLClone       = "zvol-clone"
-	vmDiskPhaseZVOLResize      = "zvol-resize"
 )
 
 type vmDiskPlan struct {
@@ -88,8 +87,6 @@ func vmDiskProgressLabel(phase string) string {
 		return "Writing image to ZFS base"
 	case vmDiskPhaseZVOLClone:
 		return "Cloning VM disk"
-	case vmDiskPhaseZVOLResize:
-		return "Expanding filesystem"
 	default:
 		return ""
 	}
@@ -212,12 +209,12 @@ func (p vmDiskPlan) ZVOLBaseSteps() ([]vmDiskPlanStep, error) {
 	}
 	snap := p.ZVOLSnapshotName()
 	size := fmt.Sprintf("%d", p.zvolBaseBytes())
-	return append(zfsParentDatasetSteps(vmDiskPhaseZVOLBasePrepare, p.BaseDataset),
-		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBasePrepare, Command: []string{"zfs", "create", "-s", "-V", size, p.BaseDataset}},
+	return []vmDiskPlanStep{
+		{Phase: vmDiskPhaseZVOLBasePrepare, Command: []string{"zfs", "create", "-p", "-s", "-V", size, p.BaseDataset}},
 		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBasePrepare, Command: vmZVOLSettleCommand()},
 		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBaseWrite, Command: []string{"dd", "if=" + p.BaseRootFS, "of=/dev/zvol/" + p.BaseDataset, "bs=16M", "status=none"}},
 		vmDiskPlanStep{Phase: vmDiskPhaseZVOLBaseWrite, Command: []string{"zfs", "snapshot", snap}},
-	), nil
+	}, nil
 }
 
 func (p vmDiskPlan) zvolBaseBytes() int64 {
@@ -236,32 +233,14 @@ func (p vmDiskPlan) ZVOLCloneSteps() ([]vmDiskPlanStep, error) {
 	}
 	snap := p.ZVOLSnapshotName()
 	size := fmt.Sprintf("%d", p.Bytes)
-	return append(zfsParentDatasetSteps(vmDiskPhaseZVOLClone, p.Path),
-		vmDiskPlanStep{Phase: vmDiskPhaseZVOLClone, Command: []string{"zfs", "clone", snap, p.Path}},
-		vmDiskPlanStep{Phase: vmDiskPhaseZVOLClone, Command: []string{"zfs", "set", "volsize=" + size, p.Path}},
+	return []vmDiskPlanStep{
+		{Phase: vmDiskPhaseZVOLClone, Command: []string{"zfs", "clone", "-o", "volsize=" + size, snap, p.Path}},
 		vmDiskPlanStep{Phase: vmDiskPhaseZVOLClone, Command: vmZVOLSettleCommand()},
-		vmDiskPlanStep{Phase: vmDiskPhaseZVOLResize, Command: []string{"resize2fs", vmDiskPathForRuntime(p)}},
-	), nil
+	}, nil
 }
 
 func (p vmDiskPlan) ZVOLSnapshotName() string {
 	return p.BaseDataset + "@" + p.ImageVersion
-}
-
-func zfsParentDatasetSteps(phase, dataset string) []vmDiskPlanStep {
-	parent := zfsParentDataset(dataset)
-	if parent == "" {
-		return nil
-	}
-	return []vmDiskPlanStep{{Phase: phase, Command: []string{"zfs", "create", "-p", parent}}}
-}
-
-func zfsParentDataset(dataset string) string {
-	idx := strings.LastIndex(dataset, "/")
-	if idx <= 0 {
-		return ""
-	}
-	return dataset[:idx]
 }
 
 func vmZVOLSettleCommand() []string {

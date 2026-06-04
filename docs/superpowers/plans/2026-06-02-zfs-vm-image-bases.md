@@ -66,8 +66,8 @@ func TestVMZVOLBaseDatasetUsesTargetPoolForDifferentServiceRoot(t *testing.T) {
 		ZFS:     true,
 	}
 
-	got := vmZVOLBaseDataset(root, "ubuntu-26.04-amd64-v2")
-	want := "tank/yeet/vm-images/ubuntu-26.04-amd64-v2/root"
+	got := vmZVOLBaseDataset(root, "ubuntu-26.04-amd64-v3")
+	want := "tank/yeet/vm-images/ubuntu-26.04-amd64-v3/root"
 	if got != want {
 		t.Fatalf("vmZVOLBaseDataset = %q, want %q", got, want)
 	}

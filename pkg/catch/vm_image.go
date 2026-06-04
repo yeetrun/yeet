@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	defaultVMImageVersion     = "ubuntu-26.04-amd64-v1"
+	defaultVMImageVersion     = "ubuntu-26.04-amd64-v3"
 	defaultVMImageManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json"
 
 	vmImageCacheMissing = "missing"
@@ -36,15 +36,21 @@ var prepareVMRootFSFunc = prepareVMRootFS
 var vmRootFSDecompressRunner = runVMRootFSDecompress
 
 type vmImageManifest struct {
-	Name         string            `json:"name"`
-	Version      string            `json:"version"`
-	Architecture string            `json:"architecture"`
-	Kernel       string            `json:"kernel"`
-	Initrd       string            `json:"initrd,omitempty"`
-	RootFS       string            `json:"rootfs"`
-	Firecracker  string            `json:"firecracker"`
-	RootFSSize   int64             `json:"rootfs_size"`
-	Checksums    map[string]string `json:"checksums"`
+	Name                string            `json:"name"`
+	Version             string            `json:"version"`
+	Architecture        string            `json:"architecture"`
+	ImageProfile        string            `json:"image_profile,omitempty"`
+	KernelPolicy        string            `json:"kernel_policy,omitempty"`
+	SnapSupport         *bool             `json:"snap_support,omitempty"`
+	Kernel              string            `json:"kernel"`
+	Initrd              string            `json:"initrd,omitempty"`
+	RootFS              string            `json:"rootfs"`
+	Firecracker         string            `json:"firecracker"`
+	RootFSSize          int64             `json:"rootfs_size"`
+	KernelVersion       string            `json:"kernel_version,omitempty"`
+	UbuntuKernelVersion string            `json:"ubuntu_kernel_version,omitempty"`
+	Provenance          map[string]string `json:"provenance,omitempty"`
+	Checksums           map[string]string `json:"checksums"`
 }
 
 type vmImageCache struct {

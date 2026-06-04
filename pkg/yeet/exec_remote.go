@@ -289,6 +289,7 @@ func newRemoteExecRequest(host string, service string, args []string, stdin io.R
 		Host:     host,
 		TTY:      tty,
 		Progress: execProgressMode(),
+		Trace:    remoteTraceEnabled(),
 	}
 	if payload := payloadNameForStdin(stdin); payload != "" {
 		req.PayloadName = payload
@@ -297,6 +298,15 @@ func newRemoteExecRequest(host string, service string, args []string, stdin io.R
 		req.VMSSHKey = key
 	}
 	return req
+}
+
+func remoteTraceEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("YEET_TRACE"))) {
+	case "", "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 func localVMSSHKeyForRemoteArgs(args []string) string {

@@ -195,6 +195,34 @@ console or a guest-ready marker in under five seconds on `yeet-pve1`. SSH
 readiness should be automatic, but can be measured separately because LAN DHCP
 may add latency.
 
+### Guest Kernel and Snap Policy
+
+Yeet owns the Firecracker guest kernel. The Ubuntu root filesystem should not
+install or update a distro kernel, bootloader, or initrd as part of normal guest
+package maintenance. For the fast image profile, build the yeet kernel with the
+drivers required for Firecracker direct boot and the selected root filesystem
+built in, then omit Ubuntu kernel packages from the rootfs.
+
+The image builder should make that ownership explicit so future maintainers do
+not accidentally reintroduce distro kernel management:
+
+- purge or never install `linux-image-*`, `linux-modules-*`, `linux-headers-*`,
+  `linux-generic*`, bootloader packages, and initramfs generation packages that
+  are only needed for distro-managed kernels;
+- add an apt preferences file that pins Ubuntu kernel, module, header,
+  bootloader, and initramfs packages below installable priority unless yeet
+  intentionally changes the image policy;
+- include a small `/usr/share/doc/yeet-vm-image/kernel.md` note in the image
+  explaining that the kernel is supplied by the yeet VM image bundle manifest,
+  not by guest apt upgrades.
+
+The fast image profile intentionally does not support snap packages. Snap
+support needs at least a working snapd service plus kernel/filesystem support
+for loop-mounted squashfs snaps and the confinement model yeet chooses to
+support. Reintroducing snap support should be a deliberate future image profile
+decision, with the required kernel config, rootfs packages, boot-time cost, and
+security tradeoffs measured before release.
+
 Ubuntu 26.04 LTS is current in the 2026 cycle. Ubuntu's official release notes
 and release index list Ubuntu 26.04 LTS as an available LTS release.
 

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/db"
@@ -103,6 +104,31 @@ func TestVMRunnerRemoveDeletesUnitAndReloads(t *testing.T) {
 	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Fatalf("calls = %#v, want %#v", *calls, want)
+	}
+}
+
+func TestVMRunnerRemoveTreatsMissingUnitAsAlreadyRemoved(t *testing.T) {
+	withTempVMSystemdSystemDir(t)
+	var calls [][]string
+	runner := &vmRunner{name: "devbox"}
+	runner.SetNewCmd(func(name string, args ...string) *exec.Cmd {
+		call := append([]string{name}, args...)
+		calls = append(calls, call)
+		if name == "systemctl" && strings.Join(args, " ") == "disable --now yeet-vm-devbox.service" {
+			return exec.Command("sh", "-c", "printf '%s\n' 'Failed to disable unit: Unit yeet-vm-devbox.service does not exist' >&2; exit 1")
+		}
+		return exec.Command("true")
+	})
+
+	if err := runner.Remove(); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	want := [][]string{
+		{"systemctl", "disable", "--now", "yeet-vm-devbox.service"},
+		{"systemctl", "daemon-reload"},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("calls = %#v, want %#v", calls, want)
 	}
 }
 

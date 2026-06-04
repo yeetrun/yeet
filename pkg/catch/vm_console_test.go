@@ -21,7 +21,7 @@ import (
 )
 
 func TestVMConsoleConnectsToUnixSocket(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "console.sock")
+	socketPath := filepath.Join(shortUnixSocketDirForTest(t), "console.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
@@ -89,7 +89,7 @@ func TestVMConsoleFallsBackToJournalWhenSocketMissing(t *testing.T) {
 	server := newTestServer(t)
 	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, s *db.Service) error {
 		s.ServiceType = db.ServiceTypeVM
-		s.VM = &db.VMConfig{Console: db.VMConsoleConfig{SocketPath: filepath.Join(t.TempDir(), "missing.sock")}}
+		s.VM = &db.VMConfig{Console: db.VMConsoleConfig{SocketPath: filepath.Join(shortUnixSocketDirForTest(t), "missing.sock")}}
 		return nil
 	}); err != nil {
 		t.Fatalf("seed VM service: %v", err)
@@ -111,7 +111,7 @@ func TestVMConsoleFallsBackToJournalWhenSocketMissing(t *testing.T) {
 }
 
 func TestVMConsoleStopsWhenContextCanceled(t *testing.T) {
-	socketPath := filepath.Join(t.TempDir(), "console.sock")
+	socketPath := filepath.Join(shortUnixSocketDirForTest(t), "console.sock")
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)
@@ -166,7 +166,7 @@ func TestCopyVMConsoleInputStopsOnEscapeSequence(t *testing.T) {
 }
 
 func TestRunVMConsoleProxyBridgesPTYToSocket(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortUnixSocketDirForTest(t)
 	fakeFirecracker := filepath.Join(dir, "firecracker")
 	script := `#!/bin/sh
 printf 'fake-ready\n'
@@ -215,7 +215,7 @@ done
 }
 
 func TestRunVMConsoleProxyStopsWhenGuestHalts(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortUnixSocketDirForTest(t)
 	fakeFirecracker := filepath.Join(dir, "firecracker")
 	script := `#!/bin/sh
 printf '[ 1.0] reboot: System halted\n'
@@ -252,6 +252,18 @@ func dialUnixSocketForTest(t *testing.T, socketPath string) net.Conn {
 	}
 	t.Fatalf("dial unix socket %s: %v", socketPath, lastErr)
 	return nil
+}
+
+func shortUnixSocketDirForTest(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "yeet-vm-console-*")
+	if err != nil {
+		t.Fatalf("create short unix socket dir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(dir)
+	})
+	return dir
 }
 
 func readUntilForTest(t *testing.T, r io.Reader, want string) string {
