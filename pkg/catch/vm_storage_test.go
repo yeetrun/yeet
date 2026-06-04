@@ -7,6 +7,8 @@ package catch
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -30,11 +32,42 @@ func TestVMRawDiskPlanUsesSparseQemuImage(t *testing.T) {
 		{"qemu-img", "create", "-f", "raw", plan.Path, "34359738368"},
 		{"cp", "--reflink=auto", "--sparse=always", plan.BaseRootFS, plan.Path},
 		{"truncate", "-s", "34359738368", plan.Path},
+		{"e2fsck", "-pf", plan.Path},
 		{"resize2fs", plan.Path},
 	}
 	if !reflect.DeepEqual(cmds, want) {
 		t.Fatalf("commands = %#v, want %#v", cmds, want)
 	}
+}
+
+func TestRunVMCommandTreatsE2FSCKCorrectionsAsSuccess(t *testing.T) {
+	fakeCommandInPath(t, "e2fsck", "#!/bin/sh\nexit 1\n")
+
+	if err := runVMCommand(context.Background(), []string{"e2fsck", "-pf", "/srv/devbox/rootfs.raw"}); err != nil {
+		t.Fatalf("runVMCommand e2fsck exit 1: %v", err)
+	}
+}
+
+func TestRunVMCommandRejectsHardE2FSCKFailure(t *testing.T) {
+	fakeCommandInPath(t, "e2fsck", "#!/bin/sh\necho broken >&2\nexit 2\n")
+
+	err := runVMCommand(context.Background(), []string{"e2fsck", "-pf", "/srv/devbox/rootfs.raw"})
+	if err == nil {
+		t.Fatal("runVMCommand e2fsck exit 2 = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "broken") {
+		t.Fatalf("error = %q, want command output", err.Error())
+	}
+}
+
+func fakeCommandInPath(t *testing.T, name, script string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake %s: %v", name, err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 func TestVMZVOLPlanCreatesSparseClone(t *testing.T) {
