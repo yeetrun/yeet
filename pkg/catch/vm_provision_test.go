@@ -51,7 +51,7 @@ func TestRunVMDoesNotCommitReadyOnArtifactFailure(t *testing.T) {
 func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
-	fastImageVersion := "ubuntu-26.04-amd64-v4"
+	fastImageVersion := "ubuntu-26.04-amd64-v6"
 	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
 		asset, err := fakeVMImageAssetVersion(t, fastImageVersion)
 		if err != nil {

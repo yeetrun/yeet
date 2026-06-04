@@ -432,10 +432,12 @@ func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, re
 	knownHosts := vmSSHKnownHostsFile()
 	addYeetKnownHosts := knownHosts != "" && !hasSSHUserKnownHostsFileOption(out)
 	alias := vmSSHHostKeyAlias(service, proxyHost)
-	addGeneratedAlias := target.Proxy && !hasSSHHostKeyAliasOption(out)
+	addGeneratedAlias := !hasSSHHostKeyAliasOption(out)
+	addGeneratedCheckHostIP := addGeneratedAlias && !hasSSHCheckHostIPOption(out)
 
 	out = appendVMSSHBaseOptions(out, target)
-	out = appendVMSSHProxyOptions(out, target, service, proxyHost, info)
+	out = appendVMSSHIdentityOptions(out, service, proxyHost, addGeneratedAlias, addGeneratedCheckHostIP)
+	out = appendVMSSHProxyOptions(out, target, proxyHost, info)
 	plan := vmSSHOptionsPlan{Options: out}
 	if addYeetKnownHosts && addGeneratedAlias && knownHosts == vmSSHKnownHostsFile() && alias == vmSSHHostKeyAlias(service, proxyHost) {
 		plan.KnownHostRepair = &sshKnownHostRepair{
@@ -463,11 +465,19 @@ func appendVMSSHBaseOptions(options []string, target vmSSHTargetInfo) []string {
 	return out
 }
 
-func appendVMSSHProxyOptions(options []string, target vmSSHTargetInfo, service, proxyHost string, info serverInfo) []string {
+func appendVMSSHIdentityOptions(options []string, service, proxyHost string, addAlias, addCheckHostIP bool) []string {
 	out := options
-	if target.Proxy && !hasSSHHostKeyAliasOption(out) {
+	if addAlias {
 		out = append(out, "-o", "HostKeyAlias="+vmSSHHostKeyAlias(service, proxyHost))
 	}
+	if addCheckHostIP {
+		out = append(out, "-o", "CheckHostIP=no")
+	}
+	return out
+}
+
+func appendVMSSHProxyOptions(options []string, target vmSSHTargetInfo, proxyHost string, info serverInfo) []string {
+	out := options
 	if target.Proxy && !hasSSHProxyOption(out) {
 		out = append(out, "-o", "ProxyCommand=ssh -W %h:%p "+shellQuote(sshTarget(proxyHost, info)))
 	}
@@ -625,6 +635,25 @@ func hasSSHHostKeyAliasOption(options []string) bool {
 func isSSHHostKeyAliasOptionValue(value string) bool {
 	value = strings.ToLower(strings.TrimSpace(value))
 	return strings.HasPrefix(value, "hostkeyalias=")
+}
+
+func hasSSHCheckHostIPOption(options []string) bool {
+	for i, opt := range options {
+		switch {
+		case opt == "-o" && i+1 < len(options):
+			if isSSHCheckHostIPOptionValue(options[i+1]) {
+				return true
+			}
+		case strings.HasPrefix(opt, "-o") && isSSHCheckHostIPOptionValue(opt[2:]):
+			return true
+		}
+	}
+	return false
+}
+
+func isSSHCheckHostIPOptionValue(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "checkhostip=")
 }
 
 func hasSSHStrictHostKeyCheckingOption(options []string) bool {

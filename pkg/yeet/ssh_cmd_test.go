@@ -315,6 +315,7 @@ func TestServiceShellCommandForVMUsesGuestSSH(t *testing.T) {
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts"),
 		"-o", "HostKeyAlias=yeet-vm-devbox@yeet-lab",
+		"-o", "CheckHostIP=no",
 		"-o", "ProxyCommand=ssh -W %h:%p root@yeet-lab",
 	}
 	if !reflect.DeepEqual(gotOptions, wantOptions) {
@@ -326,7 +327,7 @@ func TestServiceShellCommandForVMLANNetworkDoesNotProxy(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	gotCommand, gotOptions, err := serviceShellCommandFromResponse(
+	gotCommand, gotOptions, repair, err := serviceShellCommandPlanFromResponse(
 		"yeet-lab",
 		"devbox",
 		serverInfo{InstallUser: "root"},
@@ -354,9 +355,17 @@ func TestServiceShellCommandForVMLANNetworkDoesNotProxy(t *testing.T) {
 		"-o", "HostName=10.0.4.80",
 		"-o", "StrictHostKeyChecking=accept-new",
 		"-o", "UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts"),
+		"-o", "HostKeyAlias=yeet-vm-devbox@yeet-lab",
+		"-o", "CheckHostIP=no",
 	}
 	if !reflect.DeepEqual(gotOptions, wantOptions) {
 		t.Fatalf("options = %#v, want %#v", gotOptions, wantOptions)
+	}
+	if repair == nil {
+		t.Fatal("KnownHostRepair = nil, want VM repair metadata")
+	}
+	if repair.Alias != "yeet-vm-devbox@yeet-lab" {
+		t.Fatalf("repair alias = %q", repair.Alias)
 	}
 }
 
