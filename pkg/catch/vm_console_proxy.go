@@ -6,6 +6,7 @@ package catch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +27,18 @@ type VMConsoleProxyConfig struct {
 	ConsoleSocket string
 }
 
+var ErrVMGuestReboot = errors.New("VM guest requested reboot")
+
+const VMGuestRebootExitCode = 75
+
+type vmGuestStopKind int
+
+const (
+	vmGuestStopNone vmGuestStopKind = iota
+	vmGuestStopHalt
+	vmGuestStopReboot
+)
+
 func RunVMConsoleProxy(ctx context.Context, cfg VMConsoleProxyConfig) error {
 	if err := validateVMConsoleProxyConfig(cfg); err != nil {
 		return err
@@ -43,7 +56,7 @@ func RunVMConsoleProxy(ctx context.Context, cfg VMConsoleProxyConfig) error {
 	}
 	defer func() { _ = console.Close() }()
 
-	guestStopped := make(chan struct{})
+	guestStopped := make(chan vmGuestStopKind, 1)
 	broker := newVMConsoleBroker(console, os.Stdout, guestStopped)
 	go broker.accept(listener)
 	go broker.copyOutput()
@@ -68,37 +81,43 @@ func listenVMConsoleSocket(socketPath string) (net.Listener, error) {
 	return listener, nil
 }
 
-func waitVMConsoleProcess(cmd *exec.Cmd, guestStopped <-chan struct{}) error {
-	waitDone := make(chan struct{})
-	go stopVMConsoleProcessOnGuestStop(cmd, guestStopped, waitDone)
-	if err := cmd.Wait(); err != nil {
-		close(waitDone)
-		if vmGuestStopped(guestStopped) {
-			return nil
-		}
-		return fmt.Errorf("wait for Firecracker: %w", err)
-	}
-	close(waitDone)
-	return nil
-}
+func waitVMConsoleProcess(cmd *exec.Cmd, guestStopped <-chan vmGuestStopKind) error {
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- cmd.Wait()
+	}()
 
-func stopVMConsoleProcessOnGuestStop(cmd *exec.Cmd, guestStopped <-chan struct{}, waitDone <-chan struct{}) {
 	select {
-	case <-guestStopped:
+	case kind := <-guestStopped:
 		if cmd.Process != nil {
 			_ = cmd.Process.Kill()
 		}
-	case <-waitDone:
+		err := <-waitDone
+		return vmGuestStopError(kind, err)
+	case err := <-waitDone:
+		select {
+		case kind := <-guestStopped:
+			return vmGuestStopError(kind, err)
+		default:
+		}
+		if err != nil {
+			return fmt.Errorf("wait for Firecracker: %w", err)
+		}
+		return nil
 	}
 }
 
-func vmGuestStopped(ch <-chan struct{}) bool {
-	select {
-	case <-ch:
-		return true
-	default:
-		return false
+func vmGuestStopError(kind vmGuestStopKind, err error) error {
+	switch kind {
+	case vmGuestStopReboot:
+		return ErrVMGuestReboot
+	case vmGuestStopHalt:
+		return nil
 	}
+	if err != nil {
+		return fmt.Errorf("wait for Firecracker: %w", err)
+	}
+	return nil
 }
 
 func validateVMConsoleProxyConfig(cfg VMConsoleProxyConfig) error {
@@ -123,12 +142,12 @@ type vmConsoleBroker struct {
 	mu      sync.Mutex
 	clients map[net.Conn]struct{}
 
-	guestStopped  chan struct{}
+	guestStopped  chan vmGuestStopKind
 	guestStopOnce sync.Once
 	shutdownLog   vmGuestShutdownLog
 }
 
-func newVMConsoleBroker(console *os.File, output io.Writer, guestStopped chan struct{}) *vmConsoleBroker {
+func newVMConsoleBroker(console *os.File, output io.Writer, guestStopped chan vmGuestStopKind) *vmConsoleBroker {
 	if output == nil {
 		output = io.Discard
 	}
@@ -185,8 +204,9 @@ func (b *vmConsoleBroker) copyOutput() {
 
 func (b *vmConsoleBroker) write(p []byte) {
 	_, _ = b.output.Write(p)
-	if b.shutdownLog.observe(p) {
+	if kind := b.shutdownLog.observe(p); kind != vmGuestStopNone {
 		b.guestStopOnce.Do(func() {
+			b.guestStopped <- kind
 			close(b.guestStopped)
 		})
 	}
@@ -205,19 +225,26 @@ type vmGuestShutdownLog struct {
 	tail string
 }
 
-func (l *vmGuestShutdownLog) observe(p []byte) bool {
+func (l *vmGuestShutdownLog) observe(p []byte) vmGuestStopKind {
 	text := l.tail + string(p)
-	if vmGuestShutdownText(text) {
-		return true
+	if kind := vmGuestShutdownKind(text); kind != vmGuestStopNone {
+		return kind
 	}
 	l.tail = vmGuestShutdownTail(text)
-	return false
+	return vmGuestStopNone
 }
 
-func vmGuestShutdownText(text string) bool {
+func vmGuestShutdownKind(text string) vmGuestStopKind {
 	text = strings.ToLower(text)
-	return strings.Contains(text, "reboot: system halted") ||
-		strings.Contains(text, "reboot: power down")
+	switch {
+	case strings.Contains(text, "reboot: restarting system"):
+		return vmGuestStopReboot
+	case strings.Contains(text, "reboot: system halted"),
+		strings.Contains(text, "reboot: power down"):
+		return vmGuestStopHalt
+	default:
+		return vmGuestStopNone
+	}
 }
 
 func vmGuestShutdownTail(text string) string {
