@@ -11,8 +11,12 @@ import (
 )
 
 const vmGuestInitPath = "/usr/local/lib/yeet-vm/yeet-init"
+const vmLegacyKernelBootArgs = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
 
-func vmKernelBootArgs(service string, network vmNetworkPlan) string {
+func vmKernelBootArgs(service string, network vmNetworkPlan) (string, error) {
+	if err := validateVMKernelBootHostname(service); err != nil {
+		return "", err
+	}
 	args := []string{
 		"console=ttyS0",
 		"reboot=k",
@@ -31,7 +35,14 @@ func vmKernelBootArgs(service string, network vmNetworkPlan) string {
 	if len(network.Interfaces) > 0 && network.Interfaces[0].GuestName != "" {
 		args = append(args, "yeet.iface="+network.Interfaces[0].GuestName)
 	}
-	return strings.Join(args, " ")
+	return strings.Join(args, " "), nil
+}
+
+func validateVMKernelBootHostname(service string) error {
+	if !vmHostnamePattern.MatchString(service) || strings.Contains(service, "..") {
+		return fmt.Errorf("invalid VM hostname %q for kernel boot args", service)
+	}
+	return nil
 }
 
 func vmKernelIPArg(service string, network vmNetworkPlan) string {

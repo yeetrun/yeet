@@ -244,6 +244,8 @@ func TestWriteVMGuestMetadataFiles(t *testing.T) {
 	assertFileNotContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "serial-getty")
 	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "guest-ready"), "yeet-ready")
 	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "guest-ready"), "ip -o -4 addr show scope global")
+	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "guest-ready"), "ss -H -ltn")
+	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "guest-ready"), "sport = :22")
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-grow-root.service"), "After=yeet-guest-ready.service")
 	assertFileContains(t, filepath.Join(root, "usr", "local", "lib", "yeet-vm", "grow-root"), "resize2fs")
 	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "serial-getty@ttyS0.service.d", "10-yeet-autologin.conf"), "--autologin ubuntu")
@@ -265,6 +267,29 @@ func TestWriteVMGuestMetadataFiles(t *testing.T) {
 	}
 	if target, err := os.Readlink(filepath.Join(root, "etc", "systemd", "system", "systemd-networkd-wait-online.service")); err != nil || target != "/dev/null" {
 		t.Fatalf("systemd-networkd-wait-online mask = %q, %v; want /dev/null", target, err)
+	}
+}
+
+func TestWriteVMGuestMetadataFilesUsesLegacyGuestConfigWithoutFastBoot(t *testing.T) {
+	root := t.TempDir()
+	stubVMGuestChown(t)
+	cfg := validVMMetadataConfig()
+	cfg.FastBoot = false
+	if err := writeVMGuestMetadataFiles(root, cfg); err != nil {
+		t.Fatalf("writeVMGuestMetadataFiles: %v", err)
+	}
+
+	assertFileContains(t, filepath.Join(root, "etc", "netplan", "99-yeet.yaml"), "192.168.100.12/24")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "network-online.target")
+	assertFileContains(t, filepath.Join(root, "etc", "systemd", "system", "yeet-guest-ready.service"), "ssh.service")
+	if _, err := os.Lstat(filepath.Join(root, "etc", "systemd", "system", "multi-user.target.wants", "ssh.service")); err != nil {
+		t.Fatalf("ssh.service enable symlink missing: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "etc", "systemd", "system", "yeet-sshd.service")); !os.IsNotExist(err) {
+		t.Fatalf("yeet-sshd.service exists for legacy metadata: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "etc", "systemd", "network", "10-yeet-eth0.network")); !os.IsNotExist(err) {
+		t.Fatalf("networkd file exists for legacy metadata: %v", err)
 	}
 }
 
@@ -416,6 +441,7 @@ func validVMMetadataConfig() vmMetadataConfig {
 		Hostname: "devbox",
 		User:     "ubuntu",
 		SSHKey:   "ssh-ed25519 AAAATEST user@example",
+		FastBoot: true,
 		Networks: []vmGuestNetwork{
 			{Name: "eth0", Mode: "svc", Address: "192.168.100.12/24", Gateway: "192.168.100.254"},
 			{Name: "eth1", Mode: "lan", DHCP: true},

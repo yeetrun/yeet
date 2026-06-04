@@ -51,6 +51,15 @@ func TestRunVMDoesNotCommitReadyOnArtifactFailure(t *testing.T) {
 func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
+	fastImageVersion := "ubuntu-26.04-amd64-v4"
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		asset, err := fakeVMImageAssetVersion(t, fastImageVersion)
+		if err != nil {
+			return vmImageAsset{}, err
+		}
+		asset.Manifest.GuestInit = vmGuestInitPath
+		return asset, nil
+	}
 
 	var diskCommands [][]string
 	vmProvisionDiskRunner = func(_ context.Context, cmd []string) error {
@@ -85,7 +94,7 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	if vm.SetupState != "ready" {
 		t.Fatalf("SetupState = %q, want ready", vm.SetupState)
 	}
-	if vm.Runtime != vmRuntimeFirecracker || vm.Image.Payload != vmUbuntu2604Payload || vm.Image.Version != defaultVMImageVersion {
+	if vm.Runtime != vmRuntimeFirecracker || vm.Image.Payload != vmUbuntu2604Payload || vm.Image.Version != fastImageVersion {
 		t.Fatalf("VM image/runtime = %#v", vm)
 	}
 	if vm.CPUs != 2 || vm.MemoryBytes != 2<<30 || vm.Disk.Bytes != 16<<30 || vm.Disk.Backend != vmDiskBackendRaw {
@@ -115,6 +124,9 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	if injectedMetadata.SSHKey != "ssh-ed25519 AAAATEST user@example" {
 		t.Fatalf("metadata SSH key = %q", injectedMetadata.SSHKey)
 	}
+	if !injectedMetadata.FastBoot {
+		t.Fatal("metadata FastBoot = false, want true for guest_init image")
+	}
 
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), `"kernel_image_path"`)
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), vm.Disk.Path)
@@ -131,6 +143,31 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	}
 	if !reflect.DeepEqual(*systemctlCalls, wantSystemctl) {
 		t.Fatalf("systemctl calls = %#v, want %#v", *systemctlCalls, wantSystemctl)
+	}
+}
+
+func TestRunVMProvisionUsesLegacyBootAndMetadataWithoutGuestInit(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+
+	var injectedMetadata vmMetadataConfig
+	vmProvisionMetadataInjector = func(_ context.Context, _ string, cfg vmMetadataConfig) error {
+		injectedMetadata = cfg
+		return nil
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", CPUs: 2, Memory: "2g", Disk: "16g", Restart: false}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+
+	firecrackerConfig := filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json")
+	assertFileContains(t, firecrackerConfig, "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw")
+	assertFileNotContains(t, firecrackerConfig, "init=/usr/local/lib/yeet-vm/yeet-init")
+	assertFileNotContains(t, firecrackerConfig, "ip=192.168.100.")
+	assertFileNotContains(t, firecrackerConfig, "yeet.hostname=svc")
+	assertFileNotContains(t, firecrackerConfig, "yeet.iface=eth0")
+	if injectedMetadata.FastBoot {
+		t.Fatal("metadata FastBoot = true, want false for image without guest_init")
 	}
 }
 

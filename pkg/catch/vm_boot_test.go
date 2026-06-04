@@ -12,7 +12,10 @@ import (
 func TestVMKernelBootArgsIncludesInitAndDHCPForLAN(t *testing.T) {
 	network := newVMNetworkPlan("devbox", []string{"lan"}, vmNetworkInputs{LANParent: "br0", LANParentIsBridge: true})
 
-	got := vmKernelBootArgs("devbox", network)
+	got, err := vmKernelBootArgs("devbox", network)
+	if err != nil {
+		t.Fatalf("vmKernelBootArgs: %v", err)
+	}
 
 	for _, want := range []string{
 		"console=ttyS0",
@@ -32,11 +35,24 @@ func TestVMKernelBootArgsIncludesInitAndDHCPForLAN(t *testing.T) {
 func TestVMKernelBootArgsIncludesStaticSvcIP(t *testing.T) {
 	network := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 
-	got := vmKernelBootArgs("devbox", network)
+	got, err := vmKernelBootArgs("devbox", network)
+	if err != nil {
+		t.Fatalf("vmKernelBootArgs: %v", err)
+	}
 
 	want := "ip=192.168.100.12::192.168.100.254:255.255.255.0:devbox:eth0:none"
 	if !strings.Contains(got, want) {
 		t.Fatalf("boot args = %s, want %s", got, want)
+	}
+}
+
+func TestVMKernelBootArgsRejectsUnsafeServiceName(t *testing.T) {
+	network := newVMNetworkPlan("bad name", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+
+	_, err := vmKernelBootArgs("bad name", network)
+
+	if err == nil || !strings.Contains(err.Error(), "invalid VM hostname") {
+		t.Fatalf("vmKernelBootArgs error = %v, want invalid hostname", err)
 	}
 }
 

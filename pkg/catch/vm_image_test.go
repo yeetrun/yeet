@@ -144,6 +144,7 @@ func TestVMImageCachePreservesImagePolicyMetadata(t *testing.T) {
 				"architecture":"x86_64",
 				"image_profile":"fast",
 				"kernel_policy":"yeet-managed",
+				"guest_init":"/usr/local/lib/yeet-vm/yeet-init",
 				"snap_support":false,
 				"kernel":"vmlinux",
 				"rootfs":"rootfs.ext4.zst",
@@ -185,7 +186,7 @@ func TestVMImageCachePreservesImagePolicyMetadata(t *testing.T) {
 	if err := json.Unmarshal(raw, &manifest); err != nil {
 		t.Fatalf("decode cached manifest: %v", err)
 	}
-	if manifest.ImageProfile != "fast" || manifest.KernelPolicy != "yeet-managed" || manifest.KernelVersion != "linux-7.0-yeet" {
+	if manifest.ImageProfile != "fast" || manifest.KernelPolicy != "yeet-managed" || manifest.GuestInit != vmGuestInitPath || manifest.KernelVersion != "linux-7.0-yeet" {
 		t.Fatalf("cached manifest policy metadata = %#v", manifest)
 	}
 	if manifest.SnapSupport == nil || *manifest.SnapSupport {
@@ -196,6 +197,18 @@ func TestVMImageCachePreservesImagePolicyMetadata(t *testing.T) {
 	}
 	if manifest.Initrd != "" || image.InitrdPath != "" {
 		t.Fatalf("initrd = manifest %q path %q, want omitted", manifest.Initrd, image.InitrdPath)
+	}
+}
+
+func TestVMImageSupportsFastBootRequiresGuestInitCapability(t *testing.T) {
+	if vmImageSupportsFastBoot(vmImageManifest{GuestInit: ""}) {
+		t.Fatal("vmImageSupportsFastBoot true without guest_init")
+	}
+	if vmImageSupportsFastBoot(vmImageManifest{GuestInit: "/usr/local/lib/yeet-vm/other-init"}) {
+		t.Fatal("vmImageSupportsFastBoot true for different guest_init")
+	}
+	if !vmImageSupportsFastBoot(vmImageManifest{GuestInit: vmGuestInitPath}) {
+		t.Fatal("vmImageSupportsFastBoot false for yeet guest init")
 	}
 }
 
