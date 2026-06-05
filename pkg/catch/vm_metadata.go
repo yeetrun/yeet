@@ -6,6 +6,7 @@ package catch
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -20,6 +21,9 @@ var vmGuestNetworkNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 var vmHostnamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 var vmUserPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
 var vmGuestChown = os.Chown
+
+//go:embed xterm-ghostty.terminfo
+var vmGuestGhosttyTerminfoSource string
 
 type vmMetadataConfig struct {
 	Hostname string
@@ -167,8 +171,34 @@ func injectVMMetadataIntoRootFSWith(ctx context.Context, diskPath string, cfg vm
 	if err := writer(mountRoot, cfg); err != nil {
 		return fmt.Errorf("write VM guest metadata: %w", err)
 	}
+	if err := installVMGuestTerminfo(ctx, mountRoot, runner); err != nil {
+		return err
+	}
 	if err := ensureVMGuestSSHHostKeys(ctx, mountRoot, cfg.HostKeyDir, runner); err != nil {
 		return err
+	}
+	return nil
+}
+
+func installVMGuestTerminfo(ctx context.Context, root string, runner vmCommandRunner) error {
+	if runner == nil {
+		runner = runVMCommand
+	}
+	outDir := filepath.Join(root, "etc", "terminfo")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return fmt.Errorf("prepare VM guest terminfo dir: %w", err)
+	}
+	sourceDir, err := os.MkdirTemp("", "yeet-vm-terminfo-*")
+	if err != nil {
+		return fmt.Errorf("create VM guest terminfo source dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(sourceDir) }()
+	sourcePath := filepath.Join(sourceDir, "xterm-ghostty.terminfo")
+	if err := os.WriteFile(sourcePath, []byte(vmGuestGhosttyTerminfoSource), 0o644); err != nil {
+		return fmt.Errorf("write VM guest Ghostty terminfo source: %w", err)
+	}
+	if err := runner(ctx, []string{"tic", "-x", "-o", outDir, sourcePath}); err != nil {
+		return fmt.Errorf("install VM guest Ghostty terminfo: %w", err)
 	}
 	return nil
 }
@@ -366,6 +396,9 @@ func writeVMGuestShellDefaults(root string, cfg vmMetadataConfig) error {
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		return err
 	}
+	if err := seedVMGuestHomeFromSkel(root, cfg.User); err != nil {
+		return err
+	}
 	if err := writeVMGuestManagedShellFile(filepath.Join(home, ".profile"), vmGuestProfileBegin, vmGuestProfileEnd, vmGuestProfileBlock()); err != nil {
 		return err
 	}
@@ -373,6 +406,75 @@ func writeVMGuestShellDefaults(root string, cfg vmMetadataConfig) error {
 		return err
 	}
 	return chownVMGuestShellDefaults(root, cfg.User)
+}
+
+func seedVMGuestHomeFromSkel(root, user string) error {
+	home := filepath.Join(root, "home", user)
+	for _, name := range []string{".profile", ".bashrc", ".bash_logout", ".bash_aliases"} {
+		if err := seedVMGuestHomeFileFromSkel(root, home, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func seedVMGuestHomeFileFromSkel(root, home, name string) error {
+	sourcePath := filepath.Join(root, "etc", "skel", name)
+	source, err := os.ReadFile(sourcePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	destPath := filepath.Join(home, name)
+	dest, err := os.ReadFile(destPath)
+	if err == nil && !vmGuestShellFileShouldSeed(name, string(dest)) {
+		return nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return err
+	}
+	mode := info.Mode().Perm()
+	if mode == 0 {
+		mode = 0o644
+	}
+	if err := os.WriteFile(destPath, source, mode); err != nil {
+		return err
+	}
+	return os.Chmod(destPath, mode)
+}
+
+func vmGuestShellFileShouldSeed(name, raw string) bool {
+	if strings.TrimSpace(raw) == "" {
+		return true
+	}
+	switch name {
+	case ".profile":
+		return vmGuestShellFileIsOnlyManaged(raw, vmGuestProfileBegin, vmGuestProfileEnd)
+	case ".bashrc":
+		return vmGuestShellFileIsOnlyManaged(raw, vmGuestBashRCBegin, vmGuestBashRCEnd)
+	default:
+		return false
+	}
+}
+
+func vmGuestShellFileIsOnlyManaged(raw, begin, end string) bool {
+	start := strings.Index(raw, begin)
+	if start == -1 {
+		return false
+	}
+	afterStart := raw[start:]
+	endOffset := strings.Index(afterStart, end)
+	if endOffset == -1 {
+		return false
+	}
+	afterEnd := start + endOffset + len(end)
+	return strings.TrimSpace(raw[:start]) == "" && strings.TrimSpace(raw[afterEnd:]) == ""
 }
 
 func writeVMGuestManagedShellFile(path, begin, end, block string) error {
@@ -427,12 +529,17 @@ func chownVMGuestShellDefaults(root, user string) error {
 }
 
 func vmGuestProfileBlock() string {
-	return `[ -n "${BASH_VERSION:-}" ] && [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+	return `[ -n "${BASH_VERSION:-}" ] && [ -f "$HOME/.bashrc" ] && [ -z "${YEET_VM_BASHRC_SOURCED:-}" ] && . "$HOME/.bashrc"
 `
 }
 
 func vmGuestBashRCBlock(hostname string) string {
 	return fmt.Sprintf(`export PATH="$HOME/.local/bin:$PATH"
+if [ "${YEET_VM_BASHRC_SOURCED:-}" = 1 ]; then
+	return
+fi
+export YEET_VM_BASHRC_SOURCED=1
+
 if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
 	export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 fi
@@ -442,27 +549,61 @@ case "$-" in
 	*) return ;;
 esac
 
+HISTCONTROL=ignoreboth
+shopt -s histappend
+HISTSIZE="${HISTSIZE:-1000}"
+HISTFILESIZE="${HISTFILESIZE:-2000}"
+shopt -s checkwinsize
+
+[ -x /usr/bin/lesspipe ] && eval "$(SHELL=/bin/sh lesspipe)"
+
+if [ -z "${debian_chroot:-}" ] && [ -r /etc/debian_chroot ]; then
+	debian_chroot="$(cat /etc/debian_chroot)"
+fi
+
+if command -v tput >/dev/null 2>&1 && [ "$(tput colors 2>/dev/null || echo 0)" -ge 8 ]; then
+	PS1='${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+else
+	PS1='${debian_chroot:+($debian_chroot)}\u@\h:\w\$ '
+fi
+
+case "${TERM:-}" in
+xterm*|rxvt*|ghostty*|*-ghostty)
+	PS1="\[\e]0;${debian_chroot:+($debian_chroot)}\u@\h: \w\a\]$PS1"
+	;;
+esac
+
+if command -v dircolors >/dev/null 2>&1; then
+	if [ -r "$HOME/.dircolors" ]; then
+		eval "$(dircolors -b "$HOME/.dircolors")" 2>/dev/null || true
+	else
+		eval "$(dircolors -b)" 2>/dev/null || true
+	fi
+	alias ls='ls --color=auto'
+	alias grep='grep --color=auto'
+	alias fgrep='fgrep --color=auto'
+	alias egrep='egrep --color=auto'
+fi
+
 alias ll='ls -alF'
 alias la='ls -A'
 alias l='ls -CF'
 
+if [ -f "$HOME/.bash_aliases" ]; then
+	. "$HOME/.bash_aliases"
+fi
+
+if ! shopt -oq posix; then
+	if [ -f /usr/share/bash-completion/bash_completion ]; then
+		. /usr/share/bash-completion/bash_completion
+	elif [ -f /etc/bash_completion ]; then
+		. /etc/bash_completion
+	fi
+fi
+
 printf '\n%%s\n' 'Welcome to yeet VM %s.'
 printf '%%s\n' 'The disk is persistent. You have passwordless sudo.'
-
-yeet_vm_hints='
-Run yeet ssh %s to reconnect from your workstation.
-Run yeet vm console %s for the serial console.
-Run yeet service set %s --disk=SIZE after stopping the VM to grow the root disk.
-Run python3 -m http.server 8000 to serve the current directory.
-Run systemctl status --no-pager to inspect guest services.
-'
-hint_count="$(printf '%%s\n' "$yeet_vm_hints" | sed '/^$/d' | wc -l)"
-if [ "$hint_count" -gt 0 ]; then
-	hint_index="$(( $(date +%%s 2>/dev/null || echo 0) %% hint_count + 1 ))"
-	printf 'Hint: %%s\n' "$(printf '%%s\n' "$yeet_vm_hints" | sed '/^$/d' | sed -n "${hint_index}p")"
-fi
-unset yeet_vm_hints hint_count hint_index
-`, hostname, hostname, hostname, hostname)
+`, hostname)
 }
 
 func ensureVMGuestLoginUser(root, userName string) error {

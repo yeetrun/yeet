@@ -174,10 +174,7 @@ login shells. The `.bashrc` block should:
 - enable color aliases when `dircolors` is available;
 - define common `ls` aliases;
 - print a concise interactive SSH welcome that says the disk is persistent and
-  the user has passwordless sudo;
-- show one rotating yeet-oriented hint, such as using `yeet vm console` for
-  recovery, using `python3 -m http.server` for quick local testing, or resizing
-  stopped VMs with `yeet service set`.
+  the user has passwordless sudo.
 
 The managed blocks must be idempotent and preserve user-authored `.profile` and
 `.bashrc` content. Metadata reinjection during a network change should replace

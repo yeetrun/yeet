@@ -26,6 +26,7 @@ func TestSetupVMHostWithReadyHostSkipsPromptAndInstall(t *testing.T) {
 			"mount":     true,
 			"umount":    true,
 			"ip":        true,
+			"tic":       true,
 			"apt-get":   true,
 		}),
 		pathExists: fakeVMPathExists(map[string]bool{
@@ -91,16 +92,16 @@ func TestSetupVMHostWithMissingPackagesPromptsAndInstallsAPT(t *testing.T) {
 	}
 	want := [][]string{
 		{"apt-get", "update"},
-		{"apt-get", "install", "-y", "e2fsprogs", "qemu-utils", "zstd"},
+		{"apt-get", "install", "-y", "e2fsprogs", "ncurses-bin", "qemu-utils", "zstd"},
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
 	}
 	got := stderr.String()
-	if !strings.Contains(got, "Warning: VM tooling is missing required commands: qemu-img, zstd, e2fsck, resize2fs") {
+	if !strings.Contains(got, "Warning: VM tooling is missing required commands: qemu-img, zstd, e2fsck, resize2fs, tic") {
 		t.Fatalf("stderr = %q, want missing command warning", got)
 	}
-	if !strings.Contains(got, "Install packages: e2fsprogs, qemu-utils, zstd") {
+	if !strings.Contains(got, "Install packages: e2fsprogs, ncurses-bin, qemu-utils, zstd") {
 		t.Fatalf("stderr = %q, want package list", got)
 	}
 }
@@ -183,6 +184,7 @@ func TestSetupVMHostWithMissingCapabilitiesWarnsButDoesNotFail(t *testing.T) {
 			"mount":     true,
 			"umount":    true,
 			"ip":        true,
+			"tic":       true,
 			"zfs":       true,
 		}),
 		pathExists: fakeVMPathExists(map[string]bool{}),
