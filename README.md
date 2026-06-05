@@ -14,7 +14,8 @@
 
 If you landed here first, start with the docs and installation guide on [yeetrun.com](https://yeetrun.com).
 
-See the [Architecture](https://yeetrun.com/docs/concepts/architecture) page for how the pieces fit together.
+See the [Architecture](https://yeetrun.com/docs/concepts/architecture) page for how the pieces fit together, and
+[Payloads](https://yeetrun.com/docs/payloads) when you want to dive into containers, binaries, VMs, and cron jobs.
 
 ## Read This First
 
@@ -190,7 +191,8 @@ yeet-owned Ubuntu 26.04 image bundle published at
 the service type `vm`.
 
 ```bash
-yeet run devbox vm://ubuntu/26.04 --net=svc
+yeet run devbox vm://ubuntu/26.04
+yeet run lanbox vm://ubuntu/26.04 --net=lan
 yeet vm images
 yeet vm images update
 yeet vm console devbox
@@ -259,6 +261,9 @@ default, catch snapshots before a redeploy, a Docker image update, or a
 ZFS-backed service-root migration; first deploys are skipped because there is
 nothing useful to recover. Snapshot creation is required by default, so the
 change aborts if `zfs snapshot` fails.
+
+See the [ZFS docs](https://yeetrun.com/docs/concepts/zfs) for dataset-backed
+service roots, snapshot policy, and VM disk clone behavior.
 
 The server-wide default is enabled, keeps the newest 5 yeet-created snapshots,
 and prunes yeet-created snapshots older than 7 days:
