@@ -154,6 +154,35 @@ The implementation should reuse existing rendering helpers where possible.
 If a resource change does not affect metadata, avoid remounting and injecting
 the rootfs.
 
+## Guest Shell Defaults
+
+VM metadata injection should also make the default SSH shell feel friendlier.
+Use the exe.dev `.bashrc` pattern as inspiration, but keep yeet-specific text
+accurate and avoid exe.dev proxy URLs or product names.
+
+The current yeet VM image does not copy `/etc/skel/.bashrc` or `.profile` into
+`/home/ubuntu`, so metadata injection should create both files when missing.
+The implementation should write a managed source block into `~/.profile` and a
+managed defaults block into the VM login user's `~/.bashrc` instead of
+replacing whole files. The `.profile` block should source `.bashrc` for Bash
+login shells. The `.bashrc` block should:
+
+- add `$HOME/.local/bin` to `PATH`;
+- set `XDG_RUNTIME_DIR` when `/run/user/<uid>` exists;
+- enable practical Bash defaults such as appended history and terminal resize
+  checks;
+- enable color aliases when `dircolors` is available;
+- define common `ls` aliases;
+- print a concise interactive SSH welcome that says the disk is persistent and
+  the user has passwordless sudo;
+- show one rotating yeet-oriented hint, such as using `yeet vm console` for
+  recovery, using `python3 -m http.server` for quick local testing, or resizing
+  stopped VMs with `yeet service set`.
+
+The managed blocks must be idempotent and preserve user-authored `.profile` and
+`.bashrc` content. Metadata reinjection during a network change should replace
+only the managed yeet blocks.
+
 ## Local Config Sync
 
 `yeet service set` already updates a matching local `yeet.toml` entry after the
@@ -205,6 +234,8 @@ Add focused tests for:
 - no-op disk resize skipping external disk commands.
 - network replacement cleaning old devices, setting up new devices, and
   persisting new DB networks.
+- guest shell defaults writing idempotent managed `.profile` and `.bashrc`
+  blocks without overwriting user content.
 - service-set local config rewriting VM run flags while preserving payload args.
 - existing root, publish, and snapshot service-set tests remaining unchanged.
 
@@ -249,6 +280,8 @@ each mutation.
 - VM resource changes fail cleanly while the VM is running.
 - Disk shrink is rejected.
 - Raw and ZVOL disk growth both work.
+- VM SSH sessions get yeet-managed modern Bash defaults without clobbering
+  user-authored `.profile` or `.bashrc` content.
 - Firecracker config, guest metadata, catch DB, and local `yeet.toml` stay in
   sync after successful changes.
 - Existing non-VM service-set behavior is unchanged.
