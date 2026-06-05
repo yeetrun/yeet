@@ -74,6 +74,14 @@ type ServiceSetFlags struct {
 	Empty            bool
 	Publish          []string
 	PublishReset     bool
+	CPUs             int
+	Memory           string
+	Disk             string
+	Net              string
+	NetworkChange    bool
+	MacvlanMac       string
+	MacvlanVlan      int
+	MacvlanParent    string
 	Snapshots        string
 	SnapshotKeepLast string
 	SnapshotMaxAge   string
@@ -213,6 +221,13 @@ type serviceSetFlagsParsed struct {
 	Empty            bool     `flag:"empty"`
 	Publish          []string `flag:"publish" short:"p"`
 	PublishReset     bool     `flag:"publish-reset"`
+	CPUs             int      `flag:"cpus"`
+	Memory           string   `flag:"memory"`
+	Disk             string   `flag:"disk"`
+	Net              string   `flag:"net"`
+	MacvlanMac       string   `flag:"macvlan-mac"`
+	MacvlanVlan      int      `flag:"macvlan-vlan"`
+	MacvlanParent    string   `flag:"macvlan-parent"`
 	Snapshots        string   `flag:"snapshots"`
 	SnapshotKeepLast string   `flag:"snapshot-keep-last"`
 	SnapshotMaxAge   string   `flag:"snapshot-max-age"`
@@ -481,7 +496,7 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set service settings",
-				Usage:       "service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]",
+				Usage:       "service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--cpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]",
 				Examples: []string{
 					"yeet service set <svc> -p 80:80 -p 443:443",
 					"yeet service set <svc> --publish-reset -p 443:443",
@@ -489,6 +504,8 @@ var remoteGroupInfos = map[string]GroupInfo{
 					"yeet service set <svc> --service-root=/srv/apps/<svc>",
 					"yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy",
 					"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
+					"yeet service set <vm> --cpus=8 --memory=8g --disk=128g",
+					"yeet service set <vm> --net=lan",
 					"yeet service set <svc> --snapshots=off",
 					"yeet service set <svc> --snapshots=on --snapshot-keep-last=5 --snapshot-max-age=7d",
 				},
@@ -718,6 +735,14 @@ func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string)
 		Empty:            parsed.Empty,
 		Publish:          orderedFlagValues(parseArgs, "--publish", "-p"),
 		PublishReset:     parsed.PublishReset,
+		CPUs:             parsed.CPUs,
+		Memory:           strings.TrimSpace(parsed.Memory),
+		Disk:             strings.TrimSpace(parsed.Disk),
+		Net:              strings.TrimSpace(parsed.Net),
+		NetworkChange:    hasNamedFlag(parseArgs, "--net"),
+		MacvlanMac:       strings.TrimSpace(parsed.MacvlanMac),
+		MacvlanVlan:      parsed.MacvlanVlan,
+		MacvlanParent:    strings.TrimSpace(parsed.MacvlanParent),
 		Snapshots:        snapshotMode,
 		SnapshotKeepLast: strings.TrimSpace(parsed.SnapshotKeepLast),
 		SnapshotMaxAge:   strings.TrimSpace(parsed.SnapshotMaxAge),
@@ -738,7 +763,7 @@ func validateServiceSetFlags(flags ServiceSetFlags) error {
 	if err := validateServiceSetMigrationFlags(flags); err != nil {
 		return err
 	}
-	return nil
+	return validateServiceSetVMFlags(flags)
 }
 
 func validateServiceSetMigrationFlags(flags ServiceSetFlags) error {
@@ -764,7 +789,7 @@ func validateServiceSetRootFlags(flags ServiceSetFlags) error {
 		return err
 	}
 	if !serviceSetHasChange(flags, rootChange) {
-		return fmt.Errorf("service set requires --service-root, snapshot settings, or published ports")
+		return fmt.Errorf("service set requires settings to change")
 	}
 	return nil
 }
@@ -775,6 +800,26 @@ func hasServiceSetRootChange(flags ServiceSetFlags) bool {
 
 func hasServiceSetPublishChange(flags ServiceSetFlags) bool {
 	return len(flags.Publish) != 0 || flags.PublishReset
+}
+
+func hasServiceSetVMChange(flags ServiceSetFlags) bool {
+	return flags.CPUs != 0 ||
+		strings.TrimSpace(flags.Memory) != "" ||
+		strings.TrimSpace(flags.Disk) != "" ||
+		flags.NetworkChange ||
+		strings.TrimSpace(flags.MacvlanMac) != "" ||
+		flags.MacvlanVlan != 0 ||
+		strings.TrimSpace(flags.MacvlanParent) != ""
+}
+
+func validateServiceSetVMFlags(flags ServiceSetFlags) error {
+	if flags.CPUs < 0 {
+		return fmt.Errorf("VM CPU count must be positive")
+	}
+	if flags.MacvlanVlan < 0 {
+		return fmt.Errorf("--macvlan-vlan must not be negative")
+	}
+	return nil
 }
 
 func validateServiceSetRootValue(flags ServiceSetFlags, rootChange bool) error {
@@ -791,7 +836,7 @@ func validateServiceSetRootValue(flags ServiceSetFlags, rootChange bool) error {
 }
 
 func serviceSetHasChange(flags ServiceSetFlags, rootChange bool) bool {
-	return rootChange || flags.SnapshotChange || hasServiceSetPublishChange(flags)
+	return rootChange || flags.SnapshotChange || hasServiceSetPublishChange(flags) || hasServiceSetVMChange(flags)
 }
 
 func normalizeSnapshotMode(value string) (string, error) {
@@ -884,6 +929,16 @@ func orderedFlagValues(args []string, longName, shortName string) []string {
 		}
 	}
 	return values
+}
+
+func hasNamedFlag(args []string, name string) bool {
+	for _, arg := range args {
+		flagName, _ := splitInlineFlagValue(arg)
+		if flagName == name {
+			return true
+		}
+	}
+	return false
 }
 
 func isFlagToken(arg string) bool {

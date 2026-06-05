@@ -285,6 +285,22 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 			wantBridged: "service set -p 80:80",
 			wantOK:      true,
 		},
+		{
+			name:        "vm shape flags after service",
+			args:        []string{"service", "set", "devbox", "--cpus=8", "--memory", "8g", "--disk=128g"},
+			wantService: "devbox",
+			wantHost:    "",
+			wantBridged: "service set --cpus=8 --memory 8g --disk=128g",
+			wantOK:      true,
+		},
+		{
+			name:        "vm net flags before service",
+			args:        []string{"service", "set", "--net", "lan", "--macvlan-parent=vmbr0", "devbox"},
+			wantService: "devbox",
+			wantHost:    "",
+			wantBridged: "service set --net lan --macvlan-parent=vmbr0",
+			wantOK:      true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
