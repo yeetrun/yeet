@@ -492,16 +492,26 @@ func (s *SystemdService) monitorTailscale() (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	bo := backoff.NewBackoff("tailscale monitor", log.Printf, time.Minute)
+	return runTailscaleMonitorLoop(ctx, func() error {
+		return s.monitorTailscaleBus(ctx, &lc, bo)
+	}, func(err error) {
+		log.Printf("tailscaled socket not found, retrying")
+		bo.BackOff(ctx, err)
+	})
+}
+
+func runTailscaleMonitorLoop(ctx context.Context, watch func() error, retryMissingSocket func(error)) error {
 	for {
-		if err := s.monitorTailscaleBus(ctx, &lc, bo); err != nil {
-			if !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-			log.Printf("tailscaled socket not found, retrying")
-			bo.BackOff(ctx, err)
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
+		err := watch()
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		retryMissingSocket(err)
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 	}
 }
@@ -541,7 +551,6 @@ func (s *SystemdService) storeTailscaleStableID(bus *local.IPNBusWatcher) error 
 		if msg.NetMap == nil {
 			continue
 		}
-		log.Printf("got netmap")
 		_, _, err = s.db.MutateService(s.cfg.Name(), func(d *db.Data, s *db.Service) error {
 			s.TSNet.StableID = msg.NetMap.SelfNode.StableID()
 			return nil

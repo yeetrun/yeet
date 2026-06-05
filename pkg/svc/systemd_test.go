@@ -5,6 +5,8 @@
 package svc
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +15,69 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/yeetrun/yeet/pkg/db"
 )
+
+func TestTailscaleMonitorLoopReturnsAfterStableIDStored(t *testing.T) {
+	var calls int
+	err := runTailscaleMonitorLoop(
+		context.Background(),
+		func() error {
+			calls++
+			return nil
+		},
+		func(error) {
+			t.Fatal("backoff should not run after successful stable ID storage")
+		},
+	)
+	if err != nil {
+		t.Fatalf("runTailscaleMonitorLoop returned error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("watch calls = %d, want 1", calls)
+	}
+}
+
+func TestTailscaleMonitorLoopRetriesMissingSocket(t *testing.T) {
+	var calls int
+	var backoffs int
+	err := runTailscaleMonitorLoop(
+		context.Background(),
+		func() error {
+			calls++
+			if calls == 1 {
+				return os.ErrNotExist
+			}
+			return nil
+		},
+		func(error) {
+			backoffs++
+		},
+	)
+	if err != nil {
+		t.Fatalf("runTailscaleMonitorLoop returned error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("watch calls = %d, want 2", calls)
+	}
+	if backoffs != 1 {
+		t.Fatalf("backoffs = %d, want 1", backoffs)
+	}
+}
+
+func TestTailscaleMonitorLoopReturnsNonSocketError(t *testing.T) {
+	wantErr := errors.New("watch failed")
+	err := runTailscaleMonitorLoop(
+		context.Background(),
+		func() error {
+			return wantErr
+		},
+		func(error) {
+			t.Fatal("backoff should not run for non-socket errors")
+		},
+	)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runTailscaleMonitorLoop error = %v, want %v", err, wantErr)
+	}
+}
 
 func TestSystemdUnitRendersExplicitDependencies(t *testing.T) {
 	unit := SystemdUnit{
