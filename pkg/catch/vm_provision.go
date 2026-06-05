@@ -243,7 +243,7 @@ func (e *ttyExecer) selectStaleVMProvisionImage(ctx context.Context, cache vmIma
 			return vmImageAsset{}, staleVMImagePolicyError(payload, state, latestManifest)
 		}
 		donePrompt := e.traceBlock("vm image stale prompt")
-		update, err := cmdutil.Confirm(e.confirmationReader(), e.rw, staleVMImagePrompt(payload, state, latestManifest))
+		update, err := e.confirmStaleVMImageUpdate(payload, state, latestManifest)
 		donePrompt()
 		if err != nil {
 			return vmImageAsset{}, err
@@ -263,15 +263,99 @@ func (e *ttyExecer) selectStaleVMProvisionImage(ctx context.Context, cache vmIma
 	}
 }
 
-func (e *ttyExecer) confirmationReader() io.Reader {
+func (e *ttyExecer) confirmStaleVMImageUpdate(payload string, state vmImageCacheState, latestManifest vmImageManifest) (bool, error) {
+	msg := staleVMImagePrompt(payload, state, latestManifest)
 	if e.bypassPtyInput && e.rawRW != nil {
-		return e.rawRW
+		return confirmRawLine(e.rawRW, e.rw, msg)
 	}
-	return e.rw
+	return cmdutil.Confirm(e.rw, e.rw, msg)
+}
+
+func confirmRawLine(r io.Reader, w io.Writer, msg string) (bool, error) {
+	if _, err := fmt.Fprintf(w, "%s [y/N]: ", msg); err != nil {
+		return false, fmt.Errorf("failed to write confirmation prompt: %w", err)
+	}
+	answer, err := readRawConfirmationAnswer(r, w)
+	if err != nil {
+		return false, err
+	}
+	return strings.EqualFold(strings.TrimSpace(string(answer)), "y"), nil
+}
+
+func readRawConfirmationAnswer(r io.Reader, w io.Writer) ([]byte, error) {
+	var answer []byte
+	for {
+		b, err := readRawConfirmationByte(r)
+		if err != nil {
+			return nil, err
+		}
+		done, err := handleRawConfirmationByte(&answer, b, w)
+		if err != nil {
+			return nil, err
+		}
+		if done {
+			return answer, nil
+		}
+	}
+}
+
+func readRawConfirmationByte(r io.Reader) (byte, error) {
+	var b [1]byte
+	for {
+		n, err := r.Read(b[:])
+		if n > 0 {
+			return b[0], nil
+		}
+		if err != nil {
+			return 0, fmt.Errorf("failed to read confirmation: %w", err)
+		}
+	}
+}
+
+func handleRawConfirmationByte(answer *[]byte, b byte, w io.Writer) (bool, error) {
+	switch b {
+	case '\r', '\n':
+		return true, writeRawConfirmationEcho(w, "\n")
+	case 0x03:
+		return false, rawConfirmationInterrupt(w, "^C\n", "interrupted")
+	case 0x1c:
+		return false, rawConfirmationInterrupt(w, "^\\\n", "quit")
+	case '\b', 0x7f:
+		return false, rawConfirmationBackspace(answer, w)
+	default:
+		*answer = append(*answer, b)
+		return false, writeRawConfirmationEchoBytes(w, []byte{b})
+	}
+}
+
+func rawConfirmationInterrupt(w io.Writer, echo, msg string) error {
+	if err := writeRawConfirmationEcho(w, echo); err != nil {
+		return err
+	}
+	return errors.New(msg)
+}
+
+func rawConfirmationBackspace(answer *[]byte, w io.Writer) error {
+	if len(*answer) == 0 {
+		return nil
+	}
+	*answer = (*answer)[:len(*answer)-1]
+	return writeRawConfirmationEcho(w, "\b \b")
+}
+
+func writeRawConfirmationEcho(w io.Writer, s string) error {
+	return writeRawConfirmationEchoBytes(w, []byte(s))
+}
+
+func writeRawConfirmationEchoBytes(w io.Writer, b []byte) error {
+	if _, err := w.Write(b); err != nil {
+		return fmt.Errorf("failed to write confirmation echo: %w", err)
+	}
+	return nil
 }
 
 func staleVMImagePrompt(payload string, state vmImageCacheState, latestManifest vmImageManifest) string {
-	return fmt.Sprintf("VM image %s has cached version %s; latest is %s. Update now?", payload, vmImageVersionForMessage(state.CachedVersion), vmImageVersionForMessage(vmLatestVersionForMessage(state, latestManifest)))
+	return fmt.Sprintf("Update VM image %s (cached %s, latest %s)?", payload, vmImagePromptVersion(state.CachedVersion), vmImagePromptVersion(vmLatestVersionForMessage(state, latestManifest)))
 }
 
 func staleVMImagePolicyError(payload string, state vmImageCacheState, latestManifest vmImageManifest) error {
@@ -283,6 +367,31 @@ func vmLatestVersionForMessage(state vmImageCacheState, latestManifest vmImageMa
 		return state.LatestVersion
 	}
 	return latestManifest.Version
+}
+
+func vmImagePromptVersion(version string) string {
+	version = vmImageVersionForMessage(version)
+	idx := strings.LastIndex(version, "-v")
+	if idx < 0 {
+		return version
+	}
+	suffix := version[idx+1:]
+	if !isNumericVersionSuffix(suffix) {
+		return version
+	}
+	return suffix
+}
+
+func isNumericVersionSuffix(suffix string) bool {
+	if len(suffix) < 2 || suffix[0] != 'v' {
+		return false
+	}
+	for _, r := range suffix[1:] {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func vmImageVersionForMessage(version string) string {
