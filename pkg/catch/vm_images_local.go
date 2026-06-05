@@ -56,6 +56,16 @@ type localVMImageRef struct {
 	CreatedAt    string `json:"createdAt"`
 }
 
+type localVMImageManifestCapabilities struct {
+	ImageProfile        string
+	KernelPolicy        string
+	GuestInit           string
+	SnapSupportSet      bool
+	SnapSupport         bool
+	KernelVersion       string
+	UbuntuKernelVersion string
+}
+
 func validateLocalVMImageName(name string) error {
 	if name == "" {
 		return fmt.Errorf("local VM image name is required")
@@ -111,17 +121,22 @@ func (i localVMImageImporter) importExtracted(cacheRoot string, req localVMImage
 	if err != nil {
 		return localVMImageRef{}, err
 	}
+	sourceManifest, hasSourceManifest, err := localVMImageSourceManifest(stagingDir, rootFSName)
+	if err != nil {
+		return localVMImageRef{}, err
+	}
 	kernelSource, kernelPolicy, err := localVMImageKernelSource(stagingDir, managed.Paths.KernelPath, req.AllowLocalKernel)
 	if err != nil {
 		return localVMImageRef{}, err
 	}
-	contentID, err := localVMImageContentID(req.Name, rootFSPath, kernelSource, managed.Paths.FirecrackerPath)
+	capabilities := localVMImageCapabilities(sourceManifest, hasSourceManifest, managed.Manifest, kernelPolicy)
+	contentID, err := localVMImageContentID(req.Name, rootFSPath, kernelSource, managed.Paths.FirecrackerPath, capabilities)
 	if err != nil {
 		return localVMImageRef{}, err
 	}
 	version := fmt.Sprintf("local-%s-%s", strings.ReplaceAll(req.Name, "/", "-"), contentID[:12])
 	blobDir := filepath.Join(cacheRoot, "local", "blobs", contentID)
-	if err := installLocalVMImageBlob(blobDir, rootFSName, rootFSPath, kernelSource, managed.Paths.FirecrackerPath, version, req.Name, kernelPolicy, rootFSSize); err != nil {
+	if err := installLocalVMImageBlob(blobDir, rootFSName, rootFSPath, kernelSource, managed.Paths.FirecrackerPath, version, req.Name, rootFSSize, capabilities); err != nil {
 		return localVMImageRef{}, err
 	}
 
@@ -163,6 +178,78 @@ func localVMImageKernelSource(stagingDir, managedKernelPath string, allowLocalKe
 		return "", "", err
 	}
 	return kernelSource, localVMImageKernelPolicyLocal, nil
+}
+
+func localVMImageSourceManifest(stagingDir, rootFSName string) (vmImageManifest, bool, error) {
+	raw, err := os.ReadFile(filepath.Join(stagingDir, "manifest.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return vmImageManifest{}, false, nil
+		}
+		return vmImageManifest{}, false, fmt.Errorf("read local VM image source manifest: %w", err)
+	}
+	var manifest vmImageManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return vmImageManifest{}, false, fmt.Errorf("decode local VM image source manifest: %w", err)
+	}
+	if manifest.RootFS != "" && manifest.RootFS != rootFSName {
+		return vmImageManifest{}, false, fmt.Errorf("local VM image source manifest rootfs %q does not match imported rootfs %q", manifest.RootFS, rootFSName)
+	}
+	return manifest, true, nil
+}
+
+func localVMImageCapabilities(source vmImageManifest, hasSource bool, managed vmImageManifest, kernelPolicy string) localVMImageManifestCapabilities {
+	caps := localVMImageManifestCapabilities{
+		ImageProfile: "local",
+		KernelPolicy: kernelPolicy,
+	}
+	if hasSource {
+		caps.applySource(source)
+	} else {
+		caps.applyManagedRootFSDefaults(managed, kernelPolicy)
+	}
+	caps.applyManagedKernel(managed, kernelPolicy)
+	return caps
+}
+
+func (c *localVMImageManifestCapabilities) applySource(source vmImageManifest) {
+	if strings.TrimSpace(source.ImageProfile) != "" {
+		c.ImageProfile = source.ImageProfile
+	}
+	if strings.TrimSpace(source.GuestInit) == vmGuestInitPath {
+		c.GuestInit = vmGuestInitPath
+	}
+	if source.SnapSupport != nil {
+		c.SnapSupportSet = true
+		c.SnapSupport = *source.SnapSupport
+	}
+	if strings.TrimSpace(source.KernelVersion) != "" {
+		c.KernelVersion = source.KernelVersion
+	}
+	if strings.TrimSpace(source.UbuntuKernelVersion) != "" {
+		c.UbuntuKernelVersion = source.UbuntuKernelVersion
+	}
+}
+
+func (c *localVMImageManifestCapabilities) applyManagedRootFSDefaults(managed vmImageManifest, kernelPolicy string) {
+	if kernelPolicy != localVMImageKernelPolicyManaged {
+		return
+	}
+	if strings.TrimSpace(managed.ImageProfile) != "" {
+		c.ImageProfile = managed.ImageProfile
+	}
+	if strings.TrimSpace(managed.GuestInit) == vmGuestInitPath {
+		c.GuestInit = vmGuestInitPath
+	}
+}
+
+func (c *localVMImageManifestCapabilities) applyManagedKernel(managed vmImageManifest, kernelPolicy string) {
+	if kernelPolicy != localVMImageKernelPolicyManaged {
+		return
+	}
+	if strings.TrimSpace(managed.KernelVersion) != "" {
+		c.KernelVersion = managed.KernelVersion
+	}
 }
 
 func resolveLocalVMImageAsset(ctx context.Context, cacheRoot, name string) (vmImageAsset, error) {
@@ -243,7 +330,7 @@ func verifyResolvedLocalVMImage(ref localVMImageRef, manifest vmImageManifest, p
 	if err := localVMImageVerifyManifestArtifacts(ref.Root, manifest); err != nil {
 		return err
 	}
-	contentID, err := localVMImageContentID(ref.Name, paths.RootFSPath, paths.KernelPath, paths.FirecrackerPath)
+	contentID, err := localVMImageContentID(ref.Name, paths.RootFSPath, paths.KernelPath, paths.FirecrackerPath, localVMImageCapabilitiesFromManifest(manifest))
 	if err != nil {
 		return err
 	}
@@ -600,9 +687,12 @@ func localVMImageSafeArtifactPath(stagingDir, name string) (string, error) {
 	return resolved, nil
 }
 
-func localVMImageContentID(name, rootFSPath, kernelPath, firecrackerPath string) (string, error) {
+func localVMImageContentID(name, rootFSPath, kernelPath, firecrackerPath string, capabilities localVMImageManifestCapabilities) (string, error) {
 	h := sha256.New()
 	if _, err := h.Write([]byte(name)); err != nil {
+		return "", err
+	}
+	if err := hashLocalVMImageCapabilities(h, capabilities); err != nil {
 		return "", err
 	}
 	for _, path := range []string{rootFSPath, kernelPath, firecrackerPath} {
@@ -614,6 +704,27 @@ func localVMImageContentID(name, rootFSPath, kernelPath, firecrackerPath string)
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func hashLocalVMImageCapabilities(w io.Writer, capabilities localVMImageManifestCapabilities) error {
+	parts := []string{
+		capabilities.ImageProfile,
+		capabilities.KernelPolicy,
+		capabilities.GuestInit,
+		fmt.Sprintf("%t", capabilities.SnapSupportSet),
+		fmt.Sprintf("%t", capabilities.SnapSupport),
+		capabilities.KernelVersion,
+		capabilities.UbuntuKernelVersion,
+	}
+	for _, part := range parts {
+		if _, err := w.Write([]byte{0}); err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte(part)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func hashLocalVMImageFile(w io.Writer, path string) error {
@@ -628,7 +739,7 @@ func hashLocalVMImageFile(w io.Writer, path string) error {
 	return nil
 }
 
-func installLocalVMImageBlob(blobDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, version, name, kernelPolicy string, rootFSSize int64) error {
+func installLocalVMImageBlob(blobDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, version, name string, rootFSSize int64, capabilities localVMImageManifestCapabilities) error {
 	tmpDir, err := createLocalVMImageBlobTemp(blobDir)
 	if err != nil {
 		return err
@@ -639,7 +750,7 @@ func installLocalVMImageBlob(blobDir, rootFSName, rootFSSource, kernelSource, fi
 			_ = os.RemoveAll(tmpDir)
 		}
 	}()
-	manifest, err := populateLocalVMImageBlob(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, version, name, kernelPolicy, rootFSSize)
+	manifest, err := populateLocalVMImageBlob(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, version, name, rootFSSize, capabilities)
 	if err != nil {
 		return err
 	}
@@ -663,7 +774,7 @@ func createLocalVMImageBlobTemp(blobDir string) (string, error) {
 	return tmpDir, nil
 }
 
-func populateLocalVMImageBlob(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, version, name, kernelPolicy string, rootFSSize int64) (vmImageManifest, error) {
+func populateLocalVMImageBlob(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, version, name string, rootFSSize int64, capabilities localVMImageManifestCapabilities) (vmImageManifest, error) {
 	if err := copyLocalVMImageArtifacts(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource); err != nil {
 		return vmImageManifest{}, err
 	}
@@ -671,7 +782,7 @@ func populateLocalVMImageBlob(tmpDir, rootFSName, rootFSSource, kernelSource, fi
 	if err != nil {
 		return vmImageManifest{}, err
 	}
-	manifest := localVMImageManifest(name, version, rootFSName, kernelPolicy, rootFSSize, checksums)
+	manifest := localVMImageManifest(name, version, rootFSName, rootFSSize, checksums, capabilities)
 	if err := manifest.validate(); err != nil {
 		return vmImageManifest{}, err
 	}
@@ -694,19 +805,46 @@ func copyLocalVMImageArtifacts(tmpDir, rootFSName, rootFSSource, kernelSource, f
 	return copyLocalVMImageFile(firecrackerSource, filepath.Join(tmpDir, "firecracker"), 0o755)
 }
 
-func localVMImageManifest(name, version, rootFSName, kernelPolicy string, rootFSSize int64, checksums map[string]string) vmImageManifest {
-	return vmImageManifest{
+func localVMImageManifest(name, version, rootFSName string, rootFSSize int64, checksums map[string]string, capabilities localVMImageManifestCapabilities) vmImageManifest {
+	manifest := vmImageManifest{
 		Name:         "yeet-local-" + name,
 		Version:      version,
 		Architecture: "x86_64",
-		ImageProfile: "local",
-		KernelPolicy: kernelPolicy,
 		Kernel:       "vmlinux",
 		RootFS:       rootFSName,
 		Firecracker:  "firecracker",
 		RootFSSize:   rootFSSize,
 		Checksums:    checksums,
 	}
+	capabilities.applyToManifest(&manifest)
+	return manifest
+}
+
+func (c localVMImageManifestCapabilities) applyToManifest(manifest *vmImageManifest) {
+	manifest.ImageProfile = c.ImageProfile
+	manifest.KernelPolicy = c.KernelPolicy
+	manifest.GuestInit = c.GuestInit
+	if c.SnapSupportSet {
+		snapSupport := c.SnapSupport
+		manifest.SnapSupport = &snapSupport
+	}
+	manifest.KernelVersion = c.KernelVersion
+	manifest.UbuntuKernelVersion = c.UbuntuKernelVersion
+}
+
+func localVMImageCapabilitiesFromManifest(manifest vmImageManifest) localVMImageManifestCapabilities {
+	caps := localVMImageManifestCapabilities{
+		ImageProfile:        manifest.ImageProfile,
+		KernelPolicy:        manifest.KernelPolicy,
+		GuestInit:           manifest.GuestInit,
+		KernelVersion:       manifest.KernelVersion,
+		UbuntuKernelVersion: manifest.UbuntuKernelVersion,
+	}
+	if manifest.SnapSupport != nil {
+		caps.SnapSupportSet = true
+		caps.SnapSupport = *manifest.SnapSupport
+	}
+	return caps
 }
 
 func installCompletedLocalVMImageBlob(blobDir, tmpDir string, manifest vmImageManifest) (bool, error) {

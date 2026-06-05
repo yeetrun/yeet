@@ -40,6 +40,8 @@ func TestValidateLocalVMImageName(t *testing.T) {
 
 func TestImportLocalVMImageRootFSOnlyUsesManagedKernel(t *testing.T) {
 	managed := fakeManagedVMImageAsset(t)
+	managed.Manifest.GuestInit = vmGuestInitPath
+	managed.Manifest.KernelVersion = "linux-managed-test"
 	called := false
 	importer := localVMImageImporter{
 		CacheRoot: t.TempDir(),
@@ -83,10 +85,73 @@ func TestImportLocalVMImageRootFSOnlyUsesManagedKernel(t *testing.T) {
 	if manifest.Version != ref.Version {
 		t.Fatalf("manifest version = %q, want ref version %q", manifest.Version, ref.Version)
 	}
+	if manifest.GuestInit != vmGuestInitPath {
+		t.Fatalf("manifest guest_init = %q, want %q", manifest.GuestInit, vmGuestInitPath)
+	}
+	if manifest.KernelVersion != "linux-managed-test" {
+		t.Fatalf("manifest kernel_version = %q, want linux-managed-test", manifest.KernelVersion)
+	}
 
 	storedRef := decodeLocalRef(t, localVMImageRefPath(importer.CacheRoot, "foo/bar"))
 	if !reflect.DeepEqual(storedRef, ref) {
 		t.Fatalf("stored ref = %#v, want %#v", storedRef, ref)
+	}
+}
+
+func TestImportLocalVMImagePreservesBundleManifestFastBootCapability(t *testing.T) {
+	importer := localVMImageImporter{
+		CacheRoot: t.TempDir(),
+		EnsureManagedAsset: func(context.Context) (vmImageAsset, error) {
+			return fakeManagedVMImageAsset(t), nil
+		},
+	}
+	snapSupport := false
+	sourceManifest := vmImageManifest{
+		Name:          "yeet-test-image",
+		Version:       "test-image-v1",
+		Architecture:  "x86_64",
+		ImageProfile:  "fast",
+		KernelPolicy:  "yeet-managed",
+		GuestInit:     vmGuestInitPath,
+		SnapSupport:   &snapSupport,
+		Kernel:        "vmlinux",
+		RootFS:        "rootfs.ext4",
+		Firecracker:   "firecracker",
+		RootFSSize:    int64(len("local-rootfs")),
+		KernelVersion: "linux-source-test",
+		Checksums: map[string]string{
+			"vmlinux":     strings.Repeat("a", 64),
+			"rootfs.ext4": strings.Repeat("b", 64),
+			"firecracker": strings.Repeat("c", 64),
+		},
+	}
+	manifestRaw, err := json.Marshal(sourceManifest)
+	if err != nil {
+		t.Fatalf("marshal source manifest: %v", err)
+	}
+
+	ref, err := importer.Import(context.Background(), localVMImageImportRequest{
+		Name: "foo/bar",
+		Reader: localVMImageBundleTar(t, map[string][]byte{
+			"rootfs.ext4":   []byte("local-rootfs"),
+			"manifest.json": manifestRaw,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	manifest, err := readLocalVMImageBlobManifest(ref.Root)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	if manifest.GuestInit != vmGuestInitPath {
+		t.Fatalf("manifest guest_init = %q, want %q", manifest.GuestInit, vmGuestInitPath)
+	}
+	if manifest.SnapSupport == nil || *manifest.SnapSupport {
+		t.Fatalf("manifest snap_support = %#v, want false", manifest.SnapSupport)
+	}
+	if !vmImageSupportsFastBoot(manifest) {
+		t.Fatal("imported manifest does not advertise fast boot")
 	}
 }
 
