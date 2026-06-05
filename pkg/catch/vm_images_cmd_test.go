@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,6 +125,34 @@ func TestVMImagesCmdImportReadsStdinAndPrintsRef(t *testing.T) {
 		t.Fatalf("kernel policy = %q, want %q", ref.KernelPolicy, localVMImageKernelPolicyManaged)
 	}
 	assertLocalImageFileContains(t, ref.Root, ref.RootFS, "local-rootfs")
+}
+
+func TestVMImagesCmdImportReadsRawPayloadWhenPTYBypassesInput(t *testing.T) {
+	server := newTestServer(t)
+	restoreEnsure := stubManagedVMImageAsset(t, fakeManagedVMImageAsset(t))
+	defer restoreEnsure()
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx:            context.Background(),
+		s:              server,
+		isPty:          true,
+		bypassPtyInput: true,
+		rawRW: readWriter{
+			Reader: localVMImageBundleTar(t, map[string][]byte{"rootfs.ext4": []byte("raw-rootfs")}),
+			Writer: io.Discard,
+		},
+		rw: readWriter{
+			Reader: strings.NewReader("not a tar stream"),
+			Writer: &out,
+		},
+	}
+	err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "table", Stdin: true}, []string{"import", "foo/raw"})
+	if err != nil {
+		t.Fatalf("vmImagesCmdFunc import: %v", err)
+	}
+	ref := decodeLocalRef(t, localVMImageRefPath(execer.vmImageCache().Root, "foo/raw"))
+	assertLocalImageFileContains(t, ref.Root, ref.RootFS, "raw-rootfs")
 }
 
 func TestVMImagesCmdImportRejectsWithoutStdin(t *testing.T) {

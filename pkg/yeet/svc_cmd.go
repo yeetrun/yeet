@@ -375,7 +375,19 @@ func handleVMImagesImportParsed(ctx context.Context, flags cli.VMImagesFlags, re
 	if flags.Format != "" && flags.Format != "table" {
 		remoteArgs = append(remoteArgs, "--format="+flags.Format)
 	}
-	return execRemoteFn(ctx, systemServiceName, remoteArgs, pr, false)
+	return withRemoteExecTTYDisabled(func() error {
+		return execRemoteFn(ctx, systemServiceName, remoteArgs, pr, false)
+	})
+}
+
+func withRemoteExecTTYDisabled(fn func() error) error {
+	old := execUIOverrides
+	tty := false
+	execUIOverrides.TTYOverride = &tty
+	defer func() {
+		execUIOverrides = old
+	}()
+	return fn()
 }
 
 type parsedSvcRun struct {
