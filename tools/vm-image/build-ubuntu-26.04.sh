@@ -6,7 +6,7 @@
 set -euo pipefail
 
 profile="${YEET_VM_IMAGE_PROFILE:-fast}"
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v6}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v7}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
