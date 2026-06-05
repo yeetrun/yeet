@@ -47,6 +47,7 @@ var requiredVMHostCommands = []vmHostCommandRequirement{
 	{Command: "mount", Package: "util-linux"},
 	{Command: "umount", Package: "util-linux"},
 	{Command: "ip", Package: "iproute2"},
+	{Command: "tic", Package: "ncurses-bin"},
 }
 
 var requiredVMHostDevices = []string{"/dev/kvm", "/dev/net/tun"}

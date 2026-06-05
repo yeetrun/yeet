@@ -346,7 +346,7 @@ func TestWriteVMGuestMetadataFilesWritesShellDefaults(t *testing.T) {
 	}
 	for _, want := range []string{
 		"# >>> yeet VM profile >>>",
-		`[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"`,
+		`[ -z "${YEET_VM_BASHRC_SOURCED:-}" ] && . "$HOME/.bashrc"`,
 		"# <<< yeet VM profile <<<",
 	} {
 		if !strings.Contains(string(profile), want) {
@@ -357,10 +357,18 @@ func TestWriteVMGuestMetadataFilesWritesShellDefaults(t *testing.T) {
 		"alias gs='git status'",
 		"# >>> yeet VM defaults >>>",
 		`export PATH="$HOME/.local/bin:$PATH"`,
+		`YEET_VM_BASHRC_SOURCED=1`,
 		`XDG_RUNTIME_DIR="/run/user/$(id -u)"`,
+		`HISTCONTROL=ignoreboth`,
+		`shopt -s histappend`,
+		`shopt -s checkwinsize`,
+		`dircolors -b`,
+		`alias ls='ls --color=auto'`,
+		`alias grep='grep --color=auto'`,
+		`tput colors`,
+		`\[\033[01;32m\]\u@\h`,
+		`/usr/share/bash-completion/bash_completion`,
 		"The disk is persistent.",
-		"yeet vm console devbox",
-		"yeet service set devbox --disk=SIZE",
 		"# <<< yeet VM defaults <<<",
 	} {
 		if !strings.Contains(string(bashrc), want) {
@@ -370,6 +378,11 @@ func TestWriteVMGuestMetadataFilesWritesShellDefaults(t *testing.T) {
 	if strings.Contains(string(bashrc), "old managed content") {
 		t.Fatalf(".bashrc kept old managed content:\n%s", string(bashrc))
 	}
+	for _, unwanted := range []string{"yeet_vm_hints", "Hint:", "yeet service set devbox --disk=SIZE"} {
+		if strings.Contains(string(bashrc), unwanted) {
+			t.Fatalf(".bashrc contains unwanted hint content %q:\n%s", unwanted, string(bashrc))
+		}
+	}
 	if strings.Count(string(profile), "# >>> yeet VM profile >>>") != 1 {
 		t.Fatalf(".profile managed block duplicated:\n%s", string(profile))
 	}
@@ -378,6 +391,55 @@ func TestWriteVMGuestMetadataFilesWritesShellDefaults(t *testing.T) {
 	}
 	assertFileMode(t, profilePath, 0o644)
 	assertFileMode(t, bashrcPath, 0o644)
+}
+
+func TestWriteVMGuestMetadataFilesSeedsStockShellDefaults(t *testing.T) {
+	root := t.TempDir()
+	stubVMGuestChown(t)
+	seedVMGuestAccountFiles(t, root)
+	writeVMGuestSkelFile(t, root, ".bashrc", "stock bashrc\nalias stock='true'\n")
+	writeVMGuestSkelFile(t, root, ".profile", "stock profile\n")
+
+	cfg := validVMMetadataConfig()
+	if err := writeVMGuestMetadataFiles(root, cfg); err != nil {
+		t.Fatalf("writeVMGuestMetadataFiles: %v", err)
+	}
+
+	home := filepath.Join(root, "home", "ubuntu")
+	assertFileContains(t, filepath.Join(home, ".bashrc"), "stock bashrc")
+	assertFileContains(t, filepath.Join(home, ".bashrc"), "alias stock='true'")
+	assertFileContains(t, filepath.Join(home, ".bashrc"), "# >>> yeet VM defaults >>>")
+	assertFileContains(t, filepath.Join(home, ".profile"), "stock profile")
+	assertFileContains(t, filepath.Join(home, ".profile"), "# >>> yeet VM profile >>>")
+}
+
+func TestWriteVMGuestMetadataFilesRefreshesYeetOnlyShellDefaultsFromSkel(t *testing.T) {
+	root := t.TempDir()
+	stubVMGuestChown(t)
+	seedVMGuestAccountFiles(t, root)
+	writeVMGuestSkelFile(t, root, ".bashrc", "stock bashrc\nalias stock='true'\n")
+	writeVMGuestSkelFile(t, root, ".profile", "stock profile\n")
+	home := filepath.Join(root, "home", "ubuntu")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".bashrc"), []byte("# >>> yeet VM defaults >>>\nold managed content\n# <<< yeet VM defaults <<<\n"), 0o644); err != nil {
+		t.Fatalf("write yeet-only bashrc: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".profile"), []byte("# >>> yeet VM profile >>>\nold managed content\n# <<< yeet VM profile <<<\n"), 0o644); err != nil {
+		t.Fatalf("write yeet-only profile: %v", err)
+	}
+
+	cfg := validVMMetadataConfig()
+	if err := writeVMGuestMetadataFiles(root, cfg); err != nil {
+		t.Fatalf("writeVMGuestMetadataFiles: %v", err)
+	}
+
+	assertFileContains(t, filepath.Join(home, ".bashrc"), "stock bashrc")
+	assertFileContains(t, filepath.Join(home, ".bashrc"), "alias stock='true'")
+	assertFileContains(t, filepath.Join(home, ".profile"), "stock profile")
+	assertFileNotContains(t, filepath.Join(home, ".bashrc"), "old managed content")
+	assertFileNotContains(t, filepath.Join(home, ".profile"), "old managed content")
 }
 
 func TestInjectVMMetadataIntoRootFSMountsAndUnmounts(t *testing.T) {
@@ -397,17 +459,23 @@ func TestInjectVMMetadataIntoRootFSMountsAndUnmounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("injectVMMetadataIntoRootFSWith: %v", err)
 	}
-	if len(commands) != 3 {
-		t.Fatalf("commands = %#v, want mount, host-key generation, and umount", commands)
+	if len(commands) != 4 {
+		t.Fatalf("commands = %#v, want mount, terminfo compile, host-key generation, and umount", commands)
 	}
 	if commands[0][0] != "mount" || !reflect.DeepEqual(commands[0][1:4], []string{"-o", "loop,rw", "/srv/devbox/rootfs.raw"}) {
 		t.Fatalf("mount command = %#v", commands[0])
 	}
-	if !reflect.DeepEqual(commands[1], []string{"chroot", wroteRoot, "ssh-keygen", "-A"}) {
-		t.Fatalf("host key command = %#v, wrote root %q", commands[1], wroteRoot)
+	if commands[1][0] != "tic" || !reflect.DeepEqual(commands[1][1:4], []string{"-x", "-o", filepath.Join(wroteRoot, "etc", "terminfo")}) {
+		t.Fatalf("terminfo command = %#v, wrote root %q", commands[1], wroteRoot)
 	}
-	if commands[2][0] != "umount" || commands[2][1] != wroteRoot {
-		t.Fatalf("umount command = %#v, wrote root %q", commands[2], wroteRoot)
+	if !strings.HasSuffix(commands[1][4], "xterm-ghostty.terminfo") {
+		t.Fatalf("terminfo source = %#v, want xterm-ghostty.terminfo", commands[1])
+	}
+	if !reflect.DeepEqual(commands[2], []string{"chroot", wroteRoot, "ssh-keygen", "-A"}) {
+		t.Fatalf("host key command = %#v, wrote root %q", commands[2], wroteRoot)
+	}
+	if commands[3][0] != "umount" || commands[3][1] != wroteRoot {
+		t.Fatalf("umount command = %#v, wrote root %q", commands[3], wroteRoot)
 	}
 }
 
@@ -548,6 +616,17 @@ func seedVMGuestAccountFiles(t *testing.T, root string) {
 		if err := os.WriteFile(path, []byte(data), mode); err != nil {
 			t.Fatalf("write %s: %v", path, err)
 		}
+	}
+}
+
+func writeVMGuestSkelFile(t *testing.T, root, name, data string) {
+	t.Helper()
+	path := filepath.Join(root, "etc", "skel", name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir skel: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		t.Fatalf("write skel %s: %v", name, err)
 	}
 }
 

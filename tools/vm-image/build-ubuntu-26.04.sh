@@ -12,6 +12,9 @@ work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
 kernel_version_override="${YEET_VM_KERNEL_VERSION:-}"
 guest_init_path="${YEET_VM_INIT_PATH:-}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+ghostty_terminfo_source="${YEET_VM_GHOSTTY_TERMINFO:-$repo_root/pkg/catch/xterm-ghostty.terminfo}"
 
 ubuntu_base_url="${UBUNTU_CLOUD_BASE_URL:-https://cloud-images.ubuntu.com/resolute/current}"
 ubuntu_image="${UBUNTU_CLOUD_IMAGE:-resolute-server-cloudimg-amd64.tar.gz}"
@@ -43,7 +46,7 @@ fast | stock)
 esac
 
 if [ "$profile" = "fast" ]; then
-	for cmd in chroot id mount mountpoint umount; do
+	for cmd in chroot id infocmp mount mountpoint tic umount; do
 		require "$cmd"
 	done
 	if [ -z "$kernel_path" ]; then
@@ -61,6 +64,10 @@ if [ "$profile" = "fast" ]; then
 	fi
 	if [ ! -x "$guest_init_path" ]; then
 		echo "YEET_VM_INIT_PATH is not executable: $guest_init_path" >&2
+		exit 1
+	fi
+	if [ ! -r "$ghostty_terminfo_source" ]; then
+		echo "YEET_VM_GHOSTTY_TERMINFO is not readable: $ghostty_terminfo_source" >&2
 		exit 1
 	fi
 	if [ "$(id -u)" != 0 ]; then
@@ -218,6 +225,13 @@ the systemd-backed `yeet-guest-ready.service` marker before returning.
 EOF
 }
 
+install_fast_rootfs_terminfo() {
+	local root="$1"
+	install -d -m 0755 "$root/etc/terminfo"
+	tic -x -o "$root/etc/terminfo" "$ghostty_terminfo_source"
+	TERMINFO="$root/etc/terminfo" infocmp -x xterm-ghostty >/dev/null
+}
+
 customize_fast_rootfs() {
 	local rootfs="$1"
 	rootfs_mount="$work_dir/rootfs-mount"
@@ -236,6 +250,7 @@ customize_fast_rootfs() {
 	write_fast_rootfs_policy_files "$rootfs_mount"
 	install -d -m 0755 "$rootfs_mount/usr/local/lib/yeet-vm"
 	install -m 0755 "$guest_init_path" "$rootfs_mount/usr/local/lib/yeet-vm/yeet-init"
+	install_fast_rootfs_terminfo "$rootfs_mount"
 	cat >"$rootfs_mount/usr/sbin/policy-rc.d" <<'EOF'
 #!/bin/sh
 exit 101

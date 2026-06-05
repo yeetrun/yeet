@@ -243,7 +243,8 @@ guest shell. For yeet-managed VM aliases in `~/.yeet/known_hosts`,
 `yeet ssh <svc>` repairs a stale host key and retries once after a VM is
 recreated; it does not edit normal `~/.ssh/known_hosts` entries. The default
 `ubuntu` guest user has passwordless sudo, `~/.local/bin` on `PATH`, and
-yeet-managed `.profile`/`.bashrc` defaults with a short login hint. Use
+yeet-managed `.profile`/`.bashrc` defaults with color-friendly Ubuntu shell
+behavior. Use
 `--clean-data` when removing a VM if you want to delete the guest disk too.
 
 Custom service root on the catch host:
