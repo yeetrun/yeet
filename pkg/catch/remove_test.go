@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -85,6 +86,49 @@ func TestRemoveServiceCleansDBOnCleanupFailure(t *testing.T) {
 	}
 	if _, ok := dv.Services().GetOk(name); ok {
 		t.Fatalf("service still present in db")
+	}
+}
+
+func TestRemoveServiceCleansVMNetwork(t *testing.T) {
+	server := newTestServer(t)
+	name := "vm-cleanup"
+	root := filepath.Join(server.cfg.ServicesRoot, name)
+	network := newVMNetworkPlan(name, []string{"lan"}, vmNetworkInputs{LANParent: "vmbr0", LANParentIsBridge: true})
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {
+			Name:        name,
+			ServiceType: db.ServiceTypeVM,
+			ServiceRoot: root,
+			VM: &db.VMConfig{
+				Runtime:  vmRuntimeFirecracker,
+				Networks: network.DBNetworks(),
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	var commands [][]string
+	old := vmRemovalNetworkRunner
+	vmRemovalNetworkRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() { vmRemovalNetworkRunner = old })
+
+	report, err := server.RemoveService(name)
+	if err != nil {
+		t.Fatalf("RemoveService: %v", err)
+	}
+	if report == nil || len(report.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", report.Warnings)
+	}
+	want := [][]string{{"ip", "link", "del", network.Interfaces[0].Tap}}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("network cleanup commands = %#v, want %#v", commands, want)
 	}
 }
 

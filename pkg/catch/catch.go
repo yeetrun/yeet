@@ -849,6 +849,8 @@ type RemoveOptions struct {
 	Trace     func(string, ...any)
 }
 
+var vmRemovalNetworkRunner vmNetworkCommandRunner
+
 // RemoveService removes the service from the database and attempts to clean up
 // related files/devices. Cleanup warnings are reported separately from fatal
 // errors. A requested ZFS clean-data destroy must succeed before the DB entry is
@@ -880,6 +882,9 @@ func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*Rem
 		report.addWarning(fmt.Errorf("failed to resolve service root for %q: %w", name, err))
 		removeDirs = false
 	}
+	doneVMNetwork := removeTraceBlock(opts, "remove vm network")
+	s.cleanupVMNetworkForRemoval(report, name)
+	doneVMNetwork()
 	if removeDirs && opts.CleanData {
 		removeTrace(opts, "remove zfs dataset=%s", serviceRootZFS)
 		doneZFS := removeTraceBlock(opts, "remove zfs destroy")
@@ -907,6 +912,31 @@ func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*Rem
 		doneDirs()
 	}
 	return report, nil
+}
+
+func (s *Server) cleanupVMNetworkForRemoval(report *RemoveReport, name string) {
+	sv, err := s.serviceView(name)
+	if err != nil {
+		if !errors.Is(err, errServiceNotFound) {
+			report.addWarning(fmt.Errorf("failed to resolve VM network for %q: %w", name, err))
+		}
+		return
+	}
+	service := sv.AsStruct()
+	if service.ServiceType != db.ServiceTypeVM || service.VM == nil {
+		return
+	}
+	plan := vmNetworkPlanFromDB(name, service.VM.Networks)
+	if len(plan.Interfaces) == 0 {
+		return
+	}
+	runner := vmRemovalNetworkRunner
+	if runner == nil {
+		runner = execVMNetworkCommand
+	}
+	if err := plan.ExecuteCleanup(runner); err != nil {
+		report.addWarning(fmt.Errorf("failed to clean up VM network for %q: %w", name, err))
+	}
 }
 
 func removeTrace(opts RemoveOptions, format string, args ...any) {
