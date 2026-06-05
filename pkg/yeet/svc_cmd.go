@@ -21,6 +21,7 @@ import (
 	"github.com/shayne/yargs"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
+	"github.com/yeetrun/yeet/pkg/copyutil"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
 )
 
@@ -194,6 +195,9 @@ var svcCommandHandlers = map[string]svcCommandHandler{
 		}
 		return handleSvcRemote(ctx, req)
 	},
+	"vm": func(ctx context.Context, req svcCommandRequest) error {
+		return handleSvcVM(ctx, req)
+	},
 }
 
 func HandleSvcCmd(args []string) error {
@@ -323,6 +327,55 @@ func handleSvcEnv(ctx context.Context, req svcCommandRequest) error {
 		return execRemoteFn(ctx, req.Service, setArgs, nil, true)
 	}
 	return handleSvcRemote(ctx, req)
+}
+
+func handleSvcVM(ctx context.Context, req svcCommandRequest) error {
+	args := req.Command.RawArgs
+	if len(args) >= 2 && args[0] == "vm" && args[1] == "images" {
+		flags, remaining, err := cli.ParseVMImages(args[2:])
+		if err != nil {
+			return err
+		}
+		if len(remaining) > 0 && remaining[0] == "import" {
+			return handleVMImagesImportParsed(ctx, flags, remaining)
+		}
+	}
+	return handleSvcRemote(ctx, req)
+}
+
+func handleVMImagesImportParsed(ctx context.Context, flags cli.VMImagesFlags, remaining []string) error {
+	if len(remaining) != 3 || remaining[0] != "import" {
+		return fmt.Errorf("vm images import requires a name and bundle directory")
+	}
+	name := remaining[1]
+	dir := remaining[2]
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("VM image bundle directory does not exist: %s", dir)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect VM image bundle directory: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("VM image bundle path must be a directory: %s", dir)
+	}
+
+	pr, pw := io.Pipe()
+	go func() {
+		err := copyutil.TarDirectory(pw, dir, "")
+		_ = pw.CloseWithError(err)
+	}()
+
+	defer func() { _ = pr.Close() }()
+
+	remoteArgs := []string{"vm", "images", "import", name, "--stdin"}
+	if flags.AllowLocalKernel {
+		remoteArgs = append(remoteArgs, "--allow-local-kernel")
+	}
+	if flags.Format != "" && flags.Format != "table" {
+		remoteArgs = append(remoteArgs, "--format="+flags.Format)
+	}
+	return execRemoteFn(ctx, systemServiceName, remoteArgs, pr, false)
 }
 
 type parsedSvcRun struct {
