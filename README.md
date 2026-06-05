@@ -223,6 +223,29 @@ rewritten. When creating a VM with a stale cached image, interactive runs prompt
 by default; non-interactive runs require `--image-policy=update` or
 `--image-policy=cached`.
 
+### Local VM images
+
+Import a local rootfs bundle onto a catch host, then run it by name:
+
+```bash
+yeet vm images import lab/ubuntu ./dist/my-vm
+yeet run devbox vm://lab/ubuntu
+yeet vm images rm lab/ubuntu --yes
+```
+
+A local bundle is a directory containing `rootfs.ext4` or `rootfs.ext4.zst`.
+Rootfs-only bundles use yeet's managed kernel and Firecracker from the current
+Ubuntu VM image. To test a local kernel, include `vmlinux` in the bundle and
+import with `--allow-local-kernel`:
+
+```bash
+yeet vm images import kernel/test ./dist/my-vm --allow-local-kernel
+```
+
+Imported image names are catch-host global. Re-importing the same name updates
+the ref for new VMs; existing VMs keep the exact imported content version they
+were created with.
+
 The default Ubuntu VM image is optimized for Firecracker direct kernel boot. It
 uses a yeet-managed kernel and init shim, starts SSH through a yeet-managed
 systemd unit, and intentionally does not support snap packages in the fast
