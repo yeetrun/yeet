@@ -234,9 +234,11 @@ yeet vm images rm lab/ubuntu --yes
 ```
 
 A local bundle is a directory containing `rootfs.ext4` or `rootfs.ext4.zst`.
-Rootfs-only bundles use yeet's managed kernel and Firecracker from the current
-Ubuntu VM image. To test a local kernel, include `vmlinux` in the bundle and
-import with `--allow-local-kernel`:
+If the directory also contains a yeet VM `manifest.json`, yeet preserves the
+guest boot capability metadata from that manifest. Rootfs-only bundles use
+yeet's managed kernel and Firecracker from the current Ubuntu VM image. To test
+a local kernel, include `vmlinux` in the bundle and import with
+`--allow-local-kernel`:
 
 ```bash
 yeet vm images import kernel/test ./dist/my-vm --allow-local-kernel
