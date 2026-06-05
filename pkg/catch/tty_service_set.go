@@ -90,6 +90,11 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	if err := e.applyServiceSetPublishChange(flags, changes); err != nil {
 		return err
 	}
+	if changes.vm {
+		if err := e.s.updateVMServiceSettings(e.vmProvisionContext(), e.sn, flags); err != nil {
+			return err
+		}
+	}
 	if changes.snapshot {
 		return e.s.updateServiceSnapshotPolicy(e.sn, flags)
 	}
@@ -99,6 +104,7 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 type serviceSetChanges struct {
 	root     bool
 	publish  bool
+	vm       bool
 	snapshot bool
 }
 
@@ -106,12 +112,13 @@ func serviceSetChangesFromFlags(flags cli.ServiceSetFlags) serviceSetChanges {
 	return serviceSetChanges{
 		root:     strings.TrimSpace(flags.ServiceRoot) != "" || flags.ZFS,
 		publish:  len(flags.Publish) != 0 || flags.PublishReset,
+		vm:       hasCatchServiceSetVMChange(flags),
 		snapshot: flags.SnapshotChange,
 	}
 }
 
 func (c serviceSetChanges) any() bool {
-	return c.root || c.publish || c.snapshot
+	return c.root || c.publish || c.vm || c.snapshot
 }
 
 func validateServiceSetSnapshotChange(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
