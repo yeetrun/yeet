@@ -824,6 +824,79 @@ func TestServiceSetPublishUpdatesConfig(t *testing.T) {
 	}
 }
 
+func TestServiceSetVMFlagsUpdateStoredRunArgs(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "devbox"
+	loadedPrefs.DefaultHost = "host-a"
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:        "devbox",
+		Host:        "host-a",
+		Type:        serviceTypeVM,
+		Payload:     "vm://ubuntu/26.04",
+		PayloadKind: serviceTypeVM,
+		Args:        []string{"--zfs", "--cpus", "4", "--memory=4g", "--disk=16g", "--net=svc", "--macvlan-parent=old0", "guest-arg"},
+	})
+
+	if err := HandleSvcCmd([]string{"service", "set", "--cpus=8", "--memory", "8g", "--disk=128g", "--net", "lan", "--macvlan-parent=vmbr0"}); err != nil {
+		t.Fatalf("HandleSvcCmd: %v", err)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"service", "set", "--cpus=8", "--memory", "8g", "--disk=128g", "--net", "lan", "--macvlan-parent=vmbr0"}) {
+		t.Fatalf("remote args = %#v", gotArgs)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("devbox", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	want := []string{"--zfs", "--cpus=8", "--memory=8g", "--disk=128g", "--net=lan", "--macvlan-parent=vmbr0", "guest-arg"}
+	if !reflect.DeepEqual(entry.Args, want) {
+		t.Fatalf("args = %#v, want %#v", entry.Args, want)
+	}
+}
+
+func TestServiceSetVMFlagsDoNotUpdateNonVMRunArgs(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:    "svc-a",
+		Host:    "host-a",
+		Type:    serviceTypeRun,
+		Payload: "run.sh",
+		Args:    []string{"--pull"},
+	})
+
+	if err := HandleSvcCmd([]string{"service", "set", "--cpus=8"}); err != nil {
+		t.Fatalf("HandleSvcCmd: %v", err)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if !reflect.DeepEqual(entry.Args, []string{"--pull"}) {
+		t.Fatalf("args = %#v, want unchanged", entry.Args)
+	}
+}
+
 func TestServiceSetPublishRemoteExitMentionsCatchVersion(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)

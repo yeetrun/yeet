@@ -2331,7 +2331,94 @@ func applyServiceSetConfigFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) 
 	if len(flags.Publish) != 0 || flags.PublishReset {
 		entry.Ports = normalizePublishPorts(flags.Publish)
 	}
+	applyServiceSetVMConfigFlags(entry, flags)
 	return applyServiceSetSnapshotFlags(entry, flags)
+}
+
+type runFlagUpdate struct {
+	Name  string
+	Value string
+}
+
+func applyServiceSetVMConfigFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) {
+	removals, updates := serviceSetVMRunFlagChanges(flags)
+	if len(removals) == 0 || !serviceEntryIsVM(*entry) {
+		return
+	}
+	entry.Args = rewriteStoredRunArgs(entry.Args, removals, updates)
+}
+
+func serviceEntryIsVM(entry ServiceEntry) bool {
+	return strings.TrimSpace(entry.Type) == serviceTypeVM ||
+		strings.TrimSpace(entry.PayloadKind) == serviceTypeVM ||
+		isVMPayload(entry.Payload)
+}
+
+func serviceSetVMRunFlagChanges(flags cli.ServiceSetFlags) (map[string]bool, []runFlagUpdate) {
+	removals := map[string]bool{}
+	var updates []runFlagUpdate
+	add := func(name, value string) {
+		removals[name] = true
+		updates = append(updates, runFlagUpdate{Name: name, Value: value})
+	}
+	if flags.CPUs > 0 {
+		add("--cpus", strconv.Itoa(flags.CPUs))
+	}
+	if value := strings.TrimSpace(flags.Memory); value != "" {
+		add("--memory", value)
+	}
+	if value := strings.TrimSpace(flags.Disk); value != "" {
+		add("--disk", value)
+	}
+	if flags.NetworkChange {
+		removals["--net"] = true
+		removals["--macvlan-parent"] = true
+		removals["--macvlan-vlan"] = true
+		removals["--macvlan-mac"] = true
+		if value := strings.TrimSpace(flags.Net); value != "" {
+			updates = append(updates, runFlagUpdate{Name: "--net", Value: value})
+		}
+	}
+	if value := strings.TrimSpace(flags.MacvlanParent); value != "" {
+		add("--macvlan-parent", value)
+	}
+	if flags.MacvlanVlan != 0 {
+		add("--macvlan-vlan", strconv.Itoa(flags.MacvlanVlan))
+	}
+	if value := strings.TrimSpace(flags.MacvlanMac); value != "" {
+		add("--macvlan-mac", value)
+	}
+	return removals, updates
+}
+
+func rewriteStoredRunArgs(args []string, removals map[string]bool, updates []runFlagUpdate) []string {
+	flagArgs, payloadArgs := splitRunArgsForParsing(rehydrateRunArgs(args))
+	out := removeRunFlags(flagArgs, removals)
+	for _, update := range updates {
+		out = append(out, update.Name+"="+update.Value)
+	}
+	if len(payloadArgs) != 0 {
+		out = append(out, "--")
+		out = append(out, payloadArgs...)
+	}
+	return normalizeRunArgs(out)
+}
+
+func removeRunFlags(args []string, removals map[string]bool) []string {
+	out := make([]string, 0, len(args))
+	specs := cli.RemoteFlagSpecs()["run"]
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		name := flagName(arg)
+		if !removals[name] {
+			out = append(out, arg)
+			continue
+		}
+		if spec, ok := specs[name]; ok && spec.ConsumesValue && !strings.Contains(arg, "=") {
+			i++
+		}
+	}
+	return out
 }
 
 func applyServiceSetSnapshotFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) error {
