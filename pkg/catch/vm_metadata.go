@@ -271,6 +271,9 @@ func writeVMGuestMetadataFiles(root string, cfg vmMetadataConfig) error {
 	if err := writeVMGuestSSHAccess(root, cfg); err != nil {
 		return err
 	}
+	if err := writeVMGuestShellDefaults(root, cfg); err != nil {
+		return err
+	}
 	if err := writeVMGuestPrivileges(root, cfg.User); err != nil {
 		return err
 	}
@@ -349,6 +352,117 @@ func writeVMGuestSSHAccess(root string, cfg vmMetadataConfig) error {
 	}
 	uid, gid, ok := vmGuestUserIDs(root, cfg.User)
 	return writeVMGuestAuthorizedKeys(root, cfg.User, cfg.SSHKey, uid, gid, ok)
+}
+
+const (
+	vmGuestProfileBegin = "# >>> yeet VM profile >>>"
+	vmGuestProfileEnd   = "# <<< yeet VM profile <<<"
+	vmGuestBashRCBegin  = "# >>> yeet VM defaults >>>"
+	vmGuestBashRCEnd    = "# <<< yeet VM defaults <<<"
+)
+
+func writeVMGuestShellDefaults(root string, cfg vmMetadataConfig) error {
+	home := filepath.Join(root, "home", cfg.User)
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		return err
+	}
+	if err := writeVMGuestManagedShellFile(filepath.Join(home, ".profile"), vmGuestProfileBegin, vmGuestProfileEnd, vmGuestProfileBlock()); err != nil {
+		return err
+	}
+	if err := writeVMGuestManagedShellFile(filepath.Join(home, ".bashrc"), vmGuestBashRCBegin, vmGuestBashRCEnd, vmGuestBashRCBlock(cfg.Hostname)); err != nil {
+		return err
+	}
+	return chownVMGuestShellDefaults(root, cfg.User)
+}
+
+func writeVMGuestManagedShellFile(path, begin, end, block string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	data := replaceVMGuestManagedBlock(string(raw), begin, end, block)
+	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o644)
+}
+
+func replaceVMGuestManagedBlock(raw, begin, end, block string) string {
+	managed := begin + "\n" + strings.TrimRight(block, "\n") + "\n" + end + "\n"
+	start := strings.Index(raw, begin)
+	if start == -1 {
+		return appendVMGuestManagedBlock(raw, managed)
+	}
+	afterStart := raw[start:]
+	endOffset := strings.Index(afterStart, end)
+	if endOffset == -1 {
+		return appendVMGuestManagedBlock(raw, managed)
+	}
+	after := afterStart[endOffset+len(end):]
+	after = strings.TrimPrefix(after, "\n")
+	return raw[:start] + managed + after
+}
+
+func appendVMGuestManagedBlock(raw, managed string) string {
+	if strings.TrimSpace(raw) == "" {
+		return managed
+	}
+	if !strings.HasSuffix(raw, "\n") {
+		raw += "\n"
+	}
+	return raw + managed
+}
+
+func chownVMGuestShellDefaults(root, user string) error {
+	uid, gid, ok := vmGuestUserIDs(root, user)
+	if !ok {
+		return nil
+	}
+	for _, name := range []string{".profile", ".bashrc"} {
+		if err := vmGuestChown(filepath.Join(root, "home", user, name), uid, gid); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func vmGuestProfileBlock() string {
+	return `[ -n "${BASH_VERSION:-}" ] && [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+`
+}
+
+func vmGuestBashRCBlock(hostname string) string {
+	return fmt.Sprintf(`export PATH="$HOME/.local/bin:$PATH"
+if [ -z "${XDG_RUNTIME_DIR:-}" ] && [ -d "/run/user/$(id -u)" ]; then
+	export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+fi
+
+case "$-" in
+	*i*) ;;
+	*) return ;;
+esac
+
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+
+printf '\n%%s\n' 'Welcome to yeet VM %s.'
+printf '%%s\n' 'The disk is persistent. You have passwordless sudo.'
+
+yeet_vm_hints='
+Run yeet ssh %s to reconnect from your workstation.
+Run yeet vm console %s for the serial console.
+Run yeet service set %s --disk=SIZE after stopping the VM to grow the root disk.
+Run python3 -m http.server 8000 to serve the current directory.
+Run systemctl status --no-pager to inspect guest services.
+'
+hint_count="$(printf '%%s\n' "$yeet_vm_hints" | sed '/^$/d' | wc -l)"
+if [ "$hint_count" -gt 0 ]; then
+	hint_index="$(( $(date +%%s 2>/dev/null || echo 0) %% hint_count + 1 ))"
+	printf 'Hint: %%s\n' "$(printf '%%s\n' "$yeet_vm_hints" | sed '/^$/d' | sed -n "${hint_index}p")"
+fi
+unset yeet_vm_hints hint_count hint_index
+`, hostname, hostname, hostname, hostname)
 }
 
 func ensureVMGuestLoginUser(root, userName string) error {

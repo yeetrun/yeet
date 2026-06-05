@@ -310,6 +310,76 @@ func TestWriteVMGuestMetadataFilesCreatesMissingLoginUser(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "home", "ubuntu", ".ssh", "authorized_keys"), "ssh-ed25519 AAAATEST")
 }
 
+func TestWriteVMGuestMetadataFilesWritesShellDefaults(t *testing.T) {
+	root := t.TempDir()
+	stubVMGuestChown(t)
+	seedVMGuestAccountFiles(t, root)
+	home := filepath.Join(root, "home", "ubuntu")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatalf("mkdir home: %v", err)
+	}
+	existingBashRC := strings.Join([]string{
+		"alias gs='git status'",
+		"# >>> yeet VM defaults >>>",
+		"old managed content",
+		"# <<< yeet VM defaults <<<",
+		"",
+	}, "\n")
+	if err := os.WriteFile(filepath.Join(home, ".bashrc"), []byte(existingBashRC), 0o644); err != nil {
+		t.Fatalf("write existing bashrc: %v", err)
+	}
+
+	cfg := validVMMetadataConfig()
+	if err := writeVMGuestMetadataFiles(root, cfg); err != nil {
+		t.Fatalf("writeVMGuestMetadataFiles: %v", err)
+	}
+
+	profilePath := filepath.Join(home, ".profile")
+	bashrcPath := filepath.Join(home, ".bashrc")
+	profile, err := os.ReadFile(profilePath)
+	if err != nil {
+		t.Fatalf("read profile: %v", err)
+	}
+	bashrc, err := os.ReadFile(bashrcPath)
+	if err != nil {
+		t.Fatalf("read bashrc: %v", err)
+	}
+	for _, want := range []string{
+		"# >>> yeet VM profile >>>",
+		`[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"`,
+		"# <<< yeet VM profile <<<",
+	} {
+		if !strings.Contains(string(profile), want) {
+			t.Fatalf(".profile missing %q:\n%s", want, string(profile))
+		}
+	}
+	for _, want := range []string{
+		"alias gs='git status'",
+		"# >>> yeet VM defaults >>>",
+		`export PATH="$HOME/.local/bin:$PATH"`,
+		`XDG_RUNTIME_DIR="/run/user/$(id -u)"`,
+		"The disk is persistent.",
+		"yeet vm console devbox",
+		"yeet service set devbox --disk=SIZE",
+		"# <<< yeet VM defaults <<<",
+	} {
+		if !strings.Contains(string(bashrc), want) {
+			t.Fatalf(".bashrc missing %q:\n%s", want, string(bashrc))
+		}
+	}
+	if strings.Contains(string(bashrc), "old managed content") {
+		t.Fatalf(".bashrc kept old managed content:\n%s", string(bashrc))
+	}
+	if strings.Count(string(profile), "# >>> yeet VM profile >>>") != 1 {
+		t.Fatalf(".profile managed block duplicated:\n%s", string(profile))
+	}
+	if strings.Count(string(bashrc), "# >>> yeet VM defaults >>>") != 1 {
+		t.Fatalf(".bashrc managed block duplicated:\n%s", string(bashrc))
+	}
+	assertFileMode(t, profilePath, 0o644)
+	assertFileMode(t, bashrcPath, 0o644)
+}
+
 func TestInjectVMMetadataIntoRootFSMountsAndUnmounts(t *testing.T) {
 	var commands [][]string
 	var wroteRoot string
