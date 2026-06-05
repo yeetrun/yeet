@@ -134,26 +134,30 @@ func TestValidateRunDraftNormalizesNetworkFields(t *testing.T) {
 }
 
 func TestValidateRunDraftAcceptsVMPayload(t *testing.T) {
-	draft := RunDraft{
-		Service: "devbox",
-		Host:    "yeet-lab",
-		Payload: "vm://ubuntu/26.04",
-		VM: RunDraftVM{
-			CPUs:   4,
-			Memory: "4g",
-			Disk:   "128g",
-		},
-		Network: RunDraftNetwork{Modes: []string{"svc", "lan"}},
-	}
-	normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
-	if !validation.OK {
-		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
-	}
-	if normalized.PayloadKind != "vm" {
-		t.Fatalf("PayloadKind = %q, want vm", normalized.PayloadKind)
-	}
-	if normalized.Payload != "vm://ubuntu/26.04" {
-		t.Fatalf("Payload = %q", normalized.Payload)
+	for _, payload := range []string{"vm://ubuntu/26.04", "vm://foo/bar"} {
+		t.Run(payload, func(t *testing.T) {
+			draft := RunDraft{
+				Service: "devbox",
+				Host:    "yeet-lab",
+				Payload: payload,
+				VM: RunDraftVM{
+					CPUs:   4,
+					Memory: "4g",
+					Disk:   "128g",
+				},
+				Network: RunDraftNetwork{Modes: []string{"svc", "lan"}},
+			}
+			normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+			if !validation.OK {
+				t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+			}
+			if normalized.PayloadKind != "vm" {
+				t.Fatalf("PayloadKind = %q, want vm", normalized.PayloadKind)
+			}
+			if normalized.Payload != payload {
+				t.Fatalf("Payload = %q, want %q", normalized.Payload, payload)
+			}
+		})
 	}
 }
 

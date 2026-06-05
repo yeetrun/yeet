@@ -26,8 +26,6 @@ var (
 	runDraftLocalImageNameRE     = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]+)?(/[a-z0-9]+([._-][a-z0-9]+)*)*$`)
 )
 
-const vmUbuntu2604Payload = "vm://ubuntu/26.04"
-
 type RunDraftValidationResult struct {
 	OK       bool                        `json:"ok"`
 	Errors   []RunDraftValidationError   `json:"errors,omitempty"`
@@ -440,7 +438,7 @@ func normalizeLocalImageRunDraftPayloadKind(_ string, payload, kind string) (str
 func normalizeVMRunDraftPayload(payload, kind string) (string, string, error) {
 	switch {
 	case kind == serviceTypeVM && !isVMPayload(payload):
-		return "", kind, fmt.Errorf("payloadKind %q requires %s", kind, vmUbuntu2604Payload)
+		return "", kind, fmt.Errorf("payloadKind %q requires a vm:// payload", kind)
 	case kind == serviceTypeVM:
 		return payload, serviceTypeVM, nil
 	case kind == "" || kind == "auto":
@@ -451,7 +449,7 @@ func normalizeVMRunDraftPayload(payload, kind string) (string, string, error) {
 }
 
 func isVMPayload(payload string) bool {
-	return strings.TrimSpace(payload) == vmUbuntu2604Payload
+	return strings.HasPrefix(strings.TrimSpace(payload), "vm://")
 }
 
 func normalizeAutoRunDraftPayload(cwd, payload string) (string, string, error) {

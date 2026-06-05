@@ -315,26 +315,67 @@ func TestDefaultVMImageEnsureFuncSkipsDownloadProgressWhenCurrent(t *testing.T) 
 	}
 }
 
-func TestResolveVMImagePayload(t *testing.T) {
+func TestResolveVMImagePayloadBuiltIn(t *testing.T) {
 	wantManifestURL := "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json"
 	if defaultVMImageManifestURL != wantManifestURL {
 		t.Fatalf("default manifest URL = %q, want %q", defaultVMImageManifestURL, wantManifestURL)
 	}
 
-	got, err := resolveVMImagePayload(vmUbuntu2604Payload)
+	source, err := resolveVMImagePayload(vmUbuntu2604Payload)
 	if err != nil {
 		t.Fatalf("resolveVMImagePayload: %v", err)
 	}
-	if got != wantManifestURL {
-		t.Fatalf("manifest URL = %q, want %q", got, wantManifestURL)
+	if source.Kind != vmImageSourceRemote || source.ManifestURL != wantManifestURL {
+		t.Fatalf("source = %#v, want built-in remote", source)
+	}
+}
+
+func TestResolveVMImagePayloadLocal(t *testing.T) {
+	source, err := resolveVMImagePayload("vm://foo/bar")
+	if err != nil {
+		t.Fatalf("resolveVMImagePayload local: %v", err)
+	}
+	if source.Kind != vmImageSourceLocal || source.LocalName != "foo/bar" {
+		t.Fatalf("source = %#v, want local foo/bar", source)
+	}
+}
+
+func TestResolveVMImagePayloadRejectsInvalidLocalName(t *testing.T) {
+	_, err := resolveVMImagePayload("vm://Foo/Bar")
+	if err == nil || !strings.Contains(err.Error(), "invalid local VM image name") {
+		t.Fatalf("error = %v, want invalid local image name", err)
+	}
+}
+
+func TestEnsureVMImageAssetWithProgressUsesLocalRef(t *testing.T) {
+	root := t.TempDir()
+	importer := localVMImageImporter{
+		CacheRoot: root,
+		EnsureManagedAsset: func(context.Context) (vmImageAsset, error) {
+			return fakeManagedVMImageAsset(t), nil
+		},
+	}
+	ref, err := importer.Import(context.Background(), localVMImageImportRequest{
+		Name:   "foo/bar",
+		Reader: localVMImageBundleTar(t, map[string][]byte{"rootfs.ext4": []byte("rootfs")}),
+	})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
 	}
 
-	_, err = resolveVMImagePayload("vm://debian/13")
-	if err == nil {
-		t.Fatal("resolveVMImagePayload returned nil error for unsupported payload")
+	asset, err := ensureVMImageAssetWithProgress(context.Background(), vmImageCache{Root: root}, "vm://foo/bar", nil)
+	if err != nil {
+		t.Fatalf("ensureVMImageAssetWithProgress: %v", err)
 	}
-	if !strings.Contains(err.Error(), "unsupported VM image payload") || !strings.Contains(err.Error(), "vm://debian/13") || !strings.Contains(err.Error(), vmUbuntu2604Payload) {
-		t.Fatalf("error = %v, want unsupported payload with supported value", err)
+	if asset.Manifest.Version != ref.Version {
+		t.Fatalf("version = %q, want %q", asset.Manifest.Version, ref.Version)
+	}
+}
+
+func TestEnsureVMImageAssetWithProgressReportsUnknownLocalRef(t *testing.T) {
+	_, err := ensureVMImageAssetWithProgress(context.Background(), vmImageCache{Root: t.TempDir()}, "vm://foo/bar", nil)
+	if err == nil || !strings.Contains(err.Error(), "import it with `yeet vm images import foo/bar`") {
+		t.Fatalf("error = %v, want import hint", err)
 	}
 }
 

@@ -275,7 +275,7 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	if e.sn == SystemService {
 		return fmt.Errorf("cannot run, reserved service name")
 	}
-	if len(argsIn) > 0 && strings.TrimSpace(argsIn[0]) == vmUbuntu2604Payload {
+	if len(argsIn) > 0 && isVMImagePayload(argsIn[0]) {
 		if len(argsIn) != 1 {
 			return fmt.Errorf("VM payloads do not accept payload args")
 		}
