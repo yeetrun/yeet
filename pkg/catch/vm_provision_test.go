@@ -823,12 +823,66 @@ func TestReserveVMServiceNetworkAllocatesInsideMutation(t *testing.T) {
 func TestRunVMRejectsUnsupportedPayload(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
+		return cache.Inspect(ctx, payload)
+	}
+	vmImageEnsureFunc = func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
+		return ensureVMImageAssetWithProgress(ctx, cache, payload, ui)
+	}
 
-	err := execer.runVM(cli.RunFlags{Net: "svc"}, "vm://debian/13")
-	if err == nil || !strings.Contains(err.Error(), "unsupported VM payload") {
+	err := execer.runVM(cli.RunFlags{Net: "svc"}, "oci://debian/13")
+	if err == nil || !strings.Contains(err.Error(), "unsupported VM image payload") {
 		t.Fatalf("runVM error = %v, want unsupported payload", err)
 	}
 	assertNoReadyVM(t, server, "svc")
+}
+
+func TestRunVMReportsUnknownLocalImage(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
+		return cache.Inspect(ctx, payload)
+	}
+	vmImageEnsureFunc = func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
+		return ensureVMImageAssetWithProgress(ctx, cache, payload, ui)
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc"}, "vm://debian/13")
+	if err == nil || !strings.Contains(err.Error(), "import it with `yeet vm images import debian/13`") {
+		t.Fatalf("runVM error = %v, want local import hint", err)
+	}
+	assertNoReadyVM(t, server, "svc")
+}
+
+func TestRunVMLocalImportedImage(t *testing.T) {
+	server := newTestServer(t)
+	service := "svc"
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, service)
+	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
+		return cache.Inspect(ctx, payload)
+	}
+	vmImageEnsureFunc = func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
+		return ensureVMImageAssetWithProgress(ctx, cache, payload, ui)
+	}
+
+	importer := localVMImageImporter{
+		CacheRoot: filepath.Join(server.cfg.RootDir, "vm-images"),
+		EnsureManagedAsset: func(context.Context) (vmImageAsset, error) {
+			return fakeManagedVMImageAsset(t), nil
+		},
+	}
+	ref, err := importer.Import(context.Background(), localVMImageImportRequest{
+		Name:   "foo/bar",
+		Reader: localVMImageBundleTar(t, map[string][]byte{"rootfs.ext4": []byte("rootfs")}),
+	})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc"}, "vm://foo/bar"); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	assertVMImageVersion(t, server, service, ref.Version)
 }
 
 func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*ttyExecer, string, string, *[][]string) {

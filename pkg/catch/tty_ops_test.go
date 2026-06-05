@@ -48,27 +48,31 @@ func TestConfirmTSUpdateReturnsPromptWriteError(t *testing.T) {
 }
 
 func TestRunCmdDispatchesVMPayload(t *testing.T) {
-	server := newTestServer(t)
-	var called bool
-	oldRunVM := runVMCmdFunc
-	defer func() { runVMCmdFunc = oldRunVM }()
-	runVMCmdFunc = func(e *ttyExecer, flags cli.RunFlags, payload string) error {
-		called = true
-		if payload != vmUbuntu2604Payload {
-			t.Fatalf("payload = %q", payload)
-		}
-		if flags.Net != "svc" || flags.CPUs != 4 {
-			t.Fatalf("flags = %#v", flags)
-		}
-		return nil
-	}
+	for _, payload := range []string{vmUbuntu2604Payload, "vm://foo/bar"} {
+		t.Run(payload, func(t *testing.T) {
+			server := newTestServer(t)
+			var called bool
+			oldRunVM := runVMCmdFunc
+			defer func() { runVMCmdFunc = oldRunVM }()
+			runVMCmdFunc = func(e *ttyExecer, flags cli.RunFlags, gotPayload string) error {
+				called = true
+				if gotPayload != payload {
+					t.Fatalf("payload = %q, want %q", gotPayload, payload)
+				}
+				if flags.Net != "svc" || flags.CPUs != 4 {
+					t.Fatalf("flags = %#v", flags)
+				}
+				return nil
+			}
 
-	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "devbox", rw: &bytes.Buffer{}}
-	if err := execer.runCmdFunc(cli.RunFlags{Net: "svc", CPUs: 4}, []string{vmUbuntu2604Payload}); err != nil {
-		t.Fatalf("runCmdFunc: %v", err)
-	}
-	if !called {
-		t.Fatal("VM run function was not called")
+			execer := &ttyExecer{ctx: context.Background(), s: server, sn: "devbox", rw: &bytes.Buffer{}}
+			if err := execer.runCmdFunc(cli.RunFlags{Net: "svc", CPUs: 4}, []string{payload}); err != nil {
+				t.Fatalf("runCmdFunc: %v", err)
+			}
+			if !called {
+				t.Fatal("VM run function was not called")
+			}
+		})
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 )
 
 const vmUbuntu2604Payload = "vm://ubuntu/26.04"
+const vmImagePayloadPrefix = "vm://"
 
 var errVMConsoleDetached = errors.New("VM console detached")
 
@@ -27,6 +28,10 @@ var runVMCmdFunc = func(e *ttyExecer, flags cli.RunFlags, payload string) error 
 
 var vmConsoleJournalFunc = func(e *ttyExecer) error {
 	return e.vmConsoleJournalCmdFunc()
+}
+
+func isVMImagePayload(payload string) bool {
+	return strings.HasPrefix(strings.TrimSpace(payload), vmImagePayloadPrefix)
 }
 
 func (e *ttyExecer) runVM(flags cli.RunFlags, payload string) error {

@@ -131,17 +131,24 @@ func TestRunDraftFromCLIParsesVMOptions(t *testing.T) {
 	hostOverrideSet = true
 
 	loc := &projectConfigLocation{Dir: t.TempDir(), Config: &ProjectConfig{Version: projectConfigVersion}}
-	draft, err := runDraftFromCLI([]string{
-		"--cpus=4",
-		"--memory=4g",
-		"--disk=128g",
-		"vm://ubuntu/26.04",
-	}, loc, "host-a")
-	if err != nil {
-		t.Fatalf("runDraftFromCLI error: %v", err)
-	}
-	if draft.VM.CPUs != 4 || draft.VM.Memory != "4g" || draft.VM.Disk != "128g" {
-		t.Fatalf("VM = %#v, want cpus=4 memory=4g disk=128g", draft.VM)
+	for _, payload := range []string{"vm://ubuntu/26.04", "vm://foo/bar"} {
+		t.Run(payload, func(t *testing.T) {
+			draft, err := runDraftFromCLI([]string{
+				"--cpus=4",
+				"--memory=4g",
+				"--disk=128g",
+				payload,
+			}, loc, "host-a")
+			if err != nil {
+				t.Fatalf("runDraftFromCLI error: %v", err)
+			}
+			if draft.Payload != payload {
+				t.Fatalf("payload = %q, want %q", draft.Payload, payload)
+			}
+			if draft.VM.CPUs != 4 || draft.VM.Memory != "4g" || draft.VM.Disk != "128g" {
+				t.Fatalf("VM = %#v, want cpus=4 memory=4g disk=128g", draft.VM)
+			}
+		})
 	}
 }
 
@@ -463,46 +470,50 @@ func TestExecuteRunDraftLocalImagePayloadKindUsesLocalDocker(t *testing.T) {
 }
 
 func TestRunDraftVMPayloadUsesVMRunnerAndSavesVMType(t *testing.T) {
-	preserveRunDraftGlobals(t)
-	oldVM := tryRunVMPayloadWithOutputFn
-	defer func() { tryRunVMPayloadWithOutputFn = oldVM }()
+	for _, payload := range []string{"vm://ubuntu/26.04", "vm://foo/bar"} {
+		t.Run(payload, func(t *testing.T) {
+			preserveRunDraftGlobals(t)
+			oldVM := tryRunVMPayloadWithOutputFn
+			defer func() { tryRunVMPayloadWithOutputFn = oldVM }()
 
-	var gotPayload string
-	var gotArgs []string
-	tryRunVMPayloadWithOutputFn = func(ctx context.Context, stdout io.Writer, payload string, args []string) (bool, error) {
-		gotPayload = payload
-		gotArgs = append([]string{}, args...)
-		return true, nil
-	}
+			var gotPayload string
+			var gotArgs []string
+			tryRunVMPayloadWithOutputFn = func(ctx context.Context, stdout io.Writer, payload string, args []string) (bool, error) {
+				gotPayload = payload
+				gotArgs = append([]string{}, args...)
+				return true, nil
+			}
 
-	serviceOverride = "devbox"
-	tmp := t.TempDir()
-	loc := &projectConfigLocation{
-		Path:   filepath.Join(tmp, projectConfigName),
-		Dir:    tmp,
-		Config: &ProjectConfig{Version: projectConfigVersion},
-	}
+			serviceOverride = "devbox"
+			tmp := t.TempDir()
+			loc := &projectConfigLocation{
+				Path:   filepath.Join(tmp, projectConfigName),
+				Dir:    tmp,
+				Config: &ProjectConfig{Version: projectConfigVersion},
+			}
 
-	draft, err := runDraftFromCLI([]string{"vm://ubuntu/26.04", "--net=svc", "--cpus=4"}, loc, "yeet-pve1")
-	if err != nil {
-		t.Fatalf("runDraftFromCLI: %v", err)
-	}
-	if err := executeRunDraftWithOptions(context.Background(), draft, loc, runDraftExecuteOptions{Stdout: io.Discard}); err != nil {
-		t.Fatalf("executeRunDraftWithOptions: %v", err)
-	}
+			draft, err := runDraftFromCLI([]string{payload, "--net=svc", "--cpus=4"}, loc, "yeet-pve1")
+			if err != nil {
+				t.Fatalf("runDraftFromCLI: %v", err)
+			}
+			if err := executeRunDraftWithOptions(context.Background(), draft, loc, runDraftExecuteOptions{Stdout: io.Discard}); err != nil {
+				t.Fatalf("executeRunDraftWithOptions: %v", err)
+			}
 
-	if gotPayload != "vm://ubuntu/26.04" {
-		t.Fatalf("payload = %q", gotPayload)
-	}
-	if !reflect.DeepEqual(gotArgs, []string{"--net=svc", "--cpus=4"}) {
-		t.Fatalf("args = %#v", gotArgs)
-	}
-	entry, ok := loc.Config.ServiceEntry("devbox", "yeet-pve1")
-	if !ok {
-		t.Fatal("missing stored entry")
-	}
-	if entry.Type != serviceTypeVM {
-		t.Fatalf("entry type = %q, want vm", entry.Type)
+			if gotPayload != payload {
+				t.Fatalf("payload = %q, want %q", gotPayload, payload)
+			}
+			if !reflect.DeepEqual(gotArgs, []string{"--net=svc", "--cpus=4"}) {
+				t.Fatalf("args = %#v", gotArgs)
+			}
+			entry, ok := loc.Config.ServiceEntry("devbox", "yeet-pve1")
+			if !ok {
+				t.Fatal("missing stored entry")
+			}
+			if entry.Type != serviceTypeVM || entry.PayloadKind != serviceTypeVM || entry.Payload != payload {
+				t.Fatalf("entry = %#v, want VM payload %q", entry, payload)
+			}
+		})
 	}
 }
 

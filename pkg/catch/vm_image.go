@@ -69,6 +69,19 @@ type vmImageCacheState struct {
 	ManifestURL   string `json:"manifestURL"`
 }
 
+type vmImageSourceKind string
+
+const (
+	vmImageSourceRemote vmImageSourceKind = "remote"
+	vmImageSourceLocal  vmImageSourceKind = "local"
+)
+
+type vmImageSource struct {
+	Kind        vmImageSourceKind
+	ManifestURL string
+	LocalName   string
+}
+
 type vmImagePaths struct {
 	Manifest        string
 	Dir             string
@@ -95,15 +108,23 @@ func vmImageSupportsFastBoot(manifest vmImageManifest) bool {
 	return strings.TrimSpace(manifest.GuestInit) == vmGuestInitPath
 }
 
-func resolveVMImagePayload(payload string) (string, error) {
+func resolveVMImagePayload(payload string) (vmImageSource, error) {
 	payload = strings.TrimSpace(payload)
 	switch payload {
 	case vmUbuntu2604Payload:
-		return defaultVMImageManifestURL, nil
+		return vmImageSource{Kind: vmImageSourceRemote, ManifestURL: defaultVMImageManifestURL}, nil
 	case "":
-		return "", fmt.Errorf("VM image payload is required")
+		return vmImageSource{}, fmt.Errorf("VM image payload is required")
 	default:
-		return "", fmt.Errorf("unsupported VM image payload %q (supported: %s)", payload, vmUbuntu2604Payload)
+		const prefix = "vm://"
+		if strings.HasPrefix(payload, prefix) {
+			name := strings.TrimPrefix(payload, prefix)
+			if err := validateLocalVMImageName(name); err != nil {
+				return vmImageSource{}, fmt.Errorf("invalid local VM image name %q: %w", name, err)
+			}
+			return vmImageSource{Kind: vmImageSourceLocal, LocalName: name}, nil
+		}
+		return vmImageSource{}, fmt.Errorf("unsupported VM image payload %q (supported: %s or imported vm://<name>)", payload, vmUbuntu2604Payload)
 	}
 }
 
@@ -112,11 +133,14 @@ func ensureVMImageAsset(ctx context.Context, cache vmImageCache) (vmImageAsset, 
 }
 
 func ensureVMImageAssetWithProgress(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (asset vmImageAsset, retErr error) {
-	manifestURL, err := resolveVMImagePayload(payload)
+	source, err := resolveVMImagePayload(payload)
 	if err != nil {
 		return vmImageAsset{}, err
 	}
-	cache = cache.withManifestURL(manifestURL)
+	if source.Kind == vmImageSourceLocal {
+		return resolveLocalVMImageAssetForPayload(ctx, cache.Root, source.LocalName)
+	}
+	cache = cache.withManifestURL(source.ManifestURL)
 	if ui != nil {
 		state, _, err := cache.Inspect(ctx, payload)
 		if err != nil {
@@ -142,6 +166,24 @@ func ensureVMImageAssetWithProgress(ctx context.Context, cache vmImageCache, pay
 		}()
 	}
 	return ensureVMImageAssetFromCache(ctx, cache, progress, ui)
+}
+
+func resolveLocalVMImageAssetForPayload(ctx context.Context, cacheRoot, name string) (vmImageAsset, error) {
+	if strings.TrimSpace(cacheRoot) == "" {
+		return vmImageAsset{}, fmt.Errorf("VM image cache root is required")
+	}
+	asset, err := resolveLocalVMImageAsset(ctx, cacheRoot, name)
+	if err != nil {
+		return vmImageAsset{}, localVMImagePayloadError(name, err)
+	}
+	return asset, nil
+}
+
+func localVMImagePayloadError(name string, err error) error {
+	if os.IsNotExist(err) {
+		return fmt.Errorf("local VM image %q is not imported; import it with `yeet vm images import %s`: %w", name, name, err)
+	}
+	return err
 }
 
 func ensureVMImageAssetFromCache(ctx context.Context, cache vmImageCache, progress *byteProgress, ui ProgressUI) (vmImageAsset, error) {
@@ -273,20 +315,41 @@ func (c vmImageCache) ensure(ctx context.Context, progress *byteProgress, ui Pro
 
 func (c vmImageCache) Inspect(ctx context.Context, payload string) (vmImageCacheState, vmImageManifest, error) {
 	payload = strings.TrimSpace(payload)
-	upstreamManifestURL, err := resolveVMImagePayload(payload)
+	source, err := resolveVMImagePayload(payload)
 	if err != nil {
 		return vmImageCacheState{}, vmImageManifest{}, err
 	}
-	cache := c.withManifestURL(upstreamManifestURL)
-	manifestURL := cache.manifestURL()
-	latestManifest, err := cache.fetchManifest(ctx)
+	if source.Kind == vmImageSourceLocal {
+		return c.inspectLocal(ctx, payload, source.LocalName)
+	}
+	return c.withManifestURL(source.ManifestURL).inspectRemote(ctx, payload)
+}
+
+func (c vmImageCache) inspectLocal(ctx context.Context, payload, name string) (vmImageCacheState, vmImageManifest, error) {
+	asset, err := resolveLocalVMImageAssetForPayload(ctx, c.Root, name)
+	if err != nil {
+		return vmImageCacheState{}, vmImageManifest{}, err
+	}
+	state := vmImageCacheState{
+		Payload:       payload,
+		CachedVersion: asset.Manifest.Version,
+		LatestVersion: asset.Manifest.Version,
+		State:         vmImageCacheCurrent,
+		CachePath:     asset.Paths.Dir,
+	}
+	return state, asset.Manifest, nil
+}
+
+func (c vmImageCache) inspectRemote(ctx context.Context, payload string) (vmImageCacheState, vmImageManifest, error) {
+	manifestURL := c.manifestURL()
+	latestManifest, err := c.fetchManifest(ctx)
 	if err != nil {
 		return vmImageCacheState{}, vmImageManifest{}, err
 	}
 	if err := latestManifest.validate(); err != nil {
 		return vmImageCacheState{}, vmImageManifest{}, err
 	}
-	root := strings.TrimSpace(cache.Root)
+	root := strings.TrimSpace(c.Root)
 	if root == "" {
 		return vmImageCacheState{}, vmImageManifest{}, fmt.Errorf("VM image cache root is required")
 	}

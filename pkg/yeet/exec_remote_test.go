@@ -332,9 +332,13 @@ func TestNewRemoteExecRequestAddsLocalSSHKeyForVMRun(t *testing.T) {
 	t.Setenv("HOME", tmp)
 	t.Setenv("YEET_VM_SSH_KEY", "")
 
-	req := newRemoteExecRequest("yeet-pve1", "devbox", []string{"run", "vm://ubuntu/26.04"}, nil, false)
-	if req.VMSSHKey != wantKey {
-		t.Fatalf("VMSSHKey = %q, want local public key", req.VMSSHKey)
+	for _, payload := range []string{"vm://ubuntu/26.04", "vm://foo/bar"} {
+		t.Run(payload, func(t *testing.T) {
+			req := newRemoteExecRequest("yeet-pve1", "devbox", []string{"run", payload}, nil, false)
+			if req.VMSSHKey != wantKey {
+				t.Fatalf("VMSSHKey = %q, want local public key", req.VMSSHKey)
+			}
+		})
 	}
 }
 

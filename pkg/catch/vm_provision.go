@@ -56,9 +56,6 @@ type vmProvisionPlan struct {
 func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr error) {
 	doneProvision := e.traceBlock("vm provision")
 	defer doneProvision()
-	if payload != vmUbuntu2604Payload {
-		return fmt.Errorf("unsupported VM payload %q; supported payload: %s", payload, vmUbuntu2604Payload)
-	}
 	doneServiceExists := e.traceBlock("vm service exists")
 	serviceExisted, err := e.serviceExists()
 	doneServiceExists()
@@ -195,7 +192,7 @@ func (e *ttyExecer) selectVMProvisionImage(ctx context.Context, flags cli.RunFla
 		return asset, err
 	case vmImageCacheCurrent:
 		done := e.traceBlock("vm image cached asset")
-		asset, err := cachedVMImageAsset(ctx, cache, state.CachedVersion)
+		asset, err := currentVMImageAsset(ctx, cache, payload, state)
 		done()
 		return asset, err
 	case vmImageCacheStale:
@@ -203,6 +200,17 @@ func (e *ttyExecer) selectVMProvisionImage(ctx context.Context, flags cli.RunFla
 	default:
 		return vmImageAsset{}, fmt.Errorf("unknown VM image cache state %q for %s", state.State, payload)
 	}
+}
+
+func currentVMImageAsset(ctx context.Context, cache vmImageCache, payload string, state vmImageCacheState) (vmImageAsset, error) {
+	source, err := resolveVMImagePayload(payload)
+	if err != nil {
+		return vmImageAsset{}, err
+	}
+	if source.Kind == vmImageSourceLocal {
+		return resolveLocalVMImageAssetForPayload(ctx, cache.Root, source.LocalName)
+	}
+	return cachedVMImageAsset(ctx, cache, state.CachedVersion)
 }
 
 func normalizeVMProvisionImagePolicy(policy string) (string, error) {
