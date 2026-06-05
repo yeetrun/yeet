@@ -274,6 +274,50 @@ func TestRejectVMDiskShrink(t *testing.T) {
 	}
 }
 
+func TestRawVMDiskResizeStepsGrowFilesystem(t *testing.T) {
+	steps, err := rawVMDiskResizeSteps("/srv/devbox/data/rootfs.raw", 16<<30, 32<<30)
+	if err != nil {
+		t.Fatalf("rawVMDiskResizeSteps: %v", err)
+	}
+	want := []vmDiskPlanStep{
+		{Phase: vmDiskPhaseRawResize, Command: []string{"qemu-img", "resize", "/srv/devbox/data/rootfs.raw", "34359738368"}},
+		{Phase: vmDiskPhaseRawResize, Command: []string{"e2fsck", "-pf", "/srv/devbox/data/rootfs.raw"}},
+		{Phase: vmDiskPhaseRawResize, Command: []string{"resize2fs", "/srv/devbox/data/rootfs.raw"}},
+	}
+	if !reflect.DeepEqual(steps, want) {
+		t.Fatalf("steps = %#v, want %#v", steps, want)
+	}
+}
+
+func TestZVOLVMDiskResizeStepsGrowFilesystem(t *testing.T) {
+	steps, err := zvolVMDiskResizeSteps("flash/yeet/vms/devbox/vm/d-abc/root", 16<<30, 32<<30)
+	if err != nil {
+		t.Fatalf("zvolVMDiskResizeSteps: %v", err)
+	}
+	want := []vmDiskPlanStep{
+		{Phase: vmDiskPhaseZVOLResize, Command: []string{"zfs", "set", "volsize=34359738368", "flash/yeet/vms/devbox/vm/d-abc/root"}},
+		{Phase: vmDiskPhaseZVOLResize, Command: vmZVOLSettleCommand()},
+		{Phase: vmDiskPhaseZVOLResize, Command: []string{"e2fsck", "-pf", "/dev/zvol/flash/yeet/vms/devbox/vm/d-abc/root"}},
+		{Phase: vmDiskPhaseZVOLResize, Command: []string{"resize2fs", "/dev/zvol/flash/yeet/vms/devbox/vm/d-abc/root"}},
+	}
+	if !reflect.DeepEqual(steps, want) {
+		t.Fatalf("steps = %#v, want %#v", steps, want)
+	}
+}
+
+func TestVMDiskResizeStepsRejectShrinkAndNoop(t *testing.T) {
+	if _, err := rawVMDiskResizeSteps("/srv/rootfs.raw", 32<<30, 16<<30); err == nil || !strings.Contains(err.Error(), "VM disk shrink is not supported") {
+		t.Fatalf("raw shrink error = %v", err)
+	}
+	steps, err := rawVMDiskResizeSteps("/srv/rootfs.raw", 16<<30, 16<<30)
+	if err != nil {
+		t.Fatalf("raw noop: %v", err)
+	}
+	if len(steps) != 0 {
+		t.Fatalf("noop steps = %#v, want none", steps)
+	}
+}
+
 func TestRunVMDiskPlanPreservesDiskOnSetupError(t *testing.T) {
 	plan := vmDiskPlan{
 		Service:    "devbox",

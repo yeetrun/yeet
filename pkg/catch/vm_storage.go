@@ -25,9 +25,11 @@ var vmZFSDatasetComponentPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 
 const (
 	vmDiskPhaseRaw             = "raw"
+	vmDiskPhaseRawResize       = "raw-resize"
 	vmDiskPhaseZVOLBasePrepare = "zvol-base-prepare"
 	vmDiskPhaseZVOLBaseWrite   = "zvol-base-write"
 	vmDiskPhaseZVOLClone       = "zvol-clone"
+	vmDiskPhaseZVOLResize      = "zvol-resize"
 )
 
 type vmDiskPlan struct {
@@ -81,6 +83,8 @@ func vmDiskProgressLabel(phase string) string {
 	switch phase {
 	case vmDiskPhaseRaw:
 		return "Preparing disk"
+	case vmDiskPhaseRawResize, vmDiskPhaseZVOLResize:
+		return "Expanding filesystem"
 	case vmDiskPhaseZVOLBasePrepare:
 		return "Preparing ZFS image base"
 	case vmDiskPhaseZVOLBaseWrite:
@@ -264,6 +268,44 @@ func validateVMDiskResize(currentBytes, requestedBytes int64) error {
 		return fmt.Errorf("VM disk shrink is not supported")
 	}
 	return nil
+}
+
+func rawVMDiskResizeSteps(path string, currentBytes, requestedBytes int64) ([]vmDiskPlanStep, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, fmt.Errorf("VM raw disk path is required")
+	}
+	if err := validateVMDiskResize(currentBytes, requestedBytes); err != nil {
+		return nil, err
+	}
+	if currentBytes == 0 || requestedBytes == 0 || requestedBytes == currentBytes {
+		return nil, nil
+	}
+	size := fmt.Sprintf("%d", requestedBytes)
+	return []vmDiskPlanStep{
+		{Phase: vmDiskPhaseRawResize, Command: []string{"qemu-img", "resize", path, size}},
+		{Phase: vmDiskPhaseRawResize, Command: []string{"e2fsck", "-pf", path}},
+		{Phase: vmDiskPhaseRawResize, Command: []string{"resize2fs", path}},
+	}, nil
+}
+
+func zvolVMDiskResizeSteps(dataset string, currentBytes, requestedBytes int64) ([]vmDiskPlanStep, error) {
+	if err := validateZFSName("target dataset", dataset, true); err != nil {
+		return nil, err
+	}
+	if err := validateVMDiskResize(currentBytes, requestedBytes); err != nil {
+		return nil, err
+	}
+	if currentBytes == 0 || requestedBytes == 0 || requestedBytes == currentBytes {
+		return nil, nil
+	}
+	size := fmt.Sprintf("%d", requestedBytes)
+	diskPath := vmDiskPathForRuntime(vmDiskPlan{Backend: vmDiskBackendZVOL, Path: dataset})
+	return []vmDiskPlanStep{
+		{Phase: vmDiskPhaseZVOLResize, Command: []string{"zfs", "set", "volsize=" + size, dataset}},
+		{Phase: vmDiskPhaseZVOLResize, Command: vmZVOLSettleCommand()},
+		{Phase: vmDiskPhaseZVOLResize, Command: []string{"e2fsck", "-pf", diskPath}},
+		{Phase: vmDiskPhaseZVOLResize, Command: []string{"resize2fs", diskPath}},
+	}, nil
 }
 
 func runVMDiskPlanWithRunner(ctx context.Context, plan vmDiskPlan, runner vmCommandRunner) error {
