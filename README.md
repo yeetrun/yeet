@@ -193,6 +193,9 @@ the service type `vm`.
 ```bash
 yeet run devbox vm://ubuntu/26.04
 yeet run lanbox vm://ubuntu/26.04 --net=lan
+yeet stop devbox
+yeet service set devbox --cpus=6 --memory=6g --disk=128g
+yeet service set devbox --net=lan
 yeet vm images
 yeet vm images update
 yeet vm console devbox
@@ -208,6 +211,9 @@ install missing VM packages. ZFS is optional unless you create VMs with `--zfs`.
 When `yeet run` starts a VM, it waits for the guest to report SSH readiness
 and an IPv4 address before printing the next `yeet ssh` command. If the guest
 does not report readiness, use `yeet vm console <svc>` for boot diagnostics.
+VM CPU, memory, disk growth, and network settings can be changed later with
+`yeet service set` while the VM is stopped. Disk changes only grow the root
+filesystem; shrink and live resize are not supported.
 
 VM image bundles are cached on each catch host. `yeet vm images` shows whether
 the cached image is current, stale, or missing; `yeet vm images update`
@@ -227,7 +233,8 @@ For ZFS-backed VMs, the first VM created on a pool for an image version prepares
 a shared ZFS image base on that pool. Later VMs on the same pool and image
 version clone that shared base instead of writing the root filesystem again.
 `yeet rm --clean-data devbox` removes the VM's service data and clone, not the
-shared image base.
+shared image base. Growing a ZFS-backed VM disk grows the ZVOL and then the
+guest ext4 filesystem.
 
 For `--net=svc`, `yeet ssh <svc>` proxies through the yeet host to reach the
 guest's private service-network IP. `yeet vm console <svc>` streams the guest
@@ -235,8 +242,9 @@ serial output and is useful for boot diagnostics; use SSH for an interactive
 guest shell. For yeet-managed VM aliases in `~/.yeet/known_hosts`,
 `yeet ssh <svc>` repairs a stale host key and retries once after a VM is
 recreated; it does not edit normal `~/.ssh/known_hosts` entries. The default
-`ubuntu` guest user has passwordless sudo. Use `--clean-data` when removing a
-VM if you want to delete the guest disk too.
+`ubuntu` guest user has passwordless sudo, `~/.local/bin` on `PATH`, and
+yeet-managed `.profile`/`.bashrc` defaults with a short login hint. Use
+`--clean-data` when removing a VM if you want to delete the guest disk too.
 
 Custom service root on the catch host:
 
