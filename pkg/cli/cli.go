@@ -139,7 +139,10 @@ type DockerUpdateFlags struct {
 }
 
 type VMImagesFlags struct {
-	Format string
+	Format           string
+	AllowLocalKernel bool
+	Stdin            bool
+	Yes              bool
 }
 
 type InfoFlags struct {
@@ -284,8 +287,11 @@ type dockerUpdateFlagsParsed struct {
 }
 
 type vmImagesFlagsParsed struct {
-	Format string `flag:"format" default:"table"`
-	Output string `flag:"output"`
+	AllowLocalKernel bool   `flag:"allow-local-kernel" help:"Allow an imported VM image bundle to provide vmlinux"`
+	Stdin            bool   `flag:"stdin" help:"Read an import bundle tar stream from stdin"`
+	Yes              bool   `flag:"yes" short:"y" help:"Skip confirmation prompts"`
+	Format           string `flag:"format" help:"Output format: table, json, json-pretty"`
+	Output           string `flag:"output" help:"Alias for --format"`
 }
 
 type infoFlagsParsed struct {
@@ -467,12 +473,14 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"images": {
 				Name:        "images",
 				Description: "Show or refresh VM image cache state",
-				Usage:       "vm images [update] [--format=table|json|json-pretty]",
+				Usage:       "vm images [ls|update|import <name> <dir>|rm <name>] [--format=table|json|json-pretty]",
 				Examples: []string{
 					"yeet vm images",
-					"yeet vm images --format=json",
+					"yeet vm images ls",
 					"yeet vm images update",
-					"yeet vm images update --format=json-pretty",
+					"yeet vm images import foo/bar ./dist/my-vm",
+					"yeet vm images import kernel/test ./dist/my-vm --allow-local-kernel",
+					"yeet vm images rm foo/bar --yes",
 				},
 				ArgsSchema:  VMImagesArgs{},
 				FlagsSchema: vmImagesFlagsParsed{},
@@ -1135,7 +1143,12 @@ func ParseVMImages(args []string) (VMImagesFlags, []string, error) {
 	if err != nil {
 		return VMImagesFlags{}, nil, err
 	}
-	flags := VMImagesFlags{Format: format}
+	flags := VMImagesFlags{
+		Format:           format,
+		AllowLocalKernel: parsed.Flags.AllowLocalKernel,
+		Stdin:            parsed.Flags.Stdin,
+		Yes:              parsed.Flags.Yes,
+	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
 }

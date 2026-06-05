@@ -1048,6 +1048,85 @@ func TestParseAdditionalCommandFlags(t *testing.T) {
 	})
 }
 
+func TestParseVMImagesImport(t *testing.T) {
+	flags, args, err := ParseVMImages([]string{"import", "foo/bar", "./bundle", "--allow-local-kernel", "--format=json"})
+	if err != nil {
+		t.Fatalf("ParseVMImages import: %v", err)
+	}
+	if flags.Format != "json" {
+		t.Fatalf("format = %q, want json", flags.Format)
+	}
+	if !flags.AllowLocalKernel {
+		t.Fatal("AllowLocalKernel = false, want true")
+	}
+	if flags.Stdin {
+		t.Fatal("Stdin = true for public import args, want false")
+	}
+	want := []string{"import", "foo/bar", "./bundle"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
+func TestParseVMImagesImportStdin(t *testing.T) {
+	flags, args, err := ParseVMImages([]string{"import", "foo/bar", "--stdin", "--format=json-pretty"})
+	if err != nil {
+		t.Fatalf("ParseVMImages import stdin: %v", err)
+	}
+	if !flags.Stdin {
+		t.Fatal("Stdin = false, want true")
+	}
+	if flags.Format != "json-pretty" {
+		t.Fatalf("format = %q, want json-pretty", flags.Format)
+	}
+	want := []string{"import", "foo/bar"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
+func TestParseVMImagesRemove(t *testing.T) {
+	flags, args, err := ParseVMImages([]string{"rm", "foo/bar", "--yes", "--format=table"})
+	if err != nil {
+		t.Fatalf("ParseVMImages rm: %v", err)
+	}
+	if !flags.Yes {
+		t.Fatal("Yes = false, want true")
+	}
+	if flags.Format != "table" {
+		t.Fatalf("format = %q, want table", flags.Format)
+	}
+	want := []string{"rm", "foo/bar"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+
+	flags, args, err = ParseVMImages([]string{"rm", "foo/bar", "-y"})
+	if err != nil {
+		t.Fatalf("ParseVMImages rm short yes: %v", err)
+	}
+	if !flags.Yes {
+		t.Fatal("Yes = false for -y, want true")
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
+func TestParseVMImagesListAlias(t *testing.T) {
+	flags, args, err := ParseVMImages([]string{"ls", "--output=json"})
+	if err != nil {
+		t.Fatalf("ParseVMImages ls: %v", err)
+	}
+	if flags.Format != "json" {
+		t.Fatalf("format = %q, want json", flags.Format)
+	}
+	want := []string{"ls"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
 func TestParseFlagErrors(t *testing.T) {
 	if _, _, err := ParseRun([]string{"--macvlan-vlan", "not-an-int"}); err == nil {
 		t.Fatal("ParseRun succeeded with invalid int")
