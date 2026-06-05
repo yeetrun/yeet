@@ -47,25 +47,74 @@ type Installer struct {
 	s    *Server
 }
 
+var liveSvcNetworkIPsFunc = liveSvcNetworkIPs
+
 func unassignedIP(dv db.DataView) (netip.Addr, error) {
-	isAssignedIP := func(ip netip.Addr) bool {
-		for _, s := range dv.AsStruct().Services {
-			if s.SvcNetwork != nil && s.SvcNetwork.IPv4 == ip {
-				return true
-			}
+	assigned := assignedSvcNetworkIPs(dv)
+	live, err := liveSvcNetworkIPsFunc()
+	if err != nil {
+		log.Printf("failed to inspect live service network IPs: %v", err)
+	} else {
+		for ip := range live {
+			assigned[ip] = true
 		}
-		return false
 	}
 	ip := netip.MustParseAddr("192.168.100.3")
 	pfx := netip.MustParsePrefix("192.168.100.0/24")
 	max := netip.MustParseAddr("192.168.100.253")
-	for isAssignedIP(ip) && ip.Less(max) {
+	for assigned[ip] && ip.Less(max) {
 		ip = ip.Next()
 	}
 	if !pfx.Contains(ip) || ip.Compare(max) > 0 {
 		return netip.Addr{}, fmt.Errorf("no available IP address")
 	}
 	return ip, nil
+}
+
+func assignedSvcNetworkIPs(dv db.DataView) map[netip.Addr]bool {
+	assigned := map[netip.Addr]bool{}
+	for _, s := range dv.AsStruct().Services {
+		if s.SvcNetwork != nil && s.SvcNetwork.IPv4.IsValid() {
+			assigned[s.SvcNetwork.IPv4] = true
+		}
+	}
+	return assigned
+}
+
+func liveSvcNetworkIPs() (map[netip.Addr]bool, error) {
+	out := map[netip.Addr]bool{}
+	raw, err := exec.Command("ip", "netns", "list").Output()
+	if err != nil {
+		return out, err
+	}
+	pfx := netip.MustParsePrefix("192.168.100.0/24")
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		addrRaw, err := exec.Command("ip", "netns", "exec", fields[0], "ip", "-o", "-4", "addr", "show", "scope", "global").Output()
+		if err != nil {
+			continue
+		}
+		parseLiveSvcNetworkIPs(out, pfx, addrRaw)
+	}
+	return out, nil
+}
+
+func parseLiveSvcNetworkIPs(out map[netip.Addr]bool, pfx netip.Prefix, raw []byte) {
+	for _, line := range strings.Split(string(raw), "\n") {
+		fields := strings.Fields(line)
+		for i, field := range fields {
+			if field != "inet" || i+1 >= len(fields) {
+				continue
+			}
+			addr, err := netip.ParsePrefix(fields[i+1])
+			if err == nil && pfx.Contains(addr.Addr()) {
+				out[addr.Addr()] = true
+			}
+		}
+	}
 }
 
 func randomMAC() string {

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,55 @@ import (
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/util/set"
 )
+
+func TestUnassignedIPSkipsLiveSvcNetworkIPs(t *testing.T) {
+	old := liveSvcNetworkIPsFunc
+	liveSvcNetworkIPsFunc = func() (map[netip.Addr]bool, error) {
+		return map[netip.Addr]bool{
+			netip.MustParseAddr("192.168.100.14"): true,
+		}, nil
+	}
+	t.Cleanup(func() { liveSvcNetworkIPsFunc = old })
+	dv := (&db.Data{Services: map[string]*db.Service{
+		"svc-3":  {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.3")}},
+		"svc-4":  {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.4")}},
+		"svc-5":  {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.5")}},
+		"svc-6":  {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.6")}},
+		"svc-7":  {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.7")}},
+		"svc-8":  {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.8")}},
+		"svc-9":  {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.9")}},
+		"svc-10": {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.10")}},
+		"svc-11": {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.11")}},
+		"svc-12": {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.12")}},
+		"svc-13": {SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.13")}},
+	}}).View()
+
+	got, err := unassignedIP(dv)
+	if err != nil {
+		t.Fatalf("unassignedIP: %v", err)
+	}
+	if got.String() != "192.168.100.15" {
+		t.Fatalf("unassignedIP = %s, want 192.168.100.15", got)
+	}
+}
+
+func TestParseLiveSvcNetworkIPs(t *testing.T) {
+	out := map[netip.Addr]bool{}
+	parseLiveSvcNetworkIPs(out, netip.MustParsePrefix("192.168.100.0/24"), []byte(`308: y-2dcb-vp    inet 192.168.100.14/32 scope global y-2dcb-vp
+309: eth0    inet 10.0.4.51/24 scope global eth0
+310: br0    inet 192.168.100.254/32 scope global br0
+bad line
+`))
+
+	for _, want := range []string{"192.168.100.14", "192.168.100.254"} {
+		if !out[netip.MustParseAddr(want)] {
+			t.Fatalf("parsed live IPs = %#v, missing %s", out, want)
+		}
+	}
+	if out[netip.MustParseAddr("10.0.4.51")] {
+		t.Fatalf("parsed LAN address outside svc range: %#v", out)
+	}
+}
 
 func TestCommitGenPlanForStagedInstallPromotesLatestAndGeneration(t *testing.T) {
 	commit := generatedServiceCommitForGen(0, 2)
