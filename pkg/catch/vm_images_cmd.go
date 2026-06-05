@@ -128,7 +128,7 @@ func (e *ttyExecer) vmImagesImportCmdFunc(flags cli.VMImagesFlags, name string) 
 	}
 	ref, err := importer.Import(e.vmImagesContext(), localVMImageImportRequest{
 		Name:             name,
-		Reader:           e.rw,
+		Reader:           e.payloadReader(),
 		AllowLocalKernel: flags.AllowLocalKernel,
 	})
 	if err != nil {

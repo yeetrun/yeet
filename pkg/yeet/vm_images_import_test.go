@@ -17,6 +17,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 func TestHandleSvcVMImagesImportStreamsBundleToCatch(t *testing.T) {
@@ -121,6 +123,56 @@ func TestHandleSvcVMImagesImportPassesFormatBeforeImport(t *testing.T) {
 	if !reflect.DeepEqual(gotArgs, want) {
 		t.Fatalf("args = %#v, want %#v", gotArgs, want)
 	}
+}
+
+func TestHandleSvcVMImagesImportForcesNonTTYWhenTTYOverrideIsSet(t *testing.T) {
+	restoreExecRemoteGlobals(t)
+	oldExec := execRemoteFn
+	defer func() { execRemoteFn = oldExec }()
+	execRemoteFn = execRemote
+	loadedPrefs.DefaultHost = "host-a"
+	forceTTY := true
+	SetUIConfig(UIConfig{TTYOverride: &forceTTY, Progress: catchrpc.ProgressAuto})
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "rootfs.ext4"), []byte("rootfs"), 0o644); err != nil {
+		t.Fatalf("write rootfs: %v", err)
+	}
+
+	var gotReq catchrpc.ExecRequest
+	var gotPayload bytes.Buffer
+	newRPCExecClientFn = func(host string) rpcExecClient {
+		if host != "host-a" {
+			t.Fatalf("host = %q, want host-a", host)
+		}
+		return fakeExecClient{
+			execFn: func(ctx context.Context, req catchrpc.ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan catchrpc.Resize) (int, error) {
+				gotReq = req
+				if resizeCh != nil {
+					t.Fatal("VM image import should not pass a resize channel")
+				}
+				if _, err := io.Copy(&gotPayload, stdin); err != nil {
+					t.Fatalf("copy stdin: %v", err)
+				}
+				return 0, nil
+			},
+		}
+	}
+
+	err := handleSvcVM(context.Background(), svcCommandRequest{
+		Command: svcCommand{RawArgs: []string{"vm", "images", "import", "foo/bar", dir}},
+		Service: systemServiceName,
+	})
+	if err != nil {
+		t.Fatalf("handleSvcVM: %v", err)
+	}
+	if gotReq.TTY {
+		t.Fatal("request TTY = true, want false for tar upload")
+	}
+	if !reflect.DeepEqual(gotReq.Args, []string{"vm", "images", "import", "foo/bar", "--stdin"}) {
+		t.Fatalf("request args = %#v", gotReq.Args)
+	}
+	assertTarContains(t, gotPayload.Bytes(), "rootfs.ext4")
 }
 
 func TestHandleSvcVMImagesImportRejectsMissingDirectory(t *testing.T) {

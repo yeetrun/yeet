@@ -136,6 +136,10 @@ func TestShouldBypassPtyInputModes(t *testing.T) {
 		{name: "run", isPty: true, args: []string{"run"}, want: true},
 		{name: "copy", isPty: true, args: []string{"copy"}, want: true},
 		{name: "stage", isPty: true, args: []string{"stage"}, want: true},
+		{name: "vm images import stdin", isPty: true, args: []string{"vm", "images", "import", "foo/bar", "--stdin"}, want: true},
+		{name: "vm images import stdin flags before action", isPty: true, args: []string{"vm", "images", "--format=json", "import", "foo/bar", "--stdin"}, want: true},
+		{name: "vm images import without stdin", isPty: true, args: []string{"vm", "images", "import", "foo/bar"}},
+		{name: "vm images ls", isPty: true, args: []string{"vm", "images", "ls"}},
 		{name: "version", isPty: true, args: []string{"version"}},
 	}
 	for _, tc := range tests {

@@ -299,9 +299,22 @@ func (e *ttyExecer) shouldBypassPtyInput() bool {
 	switch e.args[0] {
 	case "run", "copy", "stage", "cron":
 		return true
+	case "vm":
+		return vmCommandShouldBypassPtyInput(e.args[1:])
 	default:
 		return false
 	}
+}
+
+func vmCommandShouldBypassPtyInput(args []string) bool {
+	if len(args) == 0 || args[0] != "images" {
+		return false
+	}
+	flags, remaining, err := cli.ParseVMImages(args[1:])
+	if err != nil || !flags.Stdin || len(remaining) == 0 {
+		return false
+	}
+	return remaining[0] == "import"
 }
 
 func (e *ttyExecer) payloadReader() io.Reader {
