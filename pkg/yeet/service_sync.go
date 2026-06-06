@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -21,12 +22,14 @@ var fetchServiceInfoForSyncFn = func(ctx context.Context, host, service string) 
 }
 
 type serviceSyncTarget struct {
-	Service string
-	Host    string
+	Service       string
+	Host          string
+	CreateMissing bool
 }
 
 type serviceSyncResult struct {
 	Target           serviceSyncTarget
+	Created          bool
 	Root             string
 	ZFS              bool
 	Snapshots        string
@@ -154,14 +157,15 @@ func serviceSyncNamedTarget(cfg *ProjectConfig, req svcCommandRequest, remaining
 	if service == "" {
 		return nil, fmt.Errorf("service sync requires a service name or --all")
 	}
+	createMissing := hostOverrideSet && strings.TrimSpace(hostOverride) != ""
 	host, err := serviceSyncHost(cfg, service, hostOverride, hostOverrideSet)
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := cfg.ServiceEntry(service, host); !ok {
+	if _, ok := cfg.ServiceEntry(service, host); !ok && !createMissing {
 		return nil, fmt.Errorf("no yeet.toml entry for %s@%s", service, host)
 	}
-	return []serviceSyncTarget{{Service: service, Host: host}}, nil
+	return []serviceSyncTarget{{Service: service, Host: host, CreateMissing: createMissing}}, nil
 }
 
 func serviceSyncHost(cfg *ProjectConfig, service, hostOverride string, hostOverrideSet bool) (string, error) {
@@ -200,6 +204,13 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 	}
 	result.Root = root
 	result.ZFS = zfs
+	if _, ok := cfgLoc.Config.ServiceEntry(target.Service, target.Host); !ok {
+		if !target.CreateMissing {
+			return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
+		}
+		cfgLoc.Config.SetServiceEntry(serviceEntryFromSyncInfo(target, resp.Info))
+		result.Created = true
+	}
 	if !cfgLoc.Config.SetServiceRootForEntry(target.Service, target.Host, root, zfs) {
 		return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
 	}
@@ -219,6 +230,73 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 		}
 	}
 	return result, true, nil
+}
+
+func serviceEntryFromSyncInfo(target serviceSyncTarget, info catchrpc.ServiceInfo) ServiceEntry {
+	entry := ServiceEntry{
+		Name: target.Service,
+		Host: target.Host,
+		Type: strings.TrimSpace(info.ServiceType),
+	}
+	if info.VM != nil || entry.Type == serviceTypeVM {
+		entry.Type = serviceTypeVM
+		entry.PayloadKind = serviceTypeVM
+		if info.VM != nil {
+			entry.Payload = strings.TrimSpace(info.VM.Image)
+			entry.Args = serviceSyncVMArgs(info.VM)
+		}
+	}
+	return entry
+}
+
+func serviceSyncVMArgs(vm *catchrpc.ServiceVM) []string {
+	if vm == nil {
+		return nil
+	}
+	var args []string
+	if vm.CPUs > 0 {
+		args = append(args, "--cpus="+strconv.Itoa(vm.CPUs))
+	}
+	if memory := serviceSyncSizeArg(vm.MemoryBytes); memory != "" {
+		args = append(args, "--memory="+memory)
+	}
+	if disk := serviceSyncSizeArg(vm.DiskBytes); disk != "" {
+		args = append(args, "--disk="+disk)
+	}
+	if modes := serviceSyncVMNetworkModes(vm.Networks); len(modes) != 0 {
+		args = append(args, "--net="+strings.Join(modes, ","))
+	}
+	return args
+}
+
+func serviceSyncSizeArg(bytes int64) string {
+	switch {
+	case bytes <= 0:
+		return ""
+	case bytes%(1<<30) == 0:
+		return strconv.FormatInt(bytes>>30, 10) + "g"
+	case bytes%(1<<20) == 0:
+		return strconv.FormatInt(bytes>>20, 10) + "m"
+	default:
+		return strconv.FormatInt(bytes, 10)
+	}
+}
+
+func serviceSyncVMNetworkModes(networks []catchrpc.ServiceVMNetwork) []string {
+	seen := map[string]struct{}{}
+	var modes []string
+	for _, network := range networks {
+		mode := strings.TrimSpace(network.Mode)
+		if mode == "" {
+			continue
+		}
+		if _, ok := seen[mode]; ok {
+			continue
+		}
+		seen[mode] = struct{}{}
+		modes = append(modes, mode)
+	}
+	return modes
 }
 
 func setServicePortsForEntry(cfg *ProjectConfig, service, host string, ports []string) bool {
@@ -339,15 +417,19 @@ func renderServiceSyncResult(w io.Writer, configPath string, all bool, result se
 		_, err := fmt.Fprintf(w, "Skipped %s: %s\n", target, result.Skip)
 		return err
 	}
+	verb := "Updated"
+	if result.Created {
+		verb = "Created"
+	}
 	if all {
-		_, err := fmt.Fprintf(w, "Updated %s\n", target)
+		_, err := fmt.Fprintf(w, "%s %s\n", verb, target)
 		return err
 	}
-	return renderServiceSyncDetail(w, configPath, target, result)
+	return renderServiceSyncDetail(w, configPath, verb, target, result)
 }
 
-func renderServiceSyncDetail(w io.Writer, configPath string, target string, result serviceSyncResult) error {
-	if _, err := fmt.Fprintf(w, "Updated %s in %s\n", target, configPath); err != nil {
+func renderServiceSyncDetail(w io.Writer, configPath string, verb string, target string, result serviceSyncResult) error {
+	if _, err := fmt.Fprintf(w, "%s %s in %s\n", verb, target, configPath); err != nil {
 		return err
 	}
 	if result.Root == "" {
