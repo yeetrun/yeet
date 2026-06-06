@@ -2,7 +2,7 @@
 
 The v0 VM payload is `vm://ubuntu/26.04`.
 
-The current fast bundle version is `ubuntu-26.04-amd64-v11`. It is built from
+The current fast bundle version is `ubuntu-26.04-amd64-v12`. It is built from
 the official Ubuntu 26.04 cloud image, boots a yeet-managed kernel under
 Firecracker direct kernel boot, uses `/usr/local/lib/yeet-vm/yeet-init` as the
 pre-systemd init shim, and omits `initrd.img`.
@@ -69,8 +69,8 @@ The fast profile customizes the Ubuntu rootfs before compression:
 - masks residual boot units for netplan, networkd-dispatcher, sysstat,
   e2scrub, XFS scrub, fwupd refresh, update notifier, binfmt_misc, ldconfig,
   keyboard setup, plymouth, module loading, and background maintenance timers;
-- merges `/usr/sbin` into `/usr/bin` after validating collisions so systemd's
-  fresh VM status is not tainted by a split bin/sbin layout;
+- preserves Ubuntu package-owned filesystem paths such as `/usr/sbin` so normal
+  Ubuntu packages and alternatives keep working inside yeet VMs;
 - masks snapd units because the fast image intentionally does not support
   snaps.
 

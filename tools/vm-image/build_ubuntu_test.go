@@ -14,7 +14,7 @@ func TestFastUbuntuImagePolicyCleansFirecrackerGuestStatus(t *testing.T) {
 	script := readBuildUbuntuScript(t)
 
 	for _, want := range []string{
-		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v11}"`,
+		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v12}"`,
 		"fwupd$",
 		"fwupd-signed$",
 		"update-notifier-common$",
@@ -31,7 +31,6 @@ func TestFastUbuntuImagePolicyCleansFirecrackerGuestStatus(t *testing.T) {
 		"xfs_scrub_all.timer",
 		"proc-sys-fs-binfmt_misc.automount",
 		"proc-sys-fs-binfmt_misc.mount",
-		"merge_usr_sbin_into_usr_bin",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("build script missing %q", want)
@@ -97,19 +96,36 @@ func TestYeetKernelConfigSupportsRouterServicesWithoutModules(t *testing.T) {
 	}
 }
 
-func TestFastUbuntuImagePolicyGuardsSbinMerge(t *testing.T) {
+func TestFastUbuntuImagePolicyPreservesUbuntuSbinLayout(t *testing.T) {
 	script := readBuildUbuntuScript(t)
 
-	for _, want := range []string{
-		"find \"$usr_sbin\" -mindepth 1 -maxdepth 1 -print",
-		"resolve_guest_path",
-		"chroot \"$root\" /usr/bin/readlink -f \"$guest_path\"",
-		"unmergeable /usr/sbin collision",
+	for _, forbidden := range []string{
+		"merge_usr_sbin_into_usr_bin",
 		"ln -s bin \"$usr_sbin\"",
 		"ln -snf usr/bin \"$root/sbin\"",
+		"unmergeable /usr/sbin collision",
+	} {
+		if strings.Contains(script, forbidden) {
+			t.Fatalf("build script still contains custom sbin merge fragment %q", forbidden)
+		}
+	}
+
+	for _, want := range []string{
+		"validate_fast_rootfs_ubuntu_compatibility",
+		"/usr/sbin must remain an Ubuntu-owned directory",
+		"/sbin must keep Ubuntu cloud image target usr/sbin",
+		"/usr/sbin/sshd",
+		"/usr/sbin/agetty",
+		"/usr/sbin/unix_chkpwd",
+		"/usr/sbin/iptables-nft",
+		"/usr/sbin/xtables-nft-multi",
+		"dpkg -S /usr/sbin/sshd",
+		"update-alternatives --display iptables",
+		"iptables --version",
+		"nf_tables",
 	} {
 		if !strings.Contains(script, want) {
-			t.Fatalf("sbin merge helper missing %q", want)
+			t.Fatalf("build script missing Ubuntu compatibility validation %q", want)
 		}
 	}
 }

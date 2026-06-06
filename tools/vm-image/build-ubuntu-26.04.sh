@@ -6,7 +6,7 @@
 set -euo pipefail
 
 profile="${YEET_VM_IMAGE_PROFILE:-fast}"
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v11}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v12}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
@@ -247,67 +247,63 @@ install_fast_rootfs_terminfo() {
 	TERMINFO="$root/etc/terminfo" infocmp -x xterm-ghostty >/dev/null
 }
 
-resolve_guest_path() {
+validate_fast_rootfs_ubuntu_compatibility() {
 	local root="$1"
-	local guest_path="$2"
-	chroot "$root" /usr/bin/readlink -f "$guest_path" 2>/dev/null || true
-}
 
-same_guest_file() {
-	local root="$1"
-	local left="$2"
-	local right="$3"
-	if [ -z "$left" ] || [ -z "$right" ]; then
-		return 1
+	if [ -L "$root/usr/sbin" ] || [ ! -d "$root/usr/sbin" ]; then
+		echo "/usr/sbin must remain an Ubuntu-owned directory" >&2
+		exit 1
 	fi
-	if [ "$left" = "$right" ]; then
-		return 0
-	fi
-	cmp -s "$root$left" "$root$right"
-}
 
-merge_usr_sbin_into_usr_bin() {
-	local root="$1"
-	local usr_bin="$root/usr/bin"
-	local usr_sbin="$root/usr/sbin"
-	if [ -L "$usr_sbin" ] || [ ! -d "$usr_sbin" ]; then
-		return
+	local sbin_target
+	sbin_target="$(chroot "$root" /usr/bin/readlink /sbin 2>/dev/null || true)"
+	if [ "$sbin_target" != "usr/sbin" ]; then
+		echo "/sbin must keep Ubuntu cloud image target usr/sbin, got ${sbin_target:-missing}" >&2
+		exit 1
 	fi
-	install -d -m 0755 "$usr_bin"
-	while IFS= read -r src; do
-		local name dst src_guest dst_guest src_real dst_real
-		name="$(basename "$src")"
-		dst="$usr_bin/$name"
-		src_guest="/usr/sbin/$name"
-		dst_guest="/usr/bin/$name"
-		if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
-			mv "$src" "$usr_bin/"
-			continue
-		fi
-		src_real="$(resolve_guest_path "$root" "$src_guest")"
-		dst_real="$(resolve_guest_path "$root" "$dst_guest")"
-		case "$dst_real" in
-		/usr/sbin/* | /sbin/*)
-			rm -f "$dst"
-			mv "$src" "$usr_bin/"
-			;;
-		/usr/bin/*)
-			if same_guest_file "$root" "$src_real" "$dst_real"; then
-				rm -f "$src"
-			else
-				echo "unmergeable /usr/sbin collision: $src_guest -> ${src_real:-?}, $dst_guest -> ${dst_real:-?}" >&2
-				exit 1
-			fi
-			;;
-		*)
-			echo "unmergeable /usr/sbin collision: $src_guest -> ${src_real:-?}, $dst_guest -> ${dst_real:-?}" >&2
+
+	for path in \
+		/usr/sbin/sshd \
+		/usr/sbin/agetty \
+		/usr/sbin/unix_chkpwd \
+		/usr/sbin/iptables-nft \
+		/usr/sbin/xtables-nft-multi
+	do
+		if [ ! -e "$root$path" ]; then
+			echo "missing Ubuntu package-owned path $path" >&2
 			exit 1
-			;;
-		esac
-	done < <(find "$usr_sbin" -mindepth 1 -maxdepth 1 -print)
-	rmdir "$usr_sbin"
-	ln -s bin "$usr_sbin"
-	ln -snf usr/bin "$root/sbin"
+		fi
+	done
+
+	for path in \
+		/usr/sbin/sshd \
+		/usr/sbin/agetty \
+		/usr/sbin/unix_chkpwd \
+		/usr/sbin/iptables-nft \
+		/usr/sbin/xtables-nft-multi
+	do
+		if ! chroot "$root" /usr/bin/dpkg -S "$path" >/dev/null; then
+			echo "dpkg ownership missing for $path" >&2
+			exit 1
+		fi
+	done
+
+	chroot "$root" /usr/bin/dpkg -S /usr/sbin/sshd >/dev/null
+	chroot "$root" /usr/bin/update-alternatives --display iptables >/dev/null
+
+	for path in /usr/sbin/iptables /usr/sbin/iptables-restore /usr/sbin/iptables-save; do
+		local target
+		target="$(chroot "$root" /usr/bin/readlink -f "$path" 2>/dev/null || true)"
+		if [ -z "$target" ] || [ ! -e "$root$target" ]; then
+			echo "iptables alternative $path resolves to missing target ${target:-missing}" >&2
+			exit 1
+		fi
+	done
+
+	if ! chroot "$root" /usr/sbin/iptables --version | grep -q 'nf_tables'; then
+		echo "iptables must use the nf_tables backend" >&2
+		exit 1
+	fi
 }
 
 customize_fast_rootfs() {
@@ -417,7 +413,7 @@ do
 done
 ldconfig
 EOF
-	merge_usr_sbin_into_usr_bin "$rootfs_mount"
+	validate_fast_rootfs_ubuntu_compatibility "$rootfs_mount"
 	rm -f "$rootfs_mount/usr/sbin/policy-rc.d"
 	cleanup_rootfs_mount
 	rootfs_mount=""
