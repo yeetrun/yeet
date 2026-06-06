@@ -136,9 +136,13 @@ func TestVMConsoleStopsWhenContextCanceled(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	inputReader, inputWriter := io.Pipe()
+	t.Cleanup(func() { _ = inputReader.Close() })
+	t.Cleanup(func() { _ = inputWriter.Close() })
+	rw := readWriter{Reader: inputReader, Writer: io.Discard}
 	done := make(chan error, 1)
 	go func() {
-		done <- (&ttyExecer{ctx: ctx, s: server, sn: "devbox", rw: &bytes.Buffer{}}).vmConsoleCmdFunc()
+		done <- (&ttyExecer{ctx: ctx, s: server, sn: "devbox", rw: rw}).vmConsoleCmdFunc()
 	}()
 
 	conn := <-accepted
