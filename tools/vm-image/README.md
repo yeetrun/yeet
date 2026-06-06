@@ -2,7 +2,7 @@
 
 The v0 VM payload is `vm://ubuntu/26.04`.
 
-The current fast bundle version is `ubuntu-26.04-amd64-v10`. It is built from
+The current fast bundle version is `ubuntu-26.04-amd64-v11`. It is built from
 the official Ubuntu 26.04 cloud image, boots a yeet-managed kernel under
 Firecracker direct kernel boot, uses `/usr/local/lib/yeet-vm/yeet-init` as the
 pre-systemd init shim, and omits `initrd.img`.
@@ -25,9 +25,9 @@ The manifest URL used by catch is:
 The default build profile is `fast`. It requires a kernel that already has the
 Firecracker boot path built in. The kernel builder pins the Firecracker microVM
 config revision used by yeet's no-initrd direct-boot image and enables kernel IP
-autoconfiguration for the first VM interface. It also builds in TUN, netfilter,
-conntrack, conntrack marks, nftables, nft NAT/masquerade, and the nft
-compatibility support needed by Ubuntu's `iptables-nft` userspace so
+autoconfiguration for the first VM interface. It also builds in TUN, IPv6,
+netfilter, conntrack, conntrack marks, nftables, nft NAT/masquerade, and the
+nft compatibility support needed by Ubuntu's `iptables-nft` userspace so
 guest-installed router software can run without loadable kernel modules:
 
 ```bash
@@ -56,7 +56,8 @@ The fast profile customizes the Ubuntu rootfs before compression:
 - keeps `iptables` and `nftables` userspace tools installed for guest-managed
   firewalls and routers. On Ubuntu, the default `iptables` command uses the
   nftables backend;
-- writes `/etc/sysctl.d/99-yeet-vm-router.conf` with IPv4 forwarding enabled;
+- writes `/etc/sysctl.d/99-yeet-vm-router.conf` with IPv4 and IPv6 forwarding
+  enabled;
 - writes `/etc/tmpfiles.d/yeet-vm-tun.conf` so `/dev/net/tun` is present for
   guest-managed tunneling software;
 - enables kernel IP autoconfiguration for the first VM interface;

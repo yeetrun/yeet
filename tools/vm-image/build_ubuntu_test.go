@@ -14,7 +14,7 @@ func TestFastUbuntuImagePolicyCleansFirecrackerGuestStatus(t *testing.T) {
 	script := readBuildUbuntuScript(t)
 
 	for _, want := range []string{
-		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v10}"`,
+		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v11}"`,
 		"fwupd$",
 		"fwupd-signed$",
 		"update-notifier-common$",
@@ -46,6 +46,7 @@ func TestFastUbuntuImagePolicySupportsRouterServices(t *testing.T) {
 		"apt-get install -y --no-install-recommends iptables nftables",
 		"99-yeet-vm-router.conf",
 		"net.ipv4.ip_forward = 1",
+		"net.ipv6.conf.all.forwarding = 1",
 		"yeet-vm-tun.conf",
 		"/dev/net/tun",
 	} {
@@ -60,6 +61,8 @@ func TestYeetKernelConfigSupportsRouterServicesWithoutModules(t *testing.T) {
 
 	for _, want := range []string{
 		"CONFIG_MODULES n",
+		"CONFIG_IPV6 y",
+		"CONFIG_IPV6_MULTIPLE_TABLES y",
 		"CONFIG_TUN y",
 		"CONFIG_NETFILTER y",
 		"CONFIG_NETFILTER_XTABLES y",
@@ -67,9 +70,14 @@ func TestYeetKernelConfigSupportsRouterServicesWithoutModules(t *testing.T) {
 		"CONFIG_NF_CONNTRACK_MARK y",
 		"CONFIG_NF_NAT y",
 		"CONFIG_NF_TABLES_IPV4 y",
+		"CONFIG_NF_TABLES_IPV6 y",
+		"CONFIG_NF_TABLES_INET y",
 		"CONFIG_NFT_CT y",
 		"CONFIG_NFT_NAT y",
 		"CONFIG_NFT_MASQ y",
+		"CONFIG_NFT_REJECT y",
+		"CONFIG_NFT_REJECT_IPV6 y",
+		"CONFIG_NFT_REJECT_INET y",
 		"CONFIG_NETFILTER_XT_TARGET_CONNMARK y",
 		"CONFIG_NETFILTER_XT_TARGET_MASQUERADE y",
 		"CONFIG_NETFILTER_XT_TARGET_MARK y",
@@ -79,6 +87,7 @@ func TestYeetKernelConfigSupportsRouterServicesWithoutModules(t *testing.T) {
 		"CONFIG_NETFILTER_XT_MATCH_COMMENT y",
 		"CONFIG_NETFILTER_XT_MATCH_CONNTRACK y",
 		"CONFIG_NETFILTER_XT_MATCH_ADDRTYPE y",
+		"CONFIG_IP6_NF_IPTABLES y",
 		"CONFIG_NF_TABLES y",
 		"CONFIG_NFT_COMPAT y",
 	} {
