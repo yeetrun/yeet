@@ -14,7 +14,7 @@ func TestFastUbuntuImagePolicyCleansFirecrackerGuestStatus(t *testing.T) {
 	script := readBuildUbuntuScript(t)
 
 	for _, want := range []string{
-		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v9}"`,
+		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v10}"`,
 		"fwupd$",
 		"fwupd-signed$",
 		"update-notifier-common$",
@@ -64,14 +64,17 @@ func TestYeetKernelConfigSupportsRouterServicesWithoutModules(t *testing.T) {
 		"CONFIG_NETFILTER y",
 		"CONFIG_NETFILTER_XTABLES y",
 		"CONFIG_NF_CONNTRACK y",
+		"CONFIG_NF_CONNTRACK_MARK y",
 		"CONFIG_NF_NAT y",
 		"CONFIG_NF_TABLES_IPV4 y",
 		"CONFIG_NFT_CT y",
 		"CONFIG_NFT_NAT y",
 		"CONFIG_NFT_MASQ y",
+		"CONFIG_NETFILTER_XT_TARGET_CONNMARK y",
 		"CONFIG_NETFILTER_XT_TARGET_MASQUERADE y",
 		"CONFIG_NETFILTER_XT_TARGET_MARK y",
 		"CONFIG_NETFILTER_XT_NAT y",
+		"CONFIG_NETFILTER_XT_MATCH_CONNMARK y",
 		"CONFIG_NETFILTER_XT_MATCH_MARK y",
 		"CONFIG_NETFILTER_XT_MATCH_COMMENT y",
 		"CONFIG_NETFILTER_XT_MATCH_CONNTRACK y",
