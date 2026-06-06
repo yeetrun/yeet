@@ -979,14 +979,9 @@ func (e *ttyExecer) vmNetworkPlanFromFlags(flags cli.RunFlags, svcNet *db.SvcNet
 		return vmNetworkPlan{}, err
 	}
 	if vmModeListContains(modes, "lan") {
-		if input.LANParent == "" {
-			parent, err := hostDefaultRouteInterfaceFn()
-			if err != nil {
-				return vmNetworkPlan{}, fmt.Errorf("resolve VM LAN parent: %w", err)
-			}
-			input.LANParent = parent
+		if err := resolveVMLANNetworkInput(&input); err != nil {
+			return vmNetworkPlan{}, err
 		}
-		input.LANParentIsBridge = vmLANParentIsBridge(input.LANParent)
 		if input.LANMAC == "" {
 			input.LANMAC = randomMAC()
 		}
