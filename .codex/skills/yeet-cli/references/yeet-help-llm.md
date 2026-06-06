@@ -434,7 +434,7 @@ Manage VM-specific commands
 **Commands**:
 
 - `vm console`: Stream VM serial console output
-- `vm images`: Show or refresh VM image cache state
+- `vm images`: Show, refresh, import, or prune VM image cache state
 
 Get detailed help: `yeet vm --help-llm`
 
@@ -2828,7 +2828,7 @@ Get detailed help: `yeet vm console --help-llm`
 
 ### `vm images`
 
-Show or refresh VM image cache state
+Show, refresh, import, or prune VM image cache state
 
 **Examples**:
 
@@ -2837,7 +2837,7 @@ yeet vm images
 ```
 
 ```
-yeet vm images --format=json
+yeet vm images ls
 ```
 
 ```
@@ -2845,7 +2845,23 @@ yeet vm images update
 ```
 
 ```
-yeet vm images update --format=json-pretty
+yeet vm images import foo/bar ./dist/my-vm
+```
+
+```
+yeet vm images import kernel/test ./dist/my-vm --allow-local-kernel
+```
+
+```
+yeet vm images rm foo/bar --yes
+```
+
+```
+yeet vm images prune
+```
+
+```
+yeet vm images prune --dry-run
 ```
 
 Get detailed help: `yeet vm images --help-llm`
@@ -2906,12 +2922,12 @@ Progress output (auto|tty|plain|quiet)
 ````
 # yeet vm images
 
-Show or refresh VM image cache state
+Show, refresh, import, or prune VM image cache state
 
 ## Usage
 
 ```
-yeet [GLOBAL OPTIONS] vm images [update] [--format=table|json|json-pretty]
+yeet [GLOBAL OPTIONS] vm images [ls|update|import <name> <dir>|rm <name>|prune] [--format=table|json|json-pretty]
 ```
 
 ## Global Options
@@ -2953,7 +2969,7 @@ yeet vm images
 ```
 
 ```
-yeet vm images --format=json
+yeet vm images ls
 ```
 
 ```
@@ -2961,7 +2977,23 @@ yeet vm images update
 ```
 
 ```
-yeet vm images update --format=json-pretty
+yeet vm images import foo/bar ./dist/my-vm
+```
+
+```
+yeet vm images import kernel/test ./dist/my-vm --allow-local-kernel
+```
+
+```
+yeet vm images rm foo/bar --yes
+```
+
+```
+yeet vm images prune
+```
+
+```
+yeet vm images prune --dry-run
 ```
 
 

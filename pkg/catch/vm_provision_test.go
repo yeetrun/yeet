@@ -602,6 +602,34 @@ func TestRunVMStaleImageUpdatePolicyEnsuresLatest(t *testing.T) {
 	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v3")
 }
 
+func TestRunVMStaleImageUpdatePolicyPrunesOldCacheAfterRefresh(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
+	oldDir := seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v1")
+	currentDir := seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v3")
+	stubVMProvisionImageState(t, staleVMProvisionImageState("ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v3"))
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		asset, err := fakeVMImageAssetVersion(t, "ubuntu-26.04-amd64-v3")
+		if err != nil {
+			return vmImageAsset{}, err
+		}
+		asset.Paths.Dir = currentDir
+		return asset, nil
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", ImagePolicy: "update"}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		t.Fatalf("old cache dir stat err = %v, want not exist", err)
+	}
+	if _, err := os.Stat(currentDir); err != nil {
+		t.Fatalf("current cache dir should remain: %v", err)
+	}
+	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v3")
+}
+
 func TestRunVMCachedImagePolicyUsesCachedStaleVersion(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")

@@ -602,6 +602,19 @@ func TestBridgeServiceArgsSkipsVMImagesImport(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsSkipsVMImagesPrune(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"vm", "images", "prune", "--dry-run"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if ok {
+		t.Fatalf("vm images prune should not bridge service args, got service=%q host=%q bridged=%v", service, host, bridged)
+	}
+	if service != "" || host != "" || bridged != nil {
+		t.Fatalf("bridge result = service=%q host=%q bridged=%v, want empty", service, host, bridged)
+	}
+}
+
 func TestBridgeServiceArgsLogsServiceBeforeFollowFlag(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

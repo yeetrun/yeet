@@ -826,6 +826,9 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	if !RemoteGroupFlagSpecs()["vm"]["images"]["--output"].ConsumesValue {
 		t.Fatal("vm images --output alias should consume a value")
 	}
+	if RemoteGroupFlagSpecs()["vm"]["images"]["--dry-run"].ConsumesValue {
+		t.Fatal("vm images --dry-run should not consume a value")
+	}
 }
 
 func TestServiceArgSpecDetection(t *testing.T) {
@@ -1108,6 +1111,26 @@ func TestParseVMImagesRemove(t *testing.T) {
 	if !flags.Yes {
 		t.Fatal("Yes = false for -y, want true")
 	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("args = %#v, want %#v", args, want)
+	}
+}
+
+func TestParseVMImagesPrune(t *testing.T) {
+	flags, args, err := ParseVMImages([]string{"prune", "--dry-run", "--yes", "--format=json"})
+	if err != nil {
+		t.Fatalf("ParseVMImages prune: %v", err)
+	}
+	if !flags.DryRun {
+		t.Fatal("DryRun = false, want true")
+	}
+	if !flags.Yes {
+		t.Fatal("Yes = false, want true")
+	}
+	if flags.Format != "json" {
+		t.Fatalf("format = %q, want json", flags.Format)
+	}
+	want := []string{"prune"}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("args = %#v, want %#v", args, want)
 	}

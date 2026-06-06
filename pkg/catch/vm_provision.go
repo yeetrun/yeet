@@ -187,7 +187,7 @@ func (e *ttyExecer) selectVMProvisionImage(ctx context.Context, flags cli.RunFla
 	switch state.State {
 	case vmImageCacheMissing:
 		done := e.traceBlock("vm image ensure missing")
-		asset, err := vmImageEnsureFunc(ctx, cache, payload, ui)
+		asset, err := e.ensureManagedVMImageAndPrune(ctx, cache, payload, ui)
 		done()
 		return asset, err
 	case vmImageCacheCurrent:
@@ -230,7 +230,7 @@ func (e *ttyExecer) selectStaleVMProvisionImage(ctx context.Context, cache vmIma
 	switch policy {
 	case "update":
 		done := e.traceBlock("vm image ensure stale")
-		asset, err := vmImageEnsureFunc(ctx, cache, payload, ui)
+		asset, err := e.ensureManagedVMImageAndPrune(ctx, cache, payload, ui)
 		done()
 		return asset, err
 	case "cached":
@@ -250,7 +250,7 @@ func (e *ttyExecer) selectStaleVMProvisionImage(ctx context.Context, cache vmIma
 		}
 		if update {
 			done := e.traceBlock("vm image ensure prompt")
-			asset, err := vmImageEnsureFunc(ctx, cache, payload, ui)
+			asset, err := e.ensureManagedVMImageAndPrune(ctx, cache, payload, ui)
 			done()
 			return asset, err
 		}
