@@ -198,6 +198,7 @@ yeet service set devbox --cpus=6 --memory=6g --disk=128g
 yeet service set devbox --net=lan
 yeet vm images
 yeet vm images update
+yeet vm images prune --dry-run
 yeet vm console devbox
 yeet ssh devbox
 yeet rm --clean-data devbox
@@ -216,12 +217,14 @@ VM CPU, memory, disk growth, and network settings can be changed later with
 filesystem; shrink and live resize are not supported.
 
 VM image bundles are cached on each catch host. `yeet vm images` shows whether
-the cached image is current, stale, or missing; `yeet vm images update`
-refreshes the host file cache used for future VM creates. A missing image is
-downloaded automatically on the first VM create. Existing VM disks are not
-rewritten. When creating a VM with a stale cached image, interactive runs prompt
-by default; non-interactive runs require `--image-policy=update` or
-`--image-policy=cached`.
+the cached image is current, stale, missing, in use, or prunable; `yeet vm
+images update` refreshes the host file cache used for future VM creates and
+automatically removes old unreferenced image versions when it is safe. A missing
+image is downloaded automatically on the first VM create. Existing VM disks are
+not rewritten. When creating a VM with a stale cached image, interactive runs
+prompt by default; non-interactive runs require `--image-policy=update` or
+`--image-policy=cached`. Use `yeet vm images prune --dry-run` to preview manual
+cleanup, or `yeet vm images prune` to confirm and remove prunable cache entries.
 
 ### Local VM images
 

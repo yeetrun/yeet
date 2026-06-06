@@ -14,9 +14,10 @@ import (
 	"text/tabwriter"
 
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
 )
 
-const vmImagesUsage = "usage: yeet vm images [ls|update|import <name>|rm <name>]"
+const vmImagesUsage = "usage: yeet vm images [ls|update|import <name>|rm <name>|prune]"
 
 type vmImageListRow struct {
 	Payload      string `json:"payload"`
@@ -45,30 +46,33 @@ func (e *ttyExecer) vmImagesCmdFunc(flags cli.VMImagesFlags, args []string) erro
 func (e *ttyExecer) vmImagesActionCmdFunc(flags cli.VMImagesFlags, action string, args []string) error {
 	switch action {
 	case "ls":
-		if len(args) != 0 {
-			return fmt.Errorf("%s", vmImagesUsage)
-		}
-		return e.vmImagesListCmdFunc(flags)
+		return vmImagesNoArgAction(args, func() error { return e.vmImagesListCmdFunc(flags) })
 	case "update":
-		if len(args) != 0 {
-			return fmt.Errorf("%s", vmImagesUsage)
-		}
-		return e.vmImagesUpdateCmdFunc(flags)
+		return vmImagesNoArgAction(args, func() error { return e.vmImagesUpdateCmdFunc(flags) })
 	case "import":
-		name, ok := vmImagesSingleNameArg(args)
-		if !ok {
-			return fmt.Errorf("%s", vmImagesUsage)
-		}
-		return e.vmImagesImportCmdFunc(flags, name)
+		return vmImagesNameAction(args, func(name string) error { return e.vmImagesImportCmdFunc(flags, name) })
 	case "rm":
-		name, ok := vmImagesSingleNameArg(args)
-		if !ok {
-			return fmt.Errorf("%s", vmImagesUsage)
-		}
-		return e.vmImagesRemoveCmdFunc(flags, name)
+		return vmImagesNameAction(args, func(name string) error { return e.vmImagesRemoveCmdFunc(flags, name) })
+	case "prune":
+		return vmImagesNoArgAction(args, func() error { return e.vmImagesPruneCmdFunc(flags) })
 	default:
 		return fmt.Errorf("%s", vmImagesUsage)
 	}
+}
+
+func vmImagesNoArgAction(args []string, run func() error) error {
+	if len(args) != 0 {
+		return fmt.Errorf("%s", vmImagesUsage)
+	}
+	return run()
+}
+
+func vmImagesNameAction(args []string, run func(string) error) error {
+	name, ok := vmImagesSingleNameArg(args)
+	if !ok {
+		return fmt.Errorf("%s", vmImagesUsage)
+	}
+	return run(name)
 }
 
 func vmImagesSingleNameArg(args []string) (string, bool) {
@@ -92,12 +96,22 @@ func (e *ttyExecer) vmImagesListCmdFunc(flags cli.VMImagesFlags) error {
 	for _, ref := range refs {
 		rows = append(rows, vmImageListRowFromLocalRef(ref, "ready"))
 	}
+	pruneRows, err := e.s.planVMImagePrune(e.vmImagesContext(), cache)
+	if err != nil {
+		return err
+	}
+	for _, row := range pruneRows {
+		if row.Kind == vmImagePruneKindCache && row.State == vmImagePruneStateCurrent {
+			continue
+		}
+		rows = append(rows, vmImageListRowFromPruneRow(row))
+	}
 	return renderVMImageListRows(e.rw, flags.Format, rows)
 }
 
 func (e *ttyExecer) vmImagesUpdateCmdFunc(flags cli.VMImagesFlags) error {
 	cache := e.vmImageCache()
-	asset, err := vmImageEnsureFunc(e.vmImagesContext(), cache, vmUbuntu2604Payload, e.vmImagesProgressUI(flags))
+	asset, err := e.ensureManagedVMImageAndPrune(e.vmImagesContext(), cache, vmUbuntu2604Payload, e.vmImagesProgressUI(flags))
 	if err != nil {
 		return err
 	}
@@ -152,6 +166,37 @@ func (e *ttyExecer) vmImagesRemoveCmdFunc(flags cli.VMImagesFlags, name string) 
 	return renderVMImageListRows(e.rw, flags.Format, []vmImageListRow{row})
 }
 
+func (e *ttyExecer) vmImagesPruneCmdFunc(flags cli.VMImagesFlags) error {
+	cache := e.vmImageCache()
+	rows, err := e.s.planVMImagePrune(e.vmImagesContext(), cache)
+	if err != nil {
+		return err
+	}
+	if flags.DryRun {
+		return renderVMImagePruneRows(e.rw, flags.Format, rows)
+	}
+	if !vmImagePruneRowsHavePrunable(rows) {
+		return renderVMImagePruneRows(e.rw, flags.Format, rows)
+	}
+	if !flags.Yes {
+		if strings.TrimSpace(flags.Format) != "" && strings.TrimSpace(flags.Format) != "table" {
+			return fmt.Errorf("rerun with --yes or --dry-run to prune VM images with %s output", flags.Format)
+		}
+		if err := renderVMImagePruneRows(e.rw, flags.Format, rows); err != nil {
+			return err
+		}
+		ok, err := cmdutil.Confirm(e.rw, e.rw, "Remove prunable VM images?")
+		if err != nil {
+			return fmt.Errorf("failed to confirm VM image prune: %w", err)
+		}
+		if !ok {
+			return nil
+		}
+	}
+	rows = e.s.applyVMImagePrune(e.vmImagesContext(), rows)
+	return renderVMImagePruneRows(e.rw, flags.Format, rows)
+}
+
 func (e *ttyExecer) vmImagesProgressUI(flags cli.VMImagesFlags) ProgressUI {
 	switch strings.TrimSpace(flags.Format) {
 	case "json", "json-pretty":
@@ -194,6 +239,16 @@ func vmImageListRowFromLocalRef(ref localVMImageRef, state string) vmImageListRo
 		Version:      ref.Version,
 		CachePath:    ref.Root,
 		KernelPolicy: ref.KernelPolicy,
+	}
+}
+
+func vmImageListRowFromPruneRow(row vmImagePruneRow) vmImageListRow {
+	return vmImageListRow{
+		Payload:   vmUbuntu2604Payload,
+		Kind:      row.Kind,
+		State:     row.State,
+		Version:   row.Version,
+		CachePath: row.Path,
 	}
 }
 

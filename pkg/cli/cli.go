@@ -143,6 +143,7 @@ type VMImagesFlags struct {
 	AllowLocalKernel bool
 	Stdin            bool
 	Yes              bool
+	DryRun           bool
 }
 
 type InfoFlags struct {
@@ -290,6 +291,7 @@ type vmImagesFlagsParsed struct {
 	AllowLocalKernel bool   `flag:"allow-local-kernel" help:"Allow an imported VM image bundle to provide vmlinux"`
 	Stdin            bool   `flag:"stdin" help:"Read an import bundle tar stream from stdin"`
 	Yes              bool   `flag:"yes" short:"y" help:"Skip confirmation prompts"`
+	DryRun           bool   `flag:"dry-run" help:"Show what would be pruned without removing anything"`
 	Format           string `flag:"format" help:"Output format: table, json, json-pretty"`
 	Output           string `flag:"output" help:"Alias for --format"`
 }
@@ -472,8 +474,8 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"console": {Name: "console", Description: "Stream VM serial console output", Usage: "vm console <svc>", ArgsSchema: ServiceArgs{}},
 			"images": {
 				Name:        "images",
-				Description: "Show or refresh VM image cache state",
-				Usage:       "vm images [ls|update|import <name> <dir>|rm <name>] [--format=table|json|json-pretty]",
+				Description: "Show, refresh, import, or prune VM image cache state",
+				Usage:       "vm images [ls|update|import <name> <dir>|rm <name>|prune] [--format=table|json|json-pretty]",
 				Examples: []string{
 					"yeet vm images",
 					"yeet vm images ls",
@@ -481,6 +483,8 @@ var remoteGroupInfos = map[string]GroupInfo{
 					"yeet vm images import foo/bar ./dist/my-vm",
 					"yeet vm images import kernel/test ./dist/my-vm --allow-local-kernel",
 					"yeet vm images rm foo/bar --yes",
+					"yeet vm images prune",
+					"yeet vm images prune --dry-run",
 				},
 				ArgsSchema:  VMImagesArgs{},
 				FlagsSchema: vmImagesFlagsParsed{},
@@ -1148,6 +1152,7 @@ func ParseVMImages(args []string) (VMImagesFlags, []string, error) {
 		AllowLocalKernel: parsed.Flags.AllowLocalKernel,
 		Stdin:            parsed.Flags.Stdin,
 		Yes:              parsed.Flags.Yes,
+		DryRun:           parsed.Flags.DryRun,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
