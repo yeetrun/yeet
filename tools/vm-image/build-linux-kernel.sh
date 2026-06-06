@@ -93,6 +93,7 @@ echo "Configuring yeet Firecracker kernel..."
 		--enable NETFILTER_ADVANCED \
 		--enable NETFILTER_XTABLES \
 		--enable NF_CONNTRACK \
+		--enable NF_CONNTRACK_MARK \
 		--enable NF_NAT \
 		--enable NF_NAT_MASQUERADE \
 		--enable NF_TABLES \
@@ -101,9 +102,11 @@ echo "Configuring yeet Firecracker kernel..."
 		--enable NFT_NAT \
 		--enable NFT_MASQ \
 		--enable NFT_COMPAT \
+		--enable NETFILTER_XT_TARGET_CONNMARK \
 		--enable NETFILTER_XT_TARGET_MASQUERADE \
 		--enable NETFILTER_XT_TARGET_MARK \
 		--enable NETFILTER_XT_NAT \
+		--enable NETFILTER_XT_MATCH_CONNMARK \
 		--enable NETFILTER_XT_MATCH_MARK \
 		--enable NETFILTER_XT_MATCH_COMMENT \
 		--enable NETFILTER_XT_MATCH_CONNTRACK \
@@ -147,6 +150,7 @@ require_config CONFIG_NETFILTER y
 require_config CONFIG_NETFILTER_ADVANCED y
 require_config CONFIG_NETFILTER_XTABLES y
 require_config CONFIG_NF_CONNTRACK y
+require_config CONFIG_NF_CONNTRACK_MARK y
 require_config CONFIG_NF_NAT y
 require_config CONFIG_NF_NAT_MASQUERADE y
 require_config CONFIG_NF_TABLES y
@@ -155,9 +159,11 @@ require_config CONFIG_NFT_CT y
 require_config CONFIG_NFT_NAT y
 require_config CONFIG_NFT_MASQ y
 require_config CONFIG_NFT_COMPAT y
+require_config CONFIG_NETFILTER_XT_TARGET_CONNMARK y
 require_config CONFIG_NETFILTER_XT_TARGET_MASQUERADE y
 require_config CONFIG_NETFILTER_XT_TARGET_MARK y
 require_config CONFIG_NETFILTER_XT_NAT y
+require_config CONFIG_NETFILTER_XT_MATCH_CONNMARK y
 require_config CONFIG_NETFILTER_XT_MATCH_MARK y
 require_config CONFIG_NETFILTER_XT_MATCH_COMMENT y
 require_config CONFIG_NETFILTER_XT_MATCH_CONNTRACK y
