@@ -201,8 +201,8 @@ func TestVMImageCachePreservesImagePolicyMetadata(t *testing.T) {
 }
 
 func TestDefaultVMImageVersionUsesLatestFastBundle(t *testing.T) {
-	if defaultVMImageVersion != "ubuntu-26.04-amd64-v8" {
-		t.Fatalf("default VM image version = %q, want ubuntu-26.04-amd64-v8", defaultVMImageVersion)
+	if defaultVMImageVersion != "ubuntu-26.04-amd64-v9" {
+		t.Fatalf("default VM image version = %q, want ubuntu-26.04-amd64-v9", defaultVMImageVersion)
 	}
 }
 
