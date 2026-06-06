@@ -231,6 +231,61 @@ func TestSystemdMonitorEntryPublishesStatusTransition(t *testing.T) {
 	assertStoredComponentStatus(t, server, "worker", "worker", ComponentStatusRunning)
 }
 
+func TestMonitorSystemdPublishesDecodedJournalEntries(t *testing.T) {
+	const timeout = 10 * time.Second
+
+	server := newTestServer(t)
+	addTestService(t, server, "worker", db.ServiceTypeSystemd)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server.ctx = ctx
+	server.cancel = cancel
+
+	events := make(chan Event, 1)
+	handle := server.AddEventListener(events, func(Event) bool {
+		cancel()
+		return true
+	})
+	defer server.RemoveEventListener(handle)
+
+	fakeBin := t.TempDir()
+	journalctlPath := filepath.Join(fakeBin, "journalctl")
+	script := `#!/bin/sh
+if [ "$1" != "--follow" ] || [ "$2" != "-o" ] || [ "$3" != "json" ] || [ "$4" != "_PID=1" ]; then
+  exit 2
+fi
+printf '%s\n' '{"UNIT":"worker.service","MESSAGE_ID":"39f53479d3a045ac8e11786248231fbf"}'
+`
+	if err := os.WriteFile(journalctlPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake journalctl: %v", err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		server.monitorSystemd()
+	}()
+
+	select {
+	case event := <-events:
+		if event.Type != EventTypeServiceStatusChanged || event.ServiceName != "worker" {
+			t.Fatalf("unexpected event: %#v", event)
+		}
+	case <-time.After(timeout):
+		cancel()
+		t.Fatal("timed out waiting for systemd monitor event")
+	}
+	assertStoredComponentStatus(t, server, "worker", "worker", ComponentStatusRunning)
+
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		t.Fatal("monitorSystemd did not exit after context cancellation")
+	}
+}
+
 func TestSystemdMonitorEntryFiltersIgnoredEntries(t *testing.T) {
 	server := newTestServer(t)
 	addTestService(t, server, "worker", db.ServiceTypeSystemd)

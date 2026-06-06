@@ -204,32 +204,57 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 	}
 	result.Root = root
 	result.ZFS = zfs
-	if _, ok := cfgLoc.Config.ServiceEntry(target.Service, target.Host); !ok {
-		if !target.CreateMissing {
-			return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
-		}
-		cfgLoc.Config.SetServiceEntry(serviceEntryFromSyncInfo(target, resp.Info))
-		result.Created = true
+	if err := syncServiceEntryRoot(cfgLoc.Config, target, resp.Info, root, zfs, &result); err != nil {
+		return serviceSyncResult{}, false, err
 	}
-	if !cfgLoc.Config.SetServiceRootForEntry(target.Service, target.Host, root, zfs) {
-		return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
+	if err := syncServiceSnapshotPolicy(cfgLoc.Config, target, resp.Info.Snapshots, &result); err != nil {
+		return serviceSyncResult{}, false, err
 	}
-	snapshotPolicy, hasSnapshotInfo := serviceSyncSnapshotOverride(resp.Info.Snapshots)
-	if hasSnapshotInfo {
-		applySnapshotPolicyToSyncResult(&result, snapshotPolicy)
-		if !cfgLoc.Config.SetServiceSnapshotsForEntry(target.Service, target.Host, snapshotPolicy) {
-			return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
-		}
-	}
-	if resp.Info.Network.PortsPresent {
-		ports := servicePortsForConfig(resp.Info.Network.Ports)
-		result.Ports = ports
-		result.PortsSynced = true
-		if !setServicePortsForEntry(cfgLoc.Config, target.Service, target.Host, ports) {
-			return serviceSyncResult{}, false, fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
-		}
+	if err := syncServicePorts(cfgLoc.Config, target, resp.Info.Network.PortsPresent, resp.Info.Network.Ports, &result); err != nil {
+		return serviceSyncResult{}, false, err
 	}
 	return result, true, nil
+}
+
+func syncServiceEntryRoot(cfg *ProjectConfig, target serviceSyncTarget, info catchrpc.ServiceInfo, root string, zfs bool, result *serviceSyncResult) error {
+	if _, ok := cfg.ServiceEntry(target.Service, target.Host); !ok {
+		if !target.CreateMissing {
+			return serviceSyncMissingEntryError(target)
+		}
+		cfg.SetServiceEntry(serviceEntryFromSyncInfo(target, info))
+		result.Created = true
+	}
+	if !cfg.SetServiceRootForEntry(target.Service, target.Host, root, zfs) {
+		return serviceSyncMissingEntryError(target)
+	}
+	return nil
+}
+
+func syncServiceSnapshotPolicy(cfg *ProjectConfig, target serviceSyncTarget, snapshots *catchrpc.ServiceSnapshots, result *serviceSyncResult) error {
+	snapshotPolicy, hasSnapshotInfo := serviceSyncSnapshotOverride(snapshots)
+	if hasSnapshotInfo {
+		applySnapshotPolicyToSyncResult(result, snapshotPolicy)
+		if !cfg.SetServiceSnapshotsForEntry(target.Service, target.Host, snapshotPolicy) {
+			return serviceSyncMissingEntryError(target)
+		}
+	}
+	return nil
+}
+
+func syncServicePorts(cfg *ProjectConfig, target serviceSyncTarget, portsPresent bool, servicePorts []catchrpc.ServicePort, result *serviceSyncResult) error {
+	if portsPresent {
+		ports := servicePortsForConfig(servicePorts)
+		result.Ports = ports
+		result.PortsSynced = true
+		if !setServicePortsForEntry(cfg, target.Service, target.Host, ports) {
+			return serviceSyncMissingEntryError(target)
+		}
+	}
+	return nil
+}
+
+func serviceSyncMissingEntryError(target serviceSyncTarget) error {
+	return fmt.Errorf("no yeet.toml entry for %s@%s", target.Service, target.Host)
 }
 
 func serviceEntryFromSyncInfo(target serviceSyncTarget, info catchrpc.ServiceInfo) ServiceEntry {
