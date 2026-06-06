@@ -1091,6 +1091,12 @@ func (s *Server) removeServiceDirs(report *RemoveReport, serviceRoot string, cle
 			report.addWarning(fmt.Errorf("failed to remove service directory %s: %w", dir, err))
 		}
 	}
+	if cleanData {
+		log.Printf("removing service root directory: %v", serviceRoot)
+		if err := os.Remove(serviceRoot); err != nil && !errors.Is(err, os.ErrNotExist) {
+			report.addWarning(fmt.Errorf("failed to remove service root directory %s: %w", serviceRoot, err))
+		}
+	}
 }
 
 func serviceChildDirsToRemove(dirs []string, cleanData bool) []string {
