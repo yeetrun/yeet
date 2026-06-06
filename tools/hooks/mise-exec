@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Copyright (c) 2025 AUTHORS All rights reserved.
+# Use of this source code is governed by a BSD-style
+# license that can be found in the LICENSE file.
+
+set -euo pipefail
+
+if [[ $# -eq 0 ]]; then
+  echo "usage: tools/hooks/mise-exec COMMAND [ARG...]" >&2
+  exit 2
+fi
+
+if [[ "${YEET_HOOKS_IN_MISE:-}" == "1" ]]; then
+  exec "$@"
+fi
+
+if ! command -v mise >/dev/null 2>&1; then
+  echo "mise is required to run yeet hooks with the repo toolchain." >&2
+  echo "Install and run: mise install" >&2
+  exit 1
+fi
+
+export YEET_HOOKS_IN_MISE=1
+exec mise exec -- "$@"

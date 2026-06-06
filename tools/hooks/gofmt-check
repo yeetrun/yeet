@@ -21,7 +21,7 @@ done < <(
 )
 
 if ((${#gofmt_targets[@]})); then
-  gofmt -w "${gofmt_targets[@]}"
+  tools/hooks/mise-exec gofmt -w "${gofmt_targets[@]}"
   if ! git diff --exit-code -- "${gofmt_targets[@]}" >/dev/null; then
     echo "" >&2
     echo "gofmt changed files; please stage the updates and retry the commit." >&2
