@@ -384,6 +384,9 @@ func TestRemoveServiceCleanDataRemovesDataDir(t *testing.T) {
 			t.Fatalf("%s stat err = %v, want not exist", removed, err)
 		}
 	}
+	if _, err := os.Stat(serviceRoot); !os.IsNotExist(err) {
+		t.Fatalf("service root stat err = %v, want not exist", err)
+	}
 }
 
 func TestRemoveServiceCleanDataDestroysZFSServiceRoot(t *testing.T) {
