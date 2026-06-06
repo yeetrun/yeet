@@ -23,7 +23,7 @@ if [[ -d example ]]; then
 fi
 
 set +e
-go run github.com/google/addlicense $check_mode \
+tools/hooks/mise-exec go run github.com/google/addlicense $check_mode \
   -l bsd \
   -c "AUTHORS" \
   -y 2025 \
@@ -33,7 +33,7 @@ set -e
 
 if [[ $status -ne 0 && "$auto_fix" == "true" ]]; then
   echo "License headers missing; running addlicense to fix."
-  go run github.com/google/addlicense \
+  tools/hooks/mise-exec go run github.com/google/addlicense \
     -l bsd \
     -c "AUTHORS" \
     -y 2025 \

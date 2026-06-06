@@ -8,7 +8,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
-if ! tools/addlicense.sh --check; then
+if ! tools/hooks/mise-exec tools/addlicense.sh --check; then
   echo "" >&2
   echo "License headers missing or incorrect." >&2
   echo "Run: tools/addlicense.sh" >&2
@@ -28,7 +28,7 @@ done < <(
 )
 
 if ((${#gofmt_targets[@]})); then
-  gofmt -w "${gofmt_targets[@]}"
+  tools/hooks/mise-exec gofmt -w "${gofmt_targets[@]}"
   if ! git diff --exit-code -- "${gofmt_targets[@]}" >/dev/null; then
     echo "" >&2
     echo "gofmt changed files; please stage the updates and retry the commit." >&2
@@ -36,7 +36,7 @@ if ((${#gofmt_targets[@]})); then
   fi
 fi
 
-if ! go run github.com/tailscale/depaware -update ./cmd/yeet ./cmd/catch; then
+if ! tools/hooks/mise-exec go run github.com/tailscale/depaware -update ./cmd/yeet ./cmd/catch; then
   echo "" >&2
   echo "depaware.txt generation failed." >&2
   exit 1

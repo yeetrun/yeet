@@ -65,6 +65,9 @@ mise install
 mise run install-githooks
 ```
 
+Installed hooks enter the repo's mise environment themselves, so a normal
+`git commit` uses the pinned Go and quality-tool versions.
+
 Run the same deterministic baseline checks manually:
 
 ```bash
