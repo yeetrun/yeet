@@ -21,9 +21,6 @@ func vmKernelBootArgs(service string, network vmNetworkPlan) (string, error) {
 		"console=ttyS0",
 		"reboot=k",
 		"panic=1",
-		"pci=off",
-		"root=/dev/vda",
-		"rw",
 		"init=" + vmGuestInitPath,
 	}
 	if ipArg := vmKernelIPArg(service, network); ipArg != "" {
