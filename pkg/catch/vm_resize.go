@@ -291,14 +291,9 @@ func vmNetworkInputForServiceSet(svcNet *db.SvcNetwork, modes []string, flags cl
 		input.ServiceIP = svcNet.IPv4.String()
 	}
 	if vmModeListContains(modes, "lan") {
-		if input.LANParent == "" {
-			parent, err := hostDefaultRouteInterfaceFn()
-			if err != nil {
-				return vmNetworkInputs{}, fmt.Errorf("resolve VM LAN parent: %w", err)
-			}
-			input.LANParent = parent
+		if err := resolveVMLANNetworkInput(&input); err != nil {
+			return vmNetworkInputs{}, err
 		}
-		input.LANParentIsBridge = vmLANParentIsBridge(input.LANParent)
 		if input.LANMAC == "" {
 			input.LANMAC = randomMAC()
 		}
@@ -339,7 +334,16 @@ func vmNetworkPlanFromDB(service string, networks []db.VMNetworkConfig) vmNetwor
 			}
 			iface.Gateway = vmSvcGateway
 		case "lan":
-			iface.Bridge = network.Parent
+			if network.VLAN != 0 {
+				if vmLANParentIsBridge(network.Parent) {
+					iface.Bridge = network.Parent
+				} else {
+					iface.Bridge = fmt.Sprintf("yvm-%s-b%d", short, i)
+					iface.VLANDevice = fmt.Sprintf("yvm-%s-v%d", short, i)
+				}
+			} else {
+				iface.Bridge = network.Parent
+			}
 			iface.DHCP = true
 		}
 		plan.Interfaces = append(plan.Interfaces, iface)
