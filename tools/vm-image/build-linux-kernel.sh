@@ -88,6 +88,26 @@ echo "Configuring yeet Firecracker kernel..."
 		--enable SECURITY_APPARMOR \
 		--enable SECURITY_APPARMOR_HASH \
 		--enable SECURITY_APPARMOR_HASH_DEFAULT \
+		--enable TUN \
+		--enable NETFILTER \
+		--enable NETFILTER_ADVANCED \
+		--enable NETFILTER_XTABLES \
+		--enable NF_CONNTRACK \
+		--enable NF_NAT \
+		--enable NF_NAT_MASQUERADE \
+		--enable NF_TABLES \
+		--enable NF_TABLES_IPV4 \
+		--enable NFT_CT \
+		--enable NFT_NAT \
+		--enable NFT_MASQ \
+		--enable NFT_COMPAT \
+		--enable NETFILTER_XT_TARGET_MASQUERADE \
+		--enable NETFILTER_XT_TARGET_MARK \
+		--enable NETFILTER_XT_NAT \
+		--enable NETFILTER_XT_MATCH_MARK \
+		--enable NETFILTER_XT_MATCH_COMMENT \
+		--enable NETFILTER_XT_MATCH_CONNTRACK \
+		--enable NETFILTER_XT_MATCH_ADDRTYPE \
 		--set-str LOCALVERSION "$localversion"
 	make olddefconfig
 )
@@ -122,6 +142,26 @@ require_config CONFIG_EXT4_FS y
 require_config CONFIG_SERIAL_8250_CONSOLE y
 require_config CONFIG_DEVTMPFS y
 require_config CONFIG_DEVTMPFS_MOUNT y
+require_config CONFIG_TUN y
+require_config CONFIG_NETFILTER y
+require_config CONFIG_NETFILTER_ADVANCED y
+require_config CONFIG_NETFILTER_XTABLES y
+require_config CONFIG_NF_CONNTRACK y
+require_config CONFIG_NF_NAT y
+require_config CONFIG_NF_NAT_MASQUERADE y
+require_config CONFIG_NF_TABLES y
+require_config CONFIG_NF_TABLES_IPV4 y
+require_config CONFIG_NFT_CT y
+require_config CONFIG_NFT_NAT y
+require_config CONFIG_NFT_MASQ y
+require_config CONFIG_NFT_COMPAT y
+require_config CONFIG_NETFILTER_XT_TARGET_MASQUERADE y
+require_config CONFIG_NETFILTER_XT_TARGET_MARK y
+require_config CONFIG_NETFILTER_XT_NAT y
+require_config CONFIG_NETFILTER_XT_MATCH_MARK y
+require_config CONFIG_NETFILTER_XT_MATCH_COMMENT y
+require_config CONFIG_NETFILTER_XT_MATCH_CONNTRACK y
+require_config CONFIG_NETFILTER_XT_MATCH_ADDRTYPE y
 
 echo "Building vmlinux..."
 make -C "$src_dir" -j"$(nproc)" vmlinux
