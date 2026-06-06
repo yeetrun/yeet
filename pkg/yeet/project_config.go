@@ -47,6 +47,31 @@ type ServiceEntry struct {
 	Args             []string `toml:"args,omitempty"`
 }
 
+type projectConfigTOML struct {
+	Version  int                `toml:"version,omitempty"`
+	Hosts    []string           `toml:"hosts,omitempty"`
+	Services []serviceEntryTOML `toml:"services,omitempty"`
+}
+
+type serviceEntryTOML struct {
+	Name             string   `toml:"name"`
+	Host             string   `toml:"host"`
+	Type             string   `toml:"type,omitempty"`
+	Payload          string   `toml:"payload,omitempty"`
+	PayloadKind      string   `toml:"payload_kind,omitempty"`
+	EnvFile          string   `toml:"env_file,omitempty"`
+	ServiceRoot      string   `toml:"service_root,omitempty"`
+	ServiceRootZFS   bool     `toml:"service_root_zfs,omitempty"`
+	Snapshots        string   `toml:"snapshots,omitempty"`
+	SnapshotKeepLast *int     `toml:"snapshot_keep_last,omitempty"`
+	SnapshotMaxAge   string   `toml:"snapshot_max_age,omitempty"`
+	SnapshotRequired *bool    `toml:"snapshot_required,omitempty"`
+	SnapshotEvents   []string `toml:"snapshot_events,omitempty"`
+	Ports            []string `toml:"ports,omitempty"`
+	Schedule         string   `toml:"schedule,omitempty"`
+	Args             []string `toml:"args,omitempty"`
+}
+
 type projectConfigLocation struct {
 	Path   string
 	Dir    string
@@ -216,7 +241,47 @@ func encodeProjectConfig(w io.WriteCloser, cfg *ProjectConfig) (err error) {
 		}
 	}()
 	encoder := toml.NewEncoder(w)
-	return encoder.Encode(cfg)
+	return encoder.Encode(projectConfigForTOML(cfg))
+}
+
+func projectConfigForTOML(cfg *ProjectConfig) projectConfigTOML {
+	if cfg == nil {
+		return projectConfigTOML{}
+	}
+	out := projectConfigTOML{
+		Version: cfg.Version,
+		Hosts:   cloneStringSlice(cfg.Hosts),
+	}
+	out.Services = make([]serviceEntryTOML, 0, len(cfg.Services))
+	for _, entry := range cfg.Services {
+		out.Services = append(out.Services, serviceEntryForTOML(entry))
+	}
+	return out
+}
+
+func serviceEntryForTOML(entry ServiceEntry) serviceEntryTOML {
+	out := serviceEntryTOML{
+		Name:             entry.Name,
+		Host:             entry.Host,
+		Type:             entry.Type,
+		Payload:          entry.Payload,
+		PayloadKind:      entry.PayloadKind,
+		EnvFile:          entry.EnvFile,
+		ServiceRoot:      entry.ServiceRoot,
+		ServiceRootZFS:   entry.ServiceRootZFS,
+		Snapshots:        entry.Snapshots,
+		SnapshotMaxAge:   entry.SnapshotMaxAge,
+		SnapshotRequired: cloneBoolPtr(entry.SnapshotRequired),
+		SnapshotEvents:   cloneStringSlice(entry.SnapshotEvents),
+		Ports:            cloneStringSlice(entry.Ports),
+		Schedule:         entry.Schedule,
+		Args:             cloneStringSlice(entry.Args),
+	}
+	if entry.SnapshotKeepLast != 0 {
+		keepLast := entry.SnapshotKeepLast
+		out.SnapshotKeepLast = &keepLast
+	}
+	return out
 }
 
 func (c *ProjectConfig) AllHosts() []string {

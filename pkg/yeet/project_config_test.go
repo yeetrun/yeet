@@ -188,8 +188,77 @@ func TestProjectConfigSnapshotFieldsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile config: %v", err)
 	}
+	if !strings.Contains(string(raw), `snapshot_keep_last = 3`) {
+		t.Fatalf("saved config = %q, want snapshot_keep_last", string(raw))
+	}
 	if !strings.Contains(string(raw), `ports = ["80:80", "443:443"]`) {
 		t.Fatalf("saved config = %q, want ports", string(raw))
+	}
+}
+
+func TestProjectConfigOmitsZeroSnapshotKeepLast(t *testing.T) {
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{
+		Name:             "svc",
+		Host:             "host-a",
+		Payload:          "compose.yml",
+		Snapshots:        "off",
+		SnapshotKeepLast: 0,
+	})
+	loc := &projectConfigLocation{Path: filepath.Join(t.TempDir(), projectConfigName), Dir: t.TempDir(), Config: cfg}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	raw, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	if strings.Contains(string(raw), "snapshot_keep_last") {
+		t.Fatalf("saved config = %q, want snapshot_keep_last omitted", string(raw))
+	}
+	if !strings.Contains(string(raw), `snapshots = "off"`) {
+		t.Fatalf("saved config = %q, want snapshot mode retained", string(raw))
+	}
+}
+
+func TestProjectConfigLegacyZeroSnapshotKeepLastSavesClean(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, projectConfigName)
+	if err := os.WriteFile(path, []byte(`
+version = 1
+
+[[services]]
+  name = "svc"
+  host = "host-a"
+  payload = "compose.yml"
+  snapshots = "off"
+  snapshot_keep_last = 0
+`), 0o600); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+	loc, err := loadProjectConfigFromFile(path)
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromFile: %v", err)
+	}
+	entry, ok := loc.Config.ServiceEntry("svc", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if entry.SnapshotKeepLast != 0 {
+		t.Fatalf("SnapshotKeepLast = %d, want 0 inherit sentinel", entry.SnapshotKeepLast)
+	}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	if strings.Contains(string(raw), "snapshot_keep_last") {
+		t.Fatalf("saved config = %q, want legacy snapshot_keep_last removed", string(raw))
+	}
+	if !strings.Contains(string(raw), `snapshots = "off"`) {
+		t.Fatalf("saved config = %q, want snapshot mode retained", string(raw))
 	}
 }
 
