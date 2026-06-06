@@ -19,8 +19,6 @@ func TestVMKernelBootArgsIncludesInitAndDHCPForLAN(t *testing.T) {
 
 	for _, want := range []string{
 		"console=ttyS0",
-		"root=/dev/vda",
-		"rw",
 		"init=/usr/local/lib/yeet-vm/yeet-init",
 		"ip=dhcp",
 		"yeet.hostname=devbox",
@@ -28,6 +26,11 @@ func TestVMKernelBootArgsIncludesInitAndDHCPForLAN(t *testing.T) {
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("boot args missing %q: %s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"pci=off", "root=/dev/vda", " rw"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("boot args include %q, want Firecracker/kernel-owned root args omitted: %s", unwanted, got)
 		}
 	}
 }

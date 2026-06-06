@@ -6,7 +6,7 @@
 set -euo pipefail
 
 profile="${YEET_VM_IMAGE_PROFILE:-fast}"
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v7}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v8}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
@@ -232,6 +232,69 @@ install_fast_rootfs_terminfo() {
 	TERMINFO="$root/etc/terminfo" infocmp -x xterm-ghostty >/dev/null
 }
 
+resolve_guest_path() {
+	local root="$1"
+	local guest_path="$2"
+	chroot "$root" /usr/bin/readlink -f "$guest_path" 2>/dev/null || true
+}
+
+same_guest_file() {
+	local root="$1"
+	local left="$2"
+	local right="$3"
+	if [ -z "$left" ] || [ -z "$right" ]; then
+		return 1
+	fi
+	if [ "$left" = "$right" ]; then
+		return 0
+	fi
+	cmp -s "$root$left" "$root$right"
+}
+
+merge_usr_sbin_into_usr_bin() {
+	local root="$1"
+	local usr_bin="$root/usr/bin"
+	local usr_sbin="$root/usr/sbin"
+	if [ -L "$usr_sbin" ] || [ ! -d "$usr_sbin" ]; then
+		return
+	fi
+	install -d -m 0755 "$usr_bin"
+	while IFS= read -r src; do
+		local name dst src_guest dst_guest src_real dst_real
+		name="$(basename "$src")"
+		dst="$usr_bin/$name"
+		src_guest="/usr/sbin/$name"
+		dst_guest="/usr/bin/$name"
+		if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
+			mv "$src" "$usr_bin/"
+			continue
+		fi
+		src_real="$(resolve_guest_path "$root" "$src_guest")"
+		dst_real="$(resolve_guest_path "$root" "$dst_guest")"
+		case "$dst_real" in
+		/usr/sbin/* | /sbin/*)
+			rm -f "$dst"
+			mv "$src" "$usr_bin/"
+			;;
+		/usr/bin/*)
+			if same_guest_file "$root" "$src_real" "$dst_real"; then
+				rm -f "$src"
+			else
+				echo "unmergeable /usr/sbin collision: $src_guest -> ${src_real:-?}, $dst_guest -> ${dst_real:-?}" >&2
+				exit 1
+			fi
+			;;
+		*)
+			echo "unmergeable /usr/sbin collision: $src_guest -> ${src_real:-?}, $dst_guest -> ${dst_real:-?}" >&2
+			exit 1
+			;;
+		esac
+	done < <(find "$usr_sbin" -mindepth 1 -maxdepth 1 -print)
+	rmdir "$usr_sbin"
+	ln -s bin "$usr_sbin"
+	ln -snf usr/bin "$root/sbin"
+}
+
 customize_fast_rootfs() {
 	local rootfs="$1"
 	rootfs_mount="$work_dir/rootfs-mount"
@@ -260,7 +323,7 @@ EOF
 	chroot "$rootfs_mount" /bin/sh <<'EOF'
 set -e
 export DEBIAN_FRONTEND=noninteractive
-packages="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | awk '/^(linux-image-|linux-modules-|linux-modules-extra-|linux-headers-|linux-generic|linux-virtual|grub-|shim-signed$|initramfs-tools|snapd$|snap-confine$|squashfs-tools$|cloud-init$|pollinate$|apport$|apport-symptoms$|modemmanager$|udisks2$|multipath-tools$|lvm2$|rsyslog$|ufw$|unattended-upgrades$|open-vm-tools$|open-vm-tools-desktop$|vgauth$|netplan.io$|networkd-dispatcher$|sysstat$|chrony$|plymouth$|plymouth-|keyboard-configuration$|console-setup$)/ { print }')"
+packages="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | awk '/^(linux-image-|linux-modules-|linux-modules-extra-|linux-headers-|linux-generic|linux-virtual|grub-|shim-signed$|initramfs-tools|snapd$|snap-confine$|squashfs-tools$|cloud-init$|pollinate$|apport$|apport-symptoms$|fwupd$|fwupd-signed$|update-notifier-common$|update-manager-core$|xfsprogs$|modemmanager$|udisks2$|multipath-tools$|lvm2$|rsyslog$|ufw$|unattended-upgrades$|open-vm-tools$|open-vm-tools-desktop$|vgauth$|netplan.io$|networkd-dispatcher$|sysstat$|chrony$|plymouth$|plymouth-|keyboard-configuration$|console-setup$)/ { print }')"
 if [ -n "$packages" ]; then
 	apt-get purge -y $packages
 fi
@@ -279,18 +342,31 @@ if [ -e /usr/lib/systemd/system/systemd-timesyncd.service ]; then
 	ln -sf /usr/lib/systemd/system/systemd-timesyncd.service /etc/systemd/system/multi-user.target.wants/systemd-timesyncd.service
 fi
 ln -sf /usr/lib/systemd/system/multi-user.target /etc/systemd/system/default.target
+mkdir -p /etc/default
+printf 'EXTRA_OPTS=""\n' >/etc/default/cron
 for unit in \
 	apt-daily.timer \
 	apt-daily-upgrade.timer \
 	e2scrub_all.timer \
 	e2scrub_reap.service \
 	fstrim.timer \
+	fwupd.service \
+	fwupd-refresh.service \
+	fwupd-refresh.timer \
 	man-db.timer \
 	motd-news.timer \
+	proc-sys-fs-binfmt_misc.automount \
+	proc-sys-fs-binfmt_misc.mount \
 	pollinate.service \
 	cloud-init.service \
 	cloud-config.service \
 	cloud-final.service \
+	update-notifier-download.service \
+	update-notifier-download.timer \
+	update-notifier-motd.service \
+	update-notifier-motd.timer \
+	xfs_scrub_all.service \
+	xfs_scrub_all.timer \
 	NetworkManager.service \
 	NetworkManager-wait-online.service \
 	systemd-modules-load.service \
@@ -324,6 +400,7 @@ do
 done
 ldconfig
 EOF
+	merge_usr_sbin_into_usr_bin "$rootfs_mount"
 	rm -f "$rootfs_mount/usr/sbin/policy-rc.d"
 	cleanup_rootfs_mount
 	rootfs_mount=""
