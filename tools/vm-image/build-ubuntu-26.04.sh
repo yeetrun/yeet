@@ -6,7 +6,7 @@
 set -euo pipefail
 
 profile="${YEET_VM_IMAGE_PROFILE:-fast}"
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v8}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v9}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
@@ -32,7 +32,7 @@ require() {
 	fi
 }
 
-for cmd in awk chmod cp curl date debugfs file find grep install mkdir mktemp sha256sum stat tar zstd; do
+for cmd in awk chmod cmp cp curl date debugfs file find grep install mkdir mktemp sha256sum stat tar zstd; do
 	require "$cmd"
 done
 
@@ -193,7 +193,11 @@ fi
 
 write_fast_rootfs_policy_files() {
 	local root="$1"
-	install -d -m 0755 "$root/etc/apt/preferences.d" "$root/usr/share/doc/yeet-vm-image"
+	install -d -m 0755 \
+		"$root/etc/apt/preferences.d" \
+		"$root/etc/sysctl.d" \
+		"$root/etc/tmpfiles.d" \
+		"$root/usr/share/doc/yeet-vm-image"
 	cat >"$root/etc/apt/preferences.d/99-yeet-managed-kernel" <<'EOF'
 Package: linux-image-* linux-modules-* linux-modules-extra-* linux-headers-* linux-generic* linux-virtual* grub-* shim-signed initramfs-tools initramfs-tools-* snapd snap-confine squashfs-tools
 Pin: version *
@@ -209,9 +213,11 @@ Guest apt upgrades intentionally do not install Ubuntu kernel, bootloader, or
 initramfs packages. To update the boot kernel, publish a new yeet VM image
 bundle and create VMs from that image version.
 
-The fast yeet VM image profile intentionally does not support snap packages.
-Snap support requires a separate image profile with measured kernel,
-filesystem, boot-time, and confinement choices.
+The fast yeet VM image profile intentionally does not support loadable kernel
+modules or snap packages. Router-oriented kernel features such as TUN,
+netfilter, conntrack, nftables, nft NAT/masquerade, and Ubuntu iptables-nft
+compatibility are built into the yeet-managed kernel instead of loaded from
+guest module packages.
 EOF
 	cat >"$root/usr/share/doc/yeet-vm-image/init.md" <<'EOF'
 # Yeet VM Init
@@ -222,6 +228,14 @@ configured IPv4 address on the serial console, and then execs systemd as PID 1.
 
 SSH remains managed by systemd through `yeet-sshd.service`; `yeet run` waits for
 the systemd-backed `yeet-guest-ready.service` marker before returning.
+EOF
+	cat >"$root/etc/sysctl.d/99-yeet-vm-router.conf" <<'EOF'
+# Yeet VMs should be ready to run guest-managed routers and exit nodes.
+net.ipv4.ip_forward = 1
+EOF
+	cat >"$root/etc/tmpfiles.d/yeet-vm-tun.conf" <<'EOF'
+d /dev/net 0755 root root -
+c /dev/net/tun 0666 root root 10:200
 EOF
 }
 
@@ -327,6 +341,8 @@ packages="$(dpkg-query -W -f='${binary:Package}\n' 2>/dev/null | awk '/^(linux-i
 if [ -n "$packages" ]; then
 	apt-get purge -y $packages
 fi
+apt-get update
+apt-get install -y --no-install-recommends iptables nftables
 apt-get autoremove -y --purge
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/snapd/* /var/lib/snapd/cache/*
