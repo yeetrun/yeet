@@ -6,7 +6,7 @@
 set -euo pipefail
 
 profile="${YEET_VM_IMAGE_PROFILE:-fast}"
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v10}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v11}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
@@ -232,6 +232,7 @@ EOF
 	cat >"$root/etc/sysctl.d/99-yeet-vm-router.conf" <<'EOF'
 # Yeet VMs should be ready to run guest-managed routers and exit nodes.
 net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
 EOF
 	cat >"$root/etc/tmpfiles.d/yeet-vm-tun.conf" <<'EOF'
 d /dev/net 0755 root root -

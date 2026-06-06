@@ -89,6 +89,8 @@ echo "Configuring yeet Firecracker kernel..."
 		--enable SECURITY_APPARMOR_HASH \
 		--enable SECURITY_APPARMOR_HASH_DEFAULT \
 		--enable TUN \
+		--enable IPV6 \
+		--enable IPV6_MULTIPLE_TABLES \
 		--enable NETFILTER \
 		--enable NETFILTER_ADVANCED \
 		--enable NETFILTER_XTABLES \
@@ -98,9 +100,14 @@ echo "Configuring yeet Firecracker kernel..."
 		--enable NF_NAT_MASQUERADE \
 		--enable NF_TABLES \
 		--enable NF_TABLES_IPV4 \
+		--enable NF_TABLES_IPV6 \
+		--enable NF_TABLES_INET \
 		--enable NFT_CT \
 		--enable NFT_NAT \
 		--enable NFT_MASQ \
+		--enable NFT_REJECT \
+		--enable NFT_REJECT_IPV6 \
+		--enable NFT_REJECT_INET \
 		--enable NFT_COMPAT \
 		--enable NETFILTER_XT_TARGET_CONNMARK \
 		--enable NETFILTER_XT_TARGET_MASQUERADE \
@@ -111,6 +118,7 @@ echo "Configuring yeet Firecracker kernel..."
 		--enable NETFILTER_XT_MATCH_COMMENT \
 		--enable NETFILTER_XT_MATCH_CONNTRACK \
 		--enable NETFILTER_XT_MATCH_ADDRTYPE \
+		--enable IP6_NF_IPTABLES \
 		--set-str LOCALVERSION "$localversion"
 	make olddefconfig
 )
@@ -146,6 +154,8 @@ require_config CONFIG_SERIAL_8250_CONSOLE y
 require_config CONFIG_DEVTMPFS y
 require_config CONFIG_DEVTMPFS_MOUNT y
 require_config CONFIG_TUN y
+require_config CONFIG_IPV6 y
+require_config CONFIG_IPV6_MULTIPLE_TABLES y
 require_config CONFIG_NETFILTER y
 require_config CONFIG_NETFILTER_ADVANCED y
 require_config CONFIG_NETFILTER_XTABLES y
@@ -155,9 +165,14 @@ require_config CONFIG_NF_NAT y
 require_config CONFIG_NF_NAT_MASQUERADE y
 require_config CONFIG_NF_TABLES y
 require_config CONFIG_NF_TABLES_IPV4 y
+require_config CONFIG_NF_TABLES_IPV6 y
+require_config CONFIG_NF_TABLES_INET y
 require_config CONFIG_NFT_CT y
 require_config CONFIG_NFT_NAT y
 require_config CONFIG_NFT_MASQ y
+require_config CONFIG_NFT_REJECT y
+require_config CONFIG_NFT_REJECT_IPV6 y
+require_config CONFIG_NFT_REJECT_INET y
 require_config CONFIG_NFT_COMPAT y
 require_config CONFIG_NETFILTER_XT_TARGET_CONNMARK y
 require_config CONFIG_NETFILTER_XT_TARGET_MASQUERADE y
@@ -168,6 +183,7 @@ require_config CONFIG_NETFILTER_XT_MATCH_MARK y
 require_config CONFIG_NETFILTER_XT_MATCH_COMMENT y
 require_config CONFIG_NETFILTER_XT_MATCH_CONNTRACK y
 require_config CONFIG_NETFILTER_XT_MATCH_ADDRTYPE y
+require_config CONFIG_IP6_NF_IPTABLES y
 
 echo "Building vmlinux..."
 make -C "$src_dir" -j"$(nproc)" vmlinux
