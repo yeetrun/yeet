@@ -244,6 +244,63 @@ func TestServiceSyncNamedSupportsHostQualifier(t *testing.T) {
 	}
 }
 
+func TestServiceSyncExplicitHostCreatesMissingVMEntry(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	writeSvcBranchConfig(t, tmp, ServiceEntry{Name: "radarr", Host: "host-a", Type: serviceTypeRun, Payload: "compose.yml"})
+	fetchServiceInfoForSyncFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if host != "host-b" || service != "vm-router" {
+			t.Fatalf("fetch host=%q service=%q, want host-b vm-router", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				Name:        service,
+				ServiceType: serviceTypeVM,
+				Paths: catchrpc.ServicePaths{
+					ServiceRootZFS: "tank/yeet/vms/vm-router",
+				},
+				VM: &catchrpc.ServiceVM{
+					Image:       "vm://ubuntu/26.04",
+					CPUs:        2,
+					MemoryBytes: 2 << 30,
+					DiskBytes:   8 << 30,
+					DiskBackend: "zvol",
+					Networks:    []catchrpc.ServiceVMNetwork{{Mode: "lan", Interface: "eth0", IP: "192.0.2.10"}},
+				},
+			},
+		}, nil
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return HandleSvcCmd([]string{"service", "sync", "vm-router@host-b"})
+	})
+	if err != nil {
+		t.Fatalf("HandleSvcCmd service sync: %v", err)
+	}
+	if !strings.Contains(out, "Created vm-router@host-b") {
+		t.Fatalf("output = %q, want created message", out)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("vm-router", "host-b")
+	if !ok {
+		t.Fatal("missing synced vm-router entry")
+	}
+	if entry.Type != serviceTypeVM || entry.Payload != "vm://ubuntu/26.04" || entry.PayloadKind != serviceTypeVM {
+		t.Fatalf("entry payload = %#v, want VM payload", entry)
+	}
+	if entry.ServiceRoot != "tank/yeet/vms/vm-router" || !entry.ServiceRootZFS {
+		t.Fatalf("entry root = %#v, want zfs service root", entry)
+	}
+	wantArgs := []string{"--cpus=2", "--memory=2g", "--disk=8g", "--net=lan"}
+	if !reflect.DeepEqual(entry.Args, wantArgs) {
+		t.Fatalf("entry args = %#v, want %#v", entry.Args, wantArgs)
+	}
+}
+
 func TestServiceSyncClearsDefaultRoot(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
