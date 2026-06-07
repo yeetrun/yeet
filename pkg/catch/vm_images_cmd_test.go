@@ -377,6 +377,24 @@ func TestVMImagesCmdPruneKeepsCurrentVersionPerOfficialFamily(t *testing.T) {
 	assertPruneRowPayload(t, rows, "nixos-26.05-amd64-v1", vmNixOS2605Payload)
 }
 
+func TestVMImagesCmdPruneTableShowsPayload(t *testing.T) {
+	server := newTestServer(t)
+	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
+	seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v13")
+	seedCachedVMImage(t, cacheRoot, "nixos-26.05-amd64-v1")
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "table", DryRun: true}, []string{"prune"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc prune dry-run: %v", err)
+	}
+	for _, want := range []string{"PAYLOAD", vmUbuntu2604Payload, vmNixOS2605Payload} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("prune table missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestVMImagesCmdPrunePromptsAndRemovesOldCache(t *testing.T) {
 	server := newTestServer(t)
 	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
