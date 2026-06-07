@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-06-07T14:07:29-04:00",
+  "title": "Design System: yeet",
+  "extensions": {
+    "colorMeta": {
+      "brand-green": {
+        "role": "primary",
+        "displayName": "Catch Green",
+        "canonical": "#38e17b",
+        "tonalRamp": ["#102818", "#1f7c43", "#38e17b", "#9af0bd"]
+      },
+      "accent-cyan": {
+        "role": "secondary",
+        "displayName": "Tailnet Cyan",
+        "canonical": "#4fd6d3",
+        "tonalRamp": ["#102627", "#267d7c", "#4fd6d3", "#a7efee"]
+      },
+      "surface-root": {
+        "role": "neutral",
+        "displayName": "Root Blackened Surface",
+        "canonical": "#0f0f11",
+        "tonalRamp": ["#0f0f11", "#16161a", "#242428", "#34343a"]
+      },
+      "text-strong": {
+        "role": "neutral",
+        "displayName": "Bright Text",
+        "canonical": "#f7f8fb",
+        "tonalRamp": ["#9ea1a8", "#c0c4cc", "#eaedf2", "#f7f8fb"]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display",
+        "purpose": "Hero headlines and first-viewport statements."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Section titles and major homepage modules."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Readable documentation and explanatory copy."
+      },
+      "code": {
+        "displayName": "Code",
+        "purpose": "Commands, configuration, and terminal output."
+      }
+    },
+    "elevation": {
+      "hero-panel": {
+        "boxShadow": "0 20px 50px rgba(0, 0, 0, 0.4)",
+        "purpose": "Large first-viewport code or command panels."
+      },
+      "media-frame": {
+        "boxShadow": "0 22px 50px rgba(0, 0, 0, 0.38)",
+        "purpose": "Screenshots and product media."
+      },
+      "card": {
+        "boxShadow": "0 12px 30px rgba(0, 0, 0, 0.25)",
+        "purpose": "Feature cards when separation is needed."
+      },
+      "hover-lift": {
+        "boxShadow": "0 16px 30px rgba(0, 0, 0, 0.35)",
+        "purpose": "Interactive link cards on hover."
+      }
+    },
+    "motion": {
+      "fast": "100ms ease-in-out",
+      "standard": "150ms ease-in-out",
+      "copy-feedback": "250ms ease-in-out",
+      "rule": "Respect prefers-reduced-motion and avoid animating layout properties."
+    },
+    "breakpoints": {
+      "mobile": "640px",
+      "tablet": "768px",
+      "desktop-collapse": "1024px"
+    },
+    "rules": [
+      "Lead with the shortest honest first-run path.",
+      "Command examples must be readable before they are decorative.",
+      "Cards are for discrete choices or links, not default page texture.",
+      "Public copy must be written from the user's point of view.",
+      "Avoid purple-blue gradients, neon terminal cliches, glassmorphism, decorative blobs, and clipped command grids."
+    ]
+  }
+}
