@@ -73,7 +73,7 @@ func validateLocalVMImageName(name string) error {
 	if name != strings.TrimSpace(name) || !localVMImageNamePattern.MatchString(name) {
 		return fmt.Errorf("local VM image name %q must use lowercase path segments with letters, numbers, dots, underscores, or dashes", name)
 	}
-	if strings.HasPrefix(name, "ubuntu/") {
+	if reservedVMImageLocalPrefix(name) {
 		return fmt.Errorf("local VM image name %q is reserved", name)
 	}
 	return nil

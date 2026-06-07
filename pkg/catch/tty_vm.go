@@ -17,9 +17,6 @@ import (
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
-const vmUbuntu2604Payload = "vm://ubuntu/26.04"
-const vmImagePayloadPrefix = "vm://"
-
 var errVMConsoleDetached = errors.New("VM console detached")
 
 var runVMCmdFunc = func(e *ttyExecer, flags cli.RunFlags, payload string) error {

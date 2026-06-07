@@ -23,9 +23,6 @@ import (
 )
 
 const (
-	defaultVMImageVersion     = "ubuntu-26.04-amd64-v13"
-	defaultVMImageManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json"
-
 	vmImageCacheMissing = "missing"
 	vmImageCacheCurrent = "current"
 	vmImageCacheStale   = "stale"
@@ -80,6 +77,7 @@ type vmImageSource struct {
 	Kind        vmImageSourceKind
 	ManifestURL string
 	LocalName   string
+	Official    *officialVMImage
 }
 
 type vmImagePaths struct {
@@ -110,22 +108,20 @@ func vmImageSupportsFastBoot(manifest vmImageManifest) bool {
 
 func resolveVMImagePayload(payload string) (vmImageSource, error) {
 	payload = strings.TrimSpace(payload)
-	switch payload {
-	case vmUbuntu2604Payload:
-		return vmImageSource{Kind: vmImageSourceRemote, ManifestURL: defaultVMImageManifestURL}, nil
-	case "":
+	if payload == "" {
 		return vmImageSource{}, fmt.Errorf("VM image payload is required")
-	default:
-		const prefix = "vm://"
-		if strings.HasPrefix(payload, prefix) {
-			name := strings.TrimPrefix(payload, prefix)
-			if err := validateLocalVMImageName(name); err != nil {
-				return vmImageSource{}, fmt.Errorf("invalid local VM image name %q: %w", name, err)
-			}
-			return vmImageSource{Kind: vmImageSourceLocal, LocalName: name}, nil
-		}
-		return vmImageSource{}, fmt.Errorf("unsupported VM image payload %q (supported: %s or imported vm://<name>)", payload, vmUbuntu2604Payload)
 	}
+	if image, ok := officialVMImageByPayload(payload); ok {
+		return vmImageSource{Kind: vmImageSourceRemote, ManifestURL: image.ManifestURL, Official: &image}, nil
+	}
+	if strings.HasPrefix(payload, vmImagePayloadPrefix) {
+		name := strings.TrimPrefix(payload, vmImagePayloadPrefix)
+		if err := validateLocalVMImageName(name); err != nil {
+			return vmImageSource{}, fmt.Errorf("invalid local VM image name %q: %w", name, err)
+		}
+		return vmImageSource{Kind: vmImageSourceLocal, LocalName: name}, nil
+	}
+	return vmImageSource{}, fmt.Errorf("unsupported VM image payload %q (supported: %s or imported vm://<name>)", payload, officialVMImagePayloadsForError())
 }
 
 func ensureVMImageAsset(ctx context.Context, cache vmImageCache) (vmImageAsset, error) {
