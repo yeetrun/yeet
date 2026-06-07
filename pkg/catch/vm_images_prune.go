@@ -32,6 +32,7 @@ const (
 type vmImagePruneRow struct {
 	Kind    string `json:"kind"`
 	State   string `json:"state"`
+	Payload string `json:"payload,omitempty"`
 	Version string `json:"version,omitempty"`
 	Path    string `json:"path,omitempty"`
 	Reason  string `json:"reason,omitempty"`
@@ -58,7 +59,7 @@ func (s *Server) planVMImagePrune(ctx context.Context, cache vmImageCache) ([]vm
 	if err != nil {
 		return nil, err
 	}
-	currentVersion := currentVMImagePruneVersion(cacheEntries, zfsBases)
+	currentVersions := currentVMImagePruneVersions(cacheEntries, zfsBases)
 	inUseVersions, err := s.inUseVMImageVersions()
 	if err != nil {
 		return nil, err
@@ -66,16 +67,16 @@ func (s *Server) planVMImagePrune(ctx context.Context, cache vmImageCache) ([]vm
 
 	rows := make([]vmImagePruneRow, 0, len(cacheEntries)+len(zfsBases))
 	for _, entry := range cacheEntries {
-		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindCache, entry.Version, entry.Dir, currentVersion, inUseVersions, false, nil))
+		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindCache, entry.Version, entry.Dir, currentVersions, inUseVersions, false, nil))
 	}
 	runner := s.vmImagePruneZFSRunner()
 	for _, base := range zfsBases {
 		hasClones := false
 		var cloneErr error
-		if base.Version != currentVersion && !vmImageVersionInUse(inUseVersions, base.Version) {
+		if !vmImageVersionIsCurrent(currentVersions, base.Version) && !vmImageVersionInUse(inUseVersions, base.Version) {
 			hasClones, cloneErr = vmImageZFSSnapshotHasClones(ctx, runner, base.Snapshot)
 		}
-		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindZFSBase, base.Version, base.Dataset, currentVersion, inUseVersions, hasClones, cloneErr))
+		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindZFSBase, base.Version, base.Dataset, currentVersions, inUseVersions, hasClones, cloneErr))
 	}
 	sortVMImagePruneRows(rows)
 	return rows, nil
@@ -174,26 +175,33 @@ func parseVMImageZFSBaseDataset(name string) (vmImageZFSBase, bool) {
 }
 
 func isManagedVMImagePruneVersion(version string) bool {
-	const prefix = "ubuntu-26.04-amd64-"
-	if !strings.HasPrefix(version, prefix) {
-		return false
-	}
-	return isNumericVersionSuffix(strings.TrimPrefix(version, prefix))
+	_, ok := officialVMImageByVersion(version)
+	return ok
 }
 
-func currentVMImagePruneVersion(cacheEntries []cachedVMImagePruneEntry, zfsBases []vmImageZFSBase) string {
-	current := ""
-	for _, entry := range cacheEntries {
-		if current == "" || compareVMImageVersions(entry.Version, current) > 0 {
-			current = entry.Version
+func currentVMImagePruneVersions(cacheEntries []cachedVMImagePruneEntry, zfsBases []vmImageZFSBase) map[string]string {
+	current := map[string]string{}
+	consider := func(version string) {
+		image, ok := officialVMImageByVersion(version)
+		if !ok {
+			return
 		}
+		if current[image.Payload] == "" || compareVMImageVersions(version, current[image.Payload]) > 0 {
+			current[image.Payload] = version
+		}
+	}
+	for _, entry := range cacheEntries {
+		consider(entry.Version)
 	}
 	for _, base := range zfsBases {
-		if current == "" || compareVMImageVersions(base.Version, current) > 0 {
-			current = base.Version
-		}
+		consider(base.Version)
 	}
 	return current
+}
+
+func vmImageVersionIsCurrent(currentVersions map[string]string, version string) bool {
+	image, ok := officialVMImageByVersion(version)
+	return ok && currentVersions[image.Payload] == version
 }
 
 func (s *Server) inUseVMImageVersions() (map[string]struct{}, error) {
@@ -238,10 +246,13 @@ func vmImageZFSSnapshotHasClones(ctx context.Context, runner zfsCommandRunner, s
 	return value != "" && value != "-", nil
 }
 
-func classifyVMImagePruneRow(kind, version, path, currentVersion string, inUse map[string]struct{}, hasClones bool, cloneErr error) vmImagePruneRow {
+func classifyVMImagePruneRow(kind, version, path string, currentVersions map[string]string, inUse map[string]struct{}, hasClones bool, cloneErr error) vmImagePruneRow {
 	row := vmImagePruneRow{Kind: kind, Version: version, Path: path}
+	if image, ok := officialVMImageByVersion(version); ok {
+		row.Payload = image.Payload
+	}
 	switch {
-	case version == currentVersion:
+	case vmImageVersionIsCurrent(currentVersions, version):
 		row.State = vmImagePruneStateCurrent
 		row.Reason = "newest cached version"
 	case vmImageVersionInUse(inUse, version):
@@ -317,7 +328,7 @@ func (e *ttyExecer) ensureManagedVMImageAndPrune(ctx context.Context, cache vmIm
 }
 
 func (e *ttyExecer) pruneVMImagesAfterManagedUpdate(ctx context.Context, cache vmImageCache, payload string) {
-	if payload != vmUbuntu2604Payload || e == nil || e.s == nil {
+	if _, ok := officialVMImageByPayload(payload); !ok || e == nil || e.s == nil {
 		return
 	}
 	done := e.traceBlock("vm image auto prune")
