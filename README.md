@@ -44,6 +44,28 @@ Nightly build:
 curl -fsSL https://yeetrun.com/install.sh | sh -s -- --nightly
 ```
 
+## Upgrade
+
+Check the local CLI and the selected catch host:
+
+```bash
+yeet upgrade check
+```
+
+Upgrade both from verified GitHub release assets:
+
+```bash
+yeet upgrade
+```
+
+In a project with multiple catch hosts in `yeet.toml`, scan and upgrade all of
+them explicitly:
+
+```bash
+yeet upgrade check --all
+yeet upgrade --all
+```
+
 ## Bootstrap a Host
 
 Start with a Linux host that has systemd and SSH access. Docker can be
