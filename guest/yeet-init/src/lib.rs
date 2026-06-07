@@ -16,6 +16,7 @@ pub const SERIAL_TTY: &str = "/dev/ttyS0";
 pub struct BootConfig {
     pub hostname: Option<String>,
     pub interface: String,
+    pub system_init: String,
 }
 
 impl BootConfig {
@@ -27,6 +28,11 @@ impl BootConfig {
                 .get("yeet.iface")
                 .cloned()
                 .unwrap_or_else(|| DEFAULT_INTERFACE.to_string()),
+            system_init: args
+                .get("yeet.system_init")
+                .filter(|value| value.starts_with('/') && !value.contains('\0'))
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_SYSTEMD.to_string()),
         }
     }
 }
@@ -171,18 +177,17 @@ where
     Ok(())
 }
 
-pub fn exec_systemd() -> io::Error {
-    Command::new(DEFAULT_SYSTEMD)
-        .arg("--unit=multi-user.target")
-        .exec()
+pub fn exec_system_init(path: &str) -> io::Error {
+    Command::new(path).arg("--unit=multi-user.target").exec()
 }
 
 pub fn run() -> io::Result<()> {
     let cmdline = read_cmdline_or_empty(Path::new("/proc/cmdline"), Path::new(SERIAL_TTY));
+    let cfg = BootConfig::from_cmdline(&cmdline);
     if let Err(err) = run_before_systemd(&cmdline) {
         let _ = write_serial(Path::new(SERIAL_TTY), &format!("yeet-init-error {err}\n"));
     }
-    Err(exec_systemd())
+    Err(exec_system_init(&cfg.system_init))
 }
 
 fn read_cmdline_or_empty(cmdline_path: &Path, serial_path: &Path) -> String {
@@ -218,6 +223,33 @@ mod tests {
         let cfg = BootConfig::from_cmdline("console=ttyS0 yeet.hostname=devbox");
         assert_eq!(cfg.hostname.as_deref(), Some("devbox"));
         assert_eq!(cfg.interface, "eth0");
+    }
+
+    #[test]
+    fn builds_boot_config_with_custom_system_init() {
+        let cfg = BootConfig::from_cmdline(
+            "console=ttyS0 yeet.hostname=devbox yeet.system_init=/run/current-system/init",
+        );
+        assert_eq!(cfg.hostname.as_deref(), Some("devbox"));
+        assert_eq!(cfg.interface, "eth0");
+        assert_eq!(cfg.system_init, "/run/current-system/init");
+    }
+
+    #[test]
+    fn builds_boot_config_with_default_system_init() {
+        let cfg = BootConfig::from_cmdline("console=ttyS0 yeet.hostname=devbox");
+        assert_eq!(cfg.system_init, DEFAULT_SYSTEMD);
+    }
+
+    #[test]
+    fn builds_boot_config_with_default_system_init_for_invalid_values() {
+        for cmdline in [
+            "console=ttyS0 yeet.system_init=run/current-system/init",
+            "console=ttyS0 yeet.system_init=/run/current-system/init\0bad",
+        ] {
+            let cfg = BootConfig::from_cmdline(cmdline);
+            assert_eq!(cfg.system_init, DEFAULT_SYSTEMD);
+        }
     }
 
     #[test]
