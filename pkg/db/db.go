@@ -160,11 +160,16 @@ type VMConfig struct {
 }
 
 type VMImageConfig struct {
-	Payload string
-	Version string
-	Digest  string
-	Kernel  string
-	RootFS  string
+	Payload         string
+	Version         string
+	Digest          string
+	Kernel          string
+	RootFS          string
+	Distro          string `json:",omitempty"`
+	DistroVersion   string `json:",omitempty"`
+	DefaultUser     string `json:",omitempty"`
+	GuestSystemInit string `json:",omitempty"`
+	MetadataDriver  string `json:",omitempty"`
 }
 
 type VMDiskConfig struct {

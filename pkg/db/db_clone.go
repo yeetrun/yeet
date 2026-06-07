@@ -346,11 +346,16 @@ func (src *VMImageConfig) Clone() *VMImageConfig {
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _VMImageConfigCloneNeedsRegeneration = VMImageConfig(struct {
-	Payload string
-	Version string
-	Digest  string
-	Kernel  string
-	RootFS  string
+	Payload         string
+	Version         string
+	Digest          string
+	Kernel          string
+	RootFS          string
+	Distro          string
+	DistroVersion   string
+	DefaultUser     string
+	GuestSystemInit string
+	MetadataDriver  string
 }{})
 
 // Clone makes a deep copy of VMDiskConfig.

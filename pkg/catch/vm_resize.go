@@ -399,9 +399,13 @@ func (p vmSettingsPlan) renderFirecrackerConfig(cfg firecrackerConfig, fastBoot 
 		cfg.Drives[0].PathOnHost = p.OldVM.Disk.Path
 	}
 	if fastBoot {
+		guestSystemInit := guestSystemInitFromBootArgs(cfg.BootSource.BootArgs)
+		if guestSystemInit == "" {
+			guestSystemInit = strings.TrimSpace(p.OldVM.Image.GuestSystemInit)
+		}
 		bootArgs, err := vmKernelBootArgs(p.Service, p.NewNetwork, vmImageManifest{
 			GuestInit:       vmGuestInitPath,
-			GuestSystemInit: guestSystemInitFromBootArgs(cfg.BootSource.BootArgs),
+			GuestSystemInit: guestSystemInit,
 		})
 		if err != nil {
 			return nil, err
@@ -423,6 +427,9 @@ func guestSystemInitFromBootArgs(args string) string {
 func vmMetadataForSettings(root, service string, vm db.VMConfig, network vmNetworkPlan, fastBoot bool) (vmMetadataConfig, error) {
 	user := strings.TrimSpace(vm.SSH.User)
 	if user == "" {
+		user = strings.TrimSpace(vm.Image.DefaultUser)
+	}
+	if user == "" {
 		user = "ubuntu"
 	}
 	sshKey, err := os.ReadFile(filepath.Join(root, "metadata", "authorized_keys"))
@@ -441,6 +448,9 @@ func vmMetadataForSettings(root, service string, vm db.VMConfig, network vmNetwo
 }
 
 func vmMetadataDriverForExistingVM(vm db.VMConfig) string {
+	if driver := strings.TrimSpace(vm.Image.MetadataDriver); driver != "" {
+		return driver
+	}
 	if strings.TrimSpace(vm.Image.Payload) == vmNixOS2605Payload {
 		return "nixos"
 	}

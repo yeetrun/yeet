@@ -1061,19 +1061,29 @@ func (v *VMImageConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
-func (v VMImageConfigView) Payload() string { return v.ж.Payload }
-func (v VMImageConfigView) Version() string { return v.ж.Version }
-func (v VMImageConfigView) Digest() string  { return v.ж.Digest }
-func (v VMImageConfigView) Kernel() string  { return v.ж.Kernel }
-func (v VMImageConfigView) RootFS() string  { return v.ж.RootFS }
+func (v VMImageConfigView) Payload() string         { return v.ж.Payload }
+func (v VMImageConfigView) Version() string         { return v.ж.Version }
+func (v VMImageConfigView) Digest() string          { return v.ж.Digest }
+func (v VMImageConfigView) Kernel() string          { return v.ж.Kernel }
+func (v VMImageConfigView) RootFS() string          { return v.ж.RootFS }
+func (v VMImageConfigView) Distro() string          { return v.ж.Distro }
+func (v VMImageConfigView) DistroVersion() string   { return v.ж.DistroVersion }
+func (v VMImageConfigView) DefaultUser() string     { return v.ж.DefaultUser }
+func (v VMImageConfigView) GuestSystemInit() string { return v.ж.GuestSystemInit }
+func (v VMImageConfigView) MetadataDriver() string  { return v.ж.MetadataDriver }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _VMImageConfigViewNeedsRegeneration = VMImageConfig(struct {
-	Payload string
-	Version string
-	Digest  string
-	Kernel  string
-	RootFS  string
+	Payload         string
+	Version         string
+	Digest          string
+	Kernel          string
+	RootFS          string
+	Distro          string
+	DistroVersion   string
+	DefaultUser     string
+	GuestSystemInit string
+	MetadataDriver  string
 }{})
 
 // View returns a read-only view of VMDiskConfig.

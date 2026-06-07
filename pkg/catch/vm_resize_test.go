@@ -218,6 +218,47 @@ func TestServiceSetVMPreservesNixOSUserAndSystemInit(t *testing.T) {
 	assertFileContains(t, firecrackerPath, "yeet.system_init=/run/current-system/init")
 }
 
+func TestServiceSetVMPreservesLocalNixOSImageMetadata(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, svc *db.Service) error {
+		svc.VM.Image.Payload = "vm://local/nixos"
+		svc.VM.Image.Version = "custom-nixos-v1"
+		svc.VM.Image.DefaultUser = "nixos"
+		svc.VM.Image.GuestSystemInit = "/run/current-system/init"
+		svc.VM.Image.MetadataDriver = "nixos"
+		svc.VM.SSH.User = ""
+		return nil
+	}); err != nil {
+		t.Fatalf("MutateService: %v", err)
+	}
+	firecrackerPath := filepath.Join(serviceRunDirForRoot(root), "firecracker.json")
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	withServiceSetVMNetworkRunner(t, func([]string) error { return nil })
+	var injectedMetadata vmMetadataConfig
+	withServiceSetVMMetadataInjector(t, func(_ context.Context, _ string, metadata vmMetadataConfig) error {
+		injectedMetadata = metadata
+		return nil
+	})
+
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.ServiceSetFlags{
+		Net:           "lan",
+		NetworkChange: true,
+		MacvlanParent: "vmbr0",
+	}); err != nil {
+		t.Fatalf("updateVMServiceSettings: %v", err)
+	}
+
+	if injectedMetadata.User != "nixos" {
+		t.Fatalf("metadata user = %q, want nixos", injectedMetadata.User)
+	}
+	if injectedMetadata.MetadataDriver != "nixos" {
+		t.Fatalf("metadata driver = %q, want nixos", injectedMetadata.MetadataDriver)
+	}
+	assertFileContains(t, firecrackerPath, "yeet.system_init=/run/current-system/init")
+}
+
 func seedVMForResize(t *testing.T, server *Server, name, root, backend string) {
 	t.Helper()
 	withServiceSetVMHostProfile(t, func(*Server, string, int64) (vmHostProfile, error) {
