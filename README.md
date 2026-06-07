@@ -24,7 +24,8 @@ Yeet is intentionally opinionated:
 - SSH is used for `yeet init`; RPC uses catch's embedded tsnet node.
 - Docker is used for container payloads.
 - Services are currently managed as root-owned systemd units.
-- VM payloads require KVM (`/dev/kvm`) and TUN/TAP on the catch host.
+- VM payloads require x86_64 Linux, KVM (`/dev/kvm`), TUN/TAP, and VM
+  filesystem/networking tools on the catch host.
 
 Within those constraints, the release path is intended to be installable on a
 fresh Ubuntu/Debian-style host with SSH access.
@@ -154,7 +155,9 @@ Yeet works without every optional feature. The host determines which payloads
 and network modes are available:
 
 - Docker is required for container payloads.
-- KVM and TUN/TAP are required for VM payloads.
+- x86_64 Linux, KVM, TUN/TAP, and VM filesystem/networking tools are required
+  for VM payloads. `yeet init` checks this and can offer to install missing
+  Debian/Ubuntu packages when the host can run VMs.
 - LAN/macvlan networking requires a host network where macvlan and DHCP make
   sense.
 - ZFS is optional and enables dataset-backed service roots, snapshots, and fast
