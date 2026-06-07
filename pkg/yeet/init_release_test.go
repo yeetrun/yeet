@@ -52,10 +52,10 @@ func TestResolveReleaseAssetURLs(t *testing.T) {
 }
 
 func TestGithubReleaseURL(t *testing.T) {
-	if got := githubReleaseURL(false); got != "https://api.github.com/repos/shayne/yeet/releases/latest" {
+	if got := githubReleaseURL(false); got != "https://api.github.com/repos/yeetrun/yeet/releases/latest" {
 		t.Fatalf("latest URL = %q", got)
 	}
-	if got := githubReleaseURL(true); got != "https://api.github.com/repos/shayne/yeet/releases/tags/nightly" {
+	if got := githubReleaseURL(true); got != "https://api.github.com/repos/yeetrun/yeet/releases/tags/nightly" {
 		t.Fatalf("nightly URL = %q", got)
 	}
 }
