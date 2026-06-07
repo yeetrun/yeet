@@ -37,8 +37,13 @@ type vmImageManifest struct {
 	Version             string            `json:"version"`
 	Architecture        string            `json:"architecture"`
 	ImageProfile        string            `json:"image_profile,omitempty"`
+	Distro              string            `json:"distro,omitempty"`
+	DistroVersion       string            `json:"distro_version,omitempty"`
+	DefaultUser         string            `json:"default_user,omitempty"`
 	KernelPolicy        string            `json:"kernel_policy,omitempty"`
 	GuestInit           string            `json:"guest_init,omitempty"`
+	GuestSystemInit     string            `json:"guest_system_init,omitempty"`
+	MetadataDriver      string            `json:"metadata_driver,omitempty"`
 	SnapSupport         *bool             `json:"snap_support,omitempty"`
 	Kernel              string            `json:"kernel"`
 	Initrd              string            `json:"initrd,omitempty"`
@@ -104,6 +109,26 @@ func (a vmImageAsset) DiskRootFSPath() string {
 
 func vmImageSupportsFastBoot(manifest vmImageManifest) bool {
 	return strings.TrimSpace(manifest.GuestInit) == vmGuestInitPath
+}
+
+func (m vmImageManifest) DefaultUserOr(fallback string) string {
+	if user := strings.TrimSpace(m.DefaultUser); user != "" {
+		return user
+	}
+	if user := strings.TrimSpace(fallback); user != "" {
+		return user
+	}
+	return "ubuntu"
+}
+
+func (m vmImageManifest) GuestSystemInitOr(fallback string) string {
+	if init := strings.TrimSpace(m.GuestSystemInit); init != "" {
+		return init
+	}
+	if init := strings.TrimSpace(fallback); init != "" {
+		return init
+	}
+	return "/usr/lib/systemd/systemd"
 }
 
 func resolveVMImagePayload(payload string) (vmImageSource, error) {

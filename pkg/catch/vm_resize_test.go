@@ -168,6 +168,53 @@ func TestServiceSetVMReplacesNetworkAndMetadata(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"host_dev_name": "yvm-d-ea1055-l0"`)
 }
 
+func TestServiceSetVMPreservesNixOSUserAndSystemInit(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, svc *db.Service) error {
+		svc.VM.Image.Payload = vmNixOS2605Payload
+		svc.VM.Image.Version = "nixos-26.05-amd64-v1"
+		svc.VM.SSH.User = "nixos"
+		return nil
+	}); err != nil {
+		t.Fatalf("MutateService: %v", err)
+	}
+	firecrackerPath := filepath.Join(serviceRunDirForRoot(root), "firecracker.json")
+	raw, err := os.ReadFile(firecrackerPath)
+	if err != nil {
+		t.Fatalf("read firecracker config: %v", err)
+	}
+	raw = []byte(strings.Replace(string(raw), "init=/usr/local/lib/yeet-vm/yeet-init", "init=/usr/local/lib/yeet-vm/yeet-init yeet.system_init=/run/current-system/init", 1))
+	if err := os.WriteFile(firecrackerPath, raw, 0o644); err != nil {
+		t.Fatalf("write firecracker config: %v", err)
+	}
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	withServiceSetVMNetworkRunner(t, func([]string) error { return nil })
+	var injectedMetadata vmMetadataConfig
+	withServiceSetVMMetadataInjector(t, func(_ context.Context, _ string, metadata vmMetadataConfig) error {
+		injectedMetadata = metadata
+		return nil
+	})
+
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.ServiceSetFlags{
+		Net:           "lan",
+		NetworkChange: true,
+		MacvlanParent: "vmbr0",
+	}); err != nil {
+		t.Fatalf("updateVMServiceSettings: %v", err)
+	}
+
+	svc := getTestService(t, server, "devbox")
+	if svc.VM.SSH.User != "nixos" {
+		t.Fatalf("SSH user = %q, want nixos", svc.VM.SSH.User)
+	}
+	if injectedMetadata.User != "nixos" {
+		t.Fatalf("metadata user = %q, want nixos", injectedMetadata.User)
+	}
+	assertFileContains(t, firecrackerPath, "yeet.system_init=/run/current-system/init")
+}
+
 func seedVMForResize(t *testing.T, server *Server, name, root, backend string) {
 	t.Helper()
 	withServiceSetVMHostProfile(t, func(*Server, string, int64) (vmHostProfile, error) {

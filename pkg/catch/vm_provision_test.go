@@ -195,6 +195,41 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	}
 }
 
+func TestRunVMProvisionUsesManifestDefaultUser(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		asset, err := fakeVMImageAssetVersion(t, "nixos-26.05-amd64-v1")
+		if err != nil {
+			return vmImageAsset{}, err
+		}
+		asset.Manifest.Name = "yeet-nixos-26.05"
+		asset.Manifest.DefaultUser = "nixos"
+		asset.Manifest.GuestInit = vmGuestInitPath
+		asset.Manifest.GuestSystemInit = "/run/current-system/init"
+		return asset, nil
+	}
+
+	var injectedMetadata vmMetadataConfig
+	vmProvisionMetadataInjector = func(_ context.Context, _ string, cfg vmMetadataConfig) error {
+		injectedMetadata = cfg
+		return nil
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: false}, vmNixOS2605Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+
+	vm := getTestService(t, server, "svc").VM
+	if vm.SSH.User != "nixos" {
+		t.Fatalf("SSH user = %q, want nixos", vm.SSH.User)
+	}
+	if injectedMetadata.User != "nixos" {
+		t.Fatalf("metadata user = %q, want nixos", injectedMetadata.User)
+	}
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "yeet.system_init=/run/current-system/init")
+}
+
 func TestRunVMProvisionUsesLegacyBootAndMetadataWithoutGuestInit(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")

@@ -200,6 +200,48 @@ func TestVMImageCachePreservesImagePolicyMetadata(t *testing.T) {
 	}
 }
 
+func TestVMImageManifestPreservesNixOSFields(t *testing.T) {
+	raw := []byte(`{
+		"name":"yeet-nixos-26.05",
+		"version":"nixos-26.05-amd64-v1",
+		"architecture":"x86_64",
+		"image_profile":"fast",
+		"distro":"nixos",
+		"distro_version":"26.05",
+		"default_user":"nixos",
+		"kernel_policy":"yeet-managed",
+		"guest_init":"/usr/local/lib/yeet-vm/yeet-init",
+		"guest_system_init":"/run/current-system/init",
+		"metadata_driver":"nixos",
+		"snap_support":false,
+		"kernel":"vmlinux",
+		"rootfs":"rootfs.ext4.zst",
+		"firecracker":"firecracker",
+		"rootfs_size":2147483648,
+		"checksums":{
+			"vmlinux":"0000000000000000000000000000000000000000000000000000000000000000",
+			"rootfs.ext4.zst":"1111111111111111111111111111111111111111111111111111111111111111",
+			"firecracker":"2222222222222222222222222222222222222222222222222222222222222222"
+		}
+	}`)
+	var manifest vmImageManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if err := manifest.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if manifest.Distro != "nixos" || manifest.DistroVersion != "26.05" || manifest.MetadataDriver != "nixos" {
+		t.Fatalf("manifest NixOS metadata = %#v", manifest)
+	}
+	if manifest.DefaultUserOr("ubuntu") != "nixos" {
+		t.Fatalf("default user = %q", manifest.DefaultUserOr("ubuntu"))
+	}
+	if manifest.GuestSystemInitOr("/usr/lib/systemd/systemd") != "/run/current-system/init" {
+		t.Fatalf("guest system init = %q", manifest.GuestSystemInitOr(""))
+	}
+}
+
 func TestDefaultVMImageVersionUsesLatestFastBundle(t *testing.T) {
 	if defaultVMImageVersion != "ubuntu-26.04-amd64-v13" {
 		t.Fatalf("default VM image version = %q, want ubuntu-26.04-amd64-v13", defaultVMImageVersion)
