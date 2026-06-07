@@ -164,6 +164,11 @@ func runSSHCommand(ctx context.Context, sshArgs []string, stdin io.Reader, stdou
 }
 
 func runSSHPlan(ctx context.Context, plan sshExecutionPlan, stdin io.Reader, stdout, stderr io.Writer) error {
+	if strings.TrimSpace(plan.Notice) != "" {
+		if _, err := fmt.Fprintln(writerOrDiscard(stderr), plan.Notice); err != nil {
+			return err
+		}
+	}
 	if !plan.canRepairKnownHost() {
 		return runSSHCommandFunc(ctx, plan.Args, stdin, stdout, stderr)
 	}
