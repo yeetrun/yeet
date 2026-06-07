@@ -105,6 +105,10 @@ func (s *initInstallSummary) Absorb(msg string) bool {
 		s.addWarning(msg)
 		return true
 	}
+	if isInstallInfoLine(msg) {
+		s.infos = append(s.infos, msg)
+		return true
+	}
 	if isVisibleWarningLine(msg) {
 		s.addWarning(msg)
 		return false
@@ -172,6 +176,10 @@ func isIgnoredInstallProgressLine(msg string) bool {
 
 func isInstallWarningLine(msg string) bool {
 	return strings.HasPrefix(msg, "Installation of ")
+}
+
+func isInstallInfoLine(msg string) bool {
+	return strings.HasPrefix(msg, "Installed VM host packages:")
 }
 
 func isVisibleWarningLine(msg string) bool {

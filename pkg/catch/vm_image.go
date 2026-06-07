@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	defaultVMImageVersion     = "ubuntu-26.04-amd64-v12"
+	defaultVMImageVersion     = "ubuntu-26.04-amd64-v13"
 	defaultVMImageManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json"
 
 	vmImageCacheMissing = "missing"

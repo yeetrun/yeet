@@ -129,15 +129,15 @@ Install catch on a remote host (local build or GitHub release)
 **Examples**:
 
 ```
-yeet init --install-docker root@<host>
+yeet init --install-docker root@<machine-host>
 ```
 
 ```
-yeet init --install-docker --ts-auth-key=<key> root@<host>
+yeet init --install-docker --install-vm-tools --ts-auth-key=<key> root@<machine-host>
 ```
 
 ```
-yeet init root@<host>
+yeet init root@<machine-host>
 ```
 
 ```
@@ -870,7 +870,7 @@ Install catch on a remote host (local build or GitHub release)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] init [OPTIONS] [--from-github] [--nightly] [--install-docker] [--ts-auth-key=<key>] [ROOT@HOST]
+yeet [GLOBAL_OPTIONS] init [OPTIONS] [--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]
 ```
 
 ## Global Options
@@ -908,15 +908,15 @@ Progress output (auto|tty|plain|quiet)
 ## Examples
 
 ```
-yeet init --install-docker root@<host>
+yeet init --install-docker root@<machine-host>
 ```
 
 ```
-yeet init --install-docker --ts-auth-key=<key> root@<host>
+yeet init --install-docker --install-vm-tools --ts-auth-key=<key> root@<machine-host>
 ```
 
 ```
-yeet init root@<host>
+yeet init root@<machine-host>
 ```
 
 ```

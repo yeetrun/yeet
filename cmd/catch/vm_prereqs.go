@@ -23,6 +23,7 @@ type vmSetupDeps struct {
 	stdin         io.Reader
 	stderr        io.Writer
 	runCommand    func(string, ...string) error
+	getenv        func(string) string
 	goarch        string
 }
 
@@ -64,6 +65,7 @@ func defaultVMSetupDeps() vmSetupDeps {
 		stdin:         os.Stdin,
 		stderr:        os.Stderr,
 		runCommand:    runVMHostSetupCommand,
+		getenv:        os.Getenv,
 		goarch:        runtime.GOARCH,
 	}
 }
@@ -76,13 +78,25 @@ func setupVMHostWith(deps vmSetupDeps) error {
 		return nil
 	}
 	packages := missingVMHostPackages(report)
-	warnMissingVMHostCommands(deps.stderr, report.MissingCommands, packages)
 	if !canInstallVMHostPackages(report) {
+		warnMissingVMHostCommands(deps.stderr, report.MissingCommands, packages)
 		return nil
 	}
 	if !deps.commandExists("apt-get") {
+		warnMissingVMHostCommands(deps.stderr, report.MissingCommands, packages)
 		return nil
 	}
+	if deps.getenv("CATCH_INSTALL_VM_TOOLS") == "1" {
+		if _, err := fmt.Fprintf(deps.stderr, "Installing VM host packages because CATCH_INSTALL_VM_TOOLS=1: %s\n", strings.Join(packages, ", ")); err != nil {
+			return err
+		}
+		if err := installVMHostPackages(deps, packages); err != nil {
+			return err
+		}
+		_, err := fmt.Fprintf(deps.stderr, "Installed VM host packages: %s\n", strings.Join(packages, ", "))
+		return err
+	}
+	warnMissingVMHostCommands(deps.stderr, report.MissingCommands, packages)
 	ok, err := deps.confirm(deps.stdin, deps.stderr, "Would you like to install VM host packages with apt-get?")
 	if err != nil {
 		warnVMHostConfirmError(deps.stderr, err, packages)
@@ -91,6 +105,14 @@ func setupVMHostWith(deps vmSetupDeps) error {
 	if !ok {
 		return nil
 	}
+	if err := installVMHostPackages(deps, packages); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(deps.stderr, "Installed VM host packages: %s\n", strings.Join(packages, ", "))
+	return err
+}
+
+func installVMHostPackages(deps vmSetupDeps, packages []string) error {
 	if err := deps.runCommand("apt-get", "update"); err != nil {
 		return fmt.Errorf("failed to update apt package index for VM tooling: %w", err)
 	}
@@ -136,6 +158,9 @@ func normalizeVMSetupDeps(deps vmSetupDeps) vmSetupDeps {
 	}
 	if deps.runCommand == nil {
 		deps.runCommand = defaults.runCommand
+	}
+	if deps.getenv == nil {
+		deps.getenv = defaults.getenv
 	}
 	if deps.goarch == "" {
 		deps.goarch = defaults.goarch

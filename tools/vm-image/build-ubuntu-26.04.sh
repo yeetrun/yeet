@@ -6,7 +6,7 @@
 set -euo pipefail
 
 profile="${YEET_VM_IMAGE_PROFILE:-fast}"
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v12}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v13}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
@@ -46,7 +46,7 @@ fast | stock)
 esac
 
 if [ "$profile" = "fast" ]; then
-	for cmd in chroot id infocmp mount mountpoint tic umount; do
+	for cmd in chroot dumpe2fs e2fsck id infocmp mount mountpoint tic tune2fs umount; do
 		require "$cmd"
 	done
 	if [ -z "$kernel_path" ]; then
@@ -306,6 +306,43 @@ validate_fast_rootfs_ubuntu_compatibility() {
 	fi
 }
 
+run_fast_rootfs_e2fsck() {
+	local rootfs="$1"
+	local status
+
+	set +e
+	e2fsck -fy "$rootfs"
+	status=$?
+	set -e
+
+	case "$status" in
+	0 | 1)
+		;;
+	*)
+		echo "e2fsck failed after rootfs feature normalization: exit $status" >&2
+		exit "$status"
+		;;
+	esac
+}
+
+normalize_fast_rootfs_ext4_features() {
+	local rootfs="$1"
+	local features
+
+	features="$(dumpe2fs -h "$rootfs" 2>/dev/null | awk -F: '/Filesystem features/ { print $2; exit }')"
+	if printf '%s\n' "$features" | grep -qw orphan_file; then
+		echo "Disabling ext4 orphan_file for LTS host e2fsprogs compatibility..."
+		tune2fs -O ^orphan_file "$rootfs" >/dev/null
+		run_fast_rootfs_e2fsck "$rootfs"
+	fi
+
+	features="$(dumpe2fs -h "$rootfs" 2>/dev/null | awk -F: '/Filesystem features/ { print $2; exit }')"
+	if printf '%s\n' "$features" | grep -Eq '(^|[[:space:]])orphan_file($|[[:space:]])|(^|[[:space:]])FEATURE_'; then
+		echo "rootfs ext4 features are not compatible with LTS host tooling: $features" >&2
+		exit 1
+	fi
+}
+
 customize_fast_rootfs() {
 	local rootfs="$1"
 	rootfs_mount="$work_dir/rootfs-mount"
@@ -440,6 +477,7 @@ install -m 0755 "$fc_dir/firecracker-${firecracker_version}-${firecracker_arch}"
 
 if [ "$profile" = "fast" ]; then
 	customize_fast_rootfs "$out_dir/rootfs.ext4"
+	normalize_fast_rootfs_ext4_features "$out_dir/rootfs.ext4"
 fi
 
 echo "Compressing rootfs..."

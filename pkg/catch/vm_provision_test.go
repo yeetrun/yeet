@@ -49,6 +49,54 @@ func TestRunVMDoesNotCommitReadyOnArtifactFailure(t *testing.T) {
 	assertNoReadyVM(t, server, "svc")
 }
 
+func TestRunVMRemovesNewServiceRootOnArtifactFailure(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	vmProvisionDiskRunner = func(context.Context, []string) error {
+		if err := os.WriteFile(filepath.Join(serviceDataDirForRoot(serviceRoot), "partial-rootfs.raw"), []byte("partial"), 0o644); err != nil {
+			t.Fatalf("write partial disk: %v", err)
+		}
+		return errors.New("disk failed")
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc", CPUs: 2, Memory: "2g", Disk: "16g"}, vmUbuntu2604Payload)
+	if err == nil || !strings.Contains(err.Error(), "disk failed") {
+		t.Fatalf("runVM error = %v, want disk failure", err)
+	}
+	assertNoReadyVM(t, server, "svc")
+	if _, statErr := os.Stat(serviceRoot); !os.IsNotExist(statErr) {
+		t.Fatalf("service root stat after failed new VM = %v, want not exists", statErr)
+	}
+}
+
+func TestRunVMKeepsExistingServiceRootOnArtifactFailure(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	if err := os.MkdirAll(serviceDataDirForRoot(serviceRoot), 0o755); err != nil {
+		t.Fatalf("mkdir service data: %v", err)
+	}
+	marker := filepath.Join(serviceDataDirForRoot(serviceRoot), "existing")
+	if err := os.WriteFile(marker, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	addTestServices(t, server, db.Service{
+		Name:        "svc",
+		ServiceType: db.ServiceTypeVM,
+		VM:          &db.VMConfig{SetupState: "ready"},
+	})
+	vmProvisionDiskRunner = func(context.Context, []string) error {
+		return errors.New("disk failed")
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc", CPUs: 2, Memory: "2g", Disk: "16g"}, vmUbuntu2604Payload)
+	if err == nil || !strings.Contains(err.Error(), "disk failed") {
+		t.Fatalf("runVM error = %v, want disk failure", err)
+	}
+	if got, readErr := os.ReadFile(marker); readErr != nil || string(got) != "keep" {
+		t.Fatalf("existing marker after failed VM update = %q, %v; want preserved", got, readErr)
+	}
+}
+
 func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")

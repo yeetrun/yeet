@@ -53,11 +53,18 @@ installed by `yeet init` on Debian/Ubuntu-style hosts:
 yeet init --install-docker root@<machine-host>
 ```
 
+On KVM-capable hosts where you plan to run VM payloads, let init install the
+VM filesystem tools too:
+
+```bash
+yeet init --install-docker --install-vm-tools root@<machine-host>
+```
+
 If catch needs first-time Tailscale enrollment, `yeet init` prints a login URL.
 For unattended bootstrap, pass a Tailscale auth key for the catch node:
 
 ```bash
-yeet init --install-docker --ts-auth-key=<key> root@<machine-host>
+yeet init --install-docker --install-vm-tools --ts-auth-key=<key> root@<machine-host>
 ```
 
 Host names matter:
@@ -136,6 +143,13 @@ yeet ssh devbox
 yeet vm console devbox
 ```
 
+For a VM that should also request an address on the catch host's LAN, keep the
+default management network and add LAN networking:
+
+```bash
+yeet run devbox vm://ubuntu/26.04 --net=svc,lan
+```
+
 Local image built on your workstation:
 
 ```bash
@@ -159,8 +173,8 @@ and network modes are available:
 
 - Docker is required for container payloads.
 - x86_64 Linux, KVM, TUN/TAP, and VM filesystem/networking tools are required
-  for VM payloads. `yeet init` checks this and can offer to install missing
-  Debian/Ubuntu packages when the host can run VMs.
+  for VM payloads. `yeet init` checks this and `--install-vm-tools` installs
+  missing Debian/Ubuntu packages when the host can run VMs.
 - LAN/macvlan networking requires a host network where macvlan and DHCP make
   sense.
 - ZFS is optional and enables dataset-backed service roots, snapshots, and fast

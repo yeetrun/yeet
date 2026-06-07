@@ -53,6 +53,22 @@ func TestVMSvcNetworkPlanUsesHostBridgeAndYeetNSPeer(t *testing.T) {
 	if got := cmds[:len(wantPrefix)]; !reflect.DeepEqual(got, wantPrefix) {
 		t.Fatalf("setup command prefix = %#v, want %#v", got, wantPrefix)
 	}
+	if containsCommand(cmds, []string{"ip", "addr", "add", vmSvcGateway + "/24", "dev", iface.Bridge}) {
+		t.Fatalf("setup commands = %#v, want no broad service network route on VM bridge", cmds)
+	}
+	for _, command := range [][]string{
+		{"ip", "addr", "add", vmSvcGateway + "/32", "dev", iface.Bridge},
+		{"ip", "route", "replace", "192.168.100.12/32", "dev", iface.Bridge, "src", vmSvcGateway},
+	} {
+		if !containsCommand(cmds, command) {
+			t.Fatalf("setup commands = %#v, missing %#v", cmds, command)
+		}
+	}
+
+	cleanup := plan.CleanupCommands()
+	if !containsCommand(cleanup, []string{"ip", "route", "del", "192.168.100.12/32", "dev", iface.Bridge}) {
+		t.Fatalf("cleanup commands = %#v, want guest route deletion", cleanup)
+	}
 }
 
 func TestVMLANNetworkPlanUsesParentBridgeWhenAvailable(t *testing.T) {
