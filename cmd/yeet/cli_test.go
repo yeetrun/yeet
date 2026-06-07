@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"reflect"
 	"strings"
@@ -263,6 +264,49 @@ func TestRunUpgradeRoutesToLocalHandler(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []string{"upgrade", "check", "--all"}) {
 		t.Fatalf("upgrade args = %#v, want command args", got)
+	}
+}
+
+func TestRunCallsUpdateAdvisoryAfterSuccessfulCommand(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldMaybePrintUpdateAdvisoryFn := maybePrintUpdateAdvisoryFn
+	oldProjectHostCountForAdvisoryFn := projectHostCountForAdvisoryFn
+	oldIsTerminalFn := isTerminalFn
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		maybePrintUpdateAdvisoryFn = oldMaybePrintUpdateAdvisoryFn
+		projectHostCountForAdvisoryFn = oldProjectHostCountForAdvisoryFn
+		isTerminalFn = oldIsTerminalFn
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	os.Args = []string{"yeet", "status"}
+	handleSvcCmdFn = func(args []string) error {
+		return nil
+	}
+	isTerminalFn = func(int) bool { return true }
+	projectHostCountForAdvisoryFn = func() int { return 3 }
+	var gotArgs []string
+	var gotExitCode, gotHostCount int
+	var gotStdoutTTY, gotStderrTTY bool
+	maybePrintUpdateAdvisoryFn = func(w io.Writer, args []string, exitCode int, stdoutTTY bool, stderrTTY bool, projectHostCount int) {
+		gotArgs = append([]string(nil), args...)
+		gotExitCode = exitCode
+		gotStdoutTTY = stdoutTTY
+		gotStderrTTY = stderrTTY
+		gotHostCount = projectHostCount
+	}
+
+	if code := run(); code != 0 {
+		t.Fatalf("run exit code = %d, want 0", code)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"status"}) || gotExitCode != 0 || !gotStdoutTTY || !gotStderrTTY || gotHostCount != 3 {
+		t.Fatalf("advisory args=%#v exit=%d stdoutTTY=%v stderrTTY=%v hosts=%d", gotArgs, gotExitCode, gotStdoutTTY, gotStderrTTY, gotHostCount)
 	}
 }
 
