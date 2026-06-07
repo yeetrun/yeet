@@ -73,9 +73,12 @@ See [Installation](https://yeetrun.com/docs/getting-started/installation) and
 Confirm the control plane is reachable:
 
 ```bash
-yeet list-hosts
+yeet version
 yeet status
 ```
+
+If you have Tailscale installed locally, `yeet list-hosts` can also discover
+tagged catch nodes. It is optional for normal RPC because yeet embeds tsnet.
 
 Then run a disposable container:
 

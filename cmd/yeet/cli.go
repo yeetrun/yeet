@@ -141,7 +141,7 @@ func buildHelpConfig() yargs.HelpConfig {
 	}
 	subcommands["list-hosts"] = yargs.SubCommandInfo{
 		Name:        "list-hosts",
-		Description: "List all hosts with the given tags",
+		Description: "List tailnet hosts with the given tags; requires a local Tailscale client",
 		Usage:       "[--tags=tag:catch]",
 	}
 	subcommands["prefs"] = yargs.SubCommandInfo{
