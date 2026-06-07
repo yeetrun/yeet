@@ -14,7 +14,8 @@ Use this skill for operating yeet from this repository. Prefer `go run
 - Read `AGENTS.local.md` before live host testing.
 - For exact syntax, use `go run ./cmd/yeet <command> --help-llm`.
 - If help output changes, update
-  `.codex/skills/yeet-cli/references/yeet-help-llm.md`.
+  `.codex/skills/yeet-cli/references/yeet-help-llm.md` with
+  `tools/generate-yeet-help-llm.sh`.
 
 ## Common Commands
 

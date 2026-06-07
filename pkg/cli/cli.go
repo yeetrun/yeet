@@ -358,7 +358,7 @@ func IsServiceArgSpec(spec yargs.ArgSpec) bool {
 }
 
 var remoteCommandInfos = map[string]CommandInfo{
-	"cron": {Name: "cron", Description: "Install a cron job from a file and 5-field expression", Usage: `SVC FILE "<cron expr>" [-- <args...>]`, Examples: []string{`yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo`}, ArgsSchema: ServiceArgs{}},
+	"cron": {Name: "cron", Description: "Install a cron job from a file and 5-field expression", Usage: `FILE "<cron expr>" [-- <args...>]`, Examples: []string{`yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo`}, ArgsSchema: ServiceArgs{}},
 	"copy": {Name: "copy", Description: "Copy files between local and service data", Usage: "[-avz] <src> <dst>", Examples: []string{
 		"yeet copy ./config.yml svc:data/config.yml",
 		"yeet copy ./configs/ svc:data/",
