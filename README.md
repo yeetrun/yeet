@@ -70,8 +70,8 @@ yeet upgrade --all
 
 Start with a Linux host that has systemd and SSH access. Docker can be
 installed by `yeet init` on Debian/Ubuntu-style hosts. A plain first run is
-valid; if the catch Tailscale node is not already authenticated, `yeet init`
-prints the Tailscale login URL and waits for you to finish enrollment:
+valid; if catch needs to join Tailscale, `yeet init` prompts for a Tailscale
+OAuth client secret and uses it to enroll catch as a tagged device:
 
 ```bash
 yeet init root@<machine-host>
@@ -88,10 +88,18 @@ yeet init --install-docker --install-vm-tools root@<machine-host>
 Catch uses an embedded Tailscale node for RPC. That node must end up with a
 tag-based identity, such as `tag:catch`; user-owned catch nodes are rejected.
 If your tailnet policy does not already allow that tag, update `tagOwners` in
-Tailscale before or during first setup.
+Tailscale before first setup. The OAuth client secret should have the
+`auth_keys` scope and be allowed to assign `tag:catch`, either directly or via
+an owner tag such as `tag:yeet`.
 
-For unattended bootstrap, create a preauthorized Tailscale auth key that
-assigns the catch server tag and pass it with:
+For repeatable or non-interactive bootstrap, pass the OAuth client secret:
+
+```bash
+yeet init --install-docker --install-vm-tools --ts-client-secret=<secret> root@<machine-host>
+```
+
+Advanced users can also create a preauthorized Tailscale auth key that assigns
+the catch server tag and pass it with:
 
 ```bash
 yeet init --install-docker --install-vm-tools --ts-auth-key=<key> root@<machine-host>

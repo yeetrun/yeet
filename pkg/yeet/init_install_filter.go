@@ -89,6 +89,7 @@ type initInstallSummary struct {
 	skippedImages int
 	warnings      []string
 	infos         []string
+	errors        []string
 }
 
 func (s *initInstallSummary) Absorb(msg string) bool {
@@ -108,6 +109,10 @@ func (s *initInstallSummary) Absorb(msg string) bool {
 	if isInstallInfoLine(msg) {
 		s.infos = append(s.infos, msg)
 		return true
+	}
+	if isInstallErrorLine(msg) {
+		s.errors = append(s.errors, msg)
+		return false
 	}
 	if isVisibleWarningLine(msg) {
 		s.addWarning(msg)
@@ -182,6 +187,12 @@ func isInstallInfoLine(msg string) bool {
 	return strings.HasPrefix(msg, "Installed VM host packages:")
 }
 
+func isInstallErrorLine(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "tailscale oauth setup failed:") ||
+		strings.Contains(msg, "requires a Tailscale OAuth client secret or auth key")
+}
+
 func isVisibleWarningLine(msg string) bool {
 	return strings.HasPrefix(msg, "Failed to install service:") || strings.HasPrefix(msg, "Warning:")
 }
@@ -206,6 +217,22 @@ func (s *initInstallSummary) WarningSummary() string {
 
 func (s *initInstallSummary) InfoSummary() string {
 	return strings.Join(uniqueStrings(s.infos), "; ")
+}
+
+func (f *initInstallFilter) ErrorSummary() error {
+	msg := strings.Join(uniqueStrings(f.summary.errors), "; ")
+	if msg == "" {
+		return nil
+	}
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "tailscale oauth setup failed:"):
+		return fmt.Errorf("%w: %s", errTailscaleOAuthRejected, msg)
+	case strings.Contains(msg, "requires a Tailscale OAuth client secret or auth key"):
+		return fmt.Errorf("%w: %s", errTailscaleCredentialRequired, msg)
+	default:
+		return fmt.Errorf("%s", msg)
+	}
 }
 
 func (s *initInstallSummary) addWarning(msg string) {
@@ -239,9 +266,6 @@ func extractQuotedValue(line, key string) string {
 
 func isImportantInitLine(msg string) bool {
 	if strings.HasPrefix(msg, "Warning:") || strings.HasPrefix(msg, "Error:") {
-		return true
-	}
-	if strings.Contains(msg, "login.tailscale.com") {
 		return true
 	}
 	if strings.Contains(msg, "https://yeetrun.com/docs/concepts/tailscale") {

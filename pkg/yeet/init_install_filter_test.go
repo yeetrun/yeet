@@ -7,6 +7,7 @@ package yeet
 import (
 	"bytes"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -82,17 +83,52 @@ func TestInitInstallFilterRedactsTailscaleAuthKeys(t *testing.T) {
 	var buf bytes.Buffer
 	filter := newInitInstallFilter(&buf)
 
-	input := "Error: TS_AUTHKEY=tskey-auth-secret123 failed\n"
+	input := "Error: TS_AUTHKEY=tskey-auth-secret123 TS_CLIENT_SECRET=tskey-client-secret456 failed\n"
 	if _, err := filter.Write([]byte(input)); err != nil {
 		t.Fatalf("write failed: %v", err)
 	}
 
 	got := buf.String()
-	if strings.Contains(got, "tskey-auth-secret123") {
-		t.Fatalf("filter output leaked auth key: %q", got)
+	if strings.Contains(got, "tskey-auth-secret123") || strings.Contains(got, "tskey-client-secret456") {
+		t.Fatalf("filter output leaked tailscale key: %q", got)
 	}
-	if !strings.Contains(got, "TS_AUTHKEY=[tailscale-key-redacted] failed") {
-		t.Fatalf("filter output = %q, want redacted auth key", got)
+	if !strings.Contains(got, "TS_AUTHKEY=[tailscale-key-redacted] TS_CLIENT_SECRET=[tailscale-key-redacted] failed") {
+		t.Fatalf("filter output = %q, want redacted keys", got)
+	}
+}
+
+func TestInitInstallFilterCapturesTailscaleOAuthError(t *testing.T) {
+	var buf bytes.Buffer
+	filter := newInitInstallFilter(&buf)
+
+	input := "tailscale OAuth setup failed: tag:catch is not allowed by tagOwners\n"
+	if _, err := filter.Write([]byte(input)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	err := filter.ErrorSummary()
+	if !errors.Is(err, errTailscaleOAuthRejected) {
+		t.Fatalf("ErrorSummary = %v, want errTailscaleOAuthRejected", err)
+	}
+	if !strings.Contains(err.Error(), "tag:catch") {
+		t.Fatalf("ErrorSummary missing tag detail: %v", err)
+	}
+	if !strings.Contains(buf.String(), "tailscale OAuth setup failed") {
+		t.Fatalf("visible output = %q, want OAuth error", buf.String())
+	}
+}
+
+func TestInitInstallFilterCapturesTailscaleCredentialRequired(t *testing.T) {
+	filter := newInitInstallFilter(io.Discard)
+
+	input := "catch Tailscale setup requires a Tailscale OAuth client secret or auth key; see https://yeetrun.com/docs/concepts/tailscale\n"
+	if _, err := filter.Write([]byte(input)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	err := filter.ErrorSummary()
+	if !errors.Is(err, errTailscaleCredentialRequired) {
+		t.Fatalf("ErrorSummary = %v, want errTailscaleCredentialRequired", err)
 	}
 }
 
@@ -197,7 +233,7 @@ func TestInitInstallLineClassifiers(t *testing.T) {
 		}
 	}
 
-	important := []string{"Warning: docker missing", "Error: install failed", "operation failed", "runtime error", "https://login.tailscale.com/a/example"}
+	important := []string{"Warning: docker missing", "Error: install failed", "operation failed", "runtime error", "tailscale OAuth setup failed: tag rejected"}
 	for _, msg := range important {
 		if !isImportantInitLine(msg) {
 			t.Fatalf("isImportantInitLine(%q) = false, want true", msg)

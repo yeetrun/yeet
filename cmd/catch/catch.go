@@ -60,9 +60,12 @@ var (
 	doInstallFn                             = doInstall
 	validateCatchRuntimeFn                  = validateCatchRuntime
 	ensureContainerdSnapshotterForInstallFn = ensureContainerdSnapshotterForInstall
+	generateCatchTailscaleAuthKeyFn         = catch.GenerateTailscaleAuthKeyFromSecret
+	writeCatchTailscaleClientSecretFn       = catch.WriteCatchTailscaleClientSecret
 )
 
 const defaultDockerConfigPath = "/etc/docker/daemon.json"
+const defaultCatchTag = "tag:catch"
 
 var errCatchTSNetUntagged = errors.New("catch Tailscale node must be tagged")
 
@@ -71,7 +74,18 @@ func initTSNet(dataDir string) (*tsnet.Server, error) {
 	if *tsnetHost == "" {
 		return nil, nil
 	}
+	authKey, err := prepareCatchTSNetAuth(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	ts := newTSNetServer(dataDir)
+	return startTSNetServer(ts, authKey)
+}
+
+func startTSNetServer(ts *tsnet.Server, authKey string) (*tsnet.Server, error) {
+	if authKey != "" {
+		ts.AuthKey = authKey
+	}
 	st, err := ts.Up(context.Background())
 	if err != nil {
 		return nil, err
@@ -132,6 +146,67 @@ func newTSNetServer(dataDir string) *tsnet.Server {
 		Hostname: *tsnetHost,
 		Port:     uint16(*tsnetPort),
 	}
+}
+
+func prepareCatchTSNetAuth(dataDir string) (string, error) {
+	tsAuthKey := strings.TrimSpace(os.Getenv("TS_AUTHKEY"))
+	clientSecret := strings.TrimSpace(os.Getenv("TS_CLIENT_SECRET"))
+	hasState := catchTSNetStateExists(dataDir)
+	if err := validateTSNetInstallAuth(hasState, tsAuthKey, clientSecret); err != nil {
+		return "", err
+	}
+	if clientSecret != "" {
+		if hasState {
+			if _, err := writeCatchTailscaleClientSecretFn(dataDir, clientSecret); err != nil {
+				return "", err
+			}
+			return tsAuthKey, nil
+		}
+		tags := catchTailscaleTagsFromEnv(os.Getenv("TS_CATCH_TAGS"))
+		authKey, err := generateCatchTailscaleAuthKeyFn(context.Background(), clientSecret, tags)
+		if err != nil {
+			return "", fmt.Errorf("tailscale OAuth setup failed: %w", err)
+		}
+		if _, err := writeCatchTailscaleClientSecretFn(dataDir, clientSecret); err != nil {
+			return "", err
+		}
+		return authKey, nil
+	}
+	return tsAuthKey, nil
+}
+
+func validateTSNetInstallAuth(hasState bool, tsAuthKey string, clientSecret string) error {
+	if hasState || strings.TrimSpace(tsAuthKey) != "" || strings.TrimSpace(clientSecret) != "" {
+		return nil
+	}
+	return fmt.Errorf("catch Tailscale setup requires a Tailscale OAuth client secret or auth key; run yeet init in a TTY, pass --ts-client-secret=tskey-client-..., or pass --ts-auth-key=<key>; see https://yeetrun.com/docs/concepts/tailscale")
+}
+
+func catchTSNetStateExists(dataDir string) bool {
+	info, err := os.Stat(catchTSNetStatePath(dataDir))
+	return err == nil && !info.IsDir()
+}
+
+func catchTSNetStatePath(dataDir string) string {
+	return filepath.Join(dataDir, "tsnet", "tailscaled.state")
+}
+
+func catchTailscaleTagsFromEnv(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return []string{defaultCatchTag}
+	}
+	parts := strings.Split(raw, ",")
+	tags := make([]string, 0, len(parts))
+	for _, part := range parts {
+		tag := strings.TrimSpace(part)
+		if tag != "" {
+			tags = append(tags, tag)
+		}
+	}
+	if len(tags) == 0 {
+		return []string{defaultCatchTag}
+	}
+	return tags
 }
 
 func tsnetAssignedNameWarning(requested, assignedDNS string) string {

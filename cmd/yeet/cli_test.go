@@ -432,7 +432,7 @@ func TestRunInitHelpLLMUsesMachineHostAndVMToolsFlag(t *testing.T) {
 		t.Fatalf("read stdout: %v", err)
 	}
 	stdout := string(rawStdout)
-	for _, want := range []string{"--install-vm-tools", "root@<machine-host>"} {
+	for _, want := range []string{"--install-vm-tools", "--ts-client-secret", "root@<machine-host>"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q:\n%s", want, stdout)
 		}

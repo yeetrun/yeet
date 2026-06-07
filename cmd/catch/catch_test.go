@@ -329,6 +329,112 @@ func TestInitTSNetReturnsNilWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestValidateTSNetInstallAuthRequiresCredentialWithoutState(t *testing.T) {
+	err := validateTSNetInstallAuth(false, "", "")
+	if err == nil || !strings.Contains(err.Error(), "requires a Tailscale OAuth client secret or auth key") {
+		t.Fatalf("validateTSNetInstallAuth error = %v, want credential requirement", err)
+	}
+
+	if err := validateTSNetInstallAuth(true, "", ""); err != nil {
+		t.Fatalf("validateTSNetInstallAuth existing state error = %v", err)
+	}
+	if err := validateTSNetInstallAuth(false, "tskey-auth-test", ""); err != nil {
+		t.Fatalf("validateTSNetInstallAuth auth key error = %v", err)
+	}
+	if err := validateTSNetInstallAuth(false, "", "tskey-client-test"); err != nil {
+		t.Fatalf("validateTSNetInstallAuth client secret error = %v", err)
+	}
+}
+
+func TestCatchTSNetStateExists(t *testing.T) {
+	root := t.TempDir()
+	if catchTSNetStateExists(root) {
+		t.Fatal("catchTSNetStateExists = true before state file exists")
+	}
+	statePath := catchTSNetStatePath(root)
+	if err := os.MkdirAll(filepath.Dir(statePath), 0o700); err != nil {
+		t.Fatalf("MkdirAll state dir: %v", err)
+	}
+	if err := os.WriteFile(statePath, []byte("state"), 0o600); err != nil {
+		t.Fatalf("WriteFile state: %v", err)
+	}
+	if !catchTSNetStateExists(root) {
+		t.Fatal("catchTSNetStateExists = false after state file exists")
+	}
+}
+
+func TestCatchTailscaleTagsFromEnv(t *testing.T) {
+	if got := catchTailscaleTagsFromEnv(""); !reflect.DeepEqual(got, []string{defaultCatchTag}) {
+		t.Fatalf("default tags = %#v", got)
+	}
+	got := catchTailscaleTagsFromEnv(" tag:catch,tag:app ,, ")
+	want := []string{"tag:catch", "tag:app"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("tags = %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareCatchTSNetAuthMintsAndStoresOAuthSecret(t *testing.T) {
+	oldGenerate := generateCatchTailscaleAuthKeyFn
+	oldWrite := writeCatchTailscaleClientSecretFn
+	t.Cleanup(func() {
+		generateCatchTailscaleAuthKeyFn = oldGenerate
+		writeCatchTailscaleClientSecretFn = oldWrite
+	})
+
+	root := t.TempDir()
+	t.Setenv("TS_AUTHKEY", "")
+	t.Setenv("TS_CLIENT_SECRET", " tskey-client-test ")
+	t.Setenv("TS_CATCH_TAGS", "tag:catch,tag:app")
+
+	var storedSecret string
+	generateCatchTailscaleAuthKeyFn = func(_ context.Context, clientSecret string, tags []string) (string, error) {
+		if clientSecret != "tskey-client-test" {
+			t.Fatalf("clientSecret = %q, want trimmed secret", clientSecret)
+		}
+		wantTags := []string{"tag:catch", "tag:app"}
+		if !reflect.DeepEqual(tags, wantTags) {
+			t.Fatalf("tags = %#v, want %#v", tags, wantTags)
+		}
+		return "tskey-auth-generated", nil
+	}
+	writeCatchTailscaleClientSecretFn = func(rootDir string, clientSecret string) (string, error) {
+		if rootDir != root {
+			t.Fatalf("rootDir = %q, want %q", rootDir, root)
+		}
+		storedSecret = clientSecret
+		return filepath.Join(rootDir, "services", catch.CatchService, "data", "tailscale.key"), nil
+	}
+
+	authKey, err := prepareCatchTSNetAuth(root)
+	if err != nil {
+		t.Fatalf("prepareCatchTSNetAuth returned error: %v", err)
+	}
+	if authKey != "tskey-auth-generated" {
+		t.Fatalf("authKey = %q, want generated key", authKey)
+	}
+	if storedSecret != "tskey-client-test" {
+		t.Fatalf("storedSecret = %q, want trimmed secret", storedSecret)
+	}
+}
+
+func TestPrepareCatchTSNetAuthWrapsOAuthRejection(t *testing.T) {
+	oldGenerate := generateCatchTailscaleAuthKeyFn
+	t.Cleanup(func() {
+		generateCatchTailscaleAuthKeyFn = oldGenerate
+	})
+	t.Setenv("TS_CLIENT_SECRET", "tskey-client-test")
+	wantErr := errors.New("tag:catch not allowed")
+	generateCatchTailscaleAuthKeyFn = func(context.Context, string, []string) (string, error) {
+		return "", wantErr
+	}
+
+	_, err := prepareCatchTSNetAuth(t.TempDir())
+	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "tailscale OAuth setup failed") {
+		t.Fatalf("prepareCatchTSNetAuth error = %v, want wrapped OAuth failure", err)
+	}
+}
+
 func TestValidateCatchTSNetSelfRequiresTaggedNode(t *testing.T) {
 	if err := validateCatchTSNetSelf(testTSNetSelf("catch.shayne.ts.net.", "tag:catch")); err != nil {
 		t.Fatalf("validateCatchTSNetSelf tagged error = %v, want nil", err)

@@ -5,7 +5,9 @@
 package yeet
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -37,6 +39,7 @@ type initFlagsParsed struct {
 	InstallDocker  bool   `flag:"install-docker"`
 	InstallVMTools bool   `flag:"install-vm-tools"`
 	TSAuthKey      string `flag:"ts-auth-key"`
+	TSClientSecret string `flag:"ts-client-secret"`
 }
 
 type initOptions struct {
@@ -45,9 +48,17 @@ type initOptions struct {
 	installDocker  bool
 	installVMTools bool
 	tsAuthKey      string
+	tsClientSecret string
 }
 
 var initCatchFn = initCatch
+
+const defaultCatchTag = "tag:catch"
+
+var (
+	errTailscaleCredentialRequired = errors.New("tailscale credential required")
+	errTailscaleOAuthRejected      = errors.New("tailscale oauth setup rejected")
+)
 
 func HandleInit(_ context.Context, args []string) error {
 	pos, opts, err := parseInitArgs(args)
@@ -78,6 +89,13 @@ func parseInitArgs(args []string) ([]string, initOptions, error) {
 		installDocker:  result.Flags.InstallDocker,
 		installVMTools: result.Flags.InstallVMTools,
 		tsAuthKey:      result.Flags.TSAuthKey,
+		tsClientSecret: result.Flags.TSClientSecret,
+	}
+	if opts.tsAuthKey != "" && opts.tsClientSecret != "" {
+		return nil, initOptions{}, fmt.Errorf("--ts-auth-key and --ts-client-secret cannot be used together")
+	}
+	if opts.tsClientSecret != "" && !strings.HasPrefix(opts.tsClientSecret, "tskey-client-") {
+		return nil, initOptions{}, fmt.Errorf("invalid --ts-client-secret (expected tskey-client-...)")
 	}
 	if len(pos) > 1 {
 		return nil, initOptions{}, fmt.Errorf("init takes at most one argument")
@@ -230,7 +248,7 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 	if err := chmodInitCatchFn(ui, userAtRemote); err != nil {
 		return err
 	}
-	return installInitCatchFn(ui, userAtRemote, useSudo, installDocker, opts.installVMTools, opts.tsAuthKey)
+	return installInitCatchWithTailscaleRetry(ui, userAtRemote, useSudo, installDocker, opts.installVMTools, opts)
 }
 
 type initCatchSource struct {
@@ -426,15 +444,105 @@ func chmodInitCatch(ui *initUI, userAtRemote string) error {
 	return nil
 }
 
-func installInitCatch(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string) error {
-	if !useSudo {
-		return installInitCatchDetached(ui, userAtRemote, installDocker, installVMTools, tsAuthKey)
+func installInitCatchWithTailscaleRetry(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, opts initOptions) error {
+	tsClientSecret := strings.TrimSpace(opts.tsClientSecret)
+	for attempt := 0; attempt < 3; attempt++ {
+		err := installInitCatchFn(ui, userAtRemote, useSudo, installDocker, installVMTools, opts.tsAuthKey, tsClientSecret, []string{defaultCatchTag})
+		if err == nil {
+			return nil
+		}
+		if opts.tsAuthKey != "" || !isInitTailscaleCredentialError(err) {
+			return err
+		}
+		next, promptErr := retryInitTailscaleClientSecret(ui, attempt, err)
+		if promptErr != nil {
+			return promptErr
+		}
+		tsClientSecret = next
 	}
-	return installInitCatchDirect(ui, userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey)
+	return fmt.Errorf("tailscale OAuth setup failed after 3 attempts")
 }
 
-func installInitCatchDirect(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string) error {
-	cmd := exec.Command("ssh", remoteCatchInstallArgs(userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey)...)
+func retryInitTailscaleClientSecret(ui *initUI, attempt int, installErr error) (string, error) {
+	if !canPromptInitTailscale() {
+		return "", fmt.Errorf("%w; run yeet init in a TTY, pass --ts-client-secret=tskey-client-..., or pass --ts-auth-key=<key>; see https://yeetrun.com/docs/concepts/tailscale", installErr)
+	}
+	ui.Suspend()
+	defer ui.Resume()
+	if attempt > 0 {
+		if _, err := fmt.Fprintln(os.Stdout, "Tailscale rejected that OAuth client secret for tag:catch. Fix the OAuth tags or tagOwners policy, then try another secret."); err != nil {
+			return "", err
+		}
+	}
+	next, err := promptInitTailscaleClientSecret(os.Stdout, os.Stdin)
+	if err != nil {
+		return "", err
+	}
+	return validateInitTailscaleClientSecret(next)
+}
+
+func validateInitTailscaleClientSecret(secret string) (string, error) {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return "", fmt.Errorf("tailscale OAuth client secret is required")
+	}
+	if !strings.HasPrefix(secret, "tskey-client-") {
+		return "", fmt.Errorf("invalid tailscale OAuth client secret (expected tskey-client-...)")
+	}
+	return secret, nil
+}
+
+func canPromptInitTailscale() bool {
+	return isTerminalFn(int(os.Stdin.Fd())) && isTerminalFn(int(os.Stdout.Fd()))
+}
+
+func promptInitTailscaleClientSecret(out io.Writer, in io.Reader) (string, error) {
+	for _, line := range []string{
+		"yeet installs catch, a small daemon that runs on the host and manages services.",
+		"catch uses Tailscale for RPC and must join your tailnet as a tagged device, usually tag:catch.",
+		"Paste a Tailscale OAuth client secret with the auth_keys scope that can mint tag:catch.",
+		"Recommended: create an owner tag such as tag:yeet, let it own tag:catch, and select tag:yeet on the OAuth client.",
+		"Docs: https://yeetrun.com/docs/concepts/tailscale",
+		"",
+		"Tailscale OAuth client secret:",
+	} {
+		if _, err := fmt.Fprintln(out, line); err != nil {
+			return "", err
+		}
+	}
+	if _, err := fmt.Fprint(out, "> "); err != nil {
+		return "", err
+	}
+	reader := bufio.NewReader(in)
+	line, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func isInitTailscaleCredentialError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, errTailscaleCredentialRequired) || errors.Is(err, errTailscaleOAuthRejected) {
+		return true
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "tailscale oauth setup failed") ||
+		strings.Contains(msg, "requires a Tailscale OAuth client secret or auth key")
+}
+
+func installInitCatch(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) error {
+	if !useSudo {
+		return installInitCatchDetached(ui, userAtRemote, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags)
+	}
+	return installInitCatchDirect(ui, userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags)
+}
+
+func installInitCatchDirect(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) error {
+	cmd := exec.Command("ssh", remoteCatchInstallArgs(userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags)...)
 	cmd.Stdin = os.Stdin
 	ui.Suspend()
 	filter := newInitInstallFilter(os.Stdout)
@@ -442,6 +550,9 @@ func installInitCatchDirect(ui *initUI, userAtRemote string, useSudo bool, insta
 	cmd.Stderr = filter
 	if err := cmd.Run(); err != nil {
 		ui.FailStep("install failed")
+		if summaryErr := filter.ErrorSummary(); summaryErr != nil {
+			return summaryErr
+		}
 		return fmt.Errorf("failed to run catch binary on remote host")
 	}
 	ui.DoneStep(filter.SummaryDetail())
@@ -465,11 +576,11 @@ var (
 	initInstallSSHTimeout   = 10 * time.Second
 )
 
-func installInitCatchDetached(ui *initUI, userAtRemote string, installDocker bool, installVMTools bool, tsAuthKey string) error {
+func installInitCatchDetached(ui *initUI, userAtRemote string, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) error {
 	session := newInitInstallSession()
 	ui.Suspend()
 	filter := newInitInstallFilter(os.Stdout)
-	if err := launchDetachedInitCatchInstall(userAtRemote, session, installDocker, installVMTools, tsAuthKey); err != nil {
+	if err := launchDetachedInitCatchInstall(userAtRemote, session, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags); err != nil {
 		ui.FailStep("install failed")
 		return fmt.Errorf("failed to run catch binary on remote host")
 	}
@@ -481,6 +592,9 @@ func installInitCatchDetached(ui *initUI, userAtRemote string, installDocker boo
 	}
 	if strings.TrimSpace(status) != "0" {
 		ui.FailStep("install failed")
+		if summaryErr := filter.ErrorSummary(); summaryErr != nil {
+			return summaryErr
+		}
 		return fmt.Errorf("failed to run catch binary on remote host")
 	}
 	ui.DoneStep(filter.SummaryDetail())
@@ -501,16 +615,16 @@ func newInitInstallSession() initInstallSession {
 	}
 }
 
-func launchDetachedInitCatchInstall(userAtRemote string, session initInstallSession, installDocker bool, installVMTools bool, tsAuthKey string) error {
-	cmd := exec.Command("ssh", userAtRemote, detachedInitCatchInstallScript(userAtRemote, session, installDocker, installVMTools, tsAuthKey))
+func launchDetachedInitCatchInstall(userAtRemote string, session initInstallSession, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) error {
+	cmd := exec.Command("ssh", userAtRemote, detachedInitCatchInstallScript(userAtRemote, session, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags))
 	cmd.Stdin = nil
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run()
 }
 
-func detachedInitCatchInstallScript(userAtRemote string, session initInstallSession, installDocker bool, installVMTools bool, tsAuthKey string) string {
-	install := shellJoin(remoteCatchInstallCommand(userAtRemote, false, installDocker, installVMTools, tsAuthKey))
+func detachedInitCatchInstallScript(userAtRemote string, session initInstallSession, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) string {
+	install := shellJoin(remoteCatchInstallCommand(userAtRemote, false, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags))
 	logPath := shellQuote(session.LogPath)
 	statusPath := shellQuote(session.StatusPath)
 	body := fmt.Sprintf("%s >%s 2>&1; code=$?; printf \"%%s\" \"$code\" >%s", install, logPath, statusPath)
@@ -590,7 +704,7 @@ func cleanupDetachedInitCatchInstall(userAtRemote string, session initInstallSes
 	_ = cmd.Run()
 }
 
-func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string) []string {
+func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) []string {
 	args := []string{}
 	if useSudo {
 		args = append(args, "sudo")
@@ -605,6 +719,13 @@ func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker 
 	if tsAuthKey != "" {
 		installEnv = append(installEnv, "TS_AUTHKEY="+tsAuthKey)
 	}
+	if tsClientSecret != "" {
+		installEnv = append(installEnv, "TS_CLIENT_SECRET="+tsClientSecret)
+		if len(tsCatchTags) == 0 {
+			tsCatchTags = []string{defaultCatchTag}
+		}
+		installEnv = append(installEnv, "TS_CATCH_TAGS="+strings.Join(tsCatchTags, ","))
+	}
 	if len(installEnv) > 0 {
 		args = append(args, "env")
 		args = append(args, installEnv...)
@@ -612,9 +733,9 @@ func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker 
 	return append(args, "./catch", fmt.Sprintf("--tsnet-host=%v", Host()), "install")
 }
 
-func remoteCatchInstallArgs(userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string) []string {
+func remoteCatchInstallArgs(userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) []string {
 	args := append(make([]string, 0, 7), "-t", userAtRemote)
-	return append(args, remoteCatchInstallCommand(userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey)...)
+	return append(args, remoteCatchInstallCommand(userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags)...)
 }
 
 func catchInstallEnv(userAtRemote string) []string {

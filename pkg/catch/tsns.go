@@ -193,7 +193,10 @@ func tsClient(ctx context.Context) (*tailscale.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read tailscale.key: %w", err)
 	}
-	clientSecret := strings.TrimSpace(string(b))
+	return tailscaleClientFromSecret(strings.TrimSpace(string(b)))
+}
+
+func tailscaleClientFromSecret(clientSecret string) (*tailscale.Client, error) {
 	if !strings.HasPrefix(clientSecret, "tskey-client-") {
 		return nil, errors.New("invalid tailscale oauth secret")
 	}
@@ -210,6 +213,7 @@ func tsClient(ctx context.Context) (*tailscale.Client, error) {
 	tsClient := &tailscale.Client{
 		BaseURL: parsedBaseURL,
 		Tailnet: "-",
+		HTTP:    tailscaleHTTPClient,
 		Auth: &tailscale.OAuth{
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
@@ -224,8 +228,23 @@ func generateTailscaleAuthKey(ctx context.Context, tags []string) (string, error
 	if err != nil {
 		return "", err
 	}
+	return createTailscaleAuthKey(ctx, tsClient, tags)
+}
+
+// GenerateTailscaleAuthKeyFromSecret creates a reusable preauthorized auth key
+// for the requested tags using a Tailscale OAuth client secret.
+func GenerateTailscaleAuthKeyFromSecret(ctx context.Context, clientSecret string, tags []string) (string, error) {
+	tsClient, err := tailscaleClientFromSecret(strings.TrimSpace(clientSecret))
+	if err != nil {
+		return "", err
+	}
+	return createTailscaleAuthKey(ctx, tsClient, tags)
+}
+
+func createTailscaleAuthKey(ctx context.Context, tsClient *tailscale.Client, tags []string) (string, error) {
 	caps := tailscale.KeyCapabilities{}
 	caps.Devices.Create.Preauthorized = true
+	caps.Devices.Create.Reusable = true
 	caps.Devices.Create.Tags = tags
 
 	key, err := tsClient.Keys().CreateAuthKey(ctx, tailscale.CreateKeyRequest{

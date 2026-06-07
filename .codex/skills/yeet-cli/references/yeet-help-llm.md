@@ -124,7 +124,7 @@ Get detailed help: `yeet info --help-llm`
 
 ### `init`
 
-Install catch on a remote host (interactive Tailscale setup when needed)
+Install catch on a remote host (prompts for Tailscale OAuth setup when needed)
 
 **Examples**:
 
@@ -138,6 +138,10 @@ yeet init --install-docker root@<machine-host>
 
 ```
 yeet init --install-docker --install-vm-tools root@<machine-host>
+```
+
+```
+yeet init --ts-client-secret=<secret> root@<machine-host>
 ```
 
 ```
@@ -889,12 +893,12 @@ Progress output (auto|tty|plain|quiet)
 ````
 # yeet init
 
-Install catch on a remote host (interactive Tailscale setup when needed)
+Install catch on a remote host (prompts for Tailscale OAuth setup when needed)
 
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] init [OPTIONS] [--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]
+yeet [GLOBAL_OPTIONS] init [OPTIONS] [--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--ts-client-secret=<secret>] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]
 ```
 
 ## Global Options
@@ -941,6 +945,10 @@ yeet init --install-docker root@<machine-host>
 
 ```
 yeet init --install-docker --install-vm-tools root@<machine-host>
+```
+
+```
+yeet init --ts-client-secret=<secret> root@<machine-host>
 ```
 
 ```
