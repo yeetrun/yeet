@@ -96,6 +96,23 @@ func TestInitInstallFilterRedactsTailscaleAuthKeys(t *testing.T) {
 	}
 }
 
+func TestInitInstallFilterSurfacesTailscaleSetupGuidance(t *testing.T) {
+	var buf bytes.Buffer
+	filter := newInitInstallFilter(&buf)
+
+	input := "2026/01/02 18:15:34 catch Tailscale node must be tagged; configure tagOwners and rerun yeet init, or use --ts-auth-key=<key> for unattended installs; docs: https://yeetrun.com/docs/concepts/tailscale\n"
+	if _, err := filter.Write([]byte(input)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	got := buf.String()
+	for _, want := range []string{"tagOwners", "rerun yeet init", "--ts-auth-key=<key>", "https://yeetrun.com/docs/concepts/tailscale"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("filter output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestInitInstallSummaryAbsorbPathsImagesAndWarnings(t *testing.T) {
 	var summary initInstallSummary
 

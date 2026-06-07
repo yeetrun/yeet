@@ -72,11 +72,19 @@ func renderUpgradeRow(w io.Writer, row upgradeComponent) error {
 	if row.Host != "" {
 		component += "@" + row.Host
 	}
+	current := row.Current
+	if current == "" {
+		current = "-"
+	}
+	latest := row.Latest
+	if latest == "" {
+		latest = "-"
+	}
 	status := string(row.Status)
-	if row.Reason != "" {
+	if row.Reason != "" && row.Status != upgradeStatusDev {
 		status += ": " + row.Reason
 	}
-	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", component, row.Current, row.Latest, status)
+	_, err := fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", component, current, latest, status)
 	return err
 }
 
@@ -92,6 +100,12 @@ func runUpgrade(ctx context.Context, stdout io.Writer, stderr io.Writer, flags c
 }
 
 func confirmUpgradeIfNeeded(stdin io.Reader, stdout io.Writer, stderr io.Writer, flags cli.UpgradeFlags, report upgradeReport) (bool, error) {
+	if !upgradeReportHasUpdates(report) {
+		if _, err := fmt.Fprintln(stdout, "No upgrades available."); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
 	if flags.Yes {
 		return true, nil
 	}
@@ -103,6 +117,18 @@ func confirmUpgradeIfNeeded(stdin io.Reader, stdout io.Writer, stderr io.Writer,
 		return false, err
 	}
 	return false, nil
+}
+
+func upgradeReportHasUpdates(report upgradeReport) bool {
+	if report.Local.Status == upgradeStatusUpdateAvailable {
+		return true
+	}
+	for _, row := range report.Catch {
+		if row.Status == upgradeStatusUpdateAvailable {
+			return true
+		}
+	}
+	return false
 }
 
 func upgradeLocalFromReport(flags cli.UpgradeFlags, report upgradeReport) error {

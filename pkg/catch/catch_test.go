@@ -51,53 +51,45 @@ func TestStatusesDockerComposeRunningDecision(t *testing.T) {
 	}
 }
 
-func TestCallerValidationRules(t *testing.T) {
+func TestCatchNodeIdentityValidationRules(t *testing.T) {
 	tests := []struct {
 		name       string
 		serverTags []string
-		serverUser tailcfg.UserID
-		callerTags []string
-		callerUser tailcfg.UserID
 		wantErr    bool
 	}{
 		{
 			name:       "tagged caller allowed by overlapping tagged server",
 			serverTags: []string{"tag:prod", "tag:web"},
-			callerTags: []string{"tag:web"},
 		},
 		{
-			name:       "tagged caller rejected without overlap",
+			name:       "tagged caller allowed by tagged server ACL without overlap",
 			serverTags: []string{"tag:prod"},
-			callerTags: []string{"tag:db"},
-			wantErr:    true,
 		},
 		{
 			name:       "untagged caller allowed when server is tagged",
 			serverTags: []string{"tag:prod"},
 		},
 		{
-			name:       "untagged caller allowed for same user",
-			serverUser: 1,
-			callerUser: 1,
+			name:    "untagged server rejected for same user",
+			wantErr: true,
 		},
 		{
-			name:       "untagged caller rejected for different user",
-			serverUser: 1,
-			callerUser: 2,
-			wantErr:    true,
+			name:    "untagged server rejected for different user",
+			wantErr: true,
 		},
 		{
-			name:       "tagged caller rejected when server is untagged",
-			serverUser: 1,
-			callerTags: []string{"tag:web"},
-			callerUser: 1,
-			wantErr:    true,
+			name:    "untagged server rejected for tagged same user",
+			wantErr: true,
+		},
+		{
+			name:    "untagged server rejected for tagged different user",
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateCallerIdentity(tt.serverTags, tt.serverUser, tt.callerTags, tt.callerUser)
+			err := validateCatchNodeIdentity(tt.serverTags)
 			if tt.wantErr {
 				if !errors.Is(err, errUnauthorized) {
 					t.Fatalf("validateCallerIdentity error = %v, want errUnauthorized", err)

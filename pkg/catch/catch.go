@@ -30,7 +30,6 @@ import (
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/client/local"
 	tsapi "tailscale.com/client/tailscale/v2"
-	"tailscale.com/tailcfg"
 	"tailscale.com/util/set"
 )
 
@@ -238,43 +237,20 @@ func (s *Server) RegistryHandler() http.Handler {
 	return s.registry
 }
 
-func overlaps(a, b []string) bool {
-	for _, x := range a {
-		if slices.Contains(b, x) {
-			return true
-		}
-	}
-	return false
-}
-
 var errUnauthorized = fmt.Errorf("unauthorized connection")
 
-func validateCallerIdentity(serverTags []string, serverUser tailcfg.UserID, callerTags []string, callerUser tailcfg.UserID) error {
-	serverTagged := len(serverTags) > 0
-	callerTagged := len(callerTags) > 0
-	if callerTagged {
-		if serverTagged && overlaps(callerTags, serverTags) {
-			return nil
-		}
-		return errUnauthorized
+func validateCatchNodeIdentity(serverTags []string) error {
+	if len(serverTags) == 0 {
+		return fmt.Errorf("%w: catch tsnet node must be tagged", errUnauthorized)
 	}
-	if serverTagged {
-		return nil
-	}
-	if serverUser == callerUser {
-		return nil
-	}
-	return errUnauthorized
+	return nil
 }
 
 // verifyCaller checks if the caller is authorized to connect to the server.
 //
-// - If the server is tagged and the caller is tagged, it checks if the tags
-// overlap.
-// - If the server is tagged and the caller is not tagged, it allows the
-// connection.
-// - If the server is not tagged, it checks if the caller is the same user as the
-// server.
+// Catch is infrastructure, so its own tsnet node must be tagged. Once a tagged
+// catch node receives a Tailscale connection, tailnet ACLs are the source of
+// truth for caller authorization.
 func (s *Server) verifyCaller(ctx context.Context, remoteAddr string) error {
 	if s.cfg.AuthorizeFunc != nil {
 		return s.cfg.AuthorizeFunc(ctx, remoteAddr)
@@ -284,15 +260,11 @@ func (s *Server) verifyCaller(ctx context.Context, remoteAddr string) error {
 	if err != nil {
 		return fmt.Errorf("failed to get local client status: %v", err)
 	}
-	who, err := lc.WhoIs(ctx, remoteAddr)
-	if err != nil {
-		return fmt.Errorf("failed to get whois: %v", err)
-	}
 	var selfTags []string
 	if st.Self.IsTagged() {
 		selfTags = st.Self.Tags.AsSlice()
 	}
-	return validateCallerIdentity(selfTags, st.Self.UserID, who.Node.Tags, who.Node.User)
+	return validateCatchNodeIdentity(selfTags)
 }
 
 func (s *Server) dockerComposeService(sn string) (*svc.DockerComposeService, error) {

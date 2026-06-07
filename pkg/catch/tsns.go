@@ -32,7 +32,10 @@ import (
 
 const tailscalePackageBaseURL = "https://pkgs.tailscale.com"
 
-var tailscaleHTTPClient = http.DefaultClient
+var (
+	tailscaleHTTPClient        = http.DefaultClient
+	generateTailscaleAuthKeyFn = generateTailscaleAuthKey
+)
 
 type tailscaleDownload struct {
 	version string
@@ -235,7 +238,7 @@ func generateTailscaleAuthKey(ctx context.Context, tags []string) (string, error
 }
 
 func (s *Server) getTailscaleAuthKey(ctx context.Context, tags []string) (string, error) {
-	return generateTailscaleAuthKey(ctx, tags)
+	return generateTailscaleAuthKeyFn(ctx, tags)
 }
 
 // installTS installs a Tailscale service. If runInNetNS is empty, it runs
@@ -295,7 +298,11 @@ func (s *Server) resolveTailscaleAuthKey(tsNet *db.TailscaleNetwork, tsAuthKey s
 	if tsAuthKey != "" {
 		return tsAuthKey, nil
 	}
-	return s.getTailscaleAuthKey(context.TODO(), tsNet.Tags)
+	key, err := s.getTailscaleAuthKey(context.TODO(), tsNet.Tags)
+	if err != nil {
+		return "", fmt.Errorf("failed to create Tailscale auth key for tags %s: %w; configure Tailscale tagOwners so catch's OAuth client can assign these service tags, then rerun yeet tailscale --setup if the OAuth client secret changed; see https://yeetrun.com/docs/concepts/tailscale", strings.Join(tsNet.Tags, ","), err)
+	}
+	return key, nil
 }
 
 func writeTailscaleEnv(serviceTSDir string) (string, error) {

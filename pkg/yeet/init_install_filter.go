@@ -244,6 +244,9 @@ func isImportantInitLine(msg string) bool {
 	if strings.Contains(msg, "login.tailscale.com") {
 		return true
 	}
+	if strings.Contains(msg, "https://yeetrun.com/docs/concepts/tailscale") {
+		return true
+	}
 	if strings.Contains(strings.ToLower(msg), "failed") || strings.Contains(strings.ToLower(msg), "error") {
 		return true
 	}

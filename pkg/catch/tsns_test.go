@@ -334,6 +334,33 @@ func TestResolveTailscaleAuthKeyUsesProvidedKey(t *testing.T) {
 	}
 }
 
+func TestResolveTailscaleAuthKeyAddsPolicyGuidance(t *testing.T) {
+	old := generateTailscaleAuthKeyFn
+	generateTailscaleAuthKeyFn = func(context.Context, []string) (string, error) {
+		return "", errors.New("tailscale api: tag not owned")
+	}
+	t.Cleanup(func() {
+		generateTailscaleAuthKeyFn = old
+	})
+
+	server := newTestServer(t)
+	_, err := server.resolveTailscaleAuthKey(&db.TailscaleNetwork{Tags: []string{"tag:app"}}, "")
+	if err == nil {
+		t.Fatal("resolveTailscaleAuthKey error = nil, want policy guidance")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"tagOwners",
+		"tag:app",
+		"yeet tailscale --setup",
+		"https://yeetrun.com/docs/concepts/tailscale",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("policy guidance missing %q:\n%s", want, msg)
+		}
+	}
+}
+
 func TestWriteTailscaleConfigWithoutExitNode(t *testing.T) {
 	path, err := writeTailscaleConfig(t.TempDir(), "svc", "tskey-auth-test", "")
 	if err != nil {

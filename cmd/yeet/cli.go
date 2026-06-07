@@ -130,12 +130,13 @@ func buildHelpConfig() yargs.HelpConfig {
 	}
 	subcommands["init"] = yargs.SubCommandInfo{
 		Name:        "init",
-		Description: "Install catch on a remote host (local build or GitHub release)",
+		Description: "Install catch on a remote host (interactive Tailscale setup when needed)",
 		Usage:       "[--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]",
 		Examples: []string{
-			"yeet init --install-docker root@<machine-host>",
-			"yeet init --install-docker --install-vm-tools --ts-auth-key=<key> root@<machine-host>",
 			"yeet init root@<machine-host>",
+			"yeet init --install-docker root@<machine-host>",
+			"yeet init --install-docker --install-vm-tools root@<machine-host>",
+			"yeet init --ts-auth-key=<key> root@<machine-host>",
 			"yeet init",
 		},
 	}

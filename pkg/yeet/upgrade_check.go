@@ -142,9 +142,6 @@ func fetchUpgradeLatest(ctx context.Context, channel buildinfo.Channel, now time
 	if nightly {
 		entry = cache.LatestNightly
 	}
-	if entry.fresh(now, updateCheckCacheTTL) {
-		return entry, nil
-	}
 	if err := ctx.Err(); err != nil {
 		if entry.Tag != "" {
 			return entry, nil
