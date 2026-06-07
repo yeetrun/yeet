@@ -12,7 +12,7 @@ import (
 func TestVMKernelBootArgsIncludesInitAndDHCPForLAN(t *testing.T) {
 	network := newVMNetworkPlan("devbox", []string{"lan"}, vmNetworkInputs{LANParent: "br0", LANParentIsBridge: true})
 
-	got, err := vmKernelBootArgs("devbox", network)
+	got, err := vmKernelBootArgs("devbox", network, vmImageManifest{})
 	if err != nil {
 		t.Fatalf("vmKernelBootArgs: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestVMKernelBootArgsIncludesInitAndDHCPForLAN(t *testing.T) {
 func TestVMKernelBootArgsIncludesStaticSvcIP(t *testing.T) {
 	network := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 
-	got, err := vmKernelBootArgs("devbox", network)
+	got, err := vmKernelBootArgs("devbox", network, vmImageManifest{})
 	if err != nil {
 		t.Fatalf("vmKernelBootArgs: %v", err)
 	}
@@ -52,10 +52,36 @@ func TestVMKernelBootArgsIncludesStaticSvcIP(t *testing.T) {
 func TestVMKernelBootArgsRejectsUnsafeServiceName(t *testing.T) {
 	network := newVMNetworkPlan("bad name", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 
-	_, err := vmKernelBootArgs("bad name", network)
+	_, err := vmKernelBootArgs("bad name", network, vmImageManifest{})
 
 	if err == nil || !strings.Contains(err.Error(), "invalid VM hostname") {
 		t.Fatalf("vmKernelBootArgs error = %v, want invalid hostname", err)
+	}
+}
+
+func TestVMKernelBootArgsIncludesGuestSystemInit(t *testing.T) {
+	network := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+	manifest := vmImageManifest{
+		GuestInit:       vmGuestInitPath,
+		GuestSystemInit: "/run/current-system/init",
+	}
+
+	got, err := vmKernelBootArgs("devbox", network, manifest)
+	if err != nil {
+		t.Fatalf("vmKernelBootArgs: %v", err)
+	}
+	if !strings.Contains(got, "yeet.system_init=/run/current-system/init") {
+		t.Fatalf("boot args missing NixOS system init: %s", got)
+	}
+}
+
+func TestVMKernelBootArgsRejectsUnsafeGuestSystemInit(t *testing.T) {
+	network := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+
+	_, err := vmKernelBootArgs("devbox", network, vmImageManifest{GuestSystemInit: "/run/current-system/../init"})
+
+	if err == nil || !strings.Contains(err.Error(), "invalid VM guest system init path") {
+		t.Fatalf("vmKernelBootArgs error = %v, want invalid guest system init", err)
 	}
 }
 

@@ -89,7 +89,7 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 		return err
 	}
 	donePlan := e.traceBlock("vm plan")
-	plan, err := e.newVMProvisionPlan(flags, inputs.ServiceRoot, inputs.Shape, inputs.Image, svcNet, inputs.SSHKey)
+	plan, err := e.newVMProvisionPlan(flags, payload, inputs.ServiceRoot, inputs.Shape, inputs.Image, svcNet, inputs.SSHKey)
 	donePlan()
 	if err != nil {
 		return err
@@ -660,11 +660,20 @@ func validateVMShape(shape vmShape) error {
 	}
 }
 
-func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, resolvedRoot resolvedServiceRoot, shape vmShape, image vmImageAsset, svcNet *db.SvcNetwork, sshKey string) (vmProvisionPlan, error) {
+func vmGuestUserForImage(payload string, manifest vmImageManifest) string {
+	fallback := "ubuntu"
+	if source, err := resolveVMImagePayload(payload); err == nil && source.Official != nil {
+		fallback = source.Official.DefaultUser
+	}
+	return manifest.DefaultUserOr(fallback)
+}
+
+func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resolvedRoot resolvedServiceRoot, shape vmShape, image vmImageAsset, svcNet *db.SvcNetwork, sshKey string) (vmProvisionPlan, error) {
 	networkPlan, err := e.vmNetworkPlanFromFlags(flags, svcNet)
 	if err != nil {
 		return vmProvisionPlan{}, err
 	}
+	guestUser := vmGuestUserForImage(payload, image.Manifest)
 
 	runDir := serviceRunDirForRoot(resolvedRoot.Root)
 	binDir := serviceBinDirForRoot(resolvedRoot.Root)
@@ -695,7 +704,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, resolvedRoot resolved
 	fastBoot := vmImageSupportsFastBoot(image.Manifest)
 	bootArgs := vmLegacyKernelBootArgs
 	if fastBoot {
-		bootArgs, err = vmKernelBootArgs(e.sn, networkPlan)
+		bootArgs, err = vmKernelBootArgs(e.sn, networkPlan, image.Manifest)
 		if err != nil {
 			return vmProvisionPlan{}, err
 		}
@@ -740,7 +749,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, resolvedRoot resolved
 		DiskPath:               diskPath,
 		Network:                networkPlan,
 		SvcNetwork:             svcNet,
-		Metadata:               vmMetadataConfig{Hostname: e.sn, User: "ubuntu", SSHKey: sshKey, Networks: networkPlan.MetadataNetworks(), FastBoot: fastBoot, HostKeyDir: filepath.Join(resolvedRoot.Root, "metadata", "ssh-host-keys")},
+		Metadata:               vmMetadataConfig{Hostname: e.sn, User: guestUser, SSHKey: sshKey, Networks: networkPlan.MetadataNetworks(), FastBoot: fastBoot, HostKeyDir: filepath.Join(resolvedRoot.Root, "metadata", "ssh-host-keys")},
 		FirecrackerConfigPath:  firecrackerPath,
 		FirecrackerConfig:      firecrackerConfig,
 		SystemdUnitStagePath:   filepath.Join(binDir, unitName),
@@ -835,7 +844,7 @@ func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string) erro
 				Path:    plan.DiskPath,
 			},
 			Networks:   plan.Network.DBNetworks(),
-			SSH:        db.VMSSHConfig{User: "ubuntu"},
+			SSH:        db.VMSSHConfig{User: plan.Metadata.User},
 			Console:    db.VMConsoleConfig{SocketPath: plan.SerialSocket, LogPath: plan.SerialLog},
 			Sockets:    db.VMSocketConfig{APISocketPath: plan.APISocket},
 			PIDFile:    plan.PIDFile,

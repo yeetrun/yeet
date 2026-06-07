@@ -399,13 +399,25 @@ func (p vmSettingsPlan) renderFirecrackerConfig(cfg firecrackerConfig, fastBoot 
 		cfg.Drives[0].PathOnHost = p.OldVM.Disk.Path
 	}
 	if fastBoot {
-		bootArgs, err := vmKernelBootArgs(p.Service, p.NewNetwork)
+		bootArgs, err := vmKernelBootArgs(p.Service, p.NewNetwork, vmImageManifest{
+			GuestInit:       vmGuestInitPath,
+			GuestSystemInit: guestSystemInitFromBootArgs(cfg.BootSource.BootArgs),
+		})
 		if err != nil {
 			return nil, err
 		}
 		cfg.BootSource.BootArgs = bootArgs
 	}
 	return renderFirecrackerConfig(cfg)
+}
+
+func guestSystemInitFromBootArgs(args string) string {
+	for _, field := range strings.Fields(args) {
+		if value, ok := strings.CutPrefix(field, "yeet.system_init="); ok {
+			return value
+		}
+	}
+	return ""
 }
 
 func vmMetadataForSettings(root, service string, vm db.VMConfig, network vmNetworkPlan, fastBoot bool) (vmMetadataConfig, error) {

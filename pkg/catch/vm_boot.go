@@ -13,7 +13,7 @@ import (
 const vmGuestInitPath = "/usr/local/lib/yeet-vm/yeet-init"
 const vmLegacyKernelBootArgs = "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
 
-func vmKernelBootArgs(service string, network vmNetworkPlan) (string, error) {
+func vmKernelBootArgs(service string, network vmNetworkPlan, manifest vmImageManifest) (string, error) {
 	if err := validateVMKernelBootHostname(service); err != nil {
 		return "", err
 	}
@@ -22,6 +22,12 @@ func vmKernelBootArgs(service string, network vmNetworkPlan) (string, error) {
 		"reboot=k",
 		"panic=1",
 		"init=" + vmGuestInitPath,
+	}
+	if systemInit := manifest.GuestSystemInitOr(""); systemInit != "" {
+		if err := validateVMGuestSystemInit(systemInit); err != nil {
+			return "", err
+		}
+		args = append(args, "yeet.system_init="+systemInit)
 	}
 	if ipArg := vmKernelIPArg(service, network); ipArg != "" {
 		args = append(args, ipArg)
@@ -38,6 +44,17 @@ func vmKernelBootArgs(service string, network vmNetworkPlan) (string, error) {
 func validateVMKernelBootHostname(service string) error {
 	if !vmHostnamePattern.MatchString(service) || strings.Contains(service, "..") {
 		return fmt.Errorf("invalid VM hostname %q for kernel boot args", service)
+	}
+	return nil
+}
+
+func validateVMGuestSystemInit(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	if !strings.HasPrefix(path, "/") || strings.ContainsAny(path, " \t\r\n\x00") || strings.Contains(path, "..") {
+		return fmt.Errorf("invalid VM guest system init path %q", path)
 	}
 	return nil
 }
