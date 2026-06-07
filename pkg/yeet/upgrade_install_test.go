@@ -20,7 +20,7 @@ import (
 )
 
 func TestLocalUpgradePlanRejectsDevBuild(t *testing.T) {
-	plan, err := localUpgradePlan(buildinfo.Info{Version: "abc123456", Channel: buildinfo.ChannelDev}, releaseCacheEntry{Tag: "v0.5.13"})
+	plan, err := localUpgradePlan(buildinfo.Info{Version: "abc123456", Channel: buildinfo.ChannelDev}, releaseCacheEntry{Tag: "v0.5.13"}, false)
 	if err != nil {
 		t.Fatalf("localUpgradePlan error: %v", err)
 	}
@@ -29,8 +29,18 @@ func TestLocalUpgradePlanRejectsDevBuild(t *testing.T) {
 	}
 }
 
+func TestLocalUpgradePlanForceUpdatesDevBuild(t *testing.T) {
+	plan, err := localUpgradePlan(buildinfo.Info{Version: "abc123456", Channel: buildinfo.ChannelDev}, releaseCacheEntry{Tag: "v0.5.13"}, true)
+	if err != nil {
+		t.Fatalf("localUpgradePlan error: %v", err)
+	}
+	if plan.Action != localUpgradeActionUpdate {
+		t.Fatalf("plan = %#v, want update", plan)
+	}
+}
+
 func TestLocalUpgradePlanUpdatesStableBehind(t *testing.T) {
-	plan, err := localUpgradePlan(buildinfo.Info{Version: "v0.5.10", Channel: buildinfo.ChannelStable}, releaseCacheEntry{Tag: "v0.5.13"})
+	plan, err := localUpgradePlan(buildinfo.Info{Version: "v0.5.10", Channel: buildinfo.ChannelStable}, releaseCacheEntry{Tag: "v0.5.13"}, false)
 	if err != nil {
 		t.Fatalf("localUpgradePlan error: %v", err)
 	}
@@ -60,9 +70,12 @@ func TestUpgradeLocalBinaryDownloadsAndReplaces(t *testing.T) {
 	currentExecutableFn = func() (string, error) {
 		return targetPath, nil
 	}
-	resolveYeetReleaseAssetFn = func(goos, goarch string, nightly bool) (string, string, string, string, error) {
+	resolveYeetReleaseAssetFn = func(goos, goarch string, nightly bool, version string) (string, string, string, string, error) {
 		if nightly {
 			t.Fatal("stable release should not resolve nightly asset")
+		}
+		if version != "v0.5.13" {
+			t.Fatalf("version = %q, want v0.5.13", version)
 		}
 		return "yeet-darwin-arm64.tar.gz", "https://example.com/yeet.tgz", "https://example.com/yeet.sha256", "v0.5.13", nil
 	}

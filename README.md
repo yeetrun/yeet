@@ -66,6 +66,20 @@ yeet upgrade check --all
 yeet upgrade --all
 ```
 
+To reinstall the latest public release even when a component is already current,
+newer, or currently a source/dev build:
+
+```bash
+yeet upgrade --all --force
+```
+
+To install a specific public release instead of latest, select the tag
+explicitly. Use `--force` when that would reinstall or downgrade a component:
+
+```bash
+yeet upgrade --all --version v0.6.1 --force
+```
+
 ## Bootstrap a Host
 
 Start with a Linux host that has systemd and SSH access. Docker can be

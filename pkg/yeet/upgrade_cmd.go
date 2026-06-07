@@ -41,7 +41,13 @@ func handleUpgrade(ctx context.Context, args []string, stdout io.Writer, stderr 
 	cfgLoc, _ := loadProjectConfigFromCwd()
 	_, hasHostOverride := HostOverride()
 	hosts := upgradeKnownHosts(cfgLoc, flags.All, hasHostOverride)
-	report := buildUpgradeReportFn(ctx, upgradeCheckRequest{Local: local, Hosts: hosts, Now: time.Now()})
+	report := buildUpgradeReportFn(ctx, upgradeCheckRequest{
+		Local:         local,
+		Hosts:         hosts,
+		Now:           time.Now(),
+		Force:         flags.Force,
+		TargetVersion: flags.Version,
+	})
 	if checkOnly {
 		if flags.JSON {
 			return json.NewEncoder(stdout).Encode(report)
@@ -53,7 +59,11 @@ func handleUpgrade(ctx context.Context, args []string, stdout io.Writer, stderr 
 
 func renderUpgradeReport(w io.Writer, report upgradeReport) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "COMPONENT\tCURRENT\tLATEST\tSTATUS"); err != nil {
+	versionHeader := "LATEST"
+	if upgradeReportUsesTarget(report) {
+		versionHeader = "TARGET"
+	}
+	if _, err := fmt.Fprintf(tw, "COMPONENT\tCURRENT\t%s\tSTATUS\n", versionHeader); err != nil {
 		return err
 	}
 	if err := renderUpgradeRow(tw, report.Local); err != nil {
@@ -65,6 +75,10 @@ func renderUpgradeReport(w io.Writer, report upgradeReport) error {
 		}
 	}
 	return tw.Flush()
+}
+
+func upgradeReportUsesTarget(report upgradeReport) bool {
+	return report.Force || strings.TrimSpace(report.TargetVersion) != ""
 }
 
 func renderUpgradeRow(w io.Writer, row upgradeComponent) error {
@@ -120,20 +134,24 @@ func confirmUpgradeIfNeeded(stdin io.Reader, stdout io.Writer, stderr io.Writer,
 }
 
 func upgradeReportHasUpdates(report upgradeReport) bool {
-	if report.Local.Status == upgradeStatusUpdateAvailable {
+	if upgradeRowActionable(report.Local) {
 		return true
 	}
 	for _, row := range report.Catch {
-		if row.Status == upgradeStatusUpdateAvailable {
+		if upgradeRowActionable(row) {
 			return true
 		}
 	}
 	return false
 }
 
+func upgradeRowActionable(row upgradeComponent) bool {
+	return row.Status == upgradeStatusUpdateAvailable || row.Status == upgradeStatusReinstall
+}
+
 func upgradeLocalFromReport(flags cli.UpgradeFlags, report upgradeReport) error {
-	if report.Local.Status == upgradeStatusUpdateAvailable {
-		if err := upgradeLocalBinaryFn(buildinfo.Current(), report.Latest, flags.Yes); err != nil {
+	if upgradeRowActionable(report.Local) {
+		if err := upgradeLocalBinaryFn(buildinfo.Current(), report.Latest, flags.Force); err != nil {
 			return err
 		}
 	}
@@ -142,7 +160,7 @@ func upgradeLocalFromReport(flags cli.UpgradeFlags, report upgradeReport) error 
 
 func upgradeCatchFromReport(ctx context.Context, report upgradeReport) error {
 	for _, row := range report.Catch {
-		if row.Status != upgradeStatusUpdateAvailable {
+		if !upgradeRowActionable(row) {
 			continue
 		}
 		target, err := catchInstallTarget(row)
@@ -150,7 +168,7 @@ func upgradeCatchFromReport(ctx context.Context, report upgradeReport) error {
 			return err
 		}
 		if err := withTemporaryHost(row.Host, func() error {
-			return initCatchFn(target, initOptions{fromGithub: true})
+			return initCatchFn(target, initOptions{fromGithub: true, releaseVersion: report.Latest.Tag})
 		}); err != nil {
 			return fmt.Errorf("upgrade catch@%s: %w", row.Host, err)
 		}
@@ -162,19 +180,26 @@ func confirmUpgradePlan(stdin io.Reader, stdout io.Writer, report upgradeReport)
 	if _, err := fmt.Fprintln(stdout, "Upgrade plan:"); err != nil {
 		return false, err
 	}
-	if report.Local.Status == upgradeStatusUpdateAvailable {
-		if _, err := fmt.Fprintf(stdout, "  yeet: %s -> %s\n", report.Local.Current, report.Local.Latest); err != nil {
+	if upgradeRowActionable(report.Local) {
+		if _, err := fmt.Fprintf(stdout, "  yeet: %s -> %s%s\n", report.Local.Current, report.Local.Latest, upgradePlanStatusSuffix(report.Local)); err != nil {
 			return false, err
 		}
 	}
 	for _, row := range report.Catch {
-		if row.Status == upgradeStatusUpdateAvailable {
-			if _, err := fmt.Fprintf(stdout, "  catch@%s: %s -> %s\n", row.Host, row.Current, row.Latest); err != nil {
+		if upgradeRowActionable(row) {
+			if _, err := fmt.Fprintf(stdout, "  catch@%s: %s -> %s%s\n", row.Host, row.Current, row.Latest, upgradePlanStatusSuffix(row)); err != nil {
 				return false, err
 			}
 		}
 	}
 	return cmdutil.Confirm(stdin, stdout, "Proceed?")
+}
+
+func upgradePlanStatusSuffix(row upgradeComponent) string {
+	if row.Status == upgradeStatusReinstall {
+		return " (reinstall release)"
+	}
+	return ""
 }
 
 func catchInstallTarget(row upgradeComponent) (string, error) {

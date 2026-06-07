@@ -38,7 +38,14 @@ func fetchGitHubRelease(nightly bool) (githubRelease, error) {
 	return fetchGitHubReleaseFromURL(githubReleaseURL(nightly), &http.Client{Timeout: 30 * time.Second})
 }
 
-var fetchGitHubReleaseFn = fetchGitHubRelease
+func fetchGitHubReleaseByTag(tag string) (githubRelease, error) {
+	return fetchGitHubReleaseFromURL(githubReleaseTagURL(tag), &http.Client{Timeout: 30 * time.Second})
+}
+
+var (
+	fetchGitHubReleaseFn      = fetchGitHubRelease
+	fetchGitHubReleaseByTagFn = fetchGitHubReleaseByTag
+)
 
 func githubReleaseURL(nightly bool) string {
 	path := fmt.Sprintf("/repos/%s/%s/releases/latest", githubOwner, githubRepo)
@@ -46,6 +53,18 @@ func githubReleaseURL(nightly bool) string {
 		path = fmt.Sprintf("/repos/%s/%s/releases/tags/nightly", githubOwner, githubRepo)
 	}
 	return githubAPIBase + path
+}
+
+func githubReleaseTagURL(tag string) string {
+	return githubAPIBase + fmt.Sprintf("/repos/%s/%s/releases/tags/%s", githubOwner, githubRepo, strings.TrimSpace(tag))
+}
+
+func fetchGitHubReleaseForVersion(nightly bool, version string) (githubRelease, error) {
+	version = strings.TrimSpace(version)
+	if version != "" {
+		return fetchGitHubReleaseByTagFn(version)
+	}
+	return fetchGitHubReleaseFn(nightly)
 }
 
 func fetchGitHubReleaseFromURL(url string, client *http.Client) (rel githubRelease, err error) {

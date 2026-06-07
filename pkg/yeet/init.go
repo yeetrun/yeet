@@ -49,6 +49,7 @@ type initOptions struct {
 	installVMTools bool
 	tsAuthKey      string
 	tsClientSecret string
+	releaseVersion string
 }
 
 var initCatchFn = initCatch
@@ -238,7 +239,7 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 	}
 
 	if source.useGithub {
-		if err := downloadInitCatchFn(ui, userAtRemote, systemName, goarch, opts.nightly); err != nil {
+		if err := downloadInitCatchFn(ui, userAtRemote, systemName, goarch, opts.nightly, opts.releaseVersion); err != nil {
 			return err
 		}
 	} else if err := buildAndUploadInitCatchFn(ui, userAtRemote, systemName, goarch, source); err != nil {
@@ -382,9 +383,9 @@ func remoteDockerInstalled(userAtRemote string) (bool, error) {
 	}
 }
 
-func downloadInitCatch(ui *initUI, userAtRemote, systemName, goarch string, nightly bool) error {
+func downloadInitCatch(ui *initUI, userAtRemote, systemName, goarch string, nightly bool, version string) error {
 	ui.StartStep("Download catch")
-	assetName, assetURL, shaURL, tag, err := resolveCatchReleaseAsset(systemName, goarch, nightly)
+	assetName, assetURL, shaURL, tag, err := resolveCatchReleaseAsset(systemName, goarch, nightly, version)
 	if err != nil {
 		ui.FailStep(err.Error())
 		return err

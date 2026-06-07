@@ -408,6 +408,14 @@ yeet upgrade check --all
 yeet upgrade --all
 ```
 
+```
+yeet upgrade --all --force
+```
+
+```
+yeet upgrade --all --version v0.6.1 --force
+```
+
 Get detailed help: `yeet upgrade --help-llm`
 
 ### `version`
@@ -1943,7 +1951,7 @@ Check for and install yeet/catch updates
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] upgrade [OPTIONS] [check] [--all] [--host=catch-a] [--json] [--yes]
+yeet [GLOBAL_OPTIONS] upgrade [OPTIONS] [check] [--all] [--host=catch-a] [--json] [--yes] [--force] [--version=vX.Y.Z]
 ```
 
 ## Global Options
@@ -1990,6 +1998,14 @@ yeet upgrade check --all
 
 ```
 yeet upgrade --all
+```
+
+```
+yeet upgrade --all --force
+```
+
+```
+yeet upgrade --all --version v0.6.1 --force
 ```
 ````
 

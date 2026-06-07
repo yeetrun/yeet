@@ -142,6 +142,7 @@ func TestParseUpgrade(t *testing.T) {
 		{name: "check all json", args: []string{"check", "--all", "--json"}, want: UpgradeFlags{All: true, JSON: true}, wantPos: []string{"check"}},
 		{name: "host yes", args: []string{"--host", "edge-a", "--yes"}, want: UpgradeFlags{Host: "edge-a", Yes: true}},
 		{name: "check flag alias", args: []string{"--check"}, want: UpgradeFlags{Check: true}},
+		{name: "force specific version", args: []string{"--all", "--force", "--version", "v0.6.1"}, want: UpgradeFlags{All: true, Force: true, Version: "v0.6.1"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

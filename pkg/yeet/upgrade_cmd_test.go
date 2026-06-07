@@ -72,6 +72,31 @@ func TestRenderUpgradeReportTableKeepsDevRowsCompact(t *testing.T) {
 	}
 }
 
+func TestRenderUpgradeReportUsesTargetForForcedVersion(t *testing.T) {
+	report := upgradeReport{
+		Latest:        releaseCacheEntry{Tag: "v0.6.1"},
+		Force:         true,
+		TargetVersion: "v0.6.1",
+		Local: upgradeComponent{
+			Name:    "yeet",
+			Current: "f6aeae51f+dirty",
+			Latest:  "v0.6.1",
+			Status:  upgradeStatusReinstall,
+		},
+	}
+	var out bytes.Buffer
+	if err := renderUpgradeReport(&out, report); err != nil {
+		t.Fatalf("renderUpgradeReport: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "TARGET") || strings.Contains(got, "LATEST") {
+		t.Fatalf("output should use TARGET header:\n%s", got)
+	}
+	if !strings.Contains(got, "reinstall release") {
+		t.Fatalf("output missing reinstall status:\n%s", got)
+	}
+}
+
 func TestHandleUpgradeCheckJSON(t *testing.T) {
 	old := buildUpgradeReportFn
 	t.Cleanup(func() { buildUpgradeReportFn = old })
@@ -156,15 +181,48 @@ func TestConfirmUpgradeIfNeededSkipsEmptyPlan(t *testing.T) {
 	}
 }
 
+func TestConfirmUpgradeIfNeededShowsForcedReinstallPlan(t *testing.T) {
+	report := upgradeReport{
+		Latest: releaseCacheEntry{Tag: "v0.6.2"},
+		Force:  true,
+		Local:  upgradeComponent{Name: "yeet", Current: "f6aeae51f+dirty", Latest: "v0.6.2", Status: upgradeStatusReinstall},
+		Catch: []upgradeComponent{
+			{Name: "catch", Host: "edge-a", Current: "47ee0875a+dirty", Latest: "v0.6.2", Status: upgradeStatusReinstall},
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	proceed, err := confirmUpgradeIfNeeded(strings.NewReader("y\n"), &stdout, &stderr, cli.UpgradeFlags{}, report)
+	if err != nil {
+		t.Fatalf("confirmUpgradeIfNeeded: %v", err)
+	}
+	if !proceed {
+		t.Fatal("confirmUpgradeIfNeeded = false, want true")
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"Upgrade plan:",
+		"yeet: f6aeae51f+dirty -> v0.6.2 (reinstall release)",
+		"catch@edge-a: 47ee0875a+dirty -> v0.6.2 (reinstall release)",
+		"Proceed?",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestRunUpgradeUpdatesCatchWithRecordedInstallTarget(t *testing.T) {
 	oldInit := initCatchFn
 	t.Cleanup(func() { initCatchFn = oldInit })
 	var target string
+	var releaseVersion string
 	initCatchFn = func(userAtRemote string, opts initOptions) error {
 		target = userAtRemote
 		if !opts.fromGithub {
 			t.Fatalf("opts = %#v, want from github", opts)
 		}
+		releaseVersion = opts.releaseVersion
 		return nil
 	}
 	report := upgradeReport{
@@ -179,5 +237,31 @@ func TestRunUpgradeUpdatesCatchWithRecordedInstallTarget(t *testing.T) {
 	}
 	if target != "root@machine-a" {
 		t.Fatalf("target = %q", target)
+	}
+	if releaseVersion != "v0.5.13" {
+		t.Fatalf("releaseVersion = %q, want v0.5.13", releaseVersion)
+	}
+}
+
+func TestUpgradeLocalFromReportPassesForce(t *testing.T) {
+	oldUpgrade := upgradeLocalBinaryFn
+	t.Cleanup(func() { upgradeLocalBinaryFn = oldUpgrade })
+	var gotForce bool
+	var gotLatest releaseCacheEntry
+	upgradeLocalBinaryFn = func(_ buildinfo.Info, latest releaseCacheEntry, force bool) error {
+		gotLatest = latest
+		gotForce = force
+		return nil
+	}
+
+	report := upgradeReport{
+		Latest: releaseCacheEntry{Tag: "v0.6.2"},
+		Local:  upgradeComponent{Name: "yeet", Current: "dev", Latest: "v0.6.2", Status: upgradeStatusReinstall},
+	}
+	if err := upgradeLocalFromReport(cli.UpgradeFlags{Force: true}, report); err != nil {
+		t.Fatalf("upgradeLocalFromReport: %v", err)
+	}
+	if !gotForce || gotLatest.Tag != "v0.6.2" {
+		t.Fatalf("gotForce=%v gotLatest=%#v", gotForce, gotLatest)
 	}
 }
