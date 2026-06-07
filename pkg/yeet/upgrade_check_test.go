@@ -25,14 +25,13 @@ func TestUpgradeKnownHostsUsesCurrentHostWithoutAll(t *testing.T) {
 	}
 }
 
-func TestFetchUpgradeLatestUsesFreshCache(t *testing.T) {
+func TestFetchUpgradeLatestRefreshesFreshCache(t *testing.T) {
 	restoreCache := stubUpdateCheckCacheFile(t)
 	defer restoreCache()
 	oldFetch := fetchGitHubReleaseFn
 	t.Cleanup(func() { fetchGitHubReleaseFn = oldFetch })
 	fetchGitHubReleaseFn = func(nightly bool) (githubRelease, error) {
-		t.Fatal("fresh cache should avoid github fetch")
-		return githubRelease{}, nil
+		return githubRelease{TagName: "v0.6.0", PublishedAt: "2026-06-07T12:24:07Z"}, nil
 	}
 
 	now := time.Unix(100, 0)
@@ -46,8 +45,12 @@ func TestFetchUpgradeLatestUsesFreshCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetch latest: %v", err)
 	}
-	if got.Tag != "v0.5.13" {
-		t.Fatalf("latest tag = %q, want v0.5.13", got.Tag)
+	if got.Tag != "v0.6.0" {
+		t.Fatalf("latest tag = %q, want v0.6.0", got.Tag)
+	}
+	cache := readUpdateCheckCache(updateCheckCacheFile)
+	if cache.LatestStable.Tag != "v0.6.0" || !cache.LatestStable.CheckedAt.Equal(now) {
+		t.Fatalf("cache latest = %#v, want refreshed stable", cache.LatestStable)
 	}
 }
 

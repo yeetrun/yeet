@@ -124,20 +124,24 @@ Get detailed help: `yeet info --help-llm`
 
 ### `init`
 
-Install catch on a remote host (local build or GitHub release)
+Install catch on a remote host (interactive Tailscale setup when needed)
 
 **Examples**:
+
+```
+yeet init root@<machine-host>
+```
 
 ```
 yeet init --install-docker root@<machine-host>
 ```
 
 ```
-yeet init --install-docker --install-vm-tools --ts-auth-key=<key> root@<machine-host>
+yeet init --install-docker --install-vm-tools root@<machine-host>
 ```
 
 ```
-yeet init root@<machine-host>
+yeet init --ts-auth-key=<key> root@<machine-host>
 ```
 
 ```
@@ -381,6 +385,26 @@ yeet umount data-share
 ```
 
 Get detailed help: `yeet umount --help-llm`
+
+### `upgrade`
+
+Check for and install yeet/catch updates
+
+**Examples**:
+
+```
+yeet upgrade check
+```
+
+```
+yeet upgrade check --all
+```
+
+```
+yeet upgrade --all
+```
+
+Get detailed help: `yeet upgrade --help-llm`
 
 ### `version`
 
@@ -865,7 +889,7 @@ Progress output (auto|tty|plain|quiet)
 ````
 # yeet init
 
-Install catch on a remote host (local build or GitHub release)
+Install catch on a remote host (interactive Tailscale setup when needed)
 
 ## Usage
 
@@ -908,15 +932,19 @@ Progress output (auto|tty|plain|quiet)
 ## Examples
 
 ```
+yeet init root@<machine-host>
+```
+
+```
 yeet init --install-docker root@<machine-host>
 ```
 
 ```
-yeet init --install-docker --install-vm-tools --ts-auth-key=<key> root@<machine-host>
+yeet init --install-docker --install-vm-tools root@<machine-host>
 ```
 
 ```
-yeet init root@<machine-host>
+yeet init --ts-auth-key=<key> root@<machine-host>
 ```
 
 ```
@@ -1894,6 +1922,66 @@ Progress output (auto|tty|plain|quiet)
 
 ```
 yeet umount data-share
+```
+````
+
+## Command: upgrade
+
+````
+# yeet upgrade
+
+Check for and install yeet/catch updates
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] upgrade [OPTIONS] [check] [--all] [--host=catch-a] [--json] [--yes]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet upgrade check
+```
+
+```
+yeet upgrade check --all
+```
+
+```
+yeet upgrade --all
 ```
 ````
 

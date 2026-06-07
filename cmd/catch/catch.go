@@ -27,6 +27,7 @@ import (
 	cdb "github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/dnet"
 	"github.com/yeetrun/yeet/pkg/svc"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 	"tailscale.com/util/must"
 )
@@ -63,21 +64,66 @@ var (
 
 const defaultDockerConfigPath = "/etc/docker/daemon.json"
 
+var errCatchTSNetUntagged = errors.New("catch Tailscale node must be tagged")
+
 // initTSNet initializes and returns a tsnet.Server if tsnetHost is set.
-func initTSNet(dataDir string) *tsnet.Server {
+func initTSNet(dataDir string) (*tsnet.Server, error) {
 	if *tsnetHost == "" {
-		return nil
+		return nil, nil
 	}
 	ts := newTSNetServer(dataDir)
-	st := must.Get(ts.Up(context.Background()))
-	if st.Self != nil && st.Self.DNSName != "" {
-		log.Printf("tsnet assigned DNS name %q", st.Self.DNSName)
-		if warning := tsnetAssignedNameWarning(*tsnetHost, st.Self.DNSName); warning != "" {
-			log.Print(warning)
-		}
+	st, err := ts.Up(context.Background())
+	if err != nil {
+		return nil, err
 	}
-	registerTSNetFallback(ts, st.TailscaleIPs)
-	return ts
+	if err := validateStartedTSNetStatus(ts, st); err != nil {
+		return nil, err
+	}
+	logStartedTSNetStatus(st)
+	registerTSNetFallback(ts, tsnetIPsFromStatus(st))
+	return ts, nil
+}
+
+func validateStartedTSNetStatus(ts closeErrorer, st *ipnstate.Status) error {
+	if err := validateCatchTSNetSelf(tsnetSelfFromStatus(st)); err != nil {
+		if closeErr := ts.Close(); closeErr != nil {
+			log.Printf("warning: failed to close untagged tsnet server: %v", closeErr)
+		}
+		return err
+	}
+	return nil
+}
+
+func validateCatchTSNetSelf(self *ipnstate.PeerStatus) error {
+	if self == nil || !self.IsTagged() {
+		return fmt.Errorf("%w; configure Tailscale tagOwners so the catch node can use a server tag such as tag:catch, then rerun yeet init; for unattended installs pass --ts-auth-key=<key>; see https://yeetrun.com/docs/concepts/tailscale", errCatchTSNetUntagged)
+	}
+	return nil
+}
+
+func logStartedTSNetStatus(st *ipnstate.Status) {
+	self := tsnetSelfFromStatus(st)
+	if self == nil || self.DNSName == "" {
+		return
+	}
+	log.Printf("tsnet assigned DNS name %q", self.DNSName)
+	if warning := tsnetAssignedNameWarning(*tsnetHost, self.DNSName); warning != "" {
+		log.Print(warning)
+	}
+}
+
+func tsnetSelfFromStatus(st *ipnstate.Status) *ipnstate.PeerStatus {
+	if st == nil {
+		return nil
+	}
+	return st.Self
+}
+
+func tsnetIPsFromStatus(st *ipnstate.Status) []netip.Addr {
+	if st == nil {
+		return nil
+	}
+	return st.TailscaleIPs
 }
 
 func newTSNetServer(dataDir string) *tsnet.Server {
@@ -320,7 +366,10 @@ func writeLine(out io.Writer, value string) error {
 
 func runServer(dataDir string, scfg *catch.Config) {
 	// Require tsnet to continue.
-	ts := initTSNet(dataDir)
+	ts, err := initTSNet(dataDir)
+	if err != nil {
+		log.Fatalf("failed to initialize tsnet: %v", err)
+	}
 	if ts == nil {
 		log.Fatal("failed to initialize tsnet")
 	}
@@ -706,7 +755,7 @@ type catchServiceInstaller interface {
 
 type catchInstallDeps struct {
 	writeInstallMeta func(string) error
-	initTSNet        func(string) installTSNet
+	initTSNet        func(string) (installTSNet, error)
 	newInstaller     func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error)
 	executable       func() (string, error)
 	readFile         func(string) ([]byte, error)
@@ -728,7 +777,7 @@ func doInstall(cfg *catch.Config, dataDir string) (err error) {
 func defaultCatchInstallDeps() catchInstallDeps {
 	return catchInstallDeps{
 		writeInstallMeta: writeInstallMeta,
-		initTSNet: func(dataDir string) installTSNet {
+		initTSNet: func(dataDir string) (installTSNet, error) {
 			return initTSNet(dataDir)
 		},
 		newInstaller: newCatchServiceInstaller,
@@ -809,7 +858,10 @@ func recordInstallMetadata(dataDir string, deps catchInstallDeps) {
 }
 
 func startInstallTSNet(dataDir string, deps catchInstallDeps) (installTSNet, error) {
-	ts := deps.initTSNet(dataDir)
+	ts, err := deps.initTSNet(dataDir)
+	if err != nil {
+		return nil, err
+	}
 	if ts == nil {
 		return nil, fmt.Errorf("failed to initialize tsnet")
 	}

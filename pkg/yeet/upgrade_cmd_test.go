@@ -35,6 +35,43 @@ func TestRenderUpgradeReportTable(t *testing.T) {
 	}
 }
 
+func TestRenderUpgradeReportTableKeepsDevRowsCompact(t *testing.T) {
+	report := upgradeReport{
+		Local: upgradeComponent{
+			Name:    "yeet",
+			Current: "abaf5aaa1+dirty",
+			Latest:  "v0.6.0",
+			Status:  upgradeStatusDev,
+			Reason:  "source/dev builds are not self-updated as release binaries",
+		},
+		Catch: []upgradeComponent{
+			{
+				Name:    "catch",
+				Host:    "edge-a",
+				Current: "47ee0875a+dirty",
+				Latest:  "v0.6.0",
+				Status:  upgradeStatusDev,
+				Reason:  "source/dev builds are not self-updated as release binaries",
+			},
+		},
+	}
+	var out bytes.Buffer
+	if err := renderUpgradeReport(&out, report); err != nil {
+		t.Fatalf("renderUpgradeReport: %v", err)
+	}
+	got := out.String()
+	for _, unwanted := range []string{"source/dev builds"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("output contains %q:\n%s", unwanted, got)
+		}
+	}
+	for _, want := range []string{"yeet", "catch@edge-a", "abaf5aaa1+dirty", "47ee0875a+dirty", "dev build", "v0.6.0"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestHandleUpgradeCheckJSON(t *testing.T) {
 	old := buildUpgradeReportFn
 	t.Cleanup(func() { buildUpgradeReportFn = old })
@@ -89,6 +126,33 @@ func TestConfirmUpgradePlanRendersUpdates(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestConfirmUpgradeIfNeededSkipsEmptyPlan(t *testing.T) {
+	report := upgradeReport{
+		Local: upgradeComponent{Name: "yeet", Current: "v0.6.0", Latest: "v0.6.0", Status: upgradeStatusCurrent},
+		Catch: []upgradeComponent{
+			{Name: "catch", Host: "edge-a", Current: "47ee0875a+dirty", Latest: "v0.6.0", Status: upgradeStatusDev},
+		},
+	}
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	proceed, err := confirmUpgradeIfNeeded(strings.NewReader(""), &stdout, &stderr, cli.UpgradeFlags{}, report)
+	if err != nil {
+		t.Fatalf("confirmUpgradeIfNeeded: %v", err)
+	}
+	if proceed {
+		t.Fatal("confirmUpgradeIfNeeded = true, want false")
+	}
+	if strings.Contains(stdout.String(), "Proceed?") || strings.Contains(stdout.String(), "Upgrade plan:") {
+		t.Fatalf("empty plan should not prompt:\nstdout=%q\nstderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "No upgrades available.") {
+		t.Fatalf("stdout = %q, want no-upgrades message", stdout.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
 	}
 }
 

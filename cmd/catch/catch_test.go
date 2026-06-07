@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/catch"
+	"tailscale.com/ipn/ipnstate"
+	"tailscale.com/types/views"
 )
 
 func TestPrepareDataDirsAndNewCatchConfig(t *testing.T) {
@@ -318,9 +320,74 @@ func TestInitTSNetReturnsNilWhenDisabled(t *testing.T) {
 	})
 	*tsnetHost = ""
 
-	if got := initTSNet(t.TempDir()); got != nil {
+	got, err := initTSNet(t.TempDir())
+	if err != nil {
+		t.Fatalf("initTSNet error = %v, want nil", err)
+	}
+	if got != nil {
 		t.Fatalf("initTSNet() = %#v, want nil when tsnet host is empty", got)
 	}
+}
+
+func TestValidateCatchTSNetSelfRequiresTaggedNode(t *testing.T) {
+	if err := validateCatchTSNetSelf(testTSNetSelf("catch.shayne.ts.net.", "tag:catch")); err != nil {
+		t.Fatalf("validateCatchTSNetSelf tagged error = %v, want nil", err)
+	}
+
+	for _, self := range []*ipnstate.PeerStatus{
+		nil,
+		testTSNetSelf("catch.shayne.ts.net."),
+	} {
+		err := validateCatchTSNetSelf(self)
+		if !errors.Is(err, errCatchTSNetUntagged) {
+			t.Fatalf("validateCatchTSNetSelf(%#v) error = %v, want errCatchTSNetUntagged", self, err)
+		}
+	}
+}
+
+func TestValidateCatchTSNetSelfGivesSetupGuidance(t *testing.T) {
+	err := validateCatchTSNetSelf(testTSNetSelf("catch.example.ts.net."))
+	if !errors.Is(err, errCatchTSNetUntagged) {
+		t.Fatalf("validateCatchTSNetSelf error = %v, want errCatchTSNetUntagged", err)
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"tagOwners",
+		"tag:catch",
+		"rerun yeet init",
+		"--ts-auth-key=<key>",
+		"https://yeetrun.com/docs/concepts/tailscale",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("setup guidance missing %q:\n%s", want, msg)
+		}
+	}
+}
+
+func TestValidateStartedTSNetStatusClosesUntaggedServer(t *testing.T) {
+	closer := &recordingCloser{}
+
+	err := validateStartedTSNetStatus(closer, &ipnstate.Status{Self: testTSNetSelf("catch.example.ts.net.")})
+	if !errors.Is(err, errCatchTSNetUntagged) {
+		t.Fatalf("validateStartedTSNetStatus error = %v, want errCatchTSNetUntagged", err)
+	}
+	if !closer.closed {
+		t.Fatal("validateStartedTSNetStatus did not close untagged server")
+	}
+}
+
+type recordingCloser struct {
+	closed bool
+}
+
+func (c *recordingCloser) Close() error {
+	c.closed = true
+	return nil
+}
+
+func testTSNetSelf(dnsName string, tags ...string) *ipnstate.PeerStatus {
+	view := views.SliceOf(tags)
+	return &ipnstate.PeerStatus{DNSName: dnsName, Tags: &view}
 }
 
 func TestTSNetAssignedNameWarning(t *testing.T) {
@@ -769,11 +836,11 @@ func TestDoInstallWritesCurrentExecutableWithGeneratedServiceConfig(t *testing.T
 			metaDir = dir
 			return nil
 		},
-		initTSNet: func(dir string) installTSNet {
+		initTSNet: func(dir string) (installTSNet, error) {
 			if dir != dataDir {
 				t.Fatalf("initTSNet dir = %q, want %q", dir, dataDir)
 			}
-			return ts
+			return ts, nil
 		},
 		newInstaller: func(cfg *catch.Config, installerCfg catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			gotCfg = cfg
@@ -834,7 +901,7 @@ func TestDoInstallExecutableErrorFailsInstaller(t *testing.T) {
 
 	err := doInstallWith(&catch.Config{}, dataDir, catchInstallDeps{
 		writeInstallMeta: func(string) error { return nil },
-		initTSNet:        func(string) installTSNet { return ts },
+		initTSNet:        func(string) (installTSNet, error) { return ts, nil },
 		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			return inst, nil
 		},
@@ -869,7 +936,7 @@ func TestDoInstallRequiresTSNet(t *testing.T) {
 	newInstallerCalled := false
 	err := doInstallWith(&catch.Config{}, t.TempDir(), catchInstallDeps{
 		writeInstallMeta: func(string) error { return nil },
-		initTSNet:        func(string) installTSNet { return nil },
+		initTSNet:        func(string) (installTSNet, error) { return nil, nil },
 		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			newInstallerCalled = true
 			return nil, nil
@@ -899,7 +966,7 @@ func TestDoInstallValidationAndInstallerErrors(t *testing.T) {
 	wantErr := errors.New("installer failed")
 	err := doInstallWith(&catch.Config{}, t.TempDir(), catchInstallDeps{
 		writeInstallMeta: func(string) error { return nil },
-		initTSNet:        func(string) installTSNet { return ts },
+		initTSNet:        func(string) (installTSNet, error) { return ts, nil },
 		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			return nil, wantErr
 		},

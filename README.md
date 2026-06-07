@@ -69,9 +69,12 @@ yeet upgrade --all
 ## Bootstrap a Host
 
 Start with a Linux host that has systemd and SSH access. Docker can be
-installed by `yeet init` on Debian/Ubuntu-style hosts:
+installed by `yeet init` on Debian/Ubuntu-style hosts. A plain first run is
+valid; if the catch Tailscale node is not already authenticated, `yeet init`
+prints the Tailscale login URL and waits for you to finish enrollment:
 
 ```bash
+yeet init root@<machine-host>
 yeet init --install-docker root@<machine-host>
 ```
 
@@ -82,12 +85,20 @@ VM filesystem tools too:
 yeet init --install-docker --install-vm-tools root@<machine-host>
 ```
 
-If catch needs first-time Tailscale enrollment, `yeet init` prints a login URL.
-For unattended bootstrap, pass a Tailscale auth key for the catch node:
+Catch uses an embedded Tailscale node for RPC. That node must end up with a
+tag-based identity, such as `tag:catch`; user-owned catch nodes are rejected.
+If your tailnet policy does not already allow that tag, update `tagOwners` in
+Tailscale before or during first setup.
+
+For unattended bootstrap, create a preauthorized Tailscale auth key that
+assigns the catch server tag and pass it with:
 
 ```bash
 yeet init --install-docker --install-vm-tools --ts-auth-key=<key> root@<machine-host>
 ```
+
+If your tailnet separates catch hosts by cluster or location, include the tags
+your ACLs or grants expect on that key.
 
 Host names matter:
 
