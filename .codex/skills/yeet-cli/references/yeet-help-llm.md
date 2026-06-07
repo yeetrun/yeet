@@ -127,7 +127,11 @@ Install catch on a remote host (local build or GitHub release)
 **Examples**:
 
 ```
-yeet init root@<host>
+yeet init --install-docker root@<host>
+```
+
+```
+yeet init --install-docker --ts-auth-key=<key> root@<host>
 ```
 
 ```
@@ -1635,15 +1639,15 @@ Progress output (auto|tty|plain|quiet)
 ## Examples
 
 ```
-yeet init root@<host>
-```
-
-```
 yeet init --install-docker root@<host>
 ```
 
 ```
 yeet init --install-docker --ts-auth-key=<key> root@<host>
+```
+
+```
+yeet init root@<host>
 ```
 
 ```
