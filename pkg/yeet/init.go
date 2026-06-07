@@ -47,6 +47,8 @@ type initOptions struct {
 	tsAuthKey      string
 }
 
+var initCatchFn = initCatch
+
 func HandleInit(_ context.Context, args []string) error {
 	pos, opts, err := parseInitArgs(args)
 	if err != nil {
@@ -55,7 +57,7 @@ func HandleInit(_ context.Context, args []string) error {
 	if len(pos) == 0 {
 		return updateCatch(opts)
 	}
-	return initCatch(pos[0], opts)
+	return initCatchFn(pos[0], opts)
 }
 
 func parseInitArgs(args []string) ([]string, initOptions, error) {
@@ -143,7 +145,7 @@ func updateCatch(opts initOptions) error {
 			userAtRemote = host
 		}
 	}
-	return initCatch(userAtRemote, opts)
+	return initCatchFn(userAtRemote, opts)
 }
 
 func buildCatch(goos, goarch, gitRoot string) (string, int64, error) {
