@@ -693,6 +693,39 @@ func TestRunVMCachedImagePolicyUsesCachedStaleVersion(t *testing.T) {
 	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v1")
 }
 
+func TestRunVMCachedImagePolicyUsesRequestedOfficialFamily(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	contents := vmImageTestContents()
+	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
+	ubuntuDir := writeCachedVMImageManifest(t, cacheRoot, vmImageTestManifest("ubuntu-26.04-amd64-v99", contents))
+	writeCachedVMImageArtifacts(t, ubuntuDir, contents)
+	nixosCached := vmImageTestManifest("nixos-26.05-amd64-v1", contents)
+	nixosCached.Name = "yeet-nixos-26.05"
+	nixosDir := writeCachedVMImageManifest(t, cacheRoot, nixosCached)
+	writeCachedVMImageArtifacts(t, nixosDir, contents)
+	nixosLatest := vmImageTestManifest("nixos-26.05-amd64-v2", contents)
+	nixosLatest.Name = "yeet-nixos-26.05"
+	manifestServer := newVMImageArtifactTestServer(t, nixosLatest, contents)
+	defer manifestServer.Close()
+
+	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
+		if payload != vmNixOS2605Payload {
+			t.Fatalf("inspect payload = %q, want %q", payload, vmNixOS2605Payload)
+		}
+		cache.ManifestURL = manifestServer.URL + "/manifest.json"
+		return cache.Inspect(ctx, payload)
+	}
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		return vmImageAsset{}, fmt.Errorf("ensure should not be called")
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", ImagePolicy: "cached"}, vmNixOS2605Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	assertVMImageVersion(t, server, "svc", "nixos-26.05-amd64-v1")
+}
+
 func TestRunVMStaleImageTTYPromptYesEnsuresLatest(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")

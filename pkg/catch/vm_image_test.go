@@ -569,6 +569,30 @@ func TestVMImageCacheInspectCurrent(t *testing.T) {
 	}
 }
 
+func TestVMImageCacheInspectIgnoresOtherOfficialFamilies(t *testing.T) {
+	contents := vmImageTestContents()
+	nixosLatest := vmImageTestManifest("nixos-26.05-amd64-v2", contents)
+	nixosLatest.Name = "yeet-nixos-26.05"
+	server := newVMImageArtifactTestServer(t, nixosLatest, contents)
+	defer server.Close()
+
+	root := t.TempDir()
+	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v99", contents))
+	nixosCached := vmImageTestManifest("nixos-26.05-amd64-v1", contents)
+	nixosCached.Name = "yeet-nixos-26.05"
+	nixosDir := writeCachedVMImageManifest(t, root, nixosCached)
+	writeCachedVMImageArtifacts(t, nixosDir, contents)
+
+	cache := vmImageCache{Root: root, ManifestURL: server.URL + "/manifest.json"}
+	got, _, err := cache.Inspect(context.Background(), vmNixOS2605Payload)
+	if err != nil {
+		t.Fatalf("Inspect: %v", err)
+	}
+	if got.CachedVersion != "nixos-26.05-amd64-v1" || got.LatestVersion != "nixos-26.05-amd64-v2" {
+		t.Fatalf("state = %#v, want NixOS family only", got)
+	}
+}
+
 func TestVMImageCacheStateJSONUsesPublicFieldNames(t *testing.T) {
 	raw, err := json.Marshal(vmImageCacheState{
 		Payload:       vmUbuntu2604Payload,
@@ -601,7 +625,11 @@ func TestCachedVMImageManifestSelectsHighestValidCachedManifest(t *testing.T) {
 	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v10", contents))
 	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v3", contents))
 
-	got, dir, ok, err := latestCachedVMImageManifest(root)
+	image, ok := officialVMImageByPayload(vmUbuntu2604Payload)
+	if !ok {
+		t.Fatal("missing Ubuntu registry entry")
+	}
+	got, dir, ok, err := latestCachedVMImageManifest(root, image)
 	if err != nil {
 		t.Fatalf("latestCachedVMImageManifest: %v", err)
 	}
@@ -613,6 +641,26 @@ func TestCachedVMImageManifestSelectsHighestValidCachedManifest(t *testing.T) {
 	}
 	if dir != filepath.Join(root, got.Version) {
 		t.Fatalf("dir = %q, want matching cache dir", dir)
+	}
+}
+
+func TestLatestCachedVMImageManifestFiltersByOfficialFamily(t *testing.T) {
+	root := t.TempDir()
+	contents := vmImageTestContents()
+	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v99", contents))
+	writeCachedVMImageManifest(t, root, vmImageTestManifest("nixos-26.05-amd64-v1", contents))
+	writeCachedVMImageManifest(t, root, vmImageTestManifest("nixos-26.05-amd64-v3", contents))
+
+	image, ok := officialVMImageByPayload(vmNixOS2605Payload)
+	if !ok {
+		t.Fatal("missing NixOS registry entry")
+	}
+	got, _, ok, err := latestCachedVMImageManifest(root, image)
+	if err != nil {
+		t.Fatalf("latestCachedVMImageManifest: %v", err)
+	}
+	if !ok || got.Version != "nixos-26.05-amd64-v3" {
+		t.Fatalf("manifest = %#v ok=%v, want NixOS v3", got, ok)
 	}
 }
 
@@ -629,7 +677,11 @@ func TestCachedVMImageManifestIgnoresInvalidCachedManifests(t *testing.T) {
 	valid := vmImageTestManifest("ubuntu-26.04-amd64-v3", contents)
 	writeCachedVMImageManifest(t, root, valid)
 
-	got, _, ok, err := latestCachedVMImageManifest(root)
+	image, ok := officialVMImageByPayload(vmUbuntu2604Payload)
+	if !ok {
+		t.Fatal("missing Ubuntu registry entry")
+	}
+	got, _, ok, err := latestCachedVMImageManifest(root, image)
 	if err != nil {
 		t.Fatalf("latestCachedVMImageManifest: %v", err)
 	}
