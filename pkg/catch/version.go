@@ -4,47 +4,14 @@
 
 package catch
 
-import (
-	"runtime/debug"
-	"strings"
-)
-
-// buildVersion is injected at build time via -ldflags.
-var buildVersion string
+import "github.com/yeetrun/yeet/pkg/buildinfo"
 
 // Version returns the release version if set, otherwise falls back to the commit hash.
 func Version() string {
-	if v := strings.TrimSpace(buildVersion); v != "" {
-		return v
-	}
-	return VersionCommit()
+	return buildinfo.Version()
 }
 
 // VersionCommit returns the commit hash of the current build.
 func VersionCommit() string {
-	bi, ok := debug.ReadBuildInfo()
-	if !ok {
-		return "unknown"
-	}
-	var dirty bool
-	var commit string
-	for _, s := range bi.Settings {
-		switch s.Key {
-		case "vcs.revision":
-			commit = s.Value
-		case "vcs.modified":
-			dirty = s.Value == "true"
-		}
-	}
-	if commit == "" {
-		return "dev"
-	}
-
-	if len(commit) >= 9 {
-		commit = commit[:9]
-	}
-	if dirty {
-		commit += "+dirty"
-	}
-	return commit
+	return buildinfo.CommitVersion()
 }

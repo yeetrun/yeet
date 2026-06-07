@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/shayne/yargs"
+	"github.com/yeetrun/yeet/pkg/buildinfo"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/yeet"
 )
@@ -26,6 +27,8 @@ func main() {
 }
 
 func run() int {
+	// Keep buildinfo linked into yeet so release ldflags can stamp the binary.
+	_ = buildinfo.Version()
 	rawArgs = os.Args[1:]
 	globalFlags, remaining, err := parseGlobalFlags(rawArgs)
 	if err != nil {
