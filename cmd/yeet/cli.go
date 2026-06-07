@@ -160,6 +160,16 @@ func buildHelpConfig() yargs.HelpConfig {
 			"yeet ssh <svc> -- ls -la",
 		},
 	}
+	subcommands["upgrade"] = yargs.SubCommandInfo{
+		Name:        "upgrade",
+		Description: "Check for and install yeet/catch updates",
+		Usage:       "[check] [--all] [--host=catch-a] [--json] [--yes]",
+		Examples: []string{
+			"yeet upgrade check",
+			"yeet upgrade check --all",
+			"yeet upgrade --all",
+		},
+	}
 	subcommands["skirt"] = yargs.SubCommandInfo{
 		Name:   "skirt",
 		Hidden: true,
