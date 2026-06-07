@@ -368,7 +368,8 @@ func prepareInitDockerInstall(ui *initUI, userAtRemote string, opts initOptions)
 }
 
 func remoteDockerInstalled(userAtRemote string) (bool, error) {
-	cmd := exec.Command("ssh", userAtRemote, "if command -v docker >/dev/null 2>&1; then printf yes; else printf no; fi")
+	const probe = "if command -v docker >/dev/null 2>&1; then printf yes; else printf no; fi"
+	cmd := exec.Command("ssh", userAtRemote, "bash -lc "+shellQuote(probe))
 	output, err := cmd.Output()
 	if err != nil {
 		return false, fmt.Errorf("failed to check docker on remote host: %w", err)
