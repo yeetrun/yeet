@@ -324,7 +324,7 @@ func TestResolveVMImagePayloadBuiltIns(t *testing.T) {
 	}{
 		{
 			payload:     vmUbuntu2604Payload,
-			manifestURL: "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json",
+			manifestURL: "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json",
 			prefix:      "ubuntu-26.04-amd64-",
 			user:        "ubuntu",
 		},
