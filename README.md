@@ -3,7 +3,7 @@
     <img src="https://github.com/yeetrun.png" alt="yeet logo" width="140" height="140">
   </a>
   <h1>yeet</h1>
-  <p>Personal homelab service manager built around Tailscale RPC.</p>
+  <p>Homelab service manager built around Tailscale RPC.</p>
   <p>
     <a href="https://yeetrun.com"><strong>yeetrun.com</strong></a>
     · <a href="https://yeetrun.com/docs/getting-started/quick-start">Quick Start</a>
@@ -19,7 +19,11 @@ See the [Architecture](https://yeetrun.com/docs/concepts/architecture) page for 
 
 ## Read This First
 
-This repository is **personal infrastructure tooling** for how I run my homelab. It is not intended for a general audience, likely will not work for you as-is, and may rely on assumptions, configs, and workflows that only exist in my environment. Use it only as a reference or starting point.
+Yeet is open source homelab infrastructure tooling. It is opinionated: hosts
+run Linux and systemd, the control plane uses Tailscale/tsnet, and services
+currently run with root-managed systemd units. Within those constraints, the
+release path is intended to be installable from a fresh Ubuntu/Debian-style
+host with SSH access.
 
 ## Install yeet (release binary)
 
@@ -32,6 +36,28 @@ Nightly build:
 ```bash
 curl -fsSL https://yeetrun.com/install.sh | sh -s -- --nightly
 ```
+
+## Fresh Host Checklist
+
+Start with a Linux host that has systemd and SSH access. Docker can be installed
+by `yeet init` on Debian/Ubuntu-style hosts:
+
+```bash
+yeet init --install-docker root@<host>
+yeet status
+yeet run -p 8080:80 web nginx:alpine
+```
+
+For unattended bootstrap, create a Tailscale auth key for the catch node and
+pass it to init:
+
+```bash
+yeet init --install-docker --ts-auth-key=<key> root@<host>
+```
+
+VM payloads also require KVM (`/dev/kvm`). ZFS, LAN/macvlan, and Tailscale
+per-service networking are optional host capabilities; yeet will warn when a
+host cannot support a feature.
 
 ## Toolchain Setup (Recommended: mise)
 
@@ -124,7 +150,7 @@ Firecracker-backed Ubuntu VMs through the same small workflow.
 - Push locally-built images into an internal registry when you need them
 - Manage service lifecycle (start/stop/restart/logs/status)
 - Push updates over Tailscale RPC
-- Support a few networking modes used in my lab (e.g., Tailscale, macvlan)
+- Support homelab networking modes such as Tailscale, macvlan, and private service networks
 
 ## Docker Quickstart (Most Common Path: Compose)
 
@@ -408,16 +434,23 @@ The docs site is the user manual and the source of truth for behavior and workfl
 
 ## Components
 
-- **yeet**: client CLI used from my workstation (see the [yeet CLI](https://yeetrun.com/docs/cli/yeet-cli) reference)
+- **yeet**: client CLI used from your workstation (see the [yeet CLI](https://yeetrun.com/docs/cli/yeet-cli) reference)
 - **catch**: service manager daemon running on homelab hosts (see the [catch CLI](https://yeetrun.com/docs/cli/catch-cli) reference)
 
-## How I Run It
+## How It Runs
 
-In my homelab, I run `catch` on each host and use `yeet` to push binaries/images, manage versions, and poke at service state over Tailscale. The [Networking](https://yeetrun.com/docs/concepts/networking) and [Configuration & Prefs](https://yeetrun.com/docs/concepts/configuration-and-prefs) pages describe the host targeting and network modes that make this work in my lab. The workflow is optimized for my machines and my network topology, not for general compatibility.
+Run `catch` on each host, then use `yeet` from your workstation to push
+binaries/images, manage versions, and inspect service state over Tailscale RPC.
+The [Networking](https://yeetrun.com/docs/concepts/networking) and
+[Configuration & Prefs](https://yeetrun.com/docs/concepts/configuration-and-prefs)
+pages describe host targeting and network modes.
 
 ## Security Notes
 
-Currently, services managed by `catch` run as root. This is fine for my lab, but it is not a good default for production or multi-tenant setups. See the [FAQ](https://yeetrun.com/docs/faq) for current limitations.
+Currently, services managed by `catch` run as root. That is acceptable for a
+single-operator homelab, but it is not a good default for production or
+multi-tenant setups. See the [FAQ](https://yeetrun.com/docs/faq) for current
+limitations.
 
 ## License
 

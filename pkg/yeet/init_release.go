@@ -17,7 +17,7 @@ import (
 
 const (
 	githubAPIBase = "https://api.github.com"
-	githubOwner   = "shayne"
+	githubOwner   = "yeetrun"
 	githubRepo    = "yeet"
 )
 
