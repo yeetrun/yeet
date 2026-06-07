@@ -38,6 +38,8 @@ func fetchGitHubRelease(nightly bool) (githubRelease, error) {
 	return fetchGitHubReleaseFromURL(githubReleaseURL(nightly), &http.Client{Timeout: 30 * time.Second})
 }
 
+var fetchGitHubReleaseFn = fetchGitHubRelease
+
 func githubReleaseURL(nightly bool) string {
 	path := fmt.Sprintf("/repos/%s/%s/releases/latest", githubOwner, githubRepo)
 	if nightly {

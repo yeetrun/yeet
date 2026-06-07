@@ -18,7 +18,25 @@ func resolveCatchReleaseAsset(systemName, goarch string, nightly bool) (assetNam
 		return "", "", "", "", err
 	}
 
-	rel, err := fetchGitHubRelease(nightly)
+	rel, err := fetchGitHubReleaseFn(nightly)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	assetURL, shaURL, err = resolveReleaseAssetURLs(rel.Assets, assetName, shaName)
+	if err != nil {
+		return "", "", "", "", err
+	}
+
+	return assetName, assetURL, shaURL, rel.TagName, nil
+}
+
+func resolveYeetReleaseAsset(goos, goarch string, nightly bool) (assetName, assetURL, shaURL, tag string, err error) {
+	assetName, shaName, err := yeetReleaseAssetNames(goos, goarch)
+	if err != nil {
+		return "", "", "", "", err
+	}
+
+	rel, err := fetchGitHubReleaseFn(nightly)
 	if err != nil {
 		return "", "", "", "", err
 	}
@@ -41,6 +59,20 @@ func catchReleaseAssetNames(systemName, goarch string) (assetName, shaName strin
 	}
 
 	assetName = fmt.Sprintf("catch-%s-%s.tar.gz", goos, goarch)
+	return assetName, assetName + ".sha256", nil
+}
+
+func yeetReleaseAssetNames(goos, goarch string) (assetName, shaName string, err error) {
+	goos = strings.ToLower(strings.TrimSpace(goos))
+	goarch = strings.ToLower(strings.TrimSpace(goarch))
+	if goos != "linux" && goos != "darwin" {
+		return "", "", fmt.Errorf("unsupported OS for yeet release asset: %s", goos)
+	}
+	if goarch != "amd64" && goarch != "arm64" {
+		return "", "", fmt.Errorf("unsupported arch for yeet release asset: %s", goarch)
+	}
+
+	assetName = fmt.Sprintf("yeet-%s-%s.tar.gz", goos, goarch)
 	return assetName, assetName + ".sha256", nil
 }
 
