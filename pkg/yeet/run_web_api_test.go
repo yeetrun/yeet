@@ -290,13 +290,7 @@ func TestRunWebAPIValidateAndDeploy(t *testing.T) {
 	if deployed.EnvFile != envFile || !deployed.EnvFileSet || deployed.EnvFileArg != envFile {
 		t.Fatalf("deployed env = file:%q set:%v arg:%q, want normalized explicit env", deployed.EnvFile, deployed.EnvFileSet, deployed.EnvFileArg)
 	}
-	status := runWebAPIRequest(t, s, http.MethodGet, "/api/deploy/"+jobID+"/status", nil)
-	if status.Code != http.StatusOK {
-		t.Fatalf("status code = %d body=%s", status.Code, status.Body.String())
-	}
-	if !strings.Contains(status.Body.String(), `"state":"succeeded"`) {
-		t.Fatalf("status body = %s, want succeeded", status.Body.String())
-	}
+	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
 }
 
 func TestRunWebAPIDeployStartsJobWithoutWaitingForCompletion(t *testing.T) {
