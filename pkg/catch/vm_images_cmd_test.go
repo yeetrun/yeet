@@ -61,13 +61,21 @@ func TestVMImagesCmdTableShowsCacheState(t *testing.T) {
 func TestVMImagesCmdJSONShowsListRows(t *testing.T) {
 	server := newTestServer(t)
 	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-26.04-amd64-v1")
-	restore := stubVMImageInspect(t, vmImageCacheState{
-		Payload:       vmUbuntu2604Payload,
-		CachedVersion: "ubuntu-26.04-amd64-v1",
-		LatestVersion: "ubuntu-26.04-amd64-v1",
-		State:         vmImageCacheCurrent,
-		CachePath:     cachePath,
-		ManifestURL:   defaultVMImageManifestURL,
+	restore := stubVMImageInspectMap(t, map[string]vmImageCacheState{
+		vmUbuntu2604Payload: {
+			Payload:       vmUbuntu2604Payload,
+			CachedVersion: "ubuntu-26.04-amd64-v1",
+			LatestVersion: "ubuntu-26.04-amd64-v1",
+			State:         vmImageCacheCurrent,
+			CachePath:     cachePath,
+			ManifestURL:   defaultVMImageManifestURL,
+		},
+		vmNixOS2605Payload: {
+			Payload:       vmNixOS2605Payload,
+			LatestVersion: "nixos-26.05-amd64-v1",
+			State:         vmImageCacheMissing,
+			ManifestURL:   nixos2605VMImageManifestURL,
+		},
 	})
 	defer restore()
 
@@ -81,9 +89,10 @@ func TestVMImagesCmdJSONShowsListRows(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, out.String())
 	}
-	if len(got) != 1 {
-		t.Fatalf("row count = %d, want 1: %#v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("row count = %d, want 2: %#v", len(got), got)
 	}
+	byPayload := vmImageRowsByPayload(got)
 	want := vmImageListRowJSON{
 		Payload:   vmUbuntu2604Payload,
 		Kind:      "builtin",
@@ -91,8 +100,45 @@ func TestVMImagesCmdJSONShowsListRows(t *testing.T) {
 		Version:   "ubuntu-26.04-amd64-v1",
 		CachePath: cachePath,
 	}
-	if got[0] != want {
-		t.Fatalf("json row = %#v, want %#v", got[0], want)
+	if byPayload[vmUbuntu2604Payload] != want {
+		t.Fatalf("ubuntu json row = %#v, want %#v", byPayload[vmUbuntu2604Payload], want)
+	}
+	if byPayload[vmNixOS2605Payload].Version != "nixos-26.05-amd64-v1" || byPayload[vmNixOS2605Payload].State != string(vmImageCacheMissing) {
+		t.Fatalf("nixos json row = %#v", byPayload[vmNixOS2605Payload])
+	}
+}
+
+func TestVMImagesCmdListShowsAllOfficialImages(t *testing.T) {
+	server := newTestServer(t)
+	restore := stubVMImageInspectMap(t, map[string]vmImageCacheState{
+		vmUbuntu2604Payload: {
+			Payload:       vmUbuntu2604Payload,
+			LatestVersion: "ubuntu-26.04-amd64-v13",
+			State:         vmImageCacheCurrent,
+		},
+		vmNixOS2605Payload: {
+			Payload:       vmNixOS2605Payload,
+			LatestVersion: "nixos-26.05-amd64-v1",
+			State:         vmImageCacheMissing,
+		},
+	})
+	defer restore()
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, nil); err != nil {
+		t.Fatalf("vmImagesCmdFunc: %v", err)
+	}
+	var rows []vmImageListRowJSON
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, out.String())
+	}
+	byPayload := vmImageRowsByPayload(rows)
+	if byPayload[vmUbuntu2604Payload].Version != "ubuntu-26.04-amd64-v13" {
+		t.Fatalf("ubuntu row = %#v", byPayload[vmUbuntu2604Payload])
+	}
+	if byPayload[vmNixOS2605Payload].Version != "nixos-26.05-amd64-v1" {
+		t.Fatalf("nixos row = %#v", byPayload[vmNixOS2605Payload])
 	}
 }
 
@@ -201,13 +247,21 @@ func TestVMImagesCmdListShowsLocalImages(t *testing.T) {
 		t.Fatalf("Import: %v", err)
 	}
 	builtinCachePath := filepath.Join(cacheRoot, "ubuntu-26.04-amd64-v1")
-	restore := stubVMImageInspect(t, vmImageCacheState{
-		Payload:       vmUbuntu2604Payload,
-		CachedVersion: "ubuntu-26.04-amd64-v0",
-		LatestVersion: "ubuntu-26.04-amd64-v1",
-		State:         vmImageCacheStale,
-		CachePath:     builtinCachePath,
-		ManifestURL:   defaultVMImageManifestURL,
+	restore := stubVMImageInspectMap(t, map[string]vmImageCacheState{
+		vmUbuntu2604Payload: {
+			Payload:       vmUbuntu2604Payload,
+			CachedVersion: "ubuntu-26.04-amd64-v0",
+			LatestVersion: "ubuntu-26.04-amd64-v1",
+			State:         vmImageCacheStale,
+			CachePath:     builtinCachePath,
+			ManifestURL:   defaultVMImageManifestURL,
+		},
+		vmNixOS2605Payload: {
+			Payload:       vmNixOS2605Payload,
+			LatestVersion: "nixos-26.05-amd64-v1",
+			State:         vmImageCacheMissing,
+			ManifestURL:   nixos2605VMImageManifestURL,
+		},
 	})
 	defer restore()
 
@@ -300,6 +354,27 @@ func TestVMImagesCmdPruneDryRunPreviewsOldCacheWithoutRemoving(t *testing.T) {
 	if _, err := os.Stat(oldDir); err != nil {
 		t.Fatalf("old cache dir should remain after dry-run: %v", err)
 	}
+}
+
+func TestVMImagesCmdPruneKeepsCurrentVersionPerOfficialFamily(t *testing.T) {
+	server := newTestServer(t)
+	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
+	oldUbuntu := seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v12")
+	currentUbuntu := seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v13")
+	currentNixOS := seedCachedVMImage(t, cacheRoot, "nixos-26.05-amd64-v1")
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json", DryRun: true}, []string{"prune"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc prune dry-run: %v", err)
+	}
+
+	rows := decodeVMImagePruneRows(t, out.Bytes())
+	assertPruneRow(t, rows, "cache", "ubuntu-26.04-amd64-v12", "prunable", oldUbuntu)
+	assertPruneRow(t, rows, "cache", "ubuntu-26.04-amd64-v13", "current", currentUbuntu)
+	assertPruneRow(t, rows, "cache", "nixos-26.05-amd64-v1", "current", currentNixOS)
+	assertPruneRowPayload(t, rows, "ubuntu-26.04-amd64-v13", vmUbuntu2604Payload)
+	assertPruneRowPayload(t, rows, "nixos-26.05-amd64-v1", vmNixOS2605Payload)
 }
 
 func TestVMImagesCmdPrunePromptsAndRemovesOldCache(t *testing.T) {
@@ -481,41 +556,65 @@ func TestVMImagesCmdPruneKeepsInUseZFSBaseAndRemovesOldUnreferencedBase(t *testi
 
 func TestVMImagesCmdUpdateEnsuresImageAndPrintsState(t *testing.T) {
 	server := newTestServer(t)
-	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", defaultVMImageVersion)
-	var ensuredPayload string
+	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", "nixos-26.05-amd64-v1")
+	var ensuredPayloads []string
 	restoreEnsure := stubVMImageEnsure(t, func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
-		ensuredPayload = payload
+		ensuredPayloads = append(ensuredPayloads, payload)
 		return vmImageAsset{
 			Paths: vmImagePaths{Dir: cachePath},
 			Manifest: vmImageManifest{
-				Version: defaultVMImageVersion,
+				Version: "nixos-26.05-amd64-v1",
 			},
 		}, nil
 	})
 	defer restoreEnsure()
-	restoreInspect := stubVMImageInspect(t, vmImageCacheState{
-		Payload:       vmUbuntu2604Payload,
-		CachedVersion: defaultVMImageVersion,
-		LatestVersion: defaultVMImageVersion,
-		State:         vmImageCacheCurrent,
-		CachePath:     cachePath,
-		ManifestURL:   defaultVMImageManifestURL,
-	})
-	defer restoreInspect()
 
 	var out bytes.Buffer
 	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
-	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "table"}, []string{"update"}); err != nil {
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "table"}, []string{"update", vmNixOS2605Payload}); err != nil {
 		t.Fatalf("vmImagesCmdFunc update: %v", err)
 	}
-	if ensuredPayload != vmUbuntu2604Payload {
-		t.Fatalf("ensure payload = %q, want %q", ensuredPayload, vmUbuntu2604Payload)
+	if !reflect.DeepEqual(ensuredPayloads, []string{vmNixOS2605Payload}) {
+		t.Fatalf("ensure payloads = %#v", ensuredPayloads)
 	}
 	got := out.String()
-	for _, want := range []string{vmImageCacheCurrent, defaultVMImageVersion, cachePath} {
+	for _, want := range []string{vmNixOS2605Payload, vmImageCacheCurrent, "nixos-26.05-amd64-v1", cachePath} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("update output missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestVMImagesCmdUpdateAllOfficialImagesByDefault(t *testing.T) {
+	server := newTestServer(t)
+	var ensured []string
+	restoreEnsure := stubVMImageEnsure(t, func(_ context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
+		ensured = append(ensured, payload)
+		version := defaultVMImageVersion
+		if payload == vmNixOS2605Payload {
+			version = "nixos-26.05-amd64-v1"
+		}
+		return vmImageAsset{
+			Paths:    vmImagePaths{Dir: filepath.Join(cache.Root, version)},
+			Manifest: vmImageManifest{Version: version},
+		}, nil
+	})
+	defer restoreEnsure()
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc update: %v", err)
+	}
+	if !reflect.DeepEqual(ensured, []string{vmUbuntu2604Payload, vmNixOS2605Payload}) {
+		t.Fatalf("ensured = %#v", ensured)
+	}
+	var states []vmImageCacheState
+	if err := json.Unmarshal(out.Bytes(), &states); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, out.String())
+	}
+	if len(states) != 2 || states[0].Payload != vmUbuntu2604Payload || states[1].Payload != vmNixOS2605Payload {
+		t.Fatalf("states = %#v", states)
 	}
 }
 
@@ -537,7 +636,7 @@ func TestVMImagesCmdUpdatePrunesOldCacheAfterRefresh(t *testing.T) {
 
 	var out bytes.Buffer
 	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
-	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update"}); err != nil {
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update", vmUbuntu2604Payload}); err != nil {
 		t.Fatalf("vmImagesCmdFunc update: %v", err)
 	}
 	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
@@ -570,7 +669,7 @@ func TestVMImagesCmdUpdateJSONSuppressesProgress(t *testing.T) {
 
 	var out bytes.Buffer
 	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
-	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update"}); err != nil {
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update", vmUbuntu2604Payload}); err != nil {
 		t.Fatalf("vmImagesCmdFunc update json: %v", err)
 	}
 
@@ -605,7 +704,14 @@ func TestVMCmdFuncRoutesImagesAndParsesFormat(t *testing.T) {
 		CachePath:     filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-26.04-amd64-v1"),
 		ManifestURL:   defaultVMImageManifestURL,
 	}
-	restore := stubVMImageInspect(t, want)
+	restore := stubVMImageInspectMap(t, map[string]vmImageCacheState{
+		vmUbuntu2604Payload: want,
+		vmNixOS2605Payload: {
+			Payload:       vmNixOS2605Payload,
+			LatestVersion: "nixos-26.05-amd64-v1",
+			State:         vmImageCacheMissing,
+		},
+	})
 	defer restore()
 
 	var out bytes.Buffer
@@ -618,9 +724,10 @@ func TestVMCmdFuncRoutesImagesAndParsesFormat(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, out.String())
 	}
-	if len(got) != 1 {
-		t.Fatalf("row count = %d, want 1: %#v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("row count = %d, want 2: %#v", len(got), got)
 	}
+	byPayload := vmImageRowsByPayload(got)
 	wantRow := vmImageListRowJSON{
 		Payload:   want.Payload,
 		Kind:      "builtin",
@@ -628,8 +735,8 @@ func TestVMCmdFuncRoutesImagesAndParsesFormat(t *testing.T) {
 		Version:   want.LatestVersion,
 		CachePath: want.CachePath,
 	}
-	if got[0] != wantRow {
-		t.Fatalf("json row = %#v, want %#v", got[0], wantRow)
+	if byPayload[vmUbuntu2604Payload] != wantRow {
+		t.Fatalf("json row = %#v, want %#v", byPayload[vmUbuntu2604Payload], wantRow)
 	}
 }
 
@@ -645,9 +752,18 @@ type vmImageListRowJSON struct {
 type vmImagePruneRowJSON struct {
 	Kind    string `json:"kind"`
 	State   string `json:"state"`
+	Payload string `json:"payload,omitempty"`
 	Version string `json:"version,omitempty"`
 	Path    string `json:"path,omitempty"`
 	Reason  string `json:"reason,omitempty"`
+}
+
+func vmImageRowsByPayload(rows []vmImageListRowJSON) map[string]vmImageListRowJSON {
+	out := make(map[string]vmImageListRowJSON, len(rows))
+	for _, row := range rows {
+		out[row.Payload] = row
+	}
+	return out
 }
 
 func seedCachedVMImage(t *testing.T, root, version string) string {
@@ -681,15 +797,40 @@ func assertPruneRow(t *testing.T, rows []vmImagePruneRowJSON, kind, version, sta
 	t.Fatalf("missing prune row kind=%s version=%s in %#v", kind, version, rows)
 }
 
+func assertPruneRowPayload(t *testing.T, rows []vmImagePruneRowJSON, version, payload string) {
+	t.Helper()
+	for _, row := range rows {
+		if row.Version == version {
+			if row.Payload != payload {
+				t.Fatalf("row %s payload = %q, want %q", version, row.Payload, payload)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing prune row version=%s in %#v", version, rows)
+}
+
 func stubVMImageInspect(t *testing.T, state vmImageCacheState) func() {
+	t.Helper()
+	return stubVMImageInspectMap(t, map[string]vmImageCacheState{
+		vmUbuntu2604Payload: state,
+		vmNixOS2605Payload: {
+			Payload:       vmNixOS2605Payload,
+			LatestVersion: "nixos-26.05-amd64-v1",
+			State:         vmImageCacheMissing,
+		},
+	})
+}
+
+func stubVMImageInspectMap(t *testing.T, states map[string]vmImageCacheState) func() {
 	t.Helper()
 	old := vmImageInspectFunc
 	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
-		if payload != vmUbuntu2604Payload {
-			t.Fatalf("inspect payload = %q, want %q", payload, vmUbuntu2604Payload)
+		state, ok := states[payload]
+		if !ok {
+			t.Fatalf("unexpected inspect payload %q", payload)
 		}
-		wantRoot := filepath.Join(cache.Root)
-		if wantRoot == "" {
+		if strings.TrimSpace(cache.Root) == "" {
 			t.Fatal("inspect cache root is empty")
 		}
 		return state, vmImageManifest{Version: state.LatestVersion}, nil
