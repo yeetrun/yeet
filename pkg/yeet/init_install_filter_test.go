@@ -146,6 +146,20 @@ func TestInitInstallSummaryInfoSummaryDedupes(t *testing.T) {
 	}
 }
 
+func TestInitInstallSummaryAbsorbsVMToolInstallInfo(t *testing.T) {
+	var summary initInstallSummary
+
+	if !summary.Absorb("Installed VM host packages: qemu-utils") {
+		t.Fatal("VM host package install info should be absorbed into summary")
+	}
+	if got := summary.InfoSummary(); got != "Installed VM host packages: qemu-utils" {
+		t.Fatalf("InfoSummary = %q, want VM package install info", got)
+	}
+	if got := summary.WarningSummary(); got != "" {
+		t.Fatalf("WarningSummary = %q, want no warning", got)
+	}
+}
+
 func TestInitInstallLineClassifiers(t *testing.T) {
 	ignored := []string{
 		"NetNS: created",

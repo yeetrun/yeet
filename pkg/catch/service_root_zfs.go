@@ -30,6 +30,7 @@ type resolvedServiceRoot struct {
 	Root     string
 	Dataset  string
 	ZFS      bool
+	Created  bool
 	Warnings []string
 }
 
@@ -76,7 +77,7 @@ func resolveZFSServiceRoot(ctx context.Context, runner zfsCommandRunner, dataset
 	if mode == zfsServiceRootTarget && existingDataset {
 		warnings = append([]string{fmt.Sprintf("ZFS dataset %q already exists; using existing dataset", dataset)}, warnings...)
 	}
-	return resolvedServiceRoot{Root: root, Dataset: dataset, ZFS: true, Warnings: warnings}, nil
+	return resolvedServiceRoot{Root: root, Dataset: dataset, ZFS: true, Created: !existingDataset, Warnings: warnings}, nil
 }
 
 func zfsDatasetExists(ctx context.Context, runner zfsCommandRunner, dataset string) (bool, error) {

@@ -316,14 +316,14 @@ func TestServiceShellCommandForVMUsesGuestSSH(t *testing.T) {
 		"-o", "UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts"),
 		"-o", "HostKeyAlias=yeet-vm-devbox@yeet-pve1",
 		"-o", "CheckHostIP=no",
-		"-o", "ProxyCommand=ssh -W %h:%p root@yeet-pve1",
+		"-o", "ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts") + " -o HostKeyAlias=yeet-proxy@yeet-pve1 -o CheckHostIP=no -W %h:%p root@yeet-pve1",
 	}
 	if !reflect.DeepEqual(gotOptions, wantOptions) {
 		t.Fatalf("options = %#v, want %#v", gotOptions, wantOptions)
 	}
 }
 
-func TestServiceShellCommandForVMLANNetworkDoesNotProxy(t *testing.T) {
+func TestServiceShellCommandForVMLANNetworkProxiesThroughCatch(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -357,6 +357,7 @@ func TestServiceShellCommandForVMLANNetworkDoesNotProxy(t *testing.T) {
 		"-o", "UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts"),
 		"-o", "HostKeyAlias=yeet-vm-devbox@yeet-pve1",
 		"-o", "CheckHostIP=no",
+		"-o", "ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts") + " -o HostKeyAlias=yeet-proxy@yeet-pve1 -o CheckHostIP=no -W %h:%p root@yeet-pve1",
 	}
 	if !reflect.DeepEqual(gotOptions, wantOptions) {
 		t.Fatalf("options = %#v, want %#v", gotOptions, wantOptions)
@@ -366,6 +367,9 @@ func TestServiceShellCommandForVMLANNetworkDoesNotProxy(t *testing.T) {
 	}
 	if repair.Alias != "yeet-vm-devbox@yeet-pve1" {
 		t.Fatalf("repair alias = %q", repair.Alias)
+	}
+	if !reflect.DeepEqual(repair.ExtraAliases, []string{"yeet-proxy@yeet-pve1"}) {
+		t.Fatalf("repair extra aliases = %#v, want proxy alias", repair.ExtraAliases)
 	}
 }
 
@@ -390,7 +394,7 @@ func TestServiceShellCommandForVMKeepsUserStrictHostKeyChecking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serviceShellCommandFromResponse: %v", err)
 	}
-	if strings.Count(strings.Join(gotOptions, "\n"), "StrictHostKeyChecking") != 1 {
+	if sshOptionsCountValuePrefix(gotOptions, "StrictHostKeyChecking=") != 1 {
 		t.Fatalf("options = %#v, want one StrictHostKeyChecking option", gotOptions)
 	}
 }
@@ -446,7 +450,7 @@ func TestServiceShellCommandForVMKeepsUserKnownHostsFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serviceShellCommandFromResponse: %v", err)
 	}
-	if strings.Count(strings.Join(gotOptions, "\n"), "UserKnownHostsFile") != 1 {
+	if sshOptionsCountValuePrefix(gotOptions, "UserKnownHostsFile=") != 1 {
 		t.Fatalf("options = %#v, want one UserKnownHostsFile option", gotOptions)
 	}
 	if !sshOptionsContainValue(gotOptions, "UserKnownHostsFile=/tmp/custom-known-hosts") {
@@ -503,6 +507,9 @@ func TestRunSSHPlanRepairsVMKnownHostAliasAndRetries(t *testing.T) {
 	if plan.KnownHostRepair.KnownHostsFile != wantKnownHosts {
 		t.Fatalf("repair known_hosts = %q, want %q", plan.KnownHostRepair.KnownHostsFile, wantKnownHosts)
 	}
+	if !reflect.DeepEqual(plan.KnownHostRepair.ExtraAliases, []string{"yeet-proxy@yeet-pve1"}) {
+		t.Fatalf("repair extra aliases = %#v, want proxy alias", plan.KnownHostRepair.ExtraAliases)
+	}
 	if !sshOptionsContainValue(plan.Args, "HostKeyAlias="+wantAlias) {
 		t.Fatalf("args = %#v, want generated HostKeyAlias", plan.Args)
 	}
@@ -521,9 +528,10 @@ func TestRunSSHPlanRepairsVMKnownHostAliasAndRetries(t *testing.T) {
 		_, _ = io.WriteString(stderr, "Warning: Permanently added 'yeet-vm-devbox@yeet-pve1' (ED25519) to the list of known hosts.\n")
 		return nil
 	})
-	var removedAlias, removedKnownHosts string
+	var removedKnownHosts string
+	var removedAliases []string
 	stubRemoveSSHKnownHost(t, func(ctx context.Context, alias, knownHosts string) error {
-		removedAlias = alias
+		removedAliases = append(removedAliases, alias)
 		removedKnownHosts = knownHosts
 		return nil
 	})
@@ -538,8 +546,8 @@ func TestRunSSHPlanRepairsVMKnownHostAliasAndRetries(t *testing.T) {
 	if !reflect.DeepEqual(runs[0], plan.Args) || !reflect.DeepEqual(runs[1], plan.Args) {
 		t.Fatalf("runs = %#v, want both with plan args %#v", runs, plan.Args)
 	}
-	if removedAlias != wantAlias || removedKnownHosts != wantKnownHosts {
-		t.Fatalf("removed %q from %q, want %q from %q", removedAlias, removedKnownHosts, wantAlias, wantKnownHosts)
+	if !reflect.DeepEqual(removedAliases, []string{wantAlias, "yeet-proxy@yeet-pve1"}) || removedKnownHosts != wantKnownHosts {
+		t.Fatalf("removed aliases %#v lastKnownHosts=%q, want VM and proxy aliases from %q", removedAliases, removedKnownHosts, wantKnownHosts)
 	}
 	if strings.Contains(stderr.String(), "REMOTE HOST IDENTIFICATION HAS CHANGED") {
 		t.Fatalf("stderr = %q, want stale host-key warning suppressed", stderr.String())
@@ -672,9 +680,22 @@ func TestRunSSHPlanReturnsRetryError(t *testing.T) {
 	if runs != 2 {
 		t.Fatalf("ssh runs = %d, want 2", runs)
 	}
-	if removals != 1 {
-		t.Fatalf("removals = %d, want 1", removals)
+	if removals != 2 {
+		t.Fatalf("removals = %d, want 2", removals)
 	}
+}
+
+func sshOptionsCountValuePrefix(options []string, prefix string) int {
+	count := 0
+	for i, opt := range options {
+		switch {
+		case opt == "-o" && i+1 < len(options) && strings.HasPrefix(options[i+1], prefix):
+			count++
+		case strings.HasPrefix(opt, "-o") && strings.HasPrefix(opt[2:], prefix):
+			count++
+		}
+	}
+	return count
 }
 
 func sshOptionsContainValue(options []string, value string) bool {

@@ -70,6 +70,12 @@ func initTSNet(dataDir string) *tsnet.Server {
 	}
 	ts := newTSNetServer(dataDir)
 	st := must.Get(ts.Up(context.Background()))
+	if st.Self != nil && st.Self.DNSName != "" {
+		log.Printf("tsnet assigned DNS name %q", st.Self.DNSName)
+		if warning := tsnetAssignedNameWarning(*tsnetHost, st.Self.DNSName); warning != "" {
+			log.Print(warning)
+		}
+	}
 	registerTSNetFallback(ts, st.TailscaleIPs)
 	return ts
 }
@@ -80,6 +86,24 @@ func newTSNetServer(dataDir string) *tsnet.Server {
 		Hostname: *tsnetHost,
 		Port:     uint16(*tsnetPort),
 	}
+}
+
+func tsnetAssignedNameWarning(requested, assignedDNS string) string {
+	assigned := shortTailscaleDNSName(assignedDNS)
+	requested = strings.TrimSpace(requested)
+	if assigned == "" || requested == "" || strings.EqualFold(assigned, requested) {
+		return ""
+	}
+	return fmt.Sprintf("Warning: requested Tailscale hostname %q, but Tailscale assigned %q. Use --host=%s for this catch host, or remove the stale/conflicting Tailscale device and rerun yeet init.", requested, assigned, assigned)
+}
+
+func shortTailscaleDNSName(dnsName string) string {
+	dnsName = strings.TrimSuffix(strings.TrimSpace(dnsName), ".")
+	if dnsName == "" {
+		return ""
+	}
+	short, _, _ := strings.Cut(dnsName, ".")
+	return short
 }
 
 func registerTSNetFallback(ts *tsnet.Server, tsIPs []netip.Addr) {

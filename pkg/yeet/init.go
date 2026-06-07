@@ -32,17 +32,19 @@ var archMap = map[string]string{
 }
 
 type initFlagsParsed struct {
-	FromGithub    bool   `flag:"from-github"`
-	Nightly       bool   `flag:"nightly"`
-	InstallDocker bool   `flag:"install-docker"`
-	TSAuthKey     string `flag:"ts-auth-key"`
+	FromGithub     bool   `flag:"from-github"`
+	Nightly        bool   `flag:"nightly"`
+	InstallDocker  bool   `flag:"install-docker"`
+	InstallVMTools bool   `flag:"install-vm-tools"`
+	TSAuthKey      string `flag:"ts-auth-key"`
 }
 
 type initOptions struct {
-	fromGithub    bool
-	nightly       bool
-	installDocker bool
-	tsAuthKey     string
+	fromGithub     bool
+	nightly        bool
+	installDocker  bool
+	installVMTools bool
+	tsAuthKey      string
 }
 
 func HandleInit(_ context.Context, args []string) error {
@@ -69,10 +71,11 @@ func parseInitArgs(args []string) ([]string, initOptions, error) {
 		pos = append(pos, result.RemainingArgs...)
 	}
 	opts := initOptions{
-		fromGithub:    result.Flags.FromGithub,
-		nightly:       result.Flags.Nightly,
-		installDocker: result.Flags.InstallDocker,
-		tsAuthKey:     result.Flags.TSAuthKey,
+		fromGithub:     result.Flags.FromGithub,
+		nightly:        result.Flags.Nightly,
+		installDocker:  result.Flags.InstallDocker,
+		installVMTools: result.Flags.InstallVMTools,
+		tsAuthKey:      result.Flags.TSAuthKey,
 	}
 	if len(pos) > 1 {
 		return nil, initOptions{}, fmt.Errorf("init takes at most one argument")
@@ -225,7 +228,7 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 	if err := chmodInitCatchFn(ui, userAtRemote); err != nil {
 		return err
 	}
-	return installInitCatchFn(ui, userAtRemote, useSudo, installDocker, opts.tsAuthKey)
+	return installInitCatchFn(ui, userAtRemote, useSudo, installDocker, opts.installVMTools, opts.tsAuthKey)
 }
 
 type initCatchSource struct {
@@ -421,15 +424,15 @@ func chmodInitCatch(ui *initUI, userAtRemote string) error {
 	return nil
 }
 
-func installInitCatch(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, tsAuthKey string) error {
+func installInitCatch(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string) error {
 	if !useSudo {
-		return installInitCatchDetached(ui, userAtRemote, installDocker, tsAuthKey)
+		return installInitCatchDetached(ui, userAtRemote, installDocker, installVMTools, tsAuthKey)
 	}
-	return installInitCatchDirect(ui, userAtRemote, useSudo, installDocker, tsAuthKey)
+	return installInitCatchDirect(ui, userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey)
 }
 
-func installInitCatchDirect(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, tsAuthKey string) error {
-	cmd := exec.Command("ssh", remoteCatchInstallArgs(userAtRemote, useSudo, installDocker, tsAuthKey)...)
+func installInitCatchDirect(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string) error {
+	cmd := exec.Command("ssh", remoteCatchInstallArgs(userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey)...)
 	cmd.Stdin = os.Stdin
 	ui.Suspend()
 	filter := newInitInstallFilter(os.Stdout)
@@ -460,11 +463,11 @@ var (
 	initInstallSSHTimeout   = 10 * time.Second
 )
 
-func installInitCatchDetached(ui *initUI, userAtRemote string, installDocker bool, tsAuthKey string) error {
+func installInitCatchDetached(ui *initUI, userAtRemote string, installDocker bool, installVMTools bool, tsAuthKey string) error {
 	session := newInitInstallSession()
 	ui.Suspend()
 	filter := newInitInstallFilter(os.Stdout)
-	if err := launchDetachedInitCatchInstall(userAtRemote, session, installDocker, tsAuthKey); err != nil {
+	if err := launchDetachedInitCatchInstall(userAtRemote, session, installDocker, installVMTools, tsAuthKey); err != nil {
 		ui.FailStep("install failed")
 		return fmt.Errorf("failed to run catch binary on remote host")
 	}
@@ -496,16 +499,16 @@ func newInitInstallSession() initInstallSession {
 	}
 }
 
-func launchDetachedInitCatchInstall(userAtRemote string, session initInstallSession, installDocker bool, tsAuthKey string) error {
-	cmd := exec.Command("ssh", userAtRemote, detachedInitCatchInstallScript(userAtRemote, session, installDocker, tsAuthKey))
+func launchDetachedInitCatchInstall(userAtRemote string, session initInstallSession, installDocker bool, installVMTools bool, tsAuthKey string) error {
+	cmd := exec.Command("ssh", userAtRemote, detachedInitCatchInstallScript(userAtRemote, session, installDocker, installVMTools, tsAuthKey))
 	cmd.Stdin = nil
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run()
 }
 
-func detachedInitCatchInstallScript(userAtRemote string, session initInstallSession, installDocker bool, tsAuthKey string) string {
-	install := shellJoin(remoteCatchInstallCommand(userAtRemote, false, installDocker, tsAuthKey))
+func detachedInitCatchInstallScript(userAtRemote string, session initInstallSession, installDocker bool, installVMTools bool, tsAuthKey string) string {
+	install := shellJoin(remoteCatchInstallCommand(userAtRemote, false, installDocker, installVMTools, tsAuthKey))
 	logPath := shellQuote(session.LogPath)
 	statusPath := shellQuote(session.StatusPath)
 	body := fmt.Sprintf("%s >%s 2>&1; code=$?; printf \"%%s\" \"$code\" >%s", install, logPath, statusPath)
@@ -585,7 +588,7 @@ func cleanupDetachedInitCatchInstall(userAtRemote string, session initInstallSes
 	_ = cmd.Run()
 }
 
-func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker bool, tsAuthKey string) []string {
+func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string) []string {
 	args := []string{}
 	if useSudo {
 		args = append(args, "sudo")
@@ -593,6 +596,9 @@ func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker 
 	installEnv := catchInstallEnv(userAtRemote)
 	if installDocker {
 		installEnv = append(installEnv, "CATCH_INSTALL_DOCKER=1")
+	}
+	if installVMTools {
+		installEnv = append(installEnv, "CATCH_INSTALL_VM_TOOLS=1")
 	}
 	if tsAuthKey != "" {
 		installEnv = append(installEnv, "TS_AUTHKEY="+tsAuthKey)
@@ -604,9 +610,9 @@ func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker 
 	return append(args, "./catch", fmt.Sprintf("--tsnet-host=%v", Host()), "install")
 }
 
-func remoteCatchInstallArgs(userAtRemote string, useSudo bool, installDocker bool, tsAuthKey string) []string {
+func remoteCatchInstallArgs(userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string) []string {
 	args := append(make([]string, 0, 7), "-t", userAtRemote)
-	return append(args, remoteCatchInstallCommand(userAtRemote, useSudo, installDocker, tsAuthKey)...)
+	return append(args, remoteCatchInstallCommand(userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey)...)
 }
 
 func catchInstallEnv(userAtRemote string) []string {

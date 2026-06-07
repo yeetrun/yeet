@@ -63,6 +63,7 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 		return err
 	}
 	rollbackNewService := false
+	var inputs vmProvisionInputs
 	defer func() {
 		if retErr == nil || !rollbackNewService {
 			return
@@ -70,20 +71,23 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 		if err := e.rollbackNewVMProvisionReservation(); err != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("rollback VM service reservation: %w", err))
 		}
+		if err := e.cleanupFailedNewVMProvisionRoot(inputs.ServiceRoot); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("cleanup failed VM service root: %w", err))
+		}
 	}()
 	doneInputs := e.traceBlock("vm inputs")
-	inputs, err := e.vmProvisionInputs(flags, payload)
+	inputs, err = e.vmProvisionInputs(flags, payload)
 	doneInputs()
 	if err != nil {
 		return err
 	}
+	rollbackNewService = !serviceExisted
 	doneReserveNetwork := e.traceBlock("vm reserve service network")
 	svcNet, err := e.reserveVMServiceNetwork(flags)
 	doneReserveNetwork()
 	if err != nil {
 		return err
 	}
-	rollbackNewService = !serviceExisted
 	donePlan := e.traceBlock("vm plan")
 	plan, err := e.newVMProvisionPlan(flags, inputs.ServiceRoot, inputs.Shape, inputs.Image, svcNet, inputs.SSHKey)
 	donePlan()
@@ -150,6 +154,15 @@ func (e *ttyExecer) prepareVMServiceRoot(flags cli.RunFlags) (resolvedServiceRoo
 	resolvedRoot, err := e.s.prepareServiceRootForInstall(e.sn, flags.ServiceRoot, flags.ZFS)
 	if err != nil {
 		return resolvedServiceRoot{}, err
+	}
+	if !resolvedRoot.ZFS {
+		_, err := os.Stat(resolvedRoot.Root)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return resolvedServiceRoot{}, fmt.Errorf("stat VM service root: %w", err)
+			}
+			resolvedRoot.Created = true
+		}
 	}
 	if err := ensureDirsForRoot(resolvedRoot.Root, e.user); err != nil {
 		return resolvedServiceRoot{}, fmt.Errorf("prepare VM service root: %w", err)
@@ -533,6 +546,39 @@ func (e *ttyExecer) rollbackNewVMProvisionReservation() error {
 		return nil
 	})
 	return err
+}
+
+func (e *ttyExecer) cleanupFailedNewVMProvisionRoot(root resolvedServiceRoot) error {
+	if strings.TrimSpace(root.Root) == "" {
+		return nil
+	}
+	if root.ZFS && root.Dataset != "" {
+		return e.s.destroyServiceRootZFS(root.Dataset)
+	}
+	return cleanupFailedVMFilesystemRoot(root.Root, root.Created)
+}
+
+func cleanupFailedVMFilesystemRoot(root string, removeRoot bool) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read failed VM service root %q: %w", root, err)
+	}
+	var errs []error
+	for _, entry := range entries {
+		path := filepath.Join(root, entry.Name())
+		if err := os.RemoveAll(path); err != nil {
+			errs = append(errs, fmt.Errorf("remove failed VM service root child %q: %w", path, err))
+		}
+	}
+	if removeRoot {
+		if err := os.Remove(root); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove failed VM service root %q: %w", root, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (e *ttyExecer) vmSSHKey() (string, error) {

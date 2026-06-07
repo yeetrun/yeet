@@ -14,7 +14,7 @@ func TestFastUbuntuImagePolicyCleansFirecrackerGuestStatus(t *testing.T) {
 	script := readBuildUbuntuScript(t)
 
 	for _, want := range []string{
-		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v12}"`,
+		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v13}"`,
 		"fwupd$",
 		"fwupd-signed$",
 		"update-notifier-common$",
@@ -34,6 +34,22 @@ func TestFastUbuntuImagePolicyCleansFirecrackerGuestStatus(t *testing.T) {
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("build script missing %q", want)
+		}
+	}
+}
+
+func TestFastUbuntuImagePolicyUsesHostCompatibleExt4Features(t *testing.T) {
+	script := readBuildUbuntuScript(t)
+
+	for _, want := range []string{
+		"normalize_fast_rootfs_ext4_features",
+		"tune2fs -O ^orphan_file",
+		"run_fast_rootfs_e2fsck",
+		"rootfs ext4 features are not compatible with LTS host tooling",
+		"FEATURE_",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("build script missing ext4 compatibility policy %q", want)
 		}
 	}
 }

@@ -323,6 +323,19 @@ func TestInitTSNetReturnsNilWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestTSNetAssignedNameWarning(t *testing.T) {
+	if got := tsnetAssignedNameWarning("catch", "catch.shayne.ts.net."); got != "" {
+		t.Fatalf("warning = %q, want empty for matching assigned name", got)
+	}
+
+	got := tsnetAssignedNameWarning("catch", "catch-1.shayne.ts.net.")
+	for _, want := range []string{"Warning:", "requested Tailscale hostname \"catch\"", "assigned \"catch-1\"", "--host=catch-1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("warning missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestProxyConnPairCopiesBetweenConnections(t *testing.T) {
 	backendApp, backendProxy := net.Pipe()
 	clientApp, clientProxy := net.Pipe()

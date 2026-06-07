@@ -106,6 +106,59 @@ func TestSetupVMHostWithMissingPackagesPromptsAndInstallsAPT(t *testing.T) {
 	}
 }
 
+func TestSetupVMHostWithInstallEnvInstallsAPTWithoutPrompt(t *testing.T) {
+	var stderr bytes.Buffer
+	var prompted bool
+	var commands [][]string
+	err := setupVMHostWith(vmSetupDeps{
+		commandExists: fakeVMCommandExists(map[string]bool{
+			"mount":   true,
+			"umount":  true,
+			"ip":      true,
+			"apt-get": true,
+		}),
+		pathExists: fakeVMPathExists(map[string]bool{
+			"/dev/kvm":     true,
+			"/dev/net/tun": true,
+		}),
+		getenv: func(key string) string {
+			if key == "CATCH_INSTALL_VM_TOOLS" {
+				return "1"
+			}
+			return ""
+		},
+		confirm: func(io.Reader, io.Writer, string) (bool, error) {
+			prompted = true
+			return false, nil
+		},
+		runCommand: func(name string, args ...string) error {
+			commands = append(commands, append([]string{name}, args...))
+			return nil
+		},
+		stderr: &stderr,
+		goarch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("setupVMHostWith returned error: %v", err)
+	}
+	if prompted {
+		t.Fatal("setupVMHostWith prompted despite CATCH_INSTALL_VM_TOOLS=1")
+	}
+	want := [][]string{
+		{"apt-get", "update"},
+		{"apt-get", "install", "-y", "e2fsprogs", "ncurses-bin", "qemu-utils", "zstd"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+	if !strings.Contains(stderr.String(), "Installing VM host packages because CATCH_INSTALL_VM_TOOLS=1") {
+		t.Fatalf("stderr = %q, want install env note", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "Warning: VM tooling is missing required commands") {
+		t.Fatalf("stderr = %q, want no missing tooling warning after explicit install request", stderr.String())
+	}
+}
+
 func TestSetupVMHostWithMissingPackagesWithoutAPTWarnsOnly(t *testing.T) {
 	var stderr bytes.Buffer
 	var prompted bool

@@ -414,6 +414,18 @@ func vmNetDeviceMaster(name string) string {
 	return filepath.Base(target)
 }
 
+func vmServiceGuestRoute(ip string) string {
+	pfx, err := netip.ParsePrefix(strings.TrimSpace(ip))
+	if err == nil {
+		return pfx.Addr().String() + "/32"
+	}
+	addr, err := netip.ParseAddr(strings.TrimSpace(ip))
+	if err == nil {
+		return addr.String() + "/32"
+	}
+	return ""
+}
+
 func (p vmNetworkPlan) SetupCommands() [][]string {
 	var cmds [][]string
 	short := shortVMName(p.Service)
@@ -426,9 +438,15 @@ func (p vmNetworkPlan) SetupCommands() [][]string {
 				[]string{"ip", "link", "add", iface.Bridge, "type", "bridge"},
 				[]string{"ip", "tuntap", "add", iface.Tap, "mode", "tap"},
 				[]string{"ip", "link", "set", iface.Tap, "master", iface.Bridge},
-				[]string{"ip", "addr", "add", vmSvcGateway + "/24", "dev", iface.Bridge},
+				[]string{"ip", "addr", "del", vmSvcGateway + "/24", "dev", iface.Bridge},
+				[]string{"ip", "addr", "add", vmSvcGateway + "/32", "dev", iface.Bridge},
 				[]string{"ip", "link", "set", iface.Bridge, "up"},
 				[]string{"ip", "link", "set", iface.Tap, "up"},
+			)
+			if route := vmServiceGuestRoute(iface.GuestIP); route != "" {
+				cmds = append(cmds, []string{"ip", "route", "replace", route, "dev", iface.Bridge, "src", vmSvcGateway})
+			}
+			cmds = append(cmds,
 				[]string{"ip", "link", "add", hostPeer, "type", "veth", "peer", "name", nsPeer},
 				[]string{"ip", "link", "set", nsPeer, "netns", vmSvcNetNS},
 				[]string{"ip", "link", "set", hostPeer, "master", iface.Bridge},
@@ -472,6 +490,9 @@ func (p vmNetworkPlan) CleanupCommands() [][]string {
 		switch iface.Mode {
 		case "svc":
 			hostPeer := fmt.Sprintf("yvm-%s-v%d", short, i)
+			if route := vmServiceGuestRoute(iface.GuestIP); route != "" {
+				cmds = append(cmds, []string{"ip", "route", "del", route, "dev", iface.Bridge})
+			}
 			cmds = append(cmds,
 				[]string{"ip", "link", "del", hostPeer},
 				[]string{"ip", "link", "del", iface.Tap},
@@ -581,6 +602,9 @@ func isIgnorableVMNetworkCommandError(mode vmNetworkCommandMode, cmd []string, e
 }
 
 func isIgnorableVMNetworkSetupError(cmd []string, text string) bool {
+	if isVMSvcLegacyGatewayDeleteCommand(cmd) && vmNetworkMissingAddressError(text) {
+		return true
+	}
 	if isIdempotentVMNetworkSetupCommand(cmd) && vmNetworkAlreadyConfiguredError(text) {
 		return true
 	}
@@ -634,13 +658,29 @@ func vmNetworkSetupVerb(group, action string) bool {
 }
 
 func isIdempotentVMNetworkCleanupCommand(cmd []string) bool {
-	return len(cmd) >= 4 && cmd[0] == "ip" && cmd[1] == "link" && cmd[2] == "del"
+	return len(cmd) >= 4 && cmd[0] == "ip" && (cmd[1] == "link" || cmd[1] == "route") && cmd[2] == "del"
 }
 
 func vmNetworkMissingDeviceError(text string) bool {
 	return strings.Contains(text, "cannot find device") ||
 		strings.Contains(text, "does not exist") ||
-		strings.Contains(text, "no such device")
+		strings.Contains(text, "no such device") ||
+		strings.Contains(text, "no such process")
+}
+
+func vmNetworkMissingAddressError(text string) bool {
+	return vmNetworkMissingDeviceError(text) ||
+		strings.Contains(text, "cannot assign requested address") ||
+		strings.Contains(text, "address not found")
+}
+
+func isVMSvcLegacyGatewayDeleteCommand(cmd []string) bool {
+	return len(cmd) == 6 &&
+		cmd[0] == "ip" &&
+		cmd[1] == "addr" &&
+		cmd[2] == "del" &&
+		cmd[3] == vmSvcGateway+"/24" &&
+		cmd[4] == "dev"
 }
 
 func isReplayVMNetworkNamespaceMove(cmd []string) bool {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -32,6 +33,7 @@ type sshExecutionPlan struct {
 type sshKnownHostRepair struct {
 	Alias          string
 	KnownHostsFile string
+	ExtraAliases   []string
 }
 
 type sshCommandRunner func(context.Context, []string, io.Reader, io.Writer, io.Writer) error
@@ -168,8 +170,10 @@ func runSSHPlan(ctx context.Context, plan sshExecutionPlan, stdin io.Reader, std
 		replaySSHStderr(&stderrBuf, stderr)
 		return firstErr
 	}
-	if err := removeSSHKnownHostFunc(ctx, plan.KnownHostRepair.Alias, plan.KnownHostRepair.KnownHostsFile); err != nil {
-		return err
+	for _, alias := range plan.KnownHostRepair.Aliases() {
+		if err := removeSSHKnownHostFunc(ctx, alias, plan.KnownHostRepair.KnownHostsFile); err != nil {
+			return err
+		}
 	}
 	return runSSHCommandFunc(ctx, plan.Args, stdin, stdout, stderr)
 }
@@ -185,6 +189,18 @@ func (p sshExecutionPlan) canRepairKnownHost() bool {
 	return p.KnownHostRepair != nil &&
 		strings.TrimSpace(p.KnownHostRepair.Alias) != "" &&
 		strings.TrimSpace(p.KnownHostRepair.KnownHostsFile) != ""
+}
+
+func (r sshKnownHostRepair) Aliases() []string {
+	aliases := []string{r.Alias}
+	for _, alias := range r.ExtraAliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" || slices.Contains(aliases, alias) {
+			continue
+		}
+		aliases = append(aliases, alias)
+	}
+	return aliases
 }
 
 func writerOrDiscard(w io.Writer) io.Writer {
@@ -443,6 +459,7 @@ func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, re
 		plan.KnownHostRepair = &sshKnownHostRepair{
 			Alias:          alias,
 			KnownHostsFile: knownHosts,
+			ExtraAliases:   []string{vmSSHProxyHostKeyAlias(proxyHost)},
 		}
 	}
 	return plan, nil
@@ -479,9 +496,23 @@ func appendVMSSHIdentityOptions(options []string, service, proxyHost string, add
 func appendVMSSHProxyOptions(options []string, target vmSSHTargetInfo, proxyHost string, info serverInfo) []string {
 	out := options
 	if target.Proxy && !hasSSHProxyOption(out) {
-		out = append(out, "-o", "ProxyCommand=ssh -W %h:%p "+shellQuote(sshTarget(proxyHost, info)))
+		out = append(out, "-o", "ProxyCommand="+vmSSHProxyCommand(proxyHost, info))
 	}
 	return out
+}
+
+func vmSSHProxyCommand(proxyHost string, info serverInfo) string {
+	args := []string{"ssh"}
+	if knownHosts := vmSSHKnownHostsFile(); knownHosts != "" {
+		args = append(args,
+			"-o", "StrictHostKeyChecking=accept-new",
+			"-o", "UserKnownHostsFile="+knownHosts,
+			"-o", "HostKeyAlias="+vmSSHProxyHostKeyAlias(proxyHost),
+			"-o", "CheckHostIP=no",
+		)
+	}
+	args = append(args, "-W", "%h:%p", sshTarget(proxyHost, info))
+	return shellJoin(args)
 }
 
 type vmSSHTargetInfo struct {
@@ -510,19 +541,10 @@ func firstNonEmpty(values ...string) string {
 }
 
 func shouldProxyVMSSH(resp catchrpc.ServiceInfoResponse, guestHost string) bool {
-	svcIP := strings.TrimSpace(resp.Info.Network.SvcIP)
-	if svcIP != "" && guestHost == svcIP {
-		return true
-	}
 	if resp.Info.VM == nil {
 		return false
 	}
-	for _, network := range resp.Info.VM.Networks {
-		if strings.TrimSpace(network.Mode) == "svc" && strings.TrimSpace(network.IP) == guestHost {
-			return true
-		}
-	}
-	return false
+	return strings.TrimSpace(guestHost) != ""
 }
 
 func vmSSHHostKeyAlias(service, host string) string {
@@ -532,6 +554,14 @@ func vmSSHHostKeyAlias(service, host string) string {
 		return "yeet-vm-" + service
 	}
 	return "yeet-vm-" + service + "@" + host
+}
+
+func vmSSHProxyHostKeyAlias(host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "yeet-proxy"
+	}
+	return "yeet-proxy@" + host
 }
 
 func vmSSHKnownHostsFile() string {
