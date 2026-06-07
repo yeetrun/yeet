@@ -467,6 +467,34 @@ func TestServiceShellCommandForVMLANNetworkForceProxy(t *testing.T) {
 	}
 }
 
+func TestServiceShellCommandForVMLANNetworkCustomProxySuppressesDirectNotice(t *testing.T) {
+	_, plan := testSSHExecutionPlan(t,
+		[]string{"ssh", "-J", "bastion", "devbox"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				VM: &catchrpc.ServiceVM{
+					SSH:      &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "10.0.4.80"},
+					Networks: []catchrpc.ServiceVMNetwork{{Mode: "lan", IP: "10.0.4.80"}},
+				},
+			},
+		},
+	)
+	if plan.Notice != "" {
+		t.Fatalf("notice = %q, want empty for custom proxy", plan.Notice)
+	}
+	if !slices.Contains(plan.Args, "-J") || !slices.Contains(plan.Args, "bastion") {
+		t.Fatalf("args = %#v, want custom proxy jump preserved", plan.Args)
+	}
+	if plan.KnownHostRepair == nil {
+		t.Fatal("KnownHostRepair = nil, want VM repair metadata")
+	}
+	if len(plan.KnownHostRepair.ExtraAliases) != 0 {
+		t.Fatalf("repair extra aliases = %#v, want none for custom proxy", plan.KnownHostRepair.ExtraAliases)
+	}
+}
+
 func TestServiceShellCommandForVMKeepsUserStrictHostKeyChecking(t *testing.T) {
 	_, gotOptions, err := serviceShellCommandFromResponse(
 		"yeet-pve1",

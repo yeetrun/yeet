@@ -493,10 +493,11 @@ func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, re
 
 	out = appendVMSSHBaseOptions(out, target)
 	out = appendVMSSHIdentityOptions(out, service, proxyHost, addGeneratedAlias, addGeneratedCheckHostIP)
+	userProxy := hasSSHProxyOption(out)
 	out, generatedProxy := appendVMSSHProxyOptions(out, target, proxyHost, info)
 	plan := vmSSHOptionsPlan{
 		Options:        out,
-		Notice:         vmSSHTransportNotice(proxyHost, target, generatedProxy),
+		Notice:         vmSSHTransportNotice(proxyHost, target, generatedProxy, userProxy),
 		GeneratedProxy: generatedProxy,
 	}
 	if addYeetKnownHosts && addGeneratedAlias && knownHosts == vmSSHKnownHostsFile() && alias == vmSSHHostKeyAlias(service, proxyHost) {
@@ -624,12 +625,15 @@ func shouldProxyVMSSH(resp catchrpc.ServiceInfoResponse, guestHost, mode string,
 	return forceProxy || mode == "svc"
 }
 
-func vmSSHTransportNotice(proxyHost string, target vmSSHTargetInfo, generatedProxy bool) string {
+func vmSSHTransportNotice(proxyHost string, target vmSSHTargetInfo, generatedProxy, userProxy bool) string {
 	if strings.TrimSpace(target.Host) == "" {
 		return ""
 	}
 	if generatedProxy {
 		return fmt.Sprintf("Proxying VM SSH through %s to %s", proxyHost, target.Host)
+	}
+	if userProxy {
+		return ""
 	}
 	if target.Mode == "lan" {
 		return fmt.Sprintf("Connecting directly to VM LAN IP %s", target.Host)
