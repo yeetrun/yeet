@@ -153,11 +153,12 @@ func buildHelpConfig() yargs.HelpConfig {
 	subcommands["ssh"] = yargs.SubCommandInfo{
 		Name:        "ssh",
 		Description: "Open SSH to the catch host (optionally into a service dir)",
-		Usage:       "[ssh-opts...] [<svc>] [-- <remote-cmd...>]",
+		Usage:       "[--force-proxy] [ssh-opts...] [<svc>] [-- <remote-cmd...>]",
 		Examples: []string{
 			"yeet ssh",
 			"yeet --host=<host> ssh",
 			"yeet ssh <svc>",
+			"yeet ssh --force-proxy <vm>",
 			"yeet ssh -- uname -a",
 			"yeet ssh <svc> -- ls -la",
 		},
