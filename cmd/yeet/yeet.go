@@ -14,13 +14,17 @@ import (
 	"github.com/yeetrun/yeet/pkg/buildinfo"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/yeet"
+	"golang.org/x/term"
 )
 
 var (
-	bridgedArgs     []string
-	handleSvcCmdFn  = yeet.HandleSvcCmd
-	handleUpgradeFn = yeet.HandleUpgrade
-	rawArgs         []string
+	bridgedArgs                   []string
+	handleSvcCmdFn                = yeet.HandleSvcCmd
+	handleUpgradeFn               = yeet.HandleUpgrade
+	isTerminalFn                  = term.IsTerminal
+	maybePrintUpdateAdvisoryFn    = yeet.MaybePrintUpdateAdvisory
+	projectHostCountForAdvisoryFn = yeet.ProjectHostCountForAdvisory
+	rawArgs                       []string
 )
 
 func main() {
@@ -68,11 +72,20 @@ func run() int {
 	handlers["upgrade"] = handleUpgradeFn
 
 	groups := buildGroupHandlers()
+	exitCode := 0
 	if err := yargs.RunSubcommandsWithGroups(context.Background(), args, helpConfig, globalFlagsParsed{}, handlers, groups); err != nil {
 		yeet.PrintCLIError(os.Stderr, err)
-		return 1
+		exitCode = 1
 	}
-	return 0
+	maybePrintUpdateAdvisoryFn(
+		os.Stderr,
+		args,
+		exitCode,
+		isTerminalFn(int(os.Stdout.Fd())),
+		isTerminalFn(int(os.Stderr.Fd())),
+		projectHostCountForAdvisoryFn(),
+	)
+	return exitCode
 }
 
 func handleSchemaBackedHelp(args []string, config yargs.HelpConfig) bool {
