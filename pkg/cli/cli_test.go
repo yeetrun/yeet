@@ -711,6 +711,9 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if !containsString(reg.SubCommands["run"].Info.Examples, "yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs") {
 		t.Fatalf("run examples = %#v, want zfs service-root example", reg.SubCommands["run"].Info.Examples)
 	}
+	if !containsString(reg.SubCommands["run"].Info.Examples, "yeet run <svc> vm://nixos/26.05") {
+		t.Fatalf("run examples = %#v, want NixOS VM example", reg.SubCommands["run"].Info.Examples)
+	}
 	if reg.SubCommands["remove"].Info.Aliases[0] != "rm" {
 		t.Fatalf("registry remove aliases = %v, want rm", reg.SubCommands["remove"].Info.Aliases)
 	}
@@ -856,6 +859,9 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	}
 	if RemoteGroupFlagSpecs()["vm"]["images"]["--dry-run"].ConsumesValue {
 		t.Fatal("vm images --dry-run should not consume a value")
+	}
+	if !containsString(group.Commands["images"].Examples, "yeet vm images update vm://nixos/26.05") {
+		t.Fatalf("vm images examples = %#v, want selected NixOS update example", group.Commands["images"].Examples)
 	}
 }
 

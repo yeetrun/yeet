@@ -1,6 +1,13 @@
-# Yeet Ubuntu VM Image
+# Yeet VM Images
 
-The v0 VM payload is `vm://ubuntu/26.04`.
+Official VM image payloads:
+
+- `vm://ubuntu/26.04`
+- `vm://nixos/26.05`
+
+This directory contains the shared Firecracker kernel helper and the Ubuntu
+rootfs builder used by yeet. The release workflows that publish public bundles
+live in `github.com/yeetrun/yeet-vm-images`.
 
 The current fast bundle version is `ubuntu-26.04-amd64-v13`. It is built from
 the official Ubuntu 26.04 cloud image, boots a yeet-managed kernel under
@@ -16,11 +23,15 @@ Release asset names:
 - `kernel.config`
 - `checksums.txt`
 
-The manifest URL used by catch is:
+The Ubuntu manifest URL used by catch is:
 
 `https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json`
 
-## Fast Profile
+The NixOS manifest URL used by catch is:
+
+`https://github.com/yeetrun/yeet-vm-images/releases/download/nixos-26.05-amd64-latest/manifest.json`
+
+## Ubuntu Fast Profile
 
 The default build profile is `fast`. It requires a kernel that already has the
 Firecracker boot path built in. The kernel builder pins the Firecracker microVM
@@ -79,6 +90,19 @@ The fast profile customizes the Ubuntu rootfs before compression:
 The fast profile does not preinstall Tailscale or any other overlay network
 agent. Users can install and manage those services inside the VM using normal
 Ubuntu packages.
+
+## NixOS Profile
+
+The NixOS image is built from NixOS configuration, not from rootfs patching.
+The image declares the yeet default user, SSH configuration, networkd units,
+readiness service, shell defaults, and `/etc/yeet-vm` metadata consumers in
+NixOS modules. Yeet writes only data under `/etc/yeet-vm` for NixOS guests:
+hostname, authorized keys, and generated network files.
+
+NixOS guests use the same yeet-managed Firecracker kernel and init shim boot
+model as Ubuntu, with `yeet.system_init=/run/current-system/init` passed to
+`yeet-init`. Guest package and service changes should be made with normal
+NixOS configuration and `nixos-rebuild`.
 
 ## Stock Profile
 
