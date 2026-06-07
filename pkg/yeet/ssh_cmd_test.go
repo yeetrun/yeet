@@ -679,6 +679,88 @@ func TestRunSSHPlanRepairsVMKnownHostAliasAndRetries(t *testing.T) {
 	}
 }
 
+func TestRunSSHPlanPrintsVMTransportNoticeToStderr(t *testing.T) {
+	_, plan := testSSHExecutionPlan(t,
+		[]string{"ssh", "devbox", "--", "hostname"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: serviceTypeVM,
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH:      &catchrpc.ServiceVMSSH{User: "ubuntu"},
+					Networks: []catchrpc.ServiceVMNetwork{{Mode: "svc", IP: "192.168.100.12"}},
+				},
+			},
+		},
+	)
+	stubRunSSHCommand(t, func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+		_, _ = io.WriteString(stdout, "devbox\n")
+		return nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	if err := runSSHPlan(context.Background(), plan, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("runSSHPlan: %v", err)
+	}
+	if stdout.String() != "devbox\n" {
+		t.Fatalf("stdout = %q, want devbox newline", stdout.String())
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "Proxying VM SSH through yeet-lab to 192.168.100.12" {
+		t.Fatalf("stderr = %q, want VM transport notice", got)
+	}
+}
+
+func TestRunSSHPlanPrintsDirectLANNoticeToStderr(t *testing.T) {
+	_, plan := testSSHExecutionPlan(t,
+		[]string{"ssh", "devbox"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: serviceTypeVM,
+				VM: &catchrpc.ServiceVM{
+					SSH:      &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "10.0.4.80"},
+					Networks: []catchrpc.ServiceVMNetwork{{Mode: "lan", IP: "10.0.4.80"}},
+				},
+			},
+		},
+	)
+	stubRunSSHCommand(t, func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+		_, _ = io.WriteString(stdout, "devbox\n")
+		return nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	if err := runSSHPlan(context.Background(), plan, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("runSSHPlan: %v", err)
+	}
+	if stdout.String() != "devbox\n" {
+		t.Fatalf("stdout = %q, want devbox newline", stdout.String())
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "Connecting directly to VM LAN IP 10.0.4.80" {
+		t.Fatalf("stderr = %q, want direct LAN notice", got)
+	}
+}
+
+func TestRunSSHPlanDoesNotPrintNoticeForRegularService(t *testing.T) {
+	plan := sshExecutionPlan{Args: []string{"root@yeet-lab", "true"}}
+	stubRunSSHCommand(t, func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+		_, _ = io.WriteString(stdout, "ok\n")
+		return nil
+	})
+
+	var stdout, stderr bytes.Buffer
+	if err := runSSHPlan(context.Background(), plan, nil, &stdout, &stderr); err != nil {
+		t.Fatalf("runSSHPlan: %v", err)
+	}
+	if stdout.String() != "ok\n" {
+		t.Fatalf("stdout = %q, want ok newline", stdout.String())
+	}
+	if stderr.String() != "" {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
 func TestRunSSHPlanDoesNotRepairCustomUserKnownHostsFile(t *testing.T) {
 	_, plan := testSSHExecutionPlan(t, []string{"ssh", "-o", "UserKnownHostsFile=/tmp/custom-known-hosts", "devbox"}, vmSSHRepairServiceInfo())
 	assertNoSSHRepairOnChangedHostKey(t, plan)
