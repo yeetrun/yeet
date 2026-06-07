@@ -108,15 +108,17 @@ func promptTailscaleClientSecret(out io.Writer, in io.Reader) (string, error) {
 	for _, line := range []string{
 		"Tailscale OAuth setup",
 		"",
-		"1) Create a tag for yeet services:",
+		"1) Choose an owner tag for yeet, such as tag:yeet:",
 		"   https://login.tailscale.com/admin/acls/visual/tags",
-		"   Example: tag:app",
-		"2) Create a trust credential (OAuth client):",
+		"   Let that owner tag own the service tags yeet-managed services may use.",
+		"2) Create a Tailscale OAuth client:",
 		"   https://login.tailscale.com/admin/settings/trust-credentials",
-		"   - Scope: Devices -> Core (write)",
-		"   - Tags: select the tag you created (e.g. tag:app)",
+		"   - Scope: Auth Keys (write), also called auth_keys",
+		"   - Tags: select the owner tag, such as tag:yeet",
+		"3) Make sure tagOwners lets that owner tag assign your service tags.",
+		"   Docs: https://yeetrun.com/docs/concepts/tailscale",
 		"",
-		"Client secret:",
+		"Tailscale OAuth client secret:",
 		"Paste the client secret and press Enter when done.",
 	} {
 		if _, err := fmt.Fprintln(out, line); err != nil {

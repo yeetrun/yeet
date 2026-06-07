@@ -18,15 +18,16 @@ import (
 
 func TestParseInitArgs(t *testing.T) {
 	tests := []struct {
-		name        string
-		args        []string
-		wantPos     []string
-		wantGithub  bool
-		wantNightly bool
-		wantDocker  bool
-		wantVMTools bool
-		wantTSAuth  string
-		wantErr     bool
+		name         string
+		args         []string
+		wantPos      []string
+		wantGithub   bool
+		wantNightly  bool
+		wantDocker   bool
+		wantVMTools  bool
+		wantTSAuth   string
+		wantTSClient string
+		wantErr      bool
 	}{
 		{
 			name:    "strips command name",
@@ -42,6 +43,22 @@ func TestParseInitArgs(t *testing.T) {
 			wantDocker:  true,
 			wantVMTools: true,
 			wantTSAuth:  "tskey-test",
+		},
+		{
+			name:         "parses tailscale oauth client secret",
+			args:         []string{"--ts-client-secret=tskey-client-test", "root@example.com"},
+			wantPos:      []string{"root@example.com"},
+			wantTSClient: "tskey-client-test",
+		},
+		{
+			name:    "rejects auth key and client secret together",
+			args:    []string{"--ts-auth-key=tskey-auth-test", "--ts-client-secret=tskey-client-test", "root@example.com"},
+			wantErr: true,
+		},
+		{
+			name:    "rejects invalid client secret",
+			args:    []string{"--ts-client-secret=not-a-client-secret", "root@example.com"},
+			wantErr: true,
 		},
 		{
 			name:    "rejects too many args",
@@ -79,6 +96,9 @@ func TestParseInitArgs(t *testing.T) {
 			}
 			if opts.tsAuthKey != tt.wantTSAuth {
 				t.Fatalf("tsAuthKey = %q, want %q", opts.tsAuthKey, tt.wantTSAuth)
+			}
+			if opts.tsClientSecret != tt.wantTSClient {
+				t.Fatalf("tsClientSecret = %q, want %q", opts.tsClientSecret, tt.wantTSClient)
 			}
 		})
 	}
@@ -205,7 +225,7 @@ func TestInitCatchPassesInstallDockerFlagToRemoteInstall(t *testing.T) {
 	var steps []string
 	configureSteps := stubInitCatchWorkflow(t)
 	configureSteps(&steps)
-	installInitCatchFn = func(_ *initUI, _ string, _ bool, installDocker bool, installVMTools bool, _ string) error {
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, installDocker bool, installVMTools bool, _ string, _ string, _ []string) error {
 		steps = append(steps, "install-docker:"+boolString(installDocker)+":install-vm-tools:"+boolString(installVMTools))
 		return nil
 	}
@@ -230,6 +250,8 @@ func TestRemoteCatchInstallArgs(t *testing.T) {
 		installDocker  bool
 		installVMTools bool
 		tsAuthKey      string
+		tsClientSecret string
+		tsCatchTags    []string
 		want           []string
 	}{
 		{
@@ -248,6 +270,17 @@ func TestRemoteCatchInstallArgs(t *testing.T) {
 			want: []string{
 				"-t", "root@example.com",
 				"env", "CATCH_INSTALL_USER=root", "CATCH_INSTALL_HOST=example.com", "TS_AUTHKEY=tskey-test",
+				"./catch", "--tsnet-host=catch-host", "install",
+			},
+		},
+		{
+			name:           "tailscale oauth env",
+			userAtRemote:   "root@example.com",
+			tsClientSecret: "tskey-client-test",
+			tsCatchTags:    []string{"tag:catch"},
+			want: []string{
+				"-t", "root@example.com",
+				"env", "CATCH_INSTALL_USER=root", "CATCH_INSTALL_HOST=example.com", "TS_CLIENT_SECRET=tskey-client-test", "TS_CATCH_TAGS=tag:catch",
 				"./catch", "--tsnet-host=catch-host", "install",
 			},
 		},
@@ -277,7 +310,7 @@ func TestRemoteCatchInstallArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := remoteCatchInstallArgs(tt.userAtRemote, tt.useSudo, tt.installDocker, tt.installVMTools, tt.tsAuthKey)
+			got := remoteCatchInstallArgs(tt.userAtRemote, tt.useSudo, tt.installDocker, tt.installVMTools, tt.tsAuthKey, tt.tsClientSecret, tt.tsCatchTags)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("remoteCatchInstallArgs = %#v, want %#v", got, tt.want)
 			}
@@ -410,7 +443,7 @@ func TestInstallInitCatchUsesFilteredSSHOutput(t *testing.T) {
 	}, "\n")+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch-host", "root@example.com", catchServiceName)
 
-	if err := installInitCatch(ui, "root@example.com", false, false, false, ""); err != nil {
+	if err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil); err != nil {
 		t.Fatalf("installInitCatch error: %v", err)
 	}
 	raw, err := os.ReadFile(logFile)
@@ -441,7 +474,7 @@ func TestInstallInitCatchReportsSSHError(t *testing.T) {
 	fakeSSHInPath(t, "exit 1\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	err := installInitCatch(ui, "root@example.com", false, false, false, "")
+	err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil)
 	if err == nil || !strings.Contains(err.Error(), "failed to run catch binary") {
 		t.Fatalf("installInitCatch error = %v, want install error", err)
 	}
@@ -456,7 +489,7 @@ func TestInstallInitCatchReportsRemoteInstallStatusError(t *testing.T) {
 	}, "\n")+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	err := installInitCatch(ui, "root@example.com", false, false, false, "")
+	err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil)
 	if err == nil || !strings.Contains(err.Error(), "failed to run catch binary") {
 		t.Fatalf("installInitCatch error = %v, want install error", err)
 	}
@@ -481,8 +514,66 @@ func TestInstallInitCatchRetriesHungStatusPoll(t *testing.T) {
 	}, "\n")+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	if err := installInitCatch(ui, "root@example.com", false, false, false, ""); err != nil {
+	if err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil); err != nil {
 		t.Fatalf("installInitCatch error: %v", err)
+	}
+}
+
+func TestInstallInitCatchWithTailscaleRetryPromptsAfterCredentialError(t *testing.T) {
+	oldInstall := installInitCatchFn
+	oldIsTerminal := isTerminalFn
+	oldStdin := os.Stdin
+	oldStdout := os.Stdout
+	t.Cleanup(func() {
+		installInitCatchFn = oldInstall
+		isTerminalFn = oldIsTerminal
+		os.Stdin = oldStdin
+		os.Stdout = oldStdout
+	})
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
+	outR, outW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout pipe: %v", err)
+	}
+	os.Stdin = inR
+	os.Stdout = outW
+	isTerminalFn = func(int) bool { return true }
+	if _, err := inW.WriteString("tskey-client-good\n"); err != nil {
+		t.Fatalf("write prompt input: %v", err)
+	}
+	_ = inW.Close()
+
+	var installs int
+	var gotSecret string
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, tsClientSecret string, tsCatchTags []string) error {
+		installs++
+		if installs == 1 {
+			return errTailscaleCredentialRequired
+		}
+		gotSecret = tsClientSecret
+		if !reflect.DeepEqual(tsCatchTags, []string{defaultCatchTag}) {
+			t.Fatalf("tsCatchTags = %#v, want tag:catch", tsCatchTags)
+		}
+		return nil
+	}
+
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+	if err := installInitCatchWithTailscaleRetry(ui, "root@example.com", false, false, false, initOptions{}); err != nil {
+		t.Fatalf("installInitCatchWithTailscaleRetry error: %v", err)
+	}
+	if err := outW.Close(); err != nil {
+		t.Fatalf("stdout close: %v", err)
+	}
+	_, _ = io.ReadAll(outR)
+	if installs != 2 {
+		t.Fatalf("installs = %d, want 2", installs)
+	}
+	if gotSecret != "tskey-client-good" {
+		t.Fatalf("secret = %q, want prompted secret", gotSecret)
 	}
 }
 
@@ -492,7 +583,7 @@ func TestWaitDetachedInitCatchInstallStreamsLogsWhileStatusIsPending(t *testing.
 	fakeSSHInPath(t, strings.Join([]string{
 		"case \"$*\" in",
 		"  *'.status'*) ;;",
-		"  *'.log'*) printf '%s\\n' 'go to: https://login.tailscale.com/a/example' ;;",
+		"  *'.log'*) printf '%s\\n' 'tailscale OAuth setup failed: tag:catch not allowed' ;;",
 		"esac",
 	}, "\n")+"\n")
 	var out strings.Builder
@@ -505,8 +596,8 @@ func TestWaitDetachedInitCatchInstallStreamsLogsWhileStatusIsPending(t *testing.
 	if err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("waitDetachedInitCatchInstall error = %v, want timeout", err)
 	}
-	if !strings.Contains(out.String(), "login.tailscale.com") {
-		t.Fatalf("streamed output = %q, want login URL", out.String())
+	if !strings.Contains(out.String(), "tailscale OAuth setup failed") {
+		t.Fatalf("streamed output = %q, want OAuth error", out.String())
 	}
 }
 
@@ -664,7 +755,7 @@ func TestInitCatchStopsWhenInstallPrepFails(t *testing.T) {
 		steps = append(steps, "chmod")
 		return wantErr
 	}
-	installInitCatchFn = func(*initUI, string, bool, bool, bool, string) error {
+	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string) error {
 		t.Fatal("installInitCatchFn should not be called after chmod failure")
 		return nil
 	}
@@ -709,7 +800,7 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 	downloadInitCatchFn = func(*initUI, string, string, string, bool) error { return nil }
 	buildAndUploadInitCatchFn = func(*initUI, string, string, string, initCatchSource) error { return nil }
 	chmodInitCatchFn = func(*initUI, string) error { return nil }
-	installInitCatchFn = func(*initUI, string, bool, bool, bool, string) error { return nil }
+	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string) error { return nil }
 	prepareInitDockerInstallFn = func(_ *initUI, _ string, opts initOptions) (bool, error) {
 		return opts.installDocker, nil
 	}
@@ -738,7 +829,7 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 			*steps = append(*steps, "chmod")
 			return nil
 		}
-		installInitCatchFn = func(_ *initUI, _ string, useSudo bool, installDocker bool, installVMTools bool, _ string) error {
+		installInitCatchFn = func(_ *initUI, _ string, useSudo bool, installDocker bool, installVMTools bool, _ string, _ string, _ []string) error {
 			*steps = append(*steps, "install:"+boolString(useSudo))
 			return nil
 		}

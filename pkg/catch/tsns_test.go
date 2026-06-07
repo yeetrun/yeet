@@ -323,6 +323,13 @@ func TestTSClientRejectsInvalidSecret(t *testing.T) {
 	}
 }
 
+func TestGenerateTailscaleAuthKeyFromSecretRejectsInvalidSecret(t *testing.T) {
+	_, err := GenerateTailscaleAuthKeyFromSecret(context.Background(), "not-an-oauth-secret", []string{"tag:catch"})
+	if err == nil || !strings.Contains(err.Error(), "invalid tailscale oauth secret") {
+		t.Fatalf("GenerateTailscaleAuthKeyFromSecret error = %v, want invalid oauth secret", err)
+	}
+}
+
 func TestResolveTailscaleAuthKeyUsesProvidedKey(t *testing.T) {
 	server := newTestServer(t)
 	key, err := server.resolveTailscaleAuthKey(&db.TailscaleNetwork{Tags: []string{"tag:svc"}}, "tskey-auth-provided")
