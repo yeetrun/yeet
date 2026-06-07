@@ -201,6 +201,36 @@ func TestShouldUseSudoForInit(t *testing.T) {
 	}
 }
 
+func TestRemoteDockerInstalledUsesBashProbe(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "ssh.log")
+	fakeSSHInPath(t, `
+printf '%s\n' "$@" > `+strconvQuoteForShell(logFile)+`
+if [ "$#" -ne 2 ]; then
+	echo "ssh command must pass one quoted remote command" >&2
+	exit 127
+fi
+case "$2" in
+	"bash -lc "*"'if command -v docker"*) printf yes ;;
+	*) echo "unexpected remote command: $2" >&2; exit 2 ;;
+esac
+`)
+
+	installed, err := remoteDockerInstalled("root@example.com")
+	if err != nil {
+		t.Fatalf("remoteDockerInstalled failed: %v", err)
+	}
+	if !installed {
+		t.Fatal("installed = false, want true")
+	}
+	raw, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("read ssh log: %v", err)
+	}
+	if got := string(raw); !strings.Contains(got, "\nbash -lc ") {
+		t.Fatalf("ssh args = %q, want single bash -lc remote command", got)
+	}
+}
+
 func TestPrepareInitDockerInstallRequiresFlagWhenMissingAndNonInteractive(t *testing.T) {
 	oldRemoteDocker := remoteDockerInstalledFn
 	oldIsTerminal := isTerminalFn
