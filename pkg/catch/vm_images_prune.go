@@ -410,13 +410,14 @@ func renderVMImagePruneRowsTable(w io.Writer, rows []vmImagePruneRow) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "KIND\tSTATE\tVERSION\tPATH\tREASON"); err != nil {
+	if _, err := fmt.Fprintln(tw, "KIND\tSTATE\tPAYLOAD\tVERSION\tPATH\tREASON"); err != nil {
 		return err
 	}
 	for _, row := range rows {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			row.Kind,
 			row.State,
+			dash(row.Payload),
 			dash(row.Version),
 			dash(row.Path),
 			dash(row.Reason),
