@@ -17,9 +17,10 @@ import (
 )
 
 var (
-	bridgedArgs    []string
-	handleSvcCmdFn = yeet.HandleSvcCmd
-	rawArgs        []string
+	bridgedArgs     []string
+	handleSvcCmdFn  = yeet.HandleSvcCmd
+	handleUpgradeFn = yeet.HandleUpgrade
+	rawArgs         []string
 )
 
 func main() {
@@ -64,6 +65,7 @@ func run() int {
 	handlers["prefs"] = yeet.HandlePrefs
 	handlers["ssh"] = yeet.HandleSSH
 	handlers["skirt"] = yeet.HandleSkirt
+	handlers["upgrade"] = handleUpgradeFn
 
 	groups := buildGroupHandlers()
 	if err := yargs.RunSubcommandsWithGroups(context.Background(), args, helpConfig, globalFlagsParsed{}, handlers, groups); err != nil {

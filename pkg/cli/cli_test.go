@@ -132,6 +132,33 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	}
 }
 
+func TestParseUpgrade(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    UpgradeFlags
+		wantPos []string
+	}{
+		{name: "check all json", args: []string{"check", "--all", "--json"}, want: UpgradeFlags{All: true, JSON: true}, wantPos: []string{"check"}},
+		{name: "host yes", args: []string{"--host", "edge-a", "--yes"}, want: UpgradeFlags{Host: "edge-a", Yes: true}},
+		{name: "check flag alias", args: []string{"--check"}, want: UpgradeFlags{Check: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, pos, err := ParseUpgrade(tt.args)
+			if err != nil {
+				t.Fatalf("ParseUpgrade error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("flags = %#v, want %#v", got, tt.want)
+			}
+			if strings.Join(pos, ",") != strings.Join(tt.wantPos, ",") {
+				t.Fatalf("pos = %#v, want %#v", pos, tt.wantPos)
+			}
+		})
+	}
+}
+
 func TestParseRunAbsoluteServiceRootWithoutZFS(t *testing.T) {
 	flags, outArgs, err := ParseRun([]string{"--service-root=/srv/apps/svc-a", "payload"})
 	if err != nil {

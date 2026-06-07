@@ -164,6 +164,14 @@ type VersionFlags struct {
 	JSON bool
 }
 
+type UpgradeFlags struct {
+	All   bool
+	Host  string
+	JSON  bool
+	Yes   bool
+	Check bool
+}
+
 type EnvShowFlags struct {
 	Staged bool
 }
@@ -312,6 +320,14 @@ type mountFlagsParsed struct {
 
 type versionFlagsParsed struct {
 	JSON bool `flag:"json"`
+}
+
+type upgradeFlagsParsed struct {
+	All   bool   `flag:"all"`
+	Host  string `flag:"host"`
+	JSON  bool   `flag:"json"`
+	Yes   bool   `flag:"yes"`
+	Check bool   `flag:"check"`
 }
 
 type envShowFlagsParsed struct {
@@ -1202,6 +1218,23 @@ func ParseVersion(args []string) (VersionFlags, []string, error) {
 		return VersionFlags{}, nil, err
 	}
 	flags := VersionFlags{JSON: parsed.Flags.JSON}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseUpgrade(args []string) (UpgradeFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[upgradeFlagsParsed](parseArgs)
+	if err != nil {
+		return UpgradeFlags{}, nil, err
+	}
+	flags := UpgradeFlags{
+		All:   parsed.Flags.All,
+		Host:  parsed.Flags.Host,
+		JSON:  parsed.Flags.JSON,
+		Yes:   parsed.Flags.Yes,
+		Check: parsed.Flags.Check,
+	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
 }

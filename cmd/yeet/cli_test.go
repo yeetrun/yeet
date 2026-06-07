@@ -190,6 +190,82 @@ func TestRunRemoveHelpLLMShowsOptions(t *testing.T) {
 	}
 }
 
+func TestRunGlobalHelpIncludesUpgrade(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldStdout := os.Stdout
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		os.Stdout = oldStdout
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create stdout temp file: %v", err)
+	}
+	os.Stdout = stdoutFile
+	os.Args = []string{"yeet", "--help"}
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("global help should not call handler with args %v", args)
+		return nil
+	}
+
+	if got := run(); got != 0 {
+		t.Fatalf("run exit code = %d, want 0", got)
+	}
+	if _, err := stdoutFile.Seek(0, 0); err != nil {
+		t.Fatalf("seek stdout: %v", err)
+	}
+	rawStdout, err := os.ReadFile(stdoutFile.Name())
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	stdout := string(rawStdout)
+	for _, want := range []string{"upgrade", "Check for and install yeet/catch updates"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestRunUpgradeRoutesToLocalHandler(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldHandleUpgradeFn := handleUpgradeFn
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		handleUpgradeFn = oldHandleUpgradeFn
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	os.Args = []string{"yeet", "upgrade", "check", "--all"}
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("upgrade should not use remote handler with args %v", args)
+		return nil
+	}
+	var got []string
+	handleUpgradeFn = func(ctx context.Context, args []string) error {
+		got = append([]string(nil), args...)
+		return nil
+	}
+
+	if code := run(); code != 0 {
+		t.Fatalf("run exit code = %d, want 0", code)
+	}
+	if !reflect.DeepEqual(got, []string{"upgrade", "check", "--all"}) {
+		t.Fatalf("upgrade args = %#v, want command args", got)
+	}
+}
+
 func TestRunCronHelpLLMUsesSingleServicePlaceholder(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
