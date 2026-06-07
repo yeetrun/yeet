@@ -96,6 +96,22 @@ func TestVMImagesCmdJSONShowsListRows(t *testing.T) {
 	}
 }
 
+func TestTTYVMImageCacheLeavesManifestURLUnset(t *testing.T) {
+	server := newTestServer(t)
+	execer := &ttyExecer{s: server}
+
+	cache := execer.vmImageCache()
+	if cache.Root != filepath.Join(server.cfg.RootDir, "vm-images") {
+		t.Fatalf("cache root = %q, want VM image root under server root", cache.Root)
+	}
+	if cache.ManifestURL != "" {
+		t.Fatalf("manifest URL override = %q, want empty so official images can select their registry URL", cache.ManifestURL)
+	}
+	if got := cache.manifestURL(); got != defaultVMImageManifestURL {
+		t.Fatalf("manifestURL fallback = %q, want %q", got, defaultVMImageManifestURL)
+	}
+}
+
 func TestVMImagesCmdImportReadsStdinAndPrintsRef(t *testing.T) {
 	server := newTestServer(t)
 	restoreEnsure := stubManagedVMImageAsset(t, fakeManagedVMImageAsset(t))

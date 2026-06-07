@@ -58,8 +58,7 @@ func (e *ttyExecer) vmCmdFunc(args []string) error {
 
 func (e *ttyExecer) vmImageCache() vmImageCache {
 	return vmImageCache{
-		Root:        filepath.Join(e.s.cfg.RootDir, "vm-images"),
-		ManifestURL: defaultVMImageManifestURL,
+		Root: filepath.Join(e.s.cfg.RootDir, "vm-images"),
 	}
 }
 
