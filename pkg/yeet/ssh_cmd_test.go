@@ -157,6 +157,32 @@ func TestSSHInvocationFromArgsAppliesServiceOverride(t *testing.T) {
 	}
 }
 
+func TestSSHInvocationFromArgsConsumesForceProxy(t *testing.T) {
+	inv, err := sshInvocationFromArgs([]string{"ssh", "--force-proxy", "-i", "key.pem", "devbox", "--", "hostname"})
+	if err != nil {
+		t.Fatalf("sshInvocationFromArgs: %v", err)
+	}
+	if !inv.ForceProxy {
+		t.Fatal("ForceProxy = false, want true")
+	}
+	if !reflect.DeepEqual(inv.Options, []string{"-i", "key.pem"}) {
+		t.Fatalf("Options = %#v", inv.Options)
+	}
+	if inv.Service != "devbox" {
+		t.Fatalf("Service = %q", inv.Service)
+	}
+	if !reflect.DeepEqual(inv.Command, []string{"hostname"}) {
+		t.Fatalf("Command = %#v", inv.Command)
+	}
+}
+
+func TestSSHInvocationFromArgsRejectsForceProxyValue(t *testing.T) {
+	_, err := sshInvocationFromArgs([]string{"ssh", "--force-proxy=true", "devbox"})
+	if err == nil || !strings.Contains(err.Error(), "does not take a value") {
+		t.Fatalf("error = %v, want --force-proxy value error", err)
+	}
+}
+
 func TestResolveSSHHostUsesExplicitAndOverrideHosts(t *testing.T) {
 	oldPrefs := loadedPrefs
 	oldOverride := hostOverride
