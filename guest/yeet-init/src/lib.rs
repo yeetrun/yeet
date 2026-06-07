@@ -97,6 +97,11 @@ pub fn current_ipv4(iface: &str) -> Option<String> {
                 .args(["-o", "-4", "addr", "show", "dev", iface, "scope", "global"])
                 .output()
         })
+        .or_else(|_| {
+            Command::new("/run/current-system/sw/bin/ip")
+                .args(["-o", "-4", "addr", "show", "dev", iface, "scope", "global"])
+                .output()
+        })
         .ok()?;
     if !output.status.success() {
         return None;
