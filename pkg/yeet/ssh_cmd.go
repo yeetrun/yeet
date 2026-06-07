@@ -577,7 +577,7 @@ func vmSSHTarget(resp catchrpc.ServiceInfoResponse, forceProxy bool) vmSSHTarget
 	host := strings.TrimSpace(resp.Info.Network.SvcIP)
 	if resp.Info.VM != nil && resp.Info.VM.SSH != nil {
 		user = firstNonEmpty(strings.TrimSpace(resp.Info.VM.SSH.User), user)
-		host = firstNonEmpty(strings.TrimSpace(resp.Info.VM.SSH.Host), host)
+		host = firstNonEmpty(host, strings.TrimSpace(resp.Info.VM.SSH.Host))
 	}
 	mode := vmSSHNetworkMode(resp, host)
 	return vmSSHTargetInfo{

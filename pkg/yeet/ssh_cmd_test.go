@@ -364,7 +364,7 @@ func TestServiceShellCommandForVMSvcLANPrefersSvcAndProxies(t *testing.T) {
 				ServiceType: "vm",
 				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
 				VM: &catchrpc.ServiceVM{
-					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "10.0.4.80"},
 					Networks: []catchrpc.ServiceVMNetwork{
 						{Mode: "svc", IP: "192.168.100.12"},
 						{Mode: "lan", IP: "10.0.4.80"},
