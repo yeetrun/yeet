@@ -430,13 +430,24 @@ func vmMetadataForSettings(root, service string, vm db.VMConfig, network vmNetwo
 		return vmMetadataConfig{}, fmt.Errorf("read VM metadata authorized_keys: %w", err)
 	}
 	return vmMetadataConfig{
-		Hostname:   service,
-		User:       user,
-		SSHKey:     strings.TrimSpace(string(sshKey)),
-		Networks:   network.MetadataNetworks(),
-		FastBoot:   fastBoot,
-		HostKeyDir: filepath.Join(root, "metadata", "ssh-host-keys"),
+		Hostname:       service,
+		User:           user,
+		SSHKey:         strings.TrimSpace(string(sshKey)),
+		Networks:       network.MetadataNetworks(),
+		FastBoot:       fastBoot,
+		MetadataDriver: vmMetadataDriverForExistingVM(vm),
+		HostKeyDir:     filepath.Join(root, "metadata", "ssh-host-keys"),
 	}, nil
+}
+
+func vmMetadataDriverForExistingVM(vm db.VMConfig) string {
+	if strings.TrimSpace(vm.Image.Payload) == vmNixOS2605Payload {
+		return "nixos"
+	}
+	if image, ok := officialVMImageByVersion(vm.Image.Version); ok && image.Payload == vmNixOS2605Payload {
+		return "nixos"
+	}
+	return "ubuntu"
 }
 
 func (s *Server) applyVMServiceSettingsPlan(ctx context.Context, plan vmSettingsPlan) error {

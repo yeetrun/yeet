@@ -107,18 +107,23 @@ func TestImportLocalVMImagePreservesBundleManifestFastBootCapability(t *testing.
 	}
 	snapSupport := false
 	sourceManifest := vmImageManifest{
-		Name:          "yeet-test-image",
-		Version:       "test-image-v1",
-		Architecture:  "x86_64",
-		ImageProfile:  "fast",
-		KernelPolicy:  "yeet-managed",
-		GuestInit:     vmGuestInitPath,
-		SnapSupport:   &snapSupport,
-		Kernel:        "vmlinux",
-		RootFS:        "rootfs.ext4",
-		Firecracker:   "firecracker",
-		RootFSSize:    int64(len("local-rootfs")),
-		KernelVersion: "linux-source-test",
+		Name:            "yeet-test-image",
+		Version:         "test-image-v1",
+		Architecture:    "x86_64",
+		ImageProfile:    "fast",
+		Distro:          "nixos",
+		DistroVersion:   "26.05",
+		DefaultUser:     "nixos",
+		KernelPolicy:    "yeet-managed",
+		GuestInit:       vmGuestInitPath,
+		GuestSystemInit: "/run/current-system/init",
+		MetadataDriver:  "nixos",
+		SnapSupport:     &snapSupport,
+		Kernel:          "vmlinux",
+		RootFS:          "rootfs.ext4",
+		Firecracker:     "firecracker",
+		RootFSSize:      int64(len("local-rootfs")),
+		KernelVersion:   "linux-source-test",
 		Checksums: map[string]string{
 			"vmlinux":     strings.Repeat("a", 64),
 			"rootfs.ext4": strings.Repeat("b", 64),
@@ -149,6 +154,9 @@ func TestImportLocalVMImagePreservesBundleManifestFastBootCapability(t *testing.
 	}
 	if manifest.SnapSupport == nil || *manifest.SnapSupport {
 		t.Fatalf("manifest snap_support = %#v, want false", manifest.SnapSupport)
+	}
+	if manifest.Distro != "nixos" || manifest.DistroVersion != "26.05" || manifest.DefaultUser != "nixos" || manifest.GuestSystemInit != "/run/current-system/init" || manifest.MetadataDriver != "nixos" {
+		t.Fatalf("manifest NixOS metadata fields = %#v", manifest)
 	}
 	if !vmImageSupportsFastBoot(manifest) {
 		t.Fatal("imported manifest does not advertise fast boot")

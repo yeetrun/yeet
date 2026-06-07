@@ -212,6 +212,9 @@ func TestServiceSetVMPreservesNixOSUserAndSystemInit(t *testing.T) {
 	if injectedMetadata.User != "nixos" {
 		t.Fatalf("metadata user = %q, want nixos", injectedMetadata.User)
 	}
+	if injectedMetadata.MetadataDriver != "nixos" {
+		t.Fatalf("metadata driver = %q, want nixos", injectedMetadata.MetadataDriver)
+	}
 	assertFileContains(t, firecrackerPath, "yeet.system_init=/run/current-system/init")
 }
 

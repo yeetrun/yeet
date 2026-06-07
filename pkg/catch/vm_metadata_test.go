@@ -270,6 +270,50 @@ func TestWriteVMGuestMetadataFiles(t *testing.T) {
 	}
 }
 
+func TestWriteVMGuestMetadataFilesUsesNixOSDriver(t *testing.T) {
+	root := t.TempDir()
+	cfg := vmMetadataConfig{
+		Hostname:       "nixos-smoke",
+		User:           "nixos",
+		SSHKey:         "ssh-ed25519 AAAATEST user@example",
+		FastBoot:       true,
+		MetadataDriver: "nixos",
+		Networks: []vmGuestNetwork{{
+			Name:    "eth0",
+			Mode:    "svc",
+			Address: "192.168.100.12/24",
+			Gateway: "192.168.100.254",
+		}},
+	}
+
+	if err := writeVMGuestMetadataFiles(root, cfg); err != nil {
+		t.Fatalf("writeVMGuestMetadataFiles: %v", err)
+	}
+
+	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "hostname"), "nixos-smoke")
+	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "user"), "nixos")
+	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "authorized_keys"), "ssh-ed25519 AAAATEST")
+	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "systemd-network", "10-yeet-eth0.network"), "Address=192.168.100.12/24")
+
+	for _, path := range []string{
+		filepath.Join(root, "etc", "systemd", "system", "yeet-sshd.service"),
+		filepath.Join(root, "etc", "sudoers.d", "90-yeet-vm-nixos"),
+		filepath.Join(root, "home", "nixos", ".ssh", "authorized_keys"),
+		filepath.Join(root, "usr", "sbin", "sshd"),
+	} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("NixOS metadata driver wrote %s: %v", path, err)
+		}
+	}
+}
+
+func TestVMImageManifestMetadataDriverDefaultsToUbuntuWriter(t *testing.T) {
+	manifest := vmImageManifest{}
+	if got := manifest.MetadataDriverOr("ubuntu"); got != "ubuntu" {
+		t.Fatalf("metadata driver = %q, want ubuntu", got)
+	}
+}
+
 func TestWriteVMGuestMetadataFilesUsesLegacyGuestConfigWithoutFastBoot(t *testing.T) {
 	root := t.TempDir()
 	stubVMGuestChown(t)
@@ -528,7 +572,9 @@ func TestEnsureVMGuestSSHHostKeysRestoresPersistedKeys(t *testing.T) {
 	}
 
 	var commands [][]string
-	err := ensureVMGuestSSHHostKeys(context.Background(), root, keyDir, func(_ context.Context, cmd []string) error {
+	cfg := validVMMetadataConfig()
+	cfg.HostKeyDir = keyDir
+	err := ensureVMGuestSSHHostKeys(context.Background(), root, cfg, func(_ context.Context, cmd []string) error {
 		commands = append(commands, append([]string(nil), cmd...))
 		return nil
 	})
@@ -546,7 +592,9 @@ func TestEnsureVMGuestSSHHostKeysPersistsGeneratedKeys(t *testing.T) {
 	root := t.TempDir()
 	keyDir := filepath.Join(t.TempDir(), "keys")
 
-	err := ensureVMGuestSSHHostKeys(context.Background(), root, keyDir, func(_ context.Context, cmd []string) error {
+	cfg := validVMMetadataConfig()
+	cfg.HostKeyDir = keyDir
+	err := ensureVMGuestSSHHostKeys(context.Background(), root, cfg, func(_ context.Context, cmd []string) error {
 		if !reflect.DeepEqual(cmd, []string{"chroot", root, "ssh-keygen", "-A"}) {
 			t.Fatalf("host key command = %#v", cmd)
 		}
@@ -564,6 +612,39 @@ func TestEnsureVMGuestSSHHostKeysPersistsGeneratedKeys(t *testing.T) {
 	}
 	assertFileContains(t, filepath.Join(keyDir, "ssh_host_ed25519_key"), "generated-private")
 	assertFileContains(t, filepath.Join(keyDir, "ssh_host_ed25519_key.pub"), "generated-public")
+}
+
+func TestEnsureVMGuestSSHHostKeysUsesHostSideGenerationForNixOS(t *testing.T) {
+	root := t.TempDir()
+	keyDir := filepath.Join(t.TempDir(), "keys")
+	cfg := validVMMetadataConfig()
+	cfg.MetadataDriver = "nixos"
+	cfg.HostKeyDir = keyDir
+
+	var commands [][]string
+	err := ensureVMGuestSSHHostKeys(context.Background(), root, cfg, func(_ context.Context, cmd []string) error {
+		commands = append(commands, append([]string(nil), cmd...))
+		keyPath := cmd[4]
+		if err := os.MkdirAll(filepath.Dir(keyPath), 0o755); err != nil {
+			t.Fatalf("mkdir ssh dir: %v", err)
+		}
+		if err := os.WriteFile(keyPath, []byte("generated-"+cmd[2]), 0o600); err != nil {
+			t.Fatalf("write generated key: %v", err)
+		}
+		return os.WriteFile(keyPath+".pub", []byte("generated-"+cmd[2]+"-pub"), 0o644)
+	})
+	if err != nil {
+		t.Fatalf("ensureVMGuestSSHHostKeys: %v", err)
+	}
+	want := [][]string{
+		{"ssh-keygen", "-t", "ed25519", "-f", filepath.Join(root, "etc", "ssh", "ssh_host_ed25519_key"), "-N", ""},
+		{"ssh-keygen", "-t", "rsa", "-f", filepath.Join(root, "etc", "ssh", "ssh_host_rsa_key"), "-N", ""},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+	assertFileContains(t, filepath.Join(keyDir, "ssh_host_ed25519_key"), "generated-ed25519")
+	assertFileContains(t, filepath.Join(keyDir, "ssh_host_rsa_key"), "generated-rsa")
 }
 
 func TestVMRootFSMountCommandUsesPlainBlockMountForDevices(t *testing.T) {

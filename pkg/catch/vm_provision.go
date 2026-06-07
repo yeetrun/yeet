@@ -668,12 +668,21 @@ func vmGuestUserForImage(payload string, manifest vmImageManifest) string {
 	return manifest.DefaultUserOr(fallback)
 }
 
+func vmMetadataDriverForImage(payload string, manifest vmImageManifest) string {
+	fallback := "ubuntu"
+	if source, err := resolveVMImagePayload(payload); err == nil && source.Official != nil && source.Official.Payload == vmNixOS2605Payload {
+		fallback = "nixos"
+	}
+	return manifest.MetadataDriverOr(fallback)
+}
+
 func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resolvedRoot resolvedServiceRoot, shape vmShape, image vmImageAsset, svcNet *db.SvcNetwork, sshKey string) (vmProvisionPlan, error) {
 	networkPlan, err := e.vmNetworkPlanFromFlags(flags, svcNet)
 	if err != nil {
 		return vmProvisionPlan{}, err
 	}
 	guestUser := vmGuestUserForImage(payload, image.Manifest)
+	metadataDriver := vmMetadataDriverForImage(payload, image.Manifest)
 
 	runDir := serviceRunDirForRoot(resolvedRoot.Root)
 	binDir := serviceBinDirForRoot(resolvedRoot.Root)
@@ -749,7 +758,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 		DiskPath:               diskPath,
 		Network:                networkPlan,
 		SvcNetwork:             svcNet,
-		Metadata:               vmMetadataConfig{Hostname: e.sn, User: guestUser, SSHKey: sshKey, Networks: networkPlan.MetadataNetworks(), FastBoot: fastBoot, HostKeyDir: filepath.Join(resolvedRoot.Root, "metadata", "ssh-host-keys")},
+		Metadata:               vmMetadataConfig{Hostname: e.sn, User: guestUser, SSHKey: sshKey, Networks: networkPlan.MetadataNetworks(), FastBoot: fastBoot, MetadataDriver: metadataDriver, HostKeyDir: filepath.Join(resolvedRoot.Root, "metadata", "ssh-host-keys")},
 		FirecrackerConfigPath:  firecrackerPath,
 		FirecrackerConfig:      firecrackerConfig,
 		SystemdUnitStagePath:   filepath.Join(binDir, unitName),

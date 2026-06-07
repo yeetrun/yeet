@@ -58,8 +58,13 @@ type localVMImageRef struct {
 
 type localVMImageManifestCapabilities struct {
 	ImageProfile        string
+	Distro              string
+	DistroVersion       string
+	DefaultUser         string
 	KernelPolicy        string
 	GuestInit           string
+	GuestSystemInit     string
+	MetadataDriver      string
 	SnapSupportSet      bool
 	SnapSupport         bool
 	KernelVersion       string
@@ -213,16 +218,43 @@ func localVMImageCapabilities(source vmImageManifest, hasSource bool, managed vm
 }
 
 func (c *localVMImageManifestCapabilities) applySource(source vmImageManifest) {
-	if strings.TrimSpace(source.ImageProfile) != "" {
-		c.ImageProfile = source.ImageProfile
-	}
-	if strings.TrimSpace(source.GuestInit) == vmGuestInitPath {
-		c.GuestInit = vmGuestInitPath
-	}
+	c.applySourceIdentity(source)
+	c.applySourceBoot(source)
+	c.applySourceKernel(source)
 	if source.SnapSupport != nil {
 		c.SnapSupportSet = true
 		c.SnapSupport = *source.SnapSupport
 	}
+}
+
+func (c *localVMImageManifestCapabilities) applySourceIdentity(source vmImageManifest) {
+	if strings.TrimSpace(source.ImageProfile) != "" {
+		c.ImageProfile = source.ImageProfile
+	}
+	if strings.TrimSpace(source.Distro) != "" {
+		c.Distro = source.Distro
+	}
+	if strings.TrimSpace(source.DistroVersion) != "" {
+		c.DistroVersion = source.DistroVersion
+	}
+	if strings.TrimSpace(source.DefaultUser) != "" {
+		c.DefaultUser = source.DefaultUser
+	}
+	if strings.TrimSpace(source.MetadataDriver) != "" {
+		c.MetadataDriver = source.MetadataDriver
+	}
+}
+
+func (c *localVMImageManifestCapabilities) applySourceBoot(source vmImageManifest) {
+	if strings.TrimSpace(source.GuestInit) == vmGuestInitPath {
+		c.GuestInit = vmGuestInitPath
+	}
+	if strings.TrimSpace(source.GuestSystemInit) != "" {
+		c.GuestSystemInit = source.GuestSystemInit
+	}
+}
+
+func (c *localVMImageManifestCapabilities) applySourceKernel(source vmImageManifest) {
 	if strings.TrimSpace(source.KernelVersion) != "" {
 		c.KernelVersion = source.KernelVersion
 	}
@@ -822,8 +854,13 @@ func localVMImageManifest(name, version, rootFSName string, rootFSSize int64, ch
 
 func (c localVMImageManifestCapabilities) applyToManifest(manifest *vmImageManifest) {
 	manifest.ImageProfile = c.ImageProfile
+	manifest.Distro = c.Distro
+	manifest.DistroVersion = c.DistroVersion
+	manifest.DefaultUser = c.DefaultUser
 	manifest.KernelPolicy = c.KernelPolicy
 	manifest.GuestInit = c.GuestInit
+	manifest.GuestSystemInit = c.GuestSystemInit
+	manifest.MetadataDriver = c.MetadataDriver
 	if c.SnapSupportSet {
 		snapSupport := c.SnapSupport
 		manifest.SnapSupport = &snapSupport
@@ -835,8 +872,13 @@ func (c localVMImageManifestCapabilities) applyToManifest(manifest *vmImageManif
 func localVMImageCapabilitiesFromManifest(manifest vmImageManifest) localVMImageManifestCapabilities {
 	caps := localVMImageManifestCapabilities{
 		ImageProfile:        manifest.ImageProfile,
+		Distro:              manifest.Distro,
+		DistroVersion:       manifest.DistroVersion,
+		DefaultUser:         manifest.DefaultUser,
 		KernelPolicy:        manifest.KernelPolicy,
 		GuestInit:           manifest.GuestInit,
+		GuestSystemInit:     manifest.GuestSystemInit,
+		MetadataDriver:      manifest.MetadataDriver,
 		KernelVersion:       manifest.KernelVersion,
 		UbuntuKernelVersion: manifest.UbuntuKernelVersion,
 	}
