@@ -154,3 +154,27 @@ func TestBuildUpgradeReportClassifiesStaleAndUnreachable(t *testing.T) {
 		t.Fatalf("catch rows = %#v", report.Catch)
 	}
 }
+
+func TestBuildUpgradeReportClassifiesDevCatch(t *testing.T) {
+	oldLatest := fetchUpgradeLatestFn
+	oldInfo := fetchUpgradeCatchInfoFn
+	t.Cleanup(func() {
+		fetchUpgradeLatestFn = oldLatest
+		fetchUpgradeCatchInfoFn = oldInfo
+	})
+	fetchUpgradeLatestFn = func(context.Context, buildinfo.Channel, time.Time) (releaseCacheEntry, error) {
+		return releaseCacheEntry{Tag: "v0.5.13"}, nil
+	}
+	fetchUpgradeCatchInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{Version: "47ee0875a+dirty", InstallUser: "root", InstallHost: host}, nil
+	}
+
+	report := buildUpgradeReport(context.Background(), upgradeCheckRequest{
+		Local: buildinfo.Info{Version: "v0.5.13", Channel: buildinfo.ChannelStable},
+		Hosts: []string{"edge"},
+		Now:   time.Unix(100, 0),
+	})
+	if report.Catch[0].Status != upgradeStatusDev || !strings.Contains(report.Catch[0].Reason, "source/dev") {
+		t.Fatalf("catch row = %#v, want dev status", report.Catch[0])
+	}
+}
