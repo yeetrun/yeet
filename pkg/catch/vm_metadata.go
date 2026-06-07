@@ -26,11 +26,12 @@ var vmGuestChown = os.Chown
 var vmGuestGhosttyTerminfoSource string
 
 type vmMetadataConfig struct {
-	Hostname string
-	User     string
-	SSHKey   string
-	Networks []vmGuestNetwork
-	FastBoot bool
+	Hostname       string
+	User           string
+	SSHKey         string
+	Networks       []vmGuestNetwork
+	FastBoot       bool
+	MetadataDriver string
 
 	HostKeyDir string
 }
@@ -174,7 +175,7 @@ func injectVMMetadataIntoRootFSWith(ctx context.Context, diskPath string, cfg vm
 	if err := installVMGuestTerminfo(ctx, mountRoot, runner); err != nil {
 		return err
 	}
-	if err := ensureVMGuestSSHHostKeys(ctx, mountRoot, cfg.HostKeyDir, runner); err != nil {
+	if err := ensureVMGuestSSHHostKeys(ctx, mountRoot, cfg, runner); err != nil {
 		return err
 	}
 	return nil
@@ -214,17 +215,20 @@ func joinVMMetadataDeferredError(retErr, err error, label string) error {
 	return errors.Join(retErr, err)
 }
 
-func ensureVMGuestSSHHostKeys(ctx context.Context, root, keyDir string, runner vmCommandRunner) error {
+func ensureVMGuestSSHHostKeys(ctx context.Context, root string, cfg vmMetadataConfig, runner vmCommandRunner) error {
+	if strings.TrimSpace(cfg.MetadataDriver) == "nixos" {
+		return ensureVMGuestNixOSSSHHostKeys(ctx, root, cfg.HostKeyDir, runner)
+	}
 	if runner == nil {
 		runner = runVMCommand
 	}
-	if err := restoreVMGuestSSHHostKeys(root, keyDir); err != nil {
+	if err := restoreVMGuestSSHHostKeys(root, cfg.HostKeyDir); err != nil {
 		return err
 	}
 	if err := runner(ctx, []string{"chroot", root, "ssh-keygen", "-A"}); err != nil {
 		return fmt.Errorf("generate VM SSH host keys: %w", err)
 	}
-	return persistVMGuestSSHHostKeys(root, keyDir)
+	return persistVMGuestSSHHostKeys(root, cfg.HostKeyDir)
 }
 
 func restoreVMGuestSSHHostKeys(root, keyDir string) error {
@@ -295,6 +299,17 @@ func writeVMGuestMetadataFiles(root string, cfg vmMetadataConfig) error {
 	if err := validateVMMetadata(cfg); err != nil {
 		return err
 	}
+	switch strings.TrimSpace(cfg.MetadataDriver) {
+	case "", "ubuntu":
+		return writeVMGuestUbuntuMetadataFiles(root, cfg)
+	case "nixos":
+		return writeVMGuestNixOSMetadataFiles(root, cfg)
+	default:
+		return fmt.Errorf("unsupported VM metadata driver %q", cfg.MetadataDriver)
+	}
+}
+
+func writeVMGuestUbuntuMetadataFiles(root string, cfg vmMetadataConfig) error {
 	if err := writeVMGuestBaseFiles(root, cfg); err != nil {
 		return err
 	}

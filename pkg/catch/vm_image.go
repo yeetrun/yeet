@@ -131,6 +131,16 @@ func (m vmImageManifest) GuestSystemInitOr(fallback string) string {
 	return "/usr/lib/systemd/systemd"
 }
 
+func (m vmImageManifest) MetadataDriverOr(fallback string) string {
+	if driver := strings.TrimSpace(m.MetadataDriver); driver != "" {
+		return driver
+	}
+	if driver := strings.TrimSpace(fallback); driver != "" {
+		return driver
+	}
+	return "ubuntu"
+}
+
 func resolveVMImagePayload(payload string) (vmImageSource, error) {
 	payload = strings.TrimSpace(payload)
 	if payload == "" {
