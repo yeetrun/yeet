@@ -154,7 +154,7 @@ Get detailed help: `yeet ip --help-llm`
 
 ### `list-hosts`
 
-List all hosts with the given tags
+List tailnet hosts with the given tags; requires a local Tailscale client
 
 Get detailed help: `yeet list-hosts --help-llm`
 
@@ -975,7 +975,7 @@ Progress output (auto|tty|plain|quiet)
 ````
 # yeet list-hosts
 
-List all hosts with the given tags
+List tailnet hosts with the given tags; requires a local Tailscale client
 
 ## Usage
 
