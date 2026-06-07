@@ -133,9 +133,9 @@ func buildHelpConfig() yargs.HelpConfig {
 		Description: "Install catch on a remote host (local build or GitHub release)",
 		Usage:       "[--from-github] [--nightly] [--install-docker] [--ts-auth-key=<key>] [ROOT@HOST]",
 		Examples: []string{
-			"yeet init root@<host>",
 			"yeet init --install-docker root@<host>",
 			"yeet init --install-docker --ts-auth-key=<key> root@<host>",
+			"yeet init root@<host>",
 			"yeet init",
 		},
 	}
