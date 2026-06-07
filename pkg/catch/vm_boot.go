@@ -23,7 +23,7 @@ func vmKernelBootArgs(service string, network vmNetworkPlan, manifest vmImageMan
 		"panic=1",
 		"init=" + vmGuestInitPath,
 	}
-	if systemInit := manifest.GuestSystemInitOr(""); systemInit != "" {
+	if systemInit := strings.TrimSpace(manifest.GuestSystemInit); systemInit != "" {
 		if err := validateVMGuestSystemInit(systemInit); err != nil {
 			return "", err
 		}

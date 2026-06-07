@@ -75,6 +75,18 @@ func TestVMKernelBootArgsIncludesGuestSystemInit(t *testing.T) {
 	}
 }
 
+func TestVMKernelBootArgsOmitsGuestSystemInitWhenManifestDoesNotDeclareIt(t *testing.T) {
+	network := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+
+	got, err := vmKernelBootArgs("devbox", network, vmImageManifest{GuestInit: vmGuestInitPath})
+	if err != nil {
+		t.Fatalf("vmKernelBootArgs: %v", err)
+	}
+	if strings.Contains(got, "yeet.system_init=") {
+		t.Fatalf("boot args include unexpected system init: %s", got)
+	}
+}
+
 func TestVMKernelBootArgsRejectsUnsafeGuestSystemInit(t *testing.T) {
 	network := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 
