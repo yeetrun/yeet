@@ -61,8 +61,10 @@ func TestYeetReleaseAssetNamesRejectUnsupported(t *testing.T) {
 
 func TestResolveYeetReleaseAsset(t *testing.T) {
 	originalFetch := fetchGitHubReleaseFn
+	originalFetchByTag := fetchGitHubReleaseByTagFn
 	t.Cleanup(func() {
 		fetchGitHubReleaseFn = originalFetch
+		fetchGitHubReleaseByTagFn = originalFetchByTag
 	})
 
 	var gotNightly bool
@@ -77,7 +79,7 @@ func TestResolveYeetReleaseAsset(t *testing.T) {
 		}, nil
 	}
 
-	assetName, assetURL, shaURL, tag, err := resolveYeetReleaseAsset("darwin", "arm64", true)
+	assetName, assetURL, shaURL, tag, err := resolveYeetReleaseAsset("darwin", "arm64", true, "")
 	if err != nil {
 		t.Fatalf("resolveYeetReleaseAsset failed: %v", err)
 	}
@@ -100,8 +102,69 @@ func TestResolveYeetReleaseAsset(t *testing.T) {
 	fetchGitHubReleaseFn = func(bool) (githubRelease, error) {
 		return githubRelease{}, errors.New("boom")
 	}
-	_, _, _, _, err = resolveYeetReleaseAsset("linux", "amd64", false)
+	_, _, _, _, err = resolveYeetReleaseAsset("linux", "amd64", false, "")
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("expected fetch error, got %v", err)
+	}
+}
+
+func TestResolveYeetReleaseAssetUsesSpecificVersion(t *testing.T) {
+	originalFetch := fetchGitHubReleaseFn
+	originalFetchByTag := fetchGitHubReleaseByTagFn
+	t.Cleanup(func() {
+		fetchGitHubReleaseFn = originalFetch
+		fetchGitHubReleaseByTagFn = originalFetchByTag
+	})
+
+	fetchGitHubReleaseFn = func(bool) (githubRelease, error) {
+		t.Fatal("specific version should not fetch latest")
+		return githubRelease{}, nil
+	}
+	var gotTag string
+	fetchGitHubReleaseByTagFn = func(tag string) (githubRelease, error) {
+		gotTag = tag
+		return githubRelease{
+			TagName: "v0.6.1",
+			Assets: []githubAsset{
+				{Name: "yeet-linux-amd64.tar.gz", BrowserDownloadURL: "https://example.com/yeet-linux-amd64.tar.gz"},
+				{Name: "yeet-linux-amd64.tar.gz.sha256", BrowserDownloadURL: "https://example.com/yeet-linux-amd64.tar.gz.sha256"},
+			},
+		}, nil
+	}
+
+	assetName, assetURL, shaURL, tag, err := resolveYeetReleaseAsset("linux", "amd64", false, " v0.6.1 ")
+	if err != nil {
+		t.Fatalf("resolveYeetReleaseAsset failed: %v", err)
+	}
+	if gotTag != "v0.6.1" {
+		t.Fatalf("tag fetch = %q, want v0.6.1", gotTag)
+	}
+	if assetName != "yeet-linux-amd64.tar.gz" || assetURL == "" || shaURL == "" || tag != "v0.6.1" {
+		t.Fatalf("assetName=%q assetURL=%q shaURL=%q tag=%q", assetName, assetURL, shaURL, tag)
+	}
+}
+
+func TestResolveCatchReleaseAssetUsesSpecificVersion(t *testing.T) {
+	originalFetchByTag := fetchGitHubReleaseByTagFn
+	t.Cleanup(func() { fetchGitHubReleaseByTagFn = originalFetchByTag })
+
+	var gotTag string
+	fetchGitHubReleaseByTagFn = func(tag string) (githubRelease, error) {
+		gotTag = tag
+		return githubRelease{
+			TagName: "v0.6.1",
+			Assets: []githubAsset{
+				{Name: "catch-linux-arm64.tar.gz", BrowserDownloadURL: "https://example.com/catch-linux-arm64.tar.gz"},
+				{Name: "catch-linux-arm64.tar.gz.sha256", BrowserDownloadURL: "https://example.com/catch-linux-arm64.tar.gz.sha256"},
+			},
+		}, nil
+	}
+
+	assetName, _, _, tag, err := resolveCatchReleaseAsset("linux", "arm64", false, "v0.6.1")
+	if err != nil {
+		t.Fatalf("resolveCatchReleaseAsset failed: %v", err)
+	}
+	if gotTag != "v0.6.1" || assetName != "catch-linux-arm64.tar.gz" || tag != "v0.6.1" {
+		t.Fatalf("gotTag=%q assetName=%q tag=%q", gotTag, assetName, tag)
 	}
 }

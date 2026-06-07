@@ -58,6 +58,9 @@ func TestGithubReleaseURL(t *testing.T) {
 	if got := githubReleaseURL(true); got != "https://api.github.com/repos/yeetrun/yeet/releases/tags/nightly" {
 		t.Fatalf("nightly URL = %q", got)
 	}
+	if got := githubReleaseTagURL(" v0.6.1 "); got != "https://api.github.com/repos/yeetrun/yeet/releases/tags/v0.6.1" {
+		t.Fatalf("tag URL = %q", got)
+	}
 }
 
 func TestFindGitHubAssetURLRequiresDownloadURL(t *testing.T) {

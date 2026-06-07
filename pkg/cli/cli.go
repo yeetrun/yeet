@@ -165,11 +165,13 @@ type VersionFlags struct {
 }
 
 type UpgradeFlags struct {
-	All   bool
-	Host  string
-	JSON  bool
-	Yes   bool
-	Check bool
+	All     bool
+	Host    string
+	JSON    bool
+	Yes     bool
+	Check   bool
+	Force   bool
+	Version string
 }
 
 type EnvShowFlags struct {
@@ -323,11 +325,13 @@ type versionFlagsParsed struct {
 }
 
 type upgradeFlagsParsed struct {
-	All   bool   `flag:"all"`
-	Host  string `flag:"host"`
-	JSON  bool   `flag:"json"`
-	Yes   bool   `flag:"yes"`
-	Check bool   `flag:"check"`
+	All     bool   `flag:"all"`
+	Host    string `flag:"host"`
+	JSON    bool   `flag:"json"`
+	Yes     bool   `flag:"yes"`
+	Check   bool   `flag:"check"`
+	Force   bool   `flag:"force"`
+	Version string `flag:"version"`
 }
 
 type envShowFlagsParsed struct {
@@ -1229,11 +1233,13 @@ func ParseUpgrade(args []string) (UpgradeFlags, []string, error) {
 		return UpgradeFlags{}, nil, err
 	}
 	flags := UpgradeFlags{
-		All:   parsed.Flags.All,
-		Host:  parsed.Flags.Host,
-		JSON:  parsed.Flags.JSON,
-		Yes:   parsed.Flags.Yes,
-		Check: parsed.Flags.Check,
+		All:     parsed.Flags.All,
+		Host:    parsed.Flags.Host,
+		JSON:    parsed.Flags.JSON,
+		Yes:     parsed.Flags.Yes,
+		Check:   parsed.Flags.Check,
+		Force:   parsed.Flags.Force,
+		Version: parsed.Flags.Version,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil

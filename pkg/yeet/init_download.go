@@ -12,13 +12,13 @@ import (
 	"strings"
 )
 
-func resolveCatchReleaseAsset(systemName, goarch string, nightly bool) (assetName, assetURL, shaURL, tag string, err error) {
+func resolveCatchReleaseAsset(systemName, goarch string, nightly bool, version string) (assetName, assetURL, shaURL, tag string, err error) {
 	assetName, shaName, err := catchReleaseAssetNames(systemName, goarch)
 	if err != nil {
 		return "", "", "", "", err
 	}
 
-	rel, err := fetchGitHubReleaseFn(nightly)
+	rel, err := fetchGitHubReleaseForVersion(nightly, version)
 	if err != nil {
 		return "", "", "", "", err
 	}
@@ -30,13 +30,13 @@ func resolveCatchReleaseAsset(systemName, goarch string, nightly bool) (assetNam
 	return assetName, assetURL, shaURL, rel.TagName, nil
 }
 
-func resolveYeetReleaseAsset(goos, goarch string, nightly bool) (assetName, assetURL, shaURL, tag string, err error) {
+func resolveYeetReleaseAsset(goos, goarch string, nightly bool, version string) (assetName, assetURL, shaURL, tag string, err error) {
 	assetName, shaName, err := yeetReleaseAssetNames(goos, goarch)
 	if err != nil {
 		return "", "", "", "", err
 	}
 
-	rel, err := fetchGitHubReleaseFn(nightly)
+	rel, err := fetchGitHubReleaseForVersion(nightly, version)
 	if err != nil {
 		return "", "", "", "", err
 	}

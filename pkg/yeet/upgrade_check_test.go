@@ -181,3 +181,85 @@ func TestBuildUpgradeReportClassifiesDevCatch(t *testing.T) {
 		t.Fatalf("catch row = %#v, want dev status", report.Catch[0])
 	}
 }
+
+func TestFetchUpgradeTargetUsesSpecificVersion(t *testing.T) {
+	oldFetchByTag := fetchGitHubReleaseByTagFn
+	oldFetchLatest := fetchUpgradeLatestFn
+	t.Cleanup(func() {
+		fetchGitHubReleaseByTagFn = oldFetchByTag
+		fetchUpgradeLatestFn = oldFetchLatest
+	})
+	fetchUpgradeLatestFn = func(context.Context, buildinfo.Channel, time.Time) (releaseCacheEntry, error) {
+		t.Fatal("specific version should not fetch latest")
+		return releaseCacheEntry{}, nil
+	}
+	var gotTag string
+	fetchGitHubReleaseByTagFn = func(tag string) (githubRelease, error) {
+		gotTag = tag
+		return githubRelease{TagName: "v0.6.1", PublishedAt: "2026-06-07T00:00:00Z"}, nil
+	}
+
+	got, err := fetchUpgradeTarget(context.Background(), buildinfo.ChannelStable, time.Unix(400, 0), " v0.6.1 ")
+	if err != nil {
+		t.Fatalf("fetchUpgradeTarget: %v", err)
+	}
+	if gotTag != "v0.6.1" || got.Tag != "v0.6.1" {
+		t.Fatalf("gotTag=%q target=%#v", gotTag, got)
+	}
+}
+
+func TestBuildUpgradeReportForceReinstallsDevAndCurrent(t *testing.T) {
+	oldLatest := fetchUpgradeLatestFn
+	oldInfo := fetchUpgradeCatchInfoFn
+	t.Cleanup(func() {
+		fetchUpgradeLatestFn = oldLatest
+		fetchUpgradeCatchInfoFn = oldInfo
+	})
+	fetchUpgradeLatestFn = func(context.Context, buildinfo.Channel, time.Time) (releaseCacheEntry, error) {
+		return releaseCacheEntry{Tag: "v0.6.2"}, nil
+	}
+	fetchUpgradeCatchInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{Version: "v0.6.2", InstallUser: "root", InstallHost: host}, nil
+	}
+
+	report := buildUpgradeReport(context.Background(), upgradeCheckRequest{
+		Local: buildinfo.Info{Version: "f6aeae51f+dirty", Channel: buildinfo.ChannelDev},
+		Hosts: []string{"edge"},
+		Now:   time.Unix(100, 0),
+		Force: true,
+	})
+	if report.Local.Status != upgradeStatusReinstall {
+		t.Fatalf("local status = %q, want reinstall", report.Local.Status)
+	}
+	if report.Catch[0].Status != upgradeStatusReinstall {
+		t.Fatalf("catch row = %#v, want reinstall", report.Catch[0])
+	}
+}
+
+func TestBuildUpgradeReportSpecificVersionDoesNotDowngradeWithoutForce(t *testing.T) {
+	oldFetchByTag := fetchGitHubReleaseByTagFn
+	oldInfo := fetchUpgradeCatchInfoFn
+	t.Cleanup(func() {
+		fetchGitHubReleaseByTagFn = oldFetchByTag
+		fetchUpgradeCatchInfoFn = oldInfo
+	})
+	fetchGitHubReleaseByTagFn = func(tag string) (githubRelease, error) {
+		return githubRelease{TagName: tag}, nil
+	}
+	fetchUpgradeCatchInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{Version: "v0.6.0", InstallUser: "root", InstallHost: host}, nil
+	}
+
+	report := buildUpgradeReport(context.Background(), upgradeCheckRequest{
+		Local:         buildinfo.Info{Version: "v0.6.2", Channel: buildinfo.ChannelStable},
+		Hosts:         []string{"edge"},
+		Now:           time.Unix(100, 0),
+		TargetVersion: "v0.6.1",
+	})
+	if report.Local.Status != upgradeStatusAhead {
+		t.Fatalf("local status = %q, want ahead", report.Local.Status)
+	}
+	if report.Catch[0].Status != upgradeStatusUpdateAvailable {
+		t.Fatalf("catch row = %#v, want update available", report.Catch[0])
+	}
+}

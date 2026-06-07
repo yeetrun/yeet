@@ -165,11 +165,13 @@ func buildHelpConfig() yargs.HelpConfig {
 	subcommands["upgrade"] = yargs.SubCommandInfo{
 		Name:        "upgrade",
 		Description: "Check for and install yeet/catch updates",
-		Usage:       "[check] [--all] [--host=catch-a] [--json] [--yes]",
+		Usage:       "[check] [--all] [--host=catch-a] [--json] [--yes] [--force] [--version=vX.Y.Z]",
 		Examples: []string{
 			"yeet upgrade check",
 			"yeet upgrade check --all",
 			"yeet upgrade --all",
+			"yeet upgrade --all --force",
+			"yeet upgrade --all --version v0.6.1 --force",
 		},
 	}
 	subcommands["skirt"] = yargs.SubCommandInfo{

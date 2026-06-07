@@ -655,7 +655,7 @@ func TestInitCatchUsesGitHubSource(t *testing.T) {
 	var steps []string
 	restore(&steps)
 	resolveInitCatchSourceFn = func(opts initOptions) (initCatchSource, error) {
-		if !opts.fromGithub || !opts.nightly {
+		if !opts.fromGithub || !opts.nightly || opts.releaseVersion != "v0.6.1" {
 			t.Fatalf("opts = %#v, want from github nightly", opts)
 		}
 		steps = append(steps, "resolve")
@@ -668,8 +668,8 @@ func TestInitCatchUsesGitHubSource(t *testing.T) {
 		steps = append(steps, "detect")
 		return "Linux", "amd64", nil
 	}
-	downloadInitCatchFn = func(_ *initUI, userAtRemote, systemName, goarch string, nightly bool) error {
-		steps = append(steps, strings.Join([]string{"download", userAtRemote, systemName, goarch, boolString(nightly)}, ":"))
+	downloadInitCatchFn = func(_ *initUI, userAtRemote, systemName, goarch string, nightly bool, version string) error {
+		steps = append(steps, strings.Join([]string{"download", userAtRemote, systemName, goarch, boolString(nightly), version}, ":"))
 		return nil
 	}
 	buildAndUploadInitCatchFn = func(*initUI, string, string, string, initCatchSource) error {
@@ -677,7 +677,7 @@ func TestInitCatchUsesGitHubSource(t *testing.T) {
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{fromGithub: true, nightly: true}); err != nil {
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, nightly: true, releaseVersion: "v0.6.1"}); err != nil {
 		t.Fatalf("initCatch error: %v", err)
 	}
 
@@ -685,7 +685,7 @@ func TestInitCatchUsesGitHubSource(t *testing.T) {
 		"resolve",
 		"verify",
 		"detect",
-		"download:root@example.com:Linux:amd64:true",
+		"download:root@example.com:Linux:amd64:true:v0.6.1",
 		"chmod",
 		"install:false",
 	}
@@ -707,7 +707,7 @@ func TestInitCatchBuildsAndUploadsLocalSource(t *testing.T) {
 		steps = append(steps, "detect")
 		return "Linux", "arm64", nil
 	}
-	downloadInitCatchFn = func(*initUI, string, string, string, bool) error {
+	downloadInitCatchFn = func(*initUI, string, string, string, bool, string) error {
 		t.Fatal("downloadInitCatchFn should not be called for local source")
 		return nil
 	}
@@ -797,7 +797,7 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 	}
 	verifyInitSSHFn = func(*initUI, string) error { return nil }
 	detectInitHostFn = func(*initUI, string) (string, string, error) { return "Linux", "amd64", nil }
-	downloadInitCatchFn = func(*initUI, string, string, string, bool) error { return nil }
+	downloadInitCatchFn = func(*initUI, string, string, string, bool, string) error { return nil }
 	buildAndUploadInitCatchFn = func(*initUI, string, string, string, initCatchSource) error { return nil }
 	chmodInitCatchFn = func(*initUI, string) error { return nil }
 	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string) error { return nil }
@@ -817,7 +817,7 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 			*steps = append(*steps, "detect")
 			return "Linux", "amd64", nil
 		}
-		downloadInitCatchFn = func(*initUI, string, string, string, bool) error {
+		downloadInitCatchFn = func(*initUI, string, string, string, bool, string) error {
 			*steps = append(*steps, "download")
 			return nil
 		}

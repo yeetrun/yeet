@@ -19,21 +19,27 @@ type upgradeStatus string
 const (
 	upgradeStatusCurrent         upgradeStatus = "current"
 	upgradeStatusUpdateAvailable upgradeStatus = "update available"
+	upgradeStatusReinstall       upgradeStatus = "reinstall release"
+	upgradeStatusAhead           upgradeStatus = "newer than target"
 	upgradeStatusUnknown         upgradeStatus = "unknown"
 	upgradeStatusUnreachable     upgradeStatus = "unreachable"
 	upgradeStatusDev             upgradeStatus = "dev build"
 )
 
 type upgradeCheckRequest struct {
-	Local buildinfo.Info
-	Hosts []string
-	Now   time.Time
+	Local         buildinfo.Info
+	Hosts         []string
+	Now           time.Time
+	Force         bool
+	TargetVersion string
 }
 
 type upgradeReport struct {
-	Latest releaseCacheEntry  `json:"latest"`
-	Local  upgradeComponent   `json:"local"`
-	Catch  []upgradeComponent `json:"catch,omitempty"`
+	Latest        releaseCacheEntry  `json:"latest"`
+	Local         upgradeComponent   `json:"local"`
+	Catch         []upgradeComponent `json:"catch,omitempty"`
+	Force         bool               `json:"force,omitempty"`
+	TargetVersion string             `json:"targetVersion,omitempty"`
 }
 
 type upgradeComponent struct {
@@ -76,20 +82,24 @@ func buildUpgradeReport(ctx context.Context, req upgradeCheckRequest) upgradeRep
 		now = time.Now()
 	}
 	channel := req.Local.ReleaseChannel()
-	latest, latestErr := fetchUpgradeLatestFn(ctx, channel, now)
-	report := upgradeReport{Latest: latest}
-	report.Local = classifyLocalUpgrade(req.Local, latest, latestErr)
+	latest, latestErr := fetchUpgradeTarget(ctx, channel, now, req.TargetVersion)
+	report := upgradeReport{Latest: latest, Force: req.Force, TargetVersion: strings.TrimSpace(req.TargetVersion)}
+	report.Local = classifyLocalUpgrade(req.Local, latest, latestErr, req.Force)
 	for _, host := range req.Hosts {
-		report.Catch = append(report.Catch, checkCatchUpgrade(ctx, host, latest, latestErr))
+		report.Catch = append(report.Catch, checkCatchUpgrade(ctx, host, latest, latestErr, req.Force))
 	}
 	return report
 }
 
-func classifyLocalUpgrade(local buildinfo.Info, latest releaseCacheEntry, latestErr error) upgradeComponent {
+func classifyLocalUpgrade(local buildinfo.Info, latest releaseCacheEntry, latestErr error, force bool) upgradeComponent {
 	row := upgradeComponent{Name: "yeet", Current: local.Version, Latest: latest.Tag}
 	if latestErr != nil || latest.Tag == "" {
 		row.Status = upgradeStatusUnknown
 		row.Reason = errorString(latestErr)
+		return row
+	}
+	if force {
+		row.Status = upgradeStatusReinstall
 		return row
 	}
 	if !local.IsRelease() {
@@ -97,15 +107,20 @@ func classifyLocalUpgrade(local buildinfo.Info, latest releaseCacheEntry, latest
 		row.Reason = "source/dev builds are not self-updated as release binaries"
 		return row
 	}
-	if buildinfo.CompareSemver(local.Version, latest.Tag) < 0 {
+	cmp := buildinfo.CompareSemver(local.Version, latest.Tag)
+	if cmp < 0 {
 		row.Status = upgradeStatusUpdateAvailable
+		return row
+	}
+	if cmp > 0 {
+		row.Status = upgradeStatusAhead
 		return row
 	}
 	row.Status = upgradeStatusCurrent
 	return row
 }
 
-func checkCatchUpgrade(ctx context.Context, host string, latest releaseCacheEntry, latestErr error) upgradeComponent {
+func checkCatchUpgrade(ctx context.Context, host string, latest releaseCacheEntry, latestErr error, force bool) upgradeComponent {
 	row := upgradeComponent{Name: "catch", Host: host, Latest: latest.Tag}
 	info, err := fetchUpgradeCatchInfoFn(ctx, host)
 	if err != nil {
@@ -121,18 +136,42 @@ func checkCatchUpgrade(ctx context.Context, host string, latest releaseCacheEntr
 		row.Reason = errorString(latestErr)
 		return row
 	}
+	if force {
+		row.Status = upgradeStatusReinstall
+		return row
+	}
 	catchBuild := buildinfo.Info{Version: info.Version}
 	if !catchBuild.IsRelease() {
 		row.Status = upgradeStatusDev
 		row.Reason = "source/dev builds are not self-updated as release binaries"
 		return row
 	}
-	if buildinfo.CompareSemver(info.Version, latest.Tag) < 0 {
+	cmp := buildinfo.CompareSemver(info.Version, latest.Tag)
+	if cmp < 0 {
 		row.Status = upgradeStatusUpdateAvailable
+		return row
+	}
+	if cmp > 0 {
+		row.Status = upgradeStatusAhead
 		return row
 	}
 	row.Status = upgradeStatusCurrent
 	return row
+}
+
+func fetchUpgradeTarget(ctx context.Context, channel buildinfo.Channel, now time.Time, version string) (releaseCacheEntry, error) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return fetchUpgradeLatestFn(ctx, channel, now)
+	}
+	if err := ctx.Err(); err != nil {
+		return releaseCacheEntry{}, err
+	}
+	rel, err := fetchGitHubReleaseByTagFn(version)
+	if err != nil {
+		return releaseCacheEntry{}, err
+	}
+	return releaseCacheEntry{Tag: rel.TagName, PublishedAt: rel.PublishedAt, CheckedAt: now, Assets: rel.Assets}, nil
 }
 
 func fetchUpgradeLatest(ctx context.Context, channel buildinfo.Channel, now time.Time) (releaseCacheEntry, error) {

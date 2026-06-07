@@ -44,11 +44,15 @@ var (
 	replaceLocalBinaryFn      = replaceLocalBinary
 )
 
-func localUpgradePlan(local buildinfo.Info, latest releaseCacheEntry) (localUpgradePlanResult, error) {
+func localUpgradePlan(local buildinfo.Info, latest releaseCacheEntry, force bool) (localUpgradePlanResult, error) {
 	result := localUpgradePlanResult{From: local.Version, To: latest.Tag}
 	if latest.Tag == "" {
 		result.Action = localUpgradeActionSkip
 		result.Reason = "latest release is unknown"
+		return result, nil
+	}
+	if force {
+		result.Action = localUpgradeActionUpdate
 		return result, nil
 	}
 	if !local.IsRelease() {
@@ -65,9 +69,8 @@ func localUpgradePlan(local buildinfo.Info, latest releaseCacheEntry) (localUpgr
 	return result, nil
 }
 
-func upgradeLocalBinary(local buildinfo.Info, latest releaseCacheEntry, yes bool) error {
-	_ = yes
-	plan, err := localUpgradePlan(local, latest)
+func upgradeLocalBinary(local buildinfo.Info, latest releaseCacheEntry, force bool) error {
+	plan, err := localUpgradePlan(local, latest, force)
 	if err != nil || plan.Action != localUpgradeActionUpdate {
 		return err
 	}
@@ -75,7 +78,7 @@ func upgradeLocalBinary(local buildinfo.Info, latest releaseCacheEntry, yes bool
 	if err != nil {
 		return fmt.Errorf("locate current yeet binary: %w", err)
 	}
-	assetName, assetURL, shaURL, _, err := resolveYeetReleaseAssetFn(runtime.GOOS, runtime.GOARCH, local.ReleaseChannel() == buildinfo.ChannelNightly)
+	assetName, assetURL, shaURL, _, err := resolveYeetReleaseAssetFn(runtime.GOOS, runtime.GOARCH, local.ReleaseChannel() == buildinfo.ChannelNightly, latest.Tag)
 	if err != nil {
 		return err
 	}
