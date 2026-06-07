@@ -1597,7 +1597,7 @@ Install catch on a remote host (local build or GitHub release)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] init [OPTIONS] [--from-github] [--nightly] [ROOT@HOST]
+yeet [GLOBAL_OPTIONS] init [OPTIONS] [--from-github] [--nightly] [--install-docker] [--ts-auth-key=<key>] [ROOT@HOST]
 ```
 
 ## Global Options
@@ -1636,6 +1636,14 @@ Progress output (auto|tty|plain|quiet)
 
 ```
 yeet init root@<host>
+```
+
+```
+yeet init --install-docker root@<host>
+```
+
+```
+yeet init --install-docker --ts-auth-key=<key> root@<host>
 ```
 
 ```

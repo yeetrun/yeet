@@ -29,7 +29,7 @@ func TestInitInstallFilterSummaryAndOutput(t *testing.T) {
 		`2026/01/02 18:15:35 skipping image "plain-df"`,
 		`2026/01/02 18:15:35 skipping image "nginx"`,
 		`2026/01/02 18:15:35 copying /root/data/services/catch/bin/catch-123 to /root/data/services/catch/run/catch`,
-		`Warning: docker is recommended but not installed`,
+		`Warning: docker is required but not installed`,
 		`2026/01/02 18:15:36 Service "catch" installed`,
 	}, "\n") + "\n"
 
@@ -38,7 +38,7 @@ func TestInitInstallFilterSummaryAndOutput(t *testing.T) {
 	}
 
 	gotOutput := strings.TrimSpace(buf.String())
-	if gotOutput != "Warning: docker is recommended but not installed" {
+	if gotOutput != "Warning: docker is required but not installed" {
 		t.Fatalf("unexpected output: %q", gotOutput)
 	}
 
@@ -46,7 +46,7 @@ func TestInitInstallFilterSummaryAndOutput(t *testing.T) {
 	if detail := filter.SummaryDetail(); detail != wantDetail {
 		t.Fatalf("unexpected detail: %q", detail)
 	}
-	if warning := filter.WarningSummary(); warning != "Warning: docker is recommended but not installed" {
+	if warning := filter.WarningSummary(); warning != "Warning: docker is required but not installed" {
 		t.Fatalf("unexpected warning summary: %q", warning)
 	}
 	if info := filter.InfoSummary(); info != "" {
@@ -78,6 +78,24 @@ func TestInitInstallFilterReportsOutputErrors(t *testing.T) {
 	}
 }
 
+func TestInitInstallFilterRedactsTailscaleAuthKeys(t *testing.T) {
+	var buf bytes.Buffer
+	filter := newInitInstallFilter(&buf)
+
+	input := "Error: TS_AUTHKEY=tskey-auth-secret123 failed\n"
+	if _, err := filter.Write([]byte(input)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	got := buf.String()
+	if strings.Contains(got, "tskey-auth-secret123") {
+		t.Fatalf("filter output leaked auth key: %q", got)
+	}
+	if !strings.Contains(got, "TS_AUTHKEY=[tailscale-key-redacted] failed") {
+		t.Fatalf("filter output = %q, want redacted auth key", got)
+	}
+}
+
 func TestInitInstallSummaryAbsorbPathsImagesAndWarnings(t *testing.T) {
 	var summary initInstallSummary
 
@@ -105,7 +123,7 @@ func TestInitInstallSummaryVisibleWarnings(t *testing.T) {
 	var summary initInstallSummary
 
 	for _, msg := range []string{
-		"Warning: docker is recommended but not installed",
+		"Warning: docker is required but not installed",
 		"Failed to install service: exit status 1",
 	} {
 		if summary.Absorb(msg) {
@@ -113,7 +131,7 @@ func TestInitInstallSummaryVisibleWarnings(t *testing.T) {
 		}
 	}
 
-	want := "Warning: docker is recommended but not installed; Failed to install service: exit status 1"
+	want := "Warning: docker is required but not installed; Failed to install service: exit status 1"
 	if got := summary.WarningSummary(); got != want {
 		t.Fatalf("warning = %q, want %q", got, want)
 	}
@@ -148,7 +166,7 @@ func TestInitInstallLineClassifiers(t *testing.T) {
 		}
 	}
 
-	important := []string{"Warning: docker missing", "Error: install failed", "operation failed", "runtime error"}
+	important := []string{"Warning: docker missing", "Error: install failed", "operation failed", "runtime error", "https://login.tailscale.com/a/example"}
 	for _, msg := range important {
 		if !isImportantInitLine(msg) {
 			t.Fatalf("isImportantInitLine(%q) = false, want true", msg)
@@ -156,6 +174,17 @@ func TestInitInstallLineClassifiers(t *testing.T) {
 	}
 	if isImportantInitLine("all good") {
 		t.Fatal("isImportantInitLine all good = true, want false")
+	}
+}
+
+func TestRedactSensitiveInitLine(t *testing.T) {
+	got := redactSensitiveInitLine("key tskey-auth-secret, next tskey-api-secret\"")
+	if strings.Contains(got, "secret") {
+		t.Fatalf("redactSensitiveInitLine leaked secret: %q", got)
+	}
+	want := "key [tailscale-key-redacted], next [tailscale-key-redacted]\""
+	if got != want {
+		t.Fatalf("redactSensitiveInitLine = %q, want %q", got, want)
 	}
 }
 

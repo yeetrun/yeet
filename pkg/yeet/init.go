@@ -17,6 +17,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/shayne/yargs"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
 )
 
 var archMap = map[string]string{
@@ -31,13 +32,17 @@ var archMap = map[string]string{
 }
 
 type initFlagsParsed struct {
-	FromGithub bool `flag:"from-github"`
-	Nightly    bool `flag:"nightly"`
+	FromGithub    bool   `flag:"from-github"`
+	Nightly       bool   `flag:"nightly"`
+	InstallDocker bool   `flag:"install-docker"`
+	TSAuthKey     string `flag:"ts-auth-key"`
 }
 
 type initOptions struct {
-	fromGithub bool
-	nightly    bool
+	fromGithub    bool
+	nightly       bool
+	installDocker bool
+	tsAuthKey     string
 }
 
 func HandleInit(_ context.Context, args []string) error {
@@ -64,8 +69,10 @@ func parseInitArgs(args []string) ([]string, initOptions, error) {
 		pos = append(pos, result.RemainingArgs...)
 	}
 	opts := initOptions{
-		fromGithub: result.Flags.FromGithub,
-		nightly:    result.Flags.Nightly,
+		fromGithub:    result.Flags.FromGithub,
+		nightly:       result.Flags.Nightly,
+		installDocker: result.Flags.InstallDocker,
+		tsAuthKey:     result.Flags.TSAuthKey,
 	}
 	if len(pos) > 1 {
 		return nil, initOptions{}, fmt.Errorf("init takes at most one argument")
@@ -202,6 +209,11 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 		return err
 	}
 
+	installDocker, err := prepareInitDockerInstallFn(ui, userAtRemote, opts)
+	if err != nil {
+		return err
+	}
+
 	if source.useGithub {
 		if err := downloadInitCatchFn(ui, userAtRemote, systemName, goarch, opts.nightly); err != nil {
 			return err
@@ -213,7 +225,7 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 	if err := chmodInitCatchFn(ui, userAtRemote); err != nil {
 		return err
 	}
-	return installInitCatchFn(ui, userAtRemote, useSudo)
+	return installInitCatchFn(ui, userAtRemote, useSudo, installDocker, opts.tsAuthKey)
 }
 
 type initCatchSource struct {
@@ -224,13 +236,15 @@ type initCatchSource struct {
 }
 
 var (
-	resolveInitCatchSourceFn  = resolveInitCatchSource
-	verifyInitSSHFn           = verifyInitSSH
-	detectInitHostFn          = detectInitHost
-	downloadInitCatchFn       = downloadInitCatch
-	buildAndUploadInitCatchFn = buildAndUploadInitCatch
-	chmodInitCatchFn          = chmodInitCatch
-	installInitCatchFn        = installInitCatch
+	resolveInitCatchSourceFn   = resolveInitCatchSource
+	verifyInitSSHFn            = verifyInitSSH
+	detectInitHostFn           = detectInitHost
+	downloadInitCatchFn        = downloadInitCatch
+	buildAndUploadInitCatchFn  = buildAndUploadInitCatch
+	chmodInitCatchFn           = chmodInitCatch
+	installInitCatchFn         = installInitCatch
+	prepareInitDockerInstallFn = prepareInitDockerInstall
+	remoteDockerInstalledFn    = remoteDockerInstalled
 )
 
 func (s initCatchSource) localDetail() string {
@@ -291,6 +305,58 @@ func detectInitHost(ui *initUI, userAtRemote string) (string, string, error) {
 	}
 	ui.DoneStep(fmt.Sprintf("%s/%s", strings.ToLower(systemName), goarch))
 	return systemName, goarch, nil
+}
+
+func prepareInitDockerInstall(ui *initUI, userAtRemote string, opts initOptions) (bool, error) {
+	ui.StartStep("Check Docker")
+	if opts.installDocker {
+		ui.DoneStep("will install")
+		return true, nil
+	}
+	installed, err := remoteDockerInstalledFn(userAtRemote)
+	if err != nil {
+		ui.FailStep(err.Error())
+		return false, err
+	}
+	if installed {
+		ui.DoneStep("present")
+		return false, nil
+	}
+	if !isTerminalFn(int(os.Stdin.Fd())) || !isTerminalFn(int(os.Stdout.Fd())) {
+		err := fmt.Errorf("docker is required on the remote host; rerun yeet init with --install-docker or install Docker manually")
+		ui.FailStep("docker missing")
+		return false, err
+	}
+	ui.Suspend()
+	ok, err := cmdutil.Confirm(os.Stdin, os.Stdout, "Docker is required on the remote host. Install Docker now?")
+	ui.Resume()
+	if err != nil {
+		ui.FailStep(err.Error())
+		return false, err
+	}
+	if !ok {
+		err := fmt.Errorf("docker is required on the remote host; rerun yeet init with --install-docker or install Docker manually")
+		ui.FailStep("docker missing")
+		return false, err
+	}
+	ui.DoneStep("will install")
+	return true, nil
+}
+
+func remoteDockerInstalled(userAtRemote string) (bool, error) {
+	cmd := exec.Command("ssh", userAtRemote, "if command -v docker >/dev/null 2>&1; then printf yes; else printf no; fi")
+	output, err := cmd.Output()
+	if err != nil {
+		return false, fmt.Errorf("failed to check docker on remote host: %w", err)
+	}
+	switch strings.TrimSpace(string(output)) {
+	case "yes":
+		return true, nil
+	case "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected docker check output from remote host: %q", strings.TrimSpace(string(output)))
+	}
 }
 
 func downloadInitCatch(ui *initUI, userAtRemote, systemName, goarch string, nightly bool) error {
@@ -355,15 +421,15 @@ func chmodInitCatch(ui *initUI, userAtRemote string) error {
 	return nil
 }
 
-func installInitCatch(ui *initUI, userAtRemote string, useSudo bool) error {
+func installInitCatch(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, tsAuthKey string) error {
 	if !useSudo {
-		return installInitCatchDetached(ui, userAtRemote)
+		return installInitCatchDetached(ui, userAtRemote, installDocker, tsAuthKey)
 	}
-	return installInitCatchDirect(ui, userAtRemote, useSudo)
+	return installInitCatchDirect(ui, userAtRemote, useSudo, installDocker, tsAuthKey)
 }
 
-func installInitCatchDirect(ui *initUI, userAtRemote string, useSudo bool) error {
-	cmd := exec.Command("ssh", remoteCatchInstallArgs(userAtRemote, useSudo)...)
+func installInitCatchDirect(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, tsAuthKey string) error {
+	cmd := exec.Command("ssh", remoteCatchInstallArgs(userAtRemote, useSudo, installDocker, tsAuthKey)...)
 	cmd.Stdin = os.Stdin
 	ui.Suspend()
 	filter := newInitInstallFilter(os.Stdout)
@@ -394,11 +460,11 @@ var (
 	initInstallSSHTimeout   = 10 * time.Second
 )
 
-func installInitCatchDetached(ui *initUI, userAtRemote string) error {
+func installInitCatchDetached(ui *initUI, userAtRemote string, installDocker bool, tsAuthKey string) error {
 	session := newInitInstallSession()
 	ui.Suspend()
 	filter := newInitInstallFilter(os.Stdout)
-	if err := launchDetachedInitCatchInstall(userAtRemote, session); err != nil {
+	if err := launchDetachedInitCatchInstall(userAtRemote, session, installDocker, tsAuthKey); err != nil {
 		ui.FailStep("install failed")
 		return fmt.Errorf("failed to run catch binary on remote host")
 	}
@@ -430,16 +496,16 @@ func newInitInstallSession() initInstallSession {
 	}
 }
 
-func launchDetachedInitCatchInstall(userAtRemote string, session initInstallSession) error {
-	cmd := exec.Command("ssh", userAtRemote, detachedInitCatchInstallScript(userAtRemote, session))
+func launchDetachedInitCatchInstall(userAtRemote string, session initInstallSession, installDocker bool, tsAuthKey string) error {
+	cmd := exec.Command("ssh", userAtRemote, detachedInitCatchInstallScript(userAtRemote, session, installDocker, tsAuthKey))
 	cmd.Stdin = nil
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run()
 }
 
-func detachedInitCatchInstallScript(userAtRemote string, session initInstallSession) string {
-	install := shellJoin(remoteCatchInstallCommand(userAtRemote, false))
+func detachedInitCatchInstallScript(userAtRemote string, session initInstallSession, installDocker bool, tsAuthKey string) string {
+	install := shellJoin(remoteCatchInstallCommand(userAtRemote, false, installDocker, tsAuthKey))
 	logPath := shellQuote(session.LogPath)
 	statusPath := shellQuote(session.StatusPath)
 	body := fmt.Sprintf("%s >%s 2>&1; code=$?; printf \"%%s\" \"$code\" >%s", install, logPath, statusPath)
@@ -454,15 +520,19 @@ func detachedInitCatchInstallScript(userAtRemote string, session initInstallSess
 func waitDetachedInitCatchInstall(userAtRemote string, session initInstallSession, filter *initInstallFilter) (string, error) {
 	deadline := time.Now().Add(initInstallTimeout)
 	var lastReadErr error
+	var lastLog string
 	for {
 		status, err := readRemoteInitInstallFile(userAtRemote, session.StatusPath)
 		if err != nil {
 			lastReadErr = err
 		} else if strings.TrimSpace(status) != "" {
-			if err := writeRemoteInitInstallLog(userAtRemote, session, filter); err != nil {
+			if err := streamRemoteInitInstallLog(userAtRemote, session, filter, &lastLog); err != nil {
 				return "", err
 			}
 			return strings.TrimSpace(status), nil
+		}
+		if err := streamRemoteInitInstallLog(userAtRemote, session, filter, &lastLog); err != nil {
+			return "", err
 		}
 		if time.Now().After(deadline) {
 			if lastReadErr != nil {
@@ -474,7 +544,7 @@ func waitDetachedInitCatchInstall(userAtRemote string, session initInstallSessio
 	}
 }
 
-func writeRemoteInitInstallLog(userAtRemote string, session initInstallSession, filter *initInstallFilter) error {
+func streamRemoteInitInstallLog(userAtRemote string, session initInstallSession, filter *initInstallFilter, lastLog *string) error {
 	logRaw, err := readRemoteInitInstallFile(userAtRemote, session.LogPath)
 	if err != nil {
 		return fmt.Errorf("failed to read remote install log: %w", err)
@@ -482,7 +552,15 @@ func writeRemoteInitInstallLog(userAtRemote string, session initInstallSession, 
 	if logRaw == "" {
 		return nil
 	}
-	_, err = filter.Write([]byte(logRaw))
+	delta := logRaw
+	if strings.HasPrefix(logRaw, *lastLog) {
+		delta = logRaw[len(*lastLog):]
+	}
+	*lastLog = logRaw
+	if delta == "" {
+		return nil
+	}
+	_, err = filter.Write([]byte(delta))
 	return err
 }
 
@@ -507,12 +585,18 @@ func cleanupDetachedInitCatchInstall(userAtRemote string, session initInstallSes
 	_ = cmd.Run()
 }
 
-func remoteCatchInstallCommand(userAtRemote string, useSudo bool) []string {
+func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker bool, tsAuthKey string) []string {
 	args := []string{}
 	if useSudo {
 		args = append(args, "sudo")
 	}
 	installEnv := catchInstallEnv(userAtRemote)
+	if installDocker {
+		installEnv = append(installEnv, "CATCH_INSTALL_DOCKER=1")
+	}
+	if tsAuthKey != "" {
+		installEnv = append(installEnv, "TS_AUTHKEY="+tsAuthKey)
+	}
 	if len(installEnv) > 0 {
 		args = append(args, "env")
 		args = append(args, installEnv...)
@@ -520,9 +604,9 @@ func remoteCatchInstallCommand(userAtRemote string, useSudo bool) []string {
 	return append(args, "./catch", fmt.Sprintf("--tsnet-host=%v", Host()), "install")
 }
 
-func remoteCatchInstallArgs(userAtRemote string, useSudo bool) []string {
+func remoteCatchInstallArgs(userAtRemote string, useSudo bool, installDocker bool, tsAuthKey string) []string {
 	args := append(make([]string, 0, 7), "-t", userAtRemote)
-	return append(args, remoteCatchInstallCommand(userAtRemote, useSudo)...)
+	return append(args, remoteCatchInstallCommand(userAtRemote, useSudo, installDocker, tsAuthKey)...)
 }
 
 func catchInstallEnv(userAtRemote string) []string {

@@ -19,6 +19,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/catch"
@@ -51,9 +52,16 @@ var (
 )
 
 var (
-	runVMConsoleProxy = catch.RunVMConsoleProxy
-	exitProcess       = os.Exit
+	runVMConsoleProxy                       = catch.RunVMConsoleProxy
+	exitProcess                             = os.Exit
+	setupDockerFn                           = setupDocker
+	setupVMHostFn                           = setupVMHost
+	doInstallFn                             = doInstall
+	validateCatchRuntimeFn                  = validateCatchRuntime
+	ensureContainerdSnapshotterForInstallFn = ensureContainerdSnapshotterForInstall
 )
+
+const defaultDockerConfigPath = "/etc/docker/daemon.json"
 
 // initTSNet initializes and returns a tsnet.Server if tsnetHost is set.
 func initTSNet(dataDir string) *tsnet.Server {
@@ -118,30 +126,37 @@ func proxyConnPair(bc, cc net.Conn) {
 
 func main() {
 	flag.Parse()
-	if handled, err := handleSpecialCommand(flag.Args(), os.Stdout); err != nil {
+	if err := runCatchProcess(flag.Args(), os.Stdout); err != nil {
 		log.Fatal(err)
-	} else if handled {
-		return
 	}
+}
 
+func runCatchProcess(args []string, out io.Writer) error {
+	if handled, err := handleSpecialCommand(args, out); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
 	dataDir := *legacyDataDir
 	// Set and create all the necessary directories.
 	log.Printf("data dir: %v", dataDir)
 	paths := must.Get(prepareDataDirs(dataDir))
 
 	curUser := must.Get(user.Current())
-	must.Do(validateContainerdSocket(*containerdSocket))
-	ensureContainerdSnapshotterEnabled()
 	scfg := newCatchConfig(paths, curUser.Username, *registryInternalAddr, *containerdSocket)
 	applyInstallMeta(scfg, dataDir)
 
-	if handled, err := handleLocalCommand(flag.Args(), scfg, dataDir, os.Stdout); err != nil {
-		log.Fatal(err)
+	if handled, err := handleLocalCommand(args, scfg, dataDir, out); err != nil {
+		return err
 	} else if handled {
-		return
+		return nil
 	}
 
+	if err := validateCatchRuntimeFn(*containerdSocket); err != nil {
+		return err
+	}
 	runServer(dataDir, scfg)
+	return nil
 }
 
 func handleSpecialCommand(args []string, out io.Writer) (bool, error) {
@@ -256,10 +271,19 @@ func handleLocalCommand(args []string, scfg *catch.Config, dataDir string, out i
 	case "version":
 		return true, writeLine(out, catch.VersionCommit())
 	case "install":
-		if err := doInstall(scfg, dataDir); err != nil {
+		if err := setupDockerFn(); err != nil {
+			return true, fmt.Errorf("failed to set up docker: %w", err)
+		}
+		if err := ensureContainerdSnapshotterForInstallFn(defaultDockerConfigPath); err != nil {
+			return true, fmt.Errorf("failed to configure docker containerd snapshotter: %w", err)
+		}
+		if err := validateCatchRuntimeFn(*containerdSocket); err != nil {
+			return true, fmt.Errorf("failed to validate catch runtime prerequisites: %w", err)
+		}
+		if err := doInstallFn(scfg, dataDir); err != nil {
 			return true, fmt.Errorf("failed to install: %w", err)
 		}
-		return true, errors.Join(setupDocker(), setupVMHost())
+		return true, setupVMHostFn()
 	default:
 		return false, nil
 	}
@@ -302,11 +326,90 @@ func runServer(dataDir string, scfg *catch.Config) {
 	must.Do(http.Serve(rpcln, server.RPCMux()))
 }
 
-func ensureContainerdSnapshotterEnabled() {
-	const dockerConfigPath = "/etc/docker/daemon.json"
-	if err := checkContainerdSnapshotterEnabled(dockerConfigPath); err != nil {
-		log.Fatal(err)
+func validateCatchRuntime(socket string) error {
+	if err := validateContainerdSocket(socket); err != nil {
+		return err
 	}
+	return checkContainerdSnapshotterEnabled(defaultDockerConfigPath)
+}
+
+func ensureContainerdSnapshotterForInstall(dockerConfigPath string) error {
+	changed, err := writeContainerdSnapshotterConfig(dockerConfigPath)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	return restartDocker()
+}
+
+func writeContainerdSnapshotterConfig(dockerConfigPath string) (bool, error) {
+	cfg, err := readDockerConfig(dockerConfigPath)
+	if err != nil {
+		return false, err
+	}
+	features, err := dockerConfigFeatures(cfg, dockerConfigPath)
+	if err != nil {
+		return false, err
+	}
+	if features["containerd-snapshotter"] == true {
+		return false, nil
+	}
+	features["containerd-snapshotter"] = true
+	if err := writeDockerConfig(dockerConfigPath, cfg); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func readDockerConfig(dockerConfigPath string) (map[string]any, error) {
+	cfg := map[string]any{}
+	raw, err := os.ReadFile(dockerConfigPath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("failed to read docker config %s: %w", dockerConfigPath, err)
+		}
+	} else if len(strings.TrimSpace(string(raw))) > 0 {
+		if err := json.Unmarshal(raw, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse docker config %s: %w", dockerConfigPath, err)
+		}
+	}
+	return cfg, nil
+}
+
+func dockerConfigFeatures(cfg map[string]any, dockerConfigPath string) (map[string]any, error) {
+	features, ok := cfg["features"].(map[string]any)
+	if !ok || features == nil {
+		if existing, exists := cfg["features"]; exists && existing != nil {
+			return nil, fmt.Errorf("docker config %s has non-object features", dockerConfigPath)
+		}
+		features = map[string]any{}
+		cfg["features"] = features
+	}
+	return features, nil
+}
+
+func writeDockerConfig(dockerConfigPath string, cfg map[string]any) error {
+	next, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to render docker config %s: %w", dockerConfigPath, err)
+	}
+	next = append(next, '\n')
+	if err := os.MkdirAll(filepath.Dir(dockerConfigPath), 0o755); err != nil {
+		return fmt.Errorf("failed to create docker config dir %s: %w", filepath.Dir(dockerConfigPath), err)
+	}
+	if err := os.WriteFile(dockerConfigPath, next, 0o644); err != nil {
+		return fmt.Errorf("failed to write docker config %s: %w", dockerConfigPath, err)
+	}
+	return nil
+}
+
+func restartDocker() error {
+	if err := cmdutil.NewStdCmd("systemctl", "restart", "docker").Run(); err != nil {
+		return fmt.Errorf("failed to restart docker: %w", err)
+	}
+	return nil
 }
 
 func checkContainerdSnapshotterEnabled(dockerConfigPath string) error {
@@ -346,6 +449,7 @@ type dockerSetupDeps struct {
 	confirm    func(io.Reader, io.Writer, string) (bool, error)
 	stdin      io.Reader
 	stderr     io.Writer
+	getenv     func(string) string
 	scriptURL  string
 	httpClient httpDoer
 	runScript  func(string) error
@@ -362,6 +466,7 @@ func defaultDockerSetupDeps() dockerSetupDeps {
 		confirm:    cmdutil.Confirm,
 		stdin:      os.Stdin,
 		stderr:     os.Stderr,
+		getenv:     os.Getenv,
 		scriptURL:  dockerInstallScriptURL,
 		httpClient: http.DefaultClient,
 		runScript:  runDockerInstallScript,
@@ -373,12 +478,18 @@ func setupDockerWith(deps dockerSetupDeps) error {
 	if dockerInstalled(deps.dockerCmd) {
 		return nil
 	}
+	if deps.getenv("CATCH_INSTALL_DOCKER") == "1" {
+		if _, err := fmt.Fprintln(deps.stderr, "Installing Docker because CATCH_INSTALL_DOCKER=1"); err != nil {
+			return err
+		}
+		return downloadAndRunDockerInstaller(deps)
+	}
 	ok, err := confirmDockerInstall(deps.stdin, deps.stderr, deps.confirm)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		return nil
+		return fmt.Errorf("docker is required")
 	}
 	return downloadAndRunDockerInstaller(deps)
 }
@@ -396,6 +507,9 @@ func normalizeDockerSetupDeps(deps dockerSetupDeps) dockerSetupDeps {
 	}
 	if deps.stderr == nil {
 		deps.stderr = defaults.stderr
+	}
+	if deps.getenv == nil {
+		deps.getenv = defaults.getenv
 	}
 	if deps.scriptURL == "" {
 		deps.scriptURL = defaults.scriptURL
@@ -415,7 +529,7 @@ func dockerInstalled(dockerCmd func() (string, error)) bool {
 }
 
 func confirmDockerInstall(in io.Reader, out io.Writer, confirm func(io.Reader, io.Writer, string) (bool, error)) (bool, error) {
-	if _, err := fmt.Fprintln(out, "Warning: docker is recommended but not installed"); err != nil {
+	if _, err := fmt.Fprintln(out, "Warning: docker is required but not installed"); err != nil {
 		return false, err
 	}
 	ok, err := confirm(in, out, "Would you like to install docker?")

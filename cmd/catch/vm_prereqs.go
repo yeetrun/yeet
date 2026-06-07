@@ -77,6 +77,9 @@ func setupVMHostWith(deps vmSetupDeps) error {
 	}
 	packages := missingVMHostPackages(report)
 	warnMissingVMHostCommands(deps.stderr, report.MissingCommands, packages)
+	if !canInstallVMHostPackages(report) {
+		return nil
+	}
 	if !deps.commandExists("apt-get") {
 		return nil
 	}
@@ -96,6 +99,22 @@ func setupVMHostWith(deps vmSetupDeps) error {
 		return fmt.Errorf("failed to install VM host packages: %w", err)
 	}
 	return nil
+}
+
+func canInstallVMHostPackages(report vmHostPrereqReport) bool {
+	if report.UnsupportedArch != "" {
+		return false
+	}
+	return !missingVMHostDevice(report, "/dev/kvm") && !missingVMHostDevice(report, "/dev/net/tun")
+}
+
+func missingVMHostDevice(report vmHostPrereqReport, device string) bool {
+	for _, missing := range report.MissingDevices {
+		if missing == device {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeVMSetupDeps(deps vmSetupDeps) vmSetupDeps {

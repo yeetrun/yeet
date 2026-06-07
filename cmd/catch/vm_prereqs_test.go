@@ -173,6 +173,52 @@ func TestSetupVMHostWithConfirmErrorWarnsAndContinues(t *testing.T) {
 	}
 }
 
+func TestSetupVMHostWithMissingKVMDoesNotPromptForPackages(t *testing.T) {
+	var stderr bytes.Buffer
+	var prompted bool
+	var ran bool
+	err := setupVMHostWith(vmSetupDeps{
+		commandExists: fakeVMCommandExists(map[string]bool{
+			"mount":   true,
+			"umount":  true,
+			"ip":      true,
+			"apt-get": true,
+		}),
+		pathExists: fakeVMPathExists(map[string]bool{
+			"/dev/net/tun": true,
+		}),
+		confirm: func(io.Reader, io.Writer, string) (bool, error) {
+			prompted = true
+			return true, nil
+		},
+		runCommand: func(string, ...string) error {
+			ran = true
+			return nil
+		},
+		stderr: &stderr,
+		goarch: "amd64",
+	})
+	if err != nil {
+		t.Fatalf("setupVMHostWith returned error: %v", err)
+	}
+	if prompted {
+		t.Fatal("setupVMHostWith prompted even though KVM is missing")
+	}
+	if ran {
+		t.Fatal("setupVMHostWith ran installer even though KVM is missing")
+	}
+	got := stderr.String()
+	if !strings.Contains(got, "Warning: VM payloads require KVM; /dev/kvm is missing") {
+		t.Fatalf("stderr = %q, want missing KVM warning", got)
+	}
+	if !strings.Contains(got, "Warning: VM tooling is missing required commands") {
+		t.Fatalf("stderr = %q, want missing tooling warning", got)
+	}
+	if strings.Contains(got, "could not confirm VM package install") {
+		t.Fatalf("stderr = %q, want no confirm warning", got)
+	}
+}
+
 func TestSetupVMHostWithMissingCapabilitiesWarnsButDoesNotFail(t *testing.T) {
 	var stderr bytes.Buffer
 	err := setupVMHostWith(vmSetupDeps{
