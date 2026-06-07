@@ -56,11 +56,16 @@ func officialVMImageByPayload(payload string) (officialVMImage, bool) {
 func officialVMImageByVersion(version string) (officialVMImage, bool) {
 	version = strings.TrimSpace(version)
 	for _, image := range officialVMImages {
-		if strings.HasPrefix(version, image.VersionPrefix) && isNumericVersionSuffix(strings.TrimPrefix(version, image.VersionPrefix)) {
+		if image.matchesVersion(version) {
 			return image, true
 		}
 	}
 	return officialVMImage{}, false
+}
+
+func (i officialVMImage) matchesVersion(version string) bool {
+	version = strings.TrimSpace(version)
+	return strings.HasPrefix(version, i.VersionPrefix) && isNumericVersionSuffix(strings.TrimPrefix(version, i.VersionPrefix))
 }
 
 func reservedVMImageLocalPrefix(name string) bool {

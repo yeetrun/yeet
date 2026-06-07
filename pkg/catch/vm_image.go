@@ -318,7 +318,7 @@ func (c vmImageCache) Inspect(ctx context.Context, payload string) (vmImageCache
 	if source.Kind == vmImageSourceLocal {
 		return c.inspectLocal(ctx, payload, source.LocalName)
 	}
-	return c.withManifestURL(source.ManifestURL).inspectRemote(ctx, payload)
+	return c.withManifestURL(source.ManifestURL).inspectRemote(ctx, payload, *source.Official)
 }
 
 func (c vmImageCache) inspectLocal(ctx context.Context, payload, name string) (vmImageCacheState, vmImageManifest, error) {
@@ -336,7 +336,7 @@ func (c vmImageCache) inspectLocal(ctx context.Context, payload, name string) (v
 	return state, asset.Manifest, nil
 }
 
-func (c vmImageCache) inspectRemote(ctx context.Context, payload string) (vmImageCacheState, vmImageManifest, error) {
+func (c vmImageCache) inspectRemote(ctx context.Context, payload string, family officialVMImage) (vmImageCacheState, vmImageManifest, error) {
 	manifestURL := c.manifestURL()
 	latestManifest, err := c.fetchManifest(ctx)
 	if err != nil {
@@ -357,7 +357,7 @@ func (c vmImageCache) inspectRemote(ctx context.Context, payload string) (vmImag
 		CachePath:     filepath.Join(root, latestManifest.Version),
 		ManifestURL:   manifestURL,
 	}
-	cachedManifest, cachedDir, ok, err := latestCachedVMImageManifest(root)
+	cachedManifest, cachedDir, ok, err := latestCachedVMImageManifest(root, family)
 	if err != nil {
 		return vmImageCacheState{}, vmImageManifest{}, err
 	}
@@ -674,7 +674,7 @@ func (m vmImageManifest) artifactNames() []string {
 	return append(names, m.RootFS, m.Firecracker)
 }
 
-func latestCachedVMImageManifest(root string) (vmImageManifest, string, bool, error) {
+func latestCachedVMImageManifest(root string, family officialVMImage) (vmImageManifest, string, bool, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return vmImageManifest{}, "", false, fmt.Errorf("VM image cache root is required")
@@ -692,7 +692,7 @@ func latestCachedVMImageManifest(root string) (vmImageManifest, string, bool, er
 		if err != nil {
 			return vmImageManifest{}, "", false, err
 		}
-		if !ok {
+		if !ok || !family.matchesVersion(manifest.Version) {
 			continue
 		}
 		if !found || compareVMImageVersions(manifest.Version, best.Version) > 0 {
