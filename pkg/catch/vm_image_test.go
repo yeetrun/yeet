@@ -315,18 +315,72 @@ func TestDefaultVMImageEnsureFuncSkipsDownloadProgressWhenCurrent(t *testing.T) 
 	}
 }
 
-func TestResolveVMImagePayloadBuiltIn(t *testing.T) {
-	wantManifestURL := "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json"
-	if defaultVMImageManifestURL != wantManifestURL {
-		t.Fatalf("default manifest URL = %q, want %q", defaultVMImageManifestURL, wantManifestURL)
+func TestResolveVMImagePayloadBuiltIns(t *testing.T) {
+	tests := []struct {
+		payload     string
+		manifestURL string
+		prefix      string
+		user        string
+	}{
+		{
+			payload:     vmUbuntu2604Payload,
+			manifestURL: "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json",
+			prefix:      "ubuntu-26.04-amd64-",
+			user:        "ubuntu",
+		},
+		{
+			payload:     vmNixOS2605Payload,
+			manifestURL: "https://github.com/yeetrun/yeet-vm-images/releases/download/nixos-26.05-amd64-latest/manifest.json",
+			prefix:      "nixos-26.05-amd64-",
+			user:        "nixos",
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.payload, func(t *testing.T) {
+			source, err := resolveVMImagePayload(tt.payload)
+			if err != nil {
+				t.Fatalf("resolveVMImagePayload: %v", err)
+			}
+			if source.Kind != vmImageSourceRemote || source.ManifestURL != tt.manifestURL {
+				t.Fatalf("source = %#v", source)
+			}
+			if source.Official == nil || source.Official.VersionPrefix != tt.prefix || source.Official.DefaultUser != tt.user {
+				t.Fatalf("official = %#v", source.Official)
+			}
+		})
+	}
+}
 
-	source, err := resolveVMImagePayload(vmUbuntu2604Payload)
-	if err != nil {
-		t.Fatalf("resolveVMImagePayload: %v", err)
+func TestResolveVMImagePayloadRejectsReservedOfficialLocalPrefixes(t *testing.T) {
+	for _, payload := range []string{"vm://ubuntu/custom", "vm://nixos/custom"} {
+		_, err := resolveVMImagePayload(payload)
+		if err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Fatalf("resolve %s error = %v, want reserved prefix", payload, err)
+		}
 	}
-	if source.Kind != vmImageSourceRemote || source.ManifestURL != wantManifestURL {
-		t.Fatalf("source = %#v, want built-in remote", source)
+}
+
+func TestOfficialVMImageByVersionMatchesNumericOfficialVersions(t *testing.T) {
+	tests := []struct {
+		version string
+		payload string
+		ok      bool
+	}{
+		{version: "ubuntu-26.04-amd64-v13", payload: vmUbuntu2604Payload, ok: true},
+		{version: "nixos-26.05-amd64-v1", payload: vmNixOS2605Payload, ok: true},
+		{version: "ubuntu-26.04-amd64-latest", ok: false},
+		{version: "custom-1", ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			image, ok := officialVMImageByVersion(tt.version)
+			if ok != tt.ok {
+				t.Fatalf("officialVMImageByVersion ok = %v, want %v", ok, tt.ok)
+			}
+			if ok && image.Payload != tt.payload {
+				t.Fatalf("official image = %#v, want payload %q", image, tt.payload)
+			}
+		})
 	}
 }
 
