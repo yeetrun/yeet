@@ -288,7 +288,7 @@ Get detailed help: `yeet run --help-llm`
 
 ### `ssh`
 
-Open SSH to the catch host (optionally into a service dir)
+Open SSH to the catch host, a service dir, or a VM guest
 
 **Examples**:
 
@@ -302,6 +302,10 @@ yeet --host=<host> ssh
 
 ```
 yeet ssh <svc>
+```
+
+```
+yeet ssh --force-proxy <vm>
 ```
 
 ```
@@ -1528,12 +1532,12 @@ yeet run <svc> ./Dockerfile
 ````
 # yeet ssh
 
-Open SSH to the catch host (optionally into a service dir)
+Open SSH to the catch host, a service dir, or a VM guest
 
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] ssh [OPTIONS] [ssh-opts...] [<svc>] [-- <remote-cmd...>]
+yeet [GLOBAL_OPTIONS] ssh [OPTIONS] [--force-proxy] [ssh-opts...] [<svc>] [-- <remote-cmd...>]
 ```
 
 ## Global Options
@@ -1580,6 +1584,10 @@ yeet --host=<host> ssh
 
 ```
 yeet ssh <svc>
+```
+
+```
+yeet ssh --force-proxy <vm>
 ```
 
 ```
