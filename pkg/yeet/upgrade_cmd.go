@@ -10,14 +10,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/buildinfo"
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
 )
 
 var buildUpgradeReportFn = buildUpgradeReport
+var upgradeLocalBinaryFn = upgradeLocalBinary
 
 func HandleUpgrade(ctx context.Context, args []string) error {
 	return handleUpgrade(ctx, args, os.Stdout, os.Stderr, buildinfo.Current())
@@ -77,6 +80,88 @@ func renderUpgradeRow(w io.Writer, row upgradeComponent) error {
 	return err
 }
 
-func runUpgrade(context.Context, io.Writer, io.Writer, cli.UpgradeFlags, upgradeReport) error {
-	return fmt.Errorf("upgrade apply path is unavailable in this build")
+func runUpgrade(ctx context.Context, stdout io.Writer, stderr io.Writer, flags cli.UpgradeFlags, report upgradeReport) error {
+	proceed, err := confirmUpgradeIfNeeded(os.Stdin, stdout, stderr, flags, report)
+	if err != nil || !proceed {
+		return err
+	}
+	if err := upgradeLocalFromReport(flags, report); err != nil {
+		return err
+	}
+	return upgradeCatchFromReport(ctx, report)
+}
+
+func confirmUpgradeIfNeeded(stdin io.Reader, stdout io.Writer, stderr io.Writer, flags cli.UpgradeFlags, report upgradeReport) (bool, error) {
+	if flags.Yes {
+		return true, nil
+	}
+	ok, err := confirmUpgradePlan(stdin, stdout, report)
+	if err != nil || ok {
+		return ok, err
+	}
+	if _, err := fmt.Fprintln(stderr, "Upgrade cancelled"); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func upgradeLocalFromReport(flags cli.UpgradeFlags, report upgradeReport) error {
+	if report.Local.Status == upgradeStatusUpdateAvailable {
+		if err := upgradeLocalBinaryFn(buildinfo.Current(), report.Latest, flags.Yes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func upgradeCatchFromReport(ctx context.Context, report upgradeReport) error {
+	for _, row := range report.Catch {
+		if row.Status != upgradeStatusUpdateAvailable {
+			continue
+		}
+		target, err := catchInstallTarget(row)
+		if err != nil {
+			return err
+		}
+		if err := withTemporaryHost(row.Host, func() error {
+			return initCatchFn(target, initOptions{fromGithub: true})
+		}); err != nil {
+			return fmt.Errorf("upgrade catch@%s: %w", row.Host, err)
+		}
+	}
+	return nil
+}
+
+func confirmUpgradePlan(stdin io.Reader, stdout io.Writer, report upgradeReport) (bool, error) {
+	if _, err := fmt.Fprintln(stdout, "Upgrade plan:"); err != nil {
+		return false, err
+	}
+	if report.Local.Status == upgradeStatusUpdateAvailable {
+		if _, err := fmt.Fprintf(stdout, "  yeet: %s -> %s\n", report.Local.Current, report.Local.Latest); err != nil {
+			return false, err
+		}
+	}
+	for _, row := range report.Catch {
+		if row.Status == upgradeStatusUpdateAvailable {
+			if _, err := fmt.Fprintf(stdout, "  catch@%s: %s -> %s\n", row.Host, row.Current, row.Latest); err != nil {
+				return false, err
+			}
+		}
+	}
+	return cmdutil.Confirm(stdin, stdout, "Proceed?")
+}
+
+func catchInstallTarget(row upgradeComponent) (string, error) {
+	host := strings.TrimSpace(row.InstallHost)
+	user := strings.TrimSpace(row.InstallUser)
+	if host == "" {
+		return "", fmt.Errorf("catch@%s missing install host metadata; run yeet init root@the-ssh-machine-host --from-github", row.Host)
+	}
+	if strings.Contains(host, "@") {
+		return host, nil
+	}
+	if user == "" {
+		return "", fmt.Errorf("catch@%s missing install user metadata; run yeet init root@%s --from-github", row.Host, host)
+	}
+	return user + "@" + host, nil
 }
