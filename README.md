@@ -137,6 +137,10 @@ yeet ssh
 ```
 
 Note: from a repo checkout, `yeet init` builds and uploads `catch`. Released yeet binaries (or `--from-github`) download the latest stable release; add `--nightly` for nightly builds.
+On a fresh host without Docker, interactive `yeet init` prompts to install it;
+for scripted setup use `yeet init --install-docker root@<host>`. If the catch
+tsnet node needs first login, follow the printed Tailscale URL or pass a
+Tailscale auth key with `--ts-auth-key=<key>`.
 
 If your compose uses an env file, upload it before deploy:
 
@@ -160,7 +164,9 @@ If you need to redeploy even when nothing changed, use `yeet run --force <svc> .
 With a stored `yeet.toml` payload, `yeet run <svc> --force` also works.
 For an existing service, `yeet run <svc> ./compose.yml` with only a payload
 reuses the saved run options from `yeet.toml` and updates just the payload.
-Note: Docker hosts must enable the containerd snapshotter so pushed images show up locally (see Installation in the docs).
+Note: `yeet init` configures Docker's containerd snapshotter so pushed images
+show up locally. For manual catch installs or troubleshooting, see Installation
+in the docs.
 
 Other common variants (in order of use):
 
@@ -209,8 +215,9 @@ yeet rm --clean-data devbox
 
 During `yeet init`, catch checks the host for KVM, TUN/TAP, and required VM
 tooling (`qemu-img`, `zstd`, `e2fsck`, `resize2fs`, `mount`, `umount`, and
-`ip`). On Debian/Ubuntu hosts with `apt-get`, interactive installs can offer to
-install missing VM packages. ZFS is optional unless you create VMs with `--zfs`.
+`ip`). On Debian/Ubuntu hosts with the required VM devices available,
+interactive installs can offer to install missing VM packages. ZFS is optional
+unless you create VMs with `--zfs`.
 
 When `yeet run` starts a VM, it waits for the guest to report SSH readiness
 and an IPv4 address before printing the next `yeet ssh` command. If the guest
@@ -351,11 +358,12 @@ yeet service sync --all --config ~/yeet-services/yeet.toml
 The catch DB remains the source of truth for the live service. `yeet service
 sync` updates only existing entries in `yeet.toml`; it does not import
 arbitrary catch services because catch does not know the local payload or env
-file paths. For ZFS-backed roots, the local config stores the dataset name with
-`service_root_zfs = true`. If a service has snapshot overrides, sync also stores
-the TOML replay fields such as `snapshots`, `snapshot_keep_last`, and
-`snapshot_max_age`. Sync also mirrors live published ports when catch reports
-them.
+file paths. The file passed with `--config` must already exist and contain the
+service entries you want to update. For ZFS-backed roots, the local config
+stores the dataset name with `service_root_zfs = true`. If a service has
+snapshot overrides, sync also stores the TOML replay fields such as
+`snapshots`, `snapshot_keep_last`, and `snapshot_max_age`. Sync also mirrors
+live published ports when catch reports them.
 
 Less common (registry image or pushing a local image):
 

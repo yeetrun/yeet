@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -128,6 +129,96 @@ func TestHandleLocalCommandVersionAndDefault(t *testing.T) {
 	}
 	if strings.TrimSpace(out.String()) == "" {
 		t.Fatalf("version command did not write output")
+	}
+}
+
+func TestRunCatchProcessHandlesSpecialCommand(t *testing.T) {
+	var out strings.Builder
+	if err := runCatchProcess([]string{"is-catch"}, &out); err != nil {
+		t.Fatalf("runCatchProcess returned error: %v", err)
+	}
+	if strings.TrimSpace(out.String()) != "yes" {
+		t.Fatalf("output = %q, want yes", out.String())
+	}
+}
+
+func TestRunCatchProcessHandlesLocalCommand(t *testing.T) {
+	oldDataDir := *legacyDataDir
+	*legacyDataDir = t.TempDir()
+	t.Cleanup(func() { *legacyDataDir = oldDataDir })
+
+	var out strings.Builder
+	if err := runCatchProcess([]string{"version"}, &out); err != nil {
+		t.Fatalf("runCatchProcess returned error: %v", err)
+	}
+	if strings.TrimSpace(out.String()) == "" {
+		t.Fatal("version output is empty")
+	}
+}
+
+func TestRunCatchProcessReturnsRuntimeValidationError(t *testing.T) {
+	oldDataDir := *legacyDataDir
+	oldValidateRuntime := validateCatchRuntimeFn
+	*legacyDataDir = t.TempDir()
+	wantErr := errors.New("runtime missing")
+	validateCatchRuntimeFn = func(string) error { return wantErr }
+	t.Cleanup(func() {
+		*legacyDataDir = oldDataDir
+		validateCatchRuntimeFn = oldValidateRuntime
+	})
+
+	err := runCatchProcess(nil, io.Discard)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("runCatchProcess error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestHandleLocalCommandInstallPreparesRuntimeBeforeInstallingService(t *testing.T) {
+	oldSetupDocker := setupDockerFn
+	oldEnsureSnapshotter := ensureContainerdSnapshotterForInstallFn
+	oldValidateRuntime := validateCatchRuntimeFn
+	oldDoInstall := doInstallFn
+	oldSetupVMHost := setupVMHostFn
+	t.Cleanup(func() {
+		setupDockerFn = oldSetupDocker
+		ensureContainerdSnapshotterForInstallFn = oldEnsureSnapshotter
+		validateCatchRuntimeFn = oldValidateRuntime
+		doInstallFn = oldDoInstall
+		setupVMHostFn = oldSetupVMHost
+	})
+
+	var order []string
+	setupDockerFn = func() error {
+		order = append(order, "docker")
+		return nil
+	}
+	ensureContainerdSnapshotterForInstallFn = func(string) error {
+		order = append(order, "snapshotter")
+		return nil
+	}
+	validateCatchRuntimeFn = func(string) error {
+		order = append(order, "runtime")
+		return nil
+	}
+	doInstallFn = func(*catch.Config, string) error {
+		order = append(order, "install")
+		return nil
+	}
+	setupVMHostFn = func() error {
+		order = append(order, "vm")
+		return nil
+	}
+
+	handled, err := handleLocalCommand([]string{"install"}, &catch.Config{}, t.TempDir(), io.Discard)
+	if err != nil {
+		t.Fatalf("handleLocalCommand install returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("install command was not handled")
+	}
+	want := []string{"docker", "snapshotter", "runtime", "install", "vm"}
+	if !reflect.DeepEqual(order, want) {
+		t.Fatalf("install order = %#v, want %#v", order, want)
 	}
 }
 
@@ -362,6 +453,60 @@ func TestVerifyContainerdSnapshotterConfig(t *testing.T) {
 	}
 }
 
+func TestWriteContainerdSnapshotterConfigCreatesAndPreservesDockerConfig(t *testing.T) {
+	root := t.TempDir()
+	missingCfg := filepath.Join(root, "missing", "daemon.json")
+	changed, err := writeContainerdSnapshotterConfig(missingCfg)
+	if err != nil {
+		t.Fatalf("writeContainerdSnapshotterConfig missing config: %v", err)
+	}
+	if !changed {
+		t.Fatal("missing config changed=false, want true")
+	}
+	raw, err := os.ReadFile(missingCfg)
+	if err != nil {
+		t.Fatalf("read created config: %v", err)
+	}
+	if err := verifyContainerdSnapshotterConfig(raw, missingCfg); err != nil {
+		t.Fatalf("created config did not verify: %v", err)
+	}
+
+	existingCfg := filepath.Join(root, "daemon.json")
+	if err := os.WriteFile(existingCfg, []byte(`{"log-driver":"journald","features":{"buildkit":true}}`), 0o600); err != nil {
+		t.Fatalf("write existing config: %v", err)
+	}
+	changed, err = writeContainerdSnapshotterConfig(existingCfg)
+	if err != nil {
+		t.Fatalf("writeContainerdSnapshotterConfig existing config: %v", err)
+	}
+	if !changed {
+		t.Fatal("existing config changed=false, want true")
+	}
+	raw, err = os.ReadFile(existingCfg)
+	if err != nil {
+		t.Fatalf("read updated config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("updated config json: %v", err)
+	}
+	if cfg["log-driver"] != "journald" {
+		t.Fatalf("log-driver = %#v, want journald", cfg["log-driver"])
+	}
+	features := cfg["features"].(map[string]any)
+	if features["buildkit"] != true || features["containerd-snapshotter"] != true {
+		t.Fatalf("features = %#v, want buildkit and containerd-snapshotter", features)
+	}
+
+	changed, err = writeContainerdSnapshotterConfig(existingCfg)
+	if err != nil {
+		t.Fatalf("writeContainerdSnapshotterConfig already enabled: %v", err)
+	}
+	if changed {
+		t.Fatal("already enabled config changed=true, want false")
+	}
+}
+
 func TestCheckContainerdSnapshotterEnabledReadAndParseErrors(t *testing.T) {
 	root := t.TempDir()
 	dirPath := filepath.Join(root, "daemon-dir")
@@ -417,7 +562,7 @@ func TestSetupDockerSkipsInstallWhenDockerPresent(t *testing.T) {
 	}
 }
 
-func TestSetupDockerDeclineSkipsInstall(t *testing.T) {
+func TestSetupDockerDeclineFailsWithoutInstalling(t *testing.T) {
 	var stderr bytes.Buffer
 	ran := false
 
@@ -437,13 +582,13 @@ func TestSetupDockerDeclineSkipsInstall(t *testing.T) {
 			return nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("setupDockerWith returned error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "docker is required") {
+		t.Fatalf("setupDockerWith error = %v, want docker required", err)
 	}
 	if ran {
 		t.Fatalf("setupDockerWith ran installer after declined confirmation")
 	}
-	if got := stderr.String(); !strings.Contains(got, "Warning: docker is recommended but not installed") {
+	if got := stderr.String(); !strings.Contains(got, "Warning: docker is required but not installed") {
 		t.Fatalf("setupDockerWith stderr = %q, want docker warning", got)
 	}
 }
@@ -494,9 +639,52 @@ func TestSetupDockerDownloadsAndRunsConfirmedScript(t *testing.T) {
 	}
 }
 
+func TestSetupDockerEnvInstallsWithoutPrompt(t *testing.T) {
+	const script = "echo installing docker\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, script)
+	}))
+	defer server.Close()
+
+	confirmed := false
+	ran := false
+	err := setupDockerWith(dockerSetupDeps{
+		dockerCmd: func() (string, error) {
+			return "", errors.New("missing")
+		},
+		confirm: func(io.Reader, io.Writer, string) (bool, error) {
+			confirmed = true
+			return false, nil
+		},
+		getenv: func(key string) string {
+			if key == "CATCH_INSTALL_DOCKER" {
+				return "1"
+			}
+			return ""
+		},
+		stderr:     io.Discard,
+		stdin:      strings.NewReader(""),
+		scriptURL:  server.URL + "/docker.sh",
+		httpClient: server.Client(),
+		runScript: func(string) error {
+			ran = true
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("setupDockerWith returned error: %v", err)
+	}
+	if confirmed {
+		t.Fatal("setupDockerWith prompted despite CATCH_INSTALL_DOCKER=1")
+	}
+	if !ran {
+		t.Fatal("setupDockerWith did not run installer")
+	}
+}
+
 func TestNormalizeDockerSetupDepsFillsDefaults(t *testing.T) {
 	deps := normalizeDockerSetupDeps(dockerSetupDeps{})
-	if deps.dockerCmd == nil || deps.confirm == nil || deps.stdin == nil || deps.stderr == nil ||
+	if deps.dockerCmd == nil || deps.confirm == nil || deps.stdin == nil || deps.stderr == nil || deps.getenv == nil ||
 		deps.scriptURL == "" || deps.httpClient == nil || deps.runScript == nil {
 		t.Fatalf("normalizeDockerSetupDeps left default unset: %#v", deps)
 	}

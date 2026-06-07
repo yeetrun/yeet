@@ -68,6 +68,7 @@ func (f *initInstallFilter) handleLine(line string) error {
 	if msg == "" {
 		return nil
 	}
+	msg = redactSensitiveInitLine(msg)
 	if f.summary.Absorb(msg) {
 		return nil
 	}
@@ -232,10 +233,37 @@ func isImportantInitLine(msg string) bool {
 	if strings.HasPrefix(msg, "Warning:") || strings.HasPrefix(msg, "Error:") {
 		return true
 	}
+	if strings.Contains(msg, "login.tailscale.com") {
+		return true
+	}
 	if strings.Contains(strings.ToLower(msg), "failed") || strings.Contains(strings.ToLower(msg), "error") {
 		return true
 	}
 	return false
+}
+
+func redactSensitiveInitLine(line string) string {
+	const prefix = "tskey-"
+	for {
+		idx := strings.Index(line, prefix)
+		if idx == -1 {
+			return line
+		}
+		end := idx + len(prefix)
+		for end < len(line) && !isSecretDelimiter(line[end]) {
+			end++
+		}
+		line = line[:idx] + "[tailscale-key-redacted]" + line[end:]
+	}
+}
+
+func isSecretDelimiter(ch byte) bool {
+	switch ch {
+	case ' ', '\t', '\r', '\n', '"', '\'', '`', ',', ';', ')', ']', '}':
+		return true
+	default:
+		return false
+	}
 }
 
 func uniqueStrings(in []string) []string {
