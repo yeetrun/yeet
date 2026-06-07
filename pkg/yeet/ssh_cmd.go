@@ -20,14 +20,16 @@ import (
 )
 
 type sshInvocation struct {
-	Options []string
-	Service string
-	Command []string
+	Options    []string
+	Service    string
+	Command    []string
+	ForceProxy bool
 }
 
 type sshExecutionPlan struct {
 	Args            []string
 	KnownHostRepair *sshKnownHostRepair
+	Notice          string
 }
 
 type sshKnownHostRepair struct {
@@ -58,33 +60,34 @@ func sshExecutionPlanForArgs(ctx context.Context, args []string) (sshExecutionPl
 	if err := ensureSSHCLI(); err != nil {
 		return sshExecutionPlan{}, err
 	}
-	host, info, inv, repair, err := resolvedSSHInvocation(ctx, args)
+	host, info, inv, repair, notice, err := resolvedSSHInvocation(ctx, args)
 	if err != nil {
 		return sshExecutionPlan{}, err
 	}
 	return sshExecutionPlan{
 		Args:            sshArgsFromInvocation(host, info, inv),
 		KnownHostRepair: repair,
+		Notice:          notice,
 	}, nil
 }
 
-func resolvedSSHInvocation(ctx context.Context, args []string) (string, serverInfo, sshInvocation, *sshKnownHostRepair, error) {
+func resolvedSSHInvocation(ctx context.Context, args []string) (string, serverInfo, sshInvocation, *sshKnownHostRepair, string, error) {
 	inv, err := sshInvocationFromArgs(args)
 	if err != nil {
-		return "", serverInfo{}, sshInvocation{}, nil, err
+		return "", serverInfo{}, sshInvocation{}, nil, "", err
 	}
 	host, info, err := sshHostInfo(ctx, inv.Service)
 	if err != nil {
-		return "", serverInfo{}, sshInvocation{}, nil, err
+		return "", serverInfo{}, sshInvocation{}, nil, "", err
 	}
-	inv, repair, err := withServiceShellCommand(ctx, host, info, inv)
+	inv, repair, notice, err := withServiceShellCommand(ctx, host, info, inv)
 	if err != nil {
-		return "", serverInfo{}, sshInvocation{}, nil, err
+		return "", serverInfo{}, sshInvocation{}, nil, "", err
 	}
 	if err := ensureVMSSHKnownHostsDir(inv.Options); err != nil {
-		return "", serverInfo{}, sshInvocation{}, nil, err
+		return "", serverInfo{}, sshInvocation{}, nil, "", err
 	}
-	return host, info, inv, repair, nil
+	return host, info, inv, repair, notice, nil
 }
 
 func ensureSSHCLI() error {
@@ -95,14 +98,19 @@ func ensureSSHCLI() error {
 }
 
 func sshInvocationFromArgs(args []string) (sshInvocation, error) {
-	options, service, command, err := parseSSHArgs(trimSSHCommandName(args))
+	forceProxy, sshArgs, err := splitYeetSSHFlags(trimSSHCommandName(args))
+	if err != nil {
+		return sshInvocation{}, err
+	}
+	options, service, command, err := parseSSHArgs(sshArgs)
 	if err != nil {
 		return sshInvocation{}, err
 	}
 	return sshInvocation{
-		Options: options,
-		Service: sshServiceOrOverride(service),
-		Command: command,
+		Options:    options,
+		Service:    sshServiceOrOverride(service),
+		Command:    command,
+		ForceProxy: forceProxy,
 	}, nil
 }
 
@@ -134,17 +142,17 @@ func fetchSSHServerInfo(ctx context.Context, host string) (serverInfo, error) {
 	return info, err
 }
 
-func withServiceShellCommand(ctx context.Context, host string, info serverInfo, inv sshInvocation) (sshInvocation, *sshKnownHostRepair, error) {
+func withServiceShellCommand(ctx context.Context, host string, info serverInfo, inv sshInvocation) (sshInvocation, *sshKnownHostRepair, string, error) {
 	if inv.Service == "" {
-		return inv, nil, nil
+		return inv, nil, "", nil
 	}
-	command, options, repair, err := serviceShellCommand(ctx, host, inv.Service, info, inv.Command, inv.Options)
+	command, options, repair, notice, err := serviceShellCommand(ctx, host, inv.Service, info, inv.Command, inv.Options, inv.ForceProxy)
 	if err != nil {
-		return sshInvocation{}, nil, err
+		return sshInvocation{}, nil, "", err
 	}
 	inv.Command = command
 	inv.Options = options
-	return inv, repair, nil
+	return inv, repair, notice, nil
 }
 
 func runSSHCommand(ctx context.Context, sshArgs []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -280,6 +288,31 @@ func trimSSHCommandName(args []string) []string {
 	return args
 }
 
+func splitYeetSSHFlags(args []string) (bool, []string, error) {
+	out := make([]string, 0, len(args))
+	forceProxy := false
+	for i := 0; i < len(args); i++ {
+		token := args[i]
+		if token == "--" || token == "-" || !strings.HasPrefix(token, "-") {
+			out = append(out, args[i:]...)
+			return forceProxy, out, nil
+		}
+		if token == "--force-proxy" {
+			forceProxy = true
+			continue
+		}
+		if strings.HasPrefix(token, "--force-proxy=") {
+			return false, nil, fmt.Errorf("ssh --force-proxy does not take a value")
+		}
+		out = append(out, token)
+		if sshOptionNeedsArg(token) && len(token) == 2 && i+1 < len(args) {
+			out = append(out, args[i+1])
+			i++
+		}
+	}
+	return forceProxy, out, nil
+}
+
 func sshTarget(host string, info serverInfo) string {
 	user := strings.TrimSpace(info.InstallUser)
 	if user == "" {
@@ -388,13 +421,13 @@ func resolveSSHHostFromProject(host, service string) (string, error) {
 	return resolved, nil
 }
 
-func serviceShellCommand(ctx context.Context, host, service string, info serverInfo, command []string, options []string) ([]string, []string, *sshKnownHostRepair, error) {
+func serviceShellCommand(ctx context.Context, host, service string, info serverInfo, command []string, options []string, forceProxy bool) ([]string, []string, *sshKnownHostRepair, string, error) {
 	service = baseSSHServiceName(service)
 	resp, err := fetchSSHServiceInfoFunc(ctx, host, service)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, "", err
 	}
-	return serviceShellCommandPlanFromResponse(host, service, info, resp, command, options)
+	return serviceShellCommandPlanFromResponseWithForce(host, service, info, resp, command, options, forceProxy)
 }
 
 func baseSSHServiceName(service string) string {
@@ -415,33 +448,40 @@ func serviceShellCommandFromResponse(host, service string, info serverInfo, resp
 }
 
 func serviceShellCommandPlanFromResponse(host, service string, info serverInfo, resp catchrpc.ServiceInfoResponse, command []string, options []string) ([]string, []string, *sshKnownHostRepair, error) {
+	command, options, repair, _, err := serviceShellCommandPlanFromResponseWithForce(host, service, info, resp, command, options, false)
+	return command, options, repair, err
+}
+
+func serviceShellCommandPlanFromResponseWithForce(host, service string, info serverInfo, resp catchrpc.ServiceInfoResponse, command []string, options []string, forceProxy bool) ([]string, []string, *sshKnownHostRepair, string, error) {
 	service = baseSSHServiceName(service)
 	if !resp.Found {
-		return nil, nil, nil, serviceNotFoundShellError(service, resp.Message)
+		return nil, nil, nil, "", serviceNotFoundShellError(service, resp.Message)
 	}
 	if resp.Info.ServiceType == serviceTypeVM {
-		vmPlan, err := buildVMSSHOptionsPlan(host, info, service, resp, options)
+		vmPlan, err := buildVMSSHOptionsPlan(host, info, service, resp, options, forceProxy)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, "", err
 		}
-		return command, vmPlan.Options, vmPlan.KnownHostRepair, nil
+		return command, vmPlan.Options, vmPlan.KnownHostRepair, vmPlan.Notice, nil
 	}
 	serviceDir, err := serviceDataDir(service, info, resp)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, "", err
 	}
 	command, options = buildServiceSSHCommand(serviceDir, command, options)
-	return command, options, nil, nil
+	return command, options, nil, "", nil
 }
 
 type vmSSHOptionsPlan struct {
 	Options         []string
 	KnownHostRepair *sshKnownHostRepair
+	Notice          string
+	GeneratedProxy  bool
 }
 
-func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, resp catchrpc.ServiceInfoResponse, options []string) (vmSSHOptionsPlan, error) {
+func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, resp catchrpc.ServiceInfoResponse, options []string, forceProxy bool) (vmSSHOptionsPlan, error) {
 	out := append([]string{}, options...)
-	target := vmSSHTarget(resp)
+	target := vmSSHTarget(resp, forceProxy)
 	if target.Host == "" && !hasSSHHostNameOption(out) {
 		return vmSSHOptionsPlan{}, fmt.Errorf("VM %q has no SSH address yet; use `yeet vm console %s`", service, service)
 	}
@@ -453,13 +493,21 @@ func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, re
 
 	out = appendVMSSHBaseOptions(out, target)
 	out = appendVMSSHIdentityOptions(out, service, proxyHost, addGeneratedAlias, addGeneratedCheckHostIP)
-	out = appendVMSSHProxyOptions(out, target, proxyHost, info)
-	plan := vmSSHOptionsPlan{Options: out}
+	out, generatedProxy := appendVMSSHProxyOptions(out, target, proxyHost, info)
+	plan := vmSSHOptionsPlan{
+		Options:        out,
+		Notice:         vmSSHTransportNotice(proxyHost, target, generatedProxy),
+		GeneratedProxy: generatedProxy,
+	}
 	if addYeetKnownHosts && addGeneratedAlias && knownHosts == vmSSHKnownHostsFile() && alias == vmSSHHostKeyAlias(service, proxyHost) {
+		extraAliases := []string(nil)
+		if generatedProxy {
+			extraAliases = append(extraAliases, vmSSHProxyHostKeyAlias(proxyHost))
+		}
 		plan.KnownHostRepair = &sshKnownHostRepair{
 			Alias:          alias,
 			KnownHostsFile: knownHosts,
-			ExtraAliases:   []string{vmSSHProxyHostKeyAlias(proxyHost)},
+			ExtraAliases:   extraAliases,
 		}
 	}
 	return plan, nil
@@ -493,12 +541,13 @@ func appendVMSSHIdentityOptions(options []string, service, proxyHost string, add
 	return out
 }
 
-func appendVMSSHProxyOptions(options []string, target vmSSHTargetInfo, proxyHost string, info serverInfo) []string {
+func appendVMSSHProxyOptions(options []string, target vmSSHTargetInfo, proxyHost string, info serverInfo) ([]string, bool) {
 	out := options
 	if target.Proxy && !hasSSHProxyOption(out) {
 		out = append(out, "-o", "ProxyCommand="+vmSSHProxyCommand(proxyHost, info))
+		return out, true
 	}
-	return out
+	return out, false
 }
 
 func vmSSHProxyCommand(proxyHost string, info serverInfo) string {
@@ -516,19 +565,28 @@ func vmSSHProxyCommand(proxyHost string, info serverInfo) string {
 }
 
 type vmSSHTargetInfo struct {
-	User  string
-	Host  string
-	Proxy bool
+	User       string
+	Host       string
+	Mode       string
+	Proxy      bool
+	ForceProxy bool
 }
 
-func vmSSHTarget(resp catchrpc.ServiceInfoResponse) vmSSHTargetInfo {
+func vmSSHTarget(resp catchrpc.ServiceInfoResponse, forceProxy bool) vmSSHTargetInfo {
 	user := "ubuntu"
 	host := strings.TrimSpace(resp.Info.Network.SvcIP)
 	if resp.Info.VM != nil && resp.Info.VM.SSH != nil {
 		user = firstNonEmpty(strings.TrimSpace(resp.Info.VM.SSH.User), user)
 		host = firstNonEmpty(strings.TrimSpace(resp.Info.VM.SSH.Host), host)
 	}
-	return vmSSHTargetInfo{User: user, Host: host, Proxy: shouldProxyVMSSH(resp, host)}
+	mode := vmSSHNetworkMode(resp, host)
+	return vmSSHTargetInfo{
+		User:       user,
+		Host:       host,
+		Mode:       mode,
+		Proxy:      shouldProxyVMSSH(resp, host, mode, forceProxy),
+		ForceProxy: forceProxy,
+	}
 }
 
 func firstNonEmpty(values ...string) string {
@@ -540,11 +598,43 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func shouldProxyVMSSH(resp catchrpc.ServiceInfoResponse, guestHost string) bool {
+func vmSSHNetworkMode(resp catchrpc.ServiceInfoResponse, host string) string {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return ""
+	}
+	if strings.TrimSpace(resp.Info.Network.SvcIP) == host {
+		return "svc"
+	}
 	if resp.Info.VM == nil {
+		return ""
+	}
+	for _, network := range resp.Info.VM.Networks {
+		if strings.TrimSpace(network.IP) == host {
+			return strings.TrimSpace(network.Mode)
+		}
+	}
+	return ""
+}
+
+func shouldProxyVMSSH(resp catchrpc.ServiceInfoResponse, guestHost, mode string, forceProxy bool) bool {
+	if resp.Info.VM == nil || strings.TrimSpace(guestHost) == "" {
 		return false
 	}
-	return strings.TrimSpace(guestHost) != ""
+	return forceProxy || mode == "svc"
+}
+
+func vmSSHTransportNotice(proxyHost string, target vmSSHTargetInfo, generatedProxy bool) string {
+	if strings.TrimSpace(target.Host) == "" {
+		return ""
+	}
+	if generatedProxy {
+		return fmt.Sprintf("Proxying VM SSH through %s to %s", proxyHost, target.Host)
+	}
+	if target.Mode == "lan" {
+		return fmt.Sprintf("Connecting directly to VM LAN IP %s", target.Host)
+	}
+	return ""
 }
 
 func vmSSHHostKeyAlias(service, host string) string {
