@@ -16,7 +16,7 @@
 Yeet is open source homelab infrastructure tooling. You run the `yeet` CLI from
 your workstation and install the `catch` daemon on Linux hosts you control.
 From there, yeet deploys containers, host services, cron jobs, and
-Firecracker-backed Ubuntu VMs over Tailscale/tsnet RPC.
+Firecracker-backed Linux VMs over Tailscale/tsnet RPC.
 
 Yeet is intentionally opinionated:
 
@@ -190,12 +190,18 @@ Cron job:
 yeet cron <svc> ./job.sh "0 9 * * *"
 ```
 
-Ubuntu VM on a KVM-capable host:
+VM on a KVM-capable host:
 
 ```bash
 yeet run devbox vm://ubuntu/26.04
 yeet ssh devbox
 yeet vm console devbox
+```
+
+Official VM images also include NixOS:
+
+```bash
+yeet run lab vm://nixos/26.05
 ```
 
 For a VM that should also request an address on the catch host's LAN, keep the
