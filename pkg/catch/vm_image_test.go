@@ -366,7 +366,7 @@ func TestResolveVMImagePayloadBuiltIns(t *testing.T) {
 	}{
 		{
 			payload:     vmUbuntu2604Payload,
-			manifestURL: "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json",
+			manifestURL: "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json",
 			prefix:      "ubuntu-26.04-amd64-",
 			user:        "ubuntu",
 		},
@@ -762,13 +762,13 @@ func TestCachedVMImageArtifactsReady(t *testing.T) {
 	}
 }
 
-func TestVMImageCacheArtifactURLFromLatestManifestRoute(t *testing.T) {
-	cache := vmImageCache{ManifestURL: "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json"}
+func TestVMImageCacheArtifactURLFromStableManifestRoute(t *testing.T) {
+	cache := vmImageCache{ManifestURL: "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json"}
 	got, err := cache.artifactURL("vmlinux")
 	if err != nil {
 		t.Fatalf("artifactURL: %v", err)
 	}
-	want := "https://github.com/yeetrun/yeet-vm-images/releases/latest/download/vmlinux"
+	want := "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/vmlinux"
 	if got != want {
 		t.Fatalf("artifact URL = %q, want %q", got, want)
 	}
