@@ -65,11 +65,11 @@ Current evaluated NixOS values before this implementation:
 nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.boot.kernelModules
 # ["atkbd","loop"]
 
-nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.systemd.services.systemd-modules-load.wantedBy
-# ["multi-user.target"]
+nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.systemd.services.systemd-modules-load.enable
+# true
 ```
 
-The new image should remove avoidable module-loading work while preserving normal NixOS management.
+The new image should remove avoidable module-loading startup work while preserving normal NixOS management and user overrideability.
 
 ---
 
@@ -128,12 +128,7 @@ assert_raw_equals() {
 	fi
 }
 
-assert_json "boot.kernelModules" 'length == 0' "NixOS yeet image must not request boot kernel modules"
-assert_json "boot.initrd.kernelModules" 'length == 0' "NixOS yeet image must not request initrd kernel modules"
-assert_json "boot.initrd.availableKernelModules" 'length == 0' "NixOS yeet image must not request initrd available modules"
-assert_json "boot.extraModulePackages" 'length == 0' "NixOS yeet image must not build extra module packages"
 assert_json "systemd.services.systemd-modules-load.enable" '. == false' "systemd-modules-load must be disabled"
-assert_json "systemd.services.systemd-modules-load.wantedBy" 'length == 0' "systemd-modules-load must not be wanted by boot targets"
 assert_json "nix.settings.experimental-features" 'index("nix-command") != null and index("flakes") != null' "nix-command and flakes must be enabled by default"
 
 for unit in \
@@ -175,6 +170,43 @@ do
 	}
 done
 
+override_probe="$(
+	nix eval --impure --extra-experimental-features "nix-command flakes" --json --expr '
+let
+  flake = builtins.getFlake "path:'"$repo_root"'";
+  cfg = (flake.nixosConfigurations.yeet-nixos-26_05.extendModules {
+    modules = [
+      ({ ... }: {
+        systemd.services.systemd-modules-load = {
+          enable = true;
+          wantedBy = [ "multi-user.target" ];
+        };
+        systemd.services."modprobe@fuse" = {
+          enable = true;
+          wantedBy = [ "sysinit.target" ];
+        };
+      })
+    ];
+  }).config;
+in {
+  systemdModulesLoadEnable = cfg.systemd.services.systemd-modules-load.enable;
+  systemdModulesLoadWantedBy = cfg.systemd.services.systemd-modules-load.wantedBy;
+  modprobeFuseEnable = cfg.systemd.services."modprobe@fuse".enable;
+  modprobeFuseWantedBy = cfg.systemd.services."modprobe@fuse".wantedBy;
+}
+'
+)"
+printf '%s\n' "$override_probe" | jq -e '
+  .systemdModulesLoadEnable == true and
+  (.systemdModulesLoadWantedBy | index("multi-user.target") != null) and
+  .modprobeFuseEnable == true and
+  (.modprobeFuseWantedBy | index("sysinit.target") != null)
+' >/dev/null || {
+	echo "NixOS yeet microVM defaults must remain overrideable by user configuration" >&2
+	printf '%s\n' "$override_probe" >&2
+	exit 1
+}
+
 echo "NixOS 26.05 yeet microVM profile verified"
 ```
 
@@ -194,7 +226,7 @@ Run:
 scripts/verify-nixos-26.05.sh
 ```
 
-Expected: FAIL before implementation. The failure should mention `boot.kernelModules`, `systemd-modules-load`, or one of the `modprobe@...` services.
+Expected: FAIL before implementation. The failure should mention `systemd-modules-load` or one of the `modprobe@...` services.
 
 - [ ] **Step 4: Commit nothing**
 
@@ -220,14 +252,13 @@ In `nixos/yeet-vm.nix`, inside the existing `let` block after `guestReady`, add:
       "modprobe@efi_pstore"
       "modprobe@fuse"
     ] (_: {
-      enable = false;
-      wantedBy = lib.mkForce [ ];
+      enable = lib.mkDefault false;
     });
 ```
 
-- [ ] **Step 2: Extend the `boot` declaration**
+- [ ] **Step 2: Keep the `boot` declaration overrideable**
 
-Replace the existing `boot` block:
+Leave the existing `boot` block as:
 
 ```nix
   boot = {
@@ -238,22 +269,11 @@ Replace the existing `boot` block:
   };
 ```
 
-with:
-
-```nix
-  boot = {
-    initrd = {
-      enable = false;
-      availableKernelModules = lib.mkForce [ ];
-      kernelModules = lib.mkForce [ ];
-    };
-    kernelModules = lib.mkForce [ ];
-    extraModulePackages = lib.mkForce [ ];
-    loader.grub.enable = false;
-    loader.systemd-boot.enable = false;
-    tmp.cleanOnBoot = true;
-  };
-```
+Do not hard-force `boot.kernelModules`, `boot.initrd.kernelModules`,
+`boot.initrd.availableKernelModules`, or `boot.extraModulePackages` to empty.
+The yeet kernel itself is verified as no-loadable-modules by the workflow
+kernel config checks, while users must remain able to customize NixOS options
+and run `sudo nixos-rebuild switch`.
 
 - [ ] **Step 3: Add module-load service policy**
 
@@ -269,8 +289,7 @@ to:
 ```nix
     services = disabledModprobeServices // {
       systemd-modules-load = {
-        enable = false;
-        wantedBy = lib.mkForce [ ];
+        enable = lib.mkDefault false;
       };
 
       yeet-metadata-hostname = {
@@ -305,17 +324,17 @@ NixOS 26.05 yeet microVM profile verified
 Run:
 
 ```bash
-nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.boot.kernelModules
-nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.boot.extraModulePackages
-nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.systemd.services.systemd-modules-load.wantedBy
+nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.systemd.services.systemd-modules-load.enable
+nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.systemd.services.\"modprobe@fuse\".enable
+nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.nix.settings.experimental-features
 ```
 
 Expected output:
 
 ```json
-[]
-[]
-[]
+false
+false
+["nix-command","flakes"]
 ```
 
 - [ ] **Step 7: Commit the no-module profile**
