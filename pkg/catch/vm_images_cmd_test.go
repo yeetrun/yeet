@@ -142,6 +142,75 @@ func TestVMImagesCmdListShowsAllOfficialImages(t *testing.T) {
 	}
 }
 
+func TestVMImagesCmdCatalogShowsOfficialImagesWithoutCacheInspect(t *testing.T) {
+	server := newTestServer(t)
+	restore := stubVMImageInspectFail(t)
+	defer restore()
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"catalog"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc catalog: %v", err)
+	}
+
+	var rows []vmImageCatalogRowJSON
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, out.String())
+	}
+	if len(rows) != len(officialVMImages) {
+		t.Fatalf("catalog row count = %d, want %d: %#v", len(rows), len(officialVMImages), rows)
+	}
+	byPayload := vmImageCatalogRowsByPayload(rows)
+	if got := byPayload[vmUbuntu2604Payload]; got.Kind != "builtin" || got.Name != "Ubuntu 26.04" || got.DefaultUser != "ubuntu" || got.VersionPrefix != "ubuntu-26.04-amd64-" {
+		t.Fatalf("ubuntu catalog row = %#v", got)
+	}
+	if got := byPayload[vmNixOS2605Payload]; got.Kind != "builtin" || got.Name != "NixOS 26.05" || got.DefaultUser != "nixos" || got.VersionPrefix != "nixos-26.05-amd64-" {
+		t.Fatalf("nixos catalog row = %#v", got)
+	}
+}
+
+func TestVMImagesCmdCatalogIncludesLocalImages(t *testing.T) {
+	server := newTestServer(t)
+	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
+	importer := localVMImageImporter{
+		CacheRoot: cacheRoot,
+		EnsureManagedAsset: func(context.Context) (vmImageAsset, error) {
+			return fakeManagedVMImageAsset(t), nil
+		},
+	}
+	ref, err := importer.Import(context.Background(), localVMImageImportRequest{
+		Name:   "foo/bar",
+		Reader: localVMImageBundleTar(t, map[string][]byte{"rootfs.ext4": []byte("local-rootfs")}),
+	})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "table"}, []string{"catalog"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc catalog: %v", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{
+		"PAYLOAD",
+		"KIND",
+		"NAME",
+		"DEFAULT_USER",
+		vmUbuntu2604Payload,
+		vmNixOS2605Payload,
+		"vm://foo/bar",
+		"local",
+		ref.Name,
+		ref.KernelPolicy,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("catalog output missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestTTYVMImageCacheLeavesManifestURLUnset(t *testing.T) {
 	server := newTestServer(t)
 	execer := &ttyExecer{s: server}
@@ -707,7 +776,7 @@ func TestVMImagesCmdRejectsInvalidAction(t *testing.T) {
 	server := newTestServer(t)
 	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
 	err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "table"}, []string{"refresh"})
-	if err == nil || !strings.Contains(err.Error(), "usage: yeet vm images [ls|update|import <name>|rm <name>|prune]") {
+	if err == nil || !strings.Contains(err.Error(), "usage: yeet vm images [ls|catalog|update|import <name>|rm <name>|prune]") {
 		t.Fatalf("error = %v", err)
 	}
 }
@@ -767,6 +836,15 @@ type vmImageListRowJSON struct {
 	KernelPolicy string `json:"kernelPolicy,omitempty"`
 }
 
+type vmImageCatalogRowJSON struct {
+	Payload       string `json:"payload"`
+	Kind          string `json:"kind"`
+	Name          string `json:"name"`
+	DefaultUser   string `json:"defaultUser,omitempty"`
+	VersionPrefix string `json:"versionPrefix,omitempty"`
+	KernelPolicy  string `json:"kernelPolicy,omitempty"`
+}
+
 type vmImagePruneRowJSON struct {
 	Kind    string `json:"kind"`
 	State   string `json:"state"`
@@ -778,6 +856,14 @@ type vmImagePruneRowJSON struct {
 
 func vmImageRowsByPayload(rows []vmImageListRowJSON) map[string]vmImageListRowJSON {
 	out := make(map[string]vmImageListRowJSON, len(rows))
+	for _, row := range rows {
+		out[row.Payload] = row
+	}
+	return out
+}
+
+func vmImageCatalogRowsByPayload(rows []vmImageCatalogRowJSON) map[string]vmImageCatalogRowJSON {
+	out := make(map[string]vmImageCatalogRowJSON, len(rows))
 	for _, row := range rows {
 		out[row.Payload] = row
 	}
@@ -852,6 +938,16 @@ func stubVMImageInspectMap(t *testing.T, states map[string]vmImageCacheState) fu
 			t.Fatal("inspect cache root is empty")
 		}
 		return state, vmImageManifest{Version: state.LatestVersion}, nil
+	}
+	return func() { vmImageInspectFunc = old }
+}
+
+func stubVMImageInspectFail(t *testing.T) func() {
+	t.Helper()
+	old := vmImageInspectFunc
+	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
+		t.Fatalf("catalog should not inspect cache state for %q", payload)
+		return vmImageCacheState{}, vmImageManifest{}, nil
 	}
 	return func() { vmImageInspectFunc = old }
 }
