@@ -158,6 +158,41 @@ func TestDownloadFileWritesResponse(t *testing.T) {
 	}
 }
 
+func TestDownloadFileRetriesTemporaryFailure(t *testing.T) {
+	oldDelay := releaseDownloadRetryDelay
+	releaseDownloadRetryDelay = 0
+	t.Cleanup(func() { releaseDownloadRetryDelay = oldDelay })
+
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if r.UserAgent() != releaseDownloadUserAgent {
+			t.Fatalf("user agent = %q, want %q", r.UserAgent(), releaseDownloadUserAgent)
+		}
+		if attempts == 1 {
+			http.Error(w, "temporary gateway timeout", http.StatusGatewayTimeout)
+			return
+		}
+		_, _ = w.Write([]byte("payload"))
+	}))
+	defer server.Close()
+
+	path := filepath.Join(t.TempDir(), "download")
+	if err := downloadFile(server.URL, path); err != nil {
+		t.Fatalf("downloadFile: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read download: %v", err)
+	}
+	if string(got) != "payload" {
+		t.Fatalf("download = %q", got)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
 func TestVerifySHA256File(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "asset")

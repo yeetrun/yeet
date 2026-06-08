@@ -27,6 +27,8 @@ type localUpgradeAction string
 const (
 	localUpgradeActionSkip   localUpgradeAction = "skip"
 	localUpgradeActionUpdate localUpgradeAction = "update"
+	releaseDownloadAttempts  int                = 4
+	releaseDownloadUserAgent                    = "yeet-release-downloader"
 )
 
 type localUpgradePlanResult struct {
@@ -43,6 +45,8 @@ var (
 	extractSingleBinaryFn     = extractSingleBinary
 	replaceLocalBinaryFn      = replaceLocalBinary
 )
+
+var releaseDownloadRetryDelay = 500 * time.Millisecond
 
 func localUpgradePlan(local buildinfo.Info, latest releaseCacheEntry, force bool) (localUpgradePlanResult, error) {
 	result := localUpgradePlanResult{From: local.Version, To: latest.Tag}
@@ -108,9 +112,30 @@ func upgradeLocalBinary(local buildinfo.Info, latest releaseCacheEntry, force bo
 
 func downloadFile(url, path string) (err error) {
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(url)
+	var lastErr error
+	for attempt := 1; attempt <= releaseDownloadAttempts; attempt++ {
+		err := downloadFileOnce(client, url, path)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isTransientReleaseDownloadError(err) || attempt == releaseDownloadAttempts {
+			return err
+		}
+		time.Sleep(releaseDownloadRetryDelay)
+	}
+	return lastErr
+}
+
+func downloadFileOnce(client *http.Client, url, path string) (err error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return err
+	}
+	req.Header.Set("User-Agent", releaseDownloadUserAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return transientReleaseDownloadError{URL: url, Status: err.Error()}
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); err == nil && closeErr != nil {
@@ -118,6 +143,9 @@ func downloadFile(url, path string) (err error) {
 		}
 	}()
 	if resp.StatusCode != http.StatusOK {
+		if releaseDownloadStatusIsTransient(resp.StatusCode) {
+			return transientReleaseDownloadError{URL: url, Status: resp.Status}
+		}
 		return fmt.Errorf("download %s: %s", url, resp.Status)
 	}
 	out, err := os.Create(path)
@@ -131,6 +159,26 @@ func downloadFile(url, path string) (err error) {
 	}()
 	_, err = io.Copy(out, resp.Body)
 	return err
+}
+
+type transientReleaseDownloadError struct {
+	URL    string
+	Status string
+}
+
+func (e transientReleaseDownloadError) Error() string {
+	return fmt.Sprintf("download %s: %s", e.URL, e.Status)
+}
+
+func isTransientReleaseDownloadError(err error) bool {
+	_, ok := err.(transientReleaseDownloadError)
+	return ok
+}
+
+func releaseDownloadStatusIsTransient(status int) bool {
+	return status == http.StatusRequestTimeout ||
+		status == http.StatusTooManyRequests ||
+		status >= http.StatusInternalServerError
 }
 
 func verifySHA256File(path, shaPath string) (err error) {

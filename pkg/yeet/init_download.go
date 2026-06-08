@@ -99,9 +99,9 @@ fetch() {
   url=$1
   out=$2
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$out"
+    curl --retry 3 --retry-delay 1 --retry-connrefused -A "yeet-release-downloader" -fsSL "$url" -o "$out"
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO "$out" "$url"
+    wget --tries=4 --waitretry=1 --retry-connrefused --user-agent="yeet-release-downloader" -qO "$out" "$url"
   else
     echo "curl or wget is required" >&2
     exit 1

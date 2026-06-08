@@ -30,6 +30,8 @@ func TestDownloadCatchReleaseRunsRemoteScript(t *testing.T) {
 	}
 	script := string(b)
 	for _, want := range []string{
+		`curl --retry 3 --retry-delay 1 --retry-connrefused -A "yeet-release-downloader" -fsSL "$url" -o "$out"`,
+		`wget --tries=4 --waitretry=1 --retry-connrefused --user-agent="yeet-release-downloader" -qO "$out" "$url"`,
 		`fetch "https://example.com/catch.tgz" "$TMP_DIR/catch-linux-amd64.tar.gz"`,
 		`fetch "https://example.com/catch.sha256" "$TMP_DIR/catch-linux-amd64.tar.gz.sha256"`,
 		`mv -f "$TMP_DIR/catch-linux-amd64" ./catch`,
