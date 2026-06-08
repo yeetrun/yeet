@@ -88,9 +88,11 @@ The image repository's NixOS policy remains the boundary:
 
 ### 1. Align NixOS With the No-Module Kernel
 
-Declare that the official yeet NixOS image does not use loadable kernel modules
-or boot-time module loading. This should be done through NixOS options, not by
-editing generated unit files.
+Declare that the official yeet NixOS image does not need distro-requested
+static module probes for Firecracker-inapplicable devices. Keep the standard
+NixOS `systemd-modules-load` path available for user-managed
+`boot.kernelModules` settings. This should be done through NixOS options, not
+by editing generated unit files.
 
 The implementation should verify the exact NixOS option set, but the intended
 shape is:
