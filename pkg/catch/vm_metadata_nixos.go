@@ -21,6 +21,9 @@ func writeVMGuestNixOSMetadataFiles(root string, cfg vmMetadataConfig) error {
 	if err := writeVMGuestFile(root, "etc/yeet-vm/authorized_keys", []byte(cfg.SSHKey+"\n"), 0o644); err != nil {
 		return err
 	}
+	if err := writeVMGuestFile(root, filepath.Join("etc", "yeet-vm", "authorized_keys.d", cfg.User), []byte(cfg.SSHKey+"\n"), 0o644); err != nil {
+		return err
+	}
 	for _, network := range cfg.Networks {
 		if err := validateVMGuestNetwork(network); err != nil {
 			return err
