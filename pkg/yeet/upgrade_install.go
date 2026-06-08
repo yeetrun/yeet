@@ -27,7 +27,7 @@ type localUpgradeAction string
 const (
 	localUpgradeActionSkip   localUpgradeAction = "skip"
 	localUpgradeActionUpdate localUpgradeAction = "update"
-	releaseDownloadAttempts  int                = 4
+	releaseDownloadAttempts  int                = 12
 	releaseDownloadUserAgent                    = "yeet-release-downloader"
 )
 
@@ -46,7 +46,7 @@ var (
 	replaceLocalBinaryFn      = replaceLocalBinary
 )
 
-var releaseDownloadRetryDelay = 500 * time.Millisecond
+var releaseDownloadRetryDelay = 5 * time.Second
 
 func localUpgradePlan(local buildinfo.Info, latest releaseCacheEntry, force bool) (localUpgradePlanResult, error) {
 	result := localUpgradePlanResult{From: local.Version, To: latest.Tag}
