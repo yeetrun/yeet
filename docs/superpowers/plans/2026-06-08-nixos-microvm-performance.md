@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the official `vm://nixos/26.05` image fit yeet's no-initrd, no-loadable-modules Firecracker model and improve first/second boot performance against the current Ubuntu baseline.
+**Goal:** Make the official `vm://nixos/26.05` image fit yeet's no-initrd, built-in-driver Firecracker model and improve first/second boot performance against the current Ubuntu baseline while preserving normal NixOS rebuild behavior.
 
 **Architecture:** Keep the change image-side in `/Users/shayne/code/yeet-vm-images`. Add an explicit NixOS microVM profile that disables module-loading work through NixOS declarations, add CI verification for the evaluated boot graph, publish a new NixOS image, and compare first boot plus reboot live on `pve1`.
 
@@ -27,7 +27,7 @@ No `catch` or yeet client code changes are planned. If implementation uncovers a
 ### `/Users/shayne/code/yeet-vm-images`
 
 - Modify: `nixos/yeet-vm.nix`
-  - Declare the official NixOS image's no-loadable-modules boot policy through NixOS options.
+  - Declare the official NixOS image's built-in-driver boot policy through NixOS options.
   - Disable static `modprobe@...` instances that do not apply to the yeet kernel.
   - Preserve standard `systemd-modules-load` behavior so user `boot.kernelModules` settings work.
   - Keep useful interactive/admin packages.
@@ -35,17 +35,18 @@ No `catch` or yeet client code changes are planned. If implementation uncovers a
   - Set `nix.nixPath` so `sudo nixos-rebuild switch` finds `/etc/nixos/configuration.nix` by default.
 - Modify: `scripts/build-linux-kernel.sh`
   - Enable and verify `CONFIG_SECCOMP` and `CONFIG_SECCOMP_FILTER` so Nix's build sandbox works inside yeet-managed kernels.
+  - Keep `CONFIG_MODULES` enabled so standard NixOS activation can manage `/proc/sys/kernel/modprobe`.
 - Create: `scripts/verify-nixos-26.05.sh`
   - Evaluate NixOS options and fail when module-loading behavior returns.
   - Verify OpenSSH metadata, grow-root ordering, and expected yeet services.
   - Verify `nix-command`, `flakes`, and `nixos-config` remain enabled by default.
 - Modify: `.github/workflows/build-nixos-26.05.yml`
-  - Bump default image version to `nixos-26.05-amd64-v9`.
+  - Bump default image version to `nixos-26.05-amd64-v10`.
   - Run `scripts/verify-nixos-26.05.sh` in CI.
 - Modify: `scripts/build-nixos-26.05.sh`
-  - Bump default image version to `nixos-26.05-amd64-v9`.
+  - Bump default image version to `nixos-26.05-amd64-v10`.
 - Modify: `README.md`
-  - Document that the NixOS image disables module-loading work because the yeet kernel has required features built in.
+  - Document that the NixOS image disables avoidable static module-loading work, but keeps standard NixOS modprobe activation compatible.
 
 ## Baseline Evidence
 
@@ -141,7 +142,7 @@ for unit in \
 	'modprobe@efi_pstore' \
 	'modprobe@fuse'
 do
-	assert_json "systemd.services.\"${unit}\".enable" '. == false' "$unit must be disabled in the no-module microVM profile"
+	assert_json "systemd.services.\"${unit}\".enable" '. == false' "$unit must be disabled by default in the yeet microVM profile"
 done
 
 assert_raw_equals "services.openssh.authorizedKeysCommand" "none"
@@ -296,9 +297,11 @@ Leave the existing `boot` block as:
 
 Do not hard-force `boot.kernelModules`, `boot.initrd.kernelModules`,
 `boot.initrd.availableKernelModules`, or `boot.extraModulePackages` to empty.
-The yeet kernel itself is verified as no-loadable-modules by the workflow
-kernel config checks, while users must remain able to customize NixOS options
-and run `sudo nixos-rebuild switch`.
+The yeet kernel itself is verified by the workflow kernel config checks:
+required Firecracker and router features are built in, seccomp is enabled for
+Nix, and `CONFIG_MODULES=y` is kept for standard NixOS activation compatibility.
+Users must remain able to customize NixOS options and run
+`sudo nixos-rebuild switch`.
 
 - [ ] **Step 3: Add module-load service policy**
 
@@ -389,7 +392,7 @@ version="${YEET_VM_IMAGE_VERSION:-nixos-26.05-amd64-v6}"
 to:
 
 ```bash
-version="${YEET_VM_IMAGE_VERSION:-nixos-26.05-amd64-v9}"
+version="${YEET_VM_IMAGE_VERSION:-nixos-26.05-amd64-v10}"
 ```
 
 - [ ] **Step 2: Bump the workflow default version**
@@ -403,7 +406,7 @@ In `.github/workflows/build-nixos-26.05.yml`, change:
 to:
 
 ```yaml
-        default: nixos-26.05-amd64-v9
+        default: nixos-26.05-amd64-v10
 ```
 
 - [ ] **Step 3: Call the verifier in the workflow**
@@ -438,7 +441,7 @@ In `README.md`, in the `## NixOS 26.05` section under `The NixOS module:`, ensur
 Also update any current NixOS version mention from `nixos-26.05-amd64-v6` to:
 
 ```text
-nixos-26.05-amd64-v9
+nixos-26.05-amd64-v10
 ```
 
 - [ ] **Step 5: Run formatting and static checks**
@@ -549,7 +552,7 @@ Run:
 ```bash
 gh workflow run build-nixos-26.05.yml \
   --repo yeetrun/yeet-vm-images \
-  -f version=nixos-26.05-amd64-v9 \
+  -f version=nixos-26.05-amd64-v10 \
   -f yeet_ref=main \
   -f firecracker_version=v1.14.3 \
   -f kernel_version=7.0 \
@@ -588,14 +591,14 @@ Expected: workflow completes successfully. If it fails, inspect:
 gh run view <run-id> --repo yeetrun/yeet-vm-images --log-failed
 ```
 
-Fix the failure with a new commit, push, and re-run the workflow using the same `version` only when the failed run did not publish a release. If the failed run published a partial release/tag, re-run with `-f overwrite_release=true` after confirming the partial release is for `nixos-26.05-amd64-v9`.
+Fix the failure with a new commit, push, and re-run the workflow using the same `version` only when the failed run did not publish a release. If the failed run published a partial release/tag, re-run with `-f overwrite_release=true` after confirming the partial release is for `nixos-26.05-amd64-v10`.
 
 - [ ] **Step 5: Confirm the release**
 
 Run:
 
 ```bash
-gh release view nixos-26.05-amd64-v9 --repo yeetrun/yeet-vm-images --json tagName,isDraft,isPrerelease,url,publishedAt
+gh release view nixos-26.05-amd64-v10 --repo yeetrun/yeet-vm-images --json tagName,isDraft,isPrerelease,url,publishedAt
 gh release view nixos-26.05-amd64-latest --repo yeetrun/yeet-vm-images --json tagName,isDraft,isPrerelease,url,publishedAt
 ```
 
@@ -619,7 +622,7 @@ CATCH_HOST=yeet-pve1 mise exec -- go run ./cmd/yeet vm images update vm://nixos/
 Expected output includes:
 
 ```text
-vm://nixos/26.05   current   nixos-26.05-amd64-v9   nixos-26.05-amd64-v9
+vm://nixos/26.05   current   nixos-26.05-amd64-v10   nixos-26.05-amd64-v10
 ```
 
 - [ ] **Step 2: Remove stale disposable comparison VMs**
@@ -861,7 +864,7 @@ CATCH_HOST=yeet-pve1 mise exec -- go run ./cmd/yeet vm images
 Expected output includes:
 
 ```text
-vm://nixos/26.05    builtin    current   nixos-26.05-amd64-v9
+vm://nixos/26.05    builtin    current   nixos-26.05-amd64-v10
 ```
 
 - [ ] **Step 2: Confirm repository cleanliness**

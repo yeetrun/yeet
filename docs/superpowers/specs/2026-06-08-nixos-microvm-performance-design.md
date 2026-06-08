@@ -30,8 +30,8 @@ NixOS first boot logged:
 - `Applying preset policy`
 - `Populated /etc with preset unit settings`
 
-NixOS also attempted module-related work despite the yeet kernel being built
-without loadable modules:
+NixOS also attempted static module-related startup work for devices that do not
+apply to the yeet Firecracker kernel:
 
 - `Failed to find module 'autofs4'`
 - `Starting Load Kernel Module configfs`
@@ -45,8 +45,8 @@ The evaluated NixOS config currently includes default kernel modules such as
 
 ## Goals
 
-- Make the NixOS image fit yeet's no-initrd, no-loadable-modules Firecracker
-  guest model.
+- Make the NixOS image fit yeet's no-initrd, built-in-driver Firecracker guest
+  model while keeping distro-compatible kernel module-loader support.
 - Preserve normal NixOS configuration, package management, and
   `nixos-rebuild` expectations.
 - Keep `nix-command` and `flakes` enabled by default so users can inspect and
@@ -68,7 +68,7 @@ The evaluated NixOS config currently includes default kernel modules such as
 - Do not patch package-owned or Nix-store files in the rootfs.
 - Do not remove useful interactive packages merely to shrink closure size.
 - Do not replace NixOS activation with a custom appliance init path.
-- Do not add loadable kernel modules unless a separate capability decision
+- Do not ship a broad loadable module set unless a separate capability decision
   changes yeet's kernel policy.
 
 ## Design Constraints
@@ -81,18 +81,23 @@ The image repository's NixOS policy remains the boundary:
   NixOS module.
 - Keep yeet metadata data-only under `/etc/yeet-vm`.
 - Preserve `nixos-rebuild` compatibility.
+- Preserve the normal NixOS `/etc` model. Do not pre-materialize paths such as
+  `/etc/terminfo` in a way that prevents activation from managing `/etc`.
+- Keep `CONFIG_MODULES` enabled because standard NixOS activation manages
+  `/proc/sys/kernel/modprobe`, even when yeet's required Firecracker and router
+  features are built in.
 - Avoid long-running application services in the base image unless they are
   part of the base VM contract.
 
 ## Recommended Approach
 
-### 1. Align NixOS With the No-Module Kernel
+### 1. Align NixOS With the Built-In-Driver Kernel
 
 Declare that the official yeet NixOS image does not need distro-requested
 static module probes for Firecracker-inapplicable devices. Keep the standard
-NixOS `systemd-modules-load` path available for user-managed
-`boot.kernelModules` settings. This should be done through NixOS options, not
-by editing generated unit files.
+NixOS modprobe activation and `systemd-modules-load` paths available for
+user-managed `boot.kernelModules` settings. This should be done through NixOS
+options and kernel config, not by editing generated unit files.
 
 The implementation should verify the exact NixOS option set, but the intended
 shape is:
