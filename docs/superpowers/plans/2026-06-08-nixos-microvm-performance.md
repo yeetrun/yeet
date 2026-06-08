@@ -129,7 +129,6 @@ assert_raw_equals() {
 	fi
 }
 
-assert_json "systemd.services.systemd-modules-load.enable" '. == false' "systemd-modules-load must be disabled"
 assert_json "nix.settings.experimental-features" 'index("nix-command") != null and index("flakes") != null' "nix-command and flakes must be enabled by default"
 
 for unit in \
@@ -289,10 +288,6 @@ to:
 
 ```nix
     services = disabledModprobeServices // {
-      systemd-modules-load = {
-        enable = lib.mkDefault false;
-      };
-
       yeet-metadata-hostname = {
 ```
 
@@ -410,9 +405,9 @@ The step should end as:
 In `README.md`, in the `## NixOS 26.05` section under `The NixOS module:`, ensure the bullet list includes:
 
 ```markdown
-- disables loadable-module startup work because the yeet Firecracker kernel is
-  built with the required VM, networking, nftables, TUN, and ext4 features
-  already enabled;
+- disables Firecracker-inapplicable static `modprobe@...` startup units while
+  leaving NixOS `systemd-modules-load` available for user-managed
+  `boot.kernelModules` settings;
 ```
 
 Also update any current NixOS version mention from `nixos-26.05-amd64-v6` to:
