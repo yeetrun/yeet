@@ -32,15 +32,18 @@ No `catch` or yeet client code changes are planned. If implementation uncovers a
   - Preserve standard `systemd-modules-load` behavior so user `boot.kernelModules` settings work.
   - Keep useful interactive/admin packages.
   - Preserve default `nix-command` and `flakes` support.
+  - Set `nix.nixPath` so `sudo nixos-rebuild switch` finds `/etc/nixos/configuration.nix` by default.
+- Modify: `scripts/build-linux-kernel.sh`
+  - Enable and verify `CONFIG_SECCOMP` and `CONFIG_SECCOMP_FILTER` so Nix's build sandbox works inside yeet-managed kernels.
 - Create: `scripts/verify-nixos-26.05.sh`
   - Evaluate NixOS options and fail when module-loading behavior returns.
   - Verify OpenSSH metadata, grow-root ordering, and expected yeet services.
-  - Verify `nix-command` and `flakes` remain enabled by default.
+  - Verify `nix-command`, `flakes`, and `nixos-config` remain enabled by default.
 - Modify: `.github/workflows/build-nixos-26.05.yml`
-  - Bump default image version to `nixos-26.05-amd64-v8`.
+  - Bump default image version to `nixos-26.05-amd64-v9`.
   - Run `scripts/verify-nixos-26.05.sh` in CI.
 - Modify: `scripts/build-nixos-26.05.sh`
-  - Bump default image version to `nixos-26.05-amd64-v8`.
+  - Bump default image version to `nixos-26.05-amd64-v9`.
 - Modify: `README.md`
   - Document that the NixOS image disables module-loading work because the yeet kernel has required features built in.
 
@@ -386,7 +389,7 @@ version="${YEET_VM_IMAGE_VERSION:-nixos-26.05-amd64-v6}"
 to:
 
 ```bash
-version="${YEET_VM_IMAGE_VERSION:-nixos-26.05-amd64-v8}"
+version="${YEET_VM_IMAGE_VERSION:-nixos-26.05-amd64-v9}"
 ```
 
 - [ ] **Step 2: Bump the workflow default version**
@@ -400,7 +403,7 @@ In `.github/workflows/build-nixos-26.05.yml`, change:
 to:
 
 ```yaml
-        default: nixos-26.05-amd64-v8
+        default: nixos-26.05-amd64-v9
 ```
 
 - [ ] **Step 3: Call the verifier in the workflow**
@@ -435,7 +438,7 @@ In `README.md`, in the `## NixOS 26.05` section under `The NixOS module:`, ensur
 Also update any current NixOS version mention from `nixos-26.05-amd64-v6` to:
 
 ```text
-nixos-26.05-amd64-v8
+nixos-26.05-amd64-v9
 ```
 
 - [ ] **Step 5: Run formatting and static checks**
@@ -546,7 +549,7 @@ Run:
 ```bash
 gh workflow run build-nixos-26.05.yml \
   --repo yeetrun/yeet-vm-images \
-  -f version=nixos-26.05-amd64-v8 \
+  -f version=nixos-26.05-amd64-v9 \
   -f yeet_ref=main \
   -f firecracker_version=v1.14.3 \
   -f kernel_version=7.0 \
@@ -585,14 +588,14 @@ Expected: workflow completes successfully. If it fails, inspect:
 gh run view <run-id> --repo yeetrun/yeet-vm-images --log-failed
 ```
 
-Fix the failure with a new commit, push, and re-run the workflow using the same `version` only when the failed run did not publish a release. If the failed run published a partial release/tag, re-run with `-f overwrite_release=true` after confirming the partial release is for `nixos-26.05-amd64-v8`.
+Fix the failure with a new commit, push, and re-run the workflow using the same `version` only when the failed run did not publish a release. If the failed run published a partial release/tag, re-run with `-f overwrite_release=true` after confirming the partial release is for `nixos-26.05-amd64-v9`.
 
 - [ ] **Step 5: Confirm the release**
 
 Run:
 
 ```bash
-gh release view nixos-26.05-amd64-v8 --repo yeetrun/yeet-vm-images --json tagName,isDraft,isPrerelease,url,publishedAt
+gh release view nixos-26.05-amd64-v9 --repo yeetrun/yeet-vm-images --json tagName,isDraft,isPrerelease,url,publishedAt
 gh release view nixos-26.05-amd64-latest --repo yeetrun/yeet-vm-images --json tagName,isDraft,isPrerelease,url,publishedAt
 ```
 
@@ -616,7 +619,7 @@ CATCH_HOST=yeet-pve1 mise exec -- go run ./cmd/yeet vm images update vm://nixos/
 Expected output includes:
 
 ```text
-vm://nixos/26.05   current   nixos-26.05-amd64-v8   nixos-26.05-amd64-v8
+vm://nixos/26.05   current   nixos-26.05-amd64-v9   nixos-26.05-amd64-v9
 ```
 
 - [ ] **Step 2: Remove stale disposable comparison VMs**
@@ -858,7 +861,7 @@ CATCH_HOST=yeet-pve1 mise exec -- go run ./cmd/yeet vm images
 Expected output includes:
 
 ```text
-vm://nixos/26.05    builtin    current   nixos-26.05-amd64-v8
+vm://nixos/26.05    builtin    current   nixos-26.05-amd64-v9
 ```
 
 - [ ] **Step 2: Confirm repository cleanliness**
