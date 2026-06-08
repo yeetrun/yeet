@@ -44,7 +44,8 @@ The existing `yeet-vm-images` repo is Ubuntu-specific:
 The existing `yeet` repo is also Ubuntu-specific in several places:
 
 - `vm://ubuntu/26.04` is the only built-in payload.
-- `defaultVMImageManifestURL` uses
+- `defaultVMImageManifestURL` previously used the repository-wide latest
+  release,
   `https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json`.
 - Cache inspection picks the highest cached manifest globally, not the highest
   cached manifest for a specific official image family.

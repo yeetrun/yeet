@@ -25,7 +25,7 @@ Release asset names:
 
 The Ubuntu manifest URL used by catch is:
 
-`https://github.com/yeetrun/yeet-vm-images/releases/latest/download/manifest.json`
+`https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json`
 
 The NixOS manifest URL used by catch is:
 
