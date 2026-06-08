@@ -128,9 +128,9 @@ func TestVMImageCacheDownloadsOptionalInitrdArtifact(t *testing.T) {
 }
 
 func TestVMImageCacheRetriesTemporaryManifestFetchFailure(t *testing.T) {
-	oldDelay := vmImageManifestFetchRetryDelay
-	vmImageManifestFetchRetryDelay = 0
-	t.Cleanup(func() { vmImageManifestFetchRetryDelay = oldDelay })
+	oldDelay := vmImageFetchRetryDelay
+	vmImageFetchRetryDelay = 0
+	t.Cleanup(func() { vmImageFetchRetryDelay = oldDelay })
 
 	contents := vmImageTestContents()
 	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
@@ -180,9 +180,9 @@ func TestVMImageCacheRetriesTemporaryManifestFetchFailure(t *testing.T) {
 }
 
 func TestVMImageCacheDoesNotRetryPermanentManifestFetchFailure(t *testing.T) {
-	oldDelay := vmImageManifestFetchRetryDelay
-	vmImageManifestFetchRetryDelay = 0
-	t.Cleanup(func() { vmImageManifestFetchRetryDelay = oldDelay })
+	oldDelay := vmImageFetchRetryDelay
+	vmImageFetchRetryDelay = 0
+	t.Cleanup(func() { vmImageFetchRetryDelay = oldDelay })
 
 	var manifestAttempts int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -198,6 +198,52 @@ func TestVMImageCacheDoesNotRetryPermanentManifestFetchFailure(t *testing.T) {
 	}
 	if manifestAttempts != 1 {
 		t.Fatalf("manifest attempts = %d, want 1", manifestAttempts)
+	}
+}
+
+func TestVMImageCacheRetriesTemporaryArtifactFetchFailure(t *testing.T) {
+	oldDelay := vmImageFetchRetryDelay
+	vmImageFetchRetryDelay = 0
+	t.Cleanup(func() { vmImageFetchRetryDelay = oldDelay })
+
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
+	manifestRaw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	var rootfsAttempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write(manifestRaw)
+		case "/rootfs.ext4.zst":
+			rootfsAttempts++
+			if rootfsAttempts == 1 {
+				http.Error(w, "temporary gateway timeout", http.StatusGatewayTimeout)
+				return
+			}
+			_, _ = w.Write(contents["rootfs.ext4.zst"])
+		default:
+			if content, ok := contents[strings.TrimPrefix(r.URL.Path, "/")]; ok {
+				_, _ = w.Write(content)
+				return
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cache := vmImageCache{Root: t.TempDir(), ManifestURL: server.URL + "/manifest.json"}
+	image, err := cache.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if image.RootFSPath == "" {
+		t.Fatal("rootfs path is empty")
+	}
+	if rootfsAttempts != 2 {
+		t.Fatalf("rootfs attempts = %d, want 2", rootfsAttempts)
 	}
 }
 
