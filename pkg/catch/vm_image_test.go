@@ -127,6 +127,80 @@ func TestVMImageCacheDownloadsOptionalInitrdArtifact(t *testing.T) {
 	}
 }
 
+func TestVMImageCacheRetriesTemporaryManifestFetchFailure(t *testing.T) {
+	oldDelay := vmImageManifestFetchRetryDelay
+	vmImageManifestFetchRetryDelay = 0
+	t.Cleanup(func() { vmImageManifestFetchRetryDelay = oldDelay })
+
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
+	manifestRaw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	var manifestAttempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/manifest.json":
+			manifestAttempts++
+			if manifestAttempts == 1 {
+				http.Error(w, "temporary gateway timeout", http.StatusGatewayTimeout)
+				return
+			}
+			_, _ = w.Write(manifestRaw)
+		default:
+			if content, ok := contents[strings.TrimPrefix(r.URL.Path, "/")]; ok {
+				_, _ = w.Write(content)
+				return
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cache := vmImageCache{Root: t.TempDir(), ManifestURL: server.URL + "/manifest.json"}
+	image, err := cache.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	var gotManifest vmImageManifest
+	rawManifest, err := os.ReadFile(image.Manifest)
+	if err != nil {
+		t.Fatalf("read cached manifest: %v", err)
+	}
+	if err := json.Unmarshal(rawManifest, &gotManifest); err != nil {
+		t.Fatalf("decode cached manifest: %v", err)
+	}
+	if gotManifest.Version != manifest.Version {
+		t.Fatalf("manifest version = %q, want %q", gotManifest.Version, manifest.Version)
+	}
+	if manifestAttempts != 2 {
+		t.Fatalf("manifest attempts = %d, want 2", manifestAttempts)
+	}
+}
+
+func TestVMImageCacheDoesNotRetryPermanentManifestFetchFailure(t *testing.T) {
+	oldDelay := vmImageManifestFetchRetryDelay
+	vmImageManifestFetchRetryDelay = 0
+	t.Cleanup(func() { vmImageManifestFetchRetryDelay = oldDelay })
+
+	var manifestAttempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		manifestAttempts++
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	cache := vmImageCache{Root: t.TempDir(), ManifestURL: server.URL + "/manifest.json"}
+	_, err := cache.fetchManifest(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "404 Not Found") {
+		t.Fatalf("fetchManifest error = %v, want 404", err)
+	}
+	if manifestAttempts != 1 {
+		t.Fatalf("manifest attempts = %d, want 1", manifestAttempts)
+	}
+}
+
 func TestVMImageCachePreservesImagePolicyMetadata(t *testing.T) {
 	rootfs := []byte("rootfs")
 	kernel := []byte("kernel")
