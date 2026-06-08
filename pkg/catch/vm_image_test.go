@@ -201,6 +201,43 @@ func TestVMImageCacheDoesNotRetryPermanentManifestFetchFailure(t *testing.T) {
 	}
 }
 
+func TestVMImageCacheUsesYeetUserAgent(t *testing.T) {
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
+	manifestRaw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	var seen []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.UserAgent())
+		switch r.URL.Path {
+		case "/manifest.json":
+			_, _ = w.Write(manifestRaw)
+		default:
+			if content, ok := contents[strings.TrimPrefix(r.URL.Path, "/")]; ok {
+				_, _ = w.Write(content)
+				return
+			}
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cache := vmImageCache{Root: t.TempDir(), ManifestURL: server.URL + "/manifest.json"}
+	if _, err := cache.Ensure(context.Background()); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if len(seen) == 0 {
+		t.Fatal("saw no VM image HTTP requests")
+	}
+	for _, ua := range seen {
+		if ua != vmImageHTTPUserAgent {
+			t.Fatalf("User-Agent = %q, want %q; all seen: %#v", ua, vmImageHTTPUserAgent, seen)
+		}
+	}
+}
+
 func TestVMImageCachePreservesImagePolicyMetadata(t *testing.T) {
 	rootfs := []byte("rootfs")
 	kernel := []byte("kernel")
