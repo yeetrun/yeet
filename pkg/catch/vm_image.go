@@ -32,7 +32,7 @@ const (
 var vmImageSafeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 var prepareVMRootFSFunc = prepareVMRootFS
 var vmRootFSDecompressRunner = runVMRootFSDecompress
-var vmImageManifestFetchRetryDelay = 500 * time.Millisecond
+var vmImageFetchRetryDelay = 500 * time.Millisecond
 
 type vmImageManifest struct {
 	Name                string            `json:"name"`
@@ -458,7 +458,7 @@ func (c vmImageCache) fetchManifest(ctx context.Context) (vmImageManifest, error
 		if !retry || attempt == 3 {
 			return vmImageManifest{}, err
 		}
-		if err := sleepVMImageRetry(ctx, vmImageManifestFetchRetryDelay); err != nil {
+		if err := sleepVMImageRetry(ctx, vmImageFetchRetryDelay); err != nil {
 			return vmImageManifest{}, err
 		}
 	}
@@ -495,7 +495,7 @@ func sleepVMImageRetry(ctx context.Context, delay time.Duration) error {
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("wait to retry VM image manifest fetch: %w", ctx.Err())
+		return fmt.Errorf("wait to retry VM image fetch: %w", ctx.Err())
 	case <-timer.C:
 		return nil
 	}
@@ -602,20 +602,38 @@ func (c vmImageCache) withManifestURL(manifestURL string) vmImageCache {
 }
 
 func (c vmImageCache) downloadArtifactResponse(ctx context.Context, rawURL string) (*http.Response, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		resp, retry, err := c.downloadArtifactResponseOnce(ctx, rawURL)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !retry || attempt == 3 {
+			return nil, err
+		}
+		if err := sleepVMImageRetry(ctx, vmImageFetchRetryDelay); err != nil {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+func (c vmImageCache) downloadArtifactResponseOnce(ctx context.Context, rawURL string) (*http.Response, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, fmt.Errorf("create VM image artifact request: %w", err)
+		return nil, false, fmt.Errorf("create VM image artifact request: %w", err)
 	}
 	req.Header.Set("User-Agent", vmImageHTTPUserAgent)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("download VM image artifact %q: %w", rawURL, err)
+		return nil, true, fmt.Errorf("download VM image artifact %q: %w", rawURL, err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer func() { _ = resp.Body.Close() }()
-		return nil, fmt.Errorf("download VM image artifact %q: %s", rawURL, resp.Status)
+		return nil, resp.StatusCode >= 500, fmt.Errorf("download VM image artifact %q: %s", rawURL, resp.Status)
 	}
-	return resp, nil
+	return resp, false, nil
 }
 
 func installVerifiedVMImageArtifact(r io.Reader, dst, artifactName, want string) error {
