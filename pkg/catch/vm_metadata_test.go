@@ -294,6 +294,8 @@ func TestWriteVMGuestMetadataFilesUsesNixOSDriver(t *testing.T) {
 	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "user"), "nixos")
 	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "authorized_keys"), "ssh-ed25519 AAAATEST")
 	assertFileMode(t, filepath.Join(root, "etc", "yeet-vm", "authorized_keys"), 0o644)
+	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "authorized_keys.d", "nixos"), "ssh-ed25519 AAAATEST")
+	assertFileMode(t, filepath.Join(root, "etc", "yeet-vm", "authorized_keys.d", "nixos"), 0o644)
 	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "systemd-network", "10-yeet-eth0.network"), "Address=192.168.100.12/24")
 
 	for _, path := range []string{
