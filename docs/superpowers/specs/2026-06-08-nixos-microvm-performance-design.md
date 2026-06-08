@@ -95,11 +95,14 @@ editing generated unit files.
 The implementation should verify the exact NixOS option set, but the intended
 shape is:
 
-- force `boot.kernelModules` and related module lists to empty where safe;
-- avoid `systemd-modules-load` being enabled or wanted by normal boot targets;
-- prevent default module requests for `autofs4`, `configfs`, `drm`,
-  `efi_pstore`, `fuse`, `atkbd`, and `loop` when those are not needed by the
-  Firecracker guest;
+- disable `systemd-modules-load` by default without preventing users from
+  re-enabling it in their own NixOS configuration;
+- disable static `modprobe@configfs`, `modprobe@drm`,
+  `modprobe@efi_pstore`, and `modprobe@fuse` units by default without
+  preventing users from re-enabling them;
+- avoid hard-forcing NixOS kernel module option lists, because users should be
+  able to modify the shipped configuration and run `sudo nixos-rebuild switch`
+  normally;
 - preserve built-in kernel features that yeet needs for networking, nftables,
   TUN, ext4, virtio block, and virtio net.
 
@@ -181,8 +184,11 @@ drifts away from the microVM profile.
 
 Minimum checks:
 
-- the evaluated NixOS config has no unwanted boot kernel modules;
-- `systemd-modules-load` is not enabled or wanted by the default boot graph;
+- `systemd-modules-load` is disabled by default;
+- static `modprobe@...` units that do not apply to the yeet kernel are
+  disabled by default;
+- those default disables remain overrideable by ordinary user NixOS
+  configuration;
 - OpenSSH still uses `/etc/yeet-vm/authorized_keys.d/%u`;
 - yeet network metadata still avoids Bash-only assumptions;
 - grow-root still runs before guest readiness;
