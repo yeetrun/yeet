@@ -23,9 +23,10 @@ import (
 )
 
 const (
-	vmImageCacheMissing = "missing"
-	vmImageCacheCurrent = "current"
-	vmImageCacheStale   = "stale"
+	vmImageCacheMissing  = "missing"
+	vmImageCacheCurrent  = "current"
+	vmImageCacheStale    = "stale"
+	vmImageHTTPUserAgent = "yeet-vm-image-fetcher"
 )
 
 var vmImageSafeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
@@ -470,6 +471,7 @@ func (c vmImageCache) fetchManifestOnce(ctx context.Context) (vmImageManifest, b
 	if err != nil {
 		return vmImageManifest{}, false, fmt.Errorf("create VM image manifest request: %w", err)
 	}
+	req.Header.Set("User-Agent", vmImageHTTPUserAgent)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return vmImageManifest{}, true, fmt.Errorf("fetch VM image manifest: %w", err)
@@ -604,6 +606,7 @@ func (c vmImageCache) downloadArtifactResponse(ctx context.Context, rawURL strin
 	if err != nil {
 		return nil, fmt.Errorf("create VM image artifact request: %w", err)
 	}
+	req.Header.Set("User-Agent", vmImageHTTPUserAgent)
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("download VM image artifact %q: %w", rawURL, err)
