@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_INTERFACE: &str = "eth0";
 pub const DEFAULT_SYSTEMD: &str = "/usr/lib/systemd/systemd";
+pub const PROC_CMDLINE: &str = "/proc/cmdline";
+pub const PROC_MOUNTPOINT: &str = "/proc";
 pub const SERIAL_TTY: &str = "/dev/ttyS0";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -187,7 +189,7 @@ pub fn exec_system_init(path: &str) -> io::Error {
 }
 
 pub fn run() -> io::Result<()> {
-    let cmdline = read_cmdline_or_empty(Path::new("/proc/cmdline"), Path::new(SERIAL_TTY));
+    let cmdline = read_cmdline_or_empty(Path::new(PROC_CMDLINE), Path::new(SERIAL_TTY));
     let cfg = BootConfig::from_cmdline(&cmdline);
     if let Err(err) = run_before_systemd(&cmdline) {
         let _ = write_serial(Path::new(SERIAL_TTY), &format!("yeet-init-error {err}\n"));
@@ -196,16 +198,82 @@ pub fn run() -> io::Result<()> {
 }
 
 fn read_cmdline_or_empty(cmdline_path: &Path, serial_path: &Path) -> String {
-    match fs::read_to_string(cmdline_path) {
+    read_cmdline_or_empty_with(
+        cmdline_path,
+        serial_path,
+        |path| fs::read_to_string(path),
+        mount_proc,
+    )
+}
+
+fn read_cmdline_or_empty_with<ReadCmdline, MountProc>(
+    cmdline_path: &Path,
+    serial_path: &Path,
+    mut read_cmdline: ReadCmdline,
+    mut mount_proc: MountProc,
+) -> String
+where
+    ReadCmdline: FnMut(&Path) -> io::Result<String>,
+    MountProc: FnMut() -> io::Result<()>,
+{
+    match read_cmdline(cmdline_path) {
         Ok(cmdline) => cmdline,
-        Err(err) => {
-            let _ = write_serial(
-                serial_path,
-                &format!("yeet-init-error read cmdline: {err}\n"),
-            );
+        Err(first_err) => {
+            if first_err.kind() == io::ErrorKind::NotFound {
+                match mount_proc().and_then(|_| read_cmdline(cmdline_path)) {
+                    Ok(cmdline) => return cmdline,
+                    Err(second_err) => {
+                        let _ = write_serial(
+                            serial_path,
+                            &format!(
+                                "yeet-init-error read cmdline after proc mount: {second_err}\n"
+                            ),
+                        );
+                    }
+                }
+            } else {
+                let _ = write_serial(
+                    serial_path,
+                    &format!("yeet-init-error read cmdline: {first_err}\n"),
+                );
+            }
             String::new()
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn mount_proc() -> io::Result<()> {
+    fs::create_dir_all(PROC_MOUNTPOINT)?;
+    let source = std::ffi::CStr::from_bytes_with_nul(b"proc\0")
+        .expect("static proc source contains nul terminator");
+    let target = std::ffi::CStr::from_bytes_with_nul(b"/proc\0")
+        .expect("static proc mount target contains nul terminator");
+    let fstype = std::ffi::CStr::from_bytes_with_nul(b"proc\0")
+        .expect("static proc fstype contains nul terminator");
+    let rc = unsafe {
+        libc::mount(
+            source.as_ptr(),
+            target.as_ptr(),
+            fstype.as_ptr(),
+            0,
+            std::ptr::null(),
+        )
+    };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::EBUSY) {
+        Ok(())
+    } else {
+        Err(err)
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mount_proc() -> io::Result<()> {
+    Err(io::Error::other("mount proc requires Linux"))
 }
 
 #[cfg(test)]
@@ -294,11 +362,43 @@ mod tests {
         let serial = dir.join("serial");
         fs::write(&serial, "").expect("create serial file");
 
-        let got = read_cmdline_or_empty(&missing_cmdline, &serial);
+        let got = read_cmdline_or_empty_with(
+            &missing_cmdline,
+            &serial,
+            |path| fs::read_to_string(path),
+            || Err(io::Error::other("mount failed")),
+        );
 
         assert_eq!(got, "");
         let log = fs::read_to_string(&serial).expect("read serial file");
-        assert!(log.contains("yeet-init-error read cmdline:"));
+        assert!(log.contains("yeet-init-error read cmdline after proc mount:"));
+    }
+
+    #[test]
+    fn missing_cmdline_mounts_proc_and_retries() {
+        let calls = RefCell::new(0);
+        let mounts = RefCell::new(0);
+
+        let got = read_cmdline_or_empty_with(
+            Path::new("/proc/cmdline"),
+            Path::new("/dev/test-serial"),
+            |_| {
+                let mut calls = calls.borrow_mut();
+                *calls += 1;
+                if *calls == 1 {
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "proc missing"));
+                }
+                Ok("yeet.system_init=/run/current-system/init".to_string())
+            },
+            || {
+                *mounts.borrow_mut() += 1;
+                Ok(())
+            },
+        );
+
+        assert_eq!(got, "yeet.system_init=/run/current-system/init");
+        assert_eq!(*calls.borrow(), 2);
+        assert_eq!(*mounts.borrow(), 1);
     }
 
     #[test]
