@@ -95,11 +95,12 @@ editing generated unit files.
 The implementation should verify the exact NixOS option set, but the intended
 shape is:
 
-- disable `systemd-modules-load` by default without preventing users from
-  re-enabling it in their own NixOS configuration;
 - disable static `modprobe@configfs`, `modprobe@drm`,
   `modprobe@efi_pstore`, and `modprobe@fuse` units by default without
   preventing users from re-enabling them;
+- leave `systemd-modules-load` available so idiomatic user settings such as
+  `boot.kernelModules = [ ... ];` continue to work after
+  `sudo nixos-rebuild switch`;
 - avoid hard-forcing NixOS kernel module option lists, because users should be
   able to modify the shipped configuration and run `sudo nixos-rebuild switch`
   normally;
@@ -184,7 +185,6 @@ drifts away from the microVM profile.
 
 Minimum checks:
 
-- `systemd-modules-load` is disabled by default;
 - static `modprobe@...` units that do not apply to the yeet kernel are
   disabled by default;
 - those default disables remain overrideable by ordinary user NixOS

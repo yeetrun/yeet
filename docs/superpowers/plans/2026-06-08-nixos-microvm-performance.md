@@ -28,7 +28,8 @@ No `catch` or yeet client code changes are planned. If implementation uncovers a
 
 - Modify: `nixos/yeet-vm.nix`
   - Declare the official NixOS image's no-loadable-modules boot policy through NixOS options.
-  - Disable `systemd-modules-load` and static `modprobe@...` instances that do not apply to the yeet kernel.
+  - Disable static `modprobe@...` instances that do not apply to the yeet kernel.
+  - Preserve standard `systemd-modules-load` behavior so user `boot.kernelModules` settings work.
   - Keep useful interactive/admin packages.
   - Preserve default `nix-command` and `flakes` support.
 - Create: `scripts/verify-nixos-26.05.sh`
@@ -65,11 +66,11 @@ Current evaluated NixOS values before this implementation:
 nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.boot.kernelModules
 # ["atkbd","loop"]
 
-nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.systemd.services.systemd-modules-load.enable
+nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.systemd.services.\"modprobe@fuse\".enable
 # true
 ```
 
-The new image should remove avoidable module-loading startup work while preserving normal NixOS management and user overrideability.
+The new image should remove avoidable static `modprobe@...` startup work while preserving normal NixOS module-loading behavior and user overrideability.
 
 ---
 
@@ -226,7 +227,7 @@ Run:
 scripts/verify-nixos-26.05.sh
 ```
 
-Expected: FAIL before implementation. The failure should mention `systemd-modules-load` or one of the `modprobe@...` services.
+Expected: FAIL before implementation. The failure should mention one of the `modprobe@...` services.
 
 - [ ] **Step 4: Commit nothing**
 
@@ -324,7 +325,7 @@ NixOS 26.05 yeet microVM profile verified
 Run:
 
 ```bash
-nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.systemd.services.systemd-modules-load.enable
+nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.boot.kernelModules
 nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.systemd.services.\"modprobe@fuse\".enable
 nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfigurations.yeet-nixos-26_05.config.nix.settings.experimental-features
 ```
@@ -332,7 +333,7 @@ nix eval --extra-experimental-features 'nix-command flakes' --json .#nixosConfig
 Expected output:
 
 ```json
-false
+["atkbd","loop"]
 false
 ["nix-command","flakes"]
 ```
