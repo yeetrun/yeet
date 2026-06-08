@@ -860,6 +860,9 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	if RemoteGroupFlagSpecs()["vm"]["images"]["--dry-run"].ConsumesValue {
 		t.Fatal("vm images --dry-run should not consume a value")
 	}
+	if !containsString(group.Commands["images"].Examples, "yeet vm images catalog") {
+		t.Fatalf("vm images examples = %#v, want catalog example", group.Commands["images"].Examples)
+	}
 	if !containsString(group.Commands["images"].Examples, "yeet vm images update vm://nixos/26.05") {
 		t.Fatalf("vm images examples = %#v, want selected NixOS update example", group.Commands["images"].Examples)
 	}
@@ -1004,6 +1007,14 @@ func TestParseAdditionalCommandFlags(t *testing.T) {
 		}
 		if flags.Format != "json" || len(args) != 0 {
 			t.Fatalf("ParseVMImages format = %#v args=%v, want json no args", flags, args)
+		}
+
+		flags, args, err = ParseVMImages([]string{"catalog", "--format=json"})
+		if err != nil {
+			t.Fatalf("ParseVMImages catalog format: %v", err)
+		}
+		if flags.Format != "json" || strings.Join(args, " ") != "catalog" {
+			t.Fatalf("ParseVMImages catalog format = %#v args=%v, want json catalog", flags, args)
 		}
 
 		flags, args, err = ParseVMImages([]string{"--output=json-pretty"})

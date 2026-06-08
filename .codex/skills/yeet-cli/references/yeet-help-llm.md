@@ -253,6 +253,10 @@ yeet run <svc> vm://ubuntu/26.04 --net=svc
 ```
 
 ```
+yeet run <svc> vm://nixos/26.05
+```
+
+```
 yeet run <svc> vm://ubuntu/26.04 --image-policy=update
 ```
 
@@ -484,7 +488,7 @@ Manage VM-specific commands
 **Commands**:
 
 - `vm console`: Stream VM serial console output
-- `vm images`: Show, refresh, import, or prune VM image cache state
+- `vm images`: Show available VM images and manage VM image cache state
 
 Get detailed help: `yeet vm --help-llm`
 
@@ -1495,6 +1499,10 @@ yeet run <svc> vm://ubuntu/26.04 --net=svc
 ```
 
 ```
+yeet run <svc> vm://nixos/26.05
+```
+
+```
 yeet run <svc> vm://ubuntu/26.04 --image-policy=update
 ```
 
@@ -2484,9 +2492,13 @@ Get detailed help: `yeet vm console --help-llm`
 
 ### `vm images`
 
-Show, refresh, import, or prune VM image cache state
+Show available VM images and manage VM image cache state
 
 **Examples**:
+
+```
+yeet vm images catalog
+```
 
 ```
 yeet vm images
@@ -2498,6 +2510,10 @@ yeet vm images ls
 
 ```
 yeet vm images update
+```
+
+```
+yeet vm images update vm://nixos/26.05
 ```
 
 ```
@@ -3188,12 +3204,12 @@ Progress output (auto|tty|plain|quiet)
 ````
 # yeet vm images
 
-Show, refresh, import, or prune VM image cache state
+Show available VM images and manage VM image cache state
 
 ## Usage
 
 ```
-yeet [GLOBAL OPTIONS] vm images [ls|update|import <name> <dir>|rm <name>|prune] [--format=table|json|json-pretty]
+yeet [GLOBAL OPTIONS] vm images [ls|catalog|update|import <name> <dir>|rm <name>|prune] [--format=table|json|json-pretty]
 ```
 
 ## Global Options
@@ -3231,6 +3247,10 @@ Progress output (auto|tty|plain|quiet)
 ## Examples
 
 ```
+yeet vm images catalog
+```
+
+```
 yeet vm images
 ```
 
@@ -3240,6 +3260,10 @@ yeet vm images ls
 
 ```
 yeet vm images update
+```
+
+```
+yeet vm images update vm://nixos/26.05
 ```
 
 ```

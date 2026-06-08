@@ -193,6 +193,7 @@ yeet cron <svc> ./job.sh "0 9 * * *"
 VM on a KVM-capable host:
 
 ```bash
+yeet vm images catalog
 yeet run devbox vm://ubuntu/26.04
 yeet ssh devbox
 yeet vm console devbox

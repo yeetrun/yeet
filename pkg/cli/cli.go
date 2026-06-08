@@ -495,9 +495,10 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"console": {Name: "console", Description: "Stream VM serial console output", Usage: "vm console <svc>", ArgsSchema: ServiceArgs{}},
 			"images": {
 				Name:        "images",
-				Description: "Show, refresh, import, or prune VM image cache state",
-				Usage:       "vm images [ls|update|import <name> <dir>|rm <name>|prune] [--format=table|json|json-pretty]",
+				Description: "Show available VM images and manage VM image cache state",
+				Usage:       "vm images [ls|catalog|update|import <name> <dir>|rm <name>|prune] [--format=table|json|json-pretty]",
 				Examples: []string{
+					"yeet vm images catalog",
 					"yeet vm images",
 					"yeet vm images ls",
 					"yeet vm images update",

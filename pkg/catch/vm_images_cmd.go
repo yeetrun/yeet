@@ -17,7 +17,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 )
 
-const vmImagesUsage = "usage: yeet vm images [ls|update|import <name>|rm <name>|prune]"
+const vmImagesUsage = "usage: yeet vm images [ls|catalog|update|import <name>|rm <name>|prune]"
 
 type vmImageListRow struct {
 	Payload      string `json:"payload"`
@@ -26,6 +26,15 @@ type vmImageListRow struct {
 	Version      string `json:"version,omitempty"`
 	CachePath    string `json:"cachePath,omitempty"`
 	KernelPolicy string `json:"kernelPolicy,omitempty"`
+}
+
+type vmImageCatalogRow struct {
+	Payload       string `json:"payload"`
+	Kind          string `json:"kind"`
+	Name          string `json:"name"`
+	DefaultUser   string `json:"defaultUser,omitempty"`
+	VersionPrefix string `json:"versionPrefix,omitempty"`
+	KernelPolicy  string `json:"kernelPolicy,omitempty"`
 }
 
 var vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
@@ -47,6 +56,8 @@ func (e *ttyExecer) vmImagesActionCmdFunc(flags cli.VMImagesFlags, action string
 	switch action {
 	case "ls":
 		return vmImagesNoArgAction(args, func() error { return e.vmImagesListCmdFunc(flags) })
+	case "catalog":
+		return vmImagesNoArgAction(args, func() error { return e.vmImagesCatalogCmdFunc(flags) })
 	case "update":
 		return e.vmImagesUpdateCmdFunc(flags, args)
 	case "import":
@@ -110,6 +121,21 @@ func (e *ttyExecer) vmImagesListCmdFunc(flags cli.VMImagesFlags) error {
 		rows = append(rows, vmImageListRowFromPruneRow(row))
 	}
 	return renderVMImageListRows(e.rw, flags.Format, rows)
+}
+
+func (e *ttyExecer) vmImagesCatalogCmdFunc(flags cli.VMImagesFlags) error {
+	rows := make([]vmImageCatalogRow, 0, len(officialVMImages))
+	for _, image := range officialVMImages {
+		rows = append(rows, vmImageCatalogRowFromOfficial(image))
+	}
+	refs, err := listLocalVMImages(e.vmImageCache().Root)
+	if err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		rows = append(rows, vmImageCatalogRowFromLocalRef(ref))
+	}
+	return renderVMImageCatalogRows(e.rw, flags.Format, rows)
 }
 
 func (e *ttyExecer) vmImagesUpdateCmdFunc(flags cli.VMImagesFlags, args []string) error {
@@ -255,6 +281,25 @@ func (e *ttyExecer) vmImagesContext() context.Context {
 	return context.Background()
 }
 
+func vmImageCatalogRowFromOfficial(image officialVMImage) vmImageCatalogRow {
+	return vmImageCatalogRow{
+		Payload:       image.Payload,
+		Kind:          "builtin",
+		Name:          image.DisplayName,
+		DefaultUser:   image.DefaultUser,
+		VersionPrefix: image.VersionPrefix,
+	}
+}
+
+func vmImageCatalogRowFromLocalRef(ref localVMImageRef) vmImageCatalogRow {
+	return vmImageCatalogRow{
+		Payload:      ref.Payload,
+		Kind:         "local",
+		Name:         ref.Name,
+		KernelPolicy: ref.KernelPolicy,
+	}
+}
+
 func vmImageListRowFromCacheState(state vmImageCacheState) vmImageListRow {
 	version := state.LatestVersion
 	if version == "" {
@@ -296,6 +341,40 @@ func vmImageListRowFromPruneRow(row vmImagePruneRow) vmImageListRow {
 		Version:   row.Version,
 		CachePath: row.Path,
 	}
+}
+
+func renderVMImageCatalogRows(w io.Writer, formatOut string, rows []vmImageCatalogRow) error {
+	switch strings.TrimSpace(formatOut) {
+	case "json":
+		return json.NewEncoder(w).Encode(rows)
+	case "json-pretty":
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(rows)
+	case "", "table":
+		return renderVMImageCatalogRowsTable(w, rows)
+	default:
+		return fmt.Errorf("unsupported vm images format %q", formatOut)
+	}
+}
+
+func renderVMImageCatalogRowsTable(w io.Writer, rows []vmImageCatalogRow) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "PAYLOAD\tKIND\tNAME\tDEFAULT_USER\tKERNEL_POLICY"); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			row.Payload,
+			row.Kind,
+			row.Name,
+			dash(row.DefaultUser),
+			dash(row.KernelPolicy),
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
 }
 
 func renderVMImageListRows(w io.Writer, formatOut string, rows []vmImageListRow) error {
