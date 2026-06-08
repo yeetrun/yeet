@@ -174,33 +174,54 @@ override_probe="$(
 	nix eval --impure --extra-experimental-features "nix-command flakes" --json --expr '
 let
   flake = builtins.getFlake "path:'"$repo_root"'";
+  modprobeUnits = [
+    "modprobe@configfs"
+    "modprobe@drm"
+    "modprobe@efi_pstore"
+    "modprobe@fuse"
+  ];
   cfg = (flake.nixosConfigurations.yeet-nixos-26_05.extendModules {
     modules = [
       ({ ... }: {
-        systemd.services.systemd-modules-load = {
-          enable = true;
-          wantedBy = [ "multi-user.target" ];
-        };
-        systemd.services."modprobe@fuse" = {
-          enable = true;
-          wantedBy = [ "sysinit.target" ];
-        };
+        boot.kernelModules = [ "dummy" ];
+        systemd.services = builtins.listToAttrs (map
+          (name: {
+            inherit name;
+            value = {
+              enable = true;
+              wantedBy = [ "sysinit.target" ];
+            };
+          })
+          modprobeUnits);
       })
     ];
   }).config;
 in {
+  bootKernelModules = cfg.boot.kernelModules;
   systemdModulesLoadEnable = cfg.systemd.services.systemd-modules-load.enable;
   systemdModulesLoadWantedBy = cfg.systemd.services.systemd-modules-load.wantedBy;
-  modprobeFuseEnable = cfg.systemd.services."modprobe@fuse".enable;
-  modprobeFuseWantedBy = cfg.systemd.services."modprobe@fuse".wantedBy;
+  modprobeUnits = builtins.listToAttrs (map
+    (name:
+      let
+        service = builtins.getAttr name cfg.systemd.services;
+      in
+      {
+        inherit name;
+        value = {
+          enable = service.enable;
+          wantedBy = service.wantedBy;
+        };
+      })
+    modprobeUnits);
 }
 '
 )"
 printf '%s\n' "$override_probe" | jq -e '
+  (.bootKernelModules | index("dummy") != null) and
   .systemdModulesLoadEnable == true and
   (.systemdModulesLoadWantedBy | index("multi-user.target") != null) and
-  .modprobeFuseEnable == true and
-  (.modprobeFuseWantedBy | index("sysinit.target") != null)
+  (.modprobeUnits | length == 4) and
+  ([.modprobeUnits[] | select(.enable == true and (.wantedBy | index("sysinit.target") != null))] | length == 4)
 ' >/dev/null || {
 	echo "NixOS yeet microVM defaults must remain overrideable by user configuration" >&2
 	printf '%s\n' "$override_probe" >&2
