@@ -224,6 +224,10 @@ func writerOrDiscard(w io.Writer) io.Writer {
 }
 
 func removeSSHKnownHost(ctx context.Context, alias, knownHosts string) error {
+	backup := knownHosts + ".old"
+	if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale VM SSH host key backup %s: %w", backup, err)
+	}
 	cmd := exec.CommandContext(ctx, "ssh-keygen", "-R", alias, "-f", knownHosts)
 	output, err := cmd.CombinedOutput()
 	if err == nil {

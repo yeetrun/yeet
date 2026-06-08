@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -856,6 +857,43 @@ func TestRunSSHPlanReturnsRemovalErrorWithoutRetry(t *testing.T) {
 	}
 	if runs != 1 {
 		t.Fatalf("ssh runs = %d, want 1", runs)
+	}
+}
+
+func TestRemoveSSHKnownHostRemovesStaleBackupBeforeSSHKeygen(t *testing.T) {
+	if _, err := exec.LookPath("ssh-keygen"); err != nil {
+		t.Skip("ssh-keygen not available")
+	}
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "host_key")
+	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", keyPath, "-N", "")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate test ssh key: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	pub, err := os.ReadFile(keyPath + ".pub")
+	if err != nil {
+		t.Fatalf("read generated public key: %v", err)
+	}
+	knownHosts := filepath.Join(dir, "known_hosts")
+	if err := os.WriteFile(knownHosts, []byte("yeet-vm-test@catch "+string(pub)), 0o600); err != nil {
+		t.Fatalf("write known_hosts: %v", err)
+	}
+	if err := os.WriteFile(knownHosts+".old", []byte("stale backup"), 0o600); err != nil {
+		t.Fatalf("write stale known_hosts backup: %v", err)
+	}
+
+	if err := removeSSHKnownHost(context.Background(), "yeet-vm-test@catch", knownHosts); err != nil {
+		t.Fatalf("removeSSHKnownHost error = %v", err)
+	}
+	got, err := os.ReadFile(knownHosts)
+	if err != nil {
+		t.Fatalf("read known_hosts after removal: %v", err)
+	}
+	if strings.Contains(string(got), "yeet-vm-test@catch") {
+		t.Fatalf("known_hosts still contains alias after removal: %q", string(got))
+	}
+	if _, err := os.Stat(knownHosts + ".old"); err != nil {
+		t.Fatalf("known_hosts backup was not recreated by ssh-keygen: %v", err)
 	}
 }
 

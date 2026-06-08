@@ -31,6 +31,7 @@ const (
 var vmImageSafeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 var prepareVMRootFSFunc = prepareVMRootFS
 var vmRootFSDecompressRunner = runVMRootFSDecompress
+var vmImageManifestFetchRetryDelay = 500 * time.Millisecond
 
 type vmImageManifest struct {
 	Name                string            `json:"name"`
@@ -446,24 +447,56 @@ func (c vmImageCache) ensureArtifacts(ctx context.Context, dir string, manifest 
 }
 
 func (c vmImageCache) fetchManifest(ctx context.Context) (vmImageManifest, error) {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		manifest, retry, err := c.fetchManifestOnce(ctx)
+		if err == nil {
+			return manifest, nil
+		}
+		lastErr = err
+		if !retry || attempt == 3 {
+			return vmImageManifest{}, err
+		}
+		if err := sleepVMImageRetry(ctx, vmImageManifestFetchRetryDelay); err != nil {
+			return vmImageManifest{}, err
+		}
+	}
+	return vmImageManifest{}, lastErr
+}
+
+func (c vmImageCache) fetchManifestOnce(ctx context.Context) (vmImageManifest, bool, error) {
 	manifestURL := c.manifestURL()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
 	if err != nil {
-		return vmImageManifest{}, fmt.Errorf("create VM image manifest request: %w", err)
+		return vmImageManifest{}, false, fmt.Errorf("create VM image manifest request: %w", err)
 	}
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return vmImageManifest{}, fmt.Errorf("fetch VM image manifest: %w", err)
+		return vmImageManifest{}, true, fmt.Errorf("fetch VM image manifest: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return vmImageManifest{}, fmt.Errorf("fetch VM image manifest: %s", resp.Status)
+		return vmImageManifest{}, resp.StatusCode >= 500, fmt.Errorf("fetch VM image manifest: %s", resp.Status)
 	}
 	var manifest vmImageManifest
 	if err := json.NewDecoder(resp.Body).Decode(&manifest); err != nil {
-		return vmImageManifest{}, fmt.Errorf("decode VM image manifest: %w", err)
+		return vmImageManifest{}, false, fmt.Errorf("decode VM image manifest: %w", err)
 	}
-	return manifest, nil
+	return manifest, false, nil
+}
+
+func sleepVMImageRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("wait to retry VM image manifest fetch: %w", ctx.Err())
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (c vmImageCache) ensureArtifact(ctx context.Context, dir string, manifest vmImageManifest, artifactName string, progress *byteProgress, ui ProgressUI) (string, error) {
