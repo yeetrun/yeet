@@ -49,6 +49,8 @@ The evaluated NixOS config currently includes default kernel modules such as
   guest model.
 - Preserve normal NixOS configuration, package management, and
   `nixos-rebuild` expectations.
+- Keep `nix-command` and `flakes` enabled by default so users can inspect and
+  rebuild the VM with modern Nix workflows immediately after SSH.
 - Keep useful interactive/admin tools such as `htop`, `vim`, `jq`, `curl`,
   `git`, and `wget`; they are not the likely boot bottleneck.
 - Reduce first-boot work where NixOS provides a clean, supported way to do so.
@@ -229,6 +231,8 @@ The comparison should include:
 - Avoidable module-load dmesg noise is removed.
 - No failed units are introduced.
 - `nixos-rebuild` remains a supported expectation.
+- `sudo nixos-rebuild switch` works in a fresh VM without additional setup.
+- `nix-command` and `flakes` are enabled in a fresh VM without extra flags.
 - Interactive/admin tools remain available.
 - The image build fails if future changes reintroduce module-loading behavior
   incompatible with the yeet kernel.
