@@ -9,7 +9,7 @@ This directory contains the shared Firecracker kernel helper and the Ubuntu
 rootfs builder used by yeet. The release workflows that publish public bundles
 live in `github.com/yeetrun/yeet-vm-images`.
 
-The current fast bundle version is `ubuntu-26.04-amd64-v13`. It is built from
+The current fast bundle version is `ubuntu-26.04-amd64-v14`. It is built from
 the official Ubuntu 26.04 cloud image, boots a yeet-managed kernel under
 Firecracker direct kernel boot, uses `/usr/local/lib/yeet-vm/yeet-init` as the
 pre-systemd init shim, and omits `initrd.img`.
@@ -64,9 +64,9 @@ The fast profile customizes the Ubuntu rootfs before compression:
 - installs the Rust `yeet-init` binary into `/usr/local/lib/yeet-vm/yeet-init`;
 - compiles Ghostty's `xterm-ghostty` terminfo into `/etc/terminfo` so terminal
   applications recognize that TERM value out of the box;
-- keeps `iptables` and `nftables` userspace tools installed for guest-managed
-  firewalls and routers. On Ubuntu, the default `iptables` command uses the
-  nftables backend;
+- keeps `iptables`, `nftables`, and `rsync` userspace tools installed for
+  guest-managed firewalls, routers, and `yeet copy` guest file sync. On Ubuntu,
+  the default `iptables` command uses the nftables backend;
 - writes `/etc/sysctl.d/99-yeet-vm-router.conf` with IPv4 and IPv6 forwarding
   enabled;
 - writes `/etc/tmpfiles.d/yeet-vm-tun.conf` so `/dev/net/tun` is present for

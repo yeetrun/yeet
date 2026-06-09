@@ -14,7 +14,7 @@ func TestFastUbuntuImagePolicyCleansFirecrackerGuestStatus(t *testing.T) {
 	script := readBuildUbuntuScript(t)
 
 	for _, want := range []string{
-		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v13}"`,
+		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v14}"`,
 		"fwupd$",
 		"fwupd-signed$",
 		"update-notifier-common$",
@@ -58,7 +58,8 @@ func TestFastUbuntuImagePolicySupportsRouterServices(t *testing.T) {
 	script := readBuildUbuntuScript(t)
 
 	for _, want := range []string{
-		"apt-get install -y --no-install-recommends iptables nftables",
+		"apt-get install -y --no-install-recommends iptables nftables rsync",
+		`chroot "$root" /usr/bin/rsync --version >/dev/null`,
 		"99-yeet-vm-router.conf",
 		"net.ipv4.ip_forward = 1",
 		"net.ipv6.conf.all.forwarding = 1",
