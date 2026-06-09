@@ -463,15 +463,19 @@ func serviceShellCommandPlanFromResponse(host, service string, info serverInfo, 
 
 func serviceShellCommandPlanFromResponseWithForce(host, service string, info serverInfo, resp catchrpc.ServiceInfoResponse, command []string, options []string, forceProxy bool) ([]string, []string, *sshKnownHostRepair, string, error) {
 	service = baseSSHServiceName(service)
-	if !resp.Found {
-		return nil, nil, nil, "", serviceNotFoundShellError(service, resp.Message)
-	}
 	if resp.Info.ServiceType == serviceTypeVM {
-		vmPlan, err := buildVMSSHOptionsPlan(host, info, service, resp, options, forceProxy)
+		plan, err := vmSSHExecutionPlanForServiceInfo(host, info, service, resp, command, options, forceProxy)
 		if err != nil {
 			return nil, nil, nil, "", err
 		}
-		return command, vmPlan.Options, vmPlan.KnownHostRepair, vmPlan.Notice, nil
+		optionsLen := len(plan.Args) - 1 - len(command)
+		if optionsLen < 0 {
+			return nil, nil, nil, "", fmt.Errorf("invalid VM SSH plan for service %q", service)
+		}
+		return command, plan.Args[:optionsLen], plan.KnownHostRepair, plan.Notice, nil
+	}
+	if !resp.Found {
+		return nil, nil, nil, "", serviceNotFoundShellError(service, resp.Message)
 	}
 	serviceDir, err := serviceDataDir(service, info, resp)
 	if err != nil {
@@ -479,6 +483,30 @@ func serviceShellCommandPlanFromResponseWithForce(host, service string, info ser
 	}
 	command, options = buildServiceSSHCommand(serviceDir, command, options)
 	return command, options, nil, "", nil
+}
+
+func vmSSHExecutionPlanForServiceInfo(host string, info serverInfo, service string, resp catchrpc.ServiceInfoResponse, command []string, options []string, forceProxy bool) (sshExecutionPlan, error) {
+	if !resp.Found {
+		return sshExecutionPlan{}, serviceNotFoundShellError(service, resp.Message)
+	}
+	if resp.Info.ServiceType != serviceTypeVM {
+		return sshExecutionPlan{}, fmt.Errorf("service %q is not a VM service", service)
+	}
+	vmPlan, err := buildVMSSHOptionsPlan(host, info, service, resp, options, forceProxy)
+	if err != nil {
+		return sshExecutionPlan{}, err
+	}
+	inv := sshInvocation{
+		Options:    vmPlan.Options,
+		Service:    service,
+		Command:    command,
+		ForceProxy: forceProxy,
+	}
+	return sshExecutionPlan{
+		Args:            sshArgsFromInvocation(host, info, inv),
+		KnownHostRepair: vmPlan.KnownHostRepair,
+		Notice:          vmPlan.Notice,
+	}, nil
 }
 
 type vmSSHOptionsPlan struct {

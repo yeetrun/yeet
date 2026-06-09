@@ -351,6 +351,50 @@ func TestServiceShellCommandForVMUsesGuestSSH(t *testing.T) {
 	}
 }
 
+func TestVMSSHExecutionPlanForServiceBuildsProxyPlan(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	plan, err := vmSSHExecutionPlanForServiceInfo(
+		"yeet-pve1",
+		serverInfo{InstallUser: "root"},
+		"devbox",
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: serviceTypeVM,
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+				},
+			},
+		},
+		nil,
+		nil,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("vmSSHExecutionPlanForServiceInfo: %v", err)
+	}
+	for _, want := range []string{
+		"-l", "ubuntu",
+		"HostName=192.168.100.12",
+		"HostKeyAlias=yeet-vm-devbox@yeet-pve1",
+		"ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts") + " -o HostKeyAlias=yeet-proxy@yeet-pve1 -o CheckHostIP=no -W %h:%p root@yeet-pve1",
+		"yeet-pve1",
+	} {
+		if !sshOptionsContainValue(plan.Args, want) && !slices.Contains(plan.Args, want) {
+			t.Fatalf("plan args = %#v, want %q", plan.Args, want)
+		}
+	}
+	if plan.Notice != "Proxying VM SSH through yeet-pve1 to 192.168.100.12" {
+		t.Fatalf("notice = %q", plan.Notice)
+	}
+	if plan.KnownHostRepair == nil || !slices.Contains(plan.KnownHostRepair.ExtraAliases, "yeet-proxy@yeet-pve1") {
+		t.Fatalf("repair = %#v, want proxy alias", plan.KnownHostRepair)
+	}
+}
+
 func TestServiceShellCommandForVMSvcLANPrefersSvcAndProxies(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
