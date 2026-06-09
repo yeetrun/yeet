@@ -91,7 +91,7 @@ func TestRunServiceSetHelpShowsLeafCommand(t *testing.T) {
 	if !strings.Contains(stdout, "Set service settings") {
 		t.Fatalf("stdout = %q, want service set command help", stdout)
 	}
-	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--cpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--snapshots=on|off|inherit]") {
+	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit]") {
 		t.Fatalf("stdout = %q, want service set usage", stdout)
 	}
 	if strings.Contains(stdout, "service COMMAND [ARGS...]") {

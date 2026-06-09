@@ -47,6 +47,14 @@ func TestServiceSetRootRejectsServiceCommandSyntax(t *testing.T) {
 	}
 }
 
+func TestServiceSetRejectsVMFlags(t *testing.T) {
+	execer := &ttyExecer{}
+	err := execer.serviceCmdFunc([]string{"set", "--cpus=8"})
+	if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+		t.Fatalf("service set --cpus error = %v, want unknown flag", err)
+	}
+}
+
 func TestServiceSetRootRejectsMissingService(t *testing.T) {
 	server := newTestServer(t)
 	newRoot := filepath.Join(t.TempDir(), "new-root")

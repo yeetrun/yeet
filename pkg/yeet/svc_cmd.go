@@ -340,7 +340,28 @@ func handleSvcVM(ctx context.Context, req svcCommandRequest) error {
 			return handleVMImagesImportParsed(ctx, flags, remaining)
 		}
 	}
+	if len(args) >= 2 && args[0] == "vm" && args[1] == "set" {
+		return handleVMSet(ctx, req)
+	}
 	return handleSvcRemote(ctx, req)
+}
+
+func handleVMSet(ctx context.Context, req svcCommandRequest) error {
+	flags, _, err := cli.ParseVMSet(req.Command.Args[1:])
+	if err != nil {
+		return err
+	}
+	if err := execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, false); err != nil {
+		return err
+	}
+	updated, err := saveVMSetConfig(req.Config, req.HostOverride, flags)
+	if err != nil {
+		return fmt.Errorf("updated catch VM settings, but failed to update %s: %w", projectConfigName, err)
+	}
+	if !updated {
+		return printServiceSetSyncHint(os.Stdout, req.Service, serviceSetSyncHintHost(req))
+	}
+	return nil
 }
 
 func handleVMImagesImportParsed(ctx context.Context, flags cli.VMImagesFlags, remaining []string) error {
@@ -2396,7 +2417,6 @@ func applyServiceSetConfigFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) 
 	if len(flags.Publish) != 0 || flags.PublishReset {
 		entry.Ports = normalizePublishPorts(flags.Publish)
 	}
-	applyServiceSetVMConfigFlags(entry, flags)
 	return applyServiceSetSnapshotFlags(entry, flags)
 }
 
@@ -2405,8 +2425,21 @@ type runFlagUpdate struct {
 	Value string
 }
 
-func applyServiceSetVMConfigFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) {
-	removals, updates := serviceSetVMRunFlagChanges(flags)
+func saveVMSetConfig(cfgLoc *projectConfigLocation, hostOverride string, flags cli.VMSetFlags) (bool, error) {
+	if serviceOverride == "" {
+		return false, nil
+	}
+	entry, ok := serviceEntryForConfig(cfgLoc, hostOverride)
+	if !ok {
+		return false, nil
+	}
+	applyVMSetConfigFlags(&entry, flags)
+	cfgLoc.Config.SetServiceEntry(entry)
+	return true, saveProjectConfig(cfgLoc)
+}
+
+func applyVMSetConfigFlags(entry *ServiceEntry, flags cli.VMSetFlags) {
+	removals, updates := vmSetRunFlagChanges(flags)
 	if len(removals) == 0 || !serviceEntryIsVM(*entry) {
 		return
 	}
@@ -2419,7 +2452,7 @@ func serviceEntryIsVM(entry ServiceEntry) bool {
 		isVMPayload(entry.Payload)
 }
 
-func serviceSetVMRunFlagChanges(flags cli.ServiceSetFlags) (map[string]bool, []runFlagUpdate) {
+func vmSetRunFlagChanges(flags cli.VMSetFlags) (map[string]bool, []runFlagUpdate) {
 	removals := map[string]bool{}
 	var updates []runFlagUpdate
 	add := func(name, value string) {

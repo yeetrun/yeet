@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"bytes"
 	"context"
 	"net/netip"
 	"os"
@@ -17,7 +18,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
-func TestServiceSetVMRejectsNonVMService(t *testing.T) {
+func TestVMSetRejectsNonVMService(t *testing.T) {
 	server := newTestServer(t)
 	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
 		"api": {Name: "api", ServiceType: db.ServiceTypeDockerCompose},
@@ -25,30 +26,30 @@ func TestServiceSetVMRejectsNonVMService(t *testing.T) {
 		t.Fatalf("DB.Set: %v", err)
 	}
 
-	err := server.updateVMServiceSettings(context.Background(), "api", cli.ServiceSetFlags{CPUs: 2})
+	err := server.updateVMServiceSettings(context.Background(), "api", cli.VMSetFlags{CPUs: 2})
 	if err == nil || !strings.Contains(err.Error(), `service "api" is not a VM service`) {
 		t.Fatalf("error = %v, want non-VM service", err)
 	}
 }
 
-func TestServiceSetVMRejectsRunningVM(t *testing.T) {
+func TestVMSetRejectsRunningVM(t *testing.T) {
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendRaw)
 	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return true, nil })
 
-	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.ServiceSetFlags{CPUs: 2})
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{CPUs: 2})
 	if err == nil || !strings.Contains(err.Error(), `cannot change VM settings while "devbox" is running`) {
 		t.Fatalf("error = %v, want running VM error", err)
 	}
 }
 
-func TestServiceSetVMUpdatesShapeAndFirecrackerConfig(t *testing.T) {
+func TestVMSetUpdatesShapeAndFirecrackerConfig(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
 	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
 
-	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.ServiceSetFlags{CPUs: 6, Memory: "6g"}); err != nil {
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{CPUs: 6, Memory: "6g"}); err != nil {
 		t.Fatalf("updateVMServiceSettings: %v", err)
 	}
 
@@ -60,7 +61,23 @@ func TestServiceSetVMUpdatesShapeAndFirecrackerConfig(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"mem_size_mib": 6144`)
 }
 
-func TestServiceSetVMGrowsRawDiskAfterCommands(t *testing.T) {
+func TestVMCmdSetUpdatesShape(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	execer := &ttyExecer{s: server, sn: "devbox", rw: &bytes.Buffer{}}
+
+	if err := execer.vmCmdFunc([]string{"set", "--cpus=6", "--memory=6g"}); err != nil {
+		t.Fatalf("vm set: %v", err)
+	}
+	svc := getTestService(t, server, "devbox")
+	if svc.VM.CPUs != 6 || svc.VM.MemoryBytes != 6<<30 {
+		t.Fatalf("vm shape = %d/%d, want 6/%d", svc.VM.CPUs, svc.VM.MemoryBytes, int64(6<<30))
+	}
+}
+
+func TestVMSetGrowsRawDiskAfterCommands(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
@@ -71,7 +88,7 @@ func TestServiceSetVMGrowsRawDiskAfterCommands(t *testing.T) {
 		return nil
 	})
 
-	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.ServiceSetFlags{Disk: "32g"}); err != nil {
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{Disk: "32g"}); err != nil {
 		t.Fatalf("updateVMServiceSettings: %v", err)
 	}
 
@@ -90,29 +107,29 @@ func TestServiceSetVMGrowsRawDiskAfterCommands(t *testing.T) {
 	}
 }
 
-func TestServiceSetVMGrowsDiskWithoutMemoryAdmission(t *testing.T) {
+func TestVMSetGrowsDiskWithoutMemoryAdmission(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
 	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
 	withServiceSetVMHostProfile(t, func(*Server, string, int64) (vmHostProfile, error) {
-		t.Fatal("disk-only service set should not inspect host memory admission")
+		t.Fatal("disk-only vm set should not inspect host memory admission")
 		return vmHostProfile{}, nil
 	})
 	withServiceSetVMDiskRunner(t, func(context.Context, []string) error { return nil })
 
-	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.ServiceSetFlags{Disk: "32g"}); err != nil {
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{Disk: "32g"}); err != nil {
 		t.Fatalf("updateVMServiceSettings: %v", err)
 	}
 }
 
-func TestServiceSetVMRejectsDiskShrinkWithoutDBChange(t *testing.T) {
+func TestVMSetRejectsDiskShrinkWithoutDBChange(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
 	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
 
-	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.ServiceSetFlags{Disk: "8g"})
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{Disk: "8g"})
 	if err == nil || !strings.Contains(err.Error(), "VM disk shrink is not supported") {
 		t.Fatalf("error = %v, want shrink rejection", err)
 	}
@@ -122,7 +139,7 @@ func TestServiceSetVMRejectsDiskShrinkWithoutDBChange(t *testing.T) {
 	}
 }
 
-func TestServiceSetVMReplacesNetworkAndMetadata(t *testing.T) {
+func TestVMSetReplacesNetworkAndMetadata(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
@@ -140,7 +157,7 @@ func TestServiceSetVMReplacesNetworkAndMetadata(t *testing.T) {
 		return nil
 	})
 
-	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.ServiceSetFlags{
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
 		Net:           "lan",
 		NetworkChange: true,
 		MacvlanParent: "vmbr0",
@@ -168,7 +185,7 @@ func TestServiceSetVMReplacesNetworkAndMetadata(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"host_dev_name": "yvm-d-ea1055-l0"`)
 }
 
-func TestServiceSetVMPreservesNixOSUserAndSystemInit(t *testing.T) {
+func TestVMSetPreservesNixOSUserAndSystemInit(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
@@ -197,7 +214,7 @@ func TestServiceSetVMPreservesNixOSUserAndSystemInit(t *testing.T) {
 		return nil
 	})
 
-	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.ServiceSetFlags{
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
 		Net:           "lan",
 		NetworkChange: true,
 		MacvlanParent: "vmbr0",
@@ -218,7 +235,7 @@ func TestServiceSetVMPreservesNixOSUserAndSystemInit(t *testing.T) {
 	assertFileContains(t, firecrackerPath, "yeet.system_init=/run/current-system/init")
 }
 
-func TestServiceSetVMPreservesLocalNixOSImageMetadata(t *testing.T) {
+func TestVMSetPreservesLocalNixOSImageMetadata(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
@@ -242,7 +259,7 @@ func TestServiceSetVMPreservesLocalNixOSImageMetadata(t *testing.T) {
 		return nil
 	})
 
-	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.ServiceSetFlags{
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
 		Net:           "lan",
 		NetworkChange: true,
 		MacvlanParent: "vmbr0",

@@ -397,26 +397,9 @@ func TestParseServiceSetFlags(t *testing.T) {
 			want:    ServiceSetFlags{ServiceRoot: "tank/apps/svc-a", ZFS: true, Copy: true},
 			wantOut: []string{"svc-a"},
 		},
-		{
-			name:    "vm shape flags",
-			args:    []string{"svc-a", "--cpus=8", "--memory", "8g", "--disk=128g"},
-			want:    ServiceSetFlags{CPUs: 8, Memory: "8g", Disk: "128g"},
-			wantOut: []string{"svc-a"},
-		},
-		{
-			name: "vm network flags",
-			args: []string{"--net", "svc,lan", "--macvlan-parent=vmbr0", "--macvlan-vlan=42", "--macvlan-mac=02:00:00:00:00:42", "svc-a"},
-			want: ServiceSetFlags{
-				Net:           "svc,lan",
-				NetworkChange: true,
-				MacvlanParent: "vmbr0",
-				MacvlanVlan:   42,
-				MacvlanMac:    "02:00:00:00:00:42",
-			},
-			wantOut: []string{"svc-a"},
-		},
 		{name: "missing change", args: []string{"svc-a"}, wantErr: "service set requires settings to change"},
-		{name: "negative cpus", args: []string{"svc-a", "--cpus=-1"}, wantErr: "VM CPU count must be positive"},
+		{name: "rejects vm shape flags", args: []string{"svc-a", "--cpus=8"}, wantErr: "unknown flag"},
+		{name: "rejects vm network flags", args: []string{"svc-a", "--net=lan"}, wantErr: "unknown flag"},
 		{name: "zfs without root", args: []string{"svc-a", "--zfs"}, wantErr: "--service-root is required when --zfs is set"},
 		{name: "relative root without zfs", args: []string{"svc-a", "--service-root", "apps/svc-a"}, wantErr: "--service-root must be absolute unless --zfs is set"},
 		{name: "copy and empty", args: []string{"svc-a", "--service-root", "/srv/apps/svc-a", "--copy", "--empty"}, wantErr: "cannot use --copy and --empty together"},
@@ -433,6 +416,59 @@ func TestParseServiceSetFlags(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("ParseServiceSet error: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("flags = %#v, want %#v", got, tt.want)
+			}
+			if !reflect.DeepEqual(out, tt.wantOut) {
+				t.Fatalf("args = %#v, want %#v", out, tt.wantOut)
+			}
+		})
+	}
+}
+
+func TestParseVMSetFlags(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    VMSetFlags
+		wantOut []string
+		wantErr string
+	}{
+		{
+			name:    "shape flags",
+			args:    []string{"devbox", "--cpus=8", "--memory", "8g", "--disk=128g"},
+			want:    VMSetFlags{CPUs: 8, Memory: "8g", Disk: "128g"},
+			wantOut: []string{"devbox"},
+		},
+		{
+			name: "network flags",
+			args: []string{"--net", "svc,lan", "--macvlan-parent=vmbr0", "--macvlan-vlan=42", "--macvlan-mac=02:00:00:00:00:42", "devbox"},
+			want: VMSetFlags{
+				Net:           "svc,lan",
+				NetworkChange: true,
+				MacvlanParent: "vmbr0",
+				MacvlanVlan:   42,
+				MacvlanMac:    "02:00:00:00:00:42",
+			},
+			wantOut: []string{"devbox"},
+		},
+		{name: "missing change", args: []string{"devbox"}, wantErr: "vm set requires settings to change"},
+		{name: "negative cpus", args: []string{"devbox", "--cpus=-1"}, wantErr: "VM CPU count must be positive"},
+		{name: "negative vlan", args: []string{"devbox", "--macvlan-vlan=-1"}, wantErr: "--macvlan-vlan must not be negative"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, out, err := ParseVMSet(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseVMSet error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseVMSet error: %v", err)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("flags = %#v, want %#v", got, tt.want)
@@ -726,7 +762,7 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if reg.Groups["service"].Commands["set"].Info.Name != "set" {
 		t.Fatalf("registry service set command = %#v", reg.Groups["service"].Commands["set"])
 	}
-	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--cpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]" {
+	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]" {
 		t.Fatalf("service set usage = %q", reg.Groups["service"].Commands["set"].Info.Usage)
 	}
 	wantServiceSetExamples := []string{
@@ -736,13 +772,14 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 		"yeet service set <svc> --service-root=/srv/apps/<svc>",
 		"yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy",
 		"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
-		"yeet service set <vm> --cpus=8 --memory=8g --disk=128g",
-		"yeet service set <vm> --net=lan",
 		"yeet service set <svc> --snapshots=off",
 		"yeet service set <svc> --snapshots=on --snapshot-keep-last=5 --snapshot-max-age=7d",
 	}
 	if !reflect.DeepEqual(reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples) {
 		t.Fatalf("service set examples = %#v, want %#v", reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples)
+	}
+	if reg.Groups["vm"].Commands["set"].Info.Usage != "vm set <vm> [--cpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
+		t.Fatalf("vm set usage = %q", reg.Groups["vm"].Commands["set"].Info.Usage)
 	}
 	if reg.Groups["snapshots"].Commands["defaults"].Info.Name != "defaults" {
 		t.Fatalf("registry snapshots defaults command = %#v", reg.Groups["snapshots"].Commands["defaults"])
@@ -824,11 +861,6 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	if !RemoteGroupFlagSpecs()["service"]["set"]["--snapshots"].ConsumesValue {
 		t.Fatal("service set --snapshots should consume a value")
 	}
-	for _, flag := range []string{"--cpus", "--memory", "--disk", "--net", "--macvlan-parent", "--macvlan-vlan", "--macvlan-mac"} {
-		if !RemoteGroupFlagSpecs()["service"]["set"][flag].ConsumesValue {
-			t.Fatalf("service set %s should consume a value", flag)
-		}
-	}
 	if !RemoteGroupFlagSpecs()["snapshots"]["defaults"]["--enabled"].ConsumesValue {
 		t.Fatal("snapshots defaults --enabled should consume a value")
 	}
@@ -844,6 +876,20 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	}
 	if _, ok := RemoteGroupFlagSpecs()["vm"]["console"]; !ok {
 		t.Fatal("vm console flag spec missing")
+	}
+	if _, ok := group.Commands["set"]; !ok {
+		t.Fatal("vm set command missing")
+	}
+	if _, ok := RemoteGroupFlagSpecs()["vm"]["set"]; !ok {
+		t.Fatal("vm set flag spec missing")
+	}
+	for _, flag := range []string{"--cpus", "--memory", "--disk", "--net", "--macvlan-parent", "--macvlan-vlan", "--macvlan-mac"} {
+		if !RemoteGroupFlagSpecs()["vm"]["set"][flag].ConsumesValue {
+			t.Fatalf("vm set %s should consume a value", flag)
+		}
+		if _, ok := RemoteGroupFlagSpecs()["service"]["set"][flag]; ok {
+			t.Fatalf("service set %s should not be registered", flag)
+		}
 	}
 	if _, ok := group.Commands["images"]; !ok {
 		t.Fatal("vm images command missing")
