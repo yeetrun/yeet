@@ -191,6 +191,55 @@ func TestRunRemoveHelpLLMShowsOptions(t *testing.T) {
 	}
 }
 
+func TestCopyHelpMentionsVMGuestCopy(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldStdout := os.Stdout
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		os.Stdout = oldStdout
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create stdout temp file: %v", err)
+	}
+	os.Stdout = stdoutFile
+	os.Args = []string{"yeet", "copy", "--help"}
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("copy help should not call handler with args %v", args)
+		return nil
+	}
+
+	if got := run(); got != 0 {
+		t.Fatalf("run exit code = %d, want 0", got)
+	}
+	if _, err := stdoutFile.Seek(0, 0); err != nil {
+		t.Fatalf("seek stdout: %v", err)
+	}
+	rawStdout, err := os.ReadFile(stdoutFile.Name())
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	stdout := string(rawStdout)
+	for _, want := range []string{
+		"Copy files between local paths and service data or VM guests",
+		"[--force-proxy] [-avz] <src> <dst>",
+		"yeet copy ./config.yml svc:data/config.yml",
+		"yeet copy ./app devbox:~/app",
+		"yeet copy --force-proxy ./configs/ devbox:~/configs/",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("copy help missing %q\n%s", want, stdout)
+		}
+	}
+}
+
 func TestRunGlobalHelpIncludesUpgrade(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
