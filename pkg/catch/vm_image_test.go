@@ -400,8 +400,8 @@ func TestVMImageManifestPreservesNixOSFields(t *testing.T) {
 }
 
 func TestDefaultVMImageVersionUsesLatestFastBundle(t *testing.T) {
-	if defaultVMImageVersion != "ubuntu-26.04-amd64-v13" {
-		t.Fatalf("default VM image version = %q, want ubuntu-26.04-amd64-v13", defaultVMImageVersion)
+	if defaultVMImageVersion != "ubuntu-26.04-amd64-v14" {
+		t.Fatalf("default VM image version = %q, want ubuntu-26.04-amd64-v14", defaultVMImageVersion)
 	}
 }
 
@@ -565,7 +565,7 @@ func TestOfficialVMImageByVersionMatchesNumericOfficialVersions(t *testing.T) {
 		payload string
 		ok      bool
 	}{
-		{version: "ubuntu-26.04-amd64-v13", payload: vmUbuntu2604Payload, ok: true},
+		{version: "ubuntu-26.04-amd64-v14", payload: vmUbuntu2604Payload, ok: true},
 		{version: "nixos-26.05-amd64-v1", payload: vmNixOS2605Payload, ok: true},
 		{version: "ubuntu-26.04-amd64-latest", ok: false},
 		{version: "custom-1", ok: false},

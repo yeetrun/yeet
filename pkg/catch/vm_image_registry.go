@@ -13,7 +13,7 @@ const (
 )
 
 const (
-	defaultVMImageVersion       = "ubuntu-26.04-amd64-v13"
+	defaultVMImageVersion       = "ubuntu-26.04-amd64-v14"
 	defaultVMImageManifestURL   = "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json"
 	nixos2605VMImageManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/download/nixos-26.05-amd64-latest/manifest.json"
 )
