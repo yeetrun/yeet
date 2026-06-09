@@ -60,7 +60,7 @@ Progress output (auto|tty|plain|quiet)
 
 ### `copy`
 
-Copy files between local and service data
+Copy files between local paths and service data or VM guests
 
 **Aliases**: `cp`
 
@@ -76,6 +76,18 @@ yeet copy ./configs/ svc:data/
 
 ```
 yeet copy svc:data/configs ./configs
+```
+
+```
+yeet copy ./app devbox:~/app
+```
+
+```
+yeet copy devbox:/var/log/cloud-init.log ./logs/
+```
+
+```
+yeet copy --force-proxy ./configs/ devbox:~/configs/
 ```
 
 Get detailed help: `yeet copy --help-llm`
@@ -523,12 +535,12 @@ yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
 ````
 # yeet copy
 
-Copy files between local and service data
+Copy files between local paths and service data or VM guests
 
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] copy [OPTIONS] [-avz] <src> <dst>
+yeet [GLOBAL_OPTIONS] copy [OPTIONS] [--force-proxy] [-avz] <src> <dst>
 ```
 
 ## Global Options
@@ -575,6 +587,18 @@ yeet copy ./configs/ svc:data/
 
 ```
 yeet copy svc:data/configs ./configs
+```
+
+```
+yeet copy ./app devbox:~/app
+```
+
+```
+yeet copy devbox:/var/log/cloud-init.log ./logs/
+```
+
+```
+yeet copy --force-proxy ./configs/ devbox:~/configs/
 ```
 ````
 
