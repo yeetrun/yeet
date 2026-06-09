@@ -113,7 +113,7 @@ func TestVMImagesCmdListShowsAllOfficialImages(t *testing.T) {
 	restore := stubVMImageInspectMap(t, map[string]vmImageCacheState{
 		vmUbuntu2604Payload: {
 			Payload:       vmUbuntu2604Payload,
-			LatestVersion: "ubuntu-26.04-amd64-v13",
+			LatestVersion: "ubuntu-26.04-amd64-v14",
 			State:         vmImageCacheCurrent,
 		},
 		vmNixOS2605Payload: {
@@ -134,7 +134,7 @@ func TestVMImagesCmdListShowsAllOfficialImages(t *testing.T) {
 		t.Fatalf("decode output: %v\n%s", err, out.String())
 	}
 	byPayload := vmImageRowsByPayload(rows)
-	if byPayload[vmUbuntu2604Payload].Version != "ubuntu-26.04-amd64-v13" {
+	if byPayload[vmUbuntu2604Payload].Version != "ubuntu-26.04-amd64-v14" {
 		t.Fatalf("ubuntu row = %#v", byPayload[vmUbuntu2604Payload])
 	}
 	if byPayload[vmNixOS2605Payload].Version != "nixos-26.05-amd64-v1" {
@@ -429,7 +429,7 @@ func TestVMImagesCmdPruneKeepsCurrentVersionPerOfficialFamily(t *testing.T) {
 	server := newTestServer(t)
 	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
 	oldUbuntu := seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v12")
-	currentUbuntu := seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v13")
+	currentUbuntu := seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v14")
 	currentNixOS := seedCachedVMImage(t, cacheRoot, "nixos-26.05-amd64-v1")
 
 	var out bytes.Buffer
@@ -440,16 +440,16 @@ func TestVMImagesCmdPruneKeepsCurrentVersionPerOfficialFamily(t *testing.T) {
 
 	rows := decodeVMImagePruneRows(t, out.Bytes())
 	assertPruneRow(t, rows, "cache", "ubuntu-26.04-amd64-v12", "prunable", oldUbuntu)
-	assertPruneRow(t, rows, "cache", "ubuntu-26.04-amd64-v13", "current", currentUbuntu)
+	assertPruneRow(t, rows, "cache", "ubuntu-26.04-amd64-v14", "current", currentUbuntu)
 	assertPruneRow(t, rows, "cache", "nixos-26.05-amd64-v1", "current", currentNixOS)
-	assertPruneRowPayload(t, rows, "ubuntu-26.04-amd64-v13", vmUbuntu2604Payload)
+	assertPruneRowPayload(t, rows, "ubuntu-26.04-amd64-v14", vmUbuntu2604Payload)
 	assertPruneRowPayload(t, rows, "nixos-26.05-amd64-v1", vmNixOS2605Payload)
 }
 
 func TestVMImagesCmdPruneTableShowsPayload(t *testing.T) {
 	server := newTestServer(t)
 	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
-	seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v13")
+	seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v14")
 	seedCachedVMImage(t, cacheRoot, "nixos-26.05-amd64-v1")
 
 	var out bytes.Buffer
