@@ -489,6 +489,7 @@ Manage VM-specific commands
 
 - `vm console`: Stream VM serial console output
 - `vm images`: Show available VM images and manage VM image cache state
+- `vm set`: Set VM resources and networking
 
 Get detailed help: `yeet vm --help-llm`
 
@@ -2331,14 +2332,6 @@ yeet service set <svc> --service-root=/srv/apps/<svc> --empty
 ```
 
 ```
-yeet service set <vm> --cpus=8 --memory=8g --disk=128g
-```
-
-```
-yeet service set <vm> --net=lan
-```
-
-```
 yeet service set <svc> --snapshots=off
 ```
 
@@ -2537,6 +2530,26 @@ yeet vm images prune --dry-run
 ```
 
 Get detailed help: `yeet vm images --help-llm`
+
+### `vm set`
+
+Set VM resources and networking
+
+**Examples**:
+
+```
+yeet vm set <vm> --cpus=8 --memory=8g --disk=128g
+```
+
+```
+yeet vm set <vm> --net=lan
+```
+
+```
+yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4
+```
+
+Get detailed help: `yeet vm set --help-llm`
 ````
 
 ## Group Command: docker outdated
@@ -2955,7 +2968,7 @@ Set service settings
 ## Usage
 
 ```
-yeet [GLOBAL OPTIONS] service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--cpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]
+yeet [GLOBAL OPTIONS] service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]
 ```
 
 ## Global Options
@@ -3014,14 +3027,6 @@ yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy
 
 ```
 yeet service set <svc> --service-root=/srv/apps/<svc> --empty
-```
-
-```
-yeet service set <vm> --cpus=8 --memory=8g --disk=128g
-```
-
-```
-yeet service set <vm> --net=lan
 ```
 
 ```
@@ -3284,5 +3289,65 @@ yeet vm images prune
 
 ```
 yeet vm images prune --dry-run
+```
+````
+
+## Group Command: vm set
+
+````
+# yeet vm set
+
+Set VM resources and networking
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] vm set <vm> [--cpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet vm set <vm> --cpus=8 --memory=8g --disk=128g
+```
+
+```
+yeet vm set <vm> --net=lan
+```
+
+```
+yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4
 ```
 ````

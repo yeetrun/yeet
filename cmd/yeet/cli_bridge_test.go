@@ -285,22 +285,6 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 			wantBridged: "service set -p 80:80",
 			wantOK:      true,
 		},
-		{
-			name:        "vm shape flags after service",
-			args:        []string{"service", "set", "devbox", "--cpus=8", "--memory", "8g", "--disk=128g"},
-			wantService: "devbox",
-			wantHost:    "",
-			wantBridged: "service set --cpus=8 --memory 8g --disk=128g",
-			wantOK:      true,
-		},
-		{
-			name:        "vm net flags before service",
-			args:        []string{"service", "set", "--net", "lan", "--macvlan-parent=vmbr0", "devbox"},
-			wantService: "devbox",
-			wantHost:    "",
-			wantBridged: "service set --net lan --macvlan-parent=vmbr0",
-			wantOK:      true,
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -313,6 +297,45 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 			}
 			if host != tt.wantHost {
 				t.Fatalf("host = %q, want %q", host, tt.wantHost)
+			}
+			if got := strings.Join(bridged, " "); got != tt.wantBridged {
+				t.Fatalf("bridged args = %q, want %q", got, tt.wantBridged)
+			}
+		})
+	}
+}
+
+func TestBridgeServiceArgsVMSet(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	tests := []struct {
+		name        string
+		args        []string
+		wantService string
+		wantHost    string
+		wantBridged string
+	}{
+		{
+			name:        "vm shape flags after service",
+			args:        []string{"vm", "set", "devbox", "--cpus=8", "--memory", "8g", "--disk=128g"},
+			wantService: "devbox",
+			wantBridged: "vm set --cpus=8 --memory 8g --disk=128g",
+		},
+		{
+			name:        "vm net flags before service",
+			args:        []string{"vm", "set", "--net", "lan", "--macvlan-parent=vmbr0", "devbox"},
+			wantService: "devbox",
+			wantBridged: "vm set --net lan --macvlan-parent=vmbr0",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, host, bridged, ok := bridgeServiceArgs(tt.args, remoteSpecs, groupSpecs, "")
+			if !ok {
+				t.Fatal("ok = false, want true")
+			}
+			if service != tt.wantService || host != tt.wantHost {
+				t.Fatalf("service/host = %q/%q, want %q/%q", service, host, tt.wantService, tt.wantHost)
 			}
 			if got := strings.Join(bridged, " "); got != tt.wantBridged {
 				t.Fatalf("bridged args = %q, want %q", got, tt.wantBridged)

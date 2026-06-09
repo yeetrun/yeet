@@ -42,7 +42,7 @@ type vmSettingsPlan struct {
 	FirecrackerConfig     []byte
 }
 
-func (s *Server) updateVMServiceSettings(ctx context.Context, name string, flags cli.ServiceSetFlags) error {
+func (s *Server) updateVMServiceSettings(ctx context.Context, name string, flags cli.VMSetFlags) error {
 	plan, err := s.planVMServiceSettings(name, flags)
 	if err != nil {
 		return err
@@ -53,7 +53,7 @@ func (s *Server) updateVMServiceSettings(ctx context.Context, name string, flags
 	return s.commitVMServiceSettingsPlan(name, plan)
 }
 
-func (s *Server) planVMServiceSettings(name string, flags cli.ServiceSetFlags) (vmSettingsPlan, error) {
+func (s *Server) planVMServiceSettings(name string, flags cli.VMSetFlags) (vmSettingsPlan, error) {
 	dv, service, plan, err := s.baseVMSettingsPlan(name)
 	if err != nil {
 		return vmSettingsPlan{}, err
@@ -114,7 +114,7 @@ func (s *Server) baseVMSettingsPlan(name string) (*db.DataView, *db.Service, vmS
 	}, nil
 }
 
-func (s *Server) applyVMShapeSettings(service *db.Service, flags cli.ServiceSetFlags, plan *vmSettingsPlan) error {
+func (s *Server) applyVMShapeSettings(service *db.Service, flags cli.VMSetFlags, plan *vmSettingsPlan) error {
 	if flags.CPUs > 0 {
 		plan.NewCPUs = flags.CPUs
 	}
@@ -129,7 +129,7 @@ func (s *Server) applyVMShapeSettings(service *db.Service, flags cli.ServiceSetF
 	return s.validateVMSettingsShape(plan.Root, service, plan.NewCPUs, plan.NewMemoryBytes, shapeChanged)
 }
 
-func applyVMDiskSettings(flags cli.ServiceSetFlags, plan *vmSettingsPlan) error {
+func applyVMDiskSettings(flags cli.VMSetFlags, plan *vmSettingsPlan) error {
 	if strings.TrimSpace(flags.Disk) != "" {
 		diskBytes, err := parseVMSize(flags.Disk)
 		if err != nil {
@@ -145,8 +145,8 @@ func applyVMDiskSettings(flags cli.ServiceSetFlags, plan *vmSettingsPlan) error 
 	return nil
 }
 
-func (s *Server) applyVMNetworkSettings(dv *db.DataView, name string, service *db.Service, flags cli.ServiceSetFlags, plan *vmSettingsPlan) error {
-	if hasCatchServiceSetVMNetworkChange(flags) {
+func (s *Server) applyVMNetworkSettings(dv *db.DataView, name string, service *db.Service, flags cli.VMSetFlags, plan *vmSettingsPlan) error {
+	if hasCatchVMSetNetworkChange(flags) {
 		network, svcNet, err := s.planVMServiceSetNetwork(dv, name, service, plan.OldVM.Networks, flags)
 		if err != nil {
 			return err
@@ -227,21 +227,14 @@ func vmDiskResizeStepsFromConfig(disk db.VMDiskConfig, requestedBytes int64) ([]
 	}
 }
 
-func hasCatchServiceSetVMChange(flags cli.ServiceSetFlags) bool {
-	return flags.CPUs != 0 ||
-		strings.TrimSpace(flags.Memory) != "" ||
-		strings.TrimSpace(flags.Disk) != "" ||
-		hasCatchServiceSetVMNetworkChange(flags)
-}
-
-func hasCatchServiceSetVMNetworkChange(flags cli.ServiceSetFlags) bool {
+func hasCatchVMSetNetworkChange(flags cli.VMSetFlags) bool {
 	return flags.NetworkChange ||
 		strings.TrimSpace(flags.MacvlanMac) != "" ||
 		flags.MacvlanVlan != 0 ||
 		strings.TrimSpace(flags.MacvlanParent) != ""
 }
 
-func (s *Server) planVMServiceSetNetwork(dv *db.DataView, name string, service *db.Service, current []db.VMNetworkConfig, flags cli.ServiceSetFlags) (vmNetworkPlan, *db.SvcNetwork, error) {
+func (s *Server) planVMServiceSetNetwork(dv *db.DataView, name string, service *db.Service, current []db.VMNetworkConfig, flags cli.VMSetFlags) (vmNetworkPlan, *db.SvcNetwork, error) {
 	netValue := vmNetworkValueForServiceSet(current, flags)
 	modes := vmRequestedNetworkModes(netValue)
 	if err := validateVMNetworkModes(modes); err != nil {
@@ -258,7 +251,7 @@ func (s *Server) planVMServiceSetNetwork(dv *db.DataView, name string, service *
 	return newVMNetworkPlan(name, modes, input), svcNet, nil
 }
 
-func vmNetworkValueForServiceSet(current []db.VMNetworkConfig, flags cli.ServiceSetFlags) string {
+func vmNetworkValueForServiceSet(current []db.VMNetworkConfig, flags cli.VMSetFlags) string {
 	netValue := strings.TrimSpace(flags.Net)
 	if netValue == "" && !flags.NetworkChange {
 		return vmNetworkModesForServiceSet(current)
@@ -281,7 +274,7 @@ func svcNetworkForVMServiceSet(dv *db.DataView, current *db.SvcNetwork, modes []
 	return nil, nil
 }
 
-func vmNetworkInputForServiceSet(svcNet *db.SvcNetwork, modes []string, flags cli.ServiceSetFlags) (vmNetworkInputs, error) {
+func vmNetworkInputForServiceSet(svcNet *db.SvcNetwork, modes []string, flags cli.VMSetFlags) (vmNetworkInputs, error) {
 	input := vmNetworkInputs{
 		LANParent: strings.TrimSpace(flags.MacvlanParent),
 		LANVLAN:   flags.MacvlanVlan,

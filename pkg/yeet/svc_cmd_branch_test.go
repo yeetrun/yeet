@@ -824,7 +824,7 @@ func TestServiceSetPublishUpdatesConfig(t *testing.T) {
 	}
 }
 
-func TestServiceSetVMFlagsUpdateStoredRunArgs(t *testing.T) {
+func TestVMSetFlagsUpdateStoredRunArgs(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
 	serviceOverride = "devbox"
@@ -844,10 +844,10 @@ func TestServiceSetVMFlagsUpdateStoredRunArgs(t *testing.T) {
 		Args:        []string{"--zfs", "--cpus", "4", "--memory=4g", "--disk=16g", "--net=svc", "--macvlan-parent=old0", "guest-arg"},
 	})
 
-	if err := HandleSvcCmd([]string{"service", "set", "--cpus=8", "--memory", "8g", "--disk=128g", "--net", "lan", "--macvlan-parent=vmbr0"}); err != nil {
+	if err := HandleSvcCmd([]string{"vm", "set", "--cpus=8", "--memory", "8g", "--disk=128g", "--net", "lan", "--macvlan-parent=vmbr0"}); err != nil {
 		t.Fatalf("HandleSvcCmd: %v", err)
 	}
-	if !reflect.DeepEqual(gotArgs, []string{"service", "set", "--cpus=8", "--memory", "8g", "--disk=128g", "--net", "lan", "--macvlan-parent=vmbr0"}) {
+	if !reflect.DeepEqual(gotArgs, []string{"vm", "set", "--cpus=8", "--memory", "8g", "--disk=128g", "--net", "lan", "--macvlan-parent=vmbr0"}) {
 		t.Fatalf("remote args = %#v", gotArgs)
 	}
 	loaded, err := loadProjectConfigFromCwd()
@@ -864,7 +864,7 @@ func TestServiceSetVMFlagsUpdateStoredRunArgs(t *testing.T) {
 	}
 }
 
-func TestServiceSetVMFlagsDoNotUpdateNonVMRunArgs(t *testing.T) {
+func TestVMSetFlagsDoNotUpdateNonVMRunArgs(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
 	serviceOverride = "svc-a"
@@ -881,7 +881,7 @@ func TestServiceSetVMFlagsDoNotUpdateNonVMRunArgs(t *testing.T) {
 		Args:    []string{"--pull"},
 	})
 
-	if err := HandleSvcCmd([]string{"service", "set", "--cpus=8"}); err != nil {
+	if err := HandleSvcCmd([]string{"vm", "set", "--cpus=8"}); err != nil {
 		t.Fatalf("HandleSvcCmd: %v", err)
 	}
 	loaded, err := loadProjectConfigFromCwd()

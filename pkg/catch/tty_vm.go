@@ -45,6 +45,15 @@ func (e *ttyExecer) vmCmdFunc(args []string) error {
 			return fmt.Errorf("vm console takes no remote arguments")
 		}
 		return e.vmConsoleCmdFunc()
+	case "set":
+		flags, rest, err := cli.ParseVMSet(args[1:])
+		if err != nil {
+			return err
+		}
+		if len(rest) != 0 {
+			return fmt.Errorf("unexpected vm set args: %s", strings.Join(rest, " "))
+		}
+		return e.s.updateVMServiceSettings(e.vmProvisionContext(), e.sn, flags)
 	case "images":
 		flags, remaining, err := cli.ParseVMImages(args[1:])
 		if err != nil {
