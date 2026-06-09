@@ -80,7 +80,7 @@ func TestParseCopyArgs(t *testing.T) {
 				Compress:  true,
 				Verbose:   true,
 				Src:       copyEndpoint{Raw: "local.txt", Path: "local.txt"},
-				Dst:       copyEndpoint{Raw: "svc:data/logs/", Path: "logs", Service: "svc", Remote: true, DirHint: true},
+				Dst:       copyEndpoint{Raw: "svc:data/logs/", Path: "data/logs/", Service: "svc", Remote: true, DirHint: true},
 			},
 		},
 		{
@@ -92,8 +92,50 @@ func TestParseCopyArgs(t *testing.T) {
 				Compress:  true,
 				Verbose:   true,
 				Src:       copyEndpoint{Raw: "-", Path: "-"},
-				Dst:       copyEndpoint{Raw: "svc:.", Path: "", Service: "svc", Remote: true, DirHint: true},
+				Dst:       copyEndpoint{Raw: "svc:.", Path: ".", Service: "svc", Remote: true, DirHint: true},
 			},
+		},
+		{
+			name: "vm absolute remote destination path is preserved",
+			args: []string{"local.txt", "devbox:/etc/nginx/nginx.conf"},
+			want: copyRequest{
+				Recursive: true,
+				Archive:   true,
+				Compress:  true,
+				Verbose:   true,
+				Src:       copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Dst:       copyEndpoint{Raw: "devbox:/etc/nginx/nginx.conf", Path: "/etc/nginx/nginx.conf", Service: "devbox", Remote: true},
+			},
+		},
+		{
+			name: "vm tilde remote destination path is preserved",
+			args: []string{"local.txt", "devbox:~/app/config.yml"},
+			want: copyRequest{
+				Recursive: true,
+				Archive:   true,
+				Compress:  true,
+				Verbose:   true,
+				Src:       copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Dst:       copyEndpoint{Raw: "devbox:~/app/config.yml", Path: "~/app/config.yml", Service: "devbox", Remote: true},
+			},
+		},
+		{
+			name: "force proxy flag is consumed by copy",
+			args: []string{"--force-proxy", "local.txt", "devbox:~/config.yml"},
+			want: copyRequest{
+				Recursive:  true,
+				Archive:    true,
+				Compress:   true,
+				Verbose:    true,
+				ForceProxy: true,
+				Src:        copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Dst:        copyEndpoint{Raw: "devbox:~/config.yml", Path: "~/config.yml", Service: "devbox", Remote: true},
+			},
+		},
+		{
+			name:    "force proxy value is rejected",
+			args:    []string{"--force-proxy=true", "local.txt", "devbox:~/config.yml"},
+			wantErr: "copy --force-proxy does not take a value",
 		},
 		{name: "unknown long flag", args: []string{"--bogus", "a", "svc:b"}, wantErr: "unknown flag"},
 		{name: "unknown short flag", args: []string{"-x", "a", "svc:b"}, wantErr: "unknown flag"},
@@ -128,6 +170,7 @@ func TestApplyLongCopyFlag(t *testing.T) {
 		{flag: "--archive", want: copyRequest{Recursive: true, Archive: true}},
 		{flag: "--compress", want: copyRequest{Compress: true}},
 		{flag: "--verbose", want: copyRequest{Verbose: true}},
+		{flag: "--force-proxy", want: copyRequest{ForceProxy: true}},
 	}
 
 	for _, tt := range tests {
@@ -180,6 +223,72 @@ func TestNormalizeRemotePath(t *testing.T) {
 			}
 			if gotDirHint != tt.wantDirHint {
 				t.Fatalf("dirHint = %v, want %v", gotDirHint, tt.wantDirHint)
+			}
+		})
+	}
+}
+
+func TestNormalizeServiceDataCopyRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     copyRequest
+		want    copyRequest
+		wantErr string
+	}{
+		{
+			name: "upload strips data prefix",
+			req: copyRequest{
+				Src: copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Dst: copyEndpoint{Raw: "svc:data/logs/", Path: "data/logs/", Service: "svc", Remote: true, DirHint: true},
+			},
+			want: copyRequest{
+				Src: copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Dst: copyEndpoint{Raw: "svc:data/logs/", Path: "logs", Service: "svc", Remote: true, DirHint: true},
+			},
+		},
+		{
+			name: "download dot targets data root",
+			req: copyRequest{
+				Src: copyEndpoint{Raw: "svc:.", Path: ".", Service: "svc", Remote: true, DirHint: true},
+				Dst: copyEndpoint{Raw: "./out", Path: "./out"},
+			},
+			want: copyRequest{
+				Src: copyEndpoint{Raw: "svc:.", Path: "", Service: "svc", Remote: true, DirHint: true},
+				Dst: copyEndpoint{Raw: "./out", Path: "./out"},
+			},
+		},
+		{
+			name: "regular service rejects absolute destination",
+			req: copyRequest{
+				Src: copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Dst: copyEndpoint{Raw: "svc:/etc/passwd", Path: "/etc/passwd", Service: "svc", Remote: true},
+			},
+			wantErr: "remote path must be relative",
+		},
+		{
+			name: "regular service rejects absolute source",
+			req: copyRequest{
+				Src: copyEndpoint{Raw: "svc:/etc/passwd", Path: "/etc/passwd", Service: "svc", Remote: true},
+				Dst: copyEndpoint{Raw: "./out", Path: "./out"},
+			},
+			wantErr: "remote path must be relative",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeServiceDataCopyRequest(tt.req)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("normalizeServiceDataCopyRequest error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeServiceDataCopyRequest: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("normalizeServiceDataCopyRequest = %#v, want %#v", got, tt.want)
 			}
 		})
 	}

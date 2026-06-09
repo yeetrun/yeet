@@ -31,12 +31,13 @@ type copyEndpoint struct {
 }
 
 type copyRequest struct {
-	Recursive bool
-	Archive   bool
-	Compress  bool
-	Verbose   bool
-	Src       copyEndpoint
-	Dst       copyEndpoint
+	Recursive  bool
+	Archive    bool
+	Compress   bool
+	Verbose    bool
+	ForceProxy bool
+	Src        copyEndpoint
+	Dst        copyEndpoint
 }
 
 type copyDirection int
@@ -59,10 +60,17 @@ func runCopyCommand(args []string, cfg *ProjectConfig) error {
 	if err := applyCopyHostOverrideForEndpoint(remote, cfg); err != nil {
 		return err
 	}
-	if direction == copyDirectionFromRemote {
-		return copyFromRemote(req)
+	if req.ForceProxy {
+		return fmt.Errorf("copy --force-proxy only applies to VM services")
 	}
-	return copyToRemote(req)
+	req, err = normalizeServiceDataCopyRequest(req)
+	if err != nil {
+		return err
+	}
+	if direction == copyDirectionFromRemote {
+		return copyServiceDataFromRemote(req)
+	}
+	return copyServiceDataToRemote(req)
 }
 
 func classifyCopyEndpoints(req copyRequest) (copyDirection, copyEndpoint, error) {
@@ -91,6 +99,9 @@ func parseCopyArgs(args []string) (copyRequest, error) {
 		}
 		if strings.HasPrefix(arg, "-") && arg != "-" {
 			if err := applyCopyFlag(&req, arg); err != nil {
+				if err.Error() != "unknown flag" {
+					return copyRequest{}, err
+				}
 				return copyRequest{}, fmt.Errorf("unknown flag %q", arg)
 			}
 			continue
@@ -122,16 +133,20 @@ func applyCopyFlag(req *copyRequest, arg string) error {
 }
 
 func applyLongCopyFlag(req *copyRequest, arg string) error {
-	switch arg {
-	case "--recursive":
+	switch {
+	case arg == "--recursive":
 		req.Recursive = true
-	case "--archive":
+	case arg == "--archive":
 		req.Archive = true
 		req.Recursive = true
-	case "--compress":
+	case arg == "--compress":
 		req.Compress = true
-	case "--verbose":
+	case arg == "--verbose":
 		req.Verbose = true
+	case arg == "--force-proxy":
+		req.ForceProxy = true
+	case strings.HasPrefix(arg, "--force-proxy="):
+		return fmt.Errorf("copy --force-proxy does not take a value")
 	default:
 		return fmt.Errorf("unknown flag")
 	}
@@ -186,18 +201,20 @@ func parseCopyEndpoint(raw string) (copyEndpoint, error) {
 		return copyEndpoint{}, fmt.Errorf("invalid remote spec %q", raw)
 	}
 	service, host, _ := splitServiceHost(servicePart)
-	rel, dirHint, err := normalizeRemotePath(raw[idx+1:])
-	if err != nil {
-		return copyEndpoint{}, err
-	}
+	remotePath := strings.TrimSpace(raw[idx+1:])
 	return copyEndpoint{
 		Raw:     raw,
-		Path:    rel,
+		Path:    remotePath,
 		Service: service,
 		Host:    host,
 		Remote:  true,
-		DirHint: dirHint,
+		DirHint: remotePathDirHint(remotePath),
 	}, nil
+}
+
+func remotePathDirHint(raw string) bool {
+	trimmed := strings.TrimSpace(raw)
+	return trimmed == "" || trimmed == "." || trimmed == "./" || strings.HasSuffix(trimmed, "/")
 }
 
 func normalizeRemotePath(raw string) (string, bool, error) {
@@ -214,6 +231,34 @@ func normalizeRemotePath(raw string) (string, bool, error) {
 		return "", dirHint, fmt.Errorf("invalid remote path %q", raw)
 	}
 	return rel, dirHint, nil
+}
+
+func normalizeServiceDataCopyRequest(req copyRequest) (copyRequest, error) {
+	if req.Src.Remote {
+		src, err := normalizeServiceDataEndpoint(req.Src)
+		if err != nil {
+			return copyRequest{}, err
+		}
+		req.Src = src
+	}
+	if req.Dst.Remote {
+		dst, err := normalizeServiceDataEndpoint(req.Dst)
+		if err != nil {
+			return copyRequest{}, err
+		}
+		req.Dst = dst
+	}
+	return req, nil
+}
+
+func normalizeServiceDataEndpoint(ep copyEndpoint) (copyEndpoint, error) {
+	rel, dirHint, err := normalizeRemotePath(ep.Path)
+	if err != nil {
+		return copyEndpoint{}, err
+	}
+	ep.Path = rel
+	ep.DirHint = ep.DirHint || dirHint
+	return ep, nil
 }
 
 func trimRemotePath(raw string) (string, bool) {
@@ -264,7 +309,7 @@ type copyUpload struct {
 	args   []string
 }
 
-func copyToRemote(req copyRequest) error {
+func copyServiceDataToRemote(req copyRequest) error {
 	dst, err := remoteCopyDestination(req)
 	if err != nil {
 		return err
@@ -459,7 +504,7 @@ func applyConfiguredCopyHost(cfg *ProjectConfig, service string) error {
 	return nil
 }
 
-func copyFromRemote(req copyRequest) (err error) {
+func copyServiceDataFromRemote(req copyRequest) (err error) {
 	src, err := remoteCopySource(req)
 	if err != nil {
 		return err
