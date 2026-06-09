@@ -6,7 +6,7 @@
 set -euo pipefail
 
 profile="${YEET_VM_IMAGE_PROFILE:-fast}"
-version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v13}"
+version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v14}"
 out_dir="${1:-dist/$version}"
 work_dir="${YEET_VM_IMAGE_WORK_DIR:-}"
 kernel_path="${YEET_VM_KERNEL_PATH:-}"
@@ -304,6 +304,7 @@ validate_fast_rootfs_ubuntu_compatibility() {
 		echo "iptables must use the nf_tables backend" >&2
 		exit 1
 	fi
+	chroot "$root" /usr/bin/rsync --version >/dev/null
 }
 
 run_fast_rootfs_e2fsck() {
@@ -376,7 +377,7 @@ if [ -n "$packages" ]; then
 	apt-get purge -y $packages
 fi
 apt-get update
-apt-get install -y --no-install-recommends iptables nftables
+apt-get install -y --no-install-recommends iptables nftables rsync
 apt-get autoremove -y --purge
 apt-get clean
 rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb /var/cache/snapd/* /var/lib/snapd/cache/*
