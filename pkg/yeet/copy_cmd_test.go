@@ -704,6 +704,62 @@ func TestRunRsyncPlanRepairsKnownHostOnce(t *testing.T) {
 	}
 }
 
+func TestRunRsyncPlanHintsWhenInitialAttemptFindsMissingGuestRsync(t *testing.T) {
+	oldRun := runRsyncCommandFunc
+	defer func() {
+		runRsyncCommandFunc = oldRun
+	}()
+
+	runRsyncCommandFunc = func(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+		_, _ = io.WriteString(stderr, "bash: rsync: command not found\n")
+		return errors.New("exit status 127")
+	}
+
+	plan := sshExecutionPlan{Args: []string{"-o", "HostName=192.168.100.12", "yeet-pve1"}}
+	err := runRsyncPlan(context.Background(), []string{"-avz"}, plan, "devbox", io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "remote rsync is not available on VM \"devbox\"") {
+		t.Fatalf("runRsyncPlan error = %v, want missing guest rsync hint", err)
+	}
+}
+
+func TestRunRsyncPlanHintsWhenRetryFindsMissingGuestRsync(t *testing.T) {
+	oldRun := runRsyncCommandFunc
+	oldRemove := removeSSHKnownHostFunc
+	defer func() {
+		runRsyncCommandFunc = oldRun
+		removeSSHKnownHostFunc = oldRemove
+	}()
+
+	var runs int
+	runRsyncCommandFunc = func(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+		runs++
+		if runs == 1 {
+			_, _ = io.WriteString(stderr, "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nOffending ED25519 key in /tmp/known_hosts:3\n")
+			return errors.New("exit status 255")
+		}
+		_, _ = io.WriteString(stderr, "bash: rsync: command not found\n")
+		return errors.New("exit status 127")
+	}
+	removeSSHKnownHostFunc = func(ctx context.Context, alias, knownHosts string) error {
+		return nil
+	}
+
+	plan := sshExecutionPlan{
+		Args: []string{"-o", "HostName=192.168.100.12", "yeet-pve1"},
+		KnownHostRepair: &sshKnownHostRepair{
+			Alias:          "yeet-vm-devbox@yeet-pve1",
+			KnownHostsFile: "/tmp/known_hosts",
+		},
+	}
+	err := runRsyncPlan(context.Background(), []string{"-avz"}, plan, "devbox", io.Discard, io.Discard)
+	if runs != 2 {
+		t.Fatalf("runs = %d, want stale-key repair retry", runs)
+	}
+	if err == nil || !strings.Contains(err.Error(), "remote rsync is not available on VM \"devbox\"") {
+		t.Fatalf("runRsyncPlan error = %v, want missing guest rsync hint", err)
+	}
+}
+
 func TestCopyEndpointValidationHelpers(t *testing.T) {
 	if _, err := remoteCopyDestination(copyRequest{Dst: copyEndpoint{Path: "logs"}}); err == nil {
 		t.Fatal("remoteCopyDestination local dst error = nil, want error")

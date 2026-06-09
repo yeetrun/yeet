@@ -209,40 +209,53 @@ func runRsyncPlan(ctx context.Context, args []string, plan sshExecutionPlan, ser
 	if !plan.canRepairKnownHost() {
 		var stderrBuf bytes.Buffer
 		err := runRsyncCommandFunc(ctx, args, stdout, &stderrBuf)
+		stderrText := stderrBuf.String()
 		replaySSHStderr(&stderrBuf, stderr)
-		return withGuestRsyncHint(err, stderrBuf.String(), service)
+		return withGuestRsyncHint(err, stderrText, service)
 	}
 
 	var stderrBuf bytes.Buffer
 	firstErr := runRsyncCommandFunc(ctx, args, stdout, &stderrBuf)
+	firstStderrText := stderrBuf.String()
 	if firstErr == nil {
 		replaySSHStderr(&stderrBuf, stderr)
 		return nil
 	}
-	if !shouldRepairSSHKnownHostError(stderrBuf.String(), *plan.KnownHostRepair) {
+	if !shouldRepairSSHKnownHostError(firstStderrText, *plan.KnownHostRepair) {
 		replaySSHStderr(&stderrBuf, stderr)
-		return withGuestRsyncHint(firstErr, stderrBuf.String(), service)
+		return withGuestRsyncHint(firstErr, firstStderrText, service)
 	}
 	for _, alias := range plan.KnownHostRepair.Aliases() {
 		if err := removeSSHKnownHostFunc(ctx, alias, plan.KnownHostRepair.KnownHostsFile); err != nil {
 			return err
 		}
 	}
-	return runRsyncCommandFunc(ctx, args, stdout, stderr)
+	var retryStderr bytes.Buffer
+	err := runRsyncCommandFunc(ctx, args, stdout, &retryStderr)
+	retryStderrText := retryStderr.String()
+	replaySSHStderr(&retryStderr, stderr)
+	if err != nil && guestRsyncMissing(retryStderrText) {
+		return fmt.Errorf("%w\nremote rsync is not available on VM %q; install rsync in the guest or use an official yeet VM image", err, service)
+	}
+	return withGuestRsyncHint(err, retryStderrText, service)
 }
 
 func withGuestRsyncHint(err error, stderrText string, service string) error {
 	if err == nil {
 		return nil
 	}
-	lower := strings.ToLower(stderrText)
-	if strings.Contains(lower, "rsync: command not found") ||
-		strings.Contains(lower, "rsync: not found") ||
-		strings.Contains(lower, "bash: rsync: command not found") ||
-		strings.Contains(lower, "sh: rsync: not found") {
+	if guestRsyncMissing(stderrText) {
 		return fmt.Errorf("%w\nremote rsync is not available on VM %q; install rsync in the guest or use an official yeet VM image", err, service)
 	}
 	return err
+}
+
+func guestRsyncMissing(stderrText string) bool {
+	lower := strings.ToLower(stderrText)
+	return strings.Contains(lower, "rsync: command not found") ||
+		strings.Contains(lower, "rsync: not found") ||
+		strings.Contains(lower, "bash: rsync: command not found") ||
+		strings.Contains(lower, "sh: rsync: not found")
 }
 
 func classifyCopyEndpoints(req copyRequest) (copyDirection, copyEndpoint, error) {
