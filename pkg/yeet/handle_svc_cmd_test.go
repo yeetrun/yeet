@@ -32,6 +32,28 @@ func (closeErrorReadCloser) Close() error {
 	return errors.New("close failed")
 }
 
+func stubCopyRegularServiceInfo(t *testing.T) {
+	t.Helper()
+	oldServerInfo := fetchSSHServerInfoFunc
+	oldServiceInfo := fetchSSHServiceInfoFunc
+	oldHost := Host()
+	fetchSSHServerInfoFunc = func(context.Context, string) (serverInfo, error) {
+		return serverInfo{}, nil
+	}
+	fetchSSHServiceInfoFunc = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info:  catchrpc.ServiceInfo{ServiceType: dockerServiceType},
+		}, nil
+	}
+	t.Cleanup(func() {
+		fetchSSHServerInfoFunc = oldServerInfo
+		fetchSSHServiceInfoFunc = oldServiceInfo
+		SetHost(oldHost)
+		resetHostOverride()
+	})
+}
+
 func TestHandleSvcCmdDefaultsToStatus(t *testing.T) {
 	oldExec := execRemoteFn
 	oldExecOutput := execRemoteOutputFn
@@ -901,6 +923,7 @@ func buildTestELF(t *testing.T, dir string) string {
 }
 
 func TestHandleSvcCmdCopyUploadFile(t *testing.T) {
+	stubCopyRegularServiceInfo(t)
 	oldExec := execRemoteFn
 	defer func() {
 		execRemoteFn = oldExec
@@ -958,6 +981,7 @@ func TestHandleSvcCmdCopyUploadFile(t *testing.T) {
 }
 
 func TestHandleSvcCmdCopyUploadDirRecursiveContents(t *testing.T) {
+	stubCopyRegularServiceInfo(t)
 	oldExec := execRemoteFn
 	defer func() {
 		execRemoteFn = oldExec
@@ -1016,6 +1040,7 @@ func TestHandleSvcCmdCopyUploadDirRecursiveContents(t *testing.T) {
 }
 
 func TestHandleSvcCmdCopyUploadDirRecursiveKeepsDir(t *testing.T) {
+	stubCopyRegularServiceInfo(t)
 	oldExec := execRemoteFn
 	defer func() {
 		execRemoteFn = oldExec
@@ -1067,6 +1092,7 @@ func TestHandleSvcCmdCopyUploadDirRecursiveKeepsDir(t *testing.T) {
 }
 
 func TestHandleSvcCmdCopyDownloadFile(t *testing.T) {
+	stubCopyRegularServiceInfo(t)
 	oldStream := execRemoteStreamFn
 	defer func() {
 		execRemoteStreamFn = oldStream
@@ -1129,6 +1155,7 @@ func TestHandleSvcCmdCopyDownloadFile(t *testing.T) {
 }
 
 func TestHandleSvcCmdCopyDownloadReportsReaderCloseError(t *testing.T) {
+	stubCopyRegularServiceInfo(t)
 	oldStream := execRemoteStreamFn
 	defer func() {
 		execRemoteStreamFn = oldStream
@@ -1173,6 +1200,7 @@ func TestHandleSvcCmdCopyDownloadReportsReaderCloseError(t *testing.T) {
 }
 
 func TestHandleSvcCmdCopyDownloadDirRecursive(t *testing.T) {
+	stubCopyRegularServiceInfo(t)
 	oldStream := execRemoteStreamFn
 	defer func() {
 		execRemoteStreamFn = oldStream

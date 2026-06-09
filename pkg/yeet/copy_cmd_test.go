@@ -5,6 +5,7 @@
 package yeet
 
 import (
+	"context"
 	"io"
 	"os"
 	"path"
@@ -12,6 +13,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 func FuzzYeetStringNormalizers(f *testing.F) {
@@ -414,6 +417,99 @@ func TestApplyCopyHostOverrideForEndpoint(t *testing.T) {
 	}
 	if got, ok := HostOverride(); !ok || got != "active-host" {
 		t.Fatalf("active HostOverride = %q %v, want active-host true", got, ok)
+	}
+}
+
+func TestRunCopyCommandRoutesVMEndpointToRsync(t *testing.T) {
+	oldServerInfo := fetchSSHServerInfoFunc
+	oldServiceInfo := fetchSSHServiceInfoFunc
+	oldRunVM := runVMRsyncCopyFunc
+	oldExec := execRemoteFn
+	oldHost := Host()
+	oldOverride := hostOverride
+	oldOverrideSet := hostOverrideSet
+	defer func() {
+		fetchSSHServerInfoFunc = oldServerInfo
+		fetchSSHServiceInfoFunc = oldServiceInfo
+		runVMRsyncCopyFunc = oldRunVM
+		execRemoteFn = oldExec
+		SetHost(oldHost)
+		hostOverride = oldOverride
+		hostOverrideSet = oldOverrideSet
+	}()
+	resetHostOverride()
+	SetHost("yeet-pve1")
+
+	fetchSSHServerInfoFunc = func(ctx context.Context, host string) (serverInfo, error) {
+		if host != "yeet-pve1" {
+			t.Fatalf("server info host = %q, want yeet-pve1", host)
+		}
+		return serverInfo{InstallUser: "root"}, nil
+	}
+	fetchSSHServiceInfoFunc = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if host != "yeet-pve1" || service != "devbox" {
+			t.Fatalf("service info = %s %s, want yeet-pve1 devbox", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: serviceTypeVM,
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+				},
+			},
+		}, nil
+	}
+	execRemoteFn = func(context.Context, string, []string, io.Reader, bool) error {
+		t.Fatal("regular service-data copy path should not run for VM endpoint")
+		return nil
+	}
+
+	var gotReq copyRequest
+	var gotDirection copyDirection
+	var gotRemote copyEndpoint
+	runVMRsyncCopyFunc = func(ctx context.Context, req copyRequest, direction copyDirection, remote copyEndpoint, remoteCtx copyRemoteContext) error {
+		gotReq = req
+		gotDirection = direction
+		gotRemote = remote
+		if remoteCtx.Host != "yeet-pve1" || remoteCtx.Server.InstallUser != "root" || remoteCtx.Service.Info.ServiceType != serviceTypeVM {
+			t.Fatalf("remote context = %#v", remoteCtx)
+		}
+		return nil
+	}
+
+	if err := runCopyCommand([]string{"--force-proxy", "./local.txt", "devbox:/etc/motd"}, nil); err != nil {
+		t.Fatalf("runCopyCommand: %v", err)
+	}
+	if !gotReq.ForceProxy || gotDirection != copyDirectionToRemote || gotRemote.Path != "/etc/motd" {
+		t.Fatalf("VM copy routing = req %#v direction %v remote %#v", gotReq, gotDirection, gotRemote)
+	}
+}
+
+func TestRunCopyCommandRejectsForceProxyForRegularService(t *testing.T) {
+	oldServerInfo := fetchSSHServerInfoFunc
+	oldServiceInfo := fetchSSHServiceInfoFunc
+	oldHost := Host()
+	defer func() {
+		fetchSSHServerInfoFunc = oldServerInfo
+		fetchSSHServiceInfoFunc = oldServiceInfo
+		SetHost(oldHost)
+		resetHostOverride()
+	}()
+	resetHostOverride()
+	SetHost("yeet-pve1")
+
+	fetchSSHServerInfoFunc = func(context.Context, string) (serverInfo, error) {
+		return serverInfo{}, nil
+	}
+	fetchSSHServiceInfoFunc = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{ServiceType: dockerServiceType}}, nil
+	}
+
+	err := runCopyCommand([]string{"--force-proxy", "./local.txt", "web:config.yml"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "copy --force-proxy only applies to VM services") {
+		t.Fatalf("runCopyCommand error = %v, want force proxy regular service error", err)
 	}
 }
 
