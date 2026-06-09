@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/copyutil"
 )
 
@@ -42,11 +43,19 @@ type copyRequest struct {
 
 type copyDirection int
 
+type copyRemoteContext struct {
+	Host    string
+	Server  serverInfo
+	Service catchrpc.ServiceInfoResponse
+}
+
 const (
 	copyDirectionInvalid copyDirection = iota
 	copyDirectionToRemote
 	copyDirectionFromRemote
 )
+
+var runVMRsyncCopyFunc = runVMRsyncCopy
 
 func runCopyCommand(args []string, cfg *ProjectConfig) error {
 	req, err := parseCopyArgs(args)
@@ -57,8 +66,12 @@ func runCopyCommand(args []string, cfg *ProjectConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := applyCopyHostOverrideForEndpoint(remote, cfg); err != nil {
+	remoteCtx, err := resolveCopyRemoteContext(context.Background(), remote, cfg)
+	if err != nil {
 		return err
+	}
+	if remoteCtx.Service.Info.ServiceType == serviceTypeVM {
+		return runVMRsyncCopyFunc(context.Background(), req, direction, remote, remoteCtx)
 	}
 	if req.ForceProxy {
 		return fmt.Errorf("copy --force-proxy only applies to VM services")
@@ -71,6 +84,33 @@ func runCopyCommand(args []string, cfg *ProjectConfig) error {
 		return copyServiceDataFromRemote(req)
 	}
 	return copyServiceDataToRemote(req)
+}
+
+func resolveCopyRemoteContext(ctx context.Context, remote copyEndpoint, cfg *ProjectConfig) (copyRemoteContext, error) {
+	if err := applyCopyHostOverrideForEndpoint(remote, cfg); err != nil {
+		return copyRemoteContext{}, err
+	}
+	host := Host()
+	server, err := fetchSSHServerInfoFunc(ctx, host)
+	if err != nil {
+		return copyRemoteContext{}, err
+	}
+	resp, err := fetchSSHServiceInfoFunc(ctx, host, remote.Service)
+	if err != nil {
+		return copyRemoteContext{}, err
+	}
+	if !resp.Found {
+		msg := strings.TrimSpace(resp.Message)
+		if msg == "" {
+			msg = fmt.Sprintf("service %q not found", remote.Service)
+		}
+		return copyRemoteContext{}, errors.New(msg)
+	}
+	return copyRemoteContext{Host: host, Server: server, Service: resp}, nil
+}
+
+func runVMRsyncCopy(ctx context.Context, req copyRequest, direction copyDirection, remote copyEndpoint, remoteCtx copyRemoteContext) error {
+	return fmt.Errorf("VM copy is not implemented")
 }
 
 func classifyCopyEndpoints(req copyRequest) (copyDirection, copyEndpoint, error) {
