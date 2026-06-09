@@ -7,12 +7,14 @@ package yeet
 import (
 	"archive/tar"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -56,6 +58,13 @@ const (
 )
 
 var runVMRsyncCopyFunc = runVMRsyncCopy
+
+type rsyncCommandRunner func(context.Context, []string, io.Writer, io.Writer) error
+
+var (
+	lookPathCopyBinaryFunc                    = exec.LookPath
+	runRsyncCommandFunc    rsyncCommandRunner = runRsyncCommand
+)
 
 func runCopyCommand(args []string, cfg *ProjectConfig) error {
 	req, err := parseCopyArgs(args)
@@ -110,7 +119,130 @@ func resolveCopyRemoteContext(ctx context.Context, remote copyEndpoint, cfg *Pro
 }
 
 func runVMRsyncCopy(ctx context.Context, req copyRequest, direction copyDirection, remote copyEndpoint, remoteCtx copyRemoteContext) error {
-	return fmt.Errorf("VM copy is not implemented")
+	if err := ensureCopyBinary("ssh"); err != nil {
+		return err
+	}
+	if err := ensureCopyBinary("rsync"); err != nil {
+		return err
+	}
+	plan, err := vmSSHExecutionPlanForServiceInfo(remoteCtx.Host, remoteCtx.Server, remote.Service, remoteCtx.Service, nil, nil, req.ForceProxy)
+	if err != nil {
+		return err
+	}
+	if err := ensureVMSSHKnownHostsDir(plan.Args); err != nil {
+		return err
+	}
+	args, err := vmRsyncArgs(req, direction, remote, plan)
+	if err != nil {
+		return err
+	}
+	return runRsyncPlan(ctx, args, plan, remote.Service, os.Stdout, os.Stderr)
+}
+
+func ensureCopyBinary(name string) error {
+	if _, err := lookPathCopyBinaryFunc(name); err != nil {
+		return fmt.Errorf("%s CLI not found in PATH", name)
+	}
+	return nil
+}
+
+func runRsyncCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	cmd := exec.CommandContext(ctx, "rsync", args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	return cmd.Run()
+}
+
+func vmRsyncArgs(req copyRequest, direction copyDirection, remote copyEndpoint, plan sshExecutionPlan) ([]string, error) {
+	remoteShell, target, err := rsyncRemoteShellAndTarget(plan)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{copyRsyncFlags(req), "-e", remoteShell}
+	remoteSpec := target + ":" + remote.Path
+	switch direction {
+	case copyDirectionToRemote:
+		args = append(args, req.Src.Path, remoteSpec)
+	case copyDirectionFromRemote:
+		args = append(args, remoteSpec, req.Dst.Path)
+	default:
+		return nil, fmt.Errorf("invalid copy direction")
+	}
+	return args, nil
+}
+
+func copyRsyncFlags(req copyRequest) string {
+	var flags strings.Builder
+	flags.WriteByte('-')
+	if req.Archive {
+		flags.WriteByte('a')
+	} else if req.Recursive {
+		flags.WriteByte('r')
+	}
+	if req.Verbose {
+		flags.WriteByte('v')
+	}
+	if req.Compress {
+		flags.WriteByte('z')
+	}
+	if flags.Len() == 1 {
+		flags.WriteByte('a')
+	}
+	return flags.String()
+}
+
+func rsyncRemoteShellAndTarget(plan sshExecutionPlan) (string, string, error) {
+	if len(plan.Args) == 0 {
+		return "", "", fmt.Errorf("VM SSH plan is empty")
+	}
+	target := plan.Args[len(plan.Args)-1]
+	sshArgs := append([]string{"ssh"}, plan.Args[:len(plan.Args)-1]...)
+	return shellJoin(sshArgs), target, nil
+}
+
+func runRsyncPlan(ctx context.Context, args []string, plan sshExecutionPlan, service string, stdout, stderr io.Writer) error {
+	if strings.TrimSpace(plan.Notice) != "" {
+		if _, err := fmt.Fprintln(writerOrDiscard(stderr), plan.Notice); err != nil {
+			return err
+		}
+	}
+	if !plan.canRepairKnownHost() {
+		var stderrBuf bytes.Buffer
+		err := runRsyncCommandFunc(ctx, args, stdout, &stderrBuf)
+		replaySSHStderr(&stderrBuf, stderr)
+		return withGuestRsyncHint(err, stderrBuf.String(), service)
+	}
+
+	var stderrBuf bytes.Buffer
+	firstErr := runRsyncCommandFunc(ctx, args, stdout, &stderrBuf)
+	if firstErr == nil {
+		replaySSHStderr(&stderrBuf, stderr)
+		return nil
+	}
+	if !shouldRepairSSHKnownHostError(stderrBuf.String(), *plan.KnownHostRepair) {
+		replaySSHStderr(&stderrBuf, stderr)
+		return withGuestRsyncHint(firstErr, stderrBuf.String(), service)
+	}
+	for _, alias := range plan.KnownHostRepair.Aliases() {
+		if err := removeSSHKnownHostFunc(ctx, alias, plan.KnownHostRepair.KnownHostsFile); err != nil {
+			return err
+		}
+	}
+	return runRsyncCommandFunc(ctx, args, stdout, stderr)
+}
+
+func withGuestRsyncHint(err error, stderrText string, service string) error {
+	if err == nil {
+		return nil
+	}
+	lower := strings.ToLower(stderrText)
+	if strings.Contains(lower, "rsync: command not found") ||
+		strings.Contains(lower, "rsync: not found") ||
+		strings.Contains(lower, "bash: rsync: command not found") ||
+		strings.Contains(lower, "sh: rsync: not found") {
+		return fmt.Errorf("%w\nremote rsync is not available on VM %q; install rsync in the guest or use an official yeet VM image", err, service)
+	}
+	return err
 }
 
 func classifyCopyEndpoints(req copyRequest) (copyDirection, copyEndpoint, error) {

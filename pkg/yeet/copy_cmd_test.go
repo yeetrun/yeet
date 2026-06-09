@@ -5,12 +5,16 @@
 package yeet
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -510,6 +514,193 @@ func TestRunCopyCommandRejectsForceProxyForRegularService(t *testing.T) {
 	err := runCopyCommand([]string{"--force-proxy", "./local.txt", "web:config.yml"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "copy --force-proxy only applies to VM services") {
 		t.Fatalf("runCopyCommand error = %v, want force proxy regular service error", err)
+	}
+}
+
+type recordedRsync struct {
+	args []string
+	err  error
+}
+
+func TestRunVMRsyncCopyUploadBuildsRsyncCommand(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	oldLookPath := lookPathCopyBinaryFunc
+	oldRun := runRsyncCommandFunc
+	defer func() {
+		lookPathCopyBinaryFunc = oldLookPath
+		runRsyncCommandFunc = oldRun
+	}()
+	lookPathCopyBinaryFunc = func(name string) (string, error) {
+		return "/usr/bin/" + name, nil
+	}
+
+	var got recordedRsync
+	runRsyncCommandFunc = func(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+		got.args = append([]string{}, args...)
+		return got.err
+	}
+
+	req := copyRequest{
+		Archive:  true,
+		Compress: true,
+		Verbose:  true,
+		Src:      copyEndpoint{Raw: "./local.txt", Path: "./local.txt"},
+		Dst:      copyEndpoint{Raw: "devbox:/etc/motd", Path: "/etc/motd", Service: "devbox", Remote: true},
+	}
+	remote := req.Dst
+	remoteCtx := copyRemoteContext{
+		Host:   "yeet-pve1",
+		Server: serverInfo{InstallUser: "root"},
+		Service: catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: serviceTypeVM,
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+				},
+			},
+		},
+	}
+
+	if err := runVMRsyncCopy(context.Background(), req, copyDirectionToRemote, remote, remoteCtx); err != nil {
+		t.Fatalf("runVMRsyncCopy: %v", err)
+	}
+	if len(got.args) == 0 {
+		t.Fatal("rsync did not run")
+	}
+	for _, want := range []string{"-avz", "-e", "./local.txt", "yeet-pve1:/etc/motd"} {
+		if !slices.Contains(got.args, want) {
+			t.Fatalf("rsync args = %#v, want %q", got.args, want)
+		}
+	}
+	remoteShell := got.args[slices.Index(got.args, "-e")+1]
+	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=ssh"} {
+		if !strings.Contains(remoteShell, want) {
+			t.Fatalf("remote shell = %q, want %q", remoteShell, want)
+		}
+	}
+}
+
+func TestRunVMRsyncCopyDownloadBuildsRsyncCommand(t *testing.T) {
+	oldLookPath := lookPathCopyBinaryFunc
+	oldRun := runRsyncCommandFunc
+	defer func() {
+		lookPathCopyBinaryFunc = oldLookPath
+		runRsyncCommandFunc = oldRun
+	}()
+	lookPathCopyBinaryFunc = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+
+	var gotArgs []string
+	runRsyncCommandFunc = func(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+
+	req := copyRequest{
+		Archive:  true,
+		Compress: true,
+		Verbose:  true,
+		Src:      copyEndpoint{Raw: "devbox:~/app.log", Path: "~/app.log", Service: "devbox", Remote: true},
+		Dst:      copyEndpoint{Raw: "./logs/", Path: "./logs/"},
+	}
+	remoteCtx := copyRemoteContext{
+		Host:   "yeet-pve1",
+		Server: serverInfo{InstallUser: "root"},
+		Service: catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: serviceTypeVM,
+				VM: &catchrpc.ServiceVM{
+					SSH:      &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "10.0.4.80"},
+					Networks: []catchrpc.ServiceVMNetwork{{Mode: "lan", IP: "10.0.4.80"}},
+				},
+			},
+		},
+	}
+
+	if err := runVMRsyncCopy(context.Background(), req, copyDirectionFromRemote, req.Src, remoteCtx); err != nil {
+		t.Fatalf("runVMRsyncCopy: %v", err)
+	}
+	for _, want := range []string{"-avz", "yeet-pve1:~/app.log", "./logs/"} {
+		if !slices.Contains(gotArgs, want) {
+			t.Fatalf("rsync args = %#v, want %q", gotArgs, want)
+		}
+	}
+}
+
+func TestRunVMRsyncCopyMissingLocalRsync(t *testing.T) {
+	oldLookPath := lookPathCopyBinaryFunc
+	defer func() { lookPathCopyBinaryFunc = oldLookPath }()
+	lookPathCopyBinaryFunc = func(name string) (string, error) {
+		if name == "rsync" {
+			return "", exec.ErrNotFound
+		}
+		return "/usr/bin/" + name, nil
+	}
+
+	err := runVMRsyncCopy(context.Background(), copyRequest{}, copyDirectionToRemote, copyEndpoint{Service: "devbox"}, copyRemoteContext{
+		Host:   "yeet-pve1",
+		Server: serverInfo{InstallUser: "root"},
+		Service: catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: serviceTypeVM,
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM:          &catchrpc.ServiceVM{SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"}},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "rsync CLI not found in PATH") {
+		t.Fatalf("runVMRsyncCopy error = %v, want missing rsync", err)
+	}
+}
+
+func TestWithGuestRsyncHint(t *testing.T) {
+	err := withGuestRsyncHint(errors.New("exit status 127"), "bash: rsync: command not found\n", "devbox")
+	if err == nil || !strings.Contains(err.Error(), "remote rsync is not available on VM \"devbox\"") {
+		t.Fatalf("hint error = %v", err)
+	}
+}
+
+func TestRunRsyncPlanRepairsKnownHostOnce(t *testing.T) {
+	oldRun := runRsyncCommandFunc
+	oldRemove := removeSSHKnownHostFunc
+	defer func() {
+		runRsyncCommandFunc = oldRun
+		removeSSHKnownHostFunc = oldRemove
+	}()
+
+	var runs int
+	runRsyncCommandFunc = func(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+		runs++
+		if runs == 1 {
+			_, _ = io.WriteString(stderr, "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nOffending ED25519 key in /tmp/known_hosts:3\n")
+			return errors.New("exit status 255")
+		}
+		return nil
+	}
+	var removed []string
+	removeSSHKnownHostFunc = func(ctx context.Context, alias, knownHosts string) error {
+		removed = append(removed, alias+"@"+knownHosts)
+		return nil
+	}
+
+	plan := sshExecutionPlan{
+		Args: []string{"-o", "HostName=192.168.100.12", "yeet-pve1"},
+		KnownHostRepair: &sshKnownHostRepair{
+			Alias:          "yeet-vm-devbox@yeet-pve1",
+			KnownHostsFile: "/tmp/known_hosts",
+		},
+	}
+	var stderr bytes.Buffer
+	if err := runRsyncPlan(context.Background(), []string{"-avz"}, plan, "devbox", io.Discard, &stderr); err != nil {
+		t.Fatalf("runRsyncPlan: %v; stderr=%s", err, stderr.String())
+	}
+	if runs != 2 || len(removed) != 1 {
+		t.Fatalf("runs=%d removed=%v, want one repair and retry", runs, removed)
 	}
 }
 
