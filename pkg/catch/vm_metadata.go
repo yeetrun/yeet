@@ -6,7 +6,6 @@ package catch
 
 import (
 	"context"
-	_ "embed"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -21,9 +20,6 @@ var vmGuestNetworkNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
 var vmHostnamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 var vmUserPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
 var vmGuestChown = os.Chown
-
-//go:embed xterm-ghostty.terminfo
-var vmGuestGhosttyTerminfoSource string
 
 type vmMetadataConfig struct {
 	Hostname       string
@@ -172,34 +168,8 @@ func injectVMMetadataIntoRootFSWith(ctx context.Context, diskPath string, cfg vm
 	if err := writer(mountRoot, cfg); err != nil {
 		return fmt.Errorf("write VM guest metadata: %w", err)
 	}
-	if err := installVMGuestTerminfo(ctx, mountRoot, runner); err != nil {
-		return err
-	}
 	if err := ensureVMGuestSSHHostKeys(ctx, mountRoot, cfg, runner); err != nil {
 		return err
-	}
-	return nil
-}
-
-func installVMGuestTerminfo(ctx context.Context, root string, runner vmCommandRunner) error {
-	if runner == nil {
-		runner = runVMCommand
-	}
-	outDir := filepath.Join(root, "etc", "terminfo")
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return fmt.Errorf("prepare VM guest terminfo dir: %w", err)
-	}
-	sourceDir, err := os.MkdirTemp("", "yeet-vm-terminfo-*")
-	if err != nil {
-		return fmt.Errorf("create VM guest terminfo source dir: %w", err)
-	}
-	defer func() { _ = os.RemoveAll(sourceDir) }()
-	sourcePath := filepath.Join(sourceDir, "xterm-ghostty.terminfo")
-	if err := os.WriteFile(sourcePath, []byte(vmGuestGhosttyTerminfoSource), 0o644); err != nil {
-		return fmt.Errorf("write VM guest Ghostty terminfo source: %w", err)
-	}
-	if err := runner(ctx, []string{"tic", "-x", "-o", outDir, sourcePath}); err != nil {
-		return fmt.Errorf("install VM guest Ghostty terminfo: %w", err)
 	}
 	return nil
 }

@@ -72,6 +72,17 @@ func TestFastUbuntuImagePolicySupportsRouterServices(t *testing.T) {
 	}
 }
 
+func TestFastUbuntuImagePolicyOwnsGhosttyTerminfoAsset(t *testing.T) {
+	script := readBuildUbuntuScript(t)
+
+	if !strings.Contains(script, `tools/vm-image/assets/xterm-ghostty.terminfo`) {
+		t.Fatalf("build script should default Ghostty terminfo to tools/vm-image assets")
+	}
+	if strings.Contains(script, `pkg/catch/xterm-ghostty.terminfo`) {
+		t.Fatalf("build script should not depend on pkg/catch for image assets")
+	}
+}
+
 func TestYeetKernelConfigSupportsRouterServicesWithoutModules(t *testing.T) {
 	script := readBuildKernelScript(t)
 
