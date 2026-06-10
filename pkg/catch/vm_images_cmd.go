@@ -292,12 +292,16 @@ func vmImageCatalogRowFromOfficial(image officialVMImage) vmImageCatalogRow {
 }
 
 func vmImageCatalogRowFromLocalRef(ref localVMImageRef) vmImageCatalogRow {
-	return vmImageCatalogRow{
+	row := vmImageCatalogRow{
 		Payload:      ref.Payload,
 		Kind:         "local",
 		Name:         ref.Name,
 		KernelPolicy: ref.KernelPolicy,
 	}
+	if manifest, err := readLocalVMImageBlobManifest(ref.Root); err == nil {
+		row.DefaultUser = manifest.DefaultUser
+	}
+	return row
 }
 
 func vmImageListRowFromCacheState(state vmImageCacheState) vmImageListRow {

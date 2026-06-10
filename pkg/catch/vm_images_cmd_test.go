@@ -179,8 +179,11 @@ func TestVMImagesCmdCatalogIncludesLocalImages(t *testing.T) {
 		},
 	}
 	ref, err := importer.Import(context.Background(), localVMImageImportRequest{
-		Name:   "foo/bar",
-		Reader: localVMImageBundleTar(t, map[string][]byte{"rootfs.ext4": []byte("local-rootfs")}),
+		Name: "foo/bar",
+		Reader: localVMImageBundleTar(t, map[string][]byte{
+			"rootfs.ext4":   []byte("local-rootfs"),
+			"manifest.json": localVMImageSourceManifestForTest(t, "admin"),
+		}),
 	})
 	if err != nil {
 		t.Fatalf("Import: %v", err)
@@ -203,6 +206,7 @@ func TestVMImagesCmdCatalogIncludesLocalImages(t *testing.T) {
 		"vm://foo/bar",
 		"local",
 		ref.Name,
+		"admin",
 		ref.KernelPolicy,
 	} {
 		if !strings.Contains(got, want) {
