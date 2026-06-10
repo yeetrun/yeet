@@ -741,8 +741,13 @@ func localVMImageContentID(name, rootFSPath, kernelPath, firecrackerPath string,
 func hashLocalVMImageCapabilities(w io.Writer, capabilities localVMImageManifestCapabilities) error {
 	parts := []string{
 		capabilities.ImageProfile,
+		capabilities.Distro,
+		capabilities.DistroVersion,
+		capabilities.DefaultUser,
 		capabilities.KernelPolicy,
 		capabilities.GuestInit,
+		capabilities.GuestSystemInit,
+		capabilities.MetadataDriver,
 		fmt.Sprintf("%t", capabilities.SnapSupportSet),
 		fmt.Sprintf("%t", capabilities.SnapSupport),
 		capabilities.KernelVersion,
