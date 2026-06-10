@@ -8,7 +8,10 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -305,6 +308,56 @@ func TestResolveLocalVMImageAssetRejectsTamperedArtifact(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "checksum") && !strings.Contains(err.Error(), "content") {
 		t.Fatalf("error = %v, want checksum or content integrity failure", err)
+	}
+}
+
+func TestResolveLocalVMImageAssetAcceptsLegacyContentID(t *testing.T) {
+	importer := localVMImageImporter{
+		CacheRoot: t.TempDir(),
+		EnsureManagedAsset: func(context.Context) (vmImageAsset, error) {
+			return fakeManagedVMImageAsset(t), nil
+		},
+	}
+	ref, err := importer.Import(context.Background(), localVMImageImportRequest{
+		Name: "foo/bar",
+		Reader: localVMImageBundleTar(t, map[string][]byte{
+			"rootfs.ext4":   []byte("local-rootfs"),
+			"manifest.json": localVMImageSourceManifestForTest(t, "admin"),
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	manifest, err := readLocalVMImageBlobManifest(ref.Root)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	legacyID, err := legacyLocalVMImageContentIDForTest(
+		ref.Name,
+		filepath.Join(ref.Root, ref.RootFS),
+		filepath.Join(ref.Root, ref.Kernel),
+		filepath.Join(ref.Root, ref.Firecracker),
+		localVMImageCapabilitiesFromManifest(manifest),
+	)
+	if err != nil {
+		t.Fatalf("legacy content ID: %v", err)
+	}
+	legacyRoot := filepath.Join(importer.CacheRoot, "local", "blobs", legacyID)
+	if err := os.Rename(ref.Root, legacyRoot); err != nil {
+		t.Fatalf("move blob to legacy root: %v", err)
+	}
+	ref.ContentID = legacyID
+	ref.Root = legacyRoot
+	if err := writeLocalVMImageRef(localVMImageRefPath(importer.CacheRoot, ref.Name), ref); err != nil {
+		t.Fatalf("write legacy ref: %v", err)
+	}
+
+	asset, err := resolveLocalVMImageAsset(context.Background(), importer.CacheRoot, ref.Name)
+	if err != nil {
+		t.Fatalf("resolve legacy local image: %v", err)
+	}
+	if asset.Manifest.DefaultUser != "admin" {
+		t.Fatalf("resolved default_user = %q, want admin", asset.Manifest.DefaultUser)
 	}
 }
 
@@ -617,6 +670,39 @@ func localVMImageSourceManifestForTest(t *testing.T, defaultUser string) []byte 
 		t.Fatalf("marshal source manifest: %v", err)
 	}
 	return raw
+}
+
+func legacyLocalVMImageContentIDForTest(name, rootFSPath, kernelPath, firecrackerPath string, capabilities localVMImageManifestCapabilities) (string, error) {
+	h := sha256.New()
+	if _, err := h.Write([]byte(name)); err != nil {
+		return "", err
+	}
+	parts := []string{
+		capabilities.ImageProfile,
+		capabilities.KernelPolicy,
+		capabilities.GuestInit,
+		fmt.Sprintf("%t", capabilities.SnapSupportSet),
+		fmt.Sprintf("%t", capabilities.SnapSupport),
+		capabilities.KernelVersion,
+		capabilities.UbuntuKernelVersion,
+	}
+	for _, part := range parts {
+		if _, err := h.Write([]byte{0}); err != nil {
+			return "", err
+		}
+		if _, err := h.Write([]byte(part)); err != nil {
+			return "", err
+		}
+	}
+	for _, path := range []string{rootFSPath, kernelPath, firecrackerPath} {
+		if _, err := h.Write([]byte{0}); err != nil {
+			return "", err
+		}
+		if err := hashLocalVMImageFile(h, path); err != nil {
+			return "", err
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 type localVMImageTarEntry struct {

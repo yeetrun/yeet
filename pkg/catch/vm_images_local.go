@@ -362,14 +362,22 @@ func verifyResolvedLocalVMImage(ref localVMImageRef, manifest vmImageManifest, p
 	if err := localVMImageVerifyManifestArtifacts(ref.Root, manifest); err != nil {
 		return err
 	}
-	contentID, err := localVMImageContentID(ref.Name, paths.RootFSPath, paths.KernelPath, paths.FirecrackerPath, localVMImageCapabilitiesFromManifest(manifest))
+	capabilities := localVMImageCapabilitiesFromManifest(manifest)
+	contentID, err := localVMImageContentID(ref.Name, paths.RootFSPath, paths.KernelPath, paths.FirecrackerPath, capabilities)
 	if err != nil {
 		return err
 	}
-	if contentID != ref.ContentID {
-		return fmt.Errorf("local VM image content ID mismatch: got %s, want %s", contentID, ref.ContentID)
+	if contentID == ref.ContentID {
+		return nil
 	}
-	return nil
+	legacyContentID, err := legacyLocalVMImageContentID(ref.Name, paths.RootFSPath, paths.KernelPath, paths.FirecrackerPath, capabilities)
+	if err != nil {
+		return err
+	}
+	if legacyContentID == ref.ContentID {
+		return nil
+	}
+	return fmt.Errorf("local VM image content ID mismatch: got %s, want %s", contentID, ref.ContentID)
 }
 
 func validateLocalVMImageRefRoot(cacheRoot string, ref localVMImageRef) error {
@@ -720,11 +728,19 @@ func localVMImageSafeArtifactPath(stagingDir, name string) (string, error) {
 }
 
 func localVMImageContentID(name, rootFSPath, kernelPath, firecrackerPath string, capabilities localVMImageManifestCapabilities) (string, error) {
+	return localVMImageContentIDWithCapabilitiesHash(name, rootFSPath, kernelPath, firecrackerPath, capabilities, hashLocalVMImageCapabilities)
+}
+
+func legacyLocalVMImageContentID(name, rootFSPath, kernelPath, firecrackerPath string, capabilities localVMImageManifestCapabilities) (string, error) {
+	return localVMImageContentIDWithCapabilitiesHash(name, rootFSPath, kernelPath, firecrackerPath, capabilities, hashLegacyLocalVMImageCapabilities)
+}
+
+func localVMImageContentIDWithCapabilitiesHash(name, rootFSPath, kernelPath, firecrackerPath string, capabilities localVMImageManifestCapabilities, hashCapabilities func(io.Writer, localVMImageManifestCapabilities) error) (string, error) {
 	h := sha256.New()
 	if _, err := h.Write([]byte(name)); err != nil {
 		return "", err
 	}
-	if err := hashLocalVMImageCapabilities(h, capabilities); err != nil {
+	if err := hashCapabilities(h, capabilities); err != nil {
 		return "", err
 	}
 	for _, path := range []string{rootFSPath, kernelPath, firecrackerPath} {
@@ -748,6 +764,27 @@ func hashLocalVMImageCapabilities(w io.Writer, capabilities localVMImageManifest
 		capabilities.GuestInit,
 		capabilities.GuestSystemInit,
 		capabilities.MetadataDriver,
+		fmt.Sprintf("%t", capabilities.SnapSupportSet),
+		fmt.Sprintf("%t", capabilities.SnapSupport),
+		capabilities.KernelVersion,
+		capabilities.UbuntuKernelVersion,
+	}
+	for _, part := range parts {
+		if _, err := w.Write([]byte{0}); err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte(part)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hashLegacyLocalVMImageCapabilities(w io.Writer, capabilities localVMImageManifestCapabilities) error {
+	parts := []string{
+		capabilities.ImageProfile,
+		capabilities.KernelPolicy,
+		capabilities.GuestInit,
 		fmt.Sprintf("%t", capabilities.SnapSupportSet),
 		fmt.Sprintf("%t", capabilities.SnapSupport),
 		capabilities.KernelVersion,
