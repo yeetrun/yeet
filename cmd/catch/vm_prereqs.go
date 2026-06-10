@@ -53,6 +53,8 @@ var requiredVMHostCommands = []vmHostCommandRequirement{
 
 var requiredVMHostDevices = []string{"/dev/kvm", "/dev/net/tun"}
 
+const vmHostRequirementsDocsURL = "https://yeetrun.com/docs/getting-started/installation#vm-host-requirements"
+
 func setupVMHost() error {
 	return setupVMHostWith(defaultVMSetupDeps())
 }
@@ -191,20 +193,20 @@ func inspectVMHostPrereqs(deps vmSetupDeps) vmHostPrereqReport {
 
 func warnVMHostCapabilities(out io.Writer, report vmHostPrereqReport) {
 	if report.UnsupportedArch != "" {
-		_, _ = fmt.Fprintf(out, "Warning: VM payloads require x86_64/amd64 hosts in this release; detected %s\n", report.UnsupportedArch)
+		_, _ = fmt.Fprintf(out, "Warning: VM support is unavailable on this host: yeet VM payloads require x86_64/amd64 hosts in this release; detected %s. See %s\n", report.UnsupportedArch, vmHostRequirementsDocsURL)
 	}
 	for _, device := range report.MissingDevices {
 		switch device {
 		case "/dev/kvm":
-			_, _ = fmt.Fprintln(out, "Warning: VM payloads require KVM; /dev/kvm is missing")
+			_, _ = fmt.Fprintf(out, "Warning: VM support is unavailable on this host: /dev/kvm is missing. Containers, binaries, and cron jobs still work. See %s\n", vmHostRequirementsDocsURL)
 		case "/dev/net/tun":
-			_, _ = fmt.Fprintln(out, "Warning: VM networking requires TUN/TAP; /dev/net/tun is missing")
+			_, _ = fmt.Fprintf(out, "Warning: VM networking is unavailable on this host: /dev/net/tun is missing. See %s\n", vmHostRequirementsDocsURL)
 		default:
-			_, _ = fmt.Fprintf(out, "Warning: VM payloads require %s; it is missing\n", device)
+			_, _ = fmt.Fprintf(out, "Warning: VM support is unavailable on this host: %s is missing. See %s\n", device, vmHostRequirementsDocsURL)
 		}
 	}
 	if report.MissingUdevadm {
-		_, _ = fmt.Fprintln(out, "Warning: ZFS-backed VM disks require udevadm; raw VM disks still work")
+		_, _ = fmt.Fprintf(out, "Warning: ZFS-backed VM disks require udevadm; raw VM disks still work. See %s\n", vmHostRequirementsDocsURL)
 	}
 }
 
@@ -215,18 +217,20 @@ func warnMissingVMHostCommands(out io.Writer, missing []vmHostCommandRequirement
 	}
 	_, _ = fmt.Fprintf(
 		out,
-		"Warning: VM tooling is missing required commands: %s. Install packages: %s\n",
+		"Warning: VM tools are incomplete: missing %s. Install packages: %s. See %s\n",
 		strings.Join(commands, ", "),
 		strings.Join(packages, ", "),
+		vmHostRequirementsDocsURL,
 	)
 }
 
 func warnVMHostConfirmError(out io.Writer, err error, packages []string) {
 	_, _ = fmt.Fprintf(
 		out,
-		"Warning: could not confirm VM package install (%v). To enable VM payloads, install: %s\n",
+		"Warning: could not confirm VM package install (%v). To enable VM payloads, install: %s. See %s\n",
 		err,
 		strings.Join(packages, ", "),
+		vmHostRequirementsDocsURL,
 	)
 }
 
