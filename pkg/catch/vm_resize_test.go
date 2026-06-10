@@ -185,6 +185,22 @@ func TestVMSetReplacesNetworkAndMetadata(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"host_dev_name": "yvm-d-ea1055-l0"`)
 }
 
+func TestVMSetRejectsMacvlanFlagsWithoutLAN(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{MacvlanParent: "vmbr0"})
+	if err == nil || !strings.Contains(err.Error(), `--macvlan-* settings require VM LAN networking`) {
+		t.Fatalf("error = %v, want macvlan LAN requirement", err)
+	}
+	svc := getTestService(t, server, "devbox")
+	if len(svc.VM.Networks) != 1 || svc.VM.Networks[0].Mode != "svc" {
+		t.Fatalf("networks changed to %#v, want original svc network", svc.VM.Networks)
+	}
+}
+
 func TestVMSetPreservesNixOSUserAndSystemInit(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)

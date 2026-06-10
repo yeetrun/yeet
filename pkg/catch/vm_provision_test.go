@@ -140,6 +140,49 @@ func TestRunVMRejectsInvalidNetworkBeforeImageSelection(t *testing.T) {
 	assertNoReadyVM(t, server, "svc")
 }
 
+func TestRunVMRejectsMacvlanFlagsWithoutLANBeforeImageSelection(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+
+	var profiled bool
+	vmProvisionHostProfileFunc = func(_ *ttyExecer, _ resolvedServiceRoot, _ int64) (vmHostProfile, error) {
+		profiled = true
+		return vmHostProfile{
+			Arch:         "x86_64",
+			HasKVM:       true,
+			LogicalCPUs:  8,
+			MemoryBytes:  16 << 30,
+			StorageBytes: 128 << 30,
+		}, nil
+	}
+	var inspected bool
+	vmImageInspectFunc = func(context.Context, vmImageCache, string) (vmImageCacheState, vmImageManifest, error) {
+		inspected = true
+		return vmImageCacheState{
+			Payload:       vmUbuntu2604Payload,
+			LatestVersion: defaultVMImageVersion,
+			State:         vmImageCacheMissing,
+		}, vmImageManifest{Version: defaultVMImageVersion}, nil
+	}
+	var ensured bool
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		ensured = true
+		return fakeVMImageAsset(t)
+	}
+
+	err := execer.runVM(cli.RunFlags{MacvlanParent: "vmbr0"}, vmUbuntu2604Payload)
+	if err == nil || !strings.Contains(err.Error(), `--macvlan-* settings require VM LAN networking`) {
+		t.Fatalf("runVM error = %v, want macvlan LAN requirement", err)
+	}
+	if profiled || inspected || ensured {
+		t.Fatalf("invalid macvlan flags performed work: profiled=%v inspected=%v ensured=%v", profiled, inspected, ensured)
+	}
+	if _, statErr := os.Stat(serviceRoot); !os.IsNotExist(statErr) {
+		t.Fatalf("service root stat after invalid macvlan flags = %v, want not exists", statErr)
+	}
+	assertNoReadyVM(t, server, "svc")
+}
+
 func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")

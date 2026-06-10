@@ -237,7 +237,7 @@ func hasCatchVMSetNetworkChange(flags cli.VMSetFlags) bool {
 func (s *Server) planVMServiceSetNetwork(dv *db.DataView, name string, service *db.Service, current []db.VMNetworkConfig, flags cli.VMSetFlags) (vmNetworkPlan, *db.SvcNetwork, error) {
 	netValue := vmNetworkValueForServiceSet(current, flags)
 	modes := vmRequestedNetworkModes(netValue)
-	if err := validateVMNetworkModes(modes); err != nil {
+	if err := validateVMNetworkOptions(modes, flags.MacvlanParent, flags.MacvlanVlan, flags.MacvlanMac); err != nil {
 		return vmNetworkPlan{}, nil, err
 	}
 	svcNet, err := svcNetworkForVMServiceSet(dv, service.SvcNetwork, modes)

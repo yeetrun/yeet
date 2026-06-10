@@ -118,7 +118,7 @@ func validateVMProvisionFlags(flags cli.RunFlags) error {
 	if _, err := normalizeVMProvisionImagePolicy(flags.ImagePolicy); err != nil {
 		return err
 	}
-	return validateVMNetworkModes(vmRequestedNetworkModes(flags.Net))
+	return validateVMNetworkOptions(vmRequestedNetworkModes(flags.Net), flags.MacvlanParent, flags.MacvlanVlan, flags.MacvlanMac)
 }
 
 type vmProvisionInputs struct {
@@ -1059,7 +1059,7 @@ func (e *ttyExecer) vmNetworkPlanFromFlags(flags cli.RunFlags, svcNet *db.SvcNet
 		input.ServiceIP = svcNet.IPv4.String()
 	}
 	modes := vmRequestedNetworkModes(flags.Net)
-	if err := validateVMNetworkModes(modes); err != nil {
+	if err := validateVMNetworkOptions(modes, flags.MacvlanParent, flags.MacvlanVlan, flags.MacvlanMac); err != nil {
 		return vmNetworkPlan{}, err
 	}
 	if vmModeListContains(modes, "lan") {
@@ -1082,6 +1082,20 @@ func validateVMNetworkModes(modes []string) error {
 		}
 	}
 	return nil
+}
+
+func validateVMNetworkOptions(modes []string, macvlanParent string, macvlanVLAN int, macvlanMAC string) error {
+	if err := validateVMNetworkModes(modes); err != nil {
+		return err
+	}
+	if !vmMacvlanOptionsSet(macvlanParent, macvlanVLAN, macvlanMAC) || vmModeListContains(modes, "lan") {
+		return nil
+	}
+	return fmt.Errorf("--macvlan-* settings require VM LAN networking; use --net=lan or --net=svc,lan")
+}
+
+func vmMacvlanOptionsSet(parent string, vlan int, mac string) bool {
+	return strings.TrimSpace(parent) != "" || vlan != 0 || strings.TrimSpace(mac) != ""
 }
 
 func vmRequestedNetworkModes(raw string) []string {
