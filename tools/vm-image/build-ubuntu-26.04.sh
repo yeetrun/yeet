@@ -14,7 +14,7 @@ kernel_version_override="${YEET_VM_KERNEL_VERSION:-}"
 guest_init_path="${YEET_VM_INIT_PATH:-}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
-ghostty_terminfo_source="${YEET_VM_GHOSTTY_TERMINFO:-$repo_root/pkg/catch/xterm-ghostty.terminfo}"
+ghostty_terminfo_source="${YEET_VM_GHOSTTY_TERMINFO:-$repo_root/tools/vm-image/assets/xterm-ghostty.terminfo}"
 
 ubuntu_base_url="${UBUNTU_CLOUD_BASE_URL:-https://cloud-images.ubuntu.com/resolute/current}"
 ubuntu_image="${UBUNTU_CLOUD_IMAGE:-resolute-server-cloudimg-amd64.tar.gz}"

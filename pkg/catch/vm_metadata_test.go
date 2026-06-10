@@ -506,23 +506,22 @@ func TestInjectVMMetadataIntoRootFSMountsAndUnmounts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("injectVMMetadataIntoRootFSWith: %v", err)
 	}
-	if len(commands) != 4 {
-		t.Fatalf("commands = %#v, want mount, terminfo compile, host-key generation, and umount", commands)
+	if len(commands) != 3 {
+		t.Fatalf("commands = %#v, want mount, host-key generation, and umount", commands)
 	}
 	if commands[0][0] != "mount" || !reflect.DeepEqual(commands[0][1:4], []string{"-o", "loop,rw", "/srv/devbox/rootfs.raw"}) {
 		t.Fatalf("mount command = %#v", commands[0])
 	}
-	if commands[1][0] != "tic" || !reflect.DeepEqual(commands[1][1:4], []string{"-x", "-o", filepath.Join(wroteRoot, "etc", "terminfo")}) {
-		t.Fatalf("terminfo command = %#v, wrote root %q", commands[1], wroteRoot)
+	for _, command := range commands {
+		if command[0] == "tic" {
+			t.Fatalf("commands = %#v, want no runtime terminfo compilation", commands)
+		}
 	}
-	if !strings.HasSuffix(commands[1][4], "xterm-ghostty.terminfo") {
-		t.Fatalf("terminfo source = %#v, want xterm-ghostty.terminfo", commands[1])
+	if !reflect.DeepEqual(commands[1], []string{"chroot", wroteRoot, "ssh-keygen", "-A"}) {
+		t.Fatalf("host key command = %#v, wrote root %q", commands[1], wroteRoot)
 	}
-	if !reflect.DeepEqual(commands[2], []string{"chroot", wroteRoot, "ssh-keygen", "-A"}) {
-		t.Fatalf("host key command = %#v, wrote root %q", commands[2], wroteRoot)
-	}
-	if commands[3][0] != "umount" || commands[3][1] != wroteRoot {
-		t.Fatalf("umount command = %#v, wrote root %q", commands[3], wroteRoot)
+	if commands[2][0] != "umount" || commands[2][1] != wroteRoot {
+		t.Fatalf("umount command = %#v, wrote root %q", commands[2], wroteRoot)
 	}
 }
 
