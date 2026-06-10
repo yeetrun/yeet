@@ -163,6 +163,48 @@ func TestImportLocalVMImagePreservesBundleManifestFastBootCapability(t *testing.
 	}
 }
 
+func TestImportLocalVMImageContentIDIncludesRuntimeMetadata(t *testing.T) {
+	importer := localVMImageImporter{
+		CacheRoot: t.TempDir(),
+		EnsureManagedAsset: func(context.Context) (vmImageAsset, error) {
+			return fakeManagedVMImageAsset(t), nil
+		},
+	}
+
+	firstManifest := localVMImageSourceManifestForTest(t, "ubuntu")
+	secondManifest := localVMImageSourceManifestForTest(t, "admin")
+	ref1, err := importer.Import(context.Background(), localVMImageImportRequest{
+		Name: "foo/bar",
+		Reader: localVMImageBundleTar(t, map[string][]byte{
+			"rootfs.ext4":   []byte("local-rootfs"),
+			"manifest.json": firstManifest,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("first Import: %v", err)
+	}
+	ref2, err := importer.Import(context.Background(), localVMImageImportRequest{
+		Name: "foo/bar",
+		Reader: localVMImageBundleTar(t, map[string][]byte{
+			"rootfs.ext4":   []byte("local-rootfs"),
+			"manifest.json": secondManifest,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("second Import: %v", err)
+	}
+	if ref1.ContentID == ref2.ContentID {
+		t.Fatalf("content IDs are equal for different runtime metadata: %s", ref1.ContentID)
+	}
+	manifest, err := readLocalVMImageBlobManifest(ref2.Root)
+	if err != nil {
+		t.Fatalf("read second manifest: %v", err)
+	}
+	if manifest.DefaultUser != "admin" {
+		t.Fatalf("second manifest default_user = %q, want admin", manifest.DefaultUser)
+	}
+}
+
 func TestImportLocalVMImageRejectsLocalKernelWithoutFlag(t *testing.T) {
 	importer := localVMImageImporter{
 		CacheRoot: t.TempDir(),
@@ -562,6 +604,19 @@ func localVMImageBundleTar(t *testing.T, files map[string][]byte) io.Reader {
 		t.Fatalf("close tar: %v", err)
 	}
 	return bytes.NewReader(buf.Bytes())
+}
+
+func localVMImageSourceManifestForTest(t *testing.T, defaultUser string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(vmImageManifest{
+		RootFS:         "rootfs.ext4",
+		DefaultUser:    defaultUser,
+		MetadataDriver: "ubuntu",
+	})
+	if err != nil {
+		t.Fatalf("marshal source manifest: %v", err)
+	}
+	return raw
 }
 
 type localVMImageTarEntry struct {
