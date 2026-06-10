@@ -270,6 +270,9 @@ func writeExtractedBinary(r io.Reader, dstDir, name string) (string, error) {
 }
 
 func replaceLocalBinary(target, source string, sudo bool) error {
+	if sudo {
+		return replaceLocalBinaryWithSudo(target, source)
+	}
 	tmpFile, err := os.CreateTemp(filepath.Dir(target), ".yeet.upgrade.*")
 	if err != nil {
 		return err
@@ -280,19 +283,22 @@ func replaceLocalBinary(target, source string, sudo bool) error {
 		return err
 	}
 	defer func() { _ = os.Remove(tmp) }()
-	if sudo {
-		if err := exec.Command("sudo", "install", "-m", "0755", source, tmp).Run(); err != nil {
-			return fmt.Errorf("sudo install replacement: %w", err)
-		}
-		if err := exec.Command("sudo", "mv", "-f", tmp, target).Run(); err != nil {
-			return fmt.Errorf("sudo move replacement: %w", err)
-		}
-		return nil
-	}
 	if err := copyFileMode(source, tmp, 0o755); err != nil {
 		return err
 	}
 	return os.Rename(tmp, target)
+}
+
+func replaceLocalBinaryWithSudo(target, source string) error {
+	tmp := filepath.Join(filepath.Dir(target), fmt.Sprintf(".yeet.upgrade.%d.%d", os.Getpid(), time.Now().UnixNano()))
+	if err := exec.Command("sudo", "install", "-m", "0755", source, tmp).Run(); err != nil {
+		return fmt.Errorf("sudo install replacement: %w", err)
+	}
+	if err := exec.Command("sudo", "mv", "-f", tmp, target).Run(); err != nil {
+		_ = exec.Command("sudo", "rm", "-f", tmp).Run()
+		return fmt.Errorf("sudo move replacement: %w", err)
+	}
+	return nil
 }
 
 func copyFileMode(source, target string, mode os.FileMode) (err error) {

@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/buildinfo"
@@ -136,6 +138,87 @@ func TestReplaceLocalBinaryAtomic(t *testing.T) {
 	}
 	if string(got) != "new" {
 		t.Fatalf("target = %q", got)
+	}
+}
+
+func TestReplaceLocalBinarySudoDoesNotRequireWritableTargetDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based permission test is Unix-only")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can create temp files in non-writable directories")
+	}
+
+	dir := t.TempDir()
+	source := filepath.Join(t.TempDir(), "next")
+	target := filepath.Join(dir, "yeet")
+	if err := os.WriteFile(source, []byte("new"), 0o755); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := os.WriteFile(target, []byte("old"), 0o755); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	binDir := t.TempDir()
+	sudoLog := filepath.Join(t.TempDir(), "sudo.log")
+	sudoPath := filepath.Join(binDir, "sudo")
+	sudoScript := `#!/bin/sh
+printf '%s' "$1" >> "$SUDO_LOG"
+shift
+for arg in "$@"; do
+	printf ' %s' "$arg" >> "$SUDO_LOG"
+done
+printf '\n' >> "$SUDO_LOG"
+exit 0
+`
+	if err := os.WriteFile(sudoPath, []byte(sudoScript), 0o755); err != nil {
+		t.Fatalf("write fake sudo: %v", err)
+	}
+
+	oldPath := os.Getenv("PATH")
+	oldSudoLog := os.Getenv("SUDO_LOG")
+	t.Cleanup(func() {
+		_ = os.Setenv("PATH", oldPath)
+		if oldSudoLog == "" {
+			_ = os.Unsetenv("SUDO_LOG")
+		} else {
+			_ = os.Setenv("SUDO_LOG", oldSudoLog)
+		}
+	})
+	if err := os.Setenv("PATH", binDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatalf("set PATH: %v", err)
+	}
+	if err := os.Setenv("SUDO_LOG", sudoLog); err != nil {
+		t.Fatalf("set SUDO_LOG: %v", err)
+	}
+
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatalf("chmod install dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	if err := replaceLocalBinary(target, source, true); err != nil {
+		t.Fatalf("replaceLocalBinary with sudo: %v", err)
+	}
+
+	raw, err := os.ReadFile(sudoLog)
+	if err != nil {
+		t.Fatalf("read sudo log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("sudo invocations = %#v, want install and mv", lines)
+	}
+	installPrefix := "install -m 0755 " + source + " "
+	if !strings.HasPrefix(lines[0], installPrefix) {
+		t.Fatalf("install invocation = %q, want prefix %q", lines[0], installPrefix)
+	}
+	tmp := strings.TrimPrefix(lines[0], installPrefix)
+	if filepath.Dir(tmp) != dir || !strings.HasPrefix(filepath.Base(tmp), ".yeet.upgrade.") {
+		t.Fatalf("temporary path = %q, want upgrade file in %q", tmp, dir)
+	}
+	if want := "mv -f " + tmp + " " + target; lines[1] != want {
+		t.Fatalf("move invocation = %q, want %q", lines[1], want)
 	}
 }
 
