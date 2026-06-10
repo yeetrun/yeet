@@ -97,6 +97,49 @@ func TestRunVMKeepsExistingServiceRootOnArtifactFailure(t *testing.T) {
 	}
 }
 
+func TestRunVMRejectsInvalidNetworkBeforeImageSelection(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+
+	var profiled bool
+	vmProvisionHostProfileFunc = func(_ *ttyExecer, _ resolvedServiceRoot, _ int64) (vmHostProfile, error) {
+		profiled = true
+		return vmHostProfile{
+			Arch:         "x86_64",
+			HasKVM:       true,
+			LogicalCPUs:  8,
+			MemoryBytes:  16 << 30,
+			StorageBytes: 128 << 30,
+		}, nil
+	}
+	var inspected bool
+	vmImageInspectFunc = func(context.Context, vmImageCache, string) (vmImageCacheState, vmImageManifest, error) {
+		inspected = true
+		return vmImageCacheState{
+			Payload:       vmUbuntu2604Payload,
+			LatestVersion: defaultVMImageVersion,
+			State:         vmImageCacheMissing,
+		}, vmImageManifest{Version: defaultVMImageVersion}, nil
+	}
+	var ensured bool
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		ensured = true
+		return fakeVMImageAsset(t)
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "ts"}, vmUbuntu2604Payload)
+	if err == nil || !strings.Contains(err.Error(), `unsupported VM network mode "ts"`) {
+		t.Fatalf("runVM error = %v, want unsupported network mode", err)
+	}
+	if profiled || inspected || ensured {
+		t.Fatalf("invalid network performed work: profiled=%v inspected=%v ensured=%v", profiled, inspected, ensured)
+	}
+	if _, statErr := os.Stat(serviceRoot); !os.IsNotExist(statErr) {
+		t.Fatalf("service root stat after invalid network = %v, want not exists", statErr)
+	}
+	assertNoReadyVM(t, server, "svc")
+}
+
 func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
