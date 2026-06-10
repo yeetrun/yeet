@@ -116,6 +116,9 @@ func (s *initInstallSummary) Absorb(msg string) bool {
 	}
 	if isVisibleWarningLine(msg) {
 		s.addWarning(msg)
+		return true
+	}
+	if isVisibleFailureLine(msg) {
 		return false
 	}
 	return false
@@ -194,7 +197,11 @@ func isInstallErrorLine(msg string) bool {
 }
 
 func isVisibleWarningLine(msg string) bool {
-	return strings.HasPrefix(msg, "Failed to install service:") || strings.HasPrefix(msg, "Warning:")
+	return strings.HasPrefix(msg, "Warning:")
+}
+
+func isVisibleFailureLine(msg string) bool {
+	return strings.HasPrefix(msg, "Failed to install service:")
 }
 
 func (s *initInstallSummary) Detail() string {
@@ -212,11 +219,56 @@ func (s *initInstallSummary) Detail() string {
 }
 
 func (s *initInstallSummary) WarningSummary() string {
-	return strings.Join(uniqueStrings(s.warnings), "; ")
+	warnings := uniqueStrings(s.warnings)
+	if len(warnings) == 0 {
+		return ""
+	}
+	return formatInitWarningSummary(warnings)
 }
 
 func (s *initInstallSummary) InfoSummary() string {
 	return strings.Join(uniqueStrings(s.infos), "; ")
+}
+
+func formatInitWarningSummary(warnings []string) string {
+	if len(warnings) == 1 {
+		return "Warning: " + warnings[0]
+	}
+	warnings, docs := extractSharedInitWarningDocs(warnings)
+	var b strings.Builder
+	b.WriteString("Warning:")
+	for _, warning := range warnings {
+		b.WriteString("\n- ")
+		b.WriteString(warning)
+	}
+	if docs != "" {
+		b.WriteString("\nDocs: ")
+		b.WriteString(docs)
+	}
+	return b.String()
+}
+
+func extractSharedInitWarningDocs(warnings []string) ([]string, string) {
+	const marker = ". See "
+	stripped := make([]string, 0, len(warnings))
+	var docs string
+	for _, warning := range warnings {
+		idx := strings.LastIndex(warning, marker)
+		if idx == -1 {
+			return warnings, ""
+		}
+		nextDocs := strings.TrimSpace(warning[idx+len(marker):])
+		if !strings.HasPrefix(nextDocs, "https://") {
+			return warnings, ""
+		}
+		if docs == "" {
+			docs = nextDocs
+		} else if docs != nextDocs {
+			return warnings, ""
+		}
+		stripped = append(stripped, strings.TrimSpace(warning[:idx]))
+	}
+	return stripped, docs
 }
 
 func (f *initInstallFilter) ErrorSummary() error {
@@ -236,6 +288,7 @@ func (f *initInstallFilter) ErrorSummary() error {
 }
 
 func (s *initInstallSummary) addWarning(msg string) {
+	msg = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(msg), "Warning:"))
 	s.warnings = append(s.warnings, msg)
 }
 

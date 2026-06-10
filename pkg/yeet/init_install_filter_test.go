@@ -38,8 +38,7 @@ func TestInitInstallFilterSummaryAndOutput(t *testing.T) {
 		t.Fatalf("write failed: %v", err)
 	}
 
-	gotOutput := strings.TrimSpace(buf.String())
-	if gotOutput != "Warning: docker is required but not installed" {
+	if gotOutput := strings.TrimSpace(buf.String()); gotOutput != "" {
 		t.Fatalf("unexpected output: %q", gotOutput)
 	}
 
@@ -52,6 +51,40 @@ func TestInitInstallFilterSummaryAndOutput(t *testing.T) {
 	}
 	if info := filter.InfoSummary(); info != "" {
 		t.Fatalf("unexpected info summary: %q", info)
+	}
+}
+
+func TestInitInstallFilterSummarizesVisibleWarningsOnce(t *testing.T) {
+	var buf bytes.Buffer
+	filter := newInitInstallFilter(&buf)
+
+	input := strings.Join([]string{
+		"Warning: VM support is unavailable on this host: /dev/kvm is missing. Containers, binaries, and cron jobs still work. See https://yeetrun.com/docs/getting-started/installation#vm-host-requirements",
+		"Warning: VM tools are incomplete: missing qemu-img. Install packages: qemu-utils. See https://yeetrun.com/docs/getting-started/installation#vm-host-requirements",
+	}, "\n") + "\n"
+
+	if _, err := filter.Write([]byte(input)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+
+	if got := buf.String(); got != "" {
+		t.Fatalf("visible output = %q, want warnings deferred to summary", got)
+	}
+	summary := filter.WarningSummary()
+	if strings.Count(summary, "Warning:") != 1 {
+		t.Fatalf("WarningSummary = %q, want one Warning prefix", summary)
+	}
+	if strings.Count(summary, "https://yeetrun.com/docs/getting-started/installation#vm-host-requirements") != 1 {
+		t.Fatalf("WarningSummary = %q, want one docs link", summary)
+	}
+	for _, want := range []string{
+		"Warning:\n- VM support is unavailable on this host",
+		"\n- VM tools are incomplete",
+		"\nDocs: https://yeetrun.com/docs/getting-started/installation#vm-host-requirements",
+	} {
+		if !strings.Contains(summary, want) {
+			t.Fatalf("WarningSummary = %q, missing %q", summary, want)
+		}
 	}
 }
 
@@ -167,7 +200,7 @@ func TestInitInstallSummaryAbsorbPathsImagesAndWarnings(t *testing.T) {
 	if summary.Detail() != "systemd data=/srv/yeet tsnet=/srv/yeet/tsnet skipped-images=1" {
 		t.Fatalf("detail = %q", summary.Detail())
 	}
-	if summary.WarningSummary() != "Installation of docker skipped" {
+	if summary.WarningSummary() != "Warning: Installation of docker skipped" {
 		t.Fatalf("warning = %q", summary.WarningSummary())
 	}
 }
@@ -175,16 +208,14 @@ func TestInitInstallSummaryAbsorbPathsImagesAndWarnings(t *testing.T) {
 func TestInitInstallSummaryVisibleWarnings(t *testing.T) {
 	var summary initInstallSummary
 
-	for _, msg := range []string{
-		"Warning: docker is required but not installed",
-		"Failed to install service: exit status 1",
-	} {
-		if summary.Absorb(msg) {
-			t.Fatalf("expected %q to remain visible", msg)
-		}
+	if !summary.Absorb("Warning: docker is required but not installed") {
+		t.Fatal("expected warning to be absorbed into summary")
+	}
+	if summary.Absorb("Failed to install service: exit status 1") {
+		t.Fatal("expected install failure to remain visible")
 	}
 
-	want := "Warning: docker is required but not installed; Failed to install service: exit status 1"
+	want := "Warning: docker is required but not installed"
 	if got := summary.WarningSummary(); got != want {
 		t.Fatalf("warning = %q, want %q", got, want)
 	}

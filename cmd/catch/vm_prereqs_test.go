@@ -98,11 +98,14 @@ func TestSetupVMHostWithMissingPackagesPromptsAndInstallsAPT(t *testing.T) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
 	}
 	got := stderr.String()
-	if !strings.Contains(got, "Warning: VM tooling is missing required commands: qemu-img, zstd, e2fsck, resize2fs, tic") {
+	if !strings.Contains(got, "Warning: VM tools are incomplete: missing qemu-img, zstd, e2fsck, resize2fs, tic") {
 		t.Fatalf("stderr = %q, want missing command warning", got)
 	}
 	if !strings.Contains(got, "Install packages: e2fsprogs, ncurses-bin, qemu-utils, zstd") {
 		t.Fatalf("stderr = %q, want package list", got)
+	}
+	if !strings.Contains(got, "https://yeetrun.com/docs/getting-started/installation#vm-host-requirements") {
+		t.Fatalf("stderr = %q, want VM requirements docs link", got)
 	}
 }
 
@@ -154,7 +157,7 @@ func TestSetupVMHostWithInstallEnvInstallsAPTWithoutPrompt(t *testing.T) {
 	if !strings.Contains(stderr.String(), "Installing VM host packages because CATCH_INSTALL_VM_TOOLS=1") {
 		t.Fatalf("stderr = %q, want install env note", stderr.String())
 	}
-	if strings.Contains(stderr.String(), "Warning: VM tooling is missing required commands") {
+	if strings.Contains(stderr.String(), "Warning: VM tools are incomplete") {
 		t.Fatalf("stderr = %q, want no missing tooling warning after explicit install request", stderr.String())
 	}
 }
@@ -193,8 +196,11 @@ func TestSetupVMHostWithMissingPackagesWithoutAPTWarnsOnly(t *testing.T) {
 	if ran {
 		t.Fatal("setupVMHostWith ran installer without apt-get")
 	}
-	if !strings.Contains(stderr.String(), "Warning: VM tooling is missing required commands") {
+	if !strings.Contains(stderr.String(), "Warning: VM tools are incomplete") {
 		t.Fatalf("stderr = %q, want missing tooling warning", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "https://yeetrun.com/docs/getting-started/installation#vm-host-requirements") {
+		t.Fatalf("stderr = %q, want VM requirements docs link", stderr.String())
 	}
 }
 
@@ -261,11 +267,17 @@ func TestSetupVMHostWithMissingKVMDoesNotPromptForPackages(t *testing.T) {
 		t.Fatal("setupVMHostWith ran installer even though KVM is missing")
 	}
 	got := stderr.String()
-	if !strings.Contains(got, "Warning: VM payloads require KVM; /dev/kvm is missing") {
+	if !strings.Contains(got, "Warning: VM support is unavailable on this host: /dev/kvm is missing") {
 		t.Fatalf("stderr = %q, want missing KVM warning", got)
 	}
-	if !strings.Contains(got, "Warning: VM tooling is missing required commands") {
+	if !strings.Contains(got, "Warning: VM tools are incomplete") {
 		t.Fatalf("stderr = %q, want missing tooling warning", got)
+	}
+	if !strings.Contains(got, "Containers, binaries, and cron jobs still work") {
+		t.Fatalf("stderr = %q, want non-VM payload guidance", got)
+	}
+	if !strings.Contains(got, "https://yeetrun.com/docs/getting-started/installation#vm-host-requirements") {
+		t.Fatalf("stderr = %q, want VM requirements docs link", got)
 	}
 	if strings.Contains(got, "could not confirm VM package install") {
 		t.Fatalf("stderr = %q, want no confirm warning", got)
@@ -295,10 +307,11 @@ func TestSetupVMHostWithMissingCapabilitiesWarnsButDoesNotFail(t *testing.T) {
 	}
 	got := stderr.String()
 	for _, want := range []string{
-		"Warning: VM payloads require x86_64/amd64 hosts in this release; detected arm64",
-		"Warning: VM payloads require KVM; /dev/kvm is missing",
-		"Warning: VM networking requires TUN/TAP; /dev/net/tun is missing",
+		"Warning: VM support is unavailable on this host: yeet VM payloads require x86_64/amd64 hosts in this release; detected arm64",
+		"Warning: VM support is unavailable on this host: /dev/kvm is missing",
+		"Warning: VM networking is unavailable on this host: /dev/net/tun is missing",
 		"Warning: ZFS-backed VM disks require udevadm; raw VM disks still work",
+		"https://yeetrun.com/docs/getting-started/installation#vm-host-requirements",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr = %q, missing %q", got, want)
