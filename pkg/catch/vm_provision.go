@@ -56,9 +56,7 @@ type vmProvisionPlan struct {
 func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr error) {
 	doneProvision := e.traceBlock("vm provision")
 	defer doneProvision()
-	doneServiceExists := e.traceBlock("vm service exists")
-	serviceExisted, err := e.serviceExists()
-	doneServiceExists()
+	serviceExisted, err := e.validateAndCheckVMProvisionService(flags)
 	if err != nil {
 		return err
 	}
@@ -104,6 +102,23 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 	doneFinish()
 	rollbackNewService = false
 	return nil
+}
+
+func (e *ttyExecer) validateAndCheckVMProvisionService(flags cli.RunFlags) (bool, error) {
+	if err := validateVMProvisionFlags(flags); err != nil {
+		return false, err
+	}
+	doneServiceExists := e.traceBlock("vm service exists")
+	serviceExisted, err := e.serviceExists()
+	doneServiceExists()
+	return serviceExisted, err
+}
+
+func validateVMProvisionFlags(flags cli.RunFlags) error {
+	if _, err := normalizeVMProvisionImagePolicy(flags.ImagePolicy); err != nil {
+		return err
+	}
+	return validateVMNetworkModes(vmRequestedNetworkModes(flags.Net))
 }
 
 type vmProvisionInputs struct {
