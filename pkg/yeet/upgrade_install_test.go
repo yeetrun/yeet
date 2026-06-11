@@ -119,6 +119,68 @@ func TestUpgradeLocalBinaryDownloadsAndReplaces(t *testing.T) {
 	}
 }
 
+func TestUpgradeLocalBinaryUsesSudoWhenInstallDirIsNotWritable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based permission test is Unix-only")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root can create temp files in non-writable directories")
+	}
+
+	oldExecutable := currentExecutableFn
+	oldResolve := resolveYeetReleaseAssetFn
+	oldDownload := downloadFileFn
+	oldExtract := extractSingleBinaryFn
+	oldReplace := replaceLocalBinaryFn
+	t.Cleanup(func() {
+		currentExecutableFn = oldExecutable
+		resolveYeetReleaseAssetFn = oldResolve
+		downloadFileFn = oldDownload
+		extractSingleBinaryFn = oldExtract
+		replaceLocalBinaryFn = oldReplace
+	})
+
+	installDir := t.TempDir()
+	targetPath := filepath.Join(installDir, "yeet")
+	if err := os.WriteFile(targetPath, []byte("old"), 0o755); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	if err := os.Chmod(installDir, 0o555); err != nil {
+		t.Fatalf("chmod install dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(installDir, 0o755) })
+
+	currentExecutableFn = func() (string, error) {
+		return targetPath, nil
+	}
+	resolveYeetReleaseAssetFn = func(goos, goarch string, nightly bool, version string) (string, string, string, string, error) {
+		return "yeet-darwin-arm64.tar.gz", "https://example.com/yeet.tgz", "https://example.com/yeet.sha256", "", nil
+	}
+	downloadFileFn = func(url, path string) error {
+		payload := []byte("archive")
+		if strings.HasSuffix(url, ".sha256") {
+			sum := sha256.Sum256(payload)
+			return os.WriteFile(path, []byte(fmt.Sprintf("%x  yeet-darwin-arm64.tar.gz\n", sum)), 0o644)
+		}
+		return os.WriteFile(path, payload, 0o644)
+	}
+	extractSingleBinaryFn = func(archivePath, dstDir string) (string, error) {
+		return filepath.Join(dstDir, "yeet-darwin-arm64"), nil
+	}
+	var usedSudo bool
+	replaceLocalBinaryFn = func(gotTarget, gotSource string, sudo bool) error {
+		usedSudo = sudo
+		return nil
+	}
+
+	if err := upgradeLocalBinary(buildinfo.Info{Version: "v0.5.10", Channel: buildinfo.ChannelStable}, releaseCacheEntry{Tag: "v0.5.13"}, false); err != nil {
+		t.Fatalf("upgradeLocalBinary: %v", err)
+	}
+	if !usedSudo {
+		t.Fatal("upgradeLocalBinary used non-sudo replacement for non-writable install dir")
+	}
+}
+
 func TestReplaceLocalBinaryAtomic(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "yeet")
