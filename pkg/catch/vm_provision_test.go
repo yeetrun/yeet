@@ -443,6 +443,64 @@ func TestVMZVOLBaseDatasetUsesTargetPoolForDifferentServiceRoot(t *testing.T) {
 	}
 }
 
+func TestCleanupFailedNewVMProvisionRootKeepsExistingZFSDatasetContents(t *testing.T) {
+	server := newTestServer(t)
+	execer := &ttyExecer{s: server}
+	root := t.TempDir()
+	existingFile := filepath.Join(root, "preexisting")
+	if err := os.WriteFile(existingFile, []byte("owned by caller"), 0o644); err != nil {
+		t.Fatalf("write existing file: %v", err)
+	}
+	var destroyCalled bool
+	server.zfsRunner = func(context.Context, ...string) (string, string, error) {
+		destroyCalled = true
+		return "", "destroy should not be called for existing datasets", errZFSCommandFailed
+	}
+
+	err := execer.cleanupFailedNewVMProvisionRoot(resolvedServiceRoot{
+		Root:    root,
+		Dataset: "tank/apps/svc",
+		ZFS:     true,
+		Created: false,
+	})
+	if err != nil {
+		t.Fatalf("cleanupFailedNewVMProvisionRoot: %v", err)
+	}
+	if destroyCalled {
+		t.Fatal("cleanup destroyed an existing ZFS service root")
+	}
+	if _, err := os.Stat(root); err != nil {
+		t.Fatalf("existing ZFS root stat: %v", err)
+	}
+	if _, err := os.Stat(existingFile); err != nil {
+		t.Fatalf("existing ZFS content stat: %v", err)
+	}
+}
+
+func TestCleanupFailedNewVMProvisionRootDestroysCreatedZFSDataset(t *testing.T) {
+	server := newTestServer(t)
+	execer := &ttyExecer{s: server}
+	var got []string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		got = append([]string(nil), args...)
+		return "", "", nil
+	}
+
+	err := execer.cleanupFailedNewVMProvisionRoot(resolvedServiceRoot{
+		Root:    t.TempDir(),
+		Dataset: "tank/apps/svc",
+		ZFS:     true,
+		Created: true,
+	})
+	if err != nil {
+		t.Fatalf("cleanupFailedNewVMProvisionRoot: %v", err)
+	}
+	want := []string{"destroy", "-R", "tank/apps/svc"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("zfs command = %#v, want %#v", got, want)
+	}
+}
+
 func TestVMZVOLBaseDatasetFallbackForMissingDataset(t *testing.T) {
 	root := resolvedServiceRoot{Root: "/srv/yeet/services/devbox"}
 
