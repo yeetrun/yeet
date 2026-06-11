@@ -107,7 +107,7 @@ func upgradeLocalBinary(local buildinfo.Info, latest releaseCacheEntry, force bo
 	if err != nil {
 		return err
 	}
-	return replaceLocalBinaryFn(exe, bin, !fileWritable(exe))
+	return replaceLocalBinaryFn(exe, bin, !canReplaceLocalBinaryWithoutSudo(exe))
 }
 
 func downloadFile(url, path string) (err error) {
@@ -331,5 +331,23 @@ func fileWritable(path string) bool {
 		return false
 	}
 	_ = f.Close()
+	return true
+}
+
+func canReplaceLocalBinaryWithoutSudo(path string) bool {
+	return fileWritable(path) && dirWritable(filepath.Dir(path))
+}
+
+func dirWritable(path string) bool {
+	f, err := os.CreateTemp(path, ".yeet.upgrade.write-test.*")
+	if err != nil {
+		return false
+	}
+	name := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(name)
+		return false
+	}
+	_ = os.Remove(name)
 	return true
 }
