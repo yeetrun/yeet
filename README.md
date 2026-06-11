@@ -199,6 +199,9 @@ yeet ssh devbox
 yeet vm console devbox
 ```
 
+Detach from an active VM console by pressing Enter, then typing `~.`. The VM
+keeps running.
+
 Official VM images also include NixOS:
 
 ```bash
