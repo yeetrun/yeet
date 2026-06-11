@@ -60,7 +60,7 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 	if err != nil {
 		return err
 	}
-	rollbackNewService := false
+	rollbackNewService := !serviceExisted
 	var inputs vmProvisionInputs
 	defer func() {
 		if retErr == nil || !rollbackNewService {
@@ -79,7 +79,6 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 	if err != nil {
 		return err
 	}
-	rollbackNewService = !serviceExisted
 	doneReserveNetwork := e.traceBlock("vm reserve service network")
 	svcNet, err := e.reserveVMServiceNetwork(flags)
 	doneReserveNetwork()
@@ -131,31 +130,36 @@ type vmProvisionInputs struct {
 
 func (e *ttyExecer) vmProvisionInputs(flags cli.RunFlags, payload string) (vmProvisionInputs, error) {
 	ctx := e.vmProvisionContext()
+	inputs := vmProvisionInputs{Context: ctx}
 	doneRoot := e.traceBlock("vm prepare service root")
 	resolvedRoot, err := e.prepareVMServiceRoot(flags)
 	doneRoot()
 	if err != nil {
-		return vmProvisionInputs{}, err
+		return inputs, err
 	}
+	inputs.ServiceRoot = resolvedRoot
 	doneShape := e.traceBlock("vm shape")
 	shape, err := e.vmProvisionShape(resolvedRoot, flags)
 	doneShape()
 	if err != nil {
-		return vmProvisionInputs{}, err
+		return inputs, err
 	}
+	inputs.Shape = shape
 	doneSSHKey := e.traceBlock("vm ssh key")
 	sshKey, err := e.vmSSHKey()
 	doneSSHKey()
 	if err != nil {
-		return vmProvisionInputs{}, err
+		return inputs, err
 	}
+	inputs.SSHKey = sshKey
 	doneImage := e.traceBlock("vm image select")
 	image, err := e.selectVMProvisionImage(ctx, flags, payload, e.newProgressUI("vm image"))
 	doneImage()
 	if err != nil {
-		return vmProvisionInputs{}, err
+		return inputs, err
 	}
-	return vmProvisionInputs{Context: ctx, ServiceRoot: resolvedRoot, Shape: shape, Image: image, SSHKey: sshKey}, nil
+	inputs.Image = image
+	return inputs, nil
 }
 
 func (e *ttyExecer) vmProvisionContext() context.Context {
