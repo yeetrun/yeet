@@ -399,6 +399,44 @@ func TestVMImageManifestPreservesNixOSFields(t *testing.T) {
 	}
 }
 
+func TestVMImageManifestRejectsInvalidRuntimeMetadata(t *testing.T) {
+	base := vmImageTestManifest("ubuntu-26.04-amd64-v1", vmImageTestContents())
+	tests := []struct {
+		name string
+		mut  func(*vmImageManifest)
+		want string
+	}{
+		{
+			name: "default user",
+			mut:  func(m *vmImageManifest) { m.DefaultUser = "bad user" },
+			want: "default_user",
+		},
+		{
+			name: "metadata driver",
+			mut:  func(m *vmImageManifest) { m.MetadataDriver = "freebsd" },
+			want: "metadata_driver",
+		},
+		{
+			name: "guest system init",
+			mut:  func(m *vmImageManifest) { m.GuestSystemInit = "run/current-system/init" },
+			want: "guest_system_init",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manifest := base
+			tt.mut(&manifest)
+			err := manifest.validate()
+			if err == nil {
+				t.Fatal("validate returned nil error")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("validate error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestDefaultVMImageVersionUsesLatestFastBundle(t *testing.T) {
 	if defaultVMImageVersion != "ubuntu-26.04-amd64-v14" {
 		t.Fatalf("default VM image version = %q, want ubuntu-26.04-amd64-v14", defaultVMImageVersion)
