@@ -128,7 +128,7 @@ function buildDraft() {
 }
 
 function isVMPayload(payload) {
-  return payload.trim() === "vm://ubuntu/26.04";
+  return payload.trim().startsWith("vm://");
 }
 
 function selectedNetworkModes() {

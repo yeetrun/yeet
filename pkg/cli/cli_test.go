@@ -56,7 +56,7 @@ func fuzzArgs(raw string) []string {
 
 func TestParseRunFlagsAndArgs(t *testing.T) {
 	args := []string{
-		"--net", "ts",
+		"--net", "svc,ts,lan",
 		"--ts-ver", "1.2.3",
 		"--ts-exit", "exit-node",
 		"--ts-tags", "tag:a",
@@ -80,8 +80,8 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRun failed: %v", err)
 	}
-	if flags.Net != "ts" {
-		t.Errorf("Net = %q, want %q", flags.Net, "ts")
+	if flags.Net != "svc,ts,lan" {
+		t.Errorf("Net = %q, want %q", flags.Net, "svc,ts,lan")
 	}
 	if flags.TsVer != "1.2.3" {
 		t.Errorf("TsVer = %q, want %q", flags.TsVer, "1.2.3")
@@ -221,6 +221,60 @@ func TestParseRunVMFlags(t *testing.T) {
 	}
 	if !reflect.DeepEqual(args, []string{"vm://ubuntu/26.04"}) {
 		t.Fatalf("args = %#v", args)
+	}
+}
+
+func TestParseRunRejectsEmptyNetFlag(t *testing.T) {
+	tests := [][]string{
+		{"--net=", "vm://ubuntu/26.04"},
+		{"--net", "", "vm://ubuntu/26.04"},
+		{"--net", "--cpus=2", "vm://ubuntu/26.04"},
+	}
+	for _, args := range tests {
+		if _, _, err := ParseRun(args); err == nil || !strings.Contains(err.Error(), "--net must not be empty") {
+			t.Fatalf("ParseRun(%#v) error = %v, want empty --net error", args, err)
+		}
+	}
+}
+
+func TestParseRunRejectsEmptyNetComponents(t *testing.T) {
+	for _, args := range [][]string{
+		{"--net=,", "ghcr.io/example/app:latest"},
+		{"--net=svc,", "ghcr.io/example/app:latest"},
+		{"--net=svc,,lan", "ghcr.io/example/app:latest"},
+	} {
+		if _, _, err := ParseRun(args); err == nil || !strings.Contains(err.Error(), "--net must not contain empty network modes") {
+			t.Fatalf("ParseRun(%#v) error = %v, want empty mode error", args, err)
+		}
+	}
+}
+
+func TestParseRunRejectsInvalidMacvlanVLANFlag(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "negative", args: []string{"--macvlan-vlan=-1", "vm://ubuntu/26.04"}, wantErr: "--macvlan-vlan must not be negative"},
+		{name: "too large", args: []string{"--macvlan-vlan=4095", "vm://ubuntu/26.04"}, wantErr: "--macvlan-vlan must be between 1 and 4094"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, err := ParseRun(tt.args); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ParseRun(%#v) error = %v, want %q", tt.args, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseRunRejectsMacvlanFlagsWithoutLAN(t *testing.T) {
+	for _, args := range [][]string{
+		{"--macvlan-parent=vmbr0", "ghcr.io/example/app:latest"},
+		{"--net=svc", "--macvlan-vlan=4", "ghcr.io/example/app:latest"},
+		{"--net=ts", "--macvlan-mac=02:00:00:00:00:42", "ghcr.io/example/app:latest"},
+	} {
+		if _, _, err := ParseRun(args); err == nil || !strings.Contains(err.Error(), "--macvlan-* settings require LAN networking") {
+			t.Fatalf("ParseRun(%#v) error = %v, want LAN requirement", args, err)
+		}
 	}
 }
 
@@ -456,6 +510,11 @@ func TestParseVMSetFlags(t *testing.T) {
 		{name: "missing change", args: []string{"devbox"}, wantErr: "vm set requires settings to change"},
 		{name: "negative cpus", args: []string{"devbox", "--cpus=-1"}, wantErr: "VM CPU count must be positive"},
 		{name: "negative vlan", args: []string{"devbox", "--macvlan-vlan=-1"}, wantErr: "--macvlan-vlan must not be negative"},
+		{name: "too large vlan", args: []string{"devbox", "--macvlan-vlan=4095"}, wantErr: "--macvlan-vlan must be between 1 and 4094"},
+		{name: "empty net inline", args: []string{"devbox", "--net="}, wantErr: "--net must not be empty"},
+		{name: "empty net separate", args: []string{"devbox", "--net", ""}, wantErr: "--net must not be empty"},
+		{name: "missing net value", args: []string{"devbox", "--net", "--cpus=2"}, wantErr: "--net must not be empty"},
+		{name: "empty net component", args: []string{"devbox", "--net=svc,"}, wantErr: "--net must not contain empty network modes"},
 	}
 
 	for _, tt := range tests {
@@ -1269,6 +1328,59 @@ func TestParseStageDefaultSubcommandAndExtraArgs(t *testing.T) {
 	}
 	if got := strings.Join(args, " "); got != "svc payload --payload-arg" {
 		t.Fatalf("args = %q, want svc payload --payload-arg", got)
+	}
+}
+
+func TestParseStageRejectsEmptyNetFlag(t *testing.T) {
+	for _, args := range [][]string{
+		{"--net=", "svc", "payload"},
+		{"--net", "", "svc", "payload"},
+		{"--net", "--pull", "svc", "payload"},
+	} {
+		if _, _, _, err := ParseStage(args); err == nil || !strings.Contains(err.Error(), "--net must not be empty") {
+			t.Fatalf("ParseStage(%#v) error = %v, want empty --net error", args, err)
+		}
+	}
+}
+
+func TestParseStageRejectsEmptyNetComponents(t *testing.T) {
+	for _, args := range [][]string{
+		{"--net=,", "svc", "payload"},
+		{"--net=svc,", "svc", "payload"},
+		{"--net=svc,,lan", "svc", "payload"},
+	} {
+		if _, _, _, err := ParseStage(args); err == nil || !strings.Contains(err.Error(), "--net must not contain empty network modes") {
+			t.Fatalf("ParseStage(%#v) error = %v, want empty mode error", args, err)
+		}
+	}
+}
+
+func TestParseStageRejectsInvalidMacvlanVLANFlag(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{name: "negative", args: []string{"--macvlan-vlan=-1", "svc", "payload"}, wantErr: "--macvlan-vlan must not be negative"},
+		{name: "too large", args: []string{"--macvlan-vlan=4095", "svc", "payload"}, wantErr: "--macvlan-vlan must be between 1 and 4094"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, _, _, err := ParseStage(tt.args); err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("ParseStage(%#v) error = %v, want %q", tt.args, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestParseStageRejectsMacvlanFlagsWithoutLAN(t *testing.T) {
+	for _, args := range [][]string{
+		{"--macvlan-parent=vmbr0", "svc", "payload"},
+		{"--net=svc", "--macvlan-vlan=4", "svc", "payload"},
+		{"--net=ts", "--macvlan-mac=02:00:00:00:00:42", "svc", "payload"},
+	} {
+		if _, _, _, err := ParseStage(args); err == nil || !strings.Contains(err.Error(), "--macvlan-* settings require LAN networking") {
+			t.Fatalf("ParseStage(%#v) error = %v, want LAN requirement", args, err)
+		}
 	}
 }
 

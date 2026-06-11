@@ -136,3 +136,24 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		t.Fatal("index still contains native input list attribute")
 	}
 }
+
+func TestWebRunAssetsRecognizeAllVMPayloads(t *testing.T) {
+	index, err := fs.ReadFile(webRunAssets, "web_run_assets/index.html")
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
+	if err != nil {
+		t.Fatalf("read app: %v", err)
+	}
+
+	if !strings.Contains(string(app), `payload.trim().startsWith("vm://")`) {
+		t.Fatal("web run VM detection must recognize all vm:// catalog payloads")
+	}
+	if strings.Contains(string(app), `payload.trim() === "vm://ubuntu/26.04"`) {
+		t.Fatal("web run VM detection is still hard-coded to Ubuntu")
+	}
+	if !strings.Contains(string(index), "vm:// payloads") {
+		t.Fatal("VM settings help copy should describe all vm:// payloads")
+	}
+}

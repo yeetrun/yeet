@@ -186,6 +186,56 @@ func TestRunVMRejectsMacvlanFlagsWithoutLANBeforeImageSelection(t *testing.T) {
 	assertNoReadyVM(t, server, "svc")
 }
 
+func TestValidateVMNetworkOptionsRejectsDuplicateModesAndInvalidVLANs(t *testing.T) {
+	tests := []struct {
+		name    string
+		modes   []string
+		vlan    int
+		wantErr string
+	}{
+		{
+			name:    "duplicate svc",
+			modes:   []string{"svc,svc"},
+			wantErr: `duplicate VM network mode "svc"`,
+		},
+		{
+			name:    "duplicate lan",
+			modes:   []string{"svc,lan,lan"},
+			wantErr: `duplicate VM network mode "lan"`,
+		},
+		{
+			name:    "empty mode list",
+			modes:   []string{","},
+			wantErr: "VM network mode must not be empty",
+		},
+		{
+			name:    "trailing empty mode",
+			modes:   []string{"svc,"},
+			wantErr: "VM network mode must not be empty",
+		},
+		{
+			name:    "negative vlan",
+			modes:   []string{"lan"},
+			vlan:    -1,
+			wantErr: "--macvlan-vlan must be between 1 and 4094",
+		},
+		{
+			name:    "too large vlan",
+			modes:   []string{"lan"},
+			vlan:    4095,
+			wantErr: "--macvlan-vlan must be between 1 and 4094",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateVMNetworkOptions(tt.modes, "", tt.vlan, "")
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateVMNetworkOptions error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
