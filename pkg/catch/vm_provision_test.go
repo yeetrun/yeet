@@ -23,7 +23,7 @@ import (
 
 func TestRunVMStagesDBAfterArtifacts(t *testing.T) {
 	server := newTestServer(t)
-	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
 	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
 		return vmImageAsset{}, fmt.Errorf("image manifest missing kernel")
 	}
@@ -33,6 +33,9 @@ func TestRunVMStagesDBAfterArtifacts(t *testing.T) {
 		t.Fatalf("runVM error = %v, want image manifest failure", err)
 	}
 	assertNoReadyVM(t, server, "svc")
+	if _, statErr := os.Stat(serviceRoot); !os.IsNotExist(statErr) {
+		t.Fatalf("service root stat after failed VM inputs = %v, want not exists", statErr)
+	}
 }
 
 func TestRunVMDoesNotCommitReadyOnArtifactFailure(t *testing.T) {
