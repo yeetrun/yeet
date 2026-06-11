@@ -572,6 +572,9 @@ func (e *ttyExecer) cleanupFailedNewVMProvisionRoot(root resolvedServiceRoot) er
 		return nil
 	}
 	if root.ZFS && root.Dataset != "" {
+		if !root.Created {
+			return nil
+		}
 		return e.s.destroyServiceRootZFS(root.Dataset)
 	}
 	return cleanupFailedVMFilesystemRoot(root.Root, root.Created)
