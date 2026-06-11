@@ -718,6 +718,18 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 	if hasMissingSnapshotMode(parseArgs) {
 		return RunFlags{}, nil, fmt.Errorf("--snapshots must be on, off, or inherit")
 	}
+	if hasFlagWithoutValue(parseArgs, "--net") {
+		return RunFlags{}, nil, fmt.Errorf("--net must not be empty")
+	}
+	if err := validateNetworkModesNotEmpty(parsed.Flags.Net); err != nil {
+		return RunFlags{}, nil, err
+	}
+	if err := validateMacvlanVLAN(parsed.Flags.MacvlanVlan); err != nil {
+		return RunFlags{}, nil, err
+	}
+	if err := validateMacvlanLANRequirement(parsed.Flags.Net, parsed.Flags.MacvlanParent, parsed.Flags.MacvlanVlan, parsed.Flags.MacvlanMac); err != nil {
+		return RunFlags{}, nil, err
+	}
 	snapshotMode, err := normalizeSnapshotMode(parsed.Flags.Snapshots)
 	if err != nil {
 		return RunFlags{}, nil, err
@@ -899,6 +911,9 @@ func ParseVMSet(args []string) (VMSetFlags, []string, error) {
 	if err := validateVMSetFlags(flags); err != nil {
 		return VMSetFlags{}, nil, err
 	}
+	if hasFlagWithoutValue(parseArgs, "--net") {
+		return VMSetFlags{}, nil, fmt.Errorf("--net must not be empty")
+	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
 }
@@ -907,13 +922,58 @@ func validateVMSetFlags(flags VMSetFlags) error {
 	if flags.CPUs < 0 {
 		return fmt.Errorf("VM CPU count must be positive")
 	}
-	if flags.MacvlanVlan < 0 {
-		return fmt.Errorf("--macvlan-vlan must not be negative")
+	if err := validateNetworkModesNotEmpty(flags.Net); err != nil {
+		return err
+	}
+	if err := validateMacvlanVLAN(flags.MacvlanVlan); err != nil {
+		return err
 	}
 	if !hasVMSetChange(flags) {
 		return fmt.Errorf("vm set requires settings to change")
 	}
 	return nil
+}
+
+func validateMacvlanVLAN(vlan int) error {
+	if vlan < 0 {
+		return fmt.Errorf("--macvlan-vlan must not be negative")
+	}
+	if vlan > 4094 {
+		return fmt.Errorf("--macvlan-vlan must be between 1 and 4094")
+	}
+	return nil
+}
+
+func validateNetworkModesNotEmpty(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	for _, part := range strings.Split(raw, ",") {
+		if strings.TrimSpace(part) == "" {
+			return fmt.Errorf("--net must not contain empty network modes")
+		}
+	}
+	return nil
+}
+
+func validateMacvlanLANRequirement(net string, parent string, vlan int, mac string) error {
+	if !macvlanFlagsSet(parent, vlan, mac) || networkModeSet(net, "lan") {
+		return nil
+	}
+	return fmt.Errorf("--macvlan-* settings require LAN networking; use --net=lan or --net=svc,lan")
+}
+
+func macvlanFlagsSet(parent string, vlan int, mac string) bool {
+	return strings.TrimSpace(parent) != "" || vlan != 0 || strings.TrimSpace(mac) != ""
+}
+
+func networkModeSet(raw string, want string) bool {
+	for _, part := range strings.Split(raw, ",") {
+		if strings.TrimSpace(part) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func hasVMSetChange(flags VMSetFlags) bool {
@@ -1104,6 +1164,18 @@ func ParseStage(args []string) (StageFlags, string, []string, error) {
 	parseArgs, extraArgs := splitArgsForParsing(args, specs)
 	parsed, err := parseFlags[stageFlagsParsed](parseArgs)
 	if err != nil {
+		return StageFlags{}, "", nil, err
+	}
+	if hasFlagWithoutValue(parseArgs, "--net") {
+		return StageFlags{}, "", nil, fmt.Errorf("--net must not be empty")
+	}
+	if err := validateNetworkModesNotEmpty(parsed.Flags.Net); err != nil {
+		return StageFlags{}, "", nil, err
+	}
+	if err := validateMacvlanVLAN(parsed.Flags.MacvlanVlan); err != nil {
+		return StageFlags{}, "", nil, err
+	}
+	if err := validateMacvlanLANRequirement(parsed.Flags.Net, parsed.Flags.MacvlanParent, parsed.Flags.MacvlanVlan, parsed.Flags.MacvlanMac); err != nil {
 		return StageFlags{}, "", nil, err
 	}
 

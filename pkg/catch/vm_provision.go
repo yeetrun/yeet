@@ -1081,19 +1081,40 @@ func (e *ttyExecer) vmNetworkPlanFromFlags(flags cli.RunFlags, svcNet *db.SvcNet
 }
 
 func validateVMNetworkModes(modes []string) error {
-	for _, mode := range vmNetworkModes(modes) {
-		switch mode {
-		case "svc", "lan":
-		default:
-			return fmt.Errorf("unsupported VM network mode %q; supported modes: svc, lan", mode)
+	seen := map[string]bool{}
+	for _, raw := range modes {
+		for _, part := range strings.Split(raw, ",") {
+			mode := strings.TrimSpace(part)
+			if mode == "" {
+				return fmt.Errorf("VM network mode must not be empty; supported modes: svc, lan")
+			}
+			if err := validateVMNetworkMode(mode, seen); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
+}
+
+func validateVMNetworkMode(mode string, seen map[string]bool) error {
+	switch mode {
+	case "svc", "lan":
+	default:
+		return fmt.Errorf("unsupported VM network mode %q; supported modes: svc, lan", mode)
+	}
+	if seen[mode] {
+		return fmt.Errorf("duplicate VM network mode %q; supported modes: svc, lan", mode)
+	}
+	seen[mode] = true
 	return nil
 }
 
 func validateVMNetworkOptions(modes []string, macvlanParent string, macvlanVLAN int, macvlanMAC string) error {
 	if err := validateVMNetworkModes(modes); err != nil {
 		return err
+	}
+	if macvlanVLAN < 0 || macvlanVLAN > 4094 {
+		return fmt.Errorf("--macvlan-vlan must be between 1 and 4094")
 	}
 	if !vmMacvlanOptionsSet(macvlanParent, macvlanVLAN, macvlanMAC) || vmModeListContains(modes, "lan") {
 		return nil

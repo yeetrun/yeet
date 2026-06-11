@@ -108,9 +108,41 @@ func validateRunDraftNetwork(draft *RunDraft, result *RunDraftValidationResult) 
 	draft.Network.MacvlanMAC = strings.TrimSpace(draft.Network.MacvlanMAC)
 	draft.Network.MacvlanParent = strings.TrimSpace(draft.Network.MacvlanParent)
 	draft.Network.Publish = trimNonEmptyStrings(draft.Network.Publish)
+	validateRunDraftMacvlanVLAN(draft.Network.MacvlanVLAN, result)
+	validateRunDraftMacvlanLAN(draft.Network, result)
 	if draft.PayloadKind == serviceTypeVM {
 		validateRunDraftVMNetworkModes(draft.Network.Modes, result)
 	}
+}
+
+func validateRunDraftMacvlanVLAN(vlan int, result *RunDraftValidationResult) {
+	if vlan < 0 {
+		result.addError("network.macvlanVlan", "--macvlan-vlan must not be negative")
+		return
+	}
+	if vlan > 4094 {
+		result.addError("network.macvlanVlan", "--macvlan-vlan must be between 1 and 4094")
+	}
+}
+
+func validateRunDraftMacvlanLAN(network RunDraftNetwork, result *RunDraftValidationResult) {
+	if !runDraftMacvlanFieldsSet(network) || runDraftNetworkModeSet(network.Modes, "lan") {
+		return
+	}
+	result.addError("network.modes", "--macvlan-* settings require LAN networking; use --net=lan or --net=svc,lan")
+}
+
+func runDraftMacvlanFieldsSet(network RunDraftNetwork) bool {
+	return strings.TrimSpace(network.MacvlanParent) != "" || network.MacvlanVLAN != 0 || strings.TrimSpace(network.MacvlanMAC) != ""
+}
+
+func runDraftNetworkModeSet(modes []string, want string) bool {
+	for _, mode := range modes {
+		if strings.TrimSpace(mode) == want {
+			return true
+		}
+	}
+	return false
 }
 
 func validateRunDraftVMNetworkModes(modes []string, result *RunDraftValidationResult) {

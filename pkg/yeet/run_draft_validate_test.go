@@ -96,6 +96,65 @@ func TestValidateRunDraftRejectsUnsupportedNetworkModes(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftRejectsInvalidMacvlanVLAN(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		vlan    int
+		wantErr string
+	}{
+		{name: "negative", vlan: -1, wantErr: "--macvlan-vlan must not be negative"},
+		{name: "too large", vlan: 4095, wantErr: "--macvlan-vlan must be between 1 and 4094"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			draft := RunDraft{
+				Service: "svc-a",
+				Host:    "host-a",
+				Payload: "ghcr.io/example/app:latest",
+				Network: RunDraftNetwork{
+					Modes:       []string{"lan"},
+					MacvlanVLAN: tt.vlan,
+				},
+			}
+			_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+			if validation.OK {
+				t.Fatal("validation OK = true, want false")
+			}
+			if got := validation.fieldError("network.macvlanVlan"); !strings.Contains(got, tt.wantErr) {
+				t.Fatalf("network.macvlanVlan error = %q, want %q", got, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateRunDraftRejectsMacvlanFieldsWithoutLAN(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		network RunDraftNetwork
+	}{
+		{name: "parent", network: RunDraftNetwork{Modes: []string{"svc"}, MacvlanParent: "vmbr0"}},
+		{name: "vlan", network: RunDraftNetwork{Modes: []string{"ts"}, MacvlanVLAN: 4}},
+		{name: "mac", network: RunDraftNetwork{MacvlanMAC: "02:00:00:00:00:42"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			draft := RunDraft{
+				Service: "svc-a",
+				Host:    "host-a",
+				Payload: "ghcr.io/example/app:latest",
+				Network: tt.network,
+			}
+			_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+			if validation.OK {
+				t.Fatal("validation OK = true, want false")
+			}
+			if got := validation.fieldError("network.modes"); !strings.Contains(got, "--macvlan-* settings require LAN networking") {
+				t.Fatalf("network.modes error = %q, want LAN requirement", got)
+			}
+		})
+	}
+}
+
 func TestValidateRunDraftNormalizesNetworkFields(t *testing.T) {
 	draft := RunDraft{
 		Service: "svc-a",
