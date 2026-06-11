@@ -716,6 +716,9 @@ func (m vmImageManifest) validate() error {
 	if err := validateVMImageCacheDirName(m.Version); err != nil {
 		return err
 	}
+	if err := m.validateRuntimeMetadata(); err != nil {
+		return err
+	}
 	return m.validateArtifactChecksums()
 }
 
@@ -751,6 +754,21 @@ func (m vmImageManifest) validateArtifactChecksums() error {
 		if _, err := hex.DecodeString(checksum); err != nil {
 			return fmt.Errorf("VM image manifest checksum for %q is invalid: %w", artifactName, err)
 		}
+	}
+	return nil
+}
+
+func (m vmImageManifest) validateRuntimeMetadata() error {
+	if user := strings.TrimSpace(m.DefaultUser); user != "" && !vmUserPattern.MatchString(user) {
+		return fmt.Errorf("VM image manifest default_user %q is invalid", m.DefaultUser)
+	}
+	switch strings.TrimSpace(m.MetadataDriver) {
+	case "", "ubuntu", "nixos":
+	default:
+		return fmt.Errorf("VM image manifest metadata_driver %q is unsupported", m.MetadataDriver)
+	}
+	if err := validateVMGuestSystemInit(m.GuestSystemInit); err != nil {
+		return fmt.Errorf("VM image manifest guest_system_init: %w", err)
 	}
 	return nil
 }
