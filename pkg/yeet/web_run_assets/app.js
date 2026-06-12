@@ -18,6 +18,7 @@ const state = {
   deployEvents: null,
   terminal: null,
   workload: "",
+  workloadOverride: "",
   networkSelections: {},
 };
 
@@ -149,7 +150,7 @@ const workloadDefinitions = {
 };
 
 function selectedWorkload() {
-  return document.querySelector("input[name='workload']:checked")?.value || "compose";
+  return state.workloadOverride || document.querySelector("input[name='workload']:checked")?.value || "compose";
 }
 
 function workloadDefinition(workload = selectedWorkload()) {
@@ -189,10 +190,15 @@ function inferWorkloadForPayload(payload) {
 }
 
 function looksLikeRemoteImageReference(payload) {
-  return !payload.includes("\\") && (
-    payload.includes("@sha256:") ||
-    payload.includes(":")
-  );
+  if (payload.includes("\\") || /\s/.test(payload)) return false;
+  if (payload.startsWith("http://") || payload.startsWith("https://")) return false;
+  if (payload.includes("@")) {
+    const parts = payload.split("@", 2);
+    return Boolean(parts[0] && parts[1]);
+  }
+  const lastSlash = payload.lastIndexOf("/");
+  const lastColon = payload.lastIndexOf(":");
+  return lastColon > lastSlash && payload.slice(lastColon + 1) !== "";
 }
 
 function buildDraft() {
@@ -874,6 +880,12 @@ async function bootstrap() {
   $("payload").value = prefillPayload;
   renderVMCatalog(state.bootstrap.options?.vmImages || []);
   const inferredWorkload = inferWorkloadForPayload(prefillPayload);
+  state.workloadOverride = inferredWorkload === "auto" ? "auto" : "";
+  if (state.workloadOverride) {
+    document.querySelectorAll("input[name='workload']").forEach((input) => {
+      input.checked = false;
+    });
+  }
   const workloadInput = document.querySelector(`input[name='workload'][value='${inferredWorkload}']`);
   if (workloadInput) workloadInput.checked = true;
   if (inferredWorkload === "vm") {
@@ -1070,7 +1082,10 @@ document.addEventListener("input", (event) => {
   if (event.target.closest("#deployForm")) update();
 });
 document.querySelectorAll("input[name='workload']").forEach((input) => {
-  input.addEventListener("change", update);
+  input.addEventListener("change", () => {
+    state.workloadOverride = "";
+    update();
+  });
 });
 $("deployForm").addEventListener("submit", deploy);
 $("upButton").addEventListener("click", () => loadFiles(parentDir(state.currentDir)));
