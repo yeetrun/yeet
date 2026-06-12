@@ -46,8 +46,23 @@ type runWebPrefill struct {
 }
 
 type runWebOptionHints struct {
-	NetworkModes  []string `json:"networkModes"`
-	SnapshotModes []string `json:"snapshotModes"`
+	NetworkModes  []string             `json:"networkModes"`
+	SnapshotModes []string             `json:"snapshotModes"`
+	Workloads     []runWebWorkloadHint `json:"workloads"`
+	VMImages      []runWebVMImageHint  `json:"vmImages"`
+}
+
+type runWebWorkloadHint struct {
+	Kind        string   `json:"kind"`
+	Label       string   `json:"label"`
+	PayloadKind string   `json:"payloadKind,omitempty"`
+	Networks    []string `json:"networks,omitempty"`
+	Description string   `json:"description,omitempty"`
+}
+
+type runWebVMImageHint struct {
+	Payload string `json:"payload"`
+	Label   string `json:"label"`
 }
 
 var openBrowserFn = openBrowser
@@ -91,15 +106,31 @@ func newRunWebBootstrap(cfg *projectConfigLocation, hostOverride string, service
 		Hosts:        runWebHostCandidates(cfg, hostOverride),
 		SelectedHost: runWebSelectedHost(cfg, hostOverride),
 		Prefill:      runWebPrefillFromArgs(service, args),
-		Options: runWebOptionHints{
-			NetworkModes:  []string{"svc", "ts", "lan"},
-			SnapshotModes: []string{"inherit", "on", "off"},
-		},
+		Options:      defaultRunWebOptionHints(),
 	}
 	if cfg != nil {
 		boot.ConfigPath = cfg.Path
 	}
 	return boot
+}
+
+func defaultRunWebOptionHints() runWebOptionHints {
+	return runWebOptionHints{
+		NetworkModes:  []string{"svc", "ts", "lan"},
+		SnapshotModes: []string{"inherit", "on", "off"},
+		Workloads: []runWebWorkloadHint{
+			{Kind: "compose", Label: "Compose app", PayloadKind: "compose", Networks: []string{"host", "svc", "ts", "lan"}, Description: "Deploy a Docker Compose file."},
+			{Kind: "vm", Label: "Virtual machine", PayloadKind: serviceTypeVM, Networks: []string{"svc", "lan"}, Description: "Create a VM from a managed catalog image."},
+			{Kind: "dockerfile", Label: "Dockerfile", PayloadKind: "dockerfile", Networks: []string{"host", "svc", "ts", "lan"}, Description: "Build and deploy a Dockerfile."},
+			{Kind: "remote-image", Label: "Container image", PayloadKind: "remote-image", Networks: []string{"host", "svc", "ts", "lan"}, Description: "Deploy an image reference."},
+			{Kind: "file", Label: "Binary/script", PayloadKind: "file", Networks: []string{"host", "svc", "ts", "lan"}, Description: "Upload and run a binary or script."},
+			{Kind: serviceTypeCron, Label: "Scheduled job", PayloadKind: serviceTypeCron, Networks: []string{"host"}, Description: "Install a cron-style systemd timer."},
+		},
+		VMImages: []runWebVMImageHint{
+			{Payload: "vm://ubuntu/26.04", Label: "Ubuntu 26.04"},
+			{Payload: "vm://nixos/26.05", Label: "NixOS 26.05"},
+		},
+	}
 }
 
 func runWebSelectedHost(cfg *projectConfigLocation, hostOverride string) string {
