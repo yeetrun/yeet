@@ -165,6 +165,10 @@ function defaultNetworkModesForWorkload(workload) {
   return [...workloadDefinition(workload).defaultModes];
 }
 
+function payloadPickerEnabledForWorkload(workload) {
+  return workload !== "vm" && workload !== "remote-image";
+}
+
 function sourcePayloadForWorkload(workload) {
   if (workload === "vm") {
     const manual = $("manualVMSource").value.trim();
@@ -371,9 +375,15 @@ function syncWorkloadUI() {
   $("payloadLabel").querySelector(".help").dataset.help = def.payloadHelp;
   $("payload").placeholder = def.placeholder;
   $("payload").closest("label").hidden = isVM;
+  const payloadPickerEnabled = payloadPickerEnabledForWorkload(workload);
+  $("payloadPicker").hidden = !payloadPickerEnabled;
+  if (payloadPickerEnabled) $("payload").setAttribute("aria-haspopup", "listbox");
+  else $("payload").removeAttribute("aria-haspopup");
+  if (!payloadPickerEnabled && state.activePicker === "payload") hidePicker();
   $("vmCatalogBlock").hidden = !isVM;
   $("cronScheduleField").hidden = !isCron;
   $("envFile").closest("label").hidden = isVM || isCron;
+  if ((isVM || isCron) && state.activePicker === "envFile") hidePicker();
   $("publish").closest("label").hidden = isVM || isCron;
   $("serviceRoot").disabled = isCron;
   $("zfs").disabled = isCron;
