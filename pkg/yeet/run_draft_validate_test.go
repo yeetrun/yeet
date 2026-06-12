@@ -307,6 +307,49 @@ func TestValidateRunDraftCronRejectsRunOnlyFields(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftCronRejectsRunOnlyNetworkFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		network RunDraftNetwork
+		field   string
+	}{
+		{
+			name:    "publish",
+			network: RunDraftNetwork{Publish: []string{"8080:80"}},
+			field:   "network.publish",
+		},
+		{
+			name:    "tailscale auth key",
+			network: RunDraftNetwork{TSAuthKey: "tskey-secret"},
+			field:   "network.tsAuthKey",
+		},
+		{
+			name:    "macvlan parent",
+			network: RunDraftNetwork{MacvlanParent: "vmbr0"},
+			field:   "network.macvlanParent",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, validation := validateRunDraft(context.Background(), RunDraft{
+				Service:     "backup",
+				Host:        "yeet-pve1",
+				Payload:     "job.sh",
+				PayloadKind: serviceTypeCron,
+				Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+				Network:     tt.network,
+			}, t.TempDir())
+			got := validation.fieldError(tt.field)
+			if !strings.Contains(got, "network settings are not supported for scheduled jobs during web deploy") {
+				t.Fatalf("%s error = %q, want cron network rejection", tt.field, got)
+			}
+			if generic := validation.fieldError("network.modes"); strings.Contains(generic, "--macvlan-* settings require LAN networking") {
+				t.Fatalf("network.modes error = %q, want no generic macvlan validation error", generic)
+			}
+		})
+	}
+}
+
 func TestValidateRunDraftCronRejectsZFSWithoutMissingDatasetError(t *testing.T) {
 	_, validation := validateRunDraft(context.Background(), RunDraft{
 		Service:     "backup",
