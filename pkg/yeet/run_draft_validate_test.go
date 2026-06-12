@@ -326,6 +326,26 @@ func TestValidateRunDraftCronRejectsEnvFile(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftCronRejectsMissingEnvFileBeforePathCheck(t *testing.T) {
+	_, validation := validateRunDraft(context.Background(), RunDraft{
+		Service:     "backup",
+		Host:        "yeet-pve1",
+		Payload:     "job.sh",
+		PayloadKind: serviceTypeCron,
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+		EnvFile:     "missing.env",
+	}, t.TempDir())
+	if len(validation.Errors) == 0 {
+		t.Fatal("validation errors = nil, want cron env file rejection")
+	}
+	if got := validation.Errors[0]; got.Field != "envFile" || !strings.Contains(got.Message, "env file is not supported for scheduled jobs during web deploy") {
+		t.Fatalf("first error = %#v, want cron env file rejection", got)
+	}
+	if got := validation.fieldError("envFile"); strings.Contains(got, "does not exist") {
+		t.Fatalf("envFile error = %q, want no path existence error", got)
+	}
+}
+
 func TestValidateRunDraftCronRejectsRunOnlyNetworkFields(t *testing.T) {
 	tests := []struct {
 		name    string

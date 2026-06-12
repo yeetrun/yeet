@@ -76,9 +76,9 @@ func validateRunDraftLocal(draft RunDraft, cwd string) (RunDraft, RunDraftValida
 
 	draft = trimRunDraftFields(draft)
 	validateRunDraftRequired(draft, &result)
+	validateRunDraftCron(&draft, &result)
 	validateRunDraftPaths(cwd, &draft, &result)
 	validateRunDraftVM(&draft, &result)
-	validateRunDraftCron(&draft, &result)
 	if draft.PayloadKind == serviceTypeCron {
 		return draft, result
 	}
