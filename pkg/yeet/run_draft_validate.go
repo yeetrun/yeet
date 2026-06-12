@@ -264,7 +264,7 @@ func validateRunDraftPaths(cwd string, draft *RunDraft, result *RunDraftValidati
 		}
 	}
 
-	if draft.EnvFile != "" {
+	if draft.EnvFile != "" && draft.PayloadKind != serviceTypeCron {
 		envFile, err := normalizeExistingRunDraftPath(cwd, draft.EnvFile)
 		if err != nil {
 			result.addError("envFile", "%v", err)
@@ -299,18 +299,32 @@ func validateRunDraftCron(draft *RunDraft, result *RunDraftValidationResult) {
 		}
 		return
 	}
+	validateRunDraftCronSchedule(draft, result)
+	validateRunDraftCronUnsupportedFields(*draft, result)
+}
+
+func validateRunDraftCronSchedule(draft *RunDraft, result *RunDraftValidationResult) {
 	fields, err := parseCronSchedule(draft.Cron.Schedule)
 	if err != nil {
 		result.addError("cron.schedule", "%v", err)
 	} else {
 		draft.Cron.Schedule = strings.Join(fields, " ")
 	}
+}
+
+func validateRunDraftCronUnsupportedFields(draft RunDraft, result *RunDraftValidationResult) {
 	if len(trimNonEmptyStrings(draft.Network.Modes)) != 0 {
 		result.addError("network.modes", "network modes are not supported for scheduled jobs during web deploy")
 	}
 	validateRunDraftCronNetworkFields(draft.Network, result)
 	if strings.TrimSpace(draft.EnvFile) != "" {
 		result.addError("envFile", "env file is not supported for scheduled jobs during web deploy")
+	}
+	if draft.Pull {
+		result.addError("pull", "pull is not supported for scheduled jobs during web deploy")
+	}
+	if draft.ForceDeploy {
+		result.addError("forceDeploy", "force deploy is not supported for scheduled jobs during web deploy")
 	}
 	if draft.Storage.ServiceRoot != "" || draft.Storage.ZFS {
 		result.addError("serviceRoot", "service root is not supported for scheduled jobs during web deploy")
