@@ -32,6 +32,10 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read app: %v", err)
 	}
+	styles, err := fs.ReadFile(webRunAssets, "web_run_assets/styles.css")
+	if err != nil {
+		t.Fatalf("read styles: %v", err)
+	}
 
 	for _, id := range []string{
 		`id="hostDefault"`,
@@ -70,6 +74,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`id="envFilePicker"`,
 		`id="filePicker"`,
 		`id="deploySettingsTitle"`,
+		`class="deploy-settings-grid"`,
 		`id="storageModeLabel"`,
 		`id="zfsHelp"`,
 		`<summary>Tailscale settings`,
@@ -171,6 +176,18 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	}
 	if regexp.MustCompile(`\slist\s*=`).Match(index) {
 		t.Fatal("index still contains native input list attribute")
+	}
+	for _, snippet := range []string{
+		".workload-selector",
+		".workload-option",
+		".source-head",
+		".catalog-block",
+		".subsection-label",
+		".deploy-settings-grid",
+	} {
+		if !strings.Contains(string(styles), snippet) {
+			t.Fatalf("styles missing %s", snippet)
+		}
 	}
 }
 

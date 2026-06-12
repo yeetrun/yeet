@@ -506,6 +506,76 @@ legend {
   grid-template-columns: minmax(120px, 0.42fr) minmax(0, 1fr);
 }
 
+.workload-selector {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 14px 0;
+  padding: 12px;
+}
+
+.workload-option {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: oklch(0.15 0.012 165);
+}
+
+.workload-option:has(input:checked) {
+  border-color: var(--brand);
+  background: color-mix(in oklch, var(--brand) 14%, var(--surface));
+}
+
+.workload-option input {
+  width: 16px;
+  min-height: 16px;
+}
+
+.source-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.source-head h2 {
+  font-size: 16px;
+}
+
+.source-head span {
+  color: var(--quiet);
+  font-size: 13px;
+  text-align: right;
+}
+
+.catalog-block {
+  margin: 12px 0;
+}
+
+.subsection-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 14px 0 4px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.deploy-settings-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
 .action-row {
   position: fixed;
   right: 0;
@@ -690,6 +760,10 @@ body[data-terminal-visible="true"] .shell {
   .root-control,
   .picker-field {
     grid-template-columns: 1fr;
+  }
+
+  .workload-selector {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .terminal-sheet {
