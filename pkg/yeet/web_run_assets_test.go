@@ -49,6 +49,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`id="sourceTitle"`,
 		`id="vmCatalog"`,
 		`id="manualVMSource"`,
+		`id="manualVMSourceError"`,
 		`id="cronSchedule"`,
 		`id="tsVersion"`,
 		`id="tsExitNode"`,

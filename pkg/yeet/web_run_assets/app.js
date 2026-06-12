@@ -744,6 +744,7 @@ const validationFieldIDs = {
 
 function validationFieldID(field) {
   if (field === "payload" && $("vmCatalogBlock") && !$("vmCatalogBlock").hidden) {
+    if ($("manualVMSource")?.value.trim()) return "manualVMSource";
     return "vmCatalog";
   }
   return validationFieldIDs[field];
