@@ -1015,7 +1015,14 @@ func handleSvcEvents(ctx context.Context, req svcCommandRequest) error {
 }
 
 func handleSvcRemote(ctx context.Context, req svcCommandRequest) error {
-	return execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, true)
+	return execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, svcRemoteUsesTTY(req.Command.RawArgs))
+}
+
+func svcRemoteUsesTTY(args []string) bool {
+	if len(args) > 0 && args[0] == "logs" {
+		return false
+	}
+	return true
 }
 
 func ensureRunPublishPortsRetained(entry ServiceEntry, args []string, payload string) error {
