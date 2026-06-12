@@ -47,6 +47,12 @@ type runWebServer struct {
 
 var executeRunDraftWithOptionsFn = executeRunDraftWithOptions
 
+type runWebValidateResponse struct {
+	Draft      RunDraft                 `json:"draft"`
+	Validation RunDraftValidationResult `json:"validation"`
+	Command    string                   `json:"command,omitempty"`
+}
+
 func newRunWebServer(cfg runWebServerConfig) http.Handler {
 	s := &runWebServer{cfg: cfg, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
@@ -146,7 +152,7 @@ func (s *runWebServer) handleValidate(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := runWebHandlerContext(s.cfg.Context, r.Context())
 	defer cancel()
 	normalized, result := validateRunDraft(ctx, draft, s.cfg.Root)
-	writeRunWebJSON(w, http.StatusOK, map[string]any{"draft": redactRunWebDraftSecrets(normalized), "validation": result})
+	writeRunWebJSON(w, http.StatusOK, runWebValidationResponse(normalized, result))
 }
 
 func (s *runWebServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
@@ -163,7 +169,7 @@ func (s *runWebServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	normalized, result := validateRunDraft(validateCtx, draft, s.cfg.Root)
 	if !result.OK {
-		writeRunWebJSON(w, http.StatusBadRequest, map[string]any{"draft": redactRunWebDraftSecrets(normalized), "validation": result})
+		writeRunWebJSON(w, http.StatusBadRequest, runWebValidationResponse(normalized, result))
 		return
 	}
 	job, status, message := s.startDeployJob(normalized)
@@ -172,6 +178,14 @@ func (s *runWebServer) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeRunWebJSON(w, http.StatusOK, map[string]any{"ok": true, "jobId": job.id})
+}
+
+func runWebValidationResponse(draft RunDraft, result RunDraftValidationResult) runWebValidateResponse {
+	return runWebValidateResponse{
+		Draft:      redactRunWebDraftSecrets(draft),
+		Validation: result,
+		Command:    runDraftCommandPreview(draft),
+	}
 }
 
 func (s *runWebServer) startDeployJob(draft RunDraft) (*runWebJob, int, string) {

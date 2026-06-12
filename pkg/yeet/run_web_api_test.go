@@ -235,6 +235,45 @@ func TestRunWebAPIRedactsTSAuthKeyInValidationResponses(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIValidateReturnsCommandPreview(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	defer func() { fetchRunDraftServiceInfoFn = oldInfo }()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+
+	root := t.TempDir()
+	payload := filepath.Join(root, "compose.yml")
+	if err := os.WriteFile(payload, []byte("services:\n  app:\n    image: nginx\n"), 0o644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root})
+	draft := RunDraft{
+		Service: "app",
+		Host:    "yeet-lab",
+		Payload: "compose.yml",
+		Network: RunDraftNetwork{
+			Modes: []string{"svc", "lan"},
+		},
+		Storage: RunDraftStorage{ServiceRoot: "tank/apps/app", ZFS: true},
+	}
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/validate", draft)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	for _, want := range []string{"yeet run app@yeet-lab", "--net=svc,lan", "--service-root=tank/apps/app", "--zfs"} {
+		if !strings.Contains(body.Command, want) {
+			t.Fatalf("command = %q, missing %q", body.Command, want)
+		}
+	}
+}
+
 func TestRunWebAPIValidateAndDeploy(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
 	oldExecDraft := executeRunDraftWithOptionsFn

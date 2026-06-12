@@ -359,6 +359,30 @@ func saveRunDraftExecutionConfig(cfgLoc *projectConfigLocation, host string, dra
 	return nil
 }
 
+func runDraftCommandPreview(draft RunDraft) string {
+	parts := []string{"yeet", "run"}
+	if target := runDraftCommandTarget(draft); target != "" {
+		parts = append(parts, target)
+	}
+	if strings.TrimSpace(draft.Payload) != "" {
+		parts = append(parts, draft.Payload)
+	}
+	parts = append(parts, runArgsWithSensitiveRunOptionsHidden(draft.runArgs())...)
+	return shellJoin(parts)
+}
+
+func runDraftCommandTarget(draft RunDraft) string {
+	service := strings.TrimSpace(draft.Service)
+	host := strings.TrimSpace(draft.Host)
+	if service == "" {
+		return ""
+	}
+	if host == "" || strings.Contains(service, "@") {
+		return service
+	}
+	return service + "@" + host
+}
+
 func runArgsWithoutSensitiveRunOptions(args []string) []string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -374,6 +398,30 @@ func runArgsWithoutSensitiveRunOptions(args []string) []string {
 			continue
 		}
 		if strings.HasPrefix(arg, "--ts-auth-key=") {
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
+}
+
+func runArgsWithSensitiveRunOptionsHidden(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			out = append(out, args[i:]...)
+			return out
+		}
+		if arg == "--ts-auth-key" {
+			out = append(out, "--ts-auth-key=<hidden>")
+			if i+1 < len(args) {
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--ts-auth-key=") {
+			out = append(out, "--ts-auth-key=<hidden>")
 			continue
 		}
 		out = append(out, arg)
