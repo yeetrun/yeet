@@ -309,6 +309,9 @@ func validateRunDraftCron(draft *RunDraft, result *RunDraftValidationResult) {
 		result.addError("network.modes", "network modes are not supported for scheduled jobs during web deploy")
 	}
 	validateRunDraftCronNetworkFields(draft.Network, result)
+	if strings.TrimSpace(draft.EnvFile) != "" {
+		result.addError("envFile", "env file is not supported for scheduled jobs during web deploy")
+	}
 	if draft.Storage.ServiceRoot != "" || draft.Storage.ZFS {
 		result.addError("serviceRoot", "service root is not supported for scheduled jobs during web deploy")
 	}

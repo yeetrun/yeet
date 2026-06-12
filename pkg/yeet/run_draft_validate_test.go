@@ -307,6 +307,25 @@ func TestValidateRunDraftCronRejectsRunOnlyFields(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftCronRejectsEnvFile(t *testing.T) {
+	tmp := t.TempDir()
+	envFile := filepath.Join(tmp, ".env")
+	if err := os.WriteFile(envFile, []byte("BACKUP=true\n"), 0o644); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	_, validation := validateRunDraft(context.Background(), RunDraft{
+		Service:     "backup",
+		Host:        "yeet-lab",
+		Payload:     "job.sh",
+		PayloadKind: serviceTypeCron,
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+		EnvFile:     ".env",
+	}, tmp)
+	if got := validation.fieldError("envFile"); !strings.Contains(got, "env file is not supported for scheduled jobs during web deploy") {
+		t.Fatalf("envFile error = %q, want cron env file rejection", got)
+	}
+}
+
 func TestValidateRunDraftCronRejectsRunOnlyNetworkFields(t *testing.T) {
 	tests := []struct {
 		name    string
