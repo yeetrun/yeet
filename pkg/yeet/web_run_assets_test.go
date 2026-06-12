@@ -120,6 +120,18 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		}
 	}
 	for _, snippet := range []string{
+		"const workloadDefinitions =",
+		"function selectedWorkload()",
+		"function syncWorkloadUI()",
+		"function workloadPayloadKind(workload)",
+		"function sourcePayloadForWorkload(workload)",
+		"function defaultNetworkModesForWorkload(workload)",
+		"function renderVMCatalog(images)",
+		"data.command",
+		"cron: {",
+		"schedule:",
+		"manualVMSource",
+		"vmCatalog",
 		"syncNetworkUI",
 		"validationFieldID",
 		`"cron.schedule": "cronSchedule"`,

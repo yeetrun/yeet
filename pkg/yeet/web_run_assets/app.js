@@ -17,6 +17,8 @@ const state = {
   deployJobId: "",
   deployEvents: null,
   terminal: null,
+  workload: "",
+  networkSelections: {},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -80,28 +82,115 @@ function splitArgs(raw) {
   return args;
 }
 
+const workloadDefinitions = {
+  compose: {
+    payloadKind: "compose",
+    payloadLabel: "Compose file",
+    payloadHelp: "A compose.yml or docker-compose.yml file in this project.",
+    sourceHint: "Choose a Compose file.",
+    placeholder: "compose.yml",
+    networkModes: ["host", "svc", "ts", "lan"],
+    defaultModes: [],
+  },
+  vm: {
+    payloadKind: "vm",
+    payloadLabel: "VM image",
+    payloadHelp: "A managed catalog VM image, or a manual vm:// reference under advanced.",
+    sourceHint: "Choose a catalog image.",
+    placeholder: "vm://ubuntu/26.04",
+    networkModes: ["svc", "lan"],
+    defaultModes: ["svc"],
+  },
+  dockerfile: {
+    payloadKind: "dockerfile",
+    payloadLabel: "Dockerfile",
+    payloadHelp: "Dockerfile to build and deploy.",
+    sourceHint: "Choose a Dockerfile.",
+    placeholder: "Dockerfile",
+    networkModes: ["host", "svc", "ts", "lan"],
+    defaultModes: [],
+  },
+  "remote-image": {
+    payloadKind: "remote-image",
+    payloadLabel: "Image",
+    payloadHelp: "Container image reference such as ghcr.io/example/app:latest.",
+    sourceHint: "Enter an image reference.",
+    placeholder: "ghcr.io/example/app:latest",
+    networkModes: ["host", "svc", "ts", "lan"],
+    defaultModes: [],
+  },
+  file: {
+    payloadKind: "file",
+    payloadLabel: "Binary/script",
+    payloadHelp: "Local binary or script to upload and run.",
+    sourceHint: "Choose a local executable or script.",
+    placeholder: "./run.sh",
+    networkModes: ["host", "svc", "ts", "lan"],
+    defaultModes: [],
+  },
+  cron: {
+    payloadKind: "cron",
+    payloadLabel: "Job file",
+    payloadHelp: "Local binary or script to install as a scheduled job.",
+    sourceHint: "Choose a job file and schedule.",
+    placeholder: "./job.sh",
+    networkModes: ["host"],
+    defaultModes: [],
+  },
+};
+
+function selectedWorkload() {
+  return document.querySelector("input[name='workload']:checked")?.value || "compose";
+}
+
+function workloadDefinition(workload = selectedWorkload()) {
+  return workloadDefinitions[workload] || workloadDefinitions.compose;
+}
+
+function workloadPayloadKind(workload) {
+  return workloadDefinition(workload).payloadKind;
+}
+
+function defaultNetworkModesForWorkload(workload) {
+  return [...workloadDefinition(workload).defaultModes];
+}
+
+function sourcePayloadForWorkload(workload) {
+  if (workload === "vm") {
+    const manual = $("manualVMSource").value.trim();
+    return manual || $("vmCatalog").value.trim();
+  }
+  return $("payload").value.trim();
+}
+
 function buildDraft() {
   const restart = true;
   // Future redeploy support can add pull/force once the web flow allows existing services.
+  const workload = selectedWorkload();
+  const payload = sourcePayloadForWorkload(workload);
+  const payloadKind = workloadPayloadKind(workload);
+  const vmPayload = payloadKind === "vm";
+  const cronPayload = payloadKind === "cron";
   const snapshotRequired = snapshotRequiredValue();
   const modes = selectedNetworkModes();
   const hasTailscale = modes.includes("ts");
   const hasLAN = modes.includes("lan");
-  const payload = $("payload").value.trim();
-  const vmPayload = isVMPayload(payload);
   return {
     service: $("service").value.trim(),
     host: $("host").value.trim(),
     payload,
-    payloadKind: vmPayload ? "vm" : "",
+    payloadKind,
     envFile: $("envFile").value.trim(),
     payloadArgs: vmPayload ? [] : splitArgs($("payloadArgs").value),
+    cron: cronPayload ? {
+      schedule: $("cronSchedule").value.trim(),
+    } : {},
     vm: vmPayload ? {
       cpus: Number.parseInt($("vmCPUs").value, 10) || 0,
       memory: $("vmMemory").value.trim(),
       disk: $("vmDisk").value.trim(),
     } : {},
-    network: {
+    network: cronPayload ? {} : {
       modes,
       tsVersion: hasTailscale ? $("tsVersion").value.trim() : "",
       tsExitNode: hasTailscale ? $("tsExitNode").value.trim() : "",
@@ -113,11 +202,11 @@ function buildDraft() {
       publish: splitCSV($("publish").value),
       restart,
     },
-    storage: {
+    storage: cronPayload ? {} : {
       serviceRoot: $("serviceRoot").value.trim(),
       zfs: $("zfs").checked,
     },
-    snapshots: {
+    snapshots: cronPayload ? {} : {
       mode: $("snapshots").value,
       keepLast: Number.parseInt($("snapshotKeepLast").value, 10) || 0,
       maxAge: $("snapshotMaxAge").value.trim(),
@@ -148,32 +237,41 @@ function shell(value) {
 }
 
 function updatePreview(draft) {
-  const parts = ["yeet", "run"];
+  const parts = draft.payloadKind === "cron" ? ["yeet", "cron"] : ["yeet", "run"];
   const serviceTarget = draft.service && draft.host && !draft.service.includes("@")
     ? `${draft.service}@${draft.host}`
     : draft.service;
   if (serviceTarget) parts.push(shell(serviceTarget));
   if (draft.payload) parts.push(shell(draft.payload));
+  if (draft.payloadKind === "cron") {
+    if (draft.cron?.schedule) parts.push(shell(draft.cron.schedule));
+    if (draft.payloadArgs.length) parts.push("--", ...draft.payloadArgs.map(shell));
+    $("commandPreview").textContent = parts.join(" ");
+    return;
+  }
+  const network = draft.network || {};
+  const storage = draft.storage || {};
+  const snapshots = draft.snapshots || {};
   if (draft.envFile) parts.push(`--env-file=${shell(draft.envFile)}`);
-  for (const mode of draft.network.modes) parts.push(`--net=${shell(mode)}`);
-  if (draft.network.tsVersion) parts.push(`--ts-ver=${shell(draft.network.tsVersion)}`);
-  if (draft.network.tsExitNode) parts.push(`--ts-exit=${shell(draft.network.tsExitNode)}`);
-  for (const tag of draft.network.tsTags) parts.push(`--ts-tags=${shell(tag)}`);
-  if (draft.network.tsAuthKey) parts.push("--ts-auth-key=<hidden>");
-  if (draft.network.macvlanParent) parts.push(`--macvlan-parent=${shell(draft.network.macvlanParent)}`);
-  if (draft.network.macvlanVlan) parts.push(`--macvlan-vlan=${draft.network.macvlanVlan}`);
-  if (draft.network.macvlanMac) parts.push(`--macvlan-mac=${shell(draft.network.macvlanMac)}`);
-  for (const port of draft.network.publish) parts.push(`--publish=${shell(port)}`);
-  if (draft.storage.serviceRoot) parts.push(`--service-root=${shell(draft.storage.serviceRoot)}`);
-  if (draft.storage.zfs) parts.push("--zfs");
+  for (const mode of network.modes || []) parts.push(`--net=${shell(mode)}`);
+  if (network.tsVersion) parts.push(`--ts-ver=${shell(network.tsVersion)}`);
+  if (network.tsExitNode) parts.push(`--ts-exit=${shell(network.tsExitNode)}`);
+  for (const tag of network.tsTags || []) parts.push(`--ts-tags=${shell(tag)}`);
+  if (network.tsAuthKey) parts.push("--ts-auth-key=<hidden>");
+  if (network.macvlanParent) parts.push(`--macvlan-parent=${shell(network.macvlanParent)}`);
+  if (network.macvlanVlan) parts.push(`--macvlan-vlan=${network.macvlanVlan}`);
+  if (network.macvlanMac) parts.push(`--macvlan-mac=${shell(network.macvlanMac)}`);
+  for (const port of network.publish || []) parts.push(`--publish=${shell(port)}`);
+  if (storage.serviceRoot) parts.push(`--service-root=${shell(storage.serviceRoot)}`);
+  if (storage.zfs) parts.push("--zfs");
   if (draft.vm?.cpus) parts.push(`--cpus=${draft.vm.cpus}`);
   if (draft.vm?.memory) parts.push(`--memory=${shell(draft.vm.memory)}`);
   if (draft.vm?.disk) parts.push(`--disk=${shell(draft.vm.disk)}`);
-  if (draft.snapshots.mode) parts.push(`--snapshots=${shell(draft.snapshots.mode)}`);
-  if (draft.snapshots.keepLast) parts.push(`--snapshot-keep-last=${draft.snapshots.keepLast}`);
-  if (draft.snapshots.maxAge) parts.push(`--snapshot-max-age=${shell(draft.snapshots.maxAge)}`);
-  if (draft.snapshots.required !== undefined) parts.push(`--snapshot-required=${draft.snapshots.required}`);
-  for (const event of draft.snapshots.events) parts.push(`--snapshot-events=${shell(event)}`);
+  if (snapshots.mode) parts.push(`--snapshots=${shell(snapshots.mode)}`);
+  if (snapshots.keepLast) parts.push(`--snapshot-keep-last=${snapshots.keepLast}`);
+  if (snapshots.maxAge) parts.push(`--snapshot-max-age=${shell(snapshots.maxAge)}`);
+  if (snapshots.required !== undefined) parts.push(`--snapshot-required=${snapshots.required}`);
+  for (const event of snapshots.events || []) parts.push(`--snapshot-events=${shell(event)}`);
   if (draft.payloadArgs.length) parts.push("--", ...draft.payloadArgs.map(shell));
   $("commandPreview").textContent = parts.join(" ");
 }
@@ -210,6 +308,49 @@ function renderNetworkModes(modes) {
     return label;
   });
   $("networkModes").replaceChildren(...rows);
+}
+
+function renderVMCatalog(images) {
+  const rows = images.length ? images : [{ payload: "vm://ubuntu/26.04", label: "Ubuntu 26.04" }];
+  $("vmCatalog").replaceChildren(...rows.map((image) => option(image.label, image.payload)));
+}
+
+function syncWorkloadUI() {
+  const workload = selectedWorkload();
+  const def = workloadDefinition(workload);
+  const previousWorkload = state.workload;
+  const workloadChanged = previousWorkload !== workload;
+  if (previousWorkload && workloadChanged) {
+    state.networkSelections[previousWorkload] = selectedNetworkModes();
+  }
+  state.workload = workload;
+  const isVM = workload === "vm";
+  const isCron = workload === "cron";
+  $("sourceHint").textContent = def.sourceHint;
+  $("payloadLabel").firstChild.textContent = `${def.payloadLabel} `;
+  $("payloadLabel").querySelector(".help").dataset.help = def.payloadHelp;
+  $("payload").placeholder = def.placeholder;
+  $("payload").closest("label").hidden = isVM;
+  $("vmCatalogBlock").hidden = !isVM;
+  $("cronScheduleField").hidden = !isCron;
+  $("envFile").closest("label").hidden = isVM || isCron;
+  $("publish").closest("label").hidden = isVM || isCron;
+  $("serviceRoot").disabled = isCron;
+  $("zfs").disabled = isCron;
+  $("snapshots").closest("details").hidden = isCron;
+  $("storageModeLabel").firstChild.textContent = $("zfs").checked ? "ZFS dataset " : "Service root ";
+  $("zfsHelp").textContent = $("zfs").checked ? "Using ZFS dataset" : "ZFS dataset";
+  if (workloadChanged) {
+    renderNetworkModes(def.networkModes.filter((mode) => mode !== "host"));
+    applyDefaultNetworkModes(workload);
+  }
+}
+
+function applyDefaultNetworkModes(workload) {
+  const defaults = state.networkSelections[workload] || defaultNetworkModesForWorkload(workload);
+  document.querySelectorAll("input[name='net']").forEach((input) => {
+    input.checked = defaults.includes(input.value);
+  });
 }
 
 function renderHostPicker(hosts) {
@@ -249,7 +390,8 @@ function hideHostPicker() {
 }
 
 function syncNetworkUI() {
-  const vmPayload = isVMPayload($("payload").value);
+  const payloadKind = workloadPayloadKind(selectedWorkload());
+  const vmPayload = payloadKind === "vm";
   document.querySelectorAll("input[name='net']").forEach((input) => {
     if (input.value === "ts") {
       input.disabled = vmPayload;
@@ -694,20 +836,31 @@ async function bootstrap() {
   renderHostPicker(state.bootstrap.hosts || []);
 
   $("service").value = state.bootstrap.prefill?.service || "";
-  $("payload").value = state.bootstrap.prefill?.payload || "";
+  const prefillPayload = state.bootstrap.prefill?.payload || "";
+  $("payload").value = prefillPayload;
+  renderVMCatalog(state.bootstrap.options?.vmImages || []);
+  if (isVMPayload(prefillPayload)) {
+    const vmWorkload = document.querySelector("input[name='workload'][value='vm']");
+    if (vmWorkload) vmWorkload.checked = true;
+    const catalogValues = [...$("vmCatalog").options].map((item) => item.value);
+    if (catalogValues.includes(prefillPayload)) $("vmCatalog").value = prefillPayload;
+    else $("manualVMSource").value = prefillPayload;
+  }
   renderNetworkModes(state.bootstrap.options?.networkModes || ["svc", "ts", "lan"]);
   renderSnapshotModes(state.bootstrap.options?.snapshotModes || ["inherit", "on", "off"]);
   renderSnapshotRequiredOptions();
   await loadFiles(".");
+  syncWorkloadUI();
   syncNetworkUI();
   updateServiceRootPlaceholder();
   $("service").focus();
-  if ($("service").value) $("payload").focus();
+  if ($("service").value && !$("payload").closest("label").hidden) $("payload").focus();
   update();
 }
 
 function update() {
   if (state.phase !== "editing") return;
+  syncWorkloadUI();
   syncNetworkUI();
   updateServiceRootPlaceholder();
   clearValidationErrors();
@@ -797,6 +950,7 @@ async function validate(draft) {
       return;
     }
     const data = await res.json();
+    if (data.command) $("commandPreview").textContent = data.command;
     const ok = Boolean(data.validation?.ok);
     $("deployButton").disabled = !ok;
     $("hostStatus").textContent = ok ? "Ready" : "";
@@ -879,6 +1033,9 @@ function hideTooltip() {
 
 document.addEventListener("input", (event) => {
   if (event.target.closest("#deployForm")) update();
+});
+document.querySelectorAll("input[name='workload']").forEach((input) => {
+  input.addEventListener("change", update);
 });
 $("deployForm").addEventListener("submit", deploy);
 $("upButton").addEventListener("click", () => loadFiles(parentDir(state.currentDir)));
