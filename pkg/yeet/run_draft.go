@@ -24,6 +24,7 @@ type RunDraft struct {
 	EnvFileArg     string            `json:"-"`
 	EnvFileSet     bool              `json:"-"`
 	PayloadArgs    []string          `json:"payloadArgs,omitempty"`
+	Cron           RunDraftCron      `json:"cron,omitempty"`
 	VM             RunDraftVM        `json:"vm,omitempty"`
 	Network        RunDraftNetwork   `json:"network"`
 	Storage        RunDraftStorage   `json:"storage"`
@@ -58,6 +59,10 @@ type RunDraftVM struct {
 type RunDraftStorage struct {
 	ServiceRoot string `json:"serviceRoot,omitempty"`
 	ZFS         bool   `json:"zfs,omitempty"`
+}
+
+type RunDraftCron struct {
+	Schedule string `json:"schedule,omitempty"`
 }
 
 type RunDraftSnapshots struct {
@@ -292,6 +297,8 @@ type runDraftExecuteOptions struct {
 	ForceDeploy bool
 }
 
+var runCronWithOutputFn = runCronWithOutput
+
 func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigLocation, forceDeploy bool) error {
 	return executeRunDraftWithOptions(ctx, draft, cfgLoc, runDraftExecuteOptions{
 		Stdout:      os.Stdout,
@@ -334,11 +341,51 @@ func executeRunDraftWithOptions(ctx context.Context, draft RunDraft, cfgLoc *pro
 		loadedPrefs = prevPrefs
 	}()
 
+	if draft.PayloadKind == serviceTypeCron {
+		return executeCronRunDraft(ctx, opts.Stdout, cfgLoc, host, draft)
+	}
+
 	runArgs := draft.runArgs()
 	if err := executeRunDraftOutput(ctx, opts.Stdout, draft, runArgs, opts.ForceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
 		return err
 	}
 	return saveRunDraftExecutionConfig(cfgLoc, host, draft, runArgs)
+}
+
+func executeCronRunDraft(ctx context.Context, stdout io.Writer, cfgLoc *projectConfigLocation, host string, draft RunDraft) error {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	fields, err := parseCronSchedule(draft.Cron.Schedule)
+	if err != nil {
+		return err
+	}
+	if err := runCronWithOutputFn(ctx, stdout, draft.Payload, fields, draft.PayloadArgs); err != nil {
+		return err
+	}
+	return saveCronConfig(cfgLoc, host, draft.Payload, fields, draft.PayloadArgs)
+}
+
+func runCronWithOutput(ctx context.Context, stdout io.Writer, file string, cronFields []string, binArgs []string) error {
+	goos, goarch, err := remoteCatchOSAndArchFn()
+	if err != nil {
+		return err
+	}
+	payload, cleanup, _, err := openPayloadForUpload(file, goos, goarch)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if len(cronFields) != 5 {
+		return fmt.Errorf("cron expression must have 5 fields, got %d", len(cronFields))
+	}
+	svc := getService()
+	nargs := append([]string{"cron"}, cronFields...)
+	if len(binArgs) > 0 {
+		nargs = append(nargs, binArgs...)
+	}
+	tty := isTerminalFn(int(os.Stdout.Fd()))
+	return execRemoteToFn(ctx, svc, nargs, payload, tty, stdout)
 }
 
 func executeRunDraftOutput(ctx context.Context, stdout io.Writer, draft RunDraft, runArgs []string, forceDeploy bool) error {
