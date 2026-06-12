@@ -153,6 +153,8 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`state.activePicker === "envFile"`,
 		"activePicker",
 		"showPicker",
+		"function pickerEnabledForField(field)",
+		"if (!pickerEnabledForField(field))",
 		"hidePicker",
 		"EventSource",
 		"/api/session/closed",

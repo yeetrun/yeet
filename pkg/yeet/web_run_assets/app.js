@@ -543,6 +543,10 @@ async function loadFiles(dir) {
 }
 
 function showPicker(field) {
+  if (!pickerEnabledForField(field)) {
+    if (state.activePicker === field) hidePicker();
+    return;
+  }
   state.activePicker = field;
   const input = $(field);
   const picker = $("filePicker");
@@ -551,6 +555,16 @@ function showPicker(field) {
   picker.style.top = `${Math.min(window.innerHeight - 340, rect.bottom + 6)}px`;
   picker.style.width = `${Math.max(360, rect.width)}px`;
   picker.hidden = false;
+}
+
+function pickerEnabledForField(field) {
+  if (field === "payload") {
+    return payloadPickerEnabledForWorkload(selectedWorkload()) && !$("payload").closest("label").hidden;
+  }
+  if (field === "envFile") {
+    return !$("envFile").closest("label").hidden;
+  }
+  return true;
 }
 
 function hidePicker() {
