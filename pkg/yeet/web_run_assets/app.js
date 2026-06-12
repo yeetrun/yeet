@@ -180,7 +180,8 @@ function inferWorkloadForPayload(payload) {
 }
 
 function looksLikeImageReference(payload) {
-  return !payload.includes("\\") && !payload.includes("@") && (
+  return !payload.includes("\\") && (
+    payload.includes("@sha256:") ||
     payload.includes(":") ||
     payload.includes("/") ||
     payload.includes(".")
