@@ -730,6 +730,7 @@ const validationFieldIDs = {
   payload: "payload",
   envFile: "envFile",
   serviceRoot: "serviceRoot",
+  "cron.schedule": "cronSchedule",
   "network.modes": "hostDefault",
   "vm.cpus": "vmCPUs",
   "vm.memory": "vmMemory",
@@ -740,6 +741,13 @@ const validationFieldIDs = {
   "snapshots.required": "snapshotRequired",
   "snapshots.events": "snapshotEvents",
 };
+
+function validationFieldID(field) {
+  if (field === "payload" && $("vmCatalogBlock") && !$("vmCatalogBlock").hidden) {
+    return "vmCatalog";
+  }
+  return validationFieldIDs[field];
+}
 
 function clearValidationErrors() {
   document.querySelectorAll("[data-invalid='true']").forEach((el) => {
@@ -754,7 +762,7 @@ function clearValidationErrors() {
 function applyValidationErrors(validation) {
   clearValidationErrors();
   for (const err of validation?.errors || []) {
-    const id = validationFieldIDs[err.field];
+    const id = validationFieldID(err.field);
     if (!id) continue;
     const input = $(id);
     if (!input) continue;
