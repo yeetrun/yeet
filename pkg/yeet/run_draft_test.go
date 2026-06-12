@@ -124,6 +124,45 @@ func TestRunDraftBuildsExistingRunArgs(t *testing.T) {
 	}
 }
 
+func TestRunDraftCommandPreviewForRunWorkload(t *testing.T) {
+	draft := RunDraft{
+		Service: "app",
+		Host:    "yeet-pve1",
+		Payload: "./compose.yml",
+		Network: RunDraftNetwork{
+			Modes:   []string{"svc", "lan"},
+			Publish: []string{"8080:80"},
+		},
+		Storage: RunDraftStorage{ServiceRoot: "tank/apps/app", ZFS: true},
+	}
+
+	got := runDraftCommandPreview(draft)
+	want := "yeet run app@yeet-pve1 ./compose.yml --service-root=tank/apps/app --zfs --net=svc,lan --publish=8080:80"
+	if got != want {
+		t.Fatalf("preview = %q, want %q", got, want)
+	}
+}
+
+func TestRunDraftCommandPreviewRedactsTailscaleAuthKey(t *testing.T) {
+	draft := RunDraft{
+		Service: "app",
+		Host:    "yeet-pve1",
+		Payload: "ghcr.io/example/app:latest",
+		Network: RunDraftNetwork{
+			Modes:     []string{"ts"},
+			TSAuthKey: "tskey-secret",
+		},
+	}
+
+	got := runDraftCommandPreview(draft)
+	if strings.Contains(got, "tskey-secret") {
+		t.Fatalf("preview leaked auth key: %s", got)
+	}
+	if !strings.Contains(got, "--ts-auth-key=<hidden>") {
+		t.Fatalf("preview = %q, want hidden auth key marker", got)
+	}
+}
+
 func TestRunDraftFromCLIParsesVMOptions(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	serviceOverride = "devbox"
