@@ -367,8 +367,17 @@ func runDraftCommandPreview(draft RunDraft) string {
 	if strings.TrimSpace(draft.Payload) != "" {
 		parts = append(parts, draft.Payload)
 	}
+	parts = appendRunDraftCommandPreviewControlArgs(parts, draft)
 	parts = append(parts, runArgsWithSensitiveRunOptionsHidden(draft.runArgs())...)
 	return shellJoin(parts)
+}
+
+func appendRunDraftCommandPreviewControlArgs(parts []string, draft RunDraft) []string {
+	parts = appendRunDraftStringFlag(parts, "--env-file", draft.EnvFile)
+	if draft.ForceDeploy {
+		parts = append(parts, "--force")
+	}
+	return parts
 }
 
 func runDraftCommandTarget(draft RunDraft) string {
