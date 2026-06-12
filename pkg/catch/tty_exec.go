@@ -41,6 +41,7 @@ var expectedCopyErrs = []error{
 }
 
 var expectedCopyErrMessages = []string{
+	"broken pipe",
 	"use of closed network connection",
 	"endpoint is closed for send",
 	"websocket: close sent",

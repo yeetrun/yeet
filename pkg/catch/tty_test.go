@@ -226,6 +226,7 @@ func TestShouldLogCopyErrIgnoresExpectedDisconnects(t *testing.T) {
 		{name: "wrapped epipe", err: &net.OpError{Op: "write", Net: "tcp", Err: syscall.EPIPE}},
 		{name: "wrapped closed", err: &net.OpError{Op: "write", Net: "tcp", Err: net.ErrClosed}},
 		{name: "closed network string", err: errors.New("write tcp 127.0.0.1:1234->127.0.0.1:4321: use of closed network connection")},
+		{name: "broken pipe string", err: errors.New("write tcp 100.95.210.99:59091->100.85.58.107:41548: write: broken pipe")},
 		{name: "endpoint closed string", err: errors.New("write tcp 100.85.58.107:41548: endpoint is closed for send")},
 		{name: "websocket close sent", err: errors.New("websocket: close sent")},
 	}

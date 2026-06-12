@@ -71,6 +71,52 @@ func TestHandleSvcCmdRoutesRemoteFallbackCommands(t *testing.T) {
 	}
 }
 
+func TestHandleSvcCmdLogsRoutesWithoutTTY(t *testing.T) {
+	oldExec := execRemoteFn
+	oldService := serviceOverride
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	defer func() {
+		execRemoteFn = oldExec
+		serviceOverride = oldService
+		_ = os.Chdir(cwd)
+	}()
+
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
+	serviceOverride = "svc-a"
+
+	var gotService string
+	var gotArgs []string
+	var gotTTY bool
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotService = service
+		gotArgs = append([]string{}, args...)
+		gotTTY = tty
+		if stdin != nil {
+			t.Fatalf("expected nil stdin")
+		}
+		return nil
+	}
+
+	if err := HandleSvcCmd([]string{"logs", "--lines", "50"}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
+	}
+	if gotService != "svc-a" {
+		t.Fatalf("service = %q, want svc-a", gotService)
+	}
+	wantArgs := []string{"logs", "--lines", "50"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
+	}
+	if gotTTY {
+		t.Fatalf("tty = true, want false")
+	}
+}
+
 func TestHandleSvcCmdRemoveRoutes(t *testing.T) {
 	tests := []struct {
 		name        string
