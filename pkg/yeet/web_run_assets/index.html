@@ -122,17 +122,6 @@
             <span class="field-error" id="envFileError"></span>
           </label>
 
-          <div class="root-control">
-            <label for="serviceRoot" data-field="serviceRoot">
-              <span id="storageModeLabel">Service root <button type="button" class="help" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></span>
-              <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false">
-              <span class="field-error" id="serviceRootError"></span>
-            </label>
-            <label class="zfs-toggle" for="zfs">
-              <input id="zfs" name="zfs" type="checkbox">
-              <span id="zfsHelp">ZFS dataset</span>
-            </label>
-          </div>
         </section>
 
         <section class="panel options-panel" aria-labelledby="deploySettingsTitle">
@@ -150,6 +139,18 @@
               </label>
               <div class="checks" id="networkModes"></div>
             </fieldset>
+
+            <div class="root-control">
+              <label for="serviceRoot" data-field="serviceRoot">
+                <span id="storageModeLabel">Service root <button type="button" class="help" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></span>
+                <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false">
+                <span class="field-error" id="serviceRootError"></span>
+              </label>
+              <label class="zfs-toggle" for="zfs">
+                <input id="zfs" name="zfs" type="checkbox">
+                <span id="zfsHelp">ZFS dataset</span>
+              </label>
+            </div>
 
             <label for="publish">
               <span>Publish ports <button type="button" class="help" data-help="Comma-separated port mappings such as 8080:80." aria-label="Help for published ports">?</button></span>
