@@ -577,6 +577,58 @@ func TestRunCronWithOutputUsesRemoteExecToAndWriter(t *testing.T) {
 	}
 }
 
+type runDraftTerminalWriter struct {
+	strings.Builder
+	file *os.File
+}
+
+func (w *runDraftTerminalWriter) terminalFile() *os.File {
+	return w.file
+}
+
+func TestRunCronWithOutputPreservesTerminalWriterTTY(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldRemoteArch := remoteCatchOSAndArchFn
+	oldExecRemoteTo := execRemoteToFn
+	oldIsTerminal := isTerminalFn
+	defer func() {
+		remoteCatchOSAndArchFn = oldRemoteArch
+		execRemoteToFn = oldExecRemoteTo
+		isTerminalFn = oldIsTerminal
+	}()
+
+	serviceOverride = "backup"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	isTerminalFn = func(fd int) bool {
+		return fd == int(os.Stdout.Fd())
+	}
+	var gotTTY bool
+	execRemoteToFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		gotTTY = tty
+		_, _ = io.WriteString(stdout, "cron installed\n")
+		return nil
+	}
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "job.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	out := &runDraftTerminalWriter{file: os.Stdout}
+	err := runCronWithOutput(context.Background(), out, payload, []string{"0", "3", "*", "*", "*"}, nil)
+	if err != nil {
+		t.Fatalf("runCronWithOutput: %v", err)
+	}
+	if !gotTTY {
+		t.Fatal("tty = false, want true for terminal-backed writer")
+	}
+	if !strings.Contains(out.String(), "cron installed") {
+		t.Fatalf("stdout = %q, want cron output", out.String())
+	}
+}
+
 func TestExecuteRunDraftSkipsServiceInfoOutsideNewOnlyMode(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	oldTryImage := tryRunRemoteImageFn

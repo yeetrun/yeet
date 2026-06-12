@@ -384,7 +384,7 @@ func runCronWithOutput(ctx context.Context, stdout io.Writer, file string, cronF
 	if len(binArgs) > 0 {
 		nargs = append(nargs, binArgs...)
 	}
-	tty := isStdoutWriter(stdout) && isTerminalFn(int(os.Stdout.Fd()))
+	tty := isWriterTerminal(stdout)
 	return execRemoteToFn(ctx, svc, nargs, payload, tty, stdout)
 }
 
