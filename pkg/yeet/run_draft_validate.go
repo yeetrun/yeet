@@ -78,11 +78,11 @@ func validateRunDraftLocal(draft RunDraft, cwd string) (RunDraft, RunDraftValida
 	validateRunDraftRequired(draft, &result)
 	validateRunDraftPaths(cwd, &draft, &result)
 	validateRunDraftVM(&draft, &result)
-	validateRunDraftNetwork(&draft, &result)
 	validateRunDraftCron(&draft, &result)
 	if draft.PayloadKind == serviceTypeCron {
 		return draft, result
 	}
+	validateRunDraftNetwork(&draft, &result)
 	validateRunDraftStorage(&draft, &result)
 	validateRunDraftSnapshots(&draft, &result)
 
@@ -305,14 +305,46 @@ func validateRunDraftCron(draft *RunDraft, result *RunDraftValidationResult) {
 	} else {
 		draft.Cron.Schedule = strings.Join(fields, " ")
 	}
-	if len(draft.Network.Modes) != 0 {
+	if len(trimNonEmptyStrings(draft.Network.Modes)) != 0 {
 		result.addError("network.modes", "network modes are not supported for scheduled jobs during web deploy")
 	}
+	validateRunDraftCronNetworkFields(draft.Network, result)
 	if draft.Storage.ServiceRoot != "" || draft.Storage.ZFS {
 		result.addError("serviceRoot", "service root is not supported for scheduled jobs during web deploy")
 	}
 	if runDraftSnapshotsHasFieldOverrides(draft.Snapshots) || strings.TrimSpace(draft.Snapshots.Mode) != "" {
 		result.addError("snapshots.mode", "snapshot overrides are not supported for scheduled jobs during web deploy")
+	}
+}
+
+func validateRunDraftCronNetworkFields(network RunDraftNetwork, result *RunDraftValidationResult) {
+	const message = "network settings are not supported for scheduled jobs during web deploy"
+	if strings.TrimSpace(network.TSVersion) != "" {
+		result.addError("network.tsVersion", message)
+	}
+	if strings.TrimSpace(network.TSExitNode) != "" {
+		result.addError("network.tsExitNode", message)
+	}
+	if len(trimNonEmptyStrings(network.TSTags)) != 0 {
+		result.addError("network.tsTags", message)
+	}
+	if strings.TrimSpace(network.TSAuthKey) != "" {
+		result.addError("network.tsAuthKey", message)
+	}
+	if strings.TrimSpace(network.MacvlanMAC) != "" {
+		result.addError("network.macvlanMac", message)
+	}
+	if network.MacvlanVLAN != 0 {
+		result.addError("network.macvlanVlan", message)
+	}
+	if strings.TrimSpace(network.MacvlanParent) != "" {
+		result.addError("network.macvlanParent", message)
+	}
+	if network.Restart != nil {
+		result.addError("network.restart", message)
+	}
+	if len(trimNonEmptyStrings(network.Publish)) != 0 {
+		result.addError("network.publish", message)
 	}
 }
 
