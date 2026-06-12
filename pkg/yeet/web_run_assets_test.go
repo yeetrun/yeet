@@ -177,6 +177,9 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	if regexp.MustCompile(`\slist\s*=`).Match(index) {
 		t.Fatal("index still contains native input list attribute")
 	}
+	if !regexp.MustCompile(`(?s)<div class="deploy-settings-grid">.*class="root-control".*id="tsOptions"`).Match(index) {
+		t.Fatal("deploy settings grid must contain storage controls before advanced options")
+	}
 	for _, snippet := range []string{
 		".workload-selector",
 		".workload-option",
