@@ -127,6 +127,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"function sourcePayloadForWorkload(workload)",
 		"function inferWorkloadForPayload(payload)",
 		"function looksLikeImageReference(payload)",
+		`payload.includes("@sha256:")`,
 		"function defaultNetworkModesForWorkload(workload)",
 		"function renderVMCatalog(images)",
 		"data.command",
