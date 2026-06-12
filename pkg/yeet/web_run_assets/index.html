@@ -49,13 +49,67 @@
             <span class="field-error" id="hostError"></span>
           </label>
 
+          <fieldset class="workload-selector" id="workloadSelector" aria-labelledby="workloadTitle">
+            <legend id="workloadTitle">Workload</legend>
+            <label class="workload-option">
+              <input type="radio" name="workload" value="compose" checked>
+              <span>Compose app</span>
+            </label>
+            <label class="workload-option">
+              <input type="radio" name="workload" value="vm">
+              <span>Virtual machine</span>
+            </label>
+            <label class="workload-option">
+              <input type="radio" name="workload" value="dockerfile">
+              <span>Dockerfile</span>
+            </label>
+            <label class="workload-option">
+              <input type="radio" name="workload" value="remote-image">
+              <span>Container image</span>
+            </label>
+            <label class="workload-option">
+              <input type="radio" name="workload" value="file">
+              <span>Binary/script</span>
+            </label>
+            <label class="workload-option">
+              <input type="radio" name="workload" value="cron">
+              <span>Scheduled job</span>
+            </label>
+          </fieldset>
+
+          <div class="source-head">
+            <h2 id="sourceTitle">Source</h2>
+            <span id="sourceHint">Choose a Compose file.</span>
+          </div>
+
           <label for="payload" data-field="payload">
-            <span>Payload <button type="button" class="help" data-help="A project file, Dockerfile, compose file, executable, or image reference." aria-label="Help for payload">?</button></span>
+            <span id="payloadLabel">Compose file <button type="button" class="help" data-help="A compose.yml or docker-compose.yml file in this project." aria-label="Help for source">?</button></span>
             <div class="picker-field">
               <input id="payload" name="payload" autocomplete="off" spellcheck="false" required data-picker-target="payload" aria-haspopup="listbox">
               <button type="button" id="payloadPicker" class="quiet-button picker-trigger" data-picker-target="payload">Pick</button>
             </div>
             <span class="field-error" id="payloadError"></span>
+          </label>
+
+          <div id="vmCatalogBlock" class="catalog-block" hidden>
+            <label for="vmCatalog" data-field="payload">
+              <span>Catalog image <button type="button" class="help" data-help="Managed VM images from the yeet catalog." aria-label="Help for VM catalog image">?</button></span>
+              <select id="vmCatalog" name="vmCatalog"></select>
+              <span class="field-error" id="vmCatalogError"></span>
+            </label>
+            <details class="advanced-block">
+              <summary>Manual VM image</summary>
+              <label for="manualVMSource" data-field="payload">
+                <span>Image reference</span>
+                <input id="manualVMSource" name="manualVMSource" autocomplete="off" spellcheck="false" placeholder="vm://ubuntu/26.04">
+              </label>
+            </details>
+          </div>
+
+          <label for="cronSchedule" data-field="cron.schedule" id="cronScheduleField" hidden>
+            <span>Schedule <button type="button" class="help" data-help="Five-field cron expression. Presets fill this raw value." aria-label="Help for cron schedule">?</button></span>
+            <input id="cronSchedule" name="cronSchedule" autocomplete="off" spellcheck="false" placeholder="0 3 * * *">
+            <span class="field-error" id="cronScheduleError"></span>
           </label>
 
           <label for="envFile" data-field="envFile">
@@ -69,21 +123,21 @@
 
           <div class="root-control">
             <label for="serviceRoot" data-field="serviceRoot">
-              <span>Service root <button type="button" class="help" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></span>
+              <span id="storageModeLabel">Service root <button type="button" class="help" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></span>
               <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false">
               <span class="field-error" id="serviceRootError"></span>
             </label>
             <label class="zfs-toggle" for="zfs">
               <input id="zfs" name="zfs" type="checkbox">
-              <span>ZFS dataset</span>
+              <span id="zfsHelp">ZFS dataset</span>
             </label>
           </div>
         </section>
 
-        <section class="panel options-panel" aria-labelledby="optionsTitle">
+        <section class="panel options-panel" aria-labelledby="deploySettingsTitle">
           <div class="section-heading">
-            <h2 id="optionsTitle">Deploy options</h2>
-            <p>First run only</p>
+            <h2 id="deploySettingsTitle">Deploy settings</h2>
+            <p>Network and storage</p>
           </div>
 
           <fieldset>
@@ -125,8 +179,8 @@
             <input id="publish" name="publish" autocomplete="off" spellcheck="false">
           </label>
 
-          <details class="advanced-block" id="lanOptions" hidden>
-            <summary>LAN settings <button type="button" class="help" data-help="Optional macvlan settings used when the LAN network mode is selected." aria-label="Help for LAN settings">?</button></summary>
+          <div class="conditional-options" id="lanOptions" hidden>
+            <div class="subsection-label">LAN settings <button type="button" class="help" data-help="Optional macvlan settings used when the LAN network mode is selected." aria-label="Help for LAN settings">?</button></div>
             <div class="split-fields">
               <label for="macvlanParent">
                 <span>Parent</span>
@@ -141,10 +195,10 @@
               <span>MAC address</span>
               <input id="macvlanMac" name="macvlanMac" autocomplete="off" spellcheck="false" placeholder="02:00:00:00:00:07">
             </label>
-          </details>
+          </div>
 
-          <details class="advanced-block" id="vmOptions" hidden>
-            <summary>VM settings <button type="button" class="help" data-help="Optional CPU, memory, and disk overrides for vm:// payloads." aria-label="Help for VM settings">?</button></summary>
+          <div class="conditional-options" id="vmOptions" hidden>
+            <div class="subsection-label">VM shape <button type="button" class="help" data-help="Optional CPU, memory, and disk overrides for vm:// payloads." aria-label="Help for VM shape">?</button></div>
             <div class="split-fields vm-fields">
               <label for="vmCPUs" data-field="vm.cpus">
                 <span>vCPU</span>
@@ -162,7 +216,7 @@
               <input id="vmDisk" name="vmDisk" autocomplete="off" spellcheck="false" placeholder="64g">
               <span class="field-error" id="vmDiskError"></span>
             </label>
-          </details>
+          </div>
 
           <details class="advanced-block">
             <summary>Snapshots <button type="button" class="help" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></summary>
