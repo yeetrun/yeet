@@ -141,14 +141,21 @@
             <p>Network and storage</p>
           </div>
 
-          <fieldset>
-            <legend>Network <button type="button" class="help" data-help="Select one or more network modes for the service." aria-label="Help for network modes">?</button></legend>
-            <label class="check-pill is-default" for="hostDefault">
-              <input id="hostDefault" type="checkbox" checked disabled>
-              <span>Host</span>
+          <div class="deploy-settings-grid">
+            <fieldset>
+              <legend>Network <button type="button" class="help" data-help="Select one or more network modes for the service." aria-label="Help for network modes">?</button></legend>
+              <label class="check-pill is-default" for="hostDefault">
+                <input id="hostDefault" type="checkbox" checked disabled>
+                <span>Host</span>
+              </label>
+              <div class="checks" id="networkModes"></div>
+            </fieldset>
+
+            <label for="publish">
+              <span>Publish ports <button type="button" class="help" data-help="Comma-separated port mappings such as 8080:80." aria-label="Help for published ports">?</button></span>
+              <input id="publish" name="publish" autocomplete="off" spellcheck="false">
             </label>
-            <div class="checks" id="networkModes"></div>
-          </fieldset>
+          </div>
 
           <div id="tsOptions" class="conditional-options" hidden>
             <label for="tsTags">
@@ -174,11 +181,6 @@
               </div>
             </details>
           </div>
-
-          <label for="publish">
-            <span>Publish ports <button type="button" class="help" data-help="Comma-separated port mappings such as 8080:80." aria-label="Help for published ports">?</button></span>
-            <input id="publish" name="publish" autocomplete="off" spellcheck="false">
-          </label>
 
           <div class="conditional-options" id="lanOptions" hidden>
             <div class="subsection-label">LAN settings <button type="button" class="help" data-help="Optional macvlan settings used when the LAN network mode is selected." aria-label="Help for LAN settings">?</button></div>
