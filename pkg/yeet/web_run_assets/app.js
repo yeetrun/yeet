@@ -83,6 +83,15 @@ function splitArgs(raw) {
 }
 
 const workloadDefinitions = {
+  auto: {
+    payloadKind: "",
+    payloadLabel: "Payload",
+    payloadHelp: "Let yeet detect whether this is a local image name, image reference, or project file.",
+    sourceHint: "Yeet will detect the payload type.",
+    placeholder: "alpine",
+    networkModes: ["host", "svc", "ts", "lan"],
+    defaultModes: [],
+  },
   compose: {
     payloadKind: "compose",
     payloadLabel: "Compose file",
@@ -175,16 +184,14 @@ function inferWorkloadForPayload(payload) {
   }
   if (trimmed.startsWith("./") || trimmed.startsWith("../") || trimmed.startsWith("/")) return "file";
   if (name.includes(".") && !name.includes(":")) return "file";
-  if (looksLikeImageReference(trimmed)) return "remote-image";
-  return "compose";
+  if (looksLikeRemoteImageReference(trimmed)) return "remote-image";
+  return "auto";
 }
 
-function looksLikeImageReference(payload) {
+function looksLikeRemoteImageReference(payload) {
   return !payload.includes("\\") && (
     payload.includes("@sha256:") ||
-    payload.includes(":") ||
-    payload.includes("/") ||
-    payload.includes(".")
+    payload.includes(":")
   );
 }
 
