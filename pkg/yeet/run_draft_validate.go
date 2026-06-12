@@ -79,8 +79,11 @@ func validateRunDraftLocal(draft RunDraft, cwd string) (RunDraft, RunDraftValida
 	validateRunDraftPaths(cwd, &draft, &result)
 	validateRunDraftVM(&draft, &result)
 	validateRunDraftNetwork(&draft, &result)
-	validateRunDraftStorage(&draft, &result)
 	validateRunDraftCron(&draft, &result)
+	if draft.PayloadKind == serviceTypeCron {
+		return draft, result
+	}
+	validateRunDraftStorage(&draft, &result)
 	validateRunDraftSnapshots(&draft, &result)
 
 	return draft, result

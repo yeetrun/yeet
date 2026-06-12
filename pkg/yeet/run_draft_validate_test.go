@@ -307,6 +307,24 @@ func TestValidateRunDraftCronRejectsRunOnlyFields(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftCronRejectsZFSWithoutMissingDatasetError(t *testing.T) {
+	_, validation := validateRunDraft(context.Background(), RunDraft{
+		Service:     "backup",
+		Host:        "yeet-pve1",
+		Payload:     "job.sh",
+		PayloadKind: serviceTypeCron,
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+		Storage:     RunDraftStorage{ZFS: true},
+	}, t.TempDir())
+	got := validation.fieldError("serviceRoot")
+	if !strings.Contains(got, "service root is not supported for scheduled jobs during web deploy") {
+		t.Fatalf("serviceRoot error = %q, want cron service root rejection", got)
+	}
+	if strings.Contains(got, "service root or ZFS dataset is required") {
+		t.Fatalf("serviceRoot error = %q, want no missing dataset error", got)
+	}
+}
+
 func TestValidateRunDraftPayloadKindFileStatsImageLikePayload(t *testing.T) {
 	draft := RunDraft{
 		Service:     "svc-a",
