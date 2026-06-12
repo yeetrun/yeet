@@ -118,6 +118,32 @@ func TestRunWebBootstrapNetworkModesMatchCatchModes(t *testing.T) {
 	}
 }
 
+func TestRunWebBootstrapExposesWorkloadsAndCatalogVMImages(t *testing.T) {
+	boot := newRunWebBootstrap(nil, "", "", nil)
+
+	wantKinds := []string{"compose", "vm", "dockerfile", "remote-image", "file", "cron"}
+	if got := runWebWorkloadKinds(boot.Options.Workloads); !reflect.DeepEqual(got, wantKinds) {
+		t.Fatalf("workload kinds = %#v, want %#v", got, wantKinds)
+	}
+	if len(boot.Options.VMImages) != 2 {
+		t.Fatalf("VMImages = %#v, want ubuntu and nixos catalog images", boot.Options.VMImages)
+	}
+	if boot.Options.VMImages[0].Payload != "vm://ubuntu/26.04" || boot.Options.VMImages[0].Label != "Ubuntu 26.04" {
+		t.Fatalf("first VM image = %#v, want Ubuntu 26.04", boot.Options.VMImages[0])
+	}
+	if boot.Options.VMImages[1].Payload != "vm://nixos/26.05" || boot.Options.VMImages[1].Label != "NixOS 26.05" {
+		t.Fatalf("second VM image = %#v, want NixOS 26.05", boot.Options.VMImages[1])
+	}
+}
+
+func runWebWorkloadKinds(workloads []runWebWorkloadHint) []string {
+	out := make([]string, 0, len(workloads))
+	for _, workload := range workloads {
+		out = append(out, workload.Kind)
+	}
+	return out
+}
+
 func TestRunWebBootstrapPrefillUsesRequestServiceAndRunFlags(t *testing.T) {
 	oldService := serviceOverride
 	defer func() { serviceOverride = oldService }()
