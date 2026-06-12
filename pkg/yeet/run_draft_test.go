@@ -143,6 +143,26 @@ func TestRunDraftCommandPreviewForRunWorkload(t *testing.T) {
 	}
 }
 
+func TestRunDraftCommandPreviewIncludesEnvFileAndForce(t *testing.T) {
+	draft := RunDraft{
+		Service:     "app",
+		Host:        "yeet-lab",
+		Payload:     "./compose.yml",
+		EnvFile:     ".env",
+		ForceDeploy: true,
+		Network: RunDraftNetwork{
+			Modes: []string{"svc"},
+		},
+	}
+
+	got := runDraftCommandPreview(draft)
+	for _, want := range []string{"--env-file=.env", "--force"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("preview = %q, missing %q", got, want)
+		}
+	}
+}
+
 func TestRunDraftCommandPreviewRedactsTailscaleAuthKey(t *testing.T) {
 	draft := RunDraft{
 		Service: "app",
@@ -156,6 +176,24 @@ func TestRunDraftCommandPreviewRedactsTailscaleAuthKey(t *testing.T) {
 
 	got := runDraftCommandPreview(draft)
 	if strings.Contains(got, "tskey-secret") {
+		t.Fatalf("preview leaked auth key: %s", got)
+	}
+	if !strings.Contains(got, "--ts-auth-key=<hidden>") {
+		t.Fatalf("preview = %q, want hidden auth key marker", got)
+	}
+}
+
+func TestRunDraftCommandPreviewRedactsSeparatedTailscaleAuthKey(t *testing.T) {
+	draft := RunDraft{
+		Service:    "app",
+		Host:       "yeet-lab",
+		Payload:    "ghcr.io/example/app:latest",
+		RunArgsSet: true,
+		RunArgs:    []string{"--ts-auth-key", "secret"},
+	}
+
+	got := runDraftCommandPreview(draft)
+	if strings.Contains(got, "secret") {
 		t.Fatalf("preview leaked auth key: %s", got)
 	}
 	if !strings.Contains(got, "--ts-auth-key=<hidden>") {
