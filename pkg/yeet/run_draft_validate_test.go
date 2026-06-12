@@ -254,6 +254,59 @@ func TestValidateRunDraftRejectsVMFlagsForNonVMPayload(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftCronSchedule(t *testing.T) {
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "job.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+
+	normalized, validation := validateRunDraft(context.Background(), RunDraft{
+		Service:     "backup",
+		Host:        "yeet-pve1",
+		Payload:     "job.sh",
+		PayloadKind: serviceTypeCron,
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+	}, tmp)
+	if !validation.OK {
+		t.Fatalf("validation = %#v, want OK", validation)
+	}
+	if normalized.PayloadKind != serviceTypeCron || normalized.Cron.Schedule != "0 3 * * *" {
+		t.Fatalf("normalized cron = kind %q schedule %q", normalized.PayloadKind, normalized.Cron.Schedule)
+	}
+}
+
+func TestValidateRunDraftCronRejectsBadSchedule(t *testing.T) {
+	_, validation := validateRunDraft(context.Background(), RunDraft{
+		Service:     "backup",
+		Host:        "yeet-pve1",
+		Payload:     "job.sh",
+		PayloadKind: serviceTypeCron,
+		Cron:        RunDraftCron{Schedule: "daily"},
+	}, t.TempDir())
+	if got := validation.fieldError("cron.schedule"); !strings.Contains(got, "cron expression must have 5 fields") {
+		t.Fatalf("cron.schedule error = %q, want 5-field error", got)
+	}
+}
+
+func TestValidateRunDraftCronRejectsRunOnlyFields(t *testing.T) {
+	_, validation := validateRunDraft(context.Background(), RunDraft{
+		Service:     "backup",
+		Host:        "yeet-pve1",
+		Payload:     "job.sh",
+		PayloadKind: serviceTypeCron,
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+		Network:     RunDraftNetwork{Modes: []string{"svc"}},
+		Storage:     RunDraftStorage{ServiceRoot: "tank/apps/backup", ZFS: true},
+	}, t.TempDir())
+	if got := validation.fieldError("network.modes"); !strings.Contains(got, "network modes are not supported for scheduled jobs") {
+		t.Fatalf("network.modes error = %q, want cron network rejection", got)
+	}
+	if got := validation.fieldError("serviceRoot"); !strings.Contains(got, "service root is not supported for scheduled jobs during web deploy") {
+		t.Fatalf("serviceRoot error = %q, want cron service root rejection", got)
+	}
+}
+
 func TestValidateRunDraftPayloadKindFileStatsImageLikePayload(t *testing.T) {
 	draft := RunDraft{
 		Service:     "svc-a",

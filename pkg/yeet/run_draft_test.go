@@ -458,6 +458,60 @@ func TestExecuteRunDraftWithOptionsWritesDeployOutputToProvidedWriter(t *testing
 	}
 }
 
+func TestExecuteRunDraftCronUsesCronRunnerAndSavesConfig(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldCron := runCronWithOutputFn
+	defer func() { runCronWithOutputFn = oldCron }()
+
+	var gotFile string
+	var gotFields []string
+	var gotArgs []string
+	runCronWithOutputFn = func(ctx context.Context, stdout io.Writer, file string, cronFields []string, binArgs []string) error {
+		gotFile = file
+		gotFields = append([]string{}, cronFields...)
+		gotArgs = append([]string{}, binArgs...)
+		_, _ = io.WriteString(stdout, "cron installed\n")
+		return nil
+	}
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "job.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	loc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+
+	var out strings.Builder
+	err := executeRunDraftWithOptions(context.Background(), RunDraft{
+		Service:     "backup",
+		Host:        "yeet-pve1",
+		Payload:     payload,
+		PayloadKind: serviceTypeCron,
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+		PayloadArgs: []string{"--full"},
+	}, loc, runDraftExecuteOptions{Stdout: &out})
+	if err != nil {
+		t.Fatalf("executeRunDraftWithOptions: %v", err)
+	}
+	if gotFile != payload || !reflect.DeepEqual(gotFields, []string{"0", "3", "*", "*", "*"}) || !reflect.DeepEqual(gotArgs, []string{"--full"}) {
+		t.Fatalf("cron runner got file=%q fields=%#v args=%#v", gotFile, gotFields, gotArgs)
+	}
+	if !strings.Contains(out.String(), "cron installed") {
+		t.Fatalf("stdout = %q, want cron output", out.String())
+	}
+	entry, ok := loc.Config.ServiceEntry("backup", "yeet-pve1")
+	if !ok {
+		t.Fatal("saved config missing backup@yeet-pve1")
+	}
+	if entry.Type != serviceTypeCron || entry.Payload != "job.sh" || entry.Schedule != "0 3 * * *" || !reflect.DeepEqual(entry.Args, []string{"--full"}) {
+		t.Fatalf("saved cron entry = %#v", entry)
+	}
+}
+
 func TestExecuteRunDraftSkipsServiceInfoOutsideNewOnlyMode(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	oldTryImage := tryRunRemoteImageFn

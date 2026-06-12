@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -330,6 +331,51 @@ func TestRunWebAPIValidateAndDeploy(t *testing.T) {
 		t.Fatalf("deployed env = file:%q set:%v arg:%q, want normalized explicit env", deployed.EnvFile, deployed.EnvFileSet, deployed.EnvFileArg)
 	}
 	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
+}
+
+func TestRunWebAPIDeployCronDraft(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	var deployed RunDraft
+	done := make(chan struct{})
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		deployed = draft
+		close(done)
+		return nil
+	}
+
+	root := t.TempDir()
+	payload := filepath.Join(root, "job.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{
+		Service:     "backup",
+		Host:        "yeet-pve1",
+		Payload:     "job.sh",
+		PayloadKind: serviceTypeCron,
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+		PayloadArgs: []string{"--full"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deploy status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for cron deploy")
+	}
+	if deployed.PayloadKind != serviceTypeCron || deployed.Cron.Schedule != "0 3 * * *" || !reflect.DeepEqual(deployed.PayloadArgs, []string{"--full"}) {
+		t.Fatalf("deployed cron draft = %#v", deployed)
+	}
 }
 
 func TestRunWebAPIDeployStartsJobWithoutWaitingForCompletion(t *testing.T) {

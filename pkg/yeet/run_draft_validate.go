@@ -80,6 +80,7 @@ func validateRunDraftLocal(draft RunDraft, cwd string) (RunDraft, RunDraftValida
 	validateRunDraftVM(&draft, &result)
 	validateRunDraftNetwork(&draft, &result)
 	validateRunDraftStorage(&draft, &result)
+	validateRunDraftCron(&draft, &result)
 	validateRunDraftSnapshots(&draft, &result)
 
 	return draft, result
@@ -94,6 +95,7 @@ func trimRunDraftFields(draft RunDraft) RunDraft {
 	draft.VM.Memory = strings.TrimSpace(draft.VM.Memory)
 	draft.VM.Disk = strings.TrimSpace(draft.VM.Disk)
 	draft.Storage.ServiceRoot = strings.TrimSpace(draft.Storage.ServiceRoot)
+	draft.Cron.Schedule = strings.Join(strings.Fields(draft.Cron.Schedule), " ")
 	draft.Snapshots.Mode = strings.TrimSpace(draft.Snapshots.Mode)
 	draft.Snapshots.MaxAge = strings.TrimSpace(draft.Snapshots.MaxAge)
 	return draft
@@ -287,6 +289,30 @@ func validateRunDraftStorage(draft *RunDraft, result *RunDraftValidationResult) 
 	}
 }
 
+func validateRunDraftCron(draft *RunDraft, result *RunDraftValidationResult) {
+	if draft.PayloadKind != serviceTypeCron {
+		if strings.TrimSpace(draft.Cron.Schedule) != "" {
+			result.addError("cron.schedule", "cron schedule is only valid for scheduled jobs")
+		}
+		return
+	}
+	fields, err := parseCronSchedule(draft.Cron.Schedule)
+	if err != nil {
+		result.addError("cron.schedule", "%v", err)
+	} else {
+		draft.Cron.Schedule = strings.Join(fields, " ")
+	}
+	if len(draft.Network.Modes) != 0 {
+		result.addError("network.modes", "network modes are not supported for scheduled jobs during web deploy")
+	}
+	if draft.Storage.ServiceRoot != "" || draft.Storage.ZFS {
+		result.addError("serviceRoot", "service root is not supported for scheduled jobs during web deploy")
+	}
+	if runDraftSnapshotsHasFieldOverrides(draft.Snapshots) || strings.TrimSpace(draft.Snapshots.Mode) != "" {
+		result.addError("snapshots.mode", "snapshot overrides are not supported for scheduled jobs during web deploy")
+	}
+}
+
 func validateRunDraftSnapshots(draft *RunDraft, result *RunDraftValidationResult) {
 	mode := validateRunDraftSnapshotMode(draft, result)
 	validateRunDraftSnapshotKeepLast(draft.Snapshots, result)
@@ -424,13 +450,14 @@ type runDraftPayloadNormalizerFunc func(cwd, payload, kind string) (string, stri
 
 func runDraftPayloadNormalizer(kind string) (runDraftPayloadNormalizerFunc, bool) {
 	normalizers := map[string]runDraftPayloadNormalizerFunc{
-		"":             normalizeAutoRunDraftPayloadKind,
-		"auto":         normalizeAutoRunDraftPayloadKind,
-		"file":         normalizeFileRunDraftPayloadKind,
-		"compose":      normalizeComposeRunDraftPayloadKind,
-		"dockerfile":   normalizeDockerfileRunDraftPayloadKind,
-		"remote-image": normalizeRemoteImageRunDraftPayloadKind,
-		"local-image":  normalizeLocalImageRunDraftPayloadKind,
+		"":              normalizeAutoRunDraftPayloadKind,
+		"auto":          normalizeAutoRunDraftPayloadKind,
+		"file":          normalizeFileRunDraftPayloadKind,
+		serviceTypeCron: normalizeFileRunDraftPayloadKind,
+		"compose":       normalizeComposeRunDraftPayloadKind,
+		"dockerfile":    normalizeDockerfileRunDraftPayloadKind,
+		"remote-image":  normalizeRemoteImageRunDraftPayloadKind,
+		"local-image":   normalizeLocalImageRunDraftPayloadKind,
 	}
 	normalizer, ok := normalizers[kind]
 	return normalizer, ok
@@ -552,7 +579,7 @@ func looksLikeRunDraftLocalImageName(payload string) bool {
 
 func unknownPayloadKind(kind string) bool {
 	switch kind {
-	case "", "auto", "file", "compose", "dockerfile", "remote-image", "local-image", serviceTypeVM:
+	case "", "auto", "file", "compose", "dockerfile", "remote-image", "local-image", serviceTypeVM, serviceTypeCron:
 		return false
 	default:
 		return true
