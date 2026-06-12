@@ -120,6 +120,8 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	}
 	for _, snippet := range []string{
 		"syncNetworkUI",
+		"validationFieldID",
+		`"cron.schedule": "cronSchedule"`,
 		"activePicker",
 		"showPicker",
 		"hidePicker",
