@@ -32,13 +32,13 @@
           </div>
 
           <label for="service" data-field="service">
-            <span>Service <button type="button" class="help" data-help="Unique service name on the selected catch host." aria-label="Help for service">?</button></span>
+            <span>Service <button type="button" class="help" tabindex="-1" data-help="Unique service name on the selected catch host." aria-label="Help for service">?</button></span>
             <input id="service" name="service" autocomplete="off" spellcheck="false" required>
             <span class="field-error" id="serviceError"></span>
           </label>
 
           <label for="host" data-field="host">
-            <span>Host <button type="button" class="help" data-help="Target catch host from CATCH_HOST, yeet.toml, or prefs." aria-label="Help for host">?</button></span>
+            <span>Host <button type="button" class="help" tabindex="-1" data-help="Target catch host from CATCH_HOST, yeet.toml, or prefs." aria-label="Help for host">?</button></span>
             <div class="host-picker-field">
               <input id="host" name="host" autocomplete="off" spellcheck="false" required aria-haspopup="listbox" aria-expanded="false">
               <button type="button" id="hostPickerButton" class="host-picker-trigger" aria-label="Choose host" aria-controls="hostPicker">
@@ -83,7 +83,7 @@
           </div>
 
           <label for="payload" data-field="payload">
-            <span id="payloadLabel">Compose file <button type="button" class="help" data-help="A compose.yml or docker-compose.yml file in this project." aria-label="Help for source">?</button></span>
+            <span id="payloadLabel">Compose file <button type="button" class="help" tabindex="-1" data-help="A compose.yml or docker-compose.yml file in this project." aria-label="Help for source">?</button></span>
             <div class="picker-field">
               <input id="payload" name="payload" autocomplete="off" spellcheck="false" data-picker-target="payload" aria-haspopup="listbox">
               <button type="button" id="payloadPicker" class="quiet-button picker-trigger" data-picker-target="payload">Pick</button>
@@ -93,7 +93,7 @@
 
           <div id="vmCatalogBlock" class="catalog-block" hidden>
             <label for="vmCatalog" data-field="payload">
-              <span>Catalog image <button type="button" class="help" data-help="Managed VM images from the yeet catalog." aria-label="Help for VM catalog image">?</button></span>
+              <span>Catalog image <button type="button" class="help" tabindex="-1" data-help="Managed VM images from the yeet catalog." aria-label="Help for VM catalog image">?</button></span>
               <select id="vmCatalog" name="vmCatalog"></select>
               <span class="field-error" id="vmCatalogError"></span>
             </label>
@@ -108,13 +108,13 @@
           </div>
 
           <label for="cronSchedule" data-field="cron.schedule" id="cronScheduleField" hidden>
-            <span>Schedule <button type="button" class="help" data-help="Five-field cron expression. Presets fill this raw value." aria-label="Help for cron schedule">?</button></span>
+            <span>Schedule <button type="button" class="help" tabindex="-1" data-help="Five-field cron expression. Presets fill this raw value." aria-label="Help for cron schedule">?</button></span>
             <input id="cronSchedule" name="cronSchedule" autocomplete="off" spellcheck="false" placeholder="0 3 * * *">
             <span class="field-error" id="cronScheduleError"></span>
           </label>
 
           <label for="envFile" data-field="envFile">
-            <span>Env file <button type="button" class="help" data-help="Optional environment file to upload with this service." aria-label="Help for env file">?</button></span>
+            <span>Env file <button type="button" class="help" tabindex="-1" data-help="Optional environment file to upload with this service." aria-label="Help for env file">?</button></span>
             <div class="picker-field">
               <input id="envFile" name="envFile" autocomplete="off" spellcheck="false" data-picker-target="envFile" aria-haspopup="listbox">
               <button type="button" id="envFilePicker" class="quiet-button picker-trigger" data-picker-target="envFile">Pick</button>
@@ -132,7 +132,7 @@
 
           <div class="deploy-settings-grid">
             <fieldset>
-              <legend>Network <button type="button" class="help" data-help="Select one or more network modes for the service." aria-label="Help for network modes">?</button></legend>
+              <legend>Network <button type="button" class="help" tabindex="-1" data-help="Select one or more network modes for the service." aria-label="Help for network modes">?</button></legend>
               <label class="check-pill is-default" for="hostDefault">
                 <input id="hostDefault" type="checkbox" checked disabled>
                 <span>Host</span>
@@ -142,7 +142,7 @@
 
             <div class="root-control">
               <label for="serviceRoot" data-field="serviceRoot">
-                <span id="storageModeLabel">Service root <button type="button" class="help" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></span>
+                <span id="storageModeLabel">Service root <button type="button" class="help" tabindex="-1" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></span>
                 <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false">
                 <span class="field-error" id="serviceRootError"></span>
               </label>
@@ -153,19 +153,19 @@
             </div>
 
             <label for="publish">
-              <span>Publish ports <button type="button" class="help" data-help="Comma-separated port mappings such as 8080:80." aria-label="Help for published ports">?</button></span>
+              <span>Publish ports <button type="button" class="help" tabindex="-1" data-help="Comma-separated port mappings such as 8080:80." aria-label="Help for published ports">?</button></span>
               <input id="publish" name="publish" autocomplete="off" spellcheck="false">
             </label>
           </div>
 
           <div id="tsOptions" class="conditional-options" hidden>
             <label for="tsTags">
-              <span>Tailscale tags <button type="button" class="help" data-help="Comma-separated tags such as tag:app." aria-label="Help for Tailscale tags">?</button></span>
+              <span>Tailscale tags <button type="button" class="help" tabindex="-1" data-help="Comma-separated tags such as tag:app." aria-label="Help for Tailscale tags">?</button></span>
               <input id="tsTags" name="tsTags" autocomplete="off" spellcheck="false" placeholder="tag:app">
             </label>
 
             <details class="advanced-block" id="tsAdvanced">
-              <summary>Tailscale settings <button type="button" class="help" data-help="Optional enrollment, version, and exit node settings." aria-label="Help for Tailscale settings">?</button></summary>
+              <summary>Tailscale settings <button type="button" class="help" tabindex="-1" data-help="Optional enrollment, version, and exit node settings." aria-label="Help for Tailscale settings">?</button></summary>
               <label for="tsAuthKey">
                 <span>Auth key</span>
                 <input id="tsAuthKey" name="tsAuthKey" type="password" autocomplete="off">
@@ -184,7 +184,7 @@
           </div>
 
           <div class="conditional-options" id="lanOptions" hidden>
-            <div class="subsection-label">LAN settings <button type="button" class="help" data-help="Optional macvlan settings used when the LAN network mode is selected." aria-label="Help for LAN settings">?</button></div>
+            <div class="subsection-label">LAN settings <button type="button" class="help" tabindex="-1" data-help="Optional macvlan settings used when the LAN network mode is selected." aria-label="Help for LAN settings">?</button></div>
             <div class="split-fields">
               <label for="macvlanParent">
                 <span>Parent</span>
@@ -202,7 +202,7 @@
           </div>
 
           <div class="conditional-options" id="vmOptions" hidden>
-            <div class="subsection-label">VM shape <button type="button" class="help" data-help="Optional CPU, memory, and disk overrides for vm:// payloads." aria-label="Help for VM shape">?</button></div>
+            <div class="subsection-label">VM shape <button type="button" class="help" tabindex="-1" data-help="Optional CPU, memory, and disk overrides for vm:// payloads." aria-label="Help for VM shape">?</button></div>
             <div class="split-fields vm-fields">
               <label for="vmCPUs" data-field="vm.cpus">
                 <span>vCPU</span>
@@ -223,7 +223,7 @@
           </div>
 
           <details class="advanced-block">
-            <summary>Snapshots <button type="button" class="help" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></summary>
+            <summary>Snapshots <button type="button" class="help" tabindex="-1" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></summary>
             <div class="split-fields">
               <label for="snapshots">
                 <span>Mode</span>
@@ -249,7 +249,7 @@
           </details>
 
           <details class="advanced-block" id="payloadArgsBlock">
-            <summary>Payload args <button type="button" class="help" data-help="Arguments passed after -- to the deployed payload." aria-label="Help for payload args">?</button></summary>
+            <summary>Payload args <button type="button" class="help" tabindex="-1" data-help="Arguments passed after -- to the deployed payload." aria-label="Help for payload args">?</button></summary>
             <label for="payloadArgs">
               <span>Arguments</span>
               <input id="payloadArgs" name="payloadArgs" autocomplete="off" spellcheck="false" placeholder="--flag value">

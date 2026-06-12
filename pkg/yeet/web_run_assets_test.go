@@ -177,6 +177,12 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	if regexp.MustCompile(`\slist\s*=`).Match(index) {
 		t.Fatal("index still contains native input list attribute")
 	}
+	helpButtonRE := regexp.MustCompile(`<button[^>]*class="help"[^>]*>`)
+	for _, match := range helpButtonRE.FindAllString(string(index), -1) {
+		if !strings.Contains(match, `tabindex="-1"`) {
+			t.Fatalf("help button should not interrupt the primary tab order: %s", match)
+		}
+	}
 	gridMatch := regexp.MustCompile(`(?s)<div class="deploy-settings-grid">(.*?)\n          </div>\n\n          <div id="tsOptions"`).FindSubmatch(index)
 	if len(gridMatch) != 2 {
 		t.Fatal("index missing bounded deploy settings grid before advanced options")
