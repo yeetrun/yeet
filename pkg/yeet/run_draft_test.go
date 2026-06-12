@@ -201,6 +201,23 @@ func TestRunDraftCommandPreviewRedactsSeparatedTailscaleAuthKey(t *testing.T) {
 	}
 }
 
+func TestRunDraftCommandPreviewForCronWorkload(t *testing.T) {
+	draft := RunDraft{
+		Service:     "backup",
+		Host:        "yeet-lab",
+		Payload:     "./job.sh",
+		PayloadKind: serviceTypeCron,
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+		PayloadArgs: []string{"--full"},
+	}
+
+	got := runDraftCommandPreview(draft)
+	want := "yeet cron backup@yeet-lab ./job.sh '0 3 * * *' -- --full"
+	if got != want {
+		t.Fatalf("preview = %q, want %q", got, want)
+	}
+}
+
 func TestRunDraftFromCLIParsesVMOptions(t *testing.T) {
 	preserveRunDraftGlobals(t)
 	serviceOverride = "devbox"
@@ -509,6 +526,54 @@ func TestExecuteRunDraftCronUsesCronRunnerAndSavesConfig(t *testing.T) {
 	}
 	if entry.Type != serviceTypeCron || entry.Payload != "job.sh" || entry.Schedule != "0 3 * * *" || !reflect.DeepEqual(entry.Args, []string{"--full"}) {
 		t.Fatalf("saved cron entry = %#v", entry)
+	}
+}
+
+func TestRunCronWithOutputUsesRemoteExecToAndWriter(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldRemoteArch := remoteCatchOSAndArchFn
+	oldExecRemoteTo := execRemoteToFn
+	defer func() {
+		remoteCatchOSAndArchFn = oldRemoteArch
+		execRemoteToFn = oldExecRemoteTo
+	}()
+
+	serviceOverride = "backup"
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	var gotService string
+	var gotArgs []string
+	var gotTTY bool
+	execRemoteToFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		gotService = service
+		gotArgs = append([]string{}, args...)
+		gotTTY = tty
+		_, _ = io.WriteString(stdout, "cron installed\n")
+		return nil
+	}
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "job.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	var out strings.Builder
+	err := runCronWithOutput(context.Background(), &out, payload, []string{"0", "3", "*", "*", "*"}, []string{"--full"})
+	if err != nil {
+		t.Fatalf("runCronWithOutput: %v", err)
+	}
+	if gotService != "backup" {
+		t.Fatalf("service = %q, want backup", gotService)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"cron", "0", "3", "*", "*", "*", "--full"}) {
+		t.Fatalf("args = %#v", gotArgs)
+	}
+	if gotTTY {
+		t.Fatalf("tty = true, want false for test stdout")
+	}
+	if !strings.Contains(out.String(), "cron installed") {
+		t.Fatalf("stdout = %q, want cron output", out.String())
 	}
 }
 

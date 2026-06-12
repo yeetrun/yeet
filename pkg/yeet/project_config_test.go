@@ -953,6 +953,55 @@ func TestSaveCronConfigCreatesToml(t *testing.T) {
 	}
 }
 
+func TestSaveCronConfigClearsRunOnlyFields(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+
+	required := true
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "job.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	loc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	loc.Config.SetServiceEntry(ServiceEntry{
+		Name:             "backup",
+		Host:             "yeet-lab",
+		Type:             serviceTypeRun,
+		Payload:          "compose.yml",
+		PayloadKind:      "compose",
+		EnvFile:          ".env",
+		ServiceRoot:      "tank/apps/backup",
+		ServiceRootZFS:   true,
+		Snapshots:        "on",
+		SnapshotKeepLast: 3,
+		SnapshotMaxAge:   "72h",
+		SnapshotRequired: &required,
+		SnapshotEvents:   []string{"run"},
+		Ports:            []string{"8080:80"},
+	})
+
+	serviceOverride = "backup"
+	if err := saveCronConfig(loc, "yeet-lab", payload, []string{"0", "3", "*", "*", "*"}, []string{"--full"}); err != nil {
+		t.Fatalf("saveCronConfig: %v", err)
+	}
+
+	entry, ok := loc.Config.ServiceEntry("backup", "yeet-lab")
+	if !ok {
+		t.Fatal("saved config missing backup@yeet-lab")
+	}
+	if entry.Type != serviceTypeCron || entry.Payload != "job.sh" || entry.Schedule != "0 3 * * *" || !reflect.DeepEqual(entry.Args, []string{"--full"}) {
+		t.Fatalf("cron entry core fields = %#v", entry)
+	}
+	if entry.PayloadKind != "" || entry.EnvFile != "" || entry.ServiceRoot != "" || entry.ServiceRootZFS || entry.Snapshots != "" || entry.SnapshotKeepLast != 0 || entry.SnapshotMaxAge != "" || entry.SnapshotRequired != nil || len(entry.SnapshotEvents) != 0 || len(entry.Ports) != 0 {
+		t.Fatalf("cron entry kept run-only fields: %#v", entry)
+	}
+}
+
 func TestProjectConfigAllHostsDedupesTrimsAndSorts(t *testing.T) {
 	cfg := &ProjectConfig{
 		Hosts: []string{" host-b ", "", "host-a", "host-b"},

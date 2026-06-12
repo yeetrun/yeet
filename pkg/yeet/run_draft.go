@@ -384,7 +384,7 @@ func runCronWithOutput(ctx context.Context, stdout io.Writer, file string, cronF
 	if len(binArgs) > 0 {
 		nargs = append(nargs, binArgs...)
 	}
-	tty := isTerminalFn(int(os.Stdout.Fd()))
+	tty := isStdoutWriter(stdout) && isTerminalFn(int(os.Stdout.Fd()))
 	return execRemoteToFn(ctx, svc, nargs, payload, tty, stdout)
 }
 
@@ -407,6 +407,9 @@ func saveRunDraftExecutionConfig(cfgLoc *projectConfigLocation, host string, dra
 }
 
 func runDraftCommandPreview(draft RunDraft) string {
+	if draft.PayloadKind == serviceTypeCron {
+		return runDraftCronCommandPreview(draft)
+	}
 	parts := []string{"yeet", "run"}
 	if target := runDraftCommandTarget(draft); target != "" {
 		parts = append(parts, target)
@@ -416,6 +419,24 @@ func runDraftCommandPreview(draft RunDraft) string {
 	}
 	parts = appendRunDraftCommandPreviewControlArgs(parts, draft)
 	parts = append(parts, runArgsWithSensitiveRunOptionsHidden(draft.runArgs())...)
+	return shellJoin(parts)
+}
+
+func runDraftCronCommandPreview(draft RunDraft) string {
+	parts := []string{"yeet", "cron"}
+	if target := runDraftCommandTarget(draft); target != "" {
+		parts = append(parts, target)
+	}
+	if strings.TrimSpace(draft.Payload) != "" {
+		parts = append(parts, draft.Payload)
+	}
+	if schedule := strings.TrimSpace(draft.Cron.Schedule); schedule != "" {
+		parts = append(parts, schedule)
+	}
+	if len(draft.PayloadArgs) != 0 {
+		parts = append(parts, "--")
+		parts = append(parts, draft.PayloadArgs...)
+	}
 	return shellJoin(parts)
 }
 

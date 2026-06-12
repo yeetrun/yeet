@@ -385,6 +385,24 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 	sortServiceEntries(c.Services)
 }
 
+func (c *ProjectConfig) ReplaceServiceEntry(entry ServiceEntry) {
+	entry.Args = cloneStringSlice(entry.Args)
+	entry.SnapshotRequired = cloneBoolPtr(entry.SnapshotRequired)
+	entry.SnapshotEvents = cloneStringSlice(entry.SnapshotEvents)
+	entry.Ports = cloneStringSlice(entry.Ports)
+	for i := range c.Services {
+		if c.Services[i].Name == entry.Name && c.Services[i].Host == entry.Host {
+			c.Services[i] = entry
+			c.addHost(entry.Host)
+			sortServiceEntries(c.Services)
+			return
+		}
+	}
+	c.Services = append(c.Services, entry)
+	c.addHost(entry.Host)
+	sortServiceEntries(c.Services)
+}
+
 func (c *ProjectConfig) SetServiceRootForEntry(service, host, root string, zfs bool) bool {
 	if c == nil {
 		return false

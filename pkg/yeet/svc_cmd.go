@@ -2650,6 +2650,6 @@ func saveCronConfig(cfgLoc *projectConfigLocation, hostOverride string, payload 
 		Schedule: strings.Join(cronFields, " "),
 		Args:     normalizeArgs(binArgs),
 	}
-	loc.Config.SetServiceEntry(entry)
+	loc.Config.ReplaceServiceEntry(entry)
 	return saveProjectConfig(loc)
 }
