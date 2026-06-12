@@ -187,6 +187,8 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		".catalog-block",
 		".subsection-label",
 		".deploy-settings-grid",
+		"[hidden]",
+		"display: none !important",
 	} {
 		if !strings.Contains(string(styles), snippet) {
 			t.Fatalf("styles missing %s", snippet)
