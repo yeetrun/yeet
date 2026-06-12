@@ -298,12 +298,20 @@ func TestValidateRunDraftCronRejectsRunOnlyFields(t *testing.T) {
 		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
 		Network:     RunDraftNetwork{Modes: []string{"svc"}},
 		Storage:     RunDraftStorage{ServiceRoot: "tank/apps/backup", ZFS: true},
+		Pull:        true,
+		ForceDeploy: true,
 	}, t.TempDir())
 	if got := validation.fieldError("network.modes"); !strings.Contains(got, "network modes are not supported for scheduled jobs") {
 		t.Fatalf("network.modes error = %q, want cron network rejection", got)
 	}
 	if got := validation.fieldError("serviceRoot"); !strings.Contains(got, "service root is not supported for scheduled jobs during web deploy") {
 		t.Fatalf("serviceRoot error = %q, want cron service root rejection", got)
+	}
+	if got := validation.fieldError("pull"); !strings.Contains(got, "pull is not supported for scheduled jobs during web deploy") {
+		t.Fatalf("pull error = %q, want cron pull rejection", got)
+	}
+	if got := validation.fieldError("forceDeploy"); !strings.Contains(got, "force deploy is not supported for scheduled jobs during web deploy") {
+		t.Fatalf("forceDeploy error = %q, want cron force deploy rejection", got)
 	}
 }
 
@@ -341,8 +349,10 @@ func TestValidateRunDraftCronRejectsMissingEnvFileBeforePathCheck(t *testing.T) 
 	if got := validation.Errors[0]; got.Field != "envFile" || !strings.Contains(got.Message, "env file is not supported for scheduled jobs during web deploy") {
 		t.Fatalf("first error = %#v, want cron env file rejection", got)
 	}
-	if got := validation.fieldError("envFile"); strings.Contains(got, "does not exist") {
-		t.Fatalf("envFile error = %q, want no path existence error", got)
+	for _, got := range validation.Errors {
+		if got.Field == "envFile" && strings.Contains(got.Message, "does not exist") {
+			t.Fatalf("envFile error = %#v, want no path existence error", got)
+		}
 	}
 }
 
