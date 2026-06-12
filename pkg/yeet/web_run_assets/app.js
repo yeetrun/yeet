@@ -163,6 +163,30 @@ function sourcePayloadForWorkload(workload) {
   return $("payload").value.trim();
 }
 
+function inferWorkloadForPayload(payload) {
+  const trimmed = payload.trim();
+  const name = trimmed.split("/").pop();
+  const lowerName = name.toLowerCase();
+  if (!trimmed) return "compose";
+  if (isVMPayload(trimmed)) return "vm";
+  if (lowerName === "dockerfile" || lowerName.startsWith("dockerfile.")) return "dockerfile";
+  if (["compose.yml", "compose.yaml", "docker-compose.yml", "docker-compose.yaml"].includes(lowerName)) {
+    return "compose";
+  }
+  if (trimmed.startsWith("./") || trimmed.startsWith("../") || trimmed.startsWith("/")) return "file";
+  if (name.includes(".") && !name.includes(":")) return "file";
+  if (looksLikeImageReference(trimmed)) return "remote-image";
+  return "compose";
+}
+
+function looksLikeImageReference(payload) {
+  return !payload.includes("\\") && !payload.includes("@") && (
+    payload.includes(":") ||
+    payload.includes("/") ||
+    payload.includes(".")
+  );
+}
+
 function buildDraft() {
   const restart = true;
   // Future redeploy support can add pull/force once the web flow allows existing services.
@@ -171,6 +195,8 @@ function buildDraft() {
   const payloadKind = workloadPayloadKind(workload);
   const vmPayload = payloadKind === "vm";
   const cronPayload = payloadKind === "cron";
+  const envFile = vmPayload || cronPayload ? "" : $("envFile").value.trim();
+  const publish = vmPayload || cronPayload ? [] : splitCSV($("publish").value);
   const snapshotRequired = snapshotRequiredValue();
   const modes = selectedNetworkModes();
   const hasTailscale = modes.includes("ts");
@@ -180,7 +206,7 @@ function buildDraft() {
     host: $("host").value.trim(),
     payload,
     payloadKind,
-    envFile: $("envFile").value.trim(),
+    envFile,
     payloadArgs: vmPayload ? [] : splitArgs($("payloadArgs").value),
     cron: cronPayload ? {
       schedule: $("cronSchedule").value.trim(),
@@ -199,7 +225,7 @@ function buildDraft() {
       macvlanMac: hasLAN ? $("macvlanMac").value.trim() : "",
       macvlanVlan: hasLAN ? Number.parseInt($("macvlanVlan").value, 10) || 0 : 0,
       macvlanParent: hasLAN ? $("macvlanParent").value.trim() : "",
-      publish: splitCSV($("publish").value),
+      publish,
       restart,
     },
     storage: cronPayload ? {} : {
@@ -839,9 +865,10 @@ async function bootstrap() {
   const prefillPayload = state.bootstrap.prefill?.payload || "";
   $("payload").value = prefillPayload;
   renderVMCatalog(state.bootstrap.options?.vmImages || []);
-  if (isVMPayload(prefillPayload)) {
-    const vmWorkload = document.querySelector("input[name='workload'][value='vm']");
-    if (vmWorkload) vmWorkload.checked = true;
+  const inferredWorkload = inferWorkloadForPayload(prefillPayload);
+  const workloadInput = document.querySelector(`input[name='workload'][value='${inferredWorkload}']`);
+  if (workloadInput) workloadInput.checked = true;
+  if (inferredWorkload === "vm") {
     const catalogValues = [...$("vmCatalog").options].map((item) => item.value);
     if (catalogValues.includes(prefillPayload)) $("vmCatalog").value = prefillPayload;
     else $("manualVMSource").value = prefillPayload;
@@ -929,7 +956,7 @@ function applyValidationErrors(validation) {
 
 function redactValidationDraft(draft) {
   const copy = JSON.parse(JSON.stringify(draft));
-  if (copy.network) delete copy.network.tsAuthKey;
+  if (copy.network?.tsAuthKey) copy.network.tsAuthKey = "<hidden>";
   return copy;
 }
 
