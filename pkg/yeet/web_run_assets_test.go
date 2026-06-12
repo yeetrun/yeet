@@ -177,18 +177,30 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	if regexp.MustCompile(`\slist\s*=`).Match(index) {
 		t.Fatal("index still contains native input list attribute")
 	}
-	if !regexp.MustCompile(`(?s)<div class="deploy-settings-grid">.*class="root-control".*id="tsOptions"`).Match(index) {
+	gridMatch := regexp.MustCompile(`(?s)<div class="deploy-settings-grid">(.*?)\n          </div>\n\n          <div id="tsOptions"`).FindSubmatch(index)
+	if len(gridMatch) != 2 {
+		t.Fatal("index missing bounded deploy settings grid before advanced options")
+	}
+	gridHTML := string(gridMatch[1])
+	if !strings.Contains(gridHTML, `class="root-control"`) {
 		t.Fatal("deploy settings grid must contain storage controls before advanced options")
+	}
+	for _, advanced := range []string{`id="tsOptions"`, `id="lanOptions"`, `id="vmOptions"`, `id="payloadArgsBlock"`} {
+		if strings.Contains(gridHTML, advanced) {
+			t.Fatalf("deploy settings grid should not contain advanced block %s", advanced)
+		}
 	}
 	for _, snippet := range []string{
 		".workload-selector",
 		".workload-option",
+		".workload-option span",
 		".source-head",
 		".catalog-block",
 		".subsection-label",
 		".deploy-settings-grid",
 		"[hidden]",
 		"display: none !important",
+		"@media (max-width: 430px)",
 	} {
 		if !strings.Contains(string(styles), snippet) {
 			t.Fatalf("styles missing %s", snippet)

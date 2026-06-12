@@ -532,6 +532,11 @@ legend {
   background: oklch(0.15 0.012 165);
 }
 
+.workload-option span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .workload-option:has(input:checked) {
   border-color: var(--brand);
   background: color-mix(in oklch, var(--brand) 14%, var(--surface));
@@ -792,5 +797,11 @@ body[data-terminal-visible="true"] .shell {
   #formStatus {
     max-width: none;
     white-space: normal;
+  }
+}
+
+@media (max-width: 430px) {
+  .workload-selector {
+    grid-template-columns: 1fr;
   }
 }
