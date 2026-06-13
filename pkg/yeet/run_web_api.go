@@ -60,6 +60,7 @@ func newRunWebServer(cfg runWebServerConfig) http.Handler {
 	s.mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
 	s.mux.HandleFunc("/api/files", s.handleFiles)
 	s.mux.HandleFunc("/api/zfs-roots", s.handleZFSRoots)
+	s.mux.HandleFunc("/api/vm-defaults", s.handleVMDefaults)
 	s.mux.HandleFunc("/api/validate", s.handleValidate)
 	s.mux.HandleFunc("/api/deploy", s.handleDeploy)
 	s.mux.HandleFunc("/api/deploy/", s.handleDeployJob)
@@ -157,6 +158,26 @@ func (s *runWebServer) handleZFSRoots(w http.ResponseWriter, r *http.Request) {
 	writeRunWebJSON(w, http.StatusOK, runWebZFSRootsResponse(ctx, host, catchrpc.ZFSServiceRootCandidatesRequest{
 		Workload: query.Get("workload"),
 		Service:  query.Get("service"),
+	}))
+}
+
+func (s *runWebServer) handleVMDefaults(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	query := r.URL.Query()
+	host := strings.TrimSpace(query.Get("host"))
+	if host == "" {
+		host = s.cfg.Bootstrap.SelectedHost
+	}
+	zfs, _ := strconv.ParseBool(query.Get("zfs"))
+	ctx, cancel := runWebHandlerContext(s.cfg.Context, r.Context())
+	defer cancel()
+	writeRunWebJSON(w, http.StatusOK, runWebVMDefaultsResponseForHost(ctx, host, catchrpc.VMDefaultsRequest{
+		Service:     query.Get("service"),
+		ServiceRoot: query.Get("serviceRoot"),
+		ZFS:         zfs,
 	}))
 }
 

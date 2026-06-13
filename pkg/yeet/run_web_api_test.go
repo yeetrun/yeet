@@ -172,6 +172,102 @@ func TestRunWebAPIZFSRootsRejectsBadMethods(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIVMDefaultsUsesSelectedHost(t *testing.T) {
+	oldFetch := fetchRunWebVMDefaultsFn
+	defer func() { fetchRunWebVMDefaultsFn = oldFetch }()
+
+	var gotHost string
+	var gotReq catchrpc.VMDefaultsRequest
+	fetchRunWebVMDefaultsFn = func(ctx context.Context, host string, req catchrpc.VMDefaultsRequest) (catchrpc.VMDefaultsResponse, error) {
+		gotHost = host
+		gotReq = req
+		return catchrpc.VMDefaultsResponse{
+			CPUs:        4,
+			Memory:      "4g",
+			MemoryBytes: 4 << 30,
+			Disk:        "128g",
+			DiskBytes:   128 << 30,
+			DiskBackend: "zvol",
+		}, nil
+	}
+	s := newRunWebServer(runWebServerConfig{
+		Token:     "secret",
+		Root:      t.TempDir(),
+		Bootstrap: runWebBootstrap{SelectedHost: "yeet-lab"},
+	})
+	rec := runWebAPIRequest(t, s, http.MethodGet, "/api/vm-defaults?service=devbox&serviceRoot=flash/yeet/vms/devbox&zfs=true", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("vm defaults status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotHost != "yeet-lab" {
+		t.Fatalf("host = %q, want yeet-lab", gotHost)
+	}
+	if gotReq.Service != "devbox" || gotReq.ServiceRoot != "flash/yeet/vms/devbox" || !gotReq.ZFS {
+		t.Fatalf("request = %#v, want devbox ZFS request", gotReq)
+	}
+	var body runWebVMDefaultsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.State != "available" || body.Defaults.CPUs != 4 || body.Defaults.Memory != "4g" || body.Defaults.Disk != "128g" {
+		t.Fatalf("response = %#v, want available 4/4g/128g", body)
+	}
+
+	rec = runWebAPIRequest(t, s, http.MethodGet, "/api/vm-defaults?host=yeet-storage&service=devbox", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("vm defaults explicit host status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotHost != "yeet-storage" {
+		t.Fatalf("explicit host = %q, want yeet-storage", gotHost)
+	}
+}
+
+func TestRunWebAPIVMDefaultsMapsErrorsToStates(t *testing.T) {
+	oldFetch := fetchRunWebVMDefaultsFn
+	defer func() { fetchRunWebVMDefaultsFn = oldFetch }()
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "unsupported rpc", err: errors.New("rpc error -32601: method not found"), want: "unsupported-rpc"},
+		{name: "host unreachable", err: syscall.ECONNREFUSED, want: "host-unreachable"},
+		{name: "other error", err: errors.New("permission denied"), want: "error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetchRunWebVMDefaultsFn = func(ctx context.Context, host string, req catchrpc.VMDefaultsRequest) (catchrpc.VMDefaultsResponse, error) {
+				return catchrpc.VMDefaultsResponse{}, tt.err
+			}
+			s := newRunWebServer(runWebServerConfig{
+				Token:     "secret",
+				Root:      t.TempDir(),
+				Bootstrap: runWebBootstrap{SelectedHost: "yeet-lab"},
+			})
+			rec := runWebAPIRequest(t, s, http.MethodGet, "/api/vm-defaults?service=devbox", nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			var body runWebVMDefaultsResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if body.State != tt.want {
+				t.Fatalf("state = %q, want %q body=%#v", body.State, tt.want, body)
+			}
+		})
+	}
+}
+
+func TestRunWebAPIVMDefaultsRejectsBadMethods(t *testing.T) {
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/vm-defaults", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRunWebAPIStaticAssetsRequireAuth(t *testing.T) {
 	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
 

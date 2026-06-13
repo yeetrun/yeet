@@ -445,6 +445,28 @@ legend {
   margin-top: 12px;
 }
 
+.settings-block {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding-bottom: 2px;
+}
+
+.settings-block + .settings-block,
+.settings-block + .advanced-block {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.settings-block.conditional-options,
+.settings-block .conditional-options,
+.settings-block > fieldset,
+.settings-block .root-control,
+.settings-block > label {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
 .advanced-block {
   margin-top: 14px;
   padding: 0;
@@ -491,6 +513,7 @@ legend {
   align-items: center;
 }
 
+.zfs-root-field > input,
 .zfs-root-trigger {
   min-height: 40px;
   white-space: nowrap;

@@ -420,3 +420,9 @@ func (c *Client) ZFSServiceRootCandidates(ctx context.Context, req ZFSServiceRoo
 	err := c.Call(ctx, "catch.ZFSServiceRootCandidates", req, &resp)
 	return resp, err
 }
+
+func (c *Client) VMDefaults(ctx context.Context, req VMDefaultsRequest) (VMDefaultsResponse, error) {
+	var resp VMDefaultsResponse
+	err := c.Call(ctx, "catch.VMDefaults", req, &resp)
+	return resp, err
+}

@@ -201,6 +201,67 @@ func TestRPCTailscaleSetup(t *testing.T) {
 	}
 }
 
+func TestRPCVMDefaults(t *testing.T) {
+	server := newTestServer(t)
+	oldProfile := vmDefaultsHostProfileFunc
+	defer func() { vmDefaultsHostProfileFunc = oldProfile }()
+	vmDefaultsHostProfileFunc = func(_ *Server, req catchrpc.VMDefaultsRequest, _ int64) (vmHostProfile, []string, error) {
+		if req.Service != "devbox" || req.ServiceRoot != "flash/yeet/vms/devbox" || !req.ZFS {
+			t.Fatalf("request = %#v, want devbox ZFS request", req)
+		}
+		return vmHostProfile{
+			Arch:         "x86_64",
+			HasKVM:       true,
+			LogicalCPUs:  12,
+			MemoryBytes:  31 << 30,
+			StorageBytes: 897 << 30,
+			StorageZFS:   true,
+		}, nil, nil
+	}
+	ts := httptest.NewServer(server.RPCMux())
+	defer ts.Close()
+
+	params, err := json.Marshal(catchrpc.VMDefaultsRequest{
+		Service:     "devbox",
+		ServiceRoot: "flash/yeet/vms/devbox",
+		ZFS:         true,
+	})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	req := catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "catch.VMDefaults",
+		Params:  params,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	resp, err := http.Post(ts.URL+"/rpc", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp catchrpc.Response
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", rpcResp.Error)
+	}
+	var defaults catchrpc.VMDefaultsResponse
+	b, _ := json.Marshal(rpcResp.Result)
+	if err := json.Unmarshal(b, &defaults); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if defaults.CPUs != 4 || defaults.Memory != "4g" || defaults.Disk != "128g" || defaults.DiskBackend != "zvol" {
+		t.Fatalf("defaults = %#v, want 4/4g/128g zvol", defaults)
+	}
+}
+
 func TestRPCMethodNotFound(t *testing.T) {
 	server := newTestServer(t)
 	ts := httptest.NewServer(server.RPCMux())

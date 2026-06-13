@@ -347,6 +347,51 @@ func TestZFSServiceRootCandidatesCallsRPC(t *testing.T) {
 	}
 }
 
+func TestVMDefaultsCallsRPC(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method != "catch.VMDefaults" {
+			t.Fatalf("method = %q, want catch.VMDefaults", req.Method)
+		}
+		var params VMDefaultsRequest
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatalf("decode params: %v", err)
+		}
+		if params.Service != "devbox" || params.ServiceRoot != "flash/yeet/vms/devbox" || !params.ZFS {
+			t.Fatalf("params = %#v, want devbox ZFS request", params)
+		}
+		_ = json.NewEncoder(w).Encode(Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: VMDefaultsResponse{
+				CPUs:        4,
+				Memory:      "4g",
+				MemoryBytes: 4 << 30,
+				Disk:        "128g",
+				DiskBytes:   128 << 30,
+				DiskBackend: "zvol",
+			},
+		})
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	got, err := NewClient(host, port).VMDefaults(context.Background(), VMDefaultsRequest{
+		Service:     "devbox",
+		ServiceRoot: "flash/yeet/vms/devbox",
+		ZFS:         true,
+	})
+	if err != nil {
+		t.Fatalf("VMDefaults returned error: %v", err)
+	}
+	if got.CPUs != 4 || got.Memory != "4g" || got.Disk != "128g" || got.DiskBackend != "zvol" {
+		t.Fatalf("VMDefaults = %#v, want 4/4g/128g zvol", got)
+	}
+}
+
 func TestClientExec(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	var gotReq ExecRequest
