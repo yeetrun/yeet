@@ -151,6 +151,10 @@ func runDraftNetworkModeSet(modes []string, want string) bool {
 }
 
 func validateRunDraftVMNetworkModes(modes []string, result *RunDraftValidationResult) {
+	if len(modes) == 0 {
+		result.addError("network.modes", "VM networking requires svc, lan, or svc,lan")
+		return
+	}
 	for _, mode := range modes {
 		switch mode {
 		case "svc", "lan":

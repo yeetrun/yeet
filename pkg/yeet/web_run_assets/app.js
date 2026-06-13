@@ -471,6 +471,7 @@ function hideHostPicker() {
 function syncNetworkUI() {
   const payloadKind = workloadPayloadKind(selectedWorkload());
   const vmPayload = payloadKind === "vm";
+  ensureVMNetworkSelection();
   document.querySelectorAll("input[name='net']").forEach((input) => {
     if (input.value === "ts") {
       input.disabled = vmPayload;
@@ -484,6 +485,13 @@ function syncNetworkUI() {
   $("lanOptions").hidden = !modes.includes("lan");
   $("vmOptions").hidden = !vmPayload;
   $("payloadArgsBlock").hidden = !payloadArgsEnabled();
+}
+
+function ensureVMNetworkSelection() {
+  const payloadKind = workloadPayloadKind(selectedWorkload());
+  if (payloadKind !== "vm" || selectedNetworkModes().length) return;
+  const fallback = document.querySelector('input[name="net"][value="svc"]') || document.querySelector('input[name="net"]');
+  if (fallback) fallback.checked = true;
 }
 
 function updateServiceRootPlaceholder() {
