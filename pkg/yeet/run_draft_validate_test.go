@@ -915,6 +915,35 @@ func TestValidateRunDraftRejectsInvalidZFSDatasetNames(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftUsesVMZVOLWordingForInvalidVMZFSDatasetName(t *testing.T) {
+	for _, serviceRoot := range []string{"/pool/compute/devbox", "pool/compute/devbox/"} {
+		t.Run(serviceRoot, func(t *testing.T) {
+			draft := RunDraft{
+				Service:     "devbox",
+				Host:        "host-a",
+				Payload:     "vm://ubuntu/26.04",
+				PayloadKind: serviceTypeVM,
+				Storage: RunDraftStorage{
+					ServiceRoot: serviceRoot,
+					ZFS:         true,
+				},
+			}
+			_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+			if validation.OK {
+				t.Fatal("validation OK = true, want false")
+			}
+			got := validation.fieldError("serviceRoot")
+			if !strings.Contains(got, "VM ZVOL parent") {
+				t.Fatalf("serviceRoot error = %q, want VM ZVOL parent wording", got)
+			}
+			if strings.Contains(got, "zfs service root") {
+				t.Fatalf("serviceRoot error = %q, want no generic service root wording", got)
+			}
+		})
+	}
+}
+
 func TestValidateRunDraftAcceptsZFSDatasetName(t *testing.T) {
 	draft := RunDraft{
 		Service: "svc-a",
