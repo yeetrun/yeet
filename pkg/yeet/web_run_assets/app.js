@@ -364,6 +364,7 @@ function renderNetworkModes(modes) {
     input.type = "checkbox";
     input.name = "net";
     input.value = mode;
+    input.addEventListener("input", () => ensureVMNetworkSelection(input.value));
     const span = document.createElement("span");
     span.textContent = networkModeLabels[mode] || mode;
     label.append(input, span);
@@ -480,17 +481,19 @@ function syncNetworkUI() {
   });
   const modes = selectedNetworkModes();
   $("hostDefault").disabled = true;
-  $("hostDefault").checked = modes.length === 0;
+  $("hostDefault").closest("label").hidden = vmPayload;
+  $("hostDefault").checked = !vmPayload && modes.length === 0;
   $("tsOptions").hidden = !modes.includes("ts");
   $("lanOptions").hidden = !modes.includes("lan");
   $("vmOptions").hidden = !vmPayload;
   $("payloadArgsBlock").hidden = !payloadArgsEnabled();
 }
 
-function ensureVMNetworkSelection() {
+function ensureVMNetworkSelection(clearedMode = "") {
   const payloadKind = workloadPayloadKind(selectedWorkload());
   if (payloadKind !== "vm" || selectedNetworkModes().length) return;
-  const fallback = document.querySelector('input[name="net"][value="svc"]') || document.querySelector('input[name="net"]');
+  const fallbackValue = clearedMode === "svc" ? "lan" : "svc";
+  const fallback = document.querySelector(`input[name="net"][value="${fallbackValue}"]`) || document.querySelector('input[name="net"][value="svc"]') || document.querySelector('input[name="net"]');
   if (fallback) fallback.checked = true;
 }
 

@@ -357,9 +357,13 @@ func TestWebRunVMNetworkSelectionNeverFallsBackToHost(t *testing.T) {
 	source := string(app)
 
 	for _, snippet := range []string{
-		"function ensureVMNetworkSelection()",
+		"function ensureVMNetworkSelection(clearedMode = \"\")",
 		`if (payloadKind !== "vm" || selectedNetworkModes().length) return`,
+		`const fallbackValue = clearedMode === "svc" ? "lan" : "svc"`,
 		`fallback.checked = true`,
+		`input.addEventListener("input", () => ensureVMNetworkSelection(input.value))`,
+		`$("hostDefault").closest("label").hidden = vmPayload`,
+		`$("hostDefault").checked = !vmPayload && modes.length === 0`,
 		"ensureVMNetworkSelection();",
 	} {
 		if !strings.Contains(source, snippet) {
