@@ -1460,6 +1460,8 @@ $("serviceRoot").addEventListener("input", () => {
   state.pickedZFSRoot = null;
   renderZFSRootCandidates(state.zfsRootState);
 });
+$("serviceRoot").addEventListener("focus", showZFSRootPicker);
+$("serviceRoot").addEventListener("click", showZFSRootPicker);
 for (const [id, field] of [["vmCPUs", "cpus"], ["vmMemory", "memory"], ["vmDisk", "disk"]]) {
   $(id).addEventListener("input", () => {
     state.vmShapeManual[field] = true;

@@ -315,6 +315,24 @@ func TestWebRunZFSRootPickFocusesServiceRootForTyping(t *testing.T) {
 	}
 }
 
+func TestWebRunZFSRootPickerOpensFromServiceRootField(t *testing.T) {
+	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
+	if err != nil {
+		t.Fatalf("read app: %v", err)
+	}
+	source := string(app)
+
+	for _, snippet := range []string{
+		`$("serviceRoot").addEventListener("focus", showZFSRootPicker)`,
+		`$("serviceRoot").addEventListener("click", showZFSRootPicker)`,
+		`if (event.target.closest("#zfsRootPicker") || event.target.closest(".zfs-root-field")) return`,
+	} {
+		if !strings.Contains(source, snippet) {
+			t.Fatalf("app missing service-root picker trigger %s", snippet)
+		}
+	}
+}
+
 func TestWebRunPayloadArgsOnlyShowForRunnableFilesAndCron(t *testing.T) {
 	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
 	if err != nil {
