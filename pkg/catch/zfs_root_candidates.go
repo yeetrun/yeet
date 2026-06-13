@@ -27,6 +27,7 @@ type zfsRootCandidateRow struct {
 	Origin     string
 	Canmount   string
 	Readonly   string
+	Mounted    string
 }
 
 type zfsRootCandidateNode struct {
@@ -52,7 +53,7 @@ func zfsServiceRootCandidates(ctx context.Context, runner zfsCommandRunner, req 
 		runner = runZFSCommand
 	}
 
-	stdout, stderr, err := runner(ctx, "list", "-H", "-p", "-o", "name,type,mountpoint,available,used,refer,origin,canmount,readonly", "-t", "filesystem,volume")
+	stdout, stderr, err := runner(ctx, "list", "-H", "-p", "-o", "name,type,mountpoint,available,used,refer,origin,canmount,readonly,mounted", "-t", "filesystem,volume")
 	if err != nil {
 		if isZFSMissingCommand(stderr, err) {
 			return catchrpc.ZFSServiceRootCandidatesResponse{State: catchrpc.ZFSRootDiscoveryZFSMissing}, nil
@@ -91,7 +92,7 @@ func parseZFSRootCandidateRows(raw string) ([]zfsRootCandidateRow, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 9 {
+		if len(fields) != 10 {
 			return nil, fmt.Errorf("invalid zfs list row %q", line)
 		}
 		available, err := parseZFSRootCandidateBytes(fields[3], "available", line)
@@ -116,6 +117,7 @@ func parseZFSRootCandidateRows(raw string) ([]zfsRootCandidateRow, error) {
 			Origin:     strings.TrimSpace(fields[6]),
 			Canmount:   strings.TrimSpace(fields[7]),
 			Readonly:   strings.TrimSpace(fields[8]),
+			Mounted:    strings.TrimSpace(fields[9]),
 		})
 	}
 	return rows, nil
@@ -222,11 +224,11 @@ func zfsComposeRootCandidateRank(name string, childCount, vmChildCount, serviceC
 	rank := serviceChildCount*100 + childCount
 	switch {
 	case zfsDatasetNameEndsWith(name, "yeet"):
-		rank += 80
+		rank += 10000
 	case zfsDatasetNameEndsWith(name, "apps"):
-		rank += 70
+		rank += 9000
 	case zfsDatasetNameEndsWith(name, "services"):
-		rank += 70
+		rank += 9000
 	}
 	if zfsDatasetNameEndsWith(name, "vms") {
 		rank -= 150
@@ -260,6 +262,9 @@ func usableZFSRootCandidate(row zfsRootCandidateRow) bool {
 		return false
 	}
 	if strings.EqualFold(row.Readonly, "on") {
+		return false
+	}
+	if !strings.EqualFold(row.Mounted, "yes") {
 		return false
 	}
 	return !isInternalVMImagesDataset(row.Name)

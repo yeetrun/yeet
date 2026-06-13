@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -414,11 +415,11 @@ func TestRPCServicesListDispatch(t *testing.T) {
 func TestRPCZFSServiceRootCandidates(t *testing.T) {
 	server := newTestServer(t)
 	server.zfsRunner = fakeZFSListRunner(strings.Join([]string{
-		"flash\tfilesystem\t/flash\t1000\t400\t100\t-\ton\toff",
-		"flash/yeet\tfilesystem\t/flash/yeet\t1000\t300\t1\t-\ton\toff",
-		"flash/yeet/vms\tfilesystem\t/flash/yeet/vms\t1000\t30\t1\t-\ton\toff",
-		"flash/yeet/vms/devbox\tfilesystem\t/flash/yeet/vms/devbox\t1000\t10\t1\t-\ton\toff",
-		"flash/yeet/vms/devbox/root\tvolume\t-\t1000\t10\t10\tflash/yeet/vm-images/ubuntu/root@snap\t-\toff",
+		"flash\tfilesystem\t/flash\t1000\t400\t100\t-\ton\toff\tyes",
+		"flash/yeet\tfilesystem\t/flash/yeet\t1000\t300\t1\t-\ton\toff\tyes",
+		"flash/yeet/vms\tfilesystem\t/flash/yeet/vms\t1000\t30\t1\t-\ton\toff\tyes",
+		"flash/yeet/vms/devbox\tfilesystem\t/flash/yeet/vms/devbox\t1000\t10\t1\t-\ton\toff\tyes",
+		"flash/yeet/vms/devbox/root\tvolume\t-\t1000\t10\t10\tflash/yeet/vm-images/ubuntu/root@snap\t-\toff\t-",
 	}, "\n")+"\n", "", nil)
 
 	params, err := json.Marshal(catchrpc.ZFSServiceRootCandidatesRequest{
@@ -451,6 +452,70 @@ func TestRPCZFSServiceRootCandidates(t *testing.T) {
 	if len(roots.Candidates) == 0 || roots.Candidates[0].SuggestedDataset != "flash/yeet/vms/devbox" {
 		t.Fatalf("roots = %#v", roots)
 	}
+}
+
+func TestRPCZFSServiceRootCandidatesCancelsRunnerWithRequestContext(t *testing.T) {
+	server := newTestServer(t)
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	release := make(chan struct{})
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		close(started)
+		select {
+		case <-ctx.Done():
+			close(canceled)
+			return "", "", ctx.Err()
+		case <-release:
+			return "", "", errZFSCommandFailed
+		}
+	}
+	ts := httptest.NewServer(server.RPCMux())
+	defer ts.Close()
+
+	params, err := json.Marshal(catchrpc.ZFSServiceRootCandidatesRequest{Workload: "vm"})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	body, err := json.Marshal(catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "catch.ZFSServiceRootCandidates",
+		Params:  params,
+	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/rpc", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for zfs runner to start")
+	}
+	cancel()
+	select {
+	case <-canceled:
+	case <-time.After(500 * time.Millisecond):
+		close(release)
+		<-done
+		t.Fatal("zfs runner did not observe request cancellation")
+	}
+	<-done
 }
 
 func TestRPCArtifactHashesMissingService(t *testing.T) {

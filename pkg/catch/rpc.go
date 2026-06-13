@@ -146,10 +146,14 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 		return // notification
 	}
 
-	writeRPCResponse(w, s.dispatchRPC(req))
+	writeRPCResponse(w, s.dispatchRPCWithContext(r.Context(), req))
 }
 
 func (s *Server) dispatchRPC(req catchrpc.Request) catchrpc.Response {
+	return s.dispatchRPCWithContext(context.Background(), req)
+}
+
+func (s *Server) dispatchRPCWithContext(ctx context.Context, req catchrpc.Request) catchrpc.Response {
 	switch req.Method {
 	case "catch.Info":
 		return newRPCResponse(req.ID, GetInfoWithConfig(&s.cfg))
@@ -158,7 +162,7 @@ func (s *Server) dispatchRPC(req catchrpc.Request) catchrpc.Response {
 	case "catch.ArtifactHashes":
 		return s.handleRPCArtifactHashes(req)
 	case "catch.ZFSServiceRootCandidates":
-		return s.handleRPCZFSServiceRootCandidates(req)
+		return s.handleRPCZFSServiceRootCandidates(ctx, req)
 	case "catch.TailscaleSetup":
 		return s.handleRPCTailscaleSetup(req)
 	case "catch.ServicesList":
@@ -204,12 +208,12 @@ func (s *Server) handleRPCArtifactHashes(req catchrpc.Request) catchrpc.Response
 	return newRPCResponse(req.ID, resp)
 }
 
-func (s *Server) handleRPCZFSServiceRootCandidates(req catchrpc.Request) catchrpc.Response {
+func (s *Server) handleRPCZFSServiceRootCandidates(ctx context.Context, req catchrpc.Request) catchrpc.Response {
 	var params catchrpc.ZFSServiceRootCandidatesRequest
 	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
 		return responseFromRPCError(req.ID, rpcErr)
 	}
-	resp, err := s.zfsServiceRootCandidates(context.Background(), params)
+	resp, err := s.zfsServiceRootCandidates(ctx, params)
 	if err != nil {
 		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to get ZFS service root candidates", err.Error())
 	}
