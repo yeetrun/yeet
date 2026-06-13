@@ -276,11 +276,12 @@ func validateRunDraftPaths(cwd string, draft *RunDraft, result *RunDraftValidati
 
 func validateRunDraftStorage(draft *RunDraft, result *RunDraftValidationResult) {
 	if draft.Storage.ZFS {
+		zfsLabel := runDraftZFSStorageLabel(*draft)
 		if draft.Storage.ServiceRoot == "" {
-			result.addError("serviceRoot", "service root or ZFS dataset is required when zfs is enabled")
+			result.addError("serviceRoot", "%s dataset is required when zfs is enabled", zfsLabel)
 		} else if filepath.IsAbs(draft.Storage.ServiceRoot) {
-			result.addError("serviceRoot", "zfs service root expects a dataset name, not an absolute path")
-		} else if err := validateRunDraftZFSDatasetName(draft.Storage.ServiceRoot); err != nil {
+			result.addError("serviceRoot", "%s expects a dataset name, not an absolute path", zfsLabel)
+		} else if err := validateRunDraftZFSDatasetName(draft.Storage.ServiceRoot, zfsLabel); err != nil {
 			result.addError("serviceRoot", "%v", err)
 		}
 	} else if draft.Storage.ServiceRoot != "" {
@@ -290,6 +291,13 @@ func validateRunDraftStorage(draft *RunDraft, result *RunDraftValidationResult) 
 			draft.Storage.ServiceRoot = filepath.Clean(draft.Storage.ServiceRoot)
 		}
 	}
+}
+
+func runDraftZFSStorageLabel(draft RunDraft) string {
+	if draft.PayloadKind == serviceTypeVM {
+		return "VM ZVOL parent"
+	}
+	return "zfs service root"
 }
 
 func validateRunDraftCron(draft *RunDraft, result *RunDraftValidationResult) {
@@ -638,22 +646,22 @@ func unknownPayloadKind(kind string) bool {
 	}
 }
 
-func validateRunDraftZFSDatasetName(dataset string) error {
+func validateRunDraftZFSDatasetName(dataset, label string) error {
 	if len(dataset) > 255 {
-		return fmt.Errorf("zfs service root dataset name must be 255 characters or fewer")
+		return fmt.Errorf("%s dataset name must be 255 characters or fewer", label)
 	}
 	if strings.HasPrefix(dataset, "/") || strings.HasSuffix(dataset, "/") {
-		return fmt.Errorf("zfs service root expects a dataset name without leading or trailing slash")
+		return fmt.Errorf("%s expects a dataset name without leading or trailing slash", label)
 	}
 	if strings.ContainsAny(dataset, "@#") {
-		return fmt.Errorf("zfs service root expects a dataset name, not snapshot or bookmark syntax")
+		return fmt.Errorf("%s expects a dataset name, not snapshot or bookmark syntax", label)
 	}
 	for _, part := range strings.Split(dataset, "/") {
 		if part == "" || part == "." || part == ".." {
-			return fmt.Errorf("zfs service root contains invalid dataset component %q", part)
+			return fmt.Errorf("%s contains invalid dataset component %q", label, part)
 		}
 		if !runDraftZFSDatasetPartRE.MatchString(part) {
-			return fmt.Errorf("zfs service root contains malformed dataset component %q", part)
+			return fmt.Errorf("%s contains malformed dataset component %q", label, part)
 		}
 	}
 	return nil
