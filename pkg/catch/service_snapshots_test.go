@@ -151,6 +151,45 @@ func TestCreateServiceSnapshotCommand(t *testing.T) {
 	}
 }
 
+func TestCreateServiceSnapshotCommandWithCommentAndCheckpoint(t *testing.T) {
+	var calls [][]string
+	runner := func(ctx context.Context, args ...string) (string, string, error) {
+		calls = append(calls, append([]string{}, args...))
+		return "", "", nil
+	}
+	req := snapshotCreateRequest{
+		Service:    "devbox",
+		Dataset:    "flash/yeet/vms/devbox/root",
+		Event:      snapshotEventVMManual,
+		Generation: 4,
+		Now:        time.Date(2026, 6, 13, 18, 0, 0, 0, time.UTC),
+		Comment:    " before upgrade ",
+		Checkpoint: " disk ",
+	}
+
+	name, err := createServiceSnapshot(context.Background(), runner, req)
+	if err != nil {
+		t.Fatalf("createServiceSnapshot: %v", err)
+	}
+	if name != "flash/yeet/vms/devbox/root@yeet-20260613T180000Z-vm-manual-g4" {
+		t.Fatalf("snapshot name = %q", name)
+	}
+	want := []string{
+		"snapshot",
+		"-o", "com.yeetrun:created-by=catch",
+		"-o", "com.yeetrun:service=devbox",
+		"-o", "com.yeetrun:event=vm-manual",
+		"-o", "com.yeetrun:generation=4",
+		"-o", "com.yeetrun:policy-version=1",
+		"-o", "com.yeetrun:comment=before upgrade",
+		"-o", "com.yeetrun:checkpoint=disk",
+		"flash/yeet/vms/devbox/root@yeet-20260613T180000Z-vm-manual-g4",
+	}
+	if !reflect.DeepEqual(calls, [][]string{want}) {
+		t.Fatalf("zfs args = %#v, want %#v", calls, [][]string{want})
+	}
+}
+
 func TestCreateServiceSnapshotRetriesNameCollisionWithSuffix(t *testing.T) {
 	var calls [][]string
 	runner := func(ctx context.Context, args ...string) (string, string, error) {

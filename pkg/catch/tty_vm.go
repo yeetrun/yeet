@@ -41,28 +41,53 @@ func (e *ttyExecer) vmCmdFunc(args []string) error {
 	}
 	switch args[0] {
 	case "console":
-		if len(args) != 1 {
-			return fmt.Errorf("vm console takes no remote arguments")
-		}
-		return e.vmConsoleCmdFunc()
+		return e.vmConsoleRemoteCmdFunc(args[1:])
 	case "set":
-		flags, rest, err := cli.ParseVMSet(args[1:])
-		if err != nil {
-			return err
-		}
-		if len(rest) != 0 {
-			return fmt.Errorf("unexpected vm set args: %s", strings.Join(rest, " "))
-		}
-		return e.s.updateVMServiceSettings(e.vmProvisionContext(), e.sn, flags)
+		return e.vmSetCmdFunc(args[1:])
+	case "snapshot":
+		return e.vmSnapshotCmdFunc(args[1:])
 	case "images":
-		flags, remaining, err := cli.ParseVMImages(args[1:])
-		if err != nil {
-			return err
-		}
-		return e.vmImagesCmdFunc(flags, remaining)
+		return e.vmImagesRemoteCmdFunc(args[1:])
 	default:
 		return fmt.Errorf("unknown vm command %q", args[0])
 	}
+}
+
+func (e *ttyExecer) vmConsoleRemoteCmdFunc(args []string) error {
+	if len(args) != 0 {
+		return fmt.Errorf("vm console takes no remote arguments")
+	}
+	return e.vmConsoleCmdFunc()
+}
+
+func (e *ttyExecer) vmSetCmdFunc(args []string) error {
+	flags, rest, err := cli.ParseVMSet(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 0 {
+		return fmt.Errorf("unexpected vm set args: %s", strings.Join(rest, " "))
+	}
+	return e.s.updateVMServiceSettings(e.vmProvisionContext(), e.sn, flags)
+}
+
+func (e *ttyExecer) vmSnapshotCmdFunc(args []string) error {
+	flags, rest, err := cli.ParseVMSnapshot(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 0 {
+		return fmt.Errorf("unexpected vm snapshot args: %s", strings.Join(rest, " "))
+	}
+	return e.s.createVMSnapshot(e.vmProvisionContext(), e.sn, flags, e.rw)
+}
+
+func (e *ttyExecer) vmImagesRemoteCmdFunc(args []string) error {
+	flags, remaining, err := cli.ParseVMImages(args)
+	if err != nil {
+		return err
+	}
+	return e.vmImagesCmdFunc(flags, remaining)
 }
 
 func (e *ttyExecer) vmImageCache() vmImageCache {

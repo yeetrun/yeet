@@ -166,11 +166,11 @@
                 <span class="field-error" id="serviceRootError"></span>
               </div>
 
-              <details class="advanced-block">
-                <summary>Snapshots <button type="button" class="help" tabindex="-1" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></summary>
+              <details class="advanced-block" id="snapshotDetails">
+                <summary><span id="snapshotSummaryText">Snapshots</span> <button type="button" class="help" tabindex="-1" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></summary>
                 <div class="split-fields">
                   <label for="snapshots">
-                    <span>Mode</span>
+                    <span id="snapshotModeLabel">Mode</span>
                     <select id="snapshots" name="snapshots"></select>
                   </label>
                   <label for="snapshotKeepLast">
@@ -182,11 +182,11 @@
                   <span>Max age</span>
                   <input id="snapshotMaxAge" name="snapshotMaxAge" autocomplete="off" spellcheck="false" placeholder="7d or 72h">
                 </label>
-                <label for="snapshotRequired">
+                <label for="snapshotRequired" id="snapshotRequiredField">
                   <span>Required</span>
                   <select id="snapshotRequired" name="snapshotRequired"></select>
                 </label>
-                <label for="snapshotEvents">
+                <label for="snapshotEvents" id="snapshotEventsField">
                   <span>Events</span>
                   <input id="snapshotEvents" name="snapshotEvents" autocomplete="off" spellcheck="false" placeholder="run,docker-update">
                 </label>

@@ -87,9 +87,10 @@ func buildGroupHandlers() map[string]yargs.Group {
 		"vm": {
 			Description: "Manage VM-specific commands",
 			Commands: map[string]yargs.SubcommandHandler{
-				"console": handleVMGroup,
-				"set":     handleVMGroup,
-				"images":  handleVMGroup,
+				"console":  handleVMGroup,
+				"set":      handleVMGroup,
+				"images":   handleVMGroup,
+				"snapshot": handleVMGroup,
 			},
 		},
 		"env": {

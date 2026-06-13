@@ -334,6 +334,36 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	}
 }
 
+func TestRunVMPersistsSnapshotPolicyFlags(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+
+	if err := execer.runVM(cli.RunFlags{
+		Net:              "svc",
+		Restart:          false,
+		Snapshots:        "on",
+		SnapshotKeepLast: "3",
+		SnapshotMaxAge:   "72h",
+		SnapshotChange:   true,
+	}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+
+	policy := getTestService(t, server, "svc").SnapshotPolicy
+	if policy == nil {
+		t.Fatal("SnapshotPolicy is nil, want valid policy")
+	}
+	if policy.Enabled == nil || !*policy.Enabled {
+		t.Fatalf("SnapshotPolicy.Enabled = %v, want true", policy.Enabled)
+	}
+	if policy.KeepLast == nil || *policy.KeepLast != 3 {
+		t.Fatalf("SnapshotPolicy.KeepLast = %v, want 3", policy.KeepLast)
+	}
+	if policy.MaxAge != "72h" {
+		t.Fatalf("SnapshotPolicy.MaxAge = %q, want 72h", policy.MaxAge)
+	}
+}
+
 func TestRunVMProvisionUsesManifestDefaultUser(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")

@@ -381,6 +381,7 @@ func validateRunDraftSnapshots(draft *RunDraft, result *RunDraftValidationResult
 	mode := validateRunDraftSnapshotMode(draft, result)
 	validateRunDraftSnapshotKeepLast(draft.Snapshots, result)
 	validateRunDraftSnapshotMaxAge(draft.Snapshots, result)
+	validateRunDraftVMSnapshots(draft, result)
 	validateRunDraftSnapshotRequired(draft.Snapshots, result)
 	validateRunDraftSnapshotEvents(draft, result)
 	if mode == "inherit" && runDraftSnapshotsHasFieldOverrides(draft.Snapshots) {
@@ -419,6 +420,19 @@ func validateRunDraftSnapshotEvents(draft *RunDraft, result *RunDraftValidationR
 		result.addError("snapshots.events", "snapshot events cannot be combined with inherit")
 	}
 	draft.Snapshots.Events = trimRunDraftSnapshotEvents(draft.Snapshots.Events, result)
+}
+
+func validateRunDraftVMSnapshots(draft *RunDraft, result *RunDraftValidationResult) {
+	if draft.PayloadKind != serviceTypeVM {
+		return
+	}
+	if draft.Snapshots.Required != nil || draft.Snapshots.RequiredInherit {
+		result.addError("snapshots.required", "VM snapshot policy does not use required; manual vm snapshots fail or succeed directly")
+	}
+	if len(draft.Snapshots.Events) != 0 || draft.Snapshots.EventsInherit {
+		result.addError("snapshots.events", "VM snapshot policy does not use events; use mode, keep last, and max age for manual vm snapshots")
+		draft.Snapshots.Events = nil
+	}
 }
 
 func validateRunDraftSnapshotMode(draft *RunDraft, result *RunDraftValidationResult) string {

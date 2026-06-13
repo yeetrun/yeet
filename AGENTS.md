@@ -65,6 +65,14 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
   of local `main` and `origin/main` is the only allowed raw `git` write
   exception for branch/commit publication, and it still requires explicit user
   authorization.
+- `website/` submodule pointer publication is a narrow raw `git` exception only
+  when GitButler cannot materialize the gitlink after a single focused attempt.
+  GitButler may resolve `but` commands run from `website/` back to the parent
+  workspace, so website-repo commits and pushes may use raw `git -C website ...`
+  commands when they touch only the website repository. The website commit must
+  already exist and be pushed inside `website/`, and any raw root update must
+  touch only the `website` gitlink and be part of an explicitly authorized
+  finish-to-main/push workflow.
 - After a session lands on `main`, run `but pull` so GitButler can mark the
   branch integrated, then preview cleanup with `but clean --dry-run` before
   running `but clean`. Delete non-empty branches or raw local `codex/*` refs
@@ -145,7 +153,21 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - When you make user-facing changes (CLI commands, flags, workflows, behavior), update the website docs in the same work session.
 - Keep CLI-facing documentation (README quickstart/examples and CLI help text) in sync with those changes.
 - To get the latest website content: `git submodule update --init --recursive`.
-- Edit markdown files inside `website/`, commit and push **within that repo**, then commit the updated submodule pointer in this repo.
+- Edit markdown files inside `website/`, commit and push **within that repo**,
+  then commit the updated submodule pointer in this repo. If `but` run from
+  `website/` still shows the parent `yeet` GitButler workspace, use raw
+  `git -C website status`, `git -C website commit`, and `git -C website push`
+  for the website repository only.
+- After committing inside `website/`, verify the parent pointer with
+  `git diff --submodule=log -- website`; it should show exactly the intended
+  website commit range. Then use GitButler to stage and commit the root
+  `website` gitlink.
+- If GitButler leaves `website` staged after claiming `Created commit unknown`
+  or `Some selected changes could not be committed`, do not keep retrying
+  `but commit`, `but absorb`, or `but rub`. Treat it as the known submodule
+  gitlink limitation, verify `git -C website status --short --branch`, and use
+  the narrow Version Control exception above only after the website commit is
+  pushed and the user has authorized finishing/pushing the root repo.
 
 ## Website Changelog Styleguide
 - Date-first sections, then version headings, then 1-3 short bullets per release.
