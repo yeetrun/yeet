@@ -282,3 +282,54 @@ func TestWebRunAssetsRecognizeAllVMPayloads(t *testing.T) {
 		t.Fatal("VM settings help copy should describe all vm:// payloads")
 	}
 }
+
+func TestWebRunZFSRootPickFocusesServiceRootForTyping(t *testing.T) {
+	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
+	if err != nil {
+		t.Fatalf("read app: %v", err)
+	}
+	source := string(app)
+
+	for _, snippet := range []string{
+		"function focusServiceRootAtEnd()",
+		`const position = input.value.length`,
+		`input.focus({ preventScroll: true })`,
+		`input.setSelectionRange(position, position)`,
+	} {
+		if !strings.Contains(source, snippet) {
+			t.Fatalf("app missing service-root focus behavior %s", snippet)
+		}
+	}
+
+	pickStart := strings.Index(source, "function pickZFSRootCandidate(candidate)")
+	if pickStart < 0 {
+		t.Fatal("pickZFSRootCandidate missing")
+	}
+	nextFunction := strings.Index(source[pickStart+1:], "\nfunction ")
+	if nextFunction < 0 {
+		t.Fatal("pickZFSRootCandidate block terminator missing")
+	}
+	pickBlock := source[pickStart : pickStart+1+nextFunction]
+	if !strings.Contains(pickBlock, "focusServiceRootAtEnd();") {
+		t.Fatal("picking a ZFS root should focus the service-root field for immediate typing")
+	}
+}
+
+func TestWebRunPayloadArgsOnlyShowForRunnableFilesAndCron(t *testing.T) {
+	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
+	if err != nil {
+		t.Fatalf("read app: %v", err)
+	}
+	source := string(app)
+
+	for _, snippet := range []string{
+		"function payloadArgsEnabled()",
+		`return payloadKind === "file" || payloadKind === "cron"`,
+		`payloadArgs: payloadArgsEnabled() ? splitArgs($("payloadArgs").value) : []`,
+		`$("payloadArgsBlock").hidden = !payloadArgsEnabled()`,
+	} {
+		if !strings.Contains(source, snippet) {
+			t.Fatalf("app missing payload args visibility behavior %s", snippet)
+		}
+	}
+}
