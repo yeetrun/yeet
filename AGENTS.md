@@ -78,6 +78,14 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
   running `but clean`. Delete non-empty branches or raw local `codex/*` refs
   only when they belong to this session and are confirmed merged; never clean up
   another agent's branch unless the user asks.
+- If a direct squash-to-main publication is used while the GitButler session
+  branch is still applied, `but pull` may try to rebase the duplicate checkpoint
+  commits onto the squash commit and report conflicts even though raw `git
+  status` is clean. In that case, verify `main` and `origin/main` contain the
+  squash commit, then delete only this session's GitButler branch instead of
+  resolving duplicate conflicts. If the current `but` build prompts to delete
+  "unpushed" duplicate commits and does not accept `--force`, pipe a single
+  `y` into `but branch delete <branch>`.
 - Final status must distinguish local checkpoint commits from branch pushes and
   from work that has landed on `origin/main`. If the user asked to push
   everything, finish only after verifying `origin/main` contains the session
