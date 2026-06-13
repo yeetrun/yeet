@@ -150,6 +150,13 @@
                 <input id="zfs" name="zfs" type="checkbox">
                 <span id="zfsHelp">ZFS dataset</span>
               </label>
+              <div class="zfs-root-picker" id="zfsRootPicker" hidden>
+                <div class="zfs-root-head">
+                  <span>Suggested roots</span>
+                  <span id="zfsRootStatus" class="zfs-root-status" role="status"></span>
+                </div>
+                <div id="zfsRootList" class="zfs-root-list"></div>
+              </div>
             </div>
 
             <label for="publish">
