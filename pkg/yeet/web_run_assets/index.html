@@ -140,23 +140,17 @@
               <div class="checks" id="networkModes"></div>
             </fieldset>
 
-            <div class="root-control">
-              <label for="serviceRoot" data-field="serviceRoot">
-                <span id="storageModeLabel">Service root <button type="button" class="help" tabindex="-1" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></span>
-                <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false">
-                <span class="field-error" id="serviceRootError"></span>
-              </label>
-              <label class="zfs-toggle" for="zfs">
-                <input id="zfs" name="zfs" type="checkbox">
-                <span id="zfsHelp">ZFS dataset</span>
-              </label>
-              <div class="zfs-root-picker" id="zfsRootPicker" hidden>
-                <div class="zfs-root-head">
-                  <span>Suggested roots</span>
-                  <span id="zfsRootStatus" class="zfs-root-status" role="status"></span>
-                </div>
-                <div id="zfsRootList" class="zfs-root-list"></div>
+            <div class="root-control" data-field="serviceRoot">
+              <div id="storageModeLabel" class="field-label">Service root <button type="button" class="help" tabindex="-1" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></div>
+              <div class="zfs-root-field">
+                <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false" aria-labelledby="storageModeLabel">
+                <button type="button" id="zfsRootPickerButton" class="quiet-button zfs-root-trigger" aria-label="Choose ZFS dataset root" aria-controls="zfsRootPicker" aria-expanded="false" hidden>Roots</button>
+                <label class="zfs-toggle" for="zfs">
+                  <input id="zfs" name="zfs" type="checkbox">
+                  <span id="zfsHelp">ZFS</span>
+                </label>
               </div>
+              <span class="field-error" id="serviceRootError"></span>
             </div>
 
             <label for="publish">
@@ -290,6 +284,14 @@
         <button type="button" id="upButton" class="quiet-button">Up</button>
       </div>
       <div id="fileBrowser" class="picker-list" aria-label="Project files"></div>
+    </div>
+
+    <div class="field-picker zfs-root-picker" id="zfsRootPicker" role="listbox" hidden>
+      <div class="browser-head zfs-root-head">
+        <span>ZFS roots</span>
+        <span id="zfsRootStatus" class="zfs-root-status" role="status"></span>
+      </div>
+      <div id="zfsRootList" class="picker-list zfs-root-list" aria-label="ZFS dataset roots"></div>
     </div>
 
     <div class="tooltip" id="tooltip" role="tooltip" hidden></div>

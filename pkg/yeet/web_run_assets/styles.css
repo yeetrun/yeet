@@ -162,11 +162,17 @@ label {
   font-size: 14px;
 }
 
+.field-label,
 label > span,
 legend {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.field-label {
+  color: var(--muted);
+  font-size: 14px;
 }
 
 input,
@@ -474,9 +480,20 @@ legend {
 
 .root-control {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: end;
+  gap: 7px;
+  margin: 12px 0;
+}
+
+.zfs-root-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.zfs-root-trigger {
+  min-height: 40px;
+  white-space: nowrap;
 }
 
 .zfs-toggle {
@@ -484,7 +501,7 @@ legend {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  margin: 12px 0 28px;
+  margin: 0;
   padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -500,10 +517,7 @@ legend {
 }
 
 .zfs-root-picker {
-  grid-column: 1 / -1;
-  display: grid;
-  gap: 8px;
-  margin: -14px 0 6px;
+  width: min(520px, calc(100vw - 24px));
 }
 
 .zfs-root-head {
@@ -528,37 +542,36 @@ legend {
 
 .zfs-root-list {
   display: grid;
-  gap: 6px;
+  gap: 2px;
+  min-height: 44px;
+  max-height: 260px;
 }
 
 .zfs-root-row {
   width: 100%;
-  min-height: 48px;
+  min-height: 40px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(120px, auto);
-  gap: 2px 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
   align-items: center;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
   color: var(--text);
-  background: oklch(0.15 0.012 165);
+  background: transparent;
   text-align: left;
 }
 
 .zfs-root-row:hover,
 .zfs-root-row:focus-visible {
-  border-color: var(--line-strong);
   background: var(--surface-2);
 }
 
-.zfs-root-row[aria-pressed="true"] {
-  border-color: var(--brand);
+.zfs-root-row[aria-selected="true"] {
   background: color-mix(in oklch, var(--brand) 12%, var(--surface));
 }
 
 .zfs-root-main,
-.zfs-root-suggested,
 .zfs-root-meta {
   min-width: 0;
   overflow: hidden;
@@ -567,30 +580,22 @@ legend {
 }
 
 .zfs-root-main {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-weight: 700;
 }
 
 .zfs-root-meta {
-  grid-column: 1 / -1;
+  text-align: right;
   color: var(--quiet);
   font-size: 12px;
-}
-
-.zfs-root-suggested {
-  color: var(--accent);
-  font-size: 12px;
-  text-align: right;
 }
 
 .zfs-root-empty {
   min-height: 38px;
   display: grid;
   align-items: center;
-  padding: 8px 10px;
-  border: 1px dashed var(--line);
-  border-radius: 8px;
+  padding: 8px;
   color: var(--quiet);
-  background: oklch(0.15 0.012 165);
   font-size: 13px;
 }
 
@@ -861,13 +866,22 @@ body[data-terminal-visible="true"] .shell {
 
   .deploy-form,
   .split-fields,
-  .root-control,
-  .zfs-root-row,
   .picker-field {
     grid-template-columns: 1fr;
   }
 
-  .zfs-root-suggested {
+  .zfs-root-field,
+  .zfs-root-row {
+    grid-template-columns: 1fr;
+  }
+
+  .zfs-root-trigger,
+  .zfs-toggle {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .zfs-root-meta {
     text-align: left;
   }
 
