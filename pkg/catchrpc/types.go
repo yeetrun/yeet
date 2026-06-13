@@ -153,6 +153,22 @@ type ZFSServiceRootCandidatesResponse struct {
 	Warnings   []string                  `json:"warnings,omitempty"`
 }
 
+type VMDefaultsRequest struct {
+	Service     string `json:"service,omitempty"`
+	ServiceRoot string `json:"serviceRoot,omitempty"`
+	ZFS         bool   `json:"zfs,omitempty"`
+}
+
+type VMDefaultsResponse struct {
+	CPUs        int      `json:"cpus,omitempty"`
+	Memory      string   `json:"memory,omitempty"`
+	MemoryBytes int64    `json:"memoryBytes,omitempty"`
+	Disk        string   `json:"disk,omitempty"`
+	DiskBytes   int64    `json:"diskBytes,omitempty"`
+	DiskBackend string   `json:"diskBackend,omitempty"`
+	Warnings    []string `json:"warnings,omitempty"`
+}
+
 type SnapshotPolicy struct {
 	Enabled  *bool    `json:"enabled,omitempty"`
 	KeepLast *int     `json:"keepLast,omitempty"`

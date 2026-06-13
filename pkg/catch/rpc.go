@@ -163,6 +163,8 @@ func (s *Server) dispatchRPCWithContext(ctx context.Context, req catchrpc.Reques
 		return s.handleRPCArtifactHashes(req)
 	case "catch.ZFSServiceRootCandidates":
 		return s.handleRPCZFSServiceRootCandidates(ctx, req)
+	case "catch.VMDefaults":
+		return s.handleRPCVMDefaults(ctx, req)
 	case "catch.TailscaleSetup":
 		return s.handleRPCTailscaleSetup(req)
 	case "catch.ServicesList":
@@ -216,6 +218,18 @@ func (s *Server) handleRPCZFSServiceRootCandidates(ctx context.Context, req catc
 	resp, err := s.zfsServiceRootCandidates(ctx, params)
 	if err != nil {
 		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to get ZFS service root candidates", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
+}
+
+func (s *Server) handleRPCVMDefaults(ctx context.Context, req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.VMDefaultsRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.vmDefaults(ctx, params)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to get VM defaults", err.Error())
 	}
 	return newRPCResponse(req.ID, resp)
 }

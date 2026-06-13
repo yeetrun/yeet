@@ -127,135 +127,139 @@
         <section class="panel options-panel" aria-labelledby="deploySettingsTitle">
           <div class="section-heading">
             <h2 id="deploySettingsTitle">Deploy settings</h2>
-            <p>Network and storage</p>
+            <p>Shape, storage, network</p>
           </div>
 
           <div class="deploy-settings-grid">
-            <fieldset>
-              <legend>Network <button type="button" class="help" tabindex="-1" data-help="Select one or more network modes for the service." aria-label="Help for network modes">?</button></legend>
-              <label class="check-pill is-default" for="hostDefault">
-                <input id="hostDefault" type="checkbox" checked disabled>
-                <span>Host</span>
-              </label>
-              <div class="checks" id="networkModes"></div>
-            </fieldset>
-
-            <div class="root-control" data-field="serviceRoot">
-              <div id="storageModeLabel" class="field-label">Service root <button type="button" class="help" tabindex="-1" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></div>
-              <div class="zfs-root-field">
-                <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false" aria-labelledby="storageModeLabel">
-                <button type="button" id="zfsRootPickerButton" class="quiet-button zfs-root-trigger" aria-label="Choose ZFS dataset root" aria-controls="zfsRootPicker" aria-expanded="false" hidden>Roots</button>
-                <label class="zfs-toggle" for="zfs">
-                  <input id="zfs" name="zfs" type="checkbox">
-                  <span id="zfsHelp">ZFS</span>
+            <div class="settings-block conditional-options" id="vmOptions" hidden>
+              <div class="subsection-label">VM shape <button type="button" class="help" tabindex="-1" data-help="CPU, memory, and disk values catch will use for vm:// payloads." aria-label="Help for VM shape">?</button></div>
+              <div class="split-fields vm-fields">
+                <label for="vmCPUs" data-field="vm.cpus">
+                  <span>vCPU</span>
+                  <input id="vmCPUs" name="vmCPUs" inputmode="numeric" autocomplete="off">
+                  <span class="field-error" id="vmCPUsError"></span>
+                </label>
+                <label for="vmMemory" data-field="vm.memory">
+                  <span>Memory</span>
+                  <input id="vmMemory" name="vmMemory" autocomplete="off" spellcheck="false">
+                  <span class="field-error" id="vmMemoryError"></span>
                 </label>
               </div>
-              <span class="field-error" id="serviceRootError"></span>
+              <label for="vmDisk" data-field="vm.disk">
+                <span>Disk</span>
+                <input id="vmDisk" name="vmDisk" autocomplete="off" spellcheck="false">
+                <span class="field-error" id="vmDiskError"></span>
+              </label>
             </div>
 
-            <label for="publish">
-              <span>Publish ports <button type="button" class="help" tabindex="-1" data-help="Comma-separated port mappings such as 8080:80." aria-label="Help for published ports">?</button></span>
-              <input id="publish" name="publish" autocomplete="off" spellcheck="false">
-            </label>
-          </div>
-
-          <div id="tsOptions" class="conditional-options" hidden>
-            <label for="tsTags">
-              <span>Tailscale tags <button type="button" class="help" tabindex="-1" data-help="Comma-separated tags such as tag:app." aria-label="Help for Tailscale tags">?</button></span>
-              <input id="tsTags" name="tsTags" autocomplete="off" spellcheck="false" placeholder="tag:app">
-            </label>
-
-            <details class="advanced-block" id="tsAdvanced">
-              <summary>Tailscale settings <button type="button" class="help" tabindex="-1" data-help="Optional enrollment, version, and exit node settings." aria-label="Help for Tailscale settings">?</button></summary>
-              <label for="tsAuthKey">
-                <span>Auth key</span>
-                <input id="tsAuthKey" name="tsAuthKey" type="password" autocomplete="off">
-              </label>
-              <div class="split-fields">
-                <label for="tsVersion">
-                  <span>Version</span>
-                  <input id="tsVersion" name="tsVersion" autocomplete="off" spellcheck="false">
-                </label>
-                <label for="tsExitNode">
-                  <span>Exit node</span>
-                  <input id="tsExitNode" name="tsExitNode" autocomplete="off" spellcheck="false">
-                </label>
+            <div class="settings-block" id="storageOptions">
+              <div class="root-control" data-field="serviceRoot">
+                <div id="storageModeLabel" class="field-label">Service root <button type="button" class="help" tabindex="-1" data-help="Leave empty to use the catch default root. Enter an absolute filesystem path, or a dataset name when ZFS is enabled." aria-label="Help for service root">?</button></div>
+                <div class="zfs-root-field">
+                  <input id="serviceRoot" name="serviceRoot" autocomplete="off" spellcheck="false" aria-labelledby="storageModeLabel">
+                  <button type="button" id="zfsRootPickerButton" class="quiet-button zfs-root-trigger" aria-label="Choose ZFS dataset root" aria-controls="zfsRootPicker" aria-expanded="false" hidden>Roots</button>
+                  <label class="zfs-toggle" for="zfs">
+                    <input id="zfs" name="zfs" type="checkbox">
+                    <span id="zfsHelp">ZFS</span>
+                  </label>
+                </div>
+                <span class="field-error" id="serviceRootError"></span>
               </div>
+
+              <details class="advanced-block">
+                <summary>Snapshots <button type="button" class="help" tabindex="-1" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></summary>
+                <div class="split-fields">
+                  <label for="snapshots">
+                    <span>Mode</span>
+                    <select id="snapshots" name="snapshots"></select>
+                  </label>
+                  <label for="snapshotKeepLast">
+                    <span>Keep last</span>
+                    <input id="snapshotKeepLast" name="snapshotKeepLast" inputmode="numeric" autocomplete="off">
+                  </label>
+                </div>
+                <label for="snapshotMaxAge">
+                  <span>Max age</span>
+                  <input id="snapshotMaxAge" name="snapshotMaxAge" autocomplete="off" spellcheck="false" placeholder="7d or 72h">
+                </label>
+                <label for="snapshotRequired">
+                  <span>Required</span>
+                  <select id="snapshotRequired" name="snapshotRequired"></select>
+                </label>
+                <label for="snapshotEvents">
+                  <span>Events</span>
+                  <input id="snapshotEvents" name="snapshotEvents" autocomplete="off" spellcheck="false" placeholder="run,docker-update">
+                </label>
+              </details>
+            </div>
+
+            <div class="settings-block" id="networkOptions">
+              <fieldset>
+                <legend>Network <button type="button" class="help" tabindex="-1" data-help="Select one or more network modes for the service." aria-label="Help for network modes">?</button></legend>
+                <label class="check-pill is-default" for="hostDefault">
+                  <input id="hostDefault" type="checkbox" checked disabled>
+                  <span>Host</span>
+                </label>
+                <div class="checks" id="networkModes"></div>
+              </fieldset>
+
+              <label for="publish">
+                <span>Publish ports <button type="button" class="help" tabindex="-1" data-help="Comma-separated port mappings such as 8080:80." aria-label="Help for published ports">?</button></span>
+                <input id="publish" name="publish" autocomplete="off" spellcheck="false">
+              </label>
+
+              <div id="tsOptions" class="conditional-options" hidden>
+                <label for="tsTags">
+                  <span>Tailscale tags <button type="button" class="help" tabindex="-1" data-help="Comma-separated tags such as tag:app." aria-label="Help for Tailscale tags">?</button></span>
+                  <input id="tsTags" name="tsTags" autocomplete="off" spellcheck="false" placeholder="tag:app">
+                </label>
+
+                <details class="advanced-block" id="tsAdvanced">
+                  <summary>Tailscale settings <button type="button" class="help" tabindex="-1" data-help="Optional enrollment, version, and exit node settings." aria-label="Help for Tailscale settings">?</button></summary>
+                  <label for="tsAuthKey">
+                    <span>Auth key</span>
+                    <input id="tsAuthKey" name="tsAuthKey" type="password" autocomplete="off">
+                  </label>
+                  <div class="split-fields">
+                    <label for="tsVersion">
+                      <span>Version</span>
+                      <input id="tsVersion" name="tsVersion" autocomplete="off" spellcheck="false">
+                    </label>
+                    <label for="tsExitNode">
+                      <span>Exit node</span>
+                      <input id="tsExitNode" name="tsExitNode" autocomplete="off" spellcheck="false">
+                    </label>
+                  </div>
+                </details>
+              </div>
+
+              <details class="advanced-block conditional-options" id="lanOptions" hidden>
+                <summary>LAN settings <button type="button" class="help" tabindex="-1" data-help="Optional macvlan settings used when the LAN network mode is selected." aria-label="Help for LAN settings">?</button></summary>
+                <div class="split-fields">
+                  <label for="macvlanParent">
+                    <span>Parent</span>
+                    <input id="macvlanParent" name="macvlanParent" autocomplete="off" spellcheck="false" placeholder="eth0">
+                  </label>
+                  <label for="macvlanVlan">
+                    <span>VLAN</span>
+                    <input id="macvlanVlan" name="macvlanVlan" inputmode="numeric" autocomplete="off">
+                  </label>
+                </div>
+                <label for="macvlanMac">
+                  <span>MAC address</span>
+                  <input id="macvlanMac" name="macvlanMac" autocomplete="off" spellcheck="false" placeholder="02:00:00:00:00:07">
+                </label>
+              </details>
+            </div>
+
+            <details class="advanced-block" id="payloadArgsBlock">
+              <summary>Payload args <button type="button" class="help" tabindex="-1" data-help="Arguments passed after -- to the deployed payload." aria-label="Help for payload args">?</button></summary>
+              <label for="payloadArgs">
+                <span>Arguments</span>
+                <input id="payloadArgs" name="payloadArgs" autocomplete="off" spellcheck="false" placeholder="--flag value">
+              </label>
             </details>
           </div>
-
-          <div class="conditional-options" id="lanOptions" hidden>
-            <div class="subsection-label">LAN settings <button type="button" class="help" tabindex="-1" data-help="Optional macvlan settings used when the LAN network mode is selected." aria-label="Help for LAN settings">?</button></div>
-            <div class="split-fields">
-              <label for="macvlanParent">
-                <span>Parent</span>
-                <input id="macvlanParent" name="macvlanParent" autocomplete="off" spellcheck="false" placeholder="eth0">
-              </label>
-              <label for="macvlanVlan">
-                <span>VLAN</span>
-                <input id="macvlanVlan" name="macvlanVlan" inputmode="numeric" autocomplete="off">
-              </label>
-            </div>
-            <label for="macvlanMac">
-              <span>MAC address</span>
-              <input id="macvlanMac" name="macvlanMac" autocomplete="off" spellcheck="false" placeholder="02:00:00:00:00:07">
-            </label>
-          </div>
-
-          <div class="conditional-options" id="vmOptions" hidden>
-            <div class="subsection-label">VM shape <button type="button" class="help" tabindex="-1" data-help="Optional CPU, memory, and disk overrides for vm:// payloads." aria-label="Help for VM shape">?</button></div>
-            <div class="split-fields vm-fields">
-              <label for="vmCPUs" data-field="vm.cpus">
-                <span>vCPU</span>
-                <input id="vmCPUs" name="vmCPUs" inputmode="numeric" autocomplete="off" placeholder="auto">
-                <span class="field-error" id="vmCPUsError"></span>
-              </label>
-              <label for="vmMemory" data-field="vm.memory">
-                <span>Memory</span>
-                <input id="vmMemory" name="vmMemory" autocomplete="off" spellcheck="false" placeholder="2g">
-                <span class="field-error" id="vmMemoryError"></span>
-              </label>
-            </div>
-            <label for="vmDisk" data-field="vm.disk">
-              <span>Disk</span>
-              <input id="vmDisk" name="vmDisk" autocomplete="off" spellcheck="false" placeholder="64g">
-              <span class="field-error" id="vmDiskError"></span>
-            </label>
-          </div>
-
-          <details class="advanced-block">
-            <summary>Snapshots <button type="button" class="help" tabindex="-1" data-help="Optional per-service snapshot policy stored with the run recipe." aria-label="Help for snapshots">?</button></summary>
-            <div class="split-fields">
-              <label for="snapshots">
-                <span>Mode</span>
-                <select id="snapshots" name="snapshots"></select>
-              </label>
-              <label for="snapshotKeepLast">
-                <span>Keep last</span>
-                <input id="snapshotKeepLast" name="snapshotKeepLast" inputmode="numeric" autocomplete="off">
-              </label>
-            </div>
-            <label for="snapshotMaxAge">
-              <span>Max age</span>
-              <input id="snapshotMaxAge" name="snapshotMaxAge" autocomplete="off" spellcheck="false" placeholder="7d or 72h">
-            </label>
-            <label for="snapshotRequired">
-              <span>Required</span>
-              <select id="snapshotRequired" name="snapshotRequired"></select>
-            </label>
-            <label for="snapshotEvents">
-              <span>Events</span>
-              <input id="snapshotEvents" name="snapshotEvents" autocomplete="off" spellcheck="false" placeholder="run,docker-update">
-            </label>
-          </details>
-
-          <details class="advanced-block" id="payloadArgsBlock">
-            <summary>Payload args <button type="button" class="help" tabindex="-1" data-help="Arguments passed after -- to the deployed payload." aria-label="Help for payload args">?</button></summary>
-            <label for="payloadArgs">
-              <span>Arguments</span>
-              <input id="payloadArgs" name="payloadArgs" autocomplete="off" spellcheck="false" placeholder="--flag value">
-            </label>
-          </details>
         </section>
 
         <section class="action-row" aria-label="Deploy action">

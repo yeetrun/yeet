@@ -23,6 +23,14 @@ const state = {
   zfsRootSeq: 0,
   zfsRootKey: "",
   zfsRootState: null,
+  vmDefaultsSeq: 0,
+  vmDefaultsKey: "",
+  vmDefaultsState: null,
+  vmShapeManual: {
+    cpus: false,
+    memory: false,
+    disk: false,
+  },
   pickedZFSRoot: null,
   serviceRootManual: false,
 };
@@ -393,7 +401,18 @@ function syncWorkloadUI() {
   $("serviceRoot").disabled = isCron;
   $("zfs").disabled = isCron;
   $("snapshots").closest("details").hidden = isCron;
-  $("storageModeLabel").firstChild.textContent = $("zfs").checked ? "ZFS dataset " : "Service root ";
+  const zfsChecked = $("zfs").checked;
+  const storageHelp = $("storageModeLabel").querySelector(".help");
+  if (zfsChecked && isVM) {
+    $("storageModeLabel").firstChild.textContent = "VM ZVOL parent ";
+    storageHelp.dataset.help = "Enter a ZFS dataset name that will contain this VM's zvols, without a leading or trailing slash.";
+  } else if (zfsChecked) {
+    $("storageModeLabel").firstChild.textContent = "ZFS dataset ";
+    storageHelp.dataset.help = "Enter a ZFS dataset name for this service, without a leading or trailing slash.";
+  } else {
+    $("storageModeLabel").firstChild.textContent = "Service root ";
+    storageHelp.dataset.help = "Leave empty to use the catch default root, or enter an absolute filesystem path.";
+  }
   $("zfsHelp").textContent = "ZFS";
   if (workloadChanged) {
     renderNetworkModes(def.networkModes.filter((mode) => mode !== "host"));
@@ -520,6 +539,61 @@ function syncZFSRootPicker() {
   if (key === state.zfsRootKey) return;
   state.zfsRootKey = key;
   loadZFSRoots(key);
+}
+
+function vmDefaultsEnabled() {
+  return workloadPayloadKind(selectedWorkload()) === "vm";
+}
+
+function vmDefaultsRequestKey() {
+  return [
+    $("host").value.trim(),
+    $("service").value.trim(),
+    $("serviceRoot").value.trim(),
+    String($("zfs").checked),
+  ].join("\n");
+}
+
+function syncVMDefaults() {
+  if (!vmDefaultsEnabled()) {
+    state.vmDefaultsKey = "";
+    state.vmDefaultsState = null;
+    return;
+  }
+  const key = vmDefaultsRequestKey();
+  if (key === state.vmDefaultsKey) return;
+  state.vmDefaultsKey = key;
+  loadVMDefaults(key);
+}
+
+async function loadVMDefaults(key) {
+  const seq = ++state.vmDefaultsSeq;
+  const [host, service, serviceRoot, zfs] = key.split("\n");
+  if (!host) {
+    state.vmDefaultsState = { state: "error", warnings: ["Choose a host"] };
+    return;
+  }
+  state.vmDefaultsState = { state: "loading" };
+  const query = new URLSearchParams({ host, service, serviceRoot, zfs });
+  try {
+    const res = await api(`/api/vm-defaults?${query}`);
+    if (seq !== state.vmDefaultsSeq) return;
+    if (!res.ok) throw new Error(await res.text());
+    state.vmDefaultsState = await res.json();
+    applyVMDefaults(state.vmDefaultsState);
+    update();
+  } catch (err) {
+    if (seq !== state.vmDefaultsSeq) return;
+    state.vmDefaultsState = { state: "error", warnings: [String(err)] };
+  }
+}
+
+function applyVMDefaults(response) {
+  if (response?.state !== "available") return;
+  const defaults = response.defaults || {};
+  if (!state.vmShapeManual.cpus && defaults.cpus) $("vmCPUs").value = String(defaults.cpus);
+  if (!state.vmShapeManual.memory && defaults.memory) $("vmMemory").value = defaults.memory;
+  if (!state.vmShapeManual.disk && defaults.disk) $("vmDisk").value = defaults.disk;
 }
 
 async function loadZFSRoots(key) {
@@ -1175,6 +1249,7 @@ async function bootstrap() {
   syncNetworkUI();
   updateServiceRootPlaceholder();
   syncZFSRootPicker();
+  syncVMDefaults();
   $("service").focus();
   if ($("service").value && !$("payload").closest("label").hidden) $("payload").focus();
   update();
@@ -1186,12 +1261,14 @@ function update() {
   syncNetworkUI();
   updateServiceRootPlaceholder();
   syncZFSRootPicker();
+  syncVMDefaults();
   clearValidationErrors();
   const draft = buildDraft();
   updatePreview(draft);
   $("deployButton").disabled = true;
+  const seq = ++state.validateSeq;
   window.clearTimeout(state.validateTimer);
-  state.validateTimer = window.setTimeout(() => validate(draft), 250);
+  state.validateTimer = window.setTimeout(() => validate(draft, seq), 250);
 }
 
 function firstValidationMessage(validation) {
@@ -1256,9 +1333,8 @@ function redactValidationDraft(draft) {
   return copy;
 }
 
-async function validate(draft) {
+async function validate(draft, seq) {
   if (state.phase !== "editing") return;
-  const seq = ++state.validateSeq;
   setStatus("Validating");
   try {
     const res = await api("/api/validate", {
@@ -1360,6 +1436,11 @@ $("serviceRoot").addEventListener("input", () => {
   state.pickedZFSRoot = null;
   renderZFSRootCandidates(state.zfsRootState);
 });
+for (const [id, field] of [["vmCPUs", "cpus"], ["vmMemory", "memory"], ["vmDisk", "disk"]]) {
+  $(id).addEventListener("input", () => {
+    state.vmShapeManual[field] = true;
+  });
+}
 document.addEventListener("input", (event) => {
   if (event.target.closest("#deployForm")) update();
 });

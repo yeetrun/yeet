@@ -75,6 +75,8 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`id="filePicker"`,
 		`id="deploySettingsTitle"`,
 		`class="deploy-settings-grid"`,
+		`id="storageOptions"`,
+		`id="networkOptions"`,
 		`id="storageModeLabel"`,
 		`id="zfsHelp"`,
 		`id="zfsRootPicker"`,
@@ -82,6 +84,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`id="zfsRootStatus"`,
 		`id="zfsRootList"`,
 		`<summary>Tailscale settings`,
+		`<summary>LAN settings`,
 		`<summary>Snapshots`,
 		`<summary>Payload args`,
 		`placeholder="tag:app"`,
@@ -122,7 +125,9 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"terminalCopy",
 		`<div class="file-browser" id="fileBrowser"`,
 		`<summary>VM settings`,
-		`<summary>LAN settings`,
+		`placeholder="auto"`,
+		`placeholder="2g"`,
+		`placeholder="64g"`,
 	} {
 		if strings.Contains(string(index)+string(app), forbidden) {
 			t.Fatalf("web assets still contain %q", forbidden)
@@ -144,6 +149,8 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"function defaultNetworkModesForWorkload(workload)",
 		"function renderVMCatalog(images)",
 		"data.command",
+		"validate(draft, seq)",
+		"async function validate(draft, seq)",
 		`tsAuthKey = "<hidden>"`,
 		"cron: {",
 		"schedule:",
@@ -181,6 +188,12 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"function zfsRootDisplayDataset(candidate)",
 		"function loadZFSRoots(key)",
 		"/api/zfs-roots?",
+		"vmShapeManual",
+		"function syncVMDefaults()",
+		"function loadVMDefaults(key)",
+		"/api/vm-defaults?",
+		"VM ZVOL parent",
+		"will contain this VM's zvols",
 		"function pickZFSRootCandidate(candidate)",
 		"function syncPickedZFSRootValue()",
 		"function renderZFSRootCandidates(response)",
@@ -211,18 +224,18 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 			t.Fatalf("help button should not interrupt the primary tab order: %s", match)
 		}
 	}
-	gridMatch := regexp.MustCompile(`(?s)<div class="deploy-settings-grid">(.*?)\n          </div>\n\n          <div id="tsOptions"`).FindSubmatch(index)
-	if len(gridMatch) != 2 {
-		t.Fatal("index missing bounded deploy settings grid before advanced options")
+	vmIndex := strings.Index(string(index), `id="vmOptions"`)
+	storageIndex := strings.Index(string(index), `id="storageOptions"`)
+	networkIndex := strings.Index(string(index), `id="networkOptions"`)
+	if vmIndex < 0 || storageIndex < 0 || networkIndex < 0 {
+		t.Fatalf("settings order markers missing: vm=%d storage=%d network=%d", vmIndex, storageIndex, networkIndex)
 	}
-	gridHTML := string(gridMatch[1])
-	if !strings.Contains(gridHTML, `class="root-control"`) {
-		t.Fatal("deploy settings grid must contain storage controls before advanced options")
+	if !(vmIndex < storageIndex && storageIndex < networkIndex) {
+		t.Fatalf("deploy settings order = vm:%d storage:%d network:%d, want VM shape, storage, network", vmIndex, storageIndex, networkIndex)
 	}
-	for _, advanced := range []string{`id="tsOptions"`, `id="lanOptions"`, `id="vmOptions"`, `id="payloadArgsBlock"`} {
-		if strings.Contains(gridHTML, advanced) {
-			t.Fatalf("deploy settings grid should not contain advanced block %s", advanced)
-		}
+	networkHTML := string(index[networkIndex:])
+	if !strings.Contains(networkHTML, `id="lanOptions"`) || !strings.Contains(networkHTML, `<summary>LAN settings`) {
+		t.Fatal("network settings must contain collapsed LAN settings")
 	}
 	for _, snippet := range []string{
 		".workload-selector",
@@ -232,6 +245,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		".catalog-block",
 		".subsection-label",
 		".deploy-settings-grid",
+		".settings-block",
 		".zfs-root-field",
 		".zfs-root-trigger",
 		".zfs-root-picker",
