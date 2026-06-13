@@ -32,6 +32,25 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Use a dedicated GitButler branch for each agent session, unless the user asks
   for a different branch structure. Commit only changes that belong to that
   session.
+- Agents may create local checkpoint commits autonomously after a coherent unit
+  of work is complete. Do not create micro-commits for every small edit; prefer
+  commits that match the current objective and would make sense when read later.
+- Pre-commit hooks are intentionally expensive and should run normally. Avoid
+  unnecessary checkpoint churn, and report any pre-commit failure with the fix
+  or remaining blocker.
+- Treat checkpoint commits as local savepoints, not final history. Before
+  finishing to `main`, use GitButler to tidy, squash, reword, or amend
+  unpublished session commits into a clean final shape.
+- At safe boundaries, such as before starting substantial work, before a
+  checkpoint commit, or before finishing to `main`, run `but pull --check`. If
+  it is clean and affects only this session's branch, `but pull` is allowed. If
+  it conflicts or touches another active branch, stop and ask.
+- If follow-up fixes clearly belong to an unpublished local commit, amend or
+  absorb them into that commit instead of creating tiny fixup commits.
+- Before large history edits or branch restructuring, create a GitButler
+  recovery point with `but oplog snapshot -m "before history cleanup"`.
+- If another active branch or session touches the same files, generated output,
+  or runtime state, call out the overlap before committing or finishing.
 - Do not push or open pull requests unless the user asks. Pull requests are not
   the default workflow.
 - When the user asks to finish or integrate a session, the default outcome is
@@ -44,7 +63,17 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
   single commit when needed, then verify the commit is based on current
   `origin/main` and contains only this session's work. The final direct update
   of local `main` and `origin/main` is the only allowed raw `git` write
-  exception, and it still requires explicit user authorization.
+  exception for branch/commit publication, and it still requires explicit user
+  authorization.
+- After a session lands on `main`, run `but pull` so GitButler can mark the
+  branch integrated, then preview cleanup with `but clean --dry-run` before
+  running `but clean`. Delete non-empty branches or raw local `codex/*` refs
+  only when they belong to this session and are confirmed merged; never clean up
+  another agent's branch unless the user asks.
+- Final status must distinguish local checkpoint commits from branch pushes and
+  from work that has landed on `origin/main`. If the user asked to push
+  everything, finish only after verifying `origin/main` contains the session
+  commit.
 - Keep commit messages and any explicitly requested pull request descriptions
   succinct: explain what changed, why it changed, and any important decision.
 
@@ -99,10 +128,17 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Before writing release notes, inspect the actual commit range (for example,
   `git log <previous-tag>..HEAD`) and translate only user-visible behavior,
   compatibility, migration, reliability, or operational changes from that range.
-- Commit and push the changelog update inside `website/`, then commit the updated submodule pointer in this repo.
-- Create an annotated tag with message equal to the version only (example: `git tag -a v0.1.2 -m "v0.1.2"`).
-- Push commits and the new tag (`git push` then `git push origin v0.1.2`).
-- Require explicit user authorization before any commit, tag, or push operations.
+- Prepare the changelog update inside `website/`, then include the updated
+  submodule pointer in this repo's release work. Route release commits and
+  pushes through the Version Control finish-to-main flow.
+- Create an annotated tag with message equal to the version only (example:
+  `git tag -a v0.1.2 -m "v0.1.2"`). Raw `git` is allowed as a release/tagging
+  exception for tag creation if GitButler does not support tags.
+- After release commits have landed through the finish-to-main flow, push the
+  new tag. Raw `git` is allowed as a release/tagging exception for tag pushes
+  if needed (example: `git push origin v0.1.2`).
+- For release/tagging work, require explicit user authorization before release
+  commits, tags, or pushes.
 
 ## Website Docs (User Manual)
 - The user manual lives in the `website/` submodule.
