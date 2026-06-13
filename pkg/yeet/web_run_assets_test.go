@@ -333,3 +333,37 @@ func TestWebRunPayloadArgsOnlyShowForRunnableFilesAndCron(t *testing.T) {
 		}
 	}
 }
+
+func TestWebRunAdvancedBlocksDoNotGetSectionSeparatorPadding(t *testing.T) {
+	styles, err := fs.ReadFile(webRunAssets, "web_run_assets/styles.css")
+	if err != nil {
+		t.Fatalf("read styles: %v", err)
+	}
+	source := string(styles)
+
+	if !strings.Contains(source, ".settings-block + .settings-block") {
+		t.Fatal("settings blocks should still get section separator styling")
+	}
+	if strings.Contains(source, ".settings-block + .advanced-block") {
+		t.Fatal("advanced blocks should keep their own compact summary padding")
+	}
+}
+
+func TestWebRunVMNetworkSelectionNeverFallsBackToHost(t *testing.T) {
+	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
+	if err != nil {
+		t.Fatalf("read app: %v", err)
+	}
+	source := string(app)
+
+	for _, snippet := range []string{
+		"function ensureVMNetworkSelection()",
+		`if (payloadKind !== "vm" || selectedNetworkModes().length) return`,
+		`fallback.checked = true`,
+		"ensureVMNetworkSelection();",
+	} {
+		if !strings.Contains(source, snippet) {
+			t.Fatalf("app missing VM network selection behavior %s", snippet)
+		}
+	}
+}
