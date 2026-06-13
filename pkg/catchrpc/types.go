@@ -119,6 +119,40 @@ type ArtifactHashesResponse struct {
 	Env     *ArtifactHash `json:"env,omitempty"`
 }
 
+type ZFSRootDiscoveryState string
+
+const (
+	ZFSRootDiscoveryAvailable       ZFSRootDiscoveryState = "available"
+	ZFSRootDiscoveryHostUnreachable ZFSRootDiscoveryState = "host-unreachable"
+	ZFSRootDiscoveryUnsupportedRPC  ZFSRootDiscoveryState = "unsupported-rpc"
+	ZFSRootDiscoveryZFSMissing      ZFSRootDiscoveryState = "zfs-missing"
+	ZFSRootDiscoveryNoFilesystems   ZFSRootDiscoveryState = "no-filesystems"
+	ZFSRootDiscoveryError           ZFSRootDiscoveryState = "error"
+)
+
+type ZFSServiceRootCandidatesRequest struct {
+	Workload string `json:"workload,omitempty"`
+	Service  string `json:"service,omitempty"`
+}
+
+type ZFSServiceRootCandidate struct {
+	Dataset           string `json:"dataset"`
+	Mountpoint        string `json:"mountpoint,omitempty"`
+	FreeBytes         int64  `json:"freeBytes,omitempty"`
+	ChildCount        int    `json:"childCount,omitempty"`
+	VMChildCount      int    `json:"vmChildCount,omitempty"`
+	ServiceChildCount int    `json:"serviceChildCount,omitempty"`
+	SuggestedDataset  string `json:"suggestedDataset,omitempty"`
+	Label             string `json:"label,omitempty"`
+	Rank              int    `json:"rank,omitempty"`
+}
+
+type ZFSServiceRootCandidatesResponse struct {
+	State      ZFSRootDiscoveryState     `json:"state"`
+	Candidates []ZFSServiceRootCandidate `json:"candidates,omitempty"`
+	Warnings   []string                  `json:"warnings,omitempty"`
+}
+
 type SnapshotPolicy struct {
 	Enabled  *bool    `json:"enabled,omitempty"`
 	KeepLast *int     `json:"keepLast,omitempty"`
