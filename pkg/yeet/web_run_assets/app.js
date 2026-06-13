@@ -174,6 +174,11 @@ function workloadPayloadKind(workload) {
   return workloadDefinition(workload).payloadKind;
 }
 
+function payloadArgsEnabled() {
+  const payloadKind = workloadPayloadKind(selectedWorkload());
+  return payloadKind === "file" || payloadKind === "cron";
+}
+
 function defaultNetworkModesForWorkload(workload) {
   return [...workloadDefinition(workload).defaultModes];
 }
@@ -238,7 +243,7 @@ function buildDraft() {
     payload,
     payloadKind,
     envFile,
-    payloadArgs: vmPayload ? [] : splitArgs($("payloadArgs").value),
+    payloadArgs: payloadArgsEnabled() ? splitArgs($("payloadArgs").value) : [],
     cron: cronPayload ? {
       schedule: $("cronSchedule").value.trim(),
     } : {},
@@ -478,7 +483,7 @@ function syncNetworkUI() {
   $("tsOptions").hidden = !modes.includes("ts");
   $("lanOptions").hidden = !modes.includes("lan");
   $("vmOptions").hidden = !vmPayload;
-  $("payloadArgsBlock").hidden = vmPayload;
+  $("payloadArgsBlock").hidden = !payloadArgsEnabled();
 }
 
 function updateServiceRootPlaceholder() {
@@ -510,6 +515,13 @@ function syncPickedZFSRootValue() {
   const workload = selectedWorkload();
   if (state.pickedZFSRoot.host !== host || state.pickedZFSRoot.workload !== workload) return;
   $("serviceRoot").value = suggestedZFSServiceDataset(state.pickedZFSRoot.dataset, $("service").value);
+}
+
+function focusServiceRootAtEnd() {
+  const input = $("serviceRoot");
+  const position = input.value.length;
+  input.focus({ preventScroll: true });
+  if (typeof input.setSelectionRange === "function") input.setSelectionRange(position, position);
 }
 
 function clearPickedZFSRootForContextChange() {
@@ -783,6 +795,7 @@ function pickZFSRootCandidate(candidate) {
   $("serviceRoot").value = suggestedZFSServiceDataset(candidate.dataset, $("service").value);
   renderZFSRootCandidates(state.zfsRootState);
   hideZFSRootPicker();
+  focusServiceRootAtEnd();
   update();
 }
 
