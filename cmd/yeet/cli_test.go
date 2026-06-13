@@ -527,9 +527,19 @@ func TestSnapshotsDefaultsHelpShowsSubcommands(t *testing.T) {
 		t.Fatalf("read stdout: %v", err)
 	}
 	stdout := string(rawStdout)
-	if !strings.Contains(stdout, "Manage catch ZFS snapshot defaults") ||
-		!strings.Contains(stdout, "defaults") {
-		t.Fatalf("stdout = %q, want snapshots defaults help", stdout)
+	for _, want := range []string{
+		"Manage service recovery points and snapshot defaults",
+		"defaults",
+		"list",
+		"inspect",
+		"create",
+		"rm",
+		"protect",
+		"unprotect",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout = %q, want snapshots help to include %q", stdout, want)
+		}
 	}
 }
 
@@ -704,6 +714,12 @@ func TestPrepareCommandRoute(t *testing.T) {
 			args:     []string{"snapshots@catch-a", "defaults", "show"},
 			wantHost: "catch-a",
 			wantArgs: []string{"snapshots", "defaults", "show"},
+		},
+		{
+			name:     "snapshots lifecycle is unscoped remote group",
+			args:     []string{"snapshots@catch-a", "inspect", "svc-a", "yeet-abc", "--format", "json"},
+			wantHost: "catch-a",
+			wantArgs: []string{"snapshots", "inspect", "svc-a", "yeet-abc", "--format", "json"},
 		},
 	}
 

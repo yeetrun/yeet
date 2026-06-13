@@ -27,6 +27,7 @@ const (
 	snapshotEventRun                  snapshotEvent = "run"
 	snapshotEventDockerUpdate         snapshotEvent = "docker-update"
 	snapshotEventServiceRootMigration snapshotEvent = "service-root-migration"
+	snapshotEventManual               snapshotEvent = "manual"
 	snapshotEventVMManual             snapshotEvent = "vm-manual"
 	defaultSnapshotMaxAge                           = 7 * 24 * time.Hour
 	defaultSnapshotKeepLast                         = 5
@@ -61,10 +62,15 @@ type snapshotCreateRequest struct {
 }
 
 type listedSnapshot struct {
-	Name      string
-	Created   time.Time
-	CreatedBy string
-	Service   string
+	Name       string
+	Created    time.Time
+	CreatedBy  string
+	Service    string
+	Event      string
+	Generation int
+	Comment    string
+	Checkpoint string
+	Protected  bool
 }
 
 type snapshotOperation struct {
@@ -249,7 +255,7 @@ func effectiveSnapshotEvents(raw []string) (map[snapshotEvent]struct{}, error) {
 	events := make(map[snapshotEvent]struct{}, len(raw))
 	for _, event := range raw {
 		switch snapshotEvent(event) {
-		case snapshotEventRun, snapshotEventDockerUpdate, snapshotEventServiceRootMigration:
+		case snapshotEventRun, snapshotEventDockerUpdate, snapshotEventServiceRootMigration, snapshotEventManual:
 			events[snapshotEvent(event)] = struct{}{}
 		default:
 			return nil, fmt.Errorf("invalid snapshot event %q", event)
@@ -341,6 +347,7 @@ func effectiveSnapshotEventStrings(events map[snapshotEvent]struct{}) []string {
 		snapshotEventRun,
 		snapshotEventDockerUpdate,
 		snapshotEventServiceRootMigration,
+		snapshotEventManual,
 	}
 	out := make([]string, 0, len(events))
 	for _, event := range ordered {
@@ -460,7 +467,7 @@ func listServiceSnapshots(ctx context.Context, runner zfsCommandRunner, dataset 
 	if runner == nil {
 		runner = runZFSCommand
 	}
-	stdout, stderr, err := runner(ctx, "list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,com.yeetrun:created-by,com.yeetrun:service", "-s", "creation", dataset)
+	stdout, stderr, err := runner(ctx, "list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,com.yeetrun:created-by,com.yeetrun:service,com.yeetrun:event,com.yeetrun:generation,com.yeetrun:comment,com.yeetrun:checkpoint,com.yeetrun:protected", "-s", "creation", dataset)
 	if err != nil {
 		return nil, formatZFSCommandError("zfs list snapshots "+dataset, stderr, err)
 	}
@@ -474,19 +481,33 @@ func parseListedSnapshots(raw string) ([]listedSnapshot, error) {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) != 4 {
+		if len(fields) != 4 && len(fields) != 9 {
 			return nil, fmt.Errorf("invalid zfs snapshot row %q", line)
 		}
 		createdUnix, err := strconv.ParseInt(fields[1], 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("invalid zfs snapshot creation %q: %w", fields[1], err)
 		}
-		snapshots = append(snapshots, listedSnapshot{
+		snap := listedSnapshot{
 			Name:      fields[0],
 			Created:   time.Unix(createdUnix, 0).UTC(),
 			CreatedBy: zfsPropertyValue(fields[2]),
 			Service:   zfsPropertyValue(fields[3]),
-		})
+		}
+		if len(fields) == 9 {
+			snap.Event = zfsPropertyValue(fields[4])
+			if generation := zfsPropertyValue(fields[5]); generation != "" {
+				parsed, err := strconv.Atoi(generation)
+				if err != nil {
+					return nil, fmt.Errorf("invalid zfs snapshot generation %q: %w", fields[5], err)
+				}
+				snap.Generation = parsed
+			}
+			snap.Comment = zfsPropertyValue(fields[6])
+			snap.Checkpoint = zfsPropertyValue(fields[7])
+			snap.Protected = fields[8] == "true"
+		}
+		snapshots = append(snapshots, snap)
 	}
 	return snapshots, nil
 }
@@ -501,14 +522,20 @@ func snapshotsToPrune(snaps []listedSnapshot, service string, policy effectivePo
 	})
 
 	prune := make(map[string]struct{})
+	retentionIndex := 0
 	for i, snap := range owned {
+		if snap.Protected {
+			continue
+		}
+		newestIndex := retentionIndex
+		retentionIndex++
 		if snap.Name == current {
 			continue
 		}
 		if current == "" && i == 0 {
 			continue
 		}
-		if shouldPruneSnapshot(snap, policy, now, i) {
+		if shouldPruneSnapshot(snap, policy, now, newestIndex) {
 			prune[snap.Name] = struct{}{}
 		}
 	}
