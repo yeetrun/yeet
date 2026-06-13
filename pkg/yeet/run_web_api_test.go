@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -73,6 +74,101 @@ func TestRunWebAPIBootstrapAndFiles(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "compose.yml") {
 		t.Fatalf("files body = %s, want compose.yml", rec.Body.String())
+	}
+}
+
+func TestRunWebAPIZFSRootsUsesSelectedHost(t *testing.T) {
+	oldFetch := fetchRunWebZFSRootCandidatesFn
+	defer func() { fetchRunWebZFSRootCandidatesFn = oldFetch }()
+
+	var gotHost string
+	var gotReq catchrpc.ZFSServiceRootCandidatesRequest
+	fetchRunWebZFSRootCandidatesFn = func(ctx context.Context, host string, req catchrpc.ZFSServiceRootCandidatesRequest) (catchrpc.ZFSServiceRootCandidatesResponse, error) {
+		gotHost = host
+		gotReq = req
+		return catchrpc.ZFSServiceRootCandidatesResponse{
+			State: catchrpc.ZFSRootDiscoveryAvailable,
+			Candidates: []catchrpc.ZFSServiceRootCandidate{{
+				Dataset:          "flash/yeet/vms",
+				SuggestedDataset: "flash/yeet/vms/devbox",
+			}},
+		}, nil
+	}
+	s := newRunWebServer(runWebServerConfig{
+		Token:     "secret",
+		Root:      t.TempDir(),
+		Bootstrap: runWebBootstrap{SelectedHost: "yeet-pve1"},
+	})
+	rec := runWebAPIRequest(t, s, http.MethodGet, "/api/zfs-roots?workload=vm&service=devbox", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("zfs roots status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotHost != "yeet-pve1" {
+		t.Fatalf("host = %q, want yeet-pve1", gotHost)
+	}
+	if gotReq.Workload != "vm" || gotReq.Service != "devbox" {
+		t.Fatalf("request = %#v", gotReq)
+	}
+	var body catchrpc.ZFSServiceRootCandidatesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.State != catchrpc.ZFSRootDiscoveryAvailable || len(body.Candidates) != 1 {
+		t.Fatalf("response = %#v", body)
+	}
+
+	rec = runWebAPIRequest(t, s, http.MethodGet, "/api/zfs-roots?host=yeet-storage&workload=compose", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("zfs roots explicit host status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotHost != "yeet-storage" {
+		t.Fatalf("explicit host = %q, want yeet-storage", gotHost)
+	}
+}
+
+func TestRunWebAPIZFSRootsMapsErrorsToStates(t *testing.T) {
+	oldFetch := fetchRunWebZFSRootCandidatesFn
+	defer func() { fetchRunWebZFSRootCandidatesFn = oldFetch }()
+
+	tests := []struct {
+		name string
+		err  error
+		want catchrpc.ZFSRootDiscoveryState
+	}{
+		{name: "unsupported rpc", err: errors.New("rpc error -32601: method not found"), want: catchrpc.ZFSRootDiscoveryUnsupportedRPC},
+		{name: "host unreachable", err: syscall.ECONNREFUSED, want: catchrpc.ZFSRootDiscoveryHostUnreachable},
+		{name: "other error", err: errors.New("permission denied"), want: catchrpc.ZFSRootDiscoveryError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetchRunWebZFSRootCandidatesFn = func(ctx context.Context, host string, req catchrpc.ZFSServiceRootCandidatesRequest) (catchrpc.ZFSServiceRootCandidatesResponse, error) {
+				return catchrpc.ZFSServiceRootCandidatesResponse{}, tt.err
+			}
+			s := newRunWebServer(runWebServerConfig{
+				Token:     "secret",
+				Root:      t.TempDir(),
+				Bootstrap: runWebBootstrap{SelectedHost: "yeet-pve1"},
+			})
+			rec := runWebAPIRequest(t, s, http.MethodGet, "/api/zfs-roots?workload=vm", nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("zfs roots status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			var body catchrpc.ZFSServiceRootCandidatesResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if body.State != tt.want {
+				t.Fatalf("state = %q, want %q body=%s", body.State, tt.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRunWebAPIZFSRootsRejectsBadMethods(t *testing.T) {
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/zfs-roots", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405 body=%s", rec.Code, rec.Body.String())
 	}
 }
 
