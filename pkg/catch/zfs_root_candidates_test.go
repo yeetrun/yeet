@@ -14,16 +14,21 @@ import (
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
-func TestZFSServiceRootCandidatesRanksVMRoot(t *testing.T) {
+func TestZFSServiceRootCandidatesRanksVMRootFromClonedZVolChildren(t *testing.T) {
 	out := strings.Join([]string{
-		"flash\tfilesystem\t/flash\t1000\t400\t100\t-\ton\toff\tyes",
-		"flash/yeet\tfilesystem\t/flash/yeet\t1000\t300\t1\t-\ton\toff\tyes",
-		"flash/yeet/vms\tfilesystem\t/flash/yeet/vms\t1000\t30\t1\t-\ton\toff\tyes",
-		"flash/yeet/vms/devbox\tfilesystem\t/flash/yeet/vms/devbox\t1000\t10\t1\t-\ton\toff\tyes",
-		"flash/yeet/vms/devbox/root\tvolume\t-\t1000\t10\t10\tflash/yeet/vm-images/ubuntu/root@snap\t-\toff\t-",
-		"flash/yeet/vm-images\tfilesystem\t/flash/yeet/vm-images\t1000\t20\t1\t-\ton\toff\tyes",
-		"flash/yeet/vm-images/ubuntu\tfilesystem\t/flash/yeet/vm-images/ubuntu\t1000\t20\t1\t-\ton\toff\tyes",
-		"flash/yeet/vm-images/ubuntu/root\tvolume\t-\t1000\t20\t20\t-\t-\toff\t-",
+		"pool\tfilesystem\t/pool\t1000\t400\t100\t-\ton\toff\tyes",
+		"pool/workloads\tfilesystem\t/pool/workloads\t1000\t300\t1\t-\ton\toff\tyes",
+		"pool/workloads/app-a\tfilesystem\t/pool/workloads/app-a\t1000\t10\t10\t-\ton\toff\tyes",
+		"pool/workloads/app-b\tfilesystem\t/pool/workloads/app-b\t1000\t10\t10\t-\ton\toff\tyes",
+		"pool/workloads/app-c\tfilesystem\t/pool/workloads/app-c\t1000\t10\t10\t-\ton\toff\tyes",
+		"pool/machines\tfilesystem\t/pool/machines\t1000\t30\t1\t-\ton\toff\tyes",
+		"pool/machines/devbox\tfilesystem\t/pool/machines/devbox\t1000\t10\t1\t-\ton\toff\tyes",
+		"pool/machines/devbox/disk0\tvolume\t-\t1000\t10\t10\tpool/templates/ubuntu/disk0@snap\t-\toff\t-",
+		"pool/machines/buildbox\tfilesystem\t/pool/machines/buildbox\t1000\t10\t1\t-\ton\toff\tyes",
+		"pool/machines/buildbox/disk0\tvolume\t-\t1000\t10\t10\tpool/templates/ubuntu/disk0@snap\t-\toff\t-",
+		"pool/templates\tfilesystem\t/pool/templates\t1000\t20\t1\t-\ton\toff\tyes",
+		"pool/templates/ubuntu\tfilesystem\t/pool/templates/ubuntu\t1000\t20\t1\t-\ton\toff\tyes",
+		"pool/templates/ubuntu/disk0\tvolume\t-\t1000\t20\t20\t-\t-\toff\t-",
 	}, "\n") + "\n"
 	resp, err := zfsServiceRootCandidates(context.Background(), fakeZFSListRunner(out, "", nil), catchrpc.ZFSServiceRootCandidatesRequest{
 		Workload: "vm",
@@ -38,28 +43,35 @@ func TestZFSServiceRootCandidatesRanksVMRoot(t *testing.T) {
 	if len(resp.Candidates) == 0 {
 		t.Fatal("no candidates returned")
 	}
-	if resp.Candidates[0].Dataset != "flash/yeet/vms" {
-		t.Fatalf("top candidate = %#v, want flash/yeet/vms", resp.Candidates[0])
+	if resp.Candidates[0].Dataset != "pool/machines" {
+		t.Fatalf("top candidate = %#v, want pool/machines", resp.Candidates[0])
 	}
-	if resp.Candidates[0].SuggestedDataset != "flash/yeet/vms/devbox" {
+	if resp.Candidates[0].VMChildCount != 2 {
+		t.Fatalf("vm child count = %d, want 2", resp.Candidates[0].VMChildCount)
+	}
+	if resp.Candidates[0].SuggestedDataset != "pool/machines/devbox" {
 		t.Fatalf("suggested = %q", resp.Candidates[0].SuggestedDataset)
 	}
 	for _, candidate := range resp.Candidates {
-		if strings.Contains(candidate.Dataset, "/vm-images") {
-			t.Fatalf("internal vm-images dataset returned: %#v", candidate)
+		if strings.HasPrefix(candidate.Dataset, "pool/templates") {
+			t.Fatalf("image template dataset returned: %#v", candidate)
 		}
 	}
 }
 
-func TestZFSServiceRootCandidatesRanksServiceRootForCompose(t *testing.T) {
+func TestZFSServiceRootCandidatesRanksServiceRootForComposeFromPlainChildren(t *testing.T) {
 	out := strings.Join([]string{
-		"flash\tfilesystem\t/flash\t1000\t400\t100\t-\ton\toff\tyes",
-		"flash/yeet\tfilesystem\t/flash/yeet\t1000\t300\t1\t-\ton\toff\tyes",
-		"flash/yeet/radarr\tfilesystem\t/flash/yeet/radarr\t1000\t10\t10\t-\ton\toff\tyes",
-		"flash/yeet/sonarr\tfilesystem\t/flash/yeet/sonarr\t1000\t10\t10\t-\ton\toff\tyes",
-		"flash/yeet/vms\tfilesystem\t/flash/yeet/vms\t1000\t30\t1\t-\ton\toff\tyes",
-		"flash/yeet/vms/devbox\tfilesystem\t/flash/yeet/vms/devbox\t1000\t10\t1\t-\ton\toff\tyes",
-		"flash/yeet/vms/devbox/root\tvolume\t-\t1000\t10\t10\tflash/yeet/vm-images/ubuntu/root@snap\t-\toff\t-",
+		"pool\tfilesystem\t/pool\t1000\t400\t100\t-\ton\toff\tyes",
+		"pool/workloads\tfilesystem\t/pool/workloads\t1000\t300\t1\t-\ton\toff\tyes",
+		"pool/workloads/radarr\tfilesystem\t/pool/workloads/radarr\t1000\t10\t10\t-\ton\toff\tyes",
+		"pool/workloads/sonarr\tfilesystem\t/pool/workloads/sonarr\t1000\t10\t10\t-\ton\toff\tyes",
+		"pool/machines\tfilesystem\t/pool/machines\t1000\t30\t1\t-\ton\toff\tyes",
+		"pool/machines/devbox\tfilesystem\t/pool/machines/devbox\t1000\t10\t1\t-\ton\toff\tyes",
+		"pool/machines/devbox/disk0\tvolume\t-\t1000\t10\t10\tpool/templates/ubuntu/disk0@snap\t-\toff\t-",
+		"pool/machines/buildbox\tfilesystem\t/pool/machines/buildbox\t1000\t10\t1\t-\ton\toff\tyes",
+		"pool/machines/buildbox/disk0\tvolume\t-\t1000\t10\t10\tpool/templates/ubuntu/disk0@snap\t-\toff\t-",
+		"pool/machines/testbox\tfilesystem\t/pool/machines/testbox\t1000\t10\t1\t-\ton\toff\tyes",
+		"pool/machines/testbox/disk0\tvolume\t-\t1000\t10\t10\tpool/templates/ubuntu/disk0@snap\t-\toff\t-",
 	}, "\n") + "\n"
 	resp, err := zfsServiceRootCandidates(context.Background(), fakeZFSListRunner(out, "", nil), catchrpc.ZFSServiceRootCandidatesRequest{
 		Workload: "compose",
@@ -71,20 +83,31 @@ func TestZFSServiceRootCandidatesRanksServiceRootForCompose(t *testing.T) {
 	if len(resp.Candidates) < 2 {
 		t.Fatalf("candidates = %#v, want at least two", resp.Candidates)
 	}
-	if resp.Candidates[0].Dataset != "flash/yeet" {
-		t.Fatalf("top candidate = %#v, want flash/yeet", resp.Candidates[0])
+	if resp.Candidates[0].Dataset != "pool/workloads" {
+		t.Fatalf("top candidate = %#v, want pool/workloads", resp.Candidates[0])
 	}
-	if resp.Candidates[0].SuggestedDataset != "flash/yeet/radarr" {
+	if resp.Candidates[0].ServiceChildCount != 2 {
+		t.Fatalf("service child count = %d, want 2", resp.Candidates[0].ServiceChildCount)
+	}
+	if resp.Candidates[0].SuggestedDataset != "pool/workloads/radarr" {
 		t.Fatalf("suggested = %q", resp.Candidates[0].SuggestedDataset)
+	}
+	for _, candidate := range resp.Candidates {
+		if candidate.Dataset == "pool/workloads/radarr" || candidate.Dataset == "pool/workloads/sonarr" {
+			t.Fatalf("service leaf dataset returned: %#v", candidate)
+		}
 	}
 }
 
-func TestZFSServiceRootCandidatesRanksNamedServiceRootAboveBusyPoolRoot(t *testing.T) {
+func TestZFSServiceRootCandidatesRanksMoreSpecificServiceRootAboveBusyPoolRoot(t *testing.T) {
 	out := strings.Join([]string{
 		"tank\tfilesystem\t/tank\t1000\t400\t100\t-\ton\toff\tyes",
 		"tank/media\tfilesystem\t/tank/media\t1000\t10\t10\t-\ton\toff\tyes",
 		"tank/backups\tfilesystem\t/tank/backups\t1000\t10\t10\t-\ton\toff\tyes",
-		"tank/yeet\tfilesystem\t/tank/yeet\t1000\t300\t1\t-\ton\toff\tyes",
+		"tank/workloads\tfilesystem\t/tank/workloads\t1000\t300\t1\t-\ton\toff\tyes",
+		"tank/workloads/radarr\tfilesystem\t/tank/workloads/radarr\t1000\t10\t10\t-\ton\toff\tyes",
+		"tank/workloads/sonarr\tfilesystem\t/tank/workloads/sonarr\t1000\t10\t10\t-\ton\toff\tyes",
+		"tank/workloads/prowlarr\tfilesystem\t/tank/workloads/prowlarr\t1000\t10\t10\t-\ton\toff\tyes",
 	}, "\n") + "\n"
 	resp, err := zfsServiceRootCandidates(context.Background(), fakeZFSListRunner(out, "", nil), catchrpc.ZFSServiceRootCandidatesRequest{
 		Workload: "compose",
@@ -96,11 +119,45 @@ func TestZFSServiceRootCandidatesRanksNamedServiceRootAboveBusyPoolRoot(t *testi
 	if len(resp.Candidates) < 2 {
 		t.Fatalf("candidates = %#v, want at least two", resp.Candidates)
 	}
-	if resp.Candidates[0].Dataset != "tank/yeet" {
-		t.Fatalf("top candidate = %#v, want tank/yeet before generic pool root", resp.Candidates[0])
+	if resp.Candidates[0].Dataset != "tank/workloads" {
+		t.Fatalf("top candidate = %#v, want tank/workloads before generic pool root", resp.Candidates[0])
 	}
-	if resp.Candidates[0].SuggestedDataset != "tank/yeet/radarr" {
+	if resp.Candidates[0].SuggestedDataset != "tank/workloads/radarr" {
 		t.Fatalf("suggested = %q", resp.Candidates[0].SuggestedDataset)
+	}
+}
+
+func TestZFSServiceRootCandidatesRanksImageRootsBelowServiceRoots(t *testing.T) {
+	out := strings.Join([]string{
+		"pool\tfilesystem\t/pool\t1000\t400\t100\t-\ton\toff\tyes",
+		"pool/workloads\tfilesystem\t/pool/workloads\t1000\t300\t1\t-\ton\toff\tyes",
+		"pool/workloads/radarr\tfilesystem\t/pool/workloads/radarr\t1000\t10\t10\t-\ton\toff\tyes",
+		"pool/workloads/sonarr\tfilesystem\t/pool/workloads/sonarr\t1000\t10\t10\t-\ton\toff\tyes",
+		"pool/templates\tfilesystem\t/pool/templates\t1000\t20\t1\t-\ton\toff\tyes",
+		"pool/templates/ubuntu\tfilesystem\t/pool/templates/ubuntu\t1000\t20\t1\t-\ton\toff\tyes",
+		"pool/templates/ubuntu/disk0\tvolume\t-\t1000\t20\t20\t-\t-\toff\t-",
+		"pool/templates/nixos\tfilesystem\t/pool/templates/nixos\t1000\t20\t1\t-\ton\toff\tyes",
+		"pool/templates/nixos/disk0\tvolume\t-\t1000\t20\t20\t-\t-\toff\t-",
+		"pool/templates/debian\tfilesystem\t/pool/templates/debian\t1000\t20\t1\t-\ton\toff\tyes",
+		"pool/templates/debian/disk0\tvolume\t-\t1000\t20\t20\t-\t-\toff\t-",
+	}, "\n") + "\n"
+	resp, err := zfsServiceRootCandidates(context.Background(), fakeZFSListRunner(out, "", nil), catchrpc.ZFSServiceRootCandidatesRequest{
+		Workload: "compose",
+		Service:  "radarr",
+	})
+	if err != nil {
+		t.Fatalf("zfsServiceRootCandidates: %v", err)
+	}
+	if len(resp.Candidates) == 0 {
+		t.Fatal("no candidates returned")
+	}
+	if resp.Candidates[0].Dataset != "pool/workloads" {
+		t.Fatalf("top candidate = %#v, want pool/workloads", resp.Candidates[0])
+	}
+	for _, candidate := range resp.Candidates {
+		if candidate.Dataset == "pool/templates/ubuntu" || candidate.Dataset == "pool/templates/nixos" || candidate.Dataset == "pool/templates/debian" {
+			t.Fatalf("image template leaf dataset returned: %#v", candidate)
+		}
 	}
 }
 
