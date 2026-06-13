@@ -254,6 +254,86 @@ func TestValidateRunDraftRejectsVMWithoutNetworkModes(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftRejectsVMRequiredAndEventsSnapshots(t *testing.T) {
+	required := true
+	draft := RunDraft{
+		Service:     "devbox",
+		Host:        "yeet-pve1",
+		Payload:     "vm://ubuntu/26.04",
+		PayloadKind: serviceTypeVM,
+		VM:          RunDraftVM{CPUs: 2, Memory: "2g", Disk: "64g"},
+		Network:     RunDraftNetwork{Modes: []string{"svc"}},
+		Snapshots: RunDraftSnapshots{
+			Mode:     "on",
+			KeepLast: 3,
+			MaxAge:   "72h",
+			Required: &required,
+			Events:   []string{"run"},
+		},
+	}
+
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := validation.fieldError("snapshots.required"); !strings.Contains(got, "VM snapshot policy does not use required") {
+		t.Fatalf("snapshots.required error = %q", got)
+	}
+	if got := validation.fieldError("snapshots.events"); !strings.Contains(got, "VM snapshot policy does not use events") {
+		t.Fatalf("snapshots.events error = %q", got)
+	}
+}
+
+func TestValidateRunDraftRejectsVMInvalidSnapshotEventsWithVMWording(t *testing.T) {
+	draft := RunDraft{
+		Service:     "devbox",
+		Host:        "yeet-pve1",
+		Payload:     "vm://ubuntu/26.04",
+		PayloadKind: serviceTypeVM,
+		VM:          RunDraftVM{CPUs: 2, Memory: "2g", Disk: "64g"},
+		Network:     RunDraftNetwork{Modes: []string{"svc"}},
+		Snapshots: RunDraftSnapshots{
+			Mode:   "on",
+			Events: []string{"manual"},
+		},
+	}
+
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := validation.fieldError("snapshots.events"); !strings.Contains(got, "VM snapshot policy does not use events") {
+		t.Fatalf("snapshots.events error = %q", got)
+	}
+}
+
+func TestValidateRunDraftAcceptsVMRetentionSnapshotPolicy(t *testing.T) {
+	draft := RunDraft{
+		Service:     "devbox",
+		Host:        "yeet-pve1",
+		Payload:     "vm://ubuntu/26.04",
+		PayloadKind: serviceTypeVM,
+		VM:          RunDraftVM{CPUs: 2, Memory: "2g", Disk: "64g"},
+		Network:     RunDraftNetwork{Modes: []string{"svc"}},
+		Snapshots: RunDraftSnapshots{
+			Mode:     "on",
+			KeepLast: 3,
+			MaxAge:   "72h",
+		},
+	}
+
+	normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if !validation.OK {
+		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+	}
+	if normalized.Snapshots.Mode != "on" || normalized.Snapshots.KeepLast != 3 || normalized.Snapshots.MaxAge != "72h" {
+		t.Fatalf("normalized snapshots = %#v", normalized.Snapshots)
+	}
+}
+
 func TestValidateRunDraftRejectsVMFlagsForNonVMPayload(t *testing.T) {
 	draft := RunDraft{
 		Service: "api",

@@ -56,7 +56,7 @@ type vmProvisionPlan struct {
 func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr error) {
 	doneProvision := e.traceBlock("vm provision")
 	defer doneProvision()
-	serviceExisted, err := e.validateAndCheckVMProvisionService(flags)
+	serviceExisted, snapshotPolicyFlags, err := e.validateAndCheckVMProvisionRequest(flags)
 	if err != nil {
 		return err
 	}
@@ -94,13 +94,25 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 	e.printVMProvisionSummary(plan, payload)
 	e.tracef("vm summary printed")
 	doneFinish := e.traceBlock("vm finish")
-	if err := e.finishVMProvision(inputs.Context, plan, payload, flags.Restart); err != nil {
+	if err := e.finishVMProvision(inputs.Context, plan, payload, flags.Restart, snapshotPolicyFlags); err != nil {
 		doneFinish()
 		return err
 	}
 	doneFinish()
 	rollbackNewService = false
 	return nil
+}
+
+func (e *ttyExecer) validateAndCheckVMProvisionRequest(flags cli.RunFlags) (bool, *cli.ServiceSetFlags, error) {
+	serviceExisted, err := e.validateAndCheckVMProvisionService(flags)
+	if err != nil {
+		return false, nil, err
+	}
+	snapshotPolicyFlags, err := snapshotFlagsFromRunFlags(flags)
+	if err != nil {
+		return false, nil, err
+	}
+	return serviceExisted, snapshotPolicyFlags, nil
 }
 
 func (e *ttyExecer) validateAndCheckVMProvisionService(flags cli.RunFlags) (bool, error) {
@@ -482,7 +494,7 @@ func cachedVMImagePaths(dir string, manifest vmImageManifest) vmImagePaths {
 	return paths
 }
 
-func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan, payload string, restart bool) error {
+func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan, payload string, restart bool, snapshotPolicyFlags *cli.ServiceSetFlags) error {
 	doneArtifacts := e.traceBlock("vm artifacts")
 	if err := e.applyVMProvisionArtifacts(ctx, plan); err != nil {
 		doneArtifacts()
@@ -496,7 +508,7 @@ func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan,
 	}
 	doneInstall()
 	doneCommit := e.traceBlock("vm commit")
-	if err := e.commitVMProvision(plan, payload); err != nil {
+	if err := e.commitVMProvision(plan, payload, snapshotPolicyFlags); err != nil {
 		doneCommit()
 		return err
 	}
@@ -852,7 +864,7 @@ func (e *ttyExecer) vmDiskProgressf(label string) {
 	e.vmProgressf("%s...\n", label)
 }
 
-func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string) error {
+func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string, snapshotPolicyFlags *cli.ServiceSetFlags) error {
 	_, _, err := e.s.cfg.DB.MutateService(e.sn, func(_ *db.Data, s *db.Service) error {
 		applyVMServiceRoot(s, e.s.defaultServiceRootDir(e.sn), plan.ServiceRoot)
 		s.ServiceType = db.ServiceTypeVM
@@ -885,6 +897,11 @@ func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string) erro
 			Sockets:    db.VMSocketConfig{APISocketPath: plan.APISocket},
 			PIDFile:    plan.PIDFile,
 			SetupState: "ready",
+		}
+		if snapshotPolicyFlags != nil {
+			if err := applySnapshotFlagsToService(s, *snapshotPolicyFlags); err != nil {
+				return err
+			}
 		}
 		return nil
 	})

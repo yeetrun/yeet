@@ -64,6 +64,11 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`id="vmCPUs"`,
 		`id="vmMemory"`,
 		`id="vmDisk"`,
+		`id="snapshotDetails"`,
+		`id="snapshotSummaryText"`,
+		`id="snapshotModeLabel"`,
+		`id="snapshotRequiredField"`,
+		`id="snapshotEventsField"`,
 		`id="snapshotRequired"`,
 		`id="terminalSheet"`,
 		`id="terminalOutput"`,
@@ -85,7 +90,6 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`id="zfsRootList"`,
 		`<summary>Tailscale settings`,
 		`<summary>LAN settings`,
-		`<summary>Snapshots`,
 		`<summary>Payload args`,
 		`placeholder="tag:app"`,
 	} {
@@ -138,6 +142,12 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"function selectedWorkload()",
 		"workloadOverride",
 		"function syncWorkloadUI()",
+		"function snapshotDraftForPayloadKind(payloadKind)",
+		"function syncSnapshotUI(payloadKind)",
+		`snapshotEventsField`,
+		`snapshotRequiredField`,
+		`VM snapshots`,
+		`VM snapshot policy does not use events`,
 		"function workloadPayloadKind(workload)",
 		"function payloadPickerEnabledForWorkload(workload)",
 		"function sourcePayloadForWorkload(workload)",
@@ -217,6 +227,22 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	}
 	if strings.Contains(string(index)+string(app)+string(styles), "zfs-root-suggested") {
 		t.Fatal("ZFS root picker should not repeat the selected dataset and suggested path in each row")
+	}
+	if strings.Contains(string(app), "snapshots: snapshotDraftForPayloadKind(payloadKind),") {
+		t.Fatal("cron drafts must omit the snapshots field instead of sending an empty object")
+	}
+	if !strings.Contains(string(app), "const snapshots = snapshotDraftForPayloadKind(payloadKind);") ||
+		!strings.Contains(string(app), "...(cronPayload ? {} : { snapshots }),") {
+		t.Fatal("buildDraft must include snapshots only for non-cron payloads")
+	}
+	if strings.Contains(string(app), "required: vmPayload ? undefined") ||
+		strings.Contains(string(app), "events: vmPayload ? []") {
+		t.Fatal("VM snapshot drafts must omit required and events fields entirely")
+	}
+	if !strings.Contains(string(app), "if (vmPayload) return") ||
+		!strings.Contains(string(app), "required: snapshotRequiredValue(),") ||
+		!strings.Contains(string(app), `events: splitCSV($("snapshotEvents").value),`) {
+		t.Fatal("snapshot draft helper must branch VM retention-only fields from non-VM required/events fields")
 	}
 	helpButtonRE := regexp.MustCompile(`<button[^>]*class="help"[^>]*>`)
 	for _, match := range helpButtonRE.FindAllString(string(index), -1) {

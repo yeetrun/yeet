@@ -233,7 +233,7 @@ function buildDraft() {
   const cronPayload = payloadKind === "cron";
   const envFile = vmPayload || cronPayload ? "" : $("envFile").value.trim();
   const publish = vmPayload || cronPayload ? [] : splitCSV($("publish").value);
-  const snapshotRequired = snapshotRequiredValue();
+  const snapshots = snapshotDraftForPayloadKind(payloadKind);
   const modes = selectedNetworkModes();
   const hasTailscale = modes.includes("ts");
   const hasLAN = modes.includes("lan");
@@ -268,13 +268,7 @@ function buildDraft() {
       serviceRoot: $("serviceRoot").value.trim(),
       zfs: $("zfs").checked,
     },
-    snapshots: cronPayload ? {} : {
-      mode: $("snapshots").value,
-      keepLast: Number.parseInt($("snapshotKeepLast").value, 10) || 0,
-      maxAge: $("snapshotMaxAge").value.trim(),
-      required: snapshotRequired,
-      events: splitCSV($("snapshotEvents").value),
-    },
+    ...(cronPayload ? {} : { snapshots }),
   };
 }
 
@@ -291,6 +285,22 @@ function snapshotRequiredValue() {
   if (value === "true") return true;
   if (value === "false") return false;
   return undefined;
+}
+
+function snapshotDraftForPayloadKind(payloadKind) {
+  if (payloadKind === "cron") return {};
+  const vmPayload = payloadKind === "vm";
+  const retention = {
+    mode: $("snapshots").value,
+    keepLast: Number.parseInt($("snapshotKeepLast").value, 10) || 0,
+    maxAge: $("snapshotMaxAge").value.trim(),
+  };
+  if (vmPayload) return retention;
+  return {
+    ...retention,
+    required: snapshotRequiredValue(),
+    events: splitCSV($("snapshotEvents").value),
+  };
 }
 
 function shell(value) {
@@ -406,7 +416,7 @@ function syncWorkloadUI() {
   $("publish").closest("label").hidden = isVM || isCron;
   $("serviceRoot").disabled = isCron;
   $("zfs").disabled = isCron;
-  $("snapshots").closest("details").hidden = isCron;
+  syncSnapshotUI(def.payloadKind);
   const zfsChecked = $("zfs").checked;
   const storageHelp = $("storageModeLabel").querySelector(".help");
   if (zfsChecked && isVM) {
@@ -424,6 +434,25 @@ function syncWorkloadUI() {
     renderNetworkModes(def.networkModes.filter((mode) => mode !== "host"));
     applyDefaultNetworkModes(workload);
   }
+}
+
+function syncSnapshotUI(payloadKind) {
+  const isCron = payloadKind === "cron";
+  const isVM = payloadKind === "vm";
+  const details = $("snapshotDetails");
+  details.hidden = isCron;
+  if (isCron) return;
+
+  $("snapshotSummaryText").textContent = isVM ? "VM snapshots" : "Snapshots";
+  $("snapshotModeLabel").textContent = isVM ? "Policy" : "Mode";
+  $("snapshotRequiredField").hidden = isVM;
+  $("snapshotEventsField").hidden = isVM;
+  $("snapshotEventsField").dataset.vmValidation = "VM snapshot policy does not use events; use mode, keep last, and max age for manual vm snapshots";
+
+  const help = details.querySelector(".help");
+  help.dataset.help = isVM
+    ? "Retention policy for yeet vm snapshot. Disk snapshots use the VM zvol."
+    : "Optional per-service snapshot policy stored with the run recipe.";
 }
 
 function applyDefaultNetworkModes(workload) {

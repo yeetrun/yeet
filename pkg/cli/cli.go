@@ -93,6 +93,11 @@ type VMSetFlags struct {
 	MacvlanParent string
 }
 
+type VMSnapshotFlags struct {
+	Comment string
+	Full    bool
+}
+
 type ServiceSyncFlags struct {
 	All    bool
 	Config string
@@ -253,6 +258,11 @@ type vmSetFlagsParsed struct {
 	MacvlanMac    string `flag:"macvlan-mac"`
 	MacvlanVlan   int    `flag:"macvlan-vlan"`
 	MacvlanParent string `flag:"macvlan-parent"`
+}
+
+type vmSnapshotFlagsParsed struct {
+	Comment string `flag:"comment"`
+	Full    bool   `flag:"full"`
 }
 
 type serviceSyncFlagsParsed struct {
@@ -513,6 +523,18 @@ var remoteGroupInfos = map[string]GroupInfo{
 				},
 				ArgsSchema: ServiceArgs{},
 			},
+			"snapshot": {
+				Name:        "snapshot",
+				Description: "Snapshot a ZFS-backed VM disk",
+				Usage:       "vm snapshot <vm> [--comment=TEXT] [--full]",
+				Examples: []string{
+					"yeet vm snapshot devbox",
+					"yeet vm snapshot devbox --comment=\"before package upgrade\"",
+					"yeet vm snapshot devbox --full --comment=\"checkpoint before risky change\"",
+				},
+				ArgsSchema:  ServiceArgs{},
+				FlagsSchema: vmSnapshotFlagsParsed{},
+			},
 			"images": {
 				Name:        "images",
 				Description: "Show available VM images and manage VM image cache state",
@@ -605,9 +627,10 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"outdated": flagSpecsFromStruct(dockerOutdatedFlagsParsed{}),
 	},
 	"vm": {
-		"console": {},
-		"set":     flagSpecsFromStruct(vmSetFlagsParsed{}),
-		"images":  flagSpecsFromStruct(vmImagesFlagsParsed{}),
+		"console":  {},
+		"set":      flagSpecsFromStruct(vmSetFlagsParsed{}),
+		"snapshot": flagSpecsFromStruct(vmSnapshotFlagsParsed{}),
+		"images":   flagSpecsFromStruct(vmImagesFlagsParsed{}),
 	},
 	"env": {
 		"show": flagSpecsFromStruct(envShowFlagsParsed{}),
@@ -913,6 +936,21 @@ func ParseVMSet(args []string) (VMSetFlags, []string, error) {
 	}
 	if hasFlagWithoutValue(parseArgs, "--net") {
 		return VMSetFlags{}, nil, fmt.Errorf("--net must not be empty")
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseVMSnapshot(args []string) (VMSnapshotFlags, []string, error) {
+	specs := remoteGroupFlagSpecs["vm"]["snapshot"]
+	parseArgs, extraArgs := splitArgsForParsing(args, specs)
+	parsed, err := parseFlags[vmSnapshotFlagsParsed](parseArgs)
+	if err != nil {
+		return VMSnapshotFlags{}, nil, err
+	}
+	flags := VMSnapshotFlags{
+		Comment: strings.TrimSpace(parsed.Flags.Comment),
+		Full:    parsed.Flags.Full,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil

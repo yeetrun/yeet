@@ -27,6 +27,7 @@ const (
 	snapshotEventRun                  snapshotEvent = "run"
 	snapshotEventDockerUpdate         snapshotEvent = "docker-update"
 	snapshotEventServiceRootMigration snapshotEvent = "service-root-migration"
+	snapshotEventVMManual             snapshotEvent = "vm-manual"
 	defaultSnapshotMaxAge                           = 7 * 24 * time.Hour
 	defaultSnapshotKeepLast                         = 5
 )
@@ -55,6 +56,8 @@ type snapshotCreateRequest struct {
 	Event      snapshotEvent
 	Generation int
 	Now        time.Time
+	Comment    string
+	Checkpoint string
 }
 
 type listedSnapshot struct {
@@ -154,16 +157,27 @@ func (s *Server) pruneServiceSnapshots(ctx context.Context, service *db.Service,
 	if service == nil || strings.TrimSpace(service.ServiceRootZFS) == "" {
 		return nil
 	}
-	snaps, err := listServiceSnapshots(ctx, s.zfsRunner, service.ServiceRootZFS)
+	_, err := s.pruneServiceSnapshotsForDataset(ctx, service.ServiceRootZFS, service, policy, now, current)
+	return err
+}
+
+func (s *Server) pruneServiceSnapshotsForDataset(ctx context.Context, dataset string, service *db.Service, policy effectivePolicy, now time.Time, current string) ([]string, error) {
+	if service == nil || strings.TrimSpace(dataset) == "" {
+		return nil, nil
+	}
+	snaps, err := listServiceSnapshots(ctx, s.zfsRunner, dataset)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, name := range snapshotsToPrune(snaps, service.Name, policy, now, current) {
+	names := snapshotsToPrune(snaps, service.Name, policy, now, current)
+	destroyed := make([]string, 0, len(names))
+	for _, name := range names {
 		if err := destroySnapshot(ctx, s.zfsRunner, name); err != nil {
-			return err
+			return destroyed, err
 		}
+		destroyed = append(destroyed, name)
 	}
-	return nil
+	return destroyed, nil
 }
 
 func effectiveSnapshotPolicy(server, service *db.SnapshotPolicy) (effectivePolicy, error) {
@@ -405,8 +419,14 @@ func runZFSSnapshot(ctx context.Context, runner zfsCommandRunner, req snapshotCr
 		"-o", "com.yeetrun:event=" + string(req.Event),
 		"-o", "com.yeetrun:generation=" + strconv.Itoa(req.Generation),
 		"-o", "com.yeetrun:policy-version=1",
-		snapshotName,
 	}
+	if comment := strings.TrimSpace(req.Comment); comment != "" {
+		args = append(args, "-o", "com.yeetrun:comment="+comment)
+	}
+	if checkpoint := strings.TrimSpace(req.Checkpoint); checkpoint != "" {
+		args = append(args, "-o", "com.yeetrun:checkpoint="+checkpoint)
+	}
+	args = append(args, snapshotName)
 	_, stderr, err := runner(ctx, args...)
 	return stderr, err
 }
