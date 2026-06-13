@@ -193,6 +193,9 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	if strings.Contains(string(index)+string(app), "hostOptions") {
 		t.Fatal("web assets still contain native hostOptions datalist behavior")
 	}
+	if strings.Contains(string(app), "tank/apps") {
+		t.Fatal("ZFS placeholder should not imply a fixed dataset layout")
+	}
 	if strings.Contains(string(index), "<datalist") {
 		t.Fatal("index still contains native datalist markup")
 	}

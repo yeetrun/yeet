@@ -41,6 +41,13 @@ type zfsRootCandidateTree struct {
 	Ordered []*zfsRootCandidateNode
 }
 
+type zfsRootCandidateMetrics struct {
+	childCount        int
+	vmChildCount      int
+	serviceChildCount int
+	imageChildCount   int
+}
+
 func (s *Server) zfsServiceRootCandidates(ctx context.Context, req catchrpc.ZFSServiceRootCandidatesRequest) (catchrpc.ZFSServiceRootCandidatesResponse, error) {
 	if s == nil {
 		return zfsServiceRootCandidates(ctx, nil, req)
@@ -164,20 +171,24 @@ func zfsRankedRootCandidates(tree zfsRootCandidateTree, req catchrpc.ZFSServiceR
 	candidates := make([]catchrpc.ZFSServiceRootCandidate, 0, len(tree.Ordered))
 	workload := strings.ToLower(strings.TrimSpace(req.Workload))
 	for _, node := range tree.Ordered {
-		if !usableZFSRootCandidate(node.Row) {
+		if !usableZFSRootCandidate(node) {
 			continue
 		}
-		childCount := zfsFilesystemChildCount(node)
-		vmChildCount := zfsVMChildCount(node)
-		serviceChildCount := zfsServiceChildCount(node)
-		rank := zfsRootCandidateRank(node.Row.Name, workload, childCount, vmChildCount, serviceChildCount)
+		metrics := zfsRootCandidateMetricsForNode(node)
+		if zfsRootCandidateIsNonPoolLeaf(node, metrics) {
+			continue
+		}
+		if zfsRootCandidateIsImageOnlyPrefix(metrics) {
+			continue
+		}
+		rank := zfsRootCandidateRank(workload, metrics)
 		candidates = append(candidates, catchrpc.ZFSServiceRootCandidate{
 			Dataset:           node.Row.Name,
 			Mountpoint:        node.Row.Mountpoint,
 			FreeBytes:         node.Row.Available,
-			ChildCount:        childCount,
-			VMChildCount:      vmChildCount,
-			ServiceChildCount: serviceChildCount,
+			ChildCount:        metrics.childCount,
+			VMChildCount:      metrics.vmChildCount,
+			ServiceChildCount: metrics.serviceChildCount,
 			SuggestedDataset:  suggestedZFSDataset(node.Row.Name, req.Service),
 			Label:             node.Row.Name,
 			Rank:              rank,
@@ -199,46 +210,21 @@ func zfsRankedRootCandidates(tree zfsRootCandidateTree, req catchrpc.ZFSServiceR
 	return candidates
 }
 
-func zfsRootCandidateRank(name, workload string, childCount, vmChildCount, serviceChildCount int) int {
+func zfsRootCandidateRank(workload string, metrics zfsRootCandidateMetrics) int {
 	if workload == "vm" {
-		return zfsVMRootCandidateRank(name, childCount, vmChildCount)
+		return zfsVMRootCandidateRank(metrics)
 	}
-	return zfsComposeRootCandidateRank(name, childCount, vmChildCount, serviceChildCount)
+	return zfsComposeRootCandidateRank(metrics)
 }
 
-func zfsVMRootCandidateRank(name string, childCount, vmChildCount int) int {
-	rank := vmChildCount*100 + childCount
-	if zfsDatasetNameEndsWith(name, "vms") {
-		rank += 80
-	}
-	if zfsDatasetContainsPath(name, "yeet/vms") {
-		rank += 60
-	}
-	if zfsDatasetNameEndsWith(name, "yeet") {
-		rank += 10
-	}
-	return rank
+func zfsVMRootCandidateRank(metrics zfsRootCandidateMetrics) int {
+	return metrics.vmChildCount*10000 + metrics.serviceChildCount*100 + metrics.childCount
 }
 
-func zfsComposeRootCandidateRank(name string, childCount, vmChildCount, serviceChildCount int) int {
-	rank := serviceChildCount*100 + childCount
-	switch {
-	case zfsDatasetNameEndsWith(name, "yeet"):
-		rank += 10000
-	case zfsDatasetNameEndsWith(name, "apps"):
-		rank += 9000
-	case zfsDatasetNameEndsWith(name, "services"):
-		rank += 9000
-	}
-	if zfsDatasetNameEndsWith(name, "vms") {
-		rank -= 150
-	}
-	if zfsDatasetContainsPath(name, "yeet/vms") {
-		rank -= 100
-	}
-	if vmChildCount > 0 {
-		rank -= vmChildCount * 20
-	}
+func zfsComposeRootCandidateRank(metrics zfsRootCandidateMetrics) int {
+	rank := metrics.serviceChildCount*10000 + metrics.childCount
+	rank -= metrics.vmChildCount * 1000
+	rank -= metrics.imageChildCount * 1000
 	return rank
 }
 
@@ -251,7 +237,8 @@ func suggestedZFSDataset(root, service string) string {
 	return root + "/" + service
 }
 
-func usableZFSRootCandidate(row zfsRootCandidateRow) bool {
+func usableZFSRootCandidate(node *zfsRootCandidateNode) bool {
+	row := node.Row
 	if row.Type != "filesystem" {
 		return false
 	}
@@ -267,7 +254,7 @@ func usableZFSRootCandidate(row zfsRootCandidateRow) bool {
 	if !strings.EqualFold(row.Mounted, "yes") {
 		return false
 	}
-	return !isInternalVMImagesDataset(row.Name)
+	return !zfsNodeHasDirectVolume(node)
 }
 
 func normalZFSMountpoint(mountpoint string) bool {
@@ -279,19 +266,13 @@ func normalZFSMountpoint(mountpoint string) bool {
 }
 
 func zfsFilesystemChildCount(node *zfsRootCandidateNode) int {
-	count := 0
-	for _, child := range node.Children {
-		if child.Row.Type == "filesystem" {
-			count++
-		}
-	}
-	return count
+	return len(zfsDirectFilesystemChildren(node))
 }
 
 func zfsVMChildCount(node *zfsRootCandidateNode) int {
 	count := 0
-	for _, child := range node.Children {
-		if child.Row.Type == "filesystem" && zfsNodeHasDirectRootVolume(child) {
+	for _, child := range zfsDirectFilesystemChildren(node) {
+		if zfsNodeHasDirectClonedVolume(child) {
 			count++
 		}
 	}
@@ -300,14 +281,14 @@ func zfsVMChildCount(node *zfsRootCandidateNode) int {
 
 func zfsServiceChildCount(node *zfsRootCandidateNode) int {
 	count := 0
-	for _, child := range node.Children {
-		if !usableZFSRootCandidate(child.Row) {
+	for _, child := range zfsDirectFilesystemChildren(node) {
+		if !usableZFSFilesystemRow(child.Row) {
 			continue
 		}
-		if zfsDatasetNameEndsWith(child.Row.Name, "vms") {
+		if zfsFilesystemChildCount(child) > 0 {
 			continue
 		}
-		if zfsNodeHasDirectRootVolume(child) {
+		if zfsNodeHasDescendantVolume(child) {
 			continue
 		}
 		count++
@@ -315,14 +296,101 @@ func zfsServiceChildCount(node *zfsRootCandidateNode) int {
 	return count
 }
 
-func zfsNodeHasDirectRootVolume(node *zfsRootCandidateNode) bool {
-	rootVolume := node.Row.Name + "/root"
+func zfsImageChildCount(node *zfsRootCandidateNode) int {
+	count := 0
+	for _, child := range zfsDirectFilesystemChildren(node) {
+		if zfsNodeHasDirectUnclonedVolume(child) {
+			count++
+		}
+	}
+	return count
+}
+
+func zfsRootCandidateMetricsForNode(node *zfsRootCandidateNode) zfsRootCandidateMetrics {
+	return zfsRootCandidateMetrics{
+		childCount:        zfsFilesystemChildCount(node),
+		vmChildCount:      zfsVMChildCount(node),
+		serviceChildCount: zfsServiceChildCount(node),
+		imageChildCount:   zfsImageChildCount(node),
+	}
+}
+
+func zfsRootCandidateIsImageOnlyPrefix(metrics zfsRootCandidateMetrics) bool {
+	return metrics.imageChildCount > 0 && metrics.vmChildCount == 0 && metrics.serviceChildCount == 0
+}
+
+func zfsRootCandidateIsNonPoolLeaf(node *zfsRootCandidateNode, metrics zfsRootCandidateMetrics) bool {
+	return node.Parent != nil && metrics.childCount == 0
+}
+
+func usableZFSFilesystemRow(row zfsRootCandidateRow) bool {
+	if row.Type != "filesystem" {
+		return false
+	}
+	if !normalZFSMountpoint(row.Mountpoint) {
+		return false
+	}
+	if strings.EqualFold(row.Canmount, "off") {
+		return false
+	}
+	if strings.EqualFold(row.Readonly, "on") {
+		return false
+	}
+	return strings.EqualFold(row.Mounted, "yes")
+}
+
+func zfsDirectFilesystemChildren(node *zfsRootCandidateNode) []*zfsRootCandidateNode {
+	children := make([]*zfsRootCandidateNode, 0, len(node.Children))
 	for _, child := range node.Children {
-		if child.Row.Type == "volume" && child.Row.Name == rootVolume {
+		if child.Row.Type == "filesystem" {
+			children = append(children, child)
+		}
+	}
+	return children
+}
+
+func zfsNodeHasDirectVolume(node *zfsRootCandidateNode) bool {
+	for _, child := range node.Children {
+		if child.Row.Type == "volume" {
 			return true
 		}
 	}
 	return false
+}
+
+func zfsNodeHasDirectClonedVolume(node *zfsRootCandidateNode) bool {
+	for _, child := range node.Children {
+		if child.Row.Type == "volume" && zfsVolumeHasOrigin(child.Row) {
+			return true
+		}
+	}
+	return false
+}
+
+func zfsNodeHasDirectUnclonedVolume(node *zfsRootCandidateNode) bool {
+	for _, child := range node.Children {
+		if child.Row.Type == "volume" && !zfsVolumeHasOrigin(child.Row) {
+			return true
+		}
+	}
+	return false
+}
+
+func zfsNodeHasDescendantVolume(node *zfsRootCandidateNode) bool {
+	if zfsNodeHasDirectVolume(node) {
+		return true
+	}
+	for _, child := range zfsDirectFilesystemChildren(node) {
+		if zfsNodeHasDescendantVolume(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func zfsVolumeHasOrigin(row zfsRootCandidateRow) bool {
+	origin := strings.TrimSpace(row.Origin)
+	return origin != "" && origin != "-"
 }
 
 func zfsDatasetParent(name string) string {
@@ -332,25 +400,6 @@ func zfsDatasetParent(name string) string {
 		return ""
 	}
 	return name[:idx]
-}
-
-func zfsDatasetNameEndsWith(name, segment string) bool {
-	segment = strings.Trim(segment, "/")
-	return name == segment || strings.HasSuffix(name, "/"+segment)
-}
-
-func zfsDatasetContainsPath(name, path string) bool {
-	path = strings.Trim(path, "/")
-	return name == path ||
-		strings.HasPrefix(name, path+"/") ||
-		strings.HasSuffix(name, "/"+path) ||
-		strings.Contains(name, "/"+path+"/")
-}
-
-func isInternalVMImagesDataset(name string) bool {
-	return name == "vm-images" ||
-		strings.HasSuffix(name, "/vm-images") ||
-		strings.Contains(name, "/vm-images/")
 }
 
 func isZFSMissingCommand(stderr string, err error) bool {

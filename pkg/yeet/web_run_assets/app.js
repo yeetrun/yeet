@@ -464,7 +464,7 @@ function syncNetworkUI() {
 
 function updateServiceRootPlaceholder() {
   const service = $("service").value.trim() || "<service>";
-  $("serviceRoot").placeholder = $("zfs").checked ? `tank/apps/${service}` : `/root/data/services/${service}`;
+  $("serviceRoot").placeholder = $("zfs").checked ? `<dataset>/${service}` : `/root/data/services/${service}`;
 }
 
 function zfsRootPickerEnabled() {
