@@ -121,6 +121,30 @@ func TestServerZFSServiceRootCandidatesUsesConfiguredRunner(t *testing.T) {
 	}
 }
 
+func TestZFSServiceRootCandidatesSkipsNonNormalMountpoints(t *testing.T) {
+	out := strings.Join([]string{
+		"flash/none\tfilesystem\tnone\t1000\t300\t1\t-\ton\toff",
+		"flash/relative\tfilesystem\tflash/relative\t1000\t300\t1\t-\ton\toff",
+		"flash/legacy\tfilesystem\tlegacy\t1000\t300\t1\t-\ton\toff",
+		"flash/normal\tfilesystem\t/flash/normal\t1000\t300\t1\t-\ton\toff",
+	}, "\n") + "\n"
+	resp, err := zfsServiceRootCandidates(context.Background(), fakeZFSListRunner(out, "", nil), catchrpc.ZFSServiceRootCandidatesRequest{
+		Service: "radarr",
+	})
+	if err != nil {
+		t.Fatalf("zfsServiceRootCandidates: %v", err)
+	}
+	if resp.State != catchrpc.ZFSRootDiscoveryAvailable {
+		t.Fatalf("state = %q, want available", resp.State)
+	}
+	if len(resp.Candidates) != 1 {
+		t.Fatalf("candidates = %#v, want one normal mountpoint", resp.Candidates)
+	}
+	if resp.Candidates[0].Dataset != "flash/normal" {
+		t.Fatalf("candidate = %#v, want flash/normal", resp.Candidates[0])
+	}
+}
+
 func TestSuggestedZFSDatasetUsesTrailingSlashWithoutService(t *testing.T) {
 	if got := suggestedZFSDataset("flash/yeet/vms", ""); got != "flash/yeet/vms/" {
 		t.Fatalf("suggested empty service = %q", got)
