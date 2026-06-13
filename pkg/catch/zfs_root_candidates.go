@@ -7,6 +7,7 @@ package catch
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -266,7 +267,10 @@ func usableZFSRootCandidate(row zfsRootCandidateRow) bool {
 
 func normalZFSMountpoint(mountpoint string) bool {
 	mountpoint = strings.TrimSpace(mountpoint)
-	return mountpoint != "" && mountpoint != "-" && mountpoint != "legacy"
+	if mountpoint == "" || mountpoint == "-" || strings.EqualFold(mountpoint, "legacy") || strings.EqualFold(mountpoint, "none") {
+		return false
+	}
+	return filepath.IsAbs(mountpoint)
 }
 
 func zfsFilesystemChildCount(node *zfsRootCandidateNode) int {
