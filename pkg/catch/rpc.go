@@ -157,6 +157,8 @@ func (s *Server) dispatchRPC(req catchrpc.Request) catchrpc.Response {
 		return s.handleRPCServiceInfo(req)
 	case "catch.ArtifactHashes":
 		return s.handleRPCArtifactHashes(req)
+	case "catch.ZFSServiceRootCandidates":
+		return s.handleRPCZFSServiceRootCandidates(req)
 	case "catch.TailscaleSetup":
 		return s.handleRPCTailscaleSetup(req)
 	case "catch.ServicesList":
@@ -198,6 +200,18 @@ func (s *Server) handleRPCArtifactHashes(req catchrpc.Request) catchrpc.Response
 	resp, err := s.artifactHashes(service)
 	if err != nil {
 		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to get artifact hashes", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
+}
+
+func (s *Server) handleRPCZFSServiceRootCandidates(req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.ZFSServiceRootCandidatesRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.zfsServiceRootCandidates(context.Background(), params)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to get ZFS service root candidates", err.Error())
 	}
 	return newRPCResponse(req.ID, resp)
 }

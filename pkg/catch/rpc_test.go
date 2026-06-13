@@ -411,6 +411,48 @@ func TestRPCServicesListDispatch(t *testing.T) {
 	}
 }
 
+func TestRPCZFSServiceRootCandidates(t *testing.T) {
+	server := newTestServer(t)
+	server.zfsRunner = fakeZFSListRunner(strings.Join([]string{
+		"flash\tfilesystem\t/flash\t1000\t400\t100\t-\ton\toff",
+		"flash/yeet\tfilesystem\t/flash/yeet\t1000\t300\t1\t-\ton\toff",
+		"flash/yeet/vms\tfilesystem\t/flash/yeet/vms\t1000\t30\t1\t-\ton\toff",
+		"flash/yeet/vms/devbox\tfilesystem\t/flash/yeet/vms/devbox\t1000\t10\t1\t-\ton\toff",
+		"flash/yeet/vms/devbox/root\tvolume\t-\t1000\t10\t10\tflash/yeet/vm-images/ubuntu/root@snap\t-\toff",
+	}, "\n")+"\n", "", nil)
+
+	params, err := json.Marshal(catchrpc.ZFSServiceRootCandidatesRequest{
+		Workload: "vm",
+		Service:  "devbox",
+	})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	resp := server.dispatchRPC(catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "catch.ZFSServiceRootCandidates",
+		Params:  params,
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", resp.Error)
+	}
+	raw, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	var roots catchrpc.ZFSServiceRootCandidatesResponse
+	if err := json.Unmarshal(raw, &roots); err != nil {
+		t.Fatalf("unmarshal roots: %v", err)
+	}
+	if roots.State != catchrpc.ZFSRootDiscoveryAvailable {
+		t.Fatalf("state = %q, want available", roots.State)
+	}
+	if len(roots.Candidates) == 0 || roots.Candidates[0].SuggestedDataset != "flash/yeet/vms/devbox" {
+		t.Fatalf("roots = %#v", roots)
+	}
+}
+
 func TestRPCArtifactHashesMissingService(t *testing.T) {
 	server := newTestServer(t)
 	params, err := json.Marshal(catchrpc.ArtifactHashesRequest{Service: "missing"})
