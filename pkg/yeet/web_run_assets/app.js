@@ -394,7 +394,7 @@ function syncWorkloadUI() {
   $("zfs").disabled = isCron;
   $("snapshots").closest("details").hidden = isCron;
   $("storageModeLabel").firstChild.textContent = $("zfs").checked ? "ZFS dataset " : "Service root ";
-  $("zfsHelp").textContent = $("zfs").checked ? "Using ZFS dataset" : "ZFS dataset";
+  $("zfsHelp").textContent = "ZFS";
   if (workloadChanged) {
     renderNetworkModes(def.networkModes.filter((mode) => mode !== "host"));
     applyDefaultNetworkModes(workload);
@@ -475,7 +475,6 @@ function zfsRootRequestKey() {
   return [
     $("host").value.trim(),
     selectedWorkload(),
-    $("service").value.trim(),
   ].join("\n");
 }
 
@@ -504,13 +503,18 @@ function clearPickedZFSRootForContextChange() {
 
 function syncZFSRootPicker() {
   clearPickedZFSRootForContextChange();
-  const picker = $("zfsRootPicker");
+  const button = $("zfsRootPickerButton");
+  const input = $("serviceRoot");
   if (!zfsRootPickerEnabled()) {
-    picker.hidden = true;
+    button.hidden = true;
+    input.removeAttribute("aria-haspopup");
+    input.setAttribute("aria-expanded", "false");
+    hideZFSRootPicker();
     state.zfsRootKey = "";
     return;
   }
-  picker.hidden = false;
+  button.hidden = false;
+  input.setAttribute("aria-haspopup", "listbox");
   syncPickedZFSRootValue();
   const key = zfsRootRequestKey();
   if (key === state.zfsRootKey) return;
@@ -520,7 +524,7 @@ function syncZFSRootPicker() {
 
 async function loadZFSRoots(key) {
   const seq = ++state.zfsRootSeq;
-  const [host, workload, service] = key.split("\n");
+  const [host, workload] = key.split("\n");
   if (!host) {
     state.zfsRootState = { state: "error", warnings: ["Choose a host"] };
     renderZFSRootCandidates(state.zfsRootState);
@@ -528,6 +532,7 @@ async function loadZFSRoots(key) {
   }
   state.zfsRootState = { state: "loading" };
   renderZFSRootCandidates(state.zfsRootState);
+  const service = $("service").value.trim();
   const query = new URLSearchParams({ host, workload, service });
   try {
     const res = await api(`/api/zfs-roots?${query}`);
@@ -557,7 +562,33 @@ function renderZFSRootCandidates(response) {
     list.replaceChildren(emptyZFSRootState("No suggested roots"));
     return;
   }
-  list.replaceChildren(...candidates.map(zfsRootRow));
+  list.replaceChildren(...candidates.slice(0, 6).map(zfsRootRow));
+}
+
+function showZFSRootPicker() {
+  if (!zfsRootPickerEnabled()) {
+    hideZFSRootPicker();
+    return;
+  }
+  hidePicker();
+  syncZFSRootPicker();
+  state.activePicker = "zfsRoot";
+  const input = $("serviceRoot");
+  const picker = $("zfsRootPicker");
+  const rect = input.getBoundingClientRect();
+  picker.style.left = `${Math.max(12, rect.left)}px`;
+  picker.style.top = `${Math.min(window.innerHeight - 320, rect.bottom + 6)}px`;
+  picker.style.width = `${Math.max(360, Math.min(520, rect.width))}px`;
+  picker.hidden = false;
+  input.setAttribute("aria-expanded", "true");
+  $("zfsRootPickerButton").setAttribute("aria-expanded", "true");
+}
+
+function hideZFSRootPicker() {
+  if (state.activePicker === "zfsRoot") state.activePicker = "";
+  $("zfsRootPicker").hidden = true;
+  $("serviceRoot").setAttribute("aria-expanded", "false");
+  $("zfsRootPickerButton").setAttribute("aria-expanded", "false");
 }
 
 function zfsRootStatusText(response) {
@@ -610,34 +641,49 @@ function zfsRootRow(candidate) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "zfs-root-row";
-  button.setAttribute("aria-pressed", String(state.pickedZFSRoot?.dataset === candidate.dataset));
+  button.setAttribute("role", "option");
+  button.setAttribute("aria-selected", String(state.pickedZFSRoot?.dataset === candidate.dataset));
 
   const main = document.createElement("span");
   main.className = "zfs-root-main";
-  main.textContent = candidate.dataset;
+  main.textContent = zfsRootDisplayDataset(candidate);
 
   const meta = document.createElement("span");
   meta.className = "zfs-root-meta";
   meta.textContent = zfsRootMeta(candidate);
 
-  const suggested = document.createElement("span");
-  suggested.className = "zfs-root-suggested";
-  suggested.textContent = candidate.suggestedDataset || suggestedZFSServiceDataset(candidate.dataset, $("service").value);
-
-  button.append(main, meta, suggested);
+  button.append(main, meta);
   button.addEventListener("click", () => pickZFSRootCandidate(candidate));
   return button;
 }
 
+function zfsRootDisplayDataset(candidate) {
+  const dataset = (candidate.dataset || "").trim().replace(/\/+$/, "");
+  return dataset ? `${dataset}/` : "";
+}
+
 function zfsRootMeta(candidate) {
   const parts = [];
-  if (candidate.mountpoint) parts.push(candidate.mountpoint);
+  const mountpoint = zfsRootMountpointMeta(candidate);
+  if (mountpoint) parts.push(mountpoint);
   const free = formatBytes(candidate.freeBytes);
   if (free) parts.push(`${free} free`);
-  if (candidate.vmChildCount) parts.push(`${candidate.vmChildCount} VMs`);
-  else if (candidate.serviceChildCount) parts.push(`${candidate.serviceChildCount} services`);
-  else if (candidate.childCount) parts.push(`${candidate.childCount} children`);
-  return parts.join(" | ");
+  if (candidate.vmChildCount) parts.push(countLabel(candidate.vmChildCount, "VM"));
+  else if (candidate.serviceChildCount) parts.push(countLabel(candidate.serviceChildCount, "service"));
+  else if (candidate.childCount) parts.push(countLabel(candidate.childCount, "child", "children"));
+  return parts.join(", ");
+}
+
+function zfsRootMountpointMeta(candidate) {
+  const mountpoint = (candidate.mountpoint || "").trim().replace(/\/+$/, "");
+  const dataset = (candidate.dataset || "").trim().replace(/\/+$/, "");
+  if (!mountpoint) return "";
+  if (dataset && mountpoint === `/${dataset}`) return "";
+  return mountpoint;
+}
+
+function countLabel(count, singular, plural = `${singular}s`) {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 function formatBytes(bytes) {
@@ -660,8 +706,9 @@ function pickZFSRootCandidate(candidate) {
     workload: selectedWorkload(),
   };
   state.serviceRootManual = false;
-  $("serviceRoot").value = candidate.suggestedDataset || suggestedZFSServiceDataset(candidate.dataset, $("service").value);
+  $("serviceRoot").value = suggestedZFSServiceDataset(candidate.dataset, $("service").value);
   renderZFSRootCandidates(state.zfsRootState);
+  hideZFSRootPicker();
   update();
 }
 
@@ -771,7 +818,7 @@ function pickerEnabledForField(field) {
 }
 
 function hidePicker() {
-  state.activePicker = "";
+  if (state.activePicker !== "zfsRoot") state.activePicker = "";
   $("filePicker").hidden = true;
 }
 
@@ -1327,6 +1374,7 @@ $("upButton").addEventListener("click", () => loadFiles(parentDir(state.currentD
 $("host").addEventListener("focus", showHostPicker);
 $("host").addEventListener("click", showHostPicker);
 $("hostPickerButton").addEventListener("click", showHostPicker);
+$("zfsRootPickerButton").addEventListener("click", showZFSRootPicker);
 $("terminalExpand").addEventListener("click", () => {
   const sheet = $("terminalSheet");
   const expanded = sheet.dataset.expanded !== "true";
@@ -1343,6 +1391,10 @@ document.addEventListener("click", (event) => {
   hidePicker();
 });
 document.addEventListener("click", (event) => {
+  if (event.target.closest("#zfsRootPicker") || event.target.closest(".zfs-root-field")) return;
+  hideZFSRootPicker();
+});
+document.addEventListener("click", (event) => {
   if (event.target.closest("#hostPicker") || event.target.closest(".host-picker-field")) return;
   hideHostPicker();
 });
@@ -1351,12 +1403,17 @@ document.addEventListener("focusin", (event) => {
   hidePicker();
 });
 document.addEventListener("focusin", (event) => {
+  if (event.target.closest("#zfsRootPicker") || event.target.closest(".zfs-root-field")) return;
+  hideZFSRootPicker();
+});
+document.addEventListener("focusin", (event) => {
   if (event.target.closest("#hostPicker") || event.target.closest(".host-picker-field")) return;
   hideHostPicker();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     hidePicker();
+    hideZFSRootPicker();
     hideHostPicker();
   }
 });

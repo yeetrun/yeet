@@ -78,6 +78,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`id="storageModeLabel"`,
 		`id="zfsHelp"`,
 		`id="zfsRootPicker"`,
+		`id="zfsRootPickerButton"`,
 		`id="zfsRootStatus"`,
 		`id="zfsRootList"`,
 		`<summary>Tailscale settings`,
@@ -175,6 +176,9 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"pickedZFSRoot",
 		"serviceRootManual",
 		"function syncZFSRootPicker()",
+		"function showZFSRootPicker()",
+		"function hideZFSRootPicker()",
+		"function zfsRootDisplayDataset(candidate)",
 		"function loadZFSRoots(key)",
 		"/api/zfs-roots?",
 		"function pickZFSRootCandidate(candidate)",
@@ -194,6 +198,9 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	}
 	if regexp.MustCompile(`\slist\s*=`).Match(index) {
 		t.Fatal("index still contains native input list attribute")
+	}
+	if strings.Contains(string(index)+string(app)+string(styles), "zfs-root-suggested") {
+		t.Fatal("ZFS root picker should not repeat the selected dataset and suggested path in each row")
 	}
 	helpButtonRE := regexp.MustCompile(`<button[^>]*class="help"[^>]*>`)
 	for _, match := range helpButtonRE.FindAllString(string(index), -1) {
@@ -222,6 +229,8 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		".catalog-block",
 		".subsection-label",
 		".deploy-settings-grid",
+		".zfs-root-field",
+		".zfs-root-trigger",
 		".zfs-root-picker",
 		".zfs-root-row",
 		".zfs-root-meta",
