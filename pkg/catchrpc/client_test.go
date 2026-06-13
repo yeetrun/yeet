@@ -295,6 +295,58 @@ func TestServiceInfoCallsRPC(t *testing.T) {
 	}
 }
 
+func TestZFSServiceRootCandidatesCallsRPC(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method != "catch.ZFSServiceRootCandidates" {
+			t.Fatalf("method = %q, want catch.ZFSServiceRootCandidates", req.Method)
+		}
+		var params ZFSServiceRootCandidatesRequest
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatalf("decode params: %v", err)
+		}
+		if params.Workload != "vm" || params.Service != "devbox" {
+			t.Fatalf("params = %#v, want vm/devbox", params)
+		}
+		_ = json.NewEncoder(w).Encode(Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: ZFSServiceRootCandidatesResponse{
+				State: ZFSRootDiscoveryAvailable,
+				Candidates: []ZFSServiceRootCandidate{{
+					Dataset:          "flash/yeet/vms",
+					Mountpoint:       "/flash/yeet/vms",
+					FreeBytes:        1024,
+					ChildCount:       4,
+					VMChildCount:     4,
+					SuggestedDataset: "flash/yeet/vms/devbox",
+					Label:            "VM services root",
+					Rank:             100,
+				}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	got, err := NewClient(host, port).ZFSServiceRootCandidates(context.Background(), ZFSServiceRootCandidatesRequest{
+		Workload: "vm",
+		Service:  "devbox",
+	})
+	if err != nil {
+		t.Fatalf("ZFSServiceRootCandidates returned error: %v", err)
+	}
+	if got.State != ZFSRootDiscoveryAvailable || len(got.Candidates) != 1 {
+		t.Fatalf("response = %#v, want one available candidate", got)
+	}
+	if got.Candidates[0].SuggestedDataset != "flash/yeet/vms/devbox" {
+		t.Fatalf("suggested dataset = %q", got.Candidates[0].SuggestedDataset)
+	}
+}
+
 func TestClientExec(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	var gotReq ExecRequest

@@ -414,3 +414,9 @@ func (c *Client) ServiceInfo(ctx context.Context, service string) (ServiceInfoRe
 	err := c.Call(ctx, "catch.ServiceInfo", ServiceInfoRequest{Service: service}, &resp)
 	return resp, err
 }
+
+func (c *Client) ZFSServiceRootCandidates(ctx context.Context, req ZFSServiceRootCandidatesRequest) (ZFSServiceRootCandidatesResponse, error) {
+	var resp ZFSServiceRootCandidatesResponse
+	err := c.Call(ctx, "catch.ZFSServiceRootCandidates", req, &resp)
+	return resp, err
+}
