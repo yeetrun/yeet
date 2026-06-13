@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 //go:embed web_run_assets/*
@@ -57,6 +59,7 @@ func newRunWebServer(cfg runWebServerConfig) http.Handler {
 	s := &runWebServer{cfg: cfg, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
 	s.mux.HandleFunc("/api/files", s.handleFiles)
+	s.mux.HandleFunc("/api/zfs-roots", s.handleZFSRoots)
 	s.mux.HandleFunc("/api/validate", s.handleValidate)
 	s.mux.HandleFunc("/api/deploy", s.handleDeploy)
 	s.mux.HandleFunc("/api/deploy/", s.handleDeployJob)
@@ -137,6 +140,24 @@ func (s *runWebServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeRunWebJSON(w, http.StatusOK, files)
+}
+
+func (s *runWebServer) handleZFSRoots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	query := r.URL.Query()
+	host := strings.TrimSpace(query.Get("host"))
+	if host == "" {
+		host = s.cfg.Bootstrap.SelectedHost
+	}
+	ctx, cancel := runWebHandlerContext(s.cfg.Context, r.Context())
+	defer cancel()
+	writeRunWebJSON(w, http.StatusOK, runWebZFSRootsResponse(ctx, host, catchrpc.ZFSServiceRootCandidatesRequest{
+		Workload: query.Get("workload"),
+		Service:  query.Get("service"),
+	}))
 }
 
 func (s *runWebServer) handleValidate(w http.ResponseWriter, r *http.Request) {
