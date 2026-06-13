@@ -499,6 +499,101 @@ legend {
   accent-color: var(--brand);
 }
 
+.zfs-root-picker {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  margin: -14px 0 6px;
+}
+
+.zfs-root-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.zfs-root-status {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--quiet);
+  font-weight: 500;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zfs-root-list {
+  display: grid;
+  gap: 6px;
+}
+
+.zfs-root-row {
+  width: 100%;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, auto);
+  gap: 2px 12px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: oklch(0.15 0.012 165);
+  text-align: left;
+}
+
+.zfs-root-row:hover,
+.zfs-root-row:focus-visible {
+  border-color: var(--line-strong);
+  background: var(--surface-2);
+}
+
+.zfs-root-row[aria-pressed="true"] {
+  border-color: var(--brand);
+  background: color-mix(in oklch, var(--brand) 12%, var(--surface));
+}
+
+.zfs-root-main,
+.zfs-root-suggested,
+.zfs-root-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.zfs-root-main {
+  font-weight: 700;
+}
+
+.zfs-root-meta {
+  grid-column: 1 / -1;
+  color: var(--quiet);
+  font-size: 12px;
+}
+
+.zfs-root-suggested {
+  color: var(--accent);
+  font-size: 12px;
+  text-align: right;
+}
+
+.zfs-root-empty {
+  min-height: 38px;
+  display: grid;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--quiet);
+  background: oklch(0.15 0.012 165);
+  font-size: 13px;
+}
+
 .split-fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(120px, 0.42fr);
@@ -767,8 +862,13 @@ body[data-terminal-visible="true"] .shell {
   .deploy-form,
   .split-fields,
   .root-control,
+  .zfs-root-row,
   .picker-field {
     grid-template-columns: 1fr;
+  }
+
+  .zfs-root-suggested {
+    text-align: left;
   }
 
   .workload-selector {

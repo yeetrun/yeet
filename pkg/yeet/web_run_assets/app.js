@@ -20,6 +20,11 @@ const state = {
   workload: "",
   workloadOverride: "",
   networkSelections: {},
+  zfsRootSeq: 0,
+  zfsRootKey: "",
+  zfsRootState: null,
+  pickedZFSRoot: null,
+  serviceRootManual: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -460,6 +465,204 @@ function syncNetworkUI() {
 function updateServiceRootPlaceholder() {
   const service = $("service").value.trim() || "<service>";
   $("serviceRoot").placeholder = $("zfs").checked ? `tank/apps/${service}` : `/root/data/services/${service}`;
+}
+
+function zfsRootPickerEnabled() {
+  return $("zfs").checked && !$("zfs").disabled && selectedWorkload() !== "cron";
+}
+
+function zfsRootRequestKey() {
+  return [
+    $("host").value.trim(),
+    selectedWorkload(),
+    $("service").value.trim(),
+  ].join("\n");
+}
+
+function suggestedZFSServiceDataset(root, service) {
+  const dataset = root.trim().replace(/\/+$/, "");
+  const name = service.trim();
+  if (!dataset) return "";
+  return name ? `${dataset}/${name}` : `${dataset}/`;
+}
+
+function syncPickedZFSRootValue() {
+  if (!state.pickedZFSRoot || state.serviceRootManual) return;
+  const host = $("host").value.trim();
+  const workload = selectedWorkload();
+  if (state.pickedZFSRoot.host !== host || state.pickedZFSRoot.workload !== workload) return;
+  $("serviceRoot").value = suggestedZFSServiceDataset(state.pickedZFSRoot.dataset, $("service").value);
+}
+
+function clearPickedZFSRootForContextChange() {
+  if (!state.pickedZFSRoot) return;
+  const host = $("host").value.trim();
+  const workload = selectedWorkload();
+  if (state.pickedZFSRoot.host === host && state.pickedZFSRoot.workload === workload) return;
+  state.pickedZFSRoot = null;
+}
+
+function syncZFSRootPicker() {
+  clearPickedZFSRootForContextChange();
+  const picker = $("zfsRootPicker");
+  if (!zfsRootPickerEnabled()) {
+    picker.hidden = true;
+    state.zfsRootKey = "";
+    return;
+  }
+  picker.hidden = false;
+  syncPickedZFSRootValue();
+  const key = zfsRootRequestKey();
+  if (key === state.zfsRootKey) return;
+  state.zfsRootKey = key;
+  loadZFSRoots(key);
+}
+
+async function loadZFSRoots(key) {
+  const seq = ++state.zfsRootSeq;
+  const [host, workload, service] = key.split("\n");
+  if (!host) {
+    state.zfsRootState = { state: "error", warnings: ["Choose a host"] };
+    renderZFSRootCandidates(state.zfsRootState);
+    return;
+  }
+  state.zfsRootState = { state: "loading" };
+  renderZFSRootCandidates(state.zfsRootState);
+  const query = new URLSearchParams({ host, workload, service });
+  try {
+    const res = await api(`/api/zfs-roots?${query}`);
+    if (seq !== state.zfsRootSeq) return;
+    if (!res.ok) throw new Error(await res.text());
+    state.zfsRootState = await res.json();
+  } catch (err) {
+    if (seq !== state.zfsRootSeq) return;
+    state.zfsRootState = { state: "error", warnings: [String(err)] };
+  }
+  renderZFSRootCandidates(state.zfsRootState);
+}
+
+function renderZFSRootCandidates(response) {
+  const list = $("zfsRootList");
+  $("zfsRootStatus").textContent = zfsRootStatusText(response);
+  if (!response || response.state === "loading") {
+    list.replaceChildren(emptyZFSRootState("Checking host"));
+    return;
+  }
+  if (response.state !== "available") {
+    list.replaceChildren(emptyZFSRootState(zfsRootDetailText(response)));
+    return;
+  }
+  const candidates = response.candidates || [];
+  if (!candidates.length) {
+    list.replaceChildren(emptyZFSRootState("No suggested roots"));
+    return;
+  }
+  list.replaceChildren(...candidates.map(zfsRootRow));
+}
+
+function zfsRootStatusText(response) {
+  switch (response?.state) {
+    case "available":
+      return "Available";
+    case "loading":
+      return "Checking";
+    case "zfs-missing":
+      return "ZFS unavailable";
+    case "no-filesystems":
+      return "No filesystems";
+    case "unsupported-rpc":
+      return "Upgrade catch";
+    case "host-unreachable":
+      return "Host unreachable";
+    case "error":
+      return "Unavailable";
+    default:
+      return "";
+  }
+}
+
+function zfsRootDetailText(response) {
+  if (response?.warnings?.length) return response.warnings[0];
+  switch (response?.state) {
+    case "zfs-missing":
+      return "This host does not have ZFS available.";
+    case "no-filesystems":
+      return "No mounted ZFS filesystems were found.";
+    case "unsupported-rpc":
+      return "This catch host needs an upgrade for root suggestions.";
+    case "host-unreachable":
+      return "The selected host is not reachable.";
+    case "error":
+      return "ZFS root suggestions are unavailable.";
+    default:
+      return "";
+  }
+}
+
+function emptyZFSRootState(message) {
+  const empty = document.createElement("div");
+  empty.className = "zfs-root-empty";
+  empty.textContent = message;
+  return empty;
+}
+
+function zfsRootRow(candidate) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "zfs-root-row";
+  button.setAttribute("aria-pressed", String(state.pickedZFSRoot?.dataset === candidate.dataset));
+
+  const main = document.createElement("span");
+  main.className = "zfs-root-main";
+  main.textContent = candidate.dataset;
+
+  const meta = document.createElement("span");
+  meta.className = "zfs-root-meta";
+  meta.textContent = zfsRootMeta(candidate);
+
+  const suggested = document.createElement("span");
+  suggested.className = "zfs-root-suggested";
+  suggested.textContent = candidate.suggestedDataset || suggestedZFSServiceDataset(candidate.dataset, $("service").value);
+
+  button.append(main, meta, suggested);
+  button.addEventListener("click", () => pickZFSRootCandidate(candidate));
+  return button;
+}
+
+function zfsRootMeta(candidate) {
+  const parts = [];
+  if (candidate.mountpoint) parts.push(candidate.mountpoint);
+  const free = formatBytes(candidate.freeBytes);
+  if (free) parts.push(`${free} free`);
+  if (candidate.vmChildCount) parts.push(`${candidate.vmChildCount} VMs`);
+  else if (candidate.serviceChildCount) parts.push(`${candidate.serviceChildCount} services`);
+  else if (candidate.childCount) parts.push(`${candidate.childCount} children`);
+  return parts.join(" | ");
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  const rounded = value >= 10 || unit === 0 ? Math.round(value) : Math.round(value * 10) / 10;
+  return `${rounded} ${units[unit]}`;
+}
+
+function pickZFSRootCandidate(candidate) {
+  state.pickedZFSRoot = {
+    dataset: candidate.dataset,
+    host: $("host").value.trim(),
+    workload: selectedWorkload(),
+  };
+  state.serviceRootManual = false;
+  $("serviceRoot").value = candidate.suggestedDataset || suggestedZFSServiceDataset(candidate.dataset, $("service").value);
+  renderZFSRootCandidates(state.zfsRootState);
+  update();
 }
 
 function renderSnapshotModes(modes) {
@@ -924,6 +1127,7 @@ async function bootstrap() {
   syncWorkloadUI();
   syncNetworkUI();
   updateServiceRootPlaceholder();
+  syncZFSRootPicker();
   $("service").focus();
   if ($("service").value && !$("payload").closest("label").hidden) $("payload").focus();
   update();
@@ -934,6 +1138,7 @@ function update() {
   syncWorkloadUI();
   syncNetworkUI();
   updateServiceRootPlaceholder();
+  syncZFSRootPicker();
   clearValidationErrors();
   const draft = buildDraft();
   updatePreview(draft);
@@ -1102,6 +1307,12 @@ function hideTooltip() {
   $("tooltip").hidden = true;
 }
 
+$("serviceRoot").addEventListener("input", () => {
+  if (!$("zfs").checked) return;
+  state.serviceRootManual = true;
+  state.pickedZFSRoot = null;
+  renderZFSRootCandidates(state.zfsRootState);
+});
 document.addEventListener("input", (event) => {
   if (event.target.closest("#deployForm")) update();
 });
