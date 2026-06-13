@@ -377,13 +377,26 @@ func TestListServiceSnapshotsCommandAndParse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listServiceSnapshots: %v", err)
 	}
-	wantCall := []string{"list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,com.yeetrun:created-by,com.yeetrun:service", "-s", "creation", "tank/apps/svc"}
+	wantCall := []string{"list", "-H", "-p", "-t", "snapshot", "-o", "name,creation,com.yeetrun:created-by,com.yeetrun:service,com.yeetrun:event,com.yeetrun:generation,com.yeetrun:comment,com.yeetrun:checkpoint,com.yeetrun:protected", "-s", "creation", "tank/apps/svc"}
 	if len(calls) != 1 || !reflect.DeepEqual(calls[0], wantCall) {
 		t.Fatalf("calls = %#v, want %#v", calls, wantCall)
 	}
 	want := []listedSnapshot{
 		{Name: "tank/apps/svc@yeet-one", Created: time.Unix(1779664800, 0).UTC(), CreatedBy: "catch", Service: "svc"},
 		{Name: "tank/apps/svc@manual", Created: time.Unix(1779668400, 0).UTC()},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("snapshots = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseListedSnapshotsNineFieldOptionalProperties(t *testing.T) {
+	got, err := parseListedSnapshots("tank/apps/svc@yeet-one\t1779664800\tcatch\tsvc\t-\t-\t-\t-\t-\n")
+	if err != nil {
+		t.Fatalf("parseListedSnapshots: %v", err)
+	}
+	want := []listedSnapshot{
+		{Name: "tank/apps/svc@yeet-one", Created: time.Unix(1779664800, 0).UTC(), CreatedBy: "catch", Service: "svc"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("snapshots = %#v, want %#v", got, want)

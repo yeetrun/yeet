@@ -228,7 +228,95 @@ func (e *ttyExecer) dockerUpdateCmdFunc() error {
 }
 
 func (e *ttyExecer) snapshotsCmdFunc(args []string) error {
-	if len(args) < 2 || args[0] != "defaults" {
+	if len(args) == 0 {
+		return fmt.Errorf("snapshots requires a subcommand")
+	}
+	switch args[0] {
+	case "defaults":
+		return e.snapshotsDefaultsCmdFunc(args)
+	case "create":
+		return e.snapshotsCreateCmdFunc(args[1:])
+	case "list":
+		return e.snapshotsListCmdFunc(args[1:])
+	case "inspect":
+		return e.snapshotsInspectCmdFunc(args[1:])
+	case "rm":
+		return e.snapshotsRemoveCmdFunc(args[1:])
+	case "protect":
+		return e.snapshotsProtectCmdFunc(args[1:])
+	case "unprotect":
+		return e.snapshotsUnprotectCmdFunc(args[1:])
+	default:
+		return fmt.Errorf("unknown snapshots command %q", args[0])
+	}
+}
+
+func (e *ttyExecer) snapshotsCreateCmdFunc(args []string) error {
+	flags, rest, err := cli.ParseSnapshotsCreate(args)
+	if err != nil {
+		return err
+	}
+	return e.s.createRecoveryPoint(e.vmProvisionContext(), rest[0], flags, e.rw)
+}
+
+func (e *ttyExecer) snapshotsListCmdFunc(args []string) error {
+	flags, rest, err := cli.ParseSnapshotsList(args)
+	if err != nil {
+		return err
+	}
+	service := ""
+	if len(rest) == 1 {
+		service = rest[0]
+	}
+	points, err := e.s.listRecoveryPoints(e.ctx, service)
+	if err != nil {
+		return err
+	}
+	return renderRecoveryPoints(e.rw, flags.Format, points)
+}
+
+func (e *ttyExecer) snapshotsInspectCmdFunc(args []string) error {
+	flags, rest, err := cli.ParseSnapshotsInspect(args)
+	if err != nil {
+		return err
+	}
+	points, err := e.s.listRecoveryPoints(e.ctx, rest[0])
+	if err != nil {
+		return err
+	}
+	point, err := resolveRecoveryPointSelector(points, rest[1])
+	if err != nil {
+		return err
+	}
+	return renderRecoveryPointInspect(e.rw, flags.Format, point)
+}
+
+func (e *ttyExecer) snapshotsRemoveCmdFunc(args []string) error {
+	flags, rest, err := cli.ParseSnapshotsRemove(args)
+	if err != nil {
+		return err
+	}
+	return e.s.removeRecoveryPoint(e.ctx, rest[0], rest[1], flags.Yes, e.rw)
+}
+
+func (e *ttyExecer) snapshotsProtectCmdFunc(args []string) error {
+	rest, err := cli.ParseSnapshotsProtect(args, "protect")
+	if err != nil {
+		return err
+	}
+	return e.s.setRecoveryPointProtected(e.ctx, rest[0], rest[1], true, e.rw)
+}
+
+func (e *ttyExecer) snapshotsUnprotectCmdFunc(args []string) error {
+	rest, err := cli.ParseSnapshotsProtect(args, "unprotect")
+	if err != nil {
+		return err
+	}
+	return e.s.setRecoveryPointProtected(e.ctx, rest[0], rest[1], false, e.rw)
+}
+
+func (e *ttyExecer) snapshotsDefaultsCmdFunc(args []string) error {
+	if len(args) < 2 {
 		return fmt.Errorf("snapshots requires defaults show or defaults set")
 	}
 	switch args[1] {

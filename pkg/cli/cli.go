@@ -98,6 +98,23 @@ type VMSnapshotFlags struct {
 	Full    bool
 }
 
+type SnapshotsListFlags struct {
+	Format string
+}
+
+type SnapshotsInspectFlags struct {
+	Format string
+}
+
+type SnapshotsCreateFlags struct {
+	Comment string
+	Full    bool
+}
+
+type SnapshotsRemoveFlags struct {
+	Yes bool
+}
+
 type ServiceSyncFlags struct {
 	All    bool
 	Config string
@@ -200,6 +217,25 @@ type snapshotDefaultsSetFlagsParsed struct {
 	MaxAge   string `flag:"max-age"`
 	Events   string `flag:"events"`
 	Required string `flag:"required"`
+}
+
+type snapshotsListFlagsParsed struct {
+	Format string `flag:"format" help:"Output format: table, json, json-pretty"`
+	Output string `flag:"output" help:"Alias for --format"`
+}
+
+type snapshotsInspectFlagsParsed struct {
+	Format string `flag:"format" help:"Output format: table, json, json-pretty"`
+	Output string `flag:"output" help:"Alias for --format"`
+}
+
+type snapshotsCreateFlagsParsed struct {
+	Comment string `flag:"comment" help:"Human note stored with the recovery point"`
+	Full    bool   `flag:"full" help:"For VMs, also write Firecracker state and memory checkpoint files"`
+}
+
+type snapshotsRemoveFlagsParsed struct {
+	Yes bool `flag:"yes" short:"y" help:"Skip the removal prompt"`
 }
 
 type dockerPushFlagsParsed struct {
@@ -601,8 +637,61 @@ var remoteGroupInfos = map[string]GroupInfo{
 	},
 	"snapshots": {
 		Name:        "snapshots",
-		Description: "Manage catch ZFS snapshot defaults",
+		Description: "Manage service recovery points and snapshot defaults",
 		Commands: map[string]CommandInfo{
+			"list": {
+				Name:        "list",
+				Description: "List yeet recovery points",
+				Usage:       "snapshots list [svc] [--format=table|json|json-pretty]",
+				Examples: []string{
+					"yeet snapshots list",
+					"yeet snapshots list <svc>",
+					"yeet snapshots list <svc> --format=json",
+				},
+				FlagsSchema: snapshotsListFlagsParsed{},
+			},
+			"inspect": {
+				Name:        "inspect",
+				Description: "Inspect one recovery point",
+				Usage:       "snapshots inspect <svc> <snapshot> [--format=table|json|json-pretty]",
+				Examples: []string{
+					"yeet snapshots inspect <svc> yeet-20260613T203100Z-vm-manual-g0",
+					"yeet snapshots inspect <svc> yeet-20260613 --format=json",
+				},
+				FlagsSchema: snapshotsInspectFlagsParsed{},
+			},
+			"create": {
+				Name:        "create",
+				Description: "Create a manual recovery point",
+				Usage:       "snapshots create <svc> [--comment=TEXT] [--full]",
+				Examples: []string{
+					"yeet snapshots create <svc>",
+					"yeet snapshots create <svc> --comment=\"before upgrade\"",
+					"yeet snapshots create <vm> --full --comment=\"checkpoint before risky change\"",
+				},
+				FlagsSchema: snapshotsCreateFlagsParsed{},
+			},
+			"rm": {
+				Name:        "rm",
+				Description: "Delete a yeet recovery point",
+				Usage:       "snapshots rm <svc> <snapshot> [--yes]",
+				Examples: []string{
+					"yeet snapshots rm <svc> yeet-20260613T203100Z-vm-manual-g0",
+				},
+				FlagsSchema: snapshotsRemoveFlagsParsed{},
+			},
+			"protect": {
+				Name:        "protect",
+				Description: "Protect a recovery point from retention pruning",
+				Usage:       "snapshots protect <svc> <snapshot>",
+				Examples:    []string{"yeet snapshots protect <svc> yeet-20260613T203100Z-vm-manual-g0"},
+			},
+			"unprotect": {
+				Name:        "unprotect",
+				Description: "Allow retention pruning for a recovery point",
+				Usage:       "snapshots unprotect <svc> <snapshot>",
+				Examples:    []string{"yeet snapshots unprotect <svc> yeet-20260613T203100Z-vm-manual-g0"},
+			},
 			"defaults": {
 				Name:        "defaults",
 				Description: "Show or set catch snapshot defaults",
@@ -643,7 +732,13 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"sync": flagSpecsFromStruct(serviceSyncFlagsParsed{}),
 	},
 	"snapshots": {
-		"defaults": flagSpecsFromStruct(snapshotDefaultsSetFlagsParsed{}),
+		"list":      flagSpecsFromStruct(snapshotsListFlagsParsed{}),
+		"inspect":   flagSpecsFromStruct(snapshotsInspectFlagsParsed{}),
+		"create":    flagSpecsFromStruct(snapshotsCreateFlagsParsed{}),
+		"rm":        flagSpecsFromStruct(snapshotsRemoveFlagsParsed{}),
+		"protect":   {},
+		"unprotect": {},
+		"defaults":  flagSpecsFromStruct(snapshotDefaultsSetFlagsParsed{}),
 	},
 }
 
@@ -1153,6 +1248,73 @@ func ParseSnapshotDefaultsSet(args []string) (SnapshotDefaultsSetFlags, []string
 		return SnapshotDefaultsSetFlags{}, nil, fmt.Errorf("snapshots defaults set requires at least one setting")
 	}
 	return flags, parsed.Args, nil
+}
+
+func ParseSnapshotsList(args []string) (SnapshotsListFlags, []string, error) {
+	parsed, err := parseFlags[snapshotsListFlagsParsed](args)
+	if err != nil {
+		return SnapshotsListFlags{}, nil, err
+	}
+	formatRaw := strings.TrimSpace(parsed.Flags.Format)
+	if strings.TrimSpace(parsed.Flags.Output) != "" {
+		formatRaw = strings.TrimSpace(parsed.Flags.Output)
+	}
+	format, err := normalizeOutputFormat("--format", formatRaw)
+	if err != nil {
+		return SnapshotsListFlags{}, nil, err
+	}
+	if len(parsed.Args) > 1 {
+		return SnapshotsListFlags{}, nil, fmt.Errorf("snapshots list accepts at most one service")
+	}
+	return SnapshotsListFlags{Format: format}, parsed.Args, nil
+}
+
+func ParseSnapshotsInspect(args []string) (SnapshotsInspectFlags, []string, error) {
+	parsed, err := parseFlags[snapshotsInspectFlagsParsed](args)
+	if err != nil {
+		return SnapshotsInspectFlags{}, nil, err
+	}
+	formatRaw := strings.TrimSpace(parsed.Flags.Format)
+	if strings.TrimSpace(parsed.Flags.Output) != "" {
+		formatRaw = strings.TrimSpace(parsed.Flags.Output)
+	}
+	format, err := normalizeOutputFormat("--format", formatRaw)
+	if err != nil {
+		return SnapshotsInspectFlags{}, nil, err
+	}
+	if len(parsed.Args) != 2 {
+		return SnapshotsInspectFlags{}, nil, fmt.Errorf("snapshots inspect requires service and snapshot")
+	}
+	return SnapshotsInspectFlags{Format: format}, parsed.Args, nil
+}
+
+func ParseSnapshotsCreate(args []string) (SnapshotsCreateFlags, []string, error) {
+	parsed, err := parseFlags[snapshotsCreateFlagsParsed](args)
+	if err != nil {
+		return SnapshotsCreateFlags{}, nil, err
+	}
+	if len(parsed.Args) != 1 {
+		return SnapshotsCreateFlags{}, nil, fmt.Errorf("snapshots create requires a service")
+	}
+	return SnapshotsCreateFlags{Comment: strings.TrimSpace(parsed.Flags.Comment), Full: parsed.Flags.Full}, parsed.Args, nil
+}
+
+func ParseSnapshotsRemove(args []string) (SnapshotsRemoveFlags, []string, error) {
+	parsed, err := parseFlags[snapshotsRemoveFlagsParsed](args)
+	if err != nil {
+		return SnapshotsRemoveFlags{}, nil, err
+	}
+	if len(parsed.Args) != 2 {
+		return SnapshotsRemoveFlags{}, nil, fmt.Errorf("snapshots rm requires service and snapshot")
+	}
+	return SnapshotsRemoveFlags{Yes: parsed.Flags.Yes}, parsed.Args, nil
+}
+
+func ParseSnapshotsProtect(args []string, action string) ([]string, error) {
+	if len(args) != 2 {
+		return nil, fmt.Errorf("snapshots %s requires service and snapshot", action)
+	}
+	return args, nil
 }
 
 func ParseServiceSync(args []string) (ServiceSyncFlags, []string, error) {

@@ -110,9 +110,15 @@ func buildGroupHandlers() map[string]yargs.Group {
 			},
 		},
 		"snapshots": {
-			Description: "Manage catch ZFS snapshot defaults",
+			Description: "Manage service recovery points and snapshot defaults",
 			Commands: map[string]yargs.SubcommandHandler{
-				"defaults": handleSnapshotsGroup,
+				"list":      handleSnapshotsGroup,
+				"inspect":   handleSnapshotsGroup,
+				"create":    handleSnapshotsGroup,
+				"rm":        handleSnapshotsGroup,
+				"protect":   handleSnapshotsGroup,
+				"unprotect": handleSnapshotsGroup,
+				"defaults":  handleSnapshotsGroup,
 			},
 		},
 	}

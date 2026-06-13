@@ -425,6 +425,55 @@ func TestParseSnapshotDefaultsShowRejectsArgs(t *testing.T) {
 	}
 }
 
+func TestParseSnapshotsLifecycleCommands(t *testing.T) {
+	listFlags, listArgs, err := ParseSnapshotsList([]string{"svc-a", "--format=json-pretty"})
+	if err != nil {
+		t.Fatalf("ParseSnapshotsList: %v", err)
+	}
+	if listFlags.Format != "json-pretty" || len(listArgs) != 1 || listArgs[0] != "svc-a" {
+		t.Fatalf("list flags=%#v args=%#v", listFlags, listArgs)
+	}
+
+	inspectFlags, inspectArgs, err := ParseSnapshotsInspect([]string{"svc-a", "yeet-abc", "--format=json"})
+	if err != nil {
+		t.Fatalf("ParseSnapshotsInspect: %v", err)
+	}
+	if inspectFlags.Format != "json" || len(inspectArgs) != 2 || inspectArgs[0] != "svc-a" || inspectArgs[1] != "yeet-abc" {
+		t.Fatalf("inspect flags=%#v args=%#v", inspectFlags, inspectArgs)
+	}
+
+	createFlags, createArgs, err := ParseSnapshotsCreate([]string{"devbox", "--comment", " before upgrade ", "--full"})
+	if err != nil {
+		t.Fatalf("ParseSnapshotsCreate: %v", err)
+	}
+	if createFlags.Comment != "before upgrade" || !createFlags.Full || len(createArgs) != 1 || createArgs[0] != "devbox" {
+		t.Fatalf("create flags=%#v args=%#v", createFlags, createArgs)
+	}
+
+	rmFlags, rmArgs, err := ParseSnapshotsRemove([]string{"svc-a", "yeet-abc", "--yes"})
+	if err != nil {
+		t.Fatalf("ParseSnapshotsRemove: %v", err)
+	}
+	if !rmFlags.Yes || len(rmArgs) != 2 || rmArgs[1] != "yeet-abc" {
+		t.Fatalf("rm flags=%#v args=%#v", rmFlags, rmArgs)
+	}
+}
+
+func TestParseSnapshotsLifecycleRejectsBadInput(t *testing.T) {
+	if _, _, err := ParseSnapshotsList([]string{"--format=yaml"}); err == nil || !strings.Contains(err.Error(), "--format must be table, json, or json-pretty") {
+		t.Fatalf("ParseSnapshotsList error = %v, want format error", err)
+	}
+	if _, _, err := ParseSnapshotsInspect([]string{"svc-a"}); err == nil || !strings.Contains(err.Error(), "snapshots inspect requires service and snapshot") {
+		t.Fatalf("ParseSnapshotsInspect error = %v, want arity error", err)
+	}
+	if _, _, err := ParseSnapshotsCreate([]string{}); err == nil || !strings.Contains(err.Error(), "snapshots create requires a service") {
+		t.Fatalf("ParseSnapshotsCreate error = %v, want service error", err)
+	}
+	if _, _, err := ParseSnapshotsRemove([]string{"svc-a"}); err == nil || !strings.Contains(err.Error(), "snapshots rm requires service and snapshot") {
+		t.Fatalf("ParseSnapshotsRemove error = %v, want arity error", err)
+	}
+}
+
 func TestParseServiceSetFlags(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -819,7 +868,7 @@ func TestSplitArgsForParsing(t *testing.T) {
 	}
 }
 
-func TestRemoteRegistryMetadata(t *testing.T) {
+func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	names := RemoteCommandNames()
 	if !containsString(names, "run") || !containsString(names, "status") {
 		t.Fatalf("RemoteCommandNames = %v, want run and status", names)
@@ -885,6 +934,14 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	}
 	if reg.Groups["snapshots"].Commands["defaults"].Info.Name != "defaults" {
 		t.Fatalf("registry snapshots defaults command = %#v", reg.Groups["snapshots"].Commands["defaults"])
+	}
+	for _, cmd := range []string{"list", "inspect", "create", "rm", "protect", "unprotect", "defaults"} {
+		if _, ok := reg.Groups["snapshots"].Commands[cmd]; !ok {
+			t.Fatalf("snapshots %s command missing", cmd)
+		}
+		if _, ok := RemoteGroupFlagSpecs()["snapshots"][cmd]; !ok {
+			t.Fatalf("snapshots %s flag spec missing", cmd)
+		}
 	}
 	outdatedArg, ok := yargs.ArgSpecAt(reg.Groups["docker"].Commands["outdated"].ArgsSchema, 0)
 	if !ok {
@@ -965,6 +1022,21 @@ func TestRemoteRegistryMetadata(t *testing.T) {
 	}
 	if !RemoteGroupFlagSpecs()["snapshots"]["defaults"]["--enabled"].ConsumesValue {
 		t.Fatal("snapshots defaults --enabled should consume a value")
+	}
+	if !RemoteGroupFlagSpecs()["snapshots"]["list"]["--format"].ConsumesValue {
+		t.Fatal("snapshots list --format should consume a value")
+	}
+	if !RemoteGroupFlagSpecs()["snapshots"]["inspect"]["--format"].ConsumesValue {
+		t.Fatal("snapshots inspect --format should consume a value")
+	}
+	if !RemoteGroupFlagSpecs()["snapshots"]["create"]["--comment"].ConsumesValue {
+		t.Fatal("snapshots create --comment should consume a value")
+	}
+	if RemoteGroupFlagSpecs()["snapshots"]["create"]["--full"].ConsumesValue {
+		t.Fatal("snapshots create --full should not consume a value")
+	}
+	if RemoteGroupFlagSpecs()["snapshots"]["rm"]["--yes"].ConsumesValue {
+		t.Fatal("snapshots rm --yes should not consume a value")
 	}
 	if !RemoteGroupFlagSpecs()["vm"]["snapshot"]["--comment"].ConsumesValue {
 		t.Fatal("vm snapshot --comment should consume a value")

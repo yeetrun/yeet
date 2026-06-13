@@ -206,6 +206,218 @@ func TestSnapshotsDefaultsSetInvalidEventsRollsBack(t *testing.T) {
 	assertSeedSnapshotDefaults(t, server)
 }
 
+func TestSnapshotsListCommandRendersRecoveryPoints(t *testing.T) {
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		if args[0] == "list" {
+			return "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0\t1781382660\tcatch\tdevbox\tvm-manual\t0\tbefore upgrade\tdisk\tfalse\n", "", nil
+		}
+		return "", "", nil
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.snapshotsCmdFunc([]string{"list", "devbox"}); err != nil {
+		t.Fatalf("snapshots list: %v", err)
+	}
+	if !strings.Contains(out.String(), "devbox") ||
+		!strings.Contains(out.String(), "yeet-20260613T203100Z-vm-manual-g0") ||
+		!strings.Contains(out.String(), "before upgrade") {
+		t.Fatalf("output = %q, want recovery point row", out.String())
+	}
+}
+
+func TestSnapshotsInspectCommandRendersRecoveryPoint(t *testing.T) {
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		if args[0] == "list" {
+			return "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0\t1781382660\tcatch\tdevbox\tvm-manual\t0\tbefore upgrade\tdisk\tfalse\n", "", nil
+		}
+		return "", "", nil
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.snapshotsCmdFunc([]string{"inspect", "devbox", "yeet-20260613T203100Z"}); err != nil {
+		t.Fatalf("snapshots inspect: %v", err)
+	}
+	for _, want := range []string{
+		"Service: devbox",
+		"Snapshot: flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0",
+		"Short name: yeet-20260613T203100Z-vm-manual-g0",
+		"Mode: disk",
+		"Retention: managed",
+		"Actions: inspect, protect, rm",
+		"Comment: before upgrade",
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("inspect output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestSnapshotsInspectCommandRendersFullVMCheckpointPaths(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	snapshotName := "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0"
+	statePath, memoryPath := seedFullVMCheckpointMetadata(t, root, "devbox", snapshotName)
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		if args[0] == "list" {
+			return snapshotName + "\t1781382660\tcatch\tdevbox\tvm-manual\t0\tfull checkpoint\tfull\tfalse\n", "", nil
+		}
+		return "", "", nil
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.snapshotsCmdFunc([]string{"inspect", "devbox", "yeet-20260613T203100Z"}); err != nil {
+		t.Fatalf("snapshots inspect: %v", err)
+	}
+	for _, want := range []string{
+		"Mode: full",
+		"Firecracker state: " + statePath,
+		"Firecracker memory: " + memoryPath,
+	} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("inspect output missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+func TestSnapshotsInspectCommandRendersJSON(t *testing.T) {
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		if args[0] == "list" {
+			return "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0\t1781382660\tcatch\tdevbox\tvm-manual\t0\tbefore upgrade\tdisk\ttrue\n", "", nil
+		}
+		return "", "", nil
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.snapshotsCmdFunc([]string{"inspect", "devbox", "yeet-20260613T203100Z", "--format=json"}); err != nil {
+		t.Fatalf("snapshots inspect json: %v", err)
+	}
+	if !strings.Contains(out.String(), `"service":"devbox"`) ||
+		!strings.Contains(out.String(), `"retention":"protected"`) ||
+		!strings.Contains(out.String(), `"actions":["inspect","unprotect"]`) {
+		t.Fatalf("json output = %s", out.String())
+	}
+}
+
+func TestSnapshotsProtectAndRemoveCommands(t *testing.T) {
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
+	var calls [][]string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		if args[0] == "list" {
+			return "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0\t1781382660\tcatch\tdevbox\tvm-manual\t0\tnote\tdisk\tfalse\n", "", nil
+		}
+		return "", "", nil
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.snapshotsCmdFunc([]string{"protect", "devbox", "yeet-20260613T203100Z"}); err != nil {
+		t.Fatalf("snapshots protect: %v", err)
+	}
+	if err := execer.snapshotsCmdFunc([]string{"rm", "devbox", "yeet-20260613T203100Z", "--yes"}); err != nil {
+		t.Fatalf("snapshots rm: %v", err)
+	}
+	joined := joinedZFSCalls(calls)
+	wantDestroy := []string{"destroy", "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0"}
+	if !strings.Contains(joined, "set com.yeetrun:protected=true") || !hasZFSCall(calls, wantDestroy) {
+		t.Fatalf("calls = %#v, want protect and destroy", calls)
+	}
+}
+
+func joinedZFSCalls(calls [][]string) string {
+	var lines []string
+	for _, call := range calls {
+		lines = append(lines, strings.Join(call, " "))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func hasZFSCall(calls [][]string, want []string) bool {
+	for _, call := range calls {
+		if reflect.DeepEqual(call, want) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestSnapshotsUnprotectCommand(t *testing.T) {
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
+	var calls []string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if args[0] == "list" {
+			return "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0\t1781382660\tcatch\tdevbox\tvm-manual\t0\tnote\tdisk\ttrue\n", "", nil
+		}
+		return "", "", nil
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.snapshotsCmdFunc([]string{"unprotect", "devbox", "yeet-20260613T203100Z"}); err != nil {
+		t.Fatalf("snapshots unprotect: %v", err)
+	}
+	if joined := strings.Join(calls, "\n"); !strings.Contains(joined, "set com.yeetrun:protected=false") {
+		t.Fatalf("calls = %#v, want unprotect property set", calls)
+	}
+}
+
+func TestSnapshotsRemoveRejectsProtectedRecoveryPoint(t *testing.T) {
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
+	var calls []string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if args[0] == "list" {
+			return "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0\t1781382660\tcatch\tdevbox\tvm-manual\t0\tnote\tdisk\ttrue\n", "", nil
+		}
+		return "", "", nil
+	}
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+	err := execer.snapshotsCmdFunc([]string{"rm", "devbox", "yeet-20260613T203100Z", "--yes"})
+	if err == nil || !strings.Contains(err.Error(), "is protected; unprotect it before removing") {
+		t.Fatalf("snapshots rm error = %v, want protected rejection", err)
+	}
+	if strings.Contains(strings.Join(calls, "\n"), "destroy ") {
+		t.Fatalf("calls = %#v, protected snapshot should not be destroyed", calls)
+	}
+}
+
+func TestSnapshotsRemoveConfirmSkip(t *testing.T) {
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
+	var calls []string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if args[0] == "list" {
+			return "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0\t1781382660\tcatch\tdevbox\tvm-manual\t0\tnote\tdisk\tfalse\n", "", nil
+		}
+		return "", "", nil
+	}
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		rw:  readWriter{Reader: strings.NewReader("\n"), Writer: &out},
+	}
+	if err := execer.snapshotsCmdFunc([]string{"rm", "devbox", "yeet-20260613T203100Z"}); err != nil {
+		t.Fatalf("snapshots rm: %v", err)
+	}
+	if strings.Contains(strings.Join(calls, "\n"), "destroy ") {
+		t.Fatalf("calls = %#v, skipped removal should not destroy", calls)
+	}
+	if !strings.Contains(out.String(), "Skipped recovery point") {
+		t.Fatalf("output = %q, want skipped message", out.String())
+	}
+}
+
 func TestApplySnapshotDefaultsFlagsRejectsNilPolicy(t *testing.T) {
 	err := applySnapshotDefaultsFlags(nil, cli.SnapshotDefaultsSetFlags{Enabled: "false"})
 	if err == nil {

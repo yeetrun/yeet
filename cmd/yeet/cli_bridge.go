@@ -24,7 +24,13 @@ var serviceBridgeSkippedGroupCommands = map[string]map[string]struct{}{
 		"sync": {},
 	},
 	"snapshots": {
-		"defaults": {},
+		"list":      {},
+		"inspect":   {},
+		"create":    {},
+		"rm":        {},
+		"protect":   {},
+		"unprotect": {},
+		"defaults":  {},
 	},
 }
 
