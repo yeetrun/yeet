@@ -22,6 +22,32 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Keep this root file focused on repo-wide policy. Put subsystem-specific rules
   in the subsystem `AGENTS.md`.
 
+## Version Control
+
+- Use GitButler (`but`) for normal agent version-control write operations,
+  including branching, committing, branch pushes, and history edits.
+- Assume multiple agents may be working in this repository. Do not move, amend,
+  squash, discard, commit, push, or otherwise modify another agent's work unless
+  the user asks.
+- Use a dedicated GitButler branch for each agent session, unless the user asks
+  for a different branch structure. Commit only changes that belong to that
+  session.
+- Do not push or open pull requests unless the user asks. Pull requests are not
+  the default workflow.
+- When the user asks to finish or integrate a session, the default outcome is
+  that the session's work lands on both local `main` and `origin/main` without a
+  pull request, unless the user asks for a different integration path.
+- This repo normally targets `origin/main` in GitButler. Do not use `but merge`
+  as the default finish command here: it is for `gb-local` targets and creates a
+  merge commit, which is not the desired no-PR squash-to-main workflow.
+- For a finish-to-main request, first use `but` to make the session branch a
+  single commit when needed, then verify the commit is based on current
+  `origin/main` and contains only this session's work. The final direct update
+  of local `main` and `origin/main` is the only allowed raw `git` write
+  exception, and it still requires explicit user authorization.
+- Keep commit messages and any explicitly requested pull request descriptions
+  succinct: explain what changed, why it changed, and any important decision.
+
 ## Build, Test, and Development Commands
 - `go build ./cmd/yeet` — build the client CLI.
 - `go build ./cmd/catch` — build the server binary.
@@ -43,7 +69,8 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Use Go’s `testing` package; name tests `TestXxx`.
 - Prefer table-driven tests for flag parsing and CLI routing.
 - Add tests for command bridging, parsing edge cases, and service behavior.
-- Run targeted tests for packages you touch, plus `go test ./...` before PR.
+- Run targeted tests for packages you touch, plus `go test ./...` before
+  integration or release.
 
 ## Quality Standard
 - Treat `main` as release-grade at all times: no known broken tests, red checks, reachable vulnerabilities, private-info leaks, or unreviewed quality regressions.
@@ -57,12 +84,11 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Use hotspot ranking to choose quality work: high churn plus low coverage or complexity risk should move to the front of the burn-down queue.
 - Keep public repo content free of private infrastructure details, local machine paths, usernames, hostnames, and private service names unless the user explicitly approves publishing them.
 
-## Commit & Pull Request Guidelines
+## Commit Guidelines
 - Commit messages typically follow `area: summary` (e.g., `cmd/yeet: add yargs CLI`).
-- PRs should include:
-  - A short summary of changes and rationale.
-  - Tests run (commands + results).
-  - Any user-facing behavior changes or CLI impacts.
+- Commit only the changes that belong to the current session branch.
+- Summaries for integration, release, or an explicitly requested pull request
+  should include the tests run and any user-facing behavior or CLI impacts.
 
 ## Release & Tagging Process
 - Find the latest `vX.Y.Z` tag and bump the patch version.
