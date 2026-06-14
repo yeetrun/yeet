@@ -136,7 +136,7 @@ func (s *Server) createRecoveryPoint(ctx context.Context, serviceName string, fl
 		return err
 	}
 	if service.ServiceType == db.ServiceTypeVM {
-		return s.createVMSnapshot(ctx, service.Name, cli.VMSnapshotFlags(flags), w)
+		return s.createVMSnapshot(ctx, service.Name, flags, w)
 	}
 	return s.createServiceRootRecoveryPoint(ctx, service, flags, w)
 }

@@ -44,8 +44,6 @@ func (e *ttyExecer) vmCmdFunc(args []string) error {
 		return e.vmConsoleRemoteCmdFunc(args[1:])
 	case "set":
 		return e.vmSetCmdFunc(args[1:])
-	case "snapshot":
-		return e.vmSnapshotCmdFunc(args[1:])
 	case "images":
 		return e.vmImagesRemoteCmdFunc(args[1:])
 	default:
@@ -69,17 +67,6 @@ func (e *ttyExecer) vmSetCmdFunc(args []string) error {
 		return fmt.Errorf("unexpected vm set args: %s", strings.Join(rest, " "))
 	}
 	return e.s.updateVMServiceSettings(e.vmProvisionContext(), e.sn, flags)
-}
-
-func (e *ttyExecer) vmSnapshotCmdFunc(args []string) error {
-	flags, rest, err := cli.ParseVMSnapshot(args)
-	if err != nil {
-		return err
-	}
-	if len(rest) != 0 {
-		return fmt.Errorf("unexpected vm snapshot args: %s", strings.Join(rest, " "))
-	}
-	return e.s.createVMSnapshot(e.vmProvisionContext(), e.sn, flags, e.rw)
 }
 
 func (e *ttyExecer) vmImagesRemoteCmdFunc(args []string) error {

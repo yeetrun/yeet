@@ -22,7 +22,8 @@ func handleSvcSnapshots(ctx context.Context, req svcCommandRequest) error {
 	if err := validateSnapshotLifecycleCommand(req.Command.Args); err != nil {
 		return err
 	}
-	return execRemoteFn(ctx, systemServiceName, req.Command.RawArgs, nil, false)
+	tty := snapshotLifecycleNeedsTTY(req.Command.Args)
+	return execRemoteFn(ctx, systemServiceName, req.Command.RawArgs, nil, tty)
 }
 
 func validateSnapshotLifecycleCommand(args []string) error {
@@ -50,6 +51,19 @@ func validateSnapshotLifecycleCommand(args []string) error {
 		return err
 	default:
 		return fmt.Errorf("unknown snapshots command %q", args[0])
+	}
+}
+
+func snapshotLifecycleNeedsTTY(args []string) bool {
+	switch args[0] {
+	case "restore":
+		flags, _, err := cli.ParseSnapshotsRestore(args[1:])
+		return err == nil && !flags.Yes
+	case "rm":
+		flags, _, err := cli.ParseSnapshotsRemove(args[1:])
+		return err == nil && !flags.Yes
+	default:
+		return false
 	}
 }
 

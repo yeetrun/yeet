@@ -427,10 +427,10 @@ func validateRunDraftVMSnapshots(draft *RunDraft, result *RunDraftValidationResu
 		return
 	}
 	if draft.Snapshots.Required != nil || draft.Snapshots.RequiredInherit {
-		result.addError("snapshots.required", "VM snapshot policy does not use required; manual vm snapshots fail or succeed directly")
+		result.addError("snapshots.required", "VM snapshot policy does not use required; manual VM snapshots fail or succeed directly")
 	}
 	if len(draft.Snapshots.Events) != 0 || draft.Snapshots.EventsInherit {
-		result.addError("snapshots.events", "VM snapshot policy does not use events; use mode, keep last, and max age for manual vm snapshots")
+		result.addError("snapshots.events", "VM snapshot policy does not use events; use mode, keep last, and max age for manual VM snapshots")
 		draft.Snapshots.Events = nil
 	}
 }

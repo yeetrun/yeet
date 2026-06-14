@@ -506,7 +506,6 @@ Manage VM-specific commands
 - `vm console`: Stream VM serial console output
 - `vm images`: Show available VM images and manage VM image cache state
 - `vm set`: Set VM resources and networking
-- `vm snapshot`: Snapshot a ZFS-backed VM disk
 
 Get detailed help: `yeet vm --help-llm`
 
@@ -2660,26 +2659,6 @@ yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4
 ```
 
 Get detailed help: `yeet vm set --help-llm`
-
-### `vm snapshot`
-
-Snapshot a ZFS-backed VM disk
-
-**Examples**:
-
-```
-yeet vm snapshot devbox
-```
-
-```
-yeet vm snapshot devbox --comment="before package upgrade"
-```
-
-```
-yeet vm snapshot devbox --full --comment="checkpoint before risky change"
-```
-
-Get detailed help: `yeet vm snapshot --help-llm`
 ````
 
 ## Group Command: docker outdated
@@ -4015,65 +3994,5 @@ yeet vm set <vm> --net=lan
 
 ```
 yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4
-```
-````
-
-## Group Command: vm snapshot
-
-````
-# yeet vm snapshot
-
-Snapshot a ZFS-backed VM disk
-
-## Usage
-
-```
-yeet [GLOBAL OPTIONS] vm snapshot <vm> [--comment=TEXT] [--full]
-```
-
-## Global Options
-
-### `--host`
-
-Override target host (CATCH_HOST)
-
-- **Type**: `string`
-
-### `--service`
-
-Force the service name for the command
-
-- **Type**: `string`
-
-### `--tty`
-
-Force TTY for remote commands
-
-- **Type**: `bool`
-
-### `--no-tty`
-
-Disable TTY for remote commands
-
-- **Type**: `bool`
-
-### `--progress`
-
-Progress output (auto|tty|plain|quiet)
-
-- **Type**: `string`
-
-## Examples
-
-```
-yeet vm snapshot devbox
-```
-
-```
-yeet vm snapshot devbox --comment="before package upgrade"
-```
-
-```
-yeet vm snapshot devbox --full --comment="checkpoint before risky change"
 ```
 ````
