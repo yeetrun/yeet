@@ -46,6 +46,7 @@ ConditionFileIsExecutable={{.Executable}}
 {{if .Requires}}Requires={{.Requires}}{{end}}
 {{if .Before}}Before={{.Before}}{{end}}
 {{if .After}}After={{.After}}{{else if .Requires}}After={{.Requires}}{{end}}
+{{if .PartOf}}PartOf={{.PartOf}}{{end}}
 
 [Service]
 {{range .ExecStartPre}}ExecStartPre={{.}}{{end}}
@@ -129,6 +130,10 @@ type SystemdUnit struct {
 	// After controls service ordering. If empty, Requires is used to preserve
 	// the historical "requires also means after" behavior of this generator.
 	After string
+
+	// PartOf couples this unit's lifecycle to another unit. When the parent
+	// unit is restarted or stopped, systemd propagates that operation here.
+	PartOf string
 
 	// Before controls reverse service ordering.
 	Before string
