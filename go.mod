@@ -16,6 +16,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/hugomd/ascii-live v0.0.0-20231008062449-0e53a4799f1e
 	github.com/klauspost/compress v1.17.11
+	github.com/miekg/dns v1.1.58
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.0
 	github.com/shayne/yargs v1.0.2
@@ -89,7 +90,6 @@ require (
 	github.com/mdlayher/netlink v1.7.3-0.20250113171957-fbb4dce95f42 // indirect
 	github.com/mdlayher/sdnotify v1.0.0 // indirect
 	github.com/mdlayher/socket v0.5.0 // indirect
-	github.com/miekg/dns v1.1.58 // indirect
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/moby/locker v1.0.1 // indirect
 	github.com/moby/sys/mountinfo v0.6.2 // indirect

@@ -217,6 +217,8 @@ yeet run devbox vm://ubuntu/26.04 --net=svc,lan
 
 LAN-only VMs are reached directly at their guest LAN IP. `svc` or `svc,lan`
 keeps a catch-proxied `yeet ssh` management path.
+Services and VMs on `svc` also resolve other service-network names through
+yeet DNS, including short names and `*.yeet.internal` names.
 
 Local image built on your workstation:
 

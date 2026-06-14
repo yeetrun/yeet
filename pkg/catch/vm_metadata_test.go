@@ -39,7 +39,7 @@ func TestWriteVMMetadataFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read network: %v", err)
 	}
-	for _, want := range []string{"eth0:", "192.168.100.12/24", "gateway4: 192.168.100.254", "nameservers:", "addresses: [8.8.8.8]", "eth1:", "dhcp4: true"} {
+	for _, want := range []string{"eth0:", "192.168.100.12/24", "gateway4: 192.168.100.254", "nameservers:", "addresses: [192.168.100.1]", "search: [yeet.internal]", "eth1:", "dhcp4: true"} {
 		if !strings.Contains(string(network), want) {
 			t.Fatalf("network metadata missing %q:\n%s", want, string(network))
 		}
@@ -86,6 +86,59 @@ func TestVMGuestNetworkNameserversUsesDefaultNSEnvironment(t *testing.T) {
 	want := []string{"1.1.1.1", "9.9.9.9", "8.8.8.8"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("nameservers = %#v, want %#v", got, want)
+	}
+}
+
+func TestVMGuestNetworkNameserversUsesYeetDNSByDefault(t *testing.T) {
+	t.Setenv("DEFAULT_NS", "")
+
+	got := vmGuestNetworkNameservers(vmGuestNetwork{Mode: "svc"})
+	want := []string{"192.168.100.1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("nameservers = %#v, want %#v", got, want)
+	}
+}
+
+func TestVMGuestNetworkSearchDomainsDefaultToYeetInternal(t *testing.T) {
+	t.Setenv("DEFAULT_NS", "")
+	t.Setenv("DEFAULT_SEARCH_DOMAINS", "")
+
+	got := vmGuestNetworkSearchDomains(vmGuestNetwork{Mode: "svc"})
+	want := []string{"yeet.internal"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("search domains = %#v, want %#v", got, want)
+	}
+}
+
+func TestVMGuestNetworkSearchDomainsUsesDefaultSearchEnvironment(t *testing.T) {
+	t.Setenv("DEFAULT_NS", "")
+	t.Setenv("DEFAULT_SEARCH_DOMAINS", "svc.local, yeet.internal\tlan.local")
+
+	got := vmGuestNetworkSearchDomains(vmGuestNetwork{Mode: "svc"})
+	want := []string{"svc.local", "yeet.internal", "lan.local"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("search domains = %#v, want %#v", got, want)
+	}
+}
+
+func TestRenderVMNetworkdUnitIncludesDNSSearchAndDefaultRoute(t *testing.T) {
+	defaultRoute := false
+	got := renderVMNetworkdUnit(vmGuestNetwork{
+		Name:            "eth0",
+		Mode:            "svc",
+		Address:         "192.168.100.12/24",
+		Gateway:         "192.168.100.254",
+		SearchDomains:   []string{"yeet.internal"},
+		DNSDefaultRoute: &defaultRoute,
+	})
+	for _, want := range []string{
+		"DNS=192.168.100.1\n",
+		"Domains=yeet.internal\n",
+		"DNSDefaultRoute=no\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("networkd unit missing %q:\n%s", want, got)
+		}
 	}
 }
 

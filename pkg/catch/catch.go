@@ -51,6 +51,7 @@ var serverVMStatusFunc = func(name string) (svc.Status, error) {
 }
 
 var installYeetNSService = netns.InstallYeetNSService
+var installYeetDNSServiceForServer = installYeetDNSService
 var reconcileDockerNetNSPortForwards = dnet.ReconcilePortForwards
 
 // Server hosts the RPC handlers that manage services and exec commands.
@@ -191,6 +192,9 @@ func (s *Server) Start() {
 	s.waitGroup.Go(s.heartbeat)
 	if err := installYeetNSService(); err != nil {
 		log.Fatalf("Failed to install bridge service: %v", err)
+	}
+	if err := installYeetDNSServiceForServer(s.cfg.RootDir); err != nil {
+		log.Fatalf("Failed to install DNS service: %v", err)
 	}
 	if err := installDockerPrereqs(s); err != nil {
 		log.Fatalf("Failed to install Docker prerequisites: %v", err)

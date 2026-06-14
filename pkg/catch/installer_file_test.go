@@ -221,6 +221,28 @@ func TestBuildNetNSResolvConfIncludesOptionalSearchDomains(t *testing.T) {
 	}
 }
 
+func TestDefaultNetNSResolvConfUsesYeetDNS(t *testing.T) {
+	t.Setenv("DEFAULT_NS", "")
+	t.Setenv("DEFAULT_SEARCH_DOMAINS", "")
+
+	got := defaultNetNSResolvConf()
+	want := "nameserver 192.168.100.1\nsearch yeet.internal\n"
+	if got != want {
+		t.Fatalf("resolv.conf = %q, want %q", got, want)
+	}
+}
+
+func TestDefaultNetNSResolvConfExplicitNameserverOptsOut(t *testing.T) {
+	t.Setenv("DEFAULT_NS", "1.1.1.1")
+	t.Setenv("DEFAULT_SEARCH_DOMAINS", "")
+
+	got := defaultNetNSResolvConf()
+	want := "nameserver 1.1.1.1\n"
+	if got != want {
+		t.Fatalf("resolv.conf = %q, want %q", got, want)
+	}
+}
+
 func TestInstallerCloseStagesEnvFileAndCleansTemp(t *testing.T) {
 	server := newTestServer(t)
 	installer, err := NewFileInstaller(server, FileInstallerCfg{

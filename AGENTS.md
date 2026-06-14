@@ -94,11 +94,13 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
   succinct: explain what changed, why it changed, and any important decision.
 
 ## Build, Test, and Development Commands
-- `go build ./cmd/yeet` — build the client CLI.
-- `go build ./cmd/catch` — build the server binary.
-- `go test ./...` — run the full test suite.
-- `go test ./pkg/svc` — run service-layer tests only.
-- `gofmt -w path/to/file.go` — format Go source files.
+- Use `mise exec -- go ...` for Go commands in this repo so agents use the
+  repo-managed Go toolchain instead of a stale system `go` binary.
+- `mise exec -- go build ./cmd/yeet` — build the client CLI.
+- `mise exec -- go build ./cmd/catch` — build the server binary.
+- `mise exec -- go test ./...` — run the full test suite.
+- `mise exec -- go test ./pkg/svc` — run service-layer tests only.
+- `mise exec -- gofmt -w path/to/file.go` — format Go source files.
 - `make helloworld` / `make hellotimer` — build example binaries.
 - `make all` — installs `yeet` and runs `yeet init` (use with care).
 - Note: don’t set or manage `GOCACHE` here; just run tests normally and ignore cache artifacts.
@@ -114,8 +116,8 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Use Go’s `testing` package; name tests `TestXxx`.
 - Prefer table-driven tests for flag parsing and CLI routing.
 - Add tests for command bridging, parsing edge cases, and service behavior.
-- Run targeted tests for packages you touch, plus `go test ./...` before
-  integration or release.
+- Run targeted tests for packages you touch, plus `mise exec -- go test ./...`
+  before integration or release.
 
 ## Quality Standard
 - Treat `main` as release-grade at all times: no known broken tests, red checks, reachable vulnerabilities, private-info leaks, or unreviewed quality regressions.
