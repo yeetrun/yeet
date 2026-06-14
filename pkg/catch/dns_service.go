@@ -33,6 +33,7 @@ func newYeetDNSUnit(catchBin, dataDir string) *svc.SystemdUnit {
 		Arguments:  []string{"-data-dir", dataDir, "dns"},
 		Requires:   "yeet-ns.service",
 		After:      "yeet-ns.service",
+		PartOf:     "catch.service",
 		WantedBy:   "multi-user.target",
 	}
 }
@@ -60,9 +61,6 @@ func installYeetDNSService(dataDir string) error {
 		return err
 	}
 	alreadyActive := catchSystemdUnitActive("yeet-dns.service")
-	if !changed && alreadyActive {
-		return nil
-	}
 	return installGeneratedYeetDNSService(unitFiles[db.ArtifactSystemdUnit], changed, alreadyActive)
 }
 
@@ -91,7 +89,12 @@ func installGeneratedYeetDNSService(generatedUnit string, changed bool, alreadyA
 		return fmt.Errorf("failed to enable yeet-dns service: %w", err)
 	}
 	if alreadyActive {
-		log.Printf("installed updated yeet-dns.service; leaving active DNS server running")
+		if changed {
+			if err := catchSystemctl("try-restart", "yeet-dns.service"); err != nil {
+				return fmt.Errorf("failed to restart yeet-dns service: %w", err)
+			}
+			log.Printf("installed updated yeet-dns.service; restarted active DNS server")
+		}
 		return nil
 	}
 	if err := catchSystemctl("start", "yeet-dns.service"); err != nil {

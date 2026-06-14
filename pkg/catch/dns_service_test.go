@@ -29,6 +29,7 @@ func TestNewYeetDNSUnitRunsCatchDNSCommand(t *testing.T) {
 	for _, want := range []string{
 		"Requires=yeet-ns.service\n",
 		"After=yeet-ns.service\n",
+		"PartOf=catch.service\n",
 		"ExecStart=/usr/local/bin/catch -data-dir /srv/yeet dns\n",
 		"WantedBy=multi-user.target\n",
 	} {
@@ -72,7 +73,7 @@ func TestInstallYeetDNSServiceInstallsAndStarts(t *testing.T) {
 	}
 }
 
-func TestInstallYeetDNSServicePreservesActiveService(t *testing.T) {
+func TestInstallYeetDNSServiceRestartsChangedActiveService(t *testing.T) {
 	systemdPath := filepath.Join(t.TempDir(), "systemd", "yeet-dns.service")
 	var systemctlCalls [][]string
 	withYeetDNSServiceFakes(t, yeetDNSServiceFakes{
@@ -91,6 +92,47 @@ func TestInstallYeetDNSServicePreservesActiveService(t *testing.T) {
 
 	wantCalls := [][]string{
 		{"daemon-reload"},
+		{"enable", "yeet-dns.service"},
+		{"try-restart", "yeet-dns.service"},
+	}
+	if !reflect.DeepEqual(systemctlCalls, wantCalls) {
+		t.Fatalf("systemctl calls = %#v, want %#v", systemctlCalls, wantCalls)
+	}
+}
+
+func TestInstallYeetDNSServicePreservesUnchangedActiveService(t *testing.T) {
+	systemdPath := filepath.Join(t.TempDir(), "systemd", "yeet-dns.service")
+	unitFiles, err := newYeetDNSUnit("/usr/local/bin/catch", "/srv/yeet").WriteOutUnitFiles(t.TempDir())
+	if err != nil {
+		t.Fatalf("WriteOutUnitFiles: %v", err)
+	}
+	unitRaw, err := os.ReadFile(unitFiles[db.ArtifactSystemdUnit])
+	if err != nil {
+		t.Fatalf("read generated unit: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(systemdPath), 0o755); err != nil {
+		t.Fatalf("create systemd dir: %v", err)
+	}
+	if err := os.WriteFile(systemdPath, unitRaw, 0o644); err != nil {
+		t.Fatalf("write installed unit: %v", err)
+	}
+
+	var systemctlCalls [][]string
+	withYeetDNSServiceFakes(t, yeetDNSServiceFakes{
+		catchBin:    "/usr/local/bin/catch",
+		systemdPath: systemdPath,
+		unitActive:  func(string) bool { return true },
+		systemctl: func(args ...string) error {
+			systemctlCalls = append(systemctlCalls, append([]string(nil), args...))
+			return nil
+		},
+	})
+
+	if err := installYeetDNSService("/srv/yeet"); err != nil {
+		t.Fatalf("installYeetDNSService: %v", err)
+	}
+
+	wantCalls := [][]string{
 		{"enable", "yeet-dns.service"},
 	}
 	if !reflect.DeepEqual(systemctlCalls, wantCalls) {
