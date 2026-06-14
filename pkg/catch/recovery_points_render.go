@@ -76,6 +76,9 @@ func renderRecoveryPointInspectText(w io.Writer, point recoveryPoint) error {
 		{"Event", point.Event},
 		{"Retention", formatRecoveryPointRetention(point)},
 	}
+	if point.Generation != nil {
+		lines = append(lines, inspectLine{"Generation", fmt.Sprintf("%d", *point.Generation)})
+	}
 	if strings.TrimSpace(point.Comment) != "" {
 		lines = append(lines, inspectLine{"Comment", strings.TrimSpace(point.Comment)})
 	}

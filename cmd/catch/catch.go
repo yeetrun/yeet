@@ -342,6 +342,10 @@ func handleVMRunCommand(args []string) error {
 		exitProcess(catch.VMGuestRebootExitCode)
 		return nil
 	}
+	if errors.Is(err, catch.ErrVMRestoreLoadFailed) {
+		exitProcess(catch.VMRestoreLoadFailedExitCode)
+		return nil
+	}
 	return err
 }
 

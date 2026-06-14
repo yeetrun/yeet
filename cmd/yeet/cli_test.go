@@ -99,6 +99,62 @@ func TestRunServiceSetHelpShowsLeafCommand(t *testing.T) {
 	}
 }
 
+func TestServiceHelpShowsGenerationCommands(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldStdout := os.Stdout
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		os.Stdout = oldStdout
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create stdout temp file: %v", err)
+	}
+	os.Stdout = stdoutFile
+	os.Args = []string{"yeet", "service", "--help"}
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("service help should not call handler with args %v", args)
+		return nil
+	}
+
+	if got := run(); got != 0 {
+		t.Fatalf("run exit code = %d, want 0", got)
+	}
+	if _, err := stdoutFile.Seek(0, 0); err != nil {
+		t.Fatalf("seek stdout: %v", err)
+	}
+	rawStdout, err := os.ReadFile(stdoutFile.Name())
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	stdout := string(rawStdout)
+	for _, want := range []string{
+		"service rollback <svc>",
+		"service generations <svc>",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout = %q, want service help to include %q", stdout, want)
+		}
+	}
+	if strings.Contains(stdout, "yeet rollback") {
+		t.Fatalf("stdout = %q, did not expect top-level rollback help", stdout)
+	}
+
+	serviceGroup := buildGroupHandlers()["service"]
+	for _, command := range []string{"rollback", "generations"} {
+		if _, ok := serviceGroup.Commands[command]; !ok {
+			t.Fatalf("service %s should be registered in group handlers", command)
+		}
+	}
+}
+
 func TestRunRemoveHelpShowsOptionsAndPlainAliases(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
@@ -533,6 +589,8 @@ func TestSnapshotsDefaultsHelpShowsSubcommands(t *testing.T) {
 		"list",
 		"inspect",
 		"create",
+		"clone",
+		"restore",
 		"rm",
 		"protect",
 		"unprotect",
@@ -708,6 +766,22 @@ func TestPrepareCommandRoute(t *testing.T) {
 			wantService: "svc-a",
 			wantArgs:    []string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs"},
 			wantBridged: []string{"service", "set", "--service-root=tank/apps/svc-a", "--zfs"},
+		},
+		{
+			name:        "service rollback host target",
+			args:        []string{"service@catch-a", "rollback", "svc-a"},
+			wantHost:    "catch-a",
+			wantService: "svc-a",
+			wantArgs:    []string{"service", "rollback"},
+			wantBridged: []string{"service", "rollback"},
+		},
+		{
+			name:        "service generations format host target",
+			args:        []string{"service@catch-a", "generations", "svc-a", "--format=json"},
+			wantHost:    "catch-a",
+			wantService: "svc-a",
+			wantArgs:    []string{"service", "generations", "--format=json"},
+			wantBridged: []string{"service", "generations", "--format=json"},
 		},
 		{
 			name:     "snapshots defaults is unscoped remote group",

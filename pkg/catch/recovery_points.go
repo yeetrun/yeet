@@ -38,7 +38,7 @@ type recoveryPoint struct {
 	Created     time.Time `json:"created"`
 	CreatedBy   string    `json:"createdBy"`
 	Event       string    `json:"event"`
-	Generation  int       `json:"generation"`
+	Generation  *int      `json:"generation,omitempty"`
 	Comment     string    `json:"comment,omitempty"`
 	Mode        string    `json:"mode"`
 	Protected   bool      `json:"protected"`
@@ -164,7 +164,7 @@ func (s *Server) createServiceRootRecoveryPoint(ctx context.Context, service *db
 		Service:    service.Name,
 		Dataset:    target.Dataset,
 		Event:      snapshotEventManual,
-		Generation: service.Generation,
+		Generation: intPointer(service.Generation),
 		Now:        now,
 		Comment:    flags.Comment,
 		Checkpoint: recoveryModeServiceRoot,
@@ -318,7 +318,7 @@ func recoveryPointFromSnapshot(target recoveryTarget, snap listedSnapshot) recov
 		Created:     snap.Created,
 		CreatedBy:   snap.CreatedBy,
 		Event:       snap.Event,
-		Generation:  snap.Generation,
+		Generation:  recoveryPointGeneration(target, snap),
 		Comment:     snap.Comment,
 		Mode:        mode,
 		Protected:   snap.Protected,
@@ -328,12 +328,15 @@ func recoveryPointFromSnapshot(target recoveryTarget, snap listedSnapshot) recov
 	return point
 }
 
-type vmCheckpointMetadata struct {
-	Service           string `json:"service"`
-	ZVOLSnapshot      string `json:"zvolSnapshot"`
-	FirecrackerState  string `json:"firecrackerState"`
-	FirecrackerMemory string `json:"firecrackerMemory"`
-	CreatedBy         string `json:"createdBy"`
+func recoveryPointGeneration(target recoveryTarget, snap listedSnapshot) *int {
+	if target.StorageKind == recoveryStorageVMZVOL {
+		return nil
+	}
+	if snap.Generation == nil {
+		return nil
+	}
+	gen := *snap.Generation
+	return &gen
 }
 
 func (s *Server) enrichFullVMRecoveryPoint(service *db.Service, point *recoveryPoint) {
@@ -422,6 +425,10 @@ func recoveryRetentionLabel(protected bool) string {
 
 func recoveryPointActions(point recoveryPoint) []string {
 	actions := []string{"inspect"}
+	switch point.StorageKind {
+	case recoveryStorageServiceRoot, recoveryStorageVMZVOL:
+		actions = append(actions, "clone", "restore")
+	}
 	if point.Protected {
 		return append(actions, "unprotect")
 	}

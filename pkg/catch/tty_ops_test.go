@@ -247,7 +247,7 @@ func TestSnapshotsInspectCommandRendersRecoveryPoint(t *testing.T) {
 		"Short name: yeet-20260613T203100Z-vm-manual-g0",
 		"Mode: disk",
 		"Retention: managed",
-		"Actions: inspect, protect, rm",
+		"Actions: inspect, clone, restore, protect, rm",
 		"Comment: before upgrade",
 	} {
 		if !strings.Contains(out.String(), want) {
@@ -300,7 +300,8 @@ func TestSnapshotsInspectCommandRendersJSON(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"service":"devbox"`) ||
 		!strings.Contains(out.String(), `"retention":"protected"`) ||
-		!strings.Contains(out.String(), `"actions":["inspect","unprotect"]`) {
+		!strings.Contains(out.String(), `"actions":["inspect","clone","restore","unprotect"]`) ||
+		strings.Contains(out.String(), `"generation"`) {
 		t.Fatalf("json output = %s", out.String())
 	}
 }
@@ -366,6 +367,49 @@ func TestSnapshotsUnprotectCommand(t *testing.T) {
 	}
 	if joined := strings.Join(calls, "\n"); !strings.Contains(joined, "set com.yeetrun:protected=false") {
 		t.Fatalf("calls = %#v, want unprotect property set", calls)
+	}
+}
+
+func TestSnapshotsCloneRestoreLifecycleDispatchServiceRootErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "clone",
+			args:    []string{"clone", "app", "yeet-20260613T203100Z", "app-copy", "--start"},
+			wantErr: "starting service-root clones is not supported yet; run snapshots clone without --start",
+		},
+		{
+			name:    "restore",
+			args:    []string{"restore", "app", "yeet-20260613T203100Z", "--stop", "--start", "--yes", "--mode=full", "--generation=snapshot"},
+			wantErr: "--mode=full is only supported for VM recovery points",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			if _, _, err := server.cfg.DB.MutateService("app", func(_ *db.Data, svc *db.Service) error {
+				svc.Name = "app"
+				svc.ServiceType = db.ServiceTypeDockerCompose
+				svc.ServiceRootZFS = "tank/apps/app"
+				return nil
+			}); err != nil {
+				t.Fatalf("seed app: %v", err)
+			}
+			server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+				if args[0] == "list" {
+					return "tank/apps/app@yeet-20260613T203100Z-manual-g3\t1781382660\tcatch\tapp\tmanual\t3\tnote\tservice-root\tfalse\n", "", nil
+				}
+				return "", "", nil
+			}
+			execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+			err := execer.snapshotsCmdFunc(tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("snapshots %s error = %v, want %q", tt.name, err, tt.wantErr)
+			}
+		})
 	}
 }
 

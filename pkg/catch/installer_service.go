@@ -376,6 +376,17 @@ func (si *Installer) doInstall(_ *db.Data, s *db.Service) error {
 	return nil
 }
 
+func (si *Installer) installDefinitionOnly(s *db.Service) error {
+	if err := validateInstallRequest(si.icfg.Pull, s.ServiceType); err != nil {
+		return err
+	}
+	if err := si.runDefinitionInstallPhase(s); err != nil {
+		return err
+	}
+	si.publishInstallEvent(s)
+	return nil
+}
+
 func (si *Installer) serviceBeforeInstall() (*db.Service, error) {
 	if si == nil || si.s == nil {
 		return nil, nil
@@ -430,12 +441,31 @@ func (si *Installer) runInstallPhase(s *db.Service) error {
 	return phase(si, s)
 }
 
+func (si *Installer) runDefinitionInstallPhase(s *db.Service) error {
+	phase, err := definitionInstallPhaseForServiceType(s.ServiceType)
+	if err != nil {
+		return err
+	}
+	return phase(si, s)
+}
+
 func installPhaseForServiceType(serviceType db.ServiceType) (installPhase, error) {
 	switch serviceType {
 	case db.ServiceTypeSystemd:
 		return installSystemdService, nil
 	case db.ServiceTypeDockerCompose:
 		return installDockerComposeService, nil
+	default:
+		return nil, fmt.Errorf("unknown service type: %v", serviceType)
+	}
+}
+
+func definitionInstallPhaseForServiceType(serviceType db.ServiceType) (installPhase, error) {
+	switch serviceType {
+	case db.ServiceTypeSystemd:
+		return installSystemdServiceDefinition, nil
+	case db.ServiceTypeDockerCompose:
+		return installDockerComposeServiceDefinition, nil
 	default:
 		return nil, fmt.Errorf("unknown service type: %v", serviceType)
 	}
@@ -451,6 +481,18 @@ func installSystemdService(si *Installer, s *db.Service) error {
 	}
 	closeSelfUpdateClient(si, s.Name)
 	return restartSystemdUnit(service)
+}
+
+func installSystemdServiceDefinition(si *Installer, s *db.Service) error {
+	service, err := newSystemdInstallService(si, s)
+	if err != nil {
+		return err
+	}
+	if err := installSystemdUnit(service); err != nil {
+		return err
+	}
+	closeSelfUpdateClient(si, s.Name)
+	return nil
 }
 
 func newSystemdInstallService(si *Installer, s *db.Service) (*svc.SystemdService, error) {
@@ -497,6 +539,21 @@ func installDockerComposeService(si *Installer, s *db.Service) error {
 	}
 	if err := service.UpWithPull(si.icfg.Pull); err != nil {
 		return fmt.Errorf("failed to up service: %v", err)
+	}
+	return nil
+}
+
+func installDockerComposeServiceDefinition(si *Installer, s *db.Service) error {
+	si.suspendUI()
+	if _, err := svc.DockerCmd(); err != nil {
+		return err
+	}
+	service, err := si.newDockerComposeService(s)
+	if err != nil {
+		return fmt.Errorf("failed to create service: %v", err)
+	}
+	if err := service.InstallWithPull(si.icfg.Pull); err != nil {
+		return fmt.Errorf("failed to install service: %v", err)
 	}
 	return nil
 }
