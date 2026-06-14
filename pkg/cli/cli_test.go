@@ -736,46 +736,6 @@ func TestParseVMSetFlags(t *testing.T) {
 	}
 }
 
-func TestParseVMSnapshot(t *testing.T) {
-	tests := []struct {
-		name    string
-		args    []string
-		want    VMSnapshotFlags
-		wantOut []string
-		wantErr string
-	}{
-		{name: "plain", args: []string{"devbox"}, wantOut: []string{"devbox"}},
-		{
-			name:    "full with comment",
-			args:    []string{"--full", "--comment", "before upgrade", "devbox"},
-			want:    VMSnapshotFlags{Full: true, Comment: "before upgrade"},
-			wantOut: []string{"devbox"},
-		},
-		{name: "blank comment trims away", args: []string{"--comment", "  ", "devbox"}, wantOut: []string{"devbox"}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, out, err := ParseVMSnapshot(tt.args)
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("ParseVMSnapshot error = %v, want %q", err, tt.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ParseVMSnapshot: %v", err)
-			}
-			if !reflect.DeepEqual(got, tt.want) {
-				t.Fatalf("flags = %#v, want %#v", got, tt.want)
-			}
-			if !reflect.DeepEqual(out, tt.wantOut) {
-				t.Fatalf("args = %#v, want %#v", out, tt.wantOut)
-			}
-		})
-	}
-}
-
 func TestParseServiceSetSnapshotFlags(t *testing.T) {
 	flags, args, err := ParseServiceSet([]string{"svc", "--snapshots=off", "--snapshot-keep-last=3", "--snapshot-max-age=72h", "--snapshot-required=false", "--snapshot-events=run"})
 	if err != nil {
@@ -1125,8 +1085,8 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if reg.Groups["vm"].Commands["set"].Info.Usage != "vm set <vm> [--cpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
 		t.Fatalf("vm set usage = %q", reg.Groups["vm"].Commands["set"].Info.Usage)
 	}
-	if reg.Groups["vm"].Commands["snapshot"].Info.Usage != "vm snapshot <vm> [--comment=TEXT] [--full]" {
-		t.Fatalf("vm snapshot usage = %q", reg.Groups["vm"].Commands["snapshot"].Info.Usage)
+	if _, ok := reg.Groups["vm"].Commands["snapshot"]; ok {
+		t.Fatal("vm snapshot command should not be registered; use snapshots create")
 	}
 	if reg.Groups["snapshots"].Commands["defaults"].Info.Name != "defaults" {
 		t.Fatalf("registry snapshots defaults command = %#v", reg.Groups["snapshots"].Commands["defaults"])
@@ -1252,11 +1212,8 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if !RemoteGroupFlagSpecs()["snapshots"]["restore"]["--generation"].ConsumesValue {
 		t.Fatal("snapshots restore --generation should consume a value")
 	}
-	if !RemoteGroupFlagSpecs()["vm"]["snapshot"]["--comment"].ConsumesValue {
-		t.Fatal("vm snapshot --comment should consume a value")
-	}
-	if RemoteGroupFlagSpecs()["vm"]["snapshot"]["--full"].ConsumesValue {
-		t.Fatal("vm snapshot --full should not consume a value")
+	if _, ok := RemoteGroupFlagSpecs()["vm"]["snapshot"]; ok {
+		t.Fatal("vm snapshot flags should not be registered; use snapshots create")
 	}
 }
 
@@ -1380,11 +1337,11 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	if !containsString(group.Commands["images"].Examples, "yeet vm images update vm://nixos/26.05") {
 		t.Fatalf("vm images examples = %#v, want selected NixOS update example", group.Commands["images"].Examples)
 	}
-	if _, ok := group.Commands["snapshot"]; !ok {
-		t.Fatal("vm snapshot command missing")
+	if _, ok := group.Commands["snapshot"]; ok {
+		t.Fatal("vm snapshot command should not be present")
 	}
-	if _, ok := RemoteGroupFlagSpecs()["vm"]["snapshot"]; !ok {
-		t.Fatal("vm snapshot flag spec missing")
+	if _, ok := RemoteGroupFlagSpecs()["vm"]["snapshot"]; ok {
+		t.Fatal("vm snapshot flag spec should not be present")
 	}
 }
 

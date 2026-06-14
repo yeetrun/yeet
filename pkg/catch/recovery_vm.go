@@ -413,34 +413,44 @@ func (s *Server) waitForFullVMStateRestore(ctx context.Context, service *db.Serv
 	deadline := time.Now().Add(vmFullRestoreResultWaitTimeout)
 	runner := &vmRunner{name: service.Name}
 	for {
-		result, ok, err := readVMFullRestoreResult(resultPath)
-		if err != nil {
-			if !ok {
-				return fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s: %w", preRestore, err)
-			}
-		}
-		if ok && err == nil {
-			if result.Status == vmFullRestoreStatusSuccess {
-				return nil
-			}
-			message := strings.TrimSpace(result.Error)
-			if message == "" {
-				message = "unknown restore-load failure"
-			}
-			return fmt.Errorf("full VM state restore failed after disk restore; pre-restore recovery point: %s: %s", preRestore, message)
-		}
-		status, err := runner.Status()
-		if err == nil && status != svc.StatusRunning {
-			return fmt.Errorf("full VM state restore did not report completion and VM is %s; pre-restore recovery point: %s", status, preRestore)
-		}
-		if err := ctx.Err(); err != nil {
-			return fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s: %w", preRestore, err)
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s", preRestore)
+		done, err := pollFullVMStateRestore(ctx, runner, resultPath, preRestore, deadline)
+		if done || err != nil {
+			return err
 		}
 		time.Sleep(vmFullRestoreResultWaitInterval)
 	}
+}
+
+func pollFullVMStateRestore(ctx context.Context, runner *vmRunner, resultPath, preRestore string, deadline time.Time) (bool, error) {
+	result, ok, err := readVMFullRestoreResult(resultPath)
+	if err != nil && !ok {
+		return true, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s: %w", preRestore, err)
+	}
+	if ok && err == nil {
+		return true, fullVMStateRestoreResultError(result, preRestore)
+	}
+	status, err := runner.Status()
+	if err == nil && status != svc.StatusRunning {
+		return true, fmt.Errorf("full VM state restore did not report completion and VM is %s; pre-restore recovery point: %s", status, preRestore)
+	}
+	if err := ctx.Err(); err != nil {
+		return true, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s: %w", preRestore, err)
+	}
+	if time.Now().After(deadline) {
+		return true, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s", preRestore)
+	}
+	return false, nil
+}
+
+func fullVMStateRestoreResultError(result vmFullRestoreResult, preRestore string) error {
+	if result.Status == vmFullRestoreStatusSuccess {
+		return nil
+	}
+	message := strings.TrimSpace(result.Error)
+	if message == "" {
+		message = "unknown restore-load failure"
+	}
+	return fmt.Errorf("full VM state restore failed after disk restore; pre-restore recovery point: %s: %s", preRestore, message)
 }
 
 func confirmFullVMRestore(service *db.Service, point recoveryPoint, flags cli.SnapshotsRestoreFlags, rw io.ReadWriter) (bool, error) {
@@ -494,7 +504,7 @@ func startVMAfterRestore(name string, start bool, w io.Writer) error {
 }
 
 func (s *Server) createPreRestoreVMSnapshot(ctx context.Context, service *db.Service, point recoveryPoint, w io.Writer) (string, error) {
-	flags := cli.VMSnapshotFlags{Comment: "pre-restore before " + point.ShortName}
+	flags := cli.SnapshotsCreateFlags{Comment: "pre-restore before " + point.ShortName}
 	vm := *service.VM.Clone()
 	dataset, err := vmSnapshotDataset(vm.Disk)
 	if err != nil {

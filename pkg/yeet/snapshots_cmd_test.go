@@ -60,15 +60,18 @@ func TestSnapshotsDefaultsSetRejectsUnexpectedArgs(t *testing.T) {
 
 func TestSnapshotsLifecycleRoutesToSystemService(t *testing.T) {
 	tests := []struct {
-		name string
-		args []string
+		name    string
+		args    []string
+		wantTTY bool
 	}{
 		{name: "list", args: []string{"list", "svc-a", "--format=json"}},
 		{name: "inspect", args: []string{"inspect", "svc-a", "yeet-abc", "--format=json-pretty"}},
 		{name: "create", args: []string{"create", "svc-a", "--comment", "before upgrade", "--full"}},
 		{name: "clone", args: []string{"clone", "svc-a", "yeet-abc", "svc-copy", "--start"}},
 		{name: "restore", args: []string{"restore", "svc-a", "yeet-abc", "--stop", "--start", "--yes", "--mode=full", "--generation=snapshot"}},
+		{name: "restore prompt", args: []string{"restore", "svc-a", "yeet-abc", "--stop"}, wantTTY: true},
 		{name: "rm", args: []string{"rm", "svc-a", "yeet-abc", "--yes"}},
+		{name: "rm prompt", args: []string{"rm", "svc-a", "yeet-abc"}, wantTTY: true},
 		{name: "protect", args: []string{"protect", "svc-a", "yeet-abc"}},
 		{name: "unprotect", args: []string{"unprotect", "svc-a", "yeet-abc"}},
 	}
@@ -102,8 +105,8 @@ func TestSnapshotsLifecycleRoutesToSystemService(t *testing.T) {
 			if !reflect.DeepEqual(gotArgs, rawArgs) {
 				t.Fatalf("args = %#v, want %#v", gotArgs, rawArgs)
 			}
-			if gotTTY {
-				t.Fatal("tty = true, want false")
+			if gotTTY != tt.wantTTY {
+				t.Fatalf("tty = %t, want %t", gotTTY, tt.wantTTY)
 			}
 		})
 	}

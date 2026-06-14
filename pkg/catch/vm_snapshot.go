@@ -46,14 +46,14 @@ type vmSnapshotPlan struct {
 	VM                db.VMConfig
 	Dataset           string
 	Policy            effectivePolicy
-	Flags             cli.VMSnapshotFlags
+	Flags             cli.SnapshotsCreateFlags
 	Running           bool
 	Socket            string
 	Snapshot          vmFirecrackerSnapshotter
 	FullCompatibility *vmCheckpointCompatibility
 }
 
-func (s *Server) createVMSnapshot(ctx context.Context, name string, flags cli.VMSnapshotFlags, w io.Writer) error {
+func (s *Server) createVMSnapshot(ctx context.Context, name string, flags cli.SnapshotsCreateFlags, w io.Writer) error {
 	plan, err := s.newVMSnapshotPlan(name, flags)
 	if err != nil {
 		return err
@@ -73,7 +73,7 @@ func (s *Server) createVMSnapshot(ctx context.Context, name string, flags cli.VM
 	return nil
 }
 
-func (s *Server) newVMSnapshotPlan(name string, flags cli.VMSnapshotFlags) (vmSnapshotPlan, error) {
+func (s *Server) newVMSnapshotPlan(name string, flags cli.SnapshotsCreateFlags) (vmSnapshotPlan, error) {
 	service, vm, err := s.vmSnapshotService(name)
 	if err != nil {
 		return vmSnapshotPlan{}, err
@@ -126,7 +126,7 @@ func currentVMSnapshotRunning(s *Server, name string) (bool, error) {
 	return runningCheck(s, name)
 }
 
-func validateVMSnapshotRuntime(name string, flags cli.VMSnapshotFlags, running bool, socket string) error {
+func validateVMSnapshotRuntime(name string, flags cli.SnapshotsCreateFlags, running bool, socket string) error {
 	if flags.Full && !running {
 		return fmt.Errorf("full VM checkpoints require %q to be running", name)
 	}
@@ -208,7 +208,7 @@ func vmSnapshotDataset(disk db.VMDiskConfig) (string, error) {
 	return dataset, nil
 }
 
-func (s *Server) createPausedVMSnapshot(ctx context.Context, service *db.Service, vm db.VMConfig, dataset string, flags cli.VMSnapshotFlags, controller vmFirecrackerSnapshotter, fullCompatibility *vmCheckpointCompatibility, running bool) (vmSnapshotResult, error) {
+func (s *Server) createPausedVMSnapshot(ctx context.Context, service *db.Service, vm db.VMConfig, dataset string, flags cli.SnapshotsCreateFlags, controller vmFirecrackerSnapshotter, fullCompatibility *vmCheckpointCompatibility, running bool) (vmSnapshotResult, error) {
 	if flags.Full && fullCompatibility == nil {
 		return vmSnapshotResult{}, fmt.Errorf("full VM checkpoint compatibility metadata must be planned before snapshot mutation")
 	}
@@ -241,7 +241,7 @@ func (s *Server) createPausedVMSnapshot(ctx context.Context, service *db.Service
 	return result, nil
 }
 
-func (s *Server) createPausedFullVMSnapshot(ctx context.Context, service *db.Service, vm db.VMConfig, dataset string, flags cli.VMSnapshotFlags, controller vmFirecrackerSnapshotter, fullCompatibility vmCheckpointCompatibility, now time.Time, checkpoint string) (vmSnapshotResult, error) {
+func (s *Server) createPausedFullVMSnapshot(ctx context.Context, service *db.Service, vm db.VMConfig, dataset string, flags cli.SnapshotsCreateFlags, controller vmFirecrackerSnapshotter, fullCompatibility vmCheckpointCompatibility, now time.Time, checkpoint string) (vmSnapshotResult, error) {
 	result, tempDir, err := s.createTemporaryFullVMCheckpoint(ctx, service, vm, controller)
 	if err != nil {
 		return result, fmt.Errorf("create full VM checkpoint: %w", err)

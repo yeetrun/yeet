@@ -88,8 +88,7 @@ func RunVMConsoleProxy(ctx context.Context, cfg VMConsoleProxyConfig) error {
 	resultPath := vmFullRestoreResultPath(cfg.APISocket)
 	restoreRequest, restoreMode, err := readVMFullRestoreRequest(requestPath)
 	if err != nil {
-		_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusFailed, Error: err.Error()})
-		return fmt.Errorf("%w: %v", ErrVMRestoreLoadFailed, err)
+		return failVMRestoreLoadBeforeStart(resultPath, err)
 	}
 	cmd := vmFirecrackerCommand(ctx, cfg, restoreMode)
 	console, err := pty.Start(cmd)
@@ -103,31 +102,45 @@ func RunVMConsoleProxy(ctx context.Context, cfg VMConsoleProxyConfig) error {
 	go broker.accept(listener)
 	go broker.copyOutput()
 	if restoreMode {
-		if err := loadFullVMSnapshot(ctx, cfg.APISocket, restoreRequest); err != nil {
-			_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusFailed, Error: err.Error()})
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			_ = cmd.Wait()
-			return fmt.Errorf("%w: %v", ErrVMRestoreLoadFailed, err)
-		}
-		if err := os.Remove(requestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusFailed, Error: err.Error()})
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			_ = cmd.Wait()
-			return fmt.Errorf("%w: consume full restore request: %v", ErrVMRestoreLoadFailed, err)
-		}
-		if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess}); err != nil {
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-			_ = cmd.Wait()
-			return fmt.Errorf("%w: write full restore result: %v", ErrVMRestoreLoadFailed, err)
+		if err := completeVMFullRestoreStartup(ctx, cmd, cfg.APISocket, requestPath, resultPath, restoreRequest); err != nil {
+			return err
 		}
 	}
 	return waitVMConsoleProcess(cmd, guestStopped)
+}
+
+func failVMRestoreLoadBeforeStart(resultPath string, err error) error {
+	_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusFailed, Error: err.Error()})
+	return fmt.Errorf("%w: %v", ErrVMRestoreLoadFailed, err)
+}
+
+func completeVMFullRestoreStartup(ctx context.Context, cmd *exec.Cmd, apiSocket, requestPath, resultPath string, request vmFullRestoreRequest) error {
+	if err := loadFullVMSnapshot(ctx, apiSocket, request); err != nil {
+		return failRunningVMRestoreLoad(cmd, resultPath, "", err)
+	}
+	if err := os.Remove(requestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return failRunningVMRestoreLoad(cmd, resultPath, "consume full restore request", err)
+	}
+	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess}); err != nil {
+		return failRunningVMRestoreLoad(cmd, resultPath, "write full restore result", err)
+	}
+	return nil
+}
+
+func failRunningVMRestoreLoad(cmd *exec.Cmd, resultPath, context string, err error) error {
+	_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusFailed, Error: err.Error()})
+	stopVMConsoleProcess(cmd)
+	if context != "" {
+		return fmt.Errorf("%w: %s: %v", ErrVMRestoreLoadFailed, context, err)
+	}
+	return fmt.Errorf("%w: %v", ErrVMRestoreLoadFailed, err)
+}
+
+func stopVMConsoleProcess(cmd *exec.Cmd) {
+	if cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+	_ = cmd.Wait()
 }
 
 func vmFirecrackerCommand(ctx context.Context, cfg VMConsoleProxyConfig, restoreMode bool) *exec.Cmd {

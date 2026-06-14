@@ -30,7 +30,7 @@ func TestVMSnapshotRejectsRawDisk(t *testing.T) {
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendRaw)
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{}, io.Discard)
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{}, io.Discard)
 
 	if err == nil || !strings.Contains(err.Error(), "requires a ZFS zvol-backed VM") {
 		t.Fatalf("createVMSnapshot error = %v, want zvol-backed rejection", err)
@@ -53,7 +53,7 @@ func TestVMSnapshotDiskOnlyFlushesPausedDiskBeforeZFSSnapshot(t *testing.T) {
 		vmSnapshotFirecracker = oldController
 	})
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{Comment: " before upgrade "}, io.Discard)
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Comment: " before upgrade "}, io.Discard)
 	if err != nil {
 		t.Fatalf("createVMSnapshot: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestVMSnapshotAttemptsResumeAfterSnapshotFailure(t *testing.T) {
 		vmSnapshotFirecracker = oldController
 	})
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{}, io.Discard)
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{}, io.Discard)
 
 	if err == nil || !strings.Contains(err.Error(), "zfs snapshot") {
 		t.Fatalf("createVMSnapshot error = %v, want zfs snapshot error", err)
@@ -127,7 +127,7 @@ func TestVMSnapshotResumeIgnoresCanceledOperationContext(t *testing.T) {
 		vmSnapshotFirecracker = oldController
 	})
 
-	err := server.createVMSnapshot(ctx, "devbox", cli.VMSnapshotFlags{}, io.Discard)
+	err := server.createVMSnapshot(ctx, "devbox", cli.SnapshotsCreateFlags{}, io.Discard)
 
 	if err == nil || !strings.Contains(err.Error(), "zfs snapshot") {
 		t.Fatalf("createVMSnapshot error = %v, want zfs snapshot error", err)
@@ -155,7 +155,7 @@ func TestVMSnapshotDiskOnlySnapshotsStoppedVMWithoutPause(t *testing.T) {
 	})
 	var out bytes.Buffer
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{}, &out)
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{}, &out)
 	if err != nil {
 		t.Fatalf("createVMSnapshot: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestVMSnapshotPrunesCheckpointDirsForDestroyedSnapshots(t *testing.T) {
 	vmSnapshotIsRunning = func(*Server, string) (bool, error) { return false, nil }
 	t.Cleanup(func() { vmSnapshotIsRunning = oldRunning })
 
-	if err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{}, io.Discard); err != nil {
+	if err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{}, io.Discard); err != nil {
 		t.Fatalf("createVMSnapshot: %v", err)
 	}
 
@@ -273,7 +273,7 @@ func TestVMSnapshotPrunesCheckpointDirsAfterPartialZFSPruneFailure(t *testing.T)
 	t.Cleanup(func() { vmSnapshotIsRunning = oldRunning })
 	var out bytes.Buffer
 
-	if err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{}, &out); err != nil {
+	if err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{}, &out); err != nil {
 		t.Fatalf("createVMSnapshot: %v", err)
 	}
 
@@ -332,7 +332,7 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 	})
 	var out bytes.Buffer
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{Full: true, Comment: "checkpoint"}, &out)
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Full: true, Comment: "checkpoint"}, &out)
 	if err != nil {
 		t.Fatalf("createVMSnapshot: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestVMSnapshotFullRequiresRunningVM(t *testing.T) {
 	vmSnapshotIsRunning = func(*Server, string) (bool, error) { return false, nil }
 	t.Cleanup(func() { vmSnapshotIsRunning = oldRunning })
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{Full: true}, io.Discard)
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Full: true}, io.Discard)
 
 	if err == nil || !strings.Contains(err.Error(), "full VM checkpoints require") {
 		t.Fatalf("createVMSnapshot error = %v, want full requires running", err)
@@ -442,7 +442,7 @@ func TestVMSnapshotFullFailureCleansIncompleteCheckpoint(t *testing.T) {
 		vmSnapshotFirecracker = oldController
 	})
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{Full: true}, io.Discard)
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Full: true}, io.Discard)
 
 	if err == nil || !strings.Contains(err.Error(), "create full VM checkpoint") {
 		t.Fatalf("createVMSnapshot error = %v, want full checkpoint snapshot context", err)
@@ -457,6 +457,41 @@ func TestVMSnapshotFullFailureCleansIncompleteCheckpoint(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Dir(controller.fullStatePath)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("checkpoint dir stat = %v, want removed", statErr)
+	}
+}
+
+func TestFailFullVMSnapshotDestroysIncompleteArtifacts(t *testing.T) {
+	server := newTestServer(t)
+	checkpointDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(checkpointDir, "memory.bin"), []byte("checkpoint"), 0o644); err != nil {
+		t.Fatalf("write checkpoint file: %v", err)
+	}
+	var calls []string
+	server.zfsRunner = recordingVMSnapshotZFSRunner(&calls, nil)
+
+	err := server.failFullVMSnapshot(context.Background(), "tank/vms/devbox@yeet-full", checkpointDir, errVMSnapshotTest)
+
+	if err == nil || !strings.Contains(err.Error(), "create full VM checkpoint for snapshot tank/vms/devbox@yeet-full") {
+		t.Fatalf("failFullVMSnapshot error = %v, want snapshot context", err)
+	}
+	if got := vmSnapshotZFSCall(calls, "destroy"); got != "zfs destroy tank/vms/devbox@yeet-full" {
+		t.Fatalf("destroy call = %q, want zfs destroy", got)
+	}
+	if _, statErr := os.Stat(checkpointDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("checkpoint dir stat = %v, want removed", statErr)
+	}
+}
+
+func TestFailFullVMSnapshotReportsCleanupFailure(t *testing.T) {
+	server := newTestServer(t)
+	server.zfsRunner = func(context.Context, ...string) (string, string, error) {
+		return "", "dataset busy", errVMSnapshotTest
+	}
+
+	err := server.failFullVMSnapshot(context.Background(), "tank/vms/devbox@yeet-full", "", errVMSnapshotTest)
+
+	if err == nil || !strings.Contains(err.Error(), "cleanup failed") || !strings.Contains(err.Error(), "dataset busy") {
+		t.Fatalf("failFullVMSnapshot error = %v, want cleanup failure context", err)
 	}
 }
 
@@ -496,7 +531,7 @@ func TestVMSnapshotFullFailsWhenKnownFirecrackerVersionUnavailable(t *testing.T)
 		vmSnapshotFirecracker = oldController
 	})
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{Full: true}, io.Discard)
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Full: true}, io.Discard)
 
 	if err == nil || !strings.Contains(err.Error(), "read Firecracker version") {
 		t.Fatalf("createVMSnapshot error = %v, want Firecracker version failure", err)
@@ -544,7 +579,7 @@ func TestVMSnapshotFullPlansFirecrackerIdentityBeforePause(t *testing.T) {
 		vmCheckpointFirecrackerVersionFunc = oldVersionFunc
 	})
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{Full: true}, io.Discard)
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Full: true}, io.Discard)
 
 	if err == nil || !strings.Contains(err.Error(), "read Firecracker version") {
 		t.Fatalf("createVMSnapshot error = %v, want Firecracker version failure", err)
@@ -561,33 +596,13 @@ func TestVMSnapshotFullPlansFirecrackerIdentityBeforePause(t *testing.T) {
 	}
 }
 
-func TestVMCmdSnapshotRoutesAndParsesFlags(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	var calls []string
-	server.zfsRunner = recordingVMSnapshotZFSRunner(&calls, nil)
-	oldRunning := vmSnapshotIsRunning
-	oldController := vmSnapshotFirecracker
-	vmSnapshotIsRunning = func(*Server, string) (bool, error) { return false, nil }
-	vmSnapshotFirecracker = &recordingVMFirecracker{calls: &calls}
-	t.Cleanup(func() {
-		vmSnapshotIsRunning = oldRunning
-		vmSnapshotFirecracker = oldController
-	})
-	var out bytes.Buffer
-	execer := &ttyExecer{s: server, sn: "devbox", rw: &out}
+func TestVMCmdSnapshotIsNotRegistered(t *testing.T) {
+	execer := &ttyExecer{}
 
-	if err := execer.vmCmdFunc([]string{"snapshot", "--comment", " route comment "}); err != nil {
-		t.Fatalf("vm snapshot: %v", err)
-	}
+	err := execer.vmCmdFunc([]string{"snapshot", "--comment", "route comment"})
 
-	joined := strings.Join(calls, "\n")
-	if !strings.Contains(joined, "com.yeetrun:comment=route comment") {
-		t.Fatalf("calls = %#v, want routed trimmed comment", calls)
-	}
-	if !strings.Contains(out.String(), "VM snapshot: flash/yeet/vms/devbox/vm/d-abc/root@yeet-") {
-		t.Fatalf("output = %q, want VM snapshot line", out.String())
+	if err == nil || !strings.Contains(err.Error(), `unknown vm command "snapshot"`) {
+		t.Fatalf("vm snapshot error = %v, want unknown command", err)
 	}
 }
 
@@ -770,4 +785,4 @@ func newFirecrackerUnixHTTPTestServer(t *testing.T, status int) (string, <-chan 
 	return socketPath, requests
 }
 
-var errVMSnapshotTest = errors.New("vm snapshot test error")
+var errVMSnapshotTest = errors.New("VM snapshot test error")

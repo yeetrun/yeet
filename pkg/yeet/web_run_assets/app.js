@@ -447,11 +447,11 @@ function syncSnapshotUI(payloadKind) {
   $("snapshotModeLabel").textContent = isVM ? "Policy" : "Mode";
   $("snapshotRequiredField").hidden = isVM;
   $("snapshotEventsField").hidden = isVM;
-  $("snapshotEventsField").dataset.vmValidation = "VM snapshot policy does not use events; use mode, keep last, and max age for manual vm snapshots";
+  $("snapshotEventsField").dataset.vmValidation = "VM snapshot policy does not use events; use mode, keep last, and max age for manual VM snapshots";
 
   const help = details.querySelector(".help");
   help.dataset.help = isVM
-    ? "Retention policy for yeet vm snapshot. Disk snapshots use the VM zvol."
+    ? "Retention policy for yeet snapshots create. Disk snapshots use the VM zvol."
     : "Optional per-service snapshot policy stored with the run recipe.";
 }
 
