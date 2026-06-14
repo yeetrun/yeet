@@ -7,6 +7,8 @@ package catch
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,7 +37,7 @@ func TestVMSnapshotRejectsRawDisk(t *testing.T) {
 	}
 }
 
-func TestVMSnapshotDiskOnlyPausesSnapshotsAndResumesRunningVM(t *testing.T) {
+func TestVMSnapshotDiskOnlyFlushesPausedDiskBeforeZFSSnapshot(t *testing.T) {
 	server := newTestServer(t)
 	root := t.TempDir()
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
@@ -55,7 +58,7 @@ func TestVMSnapshotDiskOnlyPausesSnapshotsAndResumesRunningVM(t *testing.T) {
 		t.Fatalf("createVMSnapshot: %v", err)
 	}
 
-	assertCallOrder(t, calls, "pause ", "zfs snapshot", "resume ")
+	assertCallOrder(t, calls, "pause ", "full "+filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"), "zfs snapshot", "resume ")
 	joined := strings.Join(calls, "\n")
 	if !strings.Contains(joined, "com.yeetrun:comment=before upgrade") {
 		t.Fatalf("calls = %#v, want trimmed comment metadata", calls)
@@ -66,8 +69,12 @@ func TestVMSnapshotDiskOnlyPausesSnapshotsAndResumesRunningVM(t *testing.T) {
 	if !strings.Contains(joined, "flash/yeet/vms/devbox/vm/d-abc/root@yeet-") {
 		t.Fatalf("calls = %#v, want zvol dataset snapshot", calls)
 	}
-	if controller.fullStatePath != "" || controller.fullMemPath != "" {
-		t.Fatalf("full snapshot paths = %q %q, want none", controller.fullStatePath, controller.fullMemPath)
+	snapshotCall := vmSnapshotZFSCall(calls, "snapshot")
+	if strings.Contains(snapshotCall, "-g0") || strings.Contains(snapshotCall, "com.yeetrun:generation=") {
+		t.Fatalf("snapshot call = %q, want VM snapshot without generation suffix or property", snapshotCall)
+	}
+	if controller.fullStatePath == "" || controller.fullMemPath == "" {
+		t.Fatalf("full snapshot paths empty: state=%q mem=%q", controller.fullStatePath, controller.fullMemPath)
 	}
 }
 
@@ -288,6 +295,30 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 	server := newTestServer(t)
 	root := t.TempDir()
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	firecrackerBinary := filepath.Join(root, "firecracker")
+	const firecrackerVersion = "Firecracker v1.7.0-test"
+	firecrackerBytes := []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo " + strconv.Quote(firecrackerVersion) + "; exit 0; fi\nexit 1\n")
+	if err := os.WriteFile(firecrackerBinary, firecrackerBytes, 0o755); err != nil {
+		t.Fatalf("write firecracker binary: %v", err)
+	}
+	systemdDir := t.TempDir()
+	oldSystemdDir := vmSystemdSystemDir
+	vmSystemdSystemDir = systemdDir
+	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
+	unit := renderVMSystemdUnit(vmSystemdConfig{
+		Service:          "devbox",
+		Runner:           "/srv/catch/run/catch",
+		Firecracker:      firecrackerBinary,
+		ConfigPath:       filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
+		APISocket:        filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"),
+		ConsoleSocket:    filepath.Join(serviceRunDirForRoot(root), "serial.sock"),
+		WorkingDirectory: root,
+	})
+	if err := os.WriteFile(filepath.Join(systemdDir, vmSystemdUnitName("devbox")), []byte(unit), 0o644); err != nil {
+		t.Fatalf("write VM systemd unit: %v", err)
+	}
+	firecrackerSum := sha256.Sum256(firecrackerBytes)
+	wantFirecrackerSHA := "sha256:" + hex.EncodeToString(firecrackerSum[:])
 	var calls []string
 	server.zfsRunner = recordingVMSnapshotZFSRunner(&calls, nil)
 	oldRunning := vmSnapshotIsRunning
@@ -306,32 +337,76 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 		t.Fatalf("createVMSnapshot: %v", err)
 	}
 
-	assertCallOrder(t, calls, "pause ", "zfs snapshot", "full "+filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"), "resume ")
+	assertCallOrder(t, calls, "pause ", "full "+filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"), "zfs snapshot", "resume ")
 	if controller.fullStatePath == "" || controller.fullMemPath == "" {
 		t.Fatalf("full snapshot paths empty: state=%q mem=%q", controller.fullStatePath, controller.fullMemPath)
 	}
 	if !strings.Contains(controller.fullStatePath, filepath.Join(root, "data", "checkpoints")) {
 		t.Fatalf("state path = %q, want service data checkpoint path", controller.fullStatePath)
 	}
-	raw, err := os.ReadFile(filepath.Join(filepath.Dir(controller.fullStatePath), "metadata.json"))
+	metadataPaths, err := filepath.Glob(filepath.Join(root, "data", "checkpoints", "yeet-*", "metadata.json"))
+	if err != nil {
+		t.Fatalf("glob checkpoint metadata: %v", err)
+	}
+	if len(metadataPaths) != 1 {
+		t.Fatalf("checkpoint metadata paths = %#v, want one published checkpoint", metadataPaths)
+	}
+	checkpointDir := filepath.Dir(metadataPaths[0])
+	statePath := filepath.Join(checkpointDir, "firecracker-state.bin")
+	memoryPath := filepath.Join(checkpointDir, "memory.bin")
+	raw, err := os.ReadFile(filepath.Join(checkpointDir, "metadata.json"))
 	if err != nil {
 		t.Fatalf("read checkpoint metadata: %v", err)
 	}
-	var metadata map[string]string
+	var metadata map[string]any
 	if err := json.Unmarshal(raw, &metadata); err != nil {
 		t.Fatalf("decode checkpoint metadata: %v", err)
 	}
 	if metadata["service"] != "devbox" || metadata["comment"] != "checkpoint" || metadata["createdBy"] != "catch" {
 		t.Fatalf("metadata = %#v, want service/comment/createdBy", metadata)
 	}
-	if !strings.Contains(metadata["zvolSnapshot"], "flash/yeet/vms/devbox/vm/d-abc/root@yeet-") {
+	zvolSnapshot, ok := metadata["zvolSnapshot"].(string)
+	if !ok || !strings.Contains(zvolSnapshot, "flash/yeet/vms/devbox/vm/d-abc/root@yeet-") {
 		t.Fatalf("zvolSnapshot = %q, want zvol snapshot", metadata["zvolSnapshot"])
 	}
-	if metadata["firecrackerState"] != controller.fullStatePath || metadata["firecrackerMemory"] != controller.fullMemPath {
-		t.Fatalf("metadata paths = %#v, want %q %q", metadata, controller.fullStatePath, controller.fullMemPath)
+	if metadata["firecrackerState"] != statePath || metadata["firecrackerMemory"] != memoryPath {
+		t.Fatalf("metadata paths = %#v, want %q %q", metadata, statePath, memoryPath)
 	}
-	if !strings.Contains(out.String(), "Firecracker state: "+controller.fullStatePath) ||
-		!strings.Contains(out.String(), "Firecracker memory: "+controller.fullMemPath) {
+	for _, key := range []string{
+		"mode",
+		"machineConfigHash",
+		"networkConfigHash",
+		"diskPath",
+		"vcpu",
+		"memoryMiB",
+		"vmConfigHash",
+	} {
+		if _, ok := metadata[key]; !ok {
+			t.Fatalf("metadata = %#v, missing compatibility field %q", metadata, key)
+		}
+	}
+	if metadata["mode"] != recoveryModeFull {
+		t.Fatalf("metadata mode = %q, want full", metadata["mode"])
+	}
+	for _, key := range []string{"machineConfigHash", "networkConfigHash", "vmConfigHash"} {
+		hash, ok := metadata[key].(string)
+		if !ok || !strings.HasPrefix(hash, "sha256:") {
+			t.Fatalf("metadata[%s] = %q, want sha256-prefixed hash", key, metadata[key])
+		}
+	}
+	if metadata["diskPath"] != "/dev/zvol/flash/yeet/vms/devbox/vm/d-abc/root" ||
+		metadata["vcpu"] != float64(4) ||
+		metadata["memoryMiB"] != float64(4096) {
+		t.Fatalf("metadata compatibility = %#v, want disk/vcpu/memory from current VM config", metadata)
+	}
+	if metadata["firecrackerSha256"] != wantFirecrackerSHA {
+		t.Fatalf("metadata firecrackerSha256 = %q, want %q", metadata["firecrackerSha256"], wantFirecrackerSHA)
+	}
+	if metadata["firecrackerVersion"] != firecrackerVersion {
+		t.Fatalf("metadata firecrackerVersion = %q, want %q", metadata["firecrackerVersion"], firecrackerVersion)
+	}
+	if !strings.Contains(out.String(), "Firecracker state: "+statePath) ||
+		!strings.Contains(out.String(), "Firecracker memory: "+memoryPath) {
 		t.Fatalf("output = %q, want checkpoint paths", out.String())
 	}
 }
@@ -369,15 +444,120 @@ func TestVMSnapshotFullFailureCleansIncompleteCheckpoint(t *testing.T) {
 
 	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{Full: true}, io.Discard)
 
-	if err == nil || !strings.Contains(err.Error(), "create full VM checkpoint for snapshot flash/yeet/vms/devbox/vm/d-abc/root@yeet-") {
+	if err == nil || !strings.Contains(err.Error(), "create full VM checkpoint") {
 		t.Fatalf("createVMSnapshot error = %v, want full checkpoint snapshot context", err)
 	}
-	assertCallOrder(t, calls, "pause ", "zfs snapshot", "full "+filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"), "zfs destroy flash/yeet/vms/devbox/vm/d-abc/root@yeet-", "resume ")
+	assertCallOrder(t, calls, "pause ", "full "+filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"), "resume ")
+	joined := strings.Join(calls, "\n")
+	if strings.Contains(joined, "zfs snapshot") || strings.Contains(joined, "zfs destroy") {
+		t.Fatalf("calls = %#v, want full checkpoint failure before ZFS mutation", calls)
+	}
 	if controller.fullStatePath == "" {
 		t.Fatal("fullStatePath empty, expected checkpoint path before failure")
 	}
 	if _, statErr := os.Stat(filepath.Dir(controller.fullStatePath)); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("checkpoint dir stat = %v, want removed", statErr)
+	}
+}
+
+func TestVMSnapshotFullFailsWhenKnownFirecrackerVersionUnavailable(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	firecrackerBinary := filepath.Join(root, "firecracker")
+	if err := os.WriteFile(firecrackerBinary, []byte("#!/bin/sh\necho version failed >&2\nexit 2\n"), 0o755); err != nil {
+		t.Fatalf("write firecracker binary: %v", err)
+	}
+	systemdDir := t.TempDir()
+	oldSystemdDir := vmSystemdSystemDir
+	vmSystemdSystemDir = systemdDir
+	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
+	unit := renderVMSystemdUnit(vmSystemdConfig{
+		Service:          "devbox",
+		Runner:           "/srv/catch/run/catch",
+		Firecracker:      firecrackerBinary,
+		ConfigPath:       filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
+		APISocket:        filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"),
+		ConsoleSocket:    filepath.Join(serviceRunDirForRoot(root), "serial.sock"),
+		WorkingDirectory: root,
+	})
+	if err := os.WriteFile(filepath.Join(systemdDir, vmSystemdUnitName("devbox")), []byte(unit), 0o644); err != nil {
+		t.Fatalf("write VM systemd unit: %v", err)
+	}
+	var calls []string
+	server.zfsRunner = recordingVMSnapshotZFSRunner(&calls, nil)
+	oldRunning := vmSnapshotIsRunning
+	oldController := vmSnapshotFirecracker
+	controller := &recordingVMFirecracker{calls: &calls}
+	vmSnapshotIsRunning = func(*Server, string) (bool, error) { return true, nil }
+	vmSnapshotFirecracker = controller
+	t.Cleanup(func() {
+		vmSnapshotIsRunning = oldRunning
+		vmSnapshotFirecracker = oldController
+	})
+
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{Full: true}, io.Discard)
+
+	if err == nil || !strings.Contains(err.Error(), "read Firecracker version") {
+		t.Fatalf("createVMSnapshot error = %v, want Firecracker version failure", err)
+	}
+	joined := strings.Join(calls, "\n")
+	for _, unexpected := range []string{"pause ", "zfs snapshot", "full "} {
+		if strings.Contains(joined, unexpected) {
+			t.Fatalf("calls = %#v, want Firecracker version failure before %q", calls, unexpected)
+		}
+	}
+	if controller.fullStatePath != "" || controller.fullMemPath != "" {
+		t.Fatalf("full snapshot paths = %q %q, want none before identity failure", controller.fullStatePath, controller.fullMemPath)
+	}
+}
+
+func TestVMSnapshotFullPlansFirecrackerIdentityBeforePause(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	firecrackerBinary := filepath.Join(root, "firecracker")
+	if err := os.WriteFile(firecrackerBinary, []byte("firecracker-test-binary"), 0o755); err != nil {
+		t.Fatalf("write firecracker binary: %v", err)
+	}
+	var calls []string
+	server.zfsRunner = recordingVMSnapshotZFSRunner(&calls, nil)
+	oldRunning := vmSnapshotIsRunning
+	oldController := vmSnapshotFirecracker
+	oldPathFunc := vmCheckpointFirecrackerPathFunc
+	oldVersionFunc := vmCheckpointFirecrackerVersionFunc
+	controller := &recordingVMFirecracker{calls: &calls}
+	vmSnapshotIsRunning = func(*Server, string) (bool, error) { return true, nil }
+	vmSnapshotFirecracker = controller
+	vmCheckpointFirecrackerPathFunc = func(*db.Service, db.VMConfig) string {
+		calls = append(calls, "firecracker path")
+		return firecrackerBinary
+	}
+	vmCheckpointFirecrackerVersionFunc = func(string) (string, error) {
+		calls = append(calls, "firecracker version")
+		return "", fmt.Errorf("read Firecracker version: %w", errVMSnapshotTest)
+	}
+	t.Cleanup(func() {
+		vmSnapshotIsRunning = oldRunning
+		vmSnapshotFirecracker = oldController
+		vmCheckpointFirecrackerPathFunc = oldPathFunc
+		vmCheckpointFirecrackerVersionFunc = oldVersionFunc
+	})
+
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.VMSnapshotFlags{Full: true}, io.Discard)
+
+	if err == nil || !strings.Contains(err.Error(), "read Firecracker version") {
+		t.Fatalf("createVMSnapshot error = %v, want Firecracker version failure", err)
+	}
+	assertCallOrder(t, calls, "firecracker path", "firecracker version")
+	joined := strings.Join(calls, "\n")
+	for _, unexpected := range []string{"pause ", "zfs snapshot", "full ", "resume "} {
+		if strings.Contains(joined, unexpected) {
+			t.Fatalf("calls = %#v, want identity failure before %q", calls, unexpected)
+		}
+	}
+	if controller.fullStatePath != "" || controller.fullMemPath != "" {
+		t.Fatalf("full snapshot paths = %q %q, want none before identity failure", controller.fullStatePath, controller.fullMemPath)
 	}
 }
 
@@ -449,6 +629,23 @@ func TestFirecrackerFullSnapshotUsesUnixHTTP(t *testing.T) {
 	}
 }
 
+func TestFirecrackerBinaryVersionKeepsStableVersionLine(t *testing.T) {
+	dir := t.TempDir()
+	firecracker := filepath.Join(dir, "firecracker")
+	script := "#!/bin/sh\nprintf 'Firecracker v1.14.3\\n\\n2026-06-14T11:38:52.280711996 [anonymous-instance:main] Firecracker exiting successfully. exit_code=0\\n'\n"
+	if err := os.WriteFile(firecracker, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake firecracker: %v", err)
+	}
+
+	version, err := firecrackerBinaryVersion(firecracker)
+	if err != nil {
+		t.Fatalf("firecrackerBinaryVersion: %v", err)
+	}
+	if version != "Firecracker v1.14.3" {
+		t.Fatalf("version = %q, want stable version line", version)
+	}
+}
+
 func TestFirecrackerJSONReportsNonSuccessStatus(t *testing.T) {
 	socket, _ := newFirecrackerUnixHTTPTestServer(t, http.StatusInternalServerError)
 
@@ -500,6 +697,16 @@ func recordingVMSnapshotZFSRunner(calls *[]string, snapshotErr error) zfsCommand
 		}
 		return "", "", nil
 	}
+}
+
+func vmSnapshotZFSCall(calls []string, command string) string {
+	prefix := "zfs " + command + " "
+	for _, call := range calls {
+		if strings.HasPrefix(call, prefix) {
+			return call
+		}
+	}
+	return ""
 }
 
 func assertCallOrder(t *testing.T, calls []string, want ...string) {

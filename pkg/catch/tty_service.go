@@ -58,24 +58,37 @@ func (e *ttyExecer) stopCmdFunc() error {
 	})
 }
 
-func (e *ttyExecer) rollbackCmdFunc() error {
+const vmGenerationRollbackUnsupportedMessage = "VM services do not support generation rollback; use yeet snapshots restore for VM disk or checkpoint recovery"
+
+type serviceGenerationView struct {
+	Service           string `json:"service"`
+	Type              string `json:"type"`
+	CurrentGeneration int    `json:"currentGeneration"`
+	LatestGeneration  int    `json:"latestGeneration"`
+	RollbackSupported bool   `json:"rollbackSupported"`
+}
+
+func (e *ttyExecer) rollbackCmdFunc(serviceName string) error {
 	ui := e.newProgressUI("rollback")
 	ui.Start()
 	defer ui.Stop()
 
 	ui.StartStep("Select generation")
-	gen, err := e.rollbackGeneration()
+	gen, err := e.rollbackGeneration(serviceName)
 	if err != nil {
 		ui.FailStep(err.Error())
 		return fmt.Errorf("failed to rollback service: %w", err)
 	}
 	ui.DoneStep(fmt.Sprintf("generation=%d", gen))
 
-	return e.installRollbackGeneration(ui, gen)
+	return e.installRollbackGeneration(ui, serviceName, gen)
 }
 
-func (e *ttyExecer) rollbackGeneration() (int, error) {
-	_, service, err := e.s.cfg.DB.MutateService(e.sn, func(_ *db.Data, s *db.Service) error {
+func (e *ttyExecer) rollbackGeneration(serviceName string) (int, error) {
+	_, service, err := e.s.cfg.DB.MutateService(serviceName, func(_ *db.Data, s *db.Service) error {
+		if s.ServiceType == db.ServiceTypeVM {
+			return errors.New(vmGenerationRollbackUnsupportedMessage)
+		}
 		return selectPreviousGeneration(s)
 	})
 	if err != nil {
@@ -100,14 +113,64 @@ func selectPreviousGeneration(s *db.Service) error {
 	return nil
 }
 
-func (e *ttyExecer) installRollbackGeneration(ui *runUI, gen int) error {
+func (e *ttyExecer) installRollbackGeneration(ui *runUI, serviceName string, gen int) error {
 	ui.StartStep("Install generation")
-	if err := e.installServiceGeneration(e.installerCfg(), gen); err != nil {
+	cfg := e.installerCfg()
+	cfg.ServiceName = serviceName
+	if err := e.installServiceGeneration(cfg, gen); err != nil {
 		ui.FailStep(err.Error())
 		return err
 	}
 	ui.DoneStep(fmt.Sprintf("generation=%d", gen))
 	return nil
+}
+
+func (e *ttyExecer) serviceGenerationsCmdFunc(serviceName string, flags cli.ServiceGenerationsFlags) error {
+	sv, err := e.s.serviceView(serviceName)
+	if err != nil {
+		return err
+	}
+	return renderServiceGenerationView(e.rw, flags.Format, serviceGenerationViewFromService(sv))
+}
+
+func serviceGenerationViewFromService(sv db.ServiceView) serviceGenerationView {
+	serviceType := sv.ServiceType()
+	return serviceGenerationView{
+		Service:           sv.Name(),
+		Type:              string(serviceType),
+		CurrentGeneration: sv.Generation(),
+		LatestGeneration:  sv.LatestGeneration(),
+		RollbackSupported: serviceType != db.ServiceTypeVM,
+	}
+}
+
+func renderServiceGenerationView(w io.Writer, formatOut string, view serviceGenerationView) error {
+	if formatOut == "json" {
+		return json.NewEncoder(w).Encode(view)
+	}
+	if formatOut == "json-pretty" {
+		encoder := json.NewEncoder(w)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(view)
+	}
+	return renderServiceGenerationTable(w, view)
+}
+
+func renderServiceGenerationTable(w io.Writer, view serviceGenerationView) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "SERVICE\tTYPE\tCURRENT\tLATEST\tROLLBACK"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%t\n",
+		view.Service,
+		view.Type,
+		view.CurrentGeneration,
+		view.LatestGeneration,
+		view.RollbackSupported,
+	); err != nil {
+		return err
+	}
+	return tw.Flush()
 }
 
 func (e *ttyExecer) installService(cfg InstallerCfg) error {

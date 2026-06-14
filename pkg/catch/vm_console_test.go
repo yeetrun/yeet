@@ -12,6 +12,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -215,6 +217,207 @@ done
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("RunVMConsoleProxy did not return after fake Firecracker exited")
+	}
+}
+
+func TestRunVMConsoleProxyLoadsOneShotSnapshotRequestBeforeGuestBoot(t *testing.T) {
+	dir := shortUnixSocketDirForTest(t)
+	fakeFirecracker := filepath.Join(dir, "firecracker")
+	argvPath := filepath.Join(dir, "argv.txt")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + strconv.Quote(argvPath) + "\nprintf 'restore-ready\\n'\nwhile IFS= read -r line; do\n\tif [ \"$line\" = \"quit\" ]; then exit 0; fi\ndone\n"
+	if err := os.WriteFile(fakeFirecracker, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake firecracker: %v", err)
+	}
+
+	apiSocket := filepath.Join(dir, "firecracker.sock")
+	requestPath := vmFullRestoreRequestPath(apiSocket)
+	request := vmFullRestoreRequest{
+		StatePath:  filepath.Join(dir, "state.bin"),
+		MemoryPath: filepath.Join(dir, "memory.bin"),
+		Resume:     true,
+	}
+	if err := writeVMFullRestoreRequest(requestPath, request); err != nil {
+		t.Fatalf("write restore request: %v", err)
+	}
+
+	oldLoader := vmConsoleSnapshotLoader
+	oldWait := vmConsoleWaitForAPISocket
+	t.Cleanup(func() {
+		vmConsoleSnapshotLoader = oldLoader
+		vmConsoleWaitForAPISocket = oldWait
+	})
+
+	var loaded []string
+	vmConsoleWaitForAPISocket = func(context.Context, string) error {
+		loaded = append(loaded, "wait")
+		return nil
+	}
+	vmConsoleSnapshotLoader = vmSnapshotLoaderFunc(func(_ context.Context, socket, statePath, memoryPath string, resume bool) error {
+		loaded = append(loaded, socket, statePath, memoryPath, strconv.FormatBool(resume))
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	consoleSocket := filepath.Join(dir, "serial.sock")
+	done := make(chan error, 1)
+	go func() {
+		done <- RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
+			Firecracker:   fakeFirecracker,
+			APISocket:     apiSocket,
+			ConfigFile:    filepath.Join(dir, "firecracker.json"),
+			ConsoleSocket: consoleSocket,
+		})
+	}()
+
+	conn := dialUnixSocketForTest(t, consoleSocket)
+	defer conn.Close()
+	if _, err := conn.Write([]byte("quit\n")); err != nil {
+		t.Fatalf("write console input: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunVMConsoleProxy: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RunVMConsoleProxy did not return after fake Firecracker exited")
+	}
+
+	rawArgs, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatalf("read fake firecracker argv: %v", err)
+	}
+	if strings.Contains(string(rawArgs), "--config-file") {
+		t.Fatalf("restore launch args = %q, must not pass --config-file before snapshot/load", string(rawArgs))
+	}
+	wantLoaded := []string{"wait", apiSocket, request.StatePath, request.MemoryPath, "true"}
+	if !reflect.DeepEqual(loaded, wantLoaded) {
+		t.Fatalf("load sequence = %#v, want %#v", loaded, wantLoaded)
+	}
+	if _, err := os.Stat(requestPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("restore request still exists after consume: %v", err)
+	}
+	result, ok, err := readVMFullRestoreResult(vmFullRestoreResultPath(apiSocket))
+	if err != nil {
+		t.Fatalf("read restore result: %v", err)
+	}
+	if !ok || result.Status != vmFullRestoreStatusSuccess || result.Error != "" {
+		t.Fatalf("restore result = %#v, ok=%v; want success", result, ok)
+	}
+}
+
+func TestWriteVMFullRestoreRequestOverwritesWithPrivatePermissions(t *testing.T) {
+	dir := shortUnixSocketDirForTest(t)
+	requestPath := filepath.Join(dir, "firecracker-restore.json")
+	if err := os.WriteFile(requestPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("write existing restore request: %v", err)
+	}
+
+	request := vmFullRestoreRequest{
+		StatePath:  filepath.Join(dir, "state.bin"),
+		MemoryPath: filepath.Join(dir, "memory.bin"),
+		Resume:     true,
+	}
+	if err := writeVMFullRestoreRequest(requestPath, request); err != nil {
+		t.Fatalf("write restore request: %v", err)
+	}
+
+	info, err := os.Stat(requestPath)
+	if err != nil {
+		t.Fatalf("stat restore request: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("restore request mode = %v, want 0600", got)
+	}
+}
+
+func TestRunVMConsoleProxyReturnsRestoreFailureWhenRequestInvalid(t *testing.T) {
+	dir := shortUnixSocketDirForTest(t)
+	fakeFirecracker := filepath.Join(dir, "firecracker")
+	launchPath := filepath.Join(dir, "launched")
+	script := "#!/bin/sh\nprintf launched > " + strconv.Quote(launchPath) + "\n"
+	if err := os.WriteFile(fakeFirecracker, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake firecracker: %v", err)
+	}
+
+	apiSocket := filepath.Join(dir, "firecracker.sock")
+	requestPath := vmFullRestoreRequestPath(apiSocket)
+	if err := os.WriteFile(requestPath, []byte("{"), 0o600); err != nil {
+		t.Fatalf("write invalid restore request: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
+		Firecracker:   fakeFirecracker,
+		APISocket:     apiSocket,
+		ConfigFile:    filepath.Join(dir, "firecracker.json"),
+		ConsoleSocket: filepath.Join(dir, "serial.sock"),
+	})
+	if !errors.Is(err, ErrVMRestoreLoadFailed) {
+		t.Fatalf("RunVMConsoleProxy error = %v, want ErrVMRestoreLoadFailed", err)
+	}
+	if _, err := os.Stat(requestPath); err != nil {
+		t.Fatalf("invalid restore request was removed: %v", err)
+	}
+	if _, err := os.Stat(launchPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Firecracker launched despite invalid restore request: %v", err)
+	}
+}
+
+func TestRunVMConsoleProxyKillsFirecrackerWhenSnapshotLoadFails(t *testing.T) {
+	dir := shortUnixSocketDirForTest(t)
+	fakeFirecracker := filepath.Join(dir, "firecracker")
+	script := "#!/bin/sh\nprintf 'restore-ready\\n'\nwhile :; do sleep 1; done\n"
+	if err := os.WriteFile(fakeFirecracker, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake firecracker: %v", err)
+	}
+
+	apiSocket := filepath.Join(dir, "firecracker.sock")
+	request := vmFullRestoreRequest{
+		StatePath:  filepath.Join(dir, "state.bin"),
+		MemoryPath: filepath.Join(dir, "memory.bin"),
+		Resume:     true,
+	}
+	if err := writeVMFullRestoreRequest(vmFullRestoreRequestPath(apiSocket), request); err != nil {
+		t.Fatalf("write restore request: %v", err)
+	}
+
+	oldLoader := vmConsoleSnapshotLoader
+	oldWait := vmConsoleWaitForAPISocket
+	t.Cleanup(func() {
+		vmConsoleSnapshotLoader = oldLoader
+		vmConsoleWaitForAPISocket = oldWait
+	})
+	vmConsoleWaitForAPISocket = func(context.Context, string) error {
+		return nil
+	}
+	vmConsoleSnapshotLoader = vmSnapshotLoaderFunc(func(context.Context, string, string, string, bool) error {
+		return errors.New("snapshot load failed")
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
+		Firecracker:   fakeFirecracker,
+		APISocket:     apiSocket,
+		ConfigFile:    filepath.Join(dir, "firecracker.json"),
+		ConsoleSocket: filepath.Join(dir, "serial.sock"),
+	})
+	if !errors.Is(err, ErrVMRestoreLoadFailed) {
+		t.Fatalf("RunVMConsoleProxy error = %v, want ErrVMRestoreLoadFailed", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("RunVMConsoleProxy returned after %s, want prompt return after loader failure", elapsed)
+	}
+	result, ok, readErr := readVMFullRestoreResult(vmFullRestoreResultPath(apiSocket))
+	if readErr != nil {
+		t.Fatalf("read restore result: %v", readErr)
+	}
+	if !ok || result.Status != vmFullRestoreStatusFailed || !strings.Contains(result.Error, "snapshot load failed") {
+		t.Fatalf("restore result = %#v, ok=%v; want failed snapshot load result", result, ok)
 	}
 }
 

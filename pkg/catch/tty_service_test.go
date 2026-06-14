@@ -7,6 +7,7 @@ package catch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
 	"reflect"
@@ -157,13 +158,116 @@ func TestRollbackCmdFuncSelectsPreviousGenerationAndInstallsWithHook(t *testing.
 		},
 	}
 
-	if err := execer.rollbackCmdFunc(); err != nil {
+	if err := execer.rollbackCmdFunc("svc-rollback"); err != nil {
 		t.Fatalf("rollbackCmdFunc returned error: %v", err)
 	}
 	if installedGen != 2 {
 		t.Fatalf("installed generation = %d, want 2", installedGen)
 	}
 	sv, err := server.serviceView("svc-rollback")
+	if err != nil {
+		t.Fatalf("serviceView: %v", err)
+	}
+	if got := sv.AsStruct().Generation; got != 2 {
+		t.Fatalf("stored generation = %d, want 2", got)
+	}
+}
+
+func TestServiceCommandDispatchesRollbackAndGenerations(t *testing.T) {
+	server := newTestServer(t)
+	seedService(t, server, "svc-rollback", db.ServiceTypeSystemd, db.ArtifactStore{
+		db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/g1.service", db.Gen(2): "/tmp/g2.service", "latest": "/tmp/g3.service"}},
+	})
+	if _, _, err := server.cfg.DB.MutateService("svc-rollback", func(_ *db.Data, s *db.Service) error {
+		s.Generation = 3
+		s.LatestGeneration = 3
+		return nil
+	}); err != nil {
+		t.Fatalf("seed generation: %v", err)
+	}
+
+	var installedGen int
+	execer := &ttyExecer{
+		ctx:      context.Background(),
+		s:        server,
+		sn:       "svc-rollback",
+		rw:       &bytes.Buffer{},
+		progress: catchrpc.ProgressQuiet,
+		serviceInstallGenFunc: func(cfg InstallerCfg, gen int) error {
+			if cfg.ServiceName != "svc-rollback" {
+				t.Fatalf("install service = %q, want svc-rollback", cfg.ServiceName)
+			}
+			installedGen = gen
+			return nil
+		},
+	}
+
+	if err := execer.serviceCmdFunc([]string{"rollback"}); err != nil {
+		t.Fatalf("service rollback returned error: %v", err)
+	}
+	if installedGen != 2 {
+		t.Fatalf("installed generation = %d, want 2", installedGen)
+	}
+	sv, err := server.serviceView("svc-rollback")
+	if err != nil {
+		t.Fatalf("serviceView: %v", err)
+	}
+	if got := sv.AsStruct().Generation; got != 2 {
+		t.Fatalf("stored generation = %d, want 2", got)
+	}
+
+	var out bytes.Buffer
+	execer.rw = &out
+	if err := execer.serviceCmdFunc([]string{"generations", "--format=json"}); err != nil {
+		t.Fatalf("service generations returned error: %v", err)
+	}
+	var got struct {
+		Service           string `json:"service"`
+		Type              string `json:"type"`
+		CurrentGeneration int    `json:"currentGeneration"`
+		LatestGeneration  int    `json:"latestGeneration"`
+		RollbackSupported bool   `json:"rollbackSupported"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode generations JSON: %v\n%s", err, out.String())
+	}
+	if got.Service != "svc-rollback" || got.Type != "systemd" || got.CurrentGeneration != 2 || got.LatestGeneration != 3 || !got.RollbackSupported {
+		t.Fatalf("service generations = %#v, want svc-rollback systemd current 2 latest 3 rollback supported", got)
+	}
+
+	out.Reset()
+	if err := execer.serviceCmdFunc([]string{"generations", "--format=json-pretty"}); err != nil {
+		t.Fatalf("service generations json-pretty returned error: %v", err)
+	}
+	if !strings.Contains(out.String(), "\n  \"service\": \"svc-rollback\"") {
+		t.Fatalf("json-pretty output = %q, want indented service field", out.String())
+	}
+}
+
+func TestServiceRollbackRejectsVM(t *testing.T) {
+	server := newTestServer(t)
+	seedService(t, server, "devbox", db.ServiceTypeVM, nil)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, s *db.Service) error {
+		s.Generation = 2
+		s.LatestGeneration = 2
+		return nil
+	}); err != nil {
+		t.Fatalf("seed generation: %v", err)
+	}
+	execer := &ttyExecer{
+		ctx:      context.Background(),
+		s:        server,
+		sn:       "devbox",
+		rw:       &bytes.Buffer{},
+		progress: catchrpc.ProgressQuiet,
+	}
+
+	err := execer.serviceCmdFunc([]string{"rollback"})
+	want := "VM services do not support generation rollback; use yeet snapshots restore for VM disk or checkpoint recovery"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("service rollback error = %v, want %q", err, want)
+	}
+	sv, err := server.serviceView("devbox")
 	if err != nil {
 		t.Fatalf("serviceView: %v", err)
 	}

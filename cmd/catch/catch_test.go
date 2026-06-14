@@ -324,6 +324,35 @@ func TestHandleSpecialCommandVMRunExitsWithRebootCode(t *testing.T) {
 	_, _ = handleSpecialCommand([]string{"vm-run", "--firecracker", "/fc", "--api-sock", "/api", "--config-file", "/cfg", "--console-sock", "/serial"}, io.Discard)
 }
 
+func TestHandleSpecialCommandVMRunExitsWithRestoreLoadFailureCode(t *testing.T) {
+	oldRun := runVMConsoleProxy
+	oldExit := exitProcess
+	t.Cleanup(func() {
+		runVMConsoleProxy = oldRun
+		exitProcess = oldExit
+	})
+
+	var exitCode int
+	runVMConsoleProxy = func(context.Context, catch.VMConsoleProxyConfig) error {
+		return fmt.Errorf("context: %w", catch.ErrVMRestoreLoadFailed)
+	}
+	exitProcess = func(code int) {
+		exitCode = code
+		panic("exit intercepted")
+	}
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("exit was not intercepted")
+		}
+		if exitCode != catch.VMRestoreLoadFailedExitCode {
+			t.Fatalf("exit code = %d, want %d", exitCode, catch.VMRestoreLoadFailedExitCode)
+		}
+	}()
+	_, _ = handleSpecialCommand([]string{"vm-run", "--firecracker", "/fc", "--api-sock", "/api", "--config-file", "/cfg", "--console-sock", "/serial"}, io.Discard)
+}
+
 func TestLoopbackAndTSNetServerConfig(t *testing.T) {
 	if got := loopbackForAddr(netip.MustParseAddr("100.64.0.1")); got != ipv4Loopback {
 		t.Fatalf("IPv4 loopback = %v, want %v", got, ipv4Loopback)

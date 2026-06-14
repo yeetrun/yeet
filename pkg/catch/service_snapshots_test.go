@@ -128,7 +128,7 @@ func TestCreateServiceSnapshotCommand(t *testing.T) {
 		Service:    "svc-a",
 		Dataset:    "tank/apps/svc-a",
 		Event:      snapshotEventDockerUpdate,
-		Generation: 12,
+		Generation: intPointer(12),
 		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
 	}
 	name, err := createServiceSnapshot(context.Background(), runner, req)
@@ -161,7 +161,7 @@ func TestCreateServiceSnapshotCommandWithCommentAndCheckpoint(t *testing.T) {
 		Service:    "devbox",
 		Dataset:    "flash/yeet/vms/devbox/root",
 		Event:      snapshotEventVMManual,
-		Generation: 4,
+		Generation: intPointer(4),
 		Now:        time.Date(2026, 6, 13, 18, 0, 0, 0, time.UTC),
 		Comment:    " before upgrade ",
 		Checkpoint: " disk ",
@@ -190,6 +190,37 @@ func TestCreateServiceSnapshotCommandWithCommentAndCheckpoint(t *testing.T) {
 	}
 }
 
+func TestCreateServiceSnapshotCommandWithoutGenerationOmitsGenerationProperty(t *testing.T) {
+	var calls [][]string
+	runner := func(ctx context.Context, args ...string) (string, string, error) {
+		calls = append(calls, append([]string{}, args...))
+		return "", "", nil
+	}
+	req := snapshotCreateRequest{
+		Service:    "devbox",
+		Dataset:    "flash/yeet/vms/devbox/root",
+		Event:      snapshotEventVMManual,
+		Now:        time.Date(2026, 6, 13, 20, 31, 0, 0, time.UTC),
+		Checkpoint: "disk",
+	}
+
+	name, err := createServiceSnapshot(context.Background(), runner, req)
+	if err != nil {
+		t.Fatalf("createServiceSnapshot: %v", err)
+	}
+	if name != "flash/yeet/vms/devbox/root@yeet-20260613T203100Z-vm-manual" {
+		t.Fatalf("snapshot name = %q", name)
+	}
+	if len(calls) != 1 {
+		t.Fatalf("calls = %#v, want one zfs call", calls)
+	}
+	for _, arg := range calls[0] {
+		if strings.Contains(arg, "com.yeetrun:generation=") {
+			t.Fatalf("zfs args = %#v, want generation property omitted", calls[0])
+		}
+	}
+}
+
 func TestCreateServiceSnapshotRetriesNameCollisionWithSuffix(t *testing.T) {
 	var calls [][]string
 	runner := func(ctx context.Context, args ...string) (string, string, error) {
@@ -203,7 +234,7 @@ func TestCreateServiceSnapshotRetriesNameCollisionWithSuffix(t *testing.T) {
 		Service:    "svc",
 		Dataset:    "tank/apps/svc",
 		Event:      snapshotEventRun,
-		Generation: 12,
+		Generation: intPointer(12),
 		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
 	}
 
@@ -238,7 +269,7 @@ func TestCreateServiceSnapshotRetriesSnapshotAlreadyExistsVariant(t *testing.T) 
 		Service:    "svc",
 		Dataset:    "tank/apps/svc",
 		Event:      snapshotEventRun,
-		Generation: 12,
+		Generation: intPointer(12),
 		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
 	}
 
@@ -264,7 +295,7 @@ func TestCreateServiceSnapshotDoesNotRetryNonCollisionError(t *testing.T) {
 		Service:    "svc",
 		Dataset:    "tank/apps/svc",
 		Event:      snapshotEventRun,
-		Generation: 12,
+		Generation: intPointer(12),
 		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
 	}
 
@@ -287,7 +318,7 @@ func TestCreateServiceSnapshotDoesNotRetryNearCollisionError(t *testing.T) {
 		Service:    "svc",
 		Dataset:    "tank/apps/svc",
 		Event:      snapshotEventRun,
-		Generation: 12,
+		Generation: intPointer(12),
 		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
 	}
 
@@ -300,10 +331,35 @@ func TestCreateServiceSnapshotDoesNotRetryNearCollisionError(t *testing.T) {
 	}
 }
 
+func TestSnapshotShortNameCanOmitGeneration(t *testing.T) {
+	req := snapshotCreateRequest{
+		Event: snapshotEventVMManual,
+		Now:   time.Date(2026, 6, 13, 20, 31, 0, 0, time.UTC),
+	}
+	got := snapshotShortName(req)
+	want := "yeet-20260613T203100Z-vm-manual"
+	if got != want {
+		t.Fatalf("snapshotShortName = %q, want %q", got, want)
+	}
+}
+
+func TestSnapshotShortNameKeepsServiceGeneration(t *testing.T) {
+	req := snapshotCreateRequest{
+		Event:      snapshotEventRun,
+		Generation: intPointer(4),
+		Now:        time.Date(2026, 6, 13, 20, 31, 0, 0, time.UTC),
+	}
+	got := snapshotShortName(req)
+	want := "yeet-20260613T203100Z-run-g4"
+	if got != want {
+		t.Fatalf("snapshotShortName = %q, want %q", got, want)
+	}
+}
+
 func TestSnapshotShortNameSanitizesEvent(t *testing.T) {
 	req := snapshotCreateRequest{
 		Event:      snapshotEvent("service root/migration"),
-		Generation: 7,
+		Generation: intPointer(7),
 		Now:        time.Date(2026, 5, 24, 18, 42, 33, 0, time.UTC),
 	}
 	got := snapshotShortName(req)
@@ -400,6 +456,16 @@ func TestParseListedSnapshotsNineFieldOptionalProperties(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("snapshots = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseListedSnapshotsParsesGenerationProperty(t *testing.T) {
+	got, err := parseListedSnapshots("tank/apps/svc@yeet-one\t1779664800\tcatch\tsvc\trun\t4\t-\tservice-root\tfalse\n")
+	if err != nil {
+		t.Fatalf("parseListedSnapshots: %v", err)
+	}
+	if len(got) != 1 || got[0].Generation == nil || *got[0].Generation != 4 {
+		t.Fatalf("snapshots = %#v, want generation 4", got)
 	}
 }
 

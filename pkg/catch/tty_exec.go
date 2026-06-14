@@ -416,9 +416,6 @@ var ttyCommandHandlers = map[string]ttyCommandHandler{
 	"restart": func(e *ttyExecer, _ []string) error {
 		return e.restartCmdFunc()
 	},
-	"rollback": func(e *ttyExecer, _ []string) error {
-		return e.rollbackCmdFunc()
-	},
 	"run": func(e *ttyExecer, args []string) error {
 		flags, runArgs, err := cli.ParseRun(args)
 		if err != nil {

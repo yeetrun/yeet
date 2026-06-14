@@ -6,6 +6,7 @@ package catch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,9 +28,43 @@ type VMConsoleProxyConfig struct {
 	ConsoleSocket string
 }
 
-var ErrVMGuestReboot = errors.New("VM guest requested reboot")
+type vmFullRestoreRequest struct {
+	StatePath  string `json:"statePath"`
+	MemoryPath string `json:"memoryPath"`
+	Resume     bool   `json:"resume"`
+}
 
-const VMGuestRebootExitCode = 75
+type vmFullRestoreResult struct {
+	Status string `json:"status"`
+	Error  string `json:"error,omitempty"`
+}
+
+type vmSnapshotLoader interface {
+	LoadSnapshot(context.Context, string, string, string, bool) error
+}
+
+type vmSnapshotLoaderFunc func(context.Context, string, string, string, bool) error
+
+func (f vmSnapshotLoaderFunc) LoadSnapshot(ctx context.Context, socket, statePath, memoryPath string, resume bool) error {
+	return f(ctx, socket, statePath, memoryPath, resume)
+}
+
+var (
+	ErrVMGuestReboot       = errors.New("VM guest requested reboot")
+	ErrVMRestoreLoadFailed = errors.New("VM full restore load failed")
+
+	vmConsoleSnapshotLoader   vmSnapshotLoader = firecrackerSnapshotAPI{}
+	vmConsoleWaitForAPISocket                  = waitForUnixSocket
+)
+
+const (
+	VMGuestRebootExitCode       = 75
+	VMRestoreLoadFailedExitCode = 76
+	vmAPISocketWaitTimeout      = 10 * time.Second
+
+	vmFullRestoreStatusSuccess = "success"
+	vmFullRestoreStatusFailed  = "failed"
+)
 
 type vmGuestStopKind int
 
@@ -49,7 +84,14 @@ func RunVMConsoleProxy(ctx context.Context, cfg VMConsoleProxyConfig) error {
 	}
 	defer func() { _ = listener.Close() }()
 
-	cmd := exec.CommandContext(ctx, cfg.Firecracker, "--api-sock", cfg.APISocket, "--config-file", cfg.ConfigFile)
+	requestPath := vmFullRestoreRequestPath(cfg.APISocket)
+	resultPath := vmFullRestoreResultPath(cfg.APISocket)
+	restoreRequest, restoreMode, err := readVMFullRestoreRequest(requestPath)
+	if err != nil {
+		_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusFailed, Error: err.Error()})
+		return fmt.Errorf("%w: %v", ErrVMRestoreLoadFailed, err)
+	}
+	cmd := vmFirecrackerCommand(ctx, cfg, restoreMode)
 	console, err := pty.Start(cmd)
 	if err != nil {
 		return fmt.Errorf("start Firecracker console PTY: %w", err)
@@ -60,7 +102,46 @@ func RunVMConsoleProxy(ctx context.Context, cfg VMConsoleProxyConfig) error {
 	broker := newVMConsoleBroker(console, os.Stdout, guestStopped)
 	go broker.accept(listener)
 	go broker.copyOutput()
+	if restoreMode {
+		if err := loadFullVMSnapshot(ctx, cfg.APISocket, restoreRequest); err != nil {
+			_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusFailed, Error: err.Error()})
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+			return fmt.Errorf("%w: %v", ErrVMRestoreLoadFailed, err)
+		}
+		if err := os.Remove(requestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusFailed, Error: err.Error()})
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+			return fmt.Errorf("%w: consume full restore request: %v", ErrVMRestoreLoadFailed, err)
+		}
+		if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess}); err != nil {
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			_ = cmd.Wait()
+			return fmt.Errorf("%w: write full restore result: %v", ErrVMRestoreLoadFailed, err)
+		}
+	}
 	return waitVMConsoleProcess(cmd, guestStopped)
+}
+
+func vmFirecrackerCommand(ctx context.Context, cfg VMConsoleProxyConfig, restoreMode bool) *exec.Cmd {
+	if restoreMode {
+		return exec.CommandContext(ctx, cfg.Firecracker, "--api-sock", cfg.APISocket)
+	}
+	return exec.CommandContext(ctx, cfg.Firecracker, "--api-sock", cfg.APISocket, "--config-file", cfg.ConfigFile)
+}
+
+func loadFullVMSnapshot(ctx context.Context, apiSocket string, request vmFullRestoreRequest) error {
+	if err := vmConsoleWaitForAPISocket(ctx, apiSocket); err != nil {
+		return err
+	}
+	return vmConsoleSnapshotLoader.LoadSnapshot(ctx, apiSocket, request.StatePath, request.MemoryPath, request.Resume)
 }
 
 func listenVMConsoleSocket(socketPath string) (net.Listener, error) {
@@ -134,6 +215,125 @@ func validateVMConsoleProxyConfig(cfg VMConsoleProxyConfig) error {
 		return fmt.Errorf("console socket path is required")
 	}
 	return nil
+}
+
+func vmFullRestoreRequestPath(apiSocket string) string {
+	return filepath.Join(filepath.Dir(strings.TrimSpace(apiSocket)), "firecracker-restore.json")
+}
+
+func vmFullRestoreResultPath(apiSocket string) string {
+	return filepath.Join(filepath.Dir(strings.TrimSpace(apiSocket)), "firecracker-restore-result.json")
+}
+
+func writeVMFullRestoreRequest(path string, request vmFullRestoreRequest) error {
+	if strings.TrimSpace(request.StatePath) == "" {
+		return fmt.Errorf("full restore state path is required")
+	}
+	if strings.TrimSpace(request.MemoryPath) == "" {
+		return fmt.Errorf("full restore memory path is required")
+	}
+	raw, err := json.MarshalIndent(request, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create full restore request directory: %w", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("set full restore request permissions: %w", err)
+	}
+	return nil
+}
+
+func readVMFullRestoreRequest(path string) (vmFullRestoreRequest, bool, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return vmFullRestoreRequest{}, false, nil
+	}
+	if err != nil {
+		return vmFullRestoreRequest{}, false, fmt.Errorf("read full restore request: %w", err)
+	}
+	var request vmFullRestoreRequest
+	if err := json.Unmarshal(raw, &request); err != nil {
+		return vmFullRestoreRequest{}, false, fmt.Errorf("decode full restore request: %w", err)
+	}
+	if strings.TrimSpace(request.StatePath) == "" {
+		return vmFullRestoreRequest{}, false, fmt.Errorf("full restore state path is required")
+	}
+	if strings.TrimSpace(request.MemoryPath) == "" {
+		return vmFullRestoreRequest{}, false, fmt.Errorf("full restore memory path is required")
+	}
+	return request, true, nil
+}
+
+func writeVMFullRestoreResult(path string, result vmFullRestoreResult) error {
+	if result.Status != vmFullRestoreStatusSuccess && result.Status != vmFullRestoreStatusFailed {
+		return fmt.Errorf("invalid full restore result status %q", result.Status)
+	}
+	raw, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return err
+	}
+	raw = append(raw, '\n')
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create full restore result directory: %w", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("set full restore result permissions: %w", err)
+	}
+	return nil
+}
+
+func readVMFullRestoreResult(path string) (vmFullRestoreResult, bool, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return vmFullRestoreResult{}, false, nil
+	}
+	if err != nil {
+		return vmFullRestoreResult{}, false, fmt.Errorf("read full restore result: %w", err)
+	}
+	var result vmFullRestoreResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return vmFullRestoreResult{}, true, fmt.Errorf("decode full restore result: %w", err)
+	}
+	if result.Status != vmFullRestoreStatusSuccess && result.Status != vmFullRestoreStatusFailed {
+		return vmFullRestoreResult{}, true, fmt.Errorf("invalid full restore result status %q", result.Status)
+	}
+	return result, true, nil
+}
+
+func removeVMFullRestoreResult(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale full restore result: %w", err)
+	}
+	return nil
+}
+
+func waitForUnixSocket(ctx context.Context, socketPath string) error {
+	deadline := time.Now().Add(vmAPISocketWaitTimeout)
+	var lastErr error
+	for {
+		conn, err := net.DialTimeout("unix", socketPath, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("wait for Firecracker API socket %s: %w", socketPath, lastErr)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 type vmConsoleBroker struct {

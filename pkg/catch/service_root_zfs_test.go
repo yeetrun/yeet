@@ -220,7 +220,7 @@ func TestResolveZFSServiceRootErrors(t *testing.T) {
 				return "legacy\n", "", nil
 			},
 			mode:    zfsServiceRootTarget,
-			wantErr: "unsupported ZFS mountpoint",
+			wantErr: "unusable ZFS mountpoint",
 		},
 		{
 			name: "relative mountpoint",

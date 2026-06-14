@@ -55,7 +55,7 @@ type snapshotCreateRequest struct {
 	Service    string
 	Dataset    string
 	Event      snapshotEvent
-	Generation int
+	Generation *int
 	Now        time.Time
 	Comment    string
 	Checkpoint string
@@ -67,7 +67,7 @@ type listedSnapshot struct {
 	CreatedBy  string
 	Service    string
 	Event      string
-	Generation int
+	Generation *int
 	Comment    string
 	Checkpoint string
 	Protected  bool
@@ -132,7 +132,7 @@ func (s *Server) createSnapshotForOperation(ctx context.Context, op snapshotOper
 		Service:    op.Service.Name,
 		Dataset:    op.Service.ServiceRootZFS,
 		Event:      op.Event,
-		Generation: op.Service.Generation,
+		Generation: intPointer(op.Service.Generation),
 		Now:        now,
 	})
 }
@@ -424,9 +424,11 @@ func runZFSSnapshot(ctx context.Context, runner zfsCommandRunner, req snapshotCr
 		"-o", "com.yeetrun:created-by=catch",
 		"-o", "com.yeetrun:service=" + req.Service,
 		"-o", "com.yeetrun:event=" + string(req.Event),
-		"-o", "com.yeetrun:generation=" + strconv.Itoa(req.Generation),
-		"-o", "com.yeetrun:policy-version=1",
 	}
+	if req.Generation != nil {
+		args = append(args, "-o", "com.yeetrun:generation="+strconv.Itoa(*req.Generation))
+	}
+	args = append(args, "-o", "com.yeetrun:policy-version=1")
 	if comment := strings.TrimSpace(req.Comment); comment != "" {
 		args = append(args, "-o", "com.yeetrun:comment="+comment)
 	}
@@ -444,7 +446,11 @@ func snapshotShortName(req snapshotCreateRequest) string {
 		now = time.Now()
 	}
 	event := snapshotNameCleaner.ReplaceAllString(string(req.Event), "_")
-	return fmt.Sprintf("yeet-%s-%s-g%d", now.UTC().Format("20060102T150405Z"), event, req.Generation)
+	shortName := fmt.Sprintf("yeet-%s-%s", now.UTC().Format("20060102T150405Z"), event)
+	if req.Generation != nil {
+		shortName += fmt.Sprintf("-g%d", *req.Generation)
+	}
+	return shortName
 }
 
 func isZFSSnapshotNameCollision(stderr string) bool {
@@ -501,7 +507,7 @@ func parseListedSnapshots(raw string) ([]listedSnapshot, error) {
 				if err != nil {
 					return nil, fmt.Errorf("invalid zfs snapshot generation %q: %w", fields[5], err)
 				}
-				snap.Generation = parsed
+				snap.Generation = &parsed
 			}
 			snap.Comment = zfsPropertyValue(fields[6])
 			snap.Checkpoint = zfsPropertyValue(fields[7])

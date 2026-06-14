@@ -105,8 +105,10 @@ func buildGroupHandlers() map[string]yargs.Group {
 		"service": {
 			Description: "Manage service settings",
 			Commands: map[string]yargs.SubcommandHandler{
-				"set":  handleServiceGroup,
-				"sync": handleServiceGroup,
+				"set":         handleServiceGroup,
+				"rollback":    handleServiceGroup,
+				"generations": handleServiceGroup,
+				"sync":        handleServiceGroup,
 			},
 		},
 		"snapshots": {
@@ -115,6 +117,8 @@ func buildGroupHandlers() map[string]yargs.Group {
 				"list":      handleSnapshotsGroup,
 				"inspect":   handleSnapshotsGroup,
 				"create":    handleSnapshotsGroup,
+				"clone":     handleSnapshotsGroup,
+				"restore":   handleSnapshotsGroup,
 				"rm":        handleSnapshotsGroup,
 				"protect":   handleSnapshotsGroup,
 				"unprotect": handleSnapshotsGroup,
@@ -215,6 +219,14 @@ func buildHelpConfig() yargs.HelpConfig {
 			Examples:    []string{"yeet docker push <svc> <local-image>:<tag> --run"},
 		}
 		groups["docker"] = docker
+	}
+	if service, ok := groups["service"]; ok {
+		for _, name := range []string{"rollback", "generations"} {
+			cmd := service.Commands[name]
+			cmd.Description = fmt.Sprintf("%s - %s", cmd.Usage, cmd.Description)
+			service.Commands[name] = cmd
+		}
+		groups["service"] = service
 	}
 	return yargs.HelpConfig{
 		Command: yargs.CommandInfo{

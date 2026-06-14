@@ -36,6 +36,12 @@ func validateSnapshotLifecycleCommand(args []string) error {
 	case "create":
 		_, _, err := cli.ParseSnapshotsCreate(args[1:])
 		return err
+	case "clone":
+		_, _, err := cli.ParseSnapshotsClone(args[1:])
+		return err
+	case "restore":
+		_, _, err := cli.ParseSnapshotsRestore(args[1:])
+		return err
 	case "rm":
 		_, _, err := cli.ParseSnapshotsRemove(args[1:])
 		return err

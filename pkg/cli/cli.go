@@ -115,6 +115,22 @@ type SnapshotsRemoveFlags struct {
 	Yes bool
 }
 
+type SnapshotsCloneFlags struct {
+	Start bool
+}
+
+type SnapshotsRestoreFlags struct {
+	Stop       bool
+	Start      bool
+	Yes        bool
+	Mode       string
+	Generation string
+}
+
+type ServiceGenerationsFlags struct {
+	Format string
+}
+
 type ServiceSyncFlags struct {
 	All    bool
 	Config string
@@ -238,6 +254,18 @@ type snapshotsRemoveFlagsParsed struct {
 	Yes bool `flag:"yes" short:"y" help:"Skip the removal prompt"`
 }
 
+type snapshotsCloneFlagsParsed struct {
+	Start bool `flag:"start" help:"Reserved for future use; --start is currently unsupported for VM clones"`
+}
+
+type snapshotsRestoreFlagsParsed struct {
+	Stop       bool   `flag:"stop" help:"Stop the service before restoring"`
+	Start      bool   `flag:"start" help:"Start the service after restoring"`
+	Yes        bool   `flag:"yes" short:"y" help:"Skip the restore confirmation prompt"`
+	Mode       string `flag:"mode" help:"Restore mode: disk, full"`
+	Generation string `flag:"generation" help:"Service generation source: current, snapshot"`
+}
+
 type dockerPushFlagsParsed struct {
 	Run      bool `flag:"run"`
 	AllLocal bool `flag:"all-local"`
@@ -284,6 +312,10 @@ type serviceSetFlagsParsed struct {
 	SnapshotMaxAge   string   `flag:"snapshot-max-age"`
 	SnapshotRequired string   `flag:"snapshot-required"`
 	SnapshotEvents   string   `flag:"snapshot-events"`
+}
+
+type serviceGenerationsFlagsParsed struct {
+	Format string `flag:"format" help:"Output format: table, json, json-pretty"`
 }
 
 type vmSetFlagsParsed struct {
@@ -449,11 +481,10 @@ var remoteCommandInfos = map[string]CommandInfo{
 		"yeet mount host:/export data-share --type=nfs --opts=defaults",
 		"yeet mount",
 	}},
-	"ip":       {Name: "ip", Description: "Show the IP addresses of a service"},
-	"umount":   {Name: "umount", Description: "Unmount a host mount by name", Usage: "NAME", Examples: []string{"yeet umount data-share"}},
-	"remove":   {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}, FlagsSchema: removeFlagsParsed{}},
-	"restart":  {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
-	"rollback": {Name: "rollback", Description: "Rollback a service", ArgsSchema: ServiceArgs{}},
+	"ip":      {Name: "ip", Description: "Show the IP addresses of a service"},
+	"umount":  {Name: "umount", Description: "Unmount a host mount by name", Usage: "NAME", Examples: []string{"yeet umount data-share"}},
+	"remove":  {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}, FlagsSchema: removeFlagsParsed{}},
+	"restart": {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
 	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile, VM)", Usage: "SVC [PAYLOAD] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
 		"yeet run --web",
 		"yeet run --web <svc>",
@@ -507,7 +538,6 @@ var remoteFlagSpecs = map[string]map[string]FlagSpec{
 	"ip":        {},
 	"remove":    flagSpecsFromStruct(removeFlagsParsed{}),
 	"restart":   {},
-	"rollback":  {},
 	"start":     {},
 	"stop":      {},
 	"tailscale": {},
@@ -622,6 +652,19 @@ var remoteGroupInfos = map[string]GroupInfo{
 				},
 				ArgsSchema: ServiceArgs{},
 			},
+			"rollback": {
+				Name:        "rollback",
+				Description: "Rollback a service to the previous generation",
+				Usage:       "service rollback <svc>",
+				ArgsSchema:  ServiceArgs{},
+			},
+			"generations": {
+				Name:        "generations",
+				Description: "Show service generation rollback state",
+				Usage:       "service generations <svc> [--format=table|json|json-pretty]",
+				ArgsSchema:  ServiceArgs{},
+				FlagsSchema: serviceGenerationsFlagsParsed{},
+			},
 			"sync": {
 				Name:        "sync",
 				Description: "Sync local yeet.toml service settings from catch",
@@ -680,6 +723,26 @@ var remoteGroupInfos = map[string]GroupInfo{
 				},
 				FlagsSchema: snapshotsRemoveFlagsParsed{},
 			},
+			"clone": {
+				Name:        "clone",
+				Description: "Clone a recovery point to a new service",
+				Usage:       "snapshots clone <svc> <snapshot> <new-svc>",
+				Examples: []string{
+					"yeet snapshots clone <svc> yeet-20260613T203100Z-vm-manual-g0 <new-svc>",
+				},
+				FlagsSchema: snapshotsCloneFlagsParsed{},
+			},
+			"restore": {
+				Name:        "restore",
+				Description: "Restore disk state, service-root state, or full VM state from a recovery point",
+				Usage:       "snapshots restore <svc> <snapshot> [--stop] [--start] [--yes] [--mode=disk|full] [--generation=current|snapshot]",
+				Examples: []string{
+					"yeet snapshots restore <svc> yeet-20260613T203100Z-vm-manual-g0 --yes",
+					"yeet snapshots restore <svc> yeet-20260613 --stop --yes",
+					"yeet snapshots restore <vm> yeet-20260613T203100Z-vm-manual --mode=full --stop --yes",
+				},
+				FlagsSchema: snapshotsRestoreFlagsParsed{},
+			},
 			"protect": {
 				Name:        "protect",
 				Description: "Protect a recovery point from retention pruning",
@@ -728,14 +791,18 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"set":  {},
 	},
 	"service": {
-		"set":  flagSpecsFromStruct(serviceSetFlagsParsed{}),
-		"sync": flagSpecsFromStruct(serviceSyncFlagsParsed{}),
+		"set":         flagSpecsFromStruct(serviceSetFlagsParsed{}),
+		"rollback":    {},
+		"generations": flagSpecsFromStruct(serviceGenerationsFlagsParsed{}),
+		"sync":        flagSpecsFromStruct(serviceSyncFlagsParsed{}),
 	},
 	"snapshots": {
 		"list":      flagSpecsFromStruct(snapshotsListFlagsParsed{}),
 		"inspect":   flagSpecsFromStruct(snapshotsInspectFlagsParsed{}),
 		"create":    flagSpecsFromStruct(snapshotsCreateFlagsParsed{}),
 		"rm":        flagSpecsFromStruct(snapshotsRemoveFlagsParsed{}),
+		"clone":     flagSpecsFromStruct(snapshotsCloneFlagsParsed{}),
+		"restore":   flagSpecsFromStruct(snapshotsRestoreFlagsParsed{}),
 		"protect":   {},
 		"unprotect": {},
 		"defaults":  flagSpecsFromStruct(snapshotDefaultsSetFlagsParsed{}),
@@ -1310,11 +1377,105 @@ func ParseSnapshotsRemove(args []string) (SnapshotsRemoveFlags, []string, error)
 	return SnapshotsRemoveFlags{Yes: parsed.Flags.Yes}, parsed.Args, nil
 }
 
+func ParseSnapshotsClone(args []string) (SnapshotsCloneFlags, []string, error) {
+	parsed, err := parseFlags[snapshotsCloneFlagsParsed](args)
+	if err != nil {
+		return SnapshotsCloneFlags{}, nil, err
+	}
+	if len(parsed.Args) != 3 {
+		return SnapshotsCloneFlags{}, nil, fmt.Errorf("snapshots clone requires service, snapshot, and new service")
+	}
+	return SnapshotsCloneFlags{Start: parsed.Flags.Start}, parsed.Args, nil
+}
+
+func ParseSnapshotsRestore(args []string) (SnapshotsRestoreFlags, []string, error) {
+	parsed, err := parseFlags[snapshotsRestoreFlagsParsed](args)
+	if err != nil {
+		return SnapshotsRestoreFlags{}, nil, err
+	}
+	if len(parsed.Args) != 2 {
+		return SnapshotsRestoreFlags{}, nil, fmt.Errorf("snapshots restore requires service and snapshot")
+	}
+	if hasFlagWithoutValue(args, "--mode") {
+		return SnapshotsRestoreFlags{}, nil, fmt.Errorf("--mode must be disk or full")
+	}
+	if hasFlagWithoutValue(args, "--generation") {
+		return SnapshotsRestoreFlags{}, nil, fmt.Errorf("--generation must be current or snapshot")
+	}
+	mode, err := normalizeSnapshotsRestoreMode(parsed.Flags.Mode)
+	if err != nil {
+		return SnapshotsRestoreFlags{}, nil, err
+	}
+	generation, err := normalizeSnapshotsRestoreGeneration(parsed.Flags.Generation)
+	if err != nil {
+		return SnapshotsRestoreFlags{}, nil, err
+	}
+	return SnapshotsRestoreFlags{
+		Stop:       parsed.Flags.Stop,
+		Start:      parsed.Flags.Start,
+		Yes:        parsed.Flags.Yes,
+		Mode:       mode,
+		Generation: generation,
+	}, parsed.Args, nil
+}
+
+func normalizeSnapshotsRestoreMode(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "disk":
+		return "disk", nil
+	case "full":
+		return "full", nil
+	default:
+		return "", fmt.Errorf("--mode must be disk or full")
+	}
+}
+
+func normalizeSnapshotsRestoreGeneration(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "", "current":
+		return "current", nil
+	case "snapshot":
+		return "snapshot", nil
+	default:
+		return "", fmt.Errorf("--generation must be current or snapshot")
+	}
+}
+
 func ParseSnapshotsProtect(args []string, action string) ([]string, error) {
 	if len(args) != 2 {
 		return nil, fmt.Errorf("snapshots %s requires service and snapshot", action)
 	}
 	return args, nil
+}
+
+func ParseServiceRollback(args []string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("service rollback requires a service")
+	}
+	if len(args) != 1 {
+		return nil, fmt.Errorf("service rollback requires exactly one service")
+	}
+	return args, nil
+}
+
+func ParseServiceGenerations(args []string) (ServiceGenerationsFlags, []string, error) {
+	parsed, err := parseFlags[serviceGenerationsFlagsParsed](args)
+	if err != nil {
+		return ServiceGenerationsFlags{}, nil, err
+	}
+	format, err := normalizeOutputFormat("--format", parsed.Flags.Format)
+	if err != nil {
+		return ServiceGenerationsFlags{}, nil, err
+	}
+	if len(parsed.Args) == 0 {
+		return ServiceGenerationsFlags{}, nil, fmt.Errorf("service generations requires a service")
+	}
+	if len(parsed.Args) != 1 {
+		return ServiceGenerationsFlags{}, nil, fmt.Errorf("service generations requires exactly one service")
+	}
+	return ServiceGenerationsFlags{Format: format}, parsed.Args, nil
 }
 
 func ParseServiceSync(args []string) (ServiceSyncFlags, []string, error) {

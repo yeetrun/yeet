@@ -27,6 +27,8 @@ var serviceBridgeSkippedGroupCommands = map[string]map[string]struct{}{
 		"list":      {},
 		"inspect":   {},
 		"create":    {},
+		"clone":     {},
+		"restore":   {},
 		"rm":        {},
 		"protect":   {},
 		"unprotect": {},

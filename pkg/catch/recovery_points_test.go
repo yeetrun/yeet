@@ -64,21 +64,23 @@ func TestRecoveryPointsListVMAndServiceRootSnapshots(t *testing.T) {
 		points[0].ShortName != "yeet-20260613T203200Z-manual-g3" ||
 		points[0].Created != time.Unix(1781382720, 0).UTC() ||
 		points[0].Event != "manual" ||
-		points[0].Generation != 3 ||
+		points[0].Generation == nil ||
+		*points[0].Generation != 3 ||
 		points[0].Comment != "before deploy" ||
 		points[0].Mode != recoveryModeServiceRoot ||
 		points[0].Protected ||
 		points[0].Retention != "managed" ||
-		!reflect.DeepEqual(points[0].Actions, []string{"inspect", "protect", "rm"}) {
+		!reflect.DeepEqual(points[0].Actions, []string{"inspect", "clone", "restore", "protect", "rm"}) {
 		t.Fatalf("app recovery point = %#v, want rich service-root metadata", points[0])
 	}
 	if points[1].Service != "devbox" || points[1].StorageKind != recoveryStorageVMZVOL {
 		t.Fatalf("second point = %#v, want devbox VM zvol point", points[1])
 	}
-	if points[1].Mode != recoveryModeDisk ||
+	if points[1].Generation != nil ||
+		points[1].Mode != recoveryModeDisk ||
 		!points[1].Protected ||
 		points[1].Retention != "protected" ||
-		!reflect.DeepEqual(points[1].Actions, []string{"inspect", "unprotect"}) {
+		!reflect.DeepEqual(points[1].Actions, []string{"inspect", "clone", "restore", "unprotect"}) {
 		t.Fatalf("VM recovery point = %#v, want protected disk snapshot metadata", points[1])
 	}
 }
@@ -109,6 +111,85 @@ func TestRecoveryPointsExposeFullVMCheckpointPaths(t *testing.T) {
 		point.MemoryPath != memoryPath {
 		t.Fatalf("full VM recovery point = %#v, want checkpoint paths %q %q", point, statePath, memoryPath)
 	}
+}
+
+func TestVMRecoveryPointOmitsGenerationInJSON(t *testing.T) {
+	point := recoveryPoint{
+		Service:     "devbox",
+		ServiceType: string(db.ServiceTypeVM),
+		StorageKind: recoveryStorageVMZVOL,
+		Dataset:     "flash/yeet/vms/devbox/vm/d-abc/root",
+		Name:        "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual",
+		ShortName:   "yeet-20260613T203100Z-vm-manual",
+		Created:     time.Date(2026, 6, 13, 20, 31, 0, 0, time.UTC),
+		CreatedBy:   "catch",
+		Event:       "vm-manual",
+		Mode:        recoveryModeDisk,
+		Actions:     []string{"inspect", "clone", "restore", "protect", "rm"},
+		Retention:   "managed",
+	}
+
+	got := renderRecoveryPointJSONForTest(t, point)
+	if strings.Contains(got, `"generation":0`) || strings.Contains(got, `"generation"`) {
+		t.Fatalf("VM recovery point JSON = %s, want omitted generation", got)
+	}
+}
+
+func TestServiceRootRecoveryPointKeepsGenerationInJSON(t *testing.T) {
+	point := recoveryPoint{
+		Service:     "plex",
+		ServiceType: string(db.ServiceTypeDockerCompose),
+		StorageKind: recoveryStorageServiceRoot,
+		Dataset:     "tank/apps/plex",
+		Name:        "tank/apps/plex@yeet-20260613T203100Z-run-g4",
+		ShortName:   "yeet-20260613T203100Z-run-g4",
+		Created:     time.Date(2026, 6, 13, 20, 31, 0, 0, time.UTC),
+		CreatedBy:   "catch",
+		Event:       "run",
+		Generation:  intPointer(4),
+		Mode:        recoveryModeServiceRoot,
+		Actions:     []string{"inspect", "clone", "restore", "protect", "rm"},
+		Retention:   "managed",
+	}
+
+	got := renderRecoveryPointJSONForTest(t, point)
+	if !strings.Contains(got, `"generation":4`) {
+		t.Fatalf("service-root recovery point JSON = %s, want generation 4", got)
+	}
+}
+
+func TestServiceRootRecoveryPointInspectTextShowsGeneration(t *testing.T) {
+	point := recoveryPoint{
+		Service:     "plex",
+		ServiceType: string(db.ServiceTypeDockerCompose),
+		StorageKind: recoveryStorageServiceRoot,
+		Name:        "tank/apps/plex@yeet-20260613T203100Z-run-g4",
+		ShortName:   "yeet-20260613T203100Z-run-g4",
+		Created:     time.Date(2026, 6, 13, 20, 31, 0, 0, time.UTC),
+		CreatedBy:   "catch",
+		Event:       "run",
+		Generation:  intPointer(4),
+		Mode:        recoveryModeServiceRoot,
+		Actions:     []string{"inspect", "clone", "restore", "protect", "rm"},
+		Retention:   "managed",
+	}
+
+	var out bytes.Buffer
+	if err := renderRecoveryPointInspect(&out, "text", point); err != nil {
+		t.Fatalf("render recovery point text: %v", err)
+	}
+	if !strings.Contains(out.String(), "Generation: 4") {
+		t.Fatalf("inspect output = %q, want service generation", out.String())
+	}
+}
+
+func renderRecoveryPointJSONForTest(t *testing.T, point recoveryPoint) string {
+	t.Helper()
+	var out bytes.Buffer
+	if err := renderRecoveryPointInspect(&out, "json", point); err != nil {
+		t.Fatalf("render recovery point JSON: %v", err)
+	}
+	return out.String()
 }
 
 func seedFullVMCheckpointMetadata(t *testing.T, root string, service string, snapshotName string) (string, string) {
@@ -305,6 +386,27 @@ func TestResolveRecoveryPointSelector(t *testing.T) {
 	}
 	if _, err := resolveRecoveryPointSelector(points, "missing"); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("not found error = %v", err)
+	}
+}
+
+func TestRecoveryPointActionsExposeCloneAndRestoreForZFSBackedPoints(t *testing.T) {
+	for _, point := range []recoveryPoint{
+		{Service: "app", StorageKind: recoveryStorageServiceRoot},
+		{Service: "devbox", StorageKind: recoveryStorageVMZVOL},
+	} {
+		got := recoveryPointActions(point)
+		want := []string{"inspect", "clone", "restore", "protect", "rm"}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("recoveryPointActions(%#v) = %#v, want %#v", point, got, want)
+		}
+	}
+}
+
+func TestRecoveryPointActionsHideCloneAndRestoreForUnsupportedPoints(t *testing.T) {
+	got := recoveryPointActions(recoveryPoint{Service: "raw-vm"})
+	want := []string{"inspect", "protect", "rm"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("recoveryPointActions unsupported = %#v, want %#v", got, want)
 	}
 }
 

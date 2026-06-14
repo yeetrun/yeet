@@ -102,14 +102,6 @@ func zfsCreateDataset(ctx context.Context, runner zfsCommandRunner, dataset stri
 	return nil
 }
 
-func zfsDatasetMountpoint(ctx context.Context, runner zfsCommandRunner, dataset string) (string, error) {
-	stdout, stderr, err := runner(ctx, "get", "-H", "-o", "value", "mountpoint", dataset)
-	if err != nil {
-		return "", formatZFSCommandError("zfs get mountpoint "+dataset, stderr, err)
-	}
-	return strings.TrimSpace(stdout), nil
-}
-
 func validateZFSMountpoint(mountpoint string, mode zfsServiceRootMode, existingDataset bool) (string, []string, error) {
 	mountpoint = strings.TrimSpace(mountpoint)
 	if mountpoint == "" || mountpoint == "-" || mountpoint == "legacy" {

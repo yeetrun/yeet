@@ -372,6 +372,45 @@ func TestBridgeServiceArgsServiceSyncDoesNotBridge(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsSnapshotsCloneRestoreRemainUnscoped(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		wantHost string
+		wantArgs []string
+	}{
+		{
+			name:     "snapshots clone remains unscoped",
+			args:     []string{"snapshots@catch-a", "clone", "svc-a", "yeet-abc", "svc-copy"},
+			wantHost: "catch-a",
+			wantArgs: []string{"snapshots", "clone", "svc-a", "yeet-abc", "svc-copy"},
+		},
+		{
+			name:     "snapshots restore remains unscoped",
+			args:     []string{"snapshots@catch-a", "restore", "svc-a", "yeet-abc", "--stop", "--yes"},
+			wantHost: "catch-a",
+			wantArgs: []string{"snapshots", "restore", "svc-a", "yeet-abc", "--stop", "--yes"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := prepareCommandRoute(tt.args, "")
+			if got.host != tt.wantHost {
+				t.Fatalf("host = %q, want %q", got.host, tt.wantHost)
+			}
+			if !reflect.DeepEqual(got.args, tt.wantArgs) {
+				t.Fatalf("args = %#v, want %#v", got.args, tt.wantArgs)
+			}
+			if got.service != "" {
+				t.Fatalf("service = %q, want empty", got.service)
+			}
+			if got.bridgedArgs != nil {
+				t.Fatalf("bridgedArgs = %#v, want nil", got.bridgedArgs)
+			}
+		})
+	}
+}
+
 func TestBridgeServiceArgsUnknownFlagBeforeServiceTreatsNextTokenAsService(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

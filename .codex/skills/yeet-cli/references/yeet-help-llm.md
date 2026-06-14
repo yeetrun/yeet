@@ -220,12 +220,6 @@ Restart a service
 
 Get detailed help: `yeet restart --help-llm`
 
-### `rollback`
-
-Rollback a service
-
-Get detailed help: `yeet rollback --help-llm`
-
 ### `run`
 
 Install/update from a payload (binary, compose, image, Dockerfile, VM)
@@ -478,6 +472,8 @@ Manage service settings
 
 **Commands**:
 
+- `service generations`: service generations <svc> [--format=table|json|json-pretty] - Show service generation rollback state
+- `service rollback`: service rollback <svc> - Rollback a service to the previous generation
 - `service set`: Set service settings
 - `service sync`: Sync local yeet.toml service settings from catch
 
@@ -485,11 +481,19 @@ Get detailed help: `yeet service --help-llm`
 
 ### `snapshots`
 
-Manage catch ZFS snapshot defaults
+Manage service recovery points and snapshot defaults
 
 **Commands**:
 
+- `snapshots clone`: Clone a recovery point to a new service
+- `snapshots create`: Create a manual recovery point
 - `snapshots defaults`: Show or set catch snapshot defaults
+- `snapshots inspect`: Inspect one recovery point
+- `snapshots list`: List yeet recovery points
+- `snapshots protect`: Protect a recovery point from retention pruning
+- `snapshots restore`: Restore disk state, service-root state, or full VM state from a recovery point
+- `snapshots rm`: Delete a yeet recovery point
+- `snapshots unprotect`: Allow retention pruning for a recovery point
 
 Get detailed help: `yeet snapshots --help-llm`
 
@@ -502,6 +506,7 @@ Manage VM-specific commands
 - `vm console`: Stream VM serial console output
 - `vm images`: Show available VM images and manage VM image cache state
 - `vm set`: Set VM resources and networking
+- `vm snapshot`: Snapshot a ZFS-backed VM disk
 
 Get detailed help: `yeet vm --help-llm`
 
@@ -1336,61 +1341,6 @@ Restart a service
 
 ```
 yeet [GLOBAL_OPTIONS] restart <SERVICE> [OPTIONS]
-```
-
-## Arguments
-
-### `SERVICE`
-
-Service name
-
-- **Type**: `cli.ServiceName`
-- **Required**: true
-
-## Global Options
-
-### `--host`
-
-Override target host (CATCH_HOST)
-
-- **Type**: `string`
-
-### `--service`
-
-Force the service name for the command
-
-- **Type**: `string`
-
-### `--tty`
-
-Force TTY for remote commands
-
-- **Type**: `bool`
-
-### `--no-tty`
-
-Disable TTY for remote commands
-
-- **Type**: `bool`
-
-### `--progress`
-
-Progress output (auto|tty|plain|quiet)
-
-- **Type**: `string`
-````
-
-## Command: rollback
-
-````
-# yeet rollback
-
-Rollback a service
-
-## Usage
-
-```
-yeet [GLOBAL_OPTIONS] rollback <SERVICE> [OPTIONS]
 ```
 
 ## Arguments
@@ -2325,6 +2275,18 @@ Progress output (auto|tty|plain|quiet)
 
 ## Commands
 
+### `service generations`
+
+service generations <svc> [--format=table|json|json-pretty] - Show service generation rollback state
+
+Get detailed help: `yeet service generations --help-llm`
+
+### `service rollback`
+
+service rollback <svc> - Rollback a service to the previous generation
+
+Get detailed help: `yeet service rollback --help-llm`
+
 ### `service set`
 
 Set service settings
@@ -2391,7 +2353,7 @@ Get detailed help: `yeet service sync --help-llm`
 ````
 # yeet - snapshots
 
-Manage catch ZFS snapshot defaults
+Manage service recovery points and snapshot defaults
 
 ## Usage
 
@@ -2433,6 +2395,38 @@ Progress output (auto|tty|plain|quiet)
 
 ## Commands
 
+### `snapshots clone`
+
+Clone a recovery point to a new service
+
+**Examples**:
+
+```
+yeet snapshots clone <svc> yeet-20260613T203100Z-vm-manual-g0 <new-svc>
+```
+
+Get detailed help: `yeet snapshots clone --help-llm`
+
+### `snapshots create`
+
+Create a manual recovery point
+
+**Examples**:
+
+```
+yeet snapshots create <svc>
+```
+
+```
+yeet snapshots create <svc> --comment="before upgrade"
+```
+
+```
+yeet snapshots create <vm> --full --comment="checkpoint before risky change"
+```
+
+Get detailed help: `yeet snapshots create --help-llm`
+
 ### `snapshots defaults`
 
 Show or set catch snapshot defaults
@@ -2452,6 +2446,98 @@ yeet snapshots defaults set --enabled=true --keep-last=5 --max-age=7d
 ```
 
 Get detailed help: `yeet snapshots defaults --help-llm`
+
+### `snapshots inspect`
+
+Inspect one recovery point
+
+**Examples**:
+
+```
+yeet snapshots inspect <svc> yeet-20260613T203100Z-vm-manual-g0
+```
+
+```
+yeet snapshots inspect <svc> yeet-20260613 --format=json
+```
+
+Get detailed help: `yeet snapshots inspect --help-llm`
+
+### `snapshots list`
+
+List yeet recovery points
+
+**Examples**:
+
+```
+yeet snapshots list
+```
+
+```
+yeet snapshots list <svc>
+```
+
+```
+yeet snapshots list <svc> --format=json
+```
+
+Get detailed help: `yeet snapshots list --help-llm`
+
+### `snapshots protect`
+
+Protect a recovery point from retention pruning
+
+**Examples**:
+
+```
+yeet snapshots protect <svc> yeet-20260613T203100Z-vm-manual-g0
+```
+
+Get detailed help: `yeet snapshots protect --help-llm`
+
+### `snapshots restore`
+
+Restore disk state, service-root state, or full VM state from a recovery point
+
+**Examples**:
+
+```
+yeet snapshots restore <svc> yeet-20260613T203100Z-vm-manual-g0 --yes
+```
+
+```
+yeet snapshots restore <svc> yeet-20260613 --stop --yes
+```
+
+```
+yeet snapshots restore <vm> yeet-20260613T203100Z-vm-manual --mode=full --stop --yes
+```
+
+Get detailed help: `yeet snapshots restore --help-llm`
+
+### `snapshots rm`
+
+Delete a yeet recovery point
+
+**Examples**:
+
+```
+yeet snapshots rm <svc> yeet-20260613T203100Z-vm-manual-g0
+```
+
+Get detailed help: `yeet snapshots rm --help-llm`
+
+### `snapshots unprotect`
+
+Allow retention pruning for a recovery point
+
+**Examples**:
+
+```
+yeet snapshots unprotect <svc> yeet-20260613T203100Z-vm-manual-g0
+```
+
+Get detailed help: `yeet snapshots unprotect --help-llm`
 ````
 
 ## Group: vm
@@ -2574,6 +2660,26 @@ yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4
 ```
 
 Get detailed help: `yeet vm set --help-llm`
+
+### `vm snapshot`
+
+Snapshot a ZFS-backed VM disk
+
+**Examples**:
+
+```
+yeet vm snapshot devbox
+```
+
+```
+yeet vm snapshot devbox --comment="before package upgrade"
+```
+
+```
+yeet vm snapshot devbox --full --comment="checkpoint before risky change"
+```
+
+Get detailed help: `yeet vm snapshot --help-llm`
 ````
 
 ## Group Command: docker outdated
@@ -2982,6 +3088,98 @@ Progress output (auto|tty|plain|quiet)
 - **Type**: `string`
 ````
 
+## Group Command: service generations
+
+````
+# yeet service generations
+
+service generations <svc> [--format=table|json|json-pretty] - Show service generation rollback state
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] service generations <svc> [--format=table|json|json-pretty]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+````
+
+## Group Command: service rollback
+
+````
+# yeet service rollback
+
+service rollback <svc> - Rollback a service to the previous generation
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] service rollback <svc>
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+````
+
 ## Group Command: service set
 
 ````
@@ -3122,6 +3320,118 @@ yeet service sync <svc> --config ~/yeet-services/yeet.toml
 ```
 ````
 
+## Group Command: snapshots clone
+
+````
+# yeet snapshots clone
+
+Clone a recovery point to a new service
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] snapshots clone <svc> <snapshot> <new-svc>
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet snapshots clone <svc> yeet-20260613T203100Z-vm-manual-g0 <new-svc>
+```
+````
+
+## Group Command: snapshots create
+
+````
+# yeet snapshots create
+
+Create a manual recovery point
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] snapshots create <svc> [--comment=TEXT] [--full]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet snapshots create <svc>
+```
+
+```
+yeet snapshots create <svc> --comment="before upgrade"
+```
+
+```
+yeet snapshots create <vm> --full --comment="checkpoint before risky change"
+```
+````
+
 ## Group Command: snapshots defaults
 
 ````
@@ -3179,6 +3489,338 @@ yeet snapshots defaults set --enabled=false
 
 ```
 yeet snapshots defaults set --enabled=true --keep-last=5 --max-age=7d
+```
+````
+
+## Group Command: snapshots inspect
+
+````
+# yeet snapshots inspect
+
+Inspect one recovery point
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] snapshots inspect <svc> <snapshot> [--format=table|json|json-pretty]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet snapshots inspect <svc> yeet-20260613T203100Z-vm-manual-g0
+```
+
+```
+yeet snapshots inspect <svc> yeet-20260613 --format=json
+```
+````
+
+## Group Command: snapshots list
+
+````
+# yeet snapshots list
+
+List yeet recovery points
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] snapshots list [svc] [--format=table|json|json-pretty]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet snapshots list
+```
+
+```
+yeet snapshots list <svc>
+```
+
+```
+yeet snapshots list <svc> --format=json
+```
+````
+
+## Group Command: snapshots protect
+
+````
+# yeet snapshots protect
+
+Protect a recovery point from retention pruning
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] snapshots protect <svc> <snapshot>
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet snapshots protect <svc> yeet-20260613T203100Z-vm-manual-g0
+```
+````
+
+## Group Command: snapshots restore
+
+````
+# yeet snapshots restore
+
+Restore disk state, service-root state, or full VM state from a recovery point
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] snapshots restore <svc> <snapshot> [--stop] [--start] [--yes] [--mode=disk|full] [--generation=current|snapshot]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet snapshots restore <svc> yeet-20260613T203100Z-vm-manual-g0 --yes
+```
+
+```
+yeet snapshots restore <svc> yeet-20260613 --stop --yes
+```
+
+```
+yeet snapshots restore <vm> yeet-20260613T203100Z-vm-manual --mode=full --stop --yes
+```
+````
+
+## Group Command: snapshots rm
+
+````
+# yeet snapshots rm
+
+Delete a yeet recovery point
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] snapshots rm <svc> <snapshot> [--yes]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet snapshots rm <svc> yeet-20260613T203100Z-vm-manual-g0
+```
+````
+
+## Group Command: snapshots unprotect
+
+````
+# yeet snapshots unprotect
+
+Allow retention pruning for a recovery point
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] snapshots unprotect <svc> <snapshot>
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet snapshots unprotect <svc> yeet-20260613T203100Z-vm-manual-g0
 ```
 ````
 
@@ -3373,5 +4015,65 @@ yeet vm set <vm> --net=lan
 
 ```
 yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4
+```
+````
+
+## Group Command: vm snapshot
+
+````
+# yeet vm snapshot
+
+Snapshot a ZFS-backed VM disk
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] vm snapshot <vm> [--comment=TEXT] [--full]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet vm snapshot devbox
+```
+
+```
+yeet vm snapshot devbox --comment="before package upgrade"
+```
+
+```
+yeet vm snapshot devbox --full --comment="checkpoint before risky change"
 ```
 ````

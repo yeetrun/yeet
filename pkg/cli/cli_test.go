@@ -459,6 +459,55 @@ func TestParseSnapshotsLifecycleCommands(t *testing.T) {
 	}
 }
 
+func TestParseSnapshotsCloneAndRestore(t *testing.T) {
+	cloneFlags, cloneArgs, err := ParseSnapshotsClone([]string{"vm-a", "yeet-abc", "vm-copy", "--start"})
+	if err != nil {
+		t.Fatalf("ParseSnapshotsClone: %v", err)
+	}
+	if !cloneFlags.Start || !reflect.DeepEqual(cloneArgs, []string{"vm-a", "yeet-abc", "vm-copy"}) {
+		t.Fatalf("clone flags=%#v args=%#v", cloneFlags, cloneArgs)
+	}
+
+	restoreFlags, restoreArgs, err := ParseSnapshotsRestore([]string{"vm-a", "yeet-abc", "--stop", "--start", "--yes", "--mode=full", "--generation=snapshot"})
+	if err != nil {
+		t.Fatalf("ParseSnapshotsRestore: %v", err)
+	}
+	if !restoreFlags.Stop || !restoreFlags.Start || !restoreFlags.Yes || restoreFlags.Mode != "full" || restoreFlags.Generation != "snapshot" ||
+		!reflect.DeepEqual(restoreArgs, []string{"vm-a", "yeet-abc"}) {
+		t.Fatalf("restore flags=%#v args=%#v", restoreFlags, restoreArgs)
+	}
+
+	defaultFlags, defaultArgs, err := ParseSnapshotsRestore([]string{"vm-a", "yeet-abc"})
+	if err != nil {
+		t.Fatalf("ParseSnapshotsRestore defaults: %v", err)
+	}
+	if defaultFlags.Mode != "disk" || defaultFlags.Generation != "current" || !reflect.DeepEqual(defaultArgs, []string{"vm-a", "yeet-abc"}) {
+		t.Fatalf("restore defaults flags=%#v args=%#v", defaultFlags, defaultArgs)
+	}
+}
+
+func TestSnapshotsRestoreHelpAdvertisesFullRestoreAsSupported(t *testing.T) {
+	restore, ok := RemoteGroupInfos()["snapshots"].Commands["restore"]
+	if !ok {
+		t.Fatal("snapshots restore command missing")
+	}
+	if !strings.Contains(restore.Usage, "[--mode=disk|full]") {
+		t.Fatalf("snapshots restore usage %q should present full restore mode", restore.Usage)
+	}
+	if strings.Contains(restore.Description, "validation-only") || strings.Contains(restore.Description, "refused") {
+		t.Fatalf("snapshots restore description %q should not mark full restore as refused", restore.Description)
+	}
+	foundFullExample := false
+	for _, example := range restore.Examples {
+		if strings.Contains(example, "--mode=full") {
+			foundFullExample = true
+		}
+	}
+	if !foundFullExample {
+		t.Fatalf("snapshots restore examples %#v should include --mode=full", restore.Examples)
+	}
+}
+
 func TestParseSnapshotsLifecycleRejectsBadInput(t *testing.T) {
 	if _, _, err := ParseSnapshotsList([]string{"--format=yaml"}); err == nil || !strings.Contains(err.Error(), "--format must be table, json, or json-pretty") {
 		t.Fatalf("ParseSnapshotsList error = %v, want format error", err)
@@ -471,6 +520,105 @@ func TestParseSnapshotsLifecycleRejectsBadInput(t *testing.T) {
 	}
 	if _, _, err := ParseSnapshotsRemove([]string{"svc-a"}); err == nil || !strings.Contains(err.Error(), "snapshots rm requires service and snapshot") {
 		t.Fatalf("ParseSnapshotsRemove error = %v, want arity error", err)
+	}
+}
+
+func TestParseSnapshotsCloneAndRestoreRejectBadInput(t *testing.T) {
+	tests := []struct {
+		name    string
+		parse   func([]string) error
+		args    []string
+		wantErr string
+	}{
+		{
+			name: "clone missing new service",
+			parse: func(args []string) error {
+				_, _, err := ParseSnapshotsClone(args)
+				return err
+			},
+			args:    []string{"vm-a", "yeet-abc"},
+			wantErr: "snapshots clone requires service, snapshot, and new service",
+		},
+		{
+			name: "clone extra arg",
+			parse: func(args []string) error {
+				_, _, err := ParseSnapshotsClone(args)
+				return err
+			},
+			args:    []string{"vm-a", "yeet-abc", "vm-copy", "extra"},
+			wantErr: "snapshots clone requires service, snapshot, and new service",
+		},
+		{
+			name: "restore missing snapshot",
+			parse: func(args []string) error {
+				_, _, err := ParseSnapshotsRestore(args)
+				return err
+			},
+			args:    []string{"vm-a"},
+			wantErr: "snapshots restore requires service and snapshot",
+		},
+		{
+			name: "restore invalid mode",
+			parse: func(args []string) error {
+				_, _, err := ParseSnapshotsRestore(args)
+				return err
+			},
+			args:    []string{"vm-a", "yeet-abc", "--mode=bogus"},
+			wantErr: "--mode must be disk or full",
+		},
+		{
+			name: "restore invalid generation",
+			parse: func(args []string) error {
+				_, _, err := ParseSnapshotsRestore(args)
+				return err
+			},
+			args:    []string{"vm-a", "yeet-abc", "--generation=bogus"},
+			wantErr: "--generation must be current or snapshot",
+		},
+		{
+			name: "restore bare mode",
+			parse: func(args []string) error {
+				_, _, err := ParseSnapshotsRestore(args)
+				return err
+			},
+			args:    []string{"svc", "snap", "--mode"},
+			wantErr: "--mode must be disk or full",
+		},
+		{
+			name: "restore inline empty mode",
+			parse: func(args []string) error {
+				_, _, err := ParseSnapshotsRestore(args)
+				return err
+			},
+			args:    []string{"svc", "snap", "--mode="},
+			wantErr: "--mode must be disk or full",
+		},
+		{
+			name: "restore bare generation",
+			parse: func(args []string) error {
+				_, _, err := ParseSnapshotsRestore(args)
+				return err
+			},
+			args:    []string{"svc", "snap", "--generation"},
+			wantErr: "--generation must be current or snapshot",
+		},
+		{
+			name: "restore inline empty generation",
+			parse: func(args []string) error {
+				_, _, err := ParseSnapshotsRestore(args)
+				return err
+			},
+			args:    []string{"svc", "snap", "--generation="},
+			wantErr: "--generation must be current or snapshot",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.parse(tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -868,6 +1016,54 @@ func TestSplitArgsForParsing(t *testing.T) {
 	}
 }
 
+func TestRemoteRegistryContainsExpectedCommands(t *testing.T) {
+	reg := RemoteCommandRegistry()
+	clone, ok := reg.Groups["snapshots"].Commands["clone"]
+	if !ok {
+		t.Fatal("snapshots clone command missing")
+	}
+	if strings.Contains(clone.Info.Usage, "[--start]") {
+		t.Fatalf("snapshots clone usage %q should not advertise unsupported --start", clone.Info.Usage)
+	}
+	for _, example := range clone.Info.Examples {
+		if strings.Contains(example, "--start") {
+			t.Fatalf("snapshots clone example %q should not advertise --start while VM clone start is unsupported", example)
+		}
+	}
+	cloneInfo := RemoteGroupInfos()["snapshots"].Commands["clone"]
+	startHelp := flagHelpTag(t, cloneInfo.FlagsSchema, "start")
+	lowerStartHelp := strings.ToLower(startHelp)
+	if !strings.Contains(lowerStartHelp, "reserved") || !strings.Contains(lowerStartHelp, "unsupported") {
+		t.Fatalf("snapshots clone --start help = %q, want explicit reserved/unsupported wording", startHelp)
+	}
+	if strings.Contains(lowerStartHelp, "start the cloned service") {
+		t.Fatalf("snapshots clone --start help = %q, should not claim it starts clones", startHelp)
+	}
+}
+
+func flagHelpTag(t *testing.T, schema any, flag string) string {
+	t.Helper()
+	typ := reflect.TypeOf(schema)
+	if typ == nil {
+		t.Fatalf("nil flags schema, want flag %q", flag)
+	}
+	typ = indirectType(typ)
+	if typ.Kind() != reflect.Struct {
+		t.Fatalf("flags schema type = %s, want struct", typ)
+	}
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		if field.Tag.Get("flag") == flag {
+			return field.Tag.Get("help")
+		}
+	}
+	t.Fatalf("flag %q not found in %s", flag, typ)
+	return ""
+}
+
 func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	names := RemoteCommandNames()
 	if !containsString(names, "run") || !containsString(names, "status") {
@@ -935,7 +1131,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if reg.Groups["snapshots"].Commands["defaults"].Info.Name != "defaults" {
 		t.Fatalf("registry snapshots defaults command = %#v", reg.Groups["snapshots"].Commands["defaults"])
 	}
-	for _, cmd := range []string{"list", "inspect", "create", "rm", "protect", "unprotect", "defaults"} {
+	for _, cmd := range []string{"list", "inspect", "create", "clone", "restore", "rm", "protect", "unprotect", "defaults"} {
 		if _, ok := reg.Groups["snapshots"].Commands[cmd]; !ok {
 			t.Fatalf("snapshots %s command missing", cmd)
 		}
@@ -1038,11 +1234,103 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if RemoteGroupFlagSpecs()["snapshots"]["rm"]["--yes"].ConsumesValue {
 		t.Fatal("snapshots rm --yes should not consume a value")
 	}
+	if RemoteGroupFlagSpecs()["snapshots"]["clone"]["--start"].ConsumesValue {
+		t.Fatal("snapshots clone --start should not consume a value")
+	}
+	if RemoteGroupFlagSpecs()["snapshots"]["restore"]["--stop"].ConsumesValue {
+		t.Fatal("snapshots restore --stop should not consume a value")
+	}
+	if RemoteGroupFlagSpecs()["snapshots"]["restore"]["--start"].ConsumesValue {
+		t.Fatal("snapshots restore --start should not consume a value")
+	}
+	if RemoteGroupFlagSpecs()["snapshots"]["restore"]["--yes"].ConsumesValue {
+		t.Fatal("snapshots restore --yes should not consume a value")
+	}
+	if !RemoteGroupFlagSpecs()["snapshots"]["restore"]["--mode"].ConsumesValue {
+		t.Fatal("snapshots restore --mode should consume a value")
+	}
+	if !RemoteGroupFlagSpecs()["snapshots"]["restore"]["--generation"].ConsumesValue {
+		t.Fatal("snapshots restore --generation should consume a value")
+	}
 	if !RemoteGroupFlagSpecs()["vm"]["snapshot"]["--comment"].ConsumesValue {
 		t.Fatal("vm snapshot --comment should consume a value")
 	}
 	if RemoteGroupFlagSpecs()["vm"]["snapshot"]["--full"].ConsumesValue {
 		t.Fatal("vm snapshot --full should not consume a value")
+	}
+}
+
+func TestRegistryMovesRollbackUnderService(t *testing.T) {
+	if containsString(RemoteCommandNames(), "rollback") {
+		t.Fatalf("RemoteCommandNames includes rollback, want rollback under service group")
+	}
+	if _, ok := RemoteCommandInfos()["rollback"]; ok {
+		t.Fatal("RemoteCommandInfos includes top-level rollback, want rollback under service group")
+	}
+	if _, ok := RemoteFlagSpecs()["rollback"]; ok {
+		t.Fatal("RemoteFlagSpecs includes top-level rollback, want rollback under service group")
+	}
+
+	reg := RemoteCommandRegistry()
+	if _, ok := reg.SubCommands["rollback"]; ok {
+		t.Fatal("RemoteCommandRegistry includes top-level rollback, want rollback under service group")
+	}
+	if got := reg.Groups["service"].Commands["rollback"].Info.Usage; got != "service rollback <svc>" {
+		t.Fatalf("service rollback usage = %q, want service rollback <svc>", got)
+	}
+	if got := reg.Groups["service"].Commands["generations"].Info.Usage; got != "service generations <svc> [--format=table|json|json-pretty]" {
+		t.Fatalf("service generations usage = %q, want service generations usage", got)
+	}
+
+	groupFlags := RemoteGroupFlagSpecs()["service"]
+	if _, ok := groupFlags["rollback"]; !ok {
+		t.Fatal("service rollback flag specs missing")
+	}
+	genFlags, ok := groupFlags["generations"]
+	if !ok {
+		t.Fatal("service generations flag specs missing")
+	}
+	if !genFlags["--format"].ConsumesValue {
+		t.Fatal("service generations --format should consume a value")
+	}
+}
+
+func TestParseServiceGenerationCommands(t *testing.T) {
+	rollback, err := ParseServiceRollback([]string{"plex"})
+	if err != nil {
+		t.Fatalf("ParseServiceRollback: %v", err)
+	}
+	if !reflect.DeepEqual(rollback, []string{"plex"}) {
+		t.Fatalf("rollback args = %#v, want plex", rollback)
+	}
+
+	flags, args, err := ParseServiceGenerations([]string{"plex", "--format=json"})
+	if err != nil {
+		t.Fatalf("ParseServiceGenerations: %v", err)
+	}
+	if flags.Format != "json" {
+		t.Fatalf("service generations format = %q, want json", flags.Format)
+	}
+	if !reflect.DeepEqual(args, []string{"plex"}) {
+		t.Fatalf("service generations args = %#v, want plex", args)
+	}
+
+	flags, args, err = ParseServiceGenerations([]string{"plex", "--format=json-pretty"})
+	if err != nil {
+		t.Fatalf("ParseServiceGenerations json-pretty: %v", err)
+	}
+	if flags.Format != "json-pretty" || !reflect.DeepEqual(args, []string{"plex"}) {
+		t.Fatalf("service generations json-pretty = %#v args=%#v, want json-pretty plex", flags, args)
+	}
+
+	if _, err := ParseServiceRollback(nil); err == nil || !strings.Contains(err.Error(), "service rollback requires a service") {
+		t.Fatalf("ParseServiceRollback missing service error = %v, want service required error", err)
+	}
+	if _, err := ParseServiceRollback([]string{"plex", "jellyfin"}); err == nil || !strings.Contains(err.Error(), "service rollback requires exactly one service") {
+		t.Fatalf("ParseServiceRollback extra args error = %v, want arity error", err)
+	}
+	if _, _, err := ParseServiceGenerations([]string{"plex", "--format=yaml"}); err == nil || !strings.Contains(err.Error(), "--format must be table, json, or json-pretty") {
+		t.Fatalf("ParseServiceGenerations format error = %v, want format error", err)
 	}
 }
 

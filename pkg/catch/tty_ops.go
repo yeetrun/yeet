@@ -44,6 +44,18 @@ var (
 	dockerComposeUpdate = (*svc.DockerComposeService).Update
 )
 
+var snapshotCommandHandlers = map[string]func(*ttyExecer, []string) error{
+	"defaults":  (*ttyExecer).snapshotsDefaultsCmdFunc,
+	"create":    (*ttyExecer).snapshotsCreateCmdFunc,
+	"clone":     (*ttyExecer).snapshotsCloneCmdFunc,
+	"restore":   (*ttyExecer).snapshotsRestoreCmdFunc,
+	"list":      (*ttyExecer).snapshotsListCmdFunc,
+	"inspect":   (*ttyExecer).snapshotsInspectCmdFunc,
+	"rm":        (*ttyExecer).snapshotsRemoveCmdFunc,
+	"protect":   (*ttyExecer).snapshotsProtectCmdFunc,
+	"unprotect": (*ttyExecer).snapshotsUnprotectCmdFunc,
+}
+
 func (e *ttyExecer) dockerCmdFunc(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("docker requires a subcommand")
@@ -231,24 +243,15 @@ func (e *ttyExecer) snapshotsCmdFunc(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("snapshots requires a subcommand")
 	}
-	switch args[0] {
-	case "defaults":
-		return e.snapshotsDefaultsCmdFunc(args)
-	case "create":
-		return e.snapshotsCreateCmdFunc(args[1:])
-	case "list":
-		return e.snapshotsListCmdFunc(args[1:])
-	case "inspect":
-		return e.snapshotsInspectCmdFunc(args[1:])
-	case "rm":
-		return e.snapshotsRemoveCmdFunc(args[1:])
-	case "protect":
-		return e.snapshotsProtectCmdFunc(args[1:])
-	case "unprotect":
-		return e.snapshotsUnprotectCmdFunc(args[1:])
-	default:
+	handler, ok := snapshotCommandHandlers[args[0]]
+	if !ok {
 		return fmt.Errorf("unknown snapshots command %q", args[0])
 	}
+	handlerArgs := args[1:]
+	if args[0] == "defaults" {
+		handlerArgs = args
+	}
+	return handler(e, handlerArgs)
 }
 
 func (e *ttyExecer) snapshotsCreateCmdFunc(args []string) error {
@@ -257,6 +260,22 @@ func (e *ttyExecer) snapshotsCreateCmdFunc(args []string) error {
 		return err
 	}
 	return e.s.createRecoveryPoint(e.vmProvisionContext(), rest[0], flags, e.rw)
+}
+
+func (e *ttyExecer) snapshotsCloneCmdFunc(args []string) error {
+	flags, rest, err := cli.ParseSnapshotsClone(args)
+	if err != nil {
+		return err
+	}
+	return e.s.cloneRecoveryPoint(e.ctx, rest[0], rest[1], rest[2], flags, e.rw)
+}
+
+func (e *ttyExecer) snapshotsRestoreCmdFunc(args []string) error {
+	flags, rest, err := cli.ParseSnapshotsRestore(args)
+	if err != nil {
+		return err
+	}
+	return e.s.restoreRecoveryPoint(e.ctx, rest[0], rest[1], flags, e.rw)
 }
 
 func (e *ttyExecer) snapshotsListCmdFunc(args []string) error {

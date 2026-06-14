@@ -71,9 +71,50 @@ func (e *ttyExecer) serviceCmdFunc(args []string) error {
 			return fmt.Errorf("unexpected service set args: %s", strings.Join(rest, " "))
 		}
 		return e.serviceSetCmdFunc(flags)
+	case "rollback":
+		rest, err := cli.ParseServiceRollback(argsWithServiceDefault(args[1:], e.sn))
+		if err != nil {
+			return err
+		}
+		return e.rollbackCmdFunc(rest[0])
+	case "generations":
+		flags, rest, err := cli.ParseServiceGenerations(argsWithServiceDefault(args[1:], e.sn))
+		if err != nil {
+			return err
+		}
+		return e.serviceGenerationsCmdFunc(rest[0], flags)
 	default:
 		return fmt.Errorf("unknown service command %q", args[0])
 	}
+}
+
+func argsWithServiceDefault(args []string, serviceName string) []string {
+	if strings.TrimSpace(serviceName) == "" || hasServiceCommandArg(args) {
+		return args
+	}
+	out := append([]string{}, args...)
+	return append(out, serviceName)
+}
+
+func hasServiceCommandArg(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--" {
+			return i+1 < len(args)
+		}
+		if strings.HasPrefix(arg, "--format=") {
+			continue
+		}
+		if arg == "--format" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
