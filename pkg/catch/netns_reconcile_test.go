@@ -93,6 +93,15 @@ func stubDockerPrereqsInstaller(t *testing.T, f func(*Server) error) {
 	})
 }
 
+func stubYeetDNSInstaller(t *testing.T, f func(string) error) {
+	t.Helper()
+	prev := installYeetDNSServiceForServer
+	installYeetDNSServiceForServer = f
+	t.Cleanup(func() {
+		installYeetDNSServiceForServer = prev
+	})
+}
+
 func TestReconcileNetNSBackedDockerServices(t *testing.T) {
 	s := newTestServer(t)
 	addTestServices(t, s,
@@ -239,6 +248,13 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubYeetDNSInstaller(t, func(root string) error {
+		if root != s.cfg.RootDir {
+			t.Fatalf("dns installer root = %q, want %q", root, s.cfg.RootDir)
+		}
+		calls = append(calls, "dns-install")
+		return nil
+	})
 	stubDockerPrereqsInstaller(t, func(*Server) error {
 		calls = append(calls, "docker-prereqs")
 		return nil
@@ -273,7 +289,7 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 		t.Fatal("timed out waiting for reconciliation to run")
 	}
 
-	if diff := cmp.Diff([]string{"install", "docker-prereqs", "nat-reconcile", "reconcile:docker-netns"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{"install", "dns-install", "docker-prereqs", "nat-reconcile", "reconcile:docker-netns"}, calls); diff != "" {
 		t.Fatalf("unexpected startup call order (-want +got):\n%s", diff)
 	}
 }
@@ -296,6 +312,7 @@ func TestServerStartLogsNATReconciliationFailureNonFatally(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubYeetDNSInstaller(t, func(string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 
 	prevNAT := reconcileDockerNetNSPortForwards
@@ -357,6 +374,7 @@ func TestServerStartLogsReconciliationFailureNonFatally(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubYeetDNSInstaller(t, func(string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
@@ -411,6 +429,7 @@ func TestServerStartLogsRestartedNetNSService(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubYeetDNSInstaller(t, func(string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
@@ -461,6 +480,7 @@ func TestServerStartReturnsBeforeNetNSReconciliationFinishes(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubYeetDNSInstaller(t, func(string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
@@ -539,6 +559,7 @@ func TestServerShutdownCancelsNetNSReconciliation(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubYeetDNSInstaller(t, func(string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
@@ -625,6 +646,7 @@ func TestServerShutdownDoesNotLogCancellationAsFailure(t *testing.T) {
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
+	stubYeetDNSInstaller(t, func(string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }

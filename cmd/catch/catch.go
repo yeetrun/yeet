@@ -54,6 +54,7 @@ var (
 
 var (
 	runVMConsoleProxy                       = catch.RunVMConsoleProxy
+	runDNSFn                                = catch.RunDNSServer
 	exitProcess                             = os.Exit
 	setupDockerFn                           = setupDocker
 	setupVMHostFn                           = setupVMHost
@@ -415,6 +416,8 @@ func handleLocalCommand(args []string, scfg *catch.Config, dataDir string, out i
 	switch args[0] {
 	case "version":
 		return true, writeLine(out, catch.VersionCommit())
+	case "dns":
+		return true, runDNSFn(context.Background(), scfg)
 	case "install":
 		if err := setupDockerFn(); err != nil {
 			return true, fmt.Errorf("failed to set up docker: %w", err)

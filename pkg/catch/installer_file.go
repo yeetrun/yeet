@@ -517,12 +517,14 @@ func (i *FileInstaller) writeNetNSResolvConf(env *netns.Service, resolvConf stri
 }
 
 func defaultNetNSResolvConf() string {
-	const defaultNameserver = "8.8.8.8"
-	dns := defaultNameserver
-	if v := os.Getenv("DEFAULT_NS"); v != "" {
-		dns = v
+	if dns := os.Getenv("DEFAULT_NS"); dns != "" {
+		return buildNetNSResolvConf(dns, os.Getenv("DEFAULT_SEARCH_DOMAINS"))
 	}
-	return buildNetNSResolvConf(dns, os.Getenv("DEFAULT_SEARCH_DOMAINS"))
+	searchDomains := os.Getenv("DEFAULT_SEARCH_DOMAINS")
+	if searchDomains == "" {
+		searchDomains = strings.TrimSuffix(yeetDNSDomain, ".")
+	}
+	return buildNetNSResolvConf(yeetDNSHostIP, searchDomains)
 }
 
 func buildNetNSResolvConf(dns, searchDomains string) string {

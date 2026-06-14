@@ -17,6 +17,7 @@ import (
 )
 
 var vmGuestNetworkNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,15}$`)
+var vmGuestSearchDomainPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 var vmHostnamePattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
 var vmUserPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
 var vmGuestChown = os.Chown
@@ -33,12 +34,14 @@ type vmMetadataConfig struct {
 }
 
 type vmGuestNetwork struct {
-	Name        string
-	Mode        string
-	Address     string
-	Gateway     string
-	DHCP        bool
-	Nameservers []string
+	Name            string
+	Mode            string
+	Address         string
+	Gateway         string
+	DHCP            bool
+	Nameservers     []string
+	SearchDomains   []string
+	DNSDefaultRoute *bool
 }
 
 type vmGuestMetadataWriter func(string, vmMetadataConfig) error
@@ -354,6 +357,12 @@ func renderVMNetworkdUnit(network vmGuestNetwork) string {
 	}
 	for _, ns := range vmGuestNetworkNameservers(network) {
 		fmt.Fprintf(&b, "DNS=%s\n", ns)
+	}
+	if domains := vmGuestNetworkSearchDomains(network); len(domains) > 0 {
+		fmt.Fprintf(&b, "Domains=%s\n", strings.Join(domains, " "))
+	}
+	if network.DNSDefaultRoute != nil {
+		fmt.Fprintf(&b, "DNSDefaultRoute=%s\n", networkdBool(*network.DNSDefaultRoute))
 	}
 	return b.String()
 }
@@ -989,6 +998,19 @@ func validateVMGuestNetwork(network vmGuestNetwork) error {
 	if !vmGuestNetworkNamePattern.MatchString(network.Name) {
 		return fmt.Errorf("invalid VM guest network interface %q", network.Name)
 	}
+	if err := validateVMGuestNetworkAddress(network); err != nil {
+		return err
+	}
+	if err := validateVMGuestNetworkGateway(network); err != nil {
+		return err
+	}
+	if err := validateVMGuestNetworkNameservers(network); err != nil {
+		return err
+	}
+	return validateVMGuestNetworkSearchDomains(network)
+}
+
+func validateVMGuestNetworkAddress(network vmGuestNetwork) error {
 	if !network.DHCP {
 		if network.Address == "" {
 			return fmt.Errorf("VM guest network %s address is required without DHCP", network.Name)
@@ -997,6 +1019,10 @@ func validateVMGuestNetwork(network vmGuestNetwork) error {
 			return fmt.Errorf("invalid VM guest network %s address %q: %w", network.Name, network.Address, err)
 		}
 	}
+	return nil
+}
+
+func validateVMGuestNetworkGateway(network vmGuestNetwork) error {
 	if network.Gateway != "" {
 		addr, err := netip.ParseAddr(network.Gateway)
 		if err != nil {
@@ -1006,9 +1032,22 @@ func validateVMGuestNetwork(network vmGuestNetwork) error {
 			return fmt.Errorf("VM guest network %s gateway must be IPv4 for gateway4", network.Name)
 		}
 	}
+	return nil
+}
+
+func validateVMGuestNetworkNameservers(network vmGuestNetwork) error {
 	for _, dns := range network.Nameservers {
 		if _, err := netip.ParseAddr(dns); err != nil {
 			return fmt.Errorf("invalid VM guest network %s nameserver %q: %w", network.Name, dns, err)
+		}
+	}
+	return nil
+}
+
+func validateVMGuestNetworkSearchDomains(network vmGuestNetwork) error {
+	for _, domain := range network.SearchDomains {
+		if !vmGuestSearchDomainPattern.MatchString(domain) || strings.Contains(domain, "..") {
+			return fmt.Errorf("invalid VM guest network %s search domain %q", network.Name, domain)
 		}
 	}
 	return nil
@@ -1031,9 +1070,16 @@ func renderVMNetworkYAML(networks []vmGuestNetwork) string {
 		if net.Gateway != "" {
 			fmt.Fprintf(&b, "      gateway4: %s\n", net.Gateway)
 		}
-		if nameservers := vmGuestNetworkNameservers(net); len(nameservers) > 0 {
+		nameservers := vmGuestNetworkNameservers(net)
+		searchDomains := vmGuestNetworkSearchDomains(net)
+		if len(nameservers) > 0 || len(searchDomains) > 0 {
 			fmt.Fprintf(&b, "      nameservers:\n")
-			fmt.Fprintf(&b, "        addresses: [%s]\n", strings.Join(nameservers, ", "))
+			if len(nameservers) > 0 {
+				fmt.Fprintf(&b, "        addresses: [%s]\n", strings.Join(nameservers, ", "))
+			}
+			if len(searchDomains) > 0 {
+				fmt.Fprintf(&b, "        search: [%s]\n", strings.Join(searchDomains, ", "))
+			}
 		}
 	}
 	return b.String()
@@ -1049,10 +1095,34 @@ func vmGuestNetworkNameservers(network vmGuestNetwork) []string {
 	if dns := strings.TrimSpace(os.Getenv("DEFAULT_NS")); dns != "" {
 		return splitVMGuestNameservers(dns)
 	}
-	return []string{"8.8.8.8"}
+	return []string{yeetDNSHostIP}
+}
+
+func vmGuestNetworkSearchDomains(network vmGuestNetwork) []string {
+	if len(network.SearchDomains) > 0 {
+		return network.SearchDomains
+	}
+	if len(vmGuestNetworkNameservers(network)) == 0 {
+		return nil
+	}
+	if search := strings.TrimSpace(os.Getenv("DEFAULT_SEARCH_DOMAINS")); search != "" {
+		return splitVMGuestSearchDomains(search)
+	}
+	if strings.TrimSpace(os.Getenv("DEFAULT_NS")) != "" {
+		return nil
+	}
+	return []string{strings.TrimSuffix(yeetDNSDomain, ".")}
 }
 
 func splitVMGuestNameservers(raw string) []string {
+	return splitVMGuestNetworkList(raw)
+}
+
+func splitVMGuestSearchDomains(raw string) []string {
+	return splitVMGuestNetworkList(raw)
+}
+
+func splitVMGuestNetworkList(raw string) []string {
 	fields := strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\t' || r == '\n'
 	})
@@ -1064,4 +1134,11 @@ func splitVMGuestNameservers(raw string) []string {
 		}
 	}
 	return out
+}
+
+func networkdBool(value bool) string {
+	if value {
+		return "yes"
+	}
+	return "no"
 }

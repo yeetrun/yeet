@@ -143,16 +143,32 @@ func (p vmNetworkPlan) DBNetworks() []db.VMNetworkConfig {
 
 func (p vmNetworkPlan) MetadataNetworks() []vmGuestNetwork {
 	out := make([]vmGuestNetwork, 0, len(p.Interfaces))
+	hasLAN := p.hasNetworkMode("lan")
 	for _, iface := range p.Interfaces {
+		var dnsDefaultRoute *bool
+		if hasLAN && iface.Mode == "svc" {
+			value := false
+			dnsDefaultRoute = &value
+		}
 		out = append(out, vmGuestNetwork{
-			Name:    iface.GuestName,
-			Mode:    iface.Mode,
-			Address: iface.GuestIP,
-			Gateway: iface.Gateway,
-			DHCP:    iface.DHCP,
+			Name:            iface.GuestName,
+			Mode:            iface.Mode,
+			Address:         iface.GuestIP,
+			Gateway:         iface.Gateway,
+			DHCP:            iface.DHCP,
+			DNSDefaultRoute: dnsDefaultRoute,
 		})
 	}
 	return out
+}
+
+func (p vmNetworkPlan) hasNetworkMode(mode string) bool {
+	for _, iface := range p.Interfaces {
+		if iface.Mode == mode {
+			return true
+		}
+	}
+	return false
 }
 
 func (p vmNetworkPlan) FirecrackerInterfaces() []firecrackerNetworkInterface {

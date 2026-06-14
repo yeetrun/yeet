@@ -158,6 +158,39 @@ func TestRunCatchProcessHandlesLocalCommand(t *testing.T) {
 	}
 }
 
+func TestRunCatchProcessDNSRunsWithoutRuntimeValidation(t *testing.T) {
+	oldDataDir := *legacyDataDir
+	oldRunDNS := runDNSFn
+	oldValidateRuntime := validateCatchRuntimeFn
+	root := t.TempDir()
+	*legacyDataDir = root
+	t.Cleanup(func() {
+		*legacyDataDir = oldDataDir
+		runDNSFn = oldRunDNS
+		validateCatchRuntimeFn = oldValidateRuntime
+	})
+
+	validateCatchRuntimeFn = func(string) error {
+		t.Fatal("dns command should not validate containerd runtime")
+		return nil
+	}
+	var gotCfg *catch.Config
+	runDNSFn = func(_ context.Context, cfg *catch.Config) error {
+		gotCfg = cfg
+		return nil
+	}
+
+	if err := runCatchProcess([]string{"dns"}, io.Discard); err != nil {
+		t.Fatalf("runCatchProcess dns returned error: %v", err)
+	}
+	if gotCfg == nil {
+		t.Fatal("dns command did not run DNS server")
+	}
+	if gotCfg.RootDir != root {
+		t.Fatalf("DNS config RootDir = %q, want %q", gotCfg.RootDir, root)
+	}
+}
+
 func TestRunCatchProcessReturnsRuntimeValidationError(t *testing.T) {
 	oldDataDir := *legacyDataDir
 	oldValidateRuntime := validateCatchRuntimeFn

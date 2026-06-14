@@ -349,6 +349,16 @@ func TestVMSvcLANNetworkPlanHasTwoInterfaces(t *testing.T) {
 	if plan.Interfaces[1].GuestName != "eth1" {
 		t.Fatalf("second guest name = %q, want eth1", plan.Interfaces[1].GuestName)
 	}
+	metadata := plan.MetadataNetworks()
+	if len(metadata) != 2 {
+		t.Fatalf("metadata networks = %d, want 2", len(metadata))
+	}
+	if metadata[0].DNSDefaultRoute == nil || *metadata[0].DNSDefaultRoute {
+		t.Fatalf("svc DNSDefaultRoute = %v, want false", metadata[0].DNSDefaultRoute)
+	}
+	if metadata[1].DNSDefaultRoute != nil {
+		t.Fatalf("lan DNSDefaultRoute = %v, want nil", *metadata[1].DNSDefaultRoute)
+	}
 }
 
 func TestVMNetworkPlanRejectsUnsupportedMode(t *testing.T) {
