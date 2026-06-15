@@ -405,6 +405,11 @@ func (i *FileInstaller) configureNetworkOnce() (*networkConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	if i.svcNet != nil {
+		if err := checkSvcSubnetAvailableFn(); err != nil {
+			return nil, err
+		}
+	}
 	deps, err := i.installNetworkConfig(env, runTSInNetNS, tsTapMode)
 	if err != nil {
 		return nil, err
@@ -474,9 +479,9 @@ func applySvcNetwork(env *netns.Service, svcNet *db.SvcNetwork) {
 		return
 	}
 	env.ServiceIP = netip.PrefixFrom(svcNet.IPv4, svcNet.IPv4.BitLen())
-	env.Range = netip.MustParsePrefix("192.168.100.0/24")
-	env.HostIP = netip.MustParseAddr("192.168.100.1")
-	env.YeetIP = netip.MustParseAddr("192.168.100.254")
+	env.Range = netip.MustParsePrefix(netns.ServiceSubnetCIDR)
+	env.HostIP = netip.MustParseAddr(netns.ServiceHostIP)
+	env.YeetIP = netip.MustParseAddr(netns.ServiceGatewayIP)
 }
 
 func applyMacvlanNetwork(env *netns.Service, macvlan *db.MacvlanNetwork) {

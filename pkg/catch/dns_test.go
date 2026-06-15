@@ -203,6 +203,57 @@ func TestForwardDNSViaServersReturnsFirstResponse(t *testing.T) {
 	}
 }
 
+func TestForwardDNSViaResolverConfigRoutesTailnetQueriesToTailscaleDNS(t *testing.T) {
+	req := newAQuestion("plex.shayne.ts.net.")
+	response := new(dns.Msg)
+	response.SetReply(req)
+	var addrs []string
+
+	got, err := forwardDNSViaResolverConfig(context.Background(), req, &dns.ClientConfig{
+		Servers: []string{"192.0.2.53"},
+		Search:  []string{"shayne.ts.net"},
+		Port:    "53",
+	}, func(_ context.Context, _ *dns.Msg, addr string) (*dns.Msg, error) {
+		addrs = append(addrs, addr)
+		return response, nil
+	})
+
+	if err != nil {
+		t.Fatalf("forwardDNSViaResolverConfig returned error: %v", err)
+	}
+	if got != response {
+		t.Fatalf("response = %p, want %p", got, response)
+	}
+	want := []string{"100.100.100.100:53"}
+	if len(addrs) != len(want) || addrs[0] != want[0] {
+		t.Fatalf("addrs = %#v, want %#v", addrs, want)
+	}
+}
+
+func TestForwardDNSViaResolverConfigKeepsPublicQueriesOnHostResolver(t *testing.T) {
+	req := newAQuestion("example.com.")
+	response := new(dns.Msg)
+	response.SetReply(req)
+	var addrs []string
+
+	_, err := forwardDNSViaResolverConfig(context.Background(), req, &dns.ClientConfig{
+		Servers: []string{"192.0.2.53"},
+		Search:  []string{"shayne.ts.net"},
+		Port:    "53",
+	}, func(_ context.Context, _ *dns.Msg, addr string) (*dns.Msg, error) {
+		addrs = append(addrs, addr)
+		return response, nil
+	})
+
+	if err != nil {
+		t.Fatalf("forwardDNSViaResolverConfig returned error: %v", err)
+	}
+	want := []string{"192.0.2.53:53"}
+	if len(addrs) != len(want) || addrs[0] != want[0] {
+		t.Fatalf("addrs = %#v, want %#v", addrs, want)
+	}
+}
+
 func TestForwardDNSViaServersReturnsLastResolverError(t *testing.T) {
 	req := newAQuestion("example.com.")
 	lastErr := errors.New("last resolver failed")

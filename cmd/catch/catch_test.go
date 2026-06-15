@@ -755,6 +755,95 @@ func TestWriteContainerdSnapshotterConfigCreatesAndPreservesDockerConfig(t *test
 	}
 }
 
+func TestWriteDockerInstallConfigCreatesDNSDefaults(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "daemon.json")
+
+	changed, err := writeDockerInstallConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("writeDockerInstallConfig: %v", err)
+	}
+	if !changed {
+		t.Fatal("writeDockerInstallConfig changed=false, want true")
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read docker config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("docker config json: %v", err)
+	}
+	assertDockerConfigList(t, cfg, "dns", []string{"192.168.100.1"})
+	assertDockerConfigList(t, cfg, "dns-search", []string{"yeet.internal"})
+	features := cfg["features"].(map[string]any)
+	if features["containerd-snapshotter"] != true {
+		t.Fatalf("features = %#v, want containerd-snapshotter=true", features)
+	}
+
+	changed, err = writeDockerInstallConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("writeDockerInstallConfig already configured: %v", err)
+	}
+	if changed {
+		t.Fatal("writeDockerInstallConfig already configured changed=true, want false")
+	}
+}
+
+func TestWriteDockerInstallConfigPreservesExistingSettings(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "daemon.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"log-driver":"journald","features":{"buildkit":true},"dns":["8.8.8.8"],"dns-search":["lan"]}`), 0o600); err != nil {
+		t.Fatalf("write existing config: %v", err)
+	}
+
+	changed, err := writeDockerInstallConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("writeDockerInstallConfig: %v", err)
+	}
+	if !changed {
+		t.Fatal("writeDockerInstallConfig changed=false, want true")
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read docker config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("docker config json: %v", err)
+	}
+	if cfg["log-driver"] != "journald" {
+		t.Fatalf("log-driver = %#v, want journald", cfg["log-driver"])
+	}
+	assertDockerConfigList(t, cfg, "dns", []string{"192.168.100.1"})
+	assertDockerConfigList(t, cfg, "dns-search", []string{"yeet.internal"})
+	features := cfg["features"].(map[string]any)
+	if features["buildkit"] != true || features["containerd-snapshotter"] != true {
+		t.Fatalf("features = %#v, want buildkit and containerd-snapshotter", features)
+	}
+}
+
+func assertDockerConfigList(t *testing.T, cfg map[string]any, key string, want []string) {
+	t.Helper()
+	raw, ok := cfg[key].([]any)
+	if !ok {
+		t.Fatalf("%s = %#v, want list", key, cfg[key])
+	}
+	got := make([]string, 0, len(raw))
+	for _, item := range raw {
+		value, ok := item.(string)
+		if !ok {
+			t.Fatalf("%s item = %#v, want string", key, item)
+		}
+		got = append(got, value)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("%s = %#v, want %#v", key, got, want)
+	}
+}
+
 func TestCheckContainerdSnapshotterEnabledReadAndParseErrors(t *testing.T) {
 	root := t.TempDir()
 	dirPath := filepath.Join(root, "daemon-dir")
