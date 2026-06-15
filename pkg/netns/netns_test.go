@@ -214,6 +214,23 @@ func TestServiceNSScriptUsesPerServiceDhclientLeaseFile(t *testing.T) {
 	}
 }
 
+func TestServiceNSScriptPinsServiceNetworkRoutes(t *testing.T) {
+	raw, err := netnsScripts.ReadFile("netns-scripts/service-ns")
+	if err != nil {
+		t.Fatalf("ReadFile embedded service-ns returned error: %v", err)
+	}
+	got := string(raw)
+
+	for _, want := range []string{
+		`ip netns exec $NS_NAME ip route replace "$RANGE" dev "$IF_IN_NS_NAME"`,
+		`ip netns exec $NS_NAME ip route replace "$HOST_IP/32" dev "$IF_IN_NS_NAME"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("service-ns missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestWriteYeetNSEnvWritesAndSkipsIdenticalFiles(t *testing.T) {
 	chdirTemp(t)
 	ye := defaultYeetNSEnv(BackendNFT, "/usr/local/bin/catch")

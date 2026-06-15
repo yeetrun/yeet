@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -109,6 +110,52 @@ func TestYeetDNSHandlerAnswersInternalARecords(t *testing.T) {
 	}
 	if a.Hdr.Name != "foo.yeet.internal." || a.Hdr.Ttl != yeetDNSDefaultTTL {
 		t.Fatalf("answer header = %#v", a.Hdr)
+	}
+}
+
+func TestYeetDNSHandlerRefreshesStoreForNewServices(t *testing.T) {
+	root := t.TempDir()
+	dbPath := filepath.Join(root, "db.json")
+	servicesRoot := filepath.Join(root, "services")
+	if err := db.NewStore(dbPath, servicesRoot).Set(&db.Data{
+		DataVersion: db.CurrentDataVersion,
+		Services:    map[string]*db.Service{},
+	}); err != nil {
+		t.Fatalf("seed DB: %v", err)
+	}
+	handler := newYeetDNSHandler(freshDNSStore{dbPath: dbPath, servicesRoot: servicesRoot}, nil)
+
+	resp := exchangeYeetDNSForTest(t, handler, newAQuestion("later.yeet.internal."))
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("initial Rcode = %s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+
+	if err := db.NewStore(dbPath, servicesRoot).Set(&db.Data{
+		DataVersion: db.CurrentDataVersion,
+		Services: map[string]*db.Service{
+			"later": {
+				Name:        "later",
+				ServiceType: db.ServiceTypeSystemd,
+				SvcNetwork:  &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.9")},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("update DB: %v", err)
+	}
+
+	resp = exchangeYeetDNSForTest(t, handler, newAQuestion("later.yeet.internal."))
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("updated Rcode = %s, want success", dns.RcodeToString[resp.Rcode])
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answers = %#v, want one A record", resp.Answer)
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("answer type = %T, want *dns.A", resp.Answer[0])
+	}
+	if a.A.String() != "192.168.100.9" {
+		t.Fatalf("A = %s, want 192.168.100.9", a.A)
 	}
 }
 

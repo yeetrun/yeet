@@ -246,8 +246,9 @@ func removeFileIfExists(path string) {
 }
 
 type networkConfig struct {
-	NetNS string
-	Deps  []string
+	NetNS         string
+	Deps          []string
+	HasResolvConf bool
 }
 
 func hexStr(n int) string {
@@ -410,14 +411,15 @@ func (i *FileInstaller) configureNetworkOnce() (*networkConfig, error) {
 			return nil, err
 		}
 	}
-	deps, err := i.installNetworkConfig(env, runTSInNetNS, tsTapMode)
+	deps, err := i.installNetworkConfig(&env, runTSInNetNS, tsTapMode)
 	if err != nil {
 		return nil, err
 	}
 	log.Printf("artifacts: %v", i.artifacts)
 	return &networkConfig{
-		NetNS: env.NetNS(),
-		Deps:  deps,
+		NetNS:         env.NetNS(),
+		Deps:          deps,
+		HasResolvConf: env.ResolvConf != "",
 	}, nil
 }
 
@@ -430,24 +432,26 @@ func (i *FileInstaller) prepareNetworkConfig() (netns.Service, string, bool, err
 	return env, runTSInNetNS, tsTapMode, nil
 }
 
-func (i *FileInstaller) installNetworkConfig(env netns.Service, runTSInNetNS string, tsTapMode bool) ([]string, error) {
-	if err := i.writeBaseNetworkConfig(&env); err != nil {
+func (i *FileInstaller) installNetworkConfig(env *netns.Service, runTSInNetNS string, tsTapMode bool) ([]string, error) {
+	if err := i.writeBaseNetworkConfig(env); err != nil {
 		return nil, err
 	}
-	deps, err := i.installTailscaleDependency(env, runTSInNetNS, tsTapMode)
+	deps, err := i.installTailscaleDependency(*env, runTSInNetNS, tsTapMode)
 	if err != nil {
 		return nil, err
 	}
-	if err := i.writeDockerComposeNetwork(env); err != nil {
+	if err := i.writeDockerComposeNetwork(*env); err != nil {
 		return nil, err
 	}
 	return deps, nil
 }
 
 func (i *FileInstaller) writeBaseNetworkConfig(env *netns.Service) error {
-	_, netnsResolvConf, _ := i.tailscaleNetNSMode(env)
-	if err := i.writeNetNSResolvConf(env, netnsResolvConf); err != nil {
-		return err
+	_, tailscaleResolvConf, _ := i.tailscaleNetNSMode(env)
+	if resolvConf := netNSResolvConfFor(env, tailscaleResolvConf); resolvConf != "" {
+		if err := i.writeNetNSResolvConf(env, resolvConf); err != nil {
+			return err
+		}
 	}
 	return i.writeServiceNetNSFiles(*env)
 }
@@ -509,9 +513,6 @@ func (i *FileInstaller) tailscaleNetNSMode(env *netns.Service) (runTSInNetNS str
 }
 
 func (i *FileInstaller) writeNetNSResolvConf(env *netns.Service, resolvConf string) error {
-	if resolvConf == "" {
-		resolvConf = defaultNetNSResolvConf()
-	}
 	fp := filepath.Join(i.serviceBinDir(), fileutil.ApplyVersion("resolv.conf"))
 	if err := os.WriteFile(fp, []byte(resolvConf), 0644); err != nil {
 		return fmt.Errorf("failed to write resolv.conf: %v", err)
@@ -521,7 +522,17 @@ func (i *FileInstaller) writeNetNSResolvConf(env *netns.Service, resolvConf stri
 	return nil
 }
 
-func defaultNetNSResolvConf() string {
+func netNSResolvConfFor(env *netns.Service, tailscaleResolvConf string) string {
+	if tailscaleResolvConf != "" {
+		return tailscaleResolvConf
+	}
+	if env != nil && env.ServiceIP.IsValid() {
+		return defaultSvcNetNSResolvConf()
+	}
+	return ""
+}
+
+func defaultSvcNetNSResolvConf() string {
 	if dns := os.Getenv("DEFAULT_NS"); dns != "" {
 		return buildNetNSResolvConf(dns, os.Getenv("DEFAULT_SEARCH_DOMAINS"))
 	}
@@ -569,18 +580,41 @@ func (i *FileInstaller) installTailscaleForNetNS(env netns.Service, runTSInNetNS
 }
 
 func (i *FileInstaller) writeDockerComposeNetwork(env netns.Service) error {
-	dockerNet := fmt.Sprintf(`networks:
-  default:
-    driver: yeet
-    driver_opts:
-      dev.catchit.netns: %q
-`, filepath.Join("/var/run/netns", env.NetNS()))
+	services, err := i.composeDNSOverlayServices(env)
+	if err != nil {
+		return err
+	}
+	dockerNet, err := renderDockerComposeNetwork(env, services)
+	if err != nil {
+		return err
+	}
 	dnf := filepath.Join(i.serviceBinDir(), "compose.network")
 	if err := os.WriteFile(dnf, []byte(dockerNet), 0644); err != nil {
 		return fmt.Errorf("failed to write docker compose network: %v", err)
 	}
 	mak.Set(&i.artifacts, db.ArtifactDockerComposeNetwork, dnf)
 	return nil
+}
+
+func (i *FileInstaller) composeDNSOverlayServices(env netns.Service) ([]composeDNSService, error) {
+	composePath, ok := i.artifacts[db.ArtifactDockerComposeFile]
+	if !ok || !env.ServiceIP.IsValid() {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(composePath)
+	if err != nil {
+		return nil, fmt.Errorf("read compose file for DNS overlay: %w", err)
+	}
+	services, err := composeDNSServices(raw)
+	if err != nil {
+		return nil, fmt.Errorf("compose DNS overlay: %w", err)
+	}
+	for _, service := range services {
+		if service.CustomResolver {
+			i.printf("warning: compose service %q defines dns or dns_search; leaving resolver configuration unchanged\n", service.Name)
+		}
+	}
+	return services, nil
 }
 
 func (i *FileInstaller) setArtifacts(files map[db.ArtifactName]string) {
@@ -756,7 +790,9 @@ func (i *FileInstaller) applyNetworkToSystemdUnit(su *svc.SystemdUnit) error {
 	}
 	su.NetNS = n.NetNS
 	su.Requires = strings.Join(n.Deps, " ")
-	su.ResolvConf = fmt.Sprintf("/etc/netns/%s/resolv.conf", su.NetNS)
+	if n.HasResolvConf {
+		su.ResolvConf = fmt.Sprintf("/etc/netns/%s/resolv.conf", su.NetNS)
+	}
 	return nil
 }
 

@@ -88,6 +88,12 @@ if [ -n "$SERVICE_IP" ]; then
     # Add default route in service-ns
     ip netns exec $NS_NAME ip route add default dev $IF_IN_NS_NAME
     ip netns exec $NS_NAME ip route replace default via $YEET_IP dev $IF_IN_NS_NAME
+    if [ -n "$RANGE" ]; then
+        ip netns exec $NS_NAME ip route replace "$RANGE" dev "$IF_IN_NS_NAME"
+    fi
+    if [ -n "$HOST_IP" ]; then
+        ip netns exec $NS_NAME ip route replace "$HOST_IP/32" dev "$IF_IN_NS_NAME"
+    fi
 fi
 
 if [ -n "$MACVLAN_PARENT" ] && [ -n "$MACVLAN_MAC" ]; then

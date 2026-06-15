@@ -8,9 +8,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 func RunDNSServer(ctx context.Context, cfg *Config) error {
@@ -20,7 +22,7 @@ func RunDNSServer(ctx context.Context, cfg *Config) error {
 	server := &dns.Server{
 		Addr:         yeetDNSListenAddr,
 		Net:          "udp",
-		Handler:      newYeetDNSHandler(cfg.DB, nil),
+		Handler:      newYeetDNSHandler(dnsStoreForConfig(cfg), nil),
 		ReadTimeout:  yeetDNSReadTimeout,
 		WriteTimeout: yeetDNSWriteTimeout,
 	}
@@ -37,4 +39,30 @@ func RunDNSServer(ctx context.Context, cfg *Config) error {
 	case err := <-errc:
 		return err
 	}
+}
+
+func dnsStoreForConfig(cfg *Config) dnsDataStore {
+	if cfg == nil {
+		return nil
+	}
+	if cfg.RootDir == "" {
+		return cfg.DB
+	}
+	servicesRoot := cfg.ServicesRoot
+	if servicesRoot == "" {
+		servicesRoot = filepath.Join(cfg.RootDir, "services")
+	}
+	return freshDNSStore{
+		dbPath:       filepath.Join(cfg.RootDir, "db.json"),
+		servicesRoot: servicesRoot,
+	}
+}
+
+type freshDNSStore struct {
+	dbPath       string
+	servicesRoot string
+}
+
+func (s freshDNSStore) Get() (db.DataView, error) {
+	return db.NewStore(s.dbPath, s.servicesRoot).Get()
 }

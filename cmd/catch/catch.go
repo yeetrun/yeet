@@ -67,8 +67,8 @@ var (
 
 const defaultDockerConfigPath = "/etc/docker/daemon.json"
 const defaultCatchTag = "tag:catch"
-const dockerInstallDNS = "192.168.100.1"
-const dockerInstallDNSSearch = "yeet.internal"
+const oldDockerInstallDNS = "192.168.100.1"
+const oldDockerInstallDNSSearch = "yeet.internal"
 
 var errCatchTSNetUntagged = errors.New("catch Tailscale node must be tagged")
 
@@ -491,7 +491,7 @@ func validateCatchRuntime(socket string) error {
 }
 
 func ensureContainerdSnapshotterForInstall(dockerConfigPath string) error {
-	changed, err := writeDockerInstallConfig(dockerConfigPath)
+	changed, err := writeContainerdSnapshotterConfig(dockerConfigPath)
 	if err != nil {
 		return err
 	}
@@ -499,41 +499,6 @@ func ensureContainerdSnapshotterForInstall(dockerConfigPath string) error {
 		return nil
 	}
 	return restartDocker()
-}
-
-func writeDockerInstallConfig(dockerConfigPath string) (bool, error) {
-	cfg, err := readDockerConfig(dockerConfigPath)
-	if err != nil {
-		return false, err
-	}
-
-	changed := false
-	features, err := dockerConfigFeatures(cfg, dockerConfigPath)
-	if err != nil {
-		return false, err
-	}
-	if features["containerd-snapshotter"] != true {
-		features["containerd-snapshotter"] = true
-		changed = true
-	}
-	dnsChanged, err := setDockerConfigStringList(cfg, dockerConfigPath, "dns", []string{dockerInstallDNS})
-	if err != nil {
-		return false, err
-	}
-	changed = changed || dnsChanged
-	searchChanged, err := setDockerConfigStringList(cfg, dockerConfigPath, "dns-search", []string{dockerInstallDNSSearch})
-	if err != nil {
-		return false, err
-	}
-	changed = changed || searchChanged
-
-	if !changed {
-		return false, nil
-	}
-	if err := writeDockerConfig(dockerConfigPath, cfg); err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 func writeContainerdSnapshotterConfig(dockerConfigPath string) (bool, error) {
@@ -545,46 +510,51 @@ func writeContainerdSnapshotterConfig(dockerConfigPath string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if features["containerd-snapshotter"] == true {
+	changed := false
+	if features["containerd-snapshotter"] != true {
+		features["containerd-snapshotter"] = true
+		changed = true
+	}
+	if removeOldDockerDNSDefaults(cfg) {
+		changed = true
+	}
+	if !changed {
 		return false, nil
 	}
-	features["containerd-snapshotter"] = true
 	if err := writeDockerConfig(dockerConfigPath, cfg); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func setDockerConfigStringList(cfg map[string]any, dockerConfigPath, key string, want []string) (bool, error) {
-	got, err := dockerConfigStringList(cfg, dockerConfigPath, key)
-	if err != nil {
-		return false, err
+func removeOldDockerDNSDefaults(cfg map[string]any) bool {
+	dns, ok := dockerConfigStringList(cfg["dns"])
+	if !ok || !slices.Equal(dns, []string{oldDockerInstallDNS}) {
+		return false
 	}
-	if slices.Equal(got, want) {
-		return false, nil
+	dnsSearch, ok := dockerConfigStringList(cfg["dns-search"])
+	if !ok || !slices.Equal(dnsSearch, []string{oldDockerInstallDNSSearch}) {
+		return false
 	}
-	cfg[key] = append([]string(nil), want...)
-	return true, nil
+	delete(cfg, "dns")
+	delete(cfg, "dns-search")
+	return true
 }
 
-func dockerConfigStringList(cfg map[string]any, dockerConfigPath, key string) ([]string, error) {
-	raw, ok := cfg[key]
-	if !ok || raw == nil {
-		return nil, nil
-	}
+func dockerConfigStringList(raw any) ([]string, bool) {
 	items, ok := raw.([]any)
 	if !ok {
-		return nil, fmt.Errorf("docker config %s has non-list %s", dockerConfigPath, key)
+		return nil, false
 	}
 	values := make([]string, 0, len(items))
 	for _, item := range items {
 		value, ok := item.(string)
 		if !ok {
-			return nil, fmt.Errorf("docker config %s has non-string %s entry", dockerConfigPath, key)
+			return nil, false
 		}
 		values = append(values, value)
 	}
-	return values, nil
+	return values, true
 }
 
 func readDockerConfig(dockerConfigPath string) (map[string]any, error) {
