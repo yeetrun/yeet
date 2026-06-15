@@ -221,25 +221,46 @@ func TestBuildNetNSResolvConfIncludesOptionalSearchDomains(t *testing.T) {
 	}
 }
 
-func TestDefaultNetNSResolvConfUsesYeetDNS(t *testing.T) {
+func TestSvcNetNSResolvConfUsesYeetDNS(t *testing.T) {
 	t.Setenv("DEFAULT_NS", "")
 	t.Setenv("DEFAULT_SEARCH_DOMAINS", "")
 
-	got := defaultNetNSResolvConf()
+	got := defaultSvcNetNSResolvConf()
 	want := "nameserver 192.168.100.1\nsearch yeet.internal\n"
 	if got != want {
 		t.Fatalf("resolv.conf = %q, want %q", got, want)
 	}
 }
 
-func TestDefaultNetNSResolvConfExplicitNameserverOptsOut(t *testing.T) {
+func TestSvcNetNSResolvConfExplicitNameserverOptsOut(t *testing.T) {
 	t.Setenv("DEFAULT_NS", "1.1.1.1")
 	t.Setenv("DEFAULT_SEARCH_DOMAINS", "")
 
-	got := defaultNetNSResolvConf()
+	got := defaultSvcNetNSResolvConf()
 	want := "nameserver 1.1.1.1\n"
 	if got != want {
 		t.Fatalf("resolv.conf = %q, want %q", got, want)
+	}
+}
+
+func TestNetNSResolvConfForScopesDNSByNetworkMode(t *testing.T) {
+	t.Setenv("DEFAULT_NS", "")
+	t.Setenv("DEFAULT_SEARCH_DOMAINS", "")
+
+	svcEnv := netns.Service{ServiceName: "svc"}
+	applySvcNetwork(&svcEnv, &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.3")})
+	if got := netNSResolvConfFor(&svcEnv, ""); got != "nameserver 192.168.100.1\nsearch yeet.internal\n" {
+		t.Fatalf("svc resolv.conf = %q", got)
+	}
+
+	lanEnv := netns.Service{ServiceName: "lan", MacvlanParent: "vmbr0"}
+	if got := netNSResolvConfFor(&lanEnv, ""); got != "" {
+		t.Fatalf("lan resolv.conf = %q, want empty", got)
+	}
+
+	tsEnv := netns.Service{ServiceName: "ts", TailscaleTAPInterface: "yts0"}
+	if got := netNSResolvConfFor(&tsEnv, tailscaledResolvConf); got != tailscaledResolvConf {
+		t.Fatalf("tailscale tap resolv.conf = %q, want %q", got, tailscaledResolvConf)
 	}
 }
 
@@ -890,7 +911,7 @@ func TestInstallerCloseStagesGeneratedPythonComposeWithNetworkArtifacts(t *testi
 	}
 	for _, want := range []string{
 		"driver: yeet",
-		`dev.catchit.netns: "/var/run/netns/yeet-py-svc-ns"`,
+		"dev.catchit.netns: /var/run/netns/yeet-py-svc-ns",
 	} {
 		if !strings.Contains(string(composeNetworkRaw), want) {
 			t.Fatalf("compose network missing %q:\n%s", want, string(composeNetworkRaw))
@@ -994,6 +1015,85 @@ func TestInstallerCloseStagesDockerComposePayloadAndPublishPorts(t *testing.T) {
 	}
 	if !reflect.DeepEqual(service.Publish, []string{"127.0.0.1:8080:80"}) {
 		t.Fatalf("Publish = %#v, want normalized publish ports", service.Publish)
+	}
+}
+
+func TestInstallerCloseStagesComposeSvcDNSOverlay(t *testing.T) {
+	server := newTestServer(t)
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "compose-dns"},
+		Network:      NetworkOpts{Interfaces: "svc"},
+		StageOnly:    true,
+		PayloadName:  "compose.yml",
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller returned error: %v", err)
+	}
+	payload := "services:\n  app:\n    image: busybox\n  custom:\n    image: busybox\n    dns:\n      - 1.1.1.1\n"
+	if _, err := installer.Write([]byte(payload)); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	service := testService(t, server, "compose-dns")
+	networkPath := stagedArtifactPath(t, service, db.ArtifactDockerComposeNetwork)
+	raw, err := os.ReadFile(networkPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", networkPath, err)
+	}
+	network := string(raw)
+	for _, want := range []string{
+		"services:",
+		"app:",
+		"192.168.100.1",
+		"yeet.internal",
+		"driver: yeet",
+		"dev.catchit.netns: /var/run/netns/yeet-compose-dns-ns",
+	} {
+		if !strings.Contains(network, want) {
+			t.Fatalf("compose network missing %q:\n%s", want, network)
+		}
+	}
+	if strings.Contains(network, "custom:") {
+		t.Fatalf("custom DNS service should not receive generated resolver stanza:\n%s", network)
+	}
+}
+
+func TestInstallerCloseStagesComposeLANOverlayWithoutYeetDNS(t *testing.T) {
+	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
+	hostDefaultRouteInterfaceFn = func() (string, error) { return "vmbr0", nil }
+	t.Cleanup(func() { hostDefaultRouteInterfaceFn = oldHostDefaultRouteInterfaceFn })
+
+	server := newTestServer(t)
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "compose-lan"},
+		Network:      NetworkOpts{Interfaces: "lan"},
+		StageOnly:    true,
+		PayloadName:  "compose.yml",
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller returned error: %v", err)
+	}
+	if _, err := installer.Write([]byte("services:\n  app:\n    image: busybox\n")); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	service := testService(t, server, "compose-lan")
+	networkPath := stagedArtifactPath(t, service, db.ArtifactDockerComposeNetwork)
+	raw, err := os.ReadFile(networkPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", networkPath, err)
+	}
+	if strings.Contains(string(raw), "192.168.100.1") || strings.Contains(string(raw), "yeet.internal") {
+		t.Fatalf("lan-only compose network should not include yeet DNS:\n%s", raw)
+	}
+	if _, ok := service.Artifacts[db.ArtifactNetNSResolv]; ok {
+		t.Fatalf("lan-only service staged netns resolv artifact: %#v", service.Artifacts[db.ArtifactNetNSResolv])
 	}
 }
 

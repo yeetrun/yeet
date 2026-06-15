@@ -755,55 +755,19 @@ func TestWriteContainerdSnapshotterConfigCreatesAndPreservesDockerConfig(t *test
 	}
 }
 
-func TestWriteDockerInstallConfigCreatesDNSDefaults(t *testing.T) {
-	root := t.TempDir()
-	cfgPath := filepath.Join(root, "daemon.json")
-
-	changed, err := writeDockerInstallConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("writeDockerInstallConfig: %v", err)
-	}
-	if !changed {
-		t.Fatal("writeDockerInstallConfig changed=false, want true")
-	}
-
-	raw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		t.Fatalf("read docker config: %v", err)
-	}
-	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		t.Fatalf("docker config json: %v", err)
-	}
-	assertDockerConfigList(t, cfg, "dns", []string{"192.168.100.1"})
-	assertDockerConfigList(t, cfg, "dns-search", []string{"yeet.internal"})
-	features := cfg["features"].(map[string]any)
-	if features["containerd-snapshotter"] != true {
-		t.Fatalf("features = %#v, want containerd-snapshotter=true", features)
-	}
-
-	changed, err = writeDockerInstallConfig(cfgPath)
-	if err != nil {
-		t.Fatalf("writeDockerInstallConfig already configured: %v", err)
-	}
-	if changed {
-		t.Fatal("writeDockerInstallConfig already configured changed=true, want false")
-	}
-}
-
-func TestWriteDockerInstallConfigPreservesExistingSettings(t *testing.T) {
+func TestWriteContainerdSnapshotterConfigDoesNotSetDockerDNS(t *testing.T) {
 	root := t.TempDir()
 	cfgPath := filepath.Join(root, "daemon.json")
 	if err := os.WriteFile(cfgPath, []byte(`{"log-driver":"journald","features":{"buildkit":true},"dns":["8.8.8.8"],"dns-search":["lan"]}`), 0o600); err != nil {
 		t.Fatalf("write existing config: %v", err)
 	}
 
-	changed, err := writeDockerInstallConfig(cfgPath)
+	changed, err := writeContainerdSnapshotterConfig(cfgPath)
 	if err != nil {
-		t.Fatalf("writeDockerInstallConfig: %v", err)
+		t.Fatalf("writeContainerdSnapshotterConfig: %v", err)
 	}
 	if !changed {
-		t.Fatal("writeDockerInstallConfig changed=false, want true")
+		t.Fatal("writeContainerdSnapshotterConfig changed=false, want true")
 	}
 
 	raw, err := os.ReadFile(cfgPath)
@@ -817,30 +781,121 @@ func TestWriteDockerInstallConfigPreservesExistingSettings(t *testing.T) {
 	if cfg["log-driver"] != "journald" {
 		t.Fatalf("log-driver = %#v, want journald", cfg["log-driver"])
 	}
-	assertDockerConfigList(t, cfg, "dns", []string{"192.168.100.1"})
-	assertDockerConfigList(t, cfg, "dns-search", []string{"yeet.internal"})
+	if got := fmt.Sprint(cfg["dns"]); got != "[8.8.8.8]" {
+		t.Fatalf("dns = %#v, want existing daemon DNS preserved", cfg["dns"])
+	}
+	if got := fmt.Sprint(cfg["dns-search"]); got != "[lan]" {
+		t.Fatalf("dns-search = %#v, want existing daemon search preserved", cfg["dns-search"])
+	}
 	features := cfg["features"].(map[string]any)
 	if features["buildkit"] != true || features["containerd-snapshotter"] != true {
 		t.Fatalf("features = %#v, want buildkit and containerd-snapshotter", features)
 	}
 }
 
-func assertDockerConfigList(t *testing.T, cfg map[string]any, key string, want []string) {
-	t.Helper()
-	raw, ok := cfg[key].([]any)
-	if !ok {
-		t.Fatalf("%s = %#v, want list", key, cfg[key])
+func TestWriteContainerdSnapshotterConfigCreatesOnlySnapshotterFeature(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "docker", "daemon.json")
+
+	changed, err := writeContainerdSnapshotterConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("writeContainerdSnapshotterConfig: %v", err)
 	}
-	got := make([]string, 0, len(raw))
-	for _, item := range raw {
-		value, ok := item.(string)
-		if !ok {
-			t.Fatalf("%s item = %#v, want string", key, item)
-		}
-		got = append(got, value)
+	if !changed {
+		t.Fatal("writeContainerdSnapshotterConfig changed=false, want true")
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("%s = %#v, want %#v", key, got, want)
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read docker config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("docker config json: %v", err)
+	}
+	if _, ok := cfg["dns"]; ok {
+		t.Fatalf("dns = %#v, want no daemon DNS default", cfg["dns"])
+	}
+	if _, ok := cfg["dns-search"]; ok {
+		t.Fatalf("dns-search = %#v, want no daemon search default", cfg["dns-search"])
+	}
+	features := cfg["features"].(map[string]any)
+	if features["containerd-snapshotter"] != true {
+		t.Fatalf("features = %#v, want containerd-snapshotter=true", features)
+	}
+}
+
+func TestWriteContainerdSnapshotterConfigRemovesOldYeetDNSDefaults(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "daemon.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"features":{"containerd-snapshotter":true},"dns":["192.168.100.1"],"dns-search":["yeet.internal"]}`), 0o600); err != nil {
+		t.Fatalf("write existing config: %v", err)
+	}
+
+	changed, err := writeContainerdSnapshotterConfig(cfgPath)
+	if err != nil {
+		t.Fatalf("writeContainerdSnapshotterConfig: %v", err)
+	}
+	if !changed {
+		t.Fatal("writeContainerdSnapshotterConfig changed=false, want true")
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read docker config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("docker config json: %v", err)
+	}
+	if _, ok := cfg["dns"]; ok {
+		t.Fatalf("dns = %#v, want old yeet daemon DNS removed", cfg["dns"])
+	}
+	if _, ok := cfg["dns-search"]; ok {
+		t.Fatalf("dns-search = %#v, want old yeet daemon search removed", cfg["dns-search"])
+	}
+	features := cfg["features"].(map[string]any)
+	if features["containerd-snapshotter"] != true {
+		t.Fatalf("features = %#v, want containerd-snapshotter=true", features)
+	}
+}
+
+func TestEnsureContainerdSnapshotterForInstallPreservesDockerDNS(t *testing.T) {
+	root := t.TempDir()
+	cfgPath := filepath.Join(root, "daemon.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"features":{"buildkit":true},"dns":["8.8.8.8"],"dns-search":["lan"]}`), 0o600); err != nil {
+		t.Fatalf("write existing config: %v", err)
+	}
+	binDir := filepath.Join(root, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir fake bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "systemctl"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write fake systemctl: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := ensureContainerdSnapshotterForInstall(cfgPath); err != nil {
+		t.Fatalf("ensureContainerdSnapshotterForInstall: %v", err)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read docker config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("docker config json: %v", err)
+	}
+	if got := fmt.Sprint(cfg["dns"]); got != "[8.8.8.8]" {
+		t.Fatalf("dns = %#v, want existing daemon DNS preserved", cfg["dns"])
+	}
+	if got := fmt.Sprint(cfg["dns-search"]); got != "[lan]" {
+		t.Fatalf("dns-search = %#v, want existing daemon search preserved", cfg["dns-search"])
+	}
+	features := cfg["features"].(map[string]any)
+	if features["buildkit"] != true || features["containerd-snapshotter"] != true {
+		t.Fatalf("features = %#v, want buildkit and containerd-snapshotter", features)
 	}
 }
 
