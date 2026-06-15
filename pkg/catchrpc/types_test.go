@@ -41,19 +41,22 @@ func TestServiceInfoSnapshotsIncludePopulated(t *testing.T) {
 }
 
 func TestServiceNetworkPortsPresenceRoundTrip(t *testing.T) {
-	raw, err := json.Marshal(ServiceNetwork{PortsPresent: true})
+	raw, err := json.Marshal(ServiceNetwork{PortsPresent: true, IPWarning: "configured IP not present in guest"})
 	if err != nil {
 		t.Fatalf("Marshal ServiceNetwork: %v", err)
 	}
 	if !strings.Contains(string(raw), `"ports":[]`) {
 		t.Fatalf("ServiceNetwork JSON = %s, want empty ports field", raw)
 	}
+	if !strings.Contains(string(raw), `"ipWarning":"configured IP not present in guest"`) {
+		t.Fatalf("ServiceNetwork JSON = %s, want ip warning field", raw)
+	}
 
 	var withPorts ServiceNetwork
-	if err := json.Unmarshal([]byte(`{"ports":[{"hostPort":80,"containerPort":80,"protocol":"tcp"}]}`), &withPorts); err != nil {
+	if err := json.Unmarshal([]byte(`{"ipWarning":"configured IP not present in guest","ports":[{"hostPort":80,"containerPort":80,"protocol":"tcp"}]}`), &withPorts); err != nil {
 		t.Fatalf("Unmarshal with ports: %v", err)
 	}
-	if !withPorts.PortsPresent || len(withPorts.Ports) != 1 || withPorts.Ports[0].Protocol != "tcp" {
+	if !withPorts.PortsPresent || len(withPorts.Ports) != 1 || withPorts.Ports[0].Protocol != "tcp" || withPorts.IPWarning == "" {
 		t.Fatalf("withPorts = %#v, want present tcp port", withPorts)
 	}
 

@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -929,9 +930,16 @@ func (e *ttyExecer) printVMIPs() (bool, error) {
 	if err != nil || sv.ServiceType() != db.ServiceTypeVM {
 		return false, nil
 	}
-	ips, err := e.s.serviceIPList(e.sn, sv)
+	ctx := e.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ips, err := e.s.serviceIPListWithContext(ctx, e.sn, sv)
 	if err != nil {
-		return true, fmt.Errorf("failed to get IP addresses: %w", err)
+		return true, fmt.Errorf("VM %q has no current IP known: %w", e.sn, err)
+	}
+	if len(ips) == 0 {
+		return true, fmt.Errorf("VM %q has no current IP known", e.sn)
 	}
 	for _, ip := range ips {
 		if _, err := fmt.Fprintln(e.rw, ip.IP); err != nil {

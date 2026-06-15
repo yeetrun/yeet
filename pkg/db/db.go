@@ -200,7 +200,9 @@ type VMConsoleConfig struct {
 }
 
 type VMSocketConfig struct {
-	APISocketPath string
+	APISocketPath   string
+	VsockSocketPath string `json:",omitempty"`
+	VsockGuestCID   uint32 `json:",omitempty"`
 }
 
 // SnapshotPolicy stores either server defaults or per-service overrides.

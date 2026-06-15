@@ -239,6 +239,7 @@ type ServiceVMNetwork struct {
 	Mode      string `json:"mode,omitempty"`
 	Interface string `json:"interface,omitempty"`
 	IP        string `json:"ip,omitempty"`
+	Source    string `json:"source,omitempty"`
 	MAC       string `json:"mac,omitempty"`
 }
 
@@ -254,6 +255,7 @@ type ServiceNetwork struct {
 	SvcIP     string            `json:"svcIp,omitempty"`
 	IPs       []ServiceIP       `json:"ips,omitempty"`
 	IPError   string            `json:"ipError,omitempty"`
+	IPWarning string            `json:"ipWarning,omitempty"`
 	Ports     []ServicePort     `json:"ports,omitempty"`
 	Macvlan   *ServiceMacvlan   `json:"macvlan,omitempty"`
 	Tailscale *ServiceTailscale `json:"tailscale,omitempty"`
@@ -265,6 +267,7 @@ type serviceNetworkJSON struct {
 	SvcIP     string            `json:"svcIp,omitempty"`
 	IPs       []ServiceIP       `json:"ips,omitempty"`
 	IPError   string            `json:"ipError,omitempty"`
+	IPWarning string            `json:"ipWarning,omitempty"`
 	Ports     []ServicePort     `json:"ports,omitempty"`
 	Macvlan   *ServiceMacvlan   `json:"macvlan,omitempty"`
 	Tailscale *ServiceTailscale `json:"tailscale,omitempty"`
@@ -274,6 +277,7 @@ type serviceNetworkJSONWithPorts struct {
 	SvcIP     string            `json:"svcIp,omitempty"`
 	IPs       []ServiceIP       `json:"ips,omitempty"`
 	IPError   string            `json:"ipError,omitempty"`
+	IPWarning string            `json:"ipWarning,omitempty"`
 	Ports     []ServicePort     `json:"ports"`
 	Macvlan   *ServiceMacvlan   `json:"macvlan,omitempty"`
 	Tailscale *ServiceTailscale `json:"tailscale,omitempty"`
@@ -289,6 +293,7 @@ func (n ServiceNetwork) MarshalJSON() ([]byte, error) {
 			SvcIP:     n.SvcIP,
 			IPs:       n.IPs,
 			IPError:   n.IPError,
+			IPWarning: n.IPWarning,
 			Ports:     ports,
 			Macvlan:   n.Macvlan,
 			Tailscale: n.Tailscale,
@@ -298,6 +303,7 @@ func (n ServiceNetwork) MarshalJSON() ([]byte, error) {
 		SvcIP:     n.SvcIP,
 		IPs:       n.IPs,
 		IPError:   n.IPError,
+		IPWarning: n.IPWarning,
 		Macvlan:   n.Macvlan,
 		Tailscale: n.Tailscale,
 	})
@@ -316,6 +322,7 @@ func (n *ServiceNetwork) UnmarshalJSON(data []byte) error {
 		SvcIP:        decoded.SvcIP,
 		IPs:          decoded.IPs,
 		IPError:      decoded.IPError,
+		IPWarning:    decoded.IPWarning,
 		Ports:        decoded.Ports,
 		Macvlan:      decoded.Macvlan,
 		Tailscale:    decoded.Tailscale,
@@ -342,6 +349,7 @@ type ServiceIP struct {
 	Label     string `json:"label,omitempty"`
 	IP        string `json:"ip,omitempty"`
 	Interface string `json:"interface,omitempty"`
+	Source    string `json:"source,omitempty"`
 }
 
 type ServiceMacvlan struct {

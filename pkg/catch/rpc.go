@@ -158,7 +158,7 @@ func (s *Server) dispatchRPCWithContext(ctx context.Context, req catchrpc.Reques
 	case "catch.Info":
 		return newRPCResponse(req.ID, GetInfoWithConfig(&s.cfg))
 	case "catch.ServiceInfo":
-		return s.handleRPCServiceInfo(req)
+		return s.handleRPCServiceInfo(ctx, req)
 	case "catch.ArtifactHashes":
 		return s.handleRPCArtifactHashes(req)
 	case "catch.ZFSServiceRootCandidates":
@@ -178,7 +178,7 @@ func (s *Server) dispatchRPCWithContext(ctx context.Context, req catchrpc.Reques
 	}
 }
 
-func (s *Server) handleRPCServiceInfo(req catchrpc.Request) catchrpc.Response {
+func (s *Server) handleRPCServiceInfo(ctx context.Context, req catchrpc.Request) catchrpc.Response {
 	var params catchrpc.ServiceInfoRequest
 	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
 		return responseFromRPCError(req.ID, rpcErr)
@@ -187,7 +187,7 @@ func (s *Server) handleRPCServiceInfo(req catchrpc.Request) catchrpc.Response {
 	if rpcErr != nil {
 		return responseFromRPCError(req.ID, rpcErr)
 	}
-	resp, err := s.serviceInfo(service)
+	resp, err := s.serviceInfoWithContext(ctx, service)
 	if err != nil {
 		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to get service info", err.Error())
 	}

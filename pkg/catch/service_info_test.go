@@ -284,13 +284,13 @@ func TestServiceInfoIncludesVMConfig(t *testing.T) {
 	if vm.Console == nil || !vm.Console.Available || vm.Console.SocketPath != "/run/yeet/devbox/serial.sock" {
 		t.Fatalf("VM console = %#v", vm.Console)
 	}
-	if len(vm.Networks) != 1 || vm.Networks[0].Mode != "svc" || vm.Networks[0].Interface != "tap-devbox" || vm.Networks[0].IP != "10.0.0.42" || vm.Networks[0].MAC != "02:00:00:00:00:42" {
+	if len(vm.Networks) != 1 || vm.Networks[0].Mode != "svc" || vm.Networks[0].Interface != "tap-devbox" || vm.Networks[0].IP != "10.0.0.42" || vm.Networks[0].Source != "config" || vm.Networks[0].MAC != "02:00:00:00:00:42" {
 		t.Fatalf("VM networks = %#v", vm.Networks)
 	}
 	if resp.Info.Network.SvcIP != "10.0.0.42" {
 		t.Fatalf("generic svc IP = %q, want 10.0.0.42", resp.Info.Network.SvcIP)
 	}
-	if len(resp.Info.Network.IPs) != 1 || resp.Info.Network.IPs[0].Label != "service" || resp.Info.Network.IPs[0].IP != "10.0.0.42" || resp.Info.Network.IPs[0].Interface != "tap-devbox" {
+	if len(resp.Info.Network.IPs) != 1 || resp.Info.Network.IPs[0].Label != "service" || resp.Info.Network.IPs[0].IP != "10.0.0.42" || resp.Info.Network.IPs[0].Interface != "tap-devbox" || resp.Info.Network.IPs[0].Source != "config" {
 		t.Fatalf("generic network IPs = %#v", resp.Info.Network.IPs)
 	}
 	if vm.SetupState != "ready" {

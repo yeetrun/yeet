@@ -87,3 +87,37 @@ func TestRenderFirecrackerConfigIncludesNetworkFields(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderFirecrackerConfigIncludesVsock(t *testing.T) {
+	raw, err := renderFirecrackerConfig(firecrackerConfig{
+		BootSource: firecrackerBootSource{
+			KernelImagePath: "/srv/images/vmlinux",
+			BootArgs:        "console=ttyS0",
+		},
+		Drives: []firecrackerDrive{{
+			DriveID:      "rootfs",
+			PathOnHost:   "/srv/vms/devbox/rootfs.raw",
+			IsRootDevice: true,
+		}},
+		MachineConfig: firecrackerMachineConfig{VCPUCount: 2, MemSizeMib: 2048},
+		Vsock: &firecrackerVsock{
+			VsockID:  "agent",
+			GuestCID: 3,
+			UDSPath:  "/srv/vms/devbox/run/vsock.sock",
+		},
+	})
+	if err != nil {
+		t.Fatalf("renderFirecrackerConfig: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		`"vsock"`,
+		`"vsock_id": "agent"`,
+		`"guest_cid": 3`,
+		`"uds_path": "/srv/vms/devbox/run/vsock.sock"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config missing %q:\n%s", want, text)
+		}
+	}
+}

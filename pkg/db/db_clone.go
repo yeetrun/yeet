@@ -446,5 +446,7 @@ func (src *VMSocketConfig) Clone() *VMSocketConfig {
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _VMSocketConfigCloneNeedsRegeneration = VMSocketConfig(struct {
-	APISocketPath string
+	APISocketPath   string
+	VsockSocketPath string
+	VsockGuestCID   uint32
 }{})

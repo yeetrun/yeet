@@ -147,6 +147,47 @@ func TestRPCServiceInfo(t *testing.T) {
 	}
 }
 
+func TestRPCServiceInfoPassesRequestContextToVMAgent(t *testing.T) {
+	server := newTestServer(t)
+	seedLANVMService(t, server)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *cdb.Data, svc *cdb.Service) error {
+		svc.VM.Sockets.VsockSocketPath = "/run/devbox/vsock.sock"
+		svc.VM.Sockets.VsockGuestCID = vmAgentGuestCID
+		return nil
+	}); err != nil {
+		t.Fatalf("MutateService: %v", err)
+	}
+
+	oldQuery := queryVMNetworkStateFn
+	sawCanceled := false
+	queryVMNetworkStateFn = func(ctx context.Context, _ string) (vmAgentNetworkState, error) {
+		sawCanceled = errors.Is(ctx.Err(), context.Canceled)
+		return vmAgentNetworkState{}, ctx.Err()
+	}
+	t.Cleanup(func() { queryVMNetworkStateFn = oldQuery })
+
+	params, err := json.Marshal(catchrpc.ServiceInfoRequest{Service: "devbox"})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	req := catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "catch.ServiceInfo",
+		Params:  params,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	resp := server.dispatchRPCWithContext(ctx, req)
+	if resp.Error != nil {
+		t.Fatalf("dispatchRPCWithContext error = %#v", resp.Error)
+	}
+	if !sawCanceled {
+		t.Fatal("VM agent query did not receive canceled RPC context")
+	}
+}
+
 func TestRPCTailscaleSetup(t *testing.T) {
 	server := newTestServer(t)
 	ts := httptest.NewServer(server.RPCMux())

@@ -5,9 +5,8 @@
 package catch
 
 import (
+	"context"
 	"fmt"
-	"net/netip"
-	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,7 +18,18 @@ import (
 
 var listIPv4AddrsFn = listIPv4Addrs
 var serviceVMStatusFn = serviceVMStatus
-var discoverVMLANIPsFn = discoverVMLANIPs
+var queryVMNetworkStateFn = queryVMNetworkState
+
+type vmDiscoveredIP struct {
+	IP     string
+	Source string
+}
+
+type vmNetworkDiscovery struct {
+	IPs     map[string]vmDiscoveredIP
+	Err     error
+	Warning string
+}
 
 func serviceVMStatus(sn string) (svc.Status, error) {
 	runner := &vmRunner{name: sn}
@@ -27,6 +37,13 @@ func serviceVMStatus(sn string) (svc.Status, error) {
 }
 
 func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {
+	return s.serviceInfoWithContext(s.serviceContext(), sn)
+}
+
+func (s *Server) serviceInfoWithContext(ctx context.Context, sn string) (catchrpc.ServiceInfoResponse, error) {
+	if ctx == nil {
+		ctx = s.serviceContext()
+	}
 	resp := catchrpc.ServiceInfoResponse{}
 	dv, err := s.getDB()
 	if err != nil {
@@ -59,19 +76,24 @@ func (s *Server) serviceInfo(sn string) (catchrpc.ServiceInfoResponse, error) {
 	portInfo := servicePublishPortInfo(sn, sv)
 	info.Network.Ports = portInfo.Ports
 	info.Network.PortsPresent = portInfo.PortsPresent
-	ips, ipErr := s.serviceIPList(sn, sv)
-	if ipErr != nil {
-		info.Network.IPError = ipErr.Error()
+	if sv.ServiceType() == db.ServiceTypeVM {
+		vmNetwork := discoverVMNetworkIPs(ctx, sv.VM())
+		info.Network.IPs = serviceVMNetworkIPs(sv.VM(), vmNetwork.IPs)
+		if vmNetwork.Err != nil {
+			info.Network.IPError = vmNetwork.Err.Error()
+		}
+		info.Network.IPWarning = vmNetwork.Warning
+		info.VM = serviceVMInfo(sv.VM(), vmNetwork.IPs)
 	} else {
-		info.Network.IPs = ips
+		ips, ipErr := s.serviceIPList(sn, sv)
+		if ipErr != nil {
+			info.Network.IPError = ipErr.Error()
+		} else {
+			info.Network.IPs = ips
+		}
 	}
 	info.Status = s.serviceStatusInfo(sn, sv)
 	info.Images = serviceImageInfo(dv, sn)
-	var vmLANIPs map[string]string
-	if sv.ServiceType() == db.ServiceTypeVM {
-		vmLANIPs = discoverVMLANIPsFn(sn, sv.VM())
-		info.VM = serviceVMInfo(sv.VM(), vmLANIPs)
-	}
 	snapshots, err := s.serviceSnapshotInfo(dv, sv)
 	if err != nil {
 		return resp, err
@@ -237,7 +259,7 @@ func vmSvcIPFromNetworks(vm db.VMConfigView) string {
 	return ""
 }
 
-func serviceVMInfo(vm db.VMConfigView, discovered map[string]string) *catchrpc.ServiceVM {
+func serviceVMInfo(vm db.VMConfigView, discovered map[string]vmDiscoveredIP) *catchrpc.ServiceVM {
 	if !vm.Valid() {
 		return nil
 	}
@@ -270,45 +292,46 @@ func serviceVMInfo(vm db.VMConfigView, discovered map[string]string) *catchrpc.S
 	return out
 }
 
-func vmSSHHostFromNetworks(vm db.VMConfigView, discovered map[string]string) string {
+func vmSSHHostFromNetworks(vm db.VMConfigView, discovered map[string]vmDiscoveredIP) string {
 	if svcIP := vmSvcIPFromNetworks(vm); svcIP != "" {
 		return svcIP
 	}
 	for _, network := range vm.Networks().AsSlice() {
-		if ip := serviceVMNetworkIP(network, discovered); ip != "" {
-			return ip
+		if ip := serviceVMNetworkIP(network, discovered); ip.IP != "" {
+			return ip.IP
 		}
 	}
 	return ""
 }
 
-func serviceVMNetworkInfo(network db.VMNetworkConfig, discovered map[string]string) catchrpc.ServiceVMNetwork {
+func serviceVMNetworkInfo(network db.VMNetworkConfig, discovered map[string]vmDiscoveredIP) catchrpc.ServiceVMNetwork {
 	out := catchrpc.ServiceVMNetwork{
 		Mode:      network.Mode,
 		Interface: network.Interface,
 		MAC:       network.MAC,
 	}
-	if ip := serviceVMNetworkIP(network, discovered); ip != "" {
-		out.IP = ip
+	if ip := serviceVMNetworkIP(network, discovered); ip.IP != "" {
+		out.IP = ip.IP
+		out.Source = ip.Source
 	}
 	return out
 }
 
-func serviceVMNetworkIP(network db.VMNetworkConfig, discovered map[string]string) string {
+func serviceVMNetworkIP(network db.VMNetworkConfig, discovered map[string]vmDiscoveredIP) vmDiscoveredIP {
 	if network.IP.IsValid() {
-		return network.IP.String()
+		return vmDiscoveredIP{IP: network.IP.String(), Source: "config"}
 	}
 	return discovered[strings.TrimSpace(network.Interface)]
 }
 
-func serviceVMNetworkIPs(vm db.VMConfigView, discovered map[string]string) []catchrpc.ServiceIP {
+func serviceVMNetworkIPs(vm db.VMConfigView, discovered map[string]vmDiscoveredIP) []catchrpc.ServiceIP {
 	if !vm.Valid() {
 		return nil
 	}
 	var out []catchrpc.ServiceIP
 	for _, network := range vm.Networks().AsSlice() {
 		ip := serviceVMNetworkIP(network, discovered)
-		if ip == "" {
+		if ip.IP == "" {
 			continue
 		}
 		label := "vm"
@@ -320,19 +343,25 @@ func serviceVMNetworkIPs(vm db.VMConfigView, discovered map[string]string) []cat
 		}
 		out = append(out, catchrpc.ServiceIP{
 			Label:     label,
-			IP:        ip,
+			IP:        ip.IP,
 			Interface: network.Interface,
+			Source:    ip.Source,
 		})
 	}
 	return out
 }
 
 func (s *Server) serviceIPList(sn string, sv db.ServiceView) ([]catchrpc.ServiceIP, error) {
+	return s.serviceIPListWithContext(s.serviceContext(), sn, sv)
+}
+
+func (s *Server) serviceIPListWithContext(ctx context.Context, sn string, sv db.ServiceView) ([]catchrpc.ServiceIP, error) {
 	if sn == CatchService {
 		return s.catchServiceIPList()
 	}
 	if sv.ServiceType() == db.ServiceTypeVM {
-		return serviceVMNetworkIPs(sv.VM(), discoverVMLANIPsFn(sn, sv.VM())), nil
+		vmNetwork := discoverVMNetworkIPs(ctx, sv.VM())
+		return serviceVMNetworkIPs(sv.VM(), vmNetwork.IPs), vmNetwork.Err
 	}
 
 	args, hasNetns := serviceIPListArgs(sn, sv)
@@ -343,72 +372,107 @@ func (s *Server) serviceIPList(sn string, sv db.ServiceView) ([]catchrpc.Service
 	return serviceIPListFromEntries(raw, serviceIPLabelConfigFromView(sv, hasNetns)), nil
 }
 
-func discoverVMLANIPs(service string, vm db.VMConfigView) map[string]string {
-	out := parseVMGuestIPReports(vmJournalOutput(service))
+func (s *Server) serviceContext() context.Context {
+	if s.ctx != nil {
+		return s.ctx
+	}
+	return context.Background()
+}
+
+func discoverVMNetworkIPs(ctx context.Context, vm db.VMConfigView) vmNetworkDiscovery {
+	out := vmNetworkDiscovery{IPs: map[string]vmDiscoveredIP{}}
+	needsAgentIP := vmNeedsAgentNetworkIP(vm)
+	verifiesStaticIP := vmHasStaticNetworkIP(vm)
+	if !needsAgentIP && !verifiesStaticIP {
+		return out
+	}
+	sockets := vm.Sockets()
+	socketPath := strings.TrimSpace(sockets.VsockSocketPath)
+	if socketPath == "" {
+		if needsAgentIP {
+			out.Err = fmt.Errorf("VM agent vsock socket path is not configured")
+		} else {
+			out.Warning = "VM agent vsock socket path is not configured; configured VM IPs were not verified"
+		}
+		return out
+	}
+	state, err := queryVMNetworkStateFn(ctx, socketPath)
+	if err != nil {
+		if needsAgentIP {
+			out.Err = fmt.Errorf("VM agent unavailable: %w", err)
+		} else {
+			out.Warning = fmt.Sprintf("VM agent unavailable; configured VM IPs were not verified: %v", err)
+		}
+		return out
+	}
+	agentIPs := vmAgentInterfaceIPs(state)
+	for iface, ips := range agentIPs {
+		if len(ips) == 0 {
+			continue
+		}
+		out.IPs[iface] = vmDiscoveredIP{IP: ips[0], Source: "agent"}
+	}
+	out.Warning = vmStaticIPVerificationWarning(vm, agentIPs)
+	return out
+}
+
+func vmNeedsAgentNetworkIP(vm db.VMConfigView) bool {
 	for _, network := range vm.Networks().AsSlice() {
-		if network.Mode != "lan" || serviceVMNetworkIP(network, out) != "" {
+		if !network.IP.IsValid() {
+			return true
+		}
+	}
+	return false
+}
+
+func vmHasStaticNetworkIP(vm db.VMConfigView) bool {
+	for _, network := range vm.Networks().AsSlice() {
+		if network.IP.IsValid() {
+			return true
+		}
+	}
+	return false
+}
+
+func vmAgentInterfaceIPs(state vmAgentNetworkState) map[string][]string {
+	out := map[string][]string{}
+	for _, iface := range state.Interfaces {
+		name := strings.TrimSpace(iface.Name)
+		if name == "" || len(iface.IPs) == 0 {
 			continue
 		}
-		if ip := vmLANIPFromNeighbor(network); ip != "" {
-			out[strings.TrimSpace(network.Interface)] = ip
-		}
+		out[name] = append([]string(nil), iface.IPs...)
 	}
 	return out
 }
 
-func vmJournalOutput(service string) []byte {
-	out, err := exec.Command("journalctl", "-u", vmSystemdUnitName(service), "-o", "cat", "--no-pager", "-n", "1000").Output()
-	if err != nil {
-		return nil
+func vmStaticIPVerificationWarning(vm db.VMConfigView, agentIPs map[string][]string) string {
+	var warnings []string
+	for _, network := range vm.Networks().AsSlice() {
+		if !network.IP.IsValid() {
+			continue
+		}
+		iface := strings.TrimSpace(network.Interface)
+		want := network.IP.String()
+		got := agentIPs[iface]
+		if len(got) == 0 {
+			warnings = append(warnings, fmt.Sprintf("VM agent did not report interface %s for configured IP %s", iface, want))
+			continue
+		}
+		if !stringSliceContains(got, want) {
+			warnings = append(warnings, fmt.Sprintf("VM agent reported %s IP %s, configured IP is %s", iface, strings.Join(got, ", "), want))
+		}
 	}
-	return out
+	return strings.Join(warnings, "; ")
 }
 
-func vmLANIPFromNeighbor(network db.VMNetworkConfig) string {
-	parent := strings.TrimSpace(network.Parent)
-	mac := strings.TrimSpace(network.MAC)
-	if parent == "" || mac == "" {
-		return ""
-	}
-	out, err := exec.Command("ip", "-4", "neigh", "show", "dev", parent).Output()
-	if err != nil {
-		return ""
-	}
-	return parseIPNeighForMAC(out, mac)
-}
-
-func parseVMGuestIPReports(raw []byte) map[string]string {
-	out := map[string]string{}
-	for _, line := range strings.Split(string(raw), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) != 3 || (fields[0] != "yeet-ip" && fields[0] != "yeet-ready") {
-			continue
-		}
-		if _, err := netip.ParseAddr(fields[2]); err != nil {
-			continue
-		}
-		out[fields[1]] = fields[2]
-	}
-	return out
-}
-
-func parseIPNeighForMAC(raw []byte, mac string) string {
-	mac = strings.ToLower(strings.TrimSpace(mac))
-	for _, line := range strings.Split(string(raw), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
-		}
-		if _, err := netip.ParseAddr(fields[0]); err != nil {
-			continue
-		}
-		for i := 1; i+1 < len(fields); i++ {
-			if fields[i] == "lladdr" && strings.ToLower(fields[i+1]) == mac {
-				return fields[0]
-			}
+func stringSliceContains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
 		}
 	}
-	return ""
+	return false
 }
 
 func (s *Server) catchServiceIPList() ([]catchrpc.ServiceIP, error) {
