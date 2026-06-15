@@ -67,6 +67,8 @@ var (
 
 const defaultDockerConfigPath = "/etc/docker/daemon.json"
 const defaultCatchTag = "tag:catch"
+const dockerInstallDNS = "192.168.100.1"
+const dockerInstallDNSSearch = "yeet.internal"
 
 var errCatchTSNetUntagged = errors.New("catch Tailscale node must be tagged")
 
@@ -427,7 +429,7 @@ func handleLocalCommand(args []string, scfg *catch.Config, dataDir string, out i
 			return true, fmt.Errorf("failed to set up docker: %w", err)
 		}
 		if err := ensureContainerdSnapshotterForInstallFn(defaultDockerConfigPath); err != nil {
-			return true, fmt.Errorf("failed to configure docker containerd snapshotter: %w", err)
+			return true, fmt.Errorf("failed to configure docker: %w", err)
 		}
 		if err := validateCatchRuntimeFn(*containerdSocket); err != nil {
 			return true, fmt.Errorf("failed to validate catch runtime prerequisites: %w", err)
@@ -489,7 +491,7 @@ func validateCatchRuntime(socket string) error {
 }
 
 func ensureContainerdSnapshotterForInstall(dockerConfigPath string) error {
-	changed, err := writeContainerdSnapshotterConfig(dockerConfigPath)
+	changed, err := writeDockerInstallConfig(dockerConfigPath)
 	if err != nil {
 		return err
 	}
@@ -497,6 +499,41 @@ func ensureContainerdSnapshotterForInstall(dockerConfigPath string) error {
 		return nil
 	}
 	return restartDocker()
+}
+
+func writeDockerInstallConfig(dockerConfigPath string) (bool, error) {
+	cfg, err := readDockerConfig(dockerConfigPath)
+	if err != nil {
+		return false, err
+	}
+
+	changed := false
+	features, err := dockerConfigFeatures(cfg, dockerConfigPath)
+	if err != nil {
+		return false, err
+	}
+	if features["containerd-snapshotter"] != true {
+		features["containerd-snapshotter"] = true
+		changed = true
+	}
+	dnsChanged, err := setDockerConfigStringList(cfg, dockerConfigPath, "dns", []string{dockerInstallDNS})
+	if err != nil {
+		return false, err
+	}
+	changed = changed || dnsChanged
+	searchChanged, err := setDockerConfigStringList(cfg, dockerConfigPath, "dns-search", []string{dockerInstallDNSSearch})
+	if err != nil {
+		return false, err
+	}
+	changed = changed || searchChanged
+
+	if !changed {
+		return false, nil
+	}
+	if err := writeDockerConfig(dockerConfigPath, cfg); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func writeContainerdSnapshotterConfig(dockerConfigPath string) (bool, error) {
@@ -516,6 +553,38 @@ func writeContainerdSnapshotterConfig(dockerConfigPath string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+func setDockerConfigStringList(cfg map[string]any, dockerConfigPath, key string, want []string) (bool, error) {
+	got, err := dockerConfigStringList(cfg, dockerConfigPath, key)
+	if err != nil {
+		return false, err
+	}
+	if slices.Equal(got, want) {
+		return false, nil
+	}
+	cfg[key] = append([]string(nil), want...)
+	return true, nil
+}
+
+func dockerConfigStringList(cfg map[string]any, dockerConfigPath, key string) ([]string, error) {
+	raw, ok := cfg[key]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("docker config %s has non-list %s", dockerConfigPath, key)
+	}
+	values := make([]string, 0, len(items))
+	for _, item := range items {
+		value, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("docker config %s has non-string %s entry", dockerConfigPath, key)
+		}
+		values = append(values, value)
+	}
+	return values, nil
 }
 
 func readDockerConfig(dockerConfigPath string) (map[string]any, error) {

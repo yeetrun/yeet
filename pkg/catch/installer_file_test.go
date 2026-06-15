@@ -243,6 +243,76 @@ func TestDefaultNetNSResolvConfExplicitNameserverOptsOut(t *testing.T) {
 	}
 }
 
+func TestConfigureNetworkRejectsSvcSubnetConflict(t *testing.T) {
+	oldCheck := checkSvcSubnetAvailableFn
+	oldLiveIPs := liveSvcNetworkIPsFunc
+	t.Cleanup(func() { checkSvcSubnetAvailableFn = oldCheck })
+	t.Cleanup(func() { liveSvcNetworkIPsFunc = oldLiveIPs })
+	checkSvcSubnetAvailableFn = func() error {
+		return fmt.Errorf("required service subnet 192.168.100.0/24 conflicts with existing host address 192.168.100.50/24 on eth0")
+	}
+	liveSvcNetworkIPsFunc = func() (map[netip.Addr]bool, error) {
+		return nil, nil
+	}
+
+	server := newTestServer(t)
+	if err := server.ensureDirs("conflict-svc", ""); err != nil {
+		t.Fatalf("ensureDirs returned error: %v", err)
+	}
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "conflict-svc"},
+			Network:      NetworkOpts{Interfaces: "svc"},
+		},
+	}
+
+	_, err := installer.configureNetwork()
+	if err == nil || !strings.Contains(err.Error(), "required service subnet 192.168.100.0/24 conflicts") {
+		t.Fatalf("configureNetwork error = %v, want service subnet conflict", err)
+	}
+}
+
+func TestCheckSvcSubnetAvailableRejectsHostConflicts(t *testing.T) {
+	err := checkSvcSubnetAvailableWith(fakeSvcSubnetIPCommand(t, map[string]string{
+		"ip -j addr show":             `[{"ifname":"eth0","addr_info":[{"family":"inet","local":"192.168.100.50","prefixlen":24}]}]`,
+		"ip -j route show table main": `[]`,
+	}))
+	if err == nil || !strings.Contains(err.Error(), "existing host address 192.168.100.50/24 on eth0") {
+		t.Fatalf("checkSvcSubnetAvailableWith error = %v, want host address conflict", err)
+	}
+
+	err = checkSvcSubnetAvailableWith(fakeSvcSubnetIPCommand(t, map[string]string{
+		"ip -j addr show":             `[]`,
+		"ip -j route show table main": `[{"dst":"192.168.0.0/16","dev":"eth0"}]`,
+	}))
+	if err == nil || !strings.Contains(err.Error(), "existing host route 192.168.0.0/16 on eth0") {
+		t.Fatalf("checkSvcSubnetAvailableWith error = %v, want host route conflict", err)
+	}
+}
+
+func TestCheckSvcSubnetAvailableAllowsExistingYeetSvcSubnet(t *testing.T) {
+	err := checkSvcSubnetAvailableWith(fakeSvcSubnetIPCommand(t, map[string]string{
+		"ip -j addr show":             `[{"ifname":"yeet0","addr_info":[{"family":"inet","local":"192.168.100.1","prefixlen":32}]}]`,
+		"ip -j route show table main": `[{"dst":"192.168.100.0/24","dev":"yeet0"},{"dst":"192.168.100.0/24","dev":"yvm-demo-b0"},{"dst":"192.168.100.16","dev":"yvm-demo-b1"},{"dst":"default","dev":"eth0","gateway":"10.0.0.1"}]`,
+	}))
+	if err != nil {
+		t.Fatalf("checkSvcSubnetAvailableWith returned error: %v", err)
+	}
+}
+
+func fakeSvcSubnetIPCommand(t *testing.T, output map[string]string) func(string, ...string) ([]byte, error) {
+	t.Helper()
+	return func(name string, args ...string) ([]byte, error) {
+		key := strings.Join(append([]string{name}, args...), " ")
+		out, ok := output[key]
+		if !ok {
+			t.Fatalf("unexpected command %q", key)
+		}
+		return []byte(out), nil
+	}
+}
+
 func TestInstallerCloseStagesEnvFileAndCleansTemp(t *testing.T) {
 	server := newTestServer(t)
 	installer, err := NewFileInstaller(server, FileInstallerCfg{

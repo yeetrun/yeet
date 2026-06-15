@@ -25,6 +25,7 @@ const (
 	yeetDNSDefaultTTL   = uint32(30)
 	yeetDNSReadTimeout  = 5 * time.Second
 	yeetDNSWriteTimeout = 5 * time.Second
+	tailscaleDNSIP      = "100.100.100.100"
 )
 
 var yeetDNSServiceLabelPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -158,7 +159,7 @@ func forwardDNSViaHostResolver(ctx context.Context, req *dns.Msg) (*dns.Msg, err
 		ReadTimeout:  yeetDNSReadTimeout,
 		WriteTimeout: yeetDNSWriteTimeout,
 	}
-	return forwardDNSViaServers(ctx, req, cfg.Servers, cfg.Port, exchangeDNSWithClient(client))
+	return forwardDNSViaResolverConfig(ctx, req, cfg, exchangeDNSWithClient(client))
 }
 
 func exchangeDNSWithClient(client *dns.Client) dnsExchangeFunc {
@@ -166,6 +167,50 @@ func exchangeDNSWithClient(client *dns.Client) dnsExchangeFunc {
 		resp, _, err := client.ExchangeContext(ctx, req, addr)
 		return resp, err
 	}
+}
+
+func forwardDNSViaResolverConfig(ctx context.Context, req *dns.Msg, cfg *dns.ClientConfig, exchange dnsExchangeFunc) (*dns.Msg, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("host resolver config is nil")
+	}
+	servers := cfg.Servers
+	port := cfg.Port
+	if port == "" {
+		port = "53"
+	}
+	if shouldForwardViaTailscaleDNS(req, cfg.Search) {
+		servers = []string{tailscaleDNSIP}
+		port = "53"
+	}
+	return forwardDNSViaServers(ctx, req, servers, port, exchange)
+}
+
+func shouldForwardViaTailscaleDNS(req *dns.Msg, searchDomains []string) bool {
+	if len(req.Question) != 1 {
+		return false
+	}
+	return isTailnetDNSName(req.Question[0].Name, searchDomains)
+}
+
+func isTailnetDNSName(qname string, searchDomains []string) bool {
+	name := normalizeDNSDomain(qname)
+	if name == "ts.net" || strings.HasSuffix(name, ".ts.net") {
+		return true
+	}
+	for _, domain := range searchDomains {
+		domain = normalizeDNSDomain(domain)
+		if domain == "" || (domain != "ts.net" && !strings.HasSuffix(domain, ".ts.net")) {
+			continue
+		}
+		if name == domain || strings.HasSuffix(name, "."+domain) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeDNSDomain(name string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(dns.Fqdn(name))), ".")
 }
 
 func forwardDNSViaServers(ctx context.Context, req *dns.Msg, servers []string, port string, exchange dnsExchangeFunc) (*dns.Msg, error) {

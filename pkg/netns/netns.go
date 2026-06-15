@@ -26,6 +26,13 @@ const (
 	dockerServiceUnit       = "docker.service"
 )
 
+const (
+	ServiceSubnetCIDR = "192.168.100.0/24"
+	ServiceHostIP     = "192.168.100.1"
+	ServiceYeetNSIP   = "192.168.100.2"
+	ServiceGatewayIP  = "192.168.100.254"
+)
+
 //go:embed netns-scripts/*
 var netnsScripts embed.FS
 
@@ -125,10 +132,10 @@ func InstallYeetNSService() error {
 
 func defaultYeetNSEnv(backend FirewallBackend, catchBin string) yeetNSEnv {
 	return yeetNSEnv{
-		Range:           "192.168.100.0/24",
-		HostIP:          "192.168.100.1/32",
-		YeetIP:          "192.168.100.2/32",
-		BridgeIP:        "192.168.100.254/32",
+		Range:           ServiceSubnetCIDR,
+		HostIP:          ServiceHostIP + "/32",
+		YeetIP:          ServiceYeetNSIP + "/32",
+		BridgeIP:        ServiceGatewayIP + "/32",
 		BridgeIf:        defaultFirewallBridgeIf,
 		FirewallBackend: string(backend),
 		CatchBin:        catchBin,
