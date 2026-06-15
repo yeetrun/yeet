@@ -604,6 +604,7 @@ func TestInfoRenderNetworkSection(t *testing.T) {
 		Info: catchrpc.ServiceInfo{
 			Network: catchrpc.ServiceNetwork{
 				SvcIP:        "10.0.0.2",
+				IPWarning:    "configured IP not present in guest",
 				PortsPresent: true,
 				Ports: []catchrpc.ServicePort{
 					{HostPort: 80, ContainerPort: 80, Protocol: "tcp"},
@@ -622,6 +623,7 @@ func TestInfoRenderNetworkSection(t *testing.T) {
 	assertInfoRows(t, got.Rows, []infoRow{
 		{Label: "IPs", Value: ""},
 		{Label: "  service", Value: "10.0.0.2"},
+		{Label: "IP warning", Value: "configured IP not present in guest"},
 		{Label: "Ports", Value: "80/tcp -> 80/tcp, 127.0.0.1:8443/tcp -> 443/tcp"},
 		{Label: "Tailscale", Value: "tailscale0"},
 		{Label: "Macvlan", Value: "macvlan0, parent eth0"},

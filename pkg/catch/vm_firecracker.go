@@ -11,6 +11,7 @@ type firecrackerConfig struct {
 	Drives            []firecrackerDrive            `json:"drives"`
 	NetworkInterfaces []firecrackerNetworkInterface `json:"network-interfaces"`
 	MachineConfig     firecrackerMachineConfig      `json:"machine-config"`
+	Vsock             *firecrackerVsock             `json:"vsock,omitempty"`
 }
 
 type firecrackerBootSource struct {
@@ -35,6 +36,12 @@ type firecrackerNetworkInterface struct {
 type firecrackerMachineConfig struct {
 	VCPUCount  int `json:"vcpu_count"`
 	MemSizeMib int `json:"mem_size_mib"`
+}
+
+type firecrackerVsock struct {
+	VsockID  string `json:"vsock_id"`
+	GuestCID uint32 `json:"guest_cid"`
+	UDSPath  string `json:"uds_path"`
 }
 
 func renderFirecrackerConfig(cfg firecrackerConfig) ([]byte, error) {

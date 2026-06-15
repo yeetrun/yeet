@@ -1471,9 +1471,13 @@ func (v *VMSocketConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
-func (v VMSocketConfigView) APISocketPath() string { return v.ж.APISocketPath }
+func (v VMSocketConfigView) APISocketPath() string   { return v.ж.APISocketPath }
+func (v VMSocketConfigView) VsockSocketPath() string { return v.ж.VsockSocketPath }
+func (v VMSocketConfigView) VsockGuestCID() uint32   { return v.ж.VsockGuestCID }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _VMSocketConfigViewNeedsRegeneration = VMSocketConfig(struct {
-	APISocketPath string
+	APISocketPath   string
+	VsockSocketPath string
+	VsockGuestCID   uint32
 }{})

@@ -19,10 +19,15 @@ type vmSystemdConfig struct {
 	ConfigPath       string
 	APISocket        string
 	ConsoleSocket    string
+	VsockSocket      string
 	WorkingDirectory string
 }
 
 func renderVMSystemdUnit(cfg vmSystemdConfig) string {
+	cleanupSockets := []string{cfg.APISocket, cfg.ConsoleSocket}
+	if strings.TrimSpace(cfg.VsockSocket) != "" {
+		cleanupSockets = append(cleanupSockets, cfg.VsockSocket)
+	}
 	return fmt.Sprintf(`[Unit]
 Description=yeet VM %s
 After=network-online.target yeet-ns.service
@@ -31,7 +36,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%s
-ExecStartPre=/bin/rm -f %s %s
+ExecStartPre=/bin/rm -f %s
 ExecStart=%s vm-run --firecracker %s --api-sock %s --config-file %s --console-sock %s
 Restart=on-failure
 RestartForceExitStatus=75
@@ -42,7 +47,7 @@ TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
-`, cfg.Service, cfg.WorkingDirectory, cfg.APISocket, cfg.ConsoleSocket, cfg.Runner, cfg.Firecracker, cfg.APISocket, cfg.ConfigPath, cfg.ConsoleSocket, VMRestoreLoadFailedExitCode)
+`, cfg.Service, cfg.WorkingDirectory, strings.Join(cleanupSockets, " "), cfg.Runner, cfg.Firecracker, cfg.APISocket, cfg.ConfigPath, cfg.ConsoleSocket, VMRestoreLoadFailedExitCode)
 }
 
 func ensureVMSystemdRestorePrevent(name string) error {

@@ -78,6 +78,49 @@ if [[ "$file_output" == *"dynamically linked"* ]]; then
 fi
 '''
 
+[tasks."guest:agent:test"]
+description = "Run yeet-agent Rust tests"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "$(uname -s)" == "Darwin" ]] && command -v xcrun >/dev/null 2>&1; then
+  case "$(rustc -vV | awk '/^host:/ {print $2}')" in
+    aarch64-apple-darwin)
+      export CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER="$(xcrun --find cc)"
+      ;;
+    x86_64-apple-darwin)
+      export CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER="$(xcrun --find cc)"
+      ;;
+  esac
+fi
+
+cargo test --locked --manifest-path guest/yeet-agent/Cargo.toml
+'''
+
+[tasks."guest:agent:build"]
+description = "Build static yeet-agent for the VM image"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+rustup target add x86_64-unknown-linux-musl
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="${CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER:-rust-lld}"
+cargo build --locked --manifest-path guest/yeet-agent/Cargo.toml --release --target x86_64-unknown-linux-musl
+
+binary=guest/yeet-agent/target/x86_64-unknown-linux-musl/release/yeet-agent
+file_output=$(file "$binary")
+echo "$file_output"
+if [[ "$file_output" != *"ELF 64-bit"* || "$file_output" != *"x86-64"* ]]; then
+  echo "expected x86-64 ELF binary: $file_output" >&2
+  exit 1
+fi
+if [[ "$file_output" == *"dynamically linked"* ]]; then
+  echo "expected static binary without dynamic interpreter: $file_output" >&2
+  exit 1
+fi
+'''
+
 [tasks.coverage]
 description = "Run tests and write the quality coverage profile"
 run = '''

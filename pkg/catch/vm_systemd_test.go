@@ -20,12 +20,13 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 		ConfigPath:       "/srv/vms/devbox/run/firecracker.json",
 		APISocket:        "/srv/vms/devbox/run/firecracker.sock",
 		ConsoleSocket:    "/srv/vms/devbox/run/serial.sock",
+		VsockSocket:      "/srv/vms/devbox/run/vsock.sock",
 		WorkingDirectory: "/srv/vms/devbox",
 	})
 	for _, want := range []string{
 		"[Unit]",
 		"Description=yeet VM devbox",
-		"ExecStartPre=/bin/rm -f /srv/vms/devbox/run/firecracker.sock /srv/vms/devbox/run/serial.sock",
+		"ExecStartPre=/bin/rm -f /srv/vms/devbox/run/firecracker.sock /srv/vms/devbox/run/serial.sock /srv/vms/devbox/run/vsock.sock",
 		"ExecStart=/srv/catch/run/catch vm-run --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
 		"Restart=on-failure",
 		"RestartForceExitStatus=75",

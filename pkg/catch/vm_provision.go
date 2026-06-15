@@ -50,6 +50,7 @@ type vmProvisionPlan struct {
 	SerialSocket           string
 	SerialLog              string
 	APISocket              string
+	VsockSocket            string
 	PIDFile                string
 }
 
@@ -738,6 +739,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 
 	firecrackerPath := filepath.Join(runDir, "firecracker.json")
 	apiSocket := filepath.Join(runDir, "firecracker.sock")
+	vsockSocket := filepath.Join(runDir, "vsock.sock")
 	unitName := vmSystemdUnitName(e.sn)
 	systemdDir := vmProvisionSystemdDir
 	if systemdDir == "" {
@@ -769,6 +771,11 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 			VCPUCount:  shape.CPUs,
 			MemSizeMib: int(shape.MemoryBytes >> 20),
 		},
+		Vsock: &firecrackerVsock{
+			VsockID:  vmAgentVsockID,
+			GuestCID: vmAgentGuestCID,
+			UDSPath:  vsockSocket,
+		},
 	})
 	if err != nil {
 		return vmProvisionPlan{}, err
@@ -780,6 +787,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 		ConfigPath:       firecrackerPath,
 		APISocket:        apiSocket,
 		ConsoleSocket:    filepath.Join(runDir, "serial.sock"),
+		VsockSocket:      vsockSocket,
 		WorkingDirectory: resolvedRoot.Root,
 	})
 
@@ -801,6 +809,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 		SerialSocket:           filepath.Join(runDir, "serial.sock"),
 		SerialLog:              filepath.Join(runDir, "serial.log"),
 		APISocket:              apiSocket,
+		VsockSocket:            vsockSocket,
 		PIDFile:                filepath.Join(runDir, "firecracker.pid"),
 	}, nil
 }
@@ -891,10 +900,14 @@ func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string, snap
 				Bytes:   plan.Shape.DiskBytes,
 				Path:    plan.DiskPath,
 			},
-			Networks:   plan.Network.DBNetworks(),
-			SSH:        db.VMSSHConfig{User: plan.Metadata.User},
-			Console:    db.VMConsoleConfig{SocketPath: plan.SerialSocket, LogPath: plan.SerialLog},
-			Sockets:    db.VMSocketConfig{APISocketPath: plan.APISocket},
+			Networks: plan.Network.DBNetworks(),
+			SSH:      db.VMSSHConfig{User: plan.Metadata.User},
+			Console:  db.VMConsoleConfig{SocketPath: plan.SerialSocket, LogPath: plan.SerialLog},
+			Sockets: db.VMSocketConfig{
+				APISocketPath:   plan.APISocket,
+				VsockSocketPath: plan.VsockSocket,
+				VsockGuestCID:   vmAgentGuestCID,
+			},
 			PIDFile:    plan.PIDFile,
 			SetupState: "ready",
 		}

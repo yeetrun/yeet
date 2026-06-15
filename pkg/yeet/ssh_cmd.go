@@ -518,7 +518,7 @@ type vmSSHOptionsPlan struct {
 
 func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, resp catchrpc.ServiceInfoResponse, options []string, forceProxy bool) (vmSSHOptionsPlan, error) {
 	out := append([]string{}, options...)
-	target := vmSSHTarget(resp, forceProxy)
+	target := vmSSHTargetWithOptions(resp, out, forceProxy)
 	if target.Host == "" && !hasSSHHostNameOption(out) {
 		return vmSSHOptionsPlan{}, fmt.Errorf("VM %q has no SSH address yet; use `yeet vm console %s`", service, service)
 	}
@@ -537,18 +537,32 @@ func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, re
 		Notice:         vmSSHTransportNotice(proxyHost, target, generatedProxy, userProxy),
 		GeneratedProxy: generatedProxy,
 	}
-	if addYeetKnownHosts && addGeneratedAlias && knownHosts == vmSSHKnownHostsFile() && alias == vmSSHHostKeyAlias(service, proxyHost) {
-		extraAliases := []string(nil)
-		if generatedProxy {
-			extraAliases = append(extraAliases, vmSSHProxyHostKeyAlias(proxyHost))
-		}
-		plan.KnownHostRepair = &sshKnownHostRepair{
-			Alias:          alias,
-			KnownHostsFile: knownHosts,
-			ExtraAliases:   extraAliases,
-		}
-	}
+	plan.KnownHostRepair = vmSSHKnownHostRepair(alias, knownHosts, addYeetKnownHosts, addGeneratedAlias, generatedProxy, proxyHost)
 	return plan, nil
+}
+
+func vmSSHTargetWithOptions(resp catchrpc.ServiceInfoResponse, options []string, forceProxy bool) vmSSHTargetInfo {
+	target := vmSSHTarget(resp, forceProxy)
+	if hasSSHHostNameOption(options) && !forceProxy {
+		target.Proxy = false
+		target.Host = ""
+	}
+	return target
+}
+
+func vmSSHKnownHostRepair(alias, knownHosts string, addYeetKnownHosts, addGeneratedAlias, generatedProxy bool, proxyHost string) *sshKnownHostRepair {
+	if !addYeetKnownHosts || !addGeneratedAlias {
+		return nil
+	}
+	extraAliases := []string(nil)
+	if generatedProxy {
+		extraAliases = append(extraAliases, vmSSHProxyHostKeyAlias(proxyHost))
+	}
+	return &sshKnownHostRepair{
+		Alias:          alias,
+		KnownHostsFile: knownHosts,
+		ExtraAliases:   extraAliases,
+	}
 }
 
 func appendVMSSHBaseOptions(options []string, target vmSSHTargetInfo) []string {
@@ -659,7 +673,7 @@ func shouldProxyVMSSH(resp catchrpc.ServiceInfoResponse, guestHost, mode string,
 	if resp.Info.VM == nil || strings.TrimSpace(guestHost) == "" {
 		return false
 	}
-	return forceProxy || mode == "svc"
+	return forceProxy || mode == "svc" || mode == "lan"
 }
 
 func vmSSHTransportNotice(proxyHost string, target vmSSHTargetInfo, generatedProxy, userProxy bool) string {

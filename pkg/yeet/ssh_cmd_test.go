@@ -437,7 +437,7 @@ func TestServiceShellCommandForVMSvcLANPrefersSvcAndProxies(t *testing.T) {
 	}
 }
 
-func TestServiceShellCommandForVMLANNetworkConnectsDirectly(t *testing.T) {
+func TestServiceShellCommandForVMLANNetworkProxiesByDefault(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -471,6 +471,7 @@ func TestServiceShellCommandForVMLANNetworkConnectsDirectly(t *testing.T) {
 		"-o", "UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts"),
 		"-o", "HostKeyAlias=yeet-vm-devbox@yeet-lab",
 		"-o", "CheckHostIP=no",
+		"-o", "ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts") + " -o HostKeyAlias=yeet-proxy@yeet-lab -o CheckHostIP=no -W %h:%p root@yeet-lab",
 	}
 	if !reflect.DeepEqual(gotOptions, wantOptions) {
 		t.Fatalf("options = %#v, want %#v", gotOptions, wantOptions)
@@ -481,8 +482,41 @@ func TestServiceShellCommandForVMLANNetworkConnectsDirectly(t *testing.T) {
 	if repair.Alias != "yeet-vm-devbox@yeet-lab" {
 		t.Fatalf("repair alias = %q", repair.Alias)
 	}
-	if len(repair.ExtraAliases) != 0 {
-		t.Fatalf("repair extra aliases = %#v, want none for direct LAN SSH", repair.ExtraAliases)
+	if !slices.Contains(repair.ExtraAliases, "yeet-proxy@yeet-lab") {
+		t.Fatalf("repair extra aliases = %#v, want proxy alias", repair.ExtraAliases)
+	}
+}
+
+func TestServiceShellCommandForVMLANNetworkCustomHostNameSkipsGeneratedProxy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	_, gotOptions, _, notice, err := serviceShellCommandPlanFromResponseWithForce(
+		"yeet-lab",
+		"devbox",
+		serverInfo{InstallUser: "root"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				VM: &catchrpc.ServiceVM{
+					SSH:      &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "10.0.4.80"},
+					Networks: []catchrpc.ServiceVMNetwork{{Mode: "lan", IP: "10.0.4.80"}},
+				},
+			},
+		},
+		nil,
+		[]string{"-o", "HostName=192.0.2.44"},
+		false,
+	)
+	if err != nil {
+		t.Fatalf("serviceShellCommandFromResponse: %v", err)
+	}
+	if sshOptionsCountValuePrefix(gotOptions, "ProxyCommand=") != 0 {
+		t.Fatalf("options = %#v, want no generated proxy for custom HostName", gotOptions)
+	}
+	if notice != "" {
+		t.Fatalf("notice = %q, want none for custom HostName", notice)
 	}
 }
 
@@ -756,7 +790,7 @@ func TestRunSSHPlanPrintsVMTransportNoticeToStderr(t *testing.T) {
 	}
 }
 
-func TestRunSSHPlanPrintsDirectLANNoticeToStderr(t *testing.T) {
+func TestRunSSHPlanPrintsLANProxyNoticeToStderr(t *testing.T) {
 	_, plan := testSSHExecutionPlan(t,
 		[]string{"ssh", "devbox"},
 		catchrpc.ServiceInfoResponse{
@@ -782,8 +816,8 @@ func TestRunSSHPlanPrintsDirectLANNoticeToStderr(t *testing.T) {
 	if stdout.String() != "devbox\n" {
 		t.Fatalf("stdout = %q, want devbox newline", stdout.String())
 	}
-	if got := strings.TrimSpace(stderr.String()); got != "Connecting directly to VM LAN IP 10.0.4.80" {
-		t.Fatalf("stderr = %q, want direct LAN notice", got)
+	if got := strings.TrimSpace(stderr.String()); got != "Proxying VM SSH through yeet-lab to 10.0.4.80" {
+		t.Fatalf("stderr = %q, want VM LAN proxy notice", got)
 	}
 }
 

@@ -339,6 +339,19 @@ func TestViewJSONRoundTripAndInitializationRules(t *testing.T) {
 			validView: func() jsonView { v := (&EndpointPort{EndpointID: "endpoint-id", Port: 80}).View(); return &v },
 			json:      `{"EndpointID":"endpoint-id","Port":80}`,
 		},
+		{
+			name:    "vm socket config",
+			newView: func() jsonView { return &VMSocketConfigView{} },
+			validView: func() jsonView {
+				v := (&VMSocketConfig{
+					APISocketPath:   "/run/devbox/firecracker.sock",
+					VsockSocketPath: "/run/devbox/vsock.sock",
+					VsockGuestCID:   3,
+				}).View()
+				return &v
+			},
+			json: `{"APISocketPath":"/run/devbox/firecracker.sock","VsockSocketPath":"/run/devbox/vsock.sock","VsockGuestCID":3}`,
+		},
 	}
 
 	for _, tt := range tests {

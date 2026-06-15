@@ -545,6 +545,9 @@ func renderNetworkSection(server catchrpc.ServiceInfoResponse) infoSection {
 	}
 	net := server.Info.Network
 	rows := networkIPRows(net)
+	if net.IPWarning != "" {
+		rows = append(rows, infoRow{Label: "IP warning", Value: net.IPWarning})
+	}
 	rows = append(rows, networkPortRows(net)...)
 	rows = append(rows, infoRow{Label: "Tailscale", Value: describeTailscale(net.Tailscale)})
 	rows = append(rows, infoRow{Label: "Macvlan", Value: describeMacvlan(net.Macvlan)})

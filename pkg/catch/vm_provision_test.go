@@ -334,6 +334,46 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	}
 }
 
+func TestRunVMConfiguresVsockRuntimeMetadata(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: false}, vmUbuntu2604Payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+
+	svc := getTestService(t, server, "devbox")
+	if svc.VM == nil {
+		t.Fatal("VM missing after run")
+	}
+	if svc.VM.Sockets.VsockSocketPath == "" {
+		t.Fatalf("vsock socket path is empty: %#v", svc.VM.Sockets)
+	}
+	if !strings.HasSuffix(svc.VM.Sockets.VsockSocketPath, "/run/vsock.sock") {
+		t.Fatalf("vsock socket path = %q, want run/vsock.sock suffix", svc.VM.Sockets.VsockSocketPath)
+	}
+	if svc.VM.Sockets.VsockGuestCID != vmAgentGuestCID {
+		t.Fatalf("vsock guest CID = %d, want %d", svc.VM.Sockets.VsockGuestCID, vmAgentGuestCID)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"))
+	if err != nil {
+		t.Fatalf("read firecracker config: %v", err)
+	}
+	for _, want := range []string{
+		`"vsock"`,
+		`"vsock_id": "yeet-agent"`,
+		`"guest_cid": 3`,
+		`"uds_path": "` + svc.VM.Sockets.VsockSocketPath + `"`,
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("firecracker config missing %q:\n%s", want, string(raw))
+		}
+	}
+	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("devbox")), svc.VM.Sockets.VsockSocketPath)
+	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("devbox")), "ExecStartPre=/bin/rm -f")
+}
+
 func TestRunVMPersistsSnapshotPolicyFlags(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
