@@ -87,6 +87,7 @@ type vmImageSource struct {
 	Kind        vmImageSourceKind
 	ManifestURL string
 	LocalName   string
+	Family      vmImageCatalogImage
 	Official    *officialVMImage
 }
 
@@ -152,7 +153,7 @@ func resolveVMImagePayload(payload string) (vmImageSource, error) {
 		return vmImageSource{}, fmt.Errorf("VM image payload is required")
 	}
 	if image, ok := officialVMImageByPayload(payload); ok {
-		return vmImageSource{Kind: vmImageSourceRemote, ManifestURL: image.ManifestURL, Official: &image}, nil
+		return vmImageSource{Kind: vmImageSourceRemote, ManifestURL: image.ManifestURL, Family: image.catalogImage(), Official: &image}, nil
 	}
 	if strings.HasPrefix(payload, vmImagePayloadPrefix) {
 		name := strings.TrimPrefix(payload, vmImagePayloadPrefix)
@@ -164,12 +165,46 @@ func resolveVMImagePayload(payload string) (vmImageSource, error) {
 	return vmImageSource{}, fmt.Errorf("unsupported VM image payload %q (supported: %s or imported vm://<name>)", payload, officialVMImagePayloadsForError())
 }
 
+func resolveVMImagePayloadFromCatalog(payload string, catalog vmImageCatalog) (vmImageSource, error) {
+	payload = strings.TrimSpace(payload)
+	if payload == "" {
+		return vmImageSource{}, fmt.Errorf("VM image payload is required")
+	}
+	if image, ok := catalog.ImageByPayload(payload); ok {
+		return vmImageSource{Kind: vmImageSourceRemote, ManifestURL: image.ManifestURL, Family: image}, nil
+	}
+	if strings.HasPrefix(payload, vmImagePayloadPrefix) {
+		name := strings.TrimPrefix(payload, vmImagePayloadPrefix)
+		if err := validateLocalVMImageNameForCatalog(name, catalog); err != nil {
+			if reservedVMImageLocalPrefixFromCatalog(name, catalog) {
+				return vmImageSource{}, fmt.Errorf("invalid local VM image name %q: %w (supported: %s or imported vm://<name>)", name, err, vmImageCatalogPayloadsForError(catalog))
+			}
+			return vmImageSource{}, fmt.Errorf("invalid local VM image name %q: %w", name, err)
+		}
+		return vmImageSource{Kind: vmImageSourceLocal, LocalName: name}, nil
+	}
+	return vmImageSource{}, fmt.Errorf("unsupported VM image payload %q (supported: %s or imported vm://<name>)", payload, vmImageCatalogPayloadsForError(catalog))
+}
+
+func validateLocalVMImageNameForCatalog(name string, catalog vmImageCatalog) error {
+	if name == "" {
+		return fmt.Errorf("local VM image name is required")
+	}
+	if name != strings.TrimSpace(name) || !localVMImageNamePattern.MatchString(name) {
+		return fmt.Errorf("local VM image name %q must use lowercase path segments with letters, numbers, dots, underscores, or dashes", name)
+	}
+	if reservedVMImageLocalPrefixFromCatalog(name, catalog) {
+		return fmt.Errorf("local VM image name %q is reserved", name)
+	}
+	return nil
+}
+
 func ensureVMImageAsset(ctx context.Context, cache vmImageCache) (vmImageAsset, error) {
 	return ensureVMImageAssetFromCache(ctx, cache, nil, nil)
 }
 
 func ensureVMImageAssetWithProgress(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (asset vmImageAsset, retErr error) {
-	source, err := resolveVMImagePayload(payload)
+	source, err := cache.resolveVMImagePayload(ctx, payload)
 	if err != nil {
 		return vmImageAsset{}, err
 	}
@@ -178,7 +213,7 @@ func ensureVMImageAssetWithProgress(ctx context.Context, cache vmImageCache, pay
 	}
 	cache = cache.withManifestURL(source.ManifestURL)
 	if ui != nil {
-		state, _, err := cache.Inspect(ctx, payload)
+		state, _, err := cache.inspectRemote(ctx, payload, source.Family)
 		if err != nil {
 			return vmImageAsset{}, err
 		}
@@ -201,7 +236,7 @@ func ensureVMImageAssetWithProgress(ctx context.Context, cache vmImageCache, pay
 			ui.Stop()
 		}()
 	}
-	return ensureVMImageAssetFromCache(ctx, cache, progress, ui)
+	return ensureVMImageAssetFromCatalog(ctx, cache, source.Family, progress, ui)
 }
 
 func resolveLocalVMImageAssetForPayload(ctx context.Context, cacheRoot, name string) (vmImageAsset, error) {
@@ -227,6 +262,18 @@ func ensureVMImageAssetFromCache(ctx context.Context, cache vmImageCache, progre
 	if err != nil {
 		return vmImageAsset{}, err
 	}
+	return vmImageAssetFromPaths(ctx, paths)
+}
+
+func ensureVMImageAssetFromCatalog(ctx context.Context, cache vmImageCache, family vmImageCatalogImage, progress *byteProgress, ui ProgressUI) (vmImageAsset, error) {
+	paths, err := cache.ensureCatalogFamily(ctx, family, progress, ui)
+	if err != nil {
+		return vmImageAsset{}, err
+	}
+	return vmImageAssetFromPaths(ctx, paths)
+}
+
+func vmImageAssetFromPaths(ctx context.Context, paths vmImagePaths) (vmImageAsset, error) {
 	raw, err := os.ReadFile(paths.Manifest)
 	if err != nil {
 		return vmImageAsset{}, fmt.Errorf("read VM image manifest: %w", err)
@@ -319,13 +366,36 @@ func (c vmImageCache) Ensure(ctx context.Context) (vmImagePaths, error) {
 }
 
 func (c vmImageCache) ensure(ctx context.Context, progress *byteProgress, ui ProgressUI) (vmImagePaths, error) {
-	manifest, err := c.fetchManifest(ctx)
+	manifest, err := c.fetchValidatedManifest(ctx)
 	if err != nil {
 		return vmImagePaths{}, err
 	}
-	if err := manifest.validate(); err != nil {
+	return c.ensureManifest(ctx, manifest, progress, ui)
+}
+
+func (c vmImageCache) ensureCatalogFamily(ctx context.Context, family vmImageCatalogImage, progress *byteProgress, ui ProgressUI) (vmImagePaths, error) {
+	manifest, err := c.fetchValidatedManifest(ctx)
+	if err != nil {
 		return vmImagePaths{}, err
 	}
+	if err := validateVMImageManifestCatalogFamily(manifest, family, ""); err != nil {
+		return vmImagePaths{}, err
+	}
+	return c.ensureManifest(ctx, manifest, progress, ui)
+}
+
+func (c vmImageCache) fetchValidatedManifest(ctx context.Context) (vmImageManifest, error) {
+	manifest, err := c.fetchManifest(ctx)
+	if err != nil {
+		return vmImageManifest{}, err
+	}
+	if err := manifest.validate(); err != nil {
+		return vmImageManifest{}, err
+	}
+	return manifest, nil
+}
+
+func (c vmImageCache) ensureManifest(ctx context.Context, manifest vmImageManifest, progress *byteProgress, ui ProgressUI) (vmImagePaths, error) {
 	root := strings.TrimSpace(c.Root)
 	if root == "" {
 		return vmImagePaths{}, fmt.Errorf("VM image cache root is required")
@@ -351,14 +421,26 @@ func (c vmImageCache) ensure(ctx context.Context, progress *byteProgress, ui Pro
 
 func (c vmImageCache) Inspect(ctx context.Context, payload string) (vmImageCacheState, vmImageManifest, error) {
 	payload = strings.TrimSpace(payload)
-	source, err := resolveVMImagePayload(payload)
+	source, err := c.resolveVMImagePayload(ctx, payload)
 	if err != nil {
 		return vmImageCacheState{}, vmImageManifest{}, err
 	}
 	if source.Kind == vmImageSourceLocal {
 		return c.inspectLocal(ctx, payload, source.LocalName)
 	}
-	return c.withManifestURL(source.ManifestURL).inspectRemote(ctx, payload, *source.Official)
+	return c.withManifestURL(source.ManifestURL).inspectRemote(ctx, payload, source.Family)
+}
+
+func (c vmImageCache) resolveVMImagePayload(ctx context.Context, payload string) (vmImageSource, error) {
+	catalog, err := c.FetchCatalog(ctx)
+	if err != nil {
+		return vmImageSource{}, err
+	}
+	source, err := resolveVMImagePayloadFromCatalog(payload, catalog)
+	if err != nil {
+		return vmImageSource{}, err
+	}
+	return source, nil
 }
 
 func (c vmImageCache) inspectLocal(ctx context.Context, payload, name string) (vmImageCacheState, vmImageManifest, error) {
@@ -376,13 +458,16 @@ func (c vmImageCache) inspectLocal(ctx context.Context, payload, name string) (v
 	return state, asset.Manifest, nil
 }
 
-func (c vmImageCache) inspectRemote(ctx context.Context, payload string, family officialVMImage) (vmImageCacheState, vmImageManifest, error) {
+func (c vmImageCache) inspectRemote(ctx context.Context, payload string, family vmImageCatalogImage) (vmImageCacheState, vmImageManifest, error) {
 	manifestURL := c.manifestURL()
 	latestManifest, err := c.fetchManifest(ctx)
 	if err != nil {
 		return vmImageCacheState{}, vmImageManifest{}, err
 	}
 	if err := latestManifest.validate(); err != nil {
+		return vmImageCacheState{}, vmImageManifest{}, err
+	}
+	if err := validateVMImageManifestCatalogFamily(latestManifest, family, payload); err != nil {
 		return vmImageCacheState{}, vmImageManifest{}, err
 	}
 	root := strings.TrimSpace(c.Root)
@@ -416,6 +501,16 @@ func (c vmImageCache) inspectRemote(ctx context.Context, payload string, family 
 	}
 	state.State = vmImageCacheStale
 	return state, latestManifest, nil
+}
+
+func validateVMImageManifestCatalogFamily(manifest vmImageManifest, family vmImageCatalogImage, payload string) error {
+	if family.matchesVersion(manifest.Version) {
+		return nil
+	}
+	if strings.TrimSpace(payload) == "" {
+		payload = strings.TrimSpace(family.Payload)
+	}
+	return fmt.Errorf("VM image manifest version %q does not match catalog version prefix %q for %s", manifest.Version, family.VersionPrefix, payload)
 }
 
 func (c vmImageCache) ensureArtifacts(ctx context.Context, dir string, manifest vmImageManifest, progress *byteProgress, ui ProgressUI) (vmImagePaths, error) {
@@ -791,7 +886,7 @@ func (m vmImageManifest) artifactNames() []string {
 	return append(names, m.RootFS, m.Firecracker)
 }
 
-func latestCachedVMImageManifest(root string, family officialVMImage) (vmImageManifest, string, bool, error) {
+func latestCachedVMImageManifest(root string, family vmImageCatalogImage) (vmImageManifest, string, bool, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return vmImageManifest{}, "", false, fmt.Errorf("VM image cache root is required")

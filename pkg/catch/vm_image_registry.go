@@ -68,12 +68,40 @@ func (i officialVMImage) matchesVersion(version string) bool {
 	return strings.HasPrefix(version, i.VersionPrefix) && isNumericVersionSuffix(strings.TrimPrefix(version, i.VersionPrefix))
 }
 
+func (i officialVMImage) catalogImage() vmImageCatalogImage {
+	metadataDriver := "ubuntu"
+	if i.Payload == vmNixOS2605Payload {
+		metadataDriver = "nixos"
+	}
+	return vmImageCatalogImage{
+		Payload:        i.Payload,
+		Name:           i.DisplayName,
+		Architecture:   "amd64",
+		ManifestURL:    i.ManifestURL,
+		VersionPrefix:  i.VersionPrefix,
+		DefaultUser:    i.DefaultUser,
+		MetadataDriver: metadataDriver,
+	}
+}
+
 func reservedVMImageLocalPrefix(name string) bool {
 	name = strings.TrimSpace(name)
 	for _, image := range officialVMImages {
 		officialName := strings.TrimPrefix(image.Payload, vmImagePayloadPrefix)
 		prefix := strings.SplitN(officialName, "/", 2)[0] + "/"
 		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func reservedVMImageLocalPrefixFromCatalog(name string, catalog vmImageCatalog) bool {
+	name = strings.TrimSpace(name)
+	for _, image := range catalog.Images {
+		officialName := strings.TrimPrefix(strings.TrimSpace(image.Payload), vmImagePayloadPrefix)
+		prefix := strings.SplitN(officialName, "/", 2)[0] + "/"
+		if prefix != "/" && strings.HasPrefix(name, prefix) {
 			return true
 		}
 	}
