@@ -199,6 +199,11 @@ yeet ssh devbox
 yeet vm console devbox
 ```
 
+The official VM catalog is loaded from `yeet-vm-images` at runtime. The catalog
+defines supported `vm://...` families, and each family points at a stable latest
+manifest. New image versions are picked up through that manifest rather than a
+yeet release.
+
 Detach from an active VM console by pressing Enter, then typing `~.`. The VM
 keeps running.
 
