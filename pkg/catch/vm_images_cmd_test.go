@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -22,6 +23,7 @@ import (
 
 func TestVMImagesCmdTableShowsCacheState(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-26.04-amd64-v1")
 	restore := stubVMImageInspect(t, vmImageCacheState{
 		Payload:       vmUbuntu2604Payload,
@@ -60,6 +62,7 @@ func TestVMImagesCmdTableShowsCacheState(t *testing.T) {
 
 func TestVMImagesCmdJSONShowsListRows(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-26.04-amd64-v1")
 	restore := stubVMImageInspectMap(t, map[string]vmImageCacheState{
 		vmUbuntu2604Payload: {
@@ -110,6 +113,7 @@ func TestVMImagesCmdJSONShowsListRows(t *testing.T) {
 
 func TestVMImagesCmdListShowsAllOfficialImages(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	restore := stubVMImageInspectMap(t, map[string]vmImageCacheState{
 		vmUbuntu2604Payload: {
 			Payload:       vmUbuntu2604Payload,
@@ -144,6 +148,7 @@ func TestVMImagesCmdListShowsAllOfficialImages(t *testing.T) {
 
 func TestVMImagesCmdCatalogShowsOfficialImagesWithoutCacheInspect(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	restore := stubVMImageInspectFail(t)
 	defer restore()
 
@@ -169,8 +174,61 @@ func TestVMImagesCmdCatalogShowsOfficialImagesWithoutCacheInspect(t *testing.T) 
 	}
 }
 
+func TestVMImagesCmdCatalogUsesRemoteCatalogFamilies(t *testing.T) {
+	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageCatalog{SchemaVersion: 1, Images: []vmImageCatalogImage{
+		{
+			Payload:        "vm://debian/13",
+			Name:           "Debian 13",
+			Architecture:   "amd64",
+			ManifestURL:    "https://github.com/yeetrun/yeet-vm-images/releases/download/debian-13-amd64-latest/manifest.json",
+			VersionPrefix:  "debian-13-amd64-",
+			DefaultUser:    "debian",
+			MetadataDriver: "ubuntu",
+			Default:        true,
+		},
+	}})
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"catalog"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc catalog: %v", err)
+	}
+
+	var rows []vmImageCatalogRowJSON
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("decode rows: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Payload != "vm://debian/13" || rows[0].VersionPrefix != "debian-13-amd64-" {
+		t.Fatalf("catalog rows = %#v", rows)
+	}
+}
+
+func TestVMImagesCmdListUsesSingleCatalogSnapshot(t *testing.T) {
+	server := newTestServer(t)
+	catalog := vmImageSingleFetchCommandCatalog(t, "vm://debian/13", "debian-13-amd64-v1", true)
+	calls := stubVMImageCatalogFetchOnce(t, catalog)
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"ls"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc ls: %v", err)
+	}
+	if got := calls(); got != 1 {
+		t.Fatalf("catalog fetch calls = %d, want 1", got)
+	}
+	var rows []vmImageListRowJSON
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("decode rows: %v\n%s", err, out.String())
+	}
+	if len(rows) != 1 || rows[0].Payload != "vm://debian/13" || rows[0].Version != "debian-13-amd64-v1" {
+		t.Fatalf("list rows = %#v", rows)
+	}
+}
+
 func TestVMImagesCmdCatalogIncludesLocalImages(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
 	importer := localVMImageImporter{
 		CacheRoot: cacheRoot,
@@ -233,6 +291,7 @@ func TestTTYVMImageCacheLeavesManifestURLUnset(t *testing.T) {
 
 func TestVMImagesCmdImportReadsStdinAndPrintsRef(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	restoreEnsure := stubManagedVMImageAsset(t, fakeManagedVMImageAsset(t))
 	defer restoreEnsure()
 
@@ -267,6 +326,7 @@ func TestVMImagesCmdImportReadsStdinAndPrintsRef(t *testing.T) {
 
 func TestVMImagesCmdImportReadsRawPayloadWhenPTYBypassesInput(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	restoreEnsure := stubManagedVMImageAsset(t, fakeManagedVMImageAsset(t))
 	defer restoreEnsure()
 
@@ -293,6 +353,77 @@ func TestVMImagesCmdImportReadsRawPayloadWhenPTYBypassesInput(t *testing.T) {
 	assertLocalImageFileContains(t, ref.Root, ref.RootFS, "raw-rootfs")
 }
 
+func TestVMImagesCmdImportUsesDefaultCatalogImage(t *testing.T) {
+	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageCatalog{SchemaVersion: 1, Images: []vmImageCatalogImage{
+		{
+			Payload:        "vm://debian/13",
+			Name:           "Debian 13",
+			Architecture:   "amd64",
+			ManifestURL:    "https://github.com/yeetrun/yeet-vm-images/releases/download/debian-13-amd64-latest/manifest.json",
+			VersionPrefix:  "debian-13-amd64-",
+			DefaultUser:    "debian",
+			MetadataDriver: "ubuntu",
+			Default:        true,
+		},
+	}})
+	var ensured []string
+	restoreEnsure := stubVMImageEnsure(t, func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
+		ensured = append(ensured, payload)
+		if cache.Root == "" {
+			t.Fatal("ensure cache root is empty")
+		}
+		return fakeManagedVMImageAsset(t), nil
+	})
+	defer restoreEnsure()
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		rw: &readWriter{
+			Reader: localVMImageBundleTar(t, map[string][]byte{"rootfs.ext4": []byte("local-rootfs")}),
+			Writer: &out,
+		},
+	}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json", Stdin: true}, []string{"import", "foo/debian"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc import: %v", err)
+	}
+	if !reflect.DeepEqual(ensured, []string{"vm://debian/13"}) {
+		t.Fatalf("ensured payloads = %#v", ensured)
+	}
+}
+
+func TestVMImagesCmdImportUsesSingleCatalogSnapshot(t *testing.T) {
+	server := newTestServer(t)
+	catalog := vmImageSingleFetchCommandCatalog(t, "vm://debian/13", "debian-13-amd64-v1", true)
+	calls := stubVMImageCatalogFetchOnce(t, catalog)
+	stubPrepareVMRootFSIdentity(t)
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		rw: &readWriter{
+			Reader: localVMImageBundleTar(t, map[string][]byte{"rootfs.ext4": []byte("local-rootfs")}),
+			Writer: &out,
+		},
+	}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json", Stdin: true}, []string{"import", "foo/snapshot"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc import: %v", err)
+	}
+	if got := calls(); got != 1 {
+		t.Fatalf("catalog fetch calls = %d, want 1", got)
+	}
+	var rows []vmImageListRowJSON
+	if err := json.Unmarshal(out.Bytes(), &rows); err != nil {
+		t.Fatalf("decode rows: %v\n%s", err, out.String())
+	}
+	if len(rows) != 1 || rows[0].Payload != "vm://foo/snapshot" || rows[0].State != "imported" {
+		t.Fatalf("import rows = %#v", rows)
+	}
+}
+
 func TestVMImagesCmdImportRejectsWithoutStdin(t *testing.T) {
 	server := newTestServer(t)
 	var out bytes.Buffer
@@ -305,6 +436,7 @@ func TestVMImagesCmdImportRejectsWithoutStdin(t *testing.T) {
 
 func TestVMImagesCmdListShowsLocalImages(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
 	importer := localVMImageImporter{
 		CacheRoot: cacheRoot,
@@ -647,6 +779,7 @@ func TestVMImagesCmdPruneKeepsInUseZFSBaseAndRemovesOldUnreferencedBase(t *testi
 
 func TestVMImagesCmdUpdateEnsuresImageAndPrintsState(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", "nixos-26.05-amd64-v1")
 	var ensuredPayloads []string
 	restoreEnsure := stubVMImageEnsure(t, func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
@@ -676,8 +809,86 @@ func TestVMImagesCmdUpdateEnsuresImageAndPrintsState(t *testing.T) {
 	}
 }
 
+func TestVMImagesUpdateWithoutArgsUsesCatalogPayloads(t *testing.T) {
+	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageCatalog{SchemaVersion: 1, Images: []vmImageCatalogImage{
+		{
+			Payload:        "vm://debian/13",
+			Name:           "Debian 13",
+			Architecture:   "amd64",
+			ManifestURL:    "https://github.com/yeetrun/yeet-vm-images/releases/download/debian-13-amd64-latest/manifest.json",
+			VersionPrefix:  "debian-13-amd64-",
+			DefaultUser:    "debian",
+			MetadataDriver: "ubuntu",
+			Default:        true,
+		},
+	}})
+	var seen []string
+	restoreEnsure := stubVMImageEnsure(t, func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
+		seen = append(seen, payload)
+		return fakeVMImageAssetVersion(t, "debian-13-amd64-v1")
+	})
+	defer restoreEnsure()
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc update: %v", err)
+	}
+	if !reflect.DeepEqual(seen, []string{"vm://debian/13"}) {
+		t.Fatalf("updated payloads = %#v", seen)
+	}
+}
+
+func TestVMImagesUpdateWithoutArgsUsesSingleCatalogSnapshot(t *testing.T) {
+	server := newTestServer(t)
+	catalog := vmImageSingleFetchCommandCatalog(t, "vm://debian/13", "debian-13-amd64-v1", true)
+	calls := stubVMImageCatalogFetchOnce(t, catalog)
+	stubPrepareVMRootFSIdentity(t)
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc update: %v", err)
+	}
+	if got := calls(); got != 1 {
+		t.Fatalf("catalog fetch calls = %d, want 1", got)
+	}
+	var state vmImageCacheState
+	if err := json.Unmarshal(out.Bytes(), &state); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, out.String())
+	}
+	if state.Payload != "vm://debian/13" || state.ManifestURL != catalog.Images[0].ManifestURL {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
+func TestVMImagesUpdatePayloadUsesSingleCatalogSnapshot(t *testing.T) {
+	server := newTestServer(t)
+	catalog := vmImageSingleFetchCommandCatalog(t, "vm://debian/13", "debian-13-amd64-v1", true)
+	calls := stubVMImageCatalogFetchOnce(t, catalog)
+	stubPrepareVMRootFSIdentity(t)
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update", "vm://debian/13"}); err != nil {
+		t.Fatalf("vmImagesCmdFunc update: %v", err)
+	}
+	if got := calls(); got != 1 {
+		t.Fatalf("catalog fetch calls = %d, want 1", got)
+	}
+	var state vmImageCacheState
+	if err := json.Unmarshal(out.Bytes(), &state); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, out.String())
+	}
+	if state.Payload != "vm://debian/13" || state.ManifestURL != catalog.Images[0].ManifestURL {
+		t.Fatalf("state = %#v", state)
+	}
+}
+
 func TestVMImagesCmdUpdateAllOfficialImagesByDefault(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	var ensured []string
 	restoreEnsure := stubVMImageEnsure(t, func(_ context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
 		ensured = append(ensured, payload)
@@ -697,20 +908,21 @@ func TestVMImagesCmdUpdateAllOfficialImagesByDefault(t *testing.T) {
 	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update"}); err != nil {
 		t.Fatalf("vmImagesCmdFunc update: %v", err)
 	}
-	if !reflect.DeepEqual(ensured, []string{vmUbuntu2604Payload, vmNixOS2605Payload}) {
+	if !reflect.DeepEqual(ensured, []string{vmNixOS2605Payload, vmUbuntu2604Payload}) {
 		t.Fatalf("ensured = %#v", ensured)
 	}
 	var states []vmImageCacheState
 	if err := json.Unmarshal(out.Bytes(), &states); err != nil {
 		t.Fatalf("decode output: %v\n%s", err, out.String())
 	}
-	if len(states) != 2 || states[0].Payload != vmUbuntu2604Payload || states[1].Payload != vmNixOS2605Payload {
+	if len(states) != 2 || states[0].Payload != vmNixOS2605Payload || states[1].Payload != vmUbuntu2604Payload {
 		t.Fatalf("states = %#v", states)
 	}
 }
 
 func TestVMImagesCmdUpdatePrunesOldCacheAfterRefresh(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
 	oldDir := seedCachedVMImage(t, cacheRoot, "ubuntu-26.04-amd64-v7")
 	currentDir := seedCachedVMImage(t, cacheRoot, defaultVMImageVersion)
@@ -740,6 +952,7 @@ func TestVMImagesCmdUpdatePrunesOldCacheAfterRefresh(t *testing.T) {
 
 func TestVMImagesCmdUpdateJSONSuppressesProgress(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	cachePath := filepath.Join(server.cfg.RootDir, "vm-images", defaultVMImageVersion)
 	restoreEnsure := stubVMImageEnsure(t, func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
 		if ui != nil {
@@ -787,6 +1000,7 @@ func TestVMImagesCmdRejectsInvalidAction(t *testing.T) {
 
 func TestVMCmdFuncRoutesImagesAndParsesFormat(t *testing.T) {
 	server := newTestServer(t)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	want := vmImageCacheState{
 		Payload:       vmUbuntu2604Payload,
 		CachedVersion: "ubuntu-26.04-amd64-v1",
@@ -933,7 +1147,8 @@ func stubVMImageInspect(t *testing.T, state vmImageCacheState) func() {
 func stubVMImageInspectMap(t *testing.T, states map[string]vmImageCacheState) func() {
 	t.Helper()
 	old := vmImageInspectFunc
-	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
+	oldCatalog := vmImageInspectCatalogFunc
+	inspect := func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
 		state, ok := states[payload]
 		if !ok {
 			t.Fatalf("unexpected inspect payload %q", payload)
@@ -943,24 +1158,91 @@ func stubVMImageInspectMap(t *testing.T, states map[string]vmImageCacheState) fu
 		}
 		return state, vmImageManifest{Version: state.LatestVersion}, nil
 	}
-	return func() { vmImageInspectFunc = old }
+	vmImageInspectFunc = inspect
+	vmImageInspectCatalogFunc = func(ctx context.Context, cache vmImageCache, image vmImageCatalogImage) (vmImageCacheState, vmImageManifest, error) {
+		return inspect(ctx, cache.withManifestURL(image.ManifestURL), image.Payload)
+	}
+	return func() {
+		vmImageInspectFunc = old
+		vmImageInspectCatalogFunc = oldCatalog
+	}
 }
 
 func stubVMImageInspectFail(t *testing.T) func() {
 	t.Helper()
 	old := vmImageInspectFunc
+	oldCatalog := vmImageInspectCatalogFunc
 	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
 		t.Fatalf("catalog should not inspect cache state for %q", payload)
 		return vmImageCacheState{}, vmImageManifest{}, nil
 	}
-	return func() { vmImageInspectFunc = old }
+	vmImageInspectCatalogFunc = func(ctx context.Context, cache vmImageCache, image vmImageCatalogImage) (vmImageCacheState, vmImageManifest, error) {
+		t.Fatalf("catalog should not inspect cache state for %q", image.Payload)
+		return vmImageCacheState{}, vmImageManifest{}, nil
+	}
+	return func() {
+		vmImageInspectFunc = old
+		vmImageInspectCatalogFunc = oldCatalog
+	}
 }
 
 func stubVMImageEnsure(t *testing.T, fn func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error)) func() {
 	t.Helper()
 	old := vmImageEnsureFunc
+	oldCatalog := vmImageEnsureCatalogFunc
 	vmImageEnsureFunc = fn
-	return func() { vmImageEnsureFunc = old }
+	vmImageEnsureCatalogFunc = func(ctx context.Context, cache vmImageCache, image vmImageCatalogImage, ui ProgressUI) (vmImageAsset, error) {
+		return fn(ctx, cache.withManifestURL(image.ManifestURL), image.Payload, ui)
+	}
+	return func() {
+		vmImageEnsureFunc = old
+		vmImageEnsureCatalogFunc = oldCatalog
+	}
+}
+
+func stubVMImageCatalogFetchOnce(t *testing.T, catalog vmImageCatalog) func() int {
+	t.Helper()
+	orig := fetchVMImageCatalogFunc
+	calls := 0
+	fetchVMImageCatalogFunc = func(context.Context, *http.Client) (vmImageCatalog, error) {
+		calls++
+		if calls > 1 {
+			return vmImageCatalog{}, errors.New("unexpected second VM image catalog fetch")
+		}
+		return catalog, nil
+	}
+	t.Cleanup(func() { fetchVMImageCatalogFunc = orig })
+	return func() int { return calls }
+}
+
+func vmImageSingleFetchCommandCatalog(t *testing.T, payload, version string, def bool) vmImageCatalog {
+	t.Helper()
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest(version, contents)
+	artifactServer := newVMImageArtifactTestServer(t, manifest, contents)
+	t.Cleanup(artifactServer.Close)
+	return vmImageCatalog{
+		SchemaVersion: 1,
+		Images: []vmImageCatalogImage{{
+			Payload:        payload,
+			Name:           payload,
+			Architecture:   "amd64",
+			ManifestURL:    artifactServer.URL + "/manifest.json",
+			VersionPrefix:  strings.TrimSuffix(version, "v1"),
+			DefaultUser:    "debian",
+			MetadataDriver: "ubuntu",
+			Default:        def,
+		}},
+	}
+}
+
+func stubPrepareVMRootFSIdentity(t *testing.T) {
+	t.Helper()
+	oldPrepare := prepareVMRootFSFunc
+	prepareVMRootFSFunc = func(_ context.Context, source string) (string, error) {
+		return source, nil
+	}
+	t.Cleanup(func() { prepareVMRootFSFunc = oldPrepare })
 }
 
 func stubManagedVMImageAsset(t *testing.T, asset vmImageAsset) func() {
