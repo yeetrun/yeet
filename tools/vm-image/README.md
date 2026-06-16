@@ -1,6 +1,6 @@
 # Yeet VM Images
 
-Official VM image payloads:
+Catalog examples include:
 
 - `vm://ubuntu/26.04`
 - `vm://nixos/26.05`
@@ -9,10 +9,10 @@ This directory contains the shared Firecracker kernel helper and the Ubuntu
 rootfs builder used by yeet. The release workflows that publish public bundles
 live in `github.com/yeetrun/yeet-vm-images`.
 
-The current fast bundle version is `ubuntu-26.04-amd64-v14`. It is built from
-the official Ubuntu 26.04 cloud image, boots a yeet-managed kernel under
-Firecracker direct kernel boot, uses `/usr/local/lib/yeet-vm/yeet-init` as the
-pre-systemd init shim, and omits `initrd.img`.
+The fast Ubuntu bundle is built from the official Ubuntu 26.04 cloud image,
+boots a yeet-managed kernel under Firecracker direct kernel boot, uses
+`/usr/local/lib/yeet-vm/yeet-init` as the pre-systemd init shim, and omits
+`initrd.img`.
 
 Release asset names:
 
@@ -23,13 +23,13 @@ Release asset names:
 - `kernel.config`
 - `checksums.txt`
 
-The Ubuntu manifest URL used by catch is:
+Official VM image families are discovered from:
 
-`https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json`
+`https://raw.githubusercontent.com/yeetrun/yeet-vm-images/main/catalog.json`
 
-The NixOS manifest URL used by catch is:
-
-`https://github.com/yeetrun/yeet-vm-images/releases/download/nixos-26.05-amd64-latest/manifest.json`
+Each catalog entry points at a stable latest manifest release. Publishing a new
+image version updates the immutable release and the matching `*-latest` release;
+`yeet` does not need a code change for version bumps.
 
 ## Ubuntu Fast Profile
 
