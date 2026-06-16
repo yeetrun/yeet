@@ -248,6 +248,9 @@ func (e *ttyExecer) selectVMProvisionImage(ctx context.Context, flags cli.RunFla
 }
 
 func currentVMImageAsset(ctx context.Context, cache vmImageCache, payload string, state vmImageCacheState) (vmImageAsset, error) {
+	if strings.TrimSpace(state.ManifestURL) != "" {
+		return cachedVMImageAsset(ctx, cache.withManifestURL(state.ManifestURL), state.CachedVersion)
+	}
 	source, err := resolveVMImagePayload(payload)
 	if err != nil {
 		return vmImageAsset{}, err

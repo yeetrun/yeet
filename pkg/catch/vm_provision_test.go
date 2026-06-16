@@ -1001,6 +1001,7 @@ func TestRunVMCachedImagePolicyUsesCachedStaleVersion(t *testing.T) {
 func TestRunVMCachedImagePolicyUsesRequestedOfficialFamily(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	contents := vmImageTestContents()
 	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
 	ubuntuDir := writeCachedVMImageManifest(t, cacheRoot, vmImageTestManifest("ubuntu-26.04-amd64-v99", contents))
@@ -1249,6 +1250,52 @@ func TestRunVMCurrentImageUsesCachedAssetWithoutEnsuring(t *testing.T) {
 	assertVMImageVersion(t, server, "svc", defaultVMImageVersion)
 }
 
+func TestRunVMCatalogOnlyCurrentImageUsesCachedRemoteAsset(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	payload := "vm://debian/13"
+	version := "debian-13-amd64-v1"
+	manifestURL := "https://github.com/yeetrun/yeet-vm-images/releases/download/debian-13-amd64-latest/manifest.json"
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest(version, contents)
+	manifest.Name = "yeet-debian-13"
+	dir := writeCachedVMImageManifest(t, filepath.Join(server.cfg.RootDir, "vm-images"), manifest)
+	writeCachedVMImageArtifacts(t, dir, contents)
+	oldPrepareRootFS := prepareVMRootFSFunc
+	prepareVMRootFSFunc = func(_ context.Context, source string) (string, error) {
+		return source, nil
+	}
+	t.Cleanup(func() { prepareVMRootFSFunc = oldPrepareRootFS })
+	vmImageInspectFunc = func(_ context.Context, cache vmImageCache, gotPayload string) (vmImageCacheState, vmImageManifest, error) {
+		if gotPayload != payload {
+			t.Fatalf("inspect payload = %q, want %q", gotPayload, payload)
+		}
+		if strings.TrimSpace(cache.Root) == "" {
+			t.Fatal("inspect cache root is empty")
+		}
+		return vmImageCacheState{
+			Payload:       payload,
+			CachedVersion: version,
+			LatestVersion: version,
+			State:         vmImageCacheCurrent,
+			CachePath:     filepath.Join(server.cfg.RootDir, "vm-images", version),
+			ManifestURL:   manifestURL,
+		}, manifest, nil
+	}
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		t.Fatal("vmImageEnsureFunc called for current VM image cache")
+		return vmImageAsset{}, nil
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc"}, payload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	svc := getTestService(t, server, "svc")
+	if svc.VM.Image.Payload != payload || svc.VM.Image.Version != version {
+		t.Fatalf("VM image = %#v, want payload %q version %q", svc.VM.Image, payload, version)
+	}
+}
+
 func TestRunVMCurrentImageDoesNotPrintDownloadProgress(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
@@ -1323,6 +1370,7 @@ func TestReserveVMServiceNetworkAllocatesInsideMutation(t *testing.T) {
 func TestRunVMRejectsUnsupportedPayload(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
 		return cache.Inspect(ctx, payload)
 	}
@@ -1340,6 +1388,7 @@ func TestRunVMRejectsUnsupportedPayload(t *testing.T) {
 func TestRunVMReportsUnknownLocalImage(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
 		return cache.Inspect(ctx, payload)
 	}
@@ -1347,8 +1396,8 @@ func TestRunVMReportsUnknownLocalImage(t *testing.T) {
 		return ensureVMImageAssetWithProgress(ctx, cache, payload, ui)
 	}
 
-	err := execer.runVM(cli.RunFlags{Net: "svc"}, "vm://debian/13")
-	if err == nil || !strings.Contains(err.Error(), "import it with `yeet vm images import debian/13`") {
+	err := execer.runVM(cli.RunFlags{Net: "svc"}, "vm://foo/bar")
+	if err == nil || !strings.Contains(err.Error(), "import it with `yeet vm images import foo/bar`") {
 		t.Fatalf("runVM error = %v, want local import hint", err)
 	}
 	assertNoReadyVM(t, server, "svc")
@@ -1358,6 +1407,7 @@ func TestRunVMLocalImportedImage(t *testing.T) {
 	server := newTestServer(t)
 	service := "svc"
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, service)
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload string) (vmImageCacheState, vmImageManifest, error) {
 		return cache.Inspect(ctx, payload)
 	}

@@ -485,6 +485,7 @@ func TestDefaultVMImageEnsureFuncUpdatesProgress(t *testing.T) {
 	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
 	server := newVMImageArtifactTestServer(t, manifest, contents)
 	defer server.Close()
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 
 	oldPrepare := prepareVMRootFSFunc
 	t.Cleanup(func() { prepareVMRootFSFunc = oldPrepare })
@@ -521,6 +522,7 @@ func TestDefaultVMImageEnsureFuncSkipsDownloadProgressWhenCurrent(t *testing.T) 
 	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
 	server := newVMImageArtifactTestServer(t, manifest, contents)
 	defer server.Close()
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 
 	oldPrepare := prepareVMRootFSFunc
 	t.Cleanup(func() { prepareVMRootFSFunc = oldPrepare })
@@ -588,6 +590,144 @@ func TestResolveVMImagePayloadBuiltIns(t *testing.T) {
 	}
 }
 
+func TestResolveVMImagePayloadUsesCatalog(t *testing.T) {
+	catalog := vmImageCatalog{SchemaVersion: 1, Images: []vmImageCatalogImage{
+		{
+			Payload:        "vm://debian/13",
+			Name:           "Debian 13",
+			Architecture:   "amd64",
+			ManifestURL:    "https://github.com/yeetrun/yeet-vm-images/releases/download/debian-13-amd64-latest/manifest.json",
+			VersionPrefix:  "debian-13-amd64-",
+			DefaultUser:    "debian",
+			MetadataDriver: "ubuntu",
+		},
+	}}
+	source, err := resolveVMImagePayloadFromCatalog(" vm://debian/13 ", catalog)
+	if err != nil {
+		t.Fatalf("resolveVMImagePayloadFromCatalog: %v", err)
+	}
+	if source.Kind != vmImageSourceRemote || source.ManifestURL != catalog.Images[0].ManifestURL || source.Family.Payload != "vm://debian/13" {
+		t.Fatalf("source = %#v", source)
+	}
+}
+
+func TestResolveVMImagePayloadFromCatalogLocal(t *testing.T) {
+	source, err := resolveVMImagePayloadFromCatalog("vm://foo/bar", vmImageTestCatalog())
+	if err != nil {
+		t.Fatalf("resolveVMImagePayloadFromCatalog local: %v", err)
+	}
+	if source.Kind != vmImageSourceLocal || source.LocalName != "foo/bar" {
+		t.Fatalf("source = %#v, want local foo/bar", source)
+	}
+}
+
+func TestResolveVMImagePayloadFromCatalogAllowsVersionLikeLocalName(t *testing.T) {
+	catalog := vmImageCatalog{SchemaVersion: 1, Images: []vmImageCatalogImage{
+		{
+			Payload:        "vm://ubuntu/26.04",
+			Name:           "Ubuntu",
+			Architecture:   "amd64",
+			ManifestURL:    "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json",
+			VersionPrefix:  "ubuntu-26.04-amd64-",
+			DefaultUser:    "ubuntu",
+			MetadataDriver: "ubuntu",
+		},
+	}}
+	source, err := resolveVMImagePayloadFromCatalog("vm://debian/13", catalog)
+	if err != nil {
+		t.Fatalf("resolveVMImagePayloadFromCatalog local: %v", err)
+	}
+	if source.Kind != vmImageSourceLocal || source.LocalName != "debian/13" {
+		t.Fatalf("source = %#v, want local debian/13", source)
+	}
+}
+
+func TestResolveVMImagePayloadRejectsUnsupportedPayloadWithCatalogList(t *testing.T) {
+	catalog := vmImageCatalog{SchemaVersion: 1, Images: []vmImageCatalogImage{
+		{
+			Payload:        "vm://ubuntu/26.04",
+			Name:           "Ubuntu",
+			Architecture:   "amd64",
+			ManifestURL:    "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json",
+			VersionPrefix:  "ubuntu-26.04-amd64-",
+			DefaultUser:    "ubuntu",
+			MetadataDriver: "ubuntu",
+		},
+	}}
+	_, err := resolveVMImagePayloadFromCatalog("oci://unknown/1", catalog)
+	if err == nil || !strings.Contains(err.Error(), "supported: vm://ubuntu/26.04 or imported vm://<name>") {
+		t.Fatalf("resolve error = %v", err)
+	}
+}
+
+func TestResolveVMImagePayloadRejectsCatalogReservedLocalPrefixes(t *testing.T) {
+	catalog := vmImageCatalog{SchemaVersion: 1, Images: []vmImageCatalogImage{
+		{
+			Payload:        "vm://debian/13",
+			Name:           "Debian 13",
+			Architecture:   "amd64",
+			ManifestURL:    "https://github.com/yeetrun/yeet-vm-images/releases/download/debian-13-amd64-latest/manifest.json",
+			VersionPrefix:  "debian-13-amd64-",
+			DefaultUser:    "debian",
+			MetadataDriver: "ubuntu",
+		},
+	}}
+	_, err := resolveVMImagePayloadFromCatalog("vm://debian/custom", catalog)
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("resolve error = %v, want reserved prefix", err)
+	}
+	if !strings.Contains(err.Error(), "supported: vm://debian/13 or imported vm://<name>") {
+		t.Fatalf("resolve error = %v, want supported catalog payloads", err)
+	}
+}
+
+func TestInspectRemoteRejectsManifestOutsideCatalogFamily(t *testing.T) {
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest("debian-13-amd64-v1", contents)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(manifest)
+	}))
+	defer server.Close()
+
+	cache := vmImageCache{Root: t.TempDir(), ManifestURL: server.URL + "/manifest.json", Client: server.Client()}
+	family := vmImageCatalogImage{Payload: "vm://ubuntu/26.04", ManifestURL: server.URL + "/manifest.json", VersionPrefix: "ubuntu-26.04-amd64-"}
+	_, _, err := cache.inspectRemote(context.Background(), "vm://ubuntu/26.04", family)
+	if err == nil || !strings.Contains(err.Error(), "does not match catalog version prefix") {
+		t.Fatalf("inspect error = %v", err)
+	}
+}
+
+func TestEnsureVMImageAssetWithProgressRejectsManifestOutsideCatalogFamily(t *testing.T) {
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest("debian-13-amd64-v1", contents)
+	server := newVMImageArtifactTestServer(t, manifest, contents)
+	defer server.Close()
+
+	stubVMImageCatalogFetch(t, vmImageCatalog{SchemaVersion: 1, Images: []vmImageCatalogImage{
+		{
+			Payload:        "vm://ubuntu/26.04",
+			Name:           "Ubuntu",
+			Architecture:   "amd64",
+			ManifestURL:    server.URL + "/manifest.json",
+			VersionPrefix:  "ubuntu-26.04-amd64-",
+			DefaultUser:    "ubuntu",
+			MetadataDriver: "ubuntu",
+			Default:        true,
+		},
+	}})
+	oldPrepare := prepareVMRootFSFunc
+	prepareVMRootFSFunc = func(_ context.Context, source string) (string, error) {
+		return source, nil
+	}
+	t.Cleanup(func() { prepareVMRootFSFunc = oldPrepare })
+
+	cache := vmImageCache{Root: t.TempDir(), Client: server.Client()}
+	_, err := ensureVMImageAssetWithProgress(context.Background(), cache, "vm://ubuntu/26.04", nil)
+	if err == nil || !strings.Contains(err.Error(), "does not match catalog version prefix") {
+		t.Fatalf("ensure error = %v", err)
+	}
+}
+
 func TestResolveVMImagePayloadRejectsReservedOfficialLocalPrefixes(t *testing.T) {
 	for _, payload := range []string{"vm://ubuntu/custom", "vm://nixos/custom"} {
 		_, err := resolveVMImagePayload(payload)
@@ -639,6 +779,7 @@ func TestResolveVMImagePayloadRejectsInvalidLocalName(t *testing.T) {
 }
 
 func TestEnsureVMImageAssetWithProgressUsesLocalRef(t *testing.T) {
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	root := t.TempDir()
 	importer := localVMImageImporter{
 		CacheRoot: root,
@@ -664,6 +805,7 @@ func TestEnsureVMImageAssetWithProgressUsesLocalRef(t *testing.T) {
 }
 
 func TestEnsureVMImageAssetWithProgressReportsUnknownLocalRef(t *testing.T) {
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 	_, err := ensureVMImageAssetWithProgress(context.Background(), vmImageCache{Root: t.TempDir()}, "vm://foo/bar", nil)
 	if err == nil || !strings.Contains(err.Error(), "import it with `yeet vm images import foo/bar`") {
 		t.Fatalf("error = %v, want import hint", err)
@@ -680,6 +822,7 @@ func TestVMImageCacheInspectMissing(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(latest)
 	}))
 	defer server.Close()
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 
 	root := t.TempDir()
 	cache := vmImageCache{Root: root, ManifestURL: server.URL + "/manifest.json"}
@@ -704,6 +847,25 @@ func TestVMImageCacheInspectMissing(t *testing.T) {
 	}
 }
 
+func TestVMImageCacheInspectReturnsCatalogFetchError(t *testing.T) {
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest(defaultVMImageVersion, contents)
+	server := newVMImageArtifactTestServer(t, manifest, contents)
+	defer server.Close()
+
+	orig := fetchVMImageCatalogFunc
+	fetchVMImageCatalogFunc = func(context.Context, *http.Client) (vmImageCatalog, error) {
+		return vmImageCatalog{}, context.Canceled
+	}
+	t.Cleanup(func() { fetchVMImageCatalogFunc = orig })
+
+	cache := vmImageCache{Root: t.TempDir(), ManifestURL: server.URL + "/manifest.json", Client: server.Client()}
+	_, _, err := cache.Inspect(context.Background(), vmUbuntu2604Payload)
+	if err != context.Canceled {
+		t.Fatalf("Inspect error = %v, want catalog fetch error", err)
+	}
+}
+
 func TestVMImageCacheInspectStaleWhenCachedVersionDiffers(t *testing.T) {
 	contents := vmImageTestContents()
 	latest := vmImageTestManifest("ubuntu-26.04-amd64-v3", contents)
@@ -715,6 +877,7 @@ func TestVMImageCacheInspectStaleWhenCachedVersionDiffers(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(latest)
 	}))
 	defer server.Close()
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 
 	root := t.TempDir()
 	cached := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
@@ -751,6 +914,7 @@ func TestVMImageCacheInspectStaleWhenLatestArtifactsIncomplete(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(latest)
 	}))
 	defer server.Close()
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 
 	root := t.TempDir()
 	latestDir := writeCachedVMImageManifest(t, root, latest)
@@ -785,6 +949,7 @@ func TestVMImageCacheInspectCurrent(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(latest)
 	}))
 	defer server.Close()
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 
 	root := t.TempDir()
 	latestDir := writeCachedVMImageManifest(t, root, latest)
@@ -812,6 +977,7 @@ func TestVMImageCacheInspectIgnoresOtherOfficialFamilies(t *testing.T) {
 	nixosLatest.Name = "yeet-nixos-26.05"
 	server := newVMImageArtifactTestServer(t, nixosLatest, contents)
 	defer server.Close()
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
 
 	root := t.TempDir()
 	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v99", contents))
@@ -862,9 +1028,9 @@ func TestCachedVMImageManifestSelectsHighestValidCachedManifest(t *testing.T) {
 	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v10", contents))
 	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v3", contents))
 
-	image, ok := officialVMImageByPayload(vmUbuntu2604Payload)
+	image, ok := vmImageTestCatalog().ImageByPayload(vmUbuntu2604Payload)
 	if !ok {
-		t.Fatal("missing Ubuntu registry entry")
+		t.Fatal("missing Ubuntu catalog entry")
 	}
 	got, dir, ok, err := latestCachedVMImageManifest(root, image)
 	if err != nil {
@@ -888,9 +1054,9 @@ func TestLatestCachedVMImageManifestFiltersByOfficialFamily(t *testing.T) {
 	writeCachedVMImageManifest(t, root, vmImageTestManifest("nixos-26.05-amd64-v1", contents))
 	writeCachedVMImageManifest(t, root, vmImageTestManifest("nixos-26.05-amd64-v3", contents))
 
-	image, ok := officialVMImageByPayload(vmNixOS2605Payload)
+	image, ok := vmImageTestCatalog().ImageByPayload(vmNixOS2605Payload)
 	if !ok {
-		t.Fatal("missing NixOS registry entry")
+		t.Fatal("missing NixOS catalog entry")
 	}
 	got, _, ok, err := latestCachedVMImageManifest(root, image)
 	if err != nil {
@@ -914,9 +1080,9 @@ func TestCachedVMImageManifestIgnoresInvalidCachedManifests(t *testing.T) {
 	valid := vmImageTestManifest("ubuntu-26.04-amd64-v3", contents)
 	writeCachedVMImageManifest(t, root, valid)
 
-	image, ok := officialVMImageByPayload(vmUbuntu2604Payload)
+	image, ok := vmImageTestCatalog().ImageByPayload(vmUbuntu2604Payload)
 	if !ok {
-		t.Fatal("missing Ubuntu registry entry")
+		t.Fatal("missing Ubuntu catalog entry")
 	}
 	got, _, ok, err := latestCachedVMImageManifest(root, image)
 	if err != nil {
@@ -1245,6 +1411,42 @@ func vmImageTestManifest(version string, contents map[string][]byte) vmImageMani
 			"vmlinux":         testSHA256Hex(contents["vmlinux"]),
 			"rootfs.ext4.zst": testSHA256Hex(contents["rootfs.ext4.zst"]),
 			"firecracker":     testSHA256Hex(contents["firecracker"]),
+		},
+	}
+}
+
+func stubVMImageCatalogFetch(t *testing.T, catalog vmImageCatalog) {
+	t.Helper()
+	orig := fetchVMImageCatalogFunc
+	fetchVMImageCatalogFunc = func(context.Context, *http.Client) (vmImageCatalog, error) {
+		return catalog, nil
+	}
+	t.Cleanup(func() { fetchVMImageCatalogFunc = orig })
+}
+
+func vmImageTestCatalog() vmImageCatalog {
+	return vmImageCatalog{
+		SchemaVersion: 1,
+		Images: []vmImageCatalogImage{
+			{
+				Payload:        vmUbuntu2604Payload,
+				Name:           "Ubuntu 26.04",
+				Architecture:   "amd64",
+				ManifestURL:    defaultVMImageManifestURL,
+				VersionPrefix:  "ubuntu-26.04-amd64-",
+				DefaultUser:    "ubuntu",
+				MetadataDriver: "ubuntu",
+				Default:        true,
+			},
+			{
+				Payload:        vmNixOS2605Payload,
+				Name:           "NixOS 26.05",
+				Architecture:   "amd64",
+				ManifestURL:    nixos2605VMImageManifestURL,
+				VersionPrefix:  "nixos-26.05-amd64-",
+				DefaultUser:    "nixos",
+				MetadataDriver: "nixos",
+			},
 		},
 	}
 }
