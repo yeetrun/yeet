@@ -61,7 +61,10 @@ type vmImageManifest struct {
 type vmImageCache struct {
 	Root        string
 	ManifestURL string
-	Client      *http.Client
+	// catalogURL is an internal/test override for the catalog location; catalog
+	// entries still require trusted manifest URLs.
+	catalogURL string
+	Client     *http.Client
 }
 
 type vmImageCacheState struct {
@@ -584,6 +587,13 @@ func (c vmImageCache) httpClient() *http.Client {
 		return c.Client
 	}
 	return http.DefaultClient
+}
+
+func (c vmImageCache) FetchCatalog(ctx context.Context) (vmImageCatalog, error) {
+	if strings.TrimSpace(c.catalogURL) != "" {
+		return fetchVMImageCatalogFromURL(ctx, c.httpClient(), c.catalogURL, false)
+	}
+	return fetchVMImageCatalogFunc(ctx, c.httpClient())
 }
 
 func (c vmImageCache) manifestURL() string {
