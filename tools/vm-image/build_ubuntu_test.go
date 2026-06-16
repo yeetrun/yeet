@@ -14,7 +14,7 @@ func TestFastUbuntuImagePolicyCleansFirecrackerGuestStatus(t *testing.T) {
 	script := readBuildUbuntuScript(t)
 
 	for _, want := range []string{
-		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-v14}"`,
+		`version="${YEET_VM_IMAGE_VERSION:-ubuntu-26.04-amd64-dev}"`,
 		"fwupd$",
 		"fwupd-signed$",
 		"update-notifier-common$",

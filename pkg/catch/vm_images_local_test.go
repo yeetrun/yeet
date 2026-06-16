@@ -22,7 +22,7 @@ import (
 )
 
 func TestValidateLocalVMImageName(t *testing.T) {
-	valid := []string{"foo", "foo/bar", "team/ubuntu-fast", "a/b-c_d.1"}
+	valid := []string{"foo", "foo/bar", "team/ubuntu-fast", "a/b-c_d.1", "ubuntu/26.04"}
 	for _, name := range valid {
 		t.Run("valid/"+name, func(t *testing.T) {
 			if err := validateLocalVMImageName(name); err != nil {
@@ -31,13 +31,43 @@ func TestValidateLocalVMImageName(t *testing.T) {
 		})
 	}
 
-	invalid := []string{"", "ubuntu/26.04", "../foo", "/foo", "foo//bar", "foo/bar/", "foo bar", "Foo/Bar"}
+	invalid := []string{"", "../foo", "/foo", "foo//bar", "foo/bar/", "foo bar", "Foo/Bar"}
 	for _, name := range invalid {
 		t.Run("invalid/"+name, func(t *testing.T) {
 			if err := validateLocalVMImageName(name); err == nil {
 				t.Fatalf("validateLocalVMImageName(%q) returned nil error", name)
 			}
 		})
+	}
+}
+
+func TestImportLocalVMImageRejectsCatalogReservedName(t *testing.T) {
+	catalog := vmImageCatalog{
+		SchemaVersion: 1,
+		Images: []vmImageCatalogImage{{
+			Payload:        "vm://debian/13",
+			Name:           "Debian 13",
+			Architecture:   "amd64",
+			ManifestURL:    "https://github.com/yeetrun/yeet-vm-images/releases/download/debian-13-amd64-latest/manifest.json",
+			VersionPrefix:  "debian-13-amd64-",
+			DefaultUser:    "debian",
+			MetadataDriver: "ubuntu",
+		}},
+	}
+	importer := localVMImageImporter{
+		CacheRoot: t.TempDir(),
+		Catalog:   &catalog,
+		EnsureManagedAsset: func(context.Context) (vmImageAsset, error) {
+			return fakeManagedVMImageAsset(t), nil
+		},
+	}
+
+	_, err := importer.Import(context.Background(), localVMImageImportRequest{
+		Name:   "debian/custom",
+		Reader: localVMImageBundleTar(t, map[string][]byte{"rootfs.ext4": []byte("local-rootfs")}),
+	})
+	if err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("Import error = %v, want catalog reserved prefix", err)
 	}
 }
 

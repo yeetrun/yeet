@@ -444,12 +444,6 @@ func vmMetadataDriverForExistingVM(vm db.VMConfig) string {
 	if driver := strings.TrimSpace(vm.Image.MetadataDriver); driver != "" {
 		return driver
 	}
-	if strings.TrimSpace(vm.Image.Payload) == vmNixOS2605Payload {
-		return "nixos"
-	}
-	if image, ok := officialVMImageByVersion(vm.Image.Version); ok && image.Payload == vmNixOS2605Payload {
-		return "nixos"
-	}
 	return "ubuntu"
 }
 

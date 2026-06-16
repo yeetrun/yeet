@@ -23,6 +23,7 @@ import (
 )
 
 const (
+	vmImagePayloadPrefix = "vm://"
 	vmImageCacheMissing  = "missing"
 	vmImageCacheCurrent  = "current"
 	vmImageCacheStale    = "stale"
@@ -88,7 +89,6 @@ type vmImageSource struct {
 	ManifestURL string
 	LocalName   string
 	Family      vmImageCatalogImage
-	Official    *officialVMImage
 }
 
 type vmImagePaths struct {
@@ -152,9 +152,6 @@ func resolveVMImagePayload(payload string) (vmImageSource, error) {
 	if payload == "" {
 		return vmImageSource{}, fmt.Errorf("VM image payload is required")
 	}
-	if image, ok := officialVMImageByPayload(payload); ok {
-		return vmImageSource{Kind: vmImageSourceRemote, ManifestURL: image.ManifestURL, Family: image.catalogImage(), Official: &image}, nil
-	}
 	if strings.HasPrefix(payload, vmImagePayloadPrefix) {
 		name := strings.TrimPrefix(payload, vmImagePayloadPrefix)
 		if err := validateLocalVMImageName(name); err != nil {
@@ -162,7 +159,7 @@ func resolveVMImagePayload(payload string) (vmImageSource, error) {
 		}
 		return vmImageSource{Kind: vmImageSourceLocal, LocalName: name}, nil
 	}
-	return vmImageSource{}, fmt.Errorf("unsupported VM image payload %q (supported: %s or imported vm://<name>)", payload, officialVMImagePayloadsForError())
+	return vmImageSource{}, fmt.Errorf("unsupported VM image payload %q (expected imported vm://<name>)", payload)
 }
 
 func resolveVMImagePayloadFromCatalog(payload string, catalog vmImageCatalog) (vmImageSource, error) {
@@ -187,16 +184,25 @@ func resolveVMImagePayloadFromCatalog(payload string, catalog vmImageCatalog) (v
 }
 
 func validateLocalVMImageNameForCatalog(name string, catalog vmImageCatalog) error {
-	if name == "" {
-		return fmt.Errorf("local VM image name is required")
-	}
-	if name != strings.TrimSpace(name) || !localVMImageNamePattern.MatchString(name) {
-		return fmt.Errorf("local VM image name %q must use lowercase path segments with letters, numbers, dots, underscores, or dashes", name)
+	if err := validateLocalVMImageName(name); err != nil {
+		return err
 	}
 	if reservedVMImageLocalPrefixFromCatalog(name, catalog) {
 		return fmt.Errorf("local VM image name %q is reserved", name)
 	}
 	return nil
+}
+
+func reservedVMImageLocalPrefixFromCatalog(name string, catalog vmImageCatalog) bool {
+	name = strings.TrimSpace(name)
+	for _, image := range catalog.Images {
+		officialName := strings.TrimPrefix(strings.TrimSpace(image.Payload), vmImagePayloadPrefix)
+		prefix := strings.SplitN(officialName, "/", 2)[0] + "/"
+		if prefix != "/" && strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func ensureVMImageAsset(ctx context.Context, cache vmImageCache) (vmImageAsset, error) {
@@ -432,8 +438,15 @@ func (c vmImageCache) Inspect(ctx context.Context, payload string) (vmImageCache
 }
 
 func (c vmImageCache) resolveVMImagePayload(ctx context.Context, payload string) (vmImageSource, error) {
+	localSource, localExists, err := c.importedLocalVMImageSource(payload)
+	if err != nil {
+		return vmImageSource{}, err
+	}
 	catalog, err := c.FetchCatalog(ctx)
 	if err != nil {
+		if localExists {
+			return localSource, nil
+		}
 		return vmImageSource{}, err
 	}
 	source, err := resolveVMImagePayloadFromCatalog(payload, catalog)
@@ -441,6 +454,25 @@ func (c vmImageCache) resolveVMImagePayload(ctx context.Context, payload string)
 		return vmImageSource{}, err
 	}
 	return source, nil
+}
+
+func (c vmImageCache) importedLocalVMImageSource(payload string) (vmImageSource, bool, error) {
+	payload = strings.TrimSpace(payload)
+	if !strings.HasPrefix(payload, vmImagePayloadPrefix) {
+		return vmImageSource{}, false, nil
+	}
+	name := strings.TrimPrefix(payload, vmImagePayloadPrefix)
+	if err := validateLocalVMImageName(name); err != nil {
+		return vmImageSource{}, false, fmt.Errorf("invalid local VM image name %q: %w", name, err)
+	}
+	exists, err := localVMImageRefExists(c.Root, name)
+	if err != nil {
+		return vmImageSource{}, false, err
+	}
+	if !exists {
+		return vmImageSource{}, false, nil
+	}
+	return vmImageSource{Kind: vmImageSourceLocal, LocalName: name}, true, nil
 }
 
 func (c vmImageCache) inspectLocal(ctx context.Context, payload, name string) (vmImageCacheState, vmImageManifest, error) {
@@ -565,6 +597,9 @@ func (c vmImageCache) fetchManifest(ctx context.Context) (vmImageManifest, error
 
 func (c vmImageCache) fetchManifestOnce(ctx context.Context) (vmImageManifest, bool, error) {
 	manifestURL := c.manifestURL()
+	if manifestURL == "" {
+		return vmImageManifest{}, false, fmt.Errorf("VM image manifest URL is required")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL, nil)
 	if err != nil {
 		return vmImageManifest{}, false, fmt.Errorf("create VM image manifest request: %w", err)
@@ -692,11 +727,7 @@ func (c vmImageCache) FetchCatalog(ctx context.Context) (vmImageCatalog, error) 
 }
 
 func (c vmImageCache) manifestURL() string {
-	manifestURL := strings.TrimSpace(c.ManifestURL)
-	if manifestURL != "" {
-		return manifestURL
-	}
-	return defaultVMImageManifestURL
+	return strings.TrimSpace(c.ManifestURL)
 }
 
 func (c vmImageCache) withManifestURL(manifestURL string) vmImageCache {
@@ -798,6 +829,9 @@ func (c vmImageCache) artifactURL(artifactName string) (string, error) {
 		return "", err
 	}
 	manifestURL := c.manifestURL()
+	if manifestURL == "" {
+		return "", fmt.Errorf("VM image manifest URL is required")
+	}
 	u, err := url.Parse(manifestURL)
 	if err != nil {
 		return "", fmt.Errorf("parse VM image manifest URL: %w", err)

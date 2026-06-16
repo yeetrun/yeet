@@ -414,6 +414,7 @@ func TestRunVMProvisionUsesManifestDefaultUser(t *testing.T) {
 		}
 		asset.Manifest.Name = "yeet-nixos-26.05"
 		asset.Manifest.DefaultUser = "nixos"
+		asset.Manifest.MetadataDriver = "nixos"
 		asset.Manifest.GuestInit = vmGuestInitPath
 		asset.Manifest.GuestSystemInit = "/run/current-system/init"
 		return asset, nil
@@ -440,6 +441,15 @@ func TestRunVMProvisionUsesManifestDefaultUser(t *testing.T) {
 		t.Fatalf("metadata driver = %q, want nixos", injectedMetadata.MetadataDriver)
 	}
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "yeet.system_init=/run/current-system/init")
+}
+
+func TestVMGuestMetadataFallbacksDoNotInferFromPayload(t *testing.T) {
+	if got := vmGuestUserForImage(testNixOSVMPayload, vmImageManifest{}); got != "ubuntu" {
+		t.Fatalf("guest user fallback = %q, want ubuntu", got)
+	}
+	if got := vmMetadataDriverForImage(testNixOSVMPayload, vmImageManifest{}); got != "ubuntu" {
+		t.Fatalf("metadata driver fallback = %q, want ubuntu", got)
+	}
 }
 
 func TestRunVMProvisionUsesLegacyBootAndMetadataWithoutGuestInit(t *testing.T) {
