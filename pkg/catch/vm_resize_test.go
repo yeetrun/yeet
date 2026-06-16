@@ -208,6 +208,7 @@ func TestVMSetPreservesNixOSUserAndSystemInit(t *testing.T) {
 	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, svc *db.Service) error {
 		svc.VM.Image.Payload = testNixOSVMPayload
 		svc.VM.Image.Version = testNixOSVMImageVersion
+		svc.VM.Image.MetadataDriver = "nixos"
 		svc.VM.SSH.User = "nixos"
 		return nil
 	}); err != nil {
@@ -249,6 +250,18 @@ func TestVMSetPreservesNixOSUserAndSystemInit(t *testing.T) {
 		t.Fatalf("metadata driver = %q, want nixos", injectedMetadata.MetadataDriver)
 	}
 	assertFileContains(t, firecrackerPath, "yeet.system_init=/run/current-system/init")
+}
+
+func TestVMMetadataDriverForExistingVMFallsBackToUbuntuWithoutStoredMetadata(t *testing.T) {
+	vm := db.VMConfig{
+		Image: db.VMImageConfig{
+			Payload: testNixOSVMPayload,
+			Version: testNixOSVMImageVersion,
+		},
+	}
+	if got := vmMetadataDriverForExistingVM(vm); got != "ubuntu" {
+		t.Fatalf("metadata driver = %q, want ubuntu", got)
+	}
 }
 
 func TestVMSetPreservesLocalNixOSImageMetadata(t *testing.T) {

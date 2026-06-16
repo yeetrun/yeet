@@ -48,7 +48,7 @@ func TestConfirmTSUpdateReturnsPromptWriteError(t *testing.T) {
 }
 
 func TestRunCmdDispatchesVMPayload(t *testing.T) {
-	for _, payload := range []string{vmUbuntu2604Payload, "vm://foo/bar"} {
+	for _, payload := range []string{testUbuntuVMPayload, "vm://foo/bar"} {
 		t.Run(payload, func(t *testing.T) {
 			server := newTestServer(t)
 			var called bool

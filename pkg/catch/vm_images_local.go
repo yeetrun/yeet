@@ -39,6 +39,7 @@ type localVMImageImportRequest struct {
 
 type localVMImageImporter struct {
 	CacheRoot          string
+	Catalog            *vmImageCatalog
 	EnsureManagedAsset func(context.Context) (vmImageAsset, error)
 	Now                func() time.Time
 }
@@ -78,10 +79,14 @@ func validateLocalVMImageName(name string) error {
 	if name != strings.TrimSpace(name) || !localVMImageNamePattern.MatchString(name) {
 		return fmt.Errorf("local VM image name %q must use lowercase path segments with letters, numbers, dots, underscores, or dashes", name)
 	}
-	if reservedVMImageLocalPrefix(name) {
-		return fmt.Errorf("local VM image name %q is reserved", name)
-	}
 	return nil
+}
+
+func validateLocalVMImageNameForImport(name string, catalog *vmImageCatalog) error {
+	if catalog == nil {
+		return validateLocalVMImageName(name)
+	}
+	return validateLocalVMImageNameForCatalog(name, *catalog)
 }
 
 func (i localVMImageImporter) Import(ctx context.Context, req localVMImageImportRequest) (localVMImageRef, error) {
@@ -105,7 +110,7 @@ func (i localVMImageImporter) Import(ctx context.Context, req localVMImageImport
 }
 
 func (i localVMImageImporter) validateImportRequest(req localVMImageImportRequest) (string, error) {
-	if err := validateLocalVMImageName(req.Name); err != nil {
+	if err := validateLocalVMImageNameForImport(req.Name, i.Catalog); err != nil {
 		return "", err
 	}
 	if req.Reader == nil {
@@ -151,7 +156,7 @@ func (i localVMImageImporter) importExtracted(cacheRoot string, req localVMImage
 	}
 	ref := localVMImageRef{
 		Name:         req.Name,
-		Payload:      "vm://" + req.Name,
+		Payload:      vmImagePayloadPrefix + req.Name,
 		Version:      version,
 		ContentID:    contentID,
 		Root:         blobDir,
@@ -466,6 +471,19 @@ func localVMImageRefPath(cacheRoot, name string) string {
 	parts = append(parts, strings.Split(name, "/")...)
 	parts = append(parts, "ref.json")
 	return filepath.Join(parts...)
+}
+
+func localVMImageRefExists(cacheRoot, name string) (bool, error) {
+	if strings.TrimSpace(cacheRoot) == "" {
+		return false, nil
+	}
+	if _, err := os.Stat(localVMImageRefPath(cacheRoot, name)); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect local VM image ref: %w", err)
+	}
+	return true, nil
 }
 
 func extractLocalVMImageBundle(r io.Reader, dest string) error {

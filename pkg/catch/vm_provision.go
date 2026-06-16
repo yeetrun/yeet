@@ -251,14 +251,14 @@ func currentVMImageAsset(ctx context.Context, cache vmImageCache, payload string
 	if strings.TrimSpace(state.ManifestURL) != "" {
 		return cachedVMImageAsset(ctx, cache.withManifestURL(state.ManifestURL), state.CachedVersion)
 	}
-	source, err := resolveVMImagePayload(payload)
+	source, err := cache.resolveVMImagePayload(ctx, payload)
 	if err != nil {
 		return vmImageAsset{}, err
 	}
 	if source.Kind == vmImageSourceLocal {
 		return resolveLocalVMImageAssetForPayload(ctx, cache.Root, source.LocalName)
 	}
-	return cachedVMImageAsset(ctx, cache, state.CachedVersion)
+	return cachedVMImageAsset(ctx, cache.withManifestURL(source.ManifestURL), state.CachedVersion)
 }
 
 func normalizeVMProvisionImagePolicy(policy string) (string, error) {
@@ -699,19 +699,11 @@ func validateVMShape(shape vmShape) error {
 }
 
 func vmGuestUserForImage(payload string, manifest vmImageManifest) string {
-	fallback := "ubuntu"
-	if source, err := resolveVMImagePayload(payload); err == nil && source.Official != nil {
-		fallback = source.Official.DefaultUser
-	}
-	return manifest.DefaultUserOr(fallback)
+	return manifest.DefaultUserOr("ubuntu")
 }
 
 func vmMetadataDriverForImage(payload string, manifest vmImageManifest) string {
-	fallback := "ubuntu"
-	if source, err := resolveVMImagePayload(payload); err == nil && source.Official != nil && source.Official.Payload == vmNixOS2605Payload {
-		fallback = "nixos"
-	}
-	return manifest.MetadataDriverOr(fallback)
+	return manifest.MetadataDriverOr("ubuntu")
 }
 
 func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resolvedRoot resolvedServiceRoot, shape vmShape, image vmImageAsset, svcNet *db.SvcNetwork, sshKey string) (vmProvisionPlan, error) {

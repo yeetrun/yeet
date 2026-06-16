@@ -232,6 +232,7 @@ func (e *ttyExecer) vmImagesImportCmdFunc(flags cli.VMImagesFlags, name string) 
 	}
 	importer := localVMImageImporter{
 		CacheRoot: cache.Root,
+		Catalog:   &catalog,
 		EnsureManagedAsset: func(ctx context.Context) (vmImageAsset, error) {
 			return vmImageEnsureCatalogFunc(ctx, cache, defaultImage, e.vmImagesProgressUI(flags))
 		},

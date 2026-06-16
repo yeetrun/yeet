@@ -283,10 +283,10 @@ func TestTTYVMImageCacheLeavesManifestURLUnset(t *testing.T) {
 		t.Fatalf("cache root = %q, want VM image root under server root", cache.Root)
 	}
 	if cache.ManifestURL != "" {
-		t.Fatalf("manifest URL override = %q, want empty so official images can select their registry URL", cache.ManifestURL)
+		t.Fatalf("manifest URL override = %q, want empty so catalog images select their manifest URL", cache.ManifestURL)
 	}
-	if got := cache.manifestURL(); got != testDefaultVMImageManifest {
-		t.Fatalf("manifestURL fallback = %q, want %q", got, testDefaultVMImageManifest)
+	if got := cache.manifestURL(); got != "" {
+		t.Fatalf("manifestURL fallback = %q, want empty", got)
 	}
 }
 
