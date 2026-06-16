@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -41,8 +42,16 @@ var vmImageInspectFunc = func(ctx context.Context, cache vmImageCache, payload s
 	return cache.Inspect(ctx, payload)
 }
 
+var vmImageInspectCatalogFunc = func(ctx context.Context, cache vmImageCache, image vmImageCatalogImage) (vmImageCacheState, vmImageManifest, error) {
+	return cache.withManifestURL(image.ManifestURL).inspectRemote(ctx, image.Payload, image)
+}
+
 var vmImageEnsureFunc = func(ctx context.Context, cache vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
 	return ensureVMImageAssetWithProgress(ctx, cache, payload, ui)
+}
+
+var vmImageEnsureCatalogFunc = func(ctx context.Context, cache vmImageCache, image vmImageCatalogImage, ui ProgressUI) (vmImageAsset, error) {
+	return ensureVMImageCatalogAssetWithProgress(ctx, cache, image, ui)
 }
 
 func (e *ttyExecer) vmImagesCmdFunc(flags cli.VMImagesFlags, args []string) error {
@@ -95,9 +104,14 @@ func vmImagesSingleNameArg(args []string) (string, bool) {
 
 func (e *ttyExecer) vmImagesListCmdFunc(flags cli.VMImagesFlags) error {
 	cache := e.vmImageCache()
+	ctx := e.vmImagesContext()
+	catalog, err := cache.FetchCatalog(ctx)
+	if err != nil {
+		return err
+	}
 	var rows []vmImageListRow
-	for _, image := range officialVMImages {
-		state, _, err := vmImageInspectFunc(e.vmImagesContext(), cache, image.Payload)
+	for _, image := range catalog.Images {
+		state, _, err := vmImageInspectCatalogFunc(ctx, cache, image)
 		if err != nil {
 			return err
 		}
@@ -110,7 +124,7 @@ func (e *ttyExecer) vmImagesListCmdFunc(flags cli.VMImagesFlags) error {
 	for _, ref := range refs {
 		rows = append(rows, vmImageListRowFromLocalRef(ref, "ready"))
 	}
-	pruneRows, err := e.s.planVMImagePrune(e.vmImagesContext(), cache)
+	pruneRows, err := e.s.planVMImagePrune(ctx, cache)
 	if err != nil {
 		return err
 	}
@@ -124,11 +138,16 @@ func (e *ttyExecer) vmImagesListCmdFunc(flags cli.VMImagesFlags) error {
 }
 
 func (e *ttyExecer) vmImagesCatalogCmdFunc(flags cli.VMImagesFlags) error {
-	rows := make([]vmImageCatalogRow, 0, len(officialVMImages))
-	for _, image := range officialVMImages {
-		rows = append(rows, vmImageCatalogRowFromOfficial(image))
+	cache := e.vmImageCache()
+	catalog, err := cache.FetchCatalog(e.vmImagesContext())
+	if err != nil {
+		return err
 	}
-	refs, err := listLocalVMImages(e.vmImageCache().Root)
+	rows := make([]vmImageCatalogRow, 0, len(catalog.Images))
+	for _, image := range catalog.Images {
+		rows = append(rows, vmImageCatalogRowFromCatalogImage(image))
+	}
+	refs, err := listLocalVMImages(cache.Root)
 	if err != nil {
 		return err
 	}
@@ -139,24 +158,29 @@ func (e *ttyExecer) vmImagesCatalogCmdFunc(flags cli.VMImagesFlags) error {
 }
 
 func (e *ttyExecer) vmImagesUpdateCmdFunc(flags cli.VMImagesFlags, args []string) error {
-	payloads, err := vmImagesUpdatePayloads(args)
+	cache := e.vmImageCache()
+	ctx := e.vmImagesContext()
+	catalog, err := cache.FetchCatalog(ctx)
 	if err != nil {
 		return err
 	}
-	cache := e.vmImageCache()
-	states := make([]vmImageCacheState, 0, len(payloads))
-	for _, payload := range payloads {
-		asset, err := e.ensureManagedVMImageAndPrune(e.vmImagesContext(), cache, payload, e.vmImagesProgressUI(flags))
+	images, err := vmImagesUpdateImages(args, catalog)
+	if err != nil {
+		return err
+	}
+	states := make([]vmImageCacheState, 0, len(images))
+	for _, image := range images {
+		asset, err := e.ensureCatalogVMImageAndPrune(ctx, cache, image, e.vmImagesProgressUI(flags))
 		if err != nil {
 			return err
 		}
 		state := vmImageCacheState{
-			Payload:       payload,
+			Payload:       image.Payload,
 			CachedVersion: asset.Manifest.Version,
 			LatestVersion: asset.Manifest.Version,
 			State:         vmImageCacheCurrent,
 			CachePath:     asset.Paths.Dir,
-			ManifestURL:   vmImageManifestURLForPayload(payload),
+			ManifestURL:   image.ManifestURL,
 		}
 		if state.CachePath == "" && state.CachedVersion != "" {
 			state.CachePath = filepath.Join(cache.Root, state.CachedVersion)
@@ -169,32 +193,28 @@ func (e *ttyExecer) vmImagesUpdateCmdFunc(flags cli.VMImagesFlags, args []string
 	return renderVMImageCacheStates(e.rw, flags.Format, states)
 }
 
-func vmImagesUpdatePayloads(args []string) ([]string, error) {
+func vmImagesUpdateImages(args []string, catalog vmImageCatalog) ([]vmImageCatalogImage, error) {
 	if len(args) == 0 {
-		payloads := make([]string, 0, len(officialVMImages))
-		for _, image := range officialVMImages {
-			payloads = append(payloads, image.Payload)
+		images := make([]vmImageCatalogImage, 0, len(catalog.Images))
+		for _, image := range catalog.Images {
+			images = append(images, image.normalized())
 		}
-		return payloads, nil
+		sort.Slice(images, func(i, j int) bool {
+			return images[i].Payload < images[j].Payload
+		})
+		return images, nil
 	}
 	if len(args) != 1 {
 		return nil, fmt.Errorf("%s", vmImagesUsage)
 	}
-	source, err := resolveVMImagePayload(args[0])
+	source, err := resolveVMImagePayloadFromCatalog(args[0], catalog)
 	if err != nil {
 		return nil, err
 	}
 	if source.Kind != vmImageSourceRemote {
-		return nil, fmt.Errorf("VM image update only supports official images: %s", officialVMImagePayloadsForError())
+		return nil, fmt.Errorf("VM image update only supports catalog images: %s", vmImageCatalogPayloadsForError(catalog))
 	}
-	return []string{strings.TrimSpace(args[0])}, nil
-}
-
-func vmImageManifestURLForPayload(payload string) string {
-	if image, ok := officialVMImageByPayload(payload); ok {
-		return image.ManifestURL
-	}
-	return defaultVMImageManifestURL
+	return []vmImageCatalogImage{source.Family}, nil
 }
 
 func (e *ttyExecer) vmImagesImportCmdFunc(flags cli.VMImagesFlags, name string) error {
@@ -202,10 +222,18 @@ func (e *ttyExecer) vmImagesImportCmdFunc(flags cli.VMImagesFlags, name string) 
 		return fmt.Errorf("use yeet vm images import from the client")
 	}
 	cache := e.vmImageCache()
+	catalog, err := cache.FetchCatalog(e.vmImagesContext())
+	if err != nil {
+		return err
+	}
+	defaultImage, ok := catalog.DefaultImage()
+	if !ok {
+		return fmt.Errorf("VM image catalog has no default image for local import")
+	}
 	importer := localVMImageImporter{
 		CacheRoot: cache.Root,
 		EnsureManagedAsset: func(ctx context.Context) (vmImageAsset, error) {
-			return vmImageEnsureFunc(ctx, cache, vmUbuntu2604Payload, e.vmImagesProgressUI(flags))
+			return vmImageEnsureCatalogFunc(ctx, cache, defaultImage, e.vmImagesProgressUI(flags))
 		},
 	}
 	ref, err := importer.Import(e.vmImagesContext(), localVMImageImportRequest{
@@ -281,11 +309,49 @@ func (e *ttyExecer) vmImagesContext() context.Context {
 	return context.Background()
 }
 
-func vmImageCatalogRowFromOfficial(image officialVMImage) vmImageCatalogRow {
+func (e *ttyExecer) ensureCatalogVMImageAndPrune(ctx context.Context, cache vmImageCache, image vmImageCatalogImage, ui ProgressUI) (vmImageAsset, error) {
+	asset, err := vmImageEnsureCatalogFunc(ctx, cache, image, ui)
+	if err != nil {
+		return vmImageAsset{}, err
+	}
+	e.pruneVMImagesAfterManagedUpdate(ctx, cache, image.Payload)
+	return asset, nil
+}
+
+func ensureVMImageCatalogAssetWithProgress(ctx context.Context, cache vmImageCache, image vmImageCatalogImage, ui ProgressUI) (asset vmImageAsset, retErr error) {
+	cache = cache.withManifestURL(image.ManifestURL)
+	if ui != nil {
+		state, _, err := cache.inspectRemote(ctx, image.Payload, image)
+		if err != nil {
+			return vmImageAsset{}, err
+		}
+		if state.State == vmImageCacheCurrent {
+			return cachedVMImageAsset(ctx, cache, state.CachedVersion)
+		}
+	}
+
+	var progress *byteProgress
+	if ui != nil {
+		progress = newByteProgress(0)
+		ui.Start()
+		ui.StartStep("Download VM image")
+		defer func() {
+			if retErr != nil {
+				ui.FailStep(retErr.Error())
+			} else {
+				ui.DoneStep(progress.finalDetail())
+			}
+			ui.Stop()
+		}()
+	}
+	return ensureVMImageAssetFromCatalog(ctx, cache, image, progress, ui)
+}
+
+func vmImageCatalogRowFromCatalogImage(image vmImageCatalogImage) vmImageCatalogRow {
 	return vmImageCatalogRow{
 		Payload:       image.Payload,
 		Kind:          "builtin",
-		Name:          image.DisplayName,
+		Name:          image.Name,
 		DefaultUser:   image.DefaultUser,
 		VersionPrefix: image.VersionPrefix,
 	}
@@ -309,12 +375,8 @@ func vmImageListRowFromCacheState(state vmImageCacheState) vmImageListRow {
 	if version == "" {
 		version = state.CachedVersion
 	}
-	payload := state.Payload
-	if payload == "" {
-		payload = vmUbuntu2604Payload
-	}
 	return vmImageListRow{
-		Payload:   payload,
+		Payload:   state.Payload,
 		Kind:      "builtin",
 		State:     string(state.State),
 		Version:   version,
@@ -334,12 +396,8 @@ func vmImageListRowFromLocalRef(ref localVMImageRef, state string) vmImageListRo
 }
 
 func vmImageListRowFromPruneRow(row vmImagePruneRow) vmImageListRow {
-	payload := row.Payload
-	if payload == "" {
-		payload = vmUbuntu2604Payload
-	}
 	return vmImageListRow{
-		Payload:   payload,
+		Payload:   row.Payload,
 		Kind:      row.Kind,
 		State:     row.State,
 		Version:   row.Version,
