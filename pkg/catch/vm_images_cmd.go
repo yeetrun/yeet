@@ -124,7 +124,7 @@ func (e *ttyExecer) vmImagesListCmdFunc(flags cli.VMImagesFlags) error {
 	for _, ref := range refs {
 		rows = append(rows, vmImageListRowFromLocalRef(ref, "ready"))
 	}
-	pruneRows, err := e.s.planVMImagePrune(ctx, cache)
+	pruneRows, err := e.s.planVMImagePruneWithCatalog(ctx, cache, catalog)
 	if err != nil {
 		return err
 	}
@@ -314,7 +314,7 @@ func (e *ttyExecer) ensureCatalogVMImageAndPrune(ctx context.Context, cache vmIm
 	if err != nil {
 		return vmImageAsset{}, err
 	}
-	e.pruneVMImagesAfterManagedUpdate(ctx, cache, image.Payload)
+	e.pruneVMImagesAfterManagedUpdate(ctx, cache)
 	return asset, nil
 }
 

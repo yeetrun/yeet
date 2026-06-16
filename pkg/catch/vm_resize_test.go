@@ -206,8 +206,8 @@ func TestVMSetPreservesNixOSUserAndSystemInit(t *testing.T) {
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
 	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, svc *db.Service) error {
-		svc.VM.Image.Payload = vmNixOS2605Payload
-		svc.VM.Image.Version = "nixos-26.05-amd64-v1"
+		svc.VM.Image.Payload = testNixOSVMPayload
+		svc.VM.Image.Version = testNixOSVMImageVersion
 		svc.VM.SSH.User = "nixos"
 		return nil
 	}); err != nil {
@@ -355,8 +355,8 @@ func seedVMForResize(t *testing.T, server *Server, name, root, backend string) {
 			VM: &db.VMConfig{
 				Runtime: vmRuntimeFirecracker,
 				Image: db.VMImageConfig{
-					Payload: vmUbuntu2604Payload,
-					Version: defaultVMImageVersion,
+					Payload: testUbuntuVMPayload,
+					Version: testUbuntuVMImageVersion,
 					Kernel:  "/srv/yeet/images/kernel",
 					RootFS:  "/srv/yeet/images/rootfs.ext4",
 				},

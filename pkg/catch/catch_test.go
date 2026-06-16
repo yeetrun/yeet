@@ -21,6 +21,15 @@ import (
 	"tailscale.com/tailcfg"
 )
 
+const (
+	testUbuntuVMPayload         = "vm://ubuntu/26.04"
+	testUbuntuVMImageVersion    = "ubuntu-26.04-amd64-v99"
+	testNixOSVMPayload          = "vm://nixos/26.05"
+	testNixOSVMImageVersion     = "nixos-26.05-amd64-v99"
+	testDefaultVMImageManifest  = "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json"
+	testNixOSVMImageManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/download/nixos-26.05-amd64-latest/manifest.json"
+)
+
 func TestStatusesServiceNamesByTypeFiltersAndSorts(t *testing.T) {
 	services := map[string]*db.Service{
 		"worker": {Name: "worker", ServiceType: db.ServiceTypeSystemd},
@@ -428,7 +437,7 @@ func TestRemoveVMCleanDataDestroysServiceRootNotSharedImageBase(t *testing.T) {
 			ServiceRoot:    serviceRoot,
 			ServiceRootZFS: "flash/yeet/vms/devbox",
 			VM: &db.VMConfig{
-				Image: db.VMImageConfig{Payload: vmUbuntu2604Payload, Version: defaultVMImageVersion},
+				Image: db.VMImageConfig{Payload: testUbuntuVMPayload, Version: testUbuntuVMImageVersion},
 				Disk: db.VMDiskConfig{
 					Backend: vmDiskBackendZVOL,
 					Bytes:   128 << 30,
