@@ -51,15 +51,23 @@ type vmImageZFSBase struct {
 }
 
 func (s *Server) planVMImagePrune(ctx context.Context, cache vmImageCache) ([]vmImagePruneRow, error) {
-	cacheEntries, err := listCachedVMImagePruneEntries(cache.Root)
+	catalog, err := cache.FetchCatalog(ctx)
 	if err != nil {
 		return nil, err
 	}
-	zfsBases, err := s.listVMImageZFSBases(ctx)
+	return s.planVMImagePruneWithCatalog(ctx, cache, catalog)
+}
+
+func (s *Server) planVMImagePruneWithCatalog(ctx context.Context, cache vmImageCache, catalog vmImageCatalog) ([]vmImagePruneRow, error) {
+	cacheEntries, err := listCachedVMImagePruneEntries(cache.Root, catalog)
 	if err != nil {
 		return nil, err
 	}
-	currentVersions := currentVMImagePruneVersions(cacheEntries, zfsBases)
+	zfsBases, err := s.listVMImageZFSBases(ctx, catalog)
+	if err != nil {
+		return nil, err
+	}
+	currentVersions := currentVMImagePruneVersions(cacheEntries, zfsBases, catalog)
 	inUseVersions, err := s.inUseVMImageVersions()
 	if err != nil {
 		return nil, err
@@ -67,22 +75,22 @@ func (s *Server) planVMImagePrune(ctx context.Context, cache vmImageCache) ([]vm
 
 	rows := make([]vmImagePruneRow, 0, len(cacheEntries)+len(zfsBases))
 	for _, entry := range cacheEntries {
-		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindCache, entry.Version, entry.Dir, currentVersions, inUseVersions, false, nil))
+		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindCache, entry.Version, entry.Dir, currentVersions, inUseVersions, false, nil, catalog))
 	}
 	runner := s.vmImagePruneZFSRunner()
 	for _, base := range zfsBases {
 		hasClones := false
 		var cloneErr error
-		if !vmImageVersionIsCurrent(currentVersions, base.Version) && !vmImageVersionInUse(inUseVersions, base.Version) {
+		if !vmImageVersionIsCurrent(currentVersions, base.Version, catalog) && !vmImageVersionInUse(inUseVersions, base.Version) {
 			hasClones, cloneErr = vmImageZFSSnapshotHasClones(ctx, runner, base.Snapshot)
 		}
-		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindZFSBase, base.Version, base.Dataset, currentVersions, inUseVersions, hasClones, cloneErr))
+		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindZFSBase, base.Version, base.Dataset, currentVersions, inUseVersions, hasClones, cloneErr, catalog))
 	}
 	sortVMImagePruneRows(rows)
 	return rows, nil
 }
 
-func listCachedVMImagePruneEntries(root string) ([]cachedVMImagePruneEntry, error) {
+func listCachedVMImagePruneEntries(root string, catalog vmImageCatalog) ([]cachedVMImagePruneEntry, error) {
 	root = strings.TrimSpace(root)
 	if root == "" {
 		return nil, fmt.Errorf("VM image cache root is required")
@@ -100,7 +108,7 @@ func listCachedVMImagePruneEntries(root string) ([]cachedVMImagePruneEntry, erro
 		if !ok {
 			continue
 		}
-		if !isManagedVMImagePruneVersion(manifest.Version) {
+		if !isManagedVMImagePruneVersion(manifest.Version, catalog) {
 			continue
 		}
 		cached = append(cached, cachedVMImagePruneEntry{Version: manifest.Version, Dir: dir})
@@ -108,7 +116,7 @@ func listCachedVMImagePruneEntries(root string) ([]cachedVMImagePruneEntry, erro
 	return cached, nil
 }
 
-func (s *Server) listVMImageZFSBases(ctx context.Context) ([]vmImageZFSBase, error) {
+func (s *Server) listVMImageZFSBases(ctx context.Context, catalog vmImageCatalog) ([]vmImageZFSBase, error) {
 	runner := s.vmImagePruneZFSRunner()
 	if runner == nil {
 		return nil, nil
@@ -122,7 +130,7 @@ func (s *Server) listVMImageZFSBases(ctx context.Context) ([]vmImageZFSBase, err
 	}
 	var bases []vmImageZFSBase
 	for _, line := range strings.Split(stdout, "\n") {
-		base, ok := parseVMImageZFSBaseDataset(strings.TrimSpace(line))
+		base, ok := parseVMImageZFSBaseDataset(strings.TrimSpace(line), catalog)
 		if ok {
 			bases = append(bases, base)
 		}
@@ -149,7 +157,18 @@ func isZFSListUnavailable(stderr string, err error) bool {
 		strings.Contains(text, "the zfs modules are not loaded")
 }
 
-func parseVMImageZFSBaseDataset(name string) (vmImageZFSBase, bool) {
+func parseVMImageZFSBaseDataset(name string, catalog vmImageCatalog) (vmImageZFSBase, bool) {
+	base, ok := parseVMImageZFSBaseDatasetPath(name)
+	if !ok {
+		return vmImageZFSBase{}, false
+	}
+	if !isManagedVMImagePruneVersion(base.Version, catalog) {
+		return vmImageZFSBase{}, false
+	}
+	return base, true
+}
+
+func parseVMImageZFSBaseDatasetPath(name string) (vmImageZFSBase, bool) {
 	const marker = "/yeet/vm-images/"
 	if name == "" || !strings.HasSuffix(name, "/root") {
 		return vmImageZFSBase{}, false
@@ -162,9 +181,6 @@ func parseVMImageZFSBaseDataset(name string) (vmImageZFSBase, bool) {
 	if err := validateVMImageCacheDirName(version); err != nil {
 		return vmImageZFSBase{}, false
 	}
-	if !isManagedVMImagePruneVersion(version) {
-		return vmImageZFSBase{}, false
-	}
 	parent := strings.TrimSuffix(name, "/root")
 	return vmImageZFSBase{
 		Version:       version,
@@ -174,15 +190,15 @@ func parseVMImageZFSBaseDataset(name string) (vmImageZFSBase, bool) {
 	}, true
 }
 
-func isManagedVMImagePruneVersion(version string) bool {
-	_, ok := officialVMImageByVersion(version)
+func isManagedVMImagePruneVersion(version string, catalog vmImageCatalog) bool {
+	_, ok := catalog.ImageByVersion(version)
 	return ok
 }
 
-func currentVMImagePruneVersions(cacheEntries []cachedVMImagePruneEntry, zfsBases []vmImageZFSBase) map[string]string {
+func currentVMImagePruneVersions(cacheEntries []cachedVMImagePruneEntry, zfsBases []vmImageZFSBase, catalog vmImageCatalog) map[string]string {
 	current := map[string]string{}
 	consider := func(version string) {
-		image, ok := officialVMImageByVersion(version)
+		image, ok := catalog.ImageByVersion(version)
 		if !ok {
 			return
 		}
@@ -199,8 +215,8 @@ func currentVMImagePruneVersions(cacheEntries []cachedVMImagePruneEntry, zfsBase
 	return current
 }
 
-func vmImageVersionIsCurrent(currentVersions map[string]string, version string) bool {
-	image, ok := officialVMImageByVersion(version)
+func vmImageVersionIsCurrent(currentVersions map[string]string, version string, catalog vmImageCatalog) bool {
+	image, ok := catalog.ImageByVersion(version)
 	return ok && currentVersions[image.Payload] == version
 }
 
@@ -246,13 +262,13 @@ func vmImageZFSSnapshotHasClones(ctx context.Context, runner zfsCommandRunner, s
 	return value != "" && value != "-", nil
 }
 
-func classifyVMImagePruneRow(kind, version, path string, currentVersions map[string]string, inUse map[string]struct{}, hasClones bool, cloneErr error) vmImagePruneRow {
+func classifyVMImagePruneRow(kind, version, path string, currentVersions map[string]string, inUse map[string]struct{}, hasClones bool, cloneErr error, catalog vmImageCatalog) vmImagePruneRow {
 	row := vmImagePruneRow{Kind: kind, Version: version, Path: path}
-	if image, ok := officialVMImageByVersion(version); ok {
+	if image, ok := catalog.ImageByVersion(version); ok {
 		row.Payload = image.Payload
 	}
 	switch {
-	case vmImageVersionIsCurrent(currentVersions, version):
+	case vmImageVersionIsCurrent(currentVersions, version, catalog):
 		row.State = vmImagePruneStateCurrent
 		row.Reason = "newest cached version"
 	case vmImageVersionInUse(inUse, version):
@@ -323,12 +339,12 @@ func (e *ttyExecer) ensureManagedVMImageAndPrune(ctx context.Context, cache vmIm
 	if err != nil {
 		return vmImageAsset{}, err
 	}
-	e.pruneVMImagesAfterManagedUpdate(ctx, cache, payload)
+	e.pruneVMImagesAfterManagedUpdate(ctx, cache)
 	return asset, nil
 }
 
-func (e *ttyExecer) pruneVMImagesAfterManagedUpdate(ctx context.Context, cache vmImageCache, payload string) {
-	if _, ok := officialVMImageByPayload(payload); !ok || e == nil || e.s == nil {
+func (e *ttyExecer) pruneVMImagesAfterManagedUpdate(ctx context.Context, cache vmImageCache) {
+	if e == nil || e.s == nil {
 		return
 	}
 	done := e.traceBlock("vm image auto prune")
@@ -362,7 +378,7 @@ func countVMImagePruneResults(rows []vmImagePruneRow) (int, int) {
 }
 
 func (s *Server) destroyVMImageZFSBase(ctx context.Context, row vmImagePruneRow) error {
-	base, ok := parseVMImageZFSBaseDataset(row.Path)
+	base, ok := parseVMImageZFSBaseDatasetPath(row.Path)
 	if !ok {
 		return fmt.Errorf("invalid ZFS VM image base dataset %q", row.Path)
 	}
