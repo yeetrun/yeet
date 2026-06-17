@@ -629,6 +629,15 @@ func TestRunVMRsyncCopyDownloadBuildsRsyncCommand(t *testing.T) {
 			t.Fatalf("rsync args = %#v, want %q", gotArgs, want)
 		}
 	}
+	remoteShell := gotArgs[slices.Index(gotArgs, "-e")+1]
+	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=10.0.4.80"} {
+		if !strings.Contains(remoteShell, want) {
+			t.Fatalf("remote shell = %q, want %q", remoteShell, want)
+		}
+	}
+	if strings.Contains(remoteShell, "ProxyCommand=ssh") {
+		t.Fatalf("remote shell = %q, want direct LAN SSH without generated proxy", remoteShell)
+	}
 }
 
 func TestRunVMRsyncCopyMissingLocalRsync(t *testing.T) {

@@ -105,6 +105,7 @@ func trimRunDraftFields(draft RunDraft) RunDraft {
 }
 
 func validateRunDraftNetwork(draft *RunDraft, result *RunDraftValidationResult) {
+	networkModesProvided := runDraftNetworkModesProvided(draft.Network.Modes)
 	draft.Network.Modes = normalizeRunDraftNetworkModes(draft.Network.Modes, result)
 	draft.Network.TSVersion = strings.TrimSpace(draft.Network.TSVersion)
 	draft.Network.TSExitNode = strings.TrimSpace(draft.Network.TSExitNode)
@@ -116,8 +117,25 @@ func validateRunDraftNetwork(draft *RunDraft, result *RunDraftValidationResult) 
 	validateRunDraftMacvlanVLAN(draft.Network.MacvlanVLAN, result)
 	validateRunDraftMacvlanLAN(draft.Network, result)
 	if draft.PayloadKind == serviceTypeVM {
+		defaultRunDraftVMNetworkModes(draft, networkModesProvided)
 		validateRunDraftVMNetworkModes(draft.Network.Modes, result)
 	}
+}
+
+func runDraftNetworkModesProvided(modes []string) bool {
+	for _, mode := range modes {
+		if strings.TrimSpace(mode) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultRunDraftVMNetworkModes(draft *RunDraft, provided bool) {
+	if provided || len(draft.Network.Modes) != 0 {
+		return
+	}
+	draft.Network.Modes = []string{"svc"}
 }
 
 func validateRunDraftMacvlanVLAN(vlan int, result *RunDraftValidationResult) {

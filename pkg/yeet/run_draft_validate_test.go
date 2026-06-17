@@ -238,19 +238,19 @@ func TestValidateRunDraftRejectsTailscaleForVM(t *testing.T) {
 	}
 }
 
-func TestValidateRunDraftRejectsVMWithoutNetworkModes(t *testing.T) {
+func TestValidateRunDraftDefaultsVMWithoutNetworkModesToServiceNetwork(t *testing.T) {
 	draft := RunDraft{
 		Service:     "devbox",
 		Host:        "yeet-pve1",
 		Payload:     "vm://ubuntu/26.04",
 		PayloadKind: serviceTypeVM,
 	}
-	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
-	if validation.OK {
-		t.Fatal("validation OK = true, want false")
+	normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+	if !validation.OK {
+		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
 	}
-	if got := validation.fieldError("network.modes"); !strings.Contains(got, "VM networking requires svc, lan, or svc,lan") {
-		t.Fatalf("network.modes error = %q, want VM network requirement", got)
+	if got, want := normalized.Network.Modes, []string{"svc"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("network modes = %#v, want %#v", got, want)
 	}
 }
 

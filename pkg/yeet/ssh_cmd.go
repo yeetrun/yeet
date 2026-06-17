@@ -673,7 +673,7 @@ func shouldProxyVMSSH(resp catchrpc.ServiceInfoResponse, guestHost, mode string,
 	if resp.Info.VM == nil || strings.TrimSpace(guestHost) == "" {
 		return false
 	}
-	return forceProxy || mode == "svc" || mode == "lan"
+	return forceProxy || mode == "svc"
 }
 
 func vmSSHTransportNotice(proxyHost string, target vmSSHTargetInfo, generatedProxy, userProxy bool) string {
