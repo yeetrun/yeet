@@ -453,6 +453,7 @@ func TestVMGuestShutdownLogClassifiesShutdownKinds(t *testing.T) {
 	}{
 		{name: "halt", input: []string{"[ 1.0] reboot: System halted\n"}, want: vmGuestStopHalt},
 		{name: "power down", input: []string{"[ 1.0] reboot: Power down\n"}, want: vmGuestStopHalt},
+		{name: "x86 firecracker poweroff halt", input: []string{"[ 1.0] reboot: Power off not available: System halted instead\n"}, want: vmGuestStopHalt},
 		{name: "reboot", input: []string{"[ 1.0] reboot: Restarting system\n"}, want: vmGuestStopReboot},
 		{name: "chunked reboot", input: []string{"[ 1.0] reboot: Restart", "ing system\n"}, want: vmGuestStopReboot},
 		{name: "ordinary output", input: []string{"Welcome to Ubuntu\n"}, want: vmGuestStopNone},
