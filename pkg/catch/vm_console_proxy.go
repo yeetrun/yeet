@@ -453,7 +453,8 @@ func vmGuestShutdownKind(text string) vmGuestStopKind {
 	case strings.Contains(text, "reboot: restarting system"):
 		return vmGuestStopReboot
 	case strings.Contains(text, "reboot: system halted"),
-		strings.Contains(text, "reboot: power down"):
+		strings.Contains(text, "reboot: power down"),
+		strings.Contains(text, "reboot: power off not available: system halted instead"):
 		return vmGuestStopHalt
 	default:
 		return vmGuestStopNone
