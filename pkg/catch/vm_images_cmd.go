@@ -423,16 +423,15 @@ func renderVMImageCatalogRows(w io.Writer, formatOut string, rows []vmImageCatal
 
 func renderVMImageCatalogRowsTable(w io.Writer, rows []vmImageCatalogRow) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "PAYLOAD\tKIND\tNAME\tDEFAULT_USER\tKERNEL_POLICY"); err != nil {
+	if _, err := fmt.Fprintln(tw, "PAYLOAD\tKIND\tNAME\tDEFAULT_USER"); err != nil {
 		return err
 	}
 	for _, row := range rows {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
 			row.Payload,
 			row.Kind,
 			row.Name,
 			dash(row.DefaultUser),
-			dash(row.KernelPolicy),
 		); err != nil {
 			return err
 		}

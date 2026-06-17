@@ -266,10 +266,14 @@ func TestVMImagesCmdCatalogIncludesLocalImages(t *testing.T) {
 		"local",
 		ref.Name,
 		"admin",
-		ref.KernelPolicy,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("catalog output missing %q:\n%s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"KERNEL_POLICY", ref.KernelPolicy} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("catalog output contains %q:\n%s", unwanted, got)
 		}
 	}
 }
