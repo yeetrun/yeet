@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -149,6 +151,272 @@ func TestReconcileNetNSBackedDockerServices(t *testing.T) {
 	if diff := cmp.Diff([]string{"docker-netns"}, called); diff != "" {
 		t.Fatalf("unexpected reconciled services (-want +got):\n%s", diff)
 	}
+}
+
+func TestReconcileNetNSBackedDockerServicesRestartsTailscaleSidecar(t *testing.T) {
+	s := newTestServer(t)
+	addTestServices(t, s, db.Service{
+		Name:             "docker-netns",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		Generation:       1,
+		LatestGeneration: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ns.service"}},
+			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ts.service"}},
+		},
+	})
+
+	var calls []string
+	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
+		name := sv.Name()
+		return fakeDockerNetNSReconciler{
+			name: name,
+			reconcile: func(context.Context) (bool, error) {
+				calls = append(calls, "reconcile:"+name)
+				return true, nil
+			},
+		}, nil
+	}
+
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		calls = append(calls, "systemctl:"+strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileNetNSBackedDockerServices(context.Background()); err != nil {
+		t.Fatalf("reconcileNetNSBackedDockerServices returned error: %v", err)
+	}
+	want := []string{
+		"reconcile:docker-netns",
+		"systemctl:restart yeet-docker-netns-ts.service",
+	}
+	if diff := cmp.Diff(want, calls); diff != "" {
+		t.Fatalf("unexpected reconciliation side effects (-want +got):\n%s", diff)
+	}
+}
+
+func TestReconcileNetNSBackedDockerServicesRepairsStaleTailscaleSidecar(t *testing.T) {
+	s := newTestServer(t)
+	addTestServices(t, s, db.Service{
+		Name:             "docker-netns",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		Generation:       1,
+		LatestGeneration: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ns.service"}},
+			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ts.service"}},
+		},
+	})
+
+	var calls []string
+	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
+		name := sv.Name()
+		return fakeDockerNetNSReconciler{
+			name: name,
+			reconcile: func(context.Context) (bool, error) {
+				calls = append(calls, "reconcile:"+name)
+				return false, nil
+			},
+		}, nil
+	}
+
+	prevStale := tailscaleSidecarNetNSStale
+	tailscaleSidecarNetNSStale = func(name string) (bool, error) {
+		calls = append(calls, "stale-check:"+name)
+		return true, nil
+	}
+	t.Cleanup(func() {
+		tailscaleSidecarNetNSStale = prevStale
+	})
+
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		calls = append(calls, "systemctl:"+strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileNetNSBackedDockerServices(context.Background()); err != nil {
+		t.Fatalf("reconcileNetNSBackedDockerServices returned error: %v", err)
+	}
+	want := []string{
+		"reconcile:docker-netns",
+		"stale-check:docker-netns",
+		"systemctl:restart yeet-docker-netns-ts.service",
+	}
+	if diff := cmp.Diff(want, calls); diff != "" {
+		t.Fatalf("unexpected reconciliation side effects (-want +got):\n%s", diff)
+	}
+}
+
+func TestReconcileNetNSBackedDockerServicesSkipsCurrentTailscaleSidecar(t *testing.T) {
+	s := newTestServer(t)
+	addTestServices(t, s, db.Service{
+		Name:             "docker-netns",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		Generation:       1,
+		LatestGeneration: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ns.service"}},
+			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ts.service"}},
+		},
+	})
+
+	var calls []string
+	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
+		name := sv.Name()
+		return fakeDockerNetNSReconciler{
+			name: name,
+			reconcile: func(context.Context) (bool, error) {
+				calls = append(calls, "reconcile:"+name)
+				return false, nil
+			},
+		}, nil
+	}
+
+	prevStale := tailscaleSidecarNetNSStale
+	tailscaleSidecarNetNSStale = func(name string) (bool, error) {
+		calls = append(calls, "stale-check:"+name)
+		return false, nil
+	}
+	t.Cleanup(func() {
+		tailscaleSidecarNetNSStale = prevStale
+	})
+
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		calls = append(calls, "systemctl:"+strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileNetNSBackedDockerServices(context.Background()); err != nil {
+		t.Fatalf("reconcileNetNSBackedDockerServices returned error: %v", err)
+	}
+	want := []string{
+		"reconcile:docker-netns",
+		"stale-check:docker-netns",
+	}
+	if diff := cmp.Diff(want, calls); diff != "" {
+		t.Fatalf("unexpected reconciliation side effects (-want +got):\n%s", diff)
+	}
+}
+
+func TestTailscaleSidecarNetNSStaleOnHost(t *testing.T) {
+	dir := t.TempDir()
+	currentInfo := writeNetNSTestFile(t, filepath.Join(dir, "current"))
+	staleInfo := writeNetNSTestFile(t, filepath.Join(dir, "stale"))
+
+	cases := []struct {
+		name    string
+		pid     int
+		stats   map[string]os.FileInfo
+		statErr error
+		want    bool
+		wantErr string
+	}{
+		{
+			name: "inactive sidecar",
+			pid:  0,
+			want: false,
+		},
+		{
+			name: "current namespace",
+			pid:  1234,
+			stats: map[string]os.FileInfo{
+				"/proc/1234/ns/net":           currentInfo,
+				"/var/run/netns/yeet-demo-ns": currentInfo,
+			},
+			want: false,
+		},
+		{
+			name: "stale namespace",
+			pid:  1234,
+			stats: map[string]os.FileInfo{
+				"/proc/1234/ns/net":           staleInfo,
+				"/var/run/netns/yeet-demo-ns": currentInfo,
+			},
+			want: true,
+		},
+		{
+			name: "missing process namespace",
+			pid:  1234,
+			stats: map[string]os.FileInfo{
+				"/var/run/netns/yeet-demo-ns": currentInfo,
+			},
+			want: false,
+		},
+		{
+			name:    "stat error",
+			pid:     1234,
+			statErr: errors.New("stat failed"),
+			wantErr: "stat tailscale sidecar netns",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			prevPID := tailscaleSidecarMainPID
+			tailscaleSidecarMainPID = func(unit string) (int, error) {
+				if unit != "yeet-demo-ts.service" {
+					t.Fatalf("unit = %q, want yeet-demo-ts.service", unit)
+				}
+				return tc.pid, nil
+			}
+			t.Cleanup(func() {
+				tailscaleSidecarMainPID = prevPID
+			})
+
+			prevStat := statNetNSPath
+			statNetNSPath = func(path string) (os.FileInfo, error) {
+				if tc.statErr != nil {
+					return nil, tc.statErr
+				}
+				info, ok := tc.stats[path]
+				if !ok {
+					return nil, os.ErrNotExist
+				}
+				return info, nil
+			}
+			t.Cleanup(func() {
+				statNetNSPath = prevStat
+			})
+
+			got, err := tailscaleSidecarNetNSStaleOnHost("demo")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("tailscaleSidecarNetNSStaleOnHost returned error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("tailscaleSidecarNetNSStaleOnHost = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func writeNetNSTestFile(t *testing.T, path string) os.FileInfo {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(path), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	return info
 }
 
 func TestReconcileNetNSBackedDockerServicesContinuesAfterServiceError(t *testing.T) {
