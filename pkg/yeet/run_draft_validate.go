@@ -116,6 +116,7 @@ func validateRunDraftNetwork(draft *RunDraft, result *RunDraftValidationResult) 
 	draft.Network.Publish = trimNonEmptyStrings(draft.Network.Publish)
 	validateRunDraftMacvlanVLAN(draft.Network.MacvlanVLAN, result)
 	validateRunDraftMacvlanLAN(draft.Network, result)
+	validateRunDraftTailscaleTags(draft.Network, result)
 	if draft.PayloadKind == serviceTypeVM {
 		defaultRunDraftVMNetworkModes(draft, networkModesProvided)
 		validateRunDraftVMNetworkModes(draft.Network.Modes, result)
@@ -157,6 +158,13 @@ func validateRunDraftMacvlanLAN(network RunDraftNetwork, result *RunDraftValidat
 
 func runDraftMacvlanFieldsSet(network RunDraftNetwork) bool {
 	return strings.TrimSpace(network.MacvlanParent) != "" || network.MacvlanVLAN != 0 || strings.TrimSpace(network.MacvlanMAC) != ""
+}
+
+func validateRunDraftTailscaleTags(network RunDraftNetwork, result *RunDraftValidationResult) {
+	if !runDraftNetworkModeSet(network.Modes, "ts") || strings.TrimSpace(network.TSAuthKey) != "" || len(network.TSTags) != 0 {
+		return
+	}
+	result.addError("network.tsTags", "Tailscale tags are required for OAuth enrollment; add a service tag such as tag:app or provide a service auth key")
 }
 
 func runDraftNetworkModeSet(modes []string, want string) bool {

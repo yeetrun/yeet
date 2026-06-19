@@ -92,6 +92,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`<summary>LAN settings`,
 		`<summary>Payload args`,
 		`placeholder="tag:app"`,
+		`id="tsTagsError"`,
 	} {
 		if !strings.Contains(string(index), id) {
 			t.Fatalf("index missing %s", id)
@@ -177,6 +178,8 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"function pickerEnabledForField(field)",
 		"if (!pickerEnabledForField(field))",
 		"hidePicker",
+		"function syncTailscaleTagRequirement",
+		`"network.tsTags": "tsTags"`,
 		"EventSource",
 		"/api/session/closed",
 		"TextDecoder",

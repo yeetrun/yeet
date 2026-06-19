@@ -192,6 +192,42 @@ func TestValidateRunDraftNormalizesNetworkFields(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftRequiresTailscaleTagsForOAuthEnrollment(t *testing.T) {
+	draft := RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "ghcr.io/example/app:latest",
+		Network: RunDraftNetwork{
+			Modes: []string{"svc", "ts"},
+		},
+	}
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := validation.fieldError("network.tsTags"); !strings.Contains(got, "Tailscale tags are required") {
+		t.Fatalf("network.tsTags error = %q, want required tags error", got)
+	}
+}
+
+func TestValidateRunDraftAllowsTailscaleAuthKeyWithoutTags(t *testing.T) {
+	draft := RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "ghcr.io/example/app:latest",
+		Network: RunDraftNetwork{
+			Modes:     []string{"ts"},
+			TSAuthKey: "tskey-auth-service",
+		},
+	}
+	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+
+	if !validation.OK {
+		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+	}
+}
+
 func TestValidateRunDraftAcceptsVMPayload(t *testing.T) {
 	for _, payload := range []string{"vm://ubuntu/26.04", "vm://foo/bar"} {
 		t.Run(payload, func(t *testing.T) {
