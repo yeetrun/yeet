@@ -1254,6 +1254,62 @@ func TestInstallerNetworkPlanningCoversTailscaleTapAndMacvlanModes(t *testing.T)
 	}
 }
 
+func TestInstallerLANAndTailscaleSidecarDoesNotBindMissingResolvConf(t *testing.T) {
+	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
+	defer func() {
+		hostDefaultRouteInterfaceFn = oldHostDefaultRouteInterfaceFn
+	}()
+	hostDefaultRouteInterfaceFn = func() (string, error) {
+		return "vmbr0", nil
+	}
+
+	server := newTestServer(t)
+	const (
+		service = "lan-ts"
+		version = "1.92.3"
+	)
+	if err := server.ensureDirs(service, ""); err != nil {
+		t.Fatalf("ensureDirs: %v", err)
+	}
+	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
+	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
+		t.Fatalf("mkdir tsd dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscaled-"+version), []byte("daemon"), 0o755); err != nil {
+		t.Fatalf("write tailscaled: %v", err)
+	}
+	installer := &FileInstaller{
+		s:           server,
+		serviceRoot: server.defaultServiceRootDir(service),
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: service},
+			Network: NetworkOpts{
+				Interfaces: "lan,ts",
+				Macvlan:    MacvlanOpts{Parent: "vmbr0"},
+				Tailscale: TailscaleOpts{
+					AuthKey: "tskey-auth-test",
+					Version: version,
+				},
+			},
+		},
+	}
+
+	if _, err := installer.configureNetwork(); err != nil {
+		t.Fatalf("configureNetwork: %v", err)
+	}
+	tsUnitPath := installer.artifacts[db.ArtifactTSService]
+	if tsUnitPath == "" {
+		t.Fatalf("tailscale service artifact missing: %#v", installer.artifacts)
+	}
+	raw, err := os.ReadFile(tsUnitPath)
+	if err != nil {
+		t.Fatalf("read tailscale unit: %v", err)
+	}
+	if strings.Contains(string(raw), "BindPaths=/etc/netns/") {
+		t.Fatalf("tailscale unit binds missing netns resolv.conf:\n%s", raw)
+	}
+}
+
 func TestInstallerNewFileInstallerRejectsReservedNameAndNilWrites(t *testing.T) {
 	if _, err := NewFileInstaller(newTestServer(t), FileInstallerCfg{
 		InstallerCfg: InstallerCfg{ServiceName: string(db.ArtifactTSBinary)},

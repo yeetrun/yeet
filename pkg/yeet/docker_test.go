@@ -372,6 +372,23 @@ exit 1
 			t.Fatalf("listLocalImages = %#v, want nil", got)
 		}
 	})
+
+	t.Run("orbstack socket missing", func(t *testing.T) {
+		fakeDockerInPath(t, `
+if [ "$1" = "images" ]; then
+  printf 'failed to connect to the docker API at unix:///Users/shayne/.orbstack/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /Users/shayne/.orbstack/run/docker.sock: connect: no such file or directory\n' >&2
+  exit 1
+fi
+exit 1
+`)
+		got, err := listLocalImages(context.Background(), "svc-a")
+		if err != nil {
+			t.Fatalf("listLocalImages error = %v, want nil", err)
+		}
+		if got != nil {
+			t.Fatalf("listLocalImages = %#v, want nil", got)
+		}
+	})
 }
 
 func TestListLocalImagesReportsDockerErrors(t *testing.T) {

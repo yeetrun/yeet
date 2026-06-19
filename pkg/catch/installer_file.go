@@ -565,7 +565,10 @@ func (i *FileInstaller) writeServiceNetNSFiles(env netns.Service) error {
 }
 
 func (i *FileInstaller) installTailscaleForNetNS(env netns.Service, runTSInNetNS string, tsTapMode bool) error {
-	rc := "/etc/netns/" + env.NetNS() + "/resolv.conf"
+	rc := ""
+	if !tsTapMode && strings.TrimSpace(env.ResolvConf) != "" {
+		rc = "/etc/netns/" + env.NetNS() + "/resolv.conf"
+	}
 	if tsTapMode {
 		// Tailscale in TAP mode runs in the host namespace, so no netns
 		// resolv.conf path should be passed to tailscaled.

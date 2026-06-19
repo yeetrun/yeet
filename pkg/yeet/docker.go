@@ -5,7 +5,6 @@
 package yeet
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -273,13 +272,33 @@ func listLocalImages(ctx context.Context, s string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, "docker", "images", "--format", "{{.Repository}}:{{.Tag}}", "--filter", fmt.Sprintf("reference=%s", wild))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		if bytes.Contains(output, []byte("Is the docker daemon running?")) {
-			log.Printf("docker daemon not running, skipping push of local images")
+		if dockerImagesUnavailable(output) {
+			log.Printf("docker daemon unavailable, skipping push of local images")
 			return nil, nil
 		}
 		return nil, fmt.Errorf("failed to list images: %w (%s)", err, output)
 	}
 	return localImagesFromDockerOutput(output), nil
+}
+
+func dockerImagesUnavailable(output []byte) bool {
+	text := strings.ToLower(string(output))
+	switch {
+	case strings.Contains(text, "is the docker daemon running?"):
+		return true
+	case strings.Contains(text, "cannot connect to the docker daemon"):
+		return true
+	case strings.Contains(text, "failed to connect to the docker api"):
+		return true
+	case strings.Contains(text, "error during connect"):
+		return true
+	case strings.Contains(text, "docker.sock") && strings.Contains(text, "no such file or directory"):
+		return true
+	case strings.Contains(text, "dial unix") && strings.Contains(text, "connect: connection refused"):
+		return true
+	default:
+		return false
+	}
 }
 
 func localImagesFromDockerOutput(output []byte) []string {

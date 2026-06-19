@@ -6,6 +6,7 @@ package yeet
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -472,6 +473,92 @@ func TestExecuteRunDraftWithOptionsWritesDeployOutputToProvidedWriter(t *testing
 	}
 	if !strings.Contains(out.String(), "installing service") {
 		t.Fatalf("stdout = %q, want deploy output", out.String())
+	}
+}
+
+func TestExecuteRunDraftCleansStagedOnlyServiceAfterFailedNewDeploy(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldExecTo := execRemoteToFn
+	oldRemoteArch := remoteCatchOSAndArchFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldPush := pushAllLocalImagesFn
+	defer func() {
+		execRemoteToFn = oldExecTo
+		remoteCatchOSAndArchFn = oldRemoteArch
+		fetchRemoteArtifactHashesFn = oldHashes
+		pushAllLocalImagesFn = oldPush
+	}()
+
+	serviceOverride = "svc-a"
+	hostOverride = "host-a"
+	hostOverrideSet = true
+	remoteCatchOSAndArchFn = func() (string, string, error) {
+		return "linux", "amd64", nil
+	}
+	fetchRemoteArtifactHashesFn = func(ctx context.Context, service string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{}, false, nil
+	}
+	pushAllLocalImagesFn = func(context.Context, string, string, string) error {
+		return nil
+	}
+	infoCalls := 0
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		infoCalls++
+		if infoCalls == 1 {
+			return catchrpc.ServiceInfoResponse{Found: false}, nil
+		}
+		return catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				Staged:   true,
+				DataType: "unknown",
+				Status: catchrpc.ServiceStatus{
+					Error: "unknown service type",
+				},
+			},
+		}, nil
+	}
+
+	runErr := errors.New("remote run failed")
+	var calls [][]string
+	execRemoteToFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		calls = append(calls, append([]string{}, args...))
+		if stdin != nil {
+			_, _ = io.Copy(io.Discard, stdin)
+		}
+		if len(args) == 1 && args[0] == "run" {
+			return runErr
+		}
+		return nil
+	}
+
+	tmpDir := t.TempDir()
+	payload := filepath.Join(tmpDir, "compose.yml")
+	if err := os.WriteFile(payload, []byte("services:\n  svc-a:\n    image: alpine:latest\n"), 0o644); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	envFile := filepath.Join(tmpDir, ".env")
+	if err := os.WriteFile(envFile, []byte("A=B\n"), 0o600); err != nil {
+		t.Fatalf("write env: %v", err)
+	}
+	cfgLoc := &projectConfigLocation{
+		Path:   filepath.Join(tmpDir, projectConfigName),
+		Dir:    tmpDir,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+
+	err := executeRunDraftWithOptions(context.Background(), RunDraft{
+		Service:        "svc-a",
+		Host:           "host-a",
+		Payload:        payload,
+		EnvFile:        envFile,
+		NewServiceOnly: true,
+	}, cfgLoc, runDraftExecuteOptions{Stdout: io.Discard})
+	if !errors.Is(err, runErr) {
+		t.Fatalf("executeRunDraftWithOptions error = %v, want %v", err, runErr)
+	}
+	if !reflect.DeepEqual(calls, [][]string{{"env", "copy"}, {"run"}, {"remove", "--yes"}}) {
+		t.Fatalf("remote calls = %#v, want env copy, run, cleanup remove", calls)
 	}
 }
 

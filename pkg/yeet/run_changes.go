@@ -156,16 +156,26 @@ func validateServiceRootOptions(state serviceRootParseState) error {
 
 func runArgsWithServiceRootOptions(args []string, opts serviceRootOptions) []string {
 	args = append([]string{}, args...)
-	opts.Root = strings.TrimSpace(opts.Root)
-	if opts.Root == "" {
+	prefix := serviceRootOptionArgs(opts)
+	if len(prefix) == 0 {
 		return args
 	}
-	out := make([]string, 0, len(args)+2)
+	out := make([]string, 0, len(args)+len(prefix))
+	out = append(out, prefix...)
+	out = append(out, args...)
+	return out
+}
+
+func serviceRootOptionArgs(opts serviceRootOptions) []string {
+	opts.Root = strings.TrimSpace(opts.Root)
+	if opts.Root == "" {
+		return nil
+	}
+	out := make([]string, 0, 2)
 	out = append(out, "--service-root="+opts.Root)
 	if opts.ZFS {
 		out = append(out, "--zfs")
 	}
-	out = append(out, args...)
 	return out
 }
 
@@ -608,7 +618,7 @@ func applyRunChangeSummary(ctx context.Context, stdout io.Writer, payload string
 		return applyUnchangedRun(ctx, stdout, payload, runArgs, forceDeploy, runner)
 	}
 	if summary.envChanged {
-		if err := runEnvCopyContextWithOutput(ctx, stdout, envFile); err != nil {
+		if err := runEnvCopyContextWithOutputArgs(ctx, stdout, envFile, runArgs); err != nil {
 			return err
 		}
 		if err := writeRunChangeLine(stdout, "Updated env file"); err != nil {

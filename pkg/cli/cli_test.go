@@ -387,6 +387,40 @@ func TestParseEnvShowFlags(t *testing.T) {
 	}
 }
 
+func TestParseEnvCopyServiceRootFlags(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		want     EnvCopyFlags
+		wantArgs []string
+		wantErr  string
+	}{
+		{name: "empty", wantArgs: []string{}},
+		{name: "zfs dataset", args: []string{"--service-root=flash/yeet/searxng", "--zfs"}, want: EnvCopyFlags{ServiceRoot: "flash/yeet/searxng", ZFS: true}, wantArgs: []string{}},
+		{name: "absolute filesystem root", args: []string{"--service-root", "/srv/yeet/searxng"}, want: EnvCopyFlags{ServiceRoot: "/srv/yeet/searxng"}, wantArgs: []string{}},
+		{name: "extra args", args: []string{"--service-root=/srv/yeet/searxng", "--", "literal"}, want: EnvCopyFlags{ServiceRoot: "/srv/yeet/searxng"}, wantArgs: []string{"literal"}},
+		{name: "zfs without root", args: []string{"--zfs"}, wantErr: "--service-root is required when --zfs is set"},
+		{name: "relative root without zfs", args: []string{"--service-root", "flash/yeet/searxng"}, wantErr: "--service-root must be absolute unless --zfs is set"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, gotArgs, err := ParseEnvCopy(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseEnvCopy error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseEnvCopy failed: %v", err)
+			}
+			if got != tt.want || !reflect.DeepEqual(gotArgs, tt.wantArgs) {
+				t.Fatalf("ParseEnvCopy = %#v %#v, want %#v %#v", got, gotArgs, tt.want, tt.wantArgs)
+			}
+		})
+	}
+}
+
 func TestParseRemoveFlags(t *testing.T) {
 	flags, outArgs, err := ParseRemove([]string{"-y", "--clean-config", "--clean-data"})
 	if err != nil {

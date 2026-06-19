@@ -214,6 +214,11 @@ type EnvShowFlags struct {
 	Staged bool
 }
 
+type EnvCopyFlags struct {
+	ServiceRoot string
+	ZFS         bool
+}
+
 type SnapshotDefaultsSetFlags struct {
 	Enabled  string
 	KeepLast string
@@ -293,6 +298,11 @@ type runFlagsParsed struct {
 	SnapshotMaxAge   string   `flag:"snapshot-max-age"`
 	SnapshotRequired string   `flag:"snapshot-required"`
 	SnapshotEvents   string   `flag:"snapshot-events"`
+}
+
+type envCopyFlagsParsed struct {
+	ServiceRoot string `flag:"service-root"`
+	ZFS         bool   `flag:"zfs"`
 }
 
 type serviceSetFlagsParsed struct {
@@ -1568,6 +1578,37 @@ func ParseEnvShow(args []string) (EnvShowFlags, []string, error) {
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
+}
+
+func ParseEnvCopy(args []string) (EnvCopyFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[envCopyFlagsParsed](parseArgs)
+	if err != nil {
+		return EnvCopyFlags{}, nil, err
+	}
+	flags := EnvCopyFlags{
+		ServiceRoot: strings.TrimSpace(parsed.Flags.ServiceRoot),
+		ZFS:         parsed.Flags.ZFS,
+	}
+	if err := validateEnvCopyRootFlags(flags); err != nil {
+		return EnvCopyFlags{}, nil, err
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func validateEnvCopyRootFlags(flags EnvCopyFlags) error {
+	rootChange := flags.ServiceRoot != "" || flags.ZFS
+	if !rootChange {
+		return nil
+	}
+	if flags.ServiceRoot == "" {
+		return fmt.Errorf("--service-root is required when --zfs is set")
+	}
+	if !flags.ZFS && !filepath.IsAbs(flags.ServiceRoot) {
+		return fmt.Errorf("--service-root must be absolute unless --zfs is set")
+	}
+	return nil
 }
 
 func ParseStatus(args []string) (StatusFlags, []string, error) {

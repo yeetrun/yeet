@@ -938,6 +938,9 @@ func removeTraceBlock(opts RemoveOptions, label string) func() {
 }
 
 func (s *Server) addRunningServiceWarning(report *RemoveReport, name string) {
+	if s.serviceIsStagedOnlyEnvPlaceholder(name) {
+		return
+	}
 	running, err := s.IsServiceRunning(name)
 	if err != nil {
 		report.addWarning(fmt.Errorf("failed to check if service %q is running: %w", name, err))
@@ -946,6 +949,44 @@ func (s *Server) addRunningServiceWarning(report *RemoveReport, name string) {
 	if running {
 		report.addWarning(fmt.Errorf("service %q is still running", name))
 	}
+}
+
+func (s *Server) serviceIsStagedOnlyEnvPlaceholder(name string) bool {
+	sv, err := s.serviceView(name)
+	if err != nil {
+		return false
+	}
+	service := sv.AsStruct()
+	return serviceHasNoRuntimeDefinition(service) && artifactStoreHasOnlyStagedEnv(service.Artifacts)
+}
+
+func serviceHasNoRuntimeDefinition(service *db.Service) bool {
+	if service.ServiceType != "" || service.Generation != 0 || service.LatestGeneration != 0 {
+		return false
+	}
+	if len(service.Publish) != 0 || service.SvcNetwork != nil || service.Macvlan != nil || service.TSNet != nil || service.VM != nil {
+		return false
+	}
+	return true
+}
+
+func artifactStoreHasOnlyStagedEnv(artifacts db.ArtifactStore) bool {
+	if len(artifacts) != 1 {
+		return false
+	}
+	artifact, ok := artifacts[db.ArtifactEnvFile]
+	if !ok {
+		return false
+	}
+	return artifactHasOnlyStagedRef(artifact)
+}
+
+func artifactHasOnlyStagedRef(artifact *db.Artifact) bool {
+	if artifact == nil || len(artifact.Refs) != 1 {
+		return false
+	}
+	_, ok := artifact.Refs[db.ArtifactRef("staged")]
+	return ok
 }
 
 func (s *Server) tailscaleStableIDForService(report *RemoveReport, name string) string {
