@@ -59,9 +59,16 @@ func TestVMSvcNetworkPlanUsesHostBridgeAndYeetNSPeer(t *testing.T) {
 	if containsCommand(cmds, []string{"ip", "addr", "add", vmSvcGateway + "/24", "dev", iface.Bridge}) {
 		t.Fatalf("setup commands = %#v, want no broad service network route on VM bridge", cmds)
 	}
+	if containsCommand(cmds, []string{"ip", "addr", "add", vmSvcGateway + "/32", "dev", iface.Bridge}) {
+		t.Fatalf("setup commands = %#v, want service gateway only in %s", cmds, vmSvcNetNS)
+	}
+	if containsCommand(cmds, []string{"ip", "route", "replace", "192.168.100.12/32", "dev", iface.Bridge, "src", vmSvcGateway}) {
+		t.Fatalf("setup commands = %#v, want host route through %s", cmds, vmSvcNetNS)
+	}
 	for _, command := range [][]string{
-		{"ip", "addr", "add", vmSvcGateway + "/32", "dev", iface.Bridge},
-		{"ip", "route", "replace", "192.168.100.12/32", "dev", iface.Bridge, "src", vmSvcGateway},
+		{"ip", "addr", "del", vmSvcGateway + "/24", "dev", iface.Bridge},
+		{"ip", "addr", "del", vmSvcGateway + "/32", "dev", iface.Bridge},
+		{"ip", "route", "del", "192.168.100.12/32", "dev", iface.Bridge},
 	} {
 		if !containsCommand(cmds, command) {
 			t.Fatalf("setup commands = %#v, missing %#v", cmds, command)
@@ -405,8 +412,12 @@ func TestVMNetworkExecuteSetupToleratesAlreadyExistingLinks(t *testing.T) {
 			return errors.New("RTNETLINK answers: File exists")
 		case reflect.DeepEqual(cmd[:4], []string{"ip", "tuntap", "add", plan.Interfaces[0].Tap}):
 			return errors.New("ioctl(TUNSETIFF): Device or resource busy")
-		case reflect.DeepEqual(cmd[:4], []string{"ip", "addr", "add", vmSvcGateway + "/24"}):
-			return errors.New("RTNETLINK answers: File exists")
+		case reflect.DeepEqual(cmd, []string{"ip", "addr", "del", vmSvcGateway + "/24", "dev", plan.Interfaces[0].Bridge}):
+			return errors.New("RTNETLINK answers: Cannot assign requested address")
+		case reflect.DeepEqual(cmd, []string{"ip", "addr", "del", vmSvcGateway + "/32", "dev", plan.Interfaces[0].Bridge}):
+			return errors.New("RTNETLINK answers: Cannot assign requested address")
+		case reflect.DeepEqual(cmd, []string{"ip", "route", "del", "192.168.100.12/32", "dev", plan.Interfaces[0].Bridge}):
+			return errors.New("RTNETLINK answers: No such process")
 		case reflect.DeepEqual(cmd, []string{"ip", "link", "set", nsPeer, "netns", vmSvcNetNS}):
 			return errors.New("Cannot find device")
 		default:
@@ -834,7 +845,7 @@ func TestReconcileVMNetworksEnsuresOwnedStateAndDeletesUnownedState(t *testing.T
 		t.Fatalf("reconcileVMNetworks: %v", err)
 	}
 	for _, want := range [][]string{
-		{"ip", "route", "replace", "192.168.100.12/32", "dev", live.Interfaces[0].Bridge, "src", vmSvcGateway},
+		{"ip", "route", "del", "192.168.100.12/32", "dev", live.Interfaces[0].Bridge},
 		{"ip", "route", "del", "192.168.100.99/32", "dev", "yvm-old-123456-b0"},
 		{"ip", "link", "del", "yvm-old-123456-l1"},
 	} {

@@ -39,6 +39,7 @@ var netnsScripts embed.FS
 type yeetNSServiceInstaller interface {
 	Install() error
 	Start() error
+	Restart() error
 }
 
 var (
@@ -224,7 +225,10 @@ func installYeetNSService(unitFiles map[db.ArtifactName]string) error {
 		return fmt.Errorf("failed to install service: %v", err)
 	}
 	if alreadyActive {
-		log.Printf("installed updated yeet-ns.service; leaving active namespace running")
+		if err := service.Restart(); err != nil {
+			return fmt.Errorf("failed to restart yeet-ns service: %v", err)
+		}
+		log.Printf("installed updated yeet-ns.service and restarted active namespace")
 		return nil
 	}
 	if err := service.Start(); err != nil {

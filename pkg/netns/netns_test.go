@@ -262,6 +262,33 @@ func TestWriteYeetNSEnvWritesAndSkipsIdenticalFiles(t *testing.T) {
 	}
 }
 
+func TestYeetNSScriptConnectsHostPeerToServiceBridge(t *testing.T) {
+	raw, err := netnsScripts.ReadFile("netns-scripts/yeet-ns")
+	if err != nil {
+		t.Fatalf("ReadFile yeet-ns script returned error: %v", err)
+	}
+	script := string(raw)
+	for _, want := range []string{
+		"ip netns exec yeet-ns ip link set yeet0-peer master br0",
+		"ip netns exec yeet-ns ip addr replace ${YEET_IP} dev br0",
+		"ip netns exec yeet-ns ip route replace ${HOST_IP} dev br0",
+		"ip netns exec yeet-ns ip route replace default via ${HOST_IP_BASE} dev br0",
+		"ip route replace ${RANGE} dev ${BRIDGE_IF}",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("yeet-ns script missing %q:\n%s", want, script)
+		}
+	}
+	for _, bad := range []string{
+		"ip netns exec yeet-ns ip addr replace ${YEET_IP} dev yeet0-peer",
+		"ip route replace ${RANGE} via ${YEET_IP_BASE} dev ${BRIDGE_IF}",
+	} {
+		if strings.Contains(script, bad) {
+			t.Fatalf("yeet-ns script contains obsolete routed host peer command %q:\n%s", bad, script)
+		}
+	}
+}
+
 func TestInstallYeetNSServiceNoopsWhenArtifactsAreCurrent(t *testing.T) {
 	root := chdirTemp(t)
 	systemdPath := filepath.Join(root, "systemd", "yeet-ns.service")
@@ -290,10 +317,11 @@ func TestInstallYeetNSServiceNoopsWhenArtifactsAreCurrent(t *testing.T) {
 	}
 }
 
-func TestInstallYeetNSServiceInstallsAndPreservesActiveNamespace(t *testing.T) {
+func TestInstallYeetNSServiceRestartsActiveNamespaceAfterArtifactChange(t *testing.T) {
 	chdirTemp(t)
 	var installCalls int
 	var startCalls int
+	var restartCalls int
 
 	withDetectedFirewallBackend(t, BackendNFT)
 	withInstallYeetNSServiceFakes(t, installYeetNSServiceFakes{
@@ -315,6 +343,10 @@ func TestInstallYeetNSServiceInstallsAndPreservesActiveNamespace(t *testing.T) {
 					startCalls++
 					return nil
 				},
+				restart: func() error {
+					restartCalls++
+					return nil
+				},
 			}, nil
 		},
 		unitActive: func(unit string) bool {
@@ -330,6 +362,9 @@ func TestInstallYeetNSServiceInstallsAndPreservesActiveNamespace(t *testing.T) {
 	}
 	if startCalls != 0 {
 		t.Fatalf("start calls = %d, want 0 for active namespace", startCalls)
+	}
+	if restartCalls != 1 {
+		t.Fatalf("restart calls = %d, want 1 for active namespace", restartCalls)
 	}
 }
 
@@ -459,6 +494,7 @@ type installYeetNSServiceFakes struct {
 type fakeYeetNSSystemdService struct {
 	install func() error
 	start   func() error
+	restart func() error
 }
 
 func (s fakeYeetNSSystemdService) Install() error {
@@ -467,6 +503,10 @@ func (s fakeYeetNSSystemdService) Install() error {
 
 func (s fakeYeetNSSystemdService) Start() error {
 	return s.start()
+}
+
+func (s fakeYeetNSSystemdService) Restart() error {
+	return s.restart()
 }
 
 func chdirTemp(t *testing.T) string {
