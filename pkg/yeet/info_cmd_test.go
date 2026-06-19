@@ -6,6 +6,7 @@ package yeet
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -183,6 +184,46 @@ func TestEncodeInfoOutputFormatsJSON(t *testing.T) {
 	}
 	if !strings.Contains(pretty.String(), "\n  \"service\": \"svc\"") {
 		t.Fatalf("pretty output = %q, want indented JSON", pretty.String())
+	}
+}
+
+func TestHandleInfoCommandErrorsWhenServiceIsMissingOnCatch(t *testing.T) {
+	oldService := serviceOverride
+	oldPrefs := loadedPrefs
+	oldHostOverride := hostOverride
+	oldHostOverrideSet := hostOverrideSet
+	oldFetchHostInfo := fetchInfoHostInfoFn
+	oldFetchServiceInfo := fetchInfoServiceInfoFn
+	t.Cleanup(func() {
+		serviceOverride = oldService
+		loadedPrefs = oldPrefs
+		hostOverride = oldHostOverride
+		hostOverrideSet = oldHostOverrideSet
+		fetchInfoHostInfoFn = oldFetchHostInfo
+		fetchInfoServiceInfoFn = oldFetchServiceInfo
+	})
+
+	serviceOverride = "notreal"
+	loadedPrefs.DefaultHost = "yeet-pve1"
+	resetHostOverride()
+
+	fetchInfoHostInfoFn = func(context.Context, string) (serverInfo, error) {
+		t.Fatal("host info should not be fetched for a missing service")
+		return serverInfo{}, nil
+	}
+	fetchInfoServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if host != "yeet-pve1" || service != "notreal" {
+			t.Fatalf("ServiceInfo called with host=%q service=%q, want yeet-pve1/notreal", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{Found: false, Message: "service not found"}, nil
+	}
+
+	err := handleInfoCommand(context.Background(), nil, nil)
+	if err == nil {
+		t.Fatal("expected missing service error")
+	}
+	if got := err.Error(); got != `service "notreal" not found on yeet-pve1` {
+		t.Fatalf("error = %q, want missing service on host", got)
 	}
 }
 
