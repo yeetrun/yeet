@@ -626,11 +626,10 @@ type vmSSHTargetInfo struct {
 
 func vmSSHTarget(resp catchrpc.ServiceInfoResponse, forceProxy bool) vmSSHTargetInfo {
 	user := "ubuntu"
-	host := strings.TrimSpace(resp.Info.Network.SvcIP)
 	if resp.Info.VM != nil && resp.Info.VM.SSH != nil {
 		user = firstNonEmpty(strings.TrimSpace(resp.Info.VM.SSH.User), user)
-		host = firstNonEmpty(host, strings.TrimSpace(resp.Info.VM.SSH.Host))
 	}
+	host := vmSSHPreferredHost(resp)
 	mode := vmSSHNetworkMode(resp, host)
 	return vmSSHTargetInfo{
 		User:       user,
@@ -639,6 +638,25 @@ func vmSSHTarget(resp catchrpc.ServiceInfoResponse, forceProxy bool) vmSSHTarget
 		Proxy:      shouldProxyVMSSH(resp, host, mode, forceProxy),
 		ForceProxy: forceProxy,
 	}
+}
+
+func vmSSHPreferredHost(resp catchrpc.ServiceInfoResponse) string {
+	if resp.Info.VM != nil {
+		for _, network := range resp.Info.VM.Networks {
+			if strings.TrimSpace(network.Mode) == "lan" {
+				if host := strings.TrimSpace(network.IP); host != "" {
+					return host
+				}
+			}
+		}
+	}
+	if svc := strings.TrimSpace(resp.Info.Network.SvcIP); svc != "" {
+		return svc
+	}
+	if resp.Info.VM != nil && resp.Info.VM.SSH != nil {
+		return strings.TrimSpace(resp.Info.VM.SSH.Host)
+	}
+	return ""
 }
 
 func firstNonEmpty(values ...string) string {
@@ -673,7 +691,10 @@ func shouldProxyVMSSH(resp catchrpc.ServiceInfoResponse, guestHost, mode string,
 	if resp.Info.VM == nil || strings.TrimSpace(guestHost) == "" {
 		return false
 	}
-	return forceProxy || mode == "svc"
+	if forceProxy || mode == "svc" {
+		return true
+	}
+	return mode == "lan" && strings.TrimSpace(resp.Info.Network.SvcIP) != ""
 }
 
 func vmSSHTransportNotice(proxyHost string, target vmSSHTargetInfo, generatedProxy, userProxy bool) string {
