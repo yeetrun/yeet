@@ -61,6 +61,9 @@ type clientPayloadInfo struct {
 	ResolveErr string `json:"resolveError,omitempty"`
 }
 
+var fetchInfoHostInfoFn = fetchInfoHostInfo
+var fetchInfoServiceInfoFn = fetchInfoServiceInfo
+
 func handleInfoCommand(ctx context.Context, args []string, cfgLoc *projectConfigLocation) error {
 	flags, _, err := cli.ParseInfo(args)
 	if err != nil {
@@ -74,13 +77,15 @@ func handleInfoCommand(ctx context.Context, args []string, cfgLoc *projectConfig
 	service := getService()
 	host := Host()
 
-	var hostInfo serverInfo
-	hostInfoErr := newRPCClient(host).Call(ctx, "catch.Info", nil, &hostInfo)
-
-	serverInfoResp, err := newRPCClient(host).ServiceInfo(ctx, service)
+	serverInfoResp, err := fetchInfoServiceInfoFn(ctx, host, service)
 	if err != nil {
 		return err
 	}
+	if !serverInfoResp.Found {
+		return fmt.Errorf("service %q not found on %s", service, host)
+	}
+
+	hostInfo, hostInfoErr := fetchInfoHostInfoFn(ctx, host)
 
 	client := buildClientInfo(cfgLoc, service, host, hostInfo, hostInfoErr)
 
@@ -90,6 +95,16 @@ func handleInfoCommand(ctx context.Context, args []string, cfgLoc *projectConfig
 	}
 
 	return renderInfoPlain(os.Stdout, service, host, hostInfoErr, hostInfo, client, serverInfoResp)
+}
+
+func fetchInfoHostInfo(ctx context.Context, host string) (serverInfo, error) {
+	var info serverInfo
+	err := newRPCClient(host).Call(ctx, "catch.Info", nil, &info)
+	return info, err
+}
+
+func fetchInfoServiceInfo(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+	return newRPCClient(host).ServiceInfo(ctx, service)
 }
 
 func normalizeInfoFormat(format string) (string, error) {
