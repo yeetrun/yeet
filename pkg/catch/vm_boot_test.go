@@ -43,7 +43,7 @@ func TestVMKernelBootArgsIncludesStaticSvcIP(t *testing.T) {
 		t.Fatalf("vmKernelBootArgs: %v", err)
 	}
 
-	want := "ip=192.168.100.12::192.168.100.254:255.255.255.0:devbox:eth0:none"
+	want := "ip=192.168.100.12::192.168.100.1:255.255.255.0:devbox:eth0:none"
 	if !strings.Contains(got, want) {
 		t.Fatalf("boot args = %s, want %s", got, want)
 	}

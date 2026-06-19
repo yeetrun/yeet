@@ -21,7 +21,7 @@ func TestWriteVMMetadataFiles(t *testing.T) {
 		User:     "ubuntu",
 		SSHKey:   "ssh-ed25519 AAAATEST user@example",
 		Networks: []vmGuestNetwork{
-			{Name: "eth0", Mode: "svc", Address: "192.168.100.12/24", Gateway: "192.168.100.254"},
+			{Name: "eth0", Mode: "svc", Address: "192.168.100.12/24", Gateway: "192.168.100.1"},
 			{Name: "eth1", Mode: "lan", DHCP: true},
 		},
 	}
@@ -39,7 +39,7 @@ func TestWriteVMMetadataFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read network: %v", err)
 	}
-	for _, want := range []string{"eth0:", "192.168.100.12/24", "gateway4: 192.168.100.254", "nameservers:", "addresses: [192.168.100.1]", "search: [yeet.internal]", "eth1:", "dhcp4: true"} {
+	for _, want := range []string{"eth0:", "192.168.100.12/24", "gateway4: 192.168.100.1", "nameservers:", "addresses: [192.168.100.1]", "search: [yeet.internal]", "eth1:", "dhcp4: true"} {
 		if !strings.Contains(string(network), want) {
 			t.Fatalf("network metadata missing %q:\n%s", want, string(network))
 		}
@@ -127,7 +127,7 @@ func TestRenderVMNetworkdUnitIncludesDNSSearchAndDefaultRoute(t *testing.T) {
 		Name:            "eth0",
 		Mode:            "svc",
 		Address:         "192.168.100.12/24",
-		Gateway:         "192.168.100.254",
+		Gateway:         "192.168.100.1",
 		SearchDomains:   []string{"yeet.internal"},
 		DNSDefaultRoute: &defaultRoute,
 	})
@@ -148,7 +148,7 @@ func TestVMMetadataRejectsInvalidNetwork(t *testing.T) {
 		User:     "ubuntu",
 		SSHKey:   "ssh-ed25519 AAAATEST user@example",
 		Networks: []vmGuestNetwork{
-			{Name: "eth0", Mode: "svc", Address: "192.168.100.12/24", Gateway: "192.168.100.254"},
+			{Name: "eth0", Mode: "svc", Address: "192.168.100.12/24", Gateway: "192.168.100.1"},
 		},
 	}
 	tests := []struct {
@@ -335,7 +335,7 @@ func TestWriteVMGuestMetadataFilesUsesNixOSDriver(t *testing.T) {
 			Name:    "eth0",
 			Mode:    "svc",
 			Address: "192.168.100.12/24",
-			Gateway: "192.168.100.254",
+			Gateway: "192.168.100.1",
 		}},
 	}
 
@@ -717,7 +717,7 @@ func validVMMetadataConfig() vmMetadataConfig {
 		SSHKey:   "ssh-ed25519 AAAATEST user@example",
 		FastBoot: true,
 		Networks: []vmGuestNetwork{
-			{Name: "eth0", Mode: "svc", Address: "192.168.100.12/24", Gateway: "192.168.100.254"},
+			{Name: "eth0", Mode: "svc", Address: "192.168.100.12/24", Gateway: "192.168.100.1"},
 			{Name: "eth1", Mode: "lan", DHCP: true},
 		},
 	}
