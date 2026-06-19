@@ -773,6 +773,41 @@ func TestRemoveServiceRemovesConfigDirsPreservesDataAndPublishesEvent(t *testing
 	}
 }
 
+func TestRemoveServiceDoesNotWarnForEmptyServiceType(t *testing.T) {
+	server := newTestServer(t)
+	serviceRoot := filepath.Join(t.TempDir(), "staged-only")
+	for _, dir := range []string{"bin", "data", "env", "run"} {
+		if err := os.MkdirAll(filepath.Join(serviceRoot, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := server.cfg.DB.Set(&db.Data{
+		Services: map[string]*db.Service{
+			"staged-only": {
+				Name:        "staged-only",
+				ServiceRoot: serviceRoot,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactEnvFile: {Refs: map[db.ArtifactRef]string{
+						db.ArtifactRef("staged"): filepath.Join(serviceRoot, "env", "env-20260619111327"),
+					}},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	report, err := server.RemoveService("staged-only")
+	if err != nil {
+		t.Fatalf("RemoveService: %v", err)
+	}
+	for _, warning := range report.Warnings {
+		if strings.Contains(warning.Error(), "failed to check if service") {
+			t.Fatalf("unexpected running check warning for empty service type: %v", warning)
+		}
+	}
+}
+
 func TestRemoveServiceSkipsDirectoryCleanupWhenRootResolutionFails(t *testing.T) {
 	server := newTestServer(t)
 	defaultRoot := filepath.Join(server.cfg.ServicesRoot, "api")

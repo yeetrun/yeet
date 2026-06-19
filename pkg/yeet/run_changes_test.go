@@ -548,6 +548,53 @@ func TestApplyRunChangeSummaryCopiesEnvFileToProvidedOutput(t *testing.T) {
 	}
 }
 
+func TestApplyRunChangeSummaryCopiesEnvFileWithServiceRootOptions(t *testing.T) {
+	oldExecTo := execRemoteToFn
+	oldService := serviceOverride
+	defer func() {
+		execRemoteToFn = oldExecTo
+		serviceOverride = oldService
+	}()
+
+	serviceOverride = "svc-a"
+	tmp := t.TempDir()
+	envFile := filepath.Join(tmp, ".env")
+	if err := os.WriteFile(envFile, []byte("A=B\n"), 0o600); err != nil {
+		t.Fatalf("write env file: %v", err)
+	}
+	var gotArgs []string
+	execRemoteToFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		if service != "svc-a" {
+			t.Fatalf("service = %q, want svc-a", service)
+		}
+		gotArgs = append([]string{}, args...)
+		_, _ = io.Copy(io.Discard, stdin)
+		return nil
+	}
+	runner := func(ctx context.Context, payload string, runArgs []string) error {
+		t.Fatal("runner should not be called for env-only change")
+		return nil
+	}
+
+	err := applyRunChangeSummary(
+		context.Background(),
+		io.Discard,
+		"compose.yml",
+		[]string{"--service-root=flash/yeet/searxng", "--zfs", "--net=lan"},
+		envFile,
+		runChangeSummary{envChanged: true},
+		false,
+		runner,
+	)
+	if err != nil {
+		t.Fatalf("applyRunChangeSummary: %v", err)
+	}
+	want := []string{"env", "copy", "--service-root=flash/yeet/searxng", "--zfs"}
+	if !reflect.DeepEqual(gotArgs, want) {
+		t.Fatalf("env copy args = %#v, want %#v", gotArgs, want)
+	}
+}
+
 func TestRunWithChangesNoChangesSkips(t *testing.T) {
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn

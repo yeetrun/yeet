@@ -61,6 +61,7 @@ const (
 type envCommand struct {
 	name        envSubcommand
 	showFlags   cli.EnvShowFlags
+	copyFlags   cli.EnvCopyFlags
 	assignments []envAssignment
 }
 
@@ -73,8 +74,10 @@ func envCommandFromArgs(args []string) (envCommand, error) {
 	switch subcmd {
 	case envSubcommandShow:
 		return parseEnvShowCommand(args)
-	case envSubcommandEdit, envSubcommandCopy:
+	case envSubcommandEdit:
 		return parseEnvNoArgCommand(subcmd, args)
+	case envSubcommandCopy:
+		return parseEnvCopyCommand(args)
 	case envSubcommandSet:
 		return parseEnvSetCommand(args)
 	default:
@@ -98,6 +101,17 @@ func parseEnvNoArgCommand(subcmd envSubcommand, args []string) (envCommand, erro
 		return envCommand{}, fmt.Errorf("env %s takes no arguments", subcmd)
 	}
 	return envCommand{name: subcmd}, nil
+}
+
+func parseEnvCopyCommand(args []string) (envCommand, error) {
+	flags, rest, err := cli.ParseEnvCopy(args)
+	if err != nil {
+		return envCommand{}, err
+	}
+	if len(rest) > 0 {
+		return envCommand{}, fmt.Errorf("env copy takes no arguments")
+	}
+	return envCommand{name: envSubcommandCopy, copyFlags: flags}, nil
 }
 
 func parseEnvSetCommand(args []string) (envCommand, error) {
@@ -127,7 +141,7 @@ func (e *ttyExecer) runEnvCommand(cmd envCommand) error {
 	case envSubcommandEdit:
 		return e.editEnvCmdFunc()
 	case envSubcommandCopy:
-		return e.envCopyCmdFunc()
+		return e.envCopyCmdFunc(cmd.copyFlags)
 	case envSubcommandSet:
 		return e.envSetCmdFunc(cmd.assignments)
 	default:
@@ -255,9 +269,11 @@ func closeEnvInstaller(fi *FileInstaller) error {
 	return nil
 }
 
-func (e *ttyExecer) envCopyCmdFunc() error {
+func (e *ttyExecer) envCopyCmdFunc(flags cli.EnvCopyFlags) error {
 	cfg := e.fileInstaller(netFlags{}, nil)
 	cfg.EnvFile = true
+	cfg.ServiceRoot = flags.ServiceRoot
+	cfg.ServiceRootZFS = flags.ZFS
 	if sv, err := e.s.serviceView(e.sn); err != nil {
 		if errors.Is(err, errServiceNotFound) {
 			cfg.StageOnly = true
@@ -267,7 +283,7 @@ func (e *ttyExecer) envCopyCmdFunc() error {
 	} else if sv.ServiceType() == "" {
 		cfg.StageOnly = true
 	}
-	return e.install("env", e.payloadReader(), cfg)
+	return e.runInstall("env", e.payloadReader(), cfg)
 }
 
 type envAssignment struct {

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,6 +200,57 @@ func TestEnvCommandFromArgsParsesSetAssignments(t *testing.T) {
 		if cmd.assignments[i] != want[i] {
 			t.Fatalf("assignment %d = %#v, want %#v", i, cmd.assignments[i], want[i])
 		}
+	}
+}
+
+func TestEnvCommandFromArgsParsesCopyServiceRoot(t *testing.T) {
+	cmd, err := envCommandFromArgs([]string{"copy", "--service-root=flash/yeet/searxng", "--zfs"})
+	if err != nil {
+		t.Fatalf("envCommandFromArgs failed: %v", err)
+	}
+	if cmd.name != envSubcommandCopy {
+		t.Fatalf("command name = %q, want %q", cmd.name, envSubcommandCopy)
+	}
+	if cmd.copyFlags.ServiceRoot != "flash/yeet/searxng" {
+		t.Fatalf("ServiceRoot = %q, want flash/yeet/searxng", cmd.copyFlags.ServiceRoot)
+	}
+	if !cmd.copyFlags.ZFS {
+		t.Fatal("ZFS = false, want true")
+	}
+}
+
+func TestEnvCopyCmdFuncCopiesServiceRootIntoInstallerConfig(t *testing.T) {
+	var gotCfg FileInstallerCfg
+	execer := &ttyExecer{
+		s:              newTestServer(t),
+		sn:             "svc-env-root",
+		rawRW:          bytes.NewBufferString("A=B\n"),
+		rw:             &bytes.Buffer{},
+		bypassPtyInput: true,
+		installFunc: func(_ string, _ io.Reader, cfg FileInstallerCfg) error {
+			gotCfg = cfg
+			return nil
+		},
+	}
+
+	cmd, err := envCommandFromArgs([]string{"copy", "--service-root=flash/yeet/searxng", "--zfs"})
+	if err != nil {
+		t.Fatalf("envCommandFromArgs failed: %v", err)
+	}
+	if err := execer.runEnvCommand(cmd); err != nil {
+		t.Fatalf("runEnvCommand returned error: %v", err)
+	}
+	if !gotCfg.EnvFile {
+		t.Fatal("EnvFile = false, want true")
+	}
+	if gotCfg.ServiceRoot != "flash/yeet/searxng" {
+		t.Fatalf("ServiceRoot = %q, want flash/yeet/searxng", gotCfg.ServiceRoot)
+	}
+	if !gotCfg.ServiceRootZFS {
+		t.Fatal("ServiceRootZFS = false, want true")
+	}
+	if !gotCfg.StageOnly {
+		t.Fatal("StageOnly = false, want true for missing service env copy")
 	}
 }
 

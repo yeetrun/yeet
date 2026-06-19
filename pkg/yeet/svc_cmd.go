@@ -1679,24 +1679,26 @@ func runEnvCopy(file string) error {
 }
 
 func runEnvCopyContext(ctx context.Context, file string) (err error) {
-	return runEnvCopyContextWithExec(ctx, file, func(ctx context.Context, svc string, args []string, stdin io.Reader, tty bool) error {
+	return runEnvCopyContextWithExec(ctx, file, nil, func(ctx context.Context, svc string, args []string, stdin io.Reader, tty bool) error {
 		return execRemoteFn(ctx, svc, args, stdin, tty)
 	})
 }
 
-func runEnvCopyContextWithOutput(ctx context.Context, stdout io.Writer, file string) error {
+func runEnvCopyContextWithOutputArgs(ctx context.Context, stdout io.Writer, file string, runArgs []string) error {
 	if isStdoutWriter(stdout) {
-		return runEnvCopyContext(ctx, file)
+		return runEnvCopyContextWithExec(ctx, file, runArgs, func(ctx context.Context, svc string, args []string, stdin io.Reader, tty bool) error {
+			return execRemoteFn(ctx, svc, args, stdin, tty)
+		})
 	}
 	if stdout == nil {
 		stdout = io.Discard
 	}
-	return runEnvCopyContextWithExec(ctx, file, func(ctx context.Context, svc string, args []string, stdin io.Reader, tty bool) error {
+	return runEnvCopyContextWithExec(ctx, file, runArgs, func(ctx context.Context, svc string, args []string, stdin io.Reader, tty bool) error {
 		return execRemoteToFn(ctx, svc, args, stdin, tty, stdout)
 	})
 }
 
-func runEnvCopyContextWithExec(ctx context.Context, file string, execFn func(context.Context, string, []string, io.Reader, bool) error) (err error) {
+func runEnvCopyContextWithExec(ctx context.Context, file string, runArgs []string, execFn func(context.Context, string, []string, io.Reader, bool) error) (err error) {
 	if file == "" {
 		return fmt.Errorf("env copy requires a file")
 	}
@@ -1715,11 +1717,26 @@ func runEnvCopyContextWithExec(ctx context.Context, file string, execFn func(con
 		}
 	}()
 	svc := getService()
-	args := []string{"env", "copy"}
+	args, err := envCopyRemoteArgsFromRunArgs(runArgs)
+	if err != nil {
+		return err
+	}
 	if err := execFn(ctx, svc, args, f, false); err != nil {
 		return err
 	}
 	return nil
+}
+
+func envCopyRemoteArgsFromRunArgs(runArgs []string) ([]string, error) {
+	args := []string{"env", "copy"}
+	opts, _, found, err := extractServiceRootOptions(runArgs)
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		args = append(args, serviceRootOptionArgs(opts)...)
+	}
+	return args, nil
 }
 
 type envAssignment struct {

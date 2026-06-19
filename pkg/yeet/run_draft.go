@@ -6,11 +6,13 @@ package yeet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 )
 
@@ -347,9 +349,40 @@ func executeRunDraftWithOptions(ctx context.Context, draft RunDraft, cfgLoc *pro
 
 	runArgs := draft.runArgs()
 	if err := executeRunDraftOutput(ctx, opts.Stdout, draft, runArgs, opts.ForceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
-		return err
+		return cleanupFailedNewRunDraft(ctx, draft, host, service, err)
 	}
 	return saveRunDraftExecutionConfig(cfgLoc, host, draft, runArgs)
+}
+
+func cleanupFailedNewRunDraft(ctx context.Context, draft RunDraft, host, service string, cause error) error {
+	if !shouldCleanupFailedNewRunDraft(draft) {
+		return cause
+	}
+	resp, err := fetchRunDraftServiceInfoFn(ctx, host, service)
+	if err != nil || !runDraftStagedOnlyService(resp) {
+		return cause
+	}
+	if err := execRemoteToFn(ctx, service, []string{"remove", "--yes"}, nil, false, io.Discard); err != nil {
+		return errors.Join(cause, fmt.Errorf("failed to clean up staged service after failed deploy: %w", err))
+	}
+	return cause
+}
+
+func shouldCleanupFailedNewRunDraft(draft RunDraft) bool {
+	return draft.NewServiceOnly && strings.TrimSpace(draft.EnvFile) != ""
+}
+
+func runDraftStagedOnlyService(resp catchrpc.ServiceInfoResponse) bool {
+	if !resp.Found || !resp.Info.Staged {
+		return false
+	}
+	if resp.Info.Generation != 0 || resp.Info.LatestGeneration != 0 {
+		return false
+	}
+	if resp.Info.ServiceType != "" {
+		return false
+	}
+	return resp.Info.DataType == "" || resp.Info.DataType == "unknown"
 }
 
 func executeCronRunDraft(ctx context.Context, stdout io.Writer, cfgLoc *projectConfigLocation, host string, draft RunDraft) error {
