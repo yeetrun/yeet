@@ -203,6 +203,8 @@ The official VM catalog is loaded from `yeet-vm-images` at runtime. The catalog
 defines supported `vm://...` families, and each family points at a stable latest
 manifest. New image versions are picked up through that manifest rather than a
 yeet release.
+Run a `vm://` payload once per VM name; change an existing VM with `yeet vm set`
+or remove and recreate it for a fresh guest.
 
 Detach from an active VM console by pressing Enter, then typing `~.`. The VM
 keeps running.

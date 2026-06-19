@@ -1616,6 +1616,7 @@ func installVMRecoveryFirecrackerLauncher(t *testing.T, root string, version str
 	unit := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          "devbox",
 		Runner:           "/srv/catch/run/catch",
+		DataDir:          "/srv/catch/data",
 		Firecracker:      firecrackerBinary,
 		ConfigPath:       filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
 		APISocket:        filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"),

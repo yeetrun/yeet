@@ -5,8 +5,11 @@
 package catch
 
 import (
+	"context"
 	"errors"
+	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -415,6 +418,118 @@ func TestVMNetworkExecuteSetupToleratesAlreadyExistingLinks(t *testing.T) {
 	}
 }
 
+func TestVMNetworkExecuteSetupToleratesExistingGeneratedVLAN(t *testing.T) {
+	plan := newVMNetworkPlan("devbox", []string{"lan"}, vmNetworkInputs{LANParent: "eth0", LANVLAN: 42})
+	oldMatches := vmNetworkExistingVLANDeviceMatchesFn
+	vmNetworkExistingVLANDeviceMatchesFn = func(parent, name string, vlan int) (bool, error) {
+		if parent != "eth0" || name != plan.Interfaces[0].VLANDevice || vlan != 42 {
+			t.Fatalf("validator = parent %q name %q vlan %d", parent, name, vlan)
+		}
+		return true, nil
+	}
+	t.Cleanup(func() {
+		vmNetworkExistingVLANDeviceMatchesFn = oldMatches
+	})
+
+	err := plan.ExecuteSetup(func(cmd []string) error {
+		if isVMNetworkVLANAddCommand(cmd) {
+			return errors.New("RTNETLINK answers: File exists")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ExecuteSetup: %v", err)
+	}
+}
+
+func TestVMNetworkExecuteSetupRejectsExistingGeneratedVLANMismatch(t *testing.T) {
+	plan := newVMNetworkPlan("devbox", []string{"lan"}, vmNetworkInputs{LANParent: "eth0", LANVLAN: 42})
+	oldMatches := vmNetworkExistingVLANDeviceMatchesFn
+	vmNetworkExistingVLANDeviceMatchesFn = func(string, string, int) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() {
+		vmNetworkExistingVLANDeviceMatchesFn = oldMatches
+	})
+
+	err := plan.ExecuteSetup(func(cmd []string) error {
+		if isVMNetworkVLANAddCommand(cmd) {
+			return errors.New("RTNETLINK answers: File exists")
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "RTNETLINK answers: File exists") {
+		t.Fatalf("ExecuteSetup error = %v, want original VLAN exists error", err)
+	}
+}
+
+func TestVMNetworkExecuteSetupRejectsExistingGeneratedVLANValidationError(t *testing.T) {
+	plan := newVMNetworkPlan("devbox", []string{"lan"}, vmNetworkInputs{LANParent: "eth0", LANVLAN: 42})
+	oldMatches := vmNetworkExistingVLANDeviceMatchesFn
+	vmNetworkExistingVLANDeviceMatchesFn = func(string, string, int) (bool, error) {
+		return false, errors.New("read vlan config")
+	}
+	t.Cleanup(func() {
+		vmNetworkExistingVLANDeviceMatchesFn = oldMatches
+	})
+
+	err := plan.ExecuteSetup(func(cmd []string) error {
+		if isVMNetworkVLANAddCommand(cmd) {
+			return errors.New("RTNETLINK answers: File exists")
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "RTNETLINK answers: File exists") {
+		t.Fatalf("ExecuteSetup error = %v, want original VLAN exists error", err)
+	}
+}
+
+func TestVMNetworkExecuteSetupNonVLANToleranceSkipsExistingVLANValidation(t *testing.T) {
+	plan := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+	oldMatches := vmNetworkExistingVLANDeviceMatchesFn
+	vmNetworkExistingVLANDeviceMatchesFn = func(string, string, int) (bool, error) {
+		t.Fatal("VLAN validator should not be called for non-VLAN setup commands")
+		return false, nil
+	}
+	t.Cleanup(func() {
+		vmNetworkExistingVLANDeviceMatchesFn = oldMatches
+	})
+
+	err := plan.ExecuteSetup(func(cmd []string) error {
+		if reflect.DeepEqual(cmd[:4], []string{"ip", "link", "add", plan.Interfaces[0].Bridge}) {
+			return errors.New("RTNETLINK answers: File exists")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ExecuteSetup: %v", err)
+	}
+}
+
+func TestVMNetworkVLANAddCommandDetails(t *testing.T) {
+	cmd := []string{"ip", "link", "add", "link", "eth0", "name", "yvm-devbox-v0", "type", "vlan", "id", "42"}
+
+	parent, name, vlan, ok := vmNetworkVLANAddCommandDetails(cmd)
+	if !ok || parent != "eth0" || name != "yvm-devbox-v0" || vlan != 42 {
+		t.Fatalf("details = %q/%q/%d/%v, want eth0/yvm-devbox-v0/42/true", parent, name, vlan, ok)
+	}
+}
+
+func TestVMNetworkExistingVLANDeviceMatchesFromConfig(t *testing.T) {
+	config := strings.NewReader(`VLAN Dev name	 | VLAN ID
+Name-Type: VLAN_NAME_TYPE_RAW_PLUS_VID_NO_PAD
+yvm-devbox-v0   | 42  | eth0
+`)
+
+	ok, err := vmNetworkExistingVLANDeviceMatchesFromConfig("eth0", "yvm-devbox-v0", 42, config)
+	if err != nil {
+		t.Fatalf("vmNetworkExistingVLANDeviceMatchesFromConfig: %v", err)
+	}
+	if !ok {
+		t.Fatal("existing VLAN match = false, want true")
+	}
+}
+
 func TestVMNetworkExecuteSetupToleratesAlreadyAssignedAddress(t *testing.T) {
 	plan := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 	err := plan.ExecuteSetup(func(cmd []string) error {
@@ -437,6 +552,539 @@ func TestVMNetworkExecuteCleanupToleratesMissingLinks(t *testing.T) {
 	}
 }
 
+func TestVMNetworkCleanupToleratesMissingNetNSPeer(t *testing.T) {
+	err := runVMNetworkCommands(func([]string) error {
+		return errors.New("Cannot find device \"yvm-old-123456-n0\"")
+	}, [][]string{
+		{"ip", "netns", "exec", vmSvcNetNS, "ip", "link", "del", "yvm-old-123456-n0"},
+	}, vmNetworkCommandModeCleanup)
+	if err != nil {
+		t.Fatalf("runVMNetworkCommands: %v", err)
+	}
+}
+
+func TestVMNetworkLinkBaseAcceptsAllReservedKinds(t *testing.T) {
+	tests := []struct {
+		name   string
+		base   string
+		suffix string
+		ok     bool
+	}{
+		{name: "yvm-old-123456-b0", base: "yvm-old-123456", suffix: "b0", ok: true},
+		{name: "yvm-old-123456-s0", base: "yvm-old-123456", suffix: "s0", ok: true},
+		{name: "yvm-old-123456-v0", base: "yvm-old-123456", suffix: "v0", ok: true},
+		{name: "yvm-old-123456-n0", base: "yvm-old-123456", suffix: "n0", ok: true},
+		{name: "yvm-old-123456-l0", base: "yvm-old-123456", suffix: "l0", ok: true},
+		{name: "yvm-old-123456-x0", ok: false},
+		{name: "eth0", ok: false},
+		{name: "yvm-old-123456-lx", ok: false},
+	}
+	for _, tt := range tests {
+		base, suffix, ok := vmNetworkLinkBase(tt.name)
+		if ok != tt.ok || base != tt.base || suffix != tt.suffix {
+			t.Fatalf("vmNetworkLinkBase(%q) = %q/%q/%v, want %q/%q/%v", tt.name, base, suffix, ok, tt.base, tt.suffix, tt.ok)
+		}
+	}
+}
+
+func TestVMNetworkCleanupCommandsDeletesOnlyUnownedReservedLinks(t *testing.T) {
+	links := []string{
+		"yvm-old-123456-b0",
+		"yvm-old-123456-s0",
+		"yvm-old-123456-v0",
+		"yvm-old-123456-n0",
+		"yvm-old-123456-l1",
+		"yvm-live-abcdef-b0",
+		"yvm-live-abcdef-s0",
+		"yvm-live-abcdef-v0",
+		"yvm-live-abcdef-n0",
+		"yvm-live-abcdef-l1",
+		"eth0",
+		"vmbr0",
+	}
+	owned := map[string]bool{"yvm-live-abcdef": true}
+
+	got := unownedVMNetworkLinkCleanupCommands(links, owned)
+	want := [][]string{
+		{"ip", "link", "del", "yvm-old-123456-v0"},
+		{"ip", "netns", "exec", vmSvcNetNS, "ip", "link", "del", "yvm-old-123456-n0"},
+		{"ip", "link", "del", "yvm-old-123456-s0"},
+		{"ip", "link", "del", "yvm-old-123456-b0"},
+		{"ip", "link", "del", "yvm-old-123456-l1"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cleanup commands = %#v, want %#v", got, want)
+	}
+}
+
+func TestVMNetworkRouteFromIPRouteLine(t *testing.T) {
+	tests := []struct {
+		line string
+		want vmNetworkRoute
+		ok   bool
+	}{
+		{
+			line: "192.168.100.12 dev yvm-old-123456-b0 src 192.168.100.254",
+			want: vmNetworkRoute{Destination: "192.168.100.12/32", Device: "yvm-old-123456-b0"},
+			ok:   true,
+		},
+		{
+			line: "192.168.100.13/32 dev yvm-old-123456-b1 src 192.168.100.254",
+			want: vmNetworkRoute{Destination: "192.168.100.13/32", Device: "yvm-old-123456-b1"},
+			ok:   true,
+		},
+		{
+			line: "192.168.100.0/24 dev yvm-old-123456-b0 src 192.168.100.254",
+			want: vmNetworkRoute{Destination: "192.168.100.0/24", Device: "yvm-old-123456-b0"},
+			ok:   true,
+		},
+		{
+			line: "2001:db8::1/128 dev yvm-old-123456-b0",
+			want: vmNetworkRoute{Destination: "2001:db8::1/128", Device: "yvm-old-123456-b0"},
+			ok:   true,
+		},
+		{
+			line: "192.168.100.15/32 dev yvm-old-123456-l0",
+			want: vmNetworkRoute{Destination: "192.168.100.15/32", Device: "yvm-old-123456-l0"},
+			ok:   true,
+		},
+		{line: "default via 10.0.0.1 dev eth0", ok: false},
+		{line: "192.168.100.14 dev eth0", ok: false},
+		{line: "192.168.100.15/32 dev yvm-old-123456-x0", ok: false},
+	}
+	for _, tt := range tests {
+		got, ok := vmNetworkRouteFromIPRouteLine(tt.line)
+		if ok != tt.ok || got != tt.want {
+			t.Fatalf("vmNetworkRouteFromIPRouteLine(%q) = %#v/%v, want %#v/%v", tt.line, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestVMNetworkRoutesFromIPRouteOutputParsesReservedDeviceRoutes(t *testing.T) {
+	output := strings.Join([]string{
+		"192.168.100.12 dev yvm-old-123456-b0 src 192.168.100.254",
+		"default via 10.0.0.1 dev eth0",
+		"192.168.100.13/32 dev yvm-live-abcdef-b1 src 192.168.100.254",
+		"192.168.100.0/24 dev yvm-old-123456-l0",
+		"192.168.100.14 dev eth0",
+		"",
+	}, "\n")
+
+	got := vmNetworkRoutesFromIPRouteOutput([]byte(output))
+	want := []vmNetworkRoute{
+		{Destination: "192.168.100.12/32", Device: "yvm-old-123456-b0"},
+		{Destination: "192.168.100.13/32", Device: "yvm-live-abcdef-b1"},
+		{Destination: "192.168.100.0/24", Device: "yvm-old-123456-l0"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("routes = %#v, want %#v", got, want)
+	}
+}
+
+func TestCollectVMNetworkLiveStateCollectsLinksAndRoutes(t *testing.T) {
+	oldLinkLister := vmNetworkLinkLister
+	oldRouteLister := vmNetworkRouteLister
+	vmNetworkLinkLister = func(context.Context) ([]string, error) {
+		return []string{"yvm-old-123456-b0"}, nil
+	}
+	vmNetworkRouteLister = func(context.Context) ([]vmNetworkRoute, error) {
+		return []vmNetworkRoute{{Destination: "192.168.100.12/32", Device: "yvm-old-123456-b0"}}, nil
+	}
+	t.Cleanup(func() {
+		vmNetworkLinkLister = oldLinkLister
+		vmNetworkRouteLister = oldRouteLister
+	})
+
+	got, err := collectVMNetworkLiveState(context.Background())
+	if err != nil {
+		t.Fatalf("collectVMNetworkLiveState: %v", err)
+	}
+	want := vmNetworkLiveState{
+		Links:  []string{"yvm-old-123456-b0"},
+		Routes: []vmNetworkRoute{{Destination: "192.168.100.12/32", Device: "yvm-old-123456-b0"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("live state = %#v, want %#v", got, want)
+	}
+}
+
+func TestVMNetworkCleanupCommandsDeletesStaleRoutesForUnownedBridges(t *testing.T) {
+	live := vmNetworkLiveState{
+		Links: []string{"yvm-old-123456-b0", "yvm-live-abcdef-b0"},
+		Routes: []vmNetworkRoute{
+			{Destination: "192.168.100.12/32", Device: "yvm-old-123456-b0"},
+			{Destination: "192.168.100.13/32", Device: "yvm-live-abcdef-b0"},
+		},
+	}
+	owned := map[string]bool{"yvm-live-abcdef": true}
+
+	got := unownedVMNetworkCleanupCommands(live, owned)
+	want := [][]string{
+		{"ip", "route", "del", "192.168.100.12/32", "dev", "yvm-old-123456-b0"},
+		{"ip", "link", "del", "yvm-old-123456-b0"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cleanup commands = %#v, want %#v", got, want)
+	}
+}
+
+func TestVMNetworkCheckReportClassifiesMissingAndStaleState(t *testing.T) {
+	plan := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+	desired := vmNetworkDesiredState{
+		Plans: []vmNetworkPlan{plan},
+		Owned: vmNetworkOwnedBases(plan),
+	}
+	live := vmNetworkLiveState{
+		Links: []string{"yvm-old-123456-l0"},
+		Routes: []vmNetworkRoute{
+			{Destination: "192.168.100.99/32", Device: "yvm-old-123456-b0"},
+			{Destination: "192.168.100.0/24", Device: "yvm-old-123456-l0"},
+		},
+	}
+
+	report := desired.Check(live)
+	if !slices.IsSorted(report.Findings) {
+		t.Fatalf("findings = %#v, want sorted findings", report.Findings)
+	}
+	for _, want := range []string{
+		"missing link " + plan.Interfaces[0].Tap,
+		"stale link yvm-old-123456-l0",
+		"stale route 192.168.100.99/32 dev yvm-old-123456-b0",
+		"stale route 192.168.100.0/24 dev yvm-old-123456-l0",
+	} {
+		if !slices.Contains(report.Findings, want) {
+			t.Fatalf("findings = %#v, missing %q", report.Findings, want)
+		}
+	}
+}
+
+func TestVMNetworkRouteCleanupCommandsRejectsBroadAndNonBridgeTargets(t *testing.T) {
+	routes := []vmNetworkRoute{
+		{Destination: "192.168.100.12/32", Device: "yvm-old-123456-b0"},
+		{Destination: "192.168.100.0/24", Device: "yvm-old-123456-b0"},
+		{Destination: "192.168.100.14/32", Device: "yvm-old-123456-l0"},
+		{Destination: "192.168.100.15/32", Device: "yvm-old-123456-s0"},
+		{Destination: "2001:db8::1/128", Device: "yvm-old-123456-b0"},
+	}
+
+	got := unownedVMNetworkRouteCleanupCommands(routes, nil)
+	want := [][]string{
+		{"ip", "route", "del", "192.168.100.12/32", "dev", "yvm-old-123456-b0"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("route cleanup commands = %#v, want %#v", got, want)
+	}
+}
+
+func TestReconcileVMNetworksEnsuresOwnedStateAndDeletesUnownedState(t *testing.T) {
+	server := newTestServer(t)
+	live := newVMNetworkPlan("livebox", []string{"svc", "lan"}, vmNetworkInputs{
+		ServiceIP:         "192.168.100.12",
+		LANParent:         "vmbr0",
+		LANParentIsBridge: true,
+	})
+	liveBase, _, ok := vmNetworkLinkBase(live.Interfaces[0].Tap)
+	if !ok {
+		t.Fatalf("failed to parse live tap %q", live.Interfaces[0].Tap)
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"livebox": {
+			Name:        "livebox",
+			ServiceType: db.ServiceTypeVM,
+			SvcNetwork:  &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.12")},
+			VM: &db.VMConfig{
+				Runtime:  vmRuntimeFirecracker,
+				Networks: live.DBNetworks(),
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	oldCollector := vmNetworkLiveStateCollector
+	oldRunner := vmNetworkReconcileRunner
+	vmNetworkLiveStateCollector = func(context.Context) (vmNetworkLiveState, error) {
+		return vmNetworkLiveState{
+			Links: []string{
+				liveBase + "-b0",
+				liveBase + "-s0",
+				liveBase + "-v0",
+				liveBase + "-n0",
+				live.Interfaces[1].Tap,
+				"yvm-old-123456-b0",
+				"yvm-old-123456-s0",
+				"yvm-old-123456-v0",
+				"yvm-old-123456-n0",
+				"yvm-old-123456-l1",
+			},
+			Routes: []vmNetworkRoute{{Destination: "192.168.100.99/32", Device: "yvm-old-123456-b0"}},
+		}, nil
+	}
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() {
+		vmNetworkLiveStateCollector = oldCollector
+		vmNetworkReconcileRunner = oldRunner
+	})
+
+	if err := server.reconcileVMNetworks(context.Background()); err != nil {
+		t.Fatalf("reconcileVMNetworks: %v", err)
+	}
+	for _, want := range [][]string{
+		{"ip", "route", "replace", "192.168.100.12/32", "dev", live.Interfaces[0].Bridge, "src", vmSvcGateway},
+		{"ip", "route", "del", "192.168.100.99/32", "dev", "yvm-old-123456-b0"},
+		{"ip", "link", "del", "yvm-old-123456-l1"},
+	} {
+		if !containsCommand(commands, want) {
+			t.Fatalf("commands missing %#v in %#v", want, commands)
+		}
+	}
+}
+
+func TestEnsureVMNetworkEnsuresOnlyNamedVM(t *testing.T) {
+	server := newTestServer(t)
+	target := newVMNetworkPlan("target", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+	other := newVMNetworkPlan("other", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.13"})
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"target": {Name: "target", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: target.DBNetworks()}},
+		"other":  {Name: "other", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: other.DBNetworks()}},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	oldRunner := vmNetworkReconcileRunner
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() { vmNetworkReconcileRunner = oldRunner })
+
+	if err := server.EnsureVMNetwork(context.Background(), "target"); err != nil {
+		t.Fatalf("EnsureVMNetwork: %v", err)
+	}
+	if !containsCommand(commands, []string{"ip", "tuntap", "add", target.Interfaces[0].Tap, "mode", "tap"}) {
+		t.Fatalf("target setup missing: %#v", commands)
+	}
+	if containsCommand(commands, []string{"ip", "tuntap", "add", other.Interfaces[0].Tap, "mode", "tap"}) {
+		t.Fatalf("other VM was modified: %#v", commands)
+	}
+}
+
+func TestPackageEnsureVMNetworkUsesMinimalDBConfig(t *testing.T) {
+	root := t.TempDir()
+	cfg := Config{
+		DB: db.NewStore(root+"/db.json", root+"/services"),
+	}
+	target := newVMNetworkPlan("target", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+	other := newVMNetworkPlan("other", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.13"})
+	if err := cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"target": {Name: "target", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: target.DBNetworks()}},
+		"other":  {Name: "other", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: other.DBNetworks()}},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	oldRunner := vmNetworkReconcileRunner
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() {
+		vmNetworkReconcileRunner = oldRunner
+	})
+
+	if err := EnsureVMNetwork(context.Background(), &cfg, "target"); err != nil {
+		t.Fatalf("EnsureVMNetwork: %v", err)
+	}
+	if !containsCommand(commands, []string{"ip", "tuntap", "add", target.Interfaces[0].Tap, "mode", "tap"}) {
+		t.Fatalf("target setup missing: %#v", commands)
+	}
+	if containsCommand(commands, []string{"ip", "tuntap", "add", other.Interfaces[0].Tap, "mode", "tap"}) {
+		t.Fatalf("other VM was modified: %#v", commands)
+	}
+}
+
+func TestEnsureVMNetworkReportsMissingService(t *testing.T) {
+	server := newTestServer(t)
+
+	err := server.EnsureVMNetwork(context.Background(), "missing")
+	if err == nil || err.Error() != `service "missing" not found` {
+		t.Fatalf("EnsureVMNetwork error = %v, want missing service", err)
+	}
+}
+
+func TestEnsureVMNetworkReportsNonVMService(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"web": {Name: "web", ServiceType: db.ServiceTypeDockerCompose},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	err := server.EnsureVMNetwork(context.Background(), "web")
+	if err == nil || err.Error() != `service "web" is not a VM service` {
+		t.Fatalf("EnsureVMNetwork error = %v, want non-VM service", err)
+	}
+}
+
+func TestEnsureVMNetworkRejectsUnsupportedLANState(t *testing.T) {
+	server := newTestServer(t)
+	plan := newVMNetworkPlan("badlan", []string{"lan"}, vmNetworkInputs{})
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"badlan": {Name: "badlan", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: plan.DBNetworks()}},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	oldRunner := vmNetworkReconcileRunner
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() { vmNetworkReconcileRunner = oldRunner })
+
+	err := server.EnsureVMNetwork(context.Background(), "badlan")
+	if err == nil || !strings.Contains(err.Error(), "VM LAN network parent is required") {
+		t.Fatalf("EnsureVMNetwork error = %v, want LAN validation error", err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("commands = %#v, want no setup commands after validation failure", commands)
+	}
+}
+
+func TestEnsureVMNetworkRejectsDBBackedNonBridgeLANParent(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"badlan": {
+			Name:        "badlan",
+			ServiceType: db.ServiceTypeVM,
+			VM: &db.VMConfig{
+				Runtime: vmRuntimeFirecracker,
+				Networks: []db.VMNetworkConfig{{
+					Mode:      "lan",
+					Interface: "eth0",
+					Tap:       "yvm-badlan-l0",
+					Parent:    "eth0",
+				}},
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	oldRunner := vmNetworkReconcileRunner
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() { vmNetworkReconcileRunner = oldRunner })
+
+	err := server.EnsureVMNetwork(context.Background(), "badlan")
+	want := `VM LAN network parent "eth0" is not a bridge; non-bridge LAN parents are unsupported`
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("EnsureVMNetwork error = %v, want %q", err, want)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("commands = %#v, want no setup commands after validation failure", commands)
+	}
+}
+
+func TestReconcileVMNetworksRejectsUnsupportedLANStateBeforeCleanup(t *testing.T) {
+	server := newTestServer(t)
+	plan := newVMNetworkPlan("badlan", []string{"lan"}, vmNetworkInputs{})
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"badlan": {Name: "badlan", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: plan.DBNetworks()}},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	oldCollector := vmNetworkLiveStateCollector
+	oldRunner := vmNetworkReconcileRunner
+	vmNetworkLiveStateCollector = func(context.Context) (vmNetworkLiveState, error) {
+		return vmNetworkLiveState{
+			Links:  []string{"yvm-old-123456-b0"},
+			Routes: []vmNetworkRoute{{Destination: "192.168.100.99/32", Device: "yvm-old-123456-b0"}},
+		}, nil
+	}
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() {
+		vmNetworkLiveStateCollector = oldCollector
+		vmNetworkReconcileRunner = oldRunner
+	})
+
+	err := server.reconcileVMNetworks(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "VM LAN network parent is required") {
+		t.Fatalf("reconcileVMNetworks error = %v, want LAN validation error", err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("commands = %#v, want validation to block setup and cleanup", commands)
+	}
+}
+
+func TestReconcileOrphanedVMServiceNetworksIgnoresRouteListerFailure(t *testing.T) {
+	server := newTestServer(t)
+	live := newVMNetworkPlan("livebox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+	liveBase, _, ok := vmServiceNetworkLinkBase(live.Interfaces[0].Tap)
+	if !ok {
+		t.Fatalf("failed to parse live tap %q", live.Interfaces[0].Tap)
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"livebox": {
+			Name:        "livebox",
+			ServiceType: db.ServiceTypeVM,
+			VM: &db.VMConfig{
+				Runtime:  vmRuntimeFirecracker,
+				Networks: live.DBNetworks(),
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	oldLister := vmNetworkLinkLister
+	oldRouteLister := vmNetworkRouteLister
+	oldRunner := vmNetworkReconcileRunner
+	vmNetworkLinkLister = func(context.Context) ([]string, error) {
+		return []string{
+			liveBase + "-b0",
+			"yvm-old-123456-b0",
+			"yvm-old-123456-s0",
+		}, nil
+	}
+	vmNetworkRouteLister = func(context.Context) ([]vmNetworkRoute, error) {
+		return nil, errors.New("route listing unavailable")
+	}
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() {
+		vmNetworkLinkLister = oldLister
+		vmNetworkRouteLister = oldRouteLister
+		vmNetworkReconcileRunner = oldRunner
+	})
+
+	if err := server.reconcileOrphanedVMServiceNetworks(context.Background()); err != nil {
+		t.Fatalf("reconcileOrphanedVMServiceNetworks: %v", err)
+	}
+	want := [][]string{
+		{"ip", "link", "del", "yvm-old-123456-s0"},
+		{"ip", "link", "del", "yvm-old-123456-b0"},
+	}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+}
+
 func TestVMNetworkUnsupportedLANIsExplicit(t *testing.T) {
 	plan := newVMNetworkPlan("devbox", []string{"lan"}, vmNetworkInputs{LANParent: "eth0"})
 	if err := plan.ExecuteSetup(func([]string) error {
@@ -450,23 +1098,4 @@ func TestVMNetworkUnsupportedLANIsExplicit(t *testing.T) {
 	if len(cmds) != 1 || cmds[0][0] != "yeet-vm-network-unsupported" {
 		t.Fatalf("SetupCommands = %#v, want explicit unsupported command", cmds)
 	}
-}
-
-func vmNetworkDeviceNames(plan vmNetworkPlan) map[string]bool {
-	names := make(map[string]bool)
-	for _, iface := range plan.Interfaces {
-		for _, name := range []string{iface.Tap, iface.Bridge} {
-			if strings.HasPrefix(name, "yvm-") {
-				names[name] = true
-			}
-		}
-	}
-	for _, command := range plan.SetupCommands() {
-		for _, arg := range command {
-			if strings.HasPrefix(arg, "yvm-") {
-				names[arg] = true
-			}
-		}
-	}
-	return names
 }

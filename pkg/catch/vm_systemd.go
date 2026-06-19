@@ -15,6 +15,7 @@ import (
 type vmSystemdConfig struct {
 	Service          string
 	Runner           string
+	DataDir          string
 	Firecracker      string
 	ConfigPath       string
 	APISocket        string
@@ -37,6 +38,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%s
 ExecStartPre=/bin/rm -f %s
+ExecStartPre=%s -data-dir %s vm-network-ensure %s
 ExecStart=%s vm-run --firecracker %s --api-sock %s --config-file %s --console-sock %s
 Restart=on-failure
 RestartForceExitStatus=75
@@ -47,7 +49,7 @@ TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
-`, cfg.Service, cfg.WorkingDirectory, strings.Join(cleanupSockets, " "), cfg.Runner, cfg.Firecracker, cfg.APISocket, cfg.ConfigPath, cfg.ConsoleSocket, VMRestoreLoadFailedExitCode)
+`, cfg.Service, cfg.WorkingDirectory, strings.Join(cleanupSockets, " "), cfg.Runner, cfg.DataDir, cfg.Service, cfg.Runner, cfg.Firecracker, cfg.APISocket, cfg.ConfigPath, cfg.ConsoleSocket, VMRestoreLoadFailedExitCode)
 }
 
 func ensureVMSystemdRestorePrevent(name string) error {

@@ -7,6 +7,7 @@ package catch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -183,6 +184,260 @@ func TestVMSetReplacesNetworkAndMetadata(t *testing.T) {
 		t.Fatalf("injected metadata networks = %#v, want DHCP lan", injectedMetadata.Networks)
 	}
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"host_dev_name": "yvm-d-ea1055-l0"`)
+}
+
+func TestVMSetRestoresOldNetworkWhenMetadataRewriteFails(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	var networkCommands [][]string
+	withServiceSetVMNetworkRunner(t, func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	})
+	var injected []vmMetadataConfig
+	withServiceSetVMMetadataInjector(t, func(_ context.Context, _ string, metadata vmMetadataConfig) error {
+		injected = append(injected, metadata)
+		if vmMetadataHasNetworkMode(metadata, "lan") {
+			return errors.New("metadata rewrite failed")
+		}
+		return nil
+	})
+
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
+		Net:           "lan",
+		NetworkChange: true,
+		MacvlanParent: "vmbr0",
+		MacvlanMac:    "02:fc:00:00:00:44",
+	})
+	if err == nil || !strings.Contains(err.Error(), "metadata rewrite failed") {
+		t.Fatalf("updateVMServiceSettings error = %v, want metadata failure", err)
+	}
+	assertVMSetNetworkRolledBack(t, server, root, networkCommands, true)
+	assertVMMetadataInjectionModes(t, injected, []string{"lan", "svc"})
+}
+
+func TestVMSetRestoresOldNetworkWhenFirecrackerConfigWriteFails(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	var networkCommands [][]string
+	withServiceSetVMNetworkRunner(t, func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	})
+	var injected []vmMetadataConfig
+	withServiceSetVMMetadataInjector(t, func(_ context.Context, _ string, metadata vmMetadataConfig) error {
+		injected = append(injected, metadata)
+		if vmMetadataHasNetworkMode(metadata, "lan") {
+			firecrackerPath := filepath.Join(serviceRunDirForRoot(root), "firecracker.json")
+			if err := os.Remove(firecrackerPath); err != nil {
+				return err
+			}
+			return os.Mkdir(firecrackerPath, 0o755)
+		}
+		return nil
+	})
+
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
+		Net:           "lan",
+		NetworkChange: true,
+		MacvlanParent: "vmbr0",
+		MacvlanMac:    "02:fc:00:00:00:44",
+	})
+	if err == nil || !strings.Contains(err.Error(), "firecracker.json") {
+		t.Fatalf("updateVMServiceSettings error = %v, want firecracker config write failure", err)
+	}
+	assertVMSetNetworkRolledBack(t, server, root, networkCommands, true)
+	assertVMMetadataInjectionModes(t, injected, []string{"lan", "svc"})
+}
+
+func TestVMSetRestoresOldNetworkWhenDBCommitFails(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	var networkCommands [][]string
+	withServiceSetVMNetworkRunner(t, func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	})
+	var injected []vmMetadataConfig
+	withServiceSetVMMetadataInjector(t, func(_ context.Context, _ string, metadata vmMetadataConfig) error {
+		injected = append(injected, metadata)
+		if err := os.Chmod(server.cfg.RootDir, 0o555); err != nil {
+			return err
+		}
+		return nil
+	})
+	t.Cleanup(func() {
+		if err := os.Chmod(server.cfg.RootDir, 0o755); err != nil {
+			t.Logf("restore DB dir permissions: %v", err)
+		}
+	})
+
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
+		Net:           "lan",
+		NetworkChange: true,
+		MacvlanParent: "vmbr0",
+		MacvlanMac:    "02:fc:00:00:00:44",
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to save data") {
+		t.Fatalf("updateVMServiceSettings error = %v, want DB commit failure", err)
+	}
+	assertVMSetNetworkRolledBack(t, server, root, networkCommands, true)
+	assertVMMetadataInjectionModes(t, injected, []string{"lan", "svc"})
+}
+
+func TestVMSetCleansPartialNewNetworkWhenSetupFails(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	setupFailure := errors.New("tap attach failed")
+	var networkCommands [][]string
+	newTap := "yvm-d-ea1055-l0"
+	withServiceSetVMNetworkRunner(t, func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		if containsCommand([][]string{command}, []string{"ip", "link", "set", newTap, "master", "vmbr0"}) {
+			return setupFailure
+		}
+		return nil
+	})
+	withServiceSetVMMetadataInjector(t, func(context.Context, string, vmMetadataConfig) error {
+		t.Fatal("metadata should not be rewritten after network setup fails")
+		return nil
+	})
+
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
+		Net:           "lan",
+		NetworkChange: true,
+		MacvlanParent: "vmbr0",
+		MacvlanMac:    "02:fc:00:00:00:44",
+	})
+	if !errors.Is(err, setupFailure) {
+		t.Fatalf("updateVMServiceSettings error = %v, want setup failure", err)
+	}
+	assertVMSetNetworkRolledBack(t, server, root, networkCommands, false)
+}
+
+func TestVMSetRestoresOldNetworkWhenOldCleanupFails(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	cleanupFailure := errors.New("old tap cleanup failed")
+	var networkCommands [][]string
+	oldTap := "yvm-d-ea1055-s0"
+	newTap := "yvm-d-ea1055-l0"
+	failingCleanup := []string{"ip", "link", "del", oldTap}
+	withServiceSetVMNetworkRunner(t, func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		if containsCommand([][]string{command}, failingCleanup) {
+			return cleanupFailure
+		}
+		return nil
+	})
+	withServiceSetVMMetadataInjector(t, func(context.Context, string, vmMetadataConfig) error {
+		t.Fatal("metadata should not be rewritten after old network cleanup fails")
+		return nil
+	})
+
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
+		Net:           "lan",
+		NetworkChange: true,
+		MacvlanParent: "vmbr0",
+		MacvlanMac:    "02:fc:00:00:00:44",
+	})
+	if !errors.Is(err, cleanupFailure) {
+		t.Fatalf("updateVMServiceSettings error = %v, want cleanup failure", err)
+	}
+	svc := getTestService(t, server, "devbox")
+	if len(svc.VM.Networks) != 1 || svc.VM.Networks[0].Mode != "svc" {
+		t.Fatalf("DB networks = %#v, want original svc network", svc.VM.Networks)
+	}
+	if containsCommand(networkCommands, []string{"ip", "tuntap", "add", newTap, "mode", "tap"}) {
+		t.Fatalf("new network setup should not run after old cleanup failure: %#v", networkCommands)
+	}
+	assertCommandSequence(t, networkCommands,
+		failingCleanup,
+		[]string{"ip", "tuntap", "add", oldTap, "mode", "tap"},
+	)
+}
+
+func assertVMSetNetworkRolledBack(t *testing.T, server *Server, root string, networkCommands [][]string, metadataTouched bool) {
+	t.Helper()
+	svc := getTestService(t, server, "devbox")
+	if len(svc.VM.Networks) != 1 || svc.VM.Networks[0].Mode != "svc" {
+		t.Fatalf("DB networks = %#v, want original svc network", svc.VM.Networks)
+	}
+	if svc.SvcNetwork == nil || svc.SvcNetwork.IPv4 != netip.MustParseAddr("192.168.100.12") {
+		t.Fatalf("svc network = %#v, want original service IP", svc.SvcNetwork)
+	}
+	oldTap := "yvm-d-ea1055-s0"
+	newTap := "yvm-d-ea1055-l0"
+	if !containsCommand(networkCommands, []string{"ip", "tuntap", "add", newTap, "mode", "tap"}) {
+		t.Fatalf("new network setup missing: %#v", networkCommands)
+	}
+	if !containsCommand(networkCommands, []string{"ip", "link", "del", newTap}) {
+		t.Fatalf("new network rollback cleanup missing: %#v", networkCommands)
+	}
+	if !containsCommand(networkCommands, []string{"ip", "tuntap", "add", oldTap, "mode", "tap"}) {
+		t.Fatalf("old network restore missing: %#v", networkCommands)
+	}
+	assertCommandSequence(t, networkCommands,
+		[]string{"ip", "tuntap", "add", newTap, "mode", "tap"},
+		[]string{"ip", "link", "del", newTap},
+		[]string{"ip", "tuntap", "add", oldTap, "mode", "tap"},
+	)
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"host_dev_name": "yvm-d-ea1055-s0"`)
+	if metadataTouched {
+		assertFileContains(t, filepath.Join(root, "metadata", "network.yaml"), "192.168.100.12")
+	}
+}
+
+func assertCommandSequence(t *testing.T, commands [][]string, wants ...[]string) {
+	t.Helper()
+	offset := 0
+	for _, want := range wants {
+		found := false
+		for i := offset; i < len(commands); i++ {
+			if reflect.DeepEqual(commands[i], want) {
+				offset = i + 1
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("command sequence missing %v after index %d in %#v", want, offset, commands)
+		}
+	}
+}
+
+func assertVMMetadataInjectionModes(t *testing.T, injected []vmMetadataConfig, want []string) {
+	t.Helper()
+	var got []string
+	for _, metadata := range injected {
+		if len(metadata.Networks) == 0 {
+			got = append(got, "")
+			continue
+		}
+		got = append(got, metadata.Networks[0].Mode)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("metadata injection modes = %#v, want %#v", got, want)
+	}
+}
+
+func vmMetadataHasNetworkMode(metadata vmMetadataConfig, mode string) bool {
+	for _, network := range metadata.Networks {
+		if network.Mode == mode {
+			return true
+		}
+	}
+	return false
 }
 
 func TestVMSetRejectsMacvlanFlagsWithoutLAN(t *testing.T) {

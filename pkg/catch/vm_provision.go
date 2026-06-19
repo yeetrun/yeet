@@ -27,6 +27,7 @@ var (
 	vmProvisionSSHKeyFunc             func() (string, error)
 	vmProvisionSystemdDir             string
 	vmProvisionSystemctlFunc          func(args ...string) error
+	vmProvisionCommitFunc             func(*ttyExecer, vmProvisionPlan, string, *cli.ServiceSetFlags) error
 	vmProvisionGuestReadyBoundaryFunc = captureVMGuestReadyBoundary
 	vmProvisionGuestReadyWaitFunc     = waitVMGuestReady
 )
@@ -95,13 +96,21 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 	e.printVMProvisionSummary(plan, payload)
 	e.tracef("vm summary printed")
 	doneFinish := e.traceBlock("vm finish")
-	if err := e.finishVMProvision(inputs.Context, plan, payload, flags.Restart, snapshotPolicyFlags); err != nil {
-		doneFinish()
+	committed, err := e.finishVMProvision(inputs.Context, plan, payload, flags.Restart, snapshotPolicyFlags)
+	rollbackNewService = vmProvisionRollbackPendingAfterFinish(rollbackNewService, committed)
+	doneFinish()
+	if err != nil {
 		return err
 	}
-	doneFinish()
 	rollbackNewService = false
 	return nil
+}
+
+func vmProvisionRollbackPendingAfterFinish(rollbackPending, committed bool) bool {
+	if committed {
+		return false
+	}
+	return rollbackPending
 }
 
 func (e *ttyExecer) validateAndCheckVMProvisionRequest(flags cli.RunFlags) (bool, *cli.ServiceSetFlags, error) {
@@ -123,7 +132,17 @@ func (e *ttyExecer) validateAndCheckVMProvisionService(flags cli.RunFlags) (bool
 	doneServiceExists := e.traceBlock("vm service exists")
 	serviceExisted, err := e.serviceExists()
 	doneServiceExists()
-	return serviceExisted, err
+	if err != nil || !serviceExisted {
+		return serviceExisted, err
+	}
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return true, err
+	}
+	if sv.ServiceType() == db.ServiceTypeVM {
+		return true, fmt.Errorf("VM %q already exists; use yeet vm set for CPU, memory, disk, or network changes, or remove and recreate it", e.sn)
+	}
+	return true, nil
 }
 
 func validateVMProvisionFlags(flags cli.RunFlags) error {
@@ -498,36 +517,89 @@ func cachedVMImagePaths(dir string, manifest vmImageManifest) vmImagePaths {
 	return paths
 }
 
-func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan, payload string, restart bool, snapshotPolicyFlags *cli.ServiceSetFlags) error {
+func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan, payload string, restart bool, snapshotPolicyFlags *cli.ServiceSetFlags) (committed bool, retErr error) {
+	networkTouched := false
+	systemdTouched := false
+	defer func() {
+		retErr = rollbackFailedVMProvisionFinish(retErr, plan, committed, systemdTouched, networkTouched)
+	}()
+
 	doneArtifacts := e.traceBlock("vm artifacts")
-	if err := e.applyVMProvisionArtifacts(ctx, plan); err != nil {
+	touched, err := e.applyVMProvisionArtifacts(ctx, plan)
+	networkTouched = touched
+	if err != nil {
 		doneArtifacts()
-		return err
+		return committed, err
 	}
 	doneArtifacts()
 	doneInstall := e.traceBlock("vm install systemd")
-	if err := e.installVMSystemdUnit(plan); err != nil {
+	systemdTouched, err = e.installVMSystemdUnit(plan)
+	if err != nil {
 		doneInstall()
-		return err
+		return committed, err
 	}
 	doneInstall()
 	doneCommit := e.traceBlock("vm commit")
-	if err := e.commitVMProvision(plan, payload, snapshotPolicyFlags); err != nil {
+	if err := e.commitVMProvisionForFinish(plan, payload, snapshotPolicyFlags); err != nil {
 		doneCommit()
-		return err
+		return committed, err
 	}
 	doneCommit()
+	committed = true
 	if restart {
 		doneStart := e.traceBlock("vm start")
 		if err := e.startVMAfterProvision(ctx, plan); err != nil {
 			doneStart()
-			return err
+			return committed, err
 		}
 		doneStart()
 	}
 	e.printVMNextCommands(plan, restart)
 	e.tracef("vm next commands printed")
-	return nil
+	return committed, nil
+}
+
+func rollbackFailedVMProvisionFinish(retErr error, plan vmProvisionPlan, committed, systemdTouched, networkTouched bool) error {
+	if retErr == nil || committed {
+		return retErr
+	}
+	if systemdTouched {
+		if err := cleanupFailedVMSystemdUnit(plan); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("cleanup failed VM systemd unit: %w", err))
+		}
+	}
+	if networkTouched {
+		if err := plan.Network.ExecuteCleanup(vmProvisionNetworkRunner); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("cleanup failed VM network: %w", err))
+		}
+	}
+	return retErr
+}
+
+func (e *ttyExecer) commitVMProvisionForFinish(plan vmProvisionPlan, payload string, snapshotPolicyFlags *cli.ServiceSetFlags) error {
+	if vmProvisionCommitFunc != nil {
+		return vmProvisionCommitFunc(e, plan, payload, snapshotPolicyFlags)
+	}
+	return e.commitVMProvision(plan, payload, snapshotPolicyFlags)
+}
+
+func cleanupFailedVMSystemdUnit(plan vmProvisionPlan) error {
+	systemctl := vmProvisionSystemctlFunc
+	if systemctl == nil {
+		systemctl = runVMSystemctl
+	}
+	unit := filepath.Base(plan.SystemdUnitInstallPath)
+	var cleanupErr error
+	if err := systemctl("disable", unit); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("disable VM systemd unit: %w", err))
+	}
+	if err := os.Remove(plan.SystemdUnitInstallPath); err != nil && !os.IsNotExist(err) {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove VM systemd unit: %w", err))
+	}
+	if err := systemctl("daemon-reload"); err != nil {
+		cleanupErr = errors.Join(cleanupErr, fmt.Errorf("reload systemd after VM unit cleanup: %w", err))
+	}
+	return cleanupErr
 }
 
 func (e *ttyExecer) startVMAfterProvision(ctx context.Context, plan vmProvisionPlan) error {
@@ -778,6 +850,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 	unit := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          e.sn,
 		Runner:           e.s.catchRunnerPath(),
+		DataDir:          e.s.cfg.RootDir,
 		Firecracker:      image.Paths.FirecrackerPath,
 		ConfigPath:       firecrackerPath,
 		APISocket:        apiSocket,
@@ -809,25 +882,25 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 	}, nil
 }
 
-func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvisionPlan) error {
+func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvisionPlan) (networkTouched bool, err error) {
 	doneDisk := e.traceBlock("vm disk provision")
 	if plan.Disk.Backend == vmDiskBackendZVOL {
 		if err := runVMProvisionDiskPlanWithProgress(ctx, plan.Disk, vmProvisionDiskRunner, e.vmDiskProgressf); err != nil {
 			doneDisk()
-			return err
+			return networkTouched, err
 		}
 	} else {
 		e.vmProgressf("Preparing disk...\n")
 		if err := runVMProvisionDiskPlan(ctx, plan.Disk, vmProvisionDiskRunner); err != nil {
 			doneDisk()
-			return err
+			return networkTouched, err
 		}
 	}
 	doneDisk()
 	doneWriteMetadata := e.traceBlock("vm write metadata")
 	if err := writeVMMetadata(plan.ServiceRoot.Root, plan.Metadata); err != nil {
 		doneWriteMetadata()
-		return fmt.Errorf("write VM metadata: %w", err)
+		return networkTouched, fmt.Errorf("write VM metadata: %w", err)
 	}
 	doneWriteMetadata()
 	injectMetadata := vmProvisionMetadataInjector
@@ -838,30 +911,31 @@ func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvis
 	doneInject := e.traceBlock("vm inject metadata")
 	if err := injectMetadata(ctx, plan.DiskPath, plan.Metadata); err != nil {
 		doneInject()
-		return fmt.Errorf("inject VM metadata: %w", err)
+		return networkTouched, fmt.Errorf("inject VM metadata: %w", err)
 	}
 	doneInject()
 	e.vmProgressf("Writing Firecracker config...\n")
 	doneConfig := e.traceBlock("vm firecracker config")
 	if err := writeVMFile(plan.FirecrackerConfigPath, plan.FirecrackerConfig, 0o644); err != nil {
 		doneConfig()
-		return fmt.Errorf("write Firecracker config: %w", err)
+		return networkTouched, fmt.Errorf("write Firecracker config: %w", err)
 	}
 	doneConfig()
 	e.vmProgressf("Configuring network...\n")
 	doneNetwork := e.traceBlock("vm network setup")
+	networkTouched = true
 	if err := plan.Network.ExecuteSetup(vmProvisionNetworkRunner); err != nil {
 		doneNetwork()
-		return fmt.Errorf("set up VM network: %w", err)
+		return networkTouched, fmt.Errorf("set up VM network: %w", err)
 	}
 	doneNetwork()
 	doneUnit := e.traceBlock("vm stage systemd unit")
 	if err := writeVMFile(plan.SystemdUnitStagePath, []byte(plan.SystemdUnitContent), 0o644); err != nil {
 		doneUnit()
-		return fmt.Errorf("stage VM systemd unit: %w", err)
+		return networkTouched, fmt.Errorf("stage VM systemd unit: %w", err)
 	}
 	doneUnit()
-	return nil
+	return networkTouched, nil
 }
 
 func (e *ttyExecer) vmDiskProgressf(label string) {
@@ -919,13 +993,14 @@ func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string, snap
 	return nil
 }
 
-func (e *ttyExecer) installVMSystemdUnit(plan vmProvisionPlan) error {
+func (e *ttyExecer) installVMSystemdUnit(plan vmProvisionPlan) (unitTouched bool, err error) {
 	e.vmProgressf("Installing VM service...\n")
 	doneWriteUnit := e.traceBlock("vm install unit file")
 	if err := writeVMFile(plan.SystemdUnitInstallPath, []byte(plan.SystemdUnitContent), 0o644); err != nil {
 		doneWriteUnit()
-		return fmt.Errorf("install VM systemd unit: %w", err)
+		return unitTouched, fmt.Errorf("install VM systemd unit: %w", err)
 	}
+	unitTouched = true
 	doneWriteUnit()
 	systemctl := vmProvisionSystemctlFunc
 	if systemctl == nil {
@@ -935,16 +1010,16 @@ func (e *ttyExecer) installVMSystemdUnit(plan vmProvisionPlan) error {
 	doneReload := e.traceBlock("vm systemd daemon-reload")
 	if err := systemctl("daemon-reload"); err != nil {
 		doneReload()
-		return err
+		return unitTouched, err
 	}
 	doneReload()
 	doneEnable := e.traceBlock("vm systemd enable")
 	if err := systemctl("enable", unit); err != nil {
 		doneEnable()
-		return err
+		return unitTouched, err
 	}
 	doneEnable()
-	return nil
+	return unitTouched, nil
 }
 
 func (e *ttyExecer) restartVMSystemdUnit(plan vmProvisionPlan) error {

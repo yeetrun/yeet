@@ -72,7 +72,7 @@ func TestRunVMRemovesNewServiceRootOnArtifactFailure(t *testing.T) {
 	}
 }
 
-func TestRunVMKeepsExistingServiceRootOnArtifactFailure(t *testing.T) {
+func TestRunVMRejectsExistingVMKeepsExistingServiceRoot(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
 	if err := os.MkdirAll(serviceDataDirForRoot(serviceRoot), 0o755); err != nil {
@@ -88,15 +88,53 @@ func TestRunVMKeepsExistingServiceRootOnArtifactFailure(t *testing.T) {
 		VM:          &db.VMConfig{SetupState: "ready"},
 	})
 	vmProvisionDiskRunner = func(context.Context, []string) error {
-		return errors.New("disk failed")
+		t.Fatal("disk runner should not be called for an existing VM")
+		return nil
 	}
 
 	err := execer.runVM(cli.RunFlags{Net: "svc", CPUs: 2, Memory: "2g", Disk: "16g"}, testUbuntuVMPayload)
-	if err == nil || !strings.Contains(err.Error(), "disk failed") {
-		t.Fatalf("runVM error = %v, want disk failure", err)
+	if err == nil || !strings.Contains(err.Error(), `VM "svc" already exists`) || !strings.Contains(err.Error(), "yeet vm set") {
+		t.Fatalf("runVM error = %v, want existing VM guidance", err)
 	}
 	if got, readErr := os.ReadFile(marker); readErr != nil || string(got) != "keep" {
-		t.Fatalf("existing marker after failed VM update = %q, %v; want preserved", got, readErr)
+		t.Fatalf("existing marker after rejected VM run = %q, %v; want preserved", got, readErr)
+	}
+}
+
+func TestRunVMRejectsExistingVMBeforeProvisionWork(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	addTestServices(t, server, db.Service{
+		Name:        "svc",
+		ServiceType: db.ServiceTypeVM,
+		VM:          &db.VMConfig{SetupState: "ready"},
+	})
+
+	var profiled bool
+	vmProvisionHostProfileFunc = func(_ *ttyExecer, _ resolvedServiceRoot, _ int64) (vmHostProfile, error) {
+		profiled = true
+		return vmHostProfile{}, nil
+	}
+	var inspected bool
+	vmImageInspectFunc = func(context.Context, vmImageCache, string) (vmImageCacheState, vmImageManifest, error) {
+		inspected = true
+		return vmImageCacheState{}, vmImageManifest{}, nil
+	}
+	var networkCommands [][]string
+	vmProvisionNetworkRunner = func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc", CPUs: 2, Memory: "2g", Disk: "16g"}, testUbuntuVMPayload)
+	if err == nil || !strings.Contains(err.Error(), `VM "svc" already exists`) || !strings.Contains(err.Error(), "yeet vm set") {
+		t.Fatalf("runVM error = %v, want existing VM guidance", err)
+	}
+	if profiled || inspected || len(networkCommands) != 0 {
+		t.Fatalf("existing VM performed work: profiled=%v inspected=%v network=%#v", profiled, inspected, networkCommands)
+	}
+	if _, statErr := os.Stat(serviceRoot); !os.IsNotExist(statErr) {
+		t.Fatalf("service root stat after existing VM = %v, want not exists", statErr)
 	}
 }
 
@@ -838,7 +876,12 @@ func TestRunVMSkipsGuestReadinessWhenRestartFalse(t *testing.T) {
 
 func TestRunVMGuestReadinessFailureKeepsCommittedVM(t *testing.T) {
 	server := newTestServer(t)
-	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var networkCommands [][]string
+	vmProvisionNetworkRunner = func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	}
 	vmProvisionGuestReadyBoundaryFunc = func(context.Context, string) (vmGuestReadyBoundary, error) {
 		return vmGuestReadyBoundary{}, nil
 	}
@@ -854,11 +897,21 @@ func TestRunVMGuestReadinessFailureKeepsCommittedVM(t *testing.T) {
 	if svc.VM == nil || svc.VM.SetupState != "ready" {
 		t.Fatalf("VM after readiness failure = %#v, want committed ready VM for console recovery", svc.VM)
 	}
+	assertFileContains(t, filepath.Join(serviceRoot, "metadata", "hostname"), "devbox")
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), `"kernel_image_path"`)
+	if containsCommandPrefix(networkCommands, []string{"ip", "link", "del"}) {
+		t.Fatalf("network cleanup ran after committed readiness failure: %#v", networkCommands)
+	}
 }
 
 func TestRunVMKeepsReadyWhenRestartFailsAfterCommit(t *testing.T) {
 	server := newTestServer(t)
-	execer, _, _, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
+	execer, serviceRoot, _, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
+	var networkCommands [][]string
+	vmProvisionNetworkRunner = func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	}
 	vmProvisionSystemctlFunc = func(args ...string) error {
 		*systemctlCalls = append(*systemctlCalls, append([]string(nil), args...))
 		if reflect.DeepEqual(args, []string{"restart", vmSystemdUnitName("svc")}) {
@@ -874,6 +927,11 @@ func TestRunVMKeepsReadyWhenRestartFailsAfterCommit(t *testing.T) {
 	svc := getTestService(t, server, "svc")
 	if svc.VM == nil || svc.VM.SetupState != "ready" {
 		t.Fatalf("VM after restart failure = %#v, want ready", svc.VM)
+	}
+	assertFileContains(t, filepath.Join(serviceRoot, "metadata", "hostname"), "svc")
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), `"kernel_image_path"`)
+	if containsCommandPrefix(networkCommands, []string{"ip", "link", "del"}) {
+		t.Fatalf("network cleanup ran after committed restart failure: %#v", networkCommands)
 	}
 }
 
@@ -893,6 +951,89 @@ func TestRunVMDoesNotCommitReadyWhenSystemdEnableFails(t *testing.T) {
 		t.Fatalf("runVM error = %v, want enable failure", err)
 	}
 	assertNoReadyVM(t, server, "svc")
+}
+
+func TestRunVMCleansNetworkWhenInstallFailsAfterNetworkSetup(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
+	var networkCommands [][]string
+	vmProvisionNetworkRunner = func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	}
+	vmProvisionSystemctlFunc = func(args ...string) error {
+		*systemctlCalls = append(*systemctlCalls, append([]string(nil), args...))
+		if reflect.DeepEqual(args, []string{"enable", vmSystemdUnitName("svc")}) {
+			return errors.New("enable failed")
+		}
+		return nil
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc"}, testUbuntuVMPayload)
+	if err == nil || !strings.Contains(err.Error(), "enable failed") {
+		t.Fatalf("runVM error = %v, want enable failure", err)
+	}
+	if !containsCommandPrefix(networkCommands, []string{"ip", "tuntap", "add"}) {
+		t.Fatalf("network setup missing: %#v", networkCommands)
+	}
+	if !containsCommandPrefix(networkCommands, []string{"ip", "link", "del"}) {
+		t.Fatalf("network cleanup missing after failed install: %#v", networkCommands)
+	}
+	unitPath := filepath.Join(systemdDir, vmSystemdUnitName("svc"))
+	if _, statErr := os.Stat(unitPath); !os.IsNotExist(statErr) {
+		t.Fatalf("installed unit stat after failed install = %v, want not exists", statErr)
+	}
+	if !vmTestSystemctlCalled(*systemctlCalls, "disable", vmSystemdUnitName("svc")) {
+		t.Fatalf("systemd disable missing after failed install: %#v", *systemctlCalls)
+	}
+	if got := vmTestSystemctlCallCount(*systemctlCalls, "daemon-reload"); got < 2 {
+		t.Fatalf("daemon-reload calls = %d, want install and cleanup reload; calls %#v", got, *systemctlCalls)
+	}
+	assertNoReadyVM(t, server, "svc")
+}
+
+func TestRunVMCleansSystemdWhenCommitFailsAfterInstall(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
+	var networkCommands [][]string
+	vmProvisionNetworkRunner = func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	}
+	vmProvisionSystemctlFunc = func(args ...string) error {
+		*systemctlCalls = append(*systemctlCalls, append([]string(nil), args...))
+		if reflect.DeepEqual(args, []string{"disable", vmSystemdUnitName("svc")}) {
+			return errors.New("disable failed")
+		}
+		return nil
+	}
+	vmProvisionCommitFunc = func(*ttyExecer, vmProvisionPlan, string, *cli.ServiceSetFlags) error {
+		return errors.New("commit failed")
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc"}, testUbuntuVMPayload)
+	if err == nil {
+		t.Fatal("runVM error = nil, want commit and cleanup failures")
+	}
+	for _, want := range []string{"commit failed", "cleanup failed VM systemd unit", "disable failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("runVM error missing %q: %v", want, err)
+		}
+	}
+	assertNoReadyVM(t, server, "svc")
+	if !containsCommandPrefix(networkCommands, []string{"ip", "link", "del"}) {
+		t.Fatalf("network cleanup missing after failed commit: %#v", networkCommands)
+	}
+	unitPath := filepath.Join(systemdDir, vmSystemdUnitName("svc"))
+	if _, statErr := os.Stat(unitPath); !os.IsNotExist(statErr) {
+		t.Fatalf("installed unit stat after failed commit = %v, want not exists", statErr)
+	}
+	if !vmTestSystemctlCalled(*systemctlCalls, "disable", vmSystemdUnitName("svc")) {
+		t.Fatalf("systemd disable missing after failed commit: %#v", *systemctlCalls)
+	}
+	if got := vmTestSystemctlCallCount(*systemctlCalls, "daemon-reload"); got < 2 {
+		t.Fatalf("daemon-reload calls = %d, want install and cleanup reload; calls %#v", got, *systemctlCalls)
+	}
 }
 
 func TestRunVMRollsBackNewServiceReservationOnProvisionFailure(t *testing.T) {
@@ -1464,6 +1605,7 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	oldSSHKey := vmProvisionSSHKeyFunc
 	oldSystemdDir := vmProvisionSystemdDir
 	oldSystemctl := vmProvisionSystemctlFunc
+	oldCommit := vmProvisionCommitFunc
 	oldPrepareRootFS := prepareVMRootFSFunc
 	oldGuestReadyBoundary := vmProvisionGuestReadyBoundaryFunc
 	oldGuestReadyWait := vmProvisionGuestReadyWaitFunc
@@ -1477,6 +1619,7 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 		vmProvisionSSHKeyFunc = oldSSHKey
 		vmProvisionSystemdDir = oldSystemdDir
 		vmProvisionSystemctlFunc = oldSystemctl
+		vmProvisionCommitFunc = oldCommit
 		prepareVMRootFSFunc = oldPrepareRootFS
 		vmProvisionGuestReadyBoundaryFunc = oldGuestReadyBoundary
 		vmProvisionGuestReadyWaitFunc = oldGuestReadyWait
@@ -1640,4 +1783,14 @@ func vmTestSystemctlCalled(calls [][]string, args ...string) bool {
 		}
 	}
 	return false
+}
+
+func vmTestSystemctlCallCount(calls [][]string, args ...string) int {
+	count := 0
+	for _, call := range calls {
+		if reflect.DeepEqual(call, args) {
+			count++
+		}
+	}
+	return count
 }

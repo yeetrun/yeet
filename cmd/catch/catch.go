@@ -60,6 +60,7 @@ var (
 	setupVMHostFn                           = setupVMHost
 	doInstallFn                             = doInstall
 	validateCatchRuntimeFn                  = validateCatchRuntime
+	ensureVMNetworkFn                       = catch.EnsureVMNetwork
 	ensureContainerdSnapshotterForInstallFn = ensureContainerdSnapshotterForInstall
 	generateCatchTailscaleAuthKeyFn         = catch.GenerateTailscaleAuthKeyFromSecret
 	writeCatchTailscaleClientSecretFn       = catch.WriteCatchTailscaleClientSecret
@@ -416,6 +417,9 @@ func applyInstallMeta(cfg *catch.Config, dataDir string) {
 }
 
 func handleLocalCommand(args []string, scfg *catch.Config, dataDir string, out io.Writer) (bool, error) {
+	if handled, err := handleVMNetworkEnsureCommand(args, scfg); handled {
+		return true, err
+	}
 	if len(args) != 1 {
 		return false, nil
 	}
@@ -425,22 +429,40 @@ func handleLocalCommand(args []string, scfg *catch.Config, dataDir string, out i
 	case "dns":
 		return true, runDNSFn(context.Background(), scfg)
 	case "install":
-		if err := setupDockerFn(); err != nil {
-			return true, fmt.Errorf("failed to set up docker: %w", err)
-		}
-		if err := ensureContainerdSnapshotterForInstallFn(defaultDockerConfigPath); err != nil {
-			return true, fmt.Errorf("failed to configure docker: %w", err)
-		}
-		if err := validateCatchRuntimeFn(*containerdSocket); err != nil {
-			return true, fmt.Errorf("failed to validate catch runtime prerequisites: %w", err)
-		}
-		if err := doInstallFn(scfg, dataDir); err != nil {
-			return true, fmt.Errorf("failed to install: %w", err)
-		}
-		return true, setupVMHostFn()
+		return true, handleInstallCommand(scfg, dataDir)
 	default:
 		return false, nil
 	}
+}
+
+func handleVMNetworkEnsureCommand(args []string, scfg *catch.Config) (bool, error) {
+	if len(args) == 0 || args[0] != "vm-network-ensure" {
+		return false, nil
+	}
+	if len(args) != 2 {
+		return true, fmt.Errorf("vm-network-ensure service is required")
+	}
+	service := strings.TrimSpace(args[1])
+	if service == "" {
+		return true, fmt.Errorf("vm-network-ensure service is required")
+	}
+	return true, ensureVMNetworkFn(context.Background(), scfg, service)
+}
+
+func handleInstallCommand(scfg *catch.Config, dataDir string) error {
+	if err := setupDockerFn(); err != nil {
+		return fmt.Errorf("failed to set up docker: %w", err)
+	}
+	if err := ensureContainerdSnapshotterForInstallFn(defaultDockerConfigPath); err != nil {
+		return fmt.Errorf("failed to configure docker: %w", err)
+	}
+	if err := validateCatchRuntimeFn(*containerdSocket); err != nil {
+		return fmt.Errorf("failed to validate catch runtime prerequisites: %w", err)
+	}
+	if err := doInstallFn(scfg, dataDir); err != nil {
+		return fmt.Errorf("failed to install: %w", err)
+	}
+	return setupVMHostFn()
 }
 
 func writeLine(out io.Writer, value string) error {

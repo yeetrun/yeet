@@ -16,6 +16,7 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 	unit := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          "devbox",
 		Runner:           "/srv/catch/run/catch",
+		DataDir:          "/srv/catch/data",
 		Firecracker:      "/srv/images/firecracker",
 		ConfigPath:       "/srv/vms/devbox/run/firecracker.json",
 		APISocket:        "/srv/vms/devbox/run/firecracker.sock",
@@ -27,6 +28,7 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 		"[Unit]",
 		"Description=yeet VM devbox",
 		"ExecStartPre=/bin/rm -f /srv/vms/devbox/run/firecracker.sock /srv/vms/devbox/run/serial.sock /srv/vms/devbox/run/vsock.sock",
+		"ExecStartPre=/srv/catch/run/catch -data-dir /srv/catch/data vm-network-ensure devbox",
 		"ExecStart=/srv/catch/run/catch vm-run --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
 		"Restart=on-failure",
 		"RestartForceExitStatus=75",
@@ -35,6 +37,23 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit missing %q:\n%s", want, unit)
 		}
+	}
+	assertTextOrder(t, unit,
+		"ExecStartPre=/bin/rm -f /srv/vms/devbox/run/firecracker.sock /srv/vms/devbox/run/serial.sock /srv/vms/devbox/run/vsock.sock",
+		"ExecStartPre=/srv/catch/run/catch -data-dir /srv/catch/data vm-network-ensure devbox",
+		"ExecStart=/srv/catch/run/catch vm-run --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
+	)
+}
+
+func assertTextOrder(t *testing.T, text string, wants ...string) {
+	t.Helper()
+	offset := 0
+	for _, want := range wants {
+		idx := strings.Index(text[offset:], want)
+		if idx < 0 {
+			t.Fatalf("text missing %q after offset %d:\n%s", want, offset, text)
+		}
+		offset += idx + len(want)
 	}
 }
 
