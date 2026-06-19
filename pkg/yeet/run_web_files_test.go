@@ -151,3 +151,88 @@ func TestRunWebPathInsideRootAllowsFilesystemRootChildren(t *testing.T) {
 		t.Fatal("runWebPathInsideRoot rejected child of filesystem root")
 	}
 }
+
+func TestSearchRunWebFilesRanksRecursivePayloadMatches(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{
+		filepath.Join(root, "apps", "searxng"),
+		filepath.Join(root, "apps", "searxng-notes"),
+		filepath.Join(root, "tools"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	files := map[string]os.FileMode{
+		"apps/searxng/docker-compose.yml":      0o644,
+		"apps/searxng-notes/compose-notes.txt": 0o644,
+		"tools/searxng-compose-helper":         0o755,
+		"compose.yml":                          0o644,
+	}
+	for name, mode := range files {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte("ok\n"), mode); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	got, err := searchRunWebFiles(root, "sx compose", "payload")
+	if err != nil {
+		t.Fatalf("searchRunWebFiles: %v", err)
+	}
+	if len(got.Entries) < 2 {
+		t.Fatalf("entries = %#v, want multiple ranked matches", got.Entries)
+	}
+	if got.Entries[0].Path != "apps/searxng/docker-compose.yml" {
+		t.Fatalf("first path = %q, want nested compose payload; entries=%#v", got.Entries[0].Path, got.Entries)
+	}
+	if !got.Entries[0].LikelyPayload || got.Entries[0].Dir {
+		t.Fatalf("first entry = %#v, want file marked as likely payload", got.Entries[0])
+	}
+	for _, entry := range got.Entries {
+		if entry.Dir {
+			t.Fatalf("search entry = %#v, want files only", entry)
+		}
+	}
+}
+
+func TestSearchRunWebFilesFindsEnvFilesWhenRequested(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "apps", "searxng"), 0o755); err != nil {
+		t.Fatalf("mkdir app: %v", err)
+	}
+	for _, name := range []string{
+		"apps/searxng/prod.env",
+		"apps/searxng/docker-compose.yml",
+	} {
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(name)), []byte("ok\n"), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	got, err := searchRunWebFiles(root, "searx env", "envFile")
+	if err != nil {
+		t.Fatalf("searchRunWebFiles: %v", err)
+	}
+	if len(got.Entries) != 1 || got.Entries[0].Path != "apps/searxng/prod.env" || !got.Entries[0].LikelyEnv {
+		t.Fatalf("entries = %#v, want env file match only", got.Entries)
+	}
+}
+
+func TestSearchRunWebFilesOmitsSymlinkEscapes(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatalf("write outside compose: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "outside")); err != nil {
+		t.Skipf("symlink not available: %v", err)
+	}
+
+	got, err := searchRunWebFiles(root, "secret compose", "payload")
+	if err != nil {
+		t.Fatalf("searchRunWebFiles: %v", err)
+	}
+	if len(got.Entries) != 0 {
+		t.Fatalf("entries = %#v, want symlink escape omitted", got.Entries)
+	}
+}

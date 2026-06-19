@@ -77,6 +77,32 @@ func TestRunWebAPIBootstrapAndFiles(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIFilesSearchQuery(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "apps", "searxng"), 0o755); err != nil {
+		t.Fatalf("mkdir app: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "apps", "searxng", "docker-compose.yml"), []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	s := newRunWebServer(runWebServerConfig{
+		Token: "secret",
+		Root:  root,
+	})
+
+	rec := runWebAPIRequest(t, s, http.MethodGet, "/api/files?q=searx+compose&field=payload", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("files search status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body runWebFileList
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if len(body.Entries) != 1 || body.Entries[0].Path != "apps/searxng/docker-compose.yml" {
+		t.Fatalf("body = %#v, want recursive compose match", body)
+	}
+}
+
 func TestRunWebAPIZFSRootsUsesSelectedHost(t *testing.T) {
 	oldFetch := fetchRunWebZFSRootCandidatesFn
 	defer func() { fetchRunWebZFSRootCandidatesFn = oldFetch }()
