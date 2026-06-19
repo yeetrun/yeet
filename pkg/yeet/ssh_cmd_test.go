@@ -395,7 +395,7 @@ func TestVMSSHExecutionPlanForServiceBuildsProxyPlan(t *testing.T) {
 	}
 }
 
-func TestServiceShellCommandForVMSvcLANPrefersSvcAndProxies(t *testing.T) {
+func TestServiceShellCommandForVMSvcLANPrefersLANAndProxies(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -427,7 +427,7 @@ func TestServiceShellCommandForVMSvcLANPrefersSvcAndProxies(t *testing.T) {
 		t.Fatalf("command = %#v, want empty", gotCommand)
 	}
 	wantProxy := "ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts") + " -o HostKeyAlias=yeet-proxy@yeet-lab -o CheckHostIP=no -W %h:%p root@yeet-lab"
-	for _, want := range []string{"HostName=192.168.100.12", wantProxy} {
+	for _, want := range []string{"HostName=10.0.4.80", wantProxy} {
 		if !sshOptionsContainValue(gotOptions, want) {
 			t.Fatalf("options = %#v, want %q", gotOptions, want)
 		}
