@@ -19,12 +19,14 @@ import (
 	"unicode"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/netns"
 )
 
 const (
-	vmSvcGateway  = "192.168.100.254"
-	vmSvcNetNS    = "yeet-ns"
-	vmSvcNSBridge = "br0"
+	vmSvcGuestGateway  = netns.ServiceHostIP
+	vmSvcBridgeAddress = netns.ServiceGatewayIP
+	vmSvcNetNS         = "yeet-ns"
+	vmSvcNSBridge      = "br0"
 )
 
 type vmNetworkInputs struct {
@@ -101,7 +103,7 @@ func configureVMSvcNetworkInterface(iface *vmNetworkInterfacePlan, short string,
 	if strings.TrimSpace(in.ServiceIP) != "" {
 		iface.GuestIP = strings.TrimSpace(in.ServiceIP) + "/24"
 	}
-	iface.Gateway = vmSvcGateway
+	iface.Gateway = vmSvcGuestGateway
 }
 
 func configureVMLANNetworkInterface(iface *vmNetworkInterfacePlan, short string, idx int, in vmNetworkInputs) {
@@ -454,8 +456,8 @@ func (p vmNetworkPlan) SetupCommands() [][]string {
 				[]string{"ip", "link", "add", iface.Bridge, "type", "bridge"},
 				[]string{"ip", "tuntap", "add", iface.Tap, "mode", "tap"},
 				[]string{"ip", "link", "set", iface.Tap, "master", iface.Bridge},
-				[]string{"ip", "addr", "del", vmSvcGateway + "/24", "dev", iface.Bridge},
-				[]string{"ip", "addr", "del", vmSvcGateway + "/32", "dev", iface.Bridge},
+				[]string{"ip", "addr", "del", vmSvcBridgeAddress + "/24", "dev", iface.Bridge},
+				[]string{"ip", "addr", "del", vmSvcBridgeAddress + "/32", "dev", iface.Bridge},
 				[]string{"ip", "link", "set", iface.Bridge, "up"},
 				[]string{"ip", "link", "set", iface.Tap, "up"},
 			)
@@ -821,7 +823,7 @@ func isVMSvcGatewayDeleteCommand(cmd []string) bool {
 		cmd[0] == "ip" &&
 		cmd[1] == "addr" &&
 		cmd[2] == "del" &&
-		(cmd[3] == vmSvcGateway+"/24" || cmd[3] == vmSvcGateway+"/32") &&
+		(cmd[3] == vmSvcBridgeAddress+"/24" || cmd[3] == vmSvcBridgeAddress+"/32") &&
 		cmd[4] == "dev"
 }
 

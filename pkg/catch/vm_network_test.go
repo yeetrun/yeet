@@ -35,8 +35,14 @@ func TestVMSvcNetworkPlanUsesHostBridgeAndYeetNSPeer(t *testing.T) {
 	if iface.GuestIP != "192.168.100.12/24" {
 		t.Fatalf("guest IP = %q, want 192.168.100.12/24", iface.GuestIP)
 	}
-	if iface.Gateway != "192.168.100.254" {
-		t.Fatalf("gateway = %q, want 192.168.100.254", iface.Gateway)
+	if iface.Gateway != vmSvcGuestGateway {
+		t.Fatalf("gateway = %q, want %s", iface.Gateway, vmSvcGuestGateway)
+	}
+	if vmSvcGuestGateway != "192.168.100.1" {
+		t.Fatalf("vmSvcGuestGateway = %q, want 192.168.100.1", vmSvcGuestGateway)
+	}
+	if vmSvcBridgeAddress != "192.168.100.254" {
+		t.Fatalf("vmSvcBridgeAddress = %q, want 192.168.100.254", vmSvcBridgeAddress)
 	}
 	if iface.MAC == "" {
 		t.Fatal("guest MAC is empty")
@@ -56,18 +62,18 @@ func TestVMSvcNetworkPlanUsesHostBridgeAndYeetNSPeer(t *testing.T) {
 	if got := cmds[:len(wantPrefix)]; !reflect.DeepEqual(got, wantPrefix) {
 		t.Fatalf("setup command prefix = %#v, want %#v", got, wantPrefix)
 	}
-	if containsCommand(cmds, []string{"ip", "addr", "add", vmSvcGateway + "/24", "dev", iface.Bridge}) {
+	if containsCommand(cmds, []string{"ip", "addr", "add", vmSvcBridgeAddress + "/24", "dev", iface.Bridge}) {
 		t.Fatalf("setup commands = %#v, want no broad service network route on VM bridge", cmds)
 	}
-	if containsCommand(cmds, []string{"ip", "addr", "add", vmSvcGateway + "/32", "dev", iface.Bridge}) {
+	if containsCommand(cmds, []string{"ip", "addr", "add", vmSvcBridgeAddress + "/32", "dev", iface.Bridge}) {
 		t.Fatalf("setup commands = %#v, want service gateway only in %s", cmds, vmSvcNetNS)
 	}
-	if containsCommand(cmds, []string{"ip", "route", "replace", "192.168.100.12/32", "dev", iface.Bridge, "src", vmSvcGateway}) {
+	if containsCommand(cmds, []string{"ip", "route", "replace", "192.168.100.12/32", "dev", iface.Bridge, "src", vmSvcBridgeAddress}) {
 		t.Fatalf("setup commands = %#v, want host route through %s", cmds, vmSvcNetNS)
 	}
 	for _, command := range [][]string{
-		{"ip", "addr", "del", vmSvcGateway + "/24", "dev", iface.Bridge},
-		{"ip", "addr", "del", vmSvcGateway + "/32", "dev", iface.Bridge},
+		{"ip", "addr", "del", vmSvcBridgeAddress + "/24", "dev", iface.Bridge},
+		{"ip", "addr", "del", vmSvcBridgeAddress + "/32", "dev", iface.Bridge},
 		{"ip", "route", "del", "192.168.100.12/32", "dev", iface.Bridge},
 	} {
 		if !containsCommand(cmds, command) {
@@ -412,9 +418,9 @@ func TestVMNetworkExecuteSetupToleratesAlreadyExistingLinks(t *testing.T) {
 			return errors.New("RTNETLINK answers: File exists")
 		case reflect.DeepEqual(cmd[:4], []string{"ip", "tuntap", "add", plan.Interfaces[0].Tap}):
 			return errors.New("ioctl(TUNSETIFF): Device or resource busy")
-		case reflect.DeepEqual(cmd, []string{"ip", "addr", "del", vmSvcGateway + "/24", "dev", plan.Interfaces[0].Bridge}):
+		case reflect.DeepEqual(cmd, []string{"ip", "addr", "del", vmSvcBridgeAddress + "/24", "dev", plan.Interfaces[0].Bridge}):
 			return errors.New("RTNETLINK answers: Cannot assign requested address")
-		case reflect.DeepEqual(cmd, []string{"ip", "addr", "del", vmSvcGateway + "/32", "dev", plan.Interfaces[0].Bridge}):
+		case reflect.DeepEqual(cmd, []string{"ip", "addr", "del", vmSvcBridgeAddress + "/32", "dev", plan.Interfaces[0].Bridge}):
 			return errors.New("RTNETLINK answers: Cannot assign requested address")
 		case reflect.DeepEqual(cmd, []string{"ip", "route", "del", "192.168.100.12/32", "dev", plan.Interfaces[0].Bridge}):
 			return errors.New("RTNETLINK answers: No such process")
@@ -544,7 +550,7 @@ yvm-devbox-v0   | 42  | eth0
 func TestVMNetworkExecuteSetupToleratesAlreadyAssignedAddress(t *testing.T) {
 	plan := newVMNetworkPlan("devbox", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 	err := plan.ExecuteSetup(func(cmd []string) error {
-		if reflect.DeepEqual(cmd[:4], []string{"ip", "addr", "add", vmSvcGateway + "/24"}) {
+		if reflect.DeepEqual(cmd[:4], []string{"ip", "addr", "add", vmSvcBridgeAddress + "/24"}) {
 			return errors.New("Error: ipv4: Address already assigned.")
 		}
 		return nil

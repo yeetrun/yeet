@@ -345,7 +345,7 @@ func vmNetworkPlanFromDB(service string, networks []db.VMNetworkConfig) vmNetwor
 			if network.IP.IsValid() {
 				iface.GuestIP = network.IP.String() + "/24"
 			}
-			iface.Gateway = vmSvcGateway
+			iface.Gateway = vmSvcGuestGateway
 		case "lan":
 			if network.VLAN != 0 {
 				if vmLANParentIsBridge(network.Parent) {

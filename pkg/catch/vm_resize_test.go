@@ -590,7 +590,7 @@ func seedVMForResize(t *testing.T, server *Server, name, root, backend string) {
 		BootSource: firecrackerBootSource{
 			KernelImagePath: "/srv/yeet/images/kernel",
 			InitrdPath:      "/srv/yeet/images/initrd.img",
-			BootArgs:        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/usr/local/lib/yeet-vm/yeet-init ip=192.168.100.12::192.168.100.254:255.255.255.0:devbox:eth0:none yeet.hostname=devbox yeet.iface=eth0",
+			BootArgs:        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/usr/local/lib/yeet-vm/yeet-init ip=192.168.100.12::192.168.100.1:255.255.255.0:devbox:eth0:none yeet.hostname=devbox yeet.iface=eth0",
 		},
 		Drives: []firecrackerDrive{{
 			DriveID:      "rootfs",
