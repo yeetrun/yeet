@@ -415,3 +415,34 @@ func TestWebRunVMNetworkSelectionNeverFallsBackToHost(t *testing.T) {
 		}
 	}
 }
+
+func TestWebRunPayloadPickerSupportsFuzzyKeyboardFiltering(t *testing.T) {
+	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
+	if err != nil {
+		t.Fatalf("read app: %v", err)
+	}
+	source := string(app)
+
+	for _, snippet := range []string{
+		"fileSearchSeq",
+		"filePickerActiveIndex",
+		"function filePickerInputForActiveField()",
+		"async function loadFileMatches(query)",
+		"new URLSearchParams({ q: query, field: state.activePicker })",
+		"function renderFilePickerEntries(entries, emptyMessage)",
+		"function setFilePickerActiveIndex(index)",
+		`setAttribute("aria-activedescendant"`,
+		"function handlePickerKeydown(event)",
+		`event.key === "ArrowDown"`,
+		`event.key === "ArrowUp"`,
+		`event.key === "Enter"`,
+		`event.key === "Escape"`,
+		"function handlePayloadFilterInput()",
+		`$("payload").addEventListener("input", handlePayloadFilterInput)`,
+		`No matches`,
+	} {
+		if !strings.Contains(source, snippet) {
+			t.Fatalf("app missing fuzzy payload picker behavior %s", snippet)
+		}
+	}
+}

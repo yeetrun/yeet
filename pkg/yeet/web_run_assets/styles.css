@@ -382,7 +382,8 @@ legend {
 }
 
 .file-row:hover,
-.file-row:focus-visible {
+.file-row:focus-visible,
+.file-row[aria-selected="true"] {
   background: var(--surface-2);
 }
 

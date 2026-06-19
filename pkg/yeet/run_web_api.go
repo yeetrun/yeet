@@ -131,6 +131,16 @@ func (s *runWebServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query != "" {
+		files, err := searchRunWebFiles(s.cfg.Root, query, r.URL.Query().Get("field"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeRunWebJSON(w, http.StatusOK, files)
+		return
+	}
 	dir := r.URL.Query().Get("dir")
 	if dir == "" {
 		dir = "."

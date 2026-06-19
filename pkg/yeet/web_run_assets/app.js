@@ -14,6 +14,11 @@ const state = {
   validateTimer: null,
   phase: "editing",
   activePicker: "",
+  filePickerMode: "browse",
+  filePickerEntries: [],
+  filePickerActiveIndex: -1,
+  fileSearchSeq: 0,
+  fileSearchTimer: null,
   deployJobId: "",
   deployEvents: null,
   terminal: null,
@@ -872,7 +877,19 @@ function parentDir(dir) {
   return parts.length ? parts.join("/") : ".";
 }
 
+function filePickerInputForActiveField() {
+  if (state.activePicker === "payload") return $("payload");
+  if (state.activePicker === "envFile") return $("envFile");
+  return null;
+}
+
+function filePickerOptionID(index) {
+  return `file-picker-option-${index}`;
+}
+
 async function loadFiles(dir) {
+  state.filePickerMode = "browse";
+  state.fileSearchSeq += 1;
   const res = await api(`/api/files?dir=${encodeURIComponent(dir)}`);
   if (!res.ok) {
     setStatus(await res.text(), "error");
@@ -882,41 +899,91 @@ async function loadFiles(dir) {
   state.currentDir = data.dir || ".";
   $("browserDir").textContent = state.currentDir;
   $("upButton").disabled = state.currentDir === ".";
+  renderFilePickerEntries(data.entries || [], "No files in this directory");
+}
 
-  const rows = (data.entries || []).map((entry) => {
+async function loadFileMatches(query) {
+  query = query.trim();
+  if (!query) {
+    await loadFiles(state.currentDir || ".");
+    return;
+  }
+  const seq = ++state.fileSearchSeq;
+  state.filePickerMode = "search";
+  $("browserDir").textContent = "Matches";
+  $("upButton").disabled = true;
+  renderFilePickerEntries([], "Searching");
+  const params = new URLSearchParams({ q: query, field: state.activePicker });
+  const res = await api(`/api/files?${params}`);
+  if (seq !== state.fileSearchSeq) return;
+  if (!res.ok) {
+    setStatus(await res.text(), "error");
+    return;
+  }
+  const data = await res.json();
+  renderFilePickerEntries(data.entries || [], "No matches");
+}
+
+function renderFilePickerEntries(entries, emptyMessage) {
+  state.filePickerEntries = entries;
+  const rows = entries.map((entry, index) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "file-row";
+    button.id = filePickerOptionID(index);
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", "false");
 
     const name = document.createElement("span");
     name.className = "file-name";
-    name.textContent = entry.dir ? `${entry.name}/` : entry.name;
+    const displayName = state.filePickerMode === "search" ? entry.path : entry.name;
+    name.textContent = entry.dir ? `${displayName}/` : displayName;
 
     const badge = document.createElement("span");
     badge.className = "badge";
     badge.textContent = entry.likelyEnv ? "env" : entry.likelyPayload ? "payload" : "";
 
     button.append(name, badge);
-    button.addEventListener("click", () => {
-      if (entry.dir) {
-        loadFiles(entry.path);
-        return;
-      }
-      if (state.activePicker === "envFile") $("envFile").value = entry.path;
-      else $("payload").value = entry.path;
-      hidePicker();
-      update();
-    });
+    button.addEventListener("mouseenter", () => setFilePickerActiveIndex(index));
+    button.addEventListener("click", () => pickFilePickerEntry(entry));
     return button;
   });
 
   if (!rows.length) {
     const empty = document.createElement("div");
     empty.className = "empty-state";
-    empty.textContent = "No files in this directory";
+    empty.textContent = emptyMessage;
     rows.push(empty);
   }
   $("fileBrowser").replaceChildren(...rows);
+  setFilePickerActiveIndex(entries.length ? 0 : -1);
+}
+
+function setFilePickerActiveIndex(index) {
+  const entries = state.filePickerEntries || [];
+  state.filePickerActiveIndex = entries.length ? Math.max(0, Math.min(index, entries.length - 1)) : -1;
+  const activeID = state.filePickerActiveIndex >= 0 ? filePickerOptionID(state.filePickerActiveIndex) : "";
+  document.querySelectorAll("#fileBrowser .file-row").forEach((row) => {
+    const selected = row.id === activeID;
+    row.setAttribute("aria-selected", String(selected));
+    if (selected) row.scrollIntoView({ block: "nearest" });
+  });
+  const input = filePickerInputForActiveField();
+  if (!input) return;
+  if (activeID) input.setAttribute("aria-activedescendant", activeID);
+  else input.removeAttribute("aria-activedescendant");
+}
+
+function pickFilePickerEntry(entry) {
+  if (!entry) return;
+  if (entry.dir) {
+    loadFiles(entry.path);
+    return;
+  }
+  if (state.activePicker === "envFile") $("envFile").value = entry.path;
+  else $("payload").value = entry.path;
+  hidePicker();
+  update();
 }
 
 function showPicker(field) {
@@ -932,6 +999,7 @@ function showPicker(field) {
   picker.style.top = `${Math.min(window.innerHeight - 340, rect.bottom + 6)}px`;
   picker.style.width = `${Math.max(360, rect.width)}px`;
   picker.hidden = false;
+  input.setAttribute("aria-expanded", "true");
 }
 
 function pickerEnabledForField(field) {
@@ -946,7 +1014,49 @@ function pickerEnabledForField(field) {
 
 function hidePicker() {
   if (state.activePicker !== "zfsRoot") state.activePicker = "";
+  window.clearTimeout(state.fileSearchTimer);
+  state.filePickerActiveIndex = -1;
+  state.filePickerEntries = [];
   $("filePicker").hidden = true;
+  for (const id of ["payload", "envFile"]) {
+    $(id).setAttribute("aria-expanded", "false");
+    $(id).removeAttribute("aria-activedescendant");
+  }
+}
+
+function handlePickerKeydown(event) {
+  if ($("filePicker").hidden || event.target !== filePickerInputForActiveField()) return;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    setFilePickerActiveIndex(state.filePickerActiveIndex + 1);
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    setFilePickerActiveIndex(state.filePickerActiveIndex - 1);
+    return;
+  }
+  if (event.key === "Enter") {
+    const entry = state.filePickerEntries[state.filePickerActiveIndex];
+    if (!entry) return;
+    event.preventDefault();
+    pickFilePickerEntry(entry);
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    hidePicker();
+  }
+}
+
+function handlePayloadFilterInput() {
+  if (!pickerEnabledForField("payload")) return;
+  showPicker("payload");
+  const query = $("payload").value;
+  window.clearTimeout(state.fileSearchTimer);
+  state.fileSearchTimer = window.setTimeout(() => {
+    if (state.activePicker === "payload") loadFileMatches(query);
+  }, 100);
 }
 
 function createTerminalRenderer(output) {
@@ -1499,6 +1609,9 @@ for (const [id, field] of [["vmCPUs", "cpus"], ["vmMemory", "memory"], ["vmDisk"
 document.addEventListener("input", (event) => {
   if (event.target.closest("#deployForm")) update();
 });
+$("payload").addEventListener("input", handlePayloadFilterInput);
+$("payload").addEventListener("keydown", handlePickerKeydown);
+$("envFile").addEventListener("keydown", handlePickerKeydown);
 document.querySelectorAll("input[name='workload']").forEach((input) => {
   input.addEventListener("change", () => {
     state.workloadOverride = "";
