@@ -517,10 +517,20 @@ function syncNetworkUI() {
   $("hostDefault").disabled = true;
   $("hostDefault").closest("label").hidden = vmPayload;
   $("hostDefault").checked = !vmPayload && modes.length === 0;
-  $("tsOptions").hidden = !modes.includes("ts");
+  const hasTailscale = modes.includes("ts");
+  $("tsOptions").hidden = !hasTailscale;
+  syncTailscaleTagRequirement(hasTailscale);
   $("lanOptions").hidden = !modes.includes("lan");
   $("vmOptions").hidden = !vmPayload;
   $("payloadArgsBlock").hidden = !payloadArgsEnabled();
+}
+
+function syncTailscaleTagRequirement(hasTailscale) {
+  const tags = $("tsTags");
+  const required = hasTailscale && !$("tsAuthKey").value.trim();
+  tags.toggleAttribute("required", required);
+  if (required) tags.setAttribute("aria-required", "true");
+  else tags.removeAttribute("aria-required");
 }
 
 function ensureVMNetworkSelection(clearedMode = "") {
@@ -1448,6 +1458,7 @@ const validationFieldIDs = {
   serviceRoot: "serviceRoot",
   "cron.schedule": "cronSchedule",
   "network.modes": "hostDefault",
+  "network.tsTags": "tsTags",
   "vm.cpus": "vmCPUs",
   "vm.memory": "vmMemory",
   "vm.disk": "vmDisk",

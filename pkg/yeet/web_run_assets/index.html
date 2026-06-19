@@ -210,8 +210,9 @@
 
               <div id="tsOptions" class="conditional-options" hidden>
                 <label for="tsTags">
-                  <span>Tailscale tags <button type="button" class="help" tabindex="-1" data-help="Comma-separated tags such as tag:app." aria-label="Help for Tailscale tags">?</button></span>
+                  <span>Tailscale tags <button type="button" class="help" tabindex="-1" data-help="Required for OAuth enrollment unless you provide a direct service auth key. Use comma-separated tags such as tag:app." aria-label="Help for Tailscale tags">?</button></span>
                   <input id="tsTags" name="tsTags" autocomplete="off" spellcheck="false" placeholder="tag:app">
+                  <span class="field-error" id="tsTagsError"></span>
                 </label>
 
                 <details class="advanced-block" id="tsAdvanced">
