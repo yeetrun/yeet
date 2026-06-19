@@ -455,12 +455,12 @@ func (p vmNetworkPlan) SetupCommands() [][]string {
 				[]string{"ip", "tuntap", "add", iface.Tap, "mode", "tap"},
 				[]string{"ip", "link", "set", iface.Tap, "master", iface.Bridge},
 				[]string{"ip", "addr", "del", vmSvcGateway + "/24", "dev", iface.Bridge},
-				[]string{"ip", "addr", "add", vmSvcGateway + "/32", "dev", iface.Bridge},
+				[]string{"ip", "addr", "del", vmSvcGateway + "/32", "dev", iface.Bridge},
 				[]string{"ip", "link", "set", iface.Bridge, "up"},
 				[]string{"ip", "link", "set", iface.Tap, "up"},
 			)
 			if route := vmServiceGuestRoute(iface.GuestIP); route != "" {
-				cmds = append(cmds, []string{"ip", "route", "replace", route, "dev", iface.Bridge, "src", vmSvcGateway})
+				cmds = append(cmds, []string{"ip", "route", "del", route, "dev", iface.Bridge})
 			}
 			cmds = append(cmds,
 				[]string{"ip", "link", "add", hostPeer, "type", "veth", "peer", "name", nsPeer},
@@ -677,7 +677,10 @@ func isIgnorableVMNetworkCommandError(mode vmNetworkCommandMode, cmd []string, e
 }
 
 func isIgnorableVMNetworkSetupError(cmd []string, text string) bool {
-	if isVMSvcLegacyGatewayDeleteCommand(cmd) && vmNetworkMissingAddressError(text) {
+	if isVMSvcGatewayDeleteCommand(cmd) && vmNetworkMissingAddressError(text) {
+		return true
+	}
+	if isVMSvcGuestRouteDeleteCommand(cmd) && vmNetworkMissingDeviceError(text) {
 		return true
 	}
 	if vmNetworkAlreadyConfiguredError(text) {
@@ -813,13 +816,29 @@ func vmNetworkMissingAddressError(text string) bool {
 		strings.Contains(text, "address not found")
 }
 
-func isVMSvcLegacyGatewayDeleteCommand(cmd []string) bool {
+func isVMSvcGatewayDeleteCommand(cmd []string) bool {
 	return len(cmd) == 6 &&
 		cmd[0] == "ip" &&
 		cmd[1] == "addr" &&
 		cmd[2] == "del" &&
-		cmd[3] == vmSvcGateway+"/24" &&
+		(cmd[3] == vmSvcGateway+"/24" || cmd[3] == vmSvcGateway+"/32") &&
 		cmd[4] == "dev"
+}
+
+func isVMSvcGuestRouteDeleteCommand(cmd []string) bool {
+	if len(cmd) != 6 ||
+		cmd[0] != "ip" ||
+		cmd[1] != "route" ||
+		cmd[2] != "del" ||
+		cmd[4] != "dev" {
+		return false
+	}
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(cmd[3]))
+	if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 32 {
+		return false
+	}
+	_, suffix, ok := vmNetworkLinkBase(cmd[5])
+	return ok && strings.HasPrefix(suffix, "b")
 }
 
 func isReplayVMNetworkNamespaceMove(cmd []string) bool {

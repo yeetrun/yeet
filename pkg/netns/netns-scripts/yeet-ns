@@ -14,7 +14,6 @@ CATCH_BIN="${CATCH_BIN:-catch}"
 
 # Extract base IPs without subnet mask
 HOST_IP_BASE=$(echo $HOST_IP | cut -d'/' -f1)
-YEET_IP_BASE=$(echo $YEET_IP | cut -d'/' -f1)
 
 # Create the yeet namespace
 if ! ip netns list | grep -q yeet-ns; then
@@ -27,6 +26,7 @@ if ! ip netns exec yeet-ns ip link show br0; then
 fi
 
 ip netns exec yeet-ns ip addr replace ${BRIDGE_IP} dev br0
+ip netns exec yeet-ns ip addr replace ${YEET_IP} dev br0
 ip netns exec yeet-ns ip link set br0 up
 
 # Create veth pair for host to yeet-ns connection
@@ -39,18 +39,17 @@ ip link set yeet0 up
 if ! ip netns exec yeet-ns ip link show | grep -q "yeet0-peer"; then
   ip link set yeet0-peer netns yeet-ns
 fi
-ip netns exec yeet-ns ip addr replace ${YEET_IP} dev yeet0-peer
+ip netns exec yeet-ns ip addr del ${YEET_IP} dev yeet0-peer || true
+ip netns exec yeet-ns ip link set yeet0-peer master br0
 ip netns exec yeet-ns ip link set yeet0-peer up
 ip netns exec yeet-ns ip route replace ${RANGE} dev br0
-ip netns exec yeet-ns ip route replace ${HOST_IP} dev yeet0-peer
+ip netns exec yeet-ns ip route replace ${HOST_IP} dev br0
 
 # Configure routing
-ip netns exec yeet-ns ip route replace default via ${HOST_IP_BASE} dev yeet0-peer
+ip netns exec yeet-ns ip route replace default via ${HOST_IP_BASE} dev br0
 
-## TODO: Wtf do i need to this followed by a replace?
 ip route del ${RANGE} || true
-ip route add ${RANGE} dev yeet0
-ip route replace ${RANGE} via ${YEET_IP_BASE} dev yeet0
+ip route replace ${RANGE} dev ${BRIDGE_IF}
 
 # Enable IP forwarding
 sysctl -w net.ipv4.ip_forward=1
