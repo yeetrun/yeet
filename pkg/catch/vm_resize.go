@@ -7,6 +7,7 @@ package catch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,18 +37,30 @@ type vmSettingsPlan struct {
 	NewNetwork            vmNetworkPlan
 	NetworkChanged        bool
 	SvcNetwork            *db.SvcNetwork
+	OldMetadata           vmMetadataConfig
 	Metadata              vmMetadataConfig
 	RewriteMetadata       bool
+	OldFirecrackerConfig  []byte
+	FirecrackerExisted    bool
 	FirecrackerConfigPath string
 	FirecrackerConfig     []byte
 }
 
-func (s *Server) updateVMServiceSettings(ctx context.Context, name string, flags cli.VMSetFlags) error {
+func (s *Server) updateVMServiceSettings(ctx context.Context, name string, flags cli.VMSetFlags) (retErr error) {
 	plan, err := s.planVMServiceSettings(name, flags)
 	if err != nil {
 		return err
 	}
-	if err := s.applyVMServiceSettingsPlan(ctx, plan); err != nil {
+	transition, err := s.applyVMServiceSettingsPlan(ctx, plan)
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		if err := transition.rollback(ctx); err != nil {
+			retErr = errors.Join(retErr, err)
+		}
+	}()
+	if err != nil {
 		return err
 	}
 	return s.commitVMServiceSettingsPlan(name, plan)
@@ -160,15 +173,22 @@ func (s *Server) applyVMNetworkSettings(dv *db.DataView, name string, service *d
 }
 
 func (p *vmSettingsPlan) finalizeFirecrackerSettings() error {
-	fc, fastBoot, err := p.readFirecrackerConfig()
+	fc, fastBoot, rawFirecrackerConfig, firecrackerExisted, err := p.readFirecrackerConfig()
 	if err != nil {
 		return err
 	}
+	p.OldFirecrackerConfig = append([]byte(nil), rawFirecrackerConfig...)
+	p.FirecrackerExisted = firecrackerExisted
 	if p.RewriteMetadata {
+		oldMetadata, err := vmMetadataForSettings(p.Root, p.Service, p.OldVM, p.OldNetwork, fastBoot)
+		if err != nil {
+			return err
+		}
 		metadata, err := vmMetadataForSettings(p.Root, p.Service, p.OldVM, p.NewNetwork, fastBoot)
 		if err != nil {
 			return err
 		}
+		p.OldMetadata = oldMetadata
 		p.Metadata = metadata
 	}
 	raw, err := p.renderFirecrackerConfig(fc, fastBoot)
@@ -335,7 +355,9 @@ func vmNetworkPlanFromDB(service string, networks []db.VMNetworkConfig) vmNetwor
 					iface.VLANDevice = fmt.Sprintf("yvm-%s-v%d", short, i)
 				}
 			} else {
-				iface.Bridge = network.Parent
+				if vmLANParentIsBridge(network.Parent) {
+					iface.Bridge = network.Parent
+				}
 			}
 			iface.DHCP = true
 		}
@@ -351,31 +373,37 @@ func cloneSvcNetwork(in *db.SvcNetwork) *db.SvcNetwork {
 	return &db.SvcNetwork{IPv4: in.IPv4}
 }
 
-func (p vmSettingsPlan) readFirecrackerConfig() (firecrackerConfig, bool, error) {
+func (p vmSettingsPlan) readFirecrackerConfig() (firecrackerConfig, bool, []byte, bool, error) {
 	raw, err := os.ReadFile(p.FirecrackerConfigPath)
-	if err != nil && !os.IsNotExist(err) {
-		return firecrackerConfig{}, false, err
+	if os.IsNotExist(err) {
+		return p.defaultFirecrackerConfig(), false, nil, false, nil
+	}
+	if err != nil {
+		return firecrackerConfig{}, false, nil, false, err
 	}
 	if len(raw) == 0 {
-		cfg := firecrackerConfig{
-			BootSource: firecrackerBootSource{
-				KernelImagePath: p.OldVM.Image.Kernel,
-				BootArgs:        vmLegacyKernelBootArgs,
-			},
-			Drives: []firecrackerDrive{{
-				DriveID:      "rootfs",
-				PathOnHost:   p.OldVM.Disk.Path,
-				IsRootDevice: true,
-				IsReadOnly:   false,
-			}},
-		}
-		return cfg, false, nil
+		return p.defaultFirecrackerConfig(), false, raw, true, nil
 	}
 	var cfg firecrackerConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return firecrackerConfig{}, false, err
+		return firecrackerConfig{}, false, nil, false, err
 	}
-	return cfg, strings.Contains(cfg.BootSource.BootArgs, "init="+vmGuestInitPath), nil
+	return cfg, strings.Contains(cfg.BootSource.BootArgs, "init="+vmGuestInitPath), raw, true, nil
+}
+
+func (p vmSettingsPlan) defaultFirecrackerConfig() firecrackerConfig {
+	return firecrackerConfig{
+		BootSource: firecrackerBootSource{
+			KernelImagePath: p.OldVM.Image.Kernel,
+			BootArgs:        vmLegacyKernelBootArgs,
+		},
+		Drives: []firecrackerDrive{{
+			DriveID:      "rootfs",
+			PathOnHost:   p.OldVM.Disk.Path,
+			IsRootDevice: true,
+			IsReadOnly:   false,
+		}},
+	}
 }
 
 func (p vmSettingsPlan) renderFirecrackerConfig(cfg firecrackerConfig, fastBoot bool) ([]byte, error) {
@@ -447,17 +475,50 @@ func vmMetadataDriverForExistingVM(vm db.VMConfig) string {
 	return "ubuntu"
 }
 
-func (s *Server) applyVMServiceSettingsPlan(ctx context.Context, plan vmSettingsPlan) error {
+type vmSettingsApplyResult struct {
+	network            vmNetworkTransitionResult
+	plan               vmSettingsPlan
+	metadataTouched    bool
+	firecrackerTouched bool
+}
+
+func (r vmSettingsApplyResult) rollback(ctx context.Context) error {
+	var retErr error
+	if r.firecrackerTouched {
+		if err := restoreVMServiceFirecrackerSettings(r.plan); err != nil {
+			retErr = errors.Join(retErr, err)
+		}
+	}
+	if r.metadataTouched {
+		if err := restoreVMServiceMetadataSettings(ctx, r.plan); err != nil {
+			retErr = errors.Join(retErr, err)
+		}
+	}
+	if err := r.network.rollback(); err != nil {
+		retErr = errors.Join(retErr, err)
+	}
+	return retErr
+}
+
+func (s *Server) applyVMServiceSettingsPlan(ctx context.Context, plan vmSettingsPlan) (vmSettingsApplyResult, error) {
+	result := vmSettingsApplyResult{plan: plan}
 	if err := applyVMServiceDiskSettings(ctx, plan); err != nil {
-		return err
+		return result, err
 	}
-	if err := applyVMServiceNetworkSettings(plan); err != nil {
-		return err
+	transition, err := applyVMServiceNetworkSettings(plan)
+	result.network = transition
+	if err != nil {
+		return result, err
 	}
+	result.metadataTouched = plan.RewriteMetadata
 	if err := applyVMServiceMetadataSettings(ctx, plan); err != nil {
-		return err
+		return result, err
 	}
-	return writeVMFile(plan.FirecrackerConfigPath, plan.FirecrackerConfig, 0o644)
+	result.firecrackerTouched = true
+	if err := writeVMFile(plan.FirecrackerConfigPath, plan.FirecrackerConfig, 0o644); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 func applyVMServiceDiskSettings(ctx context.Context, plan vmSettingsPlan) error {
@@ -475,21 +536,56 @@ func applyVMServiceDiskSettings(ctx context.Context, plan vmSettingsPlan) error 
 	return runVMDiskStepsWithRunner(ctx, diskPlan, plan.DiskSteps, runner, nil)
 }
 
-func applyVMServiceNetworkSettings(plan vmSettingsPlan) error {
-	if !plan.NetworkChanged {
+type vmNetworkTransitionResult struct {
+	applied bool
+	old     vmNetworkPlan
+	new     vmNetworkPlan
+	runner  vmNetworkCommandRunner
+}
+
+func (r vmNetworkTransitionResult) rollback() error {
+	if !r.applied {
 		return nil
+	}
+	var retErr error
+	if err := r.new.ExecuteCleanup(r.runner); err != nil {
+		retErr = errors.Join(retErr, fmt.Errorf("clean up new VM network: %w", err))
+	}
+	if err := r.old.ExecuteSetup(r.runner); err != nil {
+		retErr = errors.Join(retErr, fmt.Errorf("restore old VM network: %w", err))
+	}
+	return retErr
+}
+
+func applyVMServiceNetworkSettings(plan vmSettingsPlan) (vmNetworkTransitionResult, error) {
+	result := vmNetworkTransitionResult{old: plan.OldNetwork, new: plan.NewNetwork}
+	if !plan.NetworkChanged {
+		return result, nil
 	}
 	runner := vmServiceSetNetworkRunner
 	if runner == nil {
 		runner = execVMNetworkCommand
 	}
+	result.runner = runner
 	if err := plan.OldNetwork.ExecuteCleanup(runner); err != nil {
-		return fmt.Errorf("clean up VM network: %w", err)
+		retErr := fmt.Errorf("clean up VM network: %w", err)
+		if restoreErr := plan.OldNetwork.ExecuteSetup(runner); restoreErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore old VM network: %w", restoreErr))
+		}
+		return result, retErr
 	}
 	if err := plan.NewNetwork.ExecuteSetup(runner); err != nil {
-		return fmt.Errorf("set up VM network: %w", err)
+		retErr := fmt.Errorf("set up VM network: %w", err)
+		if cleanupErr := plan.NewNetwork.ExecuteCleanup(runner); cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("clean up partial VM network: %w", cleanupErr))
+		}
+		if restoreErr := plan.OldNetwork.ExecuteSetup(runner); restoreErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore old VM network: %w", restoreErr))
+		}
+		return result, retErr
 	}
-	return nil
+	result.applied = true
+	return result, nil
 }
 
 func applyVMServiceMetadataSettings(ctx context.Context, plan vmSettingsPlan) error {
@@ -505,6 +601,40 @@ func applyVMServiceMetadataSettings(ctx context.Context, plan vmSettingsPlan) er
 	}
 	if err := injector(ctx, plan.OldVM.Disk.Path, plan.Metadata); err != nil {
 		return fmt.Errorf("inject VM metadata: %w", err)
+	}
+	return nil
+}
+
+func restoreVMServiceMetadataSettings(ctx context.Context, plan vmSettingsPlan) error {
+	if !plan.RewriteMetadata {
+		return nil
+	}
+	var retErr error
+	if err := writeVMMetadata(plan.Root, plan.OldMetadata); err != nil {
+		retErr = errors.Join(retErr, fmt.Errorf("restore VM metadata: %w", err))
+	}
+	injector := vmServiceSetMetadataInjector
+	if injector == nil {
+		injector = injectVMMetadataIntoRootFS
+	}
+	if err := injector(ctx, plan.OldVM.Disk.Path, plan.OldMetadata); err != nil {
+		retErr = errors.Join(retErr, fmt.Errorf("restore VM metadata in rootfs: %w", err))
+	}
+	return retErr
+}
+
+func restoreVMServiceFirecrackerSettings(plan vmSettingsPlan) error {
+	if !plan.FirecrackerExisted {
+		if err := os.RemoveAll(plan.FirecrackerConfigPath); err != nil {
+			return fmt.Errorf("remove new VM firecracker config: %w", err)
+		}
+		return nil
+	}
+	if err := os.RemoveAll(plan.FirecrackerConfigPath); err != nil {
+		return fmt.Errorf("remove changed VM firecracker config: %w", err)
+	}
+	if err := writeVMFile(plan.FirecrackerConfigPath, plan.OldFirecrackerConfig, 0o644); err != nil {
+		return fmt.Errorf("restore VM firecracker config: %w", err)
 	}
 	return nil
 }

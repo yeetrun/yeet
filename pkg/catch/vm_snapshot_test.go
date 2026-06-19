@@ -308,6 +308,7 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 	unit := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          "devbox",
 		Runner:           "/srv/catch/run/catch",
+		DataDir:          "/srv/catch/data",
 		Firecracker:      firecrackerBinary,
 		ConfigPath:       filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
 		APISocket:        filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"),
@@ -510,6 +511,7 @@ func TestVMSnapshotFullFailsWhenKnownFirecrackerVersionUnavailable(t *testing.T)
 	unit := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          "devbox",
 		Runner:           "/srv/catch/run/catch",
+		DataDir:          "/srv/catch/data",
 		Firecracker:      firecrackerBinary,
 		ConfigPath:       filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
 		APISocket:        filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"),

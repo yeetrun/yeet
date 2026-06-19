@@ -134,6 +134,56 @@ func TestHandleLocalCommandVersionAndDefault(t *testing.T) {
 	}
 }
 
+func TestHandleLocalCommandVMNetworkEnsure(t *testing.T) {
+	oldEnsure := ensureVMNetworkFn
+	t.Cleanup(func() { ensureVMNetworkFn = oldEnsure })
+
+	cfg := &catch.Config{RootDir: "/srv/catch/data"}
+	var gotCfg *catch.Config
+	var gotService string
+	ensureVMNetworkFn = func(_ context.Context, cfg *catch.Config, service string) error {
+		gotCfg = cfg
+		gotService = service
+		return nil
+	}
+
+	handled, err := handleLocalCommand([]string{"vm-network-ensure", "devbox"}, cfg, cfg.RootDir, io.Discard)
+	if err != nil {
+		t.Fatalf("handleLocalCommand vm-network-ensure: %v", err)
+	}
+	if !handled {
+		t.Fatalf("vm-network-ensure command was not handled")
+	}
+	if gotCfg != cfg {
+		t.Fatalf("ensure config = %#v, want original config", gotCfg)
+	}
+	if gotService != "devbox" {
+		t.Fatalf("ensure service = %q, want devbox", gotService)
+	}
+}
+
+func TestHandleLocalCommandVMNetworkEnsureRequiresService(t *testing.T) {
+	oldEnsure := ensureVMNetworkFn
+	t.Cleanup(func() { ensureVMNetworkFn = oldEnsure })
+	ensureVMNetworkFn = func(context.Context, *catch.Config, string) error {
+		t.Fatal("vm-network-ensure without service should not call ensure")
+		return nil
+	}
+
+	for _, args := range [][]string{
+		{"vm-network-ensure"},
+		{"vm-network-ensure", "   "},
+	} {
+		handled, err := handleLocalCommand(args, &catch.Config{}, t.TempDir(), io.Discard)
+		if !handled {
+			t.Fatalf("%v was not handled", args)
+		}
+		if err == nil || !strings.Contains(err.Error(), "service is required") {
+			t.Fatalf("handleLocalCommand(%v) error = %v, want service required", args, err)
+		}
+	}
+}
+
 func TestRunCatchProcessHandlesSpecialCommand(t *testing.T) {
 	var out strings.Builder
 	if err := runCatchProcess([]string{"is-catch"}, &out); err != nil {

@@ -527,6 +527,65 @@ func (p vmNetworkPlan) CleanupCommands() [][]string {
 	return cmds
 }
 
+func vmNetworkLinkBase(name string) (string, string, bool) {
+	name = strings.TrimSpace(strings.SplitN(name, "@", 2)[0])
+	if !strings.HasPrefix(name, "yvm-") {
+		return "", "", false
+	}
+	lastDash := strings.LastIndex(name, "-")
+	if lastDash <= len("yvm-") || lastDash == len(name)-1 {
+		return "", "", false
+	}
+	suffix := name[lastDash+1:]
+	if len(suffix) < 2 || !strings.ContainsRune("bsvnl", rune(suffix[0])) {
+		return "", "", false
+	}
+	for _, r := range suffix[1:] {
+		if r < '0' || r > '9' {
+			return "", "", false
+		}
+	}
+	return name[:lastDash], suffix, true
+}
+
+func vmServiceNetworkLinkBase(name string) (string, string, bool) {
+	return vmNetworkLinkBase(name)
+}
+
+var vmNetworkExistingVLANDeviceMatchesFn = vmNetworkExistingVLANDeviceMatches
+
+func vmNetworkExistingVLANDeviceMatches(parent, name string, vlan int) (bool, error) {
+	f, err := os.Open("/proc/net/vlan/config")
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer closeAndLog(f, "/proc/net/vlan/config")
+	return vmNetworkExistingVLANDeviceMatchesFromConfig(parent, name, vlan, f)
+}
+
+func vmNetworkExistingVLANDeviceMatchesFromConfig(parent, name string, vlan int, r io.Reader) (bool, error) {
+	parent = strings.TrimSpace(parent)
+	name = strings.TrimSpace(name)
+	if parent == "" || name == "" || vlan == 0 {
+		return false, nil
+	}
+	wantVLAN := strconv.Itoa(vlan)
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		gotName, ok := vmLANVLANConfigDevice(scanner.Text(), parent, wantVLAN)
+		if ok && gotName == name {
+			return true, nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
 func (p vmNetworkPlan) ExecuteSetup(run vmNetworkCommandRunner) error {
 	if err := p.validateExecutable(); err != nil {
 		return err
@@ -621,10 +680,24 @@ func isIgnorableVMNetworkSetupError(cmd []string, text string) bool {
 	if isVMSvcLegacyGatewayDeleteCommand(cmd) && vmNetworkMissingAddressError(text) {
 		return true
 	}
-	if isIdempotentVMNetworkSetupCommand(cmd) && vmNetworkAlreadyConfiguredError(text) {
-		return true
+	if vmNetworkAlreadyConfiguredError(text) {
+		if isVMNetworkVLANAddCommand(cmd) {
+			return existingVMNetworkVLANAddCommandMatches(cmd)
+		}
+		if isIdempotentVMNetworkSetupCommand(cmd) {
+			return true
+		}
 	}
 	return isReplayVMNetworkNamespaceMove(cmd) && vmNetworkMissingDeviceError(text)
+}
+
+func existingVMNetworkVLANAddCommandMatches(cmd []string) bool {
+	parent, name, vlan, ok := vmNetworkVLANAddCommandDetails(cmd)
+	if !ok {
+		return false
+	}
+	matches, err := vmNetworkExistingVLANDeviceMatchesFn(parent, name, vlan)
+	return err == nil && matches
 }
 
 func vmNetworkAlreadyConfiguredError(text string) bool {
@@ -637,31 +710,63 @@ func isIdempotentVMNetworkSetupCommand(cmd []string) bool {
 	if len(cmd) < 4 || cmd[0] != "ip" {
 		return false
 	}
-	if isVMNetworkVLANAddCommand(cmd) {
-		return false
-	}
 	return len(cmd) >= 5 && vmNetworkSetupVerb(cmd[1], cmd[2])
 }
 
 func isVMNetworkVLANAddCommand(cmd []string) bool {
-	if len(cmd) < 10 {
-		return false
-	}
-	return cmd[0] == "ip" &&
-		cmd[1] == "link" &&
-		cmd[2] == "add" &&
-		cmd[3] == "link" &&
-		slicesContains(cmd, "type") &&
-		slicesContains(cmd, "vlan")
+	_, _, _, ok := vmNetworkVLANAddCommandDetails(cmd)
+	return ok
 }
 
-func slicesContains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
+var vmNetworkVLANAddCommandFixedArgs = []struct {
+	idx   int
+	value string
+}{
+	{0, "ip"},
+	{1, "link"},
+	{2, "add"},
+	{3, "link"},
+	{5, "name"},
+	{7, "type"},
+	{8, "vlan"},
+	{9, "id"},
+}
+
+func vmNetworkVLANAddCommandDetails(cmd []string) (string, string, int, bool) {
+	if !vmNetworkVLANAddCommandShape(cmd) {
+		return "", "", 0, false
+	}
+	parent := strings.TrimSpace(cmd[4])
+	name := strings.TrimSpace(cmd[6])
+	vlan, ok := vmNetworkVLANID(cmd[10])
+	if parent == "" || !ok || !vmNetworkGeneratedVLANDeviceName(name) {
+		return "", "", 0, false
+	}
+	return parent, name, vlan, true
+}
+
+func vmNetworkVLANAddCommandShape(cmd []string) bool {
+	if len(cmd) != 11 {
+		return false
+	}
+	for _, fixed := range vmNetworkVLANAddCommandFixedArgs {
+		if cmd[fixed.idx] != fixed.value {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+func vmNetworkVLANID(raw string) (int, bool) {
+	vlan, err := strconv.Atoi(raw)
+	return vlan, err == nil && vlan != 0
+}
+
+func vmNetworkGeneratedVLANDeviceName(name string) bool {
+	if _, suffix, ok := vmNetworkLinkBase(name); !ok || suffix[0] != 'v' {
+		return false
+	}
+	return true
 }
 
 func vmNetworkSetupVerb(group, action string) bool {
@@ -674,7 +779,25 @@ func vmNetworkSetupVerb(group, action string) bool {
 }
 
 func isIdempotentVMNetworkCleanupCommand(cmd []string) bool {
-	return len(cmd) >= 4 && cmd[0] == "ip" && (cmd[1] == "link" || cmd[1] == "route") && cmd[2] == "del"
+	return isRootVMNetworkDeleteCommand(cmd) || isNetNSVMNetworkDeleteCommand(cmd)
+}
+
+func isRootVMNetworkDeleteCommand(cmd []string) bool {
+	return len(cmd) >= 4 &&
+		cmd[0] == "ip" &&
+		(cmd[1] == "link" || cmd[1] == "route") &&
+		cmd[2] == "del"
+}
+
+func isNetNSVMNetworkDeleteCommand(cmd []string) bool {
+	return len(cmd) >= 8 &&
+		cmd[0] == "ip" &&
+		cmd[1] == "netns" &&
+		cmd[2] == "exec" &&
+		cmd[3] == vmSvcNetNS &&
+		cmd[4] == "ip" &&
+		(cmd[5] == "link" || cmd[5] == "route") &&
+		cmd[6] == "del"
 }
 
 func vmNetworkMissingDeviceError(text string) bool {

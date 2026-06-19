@@ -15,6 +15,8 @@ import (
 	"tailscale.com/util/mak"
 )
 
+var renameDBFile = os.Rename
+
 //go:generate go run tailscale.com/cmd/viewer -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig --copyright=false
 
 // Data is the full JSON structure of the database.
@@ -343,22 +345,35 @@ func (s *Store) getLocked() (DataView, error) {
 		if created {
 			s.d.DataVersion = CurrentDataVersion
 		} else {
-			origVersion := s.d.DataVersion
-			migrated, err := migrate(s.d)
-			if err != nil {
-				return DataView{}, fmt.Errorf("migrating data: %v", err)
-			}
-			if migrated {
-				if err := s.backupLocked(origVersion); err != nil {
-					return DataView{}, fmt.Errorf("backing up migrated data: %v", err)
-				}
-				if err := s.saveLocked(); err != nil {
-					return DataView{}, fmt.Errorf("saving migrated data: %v", err)
-				}
+			if err := s.migrateLoadedDataLocked(); err != nil {
+				return DataView{}, err
 			}
 		}
 	}
 	return s.d.View(), nil
+}
+
+func (s *Store) migrateLoadedDataLocked() error {
+	staged := s.d.Clone()
+	origVersion := staged.DataVersion
+	migrated, err := migrate(staged)
+	if err != nil {
+		s.d = nil
+		return fmt.Errorf("migrating data: %v", err)
+	}
+	if !migrated {
+		return nil
+	}
+	if err := s.backupLocked(origVersion); err != nil {
+		s.d = nil
+		return fmt.Errorf("backing up migrated data: %v", err)
+	}
+	if err := s.saveDataLocked(staged); err != nil {
+		s.d = nil
+		return fmt.Errorf("saving migrated data: %v", err)
+	}
+	s.d = staged
+	return nil
 }
 
 func (s *Store) backupLocked(ver int) error {
@@ -378,8 +393,12 @@ func (s *Store) Set(d *Data) error {
 }
 
 func (s *Store) setLocked(d *Data) error {
-	s.d = d.Clone()
-	return s.saveLocked()
+	next := d.Clone()
+	if err := s.saveDataLocked(next); err != nil {
+		return err
+	}
+	s.d = next
+	return nil
 }
 
 // readLocked reads s.file into s.d.
@@ -409,9 +428,9 @@ func (s *Store) readLocked() (created bool, err error) {
 	return false, nil
 }
 
-// saveLocked saves s.d to s.file.
-func (s *Store) saveLocked() error {
-	if s.d == nil {
+// saveDataLocked saves d to s.file.
+func (s *Store) saveDataLocked(d *Data) error {
+	if d == nil {
 		return nil
 	}
 	dir := filepath.Dir(s.file)
@@ -425,13 +444,13 @@ func (s *Store) saveLocked() error {
 	defer removeTempFile(tmp.Name())
 	jc := json.NewEncoder(tmp)
 	jc.SetIndent("", "  ")
-	if err := jc.Encode(s.d); err != nil {
+	if err := jc.Encode(d); err != nil {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), s.file)
+	return renameDBFile(tmp.Name(), s.file)
 }
 
 func removeTempFile(path string) {

@@ -934,6 +934,53 @@ func TestMigrateAddsVMServiceConfigVersion(t *testing.T) {
 	}
 }
 
+func TestStoreGetDoesNotCacheFailedMigrationSave(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: 8,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", ServiceType: ServiceTypeSystemd, ServiceRoot: "/srv/apps/svc"},
+		},
+	})
+	store := NewStore(path, filepath.Join(root, "services"))
+
+	oldRename := renameDBFile
+	failRename := true
+	renameDBFile = func(oldPath, newPath string) error {
+		if failRename {
+			return os.ErrPermission
+		}
+		return oldRename(oldPath, newPath)
+	}
+	t.Cleanup(func() {
+		renameDBFile = oldRename
+	})
+
+	if _, err := store.Get(); err == nil {
+		t.Fatal("Get succeeded after migration save failure")
+	}
+	if got := mustReadData(t, path).DataVersion; got != 8 {
+		t.Fatalf("on-disk DataVersion after failed migration = %d, want 8", got)
+	}
+
+	if got, err := store.Get(); err == nil {
+		t.Fatalf("second Get after failed migration save = DataVersion %d, want error", got.DataVersion())
+	}
+
+	failRename = false
+	got, err := store.Get()
+	if err != nil {
+		t.Fatalf("Get after restoring rename: %v", err)
+	}
+	if got.DataVersion() != CurrentDataVersion {
+		t.Fatalf("DataVersion after retry = %d, want %d", got.DataVersion(), CurrentDataVersion)
+	}
+	if got := mustReadData(t, path).DataVersion; got != CurrentDataVersion {
+		t.Fatalf("on-disk DataVersion after retry = %d, want %d", got, CurrentDataVersion)
+	}
+}
+
 func TestArtifactStoreRefs(t *testing.T) {
 	refs := ArtifactStore{
 		ArtifactBinary: {
@@ -1077,6 +1124,49 @@ func TestStoreMutateDataWrapsCallbackErrorsWithoutSaving(t *testing.T) {
 	}
 	if got := mustReadData(t, path).Services["svc"].Generation; got != 1 {
 		t.Fatalf("on-disk generation after failed mutation = %d, want 1", got)
+	}
+}
+
+func TestStoreMutateDataKeepsCachedViewAfterSaveFailure(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", Generation: 1},
+		},
+	})
+	store := NewStore(path, filepath.Join(root, "services"))
+
+	oldRename := renameDBFile
+	renameCalled := false
+	renameDBFile = func(_, _ string) error {
+		renameCalled = true
+		return os.ErrPermission
+	}
+	t.Cleanup(func() {
+		renameDBFile = oldRename
+	})
+
+	_, err := store.MutateData(func(d *Data) error {
+		d.Services["svc"].Generation = 2
+		return nil
+	})
+	if err == nil {
+		t.Fatal("MutateData succeeded after save failure")
+	}
+	if !renameCalled {
+		t.Fatal("rename hook was not called")
+	}
+	dv, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dv.AsStruct().Services["svc"].Generation; got != 1 {
+		t.Fatalf("cached generation after failed save = %d, want 1", got)
+	}
+	if got := mustReadData(t, path).Services["svc"].Generation; got != 1 {
+		t.Fatalf("on-disk generation after failed save = %d, want 1", got)
 	}
 }
 

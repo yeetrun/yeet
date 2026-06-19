@@ -199,14 +199,19 @@ func (s *Server) Start() {
 	if err := installDockerPrereqs(s); err != nil {
 		log.Fatalf("Failed to install Docker prerequisites: %v", err)
 	}
-	s.waitGroup.Go(func() {
-		if err := reconcileDockerNetNSPortForwards(s.cfg.DB); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("docker netns NAT reconciliation failed: %v", err)
-		}
-		if err := s.reconcileNetNSBackedDockerServices(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("netns reconciliation failed: %v", err)
-		}
-	})
+	s.waitGroup.Go(s.reconcileRuntimeState)
+}
+
+func (s *Server) reconcileRuntimeState() {
+	if err := reconcileDockerNetNSPortForwards(s.cfg.DB); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("docker netns NAT reconciliation failed: %v", err)
+	}
+	if err := s.reconcileNetNSBackedDockerServices(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("netns reconciliation failed: %v", err)
+	}
+	if err := s.reconcileVMNetworks(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("VM network reconciliation failed: %v", err)
+	}
 }
 
 func (s *Server) Shutdown() {
