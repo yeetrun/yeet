@@ -86,8 +86,50 @@ func TestParseCopyArgs(t *testing.T) {
 				Archive:   true,
 				Compress:  true,
 				Verbose:   true,
-				Src:       copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Sources:   []copyEndpoint{{Raw: "local.txt", Path: "local.txt"}},
 				Dst:       copyEndpoint{Raw: "svc:data/logs/", Path: "data/logs/", Service: "svc", Remote: true, DirHint: true},
+			},
+		},
+		{
+			name: "multiple local sources to remote directory",
+			args: []string{"./id_ed25519", "./id_ed25519.pub", "devbox:.ssh/"},
+			want: copyRequest{
+				Recursive: true,
+				Archive:   true,
+				Compress:  true,
+				Verbose:   true,
+				Sources: []copyEndpoint{
+					{Raw: "./id_ed25519", Path: "./id_ed25519"},
+					{Raw: "./id_ed25519.pub", Path: "./id_ed25519.pub"},
+				},
+				Dst: copyEndpoint{Raw: "devbox:.ssh/", Path: ".ssh/", Service: "devbox", Remote: true, DirHint: true},
+			},
+		},
+		{
+			name: "multiple local sources to service data root alias",
+			args: []string{"a.txt", "b.txt", "svc:data"},
+			want: copyRequest{
+				Recursive: true,
+				Archive:   true,
+				Compress:  true,
+				Verbose:   true,
+				Sources: []copyEndpoint{
+					{Raw: "a.txt", Path: "a.txt"},
+					{Raw: "b.txt", Path: "b.txt"},
+				},
+				Dst: copyEndpoint{Raw: "svc:data", Path: "data", Service: "svc", Remote: true},
+			},
+		},
+		{
+			name: "vm remote glob source path is preserved",
+			args: []string{"devbox:.ssh/id*", "./keys/"},
+			want: copyRequest{
+				Recursive: true,
+				Archive:   true,
+				Compress:  true,
+				Verbose:   true,
+				Sources:   []copyEndpoint{{Raw: "devbox:.ssh/id*", Path: ".ssh/id*", Service: "devbox", Remote: true}},
+				Dst:       copyEndpoint{Raw: "./keys/", Path: "./keys/"},
 			},
 		},
 		{
@@ -98,7 +140,7 @@ func TestParseCopyArgs(t *testing.T) {
 				Archive:   true,
 				Compress:  true,
 				Verbose:   true,
-				Src:       copyEndpoint{Raw: "-", Path: "-"},
+				Sources:   []copyEndpoint{{Raw: "-", Path: "-"}},
 				Dst:       copyEndpoint{Raw: "svc:.", Path: ".", Service: "svc", Remote: true, DirHint: true},
 			},
 		},
@@ -110,7 +152,7 @@ func TestParseCopyArgs(t *testing.T) {
 				Archive:   true,
 				Compress:  true,
 				Verbose:   true,
-				Src:       copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Sources:   []copyEndpoint{{Raw: "local.txt", Path: "local.txt"}},
 				Dst:       copyEndpoint{Raw: "devbox:/etc/nginx/nginx.conf", Path: "/etc/nginx/nginx.conf", Service: "devbox", Remote: true},
 			},
 		},
@@ -122,7 +164,7 @@ func TestParseCopyArgs(t *testing.T) {
 				Archive:   true,
 				Compress:  true,
 				Verbose:   true,
-				Src:       copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Sources:   []copyEndpoint{{Raw: "local.txt", Path: "local.txt"}},
 				Dst:       copyEndpoint{Raw: "devbox:~/app/config.yml", Path: "~/app/config.yml", Service: "devbox", Remote: true},
 			},
 		},
@@ -135,7 +177,7 @@ func TestParseCopyArgs(t *testing.T) {
 				Compress:   true,
 				Verbose:    true,
 				ForceProxy: true,
-				Src:        copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Sources:    []copyEndpoint{{Raw: "local.txt", Path: "local.txt"}},
 				Dst:        copyEndpoint{Raw: "devbox:~/config.yml", Path: "~/config.yml", Service: "devbox", Remote: true},
 			},
 		},
@@ -146,7 +188,11 @@ func TestParseCopyArgs(t *testing.T) {
 		},
 		{name: "unknown long flag", args: []string{"--bogus", "a", "svc:b"}, wantErr: "unknown flag"},
 		{name: "unknown short flag", args: []string{"-x", "a", "svc:b"}, wantErr: "unknown flag"},
-		{name: "wrong operand count", args: []string{"a"}, wantErr: "exactly two paths"},
+		{name: "fewer than two operands", args: []string{"a"}, wantErr: "copy requires at least one source and one destination"},
+		{name: "multiple sources require directory destination", args: []string{"a", "b", "svc:file"}, wantErr: "copy with multiple sources requires a directory destination"},
+		{name: "multiple sources reject data child file destination", args: []string{"a", "b", "svc:data/file.txt"}, wantErr: "copy with multiple sources requires a directory destination"},
+		{name: "mixed local and remote sources rejected", args: []string{"a", "devbox:remote", "./out/"}, wantErr: "copy sources must all be local or all be from the same VM endpoint"},
+		{name: "multiple remote services rejected", args: []string{"devbox:a", "other:b", "./out/"}, wantErr: "copy sources must come from one VM endpoint"},
 	}
 
 	for _, tt := range tests {
@@ -166,6 +212,28 @@ func TestParseCopyArgs(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("multiple remote sources allow existing local directory destination", func(t *testing.T) {
+		dest := t.TempDir()
+		got, err := parseCopyArgs([]string{"devbox:logs/a.txt", "devbox:logs/b.txt", dest})
+		if err != nil {
+			t.Fatalf("parseCopyArgs: %v", err)
+		}
+		want := copyRequest{
+			Recursive: true,
+			Archive:   true,
+			Compress:  true,
+			Verbose:   true,
+			Sources: []copyEndpoint{
+				{Raw: "devbox:logs/a.txt", Path: "logs/a.txt", Service: "devbox", Remote: true},
+				{Raw: "devbox:logs/b.txt", Path: "logs/b.txt", Service: "devbox", Remote: true},
+			},
+			Dst: copyEndpoint{Raw: dest, Path: dest},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("parseCopyArgs = %#v, want %#v", got, want)
+		}
+	})
 }
 
 func TestApplyLongCopyFlag(t *testing.T) {
@@ -186,7 +254,7 @@ func TestApplyLongCopyFlag(t *testing.T) {
 			if err := applyLongCopyFlag(&req, tt.flag); err != nil {
 				t.Fatalf("applyLongCopyFlag error: %v", err)
 			}
-			if req != tt.want {
+			if !reflect.DeepEqual(req, tt.want) {
 				t.Fatalf("request = %#v, want %#v", req, tt.want)
 			}
 		})
@@ -245,38 +313,55 @@ func TestNormalizeServiceDataCopyRequest(t *testing.T) {
 		{
 			name: "upload strips data prefix",
 			req: copyRequest{
-				Src: copyEndpoint{Raw: "local.txt", Path: "local.txt"},
-				Dst: copyEndpoint{Raw: "svc:data/logs/", Path: "data/logs/", Service: "svc", Remote: true, DirHint: true},
+				Sources: []copyEndpoint{{Raw: "local.txt", Path: "local.txt"}},
+				Dst:     copyEndpoint{Raw: "svc:data/logs/", Path: "data/logs/", Service: "svc", Remote: true, DirHint: true},
 			},
 			want: copyRequest{
-				Src: copyEndpoint{Raw: "local.txt", Path: "local.txt"},
-				Dst: copyEndpoint{Raw: "svc:data/logs/", Path: "logs", Service: "svc", Remote: true, DirHint: true},
+				Sources: []copyEndpoint{{Raw: "local.txt", Path: "local.txt"}},
+				Dst:     copyEndpoint{Raw: "svc:data/logs/", Path: "logs", Service: "svc", Remote: true, DirHint: true},
 			},
 		},
 		{
 			name: "download dot targets data root",
 			req: copyRequest{
-				Src: copyEndpoint{Raw: "svc:.", Path: ".", Service: "svc", Remote: true, DirHint: true},
-				Dst: copyEndpoint{Raw: "./out", Path: "./out"},
+				Sources: []copyEndpoint{{Raw: "svc:.", Path: ".", Service: "svc", Remote: true, DirHint: true}},
+				Dst:     copyEndpoint{Raw: "./out", Path: "./out"},
 			},
 			want: copyRequest{
-				Src: copyEndpoint{Raw: "svc:.", Path: "", Service: "svc", Remote: true, DirHint: true},
-				Dst: copyEndpoint{Raw: "./out", Path: "./out"},
+				Sources: []copyEndpoint{{Raw: "svc:.", Path: "", Service: "svc", Remote: true, DirHint: true}},
+				Dst:     copyEndpoint{Raw: "./out", Path: "./out"},
+			},
+		},
+		{
+			name: "download normalizes all remote sources",
+			req: copyRequest{
+				Sources: []copyEndpoint{
+					{Raw: "svc:data/logs/a.txt", Path: "data/logs/a.txt", Service: "svc", Remote: true},
+					{Raw: "svc:./logs/b.txt", Path: "./logs/b.txt", Service: "svc", Remote: true},
+				},
+				Dst: copyEndpoint{Raw: "./out/", Path: "./out/"},
+			},
+			want: copyRequest{
+				Sources: []copyEndpoint{
+					{Raw: "svc:data/logs/a.txt", Path: "logs/a.txt", Service: "svc", Remote: true},
+					{Raw: "svc:./logs/b.txt", Path: "logs/b.txt", Service: "svc", Remote: true},
+				},
+				Dst: copyEndpoint{Raw: "./out/", Path: "./out/"},
 			},
 		},
 		{
 			name: "regular service rejects absolute destination",
 			req: copyRequest{
-				Src: copyEndpoint{Raw: "local.txt", Path: "local.txt"},
-				Dst: copyEndpoint{Raw: "svc:/etc/passwd", Path: "/etc/passwd", Service: "svc", Remote: true},
+				Sources: []copyEndpoint{{Raw: "local.txt", Path: "local.txt"}},
+				Dst:     copyEndpoint{Raw: "svc:/etc/passwd", Path: "/etc/passwd", Service: "svc", Remote: true},
 			},
 			wantErr: "remote path must be relative",
 		},
 		{
 			name: "regular service rejects absolute source",
 			req: copyRequest{
-				Src: copyEndpoint{Raw: "svc:/etc/passwd", Path: "/etc/passwd", Service: "svc", Remote: true},
-				Dst: copyEndpoint{Raw: "./out", Path: "./out"},
+				Sources: []copyEndpoint{{Raw: "svc:/etc/passwd", Path: "/etc/passwd", Service: "svc", Remote: true}},
+				Dst:     copyEndpoint{Raw: "./out", Path: "./out"},
 			},
 			wantErr: "remote path must be relative",
 		},
@@ -330,34 +415,58 @@ func TestClassifyCopyEndpoints(t *testing.T) {
 		{
 			name: "local to remote",
 			req: copyRequest{
-				Src: copyEndpoint{Raw: "local.txt", Path: "local.txt"},
-				Dst: copyEndpoint{Raw: "svc:logs", Path: "logs", Service: "svc", Remote: true},
+				Sources: []copyEndpoint{{Raw: "local.txt", Path: "local.txt"}},
+				Dst:     copyEndpoint{Raw: "svc:logs", Path: "logs", Service: "svc", Remote: true},
 			},
 			wantDirection: copyDirectionToRemote,
 			wantRemote:    copyEndpoint{Raw: "svc:logs", Path: "logs", Service: "svc", Remote: true},
 		},
 		{
+			name: "multiple local sources to remote",
+			req: copyRequest{
+				Sources: []copyEndpoint{
+					{Raw: "a.txt", Path: "a.txt"},
+					{Raw: "b.txt", Path: "b.txt"},
+				},
+				Dst: copyEndpoint{Raw: "svc:logs/", Path: "logs/", Service: "svc", Remote: true, DirHint: true},
+			},
+			wantDirection: copyDirectionToRemote,
+			wantRemote:    copyEndpoint{Raw: "svc:logs/", Path: "logs/", Service: "svc", Remote: true, DirHint: true},
+		},
+		{
 			name: "remote to local",
 			req: copyRequest{
-				Src: copyEndpoint{Raw: "svc:logs", Path: "logs", Service: "svc", Remote: true},
-				Dst: copyEndpoint{Raw: "local.txt", Path: "local.txt"},
+				Sources: []copyEndpoint{{Raw: "svc:logs", Path: "logs", Service: "svc", Remote: true}},
+				Dst:     copyEndpoint{Raw: "local.txt", Path: "local.txt"},
 			},
 			wantDirection: copyDirectionFromRemote,
 			wantRemote:    copyEndpoint{Raw: "svc:logs", Path: "logs", Service: "svc", Remote: true},
 		},
 		{
+			name: "multiple remote sources from same service",
+			req: copyRequest{
+				Sources: []copyEndpoint{
+					{Raw: "svc:logs/a.txt", Path: "logs/a.txt", Service: "svc", Remote: true},
+					{Raw: "svc:logs/b.txt", Path: "logs/b.txt", Service: "svc", Remote: true},
+				},
+				Dst: copyEndpoint{Raw: "./out/", Path: "./out/"},
+			},
+			wantDirection: copyDirectionFromRemote,
+			wantRemote:    copyEndpoint{Raw: "svc:logs/a.txt", Path: "logs/a.txt", Service: "svc", Remote: true},
+		},
+		{
 			name: "remote to remote rejected",
 			req: copyRequest{
-				Src: copyEndpoint{Raw: "src:logs", Path: "logs", Service: "src", Remote: true},
-				Dst: copyEndpoint{Raw: "dst:logs", Path: "logs", Service: "dst", Remote: true},
+				Sources: []copyEndpoint{{Raw: "src:logs", Path: "logs", Service: "src", Remote: true}},
+				Dst:     copyEndpoint{Raw: "dst:logs", Path: "logs", Service: "dst", Remote: true},
 			},
 			wantErr: "remote-to-remote",
 		},
 		{
 			name: "local to local rejected",
 			req: copyRequest{
-				Src: copyEndpoint{Raw: "a", Path: "a"},
-				Dst: copyEndpoint{Raw: "b", Path: "b"},
+				Sources: []copyEndpoint{{Raw: "a", Path: "a"}},
+				Dst:     copyEndpoint{Raw: "b", Path: "b"},
 			},
 			wantErr: "requires a service endpoint",
 		},
@@ -517,6 +626,38 @@ func TestRunCopyCommandRejectsForceProxyForRegularService(t *testing.T) {
 	}
 }
 
+func TestRunCopyCommandRejectsRegularServiceRemoteGlob(t *testing.T) {
+	oldServerInfo := fetchSSHServerInfoFunc
+	oldServiceInfo := fetchSSHServiceInfoFunc
+	oldStream := execRemoteStreamFn
+	oldHost := Host()
+	defer func() {
+		fetchSSHServerInfoFunc = oldServerInfo
+		fetchSSHServiceInfoFunc = oldServiceInfo
+		execRemoteStreamFn = oldStream
+		SetHost(oldHost)
+		resetHostOverride()
+	}()
+	resetHostOverride()
+	SetHost("yeet-pve1")
+
+	fetchSSHServerInfoFunc = func(context.Context, string) (serverInfo, error) {
+		return serverInfo{}, nil
+	}
+	fetchSSHServiceInfoFunc = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{ServiceType: dockerServiceType}}, nil
+	}
+	execRemoteStreamFn = func(context.Context, string, []string, io.Reader) (io.ReadCloser, <-chan error, error) {
+		t.Fatal("regular service remote glob should be rejected before streaming")
+		return nil, nil, nil
+	}
+
+	err := runCopyCommand([]string{"web:logs/*.txt", "./logs/"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "remote globs are only supported for VM endpoints; copy an exact service path or directory") {
+		t.Fatalf("runCopyCommand error = %v, want regular service remote glob error", err)
+	}
+}
+
 type recordedRsync struct {
 	args []string
 	err  error
@@ -546,8 +687,11 @@ func TestRunVMRsyncCopyUploadBuildsRsyncCommand(t *testing.T) {
 		Archive:  true,
 		Compress: true,
 		Verbose:  true,
-		Src:      copyEndpoint{Raw: "./local.txt", Path: "./local.txt"},
-		Dst:      copyEndpoint{Raw: "devbox:/etc/motd", Path: "/etc/motd", Service: "devbox", Remote: true},
+		Sources: []copyEndpoint{
+			{Raw: "./local.txt", Path: "./local.txt"},
+			{Raw: "./local.pub", Path: "./local.pub"},
+		},
+		Dst: copyEndpoint{Raw: "devbox:/etc/motd", Path: "/etc/motd", Service: "devbox", Remote: true},
 	}
 	remote := req.Dst
 	remoteCtx := copyRemoteContext{
@@ -571,10 +715,16 @@ func TestRunVMRsyncCopyUploadBuildsRsyncCommand(t *testing.T) {
 	if len(got.args) == 0 {
 		t.Fatal("rsync did not run")
 	}
-	for _, want := range []string{"-avz", "-e", "./local.txt", "yeet-pve1:/etc/motd"} {
+	for _, want := range []string{"-avz", "-e", "./local.txt", "./local.pub", "yeet-pve1:/etc/motd"} {
 		if !slices.Contains(got.args, want) {
 			t.Fatalf("rsync args = %#v, want %q", got.args, want)
 		}
+	}
+	localIdx := slices.Index(got.args, "./local.txt")
+	pubIdx := slices.Index(got.args, "./local.pub")
+	remoteIdx := slices.Index(got.args, "yeet-pve1:/etc/motd")
+	if localIdx < 0 || pubIdx < 0 || remoteIdx < 0 || !(localIdx < pubIdx && pubIdx < remoteIdx) {
+		t.Fatalf("rsync args = %#v, want local sources before remote destination", got.args)
 	}
 	remoteShell := got.args[slices.Index(got.args, "-e")+1]
 	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=ssh"} {
@@ -603,8 +753,11 @@ func TestRunVMRsyncCopyDownloadBuildsRsyncCommand(t *testing.T) {
 		Archive:  true,
 		Compress: true,
 		Verbose:  true,
-		Src:      copyEndpoint{Raw: "devbox:~/app.log", Path: "~/app.log", Service: "devbox", Remote: true},
-		Dst:      copyEndpoint{Raw: "./logs/", Path: "./logs/"},
+		Sources: []copyEndpoint{
+			{Raw: "devbox:.ssh/id*", Path: ".ssh/id*", Service: "devbox", Remote: true},
+			{Raw: "devbox:~/app.log", Path: "~/app.log", Service: "devbox", Remote: true},
+		},
+		Dst: copyEndpoint{Raw: "./logs/", Path: "./logs/"},
 	}
 	remoteCtx := copyRemoteContext{
 		Host:   "yeet-pve1",
@@ -621,13 +774,19 @@ func TestRunVMRsyncCopyDownloadBuildsRsyncCommand(t *testing.T) {
 		},
 	}
 
-	if err := runVMRsyncCopy(context.Background(), req, copyDirectionFromRemote, req.Src, remoteCtx); err != nil {
+	if err := runVMRsyncCopy(context.Background(), req, copyDirectionFromRemote, req.Sources[0], remoteCtx); err != nil {
 		t.Fatalf("runVMRsyncCopy: %v", err)
 	}
-	for _, want := range []string{"-avz", "yeet-pve1:~/app.log", "./logs/"} {
+	for _, want := range []string{"-avz", "yeet-pve1:.ssh/id*", "yeet-pve1:~/app.log", "./logs/"} {
 		if !slices.Contains(gotArgs, want) {
 			t.Fatalf("rsync args = %#v, want %q", gotArgs, want)
 		}
+	}
+	globIdx := slices.Index(gotArgs, "yeet-pve1:.ssh/id*")
+	logIdx := slices.Index(gotArgs, "yeet-pve1:~/app.log")
+	destIdx := slices.Index(gotArgs, "./logs/")
+	if globIdx < 0 || logIdx < 0 || destIdx < 0 || !(globIdx < logIdx && logIdx < destIdx) {
+		t.Fatalf("rsync args = %#v, want remote sources before local destination", gotArgs)
 	}
 	remoteShell := gotArgs[slices.Index(gotArgs, "-e")+1]
 	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=10.0.4.80"} {
@@ -776,16 +935,16 @@ func TestCopyEndpointValidationHelpers(t *testing.T) {
 	if _, err := localCopySource(copyRequest{}); err == nil {
 		t.Fatal("localCopySource empty source error = nil, want error")
 	}
-	if _, err := remoteCopySource(copyRequest{Src: copyEndpoint{Path: "logs"}}); err == nil {
+	if _, err := remoteCopySource(copyRequest{Sources: []copyEndpoint{{Path: "logs"}}}); err == nil {
 		t.Fatal("remoteCopySource local src error = nil, want error")
 	}
-	if _, err := remoteCopySource(copyRequest{Src: copyEndpoint{Remote: true}}); err == nil {
+	if _, err := remoteCopySource(copyRequest{Sources: []copyEndpoint{{Remote: true}}}); err == nil {
 		t.Fatal("remoteCopySource missing service error = nil, want error")
 	}
-	if _, err := remoteCopySource(copyRequest{Src: copyEndpoint{Remote: true, Service: "svc-a"}}); err == nil {
+	if _, err := remoteCopySource(copyRequest{Sources: []copyEndpoint{{Remote: true, Service: "svc-a"}}}); err == nil {
 		t.Fatal("remoteCopySource empty path without dir hint error = nil, want error")
 	}
-	src, err := remoteCopySource(copyRequest{Src: copyEndpoint{Remote: true, Service: "svc-a", DirHint: true}})
+	src, err := remoteCopySource(copyRequest{Sources: []copyEndpoint{{Remote: true, Service: "svc-a", DirHint: true}}})
 	if err != nil {
 		t.Fatalf("remoteCopySource dir hint error: %v", err)
 	}
@@ -804,10 +963,70 @@ func TestRemoteCopyCommandArgs(t *testing.T) {
 		Recursive: true,
 		Archive:   false,
 		Compress:  true,
-		Src:       copyEndpoint{Path: "", DirHint: true},
+		Sources:   []copyEndpoint{{Path: "", DirHint: true}},
 	})
 	if want := []string{"copy", "--from", ".", "--compress", "--recursive"}; !reflect.DeepEqual(download, want) {
 		t.Fatalf("copyDownloadArgs = %#v, want %#v", download, want)
+	}
+}
+
+func TestCopyServiceDataFromRemoteRejectsMultipleSources(t *testing.T) {
+	oldStream := execRemoteStreamFn
+	defer func() { execRemoteStreamFn = oldStream }()
+
+	execRemoteStreamFn = func(context.Context, string, []string, io.Reader) (io.ReadCloser, <-chan error, error) {
+		t.Fatal("regular service multi-source download should be rejected before streaming")
+		return nil, nil, nil
+	}
+
+	err := copyServiceDataFromRemote(copyRequest{
+		Archive:  true,
+		Compress: true,
+		Sources: []copyEndpoint{
+			{Raw: "svc-a:logs/a.txt", Path: "logs/a.txt", Service: "svc-a", Remote: true},
+			{Raw: "svc-a:logs/b.txt", Path: "logs/b.txt", Service: "svc-a", Remote: true},
+		},
+		Dst: copyEndpoint{Raw: "./out/", Path: "./out/"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "regular service copy downloads support one source; use a VM endpoint for rsync-style remote multi-source copy") {
+		t.Fatalf("copyServiceDataFromRemote error = %v, want multi-source regular download error", err)
+	}
+}
+
+func TestCopyServiceDataToRemoteIncludesSourcePathOnFailure(t *testing.T) {
+	oldExec := execRemoteFn
+	defer func() { execRemoteFn = oldExec }()
+
+	tmp := t.TempDir()
+	srcA := filepath.Join(tmp, "a.txt")
+	srcB := filepath.Join(tmp, "b.txt")
+	if err := os.WriteFile(srcA, []byte("a"), 0o600); err != nil {
+		t.Fatalf("WriteFile a.txt: %v", err)
+	}
+	if err := os.WriteFile(srcB, []byte("b"), 0o600); err != nil {
+		t.Fatalf("WriteFile b.txt: %v", err)
+	}
+
+	var calls int
+	execRemoteFn = func(context.Context, string, []string, io.Reader, bool) error {
+		calls++
+		if calls == 2 {
+			return errors.New("upload failed")
+		}
+		return nil
+	}
+
+	err := copyServiceDataToRemote(copyRequest{
+		Archive:  false,
+		Compress: false,
+		Sources: []copyEndpoint{
+			{Raw: srcA, Path: srcA},
+			{Raw: srcB, Path: srcB},
+		},
+		Dst: copyEndpoint{Raw: "svc-a:incoming/", Path: "incoming", Service: "svc-a", Remote: true, DirHint: true},
+	})
+	if err == nil || !strings.Contains(err.Error(), "copy "+srcB+": upload failed") {
+		t.Fatalf("copyServiceDataToRemote error = %v, want source path wrapper", err)
 	}
 }
 
@@ -838,7 +1057,7 @@ func TestOpenPlainFileCopyUpload(t *testing.T) {
 
 	upload, err := openPlainFileCopyUpload(copyRequest{
 		Compress: true,
-		Src:      copyEndpoint{Raw: src, Path: src},
+		Sources:  []copyEndpoint{{Raw: src, Path: src}},
 		Dst:      copyEndpoint{Raw: "svc:configs/", Path: "configs", DirHint: true},
 	})
 	if err != nil {
@@ -865,8 +1084,8 @@ func TestOpenPlainFileCopyUploadRejectsInvalidDestination(t *testing.T) {
 	}
 
 	_, err := openPlainFileCopyUpload(copyRequest{
-		Src: copyEndpoint{Raw: src, Path: src},
-		Dst: copyEndpoint{Raw: "svc:../secret", Path: "../secret"},
+		Sources: []copyEndpoint{{Raw: src, Path: src}},
+		Dst:     copyEndpoint{Raw: "svc:../secret", Path: "../secret"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "invalid copy destination") {
 		t.Fatalf("openPlainFileCopyUpload error = %v, want invalid destination", err)
