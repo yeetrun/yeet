@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
@@ -46,7 +48,10 @@ var (
 	removeSSHKnownHostFunc  sshKnownHostRemover = removeSSHKnownHost
 	fetchSSHServerInfoFunc                      = fetchSSHServerInfo
 	fetchSSHServiceInfoFunc                     = fetchSSHServiceInfo
+	vmSSHLANReachableFunc                       = vmSSHLANReachable
 )
+
+const vmSSHLANReachabilityTimeout = 300 * time.Millisecond
 
 func HandleSSH(ctx context.Context, args []string) error {
 	plan, err := sshExecutionPlanForArgs(ctx, args)
@@ -549,11 +554,10 @@ func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, re
 }
 
 func vmSSHTargetWithOptions(resp catchrpc.ServiceInfoResponse, options []string, forceProxy bool) vmSSHTargetInfo {
-	target := vmSSHTarget(resp, forceProxy)
 	if hasSSHHostNameOption(options) && !forceProxy {
-		target.Proxy = false
-		target.Host = ""
+		return vmSSHTargetInfo{User: vmSSHUser(resp)}
 	}
+	target := vmSSHTarget(resp, forceProxy)
 	return target
 }
 
@@ -632,11 +636,8 @@ type vmSSHTargetInfo struct {
 }
 
 func vmSSHTarget(resp catchrpc.ServiceInfoResponse, forceProxy bool) vmSSHTargetInfo {
-	user := "ubuntu"
-	if resp.Info.VM != nil && resp.Info.VM.SSH != nil {
-		user = firstNonEmpty(strings.TrimSpace(resp.Info.VM.SSH.User), user)
-	}
-	host := vmSSHPreferredHost(resp)
+	user := vmSSHUser(resp)
+	host := vmSSHTargetHost(resp, forceProxy)
 	mode := vmSSHNetworkMode(resp, host)
 	return vmSSHTargetInfo{
 		User:       user,
@@ -647,7 +648,40 @@ func vmSSHTarget(resp catchrpc.ServiceInfoResponse, forceProxy bool) vmSSHTarget
 	}
 }
 
+func vmSSHUser(resp catchrpc.ServiceInfoResponse) string {
+	user := "ubuntu"
+	if resp.Info.VM != nil && resp.Info.VM.SSH != nil {
+		user = firstNonEmpty(strings.TrimSpace(resp.Info.VM.SSH.User), user)
+	}
+	return user
+}
+
+func vmSSHTargetHost(resp catchrpc.ServiceInfoResponse, forceProxy bool) string {
+	lanHost := vmSSHLANHost(resp)
+	svcHost := vmSSHSvcHost(resp)
+	if forceProxy {
+		return firstNonEmpty(svcHost, vmSSHReportedHost(resp), lanHost)
+	}
+	if lanHost != "" && svcHost != "" {
+		if vmSSHLANReachableFunc(lanHost) {
+			return lanHost
+		}
+		return svcHost
+	}
+	return vmSSHPreferredHost(resp)
+}
+
 func vmSSHPreferredHost(resp catchrpc.ServiceInfoResponse) string {
+	if host := vmSSHLANHost(resp); host != "" {
+		return host
+	}
+	if host := vmSSHSvcHost(resp); host != "" {
+		return host
+	}
+	return vmSSHReportedHost(resp)
+}
+
+func vmSSHLANHost(resp catchrpc.ServiceInfoResponse) string {
 	if resp.Info.VM != nil {
 		for _, network := range resp.Info.VM.Networks {
 			if strings.TrimSpace(network.Mode) == "lan" {
@@ -657,9 +691,14 @@ func vmSSHPreferredHost(resp catchrpc.ServiceInfoResponse) string {
 			}
 		}
 	}
-	if svc := strings.TrimSpace(resp.Info.Network.SvcIP); svc != "" {
-		return svc
-	}
+	return ""
+}
+
+func vmSSHSvcHost(resp catchrpc.ServiceInfoResponse) string {
+	return strings.TrimSpace(resp.Info.Network.SvcIP)
+}
+
+func vmSSHReportedHost(resp catchrpc.ServiceInfoResponse) string {
 	if resp.Info.VM != nil && resp.Info.VM.SSH != nil {
 		return strings.TrimSpace(resp.Info.VM.SSH.Host)
 	}
@@ -701,7 +740,20 @@ func shouldProxyVMSSH(resp catchrpc.ServiceInfoResponse, guestHost, mode string,
 	if forceProxy || mode == "svc" {
 		return true
 	}
-	return mode == "lan" && strings.TrimSpace(resp.Info.Network.SvcIP) != ""
+	return false
+}
+
+func vmSSHLANReachable(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, "22"), vmSSHLANReachabilityTimeout)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
 
 func vmSSHTransportNotice(proxyHost string, target vmSSHTargetInfo, generatedProxy, userProxy bool) string {

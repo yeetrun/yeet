@@ -799,6 +799,120 @@ func TestRunVMRsyncCopyDownloadBuildsRsyncCommand(t *testing.T) {
 	}
 }
 
+func TestRunVMRsyncCopyVMSvcLANUsesReachableLANDirectly(t *testing.T) {
+	oldLookPath := lookPathCopyBinaryFunc
+	oldRun := runRsyncCommandFunc
+	defer func() {
+		lookPathCopyBinaryFunc = oldLookPath
+		runRsyncCommandFunc = oldRun
+	}()
+	lookPathCopyBinaryFunc = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	stubVMSSHLANReachable(t, func(host string) bool {
+		return host == "10.0.4.80"
+	})
+
+	var gotArgs []string
+	runRsyncCommandFunc = func(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+
+	req := copyRequest{
+		Archive:  true,
+		Compress: true,
+		Sources:  []copyEndpoint{{Raw: "./local.txt", Path: "./local.txt"}},
+		Dst:      copyEndpoint{Raw: "devbox:/etc/motd", Path: "/etc/motd", Service: "devbox", Remote: true},
+	}
+	remoteCtx := copyRemoteContext{
+		Host:   "yeet-lab",
+		Server: serverInfo{InstallUser: "root"},
+		Service: catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: serviceTypeVM,
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "10.0.4.80"},
+					Networks: []catchrpc.ServiceVMNetwork{
+						{Mode: "svc", IP: "192.168.100.12"},
+						{Mode: "lan", IP: "10.0.4.80"},
+					},
+				},
+			},
+		},
+	}
+
+	if err := runVMRsyncCopy(context.Background(), req, copyDirectionToRemote, req.Dst, remoteCtx); err != nil {
+		t.Fatalf("runVMRsyncCopy: %v", err)
+	}
+	remoteShell := gotArgs[slices.Index(gotArgs, "-e")+1]
+	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=10.0.4.80"} {
+		if !strings.Contains(remoteShell, want) {
+			t.Fatalf("remote shell = %q, want %q", remoteShell, want)
+		}
+	}
+	if strings.Contains(remoteShell, "ProxyCommand=ssh") {
+		t.Fatalf("remote shell = %q, want direct LAN SSH without generated proxy", remoteShell)
+	}
+}
+
+func TestRunVMRsyncCopyVMSvcLANFallsBackToSvcProxyWhenLANUnreachable(t *testing.T) {
+	oldLookPath := lookPathCopyBinaryFunc
+	oldRun := runRsyncCommandFunc
+	defer func() {
+		lookPathCopyBinaryFunc = oldLookPath
+		runRsyncCommandFunc = oldRun
+	}()
+	lookPathCopyBinaryFunc = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	stubVMSSHLANReachable(t, func(host string) bool {
+		if host != "10.0.4.80" {
+			t.Fatalf("LAN reachability checked host %q, want 10.0.4.80", host)
+		}
+		return false
+	})
+
+	var gotArgs []string
+	runRsyncCommandFunc = func(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+
+	req := copyRequest{
+		Archive:  true,
+		Compress: true,
+		Sources:  []copyEndpoint{{Raw: "./local.txt", Path: "./local.txt"}},
+		Dst:      copyEndpoint{Raw: "devbox:/etc/motd", Path: "/etc/motd", Service: "devbox", Remote: true},
+	}
+	remoteCtx := copyRemoteContext{
+		Host:   "yeet-lab",
+		Server: serverInfo{InstallUser: "root"},
+		Service: catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: serviceTypeVM,
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "10.0.4.80"},
+					Networks: []catchrpc.ServiceVMNetwork{
+						{Mode: "svc", IP: "192.168.100.12"},
+						{Mode: "lan", IP: "10.0.4.80"},
+					},
+				},
+			},
+		},
+	}
+
+	if err := runVMRsyncCopy(context.Background(), req, copyDirectionToRemote, req.Dst, remoteCtx); err != nil {
+		t.Fatalf("runVMRsyncCopy: %v", err)
+	}
+	remoteShell := gotArgs[slices.Index(gotArgs, "-e")+1]
+	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=ssh"} {
+		if !strings.Contains(remoteShell, want) {
+			t.Fatalf("remote shell = %q, want %q", remoteShell, want)
+		}
+	}
+}
+
 func TestRunVMRsyncCopyMissingLocalRsync(t *testing.T) {
 	oldLookPath := lookPathCopyBinaryFunc
 	defer func() { lookPathCopyBinaryFunc = oldLookPath }()
