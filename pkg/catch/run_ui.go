@@ -48,6 +48,11 @@ type runUI struct {
 	suspended bool
 	current   string
 	spinner   *tui.Spinner
+
+	stepStartedAt time.Time
+	stepDetail    string
+	timedStop     chan struct{}
+	timedDone     chan struct{}
 }
 
 func newRunUI(out io.Writer, enabled bool, quiet bool, action, service string) *runUI {
@@ -77,6 +82,7 @@ func (u *runUI) Stop() {
 	if u.quiet {
 		return
 	}
+	u.stopTimedStep()
 	u.mu.Lock()
 	if u.stopped {
 		u.mu.Unlock()
@@ -93,16 +99,35 @@ func (u *runUI) Suspend() {
 	if u.quiet {
 		return
 	}
+	u.stopTimedStep()
 	u.mu.Lock()
 	u.suspended = true
 	u.mu.Unlock()
 	u.stopSpinner(true)
 }
 
+func (u *runUI) PauseForPrompt() {
+	if u.quiet {
+		return
+	}
+	u.stopTimedStep()
+	if u.enabled {
+		u.stopSpinner(true)
+	}
+}
+
+func (u *runUI) FinishPrompt() {
+	if u.quiet || !u.enabled {
+		return
+	}
+	_, _ = fmt.Fprintln(u.out)
+}
+
 func (u *runUI) StartStep(name string) {
 	if u.quiet {
 		return
 	}
+	u.stopTimedStep()
 	u.mu.Lock()
 	if u.current == name {
 		u.mu.Unlock()
@@ -113,6 +138,7 @@ func (u *runUI) StartStep(name string) {
 		return
 	}
 	u.current = name
+	u.stepDetail = ""
 	u.mu.Unlock()
 
 	if u.enabled {
@@ -123,11 +149,86 @@ func (u *runUI) StartStep(name string) {
 	u.plain.StartStep(name)
 }
 
+func (u *runUI) StartTimedStep(name string) {
+	if u.quiet {
+		return
+	}
+	u.stopTimedStep()
+	u.StartStep(name)
+	if !u.enabled {
+		return
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	u.mu.Lock()
+	if u.suspended || u.current != name || u.spinner == nil {
+		u.mu.Unlock()
+		return
+	}
+	u.stepStartedAt = time.Now()
+	u.stepDetail = ""
+	u.timedStop = stop
+	u.timedDone = done
+	u.mu.Unlock()
+
+	go u.updateTimedStep(stop, done)
+}
+
+func (u *runUI) updateTimedStep(stop <-chan struct{}, done chan<- struct{}) {
+	defer close(done)
+	ticker := time.NewTicker(120 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			u.mu.Lock()
+			name := u.current
+			detail := u.stepDetail
+			elapsed := time.Since(u.stepStartedAt)
+			sp := u.spinner
+			suspended := u.suspended
+			u.mu.Unlock()
+
+			if shouldUpdateRunUISpinner(u.enabled, suspended, sp != nil) && name != "" {
+				sp.Update(runUITimedDetailText(name, detail, elapsed))
+			}
+		case <-stop:
+			return
+		}
+	}
+}
+
+func (u *runUI) stopTimedStep() {
+	u.mu.Lock()
+	done := u.stopTimedStepLocked()
+	u.mu.Unlock()
+	if done != nil {
+		<-done
+		u.mu.Lock()
+		u.stepStartedAt = time.Time{}
+		u.stepDetail = ""
+		u.mu.Unlock()
+	}
+}
+
+func (u *runUI) stopTimedStepLocked() chan struct{} {
+	if u.timedStop == nil {
+		return nil
+	}
+	close(u.timedStop)
+	done := u.timedDone
+	u.timedStop = nil
+	u.timedDone = nil
+	return done
+}
+
 func (u *runUI) UpdateDetail(detail string) {
 	if u.quiet {
 		return
 	}
 	u.mu.Lock()
+	u.stepDetail = detail
 	name := u.current
 	sp := u.spinner
 	suspended := u.suspended
@@ -151,13 +252,30 @@ func runUIDetailText(name, detail string) string {
 	return fmt.Sprintf("%s %s", name, detail)
 }
 
+func runUITimedDetailText(name, detail string, elapsed time.Duration) string {
+	elapsedText := formatRunUIElapsed(elapsed)
+	if detail == "" {
+		return fmt.Sprintf("%s %s", name, elapsedText)
+	}
+	return fmt.Sprintf("%s %s %s", name, detail, elapsedText)
+}
+
+func formatRunUIElapsed(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%.1fs", d.Round(100*time.Millisecond).Seconds())
+	}
+	return d.Round(time.Second).String()
+}
+
 func (u *runUI) DoneStep(detail string) {
 	if u.quiet {
 		return
 	}
+	u.stopTimedStep()
 	u.mu.Lock()
 	name := u.current
 	u.current = ""
+	u.stepDetail = ""
 	u.mu.Unlock()
 
 	if name == "" {
@@ -175,9 +293,11 @@ func (u *runUI) FailStep(detail string) {
 	if u.quiet {
 		return
 	}
+	u.stopTimedStep()
 	u.mu.Lock()
 	name := u.current
 	u.current = ""
+	u.stepDetail = ""
 	u.mu.Unlock()
 
 	if name == "" {
@@ -189,6 +309,26 @@ func (u *runUI) FailStep(detail string) {
 		return
 	}
 	u.plain.FailStep(detail)
+}
+
+func (u *runUI) PrintBlock(lines []string) {
+	if u.quiet {
+		return
+	}
+	u.stopTimedStep()
+	if u.enabled {
+		u.stopSpinner(true)
+		for _, line := range lines {
+			_, _ = fmt.Fprintln(u.out, line)
+		}
+		return
+	}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		u.plain.Info(line)
+	}
 }
 
 func (u *runUI) Printer(format string, args ...any) {

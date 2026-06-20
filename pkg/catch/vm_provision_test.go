@@ -17,6 +17,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 )
@@ -536,11 +537,12 @@ func TestRunVMProvisionIncludesInitrdPathWhenImageHasInitrd(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "initrd.img")
 }
 
-func TestRunVMPrintsProgressAndNextCommands(t *testing.T) {
+func TestRunVMPlainProgressAndNextCommands(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
 	var out bytes.Buffer
 	execer.rw = &out
+	execer.hostLabel = "yeet-pve1"
 
 	if err := execer.runVM(cli.RunFlags{Net: "svc", CPUs: 2, Memory: "2g", Disk: "16g", Restart: true}, testUbuntuVMPayload); err != nil {
 		t.Fatalf("runVM: %v", err)
@@ -548,18 +550,96 @@ func TestRunVMPrintsProgressAndNextCommands(t *testing.T) {
 
 	text := out.String()
 	for _, want := range []string{
-		"VM devbox",
-		"Image: vm://ubuntu/26.04",
-		"Shape: 2 vCPU, 2.0 GB memory, 16.0 GB disk",
-		"Network: svc",
-		"Preparing disk",
-		"Injecting guest metadata",
-		"Starting VM",
-		"SSH: yeet ssh devbox",
-		"Console: yeet vm console devbox",
+		`action=run service=devbox@yeet-pve1 status=running step="Resolve VM plan"`,
+		`action=run service=devbox@yeet-pve1 status=ok step="Resolve VM plan" detail=ubuntu`,
+		`action=run service=devbox@yeet-pve1 status=running step="Prepare disk"`,
+		`action=run service=devbox@yeet-pve1 status=ok step="Prepare disk" detail="16.0 GB"`,
+		`action=run service=devbox@yeet-pve1 status=running step="Wait for guest readiness"`,
+		`action=run service=devbox@yeet-pve1 status=ok step="Wait for guest readiness"`,
+		`action=run service=devbox@yeet-pve1 status=info detail="SSH      yeet ssh devbox"`,
+		`action=run service=devbox@yeet-pve1 status=info detail="Console  yeet vm console devbox"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestRunVMTTYProgressFooter(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var out bytes.Buffer
+	execer.rw = &out
+	execer.isPty = true
+	execer.hostLabel = "yeet-pve1"
+	vmProvisionGuestReadyWaitFunc = func(context.Context, string, vmNetworkPlan, vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+		return vmGuestReadyReport{IP: netip.MustParseAddr("10.0.4.80"), Interface: "eth1"}, nil
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc,lan", CPUs: 2, Memory: "2g", Disk: "16g", Restart: true, MacvlanParent: "vmbr0"}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+
+	text := out.String()
+	for _, want := range []string{
+		"[+] yeet run devbox@yeet-pve1",
+		"✔ Resolve VM plan",
+		"✔ Prepare disk (16.0 GB)",
+		"✔ Configure network (svc,lan)",
+		"✔ Wait for guest readiness (10.0.4.80)",
+		"✔ VM ready in ",
+		"devbox@yeet-pve1",
+		"SSH      yeet ssh devbox",
+		"Console  yeet vm console devbox",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("TTY output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestRunVMQuietSuppressesProgress(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var out bytes.Buffer
+	execer.rw = &out
+	execer.progress = catchrpc.ProgressQuiet
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: true}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if got := out.String(); got != "" {
+		t.Fatalf("quiet VM output = %q, want empty", got)
+	}
+}
+
+func TestRunVMImageDownloadUsesRunProgressUI(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var out bytes.Buffer
+	execer.rw = &out
+	vmImageEnsureFunc = func(_ context.Context, _ vmImageCache, _ string, ui ProgressUI) (vmImageAsset, error) {
+		ui.Start()
+		ui.StartStep("Download VM image")
+		ui.UpdateDetail("50%")
+		ui.DoneStep("10.0 MB @ 20.0 MB/s")
+		ui.Stop()
+		return fakeVMImageAsset(t)
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: true}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+
+	text := out.String()
+	for _, want := range []string{
+		`action=run service=devbox status=running step="Download VM image"`,
+		`action=run service=devbox status=ok step="Download VM image" detail="10.0 MB @ 20.0 MB/s"`,
+		`action=run service=devbox status=running step="Prepare disk"`,
+		`action=run service=devbox status=info detail="SSH      yeet ssh devbox"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("image progress output missing %q:\n%s", want, text)
 		}
 	}
 }
@@ -733,7 +813,7 @@ func TestRunVMZVOLProvisionUsesDevicePathForFirecracker(t *testing.T) {
 	}
 }
 
-func TestRunVMZVOLProvisionPrintsDiskSubsteps(t *testing.T) {
+func TestRunVMZVOLProvisionPrintsStructuredDiskStep(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "devbox")
 	var out bytes.Buffer
@@ -763,9 +843,8 @@ func TestRunVMZVOLProvisionPrintsDiskSubsteps(t *testing.T) {
 
 	text := out.String()
 	for _, want := range []string{
-		"Preparing ZFS image base",
-		"Writing image to ZFS base",
-		"Cloning VM disk",
+		`action=run service=devbox status=running step="Prepare disk"`,
+		`action=run service=devbox status=ok step="Prepare disk" detail="64.0 GB"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("output missing %q:\n%s\ndisk commands: %#v", want, text, diskCommands)
@@ -850,9 +929,9 @@ func TestRunVMWaitsForGuestReadinessBeforeNextCommands(t *testing.T) {
 		t.Fatalf("captured=%v waited=%v, want both true", captured, waited)
 	}
 	text := out.String()
-	waitIdx := strings.Index(text, "Waiting for guest readiness")
-	runIdx := strings.Index(text, "VM devbox is running")
-	if waitIdx < 0 || runIdx < 0 || waitIdx > runIdx {
+	waitIdx := strings.Index(text, `status=ok step="Wait for guest readiness"`)
+	sshIdx := strings.Index(text, `status=info detail="SSH      yeet ssh devbox"`)
+	if waitIdx < 0 || sshIdx < 0 || waitIdx > sshIdx {
 		t.Fatalf("output order wrong:\n%s", text)
 	}
 }
@@ -874,9 +953,58 @@ func TestRunVMSkipsGuestReadinessWhenRestartFalse(t *testing.T) {
 	}
 }
 
+func TestRunVMRestartFalsePrintsStartCommand(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var out bytes.Buffer
+	execer.rw = &out
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: false}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+
+	text := out.String()
+	for _, want := range []string{
+		`status=info detail="Start    yeet start devbox"`,
+		`status=info detail="Console  yeet vm console devbox"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("restart=false output missing %q:\n%s", want, text)
+		}
+	}
+	for _, unwanted := range []string{
+		`status=info detail="SSH      yeet ssh devbox"`,
+		`status=info detail="✔ VM ready`,
+	} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("restart=false output contains %q:\n%s", unwanted, text)
+		}
+	}
+}
+
+func TestRunVMReadinessBoundaryFailurePrintsStructuredError(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var out bytes.Buffer
+	execer.rw = &out
+	vmProvisionGuestReadyBoundaryFunc = func(context.Context, string) (vmGuestReadyBoundary, error) {
+		return vmGuestReadyBoundary{}, errors.New("boundary failed")
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc", Restart: true}, testUbuntuVMPayload)
+	if err == nil || !strings.Contains(err.Error(), "boundary failed") {
+		t.Fatalf("runVM error = %v, want boundary failure", err)
+	}
+	if text := out.String(); !strings.Contains(text, `status=err step="Start VM" detail="boundary failed"`) {
+		t.Fatalf("boundary failure output missing structured error:\n%s", text)
+	}
+}
+
 func TestRunVMGuestReadinessFailureKeepsCommittedVM(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var out bytes.Buffer
+	execer.rw = &out
 	var networkCommands [][]string
 	vmProvisionNetworkRunner = func(command []string) error {
 		networkCommands = append(networkCommands, append([]string(nil), command...))
@@ -901,6 +1029,45 @@ func TestRunVMGuestReadinessFailureKeepsCommittedVM(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), `"kernel_image_path"`)
 	if containsCommandPrefix(networkCommands, []string{"ip", "link", "del"}) {
 		t.Fatalf("network cleanup ran after committed readiness failure: %#v", networkCommands)
+	}
+	text := out.String()
+	for _, want := range []string{
+		`status=err step="Wait for guest readiness" detail="guest readiness timeout"`,
+		`status=info detail="VM service was created, but readiness did not complete."`,
+		`status=info detail="Console  yeet vm console devbox"`,
+		`status=info detail="Logs     yeet logs devbox"`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("readiness failure output missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestRunVMTTYReadinessFailurePrintsRecoveryCommands(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	var out bytes.Buffer
+	execer.rw = &out
+	execer.isPty = true
+	vmProvisionGuestReadyWaitFunc = func(context.Context, string, vmNetworkPlan, vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+		return vmGuestReadyReport{}, errors.New("guest readiness timeout")
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc", Restart: true}, testUbuntuVMPayload)
+	if err == nil || !strings.Contains(err.Error(), "guest readiness timeout") {
+		t.Fatalf("runVM error = %v, want guest readiness timeout", err)
+	}
+
+	text := out.String()
+	for _, want := range []string{
+		"✖ Wait for guest readiness (guest readiness timeout)",
+		"VM service was created, but readiness did not complete.",
+		"Console  yeet vm console devbox",
+		"Logs     yeet logs devbox",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("failure output missing %q:\n%s", want, text)
+		}
 	}
 }
 
@@ -953,6 +1120,31 @@ func TestRunVMDoesNotCommitReadyWhenSystemdEnableFails(t *testing.T) {
 	assertNoReadyVM(t, server, "svc")
 }
 
+func TestRunVMStageSystemdFailurePrintsStructuredError(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	var out bytes.Buffer
+	execer.rw = &out
+	vmProvisionDiskRunner = func(context.Context, []string) error {
+		binDir := serviceBinDirForRoot(serviceRoot)
+		if err := os.RemoveAll(binDir); err != nil {
+			t.Fatalf("remove bin dir: %v", err)
+		}
+		if err := os.WriteFile(binDir, []byte("not a directory"), 0o644); err != nil {
+			t.Fatalf("replace bin dir: %v", err)
+		}
+		return nil
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc"}, testUbuntuVMPayload)
+	if err == nil || !strings.Contains(err.Error(), "stage VM systemd unit") {
+		t.Fatalf("runVM error = %v, want stage unit failure", err)
+	}
+	if text := out.String(); !strings.Contains(text, `status=err step="Stage VM service"`) {
+		t.Fatalf("stage unit failure output missing structured error:\n%s", text)
+	}
+}
+
 func TestRunVMCleansNetworkWhenInstallFailsAfterNetworkSetup(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
@@ -995,6 +1187,8 @@ func TestRunVMCleansNetworkWhenInstallFailsAfterNetworkSetup(t *testing.T) {
 func TestRunVMCleansSystemdWhenCommitFailsAfterInstall(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
+	var out bytes.Buffer
+	execer.rw = &out
 	var networkCommands [][]string
 	vmProvisionNetworkRunner = func(command []string) error {
 		networkCommands = append(networkCommands, append([]string(nil), command...))
@@ -1033,6 +1227,9 @@ func TestRunVMCleansSystemdWhenCommitFailsAfterInstall(t *testing.T) {
 	}
 	if got := vmTestSystemctlCallCount(*systemctlCalls, "daemon-reload"); got < 2 {
 		t.Fatalf("daemon-reload calls = %d, want install and cleanup reload; calls %#v", got, *systemctlCalls)
+	}
+	if text := out.String(); !strings.Contains(text, `status=err step="Commit VM service" detail="commit failed"`) {
+		t.Fatalf("commit failure output missing structured error:\n%s", text)
 	}
 }
 
@@ -1084,6 +1281,8 @@ func TestRunVMStaleImageDefaultNonInteractiveFailsWithoutEnsure(t *testing.T) {
 func TestRunVMStaleImageUpdatePolicyEnsuresLatest(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	var out bytes.Buffer
+	execer.rw = &out
 	stubVMProvisionImageState(t, staleVMProvisionImageState("ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v3"))
 	ensureCalled := false
 	vmImageEnsureFunc = func(_ context.Context, _ vmImageCache, payload string, ui ProgressUI) (vmImageAsset, error) {
@@ -1207,6 +1406,39 @@ func TestRunVMStaleImageTTYPromptYesEnsuresLatest(t *testing.T) {
 		t.Fatalf("prompt output = %q, want update prompt", out.String())
 	}
 	assertVMImageVersion(t, server, "svc", "ubuntu-26.04-amd64-v3")
+}
+
+func TestRunVMStaleImageTTYPromptClearsAndRestoresResolveStep(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	stubVMProvisionImageState(t, staleVMProvisionImageState("ubuntu-26.04-amd64-v1", "ubuntu-26.04-amd64-v3"))
+	var out bytes.Buffer
+	execer.rw = readWriter{Reader: strings.NewReader("y\n"), Writer: &out}
+	execer.isPty = true
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		return fakeVMImageAssetVersion(t, "ubuntu-26.04-amd64-v3")
+	}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc"}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+
+	text := out.String()
+	promptIdx := strings.Index(text, "Update VM image")
+	if promptIdx < 0 {
+		t.Fatalf("output missing stale image prompt:\n%s", text)
+	}
+	resolvedIdx := strings.Index(text[promptIdx:], "✔ Resolve VM plan")
+	if resolvedIdx < 0 {
+		t.Fatalf("output did not restore/finish resolve step after prompt:\n%s", text)
+	}
+	promptLine := text[promptIdx:]
+	if newline := strings.IndexByte(promptLine, '\n'); newline >= 0 {
+		promptLine = promptLine[:newline]
+	}
+	if strings.Contains(promptLine, "⠋") || strings.Contains(promptLine, "Resolve VM plan") {
+		t.Fatalf("prompt line contains spinner text: %q", promptLine)
+	}
 }
 
 func TestRunVMStaleImageTTYPromptReadsRawInputWhenPtyInputBypassed(t *testing.T) {
