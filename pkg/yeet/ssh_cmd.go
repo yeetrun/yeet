@@ -345,7 +345,10 @@ func sshInvocationTarget(host string, info serverInfo, inv sshInvocation) string
 func buildSSHArgs(options []string, target string, command []string) []string {
 	sshArgs := append([]string{}, options...)
 	sshArgs = append(sshArgs, target)
-	return append(sshArgs, command...)
+	if len(command) > 0 {
+		sshArgs = append(sshArgs, shellJoin(command))
+	}
+	return sshArgs
 }
 
 func parseSSHArgs(args []string) (options []string, service string, command []string, err error) {
@@ -468,7 +471,11 @@ func serviceShellCommandPlanFromResponseWithForce(host, service string, info ser
 		if err != nil {
 			return nil, nil, nil, "", err
 		}
-		optionsLen := len(plan.Args) - 1 - len(command)
+		commandArgs := 0
+		if len(command) > 0 {
+			commandArgs = 1
+		}
+		optionsLen := len(plan.Args) - 1 - commandArgs
 		if optionsLen < 0 {
 			return nil, nil, nil, "", fmt.Errorf("invalid VM SSH plan for service %q", service)
 		}
@@ -948,10 +955,10 @@ func buildServiceSSHCommand(serviceDir string, command []string, options []strin
 	if len(command) == 0 {
 		options = ensureTTYOption(options)
 		cmd := fmt.Sprintf("cd %s && exec ${SHELL:-/bin/sh} -l", shellQuote(serviceDir))
-		return []string{"sh", "-lc", shellQuote(cmd)}, options
+		return []string{"sh", "-lc", cmd}, options
 	}
 	cmd := fmt.Sprintf("cd %s && exec %s", shellQuote(serviceDir), shellJoin(command))
-	return []string{"sh", "-lc", shellQuote(cmd)}, options
+	return []string{"sh", "-lc", cmd}, options
 }
 
 func ensureTTYOption(options []string) []string {
