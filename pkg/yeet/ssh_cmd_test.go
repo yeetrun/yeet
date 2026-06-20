@@ -302,7 +302,7 @@ func TestServiceShellCommandFromResponseNormalizesQualifiedService(t *testing.T)
 	if err != nil {
 		t.Fatalf("serviceShellCommandFromResponse: %v", err)
 	}
-	if want := []string{"sh", "-lc", `'cd /srv/yeet/services/api/data && exec ls -la'`}; !reflect.DeepEqual(gotCommand, want) {
+	if want := []string{"sh", "-lc", "cd /srv/yeet/services/api/data && exec ls -la"}; !reflect.DeepEqual(gotCommand, want) {
 		t.Fatalf("command = %#v, want %#v", gotCommand, want)
 	}
 	if want := []string{"-p", "2222"}; !reflect.DeepEqual(gotOptions, want) {
@@ -1068,7 +1068,7 @@ func TestBuildServiceSSHCommand(t *testing.T) {
 		{
 			name:        "interactive shell forces tty",
 			serviceDir:  "/srv/svc/data",
-			wantCommand: []string{"sh", "-lc", `'cd /srv/svc/data && exec ${SHELL:-/bin/sh} -l'`},
+			wantCommand: []string{"sh", "-lc", "cd /srv/svc/data && exec ${SHELL:-/bin/sh} -l"},
 			wantOptions: []string{"-t"},
 		},
 		{
@@ -1076,7 +1076,7 @@ func TestBuildServiceSSHCommand(t *testing.T) {
 			serviceDir:  "/srv/svc data",
 			command:     []string{"echo", "hello world"},
 			options:     []string{"-p", "2222"},
-			wantCommand: []string{"sh", "-lc", `'cd '"'"'/srv/svc data'"'"' && exec echo '"'"'hello world'"'"''`},
+			wantCommand: []string{"sh", "-lc", "cd '/srv/svc data' && exec echo 'hello world'"},
 			wantOptions: []string{"-p", "2222"},
 		},
 	}
@@ -1094,10 +1094,35 @@ func TestBuildServiceSSHCommand(t *testing.T) {
 }
 
 func TestBuildSSHArgs(t *testing.T) {
-	got := buildSSHArgs([]string{"-p", "2222"}, "admin@host", []string{"uptime"})
-	want := []string{"-p", "2222", "admin@host", "uptime"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("buildSSHArgs = %#v, want %#v", got, want)
+	tests := []struct {
+		name    string
+		options []string
+		target  string
+		command []string
+		want    []string
+	}{
+		{
+			name:    "simple command",
+			options: []string{"-p", "2222"},
+			target:  "admin@host",
+			command: []string{"uptime"},
+			want:    []string{"-p", "2222", "admin@host", "uptime"},
+		},
+		{
+			name:    "shell command preserves argv boundaries",
+			options: []string{"-p", "2222"},
+			target:  "admin@host",
+			command: []string{"bash", "-lc", "echo one; echo two"},
+			want:    []string{"-p", "2222", "admin@host", "bash -lc 'echo one; echo two'"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildSSHArgs(tt.options, tt.target, tt.command)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("buildSSHArgs = %#v, want %#v", got, tt.want)
+			}
+		})
 	}
 }
 
