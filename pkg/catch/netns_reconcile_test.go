@@ -557,7 +557,7 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 		t.Fatal("timed out waiting for reconciliation to run")
 	}
 
-	if diff := cmp.Diff([]string{"install", "dns-install", "docker-prereqs", "nat-reconcile", "reconcile:docker-netns"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{"install", "dns-install", "docker-prereqs", "reconcile:docker-netns", "nat-reconcile"}, calls); diff != "" {
 		t.Fatalf("unexpected startup call order (-want +got):\n%s", diff)
 	}
 }
