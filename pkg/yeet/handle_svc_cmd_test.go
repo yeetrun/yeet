@@ -980,6 +980,129 @@ func TestHandleSvcCmdCopyUploadFile(t *testing.T) {
 	}
 }
 
+func TestHandleSvcCmdCopyUploadMultipleFiles(t *testing.T) {
+	stubCopyRegularServiceInfo(t)
+	oldExec := execRemoteFn
+	defer func() {
+		execRemoteFn = oldExec
+	}()
+
+	tmp := t.TempDir()
+	srcA := filepath.Join(tmp, "a.txt")
+	srcB := filepath.Join(tmp, "b.txt")
+	if err := os.WriteFile(srcA, []byte("payload-a"), 0o600); err != nil {
+		t.Fatalf("failed to write a.txt: %v", err)
+	}
+	if err := os.WriteFile(srcB, []byte("payload-b"), 0o600); err != nil {
+		t.Fatalf("failed to write b.txt: %v", err)
+	}
+
+	var gotServices []string
+	var gotArgs [][]string
+	var gotNames []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotServices = append(gotServices, service)
+		gotArgs = append(gotArgs, append([]string{}, args...))
+		if tty {
+			t.Fatalf("expected tty=false, got true")
+		}
+		if stdin == nil {
+			t.Fatalf("expected stdin to be provided")
+		}
+		gz, err := gzip.NewReader(stdin)
+		if err != nil {
+			t.Fatalf("failed to read gzip: %v", err)
+		}
+		defer gz.Close()
+		tr := tar.NewReader(gz)
+		hdr, err := tr.Next()
+		if err != nil {
+			t.Fatalf("failed to read tar: %v", err)
+		}
+		gotNames = append(gotNames, hdr.Name)
+		return nil
+	}
+
+	if err := HandleSvcCmd([]string{"copy", srcA, srcB, "svc-a:incoming/"}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
+	}
+
+	wantArgs := []string{"copy", "--to", "incoming", "--archive", "--compress"}
+	if !reflect.DeepEqual(gotServices, []string{"svc-a", "svc-a"}) {
+		t.Fatalf("expected two svc-a calls, got %v", gotServices)
+	}
+	if len(gotArgs) != 2 {
+		t.Fatalf("expected two exec calls, got %d", len(gotArgs))
+	}
+	for i, args := range gotArgs {
+		if !reflect.DeepEqual(args, wantArgs) {
+			t.Fatalf("call %d args = %v, want %v", i, args, wantArgs)
+		}
+	}
+	if !reflect.DeepEqual(gotNames, []string{"a.txt", "b.txt"}) {
+		t.Fatalf("expected tar entries a.txt, b.txt; got %v", gotNames)
+	}
+}
+
+func TestHandleSvcCmdCopyUploadMultipleFilesToDataRootAlias(t *testing.T) {
+	stubCopyRegularServiceInfo(t)
+	oldExec := execRemoteFn
+	defer func() {
+		execRemoteFn = oldExec
+	}()
+
+	tmp := t.TempDir()
+	srcA := filepath.Join(tmp, "a.txt")
+	srcB := filepath.Join(tmp, "b.txt")
+	if err := os.WriteFile(srcA, []byte("payload-a"), 0o600); err != nil {
+		t.Fatalf("failed to write a.txt: %v", err)
+	}
+	if err := os.WriteFile(srcB, []byte("payload-b"), 0o600); err != nil {
+		t.Fatalf("failed to write b.txt: %v", err)
+	}
+
+	var gotArgs [][]string
+	var gotNames []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		if service != "svc-a" {
+			t.Fatalf("expected service svc-a, got %q", service)
+		}
+		if tty {
+			t.Fatalf("expected tty=false, got true")
+		}
+		gotArgs = append(gotArgs, append([]string{}, args...))
+		gz, err := gzip.NewReader(stdin)
+		if err != nil {
+			t.Fatalf("failed to read gzip: %v", err)
+		}
+		defer gz.Close()
+		tr := tar.NewReader(gz)
+		hdr, err := tr.Next()
+		if err != nil {
+			t.Fatalf("failed to read tar: %v", err)
+		}
+		gotNames = append(gotNames, hdr.Name)
+		return nil
+	}
+
+	if err := HandleSvcCmd([]string{"copy", srcA, srcB, "svc-a:data"}); err != nil {
+		t.Fatalf("HandleSvcCmd returned error: %v", err)
+	}
+
+	wantArgs := []string{"copy", "--to", ".", "--archive", "--compress"}
+	if len(gotArgs) != 2 {
+		t.Fatalf("expected two exec calls, got %d", len(gotArgs))
+	}
+	for i, args := range gotArgs {
+		if !reflect.DeepEqual(args, wantArgs) {
+			t.Fatalf("call %d args = %v, want %v", i, args, wantArgs)
+		}
+	}
+	if !reflect.DeepEqual(gotNames, []string{"a.txt", "b.txt"}) {
+		t.Fatalf("expected tar entries a.txt, b.txt; got %v", gotNames)
+	}
+}
+
 func TestHandleSvcCmdCopyUploadDirRecursiveContents(t *testing.T) {
 	stubCopyRegularServiceInfo(t)
 	oldExec := execRemoteFn

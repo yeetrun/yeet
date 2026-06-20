@@ -39,7 +39,7 @@ type copyRequest struct {
 	Compress   bool
 	Verbose    bool
 	ForceProxy bool
-	Src        copyEndpoint
+	Sources    []copyEndpoint
 	Dst        copyEndpoint
 }
 
@@ -87,6 +87,9 @@ func runCopyCommand(args []string, cfg *ProjectConfig) error {
 	}
 	req, err = normalizeServiceDataCopyRequest(req)
 	if err != nil {
+		return err
+	}
+	if err := validateServiceDataCopyShape(req, direction); err != nil {
 		return err
 	}
 	if direction == copyDirectionFromRemote {
@@ -159,12 +162,17 @@ func vmRsyncArgs(req copyRequest, direction copyDirection, remote copyEndpoint, 
 		return nil, err
 	}
 	args := []string{copyRsyncFlags(req), "-e", remoteShell}
-	remoteSpec := target + ":" + remote.Path
 	switch direction {
 	case copyDirectionToRemote:
-		args = append(args, req.Src.Path, remoteSpec)
+		for _, src := range req.Sources {
+			args = append(args, src.Path)
+		}
+		args = append(args, target+":"+remote.Path)
 	case copyDirectionFromRemote:
-		args = append(args, remoteSpec, req.Dst.Path)
+		for _, src := range req.Sources {
+			args = append(args, target+":"+src.Path)
+		}
+		args = append(args, req.Dst.Path)
 	default:
 		return nil, fmt.Errorf("invalid copy direction")
 	}
@@ -259,14 +267,21 @@ func guestRsyncMissing(stderrText string) bool {
 }
 
 func classifyCopyEndpoints(req copyRequest) (copyDirection, copyEndpoint, error) {
-	if req.Src.Remote && req.Dst.Remote {
+	if err := validateCopySourceSet(req.Sources); err != nil {
+		return copyDirectionInvalid, copyEndpoint{}, err
+	}
+	src := firstCopySource(req)
+	if src.Remote && req.Dst.Remote {
 		return copyDirectionInvalid, copyEndpoint{}, fmt.Errorf("copy does not support remote-to-remote")
 	}
-	if !req.Src.Remote && !req.Dst.Remote {
+	if !src.Remote && !req.Dst.Remote {
 		return copyDirectionInvalid, copyEndpoint{}, fmt.Errorf("copy requires a service endpoint (svc:path)")
 	}
-	if req.Src.Remote {
-		return copyDirectionFromRemote, req.Src, nil
+	if len(req.Sources) > 1 && !copyDestinationAllowsMultipleSources(req.Dst) {
+		return copyDirectionInvalid, copyEndpoint{}, fmt.Errorf("copy with multiple sources requires a directory destination")
+	}
+	if src.Remote {
+		return copyDirectionFromRemote, src, nil
 	}
 	return copyDirectionToRemote, req.Dst, nil
 }
@@ -356,20 +371,81 @@ func applyShortCopyFlag(req *copyRequest, flag rune) error {
 }
 
 func finishCopyRequest(req copyRequest, operands []string) (copyRequest, error) {
-	if len(operands) != 2 {
-		return copyRequest{}, fmt.Errorf("copy requires exactly two paths")
+	if len(operands) < 2 {
+		return copyRequest{}, fmt.Errorf("copy requires at least one source and one destination")
 	}
-	src, err := parseCopyEndpoint(operands[0])
+	sources := make([]copyEndpoint, 0, len(operands)-1)
+	for _, operand := range operands[:len(operands)-1] {
+		src, err := parseCopyEndpoint(operand)
+		if err != nil {
+			return copyRequest{}, err
+		}
+		sources = append(sources, src)
+	}
+	dst, err := parseCopyEndpoint(operands[len(operands)-1])
 	if err != nil {
 		return copyRequest{}, err
 	}
-	dst, err := parseCopyEndpoint(operands[1])
-	if err != nil {
-		return copyRequest{}, err
-	}
-	req.Src = src
+	req.Sources = sources
 	req.Dst = dst
+	if err := validateCopyRequestShape(req); err != nil {
+		return copyRequest{}, err
+	}
 	return req, nil
+}
+
+func firstCopySource(req copyRequest) copyEndpoint {
+	if len(req.Sources) == 0 {
+		return copyEndpoint{}
+	}
+	return req.Sources[0]
+}
+
+func singleCopySource(req copyRequest) (copyEndpoint, error) {
+	if len(req.Sources) == 0 {
+		return copyEndpoint{}, fmt.Errorf("copy requires a source path")
+	}
+	if len(req.Sources) > 1 {
+		return copyEndpoint{}, fmt.Errorf("copy requires exactly one source")
+	}
+	return req.Sources[0], nil
+}
+
+func validateCopyRequestShape(req copyRequest) error {
+	if err := validateCopySourceSet(req.Sources); err != nil {
+		return err
+	}
+	if len(req.Sources) > 1 && !copyDestinationAllowsMultipleSources(req.Dst) {
+		return fmt.Errorf("copy with multiple sources requires a directory destination")
+	}
+	return nil
+}
+
+func validateCopySourceSet(sources []copyEndpoint) error {
+	if len(sources) == 0 {
+		return fmt.Errorf("copy requires at least one source and one destination")
+	}
+	first := sources[0]
+	for _, src := range sources[1:] {
+		if src.Remote != first.Remote {
+			return fmt.Errorf("copy sources must all be local or all be from the same VM endpoint")
+		}
+		if src.Remote && (src.Service != first.Service || src.Host != first.Host) {
+			return fmt.Errorf("copy sources must come from one VM endpoint")
+		}
+	}
+	return nil
+}
+
+func copyDestinationAllowsMultipleSources(dst copyEndpoint) bool {
+	if dst.Remote {
+		return dst.DirHint || remotePathDirHint(dst.Path) || remoteServiceDataRootDirHint(dst.Path)
+	}
+	return isLocalDirHint(dst.Path) || existingLocalDirectory(dst.Path)
+}
+
+func remoteServiceDataRootDirHint(raw string) bool {
+	return strings.TrimSpace(raw) == "data"
 }
 
 func parseCopyEndpoint(raw string) (copyEndpoint, error) {
@@ -419,12 +495,17 @@ func normalizeRemotePath(raw string) (string, bool, error) {
 }
 
 func normalizeServiceDataCopyRequest(req copyRequest) (copyRequest, error) {
-	if req.Src.Remote {
-		src, err := normalizeServiceDataEndpoint(req.Src)
-		if err != nil {
-			return copyRequest{}, err
+	if len(req.Sources) > 0 {
+		req.Sources = append([]copyEndpoint(nil), req.Sources...)
+	}
+	for i, src := range req.Sources {
+		if src.Remote {
+			normalized, err := normalizeServiceDataEndpoint(src)
+			if err != nil {
+				return copyRequest{}, err
+			}
+			req.Sources[i] = normalized
 		}
-		req.Src = src
 	}
 	if req.Dst.Remote {
 		dst, err := normalizeServiceDataEndpoint(req.Dst)
@@ -444,6 +525,24 @@ func normalizeServiceDataEndpoint(ep copyEndpoint) (copyEndpoint, error) {
 	ep.Path = rel
 	ep.DirHint = ep.DirHint || dirHint
 	return ep, nil
+}
+
+func validateServiceDataCopyShape(req copyRequest, direction copyDirection) error {
+	if direction != copyDirectionFromRemote {
+		return nil
+	}
+	if len(req.Sources) > 1 {
+		return fmt.Errorf("regular service copy downloads support one source; use a VM endpoint for rsync-style remote multi-source copy")
+	}
+	src := firstCopySource(req)
+	if endpointHasGlob(src) {
+		return fmt.Errorf("remote globs are only supported for VM endpoints; copy an exact service path or directory")
+	}
+	return nil
+}
+
+func endpointHasGlob(ep copyEndpoint) bool {
+	return strings.ContainsAny(ep.Path, "*?[")
 }
 
 func trimRemotePath(raw string) (string, bool) {
@@ -499,8 +598,28 @@ func copyServiceDataToRemote(req copyRequest) error {
 	if err != nil {
 		return err
 	}
+	if err := validateCopySourceSet(req.Sources); err != nil {
+		return err
+	}
 	applyEndpointHostOverride(dst)
+	for _, src := range req.Sources {
+		singleReq := req
+		singleReq.Sources = []copyEndpoint{src}
+		if err := copySingleServiceDataToRemote(singleReq, dst); err != nil {
+			return fmt.Errorf("copy %s: %w", copySourceLabel(src), err)
+		}
+	}
+	return nil
+}
 
+func copySourceLabel(src copyEndpoint) string {
+	if src.Raw != "" {
+		return src.Raw
+	}
+	return src.Path
+}
+
+func copySingleServiceDataToRemote(req copyRequest, dst copyEndpoint) error {
 	info, err := localCopySourceInfo(req)
 	if err != nil {
 		return err
@@ -537,10 +656,14 @@ func remoteCopyDestination(req copyRequest) (copyEndpoint, error) {
 }
 
 func localCopySource(req copyRequest) (string, error) {
-	if req.Src.Path == "" {
+	src, err := singleCopySource(req)
+	if err != nil {
+		return "", err
+	}
+	if src.Path == "" {
 		return "", fmt.Errorf("copy requires a source path")
 	}
-	return req.Src.Path, nil
+	return src.Path, nil
 }
 
 func localCopySourceInfo(req copyRequest) (os.FileInfo, error) {
@@ -568,8 +691,9 @@ func openCopyUpload(req copyRequest, info os.FileInfo, report *copyReport) (copy
 }
 
 func openDirectoryCopyUpload(req copyRequest, report *copyReport) (copyUpload, error) {
-	prefix := sourceDirectoryArchivePrefix(req.Src.Raw, req.Src.Path)
-	reader, err := tarDirectoryStream(req.Src.Path, prefix, req.Compress, report.OnEntry)
+	src := firstCopySource(req)
+	prefix := sourceDirectoryArchivePrefix(src.Raw, src.Path)
+	reader, err := tarDirectoryStream(src.Path, prefix, req.Compress, report.OnEntry)
 	if err != nil {
 		return copyUpload{}, err
 	}
@@ -580,11 +704,12 @@ func openDirectoryCopyUpload(req copyRequest, report *copyReport) (copyUpload, e
 }
 
 func openArchiveFileCopyUpload(req copyRequest, report *copyReport) (copyUpload, error) {
-	destRoot, entryName, err := remoteArchiveFileDestination(req.Dst.Path, req.Dst.DirHint, req.Src.Path)
+	src := firstCopySource(req)
+	destRoot, entryName, err := remoteArchiveFileDestination(req.Dst.Path, req.Dst.DirHint, src.Path)
 	if err != nil {
 		return copyUpload{}, fmt.Errorf("invalid copy destination %q", req.Dst.Raw)
 	}
-	reader, err := tarFileStream(req.Src.Path, entryName, req.Compress, report.OnEntry)
+	reader, err := tarFileStream(src.Path, entryName, req.Compress, report.OnEntry)
 	if err != nil {
 		return copyUpload{}, err
 	}
@@ -595,11 +720,12 @@ func openArchiveFileCopyUpload(req copyRequest, report *copyReport) (copyUpload,
 }
 
 func openPlainFileCopyUpload(req copyRequest) (copyUpload, error) {
-	destRel, err := remotePlainFileDestination(req.Dst.Path, req.Dst.DirHint, req.Src.Path)
+	src := firstCopySource(req)
+	destRel, err := remotePlainFileDestination(req.Dst.Path, req.Dst.DirHint, src.Path)
 	if err != nil {
 		return copyUpload{}, fmt.Errorf("invalid copy destination %q", req.Dst.Raw)
 	}
-	f, err := os.Open(req.Src.Path)
+	f, err := os.Open(src.Path)
 	if err != nil {
 		return copyUpload{}, err
 	}
@@ -690,6 +816,9 @@ func applyConfiguredCopyHost(cfg *ProjectConfig, service string) error {
 }
 
 func copyServiceDataFromRemote(req copyRequest) (err error) {
+	if err := validateServiceDataCopyShape(req, copyDirectionFromRemote); err != nil {
+		return err
+	}
 	src, err := remoteCopySource(req)
 	if err != nil {
 		return err
@@ -714,17 +843,22 @@ func copyServiceDataFromRemote(req copyRequest) (err error) {
 }
 
 func remoteCopySource(req copyRequest) (copyEndpoint, error) {
-	if !req.Src.Remote || req.Src.Service == "" {
+	src, err := singleCopySource(req)
+	if err != nil {
+		return copyEndpoint{}, err
+	}
+	if !src.Remote || src.Service == "" {
 		return copyEndpoint{}, fmt.Errorf("copy source must be svc:path")
 	}
-	if req.Src.Path == "" && !req.Src.DirHint {
+	if src.Path == "" && !src.DirHint {
 		return copyEndpoint{}, fmt.Errorf("copy requires a source path")
 	}
-	return req.Src, nil
+	return src, nil
 }
 
 func copyDownloadArgs(req copyRequest) []string {
-	args := []string{"copy", "--from", remotePathOrDot(req.Src.Path)}
+	src := firstCopySource(req)
+	args := []string{"copy", "--from", remotePathOrDot(src.Path)}
 	if req.Archive {
 		args = append(args, "--archive")
 	}
@@ -746,7 +880,8 @@ func receiveRemoteCopy(req copyRequest, r io.Reader, done <-chan error, report *
 	if receive.closer != nil {
 		defer captureCloseError(&err, receive.closer)
 	}
-	if err := extractRemoteCopyPayload(receive.header, receive.dest, req.Src.DirHint, receive.payload, report.OnEntry); err != nil {
+	src := firstCopySource(req)
+	if err := extractRemoteCopyPayload(receive.header, receive.dest, src.DirHint, receive.payload, report.OnEntry); err != nil {
 		waitRemoteCopy(done)
 		return err
 	}

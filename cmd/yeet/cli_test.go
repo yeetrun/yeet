@@ -285,9 +285,10 @@ func TestCopyHelpMentionsVMGuestCopy(t *testing.T) {
 	stdout := string(rawStdout)
 	for _, want := range []string{
 		"Copy files between local paths and service data or VM guests",
-		"[--force-proxy] [-avz] <src> <dst>",
+		"[--force-proxy] [-avz] <src>... <dst>",
 		"yeet copy ./config.yml svc:data/config.yml",
-		"yeet copy ./app devbox:~/app",
+		"yeet copy ./configs/*.yml devbox:~/configs/",
+		`yeet copy devbox:"/var/log/*.log" ./logs/`,
 		"yeet copy --force-proxy ./configs/ devbox:~/configs/",
 	} {
 		if !strings.Contains(stdout, want) {

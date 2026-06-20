@@ -71,19 +71,11 @@ yeet copy ./config.yml svc:data/config.yml
 ```
 
 ```
-yeet copy ./configs/ svc:data/
+yeet copy ./configs/*.yml devbox:~/configs/
 ```
 
 ```
-yeet copy svc:data/configs ./configs
-```
-
-```
-yeet copy ./app devbox:~/app
-```
-
-```
-yeet copy devbox:/var/log/cloud-init.log ./logs/
+yeet copy devbox:"/var/log/*.log" ./logs/
 ```
 
 ```
@@ -544,7 +536,7 @@ Copy files between local paths and service data or VM guests
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] copy [OPTIONS] [--force-proxy] [-avz] <src> <dst>
+yeet [GLOBAL_OPTIONS] copy [OPTIONS] [--force-proxy] [-avz] <src>... <dst>
 ```
 
 ## Global Options
@@ -586,19 +578,11 @@ yeet copy ./config.yml svc:data/config.yml
 ```
 
 ```
-yeet copy ./configs/ svc:data/
+yeet copy ./configs/*.yml devbox:~/configs/
 ```
 
 ```
-yeet copy svc:data/configs ./configs
-```
-
-```
-yeet copy ./app devbox:~/app
-```
-
-```
-yeet copy devbox:/var/log/cloud-init.log ./logs/
+yeet copy devbox:"/var/log/*.log" ./logs/
 ```
 
 ```
