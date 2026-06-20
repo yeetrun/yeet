@@ -37,6 +37,27 @@ type probeResult struct {
 
 const defaultFirewallBridgeIf = "yeet0"
 
+// serviceNetworkNonPublicIPv4CIDRs is the service-network egress deny list.
+// It is intentionally IPv4-only; future IPv6 service-network egress policy
+// should add a separate IPv6 list and render path instead of reusing this one.
+var serviceNetworkNonPublicIPv4CIDRs = []string{
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.0.0.0/24",
+	"192.0.2.0/24",
+	"192.168.0.0/16",
+	"198.18.0.0/15",
+	"198.51.100.0/24",
+	"203.0.113.0/24",
+	"224.0.0.0/4",
+	"240.0.0.0/4",
+	"255.255.255.255/32",
+}
+
 var (
 	lookPath          = exec.LookPath
 	runCombinedOutput = func(name string, args ...string) ([]byte, error) {
@@ -127,35 +148,53 @@ func parseFirewallBackend(raw string) (FirewallBackend, error) {
 	}
 }
 
+func renderNFTForwardRules(spec FirewallSpec) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "\t\toifname %q ct state related,established accept\n", spec.BridgeIf)
+	fmt.Fprintf(&b, "\t\tiifname %q ip daddr %s accept\n", spec.BridgeIf, spec.SubnetCIDR)
+	for _, cidr := range serviceNetworkNonPublicIPv4CIDRs {
+		fmt.Fprintf(&b, "\t\tiifname %q ip daddr %s reject\n", spec.BridgeIf, cidr)
+	}
+	fmt.Fprintf(&b, "\t\tiifname %q accept\n", spec.BridgeIf)
+	return b.String()
+}
+
+func renderIPTablesForwardRules(spec FirewallSpec) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "-A YEET_FORWARD -o %s -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n", spec.BridgeIf)
+	fmt.Fprintf(&b, "-A YEET_FORWARD -i %s -d %s -j ACCEPT\n", spec.BridgeIf, spec.SubnetCIDR)
+	for _, cidr := range serviceNetworkNonPublicIPv4CIDRs {
+		fmt.Fprintf(&b, "-A YEET_FORWARD -i %s -d %s -j REJECT\n", spec.BridgeIf, cidr)
+	}
+	fmt.Fprintf(&b, "-A YEET_FORWARD -i %s -j ACCEPT\n", spec.BridgeIf)
+	return b.String()
+}
+
 func RenderFirewallRules(backend FirewallBackend, spec FirewallSpec) string {
 	switch backend {
 	case BackendNFT:
 		return fmt.Sprintf(`table ip yeet {
 	chain forward {
 		type filter hook forward priority filter; policy accept;
-		iifname "%s" accept
-		oifname "%s" ct state related,established accept
-	}
+%s	}
 
 	chain postrouting {
 		type nat hook postrouting priority srcnat; policy accept;
 		ip saddr %s ip daddr != %s masquerade
 	}
 }
-`, spec.BridgeIf, spec.BridgeIf, spec.SubnetCIDR, spec.SubnetCIDR)
+`, renderNFTForwardRules(spec), spec.SubnetCIDR, spec.SubnetCIDR)
 	case BackendIPTablesNFT, BackendIPTablesLegacy:
 		return fmt.Sprintf(`*filter
 :YEET_FORWARD -
 -A FORWARD -j YEET_FORWARD
--A YEET_FORWARD -i %s -j ACCEPT
--A YEET_FORWARD -o %s -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-COMMIT
+%sCOMMIT
 *nat
 :YEET_POSTROUTING -
 -A POSTROUTING -j YEET_POSTROUTING
 -A YEET_POSTROUTING -s %s ! -d %s -j MASQUERADE
 COMMIT
-`, spec.BridgeIf, spec.BridgeIf, spec.SubnetCIDR, spec.SubnetCIDR)
+`, renderIPTablesForwardRules(spec), spec.SubnetCIDR, spec.SubnetCIDR)
 	default:
 		return ""
 	}
@@ -195,21 +234,35 @@ func ensureIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
 	if err != nil {
 		return err
 	}
-	return runFirewallSteps([]func() error{
+	steps := []func() error{
 		func() error { return ensureIPTablesChain(bin, "filter", "YEET_FORWARD") },
 		func() error { return ensureIPTablesRule(bin, "filter", "FORWARD", "-j", "YEET_FORWARD") },
-		func() error {
-			return ensureIPTablesRule(bin, "filter", "YEET_FORWARD", "-i", spec.BridgeIf, "-j", "ACCEPT")
-		},
-		func() error {
-			return ensureIPTablesRule(bin, "filter", "YEET_FORWARD", "-o", spec.BridgeIf, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
-		},
 		func() error { return ensureIPTablesChain(bin, "nat", "YEET_POSTROUTING") },
 		func() error { return ensureIPTablesRule(bin, "nat", "POSTROUTING", "-j", "YEET_POSTROUTING") },
+		func() error { return flushIPTablesChain(bin, "filter", "YEET_FORWARD") },
+		func() error { return flushIPTablesChain(bin, "nat", "YEET_POSTROUTING") },
 		func() error {
-			return ensureIPTablesRule(bin, "nat", "YEET_POSTROUTING", "-s", spec.SubnetCIDR, "!", "-d", spec.SubnetCIDR, "-j", "MASQUERADE")
+			return appendIPTablesRule(bin, "filter", "YEET_FORWARD", "-o", spec.BridgeIf, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
 		},
-	})
+		func() error {
+			return appendIPTablesRule(bin, "filter", "YEET_FORWARD", "-i", spec.BridgeIf, "-d", spec.SubnetCIDR, "-j", "ACCEPT")
+		},
+	}
+	for _, cidr := range serviceNetworkNonPublicIPv4CIDRs {
+		cidr := cidr
+		steps = append(steps, func() error {
+			return appendIPTablesRule(bin, "filter", "YEET_FORWARD", "-i", spec.BridgeIf, "-d", cidr, "-j", "REJECT")
+		})
+	}
+	steps = append(steps,
+		func() error {
+			return appendIPTablesRule(bin, "filter", "YEET_FORWARD", "-i", spec.BridgeIf, "-j", "ACCEPT")
+		},
+		func() error {
+			return appendIPTablesRule(bin, "nat", "YEET_POSTROUTING", "-s", spec.SubnetCIDR, "!", "-d", spec.SubnetCIDR, "-j", "MASQUERADE")
+		},
+	)
+	return runFirewallSteps(steps)
 }
 
 func runFirewallSteps(steps []func() error) error {
@@ -226,12 +279,21 @@ func verifyNFTFirewall(spec FirewallSpec) error {
 	if err != nil {
 		return err
 	}
-	return verifyOutputContains("nft firewall state", out, []string{
+	return verifyOutputContains("nft firewall state", out, nftFirewallMarkers(spec))
+}
+
+func nftFirewallMarkers(spec FirewallSpec) []string {
+	return []string{
 		"table ip yeet",
-		spec.BridgeIf,
-		spec.SubnetCIDR,
+		`oifname "` + spec.BridgeIf + `"`,
+		"ct state",
+		`iifname "` + spec.BridgeIf + `" ip daddr ` + spec.SubnetCIDR + ` accept`,
+		`iifname "` + spec.BridgeIf + `" ip daddr 10.0.0.0/8 reject`,
+		`iifname "` + spec.BridgeIf + `" ip daddr 100.64.0.0/10 reject`,
+		`iifname "` + spec.BridgeIf + `" ip daddr 192.168.0.0/16 reject`,
+		`iifname "` + spec.BridgeIf + `" accept`,
 		"masquerade",
-	})
+	}
 }
 
 func verifyOutputContains(label, out string, markers []string) error {
@@ -254,16 +316,40 @@ func verifyIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
 	if err != nil {
 		return err
 	}
-	return verifyFirewallStateChecks(bin, []firewallStateCheck{
-		{
-			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -j ACCEPT",
-			err:  errors.New("missing yeet forward ingress rule"),
-		},
+	return verifyFirewallStateChecks(bin, iptablesFirewallStateChecks(spec))
+}
+
+func iptablesFirewallStateChecks(spec FirewallSpec) []firewallStateCheck {
+	return []firewallStateCheck{
 		{
 			args: []string{"-S", "YEET_FORWARD"},
 			want: "-A YEET_FORWARD -o " + spec.BridgeIf + " -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
 			err:  errors.New("missing yeet forward return rule"),
+		},
+		{
+			args: []string{"-S", "YEET_FORWARD"},
+			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d " + spec.SubnetCIDR + " -j ACCEPT",
+			err:  errors.New("missing yeet service subnet allow rule"),
+		},
+		{
+			args: []string{"-S", "YEET_FORWARD"},
+			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 10.0.0.0/8 -j REJECT",
+			err:  errors.New("missing yeet RFC1918 reject rule"),
+		},
+		{
+			args: []string{"-S", "YEET_FORWARD"},
+			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 100.64.0.0/10 -j REJECT",
+			err:  errors.New("missing yeet CGNAT reject rule"),
+		},
+		{
+			args: []string{"-S", "YEET_FORWARD"},
+			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 192.168.0.0/16 -j REJECT",
+			err:  errors.New("missing yeet private reject rule"),
+		},
+		{
+			args: []string{"-S", "YEET_FORWARD"},
+			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -j ACCEPT",
+			err:  errors.New("missing yeet public egress allow rule"),
 		},
 		{
 			args: []string{"-t", "nat", "-S", "YEET_POSTROUTING"},
@@ -280,7 +366,7 @@ func verifyIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
 			want: "-A POSTROUTING -j YEET_POSTROUTING",
 			err:  errors.New("missing yeet postrouting jump rule"),
 		},
-	})
+	}
 }
 
 func verifyFirewallStateChecks(bin string, checks []firewallStateCheck) error {
@@ -380,6 +466,15 @@ func ensureIPTablesRule(bin, table, chain string, rule ...string) error {
 	}
 	args = append([]string{"-t", table, "-A", chain}, rule...)
 	return runCommandWithInput(nil, bin, args...)
+}
+
+func appendIPTablesRule(bin, table, chain string, rule ...string) error {
+	args := append([]string{"-t", table, "-A", chain}, rule...)
+	return runCommandWithInput(nil, bin, args...)
+}
+
+func flushIPTablesChain(bin, table, chain string) error {
+	return runCommandWithInput(nil, bin, "-t", table, "-F", chain)
 }
 
 func deleteIPTablesRuleIfPresent(bin, table, chain string, rule ...string) error {
