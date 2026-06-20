@@ -113,6 +113,82 @@ func TestRenderRuleset(t *testing.T) {
 	}
 }
 
+func TestServiceNetworkNonPublicIPv4CIDRs(t *testing.T) {
+	t.Parallel()
+
+	want := []string{
+		"0.0.0.0/8",
+		"10.0.0.0/8",
+		"100.64.0.0/10",
+		"127.0.0.0/8",
+		"169.254.0.0/16",
+		"172.16.0.0/12",
+		"192.0.0.0/24",
+		"192.0.2.0/24",
+		"192.168.0.0/16",
+		"198.18.0.0/15",
+		"198.51.100.0/24",
+		"203.0.113.0/24",
+		"224.0.0.0/4",
+		"240.0.0.0/4",
+		"255.255.255.255/32",
+	}
+	if !reflect.DeepEqual(serviceNetworkNonPublicIPv4CIDRs, want) {
+		t.Fatalf("serviceNetworkNonPublicIPv4CIDRs = %#v, want %#v", serviceNetworkNonPublicIPv4CIDRs, want)
+	}
+}
+
+func TestRenderRulesetConstrainsServiceNetworkEgress(t *testing.T) {
+	t.Parallel()
+
+	spec := FirewallSpec{
+		SubnetCIDR: "192.168.100.0/24",
+		BridgeIf:   "yeet0",
+	}
+
+	t.Run("nft", func(t *testing.T) {
+		t.Parallel()
+
+		got := RenderFirewallRules(BackendNFT, spec)
+		serviceAccept := `iifname "yeet0" ip daddr 192.168.100.0/24 accept`
+		privateReject := `iifname "yeet0" ip daddr 192.168.0.0/16 reject`
+		tailnetReject := `iifname "yeet0" ip daddr 100.64.0.0/10 reject`
+		publicAccept := `iifname "yeet0" accept`
+		for _, wantPart := range []string{serviceAccept, privateReject, tailnetReject, publicAccept, `oifname "yeet0" ct state related,established accept`} {
+			if !strings.Contains(got, wantPart) {
+				t.Fatalf("nft rules missing %q in output:\n%s", wantPart, got)
+			}
+		}
+		if strings.Index(got, serviceAccept) > strings.Index(got, privateReject) {
+			t.Fatalf("service subnet accept must precede broader private reject:\n%s", got)
+		}
+		if strings.Index(got, tailnetReject) > strings.Index(got, publicAccept) {
+			t.Fatalf("tailnet reject must precede final public egress accept:\n%s", got)
+		}
+	})
+
+	t.Run("iptables", func(t *testing.T) {
+		t.Parallel()
+
+		got := RenderFirewallRules(BackendIPTablesNFT, spec)
+		serviceAccept := "-A YEET_FORWARD -i yeet0 -d 192.168.100.0/24 -j ACCEPT"
+		privateReject := "-A YEET_FORWARD -i yeet0 -d 192.168.0.0/16 -j REJECT"
+		tailnetReject := "-A YEET_FORWARD -i yeet0 -d 100.64.0.0/10 -j REJECT"
+		publicAccept := "-A YEET_FORWARD -i yeet0 -j ACCEPT"
+		for _, wantPart := range []string{serviceAccept, privateReject, tailnetReject, publicAccept, "-A YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"} {
+			if !strings.Contains(got, wantPart) {
+				t.Fatalf("iptables rules missing %q in output:\n%s", wantPart, got)
+			}
+		}
+		if strings.Index(got, serviceAccept) > strings.Index(got, privateReject) {
+			t.Fatalf("service subnet accept must precede broader private reject:\n%s", got)
+		}
+		if strings.Index(got, tailnetReject) > strings.Index(got, publicAccept) {
+			t.Fatalf("tailnet reject must precede final public egress accept:\n%s", got)
+		}
+	})
+}
+
 func TestLoadFirewallEnv(t *testing.T) {
 	t.Parallel()
 
@@ -438,10 +514,15 @@ func TestEnsureFirewallIPTablesInstallsOwnedChainsAndRules(t *testing.T) {
 	for _, want := range []string{
 		"iptables-nft -t filter -N YEET_FORWARD",
 		"iptables-nft -t filter -A FORWARD -j YEET_FORWARD",
-		"iptables-nft -t filter -A YEET_FORWARD -i yeet0 -j ACCEPT",
-		"iptables-nft -t filter -A YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
 		"iptables-nft -t nat -N YEET_POSTROUTING",
 		"iptables-nft -t nat -A POSTROUTING -j YEET_POSTROUTING",
+		"iptables-nft -t filter -F YEET_FORWARD",
+		"iptables-nft -t nat -F YEET_POSTROUTING",
+		"iptables-nft -t filter -A YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+		"iptables-nft -t filter -A YEET_FORWARD -i yeet0 -d 192.168.100.0/24 -j ACCEPT",
+		"iptables-nft -t filter -A YEET_FORWARD -i yeet0 -d 100.64.0.0/10 -j REJECT",
+		"iptables-nft -t filter -A YEET_FORWARD -i yeet0 -d 192.168.0.0/16 -j REJECT",
+		"iptables-nft -t filter -A YEET_FORWARD -i yeet0 -j ACCEPT",
 		"iptables-nft -t nat -A YEET_POSTROUTING -s 192.168.100.0/24 ! -d 192.168.100.0/24 -j MASQUERADE",
 	} {
 		if !containsString(got, want) {
@@ -450,7 +531,7 @@ func TestEnsureFirewallIPTablesInstallsOwnedChainsAndRules(t *testing.T) {
 	}
 }
 
-func TestEnsureFirewallIPTablesSkipsExistingRules(t *testing.T) {
+func TestEnsureFirewallIPTablesReplacesOwnedRules(t *testing.T) {
 	var calls []firewallCommandCall
 	spec := FirewallSpec{SubnetCIDR: "192.168.100.0/24", BridgeIf: "yeet0"}
 	withFirewallCommandFakes(t, lookupFromSet(map[string]bool{"iptables-nft": true}), func(name string, args ...string) ([]byte, error) {
@@ -466,8 +547,22 @@ func TestEnsureFirewallIPTablesSkipsExistingRules(t *testing.T) {
 	if err := EnsureFirewall(BackendIPTablesNFT, spec); err != nil {
 		t.Fatalf("EnsureFirewall returned error: %v", err)
 	}
-	if len(calls) != 0 {
-		t.Fatalf("EnsureFirewall ran commands for existing rules: %#v", commandStrings(calls))
+	got := commandStrings(calls)
+	for _, want := range []string{
+		"iptables-nft -t filter -F YEET_FORWARD",
+		"iptables-nft -t nat -F YEET_POSTROUTING",
+		"iptables-nft -t filter -A YEET_FORWARD -i yeet0 -d 100.64.0.0/10 -j REJECT",
+		"iptables-nft -t filter -A YEET_FORWARD -i yeet0 -j ACCEPT",
+		"iptables-nft -t nat -A YEET_POSTROUTING -s 192.168.100.0/24 ! -d 192.168.100.0/24 -j MASQUERADE",
+	} {
+		if !containsString(got, want) {
+			t.Fatalf("commands missing %q in %#v", want, got)
+		}
+	}
+	tailnetReject := "iptables-nft -t filter -A YEET_FORWARD -i yeet0 -d 100.64.0.0/10 -j REJECT"
+	publicAccept := "iptables-nft -t filter -A YEET_FORWARD -i yeet0 -j ACCEPT"
+	if indexString(got, tailnetReject) > indexString(got, publicAccept) {
+		t.Fatalf("tailnet reject must precede public egress accept in %#v", got)
 	}
 }
 
@@ -478,8 +573,13 @@ func TestVerifyFirewallNFT(t *testing.T) {
 		withFirewallCommandFakes(t, nil, func(name string, args ...string) ([]byte, error) {
 			if commandKey(name, args...) == "nft list table ip yeet" {
 				return []byte(`table ip yeet
+oifname "yeet0" ct state related,established accept
+iifname "yeet0" ip daddr 192.168.100.0/24 accept
+iifname "yeet0" ip daddr 10.0.0.0/8 reject
+iifname "yeet0" ip daddr 100.64.0.0/10 reject
+iifname "yeet0" ip daddr 192.168.0.0/16 reject
 iifname "yeet0" accept
-ip saddr 192.168.100.0/24 masquerade`), nil
+ip saddr 192.168.100.0/24 ip daddr != 192.168.100.0/24 masquerade`), nil
 			}
 			return nil, fmt.Errorf("unexpected command: %s", commandKey(name, args...))
 		}, nil)
@@ -512,8 +612,12 @@ func TestVerifyFirewallIPTablesAcceptsExpectedRules(t *testing.T) {
 		case "iptables-nft --version":
 			return []byte("iptables v1.8.11 (nf_tables)"), nil
 		case "iptables-nft -S YEET_FORWARD":
-			return []byte(`-A YEET_FORWARD -i yeet0 -j ACCEPT
--A YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT`), nil
+			return []byte(`-A YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A YEET_FORWARD -i yeet0 -d 192.168.100.0/24 -j ACCEPT
+-A YEET_FORWARD -i yeet0 -d 10.0.0.0/8 -j REJECT
+-A YEET_FORWARD -i yeet0 -d 100.64.0.0/10 -j REJECT
+-A YEET_FORWARD -i yeet0 -d 192.168.0.0/16 -j REJECT
+-A YEET_FORWARD -i yeet0 -j ACCEPT`), nil
 		case "iptables-nft -t nat -S YEET_POSTROUTING":
 			return []byte("-A YEET_POSTROUTING -s 192.168.100.0/24 ! -d 192.168.100.0/24 -j MASQUERADE"), nil
 		case "iptables-nft -S FORWARD":
@@ -544,8 +648,8 @@ func TestVerifyFirewallIPTablesReportsMissingRule(t *testing.T) {
 	}, nil)
 
 	err := VerifyFirewall(BackendIPTablesNFT, spec)
-	if err == nil || !strings.Contains(err.Error(), "missing yeet forward ingress rule") {
-		t.Fatalf("VerifyFirewall error = %v, want missing ingress rule", err)
+	if err == nil || !strings.Contains(err.Error(), "missing yeet forward return rule") {
+		t.Fatalf("VerifyFirewall error = %v, want missing return rule", err)
 	}
 }
 
@@ -777,4 +881,13 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func indexString(values []string, want string) int {
+	for i, value := range values {
+		if value == want {
+			return i
+		}
+	}
+	return -1
 }
