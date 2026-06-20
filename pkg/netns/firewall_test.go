@@ -151,13 +151,17 @@ func TestRenderRulesetConstrainsServiceNetworkEgress(t *testing.T) {
 
 		got := RenderFirewallRules(BackendNFT, spec)
 		serviceAccept := `iifname "yeet0" ip daddr 192.168.100.0/24 accept`
+		serviceReplyAccept := `iifname "yeet0" ct state related,established accept`
 		privateReject := `iifname "yeet0" ip daddr 192.168.0.0/16 reject`
 		tailnetReject := `iifname "yeet0" ip daddr 100.64.0.0/10 reject`
 		publicAccept := `iifname "yeet0" accept`
-		for _, wantPart := range []string{serviceAccept, privateReject, tailnetReject, publicAccept, `oifname "yeet0" ct state related,established accept`} {
+		for _, wantPart := range []string{serviceAccept, serviceReplyAccept, privateReject, tailnetReject, publicAccept, `oifname "yeet0" ct state related,established accept`} {
 			if !strings.Contains(got, wantPart) {
 				t.Fatalf("nft rules missing %q in output:\n%s", wantPart, got)
 			}
+		}
+		if strings.Index(got, serviceReplyAccept) > strings.Index(got, privateReject) {
+			t.Fatalf("service reply accept must precede broader private reject:\n%s", got)
 		}
 		if strings.Index(got, serviceAccept) > strings.Index(got, privateReject) {
 			t.Fatalf("service subnet accept must precede broader private reject:\n%s", got)
@@ -172,13 +176,17 @@ func TestRenderRulesetConstrainsServiceNetworkEgress(t *testing.T) {
 
 		got := RenderFirewallRules(BackendIPTablesNFT, spec)
 		serviceAccept := "-A YEET_FORWARD -i yeet0 -d 192.168.100.0/24 -j ACCEPT"
+		serviceReplyAccept := "-A YEET_FORWARD -i yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"
 		privateReject := "-A YEET_FORWARD -i yeet0 -d 192.168.0.0/16 -j REJECT"
 		tailnetReject := "-A YEET_FORWARD -i yeet0 -d 100.64.0.0/10 -j REJECT"
 		publicAccept := "-A YEET_FORWARD -i yeet0 -j ACCEPT"
-		for _, wantPart := range []string{serviceAccept, privateReject, tailnetReject, publicAccept, "-A YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"} {
+		for _, wantPart := range []string{serviceAccept, serviceReplyAccept, privateReject, tailnetReject, publicAccept, "-A YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"} {
 			if !strings.Contains(got, wantPart) {
 				t.Fatalf("iptables rules missing %q in output:\n%s", wantPart, got)
 			}
+		}
+		if strings.Index(got, serviceReplyAccept) > strings.Index(got, privateReject) {
+			t.Fatalf("service reply accept must precede broader private reject:\n%s", got)
 		}
 		if strings.Index(got, serviceAccept) > strings.Index(got, privateReject) {
 			t.Fatalf("service subnet accept must precede broader private reject:\n%s", got)
