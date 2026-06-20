@@ -618,7 +618,7 @@ func TestServerStartLogsNATReconciliationFailureNonFatally(t *testing.T) {
 		t.Fatal("timed out waiting for link reconciliation to run")
 	}
 
-	out := logs.String()
+	out := waitForLogContains(t, logs, "docker netns NAT reconciliation failed: nat exploded")
 	if !strings.Contains(out, "docker netns NAT reconciliation failed: nat exploded") {
 		t.Fatalf("missing NAT failure log:\n%s", out)
 	}
