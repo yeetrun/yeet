@@ -150,6 +150,7 @@ func parseFirewallBackend(raw string) (FirewallBackend, error) {
 
 func renderNFTForwardRules(spec FirewallSpec) string {
 	var b strings.Builder
+	fmt.Fprintf(&b, "\t\tiifname %q ct state related,established accept\n", spec.BridgeIf)
 	fmt.Fprintf(&b, "\t\toifname %q ct state related,established accept\n", spec.BridgeIf)
 	fmt.Fprintf(&b, "\t\tiifname %q ip daddr %s accept\n", spec.BridgeIf, spec.SubnetCIDR)
 	for _, cidr := range serviceNetworkNonPublicIPv4CIDRs {
@@ -161,6 +162,7 @@ func renderNFTForwardRules(spec FirewallSpec) string {
 
 func renderIPTablesForwardRules(spec FirewallSpec) string {
 	var b strings.Builder
+	fmt.Fprintf(&b, "-A YEET_FORWARD -i %s -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n", spec.BridgeIf)
 	fmt.Fprintf(&b, "-A YEET_FORWARD -o %s -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n", spec.BridgeIf)
 	fmt.Fprintf(&b, "-A YEET_FORWARD -i %s -d %s -j ACCEPT\n", spec.BridgeIf, spec.SubnetCIDR)
 	for _, cidr := range serviceNetworkNonPublicIPv4CIDRs {
