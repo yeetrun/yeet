@@ -7,6 +7,7 @@ package tui
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -75,4 +76,42 @@ func TestSpinnerStartWhileRunningUpdatesMessage(t *testing.T) {
 	if got := out.String(); !strings.Contains(got, "first") {
 		t.Fatalf("spinner output = %q, want first render", got)
 	}
+}
+
+func TestSpinnerConcurrentUpdatesAreSerialized(t *testing.T) {
+	var out bytes.Buffer
+	spinner := NewSpinner(&out, WithFrames([]string{"-", "+"}), WithInterval(time.Millisecond))
+
+	spinner.Start("start")
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				spinner.Update("worker")
+			}
+		}(worker)
+	}
+	wg.Wait()
+	spinner.Stop(true)
+}
+
+func TestSpinnerStopWhileUpdatesAreRendering(t *testing.T) {
+	var out bytes.Buffer
+	spinner := NewSpinner(&out, WithFrames([]string{"-", "+"}), WithInterval(time.Millisecond))
+
+	spinner.Start("start")
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 20; i++ {
+				spinner.Update("worker")
+			}
+		}()
+	}
+	spinner.Stop(true)
+	wg.Wait()
 }

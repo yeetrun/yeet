@@ -27,6 +27,8 @@ type Spinner struct {
 	running bool
 	stopCh  chan struct{}
 	doneCh  chan struct{}
+
+	renderMu sync.Mutex
 }
 
 type SpinnerOption func(*Spinner)
@@ -118,14 +120,9 @@ func (s *Spinner) Stop(clear bool) {
 	close(stopCh)
 	<-doneCh
 
-	if clear {
-		s.clearLine()
-	} else {
-		_, _ = fmt.Fprintln(s.out)
-	}
-	if s.hideCursor {
-		_, _ = fmt.Fprint(s.out, "\x1b[?25h")
-	}
+	s.renderMu.Lock()
+	s.stopRenderLocked(clear)
+	s.renderMu.Unlock()
 }
 
 func (s *Spinner) loop() {
@@ -169,9 +166,22 @@ func (s *Spinner) renderFrame(idx int, msg string) {
 	if msg != "" {
 		line = line + " " + msg
 	}
+	s.renderMu.Lock()
+	defer s.renderMu.Unlock()
 	_, _ = fmt.Fprintf(s.out, "\r\033[K%s", line)
 }
 
-func (s *Spinner) clearLine() {
+func (s *Spinner) clearLineLocked() {
 	_, _ = fmt.Fprint(s.out, "\r\033[K")
+}
+
+func (s *Spinner) stopRenderLocked(clear bool) {
+	if clear {
+		s.clearLineLocked()
+	} else {
+		_, _ = fmt.Fprintln(s.out)
+	}
+	if s.hideCursor {
+		_, _ = fmt.Fprint(s.out, "\x1b[?25h")
+	}
 }
