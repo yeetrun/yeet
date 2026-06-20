@@ -738,12 +738,25 @@ func (p *plugin) JoinNetwork(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		NetworkID  string `json:"NetworkID"`
 		EndpointID string `json:"EndpointID"`
+		Options    struct {
+			PortMap *[]portMap `json:"com.docker.network.portmap"`
+		} `json:"Options"`
 	}
 	if !decodePluginRequest(w, r, &req) {
 		return
 	}
+	var dbpm map[db.ProtoPort]*db.EndpointPort
+	updatePortMap := req.Options.PortMap != nil
+	if updatePortMap {
+		var err error
+		dbpm, err = endpointPortMap(req.EndpointID, *req.Options.PortMap)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 
-	join, status, err := p.joinNetworkState(req.NetworkID, req.EndpointID)
+	join, status, err := p.joinNetworkState(req.NetworkID, req.EndpointID, dbpm, updatePortMap)
 	if err != nil {
 		http.Error(w, err.Error(), status)
 		return
@@ -771,7 +784,7 @@ type joinNetworkState struct {
 	gatewayPrefix netip.Prefix
 }
 
-func (p *plugin) joinNetworkState(networkID, endpointID string) (joinNetworkState, int, error) {
+func (p *plugin) joinNetworkState(networkID, endpointID string, dbpm map[db.ProtoPort]*db.EndpointPort, updatePortMap bool) (joinNetworkState, int, error) {
 	dv, err := p.db.Get()
 	if err != nil {
 		return joinNetworkState{}, http.StatusInternalServerError, err
@@ -784,13 +797,23 @@ func (p *plugin) joinNetworkState(networkID, endpointID string) (joinNetworkStat
 		return joinNetworkState{}, http.StatusBadRequest, fmt.Errorf("endpoint not found")
 	}
 	ifName := "yv-" + endpointID[:4]
-	return joinNetworkState{
+	join := joinNetworkState{
 		netns:         n.NetNS,
 		ifName:        ifName,
 		peerName:      ifName + "p",
 		gateway:       n.IPv4Gateway.Addr(),
 		gatewayPrefix: n.IPv4Gateway,
-	}, http.StatusOK, nil
+	}
+	if updatePortMap {
+		if _, err := p.db.MutateData(func(d *db.Data) error {
+			n := d.DockerNetworks[networkID]
+			setEndpointPortMappings(n, endpointID, dbpm)
+			return nil
+		}); err != nil {
+			return joinNetworkState{}, http.StatusInternalServerError, err
+		}
+	}
+	return join, http.StatusOK, nil
 }
 
 func (p *plugin) joinNetwork(join joinNetworkState) error {
