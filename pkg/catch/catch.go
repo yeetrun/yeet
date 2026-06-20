@@ -203,11 +203,11 @@ func (s *Server) Start() {
 }
 
 func (s *Server) reconcileRuntimeState() {
-	if err := reconcileDockerNetNSPortForwards(s.cfg.DB); err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("docker netns NAT reconciliation failed: %v", err)
-	}
 	if err := s.reconcileNetNSBackedDockerServices(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("netns reconciliation failed: %v", err)
+	}
+	if err := reconcileDockerNetNSPortForwards(s.cfg.DB); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("docker netns NAT reconciliation failed: %v", err)
 	}
 	if err := s.reconcileVMNetworks(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("VM network reconciliation failed: %v", err)
