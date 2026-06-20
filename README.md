@@ -225,6 +225,8 @@ yeet run devbox vm://ubuntu/26.04 --net=svc,lan
 LAN-only VMs are reached directly at their guest LAN IP. VMs on `svc` proxy
 through catch, and VMs on `svc,lan` use the LAN IP when your workstation can
 reach it before falling back to the catch-proxied management path.
+In `svc,lan` mode, normal outbound traffic from the guest uses the LAN route
+while the service network remains available for yeet-managed names and access.
 Services and VMs on `svc` also resolve other service-network names through
 yeet DNS, including short names and `*.yeet.internal` names.
 

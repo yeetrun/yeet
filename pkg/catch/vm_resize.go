@@ -363,6 +363,7 @@ func vmNetworkPlanFromDB(service string, networks []db.VMNetworkConfig) vmNetwor
 		}
 		plan.Interfaces = append(plan.Interfaces, iface)
 	}
+	plan.applyGuestRoutePolicy()
 	return plan
 }
 
