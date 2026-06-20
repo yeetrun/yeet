@@ -153,8 +153,9 @@ func renderNFTForwardRules(spec FirewallSpec) string {
 	fmt.Fprintf(&b, "\t\tiifname %q ct state related,established accept\n", spec.BridgeIf)
 	fmt.Fprintf(&b, "\t\toifname %q ct state related,established accept\n", spec.BridgeIf)
 	fmt.Fprintf(&b, "\t\tiifname %q ip daddr %s accept\n", spec.BridgeIf, spec.SubnetCIDR)
+	// Drop keeps blocked service-network egress silent instead of returning ICMP unreachable.
 	for _, cidr := range serviceNetworkNonPublicIPv4CIDRs {
-		fmt.Fprintf(&b, "\t\tiifname %q ip daddr %s reject\n", spec.BridgeIf, cidr)
+		fmt.Fprintf(&b, "\t\tiifname %q ip daddr %s drop\n", spec.BridgeIf, cidr)
 	}
 	fmt.Fprintf(&b, "\t\tiifname %q accept\n", spec.BridgeIf)
 	return b.String()
@@ -165,8 +166,9 @@ func renderIPTablesForwardRules(spec FirewallSpec) string {
 	fmt.Fprintf(&b, "-A YEET_FORWARD -i %s -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n", spec.BridgeIf)
 	fmt.Fprintf(&b, "-A YEET_FORWARD -o %s -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n", spec.BridgeIf)
 	fmt.Fprintf(&b, "-A YEET_FORWARD -i %s -d %s -j ACCEPT\n", spec.BridgeIf, spec.SubnetCIDR)
+	// DROP keeps blocked service-network egress silent instead of returning ICMP unreachable.
 	for _, cidr := range serviceNetworkNonPublicIPv4CIDRs {
-		fmt.Fprintf(&b, "-A YEET_FORWARD -i %s -d %s -j REJECT\n", spec.BridgeIf, cidr)
+		fmt.Fprintf(&b, "-A YEET_FORWARD -i %s -d %s -j DROP\n", spec.BridgeIf, cidr)
 	}
 	fmt.Fprintf(&b, "-A YEET_FORWARD -i %s -j ACCEPT\n", spec.BridgeIf)
 	return b.String()
@@ -253,7 +255,7 @@ func ensureIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
 	for _, cidr := range serviceNetworkNonPublicIPv4CIDRs {
 		cidr := cidr
 		steps = append(steps, func() error {
-			return appendIPTablesRule(bin, "filter", "YEET_FORWARD", "-i", spec.BridgeIf, "-d", cidr, "-j", "REJECT")
+			return appendIPTablesRule(bin, "filter", "YEET_FORWARD", "-i", spec.BridgeIf, "-d", cidr, "-j", "DROP")
 		})
 	}
 	steps = append(steps,
@@ -290,9 +292,9 @@ func nftFirewallMarkers(spec FirewallSpec) []string {
 		`oifname "` + spec.BridgeIf + `"`,
 		"ct state",
 		`iifname "` + spec.BridgeIf + `" ip daddr ` + spec.SubnetCIDR + ` accept`,
-		`iifname "` + spec.BridgeIf + `" ip daddr 10.0.0.0/8 reject`,
-		`iifname "` + spec.BridgeIf + `" ip daddr 100.64.0.0/10 reject`,
-		`iifname "` + spec.BridgeIf + `" ip daddr 192.168.0.0/16 reject`,
+		`iifname "` + spec.BridgeIf + `" ip daddr 10.0.0.0/8 drop`,
+		`iifname "` + spec.BridgeIf + `" ip daddr 100.64.0.0/10 drop`,
+		`iifname "` + spec.BridgeIf + `" ip daddr 192.168.0.0/16 drop`,
 		`iifname "` + spec.BridgeIf + `" accept`,
 		"masquerade",
 	}
@@ -335,18 +337,18 @@ func iptablesFirewallStateChecks(spec FirewallSpec) []firewallStateCheck {
 		},
 		{
 			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 10.0.0.0/8 -j REJECT",
-			err:  errors.New("missing yeet RFC1918 reject rule"),
+			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 10.0.0.0/8 -j DROP",
+			err:  errors.New("missing yeet RFC1918 drop rule"),
 		},
 		{
 			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 100.64.0.0/10 -j REJECT",
-			err:  errors.New("missing yeet CGNAT reject rule"),
+			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 100.64.0.0/10 -j DROP",
+			err:  errors.New("missing yeet CGNAT drop rule"),
 		},
 		{
 			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 192.168.0.0/16 -j REJECT",
-			err:  errors.New("missing yeet private reject rule"),
+			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 192.168.0.0/16 -j DROP",
+			err:  errors.New("missing yeet private drop rule"),
 		},
 		{
 			args: []string{"-S", "YEET_FORWARD"},
