@@ -1055,7 +1055,12 @@ func (p *plugin) RevokeExternalConnectivity(w http.ResponseWriter, r *http.Reque
 			return fmt.Errorf("network not found")
 		}
 		netns = n.NetNS
-		removeEndpointPortMappings(n, req.EndpointID)
+		// Docker can send RevokeExternalConnectivity immediately after
+		// ProgramExternalConnectivity while the endpoint is still running.
+		// LeaveNetwork/DeleteEndpoint own cleanup for active endpoints.
+		if _, ok := n.Endpoints[req.EndpointID]; !ok {
+			removeEndpointPortMappings(n, req.EndpointID)
+		}
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

@@ -1204,7 +1204,7 @@ func TestRevokeExternalConnectivityRouteRegistered(t *testing.T) {
 	}
 }
 
-func TestRevokeExternalConnectivityRemovesPortMapAndReplaysAggregateRules(t *testing.T) {
+func TestRevokeExternalConnectivityPreservesActiveEndpointPortMap(t *testing.T) {
 	var syncs []capturedPortForwardSync
 	p := newTestPlugin(t, &db.Data{
 		DockerNetworks: map[string]*db.DockerNetwork{
@@ -1230,16 +1230,22 @@ func TestRevokeExternalConnectivityRemovesPortMapAndReplaysAggregateRules(t *tes
 	if len(syncs) != 1 {
 		t.Fatalf("sync count = %d, want 1", len(syncs))
 	}
-	if len(syncs[0].rules) != 0 {
-		t.Fatalf("rules after revoke = %#v, want none", syncs[0].rules)
+	wantRules := []portForwardRule{
+		{Proto: "tcp", HostPort: 3000, TargetIP: "172.21.0.4", TargetPort: 3000},
+	}
+	if diff := cmp.Diff(wantRules, syncs[0].rules); diff != "" {
+		t.Fatalf("sync rules mismatch (-want +got):\n%s", diff)
 	}
 
 	dv, err := p.db.Get()
 	if err != nil {
 		t.Fatalf("db.Get: %v", err)
 	}
-	if got := dv.AsStruct().DockerNetworks["demoapp"].PortMap; len(got) != 0 {
-		t.Fatalf("port map after revoke = %#v, want empty", got)
+	wantPortMap := map[string]*db.EndpointPort{
+		"6/3000": {EndpointID: "web", Port: 3000},
+	}
+	if diff := cmp.Diff(wantPortMap, dv.AsStruct().DockerNetworks["demoapp"].PortMap, cmp.AllowUnexported(db.EndpointPort{})); diff != "" {
+		t.Fatalf("port map mismatch (-want +got):\n%s", diff)
 	}
 }
 
