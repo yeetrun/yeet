@@ -395,9 +395,63 @@ func TestVMSSHExecutionPlanForServiceBuildsProxyPlan(t *testing.T) {
 	}
 }
 
-func TestServiceShellCommandForVMSvcLANPrefersLANAndProxies(t *testing.T) {
+func TestServiceShellCommandForVMSvcLANUsesReachableLANDirectly(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	stubVMSSHLANReachable(t, func(host string) bool {
+		return host == "10.0.4.80"
+	})
+
+	gotCommand, gotOptions, repair, err := serviceShellCommandPlanFromResponse(
+		"yeet-pve1",
+		"devbox",
+		serverInfo{InstallUser: "root"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "10.0.4.80"},
+					Networks: []catchrpc.ServiceVMNetwork{
+						{Mode: "svc", IP: "192.168.100.12"},
+						{Mode: "lan", IP: "10.0.4.80"},
+					},
+				},
+			},
+		},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("serviceShellCommandFromResponse: %v", err)
+	}
+	if len(gotCommand) != 0 {
+		t.Fatalf("command = %#v, want empty", gotCommand)
+	}
+	if !sshOptionsContainValue(gotOptions, "HostName=10.0.4.80") {
+		t.Fatalf("options = %#v, want LAN hostname", gotOptions)
+	}
+	if sshOptionsCountValuePrefix(gotOptions, "ProxyCommand=") != 0 {
+		t.Fatalf("options = %#v, want direct LAN without generated proxy", gotOptions)
+	}
+	if repair == nil {
+		t.Fatal("KnownHostRepair = nil, want VM repair metadata")
+	}
+	if len(repair.ExtraAliases) != 0 {
+		t.Fatalf("repair extra aliases = %#v, want none for direct LAN SSH", repair.ExtraAliases)
+	}
+}
+
+func TestServiceShellCommandForVMSvcLANFallsBackToSvcProxyWhenLANUnreachable(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	stubVMSSHLANReachable(t, func(host string) bool {
+		if host != "10.0.4.80" {
+			t.Fatalf("LAN reachability checked host %q, want 10.0.4.80", host)
+		}
+		return false
+	})
 
 	gotCommand, gotOptions, repair, err := serviceShellCommandPlanFromResponse(
 		"yeet-pve1",
@@ -427,7 +481,7 @@ func TestServiceShellCommandForVMSvcLANPrefersLANAndProxies(t *testing.T) {
 		t.Fatalf("command = %#v, want empty", gotCommand)
 	}
 	wantProxy := "ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts") + " -o HostKeyAlias=yeet-proxy@yeet-pve1 -o CheckHostIP=no -W %h:%p root@yeet-pve1"
-	for _, want := range []string{"HostName=10.0.4.80", wantProxy} {
+	for _, want := range []string{"HostName=192.168.100.12", wantProxy} {
 		if !sshOptionsContainValue(gotOptions, want) {
 			t.Fatalf("options = %#v, want %q", gotOptions, want)
 		}
@@ -483,6 +537,42 @@ func TestServiceShellCommandForVMLANNetworkConnectsDirectByDefault(t *testing.T)
 	}
 	if len(repair.ExtraAliases) != 0 {
 		t.Fatalf("repair extra aliases = %#v, want none for direct LAN SSH", repair.ExtraAliases)
+	}
+}
+
+func TestServiceShellCommandForVMLANNetworkUsesNetworkIPWithoutSSHReport(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	gotCommand, gotOptions, repair, err := serviceShellCommandPlanFromResponse(
+		"yeet-pve1",
+		"devbox",
+		serverInfo{InstallUser: "root"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				VM: &catchrpc.ServiceVM{
+					Networks: []catchrpc.ServiceVMNetwork{{Mode: "lan", IP: "10.0.4.80"}},
+				},
+			},
+		},
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("serviceShellCommandFromResponse: %v", err)
+	}
+	if len(gotCommand) != 0 {
+		t.Fatalf("command = %#v, want empty", gotCommand)
+	}
+	for _, want := range []string{"-l", "ubuntu", "HostName=10.0.4.80"} {
+		if !sshOptionsContainValue(gotOptions, want) && !slices.Contains(gotOptions, want) {
+			t.Fatalf("options = %#v, want %q", gotOptions, want)
+		}
+	}
+	if repair == nil {
+		t.Fatal("KnownHostRepair = nil, want VM repair metadata")
 	}
 }
 
@@ -542,6 +632,39 @@ func TestServiceShellCommandForVMLANNetworkForceProxy(t *testing.T) {
 	}
 	if plan.KnownHostRepair == nil || !slices.Contains(plan.KnownHostRepair.ExtraAliases, "yeet-proxy@yeet-pve1") {
 		t.Fatalf("repair = %#v, want proxy alias", plan.KnownHostRepair)
+	}
+}
+
+func TestServiceShellCommandForVMSvcLANForceProxyUsesSvcIP(t *testing.T) {
+	stubVMSSHLANReachable(t, func(host string) bool {
+		t.Fatalf("LAN reachability should not be checked when force proxy is set")
+		return false
+	})
+	home, plan := testSSHExecutionPlan(t,
+		[]string{"ssh", "--force-proxy", "devbox"},
+		catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				ServiceType: "vm",
+				Network:     catchrpc.ServiceNetwork{SvcIP: "192.168.100.12"},
+				VM: &catchrpc.ServiceVM{
+					SSH: &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "10.0.4.80"},
+					Networks: []catchrpc.ServiceVMNetwork{
+						{Mode: "svc", IP: "192.168.100.12"},
+						{Mode: "lan", IP: "10.0.4.80"},
+					},
+				},
+			},
+		},
+	)
+	wantProxy := "ProxyCommand=ssh -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts") + " -o HostKeyAlias=yeet-proxy@yeet-pve1 -o CheckHostIP=no -W %h:%p root@yeet-pve1"
+	for _, want := range []string{"HostName=192.168.100.12", wantProxy} {
+		if !sshOptionsContainValue(plan.Args, want) {
+			t.Fatalf("args = %#v, want %q", plan.Args, want)
+		}
+	}
+	if sshOptionsContainValue(plan.Args, "HostName=10.0.4.80") {
+		t.Fatalf("args = %#v, force proxy should not target LAN IP", plan.Args)
 	}
 }
 
@@ -1307,6 +1430,15 @@ func stubRemoveSSHKnownHost(t *testing.T, fn sshKnownHostRemover) {
 	removeSSHKnownHostFunc = fn
 	t.Cleanup(func() {
 		removeSSHKnownHostFunc = old
+	})
+}
+
+func stubVMSSHLANReachable(t *testing.T, fn func(string) bool) {
+	t.Helper()
+	old := vmSSHLANReachableFunc
+	vmSSHLANReachableFunc = fn
+	t.Cleanup(func() {
+		vmSSHLANReachableFunc = old
 	})
 }
 
