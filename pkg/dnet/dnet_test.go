@@ -794,6 +794,61 @@ func TestJoinNetworkUsesCommandAndNetNSBackends(t *testing.T) {
 	}
 }
 
+func TestJoinNetworkUpdatesPortMapFromOptions(t *testing.T) {
+	backend := &fakeNatRuleBackend{}
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"uptime": {
+				NetNS:       "/var/run/netns/yeet-uptime-kuma-ns",
+				NetworkID:   "uptime",
+				IPv4Gateway: netip.MustParsePrefix("172.19.0.1/16"),
+				Endpoints: map[string]*db.DockerEndpoint{
+					"current": {EndpointID: "current", IPv4: netip.MustParsePrefix("172.19.0.2/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/3001": {EndpointID: "stale", Port: 3001},
+				},
+			},
+		},
+	}, &syncs)
+	p.runCommandFunc = func(string, ...string) error { return nil }
+	p.runInNetNSFunc = func(netns string, f func() error) error { return f() }
+	p.natBackendFunc = func() natRuleBackend { return backend }
+
+	rr := postJSON(t, p.JoinNetwork, map[string]any{
+		"NetworkID":  "uptime",
+		"EndpointID": "current",
+		"Options": map[string]any{
+			"com.docker.network.portmap": []map[string]any{
+				{"Proto": 6, "Port": 3001, "HostPort": 3001, "HostPortEnd": 3001},
+			},
+		},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("JoinNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	wantPrerouting := []string{
+		"-A YEET_PREROUTING -i br0 -j RETURN",
+		"-A YEET_PREROUTING -p tcp -m tcp --dport 3001 -j DNAT --to-destination 172.19.0.2:3001",
+	}
+	if diff := cmp.Diff(wantPrerouting, backend.prerouting); diff != "" {
+		t.Fatalf("prerouting rules mismatch (-want +got):\n%s", diff)
+	}
+
+	dv, err := p.db.Get()
+	if err != nil {
+		t.Fatalf("db.Get: %v", err)
+	}
+	got := dv.AsStruct().DockerNetworks["uptime"].PortMap
+	want := map[string]*db.EndpointPort{
+		"6/3001": {EndpointID: "current", Port: 3001},
+	}
+	if diff := cmp.Diff(want, got, cmp.AllowUnexported(db.EndpointPort{})); diff != "" {
+		t.Fatalf("port map mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestJoinNetworkRejectsMissingNetworkAndEndpoint(t *testing.T) {
 	store := newTestStore(t, &db.Data{
 		DockerNetworks: map[string]*db.DockerNetwork{
