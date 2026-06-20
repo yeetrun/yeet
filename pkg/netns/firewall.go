@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"strings"
 )
@@ -22,6 +23,7 @@ const (
 
 type FirewallSpec struct {
 	SubnetCIDR string
+	HostCIDR   string
 	BridgeIf   string
 }
 
@@ -109,6 +111,11 @@ func LoadFirewallEnv(envv []string) (FirewallConfig, error) {
 	if spec.SubnetCIDR == "" {
 		return FirewallConfig{}, fmt.Errorf("missing RANGE in environment")
 	}
+	hostCIDR, err := serviceNetworkHostCIDR(spec.SubnetCIDR, vals["HOST_IP"])
+	if err != nil {
+		return FirewallConfig{}, err
+	}
+	spec.HostCIDR = hostCIDR
 	if spec.BridgeIf == "" {
 		spec.BridgeIf = defaultFirewallBridgeIf
 	}
@@ -148,6 +155,70 @@ func parseFirewallBackend(raw string) (FirewallBackend, error) {
 	}
 }
 
+func serviceNetworkHostCIDR(subnetCIDR, rawHost string) (string, error) {
+	if rawHost != "" {
+		if prefix, err := netip.ParsePrefix(rawHost); err == nil {
+			addr := prefix.Addr()
+			if !addr.Is4() {
+				return "", fmt.Errorf("HOST_IP must be an IPv4 address or prefix")
+			}
+			return netip.PrefixFrom(addr, addr.BitLen()).String(), nil
+		}
+		addr, err := netip.ParseAddr(rawHost)
+		if err != nil {
+			return "", fmt.Errorf("parse HOST_IP: %w", err)
+		}
+		if !addr.Is4() {
+			return "", fmt.Errorf("HOST_IP must be an IPv4 address or prefix")
+		}
+		return netip.PrefixFrom(addr, addr.BitLen()).String(), nil
+	}
+
+	prefix, err := netip.ParsePrefix(subnetCIDR)
+	if err != nil {
+		return "", fmt.Errorf("parse RANGE: %w", err)
+	}
+	prefix = prefix.Masked()
+	if !prefix.Addr().Is4() {
+		return "", fmt.Errorf("RANGE must be an IPv4 prefix")
+	}
+	addr := prefix.Addr().Next()
+	if !prefix.Contains(addr) {
+		return "", fmt.Errorf("cannot derive service host IP from RANGE %q", subnetCIDR)
+	}
+	return netip.PrefixFrom(addr, addr.BitLen()).String(), nil
+}
+
+func firewallHostCIDR(spec FirewallSpec) string {
+	hostCIDR, err := serviceNetworkHostCIDR(spec.SubnetCIDR, spec.HostCIDR)
+	if err != nil {
+		return spec.HostCIDR
+	}
+	return hostCIDR
+}
+
+func firewallHostAddr(spec FirewallSpec) string {
+	hostCIDR := firewallHostCIDR(spec)
+	if prefix, err := netip.ParsePrefix(hostCIDR); err == nil {
+		return prefix.Addr().String()
+	}
+	if addr, err := netip.ParseAddr(hostCIDR); err == nil {
+		return addr.String()
+	}
+	return hostCIDR
+}
+
+func renderNFTInputRules(spec FirewallSpec) string {
+	hostAddr := firewallHostAddr(spec)
+	var b strings.Builder
+	fmt.Fprintf(&b, "\t\tiifname %q ct state related,established accept\n", spec.BridgeIf)
+	fmt.Fprintf(&b, "\t\tiifname %q ip daddr %s udp dport 53 accept\n", spec.BridgeIf, hostAddr)
+	fmt.Fprintf(&b, "\t\tiifname %q ip daddr %s tcp dport 53 accept\n", spec.BridgeIf, hostAddr)
+	// IPv4 service guests should only reach the host for service DNS.
+	fmt.Fprintf(&b, "\t\tiifname %q drop\n", spec.BridgeIf)
+	return b.String()
+}
+
 func renderNFTForwardRules(spec FirewallSpec) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "\t\tiifname %q ct state related,established accept\n", spec.BridgeIf)
@@ -158,6 +229,17 @@ func renderNFTForwardRules(spec FirewallSpec) string {
 		fmt.Fprintf(&b, "\t\tiifname %q ip daddr %s drop\n", spec.BridgeIf, cidr)
 	}
 	fmt.Fprintf(&b, "\t\tiifname %q accept\n", spec.BridgeIf)
+	return b.String()
+}
+
+func renderIPTablesInputRules(spec FirewallSpec) string {
+	hostCIDR := firewallHostCIDR(spec)
+	var b strings.Builder
+	fmt.Fprintf(&b, "-A YEET_INPUT -i %s -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT\n", spec.BridgeIf)
+	fmt.Fprintf(&b, "-A YEET_INPUT -i %s -d %s -p udp -m udp --dport 53 -j ACCEPT\n", spec.BridgeIf, hostCIDR)
+	fmt.Fprintf(&b, "-A YEET_INPUT -i %s -d %s -p tcp -m tcp --dport 53 -j ACCEPT\n", spec.BridgeIf, hostCIDR)
+	// IPv4 service guests should only reach the host for service DNS.
+	fmt.Fprintf(&b, "-A YEET_INPUT -i %s -j DROP\n", spec.BridgeIf)
 	return b.String()
 }
 
@@ -178,6 +260,10 @@ func RenderFirewallRules(backend FirewallBackend, spec FirewallSpec) string {
 	switch backend {
 	case BackendNFT:
 		return fmt.Sprintf(`table ip yeet {
+	chain input {
+		type filter hook input priority filter; policy accept;
+%s	}
+
 	chain forward {
 		type filter hook forward priority filter; policy accept;
 %s	}
@@ -187,18 +273,20 @@ func RenderFirewallRules(backend FirewallBackend, spec FirewallSpec) string {
 		ip saddr %s ip daddr != %s masquerade
 	}
 }
-`, renderNFTForwardRules(spec), spec.SubnetCIDR, spec.SubnetCIDR)
+`, renderNFTInputRules(spec), renderNFTForwardRules(spec), spec.SubnetCIDR, spec.SubnetCIDR)
 	case BackendIPTablesNFT, BackendIPTablesLegacy:
 		return fmt.Sprintf(`*filter
+:YEET_INPUT -
 :YEET_FORWARD -
+-A INPUT -j YEET_INPUT
 -A FORWARD -j YEET_FORWARD
-%sCOMMIT
+%s%sCOMMIT
 *nat
 :YEET_POSTROUTING -
 -A POSTROUTING -j YEET_POSTROUTING
 -A YEET_POSTROUTING -s %s ! -d %s -j MASQUERADE
 COMMIT
-`, renderIPTablesForwardRules(spec), spec.SubnetCIDR, spec.SubnetCIDR)
+`, renderIPTablesInputRules(spec), renderIPTablesForwardRules(spec), spec.SubnetCIDR, spec.SubnetCIDR)
 	default:
 		return ""
 	}
@@ -239,12 +327,30 @@ func ensureIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
 		return err
 	}
 	steps := []func() error{
+		func() error { return ensureIPTablesChain(bin, "filter", "YEET_INPUT") },
 		func() error { return ensureIPTablesChain(bin, "filter", "YEET_FORWARD") },
+		func() error { return ensureIPTablesRule(bin, "filter", "INPUT", "-j", "YEET_INPUT") },
 		func() error { return ensureIPTablesRule(bin, "filter", "FORWARD", "-j", "YEET_FORWARD") },
 		func() error { return ensureIPTablesChain(bin, "nat", "YEET_POSTROUTING") },
 		func() error { return ensureIPTablesRule(bin, "nat", "POSTROUTING", "-j", "YEET_POSTROUTING") },
+		func() error { return flushIPTablesChain(bin, "filter", "YEET_INPUT") },
 		func() error { return flushIPTablesChain(bin, "filter", "YEET_FORWARD") },
 		func() error { return flushIPTablesChain(bin, "nat", "YEET_POSTROUTING") },
+		func() error {
+			return appendIPTablesRule(bin, "filter", "YEET_INPUT", "-i", spec.BridgeIf, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		},
+		func() error {
+			return appendIPTablesRule(bin, "filter", "YEET_INPUT", "-i", spec.BridgeIf, "-d", firewallHostCIDR(spec), "-p", "udp", "-m", "udp", "--dport", "53", "-j", "ACCEPT")
+		},
+		func() error {
+			return appendIPTablesRule(bin, "filter", "YEET_INPUT", "-i", spec.BridgeIf, "-d", firewallHostCIDR(spec), "-p", "tcp", "-m", "tcp", "--dport", "53", "-j", "ACCEPT")
+		},
+		func() error {
+			return appendIPTablesRule(bin, "filter", "YEET_INPUT", "-i", spec.BridgeIf, "-j", "DROP")
+		},
+		func() error {
+			return appendIPTablesRule(bin, "filter", "YEET_FORWARD", "-i", spec.BridgeIf, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
+		},
 		func() error {
 			return appendIPTablesRule(bin, "filter", "YEET_FORWARD", "-o", spec.BridgeIf, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT")
 		},
@@ -289,6 +395,9 @@ func verifyNFTFirewall(spec FirewallSpec) error {
 func nftFirewallMarkers(spec FirewallSpec) []string {
 	return []string{
 		"table ip yeet",
+		`iifname "` + spec.BridgeIf + `" ip daddr ` + firewallHostAddr(spec) + ` udp dport 53 accept`,
+		`iifname "` + spec.BridgeIf + `" ip daddr ` + firewallHostAddr(spec) + ` tcp dport 53 accept`,
+		`iifname "` + spec.BridgeIf + `" drop`,
 		`oifname "` + spec.BridgeIf + `"`,
 		"ct state",
 		`iifname "` + spec.BridgeIf + `" ip daddr ` + spec.SubnetCIDR + ` accept`,
@@ -325,6 +434,31 @@ func verifyIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
 
 func iptablesFirewallStateChecks(spec FirewallSpec) []firewallStateCheck {
 	return []firewallStateCheck{
+		{
+			args: []string{"-S", "YEET_INPUT"},
+			want: "-A YEET_INPUT -i " + spec.BridgeIf + " -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+			err:  errors.New("missing yeet host input return rule"),
+		},
+		{
+			args: []string{"-S", "YEET_INPUT"},
+			want: "-A YEET_INPUT -i " + spec.BridgeIf + " -d " + firewallHostCIDR(spec) + " -p udp -m udp --dport 53 -j ACCEPT",
+			err:  errors.New("missing yeet host DNS UDP allow rule"),
+		},
+		{
+			args: []string{"-S", "YEET_INPUT"},
+			want: "-A YEET_INPUT -i " + spec.BridgeIf + " -d " + firewallHostCIDR(spec) + " -p tcp -m tcp --dport 53 -j ACCEPT",
+			err:  errors.New("missing yeet host DNS TCP allow rule"),
+		},
+		{
+			args: []string{"-S", "YEET_INPUT"},
+			want: "-A YEET_INPUT -i " + spec.BridgeIf + " -j DROP",
+			err:  errors.New("missing yeet host input drop rule"),
+		},
+		{
+			args: []string{"-S", "YEET_FORWARD"},
+			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
+			err:  errors.New("missing yeet forward service return rule"),
+		},
 		{
 			args: []string{"-S", "YEET_FORWARD"},
 			want: "-A YEET_FORWARD -o " + spec.BridgeIf + " -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
@@ -366,6 +500,11 @@ func iptablesFirewallStateChecks(spec FirewallSpec) []firewallStateCheck {
 			err:  errors.New("missing yeet forward jump rule"),
 		},
 		{
+			args: []string{"-S", "INPUT"},
+			want: "-A INPUT -j YEET_INPUT",
+			err:  errors.New("missing yeet input jump rule"),
+		},
+		{
 			args: []string{"-t", "nat", "-S", "POSTROUTING"},
 			want: "-A POSTROUTING -j YEET_POSTROUTING",
 			err:  errors.New("missing yeet postrouting jump rule"),
@@ -393,6 +532,12 @@ func CleanupFirewall(backend FirewallBackend) error {
 	case BackendIPTablesNFT, BackendIPTablesLegacy:
 		bin, err := iptablesBinary(backend)
 		if err != nil {
+			return err
+		}
+		if err := deleteIPTablesRuleIfPresent(bin, "filter", "INPUT", "-j", "YEET_INPUT"); err != nil {
+			return err
+		}
+		if err := deleteIPTablesChain(bin, "filter", "YEET_INPUT"); err != nil {
 			return err
 		}
 		if err := deleteIPTablesRuleIfPresent(bin, "filter", "FORWARD", "-j", "YEET_FORWARD"); err != nil {
