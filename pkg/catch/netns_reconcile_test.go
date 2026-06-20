@@ -530,6 +530,7 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error {
 		calls = append(calls, "nat-reconcile")
+		close(reconciled)
 		return nil
 	}
 	defer func() {
@@ -542,7 +543,6 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 			name: name,
 			reconcile: func(context.Context) (bool, error) {
 				calls = append(calls, "reconcile:"+name)
-				close(reconciled)
 				return false, nil
 			},
 		}, nil
@@ -644,18 +644,20 @@ func TestServerStartLogsReconciliationFailureNonFatally(t *testing.T) {
 	}()
 	stubYeetDNSInstaller(t, func(string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+	reconciled := make(chan struct{})
 	prevNAT := reconcileDockerNetNSPortForwards
-	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
+	reconcileDockerNetNSPortForwards = func(*db.Store) error {
+		close(reconciled)
+		return nil
+	}
 	defer func() {
 		reconcileDockerNetNSPortForwards = prevNAT
 	}()
 
-	reconciled := make(chan struct{})
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		return fakeDockerNetNSReconciler{
 			name: sv.Name(),
 			reconcile: func(context.Context) (bool, error) {
-				close(reconciled)
 				return false, errors.New("reconcile exploded")
 			},
 		}, nil
@@ -699,18 +701,20 @@ func TestServerStartLogsRestartedNetNSService(t *testing.T) {
 	}()
 	stubYeetDNSInstaller(t, func(string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+	reconciled := make(chan struct{})
 	prevNAT := reconcileDockerNetNSPortForwards
-	reconcileDockerNetNSPortForwards = func(*db.Store) error { return nil }
+	reconcileDockerNetNSPortForwards = func(*db.Store) error {
+		close(reconciled)
+		return nil
+	}
 	defer func() {
 		reconcileDockerNetNSPortForwards = prevNAT
 	}()
 
-	reconciled := make(chan struct{})
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		return fakeDockerNetNSReconciler{
 			name: sv.Name(),
 			reconcile: func(context.Context) (bool, error) {
-				close(reconciled)
 				return true, nil
 			},
 		}, nil

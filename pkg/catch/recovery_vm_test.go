@@ -1168,7 +1168,8 @@ func TestSnapshotsRestoreVMFullRejectsMissingFirecrackerIdentityBeforeMutation(t
 	server := newTestServer(t)
 	root := t.TempDir()
 	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, nil)
-	installVMRecoveryFirecrackerLauncher(t, root, "Firecracker v1.7.0-test")
+	identity := installVMRecoveryFirecrackerLauncher(t, root, "Firecracker v1.7.0-test")
+	stubVMRecoveryFirecrackerVersion(t, identity.Version)
 	withVMRecoveryStatus(t, svc.StatusRunning)
 	logPath := installFakeSystemctl(t)
 	installFakeDD(t, logPath)
@@ -1189,6 +1190,7 @@ func TestSnapshotsRestoreVMFullRejectsFirecrackerSHAMismatchBeforeMutation(t *te
 	server := newTestServer(t)
 	root := t.TempDir()
 	identity := installVMRecoveryFirecrackerLauncher(t, root, "Firecracker v1.7.0-test")
+	stubVMRecoveryFirecrackerVersion(t, identity.Version)
 	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, func(metadata map[string]any) {
 		metadata["firecrackerSha256"] = "sha256:" + strings.Repeat("0", 64)
 		metadata["firecrackerVersion"] = identity.Version
@@ -1213,6 +1215,7 @@ func TestSnapshotsRestoreVMFullRejectsFirecrackerVersionMismatchBeforeMutation(t
 	server := newTestServer(t)
 	root := t.TempDir()
 	identity := installVMRecoveryFirecrackerLauncher(t, root, "Firecracker v1.7.0-test")
+	stubVMRecoveryFirecrackerVersion(t, identity.Version)
 	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, func(metadata map[string]any) {
 		metadata["firecrackerSha256"] = identity.SHA256
 		metadata["firecrackerVersion"] = "Firecracker v9.9.9-other"
@@ -1631,6 +1634,17 @@ func installVMRecoveryFirecrackerLauncher(t *testing.T, root string, version str
 		SHA256:  "sha256:" + hex.EncodeToString(sum[:]),
 		Version: version,
 	}
+}
+
+func stubVMRecoveryFirecrackerVersion(t *testing.T, version string) {
+	t.Helper()
+	oldVersionFunc := vmCheckpointFirecrackerVersionFunc
+	vmCheckpointFirecrackerVersionFunc = func(string) (string, error) {
+		return version, nil
+	}
+	t.Cleanup(func() {
+		vmCheckpointFirecrackerVersionFunc = oldVersionFunc
+	})
 }
 
 func seedCompatibleFullVMCheckpointMetadata(t *testing.T, server *Server, root string, snapshotName string, edit func(map[string]any)) (string, string) {

@@ -49,6 +49,27 @@ func TestVMKernelBootArgsIncludesStaticSvcIP(t *testing.T) {
 	}
 }
 
+func TestVMKernelBootArgsOmitsSvcDefaultGatewayWhenLANPresent(t *testing.T) {
+	network := newVMNetworkPlan("devbox", []string{"svc,lan"}, vmNetworkInputs{
+		ServiceIP:         "192.168.100.12",
+		LANParent:         "br0",
+		LANParentIsBridge: true,
+	})
+
+	got, err := vmKernelBootArgs("devbox", network, vmImageManifest{})
+	if err != nil {
+		t.Fatalf("vmKernelBootArgs: %v", err)
+	}
+
+	want := "ip=192.168.100.12:::255.255.255.0:devbox:eth0:none"
+	if !strings.Contains(got, want) {
+		t.Fatalf("boot args = %s, want %s", got, want)
+	}
+	if strings.Contains(got, "::192.168.100.1:") {
+		t.Fatalf("boot args include svc default gateway when LAN is present: %s", got)
+	}
+}
+
 func TestVMKernelBootArgsRejectsUnsafeServiceName(t *testing.T) {
 	network := newVMNetworkPlan("bad name", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 

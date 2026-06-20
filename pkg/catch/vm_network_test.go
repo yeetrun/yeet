@@ -369,6 +369,9 @@ func TestVMSvcLANNetworkPlanHasTwoInterfaces(t *testing.T) {
 	if len(metadata) != 2 {
 		t.Fatalf("metadata networks = %d, want 2", len(metadata))
 	}
+	if metadata[0].Gateway != "" {
+		t.Fatalf("svc gateway = %q, want no default gateway when LAN is present", metadata[0].Gateway)
+	}
 	if metadata[0].DNSDefaultRoute == nil || *metadata[0].DNSDefaultRoute {
 		t.Fatalf("svc DNSDefaultRoute = %v, want false", metadata[0].DNSDefaultRoute)
 	}

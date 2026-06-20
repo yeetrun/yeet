@@ -80,6 +80,7 @@ func newVMNetworkPlan(service string, modes []string, in vmNetworkInputs) vmNetw
 		}
 		plan.Interfaces = append(plan.Interfaces, iface)
 	}
+	plan.applyGuestRoutePolicy()
 	return plan
 }
 
@@ -171,6 +172,17 @@ func (p vmNetworkPlan) hasNetworkMode(mode string) bool {
 		}
 	}
 	return false
+}
+
+func (p *vmNetworkPlan) applyGuestRoutePolicy() {
+	if !p.hasNetworkMode("lan") {
+		return
+	}
+	for i := range p.Interfaces {
+		if p.Interfaces[i].Mode == "svc" {
+			p.Interfaces[i].Gateway = ""
+		}
+	}
 }
 
 func (p vmNetworkPlan) FirecrackerInterfaces() []firecrackerNetworkInterface {
