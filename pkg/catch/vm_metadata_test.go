@@ -325,6 +325,22 @@ func TestWriteVMGuestMetadataFiles(t *testing.T) {
 
 func TestWriteVMGuestMetadataFilesUsesNixOSDriver(t *testing.T) {
 	root := t.TempDir()
+	systemNix := filepath.Join(root, "etc", "nixos", "system.nix")
+	if err := os.MkdirAll(filepath.Dir(systemNix), 0o755); err != nil {
+		t.Fatalf("mkdir /etc/nixos: %v", err)
+	}
+	if err := os.WriteFile(systemNix, []byte(`{ pkgs, ... }:
+
+{
+  # yeet seeds this to the VM service name when provisioning the rootfs.
+  networking.hostName = "yeet-vm";
+
+  environment.systemPackages = with pkgs; [
+  ];
+}
+`), 0o644); err != nil {
+		t.Fatalf("write system.nix: %v", err)
+	}
 	cfg := vmMetadataConfig{
 		Hostname:       "nixos-smoke",
 		User:           "nixos",
@@ -344,6 +360,8 @@ func TestWriteVMGuestMetadataFilesUsesNixOSDriver(t *testing.T) {
 	}
 
 	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "hostname"), "nixos-smoke")
+	assertFileContains(t, systemNix, `networking.hostName = "nixos-smoke";`)
+	assertFileNotContains(t, systemNix, `networking.hostName = "yeet-vm";`)
 	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "user"), "nixos")
 	assertFileContains(t, filepath.Join(root, "etc", "yeet-vm", "authorized_keys"), "ssh-ed25519 AAAATEST")
 	assertFileMode(t, filepath.Join(root, "etc", "yeet-vm", "authorized_keys"), 0o644)
