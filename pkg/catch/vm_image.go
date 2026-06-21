@@ -36,27 +36,31 @@ var vmRootFSDecompressRunner = runVMRootFSDecompress
 var vmImageFetchRetryDelay = 500 * time.Millisecond
 
 type vmImageManifest struct {
-	Name                string            `json:"name"`
-	Version             string            `json:"version"`
-	Architecture        string            `json:"architecture"`
-	ImageProfile        string            `json:"image_profile,omitempty"`
-	Distro              string            `json:"distro,omitempty"`
-	DistroVersion       string            `json:"distro_version,omitempty"`
-	DefaultUser         string            `json:"default_user,omitempty"`
-	KernelPolicy        string            `json:"kernel_policy,omitempty"`
-	GuestInit           string            `json:"guest_init,omitempty"`
-	GuestSystemInit     string            `json:"guest_system_init,omitempty"`
-	MetadataDriver      string            `json:"metadata_driver,omitempty"`
-	SnapSupport         *bool             `json:"snap_support,omitempty"`
-	Kernel              string            `json:"kernel"`
-	Initrd              string            `json:"initrd,omitempty"`
-	RootFS              string            `json:"rootfs"`
-	Firecracker         string            `json:"firecracker"`
-	RootFSSize          int64             `json:"rootfs_size"`
-	KernelVersion       string            `json:"kernel_version,omitempty"`
-	UbuntuKernelVersion string            `json:"ubuntu_kernel_version,omitempty"`
-	Provenance          map[string]string `json:"provenance,omitempty"`
-	Checksums           map[string]string `json:"checksums"`
+	Name                  string            `json:"name"`
+	Version               string            `json:"version"`
+	ImageRevision         int               `json:"image_revision,omitempty"`
+	Architecture          string            `json:"architecture"`
+	ImageProfile          string            `json:"image_profile,omitempty"`
+	Distro                string            `json:"distro,omitempty"`
+	DistroVersion         string            `json:"distro_version,omitempty"`
+	DefaultUser           string            `json:"default_user,omitempty"`
+	KernelPolicy          string            `json:"kernel_policy,omitempty"`
+	GuestInit             string            `json:"guest_init,omitempty"`
+	GuestSystemInit       string            `json:"guest_system_init,omitempty"`
+	MetadataDriver        string            `json:"metadata_driver,omitempty"`
+	SnapSupport           *bool             `json:"snap_support,omitempty"`
+	Kernel                string            `json:"kernel"`
+	Initrd                string            `json:"initrd,omitempty"`
+	RootFS                string            `json:"rootfs"`
+	Firecracker           string            `json:"firecracker"`
+	RootFSSize            int64             `json:"rootfs_size"`
+	KernelVersion         string            `json:"kernel_version,omitempty"`
+	UpstreamKernelVersion string            `json:"upstream_kernel_version,omitempty"`
+	KernelSourceURL       string            `json:"kernel_source_url,omitempty"`
+	KernelSourceSHA256    string            `json:"kernel_source_sha256,omitempty"`
+	UbuntuKernelVersion   string            `json:"ubuntu_kernel_version,omitempty"`
+	Provenance            map[string]string `json:"provenance,omitempty"`
+	Checksums             map[string]string `json:"checksums"`
 }
 
 type vmImageCache struct {

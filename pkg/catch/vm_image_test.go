@@ -399,6 +399,54 @@ func TestVMImageManifestPreservesNixOSFields(t *testing.T) {
 	}
 }
 
+func TestVMImageManifestPreservesKernelAutomationFields(t *testing.T) {
+	raw := []byte(`{
+		"name":"yeet-ubuntu-26.04",
+		"version":"ubuntu-26.04-amd64-kernel-7.1.1-v16",
+		"image_revision":16,
+		"architecture":"x86_64",
+		"image_profile":"fast",
+		"kernel_policy":"yeet-managed",
+		"guest_init":"/usr/local/lib/yeet-vm/yeet-init",
+		"snap_support":false,
+		"kernel":"vmlinux",
+		"rootfs":"rootfs.ext4.zst",
+		"firecracker":"firecracker",
+		"rootfs_size":2147483648,
+		"kernel_version":"linux-7.1.1-yeet",
+		"upstream_kernel_version":"7.1.1",
+		"kernel_source_url":"https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.1.1.tar.xz",
+		"kernel_source_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"checksums":{
+			"vmlinux":"0000000000000000000000000000000000000000000000000000000000000000",
+			"rootfs.ext4.zst":"1111111111111111111111111111111111111111111111111111111111111111",
+			"firecracker":"2222222222222222222222222222222222222222222222222222222222222222"
+		}
+	}`)
+	var manifest vmImageManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if err := manifest.validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if manifest.ImageRevision != 16 {
+		t.Fatalf("image revision = %d, want 16", manifest.ImageRevision)
+	}
+	if manifest.KernelVersion != "linux-7.1.1-yeet" {
+		t.Fatalf("kernel version = %q", manifest.KernelVersion)
+	}
+	if manifest.UpstreamKernelVersion != "7.1.1" {
+		t.Fatalf("upstream kernel version = %q", manifest.UpstreamKernelVersion)
+	}
+	if manifest.KernelSourceURL != "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.1.1.tar.xz" {
+		t.Fatalf("kernel source URL = %q", manifest.KernelSourceURL)
+	}
+	if manifest.KernelSourceSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("kernel source sha256 = %q", manifest.KernelSourceSHA256)
+	}
+}
+
 func TestVMImageManifestRejectsInvalidRuntimeMetadata(t *testing.T) {
 	base := vmImageTestManifest("ubuntu-26.04-amd64-v1", vmImageTestContents())
 	tests := []struct {
