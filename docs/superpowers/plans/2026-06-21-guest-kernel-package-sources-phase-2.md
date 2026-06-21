@@ -8,6 +8,18 @@
 
 **Tech Stack:** Bash, dpkg-deb, dpkg-scanpackages or apt-ftparchive, GPG signing for apt repository metadata, Nix flakes, Go CLI/catch code, Firecracker direct kernel boot.
 
+## Implementation Notes
+
+- The package workflow packages `vmlinux` and `kernel.config` from an immutable
+  VM image release instead of rebuilding the kernel, so package bytes match the
+  image bundle assets exactly.
+- The public Nix source is self-contained under `kernel-packages/`. A flake
+  consumed with `?dir=kernel-packages` cannot import files from `../nix`.
+- GitHub Pages publishes `/apt` plus `yeet-vm-kernel-flake.tar.gz`; guests can
+  use the tarball flake URL directly.
+- Documentation is kept in this plan and the image repository README rather
+  than adding a separate docs tree to `yeet-vm-images`.
+
 ---
 
 ## File Structure
@@ -43,7 +55,7 @@
   - Build a versioned `yeet-vm-kernel` deb from `vmlinux`, `kernel.config`, and metadata.
 - Create: `scripts/publish-apt-repo.sh`
   - Generate apt repository indexes and sign Release metadata.
-- Create: `nix/yeet-kernel-package.nix`
+- Create: `kernel-packages/yeet-kernel-package.nix`
   - Nix package for the yeet kernel artifacts and selector manifest.
 - Create: `kernel-packages/flake.nix`
   - Public flake entrypoint for NixOS users.
@@ -51,7 +63,7 @@
   - Generated Nix metadata pointing at published kernel artifacts.
 - Create: `.github/workflows/publish-kernel-packages.yml`
   - Build and publish package sources after Phase 1 kernel artifacts are available.
-- Create: `docs/kernel-packages.md`
+- Modify: `README.md`
   - Guest opt-in documentation for Ubuntu and NixOS.
 
 ## Guest Kernel Selector Contract

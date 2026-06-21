@@ -93,6 +93,10 @@ type VMSetFlags struct {
 	MacvlanParent string
 }
 
+type VMKernelFlags struct {
+	Restart bool
+}
+
 type SnapshotsListFlags struct {
 	Format string
 }
@@ -331,6 +335,10 @@ type vmSetFlagsParsed struct {
 	MacvlanMac    string `flag:"macvlan-mac"`
 	MacvlanVlan   int    `flag:"macvlan-vlan"`
 	MacvlanParent string `flag:"macvlan-parent"`
+}
+
+type vmKernelFlagsParsed struct {
+	Restart bool `flag:"restart" help:"Restart the VM after syncing the selected kernel"`
 }
 
 type serviceSyncFlagsParsed struct {
@@ -606,6 +614,16 @@ var remoteGroupInfos = map[string]GroupInfo{
 				ArgsSchema:  VMImagesArgs{},
 				FlagsSchema: vmImagesFlagsParsed{},
 			},
+			"kernel": {
+				Name:        "kernel",
+				Description: "Manage guest-selected VM kernels",
+				Usage:       "vm kernel sync <svc> [--restart]",
+				Examples: []string{
+					"yeet vm kernel sync <svc>",
+					"yeet vm kernel sync <svc> --restart",
+				},
+				FlagsSchema: vmKernelFlagsParsed{},
+			},
 		},
 	},
 	"env": {
@@ -768,6 +786,7 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"console": {},
 		"set":     flagSpecsFromStruct(vmSetFlagsParsed{}),
 		"images":  flagSpecsFromStruct(vmImagesFlagsParsed{}),
+		"kernel":  flagSpecsFromStruct(vmKernelFlagsParsed{}),
 	},
 	"env": {
 		"show": flagSpecsFromStruct(envShowFlagsParsed{}),
@@ -1091,6 +1110,20 @@ func ParseVMSet(args []string) (VMSetFlags, []string, error) {
 		return VMSetFlags{}, nil, fmt.Errorf("--net must not be empty")
 	}
 	argsOut := append(parsed.Args, extraArgs...)
+	return flags, argsOut, nil
+}
+
+func ParseVMKernel(args []string) (VMKernelFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[vmKernelFlagsParsed](parseArgs)
+	if err != nil {
+		return VMKernelFlags{}, nil, err
+	}
+	flags := VMKernelFlags{Restart: parsed.Flags.Restart}
+	argsOut := append(parsed.Args, extraArgs...)
+	if len(argsOut) != 1 || argsOut[0] != "sync" {
+		return VMKernelFlags{}, nil, fmt.Errorf("usage: vm kernel sync <svc> [--restart]")
+	}
 	return flags, argsOut, nil
 }
 

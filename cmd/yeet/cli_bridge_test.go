@@ -677,6 +677,25 @@ func TestBridgeServiceArgsSkipsVMImagesPrune(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsVMKernelSync(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"vm", "kernel", "sync", "devbox@host-a", "--restart"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to recognize vm kernel sync group command")
+	}
+	if service != "devbox" {
+		t.Fatalf("service = %q, want devbox", service)
+	}
+	if host != "host-a" {
+		t.Fatalf("host = %q, want host-a", host)
+	}
+	if got := strings.Join(bridged, " "); got != "vm kernel sync --restart" {
+		t.Fatalf("bridged args = %q, want vm kernel sync --restart", got)
+	}
+}
+
 func TestBridgeServiceArgsLogsServiceBeforeFollowFlag(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()
