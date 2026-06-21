@@ -161,6 +161,44 @@ func TestVMKernelSyncUpdatesFirecrackerConfigAndDB(t *testing.T) {
 	}
 }
 
+func TestVMKernelSyncReplaysJournalBeforeReadOnlyMount(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withVMKernelSyncRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	var commands [][]string
+	withVMKernelSyncRunner(t, func(_ context.Context, command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		switch {
+		case len(command) > 0 && command[0] == "sh":
+			return nil
+		case len(command) > 0 && command[0] == "mount":
+			writeMountedGuestKernel(t, command[len(command)-1])
+			return nil
+		case len(command) == 2 && command[0] == "umount":
+			return nil
+		default:
+			return errors.New("unexpected kernel sync command: " + strings.Join(command, " "))
+		}
+	})
+
+	if err := server.syncVMGuestKernel(context.Background(), "devbox", cli.VMKernelFlags{}); err != nil {
+		t.Fatalf("syncVMGuestKernel: %v", err)
+	}
+	if len(commands) != 3 {
+		t.Fatalf("commands = %#v, want journal replay, read-only mount, unmount", commands)
+	}
+	if commands[0][0] != "sh" || !strings.Contains(strings.Join(commands[0], " "), "mount -o") {
+		t.Fatalf("first command = %#v, want shell journal replay mount", commands[0])
+	}
+	if commands[1][0] != "mount" {
+		t.Fatalf("second command = %#v, want read-only mount", commands[1])
+	}
+	if commands[2][0] != "umount" {
+		t.Fatalf("third command = %#v, want unmount", commands[2])
+	}
+}
+
 func TestVMKernelSyncRestartsRunningVM(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
@@ -191,7 +229,12 @@ func TestVMKernelSyncRestartsRunningVMOnSyncError(t *testing.T) {
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
 	withVMKernelSyncRunningCheck(t, func(*Server, string) (bool, error) { return true, nil })
-	withVMKernelSyncRunner(t, func(context.Context, []string) error { return errors.New("mount failed") })
+	withVMKernelSyncRunner(t, func(_ context.Context, command []string) error {
+		if len(command) > 0 && command[0] == "sh" {
+			return nil
+		}
+		return errors.New("mount failed")
+	})
 	var systemctlCalls [][]string
 	withVMKernelSyncSystemctl(t, func(args ...string) error {
 		systemctlCalls = append(systemctlCalls, append([]string(nil), args...))
@@ -239,6 +282,40 @@ func TestVMRootFSReadOnlyMountCommandUsesNoJournalReplay(t *testing.T) {
 	}
 }
 
+func TestVMRootFSJournalReplayCommandMountsWritable(t *testing.T) {
+	tests := []struct {
+		name string
+		disk string
+		want string
+	}{
+		{
+			name: "file image",
+			disk: "/srv/vms/devbox/rootfs.raw",
+			want: "loop,rw",
+		},
+		{
+			name: "block device",
+			disk: "/dev/zvol/tank/vms/devbox/root",
+			want: "rw",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := vmRootFSJournalReplayCommand(tt.disk, "/mnt/root")
+			if len(got) < 7 || got[0] != "sh" || got[1] != "-c" {
+				t.Fatalf("journal replay command = %#v, want shell command", got)
+			}
+			if !strings.Contains(got[2], "mount -o") || !strings.Contains(got[2], "umount") {
+				t.Fatalf("journal replay script = %q, want mount and umount", got[2])
+			}
+			if got[4] != tt.want || got[5] != tt.disk || got[6] != "/mnt/root" {
+				t.Fatalf("journal replay args = %#v, want options %q disk %q root /mnt/root", got[4:], tt.want, tt.disk)
+			}
+		})
+	}
+}
+
 func TestVMCmdKernelSyncRoutesToServer(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
@@ -267,6 +344,8 @@ func mountedGuestKernelRunner(t *testing.T) vmCommandRunner {
 	t.Helper()
 	return func(_ context.Context, command []string) error {
 		switch {
+		case len(command) > 0 && command[0] == "sh":
+			return nil
 		case len(command) > 0 && command[0] == "mount":
 			writeMountedGuestKernel(t, command[len(command)-1])
 			return nil
