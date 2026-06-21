@@ -69,7 +69,7 @@ func TestVMCmdSetUpdatesShape(t *testing.T) {
 	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
 	execer := &ttyExecer{s: server, sn: "devbox", rw: &bytes.Buffer{}}
 
-	if err := execer.vmCmdFunc([]string{"set", "--cpus=6", "--memory=6g"}); err != nil {
+	if err := execer.vmCmdFunc([]string{"set", "--vcpus=6", "--memory=6g"}); err != nil {
 		t.Fatalf("vm set: %v", err)
 	}
 	svc := getTestService(t, server, "devbox")

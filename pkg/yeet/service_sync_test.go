@@ -295,7 +295,7 @@ func TestServiceSyncExplicitHostCreatesMissingVMEntry(t *testing.T) {
 	if entry.ServiceRoot != "tank/yeet/vms/vm-router" || !entry.ServiceRootZFS {
 		t.Fatalf("entry root = %#v, want zfs service root", entry)
 	}
-	wantArgs := []string{"--cpus=2", "--memory=2g", "--disk=8g", "--net=lan"}
+	wantArgs := []string{"--vcpus=2", "--memory=2g", "--disk=8g", "--net=lan"}
 	if !reflect.DeepEqual(entry.Args, wantArgs) {
 		t.Fatalf("entry args = %#v, want %#v", entry.Args, wantArgs)
 	}

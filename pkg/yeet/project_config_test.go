@@ -273,7 +273,7 @@ func TestSaveRunConfigStoresVMType(t *testing.T) {
 		Dir:    tmp,
 		Config: &ProjectConfig{Version: projectConfigVersion},
 	}
-	if err := saveRunConfigWithPayloadKind(loc, "yeet-pve1", "vm://ubuntu/26.04", serviceTypeVM, []string{"--net=svc", "--cpus=4"}, "", false); err != nil {
+	if err := saveRunConfigWithPayloadKind(loc, "yeet-pve1", "vm://ubuntu/26.04", serviceTypeVM, []string{"--net=svc", "--vcpus=4"}, "", false); err != nil {
 		t.Fatalf("saveRunConfigWithPayloadKind: %v", err)
 	}
 	entry, ok := loc.Config.ServiceEntry("devbox", "yeet-pve1")

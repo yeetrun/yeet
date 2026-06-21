@@ -272,7 +272,7 @@ type dockerPushFlagsParsed struct {
 }
 
 type runFlagsParsed struct {
-	CPUs             int      `flag:"cpus"`
+	CPUs             int      `flag:"vcpus"`
 	Memory           string   `flag:"memory"`
 	Disk             string   `flag:"disk"`
 	Net              string   `flag:"net"`
@@ -324,7 +324,7 @@ type serviceGenerationsFlagsParsed struct {
 }
 
 type vmSetFlagsParsed struct {
-	CPUs          int    `flag:"cpus"`
+	CPUs          int    `flag:"vcpus"`
 	Memory        string `flag:"memory"`
 	Disk          string `flag:"disk"`
 	Net           string `flag:"net"`
@@ -479,7 +479,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 		"yeet mount host:/export data-share --type=nfs --opts=defaults",
 		"yeet mount",
 	}},
-	"ip":      {Name: "ip", Description: "Show the IP addresses of a service"},
+	"ip":      {Name: "ip", Description: "Show the connectable IP endpoints of a service"},
 	"umount":  {Name: "umount", Description: "Unmount a host mount by name", Usage: "NAME", Examples: []string{"yeet umount data-share"}},
 	"remove":  {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}, FlagsSchema: removeFlagsParsed{}},
 	"restart": {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
@@ -579,9 +579,9 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set VM resources and networking",
-				Usage:       "vm set <vm> [--cpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
+				Usage:       "vm set <vm> [--vcpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
 				Examples: []string{
-					"yeet vm set <vm> --cpus=8 --memory=8g --disk=128g",
+					"yeet vm set <vm> --vcpus=8 --memory=8g --disk=128g",
 					"yeet vm set <vm> --net=lan",
 					"yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4",
 				},
@@ -879,6 +879,9 @@ func toSubCommandInfo(name string, info CommandInfo) yargs.SubCommandInfo {
 }
 
 func ParseRun(args []string) (RunFlags, []string, error) {
+	if err := rejectRemovedVMCPUFlag(args); err != nil {
+		return RunFlags{}, nil, err
+	}
 	specs := remoteFlagSpecs["run"]
 	parseArgs, extraArgs := splitArgsForParsing(args, specs)
 	parsed, err := parseFlags[runFlagsParsed](parseArgs)
@@ -966,7 +969,7 @@ func rejectServiceSetVMFlags(args []string) error {
 		}
 		name, _ := splitInlineFlagValue(arg)
 		switch name {
-		case "--cpus", "--memory", "--disk", "--net", "--macvlan-mac", "--macvlan-vlan", "--macvlan-parent":
+		case "--cpus", "--vcpus", "--memory", "--disk", "--net", "--macvlan-mac", "--macvlan-vlan", "--macvlan-parent":
 			return fmt.Errorf("unknown flag %s; use `yeet vm set` for VM resources and networking", name)
 		}
 	}
@@ -1062,6 +1065,9 @@ func serviceSetHasChange(flags ServiceSetFlags, rootChange bool) bool {
 }
 
 func ParseVMSet(args []string) (VMSetFlags, []string, error) {
+	if err := rejectRemovedVMCPUFlag(args); err != nil {
+		return VMSetFlags{}, nil, err
+	}
 	specs := remoteGroupFlagSpecs["vm"]["set"]
 	parseArgs, extraArgs := splitArgsForParsing(args, specs)
 	parsed, err := parseFlags[vmSetFlagsParsed](parseArgs)
@@ -1088,9 +1094,23 @@ func ParseVMSet(args []string) (VMSetFlags, []string, error) {
 	return flags, argsOut, nil
 }
 
+func rejectRemovedVMCPUFlag(args []string) error {
+	for _, arg := range args {
+		if arg == "--" {
+			return nil
+		}
+		name, _ := splitInlineFlagValue(arg)
+		switch name {
+		case "--cpus", "--vcpu":
+			return fmt.Errorf("unknown flag %s; use --vcpus for VM CPU count", name)
+		}
+	}
+	return nil
+}
+
 func validateVMSetFlags(flags VMSetFlags) error {
 	if flags.CPUs < 0 {
-		return fmt.Errorf("VM CPU count must be positive")
+		return fmt.Errorf("VM vCPU count must be positive")
 	}
 	if err := validateNetworkModesNotEmpty(flags.Net); err != nil {
 		return err

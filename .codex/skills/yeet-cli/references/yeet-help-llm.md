@@ -160,7 +160,7 @@ Get detailed help: `yeet init --help-llm`
 
 ### `ip`
 
-Show the IP addresses of a service
+Show the connectable IP endpoints of a service
 
 Get detailed help: `yeet ip --help-llm`
 
@@ -994,7 +994,7 @@ yeet init
 ````
 # yeet ip
 
-Show the IP addresses of a service
+Show the connectable IP endpoints of a service
 
 ## Usage
 
@@ -2631,7 +2631,7 @@ Set VM resources and networking
 **Examples**:
 
 ```
-yeet vm set <vm> --cpus=8 --memory=8g --disk=128g
+yeet vm set <vm> --vcpus=8 --memory=8g --disk=128g
 ```
 
 ```
@@ -3931,7 +3931,7 @@ Set VM resources and networking
 ## Usage
 
 ```
-yeet [GLOBAL OPTIONS] vm set <vm> [--cpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
+yeet [GLOBAL OPTIONS] vm set <vm> [--vcpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
 ```
 
 ## Global Options
@@ -3969,7 +3969,7 @@ Progress output (auto|tty|plain|quiet)
 ## Examples
 
 ```
-yeet vm set <vm> --cpus=8 --memory=8g --disk=128g
+yeet vm set <vm> --vcpus=8 --memory=8g --disk=128g
 ```
 
 ```

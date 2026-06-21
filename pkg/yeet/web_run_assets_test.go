@@ -109,7 +109,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"cpus:",
 		"memory:",
 		"disk:",
-		"--cpus",
+		"--vcpus",
 		"--memory",
 		"--disk",
 		"required:",

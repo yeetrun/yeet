@@ -317,9 +317,9 @@ func TestBridgeServiceArgsVMSet(t *testing.T) {
 	}{
 		{
 			name:        "vm shape flags after service",
-			args:        []string{"vm", "set", "devbox", "--cpus=8", "--memory", "8g", "--disk=128g"},
+			args:        []string{"vm", "set", "devbox", "--vcpus=8", "--memory", "8g", "--disk=128g"},
 			wantService: "devbox",
-			wantBridged: "vm set --cpus=8 --memory 8g --disk=128g",
+			wantBridged: "vm set --vcpus=8 --memory 8g --disk=128g",
 		},
 		{
 			name:        "vm net flags before service",

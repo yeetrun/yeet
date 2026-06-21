@@ -2484,7 +2484,7 @@ func vmSetRunFlagChanges(flags cli.VMSetFlags) (map[string]bool, []runFlagUpdate
 		updates = append(updates, runFlagUpdate{Name: name, Value: value})
 	}
 	if flags.CPUs > 0 {
-		add("--cpus", strconv.Itoa(flags.CPUs))
+		add("--vcpus", strconv.Itoa(flags.CPUs))
 	}
 	if value := strings.TrimSpace(flags.Memory); value != "" {
 		add("--memory", value)

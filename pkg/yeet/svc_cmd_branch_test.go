@@ -841,13 +841,13 @@ func TestVMSetFlagsUpdateStoredRunArgs(t *testing.T) {
 		Type:        serviceTypeVM,
 		Payload:     "vm://ubuntu/26.04",
 		PayloadKind: serviceTypeVM,
-		Args:        []string{"--zfs", "--cpus", "4", "--memory=4g", "--disk=16g", "--net=svc", "--macvlan-parent=old0", "guest-arg"},
+		Args:        []string{"--zfs", "--vcpus", "4", "--memory=4g", "--disk=16g", "--net=svc", "--macvlan-parent=old0", "guest-arg"},
 	})
 
-	if err := HandleSvcCmd([]string{"vm", "set", "--cpus=8", "--memory", "8g", "--disk=128g", "--net", "lan", "--macvlan-parent=vmbr0"}); err != nil {
+	if err := HandleSvcCmd([]string{"vm", "set", "--vcpus=8", "--memory", "8g", "--disk=128g", "--net", "lan", "--macvlan-parent=vmbr0"}); err != nil {
 		t.Fatalf("HandleSvcCmd: %v", err)
 	}
-	if !reflect.DeepEqual(gotArgs, []string{"vm", "set", "--cpus=8", "--memory", "8g", "--disk=128g", "--net", "lan", "--macvlan-parent=vmbr0"}) {
+	if !reflect.DeepEqual(gotArgs, []string{"vm", "set", "--vcpus=8", "--memory", "8g", "--disk=128g", "--net", "lan", "--macvlan-parent=vmbr0"}) {
 		t.Fatalf("remote args = %#v", gotArgs)
 	}
 	loaded, err := loadProjectConfigFromCwd()
@@ -858,7 +858,7 @@ func TestVMSetFlagsUpdateStoredRunArgs(t *testing.T) {
 	if !ok {
 		t.Fatal("missing service entry")
 	}
-	want := []string{"--zfs", "--cpus=8", "--memory=8g", "--disk=128g", "--net=lan", "--macvlan-parent=vmbr0", "guest-arg"}
+	want := []string{"--zfs", "--vcpus=8", "--memory=8g", "--disk=128g", "--net=lan", "--macvlan-parent=vmbr0", "guest-arg"}
 	if !reflect.DeepEqual(entry.Args, want) {
 		t.Fatalf("args = %#v, want %#v", entry.Args, want)
 	}
@@ -881,7 +881,7 @@ func TestVMSetFlagsDoNotUpdateNonVMRunArgs(t *testing.T) {
 		Args:    []string{"--pull"},
 	})
 
-	if err := HandleSvcCmd([]string{"vm", "set", "--cpus=8"}); err != nil {
+	if err := HandleSvcCmd([]string{"vm", "set", "--vcpus=8"}); err != nil {
 		t.Fatalf("HandleSvcCmd: %v", err)
 	}
 	loaded, err := loadProjectConfigFromCwd()

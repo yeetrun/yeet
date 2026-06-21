@@ -31,6 +31,11 @@ type vmNetworkDiscovery struct {
 	Warning string
 }
 
+type serviceIPDetails struct {
+	Endpoints []catchrpc.ServiceIP
+	Runtime   []catchrpc.ServiceIP
+}
+
 func serviceVMStatus(sn string) (svc.Status, error) {
 	runner := &vmRunner{name: sn}
 	return runner.Status()
@@ -85,11 +90,12 @@ func (s *Server) serviceInfoWithContext(ctx context.Context, sn string) (catchrp
 		info.Network.IPWarning = vmNetwork.Warning
 		info.VM = serviceVMInfo(sv.VM(), vmNetwork.IPs)
 	} else {
-		ips, ipErr := s.serviceIPList(sn, sv)
+		details, ipErr := s.serviceIPDetailsWithContext(ctx, sn, sv)
 		if ipErr != nil {
 			info.Network.IPError = ipErr.Error()
 		} else {
-			info.Network.IPs = ips
+			info.Network.IPs = details.Endpoints
+			info.Network.RuntimeIPs = details.Runtime
 		}
 	}
 	info.Status = s.serviceStatusInfo(sn, sv)
@@ -356,20 +362,26 @@ func (s *Server) serviceIPList(sn string, sv db.ServiceView) ([]catchrpc.Service
 }
 
 func (s *Server) serviceIPListWithContext(ctx context.Context, sn string, sv db.ServiceView) ([]catchrpc.ServiceIP, error) {
+	details, err := s.serviceIPDetailsWithContext(ctx, sn, sv)
+	return details.Endpoints, err
+}
+
+func (s *Server) serviceIPDetailsWithContext(ctx context.Context, sn string, sv db.ServiceView) (serviceIPDetails, error) {
 	if sn == CatchService {
-		return s.catchServiceIPList()
+		ips, err := s.catchServiceIPList()
+		return serviceIPDetails{Endpoints: ips}, err
 	}
 	if sv.ServiceType() == db.ServiceTypeVM {
 		vmNetwork := discoverVMNetworkIPs(ctx, sv.VM())
-		return serviceVMNetworkIPs(sv.VM(), vmNetwork.IPs), vmNetwork.Err
+		return serviceIPDetails{Endpoints: serviceVMNetworkIPs(sv.VM(), vmNetwork.IPs)}, vmNetwork.Err
 	}
 
 	args, hasNetns := serviceIPListArgs(sn, sv)
 	raw, err := listIPv4AddrsFn(args)
 	if err != nil {
-		return nil, err
+		return serviceIPDetails{}, err
 	}
-	return serviceIPListFromEntries(raw, serviceIPLabelConfigFromView(sv, hasNetns)), nil
+	return serviceIPDetailsFromEntries(raw, serviceIPLabelConfigFromView(sv, hasNetns)), nil
 }
 
 func (s *Server) serviceContext() context.Context {
@@ -532,27 +544,74 @@ func serviceIPLabelConfigFromView(sv db.ServiceView, hasNetns bool) serviceIPLab
 	return cfg
 }
 
-func serviceIPListFromEntries(raw []ifaceIP, cfg serviceIPLabelConfig) []catchrpc.ServiceIP {
-	out := make([]catchrpc.ServiceIP, 0, len(raw)+1)
+func serviceIPDetailsFromEntries(raw []ifaceIP, cfg serviceIPLabelConfig) serviceIPDetails {
+	var out serviceIPDetails
 	seenSvc := false
 	for _, entry := range raw {
 		label := labelForIP(entry, cfg.svcIP, cfg.tsIface, cfg.macIface, cfg.hasNetns, cfg.serviceType)
-		out = append(out, catchrpc.ServiceIP{
+		ip := catchrpc.ServiceIP{
 			Label:     label,
 			IP:        entry.IP,
 			Interface: entry.Interface,
-		})
+		}
+		if serviceIPLabelIsEndpoint(label) {
+			out.Endpoints = append(out.Endpoints, ip)
+		} else {
+			out.Runtime = append(out.Runtime, ip)
+		}
 		if entry.IP == cfg.svcIP && cfg.svcIP != "" {
 			seenSvc = true
 		}
 	}
 	if cfg.svcIP != "" && !seenSvc {
-		out = append(out, catchrpc.ServiceIP{
+		out.Endpoints = append(out.Endpoints, catchrpc.ServiceIP{
 			Label: "service",
 			IP:    cfg.svcIP,
 		})
 	}
+	sortServiceIPsByEndpointPriority(out.Endpoints)
 	return out
+}
+
+func serviceIPLabelIsEndpoint(label string) bool {
+	switch label {
+	case "lan", "tailscale", "service", "host":
+		return true
+	default:
+		return false
+	}
+}
+
+func sortServiceIPsByEndpointPriority(ips []catchrpc.ServiceIP) {
+	sort.SliceStable(ips, func(i, j int) bool {
+		left := serviceIPEndpointPriority(ips[i].Label)
+		right := serviceIPEndpointPriority(ips[j].Label)
+		if left != right {
+			return left < right
+		}
+		if ips[i].Label != ips[j].Label {
+			return ips[i].Label < ips[j].Label
+		}
+		if ips[i].Interface != ips[j].Interface {
+			return ips[i].Interface < ips[j].Interface
+		}
+		return ips[i].IP < ips[j].IP
+	})
+}
+
+func serviceIPEndpointPriority(label string) int {
+	switch label {
+	case "lan":
+		return 0
+	case "tailscale":
+		return 1
+	case "service":
+		return 2
+	case "host":
+		return 3
+	default:
+		return 4
+	}
 }
 
 func (s *Server) serviceStatusInfo(sn string, sv db.ServiceView) catchrpc.ServiceStatus {
@@ -659,7 +718,7 @@ func labelForIP(entry ifaceIP, svcIP, tsIface, macIface string, hasNetns bool, s
 	if label := labelForInterface(entry.Interface, tsIface, macIface); label != "" {
 		return label
 	}
-	if serviceType == db.ServiceTypeDockerCompose {
+	if serviceType == db.ServiceTypeDockerCompose && hasNetns {
 		return "docker"
 	}
 	if hasNetns {
@@ -677,7 +736,7 @@ func labelForInterface(iface, tsIface, macIface string) string {
 	case strings.HasPrefix(iface, "yts-"), strings.HasPrefix(iface, "tailscale"):
 		return "tailscale"
 	case macIface != "" && iface == macIface:
-		return "macvlan"
+		return "lan"
 	case strings.HasPrefix(iface, "docker"), strings.HasPrefix(iface, "br-"):
 		return "docker"
 	default:

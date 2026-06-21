@@ -229,7 +229,7 @@ func TestRunDraftFromCLIParsesVMOptions(t *testing.T) {
 	for _, payload := range []string{"vm://ubuntu/26.04", "vm://foo/bar"} {
 		t.Run(payload, func(t *testing.T) {
 			draft, err := runDraftFromCLI([]string{
-				"--cpus=4",
+				"--vcpus=4",
 				"--memory=4g",
 				"--disk=128g",
 				payload,
@@ -241,7 +241,7 @@ func TestRunDraftFromCLIParsesVMOptions(t *testing.T) {
 				t.Fatalf("payload = %q, want %q", draft.Payload, payload)
 			}
 			if draft.VM.CPUs != 4 || draft.VM.Memory != "4g" || draft.VM.Disk != "128g" {
-				t.Fatalf("VM = %#v, want cpus=4 memory=4g disk=128g", draft.VM)
+				t.Fatalf("VM = %#v, want vcpus=4 memory=4g disk=128g", draft.VM)
 			}
 		})
 	}
@@ -261,7 +261,7 @@ func TestRunDraftBuildsVMRunArgs(t *testing.T) {
 			Disk:   "128g",
 		},
 	}
-	want := []string{"--net=svc,lan", "--cpus=4", "--memory=4g", "--disk=128g"}
+	want := []string{"--net=svc,lan", "--vcpus=4", "--memory=4g", "--disk=128g"}
 	if got := draft.runArgs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("runArgs() = %#v, want %#v", got, want)
 	}
@@ -827,7 +827,7 @@ func TestRunDraftVMPayloadUsesVMRunnerAndSavesVMType(t *testing.T) {
 				Config: &ProjectConfig{Version: projectConfigVersion},
 			}
 
-			draft, err := runDraftFromCLI([]string{payload, "--net=svc", "--cpus=4"}, loc, "yeet-pve1")
+			draft, err := runDraftFromCLI([]string{payload, "--net=svc", "--vcpus=4"}, loc, "yeet-pve1")
 			if err != nil {
 				t.Fatalf("runDraftFromCLI: %v", err)
 			}
@@ -838,7 +838,7 @@ func TestRunDraftVMPayloadUsesVMRunnerAndSavesVMType(t *testing.T) {
 			if gotPayload != payload {
 				t.Fatalf("payload = %q, want %q", gotPayload, payload)
 			}
-			if !reflect.DeepEqual(gotArgs, []string{"--net=svc", "--cpus=4"}) {
+			if !reflect.DeepEqual(gotArgs, []string{"--net=svc", "--vcpus=4"}) {
 				t.Fatalf("args = %#v", gotArgs)
 			}
 			entry, ok := loc.Config.ServiceEntry("devbox", "yeet-pve1")
@@ -890,7 +890,7 @@ func TestRunFromProjectConfigReplaysStoredVMFilelessly(t *testing.T) {
 			Type:        serviceTypeVM,
 			PayloadKind: serviceTypeVM,
 			Payload:     "vm://ubuntu/26.04",
-			Args:        []string{"--net=svc", "--cpus=4"},
+			Args:        []string{"--net=svc", "--vcpus=4"},
 		}}},
 	}
 
@@ -900,8 +900,8 @@ func TestRunFromProjectConfigReplaysStoredVMFilelessly(t *testing.T) {
 	if gotPayload != "vm://ubuntu/26.04" {
 		t.Fatalf("payload = %q, want vm://ubuntu/26.04", gotPayload)
 	}
-	if !reflect.DeepEqual(gotArgs, []string{"--net=svc", "--cpus=4"}) {
-		t.Fatalf("args = %#v, want --net=svc --cpus=4", gotArgs)
+	if !reflect.DeepEqual(gotArgs, []string{"--net=svc", "--vcpus=4"}) {
+		t.Fatalf("args = %#v, want --net=svc --vcpus=4", gotArgs)
 	}
 }
 

@@ -215,7 +215,7 @@ func appendRunDraftIntFlag(args []string, name string, value int) []string {
 
 func appendRunDraftVMArgs(args []string, vm RunDraftVM) []string {
 	if vm.CPUs != 0 {
-		args = append(args, fmt.Sprintf("--cpus=%d", vm.CPUs))
+		args = append(args, fmt.Sprintf("--vcpus=%d", vm.CPUs))
 	}
 	args = appendRunDraftStringFlag(args, "--memory", vm.Memory)
 	return appendRunDraftStringFlag(args, "--disk", vm.Disk)

@@ -204,7 +204,7 @@ func TestParseRunWebFlag(t *testing.T) {
 
 func TestParseRunVMFlags(t *testing.T) {
 	flags, args, err := ParseRun([]string{
-		"--cpus=4",
+		"--vcpus=4",
 		"--memory=4g",
 		"--disk=128g",
 		"--net=svc,lan",
@@ -228,11 +228,23 @@ func TestParseRunRejectsEmptyNetFlag(t *testing.T) {
 	tests := [][]string{
 		{"--net=", "vm://ubuntu/26.04"},
 		{"--net", "", "vm://ubuntu/26.04"},
-		{"--net", "--cpus=2", "vm://ubuntu/26.04"},
+		{"--net", "--vcpus=2", "vm://ubuntu/26.04"},
 	}
 	for _, args := range tests {
 		if _, _, err := ParseRun(args); err == nil || !strings.Contains(err.Error(), "--net must not be empty") {
 			t.Fatalf("ParseRun(%#v) error = %v, want empty --net error", args, err)
+		}
+	}
+}
+
+func TestParseRunRejectsRemovedVMCPUFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"--cpus=4", "vm://ubuntu/26.04"},
+		{"vm://ubuntu/26.04", "--vcpu=4"},
+	} {
+		_, _, err := ParseRun(args)
+		if err == nil || !strings.Contains(err.Error(), "unknown flag") {
+			t.Fatalf("ParseRun(%#v) error = %v, want unknown flag", args, err)
 		}
 	}
 }
@@ -683,7 +695,7 @@ func TestParseServiceSetFlags(t *testing.T) {
 			wantOut: []string{"svc-a"},
 		},
 		{name: "missing change", args: []string{"svc-a"}, wantErr: "service set requires settings to change"},
-		{name: "rejects vm shape flags", args: []string{"svc-a", "--cpus=8"}, wantErr: "unknown flag"},
+		{name: "rejects vm shape flags", args: []string{"svc-a", "--vcpus=8"}, wantErr: "unknown flag"},
 		{name: "rejects vm network flags", args: []string{"svc-a", "--net=lan"}, wantErr: "unknown flag"},
 		{name: "zfs without root", args: []string{"svc-a", "--zfs"}, wantErr: "--service-root is required when --zfs is set"},
 		{name: "relative root without zfs", args: []string{"svc-a", "--service-root", "apps/svc-a"}, wantErr: "--service-root must be absolute unless --zfs is set"},
@@ -722,7 +734,7 @@ func TestParseVMSetFlags(t *testing.T) {
 	}{
 		{
 			name:    "shape flags",
-			args:    []string{"devbox", "--cpus=8", "--memory", "8g", "--disk=128g"},
+			args:    []string{"devbox", "--vcpus=8", "--memory", "8g", "--disk=128g"},
 			want:    VMSetFlags{CPUs: 8, Memory: "8g", Disk: "128g"},
 			wantOut: []string{"devbox"},
 		},
@@ -739,12 +751,14 @@ func TestParseVMSetFlags(t *testing.T) {
 			wantOut: []string{"devbox"},
 		},
 		{name: "missing change", args: []string{"devbox"}, wantErr: "vm set requires settings to change"},
-		{name: "negative cpus", args: []string{"devbox", "--cpus=-1"}, wantErr: "VM CPU count must be positive"},
+		{name: "negative vcpus", args: []string{"devbox", "--vcpus=-1"}, wantErr: "VM vCPU count must be positive"},
+		{name: "old cpus flag", args: []string{"devbox", "--cpus=2"}, wantErr: "unknown flag"},
+		{name: "singular vcpu flag", args: []string{"devbox", "--vcpu=2"}, wantErr: "unknown flag"},
 		{name: "negative vlan", args: []string{"devbox", "--macvlan-vlan=-1"}, wantErr: "--macvlan-vlan must not be negative"},
 		{name: "too large vlan", args: []string{"devbox", "--macvlan-vlan=4095"}, wantErr: "--macvlan-vlan must be between 1 and 4094"},
 		{name: "empty net inline", args: []string{"devbox", "--net="}, wantErr: "--net must not be empty"},
 		{name: "empty net separate", args: []string{"devbox", "--net", ""}, wantErr: "--net must not be empty"},
-		{name: "missing net value", args: []string{"devbox", "--net", "--cpus=2"}, wantErr: "--net must not be empty"},
+		{name: "missing net value", args: []string{"devbox", "--net", "--vcpus=2"}, wantErr: "--net must not be empty"},
 		{name: "empty net component", args: []string{"devbox", "--net=svc,"}, wantErr: "--net must not contain empty network modes"},
 	}
 
@@ -1116,7 +1130,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if !reflect.DeepEqual(reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples) {
 		t.Fatalf("service set examples = %#v, want %#v", reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples)
 	}
-	if reg.Groups["vm"].Commands["set"].Info.Usage != "vm set <vm> [--cpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
+	if reg.Groups["vm"].Commands["set"].Info.Usage != "vm set <vm> [--vcpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
 		t.Fatalf("vm set usage = %q", reg.Groups["vm"].Commands["set"].Info.Usage)
 	}
 	if _, ok := reg.Groups["vm"].Commands["snapshot"]; ok {
@@ -1342,7 +1356,7 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	if _, ok := RemoteGroupFlagSpecs()["vm"]["set"]; !ok {
 		t.Fatal("vm set flag spec missing")
 	}
-	for _, flag := range []string{"--cpus", "--memory", "--disk", "--net", "--macvlan-parent", "--macvlan-vlan", "--macvlan-mac"} {
+	for _, flag := range []string{"--vcpus", "--memory", "--disk", "--net", "--macvlan-parent", "--macvlan-vlan", "--macvlan-mac"} {
 		if !RemoteGroupFlagSpecs()["vm"]["set"][flag].ConsumesValue {
 			t.Fatalf("vm set %s should consume a value", flag)
 		}
