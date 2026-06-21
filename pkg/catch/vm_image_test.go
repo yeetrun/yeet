@@ -1119,6 +1119,17 @@ func TestCachedVMImageManifestSelectsHighestHybridCachedManifestAcrossLegacyTran
 	}
 }
 
+func TestCompareVMImageVersionsTreatsEqualRevisionSuffixesAsEqual(t *testing.T) {
+	legacy := "ubuntu-26.04-amd64-v16"
+	hybrid := "ubuntu-26.04-amd64-kernel-7.1.1-v16"
+	if got := compareVMImageVersions(legacy, hybrid); got != 0 {
+		t.Fatalf("compareVMImageVersions(%q, %q) = %d, want 0", legacy, hybrid, got)
+	}
+	if got := compareVMImageVersions(hybrid, legacy); got != 0 {
+		t.Fatalf("compareVMImageVersions(%q, %q) = %d, want 0", hybrid, legacy, got)
+	}
+}
+
 func TestLatestCachedVMImageManifestFiltersByOfficialFamily(t *testing.T) {
 	root := t.TempDir()
 	contents := vmImageTestContents()
