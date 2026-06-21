@@ -308,6 +308,48 @@ func TestVMImageCatalogValidationRejectsNonnumericVersionSuffix(t *testing.T) {
 	}
 }
 
+func TestVMImageCatalogMatchesHybridKernelImageVersion(t *testing.T) {
+	catalog := vmImageCatalogValidationTestCatalog()
+	tests := []string{
+		"ubuntu-26.04-amd64-kernel-6.10-v1",
+		"ubuntu-26.04-amd64-kernel-6.10.14-v42",
+		"ubuntu-26.04-amd64-kernel-7.1.1-v3",
+	}
+	for _, version := range tests {
+		t.Run(version, func(t *testing.T) {
+			got, ok := catalog.ImageByVersion(version)
+			if !ok || got.Payload != "vm://ubuntu/26.04" {
+				t.Fatalf("ImageByVersion() = %#v ok=%v, want ubuntu image", got, ok)
+			}
+		})
+	}
+}
+
+func TestVMImageCatalogRejectsMalformedHybridKernelImageVersion(t *testing.T) {
+	catalog := vmImageCatalogValidationTestCatalog()
+	tests := []string{
+		"ubuntu-26.04-amd64- kernel-6.10-v1",
+		"ubuntu-26.04-amd64-kernel--v1",
+		"ubuntu-26.04-amd64-kernel-6-v1",
+		"ubuntu-26.04-amd64-kernel-.10-v1",
+		"ubuntu-26.04-amd64-kernel-6.-v1",
+		"ubuntu-26.04-amd64-kernel-6.10.-v1",
+		"ubuntu-26.04-amd64-kernel-6.x-v1",
+		"ubuntu-26.04-amd64-kernel-6.10-rc1-v1",
+		"ubuntu-26.04-amd64-kernel-6.10-v",
+		"ubuntu-26.04-amd64-kernel-6.10-vlatest",
+		"ubuntu-26.04-amd64-kernel-6.10-1",
+	}
+	for _, version := range tests {
+		t.Run(version, func(t *testing.T) {
+			got, ok := catalog.ImageByVersion(version)
+			if ok {
+				t.Fatalf("ImageByVersion() = %#v ok=%v, want ok=false", got, ok)
+			}
+		})
+	}
+}
+
 func TestVMImageCacheFetchCatalogUsesOverrideURL(t *testing.T) {
 	catalog := vmImageCatalog{
 		SchemaVersion: 1,
