@@ -139,18 +139,76 @@ func syncVMGuestKernelToHost(ctx context.Context, target vmKernelSyncTarget) (vm
 }
 
 func AutoSyncVMGuestKernelOnReboot(ctx context.Context, cfg VMConsoleProxyConfig) error {
-	service := strings.TrimSpace(cfg.Service)
-	serviceRoot := strings.TrimSpace(cfg.ServiceRoot)
-	diskPath := strings.TrimSpace(cfg.DiskPath)
-	configPath := strings.TrimSpace(cfg.ConfigFile)
+	service, serviceRoot, diskPath, configPath, err := resolveVMKernelAutoSyncConfig(cfg)
+	if err != nil {
+		return err
+	}
 	if service == "" || serviceRoot == "" || diskPath == "" || configPath == "" {
 		return nil
 	}
-	_, err := syncVMGuestKernelSelectionToHost(ctx, serviceRoot, service, diskPath, configPath)
+	_, err = syncVMGuestKernelSelectionToHost(ctx, serviceRoot, service, diskPath, configPath)
 	if err != nil && errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	return err
+}
+
+func resolveVMKernelAutoSyncConfig(cfg VMConsoleProxyConfig) (service, serviceRoot, diskPath, configPath string, err error) {
+	configPath = strings.TrimSpace(cfg.ConfigFile)
+	serviceRoot = strings.TrimSpace(cfg.ServiceRoot)
+	if serviceRoot == "" {
+		serviceRoot = inferVMServiceRootFromConfigPath(configPath)
+	}
+	service = strings.TrimSpace(cfg.Service)
+	if service == "" && serviceRoot != "" {
+		service = filepath.Base(serviceRoot)
+	}
+	if service != "" {
+		if err := validateVMKernelBootHostname(service); err != nil {
+			return "", "", "", "", err
+		}
+	}
+	diskPath = strings.TrimSpace(cfg.DiskPath)
+	if diskPath == "" && configPath != "" {
+		diskPath, err = firecrackerRootDrivePath(configPath)
+		if err != nil {
+			return "", "", "", "", err
+		}
+	}
+	return service, serviceRoot, diskPath, configPath, nil
+}
+
+func inferVMServiceRootFromConfigPath(configPath string) string {
+	configPath = strings.TrimSpace(configPath)
+	if filepath.Base(configPath) != "firecracker.json" {
+		return ""
+	}
+	runDir := filepath.Dir(configPath)
+	if filepath.Base(runDir) != "run" {
+		return ""
+	}
+	return filepath.Dir(runDir)
+}
+
+func firecrackerRootDrivePath(configPath string) (string, error) {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", fmt.Errorf("read Firecracker config for VM kernel auto-sync: %w", err)
+	}
+	var cfg firecrackerConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return "", fmt.Errorf("decode Firecracker config for VM kernel auto-sync: %w", err)
+	}
+	for _, drive := range cfg.Drives {
+		if drive.IsRootDevice || drive.DriveID == "rootfs" {
+			diskPath := strings.TrimSpace(drive.PathOnHost)
+			if diskPath == "" {
+				return "", fmt.Errorf("firecracker root drive path is empty")
+			}
+			return diskPath, nil
+		}
+	}
+	return "", fmt.Errorf("firecracker config has no root drive")
 }
 
 func syncVMGuestKernelSelectionToHost(ctx context.Context, serviceRoot, service, diskPath, configPath string) (vmKernelSyncResult, error) {
