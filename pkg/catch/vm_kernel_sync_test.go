@@ -155,6 +155,34 @@ func TestVMKernelSyncRestartsRunningVMOnSyncError(t *testing.T) {
 	}
 }
 
+func TestVMRootFSReadOnlyMountCommandUsesNoJournalReplay(t *testing.T) {
+	tests := []struct {
+		name string
+		disk string
+		want []string
+	}{
+		{
+			name: "file image",
+			disk: "/srv/vms/devbox/rootfs.raw",
+			want: []string{"mount", "-o", "loop,ro,noload", "/srv/vms/devbox/rootfs.raw", "/mnt/root"},
+		},
+		{
+			name: "block device",
+			disk: "/dev/zvol/tank/vms/devbox/root",
+			want: []string{"mount", "-o", "ro,noload", "/dev/zvol/tank/vms/devbox/root", "/mnt/root"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := vmRootFSReadOnlyMountCommand(tt.disk, "/mnt/root")
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("mount command = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestVMCmdKernelSyncRoutesToServer(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
