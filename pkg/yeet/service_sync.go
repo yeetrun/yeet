@@ -280,7 +280,7 @@ func serviceSyncVMArgs(vm *catchrpc.ServiceVM) []string {
 	}
 	var args []string
 	if vm.CPUs > 0 {
-		args = append(args, "--cpus="+strconv.Itoa(vm.CPUs))
+		args = append(args, "--vcpus="+strconv.Itoa(vm.CPUs))
 	}
 	if memory := serviceSyncSizeArg(vm.MemoryBytes); memory != "" {
 		args = append(args, "--memory="+memory)

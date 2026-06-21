@@ -198,7 +198,7 @@ func validateRunDraftVM(draft *RunDraft, result *RunDraftValidationResult) {
 		return
 	}
 	if draft.VM.CPUs != 0 {
-		result.addError("vm.cpus", "--cpus is only valid for VM payloads")
+		result.addError("vm.cpus", "--vcpus is only valid for VM payloads")
 	}
 	if draft.VM.Memory != "" {
 		result.addError("vm.memory", "--memory is only valid for VM payloads")

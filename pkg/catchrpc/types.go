@@ -252,35 +252,38 @@ type ServicePaths struct {
 }
 
 type ServiceNetwork struct {
-	SvcIP     string            `json:"svcIp,omitempty"`
-	IPs       []ServiceIP       `json:"ips,omitempty"`
-	IPError   string            `json:"ipError,omitempty"`
-	IPWarning string            `json:"ipWarning,omitempty"`
-	Ports     []ServicePort     `json:"ports,omitempty"`
-	Macvlan   *ServiceMacvlan   `json:"macvlan,omitempty"`
-	Tailscale *ServiceTailscale `json:"tailscale,omitempty"`
+	SvcIP      string            `json:"svcIp,omitempty"`
+	IPs        []ServiceIP       `json:"ips,omitempty"`
+	RuntimeIPs []ServiceIP       `json:"runtimeIps,omitempty"`
+	IPError    string            `json:"ipError,omitempty"`
+	IPWarning  string            `json:"ipWarning,omitempty"`
+	Ports      []ServicePort     `json:"ports,omitempty"`
+	Macvlan    *ServiceMacvlan   `json:"macvlan,omitempty"`
+	Tailscale  *ServiceTailscale `json:"tailscale,omitempty"`
 
 	PortsPresent bool `json:"-"`
 }
 
 type serviceNetworkJSON struct {
-	SvcIP     string            `json:"svcIp,omitempty"`
-	IPs       []ServiceIP       `json:"ips,omitempty"`
-	IPError   string            `json:"ipError,omitempty"`
-	IPWarning string            `json:"ipWarning,omitempty"`
-	Ports     []ServicePort     `json:"ports,omitempty"`
-	Macvlan   *ServiceMacvlan   `json:"macvlan,omitempty"`
-	Tailscale *ServiceTailscale `json:"tailscale,omitempty"`
+	SvcIP      string            `json:"svcIp,omitempty"`
+	IPs        []ServiceIP       `json:"ips,omitempty"`
+	RuntimeIPs []ServiceIP       `json:"runtimeIps,omitempty"`
+	IPError    string            `json:"ipError,omitempty"`
+	IPWarning  string            `json:"ipWarning,omitempty"`
+	Ports      []ServicePort     `json:"ports,omitempty"`
+	Macvlan    *ServiceMacvlan   `json:"macvlan,omitempty"`
+	Tailscale  *ServiceTailscale `json:"tailscale,omitempty"`
 }
 
 type serviceNetworkJSONWithPorts struct {
-	SvcIP     string            `json:"svcIp,omitempty"`
-	IPs       []ServiceIP       `json:"ips,omitempty"`
-	IPError   string            `json:"ipError,omitempty"`
-	IPWarning string            `json:"ipWarning,omitempty"`
-	Ports     []ServicePort     `json:"ports"`
-	Macvlan   *ServiceMacvlan   `json:"macvlan,omitempty"`
-	Tailscale *ServiceTailscale `json:"tailscale,omitempty"`
+	SvcIP      string            `json:"svcIp,omitempty"`
+	IPs        []ServiceIP       `json:"ips,omitempty"`
+	RuntimeIPs []ServiceIP       `json:"runtimeIps,omitempty"`
+	IPError    string            `json:"ipError,omitempty"`
+	IPWarning  string            `json:"ipWarning,omitempty"`
+	Ports      []ServicePort     `json:"ports"`
+	Macvlan    *ServiceMacvlan   `json:"macvlan,omitempty"`
+	Tailscale  *ServiceTailscale `json:"tailscale,omitempty"`
 }
 
 func (n ServiceNetwork) MarshalJSON() ([]byte, error) {
@@ -290,22 +293,24 @@ func (n ServiceNetwork) MarshalJSON() ([]byte, error) {
 			ports = []ServicePort{}
 		}
 		return json.Marshal(serviceNetworkJSONWithPorts{
-			SvcIP:     n.SvcIP,
-			IPs:       n.IPs,
-			IPError:   n.IPError,
-			IPWarning: n.IPWarning,
-			Ports:     ports,
-			Macvlan:   n.Macvlan,
-			Tailscale: n.Tailscale,
+			SvcIP:      n.SvcIP,
+			IPs:        n.IPs,
+			RuntimeIPs: n.RuntimeIPs,
+			IPError:    n.IPError,
+			IPWarning:  n.IPWarning,
+			Ports:      ports,
+			Macvlan:    n.Macvlan,
+			Tailscale:  n.Tailscale,
 		})
 	}
 	return json.Marshal(serviceNetworkJSON{
-		SvcIP:     n.SvcIP,
-		IPs:       n.IPs,
-		IPError:   n.IPError,
-		IPWarning: n.IPWarning,
-		Macvlan:   n.Macvlan,
-		Tailscale: n.Tailscale,
+		SvcIP:      n.SvcIP,
+		IPs:        n.IPs,
+		RuntimeIPs: n.RuntimeIPs,
+		IPError:    n.IPError,
+		IPWarning:  n.IPWarning,
+		Macvlan:    n.Macvlan,
+		Tailscale:  n.Tailscale,
 	})
 }
 
@@ -321,6 +326,7 @@ func (n *ServiceNetwork) UnmarshalJSON(data []byte) error {
 	*n = ServiceNetwork{
 		SvcIP:        decoded.SvcIP,
 		IPs:          decoded.IPs,
+		RuntimeIPs:   decoded.RuntimeIPs,
 		IPError:      decoded.IPError,
 		IPWarning:    decoded.IPWarning,
 		Ports:        decoded.Ports,

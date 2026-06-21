@@ -907,6 +907,9 @@ func (e *ttyExecer) ipCmdFunc() error {
 	if handled, err := e.printVMIPs(); handled {
 		return err
 	}
+	if e.sn != SystemService {
+		return e.printServiceEndpointIPs()
+	}
 
 	args, err := e.ipListArgs()
 	if err != nil {
@@ -917,6 +920,28 @@ func (e *ttyExecer) ipCmdFunc() error {
 		return fmt.Errorf("failed to get IP addresses: %w", err)
 	}
 	if err := printIfaceIPs(e.rw, ips); err != nil {
+		return fmt.Errorf("failed to write IP address: %w", err)
+	}
+	return nil
+}
+
+func (e *ttyExecer) printServiceEndpointIPs() error {
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return fmt.Errorf("failed to get service view: %w", err)
+	}
+	ctx := e.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ips, err := e.s.serviceIPListWithContext(ctx, e.sn, sv)
+	if err != nil {
+		return fmt.Errorf("failed to get IP addresses: %w", err)
+	}
+	if len(ips) == 0 {
+		return fmt.Errorf("service %q has no connectable IP endpoints", e.sn)
+	}
+	if err := printServiceIPs(e.rw, ips); err != nil {
 		return fmt.Errorf("failed to write IP address: %w", err)
 	}
 	return nil
@@ -977,6 +1002,15 @@ func (e *ttyExecer) ipListArgs() ([]string, error) {
 }
 
 func printIfaceIPs(w io.Writer, ips []ifaceIP) error {
+	for _, ip := range ips {
+		if _, err := fmt.Fprintln(w, ip.IP); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func printServiceIPs(w io.Writer, ips []catchrpc.ServiceIP) error {
 	for _, ip := range ips {
 		if _, err := fmt.Fprintln(w, ip.IP); err != nil {
 			return err

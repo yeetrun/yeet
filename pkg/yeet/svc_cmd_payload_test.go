@@ -193,7 +193,7 @@ func TestTryRunVMPayloadExecsRemoteRunWithPayloadArgument(t *testing.T) {
 	serviceOverride = "devbox"
 	defer func() { serviceOverride = oldService }()
 
-	ok, err := tryRunVMPayloadContext(context.Background(), "vm://ubuntu/26.04", []string{"--net=svc", "--cpus=4"})
+	ok, err := tryRunVMPayloadContext(context.Background(), "vm://ubuntu/26.04", []string{"--net=svc", "--vcpus=4"})
 	if err != nil {
 		t.Fatalf("tryRunVMPayloadContext: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestTryRunVMPayloadExecsRemoteRunWithPayloadArgument(t *testing.T) {
 	if gotSvc != "devbox" {
 		t.Fatalf("service = %q", gotSvc)
 	}
-	wantArgs := []string{"run", "--net=svc", "--cpus=4", "vm://ubuntu/26.04"}
+	wantArgs := []string{"run", "--net=svc", "--vcpus=4", "vm://ubuntu/26.04"}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
 	}

@@ -33,10 +33,11 @@ func TestLabelForIP(t *testing.T) {
 		{name: "configured tailscale interface", entry: ifaceIP{Interface: "ts0", IP: "100.64.0.1"}, tsIface: "ts0", want: "tailscale"},
 		{name: "tailscale prefix", entry: ifaceIP{Interface: "tailscale0", IP: "100.64.0.1"}, want: "tailscale"},
 		{name: "yeet tailscale prefix", entry: ifaceIP{Interface: "yts-app", IP: "100.64.0.1"}, want: "tailscale"},
-		{name: "configured macvlan interface", entry: ifaceIP{Interface: "mac0", IP: "10.0.0.8"}, macIface: "mac0", want: "macvlan"},
+		{name: "configured lan interface", entry: ifaceIP{Interface: "mac0", IP: "10.0.0.8"}, macIface: "mac0", want: "lan"},
 		{name: "docker prefix", entry: ifaceIP{Interface: "docker0", IP: "172.17.0.1"}, want: "docker"},
 		{name: "bridge prefix", entry: ifaceIP{Interface: "br-abcd", IP: "172.18.0.1"}, want: "docker"},
-		{name: "docker compose fallback", entry: ifaceIP{Interface: "eth0", IP: "10.0.0.8"}, serviceType: db.ServiceTypeDockerCompose, want: "docker"},
+		{name: "docker compose netns fallback", entry: ifaceIP{Interface: "eth0", IP: "10.0.0.8"}, hasNetns: true, serviceType: db.ServiceTypeDockerCompose, want: "docker"},
+		{name: "docker compose without netns fallback", entry: ifaceIP{Interface: "eth0", IP: "10.0.0.8"}, serviceType: db.ServiceTypeDockerCompose, want: "host"},
 		{name: "netns fallback", entry: ifaceIP{Interface: "eth0", IP: "10.0.0.8"}, hasNetns: true, serviceType: db.ServiceTypeSystemd, want: "netns"},
 		{name: "host fallback", entry: ifaceIP{Interface: "eth0", IP: "10.0.0.8"}, serviceType: db.ServiceTypeSystemd, want: "host"},
 	}
@@ -374,8 +375,7 @@ func TestServiceIPListLabelsInterfacesAndAddsMissingServiceIP(t *testing.T) {
 	}
 	want := map[string]string{
 		"100.64.0.10": "tailscale",
-		"10.0.0.8":    "macvlan",
-		"10.0.0.9":    "netns",
+		"10.0.0.8":    "lan",
 		"10.0.0.99":   "service",
 	}
 	if len(ips) != len(want) {
@@ -386,6 +386,120 @@ func TestServiceIPListLabelsInterfacesAndAddsMissingServiceIP(t *testing.T) {
 			t.Fatalf("ip %s label = %q, want %q (all=%#v)", ip.IP, ip.Label, want[ip.IP], ips)
 		}
 	}
+}
+
+func TestServiceInfoSeparatesEndpointAndRuntimeIPs(t *testing.T) {
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("jellyfin", func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeDockerCompose
+		s.Generation = 3
+		s.LatestGeneration = 3
+		s.Macvlan = &db.MacvlanNetwork{Interface: "ymv-jellyfin"}
+		s.TSNet = &db.TailscaleNetwork{Interface: "yts-jellyfin"}
+		s.Artifacts = db.ArtifactStore{
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/netns.service"}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service: %v", err)
+	}
+
+	oldListIPv4Addrs := listIPv4AddrsFn
+	defer func() { listIPv4AddrsFn = oldListIPv4Addrs }()
+	listIPv4AddrsFn = func([]string) ([]ifaceIP, error) {
+		return []ifaceIP{
+			{Interface: "br0", IP: "192.168.48.1"},
+			{Interface: "yts-jellyfin", IP: "100.116.205.120"},
+			{Interface: "ymv-jellyfin", IP: "10.0.4.171"},
+		}, nil
+	}
+
+	resp, err := server.serviceInfo("jellyfin")
+	if err != nil {
+		t.Fatalf("serviceInfo: %v", err)
+	}
+	gotEndpoints := serviceIPsByLabel(resp.Info.Network.IPs)
+	wantEndpoints := map[string]string{
+		"tailscale": "100.116.205.120",
+		"lan":       "10.0.4.171",
+	}
+	if !mapsEqual(gotEndpoints, wantEndpoints) {
+		t.Fatalf("endpoint IPs = %#v, want %#v (all=%#v)", gotEndpoints, wantEndpoints, resp.Info.Network.IPs)
+	}
+	gotRuntime := serviceIPsByLabel(resp.Info.Network.RuntimeIPs)
+	wantRuntime := map[string]string{"docker": "192.168.48.1"}
+	if !mapsEqual(gotRuntime, wantRuntime) {
+		t.Fatalf("runtime IPs = %#v, want %#v (all=%#v)", gotRuntime, wantRuntime, resp.Info.Network.RuntimeIPs)
+	}
+}
+
+func TestServiceIPListReturnsOnlyRelevantEndpoints(t *testing.T) {
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("jellyfin", func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeDockerCompose
+		s.Generation = 3
+		s.LatestGeneration = 3
+		s.SvcNetwork = &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.12")}
+		s.Macvlan = &db.MacvlanNetwork{Interface: "ymv-jellyfin"}
+		s.TSNet = &db.TailscaleNetwork{Interface: "yts-jellyfin"}
+		s.Artifacts = db.ArtifactStore{
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/netns.service"}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service: %v", err)
+	}
+	dv, err := server.getDB()
+	if err != nil {
+		t.Fatalf("get db: %v", err)
+	}
+	sv, ok := dv.Services().GetOk("jellyfin")
+	if !ok {
+		t.Fatal("missing service")
+	}
+
+	oldListIPv4Addrs := listIPv4AddrsFn
+	defer func() { listIPv4AddrsFn = oldListIPv4Addrs }()
+	listIPv4AddrsFn = func([]string) ([]ifaceIP, error) {
+		return []ifaceIP{
+			{Interface: "br0", IP: "192.168.48.1"},
+			{Interface: "yts-jellyfin", IP: "100.116.205.120"},
+			{Interface: "ymv-jellyfin", IP: "10.0.4.171"},
+		}, nil
+	}
+
+	ips, err := server.serviceIPList("jellyfin", sv)
+	if err != nil {
+		t.Fatalf("serviceIPList: %v", err)
+	}
+	got := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		got = append(got, ip.IP)
+	}
+	want := []string{"10.0.4.171", "100.116.205.120", "192.168.100.12"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("serviceIPList IPs = %#v, want %#v (all=%#v)", got, want, ips)
+	}
+}
+
+func serviceIPsByLabel(ips []catchrpc.ServiceIP) map[string]string {
+	out := map[string]string{}
+	for _, ip := range ips {
+		out[ip.Label] = ip.IP
+	}
+	return out
+}
+
+func mapsEqual(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftValue := range left {
+		if right[key] != leftValue {
+			return false
+		}
+	}
+	return true
 }
 
 func TestServiceInfoReturnsNotFoundResponse(t *testing.T) {

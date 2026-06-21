@@ -341,7 +341,7 @@ function updatePreview(draft) {
   for (const port of network.publish || []) parts.push(`--publish=${shell(port)}`);
   if (storage.serviceRoot) parts.push(`--service-root=${shell(storage.serviceRoot)}`);
   if (storage.zfs) parts.push("--zfs");
-  if (draft.vm?.cpus) parts.push(`--cpus=${draft.vm.cpus}`);
+  if (draft.vm?.cpus) parts.push(`--vcpus=${draft.vm.cpus}`);
   if (draft.vm?.memory) parts.push(`--memory=${shell(draft.vm.memory)}`);
   if (draft.vm?.disk) parts.push(`--disk=${shell(draft.vm.disk)}`);
   if (snapshots.mode) parts.push(`--snapshots=${shell(snapshots.mode)}`);

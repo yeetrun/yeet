@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -738,6 +739,7 @@ func TestIPCmdFuncUsesNetNSArgsForServiceArtifact(t *testing.T) {
 		s.ServiceType = db.ServiceTypeSystemd
 		s.Generation = 3
 		s.LatestGeneration = 3
+		s.SvcNetwork = &db.SvcNetwork{IPv4: netip.MustParseAddr("10.0.0.99")}
 		s.Artifacts = db.ArtifactStore{
 			db.ArtifactNetNSService: {
 				Refs: map[db.ArtifactRef]string{
@@ -773,7 +775,54 @@ func TestIPCmdFuncUsesNetNSArgsForServiceArtifact(t *testing.T) {
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("ip args = %#v, want %#v", gotArgs, wantArgs)
 	}
-	if got := out.String(); got != "10.0.0.8\n" {
+	if got := out.String(); got != "10.0.0.99\n" {
+		t.Fatalf("ip output = %q", got)
+	}
+}
+
+func TestIPCmdFuncPrintsOnlyEndpointIPsForNetNSService(t *testing.T) {
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("jellyfin", func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeDockerCompose
+		s.Generation = 3
+		s.LatestGeneration = 3
+		s.SvcNetwork = &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.12")}
+		s.Macvlan = &db.MacvlanNetwork{Interface: "ymv-jellyfin"}
+		s.TSNet = &db.TailscaleNetwork{Interface: "yts-jellyfin"}
+		s.Artifacts = db.ArtifactStore{
+			db.ArtifactNetNSService: {
+				Refs: map[db.ArtifactRef]string{
+					db.Gen(3): "/tmp/netns.service",
+				},
+			},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed service: %v", err)
+	}
+
+	oldListIPv4Addrs := listIPv4AddrsFn
+	defer func() { listIPv4AddrsFn = oldListIPv4Addrs }()
+	listIPv4AddrsFn = func([]string) ([]ifaceIP, error) {
+		return []ifaceIP{
+			{Interface: "br0", IP: "192.168.48.1"},
+			{Interface: "yts-jellyfin", IP: "100.116.205.120"},
+			{Interface: "ymv-jellyfin", IP: "10.0.4.171"},
+		}, nil
+	}
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  "jellyfin",
+		rw:  &out,
+	}
+	if err := execer.ipCmdFunc(); err != nil {
+		t.Fatalf("ipCmdFunc: %v", err)
+	}
+
+	if got := out.String(); got != "10.0.4.171\n100.116.205.120\n192.168.100.12\n" {
 		t.Fatalf("ip output = %q", got)
 	}
 }
