@@ -26,6 +26,10 @@ type VMConsoleProxyConfig struct {
 	APISocket     string
 	ConfigFile    string
 	ConsoleSocket string
+	Service       string
+	ServiceRoot   string
+	DiskPath      string
+	OnGuestReboot func(context.Context, VMConsoleProxyConfig) error
 }
 
 type vmFullRestoreRequest struct {
@@ -106,7 +110,20 @@ func RunVMConsoleProxy(ctx context.Context, cfg VMConsoleProxyConfig) error {
 			return err
 		}
 	}
-	return waitVMConsoleProcess(cmd, guestStopped)
+	err = waitVMConsoleProcess(cmd, guestStopped)
+	if errors.Is(err, ErrVMGuestReboot) {
+		runVMGuestRebootHook(ctx, cfg)
+	}
+	return err
+}
+
+func runVMGuestRebootHook(ctx context.Context, cfg VMConsoleProxyConfig) {
+	if cfg.OnGuestReboot == nil {
+		return
+	}
+	if err := cfg.OnGuestReboot(ctx, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: VM guest reboot hook failed: %v\n", err)
+	}
 }
 
 func failVMRestoreLoadBeforeStart(resultPath string, err error) error {

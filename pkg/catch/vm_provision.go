@@ -892,6 +892,8 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 		Service:          e.sn,
 		Runner:           e.s.catchRunnerPath(),
 		DataDir:          e.s.cfg.RootDir,
+		ServiceRoot:      resolvedRoot.Root,
+		DiskPath:         diskPath,
 		Firecracker:      image.Paths.FirecrackerPath,
 		ConfigPath:       firecrackerPath,
 		APISocket:        apiSocket,

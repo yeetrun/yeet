@@ -319,6 +319,9 @@ func TestHandleSpecialCommandVMRun(t *testing.T) {
 
 	handled, err := handleSpecialCommand([]string{
 		"vm-run",
+		"--service", "devbox",
+		"--service-root", "/srv/vms/devbox",
+		"--disk-path", "/srv/vms/devbox/rootfs.ext4",
 		"--firecracker", "/srv/firecracker",
 		"--api-sock", "/run/fc.sock",
 		"--config-file", "/run/fc.json",
@@ -331,11 +334,18 @@ func TestHandleSpecialCommandVMRun(t *testing.T) {
 		t.Fatal("vm-run was not handled")
 	}
 	want := catch.VMConsoleProxyConfig{
+		Service:       "devbox",
+		ServiceRoot:   "/srv/vms/devbox",
+		DiskPath:      "/srv/vms/devbox/rootfs.ext4",
 		Firecracker:   "/srv/firecracker",
 		APISocket:     "/run/fc.sock",
 		ConfigFile:    "/run/fc.json",
 		ConsoleSocket: "/run/serial.sock",
 	}
+	if got.OnGuestReboot == nil {
+		t.Fatal("OnGuestReboot is nil, want automatic guest kernel sync hook")
+	}
+	got.OnGuestReboot = nil
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("config = %#v, want %#v", got, want)
 	}
