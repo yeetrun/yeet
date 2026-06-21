@@ -158,6 +158,16 @@ func syncVMGuestKernelFromRootFS(ctx context.Context, root, service, diskPath st
 	if runner == nil {
 		runner = runVMCommand
 	}
+	replayRoot, err := os.MkdirTemp("", "yeet-vm-kernel-journal-*")
+	if err != nil {
+		return vmKernelSyncResult{}, fmt.Errorf("create VM rootfs journal replay dir: %w", err)
+	}
+	defer func() {
+		retErr = joinVMMetadataDeferredError(retErr, os.RemoveAll(replayRoot), "remove VM rootfs journal replay dir")
+	}()
+	if err := runner(ctx, vmRootFSJournalReplayCommand(diskPath, replayRoot)); err != nil {
+		return vmKernelSyncResult{}, fmt.Errorf("replay VM rootfs journal: %w", err)
+	}
 	if err := runner(ctx, vmRootFSReadOnlyMountCommand(diskPath, mountRoot)); err != nil {
 		return vmKernelSyncResult{}, fmt.Errorf("mount VM rootfs: %w", err)
 	}
@@ -335,6 +345,27 @@ func vmRootFSReadOnlyMountCommand(diskPath, mountRoot string) []string {
 		return []string{"mount", "-o", "ro,noload", diskPath, mountRoot}
 	}
 	return []string{"mount", "-o", "loop,ro,noload", diskPath, mountRoot}
+}
+
+func vmRootFSJournalReplayCommand(diskPath, mountRoot string) []string {
+	options := "rw"
+	if !strings.HasPrefix(diskPath, "/dev/") {
+		options = "loop,rw"
+	}
+	return []string{
+		"sh", "-c", `set -eu
+mounted=0
+cleanup() {
+	if [ "$mounted" = 1 ]; then
+		umount "$3"
+	fi
+}
+trap cleanup EXIT
+mount -o "$1" "$2" "$3"
+mounted=1
+umount "$3"
+mounted=0
+`, "yeet-vm-rootfs-journal-replay", options, diskPath, mountRoot}
 }
 
 func updateVMKernelFirecrackerConfig(configPath, kernelPath string) error {
