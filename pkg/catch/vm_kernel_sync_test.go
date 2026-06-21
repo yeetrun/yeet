@@ -148,6 +148,28 @@ func TestAutoSyncVMGuestKernelOnRebootUpdatesFirecrackerConfig(t *testing.T) {
 	}
 }
 
+func TestAutoSyncVMGuestKernelOnRebootInfersLegacyVMRunMetadata(t *testing.T) {
+	root := t.TempDir()
+	writeKernelSyncFirecrackerConfig(t, root, "/old/vmlinux", "/old/initrd.img")
+	withVMKernelSyncRunner(t, mountedGuestKernelRunner(t))
+
+	err := AutoSyncVMGuestKernelOnReboot(context.Background(), VMConsoleProxyConfig{
+		ConfigFile: filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
+	})
+	if err != nil {
+		t.Fatalf("AutoSyncVMGuestKernelOnReboot: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(serviceRunDirForRoot(root), "firecracker.json"))
+	if err != nil {
+		t.Fatalf("read firecracker config: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, "/run/kernels/"+filepath.Base(root)+"/linux-7.1.1-yeet/vmlinux") {
+		t.Fatalf("firecracker config = %s, want synced kernel path using inferred service name", text)
+	}
+}
+
 func TestAutoSyncVMGuestKernelOnRebootSkipsMissingSelector(t *testing.T) {
 	root := t.TempDir()
 	writeKernelSyncFirecrackerConfig(t, root, "/old/vmlinux", "")
