@@ -233,7 +233,38 @@ func (c vmImageCatalog) DefaultImage() (vmImageCatalogImage, bool) {
 func (i vmImageCatalogImage) matchesVersion(version string) bool {
 	version = strings.TrimSpace(version)
 	prefix := strings.TrimSpace(i.VersionPrefix)
-	return strings.HasPrefix(version, prefix) && isNumericVersionSuffix(strings.TrimPrefix(version, prefix))
+	if !strings.HasPrefix(version, prefix) {
+		return false
+	}
+	suffix := strings.TrimPrefix(version, prefix)
+	return isNumericVersionSuffix(suffix) || isHybridKernelVersionSuffix(suffix)
+}
+
+func isHybridKernelVersionSuffix(version string) bool {
+	const prefix = "kernel-"
+	if !strings.HasPrefix(version, prefix) {
+		return false
+	}
+	kernel, revision, ok := strings.Cut(strings.TrimPrefix(version, prefix), "-")
+	return ok && validUpstreamKernelVersion(kernel) && isNumericVersionSuffix(revision)
+}
+
+func validUpstreamKernelVersion(kernel string) bool {
+	components := strings.Split(kernel, ".")
+	if len(components) < 2 {
+		return false
+	}
+	for _, component := range components {
+		if component == "" {
+			return false
+		}
+		for _, r := range component {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (i vmImageCatalogImage) normalized() vmImageCatalogImage {

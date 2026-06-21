@@ -1019,6 +1019,13 @@ func compareVMImageVersions(a, b string) int {
 	if a == b {
 		return 0
 	}
+	if ar, ok := vmImageVersionRevisionSuffix(a); ok {
+		if br, ok := vmImageVersionRevisionSuffix(b); ok {
+			if cmp := compareVMImageVersionNumbers(strings.TrimPrefix(ar, "v"), strings.TrimPrefix(br, "v")); cmp != 0 {
+				return cmp
+			}
+		}
+	}
 	ai, bi := 0, 0
 	for ai < len(a) && bi < len(b) {
 		at, an, nextA := nextVMImageVersionToken(a, ai)
@@ -1029,6 +1036,18 @@ func compareVMImageVersions(a, b string) int {
 		ai, bi = nextA, nextB
 	}
 	return compareVMImageVersionRemainder(ai, len(a), bi, len(b))
+}
+
+func vmImageVersionRevisionSuffix(version string) (string, bool) {
+	idx := strings.LastIndex(version, "-v")
+	if idx < 0 {
+		return "", false
+	}
+	suffix := version[idx+1:]
+	if !isNumericVersionSuffix(suffix) {
+		return "", false
+	}
+	return suffix, true
 }
 
 func compareVMImageVersionTokens(a string, aNumber bool, b string, bNumber bool) int {

@@ -1045,6 +1045,32 @@ func TestCachedVMImageManifestSelectsHighestValidCachedManifest(t *testing.T) {
 	}
 }
 
+func TestCachedVMImageManifestSelectsHighestHybridCachedManifestAcrossLegacyTransition(t *testing.T) {
+	root := t.TempDir()
+	contents := vmImageTestContents()
+	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-v15", contents))
+	writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-kernel-7.1.0-v14", contents))
+	latestDir := writeCachedVMImageManifest(t, root, vmImageTestManifest("ubuntu-26.04-amd64-kernel-7.1.1-v16", contents))
+
+	image, ok := vmImageTestCatalog().ImageByPayload(testUbuntuVMPayload)
+	if !ok {
+		t.Fatal("missing Ubuntu catalog entry")
+	}
+	got, dir, ok, err := latestCachedVMImageManifest(root, image)
+	if err != nil {
+		t.Fatalf("latestCachedVMImageManifest: %v", err)
+	}
+	if !ok {
+		t.Fatal("latestCachedVMImageManifest found no cached manifest")
+	}
+	if got.Version != "ubuntu-26.04-amd64-kernel-7.1.1-v16" {
+		t.Fatalf("version = %q, want highest hybrid cached manifest", got.Version)
+	}
+	if dir != latestDir {
+		t.Fatalf("dir = %q, want %q", dir, latestDir)
+	}
+}
+
 func TestLatestCachedVMImageManifestFiltersByOfficialFamily(t *testing.T) {
 	root := t.TempDir()
 	contents := vmImageTestContents()
