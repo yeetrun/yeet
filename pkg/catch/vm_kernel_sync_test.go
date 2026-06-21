@@ -64,6 +64,62 @@ func TestSyncGuestSelectedKernelCopiesVerifiedKernel(t *testing.T) {
 	}
 }
 
+func TestSyncGuestSelectedKernelReadsSelectorThroughGuestAbsoluteSymlink(t *testing.T) {
+	root := t.TempDir()
+	mountRoot := filepath.Join(root, "mnt")
+	if err := os.MkdirAll(filepath.Join(mountRoot, "etc/yeet-vm/kernel"), 0o755); err != nil {
+		t.Fatalf("mkdir selector dir: %v", err)
+	}
+	staticDir := filepath.Join(mountRoot, "nix/store/hash-etc/etc")
+	staticSelectorDir := filepath.Join(staticDir, "yeet-vm/kernel")
+	if err := os.MkdirAll(staticSelectorDir, 0o755); err != nil {
+		t.Fatalf("mkdir static selector dir: %v", err)
+	}
+	if err := os.Symlink("/nix/store/hash-etc/etc", filepath.Join(mountRoot, "etc/static")); err != nil {
+		t.Fatalf("symlink /etc/static: %v", err)
+	}
+	if err := os.Symlink("/etc/static/yeet-vm/kernel/selected.json", filepath.Join(mountRoot, "etc/yeet-vm/kernel/selected.json")); err != nil {
+		t.Fatalf("symlink selector: %v", err)
+	}
+
+	kernelDir := filepath.Join(mountRoot, "nix/store/hash-yeet-vm-kernel-7.1.1/lib/yeet-vm/kernels/linux-7.1.1-yeet")
+	if err := os.MkdirAll(kernelDir, 0o755); err != nil {
+		t.Fatalf("mkdir kernel: %v", err)
+	}
+	kernelBytes := "kernel"
+	configBytes := "config"
+	if err := os.WriteFile(filepath.Join(kernelDir, "vmlinux"), []byte(kernelBytes), 0o644); err != nil {
+		t.Fatalf("write kernel: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(kernelDir, "kernel.config"), []byte(configBytes), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	selector := `{
+		"schema_version":1,
+		"version":"linux-7.1.1-yeet",
+		"kernel":"/nix/store/hash-yeet-vm-kernel-7.1.1/lib/yeet-vm/kernels/linux-7.1.1-yeet/vmlinux",
+		"kernel_config":"/nix/store/hash-yeet-vm-kernel-7.1.1/lib/yeet-vm/kernels/linux-7.1.1-yeet/kernel.config",
+		"sha256":{
+			"vmlinux":"` + sha256Hex(kernelBytes) + `",
+			"kernel.config":"` + sha256Hex(configBytes) + `"
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(staticSelectorDir, "selected.json"), []byte(selector), 0o644); err != nil {
+		t.Fatalf("write selector: %v", err)
+	}
+
+	out, err := syncGuestSelectedKernelFromMountedRoot(context.Background(), root, "devbox", mountRoot)
+	if err != nil {
+		t.Fatalf("syncGuestSelectedKernelFromMountedRoot: %v", err)
+	}
+	if out.Version != "linux-7.1.1-yeet" {
+		t.Fatalf("version = %q, want linux-7.1.1-yeet", out.Version)
+	}
+	if _, err := os.Stat(out.HostKernelPath); err != nil {
+		t.Fatalf("stat copied kernel: %v", err)
+	}
+}
+
 func TestVMKernelSyncRejectsRunningVMWithoutRestart(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)

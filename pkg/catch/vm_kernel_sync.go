@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -168,19 +169,15 @@ func syncVMGuestKernelFromRootFS(ctx context.Context, root, service, diskPath st
 }
 
 func syncGuestSelectedKernelFromMountedRoot(_ context.Context, serviceRoot, service, mountRoot string) (vmKernelSyncResult, error) {
-	raw, err := os.ReadFile(filepath.Join(mountRoot, strings.TrimPrefix(vmGuestKernelSelectionPath, "/")))
+	selection, err := readGuestKernelSelection(mountRoot)
 	if err != nil {
-		return vmKernelSyncResult{}, fmt.Errorf("read guest kernel selector: %w", err)
-	}
-	var selection vmGuestKernelSelection
-	if err := json.Unmarshal(raw, &selection); err != nil {
-		return vmKernelSyncResult{}, fmt.Errorf("decode guest kernel selector: %w", err)
-	}
-	if err := selection.validate(); err != nil {
 		return vmKernelSyncResult{}, err
 	}
 
-	srcKernel := filepath.Join(mountRoot, strings.TrimPrefix(selection.Kernel, "/"))
+	srcKernel, err := resolveGuestRootPath(mountRoot, selection.Kernel)
+	if err != nil {
+		return vmKernelSyncResult{}, fmt.Errorf("resolve guest kernel path: %w", err)
+	}
 	if err := verifyFileSHA256(srcKernel, selection.SHA256["vmlinux"]); err != nil {
 		return vmKernelSyncResult{}, err
 	}
@@ -193,18 +190,120 @@ func syncGuestSelectedKernelFromMountedRoot(_ context.Context, serviceRoot, serv
 		return vmKernelSyncResult{}, err
 	}
 
-	var dstConfig string
-	if strings.TrimSpace(selection.KernelConfig) != "" {
-		srcConfig := filepath.Join(mountRoot, strings.TrimPrefix(selection.KernelConfig, "/"))
-		if err := verifyFileSHA256(srcConfig, selection.SHA256["kernel.config"]); err != nil {
-			return vmKernelSyncResult{}, err
-		}
-		dstConfig = filepath.Join(dstDir, "kernel.config")
-		if err := copyFileMode(srcConfig, dstConfig, 0o644); err != nil {
-			return vmKernelSyncResult{}, err
-		}
+	dstConfig, err := syncGuestKernelConfig(mountRoot, dstDir, selection)
+	if err != nil {
+		return vmKernelSyncResult{}, err
 	}
 	return vmKernelSyncResult{Version: selection.Version, HostKernelPath: dstKernel, HostConfigPath: dstConfig}, nil
+}
+
+func readGuestKernelSelection(mountRoot string) (vmGuestKernelSelection, error) {
+	selectorPath, err := resolveGuestRootPath(mountRoot, vmGuestKernelSelectionPath)
+	if err != nil {
+		return vmGuestKernelSelection{}, fmt.Errorf("resolve guest kernel selector: %w", err)
+	}
+	raw, err := os.ReadFile(selectorPath)
+	if err != nil {
+		return vmGuestKernelSelection{}, fmt.Errorf("read guest kernel selector: %w", err)
+	}
+	var selection vmGuestKernelSelection
+	if err := json.Unmarshal(raw, &selection); err != nil {
+		return vmGuestKernelSelection{}, fmt.Errorf("decode guest kernel selector: %w", err)
+	}
+	if err := selection.validate(); err != nil {
+		return vmGuestKernelSelection{}, err
+	}
+	return selection, nil
+}
+
+func syncGuestKernelConfig(mountRoot, dstDir string, selection vmGuestKernelSelection) (string, error) {
+	if strings.TrimSpace(selection.KernelConfig) == "" {
+		return "", nil
+	}
+	srcConfig, err := resolveGuestRootPath(mountRoot, selection.KernelConfig)
+	if err != nil {
+		return "", fmt.Errorf("resolve guest kernel config path: %w", err)
+	}
+	if err := verifyFileSHA256(srcConfig, selection.SHA256["kernel.config"]); err != nil {
+		return "", err
+	}
+	dstConfig := filepath.Join(dstDir, "kernel.config")
+	if err := copyFileMode(srcConfig, dstConfig, 0o644); err != nil {
+		return "", err
+	}
+	return dstConfig, nil
+}
+
+func resolveGuestRootPath(mountRoot, guestPath string) (string, error) {
+	original := guestPath
+	guestPath = path.Clean(strings.TrimSpace(guestPath))
+	if !path.IsAbs(guestPath) {
+		return "", fmt.Errorf("guest path %q is not absolute", original)
+	}
+	parts := splitGuestPath(guestPath)
+	resolved := make([]string, 0, len(parts))
+	symlinks := 0
+	for len(parts) > 0 {
+		part := parts[0]
+		parts = parts[1:]
+		candidateParts := append(append([]string(nil), resolved...), part)
+		candidateGuestPath := guestPathFromParts(candidateParts)
+		candidateHostPath := guestHostPath(mountRoot, candidateParts)
+		info, err := os.Lstat(candidateHostPath)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", candidateGuestPath, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			resolved = append(resolved, part)
+			continue
+		}
+
+		symlinks++
+		if symlinks > 40 {
+			return "", fmt.Errorf("too many symlinks resolving guest path %q", original)
+		}
+		targetParts, err := guestSymlinkTargetParts(candidateHostPath, candidateGuestPath, resolved)
+		if err != nil {
+			return "", err
+		}
+		parts = append(targetParts, parts...)
+		resolved = resolved[:0]
+	}
+	return guestHostPath(mountRoot, resolved), nil
+}
+
+func guestSymlinkTargetParts(hostPath, guestPath string, resolved []string) ([]string, error) {
+	target, err := os.Readlink(hostPath)
+	if err != nil {
+		return nil, fmt.Errorf("readlink %s: %w", guestPath, err)
+	}
+	if path.IsAbs(target) {
+		return splitGuestPath(target), nil
+	}
+	parentGuestPath := guestPathFromParts(resolved)
+	return splitGuestPath(path.Join(parentGuestPath, target)), nil
+}
+
+func guestHostPath(mountRoot string, parts []string) string {
+	if len(parts) == 0 {
+		return mountRoot
+	}
+	return filepath.Join(mountRoot, filepath.FromSlash(path.Join(parts...)))
+}
+
+func guestPathFromParts(parts []string) string {
+	if len(parts) == 0 {
+		return "/"
+	}
+	return "/" + path.Join(parts...)
+}
+
+func splitGuestPath(p string) []string {
+	p = strings.TrimPrefix(path.Clean(p), "/")
+	if p == "" || p == "." {
+		return nil
+	}
+	return strings.Split(p, "/")
 }
 
 func verifyFileSHA256(path, want string) error {
