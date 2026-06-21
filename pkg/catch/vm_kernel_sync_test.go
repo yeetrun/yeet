@@ -120,6 +120,62 @@ func TestSyncGuestSelectedKernelReadsSelectorThroughGuestAbsoluteSymlink(t *test
 	}
 }
 
+func TestAutoSyncVMGuestKernelOnRebootUpdatesFirecrackerConfig(t *testing.T) {
+	root := t.TempDir()
+	writeKernelSyncFirecrackerConfig(t, root, "/old/vmlinux", "/old/initrd.img")
+	withVMKernelSyncRunner(t, mountedGuestKernelRunner(t))
+
+	err := AutoSyncVMGuestKernelOnReboot(context.Background(), VMConsoleProxyConfig{
+		Service:     "devbox",
+		ServiceRoot: root,
+		DiskPath:    "/srv/vms/devbox/rootfs.ext4",
+		ConfigFile:  filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
+	})
+	if err != nil {
+		t.Fatalf("AutoSyncVMGuestKernelOnReboot: %v", err)
+	}
+
+	raw, err := os.ReadFile(filepath.Join(serviceRunDirForRoot(root), "firecracker.json"))
+	if err != nil {
+		t.Fatalf("read firecracker config: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, "/run/kernels/devbox/linux-7.1.1-yeet/vmlinux") {
+		t.Fatalf("firecracker config = %s, want synced kernel path", text)
+	}
+	if strings.Contains(text, "initrd.img") {
+		t.Fatalf("firecracker config = %s, want initrd cleared", text)
+	}
+}
+
+func TestAutoSyncVMGuestKernelOnRebootSkipsMissingSelector(t *testing.T) {
+	root := t.TempDir()
+	writeKernelSyncFirecrackerConfig(t, root, "/old/vmlinux", "")
+	withVMKernelSyncRunner(t, func(_ context.Context, command []string) error {
+		switch {
+		case len(command) > 0 && command[0] == "sh":
+			return nil
+		case len(command) > 0 && command[0] == "mount":
+			return os.MkdirAll(command[len(command)-1], 0o755)
+		case len(command) == 2 && command[0] == "umount":
+			return nil
+		default:
+			return errors.New("unexpected kernel sync command: " + strings.Join(command, " "))
+		}
+	})
+
+	err := AutoSyncVMGuestKernelOnReboot(context.Background(), VMConsoleProxyConfig{
+		Service:     "devbox",
+		ServiceRoot: root,
+		DiskPath:    "/srv/vms/devbox/rootfs.ext4",
+		ConfigFile:  filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
+	})
+	if err != nil {
+		t.Fatalf("AutoSyncVMGuestKernelOnReboot: %v", err)
+	}
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), "/old/vmlinux")
+}
+
 func TestVMKernelSyncRejectsRunningVMWithoutRestart(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
@@ -387,6 +443,37 @@ func writeMountedGuestKernel(t *testing.T, mountRoot string) {
 	}`
 	if err := os.WriteFile(filepath.Join(selectorDir, "selected.json"), []byte(selector), 0o644); err != nil {
 		t.Fatalf("write selector: %v", err)
+	}
+}
+
+func writeKernelSyncFirecrackerConfig(t *testing.T, root, kernel, initrd string) {
+	t.Helper()
+	runDir := serviceRunDirForRoot(root)
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatalf("mkdir run dir: %v", err)
+	}
+	raw, err := renderFirecrackerConfig(firecrackerConfig{
+		BootSource: firecrackerBootSource{
+			KernelImagePath: kernel,
+			InitrdPath:      initrd,
+			BootArgs:        "console=ttyS0",
+		},
+		Drives: []firecrackerDrive{{
+			DriveID:      "rootfs",
+			PathOnHost:   "/disk",
+			IsRootDevice: true,
+			IsReadOnly:   false,
+		}},
+		MachineConfig: firecrackerMachineConfig{
+			VCPUCount:  1,
+			MemSizeMib: 256,
+		},
+	})
+	if err != nil {
+		t.Fatalf("render firecracker config: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "firecracker.json"), raw, 0o644); err != nil {
+		t.Fatalf("write firecracker config: %v", err)
 	}
 }
 

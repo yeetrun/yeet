@@ -134,11 +134,30 @@ func (r *vmKernelSyncRestart) finish(name string) error {
 }
 
 func syncVMGuestKernelToHost(ctx context.Context, target vmKernelSyncTarget) (vmKernelSyncResult, error) {
-	result, err := syncVMGuestKernelFromRootFS(ctx, target.serviceRoot, target.service.Name, target.service.VM.Disk.Path)
+	configPath := filepath.Join(serviceRunDirForRoot(target.serviceRoot), "firecracker.json")
+	return syncVMGuestKernelSelectionToHost(ctx, target.serviceRoot, target.service.Name, target.service.VM.Disk.Path, configPath)
+}
+
+func AutoSyncVMGuestKernelOnReboot(ctx context.Context, cfg VMConsoleProxyConfig) error {
+	service := strings.TrimSpace(cfg.Service)
+	serviceRoot := strings.TrimSpace(cfg.ServiceRoot)
+	diskPath := strings.TrimSpace(cfg.DiskPath)
+	configPath := strings.TrimSpace(cfg.ConfigFile)
+	if service == "" || serviceRoot == "" || diskPath == "" || configPath == "" {
+		return nil
+	}
+	_, err := syncVMGuestKernelSelectionToHost(ctx, serviceRoot, service, diskPath, configPath)
+	if err != nil && errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func syncVMGuestKernelSelectionToHost(ctx context.Context, serviceRoot, service, diskPath, configPath string) (vmKernelSyncResult, error) {
+	result, err := syncVMGuestKernelFromRootFS(ctx, serviceRoot, service, diskPath)
 	if err != nil {
 		return vmKernelSyncResult{}, err
 	}
-	configPath := filepath.Join(serviceRunDirForRoot(target.serviceRoot), "firecracker.json")
 	if err := updateVMKernelFirecrackerConfig(configPath, result.HostKernelPath); err != nil {
 		return vmKernelSyncResult{}, err
 	}

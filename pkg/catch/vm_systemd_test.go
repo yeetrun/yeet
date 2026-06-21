@@ -17,6 +17,8 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 		Service:          "devbox",
 		Runner:           "/srv/catch/run/catch",
 		DataDir:          "/srv/catch/data",
+		ServiceRoot:      "/srv/vms/devbox",
+		DiskPath:         "/srv/vms/devbox/rootfs.ext4",
 		Firecracker:      "/srv/images/firecracker",
 		ConfigPath:       "/srv/vms/devbox/run/firecracker.json",
 		APISocket:        "/srv/vms/devbox/run/firecracker.sock",
@@ -29,7 +31,7 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 		"Description=yeet VM devbox",
 		"ExecStartPre=/bin/rm -f /srv/vms/devbox/run/firecracker.sock /srv/vms/devbox/run/serial.sock /srv/vms/devbox/run/vsock.sock",
 		"ExecStartPre=/srv/catch/run/catch -data-dir /srv/catch/data vm-network-ensure devbox",
-		"ExecStart=/srv/catch/run/catch vm-run --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
+		"ExecStart=/srv/catch/run/catch vm-run --service devbox --service-root /srv/vms/devbox --disk-path /srv/vms/devbox/rootfs.ext4 --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
 		"Restart=on-failure",
 		"RestartForceExitStatus=75",
 		"RestartPreventExitStatus=76",
@@ -41,7 +43,7 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 	assertTextOrder(t, unit,
 		"ExecStartPre=/bin/rm -f /srv/vms/devbox/run/firecracker.sock /srv/vms/devbox/run/serial.sock /srv/vms/devbox/run/vsock.sock",
 		"ExecStartPre=/srv/catch/run/catch -data-dir /srv/catch/data vm-network-ensure devbox",
-		"ExecStart=/srv/catch/run/catch vm-run --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
+		"ExecStart=/srv/catch/run/catch vm-run --service devbox --service-root /srv/vms/devbox --disk-path /srv/vms/devbox/rootfs.ext4 --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
 	)
 }
 

@@ -328,6 +328,9 @@ func handleSpecialCommand(args []string, out io.Writer) (bool, error) {
 
 func handleVMRunCommand(args []string) error {
 	fs := flag.NewFlagSet("vm-run", flag.ContinueOnError)
+	service := fs.String("service", "", "VM service name")
+	serviceRoot := fs.String("service-root", "", "VM service root path")
+	diskPath := fs.String("disk-path", "", "VM rootfs disk path")
 	firecracker := fs.String("firecracker", "", "firecracker binary path")
 	apiSock := fs.String("api-sock", "", "firecracker API socket path")
 	configFile := fs.String("config-file", "", "firecracker config file path")
@@ -336,10 +339,14 @@ func handleVMRunCommand(args []string) error {
 		return err
 	}
 	err := runVMConsoleProxy(context.Background(), catch.VMConsoleProxyConfig{
+		Service:       *service,
+		ServiceRoot:   *serviceRoot,
+		DiskPath:      *diskPath,
 		Firecracker:   *firecracker,
 		APISocket:     *apiSock,
 		ConfigFile:    *configFile,
 		ConsoleSocket: *consoleSock,
+		OnGuestReboot: catch.AutoSyncVMGuestKernelOnReboot,
 	})
 	if errors.Is(err, catch.ErrVMGuestReboot) {
 		exitProcess(catch.VMGuestRebootExitCode)

@@ -496,6 +496,71 @@ sleep 30
 	}
 }
 
+func TestRunVMConsoleProxyRunsRebootHookBeforeReturningReboot(t *testing.T) {
+	dir := shortUnixSocketDirForTest(t)
+	fakeFirecracker := filepath.Join(dir, "firecracker")
+	script := `#!/bin/sh
+printf '[ 1.0] reboot: Restarting system\n'
+sleep 30
+`
+	if err := os.WriteFile(fakeFirecracker, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake firecracker: %v", err)
+	}
+
+	var hookCalled bool
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
+		Service:       "devbox",
+		ServiceRoot:   "/srv/yeet/services/devbox",
+		DiskPath:      "/srv/yeet/services/devbox/rootfs.ext4",
+		Firecracker:   fakeFirecracker,
+		APISocket:     filepath.Join(dir, "firecracker.sock"),
+		ConfigFile:    filepath.Join(dir, "firecracker.json"),
+		ConsoleSocket: filepath.Join(dir, "serial.sock"),
+		OnGuestReboot: func(_ context.Context, cfg VMConsoleProxyConfig) error {
+			hookCalled = true
+			if cfg.Service != "devbox" || cfg.ServiceRoot == "" || cfg.DiskPath == "" {
+				t.Fatalf("reboot hook cfg = %#v, want service/root/disk", cfg)
+			}
+			return nil
+		},
+	})
+	if !errors.Is(err, ErrVMGuestReboot) {
+		t.Fatalf("RunVMConsoleProxy error = %v, want ErrVMGuestReboot", err)
+	}
+	if !hookCalled {
+		t.Fatal("reboot hook was not called")
+	}
+}
+
+func TestRunVMConsoleProxyStillReturnsRebootWhenRebootHookFails(t *testing.T) {
+	dir := shortUnixSocketDirForTest(t)
+	fakeFirecracker := filepath.Join(dir, "firecracker")
+	script := `#!/bin/sh
+printf '[ 1.0] reboot: Restarting system\n'
+sleep 30
+`
+	if err := os.WriteFile(fakeFirecracker, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake firecracker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
+		Firecracker:   fakeFirecracker,
+		APISocket:     filepath.Join(dir, "firecracker.sock"),
+		ConfigFile:    filepath.Join(dir, "firecracker.json"),
+		ConsoleSocket: filepath.Join(dir, "serial.sock"),
+		OnGuestReboot: func(context.Context, VMConsoleProxyConfig) error {
+			return errors.New("kernel sync failed")
+		},
+	})
+	if !errors.Is(err, ErrVMGuestReboot) {
+		t.Fatalf("RunVMConsoleProxy error = %v, want ErrVMGuestReboot despite hook failure", err)
+	}
+}
+
 func dialUnixSocketForTest(t *testing.T, socketPath string) net.Conn {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
