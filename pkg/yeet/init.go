@@ -202,10 +202,58 @@ func normalizeBuildTarget(goos, goarch, gitRoot string) (string, string, error) 
 }
 
 func buildCatchCmd(goarch, gitRoot string) *exec.Cmd {
-	cmd := exec.Command("go", "build", "-o", "catch", "./cmd/catch")
+	args := []string{"build", "-o", "catch"}
+	if version := localBuildVersion(gitRoot); version != "" {
+		args = append(args, "-ldflags", "-X github.com/yeetrun/yeet/pkg/buildinfo.BuildVersion="+version)
+	}
+	args = append(args, "./cmd/catch")
+	cmd := exec.Command("go", args...)
 	cmd.Env = append(os.Environ(), "GOARCH="+goarch, "GOOS=linux", "CGO_ENABLED=0")
 	cmd.Dir = gitRoot
 	return cmd
+}
+
+func localBuildVersion(gitRoot string) string {
+	out, err := gitWorkTreeCommand(gitRoot, "rev-parse", "--short=9", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	version := strings.TrimSpace(string(out))
+	if version == "" {
+		return ""
+	}
+	if localGitHasTrackedChanges(gitRoot) {
+		version += "+dirty"
+	}
+	return version
+}
+
+func localGitHasTrackedChanges(gitRoot string) bool {
+	cmd := gitWorkTreeCommand(gitRoot, "diff", "--quiet")
+	unstagedDirty := cmd.Run() != nil
+	cmd = gitWorkTreeCommand(gitRoot, "diff", "--cached", "--quiet")
+	stagedDirty := cmd.Run() != nil
+	return unstagedDirty || stagedDirty
+}
+
+func gitWorkTreeCommand(gitRoot string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", append([]string{"-C", gitRoot}, args...)...)
+	cmd.Env = gitWorkTreeEnv(os.Environ())
+	return cmd
+}
+
+func gitWorkTreeEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, item := range env {
+		key, _, _ := strings.Cut(item, "=")
+		switch key {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR":
+			continue
+		default:
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 func initCatch(userAtRemote string, opts initOptions) (err error) {
