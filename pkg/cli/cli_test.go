@@ -1385,11 +1385,36 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	if !containsString(group.Commands["images"].Examples, "yeet vm images update vm://nixos/26.05") {
 		t.Fatalf("vm images examples = %#v, want selected NixOS update example", group.Commands["images"].Examples)
 	}
+	if _, ok := group.Commands["kernel"]; !ok {
+		t.Fatal("vm kernel command missing")
+	}
+	if _, ok := RemoteGroupFlagSpecs()["vm"]["kernel"]; !ok {
+		t.Fatal("vm kernel flag spec missing")
+	}
+	if RemoteGroupFlagSpecs()["vm"]["kernel"]["--restart"].ConsumesValue {
+		t.Fatal("vm kernel --restart should not consume a value")
+	}
+	if !containsString(group.Commands["kernel"].Examples, "yeet vm kernel sync <svc> --restart") {
+		t.Fatalf("vm kernel examples = %#v, want sync restart example", group.Commands["kernel"].Examples)
+	}
 	if _, ok := group.Commands["snapshot"]; ok {
 		t.Fatal("vm snapshot command should not be present")
 	}
 	if _, ok := RemoteGroupFlagSpecs()["vm"]["snapshot"]; ok {
 		t.Fatal("vm snapshot flag spec should not be present")
+	}
+}
+
+func TestParseVMKernelSync(t *testing.T) {
+	flags, args, err := ParseVMKernel([]string{"sync", "--restart"})
+	if err != nil {
+		t.Fatalf("ParseVMKernel: %v", err)
+	}
+	if strings.Join(args, " ") != "sync" {
+		t.Fatalf("args = %v, want sync", args)
+	}
+	if !flags.Restart {
+		t.Fatal("Restart = false, want true")
 	}
 }
 

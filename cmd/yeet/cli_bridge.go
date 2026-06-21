@@ -160,10 +160,20 @@ func bridgeGroupArgs(args []string, groupSpecs map[string]map[string]map[string]
 	if !ok {
 		return "", "", nil, false
 	}
+	if args[0] == "vm" && args[1] == "kernel" {
+		return bridgeVMKernelArgs(args, flags)
+	}
 	if isVariadicServiceGroupCommand(args[0], args[1]) {
 		return "", "", nil, false
 	}
 	return bridgeCommandArgs(args, 2, flags)
+}
+
+func bridgeVMKernelArgs(args []string, flags map[string]cli.FlagSpec) (service string, host string, bridged []string, ok bool) {
+	if len(args) < 3 || args[2] != "sync" {
+		return "", "", nil, false
+	}
+	return bridgeCommandArgs(args, 3, flags)
 }
 
 func isVariadicServiceGroupCommand(group string, command string) bool {

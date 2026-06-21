@@ -90,6 +90,7 @@ func buildGroupHandlers() map[string]yargs.Group {
 				"console": handleVMGroup,
 				"set":     handleVMGroup,
 				"images":  handleVMGroup,
+				"kernel":  handleVMGroup,
 			},
 		},
 		"env": {

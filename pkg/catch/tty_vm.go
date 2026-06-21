@@ -46,6 +46,8 @@ func (e *ttyExecer) vmCmdFunc(args []string) error {
 		return e.vmSetCmdFunc(args[1:])
 	case "images":
 		return e.vmImagesRemoteCmdFunc(args[1:])
+	case "kernel":
+		return e.vmKernelRemoteCmdFunc(args[1:])
 	default:
 		return fmt.Errorf("unknown vm command %q", args[0])
 	}
@@ -75,6 +77,17 @@ func (e *ttyExecer) vmImagesRemoteCmdFunc(args []string) error {
 		return err
 	}
 	return e.vmImagesCmdFunc(flags, remaining)
+}
+
+func (e *ttyExecer) vmKernelRemoteCmdFunc(args []string) error {
+	flags, remaining, err := cli.ParseVMKernel(args)
+	if err != nil {
+		return err
+	}
+	if len(remaining) != 1 || remaining[0] != "sync" {
+		return fmt.Errorf("unexpected vm kernel args: %s", strings.Join(remaining, " "))
+	}
+	return e.s.syncVMGuestKernel(e.vmProvisionContext(), e.sn, flags)
 }
 
 func (e *ttyExecer) vmImageCache() vmImageCache {
