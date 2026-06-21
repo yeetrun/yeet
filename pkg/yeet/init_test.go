@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -131,6 +132,50 @@ func TestBuildCatchCmdDisablesCGOForCrossCompile(t *testing.T) {
 			t.Fatalf("expected %q in env", want)
 		}
 	}
+}
+
+func TestBuildCatchCmdStampsLocalGitVersion(t *testing.T) {
+	root := t.TempDir()
+	runInitTestGit(t, root, "init")
+	runInitTestGit(t, root, "config", "user.email", "test@example.com")
+	runInitTestGit(t, root, "config", "user.name", "Test User")
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("tracked\n"), 0o644); err != nil {
+		t.Fatalf("write tracked file: %v", err)
+	}
+	runInitTestGit(t, root, "add", "tracked.txt")
+	runInitTestGit(t, root, "commit", "-m", "initial")
+	short := strings.TrimSpace(runInitTestGit(t, root, "rev-parse", "--short=9", "HEAD"))
+
+	if err := os.WriteFile(filepath.Join(root, "catch"), []byte("untracked build output\n"), 0o644); err != nil {
+		t.Fatalf("write untracked catch: %v", err)
+	}
+	args := strings.Join(buildCatchCmd("amd64", root).Args, " ")
+	wantClean := "-X github.com/yeetrun/yeet/pkg/buildinfo.BuildVersion=" + short
+	if !strings.Contains(args, wantClean) {
+		t.Fatalf("build args = %q, want %q", args, wantClean)
+	}
+	if strings.Contains(args, short+"+dirty") {
+		t.Fatalf("build args = %q, untracked catch should not mark dirty", args)
+	}
+
+	if err := os.WriteFile(filepath.Join(root, "tracked.txt"), []byte("changed\n"), 0o644); err != nil {
+		t.Fatalf("modify tracked file: %v", err)
+	}
+	args = strings.Join(buildCatchCmd("amd64", root).Args, " ")
+	if !strings.Contains(args, wantClean+"+dirty") {
+		t.Fatalf("build args = %q, want dirty stamp %q", args, wantClean+"+dirty")
+	}
+}
+
+func runInitTestGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = gitWorkTreeEnv(os.Environ())
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s failed: %v\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return string(out)
 }
 
 func TestBuildCatchUsesGoBuildOutput(t *testing.T) {
