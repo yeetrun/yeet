@@ -1025,9 +1025,7 @@ func compareVMImageVersions(a, b string) int {
 	}
 	if ar, ok := vmImageVersionRevisionSuffix(a); ok {
 		if br, ok := vmImageVersionRevisionSuffix(b); ok {
-			if cmp := compareVMImageVersionNumbers(strings.TrimPrefix(ar, "v"), strings.TrimPrefix(br, "v")); cmp != 0 {
-				return cmp
-			}
+			return compareVMImageVersionNumbers(strings.TrimPrefix(ar, "v"), strings.TrimPrefix(br, "v"))
 		}
 	}
 	ai, bi := 0, 0
