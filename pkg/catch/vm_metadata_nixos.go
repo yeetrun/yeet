@@ -9,10 +9,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 )
+
+var nixOSDefaultHostNameDeclRE = regexp.MustCompile(`(?m)^([ \t]*networking\.hostName[ \t]*=[ \t]*)"yeet-vm"([ \t]*;[ \t]*(?:#.*)?)$`)
 
 func writeVMGuestNixOSMetadataFiles(root string, cfg vmMetadataConfig) error {
 	if err := writeVMGuestFile(root, "etc/yeet-vm/hostname", []byte(cfg.Hostname+"\n"), 0o644); err != nil {
+		return err
+	}
+	if err := seedVMGuestNixOSSystemHostname(root, cfg.Hostname); err != nil {
 		return err
 	}
 	if err := writeVMGuestFile(root, "etc/yeet-vm/user", []byte(cfg.User+"\n"), 0o644); err != nil {
@@ -34,6 +40,27 @@ func writeVMGuestNixOSMetadataFiles(root string, cfg vmMetadataConfig) error {
 		}
 	}
 	return nil
+}
+
+func seedVMGuestNixOSSystemHostname(root, hostname string) error {
+	rel := filepath.Join("etc", "nixos", "system.nix")
+	path := filepath.Join(root, rel)
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	next := nixOSDefaultHostNameDeclRE.ReplaceAllString(string(raw), `${1}"`+hostname+`"${2}`)
+	if next == string(raw) {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	return writeVMGuestFile(root, rel, []byte(next), info.Mode().Perm())
 }
 
 func ensureVMGuestNixOSSSHHostKeys(ctx context.Context, root, keyDir string, runner vmCommandRunner) error {
