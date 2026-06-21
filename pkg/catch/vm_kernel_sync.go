@@ -233,9 +233,9 @@ func copyFileMode(src, dst string, mode os.FileMode) error {
 
 func vmRootFSReadOnlyMountCommand(diskPath, mountRoot string) []string {
 	if strings.HasPrefix(diskPath, "/dev/") {
-		return []string{"mount", "-o", "ro", diskPath, mountRoot}
+		return []string{"mount", "-o", "ro,noload", diskPath, mountRoot}
 	}
-	return []string{"mount", "-o", "loop,ro", diskPath, mountRoot}
+	return []string{"mount", "-o", "loop,ro,noload", diskPath, mountRoot}
 }
 
 func updateVMKernelFirecrackerConfig(configPath, kernelPath string) error {
