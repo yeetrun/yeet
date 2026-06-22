@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{self, BufRead, Write};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
 
 #[cfg(target_os = "linux")]
 use std::fs::File;
@@ -33,6 +34,8 @@ pub struct AgentResponse {
     pub request_id: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub interfaces: Vec<AgentInterface>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_ready: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<AgentError>,
 }
@@ -112,13 +115,15 @@ fn usable_ipv4(raw: &str) -> Option<String> {
     Some(ip.to_string())
 }
 
-pub fn handle_one_request<R: BufRead, W: Write, F>(
+pub fn handle_one_request<R: BufRead, W: Write, F, S>(
     mut reader: R,
     mut writer: W,
     mut network_state: F,
+    mut ssh_ready: S,
 ) -> io::Result<()>
 where
     F: FnMut() -> io::Result<Vec<AgentInterface>>,
+    S: FnMut() -> bool,
 {
     let mut line = String::new();
     if reader.read_line(&mut line)? == 0 {
@@ -147,6 +152,18 @@ where
                     response_type: req.request_type.clone(),
                     request_id: req.request_id.clone(),
                     interfaces: usable_interfaces(&interfaces),
+                    ssh_ready: None,
+                    error: None,
+                },
+                Err(err) => response_error(&req, "network_state_failed", err.to_string()),
+            },
+            "guest_ready" => match network_state() {
+                Ok(interfaces) => AgentResponse {
+                    protocol: PROTOCOL_VERSION,
+                    response_type: req.request_type.clone(),
+                    request_id: req.request_id.clone(),
+                    interfaces: usable_interfaces(&interfaces),
+                    ssh_ready: Some(ssh_ready()),
                     error: None,
                 },
                 Err(err) => response_error(&req, "network_state_failed", err.to_string()),
@@ -156,6 +173,7 @@ where
                 response_type: req.request_type.clone(),
                 request_id: req.request_id.clone(),
                 interfaces: Vec::new(),
+                ssh_ready: None,
                 error: None,
             },
             _ => response_error(&req, "unknown_request", "unknown request type".to_string()),
@@ -173,6 +191,7 @@ fn response_error(req: &AgentRequest, code: &str, message: String) -> AgentRespo
         response_type: req.request_type.clone(),
         request_id: req.request_id.clone(),
         interfaces: Vec::new(),
+        ssh_ready: None,
         error: Some(AgentError {
             code: code.to_string(),
             message,
@@ -211,6 +230,11 @@ pub fn collect_network_state() -> io::Result<Vec<AgentInterface>> {
         }
     }
     Err(last_err.unwrap_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no ip command found")))
+}
+
+pub fn ssh_ready() -> bool {
+    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 22);
+    TcpStream::connect_timeout(&addr.into(), Duration::from_millis(200)).is_ok()
 }
 
 pub fn parse_ip_json(raw: &[u8]) -> io::Result<Vec<AgentInterface>> {
@@ -310,7 +334,7 @@ fn handle_stream_fd(fd: RawFd) -> io::Result<()> {
     let stream = unsafe { File::from_raw_fd(fd) };
     let reader = BufReader::new(stream.try_clone()?);
     let writer = BufWriter::new(stream);
-    handle_one_request(reader, writer, collect_network_state)
+    handle_one_request(reader, writer, collect_network_state, ssh_ready)
 }
 
 #[cfg(target_os = "linux")]
@@ -407,6 +431,7 @@ mod tests {
                     ips: vec!["10.0.4.183".to_string()],
                 }])
             },
+            || false,
         )
         .expect("handle request");
 
@@ -420,6 +445,36 @@ mod tests {
     }
 
     #[test]
+    fn handles_guest_ready_request() {
+        let mut out = Vec::new();
+        handle_one_request(
+            br#"{"protocol":1,"type":"guest_ready","request_id":"r-ready"}
+"#
+            .as_slice(),
+            &mut out,
+            || {
+                Ok(vec![AgentInterface {
+                    name: "eth0".to_string(),
+                    mac: "02:fc:00:00:00:12".to_string(),
+                    up: true,
+                    ips: vec!["10.0.4.183".to_string()],
+                }])
+            },
+            || true,
+        )
+        .expect("handle request");
+
+        let resp: Value = serde_json::from_slice(&out).expect("response json");
+        assert_eq!(resp["protocol"], PROTOCOL_VERSION);
+        assert_eq!(resp["type"], "guest_ready");
+        assert_eq!(resp["request_id"], "r-ready");
+        assert_eq!(resp["interfaces"][0]["name"], "eth0");
+        assert_eq!(resp["interfaces"][0]["ips"][0], "10.0.4.183");
+        assert_eq!(resp["ssh_ready"], true);
+        assert!(resp.get("error").is_none());
+    }
+
+    #[test]
     fn handles_ping_and_hello_requests() {
         for request_type in ["ping", "hello"] {
             let mut out = Vec::new();
@@ -427,7 +482,7 @@ mod tests {
                 r#"{{"protocol":1,"type":"{request_type}","request_id":"r2"}}
 "#
             );
-            handle_one_request(input.as_bytes(), &mut out, || Ok(Vec::new()))
+            handle_one_request(input.as_bytes(), &mut out, || Ok(Vec::new()), || false)
                 .expect("handle request");
 
             let resp: Value = serde_json::from_slice(&out).expect("response json");
@@ -452,6 +507,7 @@ mod tests {
                 called.set(true);
                 Ok(Vec::new())
             },
+            || false,
         )
         .expect("handle request");
 
@@ -472,6 +528,7 @@ mod tests {
             .as_slice(),
             &mut out,
             || Ok(Vec::new()),
+            || false,
         )
         .expect("handle request");
 

@@ -24,13 +24,20 @@ type vmGuestReadyBoundary struct {
 	Since  time.Time
 }
 
+type vmGuestReadyWaitInput struct {
+	Service     string
+	Network     vmNetworkPlan
+	Boundary    vmGuestReadyBoundary
+	VsockSocket string
+}
+
 type vmGuestReadyJournalRunner func(context.Context, []string) ([]byte, error)
 
 var (
 	vmGuestReadyJournalOutput = runVMGuestReadyJournalOutput
 	vmGuestReadyNow           = time.Now
 	vmGuestReadyPollInterval  = 500 * time.Millisecond
-	vmGuestReadyTimeout       = 60 * time.Second
+	vmGuestReadyTimeout       = 30 * time.Second
 )
 
 func captureVMGuestReadyBoundary(ctx context.Context, service string) (vmGuestReadyBoundary, error) {
@@ -46,13 +53,21 @@ func captureVMGuestReadyBoundary(ctx context.Context, service string) (vmGuestRe
 	return boundary, nil
 }
 
-func waitVMGuestReady(ctx context.Context, service string, network vmNetworkPlan, boundary vmGuestReadyBoundary) (vmGuestReadyReport, error) {
-	allowed := vmGuestReadyInterfaces(network)
+func waitVMGuestReady(ctx context.Context, input vmGuestReadyWaitInput) (vmGuestReadyReport, error) {
+	service := strings.TrimSpace(input.Service)
+	allowed := vmGuestReadyInterfaces(input.Network)
+	interfaceOrder := vmGuestReadyInterfaceOrder(input.Network)
 	ctx, cancel := context.WithTimeout(ctx, vmGuestReadyTimeout)
 	defer cancel()
 	var lastErr error
 	for {
-		report, ok, err := readVMGuestReady(ctx, service, boundary, allowed)
+		report, ok, err := readVMGuestReady(ctx, service, input.Boundary, allowed)
+		if err != nil {
+			lastErr = err
+		} else if ok {
+			return report, nil
+		}
+		report, ok, err = readVMGuestReadyFromAgent(ctx, input.VsockSocket, interfaceOrder)
 		if err != nil {
 			lastErr = err
 		} else if ok {
@@ -68,6 +83,31 @@ func waitVMGuestReady(ctx context.Context, service string, network vmNetworkPlan
 		case <-time.After(vmGuestReadyPollInterval):
 		}
 	}
+}
+
+func readVMGuestReadyFromAgent(ctx context.Context, socketPath string, interfaces []string) (vmGuestReadyReport, bool, error) {
+	socketPath = strings.TrimSpace(socketPath)
+	if socketPath == "" || len(interfaces) == 0 {
+		return vmGuestReadyReport{}, false, nil
+	}
+	state, err := queryVMGuestReadyFn(ctx, socketPath)
+	if err != nil {
+		return vmGuestReadyReport{}, false, fmt.Errorf("read VM agent readiness: %w", err)
+	}
+	if !state.SSHReady {
+		return vmGuestReadyReport{}, false, nil
+	}
+	agentIPs := vmAgentInterfaceIPs(state.Network)
+	for _, name := range interfaces {
+		for _, raw := range agentIPs[name] {
+			ip, err := netip.ParseAddr(raw)
+			if err != nil {
+				continue
+			}
+			return vmGuestReadyReport{Interface: name, IP: ip}, true, nil
+		}
+	}
+	return vmGuestReadyReport{}, false, nil
 }
 
 func readVMGuestReady(ctx context.Context, service string, boundary vmGuestReadyBoundary, allowed map[string]struct{}) (vmGuestReadyReport, bool, error) {
@@ -101,6 +141,23 @@ func parseVMGuestReadyReport(raw []byte, allowed map[string]struct{}) (vmGuestRe
 		return vmGuestReadyReport{Interface: fields[1], IP: ip}, true
 	}
 	return vmGuestReadyReport{}, false
+}
+
+func vmGuestReadyInterfaceOrder(network vmNetworkPlan) []string {
+	out := make([]string, 0, len(network.Interfaces))
+	seen := map[string]struct{}{}
+	for _, iface := range network.Interfaces {
+		name := strings.TrimSpace(iface.GuestName)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	return out
 }
 
 func vmGuestReadyInterfaces(network vmNetworkPlan) map[string]struct{} {
