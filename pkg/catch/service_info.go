@@ -19,6 +19,7 @@ import (
 var listIPv4AddrsFn = listIPv4Addrs
 var serviceVMStatusFn = serviceVMStatus
 var queryVMNetworkStateFn = queryVMNetworkState
+var queryVMGuestReadyFn = queryVMGuestReady
 
 type vmDiscoveredIP struct {
 	IP     string

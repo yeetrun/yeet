@@ -73,6 +73,12 @@ func TestCaptureVMGuestReadyBoundaryFallsBackToTimestampWhenJournalHasNoCursor(t
 	}
 }
 
+func TestVMGuestReadyDefaultTimeoutIsThirtySeconds(t *testing.T) {
+	if vmGuestReadyTimeout != 30*time.Second {
+		t.Fatalf("vmGuestReadyTimeout = %s, want 30s", vmGuestReadyTimeout)
+	}
+}
+
 func TestWaitVMGuestReadyUsesCursorAndReturnsFreshMarker(t *testing.T) {
 	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyPollInterval
 	vmGuestReadyTimeout = time.Second
@@ -93,12 +99,124 @@ func TestWaitVMGuestReadyUsesCursorAndReturnsFreshMarker(t *testing.T) {
 		return []byte("yeet-ready eth0 10.0.4.178\n"), nil
 	})
 
-	report, err := waitVMGuestReady(context.Background(), "devbox", testVMReadyNetworkPlan(), vmGuestReadyBoundary{Cursor: "s/abc"})
+	report, err := waitVMGuestReady(context.Background(), vmGuestReadyWaitInput{
+		Service:  "devbox",
+		Network:  testVMReadyNetworkPlan(),
+		Boundary: vmGuestReadyBoundary{Cursor: "s/abc"},
+	})
 	if err != nil {
 		t.Fatalf("waitVMGuestReady: %v", err)
 	}
 	if report.Interface != "eth0" || report.IP.String() != "10.0.4.178" {
 		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestWaitVMGuestReadyReturnsAgentReadinessWhenJournalHasNoMarker(t *testing.T) {
+	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyPollInterval
+	vmGuestReadyTimeout = time.Second
+	vmGuestReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		vmGuestReadyTimeout = oldTimeout
+		vmGuestReadyPollInterval = oldPoll
+	})
+	stubVMGuestReadyJournal(t, func(context.Context, []string) ([]byte, error) {
+		return []byte("booting\n"), nil
+	})
+	oldQuery := queryVMGuestReadyFn
+	queryVMGuestReadyFn = func(ctx context.Context, socketPath string) (vmAgentGuestReadyState, error) {
+		if socketPath != "/run/devbox/vsock.sock" {
+			t.Fatalf("socketPath = %q, want /run/devbox/vsock.sock", socketPath)
+		}
+		return vmAgentGuestReadyState{
+			Network: vmAgentNetworkState{Interfaces: []vmAgentInterface{{
+				Name: "eth0",
+				Up:   true,
+				IPs:  []string{"10.0.4.178"},
+			}}},
+			SSHReady: true,
+		}, nil
+	}
+	t.Cleanup(func() { queryVMGuestReadyFn = oldQuery })
+
+	report, err := waitVMGuestReady(context.Background(), vmGuestReadyWaitInput{
+		Service:     "devbox",
+		Network:     testVMReadyNetworkPlan(),
+		VsockSocket: "/run/devbox/vsock.sock",
+	})
+	if err != nil {
+		t.Fatalf("waitVMGuestReady: %v", err)
+	}
+	if report.Interface != "eth0" || report.IP.String() != "10.0.4.178" {
+		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestWaitVMGuestReadyWaitsWhenAgentSSHIsNotReady(t *testing.T) {
+	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyPollInterval
+	vmGuestReadyTimeout = time.Millisecond
+	vmGuestReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		vmGuestReadyTimeout = oldTimeout
+		vmGuestReadyPollInterval = oldPoll
+	})
+	stubVMGuestReadyJournal(t, func(context.Context, []string) ([]byte, error) {
+		return nil, nil
+	})
+	oldQuery := queryVMGuestReadyFn
+	queryVMGuestReadyFn = func(ctx context.Context, socketPath string) (vmAgentGuestReadyState, error) {
+		return vmAgentGuestReadyState{
+			Network: vmAgentNetworkState{Interfaces: []vmAgentInterface{{
+				Name: "eth0",
+				Up:   true,
+				IPs:  []string{"10.0.4.178"},
+			}}},
+			SSHReady: false,
+		}, nil
+	}
+	t.Cleanup(func() { queryVMGuestReadyFn = oldQuery })
+
+	_, err := waitVMGuestReady(context.Background(), vmGuestReadyWaitInput{
+		Service:     "devbox",
+		Network:     testVMReadyNetworkPlan(),
+		VsockSocket: "/run/devbox/vsock.sock",
+	})
+	if err == nil || !strings.Contains(err.Error(), "yeet vm console devbox") {
+		t.Fatalf("waitVMGuestReady error = %v, want timeout with console hint", err)
+	}
+}
+
+func TestWaitVMGuestReadyIgnoresAgentInterfacesOutsidePlan(t *testing.T) {
+	oldTimeout, oldPoll := vmGuestReadyTimeout, vmGuestReadyPollInterval
+	vmGuestReadyTimeout = time.Millisecond
+	vmGuestReadyPollInterval = time.Millisecond
+	t.Cleanup(func() {
+		vmGuestReadyTimeout = oldTimeout
+		vmGuestReadyPollInterval = oldPoll
+	})
+	stubVMGuestReadyJournal(t, func(context.Context, []string) ([]byte, error) {
+		return nil, nil
+	})
+	oldQuery := queryVMGuestReadyFn
+	queryVMGuestReadyFn = func(ctx context.Context, socketPath string) (vmAgentGuestReadyState, error) {
+		return vmAgentGuestReadyState{
+			Network: vmAgentNetworkState{Interfaces: []vmAgentInterface{{
+				Name: "eth9",
+				Up:   true,
+				IPs:  []string{"10.0.4.178"},
+			}}},
+			SSHReady: true,
+		}, nil
+	}
+	t.Cleanup(func() { queryVMGuestReadyFn = oldQuery })
+
+	_, err := waitVMGuestReady(context.Background(), vmGuestReadyWaitInput{
+		Service:     "devbox",
+		Network:     testVMReadyNetworkPlan(),
+		VsockSocket: "/run/devbox/vsock.sock",
+	})
+	if err == nil || !strings.Contains(err.Error(), "yeet vm console devbox") {
+		t.Fatalf("waitVMGuestReady error = %v, want timeout with console hint", err)
 	}
 }
 
@@ -114,7 +232,10 @@ func TestWaitVMGuestReadyTimeoutIncludesConsoleHint(t *testing.T) {
 		return nil, nil
 	})
 
-	_, err := waitVMGuestReady(context.Background(), "devbox", testVMReadyNetworkPlan(), vmGuestReadyBoundary{})
+	_, err := waitVMGuestReady(context.Background(), vmGuestReadyWaitInput{
+		Service: "devbox",
+		Network: testVMReadyNetworkPlan(),
+	})
 	if err == nil || !strings.Contains(err.Error(), "yeet vm console devbox") {
 		t.Fatalf("timeout error = %v, want console hint", err)
 	}
@@ -132,7 +253,10 @@ func TestWaitVMGuestReadyReportsJournalErrors(t *testing.T) {
 		return nil, errors.New("journal unavailable")
 	})
 
-	_, err := waitVMGuestReady(context.Background(), "devbox", testVMReadyNetworkPlan(), vmGuestReadyBoundary{})
+	_, err := waitVMGuestReady(context.Background(), vmGuestReadyWaitInput{
+		Service: "devbox",
+		Network: testVMReadyNetworkPlan(),
+	})
 	if err == nil || !strings.Contains(err.Error(), "journal unavailable") {
 		t.Fatalf("waitVMGuestReady error = %v, want journal error", err)
 	}

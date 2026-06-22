@@ -658,7 +658,12 @@ func (e *ttyExecer) startVMAfterProvision(ctx context.Context, plan vmProvisionP
 		waitReady = waitVMGuestReady
 	}
 	doneWait := e.traceBlock("vm guest readiness wait")
-	report, err := waitReady(ctx, plan.Service, plan.Network, readyBoundary)
+	report, err := waitReady(ctx, vmGuestReadyWaitInput{
+		Service:     plan.Service,
+		Network:     plan.Network,
+		Boundary:    readyBoundary,
+		VsockSocket: plan.VsockSocket,
+	})
 	doneWait()
 	if err != nil {
 		ui.FailStep(err.Error())

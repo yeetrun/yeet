@@ -40,6 +40,7 @@ type vmAgentResponse struct {
 	Type       string             `json:"type"`
 	RequestID  string             `json:"request_id"`
 	Interfaces []vmAgentInterface `json:"interfaces,omitempty"`
+	SSHReady   *bool              `json:"ssh_ready,omitempty"`
 	Error      *vmAgentError      `json:"error,omitempty"`
 }
 
@@ -54,29 +55,59 @@ type vmAgentNetworkState struct {
 	Interfaces []vmAgentInterface
 }
 
+type vmAgentGuestReadyState struct {
+	Network  vmAgentNetworkState
+	SSHReady bool
+}
+
 func queryVMNetworkState(ctx context.Context, socketPath string) (vmAgentNetworkState, error) {
-	conn, r, cleanup, err := connectVMAgent(ctx, socketPath)
+	resp, err := queryVMAgent(ctx, socketPath, "network_state")
 	if err != nil {
 		return vmAgentNetworkState{}, err
+	}
+	if err := validateVMAgentNetworkStateResponse(resp, "network_state"); err != nil {
+		return vmAgentNetworkState{}, err
+	}
+	return vmAgentNetworkState{Interfaces: usableVMAgentInterfaces(resp.Interfaces)}, nil
+}
+
+func queryVMGuestReady(ctx context.Context, socketPath string) (vmAgentGuestReadyState, error) {
+	resp, err := queryVMAgent(ctx, socketPath, "guest_ready")
+	if err != nil {
+		return vmAgentGuestReadyState{}, err
+	}
+	if err := validateVMAgentNetworkStateResponse(resp, "guest_ready"); err != nil {
+		return vmAgentGuestReadyState{}, err
+	}
+	if resp.SSHReady == nil {
+		return vmAgentGuestReadyState{}, fmt.Errorf("VM agent guest_ready response missing ssh_ready")
+	}
+	return vmAgentGuestReadyState{
+		Network:  vmAgentNetworkState{Interfaces: usableVMAgentInterfaces(resp.Interfaces)},
+		SSHReady: *resp.SSHReady,
+	}, nil
+}
+
+func queryVMAgent(ctx context.Context, socketPath string, requestType string) (vmAgentResponse, error) {
+	conn, r, cleanup, err := connectVMAgent(ctx, socketPath)
+	if err != nil {
+		return vmAgentResponse{}, err
 	}
 	defer cleanup()
 
 	req := vmAgentRequest{
 		Protocol:  vmAgentProtocolVersion,
-		Type:      "network_state",
+		Type:      requestType,
 		RequestID: vmAgentRequestID,
 	}
 	if err := sendVMAgentRequest(conn, r, req); err != nil {
-		return vmAgentNetworkState{}, err
+		return vmAgentResponse{}, err
 	}
 	var resp vmAgentResponse
 	if err := json.NewDecoder(r).Decode(&resp); err != nil {
-		return vmAgentNetworkState{}, fmt.Errorf("read VM agent response: %w", err)
+		return vmAgentResponse{}, fmt.Errorf("read VM agent response: %w", err)
 	}
-	if err := validateVMAgentNetworkStateResponse(resp, req); err != nil {
-		return vmAgentNetworkState{}, err
-	}
-	return vmAgentNetworkState{Interfaces: usableVMAgentInterfaces(resp.Interfaces)}, nil
+	return resp, nil
 }
 
 func connectVMAgent(ctx context.Context, socketPath string) (net.Conn, *bufio.Reader, func(), error) {
@@ -129,15 +160,15 @@ func sendVMAgentRequest(conn net.Conn, r *bufio.Reader, req vmAgentRequest) erro
 	return nil
 }
 
-func validateVMAgentNetworkStateResponse(resp vmAgentResponse, req vmAgentRequest) error {
+func validateVMAgentNetworkStateResponse(resp vmAgentResponse, requestType string) error {
 	if resp.Protocol != vmAgentProtocolVersion {
 		return fmt.Errorf("VM agent protocol version = %d, want %d", resp.Protocol, vmAgentProtocolVersion)
 	}
-	if resp.Type != req.Type {
-		return fmt.Errorf("VM agent response type = %q, want %q", resp.Type, req.Type)
+	if resp.Type != requestType {
+		return fmt.Errorf("VM agent response type = %q, want %q", resp.Type, requestType)
 	}
-	if resp.RequestID != req.RequestID {
-		return fmt.Errorf("VM agent response request_id = %q, want %q", resp.RequestID, req.RequestID)
+	if resp.RequestID != vmAgentRequestID {
+		return fmt.Errorf("VM agent response request_id = %q, want %q", resp.RequestID, vmAgentRequestID)
 	}
 	if resp.Error != nil {
 		return fmt.Errorf("VM agent error %s: %s", resp.Error.Code, resp.Error.Message)

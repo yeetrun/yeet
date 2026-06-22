@@ -572,7 +572,7 @@ func TestRunVMTTYProgressFooter(t *testing.T) {
 	execer.rw = &out
 	execer.isPty = true
 	execer.hostLabel = "yeet-pve1"
-	vmProvisionGuestReadyWaitFunc = func(context.Context, string, vmNetworkPlan, vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+	vmProvisionGuestReadyWaitFunc = func(context.Context, vmGuestReadyWaitInput) (vmGuestReadyReport, error) {
 		return vmGuestReadyReport{IP: netip.MustParseAddr("10.0.4.80"), Interface: "eth1"}, nil
 	}
 
@@ -911,13 +911,19 @@ func TestRunVMWaitsForGuestReadinessBeforeNextCommands(t *testing.T) {
 		captured = true
 		return vmGuestReadyBoundary{Cursor: "s/abc"}, nil
 	}
-	vmProvisionGuestReadyWaitFunc = func(ctx context.Context, service string, network vmNetworkPlan, boundary vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+	vmProvisionGuestReadyWaitFunc = func(ctx context.Context, input vmGuestReadyWaitInput) (vmGuestReadyReport, error) {
 		waited = true
 		if !captured {
 			t.Fatal("wait called before boundary capture")
 		}
-		if boundary.Cursor != "s/abc" {
-			t.Fatalf("boundary = %#v, want cursor", boundary)
+		if input.Service != "devbox" {
+			t.Fatalf("readiness service = %q, want devbox", input.Service)
+		}
+		if input.Boundary.Cursor != "s/abc" {
+			t.Fatalf("boundary = %#v, want cursor", input.Boundary)
+		}
+		if input.VsockSocket == "" {
+			t.Fatal("readiness vsock socket is empty")
 		}
 		return vmGuestReadyReport{Interface: "eth0", IP: netip.MustParseAddr("192.168.100.4")}, nil
 	}
@@ -943,7 +949,7 @@ func TestRunVMSkipsGuestReadinessWhenRestartFalse(t *testing.T) {
 		t.Fatal("boundary should not be captured when restart=false")
 		return vmGuestReadyBoundary{}, nil
 	}
-	vmProvisionGuestReadyWaitFunc = func(context.Context, string, vmNetworkPlan, vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+	vmProvisionGuestReadyWaitFunc = func(context.Context, vmGuestReadyWaitInput) (vmGuestReadyReport, error) {
 		t.Fatal("readiness should not be waited when restart=false")
 		return vmGuestReadyReport{}, nil
 	}
@@ -1013,7 +1019,7 @@ func TestRunVMGuestReadinessFailureKeepsCommittedVM(t *testing.T) {
 	vmProvisionGuestReadyBoundaryFunc = func(context.Context, string) (vmGuestReadyBoundary, error) {
 		return vmGuestReadyBoundary{}, nil
 	}
-	vmProvisionGuestReadyWaitFunc = func(context.Context, string, vmNetworkPlan, vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+	vmProvisionGuestReadyWaitFunc = func(context.Context, vmGuestReadyWaitInput) (vmGuestReadyReport, error) {
 		return vmGuestReadyReport{}, errors.New("guest readiness timeout")
 	}
 
@@ -1049,7 +1055,7 @@ func TestRunVMTTYReadinessFailurePrintsRecoveryCommands(t *testing.T) {
 	var out bytes.Buffer
 	execer.rw = &out
 	execer.isPty = true
-	vmProvisionGuestReadyWaitFunc = func(context.Context, string, vmNetworkPlan, vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+	vmProvisionGuestReadyWaitFunc = func(context.Context, vmGuestReadyWaitInput) (vmGuestReadyReport, error) {
 		return vmGuestReadyReport{}, errors.New("guest readiness timeout")
 	}
 
@@ -1900,7 +1906,7 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	vmProvisionGuestReadyBoundaryFunc = func(context.Context, string) (vmGuestReadyBoundary, error) {
 		return vmGuestReadyBoundary{}, nil
 	}
-	vmProvisionGuestReadyWaitFunc = func(context.Context, string, vmNetworkPlan, vmGuestReadyBoundary) (vmGuestReadyReport, error) {
+	vmProvisionGuestReadyWaitFunc = func(context.Context, vmGuestReadyWaitInput) (vmGuestReadyReport, error) {
 		return vmGuestReadyReport{}, nil
 	}
 	return execer, serviceRoot, systemdDir, &systemctlCalls
