@@ -603,6 +603,12 @@ func (e *ttyExecer) removeCmdFunc(flags cli.RemoveFlags) error {
 	if !ok {
 		return nil
 	}
+	doneDataConfirm := e.traceBlock("remove data confirm")
+	flags, err = e.confirmRemoveData(flags)
+	doneDataConfirm()
+	if err != nil {
+		return err
+	}
 
 	doneRunnerRemove := e.traceBlock("remove runner")
 	e.removeRunner(runner)
@@ -622,6 +628,19 @@ func (e *ttyExecer) removeServiceWithoutRunner(flags cli.RemoveFlags, err error)
 		return fmt.Errorf("failed to get service runner: %w", err)
 	}
 	runnerErr := err
+	if errors.Is(runnerErr, errUnhandledServiceType) {
+		ok, err := e.confirmServiceRemoval(flags.Yes)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil
+		}
+		flags, err = e.confirmRemoveData(flags)
+		if err != nil {
+			return err
+		}
+	}
 	report, err := e.s.RemoveServiceWithOptions(e.sn, RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
 	if err != nil {
 		return fmt.Errorf("failed to cleanup %s %q: %w", e.managedTargetLabel(), e.sn, err)
@@ -642,6 +661,20 @@ func (e *ttyExecer) confirmServiceRemoval(yes bool) (bool, error) {
 		return false, fmt.Errorf("failed to confirm removal: %w", err)
 	}
 	return ok, nil
+}
+
+func (e *ttyExecer) confirmRemoveData(flags cli.RemoveFlags) (cli.RemoveFlags, error) {
+	if flags.Yes || flags.CleanData {
+		return flags, nil
+	}
+	ok, err := cmdutil.Confirm(e.rw, e.rw, fmt.Sprintf("Delete all data for %s %q?", e.managedTargetLabel(), e.sn))
+	if err != nil {
+		return flags, fmt.Errorf("failed to confirm data removal: %w", err)
+	}
+	if ok {
+		flags.CleanData = true
+	}
+	return flags, nil
 }
 
 func (e *ttyExecer) removeRunner(runner ServiceRunner) {

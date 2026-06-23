@@ -937,6 +937,29 @@ func TestConfirmVMRemovalUsesVMLabel(t *testing.T) {
 	}
 }
 
+func TestConfirmRemoveDataUsesVMLabel(t *testing.T) {
+	server := newTestServer(t)
+	seedService(t, server, "devbox", db.ServiceTypeVM, nil)
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		s:  server,
+		sn: "devbox",
+		rw: readWriter{Reader: strings.NewReader("n\n"), Writer: &out},
+	}
+
+	flags, err := execer.confirmRemoveData(cli.RemoveFlags{})
+	if err != nil {
+		t.Fatalf("confirmRemoveData returned error: %v", err)
+	}
+	if flags.CleanData {
+		t.Fatal("CleanData = true, want false")
+	}
+	if got := out.String(); !strings.Contains(got, `Delete all data for VM "devbox"?`) {
+		t.Fatalf("prompt output = %q, want VM data prompt", got)
+	}
+}
+
 func TestRemoveRunnerPrintsWarnings(t *testing.T) {
 	for _, tc := range []struct {
 		name string
