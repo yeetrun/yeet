@@ -549,7 +549,7 @@ func canPromptInitTailscale() bool {
 func promptInitTailscaleClientSecret(out io.Writer, in io.Reader) (string, error) {
 	for _, line := range []string{
 		"yeet installs catch, a small daemon that runs on the host and manages services.",
-		"catch uses Tailscale for RPC and must join your tailnet as a tagged device, usually tag:catch.",
+		"catch uses Tailscale and must join your tailnet as a tagged device, usually tag:catch.",
 		"Paste a Tailscale OAuth client secret with the auth_keys scope that can mint tag:catch.",
 		"Recommended: create an owner tag such as tag:yeet, let it own tag:catch, and select tag:yeet on the OAuth client.",
 		"Docs: https://yeetrun.com/docs/concepts/tailscale",
