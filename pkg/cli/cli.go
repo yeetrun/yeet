@@ -347,9 +347,9 @@ type serviceSyncFlagsParsed struct {
 }
 
 type removeFlagsParsed struct {
-	Yes         bool `flag:"yes" short:"y" help:"Skip the removal prompt"`
+	Yes         bool `flag:"yes" short:"y" help:"Skip removal prompts; does not imply --clean-data"`
 	CleanConfig bool `flag:"clean-config" help:"Delete the matching yeet.toml entry without prompting"`
-	CleanData   bool `flag:"clean-data" help:"Delete service data instead of preserving data/"`
+	CleanData   bool `flag:"clean-data" help:"Delete service data; skips the data-deletion prompt"`
 }
 
 type stageFlagsParsed struct {

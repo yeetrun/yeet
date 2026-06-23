@@ -152,7 +152,7 @@ func TestRemoveCmdContinuesAfterRunnerError(t *testing.T) {
 		s:   server,
 		sn:  name,
 		rw: readWriter{
-			Reader: strings.NewReader("y\n"),
+			Reader: strings.NewReader("y\n\n"),
 			Writer: &out,
 		},
 		serviceRunnerFn: func() (ServiceRunner, error) {
@@ -205,5 +205,343 @@ func TestRemoveCmdSkipsPromptWithYes(t *testing.T) {
 
 	if err := execer.removeCmdFunc(cli.RemoveFlags{Yes: true}); err != nil {
 		t.Fatalf("removeCmdFunc: %v", err)
+	}
+}
+
+func seedRemovePromptService(t *testing.T, server *Server, name string, serviceType db.ServiceType) string {
+	t.Helper()
+	serviceRoot := filepath.Join(server.cfg.ServicesRoot, name)
+	for _, dir := range []string{"bin", "data", "env", "run"} {
+		if err := os.MkdirAll(filepath.Join(serviceRoot, dir), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(serviceRoot, "data", "state.txt"), []byte("state"), 0o644); err != nil {
+		t.Fatalf("write data: %v", err)
+	}
+	if _, err := server.cfg.DB.MutateData(func(d *db.Data) error {
+		if d.Services == nil {
+			d.Services = map[string]*db.Service{}
+		}
+		d.Services[name] = &db.Service{Name: name, ServiceType: serviceType}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	return serviceRoot
+}
+
+func TestRemoveCmdDataPromptDefaultsNo(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-data-default"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader("y\n\n"),
+			Writer: &out,
+		},
+		serviceRunnerFn: func() (ServiceRunner, error) {
+			return &fakeRunner{}, nil
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, `Delete all data for service "svc-remove-data-default"?`) {
+		t.Fatalf("output = %q, want data prompt", got)
+	}
+	if _, err := os.Stat(filepath.Join(serviceRoot, "data", "state.txt")); err != nil {
+		t.Fatalf("data should remain after default-no prompt: %v", err)
+	}
+	if _, err := server.serviceView(name); !errors.Is(err, errServiceNotFound) {
+		t.Fatalf("serviceView error = %v, want service not found", err)
+	}
+}
+
+func TestRemoveCmdDataPromptCanEnableCleanData(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-data-yes"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader("y\ny\n"),
+			Writer: &out,
+		},
+		serviceRunnerFn: func() (ServiceRunner, error) {
+			return &fakeRunner{}, nil
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, `Delete all data for service "svc-remove-data-yes"?`) {
+		t.Fatalf("output = %q, want data prompt", got)
+	}
+	if _, err := os.Stat(serviceRoot); !os.IsNotExist(err) {
+		t.Fatalf("service root stat err = %v, want not exist", err)
+	}
+}
+
+func TestRemoveCmdCleanDataSkipsDataPrompt(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-clean-data"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader("y\n"),
+			Writer: &out,
+		},
+		serviceRunnerFn: func() (ServiceRunner, error) {
+			return &fakeRunner{}, nil
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{CleanData: true}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	if got := out.String(); strings.Contains(got, "Delete all data") {
+		t.Fatalf("output = %q, want no data prompt", got)
+	}
+	if _, err := os.Stat(serviceRoot); !os.IsNotExist(err) {
+		t.Fatalf("service root stat err = %v, want not exist", err)
+	}
+}
+
+func TestRemoveCmdYesSkipsDataPromptAndPreservesData(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-yes-preserve-data"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader(""),
+			Writer: &out,
+		},
+		serviceRunnerFn: func() (ServiceRunner, error) {
+			return &fakeRunner{}, nil
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{Yes: true}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	if got := out.String(); strings.Contains(got, "Are you sure") || strings.Contains(got, "Delete all data") {
+		t.Fatalf("output = %q, want no prompts", got)
+	}
+	if _, err := os.Stat(filepath.Join(serviceRoot, "data", "state.txt")); err != nil {
+		t.Fatalf("data should remain with --yes and no --clean-data: %v", err)
+	}
+}
+
+func TestRemoveCmdYesCleanDataSkipsPromptsAndDeletesData(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-yes-clean-data"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader(""),
+			Writer: &out,
+		},
+		serviceRunnerFn: func() (ServiceRunner, error) {
+			return &fakeRunner{}, nil
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{Yes: true, CleanData: true}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	if got := out.String(); strings.Contains(got, "Are you sure") || strings.Contains(got, "Delete all data") {
+		t.Fatalf("output = %q, want no prompts", got)
+	}
+	if _, err := os.Stat(serviceRoot); !os.IsNotExist(err) {
+		t.Fatalf("service root stat err = %v, want not exist", err)
+	}
+}
+
+func TestRemoveCmdUnsupportedTypePromptsAndPreservesData(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-unsupported-default"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader("y\n\n"),
+			Writer: &out,
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, `Are you sure you want to remove service "svc-remove-unsupported-default"?`) {
+		t.Fatalf("output = %q, want removal prompt", got)
+	}
+	if !strings.Contains(got, `Delete all data for service "svc-remove-unsupported-default"?`) {
+		t.Fatalf("output = %q, want data prompt", got)
+	}
+	if _, err := os.Stat(filepath.Join(serviceRoot, "data", "state.txt")); err != nil {
+		t.Fatalf("data should remain after default-no prompt: %v", err)
+	}
+	if _, err := server.serviceView(name); !errors.Is(err, errServiceNotFound) {
+		t.Fatalf("serviceView error = %v, want service not found", err)
+	}
+}
+
+func TestRemoveCmdUnsupportedTypeCleanDataStillConfirmsAndDeletesData(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-unsupported-clean-data"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader("y\n"),
+			Writer: &out,
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{CleanData: true}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, `Are you sure you want to remove service "svc-remove-unsupported-clean-data"?`) {
+		t.Fatalf("output = %q, want removal prompt", got)
+	}
+	if strings.Contains(got, "Delete all data") {
+		t.Fatalf("output = %q, want no data prompt", got)
+	}
+	if _, err := os.Stat(serviceRoot); !os.IsNotExist(err) {
+		t.Fatalf("service root stat err = %v, want not exist", err)
+	}
+	if _, err := server.serviceView(name); !errors.Is(err, errServiceNotFound) {
+		t.Fatalf("serviceView error = %v, want service not found", err)
+	}
+}
+
+func TestRemoveCmdUnsupportedTypeDeclineSkipsRemoval(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-unsupported-decline"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader("n\n"),
+			Writer: &out,
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, `Are you sure you want to remove service "svc-remove-unsupported-decline"?`) {
+		t.Fatalf("output = %q, want removal prompt", got)
+	}
+	if strings.Contains(got, "Delete all data") {
+		t.Fatalf("output = %q, want no data prompt after declining removal", got)
+	}
+	if _, err := os.Stat(filepath.Join(serviceRoot, "data", "state.txt")); err != nil {
+		t.Fatalf("data should remain after declined removal: %v", err)
+	}
+	if _, err := server.serviceView(name); err != nil {
+		t.Fatalf("serviceView after declined removal = %v, want service to remain", err)
+	}
+}
+
+func TestRemoveCmdUnsupportedTypeYesSkipsPromptsAndPreservesData(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-unsupported-yes"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader(""),
+			Writer: &out,
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{Yes: true}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	if got := out.String(); strings.Contains(got, "Are you sure") || strings.Contains(got, "Delete all data") {
+		t.Fatalf("output = %q, want no prompts", got)
+	}
+	if _, err := os.Stat(filepath.Join(serviceRoot, "data", "state.txt")); err != nil {
+		t.Fatalf("data should remain with --yes and no --clean-data: %v", err)
+	}
+	if _, err := server.serviceView(name); !errors.Is(err, errServiceNotFound) {
+		t.Fatalf("serviceView error = %v, want service not found", err)
+	}
+}
+
+func TestRemoveCmdUnsupportedTypeYesCleanDataSkipsPromptsAndDeletesData(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-unsupported-yes-clean-data"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader(""),
+			Writer: &out,
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{Yes: true, CleanData: true}); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	if got := out.String(); strings.Contains(got, "Are you sure") || strings.Contains(got, "Delete all data") {
+		t.Fatalf("output = %q, want no prompts", got)
+	}
+	if _, err := os.Stat(serviceRoot); !os.IsNotExist(err) {
+		t.Fatalf("service root stat err = %v, want not exist", err)
+	}
+	if _, err := server.serviceView(name); !errors.Is(err, errServiceNotFound) {
+		t.Fatalf("serviceView error = %v, want service not found", err)
 	}
 }
