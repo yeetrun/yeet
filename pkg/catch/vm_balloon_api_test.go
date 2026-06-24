@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFirecrackerBalloonPatchUsesUnixHTTP(t *testing.T) {
@@ -66,6 +67,52 @@ func TestFirecrackerBalloonStatsUsesUnixHTTP(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("stats = %#v, want %#v", got, want)
+	}
+}
+
+func TestFirecrackerBalloonStatsClosesUnixConnection(t *testing.T) {
+	socketPath := filepath.Join(shortUnixSocketDirForTest(t), "firecracker-balloon-close.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix: %v", err)
+	}
+	closed := make(chan struct{})
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{
+				"target_pages": 0,
+				"actual_pages": 0,
+				"free_memory": 1048576,
+				"available_memory": 2097152
+			}`)
+		}),
+		ConnState: func(_ net.Conn, state http.ConnState) {
+			if state == http.StateClosed {
+				select {
+				case <-closed:
+				default:
+					close(closed)
+				}
+			}
+		},
+	}
+	go func() {
+		_ = server.Serve(listener)
+	}()
+	t.Cleanup(func() {
+		_ = server.Close()
+		_ = listener.Close()
+	})
+
+	if _, err := (firecrackerBalloonAPI{}).Stats(context.Background(), socketPath); err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+
+	select {
+	case <-closed:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("firecracker balloon API connection stayed open after response")
 	}
 }
 
