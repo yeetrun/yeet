@@ -59,8 +59,8 @@ func TestInitInstallFilterSummarizesVisibleWarningsOnce(t *testing.T) {
 	filter := newInitInstallFilter(&buf)
 
 	input := strings.Join([]string{
-		"Warning: VM support is unavailable on this host: /dev/kvm is missing. Containers, binaries, and cron jobs still work. See https://yeetrun.com/docs/getting-started/installation#vm-host-requirements",
-		"Warning: VM tools are incomplete: missing qemu-img. Install packages: qemu-utils. See https://yeetrun.com/docs/getting-started/installation#vm-host-requirements",
+		"Warning: VM support is unavailable on this host: /dev/kvm is missing. Containers, binaries, and cron jobs still work. See https://yeetrun.com/docs/getting-started/installation#host-requirements",
+		"Warning: VM tools are incomplete: missing qemu-img. Install packages: qemu-utils. See https://yeetrun.com/docs/getting-started/installation#host-requirements",
 	}, "\n") + "\n"
 
 	if _, err := filter.Write([]byte(input)); err != nil {
@@ -74,13 +74,13 @@ func TestInitInstallFilterSummarizesVisibleWarningsOnce(t *testing.T) {
 	if strings.Count(summary, "Warning:") != 1 {
 		t.Fatalf("WarningSummary = %q, want one Warning prefix", summary)
 	}
-	if strings.Count(summary, "https://yeetrun.com/docs/getting-started/installation#vm-host-requirements") != 1 {
+	if strings.Count(summary, "https://yeetrun.com/docs/getting-started/installation#host-requirements") != 1 {
 		t.Fatalf("WarningSummary = %q, want one docs link", summary)
 	}
 	for _, want := range []string{
 		"Warning:\n- VM support is unavailable on this host",
 		"\n- VM tools are incomplete",
-		"\nDocs: https://yeetrun.com/docs/getting-started/installation#vm-host-requirements",
+		"\nDocs: https://yeetrun.com/docs/getting-started/installation#host-requirements",
 	} {
 		if !strings.Contains(summary, want) {
 			t.Fatalf("WarningSummary = %q, missing %q", summary, want)

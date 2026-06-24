@@ -147,9 +147,9 @@ func buildHelpConfig() yargs.HelpConfig {
 		Usage:       "[--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--ts-client-secret=<secret>] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]",
 		Examples: []string{
 			"yeet init root@<machine-host>",
+			"yeet init --ts-client-secret=<secret> root@<machine-host>",
 			"yeet init --install-docker root@<machine-host>",
 			"yeet init --install-docker --install-vm-tools root@<machine-host>",
-			"yeet init --ts-client-secret=<secret> root@<machine-host>",
 			"yeet init --ts-auth-key=<key> root@<machine-host>",
 			"yeet init",
 		},

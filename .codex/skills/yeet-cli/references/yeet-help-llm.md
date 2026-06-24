@@ -137,15 +137,15 @@ yeet init root@<machine-host>
 ```
 
 ```
+yeet init --ts-client-secret=<secret> root@<machine-host>
+```
+
+```
 yeet init --install-docker root@<machine-host>
 ```
 
 ```
 yeet init --install-docker --install-vm-tools root@<machine-host>
-```
-
-```
-yeet init --ts-client-secret=<secret> root@<machine-host>
 ```
 
 ```
@@ -497,6 +497,8 @@ Manage VM-specific commands
 
 - `vm console`: Stream VM serial console output
 - `vm images`: Show available VM images and manage VM image cache state
+- `vm kernel`: Manage guest-selected VM kernels
+- `vm memory`: Show or set host VM memory policy
 - `vm set`: Set VM resources and networking
 
 Get detailed help: `yeet vm --help-llm`
@@ -969,15 +971,15 @@ yeet init root@<machine-host>
 ```
 
 ```
+yeet init --ts-client-secret=<secret> root@<machine-host>
+```
+
+```
 yeet init --install-docker root@<machine-host>
 ```
 
 ```
 yeet init --install-docker --install-vm-tools root@<machine-host>
-```
-
-```
-yeet init --ts-client-secret=<secret> root@<machine-host>
 ```
 
 ```
@@ -1264,7 +1266,7 @@ Service name
 
 ### `--yes` (short: `-y`)
 
-Skip the removal prompt
+Skip removal prompts; does not imply --clean-data
 
 - **Type**: `bool`
 
@@ -1276,7 +1278,7 @@ Delete the matching yeet.toml entry without prompting
 
 ### `--clean-data`
 
-Delete service data instead of preserving data/
+Delete service data; skips the data-deletion prompt
 
 - **Type**: `bool`
 
@@ -2624,6 +2626,42 @@ yeet vm images prune --dry-run
 
 Get detailed help: `yeet vm images --help-llm`
 
+### `vm kernel`
+
+Manage guest-selected VM kernels
+
+**Examples**:
+
+```
+yeet vm kernel sync <svc>
+```
+
+```
+yeet vm kernel sync <svc> --restart
+```
+
+Get detailed help: `yeet vm kernel --help-llm`
+
+### `vm memory`
+
+Show or set host VM memory policy
+
+**Examples**:
+
+```
+yeet vm memory
+```
+
+```
+yeet vm memory set --policy=balanced
+```
+
+```
+yeet vm memory --format=json
+```
+
+Get detailed help: `yeet vm memory --help-llm`
+
 ### `vm set`
 
 Set VM resources and networking
@@ -2632,6 +2670,10 @@ Set VM resources and networking
 
 ```
 yeet vm set <vm> --vcpus=8 --memory=8g --disk=128g
+```
+
+```
+yeet vm set <vm> --memory-min=1g --balloon=auto
 ```
 
 ```
@@ -3921,6 +3963,122 @@ yeet vm images prune --dry-run
 ```
 ````
 
+## Group Command: vm kernel
+
+````
+# yeet vm kernel
+
+Manage guest-selected VM kernels
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] vm kernel sync <svc> [--restart]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet vm kernel sync <svc>
+```
+
+```
+yeet vm kernel sync <svc> --restart
+```
+````
+
+## Group Command: vm memory
+
+````
+# yeet vm memory
+
+Show or set host VM memory policy
+
+## Usage
+
+```
+yeet [GLOBAL OPTIONS] vm memory [set --policy=safe|balanced|aggressive] [--format=table|json|json-pretty]
+```
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet vm memory
+```
+
+```
+yeet vm memory set --policy=balanced
+```
+
+```
+yeet vm memory --format=json
+```
+````
+
 ## Group Command: vm set
 
 ````
@@ -3931,7 +4089,7 @@ Set VM resources and networking
 ## Usage
 
 ```
-yeet [GLOBAL OPTIONS] vm set <vm> [--vcpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
+yeet [GLOBAL OPTIONS] vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
 ```
 
 ## Global Options
@@ -3970,6 +4128,10 @@ Progress output (auto|tty|plain|quiet)
 
 ```
 yeet vm set <vm> --vcpus=8 --memory=8g --disk=128g
+```
+
+```
+yeet vm set <vm> --memory-min=1g --balloon=auto
 ```
 
 ```

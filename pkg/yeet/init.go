@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,6 +56,8 @@ type initOptions struct {
 var initCatchFn = initCatch
 
 const defaultCatchTag = "tag:catch"
+
+const hostRequirementsDocsURL = "https://yeetrun.com/docs/getting-started/installation#host-requirements"
 
 var (
 	errTailscaleCredentialRequired = errors.New("tailscale credential required")
@@ -286,6 +289,11 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 		return err
 	}
 
+	installVMTools, err := prepareInitVMToolsInstallFn(ui, userAtRemote, goarch, opts)
+	if err != nil {
+		return err
+	}
+
 	if source.useGithub {
 		if err := downloadInitCatchFn(ui, userAtRemote, systemName, goarch, opts.nightly, opts.releaseVersion); err != nil {
 			return err
@@ -297,7 +305,7 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 	if err := chmodInitCatchFn(ui, userAtRemote); err != nil {
 		return err
 	}
-	return installInitCatchWithTailscaleRetry(ui, userAtRemote, useSudo, installDocker, opts.installVMTools, opts)
+	return installInitCatchWithTailscaleRetry(ui, userAtRemote, useSudo, installDocker, installVMTools, opts)
 }
 
 type initCatchSource struct {
@@ -308,15 +316,18 @@ type initCatchSource struct {
 }
 
 var (
-	resolveInitCatchSourceFn   = resolveInitCatchSource
-	verifyInitSSHFn            = verifyInitSSH
-	detectInitHostFn           = detectInitHost
-	downloadInitCatchFn        = downloadInitCatch
-	buildAndUploadInitCatchFn  = buildAndUploadInitCatch
-	chmodInitCatchFn           = chmodInitCatch
-	installInitCatchFn         = installInitCatch
-	prepareInitDockerInstallFn = prepareInitDockerInstall
-	remoteDockerInstalledFn    = remoteDockerInstalled
+	resolveInitCatchSourceFn    = resolveInitCatchSource
+	verifyInitSSHFn             = verifyInitSSH
+	detectInitHostFn            = detectInitHost
+	downloadInitCatchFn         = downloadInitCatch
+	buildAndUploadInitCatchFn   = buildAndUploadInitCatch
+	chmodInitCatchFn            = chmodInitCatch
+	installInitCatchFn          = installInitCatch
+	prepareInitDockerInstallFn  = prepareInitDockerInstall
+	prepareInitVMToolsInstallFn = prepareInitVMToolsInstall
+	remoteDockerInstalledFn     = remoteDockerInstalled
+	remoteVMHostStatusFn        = remoteVMHostStatus
+	confirmInitFn               = cmdutil.Confirm
 )
 
 func (s initCatchSource) localDetail() string {
@@ -430,6 +441,251 @@ func remoteDockerInstalled(userAtRemote string) (bool, error) {
 	default:
 		return false, fmt.Errorf("unexpected docker check output from remote host: %q", strings.TrimSpace(string(output)))
 	}
+}
+
+type vmHostCommandRequirement struct {
+	Command string
+	Package string
+}
+
+type initVMHostStatus struct {
+	AptGet          bool
+	KVM             bool
+	TUN             bool
+	MissingCommands []vmHostCommandRequirement
+	UnsupportedArch string
+}
+
+var requiredInitVMHostCommands = []vmHostCommandRequirement{
+	{Command: "qemu-img", Package: "qemu-utils"},
+	{Command: "zstd", Package: "zstd"},
+	{Command: "e2fsck", Package: "e2fsprogs"},
+	{Command: "resize2fs", Package: "e2fsprogs"},
+	{Command: "mount", Package: "util-linux"},
+	{Command: "umount", Package: "util-linux"},
+	{Command: "ip", Package: "iproute2"},
+}
+
+func prepareInitVMToolsInstall(ui *initUI, userAtRemote, goarch string, opts initOptions) (bool, error) {
+	ui.StartStep("Check VM tools")
+	if opts.installVMTools {
+		ui.DoneStep("will install")
+		return true, nil
+	}
+	status, err := remoteVMHostStatusFn(userAtRemote, goarch)
+	if err != nil {
+		ui.DoneStep("skipped")
+		ui.Warn(formatInitVMToolsPreflightWarning(err))
+		return false, nil
+	}
+	if warnInitVMHostCapability(ui, status) {
+		ui.DoneStep("not available")
+		return false, nil
+	}
+	if len(status.MissingCommands) == 0 {
+		ui.DoneStep("present")
+		return false, nil
+	}
+	packages := missingInitVMHostPackages(status.MissingCommands)
+	if !status.AptGet {
+		ui.DoneStep("manual install")
+		ui.Warn(formatInitVMToolsMissingWarning(status.MissingCommands, packages))
+		return false, nil
+	}
+	if !isTerminalFn(int(os.Stdin.Fd())) || !isTerminalFn(int(os.Stdout.Fd())) {
+		ui.DoneStep("manual install")
+		ui.Warn(formatInitVMToolsNonInteractiveWarning(status.MissingCommands, packages))
+		return false, nil
+	}
+	ui.Suspend()
+	ok, err := confirmInitFn(os.Stdin, os.Stdout, "VM payloads can run on this host, but VM host packages are missing. Install them now?")
+	ui.Resume()
+	if err != nil {
+		ui.DoneStep("manual install")
+		ui.Warn(fmt.Sprintf("Warning: could not confirm VM package install (%v). To enable VM payloads, install: %s. See %s", err, strings.Join(packages, ", "), hostRequirementsDocsURL))
+		return false, nil
+	}
+	if !ok {
+		ui.DoneStep("manual install")
+		ui.Warn(formatInitVMToolsMissingWarning(status.MissingCommands, packages))
+		return false, nil
+	}
+	ui.DoneStep("will install")
+	return true, nil
+}
+
+func warnInitVMHostCapability(ui *initUI, status initVMHostStatus) bool {
+	warned := false
+	if status.UnsupportedArch != "" {
+		ui.Warn(fmt.Sprintf("Warning: VM support is unavailable on this host: yeet VM payloads require x86_64/amd64 hosts in this release; detected %s. See %s", status.UnsupportedArch, hostRequirementsDocsURL))
+		warned = true
+	}
+	if !status.KVM {
+		ui.Warn(fmt.Sprintf("Warning: VM support is unavailable on this host: /dev/kvm is missing. Containers, binaries, and cron jobs still work. See %s", hostRequirementsDocsURL))
+		warned = true
+	}
+	if !status.TUN {
+		ui.Warn(fmt.Sprintf("Warning: VM networking is unavailable on this host: /dev/net/tun is missing. See %s", hostRequirementsDocsURL))
+		warned = true
+	}
+	return warned
+}
+
+func formatInitVMToolsMissingWarning(missing []vmHostCommandRequirement, packages []string) string {
+	return fmt.Sprintf(
+		"Warning: VM tools are incomplete: missing %s. Install packages: %s. See %s",
+		strings.Join(initVMHostCommandNames(missing), ", "),
+		strings.Join(packages, ", "),
+		hostRequirementsDocsURL,
+	)
+}
+
+func formatInitVMToolsNonInteractiveWarning(missing []vmHostCommandRequirement, packages []string) string {
+	return fmt.Sprintf(
+		"Warning: VM tools are incomplete: missing %s. Rerun yeet init with --install-vm-tools for unattended setup, or install packages: %s. See %s",
+		strings.Join(initVMHostCommandNames(missing), ", "),
+		strings.Join(packages, ", "),
+		hostRequirementsDocsURL,
+	)
+}
+
+func formatInitVMToolsPreflightWarning(err error) string {
+	return fmt.Sprintf(
+		"Warning: could not check VM host packages on remote host (%v). Continuing without VM host package installation; rerun yeet init with --install-vm-tools for unattended setup or review host requirements. See %s",
+		err,
+		hostRequirementsDocsURL,
+	)
+}
+
+func missingInitVMHostPackages(missing []vmHostCommandRequirement) []string {
+	packages := make([]string, 0, len(missing))
+	for _, req := range missing {
+		if req.Package != "" {
+			packages = append(packages, req.Package)
+		}
+	}
+	return sortedUniqueStrings(packages)
+}
+
+func initVMHostCommandNames(reqs []vmHostCommandRequirement) []string {
+	names := make([]string, 0, len(reqs))
+	for _, req := range reqs {
+		if req.Command != "" {
+			names = append(names, req.Command)
+		}
+	}
+	return names
+}
+
+func remoteVMHostStatus(userAtRemote, goarch string) (initVMHostStatus, error) {
+	commands := shellJoin(initVMHostCommandNames(requiredInitVMHostCommands))
+	probe := fmt.Sprintf(`if command -v apt-get >/dev/null 2>&1; then printf 'apt-get=yes\n'; else printf 'apt-get=no\n'; fi
+if [ -e /dev/kvm ]; then printf 'dev-kvm=yes\n'; else printf 'dev-kvm=no\n'; fi
+if [ -e /dev/net/tun ]; then printf 'dev-net-tun=yes\n'; else printf 'dev-net-tun=no\n'; fi
+for cmd in %s; do
+	if command -v "$cmd" >/dev/null 2>&1; then printf 'cmd:%%s=yes\n' "$cmd"; else printf 'cmd:%%s=no\n' "$cmd"; fi
+done`, commands)
+	cmd := exec.Command("ssh", userAtRemote, "bash -lc "+shellQuote(probe))
+	output, err := cmd.Output()
+	if err != nil {
+		return initVMHostStatus{}, fmt.Errorf("failed to check VM host packages on remote host: %w", err)
+	}
+	status, err := parseInitVMHostStatus(string(output), goarch)
+	if err != nil {
+		return initVMHostStatus{}, fmt.Errorf("unexpected VM host check output from remote host: %w", err)
+	}
+	return status, nil
+}
+
+func parseInitVMHostStatus(output, goarch string) (initVMHostStatus, error) {
+	status := initVMHostStatus{UnsupportedArch: initVMUnsupportedArch(goarch)}
+	commandPresent := make(map[string]bool, len(requiredInitVMHostCommands))
+	for _, raw := range strings.Split(output, "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		key, present, err := parseInitVMHostProbeLine(line)
+		if err != nil {
+			return initVMHostStatus{}, err
+		}
+		if err := applyInitVMHostProbeValue(&status, commandPresent, key, present); err != nil {
+			return initVMHostStatus{}, err
+		}
+	}
+	for _, req := range requiredInitVMHostCommands {
+		if !commandPresent[req.Command] {
+			status.MissingCommands = append(status.MissingCommands, req)
+		}
+	}
+	return status, nil
+}
+
+func initVMUnsupportedArch(goarch string) string {
+	normalizedArch := strings.ToLower(strings.TrimSpace(goarch))
+	switch normalizedArch {
+	case "", "amd64", "x86_64":
+		return ""
+	default:
+		return normalizedArch
+	}
+}
+
+func parseInitVMHostProbeLine(line string) (string, bool, error) {
+	key, value, ok := strings.Cut(line, "=")
+	if !ok {
+		return "", false, fmt.Errorf("malformed line %q", line)
+	}
+	present, err := parseInitVMHostProbeBool(value)
+	if err != nil {
+		return "", false, fmt.Errorf("%s: %w", key, err)
+	}
+	return key, present, nil
+}
+
+func applyInitVMHostProbeValue(status *initVMHostStatus, commandPresent map[string]bool, key string, present bool) error {
+	switch {
+	case key == "apt-get":
+		status.AptGet = present
+	case key == "dev-kvm":
+		status.KVM = present
+	case key == "dev-net-tun":
+		status.TUN = present
+	case strings.HasPrefix(key, "cmd:"):
+		commandPresent[strings.TrimPrefix(key, "cmd:")] = present
+	default:
+		return fmt.Errorf("unknown key %q", key)
+	}
+	return nil
+}
+
+func parseInitVMHostProbeBool(value string) (bool, error) {
+	switch strings.TrimSpace(value) {
+	case "yes":
+		return true, nil
+	case "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected value %q", value)
+	}
+}
+
+func sortedUniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	values = append([]string(nil), values...)
+	sort.Strings(values)
+	out := values[:0]
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if len(out) == 0 || out[len(out)-1] != value {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func downloadInitCatch(ui *initUI, userAtRemote, systemName, goarch string, nightly bool, version string) error {
