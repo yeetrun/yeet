@@ -19,8 +19,6 @@ import (
 type vmSetupDeps struct {
 	commandExists func(string) bool
 	pathExists    func(string) bool
-	confirm       func(io.Reader, io.Writer, string) (bool, error)
-	stdin         io.Reader
 	stderr        io.Writer
 	runCommand    func(string, ...string) error
 	getenv        func(string) string
@@ -52,7 +50,7 @@ var requiredVMHostCommands = []vmHostCommandRequirement{
 
 var requiredVMHostDevices = []string{"/dev/kvm", "/dev/net/tun"}
 
-const vmHostRequirementsDocsURL = "https://yeetrun.com/docs/getting-started/installation#vm-host-requirements"
+const vmHostRequirementsDocsURL = "https://yeetrun.com/docs/getting-started/installation#host-requirements"
 
 func setupVMHost() error {
 	return setupVMHostWith(defaultVMSetupDeps())
@@ -62,8 +60,6 @@ func defaultVMSetupDeps() vmSetupDeps {
 	return vmSetupDeps{
 		commandExists: commandExists,
 		pathExists:    pathExists,
-		confirm:       cmdutil.Confirm,
-		stdin:         os.Stdin,
 		stderr:        os.Stderr,
 		runCommand:    runVMHostSetupCommand,
 		getenv:        os.Getenv,
@@ -98,19 +94,7 @@ func setupVMHostWith(deps vmSetupDeps) error {
 		return err
 	}
 	warnMissingVMHostCommands(deps.stderr, report.MissingCommands, packages)
-	ok, err := deps.confirm(deps.stdin, deps.stderr, "Would you like to install VM host packages with apt-get?")
-	if err != nil {
-		warnVMHostConfirmError(deps.stderr, err, packages)
-		return nil
-	}
-	if !ok {
-		return nil
-	}
-	if err := installVMHostPackages(deps, packages); err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(deps.stderr, "Installed VM host packages: %s\n", strings.Join(packages, ", "))
-	return err
+	return nil
 }
 
 func installVMHostPackages(deps vmSetupDeps, packages []string) error {
@@ -147,12 +131,6 @@ func normalizeVMSetupDeps(deps vmSetupDeps) vmSetupDeps {
 	}
 	if deps.pathExists == nil {
 		deps.pathExists = defaults.pathExists
-	}
-	if deps.confirm == nil {
-		deps.confirm = defaults.confirm
-	}
-	if deps.stdin == nil {
-		deps.stdin = defaults.stdin
 	}
 	if deps.stderr == nil {
 		deps.stderr = defaults.stderr
@@ -218,16 +196,6 @@ func warnMissingVMHostCommands(out io.Writer, missing []vmHostCommandRequirement
 		out,
 		"Warning: VM tools are incomplete: missing %s. Install packages: %s. See %s\n",
 		strings.Join(commands, ", "),
-		strings.Join(packages, ", "),
-		vmHostRequirementsDocsURL,
-	)
-}
-
-func warnVMHostConfirmError(out io.Writer, err error, packages []string) {
-	_, _ = fmt.Fprintf(
-		out,
-		"Warning: could not confirm VM package install (%v). To enable VM payloads, install: %s. See %s\n",
-		err,
 		strings.Join(packages, ", "),
 		vmHostRequirementsDocsURL,
 	)

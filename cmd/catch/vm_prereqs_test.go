@@ -7,14 +7,12 @@ package main
 import (
 	"bytes"
 	"errors"
-	"io"
 	"reflect"
 	"strings"
 	"testing"
 )
 
 func TestSetupVMHostWithReadyHostSkipsPromptAndInstall(t *testing.T) {
-	var prompted bool
 	var ran bool
 	var stderr bytes.Buffer
 	err := setupVMHostWith(vmSetupDeps{
@@ -32,10 +30,6 @@ func TestSetupVMHostWithReadyHostSkipsPromptAndInstall(t *testing.T) {
 			"/dev/kvm":     true,
 			"/dev/net/tun": true,
 		}),
-		confirm: func(io.Reader, io.Writer, string) (bool, error) {
-			prompted = true
-			return true, nil
-		},
 		runCommand: func(string, ...string) error {
 			ran = true
 			return nil
@@ -46,9 +40,6 @@ func TestSetupVMHostWithReadyHostSkipsPromptAndInstall(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupVMHostWith returned error: %v", err)
 	}
-	if prompted {
-		t.Fatal("setupVMHostWith prompted even though VM host was ready")
-	}
 	if ran {
 		t.Fatal("setupVMHostWith ran installer even though VM host was ready")
 	}
@@ -57,9 +48,8 @@ func TestSetupVMHostWithReadyHostSkipsPromptAndInstall(t *testing.T) {
 	}
 }
 
-func TestSetupVMHostWithMissingPackagesPromptsAndInstallsAPT(t *testing.T) {
+func TestSetupVMHostWithMissingPackagesWarnsWithoutPromptOrInstall(t *testing.T) {
 	var stderr bytes.Buffer
-	var prompt string
 	var commands [][]string
 	err := setupVMHostWith(vmSetupDeps{
 		commandExists: fakeVMCommandExists(map[string]bool{
@@ -72,9 +62,8 @@ func TestSetupVMHostWithMissingPackagesPromptsAndInstallsAPT(t *testing.T) {
 			"/dev/kvm":     true,
 			"/dev/net/tun": true,
 		}),
-		confirm: func(_ io.Reader, _ io.Writer, msg string) (bool, error) {
-			prompt = msg
-			return true, nil
+		getenv: func(string) string {
+			return ""
 		},
 		runCommand: func(name string, args ...string) error {
 			commands = append(commands, append([]string{name}, args...))
@@ -86,15 +75,11 @@ func TestSetupVMHostWithMissingPackagesPromptsAndInstallsAPT(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupVMHostWith returned error: %v", err)
 	}
-	if prompt != "Would you like to install VM host packages with apt-get?" {
-		t.Fatalf("prompt = %q", prompt)
+	if strings.Contains(stderr.String(), "Would you like to install VM host packages") {
+		t.Fatalf("stderr = %q, want no install prompt", stderr.String())
 	}
-	want := [][]string{
-		{"apt-get", "update"},
-		{"apt-get", "install", "-y", "e2fsprogs", "qemu-utils", "zstd"},
-	}
-	if !reflect.DeepEqual(commands, want) {
-		t.Fatalf("commands = %#v, want %#v", commands, want)
+	if len(commands) != 0 {
+		t.Fatalf("commands = %#v, want no installer commands", commands)
 	}
 	got := stderr.String()
 	if !strings.Contains(got, "Warning: VM tools are incomplete: missing qemu-img, zstd, e2fsck, resize2fs") {
@@ -106,14 +91,13 @@ func TestSetupVMHostWithMissingPackagesPromptsAndInstallsAPT(t *testing.T) {
 	if !strings.Contains(got, "Install packages: e2fsprogs, qemu-utils, zstd") {
 		t.Fatalf("stderr = %q, want package list", got)
 	}
-	if !strings.Contains(got, "https://yeetrun.com/docs/getting-started/installation#vm-host-requirements") {
+	if !strings.Contains(got, "https://yeetrun.com/docs/getting-started/installation#host-requirements") {
 		t.Fatalf("stderr = %q, want VM requirements docs link", got)
 	}
 }
 
 func TestSetupVMHostWithInstallEnvInstallsAPTWithoutPrompt(t *testing.T) {
 	var stderr bytes.Buffer
-	var prompted bool
 	var commands [][]string
 	err := setupVMHostWith(vmSetupDeps{
 		commandExists: fakeVMCommandExists(map[string]bool{
@@ -132,10 +116,6 @@ func TestSetupVMHostWithInstallEnvInstallsAPTWithoutPrompt(t *testing.T) {
 			}
 			return ""
 		},
-		confirm: func(io.Reader, io.Writer, string) (bool, error) {
-			prompted = true
-			return false, nil
-		},
 		runCommand: func(name string, args ...string) error {
 			commands = append(commands, append([]string{name}, args...))
 			return nil
@@ -146,8 +126,8 @@ func TestSetupVMHostWithInstallEnvInstallsAPTWithoutPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupVMHostWith returned error: %v", err)
 	}
-	if prompted {
-		t.Fatal("setupVMHostWith prompted despite CATCH_INSTALL_VM_TOOLS=1")
+	if strings.Contains(stderr.String(), "Would you like to install VM host packages") {
+		t.Fatalf("stderr = %q, want no install prompt", stderr.String())
 	}
 	want := [][]string{
 		{"apt-get", "update"},
@@ -166,7 +146,6 @@ func TestSetupVMHostWithInstallEnvInstallsAPTWithoutPrompt(t *testing.T) {
 
 func TestSetupVMHostWithMissingPackagesWithoutAPTWarnsOnly(t *testing.T) {
 	var stderr bytes.Buffer
-	var prompted bool
 	var ran bool
 	err := setupVMHostWith(vmSetupDeps{
 		commandExists: fakeVMCommandExists(map[string]bool{
@@ -178,10 +157,6 @@ func TestSetupVMHostWithMissingPackagesWithoutAPTWarnsOnly(t *testing.T) {
 			"/dev/kvm":     true,
 			"/dev/net/tun": true,
 		}),
-		confirm: func(io.Reader, io.Writer, string) (bool, error) {
-			prompted = true
-			return true, nil
-		},
 		runCommand: func(string, ...string) error {
 			ran = true
 			return nil
@@ -192,51 +167,19 @@ func TestSetupVMHostWithMissingPackagesWithoutAPTWarnsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupVMHostWith returned error: %v", err)
 	}
-	if prompted {
-		t.Fatal("setupVMHostWith prompted without apt-get")
-	}
 	if ran {
 		t.Fatal("setupVMHostWith ran installer without apt-get")
 	}
 	if !strings.Contains(stderr.String(), "Warning: VM tools are incomplete") {
 		t.Fatalf("stderr = %q, want missing tooling warning", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "https://yeetrun.com/docs/getting-started/installation#vm-host-requirements") {
+	if !strings.Contains(stderr.String(), "https://yeetrun.com/docs/getting-started/installation#host-requirements") {
 		t.Fatalf("stderr = %q, want VM requirements docs link", stderr.String())
-	}
-}
-
-func TestSetupVMHostWithConfirmErrorWarnsAndContinues(t *testing.T) {
-	confirmErr := errors.New("no stdin")
-	var stderr bytes.Buffer
-	err := setupVMHostWith(vmSetupDeps{
-		commandExists: fakeVMCommandExists(map[string]bool{
-			"mount":   true,
-			"umount":  true,
-			"ip":      true,
-			"apt-get": true,
-		}),
-		pathExists: fakeVMPathExists(map[string]bool{
-			"/dev/kvm":     true,
-			"/dev/net/tun": true,
-		}),
-		confirm: func(io.Reader, io.Writer, string) (bool, error) {
-			return false, confirmErr
-		},
-		stderr: &stderr,
-		goarch: "amd64",
-	})
-	if err != nil {
-		t.Fatalf("setupVMHostWith returned error: %v", err)
-	}
-	if !strings.Contains(stderr.String(), "Warning: could not confirm VM package install") {
-		t.Fatalf("stderr = %q, want confirm warning", stderr.String())
 	}
 }
 
 func TestSetupVMHostWithMissingKVMDoesNotPromptForPackages(t *testing.T) {
 	var stderr bytes.Buffer
-	var prompted bool
 	var ran bool
 	err := setupVMHostWith(vmSetupDeps{
 		commandExists: fakeVMCommandExists(map[string]bool{
@@ -248,10 +191,6 @@ func TestSetupVMHostWithMissingKVMDoesNotPromptForPackages(t *testing.T) {
 		pathExists: fakeVMPathExists(map[string]bool{
 			"/dev/net/tun": true,
 		}),
-		confirm: func(io.Reader, io.Writer, string) (bool, error) {
-			prompted = true
-			return true, nil
-		},
 		runCommand: func(string, ...string) error {
 			ran = true
 			return nil
@@ -261,9 +200,6 @@ func TestSetupVMHostWithMissingKVMDoesNotPromptForPackages(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("setupVMHostWith returned error: %v", err)
-	}
-	if prompted {
-		t.Fatal("setupVMHostWith prompted even though KVM is missing")
 	}
 	if ran {
 		t.Fatal("setupVMHostWith ran installer even though KVM is missing")
@@ -278,7 +214,7 @@ func TestSetupVMHostWithMissingKVMDoesNotPromptForPackages(t *testing.T) {
 	if !strings.Contains(got, "Containers, binaries, and cron jobs still work") {
 		t.Fatalf("stderr = %q, want non-VM payload guidance", got)
 	}
-	if !strings.Contains(got, "https://yeetrun.com/docs/getting-started/installation#vm-host-requirements") {
+	if !strings.Contains(got, "https://yeetrun.com/docs/getting-started/installation#host-requirements") {
 		t.Fatalf("stderr = %q, want VM requirements docs link", got)
 	}
 	if strings.Contains(got, "could not confirm VM package install") {
@@ -312,7 +248,7 @@ func TestSetupVMHostWithMissingCapabilitiesWarnsButDoesNotFail(t *testing.T) {
 		"Warning: VM support is unavailable on this host: /dev/kvm is missing",
 		"Warning: VM networking is unavailable on this host: /dev/net/tun is missing",
 		"Warning: ZFS-backed VM disks require udevadm; raw VM disks still work",
-		"https://yeetrun.com/docs/getting-started/installation#vm-host-requirements",
+		"https://yeetrun.com/docs/getting-started/installation#host-requirements",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("stderr = %q, missing %q", got, want)
@@ -322,6 +258,7 @@ func TestSetupVMHostWithMissingCapabilitiesWarnsButDoesNotFail(t *testing.T) {
 
 func TestSetupVMHostWithAPTInstallFailureReturnsError(t *testing.T) {
 	installErr := errors.New("apt failed")
+	var stderr bytes.Buffer
 	err := setupVMHostWith(vmSetupDeps{
 		commandExists: fakeVMCommandExists(map[string]bool{
 			"mount":   true,
@@ -333,8 +270,11 @@ func TestSetupVMHostWithAPTInstallFailureReturnsError(t *testing.T) {
 			"/dev/kvm":     true,
 			"/dev/net/tun": true,
 		}),
-		confirm: func(io.Reader, io.Writer, string) (bool, error) {
-			return true, nil
+		getenv: func(key string) string {
+			if key == "CATCH_INSTALL_VM_TOOLS" {
+				return "1"
+			}
+			return ""
 		},
 		runCommand: func(name string, args ...string) error {
 			if name == "apt-get" && len(args) > 0 && args[0] == "install" {
@@ -342,7 +282,7 @@ func TestSetupVMHostWithAPTInstallFailureReturnsError(t *testing.T) {
 			}
 			return nil
 		},
-		stderr: io.Discard,
+		stderr: &stderr,
 		goarch: "amd64",
 	})
 	if err == nil || !strings.Contains(err.Error(), "failed to install VM host packages") {

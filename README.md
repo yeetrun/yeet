@@ -82,41 +82,58 @@ yeet upgrade --all --version v0.6.1 --force
 
 ## Bootstrap a Host
 
-Start with a Linux host that has systemd and SSH access. Docker can be
-installed by `yeet init` on Debian/Ubuntu-style hosts. A plain first run is
-valid; if catch needs to join Tailscale, `yeet init` prompts for a Tailscale
-OAuth client secret and uses it to enroll catch as a tagged device:
+Start with a Linux host that has systemd and SSH access. The normal path is to
+run init against the SSH machine host:
 
 ```bash
 yeet init root@<machine-host>
-yeet init --install-docker root@<machine-host>
-```
-
-On KVM-capable hosts where you plan to run VM payloads, let init install the
-VM filesystem tools too:
-
-```bash
-yeet init --install-docker --install-vm-tools root@<machine-host>
 ```
 
 Catch uses an embedded Tailscale node for RPC. That node must end up with a
 tag-based identity, such as `tag:catch`; user-owned catch nodes are rejected.
-If your tailnet policy does not already allow that tag, update `tagOwners` in
-Tailscale before first setup. The OAuth client secret should have the
-`auth_keys` scope and be allowed to assign `tag:catch`, either directly or via
-an owner tag such as `tag:yeet`.
+Before the first setup, create an OAuth credential in the Tailscale admin
+console from `Trust credentials` -> `Credential` -> `OAuth`.
 
-For repeatable or non-interactive bootstrap, pass the OAuth client secret:
+You have two OAuth choices:
+
+- Simple broad setup: choose `All - Read & Write` if you are comfortable giving
+  the credential broad Tailscale API access.
+- Least-privilege setup: choose custom scopes with Auth Keys write
+  (`auth_keys`) and select the tag the credential may assign. For catch-only
+  installs, select `tag:catch` directly. If you plan to use service
+  `--net=ts` later, use an owner tag such as `tag:yeet` that owns `tag:catch`
+  and service tags such as `tag:app`.
+
+Interactive `yeet init` prompts for the OAuth client secret during first catch
+enrollment. For repeatable or non-interactive bootstrap, pass it explicitly:
 
 ```bash
-yeet init --install-docker --install-vm-tools --ts-client-secret=<secret> root@<machine-host>
+yeet init --ts-client-secret=<secret> root@<machine-host>
 ```
+
+Docker and VM packages are interactive prompts when they are missing.
+`--install-docker` and `--install-vm-tools` are unattended yes flags:
+
+```bash
+yeet init --install-docker root@<machine-host>
+yeet init --install-docker --install-vm-tools root@<machine-host>
+```
+
+The VM tools prompt only applies on Debian/Ubuntu hosts that expose KVM and
+TUN/TAP. If the host is not VM capable, yeet warns and containers, binaries,
+scripts, and cron jobs still work.
 
 Advanced users can also create a preauthorized Tailscale auth key that assigns
 the catch server tag and pass it with:
 
 ```bash
-yeet init --install-docker --install-vm-tools --ts-auth-key=<key> root@<machine-host>
+yeet init --ts-auth-key=<key> root@<machine-host>
+```
+
+Combine the unattended flags when needed:
+
+```bash
+yeet init --install-docker --install-vm-tools --ts-client-secret=<secret> root@<machine-host>
 ```
 
 If your tailnet separates catch hosts by cluster or location, include the tags
@@ -275,8 +292,9 @@ and network modes are available:
 
 - Docker is required for container payloads.
 - x86_64 Linux, KVM, TUN/TAP, and VM filesystem/networking tools are required
-  for VM payloads. `yeet init` checks this and `--install-vm-tools` installs
-  missing Debian/Ubuntu packages when the host can run VMs.
+  for VM payloads. `yeet init` checks this, prompts on capable Debian/Ubuntu
+  hosts when tools are missing, and `--install-vm-tools` answers yes for
+  unattended setup.
 - LAN/macvlan networking requires a host network where macvlan and DHCP make
   sense.
 - ZFS is optional and enables dataset-backed service roots, snapshots, and fast

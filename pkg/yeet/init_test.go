@@ -296,6 +296,230 @@ func TestPrepareInitDockerInstallRequiresFlagWhenMissingAndNonInteractive(t *tes
 	}
 }
 
+func TestPrepareInitVMToolsInstallPromptsForInteractiveCapableAptHost(t *testing.T) {
+	oldRemoteVMHostStatus := remoteVMHostStatusFn
+	oldConfirm := confirmInitFn
+	oldIsTerminal := isTerminalFn
+	t.Cleanup(func() {
+		remoteVMHostStatusFn = oldRemoteVMHostStatus
+		confirmInitFn = oldConfirm
+		isTerminalFn = oldIsTerminal
+	})
+	remoteVMHostStatusFn = func(userAtRemote string, goarch string) (initVMHostStatus, error) {
+		if userAtRemote != "root@example.com" {
+			t.Fatalf("userAtRemote = %q, want root@example.com", userAtRemote)
+		}
+		if goarch != "amd64" {
+			t.Fatalf("goarch = %q, want amd64", goarch)
+		}
+		return initVMHostStatus{
+			AptGet: true,
+			KVM:    true,
+			TUN:    true,
+			MissingCommands: []vmHostCommandRequirement{
+				{Command: "qemu-img", Package: "qemu-utils"},
+			},
+		}, nil
+	}
+	isTerminalFn = func(int) bool { return true }
+	var prompt string
+	confirmInitFn = func(_ io.Reader, _ io.Writer, msg string) (bool, error) {
+		prompt = msg
+		return true, nil
+	}
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+
+	installVMTools, err := prepareInitVMToolsInstall(ui, "root@example.com", "amd64", initOptions{})
+	if err != nil {
+		t.Fatalf("prepareInitVMToolsInstall error = %v", err)
+	}
+	if !installVMTools {
+		t.Fatal("installVMTools = false after prompt confirmation")
+	}
+	wantPrompt := "VM payloads can run on this host, but VM host packages are missing. Install them now?"
+	if prompt != wantPrompt {
+		t.Fatalf("prompt = %q, want %q", prompt, wantPrompt)
+	}
+}
+
+func TestPrepareInitVMToolsInstallWarnsWithFlagWhenCapableAptHostIsNonInteractive(t *testing.T) {
+	oldRemoteVMHostStatus := remoteVMHostStatusFn
+	oldConfirm := confirmInitFn
+	oldIsTerminal := isTerminalFn
+	t.Cleanup(func() {
+		remoteVMHostStatusFn = oldRemoteVMHostStatus
+		confirmInitFn = oldConfirm
+		isTerminalFn = oldIsTerminal
+	})
+	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
+		return initVMHostStatus{
+			AptGet: true,
+			KVM:    true,
+			TUN:    true,
+			MissingCommands: []vmHostCommandRequirement{
+				{Command: "qemu-img", Package: "qemu-utils"},
+			},
+		}, nil
+	}
+	isTerminalFn = func(int) bool { return false }
+	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
+		t.Fatal("confirmInitFn should not be called for non-interactive init")
+		return false, nil
+	}
+	var out strings.Builder
+	ui := newInitUI(&out, false, false, "catch", "root@example.com", catchServiceName)
+
+	installVMTools, err := prepareInitVMToolsInstall(ui, "root@example.com", "amd64", initOptions{})
+	if err != nil {
+		t.Fatalf("prepareInitVMToolsInstall error = %v", err)
+	}
+	if installVMTools {
+		t.Fatal("installVMTools = true for non-interactive init without --install-vm-tools")
+	}
+	for _, want := range []string{"--install-vm-tools", "qemu-utils", "#host-requirements"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output = %q, want %q", out.String(), want)
+		}
+	}
+}
+
+func TestPrepareInitVMToolsInstallWarnsAndContinuesWhenPreflightFails(t *testing.T) {
+	oldRemoteVMHostStatus := remoteVMHostStatusFn
+	oldConfirm := confirmInitFn
+	t.Cleanup(func() {
+		remoteVMHostStatusFn = oldRemoteVMHostStatus
+		confirmInitFn = oldConfirm
+	})
+	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
+		return initVMHostStatus{}, errors.New("probe failed")
+	}
+	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
+		t.Fatal("confirmInitFn should not be called when VM preflight fails")
+		return false, nil
+	}
+	var out strings.Builder
+	ui := newInitUI(&out, false, false, "catch", "root@example.com", catchServiceName)
+
+	installVMTools, err := prepareInitVMToolsInstall(ui, "root@example.com", "amd64", initOptions{})
+	if err != nil {
+		t.Fatalf("prepareInitVMToolsInstall error = %v, want nil", err)
+	}
+	if installVMTools {
+		t.Fatal("installVMTools = true after optional preflight failure")
+	}
+	for _, want := range []string{"Warning: could not check VM host packages", "probe failed", "#host-requirements"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output = %q, want %q", out.String(), want)
+		}
+	}
+}
+
+func TestPrepareInitVMToolsInstallExplicitFlagSkipsRemotePreflight(t *testing.T) {
+	oldRemoteVMHostStatus := remoteVMHostStatusFn
+	oldConfirm := confirmInitFn
+	t.Cleanup(func() {
+		remoteVMHostStatusFn = oldRemoteVMHostStatus
+		confirmInitFn = oldConfirm
+	})
+	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
+		t.Fatal("remoteVMHostStatusFn should not be called when --install-vm-tools is set")
+		return initVMHostStatus{}, nil
+	}
+	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
+		t.Fatal("confirmInitFn should not be called when --install-vm-tools is set")
+		return false, nil
+	}
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+
+	installVMTools, err := prepareInitVMToolsInstall(ui, "root@example.com", "amd64", initOptions{installVMTools: true})
+	if err != nil {
+		t.Fatalf("prepareInitVMToolsInstall error = %v", err)
+	}
+	if !installVMTools {
+		t.Fatal("installVMTools = false with explicit --install-vm-tools")
+	}
+}
+
+func TestPrepareInitVMToolsInstallWarnsForNonVMCapableHost(t *testing.T) {
+	oldRemoteVMHostStatus := remoteVMHostStatusFn
+	oldConfirm := confirmInitFn
+	oldIsTerminal := isTerminalFn
+	t.Cleanup(func() {
+		remoteVMHostStatusFn = oldRemoteVMHostStatus
+		confirmInitFn = oldConfirm
+		isTerminalFn = oldIsTerminal
+	})
+	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
+		return initVMHostStatus{
+			AptGet: true,
+			KVM:    false,
+			TUN:    true,
+			MissingCommands: []vmHostCommandRequirement{
+				{Command: "qemu-img", Package: "qemu-utils"},
+			},
+		}, nil
+	}
+	isTerminalFn = func(int) bool { return true }
+	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
+		t.Fatal("confirmInitFn should not be called when /dev/kvm is missing")
+		return false, nil
+	}
+	var out strings.Builder
+	ui := newInitUI(&out, false, false, "catch", "root@example.com", catchServiceName)
+
+	installVMTools, err := prepareInitVMToolsInstall(ui, "root@example.com", "amd64", initOptions{})
+	if err != nil {
+		t.Fatalf("prepareInitVMToolsInstall error = %v", err)
+	}
+	if installVMTools {
+		t.Fatal("installVMTools = true for non-VM-capable host")
+	}
+	if !strings.Contains(out.String(), "Warning: VM support is unavailable on this host: /dev/kvm is missing.") {
+		t.Fatalf("output = %q, want /dev/kvm warning", out.String())
+	}
+}
+
+func TestParseInitVMHostStatus(t *testing.T) {
+	t.Run("detects missing commands from successful probe output", func(t *testing.T) {
+		output := strings.Join([]string{
+			"apt-get=yes",
+			"dev-kvm=yes",
+			"dev-net-tun=yes",
+			"cmd:qemu-img=no",
+			"cmd:zstd=yes",
+			"cmd:e2fsck=yes",
+			"cmd:resize2fs=yes",
+			"cmd:mount=yes",
+			"cmd:umount=yes",
+			"cmd:ip=yes",
+		}, "\n")
+
+		status, err := parseInitVMHostStatus(output, "amd64")
+		if err != nil {
+			t.Fatalf("parseInitVMHostStatus error = %v", err)
+		}
+		if !status.AptGet || !status.KVM || !status.TUN {
+			t.Fatalf("status = %#v, want apt-get, kvm, and tun present", status)
+		}
+		wantMissing := []vmHostCommandRequirement{{Command: "qemu-img", Package: "qemu-utils"}}
+		if !reflect.DeepEqual(status.MissingCommands, wantMissing) {
+			t.Fatalf("MissingCommands = %#v, want %#v", status.MissingCommands, wantMissing)
+		}
+	})
+
+	t.Run("rejects malformed line", func(t *testing.T) {
+		if _, err := parseInitVMHostStatus("not-a-key-value-line", "amd64"); err == nil {
+			t.Fatal("parseInitVMHostStatus error = nil, want malformed line error")
+		}
+	})
+
+	t.Run("rejects unknown key", func(t *testing.T) {
+		if _, err := parseInitVMHostStatus("unexpected=yes", "amd64"); err == nil {
+			t.Fatal("parseInitVMHostStatus error = nil, want unknown key error")
+		}
+	})
+}
+
 func TestInitCatchPassesInstallDockerFlagToRemoteInstall(t *testing.T) {
 	var steps []string
 	configureSteps := stubInitCatchWorkflow(t)
@@ -854,6 +1078,7 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 	oldChmod := chmodInitCatchFn
 	oldInstall := installInitCatchFn
 	oldPrepareDocker := prepareInitDockerInstallFn
+	oldPrepareVMTools := prepareInitVMToolsInstallFn
 	SetUIConfig(UIConfig{Progress: "quiet"})
 	t.Cleanup(func() {
 		SetUIConfig(oldUIConfig)
@@ -865,6 +1090,7 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 		chmodInitCatchFn = oldChmod
 		installInitCatchFn = oldInstall
 		prepareInitDockerInstallFn = oldPrepareDocker
+		prepareInitVMToolsInstallFn = oldPrepareVMTools
 	})
 
 	resolveInitCatchSourceFn = func(initOptions) (initCatchSource, error) {
@@ -878,6 +1104,9 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string) error { return nil }
 	prepareInitDockerInstallFn = func(_ *initUI, _ string, opts initOptions) (bool, error) {
 		return opts.installDocker, nil
+	}
+	prepareInitVMToolsInstallFn = func(_ *initUI, _ string, _ string, opts initOptions) (bool, error) {
+		return opts.installVMTools, nil
 	}
 
 	return func(steps *[]string) {
