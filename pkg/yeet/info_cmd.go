@@ -346,6 +346,7 @@ func vmInfoRows(vm *catchrpc.ServiceVM) []infoRow {
 		{Label: "Image", Value: formatVMImage(vm)},
 		{Label: "CPU", Value: formatVMCPU(vm.CPUs)},
 		{Label: "Memory", Value: formatOptionalBytes(vm.MemoryBytes)},
+		{Label: "Balloon", Value: formatVMBalloon(vm.Balloon)},
 		{Label: "Disk", Value: formatVMDisk(vm)},
 		{Label: "Console", Value: formatOptionalVMConsole(vm.Console)},
 		{Label: "SSH", Value: formatVMSSH(vm.SSH)},
@@ -365,6 +366,44 @@ func formatVMCPU(cpus int) string {
 		return ""
 	}
 	return fmt.Sprintf("%d", cpus)
+}
+
+func formatVMBalloon(balloon catchrpc.ServiceVMBalloon) string {
+	mode := strings.TrimSpace(balloon.Mode)
+	if mode == "" {
+		return ""
+	}
+	if mode != "auto" {
+		return mode
+	}
+	min := strings.TrimSpace(balloon.MinMemory)
+	if min == "" && balloon.MinBytes > 0 {
+		min = formatBytesCompact(balloon.MinBytes)
+	}
+	if min == "" {
+		return mode
+	}
+	return mode + ", floor " + min
+}
+
+func formatBytesCompact(bytes int64) string {
+	if bytes <= 0 {
+		return ""
+	}
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	value := float64(bytes)
+	unit := "B"
+	for _, next := range []string{"KB", "MB", "GB", "TB", "PB"} {
+		value /= 1024
+		unit = next
+		if value < 1024 {
+			break
+		}
+	}
+	formatted := fmt.Sprintf("%.1f %s", value, unit)
+	return strings.Replace(formatted, ".0 "+unit, " "+unit, 1)
 }
 
 func formatOptionalBytes(bytes int64) string {

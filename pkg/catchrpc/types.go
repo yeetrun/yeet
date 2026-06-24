@@ -216,6 +216,7 @@ type ServiceVM struct {
 	ImageVersion string             `json:"imageVersion,omitempty"`
 	CPUs         int                `json:"cpus,omitempty"`
 	MemoryBytes  int64              `json:"memoryBytes,omitempty"`
+	Balloon      ServiceVMBalloon   `json:"balloon,omitempty"`
 	DiskBytes    int64              `json:"diskBytes,omitempty"`
 	DiskBackend  string             `json:"diskBackend,omitempty"`
 	DiskPath     string             `json:"diskPath,omitempty"`
@@ -223,6 +224,13 @@ type ServiceVM struct {
 	Console      *ServiceVMConsole  `json:"console,omitempty"`
 	Networks     []ServiceVMNetwork `json:"networks,omitempty"`
 	SetupState   string             `json:"setupState,omitempty"`
+}
+
+type ServiceVMBalloon struct {
+	Mode       string `json:"mode,omitempty"`
+	MinBytes   int64  `json:"minBytes,omitempty"`
+	MinMemory  string `json:"minMemory,omitempty"`
+	LastTarget int64  `json:"lastTargetBytes,omitempty"`
 }
 
 type ServiceVMSSH struct {

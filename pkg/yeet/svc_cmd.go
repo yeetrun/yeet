@@ -2483,22 +2483,37 @@ func vmSetRunFlagChanges(flags cli.VMSetFlags) (map[string]bool, []runFlagUpdate
 		removals[name] = true
 		updates = append(updates, runFlagUpdate{Name: name, Value: value})
 	}
+	addVMSetShapeRunFlagChanges(flags, add)
+	addVMSetNetworkRunFlagChanges(flags, removals, &updates, add)
+	return removals, updates
+}
+
+func addVMSetShapeRunFlagChanges(flags cli.VMSetFlags, add func(string, string)) {
 	if flags.CPUs > 0 {
 		add("--vcpus", strconv.Itoa(flags.CPUs))
 	}
 	if value := strings.TrimSpace(flags.Memory); value != "" {
 		add("--memory", value)
 	}
+	if value := strings.TrimSpace(flags.MemoryMin); value != "" {
+		add("--memory-min", value)
+	}
+	if value := strings.TrimSpace(flags.Balloon); value != "" {
+		add("--balloon", value)
+	}
 	if value := strings.TrimSpace(flags.Disk); value != "" {
 		add("--disk", value)
 	}
+}
+
+func addVMSetNetworkRunFlagChanges(flags cli.VMSetFlags, removals map[string]bool, updates *[]runFlagUpdate, add func(string, string)) {
 	if flags.NetworkChange {
 		removals["--net"] = true
 		removals["--macvlan-parent"] = true
 		removals["--macvlan-vlan"] = true
 		removals["--macvlan-mac"] = true
 		if value := strings.TrimSpace(flags.Net); value != "" {
-			updates = append(updates, runFlagUpdate{Name: "--net", Value: value})
+			*updates = append(*updates, runFlagUpdate{Name: "--net", Value: value})
 		}
 	}
 	if value := strings.TrimSpace(flags.MacvlanParent); value != "" {
@@ -2510,7 +2525,6 @@ func vmSetRunFlagChanges(flags cli.VMSetFlags) (map[string]bool, []runFlagUpdate
 	if value := strings.TrimSpace(flags.MacvlanMac); value != "" {
 		add("--macvlan-mac", value)
 	}
-	return removals, updates
 }
 
 func rewriteStoredRunArgs(args []string, removals map[string]bool, updates []runFlagUpdate) []string {

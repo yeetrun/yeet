@@ -36,6 +36,7 @@ type vmProvisionPlan struct {
 	Service     string
 	ServiceRoot resolvedServiceRoot
 	Shape       vmShape
+	Balloon     db.VMBalloonConfig
 	Image       vmImageAsset
 	Disk        vmDiskPlan
 	DiskPath    string
@@ -235,7 +236,7 @@ func (e *ttyExecer) prepareVMServiceRoot(flags cli.RunFlags) (resolvedServiceRoo
 }
 
 func (e *ttyExecer) vmProvisionShape(resolvedRoot resolvedServiceRoot, flags cli.RunFlags) (vmShape, error) {
-	runningVMBytes, err := e.runningVMBytes()
+	runningVMBytes, runningVMMinBytes, err := e.runningVMMemory()
 	if err != nil {
 		return vmShape{}, err
 	}
@@ -243,7 +244,14 @@ func (e *ttyExecer) vmProvisionShape(resolvedRoot resolvedServiceRoot, flags cli
 	if err != nil {
 		return vmShape{}, err
 	}
-	return vmShapeFromRunFlags(profile, flags)
+	if runningVMMinBytes > 0 && profile.RunningVMMinBytes == 0 {
+		profile.RunningVMMinBytes = runningVMMinBytes
+	}
+	policy, err := e.s.vmHostMemoryPolicy()
+	if err != nil {
+		return vmShape{}, err
+	}
+	return vmShapeFromRunFlags(profile, flags, policy)
 }
 
 func (e *ttyExecer) selectVMProvisionImage(ctx context.Context, flags cli.RunFlags, payload string, ui ProgressUI) (vmImageAsset, error) {
@@ -762,7 +770,7 @@ func (e *ttyExecer) vmHostProfile(resolvedRoot resolvedServiceRoot, runningVMByt
 	return localVMHostProfile(availableStorageBytes(resolvedRoot.Root), resolvedRoot.ZFS, runningVMBytes), nil
 }
 
-func vmShapeFromRunFlags(profile vmHostProfile, flags cli.RunFlags) (vmShape, error) {
+func vmShapeFromRunFlags(profile vmHostProfile, flags cli.RunFlags, policy vmMemoryPolicy) (vmShape, error) {
 	shape, err := defaultVMShape(profile)
 	if err != nil {
 		return vmShape{}, err
@@ -770,10 +778,13 @@ func vmShapeFromRunFlags(profile vmHostProfile, flags cli.RunFlags) (vmShape, er
 	if err := applyVMShapeOverrides(&shape, flags); err != nil {
 		return vmShape{}, err
 	}
+	if err := applyVMBalloonOverrides(&shape, flags); err != nil {
+		return vmShape{}, err
+	}
 	if err := validateVMShape(shape); err != nil {
 		return vmShape{}, err
 	}
-	if err := admitVMMemory(profile, shape.MemoryBytes); err != nil {
+	if err := admitVMMemory(profile, shape.MemoryBytes, shape.MinMemoryBytes, policy); err != nil {
 		return vmShape{}, err
 	}
 	return shape, nil
@@ -790,6 +801,41 @@ func applyVMShapeOverrides(shape *vmShape, flags cli.RunFlags) error {
 		return err
 	}
 	return applyVMSizeOverride(&shape.DiskBytes, flags.Disk)
+}
+
+func applyVMBalloonOverrides(shape *vmShape, flags cli.RunFlags) error {
+	if mode := strings.TrimSpace(flags.Balloon); mode != "" {
+		normalized, err := normalizeVMBalloonMode(mode)
+		if err != nil {
+			return err
+		}
+		shape.BalloonMode = normalized
+	}
+	if value := strings.TrimSpace(flags.MemoryMin); value != "" {
+		minBytes, err := parseVMSize(value)
+		if err != nil {
+			return fmt.Errorf("invalid --memory-min: %w", err)
+		}
+		shape.MinMemoryBytes = minBytes
+	}
+	cfg, err := effectiveVMBalloonConfig(shape.MemoryBytes, db.VMBalloonConfig{Mode: shape.BalloonMode, MinBytes: shape.MinMemoryBytes})
+	if err != nil {
+		return err
+	}
+	shape.BalloonMode = cfg.Mode
+	shape.MinMemoryBytes = cfg.MinBytes
+	return nil
+}
+
+func firecrackerBalloonFromConfig(cfg db.VMBalloonConfig) *firecrackerBalloon {
+	if cfg.Mode != vmBalloonModeAuto {
+		return nil
+	}
+	return &firecrackerBalloon{
+		AmountMib:             0,
+		DeflateOnOOM:          true,
+		StatsPollingIntervalS: cfg.StatsIntervalSeconds,
+	}
 }
 
 func applyVMSizeOverride(dst *int64, raw string) error {
@@ -809,6 +855,10 @@ func validateVMShape(shape vmShape) error {
 		return fmt.Errorf("VM CPU count must be positive")
 	case shape.MemoryBytes <= 0:
 		return fmt.Errorf("VM memory must be positive")
+	case shape.MinMemoryBytes < 0:
+		return fmt.Errorf("VM minimum memory must not be negative")
+	case shape.MinMemoryBytes > shape.MemoryBytes:
+		return fmt.Errorf("VM minimum memory %s exceeds maximum memory %s", formatBytesInt(shape.MinMemoryBytes), formatBytesInt(shape.MemoryBytes))
 	case shape.DiskBytes <= 0:
 		return fmt.Errorf("VM disk size must be positive")
 	default:
@@ -867,6 +917,13 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 			return vmProvisionPlan{}, err
 		}
 	}
+	balloonConfig, err := effectiveVMBalloonConfig(shape.MemoryBytes, db.VMBalloonConfig{
+		Mode:     shape.BalloonMode,
+		MinBytes: shape.MinMemoryBytes,
+	})
+	if err != nil {
+		return vmProvisionPlan{}, err
+	}
 	firecrackerConfig, err := renderFirecrackerConfig(firecrackerConfig{
 		BootSource: firecrackerBootSource{
 			KernelImagePath: image.Paths.KernelPath,
@@ -889,6 +946,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 			GuestCID: vmAgentGuestCID,
 			UDSPath:  vsockSocket,
 		},
+		Balloon: firecrackerBalloonFromConfig(balloonConfig),
 	})
 	if err != nil {
 		return vmProvisionPlan{}, err
@@ -911,6 +969,7 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 		Service:                e.sn,
 		ServiceRoot:            resolvedRoot,
 		Shape:                  shape,
+		Balloon:                balloonConfig,
 		Image:                  image,
 		Disk:                   diskPlan,
 		DiskPath:               diskPath,
@@ -1026,6 +1085,7 @@ func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string, snap
 			},
 			CPUs:        plan.Shape.CPUs,
 			MemoryBytes: plan.Shape.MemoryBytes,
+			Balloon:     plan.Balloon,
 			Disk: db.VMDiskConfig{
 				Backend: plan.Shape.DiskBackend,
 				Bytes:   plan.Shape.DiskBytes,
@@ -1160,19 +1220,8 @@ func vmDiskPathForRuntime(plan vmDiskPlan) string {
 	return plan.Path
 }
 
-func (e *ttyExecer) runningVMBytes() (int64, error) {
-	dv, err := e.s.getDB()
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, service := range dv.AsStruct().Services {
-		if service == nil || service.VM == nil || service.VM.SetupState != "ready" {
-			continue
-		}
-		total += service.VM.MemoryBytes
-	}
-	return total, nil
+func (e *ttyExecer) runningVMMemory() (int64, int64, error) {
+	return e.s.runningVMMemoryExcluding("")
 }
 
 func (e *ttyExecer) reserveVMServiceNetwork(flags cli.RunFlags) (*db.SvcNetwork, error) {

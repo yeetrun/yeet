@@ -16,13 +16,22 @@ const (
 
 	vmDiskBackendRaw  = "raw"
 	vmDiskBackendZVOL = "zvol"
+
+	vmBalloonModeAuto = "auto"
+	vmBalloonModeOff  = "off"
+
+	vmHostMemoryPolicySafe       = "safe"
+	vmHostMemoryPolicyBalanced   = "balanced"
+	vmHostMemoryPolicyAggressive = "aggressive"
 )
 
 type vmShape struct {
-	CPUs        int
-	MemoryBytes int64
-	DiskBytes   int64
-	DiskBackend string
+	CPUs           int
+	MemoryBytes    int64
+	MinMemoryBytes int64
+	BalloonMode    string
+	DiskBytes      int64
+	DiskBackend    string
 }
 
 func parseVMSize(raw string) (int64, error) {

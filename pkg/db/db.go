@@ -17,7 +17,7 @@ import (
 
 var renameDBFile = os.Rename
 
-//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig --copyright=false
+//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig --copyright=false
 
 // Data is the full JSON structure of the database.
 type Data struct {
@@ -26,6 +26,7 @@ type Data struct {
 	DataVersion int `json:",omitempty"`
 
 	SnapshotDefaults *SnapshotPolicy `json:",omitempty"`
+	VMHost           *VMHostConfig   `json:",omitempty"`
 
 	Services map[string]*Service
 
@@ -34,6 +35,10 @@ type Data struct {
 	Volumes map[string]*Volume
 
 	DockerNetworks map[string]*DockerNetwork
+}
+
+type VMHostConfig struct {
+	MemoryPolicy string `json:",omitempty"`
 }
 
 type DockerNetwork struct {
@@ -150,6 +155,7 @@ type VMConfig struct {
 	CPUs    int
 
 	MemoryBytes int64
+	Balloon     VMBalloonConfig
 	Disk        VMDiskConfig
 
 	Networks []VMNetworkConfig
@@ -159,6 +165,13 @@ type VMConfig struct {
 
 	PIDFile    string `json:",omitempty"`
 	SetupState string `json:",omitempty"`
+}
+
+type VMBalloonConfig struct {
+	Mode                 string
+	MinBytes             int64
+	StatsIntervalSeconds int   `json:",omitempty"`
+	LastTargetBytes      int64 `json:",omitempty"`
 }
 
 type VMImageConfig struct {

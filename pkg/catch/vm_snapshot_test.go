@@ -377,6 +377,7 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 		"mode",
 		"machineConfigHash",
 		"networkConfigHash",
+		"balloonConfigHash",
 		"diskPath",
 		"vcpu",
 		"memoryMiB",
@@ -389,7 +390,7 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 	if metadata["mode"] != recoveryModeFull {
 		t.Fatalf("metadata mode = %q, want full", metadata["mode"])
 	}
-	for _, key := range []string{"machineConfigHash", "networkConfigHash", "vmConfigHash"} {
+	for _, key := range []string{"machineConfigHash", "networkConfigHash", "balloonConfigHash", "vmConfigHash"} {
 		hash, ok := metadata[key].(string)
 		if !ok || !strings.HasPrefix(hash, "sha256:") {
 			t.Fatalf("metadata[%s] = %q, want sha256-prefixed hash", key, metadata[key])
@@ -409,6 +410,53 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 	if !strings.Contains(out.String(), "Firecracker state: "+statePath) ||
 		!strings.Contains(out.String(), "Firecracker memory: "+memoryPath) {
 		t.Fatalf("output = %q, want checkpoint paths", out.String())
+	}
+}
+
+func TestFullVMCheckpointMetadataIncludesBalloonConfigHash(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.Balloon = db.VMBalloonConfig{Mode: vmBalloonModeAuto, MinBytes: 1 << 30, StatsIntervalSeconds: vmBalloonDefaultStatsIntervalSeconds}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed VM balloon config: %v", err)
+	}
+	var calls []string
+	server.zfsRunner = recordingVMSnapshotZFSRunner(&calls, nil)
+	oldRunning := vmSnapshotIsRunning
+	oldController := vmSnapshotFirecracker
+	controller := &recordingVMFirecracker{calls: &calls}
+	vmSnapshotIsRunning = func(*Server, string) (bool, error) { return true, nil }
+	vmSnapshotFirecracker = controller
+	t.Cleanup(func() {
+		vmSnapshotIsRunning = oldRunning
+		vmSnapshotFirecracker = oldController
+	})
+
+	if err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Full: true}, io.Discard); err != nil {
+		t.Fatalf("createVMSnapshot: %v", err)
+	}
+
+	metadataPaths, err := filepath.Glob(filepath.Join(root, "data", "checkpoints", "yeet-*", "metadata.json"))
+	if err != nil {
+		t.Fatalf("glob checkpoint metadata: %v", err)
+	}
+	if len(metadataPaths) != 1 {
+		t.Fatalf("checkpoint metadata paths = %#v, want one published checkpoint", metadataPaths)
+	}
+	raw, err := os.ReadFile(metadataPaths[0])
+	if err != nil {
+		t.Fatalf("read checkpoint metadata: %v", err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("decode checkpoint metadata: %v", err)
+	}
+	hash, ok := metadata["balloonConfigHash"].(string)
+	if !ok || !strings.HasPrefix(hash, "sha256:") {
+		t.Fatalf("balloonConfigHash = %q, want sha256-prefixed hash in full checkpoint metadata", metadata["balloonConfigHash"])
 	}
 }
 

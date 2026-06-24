@@ -53,6 +53,77 @@ func TestRunVMDoesNotCommitReadyOnArtifactFailure(t *testing.T) {
 	assertNoReadyVM(t, server, "svc")
 }
 
+func TestRunVMProvisionPersistsAndRendersDefaultBalloon(t *testing.T) {
+	server := newTestServer(t)
+	execer, root, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Memory: "4g", Restart: false}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	svc := getTestService(t, server, "devbox")
+	if svc.VM.Balloon.Mode != vmBalloonModeAuto || svc.VM.Balloon.MinBytes != 1<<30 {
+		t.Fatalf("Balloon = %#v, want auto 1GiB floor", svc.VM.Balloon)
+	}
+	raw, err := os.ReadFile(filepath.Join(serviceRunDirForRoot(root), "firecracker.json"))
+	if err != nil {
+		t.Fatalf("read firecracker config: %v", err)
+	}
+	for _, want := range []string{`"balloon"`, `"amount_mib": 0`, `"deflate_on_oom": true`, `"stats_polling_interval_s": 5`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("firecracker config missing %q:\n%s", want, raw)
+		}
+	}
+	output := new(bytes.Buffer)
+	ui := &vmProvisionUI{ui: newRunUI(output, true, false, "run", "devbox")}
+	ui.PrintSuccess(vmProvisionPlan{Service: "devbox", Shape: svcVMShape(svc), Image: vmImageAsset{Manifest: vmImageManifest{Name: "Ubuntu"}}}, testUbuntuVMPayload, vmGuestReadyReport{}, false)
+	if !strings.Contains(output.String(), "(1.0 GB floor)") {
+		t.Fatalf("output missing floor:\n%s", output.String())
+	}
+}
+
+func TestRunVMProvisionBalloonOffOmitsBalloonDevice(t *testing.T) {
+	server := newTestServer(t)
+	execer, root, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Memory: "4g", Balloon: "off", Restart: false}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	svc := getTestService(t, server, "devbox")
+	if svc.VM.Balloon.Mode != vmBalloonModeOff || svc.VM.Balloon.MinBytes != 4<<30 {
+		t.Fatalf("Balloon = %#v, want off floor=max", svc.VM.Balloon)
+	}
+	raw, err := os.ReadFile(filepath.Join(serviceRunDirForRoot(root), "firecracker.json"))
+	if err != nil {
+		t.Fatalf("read firecracker config: %v", err)
+	}
+	if strings.Contains(string(raw), `"balloon"`) {
+		t.Fatalf("firecracker config includes balloon for off mode:\n%s", raw)
+	}
+}
+
+func TestRunVMBalancedPolicyAllowsMaxOvercommitWhenFloorsFit(t *testing.T) {
+	server := newTestServer(t)
+	_, err := server.cfg.DB.MutateData(func(d *db.Data) error {
+		d.VMHost = &db.VMHostConfig{MemoryPolicy: "balanced"}
+		d.Services = map[string]*db.Service{
+			"existing": {Name: "existing", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{
+				Runtime: vmRuntimeFirecracker, MemoryBytes: 12 << 30,
+				Balloon: db.VMBalloonConfig{Mode: vmBalloonModeAuto, MinBytes: 3 << 30},
+			}},
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	vmProvisionHostProfileFunc = func(_ *ttyExecer, _ resolvedServiceRoot, runningMaxBytes int64) (vmHostProfile, error) {
+		return vmHostProfile{Arch: "amd64", HasKVM: true, LogicalCPUs: 16, MemoryBytes: 16 << 30, StorageBytes: 128 << 30, RunningVMBytes: runningMaxBytes, RunningVMMinBytes: 3 << 30}, nil
+	}
+	t.Cleanup(func() { vmProvisionHostProfileFunc = nil })
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Memory: "4g", MemoryMin: "1g", Restart: false}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM balanced overcommit: %v", err)
+	}
+}
+
 func TestRunVMRemovesNewServiceRootOnArtifactFailure(t *testing.T) {
 	server := newTestServer(t)
 	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
@@ -70,6 +141,20 @@ func TestRunVMRemovesNewServiceRootOnArtifactFailure(t *testing.T) {
 	assertNoReadyVM(t, server, "svc")
 	if _, statErr := os.Stat(serviceRoot); !os.IsNotExist(statErr) {
 		t.Fatalf("service root stat after failed new VM = %v, want not exists", statErr)
+	}
+}
+
+func svcVMShape(svc *db.Service) vmShape {
+	if svc == nil || svc.VM == nil {
+		return vmShape{}
+	}
+	return vmShape{
+		CPUs:           svc.VM.CPUs,
+		MemoryBytes:    svc.VM.MemoryBytes,
+		MinMemoryBytes: svc.VM.Balloon.MinBytes,
+		BalloonMode:    svc.VM.Balloon.Mode,
+		DiskBytes:      svc.VM.Disk.Bytes,
+		DiskBackend:    svc.VM.Disk.Backend,
 	}
 }
 

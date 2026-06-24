@@ -15,14 +15,20 @@ import (
 	"syscall"
 )
 
+var (
+	linuxMemTotalBytesFunc     = linuxMemTotalBytesDefault
+	linuxMemAvailableBytesFunc = linuxMemAvailableBytesDefault
+)
+
 type vmHostProfile struct {
-	Arch           string
-	HasKVM         bool
-	LogicalCPUs    int
-	MemoryBytes    int64
-	StorageBytes   int64
-	StorageZFS     bool
-	RunningVMBytes int64
+	Arch              string
+	HasKVM            bool
+	LogicalCPUs       int
+	MemoryBytes       int64
+	StorageBytes      int64
+	StorageZFS        bool
+	RunningVMBytes    int64
+	RunningVMMinBytes int64
 }
 
 func validateVMHost(profile vmHostProfile) error {
@@ -42,6 +48,7 @@ func defaultVMShape(profile vmHostProfile) (vmShape, error) {
 	shape := vmShape{
 		CPUs:        defaultVMCPUs(profile.LogicalCPUs),
 		MemoryBytes: defaultVMMemory(profile.MemoryBytes),
+		BalloonMode: vmBalloonModeAuto,
 		DiskBytes:   defaultVMDisk(profile.StorageBytes, profile.StorageZFS),
 		DiskBackend: vmDiskBackendRaw,
 	}
@@ -50,9 +57,6 @@ func defaultVMShape(profile vmHostProfile) (vmShape, error) {
 	}
 	if shape.DiskBytes == 0 {
 		return vmShape{}, fmt.Errorf("not enough storage for VM disk")
-	}
-	if err := admitVMMemory(profile, shape.MemoryBytes); err != nil {
-		return vmShape{}, err
 	}
 	return shape, nil
 }
@@ -113,26 +117,19 @@ func diskSizeForThresholds(availableBytes int64, thresholds []vmDiskThreshold) i
 	return 0
 }
 
-func admitVMMemory(profile vmHostProfile, requestBytes int64) error {
-	reserve := vmHostMemoryReserve(profile.MemoryBytes)
-	budget := profile.MemoryBytes - reserve - profile.RunningVMBytes
-	if requestBytes > budget {
-		return fmt.Errorf("not enough memory to start VM: requested %s, available budget %s", formatBytesInt(requestBytes), formatBytesInt(budget))
-	}
-	return nil
+func admitVMMemory(profile vmHostProfile, requestMaxBytes, requestMinBytes int64, policy vmMemoryPolicy) error {
+	return admitVMMemoryWithPolicy(vmMemoryAdmissionInput{
+		Policy:          policy,
+		HostBytes:       profile.MemoryBytes,
+		RunningMaxBytes: profile.RunningVMBytes,
+		RunningMinBytes: profile.RunningVMMinBytes,
+		RequestMaxBytes: requestMaxBytes,
+		RequestMinBytes: requestMinBytes,
+	})
 }
 
 func vmHostMemoryReserve(total int64) int64 {
-	const gib = int64(1 << 30)
-
-	tenPercent := total / 10
-	if tenPercent < gib {
-		return gib
-	}
-	if tenPercent > 4*gib {
-		return 4 * gib
-	}
-	return tenPercent
+	return vmBalloonHostMemoryReserve(total)
 }
 
 func localVMHostProfile(storageBytes int64, storageZFS bool, runningVMBytes int64) vmHostProfile {
@@ -148,6 +145,18 @@ func localVMHostProfile(storageBytes int64, storageZFS bool, runningVMBytes int6
 	}
 }
 
+func (s *Server) vmHostMemoryPolicy() (vmMemoryPolicy, error) {
+	dv, err := s.getDB()
+	if err != nil {
+		return vmMemoryPolicy{}, err
+	}
+	raw := ""
+	if host := dv.VMHost(); host.Valid() {
+		raw = host.MemoryPolicy()
+	}
+	return normalizeVMHostMemoryPolicy(raw)
+}
+
 func availableStorageBytes(path string) int64 {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
@@ -157,6 +166,10 @@ func availableStorageBytes(path string) int64 {
 }
 
 func linuxMemTotalBytes() int64 {
+	return linuxMemTotalBytesFunc()
+}
+
+func linuxMemTotalBytesDefault() int64 {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return 0
@@ -170,23 +183,48 @@ func linuxMemTotalBytes() int64 {
 }
 
 func linuxMemTotalBytesFromReader(r io.Reader) (int64, error) {
+	return linuxMeminfoValueBytesFromReader(r, "MemTotal:")
+}
+
+func linuxMemAvailableBytes() int64 {
+	return linuxMemAvailableBytesFunc()
+}
+
+func linuxMemAvailableBytesDefault() int64 {
+	f, err := os.Open("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	defer func() { _ = f.Close() }()
+	available, err := linuxMemAvailableBytesFromReader(f)
+	if err != nil {
+		return 0
+	}
+	return available
+}
+
+func linuxMemAvailableBytesFromReader(r io.Reader) (int64, error) {
+	return linuxMeminfoValueBytesFromReader(r, "MemAvailable:")
+}
+
+func linuxMeminfoValueBytesFromReader(r io.Reader, key string) (int64, error) {
 	scanner := bufio.NewScanner(r)
 	for scanner.Scan() {
 		line := scanner.Text()
 		fields := strings.Fields(line)
-		if len(fields) < 2 || fields[0] != "MemTotal:" {
+		if len(fields) < 2 || fields[0] != key {
 			continue
 		}
 		kb, err := strconv.ParseInt(fields[1], 10, 64)
 		if err != nil || kb < 0 {
-			return 0, fmt.Errorf("invalid MemTotal value %q", fields[1])
+			return 0, fmt.Errorf("invalid %s value %q", strings.TrimSuffix(key, ":"), fields[1])
 		}
 		return kb << 10, nil
 	}
 	if err := scanner.Err(); err != nil {
 		return 0, err
 	}
-	return 0, fmt.Errorf("MemTotal not found")
+	return 0, fmt.Errorf("%s not found", strings.TrimSuffix(key, ":"))
 }
 
 func formatBytesInt(bytes int64) string {

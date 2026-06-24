@@ -1141,6 +1141,39 @@ func TestSnapshotsRestoreVMFullRejectsVMConfigHashMismatchBeforeMutation(t *test
 	assertNoFullVMRestoreMutation(t, calls, logPath)
 }
 
+func TestSnapshotsRestoreVMFullRejectsBalloonConfigHashMismatchBeforeMutation(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.Balloon = db.VMBalloonConfig{Mode: vmBalloonModeAuto, MinBytes: 1 << 30, StatsIntervalSeconds: vmBalloonDefaultStatsIntervalSeconds}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed VM balloon config: %v", err)
+	}
+	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, nil)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.Balloon.MinBytes = 2 << 30
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate VM balloon config: %v", err)
+	}
+	withVMRecoveryStatus(t, svc.StatusRunning)
+	logPath := installFakeSystemctl(t)
+	installFakeDD(t, logPath)
+	var calls []string
+	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
+		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
+	})
+
+	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
+
+	if err == nil || !strings.Contains(err.Error(), "checkpoint balloon config hash does not match current VM config") {
+		t.Fatalf("restoreRecoveryPoint error = %v, want balloon config hash compatibility rejection", err)
+	}
+	assertNoFullVMRestoreMutation(t, calls, logPath)
+}
+
 func TestSnapshotsRestoreVMFullRejectsMissingCheckpointFilesBeforeMutation(t *testing.T) {
 	server := newTestServer(t)
 	root := t.TempDir()
@@ -1250,6 +1283,46 @@ func TestValidateFullVMCheckpointFirecrackerIdentityNormalizesVersionNoise(t *te
 	if err != nil {
 		t.Fatalf("validateFullVMCheckpointFirecrackerIdentity: %v, want noisy metadata version accepted", err)
 	}
+}
+
+func TestValidateFullVMCheckpointRequiresBalloonConfigHash(t *testing.T) {
+	metadata := vmCheckpointMetadata{
+		Mode:              recoveryModeFull,
+		FirecrackerState:  "/tmp/state",
+		FirecrackerMemory: "/tmp/memory",
+		MachineConfigHash: "sha256:" + strings.Repeat("a", 64),
+		NetworkConfigHash: "sha256:" + strings.Repeat("b", 64),
+		DiskPath:          "/dev/zvol/tank/vms/devbox/root",
+		VCPU:              4,
+		MemoryMiB:         4096,
+		VMConfigHash:      "sha256:" + strings.Repeat("c", 64),
+	}
+
+	if metadata.hasFullCompatibilityFields() {
+		t.Fatalf("hasFullCompatibilityFields = true without balloonConfigHash; want false")
+	}
+}
+
+func TestSnapshotsRestoreVMFullReportsMissingBalloonCompatibilityField(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, func(metadata map[string]any) {
+		delete(metadata, "balloonConfigHash")
+	})
+	withVMRecoveryStatus(t, svc.StatusRunning)
+	logPath := installFakeSystemctl(t)
+	installFakeDD(t, logPath)
+	var calls []string
+	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
+		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
+	})
+
+	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
+
+	if err == nil || !strings.Contains(err.Error(), "balloonConfigHash") {
+		t.Fatalf("restoreRecoveryPoint error = %v, want missing balloonConfigHash compatibility rejection", err)
+	}
+	assertNoFullVMRestoreMutation(t, calls, logPath)
 }
 
 func TestSnapshotsRestoreVMFullCompatibleCheckpointRestoresDiskSchedulesStateLoadAndStarts(t *testing.T) {
@@ -1672,6 +1745,10 @@ func seedCompatibleFullVMCheckpointMetadata(t *testing.T, server *Server, root s
 	if err := json.Unmarshal(rawConfig, &cfg); err != nil {
 		t.Fatalf("decode firecracker config: %v", err)
 	}
+	balloonHash, vmHash, err := vmCheckpointConfigHashes(vm)
+	if err != nil {
+		t.Fatalf("VM checkpoint config hashes: %v", err)
+	}
 	metadata := map[string]any{
 		"service":           "devbox",
 		"zvolSnapshot":      snapshotName,
@@ -1685,7 +1762,8 @@ func seedCompatibleFullVMCheckpointMetadata(t *testing.T, server *Server, root s
 		"diskPath":          vm.Disk.Path,
 		"vcpu":              vm.CPUs,
 		"memoryMiB":         int(vm.MemoryBytes >> 20),
-		"vmConfigHash":      canonicalJSONHashForRecoveryTest(t, vm),
+		"balloonConfigHash": balloonHash,
+		"vmConfigHash":      vmHash,
 	}
 	if edit != nil {
 		edit(metadata)

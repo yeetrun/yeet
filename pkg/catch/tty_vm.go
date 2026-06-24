@@ -48,6 +48,8 @@ func (e *ttyExecer) vmCmdFunc(args []string) error {
 		return e.vmImagesRemoteCmdFunc(args[1:])
 	case "kernel":
 		return e.vmKernelRemoteCmdFunc(args[1:])
+	case "memory":
+		return e.vmMemoryRemoteCmdFunc(args[1:])
 	default:
 		return fmt.Errorf("unknown vm command %q", args[0])
 	}
@@ -88,6 +90,23 @@ func (e *ttyExecer) vmKernelRemoteCmdFunc(args []string) error {
 		return fmt.Errorf("unexpected vm kernel args: %s", strings.Join(remaining, " "))
 	}
 	return e.s.syncVMGuestKernel(e.vmProvisionContext(), e.sn, flags)
+}
+
+func (e *ttyExecer) vmMemoryRemoteCmdFunc(args []string) error {
+	flags, rest, err := cli.ParseVMMemory(args)
+	if err != nil {
+		return err
+	}
+	if len(rest) == 0 {
+		if strings.TrimSpace(flags.Policy) != "" {
+			return fmt.Errorf("use vm memory set --policy=%s to change host VM memory policy", flags.Policy)
+		}
+		return e.s.printVMMemoryStatus(e.rw, flags.Format)
+	}
+	if len(rest) == 1 && rest[0] == "set" {
+		return e.s.setVMMemoryPolicy(flags.Policy)
+	}
+	return fmt.Errorf("unexpected vm memory args: %s", strings.Join(rest, " "))
 }
 
 func (e *ttyExecer) vmImageCache() vmImageCache {

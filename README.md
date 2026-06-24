@@ -206,6 +206,28 @@ yeet release.
 Run a `vm://` payload once per VM name; change an existing VM with `yeet vm set`
 or remove and recreate it for a fresh guest.
 
+`--memory` sets the VM's maximum RAM. New VMs enable Firecracker ballooning by
+default, and `--memory-min` sets the floor yeet will not intentionally reclaim
+below:
+
+```bash
+yeet run devbox vm://ubuntu/26.04 --memory=4g --memory-min=1g
+yeet vm set devbox --memory-min=2g
+```
+
+Disable ballooning when a VM should reserve its full maximum memory:
+
+```bash
+yeet vm set devbox --balloon=off
+```
+
+Host memory policy defaults to `safe`. To opt into controlled VM overcommit,
+set the policy explicitly:
+
+```bash
+yeet vm memory set --policy=balanced
+```
+
 Detach from an active VM console by pressing Enter, then typing `~.`. The VM
 keeps running.
 

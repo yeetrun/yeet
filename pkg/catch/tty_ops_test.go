@@ -136,6 +136,30 @@ func TestVMConsoleSocketNotConnectedIncludesPath(t *testing.T) {
 	}
 }
 
+func TestVMMemorySetPolicyPersistsHostConfig(t *testing.T) {
+	server := newTestServer(t)
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+	if err := execer.vmCmdFunc([]string{"memory", "set", "--policy=balanced"}); err != nil {
+		t.Fatalf("vm memory set: %v", err)
+	}
+	dv, err := server.getDB()
+	if err != nil {
+		t.Fatalf("getDB: %v", err)
+	}
+	if !dv.VMHost().Valid() || dv.VMHost().MemoryPolicy() != "balanced" {
+		t.Fatalf("VMHost = %#v, want balanced", dv.VMHost().AsStruct())
+	}
+}
+
+func TestVMMemoryRejectsAggressiveWithoutSet(t *testing.T) {
+	server := newTestServer(t)
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+	err := execer.vmCmdFunc([]string{"memory", "--policy=aggressive"})
+	if err == nil || !strings.Contains(err.Error(), "use vm memory set") {
+		t.Fatalf("error = %v, want set-only policy change", err)
+	}
+}
+
 func TestSnapshotsDefaultsShow(t *testing.T) {
 	server := newTestServer(t)
 	keep := 3

@@ -240,8 +240,11 @@ func (s *Server) planFullVMRestore(service *db.Service, point recoveryPoint) (vm
 func (s *Server) fullVMRestoreMetadata(service *db.Service, point recoveryPoint) (vmCheckpointMetadata, error) {
 	dir := vmCheckpointDir(s.serviceRootFromService(service), point.ShortName)
 	metadata, ok := readVMCheckpointMetadata(filepath.Join(dir, "metadata.json"), service.Name, point.Name)
-	if !ok || !metadata.hasFullCompatibilityFields() {
+	if !ok {
 		return vmCheckpointMetadata{}, fmt.Errorf("full checkpoint metadata is missing compatibility fields")
+	}
+	if missing := metadata.missingFullCompatibilityFields(); len(missing) > 0 {
+		return vmCheckpointMetadata{}, fmt.Errorf("full checkpoint metadata is missing compatibility fields: %s", strings.Join(missing, ", "))
 	}
 	if !checkpointFilesExist(metadata.FirecrackerState, metadata.FirecrackerMemory) {
 		return vmCheckpointMetadata{}, fmt.Errorf("full checkpoint state or memory file is missing")
@@ -282,6 +285,9 @@ func validateFullVMCheckpointConfigHashes(metadata vmCheckpointMetadata, current
 	}
 	if strings.TrimSpace(metadata.NetworkConfigHash) != strings.TrimSpace(current.NetworkConfigHash) {
 		return fmt.Errorf("checkpoint network config hash does not match current Firecracker config")
+	}
+	if strings.TrimSpace(metadata.BalloonConfigHash) != strings.TrimSpace(current.BalloonConfigHash) {
+		return fmt.Errorf("checkpoint balloon config hash does not match current VM config")
 	}
 	if strings.TrimSpace(metadata.VMConfigHash) != strings.TrimSpace(current.VMConfigHash) {
 		return fmt.Errorf("checkpoint VM config hash does not match current VM config")

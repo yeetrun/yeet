@@ -244,9 +244,13 @@ func vmProvisionImageDisplayName(plan vmProvisionPlan, payload string) string {
 }
 
 func vmProvisionShapeLine(shape vmShape) string {
-	return fmt.Sprintf("%d vCPU, %s memory, %s disk",
+	line := fmt.Sprintf("%d vCPU, %s memory, %s disk",
 		shape.CPUs,
 		formatVMProvisionBytes(shape.MemoryBytes),
 		formatVMProvisionBytes(shape.DiskBytes),
 	)
+	if shape.BalloonMode == vmBalloonModeAuto && shape.MinMemoryBytes > 0 && shape.MinMemoryBytes < shape.MemoryBytes {
+		line += fmt.Sprintf(" (%s floor)", formatVMProvisionBytes(shape.MinMemoryBytes))
+	}
+	return line
 }

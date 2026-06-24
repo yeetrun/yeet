@@ -20,7 +20,7 @@ var vmDefaultsHostProfileFunc func(*Server, catchrpc.VMDefaultsRequest, int64) (
 func (s *Server) vmDefaults(ctx context.Context, req catchrpc.VMDefaultsRequest) (catchrpc.VMDefaultsResponse, error) {
 	req.Service = strings.TrimSpace(req.Service)
 	req.ServiceRoot = strings.TrimSpace(req.ServiceRoot)
-	runningVMBytes, err := s.runningVMBytesExcluding("")
+	runningVMBytes, runningVMMinBytes, err := s.runningVMMemoryExcluding("")
 	if err != nil {
 		return catchrpc.VMDefaultsResponse{}, err
 	}
@@ -28,8 +28,21 @@ func (s *Server) vmDefaults(ctx context.Context, req catchrpc.VMDefaultsRequest)
 	if err != nil {
 		return catchrpc.VMDefaultsResponse{}, err
 	}
+	if runningVMMinBytes > 0 && profile.RunningVMMinBytes == 0 {
+		profile.RunningVMMinBytes = runningVMMinBytes
+	}
 	shape, err := defaultVMShape(profile)
 	if err != nil {
+		return catchrpc.VMDefaultsResponse{}, err
+	}
+	balloon := defaultVMBalloonConfig(shape.MemoryBytes)
+	shape.BalloonMode = balloon.Mode
+	shape.MinMemoryBytes = balloon.MinBytes
+	policy, err := s.vmHostMemoryPolicy()
+	if err != nil {
+		return catchrpc.VMDefaultsResponse{}, err
+	}
+	if err := admitVMMemory(profile, shape.MemoryBytes, shape.MinMemoryBytes, policy); err != nil {
 		return catchrpc.VMDefaultsResponse{}, err
 	}
 	return catchrpc.VMDefaultsResponse{

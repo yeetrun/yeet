@@ -31,6 +31,7 @@ type vmSettingsPlan struct {
 	OldVM                 db.VMConfig
 	NewCPUs               int
 	NewMemoryBytes        int64
+	NewBalloon            db.VMBalloonConfig
 	NewDiskBytes          int64
 	DiskSteps             []vmDiskPlanStep
 	OldNetwork            vmNetworkPlan
@@ -119,6 +120,7 @@ func (s *Server) baseVMSettingsPlan(name string) (*db.DataView, *db.Service, vmS
 		OldVM:                 oldVM,
 		NewCPUs:               oldVM.CPUs,
 		NewMemoryBytes:        oldVM.MemoryBytes,
+		NewBalloon:            oldVM.Balloon,
 		NewDiskBytes:          oldVM.Disk.Bytes,
 		OldNetwork:            vmNetworkPlanFromDB(name, oldVM.Networks),
 		NewNetwork:            vmNetworkPlanFromDB(name, oldVM.Networks),
@@ -131,15 +133,67 @@ func (s *Server) applyVMShapeSettings(service *db.Service, flags cli.VMSetFlags,
 	if flags.CPUs > 0 {
 		plan.NewCPUs = flags.CPUs
 	}
-	if strings.TrimSpace(flags.Memory) != "" {
-		memoryBytes, err := parseVMSize(flags.Memory)
+	if err := applyVMSetMemoryFlag(flags, plan); err != nil {
+		return err
+	}
+	if err := applyVMSetBalloonFlags(flags, plan); err != nil {
+		return err
+	}
+	return s.validateVMSettingsShape(plan.Root, service, plan.NewCPUs, plan.NewMemoryBytes, plan.NewBalloon.MinBytes, vmSetMemoryAdmissionChanged(flags))
+}
+
+func applyVMSetMemoryFlag(flags cli.VMSetFlags, plan *vmSettingsPlan) error {
+	if strings.TrimSpace(flags.Memory) == "" {
+		return nil
+	}
+	memoryBytes, err := parseVMSize(flags.Memory)
+	if err != nil {
+		return err
+	}
+	plan.NewMemoryBytes = memoryBytes
+	return nil
+}
+
+func applyVMSetBalloonFlags(flags cli.VMSetFlags, plan *vmSettingsPlan) error {
+	balloonChanged := vmSetBalloonConfigChanged(flags)
+	if mode := strings.TrimSpace(flags.Balloon); mode != "" {
+		normalized, err := normalizeVMBalloonMode(mode)
 		if err != nil {
 			return err
 		}
-		plan.NewMemoryBytes = memoryBytes
+		plan.NewBalloon.Mode = normalized
 	}
-	shapeChanged := flags.CPUs > 0 || strings.TrimSpace(flags.Memory) != ""
-	return s.validateVMSettingsShape(plan.Root, service, plan.NewCPUs, plan.NewMemoryBytes, shapeChanged)
+	if value := strings.TrimSpace(flags.MemoryMin); value != "" {
+		minBytes, err := parseVMSize(value)
+		if err != nil {
+			return fmt.Errorf("invalid --memory-min: %w", err)
+		}
+		plan.NewBalloon.MinBytes = minBytes
+	}
+	balloon, err := effectiveVMSetBalloonConfig(plan.NewMemoryBytes, plan.NewBalloon, balloonChanged)
+	if err != nil {
+		return err
+	}
+	plan.NewBalloon = balloon
+	return nil
+}
+
+func vmSetBalloonConfigChanged(flags cli.VMSetFlags) bool {
+	return strings.TrimSpace(flags.MemoryMin) != "" ||
+		strings.TrimSpace(flags.Balloon) != ""
+}
+
+func effectiveVMSetBalloonConfig(memoryBytes int64, cfg db.VMBalloonConfig, balloonChanged bool) (db.VMBalloonConfig, error) {
+	if balloonChanged {
+		return effectiveVMBalloonConfig(memoryBytes, cfg)
+	}
+	return effectiveExistingVMBalloonConfig(memoryBytes, cfg)
+}
+
+func vmSetMemoryAdmissionChanged(flags cli.VMSetFlags) bool {
+	return strings.TrimSpace(flags.Memory) != "" ||
+		strings.TrimSpace(flags.MemoryMin) != "" ||
+		strings.TrimSpace(flags.Balloon) != ""
 }
 
 func applyVMDiskSettings(flags cli.VMSetFlags, plan *vmSettingsPlan) error {
@@ -199,14 +253,14 @@ func (p *vmSettingsPlan) finalizeFirecrackerSettings() error {
 	return nil
 }
 
-func (s *Server) validateVMSettingsShape(root string, service *db.Service, cpus int, memoryBytes int64, admitMemory bool) error {
-	if err := validateVMShape(vmShape{CPUs: cpus, MemoryBytes: memoryBytes, DiskBytes: service.VM.Disk.Bytes, DiskBackend: service.VM.Disk.Backend}); err != nil {
+func (s *Server) validateVMSettingsShape(root string, service *db.Service, cpus int, memoryBytes, minMemoryBytes int64, admitMemory bool) error {
+	if err := validateVMShape(vmShape{CPUs: cpus, MemoryBytes: memoryBytes, MinMemoryBytes: minMemoryBytes, DiskBytes: service.VM.Disk.Bytes, DiskBackend: service.VM.Disk.Backend}); err != nil {
 		return err
 	}
 	if !admitMemory {
 		return nil
 	}
-	runningBytes, err := s.runningVMBytesExcluding(service.Name)
+	runningBytes, runningMinBytes, err := s.runningVMMemoryExcluding(service.Name)
 	if err != nil {
 		return err
 	}
@@ -219,22 +273,35 @@ func (s *Server) validateVMSettingsShape(root string, service *db.Service, cpus 
 	} else {
 		profile = localVMHostProfile(availableStorageBytes(root), service.ServiceRootZFS != "", runningBytes)
 	}
-	return admitVMMemory(profile, memoryBytes)
+	if runningMinBytes > 0 && profile.RunningVMMinBytes == 0 {
+		profile.RunningVMMinBytes = runningMinBytes
+	}
+	policy, err := s.vmHostMemoryPolicy()
+	if err != nil {
+		return err
+	}
+	return admitVMMemory(profile, memoryBytes, minMemoryBytes, policy)
 }
 
-func (s *Server) runningVMBytesExcluding(name string) (int64, error) {
+func (s *Server) runningVMMemoryExcluding(name string) (int64, int64, error) {
 	dv, err := s.getDB()
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
-	var total int64
+	var maxTotal int64
+	var minTotal int64
 	for serviceName, service := range dv.AsStruct().Services {
 		if serviceName == name || service == nil || service.VM == nil || service.VM.SetupState != "ready" {
 			continue
 		}
-		total += service.VM.MemoryBytes
+		maxTotal += service.VM.MemoryBytes
+		balloon, err := effectiveExistingVMBalloonConfig(service.VM.MemoryBytes, service.VM.Balloon)
+		if err != nil {
+			return 0, 0, fmt.Errorf("VM %q balloon config: %w", serviceName, err)
+		}
+		minTotal += balloon.MinBytes
 	}
-	return total, nil
+	return maxTotal, minTotal, nil
 }
 
 func vmDiskResizeStepsFromConfig(disk db.VMDiskConfig, requestedBytes int64) ([]vmDiskPlanStep, error) {
@@ -410,6 +477,7 @@ func (p vmSettingsPlan) defaultFirecrackerConfig() firecrackerConfig {
 func (p vmSettingsPlan) renderFirecrackerConfig(cfg firecrackerConfig, fastBoot bool) ([]byte, error) {
 	cfg.MachineConfig = firecrackerMachineConfig{VCPUCount: p.NewCPUs, MemSizeMib: int(p.NewMemoryBytes >> 20)}
 	cfg.NetworkInterfaces = p.NewNetwork.FirecrackerInterfaces()
+	cfg.Balloon = firecrackerBalloonFromConfig(p.NewBalloon)
 	if len(cfg.Drives) == 0 {
 		cfg.Drives = []firecrackerDrive{{
 			DriveID:      "rootfs",
@@ -648,6 +716,7 @@ func (s *Server) commitVMServiceSettingsPlan(name string, plan vmSettingsPlan) e
 		}
 		service.VM.CPUs = plan.NewCPUs
 		service.VM.MemoryBytes = plan.NewMemoryBytes
+		service.VM.Balloon = plan.NewBalloon
 		service.VM.Disk.Bytes = plan.NewDiskBytes
 		if plan.NetworkChanged {
 			service.VM.Networks = plan.NewNetwork.DBNetworks()

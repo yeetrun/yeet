@@ -89,6 +89,7 @@ func TestServiceInfoVMJSONRoundTrip(t *testing.T) {
 			ImageVersion: "ubuntu-26.04-amd64-v1",
 			CPUs:         4,
 			MemoryBytes:  4 << 30,
+			Balloon:      ServiceVMBalloon{Mode: "auto", MinBytes: 1 << 30, MinMemory: "1 GB", LastTarget: 512 << 20},
 			DiskBytes:    128 << 30,
 			DiskBackend:  "zvol",
 			DiskPath:     "flash/yeet/vms/devbox/root",
@@ -106,6 +107,7 @@ func TestServiceInfoVMJSONRoundTrip(t *testing.T) {
 		`"vm"`,
 		`"imageVersion":"ubuntu-26.04-amd64-v1"`,
 		`"memoryBytes":4294967296`,
+		`"balloon":{"mode":"auto","minBytes":1073741824,"minMemory":"1 GB","lastTargetBytes":536870912}`,
 		`"diskBackend":"zvol"`,
 		`"socketPath":"/run/yeet/devbox/serial.sock"`,
 		`"setupState":"ready"`,
@@ -120,5 +122,8 @@ func TestServiceInfoVMJSONRoundTrip(t *testing.T) {
 	}
 	if roundTrip.VM == nil || roundTrip.VM.Image != "vm://ubuntu/26.04" || roundTrip.VM.SSH.User != "ubuntu" || !roundTrip.VM.Console.Available {
 		t.Fatalf("round trip VM = %#v", roundTrip.VM)
+	}
+	if roundTrip.VM.Balloon.Mode != "auto" || roundTrip.VM.Balloon.MinBytes != 1<<30 || roundTrip.VM.Balloon.MinMemory != "1 GB" || roundTrip.VM.Balloon.LastTarget != 512<<20 {
+		t.Fatalf("round trip balloon = %#v, want auto 1 GB with target", roundTrip.VM.Balloon)
 	}
 }

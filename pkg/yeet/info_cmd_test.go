@@ -69,10 +69,15 @@ func TestRenderInfoPlainIncludesVMSection(t *testing.T) {
 				Image:       "vm://ubuntu/26.04",
 				CPUs:        4,
 				MemoryBytes: 4 << 30,
-				DiskBytes:   128 << 30,
-				SSH:         &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
-				Console:     &catchrpc.ServiceVMConsole{Available: true},
-				SetupState:  "ready",
+				Balloon: catchrpc.ServiceVMBalloon{
+					Mode:      "auto",
+					MinBytes:  1 << 30,
+					MinMemory: "1 GB",
+				},
+				DiskBytes:  128 << 30,
+				SSH:        &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+				Console:    &catchrpc.ServiceVMConsole{Available: true},
+				SetupState: "ready",
 			},
 		},
 	}
@@ -92,6 +97,7 @@ func TestRenderInfoPlainIncludesVMSection(t *testing.T) {
 	assertPlainRow(t, text, "Type", "VM")
 	assertPlainRow(t, text, "Runtime", "firecracker")
 	assertPlainRow(t, text, "CPU", "4")
+	assertPlainRow(t, text, "Balloon", "auto, floor 1 GB")
 	assertPlainRow(t, text, "SSH", "ubuntu@192.168.100.12")
 }
 

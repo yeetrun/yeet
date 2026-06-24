@@ -62,6 +62,65 @@ func TestVMSetUpdatesShapeAndFirecrackerConfig(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"mem_size_mib": 6144`)
 }
 
+func TestVMSetUpdatesBalloonConfigAndFirecrackerConfig(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{MemoryMin: "2g", Balloon: "auto"}); err != nil {
+		t.Fatalf("updateVMServiceSettings: %v", err)
+	}
+	svc := getTestService(t, server, "devbox")
+	if svc.VM.Balloon.Mode != vmBalloonModeAuto || svc.VM.Balloon.MinBytes != 2<<30 {
+		t.Fatalf("Balloon = %#v, want auto 2GiB floor", svc.VM.Balloon)
+	}
+	raw, err := os.ReadFile(filepath.Join(serviceRunDirForRoot(root), "firecracker.json"))
+	if err != nil {
+		t.Fatalf("read Firecracker config: %v", err)
+	}
+	if !strings.Contains(string(raw), `"balloon"`) {
+		t.Fatalf("Firecracker config missing balloon:\n%s", raw)
+	}
+}
+
+func TestRunningVMMemoryTreatsLegacyMissingBalloonConfigAsReserved(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "legacy", root, vmDiskBackendRaw)
+
+	maxBytes, minBytes, err := server.runningVMMemoryExcluding("")
+	if err != nil {
+		t.Fatalf("runningVMMemoryExcluding: %v", err)
+	}
+	if maxBytes != 4<<30 || minBytes != 4<<30 {
+		t.Fatalf("running memory = max %d min %d, want both 4GiB", maxBytes, minBytes)
+	}
+}
+
+func TestVMSetDiskOnlyPreservesLegacyBalloonOff(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	withServiceSetVMDiskRunner(t, func(context.Context, []string) error { return nil })
+
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{Disk: "32g"}); err != nil {
+		t.Fatalf("updateVMServiceSettings: %v", err)
+	}
+	svc := getTestService(t, server, "devbox")
+	if svc.VM.Balloon.Mode != vmBalloonModeOff || svc.VM.Balloon.MinBytes != 4<<30 {
+		t.Fatalf("Balloon = %#v, want legacy VM to remain fully reserved", svc.VM.Balloon)
+	}
+	raw, err := os.ReadFile(filepath.Join(serviceRunDirForRoot(root), "firecracker.json"))
+	if err != nil {
+		t.Fatalf("read Firecracker config: %v", err)
+	}
+	if strings.Contains(string(raw), `"balloon"`) {
+		t.Fatalf("Firecracker config includes balloon for legacy disk-only update:\n%s", raw)
+	}
+}
+
 func TestVMCmdSetUpdatesShape(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)

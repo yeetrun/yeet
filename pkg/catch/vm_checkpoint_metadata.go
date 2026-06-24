@@ -43,6 +43,7 @@ type vmCheckpointMetadata struct {
 	FirecrackerSha256  string `json:"firecrackerSha256,omitempty"`
 	MachineConfigHash  string `json:"machineConfigHash,omitempty"`
 	NetworkConfigHash  string `json:"networkConfigHash,omitempty"`
+	BalloonConfigHash  string `json:"balloonConfigHash,omitempty"`
 	DiskPath           string `json:"diskPath,omitempty"`
 	VCPU               int    `json:"vcpu,omitempty"`
 	MemoryMiB          int    `json:"memoryMiB,omitempty"`
@@ -54,6 +55,7 @@ type vmCheckpointCompatibility struct {
 	FirecrackerSha256  string
 	MachineConfigHash  string
 	NetworkConfigHash  string
+	BalloonConfigHash  string
 	DiskPath           string
 	VCPU               int
 	MemoryMiB          int
@@ -74,6 +76,7 @@ func (s *Server) writeVMCheckpointMetadataWithCompatibility(dir string, service 
 		FirecrackerSha256:  compat.FirecrackerSha256,
 		MachineConfigHash:  compat.MachineConfigHash,
 		NetworkConfigHash:  compat.NetworkConfigHash,
+		BalloonConfigHash:  compat.BalloonConfigHash,
 		DiskPath:           compat.DiskPath,
 		VCPU:               compat.VCPU,
 		MemoryMiB:          compat.MemoryMiB,
@@ -92,15 +95,9 @@ func (s *Server) vmCheckpointCompatibility(service *db.Service, vm db.VMConfig) 
 		return vmCheckpointCompatibility{}, fmt.Errorf("VM checkpoint service is required")
 	}
 	memoryMiB := int(vm.MemoryBytes >> 20)
-	machine := firecrackerMachineConfig{VCPUCount: vm.CPUs, MemSizeMib: memoryMiB}
-	network := vmNetworkPlanFromDB(service.Name, vm.Networks).FirecrackerInterfaces()
-	cfg, ok, err := readVMCheckpointFirecrackerConfig(filepath.Join(serviceRunDirForRoot(s.serviceRootFromService(service)), "firecracker.json"))
+	machine, network, err := s.vmCheckpointFirecrackerCompatibility(service, vm, memoryMiB)
 	if err != nil {
 		return vmCheckpointCompatibility{}, err
-	}
-	if ok {
-		machine = cfg.MachineConfig
-		network = cfg.NetworkInterfaces
 	}
 	machineHash, err := canonicalJSONSHA256(machine)
 	if err != nil {
@@ -110,13 +107,14 @@ func (s *Server) vmCheckpointCompatibility(service *db.Service, vm db.VMConfig) 
 	if err != nil {
 		return vmCheckpointCompatibility{}, err
 	}
-	vmHash, err := canonicalJSONSHA256(vm)
+	balloonHash, vmHash, err := vmCheckpointConfigHashes(vm)
 	if err != nil {
 		return vmCheckpointCompatibility{}, err
 	}
 	compat := vmCheckpointCompatibility{
 		MachineConfigHash: machineHash,
 		NetworkConfigHash: networkHash,
+		BalloonConfigHash: balloonHash,
 		DiskPath:          strings.TrimSpace(vm.Disk.Path),
 		VCPU:              vm.CPUs,
 		MemoryMiB:         memoryMiB,
@@ -135,6 +133,38 @@ func (s *Server) vmCheckpointCompatibility(service *db.Service, vm db.VMConfig) 
 		compat.FirecrackerVersion = version
 	}
 	return compat, nil
+}
+
+func (s *Server) vmCheckpointFirecrackerCompatibility(service *db.Service, vm db.VMConfig, memoryMiB int) (firecrackerMachineConfig, []firecrackerNetworkInterface, error) {
+	machine := firecrackerMachineConfig{VCPUCount: vm.CPUs, MemSizeMib: memoryMiB}
+	network := vmNetworkPlanFromDB(service.Name, vm.Networks).FirecrackerInterfaces()
+	cfg, ok, err := readVMCheckpointFirecrackerConfig(filepath.Join(serviceRunDirForRoot(s.serviceRootFromService(service)), "firecracker.json"))
+	if err != nil {
+		return firecrackerMachineConfig{}, nil, err
+	}
+	if ok {
+		machine = cfg.MachineConfig
+		network = cfg.NetworkInterfaces
+	}
+	return machine, network, nil
+}
+
+func vmCheckpointConfigHashes(vm db.VMConfig) (string, string, error) {
+	balloon, err := effectiveExistingVMBalloonConfig(vm.MemoryBytes, vm.Balloon)
+	if err != nil {
+		return "", "", fmt.Errorf("VM balloon config: %w", err)
+	}
+	balloon.LastTargetBytes = 0
+	balloonHash, err := canonicalJSONSHA256(balloon)
+	if err != nil {
+		return "", "", err
+	}
+	vm.Balloon = balloon
+	vmHash, err := canonicalJSONSHA256(vm)
+	if err != nil {
+		return "", "", err
+	}
+	return balloonHash, vmHash, nil
 }
 
 func readVMCheckpointFirecrackerConfig(path string) (firecrackerConfig, bool, error) {
@@ -237,13 +267,36 @@ func firecrackerPathFromVMSystemdUnit(unit string) string {
 }
 
 func (m vmCheckpointMetadata) hasFullCompatibilityFields() bool {
-	return strings.TrimSpace(m.Mode) == recoveryModeFull &&
-		strings.TrimSpace(m.FirecrackerState) != "" &&
-		strings.TrimSpace(m.FirecrackerMemory) != "" &&
-		strings.TrimSpace(m.MachineConfigHash) != "" &&
-		strings.TrimSpace(m.NetworkConfigHash) != "" &&
-		strings.TrimSpace(m.DiskPath) != "" &&
-		m.VCPU > 0 &&
-		m.MemoryMiB > 0 &&
-		strings.TrimSpace(m.VMConfigHash) != ""
+	return len(m.missingFullCompatibilityFields()) == 0
+}
+
+type vmCheckpointCompatibilityField struct {
+	Name    string
+	Missing bool
+}
+
+func (m vmCheckpointMetadata) missingFullCompatibilityFields() []string {
+	fields := []vmCheckpointCompatibilityField{
+		{Name: "mode", Missing: strings.TrimSpace(m.Mode) != recoveryModeFull},
+		{Name: "firecrackerState", Missing: strings.TrimSpace(m.FirecrackerState) == ""},
+		{Name: "firecrackerMemory", Missing: strings.TrimSpace(m.FirecrackerMemory) == ""},
+		{Name: "machineConfigHash", Missing: strings.TrimSpace(m.MachineConfigHash) == ""},
+		{Name: "networkConfigHash", Missing: strings.TrimSpace(m.NetworkConfigHash) == ""},
+		{Name: "balloonConfigHash", Missing: strings.TrimSpace(m.BalloonConfigHash) == ""},
+		{Name: "diskPath", Missing: strings.TrimSpace(m.DiskPath) == ""},
+		{Name: "vcpu", Missing: m.VCPU <= 0},
+		{Name: "memoryMiB", Missing: m.MemoryMiB <= 0},
+		{Name: "vmConfigHash", Missing: strings.TrimSpace(m.VMConfigHash) == ""},
+	}
+	return missingVMCheckpointCompatibilityFields(fields)
+}
+
+func missingVMCheckpointCompatibilityFields(fields []vmCheckpointCompatibilityField) []string {
+	var missing []string
+	for _, field := range fields {
+		if field.Missing {
+			missing = append(missing, field.Name)
+		}
+	}
+	return missing
 }

@@ -344,6 +344,30 @@ func TestBridgeServiceArgsVMSet(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsVMSetBalloonFlags(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	service, host, bridged, ok := bridgeServiceArgs([]string{"vm", "set", "devbox", "--memory-min=1g", "--balloon=auto"}, remoteSpecs, groupSpecs, "")
+	if !ok || service != "devbox" || host != "" {
+		t.Fatalf("bridge ok=%v service=%q host=%q", ok, service, host)
+	}
+	if got := strings.Join(bridged, " "); got != "vm set --memory-min=1g --balloon=auto" {
+		t.Fatalf("bridged = %q", got)
+	}
+}
+
+func TestBridgeServiceArgsSkipsVMMemoryServiceSelection(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	service, host, bridged, ok := bridgeServiceArgs([]string{"vm", "memory", "set", "--policy=balanced"}, remoteSpecs, groupSpecs, "")
+	if !ok || service != "" || host != "" {
+		t.Fatalf("bridge ok=%v service=%q host=%q", ok, service, host)
+	}
+	if got := strings.Join(bridged, " "); got != "vm memory set --policy=balanced" {
+		t.Fatalf("bridged = %q", got)
+	}
+}
+
 func TestBridgeServiceArgsServiceSetSnapshotFlags(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

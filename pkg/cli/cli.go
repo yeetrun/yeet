@@ -40,6 +40,8 @@ type GroupInfo struct {
 type RunFlags struct {
 	CPUs             int
 	Memory           string
+	MemoryMin        string
+	Balloon          string
 	Disk             string
 	Net              string
 	TsVer            string
@@ -85,6 +87,8 @@ type ServiceSetFlags struct {
 type VMSetFlags struct {
 	CPUs          int
 	Memory        string
+	MemoryMin     string
+	Balloon       string
 	Disk          string
 	Net           string
 	NetworkChange bool
@@ -95,6 +99,11 @@ type VMSetFlags struct {
 
 type VMKernelFlags struct {
 	Restart bool
+}
+
+type VMMemoryFlags struct {
+	Policy string
+	Format string
 }
 
 type SnapshotsListFlags struct {
@@ -278,6 +287,8 @@ type dockerPushFlagsParsed struct {
 type runFlagsParsed struct {
 	CPUs             int      `flag:"vcpus"`
 	Memory           string   `flag:"memory"`
+	MemoryMin        string   `flag:"memory-min"`
+	Balloon          string   `flag:"balloon"`
 	Disk             string   `flag:"disk"`
 	Net              string   `flag:"net"`
 	TsVer            string   `flag:"ts-ver"`
@@ -330,6 +341,8 @@ type serviceGenerationsFlagsParsed struct {
 type vmSetFlagsParsed struct {
 	CPUs          int    `flag:"vcpus"`
 	Memory        string `flag:"memory"`
+	MemoryMin     string `flag:"memory-min"`
+	Balloon       string `flag:"balloon"`
 	Disk          string `flag:"disk"`
 	Net           string `flag:"net"`
 	MacvlanMac    string `flag:"macvlan-mac"`
@@ -339,6 +352,12 @@ type vmSetFlagsParsed struct {
 
 type vmKernelFlagsParsed struct {
 	Restart bool `flag:"restart" help:"Restart the VM after syncing the selected kernel"`
+}
+
+type vmMemoryFlagsParsed struct {
+	Policy string `flag:"policy" help:"Host VM memory policy: safe, balanced, aggressive"`
+	Format string `flag:"format" help:"Output format: table, json, json-pretty"`
+	Output string `flag:"output" help:"Alias for --format"`
 }
 
 type serviceSyncFlagsParsed struct {
@@ -587,13 +606,25 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set VM resources and networking",
-				Usage:       "vm set <vm> [--vcpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
+				Usage:       "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
 				Examples: []string{
 					"yeet vm set <vm> --vcpus=8 --memory=8g --disk=128g",
+					"yeet vm set <vm> --memory-min=1g --balloon=auto",
 					"yeet vm set <vm> --net=lan",
 					"yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4",
 				},
 				ArgsSchema: ServiceArgs{},
+			},
+			"memory": {
+				Name:        "memory",
+				Description: "Show or set host VM memory policy",
+				Usage:       "vm memory [set --policy=safe|balanced|aggressive] [--format=table|json|json-pretty]",
+				Examples: []string{
+					"yeet vm memory",
+					"yeet vm memory set --policy=balanced",
+					"yeet vm memory --format=json",
+				},
+				FlagsSchema: vmMemoryFlagsParsed{},
 			},
 			"images": {
 				Name:        "images",
@@ -785,6 +816,7 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 	"vm": {
 		"console": {},
 		"set":     flagSpecsFromStruct(vmSetFlagsParsed{}),
+		"memory":  flagSpecsFromStruct(vmMemoryFlagsParsed{}),
 		"images":  flagSpecsFromStruct(vmImagesFlagsParsed{}),
 		"kernel":  flagSpecsFromStruct(vmKernelFlagsParsed{}),
 	},
@@ -907,32 +939,15 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 	if err != nil {
 		return RunFlags{}, nil, err
 	}
-	if hasMissingSnapshotMode(parseArgs) {
-		return RunFlags{}, nil, fmt.Errorf("--snapshots must be on, off, or inherit")
-	}
-	if hasFlagWithoutValue(parseArgs, "--net") {
-		return RunFlags{}, nil, fmt.Errorf("--net must not be empty")
-	}
-	if err := validateNetworkModesNotEmpty(parsed.Flags.Net); err != nil {
-		return RunFlags{}, nil, err
-	}
-	if err := validateMacvlanVLAN(parsed.Flags.MacvlanVlan); err != nil {
-		return RunFlags{}, nil, err
-	}
-	if err := validateMacvlanLANRequirement(parsed.Flags.Net, parsed.Flags.MacvlanParent, parsed.Flags.MacvlanVlan, parsed.Flags.MacvlanMac); err != nil {
-		return RunFlags{}, nil, err
-	}
-	snapshotMode, err := normalizeSnapshotMode(parsed.Flags.Snapshots)
-	if err != nil {
-		return RunFlags{}, nil, err
-	}
-	imagePolicy, err := normalizeVMImagePolicy(parsed.Flags.ImagePolicy)
+	normalized, err := normalizeRunFlagValues(parseArgs, parsed.Flags)
 	if err != nil {
 		return RunFlags{}, nil, err
 	}
 	flags := RunFlags{
 		CPUs:             parsed.Flags.CPUs,
 		Memory:           strings.TrimSpace(parsed.Flags.Memory),
+		MemoryMin:        strings.TrimSpace(parsed.Flags.MemoryMin),
+		Balloon:          normalized.Balloon,
 		Disk:             strings.TrimSpace(parsed.Flags.Disk),
 		Net:              parsed.Flags.Net,
 		TsVer:            parsed.Flags.TsVer,
@@ -946,13 +961,13 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 		Pull:             parsed.Flags.Pull,
 		Force:            parsed.Flags.Force,
 		Web:              parsed.Flags.Web,
-		ImagePolicy:      imagePolicy,
+		ImagePolicy:      normalized.ImagePolicy,
 		Publish:          orderedFlagValues(parseArgs, "--publish", "-p"),
 		PublishReset:     parsed.Flags.PublishReset,
 		EnvFile:          parsed.Flags.EnvFile,
 		ServiceRoot:      parsed.Flags.ServiceRoot,
 		ZFS:              parsed.Flags.ZFS,
-		Snapshots:        snapshotMode,
+		Snapshots:        normalized.SnapshotMode,
 		SnapshotKeepLast: strings.TrimSpace(parsed.Flags.SnapshotKeepLast),
 		SnapshotMaxAge:   strings.TrimSpace(parsed.Flags.SnapshotMaxAge),
 		SnapshotRequired: strings.TrimSpace(parsed.Flags.SnapshotRequired),
@@ -961,6 +976,47 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
+}
+
+type normalizedRunFlagValues struct {
+	SnapshotMode string
+	ImagePolicy  string
+	Balloon      string
+}
+
+func normalizeRunFlagValues(parseArgs []string, flags runFlagsParsed) (normalizedRunFlagValues, error) {
+	if hasMissingSnapshotMode(parseArgs) {
+		return normalizedRunFlagValues{}, fmt.Errorf("--snapshots must be on, off, or inherit")
+	}
+	if hasFlagWithoutValue(parseArgs, "--net") {
+		return normalizedRunFlagValues{}, fmt.Errorf("--net must not be empty")
+	}
+	if err := validateNetworkModesNotEmpty(flags.Net); err != nil {
+		return normalizedRunFlagValues{}, err
+	}
+	if err := validateMacvlanVLAN(flags.MacvlanVlan); err != nil {
+		return normalizedRunFlagValues{}, err
+	}
+	if err := validateMacvlanLANRequirement(flags.Net, flags.MacvlanParent, flags.MacvlanVlan, flags.MacvlanMac); err != nil {
+		return normalizedRunFlagValues{}, err
+	}
+	snapshotMode, err := normalizeSnapshotMode(flags.Snapshots)
+	if err != nil {
+		return normalizedRunFlagValues{}, err
+	}
+	imagePolicy, err := normalizeVMImagePolicy(flags.ImagePolicy)
+	if err != nil {
+		return normalizedRunFlagValues{}, err
+	}
+	balloon, err := normalizeVMBalloonMode(flags.Balloon)
+	if err != nil {
+		return normalizedRunFlagValues{}, err
+	}
+	return normalizedRunFlagValues{
+		SnapshotMode: snapshotMode,
+		ImagePolicy:  imagePolicy,
+		Balloon:      balloon,
+	}, nil
 }
 
 func ParseServiceSet(args []string) (ServiceSetFlags, []string, error) {
@@ -988,7 +1044,7 @@ func rejectServiceSetVMFlags(args []string) error {
 		}
 		name, _ := splitInlineFlagValue(arg)
 		switch name {
-		case "--cpus", "--vcpus", "--memory", "--disk", "--net", "--macvlan-mac", "--macvlan-vlan", "--macvlan-parent":
+		case "--cpus", "--vcpus", "--memory", "--memory-min", "--balloon", "--disk", "--net", "--macvlan-mac", "--macvlan-vlan", "--macvlan-parent":
 			return fmt.Errorf("unknown flag %s; use `yeet vm set` for VM resources and networking", name)
 		}
 	}
@@ -1093,9 +1149,15 @@ func ParseVMSet(args []string) (VMSetFlags, []string, error) {
 	if err != nil {
 		return VMSetFlags{}, nil, err
 	}
+	balloon, err := normalizeVMBalloonMode(parsed.Flags.Balloon)
+	if err != nil {
+		return VMSetFlags{}, nil, err
+	}
 	flags := VMSetFlags{
 		CPUs:          parsed.Flags.CPUs,
 		Memory:        strings.TrimSpace(parsed.Flags.Memory),
+		MemoryMin:     strings.TrimSpace(parsed.Flags.MemoryMin),
+		Balloon:       balloon,
 		Disk:          strings.TrimSpace(parsed.Flags.Disk),
 		Net:           strings.TrimSpace(parsed.Flags.Net),
 		NetworkChange: hasNamedFlag(parseArgs, "--net"),
@@ -1111,6 +1173,28 @@ func ParseVMSet(args []string) (VMSetFlags, []string, error) {
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
+}
+
+func ParseVMMemory(args []string) (VMMemoryFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[vmMemoryFlagsParsed](parseArgs)
+	if err != nil {
+		return VMMemoryFlags{}, nil, err
+	}
+	policy, err := normalizeVMMemoryPolicy(parsed.Flags.Policy)
+	if err != nil {
+		return VMMemoryFlags{}, nil, err
+	}
+	formatRaw := strings.TrimSpace(parsed.Flags.Output)
+	if strings.TrimSpace(parsed.Flags.Format) != "" {
+		formatRaw = parsed.Flags.Format
+	}
+	format, err := normalizeOutputFormat("--format", formatRaw)
+	if err != nil {
+		return VMMemoryFlags{}, nil, err
+	}
+	argsOut := append(parsed.Args, extraArgs...)
+	return VMMemoryFlags{Policy: policy, Format: format}, argsOut, nil
 }
 
 func ParseVMKernel(args []string) (VMKernelFlags, []string, error) {
@@ -1202,11 +1286,37 @@ func networkModeSet(raw string, want string) bool {
 func hasVMSetChange(flags VMSetFlags) bool {
 	return flags.CPUs != 0 ||
 		strings.TrimSpace(flags.Memory) != "" ||
+		strings.TrimSpace(flags.MemoryMin) != "" ||
+		strings.TrimSpace(flags.Balloon) != "" ||
 		strings.TrimSpace(flags.Disk) != "" ||
 		flags.NetworkChange ||
 		strings.TrimSpace(flags.MacvlanMac) != "" ||
 		flags.MacvlanVlan != 0 ||
 		strings.TrimSpace(flags.MacvlanParent) != ""
+}
+
+func normalizeVMBalloonMode(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "":
+		return "", nil
+	case "auto", "off":
+		return value, nil
+	default:
+		return "", fmt.Errorf("--balloon must use auto or off")
+	}
+}
+
+func normalizeVMMemoryPolicy(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "":
+		return "", nil
+	case "safe", "balanced", "aggressive":
+		return value, nil
+	default:
+		return "", fmt.Errorf("--policy must be safe, balanced, or aggressive")
+	}
 }
 
 func normalizeSnapshotMode(value string) (string, error) {

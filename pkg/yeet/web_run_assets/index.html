@@ -150,6 +150,24 @@
                 <input id="vmDisk" name="vmDisk" autocomplete="off" spellcheck="false">
                 <span class="field-error" id="vmDiskError"></span>
               </label>
+              <details class="advanced-block">
+                <summary>Memory balloon</summary>
+                <div class="split-fields">
+                  <label for="vmMemoryMin" data-field="vm.memoryMin">
+                    <span>Memory floor</span>
+                    <input id="vmMemoryMin" name="vmMemoryMin" autocomplete="off" spellcheck="false">
+                    <span class="field-error" id="vmMemoryMinError"></span>
+                  </label>
+                  <label for="vmBalloon" data-field="vm.balloon">
+                    <span>Balloon</span>
+                    <select id="vmBalloon" name="vmBalloon">
+                      <option value="auto">Auto</option>
+                      <option value="off">Off</option>
+                    </select>
+                    <span class="field-error" id="vmBalloonError"></span>
+                  </label>
+                </div>
+              </details>
             </div>
 
             <div class="settings-block" id="storageOptions">

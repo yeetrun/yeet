@@ -864,6 +864,24 @@ func TestVMSetFlagsUpdateStoredRunArgs(t *testing.T) {
 	}
 }
 
+func TestVMSetConfigRewritesBalloonRunFlags(t *testing.T) {
+	entry := ServiceEntry{
+		Name: "devbox",
+		Type: serviceTypeVM,
+		Args: []string{"--memory=4g", "--memory-min", "512m", "--balloon", "off", "vm://ubuntu/26.04"},
+	}
+	applyVMSetConfigFlags(&entry, cli.VMSetFlags{MemoryMin: "1g", Balloon: "auto"})
+	got := strings.Join(entry.Args, " ")
+	for _, want := range []string{"--memory=4g", "--memory-min=1g", "--balloon=auto", "vm://ubuntu/26.04"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("args = %q, missing %q", got, want)
+		}
+	}
+	if strings.Contains(got, "--memory-min=512m") || strings.Contains(got, "--balloon=off") {
+		t.Fatalf("args = %q, old flags remain", got)
+	}
+}
+
 func TestVMSetFlagsDoNotUpdateNonVMRunArgs(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)

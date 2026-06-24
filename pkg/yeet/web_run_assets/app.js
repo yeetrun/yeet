@@ -34,6 +34,8 @@ const state = {
   vmShapeManual: {
     cpus: false,
     memory: false,
+    memoryMin: false,
+    balloon: false,
     disk: false,
   },
   pickedZFSRoot: null,
@@ -255,6 +257,8 @@ function buildDraft() {
     vm: vmPayload ? {
       cpus: Number.parseInt($("vmCPUs").value, 10) || 0,
       memory: $("vmMemory").value.trim(),
+      memoryMin: $("vmMemoryMin").value.trim(),
+      balloon: $("vmBalloon").value,
       disk: $("vmDisk").value.trim(),
     } : {},
     network: cronPayload ? {} : {
@@ -343,6 +347,8 @@ function updatePreview(draft) {
   if (storage.zfs) parts.push("--zfs");
   if (draft.vm?.cpus) parts.push(`--vcpus=${draft.vm.cpus}`);
   if (draft.vm?.memory) parts.push(`--memory=${shell(draft.vm.memory)}`);
+  if (draft.vm?.memoryMin) parts.push(`--memory-min=${shell(draft.vm.memoryMin)}`);
+  if (draft.vm?.balloon && draft.vm.balloon !== "auto") parts.push(`--balloon=${shell(draft.vm.balloon)}`);
   if (draft.vm?.disk) parts.push(`--disk=${shell(draft.vm.disk)}`);
   if (snapshots.mode) parts.push(`--snapshots=${shell(snapshots.mode)}`);
   if (snapshots.keepLast) parts.push(`--snapshot-keep-last=${snapshots.keepLast}`);
@@ -1461,6 +1467,8 @@ const validationFieldIDs = {
   "network.tsTags": "tsTags",
   "vm.cpus": "vmCPUs",
   "vm.memory": "vmMemory",
+  "vm.memoryMin": "vmMemoryMin",
+  "vm.balloon": "vmBalloon",
   "vm.disk": "vmDisk",
   "snapshots.mode": "snapshots",
   "snapshots.keepLast": "snapshotKeepLast",
@@ -1612,7 +1620,7 @@ $("serviceRoot").addEventListener("input", () => {
 });
 $("serviceRoot").addEventListener("focus", showZFSRootPicker);
 $("serviceRoot").addEventListener("click", showZFSRootPicker);
-for (const [id, field] of [["vmCPUs", "cpus"], ["vmMemory", "memory"], ["vmDisk", "disk"]]) {
+for (const [id, field] of [["vmCPUs", "cpus"], ["vmMemory", "memory"], ["vmMemoryMin", "memoryMin"], ["vmBalloon", "balloon"], ["vmDisk", "disk"]]) {
   $(id).addEventListener("input", () => {
     state.vmShapeManual[field] = true;
   });
