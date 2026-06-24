@@ -53,9 +53,11 @@ type RunDraftNetwork struct {
 }
 
 type RunDraftVM struct {
-	CPUs   int    `json:"cpus,omitempty"`
-	Memory string `json:"memory,omitempty"`
-	Disk   string `json:"disk,omitempty"`
+	CPUs      int    `json:"cpus,omitempty"`
+	Memory    string `json:"memory,omitempty"`
+	MemoryMin string `json:"memoryMin,omitempty"`
+	Balloon   string `json:"balloon,omitempty"`
+	Disk      string `json:"disk,omitempty"`
 }
 
 type RunDraftStorage struct {
@@ -218,6 +220,8 @@ func appendRunDraftVMArgs(args []string, vm RunDraftVM) []string {
 		args = append(args, fmt.Sprintf("--vcpus=%d", vm.CPUs))
 	}
 	args = appendRunDraftStringFlag(args, "--memory", vm.Memory)
+	args = appendRunDraftStringFlag(args, "--memory-min", vm.MemoryMin)
+	args = appendRunDraftStringFlag(args, "--balloon", vm.Balloon)
 	return appendRunDraftStringFlag(args, "--disk", vm.Disk)
 }
 
@@ -240,9 +244,11 @@ func appendRunDraftRestartFlag(args []string, restart *bool) []string {
 
 func runDraftVMFromRunFlags(flags cli.RunFlags) RunDraftVM {
 	return RunDraftVM{
-		CPUs:   flags.CPUs,
-		Memory: strings.TrimSpace(flags.Memory),
-		Disk:   strings.TrimSpace(flags.Disk),
+		CPUs:      flags.CPUs,
+		Memory:    strings.TrimSpace(flags.Memory),
+		MemoryMin: strings.TrimSpace(flags.MemoryMin),
+		Balloon:   strings.TrimSpace(flags.Balloon),
+		Disk:      strings.TrimSpace(flags.Disk),
 	}
 }
 

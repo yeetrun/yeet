@@ -121,3 +121,37 @@ func TestRenderFirecrackerConfigIncludesVsock(t *testing.T) {
 		}
 	}
 }
+
+func TestRenderFirecrackerConfigIncludesBalloon(t *testing.T) {
+	raw, err := renderFirecrackerConfig(firecrackerConfig{
+		BootSource: firecrackerBootSource{
+			KernelImagePath: "/srv/images/vmlinux",
+			BootArgs:        "console=ttyS0",
+		},
+		Drives: []firecrackerDrive{{
+			DriveID:      "rootfs",
+			PathOnHost:   "/srv/vms/devbox/rootfs.raw",
+			IsRootDevice: true,
+		}},
+		MachineConfig: firecrackerMachineConfig{VCPUCount: 2, MemSizeMib: 2048},
+		Balloon: &firecrackerBalloon{
+			AmountMib:             0,
+			DeflateOnOOM:          true,
+			StatsPollingIntervalS: 5,
+		},
+	})
+	if err != nil {
+		t.Fatalf("renderFirecrackerConfig: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		`"balloon"`,
+		`"amount_mib": 0`,
+		`"deflate_on_oom": true`,
+		`"stats_polling_interval_s": 5`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config missing %q:\n%s", want, text)
+		}
+	}
+}

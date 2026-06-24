@@ -224,6 +224,19 @@ func TestParseRunVMFlags(t *testing.T) {
 	}
 }
 
+func TestParseRunFlagsVMBalloon(t *testing.T) {
+	flags, rest, err := ParseRun([]string{"devbox", "vm://ubuntu/26.04", "--memory=4g", "--memory-min=1g", "--balloon=auto"})
+	if err != nil {
+		t.Fatalf("ParseRun: %v", err)
+	}
+	if strings.Join(rest, " ") != "devbox vm://ubuntu/26.04" {
+		t.Fatalf("rest = %#v, want service payload", rest)
+	}
+	if flags.Memory != "4g" || flags.MemoryMin != "1g" || flags.Balloon != "auto" {
+		t.Fatalf("flags = %#v, want memory balloon fields", flags)
+	}
+}
+
 func TestParseRunRejectsEmptyNetFlag(t *testing.T) {
 	tests := [][]string{
 		{"--net=", "vm://ubuntu/26.04"},
@@ -784,6 +797,56 @@ func TestParseVMSetFlags(t *testing.T) {
 	}
 }
 
+func TestParseVMSetBalloonFlags(t *testing.T) {
+	flags, rest, err := ParseVMSet([]string{"--memory-min=2g", "--balloon=off"})
+	if err != nil {
+		t.Fatalf("ParseVMSet: %v", err)
+	}
+	if len(rest) != 0 {
+		t.Fatalf("rest = %#v, want none", rest)
+	}
+	if flags.MemoryMin != "2g" || flags.Balloon != "off" {
+		t.Fatalf("flags = %#v, want balloon fields", flags)
+	}
+}
+
+func TestParseVMSetRejectsInvalidBalloonMode(t *testing.T) {
+	_, _, err := ParseVMSet([]string{"--balloon=maybe"})
+	if err == nil || !strings.Contains(err.Error(), "use auto or off") {
+		t.Fatalf("error = %v, want invalid balloon mode", err)
+	}
+}
+
+func TestParseVMMemoryCommand(t *testing.T) {
+	flags, rest, err := ParseVMMemory([]string{"set", "--policy=balanced"})
+	if err != nil {
+		t.Fatalf("ParseVMMemory: %v", err)
+	}
+	if flags.Policy != "balanced" || flags.Format != "table" || strings.Join(rest, " ") != "set" {
+		t.Fatalf("flags=%#v rest=%#v, want set balanced", flags, rest)
+	}
+
+	flags, rest, err = ParseVMMemory([]string{"--output=json", "set", "--policy=safe"})
+	if err != nil {
+		t.Fatalf("ParseVMMemory output alias: %v", err)
+	}
+	if flags.Policy != "safe" || flags.Format != "json" || strings.Join(rest, " ") != "set" {
+		t.Fatalf("flags=%#v rest=%#v, want set safe json", flags, rest)
+	}
+
+	flags, rest, err = ParseVMMemory([]string{"--output=json", "--format=json-pretty", "set", "--policy=aggressive"})
+	if err != nil {
+		t.Fatalf("ParseVMMemory format wins: %v", err)
+	}
+	if flags.Policy != "aggressive" || flags.Format != "json-pretty" || strings.Join(rest, " ") != "set" {
+		t.Fatalf("flags=%#v rest=%#v, want format to win over output", flags, rest)
+	}
+
+	if _, _, err := ParseVMMemory([]string{"set", "--policy=reckless"}); err == nil || !strings.Contains(err.Error(), "safe, balanced, or aggressive") {
+		t.Fatalf("ParseVMMemory invalid policy error = %v, want policy error", err)
+	}
+}
+
 func TestParseServiceSetSnapshotFlags(t *testing.T) {
 	flags, args, err := ParseServiceSet([]string{"svc", "--snapshots=off", "--snapshot-keep-last=3", "--snapshot-max-age=72h", "--snapshot-required=false", "--snapshot-events=run"})
 	if err != nil {
@@ -1130,8 +1193,11 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if !reflect.DeepEqual(reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples) {
 		t.Fatalf("service set examples = %#v, want %#v", reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples)
 	}
-	if reg.Groups["vm"].Commands["set"].Info.Usage != "vm set <vm> [--vcpus=N] [--memory=SIZE] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
+	if reg.Groups["vm"].Commands["set"].Info.Usage != "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
 		t.Fatalf("vm set usage = %q", reg.Groups["vm"].Commands["set"].Info.Usage)
+	}
+	if reg.Groups["vm"].Commands["memory"].Info.Usage != "vm memory [set --policy=safe|balanced|aggressive] [--format=table|json|json-pretty]" {
+		t.Fatalf("vm memory usage = %q", reg.Groups["vm"].Commands["memory"].Info.Usage)
 	}
 	if _, ok := reg.Groups["vm"].Commands["snapshot"]; ok {
 		t.Fatal("vm snapshot command should not be registered; use snapshots create")
@@ -1180,6 +1246,12 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	}
 	if !flags["run"]["--image-policy"].ConsumesValue {
 		t.Fatal("run --image-policy should consume a value")
+	}
+	if !flags["run"]["--memory-min"].ConsumesValue {
+		t.Fatal("run --memory-min should consume a value")
+	}
+	if !flags["run"]["--balloon"].ConsumesValue {
+		t.Fatal("run --balloon should consume a value")
 	}
 	spec, ok := flags["run"]["--web"]
 	if !ok {
@@ -1356,7 +1428,7 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	if _, ok := RemoteGroupFlagSpecs()["vm"]["set"]; !ok {
 		t.Fatal("vm set flag spec missing")
 	}
-	for _, flag := range []string{"--vcpus", "--memory", "--disk", "--net", "--macvlan-parent", "--macvlan-vlan", "--macvlan-mac"} {
+	for _, flag := range []string{"--vcpus", "--memory", "--memory-min", "--balloon", "--disk", "--net", "--macvlan-parent", "--macvlan-vlan", "--macvlan-mac"} {
 		if !RemoteGroupFlagSpecs()["vm"]["set"][flag].ConsumesValue {
 			t.Fatalf("vm set %s should consume a value", flag)
 		}
@@ -1393,6 +1465,17 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	}
 	if RemoteGroupFlagSpecs()["vm"]["kernel"]["--restart"].ConsumesValue {
 		t.Fatal("vm kernel --restart should not consume a value")
+	}
+	if _, ok := group.Commands["memory"]; !ok {
+		t.Fatal("vm memory command missing")
+	}
+	if _, ok := RemoteGroupFlagSpecs()["vm"]["memory"]; !ok {
+		t.Fatal("vm memory flag spec missing")
+	}
+	for _, flag := range []string{"--policy", "--format", "--output"} {
+		if !RemoteGroupFlagSpecs()["vm"]["memory"][flag].ConsumesValue {
+			t.Fatalf("vm memory %s should consume a value", flag)
+		}
 	}
 	if !containsString(group.Commands["kernel"].Examples, "yeet vm kernel sync <svc> --restart") {
 		t.Fatalf("vm kernel examples = %#v, want sync restart example", group.Commands["kernel"].Examples)

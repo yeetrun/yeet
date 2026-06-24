@@ -197,6 +197,104 @@ func TestVMServiceClonePreservesVMConfig(t *testing.T) {
 	}
 }
 
+func TestDBRoundTripsVMHostAndBalloonConfig(t *testing.T) {
+	data := &Data{
+		DataVersion: CurrentDataVersion,
+		VMHost: &VMHostConfig{
+			MemoryPolicy: "balanced",
+		},
+		Services: map[string]*Service{
+			"devbox": {
+				Name:        "devbox",
+				ServiceType: ServiceTypeVM,
+				VM: &VMConfig{
+					Runtime:     "firecracker",
+					CPUs:        2,
+					MemoryBytes: 4 << 30,
+					Balloon: VMBalloonConfig{
+						Mode:                 "auto",
+						MinBytes:             1 << 30,
+						StatsIntervalSeconds: 5,
+						LastTargetBytes:      512 << 20,
+					},
+				},
+			},
+		},
+	}
+
+	raw, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var got Data
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.VMHost == nil || got.VMHost.MemoryPolicy != "balanced" {
+		t.Fatalf("VMHost = %#v, want balanced policy", got.VMHost)
+	}
+	vm := got.Services["devbox"].VM
+	if vm.Balloon.Mode != "auto" || vm.Balloon.MinBytes != 1<<30 || vm.Balloon.StatsIntervalSeconds != 5 || vm.Balloon.LastTargetBytes != 512<<20 {
+		t.Fatalf("Balloon = %#v, want persisted config", vm.Balloon)
+	}
+}
+
+func TestVMHostAndBalloonCloneAndView(t *testing.T) {
+	data := &Data{
+		DataVersion: CurrentDataVersion,
+		VMHost: &VMHostConfig{
+			MemoryPolicy: "balanced",
+		},
+		Services: map[string]*Service{
+			"devbox": {
+				Name:        "devbox",
+				ServiceType: ServiceTypeVM,
+				VM: &VMConfig{
+					Runtime:     "firecracker",
+					MemoryBytes: 4 << 30,
+					Balloon: VMBalloonConfig{
+						Mode:                 "auto",
+						MinBytes:             1 << 30,
+						StatsIntervalSeconds: 5,
+						LastTargetBytes:      512 << 20,
+					},
+				},
+			},
+		},
+	}
+
+	clone := data.Clone()
+	requireDistinctPtr(t, "vm host", clone.VMHost, data.VMHost)
+	requireDistinctPtr(t, "vm service", clone.Services["devbox"], data.Services["devbox"])
+	requireDistinctPtr(t, "vm config", clone.Services["devbox"].VM, data.Services["devbox"].VM)
+	if got := clone.VMHost.MemoryPolicy; got != "balanced" {
+		t.Fatalf("clone VMHost MemoryPolicy = %q, want balanced", got)
+	}
+	if got := clone.Services["devbox"].VM.Balloon; got != data.Services["devbox"].VM.Balloon {
+		t.Fatalf("clone VM Balloon = %#v, want %#v", got, data.Services["devbox"].VM.Balloon)
+	}
+	clone.VMHost.MemoryPolicy = "aggressive"
+	clone.Services["devbox"].VM.Balloon.MinBytes = 2 << 30
+	if got := data.VMHost.MemoryPolicy; got != "balanced" {
+		t.Fatalf("source VMHost mutated through clone: %q", got)
+	}
+	if got := data.Services["devbox"].VM.Balloon.MinBytes; got != 1<<30 {
+		t.Fatalf("source VM Balloon mutated through clone: %d", got)
+	}
+
+	view := data.View()
+	if got := view.VMHost().MemoryPolicy(); got != "balanced" {
+		t.Fatalf("view VMHost MemoryPolicy = %q, want balanced", got)
+	}
+	svc, ok := view.Services().GetOk("devbox")
+	if !ok {
+		t.Fatal("view missing VM service")
+	}
+	if got := svc.VM().Balloon(); got != data.Services["devbox"].VM.Balloon {
+		t.Fatalf("view VM Balloon = %#v, want %#v", got, data.Services["devbox"].VM.Balloon)
+	}
+}
+
 func TestServiceRootCloneAndView(t *testing.T) {
 	data := &Data{
 		DataVersion: CurrentDataVersion,
@@ -931,6 +1029,80 @@ func TestMigrateAddsVMServiceConfigVersion(t *testing.T) {
 	}
 	if got := backup.Services["svc"].ServiceRoot; got != "/srv/apps/svc" {
 		t.Fatalf("backup ServiceRoot = %q, want /srv/apps/svc", got)
+	}
+}
+
+func TestStoreGetMigratesVersion10VMWithoutBalloonOrHost(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	if err := os.WriteFile(path, []byte(`{
+  "DataVersion": 10,
+  "Services": {
+    "devbox": {
+      "Name": "devbox",
+      "ServiceType": "vm",
+      "VM": {
+        "Runtime": "firecracker",
+        "CPUs": 2,
+        "MemoryBytes": 4294967296,
+        "SetupState": "ready"
+      }
+    }
+  }
+}
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore(path, filepath.Join(root, "services"))
+	got, err := store.Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DataVersion() != CurrentDataVersion {
+		t.Fatalf("DataVersion = %d, want %d", got.DataVersion(), CurrentDataVersion)
+	}
+	if got.VMHost().Valid() {
+		t.Fatalf("VMHost valid = true, want false")
+	}
+	sv, ok := got.Services().GetOk("devbox")
+	if !ok {
+		t.Fatal("missing migrated VM service")
+	}
+	if got := sv.VM().SetupState(); got != "ready" {
+		t.Fatalf("migrated VM SetupState = %q, want ready", got)
+	}
+	if got := sv.VM().Balloon(); got != (VMBalloonConfig{}) {
+		t.Fatalf("migrated VM Balloon = %#v, want zero value", got)
+	}
+
+	onDisk := mustReadData(t, path)
+	if onDisk.DataVersion != CurrentDataVersion {
+		t.Fatalf("on-disk DataVersion = %d, want %d", onDisk.DataVersion, CurrentDataVersion)
+	}
+	if onDisk.VMHost != nil {
+		t.Fatalf("on-disk VMHost = %#v, want nil", onDisk.VMHost)
+	}
+	if got := onDisk.Services["devbox"].VM.Balloon; got != (VMBalloonConfig{}) {
+		t.Fatalf("on-disk VM Balloon = %#v, want zero value", got)
+	}
+
+	backups, err := filepath.Glob(path + ".v10.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("migration backups = %v, want exactly one v10 backup", backups)
+	}
+	backup := mustReadData(t, backups[0])
+	if backup.DataVersion != 10 {
+		t.Fatalf("backup DataVersion = %d, want 10", backup.DataVersion)
+	}
+	if backup.VMHost != nil {
+		t.Fatalf("backup VMHost = %#v, want nil", backup.VMHost)
+	}
+	if got := backup.Services["devbox"].VM.Balloon; got != (VMBalloonConfig{}) {
+		t.Fatalf("backup VM Balloon = %#v, want zero value", got)
 	}
 }
 

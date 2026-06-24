@@ -89,6 +89,7 @@ func buildGroupHandlers() map[string]yargs.Group {
 			Commands: map[string]yargs.SubcommandHandler{
 				"console": handleVMGroup,
 				"set":     handleVMGroup,
+				"memory":  handleVMGroup,
 				"images":  handleVMGroup,
 				"kernel":  handleVMGroup,
 			},

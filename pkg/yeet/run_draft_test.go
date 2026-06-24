@@ -6,6 +6,7 @@ package yeet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -267,6 +268,56 @@ func TestRunDraftBuildsVMRunArgs(t *testing.T) {
 	}
 }
 
+func TestRunDraftIncludesVMBalloonFlags(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	serviceOverride = "devbox"
+	hostOverride = "host-a"
+	hostOverrideSet = true
+
+	loc := &projectConfigLocation{Dir: t.TempDir(), Config: &ProjectConfig{Version: projectConfigVersion}}
+	draft, err := runDraftFromCLI([]string{"vm://ubuntu/26.04", "--memory=4g", "--memory-min=1g", "--balloon=auto"}, loc, "host-a")
+	if err != nil {
+		t.Fatalf("runDraftFromCLI: %v", err)
+	}
+	if draft.VM.Memory != "4g" || draft.VM.MemoryMin != "1g" || draft.VM.Balloon != "auto" {
+		t.Fatalf("draft VM = %#v, want balloon settings", draft.VM)
+	}
+	args := draft.runArgs()
+	for _, want := range []string{"--memory=4g", "--memory-min=1g", "--balloon=auto"} {
+		if !runDraftTestContainsString(args, want) {
+			t.Fatalf("runArgs missing %q: %#v", want, args)
+		}
+	}
+}
+
+func TestRunDraftRoundTripsVMBalloonJSON(t *testing.T) {
+	draft := RunDraft{
+		Service:     "devbox",
+		Host:        "host-a",
+		Payload:     "vm://ubuntu/26.04",
+		PayloadKind: serviceTypeVM,
+		VM: RunDraftVM{
+			Memory:    "4g",
+			MemoryMin: "1g",
+			Balloon:   "auto",
+		},
+	}
+	raw, err := json.Marshal(draft)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"memoryMin":"1g"`) || !strings.Contains(string(raw), `"balloon":"auto"`) {
+		t.Fatalf("json = %s, want memoryMin and balloon fields", raw)
+	}
+	var got RunDraft
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got.VM.MemoryMin != "1g" || got.VM.Balloon != "auto" {
+		t.Fatalf("VM = %#v, want balloon fields round-tripped", got.VM)
+	}
+}
+
 func TestRunDraftFromCLIMatchesParseSvcRunParity(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -418,6 +469,46 @@ func TestExecuteRunDraftRejectsInvalidDraftBeforeRemote(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "invalid run draft") || !strings.Contains(err.Error(), "service is required") {
 		t.Fatalf("executeRunDraft error = %v, want invalid service validation error", err)
+	}
+}
+
+func TestValidateRunDraftRejectsVMBalloonForNonVM(t *testing.T) {
+	draft := RunDraft{
+		Service:     "app",
+		Host:        "host-a",
+		Payload:     "nginx:latest",
+		PayloadKind: "remote-image",
+		VM: RunDraftVM{
+			MemoryMin: "1g",
+			Balloon:   "auto",
+		},
+	}
+	_, result := validateRunDraftLocal(draft, t.TempDir())
+	if result.OK {
+		t.Fatal("result.OK = true, want invalid")
+	}
+	if result.fieldError("vm.balloon") == "" || result.fieldError("vm.memoryMin") == "" {
+		t.Fatalf("errors = %#v, want vm balloon/memoryMin errors", result.Errors)
+	}
+}
+
+func TestRunDraftValidationRejectsInvalidBalloonMode(t *testing.T) {
+	draft := RunDraft{
+		Service:     "devbox",
+		Host:        "host-a",
+		Payload:     "vm://ubuntu/26.04",
+		PayloadKind: serviceTypeVM,
+		VM: RunDraftVM{
+			Memory:  "4g",
+			Balloon: "maybe",
+		},
+	}
+	_, result := validateRunDraftLocal(draft, t.TempDir())
+	if result.OK {
+		t.Fatal("result.OK = true, want invalid")
+	}
+	if got := result.fieldError("vm.balloon"); !strings.Contains(got, "use auto or off") {
+		t.Fatalf("vm.balloon error = %q, want mode guidance", got)
 	}
 }
 
@@ -1523,4 +1614,13 @@ func TestExecuteRunDraftSavesEnvFileOnlyWhenExplicitlySet(t *testing.T) {
 
 func runDraftTestBool(v bool) *bool {
 	return &v
+}
+
+func runDraftTestContainsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
 }

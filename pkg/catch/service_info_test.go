@@ -240,7 +240,12 @@ func TestServiceInfoIncludesVMConfig(t *testing.T) {
 				Image:       db.VMImageConfig{Payload: testUbuntuVMPayload, Version: "ubuntu-26.04-amd64-v1"},
 				CPUs:        4,
 				MemoryBytes: 4 << 30,
-				Disk:        db.VMDiskConfig{Backend: "zvol", Bytes: 128 << 30, Path: "flash/yeet/vms/devbox/root"},
+				Balloon: db.VMBalloonConfig{
+					Mode:            "auto",
+					MinBytes:        1 << 30,
+					LastTargetBytes: 2 << 30,
+				},
+				Disk: db.VMDiskConfig{Backend: "zvol", Bytes: 128 << 30, Path: "flash/yeet/vms/devbox/root"},
 				Networks: []db.VMNetworkConfig{{
 					Mode:      "svc",
 					Interface: "tap-devbox",
@@ -278,6 +283,9 @@ func TestServiceInfoIncludesVMConfig(t *testing.T) {
 	}
 	if vm.CPUs != 4 || vm.MemoryBytes != 4<<30 || vm.DiskBytes != 128<<30 || vm.DiskBackend != "zvol" || vm.DiskPath != "flash/yeet/vms/devbox/root" {
 		t.Fatalf("VM resources/disk = %#v", vm)
+	}
+	if vm.Balloon.Mode != "auto" || vm.Balloon.MinBytes != 1<<30 || vm.Balloon.MinMemory != "1 GB" || vm.Balloon.LastTarget != 2<<30 {
+		t.Fatalf("VM balloon = %#v, want persisted auto config with 1 GB floor", vm.Balloon)
 	}
 	if vm.SSH == nil || vm.SSH.User != "ubuntu" || vm.SSH.Host != "10.0.0.42" {
 		t.Fatalf("VM SSH = %#v", vm.SSH)

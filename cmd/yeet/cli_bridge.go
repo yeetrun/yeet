@@ -36,6 +36,12 @@ var serviceBridgeSkippedGroupCommands = map[string]map[string]struct{}{
 	},
 }
 
+var serviceBridgeHostLevelGroupCommands = map[string]map[string]struct{}{
+	"vm": {
+		"memory": {},
+	},
+}
+
 func findServiceIndex(args []string, start int, flags map[string]cli.FlagSpec) int {
 	for i := start; i < len(args); i++ {
 		arg := args[i]
@@ -160,6 +166,9 @@ func bridgeGroupArgs(args []string, groupSpecs map[string]map[string]map[string]
 	if !ok {
 		return "", "", nil, false
 	}
+	if isServiceBridgeHostLevelGroupCommand(args[0], args[1]) {
+		return "", "", append([]string{}, args...), true
+	}
 	if args[0] == "vm" && args[1] == "kernel" {
 		return bridgeVMKernelArgs(args, flags)
 	}
@@ -196,5 +205,14 @@ func isServiceBridgeSkippedGroupCommand(group string, command string) bool {
 		return false
 	}
 	_, ok = locals[command]
+	return ok
+}
+
+func isServiceBridgeHostLevelGroupCommand(group string, command string) bool {
+	commands, ok := serviceBridgeHostLevelGroupCommands[group]
+	if !ok {
+		return false
+	}
+	_, ok = commands[command]
 	return ok
 }

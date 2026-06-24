@@ -22,6 +22,9 @@ func (src *Data) Clone() *Data {
 	dst := new(Data)
 	*dst = *src
 	dst.SnapshotDefaults = src.SnapshotDefaults.Clone()
+	if dst.VMHost != nil {
+		dst.VMHost = ptr.To(*src.VMHost)
+	}
 	if dst.Services != nil {
 		dst.Services = map[string]*Service{}
 		for k, v := range src.Services {
@@ -69,6 +72,7 @@ func (src *Data) Clone() *Data {
 var _DataCloneNeedsRegeneration = Data(struct {
 	DataVersion      int
 	SnapshotDefaults *SnapshotPolicy
+	VMHost           *VMHostConfig
 	Services         map[string]*Service
 	Images           map[ImageRepoName]*ImageRepo
 	Volumes          map[string]*Volume
@@ -324,6 +328,7 @@ var _VMConfigCloneNeedsRegeneration = VMConfig(struct {
 	Image       VMImageConfig
 	CPUs        int
 	MemoryBytes int64
+	Balloon     VMBalloonConfig
 	Disk        VMDiskConfig
 	Networks    []VMNetworkConfig
 	SSH         VMSSHConfig
@@ -449,4 +454,39 @@ var _VMSocketConfigCloneNeedsRegeneration = VMSocketConfig(struct {
 	APISocketPath   string
 	VsockSocketPath string
 	VsockGuestCID   uint32
+}{})
+
+// Clone makes a deep copy of VMBalloonConfig.
+// The result aliases no memory with the original.
+func (src *VMBalloonConfig) Clone() *VMBalloonConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMBalloonConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMBalloonConfigCloneNeedsRegeneration = VMBalloonConfig(struct {
+	Mode                 string
+	MinBytes             int64
+	StatsIntervalSeconds int
+	LastTargetBytes      int64
+}{})
+
+// Clone makes a deep copy of VMHostConfig.
+// The result aliases no memory with the original.
+func (src *VMHostConfig) Clone() *VMHostConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMHostConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMHostConfigCloneNeedsRegeneration = VMHostConfig(struct {
+	MemoryPolicy string
 }{})

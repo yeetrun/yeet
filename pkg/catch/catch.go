@@ -190,6 +190,9 @@ func (s *Server) Start() {
 	s.waitGroup.Go(s.monitorSystemd)
 	s.waitGroup.Go(s.monitorDocker)
 	s.waitGroup.Go(s.heartbeat)
+	s.waitGroup.Go(func() {
+		s.runVMBalloonController(s.ctx)
+	})
 	if err := installYeetNSService(); err != nil {
 		log.Fatalf("Failed to install bridge service: %v", err)
 	}

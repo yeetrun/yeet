@@ -12,6 +12,7 @@ type firecrackerConfig struct {
 	NetworkInterfaces []firecrackerNetworkInterface `json:"network-interfaces"`
 	MachineConfig     firecrackerMachineConfig      `json:"machine-config"`
 	Vsock             *firecrackerVsock             `json:"vsock,omitempty"`
+	Balloon           *firecrackerBalloon           `json:"balloon,omitempty"`
 }
 
 type firecrackerBootSource struct {
@@ -42,6 +43,12 @@ type firecrackerVsock struct {
 	VsockID  string `json:"vsock_id"`
 	GuestCID uint32 `json:"guest_cid"`
 	UDSPath  string `json:"uds_path"`
+}
+
+type firecrackerBalloon struct {
+	AmountMib             int  `json:"amount_mib"`
+	DeflateOnOOM          bool `json:"deflate_on_oom"`
+	StatsPollingIntervalS int  `json:"stats_polling_interval_s,omitempty"`
 }
 
 func renderFirecrackerConfig(cfg firecrackerConfig) ([]byte, error) {

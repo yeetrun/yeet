@@ -96,6 +96,8 @@ func trimRunDraftFields(draft RunDraft) RunDraft {
 	draft.PayloadKind = strings.ToLower(strings.TrimSpace(draft.PayloadKind))
 	draft.EnvFile = strings.TrimSpace(draft.EnvFile)
 	draft.VM.Memory = strings.TrimSpace(draft.VM.Memory)
+	draft.VM.MemoryMin = strings.TrimSpace(draft.VM.MemoryMin)
+	draft.VM.Balloon = strings.ToLower(strings.TrimSpace(draft.VM.Balloon))
 	draft.VM.Disk = strings.TrimSpace(draft.VM.Disk)
 	draft.Storage.ServiceRoot = strings.TrimSpace(draft.Storage.ServiceRoot)
 	draft.Cron.Schedule = strings.Join(strings.Fields(draft.Cron.Schedule), " ")
@@ -195,6 +197,7 @@ func validateRunDraftVM(draft *RunDraft, result *RunDraftValidationResult) {
 		result.addError("vm.cpus", "vm cpus must be a positive value")
 	}
 	if draft.PayloadKind == serviceTypeVM {
+		validateRunDraftVMBalloon(draft.VM.Balloon, result)
 		return
 	}
 	if draft.VM.CPUs != 0 {
@@ -203,8 +206,23 @@ func validateRunDraftVM(draft *RunDraft, result *RunDraftValidationResult) {
 	if draft.VM.Memory != "" {
 		result.addError("vm.memory", "--memory is only valid for VM payloads")
 	}
+	if draft.VM.MemoryMin != "" {
+		result.addError("vm.memoryMin", "--memory-min is only valid for VM payloads")
+	}
+	if draft.VM.Balloon != "" {
+		result.addError("vm.balloon", "--balloon is only valid for VM payloads")
+	}
 	if draft.VM.Disk != "" {
 		result.addError("vm.disk", "--disk is only valid for VM payloads")
+	}
+}
+
+func validateRunDraftVMBalloon(balloon string, result *RunDraftValidationResult) {
+	switch balloon {
+	case "", "auto", "off":
+		return
+	default:
+		result.addError("vm.balloon", "--balloon must use auto or off")
 	}
 }
 

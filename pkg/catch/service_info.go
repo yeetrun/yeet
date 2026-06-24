@@ -89,7 +89,11 @@ func (s *Server) serviceInfoWithContext(ctx context.Context, sn string) (catchrp
 			info.Network.IPError = vmNetwork.Err.Error()
 		}
 		info.Network.IPWarning = vmNetwork.Warning
-		info.VM = serviceVMInfo(sv.VM(), vmNetwork.IPs)
+		vmInfo, err := serviceVMInfo(sv.VM(), vmNetwork.IPs)
+		if err != nil {
+			return resp, err
+		}
+		info.VM = vmInfo
 	} else {
 		details, ipErr := s.serviceIPDetailsWithContext(ctx, sn, sv)
 		if ipErr != nil {
@@ -266,21 +270,26 @@ func vmSvcIPFromNetworks(vm db.VMConfigView) string {
 	return ""
 }
 
-func serviceVMInfo(vm db.VMConfigView, discovered map[string]vmDiscoveredIP) *catchrpc.ServiceVM {
+func serviceVMInfo(vm db.VMConfigView, discovered map[string]vmDiscoveredIP) (*catchrpc.ServiceVM, error) {
 	if !vm.Valid() {
-		return nil
+		return nil, nil
 	}
 	image := vm.Image()
 	disk := vm.Disk()
 	ssh := vm.SSH()
 	console := vm.Console()
 	socketPath := strings.TrimSpace(console.SocketPath)
+	balloon, err := effectiveExistingVMBalloonConfig(vm.MemoryBytes(), vm.Balloon())
+	if err != nil {
+		return nil, fmt.Errorf("VM balloon config: %w", err)
+	}
 	out := &catchrpc.ServiceVM{
 		Runtime:      vm.Runtime(),
 		Image:        image.Payload,
 		ImageVersion: image.Version,
 		CPUs:         vm.CPUs(),
 		MemoryBytes:  vm.MemoryBytes(),
+		Balloon:      serviceVMBalloonInfo(balloon),
 		DiskBytes:    disk.Bytes,
 		DiskBackend:  disk.Backend,
 		DiskPath:     disk.Path,
@@ -296,7 +305,36 @@ func serviceVMInfo(vm db.VMConfigView, discovered map[string]vmDiscoveredIP) *ca
 	for _, network := range vm.Networks().AsSlice() {
 		out.Networks = append(out.Networks, serviceVMNetworkInfo(network, discovered))
 	}
-	return out
+	return out, nil
+}
+
+func serviceVMBalloonInfo(balloon db.VMBalloonConfig) catchrpc.ServiceVMBalloon {
+	return catchrpc.ServiceVMBalloon{
+		Mode:       balloon.Mode,
+		MinBytes:   balloon.MinBytes,
+		MinMemory:  formatServiceVMMemory(balloon.MinBytes),
+		LastTarget: balloon.LastTargetBytes,
+	}
+}
+
+func formatServiceVMMemory(bytes int64) string {
+	if bytes <= 0 {
+		return ""
+	}
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	value := float64(bytes)
+	unit := "B"
+	for _, next := range []string{"KB", "MB", "GB", "TB", "PB"} {
+		value /= 1024
+		unit = next
+		if value < 1024 {
+			break
+		}
+	}
+	formatted := fmt.Sprintf("%.1f %s", value, unit)
+	return strings.Replace(formatted, ".0 "+unit, " "+unit, 1)
 }
 
 func vmSSHHostFromNetworks(vm db.VMConfigView, discovered map[string]vmDiscoveredIP) string {

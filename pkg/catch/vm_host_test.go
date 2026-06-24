@@ -62,12 +62,16 @@ func TestDefaultVMShapeRejectsNoKVM(t *testing.T) {
 }
 
 func TestVMMemoryAdmissionReservesHostMemory(t *testing.T) {
-	err := admitVMMemory(vmHostProfile{
+	policy, err := normalizeVMHostMemoryPolicy("")
+	if err != nil {
+		t.Fatalf("normalizeVMHostMemoryPolicy: %v", err)
+	}
+	err = admitVMMemory(vmHostProfile{
 		HasKVM:         true,
 		LogicalCPUs:    12,
 		MemoryBytes:    31 << 30,
 		RunningVMBytes: 23 << 30,
-	}, 4<<30)
+	}, 4<<30, 1<<30, policy)
 	if err != nil {
 		t.Fatalf("admitVMMemory: %v", err)
 	}
@@ -76,7 +80,7 @@ func TestVMMemoryAdmissionReservesHostMemory(t *testing.T) {
 		LogicalCPUs:    12,
 		MemoryBytes:    31 << 30,
 		RunningVMBytes: 28 << 30,
-	}, 4<<30)
+	}, 4<<30, 1<<30, policy)
 	if err == nil || !strings.Contains(err.Error(), "not enough memory") {
 		t.Fatalf("error = %v", err)
 	}
@@ -88,9 +92,9 @@ func TestVMHostMemoryReserve(t *testing.T) {
 		total int64
 		want  int64
 	}{
-		{name: "minimum", total: 512 << 20, want: 1 << 30},
+		{name: "minimum", total: 512 << 20, want: 2 << 30},
 		{name: "exact tenth", total: 31 << 30, want: (31 << 30) / 10},
-		{name: "maximum", total: 64 << 30, want: 4 << 30},
+		{name: "maximum", total: 128 << 30, want: 8 << 30},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
