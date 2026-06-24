@@ -113,6 +113,7 @@ func firecrackerBalloonRequestBody(body any) (io.Reader, bool, error) {
 
 func firecrackerUnixHTTPClient(socket string) *http.Client {
 	return &http.Client{Transport: &http.Transport{
+		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", socket)
