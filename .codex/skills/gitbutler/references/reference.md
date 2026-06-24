@@ -6,12 +6,10 @@ Agent-focused reference for useful `but` commands.
 
 - [Inspection](#inspection-understanding-state) - `status`, `show`, `diff`
 - [Branching](#branching) - `branch new`, `apply`, `unapply`, `branch delete`, `pick`
-- [Staging](#staging-multiple-staging-areas) - `stage`, `rub`
 - [Committing](#committing) - `commit`, `absorb`
 - [Editing History](#editing-history) - `rub`, `squash`, `amend`, `move`, `uncommit`, `reword`, `discard`
 - [Conflict Resolution](#conflict-resolution) - `resolve`
 - [Remote Operations](#remote-operations) - `push`, `pull`, `pr`, `merge`
-- [Automation](#automation) - `mark`, `unmark`
 - [Workspace Maintenance](#workspace-maintenance) - `clean`
 - [History & Undo](#history--undo) - `undo`, `oplog`
 - [Setup & Configuration](#setup--configuration) - `setup`, `teardown`, `config`, `update`, `skill`, `gui`
@@ -21,11 +19,11 @@ Agent-focused reference for useful `but` commands.
 
 ### `but status`
 
-Overview of workspace state - this is your entry point.
+Overview of branch, stack, commit, and workspace state. Use this when you need existing branch/stack/commit/conflict context. For selected dirty-file or hunk commits, start with `but diff` instead.
 
 ```bash
-but status              # Human-readable view
-but status -fv          # File-centric view with full commit details (recommended)
+but status              # Compact human overview; avoid as routine preflight for write tasks
+but status -fv          # File-centric view with full commit details
 but status --verbose    # Detailed information
 but status --upstream   # Show upstream relationship
 ```
@@ -51,10 +49,10 @@ but show <id> --verbose # Show with full messages and file details
 Display diff for file, branch, stack, or commit.
 
 ```bash
+but diff                # Diff for entire workspace; best first command for selective dirty commits
 but diff <file-id>      # Diff for specific file
 but diff <branch-id>    # Diff for all changes in branch
 but diff <commit-id>    # Diff for specific commit
-but diff                # Diff for entire workspace
 ```
 
 **Hunk IDs:** For uncommitted changes, `but diff` shows each hunk with an ID (e.g., `e8`, `j0`). Pass these IDs to `but commit --changes` for fine-grained, hunk-level commits.
@@ -88,6 +86,8 @@ but branch new feature -a <anchor>  # Stacked branch (dependent work)
 ```
 
 Use parallel branches for independent tasks. Use stacked branches when work depends on another branch.
+
+For "commit these selected changes on a new branch", prefer `but commit <branch> -c -m "message" --changes <ids>` instead of a separate `but branch new` or preflight `but status -fv`.
 
 ### `but apply <branch-name>`
 
@@ -148,28 +148,6 @@ The source can be:
 
 If no target is specified and multiple branches exist, prompts for selection interactively.
 
-## Staging (Multiple Staging Areas)
-
-GitButler has multiple staging areas - one per stack.
-
-### `but stage <file-or-hunk> <branch>`
-
-Stage file or hunk to a specific branch.
-
-```bash
-but stage <file-or-hunk-id> <branch-id>
-```
-
-Alias for `but rub <file-or-hunk> <branch>`. You can't stage changes that depend on branch A to branch B.
-
-### `but rub <file> <branch>`
-
-Core primitive for staging (see Editing History for other `but rub` uses).
-
-```bash
-but rub <file-id> <branch-id>    # Stage file to branch
-```
-
 ## Committing
 
 ### `but commit [branch]`
@@ -177,7 +155,6 @@ but rub <file-id> <branch-id>    # Stage file to branch
 Commit changes to a branch.
 
 ```bash
-but commit <branch> --only -m "message"  # Commit ONLY staged changes (recommended)
 but commit <branch> -m "message"         # Commit ALL uncommitted changes to branch
 but commit <branch> -am "message"        # Accepted Git muscle-memory form; -a is a no-op
 but commit <branch> -m "message" --changes <id>,<id>  # Commit specific files or hunks by CLI ID
@@ -191,20 +168,22 @@ but commit empty --before <target>       # Insert empty commit before target
 but commit empty --after <target>        # Insert empty commit after target
 ```
 
-**Important:** Without `--only`, ALL uncommitted changes are committed to the branch, not just staged files. Use `--only` when you've staged specific files and want to commit only those.
+**Important:** Plain `but commit <branch> -m` commits ALL uncommitted changes to the branch. Use `--changes` to commit only specific files or hunks.
 
-**Committing specific files or hunks:** Use `--changes` (or `-p`) with comma-separated CLI IDs to commit only those files or hunks:
-- **File IDs** from `but status`: commits entire files
+**Committing specific files or hunks:** Start with `but diff` for selective dirty commits, then use `--changes` (or `-p`) with comma-separated CLI IDs to commit only those files or hunks:
+- **File IDs** from `but diff` or `but status -fv`: commits entire files
 - **Hunk IDs** from `but diff`: commits individual hunks
 - `--changes` takes one argument per flag. Use `--changes a1,b2` or `--changes a1 --changes b2`, not `--changes a1 b2`.
-
-**Note:** `--changes` and `--only` are mutually exclusive.
 
 **Creating branches on commit:** Use `-c` / `--create` to create a new branch for the commit. If the branch name matches an existing branch, that branch is used instead.
 
 Example: `but commit my-branch -m "Fix bug" --changes ab,cd` commits files/hunks `ab` and `cd`.
 
+Example new branch: `but commit feature/contact-form -c -m "Validate contact form input" --changes ab,cd` creates `feature/contact-form` and commits only those selected file or hunk IDs.
+
 To commit specific hunks from a file with multiple changes, use `but diff` to see hunk IDs, then specify them individually.
+
+Edge case: if wanted and unwanted edits are in the same hunk, GitButler cannot split that hunk by ID. Only when the task requires keeping part of that hunk uncommitted, temporarily edit the working tree to isolate the wanted lines, commit with `--changes`, then restore the leftover lines so they remain uncommitted.
 
 If only one branch is applied, you can omit the branch ID.
 
@@ -214,7 +193,7 @@ Automatically amend uncommitted changes into existing commits.
 
 ```bash
 but absorb <file-id>          # Absorb specific file (recommended)
-but absorb <branch-id>        # Absorb all changes staged to this branch
+but absorb <branch-id>        # Absorb all changes assigned to this branch
 but absorb                    # Absorb ALL uncommitted changes (use with caution)
 but absorb --dry-run          # Preview without making changes
 but absorb <file-id> --dry-run  # Preview specific file absorption
@@ -235,35 +214,16 @@ Logic:
 Universal editing primitive that does different operations based on types.
 
 ```bash
-but rub <file> <branch>      # Stage file to branch
 but rub <file> <commit>      # Amend file into commit
 but rub <commit> <commit>    # Squash commits together
 but rub <commit> <branch>    # Move commit to branch
-but rub <file> zz            # Move file back to unassigned
 but rub <commit> zz          # Undo commit to unassigned
-but rub zz <branch>          # Stage all unassigned changes to branch
 but rub zz <commit>          # Amend all unassigned changes into commit
 but rub <file-in-commit> zz  # Uncommit specific file from its commit
 but rub <file-in-commit> <commit>  # Move file from one commit to another
-but rub <branch> <branch>    # Reassign all uncommitted changes between branches
 ```
 
-The core "rub two things together" operation.
-
-**Full operations matrix:**
-
-```
-SOURCE ↓ / TARGET →  │ zz (unassigned) │ Commit     │ Branch      │ Stack
-─────────────────────┼─────────────────┼────────────┼─────────────┼────────────
-File/Hunk            │ Unstage         │ Amend      │ Stage       │ Stage
-Commit               │ Undo            │ Squash     │ Move        │ -
-Branch (all changes) │ Unstage all     │ Amend all  │ Reassign    │ Reassign
-Stack (all changes)  │ Unstage all     │ -          │ Reassign    │ Reassign
-Unassigned (zz)      │ -               │ Amend all  │ Stage all   │ Stage all
-File-in-Commit       │ Uncommit        │ Move       │ Uncommit to │ -
-```
-
-`zz` is a special target meaning "unassigned" (no branch).
+The core "rub two things together" operation. `zz` is a special target meaning "unassigned" (no branch).
 
 ### `but squash <commits>`
 
@@ -325,7 +285,7 @@ Reword commit message or rename branch.
 ```bash
 but reword <id>               # Interactive editor
 but reword <id> -m "new"      # Non-interactive
-but reword <id> --format      # Format to 72-char wrapping
+but reword <id> --fix-formatting  # Format to 72-char wrapping
 ```
 
 ### `but discard <id>`
@@ -387,16 +347,15 @@ but resolve cancel --force
 
 ## Remote Operations
 
-### `but push [branch]`
+### `but push <branch>`
 
-Push branches to remote.
+Push a branch to remote. Always specify which branch to push: without one, `but push` prompts for a selection in interactive terminals and pushes ALL branches with unpushed commits otherwise. Accepts a full branch name or a branch CLI ID — prefer the name; it stays valid across mutations.
 
 ```bash
-but push                      # Push all branches with unpushed commits
-but push <branch-id>          # Push specific branch
-but push --dry-run            # Preview what would be pushed
-but push -s                   # Skip force push protection checks
-but push --no-hooks           # Bypass pre-push hooks (--no-verify also works)
+but push <branch-name>             # Push specific branch
+but push <branch-name> --dry-run   # Preview what would be pushed
+but push <branch-name> -s          # Skip force push protection checks
+but push <branch-name> --no-hooks  # Bypass pre-push hooks (--no-verify also works)
 ```
 
 Force push is enabled by default with protection checks. Use `-s` only when intentionally skipping those checks.
@@ -452,28 +411,6 @@ but merge <branch-id>
 ```
 
 Merges into local target branch, then runs `but pull` to update.
-
-## Automation
-
-### `but mark <target>`
-
-Auto-stage or auto-commit new changes.
-
-```bash
-but mark <branch-id>          # New unassigned changes auto-stage to this branch
-but mark <commit-id>          # New changes auto-amend into this commit
-but mark <id> --delete        # Remove the mark
-```
-
-### `but unmark`
-
-Remove all marks.
-
-```bash
-but unmark
-```
-
-Use marks when working on a focused area to automatically organize changes.
 
 ## Workspace Maintenance
 
@@ -591,7 +528,7 @@ but gui -n ../other-repo    # Short flag for opening another project in a new wi
 Useful to agents:
 
 - `-C, --current-dir <PATH>` - Run as if started in different directory
-- `-h, --help` - Show help for command
+- `-h, --help` - Show help for command. Avoid routine help probes; use this reference first.
 
 ## External commands (PATH helpers)
 
@@ -607,5 +544,7 @@ Restriction: `<command>` must consist of characters in the set `[a-zA-Z_-]`
 but --help                    # List all commands
 but <subcommand> --help       # Detailed help for specific command
 ```
+
+Use help only after a command fails or the installed references do not contain the syntax you need.
 
 Full documentation: <https://docs.gitbutler.com/cli-overview>
