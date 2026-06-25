@@ -3,45 +3,245 @@
     <img src="https://github.com/yeetrun.png" alt="yeet logo" width="140" height="140">
   </a>
   <h1>yeet</h1>
-  <p>Homelab service manager built around Tailscale RPC.</p>
+  <p>Run services and VMs on your own Linux hosts from your workstation.</p>
   <p>
     <a href="https://yeetrun.com"><strong>yeetrun.com</strong></a>
     · <a href="https://yeetrun.com/docs/getting-started/quick-start">Quick Start</a>
     · <a href="https://yeetrun.com/docs/getting-started/installation">Install</a>
-    · <a href="https://yeetrun.com/docs/getting-started/first-run-validation">First-Run Validation</a>
     · <a href="https://yeetrun.com/docs">Docs</a>
   </p>
 </div>
 
-Yeet is open source homelab infrastructure tooling. You run the `yeet` CLI from
-your workstation and install the `catch` daemon on Linux hosts you control.
-From there, yeet deploys containers, host services, cron jobs, and
-Firecracker-backed Linux VMs over Tailscale/tsnet RPC.
+Yeet is a CLI for deploying and operating services on Linux hosts you control.
+You run `yeet` locally. `yeet init` installs the `catch` daemon on a host over
+SSH. After setup, yeet talks to catch through Tailscale.
 
-Yeet is intentionally opinionated:
+Use yeet for:
 
-- Hosts run Linux with systemd.
-- SSH is used for `yeet init`; RPC uses catch's embedded tsnet node.
-- Docker is used for container payloads.
-- Services are currently managed as root-owned systemd units.
-- VM payloads require x86_64 Linux, KVM (`/dev/kvm`), TUN/TAP, and VM
-  filesystem/networking tools on the catch host.
+- Docker Compose stacks and container images.
+- Local Dockerfiles and locally built images.
+- Linux binaries and scripts.
+- Cron jobs.
+- Linux VMs on KVM-capable hosts.
 
-Within those constraints, the release path is intended to be installable on a
-fresh Ubuntu/Debian-style host with SSH access.
+Yeet fits single-operator homelabs and small private infrastructure. It expects
+Linux hosts with systemd. Services currently run as root-owned systemd units on
+the catch host.
 
-## Install
+## Quick Start
 
-Install the release binary:
+This path installs yeet locally, bootstraps one host, and runs a disposable
+container.
+
+### 1. Install yeet locally
+
+Run this on your workstation:
 
 ```bash
 curl -fsSL https://yeetrun.com/install.sh | sh
 ```
 
-Nightly build:
+To install the nightly build instead:
 
 ```bash
 curl -fsSL https://yeetrun.com/install.sh | sh -s -- --nightly
+```
+
+Confirm the CLI is available:
+
+```bash
+yeet --help
+```
+
+### 2. Prepare Tailscale access
+
+Do this before running `yeet init`. Catch must join your tailnet as a tagged
+device, usually `tag:catch`. User-owned catch nodes are rejected.
+
+In the Tailscale admin console, open `Trust credentials` -> `Credential` ->
+`OAuth`, then create an OAuth client secret.
+
+Choose one setup:
+
+- Simple setup: grant `All - Read & Write` if you are comfortable giving the
+  credential broad Tailscale API access.
+- Least-privilege setup: grant Auth Keys write (`auth_keys`) and select the tag
+  the credential may assign. Use `tag:catch` for catch-only installs. Use an
+  owner tag such as `tag:yeet` if you plan to create service Tailscale nodes
+  later with `--net=ts`.
+
+Keep the `tskey-client-...` secret ready. Interactive `yeet init` asks for it
+during first setup.
+
+See [Tailscale Setup](https://yeetrun.com/docs/concepts/tailscale#first-time-host-setup)
+for the minimal policy snippet.
+
+### 3. Bootstrap catch on a host
+
+Run this from your workstation:
+
+```bash
+yeet init root@<machine-host>
+```
+
+`<machine-host>` is the SSH target. If you use a non-root SSH user, yeet runs
+the remote install with sudo.
+
+During first setup, paste the Tailscale OAuth client secret when prompted. For
+repeatable setup, pass it explicitly:
+
+```bash
+yeet init --ts-client-secret=<secret> root@<machine-host>
+```
+
+If Docker is missing on a Debian/Ubuntu-style host, init can install it:
+
+```bash
+yeet init --install-docker --ts-client-secret=<secret> root@<machine-host>
+```
+
+For VM payloads on a host that exposes KVM and TUN/TAP, install the VM tools
+too:
+
+```bash
+yeet init --install-docker --install-vm-tools --ts-client-secret=<secret> root@<machine-host>
+```
+
+Skip VM tools for the first run unless you already know the host supports VMs.
+Containers, binaries, scripts, and cron jobs work without VM support.
+
+### 4. Confirm yeet can reach catch
+
+After `yeet init`, normal commands target the catch hostname, not the SSH
+machine host.
+
+```bash
+yeet version
+yeet status
+```
+
+If yeet did not save this host as the default, pass the catch hostname:
+
+```bash
+yeet --host=<catch-host> status
+```
+
+### 5. Run a disposable service
+
+Start with a small container:
+
+```bash
+yeet run -p 18080:80 hello nginx:alpine
+yeet status hello
+yeet logs hello
+```
+
+Check the published port from the catch host:
+
+```bash
+yeet ssh -- curl -fsS http://127.0.0.1:18080/ >/dev/null
+```
+
+Remove the service and its data:
+
+```bash
+yeet rm --clean-data hello
+```
+
+Read the confirmation prompt before accepting. `--clean-data` deletes the
+service data, including VM disks for VM services.
+
+## Common Commands
+
+Use the guided deploy form when you do not want to remember flags:
+
+```bash
+yeet run --web
+yeet run --web <svc>
+yeet run --web <svc> ./compose.yml
+```
+
+Deploy common payloads:
+
+```bash
+yeet run <svc> ./compose.yml
+yeet run -p 8080:80 <svc> nginx:alpine
+yeet run <svc> ./Dockerfile
+yeet docker push <svc> <local-image>:<tag> --run
+```
+
+Deploy a binary, script, or cron job:
+
+```bash
+GOOS=linux GOARCH=amd64 go build -o ./bin/<svc> ./cmd/<svc>
+yeet run <svc> ./bin/<svc>
+yeet run <svc> ./script.sh -- --app-flag value
+yeet cron <svc> ./job.sh "0 9 * * *"
+```
+
+Create a VM on a KVM-capable catch host:
+
+```bash
+yeet vm images catalog
+yeet run <vm> vm://ubuntu/26.04
+yeet ssh <vm>
+```
+
+After the first successful deploy, yeet writes service config to `yeet.toml`.
+From that directory, redeploy the saved service with:
+
+```bash
+yeet run <svc>
+```
+
+## Operate a Service
+
+Check status and logs:
+
+```bash
+yeet status
+yeet status <svc>
+yeet info <svc>
+yeet logs -f <svc>
+```
+
+Open a shell or run a remote command:
+
+```bash
+yeet ssh
+yeet ssh <svc>
+yeet ssh -- uname -a
+yeet ssh <svc> -- ls -la
+```
+
+Control or remove a service:
+
+```bash
+yeet restart <svc>
+yeet stop <svc>
+yeet start <svc>
+yeet rm <svc>
+```
+
+`yeet rm <svc>` keeps service data by default. Add `--clean-data` only when you
+want yeet to delete the service data too.
+
+## Target a Host
+
+Use `root@<machine-host>` only for `yeet init`. Use the catch hostname for
+normal commands.
+
+```bash
+CATCH_HOST=<catch-host> yeet status
+yeet --host=<catch-host> status
+yeet status@<catch-host>
+yeet run <svc>@<catch-host> ./compose.yml
+```
+
+Save a default catch host:
+
+```bash
+yeet prefs --host=<catch-host> --save
 ```
 
 ## Upgrade
@@ -58,7 +258,7 @@ Upgrade both from verified GitHub release assets:
 yeet upgrade
 ```
 
-In a project with multiple catch hosts in `yeet.toml`, scan and upgrade all of
+For projects with multiple catch hosts in `yeet.toml`, check and upgrade all of
 them explicitly:
 
 ```bash
@@ -66,307 +266,83 @@ yeet upgrade check --all
 yeet upgrade --all
 ```
 
-To reinstall the latest public release even when a component is already current,
-newer, or currently a source/dev build:
+To reinstall a release even when a component already looks current, newer, or
+locally built:
 
 ```bash
 yeet upgrade --all --force
 ```
 
-To install a specific public release instead of latest, select the tag
-explicitly. Use `--force` when that would reinstall or downgrade a component:
+To install a specific public release:
 
 ```bash
 yeet upgrade --all --version v0.6.1 --force
 ```
 
-## Bootstrap a Host
+## Optional Capabilities
 
-Start with a Linux host that has systemd and SSH access. The normal path is to
-run init against the SSH machine host:
-
-```bash
-yeet init root@<machine-host>
-```
-
-Catch uses an embedded Tailscale node for RPC. That node must end up with a
-tag-based identity, such as `tag:catch`; user-owned catch nodes are rejected.
-Before the first setup, create an OAuth credential in the Tailscale admin
-console from `Trust credentials` -> `Credential` -> `OAuth`.
-
-You have two OAuth choices:
-
-- Simple broad setup: choose `All - Read & Write` if you are comfortable giving
-  the credential broad Tailscale API access.
-- Least-privilege setup: choose custom scopes with Auth Keys write
-  (`auth_keys`) and select the tag the credential may assign. For catch-only
-  installs, select `tag:catch` directly. If you plan to use service
-  `--net=ts` later, use an owner tag such as `tag:yeet` that owns `tag:catch`
-  and service tags such as `tag:app`.
-
-Interactive `yeet init` prompts for the OAuth client secret during first catch
-enrollment. For repeatable or non-interactive bootstrap, pass it explicitly:
-
-```bash
-yeet init --ts-client-secret=<secret> root@<machine-host>
-```
-
-Docker and VM packages are interactive prompts when they are missing.
-`--install-docker` and `--install-vm-tools` are unattended yes flags:
-
-```bash
-yeet init --install-docker root@<machine-host>
-yeet init --install-docker --install-vm-tools root@<machine-host>
-```
-
-The VM tools prompt only applies on Debian/Ubuntu hosts that expose KVM and
-TUN/TAP. If the host is not VM capable, yeet warns and containers, binaries,
-scripts, and cron jobs still work.
-
-Advanced users can also create a preauthorized Tailscale auth key that assigns
-the catch server tag and pass it with:
-
-```bash
-yeet init --ts-auth-key=<key> root@<machine-host>
-```
-
-Combine the unattended flags when needed:
-
-```bash
-yeet init --install-docker --install-vm-tools --ts-client-secret=<secret> root@<machine-host>
-```
-
-If your tailnet separates catch hosts by cluster or location, include the tags
-your ACLs or grants expect on that key.
-
-Host names matter:
-
-- `root@<machine-host>` is the SSH target used only for init/install.
-- `CATCH_HOST`, `--host`, and `<svc>@<host>` refer to the catch tsnet hostname.
-
-See [Installation](https://yeetrun.com/docs/getting-started/installation) and
-[Tailscale](https://yeetrun.com/docs/concepts/tailscale) for details.
-
-## Validate the First Run
-
-Confirm the control plane is reachable:
-
-```bash
-yeet version
-yeet status
-```
-
-If you have Tailscale installed locally, `yeet list-hosts` can also discover
-tagged catch nodes. It is optional for normal RPC because yeet embeds tsnet.
-
-Then run a disposable container:
-
-```bash
-yeet run -p 18080:80 yeet-smoke-web nginx:alpine
-yeet ssh -- curl -fsS http://127.0.0.1:18080/ >/dev/null
-yeet rm --clean-data yeet-smoke-web
-```
-
-For the full fresh-host playbook, including script services, cron timers, VM
-capability, LAN networking, and ZFS checks, use
-[First-Run Validation](https://yeetrun.com/docs/getting-started/first-run-validation).
-
-## Common Workflows
-
-Docker Compose:
-
-```bash
-yeet run <svc> ./compose.yml
-yeet logs -f <svc>
-yeet run --pull <svc> ./compose.yml
-```
-
-Docker image:
-
-```bash
-yeet run -p 8080:80 <svc> nginx:alpine
-```
-
-Dockerfile:
-
-```bash
-yeet run <svc> ./Dockerfile
-```
-
-Binary or script:
-
-```bash
-GOOS=linux GOARCH=amd64 go build -o ./bin/<svc> ./cmd/<svc>
-yeet run <svc> ./bin/<svc>
-yeet run <svc> ./script.sh -- --app-flag value
-```
-
-Cron job:
-
-```bash
-yeet cron <svc> ./job.sh "0 9 * * *"
-```
-
-VM on a KVM-capable host:
-
-```bash
-yeet vm images catalog
-yeet run devbox vm://ubuntu/26.04
-yeet ssh devbox
-yeet vm console devbox
-```
-
-The official VM catalog is loaded from `yeet-vm-images` at runtime. The catalog
-defines supported `vm://...` families, and each family points at a stable latest
-manifest. New image versions are picked up through that manifest rather than a
-yeet release.
-Run a `vm://` payload once per VM name; change an existing VM with `yeet vm set`
-or remove and recreate it for a fresh guest.
-
-`--memory` sets the VM's maximum RAM. New VMs enable Firecracker ballooning by
-default, and `--memory-min` sets the floor yeet will not intentionally reclaim
-below:
-
-```bash
-yeet run devbox vm://ubuntu/26.04 --memory=4g --memory-min=1g
-yeet vm set devbox --memory-min=2g
-```
-
-Disable ballooning when a VM should reserve its full maximum memory:
-
-```bash
-yeet vm set devbox --balloon=off
-```
-
-Host memory policy defaults to `safe`. To opt into controlled VM overcommit,
-set the policy explicitly:
-
-```bash
-yeet vm memory set --policy=balanced
-```
-
-Detach from an active VM console by pressing Enter, then typing `~.`. The VM
-keeps running.
-
-Official VM images also include NixOS:
-
-```bash
-yeet run lab vm://nixos/26.05
-```
-
-For a VM that should also request an address on the catch host's LAN, keep the
-default management network and add LAN networking:
-
-```bash
-yeet run devbox vm://ubuntu/26.04 --net=svc,lan
-```
-
-LAN-only VMs are reached directly at their guest LAN IP. VMs on `svc` proxy
-through catch, and VMs on `svc,lan` use the LAN IP when your workstation can
-reach it before falling back to the catch-proxied management path.
-In `svc,lan` mode, normal outbound traffic from the guest uses the LAN route
-while the service network remains available for yeet-managed names and access.
-Services and VMs on `svc` also resolve other service-network names through
-yeet DNS, including short names and `*.yeet.internal` names.
-
-Local image built on your workstation:
-
-```bash
-yeet docker push <svc> <local-image>:<tag> --run
-```
-
-After the first successful deploy, yeet writes a `yeet.toml` replay file. You
-can usually rerun the same service with:
-
-```bash
-yeet run <svc>
-```
-
-See [Workflows](https://yeetrun.com/docs/operations/workflows) and
-[Payloads](https://yeetrun.com/docs/payloads) for the complete guides.
-
-## Optional Host Capabilities
-
-Yeet works without every optional feature. The host determines which payloads
-and network modes are available:
+Start with the quick path before adding optional features.
 
 - Docker is required for container payloads.
-- x86_64 Linux, KVM, TUN/TAP, and VM filesystem/networking tools are required
-  for VM payloads. `yeet init` checks this, prompts on capable Debian/Ubuntu
-  hosts when tools are missing, and `--install-vm-tools` answers yes for
-  unattended setup.
-- LAN/macvlan networking requires a host network where macvlan and DHCP make
+- VMs require x86_64 Linux, KVM at `/dev/kvm`, TUN/TAP, and VM filesystem
+  tools on the catch host.
+- `--net=svc` creates a private service network.
+- `--net=ts` gives a service its own Tailscale identity.
+- `--net=lan` requests a LAN address on hosts where macvlan and DHCP make
   sense.
 - ZFS is optional and enables dataset-backed service roots, snapshots, and fast
   repeated VM disk clones.
-- `--net=ts` service networking requires Tailscale auth for each service netns.
 
-Yeet warns during init or deploy when a host cannot support a requested
-feature. See [Networking](https://yeetrun.com/docs/concepts/networking),
-[VMs](https://yeetrun.com/docs/payloads/vms), and
-[ZFS](https://yeetrun.com/docs/concepts/zfs).
+Use the manual before enabling optional storage or networking:
+
+- [Payloads](https://yeetrun.com/docs/payloads)
+- [Networking](https://yeetrun.com/docs/concepts/networking)
+- [VMs](https://yeetrun.com/docs/payloads/vms)
+- [ZFS](https://yeetrun.com/docs/concepts/zfs)
 
 ## Documentation
 
-The docs site is the user manual and the source of truth for behavior:
-
 - [Quick Start](https://yeetrun.com/docs/getting-started/quick-start)
 - [Installation](https://yeetrun.com/docs/getting-started/installation)
-- [First-Run Validation](https://yeetrun.com/docs/getting-started/first-run-validation)
 - [Workflows](https://yeetrun.com/docs/operations/workflows)
 - [Payloads](https://yeetrun.com/docs/payloads)
-- [Architecture](https://yeetrun.com/docs/concepts/architecture)
-- [Networking](https://yeetrun.com/docs/concepts/networking)
-- [Tailscale](https://yeetrun.com/docs/concepts/tailscale)
-- [ZFS](https://yeetrun.com/docs/concepts/zfs)
-- [CLI Reference](https://yeetrun.com/docs/cli/yeet-cli)
+- [yeet command reference](https://yeetrun.com/docs/cli/yeet-cli)
+- [catch reference](https://yeetrun.com/docs/cli/catch-cli)
 - [Troubleshooting](https://yeetrun.com/docs/operations/troubleshooting)
 - [FAQ](https://yeetrun.com/docs/faq)
 
-## Development from Source
+## Develop from Source
 
-Use mise to install the pinned toolchain from `.mise.toml`:
+Use mise to install the repo toolchain:
 
 ```bash
-curl https://mise.run | sh
-echo 'eval "$(mise activate zsh)"' >> ~/.zshrc
 mise install
 ```
 
-Build locally:
+Build and test:
 
 ```bash
-go build ./cmd/yeet
-go build ./cmd/catch
+mise exec -- go build ./cmd/yeet
+mise exec -- go build ./cmd/catch
+mise exec -- go test ./...
 ```
 
-Install repo hooks once:
+Install local hooks before contributor work:
 
 ```bash
 mise run install-githooks
 ```
 
-Run the normal local quality gate:
+Run the normal quality gate before publishing changes:
 
 ```bash
 mise run quality
 ```
 
-Heavier checks are available for release or deeper quality work:
+## Security
 
-```bash
-mise run race
-mise run fuzz
-mise run mutation
-mise run quality:goal
-```
-
-## Security Notes
-
-Services managed by `catch` currently run as root. That is acceptable for a
-single-operator homelab, but it is not a good default for production or
-multi-tenant setups. See the [FAQ](https://yeetrun.com/docs/faq) for current
-limitations.
+Yeet is for hosts you control. It is not a multi-tenant platform. Services
+managed by catch currently run as root-owned systemd units.
 
 ## License
 
