@@ -286,10 +286,13 @@ Start with the quick path before adding optional features.
 - Docker is required for container payloads.
 - VMs require x86_64 Linux, KVM at `/dev/kvm`, TUN/TAP, and VM filesystem
   tools on the catch host.
-- `--net=svc` creates a private service network.
-- `--net=ts` gives a service its own Tailscale identity.
-- `--net=lan` requests a LAN address on hosts where macvlan and DHCP make
-  sense.
+- `--net=svc` creates a private service network, adds yeet DNS, and sends
+  ordinary outbound internet through the catch host.
+- `--net=svc,ts` keeps `svc` behavior and gives the service its own Tailscale
+  identity. Use this for most Tailscale-exposed services.
+- `--net=lan` requests a LAN or VLAN address. Outbound internet comes from the
+  DHCP gateway on that network.
+- Plain `--net=ts` is tailnet-only unless you configure a Tailscale exit node.
 - ZFS is optional and enables dataset-backed service roots, snapshots, and fast
   repeated VM disk clones.
 
