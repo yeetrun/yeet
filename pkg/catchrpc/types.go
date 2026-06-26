@@ -43,7 +43,16 @@ const (
 	ProgressQuiet ProgressMode = "quiet"
 )
 
+type ExecTarget string
+
+const (
+	ExecTargetServiceCommand ExecTarget = ""
+	ExecTargetHostShell      ExecTarget = "host-shell"
+	ExecTargetServiceShell   ExecTarget = "service-shell"
+)
+
 type ExecRequest struct {
+	Target      ExecTarget   `json:"target,omitempty"`
 	Service     string       `json:"service"`
 	Host        string       `json:"host,omitempty"`
 	User        string       `json:"user,omitempty"`

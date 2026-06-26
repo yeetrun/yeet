@@ -290,7 +290,7 @@ Get detailed help: `yeet run --help-llm`
 
 ### `ssh`
 
-Open SSH to the catch host, a service dir, or a VM guest
+Open a catch host shell, a service shell, or a VM guest shell
 
 **Examples**:
 
@@ -1500,12 +1500,12 @@ yeet run <svc> ./Dockerfile
 ````
 # yeet ssh
 
-Open SSH to the catch host, a service dir, or a VM guest
+Open a catch host shell, a service shell, or a VM guest shell
 
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] ssh [OPTIONS] [--force-proxy] [ssh-opts...] [<svc>] [-- <remote-cmd...>]
+yeet [GLOBAL_OPTIONS] ssh [OPTIONS] [--force-proxy] [<svc>] [-- <remote-cmd...>]
 ```
 
 ## Global Options

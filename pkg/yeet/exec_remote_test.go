@@ -319,6 +319,53 @@ func restoreExecRemoteGlobals(t *testing.T) {
 	})
 }
 
+func TestExecRemoteShellBuildsHostShellRequest(t *testing.T) {
+	restoreExecRemoteGlobals(t)
+
+	var gotReq catchrpc.ExecRequest
+	newRPCExecClientFn = func(host string) rpcExecClient {
+		if host != "yeet-lab" {
+			t.Fatalf("client host = %q, want yeet-lab", host)
+		}
+		return fakeExecClient{
+			execFn: func(ctx context.Context, req catchrpc.ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan catchrpc.Resize) (int, error) {
+				gotReq = req
+				return 0, nil
+			},
+		}
+	}
+
+	err := execRemoteShell(context.Background(), "yeet-lab", catchrpc.ExecTargetHostShell, "", []string{"whoami"}, nil, false, io.Discard)
+	if err != nil {
+		t.Fatalf("execRemoteShell: %v", err)
+	}
+	if gotReq.Target != catchrpc.ExecTargetHostShell || gotReq.Service != "" || !reflect.DeepEqual(gotReq.Args, []string{"whoami"}) {
+		t.Fatalf("request = %#v, want host shell whoami", gotReq)
+	}
+}
+
+func TestExecRemoteShellBuildsServiceShellRequest(t *testing.T) {
+	restoreExecRemoteGlobals(t)
+
+	var gotReq catchrpc.ExecRequest
+	newRPCExecClientFn = func(string) rpcExecClient {
+		return fakeExecClient{
+			execFn: func(ctx context.Context, req catchrpc.ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan catchrpc.Resize) (int, error) {
+				gotReq = req
+				return 0, nil
+			},
+		}
+	}
+
+	err := execRemoteShell(context.Background(), "yeet-lab", catchrpc.ExecTargetServiceShell, "api", []string{"pwd"}, nil, false, io.Discard)
+	if err != nil {
+		t.Fatalf("execRemoteShell: %v", err)
+	}
+	if gotReq.Target != catchrpc.ExecTargetServiceShell || gotReq.Service != "api" || !reflect.DeepEqual(gotReq.Args, []string{"pwd"}) {
+		t.Fatalf("request = %#v, want service shell pwd", gotReq)
+	}
+}
+
 func TestNewRemoteExecRequestAddsLocalSSHKeyForVMRun(t *testing.T) {
 	tmp := t.TempDir()
 	sshDir := filepath.Join(tmp, ".ssh")

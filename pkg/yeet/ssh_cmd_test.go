@@ -126,6 +126,99 @@ func TestEnsureSSHCLIReturnsErrorWhenMissing(t *testing.T) {
 	}
 }
 
+func TestSSHHostShellUsesRPCWithoutSSHCLI(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+
+	oldPrefs := loadedPrefs
+	oldFetchInfo := fetchSSHServerInfoFunc
+	oldExec := execRemoteShellFn
+	t.Cleanup(func() {
+		loadedPrefs = oldPrefs
+		fetchSSHServerInfoFunc = oldFetchInfo
+		execRemoteShellFn = oldExec
+	})
+	loadedPrefs.DefaultHost = "yeet-lab"
+	fetchSSHServerInfoFunc = func(ctx context.Context, host string) (serverInfo, error) {
+		if host != "yeet-lab" {
+			t.Fatalf("server info host = %q, want yeet-lab", host)
+		}
+		return serverInfo{RootDir: "/srv/yeet"}, nil
+	}
+
+	var gotHost, gotService string
+	var gotTarget catchrpc.ExecTarget
+	var gotArgs []string
+	execRemoteShellFn = func(ctx context.Context, host string, target catchrpc.ExecTarget, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		gotHost = host
+		gotTarget = target
+		gotService = service
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+
+	if err := HandleSSH(context.Background(), []string{"ssh", "--", "whoami"}); err != nil {
+		t.Fatalf("HandleSSH: %v", err)
+	}
+	if gotHost != "yeet-lab" || gotTarget != catchrpc.ExecTargetHostShell || gotService != "" || !reflect.DeepEqual(gotArgs, []string{"whoami"}) {
+		t.Fatalf("rpc shell = host %q target %q service %q args %#v", gotHost, gotTarget, gotService, gotArgs)
+	}
+}
+
+func TestSSHNonVMServiceUsesRPCShell(t *testing.T) {
+	oldFetchInfo := fetchSSHServerInfoFunc
+	oldFetchSvc := fetchSSHServiceInfoFunc
+	oldExec := execRemoteShellFn
+	t.Cleanup(func() {
+		fetchSSHServerInfoFunc = oldFetchInfo
+		fetchSSHServiceInfoFunc = oldFetchSvc
+		execRemoteShellFn = oldExec
+	})
+	fetchSSHServerInfoFunc = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{RootDir: "/srv/yeet"}, nil
+	}
+	fetchSSHServiceInfoFunc = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if service != "api" {
+			t.Fatalf("service info service = %q, want api", service)
+		}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{ServiceType: "docker-compose"}}, nil
+	}
+
+	var gotTarget catchrpc.ExecTarget
+	var gotService string
+	var gotArgs []string
+	execRemoteShellFn = func(ctx context.Context, host string, target catchrpc.ExecTarget, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		gotTarget = target
+		gotService = service
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+
+	if err := HandleSSH(context.Background(), []string{"ssh", "api", "--", "pwd"}); err != nil {
+		t.Fatalf("HandleSSH: %v", err)
+	}
+	if gotTarget != catchrpc.ExecTargetServiceShell || gotService != "api" || !reflect.DeepEqual(gotArgs, []string{"pwd"}) {
+		t.Fatalf("rpc shell = target %q service %q args %#v", gotTarget, gotService, gotArgs)
+	}
+}
+
+func TestSSHOptionsRejectedForRPCShell(t *testing.T) {
+	oldPrefs := loadedPrefs
+	oldFetchInfo := fetchSSHServerInfoFunc
+	t.Cleanup(func() {
+		loadedPrefs = oldPrefs
+		fetchSSHServerInfoFunc = oldFetchInfo
+	})
+	loadedPrefs.DefaultHost = "yeet-lab"
+	fetchSSHServerInfoFunc = func(context.Context, string) (serverInfo, error) {
+		return serverInfo{}, nil
+	}
+
+	_, err := sshExecutionPlanForArgs(context.Background(), []string{"ssh", "-p", "2222", "--", "whoami"})
+	if err == nil || !strings.Contains(err.Error(), "SSH options only apply to VM targets") {
+		t.Fatalf("error = %v, want SSH options rejected for RPC shell", err)
+	}
+}
+
 func TestSSHServiceOrOverride(t *testing.T) {
 	oldService := serviceOverride
 	defer func() { serviceOverride = oldService }()
@@ -972,20 +1065,20 @@ func TestRunSSHPlanDoesNotRepairCustomHostKeyAlias(t *testing.T) {
 	assertNoSSHRepairOnChangedHostKey(t, plan)
 }
 
-func TestRunSSHPlanDoesNotRepairNonVMServiceCommand(t *testing.T) {
+func TestRunSSHPlanUsesRPCForNonVMServiceWithoutKnownHostRepair(t *testing.T) {
 	_, plan := testSSHExecutionPlan(t, []string{"ssh", "api"}, catchrpc.ServiceInfoResponse{
 		Found: true,
 		Info:  catchrpc.ServiceInfo{Paths: catchrpc.ServicePaths{Root: "/srv/api"}},
 	})
-	assertNoSSHRepairOnChangedHostKey(t, plan)
+	assertRPCShellPlanDoesNotRepair(t, plan, catchrpc.ExecTargetServiceShell, "api")
 }
 
-func TestRunSSHPlanDoesNotRepairHostLevelSSH(t *testing.T) {
+func TestRunSSHPlanUsesRPCForHostShellWithoutKnownHostRepair(t *testing.T) {
 	_, plan := testSSHExecutionPlanWithServiceInfo(t, []string{"ssh", "--", "uptime"}, func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
 		t.Fatalf("fetchSSHServiceInfoFunc called for host-level ssh with host=%q service=%q", host, service)
 		return catchrpc.ServiceInfoResponse{}, nil
 	})
-	assertNoSSHRepairOnChangedHostKey(t, plan)
+	assertRPCShellPlanDoesNotRepair(t, plan, catchrpc.ExecTargetHostShell, "")
 }
 
 func TestRunSSHPlanDoesNotRetryUnrelatedSSHError(t *testing.T) {
@@ -1433,6 +1526,15 @@ func stubRemoveSSHKnownHost(t *testing.T, fn sshKnownHostRemover) {
 	})
 }
 
+func stubExecRemoteShell(t *testing.T, fn func(context.Context, string, catchrpc.ExecTarget, string, []string, io.Reader, bool, io.Writer) error) {
+	t.Helper()
+	old := execRemoteShellFn
+	execRemoteShellFn = fn
+	t.Cleanup(func() {
+		execRemoteShellFn = old
+	})
+}
+
 func stubVMSSHLANReachable(t *testing.T, fn func(string) bool) {
 	t.Helper()
 	old := vmSSHLANReachableFunc
@@ -1486,4 +1588,33 @@ func changedHostKeySSHOutput(knownHosts string) string {
 		"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n" +
 		"Offending ED25519 key in " + knownHosts + ":1\n" +
 		"Host key verification failed.\n"
+}
+
+func assertRPCShellPlanDoesNotRepair(t *testing.T, plan sshExecutionPlan, target catchrpc.ExecTarget, service string) {
+	t.Helper()
+	if plan.KnownHostRepair != nil {
+		t.Fatalf("KnownHostRepair = %#v, want nil", plan.KnownHostRepair)
+	}
+	if plan.RPCShell == nil {
+		t.Fatal("RPCShell = nil, want RPC shell plan")
+	}
+	if plan.RPCShell.Target != target || plan.RPCShell.Service != service {
+		t.Fatalf("RPCShell = %#v, want target %q service %q", plan.RPCShell, target, service)
+	}
+	runErr := errors.New("rpc failed")
+	stubExecRemoteShell(t, func(ctx context.Context, host string, gotTarget catchrpc.ExecTarget, gotService string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
+		if gotTarget != target || gotService != service {
+			t.Fatalf("execRemoteShell target/service = %q/%q, want %q/%q", gotTarget, gotService, target, service)
+		}
+		return runErr
+	})
+	stubRemoveSSHKnownHost(t, func(ctx context.Context, alias, knownHosts string) error {
+		t.Fatalf("removeSSHKnownHostFunc called with alias=%q knownHosts=%q", alias, knownHosts)
+		return nil
+	})
+
+	err := runSSHPlan(context.Background(), plan, nil, io.Discard, io.Discard)
+	if !errors.Is(err, runErr) {
+		t.Fatalf("runSSHPlan error = %v, want %v", err, runErr)
+	}
 }

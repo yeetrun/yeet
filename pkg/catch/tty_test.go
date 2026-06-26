@@ -96,6 +96,173 @@ func TestNewCmdDoesNotClearLineWhenNotComposeTTY(t *testing.T) {
 	}
 }
 
+func TestHostShellTargetRunsCommand(t *testing.T) {
+	oldPasswd := passwdFilePath
+	t.Cleanup(func() { passwdFilePath = oldPasswd })
+
+	home := t.TempDir()
+	passwd := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(passwd, []byte(strings.Join([]string{
+		"root:x:0:0:root:/root:/bin/bash",
+		"deploy:x:1000:1000:deploy:" + home + ":/bin/sh",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write passwd: %v", err)
+	}
+	passwdFilePath = passwd
+
+	server := newTestServer(t)
+	server.cfg.InstallUser = "deploy"
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx:    context.Background(),
+		s:      server,
+		target: catchrpc.ExecTargetHostShell,
+		args:   []string{"/bin/sh", "-c", "printf host-shell"},
+		rw:     &out,
+	}
+
+	if err := execer.exec(); err != nil {
+		t.Fatalf("host shell exec: %v", err)
+	}
+	if got := out.String(); got != "host-shell" {
+		t.Fatalf("output = %q, want host-shell", got)
+	}
+}
+
+func TestHostShellTargetRunsCommandInInstallUserHome(t *testing.T) {
+	oldPasswd := passwdFilePath
+	t.Cleanup(func() { passwdFilePath = oldPasswd })
+
+	home := t.TempDir()
+	passwd := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(passwd, []byte(strings.Join([]string{
+		"root:x:0:0:root:/root:/bin/bash",
+		"deploy:x:1000:1000:deploy:" + home + ":/bin/sh",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write passwd: %v", err)
+	}
+	passwdFilePath = passwd
+
+	server := newTestServer(t)
+	server.cfg.InstallUser = "deploy"
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx:    context.Background(),
+		s:      server,
+		target: catchrpc.ExecTargetHostShell,
+		args:   []string{"pwd"},
+		rw:     &out,
+	}
+
+	if err := execer.exec(); err != nil {
+		t.Fatalf("host shell exec: %v", err)
+	}
+	got := mustEvalSymlinkPath(t, strings.TrimSpace(out.String()))
+	want := mustEvalSymlinkPath(t, home)
+	if got != want {
+		t.Fatalf("pwd = %q, want %q", got, want)
+	}
+}
+
+func TestServiceShellTargetRunsCommandInServiceDataDir(t *testing.T) {
+	server := newTestServer(t)
+	serviceRoot := server.defaultServiceRootDir("api")
+	serviceData := serviceDataDirForRoot(serviceRoot)
+	if err := os.MkdirAll(serviceData, 0o755); err != nil {
+		t.Fatalf("mkdir service data: %v", err)
+	}
+	if _, _, err := server.cfg.DB.MutateService("api", func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeDockerCompose
+		return nil
+	}); err != nil {
+		t.Fatalf("seed service: %v", err)
+	}
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx:    context.Background(),
+		s:      server,
+		target: catchrpc.ExecTargetServiceShell,
+		sn:     "api",
+		args:   []string{"pwd"},
+		rw:     &out,
+	}
+
+	if err := execer.exec(); err != nil {
+		t.Fatalf("service shell exec: %v", err)
+	}
+	got := mustEvalSymlinkPath(t, strings.TrimSpace(out.String()))
+	want := mustEvalSymlinkPath(t, serviceData)
+	if got != want {
+		t.Fatalf("pwd = %q, want %q", got, want)
+	}
+}
+
+func mustEvalSymlinkPath(t *testing.T, path string) string {
+	t.Helper()
+	out, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		t.Fatalf("eval symlinks %q: %v", path, err)
+	}
+	return out
+}
+
+func TestServiceShellTargetRejectsVMService(t *testing.T) {
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeVM
+		return nil
+	}); err != nil {
+		t.Fatalf("seed service: %v", err)
+	}
+
+	execer := &ttyExecer{
+		ctx:    context.Background(),
+		s:      server,
+		target: catchrpc.ExecTargetServiceShell,
+		sn:     "devbox",
+		rw:     &bytes.Buffer{},
+	}
+
+	err := execer.exec()
+	if err == nil || !strings.Contains(err.Error(), "VM service") {
+		t.Fatalf("service shell VM error = %v, want VM rejection", err)
+	}
+}
+
+func TestDefaultShellPathUsesInstallUserThenRootThenSh(t *testing.T) {
+	oldPasswd := passwdFilePath
+	t.Cleanup(func() { passwdFilePath = oldPasswd })
+
+	passwd := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(passwd, []byte(strings.Join([]string{
+		"root:x:0:0:root:/root:/bin/bash",
+		"deploy:x:1000:1000:deploy:/home/deploy:/usr/bin/zsh",
+		"",
+	}, "\n")), 0o600); err != nil {
+		t.Fatalf("write passwd: %v", err)
+	}
+	passwdFilePath = passwd
+
+	server := newTestServer(t)
+	server.cfg.InstallUser = "deploy"
+	if got := (&ttyExecer{s: server}).defaultShellPath(); got != "/usr/bin/zsh" {
+		t.Fatalf("install user shell = %q, want /usr/bin/zsh", got)
+	}
+
+	server.cfg.InstallUser = "missing"
+	if got := (&ttyExecer{s: server}).defaultShellPath(); got != "/bin/bash" {
+		t.Fatalf("root fallback shell = %q, want /bin/bash", got)
+	}
+
+	passwdFilePath = filepath.Join(t.TempDir(), "missing-passwd")
+	if got := (&ttyExecer{s: server}).defaultShellPath(); got != "/bin/sh" {
+		t.Fatalf("missing passwd shell = %q, want /bin/sh", got)
+	}
+}
+
 func TestProgressUIIncludesHostLabel(t *testing.T) {
 	var buf bytes.Buffer
 	execer := &ttyExecer{

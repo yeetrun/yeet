@@ -214,6 +214,10 @@ yeet ssh -- uname -a
 yeet ssh <svc> -- ls -la
 ```
 
+After `yeet init`, host and regular service shells use catch over Tailscale, so
+they do not require host SSH keys or a host password. VM services still connect
+to the guest operating system with SSH.
+
 Control or remove a service:
 
 ```bash

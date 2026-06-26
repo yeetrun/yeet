@@ -28,10 +28,18 @@ type sshInvocation struct {
 	ForceProxy bool
 }
 
+type rpcShellPlan struct {
+	Host    string
+	Target  catchrpc.ExecTarget
+	Service string
+	Command []string
+}
+
 type sshExecutionPlan struct {
 	Args            []string
 	KnownHostRepair *sshKnownHostRepair
 	Notice          string
+	RPCShell        *rpcShellPlan
 }
 
 type sshKnownHostRepair struct {
@@ -49,6 +57,7 @@ var (
 	fetchSSHServerInfoFunc                      = fetchSSHServerInfo
 	fetchSSHServiceInfoFunc                     = fetchSSHServiceInfo
 	vmSSHLANReachableFunc                       = vmSSHLANReachable
+	execRemoteShellFn                           = execRemoteShell
 )
 
 const vmSSHLANReachabilityTimeout = 300 * time.Millisecond
@@ -62,37 +71,21 @@ func HandleSSH(ctx context.Context, args []string) error {
 }
 
 func sshExecutionPlanForArgs(ctx context.Context, args []string) (sshExecutionPlan, error) {
-	if err := ensureSSHCLI(); err != nil {
-		return sshExecutionPlan{}, err
-	}
-	host, info, inv, repair, notice, err := resolvedSSHInvocation(ctx, args)
-	if err != nil {
-		return sshExecutionPlan{}, err
-	}
-	return sshExecutionPlan{
-		Args:            sshArgsFromInvocation(host, info, inv),
-		KnownHostRepair: repair,
-		Notice:          notice,
-	}, nil
-}
-
-func resolvedSSHInvocation(ctx context.Context, args []string) (string, serverInfo, sshInvocation, *sshKnownHostRepair, string, error) {
 	inv, err := sshInvocationFromArgs(args)
 	if err != nil {
-		return "", serverInfo{}, sshInvocation{}, nil, "", err
+		return sshExecutionPlan{}, err
 	}
-	host, info, err := sshHostInfo(ctx, inv.Service)
+	host, err := resolveSSHHost(inv.Service)
 	if err != nil {
-		return "", serverInfo{}, sshInvocation{}, nil, "", err
+		return sshExecutionPlan{}, err
 	}
-	inv, repair, notice, err := withServiceShellCommand(ctx, host, info, inv)
-	if err != nil {
-		return "", serverInfo{}, sshInvocation{}, nil, "", err
+	if strings.TrimSpace(host) == "" {
+		return sshExecutionPlan{}, fmt.Errorf("no host configured")
 	}
-	if err := ensureVMSSHKnownHostsDir(inv.Options); err != nil {
-		return "", serverInfo{}, sshInvocation{}, nil, "", err
+	if inv.Service == "" {
+		return rpcHostShellPlan(host, inv)
 	}
-	return host, info, inv, repair, notice, nil
+	return serviceSSHExecutionPlan(ctx, host, inv)
 }
 
 func ensureSSHCLI() error {
@@ -126,38 +119,10 @@ func sshServiceOrOverride(service string) string {
 	return service
 }
 
-func sshHostInfo(ctx context.Context, service string) (string, serverInfo, error) {
-	host, err := resolveSSHHost(service)
-	if err != nil {
-		return "", serverInfo{}, err
-	}
-	if strings.TrimSpace(host) == "" {
-		return "", serverInfo{}, fmt.Errorf("no host configured")
-	}
-	info, err := fetchSSHServerInfoFunc(ctx, host)
-	if err != nil {
-		return "", serverInfo{}, err
-	}
-	return host, info, nil
-}
-
 func fetchSSHServerInfo(ctx context.Context, host string) (serverInfo, error) {
 	var info serverInfo
 	err := newRPCClient(host).Call(ctx, "catch.Info", nil, &info)
 	return info, err
-}
-
-func withServiceShellCommand(ctx context.Context, host string, info serverInfo, inv sshInvocation) (sshInvocation, *sshKnownHostRepair, string, error) {
-	if inv.Service == "" {
-		return inv, nil, "", nil
-	}
-	command, options, repair, notice, err := serviceShellCommand(ctx, host, inv.Service, info, inv.Command, inv.Options, inv.ForceProxy)
-	if err != nil {
-		return sshInvocation{}, nil, "", err
-	}
-	inv.Command = command
-	inv.Options = options
-	return inv, repair, notice, nil
 }
 
 func runSSHCommand(ctx context.Context, sshArgs []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -169,6 +134,10 @@ func runSSHCommand(ctx context.Context, sshArgs []string, stdin io.Reader, stdou
 }
 
 func runSSHPlan(ctx context.Context, plan sshExecutionPlan, stdin io.Reader, stdout, stderr io.Writer) error {
+	if plan.RPCShell != nil {
+		rpc := plan.RPCShell
+		return execRemoteShellFn(ctx, rpc.Host, rpc.Target, rpc.Service, rpc.Command, stdin, true, stdout)
+	}
 	if strings.TrimSpace(plan.Notice) != "" {
 		if _, err := fmt.Fprintln(writerOrDiscard(stderr), plan.Notice); err != nil {
 			return err
@@ -194,6 +163,58 @@ func runSSHPlan(ctx context.Context, plan sshExecutionPlan, stdin io.Reader, std
 		}
 	}
 	return runSSHCommandFunc(ctx, plan.Args, stdin, stdout, stderr)
+}
+
+func rpcHostShellPlan(host string, inv sshInvocation) (sshExecutionPlan, error) {
+	if len(inv.Options) > 0 || inv.ForceProxy {
+		return sshExecutionPlan{}, fmt.Errorf("SSH options only apply to VM targets")
+	}
+	return sshExecutionPlan{
+		RPCShell: &rpcShellPlan{
+			Host:    host,
+			Target:  catchrpc.ExecTargetHostShell,
+			Command: inv.Command,
+		},
+	}, nil
+}
+
+func serviceSSHExecutionPlan(ctx context.Context, host string, inv sshInvocation) (sshExecutionPlan, error) {
+	service := baseSSHServiceName(inv.Service)
+	resp, err := fetchSSHServiceInfoFunc(ctx, host, service)
+	if err != nil {
+		return sshExecutionPlan{}, err
+	}
+	if !resp.Found {
+		return sshExecutionPlan{}, serviceNotFoundShellError(service, resp.Message)
+	}
+	if resp.Info.ServiceType != serviceTypeVM {
+		if len(inv.Options) > 0 || inv.ForceProxy {
+			return sshExecutionPlan{}, fmt.Errorf("SSH options only apply to VM targets")
+		}
+		return sshExecutionPlan{
+			RPCShell: &rpcShellPlan{
+				Host:    host,
+				Target:  catchrpc.ExecTargetServiceShell,
+				Service: service,
+				Command: inv.Command,
+			},
+		}, nil
+	}
+	if err := ensureSSHCLI(); err != nil {
+		return sshExecutionPlan{}, err
+	}
+	info, err := fetchSSHServerInfoFunc(ctx, host)
+	if err != nil {
+		return sshExecutionPlan{}, err
+	}
+	plan, err := vmSSHExecutionPlanForServiceInfo(host, info, service, resp, inv.Command, inv.Options, inv.ForceProxy)
+	if err != nil {
+		return sshExecutionPlan{}, err
+	}
+	if err := ensureVMSSHKnownHostsDir(plan.Args); err != nil {
+		return sshExecutionPlan{}, err
+	}
+	return plan, nil
 }
 
 func replaySSHStderr(buf *bytes.Buffer, stderr io.Writer) {
@@ -436,15 +457,6 @@ func resolveSSHHostFromProject(host, service string) (string, error) {
 		return host, nil
 	}
 	return resolved, nil
-}
-
-func serviceShellCommand(ctx context.Context, host, service string, info serverInfo, command []string, options []string, forceProxy bool) ([]string, []string, *sshKnownHostRepair, string, error) {
-	service = baseSSHServiceName(service)
-	resp, err := fetchSSHServiceInfoFunc(ctx, host, service)
-	if err != nil {
-		return nil, nil, nil, "", err
-	}
-	return serviceShellCommandPlanFromResponseWithForce(host, service, info, resp, command, options, forceProxy)
 }
 
 func baseSSHServiceName(service string) string {
