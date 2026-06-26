@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/logtail/backoff"
 )
 
@@ -82,9 +83,22 @@ WantedBy=timers.target
 )
 
 var (
+	waitTailscaleReadyFn = func(ctx context.Context, s *SystemdService) error {
+		return s.waitTailscaleReady(ctx)
+	}
+	tailscaleStatusWithoutPeersFn = func(ctx context.Context, sock string) (*ipnstate.Status, error) {
+		lc := local.Client{
+			Socket:        sock,
+			UseSocketOnly: true,
+		}
+		return lc.StatusWithoutPeers(ctx)
+	}
+
 	systemdServiceTmpl = template.Must(template.New("systemdService").Parse(systemdServiceTemplate))
 	systemdTimerTmpl   = template.Must(template.New("systemdTimer").Parse(systemdTimerTemplate))
 )
+
+const tailscaleReadyTimeout = 30 * time.Second
 
 type SystemdUnit struct {
 	Name string // Required name of the service. No spaces suggested.
@@ -574,6 +588,7 @@ func (s *SystemdService) Start() error {
 func (s *SystemdService) StartAuxiliaryUnits() error {
 	af := s.cfg.AsStruct().Artifacts
 	var wg errgroup.Group
+	hasTailscale := false
 	if _, ok := af.Gen(db.ArtifactNetNSService, s.cfg.Generation()); ok {
 		wg.Go(func() error {
 			if err := s.run("start", s.netnsServiceUnit()); err != nil {
@@ -583,6 +598,7 @@ func (s *SystemdService) StartAuxiliaryUnits() error {
 		})
 	}
 	if _, ok := af.Gen(db.ArtifactTSService, s.cfg.Generation()); ok {
+		hasTailscale = true
 		wg.Go(func() error {
 			log.Printf("starting tailscaled for %s", s.Name())
 			if err := s.run("start", s.tailscaledServiceUnit()); err != nil {
@@ -596,7 +612,43 @@ func (s *SystemdService) StartAuxiliaryUnits() error {
 			return nil
 		})
 	}
-	return wg.Wait()
+	if err := wg.Wait(); err != nil {
+		return err
+	}
+	if hasTailscale {
+		ctx, cancel := context.WithTimeout(context.Background(), tailscaleReadyTimeout)
+		defer cancel()
+		if err := waitTailscaleReadyFn(ctx, s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *SystemdService) waitTailscaleReady(ctx context.Context) error {
+	sock := filepath.Join(s.runDir, "tailscaled.sock")
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		st, err := tailscaleStatusWithoutPeersFn(ctx, sock)
+		switch {
+		case err == nil && len(st.TailscaleIPs) > 0:
+			return nil
+		case err != nil:
+			lastErr = err
+		default:
+			lastErr = errors.New("tailscale has no IPs yet")
+		}
+		select {
+		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("tailscale endpoint not ready: %w", lastErr)
+			}
+			return fmt.Errorf("tailscale endpoint not ready: %w", ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (s *SystemdService) hasArtifact(a db.ArtifactName) bool {

@@ -128,15 +128,14 @@ func LoadFirewallEnv(envv []string) (FirewallConfig, error) {
 }
 
 func DetectFirewallBackendFromProbe(probe probeResult) FirewallBackend {
-	if probe.HasNFT {
-		return BackendNFT
-	}
 	version := strings.ToLower(probe.IPTablesVersion)
 	switch {
 	case strings.Contains(version, "nf_tables"):
 		return BackendIPTablesNFT
 	case strings.Contains(version, "legacy"):
 		return BackendIPTablesLegacy
+	case probe.HasNFT:
+		return BackendNFT
 	default:
 		return ""
 	}
@@ -327,12 +326,13 @@ func ensureIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
 		return err
 	}
 	steps := []func() error{
+		cleanupNativeNFTFirewallIfAvailable,
 		func() error { return ensureIPTablesChain(bin, "filter", "YEET_INPUT") },
 		func() error { return ensureIPTablesChain(bin, "filter", "YEET_FORWARD") },
-		func() error { return ensureIPTablesRule(bin, "filter", "INPUT", "-j", "YEET_INPUT") },
-		func() error { return ensureIPTablesRule(bin, "filter", "FORWARD", "-j", "YEET_FORWARD") },
+		func() error { return ensureIPTablesJump(bin, "filter", "INPUT", "YEET_INPUT") },
+		func() error { return ensureIPTablesJump(bin, "filter", "FORWARD", "YEET_FORWARD") },
 		func() error { return ensureIPTablesChain(bin, "nat", "YEET_POSTROUTING") },
-		func() error { return ensureIPTablesRule(bin, "nat", "POSTROUTING", "-j", "YEET_POSTROUTING") },
+		func() error { return ensureIPTablesJump(bin, "nat", "POSTROUTING", "YEET_POSTROUTING") },
 		func() error { return flushIPTablesChain(bin, "filter", "YEET_INPUT") },
 		func() error { return flushIPTablesChain(bin, "filter", "YEET_FORWARD") },
 		func() error { return flushIPTablesChain(bin, "nat", "YEET_POSTROUTING") },
@@ -373,6 +373,13 @@ func ensureIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
 		},
 	)
 	return runFirewallSteps(steps)
+}
+
+func cleanupNativeNFTFirewallIfAvailable() error {
+	if !commandExists("nft") {
+		return nil
+	}
+	return deleteNFTTable()
 }
 
 func runFirewallSteps(steps []func() error) error {
@@ -419,9 +426,10 @@ func verifyOutputContains(label, out string, markers []string) error {
 }
 
 type firewallStateCheck struct {
-	args []string
-	want string
-	err  error
+	table string
+	chain string
+	rule  []string
+	err   error
 }
 
 func verifyIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
@@ -435,90 +443,102 @@ func verifyIPTablesFirewall(backend FirewallBackend, spec FirewallSpec) error {
 func iptablesFirewallStateChecks(spec FirewallSpec) []firewallStateCheck {
 	return []firewallStateCheck{
 		{
-			args: []string{"-S", "YEET_INPUT"},
-			want: "-A YEET_INPUT -i " + spec.BridgeIf + " -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
-			err:  errors.New("missing yeet host input return rule"),
+			table: "filter",
+			chain: "YEET_INPUT",
+			rule:  []string{"-i", spec.BridgeIf, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
+			err:   errors.New("missing yeet host input return rule"),
 		},
 		{
-			args: []string{"-S", "YEET_INPUT"},
-			want: "-A YEET_INPUT -i " + spec.BridgeIf + " -d " + firewallHostCIDR(spec) + " -p udp -m udp --dport 53 -j ACCEPT",
-			err:  errors.New("missing yeet host DNS UDP allow rule"),
+			table: "filter",
+			chain: "YEET_INPUT",
+			rule:  []string{"-i", spec.BridgeIf, "-d", firewallHostCIDR(spec), "-p", "udp", "-m", "udp", "--dport", "53", "-j", "ACCEPT"},
+			err:   errors.New("missing yeet host DNS UDP allow rule"),
 		},
 		{
-			args: []string{"-S", "YEET_INPUT"},
-			want: "-A YEET_INPUT -i " + spec.BridgeIf + " -d " + firewallHostCIDR(spec) + " -p tcp -m tcp --dport 53 -j ACCEPT",
-			err:  errors.New("missing yeet host DNS TCP allow rule"),
+			table: "filter",
+			chain: "YEET_INPUT",
+			rule:  []string{"-i", spec.BridgeIf, "-d", firewallHostCIDR(spec), "-p", "tcp", "-m", "tcp", "--dport", "53", "-j", "ACCEPT"},
+			err:   errors.New("missing yeet host DNS TCP allow rule"),
 		},
 		{
-			args: []string{"-S", "YEET_INPUT"},
-			want: "-A YEET_INPUT -i " + spec.BridgeIf + " -j DROP",
-			err:  errors.New("missing yeet host input drop rule"),
+			table: "filter",
+			chain: "YEET_INPUT",
+			rule:  []string{"-i", spec.BridgeIf, "-j", "DROP"},
+			err:   errors.New("missing yeet host input drop rule"),
 		},
 		{
-			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
-			err:  errors.New("missing yeet forward service return rule"),
+			table: "filter",
+			chain: "YEET_FORWARD",
+			rule:  []string{"-i", spec.BridgeIf, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
+			err:   errors.New("missing yeet forward service return rule"),
 		},
 		{
-			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -o " + spec.BridgeIf + " -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT",
-			err:  errors.New("missing yeet forward return rule"),
+			table: "filter",
+			chain: "YEET_FORWARD",
+			rule:  []string{"-o", spec.BridgeIf, "-m", "conntrack", "--ctstate", "RELATED,ESTABLISHED", "-j", "ACCEPT"},
+			err:   errors.New("missing yeet forward return rule"),
 		},
 		{
-			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d " + spec.SubnetCIDR + " -j ACCEPT",
-			err:  errors.New("missing yeet service subnet allow rule"),
+			table: "filter",
+			chain: "YEET_FORWARD",
+			rule:  []string{"-i", spec.BridgeIf, "-d", spec.SubnetCIDR, "-j", "ACCEPT"},
+			err:   errors.New("missing yeet service subnet allow rule"),
 		},
 		{
-			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 10.0.0.0/8 -j DROP",
-			err:  errors.New("missing yeet RFC1918 drop rule"),
+			table: "filter",
+			chain: "YEET_FORWARD",
+			rule:  []string{"-i", spec.BridgeIf, "-d", "10.0.0.0/8", "-j", "DROP"},
+			err:   errors.New("missing yeet RFC1918 drop rule"),
 		},
 		{
-			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 100.64.0.0/10 -j DROP",
-			err:  errors.New("missing yeet CGNAT drop rule"),
+			table: "filter",
+			chain: "YEET_FORWARD",
+			rule:  []string{"-i", spec.BridgeIf, "-d", "100.64.0.0/10", "-j", "DROP"},
+			err:   errors.New("missing yeet CGNAT drop rule"),
 		},
 		{
-			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -d 192.168.0.0/16 -j DROP",
-			err:  errors.New("missing yeet private drop rule"),
+			table: "filter",
+			chain: "YEET_FORWARD",
+			rule:  []string{"-i", spec.BridgeIf, "-d", "192.168.0.0/16", "-j", "DROP"},
+			err:   errors.New("missing yeet private drop rule"),
 		},
 		{
-			args: []string{"-S", "YEET_FORWARD"},
-			want: "-A YEET_FORWARD -i " + spec.BridgeIf + " -j ACCEPT",
-			err:  errors.New("missing yeet public egress allow rule"),
+			table: "filter",
+			chain: "YEET_FORWARD",
+			rule:  []string{"-i", spec.BridgeIf, "-j", "ACCEPT"},
+			err:   errors.New("missing yeet public egress allow rule"),
 		},
 		{
-			args: []string{"-t", "nat", "-S", "YEET_POSTROUTING"},
-			want: fmt.Sprintf("-A YEET_POSTROUTING -s %s ! -d %s -j MASQUERADE", spec.SubnetCIDR, spec.SubnetCIDR),
-			err:  errors.New("missing yeet postrouting masquerade rule"),
+			table: "nat",
+			chain: "YEET_POSTROUTING",
+			rule:  []string{"-s", spec.SubnetCIDR, "!", "-d", spec.SubnetCIDR, "-j", "MASQUERADE"},
+			err:   errors.New("missing yeet postrouting masquerade rule"),
 		},
 		{
-			args: []string{"-S", "FORWARD"},
-			want: "-A FORWARD -j YEET_FORWARD",
-			err:  errors.New("missing yeet forward jump rule"),
+			table: "filter",
+			chain: "FORWARD",
+			rule:  []string{"-j", "YEET_FORWARD"},
+			err:   errors.New("missing yeet forward jump rule"),
 		},
 		{
-			args: []string{"-S", "INPUT"},
-			want: "-A INPUT -j YEET_INPUT",
-			err:  errors.New("missing yeet input jump rule"),
+			table: "filter",
+			chain: "INPUT",
+			rule:  []string{"-j", "YEET_INPUT"},
+			err:   errors.New("missing yeet input jump rule"),
 		},
 		{
-			args: []string{"-t", "nat", "-S", "POSTROUTING"},
-			want: "-A POSTROUTING -j YEET_POSTROUTING",
-			err:  errors.New("missing yeet postrouting jump rule"),
+			table: "nat",
+			chain: "POSTROUTING",
+			rule:  []string{"-j", "YEET_POSTROUTING"},
+			err:   errors.New("missing yeet postrouting jump rule"),
 		},
 	}
 }
 
 func verifyFirewallStateChecks(bin string, checks []firewallStateCheck) error {
 	for _, check := range checks {
-		out, err := commandOutput(bin, check.args...)
-		if err != nil {
-			return err
-		}
-		if !strings.Contains(out, check.want) {
+		args := append([]string{"-t", check.table, "-C", check.chain}, check.rule...)
+		if _, err := commandOutput(bin, args...); err != nil {
 			return check.err
 		}
 	}
@@ -561,7 +581,7 @@ func probeFirewallBackend() (probeResult, error) {
 	if hasUsableCommand("nft", "--version") {
 		probe.HasNFT = true
 	}
-	for _, candidate := range []string{"iptables-nft", "iptables", "iptables-legacy"} {
+	for _, candidate := range []string{"iptables", "iptables-nft", "iptables-legacy"} {
 		if !commandExists(candidate) {
 			continue
 		}
@@ -608,13 +628,17 @@ func deleteIPTablesChain(bin, table, chain string) error {
 	return runCommandWithInput(nil, bin, "-t", table, "-X", chain)
 }
 
-func ensureIPTablesRule(bin, table, chain string, rule ...string) error {
-	args := append([]string{"-t", table, "-C", chain}, rule...)
-	if _, err := commandOutput(bin, args...); err == nil {
-		return nil
+func ensureIPTablesJump(bin, table, chain, target string) error {
+	rule := []string{"-j", target}
+	checkArgs := append([]string{"-t", table, "-C", chain}, rule...)
+	if _, err := commandOutput(bin, checkArgs...); err == nil {
+		deleteArgs := append([]string{"-t", table, "-D", chain}, rule...)
+		if err := runCommandWithInput(nil, bin, deleteArgs...); err != nil {
+			return err
+		}
 	}
-	args = append([]string{"-t", table, "-A", chain}, rule...)
-	return runCommandWithInput(nil, bin, args...)
+	insertArgs := append([]string{"-t", table, "-I", chain, "1"}, rule...)
+	return runCommandWithInput(nil, bin, insertArgs...)
 }
 
 func appendIPTablesRule(bin, table, chain string, rule ...string) error {

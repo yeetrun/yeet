@@ -22,10 +22,25 @@ func TestDetectFirewallBackendFromProbe(t *testing.T) {
 		want  FirewallBackend
 	}{
 		{
-			name: "prefers nft when available",
+			name: "prefers iptables nft over native nft when both are available",
 			probe: probeResult{
 				HasNFT:          true,
 				IPTablesVersion: "v1.8.11 (nf_tables)",
+			},
+			want: BackendIPTablesNFT,
+		},
+		{
+			name: "prefers iptables legacy over native nft when both are available",
+			probe: probeResult{
+				HasNFT:          true,
+				IPTablesVersion: "v1.8.11 (legacy)",
+			},
+			want: BackendIPTablesLegacy,
+		},
+		{
+			name: "uses native nft when iptables is unavailable",
+			probe: probeResult{
+				HasNFT: true,
 			},
 			want: BackendNFT,
 		},
@@ -541,10 +556,10 @@ func TestEnsureFirewallIPTablesInstallsOwnedChainsAndRules(t *testing.T) {
 	for _, want := range []string{
 		"iptables-nft -t filter -N YEET_INPUT",
 		"iptables-nft -t filter -N YEET_FORWARD",
-		"iptables-nft -t filter -A INPUT -j YEET_INPUT",
-		"iptables-nft -t filter -A FORWARD -j YEET_FORWARD",
+		"iptables-nft -t filter -I INPUT 1 -j YEET_INPUT",
+		"iptables-nft -t filter -I FORWARD 1 -j YEET_FORWARD",
 		"iptables-nft -t nat -N YEET_POSTROUTING",
-		"iptables-nft -t nat -A POSTROUTING -j YEET_POSTROUTING",
+		"iptables-nft -t nat -I POSTROUTING 1 -j YEET_POSTROUTING",
 		"iptables-nft -t filter -F YEET_INPUT",
 		"iptables-nft -t filter -F YEET_FORWARD",
 		"iptables-nft -t nat -F YEET_POSTROUTING",
@@ -652,28 +667,37 @@ func TestVerifyFirewallIPTablesAcceptsExpectedRules(t *testing.T) {
 		switch commandKey(name, args...) {
 		case "iptables-nft --version":
 			return []byte("iptables v1.8.11 (nf_tables)"), nil
-		case "iptables-nft -S YEET_INPUT":
-			return []byte(`-A YEET_INPUT -i yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
--A YEET_INPUT -i yeet0 -d 192.168.100.1/32 -p udp -m udp --dport 53 -j ACCEPT
--A YEET_INPUT -i yeet0 -d 192.168.100.1/32 -p tcp -m tcp --dport 53 -j ACCEPT
--A YEET_INPUT -i yeet0 -j DROP`), nil
-		case "iptables-nft -S YEET_FORWARD":
-			return []byte(`-A YEET_FORWARD -i yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
--A YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
--A YEET_FORWARD -i yeet0 -d 192.168.100.0/24 -j ACCEPT
--A YEET_FORWARD -i yeet0 -d 10.0.0.0/8 -j DROP
--A YEET_FORWARD -i yeet0 -d 100.64.0.0/10 -j DROP
--A YEET_FORWARD -i yeet0 -d 192.168.0.0/16 -j DROP
--A YEET_FORWARD -i yeet0 -j ACCEPT`), nil
-		case "iptables-nft -t nat -S YEET_POSTROUTING":
-			return []byte("-A YEET_POSTROUTING -s 192.168.100.0/24 ! -d 192.168.100.0/24 -j MASQUERADE"), nil
-		case "iptables-nft -S FORWARD":
-			return []byte("-A FORWARD -j YEET_FORWARD"), nil
-		case "iptables-nft -S INPUT":
-			return []byte("-A INPUT -j YEET_INPUT"), nil
-		case "iptables-nft -t nat -S POSTROUTING":
-			return []byte("-A POSTROUTING -j YEET_POSTROUTING"), nil
 		default:
+			if len(args) >= 4 && args[1] == "filter" && args[2] == "-C" {
+				return []byte("ok"), nil
+			}
+			if len(args) >= 4 && args[1] == "nat" && args[2] == "-C" {
+				return []byte("ok"), nil
+			}
+			return nil, fmt.Errorf("unexpected command: %s", commandKey(name, args...))
+		}
+	}, nil)
+
+	if err := VerifyFirewall(BackendIPTablesNFT, spec); err != nil {
+		t.Fatalf("VerifyFirewall() returned error: %v", err)
+	}
+}
+
+func TestVerifyFirewallIPTablesUsesRuleChecksInsteadOfParsingSaveOutput(t *testing.T) {
+	spec := firewallSpecForTest()
+	withFirewallCommandFakes(t, lookupFromSet(map[string]bool{"iptables-nft": true}), func(name string, args ...string) ([]byte, error) {
+		switch commandKey(name, args...) {
+		case "iptables-nft --version":
+			return []byte("iptables v1.8.11 (nf_tables)"), nil
+		case "iptables-nft -S YEET_INPUT":
+			return nil, errors.New("do not parse iptables-save order")
+		default:
+			if len(args) >= 4 && args[1] == "filter" && args[2] == "-C" {
+				return []byte("ok"), nil
+			}
+			if len(args) >= 4 && args[1] == "nat" && args[2] == "-C" {
+				return []byte("ok"), nil
+			}
 			return nil, fmt.Errorf("unexpected command: %s", commandKey(name, args...))
 		}
 	}, nil)
@@ -689,14 +713,15 @@ func TestVerifyFirewallIPTablesReportsMissingRule(t *testing.T) {
 		switch commandKey(name, args...) {
 		case "iptables-nft --version":
 			return []byte("iptables v1.8.11 (nf_tables)"), nil
-		case "iptables-nft -S YEET_INPUT":
-			return []byte(`-A YEET_INPUT -i yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
--A YEET_INPUT -i yeet0 -d 192.168.100.1/32 -p udp -m udp --dport 53 -j ACCEPT
--A YEET_INPUT -i yeet0 -d 192.168.100.1/32 -p tcp -m tcp --dport 53 -j ACCEPT
--A YEET_INPUT -i yeet0 -j DROP`), nil
-		case "iptables-nft -S YEET_FORWARD":
-			return []byte("-A YEET_FORWARD -i yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT"), nil
+		case "iptables-nft -t filter -C YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT":
+			return nil, errors.New("missing")
 		default:
+			if len(args) >= 4 && args[1] == "filter" && args[2] == "-C" {
+				return []byte("ok"), nil
+			}
+			if len(args) >= 4 && args[1] == "nat" && args[2] == "-C" {
+				return []byte("ok"), nil
+			}
 			return nil, fmt.Errorf("unexpected command: %s", commandKey(name, args...))
 		}
 	}, nil)

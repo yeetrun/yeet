@@ -955,9 +955,8 @@ func waitDetachedInitCatchInstall(userAtRemote string, session initInstallSessio
 				return "", err
 			}
 			return strings.TrimSpace(status), nil
-		}
-		if err := streamRemoteInitInstallLog(userAtRemote, session, filter, &lastLog); err != nil {
-			return "", err
+		} else if err := streamRemoteInitInstallLog(userAtRemote, session, filter, &lastLog); err != nil {
+			lastReadErr = err
 		}
 		if time.Now().After(deadline) {
 			if lastReadErr != nil {
