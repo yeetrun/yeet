@@ -22,6 +22,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/svc"
 	"golang.org/x/sys/unix"
 )
@@ -107,6 +108,7 @@ type ttyExecer struct {
 	ctx                context.Context
 	args               []string
 	s                  *Server
+	target             catchrpc.ExecTarget
 	sn                 string
 	hostLabel          string
 	user               string
@@ -338,6 +340,12 @@ func (e *ttyExecer) exec() error {
 	if e.args == nil {
 		e.args = []string{}
 	}
+	switch e.target {
+	case catchrpc.ExecTargetHostShell:
+		return e.hostShellCmdFunc(e.args)
+	case catchrpc.ExecTargetServiceShell:
+		return e.serviceShellCmdFunc(e.args)
+	}
 	if len(e.args) == 0 {
 		return nil
 	}
@@ -494,6 +502,115 @@ func writeln(w io.Writer, a ...any) {
 
 func (e *ttyExecer) newCmd(name string, args ...string) *exec.Cmd {
 	return e.newCmdContext(e.ctx, name, args...)
+}
+
+var passwdFilePath = "/etc/passwd"
+
+func (e *ttyExecer) hostShellCmdFunc(args []string) error {
+	return e.runShellCommand(args, e.defaultShellHomeDir())
+}
+
+func (e *ttyExecer) serviceShellCmdFunc(args []string) error {
+	dir, err := e.serviceShellDir()
+	if err != nil {
+		return err
+	}
+	return e.runShellCommand(args, dir)
+}
+
+func (e *ttyExecer) serviceShellDir() (string, error) {
+	st, err := e.s.serviceType(e.sn)
+	if err != nil {
+		return "", fmt.Errorf("failed to get service type: %w", err)
+	}
+	if st == db.ServiceTypeVM {
+		return "", fmt.Errorf("service %q is a VM service; VM targets use guest SSH", e.sn)
+	}
+	root, err := e.s.serviceRootDir(e.sn)
+	if err != nil {
+		return "", err
+	}
+	return serviceDataDirForRoot(root), nil
+}
+
+func (e *ttyExecer) runShellCommand(args []string, dir string) error {
+	var cmd *exec.Cmd
+	if len(args) == 0 {
+		shell := e.defaultShellPath()
+		cmd = e.newCmd(shell)
+		cmd.Args[0] = "-" + filepath.Base(shell)
+	} else {
+		cmd = e.newCmd(args[0], args[1:]...)
+	}
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	return cmd.Run()
+}
+
+func (e *ttyExecer) defaultShellPath() string {
+	if e != nil && e.s != nil {
+		if user := strings.TrimSpace(e.s.cfg.InstallUser); user != "" {
+			if shell, ok := loginShellForUser(user); ok {
+				return shell
+			}
+		}
+	}
+	if shell, ok := loginShellForUser("root"); ok {
+		return shell
+	}
+	return "/bin/sh"
+}
+
+func (e *ttyExecer) defaultShellHomeDir() string {
+	if e != nil && e.s != nil {
+		if user := strings.TrimSpace(e.s.cfg.InstallUser); user != "" {
+			if entry, ok := passwdEntryForUser(user); ok && entry.home != "" {
+				return entry.home
+			}
+		}
+	}
+	if entry, ok := passwdEntryForUser("root"); ok && entry.home != "" {
+		return entry.home
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return home
+	}
+	return ""
+}
+
+func loginShellForUser(username string) (string, bool) {
+	entry, ok := passwdEntryForUser(username)
+	if !ok || entry.shell == "" {
+		return "", false
+	}
+	return entry.shell, true
+}
+
+type passwdEntry struct {
+	home  string
+	shell string
+}
+
+func passwdEntryForUser(username string) (passwdEntry, bool) {
+	raw, err := os.ReadFile(passwdFilePath)
+	if err != nil {
+		return passwdEntry{}, false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 || fields[0] != username {
+			continue
+		}
+		return passwdEntry{
+			home:  strings.TrimSpace(fields[5]),
+			shell: strings.TrimSpace(fields[6]),
+		}, true
+	}
+	return passwdEntry{}, false
 }
 
 func (e *ttyExecer) newCmdContext(ctx context.Context, name string, args ...string) *exec.Cmd {

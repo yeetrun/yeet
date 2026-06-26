@@ -300,6 +300,15 @@ func newRemoteExecRequest(host string, service string, args []string, stdin io.R
 	return req
 }
 
+func newRemoteShellExecRequest(host string, target catchrpc.ExecTarget, service string, args []string, stdin io.Reader, tty bool) catchrpc.ExecRequest {
+	req := newRemoteExecRequest(host, service, args, stdin, tty)
+	req.Target = target
+	if target == catchrpc.ExecTargetHostShell {
+		req.Service = ""
+	}
+	return req
+}
+
 func remoteTraceEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("YEET_TRACE"))) {
 	case "", "0", "false", "no", "off":
@@ -407,6 +416,19 @@ func prepareRemoteExecSession(ctx context.Context, host string, service string, 
 	return session, nil
 }
 
+func prepareRemoteShellSession(ctx context.Context, host string, target catchrpc.ExecTarget, service string, args []string, stdin io.Reader, tty bool) (*remoteExecSession, error) {
+	session := &remoteExecSession{
+		req:   newRemoteShellExecRequest(host, target, service, args, stdin, applyTTYOverride(tty)),
+		stdin: stdin,
+	}
+	session.configureTTY(ctx)
+	if err := session.prepareTTYStdin(); err != nil {
+		session.close(&err)
+		return nil, err
+	}
+	return session, nil
+}
+
 func (s *remoteExecSession) configureTTY(ctx context.Context) {
 	if !s.req.TTY {
 		return
@@ -489,6 +511,25 @@ func execRemoteTo(ctx context.Context, service string, args []string, stdin io.R
 	host := Host()
 	client := newRPCExecClientFn(host)
 	session, err := prepareRemoteExecSession(ctx, host, service, args, stdin, tty)
+	if err != nil {
+		return err
+	}
+	defer session.close(&err)
+
+	out := &trackingWriter{w: stdout}
+	code, err := client.Exec(ctx, session.req, session.stdin, out, session.resizeCh)
+	if err != nil {
+		return err
+	}
+	return remoteExecExitError(code, session.rawMode, out)
+}
+
+func execRemoteShell(ctx context.Context, host string, target catchrpc.ExecTarget, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) (err error) {
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	client := newRPCExecClientFn(host)
+	session, err := prepareRemoteShellSession(ctx, host, target, service, args, stdin, tty)
 	if err != nil {
 		return err
 	}

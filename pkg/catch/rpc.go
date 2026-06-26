@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -338,11 +339,32 @@ func readExecRequest(conn *websocket.Conn) (catchrpc.ExecRequest, bool) {
 		writeExecExit(conn, 1, "invalid exec request")
 		return catchrpc.ExecRequest{}, false
 	}
-	if req.Service == "" {
-		writeExecExit(conn, 1, "missing service")
+	req, err = normalizeExecRequest(req)
+	if err != nil {
+		writeExecExit(conn, 1, err.Error())
 		return catchrpc.ExecRequest{}, false
 	}
 	return req, true
+}
+
+func normalizeExecRequest(req catchrpc.ExecRequest) (catchrpc.ExecRequest, error) {
+	switch req.Target {
+	case catchrpc.ExecTargetServiceCommand:
+		if strings.TrimSpace(req.Service) == "" {
+			return catchrpc.ExecRequest{}, fmt.Errorf("missing service")
+		}
+		return req, nil
+	case catchrpc.ExecTargetHostShell:
+		req.Service = ""
+		return req, nil
+	case catchrpc.ExecTargetServiceShell:
+		if strings.TrimSpace(req.Service) == "" {
+			return catchrpc.ExecRequest{}, fmt.Errorf("missing service")
+		}
+		return req, nil
+	default:
+		return catchrpc.ExecRequest{}, fmt.Errorf("unknown exec target %q", req.Target)
+	}
 }
 
 func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
@@ -367,6 +389,7 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
 	execer := &ttyExecer{
 		ctx:                ctx,
 		s:                  s,
+		target:             req.Target,
 		args:               req.Args,
 		sn:                 req.Service,
 		hostLabel:          req.Host,

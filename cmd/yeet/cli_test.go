@@ -297,6 +297,53 @@ func TestCopyHelpMentionsVMGuestCopy(t *testing.T) {
 	}
 }
 
+func TestSSHHelpMentionsCatchRPCShellBehavior(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldStdout := os.Stdout
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		os.Stdout = oldStdout
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create stdout temp file: %v", err)
+	}
+	os.Stdout = stdoutFile
+	os.Args = []string{"yeet", "ssh", "--help"}
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("ssh help should not call handler with args %v", args)
+		return nil
+	}
+
+	if got := run(); got != 0 {
+		t.Fatalf("run exit code = %d, want 0", got)
+	}
+	if _, err := stdoutFile.Seek(0, 0); err != nil {
+		t.Fatalf("seek stdout: %v", err)
+	}
+	rawStdout, err := os.ReadFile(stdoutFile.Name())
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	stdout := string(rawStdout)
+	if !strings.Contains(stdout, "Open a catch host shell, a service shell, or a VM guest shell") {
+		t.Fatalf("stdout missing ssh shell description:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "yeet ssh [OPTIONS] [--force-proxy] [<svc>] [-- <remote-cmd...>]") {
+		t.Fatalf("stdout missing ssh usage:\n%s", stdout)
+	}
+	if strings.Contains(stdout, "ssh-opts") {
+		t.Fatalf("stdout still advertises generic ssh options:\n%s", stdout)
+	}
+}
+
 func TestRunGlobalHelpIncludesUpgrade(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn

@@ -48,6 +48,67 @@ func newTestServer(t *testing.T) *Server {
 	return NewUnstartedServer(cfg)
 }
 
+func TestNormalizeExecRequestTargets(t *testing.T) {
+	tests := []struct {
+		name    string
+		req     catchrpc.ExecRequest
+		wantErr string
+	}{
+		{
+			name:    "service command default requires service",
+			req:     catchrpc.ExecRequest{Args: []string{"status"}},
+			wantErr: "missing service",
+		},
+		{
+			name: "service command default with service",
+			req:  catchrpc.ExecRequest{Service: "api", Args: []string{"status"}},
+		},
+		{
+			name: "host shell allows empty service",
+			req:  catchrpc.ExecRequest{Target: catchrpc.ExecTargetHostShell, Args: []string{"whoami"}},
+		},
+		{
+			name: "host shell clears accidental service",
+			req:  catchrpc.ExecRequest{Target: catchrpc.ExecTargetHostShell, Service: "api", Args: []string{"whoami"}},
+		},
+		{
+			name:    "service shell requires service",
+			req:     catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceShell, Args: []string{"pwd"}},
+			wantErr: "missing service",
+		},
+		{
+			name: "service shell with service",
+			req:  catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceShell, Service: "api", Args: []string{"pwd"}},
+		},
+		{
+			name:    "unknown target",
+			req:     catchrpc.ExecRequest{Target: catchrpc.ExecTarget("bogus"), Service: "api"},
+			wantErr: `unknown exec target "bogus"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeExecRequest(tt.req)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("normalizeExecRequest error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("normalizeExecRequest: %v", err)
+			}
+			if tt.req.Target == catchrpc.ExecTargetHostShell && got.Service != "" {
+				t.Fatalf("host shell service = %q, want empty", got.Service)
+			}
+			if got.Target != tt.req.Target {
+				t.Fatalf("target = %q, want %q", got.Target, tt.req.Target)
+			}
+		})
+	}
+}
+
 func TestRPCInfo(t *testing.T) {
 	server := newTestServer(t)
 	ts := httptest.NewServer(server.RPCMux())
