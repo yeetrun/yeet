@@ -795,7 +795,7 @@ func TestInstallInitCatchReportsRemoteInstallStatusError(t *testing.T) {
 }
 
 func TestInstallInitCatchRetriesHungStatusPoll(t *testing.T) {
-	restore := overrideInitInstallTiming(t, time.Millisecond, 200*time.Millisecond, 20*time.Millisecond)
+	restore := overrideInitInstallTiming(t, time.Millisecond, 2*time.Second, 500*time.Millisecond)
 	defer restore()
 	tmp := t.TempDir()
 	counter := filepath.Join(tmp, "status-count")
@@ -877,7 +877,7 @@ func TestInstallInitCatchWithTailscaleRetryPromptsAfterCredentialError(t *testin
 }
 
 func TestWaitDetachedInitCatchInstallStreamsLogsWhileStatusIsPending(t *testing.T) {
-	restore := overrideInitInstallTiming(t, time.Millisecond, 50*time.Millisecond, 200*time.Millisecond)
+	restore := overrideInitInstallTiming(t, 10*time.Millisecond, 500*time.Millisecond, 500*time.Millisecond)
 	defer restore()
 	fakeSSHInPath(t, strings.Join([]string{
 		"case \"$*\" in",

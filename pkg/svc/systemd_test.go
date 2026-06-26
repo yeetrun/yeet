@@ -7,13 +7,16 @@ package svc
 import (
 	"context"
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/yeetrun/yeet/pkg/db"
+	"tailscale.com/ipn/ipnstate"
 )
 
 func TestTailscaleMonitorLoopReturnsAfterStableIDStored(t *testing.T) {
@@ -421,6 +424,89 @@ func TestSystemdServiceEnableUsesPrimaryUnit(t *testing.T) {
 	gotLog := readSystemctlLog(t, systemctlLog)
 	if diff := cmp.Diff([]string{"enable demo.service"}, gotLog); diff != "" {
 		t.Fatalf("systemctl log mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestSystemdServiceStartAuxiliaryUnitsWaitsForTailscaleReady(t *testing.T) {
+	tmp := t.TempDir()
+	systemctlLog := installFakeSystemctl(t, tmp)
+	cfg := db.Service{
+		Name:       "demo",
+		Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSService: artifactAt(1, filepath.Join(tmp, "tailscale.service")),
+		},
+	}
+	svc := &SystemdService{cfg: cfg.View(), runDir: filepath.Join(tmp, "run"), systemdDir: filepath.Join(tmp, "systemd")}
+
+	oldWait := waitTailscaleReadyFn
+	defer func() { waitTailscaleReadyFn = oldWait }()
+	var calls int
+	waitTailscaleReadyFn = func(ctx context.Context, got *SystemdService) error {
+		calls++
+		if got != svc {
+			t.Fatalf("wait service = %#v, want %#v", got, svc)
+		}
+		if err := ctx.Err(); err != nil {
+			t.Fatalf("wait context already done: %v", err)
+		}
+		return nil
+	}
+
+	if err := svc.StartAuxiliaryUnits(); err != nil {
+		t.Fatalf("StartAuxiliaryUnits returned error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("tailscale readiness wait calls = %d, want 1", calls)
+	}
+	gotLog := readSystemctlLog(t, systemctlLog)
+	if diff := cmp.Diff([]string{"start yeet-demo-ts.service"}, gotLog); diff != "" {
+		t.Fatalf("systemctl log mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestSystemdServiceWaitTailscaleReadyReturnsAfterIP(t *testing.T) {
+	tmp := t.TempDir()
+	svc := &SystemdService{runDir: filepath.Join(tmp, "run")}
+	wantSock := filepath.Join(tmp, "run", "tailscaled.sock")
+	oldStatus := tailscaleStatusWithoutPeersFn
+	defer func() { tailscaleStatusWithoutPeersFn = oldStatus }()
+	var calls int
+	tailscaleStatusWithoutPeersFn = func(ctx context.Context, sock string) (*ipnstate.Status, error) {
+		calls++
+		if sock != wantSock {
+			t.Fatalf("sock = %q, want %q", sock, wantSock)
+		}
+		if calls == 1 {
+			return nil, errors.New("socket not ready")
+		}
+		return &ipnstate.Status{TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.1")}}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := svc.waitTailscaleReady(ctx); err != nil {
+		t.Fatalf("waitTailscaleReady returned error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("status calls = %d, want 2", calls)
+	}
+}
+
+func TestSystemdServiceWaitTailscaleReadyReturnsLastErrorOnTimeout(t *testing.T) {
+	tmp := t.TempDir()
+	svc := &SystemdService{runDir: filepath.Join(tmp, "run")}
+	oldStatus := tailscaleStatusWithoutPeersFn
+	defer func() { tailscaleStatusWithoutPeersFn = oldStatus }()
+	tailscaleStatusWithoutPeersFn = func(context.Context, string) (*ipnstate.Status, error) {
+		return &ipnstate.Status{}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err := svc.waitTailscaleReady(ctx)
+	if err == nil || !strings.Contains(err.Error(), "tailscale has no IPs yet") {
+		t.Fatalf("waitTailscaleReady error = %v, want no IPs", err)
 	}
 }
 
