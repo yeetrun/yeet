@@ -170,6 +170,9 @@ yeet run <svc> ./Dockerfile
 yeet docker push <svc> <local-image>:<tag> --run
 ```
 
+Service names created by `yeet run` must use lowercase letters, numbers, and
+dashes, start with a letter, and end with a letter or number.
+
 Deploy a binary, script, or cron job:
 
 ```bash

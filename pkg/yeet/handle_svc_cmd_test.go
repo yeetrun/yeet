@@ -113,6 +113,33 @@ func TestHandleSvcCmdDefaultsToStatus(t *testing.T) {
 	}
 }
 
+func TestHandleSvcRunRejectsInvalidServiceNameBeforeDeploy(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = "bad.name"
+	loadedPrefs.DefaultHost = "host-a"
+	called := false
+	tryRunRemoteImageFn = func(context.Context, string, []string) (bool, error) {
+		called = true
+		return true, nil
+	}
+
+	err := handleSvcRun(svcCommandRequest{
+		Command: svcCommand{
+			Name:    "run",
+			Args:    []string{"ghcr.io/example/app:latest"},
+			RawArgs: []string{"run", "ghcr.io/example/app:latest"},
+		},
+		Service: "bad.name",
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "invalid service name") {
+		t.Fatalf("handleSvcRun error = %v, want invalid service name", err)
+	}
+	if called {
+		t.Fatal("deploy attempt ran for invalid service name")
+	}
+}
+
 func TestHandleStatusSingleHostIncludesHostColumn(t *testing.T) {
 	oldExec := execRemoteFn
 	oldFetch := fetchStatusForHostFn

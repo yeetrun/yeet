@@ -19,6 +19,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/copyutil"
 	"github.com/yeetrun/yeet/pkg/cronutil"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/serviceid"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
 
@@ -274,6 +275,9 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	}
 	if e.sn == SystemService {
 		return fmt.Errorf("cannot run, reserved service name")
+	}
+	if err := serviceid.Validate(e.sn); err != nil {
+		return err
 	}
 	if len(argsIn) > 0 && isVMImagePayload(argsIn[0]) {
 		if len(argsIn) != 1 {
