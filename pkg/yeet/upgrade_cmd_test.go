@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -114,6 +115,43 @@ func TestHandleUpgradeCheckJSON(t *testing.T) {
 	}
 	if decoded.Local.Status != upgradeStatusUpdateAvailable {
 		t.Fatalf("decoded = %#v", decoded)
+	}
+}
+
+func TestHandleUpgradeCheckUsesProjectHostsByDefault(t *testing.T) {
+	restore := stubPrefsState(t, prefs{DefaultHost: "current"})
+	defer restore()
+
+	dir := t.TempDir()
+	cfg := &projectConfigLocation{
+		Path: filepath.Join(dir, projectConfigName),
+		Dir:  dir,
+		Config: &ProjectConfig{
+			Version: projectConfigVersion,
+			Hosts:   []string{"catch-b"},
+			Services: []ServiceEntry{
+				{Name: "uptime-kuma", Host: "catch-a"},
+			},
+		},
+	}
+	if err := saveProjectConfig(cfg); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	t.Chdir(dir)
+
+	old := buildUpgradeReportFn
+	t.Cleanup(func() { buildUpgradeReportFn = old })
+	var gotHosts []string
+	buildUpgradeReportFn = func(_ context.Context, req upgradeCheckRequest) upgradeReport {
+		gotHosts = append([]string(nil), req.Hosts...)
+		return upgradeReport{Local: upgradeComponent{Name: "yeet", Current: "v0.6.0", Latest: "v0.6.0", Status: upgradeStatusCurrent}}
+	}
+
+	if err := handleUpgrade(context.Background(), []string{"check"}, &bytes.Buffer{}, &bytes.Buffer{}, buildinfo.Info{Version: "v0.6.0", Channel: buildinfo.ChannelStable}); err != nil {
+		t.Fatalf("handleUpgrade: %v", err)
+	}
+	if strings.Join(gotHosts, ",") != "catch-a,catch-b,current" {
+		t.Fatalf("hosts = %#v", gotHosts)
 	}
 }
 

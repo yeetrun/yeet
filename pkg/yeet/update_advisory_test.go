@@ -47,7 +47,7 @@ func TestMaybePrintUpdateAdvisoryPrintsLocalUpdate(t *testing.T) {
 		Now:              time.Unix(100, 0),
 		ProjectHostCount: 3,
 	})
-	if !printed || !strings.Contains(out.String(), "Update available") || !strings.Contains(out.String(), "yeet upgrade check --all") {
+	if !printed || !strings.Contains(out.String(), "Update available") || !strings.Contains(out.String(), "yeet upgrade check to scan 3 project catch hosts") {
 		t.Fatalf("advisory = %q", out.String())
 	}
 }

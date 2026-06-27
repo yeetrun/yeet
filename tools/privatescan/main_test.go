@@ -77,6 +77,20 @@ func TestScanDirSkipsBinaryFiles(t *testing.T) {
 	}
 }
 
+func TestScanFilesSkipsMissingCandidates(t *testing.T) {
+	root := t.TempDir()
+	writeLocalInstructions(t, root)
+	writeFile(t, root, "docs/current.md", "safe\n")
+
+	findings, err := scanFiles(root, []string{"docs/current.md", "docs/deleted.md"}, []string{exampleTarget()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("got findings for missing candidate: %#v", findings)
+	}
+}
+
 func writeLocalInstructions(t *testing.T, root string) {
 	t.Helper()
 	writeFile(t, root, "AGENTS.local.md", strings.Join([]string{

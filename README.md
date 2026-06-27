@@ -160,12 +160,12 @@ yeet ssh -- curl -fsS http://127.0.0.1:18080/ >/dev/null
 Remove the service and its data:
 
 ```bash
-yeet rm --clean-data --clean-config hello
+yeet rm --clean hello
 ```
 
-Read the confirmation prompt before accepting. `--clean-data` deletes the
-service data, including VM disks for VM services. `--clean-config` removes the
-disposable `yeet.toml` entry.
+Read the confirmation prompt before accepting. `--clean` deletes the service
+data, including VM disks for VM services, and removes the disposable
+`yeet.toml` entry.
 
 ## Common Commands
 
@@ -249,8 +249,9 @@ yeet start <svc>
 yeet rm <svc>
 ```
 
-`yeet rm <svc>` keeps service data by default. Add `--clean-data` only when you
-want yeet to delete the service data too.
+`yeet rm <svc>` keeps service data by default and prompts before removing the
+local config entry. Add `--clean` when you want yeet to delete service data and
+remove the local `yeet.toml` entry too.
 
 ## Target a Host
 
@@ -272,37 +273,37 @@ yeet prefs --host=<catch-host> --save
 
 ## Upgrade
 
-Check the local CLI and the selected catch host:
+Check the local CLI and catch hosts:
 
 ```bash
 yeet upgrade check
 ```
 
-Upgrade both from verified GitHub release assets:
+Upgrade from verified GitHub release assets:
 
 ```bash
 yeet upgrade
 ```
 
-For projects with multiple catch hosts in `yeet.toml`, check and upgrade all of
-them explicitly:
+When you run from a service workspace with `yeet.toml`, `yeet upgrade` includes
+all project catch hosts plus the default catch host. Use `--host=<catch-host>`
+only when you want to upgrade one catch host.
 
 ```bash
-yeet upgrade check --all
-yeet upgrade --all
+yeet upgrade --host=<catch-host>
 ```
 
 To reinstall a release even when a component already looks current, newer, or
 locally built:
 
 ```bash
-yeet upgrade --all --force
+yeet upgrade --force
 ```
 
 To install a specific public release:
 
 ```bash
-yeet upgrade --all --version v0.6.1 --force
+yeet upgrade --version v0.6.1 --force
 ```
 
 ## Optional Capabilities

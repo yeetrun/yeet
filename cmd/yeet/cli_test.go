@@ -191,7 +191,7 @@ func TestRunRemoveHelpShowsOptionsAndPlainAliases(t *testing.T) {
 		t.Fatalf("read stdout: %v", err)
 	}
 	stdout := string(rawStdout)
-	for _, want := range []string{"ALIASES:", "rm", "-y, --yes", "--clean-config", "--clean-data"} {
+	for _, want := range []string{"ALIASES:", "rm", "-y, --yes", "--clean                  Delete service data", "--clean-config", "--clean-data"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q:\n%s", want, stdout)
 		}
@@ -240,7 +240,7 @@ func TestRunRemoveHelpAgentShowsOptions(t *testing.T) {
 		t.Fatalf("read stdout: %v", err)
 	}
 	stdout := string(rawStdout)
-	for _, want := range []string{"# yeet remove Agent Context", "--clean-config", "--clean-data"} {
+	for _, want := range []string{"# yeet remove Agent Context", "### `--clean`", "--clean-config", "--clean-data"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q:\n%s", want, stdout)
 		}
@@ -401,7 +401,7 @@ func TestRunUpgradeRoutesToLocalHandler(t *testing.T) {
 		rawArgs = oldRawArgs
 	})
 
-	os.Args = []string{"yeet", "upgrade", "check", "--all"}
+	os.Args = []string{"yeet", "upgrade", "check"}
 	handleSvcCmdFn = func(args []string) error {
 		t.Fatalf("upgrade should not use remote handler with args %v", args)
 		return nil
@@ -415,7 +415,7 @@ func TestRunUpgradeRoutesToLocalHandler(t *testing.T) {
 	if code := run(); code != 0 {
 		t.Fatalf("run exit code = %d, want 0", code)
 	}
-	if !reflect.DeepEqual(got, []string{"upgrade", "check", "--all"}) {
+	if !reflect.DeepEqual(got, []string{"upgrade", "check"}) {
 		t.Fatalf("upgrade args = %#v, want command args", got)
 	}
 }

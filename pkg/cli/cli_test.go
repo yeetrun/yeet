@@ -139,10 +139,10 @@ func TestParseUpgrade(t *testing.T) {
 		want    UpgradeFlags
 		wantPos []string
 	}{
-		{name: "check all json", args: []string{"check", "--all", "--json"}, want: UpgradeFlags{All: true, JSON: true}, wantPos: []string{"check"}},
+		{name: "check json", args: []string{"check", "--json"}, want: UpgradeFlags{JSON: true}, wantPos: []string{"check"}},
 		{name: "host yes", args: []string{"--host", "edge-a", "--yes"}, want: UpgradeFlags{Host: "edge-a", Yes: true}},
 		{name: "check flag alias", args: []string{"--check"}, want: UpgradeFlags{Check: true}},
-		{name: "force specific version", args: []string{"--all", "--force", "--version", "v0.6.1"}, want: UpgradeFlags{All: true, Force: true, Version: "v0.6.1"}},
+		{name: "force specific version", args: []string{"--force", "--version", "v0.6.1"}, want: UpgradeFlags{Force: true, Version: "v0.6.1"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -157,6 +157,12 @@ func TestParseUpgrade(t *testing.T) {
 				t.Fatalf("pos = %#v, want %#v", pos, tt.wantPos)
 			}
 		})
+	}
+}
+
+func TestParseUpgradeRejectsAllFlag(t *testing.T) {
+	if _, _, err := ParseUpgrade([]string{"--all"}); err == nil || !strings.Contains(err.Error(), "all") {
+		t.Fatalf("ParseUpgrade --all error = %v, want unknown flag", err)
 	}
 }
 
@@ -453,6 +459,22 @@ func TestParseRemoveFlags(t *testing.T) {
 	}
 	if !flags.Yes {
 		t.Fatalf("Yes = false, want true")
+	}
+	if !flags.CleanConfig {
+		t.Fatalf("CleanConfig = false, want true")
+	}
+	if !flags.CleanData {
+		t.Fatalf("CleanData = false, want true")
+	}
+	if len(outArgs) != 0 {
+		t.Fatalf("expected no args, got %v", outArgs)
+	}
+}
+
+func TestParseRemoveCleanEnablesDataAndConfigCleanup(t *testing.T) {
+	flags, outArgs, err := ParseRemove([]string{"--clean"})
+	if err != nil {
+		t.Fatalf("ParseRemove failed: %v", err)
 	}
 	if !flags.CleanConfig {
 		t.Fatalf("CleanConfig = false, want true")

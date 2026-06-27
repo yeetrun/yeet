@@ -131,6 +131,9 @@ func scanFiles(root string, files []string, patterns []string) ([]Finding, error
 		path := filepath.Join(root, filepath.FromSlash(rel))
 		info, err := os.Stat(path)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
 			return nil, err
 		}
 		if info.IsDir() {

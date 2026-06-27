@@ -74,6 +74,26 @@ func TestBridgeServiceArgsServiceHostQualified(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsRemoveCleanAfterService(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"remove", "svc-a", "--clean"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatalf("expected to bridge remove service")
+	}
+	if service != "svc-a" {
+		t.Fatalf("service = %q, want svc-a", service)
+	}
+	if host != "" {
+		t.Fatalf("host = %q, want empty", host)
+	}
+	want := []string{"remove", "--clean"}
+	if !reflect.DeepEqual(bridged, want) {
+		t.Fatalf("bridged = %#v, want %#v", bridged, want)
+	}
+}
+
 func TestBridgeServiceArgsTerminatorTreatsFollowingTokenAsService(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

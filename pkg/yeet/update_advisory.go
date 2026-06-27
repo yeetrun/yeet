@@ -59,7 +59,7 @@ func maybePrintUpdateAdvisory(w io.Writer, req updateAdvisoryRequest) bool {
 	}
 	_, _ = fmt.Fprintf(w, "Update available: yeet %s -> %s.\n", req.Local.Version, latest)
 	if req.ProjectHostCount > 1 {
-		_, _ = fmt.Fprintf(w, "Run: yeet upgrade check --all to scan %d project catch hosts.\n", req.ProjectHostCount)
+		_, _ = fmt.Fprintf(w, "Run: yeet upgrade check to scan %d project catch hosts.\n", req.ProjectHostCount)
 	} else {
 		_, _ = fmt.Fprintln(w, "Run: yeet upgrade check")
 	}
