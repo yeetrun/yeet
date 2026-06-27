@@ -30,8 +30,8 @@ the catch host.
 
 ## Quick Start
 
-This path installs yeet locally, bootstraps one host, and runs a disposable
-container.
+This path installs yeet locally, bootstraps one host, creates a service
+workspace, and runs a disposable container.
 
 ### 1. Install yeet locally
 
@@ -126,7 +126,22 @@ If yeet did not save this host as the default, pass the catch hostname:
 yeet --host=<catch-host> status
 ```
 
-### 5. Run a disposable service
+### 5. Create a service workspace
+
+Do this before your first `yeet run`. A successful deploy writes `yeet.toml` in
+the current directory.
+
+```bash
+mkdir -p ~/yeet-services
+cd ~/yeet-services
+```
+
+Use this directory for real homelab services too. See the
+[Service Workspace](https://yeetrun.com/docs/getting-started/service-workspace)
+guide before deploying third-party Compose apps, env files, Dockerfiles,
+scripts, or binaries.
+
+### 6. Run a disposable service
 
 Start with a small container:
 
@@ -145,13 +160,17 @@ yeet ssh -- curl -fsS http://127.0.0.1:18080/ >/dev/null
 Remove the service and its data:
 
 ```bash
-yeet rm --clean-data hello
+yeet rm --clean-data --clean-config hello
 ```
 
 Read the confirmation prompt before accepting. `--clean-data` deletes the
-service data, including VM disks for VM services.
+service data, including VM disks for VM services. `--clean-config` removes the
+disposable `yeet.toml` entry.
 
 ## Common Commands
+
+Run deploy commands from your service workspace. Yeet writes `yeet.toml` in the
+current directory after a successful deploy.
 
 Use the guided deploy form when you do not want to remember flags:
 
