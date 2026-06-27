@@ -170,6 +170,14 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Prepare the changelog update inside `website/`, then include the updated
   submodule pointer in this repo's release work. Route release commits and
   pushes through the Version Control finish-to-main flow.
+- Before creating a release tag, prove the release commit pins a published
+  website submodule commit. `git -C website status --short --branch` must be
+  clean and not ahead of its upstream, `git rev-parse HEAD:website` in the root
+  repo must match `git -C website rev-parse HEAD`, and that same SHA must be
+  advertised by the website remote branch that users can fetch. If the root
+  gitlink points at an unpublished, rewritten, or otherwise unadvertised
+  website commit, stop and fix the website commit/push or the root gitlink
+  before tagging.
 - Create an annotated tag with message equal to the version only (example:
   `git tag -a v0.1.2 -m "v0.1.2"`). Raw `git` is allowed as a release/tagging
   exception for tag creation if GitButler does not support tags.
