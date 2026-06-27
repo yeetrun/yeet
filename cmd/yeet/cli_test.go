@@ -204,7 +204,7 @@ func TestRunRemoveHelpShowsOptionsAndPlainAliases(t *testing.T) {
 	}
 }
 
-func TestRunRemoveHelpLLMShowsOptions(t *testing.T) {
+func TestRunRemoveHelpAgentShowsOptions(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
 	oldStdout := os.Stdout
@@ -223,7 +223,7 @@ func TestRunRemoveHelpLLMShowsOptions(t *testing.T) {
 		t.Fatalf("create stdout temp file: %v", err)
 	}
 	os.Stdout = stdoutFile
-	os.Args = []string{"yeet", "rm", "--help-llm"}
+	os.Args = []string{"yeet", "rm", "--help-agent"}
 	handleSvcCmdFn = func(args []string) error {
 		t.Fatalf("remove help should not call handler with args %v", args)
 		return nil
@@ -240,7 +240,7 @@ func TestRunRemoveHelpLLMShowsOptions(t *testing.T) {
 		t.Fatalf("read stdout: %v", err)
 	}
 	stdout := string(rawStdout)
-	for _, want := range []string{"# yeet remove", "--clean-config", "--clean-data"} {
+	for _, want := range []string{"# yeet remove Agent Context", "--clean-config", "--clean-data"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q:\n%s", want, stdout)
 		}
@@ -463,7 +463,7 @@ func TestRunCallsUpdateAdvisoryAfterSuccessfulCommand(t *testing.T) {
 	}
 }
 
-func TestRunCronHelpLLMUsesSingleServicePlaceholder(t *testing.T) {
+func TestRunCronHelpAgentUsesSingleServicePlaceholder(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
 	oldStdout := os.Stdout
@@ -482,7 +482,7 @@ func TestRunCronHelpLLMUsesSingleServicePlaceholder(t *testing.T) {
 		t.Fatalf("create stdout temp file: %v", err)
 	}
 	os.Stdout = stdoutFile
-	os.Args = []string{"yeet", "cron", "--help-llm"}
+	os.Args = []string{"yeet", "cron", "--help-agent"}
 	handleSvcCmdFn = func(args []string) error {
 		t.Fatalf("cron help should not call handler with args %v", args)
 		return nil
@@ -499,7 +499,7 @@ func TestRunCronHelpLLMUsesSingleServicePlaceholder(t *testing.T) {
 		t.Fatalf("read stdout: %v", err)
 	}
 	stdout := string(rawStdout)
-	wantUsage := `yeet [GLOBAL_OPTIONS] cron <SERVICE> [OPTIONS] FILE "<cron expr>" [-- <args...>]`
+	wantUsage := `yeet [GLOBAL_OPTIONS] cron <SERVICE> FILE "<cron expr>" [-- <args...>]`
 	if !strings.Contains(stdout, wantUsage) {
 		t.Fatalf("stdout missing usage %q:\n%s", wantUsage, stdout)
 	}
@@ -508,7 +508,7 @@ func TestRunCronHelpLLMUsesSingleServicePlaceholder(t *testing.T) {
 	}
 }
 
-func TestRunListHostsHelpLLMNotesLocalTailscaleRequirement(t *testing.T) {
+func TestRunListHostsHelpAgentNotesLocalTailscaleRequirement(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
 	oldStdout := os.Stdout
@@ -527,7 +527,7 @@ func TestRunListHostsHelpLLMNotesLocalTailscaleRequirement(t *testing.T) {
 		t.Fatalf("create stdout temp file: %v", err)
 	}
 	os.Stdout = stdoutFile
-	os.Args = []string{"yeet", "list-hosts", "--help-llm"}
+	os.Args = []string{"yeet", "list-hosts", "--help-agent"}
 	handleSvcCmdFn = func(args []string) error {
 		t.Fatalf("list-hosts help should not call handler with args %v", args)
 		return nil
@@ -549,7 +549,7 @@ func TestRunListHostsHelpLLMNotesLocalTailscaleRequirement(t *testing.T) {
 	}
 }
 
-func TestRunInitHelpLLMUsesMachineHostAndVMToolsFlag(t *testing.T) {
+func TestRunInitHelpAgentUsesMachineHostAndVMToolsFlag(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
 	oldStdout := os.Stdout
@@ -568,7 +568,7 @@ func TestRunInitHelpLLMUsesMachineHostAndVMToolsFlag(t *testing.T) {
 		t.Fatalf("create stdout temp file: %v", err)
 	}
 	os.Stdout = stdoutFile
-	os.Args = []string{"yeet", "init", "--help-llm"}
+	os.Args = []string{"yeet", "init", "--help-agent"}
 	handleSvcCmdFn = func(args []string) error {
 		t.Fatalf("init help should not call handler with args %v", args)
 		return nil

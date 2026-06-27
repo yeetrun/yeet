@@ -16,7 +16,7 @@ import (
 func TestMaybePrintUpdateAdvisorySuppressesJSONAndUpgrade(t *testing.T) {
 	cache := newUpdateCheckCache()
 	cache.LatestStable = releaseCacheEntry{Tag: "v0.5.13", CheckedAt: time.Unix(100, 0)}
-	for _, args := range [][]string{{"upgrade", "check"}, {"status", "--format=json"}, {"version"}} {
+	for _, args := range [][]string{{"upgrade", "check"}, {"status", "--format=json"}, {"status", "--help-agent"}, {"version"}} {
 		var out bytes.Buffer
 		printed := maybePrintUpdateAdvisory(&out, updateAdvisoryRequest{
 			Args:      args,

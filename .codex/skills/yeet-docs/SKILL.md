@@ -14,7 +14,7 @@ Use this skill when a change affects what users run or read.
 - `website/docs/changelog.mdx` only for tagged releases.
 - CLI help metadata in `pkg/cli/cli.go` and `cmd/yeet/cli.go`.
 - Help reference:
-  `.codex/skills/yeet-cli/references/yeet-help-llm.md`.
+  `.codex/skills/yeet-cli/references/yeet-help-agent.md`.
 
 ## Rules
 

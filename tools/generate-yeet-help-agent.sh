@@ -8,7 +8,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-out="${1:-.codex/skills/yeet-cli/references/yeet-help-llm.md}"
+out="${1:-.codex/skills/yeet-cli/references/yeet-help-agent.md}"
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
@@ -27,13 +27,13 @@ seen_key() {
 run_help() {
   local cmd="$1"
   if [[ -z "$cmd" ]]; then
-    mise exec -- go run ./cmd/yeet --help-llm
+    mise exec -- go run ./cmd/yeet --help-agent
     return
   fi
 
   local args=()
   read -r -a args <<<"$cmd"
-  mise exec -- go run ./cmd/yeet "${args[@]}" --help-llm
+  mise exec -- go run ./cmd/yeet "${args[@]}" --help-agent
 }
 
 section_title() {
@@ -52,18 +52,18 @@ section_title() {
 }
 
 extract_help_targets() {
-  grep -Eo 'Get detailed help: `yeet [^`]+ --help-llm`' |
-    sed -E 's/^Get detailed help: `yeet (.*) --help-llm`$/\1/'
+  grep -Eo 'Run `yeet [^`]+ --help-agent`' |
+    sed -E 's/^Run `yeet (.*) --help-agent`$/\1/'
 }
 
 {
   cat <<'HEADER'
-# Yeet CLI --help-llm Outputs
+# Yeet CLI --help-agent Outputs
 
 Generated from this repo using:
 
 ```bash
-tools/generate-yeet-help-llm.sh
+tools/generate-yeet-help-agent.sh
 ```
 
 If command behavior changes, rerun the generator and commit the updated

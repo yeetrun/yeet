@@ -12,10 +12,10 @@ Use this skill for operating yeet from this repository. Prefer `go run
 
 - Read `docs/agent/codebase-map.md` for command ownership.
 - Read `AGENTS.local.md` before live host testing.
-- For exact syntax, use `go run ./cmd/yeet <command> --help-llm`.
+- For exact syntax, use `go run ./cmd/yeet <command> --help-agent`.
 - If help output changes, update
-  `.codex/skills/yeet-cli/references/yeet-help-llm.md` with
-  `tools/generate-yeet-help-llm.sh`.
+  `.codex/skills/yeet-cli/references/yeet-help-agent.md` with
+  `tools/generate-yeet-help-agent.sh`.
 
 ## Common Commands
 
