@@ -155,6 +155,31 @@ func TestTrackingWriterRecordsLastByte(t *testing.T) {
 	}
 }
 
+func TestRawTerminalOutputWriterConvertsBareNewlines(t *testing.T) {
+	var buf bytes.Buffer
+	w := &rawTerminalOutputWriter{w: &buf}
+	if _, err := w.Write([]byte("one\ntwo\r\nthree\n")); err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if got, want := buf.String(), "one\r\ntwo\r\nthree\r\n"; got != want {
+		t.Fatalf("raw terminal output = %q, want %q", got, want)
+	}
+}
+
+func TestRawTerminalOutputWriterPreservesCRLFAcrossChunks(t *testing.T) {
+	var buf bytes.Buffer
+	w := &rawTerminalOutputWriter{w: &buf}
+	if _, err := w.Write([]byte("one\r")); err != nil {
+		t.Fatalf("first Write returned error: %v", err)
+	}
+	if _, err := w.Write([]byte("\ntwo\n")); err != nil {
+		t.Fatalf("second Write returned error: %v", err)
+	}
+	if got, want := buf.String(), "one\r\ntwo\r\n"; got != want {
+		t.Fatalf("raw terminal output = %q, want %q", got, want)
+	}
+}
+
 func TestTerminalStdinReadErrorHelpers(t *testing.T) {
 	for _, err := range []error{io.EOF, io.ErrClosedPipe, os.ErrClosed} {
 		if !isTerminalStdinReadError(err) {
@@ -595,6 +620,65 @@ func TestExecRemoteOutputIncludesRemoteOutputOnExitError(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("execRemoteOutput error = %q, want %q", err, want)
 		}
+	}
+}
+
+func TestExecRemoteRawModeNormalizesPermissionErrorNewlines(t *testing.T) {
+	restoreExecRemoteGlobals(t)
+	loadedPrefs.DefaultHost = "host-a"
+
+	oldStdin := os.Stdin
+	oldStdout := os.Stdout
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdin Pipe error: %v", err)
+	}
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("stdout Pipe error: %v", err)
+	}
+	t.Cleanup(func() {
+		os.Stdin = oldStdin
+		os.Stdout = oldStdout
+		_ = stdinR.Close()
+		_ = stdinW.Close()
+		_ = stdoutR.Close()
+		_ = stdoutW.Close()
+	})
+	os.Stdin = stdinR
+	os.Stdout = stdoutW
+
+	isTerminalFn = func(int) bool { return true }
+	termGetSizeFn = func(int) (int, int, error) { return 100, 24, nil }
+	termMakeRawFn = func(int) (*term.State, error) { return &term.State{}, nil }
+	termRestoreFn = func(int, *term.State) error { return nil }
+	newRPCExecClientFn = func(string) rpcExecClient {
+		return fakeExecClient{
+			execFn: func(ctx context.Context, req catchrpc.ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan catchrpc.Resize) (int, error) {
+				_, err := io.WriteString(stdout, "Error: missing yeet permission \"ssh\"; update your Tailscale grant for yeetrun.com/app/yeet:\nhttps://yeetrun.com/docs/security/tailscale-access-grants\n")
+				if err != nil {
+					return 0, err
+				}
+				return 1, nil
+			},
+		}
+	}
+
+	err = execRemote(context.Background(), systemServiceName, []string{"ssh"}, nil, true)
+	var exitErr remoteExitError
+	if !errors.As(err, &exitErr) || exitErr.code != 1 {
+		t.Fatalf("execRemote error = %v, want remote exit 1", err)
+	}
+	if err := stdoutW.Close(); err != nil {
+		t.Fatalf("stdout close error: %v", err)
+	}
+	got, err := io.ReadAll(stdoutR)
+	if err != nil {
+		t.Fatalf("ReadAll stdout error: %v", err)
+	}
+	want := "Error: missing yeet permission \"ssh\"; update your Tailscale grant for yeetrun.com/app/yeet:\r\nhttps://yeetrun.com/docs/security/tailscale-access-grants\r\n"
+	if string(got) != want {
+		t.Fatalf("stdout = %q, want %q", string(got), want)
 	}
 }
 
