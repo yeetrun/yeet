@@ -553,6 +553,22 @@ func TestClientExecDialError(t *testing.T) {
 	}
 }
 
+func TestClientExecDialErrorIncludesHTTPBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `missing yeet permission "ssh"; update your Tailscale grant`, http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	_, err := NewClient(host, port).Exec(context.Background(), ExecRequest{Target: ExecTargetHostShell}, nil, nil, nil)
+	if err == nil {
+		t.Fatal("Exec error = nil, want bad handshake")
+	}
+	if !strings.Contains(err.Error(), `missing yeet permission "ssh"`) {
+		t.Fatalf("Exec error = %v, want auth body", err)
+	}
+}
+
 func TestClientExecSendsResizeMessages(t *testing.T) {
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 	resizeSeen := make(chan ExecMessage, 1)
@@ -886,6 +902,22 @@ func TestClientEventsDialError(t *testing.T) {
 	}
 	if err := client.Events(context.Background(), EventsRequest{}, func(Event) {}); !errors.Is(err, wantErr) {
 		t.Fatalf("Events dial error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestClientEventsDialErrorIncludesHTTPBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `missing yeet permission "read"; update your Tailscale grant`, http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	err := NewClient(host, port).Events(context.Background(), EventsRequest{}, func(Event) {})
+	if err == nil {
+		t.Fatal("Events error = nil, want bad handshake")
+	}
+	if !strings.Contains(err.Error(), `missing yeet permission "read"`) {
+		t.Fatalf("Events error = %v, want auth body", err)
 	}
 }
 

@@ -112,6 +112,21 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Keep functions small and explicit; avoid hidden side effects in CLI parsing.
 - Avoid magic strings; use constants or shared registries for command names/keywords.
 
+## Authorization & Permissions
+- Yeet access control is operation-scoped. Future features must explicitly
+  classify their required permission before implementation: `read` for
+  observation, `manage` for high-trust mutation, or `ssh` for catch-mediated
+  host/service shell access.
+- Any new CLI command, web action, RPC method, registry path, TTY command,
+  background operation, or service-management behavior must document and test
+  its permission mapping.
+- If a new or changed feature exposes a user-facing operation boundary, ask the
+  user to confirm the intended permission unless it is already specified in the
+  request or an approved design.
+- VM guest SSH is a separate path from catch-mediated shell access. It should
+  require the permission needed to read VM connection metadata, while SSH keys
+  authorize guest login.
+
 ## Testing Guidelines
 - Use Go’s `testing` package; name tests `TestXxx`.
 - Prefer table-driven tests for flag parsing and CLI routing.

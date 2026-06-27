@@ -384,15 +384,9 @@ func TestRPCMethodNotFound(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	var rpcResp catchrpc.Response
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if rpcResp.Error == nil {
-		t.Fatalf("expected rpc error")
-	}
-	if rpcResp.Error.Code != catchrpc.ErrMethodNotFound {
-		t.Fatalf("unexpected error code: %d", rpcResp.Error.Code)
+	if resp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body=%s, want 401", resp.StatusCode, body)
 	}
 }
 
@@ -536,6 +530,142 @@ func TestRPCAuthorizeDenied(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestRPCMethodAuthorization(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		have       permissionSet
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "info requires read", method: "catch.Info", have: newPermissionSet(permissionRead), wantStatus: http.StatusOK},
+		{name: "info denied without read", method: "catch.Info", have: newPermissionSet(permissionManage), wantStatus: http.StatusUnauthorized, wantBody: `missing yeet permission "read"`},
+		{name: "tailscale setup requires full admin permissions", method: "catch.TailscaleSetup", have: newPermissionSet(permissionRead, permissionManage, permissionSSH), wantStatus: http.StatusOK},
+		{name: "tailscale setup denied without manage", method: "catch.TailscaleSetup", have: newPermissionSet(permissionRead, permissionSSH), wantStatus: http.StatusUnauthorized, wantBody: `missing yeet permission "manage"`},
+		{name: "tailscale setup denied without ssh", method: "catch.TailscaleSetup", have: newPermissionSet(permissionRead, permissionManage), wantStatus: http.StatusUnauthorized, wantBody: `missing yeet permission "ssh"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newAuthzTestServer(t, tt.have)
+			ts := httptest.NewServer(server.RPCMux())
+			defer ts.Close()
+
+			req := catchrpc.Request{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: tt.method}
+			if tt.method == "catch.TailscaleSetup" {
+				params, err := json.Marshal(catchrpc.TailscaleSetupRequest{ClientSecret: "tskey-client-test"})
+				if err != nil {
+					t.Fatalf("marshal params: %v", err)
+				}
+				req.Params = params
+			}
+			body, err := json.Marshal(req)
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			resp, err := http.Post(ts.URL+"/rpc", "application/json", bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != tt.wantStatus {
+				t.Fatalf("status = %d body=%s, want %d", resp.StatusCode, raw, tt.wantStatus)
+			}
+			if tt.wantBody != "" && !strings.Contains(string(raw), tt.wantBody) {
+				t.Fatalf("body = %q, want %q", raw, tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestRPCUnknownMethodFailsClosedBeforeDispatch(t *testing.T) {
+	server := newAuthzTestServer(t, newPermissionSet(permissionRead, permissionManage, permissionSSH))
+	ts := httptest.NewServer(server.RPCMux())
+	defer ts.Close()
+
+	resp, err := http.Post(ts.URL+"/rpc", "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"catch.Future"}`))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d body=%s, want 401", resp.StatusCode, body)
+	}
+}
+
+func TestRPCExecAuthorizesAfterReadingExecRequest(t *testing.T) {
+	tests := []struct {
+		name string
+		req  catchrpc.ExecRequest
+		have permissionSet
+		want string
+	}{
+		{
+			name: "host shell requires ssh",
+			req:  catchrpc.ExecRequest{Target: catchrpc.ExecTargetHostShell, Args: []string{"sh", "-c", "echo host"}},
+			have: newPermissionSet(permissionRead, permissionManage),
+			want: `missing yeet permission "ssh"`,
+		},
+		{
+			name: "service command requires mapped manage",
+			req:  catchrpc.ExecRequest{Service: "svc", Args: []string{"remove", "--yes"}},
+			have: newPermissionSet(permissionRead),
+			want: `missing yeet permission "manage"`,
+		},
+		{
+			name: "service command requires mapped read",
+			req:  catchrpc.ExecRequest{Service: "svc", Args: []string{"logs"}},
+			have: newPermissionSet(permissionManage),
+			want: `missing yeet permission "read"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newAuthzTestServer(t, tt.have)
+			ts := httptest.NewServer(server.RPCMux())
+			defer ts.Close()
+
+			conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/rpc/exec", nil)
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			defer conn.Close()
+			if err := conn.WriteJSON(tt.req); err != nil {
+				t.Fatalf("write request: %v", err)
+			}
+			var output bytes.Buffer
+			var exitErr string
+			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			for {
+				mt, data, err := conn.ReadMessage()
+				if err != nil {
+					t.Fatalf("read message: %v output=%q", err, output.String())
+				}
+				if mt == websocket.BinaryMessage {
+					output.Write(data)
+					continue
+				}
+				var msg catchrpc.ExecMessage
+				if err := json.Unmarshal(data, &msg); err != nil {
+					t.Fatalf("decode exec message: %v", err)
+				}
+				if msg.Type == catchrpc.ExecMsgExit {
+					if msg.Code == 0 {
+						t.Fatal("exec exit code = 0, want denied")
+					}
+					exitErr = msg.Error
+					break
+				}
+			}
+			combined := output.String() + exitErr
+			if !strings.Contains(combined, tt.want) {
+				t.Fatalf("combined output = %q, want %q", combined, tt.want)
+			}
+		})
 	}
 }
 

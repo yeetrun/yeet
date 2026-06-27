@@ -29,7 +29,9 @@ import (
 	"github.com/yeetrun/yeet/pkg/registry"
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/client/local"
+	"tailscale.com/client/tailscale/apitype"
 	tsapi "tailscale.com/client/tailscale/v2"
+	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/util/set"
 )
 
@@ -157,7 +159,9 @@ type Config struct {
 	ContainerdSocket     string
 	RegistryStorage      registry.Storage
 	LocalClient          *local.Client
-	AuthorizeFunc        func(ctx context.Context, remoteAddr string) error `json:"-"`
+	StatusFunc           func(ctx context.Context) (*ipnstate.Status, error)                          `json:"-"`
+	WhoIsFunc            func(ctx context.Context, remoteAddr string) (*apitype.WhoIsResponse, error) `json:"-"`
+	AuthorizeFunc        func(ctx context.Context, remoteAddr string) error                           `json:"-"`
 }
 
 // NewUnstartedServer creates a new Server instance with the provided
@@ -261,25 +265,10 @@ func validateCatchNodeIdentity(serverTags []string) error {
 	return nil
 }
 
-// verifyCaller checks if the caller is authorized to connect to the server.
-//
-// Catch is infrastructure, so its own tsnet node must be tagged. Once a tagged
-// catch node receives a Tailscale connection, tailnet ACLs are the source of
-// truth for caller authorization.
+// verifyCaller checks the base caller identity. Operation-specific callers
+// should use authorizeCaller with required yeet permissions.
 func (s *Server) verifyCaller(ctx context.Context, remoteAddr string) error {
-	if s.cfg.AuthorizeFunc != nil {
-		return s.cfg.AuthorizeFunc(ctx, remoteAddr)
-	}
-	lc := s.cfg.LocalClient
-	st, err := lc.StatusWithoutPeers(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get local client status: %v", err)
-	}
-	var selfTags []string
-	if st.Self.IsTagged() {
-		selfTags = st.Self.Tags.AsSlice()
-	}
-	return validateCatchNodeIdentity(selfTags)
+	return s.authorizeCaller(ctx, remoteAddr)
 }
 
 func (s *Server) dockerComposeService(sn string) (*svc.DockerComposeService, error) {

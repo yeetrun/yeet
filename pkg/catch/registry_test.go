@@ -149,6 +149,22 @@ func TestRegistryLoopbackWriteRejected(t *testing.T) {
 	}
 }
 
+func TestRegistryTailnetRequiresManagePermission(t *testing.T) {
+	server := newAuthzTestServer(t, newPermissionSet(permissionRead))
+	req := httptest.NewRequest(http.MethodHead, "http://example/v2/", nil)
+	req.RemoteAddr = "100.64.0.2:1234"
+	rr := httptest.NewRecorder()
+
+	server.registry.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d body=%s, want 401", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `missing yeet permission "manage"`) {
+		t.Fatalf("body = %q, want missing manage", rr.Body.String())
+	}
+}
+
 type recordingStorage struct {
 	repo               string
 	reference          string

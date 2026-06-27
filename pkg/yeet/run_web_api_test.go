@@ -768,6 +768,41 @@ func TestRunWebAPIDeployStreamMirrorsStderr(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIDeploySurfacesPermissionErrorInJobOutput(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
+		return errors.New(`missing yeet permission "manage"; update your Tailscale grant for yeetrun.com/app/yeet:
+https://yeet.run/docs/security/tailscale-access-grants`)
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	var terminal bytes.Buffer
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, Out: &terminal})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	waitRunWebJobState(t, s, jobID, runWebJobFailed)
+
+	stream := runWebAPIRequest(t, s, http.MethodGet, "/api/deploy/"+jobID+"/stream", nil)
+	output := decodeRunWebOutputText(t, parseRunWebSSE(t, stream.Body.String()))
+	for _, want := range []string{`missing yeet permission "manage"`, "https://yeet.run/docs/security/tailscale-access-grants"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("stream output missing %q:\n%s", want, output)
+		}
+		if !strings.Contains(terminal.String(), want) {
+			t.Fatalf("terminal output missing %q:\n%s", want, terminal.String())
+		}
+	}
+}
+
 func TestRunWebAPIDeployKeepsTerminalBackedOutputTTY(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
 	oldExecDraft := executeRunDraftWithOptionsFn
