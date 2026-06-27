@@ -79,7 +79,7 @@ func (cr *containerRegistry) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		if err := cr.s.verifyCaller(r.Context(), r.RemoteAddr); err != nil {
+		if err := cr.s.authorizeCaller(r.Context(), r.RemoteAddr, permissionManage); err != nil {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
 		}

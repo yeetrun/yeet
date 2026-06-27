@@ -6,6 +6,7 @@ package catch
 
 import (
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,21 @@ func TestRPCEventsRemovesListenerAfterClientClose(t *testing.T) {
 	}
 
 	waitForEventListeners(t, server, 0)
+}
+
+func TestRPCEventsRequiresReadPermission(t *testing.T) {
+	server := newAuthzTestServer(t, newPermissionSet(permissionManage))
+	ts := newTestHTTPServer(t, server)
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/rpc/events"
+	_, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		t.Fatal("events dial succeeded without read permission")
+	}
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("events status = %#v err=%v, want 401", resp, err)
+	}
 }
 
 func waitForEventListeners(t *testing.T, server *Server, want int) {

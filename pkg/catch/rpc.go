@@ -32,16 +32,16 @@ var rpcUpgrader = websocket.Upgrader{
 // RPCMux returns the RPC handler that serves JSON-RPC and streaming endpoints.
 func (s *Server) RPCMux() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/rpc", s.authZ(http.HandlerFunc(s.handleRPC)))
-	mux.Handle("/rpc/exec", s.authZ(http.HandlerFunc(s.handleExecWS)))
-	mux.Handle("/rpc/events", s.authZ(http.HandlerFunc(s.handleEventsWS)))
+	mux.Handle("/rpc", http.HandlerFunc(s.handleRPC))
+	mux.Handle("/rpc/exec", http.HandlerFunc(s.handleExecWS))
+	mux.Handle("/rpc/events", s.authZ(permissionRead, http.HandlerFunc(s.handleEventsWS)))
 	mux.Handle("/v2/", s.registry)
 	return mux
 }
 
-func (s *Server) authZ(next http.Handler) http.Handler {
+func (s *Server) authZ(required yeetPermission, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := s.verifyCaller(r.Context(), r.RemoteAddr); err != nil {
+		if err := s.authorizeCaller(r.Context(), r.RemoteAddr, required); err != nil {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
 		}
@@ -141,6 +141,10 @@ func (s *Server) handleRPC(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.JSONRPC != "2.0" || req.Method == "" {
 		writeRPCError(w, req.ID, catchrpc.ErrInvalidRequest, "invalid request", nil)
+		return
+	}
+	if err := s.authorizeRPCMethod(r.Context(), r.RemoteAddr, req.Method); err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 	if len(req.ID) == 0 {
@@ -329,6 +333,11 @@ func writeExecExit(conn *websocket.Conn, code int, errText string) {
 	_ = conn.WriteMessage(websocket.TextMessage, payload)
 }
 
+func writeExecAuthError(conn *websocket.Conn, err error) {
+	_ = conn.WriteMessage(websocket.BinaryMessage, []byte("Error: "+err.Error()+"\n"))
+	writeExecExit(conn, 1, err.Error())
+}
+
 func readExecRequest(conn *websocket.Conn) (catchrpc.ExecRequest, bool) {
 	_, data, err := conn.ReadMessage()
 	if err != nil {
@@ -376,6 +385,10 @@ func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {
 
 	req, ok := readExecRequest(conn)
 	if !ok {
+		return
+	}
+	if err := s.authorizeExecRequest(r.Context(), r.RemoteAddr, req); err != nil {
+		writeExecAuthError(conn, err)
 		return
 	}
 

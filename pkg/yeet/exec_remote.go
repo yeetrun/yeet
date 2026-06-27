@@ -574,7 +574,7 @@ func execRemoteOutput(ctx context.Context, host string, service string, args []s
 	if err != nil {
 		return nil, err
 	}
-	if err := remoteExitCodeError(code); err != nil {
+	if err := remoteExitCodeErrorWithOutput(code, buf.Bytes()); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
@@ -603,6 +603,18 @@ func remoteExitCodeError(code int) error {
 		return nil
 	}
 	return remoteExitError{code: code}
+}
+
+func remoteExitCodeErrorWithOutput(code int, output []byte) error {
+	err := remoteExitCodeError(code)
+	if err == nil {
+		return nil
+	}
+	msg := strings.TrimSpace(string(output))
+	if msg == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, msg)
 }
 
 func closeExecStreamPipe(pw *io.PipeWriter, err error) error {

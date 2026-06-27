@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -191,9 +192,9 @@ func writeAllWithRetry(w io.Writer, p []byte) error {
 }
 
 func (c *Client) Exec(ctx context.Context, req ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan Resize) (int, error) {
-	conn, _, err := c.wsDialer.DialContext(ctx, c.wsURL+"/rpc/exec", nil)
+	conn, resp, err := c.wsDialer.DialContext(ctx, c.wsURL+"/rpc/exec", nil)
 	if err != nil {
-		return 0, err
+		return 0, websocketDialError(err, resp)
 	}
 	defer closeIgnoringError(conn)
 
@@ -210,6 +211,24 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest, stdin io.Reader, std
 	go readExecMessages(conn, stdout, exitCh, errCh)
 
 	return waitExecResult(ctx, exitCh, errCh)
+}
+
+func websocketDialError(err error, resp *http.Response) error {
+	if err == nil {
+		return nil
+	}
+	if resp == nil || resp.Body == nil {
+		return err
+	}
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return err
+	}
+	msg := strings.TrimSpace(string(body))
+	if msg == "" {
+		return err
+	}
+	return fmt.Errorf("%w: %s", err, msg)
 }
 
 func writeExecRequest(conn *websocket.Conn, req ExecRequest) error {
@@ -326,9 +345,9 @@ func waitExecResult(ctx context.Context, exitCh <-chan int, errCh <-chan error) 
 }
 
 func (c *Client) Events(ctx context.Context, req EventsRequest, onEvent func(Event)) error {
-	conn, _, err := c.wsDialer.DialContext(ctx, c.wsURL+"/rpc/events", nil)
+	conn, resp, err := c.wsDialer.DialContext(ctx, c.wsURL+"/rpc/events", nil)
 	if err != nil {
-		return err
+		return websocketDialError(err, resp)
 	}
 	defer closeIgnoringError(conn)
 
