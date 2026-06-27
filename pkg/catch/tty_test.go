@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -113,13 +114,13 @@ func TestHostShellTargetRunsCommand(t *testing.T) {
 
 	server := newTestServer(t)
 	server.cfg.InstallUser = "deploy"
-	var out bytes.Buffer
+	out := newTestDuplexRW("")
 	execer := &ttyExecer{
 		ctx:    context.Background(),
 		s:      server,
 		target: catchrpc.ExecTargetHostShell,
 		args:   []string{"/bin/sh", "-c", "printf host-shell"},
-		rw:     &out,
+		rw:     out,
 	}
 
 	if err := execer.exec(); err != nil {
@@ -147,13 +148,13 @@ func TestHostShellTargetRunsCommandInInstallUserHome(t *testing.T) {
 
 	server := newTestServer(t)
 	server.cfg.InstallUser = "deploy"
-	var out bytes.Buffer
+	out := newTestDuplexRW("")
 	execer := &ttyExecer{
 		ctx:    context.Background(),
 		s:      server,
 		target: catchrpc.ExecTargetHostShell,
 		args:   []string{"pwd"},
-		rw:     &out,
+		rw:     out,
 	}
 
 	if err := execer.exec(); err != nil {
@@ -164,6 +165,36 @@ func TestHostShellTargetRunsCommandInInstallUserHome(t *testing.T) {
 	if got != want {
 		t.Fatalf("pwd = %q, want %q", got, want)
 	}
+}
+
+type testDuplexRW struct {
+	inMu  sync.Mutex
+	input *strings.Reader
+
+	outMu  sync.Mutex
+	output bytes.Buffer
+}
+
+func newTestDuplexRW(input string) *testDuplexRW {
+	return &testDuplexRW{input: strings.NewReader(input)}
+}
+
+func (rw *testDuplexRW) Read(p []byte) (int, error) {
+	rw.inMu.Lock()
+	defer rw.inMu.Unlock()
+	return rw.input.Read(p)
+}
+
+func (rw *testDuplexRW) Write(p []byte) (int, error) {
+	rw.outMu.Lock()
+	defer rw.outMu.Unlock()
+	return rw.output.Write(p)
+}
+
+func (rw *testDuplexRW) String() string {
+	rw.outMu.Lock()
+	defer rw.outMu.Unlock()
+	return rw.output.String()
 }
 
 func TestServiceShellTargetRunsCommandInServiceDataDir(t *testing.T) {
@@ -180,14 +211,14 @@ func TestServiceShellTargetRunsCommandInServiceDataDir(t *testing.T) {
 		t.Fatalf("seed service: %v", err)
 	}
 
-	var out bytes.Buffer
+	out := newTestDuplexRW("")
 	execer := &ttyExecer{
 		ctx:    context.Background(),
 		s:      server,
 		target: catchrpc.ExecTargetServiceShell,
 		sn:     "api",
 		args:   []string{"pwd"},
-		rw:     &out,
+		rw:     out,
 	}
 
 	if err := execer.exec(); err != nil {
