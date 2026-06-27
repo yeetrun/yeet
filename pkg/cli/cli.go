@@ -875,8 +875,9 @@ func RemoteCommandRegistry() yargs.Registry {
 	subcommands := make(map[string]yargs.CommandSpec, len(remoteCommandInfos))
 	for name, info := range remoteCommandInfos {
 		subcommands[name] = yargs.CommandSpec{
-			Info:       toSubCommandInfo(name, info),
-			ArgsSchema: info.ArgsSchema,
+			Info:        toSubCommandInfo(name, info),
+			FlagsSchema: info.FlagsSchema,
+			ArgsSchema:  info.ArgsSchema,
 		}
 	}
 	groups := make(map[string]yargs.GroupSpec, len(remoteGroupInfos))
@@ -884,8 +885,9 @@ func RemoteCommandRegistry() yargs.Registry {
 		cmds := make(map[string]yargs.CommandSpec, len(info.Commands))
 		for cmdName, cmd := range info.Commands {
 			cmds[cmdName] = yargs.CommandSpec{
-				Info:       toSubCommandInfo(cmdName, cmd),
-				ArgsSchema: cmd.ArgsSchema,
+				Info:        toSubCommandInfo(cmdName, cmd),
+				FlagsSchema: cmd.FlagsSchema,
+				ArgsSchema:  cmd.ArgsSchema,
 			}
 		}
 		groupInfo := yargs.GroupInfo{
@@ -919,13 +921,12 @@ func RemoteGroupFlagSpecs() map[string]map[string]map[string]FlagSpec {
 
 func toSubCommandInfo(name string, info CommandInfo) yargs.SubCommandInfo {
 	return yargs.SubCommandInfo{
-		Name:            name,
-		Description:     info.Description,
-		Usage:           info.Usage,
-		Examples:        info.Examples,
-		Hidden:          info.Hidden,
-		Aliases:         info.Aliases,
-		LLMInstructions: "",
+		Name:        name,
+		Description: info.Description,
+		Usage:       info.Usage,
+		Examples:    info.Examples,
+		Hidden:      info.Hidden,
+		Aliases:     info.Aliases,
 	}
 }
 

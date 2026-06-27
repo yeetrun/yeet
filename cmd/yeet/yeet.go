@@ -96,7 +96,7 @@ func handleSchemaBackedHelp(args []string, config yargs.HelpConfig) bool {
 		target := yargs.ApplyAliases(args[1:], config)
 		return printSchemaBackedHelp(target, config, false)
 	}
-	if hasLLMHelpFlag(args) {
+	if hasAgentHelpFlag(args) {
 		return printSchemaBackedHelp(args, config, true)
 	}
 	if hasHumanHelpFlag(args) {
@@ -105,29 +105,136 @@ func handleSchemaBackedHelp(args []string, config yargs.HelpConfig) bool {
 	return false
 }
 
-func printSchemaBackedHelp(args []string, config yargs.HelpConfig, llm bool) bool {
+func printSchemaBackedHelp(args []string, config yargs.HelpConfig, agent bool) bool {
 	if len(args) == 0 {
 		return false
 	}
-	cmd := args[0]
-	info, ok := cli.RemoteCommandInfo(cmd)
-	if !ok || (info.FlagsSchema == nil && info.ArgsSchema == nil) {
+	reg, path, ok := schemaBackedHelpTarget(args, config)
+	if !ok {
 		return false
 	}
-	flagsSchema := info.FlagsSchema
-	if flagsSchema == nil {
-		flagsSchema = struct{}{}
-	}
-	argsSchema := info.ArgsSchema
-	if argsSchema == nil {
-		argsSchema = struct{}{}
-	}
-	if llm {
-		fmt.Print(yargs.GenerateSubCommandHelpLLM(config, cmd, globalFlagsParsed{}, flagsSchema, argsSchema))
+	if agent {
+		fmt.Print(yargs.GenerateAgentHelpFromRegistry(reg, path, globalFlagsParsed{}))
 		return true
 	}
+	if len(path) != 1 {
+		return false
+	}
+	cmd := path[0]
+	info, ok := reg.CommandSpec(path)
+	if !ok {
+		return false
+	}
+	flagsSchema := schemaOrEmpty(info.FlagsSchema)
+	argsSchema := schemaOrEmpty(info.ArgsSchema)
 	fmt.Print(stripMarkdownAliasBlock(yargs.GenerateSubCommandHelp(config, cmd, globalFlagsParsed{}, flagsSchema, argsSchema)))
 	return true
+}
+
+func schemaBackedHelpTarget(args []string, config yargs.HelpConfig) (yargs.Registry, []string, bool) {
+	reg := cli.RemoteCommandRegistry()
+	reg.Command = config.Command
+	reg = withAgentUsage(reg)
+	resolved, ok, err := yargs.ResolveCommandWithRegistry(args, reg)
+	if err != nil || !ok {
+		return reg, nil, false
+	}
+	spec, ok := reg.CommandSpec(resolved.Path)
+	if !ok || (spec.FlagsSchema == nil && spec.ArgsSchema == nil) {
+		return reg, nil, false
+	}
+	return reg, resolved.Path, true
+}
+
+func withAgentUsage(reg yargs.Registry) yargs.Registry {
+	for name, spec := range reg.SubCommands {
+		spec.Info.Usage = schemaAwareAgentUsage([]string{name}, spec.Info.Usage, spec.ArgsSchema)
+		reg.SubCommands[name] = spec
+	}
+	for groupName, group := range reg.Groups {
+		for cmdName, spec := range group.Commands {
+			spec.Info.Usage = schemaAwareAgentUsage([]string{groupName, cmdName}, spec.Info.Usage, spec.ArgsSchema)
+			group.Commands[cmdName] = spec
+		}
+		reg.Groups[groupName] = group
+	}
+	return reg
+}
+
+func schemaAwareAgentUsage(path []string, usage string, argsSchema any) string {
+	usage = strings.TrimSpace(usage)
+	pathText := strings.Join(path, " ")
+	if usage == "" {
+		return strings.TrimSpace(pathText + " " + agentArgUsageSuffix(argsSchema))
+	}
+	if usageStartsWithCommandPath(usage, path) {
+		return usage
+	}
+	if usageStartsWithSchemaArg(usage, argsSchema) {
+		return pathText + " " + usage
+	}
+	return strings.TrimSpace(pathText + " " + agentArgUsageSuffix(argsSchema) + " " + usage)
+}
+
+func usageStartsWithCommandPath(usage string, path []string) bool {
+	if len(path) == 0 {
+		return false
+	}
+	pathText := strings.Join(path, " ")
+	if usage == pathText || strings.HasPrefix(usage, pathText+" ") {
+		return true
+	}
+	last := path[len(path)-1]
+	return usage == last || strings.HasPrefix(usage, last+" ")
+}
+
+func usageStartsWithSchemaArg(usage string, argsSchema any) bool {
+	specs := yargs.ExtractArgSpecs(argsSchema)
+	if len(specs) == 0 {
+		return false
+	}
+	token := usage
+	if idx := strings.IndexAny(token, " \t"); idx >= 0 {
+		token = token[:idx]
+	}
+	token = strings.Trim(token, "<>[].")
+	first := strings.ToUpper(specs[0].Name)
+	switch first {
+	case "SERVICE":
+		return strings.EqualFold(token, "service") || strings.EqualFold(token, "svc")
+	default:
+		return strings.EqualFold(token, first)
+	}
+}
+
+func agentArgUsageSuffix(argsSchema any) string {
+	specs := yargs.ExtractArgSpecs(argsSchema)
+	parts := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		parts = append(parts, agentArgUsage(spec))
+	}
+	return strings.Join(parts, " ")
+}
+
+func agentArgUsage(spec yargs.ArgSpec) string {
+	name := strings.ToUpper(spec.Name)
+	if spec.Variadic {
+		if spec.MinCount > 0 {
+			return fmt.Sprintf("<%s...>", name)
+		}
+		return fmt.Sprintf("[%s...]", name)
+	}
+	if spec.Required {
+		return fmt.Sprintf("<%s>", name)
+	}
+	return fmt.Sprintf("[%s]", name)
+}
+
+func schemaOrEmpty(schema any) any {
+	if schema != nil {
+		return schema
+	}
+	return struct{}{}
 }
 
 func hasHumanHelpFlag(args []string) bool {
@@ -139,9 +246,9 @@ func hasHumanHelpFlag(args []string) bool {
 	return false
 }
 
-func hasLLMHelpFlag(args []string) bool {
+func hasAgentHelpFlag(args []string) bool {
 	for _, arg := range args {
-		if arg == "--help-llm" {
+		if arg == "--help-agent" {
 			return true
 		}
 	}

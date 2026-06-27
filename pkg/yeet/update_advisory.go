@@ -88,7 +88,7 @@ func suppressUpdateAdvisory(req updateAdvisoryRequest) bool {
 func suppressUpdateAdvisoryArg(arg string) bool {
 	return arg == "--help" ||
 		arg == "-h" ||
-		arg == "--help-llm" ||
+		arg == "--help-agent" ||
 		arg == "--json" ||
 		strings.Contains(arg, "json")
 }
