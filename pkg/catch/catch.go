@@ -206,6 +206,9 @@ func (s *Server) Start() {
 }
 
 func (s *Server) reconcileRuntimeState() {
+	if err := s.reconcileTailscaleDNSConfigs(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("tailscale DNS config reconciliation failed: %v", err)
+	}
 	if err := s.reconcileNetNSBackedDockerServices(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
 		log.Printf("netns reconciliation failed: %v", err)
 	}

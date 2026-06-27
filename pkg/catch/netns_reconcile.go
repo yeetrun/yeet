@@ -6,16 +6,20 @@ package catch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"tailscale.com/ipn"
+	"tailscale.com/types/opt"
 )
 
 type dockerNetNSReconciler interface {
@@ -54,6 +58,108 @@ func (s *Server) reconcileNetNSBackedDockerServices(ctx context.Context) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+func (s *Server) reconcileTailscaleDNSConfigs(ctx context.Context) error {
+	dv, err := s.getDB()
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for name, sv := range dv.Services().All() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		service := sv.AsStruct()
+		restarted, err := reconcileTailscaleDNSConfig(service, s.serviceRootFromView(sv))
+		if err != nil {
+			log.Printf("tailscale DNS config reconciliation failed for service %q: %v", name, err)
+			errs = append(errs, err)
+			continue
+		}
+		if restarted {
+			log.Printf("reconciled tailscale DNS config for service %q; restarted tailscale sidecar", name)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func reconcileTailscaleDNSConfig(service *db.Service, serviceRoot string) (bool, error) {
+	if _, ok := service.Artifacts.Gen(db.ArtifactTSService, service.Generation); !ok {
+		return false, nil
+	}
+
+	configPaths := tailscaleDNSConfigPaths(service, serviceRoot)
+	if len(configPaths) == 0 {
+		return false, nil
+	}
+
+	var changed bool
+	var errs []error
+	for _, configPath := range configPaths {
+		fileChanged, err := reconcileTailscaleDNSConfigFile(configPath)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		changed = changed || fileChanged
+	}
+	if err := errors.Join(errs...); err != nil {
+		return false, err
+	}
+	if !changed {
+		return false, nil
+	}
+	return true, restartTailscaleSidecarForService(service.Name)
+}
+
+func tailscaleDNSConfigPaths(service *db.Service, serviceRoot string) []string {
+	seen := map[string]bool{}
+	var paths []string
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" || seen[path] {
+			return
+		}
+		seen[path] = true
+		paths = append(paths, path)
+	}
+
+	if configPath, ok := service.Artifacts.Gen(db.ArtifactTSConfig, service.Generation); ok {
+		add(configPath)
+	}
+	if serviceRoot = strings.TrimSpace(serviceRoot); serviceRoot != "" {
+		add(filepath.Join(serviceRunDirForRoot(serviceRoot), "tailscaled.json"))
+	}
+	return paths
+}
+
+func reconcileTailscaleDNSConfigFile(configPath string) (bool, error) {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read tailscale config %s: %w", configPath, err)
+	}
+	var cfg ipn.ConfigVAlpha
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return false, fmt.Errorf("parse tailscale config %s: %w", configPath, err)
+	}
+	if cfg.AcceptDNS.EqualBool(false) {
+		return false, nil
+	}
+
+	cfg.AcceptDNS = opt.NewBool(false)
+	next, err := json.Marshal(cfg)
+	if err != nil {
+		return false, fmt.Errorf("marshal tailscale config %s: %w", configPath, err)
+	}
+	if err := os.WriteFile(configPath, next, 0o644); err != nil {
+		return false, fmt.Errorf("write tailscale config %s: %w", configPath, err)
+	}
+	return true, nil
 }
 
 func (s *Server) reconcileNetNSBackedDockerService(ctx context.Context, name string, sv db.ServiceView) (bool, error) {

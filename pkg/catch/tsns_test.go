@@ -227,6 +227,9 @@ func TestInstallTSWritesArtifactsWithoutNetworkWhenAuthKeyProvided(t *testing.T)
 	if cfg.ExitNode == nil || *cfg.ExitNode != "exit.example" {
 		t.Fatalf("ExitNode = %#v, want exit.example", cfg.ExitNode)
 	}
+	if !cfg.AcceptDNS.EqualBool(false) {
+		t.Fatalf("AcceptDNS = %q, want explicit false", cfg.AcceptDNS)
+	}
 
 	unitRaw, err := os.ReadFile(artifacts[db.ArtifactTSService])
 	if err != nil {
