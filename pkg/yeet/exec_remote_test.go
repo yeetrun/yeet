@@ -575,7 +575,7 @@ func TestExecRemoteOutputBuildsRequestAndReturnsOutput(t *testing.T) {
 func TestExecRemoteOutputIncludesRemoteOutputOnExitError(t *testing.T) {
 	restoreExecRemoteGlobals(t)
 
-	denial := "Error: missing yeet permission \"read\"; update your Tailscale grant for yeetrun.com/app/yeet:\nhttps://yeet.run/docs/security/tailscale-access-grants\n"
+	denial := "Error: missing yeet permission \"read\"; update your Tailscale grant for yeetrun.com/app/yeet:\nhttps://yeetrun.com/docs/security/tailscale-access-grants\n"
 	newRPCExecClientFn = func(string) rpcExecClient {
 		return fakeExecClient{
 			execFn: func(ctx context.Context, req catchrpc.ExecRequest, stdin io.Reader, stdout io.Writer, resizeCh <-chan catchrpc.Resize) (int, error) {
@@ -591,7 +591,7 @@ func TestExecRemoteOutputIncludesRemoteOutputOnExitError(t *testing.T) {
 	if err == nil {
 		t.Fatal("execRemoteOutput error = nil, want remote exit with denial text")
 	}
-	for _, want := range []string{"remote exit 1", `missing yeet permission "read"`, "https://yeet.run/docs/security/tailscale-access-grants"} {
+	for _, want := range []string{"remote exit 1", `missing yeet permission "read"`, "https://yeetrun.com/docs/security/tailscale-access-grants"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("execRemoteOutput error = %q, want %q", err, want)
 		}

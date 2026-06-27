@@ -163,7 +163,7 @@ Authorization failures should be actionable and stable:
 
 ```text
 missing yeet permission "manage"; update your Tailscale grant for yeetrun.com/app/yeet:
-https://yeet.run/docs/security/tailscale-access-grants
+https://yeetrun.com/docs/security/tailscale-access-grants
 ```
 
 The message should name the missing permission and explain that the fix belongs
@@ -179,7 +179,7 @@ but should still tell the user which one is missing.
 Add a dedicated docs page:
 
 ```text
-https://yeet.run/docs/security/tailscale-access-grants
+https://yeetrun.com/docs/security/tailscale-access-grants
 ```
 
 The page should start with the simple recommended grant:

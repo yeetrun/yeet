@@ -58,6 +58,11 @@ yeet --help
 Do this before running `yeet init`. Catch must join your tailnet as a tagged
 device, usually `tag:catch`. User-owned catch nodes are rejected.
 
+Your tailnet policy must also allow the setup user to reach catch on TCP port
+`41548` with the `yeetrun.com/app/yeet` app permissions `read`, `manage`, and
+`ssh`. First setup requires all three; split them into narrower roles later if
+you need to.
+
 In the Tailscale admin console, open `Trust credentials` -> `Credential` ->
 `OAuth`, then create an OAuth client secret.
 
@@ -74,7 +79,9 @@ Keep the `tskey-client-...` secret ready. Interactive `yeet init` asks for it
 during first setup.
 
 See [Tailscale Setup](https://yeetrun.com/docs/concepts/tailscale#first-time-host-setup)
-for the minimal policy snippet.
+for the minimal policy snippet, and
+[Tailscale Access Grants](https://yeetrun.com/docs/security/tailscale-access-grants)
+for the permission model.
 
 ### 3. Bootstrap catch on a host
 

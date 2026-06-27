@@ -780,7 +780,7 @@ func TestRunWebAPIDeploySurfacesPermissionErrorInJobOutput(t *testing.T) {
 	}
 	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
 		return errors.New(`missing yeet permission "manage"; update your Tailscale grant for yeetrun.com/app/yeet:
-https://yeet.run/docs/security/tailscale-access-grants`)
+https://yeetrun.com/docs/security/tailscale-access-grants`)
 	}
 
 	root := t.TempDir()
@@ -793,7 +793,7 @@ https://yeet.run/docs/security/tailscale-access-grants`)
 
 	stream := runWebAPIRequest(t, s, http.MethodGet, "/api/deploy/"+jobID+"/stream", nil)
 	output := decodeRunWebOutputText(t, parseRunWebSSE(t, stream.Body.String()))
-	for _, want := range []string{`missing yeet permission "manage"`, "https://yeet.run/docs/security/tailscale-access-grants"} {
+	for _, want := range []string{`missing yeet permission "manage"`, "https://yeetrun.com/docs/security/tailscale-access-grants"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("stream output missing %q:\n%s", want, output)
 		}

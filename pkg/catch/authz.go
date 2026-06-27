@@ -15,7 +15,7 @@ import (
 	"tailscale.com/tailcfg"
 )
 
-const yeetAccessGrantsDocsURL = "https://yeet.run/docs/security/tailscale-access-grants"
+const yeetAccessGrantsDocsURL = "https://yeetrun.com/docs/security/tailscale-access-grants"
 
 const yeetAppCapability tailcfg.PeerCapability = "yeetrun.com/app/yeet"
 

@@ -542,7 +542,7 @@ Version: @DEB_VERSION@
 Section: kernel
 Priority: optional
 Architecture: amd64
-Maintainer: yeet <maintainers@yeet.run>
+Maintainer: yeet <maintainers@yeetrun.com>
 Description: yeet Firecracker VM kernel artifact
  This package installs a yeet-managed Firecracker kernel artifact and writes a
  data-only selector that catch can use to boot the VM with this kernel on the
