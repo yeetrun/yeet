@@ -139,13 +139,19 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 
 ## Release & Tagging Process
 - Find the latest `vX.Y.Z` tag and bump the patch version.
-- Update `website/docs/changelog.mdx` with a new date section and 1-3 user-facing bullets for the release.
+- Update `website/docs/changelog.mdx` with a new date section and 1-3
+  user-facing bullets for the release. The latest release entry must stand
+  alone for someone installing or upgrading.
 - Scope release notes to the commits between the previous published release tag
   and the tag being prepared. Do not summarize the entire minor series unless
   the user explicitly asks for a roll-up release note.
 - Before writing release notes, inspect the actual commit range (for example,
   `git log <previous-tag>..HEAD`) and translate only user-visible behavior,
   compatibility, migration, reliability, or operational changes from that range.
+- If a corrective patch supersedes a bad tag or artifact, carry forward the real
+  user-facing changes into the new latest entry and mark the superseded version
+  plainly. Do not make submodule pointers, git hashes, CI retries, tag repair,
+  or release plumbing the release note.
 - Prepare the changelog update inside `website/`, then include the updated
   submodule pointer in this repo's release work. Route release commits and
   pushes through the Version Control finish-to-main flow.
@@ -184,10 +190,16 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Write for public yeet users and operators, not maintainers. Focus on what
   changed for someone installing, upgrading, deploying, managing, or debugging
   services.
+- The latest version section must make sense if it is the only section a user
+  sees. It should answer "what changed for me?" without requiring them to read
+  the previous version.
 - Use plain, user-facing language focused on behavior changes, new capabilities,
   reliability fixes, compatibility notes, and required user action. Avoid
   internal refactors, tests, implementation details, commit chronology, and
   developer-only wording.
+- Do not publish release-mechanics bullets about source revisions, submodule
+  pointers, git hashes, CI retries, tag repair, or website publication unless a
+  user has to take action because of them.
 - Keep tense consistent (past or present), keep lines concise, and avoid emojis.
 - Include only releases/tags; don’t list every commit.
 
