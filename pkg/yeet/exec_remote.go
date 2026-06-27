@@ -101,6 +101,35 @@ type trackingWriter struct {
 	saw  bool
 }
 
+type rawTerminalOutputWriter struct {
+	w    io.Writer
+	last byte
+	saw  bool
+}
+
+func rawTerminalOutput(w io.Writer, rawMode bool) io.Writer {
+	if !rawMode || !isTerminalFn(int(os.Stdout.Fd())) {
+		return w
+	}
+	return &rawTerminalOutputWriter{w: w}
+}
+
+func (w *rawTerminalOutputWriter) Write(p []byte) (int, error) {
+	for i, b := range p {
+		if b == '\n' && (!w.saw || w.last != '\r') {
+			if _, err := w.w.Write([]byte{'\r'}); err != nil {
+				return i, err
+			}
+		}
+		if _, err := w.w.Write([]byte{b}); err != nil {
+			return i, err
+		}
+		w.last = b
+		w.saw = true
+	}
+	return len(p), nil
+}
+
 type sessionStdinProxy struct {
 	r         *io.PipeReader
 	dup       *os.File
@@ -516,7 +545,7 @@ func execRemoteTo(ctx context.Context, service string, args []string, stdin io.R
 	}
 	defer session.close(&err)
 
-	out := &trackingWriter{w: stdout}
+	out := &trackingWriter{w: rawTerminalOutput(stdout, session.rawMode)}
 	code, err := client.Exec(ctx, session.req, session.stdin, out, session.resizeCh)
 	if err != nil {
 		return err
@@ -535,7 +564,7 @@ func execRemoteShell(ctx context.Context, host string, target catchrpc.ExecTarge
 	}
 	defer session.close(&err)
 
-	out := &trackingWriter{w: stdout}
+	out := &trackingWriter{w: rawTerminalOutput(stdout, session.rawMode)}
 	code, err := client.Exec(ctx, session.req, session.stdin, out, session.resizeCh)
 	if err != nil {
 		return err
