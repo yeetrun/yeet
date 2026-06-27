@@ -454,6 +454,38 @@ func TestRunWebAPIRedactsTSAuthKeyInValidationResponses(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIValidateRejectsInvalidServiceName(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	defer func() { fetchRunDraftServiceInfoFn = oldInfo }()
+	called := false
+	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		called = true
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/validate", RunDraft{
+		Service: "bad.name",
+		Host:    "host-a",
+		Payload: "ghcr.io/example/app:latest",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp runWebValidateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode validate response: %v", err)
+	}
+	if resp.Validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := resp.Validation.fieldError("service"); !strings.Contains(got, "invalid service name") {
+		t.Fatalf("service error = %q, want invalid service name", got)
+	}
+	if called {
+		t.Fatal("service info lookup ran for invalid service name")
+	}
+}
+
 func TestRunWebAPIValidateReturnsCommandPreview(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
 	defer func() { fetchRunDraftServiceInfoFn = oldInfo }()

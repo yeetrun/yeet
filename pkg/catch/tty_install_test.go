@@ -648,6 +648,25 @@ func TestRunCmdFuncRejectsSystemServiceBeforeInstall(t *testing.T) {
 	}
 }
 
+func TestRunCmdFuncRejectsInvalidServiceNameBeforeInstall(t *testing.T) {
+	called := false
+	execer := &ttyExecer{
+		sn: "bad.name",
+		installFunc: func(string, io.Reader, FileInstallerCfg) error {
+			called = true
+			return nil
+		},
+	}
+
+	err := execer.runCmdFunc(cli.RunFlags{}, []string{"payload"})
+	if err == nil || !strings.Contains(err.Error(), "invalid service name") {
+		t.Fatalf("run error = %v, want invalid service name", err)
+	}
+	if called {
+		t.Fatal("install seam was called for invalid service name")
+	}
+}
+
 func TestRunCommandRejectsWebFlagBeforeInstall(t *testing.T) {
 	called := false
 	execer := &ttyExecer{

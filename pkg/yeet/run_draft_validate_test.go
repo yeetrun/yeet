@@ -51,6 +51,22 @@ func TestValidateRunDraftRejectsExistingServiceInNewOnlyMode(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftRejectsInvalidServiceName(t *testing.T) {
+	draft := RunDraft{
+		Service: "bad.name",
+		Host:    "host-a",
+		Payload: "ghcr.io/example/app:latest",
+	}
+	_, validation := validateRunDraftLocal(draft, t.TempDir())
+
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	if got := validation.fieldError("service"); !strings.Contains(got, "invalid service name") {
+		t.Fatalf("service error = %q, want invalid service name", got)
+	}
+}
+
 func TestValidateRunDraftAcceptsNewServiceAndExistingFilePayload(t *testing.T) {
 	stubRunDraftServiceInfo(t, func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
 		return catchrpc.ServiceInfoResponse{Found: false}, nil

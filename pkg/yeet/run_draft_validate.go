@@ -18,6 +18,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
+	"github.com/yeetrun/yeet/pkg/serviceid"
 )
 
 var (
@@ -276,6 +277,8 @@ func trimNonEmptyStrings(values []string) []string {
 func validateRunDraftRequired(draft RunDraft, result *RunDraftValidationResult) {
 	if draft.Service == "" {
 		result.addError("service", "service is required")
+	} else if err := serviceid.Validate(draft.Service); err != nil {
+		result.addError("service", "%v", err)
 	}
 	if draft.Host == "" {
 		result.addError("host", "host is required")
