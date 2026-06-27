@@ -27,6 +27,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/targz"
 	"tailscale.com/client/tailscale/v2"
 	"tailscale.com/ipn"
+	"tailscale.com/types/opt"
 	"tailscale.com/types/ptr"
 )
 
@@ -389,10 +390,11 @@ func writeTailscaleConfig(serviceTSDir, service, tsAuthKey, exitNode string) (st
 
 func tailscaleConfig(service, tsAuthKey, exitNode string) ipn.ConfigVAlpha {
 	tsCfg := ipn.ConfigVAlpha{
-		Version:  "alpha0",
-		Hostname: ptr.To(service),
-		AuthKey:  ptr.To(tsAuthKey),
-		Locked:   "false",
+		Version:   "alpha0",
+		Hostname:  ptr.To(service),
+		AuthKey:   ptr.To(tsAuthKey),
+		Locked:    "false",
+		AcceptDNS: opt.NewBool(false),
 	}
 	if exitNode != "" {
 		tsCfg.ExitNode = ptr.To(exitNode)

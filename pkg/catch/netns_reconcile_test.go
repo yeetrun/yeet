@@ -7,6 +7,7 @@ package catch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/yeetrun/yeet/pkg/db"
+	"tailscale.com/ipn"
 )
 
 type fakeDockerNetNSReconciler struct {
@@ -308,6 +310,183 @@ func TestReconcileNetNSBackedDockerServicesSkipsCurrentTailscaleSidecar(t *testi
 	if diff := cmp.Diff(want, calls); diff != "" {
 		t.Fatalf("unexpected reconciliation side effects (-want +got):\n%s", diff)
 	}
+}
+
+func TestReconcileTailscaleDNSConfigsDisablesDNSAndRestartsSidecar(t *testing.T) {
+	s := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "services", "api")
+	configPath := filepath.Join(root, "tailscale", "tailscaled-3.json")
+	runtimeConfigPath := filepath.Join(serviceRunDirForRoot(root), "tailscaled.json")
+	writeTailscaleTestConfig(t, configPath, ipn.ConfigVAlpha{
+		Version:  "alpha0",
+		AuthKey:  ptrString("tskey-auth-test"),
+		Hostname: ptrString("api"),
+	})
+	writeTailscaleTestConfig(t, runtimeConfigPath, ipn.ConfigVAlpha{
+		Version:  "alpha0",
+		AuthKey:  ptrString("tskey-auth-test"),
+		Hostname: ptrString("api"),
+	})
+	addTestServices(t, s,
+		db.Service{
+			Name:             "api",
+			ServiceType:      db.ServiceTypeDockerCompose,
+			ServiceRoot:      root,
+			Generation:       3,
+			LatestGeneration: 3,
+			Artifacts: db.ArtifactStore{
+				db.ArtifactTSConfig:  {Refs: map[db.ArtifactRef]string{db.Gen(3): configPath}},
+				db.ArtifactTSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ts.service"}},
+			},
+		},
+		db.Service{
+			Name:             "plain",
+			ServiceType:      db.ServiceTypeDockerCompose,
+			Generation:       1,
+			LatestGeneration: 1,
+		},
+	)
+
+	var calls []string
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileTailscaleDNSConfigs(context.Background()); err != nil {
+		t.Fatalf("reconcileTailscaleDNSConfigs returned error: %v", err)
+	}
+
+	cfg := readTailscaleTestConfig(t, configPath)
+	if !cfg.AcceptDNS.EqualBool(false) {
+		t.Fatalf("artifact AcceptDNS = %q, want explicit false", cfg.AcceptDNS)
+	}
+	runtimeCfg := readTailscaleTestConfig(t, runtimeConfigPath)
+	if !runtimeCfg.AcceptDNS.EqualBool(false) {
+		t.Fatalf("runtime AcceptDNS = %q, want explicit false", runtimeCfg.AcceptDNS)
+	}
+	if diff := cmp.Diff([]string{"restart yeet-api-ts.service"}, calls); diff != "" {
+		t.Fatalf("unexpected systemctl calls (-want +got):\n%s", diff)
+	}
+}
+
+func TestReconcileTailscaleDNSConfigsRepairsUnsafeRuntimeCopy(t *testing.T) {
+	s := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "services", "api")
+	configPath := filepath.Join(root, "tailscale", "tailscaled-3.json")
+	runtimeConfigPath := filepath.Join(serviceRunDirForRoot(root), "tailscaled.json")
+	writeTailscaleTestConfig(t, configPath, tailscaleConfig("api", "tskey-auth-test", ""))
+	writeTailscaleTestConfig(t, runtimeConfigPath, ipn.ConfigVAlpha{
+		Version:  "alpha0",
+		AuthKey:  ptrString("tskey-auth-test"),
+		Hostname: ptrString("api"),
+	})
+	addTestServices(t, s, db.Service{
+		Name:             "api",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		ServiceRoot:      root,
+		Generation:       3,
+		LatestGeneration: 3,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSConfig:  {Refs: map[db.ArtifactRef]string{db.Gen(3): configPath}},
+			db.ArtifactTSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ts.service"}},
+		},
+	})
+
+	var calls []string
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileTailscaleDNSConfigs(context.Background()); err != nil {
+		t.Fatalf("reconcileTailscaleDNSConfigs returned error: %v", err)
+	}
+
+	cfg := readTailscaleTestConfig(t, configPath)
+	if !cfg.AcceptDNS.EqualBool(false) {
+		t.Fatalf("artifact AcceptDNS = %q, want explicit false", cfg.AcceptDNS)
+	}
+	runtimeCfg := readTailscaleTestConfig(t, runtimeConfigPath)
+	if !runtimeCfg.AcceptDNS.EqualBool(false) {
+		t.Fatalf("runtime AcceptDNS = %q, want explicit false", runtimeCfg.AcceptDNS)
+	}
+	if diff := cmp.Diff([]string{"restart yeet-api-ts.service"}, calls); diff != "" {
+		t.Fatalf("unexpected systemctl calls (-want +got):\n%s", diff)
+	}
+}
+
+func TestReconcileTailscaleDNSConfigsSkipsAlreadySafeConfig(t *testing.T) {
+	s := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "services", "api")
+	configPath := filepath.Join(root, "tailscale", "tailscaled-3.json")
+	runtimeConfigPath := filepath.Join(serviceRunDirForRoot(root), "tailscaled.json")
+	cfg := tailscaleConfig("api", "tskey-auth-test", "")
+	writeTailscaleTestConfig(t, configPath, cfg)
+	writeTailscaleTestConfig(t, runtimeConfigPath, cfg)
+	addTestServices(t, s, db.Service{
+		Name:             "api",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		ServiceRoot:      root,
+		Generation:       3,
+		LatestGeneration: 3,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSConfig:  {Refs: map[db.ArtifactRef]string{db.Gen(3): configPath}},
+			db.ArtifactTSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ts.service"}},
+		},
+	})
+
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		t.Fatalf("unexpected systemctl call: %v", args)
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileTailscaleDNSConfigs(context.Background()); err != nil {
+		t.Fatalf("reconcileTailscaleDNSConfigs returned error: %v", err)
+	}
+}
+
+func ptrString(s string) *string {
+	return &s
+}
+
+func writeTailscaleTestConfig(t *testing.T, path string, cfg ipn.ConfigVAlpha) {
+	t.Helper()
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal tailscale config: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir tailscale config parent: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write tailscale config: %v", err)
+	}
+}
+
+func readTailscaleTestConfig(t *testing.T, path string) ipn.ConfigVAlpha {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read tailscale config: %v", err)
+	}
+	var cfg ipn.ConfigVAlpha
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatalf("unmarshal tailscale config: %v", err)
+	}
+	return cfg
 }
 
 func TestTailscaleSidecarNetNSStaleOnHost(t *testing.T) {
