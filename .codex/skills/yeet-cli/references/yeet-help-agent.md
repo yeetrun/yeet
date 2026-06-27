@@ -1171,9 +1171,15 @@ Service name
 
 ## Options
 
+### `--clean`
+
+Delete service data and the matching yeet.toml entry
+
+- **Type**: `bool`
+
 ### `--yes` (short: `-y`)
 
-Skip removal prompts; does not imply --clean-data
+Skip removal prompts; does not imply --clean or --clean-data
 
 - **Type**: `bool`
 
@@ -1919,7 +1925,7 @@ Check for and install yeet/catch updates
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] upgrade [check] [--all] [--host=catch-a] [--json] [--yes] [--force] [--version=vX.Y.Z]
+yeet [GLOBAL_OPTIONS] upgrade [check] [--host=catch-a] [--json] [--yes] [--force] [--version=vX.Y.Z]
 ```
 
 ## Operating Rules
@@ -1968,19 +1974,19 @@ yeet upgrade check
 ```
 
 ```
-yeet upgrade check --all
+yeet upgrade
 ```
 
 ```
-yeet upgrade --all
+yeet upgrade --host=catch-a
 ```
 
 ```
-yeet upgrade --all --force
+yeet upgrade --force
 ```
 
 ```
-yeet upgrade --all --version v0.6.1 --force
+yeet upgrade --version v0.6.1 --force
 ```
 ````
 

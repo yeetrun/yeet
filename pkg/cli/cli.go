@@ -214,7 +214,6 @@ type VersionFlags struct {
 }
 
 type UpgradeFlags struct {
-	All     bool
 	Host    string
 	JSON    bool
 	Yes     bool
@@ -366,7 +365,8 @@ type serviceSyncFlagsParsed struct {
 }
 
 type removeFlagsParsed struct {
-	Yes         bool `flag:"yes" short:"y" help:"Skip removal prompts; does not imply --clean-data"`
+	Clean       bool `flag:"clean" help:"Delete service data and the matching yeet.toml entry"`
+	Yes         bool `flag:"yes" short:"y" help:"Skip removal prompts; does not imply --clean or --clean-data"`
 	CleanConfig bool `flag:"clean-config" help:"Delete the matching yeet.toml entry without prompting"`
 	CleanData   bool `flag:"clean-data" help:"Delete service data; skips the data-deletion prompt"`
 }
@@ -436,7 +436,6 @@ type versionFlagsParsed struct {
 }
 
 type upgradeFlagsParsed struct {
-	All     bool   `flag:"all"`
 	Host    string `flag:"host"`
 	JSON    bool   `flag:"json"`
 	Yes     bool   `flag:"yes"`
@@ -1647,8 +1646,8 @@ func ParseRemove(args []string) (RemoveFlags, []string, error) {
 	}
 	flags := RemoveFlags{
 		Yes:         parsed.Flags.Yes,
-		CleanConfig: parsed.Flags.CleanConfig,
-		CleanData:   parsed.Flags.CleanData,
+		CleanConfig: parsed.Flags.Clean || parsed.Flags.CleanConfig,
+		CleanData:   parsed.Flags.Clean || parsed.Flags.CleanData,
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
@@ -1886,7 +1885,6 @@ func ParseUpgrade(args []string) (UpgradeFlags, []string, error) {
 		return UpgradeFlags{}, nil, err
 	}
 	flags := UpgradeFlags{
-		All:     parsed.Flags.All,
 		Host:    parsed.Flags.Host,
 		JSON:    parsed.Flags.JSON,
 		Yes:     parsed.Flags.Yes,

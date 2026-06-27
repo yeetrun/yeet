@@ -14,13 +14,37 @@ import (
 	"github.com/yeetrun/yeet/pkg/buildinfo"
 )
 
-func TestUpgradeKnownHostsUsesCurrentHostWithoutAll(t *testing.T) {
+func TestUpgradeKnownHostsUsesProjectHostsByDefault(t *testing.T) {
 	restore := stubPrefsState(t, prefs{DefaultHost: "current"})
 	defer restore()
 
-	loc := &projectConfigLocation{Config: &ProjectConfig{Hosts: []string{"a", "b"}}}
-	got := upgradeKnownHosts(loc, false, false)
+	loc := &projectConfigLocation{Config: &ProjectConfig{
+		Hosts:    []string{"b"},
+		Services: []ServiceEntry{{Name: "svc", Host: "a"}},
+	}}
+	got := upgradeKnownHosts(loc, false)
+	if strings.Join(got, ",") != "a,b,current" {
+		t.Fatalf("hosts = %#v", got)
+	}
+}
+
+func TestUpgradeKnownHostsUsesCurrentHostWithoutProjectConfig(t *testing.T) {
+	restore := stubPrefsState(t, prefs{DefaultHost: "current"})
+	defer restore()
+
+	got := upgradeKnownHosts(nil, false)
 	if strings.Join(got, ",") != "current" {
+		t.Fatalf("hosts = %#v", got)
+	}
+}
+
+func TestUpgradeKnownHostsUsesCurrentHostWithHostOverride(t *testing.T) {
+	restore := stubPrefsState(t, prefs{DefaultHost: "override"})
+	defer restore()
+
+	loc := &projectConfigLocation{Config: &ProjectConfig{Hosts: []string{"a", "b"}}}
+	got := upgradeKnownHosts(loc, true)
+	if strings.Join(got, ",") != "override" {
 		t.Fatalf("hosts = %#v", got)
 	}
 }
@@ -111,20 +135,6 @@ func stubUpdateCheckCacheFile(t *testing.T) func() {
 	updateCheckCacheFile = t.TempDir() + "/update-check.json"
 	return func() {
 		updateCheckCacheFile = old
-	}
-}
-
-func TestUpgradeKnownHostsAllUsesProjectHosts(t *testing.T) {
-	restore := stubPrefsState(t, prefs{DefaultHost: "current"})
-	defer restore()
-
-	loc := &projectConfigLocation{Config: &ProjectConfig{
-		Hosts:    []string{"b"},
-		Services: []ServiceEntry{{Name: "svc", Host: "a"}},
-	}}
-	got := upgradeKnownHosts(loc, true, false)
-	if strings.Join(got, ",") != "a,b,current" {
-		t.Fatalf("hosts = %#v", got)
 	}
 }
 

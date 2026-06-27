@@ -56,8 +56,8 @@ type upgradeComponent struct {
 var fetchUpgradeLatestFn = fetchUpgradeLatest
 var fetchUpgradeCatchInfoFn = fetchUpgradeCatchInfo
 
-func upgradeKnownHosts(cfgLoc *projectConfigLocation, all bool, hostOverrideSet bool) []string {
-	if !all || hostOverrideSet || cfgLoc == nil || cfgLoc.Config == nil {
+func upgradeKnownHosts(cfgLoc *projectConfigLocation, hostOverrideSet bool) []string {
+	if hostOverrideSet || cfgLoc == nil || cfgLoc.Config == nil {
 		return []string{Host()}
 	}
 	seen := map[string]struct{}{Host(): {}}

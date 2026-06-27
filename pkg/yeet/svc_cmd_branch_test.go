@@ -2038,6 +2038,45 @@ func TestSvcRemovePromptAndErrorBranches(t *testing.T) {
 	}
 }
 
+func TestSvcRemoveCleanForwardsCleanAndRemovesConfig(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	loc := writeSvcBranchConfig(t, tmp, ServiceEntry{Name: "svc-a", Host: "host-a", Type: serviceTypeRun, Payload: "run.sh"})
+
+	var gotService string
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotService = service
+		gotArgs = append([]string{}, args...)
+		if stdin != nil {
+			t.Fatalf("stdin = %v, want nil", stdin)
+		}
+		if !tty {
+			t.Fatal("tty = false, want true")
+		}
+		return nil
+	}
+
+	if err := handleSvcRemove(context.Background(), svcCommandRequest{
+		Command: svcCommand{Args: []string{"--clean"}, RawArgs: []string{"remove", "--clean"}},
+		Config:  loc,
+		Service: "svc-a",
+	}); err != nil {
+		t.Fatalf("handleSvcRemove error: %v", err)
+	}
+	if gotService != "svc-a" {
+		t.Fatalf("remote service = %q, want svc-a", gotService)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"remove", "--clean"}) {
+		t.Fatalf("remote args = %#v, want remove --clean", gotArgs)
+	}
+	if _, has := loc.Config.ServiceEntry("svc-a", "host-a"); has {
+		t.Fatal("config entry still present after --clean")
+	}
+}
+
 func TestSvcEventsErrors(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 

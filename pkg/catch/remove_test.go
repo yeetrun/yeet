@@ -324,6 +324,41 @@ func TestRemoveCmdCleanDataSkipsDataPrompt(t *testing.T) {
 	}
 }
 
+func TestRemoveCmdCleanSkipsDataPromptAndDeletesData(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc-remove-clean"
+	serviceRoot := seedRemovePromptService(t, server, name, db.ServiceType("unknown"))
+
+	flags, _, err := cli.ParseRemove([]string{"--clean"})
+	if err != nil {
+		t.Fatalf("ParseRemove: %v", err)
+	}
+
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  name,
+		rw: readWriter{
+			Reader: strings.NewReader("y\n"),
+			Writer: &out,
+		},
+		serviceRunnerFn: func() (ServiceRunner, error) {
+			return &fakeRunner{}, nil
+		},
+	}
+
+	if err := execer.removeCmdFunc(flags); err != nil {
+		t.Fatalf("removeCmdFunc: %v", err)
+	}
+	if got := out.String(); strings.Contains(got, "Delete all data") {
+		t.Fatalf("output = %q, want no data prompt", got)
+	}
+	if _, err := os.Stat(serviceRoot); !os.IsNotExist(err) {
+		t.Fatalf("service root stat err = %v, want not exist", err)
+	}
+}
+
 func TestRemoveCmdYesSkipsDataPromptAndPreservesData(t *testing.T) {
 	server := newTestServer(t)
 	name := "svc-remove-yes-preserve-data"
