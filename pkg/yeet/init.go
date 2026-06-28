@@ -44,13 +44,15 @@ type initFlagsParsed struct {
 }
 
 type initOptions struct {
-	fromGithub     bool
-	nightly        bool
-	installDocker  bool
-	installVMTools bool
-	tsAuthKey      string
-	tsClientSecret string
-	releaseVersion string
+	fromGithub         bool
+	nightly            bool
+	installDocker      bool
+	installVMTools     bool
+	prepareVMLANBridge bool
+	skipVMLANBridge    bool
+	tsAuthKey          string
+	tsClientSecret     string
+	releaseVersion     string
 }
 
 var initCatchFn = initCatch
@@ -305,6 +307,7 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 	if err := chmodInitCatchFn(ui, userAtRemote); err != nil {
 		return err
 	}
+	prepareInitVMLANBridge(ui, userAtRemote, goarch, installVMTools, &opts)
 	return installInitCatchWithTailscaleRetry(ui, userAtRemote, useSudo, installDocker, installVMTools, opts)
 }
 
@@ -327,6 +330,7 @@ var (
 	prepareInitVMToolsInstallFn = prepareInitVMToolsInstall
 	remoteDockerInstalledFn     = remoteDockerInstalled
 	remoteVMHostStatusFn        = remoteVMHostStatus
+	remoteVMLANBridgePlanFn     = remoteVMLANBridgePlan
 	confirmInitFn               = cmdutil.Confirm
 )
 
@@ -456,6 +460,14 @@ type initVMHostStatus struct {
 	UnsupportedArch string
 }
 
+type initVMLANBridgePlan struct {
+	Ready        bool
+	NeedsPrepare bool
+	Bridge       string
+	Parent       string
+	Reason       string
+}
+
 var requiredInitVMHostCommands = []vmHostCommandRequirement{
 	{Command: "qemu-img", Package: "qemu-utils"},
 	{Command: "zstd", Package: "zstd"},
@@ -512,6 +524,73 @@ func prepareInitVMToolsInstall(ui *initUI, userAtRemote, goarch string, opts ini
 	}
 	ui.DoneStep("will install")
 	return true, nil
+}
+
+func prepareInitVMLANBridge(ui *initUI, userAtRemote string, goarch string, installVMTools bool, opts *initOptions) {
+	if opts == nil || opts.prepareVMLANBridge || opts.skipVMLANBridge {
+		return
+	}
+	plan, ok := initVMLANBridgePlanForInit(ui, userAtRemote, goarch, installVMTools, opts)
+	if !ok {
+		return
+	}
+	applyInitVMLANBridgePlan(ui, userAtRemote, plan, opts)
+}
+
+func initVMLANBridgePlanForInit(ui *initUI, userAtRemote string, goarch string, installVMTools bool, opts *initOptions) (initVMLANBridgePlan, bool) {
+	if !initVMLANBridgeSupportPlausible(userAtRemote, goarch, installVMTools) {
+		return initVMLANBridgePlan{}, false
+	}
+	plan, err := remoteVMLANBridgePlanFn(userAtRemote)
+	if err != nil {
+		opts.skipVMLANBridge = true
+		ui.Warn(fmt.Sprintf("Warning: VM LAN bridge planning is unavailable during init: %v", err))
+		return initVMLANBridgePlan{}, false
+	}
+	if plan.Ready || !plan.NeedsPrepare {
+		return initVMLANBridgePlan{}, false
+	}
+	return plan, true
+}
+
+func applyInitVMLANBridgePlan(ui *initUI, userAtRemote string, plan initVMLANBridgePlan, opts *initOptions) {
+	bridge := strings.TrimSpace(plan.Bridge)
+	if bridge == "" {
+		bridge = "br0"
+	}
+	if !canPromptInitVMLANBridge() {
+		opts.skipVMLANBridge = true
+		ui.Warn(fmt.Sprintf("Warning: VM LAN bridge %s needs preparation for VM LAN networking. `yeet run ... --net=lan` will need an interactive run, or rerun `yeet init %s` in a TTY.", bridge, userAtRemote))
+		return
+	}
+	ui.Suspend()
+	ok, err := confirmInitFn(os.Stdin, os.Stdout, fmt.Sprintf("Prepare %s for VM LAN networking during init?", bridge))
+	ui.Resume()
+	if err != nil {
+		opts.skipVMLANBridge = true
+		ui.Warn(fmt.Sprintf("Warning: could not confirm VM LAN bridge preparation during init: %v. `yeet run ... --net=lan` will need an interactive run, or rerun `yeet init %s` in a TTY.", err, userAtRemote))
+		return
+	}
+	if !ok {
+		opts.skipVMLANBridge = true
+		return
+	}
+	opts.prepareVMLANBridge = true
+}
+
+func initVMLANBridgeSupportPlausible(userAtRemote, goarch string, installVMTools bool) bool {
+	status, err := remoteVMHostStatusFn(userAtRemote, goarch)
+	if err != nil {
+		return false
+	}
+	if status.UnsupportedArch != "" || !status.KVM || !status.TUN {
+		return false
+	}
+	return installVMTools || len(status.MissingCommands) == 0
+}
+
+func canPromptInitVMLANBridge() bool {
+	return isTerminalFn(int(os.Stdin.Fd())) && isTerminalFn(int(os.Stdout.Fd()))
 }
 
 func warnInitVMHostCapability(ui *initUI, status initVMHostStatus) bool {
@@ -575,6 +654,104 @@ func initVMHostCommandNames(reqs []vmHostCommandRequirement) []string {
 		}
 	}
 	return names
+}
+
+func remoteVMLANBridgePlan(userAtRemote string) (initVMLANBridgePlan, error) {
+	cmd := exec.Command("ssh", userAtRemote, "./catch", "vm-lan-bridge-plan")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			return initVMLANBridgePlan{}, fmt.Errorf("remote VM LAN bridge plan failed: %w", err)
+		}
+		return initVMLANBridgePlan{}, fmt.Errorf("remote VM LAN bridge plan failed: %w: %s", err, detail)
+	}
+	plan, err := parseInitVMLANBridgePlan(string(output))
+	if err != nil {
+		return initVMLANBridgePlan{}, fmt.Errorf("unexpected VM LAN bridge plan output from remote host: %w", err)
+	}
+	return plan, nil
+}
+
+func parseInitVMLANBridgePlan(output string) (initVMLANBridgePlan, error) {
+	fields, err := initVMLANBridgePlanFields(output)
+	if err != nil {
+		return initVMLANBridgePlan{}, err
+	}
+	var plan initVMLANBridgePlan
+	var sawReady, sawNeedsPrepare bool
+	for i := 0; i < len(fields); i++ {
+		stop, err := applyInitVMLANBridgePlanField(&plan, fields[i], fields[i:], &sawReady, &sawNeedsPrepare)
+		if err != nil {
+			return initVMLANBridgePlan{}, err
+		}
+		if stop {
+			break
+		}
+	}
+	if !sawReady || !sawNeedsPrepare {
+		return initVMLANBridgePlan{}, fmt.Errorf("missing ready or needs_prepare field")
+	}
+	return plan, nil
+}
+
+func initVMLANBridgePlanFields(output string) ([]string, error) {
+	const prefix = "VM LAN bridge plan:"
+	line := strings.TrimSpace(output)
+	idx := strings.LastIndex(line, prefix)
+	if idx < 0 {
+		return nil, fmt.Errorf("missing %q prefix", prefix)
+	}
+	return strings.Fields(strings.TrimSpace(line[idx+len(prefix):])), nil
+}
+
+func applyInitVMLANBridgePlanField(plan *initVMLANBridgePlan, field string, remaining []string, sawReady *bool, sawNeedsPrepare *bool) (bool, error) {
+	if strings.HasPrefix(field, "reason=") {
+		plan.Reason = strings.TrimPrefix(strings.Join(remaining, " "), "reason=")
+		return true, nil
+	}
+	key, value, ok := strings.Cut(field, "=")
+	if !ok {
+		return false, fmt.Errorf("malformed field %q", field)
+	}
+	return applyInitVMLANBridgePlanKey(plan, key, value, sawReady, sawNeedsPrepare)
+}
+
+func applyInitVMLANBridgePlanKey(plan *initVMLANBridgePlan, key string, value string, sawReady *bool, sawNeedsPrepare *bool) (bool, error) {
+	switch key {
+	case "bridge":
+		plan.Bridge = value
+	case "parent":
+		plan.Parent = value
+	case "ready":
+		ready, err := parseInitVMLANBridgePlanBool(value)
+		if err != nil {
+			return false, fmt.Errorf("ready: %w", err)
+		}
+		plan.Ready = ready
+		*sawReady = true
+	case "needs_prepare":
+		needsPrepare, err := parseInitVMLANBridgePlanBool(value)
+		if err != nil {
+			return false, fmt.Errorf("needs_prepare: %w", err)
+		}
+		plan.NeedsPrepare = needsPrepare
+		*sawNeedsPrepare = true
+	default:
+		return false, fmt.Errorf("unknown field %q", key)
+	}
+	return false, nil
+}
+
+func parseInitVMLANBridgePlanBool(value string) (bool, error) {
+	switch strings.TrimSpace(value) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected value %q", value)
+	}
 }
 
 func remoteVMHostStatus(userAtRemote, goarch string) (initVMHostStatus, error) {
@@ -753,7 +930,7 @@ func chmodInitCatch(ui *initUI, userAtRemote string) error {
 func installInitCatchWithTailscaleRetry(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, opts initOptions) error {
 	tsClientSecret := strings.TrimSpace(opts.tsClientSecret)
 	for attempt := 0; attempt < 3; attempt++ {
-		err := installInitCatchFn(ui, userAtRemote, useSudo, installDocker, installVMTools, opts.tsAuthKey, tsClientSecret, []string{defaultCatchTag})
+		err := installInitCatchFn(ui, userAtRemote, useSudo, installDocker, installVMTools, opts.tsAuthKey, tsClientSecret, []string{defaultCatchTag}, opts.prepareVMLANBridge, opts.skipVMLANBridge)
 		if err == nil {
 			return nil
 		}
@@ -840,15 +1017,15 @@ func isInitTailscaleCredentialError(err error) bool {
 		strings.Contains(msg, "requires a Tailscale OAuth client secret or auth key")
 }
 
-func installInitCatch(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) error {
+func installInitCatch(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
 	if !useSudo {
-		return installInitCatchDetached(ui, userAtRemote, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags)
+		return installInitCatchDetached(ui, userAtRemote, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags, prepareVMLANBridge, skipVMLANBridge)
 	}
-	return installInitCatchDirect(ui, userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags)
+	return installInitCatchDirect(ui, userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags, prepareVMLANBridge, skipVMLANBridge)
 }
 
-func installInitCatchDirect(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) error {
-	cmd := exec.Command("ssh", remoteCatchInstallArgs(userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags)...)
+func installInitCatchDirect(ui *initUI, userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+	cmd := exec.Command("ssh", remoteCatchInstallArgs(userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags, prepareVMLANBridge, skipVMLANBridge)...)
 	cmd.Stdin = os.Stdin
 	ui.Suspend()
 	filter := newInitInstallFilter(os.Stdout)
@@ -877,16 +1054,18 @@ type initInstallSession struct {
 }
 
 var (
-	initInstallPollInterval = 500 * time.Millisecond
-	initInstallTimeout      = 5 * time.Minute
-	initInstallSSHTimeout   = 10 * time.Second
+	initInstallPollInterval      = 500 * time.Millisecond
+	initInstallTimeout           = 5 * time.Minute
+	initInstallSSHTimeout        = 10 * time.Second
+	readRemoteInitInstallFileFn  = readRemoteInitInstallFile
+	streamRemoteInitInstallLogFn = streamRemoteInitInstallLog
 )
 
-func installInitCatchDetached(ui *initUI, userAtRemote string, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) error {
+func installInitCatchDetached(ui *initUI, userAtRemote string, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
 	session := newInitInstallSession()
 	ui.Suspend()
 	filter := newInitInstallFilter(os.Stdout)
-	if err := launchDetachedInitCatchInstall(userAtRemote, session, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags); err != nil {
+	if err := launchDetachedInitCatchInstall(userAtRemote, session, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags, prepareVMLANBridge, skipVMLANBridge); err != nil {
 		ui.FailStep("install failed")
 		return fmt.Errorf("failed to run catch binary on remote host")
 	}
@@ -921,16 +1100,16 @@ func newInitInstallSession() initInstallSession {
 	}
 }
 
-func launchDetachedInitCatchInstall(userAtRemote string, session initInstallSession, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) error {
-	cmd := exec.Command("ssh", userAtRemote, detachedInitCatchInstallScript(userAtRemote, session, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags))
+func launchDetachedInitCatchInstall(userAtRemote string, session initInstallSession, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+	cmd := exec.Command("ssh", userAtRemote, detachedInitCatchInstallScript(userAtRemote, session, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags, prepareVMLANBridge, skipVMLANBridge))
 	cmd.Stdin = nil
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	return cmd.Run()
 }
 
-func detachedInitCatchInstallScript(userAtRemote string, session initInstallSession, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) string {
-	install := shellJoin(remoteCatchInstallCommand(userAtRemote, false, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags))
+func detachedInitCatchInstallScript(userAtRemote string, session initInstallSession, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string, prepareVMLANBridge bool, skipVMLANBridge bool) string {
+	install := shellJoin(remoteCatchInstallCommand(userAtRemote, false, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags, prepareVMLANBridge, skipVMLANBridge))
 	logPath := shellQuote(session.LogPath)
 	statusPath := shellQuote(session.StatusPath)
 	body := fmt.Sprintf("%s >%s 2>&1; code=$?; printf \"%%s\" \"$code\" >%s", install, logPath, statusPath)
@@ -946,19 +1125,21 @@ func waitDetachedInitCatchInstall(userAtRemote string, session initInstallSessio
 	deadline := time.Now().Add(initInstallTimeout)
 	var lastReadErr error
 	var lastLog string
+	bridgePrepStarted := false
 	for {
-		status, err := readRemoteInitInstallFile(userAtRemote, session.StatusPath)
+		status, err := readRemoteInitInstallFileFn(userAtRemote, session.StatusPath)
 		if err != nil {
 			lastReadErr = err
 		} else if strings.TrimSpace(status) != "" {
-			if err := streamRemoteInitInstallLog(userAtRemote, session, filter, &lastLog); err != nil {
-				return "", err
-			}
-			return strings.TrimSpace(status), nil
-		} else if err := streamRemoteInitInstallLog(userAtRemote, session, filter, &lastLog); err != nil {
+			return finishDetachedInitCatchInstall(userAtRemote, session, filter, &lastLog, status)
+		} else if err := streamRemoteInitInstallLogFn(userAtRemote, session, filter, &lastLog); err != nil {
 			lastReadErr = err
 		}
+		bridgePrepStarted = bridgePrepStarted || isVMLANBridgePrepLog(lastLog)
 		if time.Now().After(deadline) {
+			if bridgePrepStarted {
+				return "", fmt.Errorf("VM LAN bridge preparation may still be finishing; rerun `yeet init %s` to verify or resume setup", userAtRemote)
+			}
 			if lastReadErr != nil {
 				return "", fmt.Errorf("timed out waiting for catch install to finish: %w", lastReadErr)
 			}
@@ -968,8 +1149,16 @@ func waitDetachedInitCatchInstall(userAtRemote string, session initInstallSessio
 	}
 }
 
+func finishDetachedInitCatchInstall(userAtRemote string, session initInstallSession, filter *initInstallFilter, lastLog *string, status string) (string, error) {
+	status = strings.TrimSpace(status)
+	if err := streamRemoteInitInstallLogFn(userAtRemote, session, filter, lastLog); err != nil && status != "0" {
+		return "", err
+	}
+	return status, nil
+}
+
 func streamRemoteInitInstallLog(userAtRemote string, session initInstallSession, filter *initInstallFilter, lastLog *string) error {
-	logRaw, err := readRemoteInitInstallFile(userAtRemote, session.LogPath)
+	logRaw, err := readRemoteInitInstallFileFn(userAtRemote, session.LogPath)
 	if err != nil {
 		return fmt.Errorf("failed to read remote install log: %w", err)
 	}
@@ -986,6 +1175,10 @@ func streamRemoteInitInstallLog(userAtRemote string, session initInstallSession,
 	}
 	_, err = filter.Write([]byte(delta))
 	return err
+}
+
+func isVMLANBridgePrepLog(logRaw string) bool {
+	return strings.Contains(logRaw, "Preparing VM LAN bridge")
 }
 
 func readRemoteInitInstallFile(userAtRemote, path string) (string, error) {
@@ -1009,7 +1202,7 @@ func cleanupDetachedInitCatchInstall(userAtRemote string, session initInstallSes
 	_ = cmd.Run()
 }
 
-func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) []string {
+func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string, prepareVMLANBridge bool, skipVMLANBridge bool) []string {
 	args := []string{}
 	if useSudo {
 		args = append(args, "sudo")
@@ -1020,6 +1213,11 @@ func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker 
 	}
 	if installVMTools {
 		installEnv = append(installEnv, "CATCH_INSTALL_VM_TOOLS=1")
+	}
+	if prepareVMLANBridge {
+		installEnv = append(installEnv, "CATCH_PREPARE_VM_LAN_BRIDGE=1")
+	} else if skipVMLANBridge {
+		installEnv = append(installEnv, "CATCH_SKIP_VM_LAN_BRIDGE=1")
 	}
 	if tsAuthKey != "" {
 		installEnv = append(installEnv, "TS_AUTHKEY="+tsAuthKey)
@@ -1038,9 +1236,9 @@ func remoteCatchInstallCommand(userAtRemote string, useSudo bool, installDocker 
 	return append(args, "./catch", fmt.Sprintf("--tsnet-host=%v", Host()), "install")
 }
 
-func remoteCatchInstallArgs(userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string) []string {
-	args := append(make([]string, 0, 7), "-t", userAtRemote)
-	return append(args, remoteCatchInstallCommand(userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags)...)
+func remoteCatchInstallArgs(userAtRemote string, useSudo bool, installDocker bool, installVMTools bool, tsAuthKey string, tsClientSecret string, tsCatchTags []string, prepareVMLANBridge bool, skipVMLANBridge bool) []string {
+	args := append(make([]string, 0, 8), "-t", userAtRemote)
+	return append(args, remoteCatchInstallCommand(userAtRemote, useSudo, installDocker, installVMTools, tsAuthKey, tsClientSecret, tsCatchTags, prepareVMLANBridge, skipVMLANBridge)...)
 }
 
 func catchInstallEnv(userAtRemote string) []string {

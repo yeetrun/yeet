@@ -184,6 +184,45 @@ func TestHandleLocalCommandVMNetworkEnsureRequiresService(t *testing.T) {
 	}
 }
 
+func TestHandleLocalCommandVMLANBridgeStatus(t *testing.T) {
+	var out bytes.Buffer
+	cfg := &catch.Config{RootDir: t.TempDir()}
+	handled, err := handleLocalCommand([]string{"vm-lan-bridge-status"}, cfg, cfg.RootDir, &out)
+	if err != nil {
+		t.Fatalf("handleLocalCommand vm-lan-bridge-status: %v", err)
+	}
+	if !handled {
+		t.Fatal("vm-lan-bridge-status was not handled")
+	}
+	if !strings.Contains(out.String(), "VM LAN bridge") {
+		t.Fatalf("output = %q, want VM LAN bridge summary", out.String())
+	}
+}
+
+func TestHandleLocalCommandVMLANBridgePrepareRequiresYes(t *testing.T) {
+	var out bytes.Buffer
+	cfg := &catch.Config{RootDir: t.TempDir()}
+	handled, err := handleLocalCommand([]string{"vm-lan-bridge-prepare"}, cfg, cfg.RootDir, &out)
+	if err == nil || !strings.Contains(err.Error(), "--yes is required") {
+		t.Fatalf("error = %v, want --yes is required", err)
+	}
+	if !handled {
+		t.Fatal("vm-lan-bridge-prepare was not handled")
+	}
+}
+
+func TestHandleLocalCommandVMLANBridgePrepareRejectsExtraArgs(t *testing.T) {
+	var out bytes.Buffer
+	cfg := &catch.Config{RootDir: t.TempDir()}
+	handled, err := handleLocalCommand([]string{"vm-lan-bridge-prepare", "--yes", "extra"}, cfg, cfg.RootDir, &out)
+	if err == nil || !strings.Contains(err.Error(), "does not accept arguments") {
+		t.Fatalf("error = %v, want extra arg rejection", err)
+	}
+	if !handled {
+		t.Fatal("vm-lan-bridge-prepare was not handled")
+	}
+}
+
 func TestRunCatchProcessHandlesSpecialCommand(t *testing.T) {
 	var out strings.Builder
 	if err := runCatchProcess([]string{"is-catch"}, &out); err != nil {
@@ -289,7 +328,7 @@ func TestHandleLocalCommandInstallPreparesRuntimeBeforeInstallingService(t *test
 		order = append(order, "install")
 		return nil
 	}
-	setupVMHostFn = func() error {
+	setupVMHostFn = func(string) error {
 		order = append(order, "vm")
 		return nil
 	}

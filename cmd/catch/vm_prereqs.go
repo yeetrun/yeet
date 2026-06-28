@@ -13,17 +13,30 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/yeetrun/yeet/pkg/catch"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 )
 
 type vmSetupDeps struct {
-	commandExists func(string) bool
-	pathExists    func(string) bool
-	stderr        io.Writer
-	runCommand    func(string, ...string) error
-	getenv        func(string) string
-	goarch        string
+	commandExists    func(string) bool
+	pathExists       func(string) bool
+	stdin            io.Reader
+	stderr           io.Writer
+	runCommand       func(string, ...string) error
+	getenv           func(string) string
+	confirm          func(io.Reader, io.Writer, string) (bool, error)
+	planLANBridge    func() (vmLANBridgePlan, error)
+	prepareLANBridge func() error
+	goarch           string
 }
+
+type vmLANRenderer = catch.VMLANRenderer
+type vmLANBridgePlan = catch.VMLANBridgePlan
+
+var (
+	planVMLANBridgeFn    = catch.PlanVMLANBridge
+	prepareVMLANBridgeFn = catch.PrepareVMLANBridge
+)
 
 type vmHostCommandRequirement struct {
 	Command string
@@ -52,18 +65,27 @@ var requiredVMHostDevices = []string{"/dev/kvm", "/dev/net/tun"}
 
 const vmHostRequirementsDocsURL = "https://yeetrun.com/docs/getting-started/installation#host-requirements"
 
-func setupVMHost() error {
-	return setupVMHostWith(defaultVMSetupDeps())
+func setupVMHost(dataDir string) error {
+	return setupVMHostWith(defaultVMSetupDeps(dataDir))
 }
 
-func defaultVMSetupDeps() vmSetupDeps {
+func defaultVMSetupDeps(dataDir string) vmSetupDeps {
 	return vmSetupDeps{
 		commandExists: commandExists,
 		pathExists:    pathExists,
+		stdin:         os.Stdin,
 		stderr:        os.Stderr,
 		runCommand:    runVMHostSetupCommand,
 		getenv:        os.Getenv,
-		goarch:        runtime.GOARCH,
+		confirm:       cmdutil.Confirm,
+		planLANBridge: func() (vmLANBridgePlan, error) {
+			return planVMLANBridgeFn(dataDir)
+		},
+		prepareLANBridge: func() error {
+			_, err := prepareVMLANBridgeFn(dataDir, true)
+			return err
+		},
+		goarch: runtime.GOARCH,
 	}
 }
 
@@ -72,6 +94,9 @@ func setupVMHostWith(deps vmSetupDeps) error {
 	report := inspectVMHostPrereqs(deps)
 	warnVMHostCapabilities(deps.stderr, report)
 	if len(report.MissingCommands) == 0 {
+		if vmHostPrereqsReady(report) {
+			return maybePrepareVMLANBridgeDuringSetup(deps)
+		}
 		return nil
 	}
 	packages := missingVMHostPackages(report)
@@ -90,11 +115,43 @@ func setupVMHostWith(deps vmSetupDeps) error {
 		if err := installVMHostPackages(deps, packages); err != nil {
 			return err
 		}
-		_, err := fmt.Fprintf(deps.stderr, "Installed VM host packages: %s\n", strings.Join(packages, ", "))
-		return err
+		if _, err := fmt.Fprintf(deps.stderr, "Installed VM host packages: %s\n", strings.Join(packages, ", ")); err != nil {
+			return err
+		}
+		return maybePrepareVMLANBridgeDuringSetup(deps)
 	}
 	warnMissingVMHostCommands(deps.stderr, report.MissingCommands, packages)
 	return nil
+}
+
+func maybePrepareVMLANBridgeDuringSetup(deps vmSetupDeps) error {
+	if deps.getenv("CATCH_SKIP_VM_LAN_BRIDGE") == "1" {
+		return nil
+	}
+	plan, err := deps.planLANBridge()
+	if err != nil {
+		_, _ = fmt.Fprintf(deps.stderr, "Warning: VM LAN bridge planning is unavailable during init: %v\n", err)
+		return nil
+	}
+	if plan.Ready || !plan.NeedsPrepare {
+		return nil
+	}
+	if deps.getenv("CATCH_PREPARE_VM_LAN_BRIDGE") == "1" {
+		return deps.prepareLANBridge()
+	}
+	if deps.confirm == nil {
+		_, _ = fmt.Fprintf(deps.stderr, "Warning: VM LAN bridge %s needs preparation for VM LAN networking; set CATCH_PREPARE_VM_LAN_BRIDGE=1 to prepare it during init or run catch vm-lan-bridge-prepare --yes later.\n", plan.Bridge)
+		return nil
+	}
+	ok, err := deps.confirm(deps.stdin, deps.stderr, fmt.Sprintf("Prepare %s for VM LAN networking?", plan.Bridge))
+	if err != nil {
+		_, _ = fmt.Fprintf(deps.stderr, "Warning: could not confirm VM LAN bridge preparation: %v\n", err)
+		return nil
+	}
+	if !ok {
+		return nil
+	}
+	return deps.prepareLANBridge()
 }
 
 func installVMHostPackages(deps vmSetupDeps, packages []string) error {
@@ -106,6 +163,10 @@ func installVMHostPackages(deps vmSetupDeps, packages []string) error {
 		return fmt.Errorf("failed to install VM host packages: %w", err)
 	}
 	return nil
+}
+
+func vmHostPrereqsReady(report vmHostPrereqReport) bool {
+	return report.UnsupportedArch == "" && len(report.MissingDevices) == 0 && len(report.MissingCommands) == 0
 }
 
 func canInstallVMHostPackages(report vmHostPrereqReport) bool {
@@ -125,7 +186,7 @@ func missingVMHostDevice(report vmHostPrereqReport, device string) bool {
 }
 
 func normalizeVMSetupDeps(deps vmSetupDeps) vmSetupDeps {
-	defaults := defaultVMSetupDeps()
+	defaults := defaultVMSetupDeps("")
 	if deps.commandExists == nil {
 		deps.commandExists = defaults.commandExists
 	}
@@ -141,8 +202,25 @@ func normalizeVMSetupDeps(deps vmSetupDeps) vmSetupDeps {
 	if deps.getenv == nil {
 		deps.getenv = defaults.getenv
 	}
+	deps = normalizeVMSetupPromptDeps(deps, defaults)
 	if deps.goarch == "" {
 		deps.goarch = defaults.goarch
+	}
+	return deps
+}
+
+func normalizeVMSetupPromptDeps(deps vmSetupDeps, defaults vmSetupDeps) vmSetupDeps {
+	if deps.stdin == nil {
+		deps.stdin = defaults.stdin
+	}
+	if deps.confirm == nil {
+		deps.confirm = defaults.confirm
+	}
+	if deps.planLANBridge == nil {
+		deps.planLANBridge = defaults.planLANBridge
+	}
+	if deps.prepareLANBridge == nil {
+		deps.prepareLANBridge = defaults.prepareLANBridge
 	}
 	return deps
 }
