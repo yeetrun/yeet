@@ -58,6 +58,7 @@ var (
 	fetchSSHServiceInfoFunc                     = fetchSSHServiceInfo
 	vmSSHLANReachableFunc                       = vmSSHLANReachable
 	execRemoteShellFn                           = execRemoteShell
+	currentExecutableFunc                       = os.Executable
 )
 
 const vmSSHLANReachabilityTimeout = 300 * time.Millisecond
@@ -649,8 +650,30 @@ func appendVMSSHProxyOptions(options []string, target vmSSHTargetInfo, proxyHost
 }
 
 func vmSSHProxyCommand(proxyHost string, _ serverInfo, service string) string {
-	args := []string{"yeet", "--host=" + proxyHost, "_vm-ssh-proxy", baseSSHServiceName(service), "%h", "%p"}
+	args := []string{currentExecutablePath(), "--host=" + proxyHost, "_vm-ssh-proxy", baseSSHServiceName(service), "%h", "%p"}
 	return shellJoin(args)
+}
+
+func currentExecutablePath() string {
+	path, err := currentExecutableFunc()
+	if err == nil {
+		if path = strings.TrimSpace(path); path != "" {
+			if abs, absErr := filepath.Abs(path); absErr == nil {
+				return abs
+			}
+			return path
+		}
+	}
+	arg0 := strings.TrimSpace(os.Args[0])
+	if arg0 == "" {
+		return "yeet"
+	}
+	if strings.Contains(arg0, string(os.PathSeparator)) {
+		if abs, absErr := filepath.Abs(arg0); absErr == nil {
+			return abs
+		}
+	}
+	return arg0
 }
 
 type vmSSHTargetInfo struct {

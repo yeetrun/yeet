@@ -20,6 +20,15 @@ import (
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
+const testVMSSHProxyExecutable = "/tmp/yeet-current"
+
+func stubCurrentExecutable(t *testing.T, path string) {
+	t.Helper()
+	old := currentExecutableFunc
+	currentExecutableFunc = func() (string, error) { return path, nil }
+	t.Cleanup(func() { currentExecutableFunc = old })
+}
+
 func TestSSHTarget(t *testing.T) {
 	tests := []struct {
 		name string
@@ -406,6 +415,7 @@ func TestServiceShellCommandFromResponseNormalizesQualifiedService(t *testing.T)
 func TestServiceShellCommandForVMUsesGuestSSH(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	stubCurrentExecutable(t, testVMSSHProxyExecutable)
 
 	gotCommand, gotOptions, err := serviceShellCommandFromResponse(
 		"yeet-lab",
@@ -437,7 +447,7 @@ func TestServiceShellCommandForVMUsesGuestSSH(t *testing.T) {
 		"-o", "UserKnownHostsFile=" + filepath.Join(home, ".yeet", "known_hosts"),
 		"-o", "HostKeyAlias=yeet-vm-devbox@yeet-lab",
 		"-o", "CheckHostIP=no",
-		"-o", "ProxyCommand=yeet --host=yeet-lab _vm-ssh-proxy devbox %h %p",
+		"-o", "ProxyCommand=/tmp/yeet-current --host=yeet-lab _vm-ssh-proxy devbox %h %p",
 	}
 	if !reflect.DeepEqual(gotOptions, wantOptions) {
 		t.Fatalf("options = %#v, want %#v", gotOptions, wantOptions)
@@ -447,6 +457,7 @@ func TestServiceShellCommandForVMUsesGuestSSH(t *testing.T) {
 func TestVMSSHExecutionPlanForServiceBuildsProxyPlan(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	stubCurrentExecutable(t, testVMSSHProxyExecutable)
 
 	plan, err := vmSSHExecutionPlanForServiceInfo(
 		"yeet-lab",
@@ -473,7 +484,7 @@ func TestVMSSHExecutionPlanForServiceBuildsProxyPlan(t *testing.T) {
 		"-l", "ubuntu",
 		"HostName=192.168.100.12",
 		"HostKeyAlias=yeet-vm-devbox@yeet-lab",
-		"ProxyCommand=yeet --host=yeet-lab _vm-ssh-proxy devbox %h %p",
+		"ProxyCommand=/tmp/yeet-current --host=yeet-lab _vm-ssh-proxy devbox %h %p",
 		"yeet-lab",
 	} {
 		if !sshOptionsContainValue(plan.Args, want) && !slices.Contains(plan.Args, want) {
@@ -489,12 +500,33 @@ func TestVMSSHExecutionPlanForServiceBuildsProxyPlan(t *testing.T) {
 }
 
 func TestVMSSHProxyCommandUsesYeetRPCInsteadOfRootSSH(t *testing.T) {
+	stubCurrentExecutable(t, testVMSSHProxyExecutable)
+
 	got := vmSSHProxyCommand("yeet-lab", serverInfo{InstallUser: "root"}, "devbox")
 
 	if strings.Contains(got, "ssh -W") || strings.Contains(got, "root@yeet-lab") {
 		t.Fatalf("proxy command = %q, want yeet RPC proxy without root SSH", got)
 	}
-	for _, want := range []string{"yeet", "--host=yeet-lab", "_vm-ssh-proxy", "devbox", "%h", "%p"} {
+	for _, want := range []string{testVMSSHProxyExecutable, "--host=yeet-lab", "_vm-ssh-proxy", "devbox", "%h", "%p"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("proxy command = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestVMSSHProxyCommandUsesCurrentExecutable(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "yeet current")
+	stubCurrentExecutable(t, executable)
+
+	got := vmSSHProxyCommand("yeet-lab", serverInfo{}, "devbox")
+
+	if strings.HasPrefix(got, "yeet ") {
+		t.Fatalf("proxy command = %q, want current executable path instead of PATH lookup", got)
+	}
+	if want := shellQuote(executable) + " "; !strings.HasPrefix(got, want) {
+		t.Fatalf("proxy command = %q, want prefix %q", got, want)
+	}
+	for _, want := range []string{"--host=yeet-lab", "_vm-ssh-proxy", "devbox", "%h", "%p"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("proxy command = %q, want %q", got, want)
 		}
@@ -581,6 +613,8 @@ func TestServiceShellCommandForVMSvcLANUsesReachableLANDirectly(t *testing.T) {
 }
 
 func TestServiceShellCommandForVMSvcLANFallsBackToSvcProxyWhenLANUnreachable(t *testing.T) {
+	stubCurrentExecutable(t, testVMSSHProxyExecutable)
+
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	stubVMSSHLANReachable(t, func(host string) bool {
@@ -617,7 +651,7 @@ func TestServiceShellCommandForVMSvcLANFallsBackToSvcProxyWhenLANUnreachable(t *
 	if len(gotCommand) != 0 {
 		t.Fatalf("command = %#v, want empty", gotCommand)
 	}
-	wantProxy := "ProxyCommand=yeet --host=yeet-lab _vm-ssh-proxy devbox %h %p"
+	wantProxy := "ProxyCommand=/tmp/yeet-current --host=yeet-lab _vm-ssh-proxy devbox %h %p"
 	for _, want := range []string{"HostName=192.168.100.12", wantProxy} {
 		if !sshOptionsContainValue(gotOptions, want) {
 			t.Fatalf("options = %#v, want %q", gotOptions, want)
@@ -747,6 +781,8 @@ func TestServiceShellCommandForVMLANNetworkCustomHostNameSkipsGeneratedProxy(t *
 }
 
 func TestServiceShellCommandForVMLANNetworkForceProxy(t *testing.T) {
+	stubCurrentExecutable(t, testVMSSHProxyExecutable)
+
 	_, plan := testSSHExecutionPlan(t,
 		[]string{"ssh", "--force-proxy", "devbox"},
 		catchrpc.ServiceInfoResponse{
@@ -760,7 +796,7 @@ func TestServiceShellCommandForVMLANNetworkForceProxy(t *testing.T) {
 			},
 		},
 	)
-	wantProxy := "ProxyCommand=yeet --host=yeet-lab _vm-ssh-proxy devbox %h %p"
+	wantProxy := "ProxyCommand=/tmp/yeet-current --host=yeet-lab _vm-ssh-proxy devbox %h %p"
 	if !sshOptionsContainValue(plan.Args, wantProxy) {
 		t.Fatalf("args = %#v, want force proxy %q", plan.Args, wantProxy)
 	}
@@ -773,6 +809,8 @@ func TestServiceShellCommandForVMLANNetworkForceProxy(t *testing.T) {
 }
 
 func TestServiceShellCommandForVMSvcLANForceProxyUsesSvcIP(t *testing.T) {
+	stubCurrentExecutable(t, testVMSSHProxyExecutable)
+
 	stubVMSSHLANReachable(t, func(host string) bool {
 		t.Fatalf("LAN reachability should not be checked when force proxy is set")
 		return false
@@ -794,7 +832,7 @@ func TestServiceShellCommandForVMSvcLANForceProxyUsesSvcIP(t *testing.T) {
 			},
 		},
 	)
-	wantProxy := "ProxyCommand=yeet --host=yeet-lab _vm-ssh-proxy devbox %h %p"
+	wantProxy := "ProxyCommand=/tmp/yeet-current --host=yeet-lab _vm-ssh-proxy devbox %h %p"
 	for _, want := range []string{"HostName=192.168.100.12", wantProxy} {
 		if !sshOptionsContainValue(plan.Args, want) {
 			t.Fatalf("args = %#v, want %q", plan.Args, want)

@@ -666,6 +666,7 @@ type recordedRsync struct {
 func TestRunVMRsyncCopyUploadBuildsRsyncCommand(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	stubCurrentExecutable(t, testVMSSHProxyExecutable)
 
 	oldLookPath := lookPathCopyBinaryFunc
 	oldRun := runRsyncCommandFunc
@@ -727,7 +728,7 @@ func TestRunVMRsyncCopyUploadBuildsRsyncCommand(t *testing.T) {
 		t.Fatalf("rsync args = %#v, want local sources before remote destination", got.args)
 	}
 	remoteShell := got.args[slices.Index(got.args, "-e")+1]
-	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=yeet --host=yeet-lab _vm-ssh-proxy devbox %h %p"} {
+	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=/tmp/yeet-current --host=yeet-lab _vm-ssh-proxy devbox %h %p"} {
 		if !strings.Contains(remoteShell, want) {
 			t.Fatalf("remote shell = %q, want %q", remoteShell, want)
 		}
@@ -857,6 +858,8 @@ func TestRunVMRsyncCopyVMSvcLANUsesReachableLANDirectly(t *testing.T) {
 }
 
 func TestRunVMRsyncCopyVMSvcLANFallsBackToSvcProxyWhenLANUnreachable(t *testing.T) {
+	stubCurrentExecutable(t, testVMSSHProxyExecutable)
+
 	oldLookPath := lookPathCopyBinaryFunc
 	oldRun := runRsyncCommandFunc
 	defer func() {
@@ -906,7 +909,7 @@ func TestRunVMRsyncCopyVMSvcLANFallsBackToSvcProxyWhenLANUnreachable(t *testing.
 		t.Fatalf("runVMRsyncCopy: %v", err)
 	}
 	remoteShell := gotArgs[slices.Index(gotArgs, "-e")+1]
-	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=yeet --host=yeet-lab _vm-ssh-proxy devbox %h %p"} {
+	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=/tmp/yeet-current --host=yeet-lab _vm-ssh-proxy devbox %h %p"} {
 		if !strings.Contains(remoteShell, want) {
 			t.Fatalf("remote shell = %q, want %q", remoteShell, want)
 		}
