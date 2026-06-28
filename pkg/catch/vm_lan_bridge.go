@@ -75,8 +75,10 @@ func planHostLANBridge(state fakeVMLANHostState) (vmLANBridgePlan, error) {
 	if !state.renderer.Supported {
 		return vmLANBridgePlan{}, fmt.Errorf("VM LAN bridge preparation is not supported for %s: %s", state.renderer.Name, state.renderer.Reason)
 	}
-	if _, ok := links["br0"]; ok {
-		return vmLANBridgePlan{}, fmt.Errorf("br0 already exists but is not the LAN bridge for %s", link.Name)
+	if br0, ok := links["br0"]; ok {
+		if !canPrepareExistingEmptyVMLANBridge(br0, link.Name, links, state.addrs) {
+			return vmLANBridgePlan{}, fmt.Errorf("br0 already exists but is not the LAN bridge for %s", link.Name)
+		}
 	}
 	return vmLANBridgePlan{
 		Ready:        false,
@@ -100,6 +102,21 @@ func existingVMLANBridgePlan(link vmLANLink, links map[string]vmLANLink, rendere
 		return vmLANBridgePlan{}, false
 	}
 	return vmLANBridgePlan{Ready: true, Bridge: master.Name, Parent: link.Name, Renderer: renderer, Reason: "default route interface is attached to a bridge"}, true
+}
+
+func canPrepareExistingEmptyVMLANBridge(bridge vmLANLink, parent string, links map[string]vmLANLink, addrs []vmLANAddress) bool {
+	if bridge.Name != "br0" || bridge.Kind != "bridge" {
+		return false
+	}
+	if vmLANLinkHasGlobalAddress(bridge.Name, addrs) {
+		return false
+	}
+	for _, link := range links {
+		if link.Master == bridge.Name && link.Name != parent {
+			return false
+		}
+	}
+	return true
 }
 
 func chooseDefaultIPv4Route(routes []vmLANRoute) (vmLANRoute, bool) {
@@ -175,6 +192,22 @@ func vmLANLinkHasRFC1918Address(name string, addrs []vmLANAddress) bool {
 			continue
 		}
 		if prefix.Addr().Is4() && prefix.Addr().IsPrivate() {
+			return true
+		}
+	}
+	return false
+}
+
+func vmLANLinkHasGlobalAddress(name string, addrs []vmLANAddress) bool {
+	name = strings.TrimSpace(name)
+	for _, addr := range addrs {
+		if strings.TrimSpace(addr.Iface) != name {
+			continue
+		}
+		if scope := strings.TrimSpace(addr.Scope); scope != "" && scope != "global" {
+			continue
+		}
+		if strings.TrimSpace(addr.Prefix) != "" {
 			return true
 		}
 	}

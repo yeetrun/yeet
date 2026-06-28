@@ -101,7 +101,7 @@ func discoverVMLANHostState() (fakeVMLANHostState, error) {
 }
 
 func discoverVMLANLinks() ([]vmLANLink, error) {
-	raw, err := vmLANBridgeCommandOutputFn("ip", "-json", "link", "show")
+	raw, err := vmLANBridgeCommandOutputFn("ip", "-details", "-json", "link", "show")
 	if err != nil {
 		return nil, fmt.Errorf("discover VM LAN links: %w", err)
 	}
@@ -486,7 +486,15 @@ func (r *systemVMLANBridgePrepareRunner) ScheduleRollback(id string, after time.
 
 func (r *systemVMLANBridgePrepareRunner) CancelRollback(id string) error {
 	unit := vmLANBridgeRollbackUnit(id)
-	return vmLANBridgeRunCommandFn("systemctl", "stop", unit+".timer", unit+".service")
+	for _, name := range []string{unit + ".timer", unit + ".service"} {
+		if err := vmLANBridgeRunCommandFn("systemctl", "stop", name); err != nil {
+			if isVMLANBridgeTransientUnitMissingError(err, name) {
+				continue
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *systemVMLANBridgePrepareRunner) Rollback(id string) error {
@@ -531,6 +539,19 @@ func vmLANBridgeParentAttachedToBridge(parent, bridge string) (bool, error) {
 		}
 	}
 	return false, fmt.Errorf("parent %q was not found while validating bridge %q", parent, bridge)
+}
+
+func isVMLANBridgeTransientUnitMissingError(err error, unit string) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	if !strings.Contains(text, unit) {
+		return false
+	}
+	return strings.Contains(text, "not loaded") ||
+		strings.Contains(text, "not found") ||
+		strings.Contains(text, "could not be found")
 }
 
 func requireManagedVMLANBridgeOverlayContent(content []byte) error {

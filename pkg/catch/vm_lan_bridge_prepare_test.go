@@ -507,15 +507,38 @@ func TestSystemVMLANBridgeRunnerCommands(t *testing.T) {
 		"netplan generate",
 		"systemd-run --unit " + unit + " --on-active=120s --collect /bin/sh -c p=/etc/netplan/99-yeet-vm-lan-bridge.yaml; marker='# Managed by yeet VM LAN bridge preparation; do not edit.'; if [ ! -e \"$p\" ] || { IFS= read -r first < \"$p\" && [ \"$first\" = \"$marker\" ]; }; then rm -f \"$p\" && netplan apply; else echo 'refusing to remove unmanaged VM LAN bridge netplan overlay' >&2; exit 1; fi",
 		"netplan apply",
-		"systemctl stop " + unit + ".timer " + unit + ".service",
+		"systemctl stop " + unit + ".timer",
+		"systemctl stop " + unit + ".service",
 		"netplan apply",
-		"systemctl stop " + unit + ".timer " + unit + ".service",
+		"systemctl stop " + unit + ".timer",
+		"systemctl stop " + unit + ".service",
 	}
 	if !slices.Equal(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
 	}
 	if removed != vmLANBridgeNetplanOverlay {
 		t.Fatalf("removed = %q, want overlay", removed)
+	}
+}
+
+func TestSystemVMLANBridgeRunnerCancelRollbackIgnoresMissingTransientService(t *testing.T) {
+	oldRun := vmLANBridgeRunCommandFn
+	t.Cleanup(func() {
+		vmLANBridgeRunCommandFn = oldRun
+	})
+	vmLANBridgeRunCommandFn = func(name string, args ...string) error {
+		if name != "systemctl" || len(args) != 2 || args[0] != "stop" {
+			t.Fatalf("command = %s %v, want systemctl stop rollback units", name, args)
+		}
+		if args[1] == "yeet-vm-lan-bridge-test-rollback.service" {
+			return errors.New("exit status 5: Failed to stop yeet-vm-lan-bridge-test-rollback.service: Unit yeet-vm-lan-bridge-test-rollback.service not loaded.")
+		}
+		return nil
+	}
+	runner := &systemVMLANBridgePrepareRunner{}
+
+	if err := runner.CancelRollback("vm-lan-bridge-test"); err != nil {
+		t.Fatalf("CancelRollback: %v", err)
 	}
 }
 
@@ -690,7 +713,8 @@ func TestSystemVMLANBridgeRunnerRollbackRemovesManagedOverlay(t *testing.T) {
 	unit := "yeet-vm-lan-bridge-test-rollback"
 	want := []string{
 		"netplan apply",
-		"systemctl stop " + unit + ".timer " + unit + ".service",
+		"systemctl stop " + unit + ".timer",
+		"systemctl stop " + unit + ".service",
 	}
 	if !slices.Equal(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
