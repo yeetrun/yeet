@@ -133,6 +133,26 @@ func TestPlanHostLANBridgeRejectsAmbiguousDefaultRoutes(t *testing.T) {
 	}
 }
 
+func TestPlanHostLANBridgePreparesExistingEmptyBr0Bridge(t *testing.T) {
+	state := fakeVMLANHostState{
+		links: []vmLANLink{
+			{Name: "br0", Kind: "bridge", OperState: "down", HasHardware: true},
+			{Name: "eno1", Kind: "ether", OperState: "up", HasHardware: true},
+		},
+		routes:   []vmLANRoute{{Default: true, Iface: "eno1", Gateway: "192.168.20.1"}},
+		addrs:    []vmLANAddress{{Iface: "eno1", Prefix: "192.168.20.10/24", Scope: "global"}},
+		renderer: vmLANRenderer{Name: "netplan-networkd", Supported: true},
+	}
+
+	plan, err := planHostLANBridge(state)
+	if err != nil {
+		t.Fatalf("planHostLANBridge: %v", err)
+	}
+	if plan.Ready || !plan.NeedsPrepare || plan.Bridge != "br0" || plan.Parent != "eno1" {
+		t.Fatalf("plan = %#v, want prepare existing empty br0 from eno1", plan)
+	}
+}
+
 func TestPlanHostLANBridgeRejectsUnrelatedBr0(t *testing.T) {
 	state := fakeVMLANHostState{
 		links: []vmLANLink{
@@ -140,7 +160,7 @@ func TestPlanHostLANBridgeRejectsUnrelatedBr0(t *testing.T) {
 			{Name: "eno1", Kind: "ether", OperState: "up", HasHardware: true},
 		},
 		routes:   []vmLANRoute{{Default: true, Iface: "eno1", Gateway: "192.168.20.1"}},
-		addrs:    []vmLANAddress{{Iface: "eno1", Prefix: "192.168.20.10/24", Scope: "global"}},
+		addrs:    []vmLANAddress{{Iface: "br0", Prefix: "192.168.99.10/24", Scope: "global"}, {Iface: "eno1", Prefix: "192.168.20.10/24", Scope: "global"}},
 		renderer: vmLANRenderer{Name: "netplan-networkd", Supported: true},
 	}
 
@@ -192,13 +212,32 @@ func TestPlanVMLANBridgeDiscoversPhysicalDefaultRouteAndProposesBr0(t *testing.T
 		t.Fatalf("renderer = %#v, want supported netplan-networkd", plan.Renderer)
 	}
 	for _, want := range []string{
-		"ip -json link show",
+		"ip -details -json link show",
 		"ip -json route show default",
 		"ip -json address show",
 	} {
 		if !slices.Contains(*commands, want) {
 			t.Fatalf("commands = %#v, missing %q", *commands, want)
 		}
+	}
+}
+
+func TestDiscoverVMLANLinksRequestsDetailsForBridgeKind(t *testing.T) {
+	commands := stubVMLANBridgeSystem(t, vmLANBridgeCommandFixtures{
+		link: []byte(`[
+			{"ifname":"br0","operstate":"UP","address":"52:54:00:12:34:56","link_type":"ether","linkinfo":{"info_kind":"bridge"}}
+		]`),
+	})
+
+	links, err := discoverVMLANLinks()
+	if err != nil {
+		t.Fatalf("discoverVMLANLinks: %v", err)
+	}
+	if len(links) != 1 || links[0].Kind != "bridge" {
+		t.Fatalf("links = %#v, want br0 bridge", links)
+	}
+	if !slices.Contains(*commands, "ip -details -json link show") {
+		t.Fatalf("commands = %#v, want detailed ip link probe", *commands)
 	}
 }
 
@@ -355,7 +394,7 @@ func stubVMLANBridgeSystem(t *testing.T, fixtures vmLANBridgeCommandFixtures) *[
 		key := strings.Join(append([]string{name}, args...), " ")
 		commands = append(commands, key)
 		switch key {
-		case "ip -json link show":
+		case "ip -details -json link show", "ip -json link show":
 			return fixtures.link, nil
 		case "ip -json route show default":
 			return fixtures.route, nil
