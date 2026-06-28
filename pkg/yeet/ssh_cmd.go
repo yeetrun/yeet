@@ -70,6 +70,27 @@ func HandleSSH(ctx context.Context, args []string) error {
 	return runSSHPlan(ctx, plan, os.Stdin, os.Stdout, os.Stderr)
 }
 
+func HandleVMSSHProxy(ctx context.Context, args []string) error {
+	args = trimVMSSHProxyCommandName(args)
+	if len(args) != 3 {
+		return fmt.Errorf("_vm-ssh-proxy expects <service> <host> <port>")
+	}
+	host := strings.TrimSpace(Host())
+	if host == "" {
+		return fmt.Errorf("no host configured")
+	}
+	service := strings.TrimSpace(baseSSHServiceName(args[0]))
+	if service == "" {
+		return fmt.Errorf("_vm-ssh-proxy expects a service")
+	}
+	targetHost := strings.TrimSpace(args[1])
+	targetPort := strings.TrimSpace(args[2])
+	if targetHost == "" || targetPort == "" {
+		return fmt.Errorf("_vm-ssh-proxy expects <service> <host> <port>")
+	}
+	return execRemoteShellFn(ctx, host, catchrpc.ExecTargetVMSSHProxy, service, []string{targetHost, targetPort}, os.Stdin, false, os.Stdout)
+}
+
 func sshExecutionPlanForArgs(ctx context.Context, args []string) (sshExecutionPlan, error) {
 	inv, err := sshInvocationFromArgs(args)
 	if err != nil {
@@ -323,6 +344,13 @@ func trimSSHCommandName(args []string) []string {
 	return args
 }
 
+func trimVMSSHProxyCommandName(args []string) []string {
+	if len(args) > 0 && args[0] == "_vm-ssh-proxy" {
+		return args[1:]
+	}
+	return args
+}
+
 func splitYeetSSHFlags(args []string) (bool, []string, error) {
 	out := make([]string, 0, len(args))
 	forceProxy := false
@@ -555,7 +583,7 @@ func buildVMSSHOptionsPlan(proxyHost string, info serverInfo, service string, re
 	out = appendVMSSHBaseOptions(out, target)
 	out = appendVMSSHIdentityOptions(out, service, proxyHost, addGeneratedAlias, addGeneratedCheckHostIP)
 	userProxy := hasSSHProxyOption(out)
-	out, generatedProxy := appendVMSSHProxyOptions(out, target, proxyHost, info)
+	out, generatedProxy := appendVMSSHProxyOptions(out, target, proxyHost, info, service)
 	plan := vmSSHOptionsPlan{
 		Options:        out,
 		Notice:         vmSSHTransportNotice(proxyHost, target, generatedProxy, userProxy),
@@ -573,18 +601,13 @@ func vmSSHTargetWithOptions(resp catchrpc.ServiceInfoResponse, options []string,
 	return target
 }
 
-func vmSSHKnownHostRepair(alias, knownHosts string, addYeetKnownHosts, addGeneratedAlias, generatedProxy bool, proxyHost string) *sshKnownHostRepair {
+func vmSSHKnownHostRepair(alias, knownHosts string, addYeetKnownHosts, addGeneratedAlias, _ bool, _ string) *sshKnownHostRepair {
 	if !addYeetKnownHosts || !addGeneratedAlias {
 		return nil
-	}
-	extraAliases := []string(nil)
-	if generatedProxy {
-		extraAliases = append(extraAliases, vmSSHProxyHostKeyAlias(proxyHost))
 	}
 	return &sshKnownHostRepair{
 		Alias:          alias,
 		KnownHostsFile: knownHosts,
-		ExtraAliases:   extraAliases,
 	}
 }
 
@@ -616,26 +639,17 @@ func appendVMSSHIdentityOptions(options []string, service, proxyHost string, add
 	return out
 }
 
-func appendVMSSHProxyOptions(options []string, target vmSSHTargetInfo, proxyHost string, info serverInfo) ([]string, bool) {
+func appendVMSSHProxyOptions(options []string, target vmSSHTargetInfo, proxyHost string, info serverInfo, service string) ([]string, bool) {
 	out := options
 	if target.Proxy && !hasSSHProxyOption(out) {
-		out = append(out, "-o", "ProxyCommand="+vmSSHProxyCommand(proxyHost, info))
+		out = append(out, "-o", "ProxyCommand="+vmSSHProxyCommand(proxyHost, info, service))
 		return out, true
 	}
 	return out, false
 }
 
-func vmSSHProxyCommand(proxyHost string, info serverInfo) string {
-	args := []string{"ssh"}
-	if knownHosts := vmSSHKnownHostsFile(); knownHosts != "" {
-		args = append(args,
-			"-o", "StrictHostKeyChecking=accept-new",
-			"-o", "UserKnownHostsFile="+knownHosts,
-			"-o", "HostKeyAlias="+vmSSHProxyHostKeyAlias(proxyHost),
-			"-o", "CheckHostIP=no",
-		)
-	}
-	args = append(args, "-W", "%h:%p", sshTarget(proxyHost, info))
+func vmSSHProxyCommand(proxyHost string, _ serverInfo, service string) string {
+	args := []string{"yeet", "--host=" + proxyHost, "_vm-ssh-proxy", baseSSHServiceName(service), "%h", "%p"}
 	return shellJoin(args)
 }
 
@@ -791,14 +805,6 @@ func vmSSHHostKeyAlias(service, host string) string {
 		return "yeet-vm-" + service
 	}
 	return "yeet-vm-" + service + "@" + host
-}
-
-func vmSSHProxyHostKeyAlias(host string) string {
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return "yeet-proxy"
-	}
-	return "yeet-proxy@" + host
 }
 
 func vmSSHKnownHostsFile() string {

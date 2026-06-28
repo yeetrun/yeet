@@ -21,6 +21,7 @@ var (
 	bridgedArgs                   []string
 	handleSvcCmdFn                = yeet.HandleSvcCmd
 	handleUpgradeFn               = yeet.HandleUpgrade
+	handleVMSSHProxyFn            = yeet.HandleVMSSHProxy
 	isTerminalFn                  = term.IsTerminal
 	maybePrintUpdateAdvisoryFn    = yeet.MaybePrintUpdateAdvisory
 	projectHostCountForAdvisoryFn = yeet.ProjectHostCountForAdvisory
@@ -68,6 +69,7 @@ func run() int {
 	handlers["list-hosts"] = handleListHosts
 	handlers["prefs"] = yeet.HandlePrefs
 	handlers["ssh"] = yeet.HandleSSH
+	handlers["_vm-ssh-proxy"] = handleVMSSHProxyFn
 	handlers["skirt"] = yeet.HandleSkirt
 	handlers["upgrade"] = handleUpgradeFn
 

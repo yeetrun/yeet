@@ -19,6 +19,7 @@ func TestExecRequestPermissionsForShellTargets(t *testing.T) {
 	}{
 		{name: "host shell", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetHostShell}, want: permissionSSH},
 		{name: "service shell", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceShell, Service: "svc"}, want: permissionSSH},
+		{name: "VM SSH proxy", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetVMSSHProxy, Service: "devbox"}, want: permissionSSH},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

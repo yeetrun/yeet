@@ -49,6 +49,7 @@ const (
 	ExecTargetServiceCommand ExecTarget = ""
 	ExecTargetHostShell      ExecTarget = "host-shell"
 	ExecTargetServiceShell   ExecTarget = "service-shell"
+	ExecTargetVMSSHProxy     ExecTarget = "vm-ssh-proxy"
 )
 
 type ExecRequest struct {

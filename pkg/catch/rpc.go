@@ -358,22 +358,34 @@ func readExecRequest(conn *websocket.Conn) (catchrpc.ExecRequest, bool) {
 
 func normalizeExecRequest(req catchrpc.ExecRequest) (catchrpc.ExecRequest, error) {
 	switch req.Target {
-	case catchrpc.ExecTargetServiceCommand:
-		if strings.TrimSpace(req.Service) == "" {
-			return catchrpc.ExecRequest{}, fmt.Errorf("missing service")
-		}
-		return req, nil
+	case catchrpc.ExecTargetServiceCommand, catchrpc.ExecTargetServiceShell:
+		return normalizeServiceExecRequest(req)
 	case catchrpc.ExecTargetHostShell:
 		req.Service = ""
 		return req, nil
-	case catchrpc.ExecTargetServiceShell:
-		if strings.TrimSpace(req.Service) == "" {
-			return catchrpc.ExecRequest{}, fmt.Errorf("missing service")
-		}
-		return req, nil
+	case catchrpc.ExecTargetVMSSHProxy:
+		return normalizeVMSSHProxyExecRequest(req)
 	default:
 		return catchrpc.ExecRequest{}, fmt.Errorf("unknown exec target %q", req.Target)
 	}
+}
+
+func normalizeServiceExecRequest(req catchrpc.ExecRequest) (catchrpc.ExecRequest, error) {
+	if strings.TrimSpace(req.Service) == "" {
+		return catchrpc.ExecRequest{}, fmt.Errorf("missing service")
+	}
+	return req, nil
+}
+
+func normalizeVMSSHProxyExecRequest(req catchrpc.ExecRequest) (catchrpc.ExecRequest, error) {
+	if _, err := normalizeServiceExecRequest(req); err != nil {
+		return catchrpc.ExecRequest{}, err
+	}
+	if len(req.Args) != 2 || strings.TrimSpace(req.Args[0]) == "" || strings.TrimSpace(req.Args[1]) == "" {
+		return catchrpc.ExecRequest{}, fmt.Errorf("expected VM SSH proxy host and port")
+	}
+	req.TTY = false
+	return req, nil
 }
 
 func (s *Server) handleExecWS(w http.ResponseWriter, r *http.Request) {

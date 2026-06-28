@@ -81,6 +81,20 @@ func TestNormalizeExecRequestTargets(t *testing.T) {
 			req:  catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceShell, Service: "api", Args: []string{"pwd"}},
 		},
 		{
+			name: "VM SSH proxy with service and host port",
+			req:  catchrpc.ExecRequest{Target: catchrpc.ExecTargetVMSSHProxy, Service: "devbox", Args: []string{"192.168.100.12", "22"}},
+		},
+		{
+			name:    "VM SSH proxy requires service",
+			req:     catchrpc.ExecRequest{Target: catchrpc.ExecTargetVMSSHProxy, Args: []string{"192.168.100.12", "22"}},
+			wantErr: "missing service",
+		},
+		{
+			name:    "VM SSH proxy requires host and port",
+			req:     catchrpc.ExecRequest{Target: catchrpc.ExecTargetVMSSHProxy, Service: "devbox", Args: []string{"192.168.100.12"}},
+			wantErr: "expected VM SSH proxy host and port",
+		},
+		{
 			name:    "unknown target",
 			req:     catchrpc.ExecRequest{Target: catchrpc.ExecTarget("bogus"), Service: "api"},
 			wantErr: `unknown exec target "bogus"`,
