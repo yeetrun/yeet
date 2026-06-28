@@ -52,6 +52,35 @@ func TestRunReturnsFailureWhenCommandReturnsError(t *testing.T) {
 	}
 }
 
+func TestRunDispatchesHiddenVMSSHProxyCommand(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldHandleVMSSHProxyFn := handleVMSSHProxyFn
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		handleVMSSHProxyFn = oldHandleVMSSHProxyFn
+	})
+
+	var gotArgs []string
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("hidden VM SSH proxy should not route through service command: %v", args)
+		return nil
+	}
+	handleVMSSHProxyFn = func(ctx context.Context, args []string) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+	os.Args = []string{"yeet", "--host=yeet-pve1", "_vm-ssh-proxy", "devbox", "192.168.100.12", "22"}
+
+	if got := run(); got != 0 {
+		t.Fatalf("run exit code = %d, want 0", got)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"_vm-ssh-proxy", "devbox", "192.168.100.12", "22"}) {
+		t.Fatalf("proxy args = %#v, want hidden command args", gotArgs)
+	}
+}
+
 func TestRunServiceSetHelpShowsLeafCommand(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn

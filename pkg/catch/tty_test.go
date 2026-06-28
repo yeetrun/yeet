@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -260,6 +261,90 @@ func TestServiceShellTargetRejectsVMService(t *testing.T) {
 	err := execer.exec()
 	if err == nil || !strings.Contains(err.Error(), "VM service") {
 		t.Fatalf("service shell VM error = %v, want VM rejection", err)
+	}
+}
+
+func TestVMSSHProxyTargetDialsValidatedVMSSHAddress(t *testing.T) {
+	oldDial := vmSSHProxyDialFunc
+	t.Cleanup(func() {
+		vmSSHProxyDialFunc = oldDial
+	})
+
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeVM
+		s.VM = &db.VMConfig{
+			Networks: []db.VMNetworkConfig{{Mode: "svc", IP: netip.MustParseAddr("192.168.100.12")}},
+			SSH:      db.VMSSHConfig{User: "ubuntu"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed VM service: %v", err)
+	}
+
+	clientConn, serverConn := net.Pipe()
+	defer func() { _ = serverConn.Close() }()
+	readDone := make(chan string, 1)
+	go func() {
+		buf := make([]byte, len("client hello"))
+		_, _ = io.ReadFull(serverConn, buf)
+		readDone <- string(buf)
+		_, _ = io.WriteString(serverConn, "server hello")
+		_ = serverConn.Close()
+	}()
+	vmSSHProxyDialFunc = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if network != "tcp" || address != "192.168.100.12:22" {
+			t.Fatalf("dial = %s %s, want tcp 192.168.100.12:22", network, address)
+		}
+		return clientConn, nil
+	}
+
+	rw := newTestDuplexRW("client hello")
+	execer := &ttyExecer{
+		ctx:    context.Background(),
+		s:      server,
+		target: catchrpc.ExecTargetVMSSHProxy,
+		sn:     "devbox",
+		args:   []string{"192.168.100.12", "22"},
+		rw:     rw,
+	}
+
+	if err := execer.exec(); err != nil {
+		t.Fatalf("VM SSH proxy exec: %v", err)
+	}
+	if got := <-readDone; got != "client hello" {
+		t.Fatalf("dialed connection input = %q, want client bytes", got)
+	}
+	if got := rw.String(); got != "server hello" {
+		t.Fatalf("session output = %q, want server bytes", got)
+	}
+}
+
+func TestVMSSHProxyTargetRejectsUnmatchedVMSSHAddress(t *testing.T) {
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeVM
+		s.VM = &db.VMConfig{
+			Networks: []db.VMNetworkConfig{{Mode: "svc", IP: netip.MustParseAddr("192.168.100.12")}},
+			SSH:      db.VMSSHConfig{User: "ubuntu"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed VM service: %v", err)
+	}
+
+	execer := &ttyExecer{
+		ctx:    context.Background(),
+		s:      server,
+		target: catchrpc.ExecTargetVMSSHProxy,
+		sn:     "devbox",
+		args:   []string{"10.0.0.99", "22"},
+		rw:     newTestDuplexRW(""),
+	}
+
+	err := execer.exec()
+	if err == nil || !strings.Contains(err.Error(), "does not match VM SSH address") {
+		t.Fatalf("VM SSH proxy error = %v, want address rejection", err)
 	}
 }
 

@@ -345,6 +345,8 @@ func (e *ttyExecer) exec() error {
 		return e.hostShellCmdFunc(e.args)
 	case catchrpc.ExecTargetServiceShell:
 		return e.serviceShellCmdFunc(e.args)
+	case catchrpc.ExecTargetVMSSHProxy:
+		return e.vmSSHProxyCmdFunc(e.args)
 	}
 	if len(e.args) == 0 {
 		return nil

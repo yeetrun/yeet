@@ -727,7 +727,7 @@ func TestRunVMRsyncCopyUploadBuildsRsyncCommand(t *testing.T) {
 		t.Fatalf("rsync args = %#v, want local sources before remote destination", got.args)
 	}
 	remoteShell := got.args[slices.Index(got.args, "-e")+1]
-	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=ssh"} {
+	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=yeet --host=yeet-pve1 _vm-ssh-proxy devbox %h %p"} {
 		if !strings.Contains(remoteShell, want) {
 			t.Fatalf("remote shell = %q, want %q", remoteShell, want)
 		}
@@ -794,7 +794,7 @@ func TestRunVMRsyncCopyDownloadBuildsRsyncCommand(t *testing.T) {
 			t.Fatalf("remote shell = %q, want %q", remoteShell, want)
 		}
 	}
-	if strings.Contains(remoteShell, "ProxyCommand=ssh") {
+	if strings.Contains(remoteShell, "ProxyCommand=") {
 		t.Fatalf("remote shell = %q, want direct LAN SSH without generated proxy", remoteShell)
 	}
 }
@@ -851,7 +851,7 @@ func TestRunVMRsyncCopyVMSvcLANUsesReachableLANDirectly(t *testing.T) {
 			t.Fatalf("remote shell = %q, want %q", remoteShell, want)
 		}
 	}
-	if strings.Contains(remoteShell, "ProxyCommand=ssh") {
+	if strings.Contains(remoteShell, "ProxyCommand=") {
 		t.Fatalf("remote shell = %q, want direct LAN SSH without generated proxy", remoteShell)
 	}
 }
@@ -906,7 +906,7 @@ func TestRunVMRsyncCopyVMSvcLANFallsBackToSvcProxyWhenLANUnreachable(t *testing.
 		t.Fatalf("runVMRsyncCopy: %v", err)
 	}
 	remoteShell := gotArgs[slices.Index(gotArgs, "-e")+1]
-	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=ssh"} {
+	for _, want := range []string{"ssh", "-l ubuntu", "-o HostName=192.168.100.12", "ProxyCommand=yeet --host=yeet-pve1 _vm-ssh-proxy devbox %h %p"} {
 		if !strings.Contains(remoteShell, want) {
 			t.Fatalf("remote shell = %q, want %q", remoteShell, want)
 		}

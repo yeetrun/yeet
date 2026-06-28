@@ -192,6 +192,10 @@ func buildHelpConfig() yargs.HelpConfig {
 		Name:   "skirt",
 		Hidden: true,
 	}
+	subcommands["_vm-ssh-proxy"] = yargs.SubCommandInfo{
+		Name:   "_vm-ssh-proxy",
+		Hidden: true,
+	}
 	groups := make(map[string]yargs.GroupInfo)
 	for name, info := range cli.RemoteGroupInfos() {
 		commands := make(map[string]yargs.SubCommandInfo)
