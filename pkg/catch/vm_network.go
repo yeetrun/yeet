@@ -6,6 +6,7 @@ package catch
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -28,6 +29,9 @@ const (
 	vmSvcNetNS         = "yeet-ns"
 	vmSvcNSBridge      = "br0"
 )
+
+var errVMLANBridgePreparationRequired = errors.New("VM LAN bridge preparation required")
+var resolveHostVMLANBridgeFn = resolveHostVMLANBridge
 
 type vmNetworkInputs struct {
 	ServiceIP         string
@@ -270,11 +274,9 @@ func resolveVMLANNetworkInput(input *vmNetworkInputs) error {
 		return fmt.Errorf("VM LAN network input is required")
 	}
 	if input.LANParent == "" {
-		parent, err := hostDefaultRouteInterfaceFn()
-		if err != nil {
-			return fmt.Errorf("resolve VM LAN parent: %w", err)
+		if err := resolveDefaultVMLANParent(input); err != nil {
+			return err
 		}
-		input.LANParent = parent
 	}
 	if input.LANVLAN != 0 {
 		parent, bridge, err := vmLANVLANParentAndBridge(input.LANParent, input.LANVLAN)
@@ -286,6 +288,74 @@ func resolveVMLANNetworkInput(input *vmNetworkInputs) error {
 	}
 	input.LANParentIsBridge = vmLANParentIsBridge(input.LANParent)
 	return nil
+}
+
+func resolveDefaultVMLANParent(input *vmNetworkInputs) error {
+	plan, err := resolveHostVMLANBridgeFn()
+	if err != nil {
+		if plan.NeedsPrepare || errors.Is(err, errVMLANBridgePreparationRequired) {
+			return vmLANBridgePreparationRequiredError(plan, err)
+		}
+		return fmt.Errorf("resolve VM LAN bridge: %w", err)
+	}
+	if plan.Ready {
+		bridge := strings.TrimSpace(plan.Bridge)
+		if bridge == "" {
+			return fmt.Errorf("resolve VM LAN bridge: ready plan did not select a bridge")
+		}
+		input.LANParent = bridge
+		input.LANParentIsBridge = true
+		return nil
+	}
+	if plan.NeedsPrepare {
+		return vmLANBridgePreparationRequiredError(plan, nil)
+	}
+	return fmt.Errorf("resolve VM LAN bridge: no usable bridge selected")
+}
+
+func resolveHostVMLANBridge() (vmLANBridgePlan, error) {
+	plan, err := PlanVMLANBridge("")
+	if err != nil {
+		return vmLANBridgePlan{}, err
+	}
+	return vmLANBridgePlan{
+		Ready:        plan.Ready,
+		NeedsPrepare: plan.NeedsPrepare,
+		Bridge:       plan.Bridge,
+		Parent:       plan.Parent,
+		Renderer: vmLANRenderer{
+			Name:      plan.Renderer.Name,
+			Supported: plan.Renderer.Supported,
+			Reason:    plan.Renderer.Reason,
+		},
+		Reason: plan.Reason,
+	}, nil
+}
+
+func vmLANBridgePreparationRequiredError(plan vmLANBridgePlan, cause error) error {
+	cause = vmLANBridgePreparationCause(cause)
+	bridge := strings.TrimSpace(plan.Bridge)
+	parent := strings.TrimSpace(plan.Parent)
+	switch {
+	case bridge != "" && parent != "":
+		return fmt.Errorf("VM LAN bridge preparation required for bridge %q from parent %q: %w", bridge, parent, cause)
+	case bridge != "":
+		return fmt.Errorf("VM LAN bridge preparation required for bridge %q: %w", bridge, cause)
+	case parent != "":
+		return fmt.Errorf("VM LAN bridge preparation required from parent %q: %w", parent, cause)
+	default:
+		return fmt.Errorf("VM LAN bridge preparation required: %w", cause)
+	}
+}
+
+func vmLANBridgePreparationCause(cause error) error {
+	if cause == nil {
+		return errVMLANBridgePreparationRequired
+	}
+	if errors.Is(cause, errVMLANBridgePreparationRequired) {
+		return cause
+	}
+	return errors.Join(errVMLANBridgePreparationRequired, cause)
 }
 
 func vmLANVLANParentAndBridge(parent string, vlan int) (string, string, error) {
@@ -627,9 +697,9 @@ func (p vmNetworkPlan) validateExecutable() error {
 		}
 		if iface.Bridge == "" {
 			if iface.Parent == "" {
-				return fmt.Errorf("VM LAN network parent is required; non-bridge LAN parents are unsupported")
+				return fmt.Errorf("VM LAN network parent is required; prepare a host bridge with `yeet init` or run `yeet run ... --net=lan` interactively so yeet can prepare one")
 			}
-			return fmt.Errorf("VM LAN network parent %q is not a bridge; non-bridge LAN parents are unsupported", iface.Parent)
+			return fmt.Errorf("VM LAN network parent %q is not a bridge; prepare a host bridge with `yeet init` or recreate/update the VM with `yeet run ... --net=lan` interactively so yeet can prepare one", iface.Parent)
 		}
 	}
 	return nil

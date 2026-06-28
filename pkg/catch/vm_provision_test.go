@@ -310,6 +310,193 @@ func TestRunVMRejectsMacvlanFlagsWithoutLANBeforeImageSelection(t *testing.T) {
 	assertNoReadyVM(t, server, "svc")
 }
 
+func TestRunVMLANBridgePrepRequiredBeforeServiceArtifacts(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+
+	oldResolve := resolveHostVMLANBridgeFn
+	oldPrepare := prepareHostVMLANBridgeForRunFn
+	t.Cleanup(func() {
+		resolveHostVMLANBridgeFn = oldResolve
+		prepareHostVMLANBridgeForRunFn = oldPrepare
+	})
+	resolveHostVMLANBridgeFn = func() (vmLANBridgePlan, error) {
+		return vmLANBridgePlan{NeedsPrepare: true, Bridge: "br0", Parent: "eno1"}, errVMLANBridgePreparationRequired
+	}
+	prepareHostVMLANBridgeForRunFn = func(string) (VMLANBridgePrepareStatus, error) {
+		t.Fatal("prepareHostVMLANBridgeForRunFn should not be called without interactive confirmation or env intent")
+		return VMLANBridgePrepareStatus{}, nil
+	}
+
+	var profiled bool
+	vmProvisionHostProfileFunc = func(_ *ttyExecer, _ resolvedServiceRoot, _ int64) (vmHostProfile, error) {
+		profiled = true
+		return vmHostProfile{}, nil
+	}
+	var inspected bool
+	vmImageInspectFunc = func(context.Context, vmImageCache, string) (vmImageCacheState, vmImageManifest, error) {
+		inspected = true
+		return vmImageCacheState{}, vmImageManifest{}, nil
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc,lan", CPUs: 2, Memory: "2g", Disk: "16g"}, testUbuntuVMPayload)
+	if !errors.Is(err, errVMLANBridgePreparationRequired) {
+		t.Fatalf("runVM error = %v, want errVMLANBridgePreparationRequired", err)
+	}
+	if !strings.Contains(err.Error(), "VM LAN bridge preparation is required before creating VM service artifacts") {
+		t.Fatalf("runVM error = %v, want early artifact guard message", err)
+	}
+	if profiled || inspected {
+		t.Fatalf("LAN bridge guard performed provision work: profiled=%v inspected=%v", profiled, inspected)
+	}
+	if _, statErr := os.Stat(serviceRoot); !os.IsNotExist(statErr) {
+		t.Fatalf("service root stat after LAN bridge guard = %v, want not exists", statErr)
+	}
+	dv, dbErr := server.getDB()
+	if dbErr != nil {
+		t.Fatalf("getDB: %v", dbErr)
+	}
+	if svc, ok := dv.AsStruct().Services["svc"]; ok {
+		t.Fatalf("service DB entry after LAN bridge guard = %#v, want no reservation", svc)
+	}
+}
+
+func TestRunVMLANBridgeInteractiveYesPreparesBeforeArtifacts(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	var out bytes.Buffer
+	execer.rw = readWriter{Reader: strings.NewReader("y\n"), Writer: &out}
+	execer.isPty = true
+	prepared := stubRunVMLANBridgeNeedsPrepareThenReady(t, server)
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc,lan", CPUs: 2, Memory: "2g", Disk: "16g"}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if *prepared != 1 {
+		t.Fatalf("prepare calls = %d, want 1", *prepared)
+	}
+	if !strings.Contains(out.String(), "Prepare br0 for VM LAN networking?") {
+		t.Fatalf("output missing bridge prompt:\n%s", out.String())
+	}
+	assertReadyVM(t, server, "svc")
+}
+
+func TestRunVMLANBridgeInteractiveNoAbortsBeforeArtifacts(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	var out bytes.Buffer
+	execer.rw = readWriter{Reader: strings.NewReader("n\n"), Writer: &out}
+	execer.isPty = true
+	prepared := stubRunVMLANBridgeNeedsPrepareThenReady(t, server)
+
+	err := execer.runVM(cli.RunFlags{Net: "svc,lan", CPUs: 2, Memory: "2g", Disk: "16g"}, testUbuntuVMPayload)
+	if !errors.Is(err, errVMLANBridgePreparationRequired) {
+		t.Fatalf("runVM error = %v, want errVMLANBridgePreparationRequired", err)
+	}
+	if !strings.Contains(err.Error(), "VM LAN bridge preparation is required before creating VM service artifacts") {
+		t.Fatalf("runVM error = %v, want early artifact guard message", err)
+	}
+	if *prepared != 0 {
+		t.Fatalf("prepare calls = %d, want 0", *prepared)
+	}
+	if _, statErr := os.Stat(serviceRoot); !os.IsNotExist(statErr) {
+		t.Fatalf("service root stat after declined LAN bridge prep = %v, want not exists", statErr)
+	}
+	assertNoReadyVM(t, server, "svc")
+}
+
+func TestRunVMLANBridgePrepareEnvPreparesWithoutPrompt(t *testing.T) {
+	t.Setenv("CATCH_PREPARE_VM_LAN_BRIDGE", "1")
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	var out bytes.Buffer
+	execer.rw = readWriter{Reader: strings.NewReader(""), Writer: &out}
+	execer.isPty = false
+	prepared := stubRunVMLANBridgeNeedsPrepareThenReady(t, server)
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc,lan", CPUs: 2, Memory: "2g", Disk: "16g"}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if *prepared != 1 {
+		t.Fatalf("prepare calls = %d, want 1", *prepared)
+	}
+	if strings.Contains(out.String(), "Prepare br0") {
+		t.Fatalf("output contains prompt despite env intent:\n%s", out.String())
+	}
+	assertReadyVM(t, server, "svc")
+}
+
+func TestRunVMLANBridgeDisconnectAfterPrepareAbortsBeforeArtifacts(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	ctx, cancel := context.WithCancel(context.Background())
+	execer.ctx = ctx
+	var out bytes.Buffer
+	execer.rw = readWriter{Reader: strings.NewReader("y\n"), Writer: &out}
+	execer.isPty = true
+
+	oldResolve := resolveHostVMLANBridgeFn
+	oldPrepare := prepareHostVMLANBridgeForRunFn
+	prepared := 0
+	resolveHostVMLANBridgeFn = func() (vmLANBridgePlan, error) {
+		return vmLANBridgePlan{NeedsPrepare: true, Bridge: "br0", Parent: "eno1"}, errVMLANBridgePreparationRequired
+	}
+	prepareHostVMLANBridgeForRunFn = func(root string) (VMLANBridgePrepareStatus, error) {
+		if root != server.cfg.RootDir {
+			t.Fatalf("prepare root = %q, want %q", root, server.cfg.RootDir)
+		}
+		prepared++
+		cancel()
+		return VMLANBridgePrepareStatus{Phase: string(vmLANBridgePhaseReady), Bridge: "br0", Parent: "eno1"}, nil
+	}
+	t.Cleanup(func() {
+		resolveHostVMLANBridgeFn = oldResolve
+		prepareHostVMLANBridgeForRunFn = oldPrepare
+		cancel()
+	})
+
+	err := execer.runVM(cli.RunFlags{Net: "svc,lan", CPUs: 2, Memory: "2g", Disk: "16g"}, testUbuntuVMPayload)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("runVM error = %v, want context.Canceled", err)
+	}
+	if !strings.Contains(err.Error(), "VM LAN bridge is ready") || !strings.Contains(err.Error(), "rerun `yeet run ... --net=lan`") {
+		t.Fatalf("runVM error = %v, want rerun guidance", err)
+	}
+	if prepared != 1 {
+		t.Fatalf("prepare calls = %d, want 1", prepared)
+	}
+	if _, statErr := os.Stat(serviceRoot); !os.IsNotExist(statErr) {
+		t.Fatalf("service root stat after disconnected LAN bridge prep = %v, want not exists", statErr)
+	}
+	assertNoReadyVM(t, server, "svc")
+}
+
+func TestRunVMLANBridgeRawInputBypassPromptReadsRawAndWritesPty(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
+	var ptyOut bytes.Buffer
+	var rawOut bytes.Buffer
+	execer.rw = readWriter{Reader: strings.NewReader(""), Writer: &ptyOut}
+	execer.rawRW = readWriter{Reader: strings.NewReader("y\n"), Writer: &rawOut}
+	execer.isPty = true
+	execer.bypassPtyInput = true
+	prepared := stubRunVMLANBridgeNeedsPrepareThenReady(t, server)
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc,lan", CPUs: 2, Memory: "2g", Disk: "16g"}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	if *prepared != 1 {
+		t.Fatalf("prepare calls = %d, want 1", *prepared)
+	}
+	if !strings.Contains(ptyOut.String(), "Prepare br0 for VM LAN networking? [y/N]: y\n") {
+		t.Fatalf("pty output = %q, want prompt and echoed raw answer", ptyOut.String())
+	}
+	if rawOut.Len() != 0 {
+		t.Fatalf("raw output = %q, want prompt written to pty output only", rawOut.String())
+	}
+	assertReadyVM(t, server, "svc")
+}
+
 func TestValidateVMNetworkOptionsRejectsDuplicateModesAndInvalidVLANs(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1997,6 +2184,33 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	return execer, serviceRoot, systemdDir, &systemctlCalls
 }
 
+func stubRunVMLANBridgeNeedsPrepareThenReady(t *testing.T, server *Server) *int {
+	t.Helper()
+	oldResolve := resolveHostVMLANBridgeFn
+	oldPrepare := prepareHostVMLANBridgeForRunFn
+	prepared := 0
+	resolveCalls := 0
+	resolveHostVMLANBridgeFn = func() (vmLANBridgePlan, error) {
+		resolveCalls++
+		if resolveCalls == 1 {
+			return vmLANBridgePlan{NeedsPrepare: true, Bridge: "br0", Parent: "eno1"}, errVMLANBridgePreparationRequired
+		}
+		return vmLANBridgePlan{Ready: true, Bridge: "br0", Parent: "eno1"}, nil
+	}
+	prepareHostVMLANBridgeForRunFn = func(root string) (VMLANBridgePrepareStatus, error) {
+		if root != server.cfg.RootDir {
+			t.Fatalf("prepare root = %q, want %q", root, server.cfg.RootDir)
+		}
+		prepared++
+		return VMLANBridgePrepareStatus{Phase: string(vmLANBridgePhaseReady), Bridge: "br0", Parent: "eno1"}, nil
+	}
+	t.Cleanup(func() {
+		resolveHostVMLANBridgeFn = oldResolve
+		prepareHostVMLANBridgeForRunFn = oldPrepare
+	})
+	return &prepared
+}
+
 func fakeVMImageAsset(t *testing.T) (vmImageAsset, error) {
 	t.Helper()
 	return fakeVMImageAssetVersion(t, testUbuntuVMImageVersion)
@@ -2068,6 +2282,17 @@ func assertVMImageVersion(t *testing.T, server *Server, service, version string)
 	}
 	if svc.VM.Image.Version != version {
 		t.Fatalf("VM image version = %q, want %q", svc.VM.Image.Version, version)
+	}
+}
+
+func assertReadyVM(t *testing.T, server *Server, service string) {
+	t.Helper()
+	svc := getTestService(t, server, service)
+	if svc.VM == nil {
+		t.Fatalf("service %q VM config is nil", service)
+	}
+	if svc.VM.SetupState != "ready" {
+		t.Fatalf("VM setup state = %q, want ready", svc.VM.SetupState)
 	}
 }
 

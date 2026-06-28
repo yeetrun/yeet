@@ -427,19 +427,90 @@ func handleLocalCommand(args []string, scfg *catch.Config, dataDir string, out i
 	if handled, err := handleVMNetworkEnsureCommand(args, scfg); handled {
 		return true, err
 	}
-	if len(args) != 1 {
+	if len(args) == 0 {
 		return false, nil
 	}
+	if handled, err := handleSingleArgLocalCommand(args, scfg, dataDir, out); handled {
+		return true, err
+	}
+	return handleVMLANBridgeLocalCommand(args, scfg, dataDir, out)
+}
+
+func handleSingleArgLocalCommand(args []string, scfg *catch.Config, dataDir string, out io.Writer) (bool, error) {
 	switch args[0] {
 	case "version":
+		if len(args) != 1 {
+			return false, nil
+		}
 		return true, writeLine(out, catch.VersionCommit())
 	case "dns":
+		if len(args) != 1 {
+			return false, nil
+		}
 		return true, runDNSFn(context.Background(), scfg)
 	case "install":
+		if len(args) != 1 {
+			return false, nil
+		}
 		return true, handleInstallCommand(scfg, dataDir)
 	default:
 		return false, nil
 	}
+}
+
+func handleVMLANBridgeLocalCommand(args []string, scfg *catch.Config, dataDir string, out io.Writer) (bool, error) {
+	switch args[0] {
+	case "vm-lan-bridge-plan":
+		if len(args) != 1 {
+			return true, fmt.Errorf("vm-lan-bridge-plan does not accept arguments")
+		}
+		return true, handleVMLANBridgePlanCommand(scfg, dataDir, out)
+	case "vm-lan-bridge-status":
+		if len(args) != 1 {
+			return true, fmt.Errorf("vm-lan-bridge-status does not accept arguments")
+		}
+		return true, handleVMLANBridgeStatusCommand(scfg, dataDir, out)
+	case "vm-lan-bridge-prepare":
+		if len(args) > 2 {
+			return true, fmt.Errorf("vm-lan-bridge-prepare does not accept arguments except --yes")
+		}
+		if !slices.Contains(args[1:], "--yes") {
+			return true, fmt.Errorf("vm-lan-bridge-prepare --yes is required because this can momentarily change host networking")
+		}
+		return true, handleVMLANBridgePrepareCommand(scfg, dataDir, out)
+	default:
+		return false, nil
+	}
+}
+
+func handleVMLANBridgePlanCommand(_ *catch.Config, dataDir string, out io.Writer) error {
+	plan, err := catch.PlanVMLANBridge(dataDir)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(out, "VM LAN bridge plan: bridge=%s parent=%s ready=%t needs_prepare=%t reason=%s\n", plan.Bridge, plan.Parent, plan.Ready, plan.NeedsPrepare, plan.Reason)
+	return err
+}
+
+func handleVMLANBridgeStatusCommand(_ *catch.Config, dataDir string, out io.Writer) error {
+	status, ok, err := catch.ReadVMLANBridgePrepareStatus(dataDir)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return writeLine(out, "VM LAN bridge: no recorded status")
+	}
+	_, err = fmt.Fprintf(out, "VM LAN bridge: phase=%s bridge=%s parent=%s message=%s\n", status.Phase, status.Bridge, status.Parent, status.Message)
+	return err
+}
+
+func handleVMLANBridgePrepareCommand(_ *catch.Config, dataDir string, out io.Writer) error {
+	status, err := catch.PrepareVMLANBridge(dataDir, true)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(out, "VM LAN bridge: phase=%s bridge=%s parent=%s message=%s\n", status.Phase, status.Bridge, status.Parent, status.Message)
+	return err
 }
 
 func handleVMNetworkEnsureCommand(args []string, scfg *catch.Config) (bool, error) {
@@ -469,7 +540,7 @@ func handleInstallCommand(scfg *catch.Config, dataDir string) error {
 	if err := doInstallFn(scfg, dataDir); err != nil {
 		return fmt.Errorf("failed to install: %w", err)
 	}
-	return setupVMHostFn()
+	return setupVMHostFn(dataDir)
 }
 
 func writeLine(out io.Writer, value string) error {

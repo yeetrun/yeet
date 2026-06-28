@@ -518,6 +518,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 		"yeet run --publish-reset -p 443:443 <svc> nginx:latest",
 		"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
 		"yeet run <svc> vm://ubuntu/26.04 --net=svc",
+		"yeet run <svc> vm://ubuntu/26.04 --net=lan",
 		"yeet run <svc> vm://nixos/26.05",
 		"yeet run <svc> vm://ubuntu/26.04 --image-policy=update",
 		"yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs",

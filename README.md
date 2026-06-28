@@ -114,6 +114,11 @@ too:
 yeet init --install-docker --install-vm-tools --ts-client-secret=<secret> root@<machine-host>
 ```
 
+If the host can run VMs and does not already have a LAN bridge, interactive
+`yeet init` can also ask to prepare `br0` for VM `--net=lan` networking. You
+can skip that prompt and let the first `yeet run <vm> ... --net=lan` ask before
+it creates the VM service.
+
 Skip VM tools for the first run unless you already know the host supports VMs.
 Containers, binaries, scripts, and cron jobs work without VM support.
 
@@ -326,6 +331,9 @@ Start with the quick path before adding optional features.
   identity. Use this for most Tailscale-exposed services.
 - `--net=lan` requests a LAN or VLAN address. Outbound internet comes from the
   DHCP gateway on that network.
+- VM `--net=lan` attaches the guest TAP to a host bridge. On supported
+  Debian/Ubuntu hosts, yeet can prepare `br0` during `yeet init` or before the
+  first VM LAN create.
 - Plain `--net=ts` is tailnet-only unless you configure a Tailscale exit node.
 - ZFS is optional and enables dataset-backed service roots, snapshots, and fast
   repeated VM disk clones.

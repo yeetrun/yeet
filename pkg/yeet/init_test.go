@@ -520,20 +520,231 @@ func TestParseInitVMHostStatus(t *testing.T) {
 	})
 }
 
+func TestParseInitVMLANBridgePlan(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want initVMLANBridgePlan
+	}{
+		{
+			name: "needs prepare",
+			in:   "VM LAN bridge plan: bridge=br0 parent=eno1 ready=false needs_prepare=true reason=default route is on a supported physical LAN uplink\n",
+			want: initVMLANBridgePlan{
+				Bridge:       "br0",
+				Parent:       "eno1",
+				Ready:        false,
+				NeedsPrepare: true,
+				Reason:       "default route is on a supported physical LAN uplink",
+			},
+		},
+		{
+			name: "ready",
+			in:   "debug line\nVM LAN bridge plan: bridge=br0 parent=eno1 ready=true needs_prepare=false reason=default route is already on a bridge\n",
+			want: initVMLANBridgePlan{
+				Bridge:       "br0",
+				Parent:       "eno1",
+				Ready:        true,
+				NeedsPrepare: false,
+				Reason:       "default route is already on a bridge",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseInitVMLANBridgePlan(tt.in)
+			if err != nil {
+				t.Fatalf("parseInitVMLANBridgePlan: %v", err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("plan = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseInitVMLANBridgePlanRejectsMalformedOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "missing prefix",
+			in:   "bridge=br0 parent=eno1 ready=true needs_prepare=false reason=ready",
+			want: "missing",
+		},
+		{
+			name: "malformed field",
+			in:   "VM LAN bridge plan: bridge=br0 parent ready=true needs_prepare=false reason=ready",
+			want: "malformed field",
+		},
+		{
+			name: "bad bool",
+			in:   "VM LAN bridge plan: bridge=br0 parent=eno1 ready=yes needs_prepare=false reason=ready",
+			want: "ready",
+		},
+		{
+			name: "unknown field",
+			in:   "VM LAN bridge plan: bridge=br0 parent=eno1 ready=true unexpected=false needs_prepare=false reason=ready",
+			want: "unknown field",
+		},
+		{
+			name: "missing required bool",
+			in:   "VM LAN bridge plan: bridge=br0 parent=eno1 ready=true reason=ready",
+			want: "missing ready or needs_prepare",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseInitVMLANBridgePlan(tt.in)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("parseInitVMLANBridgePlan error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestInitCatchPassesInstallDockerFlagToRemoteInstall(t *testing.T) {
 	var steps []string
 	configureSteps := stubInitCatchWorkflow(t)
 	configureSteps(&steps)
-	installInitCatchFn = func(_ *initUI, _ string, _ bool, installDocker bool, installVMTools bool, _ string, _ string, _ []string) error {
-		steps = append(steps, "install-docker:"+boolString(installDocker)+":install-vm-tools:"+boolString(installVMTools))
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, installDocker bool, installVMTools bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+		steps = append(steps, "install-docker:"+boolString(installDocker)+":install-vm-tools:"+boolString(installVMTools)+":prepare-vm-lan-bridge:"+boolString(prepareVMLANBridge)+":skip-vm-lan-bridge:"+boolString(skipVMLANBridge))
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{fromGithub: true, installDocker: true, installVMTools: true}); err != nil {
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, installDocker: true, installVMTools: true, prepareVMLANBridge: true}); err != nil {
 		t.Fatalf("initCatch returned error: %v", err)
 	}
-	if got := steps[len(steps)-1]; got != "install-docker:true:install-vm-tools:true" {
+	if got := steps[len(steps)-1]; got != "install-docker:true:install-vm-tools:true:prepare-vm-lan-bridge:true:skip-vm-lan-bridge:false" {
 		t.Fatalf("last step = %q, want install flags true; steps=%#v", got, steps)
+	}
+}
+
+func TestInitCatchPromptsForVMLANBridgeAfterChmodAndPassesPrepareIntent(t *testing.T) {
+	var steps []string
+	configureSteps := stubInitCatchWorkflow(t)
+	configureSteps(&steps)
+	isTerminalFn = func(int) bool { return true }
+	remoteVMHostStatusFn = func(userAtRemote string, goarch string) (initVMHostStatus, error) {
+		steps = append(steps, "vm-status:"+userAtRemote+":"+goarch)
+		return initVMHostStatus{KVM: true, TUN: true}, nil
+	}
+	remoteVMLANBridgePlanFn = func(userAtRemote string) (initVMLANBridgePlan, error) {
+		steps = append(steps, "bridge-plan:"+userAtRemote)
+		return initVMLANBridgePlan{Bridge: "br0", Parent: "eno1", NeedsPrepare: true}, nil
+	}
+	confirmInitFn = func(_ io.Reader, _ io.Writer, msg string) (bool, error) {
+		steps = append(steps, "confirm:"+msg)
+		return true, nil
+	}
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
+		return nil
+	}
+
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true}); err != nil {
+		t.Fatalf("initCatch returned error: %v", err)
+	}
+
+	want := []string{
+		"verify",
+		"detect",
+		"download",
+		"chmod",
+		"vm-status:root@example.com:amd64",
+		"bridge-plan:root@example.com",
+		"confirm:Prepare br0 for VM LAN networking during init?",
+		"install:prepare=true:skip=false",
+	}
+	if strings.Join(steps, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("steps = %#v, want %#v", steps, want)
+	}
+}
+
+func TestInitCatchVMLANBridgeDeclinePassesSkipIntent(t *testing.T) {
+	var steps []string
+	configureSteps := stubInitCatchWorkflow(t)
+	configureSteps(&steps)
+	isTerminalFn = func(int) bool { return true }
+	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
+		return initVMHostStatus{KVM: true, TUN: true}, nil
+	}
+	remoteVMLANBridgePlanFn = func(string) (initVMLANBridgePlan, error) {
+		return initVMLANBridgePlan{Bridge: "br0", Parent: "eno1", NeedsPrepare: true}, nil
+	}
+	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
+		return false, nil
+	}
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
+		return nil
+	}
+
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true}); err != nil {
+		t.Fatalf("initCatch returned error: %v", err)
+	}
+	if got := steps[len(steps)-1]; got != "install:prepare=false:skip=true" {
+		t.Fatalf("last step = %q, want skip intent; steps=%#v", got, steps)
+	}
+}
+
+func TestInitCatchVMLANBridgeReadyPlanDoesNotPrompt(t *testing.T) {
+	var steps []string
+	configureSteps := stubInitCatchWorkflow(t)
+	configureSteps(&steps)
+	isTerminalFn = func(int) bool { return true }
+	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
+		return initVMHostStatus{KVM: true, TUN: true}, nil
+	}
+	remoteVMLANBridgePlanFn = func(string) (initVMLANBridgePlan, error) {
+		steps = append(steps, "bridge-plan")
+		return initVMLANBridgePlan{Bridge: "br0", Ready: true}, nil
+	}
+	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
+		t.Fatal("confirmInitFn should not be called when VM LAN bridge is ready")
+		return false, nil
+	}
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
+		return nil
+	}
+
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true}); err != nil {
+		t.Fatalf("initCatch returned error: %v", err)
+	}
+	if got := steps[len(steps)-1]; got != "install:prepare=false:skip=false" {
+		t.Fatalf("last step = %q, want no bridge intent; steps=%#v", got, steps)
+	}
+}
+
+func TestInitCatchVMLANBridgePlanFailureWarnsAndDoesNotBlockInstall(t *testing.T) {
+	var steps []string
+	configureSteps := stubInitCatchWorkflow(t)
+	configureSteps(&steps)
+	isTerminalFn = func(int) bool { return true }
+	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
+		return initVMHostStatus{KVM: true, TUN: true}, nil
+	}
+	remoteVMLANBridgePlanFn = func(string) (initVMLANBridgePlan, error) {
+		return initVMLANBridgePlan{}, errors.New("unsupported renderer")
+	}
+	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
+		t.Fatal("confirmInitFn should not be called when VM LAN bridge planning fails")
+		return false, nil
+	}
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
+		return nil
+	}
+
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true}); err != nil {
+		t.Fatalf("initCatch returned error: %v", err)
+	}
+	if got := steps[len(steps)-1]; got != "install:prepare=false:skip=true" {
+		t.Fatalf("last step = %q, want install with skip intent; steps=%#v", got, steps)
 	}
 }
 
@@ -551,6 +762,8 @@ func TestRemoteCatchInstallArgs(t *testing.T) {
 		tsAuthKey      string
 		tsClientSecret string
 		tsCatchTags    []string
+		prepareBridge  bool
+		skipBridge     bool
 		want           []string
 	}{
 		{
@@ -609,11 +822,54 @@ func TestRemoteCatchInstallArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := remoteCatchInstallArgs(tt.userAtRemote, tt.useSudo, tt.installDocker, tt.installVMTools, tt.tsAuthKey, tt.tsClientSecret, tt.tsCatchTags)
+			got := remoteCatchInstallArgs(tt.userAtRemote, tt.useSudo, tt.installDocker, tt.installVMTools, tt.tsAuthKey, tt.tsClientSecret, tt.tsCatchTags, tt.prepareBridge, tt.skipBridge)
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("remoteCatchInstallArgs = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRemoteCatchInstallCommandCanRequestVMLANBridgePrep(t *testing.T) {
+	oldPrefs := loadedPrefs
+	defer func() { loadedPrefs = oldPrefs }()
+	loadedPrefs.DefaultHost = "catch-host"
+
+	args := remoteCatchInstallCommand("root@example.com", false, true, true, "", "", nil, true, false)
+	want := []string{
+		"env",
+		"CATCH_INSTALL_USER=root",
+		"CATCH_INSTALL_HOST=example.com",
+		"CATCH_INSTALL_DOCKER=1",
+		"CATCH_INSTALL_VM_TOOLS=1",
+		"CATCH_PREPARE_VM_LAN_BRIDGE=1",
+		"./catch",
+		"--tsnet-host=catch-host",
+		"install",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("remoteCatchInstallCommand = %#v, want %#v", args, want)
+	}
+}
+
+func TestRemoteCatchInstallCommandCanSkipVMLANBridgePrep(t *testing.T) {
+	oldPrefs := loadedPrefs
+	defer func() { loadedPrefs = oldPrefs }()
+	loadedPrefs.DefaultHost = "catch-host"
+
+	args := remoteCatchInstallCommand("root@example.com", false, false, true, "", "", nil, false, true)
+	want := []string{
+		"env",
+		"CATCH_INSTALL_USER=root",
+		"CATCH_INSTALL_HOST=example.com",
+		"CATCH_INSTALL_VM_TOOLS=1",
+		"CATCH_SKIP_VM_LAN_BRIDGE=1",
+		"./catch",
+		"--tsnet-host=catch-host",
+		"install",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("remoteCatchInstallCommand = %#v, want %#v", args, want)
 	}
 }
 
@@ -742,7 +998,7 @@ func TestInstallInitCatchUsesFilteredSSHOutput(t *testing.T) {
 	}, "\n")+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch-host", "root@example.com", catchServiceName)
 
-	if err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil); err != nil {
+	if err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false); err != nil {
 		t.Fatalf("installInitCatch error: %v", err)
 	}
 	raw, err := os.ReadFile(logFile)
@@ -773,7 +1029,7 @@ func TestInstallInitCatchReportsSSHError(t *testing.T) {
 	fakeSSHInPath(t, "exit 1\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil)
+	err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false)
 	if err == nil || !strings.Contains(err.Error(), "failed to run catch binary") {
 		t.Fatalf("installInitCatch error = %v, want install error", err)
 	}
@@ -788,7 +1044,7 @@ func TestInstallInitCatchReportsRemoteInstallStatusError(t *testing.T) {
 	}, "\n")+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil)
+	err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false)
 	if err == nil || !strings.Contains(err.Error(), "failed to run catch binary") {
 		t.Fatalf("installInitCatch error = %v, want install error", err)
 	}
@@ -813,7 +1069,7 @@ func TestInstallInitCatchRetriesHungStatusPoll(t *testing.T) {
 	}, "\n")+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	if err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil); err != nil {
+	if err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false); err != nil {
 		t.Fatalf("installInitCatch error: %v", err)
 	}
 }
@@ -848,7 +1104,7 @@ func TestInstallInitCatchWithTailscaleRetryPromptsAfterCredentialError(t *testin
 
 	var installs int
 	var gotSecret string
-	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, tsClientSecret string, tsCatchTags []string) error {
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, tsClientSecret string, tsCatchTags []string, _ bool, _ bool) error {
 		installs++
 		if installs == 1 {
 			return errTailscaleCredentialRequired
@@ -897,6 +1153,110 @@ func TestWaitDetachedInitCatchInstallStreamsLogsWhileStatusIsPending(t *testing.
 	}
 	if !strings.Contains(out.String(), "tailscale OAuth setup failed") {
 		t.Fatalf("streamed output = %q, want OAuth error", out.String())
+	}
+}
+
+func TestWaitDetachedInitCatchInstallToleratesBridgePrepReadFailures(t *testing.T) {
+	oldRead := readRemoteInitInstallFileFn
+	oldStream := streamRemoteInitInstallLogFn
+	defer func() {
+		readRemoteInitInstallFileFn = oldRead
+		streamRemoteInitInstallLogFn = oldStream
+	}()
+	var reads int
+	readRemoteInitInstallFileFn = func(_ string, path string) (string, error) {
+		reads++
+		if reads < 3 {
+			return "", errors.New("ssh: connection reset")
+		}
+		if strings.HasSuffix(path, ".status") {
+			return "0", nil
+		}
+		return "Preparing VM LAN bridge\nVM LAN bridge ready\n", nil
+	}
+	streamRemoteInitInstallLogFn = func(_ string, _ initInstallSession, _ *initInstallFilter, lastLog *string) error {
+		*lastLog = "Preparing VM LAN bridge\n"
+		return nil
+	}
+
+	status, err := waitDetachedInitCatchInstall("root@example.com", initInstallSession{LogPath: "/tmp/x.log", StatusPath: "/tmp/x.status"}, newInitInstallFilter(io.Discard))
+	if err != nil {
+		t.Fatalf("waitDetachedInitCatchInstall: %v", err)
+	}
+	if status != "0" {
+		t.Fatalf("status = %q, want 0", status)
+	}
+}
+
+func TestWaitDetachedInitCatchInstallFinalStatusSurfacesLogReadFailure(t *testing.T) {
+	oldRead := readRemoteInitInstallFileFn
+	oldStream := streamRemoteInitInstallLogFn
+	defer func() {
+		readRemoteInitInstallFileFn = oldRead
+		streamRemoteInitInstallLogFn = oldStream
+	}()
+	readRemoteInitInstallFileFn = func(_ string, path string) (string, error) {
+		if strings.HasSuffix(path, ".status") {
+			return "7", nil
+		}
+		return "", nil
+	}
+	streamRemoteInitInstallLogFn = func(_ string, _ initInstallSession, _ *initInstallFilter, _ *string) error {
+		return errors.New("ssh: connection reset")
+	}
+
+	status, err := waitDetachedInitCatchInstall("root@example.com", initInstallSession{LogPath: "/tmp/x.log", StatusPath: "/tmp/x.status"}, newInitInstallFilter(io.Discard))
+	if err == nil || !strings.Contains(err.Error(), "ssh: connection reset") {
+		t.Fatalf("waitDetachedInitCatchInstall status/error = %q/%v, want log read error", status, err)
+	}
+}
+
+func TestWaitDetachedInitCatchInstallReportsBridgePrepTimeoutGuidance(t *testing.T) {
+	restoreTiming := overrideInitInstallTiming(t, time.Millisecond, 5*time.Millisecond, time.Millisecond)
+	defer restoreTiming()
+	oldRead := readRemoteInitInstallFileFn
+	oldStream := streamRemoteInitInstallLogFn
+	defer func() {
+		readRemoteInitInstallFileFn = oldRead
+		streamRemoteInitInstallLogFn = oldStream
+	}()
+	readRemoteInitInstallFileFn = func(_ string, _ string) (string, error) {
+		return "", nil
+	}
+	streamRemoteInitInstallLogFn = func(_ string, _ initInstallSession, _ *initInstallFilter, lastLog *string) error {
+		*lastLog = "Preparing VM LAN bridge\n"
+		return nil
+	}
+
+	_, err := waitDetachedInitCatchInstall("root@example.com", initInstallSession{LogPath: "/tmp/x.log", StatusPath: "/tmp/x.status"}, newInitInstallFilter(io.Discard))
+	if err == nil || !strings.Contains(err.Error(), "VM LAN bridge preparation may still be finishing; rerun `yeet init root@example.com` to verify or resume setup") {
+		t.Fatalf("waitDetachedInitCatchInstall error = %v, want VM LAN bridge timeout guidance", err)
+	}
+}
+
+func TestWaitDetachedInitCatchInstallBridgePrepWarningUsesNormalTimeout(t *testing.T) {
+	restoreTiming := overrideInitInstallTiming(t, time.Millisecond, 5*time.Millisecond, time.Millisecond)
+	defer restoreTiming()
+	oldRead := readRemoteInitInstallFileFn
+	oldStream := streamRemoteInitInstallLogFn
+	defer func() {
+		readRemoteInitInstallFileFn = oldRead
+		streamRemoteInitInstallLogFn = oldStream
+	}()
+	readRemoteInitInstallFileFn = func(_ string, _ string) (string, error) {
+		return "", nil
+	}
+	streamRemoteInitInstallLogFn = func(_ string, _ initInstallSession, _ *initInstallFilter, lastLog *string) error {
+		*lastLog = "Warning: VM LAN bridge br0 needs preparation\n"
+		return nil
+	}
+
+	_, err := waitDetachedInitCatchInstall("root@example.com", initInstallSession{LogPath: "/tmp/x.log", StatusPath: "/tmp/x.status"}, newInitInstallFilter(io.Discard))
+	if err == nil || !strings.Contains(err.Error(), "timed out waiting for catch install to finish") {
+		t.Fatalf("waitDetachedInitCatchInstall error = %v, want normal timeout", err)
+	}
+	if strings.Contains(err.Error(), "VM LAN bridge preparation may still be finishing") {
+		t.Fatalf("waitDetachedInitCatchInstall error = %v, should not use bridge prep guidance", err)
 	}
 }
 
@@ -1054,7 +1414,7 @@ func TestInitCatchStopsWhenInstallPrepFails(t *testing.T) {
 		steps = append(steps, "chmod")
 		return wantErr
 	}
-	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string) error {
+	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string, bool, bool) error {
 		t.Fatal("installInitCatchFn should not be called after chmod failure")
 		return nil
 	}
@@ -1079,6 +1439,10 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 	oldInstall := installInitCatchFn
 	oldPrepareDocker := prepareInitDockerInstallFn
 	oldPrepareVMTools := prepareInitVMToolsInstallFn
+	oldRemoteVMHostStatus := remoteVMHostStatusFn
+	oldRemoteVMLANBridgePlan := remoteVMLANBridgePlanFn
+	oldConfirm := confirmInitFn
+	oldIsTerminal := isTerminalFn
 	SetUIConfig(UIConfig{Progress: "quiet"})
 	t.Cleanup(func() {
 		SetUIConfig(oldUIConfig)
@@ -1091,6 +1455,10 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 		installInitCatchFn = oldInstall
 		prepareInitDockerInstallFn = oldPrepareDocker
 		prepareInitVMToolsInstallFn = oldPrepareVMTools
+		remoteVMHostStatusFn = oldRemoteVMHostStatus
+		remoteVMLANBridgePlanFn = oldRemoteVMLANBridgePlan
+		confirmInitFn = oldConfirm
+		isTerminalFn = oldIsTerminal
 	})
 
 	resolveInitCatchSourceFn = func(initOptions) (initCatchSource, error) {
@@ -1101,13 +1469,23 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 	downloadInitCatchFn = func(*initUI, string, string, string, bool, string) error { return nil }
 	buildAndUploadInitCatchFn = func(*initUI, string, string, string, initCatchSource) error { return nil }
 	chmodInitCatchFn = func(*initUI, string) error { return nil }
-	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string) error { return nil }
+	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string, bool, bool) error { return nil }
 	prepareInitDockerInstallFn = func(_ *initUI, _ string, opts initOptions) (bool, error) {
 		return opts.installDocker, nil
 	}
 	prepareInitVMToolsInstallFn = func(_ *initUI, _ string, _ string, opts initOptions) (bool, error) {
 		return opts.installVMTools, nil
 	}
+	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
+		return initVMHostStatus{KVM: true, TUN: true}, nil
+	}
+	remoteVMLANBridgePlanFn = func(string) (initVMLANBridgePlan, error) {
+		return initVMLANBridgePlan{Ready: true, Bridge: "br0"}, nil
+	}
+	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
+		return false, nil
+	}
+	isTerminalFn = func(int) bool { return false }
 
 	return func(steps *[]string) {
 		if steps == nil {
@@ -1133,7 +1511,7 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 			*steps = append(*steps, "chmod")
 			return nil
 		}
-		installInitCatchFn = func(_ *initUI, _ string, useSudo bool, installDocker bool, installVMTools bool, _ string, _ string, _ []string) error {
+		installInitCatchFn = func(_ *initUI, _ string, useSudo bool, installDocker bool, installVMTools bool, _ string, _ string, _ []string, _ bool, _ bool) error {
 			*steps = append(*steps, "install:"+boolString(useSudo))
 			return nil
 		}
