@@ -26,6 +26,6 @@ Use this skill for command-routing and remote-exec work.
 ## Tests
 
 ```bash
-go test ./pkg/cli ./cmd/yeet ./pkg/yeet -count=1
-go test ./pkg/catch ./pkg/catchrpc -count=1
+mise exec -- go test ./pkg/cli ./cmd/yeet ./pkg/yeet -count=1
+mise exec -- go test ./pkg/catch ./pkg/catchrpc -count=1
 ```

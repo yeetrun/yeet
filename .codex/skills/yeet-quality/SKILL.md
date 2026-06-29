@@ -10,9 +10,9 @@ Use this skill to choose verification depth.
 ## Normal Flow
 
 - Run targeted package tests while developing.
-- Run `go test ./... -count=1` before broad completion.
-- Run `pre-commit run --all-files` before commits that change code, tooling,
-  docs examples, release surfaces, or agent context.
+- Run `mise exec -- go test ./... -count=1` before broad completion.
+- Run `mise exec -- pre-commit run --all-files` before commits that change
+  code, tooling, docs examples, release surfaces, or agent context.
 
 ## Heavy Checks
 

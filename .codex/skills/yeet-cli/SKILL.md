@@ -5,14 +5,17 @@ description: Use for yeet CLI operations like deploying or updating services, re
 
 # Yeet CLI
 
-Use this skill for operating yeet from this repository. Prefer `go run
-./cmd/yeet ...` unless the user explicitly asks for an installed binary.
+Use this skill for operating yeet from this repository. Prefer
+`mise exec -- go run ./cmd/yeet ...` unless the user explicitly asks for an
+installed binary.
 
 ## Start Here
 
 - Read `docs/agent/codebase-map.md` for command ownership.
 - Read `AGENTS.local.md` before live host testing.
-- For exact syntax, use `go run ./cmd/yeet <command> --help-agent`.
+- For exact syntax, use
+  `mise exec -- go run ./cmd/yeet <command> --help-agent` or read
+  `.codex/skills/yeet-cli/references/yeet-help-agent.md`.
 - If help output changes, update
   `.codex/skills/yeet-cli/references/yeet-help-agent.md` with
   `tools/generate-yeet-help-agent.sh`.
@@ -20,17 +23,20 @@ Use this skill for operating yeet from this repository. Prefer `go run
 ## Common Commands
 
 ```bash
-go run ./cmd/yeet status
-go run ./cmd/yeet status <svc>
-go run ./cmd/yeet logs <svc>
-go run ./cmd/yeet info <svc>
-go run ./cmd/yeet run <svc> ./compose.yml
-go run ./cmd/yeet docker outdated
-go run ./cmd/yeet docker update <svc...>
+mise exec -- go run ./cmd/yeet status
+mise exec -- go run ./cmd/yeet status <svc>
+mise exec -- go run ./cmd/yeet logs <svc>
+mise exec -- go run ./cmd/yeet info <svc>
+mise exec -- go run ./cmd/yeet run <svc> ./compose.yml
+mise exec -- go run ./cmd/yeet run <svc> vm://ubuntu/26.04 --net=lan
+mise exec -- go run ./cmd/yeet docker outdated
+mise exec -- go run ./cmd/yeet docker update <svc...>
 ```
 
 Use `--host=<catch-host>` or `CATCH_HOST=<catch-host>` when the target host is
 not the current default.
+Run service commands from the intended service workspace because `yeet.toml` is
+read and written in the current directory.
 
 ## Live Testing
 

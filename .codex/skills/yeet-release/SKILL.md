@@ -22,18 +22,16 @@ Use this skill for release work. Follow root `AGENTS.md` exactly.
 git tag -a vX.Y.Z -m "vX.Y.Z"
 ```
 
-6. Push the root branch, then push the tag:
-
-```bash
-git push origin main
-git push origin vX.Y.Z
-```
+6. Land the release commit on `origin/main` through the root `AGENTS.md`
+   finish-to-main flow, then push the tag.
 
 ## Verification
 
 ```bash
 git status --short --branch
 git -C website status --short --branch
+git rev-parse HEAD:website
+git -C website rev-parse HEAD
 git tag --list 'v*' --sort=-version:refname | sed -n '1,5p'
 git ls-remote --tags origin vX.Y.Z
 ```
