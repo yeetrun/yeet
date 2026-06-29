@@ -33,19 +33,19 @@ Use this skill for Docker compose and registry behavior.
 ## Tests
 
 ```bash
-go test ./pkg/svc ./pkg/catch ./pkg/yeet -run 'Test.*Docker' -count=1
-go test ./pkg/svc ./pkg/catch ./pkg/yeet -count=1
+mise exec -- go test ./pkg/svc ./pkg/catch ./pkg/yeet -run 'Test.*Docker' -count=1
+mise exec -- go test ./pkg/svc ./pkg/catch ./pkg/yeet -count=1
 ```
 
 When changing Docker CLI syntax or service-argument routing, also run:
 
 ```bash
-go test ./pkg/cli ./cmd/yeet -count=1
+mise exec -- go test ./pkg/cli ./cmd/yeet -count=1
 ```
 
 When changing Docker networking, namespace, prerequisite, or port behavior,
 include catch and service helper tests:
 
 ```bash
-go test ./pkg/catch ./pkg/svc -count=1
+mise exec -- go test ./pkg/catch ./pkg/svc -count=1
 ```

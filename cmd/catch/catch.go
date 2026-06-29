@@ -550,10 +550,7 @@ func writeLine(out io.Writer, value string) error {
 }
 
 func runServer(dataDir string, scfg *catch.Config) {
-	lock, err := acquireCatchServerLock(dataDir)
-	if err != nil {
-		log.Fatalf("failed to acquire catch server lock: %v", err)
-	}
+	lock := mustAcquireCatchServerLock(dataDir)
 	defer logClose("catch server lock", lock)
 
 	// Require tsnet to continue.
@@ -588,6 +585,14 @@ func runServer(dataDir string, scfg *catch.Config) {
 
 	// Run the RPC server in the foreground.
 	must.Do(http.Serve(rpcln, server.RPCMux()))
+}
+
+func mustAcquireCatchServerLock(dataDir string) *os.File {
+	lock, err := acquireCatchServerLock(dataDir)
+	if err != nil {
+		log.Fatalf("failed to acquire catch server lock: %v", err)
+	}
+	return lock
 }
 
 func acquireCatchServerLock(dataDir string) (*os.File, error) {

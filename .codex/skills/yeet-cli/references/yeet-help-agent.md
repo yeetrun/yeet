@@ -1390,6 +1390,10 @@ yeet run <svc> vm://ubuntu/26.04 --net=svc
 ```
 
 ```
+yeet run <svc> vm://ubuntu/26.04 --net=lan
+```
+
+```
 yeet run <svc> vm://nixos/26.05
 ```
 
