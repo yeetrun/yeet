@@ -65,6 +65,13 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
   of local `main` and `origin/main` is the only allowed raw `git` write
   exception for branch/commit publication, and it still requires explicit user
   authorization.
+- Fast path for direct finish-to-main: if the session branch is already a
+  single commit based on current `origin/main`, do not create a detached
+  worktree or cherry-pick. After tests and `but pull --check`, publish with
+  `git push origin <session-commit>:main`. Treat a non-fast-forward rejection as
+  the race check; run `but pull`, retest if the base changed, and retry only
+  when clean. `but push <branch>` only publishes the GitButler branch; it does
+  not land work on `main`.
 - `website/` submodule pointer publication is a narrow raw `git` exception only
   when GitButler cannot materialize the gitlink after a single focused attempt.
   GitButler may resolve `but` commands run from `website/` back to the parent
@@ -78,6 +85,10 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
   running `but clean`. Delete non-empty branches or raw local `codex/*` refs
   only when they belong to this session and are confirmed merged; never clean up
   another agent's branch unless the user asks.
+- After the direct push, verify `main`, `origin/main`, and `git ls-remote origin
+  refs/heads/main` all point at the landed commit. If local `main` is stale
+  after `but pull`, update only local `main` to `origin/main` as part of the same
+  explicit finish-to-main publication exception.
 - If a direct squash-to-main publication is used while the GitButler session
   branch is still applied, `but pull` may try to rebase the duplicate checkpoint
   commits onto the squash commit and report conflicts even though raw `git
