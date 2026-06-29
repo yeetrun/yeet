@@ -1547,6 +1547,55 @@ func TestListenDockerPluginSocketRemovesStaleSocket(t *testing.T) {
 	}
 }
 
+func TestListenDockerPluginSocketRefusesLiveSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "yeet-live-sock-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+
+	sock := filepath.Join(dir, "plugins", "yeet.sock")
+	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen on live socket: %v", err)
+	}
+	defer logClose("live test listener", ln)
+
+	if _, err := listenDockerPluginSocket(sock); err == nil || !strings.Contains(err.Error(), "already accepting connections") {
+		t.Fatalf("listenDockerPluginSocket live socket error = %v, want already accepting connections", err)
+	}
+	if _, err := os.Stat(sock); err != nil {
+		t.Fatalf("live socket was removed: %v", err)
+	}
+}
+
+func TestAcquireCatchServerLockExcludesSecondServer(t *testing.T) {
+	dir := t.TempDir()
+	lock, err := acquireCatchServerLock(dir)
+	if err != nil {
+		t.Fatalf("acquireCatchServerLock first: %v", err)
+	}
+
+	if second, err := acquireCatchServerLock(dir); err == nil {
+		_ = second.Close()
+		t.Fatal("second acquireCatchServerLock succeeded, want already running error")
+	} else if !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("second acquireCatchServerLock error = %v, want already running", err)
+	}
+
+	if err := lock.Close(); err != nil {
+		t.Fatalf("close first lock: %v", err)
+	}
+	lock, err = acquireCatchServerLock(dir)
+	if err != nil {
+		t.Fatalf("acquireCatchServerLock after close: %v", err)
+	}
+	defer logClose("test catch server lock", lock)
+}
+
 func TestDockerPluginSocketAndListenErrors(t *testing.T) {
 	if got := dockerPluginSocket(); got != filepath.Join("/run/docker/plugins", "yeet.sock") {
 		t.Fatalf("dockerPluginSocket = %q", got)

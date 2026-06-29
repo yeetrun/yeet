@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/catch"
@@ -549,6 +550,12 @@ func writeLine(out io.Writer, value string) error {
 }
 
 func runServer(dataDir string, scfg *catch.Config) {
+	lock, err := acquireCatchServerLock(dataDir)
+	if err != nil {
+		log.Fatalf("failed to acquire catch server lock: %v", err)
+	}
+	defer logClose("catch server lock", lock)
+
 	// Require tsnet to continue.
 	ts, err := initTSNet(dataDir)
 	if err != nil {
@@ -581,6 +588,25 @@ func runServer(dataDir string, scfg *catch.Config) {
 
 	// Run the RPC server in the foreground.
 	must.Do(http.Serve(rpcln, server.RPCMux()))
+}
+
+func acquireCatchServerLock(dataDir string) (*os.File, error) {
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create data dir %s: %w", dataDir, err)
+	}
+	lockPath := filepath.Join(dataDir, "catch.lock")
+	f, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open catch server lock %s: %w", lockPath, err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf("another catch server is already running for data dir %s", dataDir)
+		}
+		return nil, fmt.Errorf("failed to lock catch server lock %s: %w", lockPath, err)
+	}
+	return f, nil
 }
 
 func validateCatchRuntime(socket string) error {
@@ -1163,11 +1189,11 @@ func listenDockerPluginSocket(sock string) (net.Listener, error) {
 	if err := removeStaleSocket(sock); err != nil {
 		return nil, err
 	}
-	fmt.Println("Docker network plugin listening on", sock)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen on socket: %w", err)
 	}
+	fmt.Println("Docker network plugin listening on", sock)
 	return ln, nil
 }
 
@@ -1205,8 +1231,20 @@ func logRemove(path string) {
 }
 
 func removeStaleSocket(path string) error {
+	if unixSocketAcceptsConnections(path) {
+		return fmt.Errorf("docker plugin socket %s is already accepting connections; another catch server may be running", path)
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove stale socket %s: %w", path, err)
 	}
 	return nil
+}
+
+func unixSocketAcceptsConnections(path string) bool {
+	conn, err := net.DialTimeout("unix", path, 200*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
 }
