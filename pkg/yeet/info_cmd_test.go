@@ -74,9 +74,13 @@ func TestRenderInfoPlainIncludesVMSection(t *testing.T) {
 					MinBytes:  1 << 30,
 					MinMemory: "1 GB",
 				},
-				DiskBytes:  128 << 30,
-				SSH:        &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
-				Console:    &catchrpc.ServiceVMConsole{Available: true},
+				DiskBytes: 128 << 30,
+				SSH:       &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "192.168.100.12"},
+				Console:   &catchrpc.ServiceVMConsole{Available: true},
+				Networks: []catchrpc.ServiceVMNetwork{
+					{Mode: "svc", Interface: "eth0", IP: "192.168.100.12", Source: "config"},
+					{Mode: "lan", Interface: "eth1", IP: "10.0.4.200", Source: "agent"},
+				},
 				SetupState: "ready",
 			},
 		},
@@ -99,6 +103,31 @@ func TestRenderInfoPlainIncludesVMSection(t *testing.T) {
 	assertPlainRow(t, text, "CPU", "4")
 	assertPlainRow(t, text, "Balloon", "auto, floor 1 GB")
 	assertPlainRow(t, text, "SSH", "ubuntu@192.168.100.12")
+	assertPlainRow(t, text, "Provisioning", "ready")
+	if strings.Contains(text, "Backend:") {
+		t.Fatalf("rendered VM info should not duplicate service type with backend row:\n%s", text)
+	}
+	if strings.Contains(text, "VM networks:") {
+		t.Fatalf("rendered VM info should not duplicate IP rows with VM networks summary:\n%s", text)
+	}
+	if strings.Contains(text, "\nRuntime\n") {
+		t.Fatalf("rendered VM info should not duplicate service status in Runtime section:\n%s", text)
+	}
+	if strings.Contains(text, "Staged changes:") {
+		t.Fatalf("rendered VM info should not include clean staged-changes row:\n%s", text)
+	}
+	if strings.Contains(text, "Client (yeet.toml)") {
+		t.Fatalf("rendered VM info should not include empty local client section:\n%s", text)
+	}
+	if strings.Contains(text, "Tailscale:") {
+		t.Fatalf("rendered VM info should not include service tailscale row:\n%s", text)
+	}
+	if strings.Contains(text, "Macvlan:") {
+		t.Fatalf("rendered VM info should not include service macvlan row:\n%s", text)
+	}
+	if strings.Contains(text, "Ports:") {
+		t.Fatalf("rendered VM info should not include service ports row:\n%s", text)
+	}
 }
 
 func TestNormalizeInfoFormat(t *testing.T) {
@@ -565,10 +594,10 @@ func TestInfoClientPayloadRows(t *testing.T) {
 
 func TestInfoClientConfigRows(t *testing.T) {
 	got := clientConfigRows(clientInfo{})
-	assertInfoRows(t, got, []infoRow{{Label: "Config", Value: "no local config"}})
+	assertInfoRows(t, got, nil)
 
 	got = clientConfigRows(clientInfo{Message: "no entry"})
-	assertInfoRows(t, got, []infoRow{{Label: "Config", Value: "no entry"}})
+	assertInfoRows(t, got, nil)
 
 	got = clientConfigRows(clientInfo{
 		Found: true,
@@ -625,7 +654,8 @@ func TestInfoRenderServerSection(t *testing.T) {
 	got = renderServerSection(catchrpc.ServiceInfoResponse{
 		Found: true,
 		Info: catchrpc.ServiceInfo{
-			ServiceType:      "docker",
+			DataType:         "python",
+			ServiceType:      "docker-compose",
 			Generation:       2,
 			LatestGeneration: 3,
 			Staged:           true,
@@ -633,10 +663,51 @@ func TestInfoRenderServerSection(t *testing.T) {
 		},
 	})
 	assertInfoRows(t, got.Rows, []infoRow{
-		{Label: "Service type", Value: "docker"},
+		{Label: "Backend", Value: "Docker Compose"},
 		{Label: "Generation", Value: "2 (latest 3)"},
 		{Label: "Staged changes", Value: "yes"},
 		{Label: "Root dir", Value: "/srv/yeet/services/app"},
+	})
+
+	got = renderServerSection(catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info: catchrpc.ServiceInfo{
+			DataType:    "python",
+			ServiceType: "docker-compose",
+			Generation:  4,
+			Paths:       catchrpc.ServicePaths{Root: "/srv/yeet/services/api"},
+		},
+	})
+	assertInfoRows(t, got.Rows, []infoRow{
+		{Label: "Backend", Value: "Docker Compose"},
+		{Label: "Generation", Value: "4"},
+		{Label: "Root dir", Value: "/srv/yeet/services/api"},
+	})
+
+	got = renderServerSection(catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info: catchrpc.ServiceInfo{
+			DataType:         "binary",
+			ServiceType:      "systemd",
+			Generation:       13,
+			LatestGeneration: 13,
+			Paths:            catchrpc.ServicePaths{Root: "/srv/yeet/services/worker"},
+		},
+	})
+	assertInfoRows(t, got.Rows, []infoRow{
+		{Label: "Root dir", Value: "/srv/yeet/services/worker"},
+	})
+
+	got = renderServerSection(catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info: catchrpc.ServiceInfo{
+			DataType:    "docker",
+			ServiceType: "docker-compose",
+			Paths:       catchrpc.ServicePaths{Root: "/srv/yeet/services/web"},
+		},
+	})
+	assertInfoRows(t, got.Rows, []infoRow{
+		{Label: "Root dir", Value: "/srv/yeet/services/web"},
 	})
 }
 
@@ -675,17 +746,74 @@ func TestInfoRenderNetworkSection(t *testing.T) {
 		{Label: "Tailscale", Value: "tailscale0"},
 		{Label: "Macvlan", Value: "macvlan0, parent eth0"},
 	})
+
+	got = renderNetworkSection(catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info: catchrpc.ServiceInfo{
+			Network: catchrpc.ServiceNetwork{
+				IPs: []catchrpc.ServiceIP{
+					{Label: "tailscale", IP: "100.88.145.8", Interface: "tailscale0"},
+					{Label: "host", IP: "10.0.4.2", Interface: "vmbr0"},
+					{Label: "host", IP: "192.168.100.1", Interface: "yeet0"},
+				},
+				PortsPresent: true,
+			},
+		},
+	})
+	assertInfoRows(t, got.Rows, nil)
+
+	got = renderNetworkSection(catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info: catchrpc.ServiceInfo{
+			Network: catchrpc.ServiceNetwork{
+				PortsPresent: true,
+			},
+		},
+	})
+	assertInfoRows(t, got.Rows, nil)
+}
+
+func TestInfoRenderNetworkSectionUsesVMContext(t *testing.T) {
+	got := renderNetworkSection(catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info: catchrpc.ServiceInfo{
+			DataType: "vm",
+			VM: &catchrpc.ServiceVM{
+				Networks: []catchrpc.ServiceVMNetwork{
+					{Mode: "svc", Interface: "eth0", IP: "192.168.100.12", Source: "config"},
+					{Mode: "lan", Interface: "eth1", IP: "10.0.4.200", Source: "agent"},
+				},
+			},
+			Network: catchrpc.ServiceNetwork{
+				SvcIP: "192.168.100.12",
+				IPs: []catchrpc.ServiceIP{
+					{Label: "service", IP: "192.168.100.12", Interface: "eth0", Source: "config"},
+					{Label: "lan", IP: "10.0.4.200", Interface: "eth1", Source: "agent"},
+				},
+				PortsPresent: true,
+				Ports:        nil,
+			},
+		},
+	})
+
+	assertInfoRows(t, got.Rows, []infoRow{
+		{Label: "IPs", Value: ""},
+		{Label: "  service", Value: "192.168.100.12"},
+		{Label: "  lan (eth1)", Value: "10.0.4.200"},
+	})
 }
 
 func TestInfoRenderRuntimeSection(t *testing.T) {
 	tests := []struct {
-		name   string
-		server catchrpc.ServiceInfoResponse
-		want   []infoRow
+		name    string
+		service string
+		server  catchrpc.ServiceInfoResponse
+		want    []infoRow
 	}{
-		{name: "not found", server: catchrpc.ServiceInfoResponse{}, want: nil},
+		{name: "not found", service: "app", server: catchrpc.ServiceInfoResponse{}, want: nil},
 		{
-			name: "status error",
+			name:    "status error",
+			service: "app",
 			server: catchrpc.ServiceInfoResponse{
 				Found: true,
 				Info:  catchrpc.ServiceInfo{Status: catchrpc.ServiceStatus{Error: "status unavailable"}},
@@ -693,12 +821,44 @@ func TestInfoRenderRuntimeSection(t *testing.T) {
 			want: []infoRow{{Label: "Status", Value: "status unavailable"}},
 		},
 		{
-			name:   "unknown",
-			server: catchrpc.ServiceInfoResponse{Found: true},
-			want:   []infoRow{{Label: "Status", Value: "unknown"}},
+			name:    "unknown",
+			service: "app",
+			server:  catchrpc.ServiceInfoResponse{Found: true},
+			want:    nil,
 		},
 		{
-			name: "components",
+			name:    "single duplicate component",
+			service: "app",
+			server: catchrpc.ServiceInfoResponse{
+				Found: true,
+				Info: catchrpc.ServiceInfo{
+					Status: catchrpc.ServiceStatus{
+						Components: []catchrpc.ServiceComponentStatus{
+							{Name: "app", Status: "running"},
+						},
+					},
+				},
+			},
+			want: nil,
+		},
+		{
+			name:    "single named subcomponent",
+			service: "app",
+			server: catchrpc.ServiceInfoResponse{
+				Found: true,
+				Info: catchrpc.ServiceInfo{
+					Status: catchrpc.ServiceStatus{
+						Components: []catchrpc.ServiceComponentStatus{
+							{Name: "worker", Status: "running"},
+						},
+					},
+				},
+			},
+			want: []infoRow{{Label: "worker", Value: "running"}},
+		},
+		{
+			name:    "components",
+			service: "app",
 			server: catchrpc.ServiceInfoResponse{
 				Found: true,
 				Info: catchrpc.ServiceInfo{
@@ -719,7 +879,7 @@ func TestInfoRenderRuntimeSection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := renderRuntimeSection(tt.server)
+			got := renderRuntimeSection(tt.service, tt.server)
 			if got.Title != "Runtime" {
 				t.Fatalf("Title = %q, want Runtime", got.Title)
 			}
@@ -806,8 +966,13 @@ func assertInfoRows(t *testing.T, got, want []infoRow) {
 func assertPlainRow(t *testing.T, text, label, value string) {
 	t.Helper()
 	for _, line := range strings.Split(text, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) >= 2 && fields[0] == label+":" && strings.Join(fields[1:], " ") == value {
+		rowLabel, rowValue, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		rowLabel = strings.Join(strings.Fields(rowLabel), " ")
+		rowValue = strings.Join(strings.Fields(rowValue), " ")
+		if rowLabel == label && rowValue == value {
 			return
 		}
 	}
