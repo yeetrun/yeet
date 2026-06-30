@@ -271,7 +271,7 @@ func renderInfoPlain(w io.Writer, service, host string, hostInfoErr error, hostI
 		renderClientSection(client),
 		renderServerSection(server),
 		renderNetworkSection(server),
-		renderRuntimeSection(server),
+		renderRuntimeSection(service, server),
 		renderImagesSection(server),
 	}
 	for _, section := range sections {
@@ -350,7 +350,7 @@ func vmInfoRows(vm *catchrpc.ServiceVM) []infoRow {
 		{Label: "Disk", Value: formatVMDisk(vm)},
 		{Label: "Console", Value: formatOptionalVMConsole(vm.Console)},
 		{Label: "SSH", Value: formatVMSSH(vm.SSH)},
-		{Label: "Setup", Value: vm.SetupState},
+		{Label: "Provisioning", Value: vm.SetupState},
 	}
 	rows := make([]infoRow, 0, len(candidates))
 	for _, row := range candidates {
@@ -488,11 +488,7 @@ func renderClientSection(client clientInfo) infoSection {
 
 func clientConfigRows(client clientInfo) []infoRow {
 	if !client.Found {
-		msg := client.Message
-		if msg == "" {
-			msg = "no local config"
-		}
-		return []infoRow{{Label: "Config", Value: msg}}
+		return nil
 	}
 
 	rows := clientSavedRows(client.Entry)
@@ -576,16 +572,14 @@ func renderServerSection(server catchrpc.ServiceInfoResponse) infoSection {
 		return infoSection{Title: "Server (catch)", Rows: rows}
 	}
 	info := server.Info
-	if info.ServiceType != "" {
-		rows = append(rows, infoRow{Label: "Service type", Value: info.ServiceType})
+	if shouldRenderServiceBackend(info) {
+		rows = append(rows, infoRow{Label: "Backend", Value: formatServiceBackend(info.ServiceType)})
 	}
-	if info.Generation != 0 || info.LatestGeneration != 0 {
-		rows = append(rows, infoRow{Label: "Generation", Value: fmt.Sprintf("%d (latest %d)", info.Generation, info.LatestGeneration)})
+	if shouldRenderServiceGeneration(info) {
+		rows = append(rows, infoRow{Label: "Generation", Value: formatServiceGeneration(info)})
 	}
 	if info.Staged {
 		rows = append(rows, infoRow{Label: "Staged changes", Value: "yes"})
-	} else {
-		rows = append(rows, infoRow{Label: "Staged changes", Value: "none"})
 	}
 	if info.Paths.Root != "" {
 		rows = append(rows, infoRow{Label: "Root dir", Value: info.Paths.Root})
@@ -593,19 +587,120 @@ func renderServerSection(server catchrpc.ServiceInfoResponse) infoSection {
 	return infoSection{Title: "Server (catch)", Rows: rows}
 }
 
+func formatServiceBackend(backend string) string {
+	switch backend {
+	case "docker", "docker-compose":
+		return "Docker Compose"
+	case "systemd":
+		return "systemd"
+	case serviceTypeVM:
+		return "VM"
+	default:
+		return backend
+	}
+}
+
+func shouldRenderServiceBackend(info catchrpc.ServiceInfo) bool {
+	if info.ServiceType == "" {
+		return false
+	}
+	switch info.DataType {
+	case "python", "typescript":
+		return true
+	case "", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func shouldRenderServiceGeneration(info catchrpc.ServiceInfo) bool {
+	if info.Generation == 0 && info.LatestGeneration == 0 {
+		return false
+	}
+	if info.LatestGeneration == 0 {
+		return true
+	}
+	return info.Generation != info.LatestGeneration
+}
+
+func formatServiceGeneration(info catchrpc.ServiceInfo) string {
+	if info.LatestGeneration == 0 {
+		return fmt.Sprintf("%d", info.Generation)
+	}
+	if info.Generation == 0 {
+		return fmt.Sprintf("unknown (latest %d)", info.LatestGeneration)
+	}
+	return fmt.Sprintf("%d (latest %d)", info.Generation, info.LatestGeneration)
+}
+
 func renderNetworkSection(server catchrpc.ServiceInfoResponse) infoSection {
 	if !server.Found {
 		return infoSection{Title: "Network", Rows: nil}
 	}
-	net := server.Info.Network
-	rows := networkIPRows(net)
+	if serviceInfoIsVM(server.Info) {
+		return renderVMNetworkSection(server.Info)
+	}
+	rows := serviceNetworkRows(server.Info.Network)
+	return infoSection{Title: "Network", Rows: rows}
+}
+
+func serviceNetworkRows(net catchrpc.ServiceNetwork) []infoRow {
+	ipNet, hasIPs := serviceEndpointNetwork(net)
+	rows := []infoRow{}
+	if hasIPs || ipNet.IPError != "" {
+		rows = append(rows, networkIPRows(ipNet)...)
+	}
 	if net.IPWarning != "" {
 		rows = append(rows, infoRow{Label: "IP warning", Value: net.IPWarning})
 	}
 	rows = append(rows, networkPortRows(net)...)
-	rows = append(rows, infoRow{Label: "Tailscale", Value: describeTailscale(net.Tailscale)})
-	rows = append(rows, infoRow{Label: "Macvlan", Value: describeMacvlan(net.Macvlan)})
+	if net.Tailscale != nil {
+		rows = append(rows, infoRow{Label: "Tailscale", Value: describeTailscale(net.Tailscale)})
+	}
+	if net.Macvlan != nil {
+		rows = append(rows, infoRow{Label: "Macvlan", Value: describeMacvlan(net.Macvlan)})
+	}
+	return rows
+}
+
+func serviceEndpointNetwork(net catchrpc.ServiceNetwork) (catchrpc.ServiceNetwork, bool) {
+	out := catchrpc.ServiceNetwork{
+		SvcIP:   net.SvcIP,
+		IPError: net.IPError,
+	}
+	for _, ip := range net.IPs {
+		if serviceIPVisibleInPlainNetwork(ip, net) {
+			out.IPs = append(out.IPs, ip)
+		}
+	}
+	return out, out.SvcIP != "" || len(out.IPs) > 0
+}
+
+func serviceIPVisibleInPlainNetwork(ip catchrpc.ServiceIP, net catchrpc.ServiceNetwork) bool {
+	switch strings.TrimSpace(ip.Label) {
+	case "service":
+		return true
+	case "tailscale":
+		return net.Tailscale != nil
+	case "lan":
+		return net.Macvlan != nil
+	default:
+		return false
+	}
+}
+
+func renderVMNetworkSection(info catchrpc.ServiceInfo) infoSection {
+	net := info.Network
+	rows := networkIPRows(net)
+	if net.IPWarning != "" {
+		rows = append(rows, infoRow{Label: "IP warning", Value: net.IPWarning})
+	}
 	return infoSection{Title: "Network", Rows: rows}
+}
+
+func serviceInfoIsVM(info catchrpc.ServiceInfo) bool {
+	return info.VM != nil || info.DataType == serviceTypeVM || info.ServiceType == serviceTypeVM
 }
 
 func networkIPRows(net catchrpc.ServiceNetwork) []infoRow {
@@ -632,15 +727,17 @@ func networkIPRows(net catchrpc.ServiceNetwork) []infoRow {
 }
 
 func networkPortRows(net catchrpc.ServiceNetwork) []infoRow {
-	if !net.PortsPresent {
-		return nil
-	}
 	if len(net.Ports) == 0 {
-		return []infoRow{{Label: "Ports", Value: "none"}}
+		return nil
 	}
 	ports := make([]string, 0, len(net.Ports))
 	for _, port := range net.Ports {
-		ports = append(ports, formatServicePort(port))
+		if formatted := formatServicePort(port); formatted != "" {
+			ports = append(ports, formatted)
+		}
+	}
+	if len(ports) == 0 {
+		return nil
 	}
 	return []infoRow{{Label: "Ports", Value: strings.Join(ports, ", ")}}
 }
@@ -713,7 +810,7 @@ func describeMacvlan(mv *catchrpc.ServiceMacvlan) string {
 	return strings.Join(parts, ", ")
 }
 
-func renderRuntimeSection(server catchrpc.ServiceInfoResponse) infoSection {
+func renderRuntimeSection(service string, server catchrpc.ServiceInfoResponse) infoSection {
 	if !server.Found {
 		return infoSection{Title: "Runtime", Rows: nil}
 	}
@@ -724,8 +821,10 @@ func renderRuntimeSection(server catchrpc.ServiceInfoResponse) infoSection {
 		return infoSection{Title: "Runtime", Rows: rows}
 	}
 	if len(status.Components) == 0 {
-		rows = append(rows, infoRow{Label: "Status", Value: "unknown"})
 		return infoSection{Title: "Runtime", Rows: rows}
+	}
+	if runtimeComponentsDuplicateServiceStatus(service, status.Components) {
+		return infoSection{Title: "Runtime", Rows: nil}
 	}
 	for _, component := range status.Components {
 		label := component.Name
@@ -735,6 +834,14 @@ func renderRuntimeSection(server catchrpc.ServiceInfoResponse) infoSection {
 		rows = append(rows, infoRow{Label: label, Value: component.Status})
 	}
 	return infoSection{Title: "Runtime", Rows: rows}
+}
+
+func runtimeComponentsDuplicateServiceStatus(service string, components []catchrpc.ServiceComponentStatus) bool {
+	if len(components) != 1 {
+		return false
+	}
+	component := components[0]
+	return component.Name == service && component.Status != ""
 }
 
 func renderImagesSection(server catchrpc.ServiceInfoResponse) infoSection {
