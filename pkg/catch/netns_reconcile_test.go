@@ -458,6 +458,347 @@ func TestReconcileTailscaleDNSConfigsSkipsAlreadySafeConfig(t *testing.T) {
 	}
 }
 
+func TestReconcileTailscaleResolverIsolationRepairsMissingBind(t *testing.T) {
+	s := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "services", "api")
+	systemdDir := useTestSystemdSystemDir(t)
+	artifactPath := filepath.Join(t.TempDir(), "artifact-yeet-api-ts.service")
+	unitPath := filepath.Join(systemdDir, "yeet-api-ts.service")
+	unitRaw := []byte(`[Unit]
+After=yeet-api-ns.service
+
+[Service]
+ExecStart=/srv/api/run/tailscaled --tun=ts0
+NetworkNamespacePath=/var/run/netns/yeet-api-ns
+
+[Install]
+WantedBy=multi-user.target
+`)
+	if err := os.WriteFile(artifactPath, unitRaw, 0o644); err != nil {
+		t.Fatalf("write artifact unit: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		t.Fatalf("mkdir systemd dir: %v", err)
+	}
+	if err := os.WriteFile(unitPath, unitRaw, 0o644); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+	addTestServices(t, s, db.Service{
+		Name:             "api",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		ServiceRoot:      root,
+		Generation:       3,
+		LatestGeneration: 3,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(3): artifactPath}},
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ns.service"}},
+		},
+	})
+
+	var calls []string
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
+		t.Fatalf("reconcileTailscaleResolverIsolation returned error: %v", err)
+	}
+	raw, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read repaired unit: %v", err)
+	}
+	unit := string(raw)
+	for _, want := range []string{
+		"BindPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf",
+		"PrivateMounts=yes",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("repaired unit missing %q:\n%s", want, unit)
+		}
+	}
+	wantCalls := []string{"daemon-reload", "restart yeet-api-ts.service"}
+	if diff := cmp.Diff(wantCalls, calls); diff != "" {
+		t.Fatalf("systemctl calls (-want +got):\n%s", diff)
+	}
+}
+
+func TestReconcileTailscaleResolverIsolationSkipsSafeUnit(t *testing.T) {
+	s := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "services", "api")
+	systemdDir := useTestSystemdSystemDir(t)
+	artifactPath := filepath.Join(t.TempDir(), "artifact-yeet-api-ts.service")
+	unitPath := filepath.Join(systemdDir, "yeet-api-ts.service")
+	unitRaw := []byte(`[Unit]
+After=yeet-api-ns.service
+
+[Service]
+ExecStart=/srv/api/run/tailscaled --tun=ts0
+NetworkNamespacePath=/var/run/netns/yeet-api-ns
+BindPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf
+PrivateMounts=yes
+
+[Install]
+WantedBy=multi-user.target
+`)
+	if err := os.WriteFile(artifactPath, unitRaw, 0o644); err != nil {
+		t.Fatalf("write artifact unit: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		t.Fatalf("mkdir systemd dir: %v", err)
+	}
+	if err := os.WriteFile(unitPath, unitRaw, 0o644); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+	addTestServices(t, s, db.Service{
+		Name:             "api",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		ServiceRoot:      root,
+		Generation:       3,
+		LatestGeneration: 3,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(3): artifactPath}},
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ns.service"}},
+		},
+	})
+
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		t.Fatalf("unexpected systemctl call: %v", args)
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
+		t.Fatalf("reconcileTailscaleResolverIsolation returned error: %v", err)
+	}
+	raw, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read unit: %v", err)
+	}
+	if string(raw) != string(unitRaw) {
+		t.Fatalf("safe unit changed:\n%s", raw)
+	}
+}
+
+func TestReconcileTailscaleResolverIsolationSkipsUnitWithoutNetworkNamespacePath(t *testing.T) {
+	s := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "services", "tap")
+	systemdDir := useTestSystemdSystemDir(t)
+	artifactPath := filepath.Join(t.TempDir(), "artifact-yeet-tap-ts.service")
+	unitPath := filepath.Join(systemdDir, "yeet-tap-ts.service")
+	unitRaw := []byte(`[Unit]
+After=network-online.target
+
+[Service]
+ExecStart=/srv/tap/run/tailscaled --tun=tailscale0
+
+[Install]
+WantedBy=multi-user.target
+`)
+	if err := os.WriteFile(artifactPath, unitRaw, 0o644); err != nil {
+		t.Fatalf("write artifact unit: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		t.Fatalf("mkdir systemd dir: %v", err)
+	}
+	if err := os.WriteFile(unitPath, unitRaw, 0o644); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+	addTestServices(t, s, db.Service{
+		Name:             "tap",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		ServiceRoot:      root,
+		Generation:       3,
+		LatestGeneration: 3,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(3): artifactPath}},
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-tap-ns.service"}},
+		},
+	})
+
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		t.Fatalf("unexpected systemctl call: %v", args)
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
+		t.Fatalf("reconcileTailscaleResolverIsolation returned error: %v", err)
+	}
+	raw, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read unit: %v", err)
+	}
+	if string(raw) != string(unitRaw) {
+		t.Fatalf("host namespace unit changed:\n%s", raw)
+	}
+}
+
+func TestReconcileTailscaleResolverIsolationRetriesAfterDaemonReloadFailure(t *testing.T) {
+	s := newTestServer(t)
+	unitPath, original := addStaleInstalledTailscaleUnit(t, s, "api")
+
+	var calls []string
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		call := strings.Join(args, " ")
+		calls = append(calls, call)
+		if call == "daemon-reload" {
+			return errors.New("reload failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err == nil || !strings.Contains(err.Error(), "daemon-reload") {
+		t.Fatalf("first reconcile error = %v, want daemon-reload failure", err)
+	}
+	assertFileContent(t, unitPath, original)
+	if diff := cmp.Diff([]string{"daemon-reload"}, calls); diff != "" {
+		t.Fatalf("first systemctl calls (-want +got):\n%s", diff)
+	}
+
+	calls = nil
+	catchSystemctl = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
+		t.Fatalf("second reconcile returned error: %v", err)
+	}
+	if diff := cmp.Diff([]string{"daemon-reload", "restart yeet-api-ts.service"}, calls); diff != "" {
+		t.Fatalf("second systemctl calls (-want +got):\n%s", diff)
+	}
+}
+
+func TestReconcileTailscaleResolverIsolationRetriesAfterRestartFailure(t *testing.T) {
+	s := newTestServer(t)
+	unitPath, original := addStaleInstalledTailscaleUnit(t, s, "api")
+
+	var calls []string
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		call := strings.Join(args, " ")
+		calls = append(calls, call)
+		if call == "restart yeet-api-ts.service" {
+			return errors.New("restart failed")
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err == nil || !strings.Contains(err.Error(), "restart failed") {
+		t.Fatalf("first reconcile error = %v, want restart failure", err)
+	}
+	assertFileContent(t, unitPath, original)
+	if diff := cmp.Diff([]string{"daemon-reload", "restart yeet-api-ts.service"}, calls); diff != "" {
+		t.Fatalf("first systemctl calls (-want +got):\n%s", diff)
+	}
+
+	calls = nil
+	catchSystemctl = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
+		t.Fatalf("second reconcile returned error: %v", err)
+	}
+	if diff := cmp.Diff([]string{"daemon-reload", "restart yeet-api-ts.service"}, calls); diff != "" {
+		t.Fatalf("second systemctl calls (-want +got):\n%s", diff)
+	}
+}
+
+func TestReconcileTailscaleResolverIsolationSkipsNonTailscaleServices(t *testing.T) {
+	s := newTestServer(t)
+	addTestServices(t, s, db.Service{
+		Name:             "api",
+		ServiceType:      db.ServiceTypeDockerCompose,
+		ServiceRoot:      filepath.Join(t.TempDir(), "services", "api"),
+		Generation:       3,
+		LatestGeneration: 3,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ns.service"}},
+		},
+	})
+
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		t.Fatalf("unexpected systemctl call: %v", args)
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
+		t.Fatalf("reconcileTailscaleResolverIsolation returned error: %v", err)
+	}
+}
+
+func useTestSystemdSystemDir(t *testing.T) string {
+	t.Helper()
+	old := systemdSystemDir
+	systemdDir := filepath.Join(t.TempDir(), "systemd")
+	systemdSystemDir = systemdDir
+	t.Cleanup(func() {
+		systemdSystemDir = old
+	})
+	return systemdDir
+}
+
+func addStaleInstalledTailscaleUnit(t *testing.T, s *Server, serviceName string) (string, string) {
+	t.Helper()
+	systemdDir := useTestSystemdSystemDir(t)
+	unitName := "yeet-" + serviceName + "-ts.service"
+	artifactPath := filepath.Join(t.TempDir(), "artifact-"+unitName)
+	unitPath := filepath.Join(systemdDir, unitName)
+	unitRaw := `[Unit]
+After=yeet-` + serviceName + `-ns.service
+
+[Service]
+ExecStart=/srv/` + serviceName + `/run/tailscaled --tun=ts0
+NetworkNamespacePath=/var/run/netns/yeet-` + serviceName + `-ns
+
+[Install]
+WantedBy=multi-user.target
+`
+	if err := os.WriteFile(artifactPath, []byte(unitRaw), 0o644); err != nil {
+		t.Fatalf("write artifact unit: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		t.Fatalf("mkdir systemd dir: %v", err)
+	}
+	if err := os.WriteFile(unitPath, []byte(unitRaw), 0o644); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+	addTestServices(t, s, db.Service{
+		Name:             serviceName,
+		ServiceType:      db.ServiceTypeDockerCompose,
+		ServiceRoot:      filepath.Join(t.TempDir(), "services", serviceName),
+		Generation:       3,
+		LatestGeneration: 3,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(3): artifactPath}},
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-" + serviceName + "-ns.service"}},
+		},
+	})
+	return unitPath, unitRaw
+}
+
 func ptrString(s string) *string {
 	return &s
 }
@@ -673,8 +1014,30 @@ func TestReconcileNetNSBackedDockerServicesContinuesAfterServiceError(t *testing
 	}
 }
 
-func TestServerStartRunsNetNSReconciliation(t *testing.T) {
+func TestReconcileRuntimeStateRunsResolverIsolationBeforeNetNSReconciliation(t *testing.T) {
 	s := newTestServer(t)
+	systemdDir := useTestSystemdSystemDir(t)
+	artifactPath := filepath.Join(t.TempDir(), "artifact-yeet-docker-netns-ts.service")
+	unitPath := filepath.Join(systemdDir, "yeet-docker-netns-ts.service")
+	unitRaw := []byte(`[Unit]
+After=yeet-docker-netns-ns.service
+
+[Service]
+ExecStart=/srv/docker-netns/run/tailscaled --tun=ts0
+NetworkNamespacePath=/var/run/netns/yeet-docker-netns-ns
+
+[Install]
+WantedBy=multi-user.target
+`)
+	if err := os.WriteFile(artifactPath, unitRaw, 0o644); err != nil {
+		t.Fatalf("write artifact unit: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		t.Fatalf("mkdir systemd dir: %v", err)
+	}
+	if err := os.WriteFile(unitPath, unitRaw, 0o644); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
 	addTestServices(t, s, db.Service{
 		Name:             "docker-netns",
 		ServiceType:      db.ServiceTypeDockerCompose,
@@ -682,6 +1045,7 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 		LatestGeneration: 1,
 		Artifacts: db.ArtifactStore{
 			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ns.service"}},
+			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(1): artifactPath}},
 		},
 	})
 
@@ -705,6 +1069,14 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 	stubDockerPrereqsInstaller(t, func(*Server) error {
 		calls = append(calls, "docker-prereqs")
 		return nil
+	})
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		calls = append(calls, "systemctl:"+strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
 	})
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error {
@@ -736,7 +1108,15 @@ func TestServerStartRunsNetNSReconciliation(t *testing.T) {
 		t.Fatal("timed out waiting for reconciliation to run")
 	}
 
-	if diff := cmp.Diff([]string{"install", "dns-install", "docker-prereqs", "reconcile:docker-netns", "nat-reconcile"}, calls); diff != "" {
+	if diff := cmp.Diff([]string{
+		"install",
+		"dns-install",
+		"docker-prereqs",
+		"systemctl:daemon-reload",
+		"systemctl:restart yeet-docker-netns-ts.service",
+		"reconcile:docker-netns",
+		"nat-reconcile",
+	}, calls); diff != "" {
 		t.Fatalf("unexpected startup call order (-want +got):\n%s", diff)
 	}
 }

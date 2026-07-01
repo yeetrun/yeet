@@ -1,0 +1,43 @@
+# yeet netns dhclient resolver redirect.
+#
+# /sbin/dhclient-script sources enter hooks after defining make_resolv_conf()
+# and before calling it for BOUND, RENEW, REBIND, and REBOOT events. Only yeet
+# service DHCP clients pass YEET_NETNS_NAME, so host DHCP clients keep the
+# distro default behavior.
+if [ -n "${YEET_NETNS_NAME:-}" ]; then
+    make_resolv_conf() {
+        target="/etc/netns/${YEET_NETNS_NAME}/resolv.conf"
+        target_dir="$(dirname "$target")"
+
+        mkdir -p "$target_dir" || return
+        tmp="$(mktemp "${target_dir}/resolv.conf.XXXXXX")" || return
+
+        if [ -n "${YEET_NETNS_RESOLV_CONF:-}" ]; then
+            cp "$YEET_NETNS_RESOLV_CONF" "$tmp" || { rm -f "$tmp"; return 1; }
+        else
+            if [ -z "${new_domain_name_servers:-}" ]; then
+                rm -f "$tmp"
+                return 0
+            fi
+
+            {
+                if [ -n "${new_domain_name:-}" ]; then
+                    printf 'domain %s\n' "$new_domain_name"
+                fi
+
+                if [ -n "${new_domain_search:-}" ]; then
+                    printf 'search %s\n' "$new_domain_search"
+                elif [ -n "${new_domain_name:-}" ]; then
+                    printf 'search %s\n' "$new_domain_name"
+                fi
+
+                for server in ${new_domain_name_servers:-}; do
+                    printf 'nameserver %s\n' "$server"
+                done
+            } > "$tmp" || { rm -f "$tmp"; return 1; }
+        fi
+
+        chmod 0644 "$tmp" || { rm -f "$tmp"; return 1; }
+        mv "$tmp" "$target" || { rm -f "$tmp"; return 1; }
+    }
+fi

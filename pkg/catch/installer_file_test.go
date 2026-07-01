@@ -1097,6 +1097,57 @@ func TestInstallerCloseStagesComposeLANOverlayWithoutYeetDNS(t *testing.T) {
 	}
 }
 
+func TestNewSystemdUnitBindsResolverForLANNetNS(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.ensureDirs("lan-systemd", ""); err != nil {
+		t.Fatalf("ensureDirs returned error: %v", err)
+	}
+	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
+	hostDefaultRouteInterfaceFn = func() (string, error) {
+		return "vmbr0", nil
+	}
+	t.Cleanup(func() {
+		hostDefaultRouteInterfaceFn = oldHostDefaultRouteInterfaceFn
+	})
+
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "lan-systemd"},
+			Network:      NetworkOpts{Interfaces: "lan"},
+		},
+	}
+
+	unit, err := installer.newSystemdUnit(filepath.Join(server.serviceRunDir("lan-systemd"), "lan-systemd"))
+	if err != nil {
+		t.Fatalf("newSystemdUnit returned error: %v", err)
+	}
+	if unit.NetNS != "yeet-lan-systemd-ns" {
+		t.Fatalf("unit NetNS = %q, want yeet-lan-systemd-ns", unit.NetNS)
+	}
+	if unit.ResolvConf != "/etc/netns/yeet-lan-systemd-ns/resolv.conf" {
+		t.Fatalf("unit ResolvConf = %q, want LAN netns resolver bind", unit.ResolvConf)
+	}
+	units, err := unit.WriteOutUnitFiles(t.TempDir())
+	if err != nil {
+		t.Fatalf("WriteOutUnitFiles returned error: %v", err)
+	}
+	raw, err := os.ReadFile(units[db.ArtifactSystemdUnit])
+	if err != nil {
+		t.Fatalf("ReadFile rendered systemd unit returned error: %v", err)
+	}
+	rendered := string(raw)
+	for _, want := range []string{
+		"NetworkNamespacePath=/var/run/netns/yeet-lan-systemd-ns",
+		"BindPaths=/etc/netns/yeet-lan-systemd-ns/resolv.conf:/etc/resolv.conf",
+		"PrivateMounts=yes",
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered systemd unit missing %q:\n%s", want, rendered)
+		}
+	}
+}
+
 func TestInstallerCloseNoBinaryRewritesExistingSystemdArtifact(t *testing.T) {
 	server := newTestServer(t)
 	oldUnit := filepath.Join(server.serviceBinDir("nobin-svc"), "nobin-svc-old.service")
@@ -1142,6 +1193,64 @@ func TestInstallerCloseNoBinaryRewritesExistingSystemdArtifact(t *testing.T) {
 	wantExec := fmt.Sprintf("ExecStart=%s --new\n", filepath.Join(server.serviceRunDir("nobin-svc"), "nobin-svc"))
 	if !strings.Contains(string(unitRaw), wantExec) {
 		t.Fatalf("rewritten systemd unit missing %q:\n%s", wantExec, string(unitRaw))
+	}
+}
+
+func TestInstallerCloseNoBinaryRegeneratesNetNSSystemdArtifact(t *testing.T) {
+	server := newTestServer(t)
+	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
+	hostDefaultRouteInterfaceFn = func() (string, error) {
+		return "vmbr0", nil
+	}
+	t.Cleanup(func() {
+		hostDefaultRouteInterfaceFn = oldHostDefaultRouteInterfaceFn
+	})
+
+	oldUnit := filepath.Join(server.serviceBinDir("nobin-lan"), "nobin-lan-old.service")
+	if err := os.MkdirAll(filepath.Dir(oldUnit), 0755); err != nil {
+		t.Fatalf("MkdirAll returned error: %v", err)
+	}
+	if err := os.WriteFile(oldUnit, []byte("[Service]\nExecStart=/old/bin\n"), 0644); err != nil {
+		t.Fatalf("WriteFile returned error: %v", err)
+	}
+	addTestServices(t, server, db.Service{
+		Name:        "nobin-lan",
+		ServiceType: db.ServiceTypeSystemd,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": oldUnit}},
+		},
+	})
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "nobin-lan"},
+		Network:      NetworkOpts{Interfaces: "lan"},
+		NoBinary:     true,
+		StageOnly:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller returned error: %v", err)
+	}
+
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	service := testService(t, server, "nobin-lan")
+	unitPath := stagedArtifactPath(t, service, db.ArtifactSystemdUnit)
+	if unitPath == oldUnit {
+		t.Fatalf("netns systemd unit reused old staged path %q", unitPath)
+	}
+	unitRaw, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) returned error: %v", unitPath, err)
+	}
+	unit := string(unitRaw)
+	for _, want := range []string{
+		"NetworkNamespacePath=/var/run/netns/yeet-nobin-lan-ns",
+		"BindPaths=/etc/netns/yeet-nobin-lan-ns/resolv.conf:/etc/resolv.conf",
+		"PrivateMounts=yes",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("regenerated systemd unit missing %q:\n%s", want, unit)
+		}
 	}
 }
 
@@ -1254,7 +1363,7 @@ func TestInstallerNetworkPlanningCoversTailscaleTapAndMacvlanModes(t *testing.T)
 	}
 }
 
-func TestInstallerLANAndTailscaleSidecarDoesNotBindMissingResolvConf(t *testing.T) {
+func TestInstallerCloseStagesComposeLANTailscaleUnitBindsNetNSResolver(t *testing.T) {
 	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
 	defer func() {
 		hostDefaultRouteInterfaceFn = oldHostDefaultRouteInterfaceFn
@@ -1305,8 +1414,15 @@ func TestInstallerLANAndTailscaleSidecarDoesNotBindMissingResolvConf(t *testing.
 	if err != nil {
 		t.Fatalf("read tailscale unit: %v", err)
 	}
-	if strings.Contains(string(raw), "BindPaths=/etc/netns/") {
-		t.Fatalf("tailscale unit binds missing netns resolv.conf:\n%s", raw)
+	unit := string(raw)
+	for _, want := range []string{
+		"NetworkNamespacePath=/var/run/netns/yeet-lan-ts-ns",
+		"BindPaths=/etc/netns/yeet-lan-ts-ns/resolv.conf:/etc/resolv.conf",
+		"PrivateMounts=yes",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("tailscale unit missing %q:\n%s", want, unit)
+		}
 	}
 }
 

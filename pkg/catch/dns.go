@@ -173,7 +173,7 @@ func forwardDNSViaResolverConfig(ctx context.Context, req *dns.Msg, cfg *dns.Cli
 	if cfg == nil {
 		return nil, fmt.Errorf("host resolver config is nil")
 	}
-	servers := cfg.Servers
+	servers := usableHostResolverServers(cfg.Servers)
 	port := cfg.Port
 	if port == "" {
 		port = "53"
@@ -182,7 +182,31 @@ func forwardDNSViaResolverConfig(ctx context.Context, req *dns.Msg, cfg *dns.Cli
 		servers = []string{tailscaleDNSIP}
 		port = "53"
 	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("no usable upstream DNS servers after filtering yeet DNS self resolver %s", yeetDNSHostIP)
+	}
 	return forwardDNSViaServers(ctx, req, servers, port, exchange)
+}
+
+func usableHostResolverServers(servers []string) []string {
+	out := make([]string, 0, len(servers))
+	for _, server := range servers {
+		server = strings.TrimSpace(server)
+		if server == "" || isYeetDNSSelfResolver(server) {
+			continue
+		}
+		out = append(out, server)
+	}
+	return out
+}
+
+func isYeetDNSSelfResolver(server string) bool {
+	server = strings.Trim(server, "[]")
+	addr, err := netip.ParseAddr(server)
+	if err != nil {
+		return server == yeetDNSHostIP
+	}
+	return addr == netip.MustParseAddr(yeetDNSHostIP)
 }
 
 func shouldForwardViaTailscaleDNS(req *dns.Msg, searchDomains []string) bool {

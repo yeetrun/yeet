@@ -246,9 +246,9 @@ func removeFileIfExists(path string) {
 }
 
 type networkConfig struct {
-	NetNS         string
-	Deps          []string
-	HasResolvConf bool
+	NetNS      string
+	Deps       []string
+	ResolvConf string
 }
 
 func hexStr(n int) string {
@@ -417,9 +417,9 @@ func (i *FileInstaller) configureNetworkOnce() (*networkConfig, error) {
 	}
 	log.Printf("artifacts: %v", i.artifacts)
 	return &networkConfig{
-		NetNS:         env.NetNS(),
-		Deps:          deps,
-		HasResolvConf: env.ResolvConf != "",
+		NetNS:      env.NetNS(),
+		Deps:       deps,
+		ResolvConf: runtimeNetNSResolvConf(env.NetNS()),
 	}, nil
 }
 
@@ -551,6 +551,14 @@ func buildNetNSResolvConf(dns, searchDomains string) string {
 	return resolvConf
 }
 
+func runtimeNetNSResolvConf(netNS string) string {
+	netNS = strings.TrimSpace(netNS)
+	if netNS == "" {
+		return ""
+	}
+	return fmt.Sprintf("/etc/netns/%s/resolv.conf", netNS)
+}
+
 func (i *FileInstaller) writeServiceNetNSFiles(env netns.Service) error {
 	files, err := netns.WriteServiceNetNS(
 		i.serviceBinDir(),
@@ -564,15 +572,10 @@ func (i *FileInstaller) writeServiceNetNSFiles(env netns.Service) error {
 	return nil
 }
 
-func (i *FileInstaller) installTailscaleForNetNS(env netns.Service, runTSInNetNS string, tsTapMode bool) error {
+func (i *FileInstaller) installTailscaleForNetNS(_ netns.Service, runTSInNetNS string, tsTapMode bool) error {
 	rc := ""
-	if !tsTapMode && strings.TrimSpace(env.ResolvConf) != "" {
-		rc = "/etc/netns/" + env.NetNS() + "/resolv.conf"
-	}
-	if tsTapMode {
-		// Tailscale in TAP mode runs in the host namespace, so no netns
-		// resolv.conf path should be passed to tailscaled.
-		rc = ""
+	if !tsTapMode && strings.TrimSpace(runTSInNetNS) != "" {
+		rc = runtimeNetNSResolvConf(runTSInNetNS)
 	}
 	files, err := i.s.installTSAtRoot(i.effectiveServiceRoot(), i.cfg.ServiceName, runTSInNetNS, i.tsNet, i.tsAuthKey, rc)
 	if err != nil {
@@ -741,6 +744,9 @@ func (i *FileInstaller) reuseExistingSystemdUnit(exe string) (bool, error) {
 	if !i.canReuseExistingSystemdUnit() {
 		return false, nil
 	}
+	if networkInterfacesEnabled(i.cfg.Network.Interfaces) {
+		return false, nil
+	}
 	s := i.existingService.AsStruct()
 	p, ok := s.Artifacts.Staged(db.ArtifactSystemdUnit)
 	if !ok {
@@ -793,8 +799,8 @@ func (i *FileInstaller) applyNetworkToSystemdUnit(su *svc.SystemdUnit) error {
 	}
 	su.NetNS = n.NetNS
 	su.Requires = strings.Join(n.Deps, " ")
-	if n.HasResolvConf {
-		su.ResolvConf = fmt.Sprintf("/etc/netns/%s/resolv.conf", su.NetNS)
+	if n.ResolvConf != "" {
+		su.ResolvConf = n.ResolvConf
 	}
 	return nil
 }
