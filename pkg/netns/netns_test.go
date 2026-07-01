@@ -186,6 +186,9 @@ func TestWriteNetNSScriptsWritesScriptsAndSkipsIdenticalFiles(t *testing.T) {
 			t.Fatalf("%s mode = %v, want 0755", name, gotMode)
 		}
 	}
+	if _, err := os.Stat("dhclient-enter-hook-yeet-netns-resolv"); !os.IsNotExist(err) {
+		t.Fatalf("dhclient hook stat error = %v, want missing from working directory", err)
+	}
 
 	changed, err = writeNetNSScripts()
 	if err != nil {
@@ -196,7 +199,7 @@ func TestWriteNetNSScriptsWritesScriptsAndSkipsIdenticalFiles(t *testing.T) {
 	}
 }
 
-func TestServiceNSScriptUsesPerServiceDhclientLeaseFile(t *testing.T) {
+func TestServiceNSScriptUsesPerServiceDhclientLeaseFileAndNetNSResolverHook(t *testing.T) {
 	raw, err := netnsScripts.ReadFile("netns-scripts/service-ns")
 	if err != nil {
 		t.Fatalf("ReadFile embedded service-ns returned error: %v", err)
@@ -205,12 +208,162 @@ func TestServiceNSScriptUsesPerServiceDhclientLeaseFile(t *testing.T) {
 
 	for _, want := range []string{
 		`DHCP_LEASEFILE="/var/lib/dhcp/dhclient-${SERVICE_NAME}-${MACVLAN_INTERFACE}.leases"`,
-		`DHCP="dhclient -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"`,
-		`DHCP_RELEASE="dhclient -r -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"`,
+		`DHCP_RELEASE="dhcpcd --nohook resolv.conf -k"`,
+		`DHCP="dhclient -e YEET_NETNS_NAME=${NS_NAME} ${DHCP_RESOLV_CONF_ENV} -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"`,
+		`DHCP_RELEASE="dhclient -e YEET_NETNS_NAME=${NS_NAME} ${DHCP_RESOLV_CONF_ENV} -r -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"`,
+		`refresh_netns_resolv_conf() {`,
+		`mkdir -p "/etc/netns/$NS_NAME"`,
+		`cp /etc/resolv.conf "/etc/netns/$NS_NAME/resolv.conf"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("service-ns missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestServiceNSScriptPassesExplicitResolverToDhclientHook(t *testing.T) {
+	raw, err := netnsScripts.ReadFile("netns-scripts/service-ns")
+	if err != nil {
+		t.Fatalf("ReadFile embedded service-ns returned error: %v", err)
+	}
+	got := string(raw)
+
+	for _, want := range []string{
+		`DHCP_RESOLV_CONF_ENV=""`,
+		`DHCP_RESOLV_CONF_ENV="-e YEET_NETNS_RESOLV_CONF=${RESOLV_CONF}"`,
+		`DHCP="dhclient -e YEET_NETNS_NAME=${NS_NAME} ${DHCP_RESOLV_CONF_ENV} -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"`,
+		`DHCP_RELEASE="dhclient -e YEET_NETNS_NAME=${NS_NAME} ${DHCP_RESOLV_CONF_ENV} -r -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("service-ns missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestServiceNSScriptRefreshesSeededNetNSResolver(t *testing.T) {
+	raw, err := netnsScripts.ReadFile("netns-scripts/service-ns")
+	if err != nil {
+		t.Fatalf("ReadFile embedded service-ns returned error: %v", err)
+	}
+	got := string(raw)
+
+	if strings.Contains(got, `[ ! -s "/etc/netns/$NS_NAME/resolv.conf" ]`) {
+		t.Fatalf("service-ns skips non-empty stale netns resolver:\n%s", got)
+	}
+	if want := `if [ -r /etc/resolv.conf ]; then`; !strings.Contains(got, want) {
+		t.Fatalf("service-ns missing %q:\n%s", want, got)
+	}
+	if want := `cp /etc/resolv.conf "/etc/netns/$NS_NAME/resolv.conf"`; !strings.Contains(got, want) {
+		t.Fatalf("service-ns missing %q:\n%s", want, got)
+	}
+	if strings.Count(got, `refresh_netns_resolv_conf`) < 3 {
+		t.Fatalf("service-ns should define and call refresh_netns_resolv_conf for setup and cleanup:\n%s", got)
+	}
+}
+
+func TestDhclientEnterHookRedirectsResolverWritesForYeetNetNS(t *testing.T) {
+	raw, err := netnsScripts.ReadFile("netns-scripts/dhclient-enter-hook-yeet-netns-resolv")
+	if err != nil {
+		t.Fatalf("ReadFile embedded dhclient hook returned error: %v", err)
+	}
+	got := string(raw)
+
+	for _, want := range []string{
+		`if [ -n "${YEET_NETNS_NAME:-}" ]; then`,
+		`make_resolv_conf() {`,
+		`target="/etc/netns/${YEET_NETNS_NAME}/resolv.conf"`,
+		`tmp="$(mktemp "${target_dir}/resolv.conf.XXXXXX")"`,
+		`if [ -n "${YEET_NETNS_RESOLV_CONF:-}" ]; then`,
+		`cp "$YEET_NETNS_RESOLV_CONF" "$tmp"`,
+		`chmod 0644 "$tmp"`,
+		`if [ -z "${new_domain_name_servers:-}" ]; then`,
+		`return 0`,
+		`printf 'nameserver %s\n' "$server"`,
+		`mv "$tmp" "$target"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("dhclient hook missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestWriteDhclientEnterHookInstallsHookIdempotently(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := dhclientEnterHookPath
+	oldMkdirAll := mkdirAll
+	dhclientEnterHookPath = filepath.Join(dir, "hooks", "yeet-netns-resolv")
+	mkdirAll = os.MkdirAll
+	t.Cleanup(func() {
+		dhclientEnterHookPath = oldPath
+		mkdirAll = oldMkdirAll
+	})
+
+	changed, err := writeDhclientEnterHook()
+	if err != nil {
+		t.Fatalf("writeDhclientEnterHook first call returned error: %v", err)
+	}
+	if !changed {
+		t.Fatal("writeDhclientEnterHook first call changed = false, want true")
+	}
+	raw, err := os.ReadFile(dhclientEnterHookPath)
+	if err != nil {
+		t.Fatalf("read installed hook: %v", err)
+	}
+	if !strings.Contains(string(raw), "YEET_NETNS_NAME") {
+		t.Fatalf("installed hook missing YEET_NETNS_NAME:\n%s", raw)
+	}
+	info, err := os.Stat(dhclientEnterHookPath)
+	if err != nil {
+		t.Fatalf("stat installed hook: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("hook mode = %v, want 0644", got)
+	}
+
+	changed, err = writeDhclientEnterHook()
+	if err != nil {
+		t.Fatalf("writeDhclientEnterHook second call returned error: %v", err)
+	}
+	if changed {
+		t.Fatal("writeDhclientEnterHook second call changed = true, want false")
+	}
+}
+
+func TestWriteDhclientEnterHookRepairsExistingHookMode(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := dhclientEnterHookPath
+	oldMkdirAll := mkdirAll
+	dhclientEnterHookPath = filepath.Join(dir, "hooks", "yeet-netns-resolv")
+	mkdirAll = os.MkdirAll
+	t.Cleanup(func() {
+		dhclientEnterHookPath = oldPath
+		mkdirAll = oldMkdirAll
+	})
+
+	raw, err := netnsScripts.ReadFile("netns-scripts/dhclient-enter-hook-yeet-netns-resolv")
+	if err != nil {
+		t.Fatalf("ReadFile embedded hook returned error: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dhclientEnterHookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll hook dir returned error: %v", err)
+	}
+	if err := os.WriteFile(dhclientEnterHookPath, raw, 0o600); err != nil {
+		t.Fatalf("WriteFile existing hook returned error: %v", err)
+	}
+
+	changed, err := writeDhclientEnterHook()
+	if err != nil {
+		t.Fatalf("writeDhclientEnterHook returned error: %v", err)
+	}
+	if !changed {
+		t.Fatal("writeDhclientEnterHook changed = false, want true for mode repair")
+	}
+	info, err := os.Stat(dhclientEnterHookPath)
+	if err != nil {
+		t.Fatalf("Stat hook returned error: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("hook mode = %v, want 0644", got)
 	}
 }
 
@@ -555,9 +708,11 @@ func withInstallYeetNSServiceFakes(t *testing.T, fakes installYeetNSServiceFakes
 	t.Helper()
 
 	oldExecutablePath := executablePath
+	oldDhclientEnterHookPath := dhclientEnterHookPath
 	oldSystemdUnitPath := systemdUnitPath
 	oldNewSystemdService := newYeetNSSystemdService
 	oldSystemdUnitActive := systemdUnitActive
+	dhclientEnterHookPath = filepath.Join(t.TempDir(), "dhclient-enter-hooks.d", "yeet-netns-resolv")
 	executablePath = func() (string, error) {
 		if fakes.executableErr != nil {
 			return "", fakes.executableErr
@@ -574,6 +729,7 @@ func withInstallYeetNSServiceFakes(t *testing.T, fakes installYeetNSServiceFakes
 	systemdUnitActive = fakes.unitActive
 	t.Cleanup(func() {
 		executablePath = oldExecutablePath
+		dhclientEnterHookPath = oldDhclientEnterHookPath
 		systemdUnitPath = oldSystemdUnitPath
 		newYeetNSSystemdService = oldNewSystemdService
 		systemdUnitActive = oldSystemdUnitActive
@@ -587,6 +743,11 @@ func writeCurrentYeetNSArtifacts(t *testing.T, backend FirewallBackend, catchBin
 		t.Fatalf("writeNetNSScripts() returned error: %v", err)
 	} else if !changed {
 		t.Fatal("writeNetNSScripts() changed = false, want true during setup")
+	}
+	if changed, err := writeDhclientEnterHook(); err != nil {
+		t.Fatalf("writeDhclientEnterHook() returned error: %v", err)
+	} else if !changed {
+		t.Fatal("writeDhclientEnterHook() changed = false, want true during setup")
 	}
 	if err := env.Write("yeet-ns.env", defaultYeetNSEnv(backend, catchBin)); err != nil {
 		t.Fatalf("env.Write returned error: %v", err)

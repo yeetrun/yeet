@@ -43,7 +43,14 @@ type yeetNSServiceInstaller interface {
 }
 
 var (
-	executablePath  = os.Executable
+	executablePath = os.Executable
+	mkdirAll       = os.MkdirAll
+	writeFile      = os.WriteFile
+	chmodFile      = os.Chmod
+	readFile       = os.ReadFile
+
+	dhclientEnterHookPath = "/etc/dhcp/dhclient-enter-hooks.d/yeet-netns-resolv"
+
 	systemdUnitPath = func(unit string) string {
 		return filepath.Join("/etc/systemd/system", unit)
 	}
@@ -61,6 +68,9 @@ func writeNetNSScripts() (changed bool, err error) {
 		return false, fmt.Errorf("failed to read dir: %v", err)
 	}
 	for _, file := range files {
+		if file.Name() == "dhclient-enter-hook-yeet-netns-resolv" {
+			continue
+		}
 		fileChanged, err := writeNetNSScript(file.Name())
 		if err != nil {
 			return false, err
@@ -75,17 +85,17 @@ func writeNetNSScript(name string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("failed to read script: %v", err)
 	}
-	if prev, err := os.ReadFile(name); err != nil && !os.IsNotExist(err) {
+	if prev, err := readFile(name); err != nil && !os.IsNotExist(err) {
 		return false, fmt.Errorf("failed to read prev script: %v", err)
 	} else if err == nil && bytes.Equal(prev, script) {
 		return false, nil
 	}
 
-	if err := os.WriteFile(name, script, 0755); err != nil {
+	if err := writeFile(name, script, 0755); err != nil {
 		return false, fmt.Errorf("failed to write script: %v", err)
 	}
 	log.Printf("wrote %s\n%s", must.Get(filepath.Abs(name)), string(script))
-	if err := os.Chmod(name, 0755); err != nil {
+	if err := chmodFile(name, 0755); err != nil {
 		return false, fmt.Errorf("failed to chmod script: %v", err)
 	}
 	if _, err := os.Stat(name); err != nil {
@@ -94,10 +104,61 @@ func writeNetNSScript(name string) (bool, error) {
 	return true, nil
 }
 
+func writeDhclientEnterHook() (bool, error) {
+	raw, err := netnsScripts.ReadFile("netns-scripts/dhclient-enter-hook-yeet-netns-resolv")
+	if err != nil {
+		return false, fmt.Errorf("failed to read dhclient enter hook: %v", err)
+	}
+	if err := mkdirAll(filepath.Dir(dhclientEnterHookPath), 0o755); err != nil {
+		return false, fmt.Errorf("failed to create dhclient hook dir: %v", err)
+	}
+	contentChanged, err := writeDhclientEnterHookContent(raw)
+	if err != nil {
+		return false, err
+	}
+	modeChanged, err := chmodDhclientEnterHookIfNeeded()
+	if err != nil {
+		return false, err
+	}
+	return contentChanged || modeChanged, nil
+}
+
+func writeDhclientEnterHookContent(raw []byte) (bool, error) {
+	prev, err := readFile(dhclientEnterHookPath)
+	if err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("failed to read previous dhclient hook: %v", err)
+	}
+	if err == nil && bytes.Equal(prev, raw) {
+		return false, nil
+	}
+	if err := writeFile(dhclientEnterHookPath, raw, 0o644); err != nil {
+		return false, fmt.Errorf("failed to write dhclient hook: %v", err)
+	}
+	return true, nil
+}
+
+func chmodDhclientEnterHookIfNeeded() (bool, error) {
+	info, err := os.Stat(dhclientEnterHookPath)
+	if err != nil {
+		return false, fmt.Errorf("failed to stat dhclient hook: %v", err)
+	}
+	if info.Mode().Perm() == 0o644 {
+		return false, nil
+	}
+	if err := chmodFile(dhclientEnterHookPath, 0o644); err != nil {
+		return false, fmt.Errorf("failed to chmod dhclient hook: %v", err)
+	}
+	return true, nil
+}
+
 func InstallYeetNSService() error {
 	scriptsChanged, err := writeNetNSScripts()
 	if err != nil {
 		return fmt.Errorf("failed to write netns scripts: %v", err)
+	}
+	dhclientHookChanged, err := writeDhclientEnterHook()
+	if err != nil {
+		return err
 	}
 	backend, err := DetectFirewallBackend()
 	if err != nil {
@@ -122,7 +183,7 @@ func InstallYeetNSService() error {
 	if err != nil {
 		return err
 	}
-	if !anyChanged(scriptsChanged, envChanged, unitChanged) {
+	if !anyChanged(scriptsChanged, dhclientHookChanged, envChanged, unitChanged) {
 		return nil
 	}
 	if err := installYeetNSService(unitFiles); err != nil {

@@ -7,9 +7,12 @@ package catch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -298,6 +301,52 @@ func TestForwardDNSViaResolverConfigKeepsPublicQueriesOnHostResolver(t *testing.
 	want := []string{"192.0.2.53:53"}
 	if len(addrs) != len(want) || addrs[0] != want[0] {
 		t.Fatalf("addrs = %#v, want %#v", addrs, want)
+	}
+}
+
+func TestForwardDNSViaResolverConfigSkipsYeetDNSHostResolver(t *testing.T) {
+	req := newAQuestion("example.com.")
+	response := new(dns.Msg)
+	response.SetReply(req)
+	var addrs []string
+
+	got, err := forwardDNSViaResolverConfig(context.Background(), req, &dns.ClientConfig{
+		Servers: []string{yeetDNSHostIP, "192.0.2.53"},
+		Port:    "53",
+	}, func(_ context.Context, _ *dns.Msg, addr string) (*dns.Msg, error) {
+		addrs = append(addrs, addr)
+		return response, nil
+	})
+
+	if err != nil {
+		t.Fatalf("forwardDNSViaResolverConfig returned error: %v", err)
+	}
+	if got != response {
+		t.Fatalf("response = %p, want %p", got, response)
+	}
+	want := []string{"192.0.2.53:53"}
+	if !reflect.DeepEqual(addrs, want) {
+		t.Fatalf("addrs = %#v, want %#v", addrs, want)
+	}
+}
+
+func TestForwardDNSViaResolverConfigRejectsOnlyYeetDNSHostResolver(t *testing.T) {
+	req := newAQuestion("example.com.")
+	var addrs []string
+
+	_, err := forwardDNSViaResolverConfig(context.Background(), req, &dns.ClientConfig{
+		Servers: []string{yeetDNSHostIP},
+		Port:    "53",
+	}, func(_ context.Context, _ *dns.Msg, addr string) (*dns.Msg, error) {
+		addrs = append(addrs, addr)
+		return nil, fmt.Errorf("unexpected exchange through %s", addr)
+	})
+
+	if err == nil || !strings.Contains(err.Error(), "no usable upstream DNS servers") {
+		t.Fatalf("error = %v, want no usable upstream DNS servers", err)
+	}
+	if len(addrs) != 0 {
+		t.Fatalf("addrs = %#v, want no exchange attempts", addrs)
 	}
 }
 

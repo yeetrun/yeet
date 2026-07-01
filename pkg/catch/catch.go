@@ -210,17 +210,16 @@ func (s *Server) Start() {
 }
 
 func (s *Server) reconcileRuntimeState() {
-	if err := s.reconcileTailscaleDNSConfigs(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("tailscale DNS config reconciliation failed: %v", err)
-	}
-	if err := s.reconcileNetNSBackedDockerServices(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("netns reconciliation failed: %v", err)
-	}
-	if err := reconcileDockerNetNSPortForwards(s.cfg.DB); err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("docker netns NAT reconciliation failed: %v", err)
-	}
-	if err := s.reconcileVMNetworks(s.ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Printf("VM network reconciliation failed: %v", err)
+	logRuntimeReconcileError("tailscale DNS config reconciliation failed", s.reconcileTailscaleDNSConfigs(s.ctx))
+	logRuntimeReconcileError("tailscale resolver isolation reconciliation failed", s.reconcileTailscaleResolverIsolation(s.ctx))
+	logRuntimeReconcileError("netns reconciliation failed", s.reconcileNetNSBackedDockerServices(s.ctx))
+	logRuntimeReconcileError("docker netns NAT reconciliation failed", reconcileDockerNetNSPortForwards(s.cfg.DB))
+	logRuntimeReconcileError("VM network reconciliation failed", s.reconcileVMNetworks(s.ctx))
+}
+
+func logRuntimeReconcileError(message string, err error) {
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Printf("%s: %v", message, err)
 	}
 }
 

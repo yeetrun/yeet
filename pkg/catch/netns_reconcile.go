@@ -162,6 +162,209 @@ func reconcileTailscaleDNSConfigFile(configPath string) (bool, error) {
 	return true, nil
 }
 
+func (s *Server) reconcileTailscaleResolverIsolation(ctx context.Context) error {
+	dv, err := s.getDB()
+	if err != nil {
+		return err
+	}
+	repairs, errs, err := collectTailscaleResolverIsolationRepairs(ctx, dv)
+	if err != nil {
+		return err
+	}
+	if len(repairs) == 0 {
+		return errors.Join(errs...)
+	}
+	errs = append(errs, applyTailscaleResolverIsolationRepairs(repairs)...)
+	return errors.Join(errs...)
+}
+
+func collectTailscaleResolverIsolationRepairs(ctx context.Context, dv *db.DataView) ([]tailscaleResolverIsolationRepair, []error, error) {
+	var errs []error
+	var repairs []tailscaleResolverIsolationRepair
+	for name, sv := range dv.Services().All() {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		service := sv.AsStruct()
+		repair, err := prepareTailscaleResolverIsolationRepair(*service)
+		if err != nil {
+			log.Printf("tailscale resolver isolation reconciliation failed for service %q: %v", name, err)
+			errs = append(errs, err)
+			continue
+		}
+		if repair != nil {
+			repairs = append(repairs, *repair)
+		}
+	}
+	return repairs, errs, nil
+}
+
+func applyTailscaleResolverIsolationRepairs(repairs []tailscaleResolverIsolationRepair) []error {
+	var errs []error
+	var applied []tailscaleResolverIsolationRepair
+	for _, repair := range repairs {
+		if err := os.WriteFile(repair.installedPath, []byte(repair.next), 0o644); err != nil {
+			errs = append(errs, fmt.Errorf("write tailscale unit %s: %w", repair.installedPath, err))
+			continue
+		}
+		applied = append(applied, repair)
+	}
+	if len(applied) == 0 {
+		return errs
+	}
+
+	if err := catchSystemctl("daemon-reload"); err != nil {
+		errs = append(errs, fmt.Errorf("systemctl daemon-reload: %w", err))
+		errs = append(errs, rollbackTailscaleResolverIsolationRepairs(applied)...)
+		return errs
+	}
+
+	errs = append(errs, restartTailscaleResolverIsolationRepairs(applied)...)
+	return errs
+}
+
+func restartTailscaleResolverIsolationRepairs(applied []tailscaleResolverIsolationRepair) []error {
+	var errs []error
+	for _, repair := range applied {
+		if err := restartTailscaleSidecarForService(repair.serviceName); err != nil {
+			errs = append(errs, err)
+			if rollbackErr := rollbackTailscaleResolverIsolationRepair(repair); rollbackErr != nil {
+				errs = append(errs, rollbackErr)
+			}
+		}
+	}
+	return errs
+}
+
+type tailscaleResolverIsolationRepair struct {
+	serviceName   string
+	installedPath string
+	original      string
+	next          string
+}
+
+func prepareTailscaleResolverIsolationRepair(service db.Service) (*tailscaleResolverIsolationRepair, error) {
+	if _, ok := service.Artifacts.Gen(db.ArtifactTSService, service.Generation); !ok {
+		return nil, nil
+	}
+
+	installedPath := tailscaleSidecarInstalledUnitPath(service.Name)
+	raw, err := os.ReadFile(installedPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read tailscale unit %s: %w", installedPath, err)
+	}
+	next, changed := ensureTailscaleUnitResolverIsolation(string(raw))
+	if !changed {
+		return nil, nil
+	}
+	return &tailscaleResolverIsolationRepair{
+		serviceName:   service.Name,
+		installedPath: installedPath,
+		original:      string(raw),
+		next:          next,
+	}, nil
+}
+
+func tailscaleSidecarInstalledUnitPath(serviceName string) string {
+	return filepath.Join(systemdSystemDir, "yeet-"+serviceName+"-ts.service")
+}
+
+func rollbackTailscaleResolverIsolationRepairs(repairs []tailscaleResolverIsolationRepair) []error {
+	var errs []error
+	for _, repair := range repairs {
+		if err := rollbackTailscaleResolverIsolationRepair(repair); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
+func rollbackTailscaleResolverIsolationRepair(repair tailscaleResolverIsolationRepair) error {
+	if err := os.WriteFile(repair.installedPath, []byte(repair.original), 0o644); err != nil {
+		return fmt.Errorf("restore tailscale unit %s after failed resolver isolation repair: %w", repair.installedPath, err)
+	}
+	return nil
+}
+
+func ensureTailscaleUnitResolverIsolation(unit string) (string, bool) {
+	netNS, ok := tailscaleUnitNetworkNamespace(unit)
+	if !ok {
+		return unit, false
+	}
+
+	bind := fmt.Sprintf("BindPaths=/etc/netns/%s/resolv.conf:/etc/resolv.conf", netNS)
+	hasBind := systemdUnitHasDirective(unit, bind)
+	hasPrivateMounts := systemdUnitHasDirective(unit, "PrivateMounts=yes")
+	if hasBind && hasPrivateMounts {
+		return unit, false
+	}
+
+	var insert []string
+	if !hasBind {
+		insert = append(insert, bind)
+	}
+	if !hasPrivateMounts {
+		insert = append(insert, "PrivateMounts=yes")
+	}
+	return insertSystemdServiceDirectives(unit, insert), true
+}
+
+func tailscaleUnitNetworkNamespace(unit string) (string, bool) {
+	for _, line := range strings.Split(unit, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		value, ok := strings.CutPrefix(line, "NetworkNamespacePath=")
+		if !ok {
+			continue
+		}
+		value = strings.Trim(strings.TrimSpace(value), `"`)
+		if value == "" {
+			return "", false
+		}
+		netNS := filepath.Base(filepath.Clean(value))
+		if netNS == "." || netNS == string(filepath.Separator) {
+			return "", false
+		}
+		return netNS, true
+	}
+	return "", false
+}
+
+func systemdUnitHasDirective(unit, directive string) bool {
+	for _, line := range strings.Split(unit, "\n") {
+		if strings.TrimSpace(line) == directive {
+			return true
+		}
+	}
+	return false
+}
+
+func insertSystemdServiceDirectives(unit string, directives []string) string {
+	lines := strings.Split(unit, "\n")
+	var out []string
+	inserted := false
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "[Install]" && !inserted {
+			out = append(out, directives...)
+			out = append(out, "")
+			inserted = true
+		}
+		out = append(out, line)
+	}
+	if !inserted {
+		if len(out) > 0 && out[len(out)-1] != "" {
+			out = append(out, "")
+		}
+		out = append(out, directives...)
+	}
+	return strings.Join(out, "\n")
+}
+
 func (s *Server) reconcileNetNSBackedDockerService(ctx context.Context, name string, sv db.ServiceView) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
