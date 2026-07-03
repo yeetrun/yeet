@@ -474,6 +474,10 @@ type ServiceArgs struct {
 	Service ServiceName `pos:"0" help:"Service name"`
 }
 
+type InfoArgs struct {
+	Service ServiceName `pos:"0?" help:"Service name"`
+}
+
 type ServiceSyncArgs struct {
 	Service ServiceName `pos:"0?" help:"Service name"`
 }
@@ -517,7 +521,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"edit":    {Name: "edit", Description: "Edit a service", ArgsSchema: ServiceArgs{}},
 	"enable":  {Name: "enable", Description: "Enable a service", ArgsSchema: ServiceArgs{}},
 	"events":  {Name: "events", Description: "Show events for a service"},
-	"info":    {Name: "info", Description: "Show detailed info about a service, including published ports", Usage: "SVC [--format=plain|json|json-pretty]", ArgsSchema: ServiceArgs{}},
+	"info":    {Name: "info", Description: "Show host info, or detailed service info when SVC is supplied", Usage: "[SVC] [--format=plain|json|json-pretty]", ArgsSchema: InfoArgs{}},
 	"logs":    {Name: "logs", Description: "Show logs of a service", ArgsSchema: ServiceArgs{}},
 	"mount": {Name: "mount", Description: "Mount a network filesystem on the host (global, not per-service)", Usage: "SOURCE [name] [--type=nfs] [--opts=defaults]", Examples: []string{
 		"yeet mount host:/export data-share --type=nfs --opts=defaults",

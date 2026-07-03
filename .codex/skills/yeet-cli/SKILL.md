@@ -26,6 +26,7 @@ installed binary.
 mise exec -- go run ./cmd/yeet status
 mise exec -- go run ./cmd/yeet status <svc>
 mise exec -- go run ./cmd/yeet logs <svc>
+mise exec -- go run ./cmd/yeet info
 mise exec -- go run ./cmd/yeet info <svc>
 mise exec -- go run ./cmd/yeet run <svc> ./compose.yml
 mise exec -- go run ./cmd/yeet run <svc> vm://ubuntu/26.04 --net=lan

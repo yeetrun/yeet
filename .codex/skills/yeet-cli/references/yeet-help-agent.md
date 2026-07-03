@@ -60,6 +60,7 @@ yeet [GLOBAL_OPTIONS] COMMAND [ARGS...]
 - Run `yeet version --help-agent` for command-specific context.
 - Run `yeet docker --help-agent` for group-specific context.
 - Run `yeet env --help-agent` for group-specific context.
+- Run `yeet host --help-agent` for group-specific context.
 - Run `yeet service --help-agent` for group-specific context.
 - Run `yeet snapshots --help-agent` for group-specific context.
 - Run `yeet vm --help-agent` for group-specific context.
@@ -138,7 +139,7 @@ Run `yeet events --help-agent` for command-specific context.
 
 ### `info`
 
-Show detailed info about a service, including published ports
+Show host info, or detailed service info when SVC is supplied
 
 Run `yeet info --help-agent` for command-specific context.
 
@@ -267,6 +268,12 @@ Run `yeet docker --help-agent` for group-specific context.
 Manage service environment files
 
 Run `yeet env --help-agent` for group-specific context.
+
+### `host`
+
+Manage catch host settings
+
+Run `yeet host --help-agent` for group-specific context.
 
 ### `service`
 
@@ -704,12 +711,12 @@ Progress output (auto|tty|plain|quiet)
 
 ## Purpose
 
-Show detailed info about a service, including published ports
+Show host info, or detailed service info when SVC is supplied
 
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] info SVC [--format=plain|json|json-pretty]
+yeet [GLOBAL_OPTIONS] info [SVC] [--format=plain|json|json-pretty]
 ```
 
 ## Operating Rules
@@ -726,7 +733,7 @@ yeet [GLOBAL_OPTIONS] info SVC [--format=plain|json|json-pretty]
 Service name
 
 - **Type**: `cli.ServiceName`
-- **Required**: true
+- **Required**: false
 
 ## Global Options
 
@@ -773,7 +780,7 @@ Install catch on a remote host (prompts for Tailscale OAuth setup when needed)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] init [--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--ts-client-secret=<secret>] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]
+yeet [GLOBAL_OPTIONS] init [--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET] [--zfs] [--ts-client-secret=<secret>] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]
 ```
 
 ## Operating Rules
@@ -819,6 +826,14 @@ Progress output (auto|tty|plain|quiet)
 
 ```
 yeet init root@<machine-host>
+```
+
+```
+yeet init --data-dir=/srv/yeet-data root@<machine-host>
+```
+
+```
+yeet init --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services root@<machine-host>
 ```
 
 ```
@@ -2227,6 +2242,73 @@ Print the current env file
 Run `yeet env show --help-agent` for command-specific context.
 ````
 
+## Group: host
+
+````
+# yeet host Agent Context
+
+## Purpose
+
+Manage catch host settings
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] host COMMAND [ARGS...]
+```
+
+## Operating Rules
+
+- Prefer exact examples when they match the task.
+- Use command-specific agent help before running an unfamiliar command.
+- Do not invent flags; use only flags listed in this context or command help.
+- Preserve arguments after `--` as payload or application arguments.
+
+## Discovery
+
+- Run `yeet host set --help-agent` for command-specific context.
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Commands
+
+### `host set`
+
+Configure catch host storage
+
+Run `yeet host set --help-agent` for command-specific context.
+````
+
 ## Group: service
 
 ````
@@ -3085,6 +3167,113 @@ Disable TTY for remote commands
 Progress output (auto|tty|plain|quiet)
 
 - **Type**: `string`
+````
+
+## Group Command: host set
+
+````
+# yeet host set Agent Context
+
+## Purpose
+
+Configure catch host storage
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] host set [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET_PREFIX] [--zfs] [--migrate-services=all|none] [--config=PATH] [--yes]
+```
+
+## Operating Rules
+
+- Prefer exact examples when they match the task.
+- Use command-specific agent help before running an unfamiliar command.
+- Do not invent flags; use only flags listed in this context or command help.
+- Preserve arguments after `--` as payload or application arguments.
+
+## Options
+
+### `--data-dir`
+
+Set catch data directory path or ZFS dataset
+
+- **Type**: `string`
+
+### `--services-root`
+
+Set default root for service directories or ZFS dataset prefix
+
+- **Type**: `string`
+
+### `--zfs`
+
+Treat supplied storage targets as ZFS datasets or dataset prefixes
+
+- **Type**: `bool`
+
+### `--migrate-services`
+
+Service migration mode: all, none
+
+- **Type**: `string`
+
+### `--config`
+
+Path to yeet.toml to update after service migration
+
+- **Type**: `string`
+
+### `--yes` (short: `-y`)
+
+Confirm disruptive host storage changes without prompting
+
+- **Type**: `bool`
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet host set --data-dir=$HOME/yeet-data
+```
+
+```
+yeet host set --services-root=$HOME/yeet-data/services2 --migrate-services=none
+```
+
+```
+yeet host set --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services --migrate-services=all
+```
 ````
 
 ## Group Command: service generations

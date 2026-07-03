@@ -1070,6 +1070,23 @@ func TestParseInfoFlags(t *testing.T) {
 	}
 }
 
+func TestInfoCommandMetadataAllowsBareHostInfo(t *testing.T) {
+	info := remoteCommandInfos["info"]
+	if !strings.Contains(info.Usage, "[SVC]") {
+		t.Fatalf("info usage = %q, want optional service", info.Usage)
+	}
+	arg, ok := yargs.ArgSpecAt(info.ArgsSchema, 0)
+	if !ok {
+		t.Fatal("info command missing service argument metadata")
+	}
+	if !IsServiceArgSpec(arg) {
+		t.Fatalf("info arg = %#v, want service arg", arg)
+	}
+	if arg.Required {
+		t.Fatalf("info service arg required = true, want optional")
+	}
+}
+
 func TestSplitArgsForParsing(t *testing.T) {
 	specs := map[string]FlagSpec{
 		"--name": {ConsumesValue: true},
