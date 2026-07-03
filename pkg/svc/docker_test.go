@@ -137,6 +137,26 @@ func TestDockerComposeUpWithoutPull(t *testing.T) {
 	}
 }
 
+func TestDockerComposeRestartStartsMissingProject(t *testing.T) {
+	calls := []cmdCall{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+
+	if err := svc.Restart(); err != nil {
+		t.Fatalf("Restart returned error: %v", err)
+	}
+
+	assertCallOrder(t, calls,
+		callSpec{composeSubcmd: "ps"},
+		callSpec{composeSubcmd: "up"},
+	)
+	if composeCallHasSubcmd(calls, "restart") {
+		t.Fatalf("did not expect compose restart for missing project, got %#v", calls)
+	}
+	if composeCallHasArg(calls, "up", "--pull") {
+		t.Fatalf("did not expect restart recovery up to pull images, got %#v", calls)
+	}
+}
+
 func TestDockerComposeUpUsesPullMode(t *testing.T) {
 	calls := []cmdCall{}
 	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))

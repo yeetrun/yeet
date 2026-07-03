@@ -39,7 +39,8 @@ const (
 )
 
 var (
-	legacyDataDir = flag.String("data-dir", must.Get(filepath.Abs("data")), "data directory")
+	legacyDataDir = flag.String("data-dir", defaultDataDir(), "data directory")
+	servicesRoot  = flag.String("services-root", "", "default root for service directories")
 	tsnetHost     = flag.String("tsnet-host", "catch", "hostname to use for tsnet")
 	tsnetPort     = flag.Int("tsnet-port", defaultTSNetPort, "port to use for tsnet")
 
@@ -61,6 +62,7 @@ var (
 	setupVMHostFn                           = setupVMHost
 	doInstallFn                             = doInstall
 	validateCatchRuntimeFn                  = validateCatchRuntime
+	resolveCatchInstallZFSTargetFn          = catch.ResolveInstallZFSTarget
 	ensureVMNetworkFn                       = catch.EnsureVMNetwork
 	ensureContainerdSnapshotterForInstallFn = ensureContainerdSnapshotterForInstall
 	generateCatchTailscaleAuthKeyFn         = catch.GenerateTailscaleAuthKeyFromSecret
@@ -71,6 +73,8 @@ const defaultDockerConfigPath = "/etc/docker/daemon.json"
 const defaultCatchTag = "tag:catch"
 const oldDockerInstallDNS = "192.168.100.1"
 const oldDockerInstallDNSSearch = "yeet.internal"
+const catchInstallDataDirZFSEnv = "CATCH_INSTALL_DATA_DIR_ZFS"
+const catchInstallServicesRootZFSEnv = "CATCH_INSTALL_SERVICES_ROOT_ZFS"
 
 var errCatchTSNetUntagged = errors.New("catch Tailscale node must be tagged")
 
@@ -287,13 +291,21 @@ func runCatchProcess(args []string, out io.Writer) error {
 	} else if handled {
 		return nil
 	}
-	dataDir := *legacyDataDir
+	startupOpts, err := resolveCatchStartupOptions(*legacyDataDir, *servicesRoot)
+	if err != nil {
+		return err
+	}
+	startup, err := resolveCatchStartupPaths(startupOpts)
+	if err != nil {
+		return err
+	}
+	dataDir := startup.dataDir
 	// Set and create all the necessary directories.
 	log.Printf("data dir: %v", dataDir)
-	paths := must.Get(prepareDataDirs(dataDir))
+	paths := startup.paths
 
 	curUser := must.Get(user.Current())
-	scfg := newCatchConfig(paths, curUser.Username, *registryInternalAddr, *containerdSocket)
+	scfg := newCatchConfig(paths, curUser.Username, *registryInternalAddr, *containerdSocket, startup.servicesRoot)
 	applyInstallMeta(scfg, dataDir)
 
 	if handled, err := handleLocalCommand(args, scfg, dataDir, out); err != nil {
@@ -368,6 +380,67 @@ type catchPaths struct {
 	mountsDir   string
 }
 
+type catchStartupOptions struct {
+	dataDir      string
+	servicesRoot string
+}
+
+type catchStartupPaths struct {
+	dataDir      string
+	paths        catchPaths
+	servicesRoot string
+}
+
+func defaultDataDir() string {
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
+		return filepath.Join(home, "yeet-data")
+	}
+	abs, err := filepath.Abs("yeet-data")
+	if err == nil {
+		return abs
+	}
+	return "yeet-data"
+}
+
+func resolveCatchStartupOptions(dataDir, servicesRoot string) (catchStartupOptions, error) {
+	opts := catchStartupOptions{
+		dataDir:      dataDir,
+		servicesRoot: servicesRoot,
+	}
+	if os.Getenv(catchInstallDataDirZFSEnv) == "1" {
+		resolved, err := resolveCatchInstallZFSTargetFn(context.Background(), dataDir)
+		if err != nil {
+			return catchStartupOptions{}, err
+		}
+		opts.dataDir = resolved
+	}
+	if os.Getenv(catchInstallServicesRootZFSEnv) == "1" {
+		resolved, err := resolveCatchInstallZFSTargetFn(context.Background(), servicesRoot)
+		if err != nil {
+			return catchStartupOptions{}, err
+		}
+		opts.servicesRoot = resolved
+	}
+	return opts, nil
+}
+
+func resolveCatchStartupPaths(opts catchStartupOptions) (catchStartupPaths, error) {
+	dataDir := strings.TrimSpace(opts.dataDir)
+	if dataDir == "" {
+		dataDir = defaultDataDir()
+	}
+	paths, err := prepareDataDirs(dataDir)
+	if err != nil {
+		return catchStartupPaths{}, err
+	}
+	return catchStartupPaths{
+		dataDir:      dataDir,
+		paths:        paths,
+		servicesRoot: resolveServicesRoot(paths, opts.servicesRoot),
+	}, nil
+}
+
 func prepareDataDirs(dataDir string) (catchPaths, error) {
 	paths := catchPaths{
 		dataDir:     dataDir,
@@ -397,13 +470,22 @@ func validateContainerdSocket(socket string) error {
 	return nil
 }
 
-func newCatchConfig(paths catchPaths, username, registryAddr, socket string) *catch.Config {
+func resolveServicesRoot(paths catchPaths, root string) string {
+	if trimmed := strings.TrimSpace(root); trimmed != "" {
+		return trimmed
+	}
+	return paths.servicesDir
+}
+
+func newCatchConfig(paths catchPaths, username, registryAddr, socket, servicesRoot string) *catch.Config {
+	resolvedServicesRoot := resolveServicesRoot(paths, servicesRoot)
 	return &catch.Config{
-		DB:                   cdb.NewStore(paths.dbPath, paths.servicesDir),
+		DB:                   cdb.NewStore(paths.dbPath, resolvedServicesRoot),
 		DefaultUser:          username, // maybe not default to root?
 		InstallUser:          username,
 		RootDir:              paths.dataDir,
-		ServicesRoot:         paths.servicesDir,
+		ServicesRoot:         resolvedServicesRoot,
+		TSNetHost:            *tsnetHost,
 		MountsRoot:           paths.mountsDir,
 		InternalRegistryAddr: registryAddr,
 		RegistryRoot:         paths.registryDir,
@@ -1016,9 +1098,10 @@ type catchInstallDeps struct {
 }
 
 type catchInstallPlan struct {
-	serviceName string
-	dataDir     string
-	tsnetHost   string
+	serviceName  string
+	dataDir      string
+	servicesRoot string
+	tsnetHost    string
 }
 
 // doInstall installs the catch binary as a service.
@@ -1057,7 +1140,7 @@ func doInstallWith(cfg *catch.Config, dataDir string, deps catchInstallDeps) (er
 	// doesn't fight for tsnet.
 	defer assignOrLogClose(&err, "tsnet server", ts)
 
-	plan := selectCatchInstallMode(dataDir, deps.tsnetHost())
+	plan := selectCatchInstallMode(dataDir, cfg.ServicesRoot, deps.tsnetHost())
 	if err := validateCatchInstallPlan(plan); err != nil {
 		return err
 	}
@@ -1120,12 +1203,20 @@ func startInstallTSNet(dataDir string, deps catchInstallDeps) (installTSNet, err
 	return ts, nil
 }
 
-func selectCatchInstallMode(dataDir, tsnetHost string) catchInstallPlan {
+func selectCatchInstallMode(dataDir, servicesRoot, tsnetHost string) catchInstallPlan {
 	return catchInstallPlan{
-		serviceName: catch.CatchService,
-		dataDir:     dataDir,
-		tsnetHost:   tsnetHost,
+		serviceName:  catch.CatchService,
+		dataDir:      dataDir,
+		servicesRoot: selectInstallServicesRoot(dataDir, servicesRoot),
+		tsnetHost:    tsnetHost,
 	}
+}
+
+func selectInstallServicesRoot(dataDir, servicesRoot string) string {
+	if trimmed := strings.TrimSpace(servicesRoot); trimmed != "" {
+		return trimmed
+	}
+	return filepath.Join(dataDir, "services")
 }
 
 func validateCatchInstallPlan(plan catchInstallPlan) error {
@@ -1136,16 +1227,28 @@ func validateCatchInstallPlan(plan catchInstallPlan) error {
 }
 
 func catchFileInstallerConfig(plan catchInstallPlan) catch.FileInstallerCfg {
+	args := []string{
+		fmt.Sprintf("--data-dir=%v", plan.dataDir),
+	}
+	if shouldWriteInstallServicesRoot(plan) {
+		args = append(args, fmt.Sprintf("--services-root=%v", plan.servicesRoot))
+	}
+	args = append(args, fmt.Sprintf("--tsnet-host=%v", plan.tsnetHost))
 	return catch.FileInstallerCfg{
 		InstallerCfg: catch.InstallerCfg{
 			ServiceName: plan.serviceName,
 			Printer:     log.Printf,
 		},
-		Args: []string{
-			fmt.Sprintf("--data-dir=%v", plan.dataDir),
-			fmt.Sprintf("--tsnet-host=%v", plan.tsnetHost),
-		},
+		Args: args,
 	}
+}
+
+func shouldWriteInstallServicesRoot(plan catchInstallPlan) bool {
+	servicesRoot := strings.TrimSpace(plan.servicesRoot)
+	if servicesRoot == "" {
+		return false
+	}
+	return filepath.Clean(servicesRoot) != filepath.Clean(filepath.Join(plan.dataDir, "services"))
 }
 
 func newCatchServiceInstaller(cfg *catch.Config, installerCfg catch.FileInstallerCfg) (catchServiceInstaller, error) {

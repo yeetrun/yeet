@@ -353,6 +353,52 @@ func TestReconcilePortForwardsRejectsNilStore(t *testing.T) {
 	}
 }
 
+func TestPruneMissingDockerNetworksRemovesOnlyMissingNetworks(t *testing.T) {
+	store := newTestStore(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"live": {
+				NetworkID: "live",
+				NetNS:     "/var/run/netns/yeet-app-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"app": {EndpointID: "app", IPv4: netip.MustParsePrefix("172.20.0.2/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/80": {EndpointID: "app", Port: 80},
+				},
+			},
+			"stale": {
+				NetworkID: "stale",
+				NetNS:     "/var/run/netns/yeet-app-ns",
+				Endpoints: map[string]*db.DockerEndpoint{
+					"old": {EndpointID: "old", IPv4: netip.MustParsePrefix("172.19.0.2/16")},
+				},
+				PortMap: map[string]*db.EndpointPort{
+					"6/80": {EndpointID: "old", Port: 80},
+				},
+			},
+		},
+	})
+
+	pruned, err := pruneMissingDockerNetworks(store, map[string]struct{}{"live": {}})
+	if err != nil {
+		t.Fatalf("pruneMissingDockerNetworks returned error: %v", err)
+	}
+	if pruned != 1 {
+		t.Fatalf("pruned = %d, want 1", pruned)
+	}
+	dv, err := store.Get()
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	networks := dv.AsStruct().DockerNetworks
+	if _, ok := networks["live"]; !ok {
+		t.Fatal("live network was pruned")
+	}
+	if _, ok := networks["stale"]; ok {
+		t.Fatal("stale network still exists after prune")
+	}
+}
+
 func TestNetnsPathExists(t *testing.T) {
 	if ok, err := netnsPathExists(""); err != nil || ok {
 		t.Fatalf("netnsPathExists(empty) = %v, %v; want false, nil", ok, err)

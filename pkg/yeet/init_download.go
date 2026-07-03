@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 )
 
@@ -88,9 +89,10 @@ func resolveReleaseAssetURLs(assets []githubAsset, assetName, shaName string) (a
 	return assetURL, shaURL, nil
 }
 
-func downloadCatchRelease(ui *initUI, userAtRemote, assetName, assetURL, shaURL string) (string, error) {
+func downloadCatchRelease(ui *initUI, userAtRemote, assetName, assetURL, shaURL string, remoteBinary string) (string, error) {
 	shaName := assetName + ".sha256"
 	binaryName := strings.TrimSuffix(assetName, ".tar.gz")
+	installDownloaded := downloadCatchInstallCommand(binaryName, remoteBinary)
 	script := fmt.Sprintf(`set -euo pipefail
 TMP_DIR=$(mktemp -d)
 cleanup() { rm -rf "$TMP_DIR"; }
@@ -137,8 +139,8 @@ if [ "$expected" != "$computed" ]; then
   exit 1
 fi
 tar -xzf "$TMP_DIR/%s" -C "$TMP_DIR"
-mv -f "$TMP_DIR/%s" ./catch
-`, assetURL, assetName, shaURL, shaName, shaName, assetName, assetName, assetName, binaryName)
+%s
+`, assetURL, assetName, shaURL, shaName, shaName, assetName, assetName, assetName, installDownloaded)
 
 	cmd := exec.Command("ssh", userAtRemote, "bash", "-s")
 	cmd.Stdin = bytes.NewBufferString(script)
@@ -151,4 +153,13 @@ mv -f "$TMP_DIR/%s" ./catch
 	}
 	ui.Resume()
 	return assetName, nil
+}
+
+func downloadCatchInstallCommand(binaryName string, remoteBinary string) string {
+	binary := normalizeInitCatchRemoteBinary(remoteBinary)
+	source := fmt.Sprintf("\"$TMP_DIR/%s\"", binaryName)
+	if binary == "./catch" {
+		return fmt.Sprintf("mv -f %s ./catch", source)
+	}
+	return fmt.Sprintf("mkdir -p %s\nmv -f %s %s", shellQuote(path.Dir(binary)), source, shellQuote(binary))
 }

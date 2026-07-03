@@ -177,6 +177,26 @@ func TestPrepareServiceRootForInstallZFSExistingSameDataset(t *testing.T) {
 	}
 }
 
+func TestPrepareServiceRootForInstallDefaultUsesServicesRootDataset(t *testing.T) {
+	server := newTestServer(t)
+	if err := os.MkdirAll(server.cfg.ServicesRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll services root: %v", err)
+	}
+	serviceRoot := filepath.Join(server.cfg.ServicesRoot, "api")
+	server.zfsRunner = fakeZFSRunner(map[string]fakeZFSDataset{
+		"tank/yeet/services":     {Mountpoint: server.cfg.ServicesRoot, Exists: true},
+		"tank/yeet/services/api": {Mountpoint: serviceRoot},
+	}).Run
+
+	got, err := server.prepareServiceRootForInstall("api", "", false)
+	if err != nil {
+		t.Fatalf("prepareServiceRootForInstall: %v", err)
+	}
+	if got.Root != serviceRoot || got.Dataset != "tank/yeet/services/api" || !got.ZFS || !got.Created {
+		t.Fatalf("resolved = %#v, want root %q dataset %q ZFS created", got, serviceRoot, "tank/yeet/services/api")
+	}
+}
+
 func TestPrepareServiceRootForInstallZFSExistingDifferentDatasetRejects(t *testing.T) {
 	server := newTestServer(t)
 	addTestServices(t, server, db.Service{

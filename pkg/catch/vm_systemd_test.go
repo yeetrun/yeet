@@ -5,11 +5,15 @@
 package catch
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 func TestRenderVMSystemdUnit(t *testing.T) {
@@ -45,6 +49,65 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 		"ExecStartPre=/srv/catch/run/catch -data-dir /srv/catch/data vm-network-ensure devbox",
 		"ExecStart=/srv/catch/run/catch vm-run --service devbox --service-root /srv/vms/devbox --disk-path /srv/vms/devbox/rootfs.ext4 --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
 	)
+}
+
+func TestRegenerateHostStorageVMSystemdUnitUsesCurrentRoots(t *testing.T) {
+	systemdDir := t.TempDir()
+	oldDir := vmSystemdSystemDir
+	vmSystemdSystemDir = systemdDir
+	t.Cleanup(func() { vmSystemdSystemDir = oldDir })
+	oldSystemctl := vmProvisionSystemctlFunc
+	var calls [][]string
+	vmProvisionSystemctlFunc = func(args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		return nil
+	}
+	t.Cleanup(func() { vmProvisionSystemctlFunc = oldSystemctl })
+
+	service := &db.Service{
+		Name:        "devbox",
+		ServiceType: db.ServiceTypeVM,
+		ServiceRoot: "/flash/yeet/services/devbox",
+		VM: &db.VMConfig{
+			Image: db.VMImageConfig{
+				RootFS: "/flash/yeet/data/vm-images/ubuntu/rootfs.ext4",
+			},
+			Disk: db.VMDiskConfig{
+				Path: "/flash/yeet/services/devbox/data/rootfs.raw",
+			},
+		},
+	}
+	cfg := Config{RootDir: "/flash/yeet/data", ServicesRoot: "/flash/yeet/services"}
+
+	units, err := regenerateHostStorageVMSystemdUnit(context.Background(), cfg, service, "/flash/yeet/services/catch/run/catch")
+	if err != nil {
+		t.Fatalf("regenerateHostStorageVMSystemdUnit error: %v", err)
+	}
+	if !slices.Equal(units, []string{vmSystemdUnitName("devbox")}) {
+		t.Fatalf("regenerateHostStorageVMSystemdUnit units = %#v, want VM unit", units)
+	}
+	raw, err := os.ReadFile(filepath.Join(systemdDir, vmSystemdUnitName("devbox")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := string(raw)
+	for _, want := range []string{
+		"/flash/yeet/data",
+		"/flash/yeet/services/catch/run/catch",
+		"/flash/yeet/services/devbox",
+		"/flash/yeet/services/devbox/data/rootfs.raw",
+		"/flash/yeet/data/vm-images/ubuntu/firecracker",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("unit missing %s:\n%s", want, unit)
+		}
+	}
+	if strings.Contains(unit, "/root/data") {
+		t.Fatalf("unit contains old root:\n%s", unit)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("systemctl calls = %#v, want none before batched reload", calls)
+	}
 }
 
 func assertTextOrder(t *testing.T, text string, wants ...string) {

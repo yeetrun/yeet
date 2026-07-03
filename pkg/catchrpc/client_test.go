@@ -234,8 +234,44 @@ func TestClientCallError(t *testing.T) {
 	client := NewClient(host, port)
 
 	var out map[string]string
-	if err := client.Call(context.Background(), "test.nope", nil, &out); err == nil {
+	err := client.Call(context.Background(), "test.nope", nil, &out)
+	if err == nil {
 		t.Fatal("expected error")
+	}
+	if got, want := err.Error(), "rpc error -32601: nope"; got != want {
+		t.Fatalf("Client.Call error = %q, want %q", got, want)
+	}
+}
+
+func TestClientCallErrorIncludesData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		resp := Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Error: &Error{
+				Code:    ErrInternal,
+				Message: "failed to apply host storage",
+				Data:    "reinstall catch unit: service root parent missing",
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	client := NewClient(host, port)
+
+	err := client.Call(context.Background(), "test.nope", nil, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	want := "rpc error -32603: failed to apply host storage: reinstall catch unit: service root parent missing"
+	if got := err.Error(); got != want {
+		t.Fatalf("Client.Call error = %q, want %q", got, want)
 	}
 }
 
@@ -258,6 +294,48 @@ func TestClientCallBuildRequestAndTransportErrors(t *testing.T) {
 	})}
 	if err := client.Call(context.Background(), "test.transport", nil, nil); !errors.Is(err, wantErr) {
 		t.Fatalf("Client.Call transport error = %v, want %v", err, wantErr)
+	}
+}
+
+func TestClientCallUsesDefaultTimeoutContext(t *testing.T) {
+	client := NewClient("127.0.0.1", 1)
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			t.Fatalf("request context has no deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 || remaining > defaultRPCTimeout+time.Second {
+			t.Fatalf("request deadline remaining = %s, want default timeout near %s", remaining, defaultRPCTimeout)
+		}
+		return rpcTestHTTPResponse(req, nil), nil
+	})}
+
+	if err := client.Call(context.Background(), "test.timeout", nil, nil); err != nil {
+		t.Fatalf("Client.Call returned error: %v", err)
+	}
+}
+
+func TestHostStorageApplyUsesExtendedTimeoutContext(t *testing.T) {
+	client := NewClient("127.0.0.1", 1)
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			t.Fatalf("request context has no deadline")
+		}
+		remaining := time.Until(deadline)
+		if remaining < 10*time.Minute {
+			t.Fatalf("request deadline remaining = %s, want extended host storage apply timeout", remaining)
+		}
+		return rpcTestHTTPResponse(req, HostStorageApplyResult{Restarted: true}), nil
+	})}
+
+	got, err := client.HostStorageApply(context.Background(), HostStorageApplyRequest{Yes: true})
+	if err != nil {
+		t.Fatalf("HostStorageApply returned error: %v", err)
+	}
+	if !got.Restarted {
+		t.Fatalf("HostStorageApply = %#v, want restarted result", got)
 	}
 }
 
@@ -389,6 +467,115 @@ func TestVMDefaultsCallsRPC(t *testing.T) {
 	}
 	if got.CPUs != 4 || got.Memory != "4g" || got.Disk != "128g" || got.DiskBackend != "zvol" {
 		t.Fatalf("VMDefaults = %#v, want 4/4g/128g zvol", got)
+	}
+}
+
+func TestHostStoragePlanCallsRPC(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method != RPCMethodHostStoragePlan {
+			t.Fatalf("method = %q, want %s", req.Method, RPCMethodHostStoragePlan)
+		}
+		var params HostStoragePlanRequest
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatalf("decode params: %v", err)
+		}
+		if params.Set.DataDir == nil || params.Set.DataDir.Value != "flash/yeet/data" || !params.Set.DataDir.ZFS {
+			t.Fatalf("params = %#v, want ZFS data dir", params)
+		}
+		if params.Set.MigrateServices != HostStorageMigrateAll {
+			t.Fatalf("migrate services = %q, want all", params.Set.MigrateServices)
+		}
+		_ = json.NewEncoder(w).Encode(Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: HostStoragePlan{
+				Current: HostStorageState{DataDir: "/home/me/yeet-data", ServicesRoot: "/home/me/yeet-data/services"},
+				Desired: HostStorageState{DataDir: "/flash/yeet/data", DataDirZFS: true, ServicesRoot: "/flash/yeet/services", ServicesZFS: true},
+				ServicesAction: HostStorageServicesAction{
+					Mode: HostStorageMigrateAll,
+					AffectedServices: []HostStorageServiceMove{{
+						Name:       "web",
+						From:       "/home/me/yeet-data/services/web",
+						To:         "/flash/yeet/services/web",
+						WasRunning: true,
+					}},
+				},
+				RequiresRestart: true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	got, err := NewClient(host, port).HostStoragePlan(context.Background(), HostStoragePlanRequest{
+		Set: HostStorageSetRequest{
+			DataDir:         &HostStorageTarget{Value: "flash/yeet/data", ZFS: true},
+			MigrateServices: HostStorageMigrateAll,
+		},
+	})
+	if err != nil {
+		t.Fatalf("HostStoragePlan returned error: %v", err)
+	}
+	if !got.RequiresRestart || got.Desired.DataDir != "/flash/yeet/data" || len(got.ServicesAction.AffectedServices) != 1 {
+		t.Fatalf("HostStoragePlan = %#v, want restart with one affected service", got)
+	}
+}
+
+func TestHostStorageApplyCallsRPC(t *testing.T) {
+	plan := HostStoragePlan{
+		Current: HostStorageState{DataDir: "/home/me/yeet-data", ServicesRoot: "/home/me/yeet-data/services"},
+		Desired: HostStorageState{DataDir: "/flash/yeet/data", ServicesRoot: "/flash/yeet/services"},
+		ServicesAction: HostStorageServicesAction{
+			Mode: HostStorageMigrateAll,
+			AffectedServices: []HostStorageServiceMove{{
+				Name:       "web",
+				From:       "/home/me/yeet-data/services/web",
+				To:         "/flash/yeet/services/web",
+				WasRunning: true,
+			}},
+		},
+		RequiresRestart: true,
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method != RPCMethodHostStorageApply {
+			t.Fatalf("method = %q, want %s", req.Method, RPCMethodHostStorageApply)
+		}
+		var params HostStorageApplyRequest
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatalf("decode params: %v", err)
+		}
+		if !params.Yes || !params.Plan.RequiresRestart || params.Plan.Desired.ServicesRoot != "/flash/yeet/services" {
+			t.Fatalf("params = %#v, want confirmed restart plan", params)
+		}
+		_ = json.NewEncoder(w).Encode(Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: HostStorageApplyResult{
+				MigratedServices: []HostStorageServiceMove{plan.ServicesAction.AffectedServices[0]},
+				Restarted:        true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	got, err := NewClient(host, port).HostStorageApply(context.Background(), HostStorageApplyRequest{
+		Plan: plan,
+		Yes:  true,
+	})
+	if err != nil {
+		t.Fatalf("HostStorageApply returned error: %v", err)
+	}
+	if !got.Restarted || len(got.MigratedServices) != 1 || got.MigratedServices[0].Name != "web" {
+		t.Fatalf("HostStorageApply = %#v, want restarted web migration", got)
 	}
 }
 
@@ -951,4 +1138,23 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func rpcTestHTTPResponse(req *http.Request, result any) *http.Response {
+	var id json.RawMessage = []byte("1")
+	var rpcReq Request
+	if err := json.NewDecoder(req.Body).Decode(&rpcReq); err == nil && len(rpcReq.ID) > 0 {
+		id = rpcReq.ID
+	}
+	var body bytes.Buffer
+	_ = json.NewEncoder(&body).Encode(Response{
+		JSONRPC: "2.0",
+		ID:      id,
+		Result:  result,
+	})
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(&body),
+	}
 }

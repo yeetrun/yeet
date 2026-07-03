@@ -28,6 +28,7 @@ func TestParseInitArgs(t *testing.T) {
 		wantVMTools  bool
 		wantTSAuth   string
 		wantTSClient string
+		wantStorage  initStorageOptions
 		wantErr      bool
 	}{
 		{
@@ -50,6 +51,22 @@ func TestParseInitArgs(t *testing.T) {
 			args:         []string{"--ts-client-secret=tskey-client-test", "root@example.com"},
 			wantPos:      []string{"root@example.com"},
 			wantTSClient: "tskey-client-test",
+		},
+		{
+			name:    "parses storage flags",
+			args:    []string{"--data-dir=flash/yeet/data", "--services-root=flash/yeet/services", "--zfs", "root@example.com"},
+			wantPos: []string{"root@example.com"},
+			wantStorage: initStorageOptions{
+				DataDir:         "flash/yeet/data",
+				DataDirZFS:      true,
+				ServicesRoot:    "flash/yeet/services",
+				ServicesRootZFS: true,
+			},
+		},
+		{
+			name:    "rejects zfs without storage target",
+			args:    []string{"--zfs", "root@example.com"},
+			wantErr: true,
 		},
 		{
 			name:    "rejects auth key and client secret together",
@@ -100,6 +117,9 @@ func TestParseInitArgs(t *testing.T) {
 			}
 			if opts.tsClientSecret != tt.wantTSClient {
 				t.Fatalf("tsClientSecret = %q, want %q", opts.tsClientSecret, tt.wantTSClient)
+			}
+			if !reflect.DeepEqual(opts.storage, tt.wantStorage) {
+				t.Fatalf("storage = %#v, want %#v", opts.storage, tt.wantStorage)
 			}
 		})
 	}
@@ -479,6 +499,260 @@ func TestPrepareInitVMToolsInstallWarnsForNonVMCapableHost(t *testing.T) {
 	}
 }
 
+func TestPrepareInitStorageOptionsKeepsExplicitFlags(t *testing.T) {
+	oldExisting := remoteInitExistingCatchStorageFn
+	oldWizard := runInitStorageWizardFn
+	t.Cleanup(func() {
+		remoteInitExistingCatchStorageFn = oldExisting
+		runInitStorageWizardFn = oldWizard
+	})
+	remoteInitExistingCatchStorageFn = func(string) (initStorageOptions, bool, error) {
+		t.Fatal("remoteInitExistingCatchStorageFn should not be called for explicit storage")
+		return initStorageOptions{}, false, nil
+	}
+	runInitStorageWizardFn = func(io.Reader, io.Writer, initStorageProbe) (initStorageOptions, error) {
+		t.Fatal("runInitStorageWizardFn should not be called for explicit storage")
+		return initStorageOptions{}, nil
+	}
+	want := initStorageOptions{DataDir: "/srv/yeet-data"}
+
+	got, err := prepareInitStorageOptions(newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName), "root@example.com", false, initOptions{storage: want})
+	if err != nil {
+		t.Fatalf("prepareInitStorageOptions: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("storage = %#v, want %#v", got, want)
+	}
+}
+
+func TestPrepareInitStorageOptionsPreservesExistingCatchStorage(t *testing.T) {
+	oldExisting := remoteInitExistingCatchStorageFn
+	oldWizard := runInitStorageWizardFn
+	oldIsTerminal := isTerminalFn
+	t.Cleanup(func() {
+		remoteInitExistingCatchStorageFn = oldExisting
+		runInitStorageWizardFn = oldWizard
+		isTerminalFn = oldIsTerminal
+	})
+	want := initStorageOptions{
+		DataDir:      "/root/data",
+		ServicesRoot: "/srv/yeet-services",
+	}
+	remoteInitExistingCatchStorageFn = func(string) (initStorageOptions, bool, error) {
+		return want, true, nil
+	}
+	runInitStorageWizardFn = func(io.Reader, io.Writer, initStorageProbe) (initStorageOptions, error) {
+		t.Fatal("runInitStorageWizardFn should not be called for existing catch")
+		return initStorageOptions{}, nil
+	}
+	isTerminalFn = func(int) bool { return true }
+
+	got, err := prepareInitStorageOptions(newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName), "root@example.com", false, initOptions{})
+	if err != nil {
+		t.Fatalf("prepareInitStorageOptions: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("storage = %#v, want existing catch storage %#v", got, want)
+	}
+}
+
+func TestPrepareInitStorageOptionsPromptsForFreshInteractiveHost(t *testing.T) {
+	oldExisting := remoteInitExistingCatchStorageFn
+	oldProbe := remoteInitStorageProbeFn
+	oldWizard := runInitStorageWizardFn
+	oldIsTerminal := isTerminalFn
+	t.Cleanup(func() {
+		remoteInitExistingCatchStorageFn = oldExisting
+		remoteInitStorageProbeFn = oldProbe
+		runInitStorageWizardFn = oldWizard
+		isTerminalFn = oldIsTerminal
+	})
+	remoteInitExistingCatchStorageFn = func(string) (initStorageOptions, bool, error) {
+		return initStorageOptions{}, false, nil
+	}
+	remoteInitStorageProbeFn = func(userAtRemote string, useSudo bool) (initStorageProbe, error) {
+		if userAtRemote != "root@example.com" || useSudo {
+			t.Fatalf("probe args = %q/%v, want root@example.com/false", userAtRemote, useSudo)
+		}
+		return initStorageProbe{Home: "/root", ZFSAvailable: true, SuggestedZFSPrefix: "flash/yeet"}, nil
+	}
+	want := initStorageOptions{DataDir: "flash/yeet/data", DataDirZFS: true}
+	runInitStorageWizardFn = func(_ io.Reader, _ io.Writer, probe initStorageProbe) (initStorageOptions, error) {
+		if probe.Home != "/root" || !probe.ZFSAvailable || probe.SuggestedZFSPrefix != "flash/yeet" {
+			t.Fatalf("probe = %#v, want remote storage probe", probe)
+		}
+		return want, nil
+	}
+	isTerminalFn = func(int) bool { return true }
+
+	got, err := prepareInitStorageOptions(newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName), "root@example.com", false, initOptions{})
+	if err != nil {
+		t.Fatalf("prepareInitStorageOptions: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("storage = %#v, want %#v", got, want)
+	}
+}
+
+func TestInitStorageOptionsFromCatchUnit(t *testing.T) {
+	unit := strings.Join([]string{
+		"[Unit]",
+		"[Service]",
+		"ExecStart=/root/data/services/catch/run/catch --data-dir=/root/data --services-root=/srv/yeet-services --tsnet-host=yeet-pve1",
+	}, "\n")
+
+	got := initStorageOptionsFromCatchUnit(unit)
+	want := initStorageOptions{
+		DataDir:      "/root/data",
+		ServicesRoot: "/srv/yeet-services",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("storage = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunInitStorageWizardDefaultsToHomeYeetData(t *testing.T) {
+	var out strings.Builder
+	got, err := runInitStorageWizard(strings.NewReader("\n\n"), &out, initStorageProbe{Home: "/root"})
+	if err != nil {
+		t.Fatalf("runInitStorageWizard: %v", err)
+	}
+	want := initStorageOptions{DataDir: "/root/yeet-data"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("storage = %#v, want %#v", got, want)
+	}
+	for _, text := range []string{"Storage setup", "Use /root/yeet-data for catch data?", "Keep services under the catch data dir?"} {
+		if !strings.Contains(out.String(), text) {
+			t.Fatalf("wizard output = %q, want %q", out.String(), text)
+		}
+	}
+}
+
+func TestRunInitStorageWizardCanSelectZFSDataAndServicesDatasets(t *testing.T) {
+	var out strings.Builder
+	input := "n\ny\n\nn\n\n\n"
+	got, err := runInitStorageWizard(strings.NewReader(input), &out, initStorageProbe{
+		Home:               "/root",
+		ZFSAvailable:       true,
+		SuggestedZFSPrefix: "flash/yeet",
+	})
+	if err != nil {
+		t.Fatalf("runInitStorageWizard: %v", err)
+	}
+	want := initStorageOptions{
+		DataDir:         "flash/yeet/data",
+		DataDirZFS:      true,
+		ServicesRoot:    "flash/yeet/services",
+		ServicesRootZFS: true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("storage = %#v, want %#v", got, want)
+	}
+	for _, text := range []string{"Catch data dataset [flash/yeet/data]", "Services dataset [flash/yeet/services]"} {
+		if !strings.Contains(out.String(), text) {
+			t.Fatalf("wizard output = %q, want %q", out.String(), text)
+		}
+	}
+}
+
+func TestRemoteInitStorageProbeDetectsHomeAndZFS(t *testing.T) {
+	oldOK := remoteInitStorageCommandOKFn
+	oldOutput := remoteInitStorageOutputFn
+	t.Cleanup(func() {
+		remoteInitStorageCommandOKFn = oldOK
+		remoteInitStorageOutputFn = oldOutput
+	})
+	remoteInitStorageCommandOKFn = func(userAtRemote, script string) (bool, error) {
+		if userAtRemote != "root@example.com" || script != "command -v zfs >/dev/null 2>&1" {
+			t.Fatalf("command ok args = %q/%q", userAtRemote, script)
+		}
+		return true, nil
+	}
+	remoteInitStorageOutputFn = func(_ string, script string) (string, error) {
+		switch script {
+		case "printf '%s\\n' \"$HOME\"":
+			return "/home/admin\n", nil
+		case "zfs list -H -d 0 -o name -t filesystem 2>/dev/null | head -n 1":
+			return "flash\n", nil
+		default:
+			t.Fatalf("unexpected script %q", script)
+			return "", nil
+		}
+	}
+
+	got, err := remoteInitStorageProbe("root@example.com", false)
+	if err != nil {
+		t.Fatalf("remoteInitStorageProbe: %v", err)
+	}
+	want := initStorageProbe{Home: "/home/admin", ZFSAvailable: true, SuggestedZFSPrefix: "flash/yeet"}
+	if got != want {
+		t.Fatalf("probe = %#v, want %#v", got, want)
+	}
+}
+
+func TestRemoteInitStorageProbeUsesRootHomeForSudoWithoutZFS(t *testing.T) {
+	oldOK := remoteInitStorageCommandOKFn
+	oldOutput := remoteInitStorageOutputFn
+	t.Cleanup(func() {
+		remoteInitStorageCommandOKFn = oldOK
+		remoteInitStorageOutputFn = oldOutput
+	})
+	remoteInitStorageOutputFn = func(_, script string) (string, error) {
+		t.Fatalf("remoteInitStorageOutputFn should not be called for sudo home, got %q", script)
+		return "", nil
+	}
+	remoteInitStorageCommandOKFn = func(_, script string) (bool, error) {
+		if script != "command -v zfs >/dev/null 2>&1" {
+			t.Fatalf("script = %q, want zfs command probe", script)
+		}
+		return false, nil
+	}
+
+	got, err := remoteInitStorageProbe("admin@example.com", true)
+	if err != nil {
+		t.Fatalf("remoteInitStorageProbe: %v", err)
+	}
+	want := initStorageProbe{Home: "/root"}
+	if got != want {
+		t.Fatalf("probe = %#v, want %#v", got, want)
+	}
+}
+
+func TestSuggestedInitServicesRootPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		storage initStorageOptions
+		probe   initStorageProbe
+		want    string
+	}{
+		{
+			name:    "filesystem data dir sibling",
+			storage: initStorageOptions{DataDir: "/srv/yeet-data"},
+			probe:   initStorageProbe{Home: "/root"},
+			want:    "/srv/yeet-services",
+		},
+		{
+			name:    "zfs data dir falls back to home",
+			storage: initStorageOptions{DataDir: "flash/yeet/data", DataDirZFS: true},
+			probe:   initStorageProbe{Home: "/root"},
+			want:    "/root/yeet-services",
+		},
+		{
+			name:    "missing data dir uses home",
+			storage: initStorageOptions{},
+			probe:   initStorageProbe{Home: "/home/admin"},
+			want:    "/home/admin/yeet-services",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := suggestedInitServicesRootPath(tt.storage, tt.probe); got != tt.want {
+				t.Fatalf("suggestedInitServicesRootPath = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseInitVMHostStatus(t *testing.T) {
 	t.Run("detects missing commands from successful probe output", func(t *testing.T) {
 		output := strings.Join([]string{
@@ -606,11 +880,39 @@ func TestParseInitVMLANBridgePlanRejectsMalformedOutput(t *testing.T) {
 	}
 }
 
+func TestRemoteVMLANBridgePlanUsesConfiguredCatchStagingBinaryAndStorage(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "ssh.log")
+	fakeSSHInPath(t, strings.Join([]string{
+		"printf '%s\\n' \"$*\" > " + strconvQuoteForShell(logFile),
+		"printf 'VM LAN bridge plan: bridge=br0 parent=eth0 ready=true needs_prepare=false reason=ready\\n'",
+	}, "\n"))
+	storage := withInitCatchRemoteBinary(initStorageOptions{
+		DataDir:      "/flash/yeet/data",
+		ServicesRoot: "/flash/yeet/services",
+	}, false)
+
+	plan, err := remoteVMLANBridgePlan("root@example.com", storage)
+	if err != nil {
+		t.Fatalf("remoteVMLANBridgePlan: %v", err)
+	}
+	if !plan.Ready || plan.Bridge != "br0" || plan.Parent != "eth0" {
+		t.Fatalf("plan = %#v", plan)
+	}
+	b, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatalf("ReadFile ssh log: %v", err)
+	}
+	want := "root@example.com /flash/yeet/services/catch/run/catch.install --data-dir=/flash/yeet/data --services-root=/flash/yeet/services vm-lan-bridge-plan"
+	if got := strings.TrimSpace(string(b)); got != want {
+		t.Fatalf("ssh args = %q, want %q", got, want)
+	}
+}
+
 func TestInitCatchPassesInstallDockerFlagToRemoteInstall(t *testing.T) {
 	var steps []string
 	configureSteps := stubInitCatchWorkflow(t)
 	configureSteps(&steps)
-	installInitCatchFn = func(_ *initUI, _ string, _ bool, installDocker bool, installVMTools bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, installDocker bool, installVMTools bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool, _ initStorageOptions) error {
 		steps = append(steps, "install-docker:"+boolString(installDocker)+":install-vm-tools:"+boolString(installVMTools)+":prepare-vm-lan-bridge:"+boolString(prepareVMLANBridge)+":skip-vm-lan-bridge:"+boolString(skipVMLANBridge))
 		return nil
 	}
@@ -623,6 +925,44 @@ func TestInitCatchPassesInstallDockerFlagToRemoteInstall(t *testing.T) {
 	}
 }
 
+func TestInitCatchPlansStorageBeforeDownloadAndPassesToRemoteInstall(t *testing.T) {
+	var steps []string
+	configureSteps := stubInitCatchWorkflow(t)
+	configureSteps(&steps)
+	wantStorage := initStorageOptions{
+		DataDir:      "/srv/yeet-data",
+		ServicesRoot: "/srv/yeet-services",
+	}
+	wantInstallStorage := withInitCatchRemoteBinary(wantStorage, false)
+	prepareInitStorageOptionsFn = func(_ *initUI, userAtRemote string, useSudo bool, opts initOptions) (initStorageOptions, error) {
+		steps = append(steps, "storage:"+userAtRemote+":"+boolString(useSudo)+":"+opts.storage.DataDir)
+		return wantStorage, nil
+	}
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, _ bool, _ bool, storage initStorageOptions) error {
+		if !reflect.DeepEqual(storage, wantInstallStorage) {
+			t.Fatalf("storage = %#v, want %#v", storage, wantInstallStorage)
+		}
+		steps = append(steps, "install-storage:"+storage.DataDir+":"+storage.ServicesRoot)
+		return nil
+	}
+
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, storage: initStorageOptions{DataDir: "/flag/data"}}); err != nil {
+		t.Fatalf("initCatch returned error: %v", err)
+	}
+
+	want := []string{
+		"verify",
+		"detect",
+		"storage:root@example.com:false:/flag/data",
+		"download",
+		"chmod",
+		"install-storage:/srv/yeet-data:/srv/yeet-services",
+	}
+	if strings.Join(steps, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("steps = %#v, want %#v", steps, want)
+	}
+}
+
 func TestInitCatchPromptsForVMLANBridgeAfterChmodAndPassesPrepareIntent(t *testing.T) {
 	var steps []string
 	configureSteps := stubInitCatchWorkflow(t)
@@ -632,7 +972,7 @@ func TestInitCatchPromptsForVMLANBridgeAfterChmodAndPassesPrepareIntent(t *testi
 		steps = append(steps, "vm-status:"+userAtRemote+":"+goarch)
 		return initVMHostStatus{KVM: true, TUN: true}, nil
 	}
-	remoteVMLANBridgePlanFn = func(userAtRemote string) (initVMLANBridgePlan, error) {
+	remoteVMLANBridgePlanFn = func(userAtRemote string, _ initStorageOptions) (initVMLANBridgePlan, error) {
 		steps = append(steps, "bridge-plan:"+userAtRemote)
 		return initVMLANBridgePlan{Bridge: "br0", Parent: "eno1", NeedsPrepare: true}, nil
 	}
@@ -640,7 +980,7 @@ func TestInitCatchPromptsForVMLANBridgeAfterChmodAndPassesPrepareIntent(t *testi
 		steps = append(steps, "confirm:"+msg)
 		return true, nil
 	}
-	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool, _ initStorageOptions) error {
 		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
 		return nil
 	}
@@ -672,13 +1012,13 @@ func TestInitCatchVMLANBridgeDeclinePassesSkipIntent(t *testing.T) {
 	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
 		return initVMHostStatus{KVM: true, TUN: true}, nil
 	}
-	remoteVMLANBridgePlanFn = func(string) (initVMLANBridgePlan, error) {
+	remoteVMLANBridgePlanFn = func(string, initStorageOptions) (initVMLANBridgePlan, error) {
 		return initVMLANBridgePlan{Bridge: "br0", Parent: "eno1", NeedsPrepare: true}, nil
 	}
 	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
 		return false, nil
 	}
-	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool, _ initStorageOptions) error {
 		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
 		return nil
 	}
@@ -699,7 +1039,7 @@ func TestInitCatchVMLANBridgeReadyPlanDoesNotPrompt(t *testing.T) {
 	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
 		return initVMHostStatus{KVM: true, TUN: true}, nil
 	}
-	remoteVMLANBridgePlanFn = func(string) (initVMLANBridgePlan, error) {
+	remoteVMLANBridgePlanFn = func(string, initStorageOptions) (initVMLANBridgePlan, error) {
 		steps = append(steps, "bridge-plan")
 		return initVMLANBridgePlan{Bridge: "br0", Ready: true}, nil
 	}
@@ -707,7 +1047,7 @@ func TestInitCatchVMLANBridgeReadyPlanDoesNotPrompt(t *testing.T) {
 		t.Fatal("confirmInitFn should not be called when VM LAN bridge is ready")
 		return false, nil
 	}
-	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool, _ initStorageOptions) error {
 		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
 		return nil
 	}
@@ -728,14 +1068,14 @@ func TestInitCatchVMLANBridgePlanFailureWarnsAndDoesNotBlockInstall(t *testing.T
 	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
 		return initVMHostStatus{KVM: true, TUN: true}, nil
 	}
-	remoteVMLANBridgePlanFn = func(string) (initVMLANBridgePlan, error) {
+	remoteVMLANBridgePlanFn = func(string, initStorageOptions) (initVMLANBridgePlan, error) {
 		return initVMLANBridgePlan{}, errors.New("unsupported renderer")
 	}
 	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
 		t.Fatal("confirmInitFn should not be called when VM LAN bridge planning fails")
 		return false, nil
 	}
-	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool) error {
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool, _ initStorageOptions) error {
 		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
 		return nil
 	}
@@ -822,7 +1162,7 @@ func TestRemoteCatchInstallArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := remoteCatchInstallArgs(tt.userAtRemote, tt.useSudo, tt.installDocker, tt.installVMTools, tt.tsAuthKey, tt.tsClientSecret, tt.tsCatchTags, tt.prepareBridge, tt.skipBridge)
+			got := remoteCatchInstallArgs(tt.userAtRemote, tt.useSudo, tt.installDocker, tt.installVMTools, tt.tsAuthKey, tt.tsClientSecret, tt.tsCatchTags, tt.prepareBridge, tt.skipBridge, initStorageOptions{})
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("remoteCatchInstallArgs = %#v, want %#v", got, tt.want)
 			}
@@ -835,7 +1175,7 @@ func TestRemoteCatchInstallCommandCanRequestVMLANBridgePrep(t *testing.T) {
 	defer func() { loadedPrefs = oldPrefs }()
 	loadedPrefs.DefaultHost = "catch-host"
 
-	args := remoteCatchInstallCommand("root@example.com", false, true, true, "", "", nil, true, false)
+	args := remoteCatchInstallCommand("root@example.com", false, true, true, "", "", nil, true, false, initStorageOptions{})
 	want := []string{
 		"env",
 		"CATCH_INSTALL_USER=root",
@@ -857,7 +1197,7 @@ func TestRemoteCatchInstallCommandCanSkipVMLANBridgePrep(t *testing.T) {
 	defer func() { loadedPrefs = oldPrefs }()
 	loadedPrefs.DefaultHost = "catch-host"
 
-	args := remoteCatchInstallCommand("root@example.com", false, false, true, "", "", nil, false, true)
+	args := remoteCatchInstallCommand("root@example.com", false, false, true, "", "", nil, false, true, initStorageOptions{})
 	want := []string{
 		"env",
 		"CATCH_INSTALL_USER=root",
@@ -870,6 +1210,96 @@ func TestRemoteCatchInstallCommandCanSkipVMLANBridgePrep(t *testing.T) {
 	}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("remoteCatchInstallCommand = %#v, want %#v", args, want)
+	}
+}
+
+func TestRemoteCatchInstallCommandIncludesStorageOptions(t *testing.T) {
+	oldPrefs := loadedPrefs
+	defer func() { loadedPrefs = oldPrefs }()
+	loadedPrefs.DefaultHost = "catch-host"
+
+	storage := withInitCatchRemoteBinary(initStorageOptions{
+		DataDir:         "flash/yeet/data",
+		DataDirZFS:      true,
+		ServicesRoot:    "flash/yeet/services",
+		ServicesRootZFS: true,
+	}, false)
+	args := remoteCatchInstallCommand("root@example.com", false, false, false, "", "", nil, false, false, storage)
+	want := []string{
+		"env",
+		"CATCH_INSTALL_USER=root",
+		"CATCH_INSTALL_HOST=example.com",
+		"CATCH_INSTALL_DATA_DIR_ZFS=1",
+		"CATCH_INSTALL_SERVICES_ROOT_ZFS=1",
+		"./catch",
+		"--data-dir=flash/yeet/data",
+		"--services-root=flash/yeet/services",
+		"--tsnet-host=catch-host",
+		"install",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("remoteCatchInstallCommand = %#v, want %#v", args, want)
+	}
+}
+
+func TestRemoteCatchInstallCommandUsesConfiguredCatchStagingBinary(t *testing.T) {
+	oldPrefs := loadedPrefs
+	defer func() { loadedPrefs = oldPrefs }()
+	loadedPrefs.DefaultHost = "catch-host"
+
+	storage := withInitCatchRemoteBinary(initStorageOptions{
+		DataDir:      "/flash/yeet/data",
+		ServicesRoot: "/flash/yeet/services",
+	}, false)
+	args := remoteCatchInstallCommand("root@example.com", false, false, false, "", "", nil, false, false, storage)
+	want := []string{
+		"env",
+		"CATCH_INSTALL_USER=root",
+		"CATCH_INSTALL_HOST=example.com",
+		"/flash/yeet/services/catch/run/catch.install",
+		"--data-dir=/flash/yeet/data",
+		"--services-root=/flash/yeet/services",
+		"--tsnet-host=catch-host",
+		"install",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("remoteCatchInstallCommand = %#v, want %#v", args, want)
+	}
+}
+
+func TestWithInitCatchRemoteBinaryUsesExistingAbsoluteServiceRoot(t *testing.T) {
+	storage := withInitCatchRemoteBinary(initStorageOptions{
+		DataDir:      "/flash/yeet/data",
+		ServicesRoot: "/flash/yeet/services",
+	}, false)
+	want := "/flash/yeet/services/catch/run/catch.install"
+	if storage.remoteCatchBinary != want {
+		t.Fatalf("remote catch binary = %q, want %q", storage.remoteCatchBinary, want)
+	}
+}
+
+func TestWithInitCatchRemoteBinaryFallsBackForSudoOrDatasets(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		storage initStorageOptions
+		useSudo bool
+	}{
+		{
+			name:    "sudo",
+			storage: initStorageOptions{DataDir: "/flash/yeet/data", ServicesRoot: "/flash/yeet/services"},
+			useSudo: true,
+		},
+		{
+			name:    "zfs dataset",
+			storage: initStorageOptions{DataDir: "flash/yeet/data", DataDirZFS: true, ServicesRoot: "flash/yeet/services", ServicesRootZFS: true},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			storage := withInitCatchRemoteBinary(tt.storage, tt.useSudo)
+			if storage.remoteCatchBinary != "" {
+				t.Fatalf("remote catch binary = %q, want default home staging", storage.remoteCatchBinary)
+			}
+		})
 	}
 }
 
@@ -958,7 +1388,7 @@ func TestChmodInitCatchUsesSSH(t *testing.T) {
 	fakeSSHInPath(t, "printf '%s\\n' \"$*\" > "+strconvQuoteForShell(logFile)+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	if err := chmodInitCatch(ui, "root@example.com"); err != nil {
+	if err := chmodInitCatch(ui, "root@example.com", "./catch"); err != nil {
 		t.Fatalf("chmodInitCatch error: %v", err)
 	}
 	b, err := os.ReadFile(logFile)
@@ -974,7 +1404,7 @@ func TestChmodInitCatchReportsSSHError(t *testing.T) {
 	fakeSSHInPath(t, "exit 1\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	err := chmodInitCatch(ui, "root@example.com")
+	err := chmodInitCatch(ui, "root@example.com", "./catch")
 	if err == nil || !strings.Contains(err.Error(), "failed to make catch binary executable") {
 		t.Fatalf("chmodInitCatch error = %v, want chmod error", err)
 	}
@@ -998,7 +1428,7 @@ func TestInstallInitCatchUsesFilteredSSHOutput(t *testing.T) {
 	}, "\n")+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch-host", "root@example.com", catchServiceName)
 
-	if err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false); err != nil {
+	if err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false, initStorageOptions{}); err != nil {
 		t.Fatalf("installInitCatch error: %v", err)
 	}
 	raw, err := os.ReadFile(logFile)
@@ -1029,7 +1459,7 @@ func TestInstallInitCatchReportsSSHError(t *testing.T) {
 	fakeSSHInPath(t, "exit 1\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false)
+	err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false, initStorageOptions{})
 	if err == nil || !strings.Contains(err.Error(), "failed to run catch binary") {
 		t.Fatalf("installInitCatch error = %v, want install error", err)
 	}
@@ -1044,7 +1474,7 @@ func TestInstallInitCatchReportsRemoteInstallStatusError(t *testing.T) {
 	}, "\n")+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false)
+	err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false, initStorageOptions{})
 	if err == nil || !strings.Contains(err.Error(), "failed to run catch binary") {
 		t.Fatalf("installInitCatch error = %v, want install error", err)
 	}
@@ -1069,7 +1499,7 @@ func TestInstallInitCatchRetriesHungStatusPoll(t *testing.T) {
 	}, "\n")+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	if err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false); err != nil {
+	if err := installInitCatch(ui, "root@example.com", false, false, false, "", "", nil, false, false, initStorageOptions{}); err != nil {
 		t.Fatalf("installInitCatch error: %v", err)
 	}
 }
@@ -1104,7 +1534,7 @@ func TestInstallInitCatchWithTailscaleRetryPromptsAfterCredentialError(t *testin
 
 	var installs int
 	var gotSecret string
-	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, tsClientSecret string, tsCatchTags []string, _ bool, _ bool) error {
+	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, tsClientSecret string, tsCatchTags []string, _ bool, _ bool, _ initStorageOptions) error {
 		installs++
 		if installs == 1 {
 			return errTailscaleCredentialRequired
@@ -1327,11 +1757,11 @@ func TestInitCatchUsesGitHubSource(t *testing.T) {
 		steps = append(steps, "detect")
 		return "Linux", "amd64", nil
 	}
-	downloadInitCatchFn = func(_ *initUI, userAtRemote, systemName, goarch string, nightly bool, version string) error {
+	downloadInitCatchFn = func(_ *initUI, userAtRemote, systemName, goarch string, nightly bool, version string, _ string) error {
 		steps = append(steps, strings.Join([]string{"download", userAtRemote, systemName, goarch, boolString(nightly), version}, ":"))
 		return nil
 	}
-	buildAndUploadInitCatchFn = func(*initUI, string, string, string, initCatchSource) error {
+	buildAndUploadInitCatchFn = func(*initUI, string, string, string, initCatchSource, string) error {
 		t.Fatal("buildAndUploadInitCatchFn should not be called for GitHub source")
 		return nil
 	}
@@ -1366,11 +1796,11 @@ func TestInitCatchBuildsAndUploadsLocalSource(t *testing.T) {
 		steps = append(steps, "detect")
 		return "Linux", "arm64", nil
 	}
-	downloadInitCatchFn = func(*initUI, string, string, string, bool, string) error {
+	downloadInitCatchFn = func(*initUI, string, string, string, bool, string, string) error {
 		t.Fatal("downloadInitCatchFn should not be called for local source")
 		return nil
 	}
-	buildAndUploadInitCatchFn = func(_ *initUI, userAtRemote, systemName, goarch string, gotSource initCatchSource) error {
+	buildAndUploadInitCatchFn = func(_ *initUI, userAtRemote, systemName, goarch string, gotSource initCatchSource, _ string) error {
 		if gotSource != source {
 			t.Fatalf("source = %#v, want %#v", gotSource, source)
 		}
@@ -1410,11 +1840,11 @@ func TestInitCatchStopsWhenInstallPrepFails(t *testing.T) {
 	wantErr := errors.New("chmod failed")
 	var steps []string
 	restore(&steps)
-	chmodInitCatchFn = func(*initUI, string) error {
+	chmodInitCatchFn = func(*initUI, string, string) error {
 		steps = append(steps, "chmod")
 		return wantErr
 	}
-	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string, bool, bool) error {
+	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string, bool, bool, initStorageOptions) error {
 		t.Fatal("installInitCatchFn should not be called after chmod failure")
 		return nil
 	}
@@ -1437,8 +1867,10 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 	oldBuildAndUpload := buildAndUploadInitCatchFn
 	oldChmod := chmodInitCatchFn
 	oldInstall := installInitCatchFn
+	oldCleanup := cleanupInitCatchBinaryFn
 	oldPrepareDocker := prepareInitDockerInstallFn
 	oldPrepareVMTools := prepareInitVMToolsInstallFn
+	oldPrepareStorage := prepareInitStorageOptionsFn
 	oldRemoteVMHostStatus := remoteVMHostStatusFn
 	oldRemoteVMLANBridgePlan := remoteVMLANBridgePlanFn
 	oldConfirm := confirmInitFn
@@ -1453,8 +1885,10 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 		buildAndUploadInitCatchFn = oldBuildAndUpload
 		chmodInitCatchFn = oldChmod
 		installInitCatchFn = oldInstall
+		cleanupInitCatchBinaryFn = oldCleanup
 		prepareInitDockerInstallFn = oldPrepareDocker
 		prepareInitVMToolsInstallFn = oldPrepareVMTools
+		prepareInitStorageOptionsFn = oldPrepareStorage
 		remoteVMHostStatusFn = oldRemoteVMHostStatus
 		remoteVMLANBridgePlanFn = oldRemoteVMLANBridgePlan
 		confirmInitFn = oldConfirm
@@ -1466,20 +1900,26 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 	}
 	verifyInitSSHFn = func(*initUI, string) error { return nil }
 	detectInitHostFn = func(*initUI, string) (string, string, error) { return "Linux", "amd64", nil }
-	downloadInitCatchFn = func(*initUI, string, string, string, bool, string) error { return nil }
-	buildAndUploadInitCatchFn = func(*initUI, string, string, string, initCatchSource) error { return nil }
-	chmodInitCatchFn = func(*initUI, string) error { return nil }
-	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string, bool, bool) error { return nil }
+	downloadInitCatchFn = func(*initUI, string, string, string, bool, string, string) error { return nil }
+	buildAndUploadInitCatchFn = func(*initUI, string, string, string, initCatchSource, string) error { return nil }
+	chmodInitCatchFn = func(*initUI, string, string) error { return nil }
+	installInitCatchFn = func(*initUI, string, bool, bool, bool, string, string, []string, bool, bool, initStorageOptions) error {
+		return nil
+	}
+	cleanupInitCatchBinaryFn = func(*initUI, string, string) {}
 	prepareInitDockerInstallFn = func(_ *initUI, _ string, opts initOptions) (bool, error) {
 		return opts.installDocker, nil
 	}
 	prepareInitVMToolsInstallFn = func(_ *initUI, _ string, _ string, opts initOptions) (bool, error) {
 		return opts.installVMTools, nil
 	}
+	prepareInitStorageOptionsFn = func(_ *initUI, _ string, _ bool, opts initOptions) (initStorageOptions, error) {
+		return opts.storage, nil
+	}
 	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
 		return initVMHostStatus{KVM: true, TUN: true}, nil
 	}
-	remoteVMLANBridgePlanFn = func(string) (initVMLANBridgePlan, error) {
+	remoteVMLANBridgePlanFn = func(string, initStorageOptions) (initVMLANBridgePlan, error) {
 		return initVMLANBridgePlan{Ready: true, Bridge: "br0"}, nil
 	}
 	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
@@ -1499,19 +1939,19 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 			*steps = append(*steps, "detect")
 			return "Linux", "amd64", nil
 		}
-		downloadInitCatchFn = func(*initUI, string, string, string, bool, string) error {
+		downloadInitCatchFn = func(*initUI, string, string, string, bool, string, string) error {
 			*steps = append(*steps, "download")
 			return nil
 		}
-		buildAndUploadInitCatchFn = func(*initUI, string, string, string, initCatchSource) error {
+		buildAndUploadInitCatchFn = func(*initUI, string, string, string, initCatchSource, string) error {
 			*steps = append(*steps, "build-upload")
 			return nil
 		}
-		chmodInitCatchFn = func(*initUI, string) error {
+		chmodInitCatchFn = func(*initUI, string, string) error {
 			*steps = append(*steps, "chmod")
 			return nil
 		}
-		installInitCatchFn = func(_ *initUI, _ string, useSudo bool, installDocker bool, installVMTools bool, _ string, _ string, _ []string, _ bool, _ bool) error {
+		installInitCatchFn = func(_ *initUI, _ string, useSudo bool, installDocker bool, installVMTools bool, _ string, _ string, _ []string, _ bool, _ bool, _ initStorageOptions) error {
 			*steps = append(*steps, "install:"+boolString(useSudo))
 			return nil
 		}

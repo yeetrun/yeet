@@ -9,12 +9,14 @@ import (
 	"errors"
 	"io"
 	"os"
+	osexec "os/exec"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/shayne/yargs"
 	"github.com/yeetrun/yeet/pkg/cli"
+	yeetpkg "github.com/yeetrun/yeet/pkg/yeet"
 )
 
 func TestRunReturnsFailureWhenCommandReturnsError(t *testing.T) {
@@ -447,6 +449,151 @@ func TestRunUpgradeRoutesToLocalHandler(t *testing.T) {
 	if !reflect.DeepEqual(got, []string{"upgrade", "check"}) {
 		t.Fatalf("upgrade args = %#v, want command args", got)
 	}
+}
+
+func TestRunHostSetRoutesToHostHandler(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldHandleHostSetFn := handleHostSetFn
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		handleHostSetFn = oldHandleHostSetFn
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	os.Args = []string{"yeet", "host", "set"}
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("host set should not route through service command with args %v", args)
+		return nil
+	}
+	var got []string
+	handleHostSetFn = func(ctx context.Context, args []string) error {
+		got = append([]string(nil), args...)
+		return nil
+	}
+
+	if code := run(); code != 0 {
+		t.Fatalf("run exit code = %d, want 0", code)
+	}
+	if !reflect.DeepEqual(got, []string{"set"}) {
+		t.Fatalf("host set args = %#v, want group subcommand args", got)
+	}
+}
+
+func TestRunHostSetRespectsHostSelection(t *testing.T) {
+	tests := []struct {
+		name         string
+		args         []string
+		catchHost    string
+		wantHost     string
+		wantOverride string
+	}{
+		{
+			name:         "global host flag",
+			args:         []string{"--host=flag-host", "host", "set"},
+			wantHost:     "flag-host",
+			wantOverride: "flag-host",
+		},
+		{
+			name:      "catch host environment",
+			args:      []string{"host", "set"},
+			catchHost: "env-host",
+			wantHost:  "env-host",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmdArgs := append([]string{"-test.run=TestRunHostSetHostSelectionHelper", "--"}, tt.args...)
+			cmd := osexec.Command(os.Args[0], cmdArgs...)
+			cmd.Env = hostSetHelperEnv(tt.catchHost, tt.wantHost, tt.wantOverride)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("helper failed: %v\n%s", err, out)
+			}
+		})
+	}
+}
+
+func TestRunHostSetHostSelectionHelper(t *testing.T) {
+	if os.Getenv("YEET_HOST_SET_HELPER") != "1" {
+		return
+	}
+
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldHandleHostSetFn := handleHostSetFn
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		handleHostSetFn = oldHandleHostSetFn
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	os.Args = append([]string{"yeet"}, argsAfterTestTerminator(os.Args)...)
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("host set should not route through service command with args %v", args)
+		return nil
+	}
+	handleHostSetFn = func(ctx context.Context, args []string) error {
+		if got, want := yeetpkg.Host(), os.Getenv("YEET_HOST_SET_WANT_HOST"); got != want {
+			t.Fatalf("Host = %q, want %q", got, want)
+		}
+		wantOverride := os.Getenv("YEET_HOST_SET_WANT_OVERRIDE")
+		gotOverride, gotOverrideSet := yeetpkg.HostOverride()
+		if wantOverride == "" {
+			if gotOverrideSet {
+				t.Fatalf("HostOverride = %q true, want unset", gotOverride)
+			}
+			return nil
+		}
+		if !gotOverrideSet || gotOverride != wantOverride {
+			t.Fatalf("HostOverride = %q %v, want %q true", gotOverride, gotOverrideSet, wantOverride)
+		}
+		return nil
+	}
+
+	if code := run(); code != 0 {
+		t.Fatalf("run exit code = %d, want 0", code)
+	}
+}
+
+func hostSetHelperEnv(catchHost, wantHost, wantOverride string) []string {
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "CATCH_HOST=") ||
+			strings.HasPrefix(entry, "YEET_HOST_SET_HELPER=") ||
+			strings.HasPrefix(entry, "YEET_HOST_SET_WANT_HOST=") ||
+			strings.HasPrefix(entry, "YEET_HOST_SET_WANT_OVERRIDE=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	env = append(env,
+		"YEET_HOST_SET_HELPER=1",
+		"YEET_HOST_SET_WANT_HOST="+wantHost,
+		"YEET_HOST_SET_WANT_OVERRIDE="+wantOverride,
+	)
+	if catchHost != "" {
+		env = append(env, "CATCH_HOST="+catchHost)
+	}
+	return env
+}
+
+func argsAfterTestTerminator(args []string) []string {
+	for i, arg := range args {
+		if arg == "--" && i+1 < len(args) {
+			return append([]string(nil), args[i+1:]...)
+		}
+	}
+	return nil
 }
 
 func TestRunCallsUpdateAdvisoryAfterSuccessfulCommand(t *testing.T) {

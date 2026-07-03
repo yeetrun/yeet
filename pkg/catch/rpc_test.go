@@ -595,6 +595,69 @@ func TestRPCMethodAuthorization(t *testing.T) {
 	}
 }
 
+func TestRPCHostStorageMethodsRequireManagePermission(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		params any
+	}{
+		{
+			name:   "plan",
+			method: catchrpc.RPCMethodHostStoragePlan,
+			params: catchrpc.HostStoragePlanRequest{
+				Set: catchrpc.HostStorageSetRequest{
+					DataDir: &catchrpc.HostStorageTarget{Value: "/srv/yeet-data"},
+				},
+			},
+		},
+		{
+			name:   "apply",
+			method: catchrpc.RPCMethodHostStorageApply,
+			params: catchrpc.HostStorageApplyRequest{
+				Plan: catchrpc.HostStoragePlan{
+					Current: catchrpc.HostStorageState{DataDir: "/srv/yeet-data", ServicesRoot: "/srv/yeet-data/services"},
+					Desired: catchrpc.HostStorageState{DataDir: "/srv/yeet-data", ServicesRoot: "/srv/yeet-data/services"},
+				},
+				Yes: true,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newAuthzTestServer(t, newPermissionSet(permissionRead))
+			ts := httptest.NewServer(server.RPCMux())
+			defer ts.Close()
+
+			params, err := json.Marshal(tt.params)
+			if err != nil {
+				t.Fatalf("marshal params: %v", err)
+			}
+			req := catchrpc.Request{
+				JSONRPC: "2.0",
+				ID:      json.RawMessage("1"),
+				Method:  tt.method,
+				Params:  params,
+			}
+			body, err := json.Marshal(req)
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			resp, err := http.Post(ts.URL+"/rpc", "application/json", bytes.NewReader(body))
+			if err != nil {
+				t.Fatalf("post: %v", err)
+			}
+			defer resp.Body.Close()
+			raw, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d body=%s, want 401", resp.StatusCode, raw)
+			}
+			if !strings.Contains(string(raw), `missing yeet permission "manage"`) {
+				t.Fatalf("body = %q, want missing manage", raw)
+			}
+		})
+	}
+}
+
 func TestRPCUnknownMethodFailsClosedBeforeDispatch(t *testing.T) {
 	server := newAuthzTestServer(t, newPermissionSet(permissionRead, permissionManage, permissionSSH))
 	ts := httptest.NewServer(server.RPCMux())
@@ -680,6 +743,87 @@ func TestRPCExecAuthorizesAfterReadingExecRequest(t *testing.T) {
 				t.Fatalf("combined output = %q, want %q", combined, tt.want)
 			}
 		})
+	}
+}
+
+func TestRPCHostStoragePlanDispatch(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "yeet-data")
+	servicesRoot := filepath.Join(dataDir, "services")
+	newDataDir := filepath.Join(root, "new-data")
+	server := newTestHostStorageServer(t, Config{
+		RootDir:      dataDir,
+		ServicesRoot: servicesRoot,
+	}, nil)
+	params, err := json.Marshal(catchrpc.HostStoragePlanRequest{
+		Set: catchrpc.HostStorageSetRequest{
+			DataDir: &catchrpc.HostStorageTarget{Value: newDataDir},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+
+	resp := server.dispatchRPC(catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  catchrpc.RPCMethodHostStoragePlan,
+		Params:  params,
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", resp.Error)
+	}
+	raw, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	var plan catchrpc.HostStoragePlan
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		t.Fatalf("unmarshal plan: %v", err)
+	}
+	if plan.Desired.DataDir != newDataDir || !plan.DataDirAction.Move || !plan.RequiresRestart {
+		t.Fatalf("plan = %#v, want data dir move to %q", plan, newDataDir)
+	}
+}
+
+func TestRPCHostStorageApplyDispatch(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "yeet-data")
+	servicesRoot := filepath.Join(dataDir, "services")
+	server := newTestHostStorageServer(t, Config{
+		RootDir:      dataDir,
+		ServicesRoot: servicesRoot,
+	}, nil)
+	params, err := json.Marshal(catchrpc.HostStorageApplyRequest{
+		Plan: catchrpc.HostStoragePlan{
+			Current: catchrpc.HostStorageState{DataDir: dataDir, ServicesRoot: servicesRoot},
+			Desired: catchrpc.HostStorageState{DataDir: dataDir, ServicesRoot: servicesRoot},
+		},
+		Yes: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+
+	resp := server.dispatchRPC(catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  catchrpc.RPCMethodHostStorageApply,
+		Params:  params,
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", resp.Error)
+	}
+	raw, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatalf("marshal result: %v", err)
+	}
+	var result catchrpc.HostStorageApplyResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if result.Restarted || len(result.MigratedServices) != 0 {
+		t.Fatalf("result = %#v, want no-op apply", result)
 	}
 }
 

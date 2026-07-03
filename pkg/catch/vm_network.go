@@ -117,8 +117,8 @@ func configureVMLANNetworkInterface(iface *vmNetworkInterfacePlan, short string,
 	if in.LANVLAN != 0 && strings.TrimSpace(in.LANBridge) != "" {
 		iface.Bridge = strings.TrimSpace(in.LANBridge)
 	} else if in.LANVLAN != 0 {
-		iface.Bridge = fmt.Sprintf("yvm-%s-b%d", short, idx)
-		iface.VLANDevice = fmt.Sprintf("yvm-%s-v%d", short, idx)
+		iface.Bridge = vmGeneratedVLANBridgeName(iface.Parent, in.LANVLAN)
+		iface.VLANDevice = vmGeneratedVLANDeviceName(iface.Parent, in.LANVLAN)
 	} else if in.LANParentIsBridge {
 		iface.Bridge = iface.Parent
 	}
@@ -258,6 +258,22 @@ func vmNetworkNameHash(service string) string {
 	return fmt.Sprintf("%06x", h.Sum32()&0xffffff)
 }
 
+func vmGeneratedVLANBase(parent string, vlan int) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.TrimSpace(parent)))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(strconv.Itoa(vlan)))
+	return fmt.Sprintf("yvm-%08x", h.Sum32())
+}
+
+func vmGeneratedVLANBridgeName(parent string, vlan int) string {
+	return vmGeneratedVLANBase(parent, vlan) + "-b0"
+}
+
+func vmGeneratedVLANDeviceName(parent string, vlan int) string {
+	return vmGeneratedVLANBase(parent, vlan) + "-v0"
+}
+
 func vmGuestMAC(service, mode string, idx int) string {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(service))
@@ -369,6 +385,9 @@ func vmLANVLANParentAndBridge(parent string, vlan int) (string, string, error) {
 			return "", "", err
 		}
 		if ok {
+			if bridge == vmGeneratedVLANBridgeName(parent, vlan) {
+				return parent, "", nil
+			}
 			return bridge, bridge, nil
 		}
 		return parent, "", nil
@@ -382,12 +401,16 @@ func vmLANVLANParentAndBridge(parent string, vlan int) (string, string, error) {
 		return "", "", err
 	}
 	if ok {
+		if bridge == vmGeneratedVLANBridgeName(uplink, vlan) {
+			return uplink, "", nil
+		}
 		return bridge, bridge, nil
 	}
 	return uplink, "", nil
 }
 
 var vmLANBridgeUplinkFn = vmLANBridgeUplink
+var vmLANLiveBridgeExistsFn = vmLANLiveBridgeExists
 
 func vmLANBridgeUplink(bridge string) (string, error) {
 	bridge = strings.TrimSpace(bridge)
@@ -427,6 +450,15 @@ func vmLANBridgeUplinkFromNames(names []string, hasHardware func(string) bool) (
 		return fallback[0], nil
 	}
 	return "", fmt.Errorf("no suitable bridge uplink found")
+}
+
+func vmLANLiveBridgeExists(bridge string) bool {
+	bridge = strings.TrimSpace(bridge)
+	if bridge == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join("/sys/class/net", bridge, "bridge"))
+	return err == nil
 }
 
 func skipVMBridgeUplinkCandidate(name string) bool {
@@ -482,14 +514,20 @@ func vmLANExistingVLANBridgeFromConfig(parent string, vlan int, r io.Reader, mas
 }
 
 func vmLANVLANConfigDevice(line, parent, wantVLAN string) (string, bool) {
-	fields := strings.Fields(line)
-	if len(fields) < 5 || fields[1] != "|" || fields[3] != "|" {
+	parts := strings.Split(line, "|")
+	if len(parts) < 3 {
 		return "", false
 	}
-	if fields[2] != wantVLAN || fields[4] != parent {
+	name := strings.TrimSpace(parts[0])
+	vlanFields := strings.Fields(parts[1])
+	parentFields := strings.Fields(parts[2])
+	if name == "" || len(vlanFields) == 0 || len(parentFields) == 0 {
 		return "", false
 	}
-	return fields[0], true
+	if vlanFields[0] != wantVLAN || parentFields[0] != parent {
+		return "", false
+	}
+	return name, true
 }
 
 func vmLANBridgeForExistingVLANDevice(parent, vlan, name string, masterFn func(string) string) (string, bool, error) {
@@ -600,12 +638,6 @@ func (p vmNetworkPlan) CleanupCommands() [][]string {
 			)
 		case "lan":
 			cmds = append(cmds, []string{"ip", "link", "del", iface.Tap})
-			if iface.VLANDevice != "" {
-				cmds = append(cmds,
-					[]string{"ip", "link", "del", iface.VLANDevice},
-					[]string{"ip", "link", "del", iface.Bridge},
-				)
-			}
 		}
 	}
 	return cmds

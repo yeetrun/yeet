@@ -179,6 +179,110 @@ type VMDefaultsResponse struct {
 	Warnings    []string `json:"warnings,omitempty"`
 }
 
+const (
+	RPCMethodHostStoragePlan  = "catch.HostStoragePlan"
+	RPCMethodHostStorageApply = "catch.HostStorageApply"
+)
+
+type HostStorageMigrateServices string
+
+const (
+	HostStorageMigratePrompt HostStorageMigrateServices = ""
+	HostStorageMigrateAll    HostStorageMigrateServices = "all"
+	HostStorageMigrateNone   HostStorageMigrateServices = "none"
+)
+
+type HostStorageTarget struct {
+	Value string `json:"value"`
+	ZFS   bool   `json:"zfs"`
+}
+
+type HostStorageSetRequest struct {
+	DataDir         *HostStorageTarget         `json:"dataDir,omitempty"`
+	ServicesRoot    *HostStorageTarget         `json:"servicesRoot,omitempty"`
+	MigrateServices HostStorageMigrateServices `json:"migrateServices,omitempty"`
+	Yes             bool                       `json:"yes,omitempty"`
+}
+
+type HostStoragePlanRequest struct {
+	Set HostStorageSetRequest `json:"set"`
+}
+
+type HostStorageApplyRequest struct {
+	Plan HostStoragePlan `json:"plan"`
+	Yes  bool            `json:"yes,omitempty"`
+}
+
+type HostStoragePlan struct {
+	Current             HostStorageState          `json:"current"`
+	Desired             HostStorageState          `json:"desired"`
+	DataDirAction       HostStorageDataDirAction  `json:"dataDirAction"`
+	ServicesAction      HostStorageServicesAction `json:"servicesAction"`
+	CatchAction         HostStorageCatchAction    `json:"catchAction"`
+	RepairAction        HostStorageRepairAction   `json:"repairAction,omitempty"`
+	ZFSDatasetsToCreate []string                  `json:"zfsDatasetsToCreate,omitempty"`
+	Warnings            []string                  `json:"warnings,omitempty"`
+	RequiresRestart     bool                      `json:"requiresRestart,omitempty"`
+}
+
+type HostStorageRepairAction struct {
+	References      int      `json:"references,omitempty"`
+	DatabaseRefs    int      `json:"databaseRefs,omitempty"`
+	SystemdRefs     int      `json:"systemdRefs,omitempty"`
+	ArtifactRefs    int      `json:"artifactRefs,omitempty"`
+	RegenerateUnits []string `json:"regenerateUnits,omitempty"`
+	RestartServices []string `json:"restartServices,omitempty"`
+	ValidationRoots []string `json:"validationRoots,omitempty"`
+}
+
+type HostStorageState struct {
+	DataDir      string `json:"dataDir"`
+	DataDirZFS   bool   `json:"dataDirZfs,omitempty"`
+	ServicesRoot string `json:"servicesRoot"`
+	ServicesZFS  bool   `json:"servicesZfs,omitempty"`
+}
+
+type HostStorageDataDirAction struct {
+	Move bool   `json:"move"`
+	From string `json:"from,omitempty"`
+	To   string `json:"to,omitempty"`
+}
+
+type HostStorageServicesAction struct {
+	Mode             HostStorageMigrateServices `json:"mode"`
+	From             string                     `json:"from,omitempty"`
+	To               string                     `json:"to,omitempty"`
+	AffectedServices []HostStorageServiceMove   `json:"affectedServices,omitempty"`
+}
+
+type HostStorageCatchAction struct {
+	Move  bool   `json:"move,omitempty"`
+	From  string `json:"from,omitempty"`
+	To    string `json:"to,omitempty"`
+	ToZFS string `json:"toZfs,omitempty"`
+}
+
+type HostStorageServiceMove struct {
+	Name       string `json:"name"`
+	From       string `json:"from"`
+	To         string `json:"to"`
+	ToZFS      string `json:"toZfs,omitempty"`
+	WasRunning bool   `json:"wasRunning"`
+}
+
+type HostStorageApplyResult struct {
+	MigratedServices []HostStorageServiceMove `json:"migratedServices,omitempty"`
+	Restarted        bool                     `json:"restarted,omitempty"`
+	RestartScheduled bool                     `json:"restartScheduled,omitempty"`
+	Validation       HostStorageValidation    `json:"validation,omitempty"`
+}
+
+type HostStorageValidation struct {
+	ActiveRefs   int `json:"activeRefs,omitempty"`
+	DatabaseRefs int `json:"databaseRefs,omitempty"`
+	SystemdRefs  int `json:"systemdRefs,omitempty"`
+}
+
 type SnapshotPolicy struct {
 	Enabled  *bool    `json:"enabled,omitempty"`
 	KeepLast *int     `json:"keepLast,omitempty"`

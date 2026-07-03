@@ -103,6 +103,12 @@ func buildGroupHandlers() map[string]yargs.Group {
 				"set":  handleEnvGroup,
 			},
 		},
+		"host": {
+			Description: "Manage catch host settings",
+			Commands: map[string]yargs.SubcommandHandler{
+				"set": handleHostSetFn,
+			},
+		},
 		"service": {
 			Description: "Manage service settings",
 			Commands: map[string]yargs.SubcommandHandler{
@@ -144,9 +150,11 @@ func buildHelpConfig() yargs.HelpConfig {
 	subcommands["init"] = yargs.SubCommandInfo{
 		Name:        "init",
 		Description: "Install catch on a remote host (prompts for Tailscale OAuth setup when needed)",
-		Usage:       "[--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--ts-client-secret=<secret>] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]",
+		Usage:       "[--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET] [--zfs] [--ts-client-secret=<secret>] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]",
 		Examples: []string{
 			"yeet init root@<machine-host>",
+			"yeet init --data-dir=/srv/yeet-data root@<machine-host>",
+			"yeet init --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services root@<machine-host>",
 			"yeet init --ts-client-secret=<secret> root@<machine-host>",
 			"yeet init --install-docker root@<machine-host>",
 			"yeet init --install-docker --install-vm-tools root@<machine-host>",

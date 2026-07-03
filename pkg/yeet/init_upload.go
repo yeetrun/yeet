@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -20,7 +21,7 @@ const uploadProgressInterval = 120 * time.Millisecond
 
 var uploadCatchCommandFn = exec.Command
 
-func uploadCatchBinary(ui *initUI, bin string, binSize int64, userAtRemote string) (detail string, err error) {
+func uploadCatchBinary(ui *initUI, bin string, binSize int64, userAtRemote string, remoteBinary string) (detail string, err error) {
 	file, err := os.Open(bin)
 	if err != nil {
 		return "", fmt.Errorf("failed to open catch binary: %w", err)
@@ -34,7 +35,7 @@ func uploadCatchBinary(ui *initUI, bin string, binSize int64, userAtRemote strin
 	progress := newUploadProgress(binSize)
 	reader := progress.reader(file)
 
-	cmd := uploadCatchCommandFn("ssh", "-q", "-C", userAtRemote, "cat > ./catch")
+	cmd := uploadCatchCommandFn("ssh", "-q", "-C", userAtRemote, uploadCatchRemoteCommand(remoteBinary))
 	cmd.Stdin = reader
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -60,6 +61,14 @@ func uploadCatchBinary(ui *initUI, bin string, binSize int64, userAtRemote strin
 		return "", err
 	}
 	return progress.finalDetail(), nil
+}
+
+func uploadCatchRemoteCommand(remoteBinary string) string {
+	binary := normalizeInitCatchRemoteBinary(remoteBinary)
+	if binary == "./catch" {
+		return "cat > ./catch"
+	}
+	return fmt.Sprintf("mkdir -p %s && cat > %s", shellQuote(path.Dir(binary)), shellQuote(binary))
 }
 
 type uploadProgress struct {

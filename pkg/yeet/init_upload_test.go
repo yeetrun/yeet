@@ -73,7 +73,7 @@ func TestUploadCatchBinaryCopiesFileWithSSHCommand(t *testing.T) {
 	}
 
 	ui := newInitUI(io.Discard, false, true, "", "", "")
-	detail, err := uploadCatchBinary(ui, bin, int64(len(content)), "root@example.com")
+	detail, err := uploadCatchBinary(ui, bin, int64(len(content)), "root@example.com", "./catch")
 	if err != nil {
 		t.Fatalf("uploadCatchBinary error: %v", err)
 	}
@@ -112,15 +112,23 @@ func TestUploadCatchBinaryReturnsCommandError(t *testing.T) {
 	}
 
 	ui := newInitUI(io.Discard, false, true, "", "", "")
-	if _, err := uploadCatchBinary(ui, bin, 5, "root@example.com"); err == nil {
+	if _, err := uploadCatchBinary(ui, bin, 5, "root@example.com", "./catch"); err == nil {
 		t.Fatal("expected command error")
 	}
 }
 
 func TestUploadCatchBinaryReturnsOpenError(t *testing.T) {
 	ui := newInitUI(io.Discard, false, true, "", "", "")
-	if _, err := uploadCatchBinary(ui, filepath.Join(t.TempDir(), "missing"), 0, "root@example.com"); err == nil || !strings.Contains(err.Error(), "failed to open catch binary") {
+	if _, err := uploadCatchBinary(ui, filepath.Join(t.TempDir(), "missing"), 0, "root@example.com", "./catch"); err == nil || !strings.Contains(err.Error(), "failed to open catch binary") {
 		t.Fatalf("uploadCatchBinary error = %v, want open error", err)
+	}
+}
+
+func TestUploadCatchRemoteCommandUsesConfiguredStagingBinary(t *testing.T) {
+	got := uploadCatchRemoteCommand("/flash/yeet/services/catch/run/catch.install")
+	want := "mkdir -p /flash/yeet/services/catch/run && cat > /flash/yeet/services/catch/run/catch.install"
+	if got != want {
+		t.Fatalf("upload command = %q, want %q", got, want)
 	}
 }
 

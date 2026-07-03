@@ -335,6 +335,9 @@ func (i *FileInstaller) parseNetworkPart(net string, dv db.DataView) error {
 		if err != nil {
 			return err
 		}
+		if existing, ok := reusableExistingMacvlan(dv, i.cfg.ServiceName, macvlan, i.cfg.Network.Macvlan); ok {
+			macvlan = existing
+		}
 		i.macvlan = macvlan
 	default:
 		return fmt.Errorf("unknown network: %q", net)
@@ -388,6 +391,30 @@ func macvlanNetworkFromOpts(opts MacvlanOpts) (*db.MacvlanNetwork, error) {
 		macvlan.Mac = opts.Mac
 	}
 	return macvlan, nil
+}
+
+func reusableExistingMacvlan(dv db.DataView, serviceName string, desired *db.MacvlanNetwork, opts MacvlanOpts) (*db.MacvlanNetwork, bool) {
+	if desired == nil {
+		return nil, false
+	}
+	sv, ok := dv.Services().GetOk(serviceName)
+	if !ok {
+		return nil, false
+	}
+	existing, ok := sv.Macvlan().GetOk()
+	if !ok {
+		return nil, false
+	}
+	if existing.Interface == "" || existing.Mac == "" {
+		return nil, false
+	}
+	if existing.Parent != desired.Parent || existing.VLAN != desired.VLAN {
+		return nil, false
+	}
+	if opts.Mac != "" && !strings.EqualFold(existing.Mac, opts.Mac) {
+		return nil, false
+	}
+	return &existing, true
 }
 
 const tailscaledResolvConf = `nameserver 100.100.100.100` + "\n"

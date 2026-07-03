@@ -325,6 +325,38 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsHostSetIsHostLevel(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{
+			name: "flags without service target",
+			args: []string{"host", "set", "--data-dir=/srv/yeet", "--yes"},
+		},
+		{
+			name: "leftover set is not service name",
+			args: []string{"host", "set", "set", "--data-dir=/srv/yeet"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, host, bridged, ok := bridgeServiceArgs(tt.args, remoteSpecs, groupSpecs, "")
+			if !ok {
+				t.Fatal("host set should be recognized as a host-level group command")
+			}
+			if service != "" || host != "" {
+				t.Fatalf("service/host = %q/%q, want empty host-level command", service, host)
+			}
+			if !reflect.DeepEqual(bridged, tt.args) {
+				t.Fatalf("bridged = %#v, want original args %#v", bridged, tt.args)
+			}
+		})
+	}
+}
+
 func TestBridgeServiceArgsVMSet(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

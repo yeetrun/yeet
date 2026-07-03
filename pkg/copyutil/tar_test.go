@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -86,6 +88,75 @@ func TestTarDirectoryRejectsNonDirectory(t *testing.T) {
 	}
 	if err := TarDirectory(io.Discard, src, ""); err == nil || !strings.Contains(err.Error(), "expected directory") {
 		t.Fatalf("TarDirectory file error = %v, want expected directory", err)
+	}
+}
+
+func TestTarDirectorySkipsSockets(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix sockets are not supported on windows")
+	}
+	src, err := os.MkdirTemp("/tmp", "yeet-copyutil-socket-")
+	if err != nil {
+		t.Fatalf("create short temp dir: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.RemoveAll(src)
+	})
+	socketPath := filepath.Join(src, "runtime.sock")
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatalf("listen unix socket: %v", err)
+	}
+	defer ln.Close()
+	if err := os.WriteFile(filepath.Join(src, "file.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	var buf bytes.Buffer
+	if err := TarDirectory(&buf, src, ""); err != nil {
+		t.Fatalf("TarDirectory returned error: %v", err)
+	}
+	dest := t.TempDir()
+	if err := ExtractTar(&buf, dest); err != nil {
+		t.Fatalf("ExtractTar returned error: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dest, "runtime.sock")); !os.IsNotExist(err) {
+		t.Fatalf("socket stat error = %v, want missing", err)
+	}
+	assertFileContents(t, filepath.Join(dest, "file.txt"), "hello")
+}
+
+func TestTarDirectoryWithOptionsFiltersEntries(t *testing.T) {
+	src := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "keep"), 0o755); err != nil {
+		t.Fatalf("MkdirAll keep: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(src, "skip", "nested"), 0o755); err != nil {
+		t.Fatalf("MkdirAll skip: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "keep", "file.txt"), []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write keep file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "skip", "nested", "file.txt"), []byte("skip"), 0o644); err != nil {
+		t.Fatalf("write skip file: %v", err)
+	}
+
+	var buf bytes.Buffer
+	err := TarDirectoryWithOptions(&buf, src, "", TarOptions{
+		Filter: func(path string, _ fs.DirEntry) (bool, error) {
+			return filepath.Base(path) != "skip", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("TarDirectoryWithOptions returned error: %v", err)
+	}
+	dest := t.TempDir()
+	if err := ExtractTar(&buf, dest); err != nil {
+		t.Fatalf("ExtractTar returned error: %v", err)
+	}
+	assertFileContents(t, filepath.Join(dest, "keep", "file.txt"), "keep")
+	if _, err := os.Lstat(filepath.Join(dest, "skip")); !os.IsNotExist(err) {
+		t.Fatalf("skip dir stat error = %v, want missing", err)
 	}
 }
 

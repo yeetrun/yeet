@@ -152,6 +152,7 @@ type Config struct {
 	InstallHost          string
 	RootDir              string
 	ServicesRoot         string
+	TSNetHost            string
 	MountsRoot           string
 	InternalRegistryAddr string
 	ExternalRegistryAddr string
@@ -446,6 +447,13 @@ func (s *Server) prepareFilesystemServiceRootForInstall(sn string, sv db.Service
 		)
 	}
 	if requested == "" {
+		resolved, ok, err := resolveDefaultZFSServiceRoot(context.Background(), s.zfsRunner, s.cfg.ServicesRoot, sn)
+		if err != nil {
+			return resolvedServiceRoot{}, err
+		}
+		if ok {
+			return resolved, nil
+		}
 		return resolvedServiceRoot{Root: s.defaultServiceRootDir(sn)}, nil
 	}
 	root, err := validateRequestedServiceRoot(requested)

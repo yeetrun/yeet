@@ -358,8 +358,8 @@ func removeOptionalArtifact(path string) error {
 }
 
 func (s *SystemdService) Install() error {
-	plan := s.installPlan()
-	if err := s.installArtifacts(plan); err != nil {
+	units, err := s.StageInstallForReload()
+	if err != nil {
 		return err
 	}
 
@@ -367,12 +367,20 @@ func (s *SystemdService) Install() error {
 		return fmt.Errorf("failed to reload systemd: %v", err)
 	}
 
-	for _, unit := range enabledUnitsForInstallPlan(plan, s.cfg.AsStruct().Artifacts, s.cfg.Generation()) {
+	for _, unit := range units {
 		if err := s.run("enable", unit); err != nil {
 			return fmt.Errorf("failed to enable %s: %v", unit, err)
 		}
 	}
 	return nil
+}
+
+func (s *SystemdService) StageInstallForReload() ([]string, error) {
+	plan := s.installPlan()
+	if err := s.installArtifacts(plan); err != nil {
+		return nil, err
+	}
+	return enabledUnitsForInstallPlan(plan, s.cfg.AsStruct().Artifacts, s.cfg.Generation()), nil
 }
 
 func (s *SystemdService) serviceUnit() string {

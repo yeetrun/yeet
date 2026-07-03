@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -23,6 +24,16 @@ type fakeZFSDataset struct {
 type fakeZFSRunner map[string]fakeZFSDataset
 
 func (f fakeZFSRunner) Run(ctx context.Context, args ...string) (string, string, error) {
+	if len(args) == 4 && reflect.DeepEqual(args, []string{"list", "-H", "-o", "name,mountpoint"}) {
+		var lines []string
+		for ds, data := range f {
+			if data.Exists {
+				lines = append(lines, ds+"\t"+data.Mountpoint)
+			}
+		}
+		sort.Strings(lines)
+		return strings.Join(lines, "\n"), "", nil
+	}
 	if len(args) == 5 && reflect.DeepEqual(args[:4], []string{"list", "-H", "-o", "name"}) {
 		ds := args[4]
 		if data, ok := f[ds]; ok && data.Exists {

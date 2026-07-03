@@ -200,12 +200,63 @@ func TestVMLANNetworkPlanBuildsTaggedVLANBridge(t *testing.T) {
 	}
 	for _, command := range [][]string{
 		{"ip", "link", "del", iface.Tap},
-		{"ip", "link", "del", iface.VLANDevice},
-		{"ip", "link", "del", iface.Bridge},
 	} {
 		if !containsCommand(plan.CleanupCommands(), command) {
 			t.Fatalf("cleanup commands = %#v, missing %#v", plan.CleanupCommands(), command)
 		}
+	}
+	for _, command := range [][]string{
+		{"ip", "link", "del", iface.VLANDevice},
+		{"ip", "link", "del", iface.Bridge},
+	} {
+		if containsCommand(plan.CleanupCommands(), command) {
+			t.Fatalf("cleanup commands = %#v, should not delete shared VLAN link %#v", plan.CleanupCommands(), command)
+		}
+	}
+}
+
+func TestVMLANNetworkPlanSharesGeneratedTaggedVLANBridge(t *testing.T) {
+	left := newVMNetworkPlan("devbox-a", []string{"lan"}, vmNetworkInputs{
+		LANParent: "eth0",
+		LANVLAN:   4,
+	})
+	right := newVMNetworkPlan("devbox-b", []string{"lan"}, vmNetworkInputs{
+		LANParent: "eth0",
+		LANVLAN:   4,
+	})
+	otherVLAN := newVMNetworkPlan("devbox-c", []string{"lan"}, vmNetworkInputs{
+		LANParent: "eth0",
+		LANVLAN:   5,
+	})
+
+	leftIface := left.Interfaces[0]
+	rightIface := right.Interfaces[0]
+	if leftIface.Tap == rightIface.Tap {
+		t.Fatalf("tap = %q for both VMs, want per-VM taps", leftIface.Tap)
+	}
+	if leftIface.Bridge == "" || leftIface.VLANDevice == "" {
+		t.Fatalf("left LAN interface = %#v, want generated bridge and VLAN device", leftIface)
+	}
+	if leftIface.Bridge != rightIface.Bridge || leftIface.VLANDevice != rightIface.VLANDevice {
+		t.Fatalf("left LAN = %#v, right LAN = %#v, want shared bridge and VLAN device", leftIface, rightIface)
+	}
+	if leftIface.Bridge == otherVLAN.Interfaces[0].Bridge || leftIface.VLANDevice == otherVLAN.Interfaces[0].VLANDevice {
+		t.Fatalf("VLAN 4 LAN = %#v, VLAN 5 LAN = %#v, want different shared links", leftIface, otherVLAN.Interfaces[0])
+	}
+	for _, name := range []string{leftIface.Bridge, leftIface.VLANDevice} {
+		if len(name) > 15 {
+			t.Fatalf("generated VLAN link %q length = %d, want <= 15", name, len(name))
+		}
+	}
+	if !containsCommand(left.SetupCommands(), []string{"ip", "link", "add", "link", "eth0", "name", leftIface.VLANDevice, "type", "vlan", "id", "4"}) {
+		t.Fatalf("setup commands = %#v, want shared VLAN device add", left.SetupCommands())
+	}
+	if !containsCommand(right.SetupCommands(), []string{"ip", "link", "set", rightIface.Tap, "master", leftIface.Bridge}) {
+		t.Fatalf("right setup commands = %#v, want tap attached to shared bridge %q", right.SetupCommands(), leftIface.Bridge)
+	}
+	if containsCommand(left.CleanupCommands(), []string{"ip", "link", "del", leftIface.VLANDevice}) ||
+		containsCommand(left.CleanupCommands(), []string{"ip", "link", "del", leftIface.Bridge}) {
+		t.Fatalf("cleanup commands = %#v, should not delete shared VLAN links", left.CleanupCommands())
 	}
 }
 
@@ -293,6 +344,31 @@ func TestVMLANNetworkPlanUsesExistingVLANBridge(t *testing.T) {
 	}
 	if containsCommand(plan.CleanupCommands(), []string{"ip", "link", "del", "br0v4"}) {
 		t.Fatalf("cleanup commands = %#v, should not delete existing bridge", plan.CleanupCommands())
+	}
+}
+
+func TestVMLANNetworkPlanKeepsGeneratedVLANParentWhenSharedBridgeExists(t *testing.T) {
+	oldExistingVLANBridge := vmLANExistingVLANBridgeFn
+	t.Cleanup(func() { vmLANExistingVLANBridgeFn = oldExistingVLANBridge })
+	vmLANExistingVLANBridgeFn = func(parent string, vlan int) (string, bool, error) {
+		if parent != "eth0" || vlan != 4 {
+			t.Fatalf("existing VLAN bridge lookup = parent %q vlan %d, want eth0 vlan 4", parent, vlan)
+		}
+		return vmGeneratedVLANBridgeName(parent, vlan), true, nil
+	}
+
+	execer := &ttyExecer{sn: "devbox"}
+	plan, err := execer.vmNetworkPlanFromFlags(cli.RunFlags{
+		Net:           "lan",
+		MacvlanParent: "eth0",
+		MacvlanVlan:   4,
+	}, nil)
+	if err != nil {
+		t.Fatalf("vmNetworkPlanFromFlags: %v", err)
+	}
+	iface := plan.Interfaces[0]
+	if iface.Parent != "eth0" || iface.Bridge != vmGeneratedVLANBridgeName("eth0", 4) || iface.VLANDevice != vmGeneratedVLANDeviceName("eth0", 4) {
+		t.Fatalf("lan interface = %#v, want generated VLAN links on parent eth0", iface)
 	}
 }
 
@@ -413,6 +489,75 @@ func TestVMNetworkPlanFromDBKeepsExistingTaggedBridgeExternal(t *testing.T) {
 	}
 	if containsCommand(plan.CleanupCommands(), []string{"ip", "link", "del", "vmbr0v4"}) {
 		t.Fatalf("cleanup commands = %#v, should not delete external bridge", plan.CleanupCommands())
+	}
+}
+
+func TestVMNetworkPlanFromDBRebuildsDisappearedDerivedVLANBridge(t *testing.T) {
+	oldBridgeUplink := vmLANBridgeUplinkFn
+	oldLiveBridgeExists := vmLANLiveBridgeExistsFn
+	t.Cleanup(func() {
+		vmLANBridgeUplinkFn = oldBridgeUplink
+		vmLANLiveBridgeExistsFn = oldLiveBridgeExists
+	})
+	vmLANLiveBridgeExistsFn = func(bridge string) bool {
+		return bridge == "vmbr0"
+	}
+	vmLANBridgeUplinkFn = func(parent string) (string, error) {
+		if parent != "vmbr0" {
+			t.Fatalf("bridge uplink parent = %q, want vmbr0", parent)
+		}
+		return "enp5s0", nil
+	}
+
+	plan := vmNetworkPlanFromDB("tyler-exit-node", []db.VMNetworkConfig{{
+		Mode:      "lan",
+		Interface: "eth0",
+		Tap:       "yvm-t-c89e9b-l0",
+		Parent:    "vmbr0v4",
+		VLAN:      4,
+	}})
+	if len(plan.Interfaces) != 1 {
+		t.Fatalf("interfaces = %d, want 1", len(plan.Interfaces))
+	}
+	iface := plan.Interfaces[0]
+	if iface.Parent != "enp5s0" || iface.Bridge == "vmbr0v4" || iface.VLANDevice == "" {
+		t.Fatalf("lan interface = %#v, want generated VLAN bridge on enp5s0", iface)
+	}
+	if !containsCommand(plan.SetupCommands(), []string{"ip", "link", "add", "link", "enp5s0", "name", iface.VLANDevice, "type", "vlan", "id", "4"}) {
+		t.Fatalf("setup commands = %#v, want VLAN device on enp5s0", plan.SetupCommands())
+	}
+	if !containsCommand(plan.SetupCommands(), []string{"ip", "link", "set", "yvm-t-c89e9b-l0", "master", iface.Bridge}) {
+		t.Fatalf("setup commands = %#v, want tap attached to generated bridge", plan.SetupCommands())
+	}
+}
+
+func TestVMNetworkPlanFromDBRebuildsGenericDotVLANBridge(t *testing.T) {
+	oldBridgeUplink := vmLANBridgeUplinkFn
+	oldLiveBridgeExists := vmLANLiveBridgeExistsFn
+	t.Cleanup(func() {
+		vmLANBridgeUplinkFn = oldBridgeUplink
+		vmLANLiveBridgeExistsFn = oldLiveBridgeExists
+	})
+	vmLANLiveBridgeExistsFn = func(bridge string) bool {
+		return bridge == "tenant"
+	}
+	vmLANBridgeUplinkFn = func(parent string) (string, error) {
+		if parent != "tenant" {
+			t.Fatalf("bridge uplink parent = %q, want tenant", parent)
+		}
+		return "eno2", nil
+	}
+
+	plan := vmNetworkPlanFromDB("devbox", []db.VMNetworkConfig{{
+		Mode:      "lan",
+		Interface: "eth0",
+		Tap:       "yvm-devbox-l0",
+		Parent:    "tenant.4",
+		VLAN:      4,
+	}})
+	iface := plan.Interfaces[0]
+	if iface.Parent != "eno2" || iface.Bridge == "tenant.4" || iface.VLANDevice == "" {
+		t.Fatalf("lan interface = %#v, want generated VLAN bridge on eno2", iface)
 	}
 }
 
@@ -606,6 +751,21 @@ func TestVMNetworkExistingVLANDeviceMatchesFromConfig(t *testing.T) {
 	config := strings.NewReader(`VLAN Dev name	 | VLAN ID
 Name-Type: VLAN_NAME_TYPE_RAW_PLUS_VID_NO_PAD
 yvm-devbox-v0   | 42  | eth0
+`)
+
+	ok, err := vmNetworkExistingVLANDeviceMatchesFromConfig("eth0", "yvm-devbox-v0", 42, config)
+	if err != nil {
+		t.Fatalf("vmNetworkExistingVLANDeviceMatchesFromConfig: %v", err)
+	}
+	if !ok {
+		t.Fatal("existing VLAN match = false, want true")
+	}
+}
+
+func TestVMNetworkExistingVLANDeviceMatchesFromCompactConfig(t *testing.T) {
+	config := strings.NewReader(`VLAN Dev name	 | VLAN ID
+Name-Type: VLAN_NAME_TYPE_RAW_PLUS_VID_NO_PAD
+yvm-devbox-v0| 42  | eth0
 `)
 
 	ok, err := vmNetworkExistingVLANDeviceMatchesFromConfig("eth0", "yvm-devbox-v0", 42, config)
@@ -1169,6 +1329,64 @@ func TestReconcileOrphanedVMServiceNetworksIgnoresRouteListerFailure(t *testing.
 	}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestReconcileOrphanedVMServiceNetworksKeepsOwnedSharedVLANLinks(t *testing.T) {
+	server := newTestServer(t)
+	live := newVMNetworkPlan("livebox", []string{"lan"}, vmNetworkInputs{LANParent: "eth0", LANVLAN: 4})
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"livebox": {
+			Name:        "livebox",
+			ServiceType: db.ServiceTypeVM,
+			VM: &db.VMConfig{
+				Runtime:  vmRuntimeFirecracker,
+				Networks: live.DBNetworks(),
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	oldLister := vmNetworkLinkLister
+	oldRunner := vmNetworkReconcileRunner
+	vmNetworkLinkLister = func(context.Context) ([]string, error) {
+		return []string{
+			live.Interfaces[0].VLANDevice,
+			live.Interfaces[0].Bridge,
+			live.Interfaces[0].Tap,
+			"yvm-old-123456-v0",
+			"yvm-old-123456-b0",
+		}, nil
+	}
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() {
+		vmNetworkLinkLister = oldLister
+		vmNetworkReconcileRunner = oldRunner
+	})
+
+	if err := server.reconcileOrphanedVMServiceNetworks(context.Background()); err != nil {
+		t.Fatalf("reconcileOrphanedVMServiceNetworks: %v", err)
+	}
+	for _, command := range [][]string{
+		{"ip", "link", "del", live.Interfaces[0].VLANDevice},
+		{"ip", "link", "del", live.Interfaces[0].Bridge},
+	} {
+		if containsCommand(commands, command) {
+			t.Fatalf("commands = %#v, should not delete owned shared VLAN link %#v", commands, command)
+		}
+	}
+	for _, command := range [][]string{
+		{"ip", "link", "del", "yvm-old-123456-v0"},
+		{"ip", "link", "del", "yvm-old-123456-b0"},
+	} {
+		if !containsCommand(commands, command) {
+			t.Fatalf("commands = %#v, missing stale cleanup %#v", commands, command)
+		}
 	}
 }
 

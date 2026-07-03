@@ -759,6 +759,42 @@ func TestParseServiceSetFlags(t *testing.T) {
 	}
 }
 
+func TestParseHostSetFlags(t *testing.T) {
+	flags, args, err := ParseHostSet([]string{
+		"--data-dir", " flash/yeet/data ",
+		"--services-root=flash/yeet/services ",
+		"--zfs",
+		"--migrate-services", " all ",
+		"--config", " ./yeet.toml ",
+		"-y",
+		"extra",
+	})
+	if err != nil {
+		t.Fatalf("ParseHostSet: %v", err)
+	}
+	want := HostSetFlags{
+		DataDir:         "flash/yeet/data",
+		ServicesRoot:    "flash/yeet/services",
+		ZFS:             true,
+		MigrateServices: "all",
+		Config:          "./yeet.toml",
+		Yes:             true,
+	}
+	if flags != want {
+		t.Fatalf("flags = %#v, want %#v", flags, want)
+	}
+	if !reflect.DeepEqual(args, []string{"extra"}) {
+		t.Fatalf("args = %#v, want extra", args)
+	}
+}
+
+func TestHostSetRejectsInvalidMigrateServices(t *testing.T) {
+	_, _, err := ParseHostSet([]string{"--migrate-services=some"})
+	if err == nil || !strings.Contains(err.Error(), "all or none") {
+		t.Fatalf("ParseHostSet error = %v, want all or none", err)
+	}
+}
+
 func TestParseVMSetFlags(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1202,6 +1238,30 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]" {
 		t.Fatalf("service set usage = %q", reg.Groups["service"].Commands["set"].Info.Usage)
 	}
+	hostSet, ok := reg.Groups["host"].Commands["set"]
+	if !ok {
+		t.Fatal("registry host set command missing")
+	}
+	if hostSet.Info.Name != "set" {
+		t.Fatalf("registry host set command = %#v", hostSet)
+	}
+	if hostSet.Info.Usage != "host set [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET_PREFIX] [--zfs] [--migrate-services=all|none] [--config=PATH] [--yes]" {
+		t.Fatalf("host set usage = %q", hostSet.Info.Usage)
+	}
+	wantHostSetExamples := []string{
+		"yeet host set --data-dir=$HOME/yeet-data",
+		"yeet host set --services-root=$HOME/yeet-data/services2 --migrate-services=none",
+		"yeet host set --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services --migrate-services=all",
+	}
+	if !reflect.DeepEqual(hostSet.Info.Examples, wantHostSetExamples) {
+		t.Fatalf("host set examples = %#v, want %#v", hostSet.Info.Examples, wantHostSetExamples)
+	}
+	hostSetHelp := yargs.GenerateGroupCommandHelp(reg.HelpConfig(), "host", "set", struct{}{})
+	for _, want := range []string{"--data-dir", "--services-root", "--zfs", "--migrate-services", "--config", "--yes"} {
+		if !strings.Contains(hostSetHelp, want) {
+			t.Fatalf("host set help missing %q:\n%s", want, hostSetHelp)
+		}
+	}
 	wantServiceSetExamples := []string{
 		"yeet service set <svc> -p 80:80 -p 443:443",
 		"yeet service set <svc> --publish-reset -p 443:443",
@@ -1314,6 +1374,16 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	}
 	if _, ok := RemoteGroupFlagSpecs()["service"]["set"]["--zfs"]; !ok {
 		t.Fatal("service set --zfs should be registered")
+	}
+	for _, flag := range []string{"--data-dir", "--services-root", "--migrate-services", "--config"} {
+		if !RemoteGroupFlagSpecs()["host"]["set"][flag].ConsumesValue {
+			t.Fatalf("host set %s should consume a value", flag)
+		}
+	}
+	for _, flag := range []string{"--zfs", "--yes", "-y"} {
+		if RemoteGroupFlagSpecs()["host"]["set"][flag].ConsumesValue {
+			t.Fatalf("host set %s should not consume a value", flag)
+		}
 	}
 	if !RemoteGroupFlagSpecs()["service"]["set"]["--snapshots"].ConsumesValue {
 		t.Fatal("service set --snapshots should consume a value")
