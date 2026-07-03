@@ -250,6 +250,7 @@ Check status and logs:
 ```bash
 yeet status
 yeet status <svc>
+yeet info
 yeet info <svc>
 yeet logs -f <svc>
 ```

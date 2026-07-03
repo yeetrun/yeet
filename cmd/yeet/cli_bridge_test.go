@@ -147,6 +147,36 @@ func TestBridgeServiceArgsNoServiceDoesNotBridge(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsInfoWithoutServiceDoesNotBridge(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"info", "--format", "json"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if ok {
+		t.Fatalf("expected no bridging, got service=%q bridged=%v", service, bridged)
+	}
+	if host != "" {
+		t.Fatalf("expected no host, got %q", host)
+	}
+}
+
+func TestBridgeServiceArgsInfoWithServiceStillBridges(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	args := []string{"info", "--format", "json", "svc-a"}
+	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+	if !ok {
+		t.Fatal("expected info with a service to bridge")
+	}
+	if service != "svc-a" || host != "" {
+		t.Fatalf("service/host = %q/%q, want svc-a/empty", service, host)
+	}
+	want := []string{"info", "--format", "json"}
+	if !reflect.DeepEqual(bridged, want) {
+		t.Fatalf("bridged = %#v, want %#v", bridged, want)
+	}
+}
+
 func TestHandleSvcCmdForwardsArgsOverRPC(t *testing.T) {
 	oldHandle := handleSvcCmdFn
 	oldBridged := bridgedArgs

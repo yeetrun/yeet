@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
 )
 
@@ -219,6 +220,143 @@ func TestEncodeInfoOutputFormatsJSON(t *testing.T) {
 	}
 	if !strings.Contains(pretty.String(), "\n  \"service\": \"svc\"") {
 		t.Fatalf("pretty output = %q, want indented JSON", pretty.String())
+	}
+}
+
+func TestHandleInfoCommandWithoutServiceRendersHostInfo(t *testing.T) {
+	oldService := serviceOverride
+	oldPrefs := loadedPrefs
+	oldHostOverride := hostOverride
+	oldHostOverrideSet := hostOverrideSet
+	oldFetchHostInfo := fetchInfoHostInfoFn
+	oldFetchServiceInfo := fetchInfoServiceInfoFn
+	oldFetchStatus := fetchStatusForHostFn
+	t.Cleanup(func() {
+		serviceOverride = oldService
+		loadedPrefs = oldPrefs
+		hostOverride = oldHostOverride
+		hostOverrideSet = oldHostOverrideSet
+		fetchInfoHostInfoFn = oldFetchHostInfo
+		fetchInfoServiceInfoFn = oldFetchServiceInfo
+		fetchStatusForHostFn = oldFetchStatus
+	})
+
+	serviceOverride = ""
+	loadedPrefs.DefaultHost = "yeet-lab"
+	resetHostOverride()
+
+	fetchInfoHostInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		if host != "yeet-lab" {
+			t.Fatalf("Info called with host=%q, want yeet-lab", host)
+		}
+		return serverInfo{
+			Version:     "v0.9.0",
+			GOOS:        "linux",
+			GOARCH:      "amd64",
+			RootDir:     "/flash/yeet/data",
+			ServicesDir: "/flash/yeet/services",
+		}, nil
+	}
+	fetchInfoServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if host != "yeet-lab" || service != catchServiceName {
+			t.Fatalf("ServiceInfo called with host=%q service=%q, want yeet-lab/%s", host, service, catchServiceName)
+		}
+		return catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				Paths: catchrpc.ServicePaths{
+					Root:           "/flash/yeet/services/catch",
+					ServiceRoot:    "/flash/yeet/services/catch",
+					ServiceRootZFS: "flash/yeet/services/catch",
+				},
+			},
+		}, nil
+	}
+	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		if host != "yeet-lab" {
+			t.Fatalf("status called with host=%q, want yeet-lab", host)
+		}
+		if flags.Format != "" {
+			t.Fatalf("status flags = %#v, want zero value", flags)
+		}
+		return []statusService{
+			{ServiceName: "app", ServiceType: "docker", Components: []statusComponent{{Status: "running"}}},
+			{ServiceName: "db", ServiceType: "docker", Components: []statusComponent{{Status: "stopped"}}},
+			{ServiceName: "worker", ServiceType: "docker", Components: []statusComponent{{Status: "running"}, {Status: "failed"}}},
+			{ServiceName: "devbox", ServiceType: serviceTypeVM, Components: []statusComponent{{Status: "running"}}},
+		}, nil
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return handleInfoCommand(context.Background(), nil, nil)
+	})
+	if err != nil {
+		t.Fatalf("handleInfoCommand returned error: %v", err)
+	}
+	assertPlainRow(t, out, "Host", "yeet-lab")
+	assertPlainRow(t, out, "Catch", "v0.9.0 (linux/amd64)")
+	assertPlainRow(t, out, "Data dir", "/flash/yeet/data")
+	assertPlainRow(t, out, "Services root", "/flash/yeet/services")
+	assertPlainRow(t, out, "Catch root", "/flash/yeet/services/catch (zfs flash/yeet/services/catch)")
+	assertPlainRow(t, out, "Services", "4 total, 2 running, 1 stopped, 1 unhealthy")
+	assertPlainRow(t, out, "VMs", "1 total, 1 running, 0 stopped, 0 unhealthy")
+	if strings.Contains(out, "\nService\n") {
+		t.Fatalf("host info should not render service-specific section:\n%s", out)
+	}
+}
+
+func TestRenderHostInfoPlainIncludesStorageAndInventory(t *testing.T) {
+	out := hostInfoOutput{
+		Host: "host-a",
+		HostInfo: &serverInfo{
+			Version:     "v0.9.0",
+			GOOS:        "linux",
+			GOARCH:      "amd64",
+			RootDir:     "/srv/yeet-data",
+			ServicesDir: "/srv/yeet-services",
+		},
+		CatchService: &catchrpc.ServiceInfoResponse{
+			Found: true,
+			Info: catchrpc.ServiceInfo{
+				Paths: catchrpc.ServicePaths{
+					ServiceRoot:    "/srv/yeet-services/catch",
+					ServiceRootZFS: "tank/yeet/services/catch",
+				},
+			},
+		},
+		Inventory: hostInfoInventory{
+			Services: hostInventoryCounts{Total: 2, Running: 1, Stopped: 1},
+			VMs:      hostInventoryCounts{Total: 1, Running: 1},
+		},
+	}
+
+	var rendered bytes.Buffer
+	if err := renderHostInfoPlain(&rendered, out); err != nil {
+		t.Fatalf("renderHostInfoPlain: %v", err)
+	}
+	text := rendered.String()
+	assertPlainRow(t, text, "Host", "host-a")
+	assertPlainRow(t, text, "Data dir", "/srv/yeet-data")
+	assertPlainRow(t, text, "Services root", "/srv/yeet-services")
+	assertPlainRow(t, text, "Catch root", "/srv/yeet-services/catch (zfs tank/yeet/services/catch)")
+	assertPlainRow(t, text, "Services", "2 total, 1 running, 1 stopped, 0 unhealthy")
+	assertPlainRow(t, text, "VMs", "1 total, 1 running, 0 stopped, 0 unhealthy")
+}
+
+func TestBuildHostInventoryCountsServicesAndVMs(t *testing.T) {
+	got := buildHostInventory([]statusService{
+		{ServiceName: "app", ServiceType: "docker", Components: []statusComponent{{Status: "running"}}},
+		{ServiceName: "db", ServiceType: "docker", Components: []statusComponent{{Status: "stopped"}}},
+		{ServiceName: "worker", ServiceType: "docker", Components: []statusComponent{{Status: "running"}, {Status: "failed"}}},
+		{ServiceName: "devbox", ServiceType: serviceTypeVM, Components: []statusComponent{{Status: "running"}}},
+		{ServiceName: "broken-vm", ServiceType: serviceTypeVM},
+	})
+	want := hostInfoInventory{
+		Services: hostInventoryCounts{Total: 5, Running: 2, Stopped: 1, Unhealthy: 2},
+		VMs:      hostInventoryCounts{Total: 2, Running: 1, Unhealthy: 1},
+	}
+	if got != want {
+		t.Fatalf("inventory = %#v, want %#v", got, want)
 	}
 }
 

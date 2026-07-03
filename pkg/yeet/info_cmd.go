@@ -29,6 +29,26 @@ type infoOutput struct {
 	Server   catchrpc.ServiceInfoResponse `json:"server"`
 }
 
+type hostInfoOutput struct {
+	Host         string                        `json:"host"`
+	HostInfo     *serverInfo                   `json:"hostInfo,omitempty"`
+	CatchService *catchrpc.ServiceInfoResponse `json:"catchService,omitempty"`
+	Inventory    hostInfoInventory             `json:"inventory"`
+	Warnings     []string                      `json:"warnings,omitempty"`
+}
+
+type hostInfoInventory struct {
+	Services hostInventoryCounts `json:"services"`
+	VMs      hostInventoryCounts `json:"vms"`
+}
+
+type hostInventoryCounts struct {
+	Total     int `json:"total"`
+	Running   int `json:"running"`
+	Stopped   int `json:"stopped"`
+	Unhealthy int `json:"unhealthy"`
+}
+
 type clientInfo struct {
 	Found      bool                `json:"found"`
 	Message    string              `json:"message,omitempty"`
@@ -65,7 +85,7 @@ var fetchInfoHostInfoFn = fetchInfoHostInfo
 var fetchInfoServiceInfoFn = fetchInfoServiceInfo
 
 func handleInfoCommand(ctx context.Context, args []string, cfgLoc *projectConfigLocation) error {
-	flags, _, err := cli.ParseInfo(args)
+	flags, remaining, err := cli.ParseInfo(args)
 	if err != nil {
 		return err
 	}
@@ -74,8 +94,14 @@ func handleInfoCommand(ctx context.Context, args []string, cfgLoc *projectConfig
 		return err
 	}
 
-	service := getService()
+	service, err := infoServiceFromArgs(remaining)
+	if err != nil {
+		return err
+	}
 	host := Host()
+	if service == "" {
+		return handleHostInfoCommand(ctx, host, format)
+	}
 
 	serverInfoResp, err := fetchInfoServiceInfoFn(ctx, host, service)
 	if err != nil {
@@ -95,6 +121,52 @@ func handleInfoCommand(ctx context.Context, args []string, cfgLoc *projectConfig
 	}
 
 	return renderInfoPlain(os.Stdout, service, host, hostInfoErr, hostInfo, client, serverInfoResp)
+}
+
+func infoServiceFromArgs(args []string) (string, error) {
+	args = trimEmptyInfoArgs(args)
+	if serviceOverride != "" {
+		if len(args) > 0 {
+			return "", fmt.Errorf("info accepts one service name")
+		}
+		return serviceOverride, nil
+	}
+	if len(args) == 0 {
+		return "", nil
+	}
+	if len(args) > 1 {
+		return "", fmt.Errorf("info accepts one service name")
+	}
+	return args[0], nil
+}
+
+func trimEmptyInfoArgs(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, arg := range args {
+		arg = strings.TrimSpace(arg)
+		if arg != "" {
+			out = append(out, arg)
+		}
+	}
+	return out
+}
+
+func handleHostInfoCommand(ctx context.Context, host, format string) error {
+	hostInfo, err := fetchInfoHostInfoFn(ctx, host)
+	if err != nil {
+		return err
+	}
+	catchService, catchErr := fetchInfoServiceInfoFn(ctx, host, catchServiceName)
+	statuses, statusErr := fetchStatusForHostFn(ctx, host, cli.StatusFlags{})
+
+	out := newHostInfoOutput(host, hostInfo, &catchService, statuses)
+	out.Warnings = append(out.Warnings, hostInfoWarning("catch service info", catchErr)...)
+	out.Warnings = append(out.Warnings, hostInfoWarning("status", statusErr)...)
+
+	if isInfoJSONFormat(format) {
+		return encodeInfoOutput(os.Stdout, format, out)
+	}
+	return renderHostInfoPlain(os.Stdout, out)
 }
 
 func fetchInfoHostInfo(ctx context.Context, host string) (serverInfo, error) {
@@ -137,7 +209,23 @@ func newInfoOutput(service, host string, hostInfo serverInfo, hostInfoErr error,
 	return out
 }
 
-func encodeInfoOutput(w io.Writer, format string, out infoOutput) error {
+func newHostInfoOutput(host string, hostInfo serverInfo, catchService *catchrpc.ServiceInfoResponse, statuses []statusService) hostInfoOutput {
+	return hostInfoOutput{
+		Host:         host,
+		HostInfo:     &hostInfo,
+		CatchService: catchService,
+		Inventory:    buildHostInventory(statuses),
+	}
+}
+
+func hostInfoWarning(label string, err error) []string {
+	if err == nil {
+		return nil
+	}
+	return []string{fmt.Sprintf("%s unavailable: %v", label, err)}
+}
+
+func encodeInfoOutput(w io.Writer, format string, out any) error {
 	enc := json.NewEncoder(w)
 	if format == "json-pretty" {
 		enc.SetIndent("", "  ")
@@ -274,6 +362,18 @@ func renderInfoPlain(w io.Writer, service, host string, hostInfoErr error, hostI
 		renderRuntimeSection(service, server),
 		renderImagesSection(server),
 	}
+	return renderInfoSections(w, sections)
+}
+
+func renderHostInfoPlain(w io.Writer, out hostInfoOutput) error {
+	return renderInfoSections(w, []infoSection{
+		renderHostInfoHostSection(out),
+		renderHostInfoInventorySection(out.Inventory),
+		renderHostInfoWarningsSection(out.Warnings),
+	})
+}
+
+func renderInfoSections(w io.Writer, sections []infoSection) error {
 	for _, section := range sections {
 		if len(section.Rows) == 0 {
 			continue
@@ -297,16 +397,146 @@ func renderInfoPlain(w io.Writer, service, host string, hostInfoErr error, hostI
 	return nil
 }
 
+func renderHostInfoHostSection(out hostInfoOutput) infoSection {
+	rows := []infoRow{{Label: "Host", Value: out.Host}}
+	if out.HostInfo == nil {
+		rows = append(rows, infoRow{Label: "Catch", Value: "unknown"})
+		return infoSection{Title: "Host", Rows: rows}
+	}
+	rows = append(rows, infoRow{Label: "Catch", Value: formatCatchInfo(*out.HostInfo)})
+	if out.HostInfo.RootDir != "" {
+		rows = append(rows, infoRow{Label: "Data dir", Value: out.HostInfo.RootDir})
+	}
+	if out.HostInfo.ServicesDir != "" {
+		rows = append(rows, infoRow{Label: "Services root", Value: out.HostInfo.ServicesDir})
+	}
+	if root := catchServiceRoot(out.CatchService); root != "" {
+		rows = append(rows, infoRow{Label: "Catch root", Value: formatPathWithZFS(root, catchServiceRootZFS(out.CatchService))})
+	}
+	return infoSection{Title: "Host", Rows: rows}
+}
+
 func renderHostSection(host string, hostInfoErr error, hostInfo serverInfo) infoSection {
 	rows := []infoRow{{Label: "Host", Value: host}}
 	catchInfo := "unknown"
 	if hostInfoErr != nil {
 		catchInfo = fmt.Sprintf("unavailable (%v)", hostInfoErr)
 	} else if hostInfo.Version != "" {
-		catchInfo = fmt.Sprintf("%s (%s/%s)", hostInfo.Version, hostInfo.GOOS, hostInfo.GOARCH)
+		catchInfo = formatCatchInfo(hostInfo)
 	}
 	rows = append(rows, infoRow{Label: "Catch", Value: catchInfo})
 	return infoSection{Title: "Host", Rows: rows}
+}
+
+func formatCatchInfo(hostInfo serverInfo) string {
+	if hostInfo.Version == "" {
+		return "unknown"
+	}
+	if hostInfo.GOOS == "" || hostInfo.GOARCH == "" {
+		return hostInfo.Version
+	}
+	return fmt.Sprintf("%s (%s/%s)", hostInfo.Version, hostInfo.GOOS, hostInfo.GOARCH)
+}
+
+func catchServiceRoot(resp *catchrpc.ServiceInfoResponse) string {
+	if resp == nil || !resp.Found {
+		return ""
+	}
+	paths := resp.Info.Paths
+	switch {
+	case paths.ServiceRoot != "":
+		return paths.ServiceRoot
+	case paths.EffectiveRoot != "":
+		return paths.EffectiveRoot
+	default:
+		return paths.Root
+	}
+}
+
+func catchServiceRootZFS(resp *catchrpc.ServiceInfoResponse) string {
+	if resp == nil || !resp.Found {
+		return ""
+	}
+	return resp.Info.Paths.ServiceRootZFS
+}
+
+func formatPathWithZFS(path, dataset string) string {
+	if path == "" || dataset == "" {
+		return path
+	}
+	return fmt.Sprintf("%s (zfs %s)", path, dataset)
+}
+
+func renderHostInfoInventorySection(inventory hostInfoInventory) infoSection {
+	return infoSection{
+		Title: "Inventory",
+		Rows: []infoRow{
+			{Label: "Services", Value: formatHostInventoryCounts(inventory.Services)},
+			{Label: "VMs", Value: formatHostInventoryCounts(inventory.VMs)},
+		},
+	}
+}
+
+func renderHostInfoWarningsSection(warnings []string) infoSection {
+	rows := make([]infoRow, 0, len(warnings))
+	for _, warning := range warnings {
+		if strings.TrimSpace(warning) != "" {
+			rows = append(rows, infoRow{Label: "Warning", Value: warning})
+		}
+	}
+	return infoSection{Title: "Warnings", Rows: rows}
+}
+
+func buildHostInventory(statuses []statusService) hostInfoInventory {
+	var inventory hostInfoInventory
+	for _, status := range statuses {
+		state := classifyHostStatusService(status)
+		addHostInventoryCount(&inventory.Services, state)
+		if strings.TrimSpace(status.ServiceType) == serviceTypeVM {
+			addHostInventoryCount(&inventory.VMs, state)
+		}
+	}
+	return inventory
+}
+
+func classifyHostStatusService(status statusService) string {
+	if len(status.Components) == 0 {
+		return "unhealthy"
+	}
+	running := 0
+	stopped := 0
+	for _, component := range status.Components {
+		switch strings.ToLower(strings.TrimSpace(component.Status)) {
+		case "running":
+			running++
+		case "stopped":
+			stopped++
+		}
+	}
+	switch total := len(status.Components); {
+	case running == total:
+		return "running"
+	case stopped == total:
+		return "stopped"
+	default:
+		return "unhealthy"
+	}
+}
+
+func addHostInventoryCount(counts *hostInventoryCounts, state string) {
+	counts.Total++
+	switch state {
+	case "running":
+		counts.Running++
+	case "stopped":
+		counts.Stopped++
+	default:
+		counts.Unhealthy++
+	}
+}
+
+func formatHostInventoryCounts(counts hostInventoryCounts) string {
+	return fmt.Sprintf("%d total, %d running, %d stopped, %d unhealthy", counts.Total, counts.Running, counts.Stopped, counts.Unhealthy)
 }
 
 func renderServiceSection(service, host string, client clientInfo, server catchrpc.ServiceInfoResponse) infoSection {
