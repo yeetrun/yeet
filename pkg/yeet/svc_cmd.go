@@ -1908,15 +1908,24 @@ func handleStatusCommand(ctx context.Context, args []string, cfgLoc *projectConf
 	if err != nil {
 		return err
 	}
+	if serviceOverride == "" && shouldAggregateStatusFormat(flags.Format) {
+		return statusMultiHost(ctx, statusHosts(cfgLoc, hostOverrideSet), flags)
+	}
 	if shouldRenderStatusTable(flags.Format) && serviceOverride != "" {
 		return renderStatusTableForService(ctx, Host(), serviceOverride)
-	}
-	if serviceOverride == "" && shouldRenderStatusTable(flags.Format) {
-		return statusMultiHost(ctx, statusHosts(cfgLoc, hostOverrideSet), flags)
 	}
 	svc := getService()
 	statusArgs := append([]string{"status"}, args...)
 	return execRemoteFn(ctx, svc, statusArgs, nil, true)
+}
+
+func shouldAggregateStatusFormat(format string) bool {
+	switch strings.TrimSpace(format) {
+	case "", "table", "json", "json-pretty":
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldRenderStatusTable(format string) bool {

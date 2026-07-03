@@ -2240,6 +2240,72 @@ func TestSvcStatusFetchMultiHostAndRemoteFormats(t *testing.T) {
 	}
 }
 
+func TestHandleStatusCommandAggregatesProjectJSONFormats(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = ""
+	loadedPrefs.DefaultHost = "default-host"
+
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-b"})
+	cfg.SetServiceEntry(ServiceEntry{Name: "svc-b", Host: "host-a"})
+	loc := &projectConfigLocation{Config: cfg}
+
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		t.Fatalf("execRemoteFn should not be called for multi-host JSON status")
+		return nil
+	}
+	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		if flags.Format != "json" {
+			t.Fatalf("status format = %q, want json", flags.Format)
+		}
+		return []statusService{{
+			ServiceName: "svc-" + host,
+			ServiceType: "binary",
+			Components:  []statusComponent{{Name: "svc-" + host, Status: "running"}},
+		}}, nil
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return handleStatusCommand(context.Background(), []string{"--format=json"}, loc, false)
+	})
+	if err != nil {
+		t.Fatalf("handleStatusCommand returned error: %v", err)
+	}
+	var decoded []hostStatusData
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("status JSON invalid: %v\n%s", err, out)
+	}
+	if len(decoded) != 2 || decoded[0].Host != "host-a" || decoded[1].Host != "host-b" {
+		t.Fatalf("decoded hosts = %#v, want sorted host-a/host-b", decoded)
+	}
+}
+
+func TestHandleStatusCommandAggregatesProjectJSONPrettyFormat(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = ""
+
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-a"})
+	loc := &projectConfigLocation{Config: cfg}
+
+	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		if flags.Format != "json-pretty" {
+			t.Fatalf("status format = %q, want json-pretty", flags.Format)
+		}
+		return []statusService{{ServiceName: "svc-a", ServiceType: "binary"}}, nil
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return handleStatusCommand(context.Background(), []string{"--format=json-pretty"}, loc, false)
+	})
+	if err != nil {
+		t.Fatalf("handleStatusCommand returned error: %v", err)
+	}
+	if !strings.Contains(out, "\n  {") {
+		t.Fatalf("status output is not pretty JSON:\n%s", out)
+	}
+}
+
 func TestSvcStatusHostsAndRenderErrors(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	loadedPrefs.DefaultHost = "default-host"

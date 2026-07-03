@@ -294,6 +294,27 @@ func (e *ttyExecer) statusData() ([]ServiceStatusData, bool, error) {
 }
 
 func (e *ttyExecer) systemStatusData() ([]ServiceStatusData, error) {
+	if e.hasLegacyStatusHooks() {
+		return e.legacySystemStatusData()
+	}
+	if e.s == nil {
+		return nil, fmt.Errorf("status snapshot server is nil")
+	}
+	ctx := e.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return e.s.collectStatusSnapshot(ctx, newStatusSnapshotCommand)
+}
+
+func (e *ttyExecer) hasLegacyStatusHooks() bool {
+	return e.systemdStatusFunc != nil ||
+		e.systemdStatusesFunc != nil ||
+		e.dockerComposeStatusFunc != nil ||
+		e.dockerComposeStatusesFunc != nil
+}
+
+func (e *ttyExecer) legacySystemStatusData() ([]ServiceStatusData, error) {
 	statuses, err := e.systemdStatusData()
 	if err != nil {
 		return nil, err

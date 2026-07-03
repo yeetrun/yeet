@@ -195,6 +195,25 @@ func TestSystemdServiceInstallPlanOrdersArtifactsAndPrimaryTimer(t *testing.T) {
 	}
 }
 
+func TestSystemdServicePrimaryUnit(t *testing.T) {
+	serviceCfg := db.Service{Name: "demo"}
+	service := &SystemdService{cfg: serviceCfg.View()}
+	if got := service.PrimaryUnit(); got != "demo.service" {
+		t.Fatalf("service PrimaryUnit = %q, want demo.service", got)
+	}
+
+	timerCfg := db.Service{
+		Name: "demo",
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdTimerFile: testArtifact("timer"),
+		},
+	}
+	timer := &SystemdService{cfg: timerCfg.View()}
+	if got := timer.PrimaryUnit(); got != "demo.timer" {
+		t.Fatalf("timer PrimaryUnit = %q, want demo.timer", got)
+	}
+}
+
 func TestSystemdServiceAuxiliaryCleanupPlansAreOptionalAndOrdered(t *testing.T) {
 	cfg := db.Service{
 		Name:       "demo",
