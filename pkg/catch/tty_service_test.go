@@ -9,6 +9,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -559,6 +561,62 @@ func TestStatusCmdFuncRendersSystemStatusesWithoutLiveCommands(t *testing.T) {
 	}
 }
 
+func TestSystemStatusDataUsesSnapshotCollectorWithoutLegacyHooks(t *testing.T) {
+	oldNewStatusSnapshotCommand := newStatusSnapshotCommand
+	t.Cleanup(func() { newStatusSnapshotCommand = oldNewStatusSnapshotCommand })
+
+	server := newTestServer(t)
+	seedService(t, server, "web", db.ServiceTypeDockerCompose, db.ArtifactStore{
+		db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/web.yml"}},
+	})
+	seedService(t, server, "api", db.ServiceTypeSystemd, nil)
+	seedService(t, server, "devbox", db.ServiceTypeVM, nil)
+
+	newStatusSnapshotCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch name {
+		case "docker":
+			if _, _, err := server.cfg.DB.MutateService("api", func(_ *db.Data, s *db.Service) error {
+				s.Artifacts = db.ArtifactStore{
+					db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/api.timer"}},
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("mutate api after snapshot DB read: %v", err)
+			}
+			return fakeStatusSnapshotCommand(t, `{"State":"running","Labels":"com.docker.compose.project=catch-web,com.docker.compose.service=app"}`)
+		case "systemctl":
+			got := append([]string{name}, args...)
+			joined := strings.Join(got, " ")
+			if !strings.Contains(joined, "api.service") || !strings.Contains(joined, "yeet-vm-devbox.service") {
+				t.Fatalf("systemctl args = %q, want api and VM units", joined)
+			}
+			return fakeStatusSnapshotCommand(t, strings.Join([]string{
+				"Id=api.service",
+				"LoadState=loaded",
+				"ActiveState=active",
+				"SubState=running",
+				"",
+				"Id=yeet-vm-devbox.service",
+				"LoadState=loaded",
+				"ActiveState=inactive",
+				"SubState=dead",
+			}, "\n"))
+		default:
+			t.Fatalf("unexpected command %s %v", name, args)
+			return fakeStatusSnapshotCommand(t, "")
+		}
+	}
+
+	statuses, err := (&ttyExecer{s: server, sn: SystemService}).systemStatusData()
+	if err != nil {
+		t.Fatalf("systemStatusData returned error: %v", err)
+	}
+	got := statusByName(statuses)
+	assertComponents(t, got["web"], []ComponentStatusData{{Name: "app", Status: ComponentStatusRunning}})
+	assertComponents(t, got["api"], []ComponentStatusData{{Name: "api", Status: ComponentStatusRunning}})
+	assertComponents(t, got["devbox"], []ComponentStatusData{{Name: "devbox", Status: ComponentStatusStopped}})
+}
+
 func TestSingleDockerComposeStatusUnknownRendersUnknownComponent(t *testing.T) {
 	server := newTestServer(t)
 	seedService(t, server, "web", db.ServiceTypeDockerCompose, db.ArtifactStore{
@@ -1017,6 +1075,23 @@ func seedService(t *testing.T, server *Server, name string, serviceType db.Servi
 	}); err != nil {
 		t.Fatalf("seed service %q: %v", name, err)
 	}
+}
+
+func fakeStatusSnapshotCommand(t *testing.T, output string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=TestTTYServiceStatusSnapshotFakeCommand", "--", output)
+	cmd.Env = append(os.Environ(), "GO_WANT_STATUS_SNAPSHOT_HELPER=1")
+	return cmd
+}
+
+func TestTTYServiceStatusSnapshotFakeCommand(t *testing.T) {
+	if os.Getenv("GO_WANT_STATUS_SNAPSHOT_HELPER") != "1" {
+		return
+	}
+	if len(os.Args) > 0 {
+		fmt.Print(os.Args[len(os.Args)-1])
+	}
+	os.Exit(0)
 }
 
 type recordingServiceRunner struct {

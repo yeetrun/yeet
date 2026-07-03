@@ -307,6 +307,29 @@ func TestDockerComposeStatusesStateMapping(t *testing.T) {
 	}
 }
 
+func TestDockerComposeStateStatusExport(t *testing.T) {
+	tests := []struct {
+		state string
+		want  Status
+	}{
+		{state: "running", want: StatusRunning},
+		{state: "restarting", want: StatusRunning},
+		{state: "exited", want: StatusStopped},
+		{state: "created", want: StatusStopped},
+		{state: "paused", want: StatusStopped},
+		{state: "dead", want: StatusStopped},
+		{state: "removing", want: StatusStopped},
+		{state: "mystery", want: StatusUnknown},
+	}
+
+	for _, tt := range tests {
+		got := DockerComposeStateStatus(tt.state)
+		if got != tt.want {
+			t.Fatalf("DockerComposeStateStatus(%q) = %v, want %v", tt.state, got, tt.want)
+		}
+	}
+}
+
 func TestParseDockerComposeStatusesSkipsMalformedLines(t *testing.T) {
 	got, err := parseDockerComposeStatuses(strings.Join([]string{
 		"app,running",

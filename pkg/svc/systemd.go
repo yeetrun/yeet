@@ -439,6 +439,10 @@ func (s *SystemdService) isTimer() bool {
 	return ok
 }
 
+func (s *SystemdService) PrimaryUnit() string {
+	return s.primaryUnit()
+}
+
 func (s *SystemdService) primaryUnit() string {
 	if s.isTimer() {
 		return s.timerUnit()

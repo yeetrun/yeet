@@ -416,6 +416,10 @@ func parseDockerComposeStatusLine(line string) (string, Status, bool) {
 	return fields[0], dockerComposeStateStatus(fields[1]), true
 }
 
+func DockerComposeStateStatus(state string) Status {
+	return dockerComposeStateStatus(state)
+}
+
 func dockerComposeStateStatus(state string) Status {
 	switch state {
 	case "running", "restarting":
