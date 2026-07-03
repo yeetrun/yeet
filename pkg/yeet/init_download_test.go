@@ -17,7 +17,7 @@ func TestDownloadCatchReleaseRunsRemoteScript(t *testing.T) {
 	fakeSSHInPath(t, "/bin/cat > "+strconvQuoteForShell(scriptFile)+"\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	got, err := downloadCatchRelease(ui, "root@example.com", "catch-linux-amd64.tar.gz", "https://example.com/catch.tgz", "https://example.com/catch.sha256")
+	got, err := downloadCatchRelease(ui, "root@example.com", "catch-linux-amd64.tar.gz", "https://example.com/catch.tgz", "https://example.com/catch.sha256", "./catch")
 	if err != nil {
 		t.Fatalf("downloadCatchRelease error: %v", err)
 	}
@@ -46,8 +46,20 @@ func TestDownloadCatchReleaseReportsSSHError(t *testing.T) {
 	fakeSSHInPath(t, "/bin/cat >/dev/null\nexit 1\n")
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
-	_, err := downloadCatchRelease(ui, "root@example.com", "catch-linux-amd64.tar.gz", "https://example.com/catch.tgz", "https://example.com/catch.sha256")
+	_, err := downloadCatchRelease(ui, "root@example.com", "catch-linux-amd64.tar.gz", "https://example.com/catch.tgz", "https://example.com/catch.sha256", "./catch")
 	if err == nil {
 		t.Fatal("downloadCatchRelease error = nil, want ssh error")
+	}
+}
+
+func TestDownloadCatchInstallCommandUsesConfiguredStagingBinary(t *testing.T) {
+	got := downloadCatchInstallCommand("catch-linux-amd64", "/flash/yeet/services/catch/run/catch.install")
+	for _, want := range []string{
+		`mkdir -p /flash/yeet/services/catch/run`,
+		`mv -f "$TMP_DIR/catch-linux-amd64" /flash/yeet/services/catch/run/catch.install`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("install command = %q, missing %q", got, want)
+		}
 	}
 }

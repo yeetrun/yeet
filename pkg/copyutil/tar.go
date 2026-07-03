@@ -43,6 +43,13 @@ type TarEntry struct {
 
 type TarObserver func(entry TarEntry)
 
+type TarFilter func(path string, entry fs.DirEntry) (bool, error)
+
+type TarOptions struct {
+	OnEntry TarObserver
+	Filter  TarFilter
+}
+
 // WriteHeader writes a copy stream header that precedes payload data.
 func WriteHeader(w io.Writer, kind, base string) error {
 	if kind == "" {
@@ -101,6 +108,11 @@ func TarDirectory(w io.Writer, src string, prefix string) error {
 
 // TarDirectoryWithObserver writes a tar archive of src into w, invoking observer for each entry.
 func TarDirectoryWithObserver(w io.Writer, src string, prefix string, observer TarObserver) (err error) {
+	return TarDirectoryWithOptions(w, src, prefix, TarOptions{OnEntry: observer})
+}
+
+// TarDirectoryWithOptions writes a tar archive of src into w with optional callbacks and filtering.
+func TarDirectoryWithOptions(w io.Writer, src string, prefix string, opts TarOptions) (err error) {
 	info, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -113,7 +125,22 @@ func TarDirectoryWithObserver(w io.Writer, src string, prefix string, observer T
 
 	src = filepath.Clean(src)
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
-		return writeDirectoryTarEntry(tw, src, prefix, p, d, err, observer)
+		if err != nil {
+			return writeDirectoryTarEntry(tw, src, prefix, p, d, err, opts.OnEntry)
+		}
+		if opts.Filter != nil && p != src {
+			include, err := opts.Filter(p, d)
+			if err != nil {
+				return err
+			}
+			if !include {
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		return writeDirectoryTarEntry(tw, src, prefix, p, d, nil, opts.OnEntry)
 	})
 }
 
@@ -224,6 +251,9 @@ func writeDirectoryTarEntry(tw *tar.Writer, src, prefix, filePath string, d fs.D
 	info, err := os.Lstat(filePath)
 	if err != nil {
 		return err
+	}
+	if info.Mode()&os.ModeSocket != 0 {
+		return nil
 	}
 	hdr, err := directoryTarHeader(src, prefix, filePath, d, info)
 	if err != nil {

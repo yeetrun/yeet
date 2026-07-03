@@ -398,6 +398,22 @@ func desiredPortForwardsByNetNS(d *db.Data) map[string][]portForwardRule {
 
 type netnsExistsFunc func(path string) (bool, error)
 type netnsPortForwardSyncFunc func(netns string, desired []portForwardRule) error
+type dockerNetworkIDsFunc func() (map[string]struct{}, error)
+
+var listDockerNetworkIDsFunc dockerNetworkIDsFunc = listDockerNetworkIDs
+
+func listDockerNetworkIDs() (map[string]struct{}, error) {
+	cmd := exec.Command("docker", "network", "ls", "--no-trunc", "--format", "{{.ID}}")
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("list docker networks: %w", err)
+	}
+	ids := map[string]struct{}{}
+	for _, line := range splitNonEmptyLines(string(output)) {
+		ids[line] = struct{}{}
+	}
+	return ids, nil
+}
 
 func netnsPathExists(path string) (bool, error) {
 	if path == "" {
@@ -442,6 +458,14 @@ func ReconcilePortForwards(store *db.Store) error {
 	if store == nil {
 		return fmt.Errorf("nil db store")
 	}
+	liveIDs, err := listDockerNetworkIDsFunc()
+	if err != nil {
+		log.Printf("skipping stale docker network DB prune: %v", err)
+	} else if pruned, err := pruneMissingDockerNetworks(store, liveIDs); err != nil {
+		return err
+	} else if pruned > 0 {
+		log.Printf("pruned %d stale docker network DB record(s)", pruned)
+	}
 	dv, err := store.Get()
 	if err != nil {
 		return err
@@ -450,6 +474,29 @@ func ReconcilePortForwards(store *db.Store) error {
 	return reconcilePortForwardsFromData(dv.AsStruct(), netnsPathExists, func(netns string, _ []portForwardRule) error {
 		return p.syncCurrentPortForwards(netns)
 	})
+}
+
+func pruneMissingDockerNetworks(store *db.Store, liveIDs map[string]struct{}) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("nil db store")
+	}
+	if liveIDs == nil {
+		liveIDs = map[string]struct{}{}
+	}
+	pruned := 0
+	if _, err := store.MutateData(func(d *db.Data) error {
+		for id := range d.DockerNetworks {
+			if _, ok := liveIDs[id]; ok {
+				continue
+			}
+			delete(d.DockerNetworks, id)
+			pruned++
+		}
+		return nil
+	}); err != nil {
+		return 0, fmt.Errorf("prune stale docker networks: %w", err)
+	}
+	return pruned, nil
 }
 
 func removeEndpointPortMappings(n *db.DockerNetwork, endpointID string) {

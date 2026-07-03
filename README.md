@@ -101,6 +101,21 @@ repeatable setup, pass it explicitly:
 yeet init --ts-client-secret=<secret> root@<machine-host>
 ```
 
+Fresh interactive installs also ask where catch should store host data. The
+default is `$HOME/yeet-data` on the catch host, with services under
+`$HOME/yeet-data/services`. If the host has ZFS, init can use datasets instead:
+
+```bash
+yeet init --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services root@<machine-host>
+```
+
+With a ZFS services root, yeet treats the services root as a dataset prefix.
+Services under that root, including `catch`, live on child datasets such as
+`flash/yeet/services/<svc>`.
+
+Rerunning `yeet init` for an existing catch install keeps the current storage
+layout and upgrades catch without asking the storage questions again.
+
 If Docker is missing on a Debian/Ubuntu-style host, init can install it:
 
 ```bash
@@ -335,8 +350,9 @@ Start with the quick path before adding optional features.
   Debian/Ubuntu hosts, yeet can prepare `br0` during `yeet init` or before the
   first VM LAN create.
 - Plain `--net=ts` is tailnet-only unless you configure a Tailscale exit node.
-- ZFS is optional and enables dataset-backed service roots, snapshots, and fast
-  repeated VM disk clones.
+- ZFS is optional. Init can place host data or the default service root on
+  datasets. A ZFS services root is a dataset prefix, so services under it use
+  child datasets for snapshots and fast VM disk clones.
 
 Use the manual before enabling optional storage or networking:
 

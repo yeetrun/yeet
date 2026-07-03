@@ -5,11 +5,14 @@
 package catch
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 type vmSystemdConfig struct {
@@ -77,6 +80,41 @@ func ensureVMSystemdRestorePrevent(name string) error {
 		return fmt.Errorf("reload systemd after updating VM unit %s: %w: %s", unitPath, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func regenerateHostStorageVMSystemdUnit(ctx context.Context, cfg Config, service *db.Service, runner string) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if service == nil || service.VM == nil {
+		return nil, nil
+	}
+	root := serviceRootFromConfig(cfg, *service)
+	runDir := serviceRunDirForRoot(root)
+	dataDir := serviceDataDirForRoot(root)
+	rootFS := service.VM.Image.RootFS
+	diskPath := service.VM.Disk.Path
+	if strings.TrimSpace(diskPath) == "" {
+		diskPath = rootFS
+	}
+	unit := renderVMSystemdUnit(vmSystemdConfig{
+		Service:          service.Name,
+		Runner:           runner,
+		DataDir:          cfg.RootDir,
+		ServiceRoot:      root,
+		DiskPath:         diskPath,
+		Firecracker:      filepath.Join(filepath.Dir(rootFS), "firecracker"),
+		ConfigPath:       filepath.Join(runDir, "firecracker.json"),
+		APISocket:        filepath.Join(runDir, "firecracker.sock"),
+		ConsoleSocket:    filepath.Join(runDir, "serial.sock"),
+		VsockSocket:      filepath.Join(runDir, "vsock.sock"),
+		WorkingDirectory: dataDir,
+	})
+	unitPath := filepath.Join(vmSystemdSystemDir, vmSystemdUnitName(service.Name))
+	if err := writeVMSystemdUnitAtomic(unitPath, []byte(unit), 0o644); err != nil {
+		return nil, fmt.Errorf("write VM systemd unit %s: %w", unitPath, err)
+	}
+	return []string{filepath.Base(unitPath)}, nil
 }
 
 func writeVMSystemdUnitAtomic(path string, contents []byte, mode os.FileMode) error {

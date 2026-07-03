@@ -171,6 +171,8 @@ func rpcMethodPermissions(method string) (permissionSet, error) {
 	switch method {
 	case "catch.Info", "catch.ServiceInfo", "catch.ArtifactHashes", "catch.ZFSServiceRootCandidates", "catch.VMDefaults", "catch.ServicesList":
 		return newPermissionSet(permissionRead), nil
+	case catchrpc.RPCMethodHostStoragePlan, catchrpc.RPCMethodHostStorageApply:
+		return newPermissionSet(permissionManage), nil
 	case "catch.TailscaleSetup":
 		return newPermissionSet(permissionRead, permissionManage, permissionSSH), nil
 	default:

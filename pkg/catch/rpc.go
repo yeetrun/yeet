@@ -168,16 +168,14 @@ func (s *Server) dispatchRPCWithContext(ctx context.Context, req catchrpc.Reques
 		return s.handleRPCArtifactHashes(req)
 	case "catch.ZFSServiceRootCandidates":
 		return s.handleRPCZFSServiceRootCandidates(ctx, req)
+	case catchrpc.RPCMethodHostStoragePlan, catchrpc.RPCMethodHostStorageApply:
+		return s.handleRPCHostStorage(ctx, req)
 	case "catch.VMDefaults":
 		return s.handleRPCVMDefaults(ctx, req)
 	case "catch.TailscaleSetup":
 		return s.handleRPCTailscaleSetup(req)
 	case "catch.ServicesList":
-		list, err := s.listServices()
-		if err != nil {
-			return newRPCError(req.ID, catchrpc.ErrInternal, "failed to list services", err.Error())
-		}
-		return newRPCResponse(req.ID, list)
+		return s.handleRPCServicesList(req)
 	default:
 		return newRPCError(req.ID, catchrpc.ErrMethodNotFound, "method not found", req.Method)
 	}
@@ -227,6 +225,41 @@ func (s *Server) handleRPCZFSServiceRootCandidates(ctx context.Context, req catc
 	return newRPCResponse(req.ID, resp)
 }
 
+func (s *Server) handleRPCHostStorage(ctx context.Context, req catchrpc.Request) catchrpc.Response {
+	switch req.Method {
+	case catchrpc.RPCMethodHostStoragePlan:
+		return s.handleRPCHostStoragePlan(ctx, req)
+	case catchrpc.RPCMethodHostStorageApply:
+		return s.handleRPCHostStorageApply(ctx, req)
+	default:
+		return newRPCError(req.ID, catchrpc.ErrMethodNotFound, "method not found", req.Method)
+	}
+}
+
+func (s *Server) handleRPCHostStoragePlan(ctx context.Context, req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.HostStoragePlanRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.PlanHostStorage(ctx, params)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to plan host storage", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
+}
+
+func (s *Server) handleRPCHostStorageApply(ctx context.Context, req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.HostStorageApplyRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.ApplyHostStoragePlan(ctx, params.Plan, params.Yes, nil)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to apply host storage", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
+}
+
 func (s *Server) handleRPCVMDefaults(ctx context.Context, req catchrpc.Request) catchrpc.Response {
 	var params catchrpc.VMDefaultsRequest
 	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
@@ -249,6 +282,14 @@ func (s *Server) handleRPCTailscaleSetup(req catchrpc.Request) catchrpc.Response
 		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to set tailscale secret", err.Error())
 	}
 	return newRPCResponse(req.ID, resp)
+}
+
+func (s *Server) handleRPCServicesList(req catchrpc.Request) catchrpc.Response {
+	list, err := s.listServices()
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to list services", err.Error())
+	}
+	return newRPCResponse(req.ID, list)
 }
 
 type serviceInfo struct {

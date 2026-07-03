@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -32,6 +33,15 @@ type resolvedServiceRoot struct {
 	ZFS      bool
 	Created  bool
 	Warnings []string
+}
+
+// ResolveInstallZFSTarget creates or reuses a ZFS dataset and returns its mounted path.
+func ResolveInstallZFSTarget(ctx context.Context, dataset string) (string, error) {
+	resolved, err := resolveZFSServiceRoot(ctx, nil, dataset, zfsServiceRootTarget)
+	if err != nil {
+		return "", err
+	}
+	return resolved.Root, nil
 }
 
 func runZFSCommand(ctx context.Context, args ...string) (string, string, error) {
@@ -78,6 +88,71 @@ func resolveZFSServiceRoot(ctx context.Context, runner zfsCommandRunner, dataset
 		warnings = append([]string{fmt.Sprintf("ZFS dataset %q already exists; using existing dataset", dataset)}, warnings...)
 	}
 	return resolvedServiceRoot{Root: root, Dataset: dataset, ZFS: true, Created: !existingDataset, Warnings: warnings}, nil
+}
+
+func resolveDefaultZFSServiceRoot(ctx context.Context, runner zfsCommandRunner, servicesRoot, service string) (resolvedServiceRoot, bool, error) {
+	parentDataset, ok, err := zfsDatasetForMountpoint(ctx, runner, servicesRoot)
+	if err != nil || !ok {
+		return resolvedServiceRoot{}, false, err
+	}
+	resolved, err := resolveZFSServiceRoot(ctx, runner, path.Join(parentDataset, service), zfsServiceRootTarget)
+	if err != nil {
+		return resolvedServiceRoot{}, false, err
+	}
+	return resolved, true, nil
+}
+
+func zfsDatasetForMountpoint(ctx context.Context, runner zfsCommandRunner, mountpoint string) (string, bool, error) {
+	mountpoint = filepath.Clean(strings.TrimSpace(mountpoint))
+	if mountpoint == "" || !filepath.IsAbs(mountpoint) {
+		return "", false, nil
+	}
+	if runner == nil {
+		runner = runZFSCommand
+	}
+	stdout, stderr, err := runner(ctx, "list", "-H", "-o", "name,mountpoint")
+	if err != nil {
+		if isZFSMissingCommand(stderr, err) || isZFSNoDatasetsAvailable(stderr, err) {
+			return "", false, nil
+		}
+		return "", false, formatZFSCommandError("zfs list filesystems", stderr, err)
+	}
+	dataset, ok := parseZFSDatasetForMountpoint(stdout, mountpoint)
+	return dataset, ok, nil
+}
+
+func parseZFSDatasetForMountpoint(stdout, mountpoint string) (string, bool) {
+	for _, line := range strings.Split(stdout, "\n") {
+		dataset, candidate, ok := parseZFSMountpointRow(line)
+		if !ok {
+			continue
+		}
+		if filepath.Clean(candidate) == mountpoint {
+			return dataset, true
+		}
+	}
+	return "", false
+}
+
+func parseZFSMountpointRow(line string) (dataset string, mountpoint string, ok bool) {
+	fields := strings.SplitN(line, "\t", 2)
+	if len(fields) != 2 {
+		return "", "", false
+	}
+	dataset = strings.TrimSpace(fields[0])
+	mountpoint = strings.TrimSpace(fields[1])
+	if dataset == "" || !normalZFSMountpoint(mountpoint) {
+		return "", "", false
+	}
+	return dataset, mountpoint, true
+}
+
+func isZFSNoDatasetsAvailable(stderr string, err error) bool {
+	if err == nil {
+		return false
+	}
+	text := strings.ToLower(strings.TrimSpace(stderr + " " + err.Error()))
+	return strings.Contains(text, "no datasets available")
 }
 
 func zfsDatasetExists(ctx context.Context, runner zfsCommandRunner, dataset string) (bool, error) {

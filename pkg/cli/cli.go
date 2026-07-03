@@ -84,6 +84,15 @@ type ServiceSetFlags struct {
 	SnapshotChange   bool
 }
 
+type HostSetFlags struct {
+	DataDir         string
+	ServicesRoot    string
+	ZFS             bool
+	MigrateServices string
+	Config          string
+	Yes             bool
+}
+
 type VMSetFlags struct {
 	CPUs          int
 	Memory        string
@@ -331,6 +340,15 @@ type serviceSetFlagsParsed struct {
 	SnapshotMaxAge   string   `flag:"snapshot-max-age"`
 	SnapshotRequired string   `flag:"snapshot-required"`
 	SnapshotEvents   string   `flag:"snapshot-events"`
+}
+
+type hostSetFlagsParsed struct {
+	DataDir         string `flag:"data-dir" help:"Set catch data directory path or ZFS dataset"`
+	ServicesRoot    string `flag:"services-root" help:"Set default root for service directories or ZFS dataset prefix"`
+	ZFS             bool   `flag:"zfs" help:"Treat supplied storage targets as ZFS datasets or dataset prefixes"`
+	MigrateServices string `flag:"migrate-services" help:"Service migration mode: all, none"`
+	Config          string `flag:"config" help:"Path to yeet.toml to update after service migration"`
+	Yes             bool   `flag:"yes" short:"y" help:"Confirm disruptive host storage changes without prompting"`
 }
 
 type serviceGenerationsFlagsParsed struct {
@@ -667,6 +685,23 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set":  {Name: "set", Description: "Set env keys", Usage: "env set <svc> KEY=VALUE [KEY=VALUE...]", ArgsSchema: ServiceArgs{}},
 		},
 	},
+	"host": {
+		Name:        "host",
+		Description: "Manage catch host settings",
+		Commands: map[string]CommandInfo{
+			"set": {
+				Name:        "set",
+				Description: "Configure catch host storage",
+				Usage:       "host set [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET_PREFIX] [--zfs] [--migrate-services=all|none] [--config=PATH] [--yes]",
+				Examples: []string{
+					"yeet host set --data-dir=$HOME/yeet-data",
+					"yeet host set --services-root=$HOME/yeet-data/services2 --migrate-services=none",
+					"yeet host set --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services --migrate-services=all",
+				},
+				FlagsSchema: hostSetFlagsParsed{},
+			},
+		},
+	},
 	"service": {
 		Name:        "service",
 		Description: "Manage service settings",
@@ -825,6 +860,9 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"edit": {},
 		"copy": {},
 		"set":  {},
+	},
+	"host": {
+		"set": flagSpecsFromStruct(hostSetFlagsParsed{}),
 	},
 	"service": {
 		"set":         flagSpecsFromStruct(serviceSetFlagsParsed{}),
@@ -1036,6 +1074,34 @@ func ParseServiceSet(args []string) (ServiceSetFlags, []string, error) {
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
+}
+
+func ParseHostSet(args []string) (HostSetFlags, []string, error) {
+	parsed, err := parseFlags[hostSetFlagsParsed](args)
+	if err != nil {
+		return HostSetFlags{}, nil, err
+	}
+	flags := HostSetFlags{
+		DataDir:         strings.TrimSpace(parsed.Flags.DataDir),
+		ServicesRoot:    strings.TrimSpace(parsed.Flags.ServicesRoot),
+		ZFS:             parsed.Flags.ZFS,
+		MigrateServices: strings.TrimSpace(parsed.Flags.MigrateServices),
+		Config:          strings.TrimSpace(parsed.Flags.Config),
+		Yes:             parsed.Flags.Yes,
+	}
+	if err := ValidateHostSetFlags(flags); err != nil {
+		return HostSetFlags{}, nil, err
+	}
+	return flags, parsed.Args, nil
+}
+
+func ValidateHostSetFlags(flags HostSetFlags) error {
+	switch flags.MigrateServices {
+	case "", "all", "none":
+		return nil
+	default:
+		return fmt.Errorf("--migrate-services must be all or none")
+	}
 }
 
 func rejectServiceSetVMFlags(args []string) error {

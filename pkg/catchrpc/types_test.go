@@ -5,7 +5,9 @@
 package catchrpc
 
 import (
+	"bytes"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -125,5 +127,76 @@ func TestServiceInfoVMJSONRoundTrip(t *testing.T) {
 	}
 	if roundTrip.VM.Balloon.Mode != "auto" || roundTrip.VM.Balloon.MinBytes != 1<<30 || roundTrip.VM.Balloon.MinMemory != "1 GB" || roundTrip.VM.Balloon.LastTarget != 512<<20 {
 		t.Fatalf("round trip balloon = %#v, want auto 1 GB with target", roundTrip.VM.Balloon)
+	}
+}
+
+func TestHostStorageSetRequestRoundTrip(t *testing.T) {
+	req := HostStorageSetRequest{
+		DataDir:         &HostStorageTarget{Value: "flash/yeet/data", ZFS: true},
+		ServicesRoot:    &HostStorageTarget{Value: "flash/yeet/services", ZFS: true},
+		MigrateServices: HostStorageMigrateAll,
+		Yes:             true,
+	}
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(req); err != nil {
+		t.Fatalf("Encode HostStorageSetRequest: %v", err)
+	}
+	var got HostStorageSetRequest
+	if err := json.NewDecoder(&buf).Decode(&got); err != nil {
+		t.Fatalf("Decode HostStorageSetRequest: %v", err)
+	}
+	if !reflect.DeepEqual(got, req) {
+		t.Fatalf("round trip = %#v, want %#v", got, req)
+	}
+}
+
+func TestHostStoragePlanCatchActionRoundTrip(t *testing.T) {
+	plan := HostStoragePlan{
+		Current: HostStorageState{DataDir: "/flash/yeet/data", ServicesRoot: "/flash/yeet/services"},
+		Desired: HostStorageState{DataDir: "/flash/yeet/data", ServicesRoot: "/flash/yeet/services"},
+		CatchAction: HostStorageCatchAction{
+			Move: true,
+			From: "/root/data/services/catch",
+			To:   "/flash/yeet/services/catch",
+		},
+		RequiresRestart: true,
+	}
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(plan); err != nil {
+		t.Fatalf("Encode HostStoragePlan: %v", err)
+	}
+	var got HostStoragePlan
+	if err := json.NewDecoder(&buf).Decode(&got); err != nil {
+		t.Fatalf("Decode HostStoragePlan: %v", err)
+	}
+	if !reflect.DeepEqual(got, plan) {
+		t.Fatalf("round trip = %#v, want %#v", got, plan)
+	}
+}
+
+func TestHostStoragePlanRepairActionRoundTrip(t *testing.T) {
+	plan := HostStoragePlan{
+		Current: HostStorageState{DataDir: "/root/data", ServicesRoot: "/root/data/services"},
+		Desired: HostStorageState{DataDir: "/flash/yeet/data", ServicesRoot: "/flash/yeet/services"},
+		RepairAction: HostStorageRepairAction{
+			References:      7,
+			DatabaseRefs:    4,
+			SystemdRefs:     2,
+			ArtifactRefs:    1,
+			RegenerateUnits: []string{"api.service", "yeet-vm-devbox.service"},
+			RestartServices: []string{"api", "devbox"},
+			ValidationRoots: []string{"/root/data", "/root/data/services"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(plan); err != nil {
+		t.Fatalf("Encode HostStoragePlan: %v", err)
+	}
+	var got HostStoragePlan
+	if err := json.NewDecoder(&buf).Decode(&got); err != nil {
+		t.Fatalf("Decode HostStoragePlan: %v", err)
+	}
+	if !reflect.DeepEqual(got, plan) {
+		t.Fatalf("round trip = %#v, want %#v", got, plan)
 	}
 }

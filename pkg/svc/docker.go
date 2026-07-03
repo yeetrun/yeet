@@ -290,7 +290,7 @@ func (s *DockerComposeService) Restart() error {
 	if ok, err := s.Exists(); err != nil {
 		return fmt.Errorf("failed to check if service exists: %v", err)
 	} else if !ok {
-		return nil
+		return s.Start()
 	}
 	if s.sd != nil {
 		if err := s.sd.StartAuxiliaryUnits(); err != nil {

@@ -19,6 +19,7 @@ import (
 
 var (
 	bridgedArgs                   []string
+	handleHostSetFn               = yeet.HandleHostSet
 	handleSvcCmdFn                = yeet.HandleSvcCmd
 	handleUpgradeFn               = yeet.HandleUpgrade
 	handleVMSSHProxyFn            = yeet.HandleVMSSHProxy

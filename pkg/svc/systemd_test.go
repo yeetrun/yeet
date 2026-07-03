@@ -333,6 +333,44 @@ func TestSystemdServiceInstallCopiesArtifactsRemovesStaleOptionalAndEnablesTimer
 	}
 }
 
+func TestSystemdServiceStageInstallForReloadCopiesArtifactsWithoutSystemctl(t *testing.T) {
+	tmp := t.TempDir()
+	systemdDir := filepath.Join(tmp, "systemd")
+	runDir := filepath.Join(tmp, "run")
+	for _, dir := range []string{systemdDir, runDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("failed to create %s: %v", dir, err)
+		}
+	}
+	systemctlLog := installFakeSystemctl(t, tmp)
+	serviceSrc := writeTempFile(t, tmp, "demo.service", "service unit\n")
+	netnsSrc := writeTempFile(t, tmp, "netns.service", "netns unit\n")
+	cfg := db.Service{
+		Name:       "demo",
+		Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit:  artifactAt(1, serviceSrc),
+			db.ArtifactNetNSService: artifactAt(1, netnsSrc),
+		},
+	}
+	svc := &SystemdService{cfg: cfg.View(), runDir: runDir, systemdDir: systemdDir}
+
+	units, err := svc.StageInstallForReload()
+	if err != nil {
+		t.Fatalf("StageInstallForReload returned error: %v", err)
+	}
+
+	assertFileContent(t, filepath.Join(systemdDir, "demo.service"), "service unit\n")
+	assertFileContent(t, filepath.Join(systemdDir, "yeet-demo-ns.service"), "netns unit\n")
+	wantUnits := []string{"demo.service", "yeet-demo-ns.service"}
+	if diff := cmp.Diff(wantUnits, units); diff != "" {
+		t.Fatalf("units mismatch (-want +got):\n%s", diff)
+	}
+	if _, err := os.Stat(systemctlLog); !os.IsNotExist(err) {
+		t.Fatalf("systemctl log stat error = %v, want no systemctl calls", err)
+	}
+}
+
 func TestSystemdServiceLifecycleUsesConfiguredSystemdDir(t *testing.T) {
 	tmp := t.TempDir()
 	systemdDir := filepath.Join(tmp, "systemd")

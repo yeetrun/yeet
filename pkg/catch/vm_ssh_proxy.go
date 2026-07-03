@@ -94,22 +94,29 @@ func vmSSHProxyAllowedHosts(info catchrpc.ServiceInfo) []string {
 
 func proxyVMSSHConn(rw io.ReadWriter, conn net.Conn) error {
 	defer func() { _ = conn.Close() }()
-	errCh := make(chan error, 2)
+	type copyResult struct {
+		remoteToLocal bool
+		err           error
+	}
+	errCh := make(chan copyResult, 2)
 	go func() {
 		_, err := io.Copy(conn, rw)
 		if closeWriter, ok := conn.(interface{ CloseWrite() error }); ok {
 			_ = closeWriter.CloseWrite()
 		}
-		errCh <- err
+		errCh <- copyResult{err: err}
 	}()
 	go func() {
 		_, err := io.Copy(rw, conn)
-		errCh <- err
+		errCh <- copyResult{remoteToLocal: true, err: err}
 	}()
 
-	firstErr := <-errCh
-	_ = conn.Close()
-	return expectedCopyErrorsOnly(firstErr)
+	first := <-errCh
+	if first.remoteToLocal {
+		_ = conn.Close()
+	}
+	second := <-errCh
+	return expectedCopyErrorsOnly(first.err, second.err)
 }
 
 func expectedCopyErrorsOnly(errs ...error) error {

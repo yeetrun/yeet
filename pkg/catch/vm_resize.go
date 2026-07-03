@@ -415,11 +415,15 @@ func vmNetworkPlanFromDB(service string, networks []db.VMNetworkConfig) vmNetwor
 			iface.Gateway = vmSvcGuestGateway
 		case "lan":
 			if network.VLAN != 0 {
-				if vmLANParentIsBridge(network.Parent) {
+				if parent, ok := vmNetworkRecoveredDerivedVLANParent(network.Parent, network.VLAN); ok {
+					iface.Parent = parent
+					iface.Bridge = vmGeneratedVLANBridgeName(parent, network.VLAN)
+					iface.VLANDevice = vmGeneratedVLANDeviceName(parent, network.VLAN)
+				} else if vmLANParentIsBridge(network.Parent) {
 					iface.Bridge = network.Parent
 				} else {
-					iface.Bridge = fmt.Sprintf("yvm-%s-b%d", short, i)
-					iface.VLANDevice = fmt.Sprintf("yvm-%s-v%d", short, i)
+					iface.Bridge = vmGeneratedVLANBridgeName(network.Parent, network.VLAN)
+					iface.VLANDevice = vmGeneratedVLANDeviceName(network.Parent, network.VLAN)
 				}
 			} else {
 				if vmLANParentIsBridge(network.Parent) {
@@ -432,6 +436,40 @@ func vmNetworkPlanFromDB(service string, networks []db.VMNetworkConfig) vmNetwor
 	}
 	plan.applyGuestRoutePolicy()
 	return plan
+}
+
+func vmNetworkRecoveredDerivedVLANParent(parent string, vlan int) (string, bool) {
+	parent = strings.TrimSpace(parent)
+	if parent == "" || vlan == 0 || vmLANLiveBridgeExistsFn(parent) {
+		return "", false
+	}
+	base, ok := vmNetworkDerivedVLANBridgeBase(parent, vlan)
+	if !ok || !vmLANLiveBridgeExistsFn(base) {
+		return "", false
+	}
+	uplink, err := vmLANBridgeUplinkFn(base)
+	if err != nil {
+		return "", false
+	}
+	uplink = strings.TrimSpace(uplink)
+	if uplink == "" {
+		return "", false
+	}
+	return uplink, true
+}
+
+func vmNetworkDerivedVLANBridgeBase(name string, vlan int) (string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" || vlan == 0 {
+		return "", false
+	}
+	for _, suffix := range []string{fmt.Sprintf("v%d", vlan), fmt.Sprintf(".%d", vlan)} {
+		base := strings.TrimSuffix(name, suffix)
+		if base != name && base != "" {
+			return base, true
+		}
+	}
+	return "", false
 }
 
 func cloneSvcNetwork(in *db.SvcNetwork) *db.SvcNetwork {

@@ -43,7 +43,7 @@ func TestPrepareDataDirsAndNewCatchConfig(t *testing.T) {
 		}
 	}
 
-	cfg := newCatchConfig(paths, "catch-user", "127.0.0.1:0", filepath.Join(root, "containerd.sock"))
+	cfg := newCatchConfig(paths, "catch-user", "127.0.0.1:0", filepath.Join(root, "containerd.sock"), paths.servicesDir)
 	if cfg.DefaultUser != "catch-user" || cfg.InstallUser != "catch-user" {
 		t.Fatalf("config users = (%q, %q), want catch-user", cfg.DefaultUser, cfg.InstallUser)
 	}
@@ -52,6 +52,121 @@ func TestPrepareDataDirsAndNewCatchConfig(t *testing.T) {
 	}
 	if cfg.DB == nil {
 		t.Fatalf("config DB is nil")
+	}
+}
+
+func TestResolveCatchStartupPathsSelectsDataDirAndServicesRoot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	defaultDataDir := filepath.Join(home, "yeet-data")
+	customDataDir := filepath.Join(t.TempDir(), "custom-data")
+	customServicesRoot := filepath.Join(t.TempDir(), "services")
+
+	tests := []struct {
+		name             string
+		opts             catchStartupOptions
+		wantDataDir      string
+		wantServicesRoot string
+	}{
+		{
+			name:             "no data dir uses home yeet data",
+			opts:             catchStartupOptions{},
+			wantDataDir:      defaultDataDir,
+			wantServicesRoot: filepath.Join(defaultDataDir, "services"),
+		},
+		{
+			name:             "custom data dir is preserved",
+			opts:             catchStartupOptions{dataDir: customDataDir},
+			wantDataDir:      customDataDir,
+			wantServicesRoot: filepath.Join(customDataDir, "services"),
+		},
+		{
+			name:             "custom services root overrides default",
+			opts:             catchStartupOptions{dataDir: customDataDir, servicesRoot: customServicesRoot},
+			wantDataDir:      customDataDir,
+			wantServicesRoot: customServicesRoot,
+		},
+		{
+			name:             "missing services root derives from data dir",
+			opts:             catchStartupOptions{dataDir: customDataDir, servicesRoot: " \t\n"},
+			wantDataDir:      customDataDir,
+			wantServicesRoot: filepath.Join(customDataDir, "services"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveCatchStartupPaths(tt.opts)
+			if err != nil {
+				t.Fatalf("resolveCatchStartupPaths: %v", err)
+			}
+			if got.dataDir != tt.wantDataDir {
+				t.Fatalf("dataDir = %q, want %q", got.dataDir, tt.wantDataDir)
+			}
+			if got.servicesRoot != tt.wantServicesRoot {
+				t.Fatalf("servicesRoot = %q, want %q", got.servicesRoot, tt.wantServicesRoot)
+			}
+			cfg := newCatchConfig(got.paths, "catch-user", "127.0.0.1:0", filepath.Join(t.TempDir(), "containerd.sock"), got.servicesRoot)
+			if cfg.ServicesRoot != tt.wantServicesRoot {
+				t.Fatalf("Config.ServicesRoot = %q, want %q", cfg.ServicesRoot, tt.wantServicesRoot)
+			}
+			if cfg.TSNetHost != *tsnetHost {
+				t.Fatalf("Config.TSNetHost = %q, want %q", cfg.TSNetHost, *tsnetHost)
+			}
+		})
+	}
+}
+
+func TestResolveCatchStartupOptionsResolvesInstallZFSTargets(t *testing.T) {
+	oldResolve := resolveCatchInstallZFSTargetFn
+	t.Cleanup(func() { resolveCatchInstallZFSTargetFn = oldResolve })
+
+	t.Setenv(catchInstallDataDirZFSEnv, "1")
+	t.Setenv(catchInstallServicesRootZFSEnv, "1")
+	resolveCatchInstallZFSTargetFn = func(_ context.Context, dataset string) (string, error) {
+		switch dataset {
+		case "flash/yeet/data":
+			return "/flash/yeet/data", nil
+		case "flash/yeet/services":
+			return "/flash/yeet/services", nil
+		default:
+			t.Fatalf("unexpected dataset %q", dataset)
+			return "", nil
+		}
+	}
+
+	got, err := resolveCatchStartupOptions("flash/yeet/data", "flash/yeet/services")
+	if err != nil {
+		t.Fatalf("resolveCatchStartupOptions: %v", err)
+	}
+	if got.dataDir != "/flash/yeet/data" || got.servicesRoot != "/flash/yeet/services" {
+		t.Fatalf("startup opts = %#v, want resolved ZFS mountpoints", got)
+	}
+}
+
+func TestResolveCatchStartupOptionsDerivesServicesRootFromResolvedZFSDataDir(t *testing.T) {
+	oldResolve := resolveCatchInstallZFSTargetFn
+	t.Cleanup(func() { resolveCatchInstallZFSTargetFn = oldResolve })
+
+	dataMount := filepath.Join(t.TempDir(), "flash", "yeet", "data")
+	t.Setenv(catchInstallDataDirZFSEnv, "1")
+	resolveCatchInstallZFSTargetFn = func(_ context.Context, dataset string) (string, error) {
+		if dataset != "flash/yeet/data" {
+			t.Fatalf("unexpected dataset %q", dataset)
+		}
+		return dataMount, nil
+	}
+
+	opts, err := resolveCatchStartupOptions("flash/yeet/data", "")
+	if err != nil {
+		t.Fatalf("resolveCatchStartupOptions: %v", err)
+	}
+	got, err := resolveCatchStartupPaths(opts)
+	if err != nil {
+		t.Fatalf("resolveCatchStartupPaths: %v", err)
+	}
+	if got.dataDir != dataMount || got.servicesRoot != filepath.Join(dataMount, "services") {
+		t.Fatalf("startup = %#v, want services under resolved data dir", got)
 	}
 }
 
@@ -1233,9 +1348,37 @@ func TestExecuteDockerInstallScriptWrapsErrors(t *testing.T) {
 	}
 }
 
+func TestCatchFileInstallerConfigWritesCustomServicesRoot(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	servicesRoot := filepath.Join(t.TempDir(), "services")
+
+	got := catchFileInstallerConfig(selectCatchInstallMode(dataDir, servicesRoot, "catch-test")).Args
+	want := []string{
+		fmt.Sprintf("--data-dir=%v", dataDir),
+		fmt.Sprintf("--services-root=%v", servicesRoot),
+		"--tsnet-host=catch-test",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("installer args = %#v, want %#v", got, want)
+	}
+}
+
+func TestCatchFileInstallerConfigOmitsDerivedServicesRoot(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+
+	got := catchFileInstallerConfig(selectCatchInstallMode(dataDir, filepath.Join(dataDir, "services"), "catch-test")).Args
+	want := []string{
+		fmt.Sprintf("--data-dir=%v", dataDir),
+		"--tsnet-host=catch-test",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("installer args = %#v, want %#v", got, want)
+	}
+}
+
 func TestDoInstallWritesCurrentExecutableWithGeneratedServiceConfig(t *testing.T) {
 	dataDir := t.TempDir()
-	cfg := &catch.Config{}
+	cfg := &catch.Config{ServicesRoot: filepath.Join(dataDir, "services")}
 	ts := &fakeInstallTSNet{}
 	inst := &fakeCatchInstaller{}
 

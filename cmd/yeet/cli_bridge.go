@@ -37,6 +37,9 @@ var serviceBridgeSkippedGroupCommands = map[string]map[string]struct{}{
 }
 
 var serviceBridgeHostLevelGroupCommands = map[string]map[string]struct{}{
+	"host": {
+		"set": {},
+	},
 	"vm": {
 		"memory": {},
 	},

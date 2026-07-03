@@ -291,10 +291,9 @@ func ownedVMServiceNetworkBases(dv *db.DataView) map[string]bool {
 		if !vm.Valid() {
 			continue
 		}
-		for _, network := range vm.Networks().AsSlice() {
-			if base, _, ok := vmNetworkLinkBase(network.Tap); ok {
-				owned[base] = true
-			}
+		plan := vmNetworkPlanFromDB(sv.Name(), vm.Networks().AsSlice())
+		for base := range vmNetworkOwnedBases(plan) {
+			owned[base] = true
 		}
 	}
 	return owned

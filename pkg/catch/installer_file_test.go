@@ -104,6 +104,48 @@ func TestParseNetworkLANExplicitParentOverridesHostDefaultRoute(t *testing.T) {
 	}
 }
 
+func TestParseNetworkLANReusesExistingMacvlanForSameTarget(t *testing.T) {
+	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
+	defer func() {
+		hostDefaultRouteInterfaceFn = oldHostDefaultRouteInterfaceFn
+	}()
+	hostDefaultRouteInterfaceFn = func() (string, error) {
+		return "vmbr0", nil
+	}
+
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name: "svc-lan",
+		Macvlan: &db.MacvlanNetwork{
+			Interface: "ymv-existing",
+			Parent:    "vmbr0",
+			Mac:       "02:00:00:00:00:10",
+		},
+	})
+
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{
+				ServiceName: "svc-lan",
+			},
+			Network: NetworkOpts{
+				Interfaces: "lan",
+			},
+		},
+	}
+
+	if err := installer.parseNetwork(); err != nil {
+		t.Fatalf("parseNetwork returned error: %v", err)
+	}
+	if installer.macvlan == nil {
+		t.Fatal("expected macvlan config")
+	}
+	if installer.macvlan.Interface != "ymv-existing" || installer.macvlan.Mac != "02:00:00:00:00:10" {
+		t.Fatalf("macvlan = %#v, want existing interface and mac", installer.macvlan)
+	}
+}
+
 func TestParseNetworkAppliesCombinedNetworkOptions(t *testing.T) {
 	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
 	defer func() {

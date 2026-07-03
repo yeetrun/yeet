@@ -31,23 +31,35 @@ type Client struct {
 	nextID uint64
 }
 
+const (
+	defaultRPCTimeout          = 30 * time.Second
+	hostStorageApplyRPCTimeout = 30 * time.Minute
+)
+
 func NewClient(host string, port int) *Client {
 	base := fmt.Sprintf("http://%s:%d", host, port)
 	ws := fmt.Sprintf("ws://%s:%d", host, port)
 	return &Client{
-		baseURL: base,
-		wsURL:   ws,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		wsDialer: websocket.DefaultDialer,
+		baseURL:    base,
+		wsURL:      ws,
+		httpClient: &http.Client{},
+		wsDialer:   websocket.DefaultDialer,
 	}
 }
 
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
+	return c.call(ctx, method, params, out, defaultRPCTimeout)
+}
+
+func (c *Client) call(ctx context.Context, method string, params any, out any, timeout time.Duration) error {
 	payload, err := buildRPCRequestPayload(method, atomic.AddUint64(&c.nextID, 1), params)
 	if err != nil {
 		return err
+	}
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
 	}
 	httpReq, err := newRPCRequest(ctx, c.baseURL, payload)
 	if err != nil {
@@ -112,7 +124,7 @@ func readRPCResponse(r io.Reader) (Response, error) {
 
 func decodeRPCResult(rpcResp Response, out any) error {
 	if rpcResp.Error != nil {
-		return fmt.Errorf("rpc error %d: %s", rpcResp.Error.Code, rpcResp.Error.Message)
+		return rpcResponseError(rpcResp.Error)
 	}
 	if out == nil {
 		return nil
@@ -122,6 +134,24 @@ func decodeRPCResult(rpcResp Response, out any) error {
 		return err
 	}
 	return json.Unmarshal(b, out)
+}
+
+func rpcResponseError(rpcErr *Error) error {
+	if rpcErr.Data == nil {
+		return fmt.Errorf("rpc error %d: %s", rpcErr.Code, rpcErr.Message)
+	}
+	return fmt.Errorf("rpc error %d: %s: %s", rpcErr.Code, rpcErr.Message, rpcErrorDataString(rpcErr.Data))
+}
+
+func rpcErrorDataString(data any) string {
+	if text, ok := data.(string); ok {
+		return text
+	}
+	b, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Sprint(data)
+	}
+	return string(b)
 }
 
 type closer interface {
@@ -443,5 +473,17 @@ func (c *Client) ZFSServiceRootCandidates(ctx context.Context, req ZFSServiceRoo
 func (c *Client) VMDefaults(ctx context.Context, req VMDefaultsRequest) (VMDefaultsResponse, error) {
 	var resp VMDefaultsResponse
 	err := c.Call(ctx, "catch.VMDefaults", req, &resp)
+	return resp, err
+}
+
+func (c *Client) HostStoragePlan(ctx context.Context, req HostStoragePlanRequest) (HostStoragePlan, error) {
+	var resp HostStoragePlan
+	err := c.Call(ctx, RPCMethodHostStoragePlan, req, &resp)
+	return resp, err
+}
+
+func (c *Client) HostStorageApply(ctx context.Context, req HostStorageApplyRequest) (HostStorageApplyResult, error) {
+	var resp HostStorageApplyResult
+	err := c.call(ctx, RPCMethodHostStorageApply, req, &resp, hostStorageApplyRPCTimeout)
 	return resp, err
 }
