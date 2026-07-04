@@ -425,6 +425,44 @@ func TestZFSServiceRootCandidatesCallsRPC(t *testing.T) {
 	}
 }
 
+func TestServiceRootDefaultsCallsRPC(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method != RPCMethodServiceRootDefaults {
+			t.Fatalf("method = %q, want %s", req.Method, RPCMethodServiceRootDefaults)
+		}
+		var params ServiceRootDefaultsRequest
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatalf("decode params: %v", err)
+		}
+		if params.Service != "nginx" {
+			t.Fatalf("params = %#v, want nginx service", params)
+		}
+		_ = json.NewEncoder(w).Encode(Response{
+			JSONRPC: "2.0",
+			ID:      req.ID,
+			Result: ServiceRootDefaultsResponse{
+				ServiceRoot:    "flash/yeet/services/nginx",
+				ServiceRootZFS: "flash/yeet/services/nginx",
+				ZFS:            true,
+			},
+		})
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	got, err := NewClient(host, port).ServiceRootDefaults(context.Background(), ServiceRootDefaultsRequest{Service: "nginx"})
+	if err != nil {
+		t.Fatalf("ServiceRootDefaults returned error: %v", err)
+	}
+	if got.ServiceRoot != "flash/yeet/services/nginx" || !got.ZFS {
+		t.Fatalf("ServiceRootDefaults = %#v, want ZFS nginx root", got)
+	}
+}
+
 func TestVMDefaultsCallsRPC(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req Request

@@ -476,6 +476,12 @@ func (c *Client) VMDefaults(ctx context.Context, req VMDefaultsRequest) (VMDefau
 	return resp, err
 }
 
+func (c *Client) ServiceRootDefaults(ctx context.Context, req ServiceRootDefaultsRequest) (ServiceRootDefaultsResponse, error) {
+	var resp ServiceRootDefaultsResponse
+	err := c.Call(ctx, RPCMethodServiceRootDefaults, req, &resp)
+	return resp, err
+}
+
 func (c *Client) HostStoragePlan(ctx context.Context, req HostStoragePlanRequest) (HostStoragePlan, error) {
 	var resp HostStoragePlan
 	err := c.Call(ctx, RPCMethodHostStoragePlan, req, &resp)

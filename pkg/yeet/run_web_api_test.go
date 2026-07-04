@@ -200,9 +200,15 @@ func TestRunWebAPIZFSRootsRejectsBadMethods(t *testing.T) {
 
 func TestRunWebAPIHostStorageUsesSelectedHost(t *testing.T) {
 	oldFetch := fetchRunWebHostStorageInfoFn
-	defer func() { fetchRunWebHostStorageInfoFn = oldFetch }()
+	oldFetchDefaults := fetchRunWebServiceRootDefaultsFn
+	defer func() {
+		fetchRunWebHostStorageInfoFn = oldFetch
+		fetchRunWebServiceRootDefaultsFn = oldFetchDefaults
+	}()
 
 	var gotHost string
+	var gotDefaultHost string
+	var gotDefaultReq catchrpc.ServiceRootDefaultsRequest
 	fetchRunWebHostStorageInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
 		gotHost = host
 		return serverInfo{
@@ -210,17 +216,29 @@ func TestRunWebAPIHostStorageUsesSelectedHost(t *testing.T) {
 			ServicesDir: "/flash/yeet/services",
 		}, nil
 	}
+	fetchRunWebServiceRootDefaultsFn = func(ctx context.Context, host string, req catchrpc.ServiceRootDefaultsRequest) (catchrpc.ServiceRootDefaultsResponse, error) {
+		gotDefaultHost = host
+		gotDefaultReq = req
+		return catchrpc.ServiceRootDefaultsResponse{
+			ServiceRoot:    "flash/yeet/services/nginx",
+			ServiceRootZFS: "flash/yeet/services/nginx",
+			ZFS:            true,
+		}, nil
+	}
 	s := newRunWebServer(runWebServerConfig{
 		Token:     "secret",
 		Root:      t.TempDir(),
 		Bootstrap: runWebBootstrap{SelectedHost: "yeet-lab"},
 	})
-	rec := runWebAPIRequest(t, s, http.MethodGet, "/api/host-storage", nil)
+	rec := runWebAPIRequest(t, s, http.MethodGet, "/api/host-storage?service=nginx&workload=compose", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("host storage status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	if gotHost != "yeet-lab" {
 		t.Fatalf("host = %q, want yeet-lab", gotHost)
+	}
+	if gotDefaultHost != "yeet-lab" || gotDefaultReq.Service != "nginx" {
+		t.Fatalf("default request = host %q req %#v, want nginx on yeet-lab", gotDefaultHost, gotDefaultReq)
 	}
 	var body runWebHostStorageResponse
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -228,6 +246,9 @@ func TestRunWebAPIHostStorageUsesSelectedHost(t *testing.T) {
 	}
 	if body.State != "available" || body.Storage.DataDir != "/flash/yeet/data" || body.Storage.ServicesRoot != "/flash/yeet/services" {
 		t.Fatalf("response = %#v, want available flash storage", body)
+	}
+	if body.Defaults.ServiceRoot != "flash/yeet/services/nginx" || !body.Defaults.ZFS {
+		t.Fatalf("defaults = %#v, want ZFS nginx service root", body.Defaults)
 	}
 
 	rec = runWebAPIRequest(t, s, http.MethodGet, "/api/host-storage?host=yeet-storage", nil)
@@ -261,6 +282,56 @@ func TestRunWebAPIHostStorageDerivesServicesRootFromDataDir(t *testing.T) {
 	}
 	if body.State != "available" || body.Storage.ServicesRoot != "/srv/yeet-data/services" {
 		t.Fatalf("response = %#v, want services root derived from data dir", body)
+	}
+}
+
+func TestRunWebAPIHostStorageInfersLegacyZFSDefaultFromServicesRootCandidate(t *testing.T) {
+	oldFetch := fetchRunWebHostStorageInfoFn
+	oldFetchDefaults := fetchRunWebServiceRootDefaultsFn
+	oldFetchZFS := fetchRunWebZFSRootCandidatesFn
+	defer func() {
+		fetchRunWebHostStorageInfoFn = oldFetch
+		fetchRunWebServiceRootDefaultsFn = oldFetchDefaults
+		fetchRunWebZFSRootCandidatesFn = oldFetchZFS
+	}()
+
+	fetchRunWebHostStorageInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{
+			RootDir:     "/flash/yeet/data",
+			ServicesDir: "/flash/yeet/services",
+		}, nil
+	}
+	fetchRunWebServiceRootDefaultsFn = func(ctx context.Context, host string, req catchrpc.ServiceRootDefaultsRequest) (catchrpc.ServiceRootDefaultsResponse, error) {
+		return catchrpc.ServiceRootDefaultsResponse{}, errors.New("rpc error -32601: method not found")
+	}
+	fetchRunWebZFSRootCandidatesFn = func(ctx context.Context, host string, req catchrpc.ZFSServiceRootCandidatesRequest) (catchrpc.ZFSServiceRootCandidatesResponse, error) {
+		if req.Service != "nginx" {
+			t.Fatalf("zfs request = %#v, want nginx", req)
+		}
+		return catchrpc.ZFSServiceRootCandidatesResponse{
+			State: catchrpc.ZFSRootDiscoveryAvailable,
+			Candidates: []catchrpc.ZFSServiceRootCandidate{{
+				Dataset:          "flash/yeet/services",
+				Mountpoint:       "/flash/yeet/services",
+				SuggestedDataset: "flash/yeet/services/nginx",
+			}},
+		}, nil
+	}
+	s := newRunWebServer(runWebServerConfig{
+		Token:     "secret",
+		Root:      t.TempDir(),
+		Bootstrap: runWebBootstrap{SelectedHost: "yeet-lab"},
+	})
+	rec := runWebAPIRequest(t, s, http.MethodGet, "/api/host-storage?service=nginx", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("host storage status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body runWebHostStorageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Defaults.ServiceRoot != "flash/yeet/services/nginx" || !body.Defaults.ZFS {
+		t.Fatalf("defaults = %#v, want legacy inferred ZFS root", body.Defaults)
 	}
 }
 

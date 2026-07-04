@@ -27,6 +27,7 @@ const state = {
   networkSelections: {},
   hostStorageSeq: 0,
   hostStorageKey: "",
+  hostStorageDefaultsKey: "",
   hostStorageState: null,
   zfsRootSeq: 0,
   zfsRootKey: "",
@@ -43,6 +44,7 @@ const state = {
   },
   pickedZFSRoot: null,
   serviceRootManual: false,
+  zfsManual: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -549,7 +551,11 @@ function ensureVMNetworkSelection(clearedMode = "") {
 }
 
 function hostStorageRequestKey() {
-  return $("host").value.trim();
+  return [
+    $("host").value.trim(),
+    selectedWorkload(),
+    $("service").value.trim(),
+  ].join("\n");
 }
 
 function syncHostStorage() {
@@ -561,14 +567,15 @@ function syncHostStorage() {
 
 async function loadHostStorage(key) {
   const seq = ++state.hostStorageSeq;
-  if (!key) {
+  const [host, workload, service] = key.split("\n");
+  if (!host) {
     state.hostStorageState = { state: "error", warnings: ["Choose a host"] };
     updateServiceRootPlaceholder();
     return;
   }
   state.hostStorageState = { state: "loading" };
   updateServiceRootPlaceholder();
-  const query = new URLSearchParams({ host: key });
+  const query = new URLSearchParams({ host, workload, service });
   try {
     const res = await api(`/api/host-storage?${query}`);
     if (seq !== state.hostStorageSeq) return;
@@ -578,8 +585,21 @@ async function loadHostStorage(key) {
     if (seq !== state.hostStorageSeq) return;
     state.hostStorageState = { state: "error", warnings: [String(err)] };
   }
+  applyHostStorageDefaults();
   updateServiceRootPlaceholder();
   update();
+}
+
+function applyHostStorageDefaults() {
+  const key = hostStorageRequestKey();
+  if (state.hostStorageDefaultsKey === key) return;
+  const defaults = state.hostStorageState?.defaults || {};
+  if (!defaults.serviceRoot) return;
+  state.hostStorageDefaultsKey = key;
+  if (state.serviceRootManual || state.zfsManual) return;
+  $("serviceRoot").value = defaults.serviceRoot;
+  $("zfs").checked = Boolean(defaults.zfs);
+  if (!defaults.zfs) state.pickedZFSRoot = null;
 }
 
 function trimRemoteRoot(root) {
@@ -1686,10 +1706,17 @@ function hideTooltip() {
 }
 
 $("serviceRoot").addEventListener("input", () => {
-  if (!$("zfs").checked) return;
   state.serviceRootManual = true;
-  state.pickedZFSRoot = null;
-  renderZFSRootCandidates(state.zfsRootState);
+  state.hostStorageDefaultsKey = "";
+  if ($("zfs").checked) {
+    state.pickedZFSRoot = null;
+    renderZFSRootCandidates(state.zfsRootState);
+  }
+});
+$("zfs").addEventListener("change", () => {
+  state.zfsManual = true;
+  state.hostStorageDefaultsKey = "";
+  if (!$("zfs").checked) state.pickedZFSRoot = null;
 });
 $("serviceRoot").addEventListener("focus", showZFSRootPicker);
 $("serviceRoot").addEventListener("click", showZFSRootPicker);
