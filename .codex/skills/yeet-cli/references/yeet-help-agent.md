@@ -219,7 +219,7 @@ Run `yeet start --help-agent` for command-specific context.
 
 ### `status`
 
-Show status of a service
+Show host or service status
 
 Run `yeet status --help-agent` for command-specific context.
 
@@ -301,6 +301,10 @@ yeet status
 
 ```
 yeet status <svc>
+```
+
+```
+yeet status <svc-a> <svc-b>
 ```
 
 ```
@@ -1679,12 +1683,12 @@ Progress output (auto|tty|plain|quiet)
 
 ## Purpose
 
-Show status of a service
+Show host or service status
 
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] status [OPTIONS]
+yeet [GLOBAL_OPTIONS] status [SVC...] [--format=table|json|json-pretty]
 ```
 
 ## Operating Rules
@@ -1725,6 +1729,24 @@ Disable TTY for remote commands
 Progress output (auto|tty|plain|quiet)
 
 - **Type**: `string`
+
+## Examples
+
+```
+yeet status
+```
+
+```
+yeet status <svc>
+```
+
+```
+yeet status <svc-a> <svc-b>
+```
+
+```
+yeet status <svc>@<catch-host>
+```
 ````
 
 ## Command: stop

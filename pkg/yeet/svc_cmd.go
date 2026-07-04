@@ -1904,9 +1904,12 @@ type statusComponent struct {
 }
 
 func handleStatusCommand(ctx context.Context, args []string, cfgLoc *projectConfigLocation, hostOverrideSet bool) error {
-	flags, _, err := cli.ParseStatus(args)
+	flags, targets, err := cli.ParseStatus(args)
 	if err != nil {
 		return err
+	}
+	if serviceOverride == "" && len(targets) > 0 && shouldAggregateStatusFormat(flags.Format) {
+		return statusSelectedServices(ctx, cfgLoc, hostOverrideSet, targets, flags)
 	}
 	if serviceOverride == "" && shouldAggregateStatusFormat(flags.Format) {
 		return statusMultiHost(ctx, statusHosts(cfgLoc, hostOverrideSet), flags)
@@ -1947,6 +1950,120 @@ func statusHosts(cfgLoc *projectConfigLocation, hostOverrideSet bool) []string {
 var fetchStatusForHostFn = fetchStatusForHost
 
 func statusMultiHost(ctx context.Context, hosts []string, flags cli.StatusFlags) error {
+	results, err := collectStatusForHosts(ctx, hosts, flags)
+	if err != nil {
+		return err
+	}
+	return renderStatusResults(os.Stdout, results, flags, true)
+}
+
+type statusTarget struct {
+	host    string
+	service string
+}
+
+func statusSelectedServices(ctx context.Context, cfgLoc *projectConfigLocation, hostOverrideSet bool, targets []string, flags cli.StatusFlags) error {
+	targetsByHost, err := resolveStatusTargets(cfgLoc, hostOverrideSet, targets)
+	if err != nil {
+		return err
+	}
+	hosts := make([]string, 0, len(targetsByHost))
+	for host := range targetsByHost {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	results, err := collectStatusForHosts(ctx, hosts, flags)
+	if err != nil {
+		return err
+	}
+	for i := range results {
+		services, err := filterStatusServicesForHost(results[i].Host, results[i].Services, targetsByHost[results[i].Host])
+		if err != nil {
+			return err
+		}
+		results[i].Services = services
+	}
+	return renderStatusResults(os.Stdout, results, flags, false)
+}
+
+func resolveStatusTargets(cfgLoc *projectConfigLocation, hostOverrideSet bool, rawTargets []string) (map[string][]string, error) {
+	targetsByHost := make(map[string][]string)
+	for _, raw := range rawTargets {
+		target, err := resolveStatusTarget(cfgLoc, hostOverrideSet, raw)
+		if err != nil {
+			return nil, err
+		}
+		if target.service == "" {
+			continue
+		}
+		addStatusTarget(targetsByHost, target)
+	}
+	if len(targetsByHost) == 0 {
+		return nil, fmt.Errorf("status requires at least one service name")
+	}
+	return targetsByHost, nil
+}
+
+func resolveStatusTarget(cfgLoc *projectConfigLocation, hostOverrideSet bool, raw string) (statusTarget, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return statusTarget{}, nil
+	}
+	service, host, qualified := splitServiceHost(value)
+	service = strings.TrimSpace(service)
+	host = strings.TrimSpace(host)
+	if service == "" {
+		return statusTarget{}, fmt.Errorf("status target %q is missing a service name", raw)
+	}
+	if qualified {
+		return statusTarget{host: host, service: service}, nil
+	}
+	if hostOverrideSet {
+		return statusTarget{host: Host(), service: service}, nil
+	}
+	if cfgLoc != nil && cfgLoc.Config != nil {
+		resolved, err := resolveServiceHost(cfgLoc.Config, service)
+		if err != nil {
+			return statusTarget{}, err
+		}
+		if resolved != "" {
+			return statusTarget{host: resolved, service: service}, nil
+		}
+	}
+	return statusTarget{host: Host(), service: service}, nil
+}
+
+func addStatusTarget(targetsByHost map[string][]string, target statusTarget) {
+	for _, existing := range targetsByHost[target.host] {
+		if existing == target.service {
+			return
+		}
+	}
+	targetsByHost[target.host] = append(targetsByHost[target.host], target.service)
+}
+
+func filterStatusServicesForHost(host string, statuses []statusService, serviceNames []string) ([]statusService, error) {
+	filtered := make([]statusService, 0, len(serviceNames))
+	for _, name := range serviceNames {
+		status, ok := findStatusService(statuses, name)
+		if !ok {
+			return nil, fmt.Errorf("status on %s did not include service %q", host, name)
+		}
+		filtered = append(filtered, status)
+	}
+	return filtered, nil
+}
+
+func findStatusService(statuses []statusService, serviceName string) (statusService, bool) {
+	for _, status := range statuses {
+		if status.ServiceName == serviceName {
+			return status, true
+		}
+	}
+	return statusService{}, false
+}
+
+func collectStatusForHosts(ctx context.Context, hosts []string, flags cli.StatusFlags) ([]hostStatusData, error) {
 	type hostResult struct {
 		host     string
 		services []statusService
@@ -1965,22 +2082,26 @@ func statusMultiHost(ctx context.Context, hosts []string, flags cli.StatusFlags)
 	for range hosts {
 		res := <-ch
 		if res.err != nil {
-			return res.err
+			return nil, res.err
 		}
 		results = append(results, hostStatusData{Host: res.host, Services: res.services})
 	}
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Host < results[j].Host
 	})
+	return results, nil
+}
+
+func renderStatusResults(w io.Writer, results []hostStatusData, flags cli.StatusFlags, aggregateContainers bool) error {
 	format := strings.TrimSpace(flags.Format)
 	if format == "json" || format == "json-pretty" {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(w)
 		if format == "json-pretty" {
 			enc.SetIndent("", "  ")
 		}
 		return enc.Encode(results)
 	}
-	return renderStatusTables(os.Stdout, results, true)
+	return renderStatusTables(w, results, aggregateContainers)
 }
 
 func fetchStatusForHost(ctx context.Context, host string, _ cli.StatusFlags) ([]statusService, error) {

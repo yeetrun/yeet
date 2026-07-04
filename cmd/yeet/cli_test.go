@@ -954,10 +954,10 @@ func TestPrepareCommandRoute(t *testing.T) {
 		{
 			name:        "splits host from command",
 			args:        []string{"status@catch-a", "svc-a"},
-			wantArgs:    []string{"status"},
+			wantArgs:    []string{"status", "svc-a"},
 			wantHost:    "catch-a",
-			wantService: "svc-a",
-			wantBridged: []string{"status"},
+			wantService: "",
+			wantBridged: nil,
 		},
 		{
 			name:        "events host defaults all services",

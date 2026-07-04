@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -2303,6 +2304,142 @@ func TestHandleStatusCommandAggregatesProjectJSONPrettyFormat(t *testing.T) {
 	}
 	if !strings.Contains(out, "\n  {") {
 		t.Fatalf("status output is not pretty JSON:\n%s", out)
+	}
+}
+
+func TestHandleStatusCommandFiltersSelectedProjectServicesAcrossHosts(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = ""
+	loadedPrefs.DefaultHost = "default-host"
+
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{Name: "api", Host: "host-a", Type: serviceTypeRun})
+	cfg.SetServiceEntry(ServiceEntry{Name: "web", Host: "host-b", Type: dockerServiceType})
+	cfg.SetServiceEntry(ServiceEntry{Name: "devbox", Host: "host-a", Type: serviceTypeVM})
+	loc := &projectConfigLocation{Config: cfg}
+
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		t.Fatalf("execRemoteFn should not be called for selected project status")
+		return nil
+	}
+	var mu sync.Mutex
+	var calls []string
+	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		if flags.Format != "table" {
+			t.Fatalf("status format = %q, want table", flags.Format)
+		}
+		mu.Lock()
+		calls = append(calls, host)
+		mu.Unlock()
+		switch host {
+		case "host-a":
+			return []statusService{
+				{ServiceName: "api", ServiceType: serviceTypeRun, Components: []statusComponent{{Name: "api", Status: "running"}}},
+				{ServiceName: "devbox", ServiceType: serviceTypeVM, Components: []statusComponent{{Name: "devbox", Status: "stopped"}}},
+				{ServiceName: "extra-a", ServiceType: serviceTypeRun, Components: []statusComponent{{Name: "extra-a", Status: "running"}}},
+			}, nil
+		case "host-b":
+			return []statusService{
+				{ServiceName: "web", ServiceType: dockerServiceType, Components: []statusComponent{{Name: "app", Status: "running"}, {Name: "worker", Status: "stopped"}}},
+				{ServiceName: "extra-b", ServiceType: serviceTypeCron, Components: []statusComponent{{Name: "extra-b", Status: "running"}}},
+			}, nil
+		default:
+			t.Fatalf("unexpected host %q", host)
+			return nil, nil
+		}
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return handleStatusCommand(context.Background(), []string{"api", "web@host-b", "devbox"}, loc, false)
+	})
+	if err != nil {
+		t.Fatalf("handleStatusCommand returned error: %v", err)
+	}
+	mu.Lock()
+	gotCalls := append([]string{}, calls...)
+	mu.Unlock()
+	slices.Sort(gotCalls)
+	if !reflect.DeepEqual(gotCalls, []string{"host-a", "host-b"}) {
+		t.Fatalf("fetch hosts = %#v, want host-a and host-b once", gotCalls)
+	}
+	for _, want := range []string{"api", "web", "devbox", "app", "worker", "CONTAINER"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("selected status output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "extra-a") || strings.Contains(out, "extra-b") || strings.Contains(out, "CONTAINERS") {
+		t.Fatalf("selected status output included unrequested services or aggregate header:\n%s", out)
+	}
+}
+
+func TestHandleStatusCommandFiltersSelectedProjectServicesJSON(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = ""
+	loadedPrefs.DefaultHost = "default-host"
+
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{Name: "api", Host: "host-a", Type: serviceTypeRun})
+	cfg.SetServiceEntry(ServiceEntry{Name: "web", Host: "host-b", Type: dockerServiceType})
+	loc := &projectConfigLocation{Config: cfg}
+
+	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		if flags.Format != "json" {
+			t.Fatalf("status format = %q, want json", flags.Format)
+		}
+		switch host {
+		case "host-a":
+			return []statusService{
+				{ServiceName: "api", ServiceType: serviceTypeRun},
+				{ServiceName: "extra-a", ServiceType: serviceTypeRun},
+			}, nil
+		case "host-b":
+			return []statusService{
+				{ServiceName: "web", ServiceType: dockerServiceType},
+				{ServiceName: "extra-b", ServiceType: serviceTypeCron},
+			}, nil
+		default:
+			t.Fatalf("unexpected host %q", host)
+			return nil, nil
+		}
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return handleStatusCommand(context.Background(), []string{"--format=json", "api", "web"}, loc, false)
+	})
+	if err != nil {
+		t.Fatalf("handleStatusCommand returned error: %v", err)
+	}
+	var decoded []hostStatusData
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("selected status JSON invalid: %v\n%s", err, out)
+	}
+	if len(decoded) != 2 || decoded[0].Host != "host-a" || decoded[1].Host != "host-b" {
+		t.Fatalf("decoded hosts = %#v, want host-a and host-b", decoded)
+	}
+	if len(decoded[0].Services) != 1 || decoded[0].Services[0].ServiceName != "api" {
+		t.Fatalf("host-a services = %#v, want api only", decoded[0].Services)
+	}
+	if len(decoded[1].Services) != 1 || decoded[1].Services[0].ServiceName != "web" {
+		t.Fatalf("host-b services = %#v, want web only", decoded[1].Services)
+	}
+}
+
+func TestHandleStatusCommandSelectedServiceMissingFromHostStatus(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	serviceOverride = ""
+	loadedPrefs.DefaultHost = "default-host"
+
+	cfg := &ProjectConfig{Version: projectConfigVersion}
+	cfg.SetServiceEntry(ServiceEntry{Name: "api", Host: "host-a", Type: serviceTypeRun})
+	loc := &projectConfigLocation{Config: cfg}
+
+	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		return []statusService{{ServiceName: "other", ServiceType: serviceTypeRun}}, nil
+	}
+
+	err := handleStatusCommand(context.Background(), []string{"api"}, loc, false)
+	if err == nil || !strings.Contains(err.Error(), "status on host-a did not include service \"api\"") {
+		t.Fatalf("selected status missing service error = %v", err)
 	}
 }
 
