@@ -348,8 +348,10 @@ function updatePreview(draft) {
   if (network.macvlanVlan) parts.push(`--macvlan-vlan=${network.macvlanVlan}`);
   if (network.macvlanMac) parts.push(`--macvlan-mac=${shell(network.macvlanMac)}`);
   for (const port of network.publish || []) parts.push(`--publish=${shell(port)}`);
-  if (storage.serviceRoot) parts.push(`--service-root=${shell(storage.serviceRoot)}`);
-  if (storage.zfs) parts.push("--zfs");
+  if (storage.serviceRoot) {
+    parts.push(`--service-root=${shell(storage.serviceRoot)}`);
+    if (storage.zfs) parts.push("--zfs");
+  }
   if (draft.vm?.cpus) parts.push(`--vcpus=${draft.vm.cpus}`);
   if (draft.vm?.memory) parts.push(`--memory=${shell(draft.vm.memory)}`);
   if (draft.vm?.memoryMin) parts.push(`--memory-min=${shell(draft.vm.memoryMin)}`);
@@ -609,6 +611,9 @@ function hostStorageAutoDefaults() {
   if (defaults.serviceRoot) {
     return { serviceRoot: defaults.serviceRoot, zfs: Boolean(defaults.zfs) };
   }
+  if (defaults.serviceRootPlaceholder) {
+    return { serviceRoot: "", zfs: Boolean(defaults.zfs) };
+  }
   if (state.hostStorageState?.state === "available" && !$("service").value.trim() && !state.pickedZFSRoot) {
     return { serviceRoot: "", zfs: null };
   }
@@ -631,7 +636,16 @@ function serviceRootPath(root, service) {
 
 function defaultServiceRootPlaceholder() {
   const service = $("service").value.trim() || "<service>";
-  if ($("zfs").checked) return `<dataset>/${service}`;
+  if ($("zfs").checked) {
+    const defaults = state.hostStorageState?.defaults || {};
+    if (defaults.serviceRootPlaceholder) return defaults.serviceRootPlaceholder;
+    if (defaults.serviceRoot) return defaults.serviceRoot;
+    if (defaults.serviceRootZfs) {
+      const zfsRoot = trimRemoteRoot(defaults.serviceRootZfs);
+      return $("service").value.trim() ? zfsRoot : serviceRootPath(zfsRoot, "<service>");
+    }
+    return `<dataset>/${service}`;
+  }
   const servicesRoot = defaultServicesRoot();
   return servicesRoot ? serviceRootPath(servicesRoot, service) : `<services-root>/${service}`;
 }
@@ -1553,6 +1567,11 @@ function update() {
   $("deployButton").disabled = true;
   const seq = ++state.validateSeq;
   window.clearTimeout(state.validateTimer);
+  if (!draft.service) {
+    $("hostStatus").textContent = "";
+    setStatus("");
+    return;
+  }
   state.validateTimer = window.setTimeout(() => validate(draft, seq), 250);
 }
 

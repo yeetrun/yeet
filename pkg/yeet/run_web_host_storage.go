@@ -79,9 +79,6 @@ func runWebHostStorageResponseForHost(ctx context.Context, host string, req catc
 
 func runWebHostStorageDefaults(ctx context.Context, host string, storage runWebHostStorage, req catchrpc.ServiceRootDefaultsRequest) (catchrpc.ServiceRootDefaultsResponse, []string) {
 	req.Service = strings.TrimSpace(req.Service)
-	if req.Service == "" {
-		return catchrpc.ServiceRootDefaultsResponse{}, nil
-	}
 	defaults, err := fetchRunWebServiceRootDefaultsFn(ctx, host, req)
 	if err == nil {
 		return normalizeRunWebServiceRootDefaults(defaults, storage, req.Service), nil
@@ -107,6 +104,10 @@ func normalizeRunWebServiceRootDefaults(defaults catchrpc.ServiceRootDefaultsRes
 	service = strings.TrimSpace(service)
 	defaults.ServiceRoot = strings.TrimSpace(defaults.ServiceRoot)
 	defaults.ServiceRootZFS = strings.TrimSpace(defaults.ServiceRootZFS)
+	defaults.ServiceRootPlaceholder = strings.TrimSpace(defaults.ServiceRootPlaceholder)
+	if service == "" {
+		return runWebServiceRootPlaceholderDefaults(defaults, storage)
+	}
 	if defaults.ServiceRoot == "" && defaults.ServiceRootZFS != "" {
 		defaults.ServiceRoot = defaults.ServiceRootZFS
 	}
@@ -119,10 +120,40 @@ func normalizeRunWebServiceRootDefaults(defaults catchrpc.ServiceRootDefaultsRes
 	return defaults
 }
 
+func runWebServiceRootPlaceholderDefaults(defaults catchrpc.ServiceRootDefaultsResponse, storage runWebHostStorage) catchrpc.ServiceRootDefaultsResponse {
+	if defaults.ZFS {
+		root := trimRunWebRootPattern(defaults.ServiceRootZFS)
+		if root == "" {
+			root = trimRunWebRootPattern(defaults.ServiceRoot)
+		}
+		if root != "" {
+			defaults.ServiceRoot = ""
+			defaults.ServiceRootZFS = root
+			defaults.ServiceRootPlaceholder = runWebServiceRootPath(root, "<service>")
+			return defaults
+		}
+	}
+	root := trimRunWebRootPattern(defaults.ServiceRoot)
+	if root == "" {
+		root = trimRunWebRootPattern(storage.ServicesRoot)
+	}
+	if root == "" {
+		return catchrpc.ServiceRootDefaultsResponse{}
+	}
+	return catchrpc.ServiceRootDefaultsResponse{
+		ServiceRootPlaceholder: runWebServiceRootPath(root, "<service>"),
+	}
+}
+
 func runWebFilesystemServiceRootDefaults(storage runWebHostStorage, service string) catchrpc.ServiceRootDefaultsResponse {
 	root := strings.TrimSpace(storage.ServicesRoot)
 	if root == "" {
 		return catchrpc.ServiceRootDefaultsResponse{}
+	}
+	if strings.TrimSpace(service) == "" {
+		return catchrpc.ServiceRootDefaultsResponse{
+			ServiceRootPlaceholder: runWebServiceRootPath(root, "<service>"),
+		}
 	}
 	return catchrpc.ServiceRootDefaultsResponse{
 		ServiceRoot: runWebServiceRootPath(root, service),
@@ -135,25 +166,40 @@ func runWebHostStorageLegacyDefaults(ctx context.Context, host string, storage r
 		Service:  service,
 	})
 	if err == nil && resp.State == catchrpc.ZFSRootDiscoveryAvailable {
-		if defaults, ok := runWebZFSDefaultForServicesRoot(storage.ServicesRoot, resp.Candidates); ok {
+		if defaults, ok := runWebZFSDefaultForServicesRoot(storage.ServicesRoot, service, resp.Candidates); ok {
 			return defaults
 		}
 	}
 	return runWebFilesystemServiceRootDefaults(storage, service)
 }
 
-func runWebZFSDefaultForServicesRoot(servicesRoot string, candidates []catchrpc.ZFSServiceRootCandidate) (catchrpc.ServiceRootDefaultsResponse, bool) {
+func runWebZFSDefaultForServicesRoot(servicesRoot, service string, candidates []catchrpc.ZFSServiceRootCandidate) (catchrpc.ServiceRootDefaultsResponse, bool) {
 	servicesRoot = cleanRunWebRemotePath(servicesRoot)
 	if servicesRoot == "" {
 		return catchrpc.ServiceRootDefaultsResponse{}, false
 	}
+	service = strings.TrimSpace(service)
 	for _, candidate := range candidates {
 		if cleanRunWebRemotePath(candidate.Mountpoint) != servicesRoot {
 			continue
 		}
-		serviceRoot := strings.TrimSpace(candidate.SuggestedDataset)
+		rootDataset := trimRunWebRootPattern(candidate.Dataset)
+		serviceRoot := trimRunWebRootPattern(candidate.SuggestedDataset)
+		if service == "" {
+			if rootDataset == "" {
+				rootDataset = serviceRoot
+			}
+			if rootDataset == "" {
+				return catchrpc.ServiceRootDefaultsResponse{}, false
+			}
+			return catchrpc.ServiceRootDefaultsResponse{
+				ServiceRootZFS:         rootDataset,
+				ServiceRootPlaceholder: runWebServiceRootPath(rootDataset, "<service>"),
+				ZFS:                    true,
+			}, true
+		}
 		if serviceRoot == "" {
-			serviceRoot = strings.TrimSpace(candidate.Dataset)
+			serviceRoot = runWebServiceRootPath(rootDataset, service)
 		}
 		if serviceRoot == "" {
 			return catchrpc.ServiceRootDefaultsResponse{}, false
@@ -165,6 +211,14 @@ func runWebZFSDefaultForServicesRoot(servicesRoot string, candidates []catchrpc.
 		}, true
 	}
 	return catchrpc.ServiceRootDefaultsResponse{}, false
+}
+
+func trimRunWebRootPattern(root string) string {
+	root = strings.TrimSpace(root)
+	if root == "/" {
+		return root
+	}
+	return strings.TrimRight(root, "/")
 }
 
 func runWebServiceRootPath(root, service string) string {
