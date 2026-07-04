@@ -13,7 +13,8 @@ function readAsset(name) {
   return fs.readFileSync(path.join(assetRoot, name), "utf8");
 }
 
-function mockRuntimeScript() {
+function mockRuntimeScript(options = {}) {
+  const prefill = options.prefill || { service: "nginx", payload: "nginx:latest" };
   return `
     function json(data, status = 200) {
       return new Response(JSON.stringify(data), {
@@ -38,7 +39,7 @@ function mockRuntimeScript() {
           configPath: "yeet.toml",
           selectedHost: "catch-lab",
           hosts: ["catch-lab"],
-          prefill: { service: "nginx", payload: "nginx:latest" },
+          prefill: ${JSON.stringify(prefill)},
           options: { networkModes: ["svc", "ts", "lan"], snapshotModes: ["inherit", "on", "off"] },
         });
       }
@@ -46,7 +47,17 @@ function mockRuntimeScript() {
         const request = new URL(target, "http://127.0.0.1");
         const service = request.searchParams.get("service") || "";
         const storage = { dataDir: "/flash/yeet/data", servicesRoot: "/flash/yeet/services" };
-        if (!service) return json({ state: "available", storage, defaults: {} });
+        if (!service) {
+          return json({
+            state: "available",
+            storage,
+            defaults: {
+              serviceRootPlaceholder: "flash/yeet/services/<service>",
+              serviceRootZfs: "flash/yeet/services",
+              zfs: true,
+            },
+          });
+        }
         const serviceRoot = "flash/yeet/services/" + service;
         return json({
           state: "available",
@@ -68,7 +79,10 @@ function mockRuntimeScript() {
         });
       }
       if (target.startsWith("/api/files")) return json({ dir: ".", entries: [] });
-      if (target === "/api/validate") return json({ validation: { ok: true, errors: [], warnings: [] } });
+      if (target === "/api/validate") {
+        window.__validateRequests = (window.__validateRequests || 0) + 1;
+        return json({ validation: { ok: true, errors: [], warnings: [] } });
+      }
       if (target === "/api/deploy") return json({ jobId: "job-1" });
       if (target === "/api/deploy/job-1/status") return json({ state: "succeeded" });
       if (target.startsWith("/api/session/closed")) return text("", 204);
@@ -105,11 +119,11 @@ function mockRuntimeScript() {
   `;
 }
 
-function pageHTML() {
+function pageHTML(options = {}) {
   return readAsset("index.html")
     .replace('<link rel="stylesheet" href="/styles.css">', `<style>${readAsset("styles.css")}</style>`)
     .replace("__YEET_SESSION_SCRIPT__", "")
-    .replace('<script src="/app.js" defer></script>', `<script>${mockRuntimeScript()}</script><script>${readAsset("app.js")}</script>`);
+    .replace('<script src="/app.js" defer></script>', `<script>${mockRuntimeScript(options)}</script><script>${readAsset("app.js")}</script>`);
 }
 
 test("web run terminal renders CRLF TTY output", async ({ page }, testInfo) => {
@@ -142,4 +156,18 @@ test("web run clears auto ZFS service root when service is erased", async ({ pag
   await page.fill("#service", "");
   await page.waitForFunction(() => document.querySelector("#serviceRoot")?.value === "");
   await expect(page.locator("#commandPreview")).not.toContainText("flash/yeet/services/n");
+});
+
+test("web run shows ZFS placeholder before service is named", async ({ page }) => {
+  await page.setContent(pageHTML({ prefill: { service: "", payload: "nginx:latest" } }), { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => document.querySelector("#zfs")?.checked === true);
+
+  await expect(page.locator("#serviceRoot")).toHaveValue("");
+  await expect(page.locator("#serviceRoot")).toHaveAttribute("placeholder", "flash/yeet/services/<service>");
+  await expect(page.locator("#commandPreview")).not.toContainText("--zfs");
+  expect(await page.evaluate(() => window.__validateRequests || 0)).toBe(0);
+
+  await page.fill("#service", "nginx");
+  await page.waitForFunction(() => document.querySelector("#serviceRoot")?.value === "flash/yeet/services/nginx");
+  await expect(page.locator("#zfs")).toBeChecked();
 });

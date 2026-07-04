@@ -186,10 +186,11 @@ type ServiceRootDefaultsRequest struct {
 }
 
 type ServiceRootDefaultsResponse struct {
-	ServiceRoot    string   `json:"serviceRoot,omitempty"`
-	ServiceRootZFS string   `json:"serviceRootZfs,omitempty"`
-	ZFS            bool     `json:"zfs,omitempty"`
-	Warnings       []string `json:"warnings,omitempty"`
+	ServiceRoot            string   `json:"serviceRoot,omitempty"`
+	ServiceRootZFS         string   `json:"serviceRootZfs,omitempty"`
+	ServiceRootPlaceholder string   `json:"serviceRootPlaceholder,omitempty"`
+	ZFS                    bool     `json:"zfs,omitempty"`
+	Warnings               []string `json:"warnings,omitempty"`
 }
 
 const (

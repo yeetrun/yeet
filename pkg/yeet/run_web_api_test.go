@@ -219,6 +219,13 @@ func TestRunWebAPIHostStorageUsesSelectedHost(t *testing.T) {
 	fetchRunWebServiceRootDefaultsFn = func(ctx context.Context, host string, req catchrpc.ServiceRootDefaultsRequest) (catchrpc.ServiceRootDefaultsResponse, error) {
 		gotDefaultHost = host
 		gotDefaultReq = req
+		if strings.TrimSpace(req.Service) == "" {
+			return catchrpc.ServiceRootDefaultsResponse{
+				ServiceRoot:    "flash/yeet/services/",
+				ServiceRootZFS: "flash/yeet/services/",
+				ZFS:            true,
+			}, nil
+		}
 		return catchrpc.ServiceRootDefaultsResponse{
 			ServiceRoot:    "flash/yeet/services/nginx",
 			ServiceRootZFS: "flash/yeet/services/nginx",
@@ -260,12 +267,66 @@ func TestRunWebAPIHostStorageUsesSelectedHost(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIHostStorageUsesZFSPlaceholderBeforeServiceName(t *testing.T) {
+	oldFetch := fetchRunWebHostStorageInfoFn
+	oldFetchDefaults := fetchRunWebServiceRootDefaultsFn
+	defer func() {
+		fetchRunWebHostStorageInfoFn = oldFetch
+		fetchRunWebServiceRootDefaultsFn = oldFetchDefaults
+	}()
+
+	var gotDefaultReq catchrpc.ServiceRootDefaultsRequest
+	fetchRunWebHostStorageInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{
+			RootDir:     "/flash/yeet/data",
+			ServicesDir: "/flash/yeet/services",
+		}, nil
+	}
+	fetchRunWebServiceRootDefaultsFn = func(ctx context.Context, host string, req catchrpc.ServiceRootDefaultsRequest) (catchrpc.ServiceRootDefaultsResponse, error) {
+		gotDefaultReq = req
+		return catchrpc.ServiceRootDefaultsResponse{
+			ServiceRoot:    "flash/yeet/services/",
+			ServiceRootZFS: "flash/yeet/services/",
+			ZFS:            true,
+		}, nil
+	}
+	s := newRunWebServer(runWebServerConfig{
+		Token:     "secret",
+		Root:      t.TempDir(),
+		Bootstrap: runWebBootstrap{SelectedHost: "yeet-lab"},
+	})
+	rec := runWebAPIRequest(t, s, http.MethodGet, "/api/host-storage?workload=compose", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("host storage status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotDefaultReq.Service != "" {
+		t.Fatalf("default request service = %q, want blank", gotDefaultReq.Service)
+	}
+	var body runWebHostStorageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Defaults.ServiceRoot != "" || body.Defaults.ServiceRootZFS != "flash/yeet/services" || !body.Defaults.ZFS {
+		t.Fatalf("defaults = %#v, want blank value with ZFS services dataset", body.Defaults)
+	}
+	if body.Defaults.ServiceRootPlaceholder != "flash/yeet/services/<service>" {
+		t.Fatalf("placeholder = %q, want flash/yeet/services/<service>", body.Defaults.ServiceRootPlaceholder)
+	}
+}
+
 func TestRunWebAPIHostStorageDerivesServicesRootFromDataDir(t *testing.T) {
 	oldFetch := fetchRunWebHostStorageInfoFn
-	defer func() { fetchRunWebHostStorageInfoFn = oldFetch }()
+	oldFetchDefaults := fetchRunWebServiceRootDefaultsFn
+	defer func() {
+		fetchRunWebHostStorageInfoFn = oldFetch
+		fetchRunWebServiceRootDefaultsFn = oldFetchDefaults
+	}()
 
 	fetchRunWebHostStorageInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
 		return serverInfo{RootDir: "/srv/yeet-data"}, nil
+	}
+	fetchRunWebServiceRootDefaultsFn = func(ctx context.Context, host string, req catchrpc.ServiceRootDefaultsRequest) (catchrpc.ServiceRootDefaultsResponse, error) {
+		return catchrpc.ServiceRootDefaultsResponse{}, nil
 	}
 	s := newRunWebServer(runWebServerConfig{
 		Token:     "secret",
@@ -282,6 +343,9 @@ func TestRunWebAPIHostStorageDerivesServicesRootFromDataDir(t *testing.T) {
 	}
 	if body.State != "available" || body.Storage.ServicesRoot != "/srv/yeet-data/services" {
 		t.Fatalf("response = %#v, want services root derived from data dir", body)
+	}
+	if body.Defaults.ServiceRoot != "" || body.Defaults.ServiceRootPlaceholder != "/srv/yeet-data/services/<service>" || body.Defaults.ZFS {
+		t.Fatalf("defaults = %#v, want filesystem placeholder", body.Defaults)
 	}
 }
 
@@ -382,6 +446,59 @@ func TestRunWebAPIHostStorageTreatsUnclassifiedDefaultsRPCAsLegacy(t *testing.T)
 	}
 	if body.Defaults.ServiceRoot != "flash/yeet/services/nginx" || !body.Defaults.ZFS || len(body.Warnings) != 0 {
 		t.Fatalf("defaults = %#v warnings=%v, want legacy ZFS root without warnings", body.Defaults, body.Warnings)
+	}
+}
+
+func TestRunWebAPIHostStorageInfersLegacyZFSPlaceholderBeforeServiceName(t *testing.T) {
+	oldFetch := fetchRunWebHostStorageInfoFn
+	oldFetchDefaults := fetchRunWebServiceRootDefaultsFn
+	oldFetchZFS := fetchRunWebZFSRootCandidatesFn
+	defer func() {
+		fetchRunWebHostStorageInfoFn = oldFetch
+		fetchRunWebServiceRootDefaultsFn = oldFetchDefaults
+		fetchRunWebZFSRootCandidatesFn = oldFetchZFS
+	}()
+
+	fetchRunWebHostStorageInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{
+			RootDir:     "/flash/yeet/data",
+			ServicesDir: "/flash/yeet/services",
+		}, nil
+	}
+	fetchRunWebServiceRootDefaultsFn = func(ctx context.Context, host string, req catchrpc.ServiceRootDefaultsRequest) (catchrpc.ServiceRootDefaultsResponse, error) {
+		return catchrpc.ServiceRootDefaultsResponse{}, errors.New(`unauthorized connection: unclassified RPC method "catch.ServiceRootDefaults"`)
+	}
+	fetchRunWebZFSRootCandidatesFn = func(ctx context.Context, host string, req catchrpc.ZFSServiceRootCandidatesRequest) (catchrpc.ZFSServiceRootCandidatesResponse, error) {
+		if req.Service != "" {
+			t.Fatalf("zfs request = %#v, want blank service", req)
+		}
+		return catchrpc.ZFSServiceRootCandidatesResponse{
+			State: catchrpc.ZFSRootDiscoveryAvailable,
+			Candidates: []catchrpc.ZFSServiceRootCandidate{{
+				Dataset:          "flash/yeet/services",
+				Mountpoint:       "/flash/yeet/services",
+				SuggestedDataset: "flash/yeet/services/",
+			}},
+		}, nil
+	}
+	s := newRunWebServer(runWebServerConfig{
+		Token:     "secret",
+		Root:      t.TempDir(),
+		Bootstrap: runWebBootstrap{SelectedHost: "yeet-lab"},
+	})
+	rec := runWebAPIRequest(t, s, http.MethodGet, "/api/host-storage", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("host storage status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body runWebHostStorageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Defaults.ServiceRoot != "" || body.Defaults.ServiceRootZFS != "flash/yeet/services" || !body.Defaults.ZFS || len(body.Warnings) != 0 {
+		t.Fatalf("defaults = %#v warnings=%v, want blank legacy ZFS placeholder default", body.Defaults, body.Warnings)
+	}
+	if body.Defaults.ServiceRootPlaceholder != "flash/yeet/services/<service>" {
+		t.Fatalf("placeholder = %q, want flash/yeet/services/<service>", body.Defaults.ServiceRootPlaceholder)
 	}
 }
 
