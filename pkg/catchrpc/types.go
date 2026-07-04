@@ -179,6 +179,19 @@ type VMDefaultsResponse struct {
 	Warnings    []string `json:"warnings,omitempty"`
 }
 
+const RPCMethodServiceRootDefaults = "catch.ServiceRootDefaults"
+
+type ServiceRootDefaultsRequest struct {
+	Service string `json:"service,omitempty"`
+}
+
+type ServiceRootDefaultsResponse struct {
+	ServiceRoot    string   `json:"serviceRoot,omitempty"`
+	ServiceRootZFS string   `json:"serviceRootZfs,omitempty"`
+	ZFS            bool     `json:"zfs,omitempty"`
+	Warnings       []string `json:"warnings,omitempty"`
+}
+
 const (
 	RPCMethodHostStoragePlan  = "catch.HostStoragePlan"
 	RPCMethodHostStorageApply = "catch.HostStorageApply"

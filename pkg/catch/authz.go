@@ -169,7 +169,7 @@ func (s *Server) callerPermissions(ctx context.Context, remoteAddr string) (perm
 
 func rpcMethodPermissions(method string) (permissionSet, error) {
 	switch method {
-	case "catch.Info", "catch.ServiceInfo", "catch.ArtifactHashes", "catch.ZFSServiceRootCandidates", "catch.VMDefaults", "catch.ServicesList":
+	case "catch.Info", "catch.ServiceInfo", "catch.ArtifactHashes", "catch.ZFSServiceRootCandidates", catchrpc.RPCMethodServiceRootDefaults, "catch.VMDefaults", "catch.ServicesList":
 		return newPermissionSet(permissionRead), nil
 	case catchrpc.RPCMethodHostStoragePlan, catchrpc.RPCMethodHostStorageApply:
 		return newPermissionSet(permissionManage), nil

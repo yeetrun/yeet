@@ -378,6 +378,51 @@ func TestRPCVMDefaults(t *testing.T) {
 	}
 }
 
+func TestRPCServiceRootDefaults(t *testing.T) {
+	server := newTestServer(t)
+	server.zfsRunner = fakeZFSRunner(map[string]fakeZFSDataset{
+		"flash/yeet/services": {Mountpoint: server.cfg.ServicesRoot, Exists: true},
+	}).Run
+
+	params, err := json.Marshal(catchrpc.ServiceRootDefaultsRequest{Service: "nginx"})
+	if err != nil {
+		t.Fatalf("marshal params: %v", err)
+	}
+	req := catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  catchrpc.RPCMethodServiceRootDefaults,
+		Params:  params,
+	}
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	ts := httptest.NewServer(server.RPCMux())
+	defer ts.Close()
+	resp, err := http.Post(ts.URL+"/rpc", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var rpcResp catchrpc.Response
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if rpcResp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", rpcResp.Error)
+	}
+	var defaults catchrpc.ServiceRootDefaultsResponse
+	b, _ := json.Marshal(rpcResp.Result)
+	if err := json.Unmarshal(b, &defaults); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if defaults.ServiceRoot != "flash/yeet/services/nginx" || !defaults.ZFS {
+		t.Fatalf("defaults = %#v, want ZFS nginx service root", defaults)
+	}
+}
+
 func TestRPCMethodNotFound(t *testing.T) {
 	server := newTestServer(t)
 	ts := httptest.NewServer(server.RPCMux())
@@ -557,6 +602,8 @@ func TestRPCMethodAuthorization(t *testing.T) {
 	}{
 		{name: "info requires read", method: "catch.Info", have: newPermissionSet(permissionRead), wantStatus: http.StatusOK},
 		{name: "info denied without read", method: "catch.Info", have: newPermissionSet(permissionManage), wantStatus: http.StatusUnauthorized, wantBody: `missing yeet permission "read"`},
+		{name: "service root defaults requires read", method: catchrpc.RPCMethodServiceRootDefaults, have: newPermissionSet(permissionRead), wantStatus: http.StatusOK},
+		{name: "service root defaults denied without read", method: catchrpc.RPCMethodServiceRootDefaults, have: newPermissionSet(permissionManage), wantStatus: http.StatusUnauthorized, wantBody: `missing yeet permission "read"`},
 		{name: "tailscale setup requires full admin permissions", method: "catch.TailscaleSetup", have: newPermissionSet(permissionRead, permissionManage, permissionSSH), wantStatus: http.StatusOK},
 		{name: "tailscale setup denied without manage", method: "catch.TailscaleSetup", have: newPermissionSet(permissionRead, permissionSSH), wantStatus: http.StatusUnauthorized, wantBody: `missing yeet permission "manage"`},
 		{name: "tailscale setup denied without ssh", method: "catch.TailscaleSetup", have: newPermissionSet(permissionRead, permissionManage), wantStatus: http.StatusUnauthorized, wantBody: `missing yeet permission "ssh"`},
@@ -570,6 +617,13 @@ func TestRPCMethodAuthorization(t *testing.T) {
 			req := catchrpc.Request{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: tt.method}
 			if tt.method == "catch.TailscaleSetup" {
 				params, err := json.Marshal(catchrpc.TailscaleSetupRequest{ClientSecret: "tskey-client-test"})
+				if err != nil {
+					t.Fatalf("marshal params: %v", err)
+				}
+				req.Params = params
+			}
+			if tt.method == catchrpc.RPCMethodServiceRootDefaults {
+				params, err := json.Marshal(catchrpc.ServiceRootDefaultsRequest{Service: "nginx"})
 				if err != nil {
 					t.Fatalf("marshal params: %v", err)
 				}

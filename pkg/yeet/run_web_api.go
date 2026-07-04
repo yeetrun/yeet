@@ -165,7 +165,9 @@ func (s *runWebServer) handleHostStorage(w http.ResponseWriter, r *http.Request)
 	}
 	ctx, cancel := runWebHandlerContext(s.cfg.Context, r.Context())
 	defer cancel()
-	writeRunWebJSON(w, http.StatusOK, runWebHostStorageResponseForHost(ctx, host))
+	writeRunWebJSON(w, http.StatusOK, runWebHostStorageResponseForHost(ctx, host, catchrpc.ServiceRootDefaultsRequest{
+		Service: r.URL.Query().Get("service"),
+	}))
 }
 
 func (s *runWebServer) handleZFSRoots(w http.ResponseWriter, r *http.Request) {
