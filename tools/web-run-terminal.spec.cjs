@@ -15,7 +15,9 @@ function readAsset(name) {
 
 function mockRuntimeScript(options = {}) {
   const prefill = options.prefill || { service: "nginx", payload: "nginx:latest" };
+  const delayedHostStorageServices = options.delayedHostStorageServices || [];
   return `
+    const delayedHostStorageServices = new Set(${JSON.stringify(delayedHostStorageServices)});
     function json(data, status = 200) {
       return new Response(JSON.stringify(data), {
         status,
@@ -30,6 +32,13 @@ function mockRuntimeScript(options = {}) {
       let binary = "";
       for (const byte of bytes) binary += String.fromCharCode(byte);
       return btoa(binary);
+    }
+    function hostStorageResponse(service, data) {
+      if (!delayedHostStorageServices.has(service)) return json(data);
+      window.__pendingHostStorage = window.__pendingHostStorage || {};
+      return new Promise((resolve) => {
+        window.__pendingHostStorage[service] = () => resolve(json(data));
+      });
     }
     window.fetch = async (url) => {
       const target = String(url);
@@ -48,7 +57,7 @@ function mockRuntimeScript(options = {}) {
         const service = request.searchParams.get("service") || "";
         const storage = { dataDir: "/flash/yeet/data", servicesRoot: "/flash/yeet/services" };
         if (!service) {
-          return json({
+          return hostStorageResponse(service, {
             state: "available",
             storage,
             defaults: {
@@ -59,7 +68,7 @@ function mockRuntimeScript(options = {}) {
           });
         }
         const serviceRoot = "flash/yeet/services/" + service;
-        return json({
+        return hostStorageResponse(service, {
           state: "available",
           storage,
           defaults: { serviceRoot, serviceRootZfs: serviceRoot, zfs: true },
@@ -170,4 +179,33 @@ test("web run shows ZFS placeholder before service is named", async ({ page }) =
   await page.fill("#service", "nginx");
   await page.waitForFunction(() => document.querySelector("#serviceRoot")?.value === "flash/yeet/services/nginx");
   await expect(page.locator("#zfs")).toBeChecked();
+});
+
+test("web run derives ZFS service root while service defaults are loading", async ({ page }) => {
+  await page.setContent(pageHTML({
+    prefill: { service: "", payload: "nginx:latest" },
+    delayedHostStorageServices: ["n"],
+  }), { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => document.querySelector("#zfs")?.checked === true);
+  await expect(page.locator("#serviceRoot")).toHaveAttribute("placeholder", "flash/yeet/services/<service>");
+
+  await page.fill("#service", "n");
+
+  expect(await page.evaluate(() => Boolean(window.__pendingHostStorage?.n))).toBe(true);
+  expect(await page.locator("#serviceRoot").inputValue()).toBe("flash/yeet/services/n");
+  expect(await page.locator("#commandPreview").textContent()).toContain("--service-root=flash/yeet/services/n --zfs");
+});
+
+test("web run derives ZFS service root from a previous auto default while loading", async ({ page }) => {
+  await page.setContent(pageHTML({
+    prefill: { service: "nginx", payload: "nginx:latest" },
+    delayedHostStorageServices: ["n"],
+  }), { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => document.querySelector("#serviceRoot")?.value === "flash/yeet/services/nginx");
+
+  await page.fill("#service", "n");
+
+  expect(await page.evaluate(() => Boolean(window.__pendingHostStorage?.n))).toBe(true);
+  expect(await page.locator("#serviceRoot").inputValue()).toBe("flash/yeet/services/n");
+  expect(await page.locator("#commandPreview").textContent()).toContain("--service-root=flash/yeet/services/n --zfs");
 });

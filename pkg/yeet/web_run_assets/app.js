@@ -28,7 +28,10 @@ const state = {
   hostStorageSeq: 0,
   hostStorageKey: "",
   hostStorageDefaultsKey: "",
+  hostStorageResponseKey: "",
+  hostStorageBaseKey: "",
   hostStorageState: null,
+  hostStorageBaseState: null,
   zfsRootSeq: 0,
   zfsRootKey: "",
   zfsRootState: null,
@@ -553,11 +556,15 @@ function ensureVMNetworkSelection(clearedMode = "") {
 }
 
 function hostStorageRequestKey() {
-  return [
-    $("host").value.trim(),
-    selectedWorkload(),
-    $("service").value.trim(),
-  ].join("\n");
+  return `${hostStorageContextKey()}\n${$("service").value.trim()}`;
+}
+
+function hostStorageContextKey() {
+  return hostStorageContextKeyFor($("host").value.trim(), selectedWorkload());
+}
+
+function hostStorageContextKeyFor(host, workload) {
+  return [host, workload].join("\n");
 }
 
 function syncHostStorage() {
@@ -570,8 +577,12 @@ function syncHostStorage() {
 async function loadHostStorage(key) {
   const seq = ++state.hostStorageSeq;
   const [host, workload, service] = key.split("\n");
+  const contextKey = hostStorageContextKeyFor(host, workload);
+  state.hostStorageResponseKey = key;
   if (!host) {
     state.hostStorageState = { state: "error", warnings: ["Choose a host"] };
+    state.hostStorageBaseState = null;
+    state.hostStorageBaseKey = "";
     updateServiceRootPlaceholder();
     return;
   }
@@ -583,9 +594,12 @@ async function loadHostStorage(key) {
     if (seq !== state.hostStorageSeq) return;
     if (!res.ok) throw new Error(await res.text());
     state.hostStorageState = await res.json();
+    state.hostStorageResponseKey = key;
+    rememberHostStorageBase(state.hostStorageState, contextKey, service);
   } catch (err) {
     if (seq !== state.hostStorageSeq) return;
     state.hostStorageState = { state: "error", warnings: [String(err)] };
+    state.hostStorageResponseKey = key;
   }
   applyHostStorageDefaults();
   updateServiceRootPlaceholder();
@@ -594,10 +608,11 @@ async function loadHostStorage(key) {
 
 function applyHostStorageDefaults() {
   const key = hostStorageRequestKey();
-  if (state.hostStorageDefaultsKey === key) return;
   const defaults = hostStorageAutoDefaults();
   if (!defaults) return;
-  state.hostStorageDefaultsKey = key;
+  const defaultsKey = `${key}\n${defaults.sourceKey || ""}`;
+  if (state.hostStorageDefaultsKey === defaultsKey) return;
+  state.hostStorageDefaultsKey = defaultsKey;
   if (state.serviceRootManual || state.zfsManual) return;
   $("serviceRoot").value = defaults.serviceRoot;
   if (defaults.zfs !== null) {
@@ -607,17 +622,125 @@ function applyHostStorageDefaults() {
 }
 
 function hostStorageAutoDefaults() {
-  const defaults = state.hostStorageState?.defaults || {};
+  const { defaults, sourceKey } = hostStorageDefaultsForCurrentService();
   if (defaults.serviceRoot) {
-    return { serviceRoot: defaults.serviceRoot, zfs: Boolean(defaults.zfs) };
+    return { serviceRoot: defaults.serviceRoot, zfs: Boolean(defaults.zfs), sourceKey };
   }
   if (defaults.serviceRootPlaceholder) {
-    return { serviceRoot: "", zfs: Boolean(defaults.zfs) };
+    return { serviceRoot: "", zfs: Boolean(defaults.zfs), sourceKey };
   }
-  if (state.hostStorageState?.state === "available" && !$("service").value.trim() && !state.pickedZFSRoot) {
-    return { serviceRoot: "", zfs: null };
+  if (effectiveHostStorageState()?.state === "available" && !$("service").value.trim() && !state.pickedZFSRoot) {
+    return { serviceRoot: "", zfs: null, sourceKey };
   }
   return null;
+}
+
+function hostStorageResponseForCurrentRequest() {
+  if (state.hostStorageResponseKey !== hostStorageRequestKey()) return null;
+  return state.hostStorageState;
+}
+
+function hostStorageBaseForCurrentContext() {
+  if (state.hostStorageBaseKey !== hostStorageContextKey()) return null;
+  return state.hostStorageBaseState;
+}
+
+function effectiveHostStorageState() {
+  const response = hostStorageResponseForCurrentRequest();
+  if (response?.state === "available") return response;
+  const base = hostStorageBaseForCurrentContext();
+  if (base?.state === "available") return base;
+  return response || base || null;
+}
+
+function hostStorageDefaultsForCurrentService() {
+  const response = hostStorageResponseForCurrentRequest();
+  if (response?.state === "available") {
+    return { defaults: response.defaults || {}, sourceKey: `response:${state.hostStorageResponseKey}` };
+  }
+  const base = hostStorageBaseForCurrentContext();
+  if (base?.state === "available") {
+    return {
+      defaults: deriveHostStorageDefaults(base.defaults || {}, $("service").value.trim()),
+      sourceKey: `base:${state.hostStorageBaseKey}:${$("service").value.trim()}`,
+    };
+  }
+  return { defaults: {}, sourceKey: "" };
+}
+
+function deriveHostStorageDefaults(defaults, service) {
+  const derived = { ...defaults };
+  const name = service.trim();
+  if (!name) {
+    derived.serviceRoot = "";
+    return derived;
+  }
+  let serviceRoot = serviceRootFromPlaceholder(derived.serviceRootPlaceholder, name);
+  if (!serviceRoot && derived.zfs && derived.serviceRootZfs) {
+    serviceRoot = serviceRootPath(derived.serviceRootZfs, name);
+  }
+  if (!serviceRoot) return derived;
+  derived.serviceRoot = serviceRoot;
+  if (derived.zfs) derived.serviceRootZfs = serviceRoot;
+  return derived;
+}
+
+function serviceRootFromPlaceholder(pattern, service) {
+  pattern = (pattern || "").trim();
+  service = service.trim();
+  if (!pattern || !service || !pattern.includes("<service>")) return "";
+  return pattern.split("<service>").join(service);
+}
+
+function rememberHostStorageBase(response, contextKey, service) {
+  const base = hostStorageBaseStateFromResponse(response, service);
+  if (!base) return;
+  state.hostStorageBaseState = base;
+  state.hostStorageBaseKey = contextKey;
+}
+
+function hostStorageBaseStateFromResponse(response, service) {
+  if (response?.state !== "available") return null;
+  const defaults = response.defaults || {};
+  if (defaults.serviceRootPlaceholder) {
+    return {
+      ...response,
+      defaults: {
+        ...defaults,
+        serviceRoot: "",
+      },
+    };
+  }
+  const serviceRoot = defaults.serviceRoot || defaults.serviceRootZfs || "";
+  const placeholder = serviceRootPlaceholderForService(serviceRoot, service);
+  if (!placeholder) return null;
+  const baseDefaults = {
+    ...defaults,
+    serviceRoot: "",
+    serviceRootPlaceholder: placeholder,
+  };
+  if (baseDefaults.zfs) {
+    const zfsRoot = serviceRootBaseForService(defaults.serviceRootZfs || defaults.serviceRoot, service);
+    if (zfsRoot) baseDefaults.serviceRootZfs = zfsRoot;
+  }
+  return {
+    ...response,
+    defaults: baseDefaults,
+  };
+}
+
+function serviceRootPlaceholderForService(root, service) {
+  const base = serviceRootBaseForService(root, service);
+  return base ? serviceRootPath(base, "<service>") : "";
+}
+
+function serviceRootBaseForService(root, service) {
+  root = trimRemoteRoot(root);
+  service = service.trim();
+  if (!root || !service) return "";
+  const suffix = `/${service}`;
+  if (root.endsWith(suffix)) return root.slice(0, -suffix.length) || "/";
+  return "";
 }
 
 function trimRemoteRoot(root) {
@@ -625,7 +748,7 @@ function trimRemoteRoot(root) {
 }
 
 function defaultServicesRoot() {
-  return trimRemoteRoot(state.hostStorageState?.storage?.servicesRoot || "");
+  return trimRemoteRoot(effectiveHostStorageState()?.storage?.servicesRoot || "");
 }
 
 function serviceRootPath(root, service) {
@@ -637,7 +760,7 @@ function serviceRootPath(root, service) {
 function defaultServiceRootPlaceholder() {
   const service = $("service").value.trim() || "<service>";
   if ($("zfs").checked) {
-    const defaults = state.hostStorageState?.defaults || {};
+    const { defaults } = hostStorageDefaultsForCurrentService();
     if (defaults.serviceRootPlaceholder) return defaults.serviceRootPlaceholder;
     if (defaults.serviceRoot) return defaults.serviceRoot;
     if (defaults.serviceRootZfs) {
@@ -1558,6 +1681,7 @@ function update() {
   syncWorkloadUI();
   syncNetworkUI();
   syncHostStorage();
+  applyHostStorageDefaults();
   updateServiceRootPlaceholder();
   syncZFSRootPicker();
   syncVMDefaults();
