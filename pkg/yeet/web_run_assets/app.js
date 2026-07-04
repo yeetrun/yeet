@@ -593,13 +593,26 @@ async function loadHostStorage(key) {
 function applyHostStorageDefaults() {
   const key = hostStorageRequestKey();
   if (state.hostStorageDefaultsKey === key) return;
-  const defaults = state.hostStorageState?.defaults || {};
-  if (!defaults.serviceRoot) return;
+  const defaults = hostStorageAutoDefaults();
+  if (!defaults) return;
   state.hostStorageDefaultsKey = key;
   if (state.serviceRootManual || state.zfsManual) return;
   $("serviceRoot").value = defaults.serviceRoot;
-  $("zfs").checked = Boolean(defaults.zfs);
-  if (!defaults.zfs) state.pickedZFSRoot = null;
+  if (defaults.zfs !== null) {
+    $("zfs").checked = defaults.zfs;
+    if (!defaults.zfs) state.pickedZFSRoot = null;
+  }
+}
+
+function hostStorageAutoDefaults() {
+  const defaults = state.hostStorageState?.defaults || {};
+  if (defaults.serviceRoot) {
+    return { serviceRoot: defaults.serviceRoot, zfs: Boolean(defaults.zfs) };
+  }
+  if (state.hostStorageState?.state === "available" && !$("service").value.trim() && !state.pickedZFSRoot) {
+    return { serviceRoot: "", zfs: null };
+  }
+  return null;
 }
 
 function trimRemoteRoot(root) {
