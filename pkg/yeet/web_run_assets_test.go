@@ -368,6 +368,40 @@ func TestWebRunZFSRootPickerOpensFromServiceRootField(t *testing.T) {
 	}
 }
 
+func TestWebRunServiceRootPlaceholderUsesHostStorageDefaults(t *testing.T) {
+	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
+	if err != nil {
+		t.Fatalf("read app: %v", err)
+	}
+	source := string(app)
+
+	for _, snippet := range []string{
+		"hostStorageSeq",
+		"hostStorageKey",
+		"hostStorageState",
+		"function syncHostStorage()",
+		"async function loadHostStorage(key)",
+		"/api/host-storage?",
+		"function defaultServicesRoot()",
+		"function defaultServiceRootPlaceholder()",
+		"function serviceRootHelpText()",
+		"Leave empty to use",
+		"selected catch host's default services root",
+	} {
+		if !strings.Contains(source, snippet) {
+			t.Fatalf("app missing host storage default behavior %s", snippet)
+		}
+	}
+	for _, forbidden := range []string{
+		"`/root/data/services/${service}`",
+		`"/root/data/services/"`,
+	} {
+		if strings.Contains(source, forbidden) {
+			t.Fatalf("app still hardcodes legacy services root placeholder %s", forbidden)
+		}
+	}
+}
+
 func TestWebRunPayloadArgsOnlyShowForRunnableFilesAndCron(t *testing.T) {
 	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
 	if err != nil {

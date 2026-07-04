@@ -59,6 +59,7 @@ func newRunWebServer(cfg runWebServerConfig) http.Handler {
 	s := &runWebServer{cfg: cfg, mux: http.NewServeMux()}
 	s.mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
 	s.mux.HandleFunc("/api/files", s.handleFiles)
+	s.mux.HandleFunc("/api/host-storage", s.handleHostStorage)
 	s.mux.HandleFunc("/api/zfs-roots", s.handleZFSRoots)
 	s.mux.HandleFunc("/api/vm-defaults", s.handleVMDefaults)
 	s.mux.HandleFunc("/api/validate", s.handleValidate)
@@ -151,6 +152,20 @@ func (s *runWebServer) handleFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeRunWebJSON(w, http.StatusOK, files)
+}
+
+func (s *runWebServer) handleHostStorage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	host := strings.TrimSpace(r.URL.Query().Get("host"))
+	if host == "" {
+		host = s.cfg.Bootstrap.SelectedHost
+	}
+	ctx, cancel := runWebHandlerContext(s.cfg.Context, r.Context())
+	defer cancel()
+	writeRunWebJSON(w, http.StatusOK, runWebHostStorageResponseForHost(ctx, host))
 }
 
 func (s *runWebServer) handleZFSRoots(w http.ResponseWriter, r *http.Request) {

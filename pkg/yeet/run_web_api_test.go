@@ -198,6 +198,117 @@ func TestRunWebAPIZFSRootsRejectsBadMethods(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIHostStorageUsesSelectedHost(t *testing.T) {
+	oldFetch := fetchRunWebHostStorageInfoFn
+	defer func() { fetchRunWebHostStorageInfoFn = oldFetch }()
+
+	var gotHost string
+	fetchRunWebHostStorageInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		gotHost = host
+		return serverInfo{
+			RootDir:     "/flash/yeet/data",
+			ServicesDir: "/flash/yeet/services",
+		}, nil
+	}
+	s := newRunWebServer(runWebServerConfig{
+		Token:     "secret",
+		Root:      t.TempDir(),
+		Bootstrap: runWebBootstrap{SelectedHost: "yeet-lab"},
+	})
+	rec := runWebAPIRequest(t, s, http.MethodGet, "/api/host-storage", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("host storage status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotHost != "yeet-lab" {
+		t.Fatalf("host = %q, want yeet-lab", gotHost)
+	}
+	var body runWebHostStorageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.State != "available" || body.Storage.DataDir != "/flash/yeet/data" || body.Storage.ServicesRoot != "/flash/yeet/services" {
+		t.Fatalf("response = %#v, want available flash storage", body)
+	}
+
+	rec = runWebAPIRequest(t, s, http.MethodGet, "/api/host-storage?host=yeet-storage", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("host storage explicit host status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if gotHost != "yeet-storage" {
+		t.Fatalf("explicit host = %q, want yeet-storage", gotHost)
+	}
+}
+
+func TestRunWebAPIHostStorageDerivesServicesRootFromDataDir(t *testing.T) {
+	oldFetch := fetchRunWebHostStorageInfoFn
+	defer func() { fetchRunWebHostStorageInfoFn = oldFetch }()
+
+	fetchRunWebHostStorageInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{RootDir: "/srv/yeet-data"}, nil
+	}
+	s := newRunWebServer(runWebServerConfig{
+		Token:     "secret",
+		Root:      t.TempDir(),
+		Bootstrap: runWebBootstrap{SelectedHost: "yeet-lab"},
+	})
+	rec := runWebAPIRequest(t, s, http.MethodGet, "/api/host-storage", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("host storage status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var body runWebHostStorageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.State != "available" || body.Storage.ServicesRoot != "/srv/yeet-data/services" {
+		t.Fatalf("response = %#v, want services root derived from data dir", body)
+	}
+}
+
+func TestRunWebAPIHostStorageMapsErrorsToStates(t *testing.T) {
+	oldFetch := fetchRunWebHostStorageInfoFn
+	defer func() { fetchRunWebHostStorageInfoFn = oldFetch }()
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "host unreachable", err: syscall.ECONNREFUSED, want: "host-unreachable"},
+		{name: "other error", err: errors.New("permission denied"), want: "error"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetchRunWebHostStorageInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+				return serverInfo{}, tt.err
+			}
+			s := newRunWebServer(runWebServerConfig{
+				Token:     "secret",
+				Root:      t.TempDir(),
+				Bootstrap: runWebBootstrap{SelectedHost: "yeet-lab"},
+			})
+			rec := runWebAPIRequest(t, s, http.MethodGet, "/api/host-storage", nil)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+			}
+			var body runWebHostStorageResponse
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if body.State != tt.want {
+				t.Fatalf("state = %q, want %q body=%#v", body.State, tt.want, body)
+			}
+		})
+	}
+}
+
+func TestRunWebAPIHostStorageRejectsBadMethods(t *testing.T) {
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/host-storage", nil)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405 body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRunWebAPIVMDefaultsUsesSelectedHost(t *testing.T) {
 	oldFetch := fetchRunWebVMDefaultsFn
 	defer func() { fetchRunWebVMDefaultsFn = oldFetch }()
