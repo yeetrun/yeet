@@ -1,176 +1,176 @@
-<div align="center">
-  <a href="https://yeetrun.com">
-    <img src="https://github.com/yeetrun.png" alt="yeet logo" width="140" height="140">
-  </a>
-  <h1>yeet</h1>
-  <p>Run services and VMs on your own Linux hosts from your workstation.</p>
-  <p>
-    <a href="https://yeetrun.com"><strong>yeetrun.com</strong></a>
-    · <a href="https://yeetrun.com/docs/getting-started/quick-start">Quick Start</a>
-    · <a href="https://yeetrun.com/docs/getting-started/installation">Install</a>
-    · <a href="https://yeetrun.com/docs">Docs</a>
-  </p>
-</div>
+# yeet
 
-Yeet is a CLI for deploying and operating services on Linux hosts you control.
-You run `yeet` locally. `yeet init` installs the `catch` daemon on a host over
-SSH. After setup, yeet talks to catch through Tailscale.
+Run services and VMs on Linux hosts you control, from the workstation you already use.
 
-Use yeet for:
+The normal way to deploy small infrastructure is to accidentally build a platform. You start with SSH, then add shell scripts, then add a deploy box, then add a secrets story, then add a dashboard, then discover that your dashboard is mostly a slower way to run SSH.
 
-- Docker Compose stacks and container images.
-- Local Dockerfiles and locally built images.
-- Linux binaries and scripts.
-- Cron jobs.
-- Linux VMs on KVM-capable hosts.
+`yeet` tries not to do that.
 
-Yeet fits single-operator homelabs and small private infrastructure. It expects
-Linux hosts with systemd. Services currently run as root-owned systemd units on
-the catch host.
+You run `yeet` locally. It installs a small daemon called `catch` on a Linux host. After that, commands go over Tailscale to the host, and catch turns them into boring Linux things: systemd units, Docker Compose projects, containers, cron jobs, files, and VMs.
 
-## Quick Start
+Not magic. Just fewer places for state to hide.
 
-This path installs yeet locally, bootstraps one host, creates a service
-workspace, and runs a disposable container.
+<p>
+  <a href="https://yeetrun.com"><strong>yeetrun.com</strong></a>
+  · <a href="https://yeetrun.com/docs/getting-started/quick-start">Quick Start</a>
+  · <a href="https://yeetrun.com/docs/getting-started/installation">Install</a>
+  · <a href="https://yeetrun.com/docs">Docs</a>
+</p>
 
-### 1. Install yeet locally
+## What yeet is for
 
-Run this on your workstation:
+Use yeet when you have one or more Linux hosts and you want to run real services without turning your homelab into a miniature cloud provider.
 
-```bash
-curl -fsSL https://yeetrun.com/install.sh | sh
-```
+Yeet can deploy:
 
-To install the nightly build instead:
+- Docker Compose stacks
+- Container images
+- Local Dockerfiles
+- Linux binaries
+- Shell scripts
+- Cron jobs
+- Linux VMs on KVM-capable hosts
 
-```bash
-curl -fsSL https://yeetrun.com/install.sh | sh -s -- --nightly
-```
+It fits single-operator homelabs and small private infrastructure. It expects Linux hosts with systemd. Services currently run as root-owned systemd units on the catch host.
 
-Confirm the CLI is available:
+That last sentence is important. Yeet is for hosts you control. It is not a multi-tenant platform, and pretending otherwise would be how we get a very exciting security incident.
 
-```bash
-yeet --help
-```
+## The model
 
-### 2. Prepare Tailscale access
+There are two moving parts:
 
-Do this before running `yeet init`. Catch must join your tailnet as a tagged
-device, usually `tag:catch`. User-owned catch nodes are rejected.
+- `yeet`: the CLI on your workstation.
+- `catch`: the daemon on each Linux host you manage.
 
-Your tailnet policy must also allow the setup user to reach catch on TCP port
-`41548` with the `yeetrun.com/app/yeet` app permissions `read`, `manage`, and
-`ssh`. First setup requires all three; split them into narrower roles later if
-you need to.
-
-In the Tailscale admin console, open `Trust credentials` -> `Credential` ->
-`OAuth`, then create an OAuth client secret.
-
-Choose one setup:
-
-- Simple setup: grant `All - Read & Write` if you are comfortable giving the
-  credential broad Tailscale API access.
-- Least-privilege setup: grant Auth Keys write (`auth_keys`) and select the tag
-  the credential may assign. Use `tag:catch` for catch-only installs. Use an
-  owner tag such as `tag:yeet` if you plan to create service Tailscale nodes
-  later with `--net=ts`.
-
-Keep the `tskey-client-...` secret ready. Interactive `yeet init` asks for it
-during first setup.
-
-See [Tailscale Setup](https://yeetrun.com/docs/concepts/tailscale#first-time-host-setup)
-for the minimal policy snippet, and
-[Tailscale Access Grants](https://yeetrun.com/docs/security/tailscale-access-grants)
-for the permission model.
-
-### 3. Bootstrap catch on a host
-
-Run this from your workstation:
+First setup uses SSH:
 
 ```bash
 yeet init root@<machine-host>
 ```
 
-`<machine-host>` is the SSH target. If you use a non-root SSH user, yeet runs
-the remote install with sudo.
-
-During first setup, paste the Tailscale OAuth client secret when prompted. For
-repeatable setup, pass it explicitly:
+After setup, normal commands target the catch host over Tailscale:
 
 ```bash
-yeet init --ts-client-secret=<secret> root@<machine-host>
+yeet status
+yeet run <svc> ./compose.yml
+yeet logs -f <svc>
 ```
 
-Fresh interactive installs also ask where catch should store host data. The
-default is `$HOME/yeet-data` on the catch host, with services under
-`$HOME/yeet-data/services`. If the host has ZFS, init can use datasets instead:
+The machine hostname is for bootstrapping. The catch hostname is for operating. This distinction sounds fussy until the first time DNS, SSH keys, and Tailscale names all disagree with each other. Then it becomes the only sentence you care about.
+
+## Quick start
+
+This gets you from nothing to a disposable container.
+
+### 1. Install yeet locally
+
+```bash
+curl -fsSL https://yeetrun.com/install.sh | sh
+```
+
+Nightly build:
+
+```bash
+curl -fsSL https://yeetrun.com/install.sh | sh -s -- --nightly
+```
+
+Check it:
+
+```bash
+yeet --help
+```
+
+### 2. Prepare Tailscale
+
+Catch joins your tailnet as a tagged device, usually `tag:catch`. User-owned catch nodes are rejected.
+
+You need a Tailscale OAuth client secret. In the Tailscale admin console, go to:
+
+```text
+Trust credentials -> Credential -> OAuth
+```
+
+For the first install, the simple path is broad access:
+
+```text
+All - Read & Write
+```
+
+The tighter path is Auth Keys write access for the tag catch will use, usually `tag:catch`.
+
+Your tailnet policy also needs to allow the setup user to reach catch on TCP `41548` with the `yeetrun.com/app/yeet` app permissions:
+
+- `read`
+- `manage`
+- `ssh`
+
+First setup needs all three. Later, split them if you want narrower roles. This is not bureaucracy; this is where the control plane lives.
+
+### 3. Install catch on a host
+
+```bash
+yeet init root@<machine-host>
+```
+
+If you SSH as a non-root user, yeet runs the remote install with sudo.
+
+Interactive setup asks for the Tailscale OAuth client secret and a data directory. The default is:
+
+```text
+$HOME/yeet-data
+```
+
+If Docker is missing on a Debian/Ubuntu-style host and you want container payloads:
+
+```bash
+yeet init --install-docker root@<machine-host>
+```
+
+If the host can run VMs too:
+
+```bash
+yeet init --install-docker --install-vm-tools root@<machine-host>
+```
+
+If the host has ZFS and you want service data on datasets:
 
 ```bash
 yeet init --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services root@<machine-host>
 ```
 
-With a ZFS services root, yeet treats the services root as a dataset prefix.
-Services under that root, including `catch`, live on child datasets such as
-`flash/yeet/services/<svc>`.
+Rerunning `yeet init` keeps the existing storage layout and upgrades catch.
 
-Rerunning `yeet init` for an existing catch install keeps the current storage
-layout and upgrades catch without asking the storage questions again.
-
-If Docker is missing on a Debian/Ubuntu-style host, init can install it:
-
-```bash
-yeet init --install-docker --ts-client-secret=<secret> root@<machine-host>
-```
-
-For VM payloads on a host that exposes KVM and TUN/TAP, install the VM tools
-too:
-
-```bash
-yeet init --install-docker --install-vm-tools --ts-client-secret=<secret> root@<machine-host>
-```
-
-If the host can run VMs and does not already have a LAN bridge, interactive
-`yeet init` can also ask to prepare `br0` for VM `--net=lan` networking. You
-can skip that prompt and let the first `yeet run <vm> ... --net=lan` ask before
-it creates the VM service.
-
-Skip VM tools for the first run unless you already know the host supports VMs.
-Containers, binaries, scripts, and cron jobs work without VM support.
-
-### 4. Confirm yeet can reach catch
-
-After `yeet init`, normal commands target the catch hostname, not the SSH
-machine host.
+### 4. Confirm the host works
 
 ```bash
 yeet version
 yeet status
 ```
 
-If yeet did not save this host as the default, pass the catch hostname:
+If you have more than one catch host:
 
 ```bash
 yeet --host=<catch-host> status
 ```
 
+Save a default:
+
+```bash
+yeet prefs --host=<catch-host> --save
+```
+
 ### 5. Create a service workspace
 
-Do this before your first `yeet run`. A successful deploy writes `yeet.toml` in
-the current directory.
+Yeet writes `yeet.toml` after a successful deploy. Put services in a directory you mean to keep.
 
 ```bash
 mkdir -p ~/yeet-services
 cd ~/yeet-services
 ```
 
-Use this directory for real homelab services too. See the
-[Service Workspace](https://yeetrun.com/docs/getting-started/service-workspace)
-guide before deploying third-party Compose apps, env files, Dockerfiles,
-scripts, or binaries.
+This file is the boring local state. Boring local state is good. Hidden state is how tools become haunted.
 
-### 6. Run a disposable service
-
-Start with a small container:
+### 6. Run something disposable
 
 ```bash
 yeet run -p 18080:80 hello nginx:alpine
@@ -184,22 +184,19 @@ Check the published port from the catch host:
 yeet ssh -- curl -fsS http://127.0.0.1:18080/ >/dev/null
 ```
 
-Remove the service and its data:
+Remove it:
 
 ```bash
 yeet rm --clean hello
 ```
 
-Read the confirmation prompt before accepting. `--clean` deletes the service
-data, including VM disks for VM services, and removes the disposable
-`yeet.toml` entry.
+Read the prompt. `--clean` deletes service data, including VM disks for VM services, and removes the local `yeet.toml` entry.
 
-## Common Commands
+## Common deploys
 
-Run deploy commands from your service workspace. Yeet writes `yeet.toml` in the
-current directory after a successful deploy.
+Run these from a service workspace.
 
-Use the guided deploy form when you do not want to remember flags:
+### Guided deploy
 
 ```bash
 yeet run --web
@@ -207,28 +204,50 @@ yeet run --web <svc>
 yeet run --web <svc> ./compose.yml
 ```
 
-Deploy common payloads:
+### Compose
 
 ```bash
 yeet run <svc> ./compose.yml
+```
+
+### Container image
+
+```bash
 yeet run -p 8080:80 <svc> nginx:alpine
+```
+
+### Dockerfile
+
+```bash
 yeet run <svc> ./Dockerfile
+```
+
+### Local image
+
+```bash
 yeet docker push <svc> <local-image>:<tag> --run
 ```
 
-Service names created by `yeet run` must use lowercase letters, numbers, and
-dashes, start with a letter, and end with a letter or number.
-
-Deploy a binary, script, or cron job:
+### Binary
 
 ```bash
 GOOS=linux GOARCH=amd64 go build -o ./bin/<svc> ./cmd/<svc>
 yeet run <svc> ./bin/<svc>
+```
+
+### Script
+
+```bash
 yeet run <svc> ./script.sh -- --app-flag value
+```
+
+### Cron job
+
+```bash
 yeet cron <svc> ./job.sh "0 9 * * *"
 ```
 
-Create a VM on a KVM-capable catch host:
+### VM
 
 ```bash
 yeet vm images catalog
@@ -236,16 +255,17 @@ yeet run <vm> vm://ubuntu/26.04
 yeet ssh <vm>
 ```
 
-After the first successful deploy, yeet writes service config to `yeet.toml`.
-From that directory, redeploy the saved service with:
+Service names created by `yeet run` must use lowercase letters, numbers, and dashes, start with a letter, and end with a letter or number.
+
+After a deploy succeeds, rerun the saved service with:
 
 ```bash
 yeet run <svc>
 ```
 
-## Operate a Service
+## Operating services
 
-Check status and logs:
+Status:
 
 ```bash
 yeet status
@@ -253,10 +273,16 @@ yeet status <svc>
 yeet status <svc-a> <svc-b>
 yeet info
 yeet info <svc>
+```
+
+Logs:
+
+```bash
+yeet logs <svc>
 yeet logs -f <svc>
 ```
 
-Open a shell or run a remote command:
+Shells and commands:
 
 ```bash
 yeet ssh
@@ -265,11 +291,9 @@ yeet ssh -- uname -a
 yeet ssh <svc> -- ls -la
 ```
 
-After `yeet init`, host and regular service shells use catch over Tailscale, so
-they do not require host SSH keys or a host password. VM services still connect
-to the guest operating system with SSH.
+After `yeet init`, host and regular service shells use catch over Tailscale. They do not need your original host SSH key or host password. VM services still connect to the guest operating system with SSH, because a VM is an actual machine and actual machines continue to be annoying.
 
-Control or remove a service:
+Lifecycle:
 
 ```bash
 yeet restart <svc>
@@ -278,14 +302,13 @@ yeet start <svc>
 yeet rm <svc>
 ```
 
-`yeet rm <svc>` keeps service data by default and prompts before removing the
-local config entry. Add `--clean` when you want yeet to delete service data and
-remove the local `yeet.toml` entry too.
+`yeet rm <svc>` keeps service data by default and prompts before removing the local config entry. Add `--clean` only when you want the data gone too.
 
-## Target a Host
+## Targeting hosts
 
-Use `root@<machine-host>` only for `yeet init`. Use the catch hostname for
-normal commands.
+Use `root@<machine-host>` for `yeet init`.
+
+Use catch hostnames for normal commands:
 
 ```bash
 CATCH_HOST=<catch-host> yeet status
@@ -294,15 +317,36 @@ yeet status@<catch-host>
 yeet run <svc>@<catch-host> ./compose.yml
 ```
 
-Save a default catch host:
+Save the default:
 
 ```bash
 yeet prefs --host=<catch-host> --save
 ```
 
-## Upgrade
+## Networking
 
-Check the local CLI and catch hosts:
+Yeet has a few network modes because services have a few different shapes. There is no single correct answer. There is only the answer that fails least badly for the service you are running.
+
+- `--net=svc`: private service network, yeet DNS, normal outbound internet through the catch host.
+- `--net=svc,ts`: `svc` behavior plus a service-owned Tailscale identity. Use this for most Tailscale-exposed services.
+- `--net=lan`: LAN or VLAN address. Outbound internet comes from that network's DHCP gateway.
+- `--net=ts`: tailnet-only unless you configure a Tailscale exit node.
+
+VM `--net=lan` attaches the guest TAP to a host bridge. On supported Debian/Ubuntu hosts, yeet can prepare `br0` during `yeet init` or before the first VM LAN create.
+
+Read the docs before combining networking modes with real services. Future you is the person who has to debug it.
+
+## Storage
+
+ZFS is optional.
+
+If you use a ZFS services root, yeet treats it as a dataset prefix. Services under it use child datasets, which gives you snapshots and fast VM disk clones.
+
+That is useful. It is also storage. Storage is where optimistic assumptions go to become incident reports. Read the ZFS docs first if the data matters.
+
+## Upgrades
+
+Check local yeet and catch hosts:
 
 ```bash
 yeet upgrade check
@@ -314,89 +358,113 @@ Upgrade from verified GitHub release assets:
 yeet upgrade
 ```
 
-When you run from a service workspace with `yeet.toml`, `yeet upgrade` includes
-all project catch hosts plus the default catch host. Use `--host=<catch-host>`
-only when you want to upgrade one catch host.
+When run from a service workspace with `yeet.toml`, `yeet upgrade` includes all project catch hosts plus the default catch host.
+
+Upgrade one host:
 
 ```bash
 yeet upgrade --host=<catch-host>
 ```
 
-To reinstall a release even when a component already looks current, newer, or
-locally built:
+Force reinstall:
 
 ```bash
 yeet upgrade --force
 ```
 
-To install a specific public release:
+Install a specific public release:
 
 ```bash
 yeet upgrade --version v0.6.1 --force
 ```
 
-## Optional Capabilities
+## Less common but useful
 
-Start with the quick path before adding optional features.
+Copy files:
 
-- Docker is required for container payloads.
-- VMs require x86_64 Linux, KVM at `/dev/kvm`, TUN/TAP, and VM filesystem
-  tools on the catch host.
-- `--net=svc` creates a private service network, adds yeet DNS, and sends
-  ordinary outbound internet through the catch host.
-- `--net=svc,ts` keeps `svc` behavior and gives the service its own Tailscale
-  identity. Use this for most Tailscale-exposed services.
-- `--net=lan` requests a LAN or VLAN address. Outbound internet comes from the
-  DHCP gateway on that network.
-- VM `--net=lan` attaches the guest TAP to a host bridge. On supported
-  Debian/Ubuntu hosts, yeet can prepare `br0` during `yeet init` or before the
-  first VM LAN create.
-- Plain `--net=ts` is tailnet-only unless you configure a Tailscale exit node.
-- ZFS is optional. Init can place host data or the default service root on
-  datasets. A ZFS services root is a dataset prefix, so services under it use
-  child datasets for snapshots and fast VM disk clones.
+```bash
+yeet copy ./local-file <svc>:/path/in/service-data
+yeet copy <svc>:/path/in/service-data ./local-file
+```
 
-Use the manual before enabling optional storage or networking:
+See events:
 
-- [Payloads](https://yeetrun.com/docs/payloads)
-- [Networking](https://yeetrun.com/docs/concepts/networking)
-- [VMs](https://yeetrun.com/docs/payloads/vms)
-- [ZFS](https://yeetrun.com/docs/concepts/zfs)
+```bash
+yeet events <svc>
+```
+
+Stage a payload before applying it:
+
+```bash
+yeet stage --help
+```
+
+Manage service settings:
+
+```bash
+yeet service --help
+yeet env --help
+yeet snapshots --help
+yeet host --help
+```
+
+## Requirements
+
+Workstation:
+
+- `yeet`
+- Tailscale access to the catch host
+
+Catch host:
+
+- Linux with systemd
+- Tailscale
+- Docker, if you run container payloads
+- x86_64 Linux, `/dev/kvm`, TUN/TAP, and VM filesystem tools, if you run VMs
+- ZFS, only if you want ZFS-backed service roots or VM clones
 
 ## Documentation
 
 - [Quick Start](https://yeetrun.com/docs/getting-started/quick-start)
 - [Installation](https://yeetrun.com/docs/getting-started/installation)
-- [Workflows](https://yeetrun.com/docs/operations/workflows)
+- [Service Workspace](https://yeetrun.com/docs/getting-started/service-workspace)
 - [Payloads](https://yeetrun.com/docs/payloads)
-- [yeet command reference](https://yeetrun.com/docs/cli/yeet-cli)
-- [catch reference](https://yeetrun.com/docs/cli/catch-cli)
+- [Networking](https://yeetrun.com/docs/concepts/networking)
+- [VMs](https://yeetrun.com/docs/payloads/vms)
+- [ZFS](https://yeetrun.com/docs/concepts/zfs)
+- [Workflows](https://yeetrun.com/docs/operations/workflows)
+- [Command reference](https://yeetrun.com/docs/cli/yeet-cli)
 - [Troubleshooting](https://yeetrun.com/docs/operations/troubleshooting)
 - [FAQ](https://yeetrun.com/docs/faq)
 
-## Develop from Source
+## Develop from source
 
-Use mise to install the repo toolchain:
+Use mise:
 
 ```bash
 mise install
 ```
 
-Build and test:
+Build:
 
 ```bash
 mise exec -- go build ./cmd/yeet
 mise exec -- go build ./cmd/catch
+```
+
+Test:
+
+```bash
 mise exec -- go test ./...
 ```
 
-Install local hooks before contributor work:
+Install hooks:
 
 ```bash
 mise run install-githooks
 ```
 
-Run the normal quality gate before publishing changes:
+Run the normal quality gate:
 
 ```bash
 mise run quality
@@ -404,8 +472,11 @@ mise run quality
 
 ## Security
 
-Yeet is for hosts you control. It is not a multi-tenant platform. Services
-managed by catch currently run as root-owned systemd units.
+Yeet is for hosts you control.
+
+It is not a multi-tenant service platform. Services managed by catch currently run as root-owned systemd units. Access is operation-scoped through Tailscale app permissions, and that helps, but it does not turn your homelab into a public cloud.
+
+This is a tool for making private infrastructure easier to operate, not for making unsafe boundaries safe by naming them.
 
 ## License
 
