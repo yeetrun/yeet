@@ -25,6 +25,9 @@ const state = {
   workload: "",
   workloadOverride: "",
   networkSelections: {},
+  hostStorageSeq: 0,
+  hostStorageKey: "",
+  hostStorageState: null,
   zfsRootSeq: 0,
   zfsRootKey: "",
   zfsRootState: null,
@@ -432,14 +435,12 @@ function syncWorkloadUI() {
   const storageHelp = $("storageModeLabel").querySelector(".help");
   if (zfsChecked && isVM) {
     $("storageModeLabel").firstChild.textContent = "VM ZVOL parent ";
-    storageHelp.dataset.help = "Enter a ZFS dataset name that will contain this VM's zvols, without a leading or trailing slash.";
   } else if (zfsChecked) {
     $("storageModeLabel").firstChild.textContent = "ZFS dataset ";
-    storageHelp.dataset.help = "Enter a ZFS dataset name for this service, without a leading or trailing slash.";
   } else {
     $("storageModeLabel").firstChild.textContent = "Service root ";
-    storageHelp.dataset.help = "Leave empty to use the catch default root, or enter an absolute filesystem path.";
   }
+  storageHelp.dataset.help = serviceRootHelpText();
   $("zfsHelp").textContent = "ZFS";
   if (workloadChanged) {
     renderNetworkModes(def.networkModes.filter((mode) => mode !== "host"));
@@ -547,9 +548,79 @@ function ensureVMNetworkSelection(clearedMode = "") {
   if (fallback) fallback.checked = true;
 }
 
-function updateServiceRootPlaceholder() {
+function hostStorageRequestKey() {
+  return $("host").value.trim();
+}
+
+function syncHostStorage() {
+  const key = hostStorageRequestKey();
+  if (key === state.hostStorageKey) return Promise.resolve();
+  state.hostStorageKey = key;
+  return loadHostStorage(key);
+}
+
+async function loadHostStorage(key) {
+  const seq = ++state.hostStorageSeq;
+  if (!key) {
+    state.hostStorageState = { state: "error", warnings: ["Choose a host"] };
+    updateServiceRootPlaceholder();
+    return;
+  }
+  state.hostStorageState = { state: "loading" };
+  updateServiceRootPlaceholder();
+  const query = new URLSearchParams({ host: key });
+  try {
+    const res = await api(`/api/host-storage?${query}`);
+    if (seq !== state.hostStorageSeq) return;
+    if (!res.ok) throw new Error(await res.text());
+    state.hostStorageState = await res.json();
+  } catch (err) {
+    if (seq !== state.hostStorageSeq) return;
+    state.hostStorageState = { state: "error", warnings: [String(err)] };
+  }
+  updateServiceRootPlaceholder();
+  update();
+}
+
+function trimRemoteRoot(root) {
+  return (root || "").trim().replace(/\/+$/, "");
+}
+
+function defaultServicesRoot() {
+  return trimRemoteRoot(state.hostStorageState?.storage?.servicesRoot || "");
+}
+
+function serviceRootPath(root, service) {
+  const cleanRoot = trimRemoteRoot(root);
+  if (!cleanRoot) return "";
+  return cleanRoot === "/" ? `/${service}` : `${cleanRoot}/${service}`;
+}
+
+function defaultServiceRootPlaceholder() {
   const service = $("service").value.trim() || "<service>";
-  $("serviceRoot").placeholder = $("zfs").checked ? `<dataset>/${service}` : `/root/data/services/${service}`;
+  if ($("zfs").checked) return `<dataset>/${service}`;
+  const servicesRoot = defaultServicesRoot();
+  return servicesRoot ? serviceRootPath(servicesRoot, service) : `<services-root>/${service}`;
+}
+
+function serviceRootHelpText() {
+  if ($("zfs").checked && selectedWorkload() === "vm") {
+    return "Enter a ZFS dataset name that will contain this VM's zvols, without a leading or trailing slash.";
+  }
+  if ($("zfs").checked) {
+    return "Enter a ZFS dataset name for this service, without a leading or trailing slash.";
+  }
+  const servicesRoot = defaultServicesRoot();
+  if (servicesRoot) {
+    return `Leave empty to use ${serviceRootPath(servicesRoot, "<service>")} on the selected catch host, or enter an absolute filesystem path.`;
+  }
+  return "Leave empty to use the selected catch host's default services root, or enter an absolute filesystem path.";
+}
+
+function updateServiceRootPlaceholder() {
+  $("serviceRoot").placeholder = defaultServiceRootPlaceholder();
+  const storageHelp = $("storageModeLabel").querySelector(".help");
+  if (storageHelp) storageHelp.dataset.help = serviceRootHelpText();
 }
 
 function zfsRootPickerEnabled() {
@@ -1423,6 +1494,7 @@ async function bootstrap() {
   renderNetworkModes(state.bootstrap.options?.networkModes || ["svc", "ts", "lan"]);
   renderSnapshotModes(state.bootstrap.options?.snapshotModes || ["inherit", "on", "off"]);
   renderSnapshotRequiredOptions();
+  await syncHostStorage();
   await loadFiles(".");
   syncWorkloadUI();
   syncNetworkUI();
@@ -1438,6 +1510,7 @@ function update() {
   if (state.phase !== "editing") return;
   syncWorkloadUI();
   syncNetworkUI();
+  syncHostStorage();
   updateServiceRootPlaceholder();
   syncZFSRootPicker();
   syncVMDefaults();
