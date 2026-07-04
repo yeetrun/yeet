@@ -42,6 +42,31 @@ function mockRuntimeScript() {
           options: { networkModes: ["svc", "ts", "lan"], snapshotModes: ["inherit", "on", "off"] },
         });
       }
+      if (target.startsWith("/api/host-storage")) {
+        const request = new URL(target, "http://127.0.0.1");
+        const service = request.searchParams.get("service") || "";
+        const storage = { dataDir: "/flash/yeet/data", servicesRoot: "/flash/yeet/services" };
+        if (!service) return json({ state: "available", storage, defaults: {} });
+        const serviceRoot = "flash/yeet/services/" + service;
+        return json({
+          state: "available",
+          storage,
+          defaults: { serviceRoot, serviceRootZfs: serviceRoot, zfs: true },
+        });
+      }
+      if (target.startsWith("/api/zfs-roots")) {
+        const request = new URL(target, "http://127.0.0.1");
+        const service = request.searchParams.get("service") || "";
+        const suggestedDataset = service ? "flash/yeet/services/" + service : "flash/yeet/services";
+        return json({
+          state: "available",
+          candidates: [{
+            dataset: "flash/yeet/services",
+            mountpoint: "/flash/yeet/services",
+            suggestedDataset,
+          }],
+        });
+      }
       if (target.startsWith("/api/files")) return json({ dir: ".", entries: [] });
       if (target === "/api/validate") return json({ validation: { ok: true, errors: [], warnings: [] } });
       if (target === "/api/deploy") return json({ jobId: "job-1" });
@@ -104,4 +129,17 @@ test("web run terminal renders CRLF TTY output", async ({ page }, testInfo) => {
   expect(output).toContain("[+] yeet run nginx@catch-lab");
   expect(output).toContain("✔ Upload payload");
   expect(output).toContain("✔ Install service");
+});
+
+test("web run clears auto ZFS service root when service is erased", async ({ page }) => {
+  await page.setContent(pageHTML(), { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => document.querySelector("#serviceRoot")?.value === "flash/yeet/services/nginx");
+  await expect(page.locator("#zfs")).toBeChecked();
+
+  await page.fill("#service", "n");
+  await page.waitForFunction(() => document.querySelector("#serviceRoot")?.value === "flash/yeet/services/n");
+
+  await page.fill("#service", "");
+  await page.waitForFunction(() => document.querySelector("#serviceRoot")?.value === "");
+  await expect(page.locator("#commandPreview")).not.toContainText("flash/yeet/services/n");
 });
