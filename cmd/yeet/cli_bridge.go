@@ -36,6 +36,10 @@ var serviceBridgeSkippedGroupCommands = map[string]map[string]struct{}{
 	},
 }
 
+var serviceBridgeSkippedRemoteCommands = map[string]struct{}{
+	"status": {},
+}
+
 var serviceBridgeHostLevelGroupCommands = map[string]map[string]struct{}{
 	"host": {
 		"set": {},
@@ -126,6 +130,10 @@ func bridgeServiceArgs(args []string, remoteSpecs map[string]map[string]cli.Flag
 		return bridgeWithOverride(args, remoteSpecs, groupSpecs, override)
 	}
 
+	if isServiceBridgeSkippedRemoteCommand(args[0]) {
+		return "", "", nil, false
+	}
+
 	if flags, ok := remoteSpecs[args[0]]; ok {
 		return bridgeCommandArgs(args, 1, flags)
 	}
@@ -208,6 +216,11 @@ func isServiceBridgeSkippedGroupCommand(group string, command string) bool {
 		return false
 	}
 	_, ok = locals[command]
+	return ok
+}
+
+func isServiceBridgeSkippedRemoteCommand(command string) bool {
+	_, ok := serviceBridgeSkippedRemoteCommands[command]
 	return ok
 }
 

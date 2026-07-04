@@ -16,7 +16,7 @@ import (
 func TestBridgeServiceArgsSkipsFlagValues(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()
-	args := []string{"status", "--format", "json", "svc-a"}
+	args := []string{"info", "--format", "json", "svc-a"}
 	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
 	if !ok {
 		t.Fatalf("expected to recognize remote command")
@@ -27,7 +27,7 @@ func TestBridgeServiceArgsSkipsFlagValues(t *testing.T) {
 	if host != "" {
 		t.Fatalf("expected no host, got %q", host)
 	}
-	if got := strings.Join(bridged, " "); got != "status --format json" {
+	if got := strings.Join(bridged, " "); got != "info --format json" {
 		t.Fatalf("unexpected bridged args: %s", got)
 	}
 }
@@ -55,10 +55,27 @@ func TestBridgeServiceArgsDoesNotBridgeLocalOrEmptyCommands(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsStatusTargetsStayPositional(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+
+	tests := [][]string{
+		{"status", "svc-a"},
+		{"status", "svc-a", "svc-b"},
+		{"status", "--format", "json", "svc-a@host-a"},
+	}
+	for _, args := range tests {
+		service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
+		if ok || service != "" || host != "" || bridged != nil {
+			t.Fatalf("bridgeServiceArgs(%v) = service=%q host=%q bridged=%v ok=%v, want no bridge", args, service, host, bridged, ok)
+		}
+	}
+}
+
 func TestBridgeServiceArgsServiceHostQualified(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()
-	args := []string{"status", "svc-a@host-a"}
+	args := []string{"info", "svc-a@host-a"}
 	service, host, bridged, ok := bridgeServiceArgs(args, remoteSpecs, groupSpecs, "")
 	if !ok {
 		t.Fatalf("expected to recognize remote command")
@@ -69,7 +86,7 @@ func TestBridgeServiceArgsServiceHostQualified(t *testing.T) {
 	if host != "host-a" {
 		t.Fatalf("expected host host-a, got %q", host)
 	}
-	if got := strings.Join(bridged, " "); got != "status" {
+	if got := strings.Join(bridged, " "); got != "info" {
 		t.Fatalf("unexpected bridged args: %s", got)
 	}
 }

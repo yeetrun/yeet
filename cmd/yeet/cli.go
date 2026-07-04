@@ -248,6 +248,7 @@ func buildHelpConfig() yargs.HelpConfig {
 			Examples: []string{
 				"yeet status",
 				"yeet status <svc>",
+				"yeet status <svc-a> <svc-b>",
 				"yeet run <svc> ./bin/<svc> -- --app-flag value",
 				"yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app",
 			},

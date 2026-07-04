@@ -558,7 +558,12 @@ var remoteCommandInfos = map[string]CommandInfo{
 		"yeet stage <svc> commit",
 		"yeet stage <svc> clear",
 	}, ArgsSchema: ServiceArgs{}},
-	"status": {Name: "status", Description: "Show status of a service"},
+	"status": {Name: "status", Description: "Show host or service status", Usage: "[SVC...] [--format=table|json|json-pretty]", Examples: []string{
+		"yeet status",
+		"yeet status <svc>",
+		"yeet status <svc-a> <svc-b>",
+		"yeet status <svc>@<catch-host>",
+	}},
 	"tailscale": {Name: "tailscale", Description: "Configure tailscale OAuth or run tailscale commands in a service netns", Usage: "--setup [--client-secret=...] | <svc> -- <tailscale args...>", Examples: []string{
 		"yeet tailscale --setup",
 		"yeet tailscale --setup --client-secret=tskey-client-***",
