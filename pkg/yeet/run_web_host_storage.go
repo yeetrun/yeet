@@ -86,10 +86,21 @@ func runWebHostStorageDefaults(ctx context.Context, host string, storage runWebH
 	if err == nil {
 		return normalizeRunWebServiceRootDefaults(defaults, storage, req.Service), nil
 	}
-	if isRPCMethodNotFound(err) {
+	if isRunWebServiceRootDefaultsUnsupported(err) {
 		return runWebHostStorageLegacyDefaults(ctx, host, storage, req.Service), nil
 	}
 	return runWebFilesystemServiceRootDefaults(storage, req.Service), []string{err.Error()}
+}
+
+func isRunWebServiceRootDefaultsUnsupported(err error) bool {
+	if isRPCMethodNotFound(err) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "unclassified RPC method") && strings.Contains(msg, `"`+catchrpc.RPCMethodServiceRootDefaults+`"`)
 }
 
 func normalizeRunWebServiceRootDefaults(defaults catchrpc.ServiceRootDefaultsResponse, storage runWebHostStorage, service string) catchrpc.ServiceRootDefaultsResponse {
