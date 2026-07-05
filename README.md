@@ -56,7 +56,7 @@ yeet run <svc> ./compose.yml
 yeet logs -f <svc>
 ```
 
-The machine hostname is for bootstrapping. The catch hostname is for operating. This distinction sounds fussy until the first time DNS, SSH keys, and Tailscale names all disagree with each other. Then it becomes the only sentence you care about.
+Use the machine hostname for `yeet init`. Use the catch hostname for normal yeet commands after setup.
 
 ## Quick start
 
@@ -120,17 +120,10 @@ Interactive setup asks for the Tailscale OAuth client secret and a data director
 $HOME/yeet-data
 ```
 
-If Docker is missing on a Debian/Ubuntu-style host and you want container payloads:
-
-```bash
-yeet init --install-docker root@<machine-host>
-```
-
-If the host can run VMs too:
-
-```bash
-yeet init --install-docker --install-vm-tools root@<machine-host>
-```
+If Docker is missing on a Debian/Ubuntu-style host, interactive setup asks
+before installing it. If the host can run VMs, setup can ask about VM tools too.
+For non-interactive setup, use the
+[Installation guide](https://yeetrun.com/docs/getting-started/installation).
 
 If the host has ZFS and you want service data on datasets:
 
