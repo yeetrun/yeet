@@ -122,8 +122,6 @@ $HOME/yeet-data
 
 If Docker is missing on a Debian/Ubuntu-style host, interactive setup asks
 before installing it. If the host can run VMs, setup can ask about VM tools too.
-For non-interactive setup, use the
-[Installation guide](https://yeetrun.com/docs/getting-started/installation).
 
 If the host has ZFS and you want service data on datasets:
 
