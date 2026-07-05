@@ -1,6 +1,6 @@
 # yeet
 
-Run services and VMs on Linux hosts you control, from the workstation you already use.
+Deploy containers, VMs, binaries, scripts, and cron jobs from your workstation to Linux hosts.
 
 The normal way to deploy small infrastructure is to accidentally build a platform. You start with SSH, then add shell scripts, then add a deploy box, then add a secrets story, then add a dashboard, then discover that your dashboard is mostly a slower way to run SSH.
 
