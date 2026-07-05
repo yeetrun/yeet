@@ -33,7 +33,7 @@ Yeet can deploy:
 
 It fits single-operator homelabs and small private infrastructure. It expects Linux hosts with systemd. Services currently run as root-owned systemd units on the catch host.
 
-That last sentence is important. Yeet is for hosts you control. It is not a multi-tenant platform, and pretending otherwise would be how we get a very exciting security incident.
+Yeet is for hosts you control. It is not a multi-tenant platform.
 
 ## The model
 
@@ -104,7 +104,7 @@ Your tailnet policy also needs to allow the setup user to reach catch on TCP `41
 - `manage`
 - `ssh`
 
-First setup needs all three. Later, split them if you want narrower roles. This is not bureaucracy; this is where the control plane lives.
+First setup needs all three. Later, split them if you want narrower roles.
 
 ### 3. Install catch on a host
 
@@ -282,7 +282,7 @@ yeet ssh -- uname -a
 yeet ssh <svc> -- ls -la
 ```
 
-After `yeet init`, host and regular service shells use catch over Tailscale. They do not need your original host SSH key or host password. VM services still connect to the guest operating system with SSH, because a VM is an actual machine and actual machines continue to be annoying.
+After `yeet init`, host and regular service shells use catch over Tailscale. They do not need your original host SSH key or host password. VM services still connect to the guest operating system with SSH keys.
 
 Lifecycle:
 
@@ -316,7 +316,7 @@ yeet prefs --host=<catch-host> --save
 
 ## Networking
 
-Yeet has a few network modes because services have a few different shapes. There is no single correct answer. There is only the answer that fails least badly for the service you are running.
+Yeet has a few network modes because services have different reachability and routing needs. Choose the mode that matches how the service should be reached.
 
 - `--net=svc`: private service network, yeet DNS, normal outbound internet through the catch host.
 - `--net=svc,ts`: `svc` behavior plus a service-owned Tailscale identity. Use this for most Tailscale-exposed services.
@@ -333,7 +333,7 @@ ZFS is optional.
 
 If you use a ZFS services root, yeet treats it as a dataset prefix. Services under it use child datasets, which gives you snapshots and fast VM disk clones.
 
-That is useful. It is also storage. Storage is where optimistic assumptions go to become incident reports. Read the ZFS docs first if the data matters.
+That is persistent storage, so read the ZFS docs first if the data matters.
 
 ## Upgrades
 
