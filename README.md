@@ -311,7 +311,7 @@ yeet run <svc>@<catch-host> ./compose.yml
 For a second catch host, choose a distinct catch hostname during setup:
 
 ```bash
-yeet --host=morpheus init root@<machine-host>
+yeet --host=morpheus-catch init root@<machine-host>
 ```
 
 Save the default:
