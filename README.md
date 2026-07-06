@@ -13,7 +13,7 @@ Not magic. Just fewer places for state to hide.
 <p>
   <a href="https://yeetrun.com"><strong>yeetrun.com</strong></a>
   · <a href="https://yeetrun.com/docs/getting-started/quick-start">Quick Start</a>
-  · <a href="https://yeetrun.com/docs/getting-started/installation">Install</a>
+  · <a href="https://yeetrun.com/docs/getting-started/host-setup">Host Setup</a>
   · <a href="https://yeetrun.com/docs">Docs</a>
 </p>
 
@@ -56,7 +56,7 @@ yeet run <svc> ./compose.yml
 yeet logs -f <svc>
 ```
 
-Use the machine hostname for `yeet init`. Use the catch hostname for normal yeet commands after setup.
+Use the machine hostname for `yeet init`. Use the catch hostname for normal yeet commands after setup. The default catch hostname is `catch`.
 
 ## Quick start
 
@@ -308,6 +308,12 @@ yeet status@<catch-host>
 yeet run <svc>@<catch-host> ./compose.yml
 ```
 
+For a second catch host, choose a distinct catch hostname during setup:
+
+```bash
+yeet --host=morpheus init root@<machine-host>
+```
+
 Save the default:
 
 ```bash
@@ -417,7 +423,7 @@ Catch host:
 ## Documentation
 
 - [Quick Start](https://yeetrun.com/docs/getting-started/quick-start)
-- [Installation](https://yeetrun.com/docs/getting-started/installation)
+- [Host Setup](https://yeetrun.com/docs/getting-started/host-setup)
 - [Service Workspace](https://yeetrun.com/docs/getting-started/service-workspace)
 - [Payloads](https://yeetrun.com/docs/payloads)
 - [Networking](https://yeetrun.com/docs/concepts/networking)
