@@ -168,7 +168,7 @@ func upgradeCatchFromReport(ctx context.Context, report upgradeReport) error {
 			return err
 		}
 		if err := withTemporaryHost(row.Host, func() error {
-			return initCatchFn(target, initOptions{fromGithub: true, releaseVersion: report.Latest.Tag})
+			return initCatchFn(target, initOptions{fromGithub: true, noWorkspace: true, releaseVersion: report.Latest.Tag})
 		}); err != nil {
 			return fmt.Errorf("upgrade catch@%s: %w", row.Host, err)
 		}

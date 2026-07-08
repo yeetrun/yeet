@@ -129,9 +129,15 @@ func updateDockerServiceForHost(ctx context.Context, host string, service string
 
 func withTemporaryHost(host string, fn func() error) error {
 	oldPrefs := loadedPrefs
-	loadedPrefs.DefaultHost = host
+	oldHostOverride := hostOverride
+	oldHostOverrideSet := hostOverrideSet
+	oldHostOverrideHard := hostOverrideHard
+	SetHostOverride(host)
 	defer func() {
 		loadedPrefs = oldPrefs
+		hostOverride = oldHostOverride
+		hostOverrideSet = oldHostOverrideSet
+		hostOverrideHard = oldHostOverrideHard
 	}()
 	return fn()
 }
