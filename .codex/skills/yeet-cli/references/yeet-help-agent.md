@@ -33,6 +33,7 @@ yeet [GLOBAL_OPTIONS] COMMAND [ARGS...]
 
 ## Discovery
 
+- Run `yeet config --help-agent` for command-specific context.
 - Run `yeet copy --help-agent` for command-specific context.
 - Run `yeet cron --help-agent` for command-specific context.
 - Run `yeet disable --help-agent` for command-specific context.
@@ -45,7 +46,6 @@ yeet [GLOBAL_OPTIONS] COMMAND [ARGS...]
 - Run `yeet list-hosts --help-agent` for command-specific context.
 - Run `yeet logs --help-agent` for command-specific context.
 - Run `yeet mount --help-agent` for command-specific context.
-- Run `yeet prefs --help-agent` for command-specific context.
 - Run `yeet remove --help-agent` for command-specific context.
 - Run `yeet restart --help-agent` for command-specific context.
 - Run `yeet run --help-agent` for command-specific context.
@@ -98,6 +98,12 @@ Progress output (auto|tty|plain|quiet)
 - **Type**: `string`
 
 ## Commands
+
+### `config`
+
+Show or update local yeet client config
+
+Run `yeet config --help-agent` for command-specific context.
 
 ### `copy`
 
@@ -172,12 +178,6 @@ Run `yeet logs --help-agent` for command-specific context.
 Mount a network filesystem on the host (global, not per-service)
 
 Run `yeet mount --help-agent` for command-specific context.
-
-### `prefs`
-
-Manage the current preferences
-
-Run `yeet prefs --help-agent` for command-specific context.
 
 ### `remove`
 
@@ -313,6 +313,87 @@ yeet run <svc> ./bin/<svc> -- --app-flag value
 
 ```
 yeet run <svc> ./compose.yml --net=svc,ts --ts-tags=tag:app
+```
+````
+
+## Command: config
+
+````
+# yeet config Agent Context
+
+## Purpose
+
+Show or update local yeet client config
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] config [--host=<catch-host>] [--workspace=PATH] [--add-workspace=PATH] [--remove-workspace=PATH] [--clear-workspaces]
+```
+
+## Operating Rules
+
+- Prefer exact examples when they match the task.
+- Use command-specific agent help before running an unfamiliar command.
+- Do not invent flags; use only flags listed in this context or command help.
+- Preserve arguments after `--` as payload or application arguments.
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet config
+```
+
+```
+yeet config --host=<catch-host>
+```
+
+```
+yeet config --workspace ~/yeet-services
+```
+
+```
+yeet config --add-workspace ~/lab-services
+```
+
+```
+yeet config --remove-workspace ~/lab-services
+```
+
+```
+yeet config --clear-workspaces
 ```
 ````
 
@@ -784,7 +865,7 @@ Install catch on a remote host (prompts for Tailscale OAuth setup when needed)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] init [--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET] [--zfs] [--ts-client-secret=<secret>] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]
+yeet [GLOBAL_OPTIONS] init [--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--workspace=PATH] [--no-workspace] [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET] [--zfs] [--ts-client-secret=<secret>] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]
 ```
 
 ## Operating Rules
@@ -833,6 +914,14 @@ yeet init root@<machine-host>
 ```
 
 ```
+yeet init --workspace ~/yeet-services root@<machine-host>
+```
+
+```
+yeet init --no-workspace root@<machine-host>
+```
+
+```
 yeet init --data-dir=/srv/yeet-data root@<machine-host>
 ```
 
@@ -845,11 +934,7 @@ yeet init --ts-client-secret=<secret> root@<machine-host>
 ```
 
 ```
-yeet init --install-docker root@<machine-host>
-```
-
-```
-yeet init --install-docker --install-vm-tools root@<machine-host>
+yeet init --install-docker --install-vm-tools --ts-client-secret=<secret> root@<machine-host>
 ```
 
 ```
@@ -1098,61 +1183,6 @@ yeet mount host:/export data-share --type=nfs --opts=defaults
 ```
 yeet mount
 ```
-````
-
-## Command: prefs
-
-````
-# yeet prefs Agent Context
-
-## Purpose
-
-Manage the current preferences
-
-## Usage
-
-```
-yeet [GLOBAL_OPTIONS] prefs [OPTIONS]
-```
-
-## Operating Rules
-
-- Prefer exact examples when they match the task.
-- Use command-specific agent help before running an unfamiliar command.
-- Do not invent flags; use only flags listed in this context or command help.
-- Preserve arguments after `--` as payload or application arguments.
-
-## Global Options
-
-### `--host`
-
-Override target host (CATCH_HOST)
-
-- **Type**: `string`
-
-### `--service`
-
-Force the service name for the command
-
-- **Type**: `string`
-
-### `--tty`
-
-Force TTY for remote commands
-
-- **Type**: `bool`
-
-### `--no-tty`
-
-Disable TTY for remote commands
-
-- **Type**: `bool`
-
-### `--progress`
-
-Progress output (auto|tty|plain|quiet)
-
-- **Type**: `string`
 ````
 
 ## Command: remove

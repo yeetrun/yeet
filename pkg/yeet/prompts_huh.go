@@ -81,3 +81,24 @@ func (huhPrompter) SelectWorkspace(host string, paths []string, current string) 
 	}
 	return selected, nil
 }
+
+func (huhPrompter) SelectDefaultHost(hosts []string, current string) (string, error) {
+	options := make([]huh.Option[string], 0, len(hosts)+1)
+	for _, host := range hosts {
+		options = append(options, huh.NewOption(host, host))
+	}
+	current = normalizeCatchHost(current)
+	if current == "" {
+		current = defaultCatchHost
+	}
+	options = append(options, huh.NewOption(fmt.Sprintf("Leave default as %s", current), ""))
+	var selected string
+	form := huh.NewSelect[string]().
+		Title("Choose the default catch host for commands outside this workspace.").
+		Options(options...).
+		Value(&selected)
+	if err := form.Run(); err != nil {
+		return "", err
+	}
+	return normalizeCatchHost(selected), nil
+}

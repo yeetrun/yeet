@@ -24,12 +24,14 @@ type closeErrorBuffer struct {
 }
 
 type fakePrompter struct {
-	confirm   bool
-	input     string
-	secret    string
-	selection workspaceSelection
-	err       error
-	selectFn  func(host string, paths []string, current string) (workspaceSelection, error)
+	confirm             bool
+	defaultHost         string
+	input               string
+	secret              string
+	selection           workspaceSelection
+	err                 error
+	selectFn            func(host string, paths []string, current string) (workspaceSelection, error)
+	selectDefaultHostFn func(hosts []string, current string) (string, error)
 }
 
 func (f fakePrompter) Confirm(string, bool) (bool, error) { return f.confirm, f.err }
@@ -43,6 +45,13 @@ func (f fakePrompter) SelectWorkspace(host string, paths []string, current strin
 		return f.selectFn(host, paths, current)
 	}
 	return f.selection, f.err
+}
+
+func (f fakePrompter) SelectDefaultHost(hosts []string, current string) (string, error) {
+	if f.selectDefaultHostFn != nil {
+		return f.selectDefaultHostFn(hosts, current)
+	}
+	return f.defaultHost, f.err
 }
 
 func (w *closeErrorBuffer) Close() error {
@@ -119,6 +128,39 @@ func TestPlainPrompterSelectWorkspaceCanRunOnce(t *testing.T) {
 	}
 	if selection.Choice != workspacePromptRunOnce || selection.Path != "" {
 		t.Fatalf("selection = %#v, want run once", selection)
+	}
+}
+
+func TestPlainPrompterSelectDefaultHostSelectsHost(t *testing.T) {
+	withSvcPromptInput(t, "yeet-cloud\n")
+
+	host, err := plainPrompter{}.SelectDefaultHost([]string{"yeet-cloud", "yeet-lab"}, "catch")
+	if err != nil {
+		t.Fatalf("SelectDefaultHost error: %v", err)
+	}
+	if host != "yeet-cloud" {
+		t.Fatalf("host = %q, want yeet-cloud", host)
+	}
+}
+
+func TestPlainPrompterSelectDefaultHostCanKeepCurrent(t *testing.T) {
+	withSvcPromptInput(t, "\n")
+
+	host, err := plainPrompter{}.SelectDefaultHost([]string{"yeet-cloud", "yeet-lab"}, "catch")
+	if err != nil {
+		t.Fatalf("SelectDefaultHost error: %v", err)
+	}
+	if host != "" {
+		t.Fatalf("host = %q, want empty keep-current selection", host)
+	}
+}
+
+func TestPlainPrompterSelectDefaultHostRejectsUnknownHost(t *testing.T) {
+	withSvcPromptInput(t, "missing\n")
+
+	_, err := plainPrompter{}.SelectDefaultHost([]string{"yeet-cloud", "yeet-lab"}, "catch")
+	if err == nil || !strings.Contains(err.Error(), "default catch host must be one of") {
+		t.Fatalf("SelectDefaultHost error = %v, want one-of error", err)
 	}
 }
 
@@ -1314,6 +1356,191 @@ func TestProjectConfigForWritePromptsToRegisterLocalConfig(t *testing.T) {
 	}
 	if got := workspacePaths(); !reflect.DeepEqual(got, []string{realTmp}) {
 		t.Fatalf("workspacePaths = %#v, want local dir", got)
+	}
+}
+
+func TestLoadSvcCommandConfigAdoptsLocalProjectConfig(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	cwd, _ := os.Getwd()
+	tmp := t.TempDir()
+	realTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks tmp: %v", err)
+	}
+	if _, err := seedWorkspaceConfig(realTmp, "yeet-lab"); err != nil {
+		t.Fatalf("seedWorkspaceConfig: %v", err)
+	}
+	if err := os.Chdir(realTmp); err != nil {
+		t.Fatalf("Chdir tmp: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	oldConfigPath := clientConfigPathFn
+	configPath := filepath.Join(tmp, "xdg", "yeet", "config.toml")
+	clientConfigPathFn = func() (string, error) { return configPath, nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-lab"})
+	defer restore()
+	oldPrompt := activePrompter
+	oldIsTerminal := isTerminalFn
+	activePrompter = fakePrompter{confirm: true}
+	isTerminalFn = func(int) bool { return true }
+	t.Cleanup(func() {
+		activePrompter = oldPrompt
+		isTerminalFn = oldIsTerminal
+	})
+
+	loc, err := loadSvcCommandConfig(svcCommand{Name: "status", CheckArgs: []string{"status"}})
+	if err != nil {
+		t.Fatalf("loadSvcCommandConfig error: %v", err)
+	}
+	if loc == nil || loc.Dir != realTmp {
+		t.Fatalf("location = %#v, want local config", loc)
+	}
+	if got := workspacePaths(); !reflect.DeepEqual(got, []string{realTmp}) {
+		t.Fatalf("workspacePaths = %#v, want local dir", got)
+	}
+	if _, err := os.Stat(configPath); err != nil {
+		t.Fatalf("stat saved config: %v", err)
+	}
+}
+
+func TestLoadSvcCommandConfigDoesNotAdoptLocalProjectConfigNonInteractive(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	cwd, _ := os.Getwd()
+	tmp := t.TempDir()
+	realTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks tmp: %v", err)
+	}
+	if _, err := seedWorkspaceConfig(realTmp, "yeet-lab"); err != nil {
+		t.Fatalf("seedWorkspaceConfig: %v", err)
+	}
+	if err := os.Chdir(realTmp); err != nil {
+		t.Fatalf("Chdir tmp: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	oldConfigPath := clientConfigPathFn
+	configPath := filepath.Join(tmp, "xdg", "yeet", "config.toml")
+	clientConfigPathFn = func() (string, error) { return configPath, nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-lab"})
+	defer restore()
+	oldPrompt := activePrompter
+	oldIsTerminal := isTerminalFn
+	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
+	isTerminalFn = func(int) bool { return false }
+	t.Cleanup(func() {
+		activePrompter = oldPrompt
+		isTerminalFn = oldIsTerminal
+	})
+
+	loc, err := loadSvcCommandConfig(svcCommand{Name: "status", CheckArgs: []string{"status"}})
+	if err != nil {
+		t.Fatalf("loadSvcCommandConfig error: %v", err)
+	}
+	if loc == nil || loc.Dir != realTmp {
+		t.Fatalf("location = %#v, want local config", loc)
+	}
+	if got := workspacePaths(); len(got) != 0 {
+		t.Fatalf("workspacePaths = %#v, want none", got)
+	}
+	if _, err := os.Stat(configPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("saved config stat error = %v, want not exist", err)
+	}
+}
+
+func TestLoadSvcCommandConfigAdoptsSingleLocalHostAsDefault(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	cwd, _ := os.Getwd()
+	tmp := t.TempDir()
+	realTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks tmp: %v", err)
+	}
+	if _, err := seedWorkspaceConfig(realTmp, "yeet-lab"); err != nil {
+		t.Fatalf("seedWorkspaceConfig: %v", err)
+	}
+	if err := os.Chdir(realTmp); err != nil {
+		t.Fatalf("Chdir tmp: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	oldConfigPath := clientConfigPathFn
+	configPath := filepath.Join(tmp, "xdg", "yeet", "config.toml")
+	clientConfigPathFn = func() (string, error) { return configPath, nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	restore := stubClientConfigState(t, clientConfig{})
+	defer restore()
+	oldPrompt := activePrompter
+	oldIsTerminal := isTerminalFn
+	activePrompter = fakePrompter{confirm: true}
+	isTerminalFn = func(int) bool { return true }
+	t.Cleanup(func() {
+		activePrompter = oldPrompt
+		isTerminalFn = oldIsTerminal
+	})
+
+	if _, err := loadSvcCommandConfig(svcCommand{Name: "status", CheckArgs: []string{"status"}}); err != nil {
+		t.Fatalf("loadSvcCommandConfig error: %v", err)
+	}
+	if got := Host(); got != "yeet-lab" {
+		t.Fatalf("Host = %q, want adopted default", got)
+	}
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile saved config: %v", err)
+	}
+	if !strings.Contains(string(raw), `default_host = "yeet-lab"`) {
+		t.Fatalf("saved config = %q, want adopted default host", raw)
+	}
+}
+
+func TestLoadSvcCommandConfigPromptsForDefaultHostWhenAdoptingMultiHostConfig(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	cwd, _ := os.Getwd()
+	tmp := t.TempDir()
+	realTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks tmp: %v", err)
+	}
+	loc := &projectConfigLocation{
+		Path: filepath.Join(realTmp, projectConfigName),
+		Dir:  realTmp,
+		Config: &ProjectConfig{
+			Version: projectConfigVersion,
+			Hosts:   []string{"yeet-cloud", "yeet-lab"},
+		},
+	}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	if err := os.Chdir(realTmp); err != nil {
+		t.Fatalf("Chdir tmp: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	oldConfigPath := clientConfigPathFn
+	configPath := filepath.Join(tmp, "xdg", "yeet", "config.toml")
+	clientConfigPathFn = func() (string, error) { return configPath, nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	restore := stubClientConfigState(t, clientConfig{})
+	defer restore()
+	oldPrompt := activePrompter
+	oldIsTerminal := isTerminalFn
+	activePrompter = fakePrompter{confirm: true, defaultHost: "yeet-cloud"}
+	isTerminalFn = func(int) bool { return true }
+	t.Cleanup(func() {
+		activePrompter = oldPrompt
+		isTerminalFn = oldIsTerminal
+	})
+
+	if _, err := loadSvcCommandConfig(svcCommand{Name: "status", CheckArgs: []string{"status"}}); err != nil {
+		t.Fatalf("loadSvcCommandConfig error: %v", err)
+	}
+	if got := Host(); got != "yeet-cloud" {
+		t.Fatalf("Host = %q, want selected default", got)
 	}
 }
 

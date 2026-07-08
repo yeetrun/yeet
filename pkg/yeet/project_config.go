@@ -121,6 +121,27 @@ func loadProjectConfigFromCwd() (*projectConfigLocation, error) {
 	return workspaceConfigForHost(Host())
 }
 
+func loadProjectConfigForCommandFromCwd() (*projectConfigLocation, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	loc, err := loadProjectConfigFromDir(cwd)
+	if err != nil || loc == nil {
+		if err != nil {
+			return nil, err
+		}
+		if err := requireClientConfig(); err != nil {
+			return nil, err
+		}
+		return workspaceConfigForHost(Host())
+	}
+	if err := adoptLocalProjectConfig(loc); err != nil {
+		return nil, err
+	}
+	return loc, nil
+}
+
 func loadOrCreateProjectConfigFromCwd() (*projectConfigLocation, error) {
 	cfg, err := loadProjectConfigFromCwd()
 	if err != nil {
@@ -161,25 +182,97 @@ func projectConfigForWrite(reason string) (*projectConfigLocation, bool, error) 
 }
 
 func projectConfigWriteLocal(local *projectConfigLocation) (*projectConfigLocation, bool, error) {
+	if err := adoptLocalProjectConfig(local); err != nil {
+		return nil, false, err
+	}
+	return local, true, nil
+}
+
+func adoptLocalProjectConfig(local *projectConfigLocation) error {
 	if local == nil || !canPromptForWorkspace() {
-		return local, true, nil
+		return nil
 	}
 	if err := ensureClientConfigLoaded(); err != nil {
-		return local, true, nil
+		return nil
 	}
 	if workspacePathRegistered(local.Dir) {
-		return local, true, nil
+		return nil
 	}
 	ok, err := activePrompter.Confirm(fmt.Sprintf("Use %s as a yeet workspace?", local.Dir), true)
 	if err != nil {
-		return nil, false, err
+		return err
 	}
 	if ok {
-		if err := registerWorkspacePath(local.Dir); err != nil {
-			return nil, false, err
+		if err := addWorkspacePath(local.Dir); err != nil {
+			return err
+		}
+		if err := adoptDefaultHostForLocalProjectConfig(local.Config); err != nil {
+			return err
+		}
+		return saveClientConfig()
+	}
+	return nil
+}
+
+func adoptDefaultHostForLocalProjectConfig(cfg *ProjectConfig) error {
+	hosts := claimHostsForDefaultAdoption(cfg)
+	if len(hosts) == 0 || defaultHostAdoptionBlocked(hosts) {
+		return nil
+	}
+	if len(hosts) == 1 {
+		return confirmSingleDefaultHost(hosts[0])
+	}
+	return selectDefaultHostForLocalProjectConfig(hosts)
+}
+
+func claimHostsForDefaultAdoption(cfg *ProjectConfig) []string {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.ClaimHosts()
+}
+
+func defaultHostAdoptionBlocked(hosts []string) bool {
+	if _, ok := HostOverride(); ok {
+		return true
+	}
+	current := normalizeCatchHost(loadedPrefs.DefaultHost)
+	for _, host := range hosts {
+		if host == current {
+			return true
 		}
 	}
-	return local, true, nil
+	return false
+}
+
+func confirmSingleDefaultHost(host string) error {
+	ok, err := activePrompter.Confirm(fmt.Sprintf("Set %s as the default catch host?", host), true)
+	if err != nil {
+		return err
+	}
+	if ok {
+		setDefaultHost(host)
+	}
+	return nil
+}
+
+func selectDefaultHostForLocalProjectConfig(hosts []string) error {
+	current := normalizeCatchHost(loadedPrefs.DefaultHost)
+	host, err := activePrompter.SelectDefaultHost(hosts, current)
+	if err != nil {
+		return err
+	}
+	host = normalizeCatchHost(host)
+	if host == "" {
+		return nil
+	}
+	for _, claimed := range hosts {
+		if host == claimed {
+			setDefaultHost(host)
+			return nil
+		}
+	}
+	return fmt.Errorf("default catch host must be one of: %s", strings.Join(hosts, ", "))
 }
 
 func projectConfigWriteWorkspace(reason string, cwd string) (*projectConfigLocation, bool, error) {
@@ -188,7 +281,10 @@ func projectConfigWriteWorkspace(reason string, cwd string) (*projectConfigLocat
 		return loc, loc != nil, err
 	}
 	dir, ok, err := projectConfigWriteWorkspaceDir(reason, cwd)
-	if err != nil || !ok {
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
 		return nil, false, err
 	}
 	loc, err = seedWorkspaceConfig(dir, Host())

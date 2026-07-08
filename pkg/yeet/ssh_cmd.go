@@ -471,7 +471,7 @@ func currentSSHHostSelection() sshHostSelection {
 }
 
 func resolveSSHHostFromProject(host, service string) (string, error) {
-	cfgLoc, err := loadProjectConfigFromCwd()
+	cfgLoc, err := loadProjectConfigForCommandFromCwd()
 	if err != nil {
 		return "", err
 	}

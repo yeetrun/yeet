@@ -419,7 +419,7 @@ func hostSetConfigLocation(configPath string) (*projectConfigLocation, error) {
 	if strings.TrimSpace(configPath) != "" {
 		return loadProjectConfigFromFile(configPath)
 	}
-	return loadProjectConfigFromCwd()
+	return loadProjectConfigForCommandFromCwd()
 }
 
 func applyHostStorageConfigMoves(cfg *ProjectConfig, host string, desiredServicesRoot string, moves []catchrpc.HostStorageServiceMove) (int, int) {

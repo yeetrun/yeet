@@ -440,6 +440,10 @@ func (*scriptedInitPrompter) SelectWorkspace(string, []string, string) (workspac
 	return workspaceSelection{}, nil
 }
 
+func (*scriptedInitPrompter) SelectDefaultHost([]string, string) (string, error) {
+	return "", nil
+}
+
 func TestPrepareInitVMToolsInstallPromptsForInteractiveCapableAptHost(t *testing.T) {
 	oldRemoteVMHostStatus := remoteVMHostStatusFn
 	oldPrompt := activePrompter

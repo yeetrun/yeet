@@ -7,6 +7,7 @@ package yeet
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 )
@@ -27,6 +28,7 @@ type workspaceSelection struct {
 type yeetPrompter interface {
 	Confirm(msg string, def bool) (bool, error)
 	SelectWorkspace(host string, paths []string, current string) (workspaceSelection, error)
+	SelectDefaultHost(hosts []string, current string) (string, error)
 	Input(msg string, def string) (string, error)
 	Secret(msg string) (string, error)
 }
@@ -52,6 +54,42 @@ func (plainPrompter) SelectWorkspace(host string, paths []string, current string
 		return workspaceSelection{Choice: workspacePromptRunOnce}, err
 	}
 	return workspaceSelection{Choice: workspacePromptUseCurrent, Path: current}, nil
+}
+
+func (plainPrompter) SelectDefaultHost(hosts []string, current string) (string, error) {
+	if len(hosts) == 0 {
+		return "", nil
+	}
+	current = defaultDefaultHost(current)
+	if _, err := fmt.Fprintf(os.Stdout, "Default catch host (%s, blank to keep %s): ", strings.Join(hosts, "/"), current); err != nil {
+		return "", err
+	}
+	var value string
+	if _, err := fmt.Fscanln(os.Stdin, &value); err != nil && err.Error() != "unexpected newline" {
+		return "", err
+	}
+	return selectedDefaultHost(hosts, current, value)
+}
+
+func defaultDefaultHost(current string) string {
+	current = normalizeCatchHost(current)
+	if current == "" {
+		return defaultCatchHost
+	}
+	return current
+}
+
+func selectedDefaultHost(hosts []string, current string, value string) (string, error) {
+	value = normalizeCatchHost(value)
+	if value == "" || value == current {
+		return "", nil
+	}
+	for _, host := range hosts {
+		if value == normalizeCatchHost(host) {
+			return value, nil
+		}
+	}
+	return "", fmt.Errorf("default catch host must be one of: %s", strings.Join(hosts, ", "))
 }
 
 func (plainPrompter) Input(msg string, def string) (string, error) {
