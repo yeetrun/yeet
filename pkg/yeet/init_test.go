@@ -5,6 +5,7 @@
 package yeet
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -191,6 +192,20 @@ func TestFinishInitWorkspaceSetupNoWorkspaceSkipsPrompt(t *testing.T) {
 
 	if err := finishInitWorkspaceSetup(ui, initOptions{noWorkspace: true}); err != nil {
 		t.Fatalf("finishInitWorkspaceSetup error: %v", err)
+	}
+}
+
+func TestFinishInitWorkspaceSetupNoWorkspaceCanSuppressNextSteps(t *testing.T) {
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-pve1"})
+	defer restore()
+	var out bytes.Buffer
+	ui := newInitUI(&out, false, false, "yeet-pve1", "root@example.com", catchServiceName)
+
+	if err := finishInitWorkspaceSetup(ui, initOptions{noWorkspace: true, suppressNextSteps: true}); err != nil {
+		t.Fatalf("finishInitWorkspaceSetup error: %v", err)
+	}
+	if got := out.String(); got != "" {
+		t.Fatalf("output = %q, want no next-step guidance", got)
 	}
 }
 
