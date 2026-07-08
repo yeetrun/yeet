@@ -792,7 +792,7 @@ func applyCopyHostOverrideForEndpoint(remote copyEndpoint, cfg *ProjectConfig) e
 }
 
 func hasActiveHostOverride() bool {
-	hostOverride, hostOverrideSet := HostOverride()
+	hostOverride, hostOverrideSet := HardHostOverride()
 	return hostOverrideSet && hostOverride != ""
 }
 

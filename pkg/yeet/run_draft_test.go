@@ -23,6 +23,7 @@ func preserveRunDraftGlobals(t *testing.T) {
 	oldService := serviceOverride
 	oldHost := hostOverride
 	oldHostSet := hostOverrideSet
+	oldHostHard := hostOverrideHard
 	oldPrefs := loadedPrefs
 	oldFetchRunDraftServiceInfo := fetchRunDraftServiceInfoFn
 	fetchRunDraftServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
@@ -33,6 +34,7 @@ func preserveRunDraftGlobals(t *testing.T) {
 		serviceOverride = oldService
 		hostOverride = oldHost
 		hostOverrideSet = oldHostSet
+		hostOverrideHard = oldHostHard
 		loadedPrefs = oldPrefs
 		fetchRunDraftServiceInfoFn = oldFetchRunDraftServiceInfo
 	})
@@ -43,6 +45,7 @@ func TestRunDraftFromCLIParsesFirstDeployOptions(t *testing.T) {
 	serviceOverride = "svc-a"
 	hostOverride = "host-a"
 	hostOverrideSet = true
+	hostOverrideHard = true
 
 	loc := &projectConfigLocation{Dir: t.TempDir(), Config: &ProjectConfig{Version: projectConfigVersion}}
 	draft, err := runDraftFromCLI([]string{
@@ -225,6 +228,7 @@ func TestRunDraftFromCLIParsesVMOptions(t *testing.T) {
 	serviceOverride = "devbox"
 	hostOverride = "host-a"
 	hostOverrideSet = true
+	hostOverrideHard = true
 
 	loc := &projectConfigLocation{Dir: t.TempDir(), Config: &ProjectConfig{Version: projectConfigVersion}}
 	for _, payload := range []string{"vm://ubuntu/26.04", "vm://foo/bar"} {
@@ -273,6 +277,7 @@ func TestRunDraftIncludesVMBalloonFlags(t *testing.T) {
 	serviceOverride = "devbox"
 	hostOverride = "host-a"
 	hostOverrideSet = true
+	hostOverrideHard = true
 
 	loc := &projectConfigLocation{Dir: t.TempDir(), Config: &ProjectConfig{Version: projectConfigVersion}}
 	draft, err := runDraftFromCLI([]string{"vm://ubuntu/26.04", "--memory=4g", "--memory-min=1g", "--balloon=auto"}, loc, "host-a")
@@ -526,6 +531,7 @@ func TestExecuteRunDraftWithOptionsWritesDeployOutputToProvidedWriter(t *testing
 	serviceOverride = "svc-a"
 	hostOverride = "host-a"
 	hostOverrideSet = true
+	hostOverrideHard = true
 	remoteCatchOSAndArchFn = func() (string, string, error) {
 		return "linux", "amd64", nil
 	}
@@ -583,6 +589,7 @@ func TestExecuteRunDraftCleansStagedOnlyServiceAfterFailedNewDeploy(t *testing.T
 	serviceOverride = "svc-a"
 	hostOverride = "host-a"
 	hostOverrideSet = true
+	hostOverrideHard = true
 	remoteCatchOSAndArchFn = func() (string, string, error) {
 		return "linux", "amd64", nil
 	}

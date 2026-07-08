@@ -2480,6 +2480,117 @@ func TestHandleStatusCommandSelectedServiceMissingFromHostStatus(t *testing.T) {
 	}
 }
 
+func TestHandleSvcCmdStatusUsesProjectHostsWithCatchHostEnv(t *testing.T) {
+	t.Setenv("CATCH_HOST", "host-a")
+	preserveSvcCommandGlobals(t)
+	isTerminalFn = func(int) bool { return false }
+	configDir := t.TempDir()
+	oldConfigPath := clientConfigPathFn
+	clientConfigPathFn = func() (string, error) { return filepath.Join(configDir, "config.toml"), nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	restore := stubClientConfigState(t, clientConfig{})
+	defer restore()
+	dir := useTempSvcCwd(t)
+	loc := &projectConfigLocation{
+		Path: filepath.Join(dir, projectConfigName),
+		Dir:  dir,
+		Config: &ProjectConfig{
+			Version: projectConfigVersion,
+			Hosts:   []string{"host-a", "host-b"},
+		},
+	}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+
+	var gotHosts []string
+	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		gotHosts = append(gotHosts, host)
+		return []statusService{{ServiceName: "svc-" + host, ServiceType: serviceTypeRun}}, nil
+	}
+
+	oldStdout := os.Stdout
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("OpenFile devnull: %v", err)
+	}
+	os.Stdout = devNull
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		_ = devNull.Close()
+	})
+
+	if err := HandleSvcCmd([]string{"status"}); err != nil {
+		t.Fatalf("HandleSvcCmd status: %v", err)
+	}
+	slices.Sort(gotHosts)
+	if !reflect.DeepEqual(gotHosts, []string{"host-a", "host-b"}) {
+		t.Fatalf("status hosts = %#v, want project hosts", gotHosts)
+	}
+}
+
+func TestHandleSvcCmdStatusUsesConfiguredWorkspaceHostsWithCatchHostEnv(t *testing.T) {
+	t.Setenv("CATCH_HOST", "host-a")
+	preserveSvcCommandGlobals(t)
+	isTerminalFn = func(int) bool { return false }
+	configDir := t.TempDir()
+	configPath := filepath.Join(configDir, "config.toml")
+	oldConfigPath := clientConfigPathFn
+	clientConfigPathFn = func() (string, error) { return configPath, nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatalf("Mkdir workspace: %v", err)
+	}
+	loc := &projectConfigLocation{
+		Path: filepath.Join(workspace, projectConfigName),
+		Dir:  workspace,
+		Config: &ProjectConfig{
+			Version: projectConfigVersion,
+			Hosts:   []string{"host-a", "host-b"},
+		},
+	}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	cfg := clientConfig{DefaultHost: "host-a", Workspaces: []string{workspace}}
+	cfg.normalize()
+	if err := cfg.saveTo(configPath); err != nil {
+		t.Fatalf("save client config: %v", err)
+	}
+	restore := stubClientConfigState(t, clientConfig{})
+	defer restore()
+	cwd := useTempSvcCwd(t)
+	if err := os.Remove(filepath.Join(cwd, projectConfigName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove local project config: %v", err)
+	}
+
+	var gotHosts []string
+	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		gotHosts = append(gotHosts, host)
+		return []statusService{{ServiceName: "svc-" + host, ServiceType: serviceTypeRun}}, nil
+	}
+
+	oldStdout := os.Stdout
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("OpenFile devnull: %v", err)
+	}
+	os.Stdout = devNull
+	t.Cleanup(func() {
+		os.Stdout = oldStdout
+		_ = devNull.Close()
+	})
+
+	if err := HandleSvcCmd([]string{"status"}); err != nil {
+		t.Fatalf("HandleSvcCmd status: %v", err)
+	}
+	slices.Sort(gotHosts)
+	if !reflect.DeepEqual(gotHosts, []string{"host-a", "host-b"}) {
+		t.Fatalf("status hosts = %#v, want workspace hosts", gotHosts)
+	}
+}
+
 func TestSvcStatusHostsAndRenderErrors(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	loadedPrefs.DefaultHost = "default-host"

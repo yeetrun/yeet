@@ -219,8 +219,8 @@ func newSvcCommandRequest(args []string) (svcCommandRequest, error) {
 		return svcCommandRequest{}, err
 	}
 
-	hostOverride, hostOverrideSet := HostOverride()
-	if err := applySvcCommandHost(cfgLoc, hostOverrideSet); err != nil {
+	hostOverride, hardHostOverrideSet := HardHostOverride()
+	if err := applySvcCommandHost(cfgLoc, hardHostOverrideSet); err != nil {
 		return svcCommandRequest{}, err
 	}
 
@@ -228,7 +228,7 @@ func newSvcCommandRequest(args []string) (svcCommandRequest, error) {
 		Command:         command,
 		Config:          cfgLoc,
 		HostOverride:    hostOverride,
-		HostOverrideSet: hostOverrideSet,
+		HostOverrideSet: hardHostOverrideSet,
 		Service:         getService(),
 	}, nil
 }

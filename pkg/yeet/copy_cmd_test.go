@@ -499,10 +499,12 @@ func TestApplyCopyHostOverrideForEndpoint(t *testing.T) {
 	oldPrefs := loadedPrefs
 	oldOverride := hostOverride
 	oldOverrideSet := hostOverrideSet
+	oldOverrideHard := hostOverrideHard
 	defer func() {
 		loadedPrefs = oldPrefs
 		hostOverride = oldOverride
 		hostOverrideSet = oldOverrideSet
+		hostOverrideHard = oldOverrideHard
 	}()
 
 	cfg := &ProjectConfig{}
@@ -542,6 +544,7 @@ func TestRunCopyCommandRoutesVMEndpointToRsync(t *testing.T) {
 	oldHost := Host()
 	oldOverride := hostOverride
 	oldOverrideSet := hostOverrideSet
+	oldOverrideHard := hostOverrideHard
 	defer func() {
 		fetchSSHServerInfoFunc = oldServerInfo
 		fetchSSHServiceInfoFunc = oldServiceInfo
@@ -550,6 +553,7 @@ func TestRunCopyCommandRoutesVMEndpointToRsync(t *testing.T) {
 		SetHost(oldHost)
 		hostOverride = oldOverride
 		hostOverrideSet = oldOverrideSet
+		hostOverrideHard = oldOverrideHard
 	}()
 	resetHostOverride()
 	SetHost("yeet-pve1")

@@ -463,11 +463,11 @@ type sshHostSelection struct {
 
 func currentSSHHostSelection() sshHostSelection {
 	host := Host()
-	hostOverride, hostOverrideSet := HostOverride()
-	if hostOverrideSet {
+	hostOverride, hardHostOverrideSet := HardHostOverride()
+	if hardHostOverrideSet {
 		host = hostOverride
 	}
-	return sshHostSelection{host: host, overrideSet: hostOverrideSet}
+	return sshHostSelection{host: host, overrideSet: hardHostOverrideSet}
 }
 
 func resolveSSHHostFromProject(host, service string) (string, error) {

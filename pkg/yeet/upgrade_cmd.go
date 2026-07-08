@@ -39,7 +39,7 @@ func handleUpgrade(ctx context.Context, args []string, stdout io.Writer, stderr 
 	}
 	checkOnly := flags.Check || len(pos) > 0 && pos[0] == "check"
 	cfgLoc, _ := loadProjectConfigForCommandFromCwd()
-	_, hasHostOverride := HostOverride()
+	_, hasHostOverride := HardHostOverride()
 	hosts := upgradeKnownHosts(cfgLoc, hasHostOverride)
 	report := buildUpgradeReportFn(ctx, upgradeCheckRequest{
 		Local:         local,

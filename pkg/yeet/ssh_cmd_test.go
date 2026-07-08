@@ -290,10 +290,12 @@ func TestResolveSSHHostUsesExplicitAndOverrideHosts(t *testing.T) {
 	oldPrefs := loadedPrefs
 	oldOverride := hostOverride
 	oldOverrideSet := hostOverrideSet
+	oldOverrideHard := hostOverrideHard
 	defer func() {
 		loadedPrefs = oldPrefs
 		hostOverride = oldOverride
 		hostOverrideSet = oldOverrideSet
+		hostOverrideHard = oldOverrideHard
 	}()
 	loadedPrefs.DefaultHost = "default-host"
 	resetHostOverride()
@@ -320,10 +322,12 @@ func TestResolveSSHHostFromProjectConfig(t *testing.T) {
 	oldHost := loadedPrefs.DefaultHost
 	oldOverride := hostOverride
 	oldOverrideSet := hostOverrideSet
+	oldOverrideHard := hostOverrideHard
 	defer func() {
 		loadedPrefs.DefaultHost = oldHost
 		hostOverride = oldOverride
 		hostOverrideSet = oldOverrideSet
+		hostOverrideHard = oldOverrideHard
 	}()
 	loadedPrefs.DefaultHost = "catch"
 	resetHostOverride()
@@ -1545,6 +1549,7 @@ func testSSHExecutionPlanWithServiceInfo(
 	oldServiceOverride := serviceOverride
 	oldHostOverride := hostOverride
 	oldHostOverrideSet := hostOverrideSet
+	oldHostOverrideHard := hostOverrideHard
 	loadedPrefs = prefs{DefaultHost: "yeet-pve1"}
 	serviceOverride = ""
 	resetHostOverride()
@@ -1553,6 +1558,7 @@ func testSSHExecutionPlanWithServiceInfo(
 		serviceOverride = oldServiceOverride
 		hostOverride = oldHostOverride
 		hostOverrideSet = oldHostOverrideSet
+		hostOverrideHard = oldHostOverrideHard
 	})
 
 	oldCwd, err := os.Getwd()
