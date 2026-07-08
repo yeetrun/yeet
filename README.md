@@ -160,8 +160,11 @@ cd ~/yeet-services
 ```
 
 After setup, yeet can remember this workspace in `$XDG_CONFIG_HOME/yeet/config.toml`, so commands from other directories can still find the right `yeet.toml`.
+If you already have a `yeet.toml` in the current directory, interactive commands
+such as `yeet status` can offer to adopt that directory as a saved workspace.
 
-This file is the boring local state. Boring local state is good. Hidden state is how tools become haunted.
+This file is the local state that makes commands from other directories behave
+like they were run from the workspace.
 
 ### 6. Run something disposable
 

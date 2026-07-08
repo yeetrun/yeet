@@ -237,7 +237,7 @@ func loadSvcCommandConfig(command svcCommand) (*projectConfigLocation, error) {
 	if skip, err := serviceSyncUsesExplicitConfig(command); skip || err != nil {
 		return nil, err
 	}
-	return loadProjectConfigFromCwd()
+	return loadProjectConfigForCommandFromCwd()
 }
 
 func serviceSyncUsesExplicitConfig(command svcCommand) (bool, error) {
