@@ -24,10 +24,11 @@ var (
 	clientConfigPathFn = defaultClientConfigPath
 	legacyPrefsPathFn  = defaultLegacyPrefsPath
 
-	serviceOverride string
-	hostOverride    string
-	hostOverrideSet bool
-	loadedPrefs     clientConfig
+	serviceOverride  string
+	hostOverride     string
+	hostOverrideSet  bool
+	hostOverrideHard bool
+	loadedPrefs      clientConfig
 )
 
 var (
@@ -115,6 +116,7 @@ func ensureClientConfigLoaded() error {
 		if envHost := normalizeCatchHost(os.Getenv("CATCH_HOST")); envHost != "" {
 			hostOverride = envHost
 			hostOverrideSet = true
+			hostOverrideHard = false
 		}
 		return nil
 	}
@@ -125,6 +127,7 @@ func ensureClientConfigLoaded() error {
 	if envHost := normalizeCatchHost(os.Getenv("CATCH_HOST")); envHost != "" {
 		hostOverride = envHost
 		hostOverrideSet = true
+		hostOverrideHard = false
 	}
 	if loadedPrefs.savedHost == "" {
 		loadedPrefs.savedHost = loadedPrefs.DefaultHost
@@ -306,6 +309,14 @@ func setWorkspaces(paths []string) error {
 }
 
 func SetHost(host string) {
+	setHostOverride(host, false)
+}
+
+func SetHostOverride(host string) {
+	setHostOverride(host, true)
+}
+
+func setHostOverride(host string, hard bool) {
 	host = normalizeCatchHost(host)
 	if host == "" {
 		return
@@ -313,15 +324,20 @@ func SetHost(host string) {
 	_ = ensureClientConfigLoaded()
 	hostOverride = host
 	hostOverrideSet = true
-}
-
-func SetHostOverride(host string) {
-	SetHost(host)
+	hostOverrideHard = hard
 }
 
 func HostOverride() (string, bool) {
 	_ = ensureClientConfigLoaded()
 	if !hostOverrideSet {
+		return "", false
+	}
+	return hostOverride, true
+}
+
+func HardHostOverride() (string, bool) {
+	_ = ensureClientConfigLoaded()
+	if !hostOverrideSet || !hostOverrideHard {
 		return "", false
 	}
 	return hostOverride, true
@@ -333,6 +349,7 @@ func resetHostOverride() {
 	hadOverride := hostOverrideSet || currentOverride != ""
 	hostOverride = ""
 	hostOverrideSet = false
+	hostOverrideHard = false
 	if !hadOverride {
 		if currentHost != "" {
 			loadedPrefs.DefaultHost = currentHost

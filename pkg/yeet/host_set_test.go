@@ -499,6 +499,7 @@ func stubHostSetRuntime(t *testing.T) *hostSetTestState {
 	oldPrefs := loadedPrefs
 	oldHostOverride := hostOverride
 	oldHostOverrideSet := hostOverrideSet
+	oldHostOverrideHard := hostOverrideHard
 	t.Cleanup(func() {
 		newHostStorageClientFn = oldClient
 		confirmHostSetFn = oldConfirm
@@ -507,6 +508,7 @@ func stubHostSetRuntime(t *testing.T) *hostSetTestState {
 		loadedPrefs = oldPrefs
 		hostOverride = oldHostOverride
 		hostOverrideSet = oldHostOverrideSet
+		hostOverrideHard = oldHostOverrideHard
 	})
 	loadedPrefs = prefs{DefaultHost: state.host}
 	resetHostOverride()

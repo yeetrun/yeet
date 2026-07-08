@@ -228,6 +228,7 @@ func TestHandleInfoCommandWithoutServiceRendersHostInfo(t *testing.T) {
 	oldPrefs := loadedPrefs
 	oldHostOverride := hostOverride
 	oldHostOverrideSet := hostOverrideSet
+	oldHostOverrideHard := hostOverrideHard
 	oldFetchHostInfo := fetchInfoHostInfoFn
 	oldFetchServiceInfo := fetchInfoServiceInfoFn
 	oldFetchStatus := fetchStatusForHostFn
@@ -236,6 +237,7 @@ func TestHandleInfoCommandWithoutServiceRendersHostInfo(t *testing.T) {
 		loadedPrefs = oldPrefs
 		hostOverride = oldHostOverride
 		hostOverrideSet = oldHostOverrideSet
+		hostOverrideHard = oldHostOverrideHard
 		fetchInfoHostInfoFn = oldFetchHostInfo
 		fetchInfoServiceInfoFn = oldFetchServiceInfo
 		fetchStatusForHostFn = oldFetchStatus
@@ -365,6 +367,7 @@ func TestHandleInfoCommandErrorsWhenServiceIsMissingOnCatch(t *testing.T) {
 	oldPrefs := loadedPrefs
 	oldHostOverride := hostOverride
 	oldHostOverrideSet := hostOverrideSet
+	oldHostOverrideHard := hostOverrideHard
 	oldFetchHostInfo := fetchInfoHostInfoFn
 	oldFetchServiceInfo := fetchInfoServiceInfoFn
 	t.Cleanup(func() {
@@ -372,6 +375,7 @@ func TestHandleInfoCommandErrorsWhenServiceIsMissingOnCatch(t *testing.T) {
 		loadedPrefs = oldPrefs
 		hostOverride = oldHostOverride
 		hostOverrideSet = oldHostOverrideSet
+		hostOverrideHard = oldHostOverrideHard
 		fetchInfoHostInfoFn = oldFetchHostInfo
 		fetchInfoServiceInfoFn = oldFetchServiceInfo
 	})

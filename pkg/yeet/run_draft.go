@@ -334,18 +334,21 @@ func executeRunDraftWithOptions(ctx context.Context, draft RunDraft, cfgLoc *pro
 	prevService := serviceOverride
 	prevHost := hostOverride
 	prevHostSet := hostOverrideSet
+	prevHostHard := hostOverrideHard
 	prevPrefs := loadedPrefs
 	serviceOverride = service
 	host := strings.TrimSpace(draft.Host)
 	if host != "" {
 		hostOverride = host
 		hostOverrideSet = true
+		hostOverrideHard = true
 		loadedPrefs.DefaultHost = host
 	}
 	defer func() {
 		serviceOverride = prevService
 		hostOverride = prevHost
 		hostOverrideSet = prevHostSet
+		hostOverrideHard = prevHostHard
 		loadedPrefs = prevPrefs
 	}()
 

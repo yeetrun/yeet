@@ -31,6 +31,9 @@ func TestPrefsHostSettersAndOverrides(t *testing.T) {
 	if got, ok := HostOverride(); !ok || got != "host-b" {
 		t.Fatalf("HostOverride after SetHost = %q %v, want host-b true", got, ok)
 	}
+	if got, ok := HardHostOverride(); ok || got != "" {
+		t.Fatalf("HardHostOverride after SetHost = %q %v, want empty false", got, ok)
+	}
 	if loadedPrefs.DefaultHost != "host-a" {
 		t.Fatalf("saved default host = %q, want host-a", loadedPrefs.DefaultHost)
 	}
@@ -47,6 +50,9 @@ func TestPrefsHostSettersAndOverrides(t *testing.T) {
 	if got, ok := HostOverride(); !ok || got != "host-c" {
 		t.Fatalf("HostOverride = %q %v, want host-c true", got, ok)
 	}
+	if got, ok := HardHostOverride(); !ok || got != "host-c" {
+		t.Fatalf("HardHostOverride = %q %v, want host-c true", got, ok)
+	}
 	if loadedPrefs.DefaultHost != "host-a" {
 		t.Fatalf("saved default host after SetHostOverride = %q, want host-a", loadedPrefs.DefaultHost)
 	}
@@ -57,6 +63,9 @@ func TestPrefsHostSettersAndOverrides(t *testing.T) {
 	}
 	if got, ok := HostOverride(); !ok || got != "host-d" {
 		t.Fatalf("HostOverride after service = %q %v, want host-d true", got, ok)
+	}
+	if got, ok := HardHostOverride(); !ok || got != "host-d" {
+		t.Fatalf("HardHostOverride after service = %q %v, want host-d true", got, ok)
 	}
 }
 
@@ -275,6 +284,9 @@ func TestClientConfigCatchHostEnvOverrideDoesNotSaveDefaultHost(t *testing.T) {
 	if got, ok := HostOverride(); !ok || got != "yeet-cloud" {
 		t.Fatalf("HostOverride from env = %q %v, want yeet-cloud true", got, ok)
 	}
+	if got, ok := HardHostOverride(); ok || got != "" {
+		t.Fatalf("HardHostOverride from env = %q %v, want empty false", got, ok)
+	}
 	if Host() != "yeet-cloud" {
 		t.Fatalf("Host = %q, want env override host", Host())
 	}
@@ -439,6 +451,7 @@ func stubClientConfigState(t *testing.T, next clientConfig) func() {
 	oldService := serviceOverride
 	oldHostOverride := hostOverride
 	oldHostOverrideSet := hostOverrideSet
+	oldHostOverrideHard := hostOverrideHard
 	if next.loaded || next.loadErr != nil || next.DefaultHost != "" || len(next.Workspaces) != 0 || len(next.warnings) != 0 || next.changed || next.savedHost != "" {
 		next.loaded = true
 		next.normalize()
@@ -450,11 +463,13 @@ func stubClientConfigState(t *testing.T, next clientConfig) func() {
 	serviceOverride = ""
 	hostOverride = ""
 	hostOverrideSet = false
+	hostOverrideHard = false
 	return func() {
 		loadedPrefs = oldPrefs
 		serviceOverride = oldService
 		hostOverride = oldHostOverride
 		hostOverrideSet = oldHostOverrideSet
+		hostOverrideHard = oldHostOverrideHard
 	}
 }
 
@@ -464,6 +479,7 @@ func stubPrefsState(t *testing.T, next prefs) func() {
 	oldService := serviceOverride
 	oldHostOverride := hostOverride
 	oldHostOverrideSet := hostOverrideSet
+	oldHostOverrideHard := hostOverrideHard
 	next.loaded = true
 	next.normalize()
 	if next.savedHost == "" {
@@ -473,10 +489,12 @@ func stubPrefsState(t *testing.T, next prefs) func() {
 	serviceOverride = ""
 	hostOverride = ""
 	hostOverrideSet = false
+	hostOverrideHard = false
 	return func() {
 		loadedPrefs = oldPrefs
 		serviceOverride = oldService
 		hostOverride = oldHostOverride
 		hostOverrideSet = oldHostOverrideSet
+		hostOverrideHard = oldHostOverrideHard
 	}
 }
