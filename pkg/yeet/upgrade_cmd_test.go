@@ -255,12 +255,14 @@ func TestRunUpgradeUpdatesCatchWithRecordedInstallTarget(t *testing.T) {
 	t.Cleanup(func() { initCatchFn = oldInit })
 	var target string
 	var releaseVersion string
+	var noWorkspace bool
 	initCatchFn = func(userAtRemote string, opts initOptions) error {
 		target = userAtRemote
 		if !opts.fromGithub {
 			t.Fatalf("opts = %#v, want from github", opts)
 		}
 		releaseVersion = opts.releaseVersion
+		noWorkspace = opts.noWorkspace
 		return nil
 	}
 	report := upgradeReport{
@@ -278,6 +280,38 @@ func TestRunUpgradeUpdatesCatchWithRecordedInstallTarget(t *testing.T) {
 	}
 	if releaseVersion != "v0.5.13" {
 		t.Fatalf("releaseVersion = %q, want v0.5.13", releaseVersion)
+	}
+	if !noWorkspace {
+		t.Fatal("noWorkspace = false, want true for catch upgrade reinstall")
+	}
+}
+
+func TestRunUpgradeInstallsCatchWithRowHostOverSoftOverride(t *testing.T) {
+	restore := stubPrefsState(t, prefs{DefaultHost: "yeet-pve1"})
+	defer restore()
+	SetHost("yeet-pve1")
+	oldInit := initCatchFn
+	t.Cleanup(func() { initCatchFn = oldInit })
+	var gotHostDuringInstall string
+	initCatchFn = func(userAtRemote string, opts initOptions) error {
+		gotHostDuringInstall = Host()
+		return nil
+	}
+	report := upgradeReport{
+		Latest: releaseCacheEntry{Tag: "v0.5.13"},
+		Local:  upgradeComponent{Name: "yeet", Current: "v0.5.13", Latest: "v0.5.13", Status: upgradeStatusCurrent},
+		Catch: []upgradeComponent{
+			{Name: "catch", Host: "yeet-hetz", Current: "v0.5.10", Latest: "v0.5.13", Status: upgradeStatusUpdateAvailable, InstallUser: "root", InstallHost: "hetz"},
+		},
+	}
+	if err := runUpgrade(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, cli.UpgradeFlags{Yes: true}, report); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	if gotHostDuringInstall != "yeet-hetz" {
+		t.Fatalf("Host during install = %q, want yeet-hetz", gotHostDuringInstall)
+	}
+	if got := Host(); got != "yeet-pve1" {
+		t.Fatalf("Host after install = %q, want original soft override", got)
 	}
 }
 
