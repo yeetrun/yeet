@@ -495,6 +495,7 @@ func TestClassifyCopyEndpoints(t *testing.T) {
 }
 
 func TestApplyCopyHostOverrideForEndpoint(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
 	oldPrefs := loadedPrefs
 	oldOverride := hostOverride
 	oldOverrideSet := hostOverrideSet

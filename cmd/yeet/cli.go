@@ -150,9 +150,11 @@ func buildHelpConfig() yargs.HelpConfig {
 	subcommands["init"] = yargs.SubCommandInfo{
 		Name:        "init",
 		Description: "Install catch on a remote host (prompts for Tailscale OAuth setup when needed)",
-		Usage:       "[--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET] [--zfs] [--ts-client-secret=<secret>] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]",
+		Usage:       "[--from-github] [--nightly] [--install-docker] [--install-vm-tools] [--workspace=PATH] [--no-workspace] [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET] [--zfs] [--ts-client-secret=<secret>] [--ts-auth-key=<key>] [ROOT@MACHINE-HOST]",
 		Examples: []string{
 			"yeet init root@<machine-host>",
+			"yeet init --workspace ~/yeet-services root@<machine-host>",
+			"yeet init --no-workspace root@<machine-host>",
 			"yeet init --data-dir=/srv/yeet-data root@<machine-host>",
 			"yeet init --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services root@<machine-host>",
 			"yeet init --ts-client-secret=<secret> root@<machine-host>",
@@ -166,9 +168,18 @@ func buildHelpConfig() yargs.HelpConfig {
 		Description: "List tailnet hosts with the given tags; requires a local Tailscale client",
 		Usage:       "[--tags=tag:catch]",
 	}
-	subcommands["prefs"] = yargs.SubCommandInfo{
-		Name:        "prefs",
-		Description: "Manage the current preferences",
+	subcommands["config"] = yargs.SubCommandInfo{
+		Name:        "config",
+		Description: "Show or update local yeet client config",
+		Usage:       "[--host=<catch-host>] [--workspace=PATH] [--add-workspace=PATH] [--remove-workspace=PATH] [--clear-workspaces]",
+		Examples: []string{
+			"yeet config",
+			"yeet config --host=<catch-host>",
+			"yeet config --workspace ~/yeet-services",
+			"yeet config --add-workspace ~/lab-services",
+			"yeet config --remove-workspace ~/lab-services",
+			"yeet config --clear-workspaces",
+		},
 	}
 	subcommands["ssh"] = yargs.SubCommandInfo{
 		Name:        "ssh",

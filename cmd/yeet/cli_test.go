@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	osexec "os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -328,6 +329,91 @@ func TestCopyHelpMentionsVMGuestCopy(t *testing.T) {
 	}
 }
 
+func TestBuildHelpConfigRegistersConfigAndNotPrefs(t *testing.T) {
+	cfg := buildHelpConfig()
+	if _, ok := cfg.SubCommands["config"]; !ok {
+		t.Fatal("config subcommand missing")
+	}
+	if _, ok := cfg.SubCommands["prefs"]; ok {
+		t.Fatal("prefs subcommand should be removed")
+	}
+}
+
+func TestRunConfigHostFlagSavesDefaultHost(t *testing.T) {
+	tmp := t.TempDir()
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatalf("Mkdir workspace: %v", err)
+	}
+	cmdArgs := []string{
+		"-test.run=TestRunConfigCommandHelper",
+		"--",
+		"config",
+		"--host",
+		"Yeet-PVE1",
+		"--workspace",
+		workspace,
+	}
+	cmd := osexec.Command(os.Args[0], cmdArgs...)
+	cmd.Env = configHelperEnv(tmp)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("helper failed: %v\n%s", err, out)
+	}
+	raw, err := os.ReadFile(filepath.Join(tmp, "xdg", "yeet", "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `default_host = "yeet-pve1"`) || !strings.Contains(text, workspace) {
+		t.Fatalf("config = %q, want saved host and workspace", text)
+	}
+}
+
+func TestRunConfigCommandHelper(t *testing.T) {
+	if os.Getenv("YEET_CONFIG_HELPER") != "1" {
+		return
+	}
+
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	os.Args = append([]string{"yeet"}, argsAfterTestTerminator(os.Args)...)
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("config should not route through service command with args %v", args)
+		return nil
+	}
+	if code := run(); code != 0 {
+		t.Fatalf("run exit code = %d, want 0", code)
+	}
+}
+
+func configHelperEnv(tmp string) []string {
+	env := make([]string, 0, len(os.Environ())+4)
+	for _, entry := range os.Environ() {
+		if strings.HasPrefix(entry, "CATCH_HOST=") ||
+			strings.HasPrefix(entry, "HOME=") ||
+			strings.HasPrefix(entry, "XDG_CONFIG_HOME=") ||
+			strings.HasPrefix(entry, "YEET_CONFIG_HELPER=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env,
+		"YEET_CONFIG_HELPER=1",
+		"HOME="+filepath.Join(tmp, "home"),
+		"XDG_CONFIG_HOME="+filepath.Join(tmp, "xdg"),
+	)
+}
+
 func TestSSHHelpMentionsCatchRPCShellBehavior(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
@@ -499,10 +585,11 @@ func TestRunHostSetRespectsHostSelection(t *testing.T) {
 			wantOverride: "flag-host",
 		},
 		{
-			name:      "catch host environment",
-			args:      []string{"host", "set"},
-			catchHost: "env-host",
-			wantHost:  "env-host",
+			name:         "catch host environment",
+			args:         []string{"host", "set"},
+			catchHost:    "env-host",
+			wantHost:     "env-host",
+			wantOverride: "env-host",
 		},
 	}
 
@@ -761,7 +848,7 @@ func TestRunInitHelpAgentUsesMachineHostAndVMToolsFlag(t *testing.T) {
 		t.Fatalf("read stdout: %v", err)
 	}
 	stdout := string(rawStdout)
-	for _, want := range []string{"--install-vm-tools", "--ts-client-secret", "root@<machine-host>"} {
+	for _, want := range []string{"--install-vm-tools", "--ts-client-secret", "--workspace", "--no-workspace", "root@<machine-host>"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout missing %q:\n%s", want, stdout)
 		}

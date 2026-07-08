@@ -440,6 +440,42 @@ func TestHandleSvcCmdRunWebWithoutServiceRoutesToLocalWeb(t *testing.T) {
 	}
 }
 
+func TestHandleSvcCmdRunWebWithoutConfigWarnsAndStillLaunches(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	t.Setenv("CATCH_HOST", "")
+	useTempSvcCwd(t)
+	serviceOverride = ""
+	loadedPrefs.DefaultHost = "yeet-pve1"
+	oldPrompt := activePrompter
+	oldWarn := warnProjectConfigNotSavedFn
+	oldIsTerminal := isTerminalFn
+	activePrompter = fakePrompter{selection: workspaceSelection{Choice: workspacePromptRunOnce}}
+	isTerminalFn = func(int) bool { return true }
+	t.Cleanup(func() {
+		activePrompter = oldPrompt
+		warnProjectConfigNotSavedFn = oldWarn
+		isTerminalFn = oldIsTerminal
+	})
+
+	var warned string
+	warnProjectConfigNotSavedFn = func(reason string) { warned = reason }
+	var got runWebRequest
+	runWebFn = func(ctx context.Context, req runWebRequest) error {
+		got = req
+		return nil
+	}
+
+	if err := HandleSvcCmd([]string{"run", "--web"}); err != nil {
+		t.Fatalf("HandleSvcCmd run --web error = %v", err)
+	}
+	if warned == "" {
+		t.Fatal("warning not emitted")
+	}
+	if got.Config != nil {
+		t.Fatalf("runWeb request config = %#v, want nil after declining workspace persistence", got.Config)
+	}
+}
+
 func TestHandleSvcCmdRunWebInvalidBoolReturnsParseError(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	useTempSvcCwd(t)
@@ -581,9 +617,10 @@ func TestSvcRunZFSServiceRoot(t *testing.T) {
 
 func TestSvcRunPreservesServiceRootPayloadArgsInSavedConfig(t *testing.T) {
 	preserveSvcCommandGlobals(t)
-	useTempSvcCwd(t)
+	tmp := useTempSvcCwd(t)
 	serviceOverride = "svc-a"
 	loadedPrefs.DefaultHost = "host-a"
+	writeSvcBranchConfig(t, tmp)
 	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		if image != "ghcr.io/example/app:latest" {
 			t.Fatalf("image = %q, want ghcr.io/example/app:latest", image)
@@ -2527,7 +2564,8 @@ func TestSvcHandleStatusRemoteAndParseErrors(t *testing.T) {
 
 func TestSvcSaveConfigEarlyReturnsAndCreation(t *testing.T) {
 	preserveSvcCommandGlobals(t)
-	useTempSvcCwd(t)
+	t.Setenv("CATCH_HOST", "")
+	tmp := useTempSvcCwd(t)
 
 	serviceOverride = ""
 	if err := saveRunConfig(nil, "", "payload", []string{"--pull"}, "", false); err != nil {
@@ -2539,16 +2577,38 @@ func TestSvcSaveConfigEarlyReturnsAndCreation(t *testing.T) {
 
 	serviceOverride = "svc-a"
 	loadedPrefs.DefaultHost = "host-a"
+	oldPrompt := activePrompter
+	oldWarn := warnProjectConfigNotSavedFn
+	oldIsTerminal := isTerminalFn
+	activePrompter = fakePrompter{selection: workspaceSelection{Choice: workspacePromptRunOnce}}
+	warned := ""
+	warnProjectConfigNotSavedFn = func(reason string) { warned = reason }
+	isTerminalFn = func(int) bool { return true }
+	defer func() {
+		activePrompter = oldPrompt
+		warnProjectConfigNotSavedFn = oldWarn
+		isTerminalFn = oldIsTerminal
+	}()
 	payload := "run.sh"
 	if err := saveRunConfig(nil, "", payload, []string{"--", "--app-flag"}, "", false); err != nil {
-		t.Fatalf("saveRunConfig create error: %v", err)
+		t.Fatalf("saveRunConfig no-save error: %v", err)
 	}
-	loaded, err := loadProjectConfigFromCwd()
+	if warned != "service" {
+		t.Fatalf("warning reason = %q, want service", warned)
+	}
+	loaded, err := loadProjectConfigFromDir(tmp)
 	if err != nil {
-		t.Fatalf("loadProjectConfigFromCwd error: %v", err)
+		t.Fatalf("loadProjectConfigFromDir error: %v", err)
+	}
+	if loaded != nil {
+		t.Fatalf("loaded config = %#v, want nil when persistence is declined", loaded)
+	}
+	loaded = writeSvcBranchConfig(t, tmp)
+	if err := saveRunConfig(loaded, "", payload, []string{"--", "--app-flag"}, "", false); err != nil {
+		t.Fatalf("saveRunConfig existing config error: %v", err)
 	}
 	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
-	if !ok || entry.Payload != "run.sh" || !reflect.DeepEqual(entry.Args, []string{"--app-flag"}) {
+	if !ok || filepath.Base(entry.Payload) != "run.sh" || !reflect.DeepEqual(entry.Args, []string{"--app-flag"}) {
 		t.Fatalf("run entry = %#v, ok=%v", entry, ok)
 	}
 

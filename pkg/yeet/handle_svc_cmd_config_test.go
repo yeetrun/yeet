@@ -88,8 +88,11 @@ func TestHandleSvcCmdUsesConfigHost(t *testing.T) {
 	if !called {
 		t.Fatalf("expected execRemoteOutputFn to be called")
 	}
-	if loadedPrefs.DefaultHost != "host-a" {
-		t.Fatalf("host = %q, want host-a", loadedPrefs.DefaultHost)
+	if host, ok := HostOverride(); !ok || host != "host-a" {
+		t.Fatalf("host override = %q ok=%v, want host-a true", host, ok)
+	}
+	if loadedPrefs.DefaultHost != "catch" {
+		t.Fatalf("saved default host = %q, want catch", loadedPrefs.DefaultHost)
 	}
 }
 

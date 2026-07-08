@@ -889,6 +889,43 @@ func TestSaveEnvFileConfigStoresRelativePath(t *testing.T) {
 	}
 }
 
+func TestSaveEnvFileConfigSkipsPersistenceWhenWorkspaceDeclined(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	oldService := serviceOverride
+	oldPrompt := activePrompter
+	oldWarn := warnProjectConfigNotSavedFn
+	oldIsTerminal := isTerminalFn
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("Chdir error: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-pve1"})
+	defer restore()
+	serviceOverride = "api"
+	activePrompter = fakePrompter{selection: workspaceSelection{Choice: workspacePromptRunOnce}}
+	isTerminalFn = func(int) bool { return true }
+	defer func() {
+		serviceOverride = oldService
+		activePrompter = oldPrompt
+		warnProjectConfigNotSavedFn = oldWarn
+		isTerminalFn = oldIsTerminal
+	}()
+	var warned string
+	warnProjectConfigNotSavedFn = func(reason string) { warned = reason }
+
+	if err := saveEnvFileConfig(nil, "yeet-pve1", ".env"); err != nil {
+		t.Fatalf("saveEnvFileConfig error: %v", err)
+	}
+	if warned == "" {
+		t.Fatal("warning not emitted")
+	}
+}
+
 func TestEnsureLockedRunFlagsRejectsChanges(t *testing.T) {
 	entry := ServiceEntry{
 		Name: "svc-a",

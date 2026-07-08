@@ -442,9 +442,12 @@ func saveEnvFileConfig(cfgLoc *projectConfigLocation, hostOverride string, envFi
 	loc := cfgLoc
 	if loc == nil {
 		var err error
-		loc, err = loadOrCreateProjectConfigFromCwd()
+		loc, _, err = projectConfigForWrite("env")
 		if err != nil {
 			return err
+		}
+		if loc == nil {
+			return nil
 		}
 	}
 	entry := ServiceEntry{

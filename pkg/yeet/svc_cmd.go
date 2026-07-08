@@ -443,9 +443,16 @@ func handleSvcRun(req svcCommandRequest) error {
 		return err
 	}
 	if web {
+		cfgLoc := req.Config
+		if cfgLoc == nil {
+			cfgLoc, _, err = projectConfigForWrite("service")
+			if err != nil {
+				return err
+			}
+		}
 		return runWebFn(context.Background(), runWebRequest{
 			Args:         webArgs,
-			Config:       req.Config,
+			Config:       cfgLoc,
 			HostOverride: req.HostOverride,
 			Service:      runWebRequestService(req.Service),
 			Out:          os.Stdout,
@@ -2421,6 +2428,9 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 	if err != nil {
 		return err
 	}
+	if loc == nil {
+		return nil
+	}
 	host := runConfigHost(hostOverride)
 	serviceRoot, serviceRootZFS, filteredArgs, err := runConfigServiceRoot(runArgs, serviceRoot, serviceRootZFS)
 	if err != nil {
@@ -2439,12 +2449,7 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 	if err != nil {
 		return err
 	}
-	payloadKind = strings.TrimSpace(payloadKind)
-	entryType := ""
-	if payloadKind == serviceTypeVM || isVMPayload(payload) {
-		entryType = serviceTypeVM
-		payloadKind = serviceTypeVM
-	}
+	entryType, payloadKind := runConfigEntryType(payload, payloadKind)
 	payloadRel := relativePayloadPathForKind(loc.Dir, payload, payloadKind)
 	entry := ServiceEntry{
 		Name:           serviceOverride,
@@ -2462,11 +2467,20 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 	return saveProjectConfig(loc)
 }
 
+func runConfigEntryType(payload string, payloadKind string) (string, string) {
+	payloadKind = strings.TrimSpace(payloadKind)
+	if payloadKind == serviceTypeVM || isVMPayload(payload) {
+		return serviceTypeVM, serviceTypeVM
+	}
+	return "", payloadKind
+}
+
 func runConfigLocation(cfgLoc *projectConfigLocation) (*projectConfigLocation, error) {
 	if cfgLoc != nil {
 		return cfgLoc, nil
 	}
-	return loadOrCreateProjectConfigFromCwd()
+	loc, _, err := projectConfigForWrite("service")
+	return loc, err
 }
 
 func runConfigHost(hostOverride string) string {
@@ -2793,9 +2807,12 @@ func saveCronConfig(cfgLoc *projectConfigLocation, hostOverride string, payload 
 	loc := cfgLoc
 	if loc == nil {
 		var err error
-		loc, err = loadOrCreateProjectConfigFromCwd()
+		loc, _, err = projectConfigForWrite("cron")
 		if err != nil {
 			return err
+		}
+		if loc == nil {
+			return nil
 		}
 	}
 	host := strings.TrimSpace(hostOverride)

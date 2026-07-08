@@ -5,7 +5,6 @@
 package yeet
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/shayne/yargs"
-	"github.com/yeetrun/yeet/pkg/cmdutil"
 )
 
 var archMap = map[string]string{
@@ -44,6 +42,8 @@ type initFlagsParsed struct {
 	DataDir        string `flag:"data-dir"`
 	ServicesRoot   string `flag:"services-root"`
 	ZFS            bool   `flag:"zfs"`
+	Workspace      string `flag:"workspace"`
+	NoWorkspace    bool   `flag:"no-workspace"`
 }
 
 type initOptions struct {
@@ -53,6 +53,8 @@ type initOptions struct {
 	installVMTools     bool
 	prepareVMLANBridge bool
 	skipVMLANBridge    bool
+	noWorkspace        bool
+	workspace          string
 	tsAuthKey          string
 	tsClientSecret     string
 	releaseVersion     string
@@ -113,6 +115,8 @@ func initOptionsFromParsedFlags(flags initFlagsParsed) (initOptions, error) {
 		nightly:        flags.Nightly,
 		installDocker:  flags.InstallDocker,
 		installVMTools: flags.InstallVMTools,
+		noWorkspace:    flags.NoWorkspace,
+		workspace:      flags.Workspace,
 		tsAuthKey:      flags.TSAuthKey,
 		tsClientSecret: flags.TSClientSecret,
 		storage:        storage,
@@ -125,6 +129,9 @@ func validateInitArgs(pos []string, opts initOptions) error {
 	}
 	if opts.tsClientSecret != "" && !strings.HasPrefix(opts.tsClientSecret, "tskey-client-") {
 		return fmt.Errorf("invalid --ts-client-secret (expected tskey-client-...)")
+	}
+	if strings.TrimSpace(opts.workspace) != "" && opts.noWorkspace {
+		return fmt.Errorf("--workspace and --no-workspace cannot be used together")
 	}
 	if len(pos) > 1 {
 		return fmt.Errorf("init takes at most one argument")
@@ -333,11 +340,21 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 	if err := chmodInitCatchFn(ui, userAtRemote, opts.storage.catchRemoteBinary()); err != nil {
 		return err
 	}
+	if err := finalizeInitCatch(ui, userAtRemote, goarch, useSudo, installDocker, installVMTools, opts); err != nil {
+		return err
+	}
+	return nil
+}
+
+func finalizeInitCatch(ui *initUI, userAtRemote string, goarch string, useSudo bool, installDocker bool, installVMTools bool, opts initOptions) error {
 	prepareInitVMLANBridge(ui, userAtRemote, goarch, installVMTools, &opts)
 	if err := installInitCatchWithTailscaleRetry(ui, userAtRemote, useSudo, installDocker, installVMTools, opts); err != nil {
 		return err
 	}
 	cleanupInitCatchBinaryFn(ui, userAtRemote, opts.storage.catchRemoteBinary())
+	if err := finishInitWorkspaceSetup(ui, opts); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -369,7 +386,6 @@ var (
 	remoteDockerInstalledFn     = remoteDockerInstalled
 	remoteVMHostStatusFn        = remoteVMHostStatus
 	remoteVMLANBridgePlanFn     = remoteVMLANBridgePlan
-	confirmInitFn               = cmdutil.Confirm
 )
 
 func (s initCatchSource) localDetail() string {
@@ -453,7 +469,7 @@ func prepareInitDockerInstall(ui *initUI, userAtRemote string, opts initOptions)
 		return false, err
 	}
 	ui.Suspend()
-	ok, err := cmdutil.Confirm(os.Stdin, os.Stdout, "Docker is required on the remote host. Install Docker now?")
+	ok, err := activePrompter.Confirm("Docker is required on the remote host. Install Docker now?", false)
 	ui.Resume()
 	if err != nil {
 		ui.FailStep(err.Error())
@@ -548,7 +564,7 @@ func prepareInitVMToolsInstall(ui *initUI, userAtRemote, goarch string, opts ini
 		return false, nil
 	}
 	ui.Suspend()
-	ok, err := confirmInitFn(os.Stdin, os.Stdout, "VM payloads can run on this host, but VM host packages are missing. Install them now?")
+	ok, err := activePrompter.Confirm("VM payloads can run on this host, but VM host packages are missing. Install them now?", false)
 	ui.Resume()
 	if err != nil {
 		ui.DoneStep("manual install")
@@ -602,7 +618,7 @@ func applyInitVMLANBridgePlan(ui *initUI, userAtRemote string, plan initVMLANBri
 		return
 	}
 	ui.Suspend()
-	ok, err := confirmInitFn(os.Stdin, os.Stdout, fmt.Sprintf("Prepare %s for VM LAN networking during init?", bridge))
+	ok, err := activePrompter.Confirm(fmt.Sprintf("Prepare %s for VM LAN networking during init?", bridge), false)
 	ui.Resume()
 	if err != nil {
 		opts.skipVMLANBridge = true
@@ -1007,7 +1023,19 @@ func retryInitTailscaleClientSecret(ui *initUI, attempt int, installErr error) (
 			return "", err
 		}
 	}
-	next, err := promptInitTailscaleClientSecret(os.Stdout, os.Stdin)
+	for _, line := range []string{
+		"yeet installs catch, a small daemon that runs on the host and manages services.",
+		"catch uses Tailscale and must join your tailnet as a tagged device, usually tag:catch.",
+		"Paste a Tailscale OAuth client secret with the auth_keys scope that can mint tag:catch.",
+		"Recommended: create an owner tag such as tag:yeet, let it own tag:catch, and select tag:yeet on the OAuth client.",
+		"Docs: https://yeetrun.com/docs/concepts/tailscale",
+		"",
+	} {
+		if _, err := fmt.Fprintln(os.Stdout, line); err != nil {
+			return "", err
+		}
+	}
+	next, err := activePrompter.Secret("Tailscale OAuth client secret")
 	if err != nil {
 		return "", err
 	}
@@ -1027,31 +1055,6 @@ func validateInitTailscaleClientSecret(secret string) (string, error) {
 
 func canPromptInitTailscale() bool {
 	return isTerminalFn(int(os.Stdin.Fd())) && isTerminalFn(int(os.Stdout.Fd()))
-}
-
-func promptInitTailscaleClientSecret(out io.Writer, in io.Reader) (string, error) {
-	for _, line := range []string{
-		"yeet installs catch, a small daemon that runs on the host and manages services.",
-		"catch uses Tailscale and must join your tailnet as a tagged device, usually tag:catch.",
-		"Paste a Tailscale OAuth client secret with the auth_keys scope that can mint tag:catch.",
-		"Recommended: create an owner tag such as tag:yeet, let it own tag:catch, and select tag:yeet on the OAuth client.",
-		"Docs: https://yeetrun.com/docs/concepts/tailscale",
-		"",
-		"Tailscale OAuth client secret:",
-	} {
-		if _, err := fmt.Fprintln(out, line); err != nil {
-			return "", err
-		}
-	}
-	if _, err := fmt.Fprint(out, "> "); err != nil {
-		return "", err
-	}
-	reader := bufio.NewReader(in)
-	line, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
-	}
-	return strings.TrimSpace(line), nil
 }
 
 func isInitTailscaleCredentialError(err error) bool {

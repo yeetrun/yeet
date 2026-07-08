@@ -111,7 +111,14 @@ func loadProjectConfigFromCwd() (*projectConfigLocation, error) {
 	if err != nil {
 		return nil, err
 	}
-	return loadProjectConfigFromDir(cwd)
+	loc, err := loadProjectConfigFromDir(cwd)
+	if err != nil || loc != nil {
+		return loc, err
+	}
+	if err := requireClientConfig(); err != nil {
+		return nil, err
+	}
+	return workspaceConfigForHost(Host())
 }
 
 func loadOrCreateProjectConfigFromCwd() (*projectConfigLocation, error) {
@@ -131,6 +138,147 @@ func loadOrCreateProjectConfigFromCwd() (*projectConfigLocation, error) {
 		Dir:    cwd,
 		Config: &ProjectConfig{Version: projectConfigVersion},
 	}, nil
+}
+
+var warnProjectConfigNotSavedFn = warnProjectConfigNotSaved
+
+func projectConfigForWrite(reason string) (*projectConfigLocation, bool, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return nil, false, err
+	}
+	local, err := loadProjectConfigFromDir(cwd)
+	if err != nil {
+		return nil, false, err
+	}
+	if local != nil {
+		return projectConfigWriteLocal(local)
+	}
+	if err := requireClientConfig(); err != nil {
+		return nil, false, err
+	}
+	return projectConfigWriteWorkspace(reason, cwd)
+}
+
+func projectConfigWriteLocal(local *projectConfigLocation) (*projectConfigLocation, bool, error) {
+	if local == nil || !canPromptForWorkspace() {
+		return local, true, nil
+	}
+	if err := ensureClientConfigLoaded(); err != nil {
+		return local, true, nil
+	}
+	if workspacePathRegistered(local.Dir) {
+		return local, true, nil
+	}
+	ok, err := activePrompter.Confirm(fmt.Sprintf("Use %s as a yeet workspace?", local.Dir), true)
+	if err != nil {
+		return nil, false, err
+	}
+	if ok {
+		if err := registerWorkspacePath(local.Dir); err != nil {
+			return nil, false, err
+		}
+	}
+	return local, true, nil
+}
+
+func projectConfigWriteWorkspace(reason string, cwd string) (*projectConfigLocation, bool, error) {
+	loc, err := workspaceConfigForHost(Host())
+	if err != nil || loc != nil {
+		return loc, loc != nil, err
+	}
+	dir, ok, err := projectConfigWriteWorkspaceDir(reason, cwd)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	loc, err = seedWorkspaceConfig(dir, Host())
+	if err != nil {
+		return nil, false, err
+	}
+	if err := registerWorkspacePath(loc.Dir); err != nil {
+		return nil, false, err
+	}
+	return loc, true, nil
+}
+
+func projectConfigWriteWorkspaceDir(reason string, cwd string) (string, bool, error) {
+	if !canPromptForWorkspace() {
+		warnProjectConfigNotSavedFn(reason)
+		return "", false, nil
+	}
+	selection, err := activePrompter.SelectWorkspace(Host(), selectableWorkspacePaths(), cwd)
+	if err != nil {
+		return "", false, err
+	}
+	if selection.Choice == workspacePromptRunOnce {
+		warnProjectConfigNotSavedFn(reason)
+		return "", false, nil
+	}
+	dir := selection.Path
+	if dir == "" || selection.Choice == workspacePromptUseCurrent {
+		dir = cwd
+	}
+	return dir, true, nil
+}
+
+func canPromptForWorkspace() bool {
+	return isTerminalFn(int(os.Stdin.Fd())) && isTerminalFn(int(os.Stdout.Fd()))
+}
+
+func selectableWorkspacePaths() []string {
+	return workspacePathsByConfigPresence(true)
+}
+
+func workspacePathsByConfigPresence(includeConfigured bool) []string {
+	var out []string
+	for _, workspace := range workspacePaths() {
+		info, err := os.Stat(workspace)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		cfgPath := filepath.Join(workspace, projectConfigName)
+		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+			out = append(out, workspace)
+			continue
+		} else if err == nil && includeConfigured {
+			out = append(out, workspace)
+		}
+	}
+	return out
+}
+
+func addWorkspacePath(path string) error {
+	workspace, err := normalizeWorkspacePath(path)
+	if err != nil {
+		return err
+	}
+	loadedPrefs.Workspaces = append(loadedPrefs.Workspaces, workspace)
+	loadedPrefs.normalize()
+	return nil
+}
+
+func registerWorkspacePath(path string) error {
+	if err := addWorkspacePath(path); err != nil {
+		return err
+	}
+	return saveClientConfig()
+}
+
+func workspacePathRegistered(path string) bool {
+	workspace, err := normalizeWorkspacePath(path)
+	if err != nil {
+		return false
+	}
+	for _, existing := range workspacePaths() {
+		if existing == workspace {
+			return true
+		}
+	}
+	return false
+}
+
+func warnProjectConfigNotSaved(reason string) {
+	fmt.Fprintf(os.Stderr, "Warning: %s config was not saved; set a workspace with `yeet config --workspace PATH` to enable client-side persistence.\n", reason)
 }
 
 func loadProjectConfigFromDir(startDir string) (*projectConfigLocation, error) {
@@ -223,6 +371,7 @@ func saveProjectConfig(loc *projectConfigLocation) error {
 	if loc.Config.Version == 0 {
 		loc.Config.Version = projectConfigVersion
 	}
+	loc.Config.NormalizeHosts()
 	sortServiceEntries(loc.Config.Services)
 	if err := os.MkdirAll(filepath.Dir(loc.Path), 0o755); err != nil {
 		return err
@@ -309,6 +458,146 @@ func (c *ProjectConfig) AllHosts() []string {
 	}
 	sort.Strings(hosts)
 	return hosts
+}
+
+func (c *ProjectConfig) ClaimHosts() []string {
+	if c == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for _, host := range c.Hosts {
+		if h := normalizeCatchHost(host); h != "" {
+			seen[h] = struct{}{}
+		}
+	}
+	for _, entry := range c.Services {
+		if h := normalizeCatchHost(entry.Host); h != "" {
+			seen[h] = struct{}{}
+		}
+	}
+	hosts := make([]string, 0, len(seen))
+	for host := range seen {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+func (c *ProjectConfig) NormalizeHosts() {
+	if c == nil {
+		return
+	}
+	for i := range c.Services {
+		c.Services[i].Host = normalizeCatchHost(c.Services[i].Host)
+	}
+	c.Hosts = c.ClaimHosts()
+}
+
+func projectConfigClaimsHost(cfg *ProjectConfig, host string) bool {
+	if cfg == nil {
+		return false
+	}
+	host = normalizeCatchHost(host)
+	if host == "" {
+		return false
+	}
+	for _, claimed := range cfg.ClaimHosts() {
+		if claimed == host {
+			return true
+		}
+	}
+	return false
+}
+
+func workspaceConfigForHost(host string) (*projectConfigLocation, error) {
+	host = normalizeCatchHost(host)
+	if host == "" {
+		host = Host()
+	}
+	paths, err := workspaceConfigConflicts(host)
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	if len(paths) > 1 {
+		return nil, fmt.Errorf("%s is claimed by multiple workspaces: %s", host, strings.Join(paths, ", "))
+	}
+	workspace := paths[0]
+	if info, err := os.Stat(workspace); err != nil || !info.IsDir() {
+		return nil, nil
+	}
+	return loadProjectConfigFromFile(filepath.Join(workspace, projectConfigName))
+}
+
+func workspaceConfigConflicts(host string) ([]string, error) {
+	host = normalizeCatchHost(host)
+	if host == "" {
+		host = Host()
+	}
+	var paths []string
+	for _, workspace := range workspacePaths() {
+		info, err := os.Stat(workspace)
+		if err != nil || !info.IsDir() {
+			continue
+		}
+		loc, err := loadProjectConfigFromFile(filepath.Join(workspace, projectConfigName))
+		if err != nil {
+			if strings.Contains(err.Error(), "no yeet.toml found at") {
+				continue
+			}
+			return nil, err
+		}
+		if projectConfigClaimsHost(loc.Config, host) {
+			paths = append(paths, loc.Dir)
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func seedWorkspaceConfig(dir string, host string) (*projectConfigLocation, error) {
+	workspace, err := normalizeWorkspacePath(dir)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(workspace, projectConfigName)
+	if _, err := os.Stat(path); err == nil {
+		loc, err := loadProjectConfigFromFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := ensureProjectConfigHost(loc, host); err != nil {
+			return nil, err
+		}
+		return loc, nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	host = normalizeCatchHost(host)
+	cfg := &ProjectConfig{Version: projectConfigVersion, Hosts: []string{host}}
+	loc := &projectConfigLocation{Path: path, Dir: workspace, Config: cfg}
+	raw := fmt.Sprintf("version = 1\nhosts = [%q]\n\n# [[services]]\n# name = \"hello\"\n# host = %q\n# payload = \"nginx:alpine\"\n# args = [\"-p\", \"18080:80\"]\n", host, host)
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		return nil, err
+	}
+	return loc, nil
+}
+
+func ensureProjectConfigHost(loc *projectConfigLocation, host string) error {
+	if loc == nil || loc.Config == nil {
+		return nil
+	}
+	host = normalizeCatchHost(host)
+	if host == "" || projectConfigClaimsHost(loc.Config, host) {
+		return nil
+	}
+	loc.Config.addHost(host)
+	return saveProjectConfig(loc)
 }
 
 func (c *ProjectConfig) ServiceHosts(service string) []string {

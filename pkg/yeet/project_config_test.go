@@ -23,6 +23,28 @@ type closeErrorBuffer struct {
 	err error
 }
 
+type fakePrompter struct {
+	confirm   bool
+	input     string
+	secret    string
+	selection workspaceSelection
+	err       error
+	selectFn  func(host string, paths []string, current string) (workspaceSelection, error)
+}
+
+func (f fakePrompter) Confirm(string, bool) (bool, error) { return f.confirm, f.err }
+
+func (f fakePrompter) Input(string, string) (string, error) { return f.input, f.err }
+
+func (f fakePrompter) Secret(string) (string, error) { return f.secret, f.err }
+
+func (f fakePrompter) SelectWorkspace(host string, paths []string, current string) (workspaceSelection, error) {
+	if f.selectFn != nil {
+		return f.selectFn(host, paths, current)
+	}
+	return f.selection, f.err
+}
+
 func (w *closeErrorBuffer) Close() error {
 	return w.err
 }
@@ -73,6 +95,30 @@ func TestLoadOrCreateProjectConfigFromCwdCreatesDefaultLocation(t *testing.T) {
 	}
 	if loc.Config == nil || loc.Config.Version != projectConfigVersion {
 		t.Fatalf("config = %#v, want default version", loc.Config)
+	}
+}
+
+func TestPlainPrompterSelectWorkspaceUsesKnownWorkspace(t *testing.T) {
+	withSvcPromptInput(t, "y\n")
+
+	selection, err := plainPrompter{}.SelectWorkspace("yeet-pve1", []string{"/tmp/workspace"}, "/tmp/current")
+	if err != nil {
+		t.Fatalf("SelectWorkspace error: %v", err)
+	}
+	if selection.Choice != workspacePromptUseKnown || selection.Path != "/tmp/workspace" {
+		t.Fatalf("selection = %#v, want known workspace", selection)
+	}
+}
+
+func TestPlainPrompterSelectWorkspaceCanRunOnce(t *testing.T) {
+	withSvcPromptInput(t, "n\n")
+
+	selection, err := plainPrompter{}.SelectWorkspace("yeet-pve1", nil, "/tmp/current")
+	if err != nil {
+		t.Fatalf("SelectWorkspace error: %v", err)
+	}
+	if selection.Choice != workspacePromptRunOnce || selection.Path != "" {
+		t.Fatalf("selection = %#v, want run once", selection)
 	}
 }
 
@@ -1022,6 +1068,397 @@ func TestProjectConfigAllHostsNilConfig(t *testing.T) {
 	var cfg *ProjectConfig
 	if got := cfg.AllHosts(); got != nil {
 		t.Fatalf("AllHosts = %#v, want nil", got)
+	}
+}
+
+func TestProjectConfigClaimHostsUsesHostsAndServices(t *testing.T) {
+	cfg := &ProjectConfig{
+		Hosts: []string{"Yeet-PVE1", " "},
+		Services: []ServiceEntry{
+			{Name: "plex", Host: "YEET-HETZ"},
+			{Name: "empty", Host: " "},
+		},
+	}
+	got := cfg.ClaimHosts()
+	want := []string{"yeet-hetz", "yeet-pve1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ClaimHosts = %#v, want %#v", got, want)
+	}
+}
+
+func TestSaveProjectConfigNormalizesHosts(t *testing.T) {
+	tmp := t.TempDir()
+	cfg := &ProjectConfig{
+		Version: projectConfigVersion,
+		Hosts:   []string{"Yeet-PVE1"},
+		Services: []ServiceEntry{{
+			Name:    "plex",
+			Host:    "YEET-HETZ",
+			Payload: "compose.yml",
+		}},
+	}
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: cfg}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig error: %v", err)
+	}
+	raw, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{`hosts = ["yeet-hetz", "yeet-pve1"]`, `host = "yeet-hetz"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("config = %q, want %s", text, want)
+		}
+	}
+}
+
+func TestWorkspaceConfigForHostSelectsRegisteredWorkspace(t *testing.T) {
+	tmp := t.TempDir()
+	workspace := filepath.Join(tmp, "services")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatalf("Mkdir workspace: %v", err)
+	}
+	loc := &projectConfigLocation{
+		Path: filepath.Join(workspace, projectConfigName),
+		Dir:  workspace,
+		Config: &ProjectConfig{
+			Version: projectConfigVersion,
+			Hosts:   []string{"yeet-pve1"},
+		},
+	}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-pve1", Workspaces: []string{workspace}})
+	defer restore()
+
+	got, err := workspaceConfigForHost("YEET-PVE1")
+	if err != nil {
+		t.Fatalf("workspaceConfigForHost error: %v", err)
+	}
+	if got == nil || got.Dir != workspace {
+		t.Fatalf("workspaceConfigForHost = %#v, want workspace", got)
+	}
+}
+
+func TestLoadProjectConfigFromCwdFallsBackToWorkspaceForHost(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	cwd, _ := os.Getwd()
+	tmp := t.TempDir()
+	random := filepath.Join(tmp, "random")
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.Mkdir(random, 0o755); err != nil {
+		t.Fatalf("Mkdir random: %v", err)
+	}
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatalf("Mkdir workspace: %v", err)
+	}
+	if err := os.Chdir(random); err != nil {
+		t.Fatalf("Chdir random: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	if _, err := seedWorkspaceConfig(workspace, "yeet-pve1"); err != nil {
+		t.Fatalf("seedWorkspaceConfig: %v", err)
+	}
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-pve1", Workspaces: []string{workspace}})
+	defer restore()
+
+	loc, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd error: %v", err)
+	}
+	if loc == nil || loc.Dir != workspace {
+		t.Fatalf("location = %#v, want workspace fallback", loc)
+	}
+}
+
+func TestLoadProjectConfigFromCwdLocalConfigWins(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	cwd, _ := os.Getwd()
+	tmp := t.TempDir()
+	realTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks tmp: %v", err)
+	}
+	local := filepath.Join(realTmp, "local")
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.Mkdir(local, 0o755); err != nil {
+		t.Fatalf("Mkdir local: %v", err)
+	}
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatalf("Mkdir workspace: %v", err)
+	}
+	if _, err := seedWorkspaceConfig(local, "yeet-pve1"); err != nil {
+		t.Fatalf("seed local: %v", err)
+	}
+	if _, err := seedWorkspaceConfig(workspace, "yeet-pve1"); err != nil {
+		t.Fatalf("seed workspace: %v", err)
+	}
+	if err := os.Chdir(local); err != nil {
+		t.Fatalf("Chdir local: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-pve1", Workspaces: []string{workspace}})
+	defer restore()
+
+	loc, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd error: %v", err)
+	}
+	if loc == nil || loc.Dir != local {
+		t.Fatalf("location = %#v, want local config", loc)
+	}
+}
+
+func TestWorkspaceConfigForHostErrorsOnDuplicateClaims(t *testing.T) {
+	tmp := t.TempDir()
+	var workspaces []string
+	for _, name := range []string{"a", "b"} {
+		dir := filepath.Join(tmp, name)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatalf("Mkdir %s: %v", name, err)
+		}
+		loc := &projectConfigLocation{
+			Path:   filepath.Join(dir, projectConfigName),
+			Dir:    dir,
+			Config: &ProjectConfig{Version: projectConfigVersion, Hosts: []string{"yeet-pve1"}},
+		}
+		if err := saveProjectConfig(loc); err != nil {
+			t.Fatalf("saveProjectConfig %s: %v", name, err)
+		}
+		workspaces = append(workspaces, dir)
+	}
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-pve1", Workspaces: workspaces})
+	defer restore()
+
+	_, err := workspaceConfigForHost("yeet-pve1")
+	if err == nil || !strings.Contains(err.Error(), "claimed by multiple workspaces") {
+		t.Fatalf("workspaceConfigForHost error = %v, want duplicate claim", err)
+	}
+	for _, dir := range workspaces {
+		if !strings.Contains(err.Error(), dir) {
+			t.Fatalf("error = %v, want path %s", err, dir)
+		}
+	}
+}
+
+func TestSeedWorkspaceConfigCreatesCommentedSeed(t *testing.T) {
+	dir := t.TempDir()
+	loc, err := seedWorkspaceConfig(dir, "Yeet-PVE1")
+	if err != nil {
+		t.Fatalf("seedWorkspaceConfig error: %v", err)
+	}
+	if loc.Dir != dir {
+		t.Fatalf("Dir = %q, want %q", loc.Dir, dir)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, projectConfigName))
+	if err != nil {
+		t.Fatalf("ReadFile seed: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{`version = 1`, `hosts = ["yeet-pve1"]`, `# [[services]]`, `# payload = "nginx:alpine"`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("seed = %q, want %s", text, want)
+		}
+	}
+}
+
+func TestEnsureProjectConfigHostRejectsMalformedExistingConfig(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, projectConfigName), []byte("bad = ["), 0o600); err != nil {
+		t.Fatalf("WriteFile bad config: %v", err)
+	}
+	_, err := seedWorkspaceConfig(dir, "yeet-pve1")
+	if err == nil || !strings.Contains(err.Error(), "failed to parse") {
+		t.Fatalf("seedWorkspaceConfig error = %v, want parse error", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, projectConfigName))
+	if string(raw) != "bad = [" {
+		t.Fatalf("bad config was modified: %q", string(raw))
+	}
+}
+
+func TestProjectConfigForWritePromptsToRegisterLocalConfig(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	cwd, _ := os.Getwd()
+	tmp := t.TempDir()
+	realTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks tmp: %v", err)
+	}
+	if _, err := seedWorkspaceConfig(realTmp, "yeet-pve1"); err != nil {
+		t.Fatalf("seedWorkspaceConfig: %v", err)
+	}
+	if err := os.Chdir(realTmp); err != nil {
+		t.Fatalf("Chdir tmp: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-pve1"})
+	defer restore()
+	oldPrompt := activePrompter
+	oldIsTerminal := isTerminalFn
+	activePrompter = fakePrompter{confirm: true}
+	isTerminalFn = func(int) bool { return true }
+	t.Cleanup(func() {
+		activePrompter = oldPrompt
+		isTerminalFn = oldIsTerminal
+	})
+
+	loc, saved, err := projectConfigForWrite("service")
+	if err != nil {
+		t.Fatalf("projectConfigForWrite error: %v", err)
+	}
+	if !saved || loc == nil || loc.Dir != realTmp {
+		t.Fatalf("loc saved = %#v %v, want local config registered", loc, saved)
+	}
+	if got := workspacePaths(); !reflect.DeepEqual(got, []string{realTmp}) {
+		t.Fatalf("workspacePaths = %#v, want local dir", got)
+	}
+}
+
+func TestProjectConfigForWriteLocalConfigWinsOverMalformedClientConfig(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	tmp := t.TempDir()
+	realTmp, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		t.Fatalf("EvalSymlinks tmp: %v", err)
+	}
+	projectDir := filepath.Join(realTmp, "project")
+	if err := os.Mkdir(projectDir, 0o755); err != nil {
+		t.Fatalf("Mkdir project: %v", err)
+	}
+	if _, err := seedWorkspaceConfig(projectDir, "yeet-pve1"); err != nil {
+		t.Fatalf("seedWorkspaceConfig: %v", err)
+	}
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatalf("Chdir project: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	clientPath := filepath.Join(tmp, "config.toml")
+	if err := os.WriteFile(clientPath, []byte("default_host = ["), 0o600); err != nil {
+		t.Fatalf("WriteFile client config: %v", err)
+	}
+	oldConfigPath := clientConfigPathFn
+	oldIsTerminal := isTerminalFn
+	clientConfigPathFn = func() (string, error) { return clientPath, nil }
+	isTerminalFn = func(int) bool { return false }
+	t.Cleanup(func() {
+		clientConfigPathFn = oldConfigPath
+		isTerminalFn = oldIsTerminal
+	})
+	restore := stubClientConfigState(t, clientConfig{})
+	defer restore()
+
+	loc, saved, err := projectConfigForWrite("service")
+	if err != nil {
+		t.Fatalf("projectConfigForWrite error: %v", err)
+	}
+	if !saved || loc == nil || loc.Dir != projectDir {
+		t.Fatalf("loc saved = %#v %v, want local config despite malformed client config", loc, saved)
+	}
+}
+
+func TestProjectConfigForWriteCanAdoptConfiguredWorkspaceForNewHost(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd error: %v", err)
+	}
+	tmp := t.TempDir()
+	random := filepath.Join(tmp, "random")
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.Mkdir(random, 0o755); err != nil {
+		t.Fatalf("Mkdir random: %v", err)
+	}
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatalf("Mkdir workspace: %v", err)
+	}
+	if _, err := seedWorkspaceConfig(workspace, "yeet-pve1"); err != nil {
+		t.Fatalf("seedWorkspaceConfig: %v", err)
+	}
+	if err := os.Chdir(random); err != nil {
+		t.Fatalf("Chdir random: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-hetz", Workspaces: []string{workspace}})
+	defer restore()
+	oldPrompt := activePrompter
+	oldIsTerminal := isTerminalFn
+	var gotPaths []string
+	activePrompter = fakePrompter{
+		selectFn: func(host string, paths []string, current string) (workspaceSelection, error) {
+			gotPaths = append([]string{}, paths...)
+			return workspaceSelection{Choice: workspacePromptUseKnown, Path: workspace}, nil
+		},
+	}
+	isTerminalFn = func(int) bool { return true }
+	t.Cleanup(func() {
+		activePrompter = oldPrompt
+		isTerminalFn = oldIsTerminal
+	})
+
+	loc, saved, err := projectConfigForWrite("service")
+	if err != nil {
+		t.Fatalf("projectConfigForWrite error: %v", err)
+	}
+	if !saved || loc == nil || loc.Dir != workspace {
+		t.Fatalf("loc saved = %#v %v, want adopted workspace", loc, saved)
+	}
+	if !reflect.DeepEqual(gotPaths, []string{workspace}) {
+		t.Fatalf("SelectWorkspace paths = %#v, want configured workspace choice", gotPaths)
+	}
+
+	loaded, err := loadProjectConfigFromFile(filepath.Join(workspace, projectConfigName))
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromFile: %v", err)
+	}
+	if got := loaded.Config.AllHosts(); !reflect.DeepEqual(got, []string{"yeet-hetz", "yeet-pve1"}) {
+		t.Fatalf("AllHosts = %#v, want both claimed hosts", got)
+	}
+}
+
+func TestUpgradeKnownHostsUsesWorkspaceFallback(t *testing.T) {
+	t.Setenv("CATCH_HOST", "")
+	tmp := t.TempDir()
+	workspace := filepath.Join(tmp, "workspace")
+	if _, err := seedWorkspaceConfig(workspace, "yeet-pve1"); err != nil {
+		t.Fatalf("seedWorkspaceConfig: %v", err)
+	}
+	loc, err := loadProjectConfigFromFile(filepath.Join(workspace, projectConfigName))
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromFile: %v", err)
+	}
+	loc.Config.addHost("yeet-hetz")
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatalf("saveProjectConfig: %v", err)
+	}
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-pve1", Workspaces: []string{workspace}})
+	defer restore()
+	cwd, _ := os.Getwd()
+	random := filepath.Join(tmp, "random")
+	if err := os.Mkdir(random, 0o755); err != nil {
+		t.Fatalf("Mkdir random: %v", err)
+	}
+	if err := os.Chdir(random); err != nil {
+		t.Fatalf("Chdir random: %v", err)
+	}
+	defer func() { _ = os.Chdir(cwd) }()
+
+	cfgLoc, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	got := upgradeKnownHosts(cfgLoc, false)
+	want := []string{"yeet-hetz", "yeet-pve1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("upgradeKnownHosts = %#v, want %#v", got, want)
 	}
 }
 

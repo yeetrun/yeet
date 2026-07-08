@@ -5,7 +5,6 @@
 package yeet
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -170,21 +169,24 @@ func canPromptInitStorage() bool {
 
 func runInitStorageWizard(in io.Reader, out io.Writer, probe initStorageProbe) (initStorageOptions, error) {
 	probe = normalizeInitStorageProbe(probe)
-	reader := bufio.NewReader(in)
 	if _, err := fmt.Fprintln(out, "Storage setup"); err != nil {
 		return initStorageOptions{}, err
 	}
-	storage, err := promptInitDataStorage(reader, out, probe)
+	return runInitStorageWizardWithPrompter(activePrompter, probe)
+}
+
+func runInitStorageWizardWithPrompter(prompter yeetPrompter, probe initStorageProbe) (initStorageOptions, error) {
+	storage, err := promptInitDataStorageWithPrompter(prompter, probe)
 	if err != nil {
 		return initStorageOptions{}, err
 	}
-	return promptInitServicesStorage(reader, out, storage, probe)
+	return promptInitServicesStorageWithPrompter(prompter, storage, probe)
 }
 
-func promptInitDataStorage(reader *bufio.Reader, out io.Writer, probe initStorageProbe) (initStorageOptions, error) {
+func promptInitDataStorageWithPrompter(prompter yeetPrompter, probe initStorageProbe) (initStorageOptions, error) {
 	storage := initStorageOptions{}
 	defaultDataDir := filepath.Join(probe.Home, "yeet-data")
-	useDefaultData, err := promptInitYesNo(reader, out, fmt.Sprintf("Use %s for catch data?", defaultDataDir), true)
+	useDefaultData, err := prompter.Confirm(fmt.Sprintf("Use %s for catch data?", defaultDataDir), true)
 	if err != nil {
 		return initStorageOptions{}, err
 	}
@@ -193,68 +195,67 @@ func promptInitDataStorage(reader *bufio.Reader, out io.Writer, probe initStorag
 		return storage, nil
 	}
 	if probe.ZFSAvailable {
-		return promptInitCustomDataStorage(reader, out, storage, probe, defaultDataDir)
+		return promptInitCustomDataStorageWithPrompter(prompter, storage, probe, defaultDataDir)
 	}
-	storage.DataDir, err = promptInitValue(reader, out, "Catch data directory", defaultDataDir)
+	storage.DataDir, err = prompter.Input("Catch data directory", defaultDataDir)
 	if err != nil {
 		return initStorageOptions{}, err
 	}
 	return storage, nil
 }
 
-func promptInitCustomDataStorage(reader *bufio.Reader, out io.Writer, storage initStorageOptions, probe initStorageProbe, defaultDataDir string) (initStorageOptions, error) {
-	useZFS, err := promptInitYesNo(reader, out, "Use a ZFS dataset for catch data?", true)
+func promptInitCustomDataStorageWithPrompter(prompter yeetPrompter, storage initStorageOptions, probe initStorageProbe, defaultDataDir string) (initStorageOptions, error) {
+	useZFS, err := prompter.Confirm("Use a ZFS dataset for catch data?", true)
 	if err != nil {
 		return initStorageOptions{}, err
 	}
 	if useZFS {
-		storage.DataDir, err = promptInitValue(reader, out, "Catch data dataset", suggestedInitDataDataset(probe))
+		storage.DataDir, err = prompter.Input("Catch data dataset", suggestedInitDataDataset(probe))
 		if err != nil {
 			return initStorageOptions{}, err
 		}
 		storage.DataDirZFS = true
 		return storage, nil
 	}
-	storage.DataDir, err = promptInitValue(reader, out, "Catch data directory", defaultDataDir)
+	storage.DataDir, err = prompter.Input("Catch data directory", defaultDataDir)
 	if err != nil {
 		return initStorageOptions{}, err
 	}
 	return storage, nil
 }
 
-func promptInitServicesStorage(reader *bufio.Reader, out io.Writer, storage initStorageOptions, probe initStorageProbe) (initStorageOptions, error) {
-	keepServicesUnderData, err := promptInitYesNo(reader, out, "Keep services under the catch data dir?", true)
+func promptInitServicesStorageWithPrompter(prompter yeetPrompter, storage initStorageOptions, probe initStorageProbe) (initStorageOptions, error) {
+	keepServicesUnderData, err := prompter.Confirm("Keep services under the catch data dir?", true)
 	if err != nil {
 		return initStorageOptions{}, err
 	}
 	if keepServicesUnderData {
 		return storage, nil
 	}
-	if probe.ZFSAvailable {
-		return promptInitCustomServicesStorage(reader, out, storage, probe)
+	if !probe.ZFSAvailable {
+		storage.ServicesRoot, err = prompter.Input("Services root", suggestedInitServicesRootPath(storage, probe))
+		if err != nil {
+			return initStorageOptions{}, err
+		}
+		return storage, nil
 	}
-	return promptInitFilesystemServicesRoot(reader, out, storage, probe)
+	return promptInitCustomServicesStorageWithPrompter(prompter, storage, probe)
 }
 
-func promptInitCustomServicesStorage(reader *bufio.Reader, out io.Writer, storage initStorageOptions, probe initStorageProbe) (initStorageOptions, error) {
-	useZFS, err := promptInitYesNo(reader, out, "Use a ZFS dataset for services?", storage.DataDirZFS)
+func promptInitCustomServicesStorageWithPrompter(prompter yeetPrompter, storage initStorageOptions, probe initStorageProbe) (initStorageOptions, error) {
+	useZFS, err := prompter.Confirm("Use a ZFS dataset for services?", storage.DataDirZFS)
 	if err != nil {
 		return initStorageOptions{}, err
 	}
 	if useZFS {
-		storage.ServicesRoot, err = promptInitValue(reader, out, "Services dataset", suggestedInitServicesDataset(storage, probe))
+		storage.ServicesRoot, err = prompter.Input("Services dataset", suggestedInitServicesDataset(storage, probe))
 		if err != nil {
 			return initStorageOptions{}, err
 		}
 		storage.ServicesRootZFS = true
 		return storage, nil
 	}
-	return promptInitFilesystemServicesRoot(reader, out, storage, probe)
-}
-
-func promptInitFilesystemServicesRoot(reader *bufio.Reader, out io.Writer, storage initStorageOptions, probe initStorageProbe) (initStorageOptions, error) {
-	var err error
-	storage.ServicesRoot, err = promptInitValue(reader, out, "Services root", suggestedInitServicesRootPath(storage, probe))
+	storage.ServicesRoot, err = prompter.Input("Services root", suggestedInitServicesRootPath(storage, probe))
 	if err != nil {
 		return initStorageOptions{}, err
 	}
@@ -268,57 +269,6 @@ func normalizeInitStorageProbe(probe initStorageProbe) initStorageProbe {
 	}
 	probe.SuggestedZFSPrefix = strings.Trim(strings.TrimSpace(probe.SuggestedZFSPrefix), "/")
 	return probe
-}
-
-func promptInitYesNo(r *bufio.Reader, w io.Writer, msg string, def bool) (bool, error) {
-	suffix := "[y/N]"
-	if def {
-		suffix = "[Y/n]"
-	}
-	if _, err := fmt.Fprintf(w, "%s %s: ", msg, suffix); err != nil {
-		return false, err
-	}
-	line, err := readInitPromptLine(r)
-	if err != nil {
-		return false, err
-	}
-	line = strings.ToLower(strings.TrimSpace(line))
-	switch line {
-	case "":
-		return def, nil
-	case "y", "yes":
-		return true, nil
-	case "n", "no":
-		return false, nil
-	default:
-		return false, fmt.Errorf("expected yes or no, got %q", line)
-	}
-}
-
-func promptInitValue(r *bufio.Reader, w io.Writer, msg string, placeholder string) (string, error) {
-	if _, err := fmt.Fprintf(w, "%s [%s]: ", msg, placeholder); err != nil {
-		return "", err
-	}
-	line, err := readInitPromptLine(r)
-	if err != nil {
-		return "", err
-	}
-	line = strings.TrimSpace(line)
-	if line == "" {
-		line = placeholder
-	}
-	if line == "" {
-		return "", fmt.Errorf("%s is required", strings.ToLower(msg))
-	}
-	return line, nil
-}
-
-func readInitPromptLine(r *bufio.Reader) (string, error) {
-	line, err := r.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return "", err
-	}
-	return strings.TrimSpace(line), nil
 }
 
 func suggestedInitDataDataset(probe initStorageProbe) string {

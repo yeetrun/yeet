@@ -147,7 +147,7 @@ yeet --host=<catch-host> status
 Save a default:
 
 ```bash
-yeet prefs --host=<catch-host> --save
+yeet config --host=<catch-host>
 ```
 
 ### 5. Create a service workspace
@@ -158,6 +158,8 @@ Yeet writes `yeet.toml` after a successful deploy. Put services in a directory y
 mkdir -p ~/yeet-services
 cd ~/yeet-services
 ```
+
+After setup, yeet can remember this workspace in `$XDG_CONFIG_HOME/yeet/config.toml`, so commands from other directories can still find the right `yeet.toml`.
 
 This file is the boring local state. Boring local state is good. Hidden state is how tools become haunted.
 
@@ -317,7 +319,7 @@ yeet --host=morpheus-catch init root@<machine-host>
 Save the default:
 
 ```bash
-yeet prefs --host=<catch-host> --save
+yeet config --host=<catch-host>
 ```
 
 ## Networking

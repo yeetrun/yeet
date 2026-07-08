@@ -24,7 +24,10 @@ func TestSetServiceOverrideQualified(t *testing.T) {
 	if host, ok := HostOverride(); !ok || host != "yeet-edge-a" {
 		t.Fatalf("host override = %q ok=%v, want yeet-edge-a", host, ok)
 	}
-	if loadedPrefs.DefaultHost != "yeet-edge-a" {
-		t.Fatalf("host = %q, want yeet-edge-a", loadedPrefs.DefaultHost)
+	if Host() != "yeet-edge-a" {
+		t.Fatalf("host = %q, want yeet-edge-a", Host())
+	}
+	if loadedPrefs.DefaultHost != "catch" {
+		t.Fatalf("saved default host = %q, want catch", loadedPrefs.DefaultHost)
 	}
 }

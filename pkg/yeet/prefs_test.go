@@ -6,50 +6,52 @@ package yeet
 
 import (
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
 
 func TestPrefsHostSettersAndOverrides(t *testing.T) {
-	oldPrefs := loadedPrefs
-	oldService := serviceOverride
-	oldHostOverride := hostOverride
-	oldHostOverrideSet := hostOverrideSet
-	defer func() {
-		loadedPrefs = oldPrefs
-		serviceOverride = oldService
-		hostOverride = oldHostOverride
-		hostOverrideSet = oldHostOverrideSet
-	}()
-	loadedPrefs = prefs{DefaultHost: "host-a"}
-	serviceOverride = ""
-	resetHostOverride()
+	t.Setenv("CATCH_HOST", "")
+	restore := stubClientConfigState(t, clientConfig{loaded: true, DefaultHost: "host-a"})
+	defer restore()
 
 	SetHost("")
-	if Host() != "host-a" || loadedPrefs.changed {
-		t.Fatalf("empty SetHost changed prefs: %#v", loadedPrefs)
-	}
-	SetHost("host-a")
-	if loadedPrefs.changed {
-		t.Fatalf("same SetHost marked changed: %#v", loadedPrefs)
-	}
-	SetHost("host-b")
-	if Host() != "host-b" || !loadedPrefs.changed {
-		t.Fatalf("SetHost host-b prefs = %#v, want changed host-b", loadedPrefs)
-	}
-	if got, ok := HostOverride(); ok || got != "" {
-		t.Fatalf("HostOverride before set = %q %v, want empty false", got, ok)
+	if Host() != "host-a" {
+		t.Fatalf("empty SetHost changed host: %q", Host())
 	}
 
-	SetHostOverride("host-c")
+	SetHost("HOST-B")
+	if Host() != "host-b" {
+		t.Fatalf("Host after SetHost = %q, want host-b", Host())
+	}
+	if got, ok := HostOverride(); !ok || got != "host-b" {
+		t.Fatalf("HostOverride after SetHost = %q %v, want host-b true", got, ok)
+	}
+	if loadedPrefs.DefaultHost != "host-a" {
+		t.Fatalf("saved default host = %q, want host-a", loadedPrefs.DefaultHost)
+	}
+
+	resetHostOverride()
+	if got, ok := HostOverride(); ok || got != "" {
+		t.Fatalf("HostOverride after reset = %q %v, want empty false", got, ok)
+	}
+	if Host() != "host-a" {
+		t.Fatalf("Host after reset = %q, want host-a", Host())
+	}
+
+	SetHostOverride("HOST-C")
 	if got, ok := HostOverride(); !ok || got != "host-c" {
 		t.Fatalf("HostOverride = %q %v, want host-c true", got, ok)
 	}
-	SetServiceOverride("svc-a@host-d")
+	if loadedPrefs.DefaultHost != "host-a" {
+		t.Fatalf("saved default host after SetHostOverride = %q, want host-a", loadedPrefs.DefaultHost)
+	}
+
+	SetServiceOverride("svc-a@HOST-D")
 	if serviceOverride != "svc-a" {
 		t.Fatalf("serviceOverride = %q, want svc-a", serviceOverride)
 	}
@@ -58,142 +60,336 @@ func TestPrefsHostSettersAndOverrides(t *testing.T) {
 	}
 }
 
-func TestPrefsLoadReadsHomePrefs(t *testing.T) {
+func TestClientConfigPathUsesXDGConfigHome(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
-	if err := os.Mkdir(filepath.Join(tmp, ".yeet"), 0o755); err != nil {
-		t.Fatalf("Mkdir .yeet: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(tmp, ".yeet", "prefs.json"), []byte(`{"defaultHost":"host-a"}`), 0o600); err != nil {
-		t.Fatalf("WriteFile prefs: %v", err)
-	}
+	t.Setenv("XDG_CONFIG_HOME", tmp)
+	t.Setenv("HOME", filepath.Join(tmp, "home"))
 
-	var p prefs
-	if err := p.load(); err != nil {
-		t.Fatalf("prefs.load error: %v", err)
+	path, err := clientConfigPath()
+	if err != nil {
+		t.Fatalf("clientConfigPath error: %v", err)
 	}
-	if p.DefaultHost != "host-a" {
-		t.Fatalf("DefaultHost = %q, want host-a", p.DefaultHost)
+	want := filepath.Join(tmp, "yeet", "config.toml")
+	if path != want {
+		t.Fatalf("clientConfigPath = %q, want %q", path, want)
 	}
 }
 
-func TestPrefsSaveReturnsMkdirError(t *testing.T) {
+func TestClientConfigPathFallsBackToDotConfig(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("HOME", home)
+
+	path, err := clientConfigPath()
+	if err != nil {
+		t.Fatalf("clientConfigPath error: %v", err)
+	}
+	want := filepath.Join(home, ".config", "yeet", "config.toml")
+	if path != want {
+		t.Fatalf("clientConfigPath = %q, want %q", path, want)
+	}
+}
+
+func TestClientConfigSaveLoadToml(t *testing.T) {
 	tmp := t.TempDir()
-	parentFile := filepath.Join(tmp, "not-dir")
-	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
-		t.Fatalf("WriteFile parent: %v", err)
-	}
-	oldPrefsFile := prefsFile
-	prefsFile = filepath.Join(parentFile, "prefs.json")
-	t.Cleanup(func() { prefsFile = oldPrefsFile })
+	t.Setenv("CATCH_HOST", "")
+	restore := stubClientConfigState(t, clientConfig{
+		loaded:      true,
+		DefaultHost: "Yeet-PVE1",
+		Workspaces: []string{
+			filepath.Join(tmp, "workspace"),
+		},
+	})
+	defer restore()
+	oldConfigPath := clientConfigPathFn
+	clientConfigPathFn = func() (string, error) { return filepath.Join(tmp, "config.toml"), nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
 
-	err := (&prefs{DefaultHost: "host-a"}).save()
-	if err == nil {
-		t.Fatal("prefs.save error = nil, want mkdir error")
+	if err := saveClientConfig(); err != nil {
+		t.Fatalf("saveClientConfig error: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(tmp, "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `default_host = "yeet-pve1"`) {
+		t.Fatalf("config = %q, want lowercase default_host", text)
+	}
+	if !strings.Contains(text, `workspaces = ["`+filepath.ToSlash(filepath.Join(tmp, "workspace"))+`"]`) &&
+		!strings.Contains(text, `workspaces = ["`+filepath.Join(tmp, "workspace")+`"]`) {
+		t.Fatalf("config = %q, want workspace path", text)
+	}
+
+	loadedPrefs = clientConfig{}
+	if err := ensureClientConfigLoaded(); err != nil {
+		t.Fatalf("ensureClientConfigLoaded error: %v", err)
+	}
+	if Host() != "yeet-pve1" {
+		t.Fatalf("Host = %q, want yeet-pve1", Host())
+	}
+	if got := workspacePaths(); !reflect.DeepEqual(got, []string{filepath.Join(tmp, "workspace")}) {
+		t.Fatalf("workspacePaths = %#v, want workspace", got)
 	}
 }
 
-func TestAsJSONFallsBackForUnsupportedValues(t *testing.T) {
-	if got := asJSON(complex(1, 2)); got != "(1+2i)" {
-		t.Fatalf("asJSON complex = %q, want fmt fallback", got)
+func TestClientConfigMigratesLegacyPrefsAndDeletesOldFile(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CATCH_HOST", "")
+	home := filepath.Join(tmp, "home")
+	legacyDir := filepath.Join(home, ".yeet")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy dir: %v", err)
+	}
+	legacyPath := filepath.Join(legacyDir, "prefs.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"defaultHost":"Yeet-PVE1"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile legacy prefs: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "xdg"))
+	restore := stubClientConfigState(t, clientConfig{})
+	defer restore()
+
+	if err := ensureClientConfigLoaded(); err != nil {
+		t.Fatalf("ensureClientConfigLoaded error: %v", err)
+	}
+	if Host() != "yeet-pve1" {
+		t.Fatalf("Host = %q, want migrated lowercase host", Host())
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy prefs stat err = %v, want removed", err)
+	}
+	if _, err := os.Stat(legacyDir); !os.IsNotExist(err) {
+		t.Fatalf("legacy dir stat err = %v, want removed when empty", err)
+	}
+	configPath := filepath.Join(tmp, "xdg", "yeet", "config.toml")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile migrated config: %v", err)
+	}
+	if !strings.Contains(string(raw), `default_host = "yeet-pve1"`) {
+		t.Fatalf("migrated config = %q, want default_host", string(raw))
 	}
 }
 
-func TestHandlePrefsWarnsWhenPrefsChanged(t *testing.T) {
-	restore := stubPrefsState(t, prefs{DefaultHost: "host-a", changed: true})
+func TestClientConfigExistingTomlWinsAndCleansLegacy(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CATCH_HOST", "")
+	home := filepath.Join(tmp, "home")
+	xdg := filepath.Join(tmp, "xdg")
+	if err := os.MkdirAll(filepath.Join(xdg, "yeet"), 0o755); err != nil {
+		t.Fatalf("MkdirAll xdg: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(xdg, "yeet", "config.toml"), []byte(`default_host = "new-host"`+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile xdg config: %v", err)
+	}
+	legacyDir := filepath.Join(home, ".yeet")
+	if err := os.MkdirAll(legacyDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll legacy dir: %v", err)
+	}
+	legacyPath := filepath.Join(legacyDir, "prefs.json")
+	if err := os.WriteFile(legacyPath, []byte(`{"defaultHost":"old-host"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile legacy prefs: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	restore := stubClientConfigState(t, clientConfig{})
+	defer restore()
+
+	if err := ensureClientConfigLoaded(); err != nil {
+		t.Fatalf("ensureClientConfigLoaded error: %v", err)
+	}
+	if Host() != "new-host" {
+		t.Fatalf("Host = %q, want existing TOML host", Host())
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("legacy prefs stat err = %v, want best-effort cleanup", err)
+	}
+}
+
+func TestClientConfigParseErrorIsRequiredOnDemand(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CATCH_HOST", "")
+	oldConfigPath := clientConfigPathFn
+	clientConfigPathFn = func() (string, error) { return filepath.Join(tmp, "config.toml"), nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	if err := os.WriteFile(filepath.Join(tmp, "config.toml"), []byte("default_host = ["), 0o600); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+	restore := stubClientConfigState(t, clientConfig{})
+	defer restore()
+
+	if got := Host(); got != defaultCatchHost {
+		t.Fatalf("Host before requiring config = %q, want default catch host", got)
+	}
+	err := requireClientConfig()
+	if err == nil || !strings.Contains(err.Error(), "failed to parse") {
+		t.Fatalf("requireClientConfig error = %v, want parse error", err)
+	}
+}
+
+func TestRuntimeHostOverridesDoNotSaveDefaultHost(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CATCH_HOST", "")
+	oldConfigPath := clientConfigPathFn
+	clientConfigPathFn = func() (string, error) { return filepath.Join(tmp, "config.toml"), nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	restore := stubClientConfigState(t, clientConfig{loaded: true, DefaultHost: "yeet-pve1"})
+	defer restore()
+
+	SetHostOverride("Yeet-Hetz")
+	if got, ok := HostOverride(); !ok || got != "yeet-hetz" {
+		t.Fatalf("HostOverride = %q %v, want yeet-hetz true", got, ok)
+	}
+	if Host() != "yeet-hetz" {
+		t.Fatalf("Host = %q, want runtime override host", Host())
+	}
+	if err := saveClientConfig(); err != nil {
+		t.Fatalf("saveClientConfig error: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(tmp, "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	if strings.Contains(string(raw), "yeet-hetz") {
+		t.Fatalf("saved config = %q, runtime override should not be persisted", string(raw))
+	}
+	if !strings.Contains(string(raw), `default_host = "yeet-pve1"`) {
+		t.Fatalf("saved config = %q, want persisted saved default host", string(raw))
+	}
+}
+
+func TestClientConfigCatchHostEnvOverrideDoesNotSaveDefaultHost(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CATCH_HOST", "Yeet-Hetz")
+	oldConfigPath := clientConfigPathFn
+	clientConfigPathFn = func() (string, error) { return filepath.Join(tmp, "config.toml"), nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	restore := stubClientConfigState(t, clientConfig{})
+	defer restore()
+	loadedPrefs.DefaultHost = "yeet-pve1"
+
+	if err := ensureClientConfigLoaded(); err != nil {
+		t.Fatalf("ensureClientConfigLoaded error: %v", err)
+	}
+	if got, ok := HostOverride(); !ok || got != "yeet-hetz" {
+		t.Fatalf("HostOverride from env = %q %v, want yeet-hetz true", got, ok)
+	}
+	if Host() != "yeet-hetz" {
+		t.Fatalf("Host = %q, want env override host", Host())
+	}
+	if loadedPrefs.DefaultHost != "yeet-pve1" {
+		t.Fatalf("saved default host after env override = %q, want yeet-pve1", loadedPrefs.DefaultHost)
+	}
+	if err := saveClientConfig(); err != nil {
+		t.Fatalf("saveClientConfig error: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(tmp, "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	if strings.Contains(string(raw), "yeet-hetz") {
+		t.Fatalf("saved config = %q, env override should not be persisted", string(raw))
+	}
+	if !strings.Contains(string(raw), `default_host = "yeet-pve1"`) {
+		t.Fatalf("saved config = %q, want persisted saved default host", string(raw))
+	}
+}
+
+func TestHostOverrideLoadsCatchHostEnvFirst(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("CATCH_HOST", "Yeet-Hetz")
+	oldConfigPath := clientConfigPathFn
+	clientConfigPathFn = func() (string, error) { return filepath.Join(tmp, "config.toml"), nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	if err := os.WriteFile(filepath.Join(tmp, "config.toml"), []byte(`default_host = "yeet-pve1"`+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile config: %v", err)
+	}
+	restore := stubClientConfigState(t, clientConfig{})
+	defer restore()
+
+	if got, ok := HostOverride(); !ok || got != "yeet-hetz" {
+		t.Fatalf("HostOverride before Host = %q %v, want yeet-hetz true", got, ok)
+	}
+	if loadedPrefs.DefaultHost != "yeet-pve1" {
+		t.Fatalf("saved default host after HostOverride = %q, want yeet-pve1", loadedPrefs.DefaultHost)
+	}
+}
+
+func TestHandleConfigPrintsToml(t *testing.T) {
+	tmp := t.TempDir()
+	restore := stubClientConfigState(t, clientConfig{
+		DefaultHost: "yeet-pve1",
+		Workspaces:  []string{tmp},
+	})
 	defer restore()
 
 	stdout, stderr, err := capturePrefsOutput(t, func() error {
-		return HandlePrefs(context.Background(), []string{"prefs"})
+		return HandleConfig(context.Background(), []string{"config"})
 	})
 	if err != nil {
-		t.Fatalf("HandlePrefs error: %v", err)
+		t.Fatalf("HandleConfig error: %v", err)
 	}
-	if !strings.Contains(stdout, `"defaultHost": "host-a"`) {
-		t.Fatalf("stdout = %q, want defaultHost JSON", stdout)
+	if !strings.Contains(stdout, `default_host = "yeet-pve1"`) || !strings.Contains(stdout, `workspaces = ["`+tmp+`"]`) {
+		t.Fatalf("stdout = %q, want TOML config", stdout)
 	}
-	if !strings.Contains(stderr, "Use --save to save the prefs") {
-		t.Fatalf("stderr = %q, want save warning", stderr)
+	if strings.Contains(stdout, "config path") {
+		t.Fatalf("stdout = %q, path should not pollute parseable TOML", stdout)
 	}
+	_ = stderr
 }
 
-func TestHandlePrefsSaveReportsNoChanges(t *testing.T) {
-	restore := stubPrefsState(t, prefs{DefaultHost: "host-a"})
-	defer restore()
-
-	stdout, stderr, err := capturePrefsOutput(t, func() error {
-		return HandlePrefs(context.Background(), []string{"--save"})
-	})
-	if err != nil {
-		t.Fatalf("HandlePrefs error: %v", err)
-	}
-	if !strings.Contains(stdout, `"defaultHost": "host-a"`) {
-		t.Fatalf("stdout = %q, want defaultHost JSON", stdout)
-	}
-	if !strings.Contains(stderr, "No changes to save") {
-		t.Fatalf("stderr = %q, want no changes message", stderr)
-	}
-}
-
-func TestHandlePrefsSaveWritesPrefsFile(t *testing.T) {
+func TestHandleConfigMutationsSaveImmediately(t *testing.T) {
 	tmp := t.TempDir()
-	path := filepath.Join(tmp, "prefs.json")
-	restore := stubPrefsState(t, prefs{DefaultHost: "host-b", changed: true})
+	workspace := filepath.Join(tmp, "workspace")
+	if err := os.Mkdir(workspace, 0o755); err != nil {
+		t.Fatalf("Mkdir workspace: %v", err)
+	}
+	oldConfigPath := clientConfigPathFn
+	clientConfigPathFn = func() (string, error) { return filepath.Join(tmp, "config.toml"), nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "catch"})
 	defer restore()
-	oldPrefsFile := prefsFile
-	prefsFile = path
-	t.Cleanup(func() { prefsFile = oldPrefsFile })
-
-	stdout, stderr, err := capturePrefsOutput(t, func() error {
-		return HandlePrefs(context.Background(), []string{"prefs", "--save"})
-	})
-	if err != nil {
-		t.Fatalf("HandlePrefs error: %v", err)
-	}
-	if !strings.Contains(stdout, `"defaultHost": "host-b"`) {
-		t.Fatalf("stdout = %q, want defaultHost JSON", stdout)
-	}
-	if !strings.Contains(stderr, "Prefs saved") {
-		t.Fatalf("stderr = %q, want saved message", stderr)
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("ReadFile prefs error: %v", err)
-	}
-	if !strings.Contains(string(b), `"defaultHost": "host-b"`) {
-		t.Fatalf("prefs file = %q, want saved host", b)
-	}
-}
-
-func TestHandlePrefsSaveReportsSaveError(t *testing.T) {
-	tmp := t.TempDir()
-	parentFile := filepath.Join(tmp, "not-dir")
-	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
-		t.Fatalf("WriteFile parent: %v", err)
-	}
-	restore := stubPrefsState(t, prefs{DefaultHost: "host-b", changed: true})
-	defer restore()
-	oldPrefsFile := prefsFile
-	prefsFile = filepath.Join(parentFile, "prefs.json")
-	t.Cleanup(func() { prefsFile = oldPrefsFile })
 
 	_, _, err := capturePrefsOutput(t, func() error {
-		return HandlePrefs(context.Background(), []string{"--save"})
+		return HandleConfig(context.Background(), []string{"--host", "Yeet-PVE1", "--workspace", workspace})
 	})
-	if err == nil || !strings.Contains(err.Error(), "failed to save preferences") {
-		t.Fatalf("HandlePrefs error = %v, want save error", err)
+	if err != nil {
+		t.Fatalf("HandleConfig mutation error: %v", err)
 	}
-	if !errors.Is(err, os.ErrExist) && !strings.Contains(err.Error(), "not a directory") {
-		t.Fatalf("HandlePrefs error = %v, want filesystem cause", err)
+	raw, err := os.ReadFile(filepath.Join(tmp, "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `default_host = "yeet-pve1"`) || !strings.Contains(text, workspace) {
+		t.Fatalf("saved config = %q, want host and workspace", text)
 	}
 }
 
-func stubPrefsState(t *testing.T, next prefs) func() {
-	t.Helper()
-	oldPrefs := loadedPrefs
-	loadedPrefs = next
-	return func() {
-		loadedPrefs = oldPrefs
+func TestHandleConfigWorkspaceRequiresExistingDirectory(t *testing.T) {
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "catch"})
+	defer restore()
+	_, _, err := capturePrefsOutput(t, func() error {
+		return HandleConfig(context.Background(), []string{"--workspace", filepath.Join(t.TempDir(), "missing")})
+	})
+	if err == nil || !strings.Contains(err.Error(), "workspace must be an existing directory") {
+		t.Fatalf("HandleConfig error = %v, want existing directory error", err)
+	}
+}
+
+func TestHandleConfigRemoveWorkspaceDoesNotRequireExistingDirectory(t *testing.T) {
+	tmp := t.TempDir()
+	missing := filepath.Join(tmp, "missing")
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "catch", Workspaces: []string{missing}})
+	defer restore()
+	if _, _, err := capturePrefsOutput(t, func() error {
+		return HandleConfig(context.Background(), []string{"--remove-workspace", missing})
+	}); err != nil {
+		t.Fatalf("HandleConfig remove missing workspace error: %v", err)
+	}
+	if got := workspacePaths(); len(got) != 0 {
+		t.Fatalf("workspacePaths = %#v, want empty", got)
 	}
 }
 
@@ -203,35 +399,84 @@ func capturePrefsOutput(t *testing.T, fn func() error) (string, string, error) {
 	oldStderr := os.Stderr
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("stdout Pipe error: %v", err)
+		t.Fatalf("stdout pipe: %v", err)
 	}
 	stderrR, stderrW, err := os.Pipe()
 	if err != nil {
-		t.Fatalf("stderr Pipe error: %v", err)
+		t.Fatalf("stderr pipe: %v", err)
 	}
 	os.Stdout = stdoutW
 	os.Stderr = stderrW
-	defer func() {
-		os.Stdout = oldStdout
-		os.Stderr = oldStderr
-		_ = stdoutR.Close()
-		_ = stderrR.Close()
-	}()
-
 	runErr := fn()
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
 	if err := stdoutW.Close(); err != nil {
-		t.Fatalf("stdout close error: %v", err)
+		t.Fatalf("stdout close: %v", err)
 	}
 	if err := stderrW.Close(); err != nil {
-		t.Fatalf("stderr close error: %v", err)
+		t.Fatalf("stderr close: %v", err)
 	}
-	stdout, readOutErr := io.ReadAll(stdoutR)
-	if readOutErr != nil {
-		t.Fatalf("stdout ReadAll error: %v", readOutErr)
+	stdout, err := io.ReadAll(stdoutR)
+	if err != nil {
+		t.Fatalf("stdout read: %v", err)
 	}
-	stderr, readErrErr := io.ReadAll(stderrR)
-	if readErrErr != nil {
-		t.Fatalf("stderr ReadAll error: %v", readErrErr)
+	if err := stdoutR.Close(); err != nil {
+		t.Fatalf("stdout reader close: %v", err)
+	}
+	stderr, err := io.ReadAll(stderrR)
+	if err != nil {
+		t.Fatalf("stderr read: %v", err)
+	}
+	if err := stderrR.Close(); err != nil {
+		t.Fatalf("stderr reader close: %v", err)
 	}
 	return string(stdout), string(stderr), runErr
+}
+
+func stubClientConfigState(t *testing.T, next clientConfig) func() {
+	t.Helper()
+	oldPrefs := loadedPrefs
+	oldService := serviceOverride
+	oldHostOverride := hostOverride
+	oldHostOverrideSet := hostOverrideSet
+	if next.loaded || next.loadErr != nil || next.DefaultHost != "" || len(next.Workspaces) != 0 || len(next.warnings) != 0 || next.changed || next.savedHost != "" {
+		next.loaded = true
+		next.normalize()
+		if next.savedHost == "" {
+			next.savedHost = next.DefaultHost
+		}
+	}
+	loadedPrefs = next
+	serviceOverride = ""
+	hostOverride = ""
+	hostOverrideSet = false
+	return func() {
+		loadedPrefs = oldPrefs
+		serviceOverride = oldService
+		hostOverride = oldHostOverride
+		hostOverrideSet = oldHostOverrideSet
+	}
+}
+
+func stubPrefsState(t *testing.T, next prefs) func() {
+	t.Helper()
+	oldPrefs := loadedPrefs
+	oldService := serviceOverride
+	oldHostOverride := hostOverride
+	oldHostOverrideSet := hostOverrideSet
+	next.loaded = true
+	next.normalize()
+	if next.savedHost == "" {
+		next.savedHost = next.DefaultHost
+	}
+	loadedPrefs = next
+	serviceOverride = ""
+	hostOverride = ""
+	hostOverrideSet = false
+	return func() {
+		loadedPrefs = oldPrefs
+		serviceOverride = oldService
+		hostOverride = oldHostOverride
+		hostOverrideSet = oldHostOverrideSet
+	}
 }
