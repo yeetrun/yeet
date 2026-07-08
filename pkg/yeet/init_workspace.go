@@ -13,7 +13,9 @@ import (
 
 func finishInitWorkspaceSetup(ui *initUI, opts initOptions) error {
 	if opts.noWorkspace {
-		printInitNextSteps(ui, "")
+		if !opts.suppressNextSteps {
+			printInitNextSteps(ui, "")
+		}
 		return nil
 	}
 	workspace := strings.TrimSpace(opts.workspace)

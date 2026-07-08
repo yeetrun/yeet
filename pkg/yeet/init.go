@@ -54,6 +54,7 @@ type initOptions struct {
 	prepareVMLANBridge bool
 	skipVMLANBridge    bool
 	noWorkspace        bool
+	suppressNextSteps  bool
 	workspace          string
 	tsAuthKey          string
 	tsClientSecret     string

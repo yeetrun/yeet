@@ -256,6 +256,7 @@ func TestRunUpgradeUpdatesCatchWithRecordedInstallTarget(t *testing.T) {
 	var target string
 	var releaseVersion string
 	var noWorkspace bool
+	var suppressNextSteps bool
 	initCatchFn = func(userAtRemote string, opts initOptions) error {
 		target = userAtRemote
 		if !opts.fromGithub {
@@ -263,6 +264,7 @@ func TestRunUpgradeUpdatesCatchWithRecordedInstallTarget(t *testing.T) {
 		}
 		releaseVersion = opts.releaseVersion
 		noWorkspace = opts.noWorkspace
+		suppressNextSteps = opts.suppressNextSteps
 		return nil
 	}
 	report := upgradeReport{
@@ -283,6 +285,9 @@ func TestRunUpgradeUpdatesCatchWithRecordedInstallTarget(t *testing.T) {
 	}
 	if !noWorkspace {
 		t.Fatal("noWorkspace = false, want true for catch upgrade reinstall")
+	}
+	if !suppressNextSteps {
+		t.Fatal("suppressNextSteps = false, want true for catch upgrade reinstall")
 	}
 }
 
