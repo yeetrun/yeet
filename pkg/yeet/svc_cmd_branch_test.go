@@ -2503,9 +2503,12 @@ func TestHandleSvcCmdStatusUsesProjectHostsWithCatchHostEnv(t *testing.T) {
 		t.Fatalf("saveProjectConfig: %v", err)
 	}
 
+	var gotHostsMu sync.Mutex
 	var gotHosts []string
 	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		gotHostsMu.Lock()
 		gotHosts = append(gotHosts, host)
+		gotHostsMu.Unlock()
 		return []statusService{{ServiceName: "svc-" + host, ServiceType: serviceTypeRun}}, nil
 	}
 
@@ -2523,6 +2526,9 @@ func TestHandleSvcCmdStatusUsesProjectHostsWithCatchHostEnv(t *testing.T) {
 	if err := HandleSvcCmd([]string{"status"}); err != nil {
 		t.Fatalf("HandleSvcCmd status: %v", err)
 	}
+	gotHostsMu.Lock()
+	gotHosts = slices.Clone(gotHosts)
+	gotHostsMu.Unlock()
 	slices.Sort(gotHosts)
 	if !reflect.DeepEqual(gotHosts, []string{"host-a", "host-b"}) {
 		t.Fatalf("status hosts = %#v, want project hosts", gotHosts)
@@ -2565,9 +2571,12 @@ func TestHandleSvcCmdStatusUsesConfiguredWorkspaceHostsWithCatchHostEnv(t *testi
 		t.Fatalf("remove local project config: %v", err)
 	}
 
+	var gotHostsMu sync.Mutex
 	var gotHosts []string
 	fetchStatusForHostFn = func(ctx context.Context, host string, flags cli.StatusFlags) ([]statusService, error) {
+		gotHostsMu.Lock()
 		gotHosts = append(gotHosts, host)
+		gotHostsMu.Unlock()
 		return []statusService{{ServiceName: "svc-" + host, ServiceType: serviceTypeRun}}, nil
 	}
 
@@ -2585,6 +2594,9 @@ func TestHandleSvcCmdStatusUsesConfiguredWorkspaceHostsWithCatchHostEnv(t *testi
 	if err := HandleSvcCmd([]string{"status"}); err != nil {
 		t.Fatalf("HandleSvcCmd status: %v", err)
 	}
+	gotHostsMu.Lock()
+	gotHosts = slices.Clone(gotHosts)
+	gotHostsMu.Unlock()
 	slices.Sort(gotHosts)
 	if !reflect.DeepEqual(gotHosts, []string{"host-a", "host-b"}) {
 		t.Fatalf("status hosts = %#v, want workspace hosts", gotHosts)
