@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,17 +20,19 @@ import (
 
 func TestParseInitArgs(t *testing.T) {
 	tests := []struct {
-		name         string
-		args         []string
-		wantPos      []string
-		wantGithub   bool
-		wantNightly  bool
-		wantDocker   bool
-		wantVMTools  bool
-		wantTSAuth   string
-		wantTSClient string
-		wantStorage  initStorageOptions
-		wantErr      bool
+		name            string
+		args            []string
+		wantPos         []string
+		wantGithub      bool
+		wantNightly     bool
+		wantDocker      bool
+		wantVMTools     bool
+		wantTSAuth      string
+		wantTSClient    string
+		wantWorkspace   string
+		wantNoWorkspace bool
+		wantStorage     initStorageOptions
+		wantErr         bool
 	}{
 		{
 			name:    "strips command name",
@@ -62,6 +65,23 @@ func TestParseInitArgs(t *testing.T) {
 				ServicesRoot:    "flash/yeet/services",
 				ServicesRootZFS: true,
 			},
+		},
+		{
+			name:          "parses workspace flag",
+			args:          []string{"--workspace", "~/yeet-services", "root@example.com"},
+			wantPos:       []string{"root@example.com"},
+			wantWorkspace: "~/yeet-services",
+		},
+		{
+			name:            "parses no workspace flag",
+			args:            []string{"--no-workspace", "root@example.com"},
+			wantPos:         []string{"root@example.com"},
+			wantNoWorkspace: true,
+		},
+		{
+			name:    "rejects workspace and no workspace together",
+			args:    []string{"--workspace", "~/yeet-services", "--no-workspace", "root@example.com"},
+			wantErr: true,
 		},
 		{
 			name:    "rejects zfs without storage target",
@@ -118,10 +138,59 @@ func TestParseInitArgs(t *testing.T) {
 			if opts.tsClientSecret != tt.wantTSClient {
 				t.Fatalf("tsClientSecret = %q, want %q", opts.tsClientSecret, tt.wantTSClient)
 			}
+			if opts.workspace != tt.wantWorkspace {
+				t.Fatalf("workspace = %q, want %q", opts.workspace, tt.wantWorkspace)
+			}
+			if opts.noWorkspace != tt.wantNoWorkspace {
+				t.Fatalf("noWorkspace = %v, want %v", opts.noWorkspace, tt.wantNoWorkspace)
+			}
 			if !reflect.DeepEqual(opts.storage, tt.wantStorage) {
 				t.Fatalf("storage = %#v, want %#v", opts.storage, tt.wantStorage)
 			}
 		})
+	}
+}
+
+func TestFinishInitWorkspaceSetupExplicitWorkspaceCreatesSeedAndSavesConfig(t *testing.T) {
+	tmp := t.TempDir()
+	workspace := filepath.Join(tmp, "services")
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "catch"})
+	defer restore()
+	oldConfigPath := clientConfigPathFn
+	clientConfigPathFn = func() (string, error) { return filepath.Join(tmp, "config.toml"), nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+	loadedPrefs.DefaultHost = "yeet-lab"
+
+	ui := newInitUI(io.Discard, false, true, "yeet-lab", "root@example.com", catchServiceName)
+	if err := finishInitWorkspaceSetup(ui, initOptions{workspace: workspace}); err != nil {
+		t.Fatalf("finishInitWorkspaceSetup error: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(workspace, projectConfigName))
+	if err != nil {
+		t.Fatalf("ReadFile yeet.toml: %v", err)
+	}
+	if !strings.Contains(string(raw), `hosts = ["yeet-lab"]`) {
+		t.Fatalf("yeet.toml = %q, want host", string(raw))
+	}
+	configRaw, err := os.ReadFile(filepath.Join(tmp, "config.toml"))
+	if err != nil {
+		t.Fatalf("ReadFile config: %v", err)
+	}
+	if !strings.Contains(string(configRaw), `default_host = "yeet-lab"`) || !strings.Contains(string(configRaw), workspace) {
+		t.Fatalf("config = %q, want host and workspace", string(configRaw))
+	}
+}
+
+func TestFinishInitWorkspaceSetupNoWorkspaceSkipsPrompt(t *testing.T) {
+	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-lab"})
+	defer restore()
+	oldPrompt := activePrompter
+	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
+	t.Cleanup(func() { activePrompter = oldPrompt })
+	ui := newInitUI(io.Discard, false, true, "yeet-lab", "root@example.com", catchServiceName)
+
+	if err := finishInitWorkspaceSetup(ui, initOptions{noWorkspace: true}); err != nil {
+		t.Fatalf("finishInitWorkspaceSetup error: %v", err)
 	}
 }
 
@@ -316,13 +385,68 @@ func TestPrepareInitDockerInstallRequiresFlagWhenMissingAndNonInteractive(t *tes
 	}
 }
 
+type scriptedInitPrompter struct {
+	confirmAnswers []bool
+	inputAnswers   []string
+	secretAnswers  []string
+	confirmErr     error
+	inputErr       error
+	secretErr      error
+	confirmPrompts []string
+	inputPrompts   []string
+	secretPrompts  []string
+}
+
+func (p *scriptedInitPrompter) Confirm(msg string, _ bool) (bool, error) {
+	p.confirmPrompts = append(p.confirmPrompts, msg)
+	if p.confirmErr != nil {
+		return false, p.confirmErr
+	}
+	if len(p.confirmAnswers) == 0 {
+		return false, nil
+	}
+	answer := p.confirmAnswers[0]
+	p.confirmAnswers = p.confirmAnswers[1:]
+	return answer, nil
+}
+
+func (p *scriptedInitPrompter) Input(msg string, _ string) (string, error) {
+	p.inputPrompts = append(p.inputPrompts, msg)
+	if p.inputErr != nil {
+		return "", p.inputErr
+	}
+	if len(p.inputAnswers) == 0 {
+		return "", nil
+	}
+	answer := p.inputAnswers[0]
+	p.inputAnswers = p.inputAnswers[1:]
+	return answer, nil
+}
+
+func (p *scriptedInitPrompter) Secret(msg string) (string, error) {
+	p.secretPrompts = append(p.secretPrompts, msg)
+	if p.secretErr != nil {
+		return "", p.secretErr
+	}
+	if len(p.secretAnswers) == 0 {
+		return "", nil
+	}
+	answer := p.secretAnswers[0]
+	p.secretAnswers = p.secretAnswers[1:]
+	return answer, nil
+}
+
+func (*scriptedInitPrompter) SelectWorkspace(string, []string, string) (workspaceSelection, error) {
+	return workspaceSelection{}, nil
+}
+
 func TestPrepareInitVMToolsInstallPromptsForInteractiveCapableAptHost(t *testing.T) {
 	oldRemoteVMHostStatus := remoteVMHostStatusFn
-	oldConfirm := confirmInitFn
+	oldPrompt := activePrompter
 	oldIsTerminal := isTerminalFn
 	t.Cleanup(func() {
 		remoteVMHostStatusFn = oldRemoteVMHostStatus
-		confirmInitFn = oldConfirm
+		activePrompter = oldPrompt
 		isTerminalFn = oldIsTerminal
 	})
 	remoteVMHostStatusFn = func(userAtRemote string, goarch string) (initVMHostStatus, error) {
@@ -342,11 +466,8 @@ func TestPrepareInitVMToolsInstallPromptsForInteractiveCapableAptHost(t *testing
 		}, nil
 	}
 	isTerminalFn = func(int) bool { return true }
-	var prompt string
-	confirmInitFn = func(_ io.Reader, _ io.Writer, msg string) (bool, error) {
-		prompt = msg
-		return true, nil
-	}
+	prompter := &scriptedInitPrompter{confirmAnswers: []bool{true}}
+	activePrompter = prompter
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
 	installVMTools, err := prepareInitVMToolsInstall(ui, "root@example.com", "amd64", initOptions{})
@@ -357,18 +478,18 @@ func TestPrepareInitVMToolsInstallPromptsForInteractiveCapableAptHost(t *testing
 		t.Fatal("installVMTools = false after prompt confirmation")
 	}
 	wantPrompt := "VM payloads can run on this host, but VM host packages are missing. Install them now?"
-	if prompt != wantPrompt {
-		t.Fatalf("prompt = %q, want %q", prompt, wantPrompt)
+	if !reflect.DeepEqual(prompter.confirmPrompts, []string{wantPrompt}) {
+		t.Fatalf("prompts = %#v, want %#v", prompter.confirmPrompts, []string{wantPrompt})
 	}
 }
 
 func TestPrepareInitVMToolsInstallWarnsWithFlagWhenCapableAptHostIsNonInteractive(t *testing.T) {
 	oldRemoteVMHostStatus := remoteVMHostStatusFn
-	oldConfirm := confirmInitFn
+	oldPrompt := activePrompter
 	oldIsTerminal := isTerminalFn
 	t.Cleanup(func() {
 		remoteVMHostStatusFn = oldRemoteVMHostStatus
-		confirmInitFn = oldConfirm
+		activePrompter = oldPrompt
 		isTerminalFn = oldIsTerminal
 	})
 	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
@@ -382,10 +503,7 @@ func TestPrepareInitVMToolsInstallWarnsWithFlagWhenCapableAptHostIsNonInteractiv
 		}, nil
 	}
 	isTerminalFn = func(int) bool { return false }
-	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
-		t.Fatal("confirmInitFn should not be called for non-interactive init")
-		return false, nil
-	}
+	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
 	var out strings.Builder
 	ui := newInitUI(&out, false, false, "catch", "root@example.com", catchServiceName)
 
@@ -405,17 +523,11 @@ func TestPrepareInitVMToolsInstallWarnsWithFlagWhenCapableAptHostIsNonInteractiv
 
 func TestPrepareInitVMToolsInstallWarnsAndContinuesWhenPreflightFails(t *testing.T) {
 	oldRemoteVMHostStatus := remoteVMHostStatusFn
-	oldConfirm := confirmInitFn
 	t.Cleanup(func() {
 		remoteVMHostStatusFn = oldRemoteVMHostStatus
-		confirmInitFn = oldConfirm
 	})
 	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
 		return initVMHostStatus{}, errors.New("probe failed")
-	}
-	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
-		t.Fatal("confirmInitFn should not be called when VM preflight fails")
-		return false, nil
 	}
 	var out strings.Builder
 	ui := newInitUI(&out, false, false, "catch", "root@example.com", catchServiceName)
@@ -436,19 +548,16 @@ func TestPrepareInitVMToolsInstallWarnsAndContinuesWhenPreflightFails(t *testing
 
 func TestPrepareInitVMToolsInstallExplicitFlagSkipsRemotePreflight(t *testing.T) {
 	oldRemoteVMHostStatus := remoteVMHostStatusFn
-	oldConfirm := confirmInitFn
+	oldPrompt := activePrompter
 	t.Cleanup(func() {
 		remoteVMHostStatusFn = oldRemoteVMHostStatus
-		confirmInitFn = oldConfirm
+		activePrompter = oldPrompt
 	})
 	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
 		t.Fatal("remoteVMHostStatusFn should not be called when --install-vm-tools is set")
 		return initVMHostStatus{}, nil
 	}
-	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
-		t.Fatal("confirmInitFn should not be called when --install-vm-tools is set")
-		return false, nil
-	}
+	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
 	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
 
 	installVMTools, err := prepareInitVMToolsInstall(ui, "root@example.com", "amd64", initOptions{installVMTools: true})
@@ -462,11 +571,11 @@ func TestPrepareInitVMToolsInstallExplicitFlagSkipsRemotePreflight(t *testing.T)
 
 func TestPrepareInitVMToolsInstallWarnsForNonVMCapableHost(t *testing.T) {
 	oldRemoteVMHostStatus := remoteVMHostStatusFn
-	oldConfirm := confirmInitFn
+	oldPrompt := activePrompter
 	oldIsTerminal := isTerminalFn
 	t.Cleanup(func() {
 		remoteVMHostStatusFn = oldRemoteVMHostStatus
-		confirmInitFn = oldConfirm
+		activePrompter = oldPrompt
 		isTerminalFn = oldIsTerminal
 	})
 	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
@@ -480,10 +589,7 @@ func TestPrepareInitVMToolsInstallWarnsForNonVMCapableHost(t *testing.T) {
 		}, nil
 	}
 	isTerminalFn = func(int) bool { return true }
-	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
-		t.Fatal("confirmInitFn should not be called when /dev/kvm is missing")
-		return false, nil
-	}
+	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
 	var out strings.Builder
 	ui := newInitUI(&out, false, false, "catch", "root@example.com", catchServiceName)
 
@@ -612,8 +718,7 @@ func TestInitStorageOptionsFromCatchUnit(t *testing.T) {
 }
 
 func TestRunInitStorageWizardDefaultsToHomeYeetData(t *testing.T) {
-	var out strings.Builder
-	got, err := runInitStorageWizard(strings.NewReader("\n\n"), &out, initStorageProbe{Home: "/root"})
+	got, err := runInitStorageWizardWithPrompter(&scriptedInitPrompter{confirmAnswers: []bool{true, true}}, initStorageProbe{Home: "/root"})
 	if err != nil {
 		t.Fatalf("runInitStorageWizard: %v", err)
 	}
@@ -621,17 +726,14 @@ func TestRunInitStorageWizardDefaultsToHomeYeetData(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("storage = %#v, want %#v", got, want)
 	}
-	for _, text := range []string{"Storage setup", "Use /root/yeet-data for catch data?", "Keep services under the catch data dir?"} {
-		if !strings.Contains(out.String(), text) {
-			t.Fatalf("wizard output = %q, want %q", out.String(), text)
-		}
-	}
 }
 
 func TestRunInitStorageWizardCanSelectZFSDataAndServicesDatasets(t *testing.T) {
-	var out strings.Builder
-	input := "n\ny\n\nn\n\n\n"
-	got, err := runInitStorageWizard(strings.NewReader(input), &out, initStorageProbe{
+	prompter := &scriptedInitPrompter{
+		confirmAnswers: []bool{false, true, false, true},
+		inputAnswers:   []string{"flash/yeet/data", "flash/yeet/services"},
+	}
+	got, err := runInitStorageWizardWithPrompter(prompter, initStorageProbe{
 		Home:               "/root",
 		ZFSAvailable:       true,
 		SuggestedZFSPrefix: "flash/yeet",
@@ -648,10 +750,73 @@ func TestRunInitStorageWizardCanSelectZFSDataAndServicesDatasets(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("storage = %#v, want %#v", got, want)
 	}
-	for _, text := range []string{"Catch data dataset [flash/yeet/data]", "Services dataset [flash/yeet/services]"} {
-		if !strings.Contains(out.String(), text) {
-			t.Fatalf("wizard output = %q, want %q", out.String(), text)
+	for _, wantPrompt := range []string{
+		"Use /root/yeet-data for catch data?",
+		"Use a ZFS dataset for catch data?",
+		"Keep services under the catch data dir?",
+		"Use a ZFS dataset for services?",
+	} {
+		if !slices.Contains(prompter.confirmPrompts, wantPrompt) {
+			t.Fatalf("confirm prompts = %#v, want %q", prompter.confirmPrompts, wantPrompt)
 		}
+	}
+	for _, wantPrompt := range []string{"Catch data dataset", "Services dataset"} {
+		if !slices.Contains(prompter.inputPrompts, wantPrompt) {
+			t.Fatalf("input prompts = %#v, want %q", prompter.inputPrompts, wantPrompt)
+		}
+	}
+}
+
+func TestRunInitStorageWizardNonZFSHostUsesFilesystemServicesRoot(t *testing.T) {
+	prompter := &scriptedInitPrompter{
+		confirmAnswers: []bool{true, false},
+		inputAnswers:   []string{"/srv/custom-services"},
+	}
+	got, err := runInitStorageWizardWithPrompter(prompter, initStorageProbe{
+		Home:         "/root",
+		ZFSAvailable: false,
+	})
+	if err != nil {
+		t.Fatalf("runInitStorageWizard: %v", err)
+	}
+	want := initStorageOptions{
+		DataDir:      "/root/yeet-data",
+		ServicesRoot: "/srv/custom-services",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("storage = %#v, want %#v", got, want)
+	}
+	if !reflect.DeepEqual(prompter.confirmPrompts, []string{
+		"Use /root/yeet-data for catch data?",
+		"Keep services under the catch data dir?",
+	}) {
+		t.Fatalf("confirm prompts = %#v", prompter.confirmPrompts)
+	}
+	if !reflect.DeepEqual(prompter.inputPrompts, []string{"Services root"}) {
+		t.Fatalf("input prompts = %#v, want filesystem services root prompt only", prompter.inputPrompts)
+	}
+	if got.ServicesRootZFS {
+		t.Fatalf("ServicesRootZFS = true, want false")
+	}
+}
+
+func TestRetryInitTailscaleClientSecretUsesPromptLayer(t *testing.T) {
+	oldPrompt := activePrompter
+	oldIsTerminal := isTerminalFn
+	activePrompter = fakePrompter{secret: "tskey-client-new"}
+	isTerminalFn = func(int) bool { return true }
+	t.Cleanup(func() {
+		activePrompter = oldPrompt
+		isTerminalFn = oldIsTerminal
+	})
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+
+	secret, err := retryInitTailscaleClientSecret(ui, 1, errors.New("tailscale OAuth setup failed"))
+	if err != nil {
+		t.Fatalf("retryInitTailscaleClientSecret error: %v", err)
+	}
+	if secret != "tskey-client-new" {
+		t.Fatalf("secret = %q, want prompted secret", secret)
 	}
 }
 
@@ -917,7 +1082,7 @@ func TestInitCatchPassesInstallDockerFlagToRemoteInstall(t *testing.T) {
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{fromGithub: true, installDocker: true, installVMTools: true, prepareVMLANBridge: true}); err != nil {
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, installDocker: true, installVMTools: true, prepareVMLANBridge: true, noWorkspace: true}); err != nil {
 		t.Fatalf("initCatch returned error: %v", err)
 	}
 	if got := steps[len(steps)-1]; got != "install-docker:true:install-vm-tools:true:prepare-vm-lan-bridge:true:skip-vm-lan-bridge:false" {
@@ -946,7 +1111,7 @@ func TestInitCatchPlansStorageBeforeDownloadAndPassesToRemoteInstall(t *testing.
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{fromGithub: true, storage: initStorageOptions{DataDir: "/flag/data"}}); err != nil {
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, storage: initStorageOptions{DataDir: "/flag/data"}, noWorkspace: true}); err != nil {
 		t.Fatalf("initCatch returned error: %v", err)
 	}
 
@@ -976,16 +1141,21 @@ func TestInitCatchPromptsForVMLANBridgeAfterChmodAndPassesPrepareIntent(t *testi
 		steps = append(steps, "bridge-plan:"+userAtRemote)
 		return initVMLANBridgePlan{Bridge: "br0", Parent: "eno1", NeedsPrepare: true}, nil
 	}
-	confirmInitFn = func(_ io.Reader, _ io.Writer, msg string) (bool, error) {
-		steps = append(steps, "confirm:"+msg)
-		return true, nil
+	oldPrompt := activePrompter
+	activePrompter = &scriptedInitPrompter{
+		confirmAnswers: []bool{true},
 	}
+	t.Cleanup(func() { activePrompter = oldPrompt })
+	prompter := activePrompter.(*scriptedInitPrompter)
 	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool, _ initStorageOptions) error {
+		for _, msg := range prompter.confirmPrompts {
+			steps = append(steps, "confirm:"+msg)
+		}
 		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true}); err != nil {
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true, noWorkspace: true}); err != nil {
 		t.Fatalf("initCatch returned error: %v", err)
 	}
 
@@ -1015,15 +1185,15 @@ func TestInitCatchVMLANBridgeDeclinePassesSkipIntent(t *testing.T) {
 	remoteVMLANBridgePlanFn = func(string, initStorageOptions) (initVMLANBridgePlan, error) {
 		return initVMLANBridgePlan{Bridge: "br0", Parent: "eno1", NeedsPrepare: true}, nil
 	}
-	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
-		return false, nil
-	}
+	oldPrompt := activePrompter
+	activePrompter = fakePrompter{confirm: false}
+	t.Cleanup(func() { activePrompter = oldPrompt })
 	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool, _ initStorageOptions) error {
 		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true}); err != nil {
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true, noWorkspace: true}); err != nil {
 		t.Fatalf("initCatch returned error: %v", err)
 	}
 	if got := steps[len(steps)-1]; got != "install:prepare=false:skip=true" {
@@ -1043,16 +1213,15 @@ func TestInitCatchVMLANBridgeReadyPlanDoesNotPrompt(t *testing.T) {
 		steps = append(steps, "bridge-plan")
 		return initVMLANBridgePlan{Bridge: "br0", Ready: true}, nil
 	}
-	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
-		t.Fatal("confirmInitFn should not be called when VM LAN bridge is ready")
-		return false, nil
-	}
+	oldPrompt := activePrompter
+	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
+	t.Cleanup(func() { activePrompter = oldPrompt })
 	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool, _ initStorageOptions) error {
 		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true}); err != nil {
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true, noWorkspace: true}); err != nil {
 		t.Fatalf("initCatch returned error: %v", err)
 	}
 	if got := steps[len(steps)-1]; got != "install:prepare=false:skip=false" {
@@ -1071,16 +1240,15 @@ func TestInitCatchVMLANBridgePlanFailureWarnsAndDoesNotBlockInstall(t *testing.T
 	remoteVMLANBridgePlanFn = func(string, initStorageOptions) (initVMLANBridgePlan, error) {
 		return initVMLANBridgePlan{}, errors.New("unsupported renderer")
 	}
-	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
-		t.Fatal("confirmInitFn should not be called when VM LAN bridge planning fails")
-		return false, nil
-	}
+	oldPrompt := activePrompter
+	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
+	t.Cleanup(func() { activePrompter = oldPrompt })
 	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, prepareVMLANBridge bool, skipVMLANBridge bool, _ initStorageOptions) error {
 		steps = append(steps, "install:prepare="+boolString(prepareVMLANBridge)+":skip="+boolString(skipVMLANBridge))
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true}); err != nil {
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, installVMTools: true, noWorkspace: true}); err != nil {
 		t.Fatalf("initCatch returned error: %v", err)
 	}
 	if got := steps[len(steps)-1]; got != "install:prepare=false:skip=true" {
@@ -1506,31 +1674,15 @@ func TestInstallInitCatchRetriesHungStatusPoll(t *testing.T) {
 
 func TestInstallInitCatchWithTailscaleRetryPromptsAfterCredentialError(t *testing.T) {
 	oldInstall := installInitCatchFn
+	oldPrompt := activePrompter
 	oldIsTerminal := isTerminalFn
-	oldStdin := os.Stdin
-	oldStdout := os.Stdout
 	t.Cleanup(func() {
 		installInitCatchFn = oldInstall
+		activePrompter = oldPrompt
 		isTerminalFn = oldIsTerminal
-		os.Stdin = oldStdin
-		os.Stdout = oldStdout
 	})
-
-	inR, inW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("stdin pipe: %v", err)
-	}
-	outR, outW, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("stdout pipe: %v", err)
-	}
-	os.Stdin = inR
-	os.Stdout = outW
+	activePrompter = fakePrompter{secret: "tskey-client-good"}
 	isTerminalFn = func(int) bool { return true }
-	if _, err := inW.WriteString("tskey-client-good\n"); err != nil {
-		t.Fatalf("write prompt input: %v", err)
-	}
-	_ = inW.Close()
 
 	var installs int
 	var gotSecret string
@@ -1550,10 +1702,6 @@ func TestInstallInitCatchWithTailscaleRetryPromptsAfterCredentialError(t *testin
 	if err := installInitCatchWithTailscaleRetry(ui, "root@example.com", false, false, false, initOptions{}); err != nil {
 		t.Fatalf("installInitCatchWithTailscaleRetry error: %v", err)
 	}
-	if err := outW.Close(); err != nil {
-		t.Fatalf("stdout close: %v", err)
-	}
-	_, _ = io.ReadAll(outR)
 	if installs != 2 {
 		t.Fatalf("installs = %d, want 2", installs)
 	}
@@ -1766,7 +1914,7 @@ func TestInitCatchUsesGitHubSource(t *testing.T) {
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{fromGithub: true, nightly: true, releaseVersion: "v0.6.1"}); err != nil {
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, nightly: true, releaseVersion: "v0.6.1", noWorkspace: true}); err != nil {
 		t.Fatalf("initCatch error: %v", err)
 	}
 
@@ -1808,7 +1956,7 @@ func TestInitCatchBuildsAndUploadsLocalSource(t *testing.T) {
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{}); err != nil {
+	if err := initCatch("root@example.com", initOptions{noWorkspace: true}); err != nil {
 		t.Fatalf("initCatch error: %v", err)
 	}
 
@@ -1830,7 +1978,7 @@ func TestInitCatchStopsWhenSourceFails(t *testing.T) {
 	}
 	restore(nil)
 
-	if err := initCatch("root@example.com", initOptions{}); !errors.Is(err, wantErr) {
+	if err := initCatch("root@example.com", initOptions{noWorkspace: true}); !errors.Is(err, wantErr) {
 		t.Fatalf("initCatch error = %v, want %v", err, wantErr)
 	}
 }
@@ -1849,7 +1997,7 @@ func TestInitCatchStopsWhenInstallPrepFails(t *testing.T) {
 		return nil
 	}
 
-	if err := initCatch("root@example.com", initOptions{fromGithub: true}); !errors.Is(err, wantErr) {
+	if err := initCatch("root@example.com", initOptions{fromGithub: true, noWorkspace: true}); !errors.Is(err, wantErr) {
 		t.Fatalf("initCatch error = %v, want %v", err, wantErr)
 	}
 	if strings.Join(steps, "\n") != strings.Join([]string{"verify", "detect", "download", "chmod"}, "\n") {
@@ -1873,7 +2021,7 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 	oldPrepareStorage := prepareInitStorageOptionsFn
 	oldRemoteVMHostStatus := remoteVMHostStatusFn
 	oldRemoteVMLANBridgePlan := remoteVMLANBridgePlanFn
-	oldConfirm := confirmInitFn
+	oldPrompt := activePrompter
 	oldIsTerminal := isTerminalFn
 	SetUIConfig(UIConfig{Progress: "quiet"})
 	t.Cleanup(func() {
@@ -1891,7 +2039,7 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 		prepareInitStorageOptionsFn = oldPrepareStorage
 		remoteVMHostStatusFn = oldRemoteVMHostStatus
 		remoteVMLANBridgePlanFn = oldRemoteVMLANBridgePlan
-		confirmInitFn = oldConfirm
+		activePrompter = oldPrompt
 		isTerminalFn = oldIsTerminal
 	})
 
@@ -1922,9 +2070,7 @@ func stubInitCatchWorkflow(t *testing.T) func(*[]string) {
 	remoteVMLANBridgePlanFn = func(string, initStorageOptions) (initVMLANBridgePlan, error) {
 		return initVMLANBridgePlan{Ready: true, Bridge: "br0"}, nil
 	}
-	confirmInitFn = func(io.Reader, io.Writer, string) (bool, error) {
-		return false, nil
-	}
+	activePrompter = fakePrompter{confirm: false}
 	isTerminalFn = func(int) bool { return false }
 
 	return func(steps *[]string) {

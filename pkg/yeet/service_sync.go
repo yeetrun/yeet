@@ -105,7 +105,7 @@ func serviceSyncConfig(existing *projectConfigLocation, configPath string) (*pro
 	if strings.TrimSpace(configPath) != "" {
 		return loadProjectConfigFromFile(configPath)
 	}
-	if existing == nil || existing.Config == nil {
+	if existing == nil {
 		return nil, fmt.Errorf("no %s found; run from a project directory or pass --config", projectConfigName)
 	}
 	return existing, nil

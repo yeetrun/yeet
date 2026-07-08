@@ -486,6 +486,7 @@ type hostSetTestState struct {
 
 func stubHostSetRuntime(t *testing.T) *hostSetTestState {
 	t.Helper()
+	t.Setenv("CATCH_HOST", "")
 	state := &hostSetTestState{
 		client:  &fakeHostStorageClient{},
 		confirm: true,

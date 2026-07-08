@@ -664,6 +664,7 @@ func TestServiceSyncErrors(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			preserveSvcCommandGlobals(t)
+			t.Setenv("CATCH_HOST", "")
 			tt.setup(t)
 			err := HandleSvcCmd(tt.args)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {

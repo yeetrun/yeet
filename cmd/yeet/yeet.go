@@ -46,6 +46,7 @@ func run() int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	remaining = preserveConfigHostFlag(remaining, globalFlags)
 
 	overrides := resolveGlobalOverrides(globalFlags)
 	applyRuntimeOverrides(overrides)
@@ -68,7 +69,7 @@ func run() int {
 	handlers["umount"] = handleMountSys
 	handlers["init"] = yeet.HandleInit
 	handlers["list-hosts"] = handleListHosts
-	handlers["prefs"] = yeet.HandlePrefs
+	handlers["config"] = yeet.HandleConfig
 	handlers["ssh"] = yeet.HandleSSH
 	handlers["_vm-ssh-proxy"] = handleVMSSHProxyFn
 	handlers["skirt"] = yeet.HandleSkirt
@@ -89,6 +90,16 @@ func run() int {
 		projectHostCountForAdvisoryFn(),
 	)
 	return exitCode
+}
+
+func preserveConfigHostFlag(args []string, flags globalFlagsParsed) []string {
+	host := strings.TrimSpace(flags.Host)
+	if host == "" || len(args) == 0 || args[0] != "config" {
+		return args
+	}
+	out := append([]string{}, args...)
+	out = append(out, "--host", host)
+	return out
 }
 
 func handleSchemaBackedHelp(args []string, config yargs.HelpConfig) bool {
