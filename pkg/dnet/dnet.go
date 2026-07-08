@@ -757,6 +757,11 @@ func setEndpointPortMappings(n *db.DockerNetwork, endpointID string, mappings ma
 
 func ensureBridgeWithRunner(addr netip.Prefix, run commandRunner) error {
 	if err := run("ip", "link", "show", "br0"); err == nil {
+		for _, cmd := range bridgeReconcileCommands(addr) {
+			if err := run(cmd.name, cmd.args...); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	for _, cmd := range bridgeCreateCommands(addr) {
@@ -770,6 +775,15 @@ func ensureBridgeWithRunner(addr netip.Prefix, run commandRunner) error {
 type commandSpec struct {
 	name string
 	args []string
+}
+
+func bridgeReconcileCommands(addr netip.Prefix) []commandSpec {
+	return []commandSpec{
+		{name: "ip", args: []string{"link", "set", "br0", "up"}},
+		{name: "ip", args: []string{"-4", "addr", "flush", "dev", "br0"}},
+		{name: "ip", args: []string{"addr", "add", addr.String(), "dev", "br0"}},
+		{name: "sysctl", args: []string{"-w", "net.ipv4.conf.br0.route_localnet=1"}},
+	}
 }
 
 func bridgeCreateCommands(addr netip.Prefix) []commandSpec {

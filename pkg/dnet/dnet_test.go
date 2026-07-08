@@ -1466,7 +1466,7 @@ func TestRemoveEndpointPortMappings(t *testing.T) {
 	}
 }
 
-func TestEnsureBridgeSkipsCreateWhenBridgeExists(t *testing.T) {
+func TestEnsureBridgeReconcilesAddressWhenBridgeExists(t *testing.T) {
 	var commands []recordedCommand
 	err := ensureBridgeWithRunner(netip.MustParsePrefix("172.20.0.1/16"), recordingRunner(&commands, nil))
 	if err != nil {
@@ -1475,6 +1475,10 @@ func TestEnsureBridgeSkipsCreateWhenBridgeExists(t *testing.T) {
 
 	want := []recordedCommand{
 		{name: "ip", args: []string{"link", "show", "br0"}},
+		{name: "ip", args: []string{"link", "set", "br0", "up"}},
+		{name: "ip", args: []string{"-4", "addr", "flush", "dev", "br0"}},
+		{name: "ip", args: []string{"addr", "add", "172.20.0.1/16", "dev", "br0"}},
+		{name: "sysctl", args: []string{"-w", "net.ipv4.conf.br0.route_localnet=1"}},
 	}
 	if diff := cmp.Diff(want, commands, cmp.AllowUnexported(recordedCommand{})); diff != "" {
 		t.Fatalf("commands mismatch (-want +got):\n%s", diff)
