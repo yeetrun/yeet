@@ -143,6 +143,8 @@ func TestParseUpgrade(t *testing.T) {
 		{name: "host yes", args: []string{"--host", "edge-a", "--yes"}, want: UpgradeFlags{Host: "edge-a", Yes: true}},
 		{name: "check flag alias", args: []string{"--check"}, want: UpgradeFlags{Check: true}},
 		{name: "force specific version", args: []string{"--force", "--version", "v0.6.1"}, want: UpgradeFlags{Force: true, Version: "v0.6.1"}},
+		{name: "nightly", args: []string{"--nightly"}, want: UpgradeFlags{Nightly: true}},
+		{name: "nightly check", args: []string{"check", "--nightly", "--json"}, want: UpgradeFlags{Nightly: true, JSON: true}, wantPos: []string{"check"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -163,6 +165,13 @@ func TestParseUpgrade(t *testing.T) {
 func TestParseUpgradeRejectsAllFlag(t *testing.T) {
 	if _, _, err := ParseUpgrade([]string{"--all"}); err == nil || !strings.Contains(err.Error(), "all") {
 		t.Fatalf("ParseUpgrade --all error = %v, want unknown flag", err)
+	}
+}
+
+func TestParseUpgradeRejectsNightlyWithVersion(t *testing.T) {
+	_, _, err := ParseUpgrade([]string{"--nightly", "--version", "v0.6.1"})
+	if err == nil || !strings.Contains(err.Error(), "--nightly") || !strings.Contains(err.Error(), "--version") {
+		t.Fatalf("ParseUpgrade nightly/version error = %v, want conflict", err)
 	}
 }
 
