@@ -374,11 +374,19 @@ Force reinstall:
 yeet upgrade --force
 ```
 
+Install the latest nightly release:
+
+```bash
+yeet upgrade --nightly
+```
+
 Install a specific public release:
 
 ```bash
 yeet upgrade --version v0.6.1 --force
 ```
+
+`--nightly` and `--version` select different targets, so use one of them per command.
 
 ## Less common but useful
 
