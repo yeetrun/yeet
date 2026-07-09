@@ -8,13 +8,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/svc"
@@ -42,6 +45,188 @@ func TestStatusesServiceNamesByTypeFiltersAndSorts(t *testing.T) {
 	want := []string{"api", "cache"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("serviceNamesByType = %v, want %v", got, want)
+	}
+}
+
+func TestDockerComposeOutdatedAllScansWithBoundedConcurrency(t *testing.T) {
+	serviceCount := dockerComposeOutdatedAllWorkerLimit + 3
+	serviceNames := make([]string, 0, serviceCount)
+	for i := 0; i < serviceCount; i++ {
+		serviceNames = append(serviceNames, fmt.Sprintf("svc-%02d", i))
+	}
+
+	started := make(chan string, serviceCount)
+	release := make(chan struct{})
+	var active atomic.Int32
+	var maxActive atomic.Int32
+
+	scan := func(ctx context.Context, sn string, opts svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error) {
+		if opts.IncludeInternal {
+			t.Errorf("IncludeInternal = true, want false for host-wide scan")
+		}
+		current := active.Add(1)
+		recordDockerOutdatedMaxActive(&maxActive, current)
+		started <- sn
+		select {
+		case <-release:
+		case <-ctx.Done():
+			active.Add(-1)
+			return nil, ctx.Err()
+		}
+		active.Add(-1)
+		return []svc.DockerOutdatedRow{{
+			ServiceName:   sn,
+			ContainerName: "app",
+			Image:         "ghcr.io/acme/" + sn + ":latest",
+			Status:        svc.DockerOutdatedUpdateAvailable,
+		}}, nil
+	}
+
+	type result struct {
+		rows []svc.DockerOutdatedRow
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		rows, err := dockerComposeOutdatedAll(context.Background(), serviceNames, scan)
+		done <- result{rows: rows, err: err}
+	}()
+
+	for i := 0; i < dockerComposeOutdatedAllWorkerLimit; i++ {
+		waitForDockerOutdatedStart(t, started)
+	}
+	select {
+	case sn := <-started:
+		t.Fatalf("scan for %q started before worker limit released", sn)
+	default:
+	}
+	select {
+	case got := <-done:
+		t.Fatalf("scan returned before release: rows=%#v err=%v", got.rows, got.err)
+	default:
+	}
+
+	close(release)
+	got := waitForDockerOutdatedResult(t, done)
+	if got.err != nil {
+		t.Fatalf("dockerComposeOutdatedAll: %v", got.err)
+	}
+	if gotMax := int(maxActive.Load()); gotMax != dockerComposeOutdatedAllWorkerLimit {
+		t.Fatalf("max active scans = %d, want %d", gotMax, dockerComposeOutdatedAllWorkerLimit)
+	}
+	if len(got.rows) != serviceCount {
+		t.Fatalf("rows = %d, want %d", len(got.rows), serviceCount)
+	}
+	for i, row := range got.rows {
+		if row.ServiceName != serviceNames[i] {
+			t.Fatalf("row %d service = %q, want %q", i, row.ServiceName, serviceNames[i])
+		}
+	}
+}
+
+func TestDockerComposeOutdatedAllPreservesErrorRowsAndSorts(t *testing.T) {
+	serviceNames := []string{"zeta", "bad", "alpha"}
+	scan := func(_ context.Context, sn string, _ svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error) {
+		if sn == "bad" {
+			return nil, errors.New("registry unavailable")
+		}
+		return []svc.DockerOutdatedRow{{
+			ServiceName:   sn,
+			ContainerName: "app",
+			Image:         "ghcr.io/acme/" + sn + ":latest",
+			Status:        svc.DockerOutdatedUpdateAvailable,
+		}}, nil
+	}
+
+	rows, err := dockerComposeOutdatedAll(context.Background(), serviceNames, scan)
+	if err != nil {
+		t.Fatalf("dockerComposeOutdatedAll: %v", err)
+	}
+	gotServices := []string{rows[0].ServiceName, rows[1].ServiceName, rows[2].ServiceName}
+	if !reflect.DeepEqual(gotServices, []string{"alpha", "bad", "zeta"}) {
+		t.Fatalf("service order = %v", gotServices)
+	}
+	if rows[1].Status != svc.DockerOutdatedError || rows[1].Reason != "registry unavailable" {
+		t.Fatalf("error row = %#v", rows[1])
+	}
+}
+
+func TestDockerComposeOutdatedAllContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan string, 2)
+	scan := func(ctx context.Context, sn string, _ svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error) {
+		started <- sn
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	type result struct {
+		rows []svc.DockerOutdatedRow
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		rows, err := dockerComposeOutdatedAll(ctx, []string{"alpha", "beta"}, scan)
+		done <- result{rows: rows, err: err}
+	}()
+
+	waitForDockerOutdatedStart(t, started)
+	cancel()
+	got := waitForDockerOutdatedResult(t, done)
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", got.err)
+	}
+	if len(got.rows) != 0 {
+		t.Fatalf("rows = %#v, want none", got.rows)
+	}
+}
+
+func TestDockerComposeOutdatedAllEmptyServices(t *testing.T) {
+	called := false
+	rows, err := dockerComposeOutdatedAll(context.Background(), nil, func(context.Context, string, svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error) {
+		called = true
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatalf("dockerComposeOutdatedAll: %v", err)
+	}
+	if called {
+		t.Fatal("scan called for empty service list")
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rows = %#v, want none", rows)
+	}
+}
+
+func recordDockerOutdatedMaxActive(maxActive *atomic.Int32, current int32) {
+	for {
+		previous := maxActive.Load()
+		if current <= previous || maxActive.CompareAndSwap(previous, current) {
+			return
+		}
+	}
+}
+
+func waitForDockerOutdatedStart(t *testing.T, started <-chan string) string {
+	t.Helper()
+	select {
+	case sn := <-started:
+		return sn
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for docker outdated scan to start")
+		return ""
+	}
+}
+
+func waitForDockerOutdatedResult[T any](t *testing.T, done <-chan T) T {
+	t.Helper()
+	select {
+	case result := <-done:
+		return result
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for docker outdated scan result")
+		var zero T
+		return zero
 	}
 }
 
