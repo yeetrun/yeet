@@ -129,6 +129,32 @@ func TestFetchUpgradeLatestFallsBackToStaleCacheOnFetchError(t *testing.T) {
 	}
 }
 
+func TestFetchUpgradeLatestMarksNightlyTargets(t *testing.T) {
+	restoreCache := stubUpdateCheckCacheFile(t)
+	defer restoreCache()
+	oldFetch := fetchGitHubReleaseFn
+	t.Cleanup(func() { fetchGitHubReleaseFn = oldFetch })
+	fetchGitHubReleaseFn = func(nightly bool) (githubRelease, error) {
+		if !nightly {
+			t.Fatal("nightly channel should fetch nightly release")
+		}
+		return githubRelease{TagName: "nightly", PublishedAt: "2026-07-09T00:00:00Z"}, nil
+	}
+
+	now := time.Unix(500, 0)
+	got, err := fetchUpgradeLatest(context.Background(), buildinfo.ChannelNightly, now)
+	if err != nil {
+		t.Fatalf("fetch latest: %v", err)
+	}
+	if got.Tag != "nightly" || !got.Nightly {
+		t.Fatalf("latest = %#v, want nightly target", got)
+	}
+	cache := readUpdateCheckCache(updateCheckCacheFile)
+	if cache.LatestNightly.Tag != "nightly" || !cache.LatestNightly.Nightly {
+		t.Fatalf("cache latest = %#v, want nightly target", cache.LatestNightly)
+	}
+}
+
 func stubUpdateCheckCacheFile(t *testing.T) func() {
 	t.Helper()
 	old := updateCheckCacheFile
@@ -165,6 +191,101 @@ func TestBuildUpgradeReportClassifiesStaleAndUnreachable(t *testing.T) {
 	}
 	if report.Catch[0].Status != upgradeStatusUpdateAvailable || report.Catch[1].Status != upgradeStatusUnreachable {
 		t.Fatalf("catch rows = %#v", report.Catch)
+	}
+}
+
+func TestBuildUpgradeReportNightlyFetchesNightlyFromStable(t *testing.T) {
+	oldLatest := fetchUpgradeLatestFn
+	oldInfo := fetchUpgradeCatchInfoFn
+	t.Cleanup(func() {
+		fetchUpgradeLatestFn = oldLatest
+		fetchUpgradeCatchInfoFn = oldInfo
+	})
+	var gotChannel buildinfo.Channel
+	fetchUpgradeLatestFn = func(_ context.Context, channel buildinfo.Channel, _ time.Time) (releaseCacheEntry, error) {
+		gotChannel = channel
+		return releaseCacheEntry{Tag: "nightly", Nightly: true}, nil
+	}
+	fetchUpgradeCatchInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{Version: "v0.9.5", InstallUser: "root", InstallHost: host}, nil
+	}
+
+	report := buildUpgradeReport(context.Background(), upgradeCheckRequest{
+		Local:   buildinfo.Info{Version: "v0.9.5", Channel: buildinfo.ChannelStable},
+		Hosts:   []string{"edge"},
+		Now:     time.Unix(100, 0),
+		Nightly: true,
+	})
+	if gotChannel != buildinfo.ChannelNightly {
+		t.Fatalf("channel = %q, want nightly", gotChannel)
+	}
+	if !report.Nightly || !report.Latest.Nightly || report.Latest.Tag != "nightly" {
+		t.Fatalf("report = %#v, want nightly target", report)
+	}
+	if report.Local.Status != upgradeStatusUpdateAvailable {
+		t.Fatalf("local status = %q, want update available", report.Local.Status)
+	}
+	if report.Catch[0].Status != upgradeStatusUpdateAvailable {
+		t.Fatalf("catch row = %#v, want update available", report.Catch[0])
+	}
+}
+
+func TestBuildUpgradeReportNightlyCurrentWhenVersionMatchesTag(t *testing.T) {
+	oldLatest := fetchUpgradeLatestFn
+	oldInfo := fetchUpgradeCatchInfoFn
+	t.Cleanup(func() {
+		fetchUpgradeLatestFn = oldLatest
+		fetchUpgradeCatchInfoFn = oldInfo
+	})
+	fetchUpgradeLatestFn = func(_ context.Context, channel buildinfo.Channel, _ time.Time) (releaseCacheEntry, error) {
+		if channel != buildinfo.ChannelNightly {
+			t.Fatalf("channel = %q, want nightly", channel)
+		}
+		return releaseCacheEntry{Tag: "nightly", Nightly: true}, nil
+	}
+	fetchUpgradeCatchInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{Version: "nightly", InstallUser: "root", InstallHost: host}, nil
+	}
+
+	report := buildUpgradeReport(context.Background(), upgradeCheckRequest{
+		Local:   buildinfo.Info{Version: "nightly", Channel: buildinfo.ChannelNightly},
+		Hosts:   []string{"edge"},
+		Now:     time.Unix(100, 0),
+		Nightly: true,
+	})
+	if report.Local.Status != upgradeStatusCurrent {
+		t.Fatalf("local status = %q, want current", report.Local.Status)
+	}
+	if report.Catch[0].Status != upgradeStatusCurrent {
+		t.Fatalf("catch row = %#v, want current", report.Catch[0])
+	}
+}
+
+func TestBuildUpgradeReportUnknownCurrentVersionIsNotActionable(t *testing.T) {
+	oldLatest := fetchUpgradeLatestFn
+	oldInfo := fetchUpgradeCatchInfoFn
+	t.Cleanup(func() {
+		fetchUpgradeLatestFn = oldLatest
+		fetchUpgradeCatchInfoFn = oldInfo
+	})
+	fetchUpgradeLatestFn = func(context.Context, buildinfo.Channel, time.Time) (releaseCacheEntry, error) {
+		return releaseCacheEntry{Tag: "nightly", Nightly: true}, nil
+	}
+	fetchUpgradeCatchInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{Version: "unknown", InstallUser: "root", InstallHost: host}, nil
+	}
+
+	report := buildUpgradeReport(context.Background(), upgradeCheckRequest{
+		Local:   buildinfo.Info{Version: "unknown", Channel: buildinfo.ChannelUnknown},
+		Hosts:   []string{"edge"},
+		Now:     time.Unix(100, 0),
+		Nightly: true,
+	})
+	if report.Local.Status != upgradeStatusUnknown {
+		t.Fatalf("local status = %q, want unknown", report.Local.Status)
+	}
+	if report.Catch[0].Status != upgradeStatusUnknown {
+		t.Fatalf("catch row = %#v, want unknown", report.Catch[0])
 	}
 }
 

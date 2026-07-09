@@ -27,6 +27,7 @@ type releaseCacheEntry struct {
 	PublishedAt string        `json:"publishedAt,omitempty"`
 	CheckedAt   time.Time     `json:"checkedAt,omitempty"`
 	Assets      []githubAsset `json:"assets,omitempty"`
+	Nightly     bool          `json:"nightly,omitempty"`
 }
 
 type catchObservation struct {
