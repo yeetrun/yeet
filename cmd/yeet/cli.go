@@ -197,12 +197,14 @@ func buildHelpConfig() yargs.HelpConfig {
 	subcommands["upgrade"] = yargs.SubCommandInfo{
 		Name:        "upgrade",
 		Description: "Check for and install yeet/catch updates",
-		Usage:       "[check] [--host=catch-a] [--json] [--yes] [--force] [--version=vX.Y.Z]",
+		Usage:       "[check] [--host=catch-a] [--json] [--yes] [--force] [--nightly] [--version=vX.Y.Z]",
 		Examples: []string{
 			"yeet upgrade check",
 			"yeet upgrade",
 			"yeet upgrade --host=catch-a",
 			"yeet upgrade --force",
+			"yeet upgrade --nightly",
+			"yeet upgrade check --nightly",
 			"yeet upgrade --version v0.6.1 --force",
 		},
 	}

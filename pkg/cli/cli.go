@@ -228,6 +228,7 @@ type UpgradeFlags struct {
 	Yes     bool
 	Check   bool
 	Force   bool
+	Nightly bool
 	Version string
 }
 
@@ -459,6 +460,7 @@ type upgradeFlagsParsed struct {
 	Yes     bool   `flag:"yes"`
 	Check   bool   `flag:"check"`
 	Force   bool   `flag:"force"`
+	Nightly bool   `flag:"nightly"`
 	Version string `flag:"version"`
 }
 
@@ -1966,7 +1968,11 @@ func ParseUpgrade(args []string) (UpgradeFlags, []string, error) {
 		Yes:     parsed.Flags.Yes,
 		Check:   parsed.Flags.Check,
 		Force:   parsed.Flags.Force,
+		Nightly: parsed.Flags.Nightly,
 		Version: parsed.Flags.Version,
+	}
+	if flags.Nightly && strings.TrimSpace(flags.Version) != "" {
+		return UpgradeFlags{}, nil, fmt.Errorf("--nightly cannot be used with --version")
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
