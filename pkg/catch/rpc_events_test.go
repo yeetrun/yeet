@@ -33,8 +33,8 @@ func TestRPCEventsFilter(t *testing.T) {
 		t.Fatalf("send events request: %v", err)
 	}
 
+	waitForEventListeners(t, server, 1)
 	go func() {
-		time.Sleep(50 * time.Millisecond)
 		server.PublishEvent(Event{ServiceName: "other", Type: EventTypeHeartbeat})
 		server.PublishEvent(Event{ServiceName: "svc", Type: EventTypeHeartbeat})
 	}()

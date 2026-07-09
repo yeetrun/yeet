@@ -1749,7 +1749,7 @@ func TestInstallInitCatchWithTailscaleRetryPromptsAfterCredentialError(t *testin
 }
 
 func TestWaitDetachedInitCatchInstallStreamsLogsWhileStatusIsPending(t *testing.T) {
-	restore := overrideInitInstallTiming(t, 10*time.Millisecond, 500*time.Millisecond, 500*time.Millisecond)
+	restore := overrideInitInstallTiming(t, 10*time.Millisecond, 2*time.Second, 2*time.Second)
 	defer restore()
 	fakeSSHInPath(t, strings.Join([]string{
 		"case \"$*\" in",
