@@ -14,6 +14,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,6 +41,7 @@ var (
 	remoteInitStorageProbeFn                               = remoteInitStorageProbe
 	remoteInitStorageCommandOKFn                           = remoteInitStorageCommandOK
 	remoteInitStorageOutputFn                              = remoteInitStorageOutput
+	initCatchRemoteBinaryCounter     atomic.Uint64
 )
 
 func initStorageOptionsFromFlags(flags initFlagsParsed) (initStorageOptions, error) {
@@ -113,7 +115,11 @@ func initCatchRemoteBinaryPath(storage initStorageOptions, useSudo bool) string 
 	if servicesRoot == "" {
 		return ""
 	}
-	return path.Join(servicesRoot, catchServiceName, "run", "catch.install")
+	return path.Join(servicesRoot, catchServiceName, "run", uniqueInitCatchInstallerName())
+}
+
+func uniqueInitCatchInstallerName() string {
+	return fmt.Sprintf("catch.install.%d.%d.%d", os.Getpid(), time.Now().UnixNano(), initCatchRemoteBinaryCounter.Add(1))
 }
 
 func initCatchRemoteServicesRoot(storage initStorageOptions) string {

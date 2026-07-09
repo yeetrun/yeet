@@ -1086,7 +1086,7 @@ func TestRemoteVMLANBridgePlanUsesConfiguredCatchStagingBinaryAndStorage(t *test
 	if err != nil {
 		t.Fatalf("ReadFile ssh log: %v", err)
 	}
-	want := "root@example.com /flash/yeet/services/catch/run/catch.install --data-dir=/flash/yeet/data --services-root=/flash/yeet/services vm-lan-bridge-plan"
+	want := "root@example.com " + storage.remoteCatchBinary + " --data-dir=/flash/yeet/data --services-root=/flash/yeet/services vm-lan-bridge-plan"
 	if got := strings.TrimSpace(string(b)); got != want {
 		t.Fatalf("ssh args = %q, want %q", got, want)
 	}
@@ -1117,14 +1117,16 @@ func TestInitCatchPlansStorageBeforeDownloadAndPassesToRemoteInstall(t *testing.
 		DataDir:      "/srv/yeet-data",
 		ServicesRoot: "/srv/yeet-services",
 	}
-	wantInstallStorage := withInitCatchRemoteBinary(wantStorage, false)
 	prepareInitStorageOptionsFn = func(_ *initUI, userAtRemote string, useSudo bool, opts initOptions) (initStorageOptions, error) {
 		steps = append(steps, "storage:"+userAtRemote+":"+boolString(useSudo)+":"+opts.storage.DataDir)
 		return wantStorage, nil
 	}
 	installInitCatchFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ string, _ string, _ []string, _ bool, _ bool, storage initStorageOptions) error {
-		if !reflect.DeepEqual(storage, wantInstallStorage) {
-			t.Fatalf("storage = %#v, want %#v", storage, wantInstallStorage)
+		if storage.DataDir != wantStorage.DataDir || storage.ServicesRoot != wantStorage.ServicesRoot {
+			t.Fatalf("storage = %#v, want data/services from %#v", storage, wantStorage)
+		}
+		if !strings.HasPrefix(storage.remoteCatchBinary, "/srv/yeet-services/catch/run/catch.install.") {
+			t.Fatalf("remote catch binary = %q, want unique staging path under services root", storage.remoteCatchBinary)
 		}
 		steps = append(steps, "install-storage:"+storage.DataDir+":"+storage.ServicesRoot)
 		return nil
@@ -1443,7 +1445,7 @@ func TestRemoteCatchInstallCommandUsesConfiguredCatchStagingBinary(t *testing.T)
 		"env",
 		"CATCH_INSTALL_USER=root",
 		"CATCH_INSTALL_HOST=example.com",
-		"/flash/yeet/services/catch/run/catch.install",
+		storage.remoteCatchBinary,
 		"--data-dir=/flash/yeet/data",
 		"--services-root=/flash/yeet/services",
 		"--tsnet-host=catch-host",
@@ -1459,9 +1461,26 @@ func TestWithInitCatchRemoteBinaryUsesExistingAbsoluteServiceRoot(t *testing.T) 
 		DataDir:      "/flash/yeet/data",
 		ServicesRoot: "/flash/yeet/services",
 	}, false)
-	want := "/flash/yeet/services/catch/run/catch.install"
-	if storage.remoteCatchBinary != want {
-		t.Fatalf("remote catch binary = %q, want %q", storage.remoteCatchBinary, want)
+	wantPrefix := "/flash/yeet/services/catch/run/catch.install."
+	if !strings.HasPrefix(storage.remoteCatchBinary, wantPrefix) {
+		t.Fatalf("remote catch binary = %q, want prefix %q", storage.remoteCatchBinary, wantPrefix)
+	}
+}
+
+func TestWithInitCatchRemoteBinaryUsesUniqueCatchInstallerPath(t *testing.T) {
+	input := initStorageOptions{
+		DataDir:      "/flash/yeet/data",
+		ServicesRoot: "/flash/yeet/services",
+	}
+	first := withInitCatchRemoteBinary(input, false).remoteCatchBinary
+	second := withInitCatchRemoteBinary(input, false).remoteCatchBinary
+	if first == second {
+		t.Fatalf("remote catch binary reused staging path %q", first)
+	}
+	for _, got := range []string{first, second} {
+		if !strings.HasPrefix(got, "/flash/yeet/services/catch/run/catch.install.") {
+			t.Fatalf("remote catch binary = %q, want unique catch.install staging path", got)
+		}
 	}
 }
 
