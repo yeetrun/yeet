@@ -31,6 +31,7 @@ type upgradeCheckRequest struct {
 	Hosts         []string
 	Now           time.Time
 	Force         bool
+	Nightly       bool
 	TargetVersion string
 }
 
@@ -39,6 +40,7 @@ type upgradeReport struct {
 	Local         upgradeComponent   `json:"local"`
 	Catch         []upgradeComponent `json:"catch,omitempty"`
 	Force         bool               `json:"force,omitempty"`
+	Nightly       bool               `json:"nightly,omitempty"`
 	TargetVersion string             `json:"targetVersion,omitempty"`
 }
 
@@ -81,14 +83,24 @@ func buildUpgradeReport(ctx context.Context, req upgradeCheckRequest) upgradeRep
 	if now.IsZero() {
 		now = time.Now()
 	}
-	channel := req.Local.ReleaseChannel()
+	channel := upgradeTargetChannel(req.Local, req.Nightly)
 	latest, latestErr := fetchUpgradeTarget(ctx, channel, now, req.TargetVersion)
-	report := upgradeReport{Latest: latest, Force: req.Force, TargetVersion: strings.TrimSpace(req.TargetVersion)}
+	if req.Nightly {
+		latest.Nightly = true
+	}
+	report := upgradeReport{Latest: latest, Force: req.Force, Nightly: req.Nightly, TargetVersion: strings.TrimSpace(req.TargetVersion)}
 	report.Local = classifyLocalUpgrade(req.Local, latest, latestErr, req.Force)
 	for _, host := range req.Hosts {
 		report.Catch = append(report.Catch, checkCatchUpgrade(ctx, host, latest, latestErr, req.Force))
 	}
 	return report
+}
+
+func upgradeTargetChannel(local buildinfo.Info, nightly bool) buildinfo.Channel {
+	if nightly {
+		return buildinfo.ChannelNightly
+	}
+	return local.ReleaseChannel()
 }
 
 func classifyLocalUpgrade(local buildinfo.Info, latest releaseCacheEntry, latestErr error, force bool) upgradeComponent {
@@ -102,21 +114,17 @@ func classifyLocalUpgrade(local buildinfo.Info, latest releaseCacheEntry, latest
 		row.Status = upgradeStatusReinstall
 		return row
 	}
+	if currentVersionUnknown(local.Version) {
+		row.Status = upgradeStatusUnknown
+		row.Reason = "current version is unknown"
+		return row
+	}
 	if !local.IsRelease() {
 		row.Status = upgradeStatusDev
 		row.Reason = "source/dev builds are not self-updated as release binaries"
 		return row
 	}
-	cmp := buildinfo.CompareSemver(local.Version, latest.Tag)
-	if cmp < 0 {
-		row.Status = upgradeStatusUpdateAvailable
-		return row
-	}
-	if cmp > 0 {
-		row.Status = upgradeStatusAhead
-		return row
-	}
-	row.Status = upgradeStatusCurrent
+	row.Status = classifyUpgradeVersion(local.Version, latest)
 	return row
 }
 
@@ -140,23 +148,46 @@ func checkCatchUpgrade(ctx context.Context, host string, latest releaseCacheEntr
 		row.Status = upgradeStatusReinstall
 		return row
 	}
+	if currentVersionUnknown(info.Version) {
+		row.Status = upgradeStatusUnknown
+		row.Reason = "current version is unknown"
+		return row
+	}
 	catchBuild := buildinfo.Info{Version: info.Version}
+	if latest.Nightly {
+		catchBuild.Channel = buildinfo.ChannelNightly
+	}
 	if !catchBuild.IsRelease() {
 		row.Status = upgradeStatusDev
 		row.Reason = "source/dev builds are not self-updated as release binaries"
 		return row
 	}
-	cmp := buildinfo.CompareSemver(info.Version, latest.Tag)
+	row.Status = classifyUpgradeVersion(info.Version, latest)
+	return row
+}
+
+func classifyUpgradeVersion(current string, latest releaseCacheEntry) upgradeStatus {
+	current = strings.TrimSpace(current)
+	target := strings.TrimSpace(latest.Tag)
+	if latest.Nightly {
+		if current == target {
+			return upgradeStatusCurrent
+		}
+		return upgradeStatusUpdateAvailable
+	}
+	cmp := buildinfo.CompareSemver(current, target)
 	if cmp < 0 {
-		row.Status = upgradeStatusUpdateAvailable
-		return row
+		return upgradeStatusUpdateAvailable
 	}
 	if cmp > 0 {
-		row.Status = upgradeStatusAhead
-		return row
+		return upgradeStatusAhead
 	}
-	row.Status = upgradeStatusCurrent
-	return row
+	return upgradeStatusCurrent
+}
+
+func currentVersionUnknown(version string) bool {
+	version = strings.TrimSpace(version)
+	return version == "" || version == "unknown"
 }
 
 func fetchUpgradeTarget(ctx context.Context, channel buildinfo.Channel, now time.Time, version string) (releaseCacheEntry, error) {
@@ -180,6 +211,7 @@ func fetchUpgradeLatest(ctx context.Context, channel buildinfo.Channel, now time
 	entry := cache.LatestStable
 	if nightly {
 		entry = cache.LatestNightly
+		entry.Nightly = true
 	}
 	if err := ctx.Err(); err != nil {
 		if entry.Tag != "" {
@@ -194,7 +226,7 @@ func fetchUpgradeLatest(ctx context.Context, channel buildinfo.Channel, now time
 		}
 		return releaseCacheEntry{}, err
 	}
-	entry = releaseCacheEntry{Tag: rel.TagName, PublishedAt: rel.PublishedAt, CheckedAt: now, Assets: rel.Assets}
+	entry = releaseCacheEntry{Tag: rel.TagName, PublishedAt: rel.PublishedAt, CheckedAt: now, Assets: rel.Assets, Nightly: nightly}
 	if nightly {
 		cache.LatestNightly = entry
 	} else {
