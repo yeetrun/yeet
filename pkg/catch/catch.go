@@ -646,6 +646,10 @@ func chownServiceDir(dir, uname string) error {
 
 var errNoServiceConfigured = fmt.Errorf("no service configured")
 
+const dockerComposeOutdatedAllWorkerLimit = 8
+
+type dockerComposeOutdatedServiceScan func(context.Context, string, svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error)
+
 // serviceType returns the type of service for the given service name.
 func (s *Server) serviceType(sn string) (db.ServiceType, error) {
 	sv, err := s.serviceView(sn)
@@ -696,21 +700,91 @@ func (s *Server) DockerComposeOutdatedAll(ctx context.Context) ([]svc.DockerOutd
 	if err != nil {
 		return nil, fmt.Errorf("failed to get db: %v", err)
 	}
-	rows := make([]svc.DockerOutdatedRow, 0)
-	for _, sn := range serviceNamesByType(dv.AsStruct().Services, db.ServiceTypeDockerCompose) {
-		serviceRows, err := s.DockerComposeOutdated(ctx, sn, svc.DockerOutdatedOptions{})
+	serviceNames := serviceNamesByType(dv.AsStruct().Services, db.ServiceTypeDockerCompose)
+	return dockerComposeOutdatedAll(ctx, serviceNames, func(ctx context.Context, sn string, opts svc.DockerOutdatedOptions) ([]svc.DockerOutdatedRow, error) {
+		return s.DockerComposeOutdated(ctx, sn, opts)
+	})
+}
+
+func dockerComposeOutdatedAll(ctx context.Context, serviceNames []string, scan dockerComposeOutdatedServiceScan) ([]svc.DockerOutdatedRow, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if len(serviceNames) == 0 {
+		return nil, nil
+	}
+
+	workers := dockerComposeOutdatedAllWorkerLimit
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(serviceNames) {
+		workers = len(serviceNames)
+	}
+
+	jobs := make(chan string)
+	results := make(chan []svc.DockerOutdatedRow, len(serviceNames))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go dockerComposeOutdatedAllWorker(ctx, &wg, scan, jobs, results)
+	}
+
+	sendErr := dockerComposeOutdatedAllSendJobs(ctx, jobs, serviceNames)
+	close(jobs)
+	wg.Wait()
+	close(results)
+
+	if sendErr != nil {
+		return nil, sendErr
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	return dockerComposeOutdatedAllCollectRows(results), nil
+}
+
+func dockerComposeOutdatedAllWorker(ctx context.Context, wg *sync.WaitGroup, scan dockerComposeOutdatedServiceScan, jobs <-chan string, results chan<- []svc.DockerOutdatedRow) {
+	defer wg.Done()
+	for sn := range jobs {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		serviceRows, err := scan(ctx, sn, svc.DockerOutdatedOptions{})
 		if err != nil {
-			rows = append(rows, svc.DockerOutdatedRow{
+			serviceRows = []svc.DockerOutdatedRow{{
 				ServiceName: sn,
 				Status:      svc.DockerOutdatedError,
 				Reason:      err.Error(),
-			})
-			continue
+			}}
 		}
+		select {
+		case results <- serviceRows:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func dockerComposeOutdatedAllSendJobs(ctx context.Context, jobs chan<- string, serviceNames []string) error {
+	for _, sn := range serviceNames {
+		select {
+		case jobs <- sn:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func dockerComposeOutdatedAllCollectRows(results <-chan []svc.DockerOutdatedRow) []svc.DockerOutdatedRow {
+	rows := make([]svc.DockerOutdatedRow, 0)
+	for serviceRows := range results {
 		rows = append(rows, serviceRows...)
 	}
 	sortDockerOutdatedRows(rows)
-	return rows, nil
+	return rows
 }
 
 func (s *Server) dockerComposeStatusOrUnknown(sn string) (svc.DockerComposeStatus, error) {
