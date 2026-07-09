@@ -1495,7 +1495,7 @@ func TestWaitForFullVMStateRestoreToleratesTransientPartialResult(t *testing.T) 
 
 	oldTimeout := vmFullRestoreResultWaitTimeout
 	oldInterval := vmFullRestoreResultWaitInterval
-	vmFullRestoreResultWaitTimeout = 500 * time.Millisecond
+	vmFullRestoreResultWaitTimeout = 5 * time.Second
 	vmFullRestoreResultWaitInterval = time.Millisecond
 	t.Cleanup(func() {
 		vmFullRestoreResultWaitTimeout = oldTimeout

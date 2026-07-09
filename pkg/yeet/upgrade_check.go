@@ -154,9 +154,6 @@ func checkCatchUpgrade(ctx context.Context, host string, latest releaseCacheEntr
 		return row
 	}
 	catchBuild := buildinfo.Info{Version: info.Version}
-	if latest.Nightly {
-		catchBuild.Channel = buildinfo.ChannelNightly
-	}
 	if !catchBuild.IsRelease() {
 		row.Status = upgradeStatusDev
 		row.Reason = "source/dev builds are not self-updated as release binaries"

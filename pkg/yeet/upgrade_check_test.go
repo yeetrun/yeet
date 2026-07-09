@@ -241,14 +241,14 @@ func TestBuildUpgradeReportNightlyCurrentWhenVersionMatchesTag(t *testing.T) {
 		if channel != buildinfo.ChannelNightly {
 			t.Fatalf("channel = %q, want nightly", channel)
 		}
-		return releaseCacheEntry{Tag: "nightly", Nightly: true}, nil
+		return releaseCacheEntry{Tag: "nightly-abc1234", Nightly: true}, nil
 	}
 	fetchUpgradeCatchInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
-		return serverInfo{Version: "nightly", InstallUser: "root", InstallHost: host}, nil
+		return serverInfo{Version: "nightly-abc1234", InstallUser: "root", InstallHost: host}, nil
 	}
 
 	report := buildUpgradeReport(context.Background(), upgradeCheckRequest{
-		Local:   buildinfo.Info{Version: "nightly", Channel: buildinfo.ChannelNightly},
+		Local:   buildinfo.Info{Version: "nightly-abc1234", Channel: buildinfo.ChannelNightly},
 		Hosts:   []string{"edge"},
 		Now:     time.Unix(100, 0),
 		Nightly: true,
@@ -307,6 +307,31 @@ func TestBuildUpgradeReportClassifiesDevCatch(t *testing.T) {
 		Local: buildinfo.Info{Version: "v0.5.13", Channel: buildinfo.ChannelStable},
 		Hosts: []string{"edge"},
 		Now:   time.Unix(100, 0),
+	})
+	if report.Catch[0].Status != upgradeStatusDev || !strings.Contains(report.Catch[0].Reason, "source/dev") {
+		t.Fatalf("catch row = %#v, want dev status", report.Catch[0])
+	}
+}
+
+func TestBuildUpgradeReportNightlyClassifiesDevCatch(t *testing.T) {
+	oldLatest := fetchUpgradeLatestFn
+	oldInfo := fetchUpgradeCatchInfoFn
+	t.Cleanup(func() {
+		fetchUpgradeLatestFn = oldLatest
+		fetchUpgradeCatchInfoFn = oldInfo
+	})
+	fetchUpgradeLatestFn = func(context.Context, buildinfo.Channel, time.Time) (releaseCacheEntry, error) {
+		return releaseCacheEntry{Tag: "nightly", Nightly: true}, nil
+	}
+	fetchUpgradeCatchInfoFn = func(ctx context.Context, host string) (serverInfo, error) {
+		return serverInfo{Version: "47ee0875a+dirty", InstallUser: "root", InstallHost: host}, nil
+	}
+
+	report := buildUpgradeReport(context.Background(), upgradeCheckRequest{
+		Local:   buildinfo.Info{Version: "nightly-abc1234", Channel: buildinfo.ChannelNightly},
+		Hosts:   []string{"edge"},
+		Now:     time.Unix(100, 0),
+		Nightly: true,
 	})
 	if report.Catch[0].Status != upgradeStatusDev || !strings.Contains(report.Catch[0].Reason, "source/dev") {
 		t.Fatalf("catch row = %#v, want dev status", report.Catch[0])
