@@ -1996,7 +1996,7 @@ Check for and install yeet/catch updates
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] upgrade [check] [--host=catch-a] [--json] [--yes] [--force] [--version=vX.Y.Z]
+yeet [GLOBAL_OPTIONS] upgrade [check] [--host=catch-a] [--json] [--yes] [--force] [--nightly] [--version=vX.Y.Z]
 ```
 
 ## Operating Rules
@@ -2054,6 +2054,14 @@ yeet upgrade --host=catch-a
 
 ```
 yeet upgrade --force
+```
+
+```
+yeet upgrade --nightly
+```
+
+```
+yeet upgrade check --nightly
 ```
 
 ```
