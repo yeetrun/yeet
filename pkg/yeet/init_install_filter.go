@@ -102,6 +102,9 @@ func (s *initInstallSummary) Absorb(msg string) bool {
 	if isIgnoredInstallProgressLine(msg) {
 		return true
 	}
+	if isBenignInstallNoiseLine(msg) {
+		return true
+	}
 	if isInstallWarningLine(msg) {
 		s.addWarning(msg)
 		return true
@@ -180,6 +183,12 @@ func isIgnoredInstallProgressLine(msg string) bool {
 		return true
 	}
 	return strings.HasPrefix(msg, "no ") && strings.Contains(msg, "artifact")
+}
+
+func isBenignInstallNoiseLine(msg string) bool {
+	return strings.HasPrefix(msg, "failed to copy: readfrom tcp ") &&
+		strings.Contains(msg, ":22:") &&
+		strings.Contains(msg, "operation aborted")
 }
 
 func isInstallWarningLine(msg string) bool {

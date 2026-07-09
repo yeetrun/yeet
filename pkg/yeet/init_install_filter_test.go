@@ -112,6 +112,19 @@ func TestInitInstallFilterReportsOutputErrors(t *testing.T) {
 	}
 }
 
+func TestInitInstallFilterSuppressesBenignTSNetCopyAbort(t *testing.T) {
+	var buf bytes.Buffer
+	filter := newInitInstallFilter(&buf)
+
+	line := "failed to copy: readfrom tcp 127.0.0.1:37070->127.0.0.1:22: read tcp 100.85.58.107:22: operation aborted\n"
+	if _, err := filter.Write([]byte(line)); err != nil {
+		t.Fatalf("write failed: %v", err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != "" {
+		t.Fatalf("visible output = %q, want benign copy abort suppressed", got)
+	}
+}
+
 func TestInitInstallFilterRedactsTailscaleAuthKeys(t *testing.T) {
 	var buf bytes.Buffer
 	filter := newInitInstallFilter(&buf)
