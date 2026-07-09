@@ -51,6 +51,26 @@ func TestLocalUpgradePlanUpdatesStableBehind(t *testing.T) {
 	}
 }
 
+func TestLocalUpgradePlanUpdatesNightlyTarget(t *testing.T) {
+	plan, err := localUpgradePlan(buildinfo.Info{Version: "v0.9.5", Channel: buildinfo.ChannelStable}, releaseCacheEntry{Tag: "nightly", Nightly: true}, false)
+	if err != nil {
+		t.Fatalf("localUpgradePlan error: %v", err)
+	}
+	if plan.Action != localUpgradeActionUpdate {
+		t.Fatalf("plan = %#v, want update", plan)
+	}
+}
+
+func TestLocalUpgradePlanSkipsUnknownCurrentVersion(t *testing.T) {
+	plan, err := localUpgradePlan(buildinfo.Info{Version: "unknown", Channel: buildinfo.ChannelStable}, releaseCacheEntry{Tag: "v0.5.13"}, false)
+	if err != nil {
+		t.Fatalf("localUpgradePlan error: %v", err)
+	}
+	if plan.Action != localUpgradeActionSkip || plan.Reason != "current version is unknown" {
+		t.Fatalf("plan = %#v", plan)
+	}
+}
+
 func TestUpgradeLocalBinaryDownloadsAndReplaces(t *testing.T) {
 	oldExecutable := currentExecutableFn
 	oldResolve := resolveYeetReleaseAssetFn
@@ -116,6 +136,62 @@ func TestUpgradeLocalBinaryDownloadsAndReplaces(t *testing.T) {
 	}
 	if target != targetPath || filepath.Base(source) != "yeet-darwin-arm64" {
 		t.Fatalf("replace target=%q source=%q", target, source)
+	}
+}
+
+func TestUpgradeLocalBinaryUsesNightlyTargetAssets(t *testing.T) {
+	oldExecutable := currentExecutableFn
+	oldResolve := resolveYeetReleaseAssetFn
+	oldDownload := downloadFileFn
+	oldExtract := extractSingleBinaryFn
+	oldReplace := replaceLocalBinaryFn
+	t.Cleanup(func() {
+		currentExecutableFn = oldExecutable
+		resolveYeetReleaseAssetFn = oldResolve
+		downloadFileFn = oldDownload
+		extractSingleBinaryFn = oldExtract
+		replaceLocalBinaryFn = oldReplace
+	})
+
+	targetPath := filepath.Join(t.TempDir(), "yeet")
+	if err := os.WriteFile(targetPath, []byte("old"), 0o755); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+	currentExecutableFn = func() (string, error) {
+		return targetPath, nil
+	}
+	var gotNightly bool
+	var gotVersion string
+	resolveYeetReleaseAssetFn = func(goos, goarch string, nightly bool, version string) (string, string, string, string, error) {
+		gotNightly = nightly
+		gotVersion = version
+		return "yeet-darwin-arm64.tar.gz", "https://example.com/yeet.tgz", "https://example.com/yeet.sha256", "nightly", nil
+	}
+	downloadFileFn = func(url, path string) error {
+		payload := []byte("archive")
+		if url == "https://example.com/yeet.sha256" {
+			sum := sha256.Sum256(payload)
+			return os.WriteFile(path, []byte(fmt.Sprintf("%x  yeet-darwin-arm64.tar.gz\n", sum)), 0o644)
+		}
+		return os.WriteFile(path, payload, 0o644)
+	}
+	extractSingleBinaryFn = func(archivePath, dstDir string) (string, error) {
+		return filepath.Join(dstDir, "yeet-darwin-arm64"), nil
+	}
+	replaceLocalBinaryFn = func(gotTarget, gotSource string, sudo bool) error {
+		return nil
+	}
+
+	err := upgradeLocalBinary(
+		buildinfo.Info{Version: "v0.9.5", Channel: buildinfo.ChannelStable},
+		releaseCacheEntry{Tag: "nightly", Nightly: true},
+		false,
+	)
+	if err != nil {
+		t.Fatalf("upgradeLocalBinary: %v", err)
+	}
+	if !gotNightly || gotVersion != "nightly" {
+		t.Fatalf("resolve nightly=%v version=%q, want nightly=true version=nightly", gotNightly, gotVersion)
 	}
 }
 

@@ -59,9 +59,23 @@ func localUpgradePlan(local buildinfo.Info, latest releaseCacheEntry, force bool
 		result.Action = localUpgradeActionUpdate
 		return result, nil
 	}
+	if currentVersionUnknown(local.Version) {
+		result.Action = localUpgradeActionSkip
+		result.Reason = "current version is unknown"
+		return result, nil
+	}
 	if !local.IsRelease() {
 		result.Action = localUpgradeActionSkip
 		result.Reason = "source/dev builds are not self-updated as release binaries"
+		return result, nil
+	}
+	if latest.Nightly {
+		if strings.TrimSpace(local.Version) == strings.TrimSpace(latest.Tag) {
+			result.Action = localUpgradeActionSkip
+			result.Reason = "already current"
+			return result, nil
+		}
+		result.Action = localUpgradeActionUpdate
 		return result, nil
 	}
 	if buildinfo.CompareSemver(local.Version, latest.Tag) >= 0 {
@@ -82,7 +96,7 @@ func upgradeLocalBinary(local buildinfo.Info, latest releaseCacheEntry, force bo
 	if err != nil {
 		return fmt.Errorf("locate current yeet binary: %w", err)
 	}
-	assetName, assetURL, shaURL, _, err := resolveYeetReleaseAssetFn(runtime.GOOS, runtime.GOARCH, local.ReleaseChannel() == buildinfo.ChannelNightly, latest.Tag)
+	assetName, assetURL, shaURL, _, err := resolveYeetReleaseAssetFn(runtime.GOOS, runtime.GOARCH, latest.Nightly, latest.Tag)
 	if err != nil {
 		return err
 	}

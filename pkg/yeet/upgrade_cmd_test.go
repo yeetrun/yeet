@@ -98,6 +98,27 @@ func TestRenderUpgradeReportUsesTargetForForcedVersion(t *testing.T) {
 	}
 }
 
+func TestRenderUpgradeReportUsesTargetForNightly(t *testing.T) {
+	report := upgradeReport{
+		Latest:  releaseCacheEntry{Tag: "nightly", Nightly: true},
+		Nightly: true,
+		Local: upgradeComponent{
+			Name:    "yeet",
+			Current: "v0.9.5",
+			Latest:  "nightly",
+			Status:  upgradeStatusUpdateAvailable,
+		},
+	}
+	var out bytes.Buffer
+	if err := renderUpgradeReport(&out, report); err != nil {
+		t.Fatalf("renderUpgradeReport: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "TARGET") || strings.Contains(got, "LATEST") {
+		t.Fatalf("output should use TARGET header:\n%s", got)
+	}
+}
+
 func TestHandleUpgradeCheckJSON(t *testing.T) {
 	old := buildUpgradeReportFn
 	t.Cleanup(func() { buildUpgradeReportFn = old })
@@ -115,6 +136,23 @@ func TestHandleUpgradeCheckJSON(t *testing.T) {
 	}
 	if decoded.Local.Status != upgradeStatusUpdateAvailable {
 		t.Fatalf("decoded = %#v", decoded)
+	}
+}
+
+func TestHandleUpgradePassesNightlyToReport(t *testing.T) {
+	old := buildUpgradeReportFn
+	t.Cleanup(func() { buildUpgradeReportFn = old })
+	var gotNightly bool
+	buildUpgradeReportFn = func(_ context.Context, req upgradeCheckRequest) upgradeReport {
+		gotNightly = req.Nightly
+		return upgradeReport{Local: upgradeComponent{Name: "yeet", Current: "v0.9.5", Latest: "nightly", Status: upgradeStatusCurrent}}
+	}
+
+	if err := handleUpgrade(context.Background(), []string{"check", "--nightly"}, &bytes.Buffer{}, &bytes.Buffer{}, buildinfo.Info{Version: "v0.9.5", Channel: buildinfo.ChannelStable}); err != nil {
+		t.Fatalf("handleUpgrade: %v", err)
+	}
+	if !gotNightly {
+		t.Fatal("Nightly = false, want true")
 	}
 }
 
@@ -291,6 +329,53 @@ func TestRunUpgradeUpdatesCatchWithRecordedInstallTarget(t *testing.T) {
 	}
 }
 
+func TestRunUpgradeUpdatesCatchFromNightly(t *testing.T) {
+	oldInit := initCatchFn
+	t.Cleanup(func() { initCatchFn = oldInit })
+	var target string
+	var nightly bool
+	var releaseVersion string
+	var noWorkspace bool
+	var suppressNextSteps bool
+	initCatchFn = func(userAtRemote string, opts initOptions) error {
+		target = userAtRemote
+		if !opts.fromGithub {
+			t.Fatalf("opts = %#v, want from github", opts)
+		}
+		nightly = opts.nightly
+		releaseVersion = opts.releaseVersion
+		noWorkspace = opts.noWorkspace
+		suppressNextSteps = opts.suppressNextSteps
+		return nil
+	}
+	report := upgradeReport{
+		Latest:  releaseCacheEntry{Tag: "nightly", Nightly: true},
+		Nightly: true,
+		Local:   upgradeComponent{Name: "yeet", Current: "nightly", Latest: "nightly", Status: upgradeStatusCurrent},
+		Catch: []upgradeComponent{
+			{Name: "catch", Host: "edge-a", Current: "v0.9.5", Latest: "nightly", Status: upgradeStatusUpdateAvailable, InstallUser: "root", InstallHost: "machine-a"},
+		},
+	}
+	if err := runUpgrade(context.Background(), &bytes.Buffer{}, &bytes.Buffer{}, cli.UpgradeFlags{Yes: true, Nightly: true}, report); err != nil {
+		t.Fatalf("runUpgrade: %v", err)
+	}
+	if target != "root@machine-a" {
+		t.Fatalf("target = %q", target)
+	}
+	if !nightly {
+		t.Fatal("nightly = false, want true")
+	}
+	if releaseVersion != "" {
+		t.Fatalf("releaseVersion = %q, want empty for nightly", releaseVersion)
+	}
+	if !noWorkspace {
+		t.Fatal("noWorkspace = false, want true")
+	}
+	if !suppressNextSteps {
+		t.Fatal("suppressNextSteps = false, want true")
+	}
+}
+
 func TestRunUpgradeInstallsCatchWithRowHostOverSoftOverride(t *testing.T) {
 	restore := stubPrefsState(t, prefs{DefaultHost: "yeet-lab"})
 	defer restore()
@@ -340,5 +425,27 @@ func TestUpgradeLocalFromReportPassesForce(t *testing.T) {
 	}
 	if !gotForce || gotLatest.Tag != "v0.6.2" {
 		t.Fatalf("gotForce=%v gotLatest=%#v", gotForce, gotLatest)
+	}
+}
+
+func TestUpgradeLocalFromReportPreservesNightlyTarget(t *testing.T) {
+	oldUpgrade := upgradeLocalBinaryFn
+	t.Cleanup(func() { upgradeLocalBinaryFn = oldUpgrade })
+	var gotLatest releaseCacheEntry
+	upgradeLocalBinaryFn = func(_ buildinfo.Info, latest releaseCacheEntry, force bool) error {
+		gotLatest = latest
+		return nil
+	}
+
+	report := upgradeReport{
+		Latest:  releaseCacheEntry{Tag: "nightly"},
+		Nightly: true,
+		Local:   upgradeComponent{Name: "yeet", Current: "v0.9.5", Latest: "nightly", Status: upgradeStatusUpdateAvailable},
+	}
+	if err := upgradeLocalFromReport(cli.UpgradeFlags{Nightly: true}, report); err != nil {
+		t.Fatalf("upgradeLocalFromReport: %v", err)
+	}
+	if gotLatest.Tag != "nightly" || !gotLatest.Nightly {
+		t.Fatalf("latest = %#v, want nightly target", gotLatest)
 	}
 }
