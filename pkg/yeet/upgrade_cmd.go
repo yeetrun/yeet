@@ -46,6 +46,7 @@ func handleUpgrade(ctx context.Context, args []string, stdout io.Writer, stderr 
 		Hosts:         hosts,
 		Now:           time.Now(),
 		Force:         flags.Force,
+		Nightly:       flags.Nightly,
 		TargetVersion: flags.Version,
 	})
 	if checkOnly {
@@ -78,7 +79,18 @@ func renderUpgradeReport(w io.Writer, report upgradeReport) error {
 }
 
 func upgradeReportUsesTarget(report upgradeReport) bool {
-	return report.Force || strings.TrimSpace(report.TargetVersion) != ""
+	return report.Force || upgradeReportTargetsNightly(report) || strings.TrimSpace(report.TargetVersion) != ""
+}
+
+func upgradeReportTargetsNightly(report upgradeReport) bool {
+	return report.Nightly || report.Latest.Nightly
+}
+
+func upgradeReportReleaseVersion(report upgradeReport) string {
+	if upgradeReportTargetsNightly(report) {
+		return ""
+	}
+	return report.Latest.Tag
 }
 
 func renderUpgradeRow(w io.Writer, row upgradeComponent) error {
@@ -151,7 +163,11 @@ func upgradeRowActionable(row upgradeComponent) bool {
 
 func upgradeLocalFromReport(flags cli.UpgradeFlags, report upgradeReport) error {
 	if upgradeRowActionable(report.Local) {
-		if err := upgradeLocalBinaryFn(buildinfo.Current(), report.Latest, flags.Force); err != nil {
+		latest := report.Latest
+		if flags.Nightly || upgradeReportTargetsNightly(report) {
+			latest.Nightly = true
+		}
+		if err := upgradeLocalBinaryFn(buildinfo.Current(), latest, flags.Force); err != nil {
 			return err
 		}
 	}
@@ -168,7 +184,7 @@ func upgradeCatchFromReport(ctx context.Context, report upgradeReport) error {
 			return err
 		}
 		if err := withTemporaryHost(row.Host, func() error {
-			return initCatchFn(target, initOptions{fromGithub: true, noWorkspace: true, suppressNextSteps: true, releaseVersion: report.Latest.Tag})
+			return initCatchFn(target, initOptions{fromGithub: true, nightly: upgradeReportTargetsNightly(report), noWorkspace: true, suppressNextSteps: true, releaseVersion: upgradeReportReleaseVersion(report)})
 		}); err != nil {
 			return fmt.Errorf("upgrade catch@%s: %w", row.Host, err)
 		}
