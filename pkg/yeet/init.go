@@ -545,7 +545,7 @@ func prepareInitVMToolsInstall(ui *initUI, userAtRemote, goarch string, opts ini
 		ui.Warn(formatInitVMToolsPreflightWarning(err))
 		return false, nil
 	}
-	if warnInitVMHostCapability(ui, status) {
+	if initVMHostCapabilityUnavailable(status) {
 		ui.DoneStep("not available")
 		return false, nil
 	}
@@ -648,21 +648,8 @@ func canPromptInitVMLANBridge() bool {
 	return isTerminalFn(int(os.Stdin.Fd())) && isTerminalFn(int(os.Stdout.Fd()))
 }
 
-func warnInitVMHostCapability(ui *initUI, status initVMHostStatus) bool {
-	warned := false
-	if status.UnsupportedArch != "" {
-		ui.Warn(fmt.Sprintf("Warning: VM support is unavailable on this host: yeet VM payloads require x86_64/amd64 hosts in this release; detected %s. See %s", status.UnsupportedArch, hostRequirementsDocsURL))
-		warned = true
-	}
-	if !status.KVM {
-		ui.Warn(fmt.Sprintf("Warning: VM support is unavailable on this host: /dev/kvm is missing. Containers, binaries, and cron jobs still work. See %s", hostRequirementsDocsURL))
-		warned = true
-	}
-	if !status.TUN {
-		ui.Warn(fmt.Sprintf("Warning: VM networking is unavailable on this host: /dev/net/tun is missing. See %s", hostRequirementsDocsURL))
-		warned = true
-	}
-	return warned
+func initVMHostCapabilityUnavailable(status initVMHostStatus) bool {
+	return status.UnsupportedArch != "" || !status.KVM || !status.TUN
 }
 
 func formatInitVMToolsMissingWarning(missing []vmHostCommandRequirement, packages []string) string {

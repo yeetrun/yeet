@@ -588,14 +588,12 @@ func TestPrepareInitVMToolsInstallExplicitFlagSkipsRemotePreflight(t *testing.T)
 	}
 }
 
-func TestPrepareInitVMToolsInstallWarnsForNonVMCapableHost(t *testing.T) {
+func TestPrepareInitVMToolsInstallMarksNonVMCapableHostUnavailableWithoutWarning(t *testing.T) {
 	oldRemoteVMHostStatus := remoteVMHostStatusFn
 	oldPrompt := activePrompter
-	oldIsTerminal := isTerminalFn
 	t.Cleanup(func() {
 		remoteVMHostStatusFn = oldRemoteVMHostStatus
 		activePrompter = oldPrompt
-		isTerminalFn = oldIsTerminal
 	})
 	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
 		return initVMHostStatus{
@@ -607,10 +605,47 @@ func TestPrepareInitVMToolsInstallWarnsForNonVMCapableHost(t *testing.T) {
 			},
 		}, nil
 	}
-	isTerminalFn = func(int) bool { return true }
 	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
-	var out strings.Builder
-	ui := newInitUI(&out, false, false, "catch", "root@example.com", catchServiceName)
+	var out bytes.Buffer
+	ui := newInitUI(&out, true, false, "catch", "root@example.com", catchServiceName)
+
+	installVMTools, err := prepareInitVMToolsInstall(ui, "root@example.com", "amd64", initOptions{})
+	ui.Stop()
+	if err != nil {
+		t.Fatalf("prepareInitVMToolsInstall error = %v", err)
+	}
+	if installVMTools {
+		t.Fatal("installVMTools = true for non-VM-capable host")
+	}
+	got := out.String()
+	if !strings.Contains(got, "Check VM tools (not available)") {
+		t.Fatalf("output = %q, want unavailable VM-tools status", got)
+	}
+	if strings.Contains(got, "/dev/kvm is missing") {
+		t.Fatalf("output = %q, want capability warning deferred to installer", got)
+	}
+}
+
+func TestInitVMWarningsAppearOnceAcrossPreflightAndInstaller(t *testing.T) {
+	oldRemoteVMHostStatus := remoteVMHostStatusFn
+	oldPrompt := activePrompter
+	t.Cleanup(func() {
+		remoteVMHostStatusFn = oldRemoteVMHostStatus
+		activePrompter = oldPrompt
+	})
+	remoteVMHostStatusFn = func(string, string) (initVMHostStatus, error) {
+		return initVMHostStatus{
+			AptGet: true,
+			KVM:    false,
+			TUN:    true,
+			MissingCommands: []vmHostCommandRequirement{
+				{Command: "qemu-img", Package: "qemu-utils"},
+			},
+		}, nil
+	}
+	activePrompter = fakePrompter{err: errors.New("prompt should not run")}
+	var out bytes.Buffer
+	ui := newInitUI(&out, true, false, "catch", "root@example.com", catchServiceName)
 
 	installVMTools, err := prepareInitVMToolsInstall(ui, "root@example.com", "amd64", initOptions{})
 	if err != nil {
@@ -619,8 +654,30 @@ func TestPrepareInitVMToolsInstallWarnsForNonVMCapableHost(t *testing.T) {
 	if installVMTools {
 		t.Fatal("installVMTools = true for non-VM-capable host")
 	}
-	if !strings.Contains(out.String(), "Warning: VM support is unavailable on this host: /dev/kvm is missing.") {
-		t.Fatalf("output = %q, want /dev/kvm warning", out.String())
+
+	filter := newInitInstallFilter(io.Discard)
+	installerOutput := strings.Join([]string{
+		"Warning: VM support is unavailable on this host: /dev/kvm is missing. Containers, binaries, and cron jobs still work. See " + hostRequirementsDocsURL,
+		"Warning: VM tools are incomplete: missing qemu-img. Install packages: qemu-utils. See " + hostRequirementsDocsURL,
+	}, "\n") + "\n"
+	if _, err := filter.Write([]byte(installerOutput)); err != nil {
+		t.Fatalf("write installer output: %v", err)
+	}
+	ui.Warn(filter.WarningSummary())
+	ui.Stop()
+
+	got := out.String()
+	if !strings.Contains(got, "Check VM tools (not available)") {
+		t.Fatalf("output = %q, want unavailable VM-tools status", got)
+	}
+	for text, wantCount := range map[string]int{
+		"/dev/kvm is missing":   1,
+		"missing qemu-img":      1,
+		hostRequirementsDocsURL: 1,
+	} {
+		if gotCount := strings.Count(got, text); gotCount != wantCount {
+			t.Fatalf("strings.Count(output, %q) = %d, want %d\n%s", text, gotCount, wantCount, got)
+		}
 	}
 }
 
