@@ -503,6 +503,45 @@ func TestVMSSHExecutionPlanForServiceBuildsProxyPlan(t *testing.T) {
 	}
 }
 
+func TestVMISOSSHAlwaysUsesCatchProxy(t *testing.T) {
+	oldReachable := vmSSHLANReachableFunc
+	vmSSHLANReachableFunc = func(string) bool {
+		t.Fatal("ISO VM SSH must not probe workstation reachability")
+		return false
+	}
+	t.Cleanup(func() { vmSSHLANReachableFunc = oldReachable })
+	resp := catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+		ServiceType: serviceTypeVM,
+		VM: &catchrpc.ServiceVM{
+			SSH:      &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "172.30.0.2"},
+			Networks: []catchrpc.ServiceVMNetwork{{Mode: "iso", IP: "172.30.0.2"}},
+		},
+	}}
+	target := vmSSHTarget(resp, false)
+	if !target.Proxy || target.Host != "172.30.0.2" || target.Mode != "iso" {
+		t.Fatalf("target = %#v", target)
+	}
+}
+
+func TestVMISOSSHKeepsUserProxyJumpAuthoritative(t *testing.T) {
+	_, plan := testSSHExecutionPlan(t,
+		[]string{"ssh", "-J", "bastion", "devbox"},
+		catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: serviceTypeVM,
+			VM: &catchrpc.ServiceVM{
+				SSH:      &catchrpc.ServiceVMSSH{User: "ubuntu", Host: "172.30.0.2"},
+				Networks: []catchrpc.ServiceVMNetwork{{Mode: "iso", IP: "172.30.0.2"}},
+			},
+		}},
+	)
+	if !slices.Contains(plan.Args, "-J") || !slices.Contains(plan.Args, "bastion") {
+		t.Fatalf("args = %#v, want custom proxy jump preserved", plan.Args)
+	}
+	if sshOptionsCountValuePrefix(plan.Args, "ProxyCommand=") != 0 {
+		t.Fatalf("args = %#v, want no generated ProxyCommand", plan.Args)
+	}
+}
+
 func TestVMSSHProxyCommandUsesYeetRPCInsteadOfRootSSH(t *testing.T) {
 	stubCurrentExecutable(t, testVMSSHProxyExecutable)
 

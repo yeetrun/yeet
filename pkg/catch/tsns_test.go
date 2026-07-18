@@ -13,12 +13,15 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
+	"github.com/yeetrun/yeet/pkg/netns"
 	"tailscale.com/ipn"
 )
 
@@ -170,6 +173,24 @@ func TestNewTailscaleSystemdUnitPlansTapAndNetNSModes(t *testing.T) {
 	}
 }
 
+func TestNewTailscaleSystemdUnitUsesPersistedISONamespaceAndActualGateUnit(t *testing.T) {
+	unit := newTailscaleSystemdUnit(tailscaleInstallPlan{
+		service:       "demo",
+		runDir:        "/srv/demo/run",
+		serviceTSDir:  "/srv/demo/tailscale",
+		runInNetNS:    "yeet-a172cedcae-ns",
+		netNSUnit:     "yeet-demo-ns.service",
+		interfaceName: "ts0",
+	})
+	if unit.NetNS != "yeet-a172cedcae-ns" {
+		t.Fatalf("NetNS = %q, want persisted ISO namespace", unit.NetNS)
+	}
+	if unit.Wants != "yeet-demo-ns.service" || unit.After != "yeet-demo-ns.service" ||
+		len(unit.ExecStartPre) != 1 || unit.ExecStartPre[0] != "/bin/systemctl is-active --quiet yeet-demo-ns.service" {
+		t.Fatalf("ISO gate ordering = wants %q after %q pre %#v", unit.Wants, unit.After, unit.ExecStartPre)
+	}
+}
+
 func TestInstallTSWritesArtifactsWithoutNetworkWhenAuthKeyProvided(t *testing.T) {
 	server := newTestServer(t)
 	const (
@@ -245,6 +266,73 @@ func TestInstallTSWritesArtifactsWithoutNetworkWhenAuthKeyProvided(t *testing.T)
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit missing %q:\n%s", want, unit)
 		}
+	}
+}
+
+func TestISOTailscaleConfigKeepsAcceptDNSDisabled(t *testing.T) {
+	path, err := writeTailscaleConfig(t.TempDir(), "iso-app", "tskey-auth-test", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg ipn.ConfigVAlpha
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AcceptDNS.EqualBool(false) {
+		t.Fatalf("ISO tailscale AcceptDNS = %q, want explicit false", cfg.AcceptDNS)
+	}
+}
+
+func TestISOTailscaleTopologyKeepsPublicDefaultAndDelegatesTailnetToTS0(t *testing.T) {
+	oldDetect := detectISOFirewallBackendForRuntime
+	detectISOFirewallBackendForRuntime = func() (netns.FirewallBackend, error) { return netns.BackendNFT, nil }
+	t.Cleanup(func() { detectISOFirewallBackendForRuntime = oldDetect })
+	allocation := testISORuntimeAllocation("app", iso.StateReserved)
+	allocation.DesiredModes = []string{"iso", "ts"}
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"app": allocation})
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec, err := server.isoRuntimeSpec(dv, "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Topology.TailscaleInterface != "ts0" {
+		t.Fatalf("TailscaleInterface = %q, want ts0", spec.Topology.TailscaleInterface)
+	}
+	commands, err := netns.ISOTopologyEnsureCommands(spec.Topology)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rendered strings.Builder
+	for _, command := range commands {
+		rendered.WriteString(command.Name)
+		rendered.WriteByte(' ')
+		rendered.WriteString(strings.Join(command.Args, " "))
+		rendered.WriteByte('\n')
+		rendered.WriteString(command.Input)
+	}
+	text := rendered.String()
+	wantDefault := "ip netns exec " + allocation.NetNS + " ip route replace default via " + allocation.HostIP.String() + " dev " + allocation.PeerInterface
+	if !strings.Contains(text, wantDefault) {
+		t.Fatalf("topology missing ISO public default %q:\n%s", wantDefault, text)
+	}
+	if strings.Contains(text, "default dev ts0") || strings.Contains(text, "default via ts0") {
+		t.Fatalf("topology moved ordinary default to ts0:\n%s", text)
+	}
+	if !strings.Contains(text, `oifname "ts0" accept`) || !strings.Contains(text, `iifname "ts0"`) {
+		t.Fatalf("topology does not admit tailnet traffic exclusively through ts0:\n%s", text)
+	}
+	if strings.Contains(text, "100.64.0.0/10") {
+		t.Fatalf("topology added a root/router CGNAT route or exception instead of relying on ts0 routes:\n%s", text)
+	}
+	if !netip.MustParsePrefix("100.64.0.0/10").Contains(netip.MustParseAddr("100.100.100.100")) {
+		t.Fatal("test precondition: Quad100 must be in CGNAT space")
 	}
 }
 

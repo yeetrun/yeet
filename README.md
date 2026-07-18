@@ -370,8 +370,19 @@ Yeet has a few network modes because services have different reachability and ro
 - `--net=svc,ts`: `svc` behavior plus a service-owned Tailscale identity. Use this for most Tailscale-exposed services.
 - `--net=lan`: LAN or VLAN address. Outbound internet comes from that network's DHCP gateway.
 - `--net=ts`: tailnet-only unless you configure a Tailscale exit node.
+- `--net=iso`: stable private address with public IPv4 egress, public-only DNS,
+  and no workload-initiated access to catch, LAN, `svc`, Tailscale, or other
+  isolated projects. Catch can still connect to the workload on any port.
+- `--net=iso,ts`: `iso` behavior plus a service-owned Tailscale identity for
+  supported container-backed payloads.
 
 VM `--net=lan` attaches the guest TAP to a host bridge. On supported Debian/Ubuntu hosts, yeet can prepare `br0` during `yeet init` or before the first VM LAN create.
+
+ISO supports VMs and container-backed payloads. VMs use `iso` alone and can
+install Tailscale inside the guest when needed. Native binaries, scripts, and
+cron jobs cannot use ISO while they run as root-owned host services. ISO also
+rejects published ports and unsafe Compose features instead of pretending they
+are contained.
 
 Read the docs before combining networking modes with real services. Future you is the person who has to debug it.
 

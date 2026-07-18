@@ -5,20 +5,33 @@
 package yeet
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	catchserver "github.com/yeetrun/yeet/pkg/catch"
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
+	"github.com/yeetrun/yeet/pkg/registry"
 )
 
 func TestHandleHostSetCallsRunnerWithoutTargets(t *testing.T) {
@@ -104,6 +117,246 @@ func TestRunHostSetPlaceholder(t *testing.T) {
 	err := runHostSet(context.Background(), cli.HostSetFlags{})
 	if err == nil || !strings.Contains(err.Error(), "requires --data-dir or --services-root") {
 		t.Fatalf("runHostSet error = %v, want missing target", err)
+	}
+}
+
+func TestRunHostSetISOPoolPlansPromptsAndApplies(t *testing.T) {
+	state := stubHostSetRuntime(t)
+	state.poolClient.plan = catchrpc.ISOPoolPlan{
+		CurrentPrefix: "172.30.0.0/16",
+		DesiredPrefix: "10.42.0.0/16",
+		Source:        "explicit",
+		Changed:       true,
+	}
+	state.poolClient.apply = catchrpc.ISOPoolApplyResult{Prefix: "10.42.0.0/16", Source: "explicit"}
+	if err := runHostSet(context.Background(), cli.HostSetFlags{ISOPool: "10.42.0.0/16"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.poolClient.planRequests) != 1 || state.poolClient.planRequests[0].Prefix != "10.42.0.0/16" {
+		t.Fatalf("plan requests = %#v", state.poolClient.planRequests)
+	}
+	if len(state.poolClient.applyRequests) != 1 || !reflect.DeepEqual(state.poolClient.applyRequests[0].Plan, state.poolClient.plan) {
+		t.Fatalf("apply requests = %#v", state.poolClient.applyRequests)
+	}
+	if len(state.prompts) != 1 || !strings.Contains(state.prompts[0], "ISO pool") {
+		t.Fatalf("prompts = %#v", state.prompts)
+	}
+	for _, want := range []string{
+		"ISO pool plan for catch-a",
+		"Current: 172.30.0.0/16",
+		"Desired: 10.42.0.0/16",
+		"Source: explicit",
+		"ISO pool set to 10.42.0.0/16 (explicit)",
+	} {
+		if !strings.Contains(state.stdout.String(), want) {
+			t.Fatalf("stdout = %q, want %q", state.stdout.String(), want)
+		}
+	}
+}
+
+func TestRunHostSetISOPoolRendersRealBlockedPlansWithoutApply(t *testing.T) {
+	tests := []struct {
+		name        string
+		configure   func(*db.Data)
+		hostAddress string
+		wantDetail  string
+	}{
+		{
+			name: "allocation blocker",
+			configure: func(data *db.Data) {
+				data.Services["stuck"] = &db.Service{ISO: &db.ISOAllocation{State: string(iso.StateTombstoned)}}
+			},
+			wantDetail: "Blockers: stuck",
+		},
+		{
+			name:        "live collision",
+			hostAddress: "10.42.1.7",
+			wantDetail:  "Conflicts: ISO pool 10.42.0.0/16 conflicts with 10.42.1.0/24",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := stubHostSetRuntime(t)
+			installISOPoolProbeCommands(t, tt.hostAddress)
+			data := newHostSetISOPoolData()
+			if tt.configure != nil {
+				tt.configure(data)
+			}
+			rpcHost, rpcPort, calls := newHostSetISOPoolRPCServer(t, data)
+			newISOPoolClientFn = func(host string) isoPoolClient {
+				if host != state.host {
+					t.Fatalf("host = %q, want %q", host, state.host)
+				}
+				return catchrpc.NewClient(rpcHost, rpcPort)
+			}
+
+			err := runHostSet(context.Background(), cli.HostSetFlags{ISOPool: "10.42.0.0/16", Yes: true})
+			if err == nil || !strings.Contains(err.Error(), "cannot be applied") {
+				t.Fatalf("runHostSet error = %v, want structured plan refusal", err)
+			}
+			if calls.plan.Load() != 1 || calls.apply.Load() != 0 {
+				t.Fatalf("RPC plan/apply calls = %d/%d, want 1/0", calls.plan.Load(), calls.apply.Load())
+			}
+			for _, want := range []string{
+				"ISO pool plan for catch-a",
+				"Current: 172.30.0.0/16",
+				"Desired: 10.42.0.0/16",
+				"Source: explicit",
+				tt.wantDetail,
+			} {
+				if !strings.Contains(state.stdout.String(), want) {
+					t.Fatalf("stdout = %q, want %q", state.stdout.String(), want)
+				}
+			}
+			if len(state.prompts) != 0 {
+				t.Fatalf("prompts = %#v, want none", state.prompts)
+			}
+		})
+	}
+}
+
+type isoPoolRPCCalls struct {
+	plan  atomic.Int32
+	apply atomic.Int32
+}
+
+func newHostSetISOPoolRPCServer(t *testing.T, data *db.Data) (string, int, *isoPoolRPCCalls) {
+	t.Helper()
+	root := t.TempDir()
+	store := db.NewStore(filepath.Join(root, "db.json"), filepath.Join(root, "services"))
+	if err := store.Set(data); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := registry.NewFilesystemStorage(filepath.Join(root, "registry"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := catchserver.NewUnstartedServer(&catchserver.Config{
+		DB:              store,
+		RootDir:         root,
+		ServicesRoot:    filepath.Join(root, "services"),
+		MountsRoot:      filepath.Join(root, "mounts"),
+		RegistryRoot:    filepath.Join(root, "registry"),
+		RegistryStorage: storage,
+		AuthorizeFunc: func(context.Context, string) error {
+			return nil
+		},
+	})
+	calls := &isoPoolRPCCalls{}
+	handler := server.RPCMux()
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			http.Error(w, readErr.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var req catchrpc.Request
+		if json.Unmarshal(body, &req) == nil {
+			switch req.Method {
+			case catchrpc.RPCMethodISOPoolPlan:
+				calls.plan.Add(1)
+			case catchrpc.RPCMethodISOPoolApply:
+				calls.apply.Add(1)
+			}
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(httpServer.Close)
+	host, portRaw, err := net.SplitHostPort(strings.TrimPrefix(httpServer.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return host, port, calls
+}
+
+func newHostSetISOPoolData() *db.Data {
+	return &db.Data{
+		DataVersion: db.CurrentDataVersion,
+		ISOPool: &db.ISOPool{
+			Prefix:           netip.MustParsePrefix("172.30.0.0/16"),
+			Source:           "automatic",
+			AllocatorVersion: iso.AllocatorVersion,
+			PolicyVersion:    iso.PolicyVersion,
+		},
+		Services:       map[string]*db.Service{},
+		DockerNetworks: map[string]*db.DockerNetwork{},
+	}
+}
+
+func installISOPoolProbeCommands(t *testing.T, hostAddress string) {
+	t.Helper()
+	addressJSON := `[]`
+	if hostAddress != "" {
+		addressJSON = fmt.Sprintf(`[{"addr_info":[{"family":"inet","local":%q,"prefixlen":24}]}]`, hostAddress)
+	}
+	commandDir := t.TempDir()
+	ipScript := fmt.Sprintf(`#!/bin/sh
+case "$*" in
+  "-j address") printf '%%s\n' '%s' ;;
+  "-j route show table all") printf '[]\n' ;;
+  "netns list") exit 0 ;;
+  *) exit 64 ;;
+esac
+`, addressJSON)
+	dockerScript := `#!/bin/sh
+case "$*" in
+  "network ls --quiet") exit 0 ;;
+  *) exit 64 ;;
+esac
+`
+	for name, script := range map[string]string{"ip": ipScript, "docker": dockerScript} {
+		if err := os.WriteFile(filepath.Join(commandDir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", commandDir)
+}
+
+func TestRunHostSetISOPoolYesSkipsPromptAndNoopSkipsApply(t *testing.T) {
+	state := stubHostSetRuntime(t)
+	state.poolClient.plan = catchrpc.ISOPoolPlan{
+		CurrentPrefix: "172.30.0.0/16",
+		DesiredPrefix: "172.30.0.0/16",
+		Source:        "automatic",
+	}
+	if err := runHostSet(context.Background(), cli.HostSetFlags{ISOPool: "172.30.0.0/16", Yes: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.prompts) != 0 || len(state.poolClient.applyRequests) != 0 {
+		t.Fatalf("prompts/apply = %#v/%#v", state.prompts, state.poolClient.applyRequests)
+	}
+	if !strings.Contains(state.stdout.String(), "No ISO pool changes to apply") {
+		t.Fatalf("stdout = %q", state.stdout.String())
+	}
+}
+
+func TestRunHostSetRejectsCombiningISOPoolAndStorage(t *testing.T) {
+	state := stubHostSetRuntime(t)
+	err := runHostSet(context.Background(), cli.HostSetFlags{ISOPool: "10.42.0.0/16", DataDir: "/srv/yeet", Yes: true})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined with host storage") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(state.poolClient.planRequests) != 0 || len(state.client.planRequests) != 0 {
+		t.Fatalf("clients called: pool=%#v storage=%#v", state.poolClient.planRequests, state.client.planRequests)
+	}
+}
+
+func TestValidateExplicitISOPool(t *testing.T) {
+	for _, valid := range []string{"10.42.0.0/16", "172.30.0.0/16", "192.168.0.0/16"} {
+		if got, err := validateExplicitISOPool(valid); err != nil || got.String() != valid {
+			t.Errorf("validate %q = %s, %v", valid, got, err)
+		}
+	}
+	for _, invalid := range []string{"10.42.1.0/16", "10.42.0.0/24", "8.8.0.0/16", "2001:db8::/16", "garbage"} {
+		if _, err := validateExplicitISOPool(invalid); err == nil {
+			t.Errorf("validate %q returned nil error", invalid)
+		}
 	}
 }
 
@@ -607,22 +860,25 @@ func TestApplyHostStorageConfigMovesUsesZFSChildDataset(t *testing.T) {
 }
 
 type hostSetTestState struct {
-	client  *fakeHostStorageClient
-	stdout  strings.Builder
-	prompts []string
-	confirm bool
-	host    string
+	client     *fakeHostStorageClient
+	poolClient *fakeISOPoolClient
+	stdout     strings.Builder
+	prompts    []string
+	confirm    bool
+	host       string
 }
 
 func stubHostSetRuntime(t *testing.T) *hostSetTestState {
 	t.Helper()
 	t.Setenv("CATCH_HOST", "")
 	state := &hostSetTestState{
-		client:  &fakeHostStorageClient{},
-		confirm: true,
-		host:    "catch-a",
+		client:     &fakeHostStorageClient{},
+		poolClient: &fakeISOPoolClient{},
+		confirm:    true,
+		host:       "catch-a",
 	}
 	oldClient := newHostStorageClientFn
+	oldPoolClient := newISOPoolClientFn
 	oldConfirm := confirmHostSetFn
 	oldStdin := hostSetStdin
 	oldStdout := hostSetStdout
@@ -632,6 +888,7 @@ func stubHostSetRuntime(t *testing.T) *hostSetTestState {
 	oldHostOverrideHard := hostOverrideHard
 	t.Cleanup(func() {
 		newHostStorageClientFn = oldClient
+		newISOPoolClientFn = oldPoolClient
 		confirmHostSetFn = oldConfirm
 		hostSetStdin = oldStdin
 		hostSetStdout = oldStdout
@@ -647,6 +904,12 @@ func stubHostSetRuntime(t *testing.T) *hostSetTestState {
 			t.Fatalf("host = %q, want %q", host, state.host)
 		}
 		return state.client
+	}
+	newISOPoolClientFn = func(host string) isoPoolClient {
+		if host != state.host {
+			t.Fatalf("host = %q, want %q", host, state.host)
+		}
+		return state.poolClient
 	}
 	confirmHostSetFn = func(_ io.Reader, _ io.Writer, msg string) (bool, error) {
 		state.prompts = append(state.prompts, msg)
@@ -670,6 +933,25 @@ type fakeHostStorageClient struct {
 	applyErr         error
 	finalizeErrs     []error
 	cleanupErr       error
+}
+
+type fakeISOPoolClient struct {
+	planRequests  []catchrpc.ISOPoolPlanRequest
+	applyRequests []catchrpc.ISOPoolApplyRequest
+	plan          catchrpc.ISOPoolPlan
+	apply         catchrpc.ISOPoolApplyResult
+	planErr       error
+	applyErr      error
+}
+
+func (c *fakeISOPoolClient) ISOPoolPlan(_ context.Context, req catchrpc.ISOPoolPlanRequest) (catchrpc.ISOPoolPlan, error) {
+	c.planRequests = append(c.planRequests, req)
+	return c.plan, c.planErr
+}
+
+func (c *fakeISOPoolClient) ISOPoolApply(_ context.Context, req catchrpc.ISOPoolApplyRequest) (catchrpc.ISOPoolApplyResult, error) {
+	c.applyRequests = append(c.applyRequests, req)
+	return c.apply, c.applyErr
 }
 
 func (c *fakeHostStorageClient) HostStoragePlan(_ context.Context, req catchrpc.HostStoragePlanRequest) (catchrpc.HostStoragePlan, error) {

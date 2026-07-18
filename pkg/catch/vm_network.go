@@ -40,6 +40,10 @@ type vmNetworkInputs struct {
 	LANBridge         string
 	LANVLAN           int
 	LANMAC            string
+	ISOHostIP         netip.Addr
+	ISOGuestIP        netip.Addr
+	ISOLink           netip.Prefix
+	ISOTap            string
 }
 
 type vmNetworkPlan struct {
@@ -112,8 +116,21 @@ func newVMNetworkInterfacePlan(short, mode string, idx int, in vmNetworkInputs) 
 		configureVMSvcNetworkInterface(&iface, short, idx, in)
 	case "lan":
 		configureVMLANNetworkInterface(&iface, short, idx, in)
+	case "iso":
+		configureVMISONetworkInterface(&iface, in)
 	}
 	return iface
+}
+
+func configureVMISONetworkInterface(iface *vmNetworkInterfacePlan, in vmNetworkInputs) {
+	iface.Tap = strings.TrimSpace(in.ISOTap)
+	if in.ISOLink.IsValid() && in.ISOGuestIP.IsValid() {
+		iface.GuestIP = netip.PrefixFrom(in.ISOGuestIP, in.ISOLink.Bits()).String()
+	}
+	if in.ISOHostIP.IsValid() {
+		iface.Gateway = in.ISOHostIP.String()
+	}
+	iface.DHCP = false
 }
 
 func configureVMSvcNetworkInterface(iface *vmNetworkInterfacePlan, short string, idx int, in vmNetworkInputs) {
@@ -162,6 +179,26 @@ func (p vmNetworkPlan) DBNetworks() []db.VMNetworkConfig {
 	return out
 }
 
+func vmNetworkMatchesISOAllocation(plan vmNetworkPlan, allocation *db.ISOAllocation) bool {
+	if !validVMISOAllocation(allocation) || len(plan.Interfaces) != 1 {
+		return false
+	}
+	return vmISOInterfaceMatchesAllocation(plan.Interfaces[0], allocation)
+}
+
+func validVMISOAllocation(allocation *db.ISOAllocation) bool {
+	return allocation != nil && allocation.Kind == "vm" && allocation.Link.IsValid() && allocation.HostIP.IsValid() && allocation.PeerIP.IsValid()
+}
+
+func vmISOInterfaceMatchesAllocation(iface vmNetworkInterfacePlan, allocation *db.ISOAllocation) bool {
+	if iface.Mode != "iso" {
+		return false
+	}
+	guest, err := netip.ParsePrefix(iface.GuestIP)
+	return err == nil && guest == netip.PrefixFrom(allocation.PeerIP, allocation.Link.Bits()) &&
+		iface.Tap == allocation.Interface && iface.Gateway == allocation.HostIP.String()
+}
+
 func (p vmNetworkPlan) MetadataNetworks() []vmGuestNetwork {
 	out := make([]vmGuestNetwork, 0, len(p.Interfaces))
 	hasLAN := p.hasNetworkMode("lan")
@@ -171,12 +208,21 @@ func (p vmNetworkPlan) MetadataNetworks() []vmGuestNetwork {
 			value := false
 			dnsDefaultRoute = &value
 		}
+		var nameservers, searchDomains []string
+		if iface.Mode == "iso" {
+			nameservers = []string{iface.Gateway}
+			searchDomains = []string{}
+			value := true
+			dnsDefaultRoute = &value
+		}
 		out = append(out, vmGuestNetwork{
 			Name:            iface.GuestName,
 			Mode:            iface.Mode,
 			Address:         iface.GuestIP,
 			Gateway:         iface.Gateway,
 			DHCP:            iface.DHCP,
+			Nameservers:     nameservers,
+			SearchDomains:   searchDomains,
 			DNSDefaultRoute: dnsDefaultRoute,
 		})
 	}
@@ -629,6 +675,14 @@ func (p vmNetworkPlan) SetupCommands() [][]string {
 				[]string{"ip", "link", "set", iface.Tap, "master", iface.Bridge},
 				[]string{"ip", "link", "set", iface.Tap, "up"},
 			)
+		case "iso":
+			cmds = append(cmds, p.tapCreateCommand(iface.Tap))
+			cmds = append(cmds,
+				[]string{"ip", "link", "set", iface.Tap, "up"},
+				[]string{"ip", "-4", "addr", "replace", vmISOHostPrefix(iface), "dev", iface.Tap},
+				[]string{"sysctl", "-w", "net.ipv4.conf." + iface.Tap + ".rp_filter=1"},
+				[]string{"sysctl", "-w", "net.ipv6.conf." + iface.Tap + ".disable_ipv6=1"},
+			)
 		}
 	}
 	return cmds
@@ -652,9 +706,23 @@ func (p vmNetworkPlan) CleanupCommands() [][]string {
 			)
 		case "lan":
 			cmds = append(cmds, []string{"ip", "link", "del", iface.Tap})
+		case "iso":
+			cmds = append(cmds, []string{"ip", "link", "del", iface.Tap})
 		}
 	}
 	return cmds
+}
+
+func vmISOHostPrefix(iface vmNetworkInterfacePlan) string {
+	guest, err := netip.ParsePrefix(strings.TrimSpace(iface.GuestIP))
+	if err != nil {
+		return ""
+	}
+	host, err := netip.ParseAddr(strings.TrimSpace(iface.Gateway))
+	if err != nil {
+		return ""
+	}
+	return netip.PrefixFrom(host, guest.Bits()).String()
 }
 
 func vmNetworkLinkBase(name string) (string, string, bool) {
@@ -747,9 +815,43 @@ func validateVMTapOwner(owner vmRuntimeIdentity) error {
 }
 
 func validateVMNetworkInterfaceExecutable(iface vmNetworkInterfacePlan) error {
+	if iface.Mode == "iso" {
+		return validateVMISONetworkInterface(iface)
+	}
 	if iface.Mode != "lan" {
 		return nil
 	}
+	return validateVMLANNetworkInterface(iface)
+}
+
+func validateVMISONetworkInterface(iface vmNetworkInterfacePlan) error {
+	if !vmISOHasDedicatedTap(iface) {
+		return fmt.Errorf("VM ISO network requires one unbridged dedicated TAP")
+	}
+	guest, err := netip.ParsePrefix(iface.GuestIP)
+	if err != nil || !validVMISOGuestPrefix(guest) {
+		return fmt.Errorf("VM ISO network requires a canonical IPv4 guest /30")
+	}
+	host, err := netip.ParseAddr(iface.Gateway)
+	if err != nil || !validVMISOHostGateway(guest, host) {
+		return fmt.Errorf("VM ISO network requires a host gateway inside the guest /30")
+	}
+	return nil
+}
+
+func vmISOHasDedicatedTap(iface vmNetworkInterfacePlan) bool {
+	return iface.Tap != "" && iface.Bridge == "" && iface.Parent == "" && iface.VLANDevice == ""
+}
+
+func validVMISOGuestPrefix(guest netip.Prefix) bool {
+	return guest.Bits() == 30 && guest.Addr().Is4()
+}
+
+func validVMISOHostGateway(guest netip.Prefix, host netip.Addr) bool {
+	return host.Is4() && guest.Contains(host) && host != guest.Addr()
+}
+
+func validateVMLANNetworkInterface(iface vmNetworkInterfacePlan) error {
 	if iface.VLAN != 0 {
 		if iface.Bridge == "" {
 			return fmt.Errorf("VM LAN network bridge is required for VLAN %d", iface.VLAN)

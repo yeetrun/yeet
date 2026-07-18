@@ -51,6 +51,7 @@ func TestRunDraftFromCLIParsesFirstDeployOptions(t *testing.T) {
 	draft, err := runDraftFromCLI([]string{
 		"--net=svc,ts",
 		"--ts-tags", "tag:app",
+		"--publish-reset",
 		"--env-file=.env",
 		"--service-root=tank/apps/svc-a",
 		"--zfs",
@@ -81,6 +82,9 @@ func TestRunDraftFromCLIParsesFirstDeployOptions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(draft.Network.TSTags, []string{"tag:app"}) {
 		t.Fatalf("Network.TSTags = %#v", draft.Network.TSTags)
+	}
+	if !draft.Network.PublishReset {
+		t.Fatal("Network.PublishReset = false, want true")
 	}
 	if !reflect.DeepEqual(draft.PayloadArgs, []string{"--app-flag"}) {
 		t.Fatalf("PayloadArgs = %#v", draft.PayloadArgs)
@@ -124,6 +128,14 @@ func TestRunDraftBuildsExistingRunArgs(t *testing.T) {
 		"--",
 		"--app-flag",
 	}
+	if got := draft.runArgs(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("runArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunDraftBuildsPublishResetArg(t *testing.T) {
+	draft := RunDraft{Network: RunDraftNetwork{Modes: []string{"iso"}, PublishReset: true}}
+	want := []string{"--net=iso", "--publish-reset"}
 	if got := draft.runArgs(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("runArgs() = %#v, want %#v", got, want)
 	}

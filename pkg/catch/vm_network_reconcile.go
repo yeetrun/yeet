@@ -6,6 +6,8 @@ package catch
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"os/exec"
@@ -13,15 +15,19 @@ import (
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 )
 
 var vmNetworkEnsureRuntimeIdentity = ensureVMRuntimeIdentity
 
 var (
-	vmNetworkLinkLister         = listVMNetworkLinks
-	vmNetworkRouteLister        = listVMNetworkRoutes
-	vmNetworkLiveStateCollector = collectVMNetworkLiveState
-	vmNetworkReconcileRunner    vmNetworkCommandRunner
+	vmNetworkLinkLister             = listVMNetworkLinks
+	vmNetworkRouteLister            = listVMNetworkRoutes
+	vmNetworkLiveStateCollector     = collectVMNetworkLiveState
+	vmNetworkReconcileRunner        vmNetworkCommandRunner
+	vmNetworkVerifyCommand          = runVMNetworkVerifyCommand
+	verifyVMNetworkPlanForReconcile = verifyVMNetworkPlan
+	ensureVMISONetworkForReconcile  = ensureVMISONetworkAttachment
 )
 
 type vmNetworkRoute struct {
@@ -44,9 +50,11 @@ type vmNetworkCheckReport struct {
 }
 
 type vmNetworkEnsureInput struct {
+	Server      *Server
 	DataRoot    string
 	Service     string
 	ServiceRoot string
+	MarkReady   bool
 }
 
 func (d vmNetworkDesiredState) Check(live vmNetworkLiveState) vmNetworkCheckReport {
@@ -102,6 +110,7 @@ func vmNetworkStaleRouteFindings(routes []vmNetworkRoute, owned map[string]bool)
 	return findings
 }
 
+//nolint:cyclop // Reconciliation keeps ensure-before-cleanup ordering explicit across ordinary and ISO plans.
 func (s *Server) reconcileVMNetworks(ctx context.Context) error {
 	dv, err := s.getDB()
 	if err != nil {
@@ -115,12 +124,37 @@ func (s *Server) reconcileVMNetworks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ensureCmds, err := desired.ensureCommands()
+	ordinary := vmNetworkDesiredState{Owned: desired.Owned}
+	var isoServices []string
+	for _, plan := range desired.Plans {
+		if plan.hasNetworkMode("iso") {
+			if _, err := vmNetworkSetupCommands(plan); err != nil {
+				return err
+			}
+			isoServices = append(isoServices, plan.Service)
+			continue
+		}
+		ordinary.Plans = append(ordinary.Plans, plan)
+	}
+	ensureCmds, err := ordinary.ensureCommands()
 	if err != nil {
 		return err
 	}
 	cleanupCmds := unownedVMNetworkCleanupCommands(live, desired.Owned)
-	return runVMNetworkLifecycleCommands(ensureCmds, cleanupCmds, "reconcile VM networks")
+	if err := runVMNetworkLifecycleCommands(ensureCmds, nil, "reconcile VM networks"); err != nil {
+		return err
+	}
+	sort.Strings(isoServices)
+	for _, service := range isoServices {
+		sv := dv.Services().Get(service)
+		if err := ensureVMNetworkFromDataView(ctx, dv, vmNetworkEnsureInput{
+			Server: s, DataRoot: s.cfg.RootDir, Service: service,
+			ServiceRoot: s.serviceRootFromService(sv.AsStruct()),
+		}); err != nil {
+			return fmt.Errorf("reconcile VM ISO network %q: %w", service, err)
+		}
+	}
+	return runVMNetworkLifecycleCommands(nil, cleanupCmds, "reconcile VM networks")
 }
 
 func (s *Server) EnsureVMNetwork(ctx context.Context, service string) error {
@@ -133,9 +167,11 @@ func (s *Server) EnsureVMNetwork(ctx context.Context, service string) error {
 		return fmt.Errorf("service %q not found", service)
 	}
 	return ensureVMNetworkFromDataView(ctx, dv, vmNetworkEnsureInput{
+		Server:      s,
 		DataRoot:    s.cfg.RootDir,
 		Service:     service,
 		ServiceRoot: s.serviceRootFromService(sv.AsStruct()),
+		MarkReady:   true,
 	})
 }
 
@@ -154,34 +190,135 @@ func EnsureVMNetwork(ctx context.Context, cfg *Config, service string) error {
 	if !ok {
 		return fmt.Errorf("service %q not found", service)
 	}
+	server := &Server{cfg: *cfg}
 	return ensureVMNetworkFromDataView(ctx, &dv, vmNetworkEnsureInput{
+		Server:      server,
 		DataRoot:    cfg.RootDir,
 		Service:     service,
 		ServiceRoot: serviceRootFromConfig(*cfg, *sv.AsStruct()),
+		MarkReady:   true,
 	})
 }
 
+//nolint:cyclop // Jailer transition, attachment, verification, and cleanup order is security-sensitive.
 func ensureVMNetworkFromDataView(ctx context.Context, dv *db.DataView, input vmNetworkEnsureInput) error {
 	identity, err := vmNetworkEnsureRuntimeIdentity()
 	if err != nil {
 		return err
 	}
-	readiness, err := vmJailerReadinessForRoot(input.ServiceRoot)
+	plan, allocation, err := vmNetworkPlanAndISOForService(dv, input.Service)
 	if err != nil {
 		return err
 	}
-	if readiness == vmJailerPendingRestart {
-		plan, err := newVMJailerTransitionPlan(dv, vmJailerTransitionInput(input), identity)
+	attach := func(currentDV *db.DataView, currentPlan vmNetworkPlan, currentAllocation *db.ISOAllocation) error {
+		currentPlan = currentPlan.WithTapOwner(identity)
+		readiness, err := vmJailerReadinessForRoot(input.ServiceRoot)
 		if err != nil {
 			return err
 		}
-		return executeVMJailerTransition(ctx, plan, defaultVMJailerTransitionDeps())
+		if readiness == vmJailerPendingRestart {
+			transition, err := newVMJailerTransitionPlan(currentDV, vmJailerTransitionInput{
+				DataRoot: input.DataRoot, Service: input.Service, ServiceRoot: input.ServiceRoot,
+			}, identity)
+			if err != nil {
+				return err
+			}
+			if err := executeVMJailerTransition(ctx, transition, defaultVMJailerTransitionDeps()); err != nil {
+				return err
+			}
+		} else {
+			if err := ensureOwnedVMNetwork(currentPlan, input.Service); err != nil {
+				if currentAllocation == nil {
+					return err
+				}
+				return errors.Join(err, cleanupVMISONetworkPlan(currentPlan))
+			}
+		}
+		if err := verifyVMNetworkPlanForReconcile(ctx, currentPlan); err != nil {
+			if currentAllocation == nil {
+				return err
+			}
+			return errors.Join(err, cleanupVMISONetworkPlan(currentPlan))
+		}
+		return nil
 	}
-	plan, err := vmNetworkPlanForVMService(dv, input.Service)
-	if err != nil {
-		return err
+	if allocation == nil {
+		return attach(dv, plan, nil)
 	}
-	return ensureOwnedVMNetwork(plan.WithTapOwner(identity), input.Service)
+	if input.Server == nil {
+		return fmt.Errorf("VM ISO network requires a server")
+	}
+	return ensureVMISONetworkForReconcile(ctx, input.Server, input.Service, input.MarkReady, attach)
+}
+
+func cleanupVMISONetworkPlan(plan vmNetworkPlan) error {
+	runner := vmNetworkReconcileRunner
+	if runner == nil {
+		runner = execVMNetworkCommand
+	}
+	if err := plan.ExecuteCleanup(runner); err != nil {
+		return fmt.Errorf("clean up partial VM ISO network: %w", err)
+	}
+	return nil
+}
+
+//nolint:cyclop // The lock, boundary, attachment, DNS, and ready transitions must remain visibly ordered.
+func ensureVMISONetworkAttachment(ctx context.Context, server *Server, service string, markReady bool, attach func(*db.DataView, vmNetworkPlan, *db.ISOAllocation) error) error {
+	return server.withISOOperationLock(ctx, func() error {
+		current, err := server.getDB()
+		if err != nil {
+			return err
+		}
+		plan, allocation, err := vmNetworkPlanAndISOForService(current, service)
+		if err != nil {
+			return err
+		}
+		if allocation == nil {
+			return fmt.Errorf("VM %q lost its ISO allocation before attachment", service)
+		}
+		if markReady {
+			if err := validateVMISOStartState(current, service); err != nil {
+				return err
+			}
+		}
+		if err := server.ensureISONetworkBoundaryLocked(ctx, service); err != nil {
+			return err
+		}
+		if err := attach(current, plan, allocation); err != nil {
+			return server.failISORuntime(err)
+		}
+		if err := verifyISODNSReadyForVM(ctx); err != nil {
+			return server.failISORuntime(err)
+		}
+		if markReady {
+			if err := server.markISOReady(service); err != nil {
+				return server.failISORuntime(err)
+			}
+		}
+		return nil
+	})
+}
+
+func validateVMISOStartState(dv *db.DataView, service string) error {
+	if dv == nil {
+		return fmt.Errorf("VM %q provisioning state is unavailable", service)
+	}
+	sv, ok := dv.Services().GetOk(service)
+	if !ok || !sv.VM().Valid() || sv.VM().SetupState() != "ready" {
+		return fmt.Errorf("VM %q provisioning is incomplete", service)
+	}
+	allocation := sv.ISO()
+	if !allocation.Valid() {
+		return fmt.Errorf("VM %q has no ISO allocation", service)
+	}
+	if allocation.RemoveRequested() || allocation.CleanupVerified() {
+		return fmt.Errorf("VM %q ISO removal or cleanup is in progress", service)
+	}
+	switch iso.AllocationState(allocation.State()) {
+	case iso.StateRemoving, iso.StateTombstoned, iso.StateQuarantined:
+		return fmt.Errorf("VM %q ISO lifecycle state %q cannot start", service, allocation.State())
+	}
+	return nil
 }
 
 func (s *Server) reconcileOrphanedVMServiceNetworks(ctx context.Context) error {
@@ -238,7 +375,10 @@ func vmNetworkDesiredStateFromDBWithTransform(dv *db.DataView, transform vmNetwo
 			continue
 		}
 		name := sv.Name()
-		plan := vmNetworkPlanFromDB(name, vm.Networks().AsSlice())
+		plan := vmNetworkPlanFromDB(name, vm.Networks().AsSlice(), sv.ISO().AsStruct())
+		if allocation := sv.ISO().AsStruct(); allocation != nil && !vmNetworkMatchesISOAllocation(plan, allocation) {
+			return vmNetworkDesiredState{}, fmt.Errorf("service %q VM ISO network does not match its allocation", name)
+		}
 		if transform != nil {
 			var err error
 			plan, err = transform(sv, plan)
@@ -255,21 +395,34 @@ func vmNetworkDesiredStateFromDBWithTransform(dv *db.DataView, transform vmNetwo
 }
 
 func vmNetworkPlanForVMService(dv *db.DataView, service string) (vmNetworkPlan, error) {
+	plan, _, err := vmNetworkPlanAndISOForService(dv, service)
+	return plan, err
+}
+
+func vmNetworkPlanAndISOForService(dv *db.DataView, service string) (vmNetworkPlan, *db.ISOAllocation, error) {
 	if dv == nil {
-		return vmNetworkPlan{}, fmt.Errorf("service %q not found", service)
+		return vmNetworkPlan{}, nil, fmt.Errorf("service %q not found", service)
 	}
 	sv, ok := dv.Services().GetOk(service)
 	if !ok {
-		return vmNetworkPlan{}, fmt.Errorf("service %q not found", service)
+		return vmNetworkPlan{}, nil, fmt.Errorf("service %q not found", service)
 	}
 	if sv.ServiceType() != db.ServiceTypeVM {
-		return vmNetworkPlan{}, fmt.Errorf("service %q is not a VM service", service)
+		return vmNetworkPlan{}, nil, fmt.Errorf("service %q is not a VM service", service)
 	}
 	vm := sv.VM()
 	if !vm.Valid() {
-		return vmNetworkPlan{}, fmt.Errorf("service %q is not a VM service", service)
+		return vmNetworkPlan{}, nil, fmt.Errorf("service %q is not a VM service", service)
 	}
-	return vmNetworkPlanFromDB(service, vm.Networks().AsSlice()), nil
+	allocation := sv.ISO().AsStruct()
+	plan := vmNetworkPlanFromDB(service, vm.Networks().AsSlice(), allocation)
+	if allocation != nil && !vmNetworkMatchesISOAllocation(plan, allocation) {
+		return vmNetworkPlan{}, nil, fmt.Errorf("service %q VM ISO network does not match its allocation", service)
+	}
+	if allocation == nil && plan.hasNetworkMode("iso") {
+		return vmNetworkPlan{}, nil, fmt.Errorf("service %q has a VM ISO network but no ISO allocation", service)
+	}
+	return plan, allocation, nil
 }
 
 func vmNetworkOwnedBases(plan vmNetworkPlan) map[string]bool {
@@ -287,6 +440,9 @@ func vmNetworkOwnedBases(plan vmNetworkPlan) map[string]bool {
 func vmNetworkDeviceNames(plan vmNetworkPlan) map[string]bool {
 	names := make(map[string]bool)
 	for _, iface := range plan.Interfaces {
+		if iface.Mode == "iso" && iface.Tap != "" {
+			names[iface.Tap] = true
+		}
 		for _, name := range []string{iface.Tap, iface.Bridge, iface.VLANDevice} {
 			if strings.HasPrefix(name, "yvm-") {
 				names[name] = true
@@ -347,6 +503,101 @@ func ensureOwnedVMNetwork(plan vmNetworkPlan, service string) error {
 	return runVMNetworkLifecycleCommands(setup, nil, fmt.Sprintf("ensure VM network for %q", service))
 }
 
+func verifyVMNetworkPlan(ctx context.Context, plan vmNetworkPlan) error {
+	for _, iface := range plan.Interfaces {
+		if iface.Mode != "iso" {
+			continue
+		}
+		if err := verifyVMISOInterface(ctx, iface); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type vmISOAddressEvidence struct {
+	IfName   string          `json:"ifname"`
+	Master   json.RawMessage `json:"master"`
+	AddrInfo []struct {
+		Family    string `json:"family"`
+		Local     string `json:"local"`
+		PrefixLen int    `json:"prefixlen"`
+	} `json:"addr_info"`
+}
+
+func verifyVMISOInterface(ctx context.Context, iface vmNetworkInterfacePlan) error {
+	link, err := loadVMISOAddressEvidence(ctx, iface.Tap)
+	if err != nil {
+		return err
+	}
+	if err := verifyVMISOAddressEvidence(iface, link); err != nil {
+		return err
+	}
+	return verifyVMISOSysctls(ctx, iface.Tap)
+}
+
+func loadVMISOAddressEvidence(ctx context.Context, tap string) (vmISOAddressEvidence, error) {
+	output, err := vmNetworkVerifyCommand(ctx, "ip", "-j", "address", "show", "dev", tap)
+	if err != nil {
+		return vmISOAddressEvidence{}, fmt.Errorf("verify VM ISO TAP %s: %w", tap, err)
+	}
+	var links []vmISOAddressEvidence
+	if err := json.Unmarshal(output, &links); err != nil || len(links) != 1 || links[0].IfName != tap {
+		return vmISOAddressEvidence{}, fmt.Errorf("verify VM ISO TAP %s: invalid ip address evidence", tap)
+	}
+	return links[0], nil
+}
+
+func verifyVMISOAddressEvidence(iface vmNetworkInterfacePlan, link vmISOAddressEvidence) error {
+	if master := strings.TrimSpace(string(link.Master)); master != "" && master != "null" && master != "0" {
+		return fmt.Errorf("verify VM ISO TAP %s: unexpectedly attached to a bridge", iface.Tap)
+	}
+	want, err := netip.ParsePrefix(vmISOHostPrefix(iface))
+	if err != nil {
+		return fmt.Errorf("verify VM ISO TAP %s: invalid desired host address: %w", iface.Tap, err)
+	}
+	return verifyVMISOAddresses(iface.Tap, want, link)
+}
+
+func verifyVMISOAddresses(tap string, want netip.Prefix, link vmISOAddressEvidence) error {
+	matched := false
+	for _, address := range link.AddrInfo {
+		if address.Family == "inet6" {
+			return fmt.Errorf("verify VM ISO TAP %s: IPv6 address is present", tap)
+		}
+		if address.Family != "inet" {
+			continue
+		}
+		got, err := netip.ParseAddr(address.Local)
+		if err != nil || got != want.Addr() || address.PrefixLen != want.Bits() || matched {
+			return fmt.Errorf("verify VM ISO TAP %s: unexpected IPv4 address evidence", tap)
+		}
+		matched = true
+	}
+	if !matched {
+		return fmt.Errorf("verify VM ISO TAP %s: host address is missing", tap)
+	}
+	return nil
+}
+
+func verifyVMISOSysctls(ctx context.Context, tap string) error {
+	for _, setting := range []string{"net.ipv4.conf." + tap + ".rp_filter", "net.ipv6.conf." + tap + ".disable_ipv6"} {
+		value, err := vmNetworkVerifyCommand(ctx, "sysctl", "-n", setting)
+		if err != nil || strings.TrimSpace(string(value)) != "1" {
+			return fmt.Errorf("verify VM ISO TAP %s: %s is not 1", tap, setting)
+		}
+	}
+	return nil
+}
+
+func runVMNetworkVerifyCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	output, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("run %s: %w: %s", strings.Join(append([]string{name}, args...), " "), err, strings.TrimSpace(string(output)))
+	}
+	return output, nil
+}
+
 func ownedVMServiceNetworkBases(dv *db.DataView) map[string]bool {
 	owned := map[string]bool{}
 	if dv == nil {
@@ -360,7 +611,7 @@ func ownedVMServiceNetworkBases(dv *db.DataView) map[string]bool {
 		if !vm.Valid() {
 			continue
 		}
-		plan := vmNetworkPlanFromDB(sv.Name(), vm.Networks().AsSlice())
+		plan := vmNetworkPlanFromDB(sv.Name(), vm.Networks().AsSlice(), sv.ISO().AsStruct())
 		for base := range vmNetworkOwnedBases(plan) {
 			owned[base] = true
 		}

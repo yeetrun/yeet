@@ -741,3 +741,46 @@ func containsLine(lines []string, want string) bool {
 	}
 	return false
 }
+
+func TestNewISONetworkUnitGatesServiceOnVerifiedBoundary(t *testing.T) {
+	unit, err := NewISONetworkUnit("app", "/usr/local/bin/catch", "/var/lib/yeet")
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := unit.WriteOutUnitFiles(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(paths[db.ArtifactSystemdUnit])
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		"Description=yeet ISO network for app\n",
+		"Before=app.service\n",
+		"After=network-online.target docker.service\n",
+		"Wants=network-online.target\n",
+		"Type=oneshot\n",
+		"RemainAfterExit=yes\n",
+		"ExecStart=/usr/local/bin/catch -data-dir /var/lib/yeet iso-network-ensure app\n",
+		"ExecStop=/usr/local/bin/catch -data-dir /var/lib/yeet iso-network-clean app\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("ISO network unit missing %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestNewISONetworkUnitRejectsAmbiguousArguments(t *testing.T) {
+	for _, test := range []struct{ service, catchBin, dataDir string }{
+		{service: "", catchBin: "/usr/bin/catch", dataDir: "/var/lib/yeet"},
+		{service: "bad name", catchBin: "/usr/bin/catch", dataDir: "/var/lib/yeet"},
+		{service: "app", catchBin: "/path with space/catch", dataDir: "/var/lib/yeet"},
+		{service: "app", catchBin: "/usr/bin/catch", dataDir: "/path with space"},
+	} {
+		if _, err := NewISONetworkUnit(test.service, test.catchBin, test.dataDir); err == nil {
+			t.Fatalf("NewISONetworkUnit(%q, %q, %q) returned nil error", test.service, test.catchBin, test.dataDir)
+		}
+	}
+}

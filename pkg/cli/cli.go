@@ -89,6 +89,7 @@ type HostSetFlags struct {
 	ServicesRoot    string
 	ZFS             bool
 	MigrateServices string
+	ISOPool         string
 	Config          string
 	Yes             bool
 }
@@ -170,6 +171,7 @@ type StageFlags struct {
 	Restart       bool
 	Pull          bool
 	Publish       []string
+	PublishReset  bool
 }
 
 type EditFlags struct {
@@ -353,8 +355,9 @@ type hostSetFlagsParsed struct {
 	ServicesRoot    string `flag:"services-root" help:"Default service root (default: data directory/services)"`
 	ZFS             bool   `flag:"zfs" help:"Treat supplied storage targets as ZFS datasets or dataset prefixes"`
 	MigrateServices string `flag:"migrate-services" help:"Service migration mode: all, none"`
+	ISOPool         string `flag:"iso-pool" help:"Set the ISO network RFC1918 IPv4 /16 before any ISO allocation exists"`
 	Config          string `flag:"config" help:"Path to yeet.toml to update after service migration"`
-	Yes             bool   `flag:"yes" short:"y" help:"Confirm disruptive host storage changes without prompting"`
+	Yes             bool   `flag:"yes" short:"y" help:"Confirm disruptive host changes without prompting"`
 }
 
 type hostCleanupFlagsParsed struct {
@@ -412,6 +415,7 @@ type stageFlagsParsed struct {
 	Restart       bool     `flag:"restart" default:"true"`
 	Pull          bool     `flag:"pull"`
 	Publish       []string `flag:"publish" short:"p"`
+	PublishReset  bool     `flag:"publish-reset"`
 }
 
 type editFlagsParsed struct {
@@ -543,7 +547,7 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"umount":  {Name: "umount", Description: "Unmount a host mount by name", Usage: "NAME", Examples: []string{"yeet umount data-share"}},
 	"remove":  {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}, FlagsSchema: removeFlagsParsed{}},
 	"restart": {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
-	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile, VM)", Usage: "SVC [PAYLOAD] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
+	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile, VM)", Usage: "SVC [PAYLOAD] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
 		"yeet run --web",
 		"yeet run --web <svc>",
 		"yeet run --web <svc> ./compose.yml",
@@ -645,12 +649,13 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set VM resources and networking",
-				Usage:       "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
+				Usage:       "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan|iso] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
 				Examples: []string{
 					"yeet vm set <vm> --vcpus=8 --memory=8g --disk=128g",
 					"yeet vm set <vm> --memory-min=1g --balloon=auto",
 					"yeet vm set <vm> --net=lan",
 					"yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4",
+					"yeet vm set <vm> --net=iso",
 				},
 				ArgsSchema: ServiceArgs{},
 			},
@@ -721,12 +726,13 @@ var remoteGroupInfos = map[string]GroupInfo{
 			},
 			"set": {
 				Name:        "set",
-				Description: "Configure catch host storage",
-				Usage:       "host set [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET_PREFIX] [--zfs] [--migrate-services=all|none] [--config=PATH] [--yes]",
+				Description: "Configure catch host storage and networking",
+				Usage:       "host set [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET_PREFIX] [--zfs] [--migrate-services=all|none] [--iso-pool=RFC1918_IPV4/16] [--config=PATH] [--yes]",
 				Examples: []string{
 					"yeet host set --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services --migrate-services=all --yes",
 					"yeet host set --services-root=/srv/yeet/services --migrate-services=none",
 					"yeet host set --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services --migrate-services=all",
+					"yeet host set --iso-pool=172.30.0.0/16",
 				},
 				FlagsSchema: hostSetFlagsParsed{},
 			},
@@ -1117,6 +1123,7 @@ func ParseHostSet(args []string) (HostSetFlags, []string, error) {
 		ServicesRoot:    strings.TrimSpace(parsed.Flags.ServicesRoot),
 		ZFS:             parsed.Flags.ZFS,
 		MigrateServices: strings.TrimSpace(parsed.Flags.MigrateServices),
+		ISOPool:         strings.TrimSpace(parsed.Flags.ISOPool),
 		Config:          strings.TrimSpace(parsed.Flags.Config),
 		Yes:             parsed.Flags.Yes,
 	}
@@ -1809,6 +1816,7 @@ func ParseStage(args []string) (StageFlags, string, []string, error) {
 		Restart:       parsed.Flags.Restart,
 		Pull:          parsed.Flags.Pull,
 		Publish:       parsed.Flags.Publish,
+		PublishReset:  parsed.Flags.PublishReset,
 	}
 
 	argsOut := append(parsed.Args, extraArgs...)

@@ -1006,6 +1006,7 @@ func vmCloneCleanupResult(cause error, cleanupErrs []error) error {
 
 func cloneVMRecoveryService(source *db.Service, newServiceName string, targetDataset string) *db.Service {
 	cloned := source.Clone()
+	clearISOCloneState(cloned)
 	cloned.Name = newServiceName
 	cloned.Generation = 0
 	cloned.LatestGeneration = 0

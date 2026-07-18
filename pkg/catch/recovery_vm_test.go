@@ -793,6 +793,47 @@ func TestSnapshotsCloneVMClearsTSNet(t *testing.T) {
 	}
 }
 
+func TestCloneVMRecoveryServiceStripsISOStateAndGeneratedArtifacts(t *testing.T) {
+	server := newTestServer(t)
+	seedVMRecoverySource(t, server)
+	source := mustService(t, server, "devbox")
+	source.ISO = &db.ISOAllocation{
+		Kind:  "vm",
+		State: "ready",
+		NetNS: "yeet-source-ns",
+		Components: map[string]db.ISOComponent{
+			"devbox": {Address: netip.MustParseAddr("172.30.128.2")},
+		},
+		RetiredComponents: map[string]db.ISOComponent{
+			"old": {Address: netip.MustParseAddr("172.30.128.3")},
+		},
+	}
+	source.Artifacts = db.ArtifactStore{
+		db.ArtifactDockerComposeNetwork: {Refs: map[db.ArtifactRef]string{"latest": "/srv/devbox/bin/compose.network.yml"}},
+		db.ArtifactNetNSService:         {Refs: map[db.ArtifactRef]string{"latest": "/srv/devbox/bin/netns.service"}},
+		db.ArtifactNetNSEnv:             {Refs: map[db.ArtifactRef]string{"latest": "/srv/devbox/bin/netns.env"}},
+		db.ArtifactNetNSResolv:          {Refs: map[db.ArtifactRef]string{"latest": "/srv/devbox/run/resolv.conf"}},
+		db.ArtifactTSService:            {Refs: map[db.ArtifactRef]string{"latest": "/srv/devbox/bin/tailscale.service"}},
+		db.ArtifactTSEnv:                {Refs: map[db.ArtifactRef]string{"latest": "/srv/devbox/bin/tailscale.env"}},
+		db.ArtifactTSBinary:             {Refs: map[db.ArtifactRef]string{"latest": "/srv/devbox/bin/tailscaled"}},
+		db.ArtifactTSConfig:             {Refs: map[db.ArtifactRef]string{"latest": "/srv/devbox/tailscale/tailscaled.json"}},
+	}
+
+	cloned := cloneVMRecoveryService(source, "devbox-copy", "flash/yeet/vms/devbox-copy/vm/d-copy/root")
+
+	if cloned.ISO != nil {
+		t.Fatalf("cloned ISO allocation = %#v, want nil so addresses and component mappings are reallocated", cloned.ISO)
+	}
+	for _, name := range []db.ArtifactName{
+		db.ArtifactDockerComposeNetwork, db.ArtifactNetNSService, db.ArtifactNetNSEnv, db.ArtifactNetNSResolv,
+		db.ArtifactTSService, db.ArtifactTSEnv, db.ArtifactTSBinary, db.ArtifactTSConfig,
+	} {
+		if _, ok := cloned.Artifacts[name]; ok {
+			t.Fatalf("cloned generated artifact %q survived: %#v", name, cloned.Artifacts[name])
+		}
+	}
+}
+
 func TestSnapshotsRestoreVMRequiresStopForRunningVM(t *testing.T) {
 	server := newTestServer(t)
 	seedVMRecoverySource(t, server)

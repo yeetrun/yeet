@@ -172,7 +172,8 @@ func rpcMethodPermissions(method string) (permissionSet, error) {
 	case "catch.Info", "catch.ServiceInfo", "catch.ArtifactHashes", "catch.ZFSServiceRootCandidates", catchrpc.RPCMethodServiceRootDefaults, "catch.VMDefaults", "catch.ServicesList":
 		return newPermissionSet(permissionRead), nil
 	case catchrpc.RPCMethodHostStoragePlan, catchrpc.RPCMethodHostStorageApply,
-		catchrpc.RPCMethodHostStorageFinalize, catchrpc.RPCMethodHostStorageCleanup:
+		catchrpc.RPCMethodHostStorageFinalize, catchrpc.RPCMethodHostStorageCleanup,
+		catchrpc.RPCMethodISOPoolPlan, catchrpc.RPCMethodISOPoolApply:
 		return newPermissionSet(permissionManage), nil
 	case "catch.TailscaleSetup":
 		return newPermissionSet(permissionRead, permissionManage, permissionSSH), nil

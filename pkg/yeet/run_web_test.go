@@ -112,16 +112,39 @@ func TestRunWebBootstrapSelectsProjectHostBeforeDefaultPrefs(t *testing.T) {
 
 func TestRunWebBootstrapNetworkModesMatchCatchModes(t *testing.T) {
 	boot := newRunWebBootstrap(nil, "", "", nil)
-	want := []string{"svc", "ts", "lan"}
+	want := []string{"svc", "ts", "lan", "iso"}
 	if !reflect.DeepEqual(boot.Options.NetworkModes, want) {
 		t.Fatalf("network modes = %#v, want %#v", boot.Options.NetworkModes, want)
+	}
+}
+
+func TestRunWebBootstrapISOCompatibilityEnums(t *testing.T) {
+	boot := newRunWebBootstrap(nil, "", "", nil)
+	wantISO := map[string]bool{
+		"compose":      true,
+		"vm":           true,
+		"dockerfile":   true,
+		"remote-image": true,
+		"python":       true,
+		"typescript":   true,
+		"file":         false,
+		"cron":         false,
+	}
+	for _, workload := range boot.Options.Workloads {
+		gotISO := false
+		for _, mode := range workload.Networks {
+			gotISO = gotISO || mode == "iso"
+		}
+		if gotISO != wantISO[workload.Kind] {
+			t.Fatalf("workload %q networks = %#v, ISO = %v, want %v", workload.Kind, workload.Networks, gotISO, wantISO[workload.Kind])
+		}
 	}
 }
 
 func TestRunWebBootstrapExposesWorkloadsAndCatalogVMImages(t *testing.T) {
 	boot := newRunWebBootstrap(nil, "", "", nil)
 
-	wantKinds := []string{"compose", "vm", "dockerfile", "remote-image", "file", "cron"}
+	wantKinds := []string{"compose", "vm", "dockerfile", "remote-image", "python", "typescript", "file", "cron"}
 	if got := runWebWorkloadKinds(boot.Options.Workloads); !reflect.DeepEqual(got, wantKinds) {
 		t.Fatalf("workload kinds = %#v, want %#v", got, wantKinds)
 	}

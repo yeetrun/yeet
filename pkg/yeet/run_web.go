@@ -116,13 +116,15 @@ func newRunWebBootstrap(cfg *projectConfigLocation, hostOverride string, service
 
 func defaultRunWebOptionHints() runWebOptionHints {
 	return runWebOptionHints{
-		NetworkModes:  []string{"svc", "ts", "lan"},
+		NetworkModes:  []string{"svc", "ts", "lan", "iso"},
 		SnapshotModes: []string{"inherit", "on", "off"},
 		Workloads: []runWebWorkloadHint{
-			{Kind: "compose", Label: "Compose app", PayloadKind: "compose", Networks: []string{"host", "svc", "ts", "lan"}, Description: "Deploy a Docker Compose file."},
-			{Kind: "vm", Label: "Virtual machine", PayloadKind: serviceTypeVM, Networks: []string{"svc", "lan"}, Description: "Create a VM from a managed catalog image."},
-			{Kind: "dockerfile", Label: "Dockerfile", PayloadKind: "dockerfile", Networks: []string{"host", "svc", "ts", "lan"}, Description: "Build and deploy a Dockerfile."},
-			{Kind: "remote-image", Label: "Container image", PayloadKind: "remote-image", Networks: []string{"host", "svc", "ts", "lan"}, Description: "Deploy an image reference."},
+			{Kind: "compose", Label: "Compose app", PayloadKind: "compose", Networks: []string{"host", "svc", "ts", "lan", "iso"}, Description: "Deploy a Docker Compose file."},
+			{Kind: "vm", Label: "Virtual machine", PayloadKind: serviceTypeVM, Networks: []string{"svc", "lan", "iso"}, Description: "Create a VM from a managed catalog image."},
+			{Kind: "dockerfile", Label: "Dockerfile", PayloadKind: "dockerfile", Networks: []string{"host", "svc", "ts", "lan", "iso"}, Description: "Build and deploy a Dockerfile."},
+			{Kind: "remote-image", Label: "Container image", PayloadKind: "remote-image", Networks: []string{"host", "svc", "ts", "lan", "iso"}, Description: "Deploy an image reference."},
+			{Kind: "python", Label: "Python app", PayloadKind: "python", Networks: []string{"host", "svc", "ts", "lan", "iso"}, Description: "Deploy Python code in a generated container."},
+			{Kind: "typescript", Label: "TypeScript app", PayloadKind: "typescript", Networks: []string{"host", "svc", "ts", "lan", "iso"}, Description: "Deploy TypeScript code in a generated container."},
 			{Kind: "file", Label: "Binary/script", PayloadKind: "file", Networks: []string{"host", "svc", "ts", "lan"}, Description: "Upload and run a binary or script."},
 			{Kind: serviceTypeCron, Label: "Scheduled job", PayloadKind: serviceTypeCron, Networks: []string{"host"}, Description: "Install a cron-style systemd timer."},
 		},
@@ -193,7 +195,10 @@ func runWebHostCandidates(cfg *projectConfigLocation, hostOverride string) []str
 	}
 	add(os.Getenv("CATCH_HOST"))
 	add(hostOverride)
-	add(Host())
+	// Candidate discovery includes the saved preference even when CATCH_HOST is
+	// currently overriding Host(). The override is already added separately.
+	_ = ensureClientConfigLoaded()
+	add(loadedPrefs.DefaultHost)
 	if cfg != nil && cfg.Config != nil {
 		for _, host := range cfg.Config.AllHosts() {
 			add(host)

@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -409,6 +411,53 @@ func TestDockerComposeCommandCopiesEnvAndIncludesNetworkComposeFile(t *testing.T
 	}
 }
 
+func TestDockerComposeResolveConfigJSONUsesExactGeneration(t *testing.T) {
+	service := newTestDockerComposeService(t, "services:\n  api:\n    image: nginx\n", recordCmd(t, &[]cmdCall{}))
+	basePath, ok := service.cfg.Artifacts.Gen(db.ArtifactDockerComposeFile, service.cfg.Generation)
+	if !ok {
+		t.Fatal("test compose artifact missing")
+	}
+	currentOverlay := filepath.Join(service.DataDir, "compose.network.current.yml")
+	staleOverlay := filepath.Join(service.DataDir, "compose.network.stale.yml")
+	service.cfg.Artifacts[db.ArtifactDockerComposeNetwork] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+		db.Gen(1): currentOverlay,
+		db.Gen(2): staleOverlay,
+	}}
+
+	var got []string
+	service.NewCmdContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		got = append([]string{filepath.Base(name)}, args...)
+		return exec.CommandContext(ctx, "sh", "-c", `printf '%s' '{"services":{"api":{"image":"nginx"}}}'`)
+	}
+	out, err := service.ResolveConfigJSON(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"docker", "compose",
+		"--project-name", "catch-svc-a",
+		"--project-directory", service.DataDir,
+		"--file", basePath,
+		"--file", currentOverlay,
+		"config", "--format", "json",
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("command mismatch (-want +got):\n%s", diff)
+	}
+	if strings.Contains(strings.Join(got, "\n"), staleOverlay) {
+		t.Fatalf("resolution used stale generation: %#v", got)
+	}
+	if diff := cmp.Diff([]byte(`{"services":{"api":{"image":"nginx"}}}`), out); diff != "" {
+		t.Fatalf("output mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestComposeProjectNameMatchesDockerRuntimeIdentity(t *testing.T) {
+	if got := ComposeProjectName("svc-a"); got != "catch-svc-a" {
+		t.Fatalf("ComposeProjectName = %q, want catch-svc-a", got)
+	}
+}
+
 func TestDockerComposeRunCommandContextReturnsCommandCreationError(t *testing.T) {
 	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &[]cmdCall{}))
 	delete(svc.cfg.Artifacts, db.ArtifactDockerComposeFile)
@@ -502,6 +551,24 @@ func TestDockerComposeStopPropagatesSystemdStopError(t *testing.T) {
 	}
 }
 
+func TestDockerComposeStopStopsAuxiliaryUnitsWhenProjectIsAbsent(t *testing.T) {
+	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "")
+	calls := []cmdCall{}
+	sd := &fakeDockerSystemdService{}
+	svc := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	svc.sd = sd
+
+	if err := svc.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if sd.stopCalls != 1 {
+		t.Fatalf("systemd Stop called %d times, want 1 even without Compose containers", sd.stopCalls)
+	}
+	if composeCallHasSubcmd(calls, "stop") {
+		t.Fatalf("unexpected Compose stop for absent project: %#v", calls)
+	}
+}
+
 func TestDockerComposeRemovePropagatesSystemdStopErrorAfterCleanup(t *testing.T) {
 	t.Setenv("HELPER_DOCKER_PS_OUTPUT", "app,running\n")
 	calls := []cmdCall{}
@@ -581,6 +648,105 @@ func TestDockerComposeServiceRunCommandContextReturnsContextErrorAfterStart(t *t
 	err := svc.runCommandContext(ctx, "ps", "-a")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("runCommandContext error = %v, want context deadline exceeded", err)
+	}
+}
+
+func TestDockerComposeISOLifecyclePrimitivesKeepSecurityPhaseOrderingExplicit(t *testing.T) {
+	calls := []cmdCall{}
+	service := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", recordCmd(t, &calls))
+	systemd := &fakeDockerSystemdService{}
+	service.sd = systemd
+
+	if err := service.InstallDefinition(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Create(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.StartAuxiliaryUnits(); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.UpDetached(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DownRemoveOrphans(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if systemd.installCalls != 1 || systemd.startAuxCalls != 1 {
+		t.Fatalf("systemd install/start calls = %d/%d, want 1/1", systemd.installCalls, systemd.startAuxCalls)
+	}
+	assertCallOrder(t, calls,
+		callSpec{composeSubcmd: "create"},
+		callSpec{composeSubcmd: "up"},
+		callSpec{composeSubcmd: "down"},
+	)
+}
+
+func TestDockerComposeStopProjectContainersFallsBackToProjectLabelWithoutComposeArtifact(t *testing.T) {
+	tmp := t.TempDir()
+	dockerPath := filepath.Join(tmp, "docker")
+	if err := os.WriteFile(dockerPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	var calls [][]string
+	service := &DockerComposeService{
+		Name: "app",
+		cfg:  &db.Service{Name: "app", Generation: 3},
+		NewCmdContext: func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+			calls = append(calls, slices.Clone(args))
+			if len(args) > 0 && args[0] == "ps" {
+				return exec.CommandContext(ctx, "sh", "-c", "printf 'aaaaaaaaaaaa\\nbbbbbbbbbbbb\\n'; printf 'daemon warning\\n' >&2")
+			}
+			return exec.CommandContext(ctx, "true")
+		},
+	}
+
+	if err := service.StopProjectContainers(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{
+		{"ps", "-aq", "--filter", "label=com.docker.compose.project=catch-app"},
+		{"rm", "--force", "aaaaaaaaaaaa", "bbbbbbbbbbbb"},
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("fallback Docker calls = %#v, want %#v", calls, want)
+	}
+}
+
+func TestDockerComposeStopProjectContainersUsesIndependentLabelBudgetBeforeComposeDown(t *testing.T) {
+	service := newTestDockerComposeService(t, "services:\n  app:\n    image: nginx:latest\n", func(string, ...string) *exec.Cmd {
+		return exec.Command("true")
+	})
+	var calls []string
+	service.NewCmdContext = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+		switch {
+		case len(args) > 0 && args[0] == "ps":
+			calls = append(calls, "label-list")
+			return exec.CommandContext(ctx, "sh", "-c", "printf 'aaaaaaaaaaaa\\n'")
+		case len(args) > 0 && args[0] == "rm":
+			calls = append(calls, "label-remove")
+			return exec.CommandContext(ctx, "true")
+		case slices.Contains(args, "down"):
+			calls = append(calls, "compose-down")
+			return exec.CommandContext(ctx, "sh", "-c", "sleep 10")
+		default:
+			t.Fatalf("unexpected Docker args: %#v", args)
+			return exec.CommandContext(ctx, "false")
+		}
+	}
+	// Starting two subprocesses under coverage or the race detector can take
+	// longer than a few scheduler ticks. Keep the deadline bounded while giving
+	// the label-removal half enough time to prove it owns an independent budget.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := service.StopProjectContainers(ctx); err != nil {
+		t.Fatalf("StopProjectContainers returned error after label stop succeeded: %v", err)
+	}
+	want := []string{"label-list", "label-remove", "compose-down"}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("cleanup order = %#v, want %#v", calls, want)
 	}
 }
 

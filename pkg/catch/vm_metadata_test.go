@@ -46,6 +46,49 @@ func TestWriteVMMetadataFiles(t *testing.T) {
 	}
 }
 
+func TestVMISOMetadataUsesPublicOnlyDNSAndDisablesIPv6(t *testing.T) {
+	network := vmGuestNetwork{
+		Name:            "eth0",
+		Mode:            "iso",
+		Address:         "172.30.0.2/30",
+		Gateway:         "172.30.0.1",
+		Nameservers:     []string{"172.30.0.1"},
+		SearchDomains:   []string{},
+		DNSDefaultRoute: pointerTo(true),
+	}
+	unit := renderVMNetworkdUnit(network)
+	for _, want := range []string{
+		"DNS=172.30.0.1",
+		"DNSDefaultRoute=yes",
+		"LinkLocalAddressing=no",
+		"IPv6AcceptRA=no",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("networkd unit missing %q:\n%s", want, unit)
+		}
+	}
+	if strings.Contains(unit, "yeet.internal") || strings.Contains(unit, "192.168.100.1") || strings.Contains(unit, "Domains=") {
+		t.Fatalf("ISO networkd unit leaked fallback DNS/search:\n%s", unit)
+	}
+
+	yaml := renderVMNetworkYAML([]vmGuestNetwork{network})
+	for _, want := range []string{
+		"addresses: [172.30.0.1]",
+		"dhcp6: false",
+		"accept-ra: false",
+		"link-local: []",
+	} {
+		if !strings.Contains(yaml, want) {
+			t.Fatalf("netplan metadata missing %q:\n%s", want, yaml)
+		}
+	}
+	if strings.Contains(yaml, "yeet.internal") || strings.Contains(yaml, "192.168.100.1") || strings.Contains(yaml, "search:") {
+		t.Fatalf("ISO netplan leaked fallback DNS/search:\n%s", yaml)
+	}
+}
+
+func pointerTo[T any](value T) *T { return &value }
+
 func TestWriteVMMetadataFileModes(t *testing.T) {
 	root := t.TempDir()
 	cfg := vmMetadataConfig{

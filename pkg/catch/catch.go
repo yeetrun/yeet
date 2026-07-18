@@ -26,6 +26,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/dnet"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/netns"
 	"github.com/yeetrun/yeet/pkg/registry"
 	"github.com/yeetrun/yeet/pkg/svc"
@@ -55,6 +56,14 @@ var serverVMStatusFunc = func(name string) (svc.Status, error) {
 
 var installYeetNSService = netns.InstallYeetNSService
 var installYeetDNSServiceForServer = installYeetDNSService
+var installISODNSServiceForServer = installISODNSService
+var waitDockerReadyForISOForServer = waitDockerReadyForISO
+var reconcileISONetworksForServer = func(ctx context.Context, s *Server) error {
+	return s.reconcileISONetworks(ctx)
+}
+var failClosedISONetworksForServer = func(ctx context.Context, s *Server, cause error) error {
+	return s.failClosedISONetworks(ctx, cause)
+}
 var reconcileDockerNetNSPortForwards = dnet.ReconcilePortForwards
 
 // Server hosts the RPC handlers that manage services and exec commands.
@@ -82,6 +91,7 @@ type Server struct {
 	hostStorageMutationMu    sync.Mutex
 	hostStorageMutationBlock error
 	hostStorageRecovery      *hostStorageTransaction
+	newISORemoveSteps        func(string, RemoveOptions, *RemoveReport, string) (isoRemoveSteps, error)
 }
 
 type EventListener struct {
@@ -225,16 +235,101 @@ func (s *Server) Start() {
 	s.waitGroup.Go(func() {
 		s.runVMBalloonController(s.ctx)
 	})
-	if err := installYeetNSService(); err != nil {
-		log.Fatalf("Failed to install bridge service: %v", err)
-	}
-	if err := installYeetDNSServiceForServer(s.cfg.RootDir); err != nil {
-		log.Fatalf("Failed to install DNS service: %v", err)
-	}
-	if err := installDockerPrereqs(s); err != nil {
-		log.Fatalf("Failed to install Docker prerequisites: %v", err)
+	if err := s.prepareNetworkRuntime(s.ctx); err != nil {
+		log.Fatalf("Failed to prepare network runtime: %v", err)
 	}
 	s.waitGroup.Go(s.reconcileRuntimeState)
+}
+
+func (s *Server) prepareNetworkRuntime(ctx context.Context) error {
+	hasISO, requiresDocker, err := s.isoRecordKinds()
+	if err != nil {
+		return err
+	}
+	failPrerequisite := func(cause error) error {
+		if !hasISO {
+			return cause
+		}
+		return errors.Join(cause, failClosedISONetworksForServer(ctx, s, cause))
+	}
+	if err := installYeetNSService(); err != nil {
+		return failPrerequisite(fmt.Errorf("install bridge service: %w", err))
+	}
+	if err := installYeetDNSServiceForServer(s.cfg.RootDir); err != nil {
+		return failPrerequisite(fmt.Errorf("install DNS service: %w", err))
+	}
+	if err := installDockerPrereqs(s); err != nil {
+		return failPrerequisite(fmt.Errorf("install Docker prerequisites: %w", err))
+	}
+	if !hasISO {
+		return nil
+	}
+	if requiresDocker {
+		if err := waitDockerReadyForISOForServer(ctx); err != nil {
+			return failPrerequisite(fmt.Errorf("wait for Docker before ISO reconciliation: %w", err))
+		}
+	}
+	if err := reconcileISONetworksForServer(ctx, s); err != nil {
+		return fmt.Errorf("reconcile ISO networks: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) isoRecordKinds() (hasISO bool, requiresDocker bool, err error) {
+	dv, err := s.cfg.DB.Get()
+	if err != nil {
+		return false, false, fmt.Errorf("load ISO records for Docker readiness: %w", err)
+	}
+	for _, service := range dv.Services().All() {
+		allocation := service.ISO()
+		if !allocation.Valid() {
+			continue
+		}
+		hasISO = true
+		if allocation.Kind() != string(iso.PayloadVM) {
+			requiresDocker = true
+		}
+	}
+	return hasISO, requiresDocker, nil
+}
+
+func waitDockerReadyForISO(ctx context.Context) error {
+	docker, err := svc.DockerCmd()
+	if err != nil {
+		return err
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		lastErr = dockerInfoForISO(waitCtx, docker)
+		if lastErr == nil {
+			return nil
+		}
+		if err := waitForISODockerRetry(waitCtx, ticker.C); err != nil {
+			return errors.Join(waitCtx.Err(), lastErr)
+		}
+	}
+}
+
+func dockerInfoForISO(ctx context.Context, docker string) error {
+	cmd := exec.CommandContext(ctx, docker, "info", "--format", "{{.ServerVersion}}")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("docker info: %w: %s", err, strings.TrimSpace(string(output)))
+}
+
+func waitForISODockerRetry(ctx context.Context, retry <-chan time.Time) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-retry:
+		return nil
+	}
 }
 
 func (s *Server) reconcileRuntimeState() {
@@ -948,6 +1043,8 @@ func (s *Server) RemoveService(name string) (*RemoveReport, error) {
 }
 
 // RemoveServiceWithOptions removes the service with optional cleanup behavior.
+//
+//nolint:cyclop // Removal ordering stays linear so cleanup and deletion boundaries remain auditable.
 func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*RemoveReport, error) {
 	doneRemove := removeTraceBlock(opts, "remove service")
 	defer doneRemove()
@@ -961,6 +1058,11 @@ func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*Rem
 	doneZFSRoot := removeTraceBlock(opts, "remove service zfs lookup")
 	serviceRootZFS := s.serviceRootZFSForRemoval(report, name)
 	doneZFSRoot()
+	serviceView, serviceViewErr := s.serviceView(name)
+	if serviceViewErr != nil && !errors.Is(serviceViewErr, errServiceNotFound) {
+		return report, fmt.Errorf("determine ISO removal state for %q: %w", name, serviceViewErr)
+	}
+	isISO := serviceViewErr == nil && serviceView.ISO().Valid()
 	doneServiceRoot := removeTraceBlock(opts, "remove service root lookup")
 	serviceRoot, err := s.serviceRootDir(name)
 	doneServiceRoot()
@@ -969,12 +1071,33 @@ func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*Rem
 		report.addWarning(fmt.Errorf("failed to resolve service root for %q: %w", name, err))
 		removeDirs = false
 	}
-	doneVMNetwork := removeTraceBlock(opts, "remove vm network")
-	s.cleanupVMNetworkForRemoval(report, name)
-	doneVMNetwork()
-	doneVMJail := removeTraceBlock(opts, "remove vm jail")
-	s.cleanupVMJailForRemoval(report, name)
-	doneVMJail()
+	if !isISO {
+		doneVMNetwork := removeTraceBlock(opts, "remove vm network")
+		s.cleanupVMNetworkForRemoval(report, name)
+		doneVMNetwork()
+		doneVMJail := removeTraceBlock(opts, "remove vm jail")
+		s.cleanupVMJailForRemoval(report, name)
+		doneVMJail()
+	}
+	if isISO {
+		stepsFactory := s.newISORemoveSteps
+		if stepsFactory == nil {
+			stepsFactory = s.newConcreteISORemoveSteps
+		}
+		steps, err := stepsFactory(name, opts, report, serviceRootZFS)
+		if err != nil {
+			return report, fmt.Errorf("prepare ISO removal: %w", err)
+		}
+		if err := s.removeISOServiceWithOptions(context.Background(), name, opts.CleanData, steps); err != nil {
+			return report, fmt.Errorf("remove ISO service: %w", err)
+		}
+		s.publishServiceDeleted(name)
+		s.deleteTailscaleDevice(report, tsStableID)
+		if removeDirs {
+			s.removeServiceDirs(report, serviceRoot, opts.CleanData)
+		}
+		return report, nil
+	}
 	if removeDirs && opts.CleanData {
 		removeTrace(opts, "remove zfs dataset=%s", serviceRootZFS)
 		doneZFS := removeTraceBlock(opts, "remove zfs destroy")

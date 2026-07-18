@@ -851,6 +851,34 @@ func TestIPCmdFuncPrintsOnlyEndpointIPsForNetNSService(t *testing.T) {
 	}
 }
 
+func TestIPCmdFuncPrintsPersistedISOComponentsWithoutRuntimeDiscovery(t *testing.T) {
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("isolated", func(_ *db.Data, service *db.Service) error {
+		service.ServiceType = db.ServiceTypeDockerCompose
+		service.ISO = &db.ISOAllocation{Kind: "compose", Components: map[string]db.ISOComponent{
+			"worker": {Address: netip.MustParseAddr("172.30.128.3")},
+			"api":    {Address: netip.MustParseAddr("172.30.128.2")},
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldList := listIPv4AddrsFn
+	listIPv4AddrsFn = func([]string) ([]ifaceIP, error) {
+		t.Fatal("ISO endpoint listing used runtime discovery")
+		return nil, nil
+	}
+	t.Cleanup(func() { listIPv4AddrsFn = oldList })
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "isolated", rw: &out}
+	if err := execer.ipCmdFunc(); err != nil {
+		t.Fatal(err)
+	}
+	if got := out.String(); got != "172.30.128.2\n172.30.128.3\n" {
+		t.Fatalf("ip output = %q", got)
+	}
+}
+
 func TestNormalizeTailscaleTrack(t *testing.T) {
 	tests := []struct {
 		name    string

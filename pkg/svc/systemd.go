@@ -42,7 +42,8 @@ type TimerConfig struct {
 
 const (
 	systemdServiceTemplate = `[Unit]
-ConditionFileIsExecutable={{.Executable}}
+{{with .Description}}Description={{.}}
+{{end}}ConditionFileIsExecutable={{.Executable}}
 {{if .Wants}}Wants={{.Wants}}{{end}}
 {{if .Requires}}Requires={{.Requires}}{{end}}
 {{if .Before}}Before={{.Before}}{{end}}
@@ -102,6 +103,9 @@ const tailscaleReadyTimeout = 30 * time.Second
 
 type SystemdUnit struct {
 	Name string // Required name of the service. No spaces suggested.
+
+	// Description is the human-readable [Unit] description.
+	Description string
 
 	// User is the user to run the service as.
 	User string
@@ -165,6 +169,35 @@ type SystemdUnit struct {
 
 	// ResolvConf is the path to the resolv.conf file to use.
 	ResolvConf string
+}
+
+// NewISONetworkUnit renders the local-only, fail-closed network gate for an
+// isolated service. Artifact staging and activation are owned by the service
+// installer transaction; this helper only defines the deterministic unit.
+func NewISONetworkUnit(service, catchBin, dataDir string) (*SystemdUnit, error) {
+	service = strings.TrimSpace(service)
+	catchBin = strings.TrimSpace(catchBin)
+	dataDir = strings.TrimSpace(dataDir)
+	if service == "" || strings.ContainsAny(service, "/\\ \t\r\n") {
+		return nil, fmt.Errorf("invalid ISO service name %q", service)
+	}
+	if catchBin == "" || dataDir == "" {
+		return nil, fmt.Errorf("ISO network unit requires catch and data-dir paths")
+	}
+	if strings.ContainsAny(catchBin+dataDir, " \t\r\n") {
+		return nil, fmt.Errorf("ISO network unit paths cannot contain whitespace")
+	}
+	return &SystemdUnit{
+		Name:        "yeet-" + service + "-ns",
+		Description: "yeet ISO network for " + service,
+		Executable:  catchBin,
+		Arguments:   []string{"-data-dir", dataDir, "iso-network-ensure", service},
+		StopCmd:     catchBin + " -data-dir " + dataDir + " iso-network-clean " + service,
+		Before:      service + ".service",
+		After:       "network-online.target docker.service",
+		Wants:       "network-online.target",
+		OneShot:     true,
+	}, nil
 }
 
 func (u *SystemdUnit) serviceUnit() string {

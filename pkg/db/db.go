@@ -17,7 +17,7 @@ import (
 
 var renameDBFile = os.Rename
 
-//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig --copyright=false
+//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent --copyright=false
 
 // Data is the full JSON structure of the database.
 type Data struct {
@@ -27,6 +27,7 @@ type Data struct {
 
 	SnapshotDefaults *SnapshotPolicy `json:",omitempty"`
 	VMHost           *VMHostConfig   `json:",omitempty"`
+	ISOPool          *ISOPool        `json:",omitempty"`
 
 	Services map[string]*Service
 
@@ -37,6 +38,43 @@ type Data struct {
 	DockerNetworks map[string]*DockerNetwork
 }
 
+type ISOPool struct {
+	Prefix              netip.Prefix
+	Source              string
+	AllocatorVersion    int
+	PolicyVersion       int
+	AggregateRouteState string `json:",omitempty"`
+	LastConflict        string `json:",omitempty"`
+}
+
+type ISOComponent struct {
+	Address netip.Addr
+	State   string
+}
+
+type ISOAllocation struct {
+	Kind              string
+	State             string
+	Link              netip.Prefix
+	HostIP            netip.Addr
+	PeerIP            netip.Addr
+	Project           netip.Prefix `json:",omitempty"`
+	Gateway           netip.Addr   `json:",omitempty"`
+	Interface         string
+	PeerInterface     string
+	NetNS             string                  `json:",omitempty"`
+	Bridge            string                  `json:",omitempty"`
+	Components        map[string]ISOComponent `json:",omitempty"`
+	RetiredComponents map[string]ISOComponent `json:",omitempty"`
+	DesiredModes      []string
+	AllocatorVersion  int
+	PolicyVersion     int
+	RemoveRequested   bool   `json:",omitempty"`
+	CleanupVerified   bool   `json:",omitempty"`
+	RemoveCleanData   bool   `json:",omitempty"`
+	LastError         string `json:",omitempty"`
+}
+
 type VMHostConfig struct {
 	MemoryPolicy string `json:",omitempty"`
 }
@@ -44,6 +82,7 @@ type VMHostConfig struct {
 type DockerNetwork struct {
 	NetworkID string
 	NetNS     string
+	Mode      string
 
 	IPv4Gateway netip.Prefix
 	IPv4Range   netip.Prefix
@@ -146,7 +185,8 @@ type Service struct {
 	SvcNetwork *SvcNetwork
 	Macvlan    *MacvlanNetwork
 	TSNet      *TailscaleNetwork
-	VM         *VMConfig `json:",omitempty"`
+	VM         *VMConfig      `json:",omitempty"`
+	ISO        *ISOAllocation `json:",omitempty"`
 }
 
 type VMConfig struct {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
 
@@ -82,30 +83,8 @@ func (s *Server) serviceInfoWithContext(ctx context.Context, sn string) (catchrp
 	portInfo := servicePublishPortInfo(sn, sv)
 	info.Network.Ports = portInfo.Ports
 	info.Network.PortsPresent = portInfo.PortsPresent
-	if sv.ServiceType() == db.ServiceTypeVM {
-		vmNetwork := discoverVMNetworkIPs(ctx, sv.VM())
-		info.Network.IPs = serviceVMNetworkIPs(sv.VM(), vmNetwork.IPs)
-		if vmNetwork.Err != nil {
-			info.Network.IPError = vmNetwork.Err.Error()
-		}
-		info.Network.IPWarning = vmNetwork.Warning
-		readiness, err := vmJailerReadinessForRoot(effectiveRoot)
-		if err != nil {
-			return resp, err
-		}
-		vmInfo, err := serviceVMInfo(sv.VM(), vmNetwork.IPs, string(readiness))
-		if err != nil {
-			return resp, err
-		}
-		info.VM = vmInfo
-	} else {
-		details, ipErr := s.serviceIPDetailsWithContext(ctx, sn, sv)
-		if ipErr != nil {
-			info.Network.IPError = ipErr.Error()
-		} else {
-			info.Network.IPs = details.Endpoints
-			info.Network.RuntimeIPs = details.Runtime
-		}
+	if err := s.populateServiceRuntimeInfo(ctx, sn, sv, effectiveRoot, &info); err != nil {
+		return resp, err
 	}
 	info.Status = s.serviceStatusInfo(sn, sv)
 	info.Images = serviceImageInfo(dv, sn)
@@ -118,6 +97,44 @@ func (s *Server) serviceInfoWithContext(ctx context.Context, sn string) (catchrp
 	resp.Found = true
 	resp.Info = info
 	return resp, nil
+}
+
+func (s *Server) populateServiceRuntimeInfo(ctx context.Context, sn string, sv db.ServiceView, effectiveRoot string, info *catchrpc.ServiceInfo) error {
+	if sv.ServiceType() == db.ServiceTypeVM {
+		return s.populateVMRuntimeInfo(ctx, sv, effectiveRoot, info)
+	}
+	details, err := s.serviceIPDetailsWithContext(ctx, sn, sv)
+	if err != nil {
+		info.Network.IPError = err.Error()
+		return nil
+	}
+	info.Network.IPs = details.Endpoints
+	info.Network.RuntimeIPs = details.Runtime
+	return nil
+}
+
+func (s *Server) populateVMRuntimeInfo(ctx context.Context, sv db.ServiceView, effectiveRoot string, info *catchrpc.ServiceInfo) error {
+	vmNetwork := vmNetworkDiscovery{IPs: map[string]vmDiscoveredIP{}}
+	if info.Network.ISO != nil {
+		info.Network.IPs = serviceISOEndpointIPs(info.Network.ISO)
+	} else {
+		vmNetwork = discoverVMNetworkIPs(ctx, sv.VM())
+		info.Network.IPs = serviceVMNetworkIPs(sv.VM(), vmNetwork.IPs)
+		if vmNetwork.Err != nil {
+			info.Network.IPError = vmNetwork.Err.Error()
+		}
+		info.Network.IPWarning = vmNetwork.Warning
+	}
+	readiness, err := vmJailerReadinessForRoot(effectiveRoot)
+	if err != nil {
+		return err
+	}
+	vmInfo, err := serviceVMInfo(sv.VM(), vmNetwork.IPs, string(readiness))
+	if err != nil {
+		return err
+	}
+	info.VM = vmInfo
+	return nil
 }
 
 func servicePublishPortInfo(serviceName string, sv db.ServiceView) catchrpc.ServiceNetwork {
@@ -231,6 +248,7 @@ func serviceHasStagedChanges(sv db.ServiceView) bool {
 
 func serviceNetworkInfo(sv db.ServiceView) catchrpc.ServiceNetwork {
 	var out catchrpc.ServiceNetwork
+	out.ISO = serviceISOInfo(sv.ISO())
 	if svcNet, ok := sv.SvcNetwork().GetOk(); ok && svcNet.IPv4.IsValid() {
 		out.SvcIP = svcNet.IPv4.String()
 	}
@@ -258,6 +276,84 @@ func serviceNetworkInfo(sv db.ServiceView) catchrpc.ServiceNetwork {
 			tsOut = nil
 		}
 		out.Tailscale = tsOut
+	}
+	return out
+}
+
+func serviceISOInfo(view db.ISOAllocationView) *catchrpc.ServiceISO {
+	if !view.Valid() {
+		return nil
+	}
+	record := view.AsStruct()
+	out := &catchrpc.ServiceISO{
+		Modes:        append([]string(nil), record.DesiredModes...),
+		State:        record.State,
+		PublicEgress: true,
+		DNS:          "public-only",
+		LastError:    record.LastError,
+	}
+	populateServiceISOAddresses(out, record)
+	out.DNS = serviceISODNS(record.DesiredModes)
+	out.Components = serviceISOComponents(record)
+	return out
+}
+
+func populateServiceISOAddresses(out *catchrpc.ServiceISO, record *db.ISOAllocation) {
+	if record.Link.IsValid() {
+		out.Link = record.Link.String()
+	}
+	if record.Project.IsValid() {
+		out.Project = record.Project.String()
+	}
+	if record.Gateway.IsValid() {
+		out.Gateway = record.Gateway.String()
+	}
+}
+
+func serviceISODNS(modes []string) string {
+	for _, mode := range modes {
+		if mode == "ts" {
+			return "tailscale"
+		}
+	}
+	return "public-only"
+}
+
+func serviceISOComponents(record *db.ISOAllocation) []catchrpc.ServiceISOComponent {
+	if record.Kind == string(iso.PayloadVM) {
+		if record.PeerIP.IsValid() {
+			return []catchrpc.ServiceISOComponent{{Name: "vm", IP: record.PeerIP.String(), State: record.State}}
+		}
+		return nil
+	}
+	names := make([]string, 0, len(record.Components))
+	for name := range record.Components {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	components := make([]catchrpc.ServiceISOComponent, 0, len(names))
+	for _, name := range names {
+		component := record.Components[name]
+		if !component.Address.IsValid() {
+			continue
+		}
+		components = append(components, catchrpc.ServiceISOComponent{
+			Name: name, IP: component.Address.String(), State: component.State,
+		})
+	}
+	return components
+}
+
+func serviceISOEndpointIPs(network *catchrpc.ServiceISO) []catchrpc.ServiceIP {
+	if network == nil {
+		return nil
+	}
+	out := make([]catchrpc.ServiceIP, 0, len(network.Components))
+	for _, component := range network.Components {
+		if component.Name == "" || component.IP == "" {
+			continue
+		}
+		out = append(out, catchrpc.ServiceIP{Label: component.Name, IP: component.IP})
 	}
 	return out
 }
@@ -414,6 +510,9 @@ func (s *Server) serviceIPDetailsWithContext(ctx context.Context, sn string, sv 
 	if sn == CatchService {
 		ips, err := s.catchServiceIPList()
 		return serviceIPDetails{Endpoints: ips}, err
+	}
+	if isoInfo := serviceISOInfo(sv.ISO()); isoInfo != nil {
+		return serviceIPDetails{Endpoints: serviceISOEndpointIPs(isoInfo)}, nil
 	}
 	if sv.ServiceType() == db.ServiceTypeVM {
 		vmNetwork := discoverVMNetworkIPs(ctx, sv.VM())

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
 
@@ -309,6 +311,157 @@ func TestServiceActionCommandsUseRunner(t *testing.T) {
 				t.Fatalf("runner calls = %#v, want %#v", runner.calls, tc.want)
 			}
 		})
+	}
+}
+
+func TestStopISOServiceRetainsAllocationAndMarksStopped(t *testing.T) {
+	server := newTestServer(t)
+	allocation := testISORuntimeAllocation("app", iso.StateReady)
+	allocation.Components = map[string]db.ISOComponent{
+		"api": {Address: netip.MustParseAddr("172.30.128.2"), State: "reserved"},
+	}
+	allocation.RetiredComponents = map[string]db.ISOComponent{
+		"worker": {Address: netip.MustParseAddr("172.30.128.3"), State: "retiring"},
+	}
+	wantAllocation := allocation.Clone()
+	addTestServices(t, server, db.Service{Name: "app", ServiceType: db.ServiceTypeDockerCompose, ISO: allocation})
+	runner := &recordingServiceRunner{}
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "app", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+	}
+
+	if err := execer.stopCmdFunc(); err != nil {
+		t.Fatal(err)
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := dv.Services().Get("app").ISO().AsStruct()
+	if got.State != string(iso.StateStopped) || got.LastError != "" {
+		t.Fatalf("stopped ISO state = %#v, want stopped without error", got)
+	}
+	got.State = wantAllocation.State
+	got.LastError = wantAllocation.LastError
+	if !reflect.DeepEqual(got, wantAllocation) {
+		t.Fatalf("ordinary stop changed stable ISO allocation:\n got %#v\nwant %#v", got, wantAllocation)
+	}
+	if !reflect.DeepEqual(runner.calls, []string{"stop"}) {
+		t.Fatalf("runner calls = %#v, want stop", runner.calls)
+	}
+}
+
+func TestStartAndRestartISOServiceUseFullInstallerLifecycle(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*ttyExecer) error
+	}{
+		{name: "start", run: (*ttyExecer).startCmdFunc},
+		{name: "restart", run: (*ttyExecer).restartCmdFunc},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+			allocation := testISORuntimeAllocation("app", iso.StateStopped)
+			addTestServices(t, server, db.Service{
+				Name: "app", ServiceType: db.ServiceTypeDockerCompose,
+				Generation: 3, LatestGeneration: 3, ISO: allocation,
+			})
+			runner := &recordingServiceRunner{}
+			installedGeneration := 0
+			execer := &ttyExecer{
+				ctx: context.Background(), s: server, sn: "app", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+				serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+				serviceInstallGenFunc: func(cfg InstallerCfg, generation int) error {
+					if cfg.ServiceName != "app" {
+						t.Fatalf("installer service = %q, want app", cfg.ServiceName)
+					}
+					installedGeneration = generation
+					return nil
+				},
+			}
+
+			if err := tc.run(execer); err != nil {
+				t.Fatal(err)
+			}
+			if installedGeneration != 3 {
+				t.Fatalf("installed generation = %d, want 3", installedGeneration)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("ISO %s used raw runner calls: %#v", tc.name, runner.calls)
+			}
+		})
+	}
+}
+
+func TestStartAndRestartISOVMUseVMRunner(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*ttyExecer) error
+		want []string
+	}{
+		{name: "start", run: (*ttyExecer).startCmdFunc, want: []string{"start"}},
+		{name: "restart", run: (*ttyExecer).restartCmdFunc, want: []string{"restart"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			previousEnsure := ensureVMNetworkForServiceAction
+			defer func() { ensureVMNetworkForServiceAction = previousEnsure }()
+			server := newTestServer(t)
+			allocation := testISORuntimeAllocation("devbox", iso.StateStopped)
+			addTestServices(t, server, db.Service{
+				Name: "devbox", ServiceType: db.ServiceTypeVM, ISO: allocation,
+			})
+			runner := &recordingServiceRunner{}
+			ensureCalls := 0
+			ensureVMNetworkForServiceAction = func(got *Server, _ context.Context, service string) error {
+				ensureCalls++
+				if got != server || service != "devbox" {
+					t.Fatalf("ensure VM network = (%p, %q), want (%p, devbox)", got, service, server)
+				}
+				return nil
+			}
+			execer := &ttyExecer{
+				ctx: context.Background(), s: server, sn: "devbox", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+				serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+				serviceInstallGenFunc: func(InstallerCfg, int) error {
+					t.Fatal("ISO VM action used the service installer")
+					return nil
+				},
+			}
+
+			if err := tc.run(execer); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(runner.calls, tc.want) {
+				t.Fatalf("runner calls = %#v, want %#v", runner.calls, tc.want)
+			}
+			if ensureCalls != 1 {
+				t.Fatalf("ensure calls = %d, want 1", ensureCalls)
+			}
+		})
+	}
+}
+
+func TestStartISOVMStopsBeforeRunnerWhenNetworkEnsureFails(t *testing.T) {
+	previousEnsure := ensureVMNetworkForServiceAction
+	defer func() { ensureVMNetworkForServiceAction = previousEnsure }()
+	server := newTestServer(t)
+	allocation := testISORuntimeAllocation("devbox", iso.StateStopped)
+	addTestServices(t, server, db.Service{Name: "devbox", ServiceType: db.ServiceTypeVM, ISO: allocation})
+	wantErr := errors.New("policy verification failed")
+	ensureVMNetworkForServiceAction = func(*Server, context.Context, string) error { return wantErr }
+	runner := &recordingServiceRunner{}
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "devbox", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+	}
+
+	err := execer.startCmdFunc()
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("start error = %v, want %v", err, wantErr)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
 	}
 }
 
@@ -895,6 +1048,35 @@ func TestRemoveCmdFuncWithYesRemovesRunnerAndConfig(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "warning:") {
 		t.Fatalf("remove output = %q, want cleanup warning", got)
+	}
+}
+
+func TestRemoveCmdFuncISODelegatesWithoutGenericRunnerRemoval(t *testing.T) {
+	server := newTestServer(t)
+	allocation := testISORuntimeAllocation("app", iso.StateReady)
+	addTestServices(t, server, db.Service{Name: "app", ServiceType: db.ServiceTypeDockerCompose, ISO: allocation})
+	runner := &recordingServiceRunner{}
+	delegated := false
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "app", rw: &bytes.Buffer{},
+		serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+		removeServiceFunc: func(name string, opts RemoveOptions) (*RemoveReport, error) {
+			delegated = true
+			if name != "app" {
+				t.Fatalf("removed service = %q, want app", name)
+			}
+			return &RemoveReport{}, nil
+		},
+	}
+
+	if err := execer.removeCmdFunc(cli.RemoveFlags{Yes: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !delegated {
+		t.Fatal("ISO removal did not delegate to authoritative server coordinator")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("ISO removal called generic runner before coordinator: %#v", runner.calls)
 	}
 }
 

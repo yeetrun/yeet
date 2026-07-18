@@ -17,6 +17,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 )
 
 func TestVMSvcNetworkPlanUsesHostBridgeAndYeetNSPeer(t *testing.T) {
@@ -86,6 +87,408 @@ func TestVMSvcNetworkPlanUsesHostBridgeAndYeetNSPeer(t *testing.T) {
 	cleanup := plan.CleanupCommands()
 	if !containsCommand(cleanup, []string{"ip", "route", "del", "192.168.100.12/32", "dev", iface.Bridge}) {
 		t.Fatalf("cleanup commands = %#v, want guest route deletion", cleanup)
+	}
+}
+
+func TestVMISONetworkPlanUsesDedicatedTap(t *testing.T) {
+	plan := newVMNetworkPlan("devbox", []string{"iso"}, vmNetworkInputs{
+		ISOHostIP:  netip.MustParseAddr("172.30.0.1"),
+		ISOGuestIP: netip.MustParseAddr("172.30.0.2"),
+		ISOLink:    netip.MustParsePrefix("172.30.0.0/30"),
+		ISOTap:     "yi-devbox",
+	})
+	if len(plan.Interfaces) != 1 {
+		t.Fatalf("interfaces = %#v, want one", plan.Interfaces)
+	}
+	iface := plan.Interfaces[0]
+	if iface.Mode != "iso" || iface.Tap != "yi-devbox" || iface.Bridge != "" || iface.Parent != "" || iface.VLANDevice != "" {
+		t.Fatalf("ISO interface attachment = %#v", iface)
+	}
+	if iface.GuestIP != "172.30.0.2/30" || iface.Gateway != "172.30.0.1" || iface.DHCP {
+		t.Fatalf("ISO guest configuration = %#v", iface)
+	}
+	metadata := plan.MetadataNetworks()[0]
+	if !reflect.DeepEqual(metadata.Nameservers, []string{"172.30.0.1"}) {
+		t.Fatalf("nameservers = %#v", metadata.Nameservers)
+	}
+	if metadata.SearchDomains == nil || len(metadata.SearchDomains) != 0 {
+		t.Fatalf("search domains = %#v, want explicit empty", metadata.SearchDomains)
+	}
+	if metadata.DNSDefaultRoute == nil || !*metadata.DNSDefaultRoute {
+		t.Fatalf("DNS default route = %#v, want true", metadata.DNSDefaultRoute)
+	}
+	dbNetwork := plan.DBNetworks()[0]
+	if dbNetwork.IP != netip.MustParseAddr("172.30.0.2") || dbNetwork.Tap != "yi-devbox" || dbNetwork.Mode != "iso" {
+		t.Fatalf("persisted network = %#v", dbNetwork)
+	}
+
+	setup := plan.SetupCommands()
+	for _, want := range [][]string{
+		{"ip", "tuntap", "add", "yi-devbox", "mode", "tap"},
+		{"ip", "link", "set", "yi-devbox", "up"},
+		{"ip", "-4", "addr", "replace", "172.30.0.1/30", "dev", "yi-devbox"},
+		{"sysctl", "-w", "net.ipv4.conf.yi-devbox.rp_filter=1"},
+		{"sysctl", "-w", "net.ipv6.conf.yi-devbox.disable_ipv6=1"},
+	} {
+		if !containsCommand(setup, want) {
+			t.Fatalf("setup commands = %#v, missing %#v", setup, want)
+		}
+	}
+	if !reflect.DeepEqual(plan.CleanupCommands(), [][]string{{"ip", "link", "del", "yi-devbox"}}) {
+		t.Fatalf("cleanup commands = %#v", plan.CleanupCommands())
+	}
+}
+
+func TestVMNetworkPlanFromDBRehydratesISOAllocation(t *testing.T) {
+	allocation := &db.ISOAllocation{
+		Kind:          "vm",
+		Link:          netip.MustParsePrefix("172.30.0.0/30"),
+		HostIP:        netip.MustParseAddr("172.30.0.1"),
+		PeerIP:        netip.MustParseAddr("172.30.0.2"),
+		Interface:     "yi-devbox",
+		DesiredModes:  []string{"iso"},
+		State:         "reserved",
+		PolicyVersion: 1,
+	}
+	plan := vmNetworkPlanFromDB("devbox", []db.VMNetworkConfig{{
+		Mode: "iso", Interface: "eth0", Tap: "yi-devbox", IP: allocation.PeerIP,
+	}}, allocation)
+	if len(plan.Interfaces) != 1 {
+		t.Fatalf("interfaces = %#v", plan.Interfaces)
+	}
+	iface := plan.Interfaces[0]
+	if iface.GuestIP != "172.30.0.2/30" || iface.Gateway != "172.30.0.1" || iface.Tap != "yi-devbox" {
+		t.Fatalf("rehydrated ISO interface = %#v", iface)
+	}
+	if _, err := vmNetworkSetupCommands(plan); err != nil {
+		t.Fatalf("rehydrated ISO plan is not executable: %v", err)
+	}
+}
+
+func TestEnsureVMISONetworkVerifiesPolicyBeforeTapAndTapBeforeReady(t *testing.T) {
+	server := newTestServer(t)
+	root := server.defaultServiceRootDir("devbox")
+	if err := markVMJailerReady(root); err != nil {
+		t.Fatal(err)
+	}
+	allocation := &db.ISOAllocation{
+		Kind:             "vm",
+		State:            "reserved",
+		Link:             netip.MustParsePrefix("172.30.0.0/30"),
+		HostIP:           netip.MustParseAddr("172.30.0.1"),
+		PeerIP:           netip.MustParseAddr("172.30.0.2"),
+		Interface:        "yi-devbox",
+		PeerInterface:    "yo-devbox",
+		DesiredModes:     []string{"iso"},
+		AllocatorVersion: 1,
+		PolicyVersion:    1,
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"devbox": {
+			Name: "devbox", ServiceRoot: root, ServiceType: db.ServiceTypeVM, ISO: allocation,
+			VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, SetupState: "ready", Networks: []db.VMNetworkConfig{{Mode: "iso", Interface: "eth0", Tap: allocation.Interface, IP: allocation.PeerIP}}},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldBoundary := ensureVMISONetworkForReconcile
+	oldVerify := verifyVMNetworkPlanForReconcile
+	oldRunner := vmNetworkReconcileRunner
+	oldIdentity := vmNetworkEnsureRuntimeIdentity
+	var events []string
+	ensureVMISONetworkForReconcile = func(_ context.Context, gotServer *Server, service string, markReady bool, attach func(*db.DataView, vmNetworkPlan, *db.ISOAllocation) error) error {
+		events = append(events, "ensure-iso-policy", "verify-iso-policy")
+		current, err := gotServer.getDB()
+		if err != nil {
+			return err
+		}
+		plan, allocation, err := vmNetworkPlanAndISOForService(current, service)
+		if err != nil {
+			return err
+		}
+		if err := attach(current, plan, allocation); err != nil {
+			return err
+		}
+		if markReady {
+			events = append(events, "mark-ready")
+		}
+		return nil
+	}
+	verifyVMNetworkPlanForReconcile = func(context.Context, vmNetworkPlan) error {
+		events = append(events, "verify-tap")
+		return nil
+	}
+	vmNetworkReconcileRunner = func(command []string) error {
+		if len(command) >= 3 && reflect.DeepEqual(command[:3], []string{"ip", "tuntap", "add"}) {
+			events = append(events, "create-tap")
+		}
+		return nil
+	}
+	vmNetworkEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) { return vmRuntimeIdentity{UID: 812, GID: 813}, nil }
+	t.Cleanup(func() {
+		ensureVMISONetworkForReconcile = oldBoundary
+		verifyVMNetworkPlanForReconcile = oldVerify
+		vmNetworkReconcileRunner = oldRunner
+		vmNetworkEnsureRuntimeIdentity = oldIdentity
+	})
+
+	if err := server.EnsureVMNetwork(context.Background(), "devbox"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ensure-iso-policy", "verify-iso-policy", "create-tap", "verify-tap", "mark-ready"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
+func TestReconcileVMISONetworkPreservesStoppedLifecycle(t *testing.T) {
+	server, allocation := newISOReconcileVMTestServer(t, iso.StateStopped)
+	root := server.defaultServiceRootDir("devbox")
+	if err := markVMJailerReady(root); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.ServiceRoot = root
+		service.VM.SetupState = "ready"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldEnsure := ensureVMISONetworkForReconcile
+	oldLive := vmNetworkLiveStateCollector
+	oldVerify := verifyVMNetworkPlanForReconcile
+	oldRunner := vmNetworkReconcileRunner
+	oldIdentity := vmNetworkEnsureRuntimeIdentity
+	ensureVMISONetworkForReconcile = func(_ context.Context, gotServer *Server, service string, markReady bool, attach func(*db.DataView, vmNetworkPlan, *db.ISOAllocation) error) error {
+		if markReady {
+			t.Fatal("background reconciliation requested lifecycle promotion")
+		}
+		current, err := gotServer.getDB()
+		if err != nil {
+			return err
+		}
+		plan, allocation, err := vmNetworkPlanAndISOForService(current, service)
+		if err != nil {
+			return err
+		}
+		return attach(current, plan, allocation)
+	}
+	vmNetworkLiveStateCollector = func(context.Context) (vmNetworkLiveState, error) { return vmNetworkLiveState{}, nil }
+	verifyVMNetworkPlanForReconcile = func(context.Context, vmNetworkPlan) error { return nil }
+	vmNetworkReconcileRunner = func([]string) error { return nil }
+	vmNetworkEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) { return vmRuntimeIdentity{UID: 812, GID: 813}, nil }
+	t.Cleanup(func() {
+		ensureVMISONetworkForReconcile = oldEnsure
+		vmNetworkLiveStateCollector = oldLive
+		verifyVMNetworkPlanForReconcile = oldVerify
+		vmNetworkReconcileRunner = oldRunner
+		vmNetworkEnsureRuntimeIdentity = oldIdentity
+	})
+
+	if err := server.reconcileVMNetworks(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := getTestService(t, server, "devbox").ISO.State; got != string(iso.StateStopped) {
+		t.Fatalf("ISO state = %q, want stopped", got)
+	}
+	if got := getTestService(t, server, "devbox").ISO.Interface; got != allocation.Interface {
+		t.Fatalf("ISO interface = %q, want %q", got, allocation.Interface)
+	}
+}
+
+func TestEnsureVMISONetworkRejectsIncompleteProvisionBeforeAttachment(t *testing.T) {
+	server, _ := newISOReconcileVMTestServer(t, iso.StateReserved)
+	root := server.defaultServiceRootDir("devbox")
+	_, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.ServiceRoot = root
+		service.VM.SetupState = "reserved"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldIdentity := vmNetworkEnsureRuntimeIdentity
+	oldEnsure := ensureVMISONetworkForReconcile
+	vmNetworkEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) { return vmRuntimeIdentity{UID: 812, GID: 813}, nil }
+	attached := false
+	ensureVMISONetworkForReconcile = func(ctx context.Context, server *Server, service string, markReady bool, attach func(*db.DataView, vmNetworkPlan, *db.ISOAllocation) error) error {
+		return ensureVMISONetworkAttachment(ctx, server, service, markReady, func(dv *db.DataView, plan vmNetworkPlan, allocation *db.ISOAllocation) error {
+			attached = true
+			return attach(dv, plan, allocation)
+		})
+	}
+	t.Cleanup(func() {
+		vmNetworkEnsureRuntimeIdentity = oldIdentity
+		ensureVMISONetworkForReconcile = oldEnsure
+	})
+
+	err = server.EnsureVMNetwork(context.Background(), "devbox")
+	if err == nil || !strings.Contains(err.Error(), "provisioning is incomplete") {
+		t.Fatalf("EnsureVMNetwork error = %v", err)
+	}
+	if attached {
+		t.Fatal("incomplete VM reached ISO attachment")
+	}
+	_, _, err = server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.SetupState = "ready"
+		service.ISO.RemoveRequested = true
+		service.ISO.State = string(iso.StateTombstoned)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = server.EnsureVMNetwork(context.Background(), "devbox")
+	if err == nil || !strings.Contains(err.Error(), "removal or cleanup is in progress") {
+		t.Fatalf("EnsureVMNetwork removal error = %v", err)
+	}
+	if attached {
+		t.Fatal("removing VM reached ISO attachment")
+	}
+}
+
+func TestEnsureVMISONetworkRechecksRemovalStateAfterAcquiringLock(t *testing.T) {
+	server, _ := newISOReconcileVMTestServer(t, iso.StateStopped)
+	root := server.defaultServiceRootDir("devbox")
+	_, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.ServiceRoot = root
+		service.VM.SetupState = "ready"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := acquireISOOperationLock(context.Background(), server.cfg.RootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAcquire := acquireISOOperationLockForRuntime
+	oldIdentity := vmNetworkEnsureRuntimeIdentity
+	waiting := make(chan struct{}, 1)
+	acquireISOOperationLockForRuntime = func(ctx context.Context, root string) (func(), error) {
+		waiting <- struct{}{}
+		return acquireISOOperationLock(ctx, root)
+	}
+	vmNetworkEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) { return vmRuntimeIdentity{UID: 812, GID: 813}, nil }
+	t.Cleanup(func() {
+		acquireISOOperationLockForRuntime = oldAcquire
+		vmNetworkEnsureRuntimeIdentity = oldIdentity
+	})
+	result := make(chan error, 1)
+	go func() { result <- server.EnsureVMNetwork(context.Background(), "devbox") }()
+	<-waiting
+	_, _, err = server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.ISO.RemoveRequested = true
+		service.ISO.State = string(iso.StateTombstoned)
+		return nil
+	})
+	if err != nil {
+		unlock()
+		t.Fatal(err)
+	}
+	unlock()
+	if err := <-result; err == nil || !strings.Contains(err.Error(), "removal or cleanup is in progress") {
+		t.Fatalf("EnsureVMNetwork error = %v", err)
+	}
+	stored := getTestService(t, server, "devbox").ISO
+	if !stored.RemoveRequested || stored.State != string(iso.StateTombstoned) {
+		t.Fatalf("lifecycle state was overwritten: %#v", stored)
+	}
+}
+
+func TestVMISONetworkPlanMustExactlyMatchAllocation(t *testing.T) {
+	server, _ := newISOReconcileVMTestServer(t, iso.StateStopped)
+	_, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.Networks = []db.VMNetworkConfig{{Mode: "svc", Interface: "eth0", Tap: "yvm-devbox-s0"}}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dv, err := server.getDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = vmNetworkPlanAndISOForService(dv, "devbox")
+	if err == nil || !strings.Contains(err.Error(), "does not match its allocation") {
+		t.Fatalf("vmNetworkPlanAndISOForService error = %v", err)
+	}
+}
+
+func TestVMISOAttachmentRequiresDNSAndOnlyStartGateMarksReady(t *testing.T) {
+	server, _ := newISOReconcileVMTestServer(t, iso.StateStopped)
+	_, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.SetupState = "ready"
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withISORuntimeBackend(t, "nft")
+	withSuccessfulISORuntimeCommands(t)
+	oldDNS := verifyISODNSReadyForVM
+	var events []string
+	verifyISODNSReadyForVM = func(context.Context) error {
+		events = append(events, "verify-dns")
+		return nil
+	}
+	t.Cleanup(func() { verifyISODNSReadyForVM = oldDNS })
+
+	attach := func(*db.DataView, vmNetworkPlan, *db.ISOAllocation) error {
+		events = append(events, "attach")
+		return nil
+	}
+	if err := ensureVMISONetworkAttachment(context.Background(), server, "devbox", false, attach); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(events, []string{"attach", "verify-dns"}) {
+		t.Fatalf("events = %#v", events)
+	}
+	if got := getTestService(t, server, "devbox").ISO.State; got != string(iso.StateStopped) {
+		t.Fatalf("background attachment state = %q, want stopped", got)
+	}
+
+	if err := ensureVMISONetworkAttachment(context.Background(), server, "devbox", true, func(*db.DataView, vmNetworkPlan, *db.ISOAllocation) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if got := getTestService(t, server, "devbox").ISO.State; got != string(iso.StateReady) {
+		t.Fatalf("start-gated attachment state = %q, want ready", got)
+	}
+}
+
+func TestVerifyVMISONetworkRejectsLiveEvidenceDrift(t *testing.T) {
+	plan := newVMNetworkPlan("devbox", []string{"iso"}, vmNetworkInputs{
+		ISOHostIP: netip.MustParseAddr("172.30.0.1"), ISOGuestIP: netip.MustParseAddr("172.30.0.2"),
+		ISOLink: netip.MustParsePrefix("172.30.0.0/30"), ISOTap: "yi-devbox",
+	})
+	tests := []struct {
+		name    string
+		address string
+		sysctl  string
+		want    string
+	}{
+		{name: "bridge master", address: `[{"ifname":"yi-devbox","master":"br0","addr_info":[{"family":"inet","local":"172.30.0.1","prefixlen":30}]}]`, sysctl: "1", want: "attached to a bridge"},
+		{name: "extra IPv4", address: `[{"ifname":"yi-devbox","addr_info":[{"family":"inet","local":"172.30.0.1","prefixlen":30},{"family":"inet","local":"172.30.0.9","prefixlen":30}]}]`, sysctl: "1", want: "unexpected IPv4"},
+		{name: "IPv6", address: `[{"ifname":"yi-devbox","addr_info":[{"family":"inet","local":"172.30.0.1","prefixlen":30},{"family":"inet6","local":"fe80::1","prefixlen":64}]}]`, sysctl: "1", want: "IPv6 address"},
+		{name: "source validation", address: `[{"ifname":"yi-devbox","addr_info":[{"family":"inet","local":"172.30.0.1","prefixlen":30}]}]`, sysctl: "0", want: "is not 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldVerify := vmNetworkVerifyCommand
+			vmNetworkVerifyCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "ip" {
+					return []byte(tt.address), nil
+				}
+				return []byte(tt.sysctl), nil
+			}
+			t.Cleanup(func() { vmNetworkVerifyCommand = oldVerify })
+			if err := verifyVMNetworkPlan(context.Background(), plan); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("verifyVMNetworkPlan error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 

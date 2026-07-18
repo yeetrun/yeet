@@ -112,6 +112,57 @@ func TestValidateRunDraftRejectsUnsupportedNetworkModes(t *testing.T) {
 	}
 }
 
+func TestRunDraftISOCompatibility(t *testing.T) {
+	tmp := t.TempDir()
+	composePath := filepath.Join(tmp, "compose.yml")
+	if err := os.WriteFile(composePath, []byte("services:\n  svc-a:\n    image: busybox\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	cronPath := filepath.Join(tmp, "job.sh")
+	if err := os.WriteFile(cronPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write cron payload: %v", err)
+	}
+	pythonPath := filepath.Join(tmp, "main.py")
+	if err := os.WriteFile(pythonPath, []byte("print('ok')\n"), 0o644); err != nil {
+		t.Fatalf("write python payload: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		draft     RunDraft
+		wantField string
+		wantErr   string
+	}{
+		{name: "VM ISO", draft: RunDraft{Service: "devbox", Host: "catch", Payload: "vm://ubuntu/26.04", PayloadKind: serviceTypeVM, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
+		{name: "container ISO TS", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}},
+		{name: "auto compose ISO", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: composePath, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
+		{name: "file python ISO", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: pythonPath, PayloadKind: "file", Network: RunDraftNetwork{Modes: []string{"iso"}}}},
+		{name: "ISO SVC", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: composePath, PayloadKind: "compose", Network: RunDraftNetwork{Modes: []string{"iso", "svc"}}}, wantField: "network.modes", wantErr: "cannot combine"},
+		{name: "VM ISO TS", draft: RunDraft{Service: "devbox", Host: "catch", Payload: "vm://ubuntu/26.04", PayloadKind: serviceTypeVM, Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "VMs support only iso"},
+		{name: "cron ISO", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: serviceTypeCron, Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso"}}}, wantField: "network.modes", wantErr: "cron root services"},
+		{name: "ISO publish", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso"}, Publish: []string{"8080:80"}}}, wantField: "network.publish", wantErr: "published ports"},
+		{name: "ISO publish reset", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso"}, PublishReset: true}}, wantField: "network.publish", wantErr: "published ports"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, result := validateRunDraftLocal(tt.draft, tmp)
+			if tt.wantErr == "" {
+				if !result.OK {
+					t.Fatalf("validation failed: %#v", result.Errors)
+				}
+				return
+			}
+			for _, got := range result.Errors {
+				if got.Field == tt.wantField && strings.Contains(got.Message, tt.wantErr) {
+					return
+				}
+			}
+			t.Fatalf("validation errors = %#v, want %s containing %q", result.Errors, tt.wantField, tt.wantErr)
+		})
+	}
+}
+
 func TestValidateRunDraftRejectsInvalidMacvlanVLAN(t *testing.T) {
 	for _, tt := range []struct {
 		name    string

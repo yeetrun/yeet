@@ -5,20 +5,25 @@
 package catch
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/codecutil"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/netns"
+	"github.com/yeetrun/yeet/pkg/svc"
 )
 
 func TestFileInstallerRollbackInstalledGenerationRestoresCapturedGeneration(t *testing.T) {
@@ -278,6 +283,224 @@ func TestParseNetworkLANUsesHostDefaultRoute(t *testing.T) {
 	}
 	if installer.macvlan.Parent != "vmbr0" {
 		t.Fatalf("macvlan parent = %q, want %q", installer.macvlan.Parent, "vmbr0")
+	}
+}
+
+func TestParseNetworkISO(t *testing.T) {
+	tailscale := TailscaleOpts{Version: "1.2.3", AuthKey: "tskey-auth"}
+	macvlan := MacvlanOpts{Parent: "vmbr0", VLAN: 42, Mac: "02:00:00:00:00:42"}
+	for _, tt := range []struct {
+		raw     string
+		kind    iso.PayloadKind
+		wantISO bool
+		wantErr string
+	}{
+		{raw: "iso", kind: iso.PayloadContainer, wantISO: true},
+		{raw: "iso,ts", kind: iso.PayloadCompose, wantISO: true},
+		{raw: "iso,svc", kind: iso.PayloadCompose, wantErr: "cannot combine"},
+		{raw: "iso", kind: iso.PayloadNative, wantErr: "native root"},
+	} {
+		opts, err := parseNetworkForPayload(NetworkOpts{Interfaces: tt.raw, Tailscale: tailscale, Macvlan: macvlan}, tt.kind, false)
+		if tt.wantErr == "" {
+			if err != nil || opts.ISO != tt.wantISO {
+				t.Fatalf("parseNetworkForPayload(%q) = %#v, %v", tt.raw, opts, err)
+			}
+			if !reflect.DeepEqual(opts.Tailscale, tailscale) || !reflect.DeepEqual(opts.Macvlan, macvlan) {
+				t.Fatalf("parseNetworkForPayload(%q) lost options: %#v", tt.raw, opts)
+			}
+			continue
+		}
+		if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+			t.Fatalf("error = %v, want %q", err, tt.wantErr)
+		}
+	}
+}
+
+func TestNetworkPayloadKind(t *testing.T) {
+	for _, tt := range []struct {
+		serviceType db.ServiceType
+		want        iso.PayloadKind
+	}{
+		{serviceType: db.ServiceTypeVM, want: iso.PayloadVM},
+		{serviceType: db.ServiceTypeDockerCompose, want: iso.PayloadCompose},
+		{serviceType: db.ServiceTypeSystemd, want: iso.PayloadNative},
+	} {
+		if got := networkPayloadKind(tt.serviceType); got != tt.want {
+			t.Fatalf("networkPayloadKind(%q) = %q, want %q", tt.serviceType, got, tt.want)
+		}
+	}
+}
+
+func TestPreparePayloadISOValidationPrecedesComposeRewrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compose.yml")
+	original := []byte("services:\n  app:\n    image: busybox\n    ports:\n      - 80:80\n")
+	if err := os.WriteFile(path, original, 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	installer := &FileInstaller{
+		s: newTestServer(t),
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "app"},
+			Network:      NetworkOpts{Interfaces: "iso"},
+			Publish:      []string{"8080:80"},
+		},
+	}
+	if _, err := installer.preparePayloadInstall(path); err == nil || !strings.Contains(err.Error(), "published ports") {
+		t.Fatalf("preparePayloadInstall error = %v, want published ports rejection", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read compose after rejection: %v", err)
+	}
+	if !reflect.DeepEqual(after, original) {
+		t.Fatalf("compose was rewritten before ISO validation:\n%s", after)
+	}
+	if len(installer.artifacts) != 0 {
+		t.Fatalf("artifacts = %#v, want none before ISO validation", installer.artifacts)
+	}
+}
+
+func TestPreparePayloadISOFailsClosedOnRawComposePortInspection(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		compose string
+	}{
+		{
+			name: "long form port object",
+			compose: "services:\n  app:\n    image: busybox\n    ports:\n" +
+				"      - target: 80\n        published: 8080\n",
+		},
+		{
+			name:    "malformed raw ports",
+			compose: "services:\n  app:\n    image: busybox\n    ports: 8080:80\n",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "compose.yml")
+			original := []byte(tt.compose)
+			if err := os.WriteFile(path, original, 0o644); err != nil {
+				t.Fatalf("write compose: %v", err)
+			}
+			installer := &FileInstaller{
+				s: newTestServer(t),
+				cfg: FileInstallerCfg{
+					InstallerCfg: InstallerCfg{ServiceName: "app"},
+					Network:      NetworkOpts{Interfaces: "iso"},
+				},
+			}
+			if _, err := installer.preparePayloadInstall(path); err == nil || !strings.Contains(err.Error(), "inspect compose published ports") {
+				t.Fatalf("preparePayloadInstall error = %v, want fail-closed inspection error", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read compose after rejection: %v", err)
+			}
+			if !reflect.DeepEqual(after, original) {
+				t.Fatalf("compose changed before inspection rejection:\n%s", after)
+			}
+			if len(installer.artifacts) != 0 {
+				t.Fatalf("artifacts = %#v, want none before inspection rejection", installer.artifacts)
+			}
+		})
+	}
+}
+
+func TestPreparePayloadPublishResetClearsComposePorts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(path, []byte("services:\n  app:\n    image: busybox\n    ports:\n      - 8080:80\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	installer := &FileInstaller{
+		s: newTestServer(t),
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "app"},
+			PublishReset: true,
+		},
+	}
+	plan, err := installer.preparePayloadInstall(path)
+	if err != nil {
+		t.Fatalf("preparePayloadInstall: %v", err)
+	}
+	ports, err := readComposePorts(path, "app")
+	if err != nil {
+		t.Fatalf("readComposePorts: %v", err)
+	}
+	if len(ports) != 0 || !plan.publishSet || len(plan.publish) != 0 {
+		t.Fatalf("ports = %#v plan = %#v, want explicit empty publish state", ports, plan)
+	}
+}
+
+func TestValidateInstallNetworkRequestRejectsNativeISO(t *testing.T) {
+	service := &db.Service{
+		ServiceType: db.ServiceTypeSystemd,
+		ISO:         &db.ISOAllocation{DesiredModes: []string{"iso"}},
+	}
+	if err := validateInstallNetworkRequest(service); err == nil || !strings.Contains(err.Error(), "native root") {
+		t.Fatalf("validateInstallNetworkRequest error = %v, want native root rejection", err)
+	}
+}
+
+func TestPrepareNoBinaryPublishResetUsesPersistedISONetwork(t *testing.T) {
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("svc-reset", func(_ *db.Data, service *db.Service) error {
+		service.ServiceType = db.ServiceTypeDockerCompose
+		service.ISO = &db.ISOAllocation{DesiredModes: []string{"iso"}}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed ISO service: %v", err)
+	}
+	view, err := server.serviceView("svc-reset")
+	if err != nil {
+		t.Fatalf("serviceView: %v", err)
+	}
+	installer := &FileInstaller{
+		s:               server,
+		existingService: view,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "svc-reset"},
+			NoBinary:     true,
+			PublishReset: true,
+		},
+	}
+	if _, err := installer.prepareNoBinaryInstall(); !errors.Is(err, iso.ErrPublishedPorts) {
+		t.Fatalf("prepareNoBinaryInstall error = %v, want ErrPublishedPorts", err)
+	}
+	if len(installer.artifacts) != 0 {
+		t.Fatalf("artifacts = %#v, want none before ISO rejection", installer.artifacts)
+	}
+}
+
+func TestPrepareNoBinaryPublishUsesPersistedISONetwork(t *testing.T) {
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("svc-publish", func(_ *db.Data, service *db.Service) error {
+		service.ServiceType = db.ServiceTypeDockerCompose
+		service.ISO = &db.ISOAllocation{DesiredModes: []string{"iso"}}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed ISO service: %v", err)
+	}
+	view, err := server.serviceView("svc-publish")
+	if err != nil {
+		t.Fatalf("serviceView: %v", err)
+	}
+	installer := &FileInstaller{
+		s:               server,
+		existingService: view,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "svc-publish"},
+			NoBinary:     true,
+			Publish:      []string{"8080:80"},
+		},
+	}
+	if _, err := installer.prepareNoBinaryInstall(); !errors.Is(err, iso.ErrPublishedPorts) {
+		t.Fatalf("prepareNoBinaryInstall error = %v, want ErrPublishedPorts", err)
+	}
+	if len(installer.artifacts) != 0 {
+		t.Fatalf("artifacts = %#v, want none before ISO rejection", installer.artifacts)
+	}
+	service := testService(t, server, "svc-publish")
+	if len(service.Publish) != 0 {
+		t.Fatalf("persisted publish = %#v, want unchanged", service.Publish)
 	}
 }
 
@@ -1315,6 +1538,36 @@ func TestInstallerCloseStagesComposeSvcDNSOverlay(t *testing.T) {
 	}
 }
 
+func TestISOComposeOverlayBypassesLegacyDNSOverlay(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.ensureDirs("iso-compose", ""); err != nil {
+		t.Fatal(err)
+	}
+	composePath := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(composePath, []byte("services:\n  api:\n    image: nginx\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "iso-compose"},
+			Network:      NetworkOpts{Interfaces: "iso", Modes: []string{"iso"}, ISO: true},
+		},
+		artifacts: map[db.ArtifactName]string{db.ArtifactDockerComposeFile: composePath},
+	}
+	env := netns.Service{
+		ServiceName: "iso-compose",
+		ServiceIP:   netip.MustParsePrefix("192.168.100.3/24"),
+	}
+	if err := installer.writeDockerComposeNetwork(env); err != nil {
+		t.Fatal(err)
+	}
+	if path, ok := installer.artifacts[db.ArtifactDockerComposeNetwork]; ok {
+		raw, readErr := os.ReadFile(path)
+		t.Fatalf("ISO generated legacy DNS overlay %q (%q, %v)", path, raw, readErr)
+	}
+}
+
 func TestInstallerCloseStagesComposeLANOverlayWithoutYeetDNS(t *testing.T) {
 	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
 	hostDefaultRouteInterfaceFn = func() (string, error) { return "vmbr0", nil }
@@ -1614,6 +1867,140 @@ func TestInstallerNetworkPlanningCoversTailscaleTapAndMacvlanModes(t *testing.T)
 	}
 	if env.MacvlanParent != "eno1" || env.MacvlanVLAN != "7" || env.MacvlanMac != "02:00:00:00:00:07" {
 		t.Fatalf("macvlan env = parent %q vlan %q mac %q", env.MacvlanParent, env.MacvlanVLAN, env.MacvlanMac)
+	}
+}
+
+func TestISOTailscaleUsesPersistedRouterNamespaceWithoutChangingOrdinaryModes(t *testing.T) {
+	allocation := &db.ISOAllocation{
+		Kind:         string(iso.PayloadCompose),
+		NetNS:        "yeet-a172cedcae-ns",
+		DesiredModes: []string{"iso", "ts"},
+	}
+	env := netns.Service{ServiceName: "app"}
+	installer := &FileInstaller{
+		cfg:           FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "app"}},
+		tsNet:         &db.TailscaleNetwork{Interface: "yts-random"},
+		isoAllocation: allocation,
+	}
+	runIn, resolvConf, tapMode, err := installer.tailscaleNetNSMode(&env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runIn != allocation.NetNS || resolvConf != "" || tapMode {
+		t.Fatalf("ISO tailscale mode = run %q resolv %q tap %v, want persisted router namespace", runIn, resolvConf, tapMode)
+	}
+	if env.TailscaleTAPInterface != "" {
+		t.Fatalf("ISO router unexpectedly configured TAP interface %q", env.TailscaleTAPInterface)
+	}
+	if installer.tsNet.Interface != "ts0" {
+		t.Fatalf("ISO tailscaled interface = %q, want Task 7 policy identity ts0", installer.tsNet.Interface)
+	}
+	unit := newTailscaleSystemdUnit(tailscaleInstallPlan{
+		service: "app", runDir: "/srv/app/run", serviceTSDir: "/srv/app/tailscale",
+		runInNetNS: runIn, interfaceName: installer.tsNet.Interface,
+	})
+	if got := strings.Join(unit.Arguments, " "); !strings.Contains(got, "--tun=ts0") || strings.Contains(got, "--tun=yts-") {
+		t.Fatalf("ISO tailscaled unit args = %q, want persisted ts0 TUN", got)
+	}
+
+	plainISO := &FileInstaller{isoAllocation: &db.ISOAllocation{Kind: string(iso.PayloadCompose), NetNS: "yeet-plain-ns", DesiredModes: []string{"iso"}}}
+	if runIn, resolvConf, tapMode, err := plainISO.tailscaleNetNSMode(&netns.Service{}); err != nil || runIn != "" || resolvConf != "" || tapMode {
+		t.Fatalf("ordinary ISO without tailscale changed mode: %q %q %v", runIn, resolvConf, tapMode)
+	}
+}
+
+func TestISOTailscaleRejectsExitNodeBeforeSelectingNamespaceOrTUN(t *testing.T) {
+	for _, exitNode := range []string{"exit.example", " \texit.example\n"} {
+		t.Run(fmt.Sprintf("exit_node_%q", exitNode), func(t *testing.T) {
+			env := netns.Service{}
+			installer := &FileInstaller{
+				cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "app"}},
+				tsNet: &db.TailscaleNetwork{
+					Interface: "yts-random",
+					ExitNode:  exitNode,
+				},
+				isoAllocation: &db.ISOAllocation{
+					Kind:         string(iso.PayloadCompose),
+					NetNS:        "yeet-a172cedcae-ns",
+					DesiredModes: []string{"iso", "ts"},
+				},
+			}
+
+			runIn, resolvConf, tapMode, err := installer.tailscaleNetNSMode(&env)
+			if err == nil || !strings.Contains(err.Error(), "exit node") {
+				t.Fatalf("exit node %q error = %v, want fail-closed rejection", exitNode, err)
+			}
+			if runIn != "" || resolvConf != "" || tapMode {
+				t.Fatalf("exit node %q selected run=%q resolv=%q tap=%v before rejection", exitNode, runIn, resolvConf, tapMode)
+			}
+			if installer.tsNet.Interface != "yts-random" || env.TailscaleTAPInterface != "" {
+				t.Fatalf("exit node %q mutated TUN state: network=%q env=%q", exitNode, installer.tsNet.Interface, env.TailscaleTAPInterface)
+			}
+		})
+	}
+}
+
+func TestOrdinaryTailscaleStillAllowsExitNode(t *testing.T) {
+	env := netns.Service{}
+	installer := &FileInstaller{
+		tsNet: &db.TailscaleNetwork{
+			Interface: "yts-random",
+			ExitNode:  "exit.example",
+		},
+	}
+
+	runIn, resolvConf, tapMode, err := installer.tailscaleNetNSMode(&env)
+	if err != nil {
+		t.Fatalf("ordinary Tailscale exit node rejected: %v", err)
+	}
+	if runIn != "" || resolvConf != tailscaledResolvConf || !tapMode {
+		t.Fatalf("ordinary Tailscale mode = run %q resolv %q tap %v, want unchanged TAP mode", runIn, resolvConf, tapMode)
+	}
+	if installer.tsNet.ExitNode != "exit.example" || installer.tsNet.Interface != "yts-random" || env.TailscaleTAPInterface != "yts-random" {
+		t.Fatalf("ordinary Tailscale state changed: network=%#v env TUN=%q", installer.tsNet, env.TailscaleTAPInterface)
+	}
+}
+
+func TestISOTailscaleRejectsCorruptPersistedRouterNamespace(t *testing.T) {
+	tests := []struct {
+		name      string
+		namespace string
+		kind      iso.PayloadKind
+		modes     []string
+	}{
+		{name: "empty namespace", kind: iso.PayloadCompose, modes: []string{"iso", "ts"}},
+		{name: "unsafe namespace", namespace: "../host", kind: iso.PayloadCompose, modes: []string{"iso", "ts"}},
+		{name: "malformed namespace", namespace: "yeet-wrong-ns", kind: iso.PayloadCompose, modes: []string{"iso", "ts"}},
+		{name: "sibling namespace", namespace: "yeet-deadbeef00-ns", kind: iso.PayloadCompose, modes: []string{"iso", "ts"}},
+		{name: "VM allocation", namespace: "yeet-a172cedcae-ns", kind: iso.PayloadVM, modes: []string{"iso", "ts"}},
+		{name: "plain ISO", namespace: "yeet-a172cedcae-ns", kind: iso.PayloadCompose, modes: []string{"iso"}},
+		{name: "missing ISO", namespace: "yeet-a172cedcae-ns", kind: iso.PayloadCompose, modes: []string{"ts"}},
+		{name: "unnormalized modes", namespace: "yeet-a172cedcae-ns", kind: iso.PayloadCompose, modes: []string{"ts", "iso"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			installer := &FileInstaller{
+				cfg:   FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "app"}},
+				tsNet: &db.TailscaleNetwork{Interface: "yts-random"},
+				isoAllocation: &db.ISOAllocation{
+					Kind: string(tt.kind), NetNS: tt.namespace, DesiredModes: tt.modes,
+				},
+			}
+			runIn, _, tapMode, err := installer.tailscaleNetNSMode(&netns.Service{})
+			if err == nil || runIn != "" || tapMode {
+				t.Fatalf("allocation %#v selected run=%q tap=%v err=%v, want fail-closed error", installer.isoAllocation, runIn, tapMode, err)
+			}
+			if installer.tsNet.Interface != "yts-random" {
+				t.Fatalf("allocation %#v mutated TUN before validation: %q", installer.isoAllocation, installer.tsNet.Interface)
+			}
+		})
+	}
+}
+
+func TestISOTailscaleVMCombinationRemainsRejected(t *testing.T) {
+	_, err := parseNetworkForPayload(NetworkOpts{Interfaces: "iso,ts"}, iso.PayloadVM, false)
+	if err == nil || !strings.Contains(err.Error(), "VMs support only iso") {
+		t.Fatalf("parseNetworkForPayload VM iso,ts error = %v", err)
 	}
 }
 
@@ -1980,6 +2367,208 @@ func TestConfigureNetworkAndStageInstallSurfaceErrors(t *testing.T) {
 	if err := installer.configureAndStageInstall(fileInstallPlan{}); err == nil || !strings.Contains(err.Error(), "failed to configure network") {
 		t.Fatalf("configureAndStageInstall error = %v, want wrapped network failure", err)
 	}
+}
+
+func TestConfigureAndStageInstallTransitionsISOToSvcTailscaleAndHost(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		interfaces string
+		modes      []string
+		configure  func(*FileInstaller)
+		assert     func(*testing.T, db.ServiceView)
+	}{
+		{
+			name:       "svc",
+			interfaces: "svc",
+			modes:      []string{"svc"},
+			configure: func(installer *FileInstaller) {
+				installer.svcNet = &db.SvcNetwork{IPv4: netip.MustParseAddr("172.17.0.27")}
+				installer.artifacts[db.ArtifactNetNSService] = "/new/yeet-app-ns.service"
+			},
+			assert: func(t *testing.T, service db.ServiceView) {
+				t.Helper()
+				if !service.SvcNetwork().Valid() || service.TSNet().Valid() || service.Macvlan().Valid() {
+					t.Fatalf("svc replacement network = %#v", service.AsStruct())
+				}
+			},
+		},
+		{
+			name:       "tailscale",
+			interfaces: "ts",
+			modes:      []string{"ts"},
+			configure: func(installer *FileInstaller) {
+				installer.tsNet = &db.TailscaleNetwork{Interface: "yts-test", Version: "1.88.2"}
+				installer.artifacts[db.ArtifactTSService] = "/new/yeet-app-ts.service"
+			},
+			assert: func(t *testing.T, service db.ServiceView) {
+				t.Helper()
+				if !service.TSNet().Valid() || service.SvcNetwork().Valid() || service.Macvlan().Valid() {
+					t.Fatalf("Tailscale replacement network = %#v", service.AsStruct())
+				}
+			},
+		},
+		{
+			name:       "explicit host",
+			interfaces: "host",
+			modes:      nil,
+			configure:  func(*FileInstaller) {},
+			assert: func(t *testing.T, service db.ServiceView) {
+				t.Helper()
+				if service.SvcNetwork().Valid() || service.TSNet().Valid() || service.Macvlan().Valid() {
+					t.Fatalf("host replacement retained managed network = %#v", service.AsStruct())
+				}
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server, installer := newFileInstallerISOTransitionTest(t, tt.interfaces, tt.modes)
+			tt.configure(installer)
+			adapterStarts := 0
+			installer.transitionFromISO = func(ctx context.Context, service string, desired []string, steps isoTransitionSteps) error {
+				wrapped := &fileInstallerTransitionTestSteps{isoTransitionSteps: steps, starts: &adapterStarts}
+				return server.transitionFromISOWith(ctx, service, desired, wrapped)
+			}
+
+			plan := fileInstallPlan{detectedServiceType: db.ServiceTypeDockerCompose}
+			if err := installer.configureAndStageInstall(plan); err != nil {
+				t.Fatal(err)
+			}
+			if !installer.transitionHandled || adapterStarts != 1 {
+				t.Fatalf("transition handled = %v, starts = %d, want true and one adapter start", installer.transitionHandled, adapterStarts)
+			}
+			if err := installer.installIfRequested(); err != nil {
+				t.Fatalf("StageOnly installIfRequested: %v", err)
+			}
+			dv, err := server.cfg.DB.Get()
+			if err != nil {
+				t.Fatal(err)
+			}
+			service := dv.Services().Get("app")
+			if service.ISO().Valid() {
+				t.Fatalf("successful transition retained ISO: %#v", service.ISO().AsStruct())
+			}
+			tt.assert(t, service)
+			artifact := service.AsStruct().Artifacts[db.ArtifactDockerComposeFile]
+			if got := artifact.Refs[db.Gen(7)]; got != "/old/compose-generation-7.yml" {
+				t.Fatalf("generation 7 payload = %q, want preserved", got)
+			}
+			if got := artifact.Refs["staged"]; got != "/new/compose-staged.yml" {
+				t.Fatalf("staged payload = %q, want new payload", got)
+			}
+			if service.Generation() != 7 {
+				t.Fatalf("generation = %d, want unchanged staged generation 7", service.Generation())
+			}
+		})
+	}
+}
+
+func TestConfigureAndStageInstallRetainsISOWhenConcreteTransitionCleanupFails(t *testing.T) {
+	server, installer := newFileInstallerISOTransitionTest(t, "svc", []string{"svc"})
+	installer.svcNet = &db.SvcNetwork{IPv4: netip.MustParseAddr("172.17.0.27")}
+	adapterStarts := 0
+	installer.transitionFromISO = func(ctx context.Context, service string, desired []string, steps isoTransitionSteps) error {
+		wrapped := &fileInstallerTransitionTestSteps{
+			isoTransitionSteps: steps,
+			cleanErr:           fmt.Errorf("endpoint absence is uncertain"),
+			starts:             &adapterStarts,
+		}
+		return server.transitionFromISOWith(ctx, service, desired, wrapped)
+	}
+
+	err := installer.configureAndStageInstall(fileInstallPlan{detectedServiceType: db.ServiceTypeDockerCompose})
+	if err == nil || !strings.Contains(err.Error(), "endpoint absence is uncertain") {
+		t.Fatalf("configureAndStageInstall error = %v, want cleanup failure", err)
+	}
+	if installer.transitionHandled || adapterStarts != 0 {
+		t.Fatalf("transition handled = %v, starts = %d, want false and no replacement start", installer.transitionHandled, adapterStarts)
+	}
+	dv, getErr := server.cfg.DB.Get()
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	service := dv.Services().Get("app")
+	if !service.ISO().Valid() || service.ISO().State() != string(iso.StateTombstoned) || service.SvcNetwork().Valid() {
+		t.Fatalf("failed concrete transition state = %#v, want ISO tombstone and no replacement", service.AsStruct())
+	}
+	if _, staged := service.AsStruct().Artifacts[db.ArtifactDockerComposeFile].Refs["staged"]; staged {
+		t.Fatalf("replacement payload staged after cleanup failure: %#v", service.AsStruct().Artifacts)
+	}
+}
+
+type fileInstallerTransitionTestSteps struct {
+	isoTransitionSteps
+	cleanErr error
+	starts   *int
+}
+
+func (s *fileInstallerTransitionTestSteps) StopISO(context.Context, string) error {
+	return nil
+}
+
+func (s *fileInstallerTransitionTestSteps) CleanISO(context.Context, string) error {
+	return s.cleanErr
+}
+
+func (s *fileInstallerTransitionTestSteps) VerifyISOAbsent(context.Context, string) error {
+	return nil
+}
+
+func (s *fileInstallerTransitionTestSteps) StartReplacement(ctx context.Context, service string, prepared isoReplacementNetwork) error {
+	(*s.starts)++
+	return s.isoTransitionSteps.StartReplacement(ctx, service, prepared)
+}
+
+func newFileInstallerISOTransitionTest(t *testing.T, interfaces string, modes []string) (*Server, *FileInstaller) {
+	t.Helper()
+	withISORuntimeBackend(t, netns.BackendNFT)
+	oldEnsurePolicy := ensureISOPolicyForRuntime
+	oldVerifyPolicy := verifyISOPolicyForRuntime
+	ensureISOPolicyForRuntime = func(context.Context, netns.ISOPolicyRules) error { return nil }
+	verifyISOPolicyForRuntime = func(context.Context, netns.ISOPolicyRules) error { return nil }
+	t.Cleanup(func() {
+		ensureISOPolicyForRuntime = oldEnsurePolicy
+		verifyISOPolicyForRuntime = oldVerifyPolicy
+	})
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{
+		"app": testISORuntimeAllocation("app", iso.StateReady),
+	})
+	if err := server.ensureDirs("app", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
+		service.ServiceType = db.ServiceTypeDockerCompose
+		service.Generation = 7
+		service.Artifacts = db.ArtifactStore{
+			db.ArtifactDockerComposeFile: {
+				Refs: map[db.ArtifactRef]string{db.Gen(7): "/old/compose-generation-7.yml"},
+			},
+			db.ArtifactDockerComposeNetwork: {
+				Refs: map[db.ArtifactRef]string{db.Gen(7): "/old/iso-network-generation-7.yml"},
+			},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := server.serviceView("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "app"},
+			Network:      NetworkOpts{Interfaces: interfaces, Modes: slices.Clone(modes)},
+			StageOnly:    true,
+		},
+		existingService: view,
+		serviceRoot:     server.defaultServiceRootDir("app"),
+		artifacts: map[db.ArtifactName]string{
+			db.ArtifactDockerComposeFile: "/new/compose-staged.yml",
+		},
+	}
+	installer.lazyNetwork.MustSet(&networkConfig{})
+	return server, installer
 }
 
 func TestNewSystemdUnitAppliesNetworkNamespaceFields(t *testing.T) {
@@ -2371,4 +2960,408 @@ func assertInstallerFileContent(t *testing.T, path, want string) {
 	if string(raw) != want {
 		t.Fatalf("file %q content = %q, want %q", path, string(raw), want)
 	}
+}
+
+func TestISOInstallOrdersAdmissionPolicyAndWorkload(t *testing.T) {
+	recorder := newISOInstallRecorder(t)
+
+	if err := recorder.installer.installISOCompose(context.Background(), recorder); err != nil {
+		t.Fatalf("installISOCompose: %v", err)
+	}
+
+	want := []string{
+		"resolve-base", "admit-base", "reserve", "render-overlay", "resolve-merged", "admit-merged",
+		"install-dns", "ensure-policy", "verify-policy", "ensure-topology", "verify-topology",
+		"install-tailscale", "pull", "build", "attach-network", "start-aux", "compose-up",
+		"inspect-runtime", "mark-ready",
+	}
+	if !reflect.DeepEqual(recorder.events, want) {
+		t.Fatalf("install order = %#v, want %#v", recorder.events, want)
+	}
+}
+
+func TestPrepareISOComposeRunsCanonicalAdmissionBeforeReservationAndStagesExactOverlay(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		data.ISOPool = &db.ISOPool{Prefix: netip.MustParsePrefix("172.30.0.0/16"), AllocatorVersion: iso.AllocatorVersion, PolicyVersion: iso.PolicyVersion}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	serviceRoot := server.defaultServiceRootDir("app")
+	for _, dir := range []string{serviceBinDirForRoot(serviceRoot), serviceDataDirForRoot(serviceRoot)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	composePath := filepath.Join(serviceBinDirForRoot(serviceRoot), "compose.yml")
+	if err := os.WriteFile(composePath, []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "app"},
+			Network:      NetworkOpts{Interfaces: "iso", Modes: []string{"iso"}, ISO: true},
+		},
+		artifacts:   map[db.ArtifactName]string{db.ArtifactDockerComposeFile: composePath},
+		serviceRoot: serviceRoot,
+	}
+	var calls [][]string
+	resolve := func(_ context.Context, opts svc.ComposeResolveOptions) ([]byte, error) {
+		calls = append(calls, slices.Clone(opts.Files))
+		if len(opts.Files) == 1 {
+			if dv, err := server.cfg.DB.Get(); err != nil {
+				return nil, err
+			} else if service, ok := dv.Services().GetOk("app"); ok && service.ISO().Valid() {
+				return nil, errors.New("allocation existed before base admission")
+			}
+			return []byte(`{"name":"catch-app","networks":{"default":{"name":"catch-app_default","ipam":{}}},"services":{"api":{"image":"nginx","networks":{"default":null}}}}`), nil
+		}
+		allocation, err := installer.persistedISOAllocation()
+		if err != nil {
+			return nil, err
+		}
+		return []byte(fmt.Sprintf(`{
+			"name":"catch-app",
+			"networks":{"default":{"name":"catch-app_default","driver":"yeet","driver_opts":{"dev.catchit.mode":"iso","dev.catchit.netns":"/var/run/netns/%s"},"enable_ipv6":false,"ipam":{"config":[{"subnet":"%s","gateway":"%s"}]}}},
+			"services":{"api":{"image":"nginx","dns":["%s"],"networks":{"default":{"ipv4_address":"%s"}}}}
+		}`, allocation.NetNS, allocation.Project, allocation.Gateway, allocation.Gateway, allocation.Components["api"].Address)), nil
+	}
+
+	model, err := installer.prepareISOCompose(context.Background(), resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(model.Components, []string{"api"}) || len(calls) != 2 || len(calls[0]) != 1 || len(calls[1]) != 2 {
+		t.Fatalf("model/calls = %#v/%#v, want admitted api and base then merged resolution", model, calls)
+	}
+	allocation, err := installer.persistedISOAllocation()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if installer.isoAllocation == nil || !reflect.DeepEqual(installer.isoAllocation, allocation) {
+		t.Fatalf("installer allocation = %#v, want persisted same-service %#v", installer.isoAllocation, allocation)
+	}
+	overlayPath := installer.artifacts[db.ArtifactDockerComposeNetwork]
+	if overlayPath == "" {
+		t.Fatal("ISO Compose overlay was not staged")
+	}
+	if raw, err := os.ReadFile(overlayPath); err != nil || !strings.Contains(string(raw), allocation.Components["api"].Address.String()) {
+		t.Fatalf("overlay = %q, %v; want persisted component address", raw, err)
+	}
+}
+
+func TestPrepareISOComposeRejectsMergedComponentSetDriftAndQuarantines(t *testing.T) {
+	server := newTestServer(t)
+	if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		data.ISOPool = &db.ISOPool{Prefix: netip.MustParsePrefix("172.30.0.0/16"), AllocatorVersion: iso.AllocatorVersion, PolicyVersion: iso.PolicyVersion}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	serviceRoot := server.defaultServiceRootDir("app")
+	for _, dir := range []string{serviceBinDirForRoot(serviceRoot), serviceDataDirForRoot(serviceRoot)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	composePath := filepath.Join(serviceBinDirForRoot(serviceRoot), "compose.yml")
+	if err := os.WriteFile(composePath, []byte("services: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "app"},
+			Network:      NetworkOpts{Interfaces: "iso", Modes: []string{"iso"}, ISO: true},
+		},
+		artifacts:   map[db.ArtifactName]string{db.ArtifactDockerComposeFile: composePath},
+		serviceRoot: serviceRoot,
+	}
+	resolveCalls := 0
+	resolve := func(_ context.Context, opts svc.ComposeResolveOptions) ([]byte, error) {
+		resolveCalls++
+		if len(opts.Files) == 1 {
+			return []byte(`{"name":"catch-app","networks":{"default":{"name":"catch-app_default","ipam":{}}},"services":{"api":{"image":"nginx","networks":{"default":null}},"worker":{"image":"nginx","networks":{"default":null}}}}`), nil
+		}
+		allocation, err := installer.persistedISOAllocation()
+		if err != nil {
+			return nil, err
+		}
+		return []byte(fmt.Sprintf(`{
+			"name":"catch-app",
+			"networks":{"default":{"name":"catch-app_default","driver":"yeet","driver_opts":{"dev.catchit.mode":"iso","dev.catchit.netns":"/var/run/netns/%s"},"enable_ipv6":false,"ipam":{"config":[{"subnet":"%s","gateway":"%s"}]}}},
+			"services":{"api":{"image":"nginx","dns":["%s"],"networks":{"default":{"ipv4_address":"%s"}}}}
+		}`, allocation.NetNS, allocation.Project, allocation.Gateway, allocation.Gateway, allocation.Components["api"].Address)), nil
+	}
+
+	_, err := installer.prepareISOCompose(context.Background(), resolve)
+	if err == nil || !strings.Contains(err.Error(), "overlay changed Compose components") {
+		t.Fatalf("prepareISOCompose error = %v, want exact component-set rejection", err)
+	}
+	if resolveCalls != 2 {
+		t.Fatalf("resolve calls = %d, want base and merged only", resolveCalls)
+	}
+	allocation, loadErr := installer.persistedISOAllocation()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if allocation.State != string(iso.StateQuarantined) || !strings.Contains(allocation.LastError, "overlay changed Compose components") {
+		t.Fatalf("allocation = %#v, want quarantined component drift", allocation)
+	}
+}
+
+func TestISOInstallStopsBeforeWorkloadSideEffectsAtSecurityFailures(t *testing.T) {
+	for _, phase := range []string{
+		"resolve-base", "admit-base", "reserve", "render-overlay", "resolve-merged", "admit-merged",
+		"install-dns", "ensure-policy", "verify-policy", "ensure-topology", "verify-topology",
+		"install-tailscale", "pull", "build",
+	} {
+		t.Run(phase, func(t *testing.T) {
+			recorder := newISOInstallRecorder(t)
+			recorder.failAt = phase
+
+			err := recorder.installer.installISOCompose(context.Background(), recorder)
+			if err == nil || !strings.Contains(err.Error(), phase) {
+				t.Fatalf("installISOCompose error = %v, want %q failure", err, phase)
+			}
+			for _, forbidden := range []string{"attach-network", "start-aux", "compose-up"} {
+				if slices.Contains(recorder.events, forbidden) {
+					t.Fatalf("%s ran after %s failure: %#v", forbidden, phase, recorder.events)
+				}
+			}
+			wantTail := []string{phase, "compose-down-remove-orphans", "quarantine"}
+			if len(recorder.events) < len(wantTail) {
+				t.Fatalf("security failure events after %s = %#v, want tail %#v", phase, recorder.events, wantTail)
+			}
+			if got := recorder.events[len(recorder.events)-len(wantTail):]; !slices.Equal(got, wantTail) {
+				t.Fatalf("security failure tail after %s = %#v, want %#v", phase, got, wantTail)
+			}
+			allocation := testService(t, recorder.server, "app").ISO
+			if allocation == nil || allocation.State != string(iso.StateQuarantined) || !strings.Contains(allocation.LastError, phase) {
+				t.Fatalf("persisted allocation after %s failure = %#v", phase, allocation)
+			}
+		})
+	}
+}
+
+func TestISOInstallLoadsPersistedSameServiceAllocationBeforeTailscale(t *testing.T) {
+	recorder := newISOInstallRecorder(t)
+	recorder.verifyPersistedAllocation = true
+
+	if err := recorder.installer.installISOCompose(context.Background(), recorder); err != nil {
+		t.Fatalf("installISOCompose: %v", err)
+	}
+	if recorder.installer.isoAllocation == nil || recorder.installer.isoAllocation.NetNS != recorder.reserved.NetNS {
+		t.Fatalf("installer allocation = %#v, want persisted same-service allocation %#v", recorder.installer.isoAllocation, recorder.reserved)
+	}
+}
+
+func TestISOInstallPreservesExitNodeRejectionBeforeTailscaleSideEffects(t *testing.T) {
+	recorder := newISOInstallRecorder(t)
+	recorder.installer.tsNet.ExitNode = "exit.example"
+
+	err := recorder.installer.installISOCompose(context.Background(), recorder)
+	if err == nil || !strings.Contains(err.Error(), "exit node") {
+		t.Fatalf("installISOCompose error = %v, want Task 8 exit-node rejection", err)
+	}
+	for _, forbidden := range []string{"pull", "build", "attach-network", "start-aux", "compose-up"} {
+		if slices.Contains(recorder.events, forbidden) {
+			t.Fatalf("%s ran after exit-node rejection: %#v", forbidden, recorder.events)
+		}
+	}
+	if recorder.tailscaleMutated {
+		t.Fatalf("Tailscale state mutated before exit-node rejection: %#v", recorder.events)
+	}
+}
+
+func TestISOInstallInspectionFailureDownsBeforeQuarantine(t *testing.T) {
+	recorder := newISOInstallRecorder(t)
+	recorder.failAt = "inspect-runtime"
+
+	err := recorder.installer.installISOCompose(context.Background(), recorder)
+	if err == nil || !strings.Contains(err.Error(), "inspect-runtime") {
+		t.Fatalf("installISOCompose error = %v, want inspection failure", err)
+	}
+	wantTail := []string{"inspect-runtime", "compose-down-remove-orphans", "quarantine"}
+	if got := recorder.events[len(recorder.events)-len(wantTail):]; !reflect.DeepEqual(got, wantTail) {
+		t.Fatalf("inspection failure tail = %#v, want %#v", got, wantTail)
+	}
+	allocation := testService(t, recorder.server, "app").ISO
+	if allocation == nil || allocation.State != string(iso.StateQuarantined) {
+		t.Fatalf("persisted allocation = %#v, want quarantined", allocation)
+	}
+}
+
+func TestISOInstallMutationFailuresDownBeforeQuarantine(t *testing.T) {
+	for _, phase := range []string{"attach-network", "start-aux", "compose-up"} {
+		t.Run(phase, func(t *testing.T) {
+			recorder := newISOInstallRecorder(t)
+			recorder.failAt = phase
+
+			err := recorder.installer.installISOCompose(context.Background(), recorder)
+			if err == nil || !strings.Contains(err.Error(), phase) {
+				t.Fatalf("installISOCompose error = %v, want %s failure", err, phase)
+			}
+			wantTail := []string{phase, "compose-down-remove-orphans", "quarantine"}
+			if got := recorder.events[len(recorder.events)-len(wantTail):]; !slices.Equal(got, wantTail) {
+				t.Fatalf("mutation failure tail = %#v, want %#v", got, wantTail)
+			}
+		})
+	}
+}
+
+func TestISOInstallCancellationUsesLiveCleanupContext(t *testing.T) {
+	recorder := newISOInstallRecorder(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	recorder.cancelAt = "inspect-runtime"
+	recorder.cancel = cancel
+
+	err := recorder.installer.installISOCompose(ctx, recorder)
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("installISOCompose error = %v, want cancellation", err)
+	}
+	if !recorder.downContextLive || !recorder.quarantineContextLive {
+		t.Fatalf("cleanup contexts live = down %v quarantine %v, want both true", recorder.downContextLive, recorder.quarantineContextLive)
+	}
+}
+
+func TestISOInstallQuarantineGetsFreshContextAfterDownDeadline(t *testing.T) {
+	oldTimeout := isoSecurityCleanupTimeout
+	isoSecurityCleanupTimeout = 5 * time.Millisecond
+	t.Cleanup(func() { isoSecurityCleanupTimeout = oldTimeout })
+	recorder := newISOInstallRecorder(t)
+	recorder.failAt = "inspect-runtime"
+	recorder.exhaustDownContext = true
+
+	if err := recorder.installer.installISOCompose(context.Background(), recorder); err == nil {
+		t.Fatal("installISOCompose unexpectedly succeeded")
+	}
+	if !recorder.quarantineContextLive {
+		t.Fatal("quarantine inherited the expired compose-down cleanup context")
+	}
+}
+
+type isoInstallRecorder struct {
+	t                         *testing.T
+	server                    *Server
+	installer                 *FileInstaller
+	events                    []string
+	failAt                    string
+	cancelAt                  string
+	cancel                    context.CancelFunc
+	reserved                  *db.ISOAllocation
+	verifyPersistedAllocation bool
+	tailscaleMutated          bool
+	downContextLive           bool
+	quarantineContextLive     bool
+	exhaustDownContext        bool
+}
+
+func newISOInstallRecorder(t *testing.T) *isoInstallRecorder {
+	t.Helper()
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{Name: "app", ServiceType: db.ServiceTypeDockerCompose})
+	reserved := &db.ISOAllocation{
+		Kind:         string(iso.PayloadCompose),
+		State:        string(iso.StateReserved),
+		DesiredModes: []string{"iso", "ts"},
+		NetNS:        "yeet-a172cedcae-ns",
+		Components: map[string]db.ISOComponent{
+			"api": {Address: netip.MustParseAddr("172.30.128.2")},
+		},
+	}
+	return &isoInstallRecorder{
+		t:        t,
+		server:   server,
+		reserved: reserved,
+		installer: &FileInstaller{
+			s: server,
+			cfg: FileInstallerCfg{
+				InstallerCfg: InstallerCfg{ServiceName: "app"},
+				Network:      NetworkOpts{Interfaces: "iso,ts", ISO: true, Modes: []string{"iso", "ts"}},
+			},
+			tsNet: &db.TailscaleNetwork{Interface: "untrusted"},
+		},
+	}
+}
+
+func (r *isoInstallRecorder) step(name string) error {
+	r.events = append(r.events, name)
+	if name == r.cancelAt {
+		r.cancel()
+		return context.Canceled
+	}
+	if name == r.failAt {
+		return errors.New(name + " failed")
+	}
+	return nil
+}
+
+func (r *isoInstallRecorder) ResolveBase(context.Context) error    { return r.step("resolve-base") }
+func (r *isoInstallRecorder) AdmitBase(context.Context) error      { return r.step("admit-base") }
+func (r *isoInstallRecorder) RenderOverlay(context.Context) error  { return r.step("render-overlay") }
+func (r *isoInstallRecorder) ResolveMerged(context.Context) error  { return r.step("resolve-merged") }
+func (r *isoInstallRecorder) AdmitMerged(context.Context) error    { return r.step("admit-merged") }
+func (r *isoInstallRecorder) InstallDNS(context.Context) error     { return r.step("install-dns") }
+func (r *isoInstallRecorder) EnsurePolicy(context.Context) error   { return r.step("ensure-policy") }
+func (r *isoInstallRecorder) VerifyPolicy(context.Context) error   { return r.step("verify-policy") }
+func (r *isoInstallRecorder) EnsureTopology(context.Context) error { return r.step("ensure-topology") }
+func (r *isoInstallRecorder) VerifyTopology(context.Context) error { return r.step("verify-topology") }
+func (r *isoInstallRecorder) Pull(context.Context) error           { return r.step("pull") }
+func (r *isoInstallRecorder) Build(context.Context) error          { return r.step("build") }
+func (r *isoInstallRecorder) AttachNetwork(context.Context) error  { return r.step("attach-network") }
+func (r *isoInstallRecorder) StartAux(context.Context) error       { return r.step("start-aux") }
+func (r *isoInstallRecorder) ComposeUp(context.Context) error      { return r.step("compose-up") }
+func (r *isoInstallRecorder) InspectRuntime(context.Context) error { return r.step("inspect-runtime") }
+func (r *isoInstallRecorder) MarkReady(context.Context) error      { return r.step("mark-ready") }
+
+func (r *isoInstallRecorder) Reserve(context.Context) error {
+	if err := r.step("reserve"); err != nil {
+		return err
+	}
+	_, _, err := r.server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
+		service.ISO = r.reserved.Clone()
+		return nil
+	})
+	return err
+}
+
+func (r *isoInstallRecorder) InstallTailscale(context.Context, *FileInstaller) error {
+	if err := r.step("install-tailscale"); err != nil {
+		return err
+	}
+	if r.verifyPersistedAllocation && !reflect.DeepEqual(r.installer.isoAllocation, r.reserved) {
+		return fmt.Errorf("installer allocation = %#v, want persisted %#v", r.installer.isoAllocation, r.reserved)
+	}
+	_, _, _, err := r.installer.tailscaleNetNSMode(&netns.Service{ServiceName: "app"})
+	if err != nil {
+		return err
+	}
+	r.tailscaleMutated = true
+	return nil
+}
+
+func (r *isoInstallRecorder) ComposeDownRemoveOrphans(ctx context.Context) error {
+	r.downContextLive = ctx.Err() == nil
+	if r.exhaustDownContext {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return r.step("compose-down-remove-orphans")
+}
+
+func (r *isoInstallRecorder) Quarantine(ctx context.Context, cause error) error {
+	r.quarantineContextLive = ctx.Err() == nil
+	r.events = append(r.events, "quarantine")
+	_, _, err := r.server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
+		if service.ISO == nil {
+			service.ISO = &db.ISOAllocation{}
+		}
+		service.ISO.State = string(iso.StateQuarantined)
+		service.ISO.LastError = cause.Error()
+		return nil
+	})
+	return err
 }

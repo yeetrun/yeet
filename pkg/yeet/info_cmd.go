@@ -19,6 +19,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
+	"github.com/yeetrun/yeet/pkg/iso"
 )
 
 type infoOutput struct {
@@ -368,9 +369,28 @@ func renderInfoPlain(w io.Writer, service, host string, hostInfoErr error, hostI
 func renderHostInfoPlain(w io.Writer, out hostInfoOutput) error {
 	return renderInfoSections(w, []infoSection{
 		renderHostInfoHostSection(out),
+		renderHostInfoISOSection(out.HostInfo),
 		renderHostInfoInventorySection(out.Inventory),
 		renderHostInfoWarningsSection(out.Warnings),
 	})
+}
+
+func renderHostInfoISOSection(info *serverInfo) infoSection {
+	if info == nil || strings.TrimSpace(info.ISO.Prefix) == "" {
+		return infoSection{}
+	}
+	summary := info.ISO
+	rows := []infoRow{
+		{Label: "ISO pool", Value: summary.Prefix},
+		{Label: "ISO source", Value: summary.Source},
+		{Label: "ISO version", Value: fmt.Sprintf("allocator %d, policy %d", summary.Allocator, summary.Policy)},
+		{Label: "ISO capacity", Value: fmt.Sprintf("links %d/%d, projects %d/%d", summary.LinksUsed, iso.MaxLinks, summary.ProjectsUsed, iso.MaxProjects)},
+		{Label: "ISO state", Value: fmt.Sprintf("active %d, reserved %d, quarantined %d, tombstoned %d", summary.Active, summary.Reserved, summary.Quarantined, summary.Tombstoned)},
+	}
+	if strings.TrimSpace(summary.Conflict) != "" {
+		rows = append(rows, infoRow{Label: "ISO conflict", Value: summary.Conflict})
+	}
+	return infoSection{Title: "ISO network", Rows: rows}
 }
 
 func renderInfoSections(w io.Writer, sections []infoSection) error {
@@ -888,9 +908,9 @@ func renderNetworkSection(server catchrpc.ServiceInfoResponse) infoSection {
 }
 
 func serviceNetworkRows(net catchrpc.ServiceNetwork) []infoRow {
+	rows := serviceISORows(net.ISO)
 	ipNet, hasIPs := serviceEndpointNetwork(net)
-	rows := []infoRow{}
-	if hasIPs || ipNet.IPError != "" {
+	if net.ISO == nil && (hasIPs || ipNet.IPError != "") {
 		rows = append(rows, networkIPRows(ipNet)...)
 	}
 	if net.IPWarning != "" {
@@ -906,10 +926,47 @@ func serviceNetworkRows(net catchrpc.ServiceNetwork) []infoRow {
 	return rows
 }
 
+func serviceISORows(network *catchrpc.ServiceISO) []infoRow {
+	if network == nil {
+		return nil
+	}
+	rows := []infoRow{
+		{Label: "ISO modes", Value: strings.Join(network.Modes, ",")},
+		{Label: "ISO state", Value: network.State},
+	}
+	if network.PublicEgress {
+		rows = append(rows, infoRow{Label: "Egress", Value: "public IPv4 via NAT"})
+	}
+	if network.DNS != "" {
+		dns := network.DNS
+		if dns == "tailscale" {
+			dns = "Tailscale/MagicDNS"
+		}
+		rows = append(rows, infoRow{Label: "DNS", Value: dns})
+	}
+	for _, component := range network.Components {
+		if component.Name != "" && component.IP != "" {
+			rows = append(rows, infoRow{Label: "ISO " + component.Name, Value: component.IP})
+		}
+	}
+	if network.LastError != "" {
+		rows = append(rows, infoRow{Label: "ISO error", Value: network.LastError})
+	}
+	return rows
+}
+
 func serviceEndpointNetwork(net catchrpc.ServiceNetwork) (catchrpc.ServiceNetwork, bool) {
 	out := catchrpc.ServiceNetwork{
 		SvcIP:   net.SvcIP,
 		IPError: net.IPError,
+	}
+	if net.ISO != nil {
+		for _, component := range net.ISO.Components {
+			if component.Name != "" && component.IP != "" {
+				out.IPs = append(out.IPs, catchrpc.ServiceIP{Label: component.Name, IP: component.IP})
+			}
+		}
+		return out, len(out.IPs) > 0
 	}
 	for _, ip := range net.IPs {
 		if serviceIPVisibleInPlainNetwork(ip, net) {
@@ -934,7 +991,10 @@ func serviceIPVisibleInPlainNetwork(ip catchrpc.ServiceIP, net catchrpc.ServiceN
 
 func renderVMNetworkSection(info catchrpc.ServiceInfo) infoSection {
 	net := info.Network
-	rows := networkIPRows(net)
+	rows := serviceISORows(net.ISO)
+	if net.ISO == nil {
+		rows = networkIPRows(net)
+	}
 	if net.IPWarning != "" {
 		rows = append(rows, infoRow{Label: "IP warning", Value: net.IPWarning})
 	}

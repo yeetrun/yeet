@@ -9,12 +9,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 )
 
 var (
@@ -24,6 +27,12 @@ var (
 	vmServiceSetMetadataInjector      func(context.Context, string, vmMetadataConfig) error
 	isServiceRunningForVMSettings     = (*Server).IsServiceRunning
 	vmServiceSetEnsureRuntimeIdentity = ensureVMRuntimeIdentity
+	ensureVMISOBoundaryForSettings    = func(ctx context.Context, server *Server, service string) error {
+		return server.ensureISONetworkBoundaryLocked(ctx, service)
+	}
+	verifyVMNetworkPlanForSettings          = verifyVMNetworkPlan
+	verifyVMISONetworkAbsentForSettings     = verifyVMISONetworkPlanAbsent
+	installVMISOPolicyAfterTransitionForSet = installVMISOPolicyAfterTransition
 )
 
 type vmSettingsPlan struct {
@@ -37,6 +46,9 @@ type vmSettingsPlan struct {
 	DiskSteps             []vmDiskPlanStep
 	OldNetwork            vmNetworkPlan
 	NewNetwork            vmNetworkPlan
+	OldISO                *db.ISOAllocation
+	NewISO                *db.ISOAllocation
+	TransitionFromISO     bool
 	NetworkChanged        bool
 	SvcNetwork            *db.SvcNetwork
 	OldMetadata           vmMetadataConfig
@@ -49,16 +61,28 @@ type vmSettingsPlan struct {
 }
 
 func (s *Server) updateVMServiceSettings(ctx context.Context, name string, flags cli.VMSetFlags) (retErr error) {
-	plan, err := s.planVMServiceSettings(name, flags)
+	if hasCatchVMSetNetworkChange(flags) {
+		return s.withISOOperationLock(ctx, func() error {
+			return s.updateVMServiceSettingsLocked(ctx, name, flags)
+		})
+	}
+	return s.updateVMServiceSettingsLocked(ctx, name, flags)
+}
+
+func (s *Server) updateVMServiceSettingsLocked(ctx context.Context, name string, flags cli.VMSetFlags) (retErr error) {
+	plan, err := s.planVMServiceSettings(ctx, name, flags)
 	if err != nil {
 		return err
+	}
+	if plan.TransitionFromISO {
+		return s.applyVMTransitionFromISO(ctx, plan)
 	}
 	transition, err := s.applyVMServiceSettingsPlan(ctx, plan)
 	defer func() {
 		if retErr == nil {
 			return
 		}
-		if err := transition.rollback(ctx); err != nil {
+		if err := transition.rollback(ctx, retErr); err != nil {
 			retErr = errors.Join(retErr, err)
 		}
 	}()
@@ -68,7 +92,7 @@ func (s *Server) updateVMServiceSettings(ctx context.Context, name string, flags
 	return s.commitVMServiceSettingsPlan(name, plan)
 }
 
-func (s *Server) planVMServiceSettings(name string, flags cli.VMSetFlags) (vmSettingsPlan, error) {
+func (s *Server) planVMServiceSettings(ctx context.Context, name string, flags cli.VMSetFlags) (vmSettingsPlan, error) {
 	dv, service, plan, err := s.baseVMSettingsPlan(name)
 	if err != nil {
 		return vmSettingsPlan{}, err
@@ -79,7 +103,7 @@ func (s *Server) planVMServiceSettings(name string, flags cli.VMSetFlags) (vmSet
 	if err := applyVMDiskSettings(flags, &plan); err != nil {
 		return vmSettingsPlan{}, err
 	}
-	if err := s.applyVMNetworkSettings(dv, name, service, flags, &plan); err != nil {
+	if err := s.applyVMNetworkSettings(ctx, dv, name, service, flags, &plan); err != nil {
 		return vmSettingsPlan{}, err
 	}
 	if err := plan.finalizeFirecrackerSettings(); err != nil {
@@ -119,7 +143,8 @@ func (s *Server) baseVMSettingsPlan(name string) (*db.DataView, *db.Service, vmS
 	if err != nil {
 		return nil, nil, vmSettingsPlan{}, err
 	}
-	oldNetwork := vmNetworkPlanFromDB(name, oldVM.Networks).WithTapOwner(identity)
+	oldISO := cloneVMISOAllocation(service.ISO)
+	oldNetwork := vmNetworkPlanFromDB(name, oldVM.Networks, oldISO).WithTapOwner(identity)
 	return dv, service, vmSettingsPlan{
 		Service:               name,
 		Root:                  root,
@@ -130,6 +155,8 @@ func (s *Server) baseVMSettingsPlan(name string) (*db.DataView, *db.Service, vmS
 		NewDiskBytes:          oldVM.Disk.Bytes,
 		OldNetwork:            oldNetwork,
 		NewNetwork:            oldNetwork,
+		OldISO:                oldISO,
+		NewISO:                cloneVMISOAllocation(oldISO),
 		SvcNetwork:            cloneSvcNetwork(service.SvcNetwork),
 		FirecrackerConfigPath: filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
 	}, nil
@@ -218,14 +245,21 @@ func applyVMDiskSettings(flags cli.VMSetFlags, plan *vmSettingsPlan) error {
 	return nil
 }
 
-func (s *Server) applyVMNetworkSettings(dv *db.DataView, name string, service *db.Service, flags cli.VMSetFlags, plan *vmSettingsPlan) error {
+func (s *Server) applyVMNetworkSettings(ctx context.Context, dv *db.DataView, name string, service *db.Service, flags cli.VMSetFlags, plan *vmSettingsPlan) error {
 	if hasCatchVMSetNetworkChange(flags) {
-		network, svcNet, err := s.planVMServiceSetNetwork(dv, name, service, plan.OldVM.Networks, flags)
+		network, svcNet, allocation, err := s.planVMServiceSetNetwork(ctx, dv, name, service, plan.OldVM.Networks, flags)
 		if err != nil {
 			return err
 		}
+		if plan.OldISO != nil && allocation == nil {
+			if plan.OldISO.RemoveRequested {
+				return fmt.Errorf("cannot change VM %q network while ISO removal is in progress", name)
+			}
+			plan.TransitionFromISO = true
+		}
 		plan.NewNetwork = network.WithTapOwner(plan.OldNetwork.TapOwner)
 		plan.SvcNetwork = svcNet
+		plan.NewISO = cloneVMISOAllocation(allocation)
 		plan.NetworkChanged = true
 		plan.RewriteMetadata = true
 	}
@@ -327,21 +361,36 @@ func hasCatchVMSetNetworkChange(flags cli.VMSetFlags) bool {
 		strings.TrimSpace(flags.MacvlanParent) != ""
 }
 
-func (s *Server) planVMServiceSetNetwork(dv *db.DataView, name string, service *db.Service, current []db.VMNetworkConfig, flags cli.VMSetFlags) (vmNetworkPlan, *db.SvcNetwork, error) {
+func (s *Server) planVMServiceSetNetwork(ctx context.Context, dv *db.DataView, name string, service *db.Service, current []db.VMNetworkConfig, flags cli.VMSetFlags) (vmNetworkPlan, *db.SvcNetwork, *db.ISOAllocation, error) {
 	netValue := vmNetworkValueForServiceSet(current, flags)
 	modes := vmRequestedNetworkModes(netValue)
 	if err := validateVMNetworkOptions(modes, flags.MacvlanParent, flags.MacvlanVlan, flags.MacvlanMac); err != nil {
-		return vmNetworkPlan{}, nil, err
+		return vmNetworkPlan{}, nil, nil, err
 	}
 	svcNet, err := svcNetworkForVMServiceSet(dv, service.SvcNetwork, modes)
 	if err != nil {
-		return vmNetworkPlan{}, nil, err
+		return vmNetworkPlan{}, nil, nil, err
 	}
-	input, err := vmNetworkInputForServiceSet(svcNet, modes, flags)
+	allocation, err := s.reserveVMISOForServiceSet(ctx, name, modes)
 	if err != nil {
-		return vmNetworkPlan{}, nil, err
+		return vmNetworkPlan{}, nil, nil, err
 	}
-	return newVMNetworkPlan(name, modes, input), svcNet, nil
+	input, err := vmNetworkInputForServiceSet(svcNet, allocation, modes, flags)
+	if err != nil {
+		return vmNetworkPlan{}, nil, nil, err
+	}
+	return newVMNetworkPlan(name, modes, input), svcNet, allocation, nil
+}
+
+func (s *Server) reserveVMISOForServiceSet(ctx context.Context, name string, modes []string) (*db.ISOAllocation, error) {
+	if !vmModeListContains(modes, "iso") {
+		return nil, nil
+	}
+	normalized, err := iso.NormalizeModes(vmNetworkModes(modes))
+	if err != nil {
+		return nil, err
+	}
+	return s.reserveISOAllocation(ctx, name, isoReservationRequest{Kind: iso.PayloadVM, Modes: normalized})
 }
 
 func vmNetworkValueForServiceSet(current []db.VMNetworkConfig, flags cli.VMSetFlags) string {
@@ -367,7 +416,7 @@ func svcNetworkForVMServiceSet(dv *db.DataView, current *db.SvcNetwork, modes []
 	return nil, nil
 }
 
-func vmNetworkInputForServiceSet(svcNet *db.SvcNetwork, modes []string, flags cli.VMSetFlags) (vmNetworkInputs, error) {
+func vmNetworkInputForServiceSet(svcNet *db.SvcNetwork, allocation *db.ISOAllocation, modes []string, flags cli.VMSetFlags) (vmNetworkInputs, error) {
 	input := vmNetworkInputs{
 		LANParent: strings.TrimSpace(flags.MacvlanParent),
 		LANVLAN:   flags.MacvlanVlan,
@@ -375,6 +424,12 @@ func vmNetworkInputForServiceSet(svcNet *db.SvcNetwork, modes []string, flags cl
 	}
 	if svcNet != nil && svcNet.IPv4.IsValid() {
 		input.ServiceIP = svcNet.IPv4.String()
+	}
+	if allocation != nil {
+		input.ISOHostIP = allocation.HostIP
+		input.ISOGuestIP = allocation.PeerIP
+		input.ISOLink = allocation.Link
+		input.ISOTap = allocation.Interface
 	}
 	if vmModeListContains(modes, "lan") {
 		if err := resolveVMLANNetworkInput(&input); err != nil {
@@ -385,6 +440,15 @@ func vmNetworkInputForServiceSet(svcNet *db.SvcNetwork, modes []string, flags cl
 		}
 	}
 	return input, nil
+}
+
+func cloneVMISOAllocation(allocation *db.ISOAllocation) *db.ISOAllocation {
+	if allocation == nil {
+		return nil
+	}
+	clone := *allocation
+	clone.DesiredModes = append([]string(nil), allocation.DesiredModes...)
+	return &clone
 }
 
 func vmNetworkModesForServiceSet(networks []db.VMNetworkConfig) string {
@@ -400,48 +464,77 @@ func vmNetworkModesForServiceSet(networks []db.VMNetworkConfig) string {
 	return strings.Join(modes, ",")
 }
 
-func vmNetworkPlanFromDB(service string, networks []db.VMNetworkConfig) vmNetworkPlan {
+func vmNetworkPlanFromDB(service string, networks []db.VMNetworkConfig, isoAllocations ...*db.ISOAllocation) vmNetworkPlan {
 	plan := vmNetworkPlan{Service: service}
 	short := shortVMName(service)
+	var isoAllocation *db.ISOAllocation
+	if len(isoAllocations) > 0 {
+		isoAllocation = isoAllocations[0]
+	}
 	for i, network := range networks {
-		iface := vmNetworkInterfacePlan{
-			Mode:      network.Mode,
-			GuestName: network.Interface,
-			Tap:       network.Tap,
-			MAC:       network.MAC,
-			Parent:    network.Parent,
-			VLAN:      network.VLAN,
-		}
-		switch network.Mode {
-		case "svc":
-			iface.Bridge = fmt.Sprintf("yvm-%s-b%d", short, i)
-			if network.IP.IsValid() {
-				iface.GuestIP = network.IP.String() + "/24"
-			}
-			iface.Gateway = vmSvcGuestGateway
-		case "lan":
-			if network.VLAN != 0 {
-				if parent, ok := vmNetworkRecoveredDerivedVLANParent(network.Parent, network.VLAN); ok {
-					iface.Parent = parent
-					iface.Bridge = vmGeneratedVLANBridgeName(parent, network.VLAN)
-					iface.VLANDevice = vmGeneratedVLANDeviceName(parent, network.VLAN)
-				} else if vmLANParentIsBridge(network.Parent) {
-					iface.Bridge = network.Parent
-				} else {
-					iface.Bridge = vmGeneratedVLANBridgeName(network.Parent, network.VLAN)
-					iface.VLANDevice = vmGeneratedVLANDeviceName(network.Parent, network.VLAN)
-				}
-			} else {
-				if vmLANParentIsBridge(network.Parent) {
-					iface.Bridge = network.Parent
-				}
-			}
-			iface.DHCP = true
-		}
-		plan.Interfaces = append(plan.Interfaces, iface)
+		plan.Interfaces = append(plan.Interfaces, vmNetworkInterfaceFromDB(short, i, network, isoAllocation))
 	}
 	plan.applyGuestRoutePolicy()
 	return plan
+}
+
+func vmNetworkInterfaceFromDB(short string, index int, network db.VMNetworkConfig, allocation *db.ISOAllocation) vmNetworkInterfacePlan {
+	iface := vmNetworkInterfacePlan{
+		Mode: network.Mode, GuestName: network.Interface, Tap: network.Tap,
+		MAC: network.MAC, Parent: network.Parent, VLAN: network.VLAN,
+	}
+	switch network.Mode {
+	case "svc":
+		configureRecoveredVMSvcInterface(&iface, short, index, network)
+	case "lan":
+		configureRecoveredVMLANInterface(&iface, network)
+	case "iso":
+		configureRecoveredVMISOInterface(&iface, network, allocation)
+	}
+	return iface
+}
+
+func configureRecoveredVMSvcInterface(iface *vmNetworkInterfacePlan, short string, index int, network db.VMNetworkConfig) {
+	iface.Bridge = fmt.Sprintf("yvm-%s-b%d", short, index)
+	if network.IP.IsValid() {
+		iface.GuestIP = network.IP.String() + "/24"
+	}
+	iface.Gateway = vmSvcGuestGateway
+}
+
+func configureRecoveredVMLANInterface(iface *vmNetworkInterfacePlan, network db.VMNetworkConfig) {
+	iface.DHCP = true
+	if network.VLAN == 0 {
+		if vmLANParentIsBridge(network.Parent) {
+			iface.Bridge = network.Parent
+		}
+		return
+	}
+	if parent, ok := vmNetworkRecoveredDerivedVLANParent(network.Parent, network.VLAN); ok {
+		iface.Parent = parent
+		iface.Bridge = vmGeneratedVLANBridgeName(parent, network.VLAN)
+		iface.VLANDevice = vmGeneratedVLANDeviceName(parent, network.VLAN)
+		return
+	}
+	if vmLANParentIsBridge(network.Parent) {
+		iface.Bridge = network.Parent
+		return
+	}
+	iface.Bridge = vmGeneratedVLANBridgeName(network.Parent, network.VLAN)
+	iface.VLANDevice = vmGeneratedVLANDeviceName(network.Parent, network.VLAN)
+}
+
+func configureRecoveredVMISOInterface(iface *vmNetworkInterfacePlan, network db.VMNetworkConfig, allocation *db.ISOAllocation) {
+	if allocation == nil {
+		return
+	}
+	iface.Tap = allocation.Interface
+	if allocation.Link.IsValid() && network.IP.IsValid() {
+		iface.GuestIP = netip.PrefixFrom(network.IP, allocation.Link.Bits()).String()
+	}
+	if allocation.HostIP.IsValid() {
+		iface.Gateway = allocation.HostIP.String()
+	}
 }
 
 func vmNetworkRecoveredDerivedVLANParent(parent string, vlan int) (string, bool) {
@@ -595,7 +688,7 @@ type vmSettingsApplyResult struct {
 	firecrackerTouched bool
 }
 
-func (r vmSettingsApplyResult) rollback(ctx context.Context) error {
+func (r vmSettingsApplyResult) rollback(ctx context.Context, cause error) error {
 	var retErr error
 	if r.firecrackerTouched {
 		if err := restoreVMServiceFirecrackerSettings(r.plan); err != nil {
@@ -607,7 +700,7 @@ func (r vmSettingsApplyResult) rollback(ctx context.Context) error {
 			retErr = errors.Join(retErr, err)
 		}
 	}
-	if err := r.network.rollback(); err != nil {
+	if err := r.network.rollback(cause); err != nil {
 		retErr = errors.Join(retErr, err)
 	}
 	return retErr
@@ -618,7 +711,7 @@ func (s *Server) applyVMServiceSettingsPlan(ctx context.Context, plan vmSettings
 	if err := applyVMServiceDiskSettings(ctx, plan); err != nil {
 		return result, err
 	}
-	transition, err := applyVMServiceNetworkSettings(plan)
+	transition, err := applyVMServiceNetworkSettings(ctx, s, plan)
 	result.network = transition
 	if err != nil {
 		return result, err
@@ -656,29 +749,141 @@ func applyVMServiceDiskSettings(ctx context.Context, plan vmSettingsPlan) error 
 	return runVMDiskStepsWithRunner(ctx, diskPlan, plan.DiskSteps, runner, nil)
 }
 
+//nolint:cyclop // Tombstone, cleanup, commit, policy, and replacement setup order is recovery-critical.
+func (s *Server) applyVMTransitionFromISO(ctx context.Context, plan vmSettingsPlan) error {
+	if err := applyVMServiceDiskSettings(ctx, plan); err != nil {
+		return err
+	}
+	if err := s.markISOState(plan.Service, string(iso.StateTombstoned), nil); err != nil {
+		return fmt.Errorf("record VM ISO transition intent: %w", err)
+	}
+	runner := vmServiceSetNetworkRunner
+	if runner == nil {
+		runner = execVMNetworkCommand
+	}
+	if err := plan.OldNetwork.ExecuteCleanup(runner); err != nil {
+		return s.retainISOTransitionTombstone(plan.Service, fmt.Errorf("clean VM ISO TAP: %w", err))
+	}
+	if err := verifyVMISONetworkAbsentForSettings(ctx, plan.OldNetwork); err != nil {
+		return s.retainISOTransitionTombstone(plan.Service, fmt.Errorf("verify VM ISO TAP absent: %w", err))
+	}
+
+	result := vmSettingsApplyResult{plan: plan, metadataTouched: plan.RewriteMetadata}
+	if err := applyVMServiceMetadataSettings(ctx, plan); err != nil {
+		return errors.Join(s.retainISOTransitionTombstone(plan.Service, err), result.rollbackPreparedFiles(ctx))
+	}
+	if err := persistVMServiceRuntimeSettings(plan, &result); err != nil {
+		return errors.Join(s.retainISOTransitionTombstone(plan.Service, err), result.rollbackPreparedFiles(ctx))
+	}
+	if err := s.commitVMServiceSettingsPlan(plan.Service, plan); err != nil {
+		return errors.Join(s.retainISOTransitionTombstone(plan.Service, fmt.Errorf("commit replacement VM network: %w", err)), result.rollbackPreparedFiles(ctx))
+	}
+	if err := installVMISOPolicyAfterTransitionForSet(ctx, s); err != nil {
+		return fmt.Errorf("install ISO policy after VM transition: %w", err)
+	}
+	if err := plan.NewNetwork.ExecuteSetup(runner); err != nil {
+		cleanupErr := plan.NewNetwork.ExecuteCleanup(runner)
+		return errors.Join(fmt.Errorf("set up replacement VM network: %w", err), cleanupErr)
+	}
+	return nil
+}
+
+func (r vmSettingsApplyResult) rollbackPreparedFiles(ctx context.Context) error {
+	var retErr error
+	if r.firecrackerTouched {
+		retErr = errors.Join(retErr, restoreVMServiceFirecrackerSettings(r.plan))
+	}
+	if r.metadataTouched {
+		retErr = errors.Join(retErr, restoreVMServiceMetadataSettings(ctx, r.plan))
+	}
+	return retErr
+}
+
+func verifyVMISONetworkPlanAbsent(ctx context.Context, plan vmNetworkPlan) error {
+	output, err := vmNetworkVerifyCommand(ctx, "ip", "-j", "link", "show")
+	if err != nil {
+		return fmt.Errorf("list links after VM ISO cleanup: %w", err)
+	}
+	links, err := decodeVMNetworkLinks(output)
+	if err != nil {
+		return err
+	}
+	return verifyVMISOTapsAbsent(plan, links)
+}
+
+func decodeVMNetworkLinks(output []byte) ([]string, error) {
+	var links []struct {
+		IfName string `json:"ifname"`
+	}
+	if err := json.Unmarshal(output, &links); err != nil {
+		return nil, fmt.Errorf("parse links after VM ISO cleanup: %w", err)
+	}
+	names := make([]string, 0, len(links))
+	for _, link := range links {
+		names = append(names, link.IfName)
+	}
+	return names, nil
+}
+
+func verifyVMISOTapsAbsent(plan vmNetworkPlan, links []string) error {
+	for _, iface := range plan.Interfaces {
+		if iface.Mode != "iso" {
+			continue
+		}
+		for _, link := range links {
+			if link == iface.Tap {
+				return fmt.Errorf("VM ISO TAP %s still exists", iface.Tap)
+			}
+		}
+	}
+	return nil
+}
+
+func installVMISOPolicyAfterTransition(ctx context.Context, server *Server) error {
+	rules, present, err := server.currentGlobalISOPolicy()
+	if err != nil || !present {
+		return err
+	}
+	if err := ensureISOPolicyForRuntime(ctx, rules); err != nil {
+		return err
+	}
+	return verifyISOPolicyForRuntime(ctx, rules)
+}
+
 type vmNetworkTransitionResult struct {
 	applied bool
 	old     vmNetworkPlan
 	new     vmNetworkPlan
 	runner  vmNetworkCommandRunner
+	server  *Server
+	service string
+	newISO  bool
 }
 
-func (r vmNetworkTransitionResult) rollback() error {
-	if !r.applied {
-		return nil
-	}
+func (r vmNetworkTransitionResult) rollback(cause error) error {
 	var retErr error
-	if err := r.new.ExecuteCleanup(r.runner); err != nil {
-		retErr = errors.Join(retErr, fmt.Errorf("clean up new VM network: %w", err))
+	if r.applied {
+		if err := r.new.ExecuteCleanup(r.runner); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("clean up new VM network: %w", err))
+		}
+		if err := r.old.ExecuteSetup(r.runner); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore old VM network: %w", err))
+		}
 	}
-	if err := r.old.ExecuteSetup(r.runner); err != nil {
-		retErr = errors.Join(retErr, fmt.Errorf("restore old VM network: %w", err))
+	if r.newISO && r.server != nil {
+		if err := r.server.markISOState(r.service, string(iso.StateQuarantined), cause); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("quarantine reserved VM ISO allocation: %w", err))
+		}
 	}
 	return retErr
 }
 
-func applyVMServiceNetworkSettings(plan vmSettingsPlan) (vmNetworkTransitionResult, error) {
-	result := vmNetworkTransitionResult{old: plan.OldNetwork, new: plan.NewNetwork}
+//nolint:cyclop // Network replacement and rollback steps stay linear to preserve the old working path.
+func applyVMServiceNetworkSettings(ctx context.Context, server *Server, plan vmSettingsPlan) (vmNetworkTransitionResult, error) {
+	result := vmNetworkTransitionResult{
+		old: plan.OldNetwork, new: plan.NewNetwork, server: server, service: plan.Service,
+		newISO: plan.NetworkChanged && plan.NewISO != nil,
+	}
 	if !plan.NetworkChanged {
 		return result, nil
 	}
@@ -687,6 +892,11 @@ func applyVMServiceNetworkSettings(plan vmSettingsPlan) (vmNetworkTransitionResu
 		runner = execVMNetworkCommand
 	}
 	result.runner = runner
+	if plan.NewISO != nil {
+		if err := ensureVMISOBoundaryForSettings(ctx, server, plan.Service); err != nil {
+			return result, err
+		}
+	}
 	if err := plan.OldNetwork.ExecuteCleanup(runner); err != nil {
 		retErr := fmt.Errorf("clean up VM network: %w", err)
 		if restoreErr := plan.OldNetwork.ExecuteSetup(runner); restoreErr != nil {
@@ -705,6 +915,11 @@ func applyVMServiceNetworkSettings(plan vmSettingsPlan) (vmNetworkTransitionResu
 		return result, retErr
 	}
 	result.applied = true
+	if plan.NewISO != nil {
+		if err := verifyVMNetworkPlanForSettings(ctx, plan.NewNetwork); err != nil {
+			return result, fmt.Errorf("verify VM ISO network: %w", err)
+		}
+	}
 	return result, nil
 }
 
@@ -759,6 +974,7 @@ func restoreVMServiceFirecrackerSettings(plan vmSettingsPlan) error {
 	return nil
 }
 
+//nolint:cyclop // Allocation validation and network-state mutation must remain in one DB transaction.
 func (s *Server) commitVMServiceSettingsPlan(name string, plan vmSettingsPlan) error {
 	_, err := s.cfg.DB.MutateData(func(d *db.Data) error {
 		service := d.Services[name]
@@ -770,10 +986,32 @@ func (s *Server) commitVMServiceSettingsPlan(name string, plan vmSettingsPlan) e
 		service.VM.Balloon = plan.NewBalloon
 		service.VM.Disk.Bytes = plan.NewDiskBytes
 		if plan.NetworkChanged {
+			if plan.NewISO != nil {
+				if !sameVMISOAllocation(service.ISO, plan.NewISO) || service.ISO.RemoveRequested || service.ISO.State != string(iso.StateReserved) {
+					return fmt.Errorf("service %q ISO allocation changed during VM network update", name)
+				}
+				if !vmNetworkMatchesISOAllocation(plan.NewNetwork, service.ISO) {
+					return fmt.Errorf("service %q VM ISO network does not match its allocation", name)
+				}
+			}
+			if plan.TransitionFromISO && service.ISO == nil {
+				return fmt.Errorf("service %q lost its ISO allocation before replacement commit", name)
+			}
 			service.VM.Networks = plan.NewNetwork.DBNetworks()
 			service.SvcNetwork = cloneSvcNetwork(plan.SvcNetwork)
+			if plan.NewISO != nil {
+				service.ISO.State = string(iso.StateStopped)
+				service.ISO.LastError = ""
+			}
+			if plan.TransitionFromISO {
+				service.ISO = nil
+			}
 		}
 		return nil
 	})
 	return err
+}
+
+func sameVMISOAllocation(current, planned *db.ISOAllocation) bool {
+	return current != nil && planned != nil && reflect.DeepEqual(current, planned)
 }

@@ -6,11 +6,93 @@ package catchrpc
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestISOPoolTypesRoundTrip(t *testing.T) {
+	req := ISOPoolApplyRequest{Plan: ISOPoolPlan{
+		CurrentPrefix: "172.30.0.0/16",
+		DesiredPrefix: "10.42.0.0/16",
+		Source:        "explicit",
+		Changed:       true,
+		Blockers:      []string{"stuck"},
+		Conflicts:     []string{"10.42.0.0/16 overlaps 10.42.1.0/24"},
+	}}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ISOPoolApplyRequest
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, req) {
+		t.Fatalf("round trip = %#v, want %#v", got, req)
+	}
+}
+
+func TestServiceISOJSONRoundTripPreservesPortPresence(t *testing.T) {
+	want := ServiceISO{
+		Modes: []string{"iso", "ts"}, State: "ready", PublicEgress: true,
+		DNS: "tailscale", Link: "172.30.0.0/30", Project: "172.30.128.0/27",
+		Components: []ServiceISOComponent{{Name: "api", IP: "172.30.128.2", State: "ready"}},
+	}
+	raw, err := json.Marshal(ServiceNetwork{ISO: &want, PortsPresent: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"ports":[]`)) || !bytes.Contains(raw, []byte(`"iso"`)) {
+		t.Fatalf("ServiceNetwork JSON = %s", raw)
+	}
+	var got ServiceNetwork
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ISO == nil || !reflect.DeepEqual(*got.ISO, want) || !got.PortsPresent {
+		t.Fatalf("ServiceNetwork round trip = %#v, want ISO %#v with ports present", got, want)
+	}
+}
+
+func TestISOPoolClientMethodsCallTypedRPC(t *testing.T) {
+	var methods []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		methods = append(methods, req.Method)
+		w.Header().Set("Content-Type", "application/json")
+		switch req.Method {
+		case RPCMethodISOPoolPlan:
+			_ = json.NewEncoder(w).Encode(Response{JSONRPC: "2.0", ID: req.ID, Result: ISOPoolPlan{DesiredPrefix: "10.42.0.0/16", Source: "explicit", Changed: true}})
+		case RPCMethodISOPoolApply:
+			_ = json.NewEncoder(w).Encode(Response{JSONRPC: "2.0", ID: req.ID, Result: ISOPoolApplyResult{Prefix: "10.42.0.0/16", Source: "explicit"}})
+		default:
+			t.Errorf("unexpected method %q", req.Method)
+		}
+	}))
+	defer server.Close()
+	host, port := splitHostPort(t, server.URL)
+	client := NewClient(host, port)
+	plan, err := client.ISOPoolPlan(context.Background(), ISOPoolPlanRequest{Prefix: "10.42.0.0/16"})
+	if err != nil || !plan.Changed {
+		t.Fatalf("ISOPoolPlan = %#v, %v", plan, err)
+	}
+	result, err := client.ISOPoolApply(context.Background(), ISOPoolApplyRequest{Plan: plan})
+	if err != nil || result.Prefix != "10.42.0.0/16" {
+		t.Fatalf("ISOPoolApply = %#v, %v", result, err)
+	}
+	if !reflect.DeepEqual(methods, []string{RPCMethodISOPoolPlan, RPCMethodISOPoolApply}) {
+		t.Fatalf("methods = %#v", methods)
+	}
+}
 
 func TestServiceInfoSnapshotsOmitEmpty(t *testing.T) {
 	raw, err := json.Marshal(ServiceInfo{Name: "svc"})

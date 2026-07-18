@@ -7,6 +7,7 @@ package catch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,12 +16,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
+	"github.com/yeetrun/yeet/pkg/netns"
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/util/set"
 )
@@ -46,6 +51,61 @@ type Installer struct {
 	icfg                InstallerCfg
 	s                   *Server
 	committedGeneration int
+	isoComposeInstall   func(*db.Service) error
+	isoTailscaleAuthKey string
+}
+
+type isoTailscaleInstallFunc func(string, string, string, *db.TailscaleNetwork, string, string) (map[db.ArtifactName]string, error)
+
+//nolint:cyclop // Installation and generation-checked persistence form one ordered transaction.
+func (si *Installer) installISOTailscale(ctx context.Context, service *db.Service, install isoTailscaleInstallFunc) error {
+	if service == nil || service.ISO == nil || service.TSNet == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := validateISOTailscaleAllocation(service.Name, service.ISO); err != nil {
+		return err
+	}
+	if install == nil {
+		install = si.s.installISOServiceTSAtRoot
+	}
+	serviceRoot := si.s.serviceRootFromView(service.View())
+	resolverPath := filepath.Join(serviceBinDirForRoot(serviceRoot), fmt.Sprintf("iso-resolv.gen-%d.conf", service.Generation))
+	if err := os.WriteFile(resolverPath, []byte("nameserver "+service.ISO.Gateway.String()+"\n"), 0o644); err != nil {
+		return fmt.Errorf("write ISO Tailscale resolver: %w", err)
+	}
+	artifacts, err := install(serviceRoot, service.Name, service.ISO.NetNS, service.TSNet.Clone(), si.isoTailscaleAuthKey, resolverPath)
+	if err != nil {
+		return fmt.Errorf("install ISO Tailscale sidecar: %w", err)
+	}
+	if artifacts == nil {
+		artifacts = map[db.ArtifactName]string{}
+	}
+	artifacts[db.ArtifactNetNSResolv] = resolverPath
+	_, _, err = si.s.cfg.DB.MutateService(service.Name, func(_ *db.Data, record *db.Service) error {
+		if record.Generation != service.Generation || record.ISO == nil {
+			return fmt.Errorf("service %q changed during ISO Tailscale installation", service.Name)
+		}
+		for name, path := range artifacts {
+			artifact := record.Artifacts[name]
+			if artifact == nil {
+				artifact = &db.Artifact{Refs: map[db.ArtifactRef]string{}}
+				if record.Artifacts == nil {
+					record.Artifacts = db.ArtifactStore{}
+				}
+				record.Artifacts[name] = artifact
+			}
+			if artifact.Refs == nil {
+				artifact.Refs = map[db.ArtifactRef]string{}
+			}
+			artifact.Refs[db.Gen(service.Generation)] = path
+			artifact.Refs["latest"] = path
+		}
+		return nil
+	})
+	return err
 }
 
 var liveSvcNetworkIPsFunc = liveSvcNetworkIPs
@@ -368,6 +428,9 @@ func (si *Installer) installGenWithExpected(gen int, expected *int) error {
 		if err := validateInstallRequest(si.icfg.Pull, preService.ServiceType); err != nil {
 			return err
 		}
+		if err := validateInstallNetworkRequest(preService); err != nil {
+			return err
+		}
 	}
 
 	operation := func() error {
@@ -405,6 +468,9 @@ func (si *Installer) doInstall(_ *db.Data, s *db.Service) error {
 	if err := validateInstallRequest(si.icfg.Pull, s.ServiceType); err != nil {
 		return err
 	}
+	if err := validateInstallNetworkRequest(s); err != nil {
+		return err
+	}
 	if err := runInstallPhaseForSnapshot(si, s); err != nil {
 		return err
 	}
@@ -414,6 +480,9 @@ func (si *Installer) doInstall(_ *db.Data, s *db.Service) error {
 
 func (si *Installer) installDefinitionOnly(s *db.Service) error {
 	if err := validateInstallRequest(si.icfg.Pull, s.ServiceType); err != nil {
+		return err
+	}
+	if err := validateInstallNetworkRequest(s); err != nil {
 		return err
 	}
 	if err := si.runDefinitionInstallPhase(s); err != nil {
@@ -442,6 +511,37 @@ func validateInstallRequest(pull bool, serviceType db.ServiceType) error {
 		return fmt.Errorf("--pull is only valid for docker compose payloads")
 	}
 	return nil
+}
+
+func validateInstallNetworkRequest(service *db.Service) error {
+	return validateInstallNetworkRequestWithPublished(service, false)
+}
+
+func validateInstallNetworkRequestWithPublished(service *db.Service, publishReset bool) error {
+	if service == nil || service.ISO == nil {
+		return nil
+	}
+	return iso.ValidateNetwork(iso.NetworkRequest{
+		Payload:   networkPayloadKind(service.ServiceType),
+		Modes:     service.ISO.DesiredModes,
+		Published: len(service.Publish) != 0 || publishReset,
+	})
+}
+
+func networkPayloadKind(serviceType db.ServiceType) iso.PayloadKind {
+	switch serviceType {
+	case db.ServiceTypeVM:
+		return iso.PayloadVM
+	case db.ServiceTypeDockerCompose:
+		return iso.PayloadCompose
+	// ISO intentionally rejects native root services. Host root can reconfigure or
+	// leave a network namespace, so non-root systemd sandboxing is a prerequisite
+	// for adding native ISO support without making a false security claim.
+	case db.ServiceTypeSystemd:
+		return iso.PayloadNative
+	default:
+		return iso.PayloadNative
+	}
 }
 
 type installPhase func(*Installer, *db.Service) error
@@ -562,6 +662,12 @@ func restartSystemdUnit(service *svc.SystemdService) error {
 
 func installDockerComposeService(si *Installer, s *db.Service) error {
 	si.suspendUI()
+	if s.ISO != nil {
+		if si.isoComposeInstall != nil {
+			return si.isoComposeInstall(s)
+		}
+		return si.installISOComposeService(s)
+	}
 	// Check that docker is installed before trying to install.
 	if _, err := svc.DockerCmd(); err != nil {
 		return err // svc.ErrDockerNotFound
@@ -579,8 +685,461 @@ func installDockerComposeService(si *Installer, s *db.Service) error {
 	return nil
 }
 
+type isoComposeLifecycle struct {
+	si             *Installer
+	record         *db.Service
+	compose        *svc.DockerComposeService
+	pullCompose    func(context.Context) error
+	createCompose  func(context.Context) error
+	readmitCompose func(context.Context) error
+	downCompose    func(context.Context) error
+	upCompose      func(context.Context) error
+	startAux       func() error
+	stopAux        func() error
+	baseJSON       []byte
+	mergedJSON     []byte
+	base           ISOComposeModel
+	merged         ISOComposeModel
+	allocation     *db.ISOAllocation
+	isoUnlock      func()
+}
+
+func (si *Installer) installISOComposeService(record *db.Service) error {
+	if _, err := svc.DockerCmd(); err != nil {
+		return err
+	}
+	compose, err := si.newDockerComposeService(record)
+	if err != nil {
+		return fmt.Errorf("load ISO Compose service: %w", err)
+	}
+	lifecycle := &isoComposeLifecycle{si: si, record: record.Clone(), compose: compose}
+	loader := &FileInstaller{
+		s: si.s,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: record.Name},
+			Network:      NetworkOpts{Interfaces: strings.Join(record.ISO.DesiredModes, ","), Modes: slices.Clone(record.ISO.DesiredModes), ISO: true},
+		},
+		tsNet: record.TSNet.Clone(),
+	}
+	return loader.installISOCompose(context.Background(), lifecycle)
+}
+
+func (l *isoComposeLifecycle) resolveOptions(files []string) svc.ComposeResolveOptions {
+	root := l.si.s.serviceRootFromView(l.record.View())
+	return svc.ComposeResolveOptions{
+		ProjectName: svc.ComposeProjectName(l.record.Name),
+		ProjectDir:  serviceDataDirForRoot(root),
+		Files:       slices.Clone(files),
+		NewCmd:      l.si.newCommandContext,
+	}
+}
+
+func (l *isoComposeLifecycle) baseComposePath() (string, error) {
+	path, ok := l.record.Artifacts.Gen(db.ArtifactDockerComposeFile, l.record.Generation)
+	if !ok {
+		return "", fmt.Errorf("ISO Compose base artifact is missing for generation %d", l.record.Generation)
+	}
+	return path, nil
+}
+
+func (l *isoComposeLifecycle) overlayComposePath() (string, error) {
+	path, ok := l.record.Artifacts.Gen(db.ArtifactDockerComposeNetwork, l.record.Generation)
+	if !ok {
+		return "", fmt.Errorf("ISO Compose overlay artifact is missing for generation %d", l.record.Generation)
+	}
+	return path, nil
+}
+
+func (l *isoComposeLifecycle) ResolveBase(ctx context.Context) error {
+	path, err := l.baseComposePath()
+	if err != nil {
+		return err
+	}
+	l.baseJSON, err = svc.ResolveComposeJSON(ctx, l.resolveOptions([]string{path}))
+	return err
+}
+
+func (l *isoComposeLifecycle) AdmitBase(context.Context) error {
+	root := l.si.s.serviceRootFromView(l.record.View())
+	model, err := AdmitISOCompose(l.baseJSON, ISOComposeAdmissionOptions{
+		ServiceRoot: root, ProjectName: svc.ComposeProjectName(l.record.Name), MaxComponents: iso.MaxComponents,
+	})
+	l.base = model
+	return err
+}
+
+func (l *isoComposeLifecycle) Reserve(ctx context.Context) error {
+	return l.si.s.withISOOperationLock(ctx, func() error {
+		allocation, err := l.si.s.reserveISOAllocation(ctx, l.record.Name, isoReservationRequest{
+			Kind: iso.PayloadCompose, Modes: slices.Clone(l.record.ISO.DesiredModes), Components: slices.Clone(l.base.Components),
+		})
+		if err != nil {
+			return err
+		}
+		l.allocation = allocation
+		if len(allocation.RetiredComponents) != 0 {
+			steps := &isoConcreteRetirementSteps{lifecycle: l}
+			if err := l.si.s.finalizeISORetirementsWith(ctx, l.record.Name, steps); err != nil {
+				return err
+			}
+			allocation, err = l.si.s.persistedISOAllocationForService(l.record.Name)
+			if err != nil {
+				return err
+			}
+			l.allocation = allocation
+		}
+		return nil
+	})
+}
+
+func (s *Server) persistedISOAllocationForService(service string) (*db.ISOAllocation, error) {
+	dv, err := s.cfg.DB.Get()
+	if err != nil {
+		return nil, err
+	}
+	view, ok := dv.Services().GetOk(service)
+	if !ok || !view.ISO().Valid() {
+		return nil, fmt.Errorf("service %q has no persisted ISO allocation", service)
+	}
+	return view.ISO().AsStruct(), nil
+}
+
+func (l *isoComposeLifecycle) RenderOverlay(context.Context) error {
+	path, err := l.overlayComposePath()
+	if err != nil {
+		return err
+	}
+	content, err := renderISOComposeOverlay(l.allocation, l.base)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+func (l *isoComposeLifecycle) ResolveMerged(ctx context.Context) error {
+	base, err := l.baseComposePath()
+	if err != nil {
+		return err
+	}
+	overlay, err := l.overlayComposePath()
+	if err != nil {
+		return err
+	}
+	l.mergedJSON, err = svc.ResolveComposeJSON(ctx, l.resolveOptions([]string{base, overlay}))
+	return err
+}
+
+func (l *isoComposeLifecycle) AdmitMerged(context.Context) error {
+	root := l.si.s.serviceRootFromView(l.record.View())
+	model, err := AdmitISOCompose(l.mergedJSON, ISOComposeAdmissionOptions{
+		ServiceRoot: root, ProjectName: svc.ComposeProjectName(l.record.Name), MaxComponents: iso.MaxComponents, RequireISOOverlay: l.allocation,
+	})
+	if err != nil {
+		return err
+	}
+	if !slices.Equal(l.base.Components, model.Components) {
+		return fmt.Errorf("ISO overlay changed Compose components: base %v, merged %v", l.base.Components, model.Components)
+	}
+	l.merged = model
+	return nil
+}
+
+func (l *isoComposeLifecycle) InstallDNS(context.Context) error {
+	return installISODNSService(l.si.s.cfg.RootDir)
+}
+
+func (l *isoComposeLifecycle) runtimeSpec() (isoRuntimeNetworkSpec, error) {
+	return l.si.s.loadISORuntimeSpec(l.record.Name)
+}
+
+func (l *isoComposeLifecycle) EnsurePolicy(ctx context.Context) error {
+	unlock, err := acquireISOOperationLockForRuntime(ctx, l.si.s.cfg.RootDir)
+	if err != nil {
+		return err
+	}
+	l.isoUnlock = unlock
+	spec, err := l.runtimeSpec()
+	if err != nil {
+		l.releaseISOLock()
+		return err
+	}
+	rules, err := netns.RenderISOPolicy(spec.Backend, spec.Policy)
+	if err != nil {
+		l.releaseISOLock()
+		return err
+	}
+	if err := netns.EnsureISOPolicy(ctx, rules); err != nil {
+		l.releaseISOLock()
+		return err
+	}
+	return nil
+}
+
+func (l *isoComposeLifecycle) VerifyPolicy(ctx context.Context) error {
+	spec, err := l.runtimeSpec()
+	if err != nil {
+		l.releaseISOLock()
+		return err
+	}
+	rules, err := netns.RenderISOPolicy(spec.Backend, spec.Policy)
+	if err != nil {
+		l.releaseISOLock()
+		return err
+	}
+	if err := netns.VerifyISOPolicy(ctx, rules); err != nil {
+		l.releaseISOLock()
+		return err
+	}
+	return nil
+}
+
+func (l *isoComposeLifecycle) EnsureTopology(ctx context.Context) error {
+	spec, err := l.runtimeSpec()
+	if err != nil {
+		l.releaseISOLock()
+		return err
+	}
+	if err := netns.EnsureISOTopology(ctx, spec.Topology); err != nil {
+		l.releaseISOLock()
+		return err
+	}
+	return nil
+}
+
+func (l *isoComposeLifecycle) VerifyTopology(ctx context.Context) error {
+	defer l.releaseISOLock()
+	spec, err := l.runtimeSpec()
+	if err != nil {
+		return err
+	}
+	return netns.VerifyISOTopology(ctx, spec.Topology)
+}
+
+func (l *isoComposeLifecycle) releaseISOLock() {
+	if l.isoUnlock == nil {
+		return
+	}
+	l.isoUnlock()
+	l.isoUnlock = nil
+}
+
+func (l *isoComposeLifecycle) InstallTailscale(ctx context.Context, _ *FileInstaller) error {
+	if l.record.TSNet == nil {
+		return nil
+	}
+	if err := l.si.installISOTailscale(ctx, l.record, nil); err != nil {
+		return err
+	}
+	view, err := l.si.s.serviceView(l.record.Name)
+	if err != nil {
+		return err
+	}
+	l.record = view.AsStruct()
+	l.compose, err = l.si.newDockerComposeService(l.record)
+	return err
+}
+
+func (l *isoComposeLifecycle) Pull(ctx context.Context) error {
+	if !l.si.icfg.Pull {
+		return nil
+	}
+	if l.pullCompose != nil {
+		return l.pullCompose(ctx)
+	}
+	return l.compose.PullContext(ctx)
+}
+func (l *isoComposeLifecycle) Build(context.Context) error { return nil }
+
+func (l *isoComposeLifecycle) AttachNetwork(ctx context.Context) error {
+	if err := l.reacquireAndVerifyForMutation(ctx); err != nil {
+		return err
+	}
+	if l.createCompose != nil {
+		return l.createCompose(ctx)
+	}
+	if err := l.compose.InstallDefinition(); err != nil {
+		return err
+	}
+	return l.compose.Create(ctx)
+}
+
+func (l *isoComposeLifecycle) StartAux(ctx context.Context) error {
+	// A gate unit can call back into iso-network-ensure, so never start it while
+	// this process still owns the same host-wide ISO operation lock.
+	l.releaseISOLock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if l.startAux != nil {
+		return l.startAux()
+	}
+	return l.compose.StartAuxiliaryUnits()
+}
+func (l *isoComposeLifecycle) ComposeUp(ctx context.Context) error {
+	if err := l.reacquireAndVerifyForStart(ctx); err != nil {
+		return err
+	}
+	if l.upCompose != nil {
+		return l.upCompose(ctx)
+	}
+	return l.compose.UpDetached(ctx, false)
+}
+
+func (l *isoComposeLifecycle) reacquireAndVerifyForStart(ctx context.Context) error {
+	return l.reacquireAndVerifyCurrentBoundary(ctx, true)
+}
+
+func (l *isoComposeLifecycle) reacquireAndVerifyForMutation(ctx context.Context) error {
+	return l.reacquireAndVerifyCurrentBoundary(ctx, true)
+}
+
+//nolint:cyclop // Lock reacquisition and boundary verification must remain visibly ordered.
+func (l *isoComposeLifecycle) reacquireAndVerifyCurrentBoundary(ctx context.Context, readmit bool) error {
+	unlock, err := acquireISOOperationLockForRuntime(ctx, l.si.s.cfg.RootDir)
+	if err != nil {
+		return err
+	}
+	l.isoUnlock = unlock
+	fail := func(err error) error {
+		l.releaseISOLock()
+		return err
+	}
+	view, err := l.si.s.serviceView(l.record.Name)
+	if err != nil {
+		return fail(err)
+	}
+	current := view.AsStruct()
+	if current.Generation != l.record.Generation || current.ISO == nil || current.ISO.RemoveRequested || !reflect.DeepEqual(current.ISO, l.allocation) {
+		return fail(fmt.Errorf("service %q changed while the ISO network gate was starting", l.record.Name))
+	}
+	spec, err := l.runtimeSpec()
+	if err != nil {
+		return fail(err)
+	}
+	rules, err := netns.RenderISOPolicy(spec.Backend, spec.Policy)
+	if err != nil {
+		return fail(err)
+	}
+	if err := verifyISOPolicyForRuntime(ctx, rules); err != nil {
+		return fail(err)
+	}
+	if err := verifyISOTopologyForRuntime(ctx, spec.Topology); err != nil {
+		return fail(err)
+	}
+	if readmit {
+		if err := l.revalidateComposeInputs(ctx); err != nil {
+			return fail(err)
+		}
+	}
+	return nil
+}
+
+func (l *isoComposeLifecycle) revalidateComposeInputs(ctx context.Context) error {
+	if l.readmitCompose != nil {
+		return l.readmitCompose(ctx)
+	}
+	if err := l.ResolveBase(ctx); err != nil {
+		return fmt.Errorf("re-resolve base ISO Compose model: %w", err)
+	}
+	if err := l.AdmitBase(ctx); err != nil {
+		return fmt.Errorf("re-admit base ISO Compose model: %w", err)
+	}
+	if err := l.ResolveMerged(ctx); err != nil {
+		return fmt.Errorf("re-resolve merged ISO Compose model: %w", err)
+	}
+	if err := l.AdmitMerged(ctx); err != nil {
+		return fmt.Errorf("re-admit merged ISO Compose model: %w", err)
+	}
+	return nil
+}
+
+func (l *isoComposeLifecycle) InspectRuntime(ctx context.Context) error {
+	components := make(map[string]netip.Addr, len(l.allocation.Components))
+	for name, component := range l.allocation.Components {
+		components[name] = component.Address
+	}
+	base, err := l.baseComposePath()
+	if err != nil {
+		return err
+	}
+	overlay, err := l.overlayComposePath()
+	if err != nil {
+		return err
+	}
+	inspection, err := svc.InspectISOProject(ctx, svc.ISOInspectOptions{
+		ProjectName: svc.ComposeProjectName(l.record.Name), ProjectDir: l.compose.DataDir,
+		ComposeFiles: []string{base, overlay}, NetworkName: svc.ComposeProjectName(l.record.Name) + "_default",
+		ServiceRoot: l.si.s.serviceRootFromView(l.record.View()), Components: components, NewCmd: l.si.newCommandContext,
+	})
+	if err != nil {
+		return err
+	}
+	return inspection.Verify()
+}
+
+func (l *isoComposeLifecycle) MarkReady(context.Context) error {
+	defer l.releaseISOLock()
+	return l.si.s.markISOReady(l.record.Name)
+}
+
+func (l *isoComposeLifecycle) ComposeDownRemoveOrphans(ctx context.Context) error {
+	l.releaseISOLock()
+	down := l.downCompose
+	if down == nil {
+		down = l.compose.StopProjectContainers
+	}
+	stop := l.stopAux
+	if stop == nil {
+		stop = l.compose.StopAuxiliaryUnits
+	}
+	downErr := down(ctx)
+	stopErr := stop()
+	return errors.Join(downErr, stopErr)
+}
+
+func (l *isoComposeLifecycle) Quarantine(_ context.Context, cause error) error {
+	l.releaseISOLock()
+	return l.si.s.markISOState(l.record.Name, string(iso.StateQuarantined), cause)
+}
+
+type isoConcreteRetirementSteps struct{ lifecycle *isoComposeLifecycle }
+
+func (r *isoConcreteRetirementSteps) StopProject(ctx context.Context, _ string) error {
+	return r.lifecycle.compose.StopProjectContainers(ctx)
+}
+func (r *isoConcreteRetirementSteps) VerifyContainersAbsent(ctx context.Context, _ string, _ map[string]db.ISOComponent) error {
+	return r.lifecycle.compose.VerifyProjectAbsent(ctx)
+}
+func (r *isoConcreteRetirementSteps) VerifyDockerEndpointsAbsent(ctx context.Context, _ string, _ map[string]db.ISOComponent) error {
+	return r.lifecycle.compose.VerifyDefaultNetworkAbsent(ctx)
+}
+func (r *isoConcreteRetirementSteps) VerifyDNetRecordsAbsent(_ context.Context, _ string, retired map[string]db.ISOComponent) error {
+	dv, err := r.lifecycle.si.s.cfg.DB.Get()
+	if err != nil {
+		return err
+	}
+	retiredAddresses := map[netip.Addr]bool{}
+	for _, component := range retired {
+		retiredAddresses[component.Address] = true
+	}
+	return verifyDNetAddressesAbsent(dv.AsStruct().DockerNetworks, retiredAddresses, "retired address")
+}
+func (r *isoConcreteRetirementSteps) Reserve(ctx context.Context, service string) error {
+	allocation, err := r.lifecycle.si.s.reserveISOAllocation(ctx, service, isoReservationRequest{
+		Kind: iso.PayloadCompose, Modes: slices.Clone(r.lifecycle.record.ISO.DesiredModes), Components: slices.Clone(r.lifecycle.base.Components),
+	})
+	r.lifecycle.allocation = allocation
+	return err
+}
+func (r *isoConcreteRetirementSteps) Quarantine(_ context.Context, service string, cause error) error {
+	return r.lifecycle.si.s.markISOState(service, string(iso.StateQuarantined), cause)
+}
+
 func installDockerComposeServiceDefinition(si *Installer, s *db.Service) error {
 	si.suspendUI()
+	if s.ISO != nil {
+		return si.installISOComposeServiceDefinition(s)
+	}
 	if _, err := svc.DockerCmd(); err != nil {
 		return err
 	}
@@ -590,6 +1149,50 @@ func installDockerComposeServiceDefinition(si *Installer, s *db.Service) error {
 	}
 	if err := service.InstallWithPull(si.icfg.Pull); err != nil {
 		return fmt.Errorf("failed to install service: %v", err)
+	}
+	return nil
+}
+
+func (si *Installer) installISOComposeServiceDefinition(record *db.Service) error {
+	if _, err := svc.DockerCmd(); err != nil {
+		return err
+	}
+	compose, err := si.newDockerComposeService(record)
+	if err != nil {
+		return err
+	}
+	lifecycle := &isoComposeLifecycle{si: si, record: record.Clone(), compose: compose}
+	if err := runISOInstallPhases(context.Background(), lifecycle); err != nil {
+		return err
+	}
+	if err := lifecycle.compose.InstallDefinition(); err != nil {
+		return errors.Join(err, lifecycle.Quarantine(context.Background(), err))
+	}
+	return si.s.markISOStoppedIfAllocated(record.Name)
+}
+
+func runISOInstallPhases(ctx context.Context, lifecycle *isoComposeLifecycle) error {
+	phases := []struct {
+		name string
+		run  func(context.Context) error
+	}{
+		{name: "resolve-base", run: lifecycle.ResolveBase},
+		{name: "admit-base", run: lifecycle.AdmitBase},
+		{name: "reserve", run: lifecycle.Reserve},
+		{name: "render-overlay", run: lifecycle.RenderOverlay},
+		{name: "resolve-merged", run: lifecycle.ResolveMerged},
+		{name: "admit-merged", run: lifecycle.AdmitMerged},
+		{name: "install-dns", run: lifecycle.InstallDNS},
+		{name: "ensure-policy", run: lifecycle.EnsurePolicy},
+		{name: "verify-policy", run: lifecycle.VerifyPolicy},
+		{name: "ensure-topology", run: lifecycle.EnsureTopology},
+		{name: "verify-topology", run: lifecycle.VerifyTopology},
+		{name: "install-tailscale", run: func(ctx context.Context) error { return lifecycle.InstallTailscale(ctx, nil) }},
+	}
+	for _, phase := range phases {
+		if err := runISOInstallPhase(ctx, phase.name, phase.run); err != nil {
+			return errors.Join(err, lifecycle.Quarantine(ctx, err))
+		}
 	}
 	return nil
 }

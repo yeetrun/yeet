@@ -20,6 +20,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/copyutil"
 	cdb "github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 )
 
 type ttyInstallErrWriter struct {
@@ -484,6 +485,57 @@ func TestRunCmdFuncBuildsInstallConfigWithoutLiveInstaller(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotCfg.Publish, []string{"8080:80"}) {
 		t.Fatalf("publish = %#v, want 8080:80", gotCfg.Publish)
+	}
+}
+
+func TestRunAndStagePublishResetReachISOValidation(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		flags func() netFlags
+	}{
+		{name: "run", flags: func() netFlags {
+			return netFlagsFromRun(cli.RunFlags{Net: "iso", PublishReset: true})
+		}},
+		{name: "stage", flags: func() netFlags {
+			return netFlagsFromStage(cli.StageFlags{Net: "iso", PublishReset: true})
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "compose.yml")
+			if err := os.WriteFile(path, []byte("services:\n  svc-reset:\n    image: busybox\n"), 0o644); err != nil {
+				t.Fatalf("write compose: %v", err)
+			}
+			cfg := (&ttyExecer{sn: "svc-reset"}).fileInstaller(tt.flags(), nil)
+			if !cfg.PublishReset || len(cfg.Publish) != 0 {
+				t.Fatalf("installer publish state = reset %v publish %#v, want reset only", cfg.PublishReset, cfg.Publish)
+			}
+			installer := &FileInstaller{s: newTestServer(t), cfg: cfg}
+			if _, err := installer.preparePayloadInstall(path); !errors.Is(err, iso.ErrPublishedPorts) {
+				t.Fatalf("preparePayloadInstall error = %v, want ErrPublishedPorts", err)
+			}
+			if len(installer.artifacts) != 0 {
+				t.Fatalf("artifacts = %#v, want none before ISO rejection", installer.artifacts)
+			}
+		})
+	}
+}
+
+func TestRunVMPublishResetRejectsISOBeforeProvisioning(t *testing.T) {
+	oldRunVM := runVMCmdFunc
+	called := false
+	runVMCmdFunc = func(*ttyExecer, cli.RunFlags, string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { runVMCmdFunc = oldRunVM })
+
+	execer := &ttyExecer{s: newTestServer(t), sn: "vm-reset"}
+	err := execer.runCmdFunc(cli.RunFlags{Net: "iso", PublishReset: true}, []string{"vm://ubuntu/26.04"})
+	if !errors.Is(err, iso.ErrPublishedPorts) {
+		t.Fatalf("runCmdFunc error = %v, want ErrPublishedPorts", err)
+	}
+	if called {
+		t.Fatal("VM provisioning ran before ISO publish-reset rejection")
 	}
 }
 
@@ -1027,6 +1079,37 @@ func TestCommitStageAppliesPublishWithInstallerHook(t *testing.T) {
 func TestApplyStagePublishNoPublishSkipsComposeLookup(t *testing.T) {
 	if err := (&ttyExecer{}).applyStagePublish(cli.StageFlags{}); err != nil {
 		t.Fatalf("applyStagePublish returned error: %v", err)
+	}
+}
+
+func TestApplyStagePublishResetClearsComposeAndPersistedPorts(t *testing.T) {
+	server := newTestServer(t)
+	path := filepath.Join(t.TempDir(), "compose.yml")
+	if err := os.WriteFile(path, []byte("services:\n  svc-reset:\n    image: nginx\n    ports:\n      - 8080:80\n"), 0o644); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	seedService(t, server, "svc-reset", cdb.ServiceTypeDockerCompose, cdb.ArtifactStore{
+		cdb.ArtifactDockerComposeFile: {Refs: map[cdb.ArtifactRef]string{"staged": path}},
+	})
+	if _, _, err := server.cfg.DB.MutateService("svc-reset", func(_ *cdb.Data, service *cdb.Service) error {
+		service.Publish = []string{"8080:80"}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed publish state: %v", err)
+	}
+	execer := &ttyExecer{s: server, sn: "svc-reset"}
+	if err := execer.applyStagePublish(cli.StageFlags{PublishReset: true}); err != nil {
+		t.Fatalf("applyStagePublish: %v", err)
+	}
+	ports, err := readComposePorts(path, "svc-reset")
+	if err != nil {
+		t.Fatalf("readComposePorts: %v", err)
+	}
+	if len(ports) != 0 {
+		t.Fatalf("compose ports = %#v, want cleared", ports)
+	}
+	if publish := testService(t, server, "svc-reset").Publish; len(publish) != 0 {
+		t.Fatalf("persisted publish = %#v, want cleared", publish)
 	}
 }
 

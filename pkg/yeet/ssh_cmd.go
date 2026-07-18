@@ -706,6 +706,9 @@ func vmSSHUser(resp catchrpc.ServiceInfoResponse) string {
 }
 
 func vmSSHTargetHost(resp catchrpc.ServiceInfoResponse, forceProxy bool) string {
+	if host := vmSSHISOHost(resp); host != "" {
+		return host
+	}
 	lanHost := vmSSHLANHost(resp)
 	svcHost := vmSSHSvcHost(resp)
 	if forceProxy {
@@ -718,6 +721,20 @@ func vmSSHTargetHost(resp catchrpc.ServiceInfoResponse, forceProxy bool) string 
 		return svcHost
 	}
 	return vmSSHPreferredHost(resp)
+}
+
+func vmSSHISOHost(resp catchrpc.ServiceInfoResponse) string {
+	if resp.Info.VM == nil {
+		return ""
+	}
+	for _, network := range resp.Info.VM.Networks {
+		if strings.TrimSpace(network.Mode) == "iso" {
+			if host := strings.TrimSpace(network.IP); host != "" {
+				return host
+			}
+		}
+	}
+	return ""
 }
 
 func vmSSHPreferredHost(resp catchrpc.ServiceInfoResponse) string {
@@ -786,7 +803,7 @@ func shouldProxyVMSSH(resp catchrpc.ServiceInfoResponse, guestHost, mode string,
 	if resp.Info.VM == nil || strings.TrimSpace(guestHost) == "" {
 		return false
 	}
-	if forceProxy || mode == "svc" {
+	if forceProxy || mode == "svc" || mode == "iso" {
 		return true
 	}
 	return false

@@ -902,6 +902,22 @@ func TestVMSetFlagsUpdateStoredRunArgs(t *testing.T) {
 	}
 }
 
+func TestVMSetNetworkChangeCanonicalizesLegacyCPUAndRemovesLANFlags(t *testing.T) {
+	entry := ServiceEntry{
+		Type:        serviceTypeVM,
+		Payload:     "vm://ubuntu/26.04",
+		PayloadKind: serviceTypeVM,
+		Args:        []string{"--cpus=1", "--memory=1g", "--disk=8g", "--net=lan", "--macvlan-parent=vmbr0", "--macvlan-vlan=4"},
+	}
+	if !applyVMSetConfigFlags(&entry, cli.VMSetFlags{Net: "iso", NetworkChange: true}) {
+		t.Fatal("applyVMSetConfigFlags reported no change")
+	}
+	want := []string{"--vcpus=1", "--memory=1g", "--disk=8g", "--net=iso"}
+	if !reflect.DeepEqual(entry.Args, want) {
+		t.Fatalf("args = %#v, want %#v", entry.Args, want)
+	}
+}
+
 func TestVMSetFutureFlagsForwardWithoutClaimingLocalConfigUpdate(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
