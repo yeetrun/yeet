@@ -6,11 +6,16 @@ package yeet
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
@@ -347,6 +352,131 @@ func TestRunHostSetAppliesCatchRootOnlyPlan(t *testing.T) {
 	}
 }
 
+func TestRunHostSetReconnectsWithCappedBackoffThenFinalizes(t *testing.T) {
+	state := stubHostSetRuntime(t)
+	state.client.plan = catchrpc.HostStoragePlan{
+		Current:         catchrpc.HostStorageState{DataDir: "/old/data", ServicesRoot: "/old/data/services"},
+		Desired:         catchrpc.HostStorageState{DataDir: "/new/data", ServicesRoot: "/new/data/services"},
+		DataDirAction:   catchrpc.HostStorageDataDirAction{Move: true, From: "/old/data", To: "/new/data"},
+		RequiresRestart: true,
+	}
+	state.client.apply = catchrpc.HostStorageApplyResult{TransactionID: "tx-1", RestartScheduled: true}
+	for range 7 {
+		state.client.finalizeErrs = append(state.client.finalizeErrs, &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED})
+	}
+	state.client.finalize = catchrpc.HostStorageFinalizeResult{TransactionID: "tx-1", CleanupPending: true}
+	var delays []time.Duration
+	oldSleep := hostStorageReconnectSleepFn
+	hostStorageReconnectSleepFn = func(_ context.Context, delay time.Duration) error {
+		delays = append(delays, delay)
+		return nil
+	}
+	t.Cleanup(func() { hostStorageReconnectSleepFn = oldSleep })
+
+	if err := runHostSet(context.Background(), cli.HostSetFlags{DataDir: "/new/data", Yes: true}); err != nil {
+		t.Fatal(err)
+	}
+	wantDelays := []time.Duration{100 * time.Millisecond, 200 * time.Millisecond, 400 * time.Millisecond, 800 * time.Millisecond, 1600 * time.Millisecond, 2 * time.Second, 2 * time.Second}
+	if !reflect.DeepEqual(delays, wantDelays) {
+		t.Fatalf("reconnect delays = %v, want %v", delays, wantDelays)
+	}
+	if len(state.client.finalizeRequests) != 8 {
+		t.Fatalf("finalize requests = %d, want 8", len(state.client.finalizeRequests))
+	}
+	for _, req := range state.client.finalizeRequests {
+		if req.TransactionID != "tx-1" {
+			t.Fatalf("finalize request = %#v", req)
+		}
+	}
+	for _, want := range []string{"reconnecting", "finalizing", "Cleanup pending"} {
+		if !strings.Contains(state.stdout.String(), want) {
+			t.Fatalf("stdout = %q, want %q", state.stdout.String(), want)
+		}
+	}
+}
+
+func TestRunHostSetReconnectStopsAtSixtySecondDeadline(t *testing.T) {
+	state := stubHostSetRuntime(t)
+	state.client.plan = catchrpc.HostStoragePlan{
+		Current:         catchrpc.HostStorageState{DataDir: "/old/data", ServicesRoot: "/old/data/services"},
+		Desired:         catchrpc.HostStorageState{DataDir: "/new/data", ServicesRoot: "/new/data/services"},
+		DataDirAction:   catchrpc.HostStorageDataDirAction{Move: true, From: "/old/data", To: "/new/data"},
+		RequiresRestart: true,
+	}
+	state.client.apply = catchrpc.HostStorageApplyResult{TransactionID: "tx-1", RestartScheduled: true}
+	state.client.finalizeErrs = []error{&net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}
+	start := time.Unix(100, 0)
+	times := []time.Time{start, start.Add(60*time.Second + time.Nanosecond)}
+	oldNow := hostStorageReconnectNowFn
+	oldSleep := hostStorageReconnectSleepFn
+	hostStorageReconnectNowFn = func() time.Time {
+		now := times[0]
+		times = times[1:]
+		return now
+	}
+	hostStorageReconnectSleepFn = func(context.Context, time.Duration) error {
+		t.Fatal("sleep called after reconnect deadline")
+		return nil
+	}
+	t.Cleanup(func() {
+		hostStorageReconnectNowFn = oldNow
+		hostStorageReconnectSleepFn = oldSleep
+	})
+
+	err := runHostSet(context.Background(), cli.HostSetFlags{DataDir: "/new/data", Yes: true})
+	if err == nil || !strings.Contains(err.Error(), "60s") || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("runHostSet error = %v, want bounded reconnect failure", err)
+	}
+	if len(state.client.finalizeRequests) != 1 {
+		t.Fatalf("finalize requests = %d, want 1", len(state.client.finalizeRequests))
+	}
+}
+
+func TestRunHostSetFinalizeApplicationErrorDoesNotRetry(t *testing.T) {
+	state := stubHostSetRuntime(t)
+	state.client.finalizeErrs = []error{errors.New("stale host storage transaction")}
+	sleepCalls := 0
+	oldSleep := hostStorageReconnectSleepFn
+	hostStorageReconnectSleepFn = func(context.Context, time.Duration) error {
+		sleepCalls++
+		return nil
+	}
+	t.Cleanup(func() { hostStorageReconnectSleepFn = oldSleep })
+
+	_, err := finalizeHostStorageAfterReconnect(context.Background(), state.client, state.host, "tx-stale")
+	if err == nil || !strings.Contains(err.Error(), "stale host storage transaction") {
+		t.Fatalf("finalize error = %v, want application error", err)
+	}
+	if sleepCalls != 0 || len(state.client.finalizeRequests) != 1 {
+		t.Fatalf("sleep/finalize calls = %d/%d, want 0/1", sleepCalls, len(state.client.finalizeRequests))
+	}
+}
+
+func TestRunHostSetCanceledWrappedNetworkErrorDoesNotRetry(t *testing.T) {
+	state := stubHostSetRuntime(t)
+	state.client.finalizeErrs = []error{&url.Error{Op: "POST", URL: "https://catch.invalid", Err: context.Canceled}}
+	sleepCalls := 0
+	oldSleep := hostStorageReconnectSleepFn
+	hostStorageReconnectSleepFn = func(context.Context, time.Duration) error {
+		sleepCalls++
+		return context.Canceled
+	}
+	t.Cleanup(func() { hostStorageReconnectSleepFn = oldSleep })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := finalizeHostStorageAfterReconnect(ctx, state.client, state.host, "tx-canceled")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("finalize error = %v, want context cancellation", err)
+	}
+	if strings.Contains(err.Error(), "wait for Catch") {
+		t.Fatalf("finalize error = %v, want direct cancellation", err)
+	}
+	if sleepCalls != 0 || len(state.client.finalizeRequests) != 1 {
+		t.Fatalf("sleep/finalize calls = %d/%d, want 0/1", sleepCalls, len(state.client.finalizeRequests))
+	}
+}
+
 func TestRenderHostStoragePlanShowsRepairAction(t *testing.T) {
 	var out strings.Builder
 	plan := catchrpc.HostStoragePlan{
@@ -528,12 +658,18 @@ func stubHostSetRuntime(t *testing.T) *hostSetTestState {
 }
 
 type fakeHostStorageClient struct {
-	planRequests  []catchrpc.HostStoragePlanRequest
-	applyRequests []catchrpc.HostStorageApplyRequest
-	plan          catchrpc.HostStoragePlan
-	apply         catchrpc.HostStorageApplyResult
-	planErr       error
-	applyErr      error
+	planRequests     []catchrpc.HostStoragePlanRequest
+	applyRequests    []catchrpc.HostStorageApplyRequest
+	finalizeRequests []catchrpc.HostStorageFinalizeRequest
+	cleanupRequests  []catchrpc.HostStorageCleanupRequest
+	plan             catchrpc.HostStoragePlan
+	apply            catchrpc.HostStorageApplyResult
+	finalize         catchrpc.HostStorageFinalizeResult
+	cleanup          catchrpc.HostStorageCleanupResult
+	planErr          error
+	applyErr         error
+	finalizeErrs     []error
+	cleanupErr       error
 }
 
 func (c *fakeHostStorageClient) HostStoragePlan(_ context.Context, req catchrpc.HostStoragePlanRequest) (catchrpc.HostStoragePlan, error) {
@@ -544,4 +680,19 @@ func (c *fakeHostStorageClient) HostStoragePlan(_ context.Context, req catchrpc.
 func (c *fakeHostStorageClient) HostStorageApply(_ context.Context, req catchrpc.HostStorageApplyRequest) (catchrpc.HostStorageApplyResult, error) {
 	c.applyRequests = append(c.applyRequests, req)
 	return c.apply, c.applyErr
+}
+
+func (c *fakeHostStorageClient) HostStorageFinalize(_ context.Context, req catchrpc.HostStorageFinalizeRequest) (catchrpc.HostStorageFinalizeResult, error) {
+	c.finalizeRequests = append(c.finalizeRequests, req)
+	if len(c.finalizeErrs) == 0 {
+		return c.finalize, nil
+	}
+	err := c.finalizeErrs[0]
+	c.finalizeErrs = c.finalizeErrs[1:]
+	return catchrpc.HostStorageFinalizeResult{}, err
+}
+
+func (c *fakeHostStorageClient) HostStorageCleanup(_ context.Context, req catchrpc.HostStorageCleanupRequest) (catchrpc.HostStorageCleanupResult, error) {
+	c.cleanupRequests = append(c.cleanupRequests, req)
+	return c.cleanup, c.cleanupErr
 }

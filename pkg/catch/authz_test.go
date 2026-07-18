@@ -183,6 +183,14 @@ func TestAuthorizeCallerAllowsGrantedPermissions(t *testing.T) {
 	}
 }
 
+func TestRPCMethodPermissionsHostStorageFinalizeAndCleanupRequireManage(t *testing.T) {
+	for _, method := range []string{"catch.HostStorageFinalize", "catch.HostStorageCleanup"} {
+		got, err := rpcMethodPermissions(method)
+		if err != nil || !got.has(permissionManage) || got.has(permissionRead) || got.has(permissionSSH) {
+			t.Fatalf("%s permissions = %v, %v", method, got, err)
+		}
+	}
+}
 func newAuthzTestServer(t *testing.T, perms permissionSet) *Server {
 	t.Helper()
 	server := newTestServer(t)

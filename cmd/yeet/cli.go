@@ -106,7 +106,8 @@ func buildGroupHandlers() map[string]yargs.Group {
 		"host": {
 			Description: "Manage catch host settings",
 			Commands: map[string]yargs.SubcommandHandler{
-				"set": handleHostSetFn,
+				"set":     handleHostSetFn,
+				"cleanup": handleHostCleanupFn,
 			},
 		},
 		"service": {

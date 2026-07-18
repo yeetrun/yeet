@@ -493,3 +493,14 @@ func (c *Client) HostStorageApply(ctx context.Context, req HostStorageApplyReque
 	err := c.call(ctx, RPCMethodHostStorageApply, req, &resp, hostStorageApplyRPCTimeout)
 	return resp, err
 }
+func (c *Client) HostStorageFinalize(ctx context.Context, req HostStorageFinalizeRequest) (HostStorageFinalizeResult, error) {
+	var resp HostStorageFinalizeResult
+	err := c.Call(ctx, RPCMethodHostStorageFinalize, req, &resp)
+	return resp, err
+}
+
+func (c *Client) HostStorageCleanup(ctx context.Context, req HostStorageCleanupRequest) (HostStorageCleanupResult, error) {
+	var resp HostStorageCleanupResult
+	err := c.Call(ctx, RPCMethodHostStorageCleanup, req, &resp)
+	return resp, err
+}

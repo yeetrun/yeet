@@ -6,6 +6,7 @@ package catch
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,116 @@ import (
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
 )
+
+func TestHostStorageRewriteTargetDataStoreShieldsLegacyPreservedRoots(t *testing.T) {
+	root := t.TempDir()
+	oldDataDir := filepath.Join(root, "legacy-data")
+	oldServicesRoot := filepath.Join(root, "operator-services")
+	newDataDir := filepath.Join(root, "managed-data")
+	newServicesRoot := filepath.Join(newDataDir, "services")
+	apiRoot := filepath.Join(oldServicesRoot, "api")
+	catchRoot := filepath.Join(oldServicesRoot, CatchService)
+	customRoot := filepath.Join(oldDataDir, "custom", "database")
+	zfsRoot := filepath.Join(oldDataDir, "mounts", "media")
+	data := &db.Data{
+		DataVersion: db.CurrentDataVersion,
+		Services: map[string]*db.Service{
+			"api": legacyPreservedRewriteTestService("api", apiRoot, ""),
+			CatchService: {
+				Name:        CatchService,
+				ServiceType: db.ServiceTypeSystemd,
+				ServiceRoot: catchRoot,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{db.Gen(1): filepath.Join(catchRoot, "bin", CatchService)}},
+				},
+			},
+			"custom": legacyPreservedRewriteTestService("custom", customRoot, ""),
+			"media":  legacyPreservedRewriteTestService("media", zfsRoot, "tank/apps/media"),
+		},
+	}
+	api := data.Services["api"]
+	api.Artifacts[db.ArtifactTSBinary] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+		db.Gen(1): filepath.Join(oldDataDir, "tsd", "tailscaled"),
+	}}
+	api.VM.Image.RootFS = filepath.Join(oldDataDir, "vm-images", "ubuntu", "rootfs.ext4")
+	targetStore := db.NewStore(filepath.Join(newDataDir, "db.json"), newServicesRoot)
+	if err := targetStore.Set(data); err != nil {
+		t.Fatalf("targetStore.Set: %v", err)
+	}
+	plan := catchrpc.HostStoragePlan{
+		Current: catchrpc.HostStorageState{DataDir: oldDataDir, ServicesRoot: oldServicesRoot},
+		Desired: catchrpc.HostStorageState{DataDir: newDataDir, ServicesRoot: newServicesRoot},
+		DataDirAction: catchrpc.HostStorageDataDirAction{
+			Move: true,
+			From: oldDataDir,
+			To:   newDataDir,
+		},
+		Legacy: catchrpc.HostStorageLegacyPlan{
+			Eligible:       true,
+			SourceRoot:     oldDataDir,
+			TargetRoot:     newDataDir,
+			PreservedRoots: []string{apiRoot, catchRoot, customRoot, zfsRoot},
+		},
+	}
+	applier := &hostStorageApplier{config: Config{RootDir: oldDataDir, ServicesRoot: oldServicesRoot}}
+
+	if err := applier.rewriteTargetDataStore(context.Background(), plan, io.Discard); err != nil {
+		t.Fatalf("rewriteTargetDataStore: %v", err)
+	}
+	rewrittenStore := db.NewStore(filepath.Join(newDataDir, "db.json"), newServicesRoot)
+	dv, err := rewrittenStore.Get()
+	if err != nil {
+		t.Fatalf("targetStore.Get: %v", err)
+	}
+	for name, preservedRoot := range map[string]string{
+		"api":        apiRoot,
+		CatchService: catchRoot,
+		"custom":     customRoot,
+		"media":      zfsRoot,
+	} {
+		service := dv.Services().Get(name).AsStruct()
+		if service == nil {
+			t.Fatalf("service %q missing after rewrite", name)
+		}
+		if service.ServiceRoot != preservedRoot {
+			t.Fatalf("%s ServiceRoot = %q, want preserved %q", name, service.ServiceRoot, preservedRoot)
+		}
+		if got := service.Artifacts[db.ArtifactBinary].Refs[db.Gen(1)]; got != filepath.Join(preservedRoot, "bin", name) {
+			t.Fatalf("%s binary ref = %q, want preserved root", name, got)
+		}
+		if service.VM != nil {
+			if got := service.VM.Image.Kernel; got != filepath.Join(preservedRoot, "run", "vmlinux") {
+				t.Fatalf("%s VM kernel = %q, want preserved root", name, got)
+			}
+			if got := service.VM.Disk.Path; got != filepath.Join(preservedRoot, "data", "rootfs.raw") {
+				t.Fatalf("%s VM disk = %q, want preserved root", name, got)
+			}
+		}
+	}
+	api = dv.Services().Get("api").AsStruct()
+	if got := api.Artifacts[db.ArtifactTSBinary].Refs[db.Gen(1)]; got != filepath.Join(newDataDir, "tsd", "tailscaled") {
+		t.Fatalf("api non-preserved artifact ref = %q, want managed data dir", got)
+	}
+	if got := api.VM.Image.RootFS; got != filepath.Join(newDataDir, "vm-images", "ubuntu", "rootfs.ext4") {
+		t.Fatalf("api non-preserved VM rootfs = %q, want managed data dir", got)
+	}
+}
+
+func legacyPreservedRewriteTestService(name, root, dataset string) *db.Service {
+	return &db.Service{
+		Name:           name,
+		ServiceType:    db.ServiceTypeVM,
+		ServiceRoot:    root,
+		ServiceRootZFS: dataset,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{db.Gen(1): filepath.Join(root, "bin", name)}},
+		},
+		VM: &db.VMConfig{
+			Image: db.VMImageConfig{Kernel: filepath.Join(root, "run", "vmlinux")},
+			Disk:  db.VMDiskConfig{Path: filepath.Join(root, "data", "rootfs.raw")},
+		},
+	}
+}
 
 func TestRewriteHostStorageDataPaths(t *testing.T) {
 	data := &db.Data{

@@ -114,11 +114,17 @@ yeet init root@<machine-host>
 
 If you SSH as a non-root user, yeet runs the remote install with sudo.
 
-Interactive setup asks for the Tailscale OAuth client secret and a data directory. The default is:
+Interactive setup asks for the Tailscale OAuth client secret. Catch stores its
+state in this directory by default:
 
 ```text
-$HOME/yeet-data
+/var/lib/yeet
 ```
+
+The service root defaults to `<data-dir>/services`, which is
+`/var/lib/yeet/services` with the default data directory. Set `--data-dir` or
+`--services-root` during init when the host needs a different filesystem path.
+Explicit custom roots are preserved during upgrades and guided migrations.
 
 If Docker is missing on a Debian/Ubuntu-style host, interactive setup asks
 before installing it. If the host can run VMs, setup can ask about VM tools too.
@@ -129,7 +135,28 @@ If the host has ZFS and you want service data on datasets:
 yeet init --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services root@<machine-host>
 ```
 
-Rerunning `yeet init` keeps the existing storage layout and upgrades catch.
+Rerunning `yeet init` upgrades catch without changing explicit custom or ZFS
+roots.
+When an interactive upgrade finds the exact legacy home-directory layout, it
+can offer to move that state to `/var/lib/yeet`. If init cannot prompt, run the
+same migration explicitly:
+
+```bash
+yeet host set \
+  --data-dir=/var/lib/yeet \
+  --services-root=/var/lib/yeet/services \
+  --migrate-services=all \
+  --yes
+yeet host cleanup --from=/root/yeet-data --yes
+```
+
+`yeet host set` moves and validates the active state but does not delete the old
+tree. Run cleanup separately. Cleanup refuses arbitrary paths, revalidates the
+active Catch and service state, and removes only the journaled inactive source.
+If deletion alone fails, rerun the same cleanup command to resume it safely.
+
+ZFS datasets are not copied or deleted implicitly. Dataset-backed data and
+nested datasets stay in place unless you manage them explicitly.
 
 ### 4. Confirm the host works
 

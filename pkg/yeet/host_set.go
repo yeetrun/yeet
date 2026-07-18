@@ -6,12 +6,16 @@ package yeet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
@@ -23,15 +27,34 @@ var runHostSetFn = runHostSet
 type hostStorageClient interface {
 	HostStoragePlan(context.Context, catchrpc.HostStoragePlanRequest) (catchrpc.HostStoragePlan, error)
 	HostStorageApply(context.Context, catchrpc.HostStorageApplyRequest) (catchrpc.HostStorageApplyResult, error)
+	HostStorageFinalize(context.Context, catchrpc.HostStorageFinalizeRequest) (catchrpc.HostStorageFinalizeResult, error)
+	HostStorageCleanup(context.Context, catchrpc.HostStorageCleanupRequest) (catchrpc.HostStorageCleanupResult, error)
 }
 
 var (
 	newHostStorageClientFn = func(host string) hostStorageClient {
 		return newRPCClient(host)
 	}
-	confirmHostSetFn           = cmdutil.Confirm
-	hostSetStdin     io.Reader = os.Stdin
-	hostSetStdout    io.Writer = os.Stdout
+	confirmHostSetFn                      = cmdutil.Confirm
+	hostSetStdin                io.Reader = os.Stdin
+	hostSetStdout               io.Writer = os.Stdout
+	hostStorageReconnectNowFn             = time.Now
+	hostStorageReconnectSleepFn           = func(ctx context.Context, delay time.Duration) error {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		}
+	}
+)
+
+const (
+	hostStorageReconnectTimeout = 60 * time.Second
+	hostStorageReconnectInitial = 100 * time.Millisecond
+	hostStorageReconnectMaximum = 2 * time.Second
 )
 
 func HandleHostSet(ctx context.Context, args []string) error {
@@ -96,7 +119,83 @@ func runHostSetApply(ctx context.Context, client hostStorageClient, host string,
 	if err := renderHostStorageApplyResult(hostSetStdout, result); err != nil {
 		return err
 	}
+	if result.TransactionID != "" {
+		finalized, err := finalizeHostStorageAfterReconnect(ctx, client, host, result.TransactionID)
+		if err != nil {
+			return err
+		}
+		if err := renderHostStorageFinalizeResult(hostSetStdout, finalized); err != nil {
+			return err
+		}
+	}
 	return updateHostStorageConfig(hostSetStdout, flags.Config, host, plan, flags, result)
+}
+
+func finalizeHostStorageAfterReconnect(ctx context.Context, client hostStorageClient, host, transactionID string) (catchrpc.HostStorageFinalizeResult, error) {
+	deadline := hostStorageReconnectNowFn().Add(hostStorageReconnectTimeout)
+	retryCtx, cancel := context.WithTimeout(ctx, hostStorageReconnectTimeout)
+	defer cancel()
+	if _, err := fmt.Fprintf(hostSetStdout, "Host storage migration phase: reconnecting to Catch on %s.\n", host); err != nil {
+		return catchrpc.HostStorageFinalizeResult{}, err
+	}
+	delay := hostStorageReconnectInitial
+	var lastErr error
+	for {
+		if _, err := fmt.Fprintf(hostSetStdout, "Host storage migration phase: finalizing transaction %s.\n", transactionID); err != nil {
+			return catchrpc.HostStorageFinalizeResult{}, err
+		}
+		result, err := client.HostStorageFinalize(retryCtx, catchrpc.HostStorageFinalizeRequest{TransactionID: transactionID})
+		if err == nil {
+			if result.TransactionID != transactionID {
+				return catchrpc.HostStorageFinalizeResult{}, fmt.Errorf("finalize host storage on %s returned transaction %q, want %q", host, result.TransactionID, transactionID)
+			}
+			return result, nil
+		}
+		lastErr = err
+		if !isHostStorageReconnectError(retryCtx, err) {
+			return catchrpc.HostStorageFinalizeResult{}, fmt.Errorf("finalize host storage transaction %s on %s: %w", transactionID, host, err)
+		}
+		now := hostStorageReconnectNowFn()
+		if !now.Before(deadline) {
+			return catchrpc.HostStorageFinalizeResult{}, fmt.Errorf("catch on %s did not reconnect within 60s to finalize host storage transaction %s: %w", host, transactionID, lastErr)
+		}
+		remaining := deadline.Sub(now)
+		wait := min(delay, remaining)
+		if _, writeErr := fmt.Fprintf(hostSetStdout, "Catch is not ready; retrying in %s.\n", wait); writeErr != nil {
+			return catchrpc.HostStorageFinalizeResult{}, writeErr
+		}
+		if err := hostStorageReconnectSleepFn(retryCtx, wait); err != nil {
+			return catchrpc.HostStorageFinalizeResult{}, fmt.Errorf("wait for Catch on %s to reconnect: %w", host, errors.Join(lastErr, err))
+		}
+		delay = min(delay*2, hostStorageReconnectMaximum)
+	}
+}
+
+func isHostStorageReconnectError(ctx context.Context, err error) bool {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return true
+	}
+	return errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EPIPE)
+}
+
+func renderHostStorageFinalizeResult(w io.Writer, result catchrpc.HostStorageFinalizeResult) error {
+	if _, err := fmt.Fprintf(w, "Finalized host storage transaction %s.\n", result.TransactionID); err != nil {
+		return err
+	}
+	if result.CleanupPending {
+		_, err := fmt.Fprintln(w, "Cleanup pending for the inactive source host storage tree.")
+		return err
+	}
+	return nil
 }
 
 func confirmHostStorageApply(flags cli.HostSetFlags, plan catchrpc.HostStoragePlan) (bool, error) {

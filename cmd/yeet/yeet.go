@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/shayne/yargs"
@@ -19,6 +20,7 @@ import (
 
 var (
 	bridgedArgs                   []string
+	handleHostCleanupFn           = yeet.HandleHostCleanup
 	handleHostSetFn               = yeet.HandleHostSet
 	handleSvcCmdFn                = yeet.HandleSvcCmd
 	handleUpgradeFn               = yeet.HandleUpgrade
@@ -131,18 +133,70 @@ func printSchemaBackedHelp(args []string, config yargs.HelpConfig, agent bool) b
 		fmt.Print(yargs.GenerateAgentHelpFromRegistry(reg, path, globalFlagsParsed{}))
 		return true
 	}
-	if len(path) != 1 {
-		return false
-	}
-	cmd := path[0]
 	info, ok := reg.CommandSpec(path)
 	if !ok {
 		return false
 	}
+	if len(path) == 2 {
+		help := yargs.GenerateGroupCommandHelp(config, path[0], path[1], globalFlagsParsed{})
+		fmt.Print(insertGroupCommandOptions(help, info.FlagsSchema))
+		return true
+	}
+	if len(path) != 1 {
+		return false
+	}
+	cmd := path[0]
 	flagsSchema := schemaOrEmpty(info.FlagsSchema)
 	argsSchema := schemaOrEmpty(info.ArgsSchema)
 	fmt.Print(stripMarkdownAliasBlock(yargs.GenerateSubCommandHelp(config, cmd, globalFlagsParsed{}, flagsSchema, argsSchema)))
 	return true
+}
+
+func insertGroupCommandOptions(help string, schema any) string {
+	options := humanSchemaOptions(schema)
+	if options == "" {
+		return help
+	}
+	section := "OPTIONS:\n" + options +
+		fmt.Sprintf("%-30s %s\n", "    -h, --help", "Show this help message") +
+		fmt.Sprintf("%-30s %s\n\n", "        --help-agent", "Show agent-readable CLI context")
+	for _, marker := range []string{"GLOBAL OPTIONS:\n", "EXAMPLES:\n"} {
+		if idx := strings.Index(help, marker); idx >= 0 {
+			return help[:idx] + section + help[idx:]
+		}
+	}
+	return help + section
+}
+
+func humanSchemaOptions(schema any) string {
+	if schema == nil {
+		return ""
+	}
+	typ := reflect.TypeOf(schema)
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
+	if typ.Kind() != reflect.Struct {
+		return ""
+	}
+
+	var options strings.Builder
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := field.Tag.Get("flag")
+		if name == "" {
+			name = strings.ToLower(field.Name)
+		}
+		label := "--" + name + " " + field.Type.String()
+		if short := field.Tag.Get("short"); short != "" {
+			label = "-" + short + ", " + label
+		}
+		fmt.Fprintf(&options, "    %-25s %s\n", label, field.Tag.Get("help"))
+	}
+	return options.String()
 }
 
 func schemaBackedHelpTarget(args []string, config yargs.HelpConfig) (yargs.Registry, []string, bool) {

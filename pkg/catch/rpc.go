@@ -168,7 +168,8 @@ func (s *Server) dispatchRPCWithContext(ctx context.Context, req catchrpc.Reques
 		return s.handleRPCArtifactHashes(req)
 	case "catch.ZFSServiceRootCandidates", catchrpc.RPCMethodServiceRootDefaults:
 		return s.handleRPCStorageRead(ctx, req)
-	case catchrpc.RPCMethodHostStoragePlan, catchrpc.RPCMethodHostStorageApply:
+	case catchrpc.RPCMethodHostStoragePlan, catchrpc.RPCMethodHostStorageApply,
+		catchrpc.RPCMethodHostStorageFinalize, catchrpc.RPCMethodHostStorageCleanup:
 		return s.handleRPCHostStorage(ctx, req)
 	case "catch.VMDefaults":
 		return s.handleRPCVMDefaults(ctx, req)
@@ -254,6 +255,10 @@ func (s *Server) handleRPCHostStorage(ctx context.Context, req catchrpc.Request)
 		return s.handleRPCHostStoragePlan(ctx, req)
 	case catchrpc.RPCMethodHostStorageApply:
 		return s.handleRPCHostStorageApply(ctx, req)
+	case catchrpc.RPCMethodHostStorageFinalize:
+		return s.handleRPCHostStorageFinalize(ctx, req)
+	case catchrpc.RPCMethodHostStorageCleanup:
+		return s.handleRPCHostStorageCleanup(ctx, req)
 	default:
 		return newRPCError(req.ID, catchrpc.ErrMethodNotFound, "method not found", req.Method)
 	}
@@ -283,6 +288,29 @@ func (s *Server) handleRPCHostStorageApply(ctx context.Context, req catchrpc.Req
 	return newRPCResponse(req.ID, resp)
 }
 
+func (s *Server) handleRPCHostStorageFinalize(ctx context.Context, req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.HostStorageFinalizeRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.FinalizeHostStorage(ctx, params)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to finalize host storage", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
+}
+
+func (s *Server) handleRPCHostStorageCleanup(ctx context.Context, req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.HostStorageCleanupRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.CleanupHostStorage(ctx, params)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to clean host storage", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
+}
 func (s *Server) handleRPCVMDefaults(ctx context.Context, req catchrpc.Request) catchrpc.Response {
 	var params catchrpc.VMDefaultsRequest
 	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {

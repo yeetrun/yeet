@@ -194,8 +194,10 @@ type ServiceRootDefaultsResponse struct {
 }
 
 const (
-	RPCMethodHostStoragePlan  = "catch.HostStoragePlan"
-	RPCMethodHostStorageApply = "catch.HostStorageApply"
+	RPCMethodHostStoragePlan     = "catch.HostStoragePlan"
+	RPCMethodHostStorageApply    = "catch.HostStorageApply"
+	RPCMethodHostStorageFinalize = "catch.HostStorageFinalize"
+	RPCMethodHostStorageCleanup  = "catch.HostStorageCleanup"
 )
 
 type HostStorageMigrateServices string
@@ -227,6 +229,15 @@ type HostStorageApplyRequest struct {
 	Yes  bool            `json:"yes,omitempty"`
 }
 
+type HostStorageFinalizeRequest struct {
+	TransactionID string `json:"transactionId"`
+}
+
+type HostStorageCleanupRequest struct {
+	From string `json:"from"`
+	Yes  bool   `json:"yes"`
+}
+
 type HostStoragePlan struct {
 	Current             HostStorageState          `json:"current"`
 	Desired             HostStorageState          `json:"desired"`
@@ -237,6 +248,22 @@ type HostStoragePlan struct {
 	ZFSDatasetsToCreate []string                  `json:"zfsDatasetsToCreate,omitempty"`
 	Warnings            []string                  `json:"warnings,omitempty"`
 	RequiresRestart     bool                      `json:"requiresRestart,omitempty"`
+	Estimate            HostStorageEstimate       `json:"estimate,omitempty,omitzero"`
+	Legacy              HostStorageLegacyPlan     `json:"legacy,omitempty,omitzero"`
+}
+
+type HostStorageEstimate struct {
+	BytesToCopy uint64 `json:"bytesToCopy,omitempty"`
+	BytesFree   uint64 `json:"bytesFree,omitempty"`
+}
+
+type HostStorageLegacyPlan struct {
+	Eligible       bool     `json:"eligible,omitempty"`
+	SourceRoot     string   `json:"sourceRoot,omitempty"`
+	TargetRoot     string   `json:"targetRoot,omitempty"`
+	PreservedRoots []string `json:"preservedRoots,omitempty"`
+	CleanupAllowed bool     `json:"cleanupAllowed,omitempty"`
+	BlockingMounts []string `json:"blockingMounts,omitempty"`
 }
 
 type HostStorageRepairAction struct {
@@ -285,10 +312,22 @@ type HostStorageServiceMove struct {
 }
 
 type HostStorageApplyResult struct {
+	TransactionID    string                   `json:"transactionId,omitempty"`
 	MigratedServices []HostStorageServiceMove `json:"migratedServices,omitempty"`
 	Restarted        bool                     `json:"restarted,omitempty"`
 	RestartScheduled bool                     `json:"restartScheduled,omitempty"`
 	Validation       HostStorageValidation    `json:"validation,omitempty"`
+}
+
+type HostStorageFinalizeResult struct {
+	TransactionID  string                `json:"transactionId"`
+	Validation     HostStorageValidation `json:"validation"`
+	CleanupPending bool                  `json:"cleanupPending,omitempty"`
+}
+
+type HostStorageCleanupResult struct {
+	TransactionID string `json:"transactionId"`
+	Removed       string `json:"removed"`
 }
 
 type HostStorageValidation struct {

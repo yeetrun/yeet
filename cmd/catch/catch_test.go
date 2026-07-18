@@ -27,6 +27,66 @@ import (
 	"tailscale.com/types/views"
 )
 
+func TestDefaultDataDirUsesVarLib(t *testing.T) {
+	if got, want := defaultDataDir(), "/var/lib/yeet"; got != want {
+		t.Fatalf("defaultDataDir() = %q, want %q", got, want)
+	}
+}
+
+func TestPrepareDataDirsAppliesPublicTraversalAndPrivateStateModes(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "var-lib-yeet")
+	paths, err := prepareDataDirs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPathMode := func(path string, want os.FileMode) {
+		t.Helper()
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s mode = %04o, want %04o", path, got, want)
+		}
+	}
+	assertPathMode(paths.dataDir, 0o711)
+	assertPathMode(paths.servicesDir, 0o711)
+	for _, name := range []string{"backups", "checkpoints", "migrations", "mounts", "registry", "tsd", "tsnet", "vm-images"} {
+		assertPathMode(filepath.Join(root, name), 0o700)
+	}
+}
+
+func TestPrepareDataDirsPreservesExistingCustomModes(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "custom-data")
+	servicesDir := filepath.Join(root, "services")
+	if err := os.MkdirAll(servicesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(servicesDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := prepareDataDirs(root); err != nil {
+		t.Fatal(err)
+	}
+
+	for path, want := range map[string]os.FileMode{
+		root:        0o750,
+		servicesDir: 0o755,
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := info.Mode().Perm(); got != want {
+			t.Fatalf("%s mode = %04o, want preserved %04o", path, got, want)
+		}
+	}
+}
+
 func TestPrepareDataDirsAndNewCatchConfig(t *testing.T) {
 	root := t.TempDir()
 	paths, err := prepareDataDirs(root)
@@ -56,9 +116,6 @@ func TestPrepareDataDirsAndNewCatchConfig(t *testing.T) {
 }
 
 func TestResolveCatchStartupPathsSelectsDataDirAndServicesRoot(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	defaultDataDir := filepath.Join(home, "yeet-data")
 	customDataDir := filepath.Join(t.TempDir(), "custom-data")
 	customServicesRoot := filepath.Join(t.TempDir(), "services")
 
@@ -68,12 +125,6 @@ func TestResolveCatchStartupPathsSelectsDataDirAndServicesRoot(t *testing.T) {
 		wantDataDir      string
 		wantServicesRoot string
 	}{
-		{
-			name:             "no data dir uses home yeet data",
-			opts:             catchStartupOptions{},
-			wantDataDir:      defaultDataDir,
-			wantServicesRoot: filepath.Join(defaultDataDir, "services"),
-		},
 		{
 			name:             "custom data dir is preserved",
 			opts:             catchStartupOptions{dataDir: customDataDir},
@@ -202,6 +253,14 @@ func TestInstallMetaReadWriteAndApply(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CATCH_INSTALL_USER", "install-user")
 	t.Setenv("CATCH_INSTALL_HOST", "install-host")
+	oldLookup := lookupInstallUserHomeFn
+	lookupInstallUserHomeFn = func(name string) (string, error) {
+		if name != "install-user" {
+			t.Fatalf("lookup install user = %q, want install-user", name)
+		}
+		return "/home/install-user", nil
+	}
+	t.Cleanup(func() { lookupInstallUserHomeFn = oldLookup })
 
 	if got := installMetaPath(root); got != filepath.Join(root, "install.json") {
 		t.Fatalf("installMetaPath = %q", got)
@@ -216,14 +275,28 @@ func TestInstallMetaReadWriteAndApply(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readInstallMeta: %v", err)
 	}
-	if meta.InstallUser != "install-user" || meta.InstallHost != "install-host" {
+	if meta.InstallUser != "install-user" || meta.InstallHome != "/home/install-user" || meta.InstallHost != "install-host" {
 		t.Fatalf("install meta = %#v", meta)
 	}
 
 	cfg := &catch.Config{InstallUser: "default-user"}
 	applyInstallMeta(cfg, root)
-	if cfg.InstallUser != "install-user" || cfg.InstallHost != "install-host" {
+	if cfg.InstallUser != "install-user" || cfg.InstallHome != "/home/install-user" || cfg.InstallHost != "install-host" {
 		t.Fatalf("applyInstallMeta cfg = %#v", cfg)
+	}
+}
+
+func TestInstallMetaReadsOldRecordWithoutInstallHome(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(installMetaPath(root), []byte(`{"installUser":"root","installHost":"old-host"}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	meta, err := readInstallMeta(root)
+	if err != nil {
+		t.Fatalf("readInstallMeta: %v", err)
+	}
+	if meta.InstallUser != "root" || meta.InstallHost != "old-host" || meta.InstallHome != "" {
+		t.Fatalf("old install meta = %#v", meta)
 	}
 }
 

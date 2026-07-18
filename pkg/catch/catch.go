@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/dnet"
 	"github.com/yeetrun/yeet/pkg/netns"
@@ -75,9 +76,12 @@ type Server struct {
 		m  map[string]map[string]ComponentStatus // serviceName -> componentName -> ComponentStatus
 	}
 
-	newDockerComposeService func(sv db.ServiceView) (dockerNetNSReconciler, error)
-	serviceRootDirFunc      func(string) (string, error)
-	zfsRunner               zfsCommandRunner
+	newDockerComposeService  func(sv db.ServiceView) (dockerNetNSReconciler, error)
+	serviceRootDirFunc       func(string) (string, error)
+	zfsRunner                zfsCommandRunner
+	hostStorageMutationMu    sync.Mutex
+	hostStorageMutationBlock error
+	hostStorageRecovery      *hostStorageTransaction
 }
 
 type EventListener struct {
@@ -149,6 +153,7 @@ type Config struct {
 	DB                   *db.Store
 	DefaultUser          string
 	InstallUser          string
+	InstallHome          string
 	InstallHost          string
 	RootDir              string
 	ServicesRoot         string
@@ -171,12 +176,34 @@ func NewUnstartedServer(config *Config) *Server {
 	s := &Server{
 		cfg: *config,
 	}
+	if tx, err := findHostStorageStartupRecoveryForConfig(context.Background(), *config); err != nil {
+		s.hostStorageMutationBlock = err
+		s.hostStorageRecovery = tx
+	}
 	s.registry = s.newRegistry()
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		root := s.serviceRootFromView(sv)
 		return svc.NewDockerComposeService(s.cfg.DB, sv, serviceDataDirForRoot(root), serviceRunDirForRoot(root))
 	}
 	return s
+}
+
+func findHostStorageStartupRecoveryForConfig(ctx context.Context, config Config) (*hostStorageTransaction, error) {
+	for {
+		tx, err := findHostStorageStartupRecovery(ctx, config.RootDir)
+		if err == nil || tx == nil || tx.Phase != hostStoragePhaseSourceRestartPending ||
+			!hostStorageConfigMatchesState(config, tx.Plan.Current) {
+			return tx, err
+		}
+		if completeErr := advanceHostStorageTransactionState(tx, hostStoragePhaseRolledBack, hostStorageCatchAuthoritySource); completeErr != nil {
+			return tx, errors.Join(err, fmt.Errorf("complete source catch restart handoff: %w", completeErr))
+		}
+	}
+}
+
+func hostStorageConfigMatchesState(config Config, state catchrpc.HostStorageState) bool {
+	return hostStoragePathsEqual(config.RootDir, state.DataDir) &&
+		hostStoragePathsEqual(config.ServicesRoot, state.ServicesRoot)
 }
 
 // NewServer creates a new Server instance with the provided configuration.

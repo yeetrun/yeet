@@ -42,7 +42,8 @@ var serviceBridgeSkippedRemoteCommands = map[string]struct{}{
 
 var serviceBridgeHostLevelGroupCommands = map[string]map[string]struct{}{
 	"host": {
-		"set": {},
+		"set":     {},
+		"cleanup": {},
 	},
 	"vm": {
 		"memory": {},

@@ -804,6 +804,25 @@ func TestHostSetRejectsInvalidMigrateServices(t *testing.T) {
 	}
 }
 
+func TestParseHostCleanup(t *testing.T) {
+	flags, args, err := ParseHostCleanup([]string{"--from", " /root/yeet-data ", "-y"})
+	if err != nil {
+		t.Fatalf("ParseHostCleanup: %v", err)
+	}
+	if want := (HostCleanupFlags{From: "/root/yeet-data", Yes: true}); flags != want {
+		t.Fatalf("flags = %#v, want %#v", flags, want)
+	}
+	if len(args) != 0 {
+		t.Fatalf("args = %#v, want none", args)
+	}
+}
+
+func TestParseHostCleanupRequiresFrom(t *testing.T) {
+	_, _, err := ParseHostCleanup([]string{"--yes"})
+	if err == nil || !strings.Contains(err.Error(), "--from is required") {
+		t.Fatalf("error = %v, want --from is required", err)
+	}
+}
 func TestParseVMSetFlags(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1260,6 +1279,39 @@ func flagHelpTag(t *testing.T, schema any, flag string) string {
 	return ""
 }
 
+func TestHostSetHelpShowsStorageDefaults(t *testing.T) {
+	info, ok := RemoteGroupCommandInfo("host", "set")
+	if !ok {
+		t.Fatal("remote host set command metadata missing")
+	}
+	for _, want := range []string{
+		"--data-dir string         Catch state directory (default /var/lib/yeet)",
+		"--services-root string    Default service root (default: data directory/services)",
+	} {
+		flagName := "data-dir"
+		if strings.Contains(want, "services-root") {
+			flagName = "services-root"
+		}
+		got := "--" + flagName + " string"
+		got += strings.Repeat(" ", 26-len(got))
+		got += flagHelpTag(t, info.FlagsSchema, flagName)
+		if got != want {
+			t.Fatalf("host set flag help = %q, want %q", got, want)
+		}
+	}
+}
+
+func TestHostCleanupHelpDescribesGenericInactiveSource(t *testing.T) {
+	info, ok := RemoteGroupCommandInfo("host", "cleanup")
+	if !ok {
+		t.Fatal("remote host cleanup command metadata missing")
+	}
+	want := "Remove an exact journaled inactive storage source after Catch revalidates it"
+	if info.Description != want {
+		t.Fatalf("host cleanup description = %q, want %q", info.Description, want)
+	}
+}
+
 func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	names := RemoteCommandNames()
 	if !containsString(names, "run") || !containsString(names, "status") {
@@ -1316,8 +1368,8 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 		t.Fatalf("host set usage = %q", hostSet.Info.Usage)
 	}
 	wantHostSetExamples := []string{
-		"yeet host set --data-dir=$HOME/yeet-data",
-		"yeet host set --services-root=$HOME/yeet-data/services2 --migrate-services=none",
+		"yeet host set --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services --migrate-services=all --yes",
+		"yeet host set --services-root=/srv/yeet/services --migrate-services=none",
 		"yeet host set --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services --migrate-services=all",
 	}
 	if !reflect.DeepEqual(hostSet.Info.Examples, wantHostSetExamples) {
@@ -1327,6 +1379,25 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	for _, want := range []string{"--data-dir", "--services-root", "--zfs", "--migrate-services", "--config", "--yes"} {
 		if !strings.Contains(hostSetHelp, want) {
 			t.Fatalf("host set help missing %q:\n%s", want, hostSetHelp)
+		}
+	}
+	hostCleanup, ok := reg.Groups["host"].Commands["cleanup"]
+	if !ok {
+		t.Fatal("registry host cleanup command missing")
+	}
+	if hostCleanup.Info.Usage != "host cleanup --from=PATH [--yes]" {
+		t.Fatalf("host cleanup usage = %q", hostCleanup.Info.Usage)
+	}
+	if got, want := "yeet "+hostCleanup.Info.Usage, "yeet host cleanup --from=PATH [--yes]"; got != want {
+		t.Fatalf("host cleanup command usage = %q, want %q", got, want)
+	}
+	if want := []string{"yeet host cleanup --from=/root/yeet-data --yes"}; !reflect.DeepEqual(hostCleanup.Info.Examples, want) {
+		t.Fatalf("host cleanup examples = %#v, want %#v", hostCleanup.Info.Examples, want)
+	}
+	hostCleanupHelp := yargs.GenerateGroupCommandHelp(reg.HelpConfig(), "host", "cleanup", struct{}{})
+	for _, want := range []string{"--from", "--yes"} {
+		if !strings.Contains(hostCleanupHelp, want) {
+			t.Fatalf("host cleanup help missing %q:\n%s", want, hostCleanupHelp)
 		}
 	}
 	wantServiceSetExamples := []string{
@@ -1459,6 +1530,14 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	for _, flag := range []string{"--zfs", "--yes", "-y"} {
 		if RemoteGroupFlagSpecs()["host"]["set"][flag].ConsumesValue {
 			t.Fatalf("host set %s should not consume a value", flag)
+		}
+	}
+	if !RemoteGroupFlagSpecs()["host"]["cleanup"]["--from"].ConsumesValue {
+		t.Fatal("host cleanup --from should consume a value")
+	}
+	for _, flag := range []string{"--yes", "-y"} {
+		if RemoteGroupFlagSpecs()["host"]["cleanup"][flag].ConsumesValue {
+			t.Fatalf("host cleanup %s should not consume a value", flag)
 		}
 	}
 	if !RemoteGroupFlagSpecs()["service"]["set"]["--snapshots"].ConsumesValue {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -881,6 +882,39 @@ func TestRPCHostStorageApplyDispatch(t *testing.T) {
 	}
 }
 
+func TestRPCHostStorageFinalizeDispatchRejectsStaleTransaction(t *testing.T) {
+	server := newTestServer(t)
+	params, err := json.Marshal(catchrpc.HostStorageFinalizeRequest{TransactionID: "stale"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := server.dispatchRPC(catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  catchrpc.RPCMethodHostStorageFinalize,
+		Params:  params,
+	})
+	if resp.Error == nil || !strings.Contains(fmt.Sprint(resp.Error.Data), "stale host storage transaction") {
+		t.Fatalf("response = %#v, want stale transaction RPC error", resp)
+	}
+}
+
+func TestRPCHostStorageCleanupDispatchRequiresYes(t *testing.T) {
+	server := newTestServer(t)
+	params, err := json.Marshal(catchrpc.HostStorageCleanupRequest{From: "/root/yeet-data"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := server.dispatchRPC(catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  catchrpc.RPCMethodHostStorageCleanup,
+		Params:  params,
+	})
+	if resp.Error == nil || !strings.Contains(fmt.Sprint(resp.Error.Data), "--yes") {
+		t.Fatalf("response = %#v, want confirmation RPC error", resp)
+	}
+}
 func TestRPCServicesListDispatch(t *testing.T) {
 	server := newTestServer(t)
 	if err := server.cfg.DB.Set(&cdb.Data{
