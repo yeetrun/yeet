@@ -200,6 +200,9 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 
 ## Website Docs (User Manual)
 - The user manual lives in the `website/` submodule.
+- Write README and manual pages as evergreen descriptions of current behavior.
+  State defaults and modes directly; reserve "new", "changed", migration, and
+  upgrade framing for changelogs or dedicated compatibility instructions.
 - When you make user-facing changes (CLI commands, flags, workflows, behavior), update the website docs in the same work session.
 - Keep CLI-facing documentation (README quickstart/examples and CLI help text) in sync with those changes.
 - To get the latest website content: `git submodule update --init --recursive`.
