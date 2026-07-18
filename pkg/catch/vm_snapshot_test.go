@@ -413,6 +413,44 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 	}
 }
 
+func TestTemporaryFullVMCheckpointDelegatesJailedOutputDirectory(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	if err := writeVMIsolationMode(root, vmIsolationJailer); err != nil {
+		t.Fatal(err)
+	}
+	service := &db.Service{Name: "devbox", ServiceType: db.ServiceTypeVM, ServiceRoot: root}
+	vm := db.VMConfig{Sockets: db.VMSocketConfig{APISocketPath: filepath.Join(serviceRunDirForRoot(root), "firecracker.sock")}}
+	oldIdentity := vmSnapshotEnsureRuntimeIdentity
+	oldChown := vmSnapshotChown
+	vmSnapshotEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	var delegated string
+	vmSnapshotChown = func(path string, uid, gid int) error {
+		if uid != 812 || gid != 813 {
+			t.Fatalf("chown identity = %d:%d", uid, gid)
+		}
+		delegated = path
+		return nil
+	}
+	t.Cleanup(func() {
+		vmSnapshotEnsureRuntimeIdentity = oldIdentity
+		vmSnapshotChown = oldChown
+	})
+	var calls []string
+	controller := &recordingVMFirecracker{calls: &calls}
+
+	_, tempDir, err := server.createTemporaryFullVMCheckpoint(context.Background(), service, vm, controller)
+	if err != nil {
+		t.Fatalf("createTemporaryFullVMCheckpoint: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tempDir) })
+	if delegated != tempDir {
+		t.Fatalf("delegated path = %q, want %q", delegated, tempDir)
+	}
+}
+
 func TestFullVMCheckpointMetadataIncludesBalloonConfigHash(t *testing.T) {
 	server := newTestServer(t)
 	root := t.TempDir()

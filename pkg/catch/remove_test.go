@@ -132,6 +132,52 @@ func TestRemoveServiceCleansVMNetwork(t *testing.T) {
 	}
 }
 
+func TestRemoveServiceCleansStaleVMJail(t *testing.T) {
+	server := newTestServer(t)
+	name := "vm-cleanup"
+	root := filepath.Join(server.cfg.ServicesRoot, name)
+	imageDir := filepath.Join(server.cfg.RootDir, "vm-images", "ubuntu-v15")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {
+			Name:        name,
+			ServiceType: db.ServiceTypeVM,
+			ServiceRoot: root,
+			VM: &db.VMConfig{
+				Runtime: vmRuntimeFirecracker,
+				Image:   db.VMImageConfig{RootFS: filepath.Join(imageDir, "rootfs.ext4")},
+				Sockets: db.VMSocketConfig{
+					APISocketPath:   filepath.Join(root, "run", "firecracker.sock"),
+					VsockSocketPath: filepath.Join(root, "run", "vsock.sock"),
+				},
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	oldCleanup := vmRemovalJailCleanup
+	var cleaned vmJailPlan
+	vmRemovalJailCleanup = func(plan vmJailPlan) error {
+		cleaned = plan
+		return nil
+	}
+	t.Cleanup(func() { vmRemovalJailCleanup = oldCleanup })
+
+	report, err := server.RemoveService(name)
+	if err != nil {
+		t.Fatalf("RemoveService: %v", err)
+	}
+	if report == nil || len(report.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", report.Warnings)
+	}
+	if cleaned.ID != vmJailerID(name) || cleaned.JailRoot == "" || len(cleaned.SocketLinks) != 2 {
+		t.Fatalf("cleaned jail plan = %#v", cleaned)
+	}
+}
+
 func TestRemoveCmdContinuesAfterRunnerError(t *testing.T) {
 	server := newTestServer(t)
 	name := "svc-remove"

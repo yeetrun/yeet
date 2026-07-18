@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -84,6 +85,28 @@ func TestVMSvcNetworkPlanUsesHostBridgeAndYeetNSPeer(t *testing.T) {
 	cleanup := plan.CleanupCommands()
 	if !containsCommand(cleanup, []string{"ip", "route", "del", "192.168.100.12/32", "dev", iface.Bridge}) {
 		t.Fatalf("cleanup commands = %#v, want guest route deletion", cleanup)
+	}
+}
+
+func TestVMNetworkPlanWithTapOwnerDelegatesEveryTap(t *testing.T) {
+	plan := newVMNetworkPlan("devbox", []string{"svc", "lan"}, vmNetworkInputs{
+		ServiceIP:         "192.168.100.12",
+		LANParent:         "vmbr0",
+		LANParentIsBridge: true,
+	}).WithTapOwner(vmRuntimeIdentity{UID: 812, GID: 813})
+
+	seen := 0
+	for _, command := range plan.SetupCommands() {
+		if len(command) < 3 || !reflect.DeepEqual(command[:3], []string{"ip", "tuntap", "add"}) {
+			continue
+		}
+		seen++
+		if !reflect.DeepEqual(command[len(command)-4:], []string{"user", "812", "group", "813"}) {
+			t.Fatalf("tap command = %#v, want delegated UID/GID", command)
+		}
+	}
+	if seen != len(plan.Interfaces) {
+		t.Fatalf("delegated tap commands = %d, want %d", seen, len(plan.Interfaces))
 	}
 }
 
@@ -1117,6 +1140,81 @@ func TestEnsureVMNetworkEnsuresOnlyNamedVM(t *testing.T) {
 	}
 	if containsCommand(commands, []string{"ip", "tuntap", "add", other.Interfaces[0].Tap, "mode", "tap"}) {
 		t.Fatalf("other VM was modified: %#v", commands)
+	}
+}
+
+func TestEnsureVMNetworkDelegatesTapForJailedVM(t *testing.T) {
+	server := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "services", "target")
+	if err := writeVMIsolationMode(root, vmIsolationJailer); err != nil {
+		t.Fatal(err)
+	}
+	plan := newVMNetworkPlan("target", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"target": {Name: "target", ServiceType: db.ServiceTypeVM, ServiceRoot: root, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: plan.DBNetworks()}},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	oldRunner := vmNetworkReconcileRunner
+	oldIdentity := vmNetworkEnsureRuntimeIdentity
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	vmNetworkEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	t.Cleanup(func() {
+		vmNetworkReconcileRunner = oldRunner
+		vmNetworkEnsureRuntimeIdentity = oldIdentity
+	})
+
+	if err := server.EnsureVMNetwork(context.Background(), "target"); err != nil {
+		t.Fatalf("EnsureVMNetwork: %v", err)
+	}
+	want := []string{"ip", "tuntap", "add", plan.Interfaces[0].Tap, "mode", "tap", "user", "812", "group", "813"}
+	if !containsCommand(commands, want) {
+		t.Fatalf("delegated target setup missing %#v in %#v", want, commands)
+	}
+}
+
+func TestReconcileVMNetworksDelegatesTapForJailedVM(t *testing.T) {
+	server := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "services", "target")
+	if err := writeVMIsolationMode(root, vmIsolationJailer); err != nil {
+		t.Fatal(err)
+	}
+	plan := newVMNetworkPlan("target", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"target": {Name: "target", ServiceType: db.ServiceTypeVM, ServiceRoot: root, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: plan.DBNetworks()}},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+	oldCollector := vmNetworkLiveStateCollector
+	oldRunner := vmNetworkReconcileRunner
+	oldIdentity := vmNetworkEnsureRuntimeIdentity
+	vmNetworkLiveStateCollector = func(context.Context) (vmNetworkLiveState, error) { return vmNetworkLiveState{}, nil }
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	vmNetworkEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	t.Cleanup(func() {
+		vmNetworkLiveStateCollector = oldCollector
+		vmNetworkReconcileRunner = oldRunner
+		vmNetworkEnsureRuntimeIdentity = oldIdentity
+	})
+
+	if err := server.reconcileVMNetworks(context.Background()); err != nil {
+		t.Fatalf("reconcileVMNetworks: %v", err)
+	}
+	want := []string{"ip", "tuntap", "add", plan.Interfaces[0].Tap, "mode", "tap", "user", "812", "group", "813"}
+	if !containsCommand(commands, want) {
+		t.Fatalf("delegated reconcile missing %#v in %#v", want, commands)
 	}
 }
 

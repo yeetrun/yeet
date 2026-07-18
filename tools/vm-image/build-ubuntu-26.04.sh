@@ -475,6 +475,7 @@ if [ -n "$initrd_artifact" ]; then
 	install -m 0644 "$work_dir/initrd.img" "$out_dir/initrd.img"
 fi
 install -m 0755 "$fc_dir/firecracker-${firecracker_version}-${firecracker_arch}" "$out_dir/firecracker"
+install -m 0755 "$fc_dir/jailer-${firecracker_version}-${firecracker_arch}" "$out_dir/jailer"
 
 if [ "$profile" = "fast" ]; then
 	customize_fast_rootfs "$out_dir/rootfs.ext4"
@@ -488,6 +489,7 @@ rootfs_size="$(stat -c %s "$out_dir/rootfs.ext4")"
 rootfs_sha="$(sha256sum "$out_dir/rootfs.ext4.zst" | awk '{ print $1 }')"
 kernel_sha="$(sha256sum "$out_dir/vmlinux" | awk '{ print $1 }')"
 firecracker_sha="$(sha256sum "$out_dir/firecracker" | awk '{ print $1 }')"
+jailer_sha="$(sha256sum "$out_dir/jailer" | awk '{ print $1 }')"
 source_image_sha="$(sha256sum "$out_dir/rootfs.ext4" | awk '{ print $1 }')"
 build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 snap_support=false
@@ -524,6 +526,7 @@ cat >"$out_dir/manifest.json" <<JSON
 $initrd_manifest_line
   "rootfs": "rootfs.ext4.zst",
   "firecracker": "firecracker",
+  "jailer": "jailer",
   "rootfs_size": $rootfs_size,
   "kernel_version": "$kernel_version",
   "ubuntu_kernel_version": "$ubuntu_kernel_version",
@@ -542,7 +545,8 @@ $initrd_manifest_line
     "vmlinux": "$kernel_sha",
 $initrd_checksum_line
     "rootfs.ext4.zst": "$rootfs_sha",
-    "firecracker": "$firecracker_sha"
+    "firecracker": "$firecracker_sha",
+    "jailer": "$jailer_sha"
   }
 }
 JSON
@@ -553,7 +557,7 @@ JSON
 	if [ -n "$initrd_artifact" ]; then
 		checksum_files+=(initrd.img)
 	fi
-	checksum_files+=(rootfs.ext4.zst firecracker)
+	checksum_files+=(rootfs.ext4.zst firecracker jailer)
 	if [ -f kernel.config ]; then
 		checksum_files+=(kernel.config)
 	fi

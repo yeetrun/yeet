@@ -217,6 +217,10 @@ func TestServiceInfoSnapshotServiceOverridePrecedence(t *testing.T) {
 
 func TestServiceInfoIncludesVMConfig(t *testing.T) {
 	server := newTestServer(t)
+	serviceRoot := t.TempDir()
+	if err := writeVMIsolationMode(serviceRoot, vmIsolationJailer); err != nil {
+		t.Fatal(err)
+	}
 	oldListIPv4Addrs := listIPv4AddrsFn
 	defer func() { listIPv4AddrsFn = oldListIPv4Addrs }()
 	listIPv4AddrsFn = func(args []string) ([]ifaceIP, error) {
@@ -235,6 +239,7 @@ func TestServiceInfoIncludesVMConfig(t *testing.T) {
 		"devbox": {
 			Name:        "devbox",
 			ServiceType: db.ServiceTypeVM,
+			ServiceRoot: serviceRoot,
 			VM: &db.VMConfig{
 				Runtime:     "firecracker",
 				Image:       db.VMImageConfig{Payload: testUbuntuVMPayload, Version: "ubuntu-26.04-amd64-v1"},
@@ -280,6 +285,9 @@ func TestServiceInfoIncludesVMConfig(t *testing.T) {
 	}
 	if vm.Runtime != "firecracker" || vm.Image != testUbuntuVMPayload || vm.ImageVersion != "ubuntu-26.04-amd64-v1" {
 		t.Fatalf("VM image/runtime = %#v", vm)
+	}
+	if vm.VMMIsolation != vmIsolationJailer {
+		t.Fatalf("VM VMM isolation = %q, want %q", vm.VMMIsolation, vmIsolationJailer)
 	}
 	if vm.CPUs != 4 || vm.MemoryBytes != 4<<30 || vm.DiskBytes != 128<<30 || vm.DiskBackend != "zvol" || vm.DiskPath != "flash/yeet/vms/devbox/root" {
 		t.Fatalf("VM resources/disk = %#v", vm)

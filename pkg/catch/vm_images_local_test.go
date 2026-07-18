@@ -106,6 +106,10 @@ func TestImportLocalVMImageRootFSOnlyUsesManagedKernel(t *testing.T) {
 	assertLocalImageFileContains(t, ref.Root, "rootfs.ext4", "local-rootfs")
 	assertLocalImageFileContains(t, ref.Root, "vmlinux", "managed-kernel")
 	assertLocalImageFileContains(t, ref.Root, "firecracker", "managed-firecracker")
+	assertLocalImageFileContains(t, ref.Root, "jailer", "managed-jailer")
+	if ref.Jailer != "jailer" {
+		t.Fatalf("ref jailer = %q, want jailer", ref.Jailer)
+	}
 
 	var manifest vmImageManifest
 	rawManifest, err := os.ReadFile(filepath.Join(ref.Root, "manifest.json"))
@@ -123,6 +127,9 @@ func TestImportLocalVMImageRootFSOnlyUsesManagedKernel(t *testing.T) {
 	}
 	if manifest.KernelVersion != "linux-managed-test" {
 		t.Fatalf("manifest kernel_version = %q, want linux-managed-test", manifest.KernelVersion)
+	}
+	if manifest.Jailer != "jailer" {
+		t.Fatalf("manifest jailer = %q, want jailer", manifest.Jailer)
 	}
 
 	storedRef := decodeLocalRef(t, localVMImageRefPath(importer.CacheRoot, "foo/bar"))
@@ -311,8 +318,11 @@ func TestResolveLocalVMImageAsset(t *testing.T) {
 	if asset.Paths.Dir != ref.Root {
 		t.Fatalf("asset dir = %q, want ref root %q", asset.Paths.Dir, ref.Root)
 	}
-	if asset.Paths.RootFSPath != filepath.Join(ref.Root, ref.RootFS) || asset.Paths.KernelPath != filepath.Join(ref.Root, "vmlinux") || asset.Paths.FirecrackerPath != filepath.Join(ref.Root, "firecracker") {
+	if asset.Paths.RootFSPath != filepath.Join(ref.Root, ref.RootFS) || asset.Paths.KernelPath != filepath.Join(ref.Root, "vmlinux") || asset.Paths.FirecrackerPath != filepath.Join(ref.Root, "firecracker") || asset.Paths.JailerPath != filepath.Join(ref.Root, "jailer") {
 		t.Fatalf("asset paths = %#v, want paths under ref root", asset.Paths)
+	}
+	if _, err := asset.RequireJailer(); err != nil {
+		t.Fatalf("RequireJailer: %v", err)
 	}
 }
 
@@ -654,19 +664,23 @@ func fakeManagedVMImageAsset(t *testing.T) vmImageAsset {
 	dir := t.TempDir()
 	kernel := filepath.Join(dir, "vmlinux")
 	firecracker := filepath.Join(dir, "firecracker")
+	jailer := filepath.Join(dir, "jailer")
 	rootfs := filepath.Join(dir, "rootfs.ext4")
 	writeFile(t, kernel, "managed-kernel", 0o644)
 	writeFile(t, firecracker, "managed-firecracker", 0o755)
+	writeFile(t, jailer, "managed-jailer", 0o755)
 	writeFile(t, rootfs, "managed-rootfs", 0o644)
 	return vmImageAsset{
 		Paths: vmImagePaths{
 			Dir:             dir,
 			KernelPath:      kernel,
 			FirecrackerPath: firecracker,
+			JailerPath:      jailer,
 			RootFSPath:      rootfs,
 		},
 		Manifest: vmImageManifest{
 			Version: "managed-test",
+			Jailer:  "jailer",
 		},
 	}
 }

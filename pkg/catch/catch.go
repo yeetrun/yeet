@@ -906,7 +906,10 @@ type RemoveOptions struct {
 	Trace     func(string, ...any)
 }
 
-var vmRemovalNetworkRunner vmNetworkCommandRunner
+var (
+	vmRemovalNetworkRunner vmNetworkCommandRunner
+	vmRemovalJailCleanup   = cleanupVMJail
+)
 
 // RemoveService removes the service from the database and attempts to clean up
 // related files/devices. Cleanup warnings are reported separately from fatal
@@ -942,6 +945,9 @@ func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*Rem
 	doneVMNetwork := removeTraceBlock(opts, "remove vm network")
 	s.cleanupVMNetworkForRemoval(report, name)
 	doneVMNetwork()
+	doneVMJail := removeTraceBlock(opts, "remove vm jail")
+	s.cleanupVMJailForRemoval(report, name)
+	doneVMJail()
 	if removeDirs && opts.CleanData {
 		removeTrace(opts, "remove zfs dataset=%s", serviceRootZFS)
 		doneZFS := removeTraceBlock(opts, "remove zfs destroy")
@@ -993,6 +999,31 @@ func (s *Server) cleanupVMNetworkForRemoval(report *RemoveReport, name string) {
 	}
 	if err := plan.ExecuteCleanup(runner); err != nil {
 		report.addWarning(fmt.Errorf("failed to clean up VM network for %q: %w", name, err))
+	}
+}
+
+func (s *Server) cleanupVMJailForRemoval(report *RemoveReport, name string) {
+	sv, err := s.serviceView(name)
+	if err != nil {
+		if !errors.Is(err, errServiceNotFound) {
+			report.addWarning(fmt.Errorf("failed to resolve VM jail for %q: %w", name, err))
+		}
+		return
+	}
+	service := sv.AsStruct()
+	if service.ServiceType != db.ServiceTypeVM || service.VM == nil {
+		return
+	}
+	rootFS := strings.TrimSpace(service.VM.Image.RootFS)
+	if !filepath.IsAbs(rootFS) {
+		return
+	}
+	plan := newVMJailCleanupPlan(name, filepath.Join(filepath.Dir(rootFS), "firecracker"), vmJailerBaseForDataRoot(s.cfg.RootDir), []string{
+		service.VM.Sockets.APISocketPath,
+		service.VM.Sockets.VsockSocketPath,
+	})
+	if err := vmRemovalJailCleanup(plan); err != nil {
+		report.addWarning(fmt.Errorf("failed to clean up VM jail for %q: %w", name, err))
 	}
 }
 

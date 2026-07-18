@@ -38,6 +38,22 @@ func TestFastUbuntuImagePolicyCleansFirecrackerGuestStatus(t *testing.T) {
 	}
 }
 
+func TestUbuntuImageBundlesMatchingFirecrackerJailer(t *testing.T) {
+	script := readBuildUbuntuScript(t)
+
+	for _, want := range []string{
+		`install -m 0755 "$fc_dir/jailer-${firecracker_version}-${firecracker_arch}" "$out_dir/jailer"`,
+		`jailer_sha="$(sha256sum "$out_dir/jailer" | awk '{ print $1 }')"`,
+		`"jailer": "jailer"`,
+		`"jailer": "$jailer_sha"`,
+		`checksum_files+=(rootfs.ext4.zst firecracker jailer)`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("build script missing paired jailer policy %q", want)
+		}
+	}
+}
+
 func TestFastUbuntuImagePolicyUsesHostCompatibleExt4Features(t *testing.T) {
 	script := readBuildUbuntuScript(t)
 

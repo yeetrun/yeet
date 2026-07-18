@@ -340,6 +340,7 @@ type ServiceInfo struct {
 
 type ServiceVM struct {
 	Runtime      string             `json:"runtime,omitempty"`
+	VMMIsolation string             `json:"vmmIsolation,omitempty"`
 	Image        string             `json:"image,omitempty"`
 	ImageVersion string             `json:"imageVersion,omitempty"`
 	CPUs         int                `json:"cpus,omitempty"`

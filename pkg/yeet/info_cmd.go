@@ -573,6 +573,7 @@ func renderVMSection(server catchrpc.ServiceInfoResponse) infoSection {
 func vmInfoRows(vm *catchrpc.ServiceVM) []infoRow {
 	candidates := []infoRow{
 		{Label: "Runtime", Value: vm.Runtime},
+		{Label: "VMM isolation", Value: vm.VMMIsolation},
 		{Label: "Image", Value: formatVMImage(vm)},
 		{Label: "CPU", Value: formatVMCPU(vm.CPUs)},
 		{Label: "Memory", Value: formatOptionalBytes(vm.MemoryBytes)},

@@ -1295,7 +1295,10 @@ func stubVMImageCatalogFetchCounting(t *testing.T, catalog vmImageCatalog) func(
 func vmImageSingleFetchCommandCatalog(t *testing.T, payload, version string, def bool) vmImageCatalog {
 	t.Helper()
 	contents := vmImageTestContents()
+	contents["jailer"] = []byte("jailer")
 	manifest := vmImageTestManifest(version, contents)
+	manifest.Jailer = "jailer"
+	manifest.Checksums[manifest.Jailer] = testSHA256Hex(contents[manifest.Jailer])
 	artifactServer := newVMImageArtifactTestServer(t, manifest, contents)
 	t.Cleanup(artifactServer.Close)
 	return vmImageCatalog{

@@ -89,7 +89,11 @@ func (s *Server) serviceInfoWithContext(ctx context.Context, sn string) (catchrp
 			info.Network.IPError = vmNetwork.Err.Error()
 		}
 		info.Network.IPWarning = vmNetwork.Warning
-		vmInfo, err := serviceVMInfo(sv.VM(), vmNetwork.IPs)
+		isolation, err := vmIsolationModeForRoot(effectiveRoot)
+		if err != nil {
+			return resp, err
+		}
+		vmInfo, err := serviceVMInfo(sv.VM(), vmNetwork.IPs, isolation)
 		if err != nil {
 			return resp, err
 		}
@@ -270,7 +274,7 @@ func vmSvcIPFromNetworks(vm db.VMConfigView) string {
 	return ""
 }
 
-func serviceVMInfo(vm db.VMConfigView, discovered map[string]vmDiscoveredIP) (*catchrpc.ServiceVM, error) {
+func serviceVMInfo(vm db.VMConfigView, discovered map[string]vmDiscoveredIP, isolation string) (*catchrpc.ServiceVM, error) {
 	if !vm.Valid() {
 		return nil, nil
 	}
@@ -285,6 +289,7 @@ func serviceVMInfo(vm db.VMConfigView, discovered map[string]vmDiscoveredIP) (*c
 	}
 	out := &catchrpc.ServiceVM{
 		Runtime:      vm.Runtime(),
+		VMMIsolation: isolation,
 		Image:        image.Payload,
 		ImageVersion: image.Version,
 		CPUs:         vm.CPUs(),

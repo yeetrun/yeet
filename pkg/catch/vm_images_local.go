@@ -53,6 +53,7 @@ type localVMImageRef struct {
 	RootFS       string `json:"rootfs"`
 	Kernel       string `json:"kernel"`
 	Firecracker  string `json:"firecracker"`
+	Jailer       string `json:"jailer,omitempty"`
 	KernelPolicy string `json:"kernelPolicy"`
 	CreatedAt    string `json:"createdAt"`
 }
@@ -139,14 +140,18 @@ func (i localVMImageImporter) importExtracted(cacheRoot string, req localVMImage
 	if err != nil {
 		return localVMImageRef{}, err
 	}
+	jailerSource, err := managed.RequireJailer()
+	if err != nil {
+		return localVMImageRef{}, err
+	}
 	capabilities := localVMImageCapabilities(sourceManifest, hasSourceManifest, managed.Manifest, kernelPolicy)
-	contentID, err := localVMImageContentID(req.Name, rootFSPath, kernelSource, managed.Paths.FirecrackerPath, capabilities)
+	contentID, err := localVMImageContentID(req.Name, rootFSPath, kernelSource, managed.Paths.FirecrackerPath, jailerSource, capabilities)
 	if err != nil {
 		return localVMImageRef{}, err
 	}
 	version := fmt.Sprintf("local-%s-%s", strings.ReplaceAll(req.Name, "/", "-"), contentID[:12])
 	blobDir := filepath.Join(cacheRoot, "local", "blobs", contentID)
-	if err := installLocalVMImageBlob(blobDir, rootFSName, rootFSPath, kernelSource, managed.Paths.FirecrackerPath, version, req.Name, rootFSSize, capabilities); err != nil {
+	if err := installLocalVMImageBlob(blobDir, rootFSName, rootFSPath, kernelSource, managed.Paths.FirecrackerPath, jailerSource, version, req.Name, rootFSSize, capabilities); err != nil {
 		return localVMImageRef{}, err
 	}
 
@@ -163,6 +168,7 @@ func (i localVMImageImporter) importExtracted(cacheRoot string, req localVMImage
 		RootFS:       rootFSName,
 		Kernel:       "vmlinux",
 		Firecracker:  "firecracker",
+		Jailer:       "jailer",
 		KernelPolicy: kernelPolicy,
 		CreatedAt:    now().UTC().Format(time.RFC3339Nano),
 	}
@@ -300,6 +306,11 @@ func resolveLocalVMImageAsset(ctx context.Context, cacheRoot, name string) (vmIm
 	if err := os.Chmod(paths.FirecrackerPath, 0o755); err != nil {
 		return vmImageAsset{}, fmt.Errorf("chmod local VM image firecracker: %w", err)
 	}
+	if paths.JailerPath != "" {
+		if err := os.Chmod(paths.JailerPath, 0o755); err != nil {
+			return vmImageAsset{}, fmt.Errorf("chmod local VM image jailer: %w", err)
+		}
+	}
 	preparedRootFS, err := prepareVMRootFSFunc(ctx, paths.RootFSPath)
 	if err != nil {
 		return vmImageAsset{}, err
@@ -335,6 +346,9 @@ func resolveLocalVMImageMetadata(cacheRoot, name string) (localVMImageRef, vmIma
 		RootFSPath:      filepath.Join(ref.Root, ref.RootFS),
 		FirecrackerPath: filepath.Join(ref.Root, ref.Firecracker),
 	}
+	if strings.TrimSpace(ref.Jailer) != "" {
+		paths.JailerPath = filepath.Join(ref.Root, ref.Jailer)
+	}
 	return ref, manifest, paths, nil
 }
 
@@ -357,7 +371,7 @@ func readResolvedLocalVMImageManifest(ref localVMImageRef) (vmImageManifest, err
 	if manifest.Version != ref.Version {
 		return vmImageManifest{}, fmt.Errorf("local VM image manifest version %q does not match ref version %q", manifest.Version, ref.Version)
 	}
-	if ref.RootFS != manifest.RootFS || ref.Kernel != manifest.Kernel || ref.Firecracker != manifest.Firecracker {
+	if ref.RootFS != manifest.RootFS || ref.Kernel != manifest.Kernel || ref.Firecracker != manifest.Firecracker || ref.Jailer != manifest.Jailer {
 		return vmImageManifest{}, fmt.Errorf("local VM image ref artifacts do not match manifest")
 	}
 	return manifest, nil
@@ -368,7 +382,7 @@ func verifyResolvedLocalVMImage(ref localVMImageRef, manifest vmImageManifest, p
 		return err
 	}
 	capabilities := localVMImageCapabilitiesFromManifest(manifest)
-	contentID, err := localVMImageContentID(ref.Name, paths.RootFSPath, paths.KernelPath, paths.FirecrackerPath, capabilities)
+	contentID, err := localVMImageContentID(ref.Name, paths.RootFSPath, paths.KernelPath, paths.FirecrackerPath, paths.JailerPath, capabilities)
 	if err != nil {
 		return err
 	}
@@ -745,15 +759,19 @@ func localVMImageSafeArtifactPath(stagingDir, name string) (string, error) {
 	return resolved, nil
 }
 
-func localVMImageContentID(name, rootFSPath, kernelPath, firecrackerPath string, capabilities localVMImageManifestCapabilities) (string, error) {
-	return localVMImageContentIDWithCapabilitiesHash(name, rootFSPath, kernelPath, firecrackerPath, capabilities, hashLocalVMImageCapabilities)
+func localVMImageContentID(name, rootFSPath, kernelPath, firecrackerPath, jailerPath string, capabilities localVMImageManifestCapabilities) (string, error) {
+	artifacts := []string{rootFSPath, kernelPath, firecrackerPath}
+	if strings.TrimSpace(jailerPath) != "" {
+		artifacts = append(artifacts, jailerPath)
+	}
+	return localVMImageContentIDWithCapabilitiesHash(name, artifacts, capabilities, hashLocalVMImageCapabilities)
 }
 
 func legacyLocalVMImageContentID(name, rootFSPath, kernelPath, firecrackerPath string, capabilities localVMImageManifestCapabilities) (string, error) {
-	return localVMImageContentIDWithCapabilitiesHash(name, rootFSPath, kernelPath, firecrackerPath, capabilities, hashLegacyLocalVMImageCapabilities)
+	return localVMImageContentIDWithCapabilitiesHash(name, []string{rootFSPath, kernelPath, firecrackerPath}, capabilities, hashLegacyLocalVMImageCapabilities)
 }
 
-func localVMImageContentIDWithCapabilitiesHash(name, rootFSPath, kernelPath, firecrackerPath string, capabilities localVMImageManifestCapabilities, hashCapabilities func(io.Writer, localVMImageManifestCapabilities) error) (string, error) {
+func localVMImageContentIDWithCapabilitiesHash(name string, artifactPaths []string, capabilities localVMImageManifestCapabilities, hashCapabilities func(io.Writer, localVMImageManifestCapabilities) error) (string, error) {
 	h := sha256.New()
 	if _, err := h.Write([]byte(name)); err != nil {
 		return "", err
@@ -761,7 +779,7 @@ func localVMImageContentIDWithCapabilitiesHash(name, rootFSPath, kernelPath, fir
 	if err := hashCapabilities(h, capabilities); err != nil {
 		return "", err
 	}
-	for _, path := range []string{rootFSPath, kernelPath, firecrackerPath} {
+	for _, path := range artifactPaths {
 		if _, err := h.Write([]byte{0}); err != nil {
 			return "", err
 		}
@@ -831,7 +849,7 @@ func hashLocalVMImageFile(w io.Writer, path string) error {
 	return nil
 }
 
-func installLocalVMImageBlob(blobDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, version, name string, rootFSSize int64, capabilities localVMImageManifestCapabilities) error {
+func installLocalVMImageBlob(blobDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, jailerSource, version, name string, rootFSSize int64, capabilities localVMImageManifestCapabilities) error {
 	tmpDir, err := createLocalVMImageBlobTemp(blobDir)
 	if err != nil {
 		return err
@@ -842,7 +860,7 @@ func installLocalVMImageBlob(blobDir, rootFSName, rootFSSource, kernelSource, fi
 			_ = os.RemoveAll(tmpDir)
 		}
 	}()
-	manifest, err := populateLocalVMImageBlob(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, version, name, rootFSSize, capabilities)
+	manifest, err := populateLocalVMImageBlob(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, jailerSource, version, name, rootFSSize, capabilities)
 	if err != nil {
 		return err
 	}
@@ -866,11 +884,11 @@ func createLocalVMImageBlobTemp(blobDir string) (string, error) {
 	return tmpDir, nil
 }
 
-func populateLocalVMImageBlob(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, version, name string, rootFSSize int64, capabilities localVMImageManifestCapabilities) (vmImageManifest, error) {
-	if err := copyLocalVMImageArtifacts(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource); err != nil {
+func populateLocalVMImageBlob(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, jailerSource, version, name string, rootFSSize int64, capabilities localVMImageManifestCapabilities) (vmImageManifest, error) {
+	if err := copyLocalVMImageArtifacts(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, jailerSource); err != nil {
 		return vmImageManifest{}, err
 	}
-	checksums, err := localVMImageChecksums(tmpDir, rootFSName)
+	checksums, err := localVMImageChecksums(tmpDir, rootFSName, "jailer")
 	if err != nil {
 		return vmImageManifest{}, err
 	}
@@ -881,20 +899,23 @@ func populateLocalVMImageBlob(tmpDir, rootFSName, rootFSSource, kernelSource, fi
 	if err := writeManifestFile(filepath.Join(tmpDir, "manifest.json"), manifest); err != nil {
 		return vmImageManifest{}, err
 	}
-	if err := writeLocalVMImageChecksums(filepath.Join(tmpDir, "checksums.txt"), checksums, rootFSName); err != nil {
+	if err := writeLocalVMImageChecksums(filepath.Join(tmpDir, "checksums.txt"), checksums, rootFSName, "jailer"); err != nil {
 		return vmImageManifest{}, err
 	}
 	return manifest, nil
 }
 
-func copyLocalVMImageArtifacts(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource string) error {
+func copyLocalVMImageArtifacts(tmpDir, rootFSName, rootFSSource, kernelSource, firecrackerSource, jailerSource string) error {
 	if err := copyLocalVMImageFile(rootFSSource, filepath.Join(tmpDir, rootFSName), 0o644); err != nil {
 		return err
 	}
 	if err := copyLocalVMImageFile(kernelSource, filepath.Join(tmpDir, "vmlinux"), 0o644); err != nil {
 		return err
 	}
-	return copyLocalVMImageFile(firecrackerSource, filepath.Join(tmpDir, "firecracker"), 0o755)
+	if err := copyLocalVMImageFile(firecrackerSource, filepath.Join(tmpDir, "firecracker"), 0o755); err != nil {
+		return err
+	}
+	return copyLocalVMImageFile(jailerSource, filepath.Join(tmpDir, "jailer"), 0o755)
 }
 
 func localVMImageManifest(name, version, rootFSName string, rootFSSize int64, checksums map[string]string, capabilities localVMImageManifestCapabilities) vmImageManifest {
@@ -905,6 +926,7 @@ func localVMImageManifest(name, version, rootFSName string, rootFSSize int64, ch
 		Kernel:       "vmlinux",
 		RootFS:       rootFSName,
 		Firecracker:  "firecracker",
+		Jailer:       "jailer",
 		RootFSSize:   rootFSSize,
 		Checksums:    checksums,
 	}
@@ -1032,9 +1054,13 @@ func copyLocalVMImageFile(src, dst string, mode os.FileMode) error {
 	return nil
 }
 
-func localVMImageChecksums(dir, rootFSName string) (map[string]string, error) {
-	checksums := make(map[string]string, 3)
-	for _, name := range []string{rootFSName, "vmlinux", "firecracker"} {
+func localVMImageChecksums(dir, rootFSName, jailerName string) (map[string]string, error) {
+	names := []string{rootFSName, "vmlinux", "firecracker"}
+	if strings.TrimSpace(jailerName) != "" {
+		names = append(names, jailerName)
+	}
+	checksums := make(map[string]string, len(names))
+	for _, name := range names {
 		sum, err := sha256File(filepath.Join(dir, name))
 		if err != nil {
 			return nil, fmt.Errorf("checksum local VM image artifact %q: %w", name, err)
@@ -1058,9 +1084,13 @@ func localVMImageVerifyManifestArtifacts(dir string, manifest vmImageManifest) e
 	return nil
 }
 
-func writeLocalVMImageChecksums(path string, checksums map[string]string, rootFSName string) error {
+func writeLocalVMImageChecksums(path string, checksums map[string]string, rootFSName, jailerName string) error {
 	var b strings.Builder
-	for _, name := range []string{rootFSName, "vmlinux", "firecracker"} {
+	names := []string{rootFSName, "vmlinux", "firecracker"}
+	if strings.TrimSpace(jailerName) != "" {
+		names = append(names, jailerName)
+	}
+	for _, name := range names {
 		_, _ = fmt.Fprintf(&b, "%s  %s\n", checksums[name], name)
 	}
 	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {

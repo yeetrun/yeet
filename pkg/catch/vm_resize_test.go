@@ -62,6 +62,174 @@ func TestVMSetUpdatesShapeAndFirecrackerConfig(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"mem_size_mib": 6144`)
 }
 
+func TestVMSetMigratesStoppedVMToJailerIsolation(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	systemdDir := t.TempDir()
+	oldSystemdDir := vmSystemdSystemDir
+	vmSystemdSystemDir = systemdDir
+	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
+	oldIdentity := vmServiceSetEnsureRuntimeIdentity
+	oldValidatePair := vmServiceSetValidateRuntimePair
+	oldSystemctl := vmServiceSetSystemctl
+	oldDelegateStorage := vmServiceSetDelegateJailStorage
+	vmServiceSetEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	vmServiceSetValidateRuntimePair = func(context.Context, string, string) error { return nil }
+	vmServiceSetDelegateJailStorage = func(string, string, vmRuntimeIdentity) error { return nil }
+	var systemctlCalls [][]string
+	vmServiceSetSystemctl = func(args ...string) error {
+		systemctlCalls = append(systemctlCalls, append([]string(nil), args...))
+		return nil
+	}
+	t.Cleanup(func() {
+		vmServiceSetEnsureRuntimeIdentity = oldIdentity
+		vmServiceSetValidateRuntimePair = oldValidatePair
+		vmServiceSetSystemctl = oldSystemctl
+		vmServiceSetDelegateJailStorage = oldDelegateStorage
+	})
+	var networkCommands [][]string
+	withServiceSetVMNetworkRunner(t, func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	})
+
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{VMMIsolation: vmIsolationJailer}); err != nil {
+		t.Fatalf("updateVMServiceSettings: %v", err)
+	}
+	mode, err := vmIsolationModeForRoot(root)
+	if err != nil || mode != vmIsolationJailer {
+		t.Fatalf("isolation mode = %q err=%v", mode, err)
+	}
+	unitPath := filepath.Join(systemdDir, vmSystemdUnitName("devbox"))
+	assertFileContains(t, unitPath, "--jailer "+filepath.Join(root, "images", "jailer"))
+	assertFileContains(t, unitPath, "--jailer-base "+vmJailerBaseForDataRoot(server.cfg.RootDir))
+	plan := vmNetworkPlanFromDB("devbox", getTestService(t, server, "devbox").VM.Networks)
+	wantTap := []string{"ip", "tuntap", "add", plan.Interfaces[0].Tap, "mode", "tap", "user", "812", "group", "813"}
+	if !containsCommand(networkCommands, wantTap) {
+		t.Fatalf("network commands missing delegated TAP %#v in %#v", wantTap, networkCommands)
+	}
+	if !reflect.DeepEqual(systemctlCalls, [][]string{{"daemon-reload"}}) {
+		t.Fatalf("systemctl calls = %#v", systemctlCalls)
+	}
+}
+
+func TestVMSetJailerMigrationRollsBackUnitMarkerAndTAPOwnership(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	systemdDir := t.TempDir()
+	oldSystemdDir := vmSystemdSystemDir
+	vmSystemdSystemDir = systemdDir
+	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
+	oldIdentity := vmServiceSetEnsureRuntimeIdentity
+	oldValidatePair := vmServiceSetValidateRuntimePair
+	oldSystemctl := vmServiceSetSystemctl
+	oldDelegateStorage := vmServiceSetDelegateJailStorage
+	vmServiceSetEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	vmServiceSetValidateRuntimePair = func(context.Context, string, string) error { return nil }
+	vmServiceSetDelegateJailStorage = func(string, string, vmRuntimeIdentity) error { return nil }
+	reloadFailure := errors.New("daemon reload failed")
+	var systemctlCalls [][]string
+	vmServiceSetSystemctl = func(args ...string) error {
+		systemctlCalls = append(systemctlCalls, append([]string(nil), args...))
+		if len(systemctlCalls) == 1 {
+			return reloadFailure
+		}
+		return nil
+	}
+	t.Cleanup(func() {
+		vmServiceSetEnsureRuntimeIdentity = oldIdentity
+		vmServiceSetValidateRuntimePair = oldValidatePair
+		vmServiceSetSystemctl = oldSystemctl
+		vmServiceSetDelegateJailStorage = oldDelegateStorage
+	})
+	var networkCommands [][]string
+	withServiceSetVMNetworkRunner(t, func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	})
+
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{VMMIsolation: vmIsolationJailer})
+	if !errors.Is(err, reloadFailure) {
+		t.Fatalf("updateVMServiceSettings error = %v, want reload failure", err)
+	}
+	mode, modeErr := vmIsolationModeForRoot(root)
+	if modeErr != nil || mode != vmIsolationLegacy {
+		t.Fatalf("isolation mode = %q err=%v, want legacy rollback", mode, modeErr)
+	}
+	unitPath := filepath.Join(systemdDir, vmSystemdUnitName("devbox"))
+	if _, statErr := os.Stat(unitPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("rolled back systemd unit stat error = %v, want not exist", statErr)
+	}
+	plan := vmNetworkPlanFromDB("devbox", getTestService(t, server, "devbox").VM.Networks)
+	ownedTap := []string{"ip", "tuntap", "add", plan.Interfaces[0].Tap, "mode", "tap", "user", "812", "group", "813"}
+	unownedTap := []string{"ip", "tuntap", "add", plan.Interfaces[0].Tap, "mode", "tap"}
+	assertCommandSequence(t, networkCommands, ownedTap, unownedTap)
+	if !reflect.DeepEqual(systemctlCalls, [][]string{{"daemon-reload"}, {"daemon-reload"}}) {
+		t.Fatalf("systemctl calls = %#v", systemctlCalls)
+	}
+}
+
+func TestVMSetCanRollJailerIsolationBackToLegacyRoot(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	if err := writeVMIsolationMode(root, vmIsolationJailer); err != nil {
+		t.Fatal(err)
+	}
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	systemdDir := t.TempDir()
+	oldSystemdDir := vmSystemdSystemDir
+	vmSystemdSystemDir = systemdDir
+	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
+	unitPath := filepath.Join(systemdDir, vmSystemdUnitName("devbox"))
+	if err := os.WriteFile(unitPath, []byte("ExecStart=/srv/catch vm-run --jailer /srv/jailer\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldIdentity := vmServiceSetEnsureRuntimeIdentity
+	oldSystemctl := vmServiceSetSystemctl
+	vmServiceSetEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	vmServiceSetSystemctl = func(...string) error { return nil }
+	t.Cleanup(func() {
+		vmServiceSetEnsureRuntimeIdentity = oldIdentity
+		vmServiceSetSystemctl = oldSystemctl
+	})
+	var networkCommands [][]string
+	withServiceSetVMNetworkRunner(t, func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	})
+
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{VMMIsolation: vmIsolationLegacy}); err != nil {
+		t.Fatalf("updateVMServiceSettings: %v", err)
+	}
+	mode, err := vmIsolationModeForRoot(root)
+	if err != nil || mode != vmIsolationLegacy {
+		t.Fatalf("isolation mode = %q err=%v", mode, err)
+	}
+	raw, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "--jailer") {
+		t.Fatalf("legacy unit still contains jailer flag:\n%s", raw)
+	}
+	plan := vmNetworkPlanFromDB("devbox", getTestService(t, server, "devbox").VM.Networks)
+	unownedTap := []string{"ip", "tuntap", "add", plan.Interfaces[0].Tap, "mode", "tap"}
+	if !containsCommand(networkCommands, unownedTap) {
+		t.Fatalf("network commands missing legacy TAP %#v in %#v", unownedTap, networkCommands)
+	}
+}
+
 func TestVMSetUpdatesBalloonConfigAndFirecrackerConfig(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
@@ -638,17 +806,37 @@ func seedVMForResize(t *testing.T, server *Server, name, root, backend string) {
 	if err := os.MkdirAll(serviceRunDirForRoot(root), 0o755); err != nil {
 		t.Fatalf("mkdir run: %v", err)
 	}
+	imageDir := filepath.Join(root, "images")
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("mkdir images: %v", err)
+	}
+	kernelPath := filepath.Join(imageDir, "kernel")
+	initrdPath := filepath.Join(imageDir, "initrd.img")
+	rootFSPath := filepath.Join(imageDir, "rootfs.ext4")
+	for path, mode := range map[string]os.FileMode{
+		kernelPath:                             0o644,
+		initrdPath:                             0o644,
+		rootFSPath:                             0o644,
+		filepath.Join(imageDir, "firecracker"): 0o755,
+		filepath.Join(imageDir, "jailer"):      0o755,
+	} {
+		if err := os.WriteFile(path, []byte(path), mode); err != nil {
+			t.Fatalf("write image artifact: %v", err)
+		}
+	}
 	diskPath := filepath.Join(serviceDataDirForRoot(root), "rootfs.raw")
 	diskDBPath := diskPath
 	if backend == vmDiskBackendZVOL {
 		diskDBPath = "/dev/zvol/flash/yeet/vms/devbox/vm/d-abc/root"
+	} else if err := os.WriteFile(diskPath, []byte("disk"), 0o600); err != nil {
+		t.Fatalf("write raw disk: %v", err)
 	}
 	network := newVMNetworkPlan(name, []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 	firecrackerPath := filepath.Join(serviceRunDirForRoot(root), "firecracker.json")
 	firecracker, err := renderFirecrackerConfig(firecrackerConfig{
 		BootSource: firecrackerBootSource{
-			KernelImagePath: "/srv/yeet/images/kernel",
-			InitrdPath:      "/srv/yeet/images/initrd.img",
+			KernelImagePath: kernelPath,
+			InitrdPath:      initrdPath,
 			BootArgs:        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw init=/usr/local/lib/yeet-vm/yeet-init ip=192.168.100.12::192.168.100.1:255.255.255.0:devbox:eth0:none yeet.hostname=devbox yeet.iface=eth0",
 		},
 		Drives: []firecrackerDrive{{
@@ -684,8 +872,8 @@ func seedVMForResize(t *testing.T, server *Server, name, root, backend string) {
 				Image: db.VMImageConfig{
 					Payload: testUbuntuVMPayload,
 					Version: testUbuntuVMImageVersion,
-					Kernel:  "/srv/yeet/images/kernel",
-					RootFS:  "/srv/yeet/images/rootfs.ext4",
+					Kernel:  kernelPath,
+					RootFS:  rootFSPath,
 				},
 				CPUs:        4,
 				MemoryBytes: 4 << 30,

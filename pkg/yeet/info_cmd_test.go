@@ -66,10 +66,11 @@ func TestRenderInfoPlainIncludesVMSection(t *testing.T) {
 			DataType:    "vm",
 			ServiceType: "vm",
 			VM: &catchrpc.ServiceVM{
-				Runtime:     "firecracker",
-				Image:       "vm://ubuntu/26.04",
-				CPUs:        4,
-				MemoryBytes: 4 << 30,
+				Runtime:      "firecracker",
+				VMMIsolation: "jailer",
+				Image:        "vm://ubuntu/26.04",
+				CPUs:         4,
+				MemoryBytes:  4 << 30,
 				Balloon: catchrpc.ServiceVMBalloon{
 					Mode:      "auto",
 					MinBytes:  1 << 30,
@@ -101,6 +102,7 @@ func TestRenderInfoPlainIncludesVMSection(t *testing.T) {
 	}
 	assertPlainRow(t, text, "Type", "VM")
 	assertPlainRow(t, text, "Runtime", "firecracker")
+	assertPlainRow(t, text, "VMM isolation", "jailer")
 	assertPlainRow(t, text, "CPU", "4")
 	assertPlainRow(t, text, "Balloon", "auto, floor 1 GB")
 	assertPlainRow(t, text, "SSH", "ubuntu@192.168.100.12")

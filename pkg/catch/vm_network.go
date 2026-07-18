@@ -45,6 +45,7 @@ type vmNetworkInputs struct {
 type vmNetworkPlan struct {
 	Service    string
 	Interfaces []vmNetworkInterfacePlan
+	TapOwner   vmRuntimeIdentity
 }
 
 type vmNetworkInterfacePlan struct {
@@ -86,6 +87,19 @@ func newVMNetworkPlan(service string, modes []string, in vmNetworkInputs) vmNetw
 	}
 	plan.applyGuestRoutePolicy()
 	return plan
+}
+
+func (p vmNetworkPlan) WithTapOwner(identity vmRuntimeIdentity) vmNetworkPlan {
+	p.TapOwner = identity
+	return p
+}
+
+func (p vmNetworkPlan) tapCreateCommand(name string) []string {
+	command := []string{"ip", "tuntap", "add", name, "mode", "tap"}
+	if p.TapOwner.UID > 0 && p.TapOwner.GID > 0 {
+		command = append(command, "user", strconv.Itoa(p.TapOwner.UID), "group", strconv.Itoa(p.TapOwner.GID))
+	}
+	return command
 }
 
 func newVMNetworkInterfacePlan(short, mode string, idx int, in vmNetworkInputs) vmNetworkInterfacePlan {
@@ -574,7 +588,7 @@ func (p vmNetworkPlan) SetupCommands() [][]string {
 			nsPeer := fmt.Sprintf("yvm-%s-n%d", short, i)
 			cmds = append(cmds,
 				[]string{"ip", "link", "add", iface.Bridge, "type", "bridge"},
-				[]string{"ip", "tuntap", "add", iface.Tap, "mode", "tap"},
+				p.tapCreateCommand(iface.Tap),
 				[]string{"ip", "link", "set", iface.Tap, "master", iface.Bridge},
 				[]string{"ip", "addr", "del", vmSvcBridgeAddress + "/24", "dev", iface.Bridge},
 				[]string{"ip", "addr", "del", vmSvcBridgeAddress + "/32", "dev", iface.Bridge},
@@ -600,7 +614,7 @@ func (p vmNetworkPlan) SetupCommands() [][]string {
 					[]string{"ip", "link", "set", iface.VLANDevice, "master", iface.Bridge},
 					[]string{"ip", "link", "set", iface.VLANDevice, "up"},
 					[]string{"ip", "link", "set", iface.Bridge, "up"},
-					[]string{"ip", "tuntap", "add", iface.Tap, "mode", "tap"},
+					p.tapCreateCommand(iface.Tap),
 					[]string{"ip", "link", "set", iface.Tap, "master", iface.Bridge},
 					[]string{"ip", "link", "set", iface.Tap, "up"},
 				)
@@ -611,7 +625,7 @@ func (p vmNetworkPlan) SetupCommands() [][]string {
 				continue
 			}
 			cmds = append(cmds,
-				[]string{"ip", "tuntap", "add", iface.Tap, "mode", "tap"},
+				p.tapCreateCommand(iface.Tap),
 				[]string{"ip", "link", "set", iface.Tap, "master", iface.Bridge},
 				[]string{"ip", "link", "set", iface.Tap, "up"},
 			)
@@ -714,27 +728,44 @@ func (p vmNetworkPlan) ExecuteCleanup(run vmNetworkCommandRunner) error {
 }
 
 func (p vmNetworkPlan) validateExecutable() error {
+	if err := validateVMTapOwner(p.TapOwner); err != nil {
+		return err
+	}
 	for _, iface := range p.Interfaces {
-		if iface.Mode != "lan" {
-			continue
-		}
-		if iface.VLAN != 0 {
-			if iface.Bridge == "" {
-				return fmt.Errorf("VM LAN network bridge is required for VLAN %d", iface.VLAN)
-			}
-			if iface.VLANDevice != "" && iface.Parent == "" {
-				return fmt.Errorf("VM LAN network parent is required for VLAN %d", iface.VLAN)
-			}
-			continue
-		}
-		if iface.Bridge == "" {
-			if iface.Parent == "" {
-				return fmt.Errorf("VM LAN network parent is required; prepare a host bridge with `yeet init` or run `yeet run ... --net=lan` interactively so yeet can prepare one")
-			}
-			return fmt.Errorf("VM LAN network parent %q is not a bridge; prepare a host bridge with `yeet init` or recreate/update the VM with `yeet run ... --net=lan` interactively so yeet can prepare one", iface.Parent)
+		if err := validateVMNetworkInterfaceExecutable(iface); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func validateVMTapOwner(owner vmRuntimeIdentity) error {
+	if (owner.UID > 0) != (owner.GID > 0) || owner.UID < 0 || owner.GID < 0 {
+		return fmt.Errorf("VM TAP owner requires a positive UID and GID")
+	}
+	return nil
+}
+
+func validateVMNetworkInterfaceExecutable(iface vmNetworkInterfacePlan) error {
+	if iface.Mode != "lan" {
+		return nil
+	}
+	if iface.VLAN != 0 {
+		if iface.Bridge == "" {
+			return fmt.Errorf("VM LAN network bridge is required for VLAN %d", iface.VLAN)
+		}
+		if iface.VLANDevice != "" && iface.Parent == "" {
+			return fmt.Errorf("VM LAN network parent is required for VLAN %d", iface.VLAN)
+		}
+		return nil
+	}
+	if iface.Bridge != "" {
+		return nil
+	}
+	if iface.Parent == "" {
+		return fmt.Errorf("VM LAN network parent is required; prepare a host bridge with `yeet init` or run `yeet run ... --net=lan` interactively so yeet can prepare one")
+	}
+	return fmt.Errorf("VM LAN network parent %q is not a bridge; prepare a host bridge with `yeet init` or recreate/update the VM with `yeet run ... --net=lan` interactively so yeet can prepare one", iface.Parent)
 }
 
 func runVMNetworkCommands(run vmNetworkCommandRunner, cmds [][]string, mode vmNetworkCommandMode) error {
