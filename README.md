@@ -251,18 +251,18 @@ yeet run <vm> vm://ubuntu/26.04
 yeet ssh <vm>
 ```
 
-New VMs run the host Firecracker process through the matching jailer as the
-unprivileged `yeet-vm` account. Existing VMs keep their current mode until you
-stop and migrate them explicitly:
+Yeet uses Firecracker jailer mode by default. It runs the host Firecracker
+process as the unprivileged `yeet-vm` account. Check or change a VM's mode with:
 
 ```bash
+yeet info <vm>
 yeet stop <vm>
 yeet vm set <vm> --vmm-isolation=jailer
 yeet start <vm>
 ```
 
-`yeet info <vm>` reports the current VMM isolation mode. Use
-`--vmm-isolation=legacy-root` while the VM is stopped to roll back.
+`legacy-root` runs Firecracker as root for compatibility. Set it with
+`--vmm-isolation=legacy-root` while the VM is stopped.
 
 Service names created by `yeet run` must use lowercase letters, numbers, and dashes, start with a letter, and end with a letter or number.
 

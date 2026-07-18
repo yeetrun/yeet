@@ -19,6 +19,10 @@ Use this skill when a change affects what users run or read.
 ## Rules
 
 - Keep examples generic and free of private hostnames or service names.
+- Treat README and manual pages as evergreen descriptions of the product. State
+  defaults and behavior directly; do not frame normal behavior as new, changed,
+  migrated, or upgraded. Reserve temporal language for changelogs and dedicated
+  upgrade or compatibility instructions.
 - Keep changelog bullets user-facing and concise.
 - The latest changelog entry must stand alone for someone installing or
   upgrading. If a screenshot showed only that version, it should still answer
