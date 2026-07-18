@@ -23,6 +23,31 @@ func TestWebRunAssetsEmbedded(t *testing.T) {
 	}
 }
 
+func TestWebRunAssetsExposeISOCompatibility(t *testing.T) {
+	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(app)
+	for _, want := range []string{
+		`vm: new Set(["svc", "lan", "iso"])`,
+		`compose: new Set(["svc", "lan", "ts", "iso"])`,
+		`file: new Set(["svc", "lan", "ts"])`,
+		`cron: new Set([])`,
+		`function reconcileISOSelection(changedInput)`,
+		`if (changedInput.value === "iso")`,
+		`["svc", "lan"].includes(input.value)`,
+		`publish.value = ""`,
+		`publish.disabled = vmPayload || cronPayload || isoSelected`,
+		`ISO does not support published ports`,
+		`VMs support only iso as a Yeet-managed isolated mode`,
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("app.js missing %q", want)
+		}
+	}
+}
+
 func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	index, err := fs.ReadFile(webRunAssets, "web_run_assets/index.html")
 	if err != nil {
@@ -464,7 +489,8 @@ func TestWebRunVMNetworkSelectionNeverFallsBackToHost(t *testing.T) {
 		`if (payloadKind !== "vm" || selectedNetworkModes().length) return`,
 		`const fallbackValue = clearedMode === "svc" ? "lan" : "svc"`,
 		`fallback.checked = true`,
-		`input.addEventListener("input", () => ensureVMNetworkSelection(input.value))`,
+		`reconcileISOSelection(input);`,
+		`ensureVMNetworkSelection(input.value);`,
 		`$("hostDefault").closest("label").hidden = vmPayload`,
 		`$("hostDefault").checked = !vmPayload && modes.length === 0`,
 		"ensureVMNetworkSelection();",

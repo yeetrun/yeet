@@ -348,6 +348,28 @@ func TestVMSSHProxyTargetRejectsUnmatchedVMSSHAddress(t *testing.T) {
 	}
 }
 
+func TestVMSSHProxyTargetAllowsPersistedISOGuestAddress(t *testing.T) {
+	server := newTestServer(t)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeVM
+		s.VM = &db.VMConfig{
+			Networks: []db.VMNetworkConfig{{Mode: "iso", IP: netip.MustParseAddr("172.30.0.2")}},
+			SSH:      db.VMSSHConfig{User: "ubuntu"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "devbox"}
+	host, port, err := execer.vmSSHProxyTarget([]string{"172.30.0.2", "22"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if host != "172.30.0.2" || port != "22" {
+		t.Fatalf("target = %s:%s", host, port)
+	}
+}
+
 func TestDefaultShellPathUsesInstallUserThenRootThenSh(t *testing.T) {
 	oldPasswd := passwdFilePath
 	t.Cleanup(func() { passwdFilePath = oldPasswd })

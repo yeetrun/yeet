@@ -12,8 +12,10 @@ import (
 
 func execRequestPermissions(req catchrpc.ExecRequest) (permissionSet, error) {
 	switch req.Target {
-	case catchrpc.ExecTargetHostShell, catchrpc.ExecTargetServiceShell, catchrpc.ExecTargetVMSSHProxy:
+	case catchrpc.ExecTargetHostShell, catchrpc.ExecTargetServiceShell:
 		return newPermissionSet(permissionSSH), nil
+	case catchrpc.ExecTargetVMSSHProxy:
+		return newPermissionSet(permissionRead), nil
 	case catchrpc.ExecTargetServiceCommand:
 		return ttyCommandPermissions(req.Args)
 	default:

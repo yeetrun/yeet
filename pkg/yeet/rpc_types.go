@@ -4,12 +4,15 @@
 
 package yeet
 
+import "github.com/yeetrun/yeet/pkg/catchrpc"
+
 type serverInfo struct {
-	Version     string `json:"version"`
-	GOOS        string `json:"goos"`
-	GOARCH      string `json:"goarch"`
-	InstallUser string `json:"installUser"`
-	InstallHost string `json:"installHost"`
-	RootDir     string `json:"rootDir,omitempty"`
-	ServicesDir string `json:"servicesDir,omitempty"`
+	Version     string                  `json:"version"`
+	GOOS        string                  `json:"goos"`
+	GOARCH      string                  `json:"goarch"`
+	InstallUser string                  `json:"installUser"`
+	InstallHost string                  `json:"installHost"`
+	RootDir     string                  `json:"rootDir,omitempty"`
+	ServicesDir string                  `json:"servicesDir,omitempty"`
+	ISO         catchrpc.ISOPoolSummary `json:"iso,omitzero"`
 }

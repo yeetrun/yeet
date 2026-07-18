@@ -364,6 +364,9 @@ func renderVMNetworkdUnit(network vmGuestNetwork) string {
 	if network.DNSDefaultRoute != nil {
 		fmt.Fprintf(&b, "DNSDefaultRoute=%s\n", networkdBool(*network.DNSDefaultRoute))
 	}
+	if network.Mode == "iso" {
+		b.WriteString("LinkLocalAddressing=no\nIPv6AcceptRA=no\n")
+	}
 	return b.String()
 }
 
@@ -1062,6 +1065,9 @@ func renderVMNetworkYAML(networks []vmGuestNetwork) string {
 	b.WriteString("network:\n  version: 2\n  ethernets:\n")
 	for _, net := range networks {
 		fmt.Fprintf(&b, "    %s:\n", net.Name)
+		if net.Mode == "iso" {
+			b.WriteString("      dhcp6: false\n      accept-ra: false\n      link-local: []\n")
+		}
 		if net.DHCP {
 			b.WriteString("      dhcp4: true\n")
 			continue
@@ -1086,7 +1092,7 @@ func renderVMNetworkYAML(networks []vmGuestNetwork) string {
 }
 
 func vmGuestNetworkNameservers(network vmGuestNetwork) []string {
-	if len(network.Nameservers) > 0 {
+	if network.Nameservers != nil {
 		return network.Nameservers
 	}
 	if network.Mode != "svc" && network.Gateway == "" {
@@ -1099,7 +1105,7 @@ func vmGuestNetworkNameservers(network vmGuestNetwork) []string {
 }
 
 func vmGuestNetworkSearchDomains(network vmGuestNetwork) []string {
-	if len(network.SearchDomains) > 0 {
+	if network.SearchDomains != nil {
 		return network.SearchDomains
 	}
 	if len(vmGuestNetworkNameservers(network)) == 0 {

@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"os"
@@ -704,6 +705,59 @@ func TestServiceNetworkInfoIncludesConfiguredNetworks(t *testing.T) {
 	}
 	if info.Tailscale == nil || info.Tailscale.Interface != "ts0" || info.Tailscale.StableID != string(stableID) {
 		t.Fatalf("tailscale = %#v", info.Tailscale)
+	}
+}
+
+func TestServiceNetworkInfoIncludesPersistedISOStateAndSortedEndpoints(t *testing.T) {
+	info := serviceNetworkInfo((&db.Service{
+		Name: "app",
+		ISO: &db.ISOAllocation{
+			Kind: "compose", DesiredModes: []string{"iso", "ts"}, State: "quarantined",
+			Link: netip.MustParsePrefix("172.30.0.0/30"), Project: netip.MustParsePrefix("172.30.128.0/27"),
+			Gateway: netip.MustParseAddr("172.30.128.1"), LastError: "firewall digest mismatch",
+			Components: map[string]db.ISOComponent{
+				"worker": {Address: netip.MustParseAddr("172.30.128.3"), State: "ready"},
+				"api":    {Address: netip.MustParseAddr("172.30.128.2"), State: "ready"},
+			},
+		},
+	}).View())
+	if info.ISO == nil || info.ISO.DNS != "tailscale" || !info.ISO.PublicEgress || info.ISO.LastError != "firewall digest mismatch" {
+		t.Fatalf("ISO info = %#v", info.ISO)
+	}
+	if got := info.ISO.Components; len(got) != 2 || got[0].Name != "api" || got[1].Name != "worker" {
+		t.Fatalf("ISO components = %#v, want stable sort", got)
+	}
+}
+
+func TestServiceIPListUsesOnlyPersistedISOEndpoints(t *testing.T) {
+	server := newTestServer(t)
+	container := (&db.Service{Name: "app", ServiceType: db.ServiceTypeDockerCompose, ISO: &db.ISOAllocation{
+		Kind: "compose", Link: netip.MustParsePrefix("172.30.0.0/30"),
+		Components: map[string]db.ISOComponent{
+			"worker": {Address: netip.MustParseAddr("172.30.128.3")},
+			"api":    {Address: netip.MustParseAddr("172.30.128.2")},
+		},
+	}}).View()
+	oldList := listIPv4AddrsFn
+	listIPv4AddrsFn = func([]string) ([]ifaceIP, error) { return nil, errors.New("runtime discovery must not run") }
+	t.Cleanup(func() { listIPv4AddrsFn = oldList })
+	ips, err := server.serviceIPListWithContext(context.Background(), "app", container)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ips) != 2 || ips[0].Label != "api" || ips[0].IP != "172.30.128.2" || ips[1].Label != "worker" {
+		t.Fatalf("container ISO endpoints = %#v", ips)
+	}
+
+	vm := (&db.Service{Name: "devbox", ServiceType: db.ServiceTypeVM, ISO: &db.ISOAllocation{
+		Kind: "vm", PeerIP: netip.MustParseAddr("172.30.0.2"),
+	}, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker}}).View()
+	ips, err = server.serviceIPListWithContext(context.Background(), "devbox", vm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ips) != 1 || ips[0] != (catchrpc.ServiceIP{Label: "vm", IP: "172.30.0.2"}) {
+		t.Fatalf("VM ISO endpoints = %#v", ips)
 	}
 }
 

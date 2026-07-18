@@ -6,6 +6,7 @@ package yeet
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/serviceid"
 )
 
@@ -81,6 +83,8 @@ func validateRunDraftLocal(draft RunDraft, cwd string) (RunDraft, RunDraftValida
 	validateRunDraftPaths(cwd, &draft, &result)
 	validateRunDraftVM(&draft, &result)
 	if draft.PayloadKind == serviceTypeCron {
+		draft.Network.Modes = normalizeRunDraftNetworkModes(draft.Network.Modes, &result)
+		validateRunDraftISO(draft, &result)
 		return draft, result
 	}
 	validateRunDraftNetwork(&draft, &result)
@@ -122,7 +126,82 @@ func validateRunDraftNetwork(draft *RunDraft, result *RunDraftValidationResult) 
 	validateRunDraftTailscaleTags(draft.Network, result)
 	if draft.PayloadKind == serviceTypeVM {
 		defaultRunDraftVMNetworkModes(draft, networkModesProvided)
-		validateRunDraftVMNetworkModes(draft.Network.Modes, result)
+		if !runDraftNetworkModeSet(draft.Network.Modes, "iso") {
+			validateRunDraftVMNetworkModes(draft.Network.Modes, result)
+		}
+	}
+	validateRunDraftISO(*draft, result)
+}
+
+func validateRunDraftISO(draft RunDraft, result *RunDraftValidationResult) {
+	err := iso.ValidateNetwork(iso.NetworkRequest{
+		Payload:   runDraftISOPayloadKind(draft),
+		Modes:     draft.Network.Modes,
+		Published: len(draft.Network.Publish) != 0 || draft.Network.PublishReset,
+	})
+	if err == nil {
+		return
+	}
+	field := "network.modes"
+	if errors.Is(err, iso.ErrPublishedPorts) {
+		field = "network.publish"
+	}
+	result.addError(field, "%v", err)
+}
+
+func runDraftISOPayloadKind(draft RunDraft) iso.PayloadKind {
+	if kind, ok := declaredRunDraftISOPayloadKind(draft.PayloadKind); ok {
+		return kind
+	}
+
+	switch draft.PayloadKind {
+	case "file":
+		if kind, ok := detectedRunDraftISOPayloadKind(draft.Payload); ok {
+			return kind
+		}
+	case "", "auto":
+		if looksLikeRunDraftImageRef(draft.Payload) || looksLikeRunDraftLocalImageName(draft.Payload) {
+			return iso.PayloadContainer
+		}
+		if kind, ok := detectedRunDraftISOPayloadKind(draft.Payload); ok {
+			return kind
+		}
+	}
+	return iso.PayloadNative
+}
+
+func declaredRunDraftISOPayloadKind(kind string) (iso.PayloadKind, bool) {
+	switch kind {
+	case serviceTypeVM:
+		return iso.PayloadVM, true
+	case "compose":
+		return iso.PayloadCompose, true
+	case "image", "remote-image", "local-image", "dockerfile", "python", "typescript":
+		return iso.PayloadContainer, true
+	case serviceTypeCron:
+		return iso.PayloadCron, true
+	default:
+		return "", false
+	}
+}
+
+func detectedRunDraftISOPayloadKind(payload string) (iso.PayloadKind, bool) {
+	if filepath.Base(payload) == "Dockerfile" {
+		return iso.PayloadContainer, true
+	}
+
+	ft, err := ftdetect.DetectFile(payload, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return "", false
+	}
+
+	switch ft {
+	case ftdetect.DockerCompose:
+		return iso.PayloadCompose, true
+	case ftdetect.Python, ftdetect.TypeScript:
+		return iso.PayloadContainer, true
+	default:
+		return "", false
 	}
 }
 
@@ -253,7 +332,7 @@ func normalizeRunDraftNetworkModes(modes []string, result *RunDraftValidationRes
 
 func validRunDraftNetworkMode(mode string) bool {
 	switch mode {
-	case "svc", "ts", "lan":
+	case "svc", "ts", "lan", "iso":
 		return true
 	default:
 		return false
@@ -372,7 +451,7 @@ func validateRunDraftCronSchedule(draft *RunDraft, result *RunDraftValidationRes
 }
 
 func validateRunDraftCronUnsupportedFields(draft RunDraft, result *RunDraftValidationResult) {
-	if len(trimNonEmptyStrings(draft.Network.Modes)) != 0 {
+	if len(trimNonEmptyStrings(draft.Network.Modes)) != 0 && !runDraftNetworkModeSet(draft.Network.Modes, "iso") {
 		result.addError("network.modes", "network modes are not supported for scheduled jobs during web deploy")
 	}
 	validateRunDraftCronNetworkFields(draft.Network, result)

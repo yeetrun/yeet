@@ -198,7 +198,45 @@ const (
 	RPCMethodHostStorageApply    = "catch.HostStorageApply"
 	RPCMethodHostStorageFinalize = "catch.HostStorageFinalize"
 	RPCMethodHostStorageCleanup  = "catch.HostStorageCleanup"
+	RPCMethodISOPoolPlan         = "catch.ISOPoolPlan"
+	RPCMethodISOPoolApply        = "catch.ISOPoolApply"
 )
+
+type ISOPoolPlanRequest struct {
+	Prefix string `json:"prefix"`
+}
+
+type ISOPoolPlan struct {
+	CurrentPrefix string   `json:"currentPrefix,omitempty"`
+	DesiredPrefix string   `json:"desiredPrefix"`
+	Source        string   `json:"source"`
+	Changed       bool     `json:"changed"`
+	Blockers      []string `json:"blockers,omitempty"`
+	Conflicts     []string `json:"conflicts,omitempty"`
+}
+
+type ISOPoolApplyRequest struct {
+	Plan ISOPoolPlan `json:"plan"`
+}
+
+type ISOPoolApplyResult struct {
+	Prefix string `json:"prefix"`
+	Source string `json:"source"`
+}
+
+type ISOPoolSummary struct {
+	Prefix       string `json:"prefix,omitempty"`
+	Source       string `json:"source,omitempty"`
+	Allocator    int    `json:"allocatorVersion,omitempty"`
+	Policy       int    `json:"policyVersion,omitempty"`
+	LinksUsed    int    `json:"linksUsed,omitempty"`
+	ProjectsUsed int    `json:"projectsUsed,omitempty"`
+	Reserved     int    `json:"reserved,omitempty"`
+	Active       int    `json:"active,omitempty"`
+	Quarantined  int    `json:"quarantined,omitempty"`
+	Tombstoned   int    `json:"tombstoned,omitempty"`
+	Conflict     string `json:"conflict,omitempty"`
+}
 
 type HostStorageMigrateServices string
 
@@ -436,6 +474,7 @@ type ServiceNetwork struct {
 	Ports      []ServicePort     `json:"ports,omitempty"`
 	Macvlan    *ServiceMacvlan   `json:"macvlan,omitempty"`
 	Tailscale  *ServiceTailscale `json:"tailscale,omitempty"`
+	ISO        *ServiceISO       `json:"iso,omitempty"`
 
 	PortsPresent bool `json:"-"`
 }
@@ -449,6 +488,7 @@ type serviceNetworkJSON struct {
 	Ports      []ServicePort     `json:"ports,omitempty"`
 	Macvlan    *ServiceMacvlan   `json:"macvlan,omitempty"`
 	Tailscale  *ServiceTailscale `json:"tailscale,omitempty"`
+	ISO        *ServiceISO       `json:"iso,omitempty"`
 }
 
 type serviceNetworkJSONWithPorts struct {
@@ -460,6 +500,7 @@ type serviceNetworkJSONWithPorts struct {
 	Ports      []ServicePort     `json:"ports"`
 	Macvlan    *ServiceMacvlan   `json:"macvlan,omitempty"`
 	Tailscale  *ServiceTailscale `json:"tailscale,omitempty"`
+	ISO        *ServiceISO       `json:"iso,omitempty"`
 }
 
 func (n ServiceNetwork) MarshalJSON() ([]byte, error) {
@@ -477,6 +518,7 @@ func (n ServiceNetwork) MarshalJSON() ([]byte, error) {
 			Ports:      ports,
 			Macvlan:    n.Macvlan,
 			Tailscale:  n.Tailscale,
+			ISO:        n.ISO,
 		})
 	}
 	return json.Marshal(serviceNetworkJSON{
@@ -487,6 +529,7 @@ func (n ServiceNetwork) MarshalJSON() ([]byte, error) {
 		IPWarning:  n.IPWarning,
 		Macvlan:    n.Macvlan,
 		Tailscale:  n.Tailscale,
+		ISO:        n.ISO,
 	})
 }
 
@@ -508,6 +551,7 @@ func (n *ServiceNetwork) UnmarshalJSON(data []byte) error {
 		Ports:        decoded.Ports,
 		Macvlan:      decoded.Macvlan,
 		Tailscale:    decoded.Tailscale,
+		ISO:          decoded.ISO,
 		PortsPresent: false,
 	}
 	if _, ok := raw["ports"]; ok {
@@ -517,6 +561,24 @@ func (n *ServiceNetwork) UnmarshalJSON(data []byte) error {
 		}
 	}
 	return nil
+}
+
+type ServiceISO struct {
+	Modes        []string              `json:"modes,omitempty"`
+	State        string                `json:"state,omitempty"`
+	PublicEgress bool                  `json:"publicEgress"`
+	DNS          string                `json:"dns,omitempty"`
+	Link         string                `json:"link,omitempty"`
+	Project      string                `json:"project,omitempty"`
+	Gateway      string                `json:"gateway,omitempty"`
+	Components   []ServiceISOComponent `json:"components,omitempty"`
+	LastError    string                `json:"lastError,omitempty"`
+}
+
+type ServiceISOComponent struct {
+	Name  string `json:"name"`
+	IP    string `json:"ip"`
+	State string `json:"state,omitempty"`
 }
 
 type ServicePort struct {

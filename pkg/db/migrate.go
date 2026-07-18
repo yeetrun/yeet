@@ -11,7 +11,7 @@ import (
 	"tailscale.com/util/mak"
 )
 
-const CurrentDataVersion = 11
+const CurrentDataVersion = 12
 
 var migrators = map[int]func(*Data) error{ // Start DataVersion -> NextStep
 	3:  reinit,
@@ -22,6 +22,7 @@ var migrators = map[int]func(*Data) error{ // Start DataVersion -> NextStep
 	8:  addVMServiceConfig,
 	9:  addVMVsockConfig,
 	10: addVMBalloonConfig,
+	11: addISOState,
 }
 
 func reinit(d *Data) error {
@@ -63,5 +64,9 @@ func addVMVsockConfig(d *Data) error {
 }
 
 func addVMBalloonConfig(d *Data) error {
+	return nil
+}
+
+func addISOState(d *Data) error {
 	return nil
 }

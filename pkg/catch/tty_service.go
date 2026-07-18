@@ -24,12 +24,20 @@ import (
 
 var errUnhandledServiceType = errors.New("unhandled service type")
 
+var ensureVMNetworkForServiceAction = (*Server).EnsureVMNetwork
+
 func (e *ttyExecer) startCmdFunc() error {
 	if e.sn == SystemService || e.sn == CatchService {
 		return fmt.Errorf("cannot start system service")
 	}
 	target := e.managedTargetLabel()
 	return e.runAction("start", "Start "+target, func() error {
+		if handled, err := e.installISOServiceIfAllocated(); handled {
+			if err != nil {
+				return fmt.Errorf("failed to start %s: %w", target, err)
+			}
+			return nil
+		}
 		runner, err := e.serviceRunner()
 		if err != nil {
 			return fmt.Errorf("failed to get service runner: %w", err)
@@ -53,6 +61,11 @@ func (e *ttyExecer) stopCmdFunc() error {
 		}
 		if err := runner.Stop(); err != nil {
 			return fmt.Errorf("failed to stop %s: %w", target, err)
+		}
+		if e.s != nil {
+			if err := e.s.markISOStoppedIfAllocated(e.sn); err != nil {
+				return fmt.Errorf("record stopped ISO state for %s: %w", target, err)
+			}
 		}
 		return nil
 	})
@@ -200,6 +213,12 @@ func (e *ttyExecer) installServiceGeneration(cfg InstallerCfg, gen int) error {
 func (e *ttyExecer) restartCmdFunc() error {
 	target := e.managedTargetLabel()
 	return e.runAction("restart", "Restart "+target, func() error {
+		if handled, err := e.installISOServiceIfAllocated(); handled {
+			if err != nil {
+				return fmt.Errorf("failed to restart %s: %w", target, err)
+			}
+			return nil
+		}
 		runner, err := e.serviceRunner()
 		if err != nil {
 			return fmt.Errorf("failed to get service runner: %w", err)
@@ -209,6 +228,27 @@ func (e *ttyExecer) restartCmdFunc() error {
 		}
 		return nil
 	})
+}
+
+func (e *ttyExecer) installISOServiceIfAllocated() (bool, error) {
+	if e.s == nil {
+		return false, nil
+	}
+	service, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return true, fmt.Errorf("load service network state: %w", err)
+	}
+	record := service.AsStruct()
+	if record.ISO == nil {
+		return false, nil
+	}
+	if record.ServiceType == db.ServiceTypeVM {
+		if err := ensureVMNetworkForServiceAction(e.s, e.ctx, e.sn); err != nil {
+			return true, err
+		}
+		return false, nil
+	}
+	return true, e.installServiceGeneration(e.installerCfg(), record.Generation)
 }
 
 func (e *ttyExecer) enableCmdFunc() error {
@@ -632,9 +672,19 @@ func (e *ttyExecer) removeCmdFunc(flags cli.RemoveFlags) error {
 	}
 
 	doneRunnerRemove := e.traceBlock("remove runner")
-	e.removeRunner(runner)
+	if !e.serviceHasISOAllocation() {
+		e.removeRunner(runner)
+	}
 	doneRunnerRemove()
 	return e.removeServiceConfig(flags)
+}
+
+func (e *ttyExecer) serviceHasISOAllocation() bool {
+	if e.s == nil {
+		return false
+	}
+	service, err := e.s.serviceView(e.sn)
+	return err == nil && service.ISO().Valid()
 }
 
 func (e *ttyExecer) validateServiceRemoval() error {
@@ -662,7 +712,7 @@ func (e *ttyExecer) removeServiceWithoutRunner(flags cli.RemoveFlags, err error)
 			return err
 		}
 	}
-	report, err := e.s.RemoveServiceWithOptions(e.sn, RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
+	report, err := e.removeServiceWithOptions(RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
 	if err != nil {
 		return fmt.Errorf("failed to cleanup %s %q: %w", e.managedTargetLabel(), e.sn, err)
 	}
@@ -709,12 +759,19 @@ func (e *ttyExecer) removeRunner(runner ServiceRunner) {
 }
 
 func (e *ttyExecer) removeServiceConfig(flags cli.RemoveFlags) error {
-	report, err := e.s.RemoveServiceWithOptions(e.sn, RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
+	report, err := e.removeServiceWithOptions(RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
 	if err != nil {
 		return fmt.Errorf("failed to cleanup %s %q: %w", e.managedTargetLabel(), e.sn, err)
 	}
 	e.printRemoveWarnings(report)
 	return nil
+}
+
+func (e *ttyExecer) removeServiceWithOptions(opts RemoveOptions) (*RemoveReport, error) {
+	if e.removeServiceFunc != nil {
+		return e.removeServiceFunc(e.sn, opts)
+	}
+	return e.s.RemoveServiceWithOptions(e.sn, opts)
 }
 
 func (e *ttyExecer) managedTargetLabel() string {

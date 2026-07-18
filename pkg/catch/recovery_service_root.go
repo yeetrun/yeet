@@ -688,6 +688,7 @@ func (s *Server) requireServiceRootCloneTargetDatasetAvailable(ctx context.Conte
 
 func cloneServiceRootRecoveryService(source *db.Service, point recoveryPoint, newServiceName string, targetDataset string, targetRoot string) (*db.Service, error) {
 	cloned := source.Clone()
+	clearISOCloneState(cloned)
 	cloned.Name = newServiceName
 	cloned.Generation = 1
 	cloned.LatestGeneration = 1

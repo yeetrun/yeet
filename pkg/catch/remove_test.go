@@ -8,7 +8,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,11 +20,284 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
+	"github.com/yeetrun/yeet/pkg/netns"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
 
 type fakeRunner struct {
 	removeErr error
+}
+
+func TestRemoveServiceISOCleanDataZFSFailureRetainsVerifiedTombstoneWithoutDeletedEvent(t *testing.T) {
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{
+		"app": testISORuntimeAllocation("app", iso.StateReady),
+	})
+	serviceRoot := filepath.Join(server.cfg.ServicesRoot, "app")
+	if err := os.MkdirAll(filepath.Join(serviceRoot, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
+		service.Name = "app"
+		service.ServiceType = db.ServiceTypeDockerCompose
+		service.ServiceRoot = serviceRoot
+		service.ServiceRootZFS = "tank/apps/app"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	zfsErr := errors.New("zfs failed")
+	server.zfsRunner = func(context.Context, ...string) (string, string, error) {
+		return "", "permission denied", zfsErr
+	}
+	recorder := &isoRemoveRecorder{server: server}
+	server.newISORemoveSteps = func(string, RemoveOptions, *RemoveReport, string) (isoRemoveSteps, error) {
+		return &isoRemoveZFSRecorder{isoRemoveRecorder: recorder, server: server, dataset: "tank/apps/app"}, nil
+	}
+	events := make(chan Event, 1)
+	handle := server.AddEventListener(events, nil)
+	defer server.RemoveEventListener(handle)
+
+	_, err := server.RemoveServiceWithOptions("app", RemoveOptions{CleanData: true})
+	if err == nil || !strings.Contains(err.Error(), "zfs destroy -R tank/apps/app") {
+		t.Fatalf("RemoveServiceWithOptions error = %v, want post-cleanup ZFS failure", err)
+	}
+	dv, getErr := server.cfg.DB.Get()
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	allocation := dv.Services().Get("app").ISO()
+	if !allocation.RemoveRequested() || !allocation.CleanupVerified() || allocation.State() != string(iso.StateTombstoned) {
+		t.Fatalf("ISO state after ZFS failure = %#v, want verified tombstone", allocation.AsStruct())
+	}
+	select {
+	case event := <-events:
+		t.Fatalf("published event after failed ISO removal: %#v", event)
+	default:
+	}
+}
+
+func TestISOReconcileRemovalResumePreservesCleanDataIntent(t *testing.T) {
+	allocation := testISORuntimeAllocation("app", iso.StateTombstoned)
+	allocation.RemoveRequested = true
+	allocation.CleanupVerified = true
+	allocation.RemoveCleanData = true
+	allocation.LastError = "before-delete: zfs destroy failed"
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"app": allocation})
+	serviceRoot := filepath.Join(server.cfg.ServicesRoot, "app")
+	if err := os.MkdirAll(filepath.Join(serviceRoot, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
+		service.Name = "app"
+		service.ServiceType = db.ServiceTypeDockerCompose
+		service.ServiceRoot = serviceRoot
+		service.ServiceRootZFS = "tank/apps/app"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	recorder := &isoRemoveRecorder{server: server}
+	cleanDataSeen := false
+	server.newISORemoveSteps = func(_ string, options RemoveOptions, _ *RemoveReport, _ string) (isoRemoveSteps, error) {
+		cleanDataSeen = options.CleanData
+		return recorder, nil
+	}
+
+	steps := &isoConcreteReconcileSteps{server: server}
+	if err := steps.ResumeRemoval(context.Background(), "app"); err != nil {
+		t.Fatal(err)
+	}
+	if !cleanDataSeen {
+		t.Fatal("startup removal resume discarded persisted CleanData intent")
+	}
+}
+
+type isoRemoveZFSRecorder struct {
+	*isoRemoveRecorder
+	server  *Server
+	dataset string
+}
+
+func (r *isoRemoveZFSRecorder) BeforeDelete(ctx context.Context, service string) error {
+	if err := r.isoRemoveRecorder.BeforeDelete(ctx, service); err != nil {
+		return err
+	}
+	return r.server.destroyServiceRootZFS(r.dataset)
+}
+
+func TestRemoveISOLeavesTombstoneOnEveryUnverifiedCleanupStep(t *testing.T) {
+	steps := []string{
+		"stop-workload", "stop-tailscale", "remove-docker-endpoints", "clean-topology",
+		"verify-topology-absent", "verify-docker-absent", "verify-dnet-absent",
+		"render-global-policy", "verify-global-policy", "before-delete",
+	}
+	for _, failAt := range steps {
+		t.Run(failAt, func(t *testing.T) {
+			server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{
+				"app": testISORuntimeAllocation("app", iso.StateReady),
+			})
+			recorder := &isoRemoveRecorder{server: server, failAt: failAt}
+
+			err := server.removeISOServiceWith(context.Background(), "app", recorder)
+			if err == nil || !strings.Contains(err.Error(), failAt) {
+				t.Fatalf("removeISOServiceWith error = %v, want %q failure", err, failAt)
+			}
+			dv, getErr := server.cfg.DB.Get()
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			service, ok := dv.Services().GetOk("app")
+			if !ok || !service.ISO().Valid() || service.ISO().State() != string(iso.StateTombstoned) || !service.ISO().RemoveRequested() {
+				t.Fatalf("failed removal state = %#v, want retained retryable tombstone", service.AsStruct())
+			}
+			if recorder.deleteObserved {
+				t.Fatalf("service deleted after unverified %s failure", failAt)
+			}
+		})
+	}
+}
+
+func TestRemoveISODeletesOnlyAfterAbsenceAndPolicyVerify(t *testing.T) {
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{
+		"app": testISORuntimeAllocation("app", iso.StateReady),
+	})
+	recorder := &isoRemoveRecorder{server: server}
+
+	if err := server.removeISOServiceWith(context.Background(), "app", recorder); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"stop-workload", "stop-tailscale", "remove-docker-endpoints", "clean-topology",
+		"verify-topology-absent", "verify-docker-absent", "verify-dnet-absent",
+		"render-global-policy", "verify-global-policy", "before-delete",
+	}
+	if !reflect.DeepEqual(recorder.events, want) {
+		t.Fatalf("remove events = %#v, want %#v", recorder.events, want)
+	}
+	if !recorder.intentObserved || !recorder.cleanupVerifiedBeforePolicy {
+		t.Fatalf("persisted phases = intent %v cleanup-before-policy %v", recorder.intentObserved, recorder.cleanupVerifiedBeforePolicy)
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := dv.Services().GetOk("app"); ok {
+		t.Fatal("ISO service record survived fully verified removal")
+	}
+}
+
+func TestRemoveISOResumesUnverifiedTombstoneFromCleanup(t *testing.T) {
+	allocation := testISORuntimeAllocation("app", iso.StateTombstoned)
+	allocation.RemoveRequested = true
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"app": allocation})
+	recorder := &isoRemoveRecorder{server: server}
+
+	if err := server.removeISOServiceWith(context.Background(), "app", recorder); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"stop-workload", "stop-tailscale", "remove-docker-endpoints", "clean-topology",
+		"verify-topology-absent", "verify-docker-absent", "verify-dnet-absent",
+		"render-global-policy", "verify-global-policy", "before-delete",
+	}
+	if !reflect.DeepEqual(recorder.events, want) {
+		t.Fatalf("resumed remove events = %#v, want full cleanup retry %#v", recorder.events, want)
+	}
+}
+
+func TestRemoveISOResumesVerifiedTombstoneAtPolicyWithoutResettingProof(t *testing.T) {
+	allocation := testISORuntimeAllocation("app", iso.StateTombstoned)
+	allocation.RemoveRequested = true
+	allocation.CleanupVerified = true
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"app": allocation})
+	recorder := &isoRemoveRecorder{server: server}
+
+	if err := server.removeISOServiceWith(context.Background(), "app", recorder); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"render-global-policy", "verify-global-policy", "before-delete"}
+	if !reflect.DeepEqual(recorder.events, want) {
+		t.Fatalf("resumed remove events = %#v, want policy/delete-only resume %#v", recorder.events, want)
+	}
+	if !recorder.cleanupVerifiedBeforePolicy {
+		t.Fatal("verified cleanup proof was reset before policy resume")
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := dv.Services().GetOk("app"); ok {
+		t.Fatal("verified removal tombstone survived successful policy resume")
+	}
+}
+
+type isoRemoveRecorder struct {
+	server                      *Server
+	events                      []string
+	failAt                      string
+	intentObserved              bool
+	cleanupVerifiedBeforePolicy bool
+	deleteObserved              bool
+}
+
+func (r *isoRemoveRecorder) step(name string) error {
+	r.events = append(r.events, name)
+	if name == r.failAt {
+		return fmt.Errorf("%s failed", name)
+	}
+	return nil
+}
+
+func (r *isoRemoveRecorder) StopWorkload(context.Context, string) error {
+	dv, err := r.server.cfg.DB.Get()
+	if err != nil {
+		return err
+	}
+	isoState := dv.Services().Get("app").ISO()
+	r.intentObserved = isoState.RemoveRequested() && !isoState.CleanupVerified() && isoState.State() == string(iso.StateRemoving)
+	return r.step("stop-workload")
+}
+
+func (r *isoRemoveRecorder) StopTailscale(context.Context, string) error {
+	return r.step("stop-tailscale")
+}
+
+func (r *isoRemoveRecorder) RemoveDockerEndpoints(context.Context, string) error {
+	return r.step("remove-docker-endpoints")
+}
+
+func (r *isoRemoveRecorder) CleanTopology(context.Context, string) error {
+	return r.step("clean-topology")
+}
+
+func (r *isoRemoveRecorder) VerifyTopologyAbsent(context.Context, string) error {
+	return r.step("verify-topology-absent")
+}
+
+func (r *isoRemoveRecorder) VerifyDockerAbsent(context.Context, string) error {
+	return r.step("verify-docker-absent")
+}
+
+func (r *isoRemoveRecorder) VerifyDNetAbsent(context.Context, string) error {
+	return r.step("verify-dnet-absent")
+}
+
+func (r *isoRemoveRecorder) RenderGlobalPolicy(_ context.Context, service string) error {
+	dv, err := r.server.cfg.DB.Get()
+	if err != nil {
+		return err
+	}
+	r.cleanupVerifiedBeforePolicy = dv.Services().Get(service).ISO().CleanupVerified()
+	return r.step("render-global-policy")
+}
+
+func (r *isoRemoveRecorder) VerifyGlobalPolicy(context.Context, string) error {
+	return r.step("verify-global-policy")
+}
+
+func (r *isoRemoveRecorder) BeforeDelete(context.Context, string) error {
+	return r.step("before-delete")
 }
 
 func (f *fakeRunner) SetNewCmd(func(string, ...string) *exec.Cmd) {}
@@ -132,6 +407,61 @@ func TestRemoveServiceCleansVMNetwork(t *testing.T) {
 	want := [][]string{{"ip", "link", "del", network.Interfaces[0].Tap}}
 	if !reflect.DeepEqual(commands, want) {
 		t.Fatalf("network cleanup commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestConcreteISORemovalCleansDedicatedVMTap(t *testing.T) {
+	server, allocation := newISOReconcileVMTestServer(t, iso.StateStopped)
+	withISORuntimeBackend(t, netns.BackendNFT)
+	oldRunner := vmRemovalNetworkRunner
+	var commands [][]string
+	vmRemovalNetworkRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() { vmRemovalNetworkRunner = oldRunner })
+
+	steps, err := server.newConcreteISORemoveSteps("devbox", RemoveOptions{}, &RemoveReport{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := steps.CleanTopology(context.Background(), "devbox"); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"ip", "link", "del", allocation.Interface}}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
+	}
+}
+
+func TestConcreteISORemovalRecoversTypedByAllocationAfterPartialProvision(t *testing.T) {
+	allocation := testISORuntimeAllocation("devbox", iso.StateTombstoned)
+	allocation.Kind = string(iso.PayloadVM)
+	allocation.Project = netip.Prefix{}
+	allocation.Gateway = netip.Addr{}
+	allocation.NetNS = ""
+	allocation.Bridge = ""
+	allocation.Components = nil
+	allocation.RetiredComponents = nil
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"devbox": allocation})
+	withISORuntimeBackend(t, netns.BackendNFT)
+	oldRunner := vmRemovalNetworkRunner
+	var commands [][]string
+	vmRemovalNetworkRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() { vmRemovalNetworkRunner = oldRunner })
+
+	steps, err := server.newConcreteISORemoveSteps("devbox", RemoveOptions{}, &RemoveReport{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := steps.CleanTopology(context.Background(), "devbox"); err != nil {
+		t.Fatal(err)
+	}
+	if want := [][]string{{"ip", "link", "del", allocation.Interface}}; !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands = %#v, want %#v", commands, want)
 	}
 }
 

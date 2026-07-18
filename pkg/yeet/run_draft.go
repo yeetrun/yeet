@@ -50,6 +50,7 @@ type RunDraftNetwork struct {
 	MacvlanParent string   `json:"macvlanParent,omitempty"`
 	Restart       *bool    `json:"restart,omitempty"`
 	Publish       []string `json:"publish,omitempty"`
+	PublishReset  bool     `json:"publishReset,omitempty"`
 }
 
 type RunDraftVM struct {
@@ -172,6 +173,9 @@ func runArgsFromDraftNetwork(n RunDraftNetwork) []string {
 	args = appendRunDraftIntFlag(args, "--macvlan-vlan", n.MacvlanVLAN)
 	args = appendRunDraftStringFlag(args, "--macvlan-parent", n.MacvlanParent)
 	args = appendRunDraftRestartFlag(args, n.Restart)
+	if n.PublishReset {
+		args = append(args, "--publish-reset")
+	}
 	return appendRunDraftRepeatedFlag(args, "--publish", n.Publish)
 }
 
@@ -264,6 +268,7 @@ func runDraftNetworkFromRunFlags(flags cli.RunFlags) RunDraftNetwork {
 		MacvlanParent: flags.MacvlanParent,
 		Restart:       runDraftBool(flags.Restart),
 		Publish:       append([]string{}, flags.Publish...),
+		PublishReset:  flags.PublishReset,
 	}
 }
 

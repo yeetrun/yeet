@@ -5,6 +5,7 @@
 package catch
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -19,7 +20,7 @@ func TestExecRequestPermissionsForShellTargets(t *testing.T) {
 	}{
 		{name: "host shell", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetHostShell}, want: permissionSSH},
 		{name: "service shell", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceShell, Service: "svc"}, want: permissionSSH},
-		{name: "VM SSH proxy", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetVMSSHProxy, Service: "devbox"}, want: permissionSSH},
+		{name: "VM SSH proxy", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetVMSSHProxy, Service: "devbox"}, want: permissionRead},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -29,6 +30,9 @@ func TestExecRequestPermissionsForShellTargets(t *testing.T) {
 			}
 			if !got.has(tt.want) {
 				t.Fatalf("permissions = %#v, want %q", got, tt.want)
+			}
+			if tt.req.Target == catchrpc.ExecTargetVMSSHProxy && got.has(permissionSSH) {
+				t.Fatalf("permissions = %#v, VM SSH proxy must not require host shell access", got)
 			}
 		})
 	}
@@ -84,6 +88,9 @@ func TestTTYCommandPermissionsFailClosed(t *testing.T) {
 		{"vm", "unknown"},
 		{"vm", "images", "unknown"},
 		{"tailscale"},
+		{"iso-network-ensure", "app"},
+		{"iso-network-clean", "app"},
+		{"iso-dns"},
 	} {
 		_, err := ttyCommandPermissions(args)
 		if err == nil {
@@ -92,5 +99,33 @@ func TestTTYCommandPermissionsFailClosed(t *testing.T) {
 		if !strings.Contains(err.Error(), "unclassified") {
 			t.Fatalf("ttyCommandPermissions(%#v) error = %v, want unclassified", args, err)
 		}
+	}
+}
+
+func TestISOPermissionMatrix(t *testing.T) {
+	tests := []struct {
+		name string
+		req  catchrpc.ExecRequest
+		want permissionSet
+	}{
+		{name: "inspect IPs", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceCommand, Args: []string{"ip"}}, want: newPermissionSet(permissionRead)},
+		{name: "VM guest proxy", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetVMSSHProxy, Service: "vm"}, want: newPermissionSet(permissionRead)},
+		{name: "run", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceCommand, Args: []string{"run", "image"}}, want: newPermissionSet(permissionManage)},
+		{name: "restart", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceCommand, Args: []string{"restart"}}, want: newPermissionSet(permissionManage)},
+		{name: "stop", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceCommand, Args: []string{"stop"}}, want: newPermissionSet(permissionManage)},
+		{name: "remove", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceCommand, Args: []string{"remove"}}, want: newPermissionSet(permissionManage)},
+		{name: "service shell", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetServiceShell, Service: "app"}, want: newPermissionSet(permissionSSH)},
+		{name: "host shell", req: catchrpc.ExecRequest{Target: catchrpc.ExecTargetHostShell}, want: newPermissionSet(permissionSSH)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := execRequestPermissions(tt.req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("permissions = %#v, want %#v", got, tt.want)
+			}
+		})
 	}
 }

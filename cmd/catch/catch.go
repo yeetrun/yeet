@@ -58,8 +58,12 @@ var (
 )
 
 var (
-	runVMConsoleProxy                       = catch.RunVMConsoleProxy
-	runDNSFn                                = catch.RunDNSServer
+	runVMConsoleProxy     = catch.RunVMConsoleProxy
+	runDNSFn              = catch.RunDNSServer
+	runISODNSFn           = catch.RunISODNSServer
+	notifyISODNSContextFn = func(parent context.Context) (context.Context, context.CancelFunc) {
+		return signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	}
 	exitProcess                             = os.Exit
 	setupDockerFn                           = setupDocker
 	setupVMHostFn                           = setupVMHost
@@ -67,6 +71,8 @@ var (
 	validateCatchRuntimeFn                  = validateCatchRuntime
 	resolveCatchInstallZFSTargetFn          = catch.ResolveInstallZFSTarget
 	ensureVMNetworkFn                       = catch.EnsureVMNetwork
+	ensureISONetworkFn                      = catch.EnsureISONetworkBoundary
+	cleanISONetworkFn                       = catch.CleanISONetwork
 	ensureContainerdSnapshotterForInstallFn = ensureContainerdSnapshotterForInstall
 	generateCatchTailscaleAuthKeyFn         = catch.GenerateTailscaleAuthKeyFromSecret
 	writeCatchTailscaleClientSecretFn       = catch.WriteCatchTailscaleClientSecret
@@ -545,13 +551,46 @@ func handleLocalCommand(args []string, scfg *catch.Config, dataDir string, out i
 	if handled, err := handleVMNetworkEnsureCommand(args, scfg); handled {
 		return true, err
 	}
+	if handled, err := handleISONetworkCommand(args, scfg); handled {
+		return true, err
+	}
 	if len(args) == 0 {
 		return false, nil
+	}
+	if args[0] == "iso-dns" {
+		if len(args) != 1 {
+			return true, fmt.Errorf("iso-dns does not accept arguments")
+		}
+		ctx, stop := notifyISODNSContextFn(context.Background())
+		defer stop()
+		return true, runISODNSFn(ctx, scfg)
 	}
 	if handled, err := handleSingleArgLocalCommand(args, scfg, dataDir, out); handled {
 		return true, err
 	}
 	return handleVMLANBridgeLocalCommand(args, scfg, dataDir, out)
+}
+
+func handleISONetworkCommand(args []string, scfg *catch.Config) (bool, error) {
+	if len(args) == 0 || args[0] != "iso-network-ensure" && args[0] != "iso-network-clean" {
+		return false, nil
+	}
+	service, err := requireSingleServiceArg(args[1:])
+	if err != nil {
+		return true, fmt.Errorf("%s: %w", args[0], err)
+	}
+	ctx := context.Background()
+	if args[0] == "iso-network-ensure" {
+		return true, ensureISONetworkFn(ctx, scfg, service)
+	}
+	return true, cleanISONetworkFn(ctx, scfg, service)
+}
+
+func requireSingleServiceArg(args []string) (string, error) {
+	if len(args) != 1 || strings.TrimSpace(args[0]) == "" {
+		return "", fmt.Errorf("exactly one service is required")
+	}
+	return strings.TrimSpace(args[0]), nil
 }
 
 func handleSingleArgLocalCommand(args []string, scfg *catch.Config, dataDir string, out io.Writer) (bool, error) {

@@ -15,11 +15,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 )
 
 func TestRunVMStagesDBAfterArtifacts(t *testing.T) {
@@ -2107,6 +2110,187 @@ func TestReserveVMServiceNetworkAllocatesInsideMutation(t *testing.T) {
 	svc := getTestService(t, server, "svc")
 	if svc.SvcNetwork == nil || svc.SvcNetwork.IPv4.String() != "192.168.100.4" {
 		t.Fatalf("stored reserved network = %#v", svc.SvcNetwork)
+	}
+}
+
+func TestReserveVMISONetworkAllocatesBeforePlanRendering(t *testing.T) {
+	server := newTestServer(t)
+	setISOAllocatorData(t, server, newISOAllocatorData("172.30.0.0/16"))
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+
+	allocation, err := execer.reserveVMISONetwork(cli.RunFlags{Net: "iso"})
+	if err != nil {
+		t.Fatalf("reserveVMISONetwork: %v", err)
+	}
+	if allocation == nil || allocation.Kind != "vm" || allocation.Link.String() != "172.30.0.0/30" || allocation.HostIP.String() != "172.30.0.1" || allocation.PeerIP.String() != "172.30.0.2" {
+		t.Fatalf("allocation = %#v", allocation)
+	}
+	plan, err := execer.vmNetworkPlanFromFlags(cli.RunFlags{Net: "iso"}, nil, allocation)
+	if err != nil {
+		t.Fatalf("vmNetworkPlanFromFlags: %v", err)
+	}
+	if got := plan.Interfaces[0]; got.Tap != allocation.Interface || got.GuestIP != "172.30.0.2/30" || got.Gateway != "172.30.0.1" {
+		t.Fatalf("ISO plan = %#v", got)
+	}
+	stored := getTestService(t, server, "devbox")
+	if stored.ISO == nil || stored.ISO.Link != allocation.Link {
+		t.Fatalf("stored ISO allocation = %#v", stored.ISO)
+	}
+	if stored.ServiceType != db.ServiceTypeVM || stored.VM == nil || stored.VM.SetupState != "reserved" {
+		t.Fatalf("reserved VM identity = %#v, want typed incomplete VM", stored)
+	}
+	if !vmNetworkMatchesISOAllocation(vmNetworkPlanFromDB("devbox", stored.VM.Networks, stored.ISO), stored.ISO) {
+		t.Fatalf("reserved VM network = %#v, want exact allocation %#v", stored.VM.Networks, stored.ISO)
+	}
+	if err := execer.rollbackNewVMProvisionReservation(); err != nil {
+		t.Fatal(err)
+	}
+	if retryExisting, err := execer.validateAndCheckVMProvisionService(cli.RunFlags{Net: "iso"}); err != nil || retryExisting {
+		t.Fatalf("ISO retry = (%v, %v), want incomplete reservation retry", retryExisting, err)
+	}
+	if _, err := execer.validateAndCheckVMProvisionService(cli.RunFlags{Net: "svc"}); err == nil || !strings.Contains(err.Error(), "incomplete ISO provision") {
+		t.Fatalf("non-ISO retry error = %v", err)
+	}
+}
+
+func TestCommitVMProvisionAtomicallyStopsExactISOPlan(t *testing.T) {
+	server := newTestServer(t)
+	setISOAllocatorData(t, server, newISOAllocatorData("172.30.0.0/16"))
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	allocation, err := execer.reserveVMISONetwork(cli.RunFlags{Net: "iso"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := vmProvisionPlan{Service: "devbox", Network: newVMNetworkPlan("devbox", []string{"iso"}, vmNetworkInputs{
+		ISOHostIP: allocation.HostIP, ISOGuestIP: allocation.PeerIP, ISOLink: allocation.Link, ISOTap: allocation.Interface,
+	})}
+	if err := execer.commitVMProvision(plan, "oci://debian/13", nil); err != nil {
+		t.Fatal(err)
+	}
+	stored := getTestService(t, server, "devbox")
+	if stored.VM == nil || stored.VM.SetupState != "ready" || stored.ISO == nil || stored.ISO.State != string(iso.StateStopped) {
+		t.Fatalf("committed VM = %#v, want ready config with stopped ISO lifecycle", stored)
+	}
+}
+
+func TestCommitVMProvisionRejectsMissingISOAllocation(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	plan := vmProvisionPlan{Service: "devbox", Network: newVMNetworkPlan("devbox", []string{"iso"}, vmNetworkInputs{
+		ISOHostIP: netip.MustParseAddr("172.30.0.1"), ISOGuestIP: netip.MustParseAddr("172.30.0.2"),
+		ISOLink: netip.MustParsePrefix("172.30.0.0/30"), ISOTap: "yi-devbox",
+	})}
+	err := execer.commitVMProvision(plan, "oci://debian/13", nil)
+	if err == nil || !strings.Contains(err.Error(), "reserved VM ISO allocation") {
+		t.Fatalf("commitVMProvision error = %v", err)
+	}
+	assertNoReadyVM(t, server, "devbox")
+}
+
+func TestAcquireVMProvisionLockSerializesOnlyTheSameVM(t *testing.T) {
+	root := canonicalISORuntimeTempDir(t)
+	firstUnlock, err := acquireVMProvisionLock(context.Background(), root, "devbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer firstUnlock()
+
+	otherUnlock, err := acquireVMProvisionLock(context.Background(), root, "other")
+	if err != nil {
+		t.Fatalf("different VM lock blocked: %v", err)
+	}
+	otherUnlock()
+
+	acquired := make(chan func(), 1)
+	errs := make(chan error, 1)
+	go func() {
+		unlock, lockErr := acquireVMProvisionLock(context.Background(), root, "devbox")
+		if lockErr != nil {
+			errs <- lockErr
+			return
+		}
+		acquired <- unlock
+	}()
+	select {
+	case unlock := <-acquired:
+		unlock()
+		t.Fatal("same VM provision lock was acquired concurrently")
+	case err := <-errs:
+		t.Fatal(err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	firstUnlock()
+	select {
+	case unlock := <-acquired:
+		unlock()
+	case err := <-errs:
+		t.Fatal(err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("same VM provision lock did not release")
+	}
+}
+
+func TestAcquireVMProvisionLockRejectsSymlink(t *testing.T) {
+	root := canonicalISORuntimeTempDir(t)
+	name := "vm-provision-" + isoNameToken("devbox") + ".lock"
+	if err := os.Symlink(filepath.Join(root, "target"), filepath.Join(root, name)); err != nil {
+		t.Fatal(err)
+	}
+	if unlock, err := acquireVMProvisionLock(context.Background(), root, "devbox"); err == nil {
+		unlock()
+		t.Fatal("VM provision lock accepted a symlink")
+	}
+}
+
+func TestConcurrentVMProvisionsSerializeBeforeValidationAndRollback(t *testing.T) {
+	server := newTestServer(t)
+	oldAcquire := acquireVMProvisionLockForProvision
+	var acquired atomic.Int32
+	acquiredEvents := make(chan int32, 2)
+	releaseFirst := make(chan struct{})
+	acquireVMProvisionLockForProvision = func(ctx context.Context, root, service string) (func(), error) {
+		unlock, err := acquireVMProvisionLock(ctx, root, service)
+		if err != nil {
+			return nil, err
+		}
+		attempt := acquired.Add(1)
+		acquiredEvents <- attempt
+		if attempt == 1 {
+			<-releaseFirst
+		}
+		return unlock, nil
+	}
+	t.Cleanup(func() { acquireVMProvisionLockForProvision = oldAcquire })
+
+	result := make(chan error, 2)
+	start := func() {
+		execer := &ttyExecer{ctx: context.Background(), s: server, sn: "devbox"}
+		result <- execer.provisionVM(cli.RunFlags{Net: "iso,svc"}, "oci://debian/13")
+	}
+	go start()
+	if got := <-acquiredEvents; got != 1 {
+		t.Fatalf("first acquired event = %d", got)
+	}
+	go start()
+	select {
+	case got := <-acquiredEvents:
+		t.Fatalf("second provision acquired concurrently: event %d", got)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseFirst)
+	if err := <-result; err == nil {
+		t.Fatal("first invalid provision unexpectedly succeeded")
+	}
+	select {
+	case got := <-acquiredEvents:
+		if got != 2 {
+			t.Fatalf("second acquired event = %d", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("second provision did not acquire after first rollback completed")
+	}
+	if err := <-result; err == nil {
+		t.Fatal("second invalid provision unexpectedly succeeded")
 	}
 }
 

@@ -2613,8 +2613,22 @@ func applyVMSetConfigFlags(entry *ServiceEntry, flags cli.VMSetFlags) bool {
 	if len(removals) == 0 || !serviceEntryIsVM(*entry) {
 		return false
 	}
+	entry.Args = canonicalizeStoredVMRunArgs(entry.Args)
 	entry.Args = rewriteStoredRunArgs(entry.Args, removals, updates)
 	return true
+}
+
+func canonicalizeStoredVMRunArgs(args []string) []string {
+	out := append([]string(nil), args...)
+	for i, arg := range out {
+		switch {
+		case arg == "--cpus":
+			out[i] = "--vcpus"
+		case strings.HasPrefix(arg, "--cpus="):
+			out[i] = "--vcpus=" + strings.TrimPrefix(arg, "--cpus=")
+		}
+	}
+	return out
 }
 
 func serviceEntryIsVM(entry ServiceEntry) bool {

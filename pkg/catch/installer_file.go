@@ -6,6 +6,7 @@ package catch
 
 import (
 	"bufio"
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -28,6 +30,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/fileutil"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/netns"
 	"github.com/yeetrun/yeet/pkg/svc"
 	"gopkg.in/yaml.v3"
@@ -46,6 +49,7 @@ type FileInstallerCfg struct {
 	StageOnly            bool
 	NoBinary             bool
 	Publish              []string
+	PublishReset         bool
 	SnapshotPolicyChange bool
 	SnapshotPolicy       *db.SnapshotPolicy
 	snapshotPolicyFlags  *cli.ServiceSetFlags
@@ -73,6 +77,8 @@ type NetworkOpts struct {
 	Interfaces string
 	Tailscale  TailscaleOpts
 	Macvlan    MacvlanOpts
+	Modes      []string
+	ISO        bool
 }
 
 type FileInstaller struct {
@@ -87,6 +93,7 @@ type FileInstaller struct {
 	svcNet                     *db.SvcNetwork
 	macvlan                    *db.MacvlanNetwork
 	tsNet                      *db.TailscaleNetwork
+	isoAllocation              *db.ISOAllocation
 	tsAuthKey                  string
 	artifacts                  map[db.ArtifactName]string
 	lazyNetwork                lazy.GValue[*networkConfig]
@@ -107,6 +114,256 @@ type FileInstaller struct {
 
 	serviceRoot    string
 	serviceRootZFS string
+
+	transitionHandled bool
+	transitionFromISO func(context.Context, string, []string, isoTransitionSteps) error
+}
+
+type isoComposeInstallSteps interface {
+	ResolveBase(context.Context) error
+	AdmitBase(context.Context) error
+	Reserve(context.Context) error
+	RenderOverlay(context.Context) error
+	ResolveMerged(context.Context) error
+	AdmitMerged(context.Context) error
+	InstallDNS(context.Context) error
+	EnsurePolicy(context.Context) error
+	VerifyPolicy(context.Context) error
+	EnsureTopology(context.Context) error
+	VerifyTopology(context.Context) error
+	InstallTailscale(context.Context, *FileInstaller) error
+	Pull(context.Context) error
+	Build(context.Context) error
+	AttachNetwork(context.Context) error
+	StartAux(context.Context) error
+	ComposeUp(context.Context) error
+	InspectRuntime(context.Context) error
+	MarkReady(context.Context) error
+	ComposeDownRemoveOrphans(context.Context) error
+	Quarantine(context.Context, error) error
+}
+
+type isoComposeResolveFunc func(context.Context, svc.ComposeResolveOptions) ([]byte, error)
+
+// prepareISOCompose performs both canonical admission passes before the
+// installer is allowed to pull, create a Docker network, start an auxiliary
+// unit, or execute a container. Reservation is deliberately between the two
+// passes because the merged overlay is derived only from persisted state.
+//
+//nolint:cyclop // Admission and quarantine ordering stays explicit at this security boundary.
+func (i *FileInstaller) prepareISOCompose(ctx context.Context, resolve isoComposeResolveFunc) (ISOComposeModel, error) {
+	if i == nil || i.s == nil || i.s.cfg.DB == nil {
+		return ISOComposeModel{}, fmt.Errorf("ISO Compose preparation requires a config database")
+	}
+	if resolve == nil {
+		resolve = svc.ResolveComposeJSON
+	}
+	composePath, err := i.isoBaseComposePath()
+	if err != nil {
+		return ISOComposeModel{}, err
+	}
+	projectName := svc.ComposeProjectName(i.cfg.ServiceName)
+	resolveOpts := svc.ComposeResolveOptions{
+		ProjectName: projectName,
+		ProjectDir:  i.serviceDataDir(),
+		Files:       []string{composePath},
+	}
+	if i.cfg.NewCmd != nil {
+		resolveOpts.NewCmd = func(_ context.Context, name string, args ...string) *exec.Cmd {
+			return i.cfg.NewCmd(name, args...)
+		}
+	}
+	baseJSON, err := resolve(ctx, resolveOpts)
+	if err != nil {
+		return ISOComposeModel{}, fmt.Errorf("resolve base ISO Compose model: %w", err)
+	}
+	base, err := AdmitISOCompose(baseJSON, ISOComposeAdmissionOptions{
+		ServiceRoot:   i.effectiveServiceRoot(),
+		ProjectName:   projectName,
+		MaxComponents: iso.MaxComponents,
+	})
+	if err != nil {
+		return ISOComposeModel{}, fmt.Errorf("admit base ISO Compose model: %w", err)
+	}
+	allocation, err := i.s.reserveISOAllocation(ctx, i.cfg.ServiceName, isoReservationRequest{
+		Kind:       iso.PayloadCompose,
+		Modes:      slices.Clone(i.cfg.Network.Modes),
+		Components: slices.Clone(base.Components),
+	})
+	if err != nil {
+		return ISOComposeModel{}, fmt.Errorf("reserve ISO Compose allocation: %w", err)
+	}
+	i.isoAllocation = allocation.Clone()
+	failReserved := func(cause error) (ISOComposeModel, error) {
+		cleanupErr := stopAndQuarantineISO(ctx, &isoConcreteReconcileSteps{server: i.s}, i.cfg.ServiceName, cause)
+		return ISOComposeModel{}, errors.Join(cause, cleanupErr)
+	}
+	overlay, err := renderISOComposeOverlay(allocation, base)
+	if err != nil {
+		return failReserved(fmt.Errorf("render persisted ISO Compose overlay: %w", err))
+	}
+	overlayPath, err := i.stageISOComposeOverlay(overlay)
+	if err != nil {
+		return failReserved(err)
+	}
+	resolveOpts.Files = []string{composePath, overlayPath}
+	mergedJSON, err := resolve(ctx, resolveOpts)
+	if err != nil {
+		return failReserved(fmt.Errorf("resolve merged ISO Compose model: %w", err))
+	}
+	merged, err := AdmitISOCompose(mergedJSON, ISOComposeAdmissionOptions{
+		ServiceRoot:       i.effectiveServiceRoot(),
+		ProjectName:       projectName,
+		MaxComponents:     iso.MaxComponents,
+		RequireISOOverlay: allocation,
+	})
+	if err != nil {
+		return failReserved(fmt.Errorf("admit merged ISO Compose model: %w", err))
+	}
+	if !slices.Equal(base.Components, merged.Components) {
+		return failReserved(fmt.Errorf("ISO overlay changed Compose components: base %v, merged %v", base.Components, merged.Components))
+	}
+	if err := i.stageISONetworkGate(); err != nil {
+		return failReserved(err)
+	}
+	return merged, nil
+}
+
+func (i *FileInstaller) isoBaseComposePath() (string, error) {
+	if path := i.artifacts[db.ArtifactDockerComposeFile]; strings.TrimSpace(path) != "" {
+		return path, nil
+	}
+	if i.existingService.Valid() {
+		artifacts := i.existingService.AsStruct().Artifacts
+		if path, ok := artifacts.Latest(db.ArtifactDockerComposeFile); ok {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("ISO Compose base file is not staged")
+}
+
+func (i *FileInstaller) stageISOComposeOverlay(content string) (string, error) {
+	path := filepath.Join(i.serviceBinDir(), fileutil.ApplyVersion("compose.network"))
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		return "", fmt.Errorf("write ISO Compose overlay: %w", err)
+	}
+	mak.Set(&i.artifacts, db.ArtifactDockerComposeNetwork, path)
+	return path, nil
+}
+
+func (i *FileInstaller) stageISONetworkGate() error {
+	catchBin, err := catchExecutablePath()
+	if err != nil {
+		return fmt.Errorf("resolve catch binary for ISO network gate: %w", err)
+	}
+	unit, err := newISONetworkGateUnit(catchBin, i.s.cfg.RootDir, i.cfg.ServiceName)
+	if err != nil {
+		return err
+	}
+	artifacts, err := unit.WriteOutUnitFiles(i.serviceBinDir())
+	if err != nil {
+		return fmt.Errorf("write ISO network gate unit: %w", err)
+	}
+	path := artifacts[db.ArtifactSystemdUnit]
+	if path == "" {
+		return fmt.Errorf("ISO network gate did not render a systemd unit")
+	}
+	mak.Set(&i.artifacts, db.ArtifactNetNSService, path)
+	return nil
+}
+
+// installISOCompose enforces the security-sensitive first-start ordering. The
+// concrete lifecycle adapter is wired by the installer transaction; the
+// explicit step interface keeps every host-side mutation failure-injectable.
+//
+//nolint:cyclop // Phase ordering stays linear so every fail-closed transition is visible.
+func (i *FileInstaller) installISOCompose(ctx context.Context, steps isoComposeInstallSteps) error {
+	if i == nil || i.s == nil || i.s.cfg.DB == nil {
+		return fmt.Errorf("ISO Compose install requires a config database")
+	}
+	type phase struct {
+		name string
+		run  func(context.Context) error
+	}
+	phases := []phase{
+		{name: "resolve-base", run: steps.ResolveBase},
+		{name: "admit-base", run: steps.AdmitBase},
+		{name: "reserve", run: steps.Reserve},
+	}
+	for _, current := range phases {
+		if err := runISOInstallPhase(ctx, current.name, current.run); err != nil {
+			return quarantineISOInstallFailure(ctx, steps, err)
+		}
+	}
+	allocation, err := i.persistedISOAllocation()
+	if err != nil {
+		return quarantineISOInstallFailure(ctx, steps, err)
+	}
+	i.isoAllocation = allocation
+	remaining := []phase{
+		{name: "render-overlay", run: steps.RenderOverlay},
+		{name: "resolve-merged", run: steps.ResolveMerged},
+		{name: "admit-merged", run: steps.AdmitMerged},
+		{name: "install-dns", run: steps.InstallDNS},
+		{name: "ensure-policy", run: steps.EnsurePolicy},
+		{name: "verify-policy", run: steps.VerifyPolicy},
+		{name: "ensure-topology", run: steps.EnsureTopology},
+		{name: "verify-topology", run: steps.VerifyTopology},
+		{name: "install-tailscale", run: func(ctx context.Context) error { return steps.InstallTailscale(ctx, i) }},
+		{name: "pull", run: steps.Pull},
+		{name: "build", run: steps.Build},
+		{name: "attach-network", run: steps.AttachNetwork},
+		{name: "start-aux", run: steps.StartAux},
+		{name: "compose-up", run: steps.ComposeUp},
+	}
+	for _, current := range remaining {
+		if err := runISOInstallPhase(ctx, current.name, current.run); err != nil {
+			return quarantineISOInstallFailure(ctx, steps, err)
+		}
+	}
+	if err := runISOInstallPhase(ctx, "inspect-runtime", steps.InspectRuntime); err != nil {
+		return quarantineISOInstallFailure(ctx, steps, err)
+	}
+	if err := runISOInstallPhase(ctx, "mark-ready", steps.MarkReady); err != nil {
+		return quarantineISOInstallFailure(ctx, steps, err)
+	}
+	return nil
+}
+
+func runISOInstallPhase(ctx context.Context, name string, run func(context.Context) error) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	if err := run(ctx); err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	return nil
+}
+
+func quarantineISOInstallFailure(ctx context.Context, steps isoComposeInstallSteps, cause error) error {
+	downCtx, downCancel := isoSecurityCleanupContext(ctx)
+	cleanupErr := steps.ComposeDownRemoveOrphans(downCtx)
+	downCancel()
+	quarantineCtx, quarantineCancel := isoSecurityCleanupContext(ctx)
+	quarantineErr := steps.Quarantine(quarantineCtx, cause)
+	quarantineCancel()
+	return errors.Join(cause, cleanupErr, quarantineErr)
+}
+
+func (i *FileInstaller) persistedISOAllocation() (*db.ISOAllocation, error) {
+	dv, err := i.s.cfg.DB.Get()
+	if err != nil {
+		return nil, fmt.Errorf("load persisted ISO allocation for %q: %w", i.cfg.ServiceName, err)
+	}
+	service, ok := dv.Services().GetOk(i.cfg.ServiceName)
+	if !ok || !service.ISO().Valid() {
+		return nil, fmt.Errorf("service %q has no persisted ISO allocation", i.cfg.ServiceName)
+	}
+	allocation := service.ISO().AsStruct()
+	if allocation == nil {
+		return nil, fmt.Errorf("service %q has no persisted ISO allocation", i.cfg.ServiceName)
+	}
+	return allocation, nil
 }
 
 func (i *FileInstaller) WriteAt(p []byte, offset int64) (n int, err error) {
@@ -332,6 +589,20 @@ func (i *FileInstaller) parseNetwork() error {
 	return nil
 }
 
+func parseNetworkForPayload(opts NetworkOpts, payload iso.PayloadKind, published bool) (NetworkOpts, error) {
+	modes, err := iso.NormalizeModes(strings.Split(opts.Interfaces, ","))
+	if err != nil {
+		return NetworkOpts{}, err
+	}
+	if err := iso.ValidateNetwork(iso.NetworkRequest{Payload: payload, Modes: modes, Published: published}); err != nil {
+		return NetworkOpts{}, err
+	}
+	opts.Interfaces = strings.Join(modes, ",")
+	opts.Modes = modes
+	opts.ISO = slices.Contains(modes, "iso")
+	return opts, nil
+}
+
 func (i *FileInstaller) parseNetworkPart(net string, dv db.DataView) error {
 	switch net {
 	case "ts":
@@ -351,6 +622,8 @@ func (i *FileInstaller) parseNetworkPart(net string, dv db.DataView) error {
 			macvlan = existing
 		}
 		i.macvlan = macvlan
+	case "iso":
+		i.cfg.Network.ISO = true
 	default:
 		return fmt.Errorf("unknown network: %q", net)
 	}
@@ -467,8 +740,8 @@ func (i *FileInstaller) prepareNetworkConfig() (netns.Service, string, bool, err
 		return netns.Service{}, "", false, fmt.Errorf("failed to parse network: %v", err)
 	}
 	env := i.netNSServiceEnv()
-	runTSInNetNS, _, tsTapMode := i.tailscaleNetNSMode(&env)
-	return env, runTSInNetNS, tsTapMode, nil
+	runTSInNetNS, _, tsTapMode, err := i.tailscaleNetNSMode(&env)
+	return env, runTSInNetNS, tsTapMode, err
 }
 
 func (i *FileInstaller) installNetworkConfig(env *netns.Service, runTSInNetNS string, tsTapMode bool) ([]string, error) {
@@ -486,7 +759,10 @@ func (i *FileInstaller) installNetworkConfig(env *netns.Service, runTSInNetNS st
 }
 
 func (i *FileInstaller) writeBaseNetworkConfig(env *netns.Service) error {
-	_, tailscaleResolvConf, _ := i.tailscaleNetNSMode(env)
+	_, tailscaleResolvConf, _, err := i.tailscaleNetNSMode(env)
+	if err != nil {
+		return err
+	}
 	if resolvConf := netNSResolvConfFor(env, tailscaleResolvConf); resolvConf != "" {
 		if err := i.writeNetNSResolvConf(env, resolvConf); err != nil {
 			return err
@@ -539,16 +815,41 @@ func applyMacvlanNetwork(env *netns.Service, macvlan *db.MacvlanNetwork) {
 	}
 }
 
-func (i *FileInstaller) tailscaleNetNSMode(env *netns.Service) (runTSInNetNS string, netnsResolvConf string, tapMode bool) {
+func (i *FileInstaller) tailscaleNetNSMode(env *netns.Service) (runTSInNetNS string, netnsResolvConf string, tapMode bool, err error) {
 	if i.tsNet == nil {
-		return "", "", false
+		return "", "", false, nil
+	}
+	if i.isoAllocation != nil {
+		if exitNode := strings.TrimSpace(i.tsNet.ExitNode); exitNode != "" {
+			return "", "", false, fmt.Errorf("ISO Tailscale does not support exit node %q", exitNode)
+		}
+		if err := validateISOTailscaleAllocation(i.cfg.ServiceName, i.isoAllocation); err != nil {
+			return "", "", false, err
+		}
+		i.tsNet.Interface = isoTailscaleInterface
+		return i.isoAllocation.NetNS, "", false, nil
 	}
 	tapMode = i.svcNet == nil && i.macvlan == nil
 	if tapMode {
 		env.TailscaleTAPInterface = i.tsNet.Interface
-		return "", tailscaledResolvConf, true
+		return "", tailscaledResolvConf, true, nil
 	}
-	return env.NetNS(), "", false
+	return env.NetNS(), "", false, nil
+}
+
+func validateISOTailscaleAllocation(service string, allocation *db.ISOAllocation) error {
+	kind := iso.PayloadKind(allocation.Kind)
+	if kind != iso.PayloadCompose && kind != iso.PayloadContainer {
+		return fmt.Errorf("ISO Tailscale requires a non-VM container allocation, got %q", allocation.Kind)
+	}
+	if !slices.Equal(allocation.DesiredModes, []string{"iso", "ts"}) {
+		return fmt.Errorf("ISO Tailscale requires normalized persisted modes [iso ts], got %v", allocation.DesiredModes)
+	}
+	want := isoRouterNamespace(service)
+	if allocation.NetNS != want {
+		return fmt.Errorf("persisted ISO router namespace %q does not belong to service %q (want %q)", allocation.NetNS, service, want)
+	}
+	return nil
 }
 
 func (i *FileInstaller) writeNetNSResolvConf(env *netns.Service, resolvConf string) error {
@@ -625,6 +926,9 @@ func (i *FileInstaller) installTailscaleForNetNS(_ netns.Service, runTSInNetNS s
 }
 
 func (i *FileInstaller) writeDockerComposeNetwork(env netns.Service) error {
+	if networkRequestsISO(i.cfg.Network) {
+		return nil
+	}
 	services, err := i.composeDNSOverlayServices(env)
 	if err != nil {
 		return err
@@ -889,6 +1193,9 @@ func (i *FileInstaller) skipSystemdUnitGeneration() bool {
 	return i.cfg.StageOnly && i.cfg.Network.Interfaces == "" && i.cfg.Args == nil
 }
 
+// ISO intentionally rejects native root services. Host root can reconfigure or
+// leave a network namespace, so non-root systemd sandboxing is a prerequisite
+// for adding native ISO support without making a false security claim.
 func (i *FileInstaller) newSystemdUnit(exe string) (*svc.SystemdUnit, error) {
 	su := &svc.SystemdUnit{
 		Name:             i.cfg.ServiceName,
@@ -976,17 +1283,166 @@ func (i *FileInstaller) prepareAndInstallTempFile(tmppath string) (fileInstallPl
 }
 
 func (i *FileInstaller) configureAndStageInstall(plan fileInstallPlan) error {
+	if networkRequestsISO(i.cfg.Network) {
+		return i.configureAndStageISOInstall(plan)
+	}
+	return i.configureAndStageRegularInstall(plan)
+}
+
+func (i *FileInstaller) configureAndStageISOInstall(plan fileInstallPlan) error {
+	if i.isoInstallServiceType(plan) != db.ServiceTypeDockerCompose {
+		return fmt.Errorf("ISO installation requires a Docker Compose payload")
+	}
+	if _, err := i.prepareISOCompose(context.Background(), nil); err != nil {
+		return err
+	}
+	if err := i.parseNetwork(); err != nil {
+		return fmt.Errorf("failed to parse ISO network: %w", err)
+	}
+	if err := i.validateISOInstallTailscale(); err != nil {
+		return err
+	}
+	return i.stageInstallPlan(plan)
+}
+
+func (i *FileInstaller) isoInstallServiceType(plan fileInstallPlan) db.ServiceType {
+	if plan.detectedServiceType != "" {
+		return plan.detectedServiceType
+	}
+	if i.existingService.Valid() {
+		return i.existingService.ServiceType()
+	}
+	return ""
+}
+
+func (i *FileInstaller) validateISOInstallTailscale() error {
+	if i.tsNet == nil {
+		return nil
+	}
+	_, _, _, err := i.tailscaleNetNSMode(&netns.Service{ServiceName: i.cfg.ServiceName})
+	if err == nil {
+		return nil
+	}
+	return errors.Join(err, i.s.markISOState(i.cfg.ServiceName, string(iso.StateQuarantined), err))
+}
+
+func (i *FileInstaller) configureAndStageRegularInstall(plan fileInstallPlan) error {
 	if _, err := i.configureNetwork(); err != nil {
 		return fmt.Errorf("failed to configure network: %v", err)
+	}
+	explicitHost := strings.EqualFold(strings.TrimSpace(i.cfg.Network.Interfaces), "host")
+	if i.existingService.Valid() && i.existingService.ISO().Valid() && (networkInterfacesEnabled(i.cfg.Network.Interfaces) || explicitHost) {
+		return i.transitionAwayFromISO(context.Background(), plan)
 	}
 	return i.stageInstallPlan(plan)
 }
 
 func (i *FileInstaller) installIfRequested() error {
+	if i.transitionHandled {
+		return nil
+	}
 	if i.cfg.StageOnly {
 		return nil
 	}
 	return i.installStagedService()
+}
+
+type fileInstallerISOTransition struct {
+	installer *FileInstaller
+	plan      fileInstallPlan
+	prepared  isoReplacementNetwork
+	compose   *svc.DockerComposeService
+	spec      isoRuntimeNetworkSpec
+}
+
+func (i *FileInstaller) transitionAwayFromISO(ctx context.Context, plan fileInstallPlan) error {
+	prepared := isoReplacementNetwork{
+		Modes:      slices.Clone(i.cfg.Network.Modes),
+		SvcNetwork: cloneISOReplacementSvcNetwork(i.svcNet),
+		Macvlan:    cloneISOReplacementMacvlan(i.macvlan),
+		Tailscale:  i.tsNet.Clone(),
+		Artifacts:  stagedISONetworkArtifacts(i.artifacts),
+	}
+	view, err := i.s.serviceView(i.cfg.ServiceName)
+	if err != nil {
+		return err
+	}
+	compose, err := i.s.dockerComposeService(i.cfg.ServiceName)
+	if err != nil {
+		return fmt.Errorf("load ISO Compose service for transition: %w", err)
+	}
+	spec, err := i.s.loadISORuntimeSpec(i.cfg.ServiceName)
+	if err != nil {
+		return fmt.Errorf("load ISO network for transition: %w", err)
+	}
+	steps := &fileInstallerISOTransition{installer: i, plan: plan, prepared: prepared, compose: compose, spec: spec}
+	transition := i.transitionFromISO
+	if transition == nil {
+		transition = i.s.transitionFromISO
+	}
+	if err := transition(ctx, view.Name(), slices.Clone(prepared.Modes), steps); err != nil {
+		return err
+	}
+	i.transitionHandled = true
+	return nil
+}
+
+func stagedISONetworkArtifacts(paths map[db.ArtifactName]string) db.ArtifactStore {
+	artifacts := db.ArtifactStore{}
+	for name, path := range paths {
+		if !isoNetworkArtifactNames[name] {
+			continue
+		}
+		artifacts[name] = &db.Artifact{Refs: map[db.ArtifactRef]string{"staged": path}}
+	}
+	return artifacts
+}
+
+func (t *fileInstallerISOTransition) PrepareReplacement(context.Context, string, []string) (isoReplacementNetwork, error) {
+	return t.prepared, nil
+}
+
+func (t *fileInstallerISOTransition) StopISO(ctx context.Context, _ string) error {
+	view, err := t.installer.s.serviceView(t.installer.cfg.ServiceName)
+	if err != nil {
+		return err
+	}
+	return errors.Join(t.compose.StopProjectContainers(ctx), stopAndVerifyISOAuxiliaryUnits(ctx, view.AsStruct()))
+}
+
+func (t *fileInstallerISOTransition) CleanISO(ctx context.Context, _ string) error {
+	return removeISOTopologyForRuntime(ctx, t.spec.Topology)
+}
+
+func (t *fileInstallerISOTransition) VerifyISOAbsent(ctx context.Context, _ string) error {
+	return errors.Join(
+		netns.VerifyISOTopologyAbsent(ctx, t.spec.Topology),
+		t.compose.VerifyProjectAbsent(ctx),
+		t.compose.VerifyDefaultNetworkAbsent(ctx),
+		verifyISOAllocationDNetAbsent(t.installer.s, t.spec.Topology.Allocation),
+	)
+}
+
+func (t *fileInstallerISOTransition) StartReplacement(ctx context.Context, _ string, _ isoReplacementNetwork) error {
+	rules, present, err := t.installer.s.currentGlobalISOPolicy()
+	if err != nil {
+		return err
+	}
+	if present {
+		if err := ensureISOPolicyForRuntime(ctx, rules); err != nil {
+			return err
+		}
+		if err := verifyISOPolicyForRuntime(ctx, rules); err != nil {
+			return err
+		}
+	}
+	if err := t.installer.stageInstallPlan(t.plan); err != nil {
+		return err
+	}
+	if t.installer.cfg.StageOnly {
+		return nil
+	}
+	return t.installer.installStagedService()
 }
 
 func (i *FileInstaller) prepareInstallPlan(tmppath string) (fileInstallPlan, error) {
@@ -1012,6 +1468,17 @@ func (i *FileInstaller) prepareNoBinaryInstall() (fileInstallPlan, error) {
 		return plan, nil
 	}
 	plan.detectedServiceType = i.existingService.ServiceType()
+	service := i.existingService.AsStruct()
+	requestedPublished := len(normalizePublish(i.cfg.Publish)) != 0 || i.cfg.PublishReset
+	published := len(service.Publish) != 0 || requestedPublished
+	if !networkInterfacesEnabled(i.cfg.Network.Interfaces) && service.ISO != nil {
+		if err := validateInstallNetworkRequestWithPublished(service, requestedPublished); err != nil {
+			return plan, err
+		}
+	}
+	if err := i.normalizeNetworkForServiceType(plan.detectedServiceType, published); err != nil {
+		return plan, err
+	}
 	if plan.detectedServiceType != db.ServiceTypeSystemd {
 		return plan, nil
 	}
@@ -1029,7 +1496,68 @@ func (i *FileInstaller) preparePayloadInstall(bin string) (fileInstallPlan, erro
 	if err := validatePullPayloadType(i.cfg.Pull, binFT); err != nil {
 		return fileInstallPlan{}, err
 	}
+	serviceType, ok := payloadServiceType(binFT)
+	if ok {
+		composePublished := false
+		if networkRequestsISO(i.cfg.Network) {
+			composePublished, err = i.composePayloadPublishesPorts(bin, binFT)
+			if err != nil {
+				return fileInstallPlan{}, err
+			}
+		}
+		published := i.cfg.PublishReset || len(normalizePublish(i.cfg.Publish)) != 0 || composePublished
+		if err := i.normalizeNetworkForServiceType(serviceType, published); err != nil {
+			return fileInstallPlan{}, err
+		}
+	}
 	return i.preparePayloadByType(bin, binFT)
+}
+
+func networkRequestsISO(network NetworkOpts) bool {
+	if network.ISO {
+		return true
+	}
+	for _, mode := range strings.Split(network.Interfaces, ",") {
+		if strings.EqualFold(strings.TrimSpace(mode), "iso") {
+			return true
+		}
+	}
+	return false
+}
+
+func payloadServiceType(binFT ftdetect.FileType) (db.ServiceType, bool) {
+	switch {
+	case systemdPayloadType(binFT):
+		return db.ServiceTypeSystemd, true
+	case binFT == ftdetect.DockerCompose:
+		return db.ServiceTypeDockerCompose, true
+	default:
+		_, ok := generatedPayloadTypes[binFT]
+		return db.ServiceTypeDockerCompose, ok
+	}
+}
+
+func (i *FileInstaller) normalizeNetworkForServiceType(serviceType db.ServiceType, published bool) error {
+	if !networkInterfacesEnabled(i.cfg.Network.Interfaces) {
+		return nil
+	}
+	network, err := parseNetworkForPayload(i.cfg.Network, networkPayloadKind(serviceType), published)
+	if err != nil {
+		return err
+	}
+	i.cfg.Network = network
+	return nil
+}
+
+func (i *FileInstaller) composePayloadPublishesPorts(bin string, binFT ftdetect.FileType) (bool, error) {
+	if binFT != ftdetect.DockerCompose {
+		return false, nil
+	}
+	publish, err := readComposePorts(bin, i.cfg.ServiceName)
+	if err != nil {
+		return false, fmt.Errorf("inspect compose published ports: %w", err)
+	}
+	return len(publish) != 0, nil
 }
 
 func (i *FileInstaller) preparePayloadByType(bin string, binFT ftdetect.FileType) (fileInstallPlan, error) {
@@ -1150,19 +1678,20 @@ func chmodExecutableAction(path string) func() error {
 
 func (i *FileInstaller) prepareDockerComposePayload(bin string) (fileInstallPlan, error) {
 	i.printf("Detected Docker Compose file\n")
-	if len(i.cfg.Publish) > 0 {
+	publishChanged := i.cfg.PublishReset || len(i.cfg.Publish) > 0
+	if publishChanged {
 		if err := updateComposePorts(bin, i.cfg.ServiceName, i.cfg.Publish); err != nil {
 			return fileInstallPlan{}, fmt.Errorf("failed to apply publish ports: %w", err)
 		}
 	}
 	publish, err := readComposePorts(bin, i.cfg.ServiceName)
 	if err != nil {
-		if len(i.cfg.Publish) > 0 {
+		if publishChanged {
 			return fileInstallPlan{}, fmt.Errorf("failed to read publish ports: %w", err)
 		}
 		publish = nil
 	}
-	publishSet := err == nil || len(i.cfg.Publish) > 0
+	publishSet := err == nil || publishChanged
 	dst := filepath.Join(i.serviceBinDir(), fmt.Sprintf("docker-compose.%s.yml", i.version()))
 	mak.Set(&i.artifacts, db.ArtifactDockerComposeFile, dst)
 	return fileInstallPlan{
@@ -1332,6 +1861,7 @@ func (i *FileInstaller) installStagedService() error {
 		return fmt.Errorf("failed to create installer: %w", err)
 	}
 	si.NewCmd = i.cfg.NewCmd
+	si.isoTailscaleAuthKey = i.tsAuthKey
 	if err := si.Install(); err != nil {
 		return fmt.Errorf("failed to install service: %w", err)
 	}

@@ -3468,7 +3468,7 @@ func hostStorageDataDirEntriesCompatible(entries []os.DirEntry) bool {
 
 func hostStorageDataDirEntryNameCompatible(name string) bool {
 	switch name {
-	case "backups", "catch.lock", "db.json", "id_ed25519", "install.json", "mounts", "registry", "services", "tsd", "tsnet", "vm-images":
+	case "backups", "catch.lock", "db.json", "id_ed25519", "install.json", isoOperationLockFileName, "mounts", "registry", "services", "tsd", "tsnet", "vm-images":
 		return true
 	default:
 		return strings.HasPrefix(name, "db.json.")

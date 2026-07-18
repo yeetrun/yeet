@@ -3754,6 +3754,9 @@ func TestHostStorageApplyDataDirTargetCompatibility(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(target, "catch.lock"), nil, 0o600); err != nil {
 			t.Fatalf("WriteFile catch.lock: %v", err)
 		}
+		if err := os.WriteFile(filepath.Join(target, isoOperationLockFileName), nil, 0o600); err != nil {
+			t.Fatalf("WriteFile %s: %v", isoOperationLockFileName, err)
+		}
 		if err := os.WriteFile(filepath.Join(target, "id_ed25519"), []byte("key"), 0o600); err != nil {
 			t.Fatalf("WriteFile id_ed25519: %v", err)
 		}

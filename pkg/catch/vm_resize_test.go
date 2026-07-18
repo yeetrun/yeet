@@ -17,6 +17,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 )
 
 func TestVMSetRejectsNonVMService(t *testing.T) {
@@ -262,6 +263,184 @@ func TestVMSetReplacesNetworkAndMetadata(t *testing.T) {
 		t.Fatalf("injected metadata networks = %#v, want DHCP lan", injectedMetadata.Networks)
 	}
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"host_dev_name": "yvm-d-ea1055-l0"`)
+}
+
+func TestVMSetMigratesStoppedVMToISOBehindVerifiedPolicy(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	_, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		data.ISOPool = &db.ISOPool{
+			Prefix:           netip.MustParsePrefix("172.30.0.0/16"),
+			Source:           "test",
+			AllocatorVersion: iso.AllocatorVersion,
+			PolicyVersion:    iso.PolicyVersion,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []string
+	withServiceSetVMISOBoundary(t, func(_ context.Context, got *Server, service string) error {
+		allocation, loadErr := got.persistedISOAllocationForService(service)
+		if loadErr != nil {
+			return loadErr
+		}
+		if allocation.Kind != string(iso.PayloadVM) || allocation.Link.Bits() != 30 {
+			t.Fatalf("allocation at policy gate = %#v", allocation)
+		}
+		events = append(events, "verify-policy")
+		return nil
+	})
+	withServiceSetVMNetworkRunner(t, func(command []string) error {
+		switch {
+		case reflect.DeepEqual(command, []string{"ip", "link", "del", "yvm-d-ea1055-b0"}):
+			events = append(events, "cleanup-old")
+		case len(command) >= 4 && reflect.DeepEqual(command[:4], []string{"ip", "tuntap", "add", "yi-2ff8ddd61f"}):
+			events = append(events, "create-tap")
+		}
+		return nil
+	})
+	withServiceSetVMNetworkVerifier(t, func(_ context.Context, plan vmNetworkPlan) error {
+		if !plan.hasNetworkMode("iso") {
+			t.Fatalf("verified plan = %#v, want ISO", plan)
+		}
+		events = append(events, "verify-tap")
+		return nil
+	})
+	withServiceSetVMMetadataInjector(t, func(_ context.Context, _ string, metadata vmMetadataConfig) error {
+		if len(metadata.Networks) != 1 || metadata.Networks[0].Mode != "iso" {
+			t.Fatalf("metadata networks = %#v, want ISO", metadata.Networks)
+		}
+		events = append(events, "metadata")
+		return nil
+	})
+
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
+		Net:           "iso",
+		NetworkChange: true,
+	}); err != nil {
+		t.Fatalf("updateVMServiceSettings: %v", err)
+	}
+
+	wantEvents := []string{"verify-policy", "cleanup-old", "create-tap", "verify-tap", "metadata"}
+	if !reflect.DeepEqual(events, wantEvents) {
+		t.Fatalf("events = %#v, want %#v", events, wantEvents)
+	}
+	service := getTestService(t, server, "devbox")
+	if service.ISO == nil || service.ISO.State != string(iso.StateStopped) {
+		t.Fatalf("ISO allocation = %#v, want stopped until the VM actually starts", service.ISO)
+	}
+	if service.SvcNetwork != nil {
+		t.Fatalf("SvcNetwork = %#v, want nil", service.SvcNetwork)
+	}
+	if len(service.VM.Networks) != 1 || service.VM.Networks[0].Mode != "iso" || service.VM.Networks[0].IP != service.ISO.PeerIP {
+		t.Fatalf("VM networks = %#v, want ISO guest %s", service.VM.Networks, service.ISO.PeerIP)
+	}
+}
+
+func TestVMSetTransitionsAwayFromISOOnlyAfterVerifiedTapCleanup(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	allocation := seedISOForVMSetTransition(t, server, "devbox")
+
+	var events []string
+	withServiceSetVMNetworkRunner(t, func(command []string) error {
+		switch {
+		case reflect.DeepEqual(command, []string{"ip", "link", "del", allocation.Interface}):
+			events = append(events, "cleanup-iso")
+		case len(command) >= 4 && command[0] == "ip" && command[1] == "tuntap" && command[2] == "add" && strings.HasPrefix(command[3], "yvm-"):
+			events = append(events, "create-replacement")
+		}
+		return nil
+	})
+	withServiceSetVMISOAbsenceVerifier(t, func(context.Context, vmNetworkPlan) error {
+		events = append(events, "verify-iso-absent")
+		return nil
+	})
+	withServiceSetVMMetadataInjector(t, func(_ context.Context, _ string, metadata vmMetadataConfig) error {
+		if len(metadata.Networks) != 1 || metadata.Networks[0].Mode != "svc" {
+			t.Fatalf("metadata networks = %#v, want svc", metadata.Networks)
+		}
+		events = append(events, "metadata")
+		return nil
+	})
+	withServiceSetVMTransitionPolicy(t, func(_ context.Context, got *Server) error {
+		if service := getTestService(t, got, "devbox"); service.ISO != nil {
+			t.Fatalf("policy rendered before ISO allocation release: %#v", service.ISO)
+		}
+		events = append(events, "verify-policy-without-iso")
+		return nil
+	})
+
+	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{Net: "svc", NetworkChange: true}); err != nil {
+		t.Fatalf("updateVMServiceSettings: %v", err)
+	}
+	want := []string{"cleanup-iso", "verify-iso-absent", "metadata", "verify-policy-without-iso", "create-replacement"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	service := getTestService(t, server, "devbox")
+	if service.ISO != nil || service.SvcNetwork == nil || len(service.VM.Networks) != 1 || service.VM.Networks[0].Mode != "svc" {
+		t.Fatalf("replacement service = %#v", service)
+	}
+}
+
+func TestVMSetTransitionAwayFromISORetainsTombstoneWhenTapAbsenceIsUnproven(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	seedISOForVMSetTransition(t, server, "devbox")
+	withServiceSetVMNetworkRunner(t, func([]string) error { return nil })
+	withServiceSetVMISOAbsenceVerifier(t, func(context.Context, vmNetworkPlan) error {
+		return errors.New("tap still exists")
+	})
+
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{Net: "svc", NetworkChange: true})
+	if err == nil || !strings.Contains(err.Error(), "tap still exists") {
+		t.Fatalf("updateVMServiceSettings error = %v", err)
+	}
+	service := getTestService(t, server, "devbox")
+	if service.ISO == nil || service.ISO.State != string(iso.StateTombstoned) || len(service.VM.Networks) != 1 || service.VM.Networks[0].Mode != "iso" {
+		t.Fatalf("failed transition service = %#v", service)
+	}
+}
+
+func seedISOForVMSetTransition(t *testing.T, server *Server, name string) *db.ISOAllocation {
+	t.Helper()
+	layout, err := iso.NewLayout(netip.MustParsePrefix("172.30.0.0/16"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := layout.Link(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocation := newDBISOAllocation(name, isoReservationRequest{Kind: iso.PayloadVM, Modes: []string{"iso"}}, link)
+	allocation.State = string(iso.StateReady)
+	_, err = server.cfg.DB.MutateData(func(data *db.Data) error {
+		data.ISOPool = &db.ISOPool{
+			Prefix: link.Masked(), Source: "test", AllocatorVersion: iso.AllocatorVersion, PolicyVersion: iso.PolicyVersion,
+		}
+		data.ISOPool.Prefix = netip.MustParsePrefix("172.30.0.0/16")
+		service := data.Services[name]
+		service.ISO = cloneVMISOAllocation(allocation)
+		service.SvcNetwork = nil
+		service.VM.Networks = newVMNetworkPlan(name, []string{"iso"}, vmNetworkInputs{
+			ISOHostIP: allocation.HostIP, ISOGuestIP: allocation.PeerIP, ISOLink: allocation.Link, ISOTap: allocation.Interface,
+		}).DBNetworks()
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return allocation
 }
 
 func TestVMSetRestoresOldNetworkWhenMetadataRewriteFails(t *testing.T) {
@@ -785,6 +964,34 @@ func withServiceSetVMMetadataInjector(t *testing.T, fn func(context.Context, str
 	old := vmServiceSetMetadataInjector
 	vmServiceSetMetadataInjector = fn
 	t.Cleanup(func() { vmServiceSetMetadataInjector = old })
+}
+
+func withServiceSetVMISOBoundary(t *testing.T, fn func(context.Context, *Server, string) error) {
+	t.Helper()
+	old := ensureVMISOBoundaryForSettings
+	ensureVMISOBoundaryForSettings = fn
+	t.Cleanup(func() { ensureVMISOBoundaryForSettings = old })
+}
+
+func withServiceSetVMNetworkVerifier(t *testing.T, fn func(context.Context, vmNetworkPlan) error) {
+	t.Helper()
+	old := verifyVMNetworkPlanForSettings
+	verifyVMNetworkPlanForSettings = fn
+	t.Cleanup(func() { verifyVMNetworkPlanForSettings = old })
+}
+
+func withServiceSetVMISOAbsenceVerifier(t *testing.T, fn func(context.Context, vmNetworkPlan) error) {
+	t.Helper()
+	old := verifyVMISONetworkAbsentForSettings
+	verifyVMISONetworkAbsentForSettings = fn
+	t.Cleanup(func() { verifyVMISONetworkAbsentForSettings = old })
+}
+
+func withServiceSetVMTransitionPolicy(t *testing.T, fn func(context.Context, *Server) error) {
+	t.Helper()
+	old := installVMISOPolicyAfterTransitionForSet
+	installVMISOPolicyAfterTransitionForSet = fn
+	t.Cleanup(func() { installVMISOPolicyAfterTransitionForSet = old })
 }
 
 func containsCommand(commands [][]string, want []string) bool {

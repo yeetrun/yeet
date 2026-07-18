@@ -111,6 +111,19 @@ function splitArgs(raw) {
   return args;
 }
 
+const NETWORK_COMPATIBILITY = Object.freeze({
+  auto: new Set(["svc", "lan", "ts", "iso"]),
+  compose: new Set(["svc", "lan", "ts", "iso"]),
+  vm: new Set(["svc", "lan", "iso"]),
+  dockerfile: new Set(["svc", "lan", "ts", "iso"]),
+  "remote-image": new Set(["svc", "lan", "ts", "iso"]),
+  file: new Set(["svc", "lan", "ts"]),
+  cron: new Set([]),
+});
+
+const ISO_PUBLISH_MESSAGE = "ISO does not support published ports";
+const ISO_VM_MESSAGE = "VMs support only iso as a Yeet-managed isolated mode";
+
 const workloadDefinitions = {
   auto: {
     payloadKind: "",
@@ -118,7 +131,7 @@ const workloadDefinitions = {
     payloadHelp: "Let yeet detect whether this is a local image name, image reference, or project file.",
     sourceHint: "Yeet will detect the payload type.",
     placeholder: "alpine",
-    networkModes: ["host", "svc", "ts", "lan"],
+    networkModes: [...NETWORK_COMPATIBILITY.auto],
     defaultModes: [],
   },
   compose: {
@@ -127,7 +140,7 @@ const workloadDefinitions = {
     payloadHelp: "A compose.yml or docker-compose.yml file in this project.",
     sourceHint: "Choose a Compose file.",
     placeholder: "compose.yml",
-    networkModes: ["host", "svc", "ts", "lan"],
+    networkModes: [...NETWORK_COMPATIBILITY.compose],
     defaultModes: [],
   },
   vm: {
@@ -136,7 +149,7 @@ const workloadDefinitions = {
     payloadHelp: "A managed catalog VM image, or a manual vm:// reference under advanced.",
     sourceHint: "Choose a catalog image.",
     placeholder: "vm://ubuntu/26.04",
-    networkModes: ["svc", "lan"],
+    networkModes: [...NETWORK_COMPATIBILITY.vm],
     defaultModes: ["svc"],
   },
   dockerfile: {
@@ -145,7 +158,7 @@ const workloadDefinitions = {
     payloadHelp: "Dockerfile to build and deploy.",
     sourceHint: "Choose a Dockerfile.",
     placeholder: "Dockerfile",
-    networkModes: ["host", "svc", "ts", "lan"],
+    networkModes: [...NETWORK_COMPATIBILITY.dockerfile],
     defaultModes: [],
   },
   "remote-image": {
@@ -154,7 +167,7 @@ const workloadDefinitions = {
     payloadHelp: "Container image reference such as ghcr.io/example/app:latest.",
     sourceHint: "Enter an image reference.",
     placeholder: "ghcr.io/example/app:latest",
-    networkModes: ["host", "svc", "ts", "lan"],
+    networkModes: [...NETWORK_COMPATIBILITY["remote-image"]],
     defaultModes: [],
   },
   file: {
@@ -163,7 +176,7 @@ const workloadDefinitions = {
     payloadHelp: "Local binary or script to upload and run.",
     sourceHint: "Choose a local executable or script.",
     placeholder: "./run.sh",
-    networkModes: ["host", "svc", "ts", "lan"],
+    networkModes: [...NETWORK_COMPATIBILITY.file],
     defaultModes: [],
   },
   cron: {
@@ -172,7 +185,7 @@ const workloadDefinitions = {
     payloadHelp: "Local binary or script to install as a scheduled job.",
     sourceHint: "Choose a job file and schedule.",
     placeholder: "./job.sh",
-    networkModes: ["host"],
+    networkModes: [...NETWORK_COMPATIBILITY.cron],
     defaultModes: [],
   },
 };
@@ -247,9 +260,9 @@ function buildDraft() {
   const vmPayload = payloadKind === "vm";
   const cronPayload = payloadKind === "cron";
   const envFile = vmPayload || cronPayload ? "" : $("envFile").value.trim();
-  const publish = vmPayload || cronPayload ? [] : splitCSV($("publish").value);
   const snapshots = snapshotDraftForPayloadKind(payloadKind);
   const modes = selectedNetworkModes();
+  const publish = vmPayload || cronPayload || modes.includes("iso") ? [] : splitCSV($("publish").value);
   const hasTailscale = modes.includes("ts");
   const hasLAN = modes.includes("lan");
   return {
@@ -385,6 +398,7 @@ const networkModeLabels = {
   svc: "Service",
   ts: "Tailscale",
   lan: "LAN",
+  iso: "Isolated",
 };
 
 function renderNetworkModes(modes) {
@@ -395,7 +409,10 @@ function renderNetworkModes(modes) {
     input.type = "checkbox";
     input.name = "net";
     input.value = mode;
-    input.addEventListener("input", () => ensureVMNetworkSelection(input.value));
+    input.addEventListener("input", () => {
+      reconcileISOSelection(input);
+      ensureVMNetworkSelection(input.value);
+    });
     const span = document.createElement("span");
     span.textContent = networkModeLabels[mode] || mode;
     label.append(input, span);
@@ -520,6 +537,8 @@ function hideHostPicker() {
 function syncNetworkUI() {
   const payloadKind = workloadPayloadKind(selectedWorkload());
   const vmPayload = payloadKind === "vm";
+  const cronPayload = payloadKind === "cron";
+  reconcileISOSelection();
   ensureVMNetworkSelection();
   document.querySelectorAll("input[name='net']").forEach((input) => {
     if (input.value === "ts") {
@@ -528,6 +547,13 @@ function syncNetworkUI() {
     }
   });
   const modes = selectedNetworkModes();
+  const isoSelected = modes.includes("iso");
+  const publish = $("publish");
+  if (isoSelected) publish.value = "";
+  publish.disabled = vmPayload || cronPayload || isoSelected;
+  publish.closest("label").hidden = publish.disabled;
+  publish.title = isoSelected ? ISO_PUBLISH_MESSAGE : "";
+  $("networkOptions").dataset.isoValidation = vmPayload && isoSelected ? ISO_VM_MESSAGE : "";
   $("hostDefault").disabled = true;
   $("hostDefault").closest("label").hidden = vmPayload;
   $("hostDefault").checked = !vmPayload && modes.length === 0;
@@ -537,6 +563,29 @@ function syncNetworkUI() {
   $("lanOptions").hidden = !modes.includes("lan");
   $("vmOptions").hidden = !vmPayload;
   $("payloadArgsBlock").hidden = !payloadArgsEnabled();
+}
+
+function reconcileISOSelection(changedInput) {
+  const inputs = [...document.querySelectorAll("input[name='net']")];
+  const isoInput = inputs.find((input) => input.value === "iso");
+  if (!isoInput) return;
+  if (changedInput?.checked) {
+    if (changedInput.value === "iso") {
+      inputs.forEach((input) => {
+        if (["svc", "lan"].includes(input.value)) input.checked = false;
+      });
+      return;
+    }
+    if (["svc", "lan"].includes(changedInput.value)) {
+      isoInput.checked = false;
+      return;
+    }
+  }
+  if (!changedInput && isoInput.checked) {
+    inputs.forEach((input) => {
+      if (["svc", "lan"].includes(input.value)) input.checked = false;
+    });
+  }
 }
 
 function syncTailscaleTagRequirement(hasTailscale) {

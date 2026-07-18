@@ -485,6 +485,214 @@ func TestCreateNetworkStoresDockerNetwork(t *testing.T) {
 	}
 }
 
+func TestISODriverPersistsModeAndRejectsUnknownMode(t *testing.T) {
+	t.Run("persists ISO mode", func(t *testing.T) {
+		var syncs []capturedPortForwardSync
+		p := newTestPlugin(t, &db.Data{}, &syncs)
+		rr := postJSON(t, p.CreateNetwork, isoCreateNetworkRequest("iso"))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("CreateNetwork status = %d body=%s", rr.Code, rr.Body.String())
+		}
+		dv, err := p.db.Get()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := dv.AsStruct().DockerNetworks["iso-network"].Mode; got != "iso" {
+			t.Fatalf("DockerNetwork.Mode = %q, want iso", got)
+		}
+	})
+
+	t.Run("rejects unknown mode", func(t *testing.T) {
+		var syncs []capturedPortForwardSync
+		p := newTestPlugin(t, &db.Data{}, &syncs)
+		rr := postJSON(t, p.CreateNetwork, isoCreateNetworkRequest("host"))
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "unsupported network mode") {
+			t.Fatalf("CreateNetwork response = %d %s", rr.Code, rr.Body.String())
+		}
+	})
+}
+
+func TestISODriverRejectsPortMapsAtEveryCallback(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler func(*plugin) http.HandlerFunc
+		body    map[string]any
+	}{
+		{
+			name:    "CreateEndpoint",
+			handler: func(p *plugin) http.HandlerFunc { return p.CreateEndpoint },
+			body: map[string]any{
+				"NetworkID": "iso-network", "EndpointID": "abcd1234",
+				"Interface": map[string]any{"Address": "172.30.128.2/27"},
+				"Options":   map[string]any{"com.docker.network.portmap": isoPortMap()},
+			},
+		},
+		{
+			name:    "Join",
+			handler: func(p *plugin) http.HandlerFunc { return p.JoinNetwork },
+			body: map[string]any{
+				"NetworkID": "iso-network", "EndpointID": "abcd1234",
+				"Options": map[string]any{"com.docker.network.portmap": isoPortMap()},
+			},
+		},
+		{
+			name:    "ProgramExternalConnectivity",
+			handler: func(p *plugin) http.HandlerFunc { return p.ProgramExternalConnectivity },
+			body: map[string]any{
+				"NetworkID": "iso-network", "EndpointID": "abcd1234",
+				"Options": map[string]any{"com.docker.network.portmap": isoPortMap()},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var syncs []capturedPortForwardSync
+			p := newTestPlugin(t, isoDriverData(nil), &syncs)
+			var commands []recordedCommand
+			p.runCommandFunc = recordingRunner(&commands, nil)
+			rr := postJSON(t, tt.handler(p), tt.body)
+			if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "ISO network does not support port maps") {
+				t.Fatalf("response = %d %s", rr.Code, rr.Body.String())
+			}
+			if len(syncs) != 0 || len(commands) != 0 {
+				t.Fatalf("side effects after rejection: syncs=%#v commands=%#v", syncs, commands)
+			}
+		})
+	}
+}
+
+func TestISODriverRejectsRestoredPortMaps(t *testing.T) {
+	data := isoDriverData(map[string]*db.EndpointPort{
+		"6/8080": {EndpointID: "abcd1234", Port: 8080},
+	})
+	var existsCalls, syncCalls int
+	err := reconcilePortForwardsFromData(data, func(string) (bool, error) {
+		existsCalls++
+		return true, nil
+	}, func(string, []portForwardRule) error {
+		syncCalls++
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "ISO network does not support port maps") {
+		t.Fatalf("reconcilePortForwardsFromData error = %v", err)
+	}
+	if existsCalls != 0 || syncCalls != 0 {
+		t.Fatalf("restored invalid state caused side effects: exists=%d sync=%d", existsCalls, syncCalls)
+	}
+}
+
+func TestISODriverJoinAttachesInterfaceWithoutNamespaceNAT(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, isoDriverData(nil), &syncs)
+	var commands []recordedCommand
+	p.runCommandFunc = recordingRunner(&commands, map[string]bool{"ip link show br0": true})
+	p.runInNetNSFunc = func(_ string, f func() error) error { return f() }
+	backend := &fakeNatRuleBackend{}
+	p.natBackendFunc = func() natRuleBackend { return backend }
+
+	rr := postJSON(t, p.JoinNetwork, map[string]any{
+		"NetworkID": "iso-network", "EndpointID": "abcd1234",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Join response = %d %s", rr.Code, rr.Body.String())
+	}
+	for _, command := range commands {
+		if command.name == "iptables" {
+			t.Fatalf("ISO Join ran namespace NAT command: %#v", command)
+		}
+	}
+	if len(backend.prerouting) != 0 || len(backend.yeetOutput) != 0 || len(backend.output) != 0 {
+		t.Fatalf("ISO Join programmed port forwarding: %#v", backend)
+	}
+	for _, want := range []recordedCommand{
+		{name: "ip", args: []string{"link", "set", "yv-abcd", "master", "br0"}},
+		{name: "ip", args: []string{"link", "set", "yv-abcd", "up"}},
+	} {
+		found := false
+		for _, command := range commands {
+			if command.name == want.name && cmp.Equal(command.args, want.args) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("commands missing %#v: %#v", want, commands)
+		}
+	}
+}
+
+func TestISODriverSkipsPortForwardSyncAndLeaveNAT(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, isoDriverData(nil), &syncs)
+	rr := postJSON(t, p.RevokeExternalConnectivity, map[string]any{
+		"NetworkID": "iso-network", "EndpointID": "abcd1234",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Revoke response = %d %s", rr.Code, rr.Body.String())
+	}
+	if len(syncs) != 0 {
+		t.Fatalf("ISO Revoke port-forward syncs = %#v, want none", syncs)
+	}
+
+	var commands []recordedCommand
+	backend := &fakeNatRuleBackend{}
+	p.runCommandFunc = recordingRunner(&commands, nil)
+	p.runInNetNSFunc = func(_ string, f func() error) error { return f() }
+	p.natBackendFunc = func() natRuleBackend { return backend }
+	rr = postJSON(t, p.LeaveNetwork, map[string]any{
+		"NetworkID": "iso-network", "EndpointID": "abcd1234",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("Leave response = %d %s", rr.Code, rr.Body.String())
+	}
+	if diff := cmp.Diff([]recordedCommand{{name: "ip", args: []string{"link", "del", "yv-abcd"}}}, commands, cmp.AllowUnexported(recordedCommand{})); diff != "" {
+		t.Fatalf("Leave commands mismatch (-want +got):\n%s", diff)
+	}
+	if len(backend.prerouting) != 0 || len(backend.yeetOutput) != 0 || len(backend.output) != 0 {
+		t.Fatalf("ISO Leave programmed port forwarding: %#v", backend)
+	}
+	rr = postJSON(t, p.DeleteNetwork, map[string]any{"NetworkID": "iso-network"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DeleteNetwork response = %d %s", rr.Code, rr.Body.String())
+	}
+	if len(syncs) != 0 {
+		t.Fatalf("ISO DeleteNetwork port-forward syncs = %#v, want none", syncs)
+	}
+}
+
+func isoCreateNetworkRequest(mode string) map[string]any {
+	return map[string]any{
+		"NetworkID": "iso-network",
+		"Options": map[string]any{
+			"com.docker.network.generic": map[string]any{
+				"dev.catchit.netns": "/var/run/netns/yeet-a172cedcae-ns",
+				"dev.catchit.mode":  mode,
+			},
+		},
+		"IPv4Data": []map[string]any{{"Gateway": "172.30.128.1/27", "Pool": "172.30.128.0/27"}},
+	}
+}
+
+func isoPortMap() []map[string]any {
+	return []map[string]any{{"Proto": 6, "Port": 8080, "HostPort": 8080, "HostPortEnd": 8080}}
+}
+
+func isoDriverData(portMap map[string]*db.EndpointPort) *db.Data {
+	return &db.Data{DockerNetworks: map[string]*db.DockerNetwork{
+		"iso-network": {
+			NetworkID:   "iso-network",
+			NetNS:       "/var/run/netns/yeet-a172cedcae-ns",
+			Mode:        "iso",
+			IPv4Gateway: netip.MustParsePrefix("172.30.128.1/27"),
+			IPv4Range:   netip.MustParsePrefix("172.30.128.0/27"),
+			Endpoints: map[string]*db.DockerEndpoint{
+				"abcd1234": {EndpointID: "abcd1234", IPv4: netip.MustParsePrefix("172.30.128.2/27")},
+			},
+			PortMap: portMap,
+		},
+	}}
+}
+
 func TestCreateNetworkRejectsMissingNetNS(t *testing.T) {
 	var syncs []capturedPortForwardSync
 	p := newTestPlugin(t, &db.Data{}, &syncs)
@@ -1345,6 +1553,122 @@ func TestDeleteNetworkRemovesEmptyNetwork(t *testing.T) {
 	}
 }
 
+func TestDeleteNetworkClearsPortForwardsForLastNonISONetwork(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+				Endpoints: map[string]*db.DockerEndpoint{},
+				PortMap: map[string]*db.EndpointPort{
+					"6/8080": {EndpointID: "stale", Port: 80},
+				},
+			},
+		},
+	}, &syncs)
+
+	rr := postJSON(t, p.DeleteNetwork, map[string]any{"NetworkID": "vaultwarden"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DeleteNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if diff := cmp.Diff([]capturedPortForwardSync{{netns: "/var/run/netns/yeet-vaultwarden-ns"}}, syncs, cmp.AllowUnexported(capturedPortForwardSync{})); diff != "" {
+		t.Fatalf("port-forward cleanup mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestDeleteNetworkSyncFailurePreservesNetworkForRetry(t *testing.T) {
+	store := newTestStore(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+				Endpoints: map[string]*db.DockerEndpoint{},
+				PortMap: map[string]*db.EndpointPort{
+					"6/8080": {EndpointID: "stale", Port: 80},
+				},
+			},
+		},
+	})
+	attempts := 0
+	p := &plugin{
+		db: store,
+		syncPortForwardsFunc: func(netns string, desired []portForwardRule) error {
+			attempts++
+			if netns != "/var/run/netns/yeet-vaultwarden-ns" || len(desired) != 0 {
+				t.Fatalf("sync = %q %#v, want empty cleanup", netns, desired)
+			}
+			if attempts == 1 {
+				return errors.New("sync failed")
+			}
+			return nil
+		},
+	}
+
+	rr := postJSON(t, p.DeleteNetwork, map[string]any{"NetworkID": "vaultwarden"})
+	if rr.Code != http.StatusInternalServerError || !strings.Contains(rr.Body.String(), "sync failed") {
+		t.Fatalf("first DeleteNetwork response = %d %s, want retryable sync error", rr.Code, rr.Body.String())
+	}
+	dv, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := dv.AsStruct().DockerNetworks["vaultwarden"]; !ok {
+		t.Fatal("network was deleted after failed port-forward sync")
+	}
+
+	rr = postJSON(t, p.DeleteNetwork, map[string]any{"NetworkID": "vaultwarden"})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("retry DeleteNetwork response = %d %s", rr.Code, rr.Body.String())
+	}
+	dv, err = store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := dv.AsStruct().DockerNetworks["vaultwarden"]; ok {
+		t.Fatal("network remains after successful retry")
+	}
+}
+
+func TestDeleteNetworkRevalidatesAfterPortForwardSync(t *testing.T) {
+	store := newTestStore(t, &db.Data{
+		DockerNetworks: map[string]*db.DockerNetwork{
+			"vaultwarden": {
+				NetNS:     "/var/run/netns/yeet-vaultwarden-ns",
+				NetworkID: "vaultwarden",
+				Endpoints: map[string]*db.DockerEndpoint{},
+			},
+		},
+	})
+	p := &plugin{db: store}
+	p.syncPortForwardsFunc = func(_ string, _ []portForwardRule) error {
+		_, err := store.MutateData(func(d *db.Data) error {
+			network, ok := d.DockerNetworks["vaultwarden"]
+			if !ok {
+				return errors.New("network missing during sync")
+			}
+			network.Endpoints = map[string]*db.DockerEndpoint{
+				"new-endpoint": {EndpointID: "new-endpoint", IPv4: netip.MustParsePrefix("172.20.0.2/16")},
+			}
+			return nil
+		})
+		return err
+	}
+
+	rr := postJSON(t, p.DeleteNetwork, map[string]any{"NetworkID": "vaultwarden"})
+	if rr.Code != http.StatusInternalServerError || !strings.Contains(rr.Body.String(), "network still has endpoints") {
+		t.Fatalf("DeleteNetwork response = %d %s, want revalidation error", rr.Code, rr.Body.String())
+	}
+	dv, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	network, ok := dv.AsStruct().DockerNetworks["vaultwarden"]
+	if !ok || network.Endpoints["new-endpoint"] == nil {
+		t.Fatalf("network was not preserved after revalidation: %#v", network)
+	}
+}
+
 func TestDeleteNetworkRejectsNetworkWithEndpoints(t *testing.T) {
 	var syncs []capturedPortForwardSync
 	p := newTestPlugin(t, &db.Data{
@@ -1365,8 +1689,20 @@ func TestDeleteNetworkRejectsNetworkWithEndpoints(t *testing.T) {
 	if rr.Code != http.StatusInternalServerError {
 		t.Fatalf("DeleteNetwork status = %d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "network still has endpoints") {
-		t.Fatalf("DeleteNetwork body = %q, want endpoint error", rr.Body.String())
+	if got, want := rr.Body.String(), "failed to mutate data: network still has endpoints\n"; got != want {
+		t.Fatalf("DeleteNetwork body = %q, want %q", got, want)
+	}
+}
+
+func TestDeleteNetworkRejectsMissingNetwork(t *testing.T) {
+	var syncs []capturedPortForwardSync
+	p := newTestPlugin(t, &db.Data{}, &syncs)
+	rr := postJSON(t, p.DeleteNetwork, map[string]any{"NetworkID": "missing"})
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("DeleteNetwork status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got, want := rr.Body.String(), "failed to mutate data: network not found\n"; got != want {
+		t.Fatalf("DeleteNetwork body = %q, want %q", got, want)
 	}
 }
 

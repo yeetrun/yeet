@@ -25,6 +25,9 @@ func (src *Data) Clone() *Data {
 	if dst.VMHost != nil {
 		dst.VMHost = ptr.To(*src.VMHost)
 	}
+	if dst.ISOPool != nil {
+		dst.ISOPool = ptr.To(*src.ISOPool)
+	}
 	if dst.Services != nil {
 		dst.Services = map[string]*Service{}
 		for k, v := range src.Services {
@@ -73,6 +76,7 @@ var _DataCloneNeedsRegeneration = Data(struct {
 	DataVersion      int
 	SnapshotDefaults *SnapshotPolicy
 	VMHost           *VMHostConfig
+	ISOPool          *ISOPool
 	Services         map[string]*Service
 	Images           map[ImageRepoName]*ImageRepo
 	Volumes          map[string]*Volume
@@ -107,6 +111,7 @@ func (src *Service) Clone() *Service {
 	}
 	dst.TSNet = src.TSNet.Clone()
 	dst.VM = src.VM.Clone()
+	dst.ISO = src.ISO.Clone()
 	return dst
 }
 
@@ -125,6 +130,7 @@ var _ServiceCloneNeedsRegeneration = Service(struct {
 	Macvlan          *MacvlanNetwork
 	TSNet            *TailscaleNetwork
 	VM               *VMConfig
+	ISO              *ISOAllocation
 }{})
 
 // Clone makes a deep copy of SnapshotPolicy.
@@ -248,6 +254,7 @@ func (src *DockerNetwork) Clone() *DockerNetwork {
 var _DockerNetworkCloneNeedsRegeneration = DockerNetwork(struct {
 	NetworkID     string
 	NetNS         string
+	Mode          string
 	IPv4Gateway   netip.Prefix
 	IPv4Range     netip.Prefix
 	Endpoints     map[string]*DockerEndpoint
@@ -489,4 +496,80 @@ func (src *VMHostConfig) Clone() *VMHostConfig {
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _VMHostConfigCloneNeedsRegeneration = VMHostConfig(struct {
 	MemoryPolicy string
+}{})
+
+// Clone makes a deep copy of ISOPool.
+// The result aliases no memory with the original.
+func (src *ISOPool) Clone() *ISOPool {
+	if src == nil {
+		return nil
+	}
+	dst := new(ISOPool)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ISOPoolCloneNeedsRegeneration = ISOPool(struct {
+	Prefix              netip.Prefix
+	Source              string
+	AllocatorVersion    int
+	PolicyVersion       int
+	AggregateRouteState string
+	LastConflict        string
+}{})
+
+// Clone makes a deep copy of ISOAllocation.
+// The result aliases no memory with the original.
+func (src *ISOAllocation) Clone() *ISOAllocation {
+	if src == nil {
+		return nil
+	}
+	dst := new(ISOAllocation)
+	*dst = *src
+	dst.Components = maps.Clone(src.Components)
+	dst.RetiredComponents = maps.Clone(src.RetiredComponents)
+	dst.DesiredModes = append(src.DesiredModes[:0:0], src.DesiredModes...)
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ISOAllocationCloneNeedsRegeneration = ISOAllocation(struct {
+	Kind              string
+	State             string
+	Link              netip.Prefix
+	HostIP            netip.Addr
+	PeerIP            netip.Addr
+	Project           netip.Prefix
+	Gateway           netip.Addr
+	Interface         string
+	PeerInterface     string
+	NetNS             string
+	Bridge            string
+	Components        map[string]ISOComponent
+	RetiredComponents map[string]ISOComponent
+	DesiredModes      []string
+	AllocatorVersion  int
+	PolicyVersion     int
+	RemoveRequested   bool
+	CleanupVerified   bool
+	RemoveCleanData   bool
+	LastError         string
+}{})
+
+// Clone makes a deep copy of ISOComponent.
+// The result aliases no memory with the original.
+func (src *ISOComponent) Clone() *ISOComponent {
+	if src == nil {
+		return nil
+	}
+	dst := new(ISOComponent)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ISOComponentCloneNeedsRegeneration = ISOComponent(struct {
+	Address netip.Addr
+	State   string
 }{})

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"tailscale.com/client/tailscale/apitype"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tailcfg"
@@ -190,6 +191,41 @@ func TestRPCMethodPermissionsHostStorageFinalizeAndCleanupRequireManage(t *testi
 			t.Fatalf("%s permissions = %v, %v", method, got, err)
 		}
 	}
+}
+
+func TestISOPoolRPCMethodsRequireManagePermission(t *testing.T) {
+	for _, method := range []string{catchrpc.RPCMethodISOPoolPlan, catchrpc.RPCMethodISOPoolApply} {
+		t.Run(method, func(t *testing.T) {
+			required, err := rpcMethodPermissions(method)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := requirePermissions(newPermissionSet(permissionManage), permissionsInOrder(required)...); err != nil {
+				t.Fatalf("manage authorization: %v", err)
+			}
+			if err := requirePermissions(newPermissionSet(permissionRead), permissionsInOrder(required)...); err == nil || !strings.Contains(err.Error(), `missing yeet permission "manage"`) {
+				t.Fatalf("read-only authorization error = %v, want missing manage", err)
+			}
+		})
+	}
+}
+
+func TestISOLocalHelpersHaveNoRemoteRPCRegistryEntry(t *testing.T) {
+	for _, method := range []string{"catch.ISONetworkEnsure", "catch.ISONetworkClean", "catch.ISODNS"} {
+		if _, err := rpcMethodPermissions(method); err == nil || !strings.Contains(err.Error(), "unclassified RPC method") {
+			t.Fatalf("rpcMethodPermissions(%q) error = %v", method, err)
+		}
+	}
+}
+
+func permissionsInOrder(required permissionSet) []yeetPermission {
+	var out []yeetPermission
+	for _, permission := range knownYeetPermissions {
+		if required.has(permission) {
+			out = append(out, permission)
+		}
+	}
+	return out
 }
 func newAuthzTestServer(t *testing.T, perms permissionSet) *Server {
 	t.Helper()

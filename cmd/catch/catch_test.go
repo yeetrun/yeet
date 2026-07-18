@@ -468,6 +468,73 @@ func TestRunCatchProcessDNSRunsWithoutRuntimeValidation(t *testing.T) {
 	}
 }
 
+func TestISODNSLocalCommandRoutesExactlyAndRejectsArguments(t *testing.T) {
+	oldDataDir := *legacyDataDir
+	oldRunISODNS := runISODNSFn
+	oldValidateRuntime := validateCatchRuntimeFn
+	root := t.TempDir()
+	*legacyDataDir = root
+	t.Cleanup(func() {
+		*legacyDataDir = oldDataDir
+		runISODNSFn = oldRunISODNS
+		validateCatchRuntimeFn = oldValidateRuntime
+	})
+
+	validateCatchRuntimeFn = func(string) error {
+		t.Fatal("iso-dns command should not validate containerd runtime")
+		return nil
+	}
+	var calls int
+	var gotCfg *catch.Config
+	runISODNSFn = func(_ context.Context, cfg *catch.Config) error {
+		calls++
+		gotCfg = cfg
+		return nil
+	}
+	if err := runCatchProcess([]string{"iso-dns"}, io.Discard); err != nil {
+		t.Fatalf("runCatchProcess iso-dns returned error: %v", err)
+	}
+	if calls != 1 || gotCfg == nil || gotCfg.RootDir != root || gotCfg.DB == nil {
+		t.Fatalf("iso-dns calls=%d config=%#v, want one call with root %q and DB", calls, gotCfg, root)
+	}
+
+	handled, err := handleLocalCommand([]string{"iso-dns", "service"}, gotCfg, root, io.Discard)
+	if !handled || err == nil || !strings.Contains(err.Error(), "iso-dns does not accept arguments") {
+		t.Fatalf("extra argument handled=%v error=%v", handled, err)
+	}
+	if calls != 1 {
+		t.Fatalf("iso-dns called with user/service argument; calls=%d", calls)
+	}
+	if handled, err := handleLocalCommand([]string{"not-iso-dns"}, gotCfg, root, io.Discard); handled || err != nil {
+		t.Fatalf("unrelated command handled=%v error=%v", handled, err)
+	}
+}
+
+func TestISODNSLocalCommandUsesSignalCancellationContext(t *testing.T) {
+	oldRun := runISODNSFn
+	oldNotify := notifyISODNSContextFn
+	t.Cleanup(func() {
+		runISODNSFn = oldRun
+		notifyISODNSContextFn = oldNotify
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stopped := false
+	notifyISODNSContextFn = func(context.Context) (context.Context, context.CancelFunc) {
+		return ctx, func() { stopped = true }
+	}
+	runISODNSFn = func(got context.Context, _ *catch.Config) error {
+		if !errors.Is(got.Err(), context.Canceled) {
+			t.Fatalf("ISO DNS context error = %v, want signal cancellation", got.Err())
+		}
+		return got.Err()
+	}
+	handled, err := handleLocalCommand([]string{"iso-dns"}, &catch.Config{}, t.TempDir(), io.Discard)
+	if !handled || !errors.Is(err, context.Canceled) || !stopped {
+		t.Fatalf("handled=%v err=%v stopped=%v", handled, err, stopped)
+	}
+}
+
 func TestRunCatchProcessReturnsRuntimeValidationError(t *testing.T) {
 	oldDataDir := *legacyDataDir
 	oldValidateRuntime := validateCatchRuntimeFn
@@ -2321,4 +2388,39 @@ type errReader struct {
 
 func (r errReader) Read([]byte) (int, error) {
 	return 0, r.err
+}
+
+func TestHandleLocalISOCommandsRequireExactlyOneService(t *testing.T) {
+	oldEnsure := ensureISONetworkFn
+	oldClean := cleanISONetworkFn
+	t.Cleanup(func() {
+		ensureISONetworkFn = oldEnsure
+		cleanISONetworkFn = oldClean
+	})
+
+	var got []string
+	ensureISONetworkFn = func(_ context.Context, _ *catch.Config, service string) error {
+		got = append(got, "ensure:"+service)
+		return nil
+	}
+	cleanISONetworkFn = func(_ context.Context, _ *catch.Config, service string) error {
+		got = append(got, "clean:"+service)
+		return nil
+	}
+	cfg := &catch.Config{}
+	for _, args := range [][]string{{"iso-network-ensure", "app"}, {"iso-network-clean", "app"}} {
+		handled, err := handleLocalCommand(args, cfg, t.TempDir(), io.Discard)
+		if err != nil || !handled {
+			t.Fatalf("handleLocalCommand(%v) = handled %t, err %v", args, handled, err)
+		}
+	}
+	if !reflect.DeepEqual(got, []string{"ensure:app", "clean:app"}) {
+		t.Fatalf("calls = %v", got)
+	}
+	for _, args := range [][]string{{"iso-network-ensure"}, {"iso-network-clean", "app", "extra"}, {"iso-network-clean", " "}} {
+		handled, err := handleLocalCommand(args, cfg, t.TempDir(), io.Discard)
+		if !handled || err == nil {
+			t.Fatalf("handleLocalCommand(%v) = handled %t, err %v; want handled error", args, handled, err)
+		}
+	}
 }

@@ -49,6 +49,10 @@ type SuccessResponse struct {
 	Err string `json:"Err"`
 }
 
+const dockerNetworkModeISO = "iso"
+
+var errISOPortMaps = errors.New("ISO network does not support port maps")
+
 // runInNetNS runs the given function in the given network namespace.
 func (p *plugin) runInNetNS(nsName string, f func() error) error {
 	errChan := make(chan error, 1)
@@ -302,7 +306,7 @@ func (iptablesBackend) EnsureChains() error {
 }
 
 func desiredPortForwards(n *db.DockerNetwork) []portForwardRule {
-	if n == nil {
+	if n == nil || n.Mode == dockerNetworkModeISO {
 		return nil
 	}
 	rules := make([]portForwardRule, 0, len(n.PortMap))
@@ -369,7 +373,7 @@ func desiredPortForwardsForNetNS(d *db.Data, netns string) []portForwardRule {
 	}
 	var rules []portForwardRule
 	for _, network := range d.DockerNetworks {
-		if network == nil || network.NetNS != netns {
+		if network == nil || network.NetNS != netns || network.Mode == dockerNetworkModeISO {
 			continue
 		}
 		rules = append(rules, desiredPortForwards(network)...)
@@ -383,7 +387,7 @@ func desiredPortForwardsByNetNS(d *db.Data) map[string][]portForwardRule {
 		return out
 	}
 	for _, network := range d.DockerNetworks {
-		if network == nil || network.NetNS == "" {
+		if network == nil || network.NetNS == "" || network.Mode == dockerNetworkModeISO {
 			continue
 		}
 		if _, ok := out[network.NetNS]; !ok {
@@ -429,6 +433,9 @@ func netnsPathExists(path string) (bool, error) {
 }
 
 func reconcilePortForwardsFromData(d *db.Data, exists netnsExistsFunc, sync netnsPortForwardSyncFunc) error {
+	if err := validatePersistedDockerNetworkModes(d); err != nil {
+		return err
+	}
 	byNetNS := desiredPortForwardsByNetNS(d)
 	netnsPaths := make([]string, 0, len(byNetNS))
 	for netns := range byNetNS {
@@ -452,6 +459,50 @@ func reconcilePortForwardsFromData(d *db.Data, exists netnsExistsFunc, sync netn
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func validatePersistedDockerNetworkModes(d *db.Data) error {
+	if d == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(d.DockerNetworks))
+	for id := range d.DockerNetworks {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		network := d.DockerNetworks[id]
+		if network == nil {
+			continue
+		}
+		if err := validateDockerNetworkMode(network.Mode); err != nil {
+			return fmt.Errorf("docker network %q: %w", id, err)
+		}
+		if network.Mode == dockerNetworkModeISO && len(network.PortMap) != 0 {
+			return fmt.Errorf("docker network %q: %w", id, errISOPortMaps)
+		}
+	}
+	return nil
+}
+
+func validateDockerNetworkMode(mode string) error {
+	if mode != "" && mode != dockerNetworkModeISO {
+		return fmt.Errorf("unsupported network mode %q", mode)
+	}
+	return nil
+}
+
+func validateNetworkPortMaps(network *db.DockerNetwork, incoming int) error {
+	if network == nil {
+		return nil
+	}
+	if err := validateDockerNetworkMode(network.Mode); err != nil {
+		return err
+	}
+	if network.Mode == dockerNetworkModeISO && (incoming != 0 || len(network.PortMap) != 0) {
+		return errISOPortMaps
+	}
+	return nil
 }
 
 func ReconcilePortForwards(store *db.Store) error {
@@ -641,18 +692,16 @@ func (p *plugin) currentPortForwardsForNetNS(netns string) ([]portForwardRule, e
 }
 
 func (p *plugin) syncCurrentPortForwards(netns string) error {
+	dv, err := p.db.Get()
+	if err != nil {
+		return err
+	}
+	data := dv.AsStruct()
+	desired := desiredPortForwardsForNetNS(data, netns)
 	if p.syncPortForwardsFunc != nil {
-		desired, err := p.currentPortForwardsForNetNS(netns)
-		if err != nil {
-			return err
-		}
 		return p.syncPortForwardsFunc(netns, desired)
 	}
 	return p.inNetNS(netns, func() error {
-		desired, err := p.currentPortForwardsForNetNS(netns)
-		if err != nil {
-			return err
-		}
 		return syncNetNSPortForwards(netns, desired, p.natBackend())
 	})
 }
@@ -683,16 +732,18 @@ type endpointNetworkRequest struct {
 type leaveNetworkState struct {
 	netns  string
 	ifName string
+	mode   string
 }
 
 func (p *plugin) leaveNetworkState(networkID, endpointID string) (leaveNetworkState, error) {
-	var netns string
+	var netns, mode string
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[networkID]
 		if !ok {
 			return fmt.Errorf("network not found")
 		}
 		netns = n.NetNS
+		mode = n.Mode
 		_, ok = n.Endpoints[endpointID]
 		if !ok {
 			return fmt.Errorf("endpoint not found")
@@ -703,17 +754,19 @@ func (p *plugin) leaveNetworkState(networkID, endpointID string) (leaveNetworkSt
 	}); err != nil {
 		return leaveNetworkState{}, err
 	}
-	return leaveNetworkState{netns: netns, ifName: "yv-" + endpointID[:4]}, nil
+	return leaveNetworkState{netns: netns, ifName: "yv-" + endpointID[:4], mode: mode}, nil
 }
 
 func (p *plugin) leaveNetwork(leave leaveNetworkState) error {
 	return p.inNetNS(leave.netns, func() error {
 		var errs []error
-		desired, err := p.currentPortForwardsForNetNS(leave.netns)
-		if err != nil {
-			errs = append(errs, err)
-		} else if err := syncNetNSPortForwards(leave.netns, desired, p.natBackend()); err != nil {
-			errs = append(errs, err)
+		if leave.mode != dockerNetworkModeISO {
+			desired, err := p.currentPortForwardsForNetNS(leave.netns)
+			if err != nil {
+				errs = append(errs, err)
+			} else if err := syncNetNSPortForwards(leave.netns, desired, p.natBackend()); err != nil {
+				errs = append(errs, err)
+			}
 		}
 		if err := p.commandRunner()("ip", "link", "del", leave.ifName); err != nil {
 			errs = append(errs, err)
@@ -839,6 +892,7 @@ func (p *plugin) JoinNetwork(w http.ResponseWriter, r *http.Request) {
 
 type joinNetworkState struct {
 	netns         string
+	mode          string
 	ifName        string
 	peerName      string
 	gateway       netip.Addr
@@ -857,9 +911,13 @@ func (p *plugin) joinNetworkState(networkID, endpointID string, dbpm map[db.Prot
 	if _, ok := n.Endpoints[endpointID]; !ok {
 		return joinNetworkState{}, http.StatusBadRequest, fmt.Errorf("endpoint not found")
 	}
+	if err := validateNetworkPortMaps(n, len(dbpm)); err != nil {
+		return joinNetworkState{}, http.StatusBadRequest, err
+	}
 	ifName := "yv-" + endpointID[:4]
 	join := joinNetworkState{
 		netns:         n.NetNS,
+		mode:          n.Mode,
 		ifName:        ifName,
 		peerName:      ifName + "p",
 		gateway:       n.IPv4Gateway.Addr(),
@@ -905,6 +963,9 @@ func (p *plugin) configureJoinedNetwork(join joinNetworkState) error {
 	if err := run("ip", "link", "set", join.ifName, "up"); err != nil {
 		return err
 	}
+	if join.mode == dockerNetworkModeISO {
+		return nil
+	}
 	if err := ensurePostroutingChainWithRunner(run); err != nil {
 		return err
 	}
@@ -924,21 +985,69 @@ func (p *plugin) DeleteNetwork(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if _, err := p.db.MutateData(func(d *db.Data) error {
-		dn, ok := d.DockerNetworks[req.NetworkID]
-		if !ok {
-			return fmt.Errorf("network not found")
+	state, err := p.inspectDeleteNetwork(req.NetworkID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if state.mode != dockerNetworkModeISO {
+		if err := p.syncCurrentPortForwards(state.netns); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
-		if len(dn.Endpoints) > 0 {
-			return fmt.Errorf("network still has endpoints")
-		}
-		delete(d.DockerNetworks, req.NetworkID)
-		return nil
-	}); err != nil {
+	}
+	if err := p.deleteNetwork(state); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, SuccessResponse{})
+}
+
+type deleteNetworkState struct {
+	networkID string
+	netns     string
+	mode      string
+}
+
+func (p *plugin) inspectDeleteNetwork(networkID string) (deleteNetworkState, error) {
+	dv, err := p.db.Get()
+	if err != nil {
+		return deleteNetworkState{}, fmt.Errorf("failed to get data: %v", err)
+	}
+	network, err := dockerNetworkReadyForDelete(dv.AsStruct(), networkID)
+	if err != nil {
+		return deleteNetworkState{}, fmt.Errorf("failed to mutate data: %w", err)
+	}
+	return deleteNetworkState{networkID: networkID, netns: network.NetNS, mode: network.Mode}, nil
+}
+
+func (p *plugin) deleteNetwork(state deleteNetworkState) error {
+	_, err := p.db.MutateData(func(d *db.Data) error {
+		network, err := dockerNetworkReadyForDelete(d, state.networkID)
+		if err != nil {
+			return err
+		}
+		if network.NetNS != state.netns || network.Mode != state.mode {
+			return fmt.Errorf("network changed during delete")
+		}
+		delete(d.DockerNetworks, state.networkID)
+		return nil
+	})
+	return err
+}
+
+func dockerNetworkReadyForDelete(d *db.Data, networkID string) (*db.DockerNetwork, error) {
+	if d == nil {
+		return nil, fmt.Errorf("network not found")
+	}
+	network, ok := d.DockerNetworks[networkID]
+	if !ok || network == nil {
+		return nil, fmt.Errorf("network not found")
+	}
+	if len(network.Endpoints) > 0 {
+		return nil, fmt.Errorf("network still has endpoints")
+	}
+	return network, nil
 }
 
 type createNetworkRequest struct {
@@ -946,6 +1055,7 @@ type createNetworkRequest struct {
 	Options   struct {
 		Generic struct {
 			NetNS string `json:"dev.catchit.netns"`
+			Mode  string `json:"dev.catchit.mode"`
 		} `json:"com.docker.network.generic"`
 	} `json:"Options"`
 	IPv4Data []struct {
@@ -962,12 +1072,13 @@ func (req createNetworkRequest) validate() error {
 	if len(req.IPv4Data) == 0 {
 		return fmt.Errorf("IPv4Data is required")
 	}
-	return nil
+	return validateDockerNetworkMode(req.Options.Generic.Mode)
 }
 
 func (req createNetworkRequest) dockerNetwork() *db.DockerNetwork {
 	return &db.DockerNetwork{
 		NetNS:       req.Options.Generic.NetNS,
+		Mode:        req.Options.Generic.Mode,
 		NetworkID:   req.NetworkID,
 		IPv4Gateway: req.IPv4Data[0].Gateway,
 		IPv4Range:   req.IPv4Data[0].Pool,
@@ -1022,41 +1133,54 @@ func (p *plugin) CreateEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pfx := req.Interface.Address
+	netns, syncPortForwards, err := p.createEndpointState(req.NetworkID, req.EndpointID, pfx, dbpm)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if syncPortForwards {
+		if err := p.syncCurrentPortForwards(netns); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	writeJSON(w, SuccessResponse{})
+}
+
+func (p *plugin) createEndpointState(networkID, endpointID string, pfx netip.Prefix, dbpm map[db.ProtoPort]*db.EndpointPort) (string, bool, error) {
 	var netns string
-	if _, err := p.db.MutateData(func(d *db.Data) error {
-		n, ok := d.DockerNetworks[req.NetworkID]
+	var syncPortForwards bool
+	_, err := p.db.MutateData(func(d *db.Data) error {
+		n, ok := d.DockerNetworks[networkID]
 		if !ok {
 			return fmt.Errorf("network not found")
 		}
+		if err := validateNetworkPortMaps(n, len(dbpm)); err != nil {
+			return err
+		}
 		netns = n.NetNS
-		ep, ok := n.Endpoints[req.EndpointID]
+		syncPortForwards = n.Mode != dockerNetworkModeISO
+		ep, ok := n.Endpoints[endpointID]
 		if !ok {
 			ep = &db.DockerEndpoint{
-				EndpointID: req.EndpointID,
+				EndpointID: endpointID,
 				IPv4:       pfx,
 			}
 		} else {
 			ep.IPv4 = pfx
 		}
-		setEndpointPortMappings(n, req.EndpointID, dbpm)
+		setEndpointPortMappings(n, endpointID, dbpm)
 		for k, existing := range n.Endpoints {
-			if existing.IPv4 == pfx && k != req.EndpointID {
+			if existing.IPv4 == pfx && k != endpointID {
 				removeEndpointPortMappings(n, k)
 				delete(n.Endpoints, k)
 			}
 		}
-		mak.Set(&n.Endpoints, req.EndpointID, ep)
+		mak.Set(&n.Endpoints, endpointID, ep)
 		return nil
-	}); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := p.syncCurrentPortForwards(netns); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	writeJSON(w, SuccessResponse{})
+	})
+	return netns, syncPortForwards, err
 }
 
 type endpointConnectivityRequest struct {
@@ -1080,24 +1204,31 @@ func (p *plugin) ProgramExternalConnectivity(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	var netns string
+	var syncPortForwards bool
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[req.NetworkID]
 		if !ok {
 			return fmt.Errorf("network not found")
 		}
+		if err := validateNetworkPortMaps(n, len(dbpm)); err != nil {
+			return err
+		}
 		if _, ok := n.Endpoints[req.EndpointID]; !ok {
 			return fmt.Errorf("endpoint not found")
 		}
 		netns = n.NetNS
+		syncPortForwards = n.Mode != dockerNetworkModeISO
 		setEndpointPortMappings(n, req.EndpointID, dbpm)
 		return nil
 	}); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := p.syncCurrentPortForwards(netns); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if syncPortForwards {
+		if err := p.syncCurrentPortForwards(netns); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, SuccessResponse{})
 }
@@ -1110,12 +1241,14 @@ func (p *plugin) RevokeExternalConnectivity(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var netns string
+	var syncPortForwards bool
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[req.NetworkID]
 		if !ok {
 			return fmt.Errorf("network not found")
 		}
 		netns = n.NetNS
+		syncPortForwards = n.Mode != dockerNetworkModeISO
 		// Docker can send RevokeExternalConnectivity immediately after
 		// ProgramExternalConnectivity while the endpoint is still running.
 		// LeaveNetwork/DeleteEndpoint own cleanup for active endpoints.
@@ -1127,9 +1260,11 @@ func (p *plugin) RevokeExternalConnectivity(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := p.syncCurrentPortForwards(netns); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if syncPortForwards {
+		if err := p.syncCurrentPortForwards(netns); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, SuccessResponse{})
 }
@@ -1146,12 +1281,14 @@ func (p *plugin) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var netns string
+	var syncPortForwards bool
 	if _, err := p.db.MutateData(func(d *db.Data) error {
 		n, ok := d.DockerNetworks[req.NetworkID]
 		if !ok {
 			return fmt.Errorf("network not found")
 		}
 		netns = n.NetNS
+		syncPortForwards = n.Mode != dockerNetworkModeISO
 		removeEndpointPortMappings(n, req.EndpointID)
 		delete(n.Endpoints, req.EndpointID)
 		return nil
@@ -1159,9 +1296,11 @@ func (p *plugin) DeleteEndpoint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := p.syncCurrentPortForwards(netns); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	if syncPortForwards {
+		if err := p.syncCurrentPortForwards(netns); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, SuccessResponse{})
 }

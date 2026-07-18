@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
@@ -31,8 +32,16 @@ type hostStorageClient interface {
 	HostStorageCleanup(context.Context, catchrpc.HostStorageCleanupRequest) (catchrpc.HostStorageCleanupResult, error)
 }
 
+type isoPoolClient interface {
+	ISOPoolPlan(context.Context, catchrpc.ISOPoolPlanRequest) (catchrpc.ISOPoolPlan, error)
+	ISOPoolApply(context.Context, catchrpc.ISOPoolApplyRequest) (catchrpc.ISOPoolApplyResult, error)
+}
+
 var (
 	newHostStorageClientFn = func(host string) hostStorageClient {
+		return newRPCClient(host)
+	}
+	newISOPoolClientFn = func(host string) isoPoolClient {
 		return newRPCClient(host)
 	}
 	confirmHostSetFn                      = cmdutil.Confirm
@@ -77,6 +86,9 @@ func trimHostSetSubcommand(args []string) []string {
 }
 
 func runHostSet(ctx context.Context, flags cli.HostSetFlags) error {
+	if strings.TrimSpace(flags.ISOPool) != "" {
+		return runHostSetISOPool(ctx, flags)
+	}
 	flags, err := completeHostSetFlags(flags)
 	if err != nil {
 		return err
@@ -98,6 +110,116 @@ func runHostSet(ctx context.Context, flags cli.HostSetFlags) error {
 		return runHostSetNoChanges(host, plan, flags)
 	}
 	return runHostSetApply(ctx, client, host, plan, flags)
+}
+
+func runHostSetISOPool(ctx context.Context, flags cli.HostSetFlags) error {
+	if hostSetHasStorageFlags(flags) {
+		return fmt.Errorf("--iso-pool cannot be combined with host storage settings")
+	}
+	prefix, err := validateExplicitISOPool(flags.ISOPool)
+	if err != nil {
+		return err
+	}
+	host := Host()
+	client := newISOPoolClientFn(host)
+	plan, err := client.ISOPoolPlan(ctx, catchrpc.ISOPoolPlanRequest{Prefix: prefix.String()})
+	if err != nil {
+		return fmt.Errorf("plan ISO pool change on %s: %w", host, err)
+	}
+	if err := renderISOPoolPlan(hostSetStdout, host, plan); err != nil {
+		return err
+	}
+	return applyISOPoolPlan(ctx, client, host, plan, flags)
+}
+
+func applyISOPoolPlan(ctx context.Context, client isoPoolClient, host string, plan catchrpc.ISOPoolPlan, flags cli.HostSetFlags) error {
+	if err := blockedISOPoolPlanError(plan); err != nil {
+		return err
+	}
+	if !plan.Changed {
+		_, err := fmt.Fprintln(hostSetStdout, "No ISO pool changes to apply.")
+		return err
+	}
+	if !flags.Yes {
+		ok, confirmErr := confirmHostSetFn(hostSetStdin, hostSetStdout, "Apply ISO pool change now?")
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !ok {
+			_, err := fmt.Fprintln(hostSetStdout, "Cancelled.")
+			return err
+		}
+	}
+	result, err := client.ISOPoolApply(ctx, catchrpc.ISOPoolApplyRequest{Plan: plan})
+	if err != nil {
+		return fmt.Errorf("apply ISO pool change on %s: %w", host, err)
+	}
+	_, err = fmt.Fprintf(hostSetStdout, "ISO pool set to %s (%s).\n", result.Prefix, result.Source)
+	return err
+}
+
+func blockedISOPoolPlanError(plan catchrpc.ISOPoolPlan) error {
+	var reasons []string
+	if len(plan.Blockers) != 0 {
+		reasons = append(reasons, "blockers: "+strings.Join(plan.Blockers, ", "))
+	}
+	if len(plan.Conflicts) != 0 {
+		reasons = append(reasons, "conflicts: "+strings.Join(plan.Conflicts, ", "))
+	}
+	if len(reasons) == 0 {
+		return nil
+	}
+	return fmt.Errorf("ISO pool change cannot be applied: %s", strings.Join(reasons, "; "))
+}
+
+func hostSetHasStorageFlags(flags cli.HostSetFlags) bool {
+	return strings.TrimSpace(flags.DataDir) != "" ||
+		strings.TrimSpace(flags.ServicesRoot) != "" ||
+		flags.ZFS ||
+		strings.TrimSpace(flags.MigrateServices) != "" ||
+		strings.TrimSpace(flags.Config) != ""
+}
+
+func validateExplicitISOPool(raw string) (netip.Prefix, error) {
+	prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+	if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 16 || prefix != prefix.Masked() {
+		return netip.Prefix{}, fmt.Errorf("--iso-pool must be a canonical RFC1918 IPv4 /16")
+	}
+	private := []netip.Prefix{
+		netip.MustParsePrefix("10.0.0.0/8"),
+		netip.MustParsePrefix("172.16.0.0/12"),
+		netip.MustParsePrefix("192.168.0.0/16"),
+	}
+	for _, allowed := range private {
+		if allowed.Contains(prefix.Addr()) {
+			return prefix, nil
+		}
+	}
+	return netip.Prefix{}, fmt.Errorf("--iso-pool must be contained by RFC1918 space")
+}
+
+func renderISOPoolPlan(w io.Writer, host string, plan catchrpc.ISOPoolPlan) error {
+	if _, err := fmt.Fprintf(w, "ISO pool plan for %s\n", host); err != nil {
+		return err
+	}
+	for _, row := range []struct {
+		label string
+		value string
+	}{
+		{label: "Current", value: plan.CurrentPrefix},
+		{label: "Desired", value: plan.DesiredPrefix},
+		{label: "Source", value: plan.Source},
+		{label: "Blockers", value: strings.Join(plan.Blockers, ", ")},
+		{label: "Conflicts", value: strings.Join(plan.Conflicts, ", ")},
+	} {
+		if row.value == "" {
+			continue
+		}
+		if _, err := fmt.Fprintf(w, "%s: %s\n", row.label, row.value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func runHostSetNoChanges(host string, plan catchrpc.HostStoragePlan, flags cli.HostSetFlags) error {

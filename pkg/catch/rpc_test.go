@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -754,6 +755,12 @@ func TestRPCExecAuthorizesAfterReadingExecRequest(t *testing.T) {
 			have: newPermissionSet(permissionManage),
 			want: `missing yeet permission "read"`,
 		},
+		{
+			name: "VM SSH proxy requires read even with ssh",
+			req:  catchrpc.ExecRequest{Target: catchrpc.ExecTargetVMSSHProxy, Service: "devbox", Args: []string{"172.30.0.2", "22"}},
+			have: newPermissionSet(permissionSSH),
+			want: `missing yeet permission "read"`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -798,6 +805,85 @@ func TestRPCExecAuthorizesAfterReadingExecRequest(t *testing.T) {
 				t.Fatalf("combined output = %q, want %q", combined, tt.want)
 			}
 		})
+	}
+}
+
+func TestRPCVMSSHProxyAllowsReadPermissionWithoutSSHPermission(t *testing.T) {
+	oldDial := vmSSHProxyDialFunc
+	t.Cleanup(func() { vmSSHProxyDialFunc = oldDial })
+	server := newAuthzTestServer(t, newPermissionSet(permissionRead))
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *cdb.Data, service *cdb.Service) error {
+		service.ServiceType = cdb.ServiceTypeVM
+		service.VM = &cdb.VMConfig{Networks: []cdb.VMNetworkConfig{{Mode: "iso", IP: netip.MustParseAddr("172.30.0.2")}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	proxy, guest := net.Pipe()
+	vmSSHProxyDialFunc = func(context.Context, string, string) (net.Conn, error) { return proxy, nil }
+	guestDone := make(chan error, 1)
+	go func() {
+		defer guest.Close()
+		buf := make([]byte, len("client hello"))
+		if _, err := io.ReadFull(guest, buf); err != nil {
+			guestDone <- err
+			return
+		}
+		if string(buf) != "client hello" {
+			guestDone <- fmt.Errorf("guest input = %q", buf)
+			return
+		}
+		_, err := io.WriteString(guest, "server hello")
+		guestDone <- err
+	}()
+
+	ts := httptest.NewServer(server.RPCMux())
+	defer ts.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/rpc/exec", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(catchrpc.ExecRequest{Target: catchrpc.ExecTargetVMSSHProxy, Service: "devbox", Args: []string{"172.30.0.2", "22"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, []byte("client hello")); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	var output bytes.Buffer
+	for {
+		messageType, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read message: %v output=%q", err, output.String())
+		}
+		if messageType == websocket.BinaryMessage {
+			output.Write(data)
+			if output.String() == "server hello" {
+				// Wake the client-to-guest copier after the guest has closed so the
+				// proxy can observe the closed connection and emit its exit message.
+				if err := conn.WriteMessage(websocket.BinaryMessage, []byte("x")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			continue
+		}
+		var msg catchrpc.ExecMessage
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatal(err)
+		}
+		if msg.Type == catchrpc.ExecMsgExit {
+			if msg.Code != 0 || msg.Error != "" {
+				t.Fatalf("exec exit = %#v", msg)
+			}
+			break
+		}
+	}
+	if err := <-guestDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := output.String(); got != "server hello" {
+		t.Fatalf("proxy output = %q", got)
 	}
 }
 
@@ -913,6 +999,62 @@ func TestRPCHostStorageCleanupDispatchRequiresYes(t *testing.T) {
 	})
 	if resp.Error == nil || !strings.Contains(fmt.Sprint(resp.Error.Data), "--yes") {
 		t.Fatalf("response = %#v, want confirmation RPC error", resp)
+	}
+}
+
+func TestRPCISOPoolPlanDispatch(t *testing.T) {
+	server := newISOPoolTestServer(t, &fakeISOPoolProbe{})
+	params, err := json.Marshal(catchrpc.ISOPoolPlanRequest{Prefix: "10.42.0.0/16"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := server.dispatchRPC(catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  catchrpc.RPCMethodISOPoolPlan,
+		Params:  params,
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", resp.Error)
+	}
+	raw, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan catchrpc.ISOPoolPlan
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.DesiredPrefix != "10.42.0.0/16" || !plan.Changed {
+		t.Fatalf("plan = %#v", plan)
+	}
+}
+
+func TestRPCISOPoolApplyDispatch(t *testing.T) {
+	server := newISOPoolTestServer(t, &fakeISOPoolProbe{})
+	params, err := json.Marshal(catchrpc.ISOPoolApplyRequest{Plan: catchrpc.ISOPoolPlan{DesiredPrefix: "10.42.0.0/16", Source: "explicit", Changed: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := server.dispatchRPC(catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  catchrpc.RPCMethodISOPoolApply,
+		Params:  params,
+	})
+	if resp.Error != nil {
+		t.Fatalf("unexpected rpc error: %+v", resp.Error)
+	}
+	raw, err := json.Marshal(resp.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result catchrpc.ISOPoolApplyResult
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Prefix != "10.42.0.0/16" || result.Source != "explicit" {
+		t.Fatalf("result = %#v", result)
 	}
 }
 func TestRPCServicesListDispatch(t *testing.T) {

@@ -139,6 +139,7 @@ type ttyExecer struct {
 	serviceInstallFunc         func(InstallerCfg) error
 	serviceInstallGenFunc      func(InstallerCfg, int) error
 	closeNewStageInstallerFunc func(FileInstallerCfg) error
+	removeServiceFunc          func(string, RemoveOptions) (*RemoveReport, error)
 }
 
 type ttyPtySession struct {

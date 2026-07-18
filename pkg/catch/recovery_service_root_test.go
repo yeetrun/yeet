@@ -106,6 +106,58 @@ func TestSnapshotsCloneServiceRootClonesDatasetAndCurrentDefinition(t *testing.T
 	}
 }
 
+func TestCloneServiceRootRecoveryServiceStripsISOStateAndGeneratedArtifacts(t *testing.T) {
+	server := newTestServer(t)
+	seedServiceRootRecoverySource(t, server)
+	source := mustService(t, server, "app")
+	source.ISO = &db.ISOAllocation{
+		Kind:  "compose",
+		State: "ready",
+		NetNS: "yeet-source-ns",
+		Components: map[string]db.ISOComponent{
+			"api": {Address: netip.MustParseAddr("172.30.128.2")},
+		},
+		RetiredComponents: map[string]db.ISOComponent{
+			"old": {Address: netip.MustParseAddr("172.30.128.3")},
+		},
+	}
+	for _, name := range []db.ArtifactName{
+		db.ArtifactDockerComposeNetwork, db.ArtifactNetNSService, db.ArtifactNetNSEnv, db.ArtifactNetNSResolv,
+		db.ArtifactTSService, db.ArtifactTSEnv, db.ArtifactTSBinary, db.ArtifactTSConfig,
+	} {
+		source.Artifacts[name] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+			"latest":  serviceRootRecoveryRoot + "/bin/iso-generated",
+			db.Gen(3): serviceRootRecoveryRoot + "/bin/iso-generated",
+		}}
+	}
+
+	cloned, err := cloneServiceRootRecoveryService(
+		source,
+		recoveryPoint{Generation: intPointer(3)},
+		"app-copy",
+		"flash/yeet/services/app-copy",
+		"/flash/yeet/services/app-copy",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if cloned.ISO != nil {
+		t.Fatalf("cloned ISO allocation = %#v, want nil so the next install reserves fresh identities", cloned.ISO)
+	}
+	for _, name := range []db.ArtifactName{
+		db.ArtifactDockerComposeNetwork, db.ArtifactNetNSService, db.ArtifactNetNSEnv, db.ArtifactNetNSResolv,
+		db.ArtifactTSService, db.ArtifactTSEnv, db.ArtifactTSBinary, db.ArtifactTSConfig,
+	} {
+		if _, ok := cloned.Artifacts[name]; ok {
+			t.Fatalf("cloned generated artifact %q survived: %#v", name, cloned.Artifacts[name])
+		}
+	}
+	if _, ok := cloned.Artifacts[db.ArtifactDockerComposeFile]; !ok {
+		t.Fatal("cloned payload Compose artifact was removed with ISO network artifacts")
+	}
+}
+
 func TestSnapshotsCloneServiceRootMaterializesSelectedGenerationAsCloneGeneration(t *testing.T) {
 	server := newTestServer(t)
 	seedServiceRootRecoverySource(t, server)

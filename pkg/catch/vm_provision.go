@@ -17,6 +17,8 @@ import (
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -31,7 +33,13 @@ var (
 	vmProvisionGuestReadyBoundaryFunc = captureVMGuestReadyBoundary
 	vmProvisionGuestReadyWaitFunc     = waitVMGuestReady
 	vmProvisionEnsureRuntimeIdentity  = ensureVMRuntimeIdentity
-	prepareHostVMLANBridgeForRunFn    = func(root string) (VMLANBridgePrepareStatus, error) {
+	ensureVMISOBoundaryForProvision   = func(ctx context.Context, server *Server, service string) error {
+		return server.ensureISONetworkBoundaryLocked(ctx, service)
+	}
+	verifyVMNetworkPlanForProvision      = verifyVMNetworkPlan
+	verifyVMISONetworkAbsentForProvision = verifyVMISONetworkPlanAbsent
+	acquireVMProvisionLockForProvision   = acquireVMProvisionLock
+	prepareHostVMLANBridgeForRunFn       = func(root string) (VMLANBridgePrepareStatus, error) {
 		return PrepareVMLANBridge(root, true)
 	}
 )
@@ -61,9 +69,15 @@ type vmProvisionPlan struct {
 	RuntimeIdentity        vmRuntimeIdentity
 }
 
+//nolint:cyclop // Provisioning keeps reservation, rollback, commit, and readiness order explicit.
 func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr error) {
 	doneProvision := e.traceBlock("vm provision")
 	defer doneProvision()
+	unlock, err := acquireVMProvisionLockForProvision(e.vmProvisionContext(), e.s.cfg.RootDir, e.sn)
+	if err != nil {
+		return fmt.Errorf("lock VM provisioning for %q: %w", e.sn, err)
+	}
+	defer unlock()
 	serviceExisted, snapshotPolicyFlags, err := e.validateAndCheckVMProvisionRequest(flags)
 	if err != nil {
 		return err
@@ -99,8 +113,13 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 		ui.FailStep(err.Error())
 		return err
 	}
+	isoAllocation, err := e.reserveVMISONetwork(flags)
+	if err != nil {
+		ui.FailStep(err.Error())
+		return err
+	}
 	donePlan := e.traceBlock("vm plan")
-	plan, err := e.newVMProvisionPlan(flags, payload, inputs.ServiceRoot, inputs.Shape, inputs.Image, svcNet, inputs.SSHKey, inputs.RuntimeIdentity)
+	plan, err := e.newVMProvisionPlan(flags, payload, inputs.ServiceRoot, inputs.Shape, inputs.Image, svcNet, isoAllocation, inputs.SSHKey, inputs.RuntimeIdentity)
 	donePlan()
 	if err != nil {
 		ui.FailStep(err.Error())
@@ -117,6 +136,59 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 	}
 	rollbackNewService = false
 	return nil
+}
+
+//nolint:cyclop // Secure open, inode validation, permission checks, and locking are one auditable sequence.
+func acquireVMProvisionLock(ctx context.Context, rootDir, service string) (func(), error) {
+	if strings.TrimSpace(service) == "" {
+		return nil, fmt.Errorf("VM provision lock requires a service name")
+	}
+	dir, _, err := openValidatedISOOperationRootDir(rootDir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = dir.Close() }()
+	name := "vm-provision-" + isoNameToken(service) + ".lock"
+	flags := unix.O_RDWR | unix.O_CLOEXEC | unix.O_NOFOLLOW
+	fd, err := unix.Openat(int(dir.Fd()), name, flags|unix.O_CREAT|unix.O_EXCL, 0o600)
+	created := err == nil
+	if errors.Is(err, unix.EEXIST) {
+		fd, err = unix.Openat(int(dir.Fd()), name, flags, 0)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open VM provision lock %s: %w", name, err)
+	}
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("open VM provision lock %s: invalid file descriptor", name)
+	}
+	stat, err := inspectISOOperationInode(fd)
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("inspect VM provision lock %s: %w", name, err)
+	}
+	if err := validateISOOperationLockStat(name, stat, uint32(os.Geteuid())); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if created {
+		if err := unix.Fchmod(fd, 0o600); err != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("secure VM provision lock %s: %w", name, err)
+		}
+	} else if stat.mode&0o7777 != 0o600 {
+		_ = file.Close()
+		return nil, fmt.Errorf("existing VM provision lock %s mode is %#o, want 0600", name, stat.mode&0o7777)
+	}
+	if err := waitForISOOperationLock(ctx, fd); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return newISOOperationUnlock(
+		func() { _ = unix.Flock(fd, unix.LOCK_UN) },
+		func() { _ = file.Close() },
+	), nil
 }
 
 func printVMProvisionFailureRecovery(ui *vmProvisionUI, service string, committed, restart bool) {
@@ -147,6 +219,7 @@ func (e *ttyExecer) validateAndCheckVMProvisionRequest(flags cli.RunFlags) (bool
 	return serviceExisted, snapshotPolicyFlags, nil
 }
 
+//nolint:cyclop // Existing incomplete ISO reservations require explicit recovery decisions.
 func (e *ttyExecer) validateAndCheckVMProvisionService(flags cli.RunFlags) (bool, error) {
 	if err := validateVMProvisionFlags(flags); err != nil {
 		return false, err
@@ -162,6 +235,13 @@ func (e *ttyExecer) validateAndCheckVMProvisionService(flags cli.RunFlags) (bool
 		return true, err
 	}
 	if sv.ServiceType() == db.ServiceTypeVM {
+		vm := sv.VM()
+		if vm.Valid() && vm.SetupState() != "ready" && sv.ISO().Valid() && !sv.ISO().RemoveRequested() {
+			if !vmNetworkModeRequested(flags.Net, "iso") {
+				return true, fmt.Errorf("VM %q has an incomplete ISO provision; retry with --net=iso or remove it", e.sn)
+			}
+			return false, nil
+		}
 		return true, fmt.Errorf("VM %q already exists; use yeet vm set for CPU, memory, disk, or network changes, or remove and recreate it", e.sn)
 	}
 	return true, nil
@@ -662,7 +742,7 @@ func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan,
 	networkTouched := false
 	systemdTouched := false
 	defer func() {
-		retErr = rollbackFailedVMProvisionFinish(retErr, plan, committed, systemdTouched, networkTouched)
+		retErr = e.rollbackFailedVMProvisionFinish(ctx, retErr, plan, committed, systemdTouched, networkTouched)
 	}()
 
 	doneArtifacts := e.traceBlock("vm artifacts")
@@ -703,7 +783,7 @@ func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan,
 	return committed, ready, nil
 }
 
-func rollbackFailedVMProvisionFinish(retErr error, plan vmProvisionPlan, committed, systemdTouched, networkTouched bool) error {
+func (e *ttyExecer) rollbackFailedVMProvisionFinish(ctx context.Context, retErr error, plan vmProvisionPlan, committed, systemdTouched, networkTouched bool) error {
 	if retErr == nil || committed {
 		return retErr
 	}
@@ -713,8 +793,15 @@ func rollbackFailedVMProvisionFinish(retErr error, plan vmProvisionPlan, committ
 		}
 	}
 	if networkTouched {
-		if err := plan.Network.ExecuteCleanup(vmProvisionNetworkRunner); err != nil {
-			retErr = errors.Join(retErr, fmt.Errorf("cleanup failed VM network: %w", err))
+		cleanupErr := plan.Network.ExecuteCleanup(vmProvisionNetworkRunner)
+		if plan.Network.hasNetworkMode("iso") {
+			cleanupErr = errors.Join(cleanupErr, verifyVMISONetworkAbsentForProvision(ctx, plan.Network))
+			if cleanupErr != nil {
+				cleanupErr = errors.Join(cleanupErr, e.retainFailedVMProvisionISOTombstone(cleanupErr))
+			}
+		}
+		if cleanupErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("cleanup failed VM network: %w", cleanupErr))
 		}
 	}
 	return retErr
@@ -808,6 +895,15 @@ func (e *ttyExecer) rollbackNewVMProvisionReservation() error {
 			return nil
 		}
 		if s.VM != nil && s.VM.SetupState == "ready" {
+			return nil
+		}
+		if s.ISO != nil && s.ISO.RemoveRequested {
+			return nil
+		}
+		// Preserve an incomplete ISO VM reservation so a retry retains the same
+		// /30. The minimal VM record also makes crash recovery and removal
+		// type-safe before the complete provision commit exists.
+		if s.ISO != nil && s.ISO.Kind == string(iso.PayloadVM) {
 			return nil
 		}
 		delete(d.Services, e.sn)
@@ -981,8 +1077,8 @@ func vmMetadataDriverForImage(payload string, manifest vmImageManifest) string {
 	return manifest.MetadataDriverOr("ubuntu")
 }
 
-func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resolvedRoot resolvedServiceRoot, shape vmShape, image vmImageAsset, svcNet *db.SvcNetwork, sshKey string, runtimeIdentity vmRuntimeIdentity) (vmProvisionPlan, error) {
-	networkPlan, err := e.vmNetworkPlanFromFlags(flags, svcNet)
+func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resolvedRoot resolvedServiceRoot, shape vmShape, image vmImageAsset, svcNet *db.SvcNetwork, isoAllocation *db.ISOAllocation, sshKey string, runtimeIdentity vmRuntimeIdentity) (vmProvisionPlan, error) {
+	networkPlan, err := e.vmNetworkPlanFromFlags(flags, svcNet, isoAllocation)
 	if err != nil {
 		return vmProvisionPlan{}, err
 	}
@@ -1170,7 +1266,7 @@ func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvis
 	ui.StartStep(vmRunStepNetwork)
 	doneNetwork := e.traceBlock("vm network setup")
 	networkTouched = true
-	if err := plan.Network.ExecuteSetup(vmProvisionNetworkRunner); err != nil {
+	if err := e.applyVMProvisionNetwork(ctx, plan.Network); err != nil {
 		doneNetwork()
 		retErr := fmt.Errorf("set up VM network: %w", err)
 		ui.FailStep(retErr.Error())
@@ -1191,6 +1287,40 @@ func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvis
 	return networkTouched, nil
 }
 
+func (e *ttyExecer) applyVMProvisionNetwork(ctx context.Context, plan vmNetworkPlan) error {
+	if !plan.hasNetworkMode("iso") {
+		return plan.ExecuteSetup(vmProvisionNetworkRunner)
+	}
+	return e.s.withISOOperationLock(ctx, func() error {
+		if err := ensureVMISOBoundaryForProvision(ctx, e.s, e.sn); err != nil {
+			return err
+		}
+		if err := plan.ExecuteSetup(vmProvisionNetworkRunner); err != nil {
+			return e.failVMProvisionISOAttachment(ctx, plan, fmt.Errorf("set up VM ISO TAP: %w", err))
+		}
+		if err := verifyVMNetworkPlanForProvision(ctx, plan); err != nil {
+			return e.failVMProvisionISOAttachment(ctx, plan, fmt.Errorf("verify VM ISO TAP: %w", err))
+		}
+		return nil
+	})
+}
+
+func (e *ttyExecer) failVMProvisionISOAttachment(ctx context.Context, plan vmNetworkPlan, cause error) error {
+	cleanupErr := plan.ExecuteCleanup(vmProvisionNetworkRunner)
+	cleanupErr = errors.Join(cleanupErr, verifyVMISONetworkAbsentForProvision(ctx, plan))
+	if cleanupErr != nil {
+		return errors.Join(cause, cleanupErr, e.retainFailedVMProvisionISOTombstone(errors.Join(cause, cleanupErr)))
+	}
+	return errors.Join(cause, e.s.markISOState(e.sn, string(iso.StateQuarantined), cause))
+}
+
+func (e *ttyExecer) retainFailedVMProvisionISOTombstone(cause error) error {
+	if err := e.s.recordISORemovalIntent(e.sn, false); err != nil {
+		return err
+	}
+	return e.s.markISOState(e.sn, string(iso.StateTombstoned), cause)
+}
+
 func writeVMProvisionConfigArtifacts(plan vmProvisionPlan) error {
 	if err := writeVMFile(plan.FirecrackerConfigPath, plan.FirecrackerConfig, 0o644); err != nil {
 		return fmt.Errorf("write Firecracker config: %w", err)
@@ -1201,8 +1331,19 @@ func writeVMProvisionConfigArtifacts(plan vmProvisionPlan) error {
 	return nil
 }
 
+//nolint:cyclop // Generation and ISO allocation checks stay adjacent to the atomic DB mutation.
 func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string, snapshotPolicyFlags *cli.ServiceSetFlags) error {
 	_, _, err := e.s.cfg.DB.MutateService(e.sn, func(_ *db.Data, s *db.Service) error {
+		if plan.Network.hasNetworkMode("iso") {
+			if s.ISO == nil || s.ISO.Kind != string(iso.PayloadVM) || s.ISO.RemoveRequested || s.ISO.State != string(iso.StateReserved) {
+				return fmt.Errorf("service %q no longer has its reserved VM ISO allocation", e.sn)
+			}
+			if !vmNetworkMatchesISOAllocation(plan.Network, s.ISO) {
+				return fmt.Errorf("service %q ISO allocation changed before provision commit", e.sn)
+			}
+		} else if s.ISO != nil {
+			return fmt.Errorf("service %q has an ISO allocation but the VM plan is not ISO", e.sn)
+		}
 		applyVMServiceRoot(s, e.s.defaultServiceRootDir(e.sn), plan.ServiceRoot)
 		s.ServiceType = db.ServiceTypeVM
 		if plan.SvcNetwork != nil {
@@ -1244,6 +1385,10 @@ func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string, snap
 			if err := applySnapshotFlagsToService(s, *snapshotPolicyFlags); err != nil {
 				return err
 			}
+		}
+		if plan.Network.hasNetworkMode("iso") {
+			s.ISO.State = string(iso.StateStopped)
+			s.ISO.LastError = ""
 		}
 		return nil
 	})
@@ -1386,7 +1531,43 @@ func (e *ttyExecer) reserveVMServiceNetwork(flags cli.RunFlags) (*db.SvcNetwork,
 	return &db.SvcNetwork{IPv4: service.SvcNetwork.IPv4}, nil
 }
 
-func (e *ttyExecer) vmNetworkPlanFromFlags(flags cli.RunFlags, svcNet *db.SvcNetwork) (vmNetworkPlan, error) {
+func (e *ttyExecer) reserveVMISONetwork(flags cli.RunFlags) (*db.ISOAllocation, error) {
+	if !vmNetworkModeRequested(flags.Net, "iso") {
+		return nil, nil
+	}
+	modes, err := iso.NormalizeModes(vmNetworkModes(vmRequestedNetworkModes(flags.Net)))
+	if err != nil {
+		return nil, err
+	}
+	if err := iso.ValidateNetwork(iso.NetworkRequest{Payload: iso.PayloadVM, Modes: modes}); err != nil {
+		return nil, err
+	}
+	ctx := e.vmProvisionContext()
+	if err := e.s.ensureISOPool(ctx); err != nil {
+		return nil, err
+	}
+	var result *db.ISOAllocation
+	_, _, err = e.s.cfg.DB.MutateService(e.sn, func(data *db.Data, service *db.Service) error {
+		allocation, reserveErr := reserveISOAllocationInData(e.sn, isoReservationRequest{Kind: iso.PayloadVM, Modes: modes}, data, service)
+		if reserveErr != nil {
+			return reserveErr
+		}
+		service.ServiceType = db.ServiceTypeVM
+		service.VM = &db.VMConfig{
+			Runtime: vmRuntimeFirecracker,
+			Networks: newVMNetworkPlan(e.sn, []string{"iso"}, vmNetworkInputs{
+				ISOHostIP: allocation.HostIP, ISOGuestIP: allocation.PeerIP,
+				ISOLink: allocation.Link, ISOTap: allocation.Interface,
+			}).DBNetworks(),
+			SetupState: "reserved",
+		}
+		result = cloneVMISOAllocation(allocation)
+		return nil
+	})
+	return result, err
+}
+
+func (e *ttyExecer) vmNetworkPlanFromFlags(flags cli.RunFlags, svcNet *db.SvcNetwork, isoAllocations ...*db.ISOAllocation) (vmNetworkPlan, error) {
 	input := vmNetworkInputs{
 		LANParent: strings.TrimSpace(flags.MacvlanParent),
 		LANVLAN:   flags.MacvlanVlan,
@@ -1394,6 +1575,13 @@ func (e *ttyExecer) vmNetworkPlanFromFlags(flags cli.RunFlags, svcNet *db.SvcNet
 	}
 	if svcNet != nil && svcNet.IPv4.IsValid() {
 		input.ServiceIP = svcNet.IPv4.String()
+	}
+	if len(isoAllocations) > 0 && isoAllocations[0] != nil {
+		allocation := isoAllocations[0]
+		input.ISOHostIP = allocation.HostIP
+		input.ISOGuestIP = allocation.PeerIP
+		input.ISOLink = allocation.Link
+		input.ISOTap = allocation.Interface
 	}
 	modes := vmRequestedNetworkModes(flags.Net)
 	if err := validateVMNetworkOptions(modes, flags.MacvlanParent, flags.MacvlanVlan, flags.MacvlanMac); err != nil {
@@ -1423,17 +1611,20 @@ func validateVMNetworkModes(modes []string) error {
 			}
 		}
 	}
+	if seen["iso"] && len(seen) != 1 {
+		return fmt.Errorf("VMs support only iso as a Yeet-managed isolated mode")
+	}
 	return nil
 }
 
 func validateVMNetworkMode(mode string, seen map[string]bool) error {
 	switch mode {
-	case "svc", "lan":
+	case "svc", "lan", "iso":
 	default:
-		return fmt.Errorf("unsupported VM network mode %q; supported modes: svc, lan", mode)
+		return fmt.Errorf("unsupported VM network mode %q; supported modes: svc, lan, iso", mode)
 	}
 	if seen[mode] {
-		return fmt.Errorf("duplicate VM network mode %q; supported modes: svc, lan", mode)
+		return fmt.Errorf("duplicate VM network mode %q; supported modes: svc, lan, iso", mode)
 	}
 	seen[mode] = true
 	return nil

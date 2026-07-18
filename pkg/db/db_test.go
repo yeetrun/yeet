@@ -107,6 +107,95 @@ func TestDataCloneDeepCopiesTopLevelCollections(t *testing.T) {
 	}
 }
 
+func TestMigrateV11AddsISOState(t *testing.T) {
+	d := &Data{DataVersion: 11, Services: map[string]*Service{"app": {Name: "app"}}}
+	migrated, err := migrate(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !migrated || d.DataVersion != 12 {
+		t.Fatalf("migrated=%v version=%d", migrated, d.DataVersion)
+	}
+}
+
+func TestISOStateCloneIsDeep(t *testing.T) {
+	d := &Data{
+		ISOPool: &ISOPool{Prefix: netip.MustParsePrefix("172.30.0.0/16")},
+		Services: map[string]*Service{
+			"app": {
+				Name: "app",
+				ISO: &ISOAllocation{
+					Components: map[string]ISOComponent{
+						"api": {Address: netip.MustParseAddr("172.30.128.2")},
+					},
+					RetiredComponents: map[string]ISOComponent{
+						"old": {Address: netip.MustParseAddr("172.30.128.3")},
+					},
+					DesiredModes: []string{"iso", "ts"},
+				},
+			},
+		},
+	}
+
+	clone := d.Clone()
+	clone.ISOPool.Source = "clone"
+	clone.Services["app"].ISO.Components["api"] = ISOComponent{Address: netip.MustParseAddr("172.30.128.4")}
+	clone.Services["app"].ISO.RetiredComponents["old"] = ISOComponent{Address: netip.MustParseAddr("172.30.128.5")}
+	clone.Services["app"].ISO.DesiredModes[0] = "clone"
+
+	if d.ISOPool.Source != "" {
+		t.Fatalf("source pool mutated to %q", d.ISOPool.Source)
+	}
+	if got := d.Services["app"].ISO.Components["api"].Address.String(); got != "172.30.128.2" {
+		t.Fatalf("source component mutated to %s", got)
+	}
+	if got := d.Services["app"].ISO.RetiredComponents["old"].Address.String(); got != "172.30.128.3" {
+		t.Fatalf("source retired component mutated to %s", got)
+	}
+	if got := d.Services["app"].ISO.DesiredModes[0]; got != "iso" {
+		t.Fatalf("source desired mode mutated to %q", got)
+	}
+}
+
+func TestISOStateViewExposesPersistedFields(t *testing.T) {
+	d := &Data{
+		ISOPool: &ISOPool{Prefix: netip.MustParsePrefix("172.30.0.0/16"), Source: "preferred"},
+		Services: map[string]*Service{
+			"app": {
+				Name: "app",
+				ISO: &ISOAllocation{
+					State:        "ready",
+					DesiredModes: []string{"iso"},
+					Components: map[string]ISOComponent{
+						"api": {Address: netip.MustParseAddr("172.30.128.2"), State: "reserved"},
+					},
+				},
+			},
+		},
+		DockerNetworks: map[string]*DockerNetwork{"app": {Mode: "iso"}},
+	}
+
+	view := d.View()
+	if got := view.ISOPool().Prefix(); got != d.ISOPool.Prefix {
+		t.Fatalf("pool prefix = %v, want %v", got, d.ISOPool.Prefix)
+	}
+	service, ok := view.Services().GetOk("app")
+	if !ok {
+		t.Fatal("service view is missing app")
+	}
+	if got := service.ISO().State(); got != "ready" {
+		t.Fatalf("allocation state = %q, want ready", got)
+	}
+	component, ok := service.ISO().Components().GetOk("api")
+	if !ok || component.State != "reserved" {
+		t.Fatalf("component view = %#v, present=%v", component, ok)
+	}
+	network, ok := view.DockerNetworks().GetOk("app")
+	if !ok || network.Mode() != "iso" {
+		t.Fatalf("docker network view mode = %q, present=%v", network.Mode(), ok)
+	}
+}
+
 func TestServiceCloneDeepCopiesArtifactsNetworksAndTags(t *testing.T) {
 	src := &Service{
 		Name:             "svc",

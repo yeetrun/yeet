@@ -273,6 +273,14 @@ func (s *Server) installTS(service string, runInNetNS string, tsNet *db.Tailscal
 }
 
 func (s *Server) installTSAtRoot(serviceRoot, service string, runInNetNS string, tsNet *db.TailscaleNetwork, tsAuthKey, resolvConf string) (map[db.ArtifactName]string, error) {
+	return s.installTSAtRootWithNamespace(serviceRoot, service, runInNetNS, tsNet, tsAuthKey, resolvConf, "")
+}
+
+func (s *Server) installISOServiceTSAtRoot(serviceRoot, service string, runInNetNS string, tsNet *db.TailscaleNetwork, tsAuthKey, resolvConf string) (map[db.ArtifactName]string, error) {
+	return s.installTSAtRootWithNamespace(serviceRoot, service, runInNetNS, tsNet, tsAuthKey, resolvConf, "yeet-"+service+"-ns.service")
+}
+
+func (s *Server) installTSAtRootWithNamespace(serviceRoot, service string, runInNetNS string, tsNet *db.TailscaleNetwork, tsAuthKey, resolvConf, netNSUnit string) (map[db.ArtifactName]string, error) {
 	tsAuthKey, err := s.resolveTailscaleAuthKey(tsNet, tsAuthKey)
 	if err != nil {
 		return nil, err
@@ -296,6 +304,7 @@ func (s *Server) installTSAtRoot(serviceRoot, service string, runInNetNS string,
 		runInNetNS:    runInNetNS,
 		interfaceName: tsNet.Interface,
 		resolvConf:    resolvConf,
+		netNSUnit:     netNSUnit,
 	})
 	artifacts, err := unit.WriteOutUnitFiles(serviceBinDirForRoot(serviceRoot))
 	if err != nil {
@@ -338,6 +347,7 @@ type tailscaleInstallPlan struct {
 	runInNetNS    string
 	interfaceName string
 	resolvConf    string
+	netNSUnit     string
 }
 
 func newTailscaleSystemdUnit(plan tailscaleInstallPlan) svc.SystemdUnit {
@@ -349,7 +359,7 @@ func newTailscaleSystemdUnit(plan tailscaleInstallPlan) svc.SystemdUnit {
 		WorkingDirectory: plan.serviceTSDir,
 	}
 	if plan.runInNetNS != "" {
-		applyTailscaleNetNS(&unit, plan.runInNetNS, plan.resolvConf)
+		applyTailscaleNetNS(&unit, plan.runInNetNS, plan.resolvConf, plan.netNSUnit)
 	}
 	return unit
 }
@@ -367,8 +377,10 @@ func tailscaleSystemdArgs(runDir, interfaceName string, tapMode bool) []string {
 	}
 }
 
-func applyTailscaleNetNS(unit *svc.SystemdUnit, runInNetNS, resolvConf string) {
-	nsUnit := runInNetNS + ".service"
+func applyTailscaleNetNS(unit *svc.SystemdUnit, runInNetNS, resolvConf, nsUnit string) {
+	if nsUnit == "" {
+		nsUnit = runInNetNS + ".service"
+	}
 	unit.Wants = nsUnit
 	unit.After = nsUnit
 	unit.ExecStartPre = []string{"/bin/systemctl is-active --quiet " + nsUnit}

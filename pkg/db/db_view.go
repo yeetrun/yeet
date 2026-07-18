@@ -13,7 +13,7 @@ import (
 	"tailscale.com/types/views"
 )
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent
 
 // View returns a read-only view of Data.
 func (p *Data) View() DataView {
@@ -87,6 +87,7 @@ func (v *DataView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 func (v DataView) DataVersion() int                     { return v.ж.DataVersion }
 func (v DataView) SnapshotDefaults() SnapshotPolicyView { return v.ж.SnapshotDefaults.View() }
 func (v DataView) VMHost() VMHostConfigView             { return v.ж.VMHost.View() }
+func (v DataView) ISOPool() ISOPoolView                 { return v.ж.ISOPool.View() }
 func (v DataView) Services() views.MapFn[string, *Service, ServiceView] {
 	return views.MapFnOf(v.ж.Services, func(t *Service) ServiceView {
 		return t.View()
@@ -113,6 +114,7 @@ var _DataViewNeedsRegeneration = Data(struct {
 	DataVersion      int
 	SnapshotDefaults *SnapshotPolicy
 	VMHost           *VMHostConfig
+	ISOPool          *ISOPool
 	Services         map[string]*Service
 	Images           map[ImageRepoName]*ImageRepo
 	Volumes          map[string]*Volume
@@ -227,6 +229,7 @@ func (v ServiceView) Macvlan() views.ValuePointer[MacvlanNetwork] {
 
 func (v ServiceView) TSNet() TailscaleNetworkView { return v.ж.TSNet.View() }
 func (v ServiceView) VM() VMConfigView            { return v.ж.VM.View() }
+func (v ServiceView) ISO() ISOAllocationView      { return v.ж.ISO.View() }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _ServiceViewNeedsRegeneration = Service(struct {
@@ -243,6 +246,7 @@ var _ServiceViewNeedsRegeneration = Service(struct {
 	Macvlan          *MacvlanNetwork
 	TSNet            *TailscaleNetwork
 	VM               *VMConfig
+	ISO              *ISOAllocation
 }{})
 
 // View returns a read-only view of SnapshotPolicy.
@@ -637,6 +641,7 @@ func (v *DockerNetworkView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 
 func (v DockerNetworkView) NetworkID() string         { return v.ж.NetworkID }
 func (v DockerNetworkView) NetNS() string             { return v.ж.NetNS }
+func (v DockerNetworkView) Mode() string              { return v.ж.Mode }
 func (v DockerNetworkView) IPv4Gateway() netip.Prefix { return v.ж.IPv4Gateway }
 func (v DockerNetworkView) IPv4Range() netip.Prefix   { return v.ж.IPv4Range }
 func (v DockerNetworkView) Endpoints() views.MapFn[string, *DockerEndpoint, DockerEndpointView] {
@@ -661,6 +666,7 @@ func (v DockerNetworkView) PortMap() views.MapFn[string, *EndpointPort, Endpoint
 var _DockerNetworkViewNeedsRegeneration = DockerNetwork(struct {
 	NetworkID     string
 	NetNS         string
+	Mode          string
 	IPv4Gateway   netip.Prefix
 	IPv4Range     netip.Prefix
 	Endpoints     map[string]*DockerEndpoint
@@ -1638,4 +1644,282 @@ func (v VMHostConfigView) MemoryPolicy() string { return v.ж.MemoryPolicy }
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _VMHostConfigViewNeedsRegeneration = VMHostConfig(struct {
 	MemoryPolicy string
+}{})
+
+// View returns a read-only view of ISOPool.
+func (p *ISOPool) View() ISOPoolView {
+	return ISOPoolView{ж: p}
+}
+
+// ISOPoolView provides a read-only view over ISOPool.
+//
+// Its methods should only be called if `Valid()` returns true.
+type ISOPoolView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *ISOPool
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v ISOPoolView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v ISOPoolView) AsStruct() *ISOPool {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ISOPoolView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ISOPoolView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *ISOPoolView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x ISOPool
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ISOPoolView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x ISOPool
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v ISOPoolView) Prefix() netip.Prefix        { return v.ж.Prefix }
+func (v ISOPoolView) Source() string              { return v.ж.Source }
+func (v ISOPoolView) AllocatorVersion() int       { return v.ж.AllocatorVersion }
+func (v ISOPoolView) PolicyVersion() int          { return v.ж.PolicyVersion }
+func (v ISOPoolView) AggregateRouteState() string { return v.ж.AggregateRouteState }
+func (v ISOPoolView) LastConflict() string        { return v.ж.LastConflict }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ISOPoolViewNeedsRegeneration = ISOPool(struct {
+	Prefix              netip.Prefix
+	Source              string
+	AllocatorVersion    int
+	PolicyVersion       int
+	AggregateRouteState string
+	LastConflict        string
+}{})
+
+// View returns a read-only view of ISOAllocation.
+func (p *ISOAllocation) View() ISOAllocationView {
+	return ISOAllocationView{ж: p}
+}
+
+// ISOAllocationView provides a read-only view over ISOAllocation.
+//
+// Its methods should only be called if `Valid()` returns true.
+type ISOAllocationView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *ISOAllocation
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v ISOAllocationView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v ISOAllocationView) AsStruct() *ISOAllocation {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ISOAllocationView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ISOAllocationView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *ISOAllocationView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x ISOAllocation
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ISOAllocationView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x ISOAllocation
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v ISOAllocationView) Kind() string          { return v.ж.Kind }
+func (v ISOAllocationView) State() string         { return v.ж.State }
+func (v ISOAllocationView) Link() netip.Prefix    { return v.ж.Link }
+func (v ISOAllocationView) HostIP() netip.Addr    { return v.ж.HostIP }
+func (v ISOAllocationView) PeerIP() netip.Addr    { return v.ж.PeerIP }
+func (v ISOAllocationView) Project() netip.Prefix { return v.ж.Project }
+func (v ISOAllocationView) Gateway() netip.Addr   { return v.ж.Gateway }
+func (v ISOAllocationView) Interface() string     { return v.ж.Interface }
+func (v ISOAllocationView) PeerInterface() string { return v.ж.PeerInterface }
+func (v ISOAllocationView) NetNS() string         { return v.ж.NetNS }
+func (v ISOAllocationView) Bridge() string        { return v.ж.Bridge }
+func (v ISOAllocationView) Components() views.Map[string, ISOComponent] {
+	return views.MapOf(v.ж.Components)
+}
+func (v ISOAllocationView) RetiredComponents() views.Map[string, ISOComponent] {
+	return views.MapOf(v.ж.RetiredComponents)
+}
+func (v ISOAllocationView) DesiredModes() views.Slice[string] {
+	return views.SliceOf(v.ж.DesiredModes)
+}
+func (v ISOAllocationView) AllocatorVersion() int { return v.ж.AllocatorVersion }
+func (v ISOAllocationView) PolicyVersion() int    { return v.ж.PolicyVersion }
+func (v ISOAllocationView) RemoveRequested() bool { return v.ж.RemoveRequested }
+func (v ISOAllocationView) CleanupVerified() bool { return v.ж.CleanupVerified }
+func (v ISOAllocationView) RemoveCleanData() bool { return v.ж.RemoveCleanData }
+func (v ISOAllocationView) LastError() string     { return v.ж.LastError }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ISOAllocationViewNeedsRegeneration = ISOAllocation(struct {
+	Kind              string
+	State             string
+	Link              netip.Prefix
+	HostIP            netip.Addr
+	PeerIP            netip.Addr
+	Project           netip.Prefix
+	Gateway           netip.Addr
+	Interface         string
+	PeerInterface     string
+	NetNS             string
+	Bridge            string
+	Components        map[string]ISOComponent
+	RetiredComponents map[string]ISOComponent
+	DesiredModes      []string
+	AllocatorVersion  int
+	PolicyVersion     int
+	RemoveRequested   bool
+	CleanupVerified   bool
+	RemoveCleanData   bool
+	LastError         string
+}{})
+
+// View returns a read-only view of ISOComponent.
+func (p *ISOComponent) View() ISOComponentView {
+	return ISOComponentView{ж: p}
+}
+
+// ISOComponentView provides a read-only view over ISOComponent.
+//
+// Its methods should only be called if `Valid()` returns true.
+type ISOComponentView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *ISOComponent
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v ISOComponentView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v ISOComponentView) AsStruct() *ISOComponent {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ISOComponentView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ISOComponentView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *ISOComponentView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x ISOComponent
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ISOComponentView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x ISOComponent
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v ISOComponentView) Address() netip.Addr { return v.ж.Address }
+func (v ISOComponentView) State() string       { return v.ж.State }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ISOComponentViewNeedsRegeneration = ISOComponent(struct {
+	Address netip.Addr
+	State   string
 }{})

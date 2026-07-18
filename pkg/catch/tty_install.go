@@ -19,6 +19,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/copyutil"
 	"github.com/yeetrun/yeet/pkg/cronutil"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/serviceid"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
@@ -199,6 +200,7 @@ type netFlags struct {
 	macvlanVlan   int
 	macvlanParent string
 	publish       []string
+	publishReset  bool
 }
 
 func netFlagsFromRun(flags cli.RunFlags) netFlags {
@@ -212,6 +214,7 @@ func netFlagsFromRun(flags cli.RunFlags) netFlags {
 		macvlanVlan:   flags.MacvlanVlan,
 		macvlanParent: flags.MacvlanParent,
 		publish:       flags.Publish,
+		publishReset:  flags.PublishReset,
 	}
 }
 
@@ -226,6 +229,7 @@ func netFlagsFromStage(flags cli.StageFlags) netFlags {
 		macvlanVlan:   flags.MacvlanVlan,
 		macvlanParent: flags.MacvlanParent,
 		publish:       flags.Publish,
+		publishReset:  flags.PublishReset,
 	}
 }
 
@@ -251,10 +255,11 @@ func (e *ttyExecer) fileInstaller(flags netFlags, argsIn []string) FileInstaller
 				VLAN:   flags.macvlanVlan,
 			},
 		},
-		Args:        args,
-		PayloadName: e.payloadName,
-		NewCmd:      e.newCmd,
-		Publish:     flags.publish,
+		Args:         args,
+		PayloadName:  e.payloadName,
+		NewCmd:       e.newCmd,
+		Publish:      flags.publish,
+		PublishReset: flags.publishReset,
 	}
 }
 
@@ -283,6 +288,9 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 		if len(argsIn) != 1 {
 			return fmt.Errorf("VM payloads do not accept payload args")
 		}
+		if err := validateVMRunNetwork(flags); err != nil {
+			return err
+		}
 		return runVMCmdFunc(e, flags, argsIn[0])
 	}
 	snapshotFlags, err := snapshotFlagsFromRunFlags(flags)
@@ -295,6 +303,21 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	cfg.Pull = flags.Pull
 	cfg.snapshotPolicyFlags = snapshotFlags
 	return e.runInstall("run", e.payloadReader(), cfg)
+}
+
+func validateVMRunNetwork(flags cli.RunFlags) error {
+	if strings.TrimSpace(flags.Net) == "" {
+		return nil
+	}
+	modes, err := iso.NormalizeModes(strings.Split(flags.Net, ","))
+	if err != nil {
+		return err
+	}
+	return iso.ValidateNetwork(iso.NetworkRequest{
+		Payload:   iso.PayloadVM,
+		Modes:     modes,
+		Published: len(flags.Publish) != 0 || flags.PublishReset,
+	})
 }
 
 func snapshotFlagsFromRunFlags(flags cli.RunFlags) (*cli.ServiceSetFlags, error) {
@@ -800,7 +823,7 @@ func (e *ttyExecer) closeNewStageInstaller(fi FileInstallerCfg) error {
 }
 
 func (e *ttyExecer) applyStagePublish(flags cli.StageFlags) error {
-	if len(flags.Publish) == 0 {
+	if len(flags.Publish) == 0 && !flags.PublishReset {
 		return nil
 	}
 	if err := e.applyPublishToCompose(flags.Publish); err != nil {
@@ -923,9 +946,6 @@ func removeUnreferencedStageFiles(stagedPaths []string, referenced map[string]st
 }
 
 func (e *ttyExecer) applyPublishToCompose(publish []string) error {
-	if len(publish) == 0 {
-		return nil
-	}
 	path, err := e.composePathForPublish()
 	if err != nil {
 		return err

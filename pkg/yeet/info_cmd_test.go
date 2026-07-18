@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -359,6 +360,49 @@ func TestRenderHostInfoPlainIncludesStorageAndInventory(t *testing.T) {
 	assertPlainRow(t, text, "VMs", "1 total, 1 running, 0 stopped, 0 unhealthy")
 }
 
+func TestInfoCatchRendersConfiguredISOPool(t *testing.T) {
+	out := hostInfoOutput{
+		Host: "host-a",
+		HostInfo: &serverInfo{
+			Version: "v0.9.0",
+			ISO: catchrpc.ISOPoolSummary{
+				Prefix:       "172.30.0.0/16",
+				Source:       "automatic",
+				Allocator:    1,
+				Policy:       1,
+				LinksUsed:    3,
+				ProjectsUsed: 2,
+				Reserved:     1,
+				Active:       2,
+				Quarantined:  1,
+				Tombstoned:   1,
+				Conflict:     "aggregate route missing",
+			},
+		},
+	}
+	var rendered bytes.Buffer
+	if err := renderHostInfoPlain(&rendered, out); err != nil {
+		t.Fatal(err)
+	}
+	text := rendered.String()
+	assertPlainRow(t, text, "ISO pool", "172.30.0.0/16")
+	assertPlainRow(t, text, "ISO source", "automatic")
+	assertPlainRow(t, text, "ISO version", "allocator 1, policy 1")
+	assertPlainRow(t, text, "ISO capacity", "links 3/8192, projects 2/1024")
+	assertPlainRow(t, text, "ISO state", "active 2, reserved 1, quarantined 1, tombstoned 1")
+	assertPlainRow(t, text, "ISO conflict", "aggregate route missing")
+}
+
+func TestInfoCatchZeroISOSummaryPreservesJSONCompatibility(t *testing.T) {
+	raw, err := json.Marshal(serverInfo{Version: "v0.9.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"iso"`) {
+		t.Fatalf("serverInfo JSON = %s, want omitted zero ISO summary", raw)
+	}
+}
+
 func TestBuildHostInventoryCountsServicesAndVMs(t *testing.T) {
 	got := buildHostInventory([]statusService{
 		{ServiceName: "app", ServiceType: "docker", Components: []statusComponent{{Status: "running"}}},
@@ -671,6 +715,23 @@ func TestInfoNetworkIPRowsReportsErrorsAndEmpty(t *testing.T) {
 
 	got = networkIPRows(catchrpc.ServiceNetwork{})
 	assertInfoRows(t, got, []infoRow{{Label: "IPs", Value: "none"}})
+}
+
+func TestInfoServiceNetworkRowsRenderISOStatusAndComponents(t *testing.T) {
+	rows := serviceNetworkRows(catchrpc.ServiceNetwork{ISO: &catchrpc.ServiceISO{
+		Modes: []string{"iso"}, State: "quarantined", PublicEgress: true, DNS: "public-only",
+		Components: []catchrpc.ServiceISOComponent{{Name: "api", IP: "172.30.128.2"}},
+		LastError:  "firewall digest mismatch",
+	}})
+	var rendered strings.Builder
+	for _, row := range rows {
+		fmt.Fprintf(&rendered, "%s=%s\n", row.Label, row.Value)
+	}
+	for _, want := range []string{"ISO modes=iso", "ISO state=quarantined", "Egress=public IPv4 via NAT", "DNS=public-only", "ISO api=172.30.128.2", "ISO error=firewall digest mismatch"} {
+		if !strings.Contains(rendered.String(), want) {
+			t.Fatalf("ISO rows missing %q:\n%s", want, rendered.String())
+		}
+	}
 }
 
 func TestInfoDescribeTailscale(t *testing.T) {

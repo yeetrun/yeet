@@ -35,6 +35,10 @@ pre-commit install --install-hooks \
 description = "Run the Go test suite"
 run = "go test ./..."
 
+[tasks."test:iso-network"]
+description = "Run privileged ISO namespace and firewall integration tests"
+run = "tools/test-iso-network.sh"
+
 [tasks."guest:init:test"]
 description = "Run yeet-init Rust tests"
 run = '''

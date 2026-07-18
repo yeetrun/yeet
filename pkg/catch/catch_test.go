@@ -22,6 +22,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/tailcfg"
 )
@@ -989,6 +990,129 @@ func TestDestroyServiceRootZFSRetriesBusyDestroy(t *testing.T) {
 	}
 	if !reflect.DeepEqual(zfsCalls, want) {
 		t.Fatalf("zfs calls = %#v, want %#v", zfsCalls, want)
+	}
+}
+
+func TestPrepareNetworkRuntimeOrdersISOReconcileAfterDockerDNSAndReadiness(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name: "app", ServiceType: db.ServiceTypeDockerCompose,
+		ISO: testISORuntimeAllocation("app", iso.StateStopped),
+	})
+	var events []string
+	oldNS := installYeetNSService
+	oldDNS := installYeetDNSServiceForServer
+	oldDocker := installDockerPrereqs
+	oldISODNS := installISODNSServiceForServer
+	oldReady := waitDockerReadyForISOForServer
+	oldReconcile := reconcileISONetworksForServer
+	installYeetNSService = func() error { events = append(events, "yeet-ns"); return nil }
+	installYeetDNSServiceForServer = func(string) error { events = append(events, "yeet-dns"); return nil }
+	installDockerPrereqs = func(*Server) error { events = append(events, "docker-prereqs"); return nil }
+	installISODNSServiceForServer = func(string) error { events = append(events, "iso-dns"); return nil }
+	waitDockerReadyForISOForServer = func(context.Context) error { events = append(events, "docker-ready"); return nil }
+	reconcileISONetworksForServer = func(context.Context, *Server) error { events = append(events, "iso-reconcile"); return nil }
+	t.Cleanup(func() {
+		installYeetNSService = oldNS
+		installYeetDNSServiceForServer = oldDNS
+		installDockerPrereqs = oldDocker
+		installISODNSServiceForServer = oldISODNS
+		waitDockerReadyForISOForServer = oldReady
+		reconcileISONetworksForServer = oldReconcile
+	})
+
+	if err := server.prepareNetworkRuntime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"yeet-ns", "yeet-dns", "docker-prereqs", "docker-ready", "iso-reconcile"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("startup network events = %#v, want %#v", events, want)
+	}
+}
+
+func TestPrepareNetworkRuntimeSkipsDockerWaitWithoutContainerISO(t *testing.T) {
+	server := newTestServer(t)
+	oldNS := installYeetNSService
+	oldDNS := installYeetDNSServiceForServer
+	oldDocker := installDockerPrereqs
+	oldISODNS := installISODNSServiceForServer
+	oldReady := waitDockerReadyForISOForServer
+	oldReconcile := reconcileISONetworksForServer
+	installYeetNSService = func() error { return nil }
+	installYeetDNSServiceForServer = func(string) error { return nil }
+	installDockerPrereqs = func(*Server) error { return nil }
+	installISODNSServiceForServer = func(string) error { return nil }
+	waitDockerReadyForISOForServer = func(context.Context) error { t.Fatal("waited for Docker without container ISO work"); return nil }
+	reconcileISONetworksForServer = func(context.Context, *Server) error { t.Fatal("reconciled ISO state with no records"); return nil }
+	t.Cleanup(func() {
+		installYeetNSService = oldNS
+		installYeetDNSServiceForServer = oldDNS
+		installDockerPrereqs = oldDocker
+		installISODNSServiceForServer = oldISODNS
+		waitDockerReadyForISOForServer = oldReady
+		reconcileISONetworksForServer = oldReconcile
+	})
+
+	if err := server.prepareNetworkRuntime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrepareNetworkRuntimeFailsClosedWhenISOPrerequisitesFail(t *testing.T) {
+	for _, failAt := range []string{"yeet-ns", "yeet-dns", "docker-prereqs", "docker-ready"} {
+		t.Run(failAt, func(t *testing.T) {
+			server := newTestServer(t)
+			addTestServices(t, server, db.Service{
+				Name: "app", ServiceType: db.ServiceTypeDockerCompose,
+				ISO: testISORuntimeAllocation("app", iso.StateReady),
+			})
+			var events []string
+			step := func(name string) error {
+				events = append(events, name)
+				if name == failAt {
+					return errors.New("prerequisite failed")
+				}
+				return nil
+			}
+
+			oldNS := installYeetNSService
+			oldDNS := installYeetDNSServiceForServer
+			oldDocker := installDockerPrereqs
+			oldReady := waitDockerReadyForISOForServer
+			oldReconcile := reconcileISONetworksForServer
+			oldFailClosed := failClosedISONetworksForServer
+			installYeetNSService = func() error { return step("yeet-ns") }
+			installYeetDNSServiceForServer = func(string) error { return step("yeet-dns") }
+			installDockerPrereqs = func(*Server) error { return step("docker-prereqs") }
+			waitDockerReadyForISOForServer = func(context.Context) error { return step("docker-ready") }
+			reconcileISONetworksForServer = func(context.Context, *Server) error {
+				t.Fatal("reconciled after prerequisite failure")
+				return nil
+			}
+			failClosedISONetworksForServer = func(_ context.Context, got *Server, cause error) error {
+				if got != server || !strings.Contains(cause.Error(), "prerequisite failed") {
+					t.Fatalf("fail-closed args = server %p cause %v", got, cause)
+				}
+				events = append(events, "fail-closed")
+				return nil
+			}
+			t.Cleanup(func() {
+				installYeetNSService = oldNS
+				installYeetDNSServiceForServer = oldDNS
+				installDockerPrereqs = oldDocker
+				waitDockerReadyForISOForServer = oldReady
+				reconcileISONetworksForServer = oldReconcile
+				failClosedISONetworksForServer = oldFailClosed
+			})
+
+			err := server.prepareNetworkRuntime(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "prerequisite failed") {
+				t.Fatalf("prepareNetworkRuntime error = %v, want prerequisite failure", err)
+			}
+			if len(events) == 0 || events[len(events)-1] != "fail-closed" {
+				t.Fatalf("startup events = %#v, want fail-closed last", events)
+			}
+		})
 	}
 }
 

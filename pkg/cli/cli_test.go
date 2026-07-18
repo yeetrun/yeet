@@ -265,6 +265,26 @@ func TestParseRunRejectsEmptyNetFlag(t *testing.T) {
 	}
 }
 
+func TestParseRunAcceptsISONetworkMode(t *testing.T) {
+	flags, args, err := ParseRun([]string{"--net=iso", "ghcr.io/example/app:latest"})
+	if err != nil {
+		t.Fatalf("ParseRun returned error: %v", err)
+	}
+	if flags.Net != "iso" {
+		t.Fatalf("Net = %q, want iso", flags.Net)
+	}
+	if !reflect.DeepEqual(args, []string{"ghcr.io/example/app:latest"}) {
+		t.Fatalf("args = %#v, want image payload", args)
+	}
+}
+
+func TestRunHelpIncludesISONetworkMode(t *testing.T) {
+	usage := RemoteCommandInfos()["run"].Usage
+	if !strings.Contains(usage, "--net=svc|ts|lan|iso") {
+		t.Fatalf("run usage = %q, want ISO network enum", usage)
+	}
+}
+
 func TestParseRunRejectsRemovedVMCPUFlags(t *testing.T) {
 	for _, args := range [][]string{
 		{"--cpus=4", "vm://ubuntu/26.04"},
@@ -397,6 +417,7 @@ func TestParseRunStopsAtUnknownFlag(t *testing.T) {
 func TestParseStagePullFlag(t *testing.T) {
 	args := []string{
 		"--pull",
+		"--publish-reset",
 		"commit",
 	}
 	flags, subcmd, outArgs, err := ParseStage(args)
@@ -405,6 +426,9 @@ func TestParseStagePullFlag(t *testing.T) {
 	}
 	if !flags.Pull {
 		t.Fatalf("Pull = false, want true")
+	}
+	if !flags.PublishReset {
+		t.Fatalf("PublishReset = false, want true")
 	}
 	if subcmd != "commit" {
 		t.Fatalf("subcmd = %q, want %q", subcmd, "commit")
@@ -821,6 +845,16 @@ func TestParseHostCleanupRequiresFrom(t *testing.T) {
 	_, _, err := ParseHostCleanup([]string{"--yes"})
 	if err == nil || !strings.Contains(err.Error(), "--from is required") {
 		t.Fatalf("error = %v, want --from is required", err)
+	}
+}
+
+func TestParseHostSetISOPool(t *testing.T) {
+	flags, args, err := ParseHostSet([]string{"--iso-pool", " 10.42.0.0/16 ", "-y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags.ISOPool != "10.42.0.0/16" || !flags.Yes || len(args) != 0 {
+		t.Fatalf("flags/args = %#v/%#v", flags, args)
 	}
 }
 func TestParseVMSetFlags(t *testing.T) {
@@ -1333,7 +1367,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if reg.SubCommands["run"].Info.Name != "run" {
 		t.Fatalf("registry run command = %#v", reg.SubCommands["run"])
 	}
-	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
+	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
 		t.Fatalf("run usage = %q", got)
 	}
 	if !containsString(reg.SubCommands["run"].Info.Examples, "yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs") {
@@ -1364,19 +1398,20 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if hostSet.Info.Name != "set" {
 		t.Fatalf("registry host set command = %#v", hostSet)
 	}
-	if hostSet.Info.Usage != "host set [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET_PREFIX] [--zfs] [--migrate-services=all|none] [--config=PATH] [--yes]" {
+	if hostSet.Info.Usage != "host set [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET_PREFIX] [--zfs] [--migrate-services=all|none] [--iso-pool=RFC1918_IPV4/16] [--config=PATH] [--yes]" {
 		t.Fatalf("host set usage = %q", hostSet.Info.Usage)
 	}
 	wantHostSetExamples := []string{
 		"yeet host set --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services --migrate-services=all --yes",
 		"yeet host set --services-root=/srv/yeet/services --migrate-services=none",
 		"yeet host set --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services --migrate-services=all",
+		"yeet host set --iso-pool=172.30.0.0/16",
 	}
 	if !reflect.DeepEqual(hostSet.Info.Examples, wantHostSetExamples) {
 		t.Fatalf("host set examples = %#v, want %#v", hostSet.Info.Examples, wantHostSetExamples)
 	}
 	hostSetHelp := yargs.GenerateGroupCommandHelp(reg.HelpConfig(), "host", "set", struct{}{})
-	for _, want := range []string{"--data-dir", "--services-root", "--zfs", "--migrate-services", "--config", "--yes"} {
+	for _, want := range []string{"--data-dir", "--services-root", "--zfs", "--migrate-services", "--iso-pool", "--config", "--yes"} {
 		if !strings.Contains(hostSetHelp, want) {
 			t.Fatalf("host set help missing %q:\n%s", want, hostSetHelp)
 		}
@@ -1413,7 +1448,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if !reflect.DeepEqual(reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples) {
 		t.Fatalf("service set examples = %#v, want %#v", reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples)
 	}
-	if reg.Groups["vm"].Commands["set"].Info.Usage != "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
+	if reg.Groups["vm"].Commands["set"].Info.Usage != "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan|iso] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
 		t.Fatalf("vm set usage = %q", reg.Groups["vm"].Commands["set"].Info.Usage)
 	}
 	wantVMSetExamples := []string{
@@ -1421,6 +1456,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 		"yeet vm set <vm> --memory-min=1g --balloon=auto",
 		"yeet vm set <vm> --net=lan",
 		"yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4",
+		"yeet vm set <vm> --net=iso",
 	}
 	if got := reg.Groups["vm"].Commands["set"].Info.Examples; !reflect.DeepEqual(got, wantVMSetExamples) {
 		t.Fatalf("vm set examples = %#v, want %#v", got, wantVMSetExamples)
@@ -1522,7 +1558,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if _, ok := RemoteGroupFlagSpecs()["service"]["set"]["--zfs"]; !ok {
 		t.Fatal("service set --zfs should be registered")
 	}
-	for _, flag := range []string{"--data-dir", "--services-root", "--migrate-services", "--config"} {
+	for _, flag := range []string{"--data-dir", "--services-root", "--migrate-services", "--iso-pool", "--config"} {
 		if !RemoteGroupFlagSpecs()["host"]["set"][flag].ConsumesValue {
 			t.Fatalf("host set %s should consume a value", flag)
 		}

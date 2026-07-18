@@ -15,8 +15,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
+	"github.com/yeetrun/yeet/pkg/netns"
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/util/set"
 )
@@ -707,6 +710,351 @@ func TestInstallerSuspendUIUsesConfiguredUI(t *testing.T) {
 		t.Fatal("UI was not suspended")
 	}
 	(&Installer{}).suspendUI()
+}
+
+func TestInstallDockerComposeServiceRoutesISOThroughSecurityLifecycle(t *testing.T) {
+	called := false
+	installer := &Installer{
+		isoComposeInstall: func(service *db.Service) error {
+			called = true
+			if service.ISO == nil {
+				t.Fatal("ISO lifecycle received service without allocation")
+			}
+			return nil
+		},
+	}
+	service := &db.Service{Name: "app", ServiceType: db.ServiceTypeDockerCompose, ISO: &db.ISOAllocation{}}
+
+	if err := installDockerComposeService(installer, service); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("ISO Compose install bypassed security lifecycle")
+	}
+}
+
+func TestInstallerStagesISOTailscaleResolverAndCurrentGenerationArtifactsWithExplicitAuth(t *testing.T) {
+	server := newTestServer(t)
+	serviceRoot := server.defaultServiceRootDir("app")
+	for _, dir := range []string{serviceBinDirForRoot(serviceRoot), serviceRunDirForRoot(serviceRoot), filepath.Join(serviceRoot, "tailscale")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allocation := testISOOverlayDNSAllocation([]string{"iso", "ts"})
+	allocation.Kind = string(iso.PayloadCompose)
+	service := &db.Service{
+		Name: "app", ServiceType: db.ServiceTypeDockerCompose, Generation: 3, LatestGeneration: 3,
+		ServiceRoot: serviceRoot, ISO: allocation, TSNet: &db.TailscaleNetwork{Interface: isoTailscaleInterface, Version: "1.2.3"},
+	}
+	if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		if data.Services == nil {
+			data.Services = map[string]*db.Service{}
+		}
+		data.Services["app"] = service
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	installer := &Installer{s: server, isoTailscaleAuthKey: "tskey-explicit"}
+	called := false
+	install := func(root, name, namespace string, tsNet *db.TailscaleNetwork, authKey, resolvConf string) (map[db.ArtifactName]string, error) {
+		called = true
+		if root != serviceRoot || name != "app" || namespace != allocation.NetNS || authKey != "tskey-explicit" {
+			t.Fatalf("install args = root %q name %q ns %q auth %q", root, name, namespace, authKey)
+		}
+		raw, err := os.ReadFile(resolvConf)
+		if err != nil || string(raw) != "nameserver "+allocation.Gateway.String()+"\n" {
+			t.Fatalf("ISO resolver = %q, %v", raw, err)
+		}
+		return map[db.ArtifactName]string{
+			db.ArtifactTSService: filepath.Join(serviceRoot, "bin", "tailscale.service"),
+			db.ArtifactTSConfig:  filepath.Join(serviceRoot, "tailscale", "tailscaled.json"),
+		}, nil
+	}
+
+	if err := installer.installISOTailscale(context.Background(), service, install); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("ISO Tailscale installer was not called")
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifacts := dv.Services().Get("app").Artifacts()
+	for _, name := range []db.ArtifactName{db.ArtifactNetNSResolv, db.ArtifactTSService, db.ArtifactTSConfig} {
+		artifact, ok := artifacts.GetOk(name)
+		if !ok {
+			t.Fatalf("artifact %q missing", name)
+		}
+		if _, ok := artifact.Refs().GetOk(db.Gen(3)); !ok {
+			t.Fatalf("artifact %q missing current generation ref", name)
+		}
+	}
+}
+
+func TestISOComposeLifecyclePolicyPhaseAcquiresAndReleasesOperationLockOnFailure(t *testing.T) {
+	server := newTestServer(t)
+	oldAcquire := acquireISOOperationLockForRuntime
+	acquired, released := 0, 0
+	acquireISOOperationLockForRuntime = func(context.Context, string) (func(), error) {
+		acquired++
+		return func() { released++ }, nil
+	}
+	t.Cleanup(func() { acquireISOOperationLockForRuntime = oldAcquire })
+	lifecycle := &isoComposeLifecycle{
+		si:     &Installer{s: server},
+		record: &db.Service{Name: "app"},
+	}
+
+	if err := lifecycle.EnsurePolicy(context.Background()); err == nil {
+		t.Fatal("EnsurePolicy unexpectedly succeeded without persisted ISO state")
+	}
+	if acquired != 1 || released != 1 {
+		t.Fatalf("ISO operation lock acquire/release = %d/%d, want 1/1 on failure", acquired, released)
+	}
+}
+
+func TestISOComposeLifecyclePullHonorsInstallerPullOption(t *testing.T) {
+	calls := 0
+	lifecycle := &isoComposeLifecycle{
+		si: &Installer{},
+		pullCompose: func(context.Context) error {
+			calls++
+			return nil
+		},
+	}
+	if err := lifecycle.Pull(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("pull calls = %d, want 0 when pull is disabled", calls)
+	}
+
+	lifecycle.si.icfg.Pull = true
+	if err := lifecycle.Pull(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("pull calls = %d, want 1 when pull is enabled", calls)
+	}
+}
+
+func TestISOComposeLifecycleCleanupPreservesCallerDeadline(t *testing.T) {
+	wantDeadline := time.Now().Add(time.Hour)
+	ctx, cancel := context.WithDeadline(context.Background(), wantDeadline)
+	defer cancel()
+	var gotDeadline time.Time
+	lifecycle := &isoComposeLifecycle{
+		downCompose: func(ctx context.Context) error {
+			var ok bool
+			gotDeadline, ok = ctx.Deadline()
+			if !ok {
+				t.Fatal("cleanup context has no deadline")
+			}
+			return nil
+		},
+		stopAux: func() error { return nil },
+	}
+	if err := lifecycle.ComposeDownRemoveOrphans(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !gotDeadline.Equal(wantDeadline) {
+		t.Fatalf("cleanup deadline = %v, want caller deadline %v", gotDeadline, wantDeadline)
+	}
+}
+
+func TestISOComposeLifecycleStartAuxReleasesOperationLockOnCancellationAndError(t *testing.T) {
+	startErr := errors.New("gate start failed")
+	for _, tc := range []struct {
+		name    string
+		ctx     func() context.Context
+		start   func() error
+		wantErr error
+	}{
+		{
+			name: "canceled",
+			ctx: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			start:   func() error { t.Fatal("started gate after cancellation"); return nil },
+			wantErr: context.Canceled,
+		},
+		{name: "start error", ctx: context.Background, start: func() error { return startErr }, wantErr: startErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			released := false
+			lifecycle := &isoComposeLifecycle{
+				isoUnlock: func() { released = true },
+				startAux: func() error {
+					if !released {
+						t.Fatal("gate start ran while ISO operation lock was held")
+					}
+					return tc.start()
+				},
+			}
+			err := lifecycle.StartAux(tc.ctx())
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("StartAux error = %v, want %v", err, tc.wantErr)
+			}
+			if !released {
+				t.Fatal("StartAux did not release ISO operation lock")
+			}
+		})
+	}
+}
+
+func TestISOComposeLifecycleRechecksAllocationAfterGateBeforeComposeUp(t *testing.T) {
+	allocation := testISORuntimeAllocation("app", iso.StateReserved)
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"app": allocation})
+	view, err := server.serviceView("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releasedBeforeGate := false
+	reacquired := 0
+	releasedAfterGate := 0
+	oldAcquire := acquireISOOperationLockForRuntime
+	acquireISOOperationLockForRuntime = func(context.Context, string) (func(), error) {
+		reacquired++
+		return func() { releasedAfterGate++ }, nil
+	}
+	t.Cleanup(func() { acquireISOOperationLockForRuntime = oldAcquire })
+	composeUpCalled := false
+	lifecycle := &isoComposeLifecycle{
+		si:         &Installer{s: server},
+		record:     view.AsStruct(),
+		allocation: allocation.Clone(),
+		isoUnlock:  func() { releasedBeforeGate = true },
+		startAux: func() error {
+			if !releasedBeforeGate {
+				t.Fatal("gate started before releasing the initial ISO lock")
+			}
+			_, _, err := server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
+				service.ISO.RemoveRequested = true
+				service.ISO.State = string(iso.StateTombstoned)
+				return nil
+			})
+			return err
+		},
+		upCompose: func(context.Context) error {
+			composeUpCalled = true
+			return nil
+		},
+	}
+
+	if err := lifecycle.StartAux(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	err = lifecycle.ComposeUp(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "changed while the ISO network gate was starting") {
+		t.Fatalf("ComposeUp error = %v, want changed-allocation rejection", err)
+	}
+	if composeUpCalled {
+		t.Fatal("Compose up ran after a concurrent ISO removal/state change")
+	}
+	if reacquired != 1 || releasedAfterGate != 1 {
+		t.Fatalf("post-gate ISO lock acquire/release = %d/%d, want 1/1", reacquired, releasedAfterGate)
+	}
+}
+
+func TestISOComposeLifecycleRechecksAllocationBeforeComposeCreate(t *testing.T) {
+	allocation := testISORuntimeAllocation("app", iso.StateReserved)
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"app": allocation})
+	view, err := server.serviceView("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
+		service.ISO.RemoveRequested = true
+		service.ISO.State = string(iso.StateTombstoned)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reacquired := 0
+	released := 0
+	oldAcquire := acquireISOOperationLockForRuntime
+	acquireISOOperationLockForRuntime = func(context.Context, string) (func(), error) {
+		reacquired++
+		return func() { released++ }, nil
+	}
+	t.Cleanup(func() { acquireISOOperationLockForRuntime = oldAcquire })
+	createCalled := false
+	lifecycle := &isoComposeLifecycle{
+		si:         &Installer{s: server},
+		record:     view.AsStruct(),
+		allocation: allocation.Clone(),
+		createCompose: func(context.Context) error {
+			createCalled = true
+			return nil
+		},
+	}
+
+	err = lifecycle.AttachNetwork(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "changed while the ISO network gate was starting") {
+		t.Fatalf("AttachNetwork error = %v, want changed-allocation rejection", err)
+	}
+	if createCalled {
+		t.Fatal("Compose create ran after a concurrent ISO removal/state change")
+	}
+	if reacquired != 1 || released != 1 {
+		t.Fatalf("pre-create ISO lock acquire/release = %d/%d, want 1/1", reacquired, released)
+	}
+}
+
+func TestISOComposeLifecycleReadmitsExactInputsBeforeComposeCreate(t *testing.T) {
+	allocation := testISORuntimeAllocation("app", iso.StateReserved)
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"app": allocation})
+	view, err := server.serviceView("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	withISORuntimeBackend(t, netns.BackendNFT)
+	oldVerifyPolicy := verifyISOPolicyForRuntime
+	oldVerifyTopology := verifyISOTopologyForRuntime
+	verifyISOPolicyForRuntime = func(context.Context, netns.ISOPolicyRules) error { return nil }
+	verifyISOTopologyForRuntime = func(context.Context, netns.ISOTopologySpec) error { return nil }
+	t.Cleanup(func() {
+		verifyISOPolicyForRuntime = oldVerifyPolicy
+		verifyISOTopologyForRuntime = oldVerifyTopology
+	})
+
+	var events []string
+	oldAcquire := acquireISOOperationLockForRuntime
+	acquireISOOperationLockForRuntime = func(context.Context, string) (func(), error) {
+		events = append(events, "lock")
+		return func() { events = append(events, "unlock") }, nil
+	}
+	t.Cleanup(func() { acquireISOOperationLockForRuntime = oldAcquire })
+	lifecycle := &isoComposeLifecycle{
+		si:         &Installer{s: server},
+		record:     view.AsStruct(),
+		allocation: allocation.Clone(),
+		readmitCompose: func(context.Context) error {
+			events = append(events, "readmit")
+			return nil
+		},
+		createCompose: func(context.Context) error {
+			events = append(events, "create")
+			return nil
+		},
+	}
+
+	if err := lifecycle.AttachNetwork(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle.releaseISOLock()
+	want := []string{"lock", "readmit", "create", "unlock"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("pre-create events = %#v, want %#v", events, want)
+	}
 }
 
 func TestPublishInstallEventIncludesServiceView(t *testing.T) {

@@ -504,3 +504,15 @@ func (c *Client) HostStorageCleanup(ctx context.Context, req HostStorageCleanupR
 	err := c.Call(ctx, RPCMethodHostStorageCleanup, req, &resp)
 	return resp, err
 }
+
+func (c *Client) ISOPoolPlan(ctx context.Context, req ISOPoolPlanRequest) (ISOPoolPlan, error) {
+	var resp ISOPoolPlan
+	err := c.Call(ctx, RPCMethodISOPoolPlan, req, &resp)
+	return resp, err
+}
+
+func (c *Client) ISOPoolApply(ctx context.Context, req ISOPoolApplyRequest) (ISOPoolApplyResult, error) {
+	var resp ISOPoolApplyResult
+	err := c.Call(ctx, RPCMethodISOPoolApply, req, &resp)
+	return resp, err
+}

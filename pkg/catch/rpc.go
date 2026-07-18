@@ -169,14 +169,27 @@ func (s *Server) dispatchRPCWithContext(ctx context.Context, req catchrpc.Reques
 	case "catch.ZFSServiceRootCandidates", catchrpc.RPCMethodServiceRootDefaults:
 		return s.handleRPCStorageRead(ctx, req)
 	case catchrpc.RPCMethodHostStoragePlan, catchrpc.RPCMethodHostStorageApply,
-		catchrpc.RPCMethodHostStorageFinalize, catchrpc.RPCMethodHostStorageCleanup:
-		return s.handleRPCHostStorage(ctx, req)
+		catchrpc.RPCMethodHostStorageFinalize, catchrpc.RPCMethodHostStorageCleanup,
+		catchrpc.RPCMethodISOPoolPlan, catchrpc.RPCMethodISOPoolApply:
+		return s.handleRPCHostMutation(ctx, req)
 	case "catch.VMDefaults":
 		return s.handleRPCVMDefaults(ctx, req)
 	case "catch.TailscaleSetup":
 		return s.handleRPCTailscaleSetup(req)
 	case "catch.ServicesList":
 		return s.handleRPCServicesList(req)
+	default:
+		return newRPCError(req.ID, catchrpc.ErrMethodNotFound, "method not found", req.Method)
+	}
+}
+
+func (s *Server) handleRPCHostMutation(ctx context.Context, req catchrpc.Request) catchrpc.Response {
+	switch req.Method {
+	case catchrpc.RPCMethodHostStoragePlan, catchrpc.RPCMethodHostStorageApply,
+		catchrpc.RPCMethodHostStorageFinalize, catchrpc.RPCMethodHostStorageCleanup:
+		return s.handleRPCHostStorage(ctx, req)
+	case catchrpc.RPCMethodISOPoolPlan, catchrpc.RPCMethodISOPoolApply:
+		return s.handleRPCISOPool(ctx, req)
 	default:
 		return newRPCError(req.ID, catchrpc.ErrMethodNotFound, "method not found", req.Method)
 	}
@@ -308,6 +321,41 @@ func (s *Server) handleRPCHostStorageCleanup(ctx context.Context, req catchrpc.R
 	resp, err := s.CleanupHostStorage(ctx, params)
 	if err != nil {
 		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to clean host storage", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
+}
+
+func (s *Server) handleRPCISOPool(ctx context.Context, req catchrpc.Request) catchrpc.Response {
+	switch req.Method {
+	case catchrpc.RPCMethodISOPoolPlan:
+		return s.handleRPCISOPoolPlan(ctx, req)
+	case catchrpc.RPCMethodISOPoolApply:
+		return s.handleRPCISOPoolApply(ctx, req)
+	default:
+		return newRPCError(req.ID, catchrpc.ErrMethodNotFound, "method not found", req.Method)
+	}
+}
+
+func (s *Server) handleRPCISOPoolPlan(ctx context.Context, req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.ISOPoolPlanRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.PlanISOPool(ctx, params)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to plan ISO pool", err.Error())
+	}
+	return newRPCResponse(req.ID, resp)
+}
+
+func (s *Server) handleRPCISOPoolApply(ctx context.Context, req catchrpc.Request) catchrpc.Response {
+	var params catchrpc.ISOPoolApplyRequest
+	if rpcErr := decodeRPCParams(req.Params, &params); rpcErr != nil {
+		return responseFromRPCError(req.ID, rpcErr)
+	}
+	resp, err := s.ApplyISOPool(ctx, params)
+	if err != nil {
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to apply ISO pool", err.Error())
 	}
 	return newRPCResponse(req.ID, resp)
 }
