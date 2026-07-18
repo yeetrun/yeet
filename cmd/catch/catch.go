@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"os/signal"
 	"os/user"
 	"path/filepath"
 	"slices"
@@ -345,17 +346,23 @@ func handleVMRunCommand(args []string) error {
 	serviceRoot := fs.String("service-root", "", "VM service root path")
 	diskPath := fs.String("disk-path", "", "VM rootfs disk path")
 	firecracker := fs.String("firecracker", "", "firecracker binary path")
+	jailer := fs.String("jailer", "", "matching Firecracker jailer binary path")
+	jailerBase := fs.String("jailer-base", "", "Firecracker jailer base directory")
 	apiSock := fs.String("api-sock", "", "firecracker API socket path")
 	configFile := fs.String("config-file", "", "firecracker config file path")
 	consoleSock := fs.String("console-sock", "", "VM serial console socket path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	err := runVMConsoleProxy(context.Background(), catch.VMConsoleProxyConfig{
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	err := runVMConsoleProxy(ctx, catch.VMConsoleProxyConfig{
 		Service:       *service,
 		ServiceRoot:   *serviceRoot,
 		DiskPath:      *diskPath,
 		Firecracker:   *firecracker,
+		Jailer:        *jailer,
+		JailerBase:    *jailerBase,
 		APISocket:     *apiSock,
 		ConfigFile:    *configFile,
 		ConsoleSocket: *consoleSock,

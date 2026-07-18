@@ -53,6 +53,7 @@ type vmImageManifest struct {
 	Initrd                string            `json:"initrd,omitempty"`
 	RootFS                string            `json:"rootfs"`
 	Firecracker           string            `json:"firecracker"`
+	Jailer                string            `json:"jailer,omitempty"`
 	RootFSSize            int64             `json:"rootfs_size"`
 	KernelVersion         string            `json:"kernel_version,omitempty"`
 	UpstreamKernelVersion string            `json:"upstream_kernel_version,omitempty"`
@@ -102,6 +103,7 @@ type vmImagePaths struct {
 	InitrdPath      string
 	RootFSPath      string
 	FirecrackerPath string
+	JailerPath      string
 }
 
 type vmImageAsset struct {
@@ -115,6 +117,21 @@ func (a vmImageAsset) DiskRootFSPath() string {
 		return a.PreparedRootFSPath
 	}
 	return a.Paths.RootFSPath
+}
+
+func (a vmImageAsset) RequireJailer() (string, error) {
+	path := strings.TrimSpace(a.Paths.JailerPath)
+	if path == "" {
+		return "", fmt.Errorf("VM image does not include the matching Firecracker jailer; update or rebuild the VM image bundle before using jailer isolation")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("inspect VM image jailer: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("VM image jailer %s is not an executable regular file", path)
+	}
+	return path, nil
 }
 
 func vmImageSupportsFastBoot(manifest vmImageManifest) bool {
@@ -572,12 +589,23 @@ func (c vmImageCache) ensureArtifacts(ctx context.Context, dir string, manifest 
 	if err := os.Chmod(firecrackerPath, 0o755); err != nil {
 		return vmImagePaths{}, fmt.Errorf("chmod firecracker: %w", err)
 	}
+	var jailerPath string
+	if strings.TrimSpace(manifest.Jailer) != "" {
+		jailerPath, err = c.ensureArtifact(ctx, dir, manifest, manifest.Jailer, progress, ui)
+		if err != nil {
+			return vmImagePaths{}, err
+		}
+		if err := os.Chmod(jailerPath, 0o755); err != nil {
+			return vmImagePaths{}, fmt.Errorf("chmod jailer: %w", err)
+		}
+	}
 
 	return vmImagePaths{
 		KernelPath:      kernelPath,
 		InitrdPath:      initrdPath,
 		RootFSPath:      rootFSPath,
 		FirecrackerPath: firecrackerPath,
+		JailerPath:      jailerPath,
 	}, nil
 }
 
@@ -921,7 +949,11 @@ func (m vmImageManifest) artifactNames() []string {
 	if strings.TrimSpace(m.Initrd) != "" {
 		names = append(names, m.Initrd)
 	}
-	return append(names, m.RootFS, m.Firecracker)
+	names = append(names, m.RootFS, m.Firecracker)
+	if strings.TrimSpace(m.Jailer) != "" {
+		names = append(names, m.Jailer)
+	}
+	return names
 }
 
 func latestCachedVMImageManifest(root string, family vmImageCatalogImage) (vmImageManifest, string, bool, error) {

@@ -15,6 +15,8 @@ import (
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
+var vmNetworkEnsureRuntimeIdentity = ensureVMRuntimeIdentity
+
 var (
 	vmNetworkLinkLister         = listVMNetworkLinks
 	vmNetworkRouteLister        = listVMNetworkRoutes
@@ -99,7 +101,10 @@ func (s *Server) reconcileVMNetworks(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	desired := vmNetworkDesiredStateFromDB(dv)
+	desired, err := s.vmNetworkDesiredStateFromDB(dv)
+	if err != nil {
+		return err
+	}
 	live, err := vmNetworkLiveStateCollector(ctx)
 	if err != nil {
 		return err
@@ -117,7 +122,11 @@ func (s *Server) EnsureVMNetwork(ctx context.Context, service string) error {
 	if err != nil {
 		return err
 	}
-	return ensureVMNetworkFromDataView(ctx, dv, service)
+	sv, ok := dv.Services().GetOk(service)
+	if !ok {
+		return fmt.Errorf("service %q not found", service)
+	}
+	return ensureVMNetworkFromDataView(ctx, dv, service, s.serviceRootFromService(sv.AsStruct()))
 }
 
 func EnsureVMNetwork(ctx context.Context, cfg *Config, service string) error {
@@ -131,13 +140,28 @@ func EnsureVMNetwork(ctx context.Context, cfg *Config, service string) error {
 	if !dv.Valid() {
 		return fmt.Errorf("db is invalid")
 	}
-	return ensureVMNetworkFromDataView(ctx, &dv, service)
+	sv, ok := dv.Services().GetOk(service)
+	if !ok {
+		return fmt.Errorf("service %q not found", service)
+	}
+	return ensureVMNetworkFromDataView(ctx, &dv, service, serviceRootFromConfig(*cfg, *sv.AsStruct()))
 }
 
-func ensureVMNetworkFromDataView(_ context.Context, dv *db.DataView, service string) error {
+func ensureVMNetworkFromDataView(_ context.Context, dv *db.DataView, service, serviceRoot string) error {
 	plan, err := vmNetworkPlanForVMService(dv, service)
 	if err != nil {
 		return err
+	}
+	isolation, err := vmIsolationModeForRoot(serviceRoot)
+	if err != nil {
+		return err
+	}
+	if isolation == vmIsolationJailer {
+		identity, err := vmNetworkEnsureRuntimeIdentity()
+		if err != nil {
+			return err
+		}
+		plan = plan.WithTapOwner(identity)
 	}
 	setupCmds, err := vmNetworkSetupCommands(plan)
 	if err != nil {
@@ -170,10 +194,33 @@ func (s *Server) reconcileOrphanedVMServiceNetworks(ctx context.Context) error {
 	return nil
 }
 
-func vmNetworkDesiredStateFromDB(dv *db.DataView) vmNetworkDesiredState {
+func (s *Server) vmNetworkDesiredStateFromDB(dv *db.DataView) (vmNetworkDesiredState, error) {
+	var runtimeIdentity *vmRuntimeIdentity
+	return vmNetworkDesiredStateFromDBWithTransform(dv, func(sv db.ServiceView, plan vmNetworkPlan) (vmNetworkPlan, error) {
+		mode, err := vmIsolationModeForRoot(s.serviceRootFromService(sv.AsStruct()))
+		if err != nil {
+			return vmNetworkPlan{}, err
+		}
+		if mode != vmIsolationJailer {
+			return plan, nil
+		}
+		if runtimeIdentity == nil {
+			identity, err := vmNetworkEnsureRuntimeIdentity()
+			if err != nil {
+				return vmNetworkPlan{}, err
+			}
+			runtimeIdentity = &identity
+		}
+		return plan.WithTapOwner(*runtimeIdentity), nil
+	})
+}
+
+type vmNetworkPlanTransform func(db.ServiceView, vmNetworkPlan) (vmNetworkPlan, error)
+
+func vmNetworkDesiredStateFromDBWithTransform(dv *db.DataView, transform vmNetworkPlanTransform) (vmNetworkDesiredState, error) {
 	desired := vmNetworkDesiredState{Owned: map[string]bool{}}
 	if dv == nil {
-		return desired
+		return desired, nil
 	}
 	for _, sv := range dv.Services().All() {
 		if sv.ServiceType() != db.ServiceTypeVM {
@@ -185,12 +232,19 @@ func vmNetworkDesiredStateFromDB(dv *db.DataView) vmNetworkDesiredState {
 		}
 		name := sv.Name()
 		plan := vmNetworkPlanFromDB(name, vm.Networks().AsSlice())
+		if transform != nil {
+			var err error
+			plan, err = transform(sv, plan)
+			if err != nil {
+				return vmNetworkDesiredState{}, err
+			}
+		}
 		desired.Plans = append(desired.Plans, plan)
 		for base := range vmNetworkOwnedBases(plan) {
 			desired.Owned[base] = true
 		}
 	}
-	return desired
+	return desired, nil
 }
 
 func vmNetworkPlanForVMService(dv *db.DataView, service string) (vmNetworkPlan, error) {

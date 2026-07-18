@@ -51,6 +51,28 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 	)
 }
 
+func TestRenderVMSystemdUnitUsesJailerWhenConfigured(t *testing.T) {
+	unit := renderVMSystemdUnit(vmSystemdConfig{
+		Service:          "devbox",
+		Runner:           "/srv/catch/run/catch",
+		DataDir:          "/srv/catch/data",
+		ServiceRoot:      "/srv/vms/devbox",
+		DiskPath:         "/srv/vms/devbox/data/rootfs.raw",
+		Firecracker:      "/srv/images/firecracker",
+		Jailer:           "/srv/images/jailer",
+		JailerBase:       "/run/yeet/vm-jailer",
+		ConfigPath:       "/srv/vms/devbox/run/firecracker.json",
+		APISocket:        "/srv/vms/devbox/run/firecracker.sock",
+		ConsoleSocket:    "/srv/vms/devbox/run/serial.sock",
+		VsockSocket:      "/srv/vms/devbox/run/vsock.sock",
+		WorkingDirectory: "/srv/vms/devbox",
+	})
+	want := "--firecracker /srv/images/firecracker --jailer /srv/images/jailer --jailer-base /run/yeet/vm-jailer --api-sock"
+	if !strings.Contains(unit, want) {
+		t.Fatalf("jailed unit missing %q:\n%s", want, unit)
+	}
+}
+
 func TestRegenerateHostStorageVMSystemdUnitUsesCurrentRoots(t *testing.T) {
 	systemdDir := t.TempDir()
 	oldDir := vmSystemdSystemDir
@@ -64,20 +86,24 @@ func TestRegenerateHostStorageVMSystemdUnitUsesCurrentRoots(t *testing.T) {
 	}
 	t.Cleanup(func() { vmProvisionSystemctlFunc = oldSystemctl })
 
+	serviceRoot := filepath.Join(t.TempDir(), "services", "devbox")
 	service := &db.Service{
 		Name:        "devbox",
 		ServiceType: db.ServiceTypeVM,
-		ServiceRoot: "/flash/yeet/services/devbox",
+		ServiceRoot: serviceRoot,
 		VM: &db.VMConfig{
 			Image: db.VMImageConfig{
 				RootFS: "/flash/yeet/data/vm-images/ubuntu/rootfs.ext4",
 			},
 			Disk: db.VMDiskConfig{
-				Path: "/flash/yeet/services/devbox/data/rootfs.raw",
+				Path: filepath.Join(serviceRoot, "data", "rootfs.raw"),
 			},
 		},
 	}
 	cfg := Config{RootDir: "/flash/yeet/data", ServicesRoot: "/flash/yeet/services"}
+	if err := writeVMIsolationMode(service.ServiceRoot, vmIsolationJailer); err != nil {
+		t.Fatalf("write VM isolation mode: %v", err)
+	}
 
 	units, err := regenerateHostStorageVMSystemdUnit(context.Background(), cfg, service, "/flash/yeet/services/catch/run/catch")
 	if err != nil {
@@ -94,9 +120,11 @@ func TestRegenerateHostStorageVMSystemdUnitUsesCurrentRoots(t *testing.T) {
 	for _, want := range []string{
 		"/flash/yeet/data",
 		"/flash/yeet/services/catch/run/catch",
-		"/flash/yeet/services/devbox",
-		"/flash/yeet/services/devbox/data/rootfs.raw",
+		serviceRoot,
+		filepath.Join(serviceRoot, "data", "rootfs.raw"),
 		"/flash/yeet/data/vm-images/ubuntu/firecracker",
+		"--jailer /flash/yeet/data/vm-images/ubuntu/jailer",
+		"--jailer-base /flash/yeet/data/vm-jailer",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit missing %s:\n%s", want, unit)

@@ -104,6 +104,7 @@ type VMSetFlags struct {
 	MacvlanMac    string
 	MacvlanVlan   int
 	MacvlanParent string
+	VMMIsolation  string
 }
 
 type VMKernelFlags struct {
@@ -366,6 +367,7 @@ type vmSetFlagsParsed struct {
 	MacvlanMac    string `flag:"macvlan-mac"`
 	MacvlanVlan   int    `flag:"macvlan-vlan"`
 	MacvlanParent string `flag:"macvlan-parent"`
+	VMMIsolation  string `flag:"vmm-isolation" help:"Host VMM isolation: jailer, legacy-root"`
 }
 
 type vmKernelFlagsParsed struct {
@@ -635,12 +637,13 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set VM resources and networking",
-				Usage:       "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
+				Usage:       "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC] [--vmm-isolation=jailer|legacy-root]",
 				Examples: []string{
 					"yeet vm set <vm> --vcpus=8 --memory=8g --disk=128g",
 					"yeet vm set <vm> --memory-min=1g --balloon=auto",
 					"yeet vm set <vm> --net=lan",
 					"yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4",
+					"yeet vm set <vm> --vmm-isolation=jailer",
 				},
 				ArgsSchema: ServiceArgs{},
 			},
@@ -1242,6 +1245,7 @@ func ParseVMSet(args []string) (VMSetFlags, []string, error) {
 		MacvlanMac:    strings.TrimSpace(parsed.Flags.MacvlanMac),
 		MacvlanVlan:   parsed.Flags.MacvlanVlan,
 		MacvlanParent: strings.TrimSpace(parsed.Flags.MacvlanParent),
+		VMMIsolation:  strings.ToLower(strings.TrimSpace(parsed.Flags.VMMIsolation)),
 	}
 	if err := validateVMSetFlags(flags); err != nil {
 		return VMSetFlags{}, nil, err
@@ -1313,6 +1317,9 @@ func validateVMSetFlags(flags VMSetFlags) error {
 	if err := validateMacvlanVLAN(flags.MacvlanVlan); err != nil {
 		return err
 	}
+	if flags.VMMIsolation != "" && flags.VMMIsolation != "jailer" && flags.VMMIsolation != "legacy-root" {
+		return fmt.Errorf("--vmm-isolation must be jailer or legacy-root")
+	}
 	if !hasVMSetChange(flags) {
 		return fmt.Errorf("vm set requires settings to change")
 	}
@@ -1370,7 +1377,8 @@ func hasVMSetChange(flags VMSetFlags) bool {
 		flags.NetworkChange ||
 		strings.TrimSpace(flags.MacvlanMac) != "" ||
 		flags.MacvlanVlan != 0 ||
-		strings.TrimSpace(flags.MacvlanParent) != ""
+		strings.TrimSpace(flags.MacvlanParent) != "" ||
+		strings.TrimSpace(flags.VMMIsolation) != ""
 }
 
 func normalizeVMBalloonMode(value string) (string, error) {

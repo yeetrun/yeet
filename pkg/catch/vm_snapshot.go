@@ -29,8 +29,10 @@ type vmFirecrackerSnapshotter interface {
 }
 
 var (
-	vmSnapshotIsRunning                            = (*Server).IsServiceRunning
-	vmSnapshotFirecracker vmFirecrackerSnapshotter = firecrackerSnapshotAPI{}
+	vmSnapshotIsRunning                                      = (*Server).IsServiceRunning
+	vmSnapshotFirecracker           vmFirecrackerSnapshotter = firecrackerSnapshotAPI{}
+	vmSnapshotEnsureRuntimeIdentity                          = ensureVMRuntimeIdentity
+	vmSnapshotChown                                          = os.Chown
 )
 
 const vmSnapshotRecoveryTimeout = 30 * time.Second
@@ -304,6 +306,10 @@ func (s *Server) createTemporaryFullVMCheckpoint(ctx context.Context, service *d
 	if err != nil {
 		return vmSnapshotResult{}, "", fmt.Errorf("create temporary VM checkpoint directory: %w", err)
 	}
+	if err := delegateVMCheckpointDirIfJailed(s.serviceRootFromService(service), dir); err != nil {
+		_ = os.RemoveAll(dir)
+		return vmSnapshotResult{}, "", err
+	}
 	result := vmSnapshotResult{
 		StatePath:  filepath.Join(dir, "firecracker-state.bin"),
 		MemoryPath: filepath.Join(dir, "memory.bin"),
@@ -313,6 +319,24 @@ func (s *Server) createTemporaryFullVMCheckpoint(ctx context.Context, service *d
 		return result, "", fmt.Errorf("create Firecracker checkpoint: %w", err)
 	}
 	return result, dir, nil
+}
+
+func delegateVMCheckpointDirIfJailed(root, dir string) error {
+	mode, err := vmIsolationModeForRoot(root)
+	if err != nil {
+		return err
+	}
+	if mode != vmIsolationJailer {
+		return nil
+	}
+	identity, err := vmSnapshotEnsureRuntimeIdentity()
+	if err != nil {
+		return err
+	}
+	if err := vmSnapshotChown(dir, identity.UID, identity.GID); err != nil {
+		return fmt.Errorf("delegate VM checkpoint directory %s: %w", dir, err)
+	}
+	return nil
 }
 
 func (s *Server) failFullVMSnapshot(ctx context.Context, snapshotName string, checkpointDir string, cause error) error {

@@ -30,6 +30,7 @@ var (
 	vmProvisionCommitFunc             func(*ttyExecer, vmProvisionPlan, string, *cli.ServiceSetFlags) error
 	vmProvisionGuestReadyBoundaryFunc = captureVMGuestReadyBoundary
 	vmProvisionGuestReadyWaitFunc     = waitVMGuestReady
+	vmProvisionEnsureRuntimeIdentity  = ensureVMRuntimeIdentity
 	prepareHostVMLANBridgeForRunFn    = func(root string) (VMLANBridgePrepareStatus, error) {
 		return PrepareVMLANBridge(root, true)
 	}
@@ -57,6 +58,8 @@ type vmProvisionPlan struct {
 	APISocket              string
 	VsockSocket            string
 	PIDFile                string
+	IsolationMode          string
+	RuntimeIdentity        vmRuntimeIdentity
 }
 
 func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr error) {
@@ -98,7 +101,7 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 		return err
 	}
 	donePlan := e.traceBlock("vm plan")
-	plan, err := e.newVMProvisionPlan(flags, payload, inputs.ServiceRoot, inputs.Shape, inputs.Image, svcNet, inputs.SSHKey)
+	plan, err := e.newVMProvisionPlan(flags, payload, inputs.ServiceRoot, inputs.Shape, inputs.Image, svcNet, inputs.SSHKey, inputs.RuntimeIdentity)
 	donePlan()
 	if err != nil {
 		ui.FailStep(err.Error())
@@ -260,11 +263,12 @@ func vmLANBridgeProvisionArtifactsError(plan vmLANBridgePlan, cause error) error
 }
 
 type vmProvisionInputs struct {
-	Context     context.Context
-	ServiceRoot resolvedServiceRoot
-	Shape       vmShape
-	Image       vmImageAsset
-	SSHKey      string
+	Context         context.Context
+	ServiceRoot     resolvedServiceRoot
+	Shape           vmShape
+	Image           vmImageAsset
+	SSHKey          string
+	RuntimeIdentity vmRuntimeIdentity
 }
 
 func (e *ttyExecer) vmProvisionInputs(flags cli.RunFlags, payload string, ui ProgressUI) (vmProvisionInputs, error) {
@@ -298,6 +302,14 @@ func (e *ttyExecer) vmProvisionInputs(flags cli.RunFlags, payload string, ui Pro
 		return inputs, err
 	}
 	inputs.Image = image
+	if _, err := image.RequireJailer(); err != nil {
+		return inputs, err
+	}
+	identity, err := vmProvisionEnsureRuntimeIdentity()
+	if err != nil {
+		return inputs, err
+	}
+	inputs.RuntimeIdentity = identity
 	return inputs, nil
 }
 
@@ -620,14 +632,27 @@ func cachedVMImageAsset(ctx context.Context, cache vmImageCache, version string)
 		return vmImageAsset{}, fmt.Errorf("cached VM image %s is incomplete; run yeet vm images update or rerun with --image-policy=update", version)
 	}
 	paths := cachedVMImagePaths(dir, manifest)
-	if err := os.Chmod(paths.FirecrackerPath, 0o755); err != nil {
-		return vmImageAsset{}, fmt.Errorf("chmod cached firecracker: %w", err)
+	if err := chmodCachedVMRuntime(paths); err != nil {
+		return vmImageAsset{}, err
 	}
 	preparedRootFS, err := prepareVMRootFSFunc(ctx, paths.RootFSPath)
 	if err != nil {
 		return vmImageAsset{}, err
 	}
 	return vmImageAsset{Paths: paths, PreparedRootFSPath: preparedRootFS, Manifest: manifest}, nil
+}
+
+func chmodCachedVMRuntime(paths vmImagePaths) error {
+	if err := os.Chmod(paths.FirecrackerPath, 0o755); err != nil {
+		return fmt.Errorf("chmod cached firecracker: %w", err)
+	}
+	if strings.TrimSpace(paths.JailerPath) == "" {
+		return nil
+	}
+	if err := os.Chmod(paths.JailerPath, 0o755); err != nil {
+		return fmt.Errorf("chmod cached jailer: %w", err)
+	}
+	return nil
 }
 
 func cachedVMImagePaths(dir string, manifest vmImageManifest) vmImagePaths {
@@ -637,6 +662,9 @@ func cachedVMImagePaths(dir string, manifest vmImageManifest) vmImagePaths {
 		KernelPath:      filepath.Join(dir, manifest.Kernel),
 		RootFSPath:      filepath.Join(dir, manifest.RootFS),
 		FirecrackerPath: filepath.Join(dir, manifest.Firecracker),
+	}
+	if strings.TrimSpace(manifest.Jailer) != "" {
+		paths.JailerPath = filepath.Join(dir, manifest.Jailer)
 	}
 	if strings.TrimSpace(manifest.Initrd) != "" {
 		paths.InitrdPath = filepath.Join(dir, manifest.Initrd)
@@ -967,8 +995,12 @@ func vmMetadataDriverForImage(payload string, manifest vmImageManifest) string {
 	return manifest.MetadataDriverOr("ubuntu")
 }
 
-func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resolvedRoot resolvedServiceRoot, shape vmShape, image vmImageAsset, svcNet *db.SvcNetwork, sshKey string) (vmProvisionPlan, error) {
+func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resolvedRoot resolvedServiceRoot, shape vmShape, image vmImageAsset, svcNet *db.SvcNetwork, sshKey string, runtimeIdentity vmRuntimeIdentity) (vmProvisionPlan, error) {
 	networkPlan, err := e.vmNetworkPlanFromFlags(flags, svcNet)
+	if err != nil {
+		return vmProvisionPlan{}, err
+	}
+	networkPlan, jailerPath, err := prepareVMProvisionRuntime(image, runtimeIdentity, networkPlan)
 	if err != nil {
 		return vmProvisionPlan{}, err
 	}
@@ -1051,6 +1083,8 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 		ServiceRoot:      resolvedRoot.Root,
 		DiskPath:         diskPath,
 		Firecracker:      image.Paths.FirecrackerPath,
+		Jailer:           jailerPath,
+		JailerBase:       vmJailerBaseForDataRoot(e.s.cfg.RootDir),
 		ConfigPath:       firecrackerPath,
 		APISocket:        apiSocket,
 		ConsoleSocket:    filepath.Join(runDir, "serial.sock"),
@@ -1079,7 +1113,20 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 		APISocket:              apiSocket,
 		VsockSocket:            vsockSocket,
 		PIDFile:                filepath.Join(runDir, "firecracker.pid"),
+		IsolationMode:          vmIsolationJailer,
+		RuntimeIdentity:        runtimeIdentity,
 	}, nil
+}
+
+func prepareVMProvisionRuntime(image vmImageAsset, identity vmRuntimeIdentity, network vmNetworkPlan) (vmNetworkPlan, string, error) {
+	if identity.UID <= 0 || identity.GID <= 0 {
+		return vmNetworkPlan{}, "", fmt.Errorf("VM runtime identity must be non-root")
+	}
+	jailerPath, err := image.RequireJailer()
+	if err != nil {
+		return vmNetworkPlan{}, "", err
+	}
+	return network.WithTapOwner(identity), jailerPath, nil
 }
 
 func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvisionPlan, ui *vmProvisionUI) (networkTouched bool, err error) {
@@ -1124,11 +1171,10 @@ func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvis
 	ui.DoneStep("")
 	ui.StartStep(vmRunStepConfig)
 	doneConfig := e.traceBlock("vm firecracker config")
-	if err := writeVMFile(plan.FirecrackerConfigPath, plan.FirecrackerConfig, 0o644); err != nil {
+	if err := writeVMProvisionConfigArtifacts(plan); err != nil {
 		doneConfig()
-		retErr := fmt.Errorf("write Firecracker config: %w", err)
-		ui.FailStep(retErr.Error())
-		return networkTouched, retErr
+		ui.FailStep(err.Error())
+		return networkTouched, err
 	}
 	doneConfig()
 	ui.DoneStep("")
@@ -1154,6 +1200,16 @@ func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvis
 	doneUnit()
 	ui.DoneStep("")
 	return networkTouched, nil
+}
+
+func writeVMProvisionConfigArtifacts(plan vmProvisionPlan) error {
+	if err := writeVMFile(plan.FirecrackerConfigPath, plan.FirecrackerConfig, 0o644); err != nil {
+		return fmt.Errorf("write Firecracker config: %w", err)
+	}
+	if err := writeVMIsolationMode(plan.ServiceRoot.Root, plan.IsolationMode); err != nil {
+		return fmt.Errorf("write VM isolation mode: %w", err)
+	}
+	return nil
 }
 
 func (e *ttyExecer) commitVMProvision(plan vmProvisionPlan, payload string, snapshotPolicyFlags *cli.ServiceSetFlags) error {

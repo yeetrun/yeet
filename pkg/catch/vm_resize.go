@@ -18,11 +18,16 @@ import (
 )
 
 var (
-	vmServiceSetHostProfileFunc   func(*Server, string, int64) (vmHostProfile, error)
-	vmServiceSetDiskRunner        vmCommandRunner
-	vmServiceSetNetworkRunner     vmNetworkCommandRunner
-	vmServiceSetMetadataInjector  func(context.Context, string, vmMetadataConfig) error
-	isServiceRunningForVMSettings = (*Server).IsServiceRunning
+	vmServiceSetHostProfileFunc       func(*Server, string, int64) (vmHostProfile, error)
+	vmServiceSetDiskRunner            vmCommandRunner
+	vmServiceSetNetworkRunner         vmNetworkCommandRunner
+	vmServiceSetMetadataInjector      func(context.Context, string, vmMetadataConfig) error
+	isServiceRunningForVMSettings     = (*Server).IsServiceRunning
+	vmServiceSetEnsureRuntimeIdentity = ensureVMRuntimeIdentity
+	vmServiceSetValidateRuntimePair   = validateVMJailerRuntimePair
+	vmServiceSetSystemctl             = runVMSystemctl
+	vmServiceSetCleanupJail           = cleanupVMJail
+	vmServiceSetDelegateJailStorage   = delegateVMJailStorage
 )
 
 type vmSettingsPlan struct {
@@ -45,6 +50,17 @@ type vmSettingsPlan struct {
 	FirecrackerExisted    bool
 	FirecrackerConfigPath string
 	FirecrackerConfig     []byte
+	OldIsolationMode      string
+	NewIsolationMode      string
+	IsolationChanged      bool
+	RuntimeIdentity       vmRuntimeIdentity
+	FirecrackerPath       string
+	JailerPath            string
+	SystemdUnitPath       string
+	OldSystemdUnit        []byte
+	SystemdUnitExisted    bool
+	SystemdUnitContent    string
+	JailCleanupPlan       vmJailPlan
 }
 
 func (s *Server) updateVMServiceSettings(ctx context.Context, name string, flags cli.VMSetFlags) (retErr error) {
@@ -81,6 +97,9 @@ func (s *Server) planVMServiceSettings(name string, flags cli.VMSetFlags) (vmSet
 	if err := s.applyVMNetworkSettings(dv, name, service, flags, &plan); err != nil {
 		return vmSettingsPlan{}, err
 	}
+	if err := s.applyVMIsolationSettings(service, flags, &plan); err != nil {
+		return vmSettingsPlan{}, err
+	}
 	if err := plan.finalizeFirecrackerSettings(); err != nil {
 		return vmSettingsPlan{}, err
 	}
@@ -114,6 +133,10 @@ func (s *Server) baseVMSettingsPlan(name string) (*db.DataView, *db.Service, vmS
 
 	root := s.serviceRootFromView(sv)
 	oldVM := *service.VM.Clone()
+	isolation, err := vmIsolationModeForRoot(root)
+	if err != nil {
+		return nil, nil, vmSettingsPlan{}, err
+	}
 	return dv, service, vmSettingsPlan{
 		Service:               name,
 		Root:                  root,
@@ -126,7 +149,108 @@ func (s *Server) baseVMSettingsPlan(name string) (*db.DataView, *db.Service, vmS
 		NewNetwork:            vmNetworkPlanFromDB(name, oldVM.Networks),
 		SvcNetwork:            cloneSvcNetwork(service.SvcNetwork),
 		FirecrackerConfigPath: filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
+		OldIsolationMode:      isolation,
+		NewIsolationMode:      isolation,
 	}, nil
+}
+
+func (s *Server) applyVMIsolationSettings(service *db.Service, flags cli.VMSetFlags, plan *vmSettingsPlan) error {
+	mode, err := requestedVMIsolationMode(plan.NewIsolationMode, flags.VMMIsolation)
+	if err != nil {
+		return err
+	}
+	plan.NewIsolationMode = mode
+	if err := applyVMIsolationIdentity(plan); err != nil {
+		return err
+	}
+	plan.IsolationChanged = plan.NewIsolationMode != plan.OldIsolationMode
+	if !plan.IsolationChanged {
+		return nil
+	}
+	plan.NetworkChanged = true
+	plan.FirecrackerPath = filepath.Join(filepath.Dir(plan.OldVM.Image.RootFS), "firecracker")
+	plan.JailerPath = filepath.Join(filepath.Dir(plan.OldVM.Image.RootFS), "jailer")
+	plan.JailCleanupPlan = newVMJailCleanupPlan(plan.Service, plan.FirecrackerPath, vmJailerBaseForDataRoot(s.cfg.RootDir), []string{
+		plan.OldVM.Sockets.APISocketPath,
+		plan.OldVM.Sockets.VsockSocketPath,
+	})
+	if err := requireVMIsolationJailer(*plan); err != nil {
+		return err
+	}
+	return s.planVMIsolationSystemdUnit(service, plan)
+}
+
+func requestedVMIsolationMode(current, requested string) (string, error) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" {
+		return current, nil
+	}
+	if err := validateVMIsolationMode(requested); err != nil {
+		return "", err
+	}
+	return requested, nil
+}
+
+func applyVMIsolationIdentity(plan *vmSettingsPlan) error {
+	if plan.OldIsolationMode == vmIsolationJailer || plan.NewIsolationMode == vmIsolationJailer {
+		identity, err := vmServiceSetEnsureRuntimeIdentity()
+		if err != nil {
+			return err
+		}
+		plan.RuntimeIdentity = identity
+	}
+	if plan.OldIsolationMode == vmIsolationJailer {
+		plan.OldNetwork = plan.OldNetwork.WithTapOwner(plan.RuntimeIdentity)
+	}
+	if plan.NewIsolationMode == vmIsolationJailer {
+		plan.NewNetwork = plan.NewNetwork.WithTapOwner(plan.RuntimeIdentity)
+	} else {
+		plan.NewNetwork.TapOwner = vmRuntimeIdentity{}
+	}
+	return nil
+}
+
+func requireVMIsolationJailer(plan vmSettingsPlan) error {
+	if plan.NewIsolationMode != vmIsolationJailer {
+		return nil
+	}
+	_, err := (vmImageAsset{Paths: vmImagePaths{JailerPath: plan.JailerPath}}).RequireJailer()
+	return err
+}
+
+func (s *Server) planVMIsolationSystemdUnit(service *db.Service, plan *vmSettingsPlan) error {
+	plan.SystemdUnitPath = filepath.Join(vmSystemdSystemDir, vmSystemdUnitName(plan.Service))
+	raw, err := os.ReadFile(plan.SystemdUnitPath)
+	if err == nil {
+		plan.OldSystemdUnit = append([]byte(nil), raw...)
+		plan.SystemdUnitExisted = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read VM systemd unit: %w", err)
+	}
+	diskPath := plan.OldVM.Disk.Path
+	if strings.TrimSpace(diskPath) == "" {
+		diskPath = plan.OldVM.Image.RootFS
+	}
+	var jailer string
+	if plan.NewIsolationMode == vmIsolationJailer {
+		jailer = plan.JailerPath
+	}
+	plan.SystemdUnitContent = renderVMSystemdUnit(vmSystemdConfig{
+		Service:          plan.Service,
+		Runner:           s.catchRunnerPath(),
+		DataDir:          s.cfg.RootDir,
+		ServiceRoot:      plan.Root,
+		DiskPath:         diskPath,
+		Firecracker:      plan.FirecrackerPath,
+		Jailer:           jailer,
+		JailerBase:       vmJailerBaseForDataRoot(s.cfg.RootDir),
+		ConfigPath:       plan.FirecrackerConfigPath,
+		APISocket:        plan.OldVM.Sockets.APISocketPath,
+		ConsoleSocket:    plan.OldVM.Console.SocketPath,
+		VsockSocket:      plan.OldVM.Sockets.VsockSocketPath,
+		WorkingDirectory: serviceDataDirForRoot(plan.Root),
+	})
+	return nil
 }
 
 func (s *Server) applyVMShapeSettings(service *db.Service, flags cli.VMSetFlags, plan *vmSettingsPlan) error {
@@ -587,6 +711,7 @@ type vmSettingsApplyResult struct {
 	plan               vmSettingsPlan
 	metadataTouched    bool
 	firecrackerTouched bool
+	isolationTouched   bool
 }
 
 func (r vmSettingsApplyResult) rollback(ctx context.Context) error {
@@ -601,6 +726,11 @@ func (r vmSettingsApplyResult) rollback(ctx context.Context) error {
 			retErr = errors.Join(retErr, err)
 		}
 	}
+	if r.isolationTouched {
+		if err := restoreVMServiceIsolationSettings(r.plan); err != nil {
+			retErr = errors.Join(retErr, err)
+		}
+	}
 	if err := r.network.rollback(); err != nil {
 		retErr = errors.Join(retErr, err)
 	}
@@ -609,6 +739,9 @@ func (r vmSettingsApplyResult) rollback(ctx context.Context) error {
 
 func (s *Server) applyVMServiceSettingsPlan(ctx context.Context, plan vmSettingsPlan) (vmSettingsApplyResult, error) {
 	result := vmSettingsApplyResult{plan: plan}
+	if err := prepareVMServiceIsolationTransition(ctx, plan); err != nil {
+		return result, err
+	}
 	if err := applyVMServiceDiskSettings(ctx, plan); err != nil {
 		return result, err
 	}
@@ -621,11 +754,75 @@ func (s *Server) applyVMServiceSettingsPlan(ctx context.Context, plan vmSettings
 	if err := applyVMServiceMetadataSettings(ctx, plan); err != nil {
 		return result, err
 	}
-	result.firecrackerTouched = true
-	if err := writeVMFile(plan.FirecrackerConfigPath, plan.FirecrackerConfig, 0o644); err != nil {
+	if err := persistVMServiceRuntimeSettings(plan, &result); err != nil {
 		return result, err
 	}
 	return result, nil
+}
+
+func prepareVMServiceIsolationTransition(ctx context.Context, plan vmSettingsPlan) error {
+	if !plan.IsolationChanged {
+		return nil
+	}
+	if plan.NewIsolationMode == vmIsolationJailer {
+		if err := vmServiceSetValidateRuntimePair(ctx, plan.FirecrackerPath, plan.JailerPath); err != nil {
+			return err
+		}
+	}
+	if err := vmServiceSetCleanupJail(plan.JailCleanupPlan); err != nil {
+		return fmt.Errorf("clean up stale VM jail: %w", err)
+	}
+	if plan.NewIsolationMode != vmIsolationJailer {
+		return nil
+	}
+	diskPath := plan.OldVM.Disk.Path
+	if strings.TrimSpace(diskPath) == "" {
+		diskPath = plan.OldVM.Image.RootFS
+	}
+	return vmServiceSetDelegateJailStorage(plan.Root, diskPath, plan.RuntimeIdentity)
+}
+
+func persistVMServiceRuntimeSettings(plan vmSettingsPlan, result *vmSettingsApplyResult) error {
+	result.firecrackerTouched = true
+	if err := writeVMFile(plan.FirecrackerConfigPath, plan.FirecrackerConfig, 0o644); err != nil {
+		return err
+	}
+	result.isolationTouched = plan.IsolationChanged
+	return applyVMServiceIsolationSettings(plan)
+}
+
+func applyVMServiceIsolationSettings(plan vmSettingsPlan) error {
+	if !plan.IsolationChanged {
+		return nil
+	}
+	if err := writeVMSystemdUnitAtomic(plan.SystemdUnitPath, []byte(plan.SystemdUnitContent), 0o644); err != nil {
+		return fmt.Errorf("write VM systemd unit: %w", err)
+	}
+	if err := writeVMIsolationMode(plan.Root, plan.NewIsolationMode); err != nil {
+		return err
+	}
+	if err := vmServiceSetSystemctl("daemon-reload"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func restoreVMServiceIsolationSettings(plan vmSettingsPlan) error {
+	var retErr error
+	if plan.SystemdUnitExisted {
+		if err := writeVMSystemdUnitAtomic(plan.SystemdUnitPath, plan.OldSystemdUnit, 0o644); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore VM systemd unit: %w", err))
+		}
+	} else if err := os.Remove(plan.SystemdUnitPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		retErr = errors.Join(retErr, fmt.Errorf("remove new VM systemd unit: %w", err))
+	}
+	if err := writeVMIsolationMode(plan.Root, plan.OldIsolationMode); err != nil {
+		retErr = errors.Join(retErr, fmt.Errorf("restore VM isolation mode: %w", err))
+	}
+	if err := vmServiceSetSystemctl("daemon-reload"); err != nil {
+		retErr = errors.Join(retErr, fmt.Errorf("reload restored VM systemd unit: %w", err))
+	}
+	return retErr
 }
 
 func applyVMServiceDiskSettings(ctx context.Context, plan vmSettingsPlan) error {

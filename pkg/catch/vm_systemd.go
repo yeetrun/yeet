@@ -22,6 +22,8 @@ type vmSystemdConfig struct {
 	ServiceRoot      string
 	DiskPath         string
 	Firecracker      string
+	Jailer           string
+	JailerBase       string
 	ConfigPath       string
 	APISocket        string
 	ConsoleSocket    string
@@ -34,6 +36,25 @@ func renderVMSystemdUnit(cfg vmSystemdConfig) string {
 	if strings.TrimSpace(cfg.VsockSocket) != "" {
 		cleanupSockets = append(cleanupSockets, cfg.VsockSocket)
 	}
+	launchArgs := []string{
+		"vm-run",
+		"--service", cfg.Service,
+		"--service-root", cfg.ServiceRoot,
+		"--disk-path", cfg.DiskPath,
+		"--firecracker", cfg.Firecracker,
+	}
+	if strings.TrimSpace(cfg.Jailer) != "" {
+		jailerBase := strings.TrimSpace(cfg.JailerBase)
+		if jailerBase == "" {
+			jailerBase = defaultVMJailerBase
+		}
+		launchArgs = append(launchArgs, "--jailer", cfg.Jailer, "--jailer-base", jailerBase)
+	}
+	launchArgs = append(launchArgs,
+		"--api-sock", cfg.APISocket,
+		"--config-file", cfg.ConfigPath,
+		"--console-sock", cfg.ConsoleSocket,
+	)
 	return fmt.Sprintf(`[Unit]
 Description=yeet VM %s
 After=network-online.target yeet-ns.service
@@ -44,7 +65,7 @@ Type=simple
 WorkingDirectory=%s
 ExecStartPre=/bin/rm -f %s
 ExecStartPre=%s -data-dir %s vm-network-ensure %s
-ExecStart=%s vm-run --service %s --service-root %s --disk-path %s --firecracker %s --api-sock %s --config-file %s --console-sock %s
+ExecStart=%s %s
 Restart=on-failure
 RestartForceExitStatus=75
 RestartPreventExitStatus=%d
@@ -54,7 +75,7 @@ TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
-`, cfg.Service, cfg.WorkingDirectory, strings.Join(cleanupSockets, " "), cfg.Runner, cfg.DataDir, cfg.Service, cfg.Runner, cfg.Service, cfg.ServiceRoot, cfg.DiskPath, cfg.Firecracker, cfg.APISocket, cfg.ConfigPath, cfg.ConsoleSocket, VMRestoreLoadFailedExitCode)
+`, cfg.Service, cfg.WorkingDirectory, strings.Join(cleanupSockets, " "), cfg.Runner, cfg.DataDir, cfg.Service, cfg.Runner, strings.Join(launchArgs, " "), VMRestoreLoadFailedExitCode)
 }
 
 func ensureVMSystemdRestorePrevent(name string) error {
@@ -97,6 +118,14 @@ func regenerateHostStorageVMSystemdUnit(ctx context.Context, cfg Config, service
 	if strings.TrimSpace(diskPath) == "" {
 		diskPath = rootFS
 	}
+	isolation, err := vmIsolationModeForRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	var jailer string
+	if isolation == vmIsolationJailer {
+		jailer = filepath.Join(filepath.Dir(rootFS), "jailer")
+	}
 	unit := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          service.Name,
 		Runner:           runner,
@@ -104,6 +133,8 @@ func regenerateHostStorageVMSystemdUnit(ctx context.Context, cfg Config, service
 		ServiceRoot:      root,
 		DiskPath:         diskPath,
 		Firecracker:      filepath.Join(filepath.Dir(rootFS), "firecracker"),
+		Jailer:           jailer,
+		JailerBase:       vmJailerBaseForDataRoot(cfg.RootDir),
 		ConfigPath:       filepath.Join(runDir, "firecracker.json"),
 		APISocket:        filepath.Join(runDir, "firecracker.sock"),
 		ConsoleSocket:    filepath.Join(runDir, "serial.sock"),

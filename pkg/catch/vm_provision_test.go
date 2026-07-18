@@ -617,6 +617,9 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	if len(networkCommands) == 0 {
 		t.Fatal("network runner was not called")
 	}
+	if !containsCommand(networkCommands, []string{"ip", "tuntap", "add", vm.Networks[0].Tap, "mode", "tap", "user", "812", "group", "813"}) {
+		t.Fatalf("network commands missing delegated TAP owner: %#v", networkCommands)
+	}
 	if injectedDisk != vm.Disk.Path {
 		t.Fatalf("metadata injected into %q, want VM disk %q", injectedDisk, vm.Disk.Path)
 	}
@@ -634,7 +637,10 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "yeet.hostname=svc")
 	assertFileContains(t, filepath.Join(serviceRoot, "metadata", "hostname"), "svc")
 	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("svc")), "ExecStart=")
+	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("svc")), "--jailer "+filepath.Join(filepath.Dir(vm.Image.RootFS), "jailer"))
+	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("svc")), "--jailer-base "+vmJailerBaseForDataRoot(server.cfg.RootDir))
 	assertFileContains(t, filepath.Join(systemdDir, vmSystemdUnitName("svc")), "--api-sock")
+	assertFileContains(t, vmIsolationMarkerPath(serviceRoot), vmIsolationJailer)
 
 	wantSystemctl := [][]string{
 		{"daemon-reload"},
@@ -1631,15 +1637,15 @@ func TestRunVMCachedImagePolicyUsesRequestedOfficialFamily(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
 	stubVMImageCatalogFetch(t, vmImageTestCatalog())
-	contents := vmImageTestContents()
+	contents := vmProvisionImageTestContents()
 	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
-	ubuntuDir := writeCachedVMImageManifest(t, cacheRoot, vmImageTestManifest(testUbuntuVMImageVersion, contents))
+	ubuntuDir := writeCachedVMImageManifest(t, cacheRoot, vmProvisionImageTestManifest(testUbuntuVMImageVersion, contents))
 	writeCachedVMImageArtifacts(t, ubuntuDir, contents)
-	nixosCached := vmImageTestManifest(testNixOSVMImageVersion, contents)
+	nixosCached := vmProvisionImageTestManifest(testNixOSVMImageVersion, contents)
 	nixosCached.Name = "yeet-nixos-26.05"
 	nixosDir := writeCachedVMImageManifest(t, cacheRoot, nixosCached)
 	writeCachedVMImageArtifacts(t, nixosDir, contents)
-	nixosLatest := vmImageTestManifest("nixos-26.05-amd64-v2", contents)
+	nixosLatest := vmProvisionImageTestManifest("nixos-26.05-amd64-v2", contents)
 	nixosLatest.Name = "yeet-nixos-26.05"
 	manifestServer := newVMImageArtifactTestServer(t, nixosLatest, contents)
 	defer manifestServer.Close()
@@ -1884,8 +1890,8 @@ func TestRunVMMissingImageAutomaticallyEnsures(t *testing.T) {
 func TestRunVMCurrentImageUsesCachedAssetWithoutEnsuring(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")
-	contents := vmImageTestContents()
-	manifest := vmImageTestManifest(testUbuntuVMImageVersion, contents)
+	contents := vmProvisionImageTestContents()
+	manifest := vmProvisionImageTestManifest(testUbuntuVMImageVersion, contents)
 	dir := writeCachedVMImageManifest(t, filepath.Join(server.cfg.RootDir, "vm-images"), manifest)
 	writeCachedVMImageArtifacts(t, dir, contents)
 	oldPrepareRootFS := prepareVMRootFSFunc
@@ -1918,8 +1924,8 @@ func TestRunVMCatalogOnlyCurrentImageUsesCachedRemoteAsset(t *testing.T) {
 	payload := "vm://debian/13"
 	version := "debian-13-amd64-v1"
 	manifestURL := "https://github.com/yeetrun/yeet-vm-images/releases/download/debian-13-amd64-latest/manifest.json"
-	contents := vmImageTestContents()
-	manifest := vmImageTestManifest(version, contents)
+	contents := vmProvisionImageTestContents()
+	manifest := vmProvisionImageTestManifest(version, contents)
 	manifest.Name = "yeet-debian-13"
 	dir := writeCachedVMImageManifest(t, filepath.Join(server.cfg.RootDir, "vm-images"), manifest)
 	writeCachedVMImageArtifacts(t, dir, contents)
@@ -2119,6 +2125,7 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	oldPrepareRootFS := prepareVMRootFSFunc
 	oldGuestReadyBoundary := vmProvisionGuestReadyBoundaryFunc
 	oldGuestReadyWait := vmProvisionGuestReadyWaitFunc
+	oldRuntimeIdentity := vmProvisionEnsureRuntimeIdentity
 	t.Cleanup(func() {
 		vmProvisionHostProfileFunc = oldHostProfile
 		vmImageInspectFunc = oldImageInspect
@@ -2133,6 +2140,7 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 		prepareVMRootFSFunc = oldPrepareRootFS
 		vmProvisionGuestReadyBoundaryFunc = oldGuestReadyBoundary
 		vmProvisionGuestReadyWaitFunc = oldGuestReadyWait
+		vmProvisionEnsureRuntimeIdentity = oldRuntimeIdentity
 	})
 	vmProvisionHostProfileFunc = func(_ *ttyExecer, resolved resolvedServiceRoot, runningVMBytes int64) (vmHostProfile, error) {
 		if resolved.Root != serviceRoot {
@@ -2165,6 +2173,9 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	}
 	vmProvisionDiskRunner = func(context.Context, []string) error { return nil }
 	vmProvisionNetworkRunner = func([]string) error { return nil }
+	vmProvisionEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
 	vmProvisionMetadataInjector = func(context.Context, string, vmMetadataConfig) error { return nil }
 	vmProvisionSSHKeyFunc = func() (string, error) {
 		return "ssh-ed25519 AAAATEST user@example", nil
@@ -2225,6 +2236,10 @@ func fakeVMImageAssetVersion(t *testing.T, version string) (vmImageAsset, error)
 		KernelPath:      filepath.Join(dir, "vmlinux"),
 		RootFSPath:      filepath.Join(dir, "rootfs.ext4.zst"),
 		FirecrackerPath: filepath.Join(dir, "firecracker"),
+		JailerPath:      filepath.Join(dir, "jailer"),
+	}
+	if err := os.WriteFile(paths.JailerPath, []byte("jailer"), 0o755); err != nil {
+		return vmImageAsset{}, err
 	}
 	return vmImageAsset{
 		Paths:              paths,
@@ -2236,6 +2251,7 @@ func fakeVMImageAssetVersion(t *testing.T, version string) (vmImageAsset, error)
 			Kernel:       "vmlinux",
 			RootFS:       "rootfs.ext4.zst",
 			Firecracker:  "firecracker",
+			Jailer:       "jailer",
 			RootFSSize:   2 << 30,
 		},
 	}, nil
@@ -2267,11 +2283,24 @@ func stubVMProvisionImageState(t *testing.T, state vmImageCacheState) {
 
 func seedCachedVMProvisionImage(t *testing.T, server *Server, version string) {
 	t.Helper()
-	contents := vmImageTestContents()
-	manifest := vmImageTestManifest(version, contents)
+	contents := vmProvisionImageTestContents()
+	manifest := vmProvisionImageTestManifest(version, contents)
 	root := filepath.Join(server.cfg.RootDir, "vm-images")
 	dir := writeCachedVMImageManifest(t, root, manifest)
 	writeCachedVMImageArtifacts(t, dir, contents)
+}
+
+func vmProvisionImageTestContents() map[string][]byte {
+	contents := vmImageTestContents()
+	contents["jailer"] = []byte("jailer")
+	return contents
+}
+
+func vmProvisionImageTestManifest(version string, contents map[string][]byte) vmImageManifest {
+	manifest := vmImageTestManifest(version, contents)
+	manifest.Jailer = "jailer"
+	manifest.Checksums[manifest.Jailer] = testSHA256Hex(contents[manifest.Jailer])
+	return manifest
 }
 
 func assertVMImageVersion(t *testing.T, server *Server, service, version string) {

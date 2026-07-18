@@ -127,6 +127,70 @@ func TestVMImageCacheDownloadsOptionalInitrdArtifact(t *testing.T) {
 	}
 }
 
+func TestVMImageCacheDownloadsOptionalJailerArtifact(t *testing.T) {
+	contents := vmImageTestContents()
+	contents["jailer"] = []byte("jailer")
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
+	manifest.Jailer = "jailer"
+	manifest.Checksums[manifest.Jailer] = testSHA256Hex(contents[manifest.Jailer])
+	manifestRaw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/manifest.json" {
+			_, _ = w.Write(manifestRaw)
+			return
+		}
+		if content, ok := contents[strings.TrimPrefix(r.URL.Path, "/")]; ok {
+			_, _ = w.Write(content)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	cache := vmImageCache{Root: t.TempDir(), ManifestURL: server.URL + "/manifest.json"}
+	paths, err := cache.Ensure(context.Background())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if filepath.Base(paths.JailerPath) != "jailer" {
+		t.Fatalf("jailer path = %q, want downloaded jailer", paths.JailerPath)
+	}
+	info, err := os.Stat(paths.JailerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Fatalf("jailer mode = %o, want 755", info.Mode().Perm())
+	}
+	if !reflect.DeepEqual(manifest.artifactNames(), []string{"vmlinux", "rootfs.ext4.zst", "firecracker", "jailer"}) {
+		t.Fatalf("artifact names = %#v", manifest.artifactNames())
+	}
+}
+
+func TestVMImageAssetRequireJailer(t *testing.T) {
+	dir := t.TempDir()
+	jailer := filepath.Join(dir, "jailer")
+	if err := os.WriteFile(jailer, []byte("jailer"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	asset := vmImageAsset{Paths: vmImagePaths{JailerPath: jailer}}
+	got, err := asset.RequireJailer()
+	if err != nil {
+		t.Fatalf("RequireJailer: %v", err)
+	}
+	if got != jailer {
+		t.Fatalf("jailer = %q, want %q", got, jailer)
+	}
+
+	_, err = (vmImageAsset{}).RequireJailer()
+	if err == nil || !strings.Contains(err.Error(), "matching Firecracker jailer") {
+		t.Fatalf("missing jailer error = %v", err)
+	}
+}
+
 func TestVMImageCacheRetriesTemporaryManifestFetchFailure(t *testing.T) {
 	oldDelay := vmImageFetchRetryDelay
 	vmImageFetchRetryDelay = 0

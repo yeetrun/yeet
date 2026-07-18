@@ -23,6 +23,8 @@ import (
 
 type VMConsoleProxyConfig struct {
 	Firecracker   string
+	Jailer        string
+	JailerBase    string
 	APISocket     string
 	ConfigFile    string
 	ConsoleSocket string
@@ -94,7 +96,11 @@ func RunVMConsoleProxy(ctx context.Context, cfg VMConsoleProxyConfig) error {
 	if err != nil {
 		return failVMRestoreLoadBeforeStart(resultPath, err)
 	}
-	cmd := vmFirecrackerCommand(ctx, cfg, restoreMode)
+	cmd, cleanupProcess, err := prepareVMConsoleProcess(ctx, cfg, restoreMode)
+	if err != nil {
+		return err
+	}
+	defer cleanupProcess()
 	console, err := pty.Start(cmd)
 	if err != nil {
 		return fmt.Errorf("start Firecracker console PTY: %w", err)
@@ -243,6 +249,11 @@ func validateVMConsoleProxyConfig(cfg VMConsoleProxyConfig) error {
 	}
 	if cfg.ConsoleSocket == "" {
 		return fmt.Errorf("console socket path is required")
+	}
+	if strings.TrimSpace(cfg.Jailer) != "" {
+		if err := validateVMJailCanonicalInputs(cfg); err != nil {
+			return err
+		}
 	}
 	return nil
 }
