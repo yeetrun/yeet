@@ -5,8 +5,10 @@
 package catch
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	osuser "os/user"
 	"path/filepath"
@@ -22,6 +24,7 @@ type hostStoragePathReason string
 
 const (
 	hostStoragePathReasonCatchRoot   hostStoragePathReason = "catch-root"
+	hostStoragePathReasonPreserved   hostStoragePathReason = "preserved-root"
 	hostStoragePathReasonServiceRoot hostStoragePathReason = "service-root"
 	hostStoragePathReasonServicesDir hostStoragePathReason = "services-root"
 	hostStoragePathReasonDataDir     hostStoragePathReason = "data-dir"
@@ -87,7 +90,7 @@ func (m hostStoragePathMappings) Rewrite(value string) (string, bool, error) {
 }
 
 func hostStorageMappingsFromPlan(plan catchrpc.HostStoragePlan) hostStoragePathMappings {
-	var mappings hostStoragePathMappings
+	mappings := hostStoragePreservedRootMappings(plan.Legacy.PreservedRoots)
 	if plan.CatchAction.Move && !hostStoragePathsEqual(plan.CatchAction.From, plan.CatchAction.To) {
 		mappings = append(mappings, hostStoragePathMapping{From: plan.CatchAction.From, To: plan.CatchAction.To, Reason: hostStoragePathReasonCatchRoot})
 	}
@@ -108,7 +111,34 @@ func hostStorageMappingsFromPlan(plan catchrpc.HostStoragePlan) hostStoragePathM
 	return mappings.Sorted()
 }
 
+func hostStoragePreservedRootMappings(roots []string) hostStoragePathMappings {
+	mappings := make(hostStoragePathMappings, 0, len(roots))
+	for _, root := range roots {
+		root = cleanHostStoragePath(root)
+		if root == "" {
+			continue
+		}
+		mappings = append(mappings, hostStoragePathMapping{From: root, To: root, Reason: hostStoragePathReasonPreserved})
+	}
+	return mappings
+}
+
 var hostStorageLookupUserHomeFn = hostStorageLookupUserHome
+
+func legacyDefaultDataDir(installHome string) string {
+	installHome = cleanHostStoragePath(installHome)
+	if installHome == "" || !filepath.IsAbs(installHome) {
+		return ""
+	}
+	return filepath.Join(installHome, "yeet-data")
+}
+
+func isExactLegacyDefault(current catchrpc.HostStorageState, installHome string) bool {
+	legacyRoot := legacyDefaultDataDir(installHome)
+	return legacyRoot != "" &&
+		!current.DataDirZFS &&
+		hostStoragePathsEqual(current.DataDir, legacyRoot)
+}
 
 func hostStorageKnownLegacyRepairMappings(current catchrpc.HostStorageState, catchRoot string, legacyDataDirs []string) hostStoragePathMappings {
 	var mappings hostStoragePathMappings
@@ -197,7 +227,7 @@ func hostStorageAddLegacyRepairRefPresence(presence map[string]hostStorageLegacy
 	}
 }
 
-func hostStorageLegacyDefaultDataDirs(cfg Config) []string {
+func hostStorageLegacyRepairDataDirs(cfg Config) []string {
 	var homes []string
 	addHome := func(home string) {
 		home = cleanHostStoragePath(home)
@@ -209,8 +239,12 @@ func hostStorageLegacyDefaultDataDirs(cfg Config) []string {
 		}
 	}
 	addHome("/root")
-	if home, ok := hostStorageLookupUserHomeFn(cfg.InstallUser); ok {
+	addHome(cfg.InstallHome)
+	home, foundInstallHome := hostStorageLookupUserHomeFn(cfg.InstallUser)
+	if foundInstallHome {
 		addHome(home)
+	} else if strings.TrimSpace(cfg.InstallUser) != "root" && hostStorageInstallUserCanInferHome(cfg.InstallUser) {
+		addHome(filepath.Join("/home", strings.TrimSpace(cfg.InstallUser)))
 	}
 	var dirs []string
 	for _, home := range homes {
@@ -230,22 +264,64 @@ func hostStorageLookupUserHome(name string) (string, bool) {
 		return "", false
 	}
 	if u, err := osuser.Lookup(name); err == nil && strings.TrimSpace(u.HomeDir) != "" {
-		return u.HomeDir, true
+		return filepath.Clean(u.HomeDir), true
 	}
-	if name == "root" {
-		return "/root", true
-	}
-	if !hostStorageInstallUserCanInferHome(name) {
-		return "", false
-	}
-	return filepath.Join("/home", name), true
+	return "", false
 }
 
 func hostStorageInstallUserCanInferHome(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false
+	}
 	if name == "." || name == ".." {
 		return false
 	}
 	return !strings.ContainsAny(name, `/\@`)
+}
+
+func hostStorageMountPointsFromReader(r io.Reader) ([]string, error) {
+	var mountPoints []string
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 5 {
+			continue
+		}
+		mountPoint := unescapeHostStorageMountPath(fields[4])
+		if mountPoint != "" && filepath.IsAbs(mountPoint) {
+			mountPoints = append(mountPoints, filepath.Clean(mountPoint))
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("inspect host storage mounts: %w", err)
+	}
+	return uniqueSortedStrings(mountPoints), nil
+}
+
+func unescapeHostStorageMountPath(value string) string {
+	replacer := strings.NewReplacer(
+		`\040`, " ",
+		`\011`, "\t",
+		`\012`, "\n",
+		`\134`, `\`,
+	)
+	return replacer.Replace(value)
+}
+
+func hostStoragePreservedServiceRoots(cfg Config, services []db.Service, legacyRoot string) []string {
+	legacyServicesRoot := filepath.Join(cleanHostStoragePath(legacyRoot), "services")
+	var roots []string
+	for _, service := range services {
+		root := cleanHostStoragePath(serviceRootFromConfig(cfg, service))
+		if root == "" {
+			continue
+		}
+		if strings.TrimSpace(service.ServiceRootZFS) != "" || !hostStorageRootContains(legacyServicesRoot, root) {
+			roots = append(roots, root)
+		}
+	}
+	return uniqueSortedStrings(roots)
 }
 
 func hostStoragePathHasPrefix(value, root string) bool {

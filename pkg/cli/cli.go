@@ -93,6 +93,11 @@ type HostSetFlags struct {
 	Yes             bool
 }
 
+type HostCleanupFlags struct {
+	From string
+	Yes  bool
+}
+
 type VMSetFlags struct {
 	CPUs          int
 	Memory        string
@@ -344,12 +349,17 @@ type serviceSetFlagsParsed struct {
 }
 
 type hostSetFlagsParsed struct {
-	DataDir         string `flag:"data-dir" help:"Set catch data directory path or ZFS dataset"`
-	ServicesRoot    string `flag:"services-root" help:"Set default root for service directories or ZFS dataset prefix"`
+	DataDir         string `flag:"data-dir" help:"Catch state directory (default /var/lib/yeet)"`
+	ServicesRoot    string `flag:"services-root" help:"Default service root (default: data directory/services)"`
 	ZFS             bool   `flag:"zfs" help:"Treat supplied storage targets as ZFS datasets or dataset prefixes"`
 	MigrateServices string `flag:"migrate-services" help:"Service migration mode: all, none"`
 	Config          string `flag:"config" help:"Path to yeet.toml to update after service migration"`
 	Yes             bool   `flag:"yes" short:"y" help:"Confirm disruptive host storage changes without prompting"`
+}
+
+type hostCleanupFlagsParsed struct {
+	From string `flag:"from" help:"Exact journaled source path to remove"`
+	Yes  bool   `flag:"yes" short:"y" help:"Confirm removal without prompting"`
 }
 
 type serviceGenerationsFlagsParsed struct {
@@ -700,13 +710,22 @@ var remoteGroupInfos = map[string]GroupInfo{
 		Name:        "host",
 		Description: "Manage catch host settings",
 		Commands: map[string]CommandInfo{
+			"cleanup": {
+				Name:        "cleanup",
+				Description: "Remove an exact journaled inactive storage source after Catch revalidates it",
+				Usage:       "host cleanup --from=PATH [--yes]",
+				Examples: []string{
+					"yeet host cleanup --from=/root/yeet-data --yes",
+				},
+				FlagsSchema: hostCleanupFlagsParsed{},
+			},
 			"set": {
 				Name:        "set",
 				Description: "Configure catch host storage",
 				Usage:       "host set [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET_PREFIX] [--zfs] [--migrate-services=all|none] [--config=PATH] [--yes]",
 				Examples: []string{
-					"yeet host set --data-dir=$HOME/yeet-data",
-					"yeet host set --services-root=$HOME/yeet-data/services2 --migrate-services=none",
+					"yeet host set --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services --migrate-services=all --yes",
+					"yeet host set --services-root=/srv/yeet/services --migrate-services=none",
 					"yeet host set --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services --migrate-services=all",
 				},
 				FlagsSchema: hostSetFlagsParsed{},
@@ -873,7 +892,8 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"set":  {},
 	},
 	"host": {
-		"set": flagSpecsFromStruct(hostSetFlagsParsed{}),
+		"cleanup": flagSpecsFromStruct(hostCleanupFlagsParsed{}),
+		"set":     flagSpecsFromStruct(hostSetFlagsParsed{}),
 	},
 	"service": {
 		"set":         flagSpecsFromStruct(serviceSetFlagsParsed{}),
@@ -1102,6 +1122,21 @@ func ParseHostSet(args []string) (HostSetFlags, []string, error) {
 	}
 	if err := ValidateHostSetFlags(flags); err != nil {
 		return HostSetFlags{}, nil, err
+	}
+	return flags, parsed.Args, nil
+}
+
+func ParseHostCleanup(args []string) (HostCleanupFlags, []string, error) {
+	parsed, err := parseFlags[hostCleanupFlagsParsed](args)
+	if err != nil {
+		return HostCleanupFlags{}, nil, err
+	}
+	flags := HostCleanupFlags{
+		From: strings.TrimSpace(parsed.Flags.From),
+		Yes:  parsed.Flags.Yes,
+	}
+	if flags.From == "" {
+		return HostCleanupFlags{}, nil, fmt.Errorf("--from is required")
 	}
 	return flags, parsed.Args, nil
 }

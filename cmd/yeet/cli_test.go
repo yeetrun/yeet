@@ -20,6 +20,46 @@ import (
 	yeetpkg "github.com/yeetrun/yeet/pkg/yeet"
 )
 
+func captureCLIHelpOutput(t *testing.T, args ...string) string {
+	t.Helper()
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldStdout := os.Stdout
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	defer func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		os.Stdout = oldStdout
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	}()
+
+	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create stdout temp file: %v", err)
+	}
+	defer stdoutFile.Close()
+	os.Stdout = stdoutFile
+	os.Args = append([]string{"yeet"}, args...)
+	handleSvcCmdFn = func(handlerArgs []string) error {
+		t.Fatalf("help should not call service handler with args %v", handlerArgs)
+		return nil
+	}
+
+	if got := run(); got != 0 {
+		t.Fatalf("run exit code = %d, want 0", got)
+	}
+	if _, err := stdoutFile.Seek(0, 0); err != nil {
+		t.Fatalf("seek stdout: %v", err)
+	}
+	rawStdout, err := os.ReadFile(stdoutFile.Name())
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	return string(rawStdout)
+}
+
 func TestRunReturnsFailureWhenCommandReturnsError(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
@@ -614,6 +654,94 @@ func TestRunHostSetRoutesToHostHandler(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []string{"set"}) {
 		t.Fatalf("host set args = %#v, want group subcommand args", got)
+	}
+}
+
+func TestRunHostCleanupRoutesLiteralCommandToHostHandler(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldHandleHostCleanupFn := handleHostCleanupFn
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		handleHostCleanupFn = oldHandleHostCleanupFn
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	os.Args = []string{"yeet", "host", "cleanup", "--from=/root/yeet-data", "--yes"}
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("host cleanup should not route through service command with args %v", args)
+		return nil
+	}
+	var got []string
+	handleHostCleanupFn = func(_ context.Context, args []string) error {
+		got = append([]string(nil), args...)
+		return nil
+	}
+
+	if code := run(); code != 0 {
+		t.Fatalf("run exit code = %d, want 0", code)
+	}
+	want := []string{"cleanup", "--from=/root/yeet-data", "--yes"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("host cleanup args = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunHostSetAgentHelpShowsVarLibDefaults(t *testing.T) {
+	stdout := captureCLIHelpOutput(t, "host", "set", "--help-agent")
+	for _, want := range []string{
+		"Catch state directory (default /var/lib/yeet)",
+		"Default service root (default: data directory/services)",
+		"yeet host set --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services --migrate-services=all --yes",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "yeet host set --data-dir=$HOME/yeet-data") {
+		t.Fatalf("stdout recommends the legacy home data directory:\n%s", stdout)
+	}
+}
+
+func TestRunHostSetHumanHelpShowsVarLibDefaults(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "trailing help flag", args: []string{"host", "set", "--help"}},
+		{name: "help command path", args: []string{"help", "host", "set"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout := captureCLIHelpOutput(t, tt.args...)
+			for _, want := range []string{
+				"--data-dir string         Catch state directory (default /var/lib/yeet)",
+				"--services-root string    Default service root (default: data directory/services)",
+			} {
+				if !strings.Contains(stdout, want) {
+					t.Fatalf("stdout missing %q:\n%s", want, stdout)
+				}
+			}
+			if strings.Contains(stdout, "yeet - Deploy/manage services") {
+				t.Fatalf("stdout fell back to top-level help:\n%s", stdout)
+			}
+		})
+	}
+}
+
+func TestRunHostCleanupHumanHelpShowsSafetyOptions(t *testing.T) {
+	stdout := captureCLIHelpOutput(t, "host", "cleanup", "--help")
+	for _, want := range []string{
+		"Remove an exact journaled inactive storage source after Catch revalidates it",
+		"--from string             Exact journaled source path to remove",
+		"-y, --yes bool            Confirm removal without prompting",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, stdout)
+		}
 	}
 }
 

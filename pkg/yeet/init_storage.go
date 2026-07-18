@@ -6,6 +6,7 @@ package yeet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,17 +14,34 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
+)
+
+const (
+	defaultInitDataDir       = "/var/lib/yeet"
+	defaultCustomInitDataDir = "/srv/yeet"
 )
 
 type initStorageOptions struct {
-	DataDir           string
-	DataDirZFS        bool
-	ServicesRoot      string
-	ServicesRootZFS   bool
-	remoteCatchBinary string
+	DataDir             string
+	DataDirZFS          bool
+	ServicesRoot        string
+	ServicesRootZFS     bool
+	remoteCatchBinary   string
+	existingCatch       bool
+	legacyCleanupSource string
+}
+
+type initLegacyStorageCandidate struct {
+	Eligible   bool
+	SourceRoot string
+	TargetRoot string
+	Plan       catchrpc.HostStoragePlan
 }
 
 type initStorageProbe struct {
@@ -146,6 +164,7 @@ func prepareInitStorageOptions(ui *initUI, userAtRemote string, useSudo bool, op
 	if err != nil {
 		ui.Warn(fmt.Sprintf("Warning: could not check existing catch install: %v", err))
 	} else if installed {
+		existing.existingCatch = true
 		ui.DoneStep("existing catch")
 		return existing, nil
 	}
@@ -167,6 +186,273 @@ func prepareInitStorageOptions(ui *initUI, userAtRemote string, useSudo bool, op
 	}
 	ui.DoneStep(storage.summary())
 	return storage, nil
+}
+
+func runInitLegacyStorageMigration(ui *initUI, userAtRemote string, storage initStorageOptions) error {
+	if !storage.existingCatch || storage.DataDirZFS || storage.ServicesRootZFS {
+		return nil
+	}
+	host := initLegacyStorageRPCHost(userAtRemote)
+	client := newHostStorageClientFn(host)
+	if hostSetPathsEqual(storage.DataDir, defaultInitDataDir) {
+		return resumeInitLegacyStorageCleanup(context.Background(), ui, client, storage)
+	}
+	candidate, err := planInitLegacyStorageMigration(context.Background(), client, userAtRemote, storage)
+	if err != nil {
+		return err
+	}
+	if !candidate.Eligible {
+		return nil
+	}
+	return runInitLegacyStorageCandidate(ui, client, host, candidate)
+}
+
+func planInitLegacyStorageMigration(ctx context.Context, client hostStorageClient, userAtRemote string, storage initStorageOptions) (initLegacyStorageCandidate, error) {
+	if !shouldPlanInitLegacyStorageMigration(storage) {
+		return initLegacyStorageCandidate{}, nil
+	}
+	plan, err := client.HostStoragePlan(ctx, initLegacyStoragePlanRequest())
+	if err != nil {
+		return initLegacyStorageCandidate{}, fmt.Errorf("plan legacy host storage migration on %s: %w", userAtRemote, err)
+	}
+	return initLegacyStorageCandidateFromPlan(plan), nil
+}
+
+func runInitLegacyStorageCandidate(ui *initUI, client hostStorageClient, host string, candidate initLegacyStorageCandidate) error {
+	if !canPromptInitStorage() {
+		return writeInitLegacyStorageCommands(ui.out, candidate.SourceRoot)
+	}
+	if err := renderInitLegacyStoragePlan(ui.out, candidate); err != nil {
+		return err
+	}
+	ui.Suspend()
+	confirmed, err := activePrompter.Confirm("Move Yeet's legacy state to /var/lib/yeet and remove the old tree after verification? [Y/n]", true)
+	ui.Resume()
+	if err != nil {
+		return fmt.Errorf("confirm legacy host storage migration: %w", err)
+	}
+	if !confirmed {
+		return writeInitLegacyStorageCommands(ui.out, candidate.SourceRoot)
+	}
+	return applyInitLegacyStorageMigration(context.Background(), ui.out, client, host, candidate)
+}
+
+func initLegacyStorageRPCHost(userAtRemote string) string {
+	_, host, ok := strings.Cut(strings.TrimSpace(userAtRemote), "@")
+	if ok {
+		return host
+	}
+	return strings.TrimSpace(userAtRemote)
+}
+
+func shouldPlanInitLegacyStorageMigration(storage initStorageOptions) bool {
+	dataDir := strings.TrimSpace(storage.DataDir)
+	return dataDir != "" && !hostSetPathsEqual(dataDir, defaultInitDataDir)
+}
+
+func resumeInitLegacyStorageCleanup(ctx context.Context, ui *initUI, client hostStorageClient, storage initStorageOptions) error {
+	source, ok, err := normalizeInitLegacyStorageCleanupSource(storage.legacyCleanupSource)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if !canPromptInitStorage() {
+		return writeInitLegacyStorageCleanupCommand(ui.out, source)
+	}
+	ui.Suspend()
+	confirmed, err := activePrompter.Confirm(fmt.Sprintf("Remove inactive legacy Yeet state at %s? [Y/n]", source), true)
+	ui.Resume()
+	if err != nil {
+		return fmt.Errorf("confirm inactive legacy host storage cleanup: %w", err)
+	}
+	if !confirmed {
+		return writeInitLegacyStorageCleanupCommand(ui.out, source)
+	}
+	result, err := client.HostStorageCleanup(ctx, catchrpc.HostStorageCleanupRequest{From: source, Yes: true})
+	if err != nil {
+		return initLegacyStorageCleanupError(defaultInitDataDir, source, err)
+	}
+	if err := validateInitLegacyStorageCleanupResult(result, "", source); err != nil {
+		return initLegacyStorageCleanupError(defaultInitDataDir, source, err)
+	}
+	_, err = fmt.Fprintf(ui.out, "Removed inactive legacy host storage %s (transaction %s).\n", result.Removed, result.TransactionID)
+	return err
+}
+
+func normalizeInitLegacyStorageCleanupSource(source string) (string, bool, error) {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "", false, nil
+	}
+	source = filepath.Clean(source)
+	if !filepath.IsAbs(source) || hostSetPathsEqual(source, defaultInitDataDir) {
+		return "", false, fmt.Errorf("unsafe recorded legacy cleanup source %q", source)
+	}
+	return source, true, nil
+}
+
+func initLegacyStorageSourceFromRecordedHome(installHome string) (string, bool) {
+	installHome = filepath.Clean(strings.TrimSpace(installHome))
+	if installHome == "." || !filepath.IsAbs(installHome) {
+		return "", false
+	}
+	source := filepath.Join(installHome, "yeet-data")
+	return source, !hostSetPathsEqual(source, defaultInitDataDir)
+}
+
+func initLegacyStoragePlanRequest() catchrpc.HostStoragePlanRequest {
+	return catchrpc.HostStoragePlanRequest{Set: catchrpc.HostStorageSetRequest{
+		DataDir:         &catchrpc.HostStorageTarget{Value: defaultInitDataDir},
+		ServicesRoot:    &catchrpc.HostStorageTarget{Value: path.Join(defaultInitDataDir, "services")},
+		MigrateServices: catchrpc.HostStorageMigrateAll,
+	}}
+}
+
+func initLegacyStorageCandidateFromPlan(plan catchrpc.HostStoragePlan) initLegacyStorageCandidate {
+	return initLegacyStorageCandidate{
+		Eligible:   plan.Legacy.Eligible && plan.Legacy.CleanupAllowed,
+		SourceRoot: filepath.Clean(plan.Legacy.SourceRoot),
+		TargetRoot: filepath.Clean(plan.Legacy.TargetRoot),
+		Plan:       plan,
+	}
+}
+
+func renderInitLegacyStoragePlan(w io.Writer, candidate initLegacyStorageCandidate) error {
+	if _, err := fmt.Fprintln(w, "Legacy host storage migration plan"); err != nil {
+		return err
+	}
+	if err := renderHostStoragePlanDetails(w, candidate.Plan); err != nil {
+		return err
+	}
+	preserved := append([]string(nil), candidate.Plan.Legacy.PreservedRoots...)
+	sort.Strings(preserved)
+	if len(preserved) == 0 {
+		preserved = []string{"none"}
+	}
+	if _, err := fmt.Fprintf(w, "Preserved service roots: %s\n", strings.Join(preserved, ", ")); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "Estimated copy: %d bytes; target free space: %d bytes\n", candidate.Plan.Estimate.BytesToCopy, candidate.Plan.Estimate.BytesFree); err != nil {
+		return err
+	}
+	running := initLegacyStorageRunningServices(candidate.Plan)
+	if len(running) == 0 {
+		running = []string{"none"}
+	}
+	if _, err := fmt.Fprintf(w, "Running services that will stop and restart: %s\n", strings.Join(running, ", ")); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintf(w,
+		"Rollback boundary: %s remains authoritative until Catch reconnects and validates %s; only then may the inactive legacy tree be removed.\n",
+		candidate.SourceRoot,
+		candidate.TargetRoot,
+	)
+	return err
+}
+
+func initLegacyStorageRunningServices(plan catchrpc.HostStoragePlan) []string {
+	running := make([]string, 0, len(plan.ServicesAction.AffectedServices))
+	for _, service := range plan.ServicesAction.AffectedServices {
+		if service.WasRunning {
+			running = append(running, service.Name)
+		}
+	}
+	sort.Strings(running)
+	return running
+}
+
+func writeInitLegacyStorageCommands(w io.Writer, source string) error {
+	_, err := fmt.Fprintf(w,
+		"Legacy Yeet state remains at %s.\n"+
+			"Migrate it explicitly:\n"+
+			"  yeet host set --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services --migrate-services=all --yes\n"+
+			"After Catch reconnects and validates the new state, remove the inactive legacy tree:\n"+
+			"  yeet host cleanup --from=%s --yes\n",
+		source,
+		source,
+	)
+	return err
+}
+
+func writeInitLegacyStorageCleanupCommand(w io.Writer, source string) error {
+	_, err := fmt.Fprintf(w,
+		"Inactive legacy Yeet state remains at %s.\n"+
+			"Remove it explicitly:\n"+
+			"  yeet host cleanup --from=%s --yes\n",
+		source,
+		source,
+	)
+	return err
+}
+
+func applyInitLegacyStorageMigration(ctx context.Context, w io.Writer, client hostStorageClient, host string, candidate initLegacyStorageCandidate) error {
+	result, err := client.HostStorageApply(ctx, catchrpc.HostStorageApplyRequest{Plan: candidate.Plan, Yes: true})
+	if err != nil {
+		return initLegacyStorageApplyError(candidate.SourceRoot, err)
+	}
+	if err := renderHostStorageApplyResult(w, result); err != nil {
+		return err
+	}
+	if strings.TrimSpace(result.TransactionID) == "" {
+		return fmt.Errorf("legacy host storage migration did not return a transaction ID; retry with: %s", initLegacyStorageSetCommand())
+	}
+	finalized, err := finalizeHostStorageAfterReconnect(ctx, client, host, result.TransactionID)
+	if err != nil {
+		return initLegacyStorageFinalizeError(result.TransactionID, err)
+	}
+	if !finalized.CleanupPending {
+		return fmt.Errorf("legacy host storage transaction %s validated without authorizing cleanup of %s", finalized.TransactionID, candidate.SourceRoot)
+	}
+	cleanup, err := client.HostStorageCleanup(ctx, catchrpc.HostStorageCleanupRequest{From: candidate.SourceRoot, Yes: true})
+	if err != nil {
+		return initLegacyStorageCleanupError(candidate.TargetRoot, candidate.SourceRoot, err)
+	}
+	if err := validateInitLegacyStorageCleanupResult(cleanup, result.TransactionID, candidate.SourceRoot); err != nil {
+		return initLegacyStorageCleanupError(candidate.TargetRoot, candidate.SourceRoot, err)
+	}
+	_, err = fmt.Fprintf(w, "Removed inactive legacy host storage %s (transaction %s).\n", cleanup.Removed, cleanup.TransactionID)
+	return err
+}
+
+func validateInitLegacyStorageCleanupResult(result catchrpc.HostStorageCleanupResult, transactionID, source string) error {
+	gotTransactionID := strings.TrimSpace(result.TransactionID)
+	if gotTransactionID == "" {
+		return fmt.Errorf("host storage cleanup returned no transaction ID")
+	}
+	if transactionID != "" && gotTransactionID != transactionID {
+		return fmt.Errorf("host storage cleanup returned transaction %q, want %q", gotTransactionID, transactionID)
+	}
+	if strings.TrimSpace(result.Removed) == "" || !hostSetPathsEqual(result.Removed, source) {
+		return fmt.Errorf("host storage cleanup reported removed path %q, want %q", result.Removed, source)
+	}
+	return nil
+}
+
+func initLegacyStorageCleanupError(target, source string, err error) error {
+	return fmt.Errorf("new host storage at %s is active, but inactive legacy tree %s still contains sensitive state; resume cleanup with: yeet host cleanup --from=%s --yes: %w", target, source, source, err)
+}
+
+func initLegacyStorageFinalizeError(transactionID string, err error) error {
+	if initLegacyStorageFinalizeDidNotAnswer(err) {
+		return fmt.Errorf("catch could not be reconnected after applying host storage transaction %s; validation and cleanup did not run, and the active storage authority is unknown; retry recovery with: %s: %w", transactionID, initLegacyStorageSetCommand(), err)
+	}
+	return fmt.Errorf("catch answered Finalize for host storage transaction %s, but finalization did not complete; inspect the Finalize error and any reported rollback result, then retry with: %s: %w", transactionID, initLegacyStorageSetCommand(), err)
+}
+
+func initLegacyStorageFinalizeDidNotAnswer(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) ||
+		strings.Contains(err.Error(), "did not reconnect within 60s") ||
+		strings.Contains(err.Error(), "wait for Catch")
+}
+
+func initLegacyStorageApplyError(source string, err error) error {
+	return fmt.Errorf("legacy host storage migration from %s did not complete; inspect the reported rollback state, then retry with: %s: %w", source, initLegacyStorageSetCommand(), err)
+}
+
+func initLegacyStorageSetCommand() string {
+	return "yeet host set --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services --migrate-services=all --yes"
 }
 
 func canPromptInitStorage() bool {
@@ -191,19 +477,18 @@ func runInitStorageWizardWithPrompter(prompter yeetPrompter, probe initStoragePr
 
 func promptInitDataStorageWithPrompter(prompter yeetPrompter, probe initStorageProbe) (initStorageOptions, error) {
 	storage := initStorageOptions{}
-	defaultDataDir := filepath.Join(probe.Home, "yeet-data")
-	useDefaultData, err := prompter.Confirm(fmt.Sprintf("Use %s for catch data?", defaultDataDir), true)
+	useDefaultData, err := prompter.Confirm("Use /var/lib/yeet for catch data?", true)
 	if err != nil {
 		return initStorageOptions{}, err
 	}
 	if useDefaultData {
-		storage.DataDir = defaultDataDir
+		storage.DataDir = defaultInitDataDir
 		return storage, nil
 	}
 	if probe.ZFSAvailable {
-		return promptInitCustomDataStorageWithPrompter(prompter, storage, probe, defaultDataDir)
+		return promptInitCustomDataStorageWithPrompter(prompter, storage, probe, defaultCustomInitDataDir)
 	}
-	storage.DataDir, err = prompter.Input("Catch data directory", defaultDataDir)
+	storage.DataDir, err = prompter.Input("Catch data directory", defaultCustomInitDataDir)
 	if err != nil {
 		return initStorageOptions{}, err
 	}
@@ -321,7 +606,29 @@ func remoteInitExistingCatchStorage(userAtRemote string) (initStorageOptions, bo
 	cmd := exec.CommandContext(ctx, "ssh", userAtRemote, "systemctl cat catch.service 2>/dev/null")
 	output, err := cmd.Output()
 	if err == nil {
-		return initStorageOptionsFromCatchUnit(string(output)), true, nil
+		storage := initStorageOptionsFromCatchUnit(string(output))
+		if !hostSetPathsEqual(storage.DataDir, defaultInitDataDir) {
+			return storage, true, nil
+		}
+		installHome, found, homeErr := remoteInitRecordedInstallHome(ctx, userAtRemote, storage.DataDir)
+		if homeErr != nil {
+			return initStorageOptions{}, false, homeErr
+		}
+		if !found {
+			return storage, true, nil
+		}
+		source, ok := initLegacyStorageSourceFromRecordedHome(installHome)
+		if !ok {
+			return storage, true, nil
+		}
+		exists, existsErr := remoteInitLegacySourceExists(ctx, userAtRemote, source)
+		if existsErr != nil {
+			return initStorageOptions{}, false, existsErr
+		}
+		if exists {
+			storage.legacyCleanupSource = source
+		}
+		return storage, true, nil
 	}
 	if ctx.Err() != nil {
 		return initStorageOptions{}, false, ctx.Err()
@@ -331,6 +638,95 @@ func remoteInitExistingCatchStorage(userAtRemote string) (initStorageOptions, bo
 		return initStorageOptions{}, false, nil
 	}
 	return initStorageOptions{}, false, err
+}
+
+type initRecordedInstallMeta struct {
+	InstallHome string `json:"installHome"`
+}
+
+const initRemoteInstallMetadataMissingExitCode = 44
+
+func remoteInitRecordedInstallHome(ctx context.Context, userAtRemote, dataDir string) (string, bool, error) {
+	dataDir = strings.TrimSpace(dataDir)
+	if !filepath.IsAbs(dataDir) {
+		return "", false, fmt.Errorf("catch data directory %q is not absolute", dataDir)
+	}
+	metaPath := filepath.Join(filepath.Clean(dataDir), "install.json")
+	remoteCommand := remoteInitPrivilegedReadCommand(metaPath)
+	output, err := exec.CommandContext(ctx, "ssh", userAtRemote, remoteCommand).CombinedOutput()
+	if ctx.Err() != nil {
+		return "", false, ctx.Err()
+	}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == initRemoteInstallMetadataMissingExitCode {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read recorded catch install metadata %s on %s: %w", metaPath, userAtRemote, err)
+	}
+	var meta initRecordedInstallMeta
+	if err := json.Unmarshal(output, &meta); err != nil {
+		return "", false, fmt.Errorf("decode recorded catch install metadata %s: %w", metaPath, err)
+	}
+	recordedHome := strings.TrimSpace(meta.InstallHome)
+	if recordedHome == "" {
+		return "", false, nil
+	}
+	home := filepath.Clean(recordedHome)
+	if !filepath.IsAbs(home) {
+		return "", false, fmt.Errorf("recorded catch install home %q in %s is not absolute", meta.InstallHome, metaPath)
+	}
+	return home, true, nil
+}
+
+func remoteInitPrivilegedReadCommand(remotePath string) string {
+	quotedPath := shellQuote(remotePath)
+	return fmt.Sprintf(
+		`if [ "$(id -u)" -eq 0 ]; then if [ ! -e %s ] && [ ! -L %s ]; then exit %d; fi; cat %s; else if sudo -n test ! -e %s && sudo -n test ! -L %s; then exit %d; fi; sudo -n cat %s; fi`,
+		quotedPath,
+		quotedPath,
+		initRemoteInstallMetadataMissingExitCode,
+		quotedPath,
+		quotedPath,
+		quotedPath,
+		initRemoteInstallMetadataMissingExitCode,
+		quotedPath,
+	)
+}
+
+func remoteInitLegacySourceExists(ctx context.Context, userAtRemote, source string) (bool, error) {
+	if !filepath.IsAbs(source) {
+		return false, fmt.Errorf("legacy source %q is not absolute", source)
+	}
+	remoteCommand := remoteInitPrivilegedPathStatusCommand(source)
+	output, err := exec.CommandContext(ctx, "ssh", userAtRemote, remoteCommand).Output()
+	if ctx.Err() != nil {
+		return false, ctx.Err()
+	}
+	if err != nil {
+		return false, fmt.Errorf("determine whether legacy source %s exists on %s: %w", source, userAtRemote, err)
+	}
+	switch strings.TrimSpace(string(output)) {
+	case "present":
+		return true, nil
+	case "absent":
+		return false, nil
+	default:
+		return false, fmt.Errorf("determine whether legacy source %s exists on %s: unexpected remote status %q", source, userAtRemote, strings.TrimSpace(string(output)))
+	}
+}
+
+func remoteInitPrivilegedPathStatusCommand(remotePath string) string {
+	quotedPath := shellQuote(remotePath)
+	return fmt.Sprintf(
+		`if [ "$(id -u)" -eq 0 ]; then if [ -e %s ] || [ -L %s ]; then printf 'present\n'; else printf 'absent\n'; fi; elif sudo -n test -e %s || sudo -n test -L %s; then printf 'present\n'; elif sudo -n test ! -e %s && sudo -n test ! -L %s; then printf 'absent\n'; else exit 45; fi`,
+		quotedPath,
+		quotedPath,
+		quotedPath,
+		quotedPath,
+		quotedPath,
+		quotedPath,
+	)
 }
 
 func initStorageOptionsFromCatchUnit(unit string) initStorageOptions {

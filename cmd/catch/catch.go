@@ -36,8 +36,9 @@ import (
 )
 
 const (
-	defaultTSNetPort = 41547 // above CATCH on QWERTY
-	defaultRPCPort   = 41548
+	defaultTSNetPort    = 41547 // above CATCH on QWERTY
+	defaultRPCPort      = 41548
+	defaultCatchDataDir = "/var/lib/yeet"
 )
 
 var (
@@ -406,15 +407,7 @@ type catchStartupPaths struct {
 }
 
 func defaultDataDir() string {
-	home, err := os.UserHomeDir()
-	if err == nil && home != "" {
-		return filepath.Join(home, "yeet-data")
-	}
-	abs, err := filepath.Abs("yeet-data")
-	if err == nil {
-		return abs
-	}
-	return "yeet-data"
+	return defaultCatchDataDir
 }
 
 func resolveCatchStartupOptions(dataDir, servicesRoot string) (catchStartupOptions, error) {
@@ -463,9 +456,34 @@ func prepareDataDirs(dataDir string) (catchPaths, error) {
 		servicesDir: filepath.Join(dataDir, "services"),
 		mountsDir:   filepath.Join(dataDir, "mounts"),
 	}
-	for _, dir := range []string{paths.dataDir, paths.registryDir, paths.servicesDir, paths.mountsDir} {
-		if err := os.MkdirAll(dir, 0700); err != nil {
+	dirs := []string{paths.dataDir, paths.servicesDir, paths.registryDir, paths.mountsDir}
+	dirModes := map[string]os.FileMode{
+		paths.dataDir:     0o711,
+		paths.servicesDir: 0o711,
+		paths.registryDir: 0o700,
+		paths.mountsDir:   0o700,
+	}
+	for _, name := range []string{"backups", "checkpoints", "migrations", "tsd", "tsnet", "vm-images"} {
+		dir := filepath.Join(dataDir, name)
+		dirs = append(dirs, dir)
+		dirModes[dir] = 0o700
+	}
+
+	enforceDefaultModes := filepath.Clean(dataDir) == defaultCatchDataDir
+	for _, dir := range dirs {
+		mode := dirModes[dir]
+		_, statErr := os.Stat(dir)
+		created := errors.Is(statErr, os.ErrNotExist)
+		if statErr != nil && !created {
+			return catchPaths{}, statErr
+		}
+		if err := os.MkdirAll(dir, mode); err != nil {
 			return catchPaths{}, err
+		}
+		if created || enforceDefaultModes {
+			if chmodErr := os.Chmod(dir, mode); chmodErr != nil {
+				return catchPaths{}, chmodErr
+			}
 		}
 	}
 	return paths, nil
@@ -514,6 +532,9 @@ func applyInstallMeta(cfg *catch.Config, dataDir string) {
 	}
 	if meta.InstallUser != "" {
 		cfg.InstallUser = meta.InstallUser
+	}
+	if meta.InstallHome != "" {
+		cfg.InstallHome = meta.InstallHome
 	}
 	if meta.InstallHost != "" {
 		cfg.InstallHost = meta.InstallHost
@@ -1019,6 +1040,7 @@ func runDockerInstallScript(scriptPath string) error {
 
 type installMeta struct {
 	InstallUser string `json:"installUser"`
+	InstallHome string `json:"installHome,omitempty"`
 	InstallHost string `json:"installHost"`
 }
 
@@ -1054,6 +1076,19 @@ func currentUsername() (string, error) {
 	return cur.Username, nil
 }
 
+var lookupInstallUserHomeFn = lookupInstallUserHome
+
+func lookupInstallUserHome(name string) (string, error) {
+	installedUser, err := user.Lookup(strings.TrimSpace(name))
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(installedUser.HomeDir) == "" {
+		return "", fmt.Errorf("install user %q has no home directory", name)
+	}
+	return filepath.Clean(installedUser.HomeDir), nil
+}
+
 func detectInstallHost() string {
 	if installHost := os.Getenv("CATCH_INSTALL_HOST"); installHost != "" {
 		return installHost
@@ -1065,9 +1100,15 @@ func detectInstallHost() string {
 }
 
 func writeInstallMeta(dataDir string) error {
+	installUser := detectInstallUser()
 	meta := installMeta{
-		InstallUser: detectInstallUser(),
+		InstallUser: installUser,
 		InstallHost: detectInstallHost(),
+	}
+	if installUser != "" {
+		if installHome, err := lookupInstallUserHomeFn(installUser); err == nil {
+			meta.InstallHome = installHome
+		}
 	}
 	if meta.InstallUser == "" && meta.InstallHost == "" {
 		return nil

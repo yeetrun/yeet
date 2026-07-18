@@ -349,10 +349,13 @@ func initCatch(userAtRemote string, opts initOptions) (err error) {
 
 func finalizeInitCatch(ui *initUI, userAtRemote string, goarch string, useSudo bool, installDocker bool, installVMTools bool, opts initOptions) error {
 	prepareInitVMLANBridge(ui, userAtRemote, goarch, installVMTools, &opts)
-	if err := installInitCatchWithTailscaleRetry(ui, userAtRemote, useSudo, installDocker, installVMTools, opts); err != nil {
+	if err := installInitCatchWithTailscaleRetryFn(ui, userAtRemote, useSudo, installDocker, installVMTools, opts); err != nil {
 		return err
 	}
 	cleanupInitCatchBinaryFn(ui, userAtRemote, opts.storage.catchRemoteBinary())
+	if err := runInitLegacyStorageMigrationFn(ui, userAtRemote, opts.storage); err != nil {
+		return err
+	}
 	if err := finishInitWorkspaceSetup(ui, opts); err != nil {
 		return err
 	}
@@ -374,19 +377,21 @@ type initCatchSource struct {
 }
 
 var (
-	resolveInitCatchSourceFn    = resolveInitCatchSource
-	verifyInitSSHFn             = verifyInitSSH
-	detectInitHostFn            = detectInitHost
-	downloadInitCatchFn         = downloadInitCatch
-	buildAndUploadInitCatchFn   = buildAndUploadInitCatch
-	chmodInitCatchFn            = chmodInitCatch
-	installInitCatchFn          = installInitCatch
-	cleanupInitCatchBinaryFn    = cleanupInitCatchBinary
-	prepareInitDockerInstallFn  = prepareInitDockerInstall
-	prepareInitVMToolsInstallFn = prepareInitVMToolsInstall
-	remoteDockerInstalledFn     = remoteDockerInstalled
-	remoteVMHostStatusFn        = remoteVMHostStatus
-	remoteVMLANBridgePlanFn     = remoteVMLANBridgePlan
+	resolveInitCatchSourceFn             = resolveInitCatchSource
+	verifyInitSSHFn                      = verifyInitSSH
+	detectInitHostFn                     = detectInitHost
+	downloadInitCatchFn                  = downloadInitCatch
+	buildAndUploadInitCatchFn            = buildAndUploadInitCatch
+	chmodInitCatchFn                     = chmodInitCatch
+	installInitCatchFn                   = installInitCatch
+	cleanupInitCatchBinaryFn             = cleanupInitCatchBinary
+	prepareInitDockerInstallFn           = prepareInitDockerInstall
+	prepareInitVMToolsInstallFn          = prepareInitVMToolsInstall
+	remoteDockerInstalledFn              = remoteDockerInstalled
+	remoteVMHostStatusFn                 = remoteVMHostStatus
+	remoteVMLANBridgePlanFn              = remoteVMLANBridgePlan
+	installInitCatchWithTailscaleRetryFn = installInitCatchWithTailscaleRetry
+	runInitLegacyStorageMigrationFn      = runInitLegacyStorageMigration
 )
 
 func (s initCatchSource) localDetail() string {

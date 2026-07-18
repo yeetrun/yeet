@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/tailcfg"
@@ -32,6 +34,261 @@ const (
 	testDefaultVMImageManifest  = "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json"
 	testNixOSVMImageManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/download/nixos-26.05-amd64-latest/manifest.json"
 )
+
+func TestNewUnstartedServerPreservesInstallHome(t *testing.T) {
+	server := newTestHostStorageServer(t, Config{InstallUser: "root", InstallHome: "/root"}, nil)
+	if server.cfg.InstallHome != "/root" {
+		t.Fatalf("InstallHome = %q, want /root", server.cfg.InstallHome)
+	}
+}
+
+func TestHostStorageTransactionStartupAllowsReadsAndRejectsNewMutation(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "target")
+	servicesRoot := filepath.Join(source, "services")
+	store := db.NewStore(filepath.Join(source, "db.json"), servicesRoot)
+	if err := store.Set(&db.Data{DataVersion: db.CurrentDataVersion, Services: map[string]*db.Service{
+		CatchService: {Name: CatchService, ServiceType: db.ServiceTypeSystemd},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := createHostStorageTransaction(
+		context.Background(),
+		testHostStorageTransactionPlan(source, target),
+		filepath.Join(source, "db.json"),
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := advanceHostStorageTransaction(tx, hostStoragePhaseTargetReady); err != nil {
+		t.Fatal(err)
+	}
+
+	server := newTestHostStorageServer(t, Config{
+		RootDir:      target,
+		ServicesRoot: filepath.Join(target, "services"),
+	}, map[string]*db.Service{
+		CatchService: {Name: CatchService, ServiceType: db.ServiceTypeSystemd},
+	})
+	if _, err := server.serviceView(CatchService); err != nil {
+		t.Fatalf("read operation serviceView: %v", err)
+	}
+	plan := catchrpc.HostStoragePlan{
+		Current: catchrpc.HostStorageState{DataDir: target, ServicesRoot: filepath.Join(target, "services")},
+		Desired: catchrpc.HostStorageState{DataDir: target, ServicesRoot: filepath.Join(target, "services")},
+	}
+	_, err = server.ApplyHostStoragePlan(context.Background(), plan, true, nil)
+	if err == nil || !strings.Contains(err.Error(), tx.SourceJournal) || !strings.Contains(err.Error(), "yeet host set") {
+		t.Fatalf("ApplyHostStoragePlan error = %v, want source journal and explicit recovery command", err)
+	}
+}
+
+func TestHostStorageRecoveryCommandRPCFlowUsesOnlyAuthoritativeJournal(t *testing.T) {
+	phases := []hostStorageTransactionPhase{
+		hostStoragePhasePrepared,
+		hostStoragePhaseServicesStopped,
+		hostStoragePhaseTargetReady,
+		hostStoragePhaseCatchSwitching,
+		hostStoragePhaseCatchSwitched,
+		hostStoragePhaseValidated,
+	}
+	for _, phase := range phases {
+		t.Run(string(phase), func(t *testing.T) {
+			root := t.TempDir()
+			servicesRoot := filepath.Join(root, "services")
+			store := db.NewStore(filepath.Join(root, "db.json"), servicesRoot)
+			if err := store.Set(&db.Data{DataVersion: db.CurrentDataVersion, Services: map[string]*db.Service{
+				CatchService: {Name: CatchService, ServiceType: db.ServiceTypeSystemd},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			plan := testHostStorageTransactionPlan(root, root)
+			plan.RequiresRestart = true
+			plan.Legacy = catchrpc.HostStorageLegacyPlan{}
+			tx, err := createHostStorageTransaction(context.Background(), plan, filepath.Join(root, "db.json"), nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authority := hostStorageCatchAuthoritySource
+			if phase == hostStoragePhaseCatchSwitching || phase == hostStoragePhaseCatchSwitched || phase == hostStoragePhaseValidated {
+				authority = hostStorageCatchAuthorityTarget
+			}
+			if err := advanceHostStorageTransactionState(tx, phase, authority); err != nil {
+				t.Fatal(err)
+			}
+
+			ops := &recordingHostStorageDefaultCatchOps{}
+			withHostStorageDefaultCatchOps(t, ops)
+			server := newTestHostStorageServer(t, Config{RootDir: root, ServicesRoot: servicesRoot}, map[string]*db.Service{
+				CatchService: {Name: CatchService, ServiceType: db.ServiceTypeSystemd},
+			})
+
+			differentParams, err := json.Marshal(catchrpc.HostStoragePlanRequest{Set: catchrpc.HostStorageSetRequest{
+				DataDir:         &catchrpc.HostStorageTarget{Value: filepath.Join(root, "unrelated")},
+				MigrateServices: catchrpc.HostStorageMigrateAll,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			different := server.dispatchRPC(catchrpc.Request{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: catchrpc.RPCMethodHostStoragePlan, Params: differentParams})
+			if different.Error == nil || !strings.Contains(fmt.Sprint(different.Error.Data), tx.SourceJournal) {
+				t.Fatalf("unrelated recovery plan response = %#v, want authoritative journal block", different)
+			}
+
+			planParams, err := json.Marshal(catchrpc.HostStoragePlanRequest{Set: catchrpc.HostStorageSetRequest{
+				DataDir:         &catchrpc.HostStorageTarget{Value: root},
+				ServicesRoot:    &catchrpc.HostStorageTarget{Value: servicesRoot},
+				MigrateServices: catchrpc.HostStorageMigrateAll,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			planResp := server.dispatchRPC(catchrpc.Request{JSONRPC: "2.0", ID: json.RawMessage("2"), Method: catchrpc.RPCMethodHostStoragePlan, Params: planParams})
+			if planResp.Error != nil {
+				t.Fatalf("exact recovery plan rpc error = %#v", planResp.Error)
+			}
+			planRaw, err := json.Marshal(planResp.Result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recoveredPlan catchrpc.HostStoragePlan
+			if err := json.Unmarshal(planRaw, &recoveredPlan); err != nil {
+				t.Fatal(err)
+			}
+			if server.hostStorageRecovery == nil || !reflect.DeepEqual(recoveredPlan, server.hostStorageRecovery.Plan) {
+				t.Fatalf("recovery plan = %#v, want authoritative journal plan %#v", recoveredPlan, server.hostStorageRecovery)
+			}
+
+			unconfirmedParams, err := json.Marshal(catchrpc.HostStorageApplyRequest{Plan: recoveredPlan})
+			if err != nil {
+				t.Fatal(err)
+			}
+			unconfirmed := server.dispatchRPC(catchrpc.Request{JSONRPC: "2.0", ID: json.RawMessage("3"), Method: catchrpc.RPCMethodHostStorageApply, Params: unconfirmedParams})
+			if unconfirmed.Error == nil || !strings.Contains(fmt.Sprint(unconfirmed.Error.Data), tx.SourceJournal) {
+				t.Fatalf("unconfirmed recovery apply response = %#v, want authoritative journal block", unconfirmed)
+			}
+
+			applyParams, err := json.Marshal(catchrpc.HostStorageApplyRequest{Plan: recoveredPlan, Yes: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			applyResp := server.dispatchRPC(catchrpc.Request{JSONRPC: "2.0", ID: json.RawMessage("4"), Method: catchrpc.RPCMethodHostStorageApply, Params: applyParams})
+			if applyResp.Error == nil || !strings.Contains(fmt.Sprint(applyResp.Error.Data), "recovery completed") {
+				t.Fatalf("exact recovery apply response = %#v, want completed rollback and rerun instruction", applyResp)
+			}
+			loaded, err := loadHostStorageTransaction(tx.SourceJournal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if loaded.Phase != hostStoragePhaseRolledBack || loaded.CatchAuthority != hostStorageCatchAuthoritySource {
+				t.Fatalf("recovered journal = phase %q authority %q, want rolled-back source", loaded.Phase, loaded.CatchAuthority)
+			}
+			if server.hostStorageMutationBlock != nil || server.hostStorageRecovery != nil {
+				t.Fatalf("completed recovery block = %v, journal = %#v; want cleared before explicit rerun", server.hostStorageMutationBlock, server.hostStorageRecovery)
+			}
+		})
+	}
+}
+
+func TestHostStorageRecoveryScheduledSourceRestartWaitsForReconnect(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "target")
+	servicesSource := filepath.Join(source, "services")
+	servicesTarget := filepath.Join(target, "services")
+	store := db.NewStore(filepath.Join(source, "db.json"), servicesSource)
+	if err := store.Set(&db.Data{DataVersion: db.CurrentDataVersion, Services: map[string]*db.Service{
+		CatchService: {Name: CatchService, ServiceType: db.ServiceTypeSystemd},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	plan := testHostStorageTransactionPlan(source, target)
+	plan.RequiresRestart = true
+	plan.Legacy = catchrpc.HostStorageLegacyPlan{}
+	tx, err := createHostStorageTransaction(context.Background(), plan, filepath.Join(source, "db.json"), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := advanceHostStorageTransactionState(tx, hostStoragePhaseCatchSwitching, hostStorageCatchAuthorityTarget); err != nil {
+		t.Fatal(err)
+	}
+	server := newTestHostStorageServer(t, Config{RootDir: target, ServicesRoot: servicesTarget}, map[string]*db.Service{
+		CatchService: {Name: CatchService, ServiceType: db.ServiceTypeSystemd},
+	})
+	oldInstall := hostStorageInstallCatchUnit
+	oldCancel := hostStorageCancelCatchRestarts
+	oldRestart := hostStorageRestartCatch
+	oldVerify := hostStorageVerifyCatchInfo
+	var installRequests []hostStorageInstallRequest
+	var handoffCalls []string
+	restartCount := 0
+	verifyCount := 0
+	hostStorageInstallCatchUnit = func(_ context.Context, req hostStorageInstallRequest, _ io.Writer) error {
+		handoffCalls = append(handoffCalls, "install")
+		installRequests = append(installRequests, req)
+		return nil
+	}
+	hostStorageCancelCatchRestarts = func(context.Context) error {
+		handoffCalls = append(handoffCalls, "cancel")
+		return nil
+	}
+	hostStorageRestartCatch = func(context.Context, hostStorageInstallRequest, io.Writer) error {
+		handoffCalls = append(handoffCalls, "restart")
+		restartCount++
+		return errHostStorageCatchRestartScheduled
+	}
+	hostStorageVerifyCatchInfo = func(_ context.Context, desired catchrpc.HostStorageState, _ Config) (ServerInfo, error) {
+		verifyCount++
+		return ServerInfo{RootDir: desired.DataDir, ServicesDir: desired.ServicesRoot}, nil
+	}
+	t.Cleanup(func() {
+		hostStorageInstallCatchUnit = oldInstall
+		hostStorageCancelCatchRestarts = oldCancel
+		hostStorageRestartCatch = oldRestart
+		hostStorageVerifyCatchInfo = oldVerify
+	})
+
+	_, err = server.ApplyHostStoragePlan(context.Background(), server.hostStorageRecovery.Plan, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "restart handoff") {
+		t.Fatalf("ApplyHostStoragePlan error = %v, want source restart handoff", err)
+	}
+	loaded, err := loadHostStorageTransaction(tx.SourceJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Phase != hostStoragePhaseSourceRestartPending || loaded.CatchAuthority != hostStorageCatchAuthorityTarget {
+		t.Fatalf("handoff journal = phase %q authority %q, want source-restart-pending target", loaded.Phase, loaded.CatchAuthority)
+	}
+	if verifyCount != 0 || restartCount != 1 {
+		t.Fatalf("restart/verify counts = %d/%d, want one scheduled restart and no in-process verification", restartCount, verifyCount)
+	}
+	if len(installRequests) != 1 || !hostStoragePathsEqual(installRequests[0].DataDir, source) {
+		t.Fatalf("install requests = %#v, want only source Catch handoff", installRequests)
+	}
+	if !slices.Equal(handoffCalls, []string{"cancel", "install", "restart"}) {
+		t.Fatalf("handoff calls = %#v, want stale timer cancellation before source install and restart", handoffCalls)
+	}
+	if server.hostStorageMutationBlock == nil || server.hostStorageRecovery == nil {
+		t.Fatalf("server cleared recovery block before source reconnect")
+	}
+
+	sourceServer := newTestHostStorageServer(t, Config{RootDir: source, ServicesRoot: servicesSource}, map[string]*db.Service{
+		CatchService: {Name: CatchService, ServiceType: db.ServiceTypeSystemd},
+	})
+	if sourceServer.hostStorageMutationBlock != nil || sourceServer.hostStorageRecovery != nil {
+		t.Fatalf("source reconnect recovery = %#v, %v; want terminalized handoff", sourceServer.hostStorageRecovery, sourceServer.hostStorageMutationBlock)
+	}
+	loaded, err = loadHostStorageTransaction(tx.SourceJournal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Phase != hostStoragePhaseRolledBack || loaded.CatchAuthority != hostStorageCatchAuthoritySource {
+		t.Fatalf("reconnected journal = phase %q authority %q, want rolled-back source", loaded.Phase, loaded.CatchAuthority)
+	}
+}
 
 func TestStatusesServiceNamesByTypeFiltersAndSorts(t *testing.T) {
 	services := map[string]*db.Service{

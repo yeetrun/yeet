@@ -6,6 +6,8 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -401,6 +403,93 @@ func TestBridgeServiceArgsHostSetIsHostLevel(t *testing.T) {
 				t.Fatalf("bridged = %#v, want original args %#v", bridged, tt.args)
 			}
 		})
+	}
+}
+
+func TestBridgeServiceArgsHostCleanupIsHostLevel(t *testing.T) {
+	args := []string{"host", "cleanup", "--from=/root/yeet-data", "--yes"}
+	service, host, bridged, ok := bridgeServiceArgs(args, cli.RemoteFlagSpecs(), cli.RemoteGroupFlagSpecs(), "")
+	if !ok {
+		t.Fatal("host cleanup should be recognized as a host-level group command")
+	}
+	if service != "" || host != "" {
+		t.Fatalf("service/host = %q/%q, want empty host-level command", service, host)
+	}
+	if !reflect.DeepEqual(bridged, args) {
+		t.Fatalf("bridged = %#v, want original args %#v", bridged, args)
+	}
+}
+
+func TestHostCleanupDocumentationCoversStorageSafety(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", ".."))
+	docPaths := []string{
+		"README.md",
+		"website/docs/getting-started/host-setup.mdx",
+		"website/docs/getting-started/first-run-validation.mdx",
+		"website/docs/concepts/service-types.mdx",
+		"website/docs/concepts/data-layout.mdx",
+		"website/docs/cli/yeet-cli.mdx",
+		"website/docs/cli/catch-cli.mdx",
+	}
+	var docs strings.Builder
+	for _, relPath := range docPaths {
+		raw, err := os.ReadFile(filepath.Join(repoRoot, relPath))
+		if err != nil {
+			t.Fatalf("read %s: %v", relPath, err)
+		}
+		if strings.Contains(string(raw), "$HOME/yeet-data") {
+			t.Errorf("%s recommends the legacy $HOME/yeet-data path", relPath)
+		}
+		docs.Write(raw)
+		docs.WriteByte('\n')
+	}
+
+	allDocs := docs.String()
+	for _, want := range []string{
+		"/var/lib/yeet",
+		"yeet host cleanup",
+		"custom roots are preserved",
+		"ZFS datasets are not copied or deleted implicitly",
+	} {
+		if !strings.Contains(allDocs, want) {
+			t.Errorf("host storage documentation missing %q", want)
+		}
+	}
+
+	for _, relPath := range []string{
+		"website/docs/concepts/data-layout.mdx",
+		"website/docs/cli/yeet-cli.mdx",
+	} {
+		raw, err := os.ReadFile(filepath.Join(repoRoot, relPath))
+		if err != nil {
+			t.Fatalf("read %s: %v", relPath, err)
+		}
+		for _, want := range []string{
+			"eligible historical layout",
+			"one consent",
+			"generic",
+			"never deletes",
+			"yeet host cleanup --from=",
+		} {
+			if !strings.Contains(string(raw), want) {
+				t.Errorf("%s missing cleanup contract %q", relPath, want)
+			}
+		}
+	}
+
+	catchCLI, err := os.ReadFile(filepath.Join(repoRoot, "website/docs/cli/catch-cli.mdx"))
+	if err != nil {
+		t.Fatalf("read catch CLI manual: %v", err)
+	}
+	for _, want := range []string{
+		"Manual runs default to `/var/lib/yeet`",
+		"`--services-root`",
+		"`<data-dir>/services`",
+		"`/var/lib/yeet/services`",
+	} {
+		if !strings.Contains(string(catchCLI), want) {
+			t.Errorf("catch CLI manual missing %q", want)
+		}
 	}
 }
 

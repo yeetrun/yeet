@@ -543,6 +543,17 @@ func TestHostStoragePlanCallsRPC(t *testing.T) {
 					}},
 				},
 				RequiresRestart: true,
+				Estimate: HostStorageEstimate{
+					BytesToCopy: 4096,
+					BytesFree:   8192,
+				},
+				Legacy: HostStorageLegacyPlan{
+					Eligible:       true,
+					SourceRoot:     "/home/me/yeet-data",
+					TargetRoot:     "/var/lib/yeet",
+					PreservedRoots: []string{"/srv/database"},
+					CleanupAllowed: true,
+				},
 			},
 		})
 	}))
@@ -560,6 +571,35 @@ func TestHostStoragePlanCallsRPC(t *testing.T) {
 	}
 	if !got.RequiresRestart || got.Desired.DataDir != "/flash/yeet/data" || len(got.ServicesAction.AffectedServices) != 1 {
 		t.Fatalf("HostStoragePlan = %#v, want restart with one affected service", got)
+	}
+	if got.Estimate.BytesToCopy != 4096 || got.Estimate.BytesFree != 8192 {
+		t.Fatalf("HostStoragePlan estimate = %#v", got.Estimate)
+	}
+	if !got.Legacy.Eligible || !got.Legacy.CleanupAllowed || len(got.Legacy.PreservedRoots) != 1 {
+		t.Fatalf("HostStoragePlan legacy = %#v", got.Legacy)
+	}
+}
+
+func TestHostStoragePlanLegacyMetadataOmittedWhenEmpty(t *testing.T) {
+	raw, err := json.Marshal(HostStoragePlan{
+		Current: HostStorageState{DataDir: "/srv/yeet", ServicesRoot: "/srv/yeet/services"},
+		Desired: HostStorageState{DataDir: "/srv/yeet", ServicesRoot: "/srv/yeet/services"},
+	})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	for _, field := range []string{`"estimate"`, `"legacy"`} {
+		if bytes.Contains(raw, []byte(field)) {
+			t.Fatalf("zero-value compatibility field %s present in %s", field, raw)
+		}
+	}
+
+	var decoded HostStoragePlan
+	if err := json.Unmarshal([]byte(`{"current":{"dataDir":"/srv/yeet","servicesRoot":"/srv/yeet/services"},"desired":{"dataDir":"/srv/yeet","servicesRoot":"/srv/yeet/services"},"dataDirAction":{"move":false},"servicesAction":{"mode":""},"catchAction":{}}`), &decoded); err != nil {
+		t.Fatalf("Unmarshal old plan: %v", err)
+	}
+	if decoded.Legacy.Eligible || decoded.Estimate.BytesToCopy != 0 {
+		t.Fatalf("old plan decoded compatibility metadata = %#v %#v", decoded.Legacy, decoded.Estimate)
 	}
 }
 
@@ -597,6 +637,7 @@ func TestHostStorageApplyCallsRPC(t *testing.T) {
 			JSONRPC: "2.0",
 			ID:      req.ID,
 			Result: HostStorageApplyResult{
+				TransactionID:    "01JZQ2F6V6YJST7M24B8H8M4KB",
 				MigratedServices: []HostStorageServiceMove{plan.ServicesAction.AffectedServices[0]},
 				Restarted:        true,
 			},
@@ -612,8 +653,74 @@ func TestHostStorageApplyCallsRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HostStorageApply returned error: %v", err)
 	}
-	if !got.Restarted || len(got.MigratedServices) != 1 || got.MigratedServices[0].Name != "web" {
+	if got.TransactionID != "01JZQ2F6V6YJST7M24B8H8M4KB" || !got.Restarted || len(got.MigratedServices) != 1 || got.MigratedServices[0].Name != "web" {
 		t.Fatalf("HostStorageApply = %#v, want restarted web migration", got)
+	}
+}
+
+func TestHostStorageFinalizeCallsRPC(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Method != RPCMethodHostStorageFinalize {
+			t.Fatalf("method = %q, want %s", req.Method, RPCMethodHostStorageFinalize)
+		}
+		var params HostStorageFinalizeRequest
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatal(err)
+		}
+		if params.TransactionID != "tx-1" {
+			t.Fatalf("params = %#v", params)
+		}
+		_ = json.NewEncoder(w).Encode(Response{JSONRPC: "2.0", ID: req.ID, Result: HostStorageFinalizeResult{
+			TransactionID:  params.TransactionID,
+			CleanupPending: true,
+		}})
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	got, err := NewClient(host, port).HostStorageFinalize(context.Background(), HostStorageFinalizeRequest{TransactionID: "tx-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TransactionID != "tx-1" || !got.CleanupPending {
+		t.Fatalf("HostStorageFinalize = %#v", got)
+	}
+}
+
+func TestHostStorageCleanupCallsRPC(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req Request
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatal(err)
+		}
+		if req.Method != RPCMethodHostStorageCleanup {
+			t.Fatalf("method = %q, want %s", req.Method, RPCMethodHostStorageCleanup)
+		}
+		var params HostStorageCleanupRequest
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			t.Fatal(err)
+		}
+		if params.From != "/root/yeet-data" || !params.Yes {
+			t.Fatalf("params = %#v", params)
+		}
+		_ = json.NewEncoder(w).Encode(Response{JSONRPC: "2.0", ID: req.ID, Result: HostStorageCleanupResult{
+			TransactionID: "tx-1",
+			Removed:       params.From,
+		}})
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	got, err := NewClient(host, port).HostStorageCleanup(context.Background(), HostStorageCleanupRequest{From: "/root/yeet-data", Yes: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TransactionID != "tx-1" || got.Removed != "/root/yeet-data" {
+		t.Fatalf("HostStorageCleanup = %#v", got)
 	}
 }
 

@@ -13,13 +13,26 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/copyutil"
 	"github.com/yeetrun/yeet/pkg/db"
+	"golang.org/x/sys/unix"
+)
+
+const managedHostStorageDataDir = "/var/lib/yeet"
+
+var (
+	hostStorageMountPointsFn        = readHostStorageMountPoints
+	hostStorageFreeBytesFn          = hostStorageFreeBytes
+	hostStorageCleanupDeviceFn      = hostStorageCleanupDevice
+	hostStorageRemoveSourceTreeFn   = removeHostStorageSourceTree
+	hostStorageFinalizeOperationsFn = func(Config) hostStorageApplyOperations { return hostStorageApplyOperations{} }
 )
 
 type hostStoragePlanner struct {
@@ -36,7 +49,403 @@ type resolvedHostStorageTarget struct {
 	mountpointWarnings []string
 }
 
+func loadTargetHostStorageTransaction(targetRoot, id string) (*hostStorageTransaction, error) {
+	currentJournal, targetRoot, id, err := targetHostStorageTransactionJournal(targetRoot, id)
+	if err != nil {
+		return nil, err
+	}
+	current, err := loadHostStorageTransaction(currentJournal)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateTargetHostStorageTransaction(current, currentJournal, targetRoot, id); err != nil {
+		return nil, err
+	}
+	if current.TargetJournal == "" {
+		return current, nil
+	}
+	authoritative, _, err := loadAuthoritativeHostStorageTransaction(currentJournal)
+	if err != nil {
+		return nil, err
+	}
+	if authoritative.ID != id {
+		return nil, staleTargetHostStorageTransactionError(targetRoot, id)
+	}
+	return authoritative, nil
+}
+
+func targetHostStorageTransactionJournal(targetRoot, id string) (string, string, string, error) {
+	targetRoot = cleanHostStoragePath(targetRoot)
+	id = strings.TrimSpace(id)
+	if targetRoot == "" || !filepath.IsAbs(targetRoot) || !validHostStorageTransactionID(id) {
+		return "", targetRoot, id, staleTargetHostStorageTransactionError(targetRoot, id)
+	}
+	currentJournal := hostStorageTransactionPath(targetRoot, id)
+	exists, err := hostStorageTransactionJournalExists(currentJournal)
+	if err != nil {
+		return "", targetRoot, id, fmt.Errorf("inspect target host storage transaction %q: %w", id, err)
+	}
+	if !exists {
+		return "", targetRoot, id, staleTargetHostStorageTransactionError(targetRoot, id)
+	}
+	return currentJournal, targetRoot, id, nil
+}
+
+func validateTargetHostStorageTransaction(tx *hostStorageTransaction, journal, targetRoot, id string) error {
+	if tx.ID != id || !hostStoragePathsEqual(tx.Plan.Desired.DataDir, targetRoot) {
+		return staleTargetHostStorageTransactionError(targetRoot, id)
+	}
+	if tx.TargetJournal == "" && !hostStoragePathsEqual(tx.SourceJournal, journal) {
+		return staleTargetHostStorageTransactionError(targetRoot, id)
+	}
+	if tx.TargetJournal != "" && !hostStoragePathsEqual(tx.TargetJournal, journal) {
+		return staleTargetHostStorageTransactionError(targetRoot, id)
+	}
+	return nil
+}
+
+func staleTargetHostStorageTransactionError(targetRoot, id string) error {
+	return fmt.Errorf("stale host storage transaction %q for target %q", id, targetRoot)
+}
+
+func completeHostStorageCleanupTransaction(tx *hostStorageTransaction) error {
+	if tx == nil || strings.TrimSpace(tx.TargetJournal) == "" {
+		return fmt.Errorf("host storage cleanup requires a target transaction journal")
+	}
+	previousPhase := tx.Phase
+	previousAuthority := tx.CatchAuthority
+	tx.Phase = hostStoragePhaseComplete
+	tx.CatchAuthority = hostStorageCatchAuthorityTarget
+	if err := writeHostStorageTransactionFile(tx.TargetJournal, tx); err != nil {
+		tx.Phase = previousPhase
+		tx.CatchAuthority = previousAuthority
+		return fmt.Errorf("record completed host storage cleanup: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) FinalizeHostStorage(ctx context.Context, req catchrpc.HostStorageFinalizeRequest) (catchrpc.HostStorageFinalizeResult, error) {
+	s.hostStorageMutationMu.Lock()
+	defer s.hostStorageMutationMu.Unlock()
+	tx, err := loadTargetHostStorageTransaction(s.cfg.RootDir, req.TransactionID)
+	if err != nil {
+		return catchrpc.HostStorageFinalizeResult{}, err
+	}
+	return s.finalizeHostStorageTransaction(ctx, tx)
+}
+
+func (s *Server) finalizeHostStorageTransaction(ctx context.Context, tx *hostStorageTransaction) (catchrpc.HostStorageFinalizeResult, error) {
+	result := catchrpc.HostStorageFinalizeResult{TransactionID: tx.ID}
+	if tx.Phase == hostStoragePhaseComplete {
+		s.clearFinalizedHostStorageRecovery(tx)
+		return result, nil
+	}
+	if !finalizableHostStorageTransactionPhase(tx.Phase) {
+		return result, fmt.Errorf("stale host storage transaction %q is in phase %q, want catch-switched or validated", tx.ID, tx.Phase)
+	}
+	validation, validateErr := s.validateFinalHostStorageTransaction(ctx, tx)
+	result.Validation = catchrpc.HostStorageValidation{
+		ActiveRefs:   validation.ActiveRefs,
+		DatabaseRefs: validation.DBRefs,
+		SystemdRefs:  validation.SystemdRefs,
+	}
+	if validateErr != nil {
+		return result, s.finalHostStorageValidationError(ctx, tx, validateErr)
+	}
+	return s.advanceFinalizedHostStorageTransaction(tx, result)
+}
+
+func finalizableHostStorageTransactionPhase(phase hostStorageTransactionPhase) bool {
+	return phase == hostStoragePhaseCatchSwitched || phase == hostStoragePhaseValidated || phase == hostStoragePhaseCleanupPending
+}
+
+func (s *Server) finalHostStorageValidationError(ctx context.Context, tx *hostStorageTransaction, validationErr error) error {
+	if tx.Phase == hostStoragePhaseCatchSwitched {
+		rollbackErr := s.rollbackFinalHostStorageTransaction(ctx, tx, validationErr)
+		return fmt.Errorf("final host storage validation failed: %v; rollback result: %w", validationErr, rollbackErr)
+	}
+	return fmt.Errorf("final host storage validation failed after target validation: %w", validationErr)
+}
+
+func (s *Server) advanceFinalizedHostStorageTransaction(tx *hostStorageTransaction, result catchrpc.HostStorageFinalizeResult) (catchrpc.HostStorageFinalizeResult, error) {
+	if tx.Phase == hostStoragePhaseValidated {
+		s.clearFinalizedHostStorageRecovery(tx)
+		return result, nil
+	}
+	if tx.Phase == hostStoragePhaseCleanupPending {
+		result.CleanupPending = true
+		s.clearFinalizedHostStorageRecovery(tx)
+		return result, nil
+	}
+	next := finalizedHostStorageTransactionPhase(tx)
+	if err := advanceHostStorageTransaction(tx, next); err != nil {
+		return result, fmt.Errorf("record finalized host storage transaction: %w", err)
+	}
+	result.CleanupPending = next == hostStoragePhaseCleanupPending
+	s.clearFinalizedHostStorageRecovery(tx)
+	return result, nil
+}
+
+func (s *Server) clearFinalizedHostStorageRecovery(tx *hostStorageTransaction) {
+	if s.hostStorageRecovery != nil && s.hostStorageRecovery.ID == tx.ID {
+		s.hostStorageRecovery = nil
+		s.hostStorageMutationBlock = nil
+	}
+}
+
+func finalizedHostStorageTransactionPhase(tx *hostStorageTransaction) hostStorageTransactionPhase {
+	if tx.TargetJournal == "" || hostStoragePathsEqual(tx.Plan.Current.DataDir, tx.Plan.Desired.DataDir) {
+		return hostStoragePhaseComplete
+	}
+	if tx.Plan.Legacy.CleanupAllowed {
+		return hostStoragePhaseCleanupPending
+	}
+	return hostStoragePhaseValidated
+}
+
+func (s *Server) validateFinalHostStorageTransaction(ctx context.Context, tx *hostStorageTransaction) (hostStorageValidationResult, error) {
+	if err := validateFinalHostStorageCatchPaths(s.cfg, tx.Plan.Desired); err != nil {
+		return hostStorageValidationResult{}, err
+	}
+	applier := &hostStorageApplier{
+		config:                 s.cfg,
+		store:                  s.cfg.DB,
+		zfs:                    s.zfsRunner,
+		ops:                    hostStorageFinalizeOperationsFn(s.cfg),
+		runningCatchState:      hostStorageStateFromConfig(s.cfg),
+		runningCatchStateKnown: true,
+	}
+	applier.ops = applier.completeOperations()
+	validation, err := applier.validateHostStorageApply(ctx, tx.Plan)
+	if err != nil {
+		return validation, err
+	}
+	if err := validateFinalHostStorageServiceStates(ctx, applier.ops.isServiceRunning, tx); err != nil {
+		return validation, err
+	}
+	return validation, nil
+}
+
+func validateFinalHostStorageCatchPaths(cfg Config, desired catchrpc.HostStorageState) error {
+	info := GetInfoWithConfig(&cfg)
+	if !hostStoragePathsEqual(info.RootDir, desired.DataDir) || !hostStoragePathsEqual(info.ServicesDir, desired.ServicesRoot) {
+		return fmt.Errorf("catch reported data dir %q and services root %q, want %q and %q", info.RootDir, info.ServicesDir, desired.DataDir, desired.ServicesRoot)
+	}
+	return nil
+}
+
+func validateFinalHostStorageServiceStates(ctx context.Context, running func(context.Context, string) (bool, error), tx *hostStorageTransaction) error {
+	wantRunning := make(map[string]bool, len(tx.PreviouslyRunning))
+	for _, name := range tx.PreviouslyRunning {
+		wantRunning[name] = true
+	}
+	names := append(slices.Clone(tx.StoppedServices), tx.RestartedServices...)
+	names = append(names, tx.PreviouslyRunning...)
+	for _, move := range tx.Plan.ServicesAction.AffectedServices {
+		names = append(names, move.Name)
+	}
+	names = append(names, tx.Plan.RepairAction.RestartServices...)
+	for _, name := range uniqueSortedStrings(names) {
+		if hostStorageSelfManagedService(name) {
+			continue
+		}
+		active, err := running(ctx, name)
+		if err != nil {
+			return fmt.Errorf("validate finalized service %q: %w", name, err)
+		}
+		if active != wantRunning[name] {
+			return fmt.Errorf("validate finalized service %q: running=%t, want %t", name, active, wantRunning[name])
+		}
+	}
+	return nil
+}
+
+func (s *Server) rollbackFinalHostStorageTransaction(ctx context.Context, tx *hostStorageTransaction, cause error) error {
+	sourceConfig := s.cfg
+	sourceConfig.RootDir = cleanHostStoragePath(tx.Plan.Current.DataDir)
+	sourceConfig.ServicesRoot = cleanHostStoragePath(tx.Plan.Current.ServicesRoot)
+	sourceConfig.MountsRoot = filepath.Join(sourceConfig.RootDir, "mounts")
+	sourceConfig.RegistryRoot = filepath.Join(sourceConfig.RootDir, "registry")
+	sourceConfig.DB = db.NewStore(filepath.Join(sourceConfig.RootDir, "db.json"), sourceConfig.ServicesRoot)
+	applier := &hostStorageApplier{
+		config:                 sourceConfig,
+		store:                  sourceConfig.DB,
+		zfs:                    s.zfsRunner,
+		ops:                    hostStorageFinalizeOperationsFn(sourceConfig),
+		runningCatchState:      hostStorageStateFromConfig(s.cfg),
+		runningCatchStateKnown: true,
+	}
+	applier.ops = applier.completeOperations()
+	if err := stopUnexpectedFinalHostStorageServices(ctx, applier.ops, tx); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("stop unexpected target services before rollback: %w", err))
+	}
+	return applier.rollbackHostStorageTransaction(ctx, tx, cause, nil)
+}
+
+func stopUnexpectedFinalHostStorageServices(ctx context.Context, ops hostStorageApplyOperations, tx *hostStorageTransaction) error {
+	wantRunning := make(map[string]bool, len(tx.PreviouslyRunning))
+	for _, name := range tx.PreviouslyRunning {
+		wantRunning[name] = true
+	}
+	names := slices.Clone(tx.StoppedServices)
+	for _, move := range tx.Plan.ServicesAction.AffectedServices {
+		names = append(names, move.Name)
+	}
+	names = append(names, tx.Plan.RepairAction.RestartServices...)
+	for _, name := range uniqueSortedStrings(names) {
+		if hostStorageSelfManagedService(name) || wantRunning[name] {
+			continue
+		}
+		running, err := ops.isServiceRunning(ctx, name)
+		if err != nil {
+			return fmt.Errorf("inspect service %q: %w", name, err)
+		}
+		if !running {
+			continue
+		}
+		runner, err := ops.runnerForService(ctx, name)
+		if err != nil {
+			return fmt.Errorf("runner for service %q: %w", name, err)
+		}
+		if err := runner.Stop(); err != nil {
+			return fmt.Errorf("stop service %q: %w", name, err)
+		}
+	}
+	return nil
+}
+
+func (s *Server) CleanupHostStorage(ctx context.Context, req catchrpc.HostStorageCleanupRequest) (catchrpc.HostStorageCleanupResult, error) {
+	s.hostStorageMutationMu.Lock()
+	defer s.hostStorageMutationMu.Unlock()
+	source, err := validatedHostStorageCleanupSource(req)
+	if err != nil {
+		return catchrpc.HostStorageCleanupResult{}, err
+	}
+	tx, err := s.validatedHostStorageCleanupTransaction(source)
+	if err != nil {
+		return catchrpc.HostStorageCleanupResult{}, err
+	}
+	result := catchrpc.HostStorageCleanupResult{TransactionID: tx.ID, Removed: source}
+	return s.cleanupHostStorageTransaction(ctx, tx, source, result)
+}
+
+func validatedHostStorageCleanupSource(req catchrpc.HostStorageCleanupRequest) (string, error) {
+	if !req.Yes {
+		return "", fmt.Errorf("host storage cleanup requires --yes confirmation")
+	}
+	source := cleanHostStoragePath(req.From)
+	if source == "" || !filepath.IsAbs(source) {
+		return "", fmt.Errorf("host storage cleanup --from must be an absolute path, got %q", req.From)
+	}
+	return source, nil
+}
+
+func (s *Server) cleanupHostStorageTransaction(ctx context.Context, tx *hostStorageTransaction, source string, result catchrpc.HostStorageCleanupResult) (catchrpc.HostStorageCleanupResult, error) {
+	if tx.Phase == hostStoragePhaseComplete {
+		return result, nil
+	}
+	if _, err := s.validateFinalHostStorageTransaction(ctx, tx); err != nil {
+		return catchrpc.HostStorageCleanupResult{}, fmt.Errorf("revalidate host storage before cleanup: %w", err)
+	}
+	missing, err := hostStorageCleanupSourceMissing(source)
+	if err != nil {
+		return catchrpc.HostStorageCleanupResult{}, err
+	}
+	if missing {
+		return completeMissingHostStorageCleanup(tx, source, result)
+	}
+	if tx.Phase == hostStoragePhaseValidated {
+		if err := advanceHostStorageTransaction(tx, hostStoragePhaseCleanupPending); err != nil {
+			return catchrpc.HostStorageCleanupResult{}, fmt.Errorf("record pending host storage cleanup: %w", err)
+		}
+	}
+	if err := hostStorageRemoveSourceTreeFn(ctx, source); err != nil {
+		return catchrpc.HostStorageCleanupResult{}, fmt.Errorf("remove inactive host storage source %q; cleanup remains pending: %w", source, err)
+	}
+	if err := completeHostStorageCleanupTransaction(tx); err != nil {
+		return catchrpc.HostStorageCleanupResult{}, err
+	}
+	return result, nil
+}
+
+func hostStorageCleanupSourceMissing(source string) (bool, error) {
+	_, err := os.Lstat(source)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	return false, err
+}
+
+func completeMissingHostStorageCleanup(tx *hostStorageTransaction, source string, result catchrpc.HostStorageCleanupResult) (catchrpc.HostStorageCleanupResult, error) {
+	if tx.Phase != hostStoragePhaseCleanupPending {
+		return catchrpc.HostStorageCleanupResult{}, fmt.Errorf("validated host storage source %q is missing before cleanup", source)
+	}
+	if err := completeHostStorageCleanupTransaction(tx); err != nil {
+		return catchrpc.HostStorageCleanupResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Server) validatedHostStorageCleanupTransaction(source string) (*hostStorageTransaction, error) {
+	paths, err := hostStorageTransactionJournalPaths(s.cfg.RootDir)
+	if err != nil {
+		return nil, err
+	}
+	active, completed, err := matchingHostStorageCleanupTransactions(paths, s.cfg.RootDir, source)
+	if err != nil {
+		return nil, err
+	}
+	return selectHostStorageCleanupTransaction(source, active, completed)
+}
+
+func matchingHostStorageCleanupTransactions(paths []string, targetRoot, source string) (active, completed []*hostStorageTransaction, err error) {
+	for _, journal := range paths {
+		tx, loadErr := loadHostStorageTransaction(journal)
+		if loadErr != nil {
+			return nil, nil, loadErr
+		}
+		if !hostStorageCleanupTransactionMatches(tx, journal, targetRoot, source) {
+			continue
+		}
+		switch tx.Phase {
+		case hostStoragePhaseValidated, hostStoragePhaseCleanupPending:
+			active = append(active, tx)
+		case hostStoragePhaseComplete:
+			completed = append(completed, tx)
+		}
+	}
+	return active, completed, nil
+}
+
+func hostStorageCleanupTransactionMatches(tx *hostStorageTransaction, journal, targetRoot, source string) bool {
+	return hostStoragePathsEqual(tx.TargetJournal, journal) &&
+		hostStoragePathsEqual(tx.Plan.Desired.DataDir, targetRoot) &&
+		hostStoragePathsEqual(tx.Plan.Current.DataDir, source)
+}
+
+func selectHostStorageCleanupTransaction(source string, active, completed []*hostStorageTransaction) (*hostStorageTransaction, error) {
+	if len(active) == 1 {
+		return active[0], nil
+	}
+	if len(active) == 0 && len(completed) == 1 {
+		return completed[0], nil
+	}
+	return nil, fmt.Errorf("host storage cleanup source %q is not authorized by exactly one validated host storage transaction", source)
+}
+
 func (s *Server) PlanHostStorage(ctx context.Context, req catchrpc.HostStoragePlanRequest) (catchrpc.HostStoragePlan, error) {
+	s.hostStorageMutationMu.Lock()
+	if s.hostStorageMutationBlock != nil {
+		if s.hostStorageRecovery == nil || !hostStorageRecoveryRequestMatches(req, s.hostStorageRecovery.Plan) {
+			err := s.hostStorageMutationBlock
+			s.hostStorageMutationMu.Unlock()
+			return catchrpc.HostStoragePlan{}, err
+		}
+		plan := s.hostStorageRecovery.Plan
+		s.hostStorageMutationMu.Unlock()
+		return plan, nil
+	}
+	s.hostStorageMutationMu.Unlock()
 	planner := &hostStoragePlanner{
 		config: s.cfg,
 		store:  s.cfg.DB,
@@ -46,12 +455,84 @@ func (s *Server) PlanHostStorage(ctx context.Context, req catchrpc.HostStoragePl
 }
 
 func (s *Server) ApplyHostStoragePlan(ctx context.Context, plan catchrpc.HostStoragePlan, yes bool, w io.Writer) (catchrpc.HostStorageApplyResult, error) {
+	s.hostStorageMutationMu.Lock()
+	defer s.hostStorageMutationMu.Unlock()
+	if s.hostStorageMutationBlock != nil {
+		if !yes || s.hostStorageRecovery == nil || !reflect.DeepEqual(plan, s.hostStorageRecovery.Plan) {
+			return catchrpc.HostStorageApplyResult{}, s.hostStorageMutationBlock
+		}
+		return s.applyHostStorageRecovery(ctx, yes, w)
+	}
 	applier := &hostStorageApplier{
-		config: s.cfg,
-		store:  s.cfg.DB,
-		zfs:    s.zfsRunner,
+		config:                 s.cfg,
+		store:                  s.cfg.DB,
+		zfs:                    s.zfsRunner,
+		runningCatchState:      hostStorageStateFromConfig(s.cfg),
+		runningCatchStateKnown: true,
 	}
 	return applier.Apply(ctx, plan, yes, w)
+}
+
+func hostStorageRecoveryRequestMatches(req catchrpc.HostStoragePlanRequest, plan catchrpc.HostStoragePlan) bool {
+	set := req.Set
+	if set.DataDir == nil && set.ServicesRoot == nil {
+		return false
+	}
+	desired := plan.Current
+	if set.DataDir != nil {
+		desired.DataDir = set.DataDir.Value
+		desired.DataDirZFS = set.DataDir.ZFS
+	}
+	if set.ServicesRoot != nil {
+		if set.MigrateServices != catchrpc.HostStorageMigrateAll {
+			return false
+		}
+		desired.ServicesRoot = set.ServicesRoot.Value
+		desired.ServicesZFS = set.ServicesRoot.ZFS
+	} else if set.MigrateServices != "" {
+		return false
+	}
+	return hostStoragePathsEqual(desired.DataDir, plan.Desired.DataDir) && desired.DataDirZFS == plan.Desired.DataDirZFS &&
+		hostStoragePathsEqual(desired.ServicesRoot, plan.Desired.ServicesRoot) && desired.ServicesZFS == plan.Desired.ServicesZFS
+}
+
+func (s *Server) applyHostStorageRecovery(ctx context.Context, yes bool, w io.Writer) (catchrpc.HostStorageApplyResult, error) {
+	tx := s.hostStorageRecovery
+	if tx == nil {
+		return catchrpc.HostStorageApplyResult{}, s.hostStorageMutationBlock
+	}
+	sourceConfig := s.cfg
+	sourceConfig.RootDir = cleanHostStoragePath(tx.Plan.Current.DataDir)
+	sourceConfig.ServicesRoot = cleanHostStoragePath(tx.Plan.Current.ServicesRoot)
+	sourceConfig.MountsRoot = filepath.Join(sourceConfig.RootDir, "mounts")
+	sourceConfig.RegistryRoot = filepath.Join(sourceConfig.RootDir, "registry")
+	sourceConfig.DB = db.NewStore(filepath.Join(sourceConfig.RootDir, "db.json"), sourceConfig.ServicesRoot)
+	applier := &hostStorageApplier{
+		config:                 sourceConfig,
+		store:                  sourceConfig.DB,
+		zfs:                    s.zfsRunner,
+		runningCatchState:      hostStorageStateFromConfig(s.cfg),
+		runningCatchStateKnown: true,
+	}
+	applier.ops = applier.completeOperations()
+	rollbackErr := applier.rollbackHostStorageTransaction(ctx, tx, errors.New("recover unfinished host storage transaction"), w)
+	if tx.Phase != hostStoragePhaseRolledBack || tx.CatchAuthority != hostStorageCatchAuthoritySource {
+		return catchrpc.HostStorageApplyResult{}, rollbackErr
+	}
+	s.hostStorageMutationBlock = nil
+	s.hostStorageRecovery = nil
+	return catchrpc.HostStorageApplyResult{}, fmt.Errorf(
+		"host storage recovery completed; rerun the requested migration with: %s: %w",
+		hostStorageTransactionRecoveryCommand(tx.Plan),
+		rollbackErr,
+	)
+}
+
+func hostStorageStateFromConfig(config Config) catchrpc.HostStorageState {
+	return catchrpc.HostStorageState{
+		DataDir:      config.RootDir,
+		ServicesRoot: config.ServicesRoot,
+	}
 }
 
 func (p *hostStoragePlanner) Plan(ctx context.Context, req catchrpc.HostStoragePlanRequest) (catchrpc.HostStoragePlan, error) {
@@ -65,6 +546,10 @@ func (p *hostStoragePlanner) Plan(ctx context.Context, req catchrpc.HostStorageP
 		return catchrpc.HostStoragePlan{}, err
 	}
 	catchAction, err := p.planCatchRootChange(ctx, desired, req.Set, servicesRootDataset)
+	if err != nil {
+		return catchrpc.HostStoragePlan{}, err
+	}
+	services, catchAction, legacyCandidate, legacyServices, err := p.prepareLegacyPlanActions(current, desired, services, catchAction)
 	if err != nil {
 		return catchrpc.HostStoragePlan{}, err
 	}
@@ -82,6 +567,9 @@ func (p *hostStoragePlanner) Plan(ctx context.Context, req catchrpc.HostStorageP
 		Warnings:            warnings,
 		RequiresRestart:     hostStorageStateRequiresRestart(current, desired) || catchAction.Move,
 	}
+	if err := p.populateHostStoragePreflight(ctx, &plan, legacyCandidate, legacyServices); err != nil {
+		return plan, err
+	}
 	repair, err := p.planRepairAction(ctx, plan)
 	if err != nil {
 		return catchrpc.HostStoragePlan{}, err
@@ -93,25 +581,552 @@ func (p *hostStoragePlanner) Plan(ctx context.Context, req catchrpc.HostStorageP
 	return plan, nil
 }
 
+func (p *hostStoragePlanner) prepareLegacyPlanActions(current, desired catchrpc.HostStorageState, services catchrpc.HostStorageServicesAction, catchAction catchrpc.HostStorageCatchAction) (catchrpc.HostStorageServicesAction, catchrpc.HostStorageCatchAction, bool, []db.Service, error) {
+	installHome, hasInstallHome := p.legacyInstallHome()
+	legacyCandidate := hasInstallHome &&
+		isExactLegacyDefault(current, installHome) &&
+		hostStoragePathsEqual(desired.DataDir, managedHostStorageDataDir)
+	if !legacyCandidate {
+		return services, catchAction, false, nil, nil
+	}
+	legacyServices, err := p.hostStorageServices()
+	if err != nil {
+		return catchrpc.HostStorageServicesAction{}, catchrpc.HostStorageCatchAction{}, false, nil, err
+	}
+	services = preserveLegacyServiceMoves(p.config, legacyServices, services, current.DataDir)
+	catchAction, err = p.preserveLegacyCatchAction(catchAction, current.DataDir)
+	if err != nil {
+		return catchrpc.HostStorageServicesAction{}, catchrpc.HostStorageCatchAction{}, false, nil, err
+	}
+	return services, catchAction, true, legacyServices, nil
+}
+
+func (p *hostStoragePlanner) legacyInstallHome() (string, bool) {
+	recorded := strings.TrimSpace(p.config.InstallHome)
+	if recorded != "" {
+		cleaned := cleanHostStoragePath(recorded)
+		return cleaned, filepath.IsAbs(cleaned)
+	}
+	home, ok := hostStorageLookupUserHomeFn(p.config.InstallUser)
+	if !ok {
+		return "", false
+	}
+	home = cleanHostStoragePath(home)
+	return home, filepath.IsAbs(home)
+}
+
+func preserveLegacyServiceMoves(cfg Config, services []db.Service, action catchrpc.HostStorageServicesAction, legacyRoot string) catchrpc.HostStorageServicesAction {
+	byName := make(map[string]db.Service, len(services))
+	for _, service := range services {
+		byName[service.Name] = service
+	}
+	legacyServicesRoot := filepath.Join(cleanHostStoragePath(legacyRoot), "services")
+	preserved := make([]catchrpc.HostStorageServiceMove, 0, len(action.AffectedServices))
+	for _, move := range action.AffectedServices {
+		service, ok := byName[move.Name]
+		if !ok {
+			preserved = append(preserved, move)
+			continue
+		}
+		currentRoot := cleanHostStoragePath(serviceRootFromConfig(cfg, service))
+		if strings.TrimSpace(service.ServiceRootZFS) == "" && hostStorageRootContains(legacyServicesRoot, currentRoot) {
+			preserved = append(preserved, move)
+			continue
+		}
+	}
+	action.AffectedServices = preserved
+	return action
+}
+
+func (p *hostStoragePlanner) preserveLegacyCatchAction(action catchrpc.HostStorageCatchAction, legacyRoot string) (catchrpc.HostStorageCatchAction, error) {
+	if !action.Move {
+		return action, nil
+	}
+	service, ok, err := p.currentCatchServiceForHostStorage()
+	if err != nil || !ok {
+		return action, err
+	}
+	currentRoot := cleanHostStoragePath(serviceRootFromConfig(p.config, *service))
+	legacyServicesRoot := filepath.Join(cleanHostStoragePath(legacyRoot), "services")
+	if strings.TrimSpace(service.ServiceRootZFS) != "" || !hostStorageRootContains(legacyServicesRoot, currentRoot) {
+		return catchrpc.HostStorageCatchAction{}, nil
+	}
+	return action, nil
+}
+
+func (p *hostStoragePlanner) populateHostStoragePreflight(ctx context.Context, plan *catchrpc.HostStoragePlan, legacyCandidate bool, services []db.Service) error {
+	if plan == nil || !plan.DataDirAction.Move {
+		return nil
+	}
+	mountPoints, err := hostStorageMountPointsFn()
+	if err != nil {
+		return err
+	}
+	if legacyCandidate {
+		plan.Legacy = catchrpc.HostStorageLegacyPlan{
+			Eligible:       true,
+			SourceRoot:     cleanHostStoragePath(plan.Current.DataDir),
+			TargetRoot:     cleanHostStoragePath(plan.Desired.DataDir),
+			PreservedRoots: hostStoragePreservedServiceRoots(p.config, services, plan.Current.DataDir),
+		}
+		p.appendPreservedLegacyCatchRoot(&plan.Legacy)
+		if err := p.preflightLegacyCleanupBoundaries(ctx, plan, mountPoints); err != nil {
+			return err
+		}
+		plan.Legacy.CleanupAllowed = hostStorageLegacyCleanupScopeComplete(*plan) &&
+			!hostStorageContainsPreservedRoot(plan.Legacy.SourceRoot, plan.Legacy.PreservedRoots)
+	}
+	bytesToCopy, err := hostStorageBytesToCopy(plan.Current.DataDir, mountPoints)
+	if err != nil {
+		return fmt.Errorf("estimate host storage copy: %w", err)
+	}
+	bytesFree, err := hostStorageFreeBytesFn(plan.Desired.DataDir)
+	if err != nil {
+		return fmt.Errorf("estimate host storage target space: %w", err)
+	}
+	plan.Estimate = catchrpc.HostStorageEstimate{BytesToCopy: bytesToCopy, BytesFree: bytesFree}
+	if bytesToCopy > bytesFree {
+		return fmt.Errorf("insufficient free space for host storage migration: need %d bytes at %q, only %d bytes free", bytesToCopy, plan.Desired.DataDir, bytesFree)
+	}
+	return nil
+}
+
+func (p *hostStoragePlanner) appendPreservedLegacyCatchRoot(legacy *catchrpc.HostStorageLegacyPlan) {
+	if legacy == nil {
+		return
+	}
+	service, ok, err := p.currentCatchServiceForHostStorage()
+	if err != nil || !ok {
+		return
+	}
+	root := cleanHostStoragePath(serviceRootFromConfig(p.config, *service))
+	legacyServicesRoot := filepath.Join(legacy.SourceRoot, "services")
+	if root != "" && (strings.TrimSpace(service.ServiceRootZFS) != "" || !hostStorageRootContains(legacyServicesRoot, root)) {
+		legacy.PreservedRoots = uniqueSortedStrings(append(legacy.PreservedRoots, root))
+	}
+}
+
+func hostStorageLegacyCleanupScopeComplete(plan catchrpc.HostStoragePlan) bool {
+	return plan.DataDirAction.Move &&
+		hostStoragePathsEqual(plan.Desired.DataDir, managedHostStorageDataDir) &&
+		hostStoragePathsEqual(plan.Desired.ServicesRoot, filepath.Join(managedHostStorageDataDir, "services")) &&
+		plan.ServicesAction.Mode == catchrpc.HostStorageMigrateAll
+}
+
+func hostStorageContainsPreservedRoot(sourceRoot string, preservedRoots []string) bool {
+	for _, root := range preservedRoots {
+		if hostStorageRootContains(sourceRoot, root) {
+			return true
+		}
+	}
+	return false
+}
+
+type hostStorageZFSBoundary struct {
+	dataset    string
+	mountPoint string
+}
+
+func (p *hostStoragePlanner) preflightLegacyCleanupBoundaries(ctx context.Context, plan *catchrpc.HostStoragePlan, mountPoints []string) error {
+	sourceRoot := plan.Legacy.SourceRoot
+	filesystemMounts := hostStoragePathsAtOrBelow(sourceRoot, mountPoints)
+	blockingMounts := slices.Clone(filesystemMounts)
+	boundaries, err := hostStorageZFSBoundaries(ctx, p.zfs, sourceRoot)
+	if err != nil {
+		return err
+	}
+	for _, boundary := range boundaries {
+		blockingMounts = append(blockingMounts, boundary.mountPoint)
+	}
+	plan.Legacy.BlockingMounts = uniqueSortedStrings(blockingMounts)
+	command := hostStorageExplicitMigrationCommand(*plan)
+	if len(filesystemMounts) > 0 {
+		return fmt.Errorf("mounted path %q blocks cleanup of exact legacy storage %q; migrate explicitly with: %s", filesystemMounts[0], sourceRoot, command)
+	}
+	if len(boundaries) > 0 {
+		return fmt.Errorf("ZFS dataset %q mounted at %q blocks cleanup of exact legacy storage %q; migrate explicitly with: %s", boundaries[0].dataset, boundaries[0].mountPoint, sourceRoot, command)
+	}
+	return nil
+}
+
+func hostStorageExplicitMigrationCommand(plan catchrpc.HostStoragePlan) string {
+	return fmt.Sprintf(
+		"yeet host set --data-dir=%s --services-root=%s --migrate-services=all --yes",
+		plan.Desired.DataDir,
+		plan.Desired.ServicesRoot,
+	)
+}
+
+func hostStoragePathsAtOrBelow(root string, candidates []string) []string {
+	root = cleanHostStoragePath(root)
+	var paths []string
+	for _, candidate := range candidates {
+		candidate = cleanHostStoragePath(candidate)
+		if candidate != "" && (candidate == root || hostStorageRootContains(root, candidate)) {
+			paths = append(paths, candidate)
+		}
+	}
+	return uniqueSortedStrings(paths)
+}
+
+func hostStorageZFSBoundaries(ctx context.Context, runner zfsCommandRunner, root string) ([]hostStorageZFSBoundary, error) {
+	if runner == nil {
+		runner = runZFSCommand
+	}
+	stdout, stderr, err := runner(ctx, "list", "-H", "-o", "name,mountpoint")
+	if err != nil {
+		if isZFSMissingCommand(stderr, err) || isZFSNoDatasetsAvailable(stderr, err) {
+			return nil, nil
+		}
+		return nil, formatZFSCommandError("zfs list filesystems", stderr, err)
+	}
+	var boundaries []hostStorageZFSBoundary
+	for _, line := range strings.Split(stdout, "\n") {
+		dataset, mountPoint, ok := parseZFSMountpointRow(line)
+		if !ok {
+			continue
+		}
+		mountPoint = cleanHostStoragePath(mountPoint)
+		if mountPoint == root || hostStorageRootContains(root, mountPoint) {
+			boundaries = append(boundaries, hostStorageZFSBoundary{dataset: dataset, mountPoint: mountPoint})
+		}
+	}
+	slices.SortFunc(boundaries, func(a, b hostStorageZFSBoundary) int {
+		if cmp := strings.Compare(a.mountPoint, b.mountPoint); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.dataset, b.dataset)
+	})
+	return boundaries, nil
+}
+
+func readHostStorageMountPoints() ([]string, error) {
+	mountInfo, err := os.Open("/proc/self/mountinfo")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect host storage mounts: %w", err)
+	}
+	defer func() { _ = mountInfo.Close() }()
+	return hostStorageMountPointsFromReader(mountInfo)
+}
+
+func removeHostStorageSourceTree(ctx context.Context, source string) error {
+	source, err := validatedHostStorageCleanupTreePath(source)
+	if err != nil {
+		return err
+	}
+	if err := rejectHostStorageCleanupMounts(source); err != nil {
+		return err
+	}
+	info, device, root, err := openValidatedHostStorageCleanupTree(source)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return removeOpenHostStorageCleanupTree(ctx, root, source, info, device)
+}
+
+func validatedHostStorageCleanupTreePath(source string) (string, error) {
+	source = cleanHostStoragePath(source)
+	if source == "" || !filepath.IsAbs(source) || filepath.Dir(source) == source {
+		return "", fmt.Errorf("host storage cleanup source must be a non-root absolute path, got %q", source)
+	}
+	return source, nil
+}
+
+func openValidatedHostStorageCleanupTree(source string) (os.FileInfo, uint64, *os.Root, error) {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, 0, nil, fmt.Errorf("host storage cleanup source %s is a symlink", source)
+	}
+	if !info.IsDir() {
+		return nil, 0, nil, fmt.Errorf("host storage cleanup source %s is not a directory", source)
+	}
+	device, err := hostStorageCleanupDeviceFn(info)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	root, err := openHostStorageCleanupRoot(source, info)
+	return info, device, root, err
+}
+
+func removeOpenHostStorageCleanupTree(ctx context.Context, root *os.Root, source string, info os.FileInfo, device uint64) error {
+	if err := rejectHostStorageCleanupMounts(source); err != nil {
+		return err
+	}
+	if err := removeHostStorageRootContents(ctx, root, source, device); err != nil {
+		return err
+	}
+	if err := rejectHostStorageCleanupMounts(source); err != nil {
+		return err
+	}
+	parent, err := os.OpenRoot(filepath.Dir(source))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = parent.Close() }()
+	name := filepath.Base(source)
+	if err := verifyHostStorageCleanupSourceName(parent, name, source, info); err != nil {
+		return err
+	}
+	if err := root.Close(); err != nil {
+		return err
+	}
+	if err := verifyHostStorageCleanupSourceName(parent, name, source, info); err != nil {
+		return err
+	}
+	return parent.Remove(name)
+}
+
+func rejectHostStorageCleanupMounts(source string) error {
+	mounts, err := hostStorageMountPointsFn()
+	if err != nil {
+		return fmt.Errorf("inspect host storage cleanup mounts: %w", err)
+	}
+	if blocked := hostStoragePathsAtOrBelow(source, mounts); len(blocked) != 0 {
+		return fmt.Errorf("mount boundary %q blocks host storage cleanup of %q", blocked[0], source)
+	}
+	return nil
+}
+
+func openHostStorageCleanupRoot(path string, expected os.FileInfo) (*os.Root, error) {
+	root, err := os.OpenRoot(path)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := root.Open(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	openedInfo, statErr := opened.Stat()
+	closeErr := opened.Close()
+	if err := errors.Join(statErr, closeErr); err != nil {
+		_ = root.Close()
+		return nil, err
+	}
+	if !os.SameFile(expected, openedInfo) {
+		_ = root.Close()
+		return nil, fmt.Errorf("host storage cleanup path %s was replaced", path)
+	}
+	return root, nil
+}
+
+func removeHostStorageRootContents(ctx context.Context, root *os.Root, display string, device uint64) error {
+	entries, err := readHostStorageCleanupDirectory(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := removeHostStorageRootEntry(ctx, root, display, entry.Name(), device); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeHostStorageRootEntry(ctx context.Context, root *os.Root, display, name string, device uint64) error {
+	path := filepath.Join(display, name)
+	info, err := root.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("host storage cleanup path %s is a symlink", path)
+	}
+	entryDevice, err := hostStorageCleanupDeviceFn(info)
+	if err != nil {
+		return err
+	}
+	if entryDevice != device {
+		return fmt.Errorf("device boundary at %s blocks host storage cleanup", path)
+	}
+	if info.IsDir() {
+		return removeHostStorageCleanupDirectory(ctx, root, name, path, info, device)
+	}
+	if err := rejectHostStorageCleanupHardlink(path, info); err != nil {
+		return err
+	}
+	return root.Remove(name)
+}
+
+func readHostStorageCleanupDirectory(root *os.Root) ([]os.DirEntry, error) {
+	dir, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	entries, readErr := dir.ReadDir(-1)
+	closeErr := dir.Close()
+	return entries, errors.Join(readErr, closeErr)
+}
+
+func removeHostStorageCleanupDirectory(ctx context.Context, parent *os.Root, name, display string, expected os.FileInfo, device uint64) error {
+	child, err := parent.OpenRoot(name)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = child.Close() }()
+	opened, err := child.Open(".")
+	if err != nil {
+		return err
+	}
+	openedInfo, statErr := opened.Stat()
+	closeErr := opened.Close()
+	current, lstatErr := parent.Lstat(name)
+	if err := errors.Join(statErr, closeErr, lstatErr); err != nil {
+		return err
+	}
+	if !os.SameFile(expected, openedInfo) || !os.SameFile(openedInfo, current) {
+		return fmt.Errorf("host storage cleanup directory %s was replaced", display)
+	}
+	if err := rejectHostStorageCleanupMounts(display); err != nil {
+		return err
+	}
+	if err := removeHostStorageRootContents(ctx, child, display, device); err != nil {
+		return err
+	}
+	current, err = parent.Lstat(name)
+	if err != nil || !os.SameFile(openedInfo, current) {
+		return fmt.Errorf("host storage cleanup directory %s was replaced", display)
+	}
+	return parent.Remove(name)
+}
+
+func verifyHostStorageCleanupSourceName(parent *os.Root, name, display string, expected os.FileInfo) error {
+	current, err := parent.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(expected, current) {
+		return fmt.Errorf("host storage cleanup source %s was replaced", display)
+	}
+	return nil
+}
+
+func rejectHostStorageCleanupHardlink(path string, info os.FileInfo) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if ok && info.Mode().IsRegular() && stat.Nlink != 1 {
+		return fmt.Errorf("host storage cleanup file %s is a hardlink with link count %d", path, stat.Nlink)
+	}
+	return nil
+}
+
+func hostStorageCleanupDevice(info os.FileInfo) (uint64, error) {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("inspect host storage cleanup device for %s", info.Name())
+	}
+	return uint64(stat.Dev), nil
+}
+
+func hostStorageBytesToCopy(root string, mountPoints []string) (uint64, error) {
+	root = cleanHostStoragePath(root)
+	if root == "" {
+		return 0, nil
+	}
+	blocked := hostStoragePathsAtOrBelow(root, mountPoints)
+	var total uint64
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		path = cleanHostStoragePath(path)
+		if path != root && slices.Contains(blocked, path) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		size := info.Size()
+		if size <= 0 {
+			return nil
+		}
+		if uint64(size) > ^uint64(0)-total {
+			return fmt.Errorf("host storage byte estimate overflow at %q", path)
+		}
+		total += uint64(size)
+		return nil
+	})
+	return total, err
+}
+
+func hostStorageFreeBytes(target string) (uint64, error) {
+	parent, err := nearestExistingHostStoragePath(target)
+	if err != nil {
+		return 0, err
+	}
+	var stat unix.Statfs_t
+	if err := unix.Statfs(parent, &stat); err != nil {
+		return 0, err
+	}
+	if stat.Bsize <= 0 || stat.Bavail <= 0 {
+		return 0, nil
+	}
+	blockSize := uint64(stat.Bsize)
+	available := uint64(stat.Bavail)
+	if blockSize != 0 && available > ^uint64(0)/blockSize {
+		return ^uint64(0), nil
+	}
+	return available * blockSize, nil
+}
+
+func nearestExistingHostStoragePath(target string) (string, error) {
+	target = cleanHostStoragePath(target)
+	if target == "" || !filepath.IsAbs(target) {
+		return "", fmt.Errorf("host storage target must be an absolute path, got %q", target)
+	}
+	for candidate := target; ; candidate = filepath.Dir(candidate) {
+		if _, err := os.Lstat(candidate); err == nil {
+			return candidate, nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			return "", fmt.Errorf("no existing parent for host storage target %q", target)
+		}
+	}
+}
+
 type hostStorageApplier struct {
-	config Config
-	store  *db.Store
-	zfs    zfsCommandRunner
-	ops    hostStorageApplyOperations
+	config                 Config
+	store                  *db.Store
+	zfs                    zfsCommandRunner
+	ops                    hostStorageApplyOperations
+	runningCatchState      catchrpc.HostStorageState
+	runningCatchStateKnown bool
 }
 
 type hostStorageApplyOperations struct {
+	createTransaction                       func(context.Context, catchrpc.HostStoragePlan, string, []string, []string) (*hostStorageTransaction, error)
 	preflightCatchRestart                   func(context.Context, catchrpc.HostStoragePlan) error
 	isServiceRunning                        func(context.Context, string) (bool, error)
 	runnerForService                        func(context.Context, string) (ServiceRunner, error)
 	materializeServiceRootMigration         func(context.Context, serviceRootMigrationPlan, io.Writer) error
 	applyServiceRootMigrationRuntimeChanges func(context.Context, Config, db.Service, db.Service, io.Writer) error
 	copyDataDir                             func(context.Context, string, string, hostStorageDataDirCopyOptions) error
+	applyManagedTargetLayout                func(string) error
 	reinstallServiceUnits                   func(context.Context, Config, *db.Service) ([]string, error)
 	regenerateVMUnit                        func(context.Context, Config, *db.Service, string) ([]string, error)
 	reloadSystemd                           func(context.Context) error
 	enableSystemdUnits                      func(context.Context, []string) error
 	reinstallCatchUnit                      func(context.Context, hostStorageInstallRequest, io.Writer) error
+	cancelCatchRestarts                     func(context.Context) error
 	restartCatch                            func(context.Context, hostStorageInstallRequest, io.Writer) error
 	verifyCatchInfo                         func(context.Context, catchrpc.HostStorageState, Config) (ServerInfo, error)
 }
@@ -133,29 +1148,122 @@ type hostStorageDataDirCopyOptions struct {
 }
 
 type hostStorageServiceApplyMove struct {
-	plan serviceRootMigrationPlan
-	move catchrpc.HostStorageServiceMove
-	old  db.Service
+	plan            serviceRootMigrationPlan
+	move            catchrpc.HostStorageServiceMove
+	old             db.Service
+	pin             bool
+	runningCaptured bool
 }
 
 var (
-	hostStorageInstallCatchUnit = installHostStorageCatchUnit
-	hostStorageRestartCatch     = restartHostStorageCatch
-	hostStorageVerifyCatchInfo  = verifyHostStorageCatchInfo
-	hostStorageRunCommand       = runHostStorageCommand
+	hostStorageInstallCatchUnit    = installHostStorageCatchUnit
+	hostStorageCancelCatchRestarts = cancelHostStorageCatchRestarts
+	hostStorageRestartCatch        = restartHostStorageCatch
+	hostStorageVerifyCatchInfo     = verifyHostStorageCatchInfo
+	hostStorageRunCommand          = runHostStorageCommand
 )
 
-var errHostStorageCatchRestartScheduled = errors.New("catch restart scheduled")
+var (
+	errHostStorageCatchRestartScheduled = errors.New("catch restart scheduled")
+	errHostStorageSourceRestartHandoff  = errors.New("source catch restart handoff")
+)
 
 func (a *hostStorageApplier) Apply(ctx context.Context, plan catchrpc.HostStoragePlan, yes bool, w io.Writer) (catchrpc.HostStorageApplyResult, error) {
 	_ = yes
 	w = hostStorageApplyWriter(w)
 	a.ops = a.completeOperations()
+	plan, err := a.authoritativeHostStoragePreflight(ctx, plan)
+	if err != nil {
+		return catchrpc.HostStorageApplyResult{}, err
+	}
 	serviceMoves, err := a.prepareApply(ctx, plan)
 	if err != nil {
 		return catchrpc.HostStorageApplyResult{}, err
 	}
-	return a.applyPreparedPlan(ctx, plan, serviceMoves, w)
+	if !hostStoragePlanNeedsTransaction(plan, serviceMoves) {
+		return a.applyPreparedPlan(ctx, plan, serviceMoves, nil, w)
+	}
+	previouslyRunning, err := a.captureHostStorageRunningState(ctx, serviceMoves)
+	if err != nil {
+		return catchrpc.HostStorageApplyResult{}, err
+	}
+	unitPaths, err := a.hostStorageTransactionUnitPaths(plan)
+	if err != nil {
+		return catchrpc.HostStorageApplyResult{}, err
+	}
+	tx, err := a.ops.createTransaction(ctx, plan, filepath.Join(a.config.RootDir, "db.json"), unitPaths, previouslyRunning)
+	if err != nil {
+		return catchrpc.HostStorageApplyResult{}, err
+	}
+	if err := a.prepareZFS(ctx, plan); err != nil {
+		return catchrpc.HostStorageApplyResult{}, a.rollbackHostStorageTransaction(ctx, tx, err, w)
+	}
+	if err := persistHostStorageTransaction(tx); err != nil {
+		return catchrpc.HostStorageApplyResult{}, a.rollbackHostStorageTransaction(ctx, tx, fmt.Errorf("mirror prepared host storage transaction: %w", err), w)
+	}
+	result, err := a.applyPreparedPlan(ctx, plan, serviceMoves, tx, w)
+	if err != nil {
+		return catchrpc.HostStorageApplyResult{}, a.rollbackHostStorageTransaction(ctx, tx, err, w)
+	}
+	result.TransactionID = tx.ID
+	return result, nil
+}
+
+func hostStoragePlanNeedsTransaction(plan catchrpc.HostStoragePlan, moves []hostStorageServiceApplyMove) bool {
+	return len(moves) > 0 || plan.DataDirAction.Move || plan.CatchAction.Move ||
+		plan.RepairAction.References > 0 || hostStoragePlanNeedsCatchRestart(plan)
+}
+
+func (a *hostStorageApplier) authoritativeHostStoragePreflight(ctx context.Context, plan catchrpc.HostStoragePlan) (catchrpc.HostStoragePlan, error) {
+	if err := ctx.Err(); err != nil {
+		return catchrpc.HostStoragePlan{}, err
+	}
+	if err := a.validatePlanStillCurrent(plan); err != nil {
+		return catchrpc.HostStoragePlan{}, err
+	}
+	planner := &hostStoragePlanner{config: a.config, store: a.store, zfs: a.zfs}
+	authoritative := plan
+	// Estimate and Legacy are server-derived advisory fields. Older clients may
+	// omit them; non-empty legacy authority must still match current server state.
+	authoritative.DataDirAction = planHostStorageDataDirAction(plan.Current, plan.Desired)
+	authoritative.Estimate = catchrpc.HostStorageEstimate{}
+	authoritative.Legacy = catchrpc.HostStorageLegacyPlan{}
+	legacyCandidate, services, err := planner.authoritativeLegacyCandidate(plan.Current, plan.Desired)
+	if err != nil {
+		return catchrpc.HostStoragePlan{}, err
+	}
+	if err := planner.populateHostStoragePreflight(ctx, &authoritative, legacyCandidate, services); err != nil {
+		return catchrpc.HostStoragePlan{}, err
+	}
+	if !hostStorageLegacyPlanOmitted(plan.Legacy) && !hostStorageLegacyPlansEqual(plan.Legacy, authoritative.Legacy) {
+		return catchrpc.HostStoragePlan{}, fmt.Errorf("host storage plan legacy metadata does not match current server state; run yeet host set again")
+	}
+	return authoritative, nil
+}
+
+func (p *hostStoragePlanner) authoritativeLegacyCandidate(current, desired catchrpc.HostStorageState) (bool, []db.Service, error) {
+	installHome, hasInstallHome := p.legacyInstallHome()
+	candidate := hasInstallHome &&
+		isExactLegacyDefault(current, installHome) &&
+		hostStoragePathsEqual(desired.DataDir, managedHostStorageDataDir)
+	if !candidate {
+		return false, nil, nil
+	}
+	services, err := p.hostStorageServices()
+	return true, services, err
+}
+
+func hostStorageLegacyPlanOmitted(plan catchrpc.HostStorageLegacyPlan) bool {
+	return !plan.Eligible && !plan.CleanupAllowed &&
+		strings.TrimSpace(plan.SourceRoot) == "" && strings.TrimSpace(plan.TargetRoot) == "" &&
+		len(plan.PreservedRoots) == 0 && len(plan.BlockingMounts) == 0
+}
+
+func hostStorageLegacyPlansEqual(a, b catchrpc.HostStorageLegacyPlan) bool {
+	return a.Eligible == b.Eligible && a.CleanupAllowed == b.CleanupAllowed &&
+		hostStoragePathsEqual(a.SourceRoot, b.SourceRoot) && hostStoragePathsEqual(a.TargetRoot, b.TargetRoot) &&
+		slices.Equal(uniqueSortedStrings(a.PreservedRoots), uniqueSortedStrings(b.PreservedRoots)) &&
+		slices.Equal(uniqueSortedStrings(a.BlockingMounts), uniqueSortedStrings(b.BlockingMounts))
 }
 
 func hostStorageApplyWriter(w io.Writer) io.Writer {
@@ -183,10 +1291,14 @@ func (a *hostStorageApplier) prepareApply(ctx context.Context, plan catchrpc.Hos
 	if err != nil {
 		return nil, err
 	}
+	serviceMoves, err = a.appendLegacyPreservedServicePins(ctx, plan, serviceMoves)
+	if err != nil {
+		return nil, err
+	}
 	if err := a.preflightCatchRestart(ctx, plan); err != nil {
 		return nil, err
 	}
-	if err := a.prepareZFS(ctx, plan); err != nil {
+	if err := a.preflightHostStorageEstimate(plan); err != nil {
 		return nil, err
 	}
 	if err := a.preflightDataDirTarget(plan); err != nil {
@@ -195,24 +1307,87 @@ func (a *hostStorageApplier) prepareApply(ctx context.Context, plan catchrpc.Hos
 	return serviceMoves, nil
 }
 
-func (a *hostStorageApplier) applyPreparedPlan(ctx context.Context, plan catchrpc.HostStoragePlan, serviceMoves []hostStorageServiceApplyMove, w io.Writer) (catchrpc.HostStorageApplyResult, error) {
-	if err := a.stopAffectedServices(ctx, serviceMoves); err != nil {
+func (a *hostStorageApplier) preflightHostStorageEstimate(plan catchrpc.HostStoragePlan) error {
+	if !plan.DataDirAction.Move || plan.Estimate.BytesToCopy == 0 {
+		return nil
+	}
+	bytesFree, err := hostStorageFreeBytesFn(plan.DataDirAction.To)
+	if err != nil {
+		return fmt.Errorf("preflight host storage target space: %w", err)
+	}
+	if plan.Estimate.BytesToCopy > bytesFree {
+		return fmt.Errorf("insufficient free space for host storage migration: need %d bytes at %q, only %d bytes free", plan.Estimate.BytesToCopy, plan.DataDirAction.To, bytesFree)
+	}
+	return nil
+}
+
+func (a *hostStorageApplier) appendLegacyPreservedServicePins(ctx context.Context, plan catchrpc.HostStoragePlan, moves []hostStorageServiceApplyMove) ([]hostStorageServiceApplyMove, error) {
+	if !plan.Legacy.Eligible {
+		return moves, nil
+	}
+	dv, err := a.serviceRootApplyData()
+	if err != nil {
+		return nil, err
+	}
+	migrating := make(map[string]bool, len(moves))
+	for _, move := range moves {
+		if strings.TrimSpace(move.plan.OldRoot) != "" || strings.TrimSpace(move.plan.NewRoot) != "" {
+			migrating[move.move.Name] = true
+		}
+	}
+	for _, service := range hostStorageServicesFromDataView(dv) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		root := cleanHostStoragePath(serviceRootFromConfig(a.config, service))
+		if migrating[service.Name] || !slices.Contains(plan.Legacy.PreservedRoots, root) {
+			continue
+		}
+		moves = append(moves, hostStorageServiceApplyMove{
+			plan: serviceRootMigrationPlan{
+				ServiceName: service.Name,
+				OldRoot:     root,
+				OldRootZFS:  strings.TrimSpace(service.ServiceRootZFS),
+				NewRoot:     root,
+				NewRootZFS:  strings.TrimSpace(service.ServiceRootZFS),
+				Mode:        serviceRootMigrationCopy,
+			},
+			move: catchrpc.HostStorageServiceMove{Name: service.Name, From: root, To: root, ToZFS: strings.TrimSpace(service.ServiceRootZFS)},
+			old:  *service.Clone(),
+			pin:  true,
+		})
+	}
+	return moves, nil
+}
+
+func (a *hostStorageApplier) applyPreparedPlan(ctx context.Context, plan catchrpc.HostStoragePlan, serviceMoves []hostStorageServiceApplyMove, tx *hostStorageTransaction, w io.Writer) (catchrpc.HostStorageApplyResult, error) {
+	if err := a.stopAffectedServices(ctx, serviceMoves, tx); err != nil {
 		return catchrpc.HostStorageApplyResult{}, err
+	}
+	if tx != nil {
+		if err := advanceHostStorageTransaction(tx, hostStoragePhaseServicesStopped); err != nil {
+			return catchrpc.HostStorageApplyResult{}, fmt.Errorf("record stopped host storage services: %w", err)
+		}
 	}
 	rootMoves := hostStorageServiceRootApplyMoves(serviceMoves)
 	result := catchrpc.HostStorageApplyResult{
 		MigratedServices: hostStorageApplyResultMoves(rootMoves),
 	}
-	if err := a.mutateHostStorageState(ctx, plan, serviceMoves, rootMoves, w); err != nil {
+	if err := a.mutateHostStorageState(ctx, plan, rootMoves, tx, w); err != nil {
 		return catchrpc.HostStorageApplyResult{}, err
 	}
-	if err := a.finishHostStorageApply(ctx, plan, serviceMoves, w, &result); err != nil {
+	if tx != nil {
+		if err := advanceHostStorageTransaction(tx, hostStoragePhaseTargetReady); err != nil {
+			return catchrpc.HostStorageApplyResult{}, fmt.Errorf("record ready host storage target: %w", err)
+		}
+	}
+	if err := a.finishHostStorageApply(ctx, plan, serviceMoves, tx, w, &result); err != nil {
 		return catchrpc.HostStorageApplyResult{}, err
 	}
 	return result, nil
 }
 
-func (a *hostStorageApplier) mutateHostStorageState(ctx context.Context, plan catchrpc.HostStoragePlan, serviceMoves []hostStorageServiceApplyMove, rootMoves []hostStorageServiceApplyMove, w io.Writer) error {
+func (a *hostStorageApplier) mutateHostStorageState(ctx context.Context, plan catchrpc.HostStoragePlan, rootMoves []hostStorageServiceApplyMove, tx *hostStorageTransaction, w io.Writer) error {
 	if err := a.moveServiceRoots(ctx, rootMoves, w); err != nil {
 		return err
 	}
@@ -222,24 +1397,29 @@ func (a *hostStorageApplier) mutateHostStorageState(ctx context.Context, plan ca
 	if err := a.moveCatchRoot(ctx, plan, w); err != nil {
 		return err
 	}
-	if err := a.moveDataDir(ctx, plan, w); err != nil {
-		return hostStorageStoppedServicesRecoveryError(err, serviceMoves)
+	if err := a.moveDataDir(ctx, plan, tx, w); err != nil {
+		return err
 	}
 	if err := a.rewriteTargetDataStore(ctx, plan, w); err != nil {
 		if plan.DataDirAction.Move {
 			err = hostStorageDataDirRecoveryError(plan, "rewrite target db", err)
 		}
-		return hostStorageStoppedServicesRecoveryError(err, serviceMoves)
+		return err
 	}
 	if err := a.repairGeneratedArtifactsAndUnits(ctx, plan, w); err != nil {
-		return hostStorageStoppedServicesRecoveryError(err, serviceMoves)
+		return err
 	}
 	return nil
 }
 
-func (a *hostStorageApplier) finishHostStorageApply(ctx context.Context, plan catchrpc.HostStoragePlan, serviceMoves []hostStorageServiceApplyMove, w io.Writer, result *catchrpc.HostStorageApplyResult) error {
-	if err := a.restartPreviouslyRunningServices(ctx, serviceMoves); err != nil {
+func (a *hostStorageApplier) finishHostStorageApply(ctx context.Context, plan catchrpc.HostStoragePlan, serviceMoves []hostStorageServiceApplyMove, tx *hostStorageTransaction, w io.Writer, result *catchrpc.HostStorageApplyResult) error {
+	if err := a.restartPreviouslyRunningServices(ctx, serviceMoves, tx); err != nil {
 		return err
+	}
+	if tx != nil && hostStoragePlanNeedsCatchRestart(plan) {
+		if err := advanceHostStorageTransactionState(tx, hostStoragePhaseCatchSwitching, hostStorageCatchAuthorityTarget); err != nil {
+			return fmt.Errorf("record host storage catch switch intent: %w", err)
+		}
 	}
 	restarted, restartScheduled, err := a.reinstallRestartAndVerifyCatch(ctx, plan, w)
 	if err != nil {
@@ -247,6 +1427,15 @@ func (a *hostStorageApplier) finishHostStorageApply(ctx context.Context, plan ca
 	}
 	result.Restarted = restarted
 	result.RestartScheduled = restartScheduled
+	if restarted {
+		a.runningCatchState = plan.Desired
+		a.runningCatchStateKnown = true
+	}
+	if tx != nil {
+		if err := advanceHostStorageTransaction(tx, hostStoragePhaseCatchSwitched); err != nil {
+			return fmt.Errorf("record host storage catch switch: %w", err)
+		}
+	}
 	validation, err := a.validateHostStorageApply(ctx, plan)
 	if err != nil {
 		return err
@@ -261,6 +1450,9 @@ func (a *hostStorageApplier) finishHostStorageApply(ctx context.Context, plan ca
 
 func (a *hostStorageApplier) completeOperations() hostStorageApplyOperations {
 	ops := a.ops
+	if ops.createTransaction == nil {
+		ops.createTransaction = createHostStorageTransaction
+	}
 	a.completeCatchRestartOperations(&ops)
 	a.completeServiceOperations(&ops)
 	a.completeStorageOperations(&ops)
@@ -280,12 +1472,27 @@ func (a *hostStorageApplier) completeCatchRestartOperations(ops *hostStorageAppl
 	if ops.reinstallCatchUnit == nil {
 		ops.reinstallCatchUnit = hostStorageInstallCatchUnit
 	}
+	if ops.cancelCatchRestarts == nil {
+		ops.cancelCatchRestarts = hostStorageCancelCatchRestarts
+	}
 	if ops.restartCatch == nil {
 		ops.restartCatch = hostStorageRestartCatch
 	}
 	if ops.verifyCatchInfo == nil {
 		ops.verifyCatchInfo = hostStorageVerifyCatchInfo
 	}
+}
+
+func (a *hostStorageApplier) runningCatchMatches(state catchrpc.HostStorageState) bool {
+	running := a.runningCatchState
+	if !a.runningCatchStateKnown {
+		running = catchrpc.HostStorageState{
+			DataDir:      a.config.RootDir,
+			ServicesRoot: a.config.ServicesRoot,
+		}
+	}
+	return hostStoragePathsEqual(running.DataDir, state.DataDir) &&
+		hostStoragePathsEqual(running.ServicesRoot, state.ServicesRoot)
 }
 
 func (a *hostStorageApplier) completeServiceOperations(ops *hostStorageApplyOperations) {
@@ -327,6 +1534,9 @@ func (a *hostStorageApplier) completeStorageOperations(ops *hostStorageApplyOper
 		ops.copyDataDir = func(ctx context.Context, from, to string, opts hostStorageDataDirCopyOptions) error {
 			return copyHostStorageDataDir(ctx, from, to, opts)
 		}
+	}
+	if ops.applyManagedTargetLayout == nil {
+		ops.applyManagedTargetLayout = applyManagedHostStorageTargetLayout
 	}
 }
 
@@ -555,15 +1765,26 @@ func (a *hostStorageApplier) validateCurrentServiceRootMovesForServices(ctx cont
 func currentHostStorageServiceMovesForPlan(ctx context.Context, cfg Config, services []db.Service, plan catchrpc.HostStoragePlan) ([]catchrpc.HostStorageServiceMove, error) {
 	from, to := hostStorageServicesActionRoots(plan)
 	servicesRootDataset := hostStorageServicesRootDatasetFromMoves(plan.ServicesAction.AffectedServices)
+	var moves []catchrpc.HostStorageServiceMove
 	if hostStoragePathsEqual(from, to) && servicesRootDataset != "" && plan.ServicesAction.Mode == catchrpc.HostStorageMigrateAll {
-		return planServicesRootZFSChildDatasetMoves(ctx, cfg, services, to, servicesRootDataset)
+		var err error
+		moves, err = planServicesRootZFSChildDatasetMoves(ctx, cfg, services, to, servicesRootDataset)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		batch, err := planServicesRootBatch(ctx, cfg, services, from, to, plan.ServicesAction.Mode)
+		if err != nil {
+			return nil, err
+		}
+		moves = hostStorageServiceMovesFromRootBatch(batch)
+		applyServicesRootDatasetToMoves(moves, servicesRootDataset, plan.ServicesAction.Mode)
 	}
-	batch, err := planServicesRootBatch(ctx, cfg, services, from, to, plan.ServicesAction.Mode)
-	if err != nil {
-		return nil, err
+	if plan.Legacy.Eligible {
+		action := plan.ServicesAction
+		action.AffectedServices = moves
+		moves = preserveLegacyServiceMoves(cfg, services, action, plan.Legacy.SourceRoot).AffectedServices
 	}
-	moves := hostStorageServiceMovesFromRootBatch(batch)
-	applyServicesRootDatasetToMoves(moves, servicesRootDataset, plan.ServicesAction.Mode)
 	return moves, nil
 }
 
@@ -721,27 +1942,126 @@ func serviceRootApplyMigrationMode(catchrpc.HostStorageMigrateServices) serviceR
 	return serviceRootMigrationCopy
 }
 
-func (a *hostStorageApplier) stopAffectedServices(ctx context.Context, moves []hostStorageServiceApplyMove) error {
+func (a *hostStorageApplier) captureHostStorageRunningState(ctx context.Context, moves []hostStorageServiceApplyMove) ([]string, error) {
+	var previouslyRunning []string
 	for i := range moves {
+		if moves[i].pin {
+			continue
+		}
 		running, err := a.ops.isServiceRunning(ctx, moves[i].move.Name)
 		if err != nil {
 			if hostStorageRunningCheckCanTreatAsStopped(moves[i].plan) {
 				running = false
 			} else {
-				return fmt.Errorf("check service %q running state: %w", moves[i].move.Name, err)
+				return nil, fmt.Errorf("check service %q running state: %w", moves[i].move.Name, err)
 			}
 		}
 		moves[i].move.WasRunning = running
+		moves[i].runningCaptured = true
+		if running {
+			previouslyRunning = append(previouslyRunning, moves[i].move.Name)
+		}
+	}
+	return uniqueSortedStrings(previouslyRunning), nil
+}
+
+func (a *hostStorageApplier) hostStorageTransactionUnitPaths(plan catchrpc.HostStoragePlan) ([]string, error) {
+	dv, err := a.serviceRootApplyData()
+	if err != nil {
+		return nil, err
+	}
+	paths := make(map[string]struct{})
+	addHostStorageServiceUnitPaths(paths, hostStorageServicesFromDataView(dv))
+	addHostStorageRepairUnitPaths(paths, plan.RepairAction.RegenerateUnits)
+	out := make([]string, 0, len(paths))
+	for path := range paths {
+		out = append(out, path)
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+func addHostStorageServiceUnitPaths(paths map[string]struct{}, services []db.Service) {
+	for _, service := range services {
+		if strings.TrimSpace(service.Name) == "" {
+			continue
+		}
+		name := service.Name
+		for _, unit := range []string{name + ".service", name + ".timer", "yeet-" + name + "-ns.service", "yeet-" + name + "-ts.service"} {
+			paths[filepath.Join(systemdSystemDir, unit)] = struct{}{}
+		}
+		if service.ServiceType == db.ServiceTypeVM {
+			paths[filepath.Join(vmSystemdSystemDir, vmSystemdUnitName(name))] = struct{}{}
+		}
+	}
+}
+
+func addHostStorageRepairUnitPaths(paths map[string]struct{}, units []string) {
+	for _, unit := range units {
+		unit = strings.TrimSpace(unit)
+		if unit == "" {
+			continue
+		}
+		if filepath.IsAbs(unit) {
+			paths[filepath.Clean(unit)] = struct{}{}
+			continue
+		}
+		dir := systemdSystemDir
+		if strings.HasPrefix(unit, "yeet-vm-") {
+			dir = vmSystemdSystemDir
+		}
+		paths[filepath.Join(dir, unit)] = struct{}{}
+	}
+}
+
+func (a *hostStorageApplier) stopAffectedServices(ctx context.Context, moves []hostStorageServiceApplyMove, tx *hostStorageTransaction) error {
+	for i := range moves {
+		if moves[i].pin {
+			continue
+		}
+		running, err := a.hostStorageMoveWasRunning(ctx, &moves[i])
+		if err != nil {
+			return err
+		}
 		if !running {
 			continue
 		}
-		runner, err := a.ops.runnerForService(ctx, moves[i].move.Name)
-		if err != nil {
-			return fmt.Errorf("runner for service %q: %w", moves[i].move.Name, err)
+		if err := a.stopHostStorageService(ctx, moves[i].move.Name, tx); err != nil {
+			return err
 		}
-		if err := runner.Stop(); err != nil {
-			return fmt.Errorf("stop service %q before host storage apply: %w", moves[i].move.Name, err)
-		}
+	}
+	return nil
+}
+
+func (a *hostStorageApplier) hostStorageMoveWasRunning(ctx context.Context, move *hostStorageServiceApplyMove) (bool, error) {
+	if move.runningCaptured {
+		return move.move.WasRunning, nil
+	}
+	running, err := a.ops.isServiceRunning(ctx, move.move.Name)
+	if err != nil && !hostStorageRunningCheckCanTreatAsStopped(move.plan) {
+		return false, fmt.Errorf("check service %q running state: %w", move.move.Name, err)
+	}
+	if err != nil {
+		running = false
+	}
+	move.move.WasRunning = running
+	return running, nil
+}
+
+func (a *hostStorageApplier) stopHostStorageService(ctx context.Context, name string, tx *hostStorageTransaction) error {
+	runner, err := a.ops.runnerForService(ctx, name)
+	if err != nil {
+		return fmt.Errorf("runner for service %q: %w", name, err)
+	}
+	if err := runner.Stop(); err != nil {
+		return fmt.Errorf("stop service %q before host storage apply: %w", name, err)
+	}
+	if tx == nil {
+		return nil
+	}
+	tx.StoppedServices = uniqueSortedStrings(append(tx.StoppedServices, name))
+	if err := persistHostStorageTransaction(tx); err != nil {
+		return fmt.Errorf("record stopped service %q: %w", name, err)
 	}
 	return nil
 }
@@ -760,6 +2080,9 @@ func hostStorageRunningCheckCanTreatAsStopped(plan serviceRootMigrationPlan) boo
 
 func (a *hostStorageApplier) moveServiceRoots(ctx context.Context, moves []hostStorageServiceApplyMove, w io.Writer) error {
 	for _, move := range moves {
+		if move.pin {
+			continue
+		}
 		if strings.TrimSpace(move.plan.OldRoot) == "" && strings.TrimSpace(move.plan.NewRoot) == "" {
 			continue
 		}
@@ -1026,8 +2349,10 @@ func (a *hostStorageApplier) prepareServiceDBUpdates(ctx context.Context, desire
 		if err != nil {
 			return nil, err
 		}
-		if err := a.ops.applyServiceRootMigrationRuntimeChanges(ctx, desiredConfig, move.old, *updated, w); err != nil {
-			return nil, err
+		if !move.pin {
+			if err := a.ops.applyServiceRootMigrationRuntimeChanges(ctx, desiredConfig, move.old, *updated, w); err != nil {
+				return nil, err
+			}
 		}
 		updates[move.plan.ServiceName] = updated
 	}
@@ -1133,7 +2458,7 @@ func (a *hostStorageApplier) updateCatchRootAfterMove(ctx context.Context, plan 
 	return err
 }
 
-func (a *hostStorageApplier) moveDataDir(ctx context.Context, plan catchrpc.HostStoragePlan, w io.Writer) error {
+func (a *hostStorageApplier) moveDataDir(ctx context.Context, plan catchrpc.HostStoragePlan, tx *hostStorageTransaction, w io.Writer) error {
 	if !plan.DataDirAction.Move {
 		return nil
 	}
@@ -1149,8 +2474,16 @@ func (a *hostStorageApplier) moveDataDir(ctx context.Context, plan catchrpc.Host
 		AllowedExistingRoots: hostStorageDataDirAllowedTargetRoots(plan),
 		ExcludeRoots:         hostStorageDataDirExcludedSourceRoots(plan),
 	}
+	if tx != nil && tx.TargetJournal != "" {
+		opts.AllowedExistingRoots = append(opts.AllowedExistingRoots, filepath.Dir(tx.TargetJournal))
+	}
 	if err := a.ops.copyDataDir(ctx, from, to, opts); err != nil {
 		return hostStorageDataDirRecoveryError(plan, "copy data dir", err)
+	}
+	if plan.Legacy.Eligible && hostStoragePathsEqual(to, managedHostStorageDataDir) {
+		if err := a.ops.applyManagedTargetLayout(to); err != nil {
+			return hostStorageDataDirRecoveryError(plan, "apply managed target modes", err)
+		}
 	}
 	return nil
 }
@@ -1357,7 +2690,7 @@ func (a *hostStorageApplier) activeHostStorageMappings(ctx context.Context, plan
 	}
 	data := dv.AsStruct()
 	catchRoot := hostStorageCatchRootFromData(cfg, data)
-	legacyDataDirs := hostStorageLegacyDefaultDataDirs(cfg)
+	legacyDataDirs := hostStorageLegacyRepairDataDirs(cfg)
 	mappings = hostStorageKnownLegacyRepairMappings(plan.Desired, catchRoot, legacyDataDirs)
 	if len(plan.RepairAction.ValidationRoots) > 0 {
 		mappings = filterHostStorageMappingsBySources(mappings, plan.RepairAction.ValidationRoots)
@@ -1499,7 +2832,7 @@ func (a *hostStorageApplier) wrapCatchRestartError(plan catchrpc.HostStoragePlan
 	return fmt.Errorf("%s: %w", step, err)
 }
 
-func (a *hostStorageApplier) restartPreviouslyRunningServices(ctx context.Context, moves []hostStorageServiceApplyMove) error {
+func (a *hostStorageApplier) restartPreviouslyRunningServices(ctx context.Context, moves []hostStorageServiceApplyMove, tx *hostStorageTransaction) error {
 	for _, move := range moves {
 		if !move.move.WasRunning {
 			continue
@@ -1510,6 +2843,12 @@ func (a *hostStorageApplier) restartPreviouslyRunningServices(ctx context.Contex
 		}
 		if err := runner.Start(); err != nil {
 			return fmt.Errorf("start service %q after host storage apply: %w", move.move.Name, err)
+		}
+		if tx != nil {
+			tx.RestartedServices = uniqueSortedStrings(append(tx.RestartedServices, move.move.Name))
+			if err := persistHostStorageTransaction(tx); err != nil {
+				return fmt.Errorf("record restarted service %q: %w", move.move.Name, err)
+			}
 		}
 	}
 	return nil
@@ -1555,8 +2894,11 @@ func hostStorageApplyResultMoves(moves []hostStorageServiceApplyMove) []catchrpc
 	if len(moves) == 0 {
 		return nil
 	}
-	out := make([]catchrpc.HostStorageServiceMove, 0, len(moves))
+	var out []catchrpc.HostStorageServiceMove
 	for _, move := range moves {
+		if move.pin {
+			continue
+		}
 		out = append(out, move.move)
 	}
 	return out
@@ -1647,7 +2989,7 @@ func formatHostStorageValidationExamples(refs []hostStorageReference) string {
 }
 
 func hostStorageServiceMoveRecoveryError(plan serviceRootMigrationPlan, err error) error {
-	return fmt.Errorf("move service root for %q from %q to %q failed: %v. Services were left stopped; repair the failed root and retry host storage apply or start services manually", plan.ServiceName, plan.OldRoot, plan.NewRoot, err)
+	return fmt.Errorf("move service root for %q from %q to %q failed: %w", plan.ServiceName, plan.OldRoot, plan.NewRoot, err)
 }
 
 func hostStorageCatchMoveRecoveryError(plan serviceRootMigrationPlan, err error) error {
@@ -1664,19 +3006,6 @@ func hostStorageDataDirRecoveryError(plan catchrpc.HostStoragePlan, step string,
 		to = cleanHostStoragePath(plan.Desired.DataDir)
 	}
 	return fmt.Errorf("host data dir change from %q to %q failed during %s: %v. Old data dir remains at %q; restore the catch unit to --data-dir=%q or retry after fixing %q", from, to, step, err, from, from, to)
-}
-
-func hostStorageStoppedServicesRecoveryError(err error, moves []hostStorageServiceApplyMove) error {
-	stopped := make([]string, 0, len(moves))
-	for _, move := range moves {
-		if move.move.WasRunning {
-			stopped = append(stopped, move.move.Name)
-		}
-	}
-	if len(stopped) == 0 {
-		return err
-	}
-	return fmt.Errorf("%w. Services were left stopped: %s", err, strings.Join(stopped, ", "))
 }
 
 func hostStoragePluralSuffix(n int) string {
@@ -1777,6 +3106,13 @@ func restartHostStorageCatch(ctx context.Context, _ hostStorageInstallRequest, w
 	}
 	writef(w, "Scheduled catch restart.\n")
 	return errHostStorageCatchRestartScheduled
+}
+
+func cancelHostStorageCatchRestarts(ctx context.Context) error {
+	if err := hostStorageRunCommand(ctx, "systemctl", "stop", "yeet-catch-restart-*.timer", "yeet-catch-restart-*.service"); err != nil {
+		return err
+	}
+	return nil
 }
 
 func runHostStorageCommand(ctx context.Context, name string, args ...string) error {
@@ -2536,7 +3872,7 @@ func (p *hostStoragePlanner) planRepairAction(ctx context.Context, plan catchrpc
 		return catchrpc.HostStorageRepairAction{}, err
 	}
 	if len(mappings) == 0 {
-		legacyDataDirs := hostStorageLegacyDefaultDataDirs(p.config)
+		legacyDataDirs := hostStorageLegacyRepairDataDirs(p.config)
 		probeMappings := hostStorageKnownLegacyRepairMappings(plan.Desired, catchRoot, legacyDataDirs)
 		probeDBRefs := scanHostStorageDataRefs(data, probeMappings)
 		probeSystemdRefs, err := scanHostStorageSystemdRefs(systemdSystemDir, probeMappings)

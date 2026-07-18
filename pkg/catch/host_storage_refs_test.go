@@ -5,15 +5,65 @@
 package catch
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
 )
+
+func TestHostStorageLegacyDefaultUsesRecordedInstallHomeOnly(t *testing.T) {
+	if got, want := legacyDefaultDataDir("/home/ubuntu/../ubuntu"), "/home/ubuntu/yeet-data"; got != want {
+		t.Fatalf("legacyDefaultDataDir = %q, want %q", got, want)
+	}
+	for _, current := range []catchrpc.HostStorageState{
+		{DataDir: "/root/data"},
+		{DataDir: "/srv/yeet"},
+		{DataDir: "/root/yeet-data", DataDirZFS: true},
+	} {
+		if isExactLegacyDefault(current, "/root") {
+			t.Fatalf("isExactLegacyDefault(%#v, /root) = true", current)
+		}
+	}
+	if !isExactLegacyDefault(catchrpc.HostStorageState{DataDir: "/root/yeet-data/"}, "/root") {
+		t.Fatalf("exact recorded legacy default was not detected")
+	}
+}
+
+func TestHostStorageLegacyRepairCandidatesRetainRootDataWithoutCleanupAuthority(t *testing.T) {
+	dirs := hostStorageLegacyRepairDataDirs(Config{InstallUser: "ubuntu", InstallHome: "/recorded/home"})
+	for _, want := range []string{
+		"/root/data",
+		"/root/yeet-data",
+		"/recorded/home/data",
+		"/recorded/home/yeet-data",
+	} {
+		if !slices.Contains(dirs, want) {
+			t.Fatalf("repair dirs = %#v, want %q", dirs, want)
+		}
+	}
+}
+
+func TestHostStorageNestedMountInfoParsesEscapedMountpoints(t *testing.T) {
+	mountInfo := bytes.NewBufferString(strings.Join([]string{
+		"35 24 0:31 / / rw,relatime - ext4 /dev/root rw",
+		`41 35 0:42 / /root/yeet-data/mounts/media rw,relatime - ext4 /dev/sdb rw`,
+		`42 35 0:43 / /root/yeet-data/mounts/My\040Media rw,relatime - ext4 /dev/sdc rw`,
+	}, "\n"))
+	got, err := hostStorageMountPointsFromReader(mountInfo)
+	if err != nil {
+		t.Fatalf("hostStorageMountPointsFromReader: %v", err)
+	}
+	want := []string{"/", "/root/yeet-data/mounts/My Media", "/root/yeet-data/mounts/media"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("mount points = %#v, want %#v", got, want)
+	}
+}
 
 func TestHostStoragePathMapRewritesLongestPrefixFirst(t *testing.T) {
 	mappings := hostStoragePathMappings{

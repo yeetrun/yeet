@@ -9,14 +9,19 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/cli"
 )
 
 func TestParseInitArgs(t *testing.T) {
@@ -716,12 +721,12 @@ func TestPrepareInitStorageOptionsPreservesExistingCatchStorage(t *testing.T) {
 		runInitStorageWizardFn = oldWizard
 		isTerminalFn = oldIsTerminal
 	})
-	want := initStorageOptions{
+	existing := initStorageOptions{
 		DataDir:      "/root/data",
 		ServicesRoot: "/srv/yeet-services",
 	}
 	remoteInitExistingCatchStorageFn = func(string) (initStorageOptions, bool, error) {
-		return want, true, nil
+		return existing, true, nil
 	}
 	runInitStorageWizardFn = func(io.Reader, io.Writer, initStorageProbe) (initStorageOptions, error) {
 		t.Fatal("runInitStorageWizardFn should not be called for existing catch")
@@ -733,8 +738,627 @@ func TestPrepareInitStorageOptionsPreservesExistingCatchStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareInitStorageOptions: %v", err)
 	}
+	want := existing
+	want.existingCatch = true
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("storage = %#v, want existing catch storage %#v", got, want)
+	}
+}
+
+func TestFinalizeInitCatchUpgradesBeforeLegacyMigration(t *testing.T) {
+	oldInstall := installInitCatchWithTailscaleRetryFn
+	oldMigrate := runInitLegacyStorageMigrationFn
+	oldCleanup := cleanupInitCatchBinaryFn
+	t.Cleanup(func() {
+		installInitCatchWithTailscaleRetryFn = oldInstall
+		runInitLegacyStorageMigrationFn = oldMigrate
+		cleanupInitCatchBinaryFn = oldCleanup
+	})
+	var calls []string
+	installInitCatchWithTailscaleRetryFn = func(_ *initUI, _ string, _ bool, _ bool, _ bool, _ initOptions) error {
+		calls = append(calls, "install")
+		return nil
+	}
+	runInitLegacyStorageMigrationFn = func(_ *initUI, _ string, _ initStorageOptions) error {
+		calls = append(calls, "migrate")
+		return nil
+	}
+	cleanupInitCatchBinaryFn = func(*initUI, string, string) {}
+	ui := newInitUI(io.Discard, false, true, "catch", "root@example.com", catchServiceName)
+	if err := finalizeInitCatch(ui, "root@example.com", "amd64", false, false, false, initOptions{noWorkspace: true, skipVMLANBridge: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(calls, []string{"install", "migrate"}) {
+		t.Fatalf("calls = %#v, want install then migrate", calls)
+	}
+}
+
+func TestInitLegacyStorageSkipsFreshVarLibCustomAndZFS(t *testing.T) {
+	tests := []struct {
+		name    string
+		storage initStorageOptions
+		plan    catchrpc.HostStoragePlan
+		wantRPC bool
+	}{
+		{name: "fresh default", storage: initStorageOptions{DataDir: "/var/lib/yeet"}},
+		{name: "fresh implicit default", storage: initStorageOptions{}},
+		{name: "existing custom", storage: initStorageOptions{DataDir: "/srv/yeet", existingCatch: true}, wantRPC: true},
+		{name: "existing zfs", storage: initStorageOptions{DataDir: "tank/yeet", DataDirZFS: true, existingCatch: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := stubInitLegacyStorageMigration(t, tt.plan, false)
+			if err := runInitLegacyStorageMigration(state.ui, "ubuntu@example.com", tt.storage); err != nil {
+				t.Fatal(err)
+			}
+			if got := len(state.client.planRequests); (got != 0) != tt.wantRPC {
+				t.Fatalf("plan requests = %d, wantRPC=%t", got, tt.wantRPC)
+			}
+			if len(state.prompter.confirmPrompts) != 0 {
+				t.Fatalf("prompts = %#v, want none", state.prompter.confirmPrompts)
+			}
+		})
+	}
+}
+
+func TestInitLegacyStorageNonInteractivePrintsInstallHomeCommands(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/home/ubuntu/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, false)
+	if err := runInitLegacyStorageMigration(state.ui, "ubuntu@example.com", initStorageOptions{DataDir: plan.Current.DataDir, existingCatch: true}); err != nil {
+		t.Fatal(err)
+	}
+	want := "Legacy Yeet state remains at /home/ubuntu/yeet-data.\n" +
+		"Migrate it explicitly:\n" +
+		"  yeet host set --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services --migrate-services=all --yes\n" +
+		"After Catch reconnects and validates the new state, remove the inactive legacy tree:\n" +
+		"  yeet host cleanup --from=/home/ubuntu/yeet-data --yes\n"
+	if state.output.String() != want {
+		t.Fatalf("output = %q, want exact guidance %q", state.output.String(), want)
+	}
+	if len(state.client.applyRequests) != 0 || len(state.prompter.confirmPrompts) != 0 {
+		t.Fatalf("apply/prompts = %#v/%#v, want none", state.client.applyRequests, state.prompter.confirmPrompts)
+	}
+	if !reflect.DeepEqual(state.clientHosts, []string{"example.com"}) {
+		t.Fatalf("RPC hosts = %#v, want SSH user removed", state.clientHosts)
+	}
+}
+
+func TestInitLegacyStorageDeclineRendersBoundaryAndPreservesOldHost(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/home/ubuntu/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, true)
+	state.prompter.confirmAnswers = []bool{false}
+	if err := runInitLegacyStorageMigration(state.ui, "ubuntu@example.com", initStorageOptions{DataDir: plan.Current.DataDir, existingCatch: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.prompter.confirmPrompts) != 1 || state.prompter.confirmPrompts[0] != "Move Yeet's legacy state to /var/lib/yeet and remove the old tree after verification? [Y/n]" {
+		t.Fatalf("prompts = %#v, want one migration consent", state.prompter.confirmPrompts)
+	}
+	if len(state.client.applyRequests) != 0 {
+		t.Fatalf("apply requests = %#v, want none", state.client.applyRequests)
+	}
+	for _, want := range []string{"/home/ubuntu/yeet-data -> /var/lib/yeet", "api", "/srv/preserved", "4096 bytes", "8192 bytes", "running services", "rollback boundary", "yeet host set", "yeet host cleanup"} {
+		if !strings.Contains(strings.ToLower(state.output.String()), strings.ToLower(want)) {
+			t.Fatalf("output = %q, want %q", state.output.String(), want)
+		}
+	}
+}
+
+func TestInitLegacyStorageConsentAppliesFinalizesAndCleans(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/root/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, true)
+	state.prompter.confirmAnswers = []bool{true}
+	state.client.apply = catchrpc.HostStorageApplyResult{TransactionID: "tx-1", RestartScheduled: true}
+	state.client.finalize = catchrpc.HostStorageFinalizeResult{TransactionID: "tx-1", CleanupPending: true}
+	state.client.cleanup = catchrpc.HostStorageCleanupResult{TransactionID: "tx-1", Removed: plan.Legacy.SourceRoot}
+	if err := runInitLegacyStorageMigration(state.ui, "root@example.com", initStorageOptions{DataDir: plan.Current.DataDir, existingCatch: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.client.planRequests) != 1 {
+		t.Fatalf("plan requests = %#v, want one", state.client.planRequests)
+	}
+	set := state.client.planRequests[0].Set
+	if set.DataDir == nil || set.DataDir.Value != "/var/lib/yeet" || set.DataDir.ZFS ||
+		set.ServicesRoot == nil || set.ServicesRoot.Value != "/var/lib/yeet/services" || set.ServicesRoot.ZFS ||
+		set.MigrateServices != catchrpc.HostStorageMigrateAll {
+		t.Fatalf("plan request = %#v, want full filesystem migration", state.client.planRequests[0])
+	}
+	if len(state.client.applyRequests) != 1 || !state.client.applyRequests[0].Yes || state.client.applyRequests[0].Plan.Legacy.SourceRoot != plan.Legacy.SourceRoot {
+		t.Fatalf("apply requests = %#v", state.client.applyRequests)
+	}
+	if len(state.client.finalizeRequests) != 1 || state.client.finalizeRequests[0].TransactionID != "tx-1" {
+		t.Fatalf("finalize requests = %#v", state.client.finalizeRequests)
+	}
+	if len(state.client.cleanupRequests) != 1 || state.client.cleanupRequests[0].From != plan.Legacy.SourceRoot || !state.client.cleanupRequests[0].Yes {
+		t.Fatalf("cleanup requests = %#v", state.client.cleanupRequests)
+	}
+}
+
+func TestInitLegacyStorageApplyFailureReportsRollbackAndRetry(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/root/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, true)
+	state.prompter.confirmAnswers = []bool{true}
+	state.client.applyErr = errors.New("copy failed; rollback completed")
+	err := runInitLegacyStorageMigration(state.ui, "root@example.com", initStorageOptions{DataDir: plan.Current.DataDir, existingCatch: true})
+	if err == nil || !strings.Contains(err.Error(), "rollback completed") || !strings.Contains(err.Error(), "yeet host set") {
+		t.Fatalf("error = %v, want rollback and retry command", err)
+	}
+	if len(state.client.finalizeRequests) != 0 || len(state.client.cleanupRequests) != 0 {
+		t.Fatalf("finalize/cleanup = %#v/%#v, want none", state.client.finalizeRequests, state.client.cleanupRequests)
+	}
+}
+
+func TestInitLegacyStorageCleanupFailureReportsInactiveSensitiveStateAndCanResume(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/recorded/home/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, true)
+	state.prompter.confirmAnswers = []bool{true, true}
+	state.client.apply = catchrpc.HostStorageApplyResult{TransactionID: "tx-1"}
+	state.client.finalize = catchrpc.HostStorageFinalizeResult{TransactionID: "tx-1", CleanupPending: true}
+	state.client.cleanupErr = errors.New("device busy")
+	err := runInitLegacyStorageMigration(state.ui, "root@example.com", initStorageOptions{DataDir: plan.Current.DataDir, existingCatch: true})
+	if err == nil || !strings.Contains(err.Error(), "inactive") || !strings.Contains(err.Error(), "sensitive state") || !strings.Contains(err.Error(), "yeet host cleanup --from=/recorded/home/yeet-data --yes") {
+		t.Fatalf("error = %v, want inactive sensitive-state cleanup guidance", err)
+	}
+	state.client.cleanupErr = nil
+	state.client.cleanup = catchrpc.HostStorageCleanupResult{TransactionID: "tx-1", Removed: plan.Legacy.SourceRoot}
+	state.output.Reset()
+	if err := runInitLegacyStorageMigration(state.ui, "root@example.com", initStorageOptions{
+		DataDir:             "/var/lib/yeet",
+		existingCatch:       true,
+		legacyCleanupSource: "/recorded/home/yeet-data",
+	}); err != nil {
+		t.Fatalf("rerun init cleanup: %v", err)
+	}
+	if len(state.client.cleanupRequests) != 2 {
+		t.Fatalf("cleanup requests = %#v, want failure then resume", state.client.cleanupRequests)
+	}
+	if len(state.client.planRequests) != 1 {
+		t.Fatalf("plan requests = %#v, want no second plan after Catch switched", state.client.planRequests)
+	}
+	if got := state.client.cleanupRequests[1].From; got != "/recorded/home/yeet-data" {
+		t.Fatalf("resumed cleanup source = %q, want recorded install-home source", got)
+	}
+	wantPrompt := "Remove inactive legacy Yeet state at /recorded/home/yeet-data? [Y/n]"
+	if !reflect.DeepEqual(state.prompter.confirmPrompts, []string{
+		"Move Yeet's legacy state to /var/lib/yeet and remove the old tree after verification? [Y/n]",
+		wantPrompt,
+	}) {
+		t.Fatalf("prompts = %#v, want migration then dedicated cleanup consent", state.prompter.confirmPrompts)
+	}
+	if !strings.Contains(state.output.String(), "Removed inactive legacy host storage /recorded/home/yeet-data") {
+		t.Fatalf("rerun output = %q, want resumed cleanup success", state.output.String())
+	}
+}
+
+func TestInitLegacyStorageAfterExplicitHostSetRequiresCleanupConsent(t *testing.T) {
+	tests := []struct {
+		name        string
+		interactive bool
+		answers     []bool
+		wantPrompts []string
+	}{
+		{name: "noninteractive"},
+		{
+			name:        "declined interactive",
+			interactive: true,
+			answers:     []bool{false},
+			wantPrompts: []string{"Remove inactive legacy Yeet state at /recorded/home/yeet-data? [Y/n]"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state := stubHostSetRuntime(t)
+			state.client.plan = initLegacyStorageTestPlan("/recorded/home/yeet-data")
+			state.client.apply = catchrpc.HostStorageApplyResult{TransactionID: "tx-explicit"}
+			state.client.finalize = catchrpc.HostStorageFinalizeResult{TransactionID: "tx-explicit", CleanupPending: true}
+			state.client.cleanup = catchrpc.HostStorageCleanupResult{TransactionID: "tx-explicit", Removed: "/recorded/home/yeet-data"}
+			if err := runHostSet(context.Background(), cli.HostSetFlags{
+				DataDir:         "/var/lib/yeet",
+				ServicesRoot:    "/var/lib/yeet/services",
+				MigrateServices: "all",
+				Yes:             true,
+			}); err != nil {
+				t.Fatalf("explicit host set: %v", err)
+			}
+
+			oldPrompt := activePrompter
+			oldTerminal := isTerminalFn
+			t.Cleanup(func() {
+				activePrompter = oldPrompt
+				isTerminalFn = oldTerminal
+			})
+			prompter := &scriptedInitPrompter{confirmAnswers: tt.answers}
+			activePrompter = prompter
+			isTerminalFn = func(int) bool { return tt.interactive }
+			var output strings.Builder
+			ui := newInitUI(&output, false, false, "catch", "catch-a", catchServiceName)
+			if err := runInitLegacyStorageMigration(ui, "ubuntu@catch-a", initStorageOptions{
+				DataDir:             "/var/lib/yeet",
+				existingCatch:       true,
+				legacyCleanupSource: "/recorded/home/yeet-data",
+			}); err != nil {
+				t.Fatalf("second init: %v", err)
+			}
+			if len(state.client.cleanupRequests) != 0 {
+				t.Fatalf("cleanup requests = %#v, explicit host set did not consent to deletion", state.client.cleanupRequests)
+			}
+			if !reflect.DeepEqual(prompter.confirmPrompts, tt.wantPrompts) {
+				t.Fatalf("cleanup prompts = %#v, want %#v", prompter.confirmPrompts, tt.wantPrompts)
+			}
+			wantOutput := "Inactive legacy Yeet state remains at /recorded/home/yeet-data.\n" +
+				"Remove it explicitly:\n" +
+				"  yeet host cleanup --from=/recorded/home/yeet-data --yes\n"
+			if output.String() != wantOutput {
+				t.Fatalf("output = %q, want exact cleanup guidance %q", output.String(), wantOutput)
+			}
+		})
+	}
+}
+
+func TestInitLegacyStorageConfirmedCleanupSurfacesAmbiguousAuthority(t *testing.T) {
+	state := stubInitLegacyStorageMigration(t, catchrpc.HostStoragePlan{}, true)
+	state.prompter.confirmAnswers = []bool{true}
+	state.client.cleanupErr = errors.New(`host storage cleanup source "/home/ubuntu/yeet-data" is not authorized by exactly one validated host storage transaction`)
+	err := runInitLegacyStorageMigration(state.ui, "ubuntu@example.com", initStorageOptions{
+		DataDir:             "/var/lib/yeet",
+		existingCatch:       true,
+		legacyCleanupSource: "/home/ubuntu/yeet-data",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not authorized by exactly one validated host storage transaction") ||
+		!strings.Contains(err.Error(), "yeet host cleanup --from=/home/ubuntu/yeet-data --yes") {
+		t.Fatalf("error = %v, want visible ambiguous authority and manual command", err)
+	}
+	if len(state.client.cleanupRequests) != 1 || state.client.cleanupRequests[0].From != "/home/ubuntu/yeet-data" || !state.client.cleanupRequests[0].Yes {
+		t.Fatalf("cleanup requests = %#v, want one consented exact-source request", state.client.cleanupRequests)
+	}
+}
+
+func TestInitLegacyStorageRejectsUnsafeRecordedCleanupSource(t *testing.T) {
+	tests := []string{"relative/yeet-data", "/var/lib/yeet"}
+	for _, source := range tests {
+		t.Run(source, func(t *testing.T) {
+			state := stubInitLegacyStorageMigration(t, catchrpc.HostStoragePlan{}, false)
+			err := runInitLegacyStorageMigration(state.ui, "ubuntu@example.com", initStorageOptions{
+				DataDir:             "/var/lib/yeet",
+				existingCatch:       true,
+				legacyCleanupSource: source,
+			})
+			if err == nil || !strings.Contains(err.Error(), "unsafe recorded legacy cleanup source") {
+				t.Fatalf("error = %v, want unsafe source rejection", err)
+			}
+			if state.output.String() != "" || len(state.client.cleanupRequests) != 0 {
+				t.Fatalf("output/cleanup = %q/%#v, want fail closed before guidance or RPC", state.output.String(), state.client.cleanupRequests)
+			}
+		})
+	}
+}
+
+func TestInitLegacyStorageRejectsIncompleteOrMismatchedCleanupResult(t *testing.T) {
+	tests := []struct {
+		name   string
+		result catchrpc.HostStorageCleanupResult
+	}{
+		{name: "zero result"},
+		{name: "wrong transaction", result: catchrpc.HostStorageCleanupResult{TransactionID: "tx-other", Removed: "/root/yeet-data"}},
+		{name: "wrong source", result: catchrpc.HostStorageCleanupResult{TransactionID: "tx-1", Removed: "/root/other"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := initLegacyStorageTestPlan("/root/yeet-data")
+			state := stubInitLegacyStorageMigration(t, plan, true)
+			state.prompter.confirmAnswers = []bool{true}
+			state.client.apply = catchrpc.HostStorageApplyResult{TransactionID: "tx-1"}
+			state.client.finalize = catchrpc.HostStorageFinalizeResult{TransactionID: "tx-1", CleanupPending: true}
+			state.client.cleanup = tt.result
+			err := runInitLegacyStorageMigration(state.ui, "root@example.com", initStorageOptions{DataDir: plan.Current.DataDir, existingCatch: true})
+			if err == nil || !strings.Contains(err.Error(), "inactive") || !strings.Contains(err.Error(), "sensitive state") {
+				t.Fatalf("error = %v, want truthful incomplete cleanup guidance", err)
+			}
+			if strings.Contains(state.output.String(), "Removed inactive legacy host storage") {
+				t.Fatalf("output = %q, must not claim cleanup success", state.output.String())
+			}
+		})
+	}
+}
+
+func TestInitLegacyStorageReconnectTimeoutDoesNotClaimValidationOrRollback(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/root/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, true)
+	state.prompter.confirmAnswers = []bool{true}
+	state.client.apply = catchrpc.HostStorageApplyResult{TransactionID: "tx-1"}
+	state.client.finalizeErrs = []error{&net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}}
+	start := time.Unix(100, 0)
+	times := []time.Time{start, start.Add(hostStorageReconnectTimeout + time.Nanosecond)}
+	hostStorageReconnectNowFn = func() time.Time {
+		now := times[0]
+		times = times[1:]
+		return now
+	}
+	err := runInitLegacyStorageMigration(state.ui, "root@example.com", initStorageOptions{DataDir: plan.Current.DataDir, existingCatch: true})
+	if err == nil || !strings.Contains(err.Error(), "could not be reconnected") || !strings.Contains(err.Error(), "validation and cleanup did not run") {
+		t.Fatalf("error = %v, want unknown reconnect outcome", err)
+	}
+	if strings.Contains(err.Error(), "validation failed") || strings.Contains(err.Error(), "reported rollback") {
+		t.Fatalf("error = %v, must not claim Finalize response", err)
+	}
+	if len(state.client.cleanupRequests) != 0 {
+		t.Fatalf("cleanup requests = %#v, want none", state.client.cleanupRequests)
+	}
+}
+
+func TestInitLegacyStorageFinalizeApplicationFailureRetainsRollbackGuidance(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/root/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, true)
+	state.prompter.confirmAnswers = []bool{true}
+	state.client.apply = catchrpc.HostStorageApplyResult{TransactionID: "tx-1"}
+	state.client.finalizeErrs = []error{errors.New("active references remain; rollback completed")}
+	err := runInitLegacyStorageMigration(state.ui, "root@example.com", initStorageOptions{DataDir: plan.Current.DataDir, existingCatch: true})
+	if err == nil || !strings.Contains(err.Error(), "catch answered Finalize") || !strings.Contains(err.Error(), "rollback completed") {
+		t.Fatalf("error = %v, want answered-Finalize rollback guidance", err)
+	}
+	if strings.Contains(err.Error(), "could not be reconnected") {
+		t.Fatalf("error = %v, must not mislabel application failure", err)
+	}
+}
+
+func TestRemoteInitExistingCatchStorageCarriesExistingLegacySource(t *testing.T) {
+	sshLog := filepath.Join(t.TempDir(), "ssh.log")
+	t.Setenv("SSH_LOG", sshLog)
+	fakeSSHInPath(t, strings.Join([]string{
+		`printf '%s\n' "$*" >> "$SSH_LOG"`,
+		`case "$*" in`,
+		`  *"systemctl cat"*) printf 'ExecStart=/var/lib/yeet/services/catch/run/catch --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services\n' ;;`,
+		`  *"install.json"*) printf '{"installUser":"ubuntu","installHome":"/recorded/ubuntu","installHost":"example.com"}\n' ;;`,
+		`  *"yeet-data"*) printf 'present\n' ;;`,
+		`  *) exit 1 ;;`,
+		`esac`,
+	}, "\n"))
+	storage, installed, err := remoteInitExistingCatchStorage("ubuntu@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !installed || storage.DataDir != "/var/lib/yeet" || storage.legacyCleanupSource != "/recorded/ubuntu/yeet-data" {
+		t.Fatalf("storage/installed = %#v/%t, want exact existing legacy source", storage, installed)
+	}
+	logBytes, err := os.ReadFile(sshLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logText := string(logBytes)
+	for _, want := range []string{"id -u", "sudo -n test", "/recorded/ubuntu/yeet-data"} {
+		if !strings.Contains(logText, want) {
+			t.Fatalf("ssh commands = %q, want conservative root/sudo source probe containing %q", logText, want)
+		}
+	}
+}
+
+func TestRemoteInitExistingCatchStoragePreservesOldMetadataWithoutInstallHome(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata string
+	}{
+		{
+			name:     "field absent",
+			metadata: `{"installUser":"ubuntu","installHost":"example.com"}`,
+		},
+		{
+			name:     "field empty",
+			metadata: `{"installUser":"ubuntu","installHome":"","installHost":"example.com"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeSSHInPath(t, strings.Join([]string{
+				`case "$*" in`,
+				`  *"systemctl cat"*) printf 'ExecStart=/var/lib/yeet/services/catch/run/catch --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services\n' ;;`,
+				`  *"install.json"*) printf '%s\n' '` + tt.metadata + `' ;;`,
+				`  *"yeet-data"*) exit 99 ;;`,
+				`  *) exit 1 ;;`,
+				`esac`,
+			}, "\n"))
+			detected, installed, err := remoteInitExistingCatchStorage("ubuntu@example.com")
+			if err != nil {
+				t.Fatalf("remoteInitExistingCatchStorage: %v", err)
+			}
+			wantDetected := initStorageOptions{
+				DataDir:      "/var/lib/yeet",
+				ServicesRoot: "/var/lib/yeet/services",
+			}
+			if !installed || !reflect.DeepEqual(detected, wantDetected) {
+				t.Fatalf("storage/installed = %#v/%t, want existing Catch %#v/true with no cleanup candidate", detected, installed, wantDetected)
+			}
+
+			oldExisting := remoteInitExistingCatchStorageFn
+			oldWizard := runInitStorageWizardFn
+			oldTerminal := isTerminalFn
+			t.Cleanup(func() {
+				remoteInitExistingCatchStorageFn = oldExisting
+				runInitStorageWizardFn = oldWizard
+				isTerminalFn = oldTerminal
+			})
+			remoteInitExistingCatchStorageFn = func(string) (initStorageOptions, bool, error) {
+				return detected, installed, nil
+			}
+			runInitStorageWizardFn = func(io.Reader, io.Writer, initStorageProbe) (initStorageOptions, error) {
+				t.Fatal("fresh storage wizard must not run for an existing Catch with old metadata")
+				return initStorageOptions{}, nil
+			}
+			isTerminalFn = func(int) bool { return true }
+			prepared, err := prepareInitStorageOptions(
+				newInitUI(io.Discard, false, true, "catch", "ubuntu@example.com", catchServiceName),
+				"ubuntu@example.com",
+				true,
+				initOptions{},
+			)
+			if err != nil {
+				t.Fatalf("prepareInitStorageOptions: %v", err)
+			}
+			wantPrepared := wantDetected
+			wantPrepared.existingCatch = true
+			if !reflect.DeepEqual(prepared, wantPrepared) {
+				t.Fatalf("prepared storage = %#v, want preserved existing storage %#v", prepared, wantPrepared)
+			}
+
+			state := stubInitLegacyStorageMigration(t, catchrpc.HostStoragePlan{}, true)
+			if err := runInitLegacyStorageMigration(state.ui, "ubuntu@example.com", prepared); err != nil {
+				t.Fatal(err)
+			}
+			if len(state.client.planRequests) != 0 || len(state.client.cleanupRequests) != 0 || len(state.prompter.confirmPrompts) != 0 {
+				t.Fatalf("plan/cleanup/prompts = %#v/%#v/%#v, want no migration behavior", state.client.planRequests, state.client.cleanupRequests, state.prompter.confirmPrompts)
+			}
+		})
+	}
+}
+
+func TestRemoteInitExistingCatchStorageMissingMetadataAndAbsentSourceStayQuiet(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "missing metadata",
+			body: strings.Join([]string{
+				`case "$*" in`,
+				`  *"systemctl cat"*) printf 'ExecStart=/var/lib/yeet/services/catch/run/catch --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services\n' ;;`,
+				`  *"install.json"*) exit 44 ;;`,
+				`  *) exit 1 ;;`,
+				`esac`,
+			}, "\n"),
+		},
+		{
+			name: "recorded source absent",
+			body: strings.Join([]string{
+				`case "$*" in`,
+				`  *"systemctl cat"*) printf 'ExecStart=/var/lib/yeet/services/catch/run/catch --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services\n' ;;`,
+				`  *"install.json"*) printf '{"installHome":"/recorded/ubuntu"}\n' ;;`,
+				`  *"yeet-data"*) printf 'absent\n' ;;`,
+				`  *) exit 1 ;;`,
+				`esac`,
+			}, "\n"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeSSHInPath(t, tt.body)
+			storage, installed, err := remoteInitExistingCatchStorage("ubuntu@example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !installed || storage.legacyCleanupSource != "" {
+				t.Fatalf("storage/installed = %#v/%t, want no cleanup candidate", storage, installed)
+			}
+			state := stubInitLegacyStorageMigration(t, catchrpc.HostStoragePlan{}, false)
+			storage.existingCatch = true
+			if err := runInitLegacyStorageMigration(state.ui, "ubuntu@example.com", storage); err != nil {
+				t.Fatal(err)
+			}
+			if state.output.String() != "" || len(state.client.cleanupRequests) != 0 || len(state.prompter.confirmPrompts) != 0 {
+				t.Fatalf("output/cleanup/prompts = %q/%#v/%#v, want quiet absent source", state.output.String(), state.client.cleanupRequests, state.prompter.confirmPrompts)
+			}
+		})
+	}
+}
+
+func TestRemoteInitExistingCatchStorageMetadataFailuresRemainVisible(t *testing.T) {
+	tests := []struct {
+		name       string
+		install    string
+		wantDetail string
+	}{
+		{name: "unreadable", install: `exit 45`, wantDetail: "install.json"},
+		{name: "malformed JSON", install: `printf '{not-json}\n'`, wantDetail: "decode"},
+		{name: "invalid home", install: `printf '{"installHome":"relative/home"}\n'`, wantDetail: "not absolute"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeSSHInPath(t, strings.Join([]string{
+				`case "$*" in`,
+				`  *"systemctl cat"*) printf 'ExecStart=/var/lib/yeet/services/catch/run/catch --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services\n' ;;`,
+				`  *"install.json"*) ` + tt.install + ` ;;`,
+				`  *) exit 1 ;;`,
+				`esac`,
+			}, "\n"))
+			_, installed, err := remoteInitExistingCatchStorage("ubuntu@example.com")
+			if err == nil || !strings.Contains(err.Error(), tt.wantDetail) || installed {
+				t.Fatalf("installed/error = %t/%v, want visible metadata failure containing %q", installed, err, tt.wantDetail)
+			}
+		})
+	}
+}
+
+func TestRemoteInitExistingCatchStorageSourceProbeFailureRemainsVisible(t *testing.T) {
+	fakeSSHInPath(t, strings.Join([]string{
+		`case "$*" in`,
+		`  *"systemctl cat"*) printf 'ExecStart=/var/lib/yeet/services/catch/run/catch --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services\n' ;;`,
+		`  *"install.json"*) printf '{"installHome":"/recorded/ubuntu"}\n' ;;`,
+		`  *"yeet-data"*) exit 45 ;;`,
+		`  *) exit 1 ;;`,
+		`esac`,
+	}, "\n"))
+	_, installed, err := remoteInitExistingCatchStorage("ubuntu@example.com")
+	if err == nil || !strings.Contains(err.Error(), "determine whether legacy source /recorded/ubuntu/yeet-data exists") || installed {
+		t.Fatalf("installed/error = %t/%v, want conservative source-existence failure", installed, err)
+	}
+}
+
+type initLegacyStorageTestState struct {
+	client      *fakeHostStorageClient
+	clientHosts []string
+	prompter    *scriptedInitPrompter
+	output      strings.Builder
+	ui          *initUI
+}
+
+func stubInitLegacyStorageMigration(t *testing.T, plan catchrpc.HostStoragePlan, interactive bool) *initLegacyStorageTestState {
+	t.Helper()
+	state := &initLegacyStorageTestState{
+		client:   &fakeHostStorageClient{plan: plan},
+		prompter: &scriptedInitPrompter{},
+	}
+	state.ui = newInitUI(&state.output, false, false, "catch", "host", catchServiceName)
+	oldClient := newHostStorageClientFn
+	oldPrompt := activePrompter
+	oldTerminal := isTerminalFn
+	oldNow := hostStorageReconnectNowFn
+	oldSleep := hostStorageReconnectSleepFn
+	oldHostSetStdout := hostSetStdout
+	t.Cleanup(func() {
+		newHostStorageClientFn = oldClient
+		activePrompter = oldPrompt
+		isTerminalFn = oldTerminal
+		hostStorageReconnectNowFn = oldNow
+		hostStorageReconnectSleepFn = oldSleep
+		hostSetStdout = oldHostSetStdout
+	})
+	newHostStorageClientFn = func(host string) hostStorageClient {
+		state.clientHosts = append(state.clientHosts, host)
+		return state.client
+	}
+	activePrompter = state.prompter
+	isTerminalFn = func(int) bool { return interactive }
+	hostStorageReconnectSleepFn = func(context.Context, time.Duration) error { return nil }
+	hostSetStdout = &state.output
+	return state
+}
+
+func initLegacyStorageTestPlan(source string) catchrpc.HostStoragePlan {
+	target := "/var/lib/yeet"
+	return catchrpc.HostStoragePlan{
+		Current:       catchrpc.HostStorageState{DataDir: source, ServicesRoot: filepath.Join(source, "services")},
+		Desired:       catchrpc.HostStorageState{DataDir: target, ServicesRoot: target + "/services"},
+		DataDirAction: catchrpc.HostStorageDataDirAction{Move: true, From: source, To: target},
+		ServicesAction: catchrpc.HostStorageServicesAction{
+			Mode:             catchrpc.HostStorageMigrateAll,
+			AffectedServices: []catchrpc.HostStorageServiceMove{{Name: "api", From: filepath.Join(source, "services/api"), To: target + "/services/api", WasRunning: true}},
+		},
+		RequiresRestart: true,
+		Estimate:        catchrpc.HostStorageEstimate{BytesToCopy: 4096, BytesFree: 8192},
+		Legacy: catchrpc.HostStorageLegacyPlan{
+			Eligible:       true,
+			CleanupAllowed: true,
+			SourceRoot:     source,
+			TargetRoot:     target,
+			PreservedRoots: []string{"/srv/preserved"},
+		},
 	}
 }
 
@@ -793,12 +1417,12 @@ func TestInitStorageOptionsFromCatchUnit(t *testing.T) {
 	}
 }
 
-func TestRunInitStorageWizardDefaultsToHomeYeetData(t *testing.T) {
+func TestInitStorageWizardDefaultsToVarLibYeet(t *testing.T) {
 	got, err := runInitStorageWizardWithPrompter(&scriptedInitPrompter{confirmAnswers: []bool{true, true}}, initStorageProbe{Home: "/root"})
 	if err != nil {
 		t.Fatalf("runInitStorageWizard: %v", err)
 	}
-	want := initStorageOptions{DataDir: "/root/yeet-data"}
+	want := initStorageOptions{DataDir: "/var/lib/yeet"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("storage = %#v, want %#v", got, want)
 	}
@@ -827,7 +1451,7 @@ func TestRunInitStorageWizardCanSelectZFSDataAndServicesDatasets(t *testing.T) {
 		t.Fatalf("storage = %#v, want %#v", got, want)
 	}
 	for _, wantPrompt := range []string{
-		"Use /root/yeet-data for catch data?",
+		"Use /var/lib/yeet for catch data?",
 		"Use a ZFS dataset for catch data?",
 		"Keep services under the catch data dir?",
 		"Use a ZFS dataset for services?",
@@ -856,14 +1480,14 @@ func TestRunInitStorageWizardNonZFSHostUsesFilesystemServicesRoot(t *testing.T) 
 		t.Fatalf("runInitStorageWizard: %v", err)
 	}
 	want := initStorageOptions{
-		DataDir:      "/root/yeet-data",
+		DataDir:      "/var/lib/yeet",
 		ServicesRoot: "/srv/custom-services",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("storage = %#v, want %#v", got, want)
 	}
 	if !reflect.DeepEqual(prompter.confirmPrompts, []string{
-		"Use /root/yeet-data for catch data?",
+		"Use /var/lib/yeet for catch data?",
 		"Keep services under the catch data dir?",
 	}) {
 		t.Fatalf("confirm prompts = %#v", prompter.confirmPrompts)
