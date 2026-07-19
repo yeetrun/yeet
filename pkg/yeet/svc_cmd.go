@@ -332,19 +332,44 @@ func handleSvcEnv(ctx context.Context, req svcCommandRequest) error {
 
 func handleSvcVM(ctx context.Context, req svcCommandRequest) error {
 	args := req.Command.RawArgs
-	if len(args) >= 2 && args[0] == "vm" && args[1] == "images" {
-		flags, remaining, err := cli.ParseVMImages(args[2:])
-		if err != nil {
-			return err
-		}
-		if len(remaining) > 0 && remaining[0] == "import" {
-			return handleVMImagesImportParsed(ctx, flags, remaining)
-		}
+	if svcCommandMatches(args, "vm", "images") {
+		return handleSvcVMImages(ctx, req)
 	}
-	if len(args) >= 2 && args[0] == "vm" && args[1] == "set" {
+	if svcCommandMatches(args, "vm", "runtime") {
+		return handleSvcVMRuntime(ctx, req)
+	}
+	if svcCommandMatches(args, "vm", "set") {
 		return handleVMSet(ctx, req)
 	}
 	return handleSvcRemote(ctx, req)
+}
+
+func svcCommandMatches(args []string, group, command string) bool {
+	return len(args) >= 2 && args[0] == group && args[1] == command
+}
+
+func handleSvcVMImages(ctx context.Context, req svcCommandRequest) error {
+	flags, remaining, err := cli.ParseVMImages(req.Command.RawArgs[2:])
+	if err != nil {
+		return err
+	}
+	if len(remaining) > 0 && remaining[0] == "import" {
+		return handleVMImagesImportParsed(ctx, flags, remaining)
+	}
+	return handleSvcRemote(ctx, req)
+}
+
+func handleSvcVMRuntime(ctx context.Context, req svcCommandRequest) error {
+	args := req.Command.RawArgs
+	action, _, ok := cli.FindVMRuntimeAction(args[2:])
+	if !ok || action != cli.VMRuntimeActionImport {
+		return handleSvcRemote(ctx, req)
+	}
+	flags, remaining, err := cli.ParseVMRuntime(args[2:])
+	if err != nil {
+		return err
+	}
+	return handleVMRuntimeImportParsed(ctx, flags, remaining)
 }
 
 func handleVMSet(ctx context.Context, req svcCommandRequest) error {

@@ -327,6 +327,44 @@ upgrade that finds VMs. Custom data roots, custom service roots, and ZFS-backed
 VM storage remain supported because Yeet derives their paths from stored
 configuration.
 
+The host Firecracker and jailer pair has its own lifecycle. It is separate from
+the guest root filesystem, guest packages, guest kernel, and guest login user.
+See what each VM has running, configured, staged, and available for rollback:
+
+```bash
+yeet vm runtime status
+yeet vm runtime status <vm> --format=json-pretty
+```
+
+Runtime policy is manual by default. `yeet vm runtime update` refreshes the
+host runtime cache but does not stage or restart a VM. `upgrade` stages an exact
+runtime for the next start; add `--restart` only when downtime is acceptable:
+
+```bash
+yeet vm runtime update
+yeet vm runtime upgrade <vm>
+yeet vm runtime upgrade <vm> --restart
+yeet vm runtime rollback <vm> --restart
+```
+
+A guest package upgrade cannot request a host runtime change. A normal guest
+reboot can consume a runtime that an operator or host policy already staged,
+but it cannot select or download one. Catch upgrades also leave running VMs
+alone. The optional `stage-on-restart` policy stages promoted releases without
+restarting VMs.
+
+Create and restore a VM disk recovery point on a ZFS-backed VM:
+
+```bash
+yeet snapshots create <vm> --comment "before package upgrade"
+yeet snapshots restore <vm> <snapshot> --stop --start --yes
+```
+
+For a running VM, catch pauses the guest while it takes one atomic ZFS snapshot
+of the disk, then resumes it. The snapshot is crash-consistent disk state, not
+guest memory or VMM runtime state. Raw-disk VMs cannot be snapshotted. Restore
+replaces the VM disk state only.
+
 Service names created by `yeet run` must use lowercase letters, numbers, and dashes, start with a letter, and end with a letter or number.
 
 After a deploy succeeds, rerun the saved service with:

@@ -375,6 +375,192 @@ func TestSnapshotsCloneServiceRootCleansUpAfterInstallFailure(t *testing.T) {
 	}
 }
 
+func TestSnapshotsCloneServiceRootPreservesPublishedCloneAfterDBDurabilityWarning(t *testing.T) {
+	server := newTestServer(t)
+	seedServiceRootRecoverySource(t, server)
+	targetDataset := "flash/yeet/services/app-restore"
+	targetRoot := "/flash/yeet/services/app-restore"
+	var calls []string
+	server.zfsRunner = serviceRootRecoveryZFSRunner(t, &calls, map[string]string{
+		serviceRootRecoveryDataset: serviceRootRecoverySnapshotLine(serviceRootRecoverySnapshot, "app", 3),
+	}, map[string]string{
+		targetDataset: targetRoot,
+	})
+	withServiceRootCloneArtifactRewrite(t, func(_ db.ArtifactStore, _, _ string) error { return nil })
+	installCalled := false
+	withServiceRootCloneInstall(t, func(_ *Server, _ *db.Service) error {
+		installCalled = true
+		return nil
+	})
+	stopCalled := false
+	withServiceRootCloneStop(t, func(_ *Server, _ *db.Service) error {
+		stopCalled = true
+		return nil
+	})
+	injected := errors.New("database parent sync failed")
+	realMutate := mutateRecoveryCloneData
+	mutateRecoveryCloneData = func(store *db.Store, f func(*db.Data) error) (*db.Data, error) {
+		data, err := store.MutateData(f)
+		if err != nil {
+			return data, err
+		}
+		return data, &db.PostPublicationError{Err: injected, MutationCommitted: true}
+	}
+	t.Cleanup(func() { mutateRecoveryCloneData = realMutate })
+
+	err := server.cloneRecoveryPoint(context.Background(), "app", "yeet-20260613T203100Z", "app-restore", cli.SnapshotsCloneFlags{}, ioDiscardReadWriter{})
+	if !errors.Is(err, injected) {
+		t.Fatalf("cloneRecoveryPoint error = %v, want durability warning", err)
+	}
+	var publishedErr *db.PostPublicationError
+	if !errors.As(err, &publishedErr) {
+		t.Fatalf("cloneRecoveryPoint error = %v, want *db.PostPublicationError", err)
+	}
+	if !installCalled || !stopCalled {
+		t.Fatalf("definition install/stop calls = %t/%t, want both after committed durability warning", installCalled, stopCalled)
+	}
+	if hasRecoveryCall(calls, "destroy -r "+targetDataset) {
+		t.Fatalf("zfs calls = %#v, published clone must not be destroyed", calls)
+	}
+	if !serviceExists(t, server, "app-restore") {
+		t.Fatal("published app-restore service was removed after durability warning")
+	}
+}
+
+func TestSnapshotsCloneServiceRootJoinsCommittedInsertWarningWithLaterFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		installErr  error
+		stopErr     error
+		wantDestroy bool
+		wantService bool
+	}{
+		{name: "install failure cleans published reference before destroy", installErr: errors.New("install cloned definition failed"), wantDestroy: true},
+		{name: "stop failure preserves published clone", stopErr: errors.New("stop cloned service failed"), wantService: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			seedServiceRootRecoverySource(t, server)
+			targetDataset := "flash/yeet/services/app-restore"
+			targetRoot := "/flash/yeet/services/app-restore"
+			var calls []string
+			server.zfsRunner = serviceRootRecoveryZFSRunner(t, &calls, map[string]string{
+				serviceRootRecoveryDataset: serviceRootRecoverySnapshotLine(serviceRootRecoverySnapshot, "app", 3),
+			}, map[string]string{targetDataset: targetRoot})
+			withServiceRootCloneArtifactRewrite(t, func(_ db.ArtifactStore, _, _ string) error { return nil })
+			withServiceRootCloneInstall(t, func(_ *Server, _ *db.Service) error { return tt.installErr })
+			withServiceRootCloneStop(t, func(_ *Server, _ *db.Service) error { return tt.stopErr })
+			commitWarning := errors.New("database parent sync failed")
+			realMutate := mutateRecoveryCloneData
+			mutationCalls := 0
+			mutateRecoveryCloneData = func(store *db.Store, f func(*db.Data) error) (*db.Data, error) {
+				mutationCalls++
+				data, err := store.MutateData(f)
+				if err != nil || mutationCalls != 1 {
+					return data, err
+				}
+				return data, &db.PostPublicationError{Err: commitWarning, MutationCommitted: true}
+			}
+			t.Cleanup(func() { mutateRecoveryCloneData = realMutate })
+
+			err := server.cloneRecoveryPoint(context.Background(), "app", "yeet-20260613T203100Z", "app-restore", cli.SnapshotsCloneFlags{}, ioDiscardReadWriter{})
+			laterErr := tt.installErr
+			if laterErr == nil {
+				laterErr = tt.stopErr
+			}
+			if !errors.Is(err, commitWarning) || !errors.Is(err, laterErr) {
+				t.Fatalf("cloneRecoveryPoint error = %v, want committed warning and later failure", err)
+			}
+			if got := hasRecoveryCall(calls, "destroy -r "+targetDataset); got != tt.wantDestroy {
+				t.Fatalf("dataset destroyed = %t, want %t; calls %#v", got, tt.wantDestroy, calls)
+			}
+			if got := serviceExists(t, server, "app-restore"); got != tt.wantService {
+				t.Fatalf("service exists = %t, want %t", got, tt.wantService)
+			}
+		})
+	}
+}
+
+func TestSnapshotsCloneServiceRootDestroysDatasetAfterUnpublishedSaveFailureAfterInsertCallback(t *testing.T) {
+	server := newTestServer(t)
+	seedServiceRootRecoverySource(t, server)
+	targetDataset := "flash/yeet/services/app-restore"
+	targetRoot := "/flash/yeet/services/app-restore"
+	var calls []string
+	server.zfsRunner = serviceRootRecoveryZFSRunner(t, &calls, map[string]string{
+		serviceRootRecoveryDataset: serviceRootRecoverySnapshotLine(serviceRootRecoverySnapshot, "app", 3),
+	}, map[string]string{targetDataset: targetRoot})
+	withServiceRootCloneArtifactRewrite(t, func(_ db.ArtifactStore, _, _ string) error { return nil })
+	saveErr := errors.New("database save failed after insert callback")
+	realMutate := mutateRecoveryCloneData
+	mutationCalls := 0
+	mutateRecoveryCloneData = func(store *db.Store, f func(*db.Data) error) (*db.Data, error) {
+		mutationCalls++
+		dv, err := store.Get()
+		if err != nil {
+			return nil, err
+		}
+		staged := dv.AsStruct().Clone()
+		if err := f(staged); err != nil {
+			return nil, err
+		}
+		return nil, saveErr
+	}
+	t.Cleanup(func() { mutateRecoveryCloneData = realMutate })
+
+	err := server.cloneRecoveryPoint(context.Background(), "app", "yeet-20260613T203100Z", "app-restore", cli.SnapshotsCloneFlags{}, ioDiscardReadWriter{})
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("cloneRecoveryPoint error = %v, want persistent save failure", err)
+	}
+	if mutationCalls != 1 {
+		t.Fatalf("database mutation calls = %d, want insertion attempt only", mutationCalls)
+	}
+	if !hasRecoveryCall(calls, "destroy -r "+targetDataset) {
+		t.Fatalf("zfs calls = %#v, want direct dataset cleanup after unpublished insert", calls)
+	}
+	if serviceExists(t, server, "app-restore") {
+		t.Fatal("unpublished app-restore service unexpectedly exists")
+	}
+}
+
+func TestSnapshotsCloneServiceRootDoesNotDestroyDatasetWhenReferenceRemovalFails(t *testing.T) {
+	server := newTestServer(t)
+	seedServiceRootRecoverySource(t, server)
+	targetDataset := "flash/yeet/services/app-restore"
+	targetRoot := "/flash/yeet/services/app-restore"
+	var calls []string
+	server.zfsRunner = serviceRootRecoveryZFSRunner(t, &calls, map[string]string{
+		serviceRootRecoveryDataset: serviceRootRecoverySnapshotLine(serviceRootRecoverySnapshot, "app", 3),
+	}, map[string]string{
+		targetDataset: targetRoot,
+	})
+	withServiceRootCloneArtifactRewrite(t, func(_ db.ArtifactStore, _, _ string) error { return nil })
+	installErr := errors.New("install cloned definition failed")
+	withServiceRootCloneInstall(t, func(_ *Server, _ *db.Service) error { return installErr })
+	realMutate := mutateRecoveryCloneData
+	removeErr := errors.New("remove clone reference failed")
+	mutationCalls := 0
+	mutateRecoveryCloneData = func(store *db.Store, f func(*db.Data) error) (*db.Data, error) {
+		mutationCalls++
+		if mutationCalls == 1 {
+			return store.MutateData(f)
+		}
+		return nil, removeErr
+	}
+	t.Cleanup(func() { mutateRecoveryCloneData = realMutate })
+
+	err := server.cloneRecoveryPoint(context.Background(), "app", "yeet-20260613T203100Z", "app-restore", cli.SnapshotsCloneFlags{}, ioDiscardReadWriter{})
+	if !errors.Is(err, installErr) || !errors.Is(err, removeErr) {
+		t.Fatalf("cloneRecoveryPoint error = %v, want install and reference-removal failures", err)
+	}
+	if hasRecoveryCall(calls, "destroy -r "+targetDataset) {
+		t.Fatalf("zfs calls = %#v, dataset must remain while DB references it", calls)
+	}
+	if !serviceExists(t, server, "app-restore") {
+		t.Fatal("app-restore reference disappeared after failed removal")
+	}
+}
+
 func TestSnapshotsCloneServiceRootCleanupPreservesMismatchedServiceRow(t *testing.T) {
 	server := newTestServer(t)
 	seedServiceRootRecoverySource(t, server)
@@ -420,7 +606,7 @@ func TestSnapshotsCloneServiceRootCleanupPreservesMismatchedServiceRow(t *testin
 	}
 }
 
-func TestSnapshotsCloneServiceRootPreservesMatchingServiceRowWhenCleanupDestroyFails(t *testing.T) {
+func TestSnapshotsCloneServiceRootRemovesReferenceBeforeCleanupDestroyFails(t *testing.T) {
 	server := newTestServer(t)
 	seedServiceRootRecoverySource(t, server)
 	targetDataset := "flash/yeet/services/app-restore"
@@ -455,9 +641,11 @@ func TestSnapshotsCloneServiceRootPreservesMatchingServiceRowWhenCleanupDestroyF
 	if !strings.Contains(err.Error(), "cleanup failed") {
 		t.Fatalf("cloneRecoveryPoint error = %v, want cleanup failure context", err)
 	}
-	got := mustService(t, server, "app-restore")
-	if got.ServiceRootZFS != targetDataset {
-		t.Fatalf("preserved service root zfs = %q, want %q", got.ServiceRootZFS, targetDataset)
+	if serviceExists(t, server, "app-restore") {
+		t.Fatal("app-restore reference remains after cleanup began destroying its dataset")
+	}
+	if !hasRecoveryCall(calls, "destroy -r "+targetDataset) {
+		t.Fatalf("zfs calls = %#v, want attempted target dataset cleanup", calls)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/cli"
 )
 
 func execRequestPermissions(req catchrpc.ExecRequest) (permissionSet, error) {
@@ -132,6 +133,8 @@ func vmCommandPermissions(args []string) (permissionSet, error) {
 	switch args[0] {
 	case "images":
 		return vmImagesCommandPermissions(args[1:])
+	case "runtime":
+		return vmRuntimeCommandPermissions(args[1:])
 	case "memory":
 		if len(args) == 1 {
 			return newPermissionSet(permissionRead), nil
@@ -141,6 +144,23 @@ func vmCommandPermissions(args []string) (permissionSet, error) {
 		return newPermissionSet(permissionManage), nil
 	default:
 		return nil, fmt.Errorf("unclassified vm command %q", args[0])
+	}
+}
+
+func vmRuntimeCommandPermissions(args []string) (permissionSet, error) {
+	action, _, ok := cli.FindVMRuntimeAction(args)
+	if !ok {
+		return nil, fmt.Errorf("unclassified vm runtime command")
+	}
+	switch action {
+	case cli.VMRuntimeActionStatus:
+		return newPermissionSet(permissionRead), nil
+	case cli.VMRuntimeActionUpdate, cli.VMRuntimeActionImport, cli.VMRuntimeActionUpgrade,
+		cli.VMRuntimeActionRollback, cli.VMRuntimeActionPolicy, cli.VMRuntimeActionProtect,
+		cli.VMRuntimeActionUnprotect, cli.VMRuntimeActionPrune:
+		return newPermissionSet(permissionManage), nil
+	default:
+		return nil, fmt.Errorf("unclassified vm runtime command %q", action)
 	}
 }
 

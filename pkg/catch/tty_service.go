@@ -95,7 +95,7 @@ func (e *ttyExecer) stopCmdFunc() error {
 	})
 }
 
-const vmGenerationRollbackUnsupportedMessage = "VM services do not support generation rollback; use yeet snapshots restore for VM disk or checkpoint recovery"
+const vmGenerationRollbackUnsupportedMessage = "VM services do not support generation rollback; use yeet snapshots restore for VM disk recovery"
 
 type serviceGenerationView struct {
 	Service           string `json:"service"`
@@ -703,12 +703,7 @@ func (e *ttyExecer) removeCmdFuncLocked(flags cli.RemoveFlags) error {
 		return err
 	}
 
-	doneRunnerRemove := e.traceBlock("remove runner")
-	if !e.serviceHasISOAllocation() {
-		e.removeRunner(runner)
-	}
-	doneRunnerRemove()
-	return e.removeServiceConfig(flags)
+	return e.removeRunnerAndServiceConfig(runner, flags)
 }
 
 func (e *ttyExecer) serviceHasISOAllocation() bool {
@@ -790,8 +785,27 @@ func (e *ttyExecer) removeRunner(runner ServiceRunner) {
 	}
 }
 
-func (e *ttyExecer) removeServiceConfig(flags cli.RemoveFlags) error {
-	report, err := e.removeServiceWithOptions(RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
+func (e *ttyExecer) removeRunnerAndServiceConfig(runner ServiceRunner, flags cli.RemoveFlags) error {
+	return WithVMRuntimeTransactionLock(context.Background(), &e.s.cfg, func() error {
+		doneRunnerRemove := e.traceBlock("remove runner")
+		if !e.serviceHasISOAllocation() {
+			e.removeRunner(runner)
+		}
+		doneRunnerRemove()
+		return e.removeServiceConfigLocked(flags)
+	})
+}
+
+func (e *ttyExecer) removeServiceConfigLocked(flags cli.RemoveFlags) error {
+	if e.removeServiceFunc != nil {
+		report, err := e.removeServiceFunc(e.sn, RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
+		return e.finishRemoveServiceConfig(report, err)
+	}
+	report, err := e.s.removeServiceWithOptionsLocked(e.sn, RemoveOptions{CleanData: flags.CleanData, Trace: e.tracef})
+	return e.finishRemoveServiceConfig(report, err)
+}
+
+func (e *ttyExecer) finishRemoveServiceConfig(report *RemoveReport, err error) error {
 	if err != nil {
 		return fmt.Errorf("failed to cleanup %s %q: %w", e.managedTargetLabel(), e.sn, err)
 	}

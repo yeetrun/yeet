@@ -22,9 +22,7 @@ func (src *Data) Clone() *Data {
 	dst := new(Data)
 	*dst = *src
 	dst.SnapshotDefaults = src.SnapshotDefaults.Clone()
-	if dst.VMHost != nil {
-		dst.VMHost = ptr.To(*src.VMHost)
-	}
+	dst.VMHost = src.VMHost.Clone()
 	if dst.ISOPool != nil {
 		dst.ISOPool = ptr.To(*src.ISOPool)
 	}
@@ -349,6 +347,7 @@ func (src *VMConfig) Clone() *VMConfig {
 	}
 	dst := new(VMConfig)
 	*dst = *src
+	dst.Components = src.Components.Clone()
 	dst.Networks = append(src.Networks[:0:0], src.Networks...)
 	return dst
 }
@@ -357,6 +356,7 @@ func (src *VMConfig) Clone() *VMConfig {
 var _VMConfigCloneNeedsRegeneration = VMConfig(struct {
 	Runtime     string
 	Image       VMImageConfig
+	Components  *VMComponentsConfig
 	CPUs        int
 	MemoryBytes int64
 	Balloon     VMBalloonConfig
@@ -514,12 +514,16 @@ func (src *VMHostConfig) Clone() *VMHostConfig {
 	}
 	dst := new(VMHostConfig)
 	*dst = *src
+	dst.ProtectedRuntimeIDs = append(src.ProtectedRuntimeIDs[:0:0], src.ProtectedRuntimeIDs...)
 	return dst
 }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _VMHostConfigCloneNeedsRegeneration = VMHostConfig(struct {
-	MemoryPolicy string
+	MemoryPolicy        string
+	RuntimePolicy       string
+	RuntimeChannel      string
+	ProtectedRuntimeIDs []string
 }{})
 
 // Clone makes a deep copy of ISOPool.
@@ -596,4 +600,135 @@ func (src *ISOComponent) Clone() *ISOComponent {
 var _ISOComponentCloneNeedsRegeneration = ISOComponent(struct {
 	Address netip.Addr
 	State   string
+}{})
+
+// Clone makes a deep copy of VMGuestBaseConfig.
+// The result aliases no memory with the original.
+func (src *VMGuestBaseConfig) Clone() *VMGuestBaseConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMGuestBaseConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMGuestBaseConfigCloneNeedsRegeneration = VMGuestBaseConfig(struct {
+	ID               string
+	ManifestSHA256   string
+	Source           string
+	RootFSProvenance string
+}{})
+
+// Clone makes a deep copy of VMKernelArtifactConfig.
+// The result aliases no memory with the original.
+func (src *VMKernelArtifactConfig) Clone() *VMKernelArtifactConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMKernelArtifactConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMKernelArtifactConfigCloneNeedsRegeneration = VMKernelArtifactConfig(struct {
+	ID             string
+	ManifestSHA256 string
+	SHA256         string
+	Path           string
+	Source         string
+}{})
+
+// Clone makes a deep copy of VMRuntimeArtifactConfig.
+// The result aliases no memory with the original.
+func (src *VMRuntimeArtifactConfig) Clone() *VMRuntimeArtifactConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMRuntimeArtifactConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMRuntimeArtifactConfigCloneNeedsRegeneration = VMRuntimeArtifactConfig(struct {
+	ID                string
+	ManifestSHA256    string
+	FirecrackerSHA256 string
+	JailerSHA256      string
+	Firecracker       string
+	Jailer            string
+	Source            string
+}{})
+
+// Clone makes a deep copy of VMRuntimeTrialConfig.
+// The result aliases no memory with the original.
+func (src *VMRuntimeTrialConfig) Clone() *VMRuntimeTrialConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMRuntimeTrialConfig)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMRuntimeTrialConfigCloneNeedsRegeneration = VMRuntimeTrialConfig(struct {
+	State         string
+	CandidateID   string
+	PreviousID    string
+	RecoveryPoint string
+	StartedAt     string
+	LastError     string
+}{})
+
+// Clone makes a deep copy of VMRuntimeLifecycleConfig.
+// The result aliases no memory with the original.
+func (src *VMRuntimeLifecycleConfig) Clone() *VMRuntimeLifecycleConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMRuntimeLifecycleConfig)
+	*dst = *src
+	if dst.Staged != nil {
+		dst.Staged = ptr.To(*src.Staged)
+	}
+	if dst.Previous != nil {
+		dst.Previous = ptr.To(*src.Previous)
+	}
+	if dst.Trial != nil {
+		dst.Trial = ptr.To(*src.Trial)
+	}
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMRuntimeLifecycleConfigCloneNeedsRegeneration = VMRuntimeLifecycleConfig(struct {
+	Policy     string
+	Channel    string
+	Configured VMRuntimeArtifactConfig
+	Staged     *VMRuntimeArtifactConfig
+	Previous   *VMRuntimeArtifactConfig
+	Trial      *VMRuntimeTrialConfig
+}{})
+
+// Clone makes a deep copy of VMComponentsConfig.
+// The result aliases no memory with the original.
+func (src *VMComponentsConfig) Clone() *VMComponentsConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(VMComponentsConfig)
+	*dst = *src
+	dst.Runtime = *src.Runtime.Clone()
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMComponentsConfigCloneNeedsRegeneration = VMComponentsConfig(struct {
+	GuestBase VMGuestBaseConfig
+	Kernel    VMKernelArtifactConfig
+	Runtime   VMRuntimeLifecycleConfig
 }{})

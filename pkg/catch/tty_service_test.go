@@ -268,7 +268,7 @@ func TestServiceRollbackRejectsVM(t *testing.T) {
 	}
 
 	err := execer.serviceCmdFunc([]string{"rollback"})
-	want := "VM services do not support generation rollback; use yeet snapshots restore for VM disk or checkpoint recovery"
+	want := "VM services do not support generation rollback; use yeet snapshots restore for VM disk recovery"
 	if err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("service rollback error = %v, want %q", err, want)
 	}

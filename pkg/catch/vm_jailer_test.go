@@ -76,7 +76,6 @@ func TestBuildVMJailPlanPreservesCanonicalResourcePaths(t *testing.T) {
 		{kernel, true},
 		{initrd, true},
 		{disk, false},
-		{filepath.Join(dataDir, "checkpoints"), false},
 	} {
 		bind, ok := findVMJailBind(plan.Binds, resource.path)
 		if !ok {
@@ -85,8 +84,10 @@ func TestBuildVMJailPlanPreservesCanonicalResourcePaths(t *testing.T) {
 		if bind.Target != vmJailCanonicalPath(wantRoot, resource.path) || bind.ReadOnly != resource.readOnly {
 			t.Fatalf("bind = %#v for %s", bind, resource.path)
 		}
-		if resource.path == filepath.Join(dataDir, "checkpoints") && bind.OwnedByRuntime {
-			t.Fatalf("checkpoint root bind = %#v, must remain root-owned", bind)
+	}
+	for _, bind := range plan.Binds {
+		if strings.Contains(bind.Source, "check"+"points") {
+			t.Fatalf("jail plan contains retired checkpoint bind: %#v", bind)
 		}
 	}
 	wantLinks := []vmJailSocketLink{
@@ -107,7 +108,7 @@ func TestVMJailerCommandArgsDropIdentityAndPreserveSystemdCgroup(t *testing.T) {
 		APISocket:   "/srv/vms/devbox/run/firecracker.sock",
 		ConfigFile:  "/srv/vms/devbox/run/firecracker.json",
 	}
-	got := vmJailerCommandArgs(cfg, vmRuntimeIdentity{UID: 812, GID: 813}, false)
+	got := vmJailerCommandArgs(cfg, vmRuntimeIdentity{UID: 812, GID: 813})
 	want := []string{
 		"--id", "yeet-devbox",
 		"--exec-file", "/srv/images/firecracker",
@@ -138,7 +139,7 @@ func TestPrepareVMConsoleProcessRequiresJailer(t *testing.T) {
 		ConsoleSocket: "/run/vm/serial.sock",
 		Service:       "devbox",
 		ServiceRoot:   "/srv/devbox",
-	}, false)
+	})
 	if err == nil || !strings.Contains(err.Error(), "jailer path is required") {
 		t.Fatalf("error = %v", err)
 	}
@@ -211,14 +212,14 @@ func TestPrepareVMConsoleProcessUsesValidatedPreparedJailer(t *testing.T) {
 		return nil
 	}
 
-	cmd, cleanup, err := prepareVMConsoleProcess(context.Background(), cfg, false)
+	cmd, cleanup, err := prepareVMConsoleProcess(context.Background(), cfg)
 	if err != nil {
 		t.Fatalf("prepareVMConsoleProcess: %v", err)
 	}
 	if !validated || !prepared {
 		t.Fatalf("validated=%v prepared=%v", validated, prepared)
 	}
-	if cmd.Path != cfg.Jailer || !reflect.DeepEqual(cmd.Args[1:], vmJailerCommandArgs(cfg, identity, false)) {
+	if cmd.Path != cfg.Jailer || !reflect.DeepEqual(cmd.Args[1:], vmJailerCommandArgs(cfg, identity)) {
 		t.Fatalf("command = %q %#v", cmd.Path, cmd.Args)
 	}
 	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
@@ -319,8 +320,8 @@ func TestPrepareVMJailCleansPartialJailWhenBindFails(t *testing.T) {
 func TestPrepareVMJailBindCreatesDelegatedDirectory(t *testing.T) {
 	base := t.TempDir()
 	bind := vmJailBind{
-		Source:          filepath.Join(base, "checkpoints"),
-		Target:          filepath.Join(base, "jail", "checkpoints"),
+		Source:          filepath.Join(base, "runtime-data"),
+		Target:          filepath.Join(base, "jail", "runtime-data"),
 		OwnedByRuntime:  true,
 		CreateDirectory: true,
 	}
@@ -361,59 +362,6 @@ func TestPrepareVMJailBindCreatesDelegatedDirectory(t *testing.T) {
 	}
 	if info, err := os.Stat(bind.Target); err != nil || !info.IsDir() {
 		t.Fatalf("bind target info = %#v err=%v", info, err)
-	}
-}
-
-func TestPrepareVMJailBindKeepsCheckpointRootOwned(t *testing.T) {
-	base, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	bind := vmJailBind{
-		Source:          filepath.Join(base, "checkpoints"),
-		Target:          filepath.Join(base, "jail", "checkpoints"),
-		CreateDirectory: true,
-	}
-	oldRun := vmJailRunCommand
-	oldResourceChown := vmJailResourceChown
-	oldStorageChown := vmJailStorageChown
-	oldStorageChmod := vmJailStorageChmod
-	vmJailRunCommand = func([]string) error { return nil }
-	vmJailResourceChown = func(path string, uid, gid int) error {
-		t.Fatalf("runtime resource chown unexpectedly called for %s with %d:%d", path, uid, gid)
-		return nil
-	}
-	var rootOwner vmRuntimeIdentity
-	vmJailStorageChown = func(file *os.File, uid, gid int) error {
-		if file.Name() != bind.Source {
-			t.Fatalf("checkpoint root chown path = %q, want %q", file.Name(), bind.Source)
-		}
-		rootOwner = vmRuntimeIdentity{UID: uid, GID: gid}
-		return nil
-	}
-	var rootMode os.FileMode
-	vmJailStorageChmod = func(file *os.File, mode os.FileMode) error {
-		if file.Name() != bind.Source {
-			t.Fatalf("checkpoint root chmod path = %q, want %q", file.Name(), bind.Source)
-		}
-		rootMode = mode
-		return nil
-	}
-	t.Cleanup(func() {
-		vmJailRunCommand = oldRun
-		vmJailResourceChown = oldResourceChown
-		vmJailStorageChown = oldStorageChown
-		vmJailStorageChmod = oldStorageChmod
-	})
-
-	if err := prepareVMJailBind(bind, vmRuntimeIdentity{UID: 812, GID: 813}); err != nil {
-		t.Fatalf("prepareVMJailBind: %v", err)
-	}
-	if rootOwner != (vmRuntimeIdentity{UID: 0, GID: 0}) {
-		t.Fatalf("checkpoint root owner = %#v, want root", rootOwner)
-	}
-	if rootMode.Perm() != 0o755 {
-		t.Fatalf("checkpoint root mode = %#o, want 0755", rootMode.Perm())
 	}
 }
 
@@ -616,14 +564,51 @@ func TestValidateVMConsoleProxyConfigValidatesJailInputs(t *testing.T) {
 	}
 }
 
+func TestValidateVMConsoleProxyDescriptorConfig(t *testing.T) {
+	root := "/srv/vms/devbox"
+	cfg := VMConsoleProxyConfig{
+		Service: "devbox", ServiceRoot: root, RuntimeDataRoot: "/var/lib/yeet",
+		RuntimeDescriptor:    filepath.Join(serviceDataDirForRoot(root), vmRuntimeDescriptorFileName),
+		RuntimeRunningMarker: filepath.Join(serviceRunDirForRoot(root), vmRuntimeRunningMarkerFileName),
+		RuntimeTrialResult:   filepath.Join(serviceRunDirForRoot(root), vmRuntimeTrialResultFileName),
+		JailerBase:           "/var/lib/yeet/vm-jailer",
+		APISocket:            filepath.Join(root, "run", "firecracker.sock"),
+		ConfigFile:           filepath.Join(root, "run", "firecracker.json"),
+		ConsoleSocket:        filepath.Join(root, "run", "serial.sock"),
+	}
+	if err := validateVMConsoleProxyDescriptorConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	invalid := cfg
+	invalid.Firecracker = "/explicit/firecracker"
+	if err := validateVMConsoleProxyDescriptorConfig(invalid); err == nil {
+		t.Fatal("explicit runtime accepted in descriptor mode")
+	}
+	invalid = cfg
+	invalid.RuntimeRunningMarker = "/wrong/running.json"
+	if err := validateVMConsoleProxyDescriptorConfig(invalid); err == nil {
+		t.Fatal("unbound running marker accepted")
+	}
+	invalid = cfg
+	invalid.Service = " "
+	if err := validateVMConsoleProxyDescriptorConfig(invalid); err == nil {
+		t.Fatal("empty service accepted")
+	}
+	invalid = cfg
+	invalid.RuntimeDataRoot = "relative"
+	if err := validateVMConsoleProxyDescriptorConfig(invalid); err == nil {
+		t.Fatal("relative data root accepted")
+	}
+}
+
 func TestVMJailMountTargetsSortDeepestFirst(t *testing.T) {
 	root := "/run/yeet/vm-jailer/firecracker/yeet-devbox/root"
 	mountInfo := "36 25 0:31 / " + root + " rw - tmpfs tmpfs rw\n" +
 		"37 36 0:40 / " + root + "/srv/vms/devbox/data/rootfs.raw rw - zfs tank rw\n" +
-		"38 36 0:41 / " + root + "/srv/vms/devbox/data/checkpoints rw - zfs tank rw\n"
+		"38 36 0:41 / " + root + "/srv/vms/devbox/data/runtime-data rw - zfs tank rw\n"
 	want := []string{
-		root + "/srv/vms/devbox/data/checkpoints",
 		root + "/srv/vms/devbox/data/rootfs.raw",
+		root + "/srv/vms/devbox/data/runtime-data",
 		root,
 	}
 	if got := vmJailMountTargets(strings.NewReader(mountInfo), root); !reflect.DeepEqual(got, want) {
@@ -677,274 +662,6 @@ func TestNewVMJailCleanupPlanTargetsCanonicalSockets(t *testing.T) {
 	}
 	if !reflect.DeepEqual(plan.SocketLinks, wantLinks) {
 		t.Fatalf("socket links = %#v, want %#v", plan.SocketLinks, wantLinks)
-	}
-}
-
-func TestDelegateVMJailStorageKeepsCheckpointRootTrustedAndDelegatesChildren(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	disk := filepath.Join(root, "data", "rootfs.raw")
-	checkpointDir := filepath.Join(root, "data", "checkpoints")
-	checkpoint := filepath.Join(checkpointDir, "full", "memory.bin")
-	for _, dir := range []string{filepath.Dir(disk), filepath.Dir(checkpoint)} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, path := range []string{disk, checkpoint} {
-		if err := os.WriteFile(path, []byte(path), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	oldChown := vmJailStorageChown
-	oldChmod := vmJailStorageChmod
-	owned := make(map[string]vmRuntimeIdentity)
-	vmJailStorageChown = func(file *os.File, uid, gid int) error {
-		owned[file.Name()] = vmRuntimeIdentity{UID: uid, GID: gid}
-		return nil
-	}
-	chmodded := make(map[string]os.FileMode)
-	vmJailStorageChmod = func(file *os.File, mode os.FileMode) error {
-		chmodded[file.Name()] = mode
-		if file.Name() == checkpointDir {
-			if mode.Perm() != 0o755 {
-				t.Fatalf("checkpoint root mode = %#o, want 0755", mode.Perm())
-			}
-		} else if info, err := file.Stat(); err != nil {
-			t.Fatal(err)
-		} else if info.IsDir() && mode&0o700 != 0o700 {
-			t.Fatalf("directory mode = %#o", mode)
-		} else if !info.IsDir() && mode&0o600 != 0o600 {
-			t.Fatalf("file mode = %#o", mode)
-		}
-		return nil
-	}
-	t.Cleanup(func() {
-		vmJailStorageChown = oldChown
-		vmJailStorageChmod = oldChmod
-	})
-
-	if err := delegateVMJailStorage(root, disk, vmRuntimeIdentity{UID: 812, GID: 813}); err != nil {
-		t.Fatalf("delegateVMJailStorage: %v", err)
-	}
-	if got := owned[checkpointDir]; got != (vmRuntimeIdentity{UID: 0, GID: 0}) {
-		t.Fatalf("checkpoint root owner = %#v, want root:root", got)
-	}
-	if got := chmodded[checkpointDir].Perm(); got != 0o755 {
-		t.Fatalf("checkpoint root mode = %#o, want 0755", got)
-	}
-	for _, want := range []string{disk, filepath.Join(checkpointDir, "full"), checkpoint} {
-		if got := owned[want]; got != (vmRuntimeIdentity{UID: 812, GID: 813}) {
-			t.Fatalf("delegated owner for %q = %#v, want 812:813", want, got)
-		}
-		if _, ok := chmodded[want]; !ok {
-			t.Fatalf("delegated mode missing for %q in %#v", want, chmodded)
-		}
-	}
-}
-
-func TestDelegateVMJailStorageDoesNotFollowCheckpointReplacementSymlink(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkpoint := filepath.Join(root, "data", "checkpoints", "full", "memory.bin")
-	if err := os.MkdirAll(filepath.Dir(checkpoint), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(checkpoint, []byte("checkpoint"), 0o400); err != nil {
-		t.Fatal(err)
-	}
-	external := filepath.Join(t.TempDir(), "external")
-	if err := os.WriteFile(external, []byte("external"), 0o400); err != nil {
-		t.Fatal(err)
-	}
-
-	oldChown := vmJailStorageChown
-	oldChmod := vmJailStorageChmod
-	swapped := false
-	vmJailStorageChown = func(file *os.File, uid, gid int) error {
-		if uid == 0 && gid == 0 {
-			return nil
-		}
-		path := file.Name()
-		if path == checkpoint {
-			if err := os.Rename(path, path+".original"); err != nil {
-				return err
-			}
-			if err := os.Symlink(external, path); err != nil {
-				return err
-			}
-			swapped = true
-		}
-		return file.Chown(uid, gid)
-	}
-	vmJailStorageChmod = func(file *os.File, mode os.FileMode) error {
-		return file.Chmod(mode)
-	}
-	t.Cleanup(func() {
-		vmJailStorageChown = oldChown
-		vmJailStorageChmod = oldChmod
-	})
-
-	identity := vmRuntimeIdentity{UID: os.Getuid(), GID: os.Getgid()}
-	err = delegateVMJailStorage(root, "", identity)
-	if err == nil || !strings.Contains(err.Error(), "changed during delegation") {
-		t.Fatalf("delegateVMJailStorage error = %v, want concurrent replacement error", err)
-	}
-	if !swapped {
-		t.Fatal("checkpoint was not swapped between validation and mutation")
-	}
-	linkInfo, err := os.Lstat(checkpoint)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if linkInfo.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("replacement mode = %v, want symbolic link", linkInfo.Mode())
-	}
-	info, err := os.Stat(external)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o400 {
-		t.Fatalf("external target mode = %#o, want %#o", got, os.FileMode(0o400))
-	}
-	originalInfo, err := os.Stat(checkpoint + ".original")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := originalInfo.Mode().Perm(); got != 0o600 {
-		t.Fatalf("opened checkpoint mode = %#o, want %#o", got, os.FileMode(0o600))
-	}
-}
-
-func TestDelegateVMJailStorageRejectsCheckpointReplacementBetweenStatAndOpen(t *testing.T) {
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	checkpoint := filepath.Join(root, "data", "checkpoints", "full", "memory.bin")
-	if err := os.MkdirAll(filepath.Dir(checkpoint), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(checkpoint, []byte("checkpoint"), 0o400); err != nil {
-		t.Fatal(err)
-	}
-	external := filepath.Join(root, "external")
-	if err := os.WriteFile(external, []byte("external"), 0o400); err != nil {
-		t.Fatal(err)
-	}
-
-	oldOpenAt := vmJailStorageOpenAt
-	oldChown := vmJailStorageChown
-	oldChmod := vmJailStorageChmod
-	swapped := false
-	vmJailStorageOpenAt = func(parentFD int, name string) (int, error) {
-		if name == filepath.Base(checkpoint) && !swapped {
-			if err := os.Rename(checkpoint, checkpoint+".original"); err != nil {
-				return -1, err
-			}
-			if err := os.Link(external, checkpoint); err != nil {
-				return -1, err
-			}
-			swapped = true
-		}
-		return openVMJailStorageAt(parentFD, name)
-	}
-	vmJailStorageChown = func(file *os.File, uid, gid int) error {
-		if uid == 0 && gid == 0 {
-			return nil
-		}
-		return file.Chown(uid, gid)
-	}
-	vmJailStorageChmod = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
-	t.Cleanup(func() {
-		vmJailStorageOpenAt = oldOpenAt
-		vmJailStorageChown = oldChown
-		vmJailStorageChmod = oldChmod
-	})
-
-	identity := vmRuntimeIdentity{UID: os.Getuid(), GID: os.Getgid()}
-	err = delegateVMJailStorage(root, "", identity)
-	if err == nil || !strings.Contains(err.Error(), "changed before delegation") {
-		t.Fatalf("delegateVMJailStorage error = %v, want pre-mutation replacement error", err)
-	}
-	if !swapped {
-		t.Fatal("checkpoint was not swapped between stat and open")
-	}
-	for _, path := range []string{external, checkpoint + ".original"} {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := info.Mode().Perm(); got != 0o400 {
-			t.Fatalf("%s mode = %#o, want %#o", path, got, os.FileMode(0o400))
-		}
-	}
-	raw, err := os.ReadFile(external)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := string(raw); got != "external" {
-		t.Fatalf("external target contents = %q, want %q", got, "external")
-	}
-}
-
-func TestDelegateVMJailStorageRejectsSymlinksAndUnsupportedTypes(t *testing.T) {
-	tests := []struct {
-		name      string
-		create    func(*testing.T, string)
-		wantError string
-	}{
-		{
-			name: "symbolic link",
-			create: func(t *testing.T, path string) {
-				t.Helper()
-				if err := os.Symlink(filepath.Join(t.TempDir(), "outside"), path); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantError: "symbolic link",
-		},
-		{
-			name: "FIFO",
-			create: func(t *testing.T, path string) {
-				t.Helper()
-				if err := unix.Mkfifo(path, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-			wantError: "regular file or directory",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			root, err := filepath.EvalSymlinks(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
-			checkpointDir := filepath.Join(root, "data", "checkpoints")
-			if err := os.MkdirAll(checkpointDir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			tt.create(t, filepath.Join(checkpointDir, "entry"))
-
-			oldChown := vmJailStorageChown
-			oldChmod := vmJailStorageChmod
-			vmJailStorageChown = func(*os.File, int, int) error { return nil }
-			vmJailStorageChmod = func(*os.File, os.FileMode) error { return nil }
-			t.Cleanup(func() {
-				vmJailStorageChown = oldChown
-				vmJailStorageChmod = oldChmod
-			})
-
-			err = delegateVMJailStorage(root, "", vmRuntimeIdentity{UID: 812, GID: 813})
-			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
-				t.Fatalf("delegateVMJailStorage error = %v, want %q", err, tt.wantError)
-			}
-		})
 	}
 }
 

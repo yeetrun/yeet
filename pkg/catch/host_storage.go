@@ -1251,41 +1251,70 @@ func (a *hostStorageApplier) Apply(ctx context.Context, plan catchrpc.HostStorag
 	_ = yes
 	w = hostStorageApplyWriter(w)
 	a.ops = a.completeOperations()
-	plan, err := a.authoritativeHostStoragePreflight(ctx, plan)
+	state := hostStorageApplyState{plan: plan}
+	err := WithVMRuntimeTransactionLock(ctx, &a.config, func() error {
+		return a.applyHostStorageWithRuntimeLock(ctx, &state, w)
+	})
 	if err != nil {
-		return catchrpc.HostStorageApplyResult{}, err
+		return catchrpc.HostStorageApplyResult{}, a.rollbackHostStorageApplyError(ctx, state.tx, err, w)
 	}
-	serviceMoves, err := a.prepareApply(ctx, plan)
+	if err := a.finishHostStorageApply(ctx, state.plan, state.serviceMoves, state.tx, w, &state.result); err != nil {
+		return catchrpc.HostStorageApplyResult{}, a.rollbackHostStorageApplyError(ctx, state.tx, err, w)
+	}
+	return state.result, nil
+}
+
+type hostStorageApplyState struct {
+	plan         catchrpc.HostStoragePlan
+	serviceMoves []hostStorageServiceApplyMove
+	result       catchrpc.HostStorageApplyResult
+	tx           *hostStorageTransaction
+}
+
+func (a *hostStorageApplier) applyHostStorageWithRuntimeLock(ctx context.Context, state *hostStorageApplyState, w io.Writer) error {
+	plan, err := a.authoritativeHostStoragePreflight(ctx, state.plan)
 	if err != nil {
-		return catchrpc.HostStorageApplyResult{}, err
+		return err
 	}
-	if !hostStoragePlanNeedsTransaction(plan, serviceMoves) {
-		return a.applyPreparedPlan(ctx, plan, serviceMoves, nil, w)
-	}
-	previouslyRunning, err := a.captureHostStorageRunningState(ctx, serviceMoves)
+	state.plan = plan
+	state.serviceMoves, err = a.prepareApply(ctx, plan)
 	if err != nil {
-		return catchrpc.HostStorageApplyResult{}, err
+		return err
+	}
+	if !hostStoragePlanNeedsTransaction(plan, state.serviceMoves) {
+		state.result, err = a.applyPreparedPlanLocked(ctx, plan, state.serviceMoves, nil, w)
+		return err
+	}
+	previouslyRunning, err := a.captureHostStorageRunningState(ctx, state.serviceMoves)
+	if err != nil {
+		return err
 	}
 	unitPaths, err := a.hostStorageTransactionUnitPaths(plan)
 	if err != nil {
-		return catchrpc.HostStorageApplyResult{}, err
+		return err
 	}
-	tx, err := a.ops.createTransaction(ctx, plan, filepath.Join(a.config.RootDir, "db.json"), unitPaths, previouslyRunning)
+	state.tx, err = a.ops.createTransaction(ctx, plan, filepath.Join(a.config.RootDir, "db.json"), unitPaths, previouslyRunning)
 	if err != nil {
-		return catchrpc.HostStorageApplyResult{}, err
+		return err
 	}
 	if err := a.prepareZFS(ctx, plan); err != nil {
-		return catchrpc.HostStorageApplyResult{}, a.rollbackHostStorageTransaction(ctx, tx, err, w)
+		return err
 	}
-	if err := persistHostStorageTransaction(tx); err != nil {
-		return catchrpc.HostStorageApplyResult{}, a.rollbackHostStorageTransaction(ctx, tx, fmt.Errorf("mirror prepared host storage transaction: %w", err), w)
+	if err := persistHostStorageTransaction(state.tx); err != nil {
+		return fmt.Errorf("mirror prepared host storage transaction: %w", err)
 	}
-	result, err := a.applyPreparedPlan(ctx, plan, serviceMoves, tx, w)
-	if err != nil {
-		return catchrpc.HostStorageApplyResult{}, a.rollbackHostStorageTransaction(ctx, tx, err, w)
+	state.result, err = a.applyPreparedPlanLocked(ctx, plan, state.serviceMoves, state.tx, w)
+	if err == nil {
+		state.result.TransactionID = state.tx.ID
 	}
-	result.TransactionID = tx.ID
-	return result, nil
+	return err
+}
+
+func (a *hostStorageApplier) rollbackHostStorageApplyError(ctx context.Context, tx *hostStorageTransaction, err error, w io.Writer) error {
+	if tx == nil {
+		return err
+	}
+	return a.rollbackHostStorageTransaction(ctx, tx, err, w)
 }
 
 func hostStoragePlanNeedsTransaction(plan catchrpc.HostStoragePlan, moves []hostStorageServiceApplyMove) bool {
@@ -1355,6 +1384,7 @@ func hostStorageApplyWriter(w io.Writer) io.Writer {
 func (a *hostStorageApplier) prepareApply(ctx context.Context, plan catchrpc.HostStoragePlan) ([]hostStorageServiceApplyMove, error) {
 	steps := []func() error{
 		func() error { return a.validatePlanStillCurrent(plan) },
+		func() error { return validateHostStorageDataDirAction(plan) },
 		func() error { return a.validateCatchRootAction(plan) },
 	}
 	for _, step := range steps {
@@ -1455,7 +1485,7 @@ func (a *hostStorageApplier) appendLegacyPreservedServicePins(ctx context.Contex
 	return moves, nil
 }
 
-func (a *hostStorageApplier) applyPreparedPlan(ctx context.Context, plan catchrpc.HostStoragePlan, serviceMoves []hostStorageServiceApplyMove, tx *hostStorageTransaction, w io.Writer) (catchrpc.HostStorageApplyResult, error) {
+func (a *hostStorageApplier) applyPreparedPlanLocked(ctx context.Context, plan catchrpc.HostStoragePlan, serviceMoves []hostStorageServiceApplyMove, tx *hostStorageTransaction, w io.Writer) (catchrpc.HostStorageApplyResult, error) {
 	if err := a.stopAffectedServices(ctx, serviceMoves, tx); err != nil {
 		return catchrpc.HostStorageApplyResult{}, err
 	}
@@ -1475,9 +1505,6 @@ func (a *hostStorageApplier) applyPreparedPlan(ctx context.Context, plan catchrp
 		if err := advanceHostStorageTransaction(tx, hostStoragePhaseTargetReady); err != nil {
 			return catchrpc.HostStorageApplyResult{}, fmt.Errorf("record ready host storage target: %w", err)
 		}
-	}
-	if err := a.finishHostStorageApply(ctx, plan, serviceMoves, tx, w, &result); err != nil {
-		return catchrpc.HostStorageApplyResult{}, err
 	}
 	return result, nil
 }
@@ -1649,6 +1676,22 @@ func (a *hostStorageApplier) validatePlanStillCurrent(plan catchrpc.HostStorageP
 	}
 	if !hostStoragePathsEqual(current.ServicesRoot, plan.Current.ServicesRoot) {
 		return fmt.Errorf("host storage plan is stale: services root is %q, plan expected %q", current.ServicesRoot, plan.Current.ServicesRoot)
+	}
+	return nil
+}
+
+func validateHostStorageDataDirAction(plan catchrpc.HostStoragePlan) error {
+	changed := !hostStoragePathsEqual(plan.Current.DataDir, plan.Desired.DataDir)
+	if !changed {
+		if plan.DataDirAction.Move || strings.TrimSpace(plan.DataDirAction.From) != "" || strings.TrimSpace(plan.DataDirAction.To) != "" {
+			return fmt.Errorf("host storage plan is inconsistent: data dir action does not match unchanged current and desired roots")
+		}
+		return nil
+	}
+	if !plan.DataDirAction.Move ||
+		!hostStoragePathsEqual(plan.DataDirAction.From, plan.Current.DataDir) ||
+		!hostStoragePathsEqual(plan.DataDirAction.To, plan.Desired.DataDir) {
+		return fmt.Errorf("host storage plan is inconsistent: data dir action does not match current and desired roots")
 	}
 	return nil
 }

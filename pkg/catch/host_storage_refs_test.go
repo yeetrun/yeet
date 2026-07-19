@@ -222,6 +222,7 @@ func TestHostStorageScanDataFindsOldRootRefs(t *testing.T) {
 				},
 			},
 			"devbox": {
+				Name: "devbox",
 				VM: &db.VMConfig{
 					Image: db.VMImageConfig{
 						RootFS: "/root/data/vm-images/ubuntu/rootfs.ext4",
@@ -238,6 +239,20 @@ func TestHostStorageScanDataFindsOldRootRefs(t *testing.T) {
 						VsockSocketPath: "/root/data/services/devbox/run/vsock.sock",
 					},
 					PIDFile: "/root/data/services/devbox/run/firecracker.pid",
+					Components: &db.VMComponentsConfig{Runtime: db.VMRuntimeLifecycleConfig{
+						Configured: db.VMRuntimeArtifactConfig{
+							Firecracker: "/root/data/vm-runtimes/amd64/firecracker-v1.16.1-yeet-v1/manifest/firecracker",
+							Jailer:      "/root/data/vm-runtimes/amd64/firecracker-v1.16.1-yeet-v1/manifest/jailer",
+						},
+						Staged: &db.VMRuntimeArtifactConfig{
+							Firecracker: "/root/data/vm-runtimes/amd64/firecracker-v1.17.0-yeet-v1/manifest/firecracker",
+							Jailer:      "/root/data/vm-runtimes/amd64/firecracker-v1.17.0-yeet-v1/manifest/jailer",
+						},
+						Previous: &db.VMRuntimeArtifactConfig{
+							Firecracker: "/root/data/vm-runtimes/amd64/firecracker-v1.15.0-yeet-v1/manifest/firecracker",
+							Jailer:      "/root/data/vm-runtimes/amd64/firecracker-v1.15.0-yeet-v1/manifest/jailer",
+						},
+					}},
 				},
 			},
 		},
@@ -248,8 +263,8 @@ func TestHostStorageScanDataFindsOldRootRefs(t *testing.T) {
 
 	refs := scanHostStorageDataRefs(data, mappings)
 
-	if len(refs) != 8 {
-		t.Fatalf("refs len = %d, want 8: %#v", len(refs), refs)
+	if len(refs) != 14 {
+		t.Fatalf("refs len = %d, want 14: %#v", len(refs), refs)
 	}
 	requireHostStorageRef(t, refs, hostStorageReference{
 		Kind:    hostStorageReferenceDB,
@@ -299,13 +314,27 @@ func TestHostStorageScanDataFindsOldRootRefs(t *testing.T) {
 		Field:   "VM.PIDFile",
 		Path:    "/root/data/services/devbox/run/firecracker.pid",
 	})
+	for field, path := range map[string]string{
+		"VM.Components.Runtime.Configured.Firecracker": "/root/data/vm-runtimes/amd64/firecracker-v1.16.1-yeet-v1/manifest/firecracker",
+		"VM.Components.Runtime.Configured.Jailer":      "/root/data/vm-runtimes/amd64/firecracker-v1.16.1-yeet-v1/manifest/jailer",
+		"VM.Components.Runtime.Staged.Firecracker":     "/root/data/vm-runtimes/amd64/firecracker-v1.17.0-yeet-v1/manifest/firecracker",
+		"VM.Components.Runtime.Staged.Jailer":          "/root/data/vm-runtimes/amd64/firecracker-v1.17.0-yeet-v1/manifest/jailer",
+		"VM.Components.Runtime.Previous.Firecracker":   "/root/data/vm-runtimes/amd64/firecracker-v1.15.0-yeet-v1/manifest/firecracker",
+		"VM.Components.Runtime.Previous.Jailer":        "/root/data/vm-runtimes/amd64/firecracker-v1.15.0-yeet-v1/manifest/jailer",
+	} {
+		requireHostStorageRef(t, refs, hostStorageReference{Kind: hostStorageReferenceDB, Service: "devbox", Field: field, Path: path})
+	}
 }
 
 func TestHostStorageScanSystemdRefsFindsYeetUnitsOnly(t *testing.T) {
 	root := t.TempDir()
 	writeHostStorageRefTestFile(t, filepath.Join(root, "api.service"), "[Service]\nExecStart=/root/data/services/api/bin/api\n")
 	writeHostStorageRefTestFile(t, filepath.Join(root, "yeet-nginx-ns.service"), "[Service]\nExecStart=/root/data/services/nginx/bin/service-ns\n")
-	writeHostStorageRefTestFile(t, filepath.Join(root, "yeet-vm-devbox.service"), "ExecStart=/usr/local/bin/catch -data-dir=/root/data vm-run\n")
+	writeHostStorageRefTestFile(t, filepath.Join(root, "yeet-vm-devbox.service"), strings.Join([]string{
+		"ExecStart=/usr/local/bin/catch -data-dir=/root/data vm-run",
+		"  --runtime-descriptor /root/data/services/devbox/data/vm-runtime.json",
+		"  --runtime-running-marker /root/data/services/devbox/run/vm-runtime-running.json",
+	}, "\n"))
 	writeHostStorageRefTestFile(t, filepath.Join(root, "docker.socket"), "ListenStream=/root/data/docker.sock\n")
 	writeHostStorageRefTestFile(t, filepath.Join(root, "yeet-not-a-unit.txt"), "ExecStart=/root/data/bin/tool\n")
 	writeHostStorageRefTestFile(t, filepath.Join(root, "yeet-sibling.service"), "ExecStart=/root/database/bin/tool\n")
@@ -317,8 +346,8 @@ func TestHostStorageScanSystemdRefsFindsYeetUnitsOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scanHostStorageSystemdRefs error: %v", err)
 	}
-	if len(refs) != 3 {
-		t.Fatalf("refs len = %d, want 3: %#v", len(refs), refs)
+	if len(refs) != 5 {
+		t.Fatalf("refs len = %d, want 5: %#v", len(refs), refs)
 	}
 	requireHostStorageRef(t, refs, hostStorageReference{
 		Kind: hostStorageReferenceSystemd,
@@ -340,6 +369,20 @@ func TestHostStorageScanSystemdRefsFindsYeetUnitsOnly(t *testing.T) {
 		File: filepath.Join(root, "yeet-vm-devbox.service"),
 		Line: 1,
 		Path: "/root/data",
+	})
+	requireHostStorageRef(t, refs, hostStorageReference{
+		Kind: hostStorageReferenceSystemd,
+		Unit: "yeet-vm-devbox.service",
+		File: filepath.Join(root, "yeet-vm-devbox.service"),
+		Line: 2,
+		Path: "/root/data/services/devbox/data/vm-runtime.json",
+	})
+	requireHostStorageRef(t, refs, hostStorageReference{
+		Kind: hostStorageReferenceSystemd,
+		Unit: "yeet-vm-devbox.service",
+		File: filepath.Join(root, "yeet-vm-devbox.service"),
+		Line: 3,
+		Path: "/root/data/services/devbox/run/vm-runtime-running.json",
 	})
 }
 

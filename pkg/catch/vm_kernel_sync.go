@@ -50,21 +50,29 @@ func (s *Server) syncVMGuestKernel(ctx context.Context, name string, flags cli.V
 }
 
 func syncVMGuestKernelDefault(ctx context.Context, s *Server, name string, flags cli.VMKernelFlags) (retErr error) {
-	target, err := s.vmKernelSyncTarget(name)
-	if err != nil {
-		return err
+	var restart *vmKernelSyncRestart
+	err := WithVMRuntimeTransactionLock(ctx, &s.cfg, func() error {
+		target, err := s.vmKernelSyncTarget(name)
+		if err != nil {
+			return err
+		}
+		if target.service.VM.Components != nil {
+			return fmt.Errorf("cannot sync the kernel for adopted VM %q until component-aware kernel reconciliation is available", name)
+		}
+		restart, err = s.prepareVMKernelSyncRestart(name, flags)
+		if err != nil {
+			return err
+		}
+		result, err := syncVMGuestKernelToHost(ctx, target)
+		if err != nil {
+			return err
+		}
+		return s.updateVMKernelDBPath(name, result.HostKernelPath)
+	})
+	if restart != nil {
+		defer restart.restoreOnError(&retErr)
 	}
-	restart, err := s.prepareVMKernelSyncRestart(name, flags)
 	if err != nil {
-		return err
-	}
-	defer restart.restoreOnError(&retErr)
-
-	result, err := syncVMGuestKernelToHost(ctx, target)
-	if err != nil {
-		return err
-	}
-	if err := s.updateVMKernelDBPath(name, result.HostKernelPath); err != nil {
 		return err
 	}
 	return restart.finish(name)
@@ -139,6 +147,9 @@ func syncVMGuestKernelToHost(ctx context.Context, target vmKernelSyncTarget) (vm
 }
 
 func AutoSyncVMGuestKernelOnReboot(ctx context.Context, cfg VMConsoleProxyConfig) error {
+	if strings.TrimSpace(cfg.RuntimeDescriptor) != "" {
+		return fmt.Errorf("automatic kernel sync for descriptor-managed VMs requires component-aware kernel reconciliation")
+	}
 	service, serviceRoot, diskPath, configPath, err := resolveVMKernelAutoSyncConfig(cfg)
 	if err != nil {
 		return err
@@ -146,11 +157,50 @@ func AutoSyncVMGuestKernelOnReboot(ctx context.Context, cfg VMConsoleProxyConfig
 	if service == "" || serviceRoot == "" || diskPath == "" || configPath == "" {
 		return nil
 	}
-	_, err = syncVMGuestKernelSelectionToHost(ctx, serviceRoot, service, diskPath, configPath)
+	dataRoot, err := vmKernelSyncDataRoot(cfg.JailerBase)
+	if err != nil {
+		return err
+	}
+	err = autoSyncVMGuestKernelLocked(ctx, dataRoot, service, serviceRoot, diskPath, configPath)
 	if err != nil && errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	return err
+}
+
+func autoSyncVMGuestKernelLocked(ctx context.Context, dataRoot, service, serviceRoot, diskPath, configPath string) error {
+	return WithVMRuntimeRootLock(ctx, dataRoot, func() error {
+		if err := refuseAdoptedVMLegacyKernelAutoSync(dataRoot, service); err != nil {
+			return err
+		}
+		_, err := syncVMGuestKernelSelectionToHost(ctx, serviceRoot, service, diskPath, configPath)
+		return err
+	})
+}
+
+func refuseAdoptedVMLegacyKernelAutoSync(dataRoot, service string) error {
+	store := db.NewStore(filepath.Join(dataRoot, "db.json"), filepath.Join(dataRoot, "services"))
+	dv, err := store.Get()
+	if err != nil {
+		return fmt.Errorf("read host VM state before automatic kernel sync: %w", err)
+	}
+	sv, ok := dv.Services().GetOk(service)
+	if !ok {
+		return nil
+	}
+	stored := sv.AsStruct()
+	if stored.ServiceType == db.ServiceTypeVM && stored.VM != nil && stored.VM.Components != nil {
+		return fmt.Errorf("automatic legacy kernel sync is disabled for adopted VM %q", service)
+	}
+	return nil
+}
+
+func vmKernelSyncDataRoot(jailerBase string) (string, error) {
+	jailerBase = filepath.Clean(strings.TrimSpace(jailerBase))
+	if !filepath.IsAbs(jailerBase) || filepath.Base(jailerBase) != "vm-jailer" {
+		return "", fmt.Errorf("automatic VM kernel sync requires the canonical jailer base under the Catch data root")
+	}
+	return filepath.Dir(jailerBase), nil
 }
 
 func resolveVMKernelAutoSyncConfig(cfg VMConsoleProxyConfig) (service, serviceRoot, diskPath, configPath string, err error) {

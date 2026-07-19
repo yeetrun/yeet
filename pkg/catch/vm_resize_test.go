@@ -548,6 +548,36 @@ func TestVMSetRestoresOldNetworkWhenDBCommitFails(t *testing.T) {
 	assertVMMetadataInjectionModes(t, injected, []string{"lan", "svc"})
 }
 
+func TestVMSetPreservesPublishedSettingsAfterDBDurabilityWarning(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
+	injected := errors.New("database parent sync failed")
+	oldCommitResult := vmServiceSetCommitResultFunc
+	vmServiceSetCommitResultFunc = func(err error) error {
+		if err != nil {
+			return err
+		}
+		return &db.PostPublicationError{Err: injected, MutationCommitted: true}
+	}
+	t.Cleanup(func() { vmServiceSetCommitResultFunc = oldCommitResult })
+
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{CPUs: 6})
+	if !errors.Is(err, injected) {
+		t.Fatalf("updateVMServiceSettings error = %v, want durability warning", err)
+	}
+	var publishedErr *db.PostPublicationError
+	if !errors.As(err, &publishedErr) || !publishedErr.MutationCommitted {
+		t.Fatalf("updateVMServiceSettings error = %v, want committed *db.PostPublicationError", err)
+	}
+	service := getTestService(t, server, "devbox")
+	if service.VM.CPUs != 6 {
+		t.Fatalf("published CPUs = %d, want 6", service.VM.CPUs)
+	}
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"vcpu_count": 6`)
+}
+
 func TestVMSetCleansPartialNewNetworkWhenSetupFails(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)

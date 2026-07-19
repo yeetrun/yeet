@@ -7,14 +7,12 @@ package catch
 import (
 	"bytes"
 	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
@@ -85,12 +83,10 @@ func TestRecoveryPointsListVMAndServiceRootSnapshots(t *testing.T) {
 	}
 }
 
-func TestRecoveryPointsExposeFullVMCheckpointPaths(t *testing.T) {
+func TestRecoveryPointRestoreRejectsRetiredFullVMCheckpoint(t *testing.T) {
 	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
 	snapshotName := "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0"
-	statePath, memoryPath := seedFullVMCheckpointMetadata(t, root, "devbox", snapshotName)
 	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
 		if args[0] != "list" {
 			t.Fatalf("unexpected zfs args: %v", args)
@@ -98,18 +94,30 @@ func TestRecoveryPointsExposeFullVMCheckpointPaths(t *testing.T) {
 		return snapshotName + "\t1781382660\tcatch\tdevbox\tvm-manual\t0\tcheckpoint\tfull\tfalse\n", "", nil
 	}
 
-	points, err := server.listRecoveryPoints(context.Background(), "devbox")
-	if err != nil {
-		t.Fatalf("listRecoveryPoints: %v", err)
+	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true}, ioDiscardReadWriter{})
+	if err == nil || !strings.Contains(err.Error(), "retired full VM checkpoint format") {
+		t.Fatalf("restoreRecoveryPoint error = %v, want retired full checkpoint rejection", err)
 	}
-	if len(points) != 1 {
-		t.Fatalf("points = %#v, want one recovery point", points)
+}
+
+func TestRecoveryPointRemoveAllowsRetiredFullVMCheckpointCleanup(t *testing.T) {
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
+	snapshotName := "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0"
+	var calls []string
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		calls = append(calls, strings.Join(args, " "))
+		if args[0] == "list" {
+			return snapshotName + "\t1781382660\tcatch\tdevbox\tvm-manual\t0\tcheckpoint\tfull\tfalse\n", "", nil
+		}
+		return "", "", nil
 	}
-	point := points[0]
-	if point.Mode != recoveryModeFull ||
-		point.StatePath != statePath ||
-		point.MemoryPath != memoryPath {
-		t.Fatalf("full VM recovery point = %#v, want checkpoint paths %q %q", point, statePath, memoryPath)
+
+	if err := server.removeRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", true, ioDiscardReadWriter{}); err != nil {
+		t.Fatalf("removeRecoveryPoint: %v", err)
+	}
+	if !hasRecoveryCall(calls, "destroy "+snapshotName) {
+		t.Fatalf("zfs calls = %#v, want retired snapshot destroy", calls)
 	}
 }
 
@@ -190,39 +198,6 @@ func renderRecoveryPointJSONForTest(t *testing.T, point recoveryPoint) string {
 		t.Fatalf("render recovery point JSON: %v", err)
 	}
 	return out.String()
-}
-
-func seedFullVMCheckpointMetadata(t *testing.T, root string, service string, snapshotName string) (string, string) {
-	t.Helper()
-	dir := vmCheckpointDir(root, vmSnapshotShortName(snapshotName))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir checkpoint dir: %v", err)
-	}
-	statePath := filepath.Join(dir, "firecracker-state.bin")
-	memoryPath := filepath.Join(dir, "memory.bin")
-	if err := os.WriteFile(statePath, []byte("state"), 0o644); err != nil {
-		t.Fatalf("write checkpoint state: %v", err)
-	}
-	if err := os.WriteFile(memoryPath, []byte("memory"), 0o644); err != nil {
-		t.Fatalf("write checkpoint memory: %v", err)
-	}
-	metadata := map[string]string{
-		"service":           service,
-		"zvolSnapshot":      snapshotName,
-		"firecrackerState":  statePath,
-		"firecrackerMemory": memoryPath,
-		"createdBy":         "catch",
-		"createdAt":         time.Unix(1781382660, 0).UTC().Format(time.RFC3339Nano),
-	}
-	raw, err := json.MarshalIndent(metadata, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal checkpoint metadata: %v", err)
-	}
-	raw = append(raw, '\n')
-	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), raw, 0o644); err != nil {
-		t.Fatalf("write checkpoint metadata: %v", err)
-	}
-	return statePath, memoryPath
 }
 
 func TestSnapshotsCreateServiceRootManualSnapshot(t *testing.T) {

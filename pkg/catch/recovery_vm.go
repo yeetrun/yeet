@@ -11,7 +11,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,28 +18,15 @@ import (
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/db"
-	"github.com/yeetrun/yeet/pkg/svc"
 )
 
 var (
-	vmRestoreTempSuffixFunc    = generateRandomSnapshotSuffix
-	vmRestoreCopyRunner        = copyVMRestoreZVOL
-	vmRestoreZVOLDeviceWaiter  = waitForVMRestoreZVOLDevices
-	vmFullRestoreRuntimeStatus = func(runner *vmRunner) (svc.Status, error) {
-		return runner.Status()
-	}
-	vmFullRestoreMainPID = func(runner *vmRunner) (int, error) {
-		return systemdMainPID(runner.unit())
-	}
-	vmFullRestoreGuestReadyQuery = queryVMGuestReady
-
-	vmFullRestoreResultWaitTimeout  = 30 * time.Second
-	vmFullRestoreResultWaitInterval = 100 * time.Millisecond
-	vmFullRestoreStabilityWait      = 3 * time.Second
-	vmFullRestoreHealthWaitTimeout  = 30 * time.Second
-	vmFullRestoreHealthWaitInterval = 500 * time.Millisecond
+	vmRestoreTempSuffixFunc         = generateRandomSnapshotSuffix
+	vmRestoreCopyRunner             = copyVMRestoreZVOL
+	vmRestoreZVOLDeviceWaiter       = waitForVMRestoreZVOLDevices
 	vmRestoreZVOLDeviceWaitTimeout  = 10 * time.Second
 	vmRestoreZVOLDeviceWaitInterval = 50 * time.Millisecond
+	mutateRecoveryCloneData         = (*db.Store).MutateData
 )
 
 func (s *Server) cloneVMRecoveryPoint(ctx context.Context, service *db.Service, point recoveryPoint, newServiceName string, flags cli.SnapshotsCloneFlags, w io.Writer) error {
@@ -69,9 +55,12 @@ func (s *Server) cloneVMRecoveryPoint(ctx context.Context, service *db.Service, 
 	}
 
 	clonedService := cloneVMRecoveryService(service, newServiceName, targetDataset)
-	inserted, err := s.insertRecoveryCloneService(clonedService)
+	_, err = s.insertRecoveryCloneService(clonedService)
 	if err != nil {
-		return s.cleanupFailedVMClone(ctx, targetDataset, createdParentDatasets, newServiceName, inserted, err)
+		if dbMutationCommitted(err) {
+			return fmt.Errorf("record cloned VM service %q: %w", newServiceName, err)
+		}
+		return s.cleanupFailedVMClone(ctx, targetDataset, createdParentDatasets, newServiceName, false, err)
 	}
 	writef(w, "Created VM service: %s (stopped).\n", newServiceName)
 	writef(w, "Cloned VM disk: %s\n", targetDataset)
@@ -104,11 +93,8 @@ func (s *Server) restoreVMRecoveryPoint(ctx context.Context, service *db.Service
 	if err := validateVMRecoveryPoint(service, point); err != nil {
 		return err
 	}
-	if err := validateVMRestoreMode(flags.Mode); err != nil {
-		return err
-	}
-	if normalizedVMRestoreMode(flags.Mode) == recoveryModeFull {
-		return s.restoreFullVMRecoveryPoint(ctx, service, point, flags, rw)
+	if point.Mode == retiredVMCheckpointMode {
+		return fmt.Errorf("recovery point %s uses retired full VM checkpoint format and cannot be restored", point.ShortName)
 	}
 	return s.restoreDiskVMRecoveryPoint(ctx, service, point, flags, rw)
 }
@@ -142,189 +128,6 @@ func (s *Server) restoreDiskVMRecoveryPoint(ctx context.Context, service *db.Ser
 	return nil
 }
 
-func validateVMRecoveryPoint(service *db.Service, point recoveryPoint) error {
-	if service == nil || service.ServiceType != db.ServiceTypeVM || service.VM == nil {
-		return fmt.Errorf("service %q is not a VM service", point.Service)
-	}
-	if point.StorageKind != recoveryStorageVMZVOL || point.ServiceType != string(db.ServiceTypeVM) {
-		return fmt.Errorf("recovery point %s is not a VM zvol recovery point", point.ShortName)
-	}
-	return nil
-}
-
-func validateVMRestoreMode(raw string) error {
-	mode := strings.TrimSpace(raw)
-	if mode == "" || mode == recoveryModeDisk {
-		return nil
-	}
-	if mode == recoveryModeFull {
-		return nil
-	}
-	return fmt.Errorf("unsupported VM restore mode %q", mode)
-}
-
-func normalizedVMRestoreMode(raw string) string {
-	mode := strings.TrimSpace(raw)
-	if mode == "" {
-		return recoveryModeDisk
-	}
-	return mode
-}
-
-func (s *Server) restoreFullVMRecoveryPoint(ctx context.Context, service *db.Service, point recoveryPoint, flags cli.SnapshotsRestoreFlags, rw io.ReadWriter) error {
-	metadata, err := s.planFullVMRestore(service, point)
-	if err != nil {
-		return err
-	}
-	confirmed, err := confirmFullVMRestore(service, point, flags, rw)
-	if err != nil || !confirmed {
-		return err
-	}
-	running, err := s.vmRestoreRunningState(service.Name, flags.Stop)
-	if err != nil {
-		return err
-	}
-	if err := stopVMForRestore(service.Name, running, flags.Stop, rw); err != nil {
-		return err
-	}
-
-	preRestore, err := s.restoreFullVMDiskAndScheduleState(ctx, service, point, metadata, rw)
-	if err != nil {
-		return err
-	}
-	if err := startVMAfterRestore(service.Name, true, rw); err != nil {
-		return fmt.Errorf("start VM %s for full restore from %s failed after disk restore; pre-restore recovery point: %s: %w", service.Name, point.ShortName, preRestore, err)
-	}
-	if err := s.waitForFullVMStateRestore(ctx, service, preRestore); err != nil {
-		return err
-	}
-	writef(rw, "Restored full VM state: %s\n", point.ShortName)
-	writef(rw, "Restore complete.\n")
-	return nil
-}
-
-func (s *Server) restoreFullVMDiskAndScheduleState(ctx context.Context, service *db.Service, point recoveryPoint, metadata vmCheckpointMetadata, rw io.ReadWriter) (string, error) {
-	preRestore, err := s.createPreRestoreVMSnapshot(ctx, service, point, rw)
-	if err != nil {
-		return "", err
-	}
-	writef(rw, "Pre-restore recovery point: %s\n", preRestore)
-	preparedRestore, err := prepareFullVMStateRestore(service, metadata)
-	if err != nil {
-		return preRestore, fmt.Errorf("prepare full VM state restore; pre-restore recovery point: %s: %w", preRestore, err)
-	}
-	defer preparedRestore.cleanup()
-	if err := s.restoreVMZVOLFromSnapshot(ctx, point); err != nil {
-		return "", err
-	}
-	writef(rw, "Restored VM disk: %s\n", point.Name)
-	if err := preparedRestore.publish(); err != nil {
-		return preRestore, fullVMPostDiskRestoreError(point, preRestore, err)
-	}
-	writef(rw, "Scheduled full VM state restore: %s\n", point.ShortName)
-	return preRestore, nil
-}
-
-func fullVMPostDiskRestoreError(point recoveryPoint, preRestore string, err error) error {
-	return fmt.Errorf("full VM restore from %s failed after disk restore; pre-restore recovery point: %s: %w", point.ShortName, preRestore, err)
-}
-
-func (s *Server) planFullVMRestore(service *db.Service, point recoveryPoint) (vmCheckpointMetadata, error) {
-	if point.Mode != recoveryModeFull {
-		return vmCheckpointMetadata{}, fmt.Errorf("recovery point %s is not a full VM checkpoint", point.ShortName)
-	}
-	metadata, err := s.fullVMRestoreMetadata(service, point)
-	if err != nil {
-		return vmCheckpointMetadata{}, err
-	}
-	current, err := s.vmCheckpointCompatibility(service, *service.VM.Clone())
-	if err != nil {
-		return vmCheckpointMetadata{}, err
-	}
-	if err := validateFullVMCheckpointCompatibility(metadata, current); err != nil {
-		return vmCheckpointMetadata{}, err
-	}
-	return metadata, nil
-}
-
-func (s *Server) fullVMRestoreMetadata(service *db.Service, point recoveryPoint) (vmCheckpointMetadata, error) {
-	dir := vmCheckpointDir(s.serviceRootFromService(service), point.ShortName)
-	metadata, ok := readVMCheckpointMetadata(filepath.Join(dir, "metadata.json"), service.Name, point.Name)
-	if !ok {
-		return vmCheckpointMetadata{}, fmt.Errorf("full checkpoint metadata is missing compatibility fields")
-	}
-	if missing := metadata.missingFullCompatibilityFields(); len(missing) > 0 {
-		return vmCheckpointMetadata{}, fmt.Errorf("full checkpoint metadata is missing compatibility fields: %s", strings.Join(missing, ", "))
-	}
-	if !checkpointFilesExist(metadata.FirecrackerState, metadata.FirecrackerMemory) {
-		return vmCheckpointMetadata{}, fmt.Errorf("full checkpoint state or memory file is missing")
-	}
-	return metadata, nil
-}
-
-func validateFullVMCheckpointCompatibility(metadata vmCheckpointMetadata, current vmCheckpointCompatibility) error {
-	if err := validateFullVMCheckpointShape(metadata, current); err != nil {
-		return err
-	}
-	if err := validateFullVMCheckpointDiskPath(metadata, current); err != nil {
-		return err
-	}
-	if err := validateFullVMCheckpointConfigHashes(metadata, current); err != nil {
-		return err
-	}
-	return validateFullVMCheckpointFirecrackerIdentity(metadata, current)
-}
-
-func validateFullVMCheckpointShape(metadata vmCheckpointMetadata, current vmCheckpointCompatibility) error {
-	if metadata.VCPU != current.VCPU || metadata.MemoryMiB != current.MemoryMiB {
-		return fmt.Errorf("checkpoint CPU or memory does not match current VM config")
-	}
-	return nil
-}
-
-func validateFullVMCheckpointDiskPath(metadata vmCheckpointMetadata, current vmCheckpointCompatibility) error {
-	if strings.TrimSpace(metadata.DiskPath) != strings.TrimSpace(current.DiskPath) {
-		return fmt.Errorf("checkpoint disk path does not match current VM config")
-	}
-	return nil
-}
-
-func validateFullVMCheckpointConfigHashes(metadata vmCheckpointMetadata, current vmCheckpointCompatibility) error {
-	if strings.TrimSpace(metadata.MachineConfigHash) != strings.TrimSpace(current.MachineConfigHash) {
-		return fmt.Errorf("checkpoint machine config hash does not match current Firecracker config")
-	}
-	if strings.TrimSpace(metadata.NetworkConfigHash) != strings.TrimSpace(current.NetworkConfigHash) {
-		return fmt.Errorf("checkpoint network config hash does not match current Firecracker config")
-	}
-	if strings.TrimSpace(metadata.BalloonConfigHash) != strings.TrimSpace(current.BalloonConfigHash) {
-		return fmt.Errorf("checkpoint balloon config hash does not match current VM config")
-	}
-	if strings.TrimSpace(metadata.VMConfigHash) != strings.TrimSpace(current.VMConfigHash) {
-		return fmt.Errorf("checkpoint VM config hash does not match current VM config")
-	}
-	return nil
-}
-
-func validateFullVMCheckpointFirecrackerIdentity(metadata vmCheckpointMetadata, current vmCheckpointCompatibility) error {
-	currentSHA := strings.TrimSpace(current.FirecrackerSha256)
-	currentVersion := stableFirecrackerVersionLine(current.FirecrackerVersion)
-	metadataSHA := strings.TrimSpace(metadata.FirecrackerSha256)
-	metadataVersion := stableFirecrackerVersionLine(metadata.FirecrackerVersion)
-	if currentSHA != "" && metadataSHA == "" {
-		return fmt.Errorf("full checkpoint metadata is missing compatibility fields")
-	}
-	if currentVersion != "" && metadataVersion == "" {
-		return fmt.Errorf("full checkpoint metadata is missing compatibility fields")
-	}
-	if currentSHA != "" && metadataSHA != currentSHA {
-		return fmt.Errorf("checkpoint Firecracker binary hash does not match current launcher")
-	}
-	if currentVersion != "" && metadataVersion != currentVersion {
-		return fmt.Errorf("checkpoint Firecracker version does not match current launcher")
-	}
-	return nil
-}
-
 func confirmVMRestore(service *db.Service, point recoveryPoint, flags cli.SnapshotsRestoreFlags, rw io.ReadWriter) (bool, error) {
 	if flags.Yes {
 		return true, nil
@@ -335,247 +138,18 @@ func confirmVMRestore(service *db.Service, point recoveryPoint, flags cli.Snapsh
 	}
 	if !ok {
 		writef(rw, "Restore cancelled.\n")
-		return false, nil
 	}
-	return true, nil
+	return ok, nil
 }
 
-type preparedFullVMStateRestore struct {
-	requestPath       string
-	stagedRequestPath string
-}
-
-func prepareFullVMStateRestore(service *db.Service, metadata vmCheckpointMetadata) (*preparedFullVMStateRestore, error) {
-	if service == nil || service.VM == nil {
-		return nil, fmt.Errorf("VM service is required for full restore")
+func validateVMRecoveryPoint(service *db.Service, point recoveryPoint) error {
+	if service == nil || service.ServiceType != db.ServiceTypeVM || service.VM == nil {
+		return fmt.Errorf("service %q is not a VM service", point.Service)
 	}
-	apiSocket := strings.TrimSpace(service.VM.Sockets.APISocketPath)
-	if apiSocket == "" {
-		return nil, fmt.Errorf("VM %s has no Firecracker API socket", service.Name)
-	}
-	if err := ensureVMSystemdRestorePrevent(service.Name); err != nil {
-		return nil, err
-	}
-	if err := removeVMFullRestoreResult(vmFullRestoreResultPath(apiSocket)); err != nil {
-		return nil, err
-	}
-	requestPath := vmFullRestoreRequestPath(apiSocket)
-	if err := os.Remove(requestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("remove stale full restore request: %w", err)
-	}
-	request := vmFullRestoreRequest{
-		StatePath:  metadata.FirecrackerState,
-		MemoryPath: metadata.FirecrackerMemory,
-		Resume:     true,
-	}
-	stagedRequestPath, err := stageVMFullRestoreRequest(requestPath, request)
-	if err != nil {
-		return nil, err
-	}
-	return &preparedFullVMStateRestore{
-		requestPath:       requestPath,
-		stagedRequestPath: stagedRequestPath,
-	}, nil
-}
-
-func stageVMFullRestoreRequest(requestPath string, request vmFullRestoreRequest) (string, error) {
-	dir := filepath.Dir(requestPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", fmt.Errorf("create full restore request directory: %w", err)
-	}
-	tmp, err := os.CreateTemp(dir, ".firecracker-restore-*.json")
-	if err != nil {
-		return "", fmt.Errorf("stage full restore request: %w", err)
-	}
-	stagedPath := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(stagedPath)
-		return "", fmt.Errorf("stage full restore request: %w", err)
-	}
-	if err := writeVMFullRestoreRequest(stagedPath, request); err != nil {
-		_ = os.Remove(stagedPath)
-		return "", err
-	}
-	return stagedPath, nil
-}
-
-func (p *preparedFullVMStateRestore) publish() error {
-	if p == nil || p.stagedRequestPath == "" {
-		return fmt.Errorf("full restore request is not staged")
-	}
-	if err := os.Rename(p.stagedRequestPath, p.requestPath); err != nil {
-		return fmt.Errorf("publish full restore request: %w", err)
-	}
-	p.stagedRequestPath = ""
-	return nil
-}
-
-func (p *preparedFullVMStateRestore) cleanup() {
-	if p == nil || p.stagedRequestPath == "" {
-		return
-	}
-	_ = os.Remove(p.stagedRequestPath)
-}
-
-func (s *Server) waitForFullVMStateRestore(ctx context.Context, service *db.Service, preRestore string) error {
-	if service == nil || service.VM == nil {
-		return fmt.Errorf("VM service is required for full restore")
-	}
-	apiSocket := strings.TrimSpace(service.VM.Sockets.APISocketPath)
-	if apiSocket == "" {
-		return fmt.Errorf("VM %s has no Firecracker API socket", service.Name)
-	}
-	resultPath := vmFullRestoreResultPath(apiSocket)
-	deadline := time.Now().Add(vmFullRestoreResultWaitTimeout)
-	runner := &vmRunner{name: service.Name}
-	for {
-		done, runnerPID, err := pollFullVMStateRestore(ctx, runner, resultPath, preRestore, deadline)
-		if err != nil {
-			return err
-		}
-		if done {
-			return waitForFullVMRestoreHealth(ctx, runner, service, runnerPID, preRestore)
-		}
-		time.Sleep(vmFullRestoreResultWaitInterval)
-	}
-}
-
-func waitForFullVMRestoreHealth(ctx context.Context, runner *vmRunner, service *db.Service, expectedRunnerPID int, preRestore string) error {
-	if err := waitForFullVMRestoreStability(ctx, runner, expectedRunnerPID, preRestore); err != nil {
-		return err
-	}
-	vsockSocket := strings.TrimSpace(service.VM.Sockets.VsockSocketPath)
-	if vsockSocket == "" {
-		return fmt.Errorf("full VM state restore loaded, but VM %s has no guest-agent vsock socket; pre-restore recovery point: %s", service.Name, preRestore)
-	}
-
-	healthCtx, cancel := context.WithTimeout(ctx, vmFullRestoreHealthWaitTimeout)
-	defer cancel()
-	var lastErr error
-	for {
-		if err := requireFullVMRestoreRunner(runner, expectedRunnerPID, preRestore); err != nil {
-			return err
-		}
-
-		ready, err := vmFullRestoreGuestReadyQuery(healthCtx, vsockSocket)
-		if err != nil {
-			lastErr = err
-		} else if ready.SSHReady {
-			if err := requireFullVMRestoreRunner(runner, expectedRunnerPID, preRestore); err != nil {
-				return err
-			}
-			return nil
-		}
-		if err := waitForFullVMRestoreHealthPoll(healthCtx); err != nil {
-			message := fmt.Sprintf("full VM state restore loaded, but guest-agent SSH readiness was not reported within %s; pre-restore recovery point: %s", vmFullRestoreHealthWaitTimeout, preRestore)
-			if lastErr != nil {
-				return fmt.Errorf("%s: %w", message, lastErr)
-			}
-			return fmt.Errorf("%s: %w", message, err)
-		}
-	}
-}
-
-func waitForFullVMRestoreStability(ctx context.Context, runner *vmRunner, expectedRunnerPID int, preRestore string) error {
-	deadline := time.Now().Add(vmFullRestoreStabilityWait)
-	for {
-		if err := requireFullVMRestoreRunner(runner, expectedRunnerPID, preRestore); err != nil {
-			return fmt.Errorf("post-load stabilization: %w", err)
-		}
-		if !time.Now().Before(deadline) {
-			return nil
-		}
-		if err := waitForFullVMRestoreHealthPoll(ctx); err != nil {
-			return fmt.Errorf("verify full VM state restore stability; pre-restore recovery point: %s: %w", preRestore, err)
-		}
-	}
-}
-
-func requireFullVMRestoreRunner(runner *vmRunner, expectedRunnerPID int, preRestore string) error {
-	status, err := vmFullRestoreRuntimeStatus(runner)
-	if err != nil {
-		return fmt.Errorf("verify full VM state restore runtime; pre-restore recovery point: %s: %w", preRestore, err)
-	}
-	if status != svc.StatusRunning {
-		return fmt.Errorf("full VM state restore loaded, but VM is %s; pre-restore recovery point: %s", status, preRestore)
-	}
-	mainPID, err := vmFullRestoreMainPID(runner)
-	if err != nil {
-		return fmt.Errorf("verify full VM state restore runner PID; pre-restore recovery point: %s: %w", preRestore, err)
-	}
-	if mainPID != expectedRunnerPID {
-		return fmt.Errorf("full VM state restore runtime changed from PID %d to %d; pre-restore recovery point: %s", expectedRunnerPID, mainPID, preRestore)
+	if point.StorageKind != recoveryStorageVMZVOL || point.ServiceType != string(db.ServiceTypeVM) {
+		return fmt.Errorf("recovery point %s is not a VM zvol recovery point", point.ShortName)
 	}
 	return nil
-}
-
-func waitForFullVMRestoreHealthPoll(ctx context.Context) error {
-	timer := time.NewTimer(vmFullRestoreHealthWaitInterval)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func pollFullVMStateRestore(ctx context.Context, runner *vmRunner, resultPath, preRestore string, deadline time.Time) (bool, int, error) {
-	result, ok, err := readVMFullRestoreResult(resultPath)
-	if err != nil && !ok {
-		return true, 0, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s: %w", preRestore, err)
-	}
-	if ok && err == nil {
-		runnerPID, err := completedFullVMStateRestore(result, preRestore)
-		return true, runnerPID, err
-	}
-	status, err := runner.Status()
-	if err == nil && status != svc.StatusRunning {
-		return true, 0, fmt.Errorf("full VM state restore did not report completion and VM is %s; pre-restore recovery point: %s", status, preRestore)
-	}
-	if err := ctx.Err(); err != nil {
-		return true, 0, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s: %w", preRestore, err)
-	}
-	if time.Now().After(deadline) {
-		return true, 0, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s", preRestore)
-	}
-	return false, 0, nil
-}
-
-func completedFullVMStateRestore(result vmFullRestoreResult, preRestore string) (int, error) {
-	if err := fullVMStateRestoreResultError(result, preRestore); err != nil {
-		return 0, err
-	}
-	if result.RunnerPID <= 0 {
-		return 0, fmt.Errorf("full VM state restore reported success without a runner PID; pre-restore recovery point: %s", preRestore)
-	}
-	return result.RunnerPID, nil
-}
-
-func fullVMStateRestoreResultError(result vmFullRestoreResult, preRestore string) error {
-	if result.Status == vmFullRestoreStatusSuccess {
-		return nil
-	}
-	message := strings.TrimSpace(result.Error)
-	if message == "" {
-		message = "unknown restore-load failure"
-	}
-	return fmt.Errorf("full VM state restore failed after disk restore; pre-restore recovery point: %s: %s", preRestore, message)
-}
-
-func confirmFullVMRestore(service *db.Service, point recoveryPoint, flags cli.SnapshotsRestoreFlags, rw io.ReadWriter) (bool, error) {
-	if flags.Yes {
-		return true, nil
-	}
-	ok, err := cmdutil.Confirm(rw, rw, fmt.Sprintf("Restore full VM state %s from %s?", service.Name, point.ShortName))
-	if err != nil {
-		return false, fmt.Errorf("failed to confirm full VM restore: %w", err)
-	}
-	if !ok {
-		writef(rw, "Restore cancelled.\n")
-		return false, nil
-	}
-	return true, nil
 }
 
 func (s *Server) vmRestoreRunningState(name string, stop bool) (bool, error) {
@@ -620,8 +194,18 @@ func (s *Server) createPreRestoreVMSnapshot(ctx context.Context, service *db.Ser
 	if err != nil {
 		return "", err
 	}
-	result, err := s.createPausedVMSnapshot(ctx, service, vm, dataset, flags, currentVMSnapshotController(), nil, false)
+	result, err := s.createPausedVMSnapshot(ctx, service, dataset, flags)
 	return result.Name, err
+}
+
+func (s *Server) serviceRootFromService(service *db.Service) string {
+	if service == nil {
+		return s.defaultServiceRootDir("")
+	}
+	if strings.TrimSpace(service.ServiceRoot) != "" {
+		return service.ServiceRoot
+	}
+	return s.defaultServiceRootDir(service.Name)
 }
 
 func (s *Server) restoreVMZVOLFromSnapshot(ctx context.Context, point recoveryPoint) error {
@@ -940,7 +524,7 @@ func (s *Server) requireRecoveryCloneTargetAvailable(name string) error {
 
 func (s *Server) insertRecoveryCloneService(service *db.Service) (bool, error) {
 	inserted := false
-	_, err := s.cfg.DB.MutateData(func(d *db.Data) error {
+	_, err := mutateRecoveryCloneData(s.cfg.DB, func(d *db.Data) error {
 		if d.Services == nil {
 			d.Services = map[string]*db.Service{}
 		}
@@ -954,15 +538,26 @@ func (s *Server) insertRecoveryCloneService(service *db.Service) (bool, error) {
 	return inserted, err
 }
 
+func dbMutationCommitted(err error) bool {
+	var publishedErr *db.PostPublicationError
+	return errors.As(err, &publishedErr) && publishedErr.MutationCommitted
+}
+
 func (s *Server) cleanupFailedVMClone(ctx context.Context, targetDataset string, parentDatasets []string, serviceName string, removeService bool, cause error) error {
 	var cleanupErrs []error
+	if removeService {
+		removeErr := s.removeFailedVMCloneService(serviceName, targetDataset)
+		if removeErr != nil {
+			cleanupErrs = append(cleanupErrs, removeErr)
+			if !dbMutationCommitted(removeErr) {
+				return vmCloneCleanupResult(cause, cleanupErrs)
+			}
+		}
+	}
 	if err := zfsDestroyDataset(ctx, s.zfsRunner, targetDataset); err != nil {
 		cleanupErrs = append(cleanupErrs, fmt.Errorf("destroy cloned dataset %s: %w", targetDataset, err))
 	} else {
 		cleanupErrs = appendCleanupError(cleanupErrs, destroyVMCloneParentDatasetCleanup(ctx, s.zfsRunner, parentDatasets))
-		if removeService {
-			cleanupErrs = appendCleanupError(cleanupErrs, s.removeFailedVMCloneService(serviceName, targetDataset))
-		}
 	}
 	return vmCloneCleanupResult(cause, cleanupErrs)
 }

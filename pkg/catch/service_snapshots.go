@@ -30,6 +30,7 @@ const (
 	snapshotEventServiceIdentityMigration snapshotEvent = "service-identity-migration"
 	snapshotEventManual                   snapshotEvent = "manual"
 	snapshotEventVMManual                 snapshotEvent = "vm-manual"
+	snapshotEventVMRuntimeUpgrade         snapshotEvent = "vm-runtime-upgrade"
 	defaultSnapshotMaxAge                               = 7 * 24 * time.Hour
 	defaultSnapshotKeepLast                             = 5
 )
@@ -60,6 +61,7 @@ type snapshotCreateRequest struct {
 	Now        time.Time
 	Comment    string
 	Checkpoint string
+	Protected  bool
 }
 
 type listedSnapshot struct {
@@ -465,6 +467,9 @@ func runZFSSnapshot(ctx context.Context, runner zfsCommandRunner, req snapshotCr
 	}
 	if checkpoint := strings.TrimSpace(req.Checkpoint); checkpoint != "" {
 		args = append(args, "-o", "com.yeetrun:checkpoint="+checkpoint)
+	}
+	if req.Protected {
+		args = append(args, "-o", "com.yeetrun:protected=true")
 	}
 	args = append(args, snapshotName)
 	_, stderr, err := runner(ctx, args...)

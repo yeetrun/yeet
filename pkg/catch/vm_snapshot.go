@@ -8,13 +8,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,36 +19,30 @@ import (
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
-type vmFirecrackerSnapshotter interface {
+type vmFirecrackerPauser interface {
 	Pause(context.Context, string) error
 	Resume(context.Context, string) error
-	CreateFullSnapshot(context.Context, string, string, string) error
 }
 
 var (
-	vmSnapshotIsRunning                                      = (*Server).IsServiceRunning
-	vmSnapshotFirecracker           vmFirecrackerSnapshotter = firecrackerSnapshotAPI{}
-	vmSnapshotEnsureRuntimeIdentity                          = ensureVMRuntimeIdentity
+	vmSnapshotIsRunning                       = (*Server).IsServiceRunning
+	vmSnapshotFirecracker vmFirecrackerPauser = firecrackerSnapshotAPI{}
 )
 
 const vmSnapshotRecoveryTimeout = 30 * time.Second
 
 type vmSnapshotResult struct {
-	Name       string
-	StatePath  string
-	MemoryPath string
+	Name string
 }
 
 type vmSnapshotPlan struct {
-	Service           *db.Service
-	VM                db.VMConfig
-	Dataset           string
-	Policy            effectivePolicy
-	Flags             cli.SnapshotsCreateFlags
-	Running           bool
-	Socket            string
-	Snapshot          vmFirecrackerSnapshotter
-	FullCompatibility *vmCheckpointCompatibility
+	Service  *db.Service
+	Dataset  string
+	Policy   effectivePolicy
+	Flags    cli.SnapshotsCreateFlags
+	Running  bool
+	Socket   string
+	Snapshot vmFirecrackerPauser
 }
 
 func (s *Server) createVMSnapshot(ctx context.Context, name string, flags cli.SnapshotsCreateFlags, w io.Writer) error {
@@ -63,12 +54,8 @@ func (s *Server) createVMSnapshot(ctx context.Context, name string, flags cli.Sn
 	if err != nil {
 		return err
 	}
-	pruned, err := s.pruneServiceSnapshotsForDataset(ctx, plan.Dataset, plan.Service, plan.Policy, time.Now(), result.Name)
-	if err != nil {
+	if _, err := s.pruneServiceSnapshotsForDataset(ctx, plan.Dataset, plan.Service, plan.Policy, time.Now(), result.Name); err != nil {
 		writeSnapshotWarning(w, "warning: failed to prune VM snapshots for %q: %v\n", name, err)
-	}
-	if err := s.pruneVMCheckpointDirsForSnapshots(plan.Service, pruned); err != nil {
-		writeSnapshotWarning(w, "warning: failed to prune VM checkpoint files for %q: %v\n", name, err)
 	}
 	printVMSnapshotResult(w, result)
 	return nil
@@ -95,28 +82,10 @@ func (s *Server) newVMSnapshotPlan(name string, flags cli.SnapshotsCreateFlags) 
 		return vmSnapshotPlan{}, err
 	}
 	socket := strings.TrimSpace(vm.Sockets.APISocketPath)
-	if err := validateVMSnapshotRuntime(name, flags, running, socket); err != nil {
-		return vmSnapshotPlan{}, err
+	if running && socket == "" {
+		return vmSnapshotPlan{}, fmt.Errorf("service %q has no Firecracker API socket", name)
 	}
-	var fullCompatibility *vmCheckpointCompatibility
-	if flags.Full {
-		compatibility, err := s.vmCheckpointCompatibility(service, vm)
-		if err != nil {
-			return vmSnapshotPlan{}, err
-		}
-		fullCompatibility = &compatibility
-	}
-	return vmSnapshotPlan{
-		Service:           service,
-		VM:                vm,
-		Dataset:           dataset,
-		Policy:            policy,
-		Flags:             flags,
-		Running:           running,
-		Socket:            socket,
-		Snapshot:          currentVMSnapshotController(),
-		FullCompatibility: fullCompatibility,
-	}, nil
+	return vmSnapshotPlan{Service: service, Dataset: dataset, Policy: policy, Flags: flags, Running: running, Socket: socket, Snapshot: currentVMSnapshotController()}, nil
 }
 
 func currentVMSnapshotRunning(s *Server, name string) (bool, error) {
@@ -127,17 +96,7 @@ func currentVMSnapshotRunning(s *Server, name string) (bool, error) {
 	return runningCheck(s, name)
 }
 
-func validateVMSnapshotRuntime(name string, flags cli.SnapshotsCreateFlags, running bool, socket string) error {
-	if flags.Full && !running {
-		return fmt.Errorf("full VM checkpoints require %q to be running", name)
-	}
-	if running && socket == "" {
-		return fmt.Errorf("service %q has no Firecracker API socket", name)
-	}
-	return nil
-}
-
-func currentVMSnapshotController() vmFirecrackerSnapshotter {
+func currentVMSnapshotController() vmFirecrackerPauser {
 	if vmSnapshotFirecracker != nil {
 		return vmSnapshotFirecracker
 	}
@@ -146,12 +105,12 @@ func currentVMSnapshotController() vmFirecrackerSnapshotter {
 
 func (s *Server) executeVMSnapshotPlan(ctx context.Context, name string, plan vmSnapshotPlan) (vmSnapshotResult, error) {
 	if !plan.Running {
-		return s.createPausedVMSnapshot(ctx, plan.Service, plan.VM, plan.Dataset, plan.Flags, plan.Snapshot, plan.FullCompatibility, false)
+		return s.createPausedVMSnapshot(ctx, plan.Service, plan.Dataset, plan.Flags)
 	}
 	if err := plan.Snapshot.Pause(ctx, plan.Socket); err != nil {
 		return vmSnapshotResult{}, fmt.Errorf("pause VM %q: %w", name, err)
 	}
-	result, snapErr := s.createPausedVMSnapshot(ctx, plan.Service, plan.VM, plan.Dataset, plan.Flags, plan.Snapshot, plan.FullCompatibility, true)
+	result, snapErr := s.createPausedVMSnapshot(ctx, plan.Service, plan.Dataset, plan.Flags)
 	resumeCtx, cancel := vmSnapshotRecoveryContext(ctx)
 	defer cancel()
 	resumeErr := plan.Snapshot.Resume(resumeCtx, plan.Socket)
@@ -209,187 +168,71 @@ func vmSnapshotDataset(disk db.VMDiskConfig) (string, error) {
 	return dataset, nil
 }
 
-func (s *Server) createPausedVMSnapshot(ctx context.Context, service *db.Service, vm db.VMConfig, dataset string, flags cli.SnapshotsCreateFlags, controller vmFirecrackerSnapshotter, fullCompatibility *vmCheckpointCompatibility, running bool) (vmSnapshotResult, error) {
-	if flags.Full && fullCompatibility == nil {
-		return vmSnapshotResult{}, fmt.Errorf("full VM checkpoint compatibility metadata must be planned before snapshot mutation")
-	}
-	now := time.Now()
-	checkpoint := "disk"
-	if flags.Full {
-		checkpoint = "full"
-	}
-	if flags.Full {
-		return s.createPausedFullVMSnapshot(ctx, service, vm, dataset, flags, controller, *fullCompatibility, now, checkpoint)
-	}
-	if running {
-		if err := s.flushPausedVMDiskForSnapshot(ctx, service, vm, controller); err != nil {
-			return vmSnapshotResult{}, err
-		}
-	}
+func (s *Server) createPausedVMSnapshot(ctx context.Context, service *db.Service, dataset string, flags cli.SnapshotsCreateFlags) (vmSnapshotResult, error) {
 	name, err := createServiceSnapshot(ctx, s.zfsRunner, snapshotCreateRequest{
-		Service:    service.Name,
-		Dataset:    dataset,
-		Event:      snapshotEventVMManual,
-		Now:        now,
-		Comment:    flags.Comment,
-		Checkpoint: checkpoint,
+		Service: service.Name, Dataset: dataset, Event: snapshotEventVMManual,
+		Now: time.Now(), Comment: flags.Comment, Checkpoint: recoveryModeDisk,
 	})
 	if err != nil {
 		return vmSnapshotResult{}, err
 	}
-
-	result := vmSnapshotResult{Name: name}
-	return result, nil
+	return vmSnapshotResult{Name: name}, nil
 }
 
-func (s *Server) createPausedFullVMSnapshot(ctx context.Context, service *db.Service, vm db.VMConfig, dataset string, flags cli.SnapshotsCreateFlags, controller vmFirecrackerSnapshotter, fullCompatibility vmCheckpointCompatibility, now time.Time, checkpoint string) (vmSnapshotResult, error) {
-	result, workspace, err := s.createTemporaryFullVMCheckpoint(ctx, service, vm, controller)
+// createVMRuntimeUpgradeRecoveryPoint creates a disk-only recovery point
+// independently of the service snapshot policy. It is born protected so a
+// concurrent retention pass cannot prune it before the runtime trial finishes.
+func (s *Server) createVMRuntimeUpgradeRecoveryPoint(ctx context.Context, service *db.Service, w io.Writer) (string, error) {
+	if service == nil || service.VM == nil {
+		return "", fmt.Errorf("VM runtime upgrade requires a VM service")
+	}
+	if service.VM.Disk.Backend != vmDiskBackendZVOL {
+		writeSnapshotWarning(w, "warning: VM %q uses a raw disk; only launcher rollback is available for this runtime trial\n", service.Name)
+		return "", nil
+	}
+	dataset, err := vmSnapshotDataset(service.VM.Disk)
 	if err != nil {
-		return result, fmt.Errorf("create full VM checkpoint: %w", err)
+		return "", err
 	}
-	defer func() { _ = workspace.close() }()
-
-	req := snapshotCreateRequest{
-		Service:    service.Name,
-		Dataset:    dataset,
-		Event:      snapshotEventVMManual,
-		Now:        now,
-		Comment:    flags.Comment,
-		Checkpoint: checkpoint,
-	}
-	name, err := createServiceSnapshot(ctx, s.zfsRunner, req)
+	running, err := currentVMSnapshotRunning(s, service.Name)
 	if err != nil {
-		cleanupErr := workspace.remove()
-		return vmSnapshotResult{}, errors.Join(
-			fmt.Errorf("create full VM checkpoint for snapshot %s@%s: %w", dataset, snapshotShortName(req), err),
-			checkpointWorkspaceCleanupError(workspace.path(), cleanupErr),
-		)
+		return "", err
 	}
-
-	finalName := vmSnapshotShortName(name)
-	finalDir := vmCheckpointDir(s.serviceRootFromService(service), finalName)
-	finalResult := vmSnapshotResult{
-		Name:       name,
-		StatePath:  filepath.Join(finalDir, "firecracker-state.bin"),
-		MemoryPath: filepath.Join(finalDir, "memory.bin"),
+	socket := strings.TrimSpace(service.VM.Sockets.APISocketPath)
+	if running && socket == "" {
+		return "", fmt.Errorf("service %q has no Firecracker API socket", service.Name)
 	}
-	metadata, err := s.marshalVMCheckpointMetadataWithCompatibility(service, fullCompatibility, flags.Comment, name, finalResult, now)
-	if err != nil {
-		return result, s.failFullVMCheckpointWorkspace(ctx, name, workspace, err)
+	create := func(snapshotCtx context.Context) (string, error) {
+		return createServiceSnapshot(snapshotCtx, s.zfsRunner, snapshotCreateRequest{
+			Service: service.Name, Dataset: dataset, Event: snapshotEventVMRuntimeUpgrade,
+			Now: time.Now(), Checkpoint: recoveryModeDisk, Protected: true,
+		})
 	}
-	if err := workspace.writeMetadata(metadata); err != nil {
-		return result, s.failFullVMCheckpointWorkspace(ctx, name, workspace, err)
+	if !running {
+		return create(ctx)
 	}
-	if err := workspace.publish(finalName); err != nil {
-		return result, s.failFullVMCheckpointWorkspace(ctx, name, workspace, err)
-	}
-	return finalResult, nil
+	return createPausedVMRuntimeUpgradeRecoveryPoint(ctx, service.Name, socket, create)
 }
 
-func (s *Server) flushPausedVMDiskForSnapshot(ctx context.Context, service *db.Service, vm db.VMConfig, controller vmFirecrackerSnapshotter) error {
-	_, workspace, err := s.createTemporaryFullVMCheckpoint(ctx, service, vm, controller)
-	if err != nil {
-		return fmt.Errorf("flush VM disk before snapshot: %w", err)
+func createPausedVMRuntimeUpgradeRecoveryPoint(ctx context.Context, serviceName, socket string, create func(context.Context) (string, error)) (string, error) {
+	controller := currentVMSnapshotController()
+	if err := controller.Pause(ctx, socket); err != nil {
+		return "", fmt.Errorf("pause VM %q before runtime upgrade recovery point: %w", serviceName, err)
 	}
-	path := workspace.path()
-	removeErr := workspace.remove()
-	closeErr := workspace.close()
-	if err := errors.Join(removeErr, closeErr); err != nil {
-		return fmt.Errorf("remove temporary VM disk flush checkpoint %s: %w", path, err)
-	}
-	return nil
-}
-
-func (s *Server) createTemporaryFullVMCheckpoint(ctx context.Context, service *db.Service, vm db.VMConfig, controller vmFirecrackerSnapshotter) (vmSnapshotResult, *vmCheckpointWorkspace, error) {
-	if controller == nil {
-		controller = currentVMSnapshotController()
-	}
-	baseDir := filepath.Join(serviceDataDirForRoot(s.serviceRootFromService(service)), "checkpoints")
-	identity, err := vmSnapshotEnsureRuntimeIdentity()
-	if err != nil {
-		return vmSnapshotResult{}, nil, err
-	}
-	workspace, err := newVMCheckpointWorkspace(baseDir, identity)
-	if err != nil {
-		return vmSnapshotResult{}, nil, err
-	}
-	result := vmSnapshotResult{
-		StatePath:  filepath.Join(workspace.path(), "firecracker-state.bin"),
-		MemoryPath: filepath.Join(workspace.path(), "memory.bin"),
-	}
-	if err := controller.CreateFullSnapshot(ctx, vm.Sockets.APISocketPath, result.StatePath, result.MemoryPath); err != nil {
-		cleanupErr := errors.Join(workspace.remove(), workspace.close())
-		return result, nil, errors.Join(
-			fmt.Errorf("create Firecracker checkpoint: %w", err),
-			checkpointWorkspaceCleanupError(workspace.path(), cleanupErr),
-		)
-	}
-	return result, workspace, nil
-}
-
-func (s *Server) failFullVMCheckpointWorkspace(ctx context.Context, snapshotName string, workspace *vmCheckpointWorkspace, cause error) error {
-	path := workspace.path()
-	cleanupErr := errors.Join(workspace.remove(), workspace.close())
-	if err := checkpointWorkspaceCleanupError(path, cleanupErr); err != nil {
-		cause = errors.Join(cause, err)
-	}
-	return s.failFullVMSnapshot(ctx, snapshotName, "", cause)
-}
-
-func checkpointWorkspaceCleanupError(path string, err error) error {
-	if err == nil {
-		return nil
-	}
-	return fmt.Errorf("clean up temporary VM checkpoint workspace %s: %w", path, err)
-}
-
-func (s *Server) failFullVMSnapshot(ctx context.Context, snapshotName string, checkpointDir string, cause error) error {
-	cleanupCtx, cancel := vmSnapshotRecoveryContext(ctx)
+	name, snapshotErr := create(ctx)
+	resumeCtx, cancel := vmSnapshotRecoveryContext(ctx)
 	defer cancel()
-	var cleanupErrs []error
-	if snapshotName != "" {
-		if err := destroySnapshot(cleanupCtx, s.zfsRunner, snapshotName); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("destroy incomplete VM zvol snapshot %s: %w", snapshotName, err))
-		}
+	resumeErr := controller.Resume(resumeCtx, socket)
+	if resumeErr != nil && snapshotErr != nil {
+		return "", fmt.Errorf("%v; additionally failed to resume VM %q: %w", snapshotErr, serviceName, resumeErr)
 	}
-	if checkpointDir != "" {
-		if err := os.RemoveAll(checkpointDir); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove incomplete VM checkpoint directory %s: %w", checkpointDir, err))
-		}
+	if resumeErr != nil {
+		return "", fmt.Errorf("created protected VM runtime recovery point %s but failed to resume VM %q: %w", name, serviceName, resumeErr)
 	}
-	if cleanupErr := errors.Join(cleanupErrs...); cleanupErr != nil {
-		return fmt.Errorf("create full VM checkpoint for snapshot %s: %w; cleanup failed: %w", snapshotName, cause, cleanupErr)
+	if snapshotErr != nil {
+		return "", snapshotErr
 	}
-	return fmt.Errorf("create full VM checkpoint for snapshot %s: %w", snapshotName, cause)
-}
-
-func (s *Server) serviceRootFromService(service *db.Service) string {
-	if service == nil {
-		return s.defaultServiceRootDir("")
-	}
-	if strings.TrimSpace(service.ServiceRoot) != "" {
-		return service.ServiceRoot
-	}
-	return s.defaultServiceRootDir(service.Name)
-}
-
-func vmCheckpointDir(root string, shortName string) string {
-	return filepath.Join(serviceDataDirForRoot(root), "checkpoints", shortName)
-}
-
-func (s *Server) pruneVMCheckpointDirsForSnapshots(service *db.Service, snapshotNames []string) error {
-	if len(snapshotNames) == 0 {
-		return nil
-	}
-	root := s.serviceRootFromService(service)
-	var errs []error
-	for _, snapshotName := range snapshotNames {
-		dir := vmCheckpointDir(root, vmSnapshotShortName(snapshotName))
-		if err := os.RemoveAll(dir); err != nil {
-			errs = append(errs, fmt.Errorf("remove VM checkpoint directory %s: %w", dir, err))
-		}
-	}
-	return errors.Join(errs...)
+	return name, nil
 }
 
 func vmSnapshotShortName(name string) string {
@@ -400,13 +243,8 @@ func vmSnapshotShortName(name string) string {
 }
 
 func printVMSnapshotResult(w io.Writer, result vmSnapshotResult) {
-	if w == nil {
-		return
-	}
-	writef(w, "VM snapshot: %s\n", result.Name)
-	if result.StatePath != "" {
-		writef(w, "Firecracker state: %s\n", result.StatePath)
-		writef(w, "Firecracker memory: %s\n", result.MemoryPath)
+	if w != nil {
+		writef(w, "VM snapshot: %s\n", result.Name)
 	}
 }
 
@@ -418,15 +256,6 @@ func (firecrackerSnapshotAPI) Pause(ctx context.Context, socket string) error {
 
 func (firecrackerSnapshotAPI) Resume(ctx context.Context, socket string) error {
 	return firecrackerPatchVMState(ctx, socket, "Resumed")
-}
-
-func (firecrackerSnapshotAPI) CreateFullSnapshot(ctx context.Context, socket string, statePath string, memPath string) error {
-	body := map[string]string{
-		"snapshot_type": "Full",
-		"snapshot_path": statePath,
-		"mem_file_path": memPath,
-	}
-	return firecrackerJSON(ctx, socket, http.MethodPut, "http://unix/snapshot/create", body)
 }
 
 func firecrackerPatchVMState(ctx context.Context, socket string, state string) error {
@@ -444,12 +273,10 @@ func firecrackerJSON(ctx context.Context, socket string, method string, url stri
 	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Transport: &http.Transport{
-		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socket)
-		},
-	}}
+	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", socket)
+	}}}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

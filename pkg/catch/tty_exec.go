@@ -314,14 +314,22 @@ func (e *ttyExecer) shouldBypassPtyInput() bool {
 }
 
 func vmCommandShouldBypassPtyInput(args []string) bool {
-	if len(args) == 0 || args[0] != "images" {
+	if len(args) == 0 {
 		return false
 	}
-	flags, remaining, err := cli.ParseVMImages(args[1:])
-	if err != nil || !flags.Stdin || len(remaining) == 0 {
+	switch args[0] {
+	case "images":
+		flags, remaining, err := cli.ParseVMImages(args[1:])
+		if err != nil || !flags.Stdin || len(remaining) == 0 {
+			return false
+		}
+		return remaining[0] == "import"
+	case "runtime":
+		action, _, ok := cli.FindVMRuntimeAction(args[1:])
+		return ok && action == cli.VMRuntimeActionImport
+	default:
 		return false
 	}
-	return remaining[0] == "import"
 }
 
 func (e *ttyExecer) payloadReader() io.Reader {

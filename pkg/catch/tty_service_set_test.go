@@ -1674,6 +1674,89 @@ func TestServiceRootMigrationSnapshotsOldZFSDatasetBeforeMaterializing(t *testin
 	assertServiceRootZFS(t, server, name, "")
 }
 
+func TestServiceRootMigrationMovesAdoptedVMAndRegeneratesRuntimeState(t *testing.T) {
+	server := newTestServer(t)
+	name := "devbox"
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	newRoot := filepath.Join(t.TempDir(), "new")
+	withServiceSetRootStopped(t)
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatal(err)
+	}
+	systemdDir := t.TempDir()
+	oldSystemdDir := vmSystemdSystemDir
+	vmSystemdSystemDir = systemdDir
+	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
+	descriptorDeps := defaultVMRuntimeDescriptorFileDeps()
+	descriptorDeps.uid = uint32(os.Geteuid())
+	descriptorDeps.gid = uint32(os.Getegid())
+	var systemctlCalls [][]string
+	server.vmRuntimeReconcileDeps = &vmRuntimeReconcileDeps{
+		descriptor: descriptorDeps,
+		units: vmUnitTransactionDeps{systemctl: func(args ...string) error {
+			systemctlCalls = append(systemctlCalls, append([]string(nil), args...))
+			return nil
+		}},
+		runner: "/usr/local/bin/catch",
+	}
+	runtime := validVMRuntimeDescriptor().Configured
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
+		s.ServiceType = db.ServiceTypeVM
+		s.ServiceRoot = oldRoot
+		s.ServiceRootZFS = "tank/vms/devbox"
+		s.VM = &db.VMConfig{
+			Disk:       db.VMDiskConfig{Path: filepath.Join(oldRoot, "data", "rootfs.raw")},
+			Components: &db.VMComponentsConfig{Runtime: db.VMRuntimeLifecycleConfig{Configured: runtime}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate service: %v", err)
+	}
+	snapshotCalls := 0
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		if len(args) != 0 && args[0] == "snapshot" {
+			snapshotCalls++
+		}
+		return "", "", nil
+	}
+
+	err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationCopy)
+	if err != nil {
+		t.Fatalf("migrateServiceRoot adopted VM: %v", err)
+	}
+	if _, statErr := os.Stat(newRoot); statErr != nil {
+		t.Fatalf("new root stat error = %v", statErr)
+	}
+	if snapshotCalls == 0 {
+		t.Fatal("adopted VM migration did not create its recovery snapshot")
+	}
+	assertServiceRoot(t, server, name, newRoot)
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := dv.AsStruct().Services[name]
+	if service.VM.Components.Runtime.Configured != runtime {
+		t.Fatalf("runtime selection changed: %#v", service.VM.Components.Runtime)
+	}
+	if service.VM.Disk.Path != filepath.Join(newRoot, "data", "rootfs.raw") {
+		t.Fatalf("disk path = %q, want new service root", service.VM.Disk.Path)
+	}
+	if _, err := os.Stat(filepath.Join(serviceDataDirForRoot(newRoot), vmRuntimeDescriptorFileName)); err != nil {
+		t.Fatalf("new runtime descriptor missing: %v", err)
+	}
+	unitRaw, err := os.ReadFile(filepath.Join(systemdDir, vmSystemdUnitName(name)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unit := string(unitRaw); !strings.Contains(unit, "--service-root "+newRoot) || strings.Contains(unit, "--firecracker") {
+		t.Fatalf("regenerated unit does not use descriptor-mode new root:\n%s", unit)
+	}
+	if !reflect.DeepEqual(systemctlCalls, [][]string{{"daemon-reload"}}) {
+		t.Fatalf("systemctl calls = %#v, want daemon-reload", systemctlCalls)
+	}
+}
+
 func TestServiceRootMigrationReportsRecoverySnapshotOnFailure(t *testing.T) {
 	server := newTestServer(t)
 	name := "svc"

@@ -29,7 +29,6 @@ import (
 	cdb "github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/dnet"
 	"github.com/yeetrun/yeet/pkg/svc"
-	"golang.org/x/sys/unix"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 	"tailscale.com/util/must"
@@ -355,6 +354,9 @@ func handleVMRunCommand(args []string) error {
 	diskPath := fs.String("disk-path", "", "VM rootfs disk path")
 	firecracker := fs.String("firecracker", "", "firecracker binary path")
 	jailer := fs.String("jailer", "", "matching Firecracker jailer binary path")
+	runtimeDescriptor := fs.String("runtime-descriptor", "", "VM runtime descriptor path")
+	runtimeRunningMarker := fs.String("runtime-running-marker", "", "VM runtime running marker path")
+	runtimeTrialResult := fs.String("runtime-trial-result", "", "VM runtime trial result path")
 	jailerBase := fs.String("jailer-base", "", "Firecracker jailer base directory")
 	apiSock := fs.String("api-sock", "", "firecracker API socket path")
 	configFile := fs.String("config-file", "", "firecracker config file path")
@@ -362,35 +364,75 @@ func handleVMRunCommand(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*jailer) == "" {
-		return fmt.Errorf("vm-run requires --jailer")
-	}
 	if strings.TrimSpace(*jailerBase) == "" {
 		return fmt.Errorf("vm-run requires --jailer-base")
 	}
+	resolvedFirecracker, resolvedJailer, err := resolveVMRunRuntimeMode(
+		*service, *serviceRoot, *firecracker, *jailer,
+		*runtimeDescriptor, *runtimeRunningMarker, *runtimeTrialResult,
+	)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	err := runVMConsoleProxy(ctx, catch.VMConsoleProxyConfig{
-		Service:       *service,
-		ServiceRoot:   *serviceRoot,
-		DiskPath:      *diskPath,
-		Firecracker:   *firecracker,
-		Jailer:        *jailer,
-		JailerBase:    *jailerBase,
-		APISocket:     *apiSock,
-		ConfigFile:    *configFile,
-		ConsoleSocket: *consoleSock,
-		OnGuestReboot: catch.AutoSyncVMGuestKernelOnReboot,
+	err = runVMConsoleProxy(ctx, catch.VMConsoleProxyConfig{
+		Service:              *service,
+		ServiceRoot:          *serviceRoot,
+		DiskPath:             *diskPath,
+		Firecracker:          resolvedFirecracker,
+		Jailer:               resolvedJailer,
+		RuntimeDescriptor:    *runtimeDescriptor,
+		RuntimeRunningMarker: *runtimeRunningMarker,
+		RuntimeTrialResult:   *runtimeTrialResult,
+		RuntimeDataRoot:      *legacyDataDir,
+		JailerBase:           *jailerBase,
+		APISocket:            *apiSock,
+		ConfigFile:           *configFile,
+		ConsoleSocket:        *consoleSock,
+		OnGuestReboot:        catch.AutoSyncVMGuestKernelOnReboot,
 	})
 	if errors.Is(err, catch.ErrVMGuestReboot) {
 		exitProcess(catch.VMGuestRebootExitCode)
 		return nil
 	}
-	if errors.Is(err, catch.ErrVMRestoreLoadFailed) {
-		exitProcess(catch.VMRestoreLoadFailedExitCode)
+	if errors.Is(err, catch.ErrVMRuntimeNoFallback) {
+		exitProcess(catch.VMRuntimeNoFallbackExitCode)
 		return nil
 	}
 	return err
+}
+
+func resolveVMRunRuntimeMode(service, serviceRoot, firecracker, jailer, descriptor, runningMarker, trialResult string) (string, string, error) {
+	explicitCount := nonEmptyVMRunValues(firecracker, jailer)
+	descriptorCount := nonEmptyVMRunValues(descriptor, runningMarker, trialResult)
+	if descriptorCount == 3 && explicitCount == 0 {
+		return resolveDescriptorVMRunRuntime(service, serviceRoot, descriptor, runningMarker, trialResult)
+	}
+	if descriptorCount == 0 && explicitCount == 2 {
+		return firecracker, jailer, nil
+	}
+	if descriptorCount == 0 && (explicitCount == 0 || strings.TrimSpace(jailer) == "") {
+		return "", "", fmt.Errorf("vm-run requires --jailer")
+	}
+	return "", "", fmt.Errorf("vm-run runtime mode requires both --firecracker and --jailer or all three runtime descriptor paths, without mixing modes")
+}
+
+func resolveDescriptorVMRunRuntime(service, serviceRoot, descriptor, runningMarker, trialResult string) (string, string, error) {
+	if err := catch.ValidateVMRuntimeLaunchPaths(serviceRoot, descriptor, runningMarker, trialResult); err != nil {
+		return "", "", fmt.Errorf("vm-run runtime mode: %w", err)
+	}
+	return "", "", nil
+}
+
+func nonEmptyVMRunValues(values ...string) int {
+	count := 0
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 type catchPaths struct {
@@ -1183,10 +1225,11 @@ type catchServiceInstaller interface {
 	RollbackInstalledGeneration() error
 }
 
-type catchVMJailerUpgrade interface {
+type catchVMRuntimeAdoption interface {
 	Commit() error
 	Close() error
-	Summary() catch.VMJailerUpgradeSummary
+	Summary() catch.VMRuntimeAdoptionSummary
+	CatchRollbackSafe() bool
 }
 
 type catchInstallDeps struct {
@@ -1198,7 +1241,9 @@ type catchInstallDeps struct {
 	readFile                    func(string) ([]byte, error)
 	logf                        func(string, ...any)
 	tsnetHost                   func() string
-	prepareVMJailerUpgrade      func(context.Context, *catch.Config) (catchVMJailerUpgrade, error)
+	inspectVMRuntimeAdoption    func(context.Context, *catch.Config) (catch.VMRuntimeAdoptionSummary, error)
+	prepareVMRuntimeAdoption    func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error)
+	reconcileVMRuntimePolicy    func(context.Context, *catch.Config) (catch.VMRuntimePolicyReconcileSummary, error)
 	acquireInstallLock          func(context.Context, string) (io.Closer, error)
 }
 
@@ -1231,9 +1276,11 @@ func defaultCatchInstallDeps() catchInstallDeps {
 		tsnetHost: func() string {
 			return *tsnetHost
 		},
-		prepareVMJailerUpgrade: func(ctx context.Context, cfg *catch.Config) (catchVMJailerUpgrade, error) {
-			return catch.PrepareVMJailerUpgrade(ctx, cfg)
+		inspectVMRuntimeAdoption: catch.InspectVMRuntimeAdoption,
+		prepareVMRuntimeAdoption: func(ctx context.Context, cfg *catch.Config) (catchVMRuntimeAdoption, error) {
+			return catch.PrepareVMRuntimeAdoption(ctx, cfg)
 		},
+		reconcileVMRuntimePolicy: catch.ReconcileVMRuntimePoliciesOnCatchUpgrade,
 		acquireInstallLock: func(ctx context.Context, dataDir string) (io.Closer, error) {
 			return acquireCatchInstallLock(ctx, dataDir, 0)
 		},
@@ -1275,36 +1322,88 @@ func runCatchInstallTransaction(cfg *catch.Config, dataDir string, deps catchIns
 			err = errors.Join(err, fmt.Errorf("release Catch install transaction lock: %w", closeErr))
 		}
 	}()
-	upgrade, err := deps.prepareVMJailerUpgrade(context.Background(), cfg)
+	summary, err := installCatchAndAdoptVMRuntimes(cfg, plan, deps)
 	if err != nil {
-		return fmt.Errorf("prepare VM jailer upgrade: %w", err)
+		return err
 	}
-	defer func() {
-		err = errors.Join(err, upgrade.Close())
-	}()
+	logCatchRuntimeAdoption(summary, deps)
+	return reconcileCatchRuntimePolicy(cfg, summary, deps)
+}
+
+func installCatchAndAdoptVMRuntimes(cfg *catch.Config, plan catchInstallPlan, deps catchInstallDeps) (summary catch.VMRuntimeAdoptionSummary, err error) {
+	preflight, err := deps.inspectVMRuntimeAdoption(context.Background(), cfg)
+	if err != nil {
+		return summary, fmt.Errorf("inspect VM runtime adoption: %w", err)
+	}
 	if err := deps.ensureManagedServiceAccount(); err != nil {
-		return fmt.Errorf("prepare managed native service account: %w", err)
+		return summary, fmt.Errorf("prepare managed native service account: %w", err)
 	}
 	inst, err := deps.newInstaller(cfg, catchFileInstallerConfig(plan))
 	if err != nil {
-		return fmt.Errorf("failed to create installer: %w", err)
+		return summary, fmt.Errorf("failed to create installer: %w", err)
 	}
-	summary := upgrade.Summary()
-	if err := requireCatchRollbackForVMUnits(summary, inst); err != nil {
-		return err
+	if err := requireCatchRollbackForVMUnits(preflight, inst); err != nil {
+		return summary, err
 	}
 	if err := installCurrentCatchExecutable(inst, deps); err != nil {
-		return err
+		return summary, err
 	}
-	if err := upgrade.Commit(); err != nil {
-		return errors.Join(err, inst.RollbackInstalledGeneration())
+	adoption, err := deps.prepareVMRuntimeAdoption(context.Background(), cfg)
+	if err != nil {
+		return summary, fmt.Errorf("prepare VM runtime adoption after installing Catch: %w", err)
 	}
-	deps.logf("VM jailer upgrade: %d ready, %d pending restart", len(summary.Ready), len(summary.PendingRestart))
+	return commitCatchRuntimeAdoption(adoption, inst)
+}
+
+func commitCatchRuntimeAdoption(adoption catchVMRuntimeAdoption, inst catchServiceInstaller) (summary catch.VMRuntimeAdoptionSummary, err error) {
+	adoptionClosed := false
+	defer func() {
+		if !adoptionClosed {
+			err = errors.Join(err, adoption.Close())
+		}
+	}()
+	summary = adoption.Summary()
+	if summary.RequiresRollbackGeneration && !inst.RollbackInstalledGenerationAvailable() {
+		return summary, fmt.Errorf("VM runtime adoption changed after preflight; keeping the new Catch generation because no previous generation is available")
+	}
+	if err := adoption.Commit(); err != nil {
+		if adoption.CatchRollbackSafe() {
+			return summary, errors.Join(err, inst.RollbackInstalledGeneration())
+		}
+		return summary, err
+	}
+	if err := adoption.Close(); err != nil {
+		return summary, err
+	}
+	adoptionClosed = true
+	return summary, nil
+}
+
+func logCatchRuntimeAdoption(summary catch.VMRuntimeAdoptionSummary, deps catchInstallDeps) {
+	deps.logf("VM runtime adoption: %d ready, %d pending restart, %d adopting, %d blocked", len(summary.Ready), len(summary.PendingRestart), len(summary.Adopting), len(summary.Blocked))
+}
+
+func reconcileCatchRuntimePolicy(cfg *catch.Config, summary catch.VMRuntimeAdoptionSummary, deps catchInstallDeps) error {
+	if !catchInstallSummaryHasRuntimePolicyVMs(summary) {
+		return nil
+	}
+	policySummary, err := deps.reconcileVMRuntimePolicy(context.Background(), cfg)
+	if err != nil {
+		return fmt.Errorf("reconcile VM runtime policy after Catch upgrade: %w", err)
+	}
+	for _, warning := range policySummary.Warnings {
+		deps.logf("warning: VM runtime policy reconciliation: %s", warning)
+	}
+	deps.logf("VM runtime policy: %d staged, %d unchanged", len(policySummary.Staged), len(policySummary.Skipped))
 	return nil
 }
 
-func requireCatchRollbackForVMUnits(summary catch.VMJailerUpgradeSummary, inst catchServiceInstaller) error {
-	if len(summary.Ready)+len(summary.PendingRestart) == 0 || inst.RollbackInstalledGenerationAvailable() {
+func catchInstallSummaryHasRuntimePolicyVMs(summary catch.VMRuntimeAdoptionSummary) bool {
+	return len(summary.Ready)+len(summary.PendingRestart)+len(summary.AlreadyAdopted)+len(summary.Adopting) != 0
+}
+
+func requireCatchRollbackForVMUnits(summary catch.VMRuntimeAdoptionSummary, inst catchServiceInstaller) error {
+	if !summary.RequiresRollbackGeneration || inst.RollbackInstalledGenerationAvailable() {
 		return nil
 	}
 	inst.Fail()
@@ -1321,11 +1420,11 @@ func installCurrentCatchExecutable(inst catchServiceInstaller, deps catchInstall
 
 func normalizeCatchInstallDeps(deps catchInstallDeps) catchInstallDeps {
 	defaults := defaultCatchInstallDeps()
-	deps = normalizeCatchInstallCoreDeps(deps, defaults)
+	deps = normalizeCatchInstallFileDeps(deps, defaults)
 	return normalizeCatchInstallRuntimeDeps(deps, defaults)
 }
 
-func normalizeCatchInstallCoreDeps(deps, defaults catchInstallDeps) catchInstallDeps {
+func normalizeCatchInstallFileDeps(deps, defaults catchInstallDeps) catchInstallDeps {
 	if deps.writeInstallMeta == nil {
 		deps.writeInstallMeta = defaults.writeInstallMeta
 	}
@@ -1344,18 +1443,24 @@ func normalizeCatchInstallCoreDeps(deps, defaults catchInstallDeps) catchInstall
 	if deps.readFile == nil {
 		deps.readFile = defaults.readFile
 	}
-	return deps
-}
-
-func normalizeCatchInstallRuntimeDeps(deps, defaults catchInstallDeps) catchInstallDeps {
 	if deps.logf == nil {
 		deps.logf = defaults.logf
 	}
 	if deps.tsnetHost == nil {
 		deps.tsnetHost = defaults.tsnetHost
 	}
-	if deps.prepareVMJailerUpgrade == nil {
-		deps.prepareVMJailerUpgrade = defaults.prepareVMJailerUpgrade
+	return deps
+}
+
+func normalizeCatchInstallRuntimeDeps(deps, defaults catchInstallDeps) catchInstallDeps {
+	if deps.inspectVMRuntimeAdoption == nil {
+		deps.inspectVMRuntimeAdoption = defaults.inspectVMRuntimeAdoption
+	}
+	if deps.prepareVMRuntimeAdoption == nil {
+		deps.prepareVMRuntimeAdoption = defaults.prepareVMRuntimeAdoption
+	}
+	if deps.reconcileVMRuntimePolicy == nil {
+		deps.reconcileVMRuntimePolicy = defaults.reconcileVMRuntimePolicy
 	}
 	if deps.acquireInstallLock == nil {
 		deps.acquireInstallLock = defaults.acquireInstallLock
@@ -1364,54 +1469,7 @@ func normalizeCatchInstallRuntimeDeps(deps, defaults catchInstallDeps) catchInst
 }
 
 func acquireCatchInstallLock(ctx context.Context, dataDir string, trustedUID uint32) (*os.File, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	dir, err := openValidatedCatchInstallRoot(dataDir, trustedUID)
-	if err != nil {
-		return nil, err
-	}
-	for {
-		err := unix.Flock(int(dir.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			return dir, nil
-		}
-		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
-			return nil, errors.Join(fmt.Errorf("lock Catch data root: %w", err), dir.Close())
-		}
-		select {
-		case <-ctx.Done():
-			return nil, errors.Join(ctx.Err(), dir.Close())
-		case <-time.After(25 * time.Millisecond):
-		}
-	}
-}
-
-func openValidatedCatchInstallRoot(dataDir string, trustedUID uint32) (*os.File, error) {
-	fd, err := unix.Open(dataDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open Catch data root without following symlinks: %w", err)
-	}
-	dir := os.NewFile(uintptr(fd), dataDir)
-	if dir == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("bind Catch data root directory descriptor")
-	}
-	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
-		return nil, errors.Join(fmt.Errorf("inspect Catch data root: %w", err), dir.Close())
-	}
-	mode := uint32(stat.Mode)
-	if mode&unix.S_IFMT != unix.S_IFDIR {
-		return nil, errors.Join(fmt.Errorf("catch data root is not a directory"), dir.Close())
-	}
-	if stat.Uid != trustedUID {
-		return nil, errors.Join(fmt.Errorf("catch data root owner is %d, want %d", stat.Uid, trustedUID), dir.Close())
-	}
-	if mode&0o022 != 0 {
-		return nil, errors.Join(fmt.Errorf("catch data root is writable by group or others: mode %o", mode&0o7777), dir.Close())
-	}
-	return dir, nil
+	return catch.AcquireCatchInstallTransactionLock(ctx, dataDir, trustedUID)
 }
 
 func validateCatchInstallConfig(cfg *catch.Config) error {

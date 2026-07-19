@@ -242,6 +242,27 @@ func TestCreateServiceSnapshotCommandWithCommentAndCheckpoint(t *testing.T) {
 	}
 }
 
+func TestCreateVMRuntimeUpgradeSnapshotIsBornProtected(t *testing.T) {
+	var call []string
+	runner := func(_ context.Context, args ...string) (string, string, error) {
+		call = append([]string(nil), args...)
+		return "", "", nil
+	}
+	_, err := createServiceSnapshot(context.Background(), runner, snapshotCreateRequest{
+		Service: "devbox", Dataset: "flash/vms/devbox", Event: snapshotEventVMRuntimeUpgrade,
+		Now: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC), Checkpoint: recoveryModeDisk, Protected: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(call, " ")
+	for _, want := range []string{"com.yeetrun:event=vm-runtime-upgrade", "com.yeetrun:checkpoint=disk", "com.yeetrun:protected=true"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("snapshot command %q missing %q", joined, want)
+		}
+	}
+}
+
 func TestCreateServiceSnapshotCommandWithoutGenerationOmitsGenerationProperty(t *testing.T) {
 	var calls [][]string
 	runner := func(ctx context.Context, args ...string) (string, string, error) {

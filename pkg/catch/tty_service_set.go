@@ -812,6 +812,12 @@ func (s *Server) migrateServiceRootWithPlanWriter(plan serviceRootMigrationPlan,
 }
 
 func (s *Server) migrateServiceRootWithPlanWriterLocked(plan serviceRootMigrationPlan, mode serviceRootMigrationMode, w io.Writer) error {
+	return WithVMRuntimeTransactionLock(context.Background(), &s.cfg, func() error {
+		return s.migrateServiceRootWithPlanWriterRuntimeLocked(plan, mode, w)
+	})
+}
+
+func (s *Server) migrateServiceRootWithPlanWriterRuntimeLocked(plan serviceRootMigrationPlan, mode serviceRootMigrationMode, w io.Writer) error {
 	oldService, err := s.serviceForRootMigrationPlan(plan)
 	if err != nil {
 		return err
@@ -841,11 +847,18 @@ func (s *Server) executeServiceRootMigrationPlan(oldService *db.Service, plan se
 	if err := s.validateServiceRootMigrationPlanCurrent(plan); err != nil {
 		return err
 	}
-	if err := applyServiceRootMigrationRuntimeChanges(context.Background(), s.cfg, *oldService, *updatedService, w); err != nil {
+	if err := applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(
+		context.Background(), s.cfg, s.cfg, *oldService, *updatedService, w, s.runtimeReconcileDependencies().descriptor,
+	); err != nil {
 		return err
 	}
 	if err := s.updateMigratedServiceRoot(plan, updatedService); err != nil {
 		return err
+	}
+	if updatedService.VM != nil && updatedService.VM.Components != nil {
+		if err := s.runtimeReconcileDependencies().units.systemctl("daemon-reload"); err != nil {
+			return fmt.Errorf("reload systemd after VM service-root migration: %w", err)
+		}
 	}
 	return s.refreshServiceRootMigrationPrereqs(oldService, updatedService)
 }

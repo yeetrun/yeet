@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -126,6 +127,15 @@ type VMKernelFlags struct {
 	Restart bool
 }
 
+type VMRuntimeFlags struct {
+	Format  string
+	To      string
+	Channel string
+	Policy  string
+	Restart bool
+	DryRun  bool
+}
+
 type VMMemoryFlags struct {
 	Policy string
 	Format string
@@ -141,7 +151,6 @@ type SnapshotsInspectFlags struct {
 
 type SnapshotsCreateFlags struct {
 	Comment string
-	Full    bool
 }
 
 type SnapshotsRemoveFlags struct {
@@ -156,7 +165,6 @@ type SnapshotsRestoreFlags struct {
 	Stop       bool
 	Start      bool
 	Yes        bool
-	Mode       string
 	Generation string
 }
 
@@ -286,7 +294,6 @@ type snapshotsInspectFlagsParsed struct {
 
 type snapshotsCreateFlagsParsed struct {
 	Comment string `flag:"comment" help:"Human note stored with the recovery point"`
-	Full    bool   `flag:"full" help:"For VMs, also write Firecracker state and memory checkpoint files"`
 }
 
 type snapshotsRemoveFlagsParsed struct {
@@ -301,7 +308,6 @@ type snapshotsRestoreFlagsParsed struct {
 	Stop       bool   `flag:"stop" help:"Stop the service before restoring"`
 	Start      bool   `flag:"start" help:"Start the service after restoring"`
 	Yes        bool   `flag:"yes" short:"y" help:"Skip the restore confirmation prompt"`
-	Mode       string `flag:"mode" help:"Restore mode: disk, full"`
 	Generation string `flag:"generation" help:"Service generation source: current, snapshot"`
 }
 
@@ -406,6 +412,14 @@ type vmKernelFlagsParsed struct {
 	Restart bool `flag:"restart" help:"Restart the VM after syncing the selected kernel"`
 }
 
+type vmRuntimeFlagsParsed struct {
+	Format  string `flag:"format" help:"Output format: table, json, json-pretty"`
+	To      string `flag:"to" help:"Exact runtime ID or upstream version"`
+	Channel string `flag:"channel" help:"Runtime channel: stable, candidate"`
+	Restart bool   `flag:"restart" help:"Restart the VM to trial the selected runtime"`
+	DryRun  bool   `flag:"dry-run" help:"Show what would be pruned without removing anything"`
+}
+
 type vmMemoryFlagsParsed struct {
 	Policy string `flag:"policy" help:"Host VM memory policy: safe, balanced, aggressive"`
 	Format string `flag:"format" help:"Output format: table, json, json-pretty"`
@@ -505,6 +519,23 @@ type envShowFlagsParsed struct {
 
 const (
 	CommandEvents = "events"
+
+	VMRuntimeActionStatus    = "status"
+	VMRuntimeActionUpdate    = "update"
+	VMRuntimeActionImport    = "import"
+	VMRuntimeActionUpgrade   = "upgrade"
+	VMRuntimeActionRollback  = "rollback"
+	VMRuntimeActionPolicy    = "policy"
+	VMRuntimeActionProtect   = "protect"
+	VMRuntimeActionUnprotect = "unprotect"
+	VMRuntimeActionPrune     = "prune"
+
+	VMRuntimePolicyInherit        = "inherit"
+	VMRuntimePolicyManual         = "manual"
+	VMRuntimePolicyStageOnRestart = "stage-on-restart"
+
+	VMRuntimeChannelStable    = "stable"
+	VMRuntimeChannelCandidate = "candidate"
 )
 
 type ServiceArgs struct {
@@ -534,6 +565,10 @@ type DockerUpdateArgs struct {
 
 type VMImagesArgs struct {
 	Action string `pos:"0?" help:"Action (update)"`
+}
+
+type VMRuntimeArgs struct {
+	Action string `pos:"0" help:"Action (status, update, import, upgrade, rollback, policy, protect, unprotect, prune)"`
 }
 
 type ServiceName string
@@ -721,6 +756,26 @@ var remoteGroupInfos = map[string]GroupInfo{
 				},
 				FlagsSchema: vmKernelFlagsParsed{},
 			},
+			"runtime": {
+				Name:        "runtime",
+				Description: "Manage host Firecracker and jailer runtimes",
+				Usage:       "vm runtime status [<vm>] [--format=table|json|json-pretty] | vm runtime update | vm runtime import <name> <dir> | vm runtime upgrade <vm> [--to=VERSION] [--channel=stable|candidate] [--restart] | vm runtime rollback <vm> [--restart] | vm runtime policy defaults show | vm runtime policy defaults set manual|stage-on-restart [--channel=stable|candidate] | vm runtime policy <vm> inherit|manual|stage-on-restart [--channel=stable|candidate] | vm runtime protect <runtime-id> | vm runtime unprotect <runtime-id> | vm runtime prune [--dry-run]",
+				Examples: []string{
+					"yeet vm runtime status",
+					"yeet vm runtime status <vm> --format=json",
+					"yeet vm runtime update",
+					"yeet vm runtime import local-v1 ./dist/runtime",
+					"yeet vm runtime upgrade <vm>",
+					"yeet vm runtime upgrade <vm> --channel=candidate --restart",
+					"yeet vm runtime rollback <vm> --restart",
+					"yeet vm runtime policy defaults set stage-on-restart --channel=stable",
+					"yeet vm runtime policy <vm> inherit",
+					"yeet vm runtime protect firecracker-v1.16.1-yeet-v1",
+					"yeet vm runtime prune --dry-run",
+				},
+				ArgsSchema:  VMRuntimeArgs{},
+				FlagsSchema: vmRuntimeFlagsParsed{},
+			},
 		},
 	},
 	"env": {
@@ -838,11 +893,10 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"create": {
 				Name:        "create",
 				Description: "Create a manual recovery point",
-				Usage:       "snapshots create <svc> [--comment=TEXT] [--full]",
+				Usage:       "snapshots create <svc> [--comment=TEXT]",
 				Examples: []string{
 					"yeet snapshots create <svc>",
 					"yeet snapshots create <svc> --comment=\"before upgrade\"",
-					"yeet snapshots create <vm> --full --comment=\"checkpoint before risky change\"",
 				},
 				FlagsSchema: snapshotsCreateFlagsParsed{},
 			},
@@ -866,12 +920,11 @@ var remoteGroupInfos = map[string]GroupInfo{
 			},
 			"restore": {
 				Name:        "restore",
-				Description: "Restore disk state, service-root state, or full VM state from a recovery point",
-				Usage:       "snapshots restore <svc> <snapshot> [--stop] [--start] [--yes] [--mode=disk|full] [--generation=current|snapshot]",
+				Description: "Restore disk state or service-root state from a recovery point",
+				Usage:       "snapshots restore <svc> <snapshot> [--stop] [--start] [--yes] [--generation=current|snapshot]",
 				Examples: []string{
 					"yeet snapshots restore <svc> yeet-20260613T203100Z-vm-manual-g0 --yes",
 					"yeet snapshots restore <svc> yeet-20260613 --stop --yes",
-					"yeet snapshots restore <vm> yeet-20260613T203100Z-vm-manual --mode=full --stop --yes",
 				},
 				FlagsSchema: snapshotsRestoreFlagsParsed{},
 			},
@@ -916,6 +969,7 @@ var remoteGroupFlagSpecs = map[string]map[string]map[string]FlagSpec{
 		"memory":  flagSpecsFromStruct(vmMemoryFlagsParsed{}),
 		"images":  flagSpecsFromStruct(vmImagesFlagsParsed{}),
 		"kernel":  flagSpecsFromStruct(vmKernelFlagsParsed{}),
+		"runtime": flagSpecsFromStruct(vmRuntimeFlagsParsed{}),
 	},
 	"env": {
 		"show": flagSpecsFromStruct(envShowFlagsParsed{}),
@@ -1456,6 +1510,249 @@ func ParseVMKernel(args []string) (VMKernelFlags, []string, error) {
 	return flags, argsOut, nil
 }
 
+func ParseVMRuntime(args []string) (VMRuntimeFlags, []string, error) {
+	parseArgs, extraArgs := splitArgsAtDoubleDash(args)
+	parsed, err := parseFlags[vmRuntimeFlagsParsed](parseArgs)
+	if err != nil {
+		return VMRuntimeFlags{}, nil, err
+	}
+	flags, presence, err := normalizeVMRuntimeFlags(parseArgs, parsed.Flags)
+	if err != nil {
+		return VMRuntimeFlags{}, nil, err
+	}
+	positionals := append(parsed.Args, extraArgs...)
+	if len(positionals) == 0 {
+		return VMRuntimeFlags{}, nil, fmt.Errorf("vm runtime requires an action")
+	}
+	action := strings.TrimSpace(positionals[0])
+	positionals[0] = action
+	return validateVMRuntimeAction(flags, presence, positionals)
+}
+
+type vmRuntimeActionRule struct {
+	allowedFlags []string
+	positionals  int
+	errorText    string
+	requireAll   bool
+}
+
+var vmRuntimeActionRules = map[string]vmRuntimeActionRule{
+	VMRuntimeActionUpdate:    {positionals: 1, errorText: "vm runtime update takes no arguments"},
+	VMRuntimeActionImport:    {positionals: 3, errorText: "vm runtime import requires a name and directory", requireAll: true},
+	VMRuntimeActionUpgrade:   {allowedFlags: []string{"--to", "--channel", "--restart"}, positionals: 2, errorText: "vm runtime upgrade requires a VM", requireAll: true},
+	VMRuntimeActionRollback:  {allowedFlags: []string{"--restart"}, positionals: 2, errorText: "vm runtime rollback requires a VM", requireAll: true},
+	VMRuntimeActionProtect:   {positionals: 2, errorText: "vm runtime protect requires a runtime ID", requireAll: true},
+	VMRuntimeActionUnprotect: {positionals: 2, errorText: "vm runtime unprotect requires a runtime ID", requireAll: true},
+	VMRuntimeActionPrune:     {allowedFlags: []string{"--dry-run"}, positionals: 1, errorText: "vm runtime prune takes no arguments"},
+}
+
+func validateVMRuntimeAction(flags VMRuntimeFlags, presence vmRuntimeFlagPresence, positionals []string) (VMRuntimeFlags, []string, error) {
+	action := positionals[0]
+	if action == VMRuntimeActionStatus {
+		return validateVMRuntimeStatusAction(flags, presence, positionals)
+	}
+	if action == VMRuntimeActionPolicy {
+		return parseVMRuntimePolicy(flags, presence, positionals)
+	}
+	rule, ok := vmRuntimeActionRules[action]
+	if !ok {
+		return VMRuntimeFlags{}, nil, fmt.Errorf("unknown vm runtime action %q", action)
+	}
+	if err := requireVMRuntimeFlagSet(presence, rule.allowedFlags...); err != nil {
+		return VMRuntimeFlags{}, nil, err
+	}
+	valid := len(positionals) == rule.positionals
+	if rule.requireAll {
+		valid = vmRuntimePositionalsPresent(positionals, rule.positionals)
+	}
+	if !valid {
+		return VMRuntimeFlags{}, nil, errors.New(rule.errorText)
+	}
+	return flags, positionals, nil
+}
+
+func validateVMRuntimeStatusAction(flags VMRuntimeFlags, presence vmRuntimeFlagPresence, positionals []string) (VMRuntimeFlags, []string, error) {
+	if err := requireVMRuntimeFlagSet(presence, "--format"); err != nil {
+		return VMRuntimeFlags{}, nil, err
+	}
+	if len(positionals) > 2 || len(positionals) == 2 && strings.TrimSpace(positionals[1]) == "" {
+		return VMRuntimeFlags{}, nil, fmt.Errorf("usage: vm runtime status [<vm>] [--format=table|json|json-pretty]")
+	}
+	return flags, positionals, nil
+}
+
+// FindVMRuntimeAction returns the first positional runtime action while
+// honoring the runtime flag grammar. Callers use the original index when a
+// service bridge has removed the VM positional from an otherwise strict
+// command shape.
+func FindVMRuntimeAction(args []string) (action string, index int, ok bool) {
+	flags := remoteGroupFlagSpecs["vm"]["runtime"]
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			if i+1 < len(args) {
+				return strings.TrimSpace(args[i+1]), i + 1, true
+			}
+			return "", -1, false
+		}
+		advance, flag, valid := vmRuntimeActionFlagAdvance(args, i, flags)
+		if flag {
+			if !valid {
+				return "", -1, false
+			}
+			i += advance
+			continue
+		}
+		if strings.HasPrefix(args[i], "-") && args[i] != "-" {
+			return "", -1, false
+		}
+		return strings.TrimSpace(args[i]), i, true
+	}
+	return "", -1, false
+}
+
+func vmRuntimeActionFlagAdvance(args []string, index int, flags map[string]FlagSpec) (advance int, flag, valid bool) {
+	arg := args[index]
+	if !strings.HasPrefix(arg, "--") {
+		return 0, false, true
+	}
+	name, _, inline := strings.Cut(arg, "=")
+	spec, exists := flags[name]
+	if !exists {
+		return 0, true, false
+	}
+	if !spec.ConsumesValue || inline {
+		return 0, true, true
+	}
+	return 1, true, index+1 < len(args)
+}
+
+type vmRuntimeFlagPresence map[string]bool
+
+func normalizeVMRuntimeFlags(args []string, parsed vmRuntimeFlagsParsed) (VMRuntimeFlags, vmRuntimeFlagPresence, error) {
+	presence := make(vmRuntimeFlagPresence)
+	for _, name := range []string{"--format", "--to", "--channel", "--restart", "--dry-run"} {
+		presence[name] = hasNamedFlag(args, name)
+	}
+	formatRaw := strings.TrimSpace(parsed.Format)
+	if presence["--format"] && formatRaw == "" {
+		return VMRuntimeFlags{}, nil, fmt.Errorf("--format must not be empty")
+	}
+	format, err := normalizeOutputFormat("--format", formatRaw)
+	if err != nil {
+		return VMRuntimeFlags{}, nil, err
+	}
+	to := strings.TrimSpace(parsed.To)
+	if presence["--to"] && to == "" {
+		return VMRuntimeFlags{}, nil, fmt.Errorf("--to must not be empty")
+	}
+	channel, err := normalizeVMRuntimeChannel(parsed.Channel, presence["--channel"])
+	if err != nil {
+		return VMRuntimeFlags{}, nil, err
+	}
+	return VMRuntimeFlags{
+		Format:  format,
+		To:      to,
+		Channel: channel,
+		Restart: parsed.Restart,
+		DryRun:  parsed.DryRun,
+	}, presence, nil
+}
+
+func normalizeVMRuntimeChannel(value string, present bool) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if present && value == "" {
+		return "", fmt.Errorf("--channel must not be empty")
+	}
+	switch value {
+	case "", VMRuntimeChannelStable, VMRuntimeChannelCandidate:
+		return value, nil
+	default:
+		return "", fmt.Errorf("--channel must be stable or candidate")
+	}
+}
+
+func parseVMRuntimePolicy(flags VMRuntimeFlags, presence vmRuntimeFlagPresence, positionals []string) (VMRuntimeFlags, []string, error) {
+	if err := requireVMRuntimeFlagSet(presence, "--channel"); err != nil {
+		return VMRuntimeFlags{}, nil, err
+	}
+	if len(positionals) < 2 {
+		return VMRuntimeFlags{}, nil, fmt.Errorf("vm runtime policy requires defaults or a VM")
+	}
+	if positionals[1] == "defaults" {
+		return parseVMRuntimeDefaultPolicy(flags, presence, positionals)
+	}
+	return parseVMRuntimeServicePolicy(flags, positionals)
+}
+
+func parseVMRuntimeDefaultPolicy(flags VMRuntimeFlags, presence vmRuntimeFlagPresence, positionals []string) (VMRuntimeFlags, []string, error) {
+	if len(positionals) == 3 && positionals[2] == "show" {
+		if presence["--channel"] {
+			return VMRuntimeFlags{}, nil, fmt.Errorf("--channel is not valid for vm runtime policy defaults show")
+		}
+		return flags, positionals, nil
+	}
+	if len(positionals) != 4 || positionals[2] != "set" {
+		return VMRuntimeFlags{}, nil, fmt.Errorf("usage: vm runtime policy defaults show | vm runtime policy defaults set manual|stage-on-restart [--channel=stable|candidate]")
+	}
+	policy, err := normalizeVMRuntimePolicy(positionals[3], false)
+	if err != nil {
+		return VMRuntimeFlags{}, nil, err
+	}
+	flags.Policy = policy
+	return flags, positionals, nil
+}
+
+func parseVMRuntimeServicePolicy(flags VMRuntimeFlags, positionals []string) (VMRuntimeFlags, []string, error) {
+	if !vmRuntimePositionalsPresent(positionals, 3) {
+		return VMRuntimeFlags{}, nil, fmt.Errorf("vm runtime policy requires a VM and policy")
+	}
+	policy, err := normalizeVMRuntimePolicy(positionals[2], true)
+	if err != nil {
+		return VMRuntimeFlags{}, nil, err
+	}
+	flags.Policy = policy
+	return flags, positionals, nil
+}
+
+func normalizeVMRuntimePolicy(value string, allowInherit bool) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == VMRuntimePolicyManual || value == VMRuntimePolicyStageOnRestart || allowInherit && value == VMRuntimePolicyInherit {
+		return value, nil
+	}
+	if allowInherit {
+		return "", fmt.Errorf("policy must be inherit, manual, or stage-on-restart")
+	}
+	return "", fmt.Errorf("policy must be manual or stage-on-restart")
+}
+
+func vmRuntimePositionalsPresent(args []string, count int) bool {
+	if len(args) != count {
+		return false
+	}
+	for _, arg := range args {
+		if strings.TrimSpace(arg) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func requireVMRuntimeFlagSet(presence vmRuntimeFlagPresence, allowed ...string) error {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, name := range allowed {
+		allowedSet[name] = struct{}{}
+	}
+	for _, name := range []string{"--format", "--to", "--channel", "--restart", "--dry-run"} {
+		if !presence[name] {
+			continue
+		}
+		if _, ok := allowedSet[name]; !ok {
+			return fmt.Errorf("%s is not valid for this vm runtime action", name)
+		}
+	}
+	return nil
+}
+
 func rejectRemovedVMCPUFlag(args []string) error {
 	for _, arg := range args {
 		if arg == "--" {
@@ -1736,12 +2033,12 @@ func ParseSnapshotsInspect(args []string) (SnapshotsInspectFlags, []string, erro
 func ParseSnapshotsCreate(args []string) (SnapshotsCreateFlags, []string, error) {
 	parsed, err := parseFlags[snapshotsCreateFlagsParsed](args)
 	if err != nil {
-		return SnapshotsCreateFlags{}, nil, err
+		return SnapshotsCreateFlags{}, nil, normalizeRetiredSnapshotsFlagError(err, "--full")
 	}
 	if len(parsed.Args) != 1 {
 		return SnapshotsCreateFlags{}, nil, fmt.Errorf("snapshots create requires a service")
 	}
-	return SnapshotsCreateFlags{Comment: strings.TrimSpace(parsed.Flags.Comment), Full: parsed.Flags.Full}, parsed.Args, nil
+	return SnapshotsCreateFlags{Comment: strings.TrimSpace(parsed.Flags.Comment)}, parsed.Args, nil
 }
 
 func ParseSnapshotsRemove(args []string) (SnapshotsRemoveFlags, []string, error) {
@@ -1769,20 +2066,13 @@ func ParseSnapshotsClone(args []string) (SnapshotsCloneFlags, []string, error) {
 func ParseSnapshotsRestore(args []string) (SnapshotsRestoreFlags, []string, error) {
 	parsed, err := parseFlags[snapshotsRestoreFlagsParsed](args)
 	if err != nil {
-		return SnapshotsRestoreFlags{}, nil, err
+		return SnapshotsRestoreFlags{}, nil, normalizeRetiredSnapshotsFlagError(err, "--mode")
 	}
 	if len(parsed.Args) != 2 {
 		return SnapshotsRestoreFlags{}, nil, fmt.Errorf("snapshots restore requires service and snapshot")
 	}
-	if hasFlagWithoutValue(args, "--mode") {
-		return SnapshotsRestoreFlags{}, nil, fmt.Errorf("--mode must be disk or full")
-	}
 	if hasFlagWithoutValue(args, "--generation") {
 		return SnapshotsRestoreFlags{}, nil, fmt.Errorf("--generation must be current or snapshot")
-	}
-	mode, err := normalizeSnapshotsRestoreMode(parsed.Flags.Mode)
-	if err != nil {
-		return SnapshotsRestoreFlags{}, nil, err
 	}
 	generation, err := normalizeSnapshotsRestoreGeneration(parsed.Flags.Generation)
 	if err != nil {
@@ -1792,21 +2082,15 @@ func ParseSnapshotsRestore(args []string) (SnapshotsRestoreFlags, []string, erro
 		Stop:       parsed.Flags.Stop,
 		Start:      parsed.Flags.Start,
 		Yes:        parsed.Flags.Yes,
-		Mode:       mode,
 		Generation: generation,
 	}, parsed.Args, nil
 }
 
-func normalizeSnapshotsRestoreMode(value string) (string, error) {
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "", "disk":
-		return "disk", nil
-	case "full":
-		return "full", nil
-	default:
-		return "", fmt.Errorf("--mode must be disk or full")
+func normalizeRetiredSnapshotsFlagError(err error, retiredFlag string) error {
+	if err != nil && err.Error() == "unknown flag: "+retiredFlag {
+		return fmt.Errorf("unknown flag %s", retiredFlag)
 	}
+	return err
 }
 
 func normalizeSnapshotsRestoreGeneration(value string) (string, error) {

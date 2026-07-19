@@ -118,7 +118,7 @@ func (e *ttyExecer) runEditSession(session *editSession) (bool, error) {
 
 func (e *ttyExecer) applyEditSession(session *editSession) error {
 	if session.config {
-		return e.applyEditedConfig(session.tmpPath)
+		return e.applyEditedConfig(session.tmpPath, session.service.AsStruct())
 	}
 
 	switch session.serviceType {
@@ -222,7 +222,7 @@ func copyPathToWriter(w io.Writer, path string) (retErr error) {
 	return nil
 }
 
-func (e *ttyExecer) applyEditedConfig(tmpPath string) error {
+func (e *ttyExecer) applyEditedConfig(tmpPath string, baseline *db.Service) error {
 	bs, err := os.ReadFile(tmpPath)
 	if err != nil {
 		return fmt.Errorf("failed to read temp file: %w", err)
@@ -231,8 +231,14 @@ func (e *ttyExecer) applyEditedConfig(tmpPath string) error {
 	if err := json.Unmarshal(bs, &s2); err != nil {
 		return fmt.Errorf("failed to unmarshal temp file: %w", err)
 	}
-	_, _, err = e.s.cfg.DB.MutateService(e.sn, func(d *db.Data, s *db.Service) error {
-		*s = s2
+	if baseline != nil && baseline.VM != nil || s2.VM != nil {
+		return fmt.Errorf("VM service configuration is lifecycle-managed; use VM-specific commands")
+	}
+	_, _, err = e.s.cfg.DB.MutateService(e.sn, func(d *db.Data, current *db.Service) error {
+		if current.VM != nil {
+			return fmt.Errorf("service became a VM during config edit; retry with VM-specific commands")
+		}
+		*current = s2
 		return nil
 	})
 	if err != nil {

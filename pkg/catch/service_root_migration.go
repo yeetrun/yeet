@@ -215,6 +215,14 @@ func plannedServiceForRootMigration(cfg Config, plan serviceRootMigrationPlan, o
 	} else if err := relocateServiceRootArtifactRefs(updatedService.Artifacts, plan.OldRoot, plan.NewRoot); err != nil {
 		return nil, err
 	}
+	if updatedService.VM != nil {
+		mappings := hostStoragePathMappings{{
+			From: plan.OldRoot, To: plan.NewRoot, Reason: hostStoragePathReasonServiceRoot, Service: plan.ServiceName,
+		}}
+		if _, err := rewriteHostStorageVMPaths(plan.ServiceName, updatedService.VM, mappings, mappings); err != nil {
+			return nil, err
+		}
+	}
 	applyServiceRoot(cfg, plan.ServiceName, updatedService, plan.NewRoot, plan.NewRootZFS)
 	return updatedService, nil
 }
@@ -232,11 +240,11 @@ func updatedServiceForRootMigration(cfg Config, plan serviceRootMigrationPlan, o
 	return updatedService, nil
 }
 
-func applyServiceRootMigrationRuntimeChanges(ctx context.Context, cfg Config, before db.Service, after db.Service, w io.Writer) error {
-	return applyServiceRootMigrationRuntimeChangesForConfigs(ctx, cfg, cfg, before, after, w)
+func applyServiceRootMigrationRuntimeChangesForConfigs(ctx context.Context, beforeCfg Config, afterCfg Config, before db.Service, after db.Service, w io.Writer) error {
+	return applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(ctx, beforeCfg, afterCfg, before, after, w, defaultVMRuntimeDescriptorFileDeps())
 }
 
-func applyServiceRootMigrationRuntimeChangesForConfigs(ctx context.Context, beforeCfg Config, afterCfg Config, before db.Service, after db.Service, w io.Writer) error {
+func applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(ctx context.Context, beforeCfg Config, afterCfg Config, before db.Service, after db.Service, w io.Writer, descriptorDeps vmRuntimeDescriptorFileDeps) error {
 	_ = w
 	if err := ctx.Err(); err != nil {
 		return err
@@ -245,6 +253,10 @@ func applyServiceRootMigrationRuntimeChangesForConfigs(ctx context.Context, befo
 	afterServer := &Server{cfg: afterCfg}
 	oldRoot := serviceRootFromConfig(beforeCfg, before)
 	newRoot := serviceRootFromConfig(afterCfg, after)
+	if after.VM != nil && after.VM.Components != nil {
+		_, err := regenerateHostStorageVMSystemdUnitWithDeps(ctx, afterCfg, &after, afterServer.catchRunnerPath(), descriptorDeps)
+		return err
+	}
 	if err := downDockerComposeForRootMigration(beforeServer, &before, oldRoot); err != nil {
 		return err
 	}

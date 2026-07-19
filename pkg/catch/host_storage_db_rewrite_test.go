@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -162,6 +163,26 @@ func TestRewriteHostStorageDataPaths(t *testing.T) {
 						VsockSocketPath: "/root/data/services/devbox/run/vsock.sock",
 					},
 					PIDFile: "/root/data/services/devbox/run/firecracker.pid",
+					Components: &db.VMComponentsConfig{Runtime: db.VMRuntimeLifecycleConfig{
+						Configured: db.VMRuntimeArtifactConfig{
+							ID: "firecracker-v1.16.1-yeet-v1", ManifestSHA256: strings.Repeat("1", 64),
+							FirecrackerSHA256: strings.Repeat("2", 64), JailerSHA256: strings.Repeat("3", 64),
+							Firecracker: "/root/data/vm-runtimes/amd64/firecracker-v1.16.1-yeet-v1/manifest/firecracker",
+							Jailer:      "/root/data/vm-runtimes/amd64/firecracker-v1.16.1-yeet-v1/manifest/jailer", Source: "official",
+						},
+						Staged: &db.VMRuntimeArtifactConfig{
+							ID: "firecracker-v1.17.0-yeet-v1", ManifestSHA256: strings.Repeat("4", 64),
+							FirecrackerSHA256: strings.Repeat("5", 64), JailerSHA256: strings.Repeat("6", 64),
+							Firecracker: "/root/data/vm-runtimes/amd64/firecracker-v1.17.0-yeet-v1/manifest/firecracker",
+							Jailer:      "/root/data/vm-runtimes/amd64/firecracker-v1.17.0-yeet-v1/manifest/jailer", Source: "official",
+						},
+						Previous: &db.VMRuntimeArtifactConfig{
+							ID: "firecracker-v1.15.0-yeet-v1", ManifestSHA256: strings.Repeat("7", 64),
+							FirecrackerSHA256: strings.Repeat("8", 64), JailerSHA256: strings.Repeat("9", 64),
+							Firecracker: "/root/data/vm-runtimes/amd64/firecracker-v1.15.0-yeet-v1/manifest/firecracker",
+							Jailer:      "/root/data/vm-runtimes/amd64/firecracker-v1.15.0-yeet-v1/manifest/jailer", Source: "official",
+						},
+					}},
 				},
 			},
 		},
@@ -175,8 +196,8 @@ func TestRewriteHostStorageDataPaths(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteHostStorageDataPaths error: %v", err)
 	}
-	if result.Changed != 10 {
-		t.Fatalf("Changed = %d, want 10", result.Changed)
+	if result.Changed != 16 {
+		t.Fatalf("Changed = %d, want 16", result.Changed)
 	}
 
 	if got := data.Services["catch"].Artifacts[db.ArtifactBinary].Refs[db.Gen(7)]; got != "/flash/yeet/services/catch/bin/catch" {
@@ -217,11 +238,24 @@ func TestRewriteHostStorageDataPaths(t *testing.T) {
 	if got := vm.PIDFile; got != "/flash/yeet/services/devbox/run/firecracker.pid" {
 		t.Fatalf("VM PID file = %q", got)
 	}
+	for label, got := range map[string]string{
+		"configured firecracker": vm.Components.Runtime.Configured.Firecracker,
+		"configured jailer":      vm.Components.Runtime.Configured.Jailer,
+		"staged firecracker":     vm.Components.Runtime.Staged.Firecracker,
+		"staged jailer":          vm.Components.Runtime.Staged.Jailer,
+		"previous firecracker":   vm.Components.Runtime.Previous.Firecracker,
+		"previous jailer":        vm.Components.Runtime.Previous.Jailer,
+	} {
+		if !strings.HasPrefix(got, "/flash/yeet/data/vm-runtimes/") {
+			t.Fatalf("%s = %q, want rewritten runtime cache path", label, got)
+		}
+	}
 
 	systemdDir := t.TempDir()
 	oldSystemdDir := vmSystemdSystemDir
 	vmSystemdSystemDir = systemdDir
 	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
+	vm.Components = nil
 	cfg := Config{RootDir: "/flash/yeet/data", ServicesRoot: "/flash/yeet/services"}
 	units, err := regenerateHostStorageVMSystemdUnit(
 		context.Background(),
@@ -253,6 +287,71 @@ func TestRewriteHostStorageDataPaths(t *testing.T) {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("regenerated host-storage VM unit missing %q:\n%s", want, unit)
 		}
+	}
+}
+
+func TestHostStorageRegeneratesAdoptedVMRuntimeDescriptorAndUnitWithoutChangingSelection(t *testing.T) {
+	dataRoot := t.TempDir()
+	servicesRoot := filepath.Join(dataRoot, "services")
+	serviceRoot := filepath.Join(servicesRoot, "devbox")
+	if err := os.MkdirAll(serviceDataDirForRoot(serviceRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(serviceRunDirForRoot(serviceRoot), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	systemdDir := t.TempDir()
+	oldSystemdDir := vmSystemdSystemDir
+	vmSystemdSystemDir = systemdDir
+	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
+
+	runtime := validVMRuntimeDescriptor().Configured
+	runtime.Firecracker = filepath.Join(dataRoot, "vm-runtimes", "amd64", runtime.ID, runtime.ManifestSHA256, "firecracker")
+	runtime.Jailer = filepath.Join(dataRoot, "vm-runtimes", "amd64", runtime.ID, runtime.ManifestSHA256, "jailer")
+	service := &db.Service{
+		Name: "devbox", ServiceType: db.ServiceTypeVM, ServiceRoot: serviceRoot,
+		VM: &db.VMConfig{
+			Disk:       db.VMDiskConfig{Path: filepath.Join(serviceRoot, "data", "rootfs.raw")},
+			Components: &db.VMComponentsConfig{Runtime: db.VMRuntimeLifecycleConfig{Configured: runtime}},
+		},
+	}
+	deps := defaultVMRuntimeDescriptorFileDeps()
+	deps.uid = uint32(os.Geteuid())
+	deps.gid = uint32(os.Getegid())
+	before := *service.VM.Components.Runtime.Clone()
+	units, err := regenerateHostStorageVMSystemdUnitWithDeps(
+		context.Background(), Config{RootDir: dataRoot, ServicesRoot: servicesRoot}, service, "/usr/local/bin/catch", deps,
+	)
+	if err != nil {
+		t.Fatalf("regenerate adopted host-storage VM state: %v", err)
+	}
+	if len(units) != 1 || units[0] != vmSystemdUnitName(service.Name) {
+		t.Fatalf("units = %#v", units)
+	}
+	if !reflect.DeepEqual(before, service.VM.Components.Runtime) {
+		t.Fatalf("runtime selection changed\nbefore=%#v\nafter=%#v", before, service.VM.Components.Runtime)
+	}
+	descriptor, err := readVMRuntimeDescriptorWithOwner(
+		filepath.Join(serviceDataDirForRoot(serviceRoot), vmRuntimeDescriptorFileName), service.Name, deps.uid, deps.gid,
+	)
+	if err != nil || descriptor.Configured != runtime {
+		t.Fatalf("descriptor = %#v, %v", descriptor, err)
+	}
+	unitRaw, err := os.ReadFile(filepath.Join(systemdDir, vmSystemdUnitName(service.Name)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := string(unitRaw)
+	for _, want := range []string{
+		"--runtime-descriptor " + filepath.Join(serviceDataDirForRoot(serviceRoot), vmRuntimeDescriptorFileName),
+		"--runtime-running-marker " + filepath.Join(serviceRunDirForRoot(serviceRoot), vmRuntimeRunningMarkerFileName),
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("regenerated unit missing %q:\n%s", want, unit)
+		}
+	}
+	if strings.Contains(unit, "--firecracker") || strings.Contains(unit, "--jailer ") {
+		t.Fatalf("regenerated adopted VM unit retained explicit runtime paths:\n%s", unit)
 	}
 }
 

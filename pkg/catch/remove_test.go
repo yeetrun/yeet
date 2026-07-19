@@ -570,7 +570,7 @@ func TestConcreteISORemovalRecoversTypedByAllocationAfterPartialProvision(t *tes
 	}
 }
 
-func TestRemoveServiceCleansStaleVMJail(t *testing.T) {
+func TestRemoveServiceDoesNotDeriveStaleVMJailFromMonolithicImage(t *testing.T) {
 	server := newTestServer(t)
 	name := "vm-cleanup"
 	root := filepath.Join(server.cfg.ServicesRoot, name)
@@ -611,8 +611,151 @@ func TestRemoveServiceCleansStaleVMJail(t *testing.T) {
 	if report == nil || len(report.Warnings) != 0 {
 		t.Fatalf("warnings = %v, want none", report.Warnings)
 	}
-	if cleaned.ID != vmJailerID(name) || cleaned.JailRoot == "" || len(cleaned.SocketLinks) != 2 {
+	if cleaned.ID != "" {
+		t.Fatalf("legacy monolithic image unexpectedly produced jail cleanup plan = %#v", cleaned)
+	}
+}
+
+func TestRemoveServiceCleansAdoptedVMJailWithConfiguredRuntime(t *testing.T) {
+	server := newTestServer(t)
+	name := "vm-cleanup-adopted"
+	root := filepath.Join(server.cfg.ServicesRoot, name)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	runtime := validVMRuntimeDescriptor().Configured
+	runtime.Firecracker = filepath.Join(server.cfg.RootDir, "vm-runtimes", runtime.ID, "firecracker")
+	runtime.Jailer = filepath.Join(server.cfg.RootDir, "vm-runtimes", runtime.ID, "jailer")
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {
+			Name:        name,
+			ServiceType: db.ServiceTypeVM,
+			ServiceRoot: root,
+			VM: &db.VMConfig{
+				Runtime: vmRuntimeFirecracker,
+				Image:   db.VMImageConfig{},
+				Components: &db.VMComponentsConfig{
+					Runtime: db.VMRuntimeLifecycleConfig{Configured: runtime},
+				},
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	oldCleanup := vmRemovalJailCleanup
+	var cleaned vmJailPlan
+	vmRemovalJailCleanup = func(plan vmJailPlan) error {
+		cleaned = plan
+		return nil
+	}
+	t.Cleanup(func() { vmRemovalJailCleanup = oldCleanup })
+
+	report, err := server.RemoveService(name)
+	if err != nil {
+		t.Fatalf("RemoveService: %v", err)
+	}
+	if report == nil || len(report.Warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", report.Warnings)
+	}
+	if cleaned.ID != vmJailerID(name) || cleaned.JailRoot == "" {
 		t.Fatalf("cleaned jail plan = %#v", cleaned)
+	}
+	service := &db.Service{VM: &db.VMConfig{Components: &db.VMComponentsConfig{
+		Runtime: db.VMRuntimeLifecycleConfig{Configured: runtime},
+	}}}
+	if got, err := vmRemovalFirecrackerPath(service); err != nil || got != runtime.Firecracker {
+		t.Fatalf("vmRemovalFirecrackerPath = %q, %v; want configured runtime %q", got, err, runtime.Firecracker)
+	}
+}
+
+func TestCleanupVMJailUsesTrustedRunningRuntimeBeforeConfiguredRuntime(t *testing.T) {
+	server := newTestServer(t)
+	name := "vm-cleanup-running-runtime"
+	root := filepath.Join(server.cfg.ServicesRoot, name)
+	if err := os.MkdirAll(serviceRunDirForRoot(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configured := validVMRuntimeDescriptor().Configured
+	configured.Firecracker = filepath.Join(server.cfg.RootDir, "vm-runtimes", configured.ID, configured.ManifestSHA256, "firecracker")
+	configured.Jailer = filepath.Join(server.cfg.RootDir, "vm-runtimes", configured.ID, configured.ManifestSHA256, "jailer")
+	running := configured
+	running.ID = "firecracker-v1.15.0-yeet-v1"
+	running.ManifestSHA256 = strings.Repeat("4", 64)
+	running.FirecrackerSHA256 = strings.Repeat("5", 64)
+	running.JailerSHA256 = strings.Repeat("6", 64)
+	running.Firecracker = filepath.Join(server.cfg.RootDir, "vm-runtimes", running.ID, running.ManifestSHA256, "firecracker")
+	running.Jailer = filepath.Join(server.cfg.RootDir, "vm-runtimes", running.ID, running.ManifestSHA256, "jailer")
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{name: {
+		Name: name, ServiceType: db.ServiceTypeVM, ServiceRoot: root,
+		VM: &db.VMConfig{Components: &db.VMComponentsConfig{Runtime: db.VMRuntimeLifecycleConfig{
+			Configured: configured, Previous: vmRuntimeArtifactPtr(running),
+		}}},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	writeVMRuntimeStatusMarker(t, server, name, running, 4101, 4102)
+
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := vmRemovalFirecrackerPathForRoot(
+		dv.AsStruct().Services[name], root, uint32(os.Geteuid()), uint32(os.Getegid()),
+	)
+	if err != nil || got != running.Firecracker {
+		t.Fatalf("removal firecracker = %q, %v; want running runtime %q", got, err, running.Firecracker)
+	}
+}
+
+func TestCleanupVMJailDoesNotDeriveRuntimeFromMonolithicRootFS(t *testing.T) {
+	service := &db.Service{VM: &db.VMConfig{Image: db.VMImageConfig{RootFS: "/var/lib/yeet/vm-images/ubuntu-v15/rootfs.ext4"}}}
+	if got, err := vmRemovalFirecrackerPath(service); err != nil || got != "" {
+		t.Fatalf("vmRemovalFirecrackerPath = %q, %v; want no monolithic image-derived runtime", got, err)
+	}
+}
+
+func TestRemoveServiceSkipsAdoptedVMJailWithInvalidConfiguredRuntime(t *testing.T) {
+	server := newTestServer(t)
+	name := "vm-cleanup-invalid-runtime"
+	root := filepath.Join(server.cfg.ServicesRoot, name)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		name: {
+			Name:        name,
+			ServiceType: db.ServiceTypeVM,
+			ServiceRoot: root,
+			VM: &db.VMConfig{
+				Runtime: vmRuntimeFirecracker,
+				Image:   db.VMImageConfig{RootFS: "/legacy/rootfs.ext4"},
+				Components: &db.VMComponentsConfig{
+					Runtime: db.VMRuntimeLifecycleConfig{Configured: db.VMRuntimeArtifactConfig{}},
+				},
+			},
+		},
+	}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	oldCleanup := vmRemovalJailCleanup
+	cleanupCalls := 0
+	vmRemovalJailCleanup = func(vmJailPlan) error {
+		cleanupCalls++
+		return nil
+	}
+	t.Cleanup(func() { vmRemovalJailCleanup = oldCleanup })
+
+	report, err := server.RemoveService(name)
+	if err != nil {
+		t.Fatalf("RemoveService: %v", err)
+	}
+	if cleanupCalls != 0 {
+		t.Fatalf("cleanup calls = %d, want zero for invalid adopted runtime", cleanupCalls)
+	}
+	if report == nil || len(report.Warnings) == 0 || !strings.Contains(report.Warnings[0].Error(), "failed to resolve VM runtime") {
+		t.Fatalf("warnings = %v, want invalid configured runtime warning", report.Warnings)
 	}
 }
 

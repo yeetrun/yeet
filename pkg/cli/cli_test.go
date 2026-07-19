@@ -33,6 +33,7 @@ func FuzzParseRemoteArgs(f *testing.F) {
 		_, _, _ = ParseLogs(args)
 		_, _, _ = ParseStatus(args)
 		_, _, _ = ParseInfo(args)
+		_, _, _ = ParseVMRuntime(args)
 	})
 }
 
@@ -633,11 +634,11 @@ func TestParseSnapshotsLifecycleCommands(t *testing.T) {
 		t.Fatalf("inspect flags=%#v args=%#v", inspectFlags, inspectArgs)
 	}
 
-	createFlags, createArgs, err := ParseSnapshotsCreate([]string{"devbox", "--comment", " before upgrade ", "--full"})
+	createFlags, createArgs, err := ParseSnapshotsCreate([]string{"devbox", "--comment", " before upgrade "})
 	if err != nil {
 		t.Fatalf("ParseSnapshotsCreate: %v", err)
 	}
-	if createFlags.Comment != "before upgrade" || !createFlags.Full || len(createArgs) != 1 || createArgs[0] != "devbox" {
+	if createFlags.Comment != "before upgrade" || len(createArgs) != 1 || createArgs[0] != "devbox" {
 		t.Fatalf("create flags=%#v args=%#v", createFlags, createArgs)
 	}
 
@@ -659,11 +660,11 @@ func TestParseSnapshotsCloneAndRestore(t *testing.T) {
 		t.Fatalf("clone flags=%#v args=%#v", cloneFlags, cloneArgs)
 	}
 
-	restoreFlags, restoreArgs, err := ParseSnapshotsRestore([]string{"vm-a", "yeet-abc", "--stop", "--start", "--yes", "--mode=full", "--generation=snapshot"})
+	restoreFlags, restoreArgs, err := ParseSnapshotsRestore([]string{"vm-a", "yeet-abc", "--stop", "--start", "--yes", "--generation=snapshot"})
 	if err != nil {
 		t.Fatalf("ParseSnapshotsRestore: %v", err)
 	}
-	if !restoreFlags.Stop || !restoreFlags.Start || !restoreFlags.Yes || restoreFlags.Mode != "full" || restoreFlags.Generation != "snapshot" ||
+	if !restoreFlags.Stop || !restoreFlags.Start || !restoreFlags.Yes || restoreFlags.Generation != "snapshot" ||
 		!reflect.DeepEqual(restoreArgs, []string{"vm-a", "yeet-abc"}) {
 		t.Fatalf("restore flags=%#v args=%#v", restoreFlags, restoreArgs)
 	}
@@ -672,30 +673,31 @@ func TestParseSnapshotsCloneAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseSnapshotsRestore defaults: %v", err)
 	}
-	if defaultFlags.Mode != "disk" || defaultFlags.Generation != "current" || !reflect.DeepEqual(defaultArgs, []string{"vm-a", "yeet-abc"}) {
+	if defaultFlags.Generation != "current" || !reflect.DeepEqual(defaultArgs, []string{"vm-a", "yeet-abc"}) {
 		t.Fatalf("restore defaults flags=%#v args=%#v", defaultFlags, defaultArgs)
 	}
 }
 
-func TestSnapshotsRestoreHelpAdvertisesFullRestoreAsSupported(t *testing.T) {
+func TestSnapshotsCommandInfoUsesDiskOnlySyntax(t *testing.T) {
+	create, ok := RemoteGroupInfos()["snapshots"].Commands["create"]
+	if !ok {
+		t.Fatal("snapshots create command missing")
+	}
+	if got, want := create.Usage, "snapshots create <svc> [--comment=TEXT]"; got != want {
+		t.Fatalf("snapshots create usage = %q, want %q", got, want)
+	}
+
 	restore, ok := RemoteGroupInfos()["snapshots"].Commands["restore"]
 	if !ok {
 		t.Fatal("snapshots restore command missing")
 	}
-	if !strings.Contains(restore.Usage, "[--mode=disk|full]") {
-		t.Fatalf("snapshots restore usage %q should present full restore mode", restore.Usage)
+	if got, want := restore.Usage, "snapshots restore <svc> <snapshot> [--stop] [--start] [--yes] [--generation=current|snapshot]"; got != want {
+		t.Fatalf("snapshots restore usage = %q, want %q", got, want)
 	}
-	if strings.Contains(restore.Description, "validation-only") || strings.Contains(restore.Description, "refused") {
-		t.Fatalf("snapshots restore description %q should not mark full restore as refused", restore.Description)
-	}
-	foundFullExample := false
-	for _, example := range restore.Examples {
-		if strings.Contains(example, "--mode=full") {
-			foundFullExample = true
+	for _, example := range append(append([]string{}, create.Examples...), restore.Examples...) {
+		if strings.Contains(example, "--full") || strings.Contains(example, "--mode") {
+			t.Fatalf("snapshot example %q includes retired memory checkpoint syntax", example)
 		}
-	}
-	if !foundFullExample {
-		t.Fatalf("snapshots restore examples %#v should include --mode=full", restore.Examples)
 	}
 }
 
@@ -711,6 +713,15 @@ func TestParseSnapshotsLifecycleRejectsBadInput(t *testing.T) {
 	}
 	if _, _, err := ParseSnapshotsRemove([]string{"svc-a"}); err == nil || !strings.Contains(err.Error(), "snapshots rm requires service and snapshot") {
 		t.Fatalf("ParseSnapshotsRemove error = %v, want arity error", err)
+	}
+}
+
+func TestSnapshotsCommandsRejectRetiredMemoryCheckpointFlags(t *testing.T) {
+	if _, _, err := ParseSnapshotsCreate([]string{"vm-a", "--full"}); err == nil || !strings.Contains(err.Error(), "unknown flag --full") {
+		t.Fatalf("ParseSnapshotsCreate error = %v", err)
+	}
+	if _, _, err := ParseSnapshotsRestore([]string{"vm-a", "yeet-a", "--mode=full"}); err == nil || !strings.Contains(err.Error(), "unknown flag --mode") {
+		t.Fatalf("ParseSnapshotsRestore error = %v", err)
 	}
 }
 
@@ -749,15 +760,6 @@ func TestParseSnapshotsCloneAndRestoreRejectBadInput(t *testing.T) {
 			wantErr: "snapshots restore requires service and snapshot",
 		},
 		{
-			name: "restore invalid mode",
-			parse: func(args []string) error {
-				_, _, err := ParseSnapshotsRestore(args)
-				return err
-			},
-			args:    []string{"vm-a", "yeet-abc", "--mode=bogus"},
-			wantErr: "--mode must be disk or full",
-		},
-		{
 			name: "restore invalid generation",
 			parse: func(args []string) error {
 				_, _, err := ParseSnapshotsRestore(args)
@@ -765,24 +767,6 @@ func TestParseSnapshotsCloneAndRestoreRejectBadInput(t *testing.T) {
 			},
 			args:    []string{"vm-a", "yeet-abc", "--generation=bogus"},
 			wantErr: "--generation must be current or snapshot",
-		},
-		{
-			name: "restore bare mode",
-			parse: func(args []string) error {
-				_, _, err := ParseSnapshotsRestore(args)
-				return err
-			},
-			args:    []string{"svc", "snap", "--mode"},
-			wantErr: "--mode must be disk or full",
-		},
-		{
-			name: "restore inline empty mode",
-			parse: func(args []string) error {
-				_, _, err := ParseSnapshotsRestore(args)
-				return err
-			},
-			args:    []string{"svc", "snap", "--mode="},
-			wantErr: "--mode must be disk or full",
 		},
 		{
 			name: "restore bare generation",
@@ -1700,8 +1684,8 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if !RemoteGroupFlagSpecs()["snapshots"]["create"]["--comment"].ConsumesValue {
 		t.Fatal("snapshots create --comment should consume a value")
 	}
-	if RemoteGroupFlagSpecs()["snapshots"]["create"]["--full"].ConsumesValue {
-		t.Fatal("snapshots create --full should not consume a value")
+	if _, ok := RemoteGroupFlagSpecs()["snapshots"]["create"]["--full"]; ok {
+		t.Fatal("snapshots create --full should not be registered")
 	}
 	if RemoteGroupFlagSpecs()["snapshots"]["rm"]["--yes"].ConsumesValue {
 		t.Fatal("snapshots rm --yes should not consume a value")
@@ -1718,8 +1702,8 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if RemoteGroupFlagSpecs()["snapshots"]["restore"]["--yes"].ConsumesValue {
 		t.Fatal("snapshots restore --yes should not consume a value")
 	}
-	if !RemoteGroupFlagSpecs()["snapshots"]["restore"]["--mode"].ConsumesValue {
-		t.Fatal("snapshots restore --mode should consume a value")
+	if _, ok := RemoteGroupFlagSpecs()["snapshots"]["restore"]["--mode"]; ok {
+		t.Fatal("snapshots restore --mode should not be registered")
 	}
 	if !RemoteGroupFlagSpecs()["snapshots"]["restore"]["--generation"].ConsumesValue {
 		t.Fatal("snapshots restore --generation should consume a value")
@@ -1893,6 +1877,134 @@ func TestParseVMKernelSync(t *testing.T) {
 	}
 	if !flags.Restart {
 		t.Fatal("Restart = false, want true")
+	}
+}
+
+func TestParseVMRuntime(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantFlags VMRuntimeFlags
+		wantArgs  []string
+	}{
+		{name: "host status", args: []string{"status"}, wantFlags: VMRuntimeFlags{Format: "table"}, wantArgs: []string{"status"}},
+		{name: "VM status", args: []string{"status", "devbox", "--format=json"}, wantFlags: VMRuntimeFlags{Format: "json"}, wantArgs: []string{"status", "devbox"}},
+		{name: "update", args: []string{"update"}, wantFlags: VMRuntimeFlags{Format: "table"}, wantArgs: []string{"update"}},
+		{name: "import", args: []string{"import", "local-v1", "./dist/runtime"}, wantFlags: VMRuntimeFlags{Format: "table"}, wantArgs: []string{"import", "local-v1", "./dist/runtime"}},
+		{name: "import flag-like directory after terminator", args: []string{"import", "local-v1", "--", "--restart"}, wantFlags: VMRuntimeFlags{Format: "table"}, wantArgs: []string{"import", "local-v1", "--restart"}},
+		{name: "upgrade", args: []string{"--channel", "CANDIDATE", "upgrade", "devbox", "--to=1.16.1", "--restart"}, wantFlags: VMRuntimeFlags{Format: "table", To: "1.16.1", Channel: "candidate", Restart: true}, wantArgs: []string{"upgrade", "devbox"}},
+		{name: "rollback", args: []string{"rollback", "devbox", "--restart"}, wantFlags: VMRuntimeFlags{Format: "table", Restart: true}, wantArgs: []string{"rollback", "devbox"}},
+		{name: "policy defaults show", args: []string{"policy", "defaults", "show"}, wantFlags: VMRuntimeFlags{Format: "table"}, wantArgs: []string{"policy", "defaults", "show"}},
+		{name: "policy defaults set", args: []string{"policy", "defaults", "set", "STAGE-ON-RESTART", "--channel=stable"}, wantFlags: VMRuntimeFlags{Format: "table", Channel: "stable", Policy: "stage-on-restart"}, wantArgs: []string{"policy", "defaults", "set", "STAGE-ON-RESTART"}},
+		{name: "VM policy", args: []string{"policy", "devbox", "INHERIT", "--channel=candidate"}, wantFlags: VMRuntimeFlags{Format: "table", Channel: "candidate", Policy: "inherit"}, wantArgs: []string{"policy", "devbox", "INHERIT"}},
+		{name: "protect", args: []string{"protect", "firecracker-v1.16.1-yeet-v1"}, wantFlags: VMRuntimeFlags{Format: "table"}, wantArgs: []string{"protect", "firecracker-v1.16.1-yeet-v1"}},
+		{name: "unprotect", args: []string{"unprotect", "firecracker-v1.16.1-yeet-v1"}, wantFlags: VMRuntimeFlags{Format: "table"}, wantArgs: []string{"unprotect", "firecracker-v1.16.1-yeet-v1"}},
+		{name: "prune", args: []string{"prune", "--dry-run"}, wantFlags: VMRuntimeFlags{Format: "table", DryRun: true}, wantArgs: []string{"prune"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags, args, err := ParseVMRuntime(tt.args)
+			if err != nil {
+				t.Fatalf("ParseVMRuntime: %v", err)
+			}
+			if flags != tt.wantFlags {
+				t.Fatalf("flags = %#v, want %#v", flags, tt.wantFlags)
+			}
+			if !reflect.DeepEqual(args, tt.wantArgs) {
+				t.Fatalf("args = %#v, want %#v", args, tt.wantArgs)
+			}
+		})
+	}
+}
+
+func TestParseVMRuntimeRejectsInvalidCommands(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing action", want: "requires an action"},
+		{name: "unknown action", args: []string{"launch"}, want: "unknown vm runtime action"},
+		{name: "status empty VM", args: []string{"status", " "}, want: "usage: vm runtime status"},
+		{name: "status too many VMs", args: []string{"status", "one", "two"}, want: "usage: vm runtime status"},
+		{name: "status restart", args: []string{"status", "--restart"}, want: "--restart is not valid"},
+		{name: "update argument", args: []string{"update", "extra"}, want: "takes no arguments"},
+		{name: "update restart", args: []string{"update", "--restart"}, want: "--restart is not valid"},
+		{name: "import missing name and directory", args: []string{"import"}, want: "requires a name and directory"},
+		{name: "import missing directory", args: []string{"import", "local-v1"}, want: "requires a name and directory"},
+		{name: "import empty name", args: []string{"import", " ", "./runtime"}, want: "requires a name and directory"},
+		{name: "import restart", args: []string{"import", "local-v1", "./runtime", "--restart"}, want: "--restart is not valid"},
+		{name: "upgrade missing VM", args: []string{"upgrade"}, want: "requires a VM"},
+		{name: "upgrade empty to", args: []string{"upgrade", "devbox", "--to="}, want: "--to must not be empty"},
+		{name: "upgrade invalid channel", args: []string{"upgrade", "devbox", "--channel=nightly"}, want: "--channel must be stable or candidate"},
+		{name: "rollback missing VM", args: []string{"rollback"}, want: "requires a VM"},
+		{name: "rollback channel", args: []string{"rollback", "devbox", "--channel=stable"}, want: "--channel is not valid"},
+		{name: "policy missing target", args: []string{"policy"}, want: "requires defaults or a VM"},
+		{name: "policy defaults missing action", args: []string{"policy", "defaults"}, want: "usage: vm runtime policy defaults"},
+		{name: "policy defaults show channel", args: []string{"policy", "defaults", "show", "--channel=stable"}, want: "--channel is not valid"},
+		{name: "policy defaults inherit", args: []string{"policy", "defaults", "set", "inherit"}, want: "policy must be manual or stage-on-restart"},
+		{name: "policy missing policy", args: []string{"policy", "devbox"}, want: "requires a VM and policy"},
+		{name: "policy invalid", args: []string{"policy", "devbox", "automatic"}, want: "policy must be inherit, manual, or stage-on-restart"},
+		{name: "protect missing ID", args: []string{"protect"}, want: "requires a runtime ID"},
+		{name: "unprotect extra ID", args: []string{"unprotect", "one", "two"}, want: "requires a runtime ID"},
+		{name: "prune argument", args: []string{"prune", "extra"}, want: "takes no arguments"},
+		{name: "prune restart", args: []string{"prune", "--restart"}, want: "--restart is not valid"},
+		{name: "empty format", args: []string{"status", "--format="}, want: "--format must not be empty"},
+		{name: "bad format", args: []string{"status", "--format=yaml"}, want: "--format must be table, json, or json-pretty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := ParseVMRuntime(tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("ParseVMRuntime(%#v) error = %v, want %q", tt.args, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRemoteRegistryIncludesVMRuntime(t *testing.T) {
+	group := RemoteGroupInfos()["vm"]
+	runtimeCommand, ok := group.Commands["runtime"]
+	if !ok {
+		t.Fatal("vm runtime command missing")
+	}
+	if runtimeCommand.ArgsSchema == nil || runtimeCommand.FlagsSchema == nil {
+		t.Fatalf("vm runtime schemas = args %#v flags %#v, want both", runtimeCommand.ArgsSchema, runtimeCommand.FlagsSchema)
+	}
+	flags := RemoteGroupFlagSpecs()["vm"]["runtime"]
+	for _, name := range []string{"--format", "--to", "--channel"} {
+		if !flags[name].ConsumesValue {
+			t.Fatalf("vm runtime %s should consume a value", name)
+		}
+	}
+	for _, name := range []string{"--restart", "--dry-run"} {
+		if flags[name].ConsumesValue {
+			t.Fatalf("vm runtime %s should not consume a value", name)
+		}
+	}
+	if !containsString(runtimeCommand.Examples, "yeet vm runtime upgrade <vm> --channel=candidate --restart") {
+		t.Fatalf("vm runtime examples = %#v, want candidate restart example", runtimeCommand.Examples)
+	}
+}
+
+func TestFindVMRuntimeAction(t *testing.T) {
+	for _, tt := range []struct {
+		args      []string
+		want      string
+		wantIndex int
+		wantOK    bool
+	}{
+		{args: []string{"status"}, want: "status", wantIndex: 0, wantOK: true},
+		{args: []string{"--format", "json", "status"}, want: "status", wantIndex: 2, wantOK: true},
+		{args: []string{"--channel=candidate", "upgrade"}, want: "upgrade", wantIndex: 1, wantOK: true},
+		{args: []string{"--", "import", "name", "dir"}, want: "import", wantIndex: 1, wantOK: true},
+		{args: []string{"--unknown", "status"}, wantIndex: -1},
+		{args: []string{"--format"}, wantIndex: -1},
+	} {
+		got, index, ok := FindVMRuntimeAction(tt.args)
+		if got != tt.want || index != tt.wantIndex || ok != tt.wantOK {
+			t.Fatalf("FindVMRuntimeAction(%#v) = %q, %d, %v; want %q, %d, %v", tt.args, got, index, ok, tt.want, tt.wantIndex, tt.wantOK)
+		}
 	}
 }
 

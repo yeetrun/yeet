@@ -127,11 +127,11 @@ func (e *ttyExecer) provisionVM(flags cli.RunFlags, payload string) (retErr erro
 	}
 	ui.DoneStep(vmProvisionPlanDetail(plan))
 	doneFinish := e.traceBlock("vm finish")
-	committed, _, err := e.finishVMProvision(inputs.Context, plan, payload, flags.Restart, snapshotPolicyFlags, ui)
+	committed, _, readinessIncomplete, err := e.finishVMProvision(inputs.Context, plan, payload, flags.Restart, snapshotPolicyFlags, ui)
 	rollbackNewService = vmProvisionRollbackPendingAfterFinish(rollbackNewService, committed)
 	doneFinish()
 	if err != nil {
-		printVMProvisionFailureRecovery(ui, plan.Service, committed, flags.Restart)
+		printVMProvisionFailureRecovery(ui, plan.Service, committed, readinessIncomplete)
 		return err
 	}
 	rollbackNewService = false
@@ -191,8 +191,8 @@ func acquireVMProvisionLock(ctx context.Context, rootDir, service string) (func(
 	), nil
 }
 
-func printVMProvisionFailureRecovery(ui *vmProvisionUI, service string, committed, restart bool) {
-	if committed && restart {
+func printVMProvisionFailureRecovery(ui *vmProvisionUI, service string, committed, readinessIncomplete bool) {
+	if committed && readinessIncomplete {
 		ui.PrintReadinessFailure(service)
 	}
 }
@@ -738,7 +738,7 @@ func cachedVMImagePaths(dir string, manifest vmImageManifest) vmImagePaths {
 	return paths
 }
 
-func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan, payload string, restart bool, snapshotPolicyFlags *cli.ServiceSetFlags, ui *vmProvisionUI) (committed bool, ready vmGuestReadyReport, retErr error) {
+func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan, payload string, restart bool, snapshotPolicyFlags *cli.ServiceSetFlags, ui *vmProvisionUI) (committed bool, ready vmGuestReadyReport, readinessIncomplete bool, retErr error) {
 	networkTouched := false
 	systemdTouched := false
 	defer func() {
@@ -750,37 +750,46 @@ func (e *ttyExecer) finishVMProvision(ctx context.Context, plan vmProvisionPlan,
 	networkTouched = touched
 	if err != nil {
 		doneArtifacts()
-		return committed, ready, err
+		return committed, ready, false, err
 	}
 	doneArtifacts()
 	doneInstall := e.traceBlock("vm install systemd")
 	systemdTouched, err = e.installVMSystemdUnit(plan, ui)
 	if err != nil {
 		doneInstall()
-		return committed, ready, err
+		return committed, ready, false, err
 	}
 	doneInstall()
 	ui.StartStep(vmRunStepCommit)
 	doneCommit := e.traceBlock("vm commit")
+	var commitWarning error
 	if err := e.commitVMProvisionForFinish(plan, payload, snapshotPolicyFlags); err != nil {
 		doneCommit()
 		ui.FailStep(err.Error())
-		return committed, ready, err
+		if !dbMutationCommitted(err) {
+			return committed, ready, false, err
+		}
+		committed = true
+		commitWarning = err
+	} else {
+		doneCommit()
+		ui.DoneStep("")
+		committed = true
 	}
-	doneCommit()
-	ui.DoneStep("")
-	committed = true
 	if restart {
 		doneStart := e.traceBlock("vm start")
 		ready, err = e.startVMAfterProvision(ctx, plan, ui)
 		if err != nil {
 			doneStart()
-			return committed, ready, err
+			return committed, ready, true, errors.Join(commitWarning, err)
 		}
 		doneStart()
 	}
+	if commitWarning != nil {
+		return committed, ready, false, commitWarning
+	}
 	ui.PrintSuccess(plan, payload, ready, restart)
-	return committed, ready, nil
+	return committed, ready, false, nil
 }
 
 func (e *ttyExecer) rollbackFailedVMProvisionFinish(ctx context.Context, retErr error, plan vmProvisionPlan, committed, systemdTouched, networkTouched bool) error {

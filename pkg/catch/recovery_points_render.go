@@ -82,12 +82,6 @@ func renderRecoveryPointInspectText(w io.Writer, point recoveryPoint) error {
 	if strings.TrimSpace(point.Comment) != "" {
 		lines = append(lines, inspectLine{"Comment", strings.TrimSpace(point.Comment)})
 	}
-	if strings.TrimSpace(point.StatePath) != "" {
-		lines = append(lines,
-			inspectLine{"Firecracker state", point.StatePath},
-			inspectLine{"Firecracker memory", point.MemoryPath},
-		)
-	}
 	lines = append(lines, inspectLine{"Actions", strings.Join(point.Actions, ", ")})
 
 	for _, line := range lines {
