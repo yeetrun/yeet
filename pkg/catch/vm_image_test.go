@@ -125,6 +125,128 @@ func TestVMImageCacheDownloadsOptionalInitrdArtifact(t *testing.T) {
 	if got, err := os.ReadFile(image.InitrdPath); err != nil || string(got) != string(initrd) {
 		t.Fatalf("initrd content = %q, %v; want %q", got, err, initrd)
 	}
+	assertVMImageArtifactMode(t, image.KernelPath, 0o644)
+	assertVMImageArtifactMode(t, image.InitrdPath, 0o644)
+}
+
+func TestCachedVMImageAssetRepairsRuntimeArtifactModes(t *testing.T) {
+	root := t.TempDir()
+	contents := vmImageTestContents()
+	contents["initrd.img"] = []byte("initrd")
+	contents["jailer"] = []byte("jailer")
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
+	manifest.Initrd = "initrd.img"
+	manifest.Jailer = "jailer"
+	manifest.Checksums[manifest.Initrd] = testSHA256Hex(contents[manifest.Initrd])
+	manifest.Checksums[manifest.Jailer] = testSHA256Hex(contents[manifest.Jailer])
+	dir := writeCachedVMImageManifest(t, root, manifest)
+	for name, content := range contents {
+		if err := os.WriteFile(filepath.Join(dir, name), content, 0o600); err != nil {
+			t.Fatalf("write cached artifact %s: %v", name, err)
+		}
+	}
+
+	oldPrepareRootFS := prepareVMRootFSFunc
+	prepareVMRootFSFunc = func(_ context.Context, source string) (string, error) {
+		return source, nil
+	}
+	t.Cleanup(func() { prepareVMRootFSFunc = oldPrepareRootFS })
+
+	asset, err := cachedVMImageAsset(context.Background(), vmImageCache{Root: root}, manifest.Version)
+	if err != nil {
+		t.Fatalf("cachedVMImageAsset: %v", err)
+	}
+	assertVMImageArtifactMode(t, asset.Paths.KernelPath, 0o644)
+	assertVMImageArtifactMode(t, asset.Paths.InitrdPath, 0o644)
+	assertVMImageArtifactMode(t, asset.Paths.FirecrackerPath, 0o755)
+	assertVMImageArtifactMode(t, asset.Paths.JailerPath, 0o755)
+	assertVMImageArtifactMode(t, asset.Paths.RootFSPath, 0o600)
+	assertVMImageArtifactMode(t, asset.Paths.Manifest, 0o600)
+}
+
+func TestNormalizeVMImageRuntimePermissionsRejectsSymlinks(t *testing.T) {
+	tests := []struct {
+		name string
+		path func(vmImagePaths) string
+	}{
+		{name: "kernel", path: func(paths vmImagePaths) string { return paths.KernelPath }},
+		{name: "initrd", path: func(paths vmImagePaths) string { return paths.InitrdPath }},
+		{name: "firecracker", path: func(paths vmImagePaths) string { return paths.FirecrackerPath }},
+		{name: "jailer", path: func(paths vmImagePaths) string { return paths.JailerPath }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := writeVMImageRuntimePermissionFixture(t)
+			target := filepath.Join(t.TempDir(), "host-target")
+			if err := os.WriteFile(target, []byte("host"), 0o600); err != nil {
+				t.Fatalf("write host target: %v", err)
+			}
+			path := tt.path(paths)
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("remove VM image artifact: %v", err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatalf("symlink VM image artifact: %v", err)
+			}
+
+			err := normalizeVMImageRuntimePermissions(paths)
+			if err == nil || !strings.Contains(err.Error(), "without following symlinks") {
+				t.Fatalf("normalizeVMImageRuntimePermissions error = %v, want no-follow rejection", err)
+			}
+			assertVMImageArtifactMode(t, target, 0o600)
+		})
+	}
+}
+
+func TestNormalizeVMImageRuntimePermissionsResistsPathSwapAfterOpen(t *testing.T) {
+	tests := []struct {
+		name string
+		path func(vmImagePaths) string
+		mode os.FileMode
+	}{
+		{name: "kernel", path: func(paths vmImagePaths) string { return paths.KernelPath }, mode: 0o644},
+		{name: "initrd", path: func(paths vmImagePaths) string { return paths.InitrdPath }, mode: 0o644},
+		{name: "firecracker", path: func(paths vmImagePaths) string { return paths.FirecrackerPath }, mode: 0o755},
+		{name: "jailer", path: func(paths vmImagePaths) string { return paths.JailerPath }, mode: 0o755},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			paths := writeVMImageRuntimePermissionFixture(t)
+			path := tt.path(paths)
+			openedPath := path + ".opened"
+			target := filepath.Join(t.TempDir(), "host-target")
+			if err := os.WriteFile(target, []byte("host"), 0o600); err != nil {
+				t.Fatalf("write host target: %v", err)
+			}
+
+			originalOpen := vmImageRuntimePermissionOpen
+			vmImageRuntimePermissionOpen = func(gotPath string) (*os.File, *os.File, string, error) {
+				file, parent, name, err := originalOpen(gotPath)
+				if err != nil || gotPath != path {
+					return file, parent, name, err
+				}
+				if err := os.Rename(path, openedPath); err != nil {
+					_ = file.Close()
+					_ = parent.Close()
+					return nil, nil, "", err
+				}
+				if err := os.Symlink(target, path); err != nil {
+					_ = file.Close()
+					_ = parent.Close()
+					return nil, nil, "", err
+				}
+				return file, parent, name, nil
+			}
+			defer func() { vmImageRuntimePermissionOpen = originalOpen }()
+
+			err := normalizeVMImageRuntimePermissions(paths)
+			if err == nil || !strings.Contains(err.Error(), "changed while normalizing permissions") {
+				t.Fatalf("normalizeVMImageRuntimePermissions error = %v, want path-change rejection", err)
+			}
+			assertVMImageArtifactMode(t, target, 0o600)
+			assertVMImageArtifactMode(t, openedPath, tt.mode)
+		})
+	}
 }
 
 func TestVMImageCacheDownloadsOptionalJailerArtifact(t *testing.T) {
@@ -1643,6 +1765,38 @@ func writeCachedVMImageArtifacts(t *testing.T, dir string, contents map[string][
 			t.Fatalf("write cached artifact %s: %v", name, err)
 		}
 	}
+}
+
+func assertVMImageArtifactMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat VM image artifact %s: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("VM image artifact %s mode = %o, want %o", path, got, want)
+	}
+}
+
+func writeVMImageRuntimePermissionFixture(t *testing.T) vmImagePaths {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve VM image test directory: %v", err)
+	}
+	paths := vmImagePaths{
+		KernelPath:      filepath.Join(dir, "vmlinux"),
+		InitrdPath:      filepath.Join(dir, "initrd.img"),
+		RootFSPath:      filepath.Join(dir, "rootfs.ext4.zst"),
+		FirecrackerPath: filepath.Join(dir, "firecracker"),
+		JailerPath:      filepath.Join(dir, "jailer"),
+	}
+	for _, path := range []string{paths.KernelPath, paths.InitrdPath, paths.RootFSPath, paths.FirecrackerPath, paths.JailerPath} {
+		if err := os.WriteFile(path, []byte(filepath.Base(path)), 0o600); err != nil {
+			t.Fatalf("write VM image artifact %s: %v", path, err)
+		}
+	}
+	return paths
 }
 
 func testSHA256Hex(content []byte) string {

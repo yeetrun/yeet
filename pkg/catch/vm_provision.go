@@ -631,7 +631,7 @@ func cachedVMImageAsset(ctx context.Context, cache vmImageCache, version string)
 		return vmImageAsset{}, fmt.Errorf("cached VM image %s is incomplete; run yeet vm images update or rerun with --image-policy=update", version)
 	}
 	paths := cachedVMImagePaths(dir, manifest)
-	if err := chmodCachedVMRuntime(paths); err != nil {
+	if err := normalizeVMImageRuntimePermissions(paths); err != nil {
 		return vmImageAsset{}, err
 	}
 	preparedRootFS, err := prepareVMRootFSFunc(ctx, paths.RootFSPath)
@@ -639,19 +639,6 @@ func cachedVMImageAsset(ctx context.Context, cache vmImageCache, version string)
 		return vmImageAsset{}, err
 	}
 	return vmImageAsset{Paths: paths, PreparedRootFSPath: preparedRootFS, Manifest: manifest}, nil
-}
-
-func chmodCachedVMRuntime(paths vmImagePaths) error {
-	if err := os.Chmod(paths.FirecrackerPath, 0o755); err != nil {
-		return fmt.Errorf("chmod cached firecracker: %w", err)
-	}
-	if strings.TrimSpace(paths.JailerPath) == "" {
-		return nil
-	}
-	if err := os.Chmod(paths.JailerPath, 0o755); err != nil {
-		return fmt.Errorf("chmod cached jailer: %w", err)
-	}
-	return nil
 }
 
 func cachedVMImagePaths(dir string, manifest vmImageManifest) vmImagePaths {

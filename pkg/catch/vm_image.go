@@ -34,6 +34,7 @@ var vmImageSafeNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 var prepareVMRootFSFunc = prepareVMRootFS
 var vmRootFSDecompressRunner = runVMRootFSDecompress
 var vmImageFetchRetryDelay = 500 * time.Millisecond
+var vmImageRuntimePermissionOpen = openVMJailStoragePath
 
 type vmImageManifest struct {
 	Name                  string            `json:"name"`
@@ -586,27 +587,70 @@ func (c vmImageCache) ensureArtifacts(ctx context.Context, dir string, manifest 
 	if err != nil {
 		return vmImagePaths{}, err
 	}
-	if err := os.Chmod(firecrackerPath, 0o755); err != nil {
-		return vmImagePaths{}, fmt.Errorf("chmod firecracker: %w", err)
-	}
 	var jailerPath string
 	if strings.TrimSpace(manifest.Jailer) != "" {
 		jailerPath, err = c.ensureArtifact(ctx, dir, manifest, manifest.Jailer, progress, ui)
 		if err != nil {
 			return vmImagePaths{}, err
 		}
-		if err := os.Chmod(jailerPath, 0o755); err != nil {
-			return vmImagePaths{}, fmt.Errorf("chmod jailer: %w", err)
-		}
 	}
 
-	return vmImagePaths{
+	paths := vmImagePaths{
 		KernelPath:      kernelPath,
 		InitrdPath:      initrdPath,
 		RootFSPath:      rootFSPath,
 		FirecrackerPath: firecrackerPath,
 		JailerPath:      jailerPath,
-	}, nil
+	}
+	if err := normalizeVMImageRuntimePermissions(paths); err != nil {
+		return vmImagePaths{}, err
+	}
+	return paths, nil
+}
+
+func normalizeVMImageRuntimePermissions(paths vmImagePaths) error {
+	if err := chmodVMImageRuntimeArtifact(paths.KernelPath, "kernel", 0o644); err != nil {
+		return err
+	}
+	if strings.TrimSpace(paths.InitrdPath) != "" {
+		if err := chmodVMImageRuntimeArtifact(paths.InitrdPath, "initrd", 0o644); err != nil {
+			return err
+		}
+	}
+	if err := chmodVMImageRuntimeArtifact(paths.FirecrackerPath, "firecracker", 0o755); err != nil {
+		return err
+	}
+	if strings.TrimSpace(paths.JailerPath) != "" {
+		if err := chmodVMImageRuntimeArtifact(paths.JailerPath, "jailer", 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func chmodVMImageRuntimeArtifact(path, name string, mode os.FileMode) error {
+	file, parent, entryName, err := vmImageRuntimePermissionOpen(path)
+	if err != nil {
+		return fmt.Errorf("open VM image %s without following symlinks: %w", name, err)
+	}
+	defer func() { _ = file.Close() }()
+	if parent != nil {
+		defer func() { _ = parent.Close() }()
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect VM image %s file descriptor: %w", name, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("VM image %s must be a regular file", name)
+	}
+	if err := file.Chmod(mode); err != nil {
+		return fmt.Errorf("chmod VM image %s: %w", name, err)
+	}
+	if err := verifyVMJailStorageEntryUnchanged(parent, entryName, file, path); err != nil {
+		return fmt.Errorf("VM image %s changed while normalizing permissions: %w", name, err)
+	}
+	return nil
 }
 
 func (c vmImageCache) fetchManifest(ctx context.Context) (vmImageManifest, error) {
