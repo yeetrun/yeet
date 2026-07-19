@@ -16,12 +16,155 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/registry"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
+
+func TestHostStorageApplyTakesOuterSortedServiceOperationLocks(t *testing.T) {
+	server := newTestServer(t)
+	release := server.serviceOperationLocks.Lock("repair")
+	done := make(chan error, 1)
+	go func() {
+		_, err := server.ApplyHostStoragePlan(context.Background(), catchrpc.HostStoragePlan{
+			ServicesAction: catchrpc.HostStorageServicesAction{AffectedServices: []catchrpc.HostStorageServiceMove{
+				{Name: "worker"}, {Name: "api"}, {Name: "api"},
+			}},
+			RepairAction: catchrpc.HostStorageRepairAction{RestartServices: []string{"repair", "api"}},
+		}, true, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("host storage apply bypassed service lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("host storage apply did not resume after service lock release")
+	}
+}
+
+func TestHostStorageServiceOperationNamesIncludesMovesAndRepairRestarts(t *testing.T) {
+	got := hostStorageServiceOperationNames(catchrpc.HostStoragePlan{
+		ServicesAction: catchrpc.HostStorageServicesAction{AffectedServices: []catchrpc.HostStorageServiceMove{
+			{Name: "worker"}, {Name: "api"}, {Name: "api"},
+		}},
+		RepairAction: catchrpc.HostStorageRepairAction{RestartServices: []string{"repair", "worker"}},
+	})
+	want := []string{"api", "repair", "worker"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("hostStorageServiceOperationNames = %#v, want %#v", got, want)
+	}
+}
+
+func TestCleanupHostStorageFileInstallerAbortsAndReleasesServiceLock(t *testing.T) {
+	server := newTestServer(t)
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: CatchService},
+		NoBinary:     true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanupHostStorageFileInstaller(installer)
+	if installer.File != nil || !installer.closed {
+		t.Fatalf("installer not aborted: file=%v closed=%t", installer.File, installer.closed)
+	}
+	release := server.serviceOperationLocks.Lock(CatchService)
+	release()
+}
+
+func TestHostStorageServiceOperationNamesIncludesAuthoritativePreservedPins(t *testing.T) {
+	installHome := t.TempDir()
+	sourceRoot := filepath.Join(installHome, "yeet-data")
+	customServicesRoot := filepath.Join(t.TempDir(), "operator-services")
+	withHostStoragePlanEnvironment(t, nil, 1<<40)
+	server := newTestHostStorageServer(t, Config{
+		InstallUser:  "root",
+		InstallHome:  installHome,
+		RootDir:      sourceRoot,
+		ServicesRoot: customServicesRoot,
+	}, map[string]*db.Service{
+		"api": {Name: "api", ServiceType: db.ServiceTypeSystemd},
+	})
+	planner := &hostStoragePlanner{config: server.cfg, store: server.cfg.DB}
+	plan, err := planner.Plan(context.Background(), legacyHostStoragePlanRequest())
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.ServicesAction.AffectedServices) != 0 {
+		t.Fatalf("AffectedServices = %#v, want preserved service omitted", plan.ServicesAction.AffectedServices)
+	}
+	// Exercise the older-client path too: apply must derive authoritative pins
+	// even when advisory legacy metadata was omitted from the request.
+	plan.Legacy = catchrpc.HostStorageLegacyPlan{}
+
+	got, err := server.hostStorageServiceOperationNamesForApply(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"api"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("host storage lock names = %#v, want %#v", got, want)
+	}
+}
+
+func TestHostStorageFinalizeTakesOneOuterServiceOperationLock(t *testing.T) {
+	fixture := newHostStorageFinalizeFixture(t, false, nil)
+	release := fixture.server.serviceOperationLocks.Lock("api")
+	done := make(chan error, 1)
+	go func() {
+		_, err := fixture.server.FinalizeHostStorage(context.Background(), catchrpc.HostStorageFinalizeRequest{TransactionID: fixture.tx.ID})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("finalize bypassed service lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("FinalizeHostStorage: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("finalize did not finish after outer lock release")
+	}
+}
+
+func TestHostStorageCleanupTakesOneOuterServiceOperationLock(t *testing.T) {
+	fixture := newHostStorageFinalizeFixture(t, false, nil)
+	if _, err := fixture.server.FinalizeHostStorage(context.Background(), catchrpc.HostStorageFinalizeRequest{TransactionID: fixture.tx.ID}); err != nil {
+		t.Fatal(err)
+	}
+	release := fixture.server.serviceOperationLocks.Lock("api")
+	done := make(chan error, 1)
+	go func() {
+		_, err := fixture.server.CleanupHostStorage(context.Background(), catchrpc.HostStorageCleanupRequest{From: fixture.source, Yes: true})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("cleanup bypassed service lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("CleanupHostStorage: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not finish after outer lock release")
+	}
+}
 
 func TestHostStoragePlanNoop(t *testing.T) {
 	root := t.TempDir()

@@ -5,11 +5,13 @@
 package db
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/netip"
 	"reflect"
 	"testing"
 
+	"github.com/go-json-experiment/json/jsontext"
 	"tailscale.com/tailcfg"
 )
 
@@ -203,6 +205,52 @@ func TestServicePublishViewAndClone(t *testing.T) {
 	viewClone.Publish[1] = "8443:443"
 	if got := service.Publish[1]; got != "443:443" {
 		t.Fatalf("source publish port mutated through ServiceView.AsStruct: %q", got)
+	}
+}
+
+func TestServiceIdentityCloneAndView(t *testing.T) {
+	want := &ServiceIdentity{RequestedUser: "app", RequestedGroup: "app", UID: 1002, GID: 1003}
+	svc := &Service{Name: "api", Identity: want}
+	clone := svc.Clone()
+	if clone.Identity == want || *clone.Identity != *want {
+		t.Fatalf("clone identity = %#v", clone.Identity)
+	}
+	view := svc.View()
+	identityView := view.Identity()
+	if !identityView.Valid() || identityView.RequestedUser() != "app" || identityView.RequestedGroup() != "app" || identityView.UID() != 1002 || identityView.GID() != 1003 {
+		t.Fatalf("view identity = %#v", view.Identity())
+	}
+	if clone := identityView.AsStruct(); clone == want || *clone != *want {
+		t.Fatalf("identity view clone = %#v", clone)
+	}
+	raw, err := identityView.MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal identity view: %v", err)
+	}
+	var decoded ServiceIdentityView
+	if err := decoded.UnmarshalJSON(raw); err != nil || !reflect.DeepEqual(decoded.AsStruct(), want) {
+		t.Fatalf("unmarshal identity view = %#v, %v", decoded.AsStruct(), err)
+	}
+	if err := decoded.UnmarshalJSON(raw); err == nil {
+		t.Fatal("identity view JSON accepted reinitialization")
+	}
+	var empty ServiceIdentityView
+	if err := empty.UnmarshalJSON(nil); err != nil || empty.Valid() {
+		t.Fatalf("empty identity view = %#v, %v", empty, err)
+	}
+	if err := empty.UnmarshalJSON([]byte("{")); err == nil {
+		t.Fatal("identity view accepted invalid JSON")
+	}
+	var buffer bytes.Buffer
+	if err := identityView.MarshalJSONTo(jsontext.NewEncoder(&buffer)); err != nil {
+		t.Fatalf("marshal identity view with jsonv2: %v", err)
+	}
+	var decodedV2 ServiceIdentityView
+	if err := decodedV2.UnmarshalJSONFrom(jsontext.NewDecoder(bytes.NewReader(buffer.Bytes()))); err != nil || !reflect.DeepEqual(decodedV2.AsStruct(), want) {
+		t.Fatalf("unmarshal identity view with jsonv2 = %#v, %v", decodedV2.AsStruct(), err)
+	}
+	if err := decodedV2.UnmarshalJSONFrom(jsontext.NewDecoder(bytes.NewReader(buffer.Bytes()))); err == nil {
+		t.Fatal("identity view jsonv2 accepted reinitialization")
 	}
 }
 

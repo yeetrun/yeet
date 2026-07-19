@@ -14,13 +14,15 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // CopyFile copies a file from src to dst. It is able to overwrite existing
 // files that are in use. It does this by writing to a temporary file and then
 // moving it into place.
 func CopyFile(src, dst string) (retErr error) {
-	srcFile, err := os.Open(src)
+	srcFile, err := os.OpenFile(src, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -36,22 +38,23 @@ func CopyFile(src, dst string) (retErr error) {
 
 	// We write to a temporary file and then move it into place to avoid issues
 	// with the destination file already existing / being in use.
-	tempDst := dst + ".tmp"
-	if err := writeCopyTempFile(srcFile, tempDst, srcStat.Mode()); err != nil {
+	tempFile, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".yeet-copy-")
+	if err != nil {
+		return err
+	}
+	tempDst := tempFile.Name()
+	if err := writeCopyTempFile(srcFile, tempFile, srcStat.Mode()); err != nil {
+		_ = os.Remove(tempDst)
 		return err
 	}
 	if err := os.Rename(tempDst, dst); err != nil {
 		_ = os.Remove(tempDst)
 		return err
 	}
-	return nil
+	return SyncDir(filepath.Dir(dst))
 }
 
-func writeCopyTempFile(srcFile *os.File, tempDst string, perm os.FileMode) (retErr error) {
-	dstFile, err := os.OpenFile(tempDst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
+func writeCopyTempFile(srcFile, dstFile *os.File, perm os.FileMode) (retErr error) {
 	closed := false
 	defer func() {
 		if !closed {
@@ -59,12 +62,12 @@ func writeCopyTempFile(srcFile *os.File, tempDst string, perm os.FileMode) (retE
 				retErr = closeErr
 			}
 		}
-		if retErr != nil {
-			_ = os.Remove(tempDst)
-		}
 	}()
 
 	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return err
+	}
+	if err := dstFile.Chmod(perm); err != nil {
 		return err
 	}
 	if err := dstFile.Sync(); err != nil {
@@ -76,6 +79,17 @@ func writeCopyTempFile(srcFile *os.File, tempDst string, perm os.FileMode) (retE
 		return err
 	}
 	return nil
+}
+
+// SyncDir makes directory-entry changes durable before a caller records them
+// in a transaction journal.
+func SyncDir(path string) (retErr error) {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer closeFile(dir, &retErr)
+	return dir.Sync()
 }
 
 func closeFile(file *os.File, retErr *error) {

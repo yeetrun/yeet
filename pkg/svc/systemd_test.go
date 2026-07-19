@@ -39,6 +39,64 @@ func TestTailscaleMonitorLoopReturnsAfterStableIDStored(t *testing.T) {
 	}
 }
 
+func TestSystemdIdentityInstallPlanSurfaces(t *testing.T) {
+	root := t.TempDir()
+	runDir := filepath.Join(root, "run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unitArtifact := filepath.Join(root, "api.service")
+	envArtifact := filepath.Join(root, "env-source")
+	if err := os.WriteFile(unitArtifact, []byte("[Service]\nWorkingDirectory=/srv/api\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envArtifact, []byte("A=B\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	config := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd, Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(1): unitArtifact}},
+			db.ArtifactEnvFile:     {Refs: map[db.ArtifactRef]string{db.Gen(1): envArtifact}},
+		},
+	}
+	service, err := NewSystemdService(nil, config.View(), runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFlistxattr := systemdInstallTargetFlistxattr
+	systemdInstallTargetFlistxattr = func(int, []byte) (int, error) { return 0, nil }
+	t.Cleanup(func() { systemdInstallTargetFlistxattr = oldFlistxattr })
+	paths := service.InstallTargetPaths()
+	if len(paths) < 2 || service.PrimaryUnitPath() == "" || len(service.InstallUnits()) == 0 {
+		t.Fatalf("install plan = paths:%v primary:%q units:%v", paths, service.PrimaryUnitPath(), service.InstallUnits())
+	}
+	states, err := service.InstallTargetStatesExcluding(service.PrimaryUnitPath())
+	if err != nil {
+		t.Fatalf("install target states: %v", err)
+	}
+	foundEnv := false
+	for _, state := range states {
+		if state.Present && state.Size == int64(len("A=B\n")) {
+			foundEnv = true
+		}
+	}
+	if !foundEnv {
+		t.Fatalf("install target states = %#v", states)
+	}
+	destination := filepath.Join(root, "installed.service")
+	if err := writeInstalledSystemdUnit(destination, []byte("[Service]\nUser=app\n"), 0o640); err != nil {
+		t.Fatalf("write installed unit: %v", err)
+	}
+	if info, err := os.Stat(destination); err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("installed unit mode = %v, %v", info, err)
+	}
+	rewritten, err := rewriteInstalledSystemdUnitIdentity("[Service]\nWorkingDirectory=/srv/api\n", "app", "app")
+	if err != nil || !strings.Contains(rewritten, systemdIdentityEnvironment("app", "/srv/api")) {
+		t.Fatalf("rewritten unit = %q, %v", rewritten, err)
+	}
+}
+
 func TestTailscaleMonitorLoopRetriesMissingSocket(t *testing.T) {
 	var calls int
 	var backoffs int
@@ -123,6 +181,43 @@ func TestSystemdUnitRendersExplicitDependencies(t *testing.T) {
 	}
 }
 
+func TestSystemdUnitRendersUserAndGroup(t *testing.T) {
+	unit := SystemdUnit{
+		Name:             "api",
+		Executable:       "/var/lib/yeet/services/api/bin/api-20260718.1",
+		Arguments:        []string{"--serve"},
+		WorkingDirectory: "/var/lib/yeet/services/api/data",
+		User:             "app",
+		Group:            "app",
+		EnvFile:          "-/var/lib/yeet/services/api/env/env",
+	}
+
+	paths, err := unit.WriteOutUnitFiles(t.TempDir())
+	if err != nil {
+		t.Fatalf("WriteOutUnitFiles: %v", err)
+	}
+	raw, err := os.ReadFile(paths[db.ArtifactSystemdUnit])
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		"ExecStart=/var/lib/yeet/services/api/bin/api-20260718.1 --serve\n",
+		"WorkingDirectory=/var/lib/yeet/services/api/data\n",
+		"User=app\n",
+		"Group=app\n",
+		"EnvironmentFile=-/var/lib/yeet/services/api/env/env\n",
+		"Environment=HOME=/var/lib/yeet/services/api/data USER=app LOGNAME=app SHELL=/bin/sh\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("unit missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Index(got, "EnvironmentFile=") > strings.Index(got, "Environment=HOME=") {
+		t.Fatalf("identity environment must follow EnvironmentFile so it cannot be overridden:\n%s", got)
+	}
+}
+
 func TestSystemdUnitDefaultsAfterToRequires(t *testing.T) {
 	unit := SystemdUnit{
 		Name:       "demo",
@@ -175,7 +270,6 @@ func TestSystemdServiceInstallPlanOrdersArtifactsAndPrimaryTimer(t *testing.T) {
 		db.ArtifactSystemdTimerFile,
 		db.ArtifactNetNSService,
 		db.ArtifactNetNSEnv,
-		db.ArtifactBinary,
 		db.ArtifactTypeScriptFile,
 		db.ArtifactPythonFile,
 		db.ArtifactEnvFile,
@@ -195,6 +289,102 @@ func TestSystemdServiceInstallPlanOrdersArtifactsAndPrimaryTimer(t *testing.T) {
 	}
 }
 
+func TestSystemdServiceNativeManagedArtifactPaths(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "api")
+	svc := &SystemdService{cfg: (&db.Service{Name: "api"}).View(), runDir: filepath.Join(root, "run")}
+	installers := svc.artifactInstaller()
+
+	want := map[db.ArtifactName]string{
+		db.ArtifactNetNSEnv: filepath.Join(root, "env", "netns.env"),
+		db.ArtifactEnvFile:  filepath.Join(root, "env", "env"),
+		db.ArtifactTSEnv:    filepath.Join(root, "env", "tailscaled.env"),
+		db.ArtifactTSBinary: filepath.Join(root, "bin", "tailscaled"),
+		db.ArtifactTSConfig: filepath.Join(root, "env", "tailscaled.json"),
+	}
+	for artifact, path := range want {
+		if got := installers[artifact].dstPath; got != path {
+			t.Fatalf("%s destination = %q, want %q", artifact, got, path)
+		}
+	}
+	if _, ok := installers[db.ArtifactBinary]; ok {
+		t.Fatal("native binary must execute its immutable generation, not be copied to run/")
+	}
+	for _, step := range svc.installPlan() {
+		if step.artifact == db.ArtifactBinary {
+			t.Fatal("native binary unexpectedly present in install plan")
+		}
+	}
+}
+
+func TestCatchSystemdServiceKeepsStableRunnerArtifact(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "catch")
+	svc := &SystemdService{cfg: (&db.Service{Name: "catch"}).View(), runDir: filepath.Join(root, "run")}
+	installers := svc.artifactInstaller()
+	installer, ok := installers[db.ArtifactBinary]
+	if !ok || installer.dstPath != filepath.Join(root, "run", "catch") {
+		t.Fatalf("Catch stable runner installer = %#v ok=%v", installer, ok)
+	}
+	if got := installers[db.ArtifactEnvFile].dstPath; got != filepath.Join(root, "env", "env") {
+		t.Fatalf("Catch env destination = %q, want managed env path", got)
+	}
+	found := false
+	for _, step := range svc.installPlan() {
+		found = found || step.artifact == db.ArtifactBinary
+	}
+	if !found {
+		t.Fatal("Catch stable runner missing from install plan")
+	}
+}
+
+func TestYeetNSSystemdServiceKeepsFlatRuntimeArtifacts(t *testing.T) {
+	tmp := t.TempDir()
+	runDir := filepath.Join(tmp, "runtime")
+	systemdDir := filepath.Join(tmp, "systemd")
+	for _, dir := range []string{runDir, systemdDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unitSrc := writeTempFile(t, tmp, "yeet-ns.source.service", "unit\n")
+	envSrc := writeTempFile(t, tmp, "yeet-ns.source.env", "RANGE=192.168.100.0/24\n")
+	binSrc := writeTempFile(t, tmp, "yeet-ns.source", "binary\n")
+	cfg := (&db.Service{
+		Name:       "yeet-ns",
+		Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit: artifactAt(1, unitSrc),
+			db.ArtifactEnvFile:     artifactAt(1, envSrc),
+			db.ArtifactBinary:      artifactAt(1, binSrc),
+		},
+	}).View()
+	service, err := NewHostSystemdService(nil, cfg, runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.systemdDir = systemdDir
+
+	if _, err := service.StageInstallForReload(); err != nil {
+		t.Fatalf("StageInstallForReload: %v", err)
+	}
+	assertFileContent(t, filepath.Join(runDir, "yeet-ns"), "binary\n")
+	assertFileContent(t, filepath.Join(runDir, "env"), "RANGE=192.168.100.0/24\n")
+}
+
+func TestUserNamedYeetNSCannotSelectFlatRuntimeArtifacts(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "yeet-ns")
+	service, err := NewSystemdService(nil, (&db.Service{Name: "yeet-ns"}).View(), filepath.Join(root, "run"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	installers := service.artifactInstaller()
+	if got := installers[db.ArtifactEnvFile].dstPath; got != filepath.Join(root, "env", "env") {
+		t.Fatalf("ordinary service env destination = %q, want managed layout", got)
+	}
+	if _, ok := installers[db.ArtifactBinary]; ok {
+		t.Fatal("ordinary service named yeet-ns selected the host-daemon binary compatibility path")
+	}
+}
+
 func TestSystemdServicePrimaryUnit(t *testing.T) {
 	serviceCfg := db.Service{Name: "demo"}
 	service := &SystemdService{cfg: serviceCfg.View()}
@@ -203,7 +393,7 @@ func TestSystemdServicePrimaryUnit(t *testing.T) {
 	}
 
 	timerCfg := db.Service{
-		Name: "demo",
+		Name: "demo", Generation: 3,
 		Artifacts: db.ArtifactStore{
 			db.ArtifactSystemdTimerFile: testArtifact("timer"),
 		},
@@ -211,6 +401,17 @@ func TestSystemdServicePrimaryUnit(t *testing.T) {
 	timer := &SystemdService{cfg: timerCfg.View()}
 	if got := timer.PrimaryUnit(); got != "demo.timer" {
 		t.Fatalf("timer PrimaryUnit = %q, want demo.timer", got)
+	}
+
+	stagedTimerCfg := db.Service{
+		Name: "demo", Generation: 3,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdTimerFile: artifactAt(4, "/tmp/timer-4"),
+		},
+	}
+	stagedTimer := &SystemdService{cfg: stagedTimerCfg.View()}
+	if got := stagedTimer.PrimaryUnit(); got != "demo.service" {
+		t.Fatalf("service with only a staged timer PrimaryUnit = %q, want demo.service", got)
 	}
 }
 
@@ -299,7 +500,7 @@ func TestSystemdServiceInstallCopiesArtifactsRemovesStaleOptionalAndEnablesTimer
 	tmp := t.TempDir()
 	systemdDir := filepath.Join(tmp, "systemd")
 	runDir := filepath.Join(tmp, "run")
-	for _, dir := range []string{systemdDir, runDir} {
+	for _, dir := range []string{systemdDir, runDir, filepath.Join(tmp, "bin"), filepath.Join(tmp, "env")} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatalf("failed to create %s: %v", dir, err)
 		}
@@ -310,7 +511,11 @@ func TestSystemdServiceInstallCopiesArtifactsRemovesStaleOptionalAndEnablesTimer
 	timerSrc := writeTempFile(t, tmp, "demo.timer", "timer unit\n")
 	netnsSrc := writeTempFile(t, tmp, "netns.service", "netns unit\n")
 	binSrc := writeTempFile(t, tmp, "demo-bin", "binary\n")
-	envSrc := writeTempFile(t, tmp, "env", "ENV=1\n")
+	envSrc := writeTempFile(t, tmp, "source.env", "ENV=1\n")
+	netnsEnvSrc := writeTempFile(t, tmp, "source-netns.env", "NETNS=1\n")
+	tsEnvSrc := writeTempFile(t, tmp, "source-tailscaled.env", "TS=1\n")
+	tsBinarySrc := writeTempFile(t, tmp, "source-tailscaled", "tailscaled\n")
+	tsConfigSrc := writeTempFile(t, tmp, "source-tailscaled.json", "{}\n")
 	stalePython := filepath.Join(runDir, "main.py")
 	if err := os.WriteFile(stalePython, []byte("stale\n"), 0644); err != nil {
 		t.Fatalf("failed to write stale python artifact: %v", err)
@@ -324,6 +529,10 @@ func TestSystemdServiceInstallCopiesArtifactsRemovesStaleOptionalAndEnablesTimer
 			db.ArtifactNetNSService:     artifactAt(1, netnsSrc),
 			db.ArtifactBinary:           artifactAt(1, binSrc),
 			db.ArtifactEnvFile:          artifactAt(1, envSrc),
+			db.ArtifactNetNSEnv:         artifactAt(1, netnsEnvSrc),
+			db.ArtifactTSEnv:            artifactAt(1, tsEnvSrc),
+			db.ArtifactTSBinary:         artifactAt(1, tsBinarySrc),
+			db.ArtifactTSConfig:         artifactAt(1, tsConfigSrc),
 		},
 	}
 	svc := &SystemdService{cfg: cfg.View(), runDir: runDir, systemdDir: systemdDir}
@@ -335,8 +544,19 @@ func TestSystemdServiceInstallCopiesArtifactsRemovesStaleOptionalAndEnablesTimer
 	assertFileContent(t, filepath.Join(systemdDir, "demo.service"), "service unit\n")
 	assertFileContent(t, filepath.Join(systemdDir, "demo.timer"), "timer unit\n")
 	assertFileContent(t, filepath.Join(systemdDir, "yeet-demo-ns.service"), "netns unit\n")
-	assertFileContent(t, filepath.Join(runDir, "demo"), "binary\n")
-	assertFileContent(t, filepath.Join(runDir, "env"), "ENV=1\n")
+	if _, err := os.Stat(filepath.Join(runDir, "demo")); !os.IsNotExist(err) {
+		t.Fatalf("immutable binary was copied to run/: %v", err)
+	}
+	assertFileContent(t, filepath.Join(tmp, "env", "env"), "ENV=1\n")
+	assertFileContent(t, filepath.Join(tmp, "env", "netns.env"), "NETNS=1\n")
+	assertFileContent(t, filepath.Join(tmp, "env", "tailscaled.env"), "TS=1\n")
+	assertFileContent(t, filepath.Join(tmp, "bin", "tailscaled"), "tailscaled\n")
+	assertFileContent(t, filepath.Join(tmp, "env", "tailscaled.json"), "{}\n")
+	for _, name := range []string{"env", "netns.env", "tailscaled.env", "tailscaled", "tailscaled.json"} {
+		if _, err := os.Stat(filepath.Join(runDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("managed artifact %s remained in run/: %v", name, err)
+		}
+	}
 	if _, err := os.Stat(stalePython); !os.IsNotExist(err) {
 		t.Fatalf("stale optional artifact stat error = %v, want not exist", err)
 	}
@@ -387,6 +607,84 @@ func TestSystemdServiceStageInstallForReloadCopiesArtifactsWithoutSystemctl(t *t
 	}
 	if _, err := os.Stat(systemctlLog); !os.IsNotExist(err) {
 		t.Fatalf("systemctl log stat error = %v, want no systemctl calls", err)
+	}
+}
+
+func TestSystemdServiceInstallTargetStatesExcludingCapturesPresentAndAbsentArtifacts(t *testing.T) {
+	tmp := t.TempDir()
+	systemdDir := filepath.Join(tmp, "systemd")
+	runDir := filepath.Join(tmp, "run")
+	for _, dir := range []string{systemdDir, runDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unitSrc := writeTempFile(t, tmp, "demo.service", "service unit\n")
+	netnsSrc := writeTempFile(t, tmp, "netns.service", "netns unit\n")
+	oldFlistxattr := systemdInstallTargetFlistxattr
+	systemdInstallTargetFlistxattr = func(int, []byte) (int, error) { return 0, nil }
+	t.Cleanup(func() { systemdInstallTargetFlistxattr = oldFlistxattr })
+	cfg := db.Service{
+		Name: "demo", Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit:  artifactAt(1, unitSrc),
+			db.ArtifactNetNSService: artifactAt(1, netnsSrc),
+		},
+	}
+	service := &SystemdService{cfg: cfg.View(), runDir: runDir, systemdDir: systemdDir}
+	excluded := filepath.Join(systemdDir, "demo.service")
+	states, err := service.InstallTargetStatesExcluding(excluded)
+	if err != nil {
+		t.Fatalf("InstallTargetStatesExcluding: %v", err)
+	}
+	if len(states) == 0 {
+		t.Fatal("transaction intent returned no auxiliary paths")
+	}
+	var present, absent bool
+	for _, state := range states {
+		if state.Path == excluded {
+			t.Fatalf("excluded primary unit remained in states: %#v", states)
+		}
+		if state.Present {
+			present = true
+			if state.Size == 0 || state.SHA256 == "" || state.Nlink != 1 {
+				t.Fatalf("present state lacks exact provenance: %#v", state)
+			}
+		} else {
+			absent = true
+		}
+	}
+	if !present || !absent {
+		t.Fatalf("states = %#v, want both present and absent auxiliary artifacts", states)
+	}
+}
+
+func TestSystemdServiceStageInstallEnforcesPersistedIdentityOnStaleUnitArtifact(t *testing.T) {
+	tmp := t.TempDir()
+	systemdDir := filepath.Join(tmp, "systemd")
+	runDir := filepath.Join(tmp, "run")
+	for _, dir := range []string{systemdDir, runDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unitSrc := writeTempFile(t, tmp, "demo.source.service", "[Unit]\nDescription=demo\n[Service]\nExecStart=/srv/demo\nUser=root\nGroup=root\n[Install]\nWantedBy=multi-user.target\n")
+	identity := &db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1002, GID: 1010}
+	cfg := db.Service{
+		Name: "demo", Generation: 1, Identity: identity,
+		Artifacts: db.ArtifactStore{db.ArtifactSystemdUnit: artifactAt(1, unitSrc)},
+	}
+	service := &SystemdService{cfg: cfg.View(), runDir: runDir, systemdDir: systemdDir}
+	if _, err := service.StageInstallForReload(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(systemdDir, "demo.service"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "User=root") || strings.Contains(string(raw), "Group=root") ||
+		!strings.Contains(string(raw), "User=app\n") || !strings.Contains(string(raw), "Group=workers\n") {
+		t.Fatalf("installed unit did not enforce persisted identity:\n%s", raw)
 	}
 }
 

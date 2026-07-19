@@ -31,22 +31,44 @@ func (e *ttyExecer) startCmdFunc() error {
 		return fmt.Errorf("cannot start system service")
 	}
 	target := e.managedTargetLabel()
-	return e.runAction("start", "Start "+target, func() error {
-		if handled, err := e.installISOServiceIfAllocated(); handled {
+	return e.withLockedServiceMutation(func() error {
+		return e.runAction("start", "Start "+target, func() error {
+			if handled, err := e.installISOServiceIfAllocated(); handled {
+				if err != nil {
+					return fmt.Errorf("failed to start %s: %w", target, err)
+				}
+				return nil
+			}
+			runner, err := e.serviceRunner()
 			if err != nil {
+				return fmt.Errorf("failed to get service runner: %w", err)
+			}
+			if err := runner.Start(); err != nil {
 				return fmt.Errorf("failed to start %s: %w", target, err)
 			}
 			return nil
-		}
-		runner, err := e.serviceRunner()
-		if err != nil {
-			return fmt.Errorf("failed to get service runner: %w", err)
-		}
-		if err := runner.Start(); err != nil {
-			return fmt.Errorf("failed to start %s: %w", target, err)
-		}
-		return nil
+		})
 	})
+}
+
+func (e *ttyExecer) withLockedServiceMutation(operation func() error) error {
+	if e.s == nil {
+		return operation()
+	}
+	if e.serviceOperationLockHeld {
+		if err := e.s.checkServiceIdentityMutationAllowed(e.sn); err != nil {
+			return err
+		}
+		return operation()
+	}
+	release := e.s.serviceOperationLocks.Lock(e.sn)
+	defer release()
+	e.serviceOperationLockHeld = true
+	defer func() { e.serviceOperationLockHeld = false }()
+	if err := e.s.checkServiceIdentityMutationAllowed(e.sn); err != nil {
+		return err
+	}
+	return operation()
 }
 
 func (e *ttyExecer) stopCmdFunc() error {
@@ -54,20 +76,22 @@ func (e *ttyExecer) stopCmdFunc() error {
 		return fmt.Errorf("cannot stop system service")
 	}
 	target := e.managedTargetLabel()
-	return e.runAction("stop", "Stop "+target, func() error {
-		runner, err := e.serviceRunner()
-		if err != nil {
-			return fmt.Errorf("failed to get service runner: %w", err)
-		}
-		if err := runner.Stop(); err != nil {
-			return fmt.Errorf("failed to stop %s: %w", target, err)
-		}
-		if e.s != nil {
-			if err := e.s.markISOStoppedIfAllocated(e.sn); err != nil {
-				return fmt.Errorf("record stopped ISO state for %s: %w", target, err)
+	return e.withLockedServiceMutation(func() error {
+		return e.runAction("stop", "Stop "+target, func() error {
+			runner, err := e.serviceRunner()
+			if err != nil {
+				return fmt.Errorf("failed to get service runner: %w", err)
 			}
-		}
-		return nil
+			if err := runner.Stop(); err != nil {
+				return fmt.Errorf("failed to stop %s: %w", target, err)
+			}
+			if e.s != nil {
+				if err := e.s.markISOStoppedIfAllocated(e.sn); err != nil {
+					return fmt.Errorf("record stopped ISO state for %s: %w", target, err)
+				}
+			}
+			return nil
+		})
 	})
 }
 
@@ -212,21 +236,23 @@ func (e *ttyExecer) installServiceGeneration(cfg InstallerCfg, gen int) error {
 
 func (e *ttyExecer) restartCmdFunc() error {
 	target := e.managedTargetLabel()
-	return e.runAction("restart", "Restart "+target, func() error {
-		if handled, err := e.installISOServiceIfAllocated(); handled {
+	return e.withLockedServiceMutation(func() error {
+		return e.runAction("restart", "Restart "+target, func() error {
+			if handled, err := e.installISOServiceIfAllocated(); handled {
+				if err != nil {
+					return fmt.Errorf("failed to restart %s: %w", target, err)
+				}
+				return nil
+			}
+			runner, err := e.serviceRunner()
 			if err != nil {
+				return fmt.Errorf("failed to get service runner: %w", err)
+			}
+			if err := runner.Restart(); err != nil {
 				return fmt.Errorf("failed to restart %s: %w", target, err)
 			}
 			return nil
-		}
-		runner, err := e.serviceRunner()
-		if err != nil {
-			return fmt.Errorf("failed to get service runner: %w", err)
-		}
-		if err := runner.Restart(); err != nil {
-			return fmt.Errorf("failed to restart %s: %w", target, err)
-		}
-		return nil
+		})
 	})
 }
 
@@ -649,6 +675,12 @@ func (e *ttyExecer) removeCmdFunc(flags cli.RemoveFlags) error {
 		return err
 	}
 	doneValidate()
+	return e.withLockedServiceMutation(func() error {
+		return e.removeCmdFuncLocked(flags)
+	})
+}
+
+func (e *ttyExecer) removeCmdFuncLocked(flags cli.RemoveFlags) error {
 	doneRunnerLookup := e.traceBlock("remove service runner")
 	runner, err := e.serviceRunner()
 	doneRunnerLookup()
@@ -771,7 +803,7 @@ func (e *ttyExecer) removeServiceWithOptions(opts RemoveOptions) (*RemoveReport,
 	if e.removeServiceFunc != nil {
 		return e.removeServiceFunc(e.sn, opts)
 	}
-	return e.s.RemoveServiceWithOptions(e.sn, opts)
+	return e.s.removeServiceWithOptionsUnlocked(e.sn, opts)
 }
 
 func (e *ttyExecer) managedTargetLabel() string {

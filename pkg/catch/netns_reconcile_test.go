@@ -374,6 +374,26 @@ func TestReconcileTailscaleDNSConfigsDisablesDNSAndRestartsSidecar(t *testing.T)
 	}
 }
 
+func TestTailscaleDNSConfigPathsIncludesManagedAndLegacyRuntimeCopies(t *testing.T) {
+	root := "/var/lib/yeet/services/api"
+	artifact := filepath.Join(root, "tailscale", "tailscaled-3.json")
+	service := &db.Service{
+		Name:       "api",
+		Generation: 3,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSConfig: {Refs: map[db.ArtifactRef]string{db.Gen(3): artifact}},
+		},
+	}
+	want := []string{
+		artifact,
+		filepath.Join(root, "env", "tailscaled.json"),
+		filepath.Join(root, "run", "tailscaled.json"),
+	}
+	if diff := cmp.Diff(want, tailscaleDNSConfigPaths(service, root)); diff != "" {
+		t.Fatalf("tailscale config paths mismatch (-want +got):\n%s", diff)
+	}
+}
+
 func TestReconcileTailscaleDNSConfigsRepairsUnsafeRuntimeCopy(t *testing.T) {
 	s := newTestServer(t)
 	root := filepath.Join(t.TempDir(), "services", "api")

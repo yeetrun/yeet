@@ -1190,15 +1190,16 @@ type catchVMJailerUpgrade interface {
 }
 
 type catchInstallDeps struct {
-	writeInstallMeta       func(string) error
-	initTSNet              func(string) (installTSNet, error)
-	newInstaller           func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error)
-	executable             func() (string, error)
-	readFile               func(string) ([]byte, error)
-	logf                   func(string, ...any)
-	tsnetHost              func() string
-	prepareVMJailerUpgrade func(context.Context, *catch.Config) (catchVMJailerUpgrade, error)
-	acquireInstallLock     func(context.Context, string) (io.Closer, error)
+	writeInstallMeta            func(string) error
+	initTSNet                   func(string) (installTSNet, error)
+	ensureManagedServiceAccount func() error
+	newInstaller                func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error)
+	executable                  func() (string, error)
+	readFile                    func(string) ([]byte, error)
+	logf                        func(string, ...any)
+	tsnetHost                   func() string
+	prepareVMJailerUpgrade      func(context.Context, *catch.Config) (catchVMJailerUpgrade, error)
+	acquireInstallLock          func(context.Context, string) (io.Closer, error)
 }
 
 type catchInstallPlan struct {
@@ -1218,6 +1219,10 @@ func defaultCatchInstallDeps() catchInstallDeps {
 		writeInstallMeta: writeInstallMeta,
 		initTSNet: func(dataDir string) (installTSNet, error) {
 			return initTSNet(dataDir)
+		},
+		ensureManagedServiceAccount: func() error {
+			_, err := catch.EnsureManagedServiceAccount()
+			return err
 		},
 		newInstaller: newCatchServiceInstaller,
 		executable:   os.Executable,
@@ -1277,6 +1282,9 @@ func runCatchInstallTransaction(cfg *catch.Config, dataDir string, deps catchIns
 	defer func() {
 		err = errors.Join(err, upgrade.Close())
 	}()
+	if err := deps.ensureManagedServiceAccount(); err != nil {
+		return fmt.Errorf("prepare managed native service account: %w", err)
+	}
 	inst, err := deps.newInstaller(cfg, catchFileInstallerConfig(plan))
 	if err != nil {
 		return fmt.Errorf("failed to create installer: %w", err)
@@ -1313,11 +1321,19 @@ func installCurrentCatchExecutable(inst catchServiceInstaller, deps catchInstall
 
 func normalizeCatchInstallDeps(deps catchInstallDeps) catchInstallDeps {
 	defaults := defaultCatchInstallDeps()
+	deps = normalizeCatchInstallCoreDeps(deps, defaults)
+	return normalizeCatchInstallRuntimeDeps(deps, defaults)
+}
+
+func normalizeCatchInstallCoreDeps(deps, defaults catchInstallDeps) catchInstallDeps {
 	if deps.writeInstallMeta == nil {
 		deps.writeInstallMeta = defaults.writeInstallMeta
 	}
 	if deps.initTSNet == nil {
 		deps.initTSNet = defaults.initTSNet
+	}
+	if deps.ensureManagedServiceAccount == nil {
+		deps.ensureManagedServiceAccount = defaults.ensureManagedServiceAccount
 	}
 	if deps.newInstaller == nil {
 		deps.newInstaller = defaults.newInstaller
@@ -1328,6 +1344,10 @@ func normalizeCatchInstallDeps(deps catchInstallDeps) catchInstallDeps {
 	if deps.readFile == nil {
 		deps.readFile = defaults.readFile
 	}
+	return deps
+}
+
+func normalizeCatchInstallRuntimeDeps(deps, defaults catchInstallDeps) catchInstallDeps {
 	if deps.logf == nil {
 		deps.logf = defaults.logf
 	}

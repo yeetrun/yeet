@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -25,6 +26,127 @@ import (
 	"github.com/yeetrun/yeet/pkg/netns"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
+
+func TestFileInstallerCloseRechecksIdentityRecoveryInsideLock(t *testing.T) {
+	server := newTestServer(t)
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "api"},
+		NoBinary:     true,
+		StageOnly:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewFileInstaller: %v", err)
+	}
+	server.setServiceIdentityMutationBlock("api", errors.New("recovery required"))
+	if err := installer.Close(); !errors.Is(err, errServiceIdentityRecoveryBlocked) {
+		t.Fatalf("Close error = %v, want identity recovery block", err)
+	}
+	dv, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := dv.Services().GetOk("api"); ok {
+		t.Fatal("Close mutated the service despite recovery block")
+	}
+}
+
+func TestFileInstallerOwnsServiceLockForLifetime(t *testing.T) {
+	server := newTestServer(t)
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "api"},
+		NoBinary:     true,
+		StageOnly:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	acquired := make(chan struct{})
+	go func() {
+		release := server.serviceOperationLocks.Lock("api")
+		close(acquired)
+		release()
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("service lock was released before installer Close")
+	case <-time.After(25 * time.Millisecond):
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-acquired:
+	case <-time.After(time.Second):
+		t.Fatal("service lock remained held after installer Close")
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("second Close: %v", err)
+	}
+}
+
+func TestFileInstallerConstructorErrorReleasesServiceLock(t *testing.T) {
+	server := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(root, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "api", ServiceRoot: root},
+	}); err == nil {
+		t.Fatal("NewFileInstaller error = nil, want invalid service root error")
+	}
+
+	release := server.serviceOperationLocks.Lock("api")
+	release()
+}
+
+func TestFileInstallerCloseErrorAndFailReleaseLifetimeLock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		fail bool
+	}{
+		{name: "close-error"},
+		{name: "fail-then-close", fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+			installer, err := NewFileInstaller(server, FileInstallerCfg{
+				InstallerCfg: InstallerCfg{ServiceName: "api"},
+				NoBinary:     true,
+				StageOnly:    true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.fail {
+				installer.Fail()
+			} else {
+				server.setServiceIdentityMutationBlock("api", errors.New("recovery required"))
+			}
+
+			acquired := make(chan struct{})
+			go func() {
+				release := server.serviceOperationLocks.Lock("api")
+				close(acquired)
+				release()
+			}()
+			select {
+			case <-acquired:
+				t.Fatal("Fail or pending Close released service lock")
+			case <-time.After(25 * time.Millisecond):
+			}
+			if err := installer.Close(); err == nil {
+				t.Fatal("Close error = nil, want failure")
+			}
+			select {
+			case <-acquired:
+			case <-time.After(time.Second):
+				t.Fatal("service lock remained held after failed Close")
+			}
+		})
+	}
+}
 
 func TestFileInstallerRollbackInstalledGenerationRestoresCapturedGeneration(t *testing.T) {
 	server := newTestServer(t)
@@ -869,7 +991,7 @@ func TestInstallerCloseStagesEnvFileAndCleansTemp(t *testing.T) {
 	}
 }
 
-func TestNewFileInstallerCreatesDirsUnderCustomServiceRoot(t *testing.T) {
+func TestNewFileInstallerRemovesNewCustomRootAfterFailedInstall(t *testing.T) {
 	server := newTestServer(t)
 	customRoot := filepath.Join(t.TempDir(), "custom-root")
 
@@ -889,15 +1011,8 @@ func TestNewFileInstallerCreatesDirsUnderCustomServiceRoot(t *testing.T) {
 		t.Fatalf("Close error = %v, want installation failed cleanup", err)
 	}
 
-	for _, dir := range []string{"bin", "run", "env", "data"} {
-		path := filepath.Join(customRoot, dir)
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat %s: %v", dir, err)
-		}
-		if !info.IsDir() {
-			t.Fatalf("%s is not a directory", path)
-		}
+	if _, err := os.Lstat(customRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed new service root remains: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(server.defaultServiceRootDir("custom-root-svc"), "bin")); !os.IsNotExist(err) {
 		t.Fatalf("default service root was created for custom-root-svc: %v", err)
@@ -954,6 +1069,11 @@ func TestNewFileInstallerPersistsCustomServiceRoot(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("NewFileInstaller returned error: %v", err)
+	}
+	installer.ensureManagedServiceAccount = func() (resolvedServiceIdentity, error) {
+		return resolvedServiceIdentity{Persisted: db.ServiceIdentity{
+			RequestedUser: "1000", RequestedGroup: "1000", UID: 1000, GID: 1000,
+		}}, nil
 	}
 	if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
 		t.Fatalf("Write returned error: %v", err)
@@ -1219,6 +1339,22 @@ func TestNewFileInstallerExistingServiceRootMismatchRejectsWithServiceSetHint(t 
 	}
 }
 
+func TestNewFileInstallerConstructorFailureRemovesNewServiceRoot(t *testing.T) {
+	server := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "new-service-root")
+
+	_, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "constructor-failure", ServiceRoot: root},
+		PayloadName:  "\x00",
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to create temp file") {
+		t.Fatalf("NewFileInstaller error = %v, want temp file creation failure", err)
+	}
+	if _, statErr := os.Lstat(root); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("new service root remains after constructor failure: %v", statErr)
+	}
+}
+
 func TestInstallerCloseFailedCleansTempAndCachesError(t *testing.T) {
 	var printed []string
 	installer, err := NewFileInstaller(newTestServer(t), FileInstallerCfg{
@@ -1413,6 +1549,11 @@ func TestInstallerCloseStagesScriptPayloadWithSystemdUnit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFileInstaller returned error: %v", err)
 	}
+	installer.ensureManagedServiceAccount = func() (resolvedServiceIdentity, error) {
+		return resolvedServiceIdentity{Persisted: db.ServiceIdentity{
+			RequestedUser: "70000", RequestedGroup: "70001", UID: 70000, GID: 70001,
+		}}, nil
+	}
 	if _, err := installer.Write([]byte("#!/bin/sh\necho hi\n")); err != nil {
 		t.Fatalf("Write returned error: %v", err)
 	}
@@ -1441,9 +1582,11 @@ func TestInstallerCloseStagesScriptPayloadWithSystemdUnit(t *testing.T) {
 	}
 	unit := string(unitRaw)
 	for _, want := range []string{
-		fmt.Sprintf("ExecStart=%s --flag\n", filepath.Join(server.serviceRunDir("script-svc"), "script-svc")),
+		fmt.Sprintf("ExecStart=%s --flag\n", binaryPath),
 		fmt.Sprintf("WorkingDirectory=%s\n", server.serviceDataDir("script-svc")),
-		fmt.Sprintf("EnvironmentFile=-%s\n", filepath.Join(server.serviceRunDir("script-svc"), "env")),
+		fmt.Sprintf("EnvironmentFile=-%s\n", filepath.Join(server.serviceEnvDir("script-svc"), "env")),
+		"User=70000\n",
+		"Group=70001\n",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("systemd unit missing %q:\n%s", want, unit)
@@ -1655,6 +1798,205 @@ func TestNewSystemdUnitBindsResolverForLANNetNS(t *testing.T) {
 	}
 }
 
+func TestNewSystemdUnitUsesImmutableGenerationAndResolvedIdentity(t *testing.T) {
+	server := newTestServer(t)
+	root := server.defaultServiceRootDir("api")
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "api"},
+			Args:         []string{"--serve"},
+		},
+		resolvedIdentity: resolvedServiceIdentity{
+			Persisted: db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1002, GID: 1010},
+			UserName:  "app",
+			GroupName: "workers",
+		},
+	}
+	exe := filepath.Join(root, "bin", "api-20260718.1")
+	unit, err := installer.newSystemdUnit(exe)
+	if err != nil {
+		t.Fatalf("newSystemdUnit: %v", err)
+	}
+	if unit.Executable != exe || unit.WorkingDirectory != filepath.Join(root, "data") || unit.EnvFile != "-"+filepath.Join(root, "env", "env") {
+		t.Fatalf("unit paths = %#v", unit)
+	}
+	if unit.User != "app" || unit.Group != "workers" {
+		t.Fatalf("unit identity = %q:%q, want app:workers", unit.User, unit.Group)
+	}
+}
+
+func TestNewSystemdUnitUsesNumericIdentityWithoutNames(t *testing.T) {
+	server := newTestServer(t)
+	installer := &FileInstaller{
+		s:   server,
+		cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "api"}},
+		resolvedIdentity: resolvedServiceIdentity{Persisted: db.ServiceIdentity{
+			RequestedUser: "70000", RequestedGroup: "70001", UID: 70000, GID: 70001,
+		}},
+	}
+	unit, err := installer.newSystemdUnit(filepath.Join(server.serviceBinDir("api"), "api-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unit.User != "70000" || unit.Group != "70001" {
+		t.Fatalf("unit identity = %q:%q, want 70000:70001", unit.User, unit.Group)
+	}
+}
+
+func TestNewSystemdUnitKeepsCatchPrivilegedWithoutIdentityDirectives(t *testing.T) {
+	server := newTestServer(t)
+	installer := &FileInstaller{
+		s:   server,
+		cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: CatchService}},
+		resolvedIdentity: resolvedServiceIdentity{Persisted: db.ServiceIdentity{
+			RequestedUser: "app", RequestedGroup: "app", UID: 1002, GID: 1003,
+		}},
+	}
+	unit, err := installer.newSystemdUnit(filepath.Join(server.serviceBinDir(CatchService), "catch-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unit.User != "" || unit.Group != "" {
+		t.Fatalf("Catch unit identity = %q:%q, want privileged empty directives", unit.User, unit.Group)
+	}
+	if unit.EnvFile != "-"+filepath.Join(server.serviceEnvDir(CatchService), "env") {
+		t.Fatalf("Catch unit env = %q, want managed env path", unit.EnvFile)
+	}
+}
+
+func TestResolveNativeInstallIdentityDefersExistingChangesToMigration(t *testing.T) {
+	current := db.ServiceIdentity{RequestedUser: "70000", RequestedGroup: "70001", UID: 70000, GID: 70001}
+	rootIdentity, err := resolveServiceIdentity("root")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name          string
+		existing      *db.Service
+		runAs         string
+		runAsSet      bool
+		want          db.ServiceIdentity
+		wantErr       string
+		wantMigration bool
+	}{
+		{name: "new explicit numeric", runAs: "70000:70001", runAsSet: true, want: current},
+		{name: "existing omitted preserves", existing: &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, Identity: &current}, want: current},
+		{name: "legacy nil explicit root persists", existing: &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd}, runAs: "root", runAsSet: true, want: rootIdentity.Persisted, wantMigration: true},
+		{name: "existing same explicit", existing: &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, Identity: &current}, runAs: "70000:70001", runAsSet: true, want: current},
+		{name: "existing different migrates", existing: &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, Identity: &current}, runAs: "70002:70003", runAsSet: true, want: db.ServiceIdentity{RequestedUser: "70002", RequestedGroup: "70003", UID: 70002, GID: 70003}, wantMigration: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			installer := &FileInstaller{cfg: FileInstallerCfg{RunAs: tt.runAs, RunAsSet: tt.runAsSet}}
+			if tt.existing != nil {
+				installer.existingService = tt.existing.View()
+			}
+			err := installer.resolveNativeInstallIdentity()
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if installer.resolvedIdentity.Persisted != tt.want {
+				t.Fatalf("identity = %#v, want %#v", installer.resolvedIdentity.Persisted, tt.want)
+			}
+			if installer.identityMigrationNeeded != tt.wantMigration {
+				t.Fatalf("identityMigrationNeeded = %t, want %t", installer.identityMigrationNeeded, tt.wantMigration)
+			}
+		})
+	}
+}
+
+func TestResolveNativeInstallIdentitySelectsManagedDefaultForNewNativeService(t *testing.T) {
+	want := resolvedServiceIdentity{Persisted: db.ServiceIdentity{
+		RequestedUser: managedServiceUser, RequestedGroup: managedServiceUser, UID: 991, GID: 992,
+	}}
+	installer := &FileInstaller{
+		ensureManagedServiceAccount: func() (resolvedServiceIdentity, error) { return want, nil },
+	}
+	if err := installer.resolveNativeInstallIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	if installer.resolvedIdentity != want || !installer.newNativeIdentity {
+		t.Fatalf("resolved/new = %#v %t, want %#v true", installer.resolvedIdentity, installer.newNativeIdentity, want)
+	}
+}
+
+func TestResolveNativeInstallIdentityTreatsCrashedProvisionalRowAsNew(t *testing.T) {
+	want := resolvedServiceIdentity{Persisted: db.ServiceIdentity{
+		RequestedUser: managedServiceUser, RequestedGroup: managedServiceUser, UID: 991, GID: 992,
+	}}
+	provisional := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd, IdentityInstallPending: true,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactBinary:      {Refs: map[db.ArtifactRef]string{"staged": "/var/lib/yeet/services/api/bin/api-staged"}},
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": "/var/lib/yeet/services/api/bin/api.service-staged"}},
+		},
+	}
+	installer := &FileInstaller{
+		existingService:             provisional.View(),
+		ensureManagedServiceAccount: func() (resolvedServiceIdentity, error) { return want, nil },
+	}
+	if err := installer.resolveNativeInstallIdentity(); err != nil {
+		t.Fatal(err)
+	}
+	if installer.resolvedIdentity != want || !installer.newNativeIdentity || !installer.nativePredecessorAbsent {
+		t.Fatalf("resolved/new/absent = %#v %t %t, want %#v true true", installer.resolvedIdentity, installer.newNativeIdentity, installer.nativePredecessorAbsent, want)
+	}
+}
+
+func TestNewNativeInstallRoutesIdentityAndGenerationThroughOneTransaction(t *testing.T) {
+	server := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "api")
+	if err := ensureDirsForRoot(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	unitArtifact := filepath.Join(serviceBinDirForRoot(root), "api.service")
+	identity := db.ServiceIdentity{RequestedUser: "70000", RequestedGroup: "70001", UID: 70000, GID: 70001}
+	unit := "[Service]\nUser=70000\nGroup=70001\nWorkingDirectory=" + serviceDataDirForRoot(root) + "\n"
+	if err := os.WriteFile(unitArtifact, []byte(unit), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": {
+		Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: root,
+		Artifacts: db.ArtifactStore{db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": unitArtifact}}},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	var got serviceIdentityMigrationRequest
+	installer := &FileInstaller{
+		s:                 server,
+		cfg:               FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "api"}},
+		resolvedIdentity:  resolvedServiceIdentity{Persisted: identity},
+		newNativeIdentity: true,
+		migrateServiceIdentityFunc: func(_ context.Context, req serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
+			got = req
+			return serviceIdentityMigrationResult{Current: req.Target}, nil
+		},
+	}
+	if err := installer.installStagedService(); err != nil {
+		t.Fatal(err)
+	}
+	if !got.StartNew || !got.PredecessorAbsent || got.TargetService == nil || got.TargetService.Generation != 1 || got.TargetService.LatestGeneration != 1 || got.TargetService.Identity == nil || *got.TargetService.Identity != identity {
+		t.Fatalf("migration request = %#v", got)
+	}
+	if got.ReplacementUnit != unit || got.StageGeneration == nil || got.InstallGeneration != nil || installer.installedGeneration != 1 {
+		t.Fatalf("replacement/stage/activate/generation = %q %t %t %d", got.ReplacementUnit, got.StageGeneration != nil, got.InstallGeneration != nil, installer.installedGeneration)
+	}
+	service, err := server.serviceView("api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Identity().Valid() || service.Generation() != 0 {
+		t.Fatalf("adapter mutated DB before engine commit: %#v", service.AsStruct())
+	}
+}
+
 func TestInstallerCloseNoBinaryRewritesExistingSystemdArtifact(t *testing.T) {
 	server := newTestServer(t)
 	oldUnit := filepath.Join(server.serviceBinDir("nobin-svc"), "nobin-svc-old.service")
@@ -1705,6 +2047,9 @@ func TestInstallerCloseNoBinaryRewritesExistingSystemdArtifact(t *testing.T) {
 
 func TestInstallerCloseNoBinaryRegeneratesNetNSSystemdArtifact(t *testing.T) {
 	server := newTestServer(t)
+	identity := db.ServiceIdentity{
+		RequestedUser: "70000", RequestedGroup: "70001", UID: 70000, GID: 70001,
+	}
 	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
 	hostDefaultRouteInterfaceFn = func() (string, error) {
 		return "vmbr0", nil
@@ -1723,8 +2068,10 @@ func TestInstallerCloseNoBinaryRegeneratesNetNSSystemdArtifact(t *testing.T) {
 	addTestServices(t, server, db.Service{
 		Name:        "nobin-lan",
 		ServiceType: db.ServiceTypeSystemd,
+		Identity:    &identity,
 		Artifacts: db.ArtifactStore{
 			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": oldUnit}},
+			db.ArtifactBinary:      {Refs: map[db.ArtifactRef]string{"latest": filepath.Join(server.serviceBinDir("nobin-lan"), "nobin-lan-1")}},
 		},
 	})
 	installer, err := NewFileInstaller(server, FileInstallerCfg{
@@ -1751,6 +2098,9 @@ func TestInstallerCloseNoBinaryRegeneratesNetNSSystemdArtifact(t *testing.T) {
 	}
 	unit := string(unitRaw)
 	for _, want := range []string{
+		"ExecStart=" + filepath.Join(server.serviceBinDir("nobin-lan"), "nobin-lan-1"),
+		"User=70000",
+		"Group=70001",
 		"NetworkNamespacePath=/var/run/netns/yeet-nobin-lan-ns",
 		"BindPaths=/etc/netns/yeet-nobin-lan-ns/resolv.conf:/etc/resolv.conf",
 		"PrivateMounts=yes",
@@ -2031,6 +2381,9 @@ func TestInstallerCloseStagesComposeLANTailscaleUnitBindsNetNSResolver(t *testin
 	installer := &FileInstaller{
 		s:           server,
 		serviceRoot: server.defaultServiceRootDir(service),
+		resolvedIdentity: resolvedServiceIdentity{Persisted: db.ServiceIdentity{
+			RequestedUser: "app", RequestedGroup: "app", UID: 1002, GID: 1003,
+		}},
 		cfg: FileInstallerCfg{
 			InstallerCfg: InstallerCfg{ServiceName: service},
 			Network: NetworkOpts{
@@ -2060,9 +2413,17 @@ func TestInstallerCloseStagesComposeLANTailscaleUnitBindsNetNSResolver(t *testin
 		"NetworkNamespacePath=/var/run/netns/yeet-lan-ts-ns",
 		"BindPaths=/etc/netns/yeet-lan-ts-ns/resolv.conf:/etc/resolv.conf",
 		"PrivateMounts=yes",
+		"ExecStart=" + filepath.Join(server.serviceBinDir(service), "tailscaled"),
+		"--config=" + filepath.Join(server.serviceEnvDir(service), "tailscaled.json"),
+		"EnvironmentFile=" + filepath.Join(server.serviceEnvDir(service), "tailscaled.env"),
 	} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("tailscale unit missing %q:\n%s", want, unit)
+		}
+	}
+	for _, forbidden := range []string{"User=app", "Group=app"} {
+		if strings.Contains(unit, forbidden) {
+			t.Fatalf("privileged tailscale unit contains %q:\n%s", forbidden, unit)
 		}
 	}
 }
@@ -2647,11 +3008,15 @@ func TestPrepareNoBinaryInstallVariants(t *testing.T) {
 
 func TestReuseExistingSystemdUnitBranches(t *testing.T) {
 	server := newTestServer(t)
+	unitPath := filepath.Join(t.TempDir(), "unit.service")
+	if err := os.WriteFile(unitPath, []byte("[Service]\nExecStart=/old/reuse-unit --keep value\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	addTestServices(t, server, db.Service{
 		Name:        "reuse-unit",
 		ServiceType: db.ServiceTypeSystemd,
 		Artifacts: db.ArtifactStore{
-			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": filepath.Join(t.TempDir(), "unit.service")}},
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": unitPath}},
 		},
 	})
 	installer := &FileInstaller{
@@ -2666,8 +3031,16 @@ func TestReuseExistingSystemdUnitBranches(t *testing.T) {
 	if !reused {
 		t.Fatal("reuseExistingSystemdUnit returned reused=false, want true")
 	}
-	if installer.artifacts != nil {
-		t.Fatalf("artifacts = %#v, want no rewrite without args", installer.artifacts)
+	rewritten := installer.artifacts[db.ArtifactSystemdUnit]
+	if rewritten == "" || rewritten == unitPath {
+		t.Fatalf("rewritten unit = %q, want a new staged unit", rewritten)
+	}
+	raw, err := os.ReadFile(rewritten)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(raw); !strings.Contains(got, "ExecStart=/srv/reuse-unit --keep value\n") {
+		t.Fatalf("rewritten unit did not retarget immutable executable and preserve args:\n%s", got)
 	}
 
 	addTestServices(t, server, db.Service{
@@ -2888,7 +3261,7 @@ func TestTempFilePathInitAndCleanupBranches(t *testing.T) {
 	}
 }
 
-func TestNewFileInstallerReportsEnsureDirsError(t *testing.T) {
+func TestNewFileInstallerRejectsNonDirectoryServiceRootComponent(t *testing.T) {
 	server := newTestServer(t)
 	servicesRoot := filepath.Join(t.TempDir(), "services")
 	if err := os.WriteFile(servicesRoot, []byte("not a directory"), 0644); err != nil {
@@ -2899,8 +3272,8 @@ func TestNewFileInstallerReportsEnsureDirsError(t *testing.T) {
 	_, err := NewFileInstaller(server, FileInstallerCfg{
 		InstallerCfg: InstallerCfg{ServiceName: "dir-error"},
 	})
-	if err == nil || !strings.Contains(err.Error(), "failed to ensure directories") {
-		t.Fatalf("NewFileInstaller error = %v, want ensure dirs failure", err)
+	if err == nil || !strings.Contains(err.Error(), "must be a non-symlink directory") {
+		t.Fatalf("NewFileInstaller error = %v, want secure root component failure", err)
 	}
 }
 

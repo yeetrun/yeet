@@ -22,6 +22,8 @@ type RunDraft struct {
 	Payload        string            `json:"payload"`
 	PayloadKind    string            `json:"payloadKind,omitempty"`
 	EnvFile        string            `json:"envFile,omitempty"`
+	RunAs          string            `json:"runAs,omitempty"`
+	RunAsSet       bool              `json:"-"`
 	Pull           bool              `json:"pull,omitempty"`
 	EnvFileArg     string            `json:"-"`
 	EnvFileSet     bool              `json:"-"`
@@ -125,6 +127,8 @@ func runDraftFromCLI(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverri
 		Host:           host,
 		Payload:        payload,
 		EnvFile:        envFile,
+		RunAs:          effectiveParsed.RunAs,
+		RunAsSet:       effectiveParsed.RunAsSet,
 		Pull:           effectiveParsed.Pull,
 		EnvFileArg:     flags.EnvFileArg,
 		EnvFileSet:     flags.EnvFileSet,
@@ -146,6 +150,9 @@ func (d RunDraft) runArgs() []string {
 		return append([]string{}, d.RunArgs...)
 	}
 	args := runArgsFromDraftNetwork(d.Network)
+	if d.RunAsSet {
+		args = appendRunDraftStringFlag(args, "--run-as", d.RunAs)
+	}
 	if d.Pull {
 		args = append(args, "--pull")
 	}
@@ -407,13 +414,30 @@ func executeCronRunDraft(ctx context.Context, stdout io.Writer, cfgLoc *projectC
 	if err != nil {
 		return err
 	}
-	if err := runCronWithOutputFn(ctx, stdout, draft.Payload, fields, draft.PayloadArgs); err != nil {
+	cronFlags := cli.CronFlags{RunAs: draft.RunAs, RunAsSet: draft.RunAsSet, Schedule: strings.Join(fields, " ")}
+	var runErr error
+	if draft.RunAsSet {
+		runErr = runCronWithOutputIdentity(ctx, stdout, draft.Payload, cronFlags, draft.PayloadArgs)
+	} else {
+		runErr = runCronWithOutputFn(ctx, stdout, draft.Payload, fields, draft.PayloadArgs)
+	}
+	if runErr != nil {
+		return runErr
+	}
+	if err := saveCronConfigWithRunAs(cfgLoc, host, draft.Payload, fields, draft.PayloadArgs, draft.RunAs, draft.RunAsSet); err != nil {
+		if draft.RunAsSet {
+			return serviceIdentityConfigWriteError(serviceConfigHost(host), draft.Service, draft.RunAs, err)
+		}
 		return err
 	}
-	return saveCronConfig(cfgLoc, host, draft.Payload, fields, draft.PayloadArgs)
+	return nil
 }
 
 func runCronWithOutput(ctx context.Context, stdout io.Writer, file string, cronFields []string, binArgs []string) error {
+	return runCronWithOutputIdentity(ctx, stdout, file, cli.CronFlags{Schedule: strings.Join(cronFields, " ")}, binArgs)
+}
+
+func runCronWithOutputIdentity(ctx context.Context, stdout io.Writer, file string, flags cli.CronFlags, binArgs []string) error {
 	goos, goarch, err := remoteCatchOSAndArchFn()
 	if err != nil {
 		return err
@@ -423,11 +447,21 @@ func runCronWithOutput(ctx context.Context, stdout io.Writer, file string, cronF
 		return err
 	}
 	defer cleanup()
+	cronFields := strings.Fields(flags.Schedule)
 	if len(cronFields) != 5 {
 		return fmt.Errorf("cron expression must have 5 fields, got %d", len(cronFields))
 	}
 	svc := getService()
-	nargs := append([]string{"cron"}, cronFields...)
+	nargs := []string{"cron"}
+	if flags.RunAsSet {
+		nargs = append(nargs, "--run-as="+flags.RunAs)
+		nargs = append(nargs, "--schedule="+strings.Join(cronFields, " "))
+		if len(binArgs) > 0 {
+			nargs = append(nargs, "--")
+		}
+	} else {
+		nargs = append(nargs, cronFields...)
+	}
 	if len(binArgs) > 0 {
 		nargs = append(nargs, binArgs...)
 	}
@@ -445,6 +479,9 @@ func executeRunDraftOutput(ctx context.Context, stdout io.Writer, draft RunDraft
 func saveRunDraftExecutionConfig(cfgLoc *projectConfigLocation, host string, draft RunDraft, runArgs []string) error {
 	configRunArgs := runArgsWithoutSensitiveRunOptions(runArgs)
 	if err := saveRunConfigWithPayloadKind(cfgLoc, host, draft.Payload, draft.PayloadKind, configRunArgs, draft.Storage.ServiceRoot, draft.Storage.ZFS); err != nil {
+		if draft.RunAsSet {
+			return serviceIdentityConfigWriteError(host, draft.Service, draft.RunAs, err)
+		}
 		return err
 	}
 	if draft.EnvFileSet {

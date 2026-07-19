@@ -13,7 +13,7 @@ import (
 	"tailscale.com/types/views"
 )
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,ServiceIdentity,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent
 
 // View returns a read-only view of Data.
 func (p *Data) View() DataView {
@@ -189,8 +189,13 @@ func (v *ServiceView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 }
 
 // Name is the name of the service.
-func (v ServiceView) Name() string             { return v.ж.Name }
-func (v ServiceView) ServiceType() ServiceType { return v.ж.ServiceType }
+func (v ServiceView) Name() string                  { return v.ж.Name }
+func (v ServiceView) ServiceType() ServiceType      { return v.ж.ServiceType }
+func (v ServiceView) Identity() ServiceIdentityView { return v.ж.Identity.View() }
+
+// IdentityInstallPending marks a first native install that has staged its
+// database row but has not yet durably entered the identity journal.
+func (v ServiceView) IdentityInstallPending() bool { return v.ж.IdentityInstallPending }
 
 // ServiceRoot is the absolute service root on the catch host.
 // Empty means filepath.Join(Store.serviceRoot, Name).
@@ -233,20 +238,102 @@ func (v ServiceView) ISO() ISOAllocationView      { return v.ж.ISO.View() }
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _ServiceViewNeedsRegeneration = Service(struct {
-	Name             string
-	ServiceType      ServiceType
-	ServiceRoot      string
-	ServiceRootZFS   string
-	SnapshotPolicy   *SnapshotPolicy
-	Generation       int
-	LatestGeneration int
-	Publish          []string
-	Artifacts        ArtifactStore
-	SvcNetwork       *SvcNetwork
-	Macvlan          *MacvlanNetwork
-	TSNet            *TailscaleNetwork
-	VM               *VMConfig
-	ISO              *ISOAllocation
+	Name                   string
+	ServiceType            ServiceType
+	Identity               *ServiceIdentity
+	IdentityInstallPending bool
+	ServiceRoot            string
+	ServiceRootZFS         string
+	SnapshotPolicy         *SnapshotPolicy
+	Generation             int
+	LatestGeneration       int
+	Publish                []string
+	Artifacts              ArtifactStore
+	SvcNetwork             *SvcNetwork
+	Macvlan                *MacvlanNetwork
+	TSNet                  *TailscaleNetwork
+	VM                     *VMConfig
+	ISO                    *ISOAllocation
+}{})
+
+// View returns a read-only view of ServiceIdentity.
+func (p *ServiceIdentity) View() ServiceIdentityView {
+	return ServiceIdentityView{ж: p}
+}
+
+// ServiceIdentityView provides a read-only view over ServiceIdentity.
+//
+// Its methods should only be called if `Valid()` returns true.
+type ServiceIdentityView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *ServiceIdentity
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v ServiceIdentityView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v ServiceIdentityView) AsStruct() *ServiceIdentity {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ServiceIdentityView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ServiceIdentityView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *ServiceIdentityView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x ServiceIdentity
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ServiceIdentityView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x ServiceIdentity
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v ServiceIdentityView) RequestedUser() string  { return v.ж.RequestedUser }
+func (v ServiceIdentityView) RequestedGroup() string { return v.ж.RequestedGroup }
+func (v ServiceIdentityView) UID() uint32            { return v.ж.UID }
+func (v ServiceIdentityView) GID() uint32            { return v.ж.GID }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ServiceIdentityViewNeedsRegeneration = ServiceIdentity(struct {
+	RequestedUser  string
+	RequestedGroup string
+	UID            uint32
+	GID            uint32
 }{})
 
 // View returns a read-only view of SnapshotPolicy.

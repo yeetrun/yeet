@@ -24,13 +24,14 @@ import (
 type snapshotEvent string
 
 const (
-	snapshotEventRun                  snapshotEvent = "run"
-	snapshotEventDockerUpdate         snapshotEvent = "docker-update"
-	snapshotEventServiceRootMigration snapshotEvent = "service-root-migration"
-	snapshotEventManual               snapshotEvent = "manual"
-	snapshotEventVMManual             snapshotEvent = "vm-manual"
-	defaultSnapshotMaxAge                           = 7 * 24 * time.Hour
-	defaultSnapshotKeepLast                         = 5
+	snapshotEventRun                      snapshotEvent = "run"
+	snapshotEventDockerUpdate             snapshotEvent = "docker-update"
+	snapshotEventServiceRootMigration     snapshotEvent = "service-root-migration"
+	snapshotEventServiceIdentityMigration snapshotEvent = "service-identity-migration"
+	snapshotEventManual                   snapshotEvent = "manual"
+	snapshotEventVMManual                 snapshotEvent = "vm-manual"
+	defaultSnapshotMaxAge                               = 7 * 24 * time.Hour
+	defaultSnapshotKeepLast                             = 5
 )
 
 var (
@@ -137,6 +138,34 @@ func (s *Server) createSnapshotForOperation(ctx context.Context, op snapshotOper
 	})
 }
 
+// createServiceIdentityMigrationSnapshot deliberately bypasses the configured
+// snapshot policy. Identity migration changes existing inode ownership in
+// place, so a ZFS-backed service always receives a recovery snapshot before
+// the durable inventory is sealed and any inode is mutated.
+func (s *Server) createServiceIdentityMigrationSnapshot(ctx context.Context, service *db.Service, journal *serviceIdentityJournal) (string, error) {
+	if service == nil || journal == nil {
+		return "", fmt.Errorf("service and identity journal are required for migration snapshot")
+	}
+	dataset := strings.TrimSpace(service.ServiceRootZFS)
+	if dataset == "" {
+		if err := journal.Seal(); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
+	snapshot, err := createServiceSnapshot(ctx, s.zfsRunner, snapshotCreateRequest{
+		Service: service.Name, Dataset: dataset, Event: snapshotEventServiceIdentityMigration,
+		Generation: intPointer(service.Generation), Now: time.Now(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("create mandatory service identity migration snapshot for %q: %w", service.Name, err)
+	}
+	if err := journal.Seal(snapshot); err != nil {
+		return snapshot, fmt.Errorf("seal service identity journal after snapshot %s: %w", snapshot, err)
+	}
+	return snapshot, nil
+}
+
 func (s *Server) finishSnapshotOperation(ctx context.Context, op snapshotOperation, policy effectivePolicy, now time.Time, snapshotName string, opErr error) error {
 	if err := s.pruneServiceSnapshots(ctx, op.Service, policy, now, snapshotName); err != nil {
 		writeSnapshotWarning(op.Writer, "warning: failed to prune ZFS snapshots for %q: %v\n", op.Service.Name, err)
@@ -195,6 +224,7 @@ func effectiveSnapshotPolicy(server, service *db.SnapshotPolicy) (effectivePolic
 			string(snapshotEventRun),
 			string(snapshotEventDockerUpdate),
 			string(snapshotEventServiceRootMigration),
+			string(snapshotEventServiceIdentityMigration),
 		},
 		Required: boolPointer(true),
 	}
@@ -255,7 +285,7 @@ func effectiveSnapshotEvents(raw []string) (map[snapshotEvent]struct{}, error) {
 	events := make(map[snapshotEvent]struct{}, len(raw))
 	for _, event := range raw {
 		switch snapshotEvent(event) {
-		case snapshotEventRun, snapshotEventDockerUpdate, snapshotEventServiceRootMigration, snapshotEventManual:
+		case snapshotEventRun, snapshotEventDockerUpdate, snapshotEventServiceRootMigration, snapshotEventServiceIdentityMigration, snapshotEventManual:
 			events[snapshotEvent(event)] = struct{}{}
 		default:
 			return nil, fmt.Errorf("invalid snapshot event %q", event)
@@ -347,6 +377,7 @@ func effectiveSnapshotEventStrings(events map[snapshotEvent]struct{}) []string {
 		snapshotEventRun,
 		snapshotEventDockerUpdate,
 		snapshotEventServiceRootMigration,
+		snapshotEventServiceIdentityMigration,
 		snapshotEventManual,
 	}
 	out := make([]string, 0, len(events))

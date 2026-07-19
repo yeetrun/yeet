@@ -1743,6 +1743,51 @@ func TestDoInstallEmptyJailerUpgradeAllowsInitialCatchInstall(t *testing.T) {
 	}
 }
 
+func TestCatchInstallEnsuresServiceAccount(t *testing.T) {
+	t.Run("before installing Catch unit", func(t *testing.T) {
+		var order []string
+		installer := &fakeCatchInstaller{closeHook: func() { order = append(order, "install-catch") }}
+		deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, installer)
+		deps.prepareVMJailerUpgrade = emptyCatchVMJailerUpgrade
+		deps.ensureManagedServiceAccount = func() error {
+			order = append(order, "ensure-service-account")
+			return nil
+		}
+		deps.newInstaller = func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
+			order = append(order, "create-installer")
+			return installer, nil
+		}
+
+		if err := doInstallWith(&catch.Config{}, t.TempDir(), deps); err != nil {
+			t.Fatalf("doInstallWith: %v", err)
+		}
+		want := []string{"ensure-service-account", "create-installer", "install-catch"}
+		if !reflect.DeepEqual(order, want) {
+			t.Fatalf("install order = %#v, want %#v", order, want)
+		}
+	})
+
+	t.Run("failure stops before Catch unit", func(t *testing.T) {
+		wantErr := errors.New("incompatible account")
+		installerCalls := 0
+		deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, &fakeCatchInstaller{})
+		deps.prepareVMJailerUpgrade = emptyCatchVMJailerUpgrade
+		deps.ensureManagedServiceAccount = func() error { return wantErr }
+		deps.newInstaller = func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
+			installerCalls++
+			return &fakeCatchInstaller{}, nil
+		}
+
+		err := doInstallWith(&catch.Config{}, t.TempDir(), deps)
+		if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "prepare managed native service account") {
+			t.Fatalf("doInstallWith error = %v, want wrapped %v", err, wantErr)
+		}
+		if installerCalls != 0 {
+			t.Fatalf("newInstaller calls = %d, want 0", installerCalls)
+		}
+	})
+}
+
 func TestDoInstallHoldsInstallLockThroughUpgradeClose(t *testing.T) {
 	var order []string
 	installer := &fakeCatchInstaller{rollbackAvailable: true, closeHook: func() { order = append(order, "install-catch") }}
@@ -1847,8 +1892,9 @@ func TestAcquireCatchInstallLockValidatesDataRootOwnerAndMode(t *testing.T) {
 
 func successfulCatchInstallDeps(ts installTSNet, inst catchServiceInstaller) catchInstallDeps {
 	return catchInstallDeps{
-		writeInstallMeta: func(string) error { return nil },
-		initTSNet:        func(string) (installTSNet, error) { return ts, nil },
+		writeInstallMeta:            func(string) error { return nil },
+		initTSNet:                   func(string) (installTSNet, error) { return ts, nil },
+		ensureManagedServiceAccount: func() error { return nil },
 		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			return inst, nil
 		},
@@ -1872,6 +1918,7 @@ func TestDoInstallWritesCurrentExecutableWithGeneratedServiceConfig(t *testing.T
 	var gotCfg *catch.Config
 	var gotInstallerCfg catch.FileInstallerCfg
 	err := doInstallWith(cfg, dataDir, catchInstallDeps{
+		ensureManagedServiceAccount: func() error { return nil },
 		writeInstallMeta: func(dir string) error {
 			metaDir = dir
 			return nil
@@ -1944,8 +1991,9 @@ func TestDoInstallExecutableErrorFailsInstaller(t *testing.T) {
 	inst := &fakeCatchInstaller{}
 
 	err := doInstallWith(&catch.Config{}, dataDir, catchInstallDeps{
-		writeInstallMeta: func(string) error { return nil },
-		initTSNet:        func(string) (installTSNet, error) { return ts, nil },
+		writeInstallMeta:            func(string) error { return nil },
+		initTSNet:                   func(string) (installTSNet, error) { return ts, nil },
+		ensureManagedServiceAccount: func() error { return nil },
 		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			return inst, nil
 		},
@@ -1983,8 +2031,9 @@ func TestDoInstallExecutableErrorFailsInstaller(t *testing.T) {
 func TestDoInstallRequiresTSNet(t *testing.T) {
 	newInstallerCalled := false
 	err := doInstallWith(&catch.Config{}, t.TempDir(), catchInstallDeps{
-		writeInstallMeta: func(string) error { return nil },
-		initTSNet:        func(string) (installTSNet, error) { return nil, nil },
+		writeInstallMeta:            func(string) error { return nil },
+		initTSNet:                   func(string) (installTSNet, error) { return nil, nil },
+		ensureManagedServiceAccount: func() error { return nil },
 		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			newInstallerCalled = true
 			return nil, nil
@@ -2017,8 +2066,9 @@ func TestDoInstallValidationAndInstallerErrors(t *testing.T) {
 	ts := &fakeInstallTSNet{}
 	wantErr := errors.New("installer failed")
 	err := doInstallWith(&catch.Config{}, t.TempDir(), catchInstallDeps{
-		writeInstallMeta: func(string) error { return nil },
-		initTSNet:        func(string) (installTSNet, error) { return ts, nil },
+		writeInstallMeta:            func(string) error { return nil },
+		initTSNet:                   func(string) (installTSNet, error) { return ts, nil },
+		ensureManagedServiceAccount: func() error { return nil },
 		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			return nil, wantErr
 		},
@@ -2064,7 +2114,7 @@ func TestWriteCurrentExecutableReadAndWriteErrorsFailInstaller(t *testing.T) {
 func TestNormalizeCatchInstallDepsFillsDefaults(t *testing.T) {
 	deps := normalizeCatchInstallDeps(catchInstallDeps{})
 	if deps.writeInstallMeta == nil || deps.initTSNet == nil || deps.newInstaller == nil ||
-		deps.executable == nil || deps.readFile == nil || deps.logf == nil || deps.tsnetHost == nil {
+		deps.ensureManagedServiceAccount == nil || deps.executable == nil || deps.readFile == nil || deps.logf == nil || deps.tsnetHost == nil {
 		t.Fatalf("normalizeCatchInstallDeps left default unset: %#v", deps)
 	}
 }

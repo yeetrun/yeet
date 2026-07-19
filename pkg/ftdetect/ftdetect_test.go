@@ -8,12 +8,31 @@ import (
 	"debug/elf"
 	"debug/macho"
 	"encoding/binary"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 )
+
+func TestDetectOpenedFileClosesDescriptor(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := newFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileType, err := detectOpenedFile(opened, runtime.GOOS, runtime.GOARCH)
+	if err != nil || fileType != Script {
+		t.Fatalf("detect opened file = %v, %v", fileType, err)
+	}
+	if _, err := opened.f.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("opened payload descriptor remains usable: %v", err)
+	}
+}
 
 func TestDetectFileByExtension(t *testing.T) {
 	t.Parallel()

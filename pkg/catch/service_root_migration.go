@@ -49,7 +49,101 @@ func buildServiceRootMigrationPlanWithRunner(ctx context.Context, cfg Config, ru
 			return serviceRootMigrationPlan{}, err
 		}
 	}
-	return serviceRootMigrationPlan{ServiceName: svc.Name, OldRoot: oldRoot, OldRootZFS: oldRootZFS, NewRoot: newRoot, NewRootZFS: resolved.Dataset}, nil
+	newRootExisted, newRootSkeleton, newRootState, err := captureServiceRootMigrationTarget(newRoot)
+	if err != nil {
+		return serviceRootMigrationPlan{}, err
+	}
+	return serviceRootMigrationPlan{
+		ServiceName: svc.Name, OldRoot: oldRoot, OldRootZFS: oldRootZFS,
+		NewRoot: newRoot, NewRootZFS: resolved.Dataset, CreateNewRootZFS: resolved.Created,
+		NewRootExisted: newRootExisted, NewRootSkeleton: newRootSkeleton, NewRootState: newRootState,
+		GuardSource: serviceRootCopyRequiresGuard(svc),
+	}, nil
+}
+
+func captureServiceRootMigrationTarget(root string) (bool, bool, []serviceRootTargetPathState, error) {
+	_, statErr := os.Lstat(root)
+	existed := statErr == nil
+	if statErr != nil && !os.IsNotExist(statErr) {
+		return false, false, nil, fmt.Errorf("inspect target service root %s: %w", root, statErr)
+	}
+	if !existed {
+		return false, false, nil, nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false, false, nil, fmt.Errorf("inspect target service root contents %s: %w", root, err)
+	}
+	skeleton := len(entries) != 0
+	state, err := captureServiceRootTargetState(root, skeleton)
+	return true, skeleton, state, err
+}
+
+func serviceRootCopyRequiresGuard(service db.Service) bool {
+	return service.ServiceType == db.ServiceTypeSystemd && service.Name != CatchService &&
+		effectiveServiceIdentity(service.View()).Persisted.UID != 0
+}
+
+func captureServiceRootTargetState(root string, skeleton bool) ([]serviceRootTargetPathState, error) {
+	paths, err := serviceRootTargetStatePaths(root, skeleton)
+	if err != nil {
+		return nil, err
+	}
+	state := make([]serviceRootTargetPathState, 0, len(paths))
+	for _, rel := range paths {
+		entry, err := captureServiceRootTargetPathState(root, rel)
+		if err != nil {
+			return nil, err
+		}
+		state = append(state, entry)
+	}
+	return state, nil
+}
+
+func serviceRootTargetStatePaths(root string, skeleton bool) ([]string, error) {
+	paths := []string{"."}
+	if !skeleton {
+		return paths, nil
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, fmt.Errorf("capture target service root entries %s: %w", root, err)
+	}
+	retrySafe, err := rootIsRetrySafeServiceRootSkeleton(root, entries)
+	if err != nil {
+		return nil, err
+	}
+	if !retrySafe {
+		return nil, fmt.Errorf("service root %q must be empty or a retry-safe service layout", root)
+	}
+	for _, path := range serviceDirectoryPlan(root) {
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, rel)
+	}
+	return paths, nil
+}
+
+func captureServiceRootTargetPathState(root, rel string) (serviceRootTargetPathState, error) {
+	path := root
+	if rel != "." {
+		path = filepath.Join(root, rel)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return serviceRootTargetPathState{}, fmt.Errorf("capture target service root state %s: %w", path, err)
+	}
+	uid, gid, err := nativeServiceFileOwner(info)
+	if err != nil {
+		return serviceRootTargetPathState{}, err
+	}
+	meta, err := serviceIdentityMetadata(info)
+	if err != nil {
+		return serviceRootTargetPathState{}, err
+	}
+	return serviceRootTargetPathState{Path: rel, Mode: info.Mode(), UID: uid, GID: gid, Dev: meta.Dev, Ino: meta.Ino}, nil
 }
 
 func materializeServiceRootMigration(ctx context.Context, plan serviceRootMigrationPlan, w io.Writer) error {
@@ -59,6 +153,9 @@ func materializeServiceRootMigration(ctx context.Context, plan serviceRootMigrat
 	}
 	switch plan.Mode {
 	case serviceRootMigrationCopy:
+		if plan.GuardSource {
+			return materializeGuardedServiceRootMigration(ctx, plan)
+		}
 		if plan.NewRootZFS != "" {
 			return copyServiceRootMigrationIntoMountedRoot(plan.OldRoot, plan.NewRoot)
 		}
@@ -73,16 +170,65 @@ func materializeServiceRootMigration(ctx context.Context, plan serviceRootMigrat
 	}
 }
 
-func updatedServiceForRootMigration(cfg Config, plan serviceRootMigrationPlan, oldService *db.Service) (*db.Service, error) {
+func materializeGuardedServiceRootMigration(ctx context.Context, plan serviceRootMigrationPlan) error {
+	if err := validateHostControlledServiceRootPath(plan.NewRoot); err != nil {
+		return err
+	}
+	guard, err := newServiceIdentityCopyGuard(ctx, plan.OldRoot, plan.OldRootZFS, nil)
+	if err != nil {
+		return err
+	}
+	if plan.NewRootZFS != "" {
+		return guard.copyIntoMountedRoot(plan.NewRoot)
+	}
+	parent := filepath.Dir(plan.NewRoot)
+	stage, err := os.MkdirTemp(parent, ".yeet-service-root-")
+	if err != nil {
+		return fmt.Errorf("create guarded migration stage: %w", err)
+	}
+	removeStage := true
+	defer func() {
+		if removeStage {
+			_ = os.RemoveAll(stage)
+		}
+	}()
+	if err := guard.copyToStage(stage); err != nil {
+		return err
+	}
+	if err := ensureDirsForRoot(stage, ""); err != nil {
+		return err
+	}
+	if err := removeRetrySafeServiceRootSkeleton(plan.NewRoot); err != nil {
+		return err
+	}
+	if err := renameServiceRoot(stage, plan.NewRoot); err != nil {
+		return fmt.Errorf("move guarded service root into place: %w", err)
+	}
+	removeStage = false
+	return nil
+}
+
+func plannedServiceForRootMigration(cfg Config, plan serviceRootMigrationPlan, oldService *db.Service) (*db.Service, error) {
 	updatedService := oldService.Clone()
 	if plan.Mode == serviceRootMigrationEmpty {
 		updatedService.Artifacts = db.ArtifactStore{}
 	} else if err := relocateServiceRootArtifactRefs(updatedService.Artifacts, plan.OldRoot, plan.NewRoot); err != nil {
 		return nil, err
-	} else if err := rewriteCopiedServiceRootArtifacts(updatedService.Artifacts, plan.OldRoot, plan.NewRoot); err != nil {
-		return nil, err
 	}
 	applyServiceRoot(cfg, plan.ServiceName, updatedService, plan.NewRoot, plan.NewRootZFS)
+	return updatedService, nil
+}
+
+func updatedServiceForRootMigration(cfg Config, plan serviceRootMigrationPlan, oldService *db.Service) (*db.Service, error) {
+	updatedService, err := plannedServiceForRootMigration(cfg, plan, oldService)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Mode == serviceRootMigrationCopy {
+		if err := rewriteCopiedServiceRootArtifacts(updatedService.Artifacts, plan.OldRoot, plan.NewRoot); err != nil {
+			return nil, err
+		}
+	}
 	return updatedService, nil
 }
 
@@ -165,6 +311,7 @@ func planServiceRootBatchMove(cfg Config, service db.Service, oldRoot string, ne
 			OldRootZFS:  service.ServiceRootZFS,
 			NewRoot:     target,
 			NewRootZFS:  serviceRootBatchTargetZFS(service, mode),
+			GuardSource: serviceRootCopyRequiresGuard(service),
 		}
 		if mode == catchrpc.HostStorageMigrateAll {
 			if err := rejectNoopServiceRootMigration(service.Name, move.OldRoot, move.OldRootZFS, move.NewRoot, move.NewRootZFS); err != nil {
@@ -232,12 +379,11 @@ func resolveZFSServiceRootMigrationRequest(ctx context.Context, runner zfsComman
 		return resolvedServiceRoot{}, err
 	}
 	if !exists {
-		if err := preflightMissingZFSServiceRootDataset(ctx, runner, name, oldRoot, oldRootZFS, dataset); err != nil {
+		predictedRoot, err := preflightMissingZFSServiceRootDataset(ctx, runner, name, oldRoot, oldRootZFS, dataset)
+		if err != nil {
 			return resolvedServiceRoot{}, err
 		}
-		if err := zfsCreateDataset(ctx, runner, dataset); err != nil {
-			return resolvedServiceRoot{}, err
-		}
+		return resolvedServiceRoot{Root: predictedRoot, Dataset: dataset, ZFS: true, Created: true}, nil
 	}
 
 	mountpoint, err := zfsDatasetMountpoint(ctx, runner, dataset)
@@ -271,30 +417,32 @@ func applyServiceRoot(cfg Config, name string, service *db.Service, newRoot, new
 	service.ServiceRoot = newRoot
 }
 
-func preflightMissingZFSServiceRootDataset(ctx context.Context, runner zfsCommandRunner, name, oldRoot, oldRootZFS, dataset string) error {
+func preflightMissingZFSServiceRootDataset(ctx context.Context, runner zfsCommandRunner, name, oldRoot, oldRootZFS, dataset string) (string, error) {
 	slash := strings.LastIndex(dataset, "/")
 	if slash <= 0 || slash == len(dataset)-1 {
-		return nil
+		return "", fmt.Errorf("new ZFS service root %q must name a child dataset", dataset)
 	}
 	parentDataset := dataset[:slash]
 	childName := dataset[slash+1:]
 	parentMountpoint, err := zfsDatasetMountpoint(ctx, runner, parentDataset)
 	if err != nil {
-		return err
+		return "", err
 	}
 	parentRoot, _, err := validateZFSMountpoint(parentMountpoint, zfsServiceRootExisting, true)
 	if err != nil {
-		return err
+		return "", err
 	}
 	predictedRoot := filepath.Join(parentRoot, childName)
 	if err := rejectNoopServiceRootMigration(name, oldRoot, oldRootZFS, predictedRoot, dataset); err != nil {
-		return err
+		return "", err
 	}
 	if rootsAreNested(oldRoot, predictedRoot) || rootsAreNested(predictedRoot, oldRoot) {
-		return fmt.Errorf("cannot migrate between nested service roots: %s and %s", oldRoot, predictedRoot)
+		return "", fmt.Errorf("cannot migrate between nested service roots: %s and %s", oldRoot, predictedRoot)
 	}
-	_, err = validateRequestedServiceRoot(predictedRoot)
-	return err
+	if _, err = validateRequestedServiceRoot(predictedRoot); err != nil {
+		return "", err
+	}
+	return predictedRoot, nil
 }
 
 func rejectNoopServiceRootMigration(name, oldRoot, oldRootZFS, newRoot, newRootZFS string) error {
@@ -327,6 +475,10 @@ func (s *Server) refreshServiceRootMigrationPrereqs(oldService, updatedService *
 }
 
 func copyServiceRootMigration(oldRoot, newRoot string) error {
+	return copyServiceRootMigrationWithOptions(oldRoot, newRoot, copyutil.TarOptions{})
+}
+
+func copyServiceRootMigrationWithOptions(oldRoot, newRoot string, opts copyutil.TarOptions) error {
 	parent := filepath.Dir(newRoot)
 	stage, err := os.MkdirTemp(parent, ".yeet-service-root-")
 	if err != nil {
@@ -339,7 +491,7 @@ func copyServiceRootMigration(oldRoot, newRoot string) error {
 		}
 	}()
 
-	if err := copyServiceRootToStage(oldRoot, stage); err != nil {
+	if err := copyServiceRootToStageWithOptions(oldRoot, stage, opts); err != nil {
 		return err
 	}
 	if err := ensureDirsForRoot(stage, ""); err != nil {
@@ -356,6 +508,10 @@ func copyServiceRootMigration(oldRoot, newRoot string) error {
 }
 
 func copyServiceRootMigrationIntoMountedRoot(oldRoot, newRoot string) error {
+	return copyServiceRootMigrationIntoMountedRootWithOptions(oldRoot, newRoot, copyutil.TarOptions{})
+}
+
+func copyServiceRootMigrationIntoMountedRootWithOptions(oldRoot, newRoot string, opts copyutil.TarOptions) error {
 	retrySafeSkeleton, err := mountedRootIsEmptyOrRetrySafeSkeleton(newRoot)
 	if err != nil {
 		return err
@@ -371,7 +527,7 @@ func copyServiceRootMigrationIntoMountedRoot(oldRoot, newRoot string) error {
 		}
 	}()
 
-	if err := copyServiceRootToStage(oldRoot, stage); err != nil {
+	if err := copyServiceRootToStageWithOptions(oldRoot, stage, opts); err != nil {
 		return err
 	}
 	if err := ensureDirsForRoot(stage, ""); err != nil {
@@ -390,10 +546,14 @@ func copyServiceRootMigrationIntoMountedRoot(oldRoot, newRoot string) error {
 }
 
 func copyServiceRootToStage(srcRoot, stageRoot string) error {
+	return copyServiceRootToStageWithOptions(srcRoot, stageRoot, copyutil.TarOptions{})
+}
+
+func copyServiceRootToStageWithOptions(srcRoot, stageRoot string, opts copyutil.TarOptions) error {
 	pr, pw := io.Pipe()
 	errCh := make(chan error, 1)
 	go func() {
-		if err := copyutil.TarDirectory(pw, srcRoot, ""); err != nil {
+		if err := copyutil.TarDirectoryWithOptions(pw, srcRoot, "", opts); err != nil {
 			_ = pw.CloseWithError(err)
 			errCh <- err
 			return

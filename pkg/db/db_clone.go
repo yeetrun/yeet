@@ -91,6 +91,9 @@ func (src *Service) Clone() *Service {
 	}
 	dst := new(Service)
 	*dst = *src
+	if dst.Identity != nil {
+		dst.Identity = ptr.To(*src.Identity)
+	}
 	dst.SnapshotPolicy = src.SnapshotPolicy.Clone()
 	dst.Publish = append(src.Publish[:0:0], src.Publish...)
 	if dst.Artifacts != nil {
@@ -117,20 +120,41 @@ func (src *Service) Clone() *Service {
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _ServiceCloneNeedsRegeneration = Service(struct {
-	Name             string
-	ServiceType      ServiceType
-	ServiceRoot      string
-	ServiceRootZFS   string
-	SnapshotPolicy   *SnapshotPolicy
-	Generation       int
-	LatestGeneration int
-	Publish          []string
-	Artifacts        ArtifactStore
-	SvcNetwork       *SvcNetwork
-	Macvlan          *MacvlanNetwork
-	TSNet            *TailscaleNetwork
-	VM               *VMConfig
-	ISO              *ISOAllocation
+	Name                   string
+	ServiceType            ServiceType
+	Identity               *ServiceIdentity
+	IdentityInstallPending bool
+	ServiceRoot            string
+	ServiceRootZFS         string
+	SnapshotPolicy         *SnapshotPolicy
+	Generation             int
+	LatestGeneration       int
+	Publish                []string
+	Artifacts              ArtifactStore
+	SvcNetwork             *SvcNetwork
+	Macvlan                *MacvlanNetwork
+	TSNet                  *TailscaleNetwork
+	VM                     *VMConfig
+	ISO                    *ISOAllocation
+}{})
+
+// Clone makes a deep copy of ServiceIdentity.
+// The result aliases no memory with the original.
+func (src *ServiceIdentity) Clone() *ServiceIdentity {
+	if src == nil {
+		return nil
+	}
+	dst := new(ServiceIdentity)
+	*dst = *src
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ServiceIdentityCloneNeedsRegeneration = ServiceIdentity(struct {
+	RequestedUser  string
+	RequestedGroup string
+	UID            uint32
+	GID            uint32
 }{})
 
 // Clone makes a deep copy of SnapshotPolicy.

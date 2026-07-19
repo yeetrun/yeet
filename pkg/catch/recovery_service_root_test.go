@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -1257,6 +1258,7 @@ func TestSnapshotsCloneServiceRootDefaultDefinitionInstallDoesNotStartCompose(t 
 }
 
 func TestSnapshotsRestoreServiceRootGenerationSnapshotDoesNotRestartSystemd(t *testing.T) {
+	stubNativeServiceLchown(t)
 	server := newTestServer(t)
 	addTestServices(t, server, db.Service{
 		Name:             "app",
@@ -1299,6 +1301,32 @@ func TestSnapshotsRestoreServiceRootGenerationSnapshotDoesNotRestartSystemd(t *t
 	}
 	if strings.Contains(log, " compose ") && strings.Contains(log, " up") {
 		t.Fatalf("command log = %q, restore generation install should not run docker compose up", log)
+	}
+}
+
+func TestFinishServiceRootRestoreReappliesPersistedNativeIdentity(t *testing.T) {
+	server := newTestServer(t)
+	identity := db.ServiceIdentity{
+		RequestedUser: strconv.Itoa(os.Geteuid()), RequestedGroup: strconv.Itoa(os.Getegid()),
+		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+	}
+	service := &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: filepath.Join(t.TempDir(), "api"), Identity: &identity}
+	oldReconcile := reconcileServiceRootRestoreIdentity
+	var reconciled *db.Service
+	reconcileServiceRootRestoreIdentity = func(_ context.Context, gotServer *Server, gotService *db.Service, _ io.Writer) error {
+		if gotServer != server {
+			t.Fatal("restore identity reconciler received another server")
+		}
+		reconciled = gotService
+		return nil
+	}
+	t.Cleanup(func() { reconcileServiceRootRestoreIdentity = oldReconcile })
+
+	if err := server.finishServiceRootRestore(context.Background(), service, recoveryPoint{}, cli.SnapshotsRestoreFlags{}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("finishServiceRootRestore: %v", err)
+	}
+	if reconciled != service {
+		t.Fatalf("reconciled service = %#v, want restored service", reconciled)
 	}
 }
 
@@ -1579,6 +1607,7 @@ func assertNoServiceRootRestoreScratch(t *testing.T, root string) {
 
 func seedServiceRootRecoveryRestoreSource(t *testing.T, server *Server, generation int, latestGeneration int) {
 	t.Helper()
+	stubNativeServiceLchown(t)
 	activeRoot := t.TempDir()
 	addTestServices(t, server, db.Service{
 		Name:             "app",
@@ -1598,6 +1627,13 @@ func seedServiceRootRecoveryRestoreSource(t *testing.T, server *Server, generati
 			},
 		},
 	})
+}
+
+func stubNativeServiceLchown(t *testing.T) {
+	t.Helper()
+	oldLchown := nativeServiceLchown
+	nativeServiceLchown = func(string, int, int) error { return nil }
+	t.Cleanup(func() { nativeServiceLchown = oldLchown })
 }
 
 func serviceRootRecoverySnapshotLine(snapshot string, serviceName string, generation int) string {

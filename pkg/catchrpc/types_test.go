@@ -124,6 +124,45 @@ func TestServiceInfoSnapshotsIncludePopulated(t *testing.T) {
 	}
 }
 
+func TestServiceInfoIdentityJSONRoundTrip(t *testing.T) {
+	want := ServiceInfo{
+		Name: "api",
+		Identity: &ServiceIdentity{
+			RequestedUser: "app", RequestedGroup: "workers", UID: 1002, GID: 1010,
+			Class: "operator", Mismatch: "user app now resolves to UID 1012",
+		},
+	}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{
+		`"requestedUser":"app"`, `"requestedGroup":"workers"`, `"uid":1002`,
+		`"gid":1010`, `"class":"operator"`, `"mismatch":"user app now resolves to UID 1012"`,
+	} {
+		if !strings.Contains(string(raw), field) {
+			t.Fatalf("ServiceInfo JSON = %s, want %s", raw, field)
+		}
+	}
+	var got ServiceInfo
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("round trip = %#v, want %#v", got, want)
+	}
+}
+
+func TestServiceInfoIdentityOmittedWhenAbsent(t *testing.T) {
+	raw, err := json.Marshal(ServiceInfo{Name: "compose"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "identity") {
+		t.Fatalf("ServiceInfo JSON = %s, want identity omitted", raw)
+	}
+}
+
 func TestServiceNetworkPortsPresenceRoundTrip(t *testing.T) {
 	raw, err := json.Marshal(ServiceNetwork{
 		PortsPresent: true,

@@ -130,6 +130,9 @@ func tailscaleDNSConfigPaths(service *db.Service, serviceRoot string) []string {
 		add(configPath)
 	}
 	if serviceRoot = strings.TrimSpace(serviceRoot); serviceRoot != "" {
+		add(filepath.Join(serviceEnvDirForRoot(serviceRoot), "tailscaled.json"))
+		// Keep reconciling the legacy runtime copy during upgrades until the
+		// service has installed the root-owned env/ replacement.
 		add(filepath.Join(serviceRunDirForRoot(serviceRoot), "tailscaled.json"))
 	}
 	return paths

@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/cli"
 )
 
 func preserveRunDraftGlobals(t *testing.T) {
@@ -723,6 +724,108 @@ func TestExecuteRunDraftCronUsesCronRunnerAndSavesConfig(t *testing.T) {
 	}
 	if entry.Type != serviceTypeCron || entry.Payload != "job.sh" || entry.Schedule != "0 3 * * *" || !reflect.DeepEqual(entry.Args, []string{"--full"}) {
 		t.Fatalf("saved cron entry = %#v", entry)
+	}
+}
+
+func TestExecuteRunDraftCronRunAsReportsConfigPartialSuccess(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldArch, oldExec, oldCreate := remoteCatchOSAndArchFn, execRemoteToFn, createProjectConfigFileFn
+	t.Cleanup(func() {
+		remoteCatchOSAndArchFn, execRemoteToFn, createProjectConfigFileFn = oldArch, oldExec, oldCreate
+	})
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	remoteCalls := 0
+	execRemoteToFn = func(context.Context, string, []string, io.Reader, bool, io.Writer) error {
+		remoteCalls++
+		return nil
+	}
+	payload := filepath.Join(t.TempDir(), "job.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: projectConfigVersion}}
+	createProjectConfigFileFn = func(string) (io.WriteCloser, error) { return nil, errors.New("disk full") }
+	err := executeRunDraftWithOptions(context.Background(), RunDraft{
+		Service:     "api",
+		Host:        "host.example.com",
+		Payload:     payload,
+		PayloadKind: serviceTypeCron,
+		RunAs:       "app:app",
+		RunAsSet:    true,
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+	}, loc, runDraftExecuteOptions{Stdout: io.Discard})
+	want := `service identity changed on host.example.com, but yeet.toml was not updated; set run_as = "app:app" for service "api" and retry sync`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+	if remoteCalls != 1 {
+		t.Fatalf("remote calls = %d, want 1", remoteCalls)
+	}
+}
+
+func TestRunDraftFromCLIRunAsOverridesConfig(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "api")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	serviceOverride = "api"
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: 1, Services: []ServiceEntry{{Name: "api", Host: "host-a", Payload: "api", RunAs: "stored"}}}}
+	draft, err := runDraftFromCLI([]string{payload, "--run-as=cli"}, loc, "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.RunAs != "cli" || !draft.RunAsSet {
+		t.Fatalf("draft identity = %q/%v", draft.RunAs, draft.RunAsSet)
+	}
+	if got := draft.runArgs(); !reflect.DeepEqual(got, []string{"--run-as=cli"}) {
+		t.Fatalf("run args = %#v", got)
+	}
+}
+
+func TestRunDraftFromCLIPreservesAbsentLegacyRunAs(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "api")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	serviceOverride = "api"
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: 1, Services: []ServiceEntry{{Name: "api", Host: "host-a", Payload: "api"}}}}
+	draft, err := runDraftFromCLI([]string{payload}, loc, "host-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.RunAs != "" || draft.RunAsSet || runArgsHaveFlag(draft.runArgs(), "--run-as") {
+		t.Fatalf("legacy draft = %#v args=%#v", draft, draft.runArgs())
+	}
+}
+
+func TestRunCronWithOutputForwardsCanonicalRunAs(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldRemoteArch := remoteCatchOSAndArchFn
+	oldExecRemoteTo := execRemoteToFn
+	defer func() { remoteCatchOSAndArchFn = oldRemoteArch; execRemoteToFn = oldExecRemoteTo }()
+	serviceOverride = "backup"
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	var got []string
+	execRemoteToFn = func(_ context.Context, _ string, args []string, _ io.Reader, _ bool, _ io.Writer) error {
+		got = append([]string{}, args...)
+		return nil
+	}
+	payload := filepath.Join(t.TempDir(), "backup")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := runCronWithOutputIdentity(context.Background(), io.Discard, payload, cli.CronFlags{RunAs: "backup", RunAsSet: true, Schedule: "0 3 * * *"}, []string{"--daily"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cron", "--run-as=backup", "--schedule=0 3 * * *", "--", "--daily"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
 	}
 }
 
@@ -1628,6 +1731,41 @@ func TestExecuteRunDraftSavesEnvFileOnlyWhenExplicitlySet(t *testing.T) {
 				t.Fatalf("EnvFile = %q, want %q", entry.EnvFile, tt.wantEnv)
 			}
 		})
+	}
+}
+
+func TestSaveRunDraftExecutionConfigPreservesRunAsWithEnvFile(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	serviceOverride = "api"
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "api")
+	envFile := filepath.Join(tmp, ".env")
+	draft := RunDraft{
+		Service:    "api",
+		Host:       "host-a",
+		Payload:    payload,
+		RunAs:      "app:app",
+		RunAsSet:   true,
+		EnvFile:    envFile,
+		EnvFileArg: envFile,
+		EnvFileSet: true,
+	}
+	loc := &projectConfigLocation{
+		Path: filepath.Join(tmp, projectConfigName),
+		Dir:  tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+			Name: "api", Host: "host-a", Payload: "old-api", EnvFile: "old.env",
+		}}},
+	}
+	if err := saveRunDraftExecutionConfig(loc, "host-a", draft, draft.runArgs()); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := loc.Config.ServiceEntry("api", "host-a")
+	if !ok {
+		t.Fatal("saved config missing api@host-a")
+	}
+	if entry.RunAs != "app:app" || entry.EnvFile != ".env" {
+		t.Fatalf("saved identity/env = %q/%q, want app:app/.env", entry.RunAs, entry.EnvFile)
 	}
 }
 

@@ -69,6 +69,7 @@ type clientServiceEntry struct {
 	Schedule    string   `json:"schedule,omitempty"`
 	Args        []string `json:"args,omitempty"`
 	Ports       []string `json:"ports,omitempty"`
+	RunAs       string   `json:"runAs,omitempty"`
 }
 
 type clientPayloadInfo struct {
@@ -258,6 +259,7 @@ func buildClientInfo(cfgLoc *projectConfigLocation, service, host string, hostIn
 		Schedule:    entry.Schedule,
 		Args:        entry.Args,
 		Ports:       entry.Ports,
+		RunAs:       entry.RunAs,
 	}
 	info.Payload = inspectPayloadWithKind(entry.Payload, entry.PayloadKind, cfgLoc.Dir, hostInfo, hostInfoErr)
 	return info
@@ -770,6 +772,9 @@ func clientSavedRows(entry *clientServiceEntry) []infoRow {
 	if entry.Type != "" {
 		rows = append(rows, infoRow{Label: "Saved type", Value: entry.Type})
 	}
+	if entry.RunAs != "" {
+		rows = append(rows, infoRow{Label: "Saved run as", Value: entry.RunAs})
+	}
 	return rows
 }
 
@@ -843,10 +848,32 @@ func renderServerSection(server catchrpc.ServiceInfoResponse) infoSection {
 	if info.Staged {
 		rows = append(rows, infoRow{Label: "Staged changes", Value: "yes"})
 	}
+	if info.Identity != nil {
+		rows = append(rows, infoRow{Label: "Run as", Value: formatServiceIdentityInfo(info.Identity)})
+		if info.Identity.Mismatch != "" {
+			rows = append(rows, infoRow{Label: "Identity warning", Value: info.Identity.Mismatch})
+		}
+	}
 	if info.Paths.Root != "" {
 		rows = append(rows, infoRow{Label: "Root dir", Value: info.Paths.Root})
 	}
 	return infoSection{Title: "Server (catch)", Rows: rows}
+}
+
+func formatServiceIdentityInfo(identity *catchrpc.ServiceIdentity) string {
+	if identity == nil {
+		return ""
+	}
+	class := strings.ReplaceAll(strings.TrimSpace(identity.Class), "-", " ")
+	prefix := "UID"
+	if identity.Class == "managed" {
+		prefix = "system UID"
+	}
+	detail := fmt.Sprintf("%s %d, GID %d", prefix, identity.UID, identity.GID)
+	if class != "" {
+		detail += "; " + class
+	}
+	return fmt.Sprintf("%s:%s (%s)", identity.RequestedUser, identity.RequestedGroup, detail)
 }
 
 func formatServiceBackend(backend string) string {

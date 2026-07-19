@@ -68,6 +68,51 @@ func TestServiceSyncNamedWritesZFSDatasetToConfig(t *testing.T) {
 	}
 }
 
+func TestServiceSyncWritesNativeRunAsFromCatch(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	loadedPrefs.DefaultHost = "host-a"
+	writeSvcBranchConfig(t, tmp, ServiceEntry{Name: "api", Host: "host-a", Type: serviceTypeRun, Payload: "api", RunAs: "old:old"})
+	fetchServiceInfoForSyncFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: "systemd", Paths: catchrpc.ServicePaths{ServiceRoot: "/srv/api"},
+			Identity: &catchrpc.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1002, GID: 1010, Class: "operator"},
+		}}, nil
+	}
+
+	out, err := captureSvcStdout(t, func() error { return HandleSvcCmd([]string{"service", "sync", "api"}) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `run_as = "app:workers"`) {
+		t.Fatalf("sync output = %q, want run_as", out)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := loaded.Config.ServiceEntry("api", "host-a")
+	if entry.RunAs != "app:workers" {
+		t.Fatalf("entry run_as = %q, want app:workers", entry.RunAs)
+	}
+}
+
+func TestServiceSyncLeavesDockerRunAsUntouchedWhenIdentityOmitted(t *testing.T) {
+	cfg := &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+		Name: "compose", Host: "host-a", Type: serviceTypeRun, RunAs: "legacy-local-value",
+	}}}
+	result := &serviceSyncResult{}
+	if err := syncServiceIdentity(cfg, serviceSyncTarget{Service: "compose", Host: "host-a"}, catchrpc.ServiceInfo{
+		ServiceType: "docker-compose",
+	}, result); err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := cfg.ServiceEntry("compose", "host-a")
+	if entry.RunAs != "legacy-local-value" || result.RunAsSynced {
+		t.Fatalf("entry/result = %#v %#v, want identity untouched", entry, result)
+	}
+}
+
 func TestServiceSyncNamedUsesExplicitConfig(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	cwd := useTempSvcCwd(t)

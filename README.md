@@ -31,7 +31,10 @@ Yeet can deploy:
 - Cron jobs
 - Linux VMs on KVM-capable hosts
 
-It fits single-operator homelabs and small private infrastructure. It expects Linux hosts with systemd. Services currently run as root-owned systemd units on the catch host.
+It fits single-operator homelabs and small private infrastructure. It expects
+Linux hosts with systemd. New native binaries, scripts, and cron jobs run as
+the unprivileged `yeet-svc` account by default; Docker and VM identities stay
+in their own runtimes.
 
 Yeet is for hosts you control. It is not a multi-tenant platform.
 
@@ -269,6 +272,42 @@ yeet run <svc> ./script.sh -- --app-flag value
 ```bash
 yeet cron <svc> ./job.sh "0 9 * * *"
 ```
+
+New native binaries, scripts, and cron-style timers run as the managed
+`yeet-svc` system account by default. Choose an existing host account with
+`--run-as=USER[:GROUP]` when the workload needs it:
+
+```bash
+yeet run <svc> ./bin/<svc> --run-as=app:app
+yeet cron <svc> ./job.sh "0 9 * * *" --run-as=backup
+```
+
+Docker execution identities stay in Compose (`user:`), and VM host execution
+uses the separate `yeet-vm` jailer account. Existing native services keep their
+current identity until you migrate one explicitly:
+
+```bash
+yeet service set <svc> --run-as=yeet-svc
+yeet service set <svc> \
+  --service-root=/var/lib/yeet/services/<svc> \
+  --copy \
+  --run-as=yeet-svc
+```
+
+The migration stops the native workload, verifies the service root, updates
+ownership and systemd definitions as one rollback-safe transaction, and then
+restores its prior running state. ZFS-backed roots remain on their configured
+dataset. Non-root native workloads cannot request privileged host ports below
+1024; use a higher host port or keep that workload explicitly root-owned.
+
+Custom service roots must live below host-controlled directories. Every parent
+must be owned by root and must not be group- or world-writable; `/srv/apps` and
+ZFS mountpoints are typical choices, while a workload-owned home directory is
+rejected because the workload could replace paths while Catch operates on them.
+For an operator-created account, systemd also applies that account's configured
+supplementary groups. Review memberships such as `docker` before selecting it.
+`yeet ssh <svc>` deliberately clears supplementary groups for a more restricted
+service shell.
 
 ### VM
 
@@ -532,7 +571,11 @@ mise run quality
 
 Yeet is for hosts you control.
 
-It is not a multi-tenant service platform. Services managed by catch currently run as root-owned systemd units. Access is operation-scoped through Tailscale app permissions, and that helps, but it does not turn your homelab into a public cloud.
+It is not a multi-tenant service platform. The default `yeet-svc` account
+reduces native workload privilege but is shared across those workloads, while
+Catch and host-management helpers remain root-owned. Access is operation-scoped
+through Tailscale app permissions, and that helps, but it does not turn your
+homelab into a public cloud.
 
 This is a tool for making private infrastructure easier to operate, not for making unsafe boundaries safe by naming them.
 

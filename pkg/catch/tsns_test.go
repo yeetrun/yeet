@@ -150,6 +150,12 @@ func TestNewTailscaleSystemdUnitPlansTapAndNetNSModes(t *testing.T) {
 	if tap.NetNS != "" || tap.Wants != "" || len(tap.ExecStartPre) != 0 {
 		t.Fatalf("tap unit has netns fields: %+v", tap)
 	}
+	if tap.Executable != "/srv/demo/bin/tailscaled" || tap.EnvFile != "/srv/demo/env/tailscaled.env" {
+		t.Fatalf("tap managed paths = executable %q env %q", tap.Executable, tap.EnvFile)
+	}
+	if got := strings.Join(tap.Arguments, " "); !strings.Contains(got, "--config=/srv/demo/env/tailscaled.json") || !strings.Contains(got, "--socket=/srv/demo/run/tailscaled.sock") {
+		t.Fatalf("tap args use wrong stable/runtime paths: %q", got)
+	}
 
 	netns := newTailscaleSystemdUnit(tailscaleInstallPlan{
 		service:       "demo",

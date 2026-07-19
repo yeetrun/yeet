@@ -488,6 +488,21 @@ func TestValidateRunDraftCronRejectsBadSchedule(t *testing.T) {
 	}
 }
 
+func TestValidateRunDraftRunAsRejectsUnsupportedPayloadKinds(t *testing.T) {
+	for _, tt := range []struct{ kind, want string }{
+		{kind: serviceTypeVM, want: "does not control VM guest"},
+		{kind: "python", want: "applies only to native systemd workloads"},
+		{kind: "typescript", want: "applies only to native systemd workloads"},
+		{kind: "local-image", want: "applies only to native systemd workloads"},
+	} {
+		draft := RunDraft{Service: "api", Host: "host-a", Payload: "payload", PayloadKind: tt.kind, RunAs: "app", RunAsSet: true}
+		_, result := validateRunDraftLocal(draft, t.TempDir())
+		if result.OK || !strings.Contains(result.fieldError("runAs"), tt.want) {
+			t.Fatalf("kind %q result = %#v, want %q", tt.kind, result, tt.want)
+		}
+	}
+}
+
 func TestValidateRunDraftCronRejectsRunOnlyFields(t *testing.T) {
 	_, validation := validateRunDraft(context.Background(), RunDraft{
 		Service:     "backup",

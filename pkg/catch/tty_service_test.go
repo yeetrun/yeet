@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
@@ -311,6 +312,90 @@ func TestServiceActionCommandsUseRunner(t *testing.T) {
 				t.Fatalf("runner calls = %#v, want %#v", runner.calls, tc.want)
 			}
 		})
+	}
+}
+
+func TestServiceActionCommandsRecheckIdentityRecoveryAfterLock(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*ttyExecer) error
+	}{
+		{name: "start", run: (*ttyExecer).startCmdFunc},
+		{name: "stop", run: (*ttyExecer).stopCmdFunc},
+		{name: "restart", run: (*ttyExecer).restartCmdFunc},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+			runner := &recordingServiceRunner{}
+			execer := &ttyExecer{
+				ctx:      context.Background(),
+				s:        server,
+				sn:       "api",
+				rw:       &bytes.Buffer{},
+				progress: catchrpc.ProgressQuiet,
+				serviceRunnerFn: func() (ServiceRunner, error) {
+					return runner, nil
+				},
+			}
+
+			release := server.serviceOperationLocks.Lock("api")
+			done := make(chan error, 1)
+			go func() { done <- tc.run(execer) }()
+			select {
+			case err := <-done:
+				release()
+				t.Fatalf("%s bypassed service lock: %v", tc.name, err)
+			case <-time.After(25 * time.Millisecond):
+			}
+			server.setServiceIdentityMutationBlock("api", errors.New("recovery required"))
+			release()
+
+			select {
+			case err := <-done:
+				if !errors.Is(err, errServiceIdentityRecoveryBlocked) {
+					t.Fatalf("%s error = %v, want identity recovery block", tc.name, err)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("%s did not resume after service lock release", tc.name)
+			}
+			if len(runner.calls) != 0 {
+				t.Fatalf("%s runner calls = %#v, want none", tc.name, runner.calls)
+			}
+		})
+	}
+}
+
+func TestDispatchSerializesManageCommandWithoutAnInnerLock(t *testing.T) {
+	server := newTestServer(t)
+	runner := &recordingServiceRunner{}
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "api", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+	}
+
+	release := server.serviceOperationLocks.Lock("api")
+	done := make(chan error, 1)
+	go func() { done <- execer.dispatch([]string{"disable"}) }()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("disable bypassed service mutation lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	server.setServiceIdentityMutationBlock("api", errors.New("recovery required"))
+	release()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errServiceIdentityRecoveryBlocked) {
+			t.Fatalf("disable error = %v, want identity recovery block", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("disable did not resume after service mutation lock release")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("disable runner calls = %#v, want none", runner.calls)
 	}
 }
 

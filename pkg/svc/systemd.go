@@ -6,19 +6,24 @@ package svc
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"text/template"
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/fileutil"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sys/unix"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
 	"tailscale.com/ipn/ipnstate"
@@ -26,6 +31,19 @@ import (
 )
 
 type Status string
+
+type InstallTargetState struct {
+	Path    string
+	Present bool
+	Mode    os.FileMode
+	UID     uint32
+	GID     uint32
+	Nlink   uint64
+	Size    int64
+	SHA256  string
+}
+
+var systemdInstallTargetFlistxattr = unix.Flistxattr
 
 const (
 	StatusRunning Status = "Running"
@@ -61,7 +79,9 @@ RestartSec=1
 RestartSteps=10
 RestartMaxDelaySec=60
 {{if .User}}User={{.User}}{{end}}
+{{if .Group}}Group={{.Group}}{{end}}
 {{if .EnvFile}}EnvironmentFile={{.EnvFile}}{{end}}
+{{if and .User .WorkingDirectory}}Environment=HOME={{.WorkingDirectory}} USER={{.User}} LOGNAME={{.User}} SHELL=/bin/sh{{end}}
 {{if .NetNS}}NetworkNamespacePath=/var/run/netns/{{.NetNS}}{{end}}
 {{if .OneShot}}RemainAfterExit=yes{{end}}
 {{if .StopCmd}}ExecStop={{.StopCmd}}{{end}}
@@ -101,6 +121,8 @@ var (
 
 const tailscaleReadyTimeout = 30 * time.Second
 
+const catchSystemServiceName = "catch"
+
 type SystemdUnit struct {
 	Name string // Required name of the service. No spaces suggested.
 
@@ -109,6 +131,9 @@ type SystemdUnit struct {
 
 	// User is the user to run the service as.
 	User string
+
+	// Group is the primary group to run the service as.
+	Group string
 
 	// Executable is the path to the executable to run or the command to run.
 	Executable string
@@ -270,10 +295,11 @@ func closeFile(f *os.File, err *error) {
 }
 
 type SystemdService struct {
-	db         *db.Store
-	cfg        db.ServiceView
-	runDir     string
-	systemdDir string
+	db                   *db.Store
+	cfg                  db.ServiceView
+	runDir               string
+	systemdDir           string
+	flatRuntimeArtifacts bool
 }
 
 func (s *SystemdService) Name() string {
@@ -301,23 +327,40 @@ type installStep struct {
 }
 
 func (s *SystemdService) artifactInstaller() map[db.ArtifactName]artifactInstall {
-	return map[db.ArtifactName]artifactInstall{
+	root := filepath.Dir(s.runDir)
+	binDir := filepath.Join(root, "bin")
+	envDir := filepath.Join(root, "env")
+	if s.flatRuntimeArtifacts {
+		binDir = s.runDir
+		envDir = s.runDir
+	}
+	installers := map[db.ArtifactName]artifactInstall{
 		db.ArtifactSystemdUnit:      {dstPath: s.servicePath(), unit: s.serviceUnit()},
 		db.ArtifactSystemdTimerFile: {dstPath: s.timerPath(), unit: s.timerUnit(), primaryUnitIfAvailable: true},
 
 		db.ArtifactNetNSService: {dstPath: s.netnsServicePath(), unit: s.netnsServiceUnit()},
-		db.ArtifactNetNSEnv:     {dstPath: filepath.Join(s.runDir, "netns.env")},
+		db.ArtifactNetNSEnv:     {dstPath: filepath.Join(envDir, "netns.env")},
 
 		db.ArtifactTypeScriptFile: {dstPath: filepath.Join(s.runDir, "main.ts")},
 		db.ArtifactPythonFile:     {dstPath: filepath.Join(s.runDir, "main.py")},
-		db.ArtifactBinary:         {dstPath: filepath.Join(s.runDir, s.Name())},
-		db.ArtifactEnvFile:        {dstPath: filepath.Join(s.runDir, "env")},
+		db.ArtifactEnvFile:        {dstPath: filepath.Join(envDir, "env")},
 
 		db.ArtifactTSService: {dstPath: s.tailscaledServicePath(), unit: s.tailscaledServiceUnit()},
-		db.ArtifactTSEnv:     {dstPath: filepath.Join(s.runDir, "tailscaled.env")},
-		db.ArtifactTSBinary:  {dstPath: filepath.Join(s.runDir, "tailscaled")},
-		db.ArtifactTSConfig:  {dstPath: filepath.Join(s.runDir, "tailscaled.json")},
+		db.ArtifactTSEnv:     {dstPath: filepath.Join(envDir, "tailscaled.env")},
+		db.ArtifactTSBinary:  {dstPath: filepath.Join(binDir, "tailscaled")},
+		db.ArtifactTSConfig:  {dstPath: filepath.Join(envDir, "tailscaled.json")},
 	}
+	// Self-managed host services retain their flat compatibility layout. Catch
+	// is also the stable runner embedded in VM units. Native workload units
+	// execute their immutable generation directly and have no such copy.
+	if s.keepsStableRuntimeBinary() {
+		installers[db.ArtifactBinary] = artifactInstall{dstPath: filepath.Join(s.runDir, s.Name())}
+	}
+	return installers
+}
+
+func (s *SystemdService) keepsStableRuntimeBinary() bool {
+	return s.Name() == catchSystemServiceName || s.flatRuntimeArtifacts
 }
 
 func (s *SystemdService) installPlan() []installStep {
@@ -327,7 +370,11 @@ func (s *SystemdService) installPlan() []installStep {
 		db.ArtifactSystemdTimerFile,
 		db.ArtifactNetNSService,
 		db.ArtifactNetNSEnv,
-		db.ArtifactBinary,
+	}
+	if s.keepsStableRuntimeBinary() {
+		artifactOrder = append(artifactOrder, db.ArtifactBinary)
+	}
+	artifactOrder = append(artifactOrder,
 		db.ArtifactTypeScriptFile,
 		db.ArtifactPythonFile,
 		db.ArtifactEnvFile,
@@ -335,7 +382,7 @@ func (s *SystemdService) installPlan() []installStep {
 		db.ArtifactTSEnv,
 		db.ArtifactTSBinary,
 		db.ArtifactTSConfig,
-	}
+	)
 	plan := make([]installStep, 0, len(artifactOrder))
 	for _, artifact := range artifactOrder {
 		plan = append(plan, installStep{
@@ -374,17 +421,185 @@ func (s *SystemdService) installArtifacts(plan []installStep) error {
 			continue
 		}
 		log.Printf("copying %s to %s", srcPath, step.dstPath)
-		if err := fileutil.CopyFile(srcPath, step.dstPath); err != nil {
+		if err := s.installArtifact(step, srcPath); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func (s *SystemdService) installArtifact(step installStep, srcPath string) error {
+	identity := s.cfg.Identity()
+	if step.artifact != db.ArtifactSystemdUnit || !identity.Valid() {
+		return fileutil.CopyFile(srcPath, step.dstPath)
+	}
+	return installSystemdUnitWithIdentity(srcPath, step.dstPath, identity.RequestedUser(), identity.RequestedGroup())
+}
+
+func installSystemdUnitWithIdentity(srcPath, dstPath, user, group string) (retErr error) {
+	src, err := os.OpenFile(srcPath, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := src.Close(); retErr == nil {
+			retErr = closeErr
+		}
+	}()
+	info, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("systemd unit artifact %s is not a regular file", srcPath)
+	}
+	raw, err := io.ReadAll(src)
+	if err != nil {
+		return err
+	}
+	rewritten, err := rewriteInstalledSystemdUnitIdentity(string(raw), user, group)
+	if err != nil {
+		return fmt.Errorf("enforce persisted service identity in %s: %w", srcPath, err)
+	}
+	return writeInstalledSystemdUnit(dstPath, []byte(rewritten), info.Mode().Perm())
+}
+
+func rewriteInstalledSystemdUnitIdentity(raw, user, group string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("unit is empty")
+	}
+	rewriter := installedSystemdIdentityRewriter{
+		user: user, updates: map[string]string{"User": user, "Group": group}, seen: map[string]bool{},
+	}
+	lines := strings.Split(strings.TrimSuffix(raw, "\n"), "\n")
+	rewriter.out = make([]string, 0, len(lines)+3)
+	for _, line := range lines {
+		rewriter.appendLine(line)
+	}
+	if !rewriter.seenService {
+		return "", fmt.Errorf("unit has no [Service] section")
+	}
+	if rewriter.inService {
+		rewriter.flush()
+	}
+	return strings.Join(rewriter.out, "\n") + "\n", nil
+}
+
+type installedSystemdIdentityRewriter struct {
+	user             string
+	updates          map[string]string
+	seen             map[string]bool
+	out              []string
+	inService        bool
+	seenService      bool
+	workingDirectory string
+}
+
+func (r *installedSystemdIdentityRewriter) appendLine(line string) {
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+		r.appendSection(line, trimmed)
+		return
+	}
+	if r.inService && (r.appendUpdatedDirective(trimmed) || isSystemdIdentityEnvironment(trimmed)) {
+		return
+	}
+	r.out = append(r.out, line)
+}
+
+func (r *installedSystemdIdentityRewriter) appendSection(line, section string) {
+	if r.inService {
+		r.flush()
+	}
+	r.inService = section == "[Service]"
+	r.seenService = r.seenService || r.inService
+	r.out = append(r.out, line)
+}
+
+func (r *installedSystemdIdentityRewriter) appendUpdatedDirective(line string) bool {
+	key, _, ok := strings.Cut(line, "=")
+	if !ok {
+		return false
+	}
+	if key == "WorkingDirectory" {
+		r.workingDirectory = strings.TrimSpace(strings.TrimPrefix(line, "WorkingDirectory="))
+	}
+	value, replace := r.updates[key]
+	if !replace {
+		return false
+	}
+	if !r.seen[key] {
+		r.out = append(r.out, key+"="+value)
+		r.seen[key] = true
+	}
+	return true
+}
+
+func (r *installedSystemdIdentityRewriter) flush() {
+	for _, key := range []string{"User", "Group"} {
+		if !r.seen[key] {
+			r.out = append(r.out, key+"="+r.updates[key])
+			r.seen[key] = true
+		}
+	}
+	if r.workingDirectory != "" {
+		r.out = append(r.out, systemdIdentityEnvironment(r.user, r.workingDirectory))
+	}
+}
+
+func systemdIdentityEnvironment(user, workingDirectory string) string {
+	return "Environment=HOME=" + workingDirectory + " USER=" + user + " LOGNAME=" + user + " SHELL=/bin/sh"
+}
+
+func isSystemdIdentityEnvironment(line string) bool {
+	return strings.HasPrefix(line, "Environment=HOME=") && strings.Contains(line, " USER=") &&
+		strings.Contains(line, " LOGNAME=") && strings.HasSuffix(line, " SHELL=/bin/sh")
+}
+
+func writeInstalledSystemdUnit(path string, raw []byte, mode os.FileMode) (retErr error) {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			if closeErr := tmp.Close(); retErr == nil {
+				retErr = closeErr
+			}
+		}
+		if retErr != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if _, err := tmp.Write(raw); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	closed = true
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return fileutil.SyncDir(dir)
+}
+
 func removeOptionalArtifact(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to remove optional artifact %s: %v", path, err)
 	} else if err == nil {
+		if syncErr := fileutil.SyncDir(filepath.Dir(path)); syncErr != nil {
+			return fmt.Errorf("sync optional artifact removal %s: %w", path, syncErr)
+		}
 		log.Printf("removed optional artifact %s", path)
 	}
 	return nil
@@ -409,11 +624,127 @@ func (s *SystemdService) Install() error {
 }
 
 func (s *SystemdService) StageInstallForReload() ([]string, error) {
+	return s.StageInstallForReloadExcluding()
+}
+
+// StageInstallForReloadExcluding stages a generation while leaving the named
+// stable destinations untouched. Transactions use this to reserve the primary
+// unit for their separately journaled atomic unit-write phase.
+func (s *SystemdService) StageInstallForReloadExcluding(excluded ...string) ([]string, error) {
 	plan := s.installPlan()
-	if err := s.installArtifacts(plan); err != nil {
+	excludedPaths := make(map[string]struct{}, len(excluded))
+	for _, path := range excluded {
+		excludedPaths[filepath.Clean(path)] = struct{}{}
+	}
+	filtered := make([]installStep, 0, len(plan))
+	for _, step := range plan {
+		if _, skip := excludedPaths[filepath.Clean(step.dstPath)]; !skip {
+			filtered = append(filtered, step)
+		}
+	}
+	if err := s.installArtifacts(filtered); err != nil {
 		return nil, err
 	}
 	return enabledUnitsForInstallPlan(plan, s.cfg.AsStruct().Artifacts, s.cfg.Generation()), nil
+}
+
+// InstallTargetPaths returns every stable path that StageInstallForReload may
+// replace or remove. Callers that wrap definition installation in a larger
+// transaction use this to preserve the prior files before staging.
+func (s *SystemdService) InstallTargetPaths() []string {
+	plan := s.installPlan()
+	paths := make([]string, 0, len(plan))
+	for _, step := range plan {
+		paths = append(paths, step.dstPath)
+	}
+	return paths
+}
+
+// InstallTargetStatesExcluding computes the exact semantic destination states
+// before a transactional install mutates any stable path.
+func (s *SystemdService) InstallTargetStatesExcluding(excluded ...string) ([]InstallTargetState, error) {
+	excludedPaths := make(map[string]struct{}, len(excluded))
+	for _, path := range excluded {
+		excludedPaths[filepath.Clean(path)] = struct{}{}
+	}
+	af := s.cfg.AsStruct().Artifacts
+	states := make([]InstallTargetState, 0, len(s.installPlan()))
+	for _, step := range s.installPlan() {
+		path := filepath.Clean(step.dstPath)
+		if _, skip := excludedPaths[path]; skip {
+			continue
+		}
+		state, err := s.installTargetState(step, af)
+		if err != nil {
+			return nil, err
+		}
+		states = append(states, state)
+	}
+	return states, nil
+}
+
+func (s *SystemdService) installTargetState(step installStep, artifacts db.ArtifactStore) (InstallTargetState, error) {
+	state := InstallTargetState{Path: filepath.Clean(step.dstPath)}
+	source, present := artifacts.Gen(step.artifact, s.cfg.Generation())
+	if !present {
+		return state, nil
+	}
+	file, err := os.OpenFile(source, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return InstallTargetState{}, fmt.Errorf("open %s artifact for transaction intent: %w", step.artifact, err)
+	}
+	info, err := validateSystemdInstallTargetArtifact(file, step.artifact, source)
+	if err != nil {
+		_ = file.Close()
+		return InstallTargetState{}, err
+	}
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		_ = file.Close()
+		return InstallTargetState{}, err
+	}
+	if err := file.Close(); err != nil {
+		return InstallTargetState{}, err
+	}
+	state.Present = true
+	state.Mode = info.Mode()
+	state.UID = uint32(os.Geteuid())
+	state.GID = uint32(os.Getegid())
+	state.Nlink = 1
+	state.Size = info.Size()
+	state.SHA256 = hex.EncodeToString(hash.Sum(nil))
+	return state, nil
+}
+
+func validateSystemdInstallTargetArtifact(file *os.File, artifact db.ArtifactName, source string) (os.FileInfo, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.Mode().IsRegular() || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || stat.Nlink != 1 {
+		return nil, fmt.Errorf("%s artifact %s is not a safe single-link regular file", artifact, source)
+	}
+	size, xattrErr := systemdInstallTargetFlistxattr(int(file.Fd()), nil)
+	if xattrErr != nil && !errors.Is(xattrErr, unix.ENOTSUP) && !errors.Is(xattrErr, unix.ENODATA) {
+		return nil, xattrErr
+	}
+	if size != 0 {
+		return nil, fmt.Errorf("%s artifact %s has extended attributes that transactional staging cannot preserve", artifact, source)
+	}
+	return info, nil
+}
+
+// PrimaryUnitPath returns the stable systemd unit destination for this service.
+func (s *SystemdService) PrimaryUnitPath() string {
+	return s.servicePath()
+}
+
+// InstallUnits returns the units that Install enables for the current
+// generation without copying artifacts or invoking systemctl.
+func (s *SystemdService) InstallUnits() []string {
+	plan := s.installPlan()
+	return enabledUnitsForInstallPlan(plan, s.cfg.AsStruct().Artifacts, s.cfg.Generation())
 }
 
 func (s *SystemdService) serviceUnit() string {
@@ -468,8 +799,7 @@ func fileExists(path string) bool {
 }
 
 func (s *SystemdService) isTimer() bool {
-	_, ok := s.cfg.Artifacts().GetOk(db.ArtifactSystemdTimerFile)
-	return ok
+	return s.hasArtifact(db.ArtifactSystemdTimerFile)
 }
 
 func (s *SystemdService) PrimaryUnit() string {

@@ -7,6 +7,8 @@ package catch
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -23,8 +25,58 @@ func TestEffectiveSnapshotPolicyDefaults(t *testing.T) {
 	if !got.Enabled || got.KeepLast != 5 || got.MaxAge != 7*24*time.Hour || !got.Required {
 		t.Fatalf("policy = %#v", got)
 	}
-	if !got.Allows(snapshotEventRun) || !got.Allows(snapshotEventDockerUpdate) || !got.Allows(snapshotEventServiceRootMigration) {
+	if !got.Allows(snapshotEventRun) || !got.Allows(snapshotEventDockerUpdate) || !got.Allows(snapshotEventServiceRootMigration) || !got.Allows(snapshotEventServiceIdentityMigration) {
 		t.Fatalf("default events = %#v", got.Events)
+	}
+}
+
+func TestServiceIdentitySnapshotEventParsesAndHasStableOrder(t *testing.T) {
+	events, err := effectiveSnapshotEvents([]string{"manual", "service-identity-migration", "run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"run", "service-identity-migration", "manual"}
+	if got := effectiveSnapshotEventStrings(events); !reflect.DeepEqual(got, want) {
+		t.Fatalf("effectiveSnapshotEventStrings = %#v, want %#v", got, want)
+	}
+}
+
+func TestServiceIdentitySnapshotIsMandatoryAndRecordedAtJournalSeal(t *testing.T) {
+	stateRoot := t.TempDir()
+	serviceRoot := filepath.Join(t.TempDir(), "api")
+	if err := os.MkdirAll(serviceRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	j, err := createServiceIdentityJournal(stateRoot, serviceIdentityJournalHeader{
+		Version: 1, ID: "tx", Service: "api", Root: serviceRoot,
+		TargetIdentity: db.ServiceIdentity{UID: 1000, GID: 1000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer j.Close()
+	var calls [][]string
+	server := &Server{zfsRunner: func(_ context.Context, args ...string) (string, string, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return "", "", nil
+	}}
+	service := &db.Service{Name: "api", ServiceRoot: serviceRoot, ServiceRootZFS: "tank/api", Generation: 3,
+		SnapshotPolicy: &db.SnapshotPolicy{Enabled: boolPtr(false)}}
+
+	snapshot, err := server.createServiceIdentityMigrationSnapshot(context.Background(), service, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot == "" || len(calls) != 1 {
+		t.Fatalf("snapshot = %q, calls = %#v; want mandatory snapshot", snapshot, calls)
+	}
+	contents, err := loadServiceIdentityJournal(j.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := contents.Phases[len(contents.Phases)-1]
+	if last.Phase != serviceIdentityJournalSealPhase || last.ZFSSnapshot != snapshot {
+		t.Fatalf("seal phase = %#v, want snapshot %q", last, snapshot)
 	}
 }
 

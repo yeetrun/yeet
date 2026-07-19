@@ -33,7 +33,11 @@ func TestTsCmdUpdateUsesYeetManagedUpdater(t *testing.T) {
 	if err := os.MkdirAll(runDir, 0o755); err != nil {
 		t.Fatalf("mkdir run dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(runDir, "tailscaled"), []byte("old-daemon"), 0o755); err != nil {
+	serviceBinDir := server.serviceBinDir(svcName)
+	if err := os.MkdirAll(serviceBinDir, 0o755); err != nil {
+		t.Fatalf("mkdir service bin dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(serviceBinDir, "tailscaled"), []byte("old-daemon"), 0o755); err != nil {
 		t.Fatalf("write existing tailscaled: %v", err)
 	}
 
@@ -116,12 +120,12 @@ func TestTsCmdUpdateUsesYeetManagedUpdater(t *testing.T) {
 		t.Fatalf("TSNet.Version = %q, want %q", got, newVersion)
 	}
 
-	runBinary, err := os.ReadFile(filepath.Join(runDir, "tailscaled"))
+	runBinary, err := os.ReadFile(filepath.Join(serviceBinDir, "tailscaled"))
 	if err != nil {
 		t.Fatalf("read run tailscaled: %v", err)
 	}
 	if got := string(runBinary); got != "new-daemon" {
-		t.Fatalf("run tailscaled = %q, want %q", got, "new-daemon")
+		t.Fatalf("managed tailscaled = %q, want %q", got, "new-daemon")
 	}
 
 	systemctlCalls, err := os.ReadFile(systemctlLog)
@@ -210,6 +214,50 @@ func TestTsCmdUpdatePassthroughWithDoubleDash(t *testing.T) {
 	}
 }
 
+func TestTailscaledManagedBinaryPathFollowsGeneratedUnit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "svc")
+	for _, dir := range []string{serviceBinDirForRoot(root), serviceRunDirForRoot(root)} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newPath := filepath.Join(serviceBinDirForRoot(root), "tailscaled")
+	legacyPath := filepath.Join(serviceRunDirForRoot(root), "tailscaled")
+	for _, path := range []string{newPath, legacyPath} {
+		if err := os.WriteFile(path, []byte("old"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tt := range []struct {
+		name string
+		exe  string
+	}{
+		{name: "managed layout", exe: newPath},
+		{name: "legacy layout", exe: legacyPath},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			unit := filepath.Join(t.TempDir(), "tailscale.service")
+			if err := os.WriteFile(unit, []byte("[Service]\nExecStart="+tt.exe+" --statedir=.\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sv := (&db.Service{
+				Name: "svc",
+				Artifacts: db.ArtifactStore{db.ArtifactTSService: {
+					Refs: map[db.ArtifactRef]string{"latest": unit},
+				}},
+			}).View()
+			got, err := tailscaledManagedBinaryPath(sv, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.exe {
+				t.Fatalf("managed binary = %q, want unit executable %q", got, tt.exe)
+			}
+		})
+	}
+}
+
 func TestTsCmdUpdatePinnedVersion(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("requires shell scripts")
@@ -287,6 +335,7 @@ func TestTsCmdUpdatePinnedVersion(t *testing.T) {
 	if got := sv.TSNet().Version(); got != pinnedVersion {
 		t.Fatalf("TSNet.Version = %q, want %q", got, pinnedVersion)
 	}
+	assertFileContent(t, filepath.Join(runDir, "tailscaled"), "pinned-daemon")
 }
 
 func TestTsCmdUpdateCanceledByUser(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
@@ -246,6 +247,28 @@ func TestExtractTarExtractsEntriesAndNotifiesObserver(t *testing.T) {
 	}
 	if entries[1].Size != int64(len("hello")) || entries[2].Linkname != "dir/file.txt" {
 		t.Fatalf("observer entries did not include expected metadata: %#v", entries)
+	}
+}
+
+func TestExtractTarWithOptionsRejectsEntryBeforeWrite(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	writeTarEntry(t, tw, &tar.Header{Name: "device", Typeflag: tar.TypeChar, Mode: 0o600}, nil)
+	if err := tw.Close(); err != nil {
+		t.Fatalf("failed to close tar: %v", err)
+	}
+
+	dest := t.TempDir()
+	err := ExtractTarWithOptions(&buf, dest, ExtractOptions{
+		ValidateEntry: func(entry TarEntry) error {
+			return fmt.Errorf("reject %s", entry.Name)
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "reject device") {
+		t.Fatalf("ExtractTarWithOptions error = %v, want validator rejection", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(dest, "device")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("rejected entry was written: %v", statErr)
 	}
 }
 

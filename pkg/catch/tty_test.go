@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -229,6 +230,118 @@ func TestServiceShellTargetRunsCommandInServiceDataDir(t *testing.T) {
 	want := mustEvalSymlinkPath(t, serviceData)
 	if got != want {
 		t.Fatalf("pwd = %q, want %q", got, want)
+	}
+}
+
+func TestServiceShellCommandUsesPersistedNativeIdentity(t *testing.T) {
+	stubServiceIdentityLookups(t,
+		map[string]*user.User{"app": {Username: "app", Uid: "1002", Gid: "1003"}},
+		map[string]*user.Group{"workers": {Name: "workers", Gid: "1003"}},
+	)
+	server := newTestServer(t)
+	root := server.defaultServiceRootDir("api")
+	data := serviceDataDirForRoot(root)
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatalf("mkdir service data: %v", err)
+	}
+	identity := db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1002, GID: 1003}
+	addTestServices(t, server, db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, Identity: &identity})
+
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "api", rw: &bytes.Buffer{}, isPty: true}
+	cmd, err := execer.serviceShellCommand(nil)
+	if err != nil {
+		t.Fatalf("serviceShellCommand: %v", err)
+	}
+	if cmd.Path != "/bin/sh" || len(cmd.Args) != 1 || cmd.Args[0] != "/bin/sh" {
+		t.Fatalf("service shell command = path %q args %#v, want /bin/sh", cmd.Path, cmd.Args)
+	}
+	if cmd.Dir != data {
+		t.Fatalf("service shell dir = %q, want %q", cmd.Dir, data)
+	}
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential == nil {
+		t.Fatalf("service shell sysproc = %#v, want credential", cmd.SysProcAttr)
+	}
+	credential := cmd.SysProcAttr.Credential
+	if credential.Uid != 1002 || credential.Gid != 1003 || credential.NoSetGroups || len(credential.Groups) != 0 {
+		t.Fatalf("service shell credential = %#v", credential)
+	}
+	if !cmd.SysProcAttr.Setctty || !cmd.SysProcAttr.Setsid {
+		t.Fatalf("service shell lost PTY attributes: %#v", cmd.SysProcAttr)
+	}
+	wantEnv := map[string]string{"HOME": data, "USER": "app", "LOGNAME": "app", "SHELL": "/bin/sh"}
+	for key, want := range wantEnv {
+		if got := envValue(cmd.Env, key); got != want {
+			t.Fatalf("service shell %s = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestServiceShellCommandRejectsPersistedIdentityDrift(t *testing.T) {
+	stubServiceIdentityLookups(t,
+		map[string]*user.User{"app": {Username: "app", Uid: "1004", Gid: "1003"}},
+		map[string]*user.Group{"workers": {Name: "workers", Gid: "1003"}},
+	)
+	server := newTestServer(t)
+	identity := db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1002, GID: 1003}
+	addTestServices(t, server, db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, Identity: &identity})
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "api", rw: &bytes.Buffer{}}
+	if _, err := execer.serviceShellCommand([]string{"true"}); err == nil || !strings.Contains(err.Error(), "UID drift") {
+		t.Fatalf("serviceShellCommand drift error = %v", err)
+	}
+}
+
+func envValue(env []string, key string) string {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix)
+		}
+	}
+	return ""
+}
+
+func TestServiceShellEnvironmentReplacesIdentityVariables(t *testing.T) {
+	base := []string{"PATH=/bin", "HOME=/root", "USER=root", "LOGNAME=root", "SHELL=/bin/bash", "KEEP=yes"}
+	got := serviceShellEnvironment(base, "/srv/api/data", "1002")
+	for key, want := range map[string]string{
+		"PATH": "/bin", "KEEP": "yes", "HOME": "/srv/api/data",
+		"USER": "1002", "LOGNAME": "1002", "SHELL": "/bin/sh",
+	} {
+		if value := envValue(got, key); value != want {
+			t.Fatalf("%s = %q, want %q in %#v", key, value, want, got)
+		}
+	}
+}
+
+func TestServiceShellTargetWaitsForServiceMutationLock(t *testing.T) {
+	server := newTestServer(t)
+	serviceRoot := server.defaultServiceRootDir("api")
+	if err := os.MkdirAll(serviceDataDirForRoot(serviceRoot), 0o755); err != nil {
+		t.Fatalf("mkdir service data: %v", err)
+	}
+	addTestServices(t, server, db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd})
+
+	release := server.serviceOperationLocks.Lock("api")
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, target: catchrpc.ExecTargetServiceShell,
+		sn: "api", args: []string{"true"}, rw: newTestDuplexRW(""),
+	}
+	done := make(chan error, 1)
+	go func() { done <- execer.exec() }()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("service shell bypassed service mutation lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("service shell after lock release: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("service shell did not resume after service mutation lock release")
 	}
 }
 

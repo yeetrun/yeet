@@ -180,7 +180,7 @@ func TestSnapshotsDefaultsShow(t *testing.T) {
 		"enabled = false",
 		"keep_last = 3",
 		"max_age = \"72h\"",
-		"events = [\"run\", \"docker-update\", \"service-root-migration\"]",
+		"events = [\"run\", \"docker-update\", \"service-root-migration\", \"service-identity-migration\"]",
 		"required = true",
 		"",
 	}, "\n")
@@ -1321,6 +1321,7 @@ func TestRunRawTailscaleCmdReportsMissingSocketBeforeDownload(t *testing.T) {
 
 func TestApplyTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
 	server := newTestServer(t)
+	identity := db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "app", UID: 1002, GID: 1003}
 	const (
 		service = "svc"
 		current = "1.92.3"
@@ -1339,12 +1340,17 @@ func TestApplyTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
 	if err := os.MkdirAll(server.serviceRunDir(service), 0o755); err != nil {
 		t.Fatalf("mkdir run: %v", err)
 	}
+	if err := os.MkdirAll(server.serviceBinDir(service), 0o755); err != nil {
+		t.Fatalf("mkdir service bin: %v", err)
+	}
 	if err := server.cfg.DB.Set(&db.Data{
 		Services: map[string]*db.Service{
 			service: {
-				Name:       service,
-				Generation: 4,
-				TSNet:      &db.TailscaleNetwork{Version: current},
+				Name:        service,
+				ServiceType: db.ServiceTypeSystemd,
+				Identity:    &identity,
+				Generation:  4,
+				TSNet:       &db.TailscaleNetwork{Version: current},
 			},
 		},
 	}); err != nil {
@@ -1363,6 +1369,14 @@ func TestApplyTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
 	t.Setenv("SYSTEMCTL_LOG", logPath)
 
 	var out bytes.Buffer
+	var chownedPath string
+	var chownedUID, chownedGID int
+	oldLchown := nativeServiceLchown
+	nativeServiceLchown = func(path string, uid, gid int) error {
+		chownedPath, chownedUID, chownedGID = path, uid, gid
+		return nil
+	}
+	t.Cleanup(func() { nativeServiceLchown = oldLchown })
 	execer := &ttyExecer{
 		ctx: context.Background(),
 		s:   server,
@@ -1373,7 +1387,16 @@ func TestApplyTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
 		t.Fatalf("applyTSUpdate: %v", err)
 	}
 
-	assertFileContent(t, filepath.Join(server.serviceRunDir(service), "tailscaled"), "daemon-new")
+	assertFileContent(t, filepath.Join(server.serviceBinDir(service), "tailscaled"), "daemon-new")
+	managedBinary := filepath.Join(server.serviceBinDir(service), "tailscaled")
+	if chownedPath != managedBinary || chownedUID != 0 || chownedGID != 1003 {
+		t.Fatalf("managed tailscaled owner call = %q %d:%d, want %q 0:1003", chownedPath, chownedUID, chownedGID, managedBinary)
+	}
+	if info, err := os.Stat(managedBinary); err != nil {
+		t.Fatal(err)
+	} else if got := info.Mode().Perm(); got != 0o750 {
+		t.Fatalf("managed tailscaled mode = %04o, want 0750", got)
+	}
 	dv, err := server.cfg.DB.Get()
 	if err != nil {
 		t.Fatalf("DB.Get: %v", err)
@@ -1423,6 +1446,9 @@ func TestApplyTSUpdatePropagatesRestartFailure(t *testing.T) {
 	}
 	if err := os.MkdirAll(server.serviceRunDir("svc"), 0o755); err != nil {
 		t.Fatalf("mkdir run: %v", err)
+	}
+	if err := os.MkdirAll(server.serviceBinDir("svc"), 0o755); err != nil {
+		t.Fatalf("mkdir service bin: %v", err)
 	}
 	if err := server.cfg.DB.Set(&db.Data{
 		Services: map[string]*db.Service{

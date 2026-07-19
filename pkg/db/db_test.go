@@ -6,6 +6,7 @@ package db
 
 import (
 	"encoding/json"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -113,8 +114,20 @@ func TestMigrateV11AddsISOState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !migrated || d.DataVersion != 12 {
+	if !migrated || d.DataVersion != CurrentDataVersion {
 		t.Fatalf("migrated=%v version=%d", migrated, d.DataVersion)
+	}
+}
+
+func TestMigrateVersion12LeavesOldServiceIdentityNil(t *testing.T) {
+	d := &Data{DataVersion: 12, Services: map[string]*Service{
+		"api": {Name: "api", ServiceType: ServiceTypeSystemd},
+	}}
+	if _, err := migrate(d); err != nil {
+		t.Fatal(err)
+	}
+	if d.DataVersion != 13 || d.Services["api"].Identity != nil {
+		t.Fatalf("migrated data = %#v", d)
 	}
 }
 
@@ -325,6 +338,48 @@ func TestDBRoundTripsVMHostAndBalloonConfig(t *testing.T) {
 	vm := got.Services["devbox"].VM
 	if vm.Balloon.Mode != "auto" || vm.Balloon.MinBytes != 1<<30 || vm.Balloon.StatsIntervalSeconds != 5 || vm.Balloon.LastTargetBytes != 512<<20 {
 		t.Fatalf("Balloon = %#v, want persisted config", vm.Balloon)
+	}
+}
+
+func TestServiceIdentityRoundTrip(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	want := &ServiceIdentity{
+		RequestedUser:  "root",
+		RequestedGroup: "root",
+		UID:            0,
+		GID:            0,
+	}
+	store := NewStore(path, filepath.Join(root, "services"))
+	if err := store.Set(&Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"api": {
+				Name:                   "api",
+				ServiceType:            ServiceTypeSystemd,
+				Identity:               want,
+				IdentityInstallPending: true,
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	onDisk := mustReadData(t, path).Services["api"].Identity
+	if onDisk == nil || *onDisk != *want {
+		t.Fatalf("on-disk identity = %#v, want %#v", onDisk, want)
+	}
+
+	got, err := NewStore(path, filepath.Join(root, "services")).Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTripped := got.AsStruct().Services["api"].Identity
+	if roundTripped == nil || *roundTripped != *want {
+		t.Fatalf("round-tripped identity = %#v, want %#v", roundTripped, want)
+	}
+	if !got.AsStruct().Services["api"].IdentityInstallPending {
+		t.Fatal("round-tripped IdentityInstallPending = false, want true")
 	}
 }
 
@@ -841,6 +896,160 @@ func TestStoreSetWritesCloneAndCreatesParentDir(t *testing.T) {
 	}
 }
 
+func TestStoreSetSyncsTemporaryFileBeforeRenameAndDirectoryAfter(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "nested", "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+
+	oldFileSync := syncDBFile
+	oldRename := renameDBFile
+	oldDirectorySync := syncDBDirectory
+	var events []string
+	syncDBFile = func(f *os.File) error {
+		events = append(events, "file-sync")
+		return oldFileSync(f)
+	}
+	renameDBFile = func(oldPath, newPath string) error {
+		events = append(events, "rename")
+		return oldRename(oldPath, newPath)
+	}
+	syncDBDirectory = func(f *os.File) error {
+		events = append(events, "directory-sync")
+		return oldDirectorySync(f)
+	}
+	t.Cleanup(func() {
+		syncDBFile = oldFileSync
+		renameDBFile = oldRename
+		syncDBDirectory = oldDirectorySync
+	})
+
+	if err := store.Set(&Data{DataVersion: CurrentDataVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"file-sync", "rename", "directory-sync"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("durability events = %v, want %v", events, want)
+	}
+}
+
+func TestStoreSetPropagatesTemporaryFileSyncFailureBeforeRename(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", Generation: 1},
+		},
+	})
+	store := NewStore(path, filepath.Join(root, "services"))
+	if _, err := store.Get(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldFileSync := syncDBFile
+	oldRename := renameDBFile
+	wantErr := errors.New("temporary database sync failed")
+	renameCalled := false
+	syncDBFile = func(*os.File) error { return wantErr }
+	renameDBFile = func(oldPath, newPath string) error {
+		renameCalled = true
+		return oldRename(oldPath, newPath)
+	}
+	t.Cleanup(func() {
+		syncDBFile = oldFileSync
+		renameDBFile = oldRename
+	})
+
+	err := store.Set(&Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", Generation: 2},
+		},
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Set error = %v, want %v", err, wantErr)
+	}
+	if renameCalled {
+		t.Fatal("database was renamed after temporary file sync failed")
+	}
+	if got := mustReadData(t, path).Services["svc"].Generation; got != 1 {
+		t.Fatalf("on-disk generation = %d, want 1", got)
+	}
+	got, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation := got.Services().Get("svc").Generation(); generation != 1 {
+		t.Fatalf("cached generation = %d, want 1", generation)
+	}
+}
+
+func TestStoreSetPropagatesDirectorySyncFailureAndExposesRenamedStateForRollback(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", Generation: 1},
+		},
+	})
+	store := NewStore(path, filepath.Join(root, "services"))
+	if _, err := store.Get(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRename := renameDBFile
+	oldDirectorySync := syncDBDirectory
+	wantErr := errors.New("database directory sync failed")
+	renameCalled := false
+	renameDBFile = func(oldPath, newPath string) error {
+		renameCalled = true
+		return oldRename(oldPath, newPath)
+	}
+	syncDBDirectory = func(*os.File) error { return wantErr }
+	t.Cleanup(func() {
+		renameDBFile = oldRename
+		syncDBDirectory = oldDirectorySync
+	})
+
+	err := store.Set(&Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", Generation: 2},
+		},
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Set error = %v, want %v", err, wantErr)
+	}
+	if !renameCalled {
+		t.Fatal("database was not renamed before directory sync")
+	}
+	got, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation := got.Services().Get("svc").Generation(); generation != 2 {
+		t.Fatalf("cached generation = %d, want renamed generation 2", generation)
+	}
+	if generation := mustReadData(t, path).Services["svc"].Generation; generation != 2 {
+		t.Fatalf("on-disk generation = %d, want renamed generation 2", generation)
+	}
+
+	syncDBDirectory = oldDirectorySync
+	_, _, err = store.MutateService("svc", func(_ *Data, svc *Service) error {
+		if svc.Generation != 2 {
+			t.Fatalf("rollback observed generation = %d, want provisional generation 2", svc.Generation)
+		}
+		svc.Generation = 1
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("rollback mutation: %v", err)
+	}
+	if generation := mustReadData(t, path).Services["svc"].Generation; generation != 1 {
+		t.Fatalf("on-disk generation after rollback = %d, want 1", generation)
+	}
+}
+
 func TestStoreSetNilDoesNotCreateFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "db.json")
 	store := NewStore(path, filepath.Join(t.TempDir(), "services"))
@@ -1239,6 +1448,62 @@ func TestStoreGetDoesNotCacheFailedMigrationSave(t *testing.T) {
 	}
 	if got := mustReadData(t, path).DataVersion; got != CurrentDataVersion {
 		t.Fatalf("on-disk DataVersion after retry = %d, want %d", got, CurrentDataVersion)
+	}
+}
+
+func TestStoreGetMigratesVersion12WithBackupAndRetriesFailedSave(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: 12,
+		Services: map[string]*Service{
+			"api": {Name: "api", ServiceType: ServiceTypeSystemd},
+		},
+	})
+	store := NewStore(path, filepath.Join(root, "services"))
+
+	oldRename := renameDBFile
+	failRename := true
+	renameDBFile = func(oldPath, newPath string) error {
+		if failRename {
+			return os.ErrPermission
+		}
+		return oldRename(oldPath, newPath)
+	}
+	t.Cleanup(func() {
+		renameDBFile = oldRename
+	})
+
+	if _, err := store.Get(); err == nil {
+		t.Fatal("Get succeeded after schema-12 migration save failure")
+	}
+	onDisk := mustReadData(t, path)
+	if onDisk.DataVersion != 12 || onDisk.Services["api"].Identity != nil {
+		t.Fatalf("on-disk data after failed migration = %#v", onDisk)
+	}
+	backups, err := filepath.Glob(path + ".v12.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("migration backups = %v, want exactly one v12 backup", backups)
+	}
+	backup := mustReadData(t, backups[0])
+	if backup.DataVersion != 12 || backup.Services["api"].Identity != nil {
+		t.Fatalf("backup data = %#v", backup)
+	}
+
+	failRename = false
+	got, err := store.Get()
+	if err != nil {
+		t.Fatalf("Get after restoring rename: %v", err)
+	}
+	if got.DataVersion() != 13 || got.Services().Get("api").Identity().Valid() {
+		t.Fatalf("migrated view = %#v", got.AsStruct())
+	}
+	onDisk = mustReadData(t, path)
+	if onDisk.DataVersion != 13 || onDisk.Services["api"].Identity != nil {
+		t.Fatalf("on-disk data after retry = %#v", onDisk)
 	}
 }
 

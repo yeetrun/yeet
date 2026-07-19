@@ -344,6 +344,63 @@ func TestHandleSvcCmdCronSplitsQuotedExpression(t *testing.T) {
 	}
 }
 
+func TestHandleSvcCmdCronForwardsRunAsCanonically(t *testing.T) {
+	oldExec, oldArch, oldService := execRemoteFn, remoteCatchOSAndArchFn, serviceOverride
+	t.Cleanup(func() { execRemoteFn, remoteCatchOSAndArchFn, serviceOverride = oldExec, oldArch, oldService })
+	serviceOverride = "backup"
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	payload := filepath.Join(t.TempDir(), "backup")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	execRemoteFn = func(_ context.Context, _ string, args []string, _ io.Reader, _ bool) error {
+		got = append([]string{}, args...)
+		return nil
+	}
+	if err := HandleSvcCmd([]string{"cron", "--run-as=backup", payload, "0 3 * * *", "--", "--daily"}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cron", "--run-as=backup", "--schedule=0 3 * * *", "--", "--daily"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestHandleSvcCronRunAsReportsConfigPartialSuccess(t *testing.T) {
+	oldExec, oldArch, oldCreate, oldService := execRemoteFn, remoteCatchOSAndArchFn, createProjectConfigFileFn, serviceOverride
+	t.Cleanup(func() {
+		execRemoteFn, remoteCatchOSAndArchFn, createProjectConfigFileFn, serviceOverride = oldExec, oldArch, oldCreate, oldService
+	})
+	serviceOverride = "api"
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	payload := filepath.Join(t.TempDir(), "api")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	remoteCalls := 0
+	execRemoteFn = func(context.Context, string, []string, io.Reader, bool) error {
+		remoteCalls++
+		return nil
+	}
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: projectConfigVersion}}
+	createProjectConfigFileFn = func(string) (io.WriteCloser, error) { return nil, errors.New("disk full") }
+	err := handleSvcCron(svcCommandRequest{
+		Command:      svcCommand{Args: []string{payload, "--run-as=app:app", "0 3 * * *"}},
+		Config:       loc,
+		HostOverride: "host.example.com",
+		Service:      "api",
+	})
+	want := `service identity changed on host.example.com, but yeet.toml was not updated; set run_as = "app:app" for service "api" and retry sync`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+	if remoteCalls != 1 {
+		t.Fatalf("remote calls = %d, want 1", remoteCalls)
+	}
+}
+
 func TestRunUsesRunCommandWithStdin(t *testing.T) {
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn

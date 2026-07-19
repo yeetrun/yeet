@@ -6,6 +6,7 @@ package yeet
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -68,6 +69,21 @@ func TestHandleSvcCmdRoutesRemoteFallbackCommands(t *testing.T) {
 				t.Fatalf("tty = false, want true")
 			}
 		})
+	}
+}
+
+func TestHandleServiceSetRunAsReportsConfigPartialSuccess(t *testing.T) {
+	oldExec, oldCreate, oldService := execRemoteFn, createProjectConfigFileFn, serviceOverride
+	t.Cleanup(func() { execRemoteFn, createProjectConfigFileFn, serviceOverride = oldExec, oldCreate, oldService })
+	serviceOverride = "api"
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: 1, Services: []ServiceEntry{{Name: "api", Host: "host.example.com"}}}}
+	execRemoteFn = func(context.Context, string, []string, io.Reader, bool) error { return nil }
+	createProjectConfigFileFn = func(string) (io.WriteCloser, error) { return nil, errors.New("disk full") }
+	err := handleServiceSet(context.Background(), svcCommandRequest{Command: svcCommand{Name: "service", Args: []string{"set", "--run-as=app:app"}, RawArgs: []string{"service", "set", "--run-as=app:app"}}, Config: loc, HostOverride: "host.example.com", Service: "api"})
+	want := `service identity changed on host.example.com, but yeet.toml was not updated; set run_as = "app:app" for service "api" and retry sync`
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
 	}
 }
 

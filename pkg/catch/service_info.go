@@ -79,6 +79,7 @@ func (s *Server) serviceInfoWithContext(ctx context.Context, sn string) (catchrp
 	}
 
 	info.Staged = serviceHasStagedChanges(sv)
+	info.Identity = serviceIdentityInfo(sv)
 	info.Network = serviceNetworkInfo(sv)
 	portInfo := servicePublishPortInfo(sn, sv)
 	info.Network.Ports = portInfo.Ports
@@ -137,6 +138,23 @@ func (s *Server) populateVMRuntimeInfo(ctx context.Context, sv db.ServiceView, e
 	return nil
 }
 
+func serviceIdentityInfo(sv db.ServiceView) *catchrpc.ServiceIdentity {
+	if !sv.Valid() || sv.ServiceType() != db.ServiceTypeSystemd {
+		return nil
+	}
+	service := sv.AsStruct()
+	effective := effectiveServiceIdentity(sv).Persisted
+	info := &catchrpc.ServiceIdentity{
+		RequestedUser: effective.RequestedUser, RequestedGroup: effective.RequestedGroup,
+		UID: effective.UID, GID: effective.GID, Class: serviceIdentityClass(service.Identity),
+	}
+	if service.Identity != nil {
+		if err := validateServiceIdentityDrift(*service.Identity); err != nil {
+			info.Mismatch = err.Error()
+		}
+	}
+	return info
+}
 func servicePublishPortInfo(serviceName string, sv db.ServiceView) catchrpc.ServiceNetwork {
 	out := catchrpc.ServiceNetwork{PortsPresent: true}
 	ports := normalizePublish(sv.Publish().AsSlice())

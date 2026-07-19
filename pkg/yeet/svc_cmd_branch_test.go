@@ -2019,6 +2019,31 @@ func TestSvcCronAndStageErrorBranches(t *testing.T) {
 	if _, _, err := splitCronArgs(nil); err == nil || !strings.Contains(err.Error(), "cron requires") {
 		t.Fatalf("splitCronArgs nil error = %v", err)
 	}
+	for _, tc := range []struct {
+		name     string
+		args     []string
+		wantCron []string
+		wantBin  []string
+	}{
+		{name: "single schedule", args: []string{"0 9 * * *"}, wantCron: []string{"0", "9", "*", "*", "*"}},
+		{name: "fields and command", args: []string{"0", "9", "*", "*", "*", "--", "--send", "daily"}, wantCron: []string{"0", "9", "*", "*", "*"}, wantBin: []string{"--send", "daily"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCron, gotBin, err := splitCronArgs(tc.args)
+			if err != nil {
+				t.Fatalf("splitCronArgs(%v): %v", tc.args, err)
+			}
+			if !reflect.DeepEqual(gotCron, tc.wantCron) {
+				t.Fatalf("cron fields = %v, want %v", gotCron, tc.wantCron)
+			}
+			if !reflect.DeepEqual(gotBin, tc.wantBin) {
+				t.Fatalf("binary args = %v, want %v", gotBin, tc.wantBin)
+			}
+		})
+	}
+	if _, _, err := splitCronArgs([]string{"*", "*"}); err == nil || !strings.Contains(err.Error(), "5 fields") {
+		t.Fatalf("splitCronArgs short schedule error = %v", err)
+	}
 	if _, err := parseCronSchedule("* * *"); err == nil || !strings.Contains(err.Error(), "5 fields") {
 		t.Fatalf("parseCronSchedule error = %v", err)
 	}

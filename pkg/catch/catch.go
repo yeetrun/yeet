@@ -23,6 +23,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/dnet"
@@ -85,13 +87,17 @@ type Server struct {
 		m  map[string]map[string]ComponentStatus // serviceName -> componentName -> ComponentStatus
 	}
 
-	newDockerComposeService  func(sv db.ServiceView) (dockerNetNSReconciler, error)
-	serviceRootDirFunc       func(string) (string, error)
-	zfsRunner                zfsCommandRunner
-	hostStorageMutationMu    sync.Mutex
-	hostStorageMutationBlock error
-	hostStorageRecovery      *hostStorageTransaction
-	newISORemoveSteps        func(string, RemoveOptions, *RemoveReport, string) (isoRemoveSteps, error)
+	newDockerComposeService            func(sv db.ServiceView) (dockerNetNSReconciler, error)
+	serviceRootDirFunc                 func(string) (string, error)
+	zfsRunner                          zfsCommandRunner
+	serviceOperationLocks              serviceOperationLocks
+	serviceIdentityRecoveryMu          sync.RWMutex
+	serviceIdentityMutationBlocks      map[string]error
+	serviceIdentityGlobalMutationBlock error
+	hostStorageMutationMu              sync.Mutex
+	hostStorageMutationBlock           error
+	hostStorageRecovery                *hostStorageTransaction
+	newISORemoveSteps                  func(string, RemoveOptions, *RemoveReport, string) (isoRemoveSteps, error)
 }
 
 type EventListener struct {
@@ -189,6 +195,9 @@ func NewUnstartedServer(config *Config) *Server {
 	if tx, err := findHostStorageStartupRecoveryForConfig(context.Background(), *config); err != nil {
 		s.hostStorageMutationBlock = err
 		s.hostStorageRecovery = tx
+	}
+	if err := s.recoverServiceIdentityMigrations(context.Background()); err != nil {
+		log.Printf("service identity startup recovery requires operator repair: %v", err)
 	}
 	s.registry = s.newRegistry()
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
@@ -590,18 +599,7 @@ func validateRequestedServiceRoot(root string) (string, error) {
 	if err != nil || cleaned == "" {
 		return cleaned, err
 	}
-	parent := filepath.Dir(cleaned)
-	parentInfo, err := os.Stat(parent)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", fmt.Errorf("service root parent %q does not exist", parent)
-		}
-		return "", fmt.Errorf("failed to stat service root parent %q: %w", parent, err)
-	}
-	if !parentInfo.IsDir() {
-		return "", fmt.Errorf("service root parent %q is not a directory", parent)
-	}
-	empty, err := rootIsMissingOrEmpty(cleaned)
+	empty, err := requestedServiceRootIsMissingOrEmptyNoFollow(cleaned)
 	if err != nil {
 		return "", err
 	}
@@ -609,6 +607,206 @@ func validateRequestedServiceRoot(root string) (string, error) {
 		return "", fmt.Errorf("service root %q must be empty", cleaned)
 	}
 	return cleaned, nil
+}
+
+func requestedServiceRootIsMissingOrEmptyNoFollow(root string) (bool, error) {
+	parentFD, leaf, err := openRequestedServiceRootParentNoFollow(root)
+	if err != nil {
+		return false, err
+	}
+	defer unix.Close(parentFD) //nolint:errcheck // validation already has a result; the fd is read-only
+	rootFD, closeRoot, missing, err := openRequestedServiceRootNoFollow(parentFD, leaf, root)
+	if err != nil || missing {
+		return missing, err
+	}
+	defer closeRoot()
+
+	entries, err := readRequestedServiceRootEntries(rootFD, root)
+	if err != nil {
+		return false, err
+	}
+	if len(entries) == 0 {
+		return true, nil
+	}
+	return requestedServiceRootIsRetrySafeSkeleton(rootFD, root, entries)
+}
+
+func openRequestedServiceRootNoFollow(parentFD int, leaf, root string) (int, func(), bool, error) {
+	if leaf == "." {
+		return parentFD, func() {}, false, nil
+	}
+	var before unix.Stat_t
+	if err := unix.Fstatat(parentFD, leaf, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return -1, func() {}, true, nil
+		}
+		return -1, func() {}, false, fmt.Errorf("failed to stat service root %q without following symlinks: %w", root, err)
+	}
+	if err := validateRequestedServiceRootType(root, before); err != nil {
+		return -1, func() {}, false, err
+	}
+	rootFD, err := unix.Openat(parentFD, leaf, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, func() {}, false, requestedServiceRootOpenError(parentFD, leaf, root, err)
+	}
+	closeRoot := func() { _ = unix.Close(rootFD) }
+	if err := validateOpenedRequestedServiceRoot(rootFD, root, before); err != nil {
+		closeRoot()
+		return -1, func() {}, false, err
+	}
+	return rootFD, closeRoot, false, nil
+}
+
+func validateRequestedServiceRootType(root string, stat unix.Stat_t) error {
+	if serviceRootUnixFileType(stat) == unix.S_IFLNK {
+		return fmt.Errorf("service root %q must not be a symbolic link", root)
+	}
+	if serviceRootUnixFileType(stat) != unix.S_IFDIR {
+		return fmt.Errorf("service root %q is a file", root)
+	}
+	return nil
+}
+
+func requestedServiceRootOpenError(parentFD int, leaf, root string, err error) error {
+	if requestedServiceRootEntryIsSymlink(parentFD, leaf) {
+		return fmt.Errorf("service root %q must not be a symbolic link", root)
+	}
+	return fmt.Errorf("failed to open service root %q without following symlinks: %w", root, err)
+}
+
+func validateOpenedRequestedServiceRoot(fd int, root string, before unix.Stat_t) error {
+	var opened unix.Stat_t
+	if err := unix.Fstat(fd, &opened); err != nil {
+		return fmt.Errorf("failed to inspect opened service root %q: %w", root, err)
+	}
+	if uint64(opened.Dev) != uint64(before.Dev) || uint64(opened.Ino) != uint64(before.Ino) {
+		return fmt.Errorf("service root %q changed during no-follow validation", root)
+	}
+	return nil
+}
+
+func openRequestedServiceRootParentNoFollow(root string) (int, string, error) {
+	current, err := unix.Open(string(filepath.Separator), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, "", fmt.Errorf("open filesystem root for service-root validation: %w", err)
+	}
+	components := strings.Split(strings.TrimPrefix(root, string(filepath.Separator)), string(filepath.Separator))
+	if len(components) == 1 && components[0] == "" {
+		return current, ".", nil
+	}
+	currentPath := string(filepath.Separator)
+	for _, component := range components[:len(components)-1] {
+		componentPath := filepath.Join(currentPath, component)
+		next, openErr := openRequestedServiceRootParentComponent(current, component, componentPath, filepath.Dir(root))
+		if openErr != nil {
+			_ = unix.Close(current)
+			return -1, "", openErr
+		}
+		_ = unix.Close(current)
+		current = next
+		currentPath = componentPath
+	}
+	return current, components[len(components)-1], nil
+}
+
+func openRequestedServiceRootParentComponent(parent int, component, path, parentPath string) (int, error) {
+	var entry unix.Stat_t
+	if err := unix.Fstatat(parent, component, &entry, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return -1, fmt.Errorf("service root parent %q does not exist", parentPath)
+		}
+		return -1, fmt.Errorf("failed to stat service root parent component %q: %w", path, err)
+	}
+	if serviceRootUnixFileType(entry) == unix.S_IFLNK {
+		return -1, fmt.Errorf("service root parent component %q must not be a symbolic link", path)
+	}
+	if serviceRootUnixFileType(entry) != unix.S_IFDIR {
+		return -1, fmt.Errorf("service root parent component %q is not a directory", path)
+	}
+	next, err := unix.Openat(parent, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil && requestedServiceRootEntryIsSymlink(parent, component) {
+		return -1, fmt.Errorf("service root parent component %q must not be a symbolic link", path)
+	}
+	if err != nil {
+		return -1, fmt.Errorf("failed to open service root parent component %q without following symlinks: %w", path, err)
+	}
+	return next, nil
+}
+
+func serviceRootUnixFileType(stat unix.Stat_t) uint32 {
+	return uint32(stat.Mode) & unix.S_IFMT
+}
+
+func requestedServiceRootEntryIsSymlink(parentFD int, name string) bool {
+	var stat unix.Stat_t
+	return unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW) == nil && serviceRootUnixFileType(stat) == unix.S_IFLNK
+}
+
+func readRequestedServiceRootEntries(rootFD int, root string) ([]os.DirEntry, error) {
+	dup, err := unix.Dup(rootFD)
+	if err != nil {
+		return nil, fmt.Errorf("duplicate service root descriptor %q: %w", root, err)
+	}
+	dir := os.NewFile(uintptr(dup), root)
+	if dir == nil {
+		_ = unix.Close(dup)
+		return nil, fmt.Errorf("open service root descriptor %q: invalid file descriptor", root)
+	}
+	entries, readErr := dir.ReadDir(-1)
+	closeErr := dir.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("failed to read service root %q: %w", root, readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("failed to close service root %q: %w", root, closeErr)
+	}
+	return entries, nil
+}
+
+func requestedServiceRootIsRetrySafeSkeleton(rootFD int, root string, entries []os.DirEntry) (bool, error) {
+	allowed := map[string]struct{}{"bin": {}, "data": {}, "env": {}, "run": {}}
+	if len(entries) != len(allowed) {
+		return false, nil
+	}
+	for _, entry := range entries {
+		if _, ok := allowed[entry.Name()]; !ok {
+			return false, nil
+		}
+		empty, err := requestedServiceRootChildIsEmpty(rootFD, root, entry.Name())
+		if err != nil || !empty {
+			return empty, err
+		}
+		delete(allowed, entry.Name())
+	}
+	return len(allowed) == 0, nil
+}
+
+func requestedServiceRootChildIsEmpty(rootFD int, root, name string) (bool, error) {
+	path := filepath.Join(root, name)
+	var before unix.Stat_t
+	if err := unix.Fstatat(rootFD, name, &before, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false, fmt.Errorf("failed to inspect service root child %q without following symlinks: %w", path, err)
+	}
+	if serviceRootUnixFileType(before) != unix.S_IFDIR {
+		return false, nil
+	}
+	childFD, err := unix.Openat(rootFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return false, fmt.Errorf("failed to open service root child %q without following symlinks: %w", path, err)
+	}
+	if err := validateOpenedRequestedServiceRoot(childFD, path, before); err != nil {
+		_ = unix.Close(childFD)
+		return false, err
+	}
+	children, readErr := readRequestedServiceRootEntries(childFD, path)
+	closeErr := unix.Close(childFD)
+	if readErr != nil {
+		return false, readErr
+	}
+	if closeErr != nil {
+		return false, fmt.Errorf("failed to close service root child %q: %w", path, closeErr)
+	}
+	return len(children) == 0, nil
 }
 
 func cleanRequestedServiceRoot(root string) (string, error) {
@@ -1046,6 +1244,15 @@ func (s *Server) RemoveService(name string) (*RemoveReport, error) {
 //
 //nolint:cyclop // Removal ordering stays linear so cleanup and deletion boundaries remain auditable.
 func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*RemoveReport, error) {
+	release := s.serviceOperationLocks.Lock(name)
+	defer release()
+	if err := s.checkServiceIdentityMutationAllowed(name); err != nil {
+		return nil, err
+	}
+	return s.removeServiceWithOptionsUnlocked(name, opts)
+}
+
+func (s *Server) removeServiceWithOptionsUnlocked(name string, opts RemoveOptions) (*RemoveReport, error) {
 	doneRemove := removeTraceBlock(opts, "remove service")
 	defer doneRemove()
 	report := &RemoveReport{}
@@ -1072,32 +1279,44 @@ func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*Rem
 		removeDirs = false
 	}
 	if !isISO {
-		doneVMNetwork := removeTraceBlock(opts, "remove vm network")
-		s.cleanupVMNetworkForRemoval(report, name)
-		doneVMNetwork()
-		doneVMJail := removeTraceBlock(opts, "remove vm jail")
-		s.cleanupVMJailForRemoval(report, name)
-		doneVMJail()
+		s.cleanupNonISOServiceRuntime(report, name, opts)
 	}
 	if isISO {
-		stepsFactory := s.newISORemoveSteps
-		if stepsFactory == nil {
-			stepsFactory = s.newConcreteISORemoveSteps
-		}
-		steps, err := stepsFactory(name, opts, report, serviceRootZFS)
-		if err != nil {
-			return report, fmt.Errorf("prepare ISO removal: %w", err)
-		}
-		if err := s.removeISOServiceWithOptions(context.Background(), name, opts.CleanData, steps); err != nil {
-			return report, fmt.Errorf("remove ISO service: %w", err)
-		}
-		s.publishServiceDeleted(name)
-		s.deleteTailscaleDevice(report, tsStableID)
-		if removeDirs {
-			s.removeServiceDirs(report, serviceRoot, opts.CleanData)
-		}
-		return report, nil
+		return s.removeISOServicePrepared(name, opts, report, serviceRootZFS, tsStableID, serviceRoot, removeDirs)
 	}
+	return s.removeOrdinaryServicePrepared(name, opts, report, serviceRootZFS, tsStableID, serviceRoot, removeDirs)
+}
+
+func (s *Server) cleanupNonISOServiceRuntime(report *RemoveReport, name string, opts RemoveOptions) {
+	doneVMNetwork := removeTraceBlock(opts, "remove vm network")
+	s.cleanupVMNetworkForRemoval(report, name)
+	doneVMNetwork()
+	doneVMJail := removeTraceBlock(opts, "remove vm jail")
+	s.cleanupVMJailForRemoval(report, name)
+	doneVMJail()
+}
+
+func (s *Server) removeISOServicePrepared(name string, opts RemoveOptions, report *RemoveReport, serviceRootZFS, tsStableID, serviceRoot string, removeDirs bool) (*RemoveReport, error) {
+	stepsFactory := s.newISORemoveSteps
+	if stepsFactory == nil {
+		stepsFactory = s.newConcreteISORemoveSteps
+	}
+	steps, err := stepsFactory(name, opts, report, serviceRootZFS)
+	if err != nil {
+		return report, fmt.Errorf("prepare ISO removal: %w", err)
+	}
+	if err := s.removeISOServiceWithOptions(context.Background(), name, opts.CleanData, steps); err != nil {
+		return report, fmt.Errorf("remove ISO service: %w", err)
+	}
+	s.publishServiceDeleted(name)
+	s.deleteTailscaleDevice(report, tsStableID)
+	if removeDirs {
+		s.removeServiceDirs(report, serviceRoot, opts.CleanData)
+	}
+	return report, nil
+}
+
+func (s *Server) removeOrdinaryServicePrepared(name string, opts RemoveOptions, report *RemoveReport, serviceRootZFS, tsStableID, serviceRoot string, removeDirs bool) (*RemoveReport, error) {
 	if removeDirs && opts.CleanData {
 		removeTrace(opts, "remove zfs dataset=%s", serviceRootZFS)
 		doneZFS := removeTraceBlock(opts, "remove zfs destroy")

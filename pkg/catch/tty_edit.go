@@ -249,7 +249,7 @@ func (e *ttyExecer) installEditedFile(tmpPath string) (retErr error) {
 	defer closeInto(f, "temp file", &retErr)
 
 	icfg := e.fileInstaller(netFlags{}, nil)
-	fi, err := NewFileInstaller(e.s, icfg)
+	fi, err := e.newFileInstaller(icfg)
 	if err != nil {
 		return fmt.Errorf("failed to create installer: %w", err)
 	}
