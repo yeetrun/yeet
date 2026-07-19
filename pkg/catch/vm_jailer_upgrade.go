@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -817,7 +818,7 @@ func inventoryVMJailerUpgrade(ctx context.Context, cfg *Config, server *Server, 
 	if !filepath.IsAbs(root) {
 		return vmJailerUpgradeVM{}, vmSystemdConfig{}, fmt.Errorf("effective service root must be absolute: %s", root)
 	}
-	runtime, err := inspectVMJailerUpgradeRuntime(service)
+	vmRuntime, err := inspectVMJailerUpgradeRuntime(service, runtime.GOARCH)
 	if err != nil {
 		return vmJailerUpgradeVM{}, vmSystemdConfig{}, err
 	}
@@ -832,12 +833,12 @@ func inventoryVMJailerUpgrade(ctx context.Context, cfg *Config, server *Server, 
 	vm := vmJailerUpgradeVM{
 		Service:      service.Name,
 		Payload:      strings.TrimSpace(service.VM.Image.Payload),
-		ImageVersion: runtime.manifest.Version,
-		Architecture: runtime.manifest.Architecture,
+		ImageVersion: vmRuntime.manifest.Version,
+		Architecture: vmRuntime.manifest.Architecture,
 		ServiceRoot:  root,
-		Disk:         runtime.disk,
-		Firecracker:  runtime.firecracker,
-		Jailer:       filepath.Join(filepath.Dir(runtime.firecracker), "jailer"),
+		Disk:         vmRuntime.disk,
+		Firecracker:  vmRuntime.firecracker,
+		Jailer:       filepath.Join(filepath.Dir(vmRuntime.firecracker), "jailer"),
 		UnitPath:     filepath.Join(vmSystemdSystemDir, vmSystemdUnitName(service.Name)),
 		Readiness:    readiness,
 		Running:      running,
@@ -851,14 +852,14 @@ func inventoryVMJailerUpgrade(ctx context.Context, cfg *Config, server *Server, 
 	return vm, renderCfg, nil
 }
 
-func inspectVMJailerUpgradeRuntime(service db.Service) (vmJailerUpgradeRuntime, error) {
+func inspectVMJailerUpgradeRuntime(service db.Service, hostArchitecture string) (vmJailerUpgradeRuntime, error) {
 	rootFS := filepath.Clean(strings.TrimSpace(service.VM.Image.RootFS))
 	if !filepath.IsAbs(rootFS) {
 		return vmJailerUpgradeRuntime{}, fmt.Errorf("stored VM rootfs must be absolute: %s", rootFS)
 	}
 	imageDir := filepath.Dir(rootFS)
 	firecracker := filepath.Join(imageDir, "firecracker")
-	manifest, err := readValidatedVMImageRuntimeManifest(firecracker)
+	manifest, err := inspectVMJailerUpgradeManifest(service, imageDir, firecracker, hostArchitecture)
 	if err != nil {
 		return vmJailerUpgradeRuntime{}, err
 	}
@@ -873,6 +874,55 @@ func inspectVMJailerUpgradeRuntime(service db.Service) (vmJailerUpgradeRuntime, 
 		return vmJailerUpgradeRuntime{}, fmt.Errorf("stored VM disk must be absolute: %s", disk)
 	}
 	return vmJailerUpgradeRuntime{disk: disk, firecracker: firecracker, manifest: manifest}, nil
+}
+
+func inspectVMJailerUpgradeManifest(service db.Service, imageDir, firecracker, hostArchitecture string) (vmImageManifest, error) {
+	manifestPath := filepath.Join(imageDir, "manifest.json")
+	_, manifestErr := os.Lstat(manifestPath)
+	if errors.Is(manifestErr, os.ErrNotExist) {
+		if err := validateLegacyVMJailerUpgradeBundle(imageDir, firecracker); err != nil {
+			return vmImageManifest{}, err
+		}
+		return legacyVMJailerUpgradeManifest(service, firecracker, hostArchitecture)
+	}
+	if manifestErr != nil {
+		return vmImageManifest{}, fmt.Errorf("inspect VM image runtime manifest: %w", manifestErr)
+	}
+	return readValidatedVMImageRuntimeManifest(firecracker)
+}
+
+func validateLegacyVMJailerUpgradeBundle(imageDir, firecracker string) error {
+	dirInfo, err := os.Lstat(imageDir)
+	if err != nil {
+		return fmt.Errorf("inspect legacy VM image bundle %s: %w", imageDir, err)
+	}
+	if !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("legacy VM image bundle %s must be a directory without symlinks", imageDir)
+	}
+	firecrackerInfo, err := os.Lstat(firecracker)
+	if err != nil {
+		return fmt.Errorf("inspect legacy VM image Firecracker %s: %w", firecracker, err)
+	}
+	if !firecrackerInfo.Mode().IsRegular() || firecrackerInfo.Mode()&os.ModeSymlink != 0 || firecrackerInfo.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("legacy VM image Firecracker %s must be an executable regular file without symlinks", firecracker)
+	}
+	return nil
+}
+
+func legacyVMJailerUpgradeManifest(service db.Service, firecracker, hostArchitecture string) (vmImageManifest, error) {
+	architecture, err := normalizeVMImageArchitecture(hostArchitecture)
+	if err != nil {
+		return vmImageManifest{}, fmt.Errorf("identify legacy VM image runtime architecture: %w", err)
+	}
+	version := strings.TrimSpace(service.VM.Image.Version)
+	if version == "" {
+		return vmImageManifest{}, fmt.Errorf("stored VM image version is required for a legacy bundle without manifest.json")
+	}
+	return vmImageManifest{
+		Version:      version,
+		Architecture: architecture,
+		Firecracker:  filepath.Base(firecracker),
+	}, nil
 }
 
 func vmJailerUpgradeSystemdConfig(cfg *Config, server *Server, service db.Service, vm vmJailerUpgradeVM) vmSystemdConfig {

@@ -1435,6 +1435,105 @@ func TestPlanVMJailerUpgradeInventory(t *testing.T) {
 	}
 }
 
+func TestInspectVMJailerUpgradeRuntimeSupportsLegacyBundleWithoutManifest(t *testing.T) {
+	dir := t.TempDir()
+	firecracker := filepath.Join(dir, "firecracker")
+	if err := os.WriteFile(firecracker, []byte("legacy firecracker"), 0o755); err != nil {
+		t.Fatalf("write legacy Firecracker: %v", err)
+	}
+	rootFS := filepath.Join(dir, "rootfs.ext4")
+	service := db.Service{VM: &db.VMConfig{
+		Image: db.VMImageConfig{Version: "ubuntu-26.04-amd64-v11", RootFS: rootFS},
+		Disk:  db.VMDiskConfig{Path: "/dev/zvol/tank/vms/devbox/root"},
+	}}
+
+	got, err := inspectVMJailerUpgradeRuntime(service, "amd64")
+	if err != nil {
+		t.Fatalf("inspectVMJailerUpgradeRuntime: %v", err)
+	}
+	if got.firecracker != firecracker || got.disk != service.VM.Disk.Path {
+		t.Fatalf("runtime paths = %#v", got)
+	}
+	if got.manifest.Version != service.VM.Image.Version || got.manifest.Architecture != "amd64" || got.manifest.Firecracker != "firecracker" {
+		t.Fatalf("legacy runtime identity = %#v", got.manifest)
+	}
+}
+
+func TestInspectVMJailerUpgradeRuntimeRejectsMissingLegacyBundleInputs(t *testing.T) {
+	tests := []struct {
+		name    string
+		rootFS  func(string) string
+		wantErr string
+	}{
+		{
+			name: "missing bundle directory",
+			rootFS: func(root string) string {
+				return filepath.Join(root, "missing", "rootfs.ext4")
+			},
+			wantErr: "inspect legacy VM image bundle",
+		},
+		{
+			name: "missing Firecracker",
+			rootFS: func(root string) string {
+				dir := filepath.Join(root, "bundle")
+				if err := os.Mkdir(dir, 0o755); err != nil {
+					t.Fatalf("mkdir bundle: %v", err)
+				}
+				return filepath.Join(dir, "rootfs.ext4")
+			},
+			wantErr: "inspect legacy VM image Firecracker",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := db.Service{VM: &db.VMConfig{Image: db.VMImageConfig{
+				Version: "ubuntu-26.04-amd64-v11",
+				RootFS:  tt.rootFS(t.TempDir()),
+			}}}
+			_, err := inspectVMJailerUpgradeRuntime(service, "amd64")
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestInspectVMJailerUpgradeRuntimeDoesNotTreatInvalidManifestAsLegacy(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "firecracker"), []byte("legacy firecracker"), 0o755); err != nil {
+		t.Fatalf("write Firecracker: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest.json"), []byte("not json"), 0o644); err != nil {
+		t.Fatalf("write invalid manifest: %v", err)
+	}
+	service := db.Service{VM: &db.VMConfig{Image: db.VMImageConfig{
+		Version: "ubuntu-26.04-amd64-v11",
+		RootFS:  filepath.Join(dir, "rootfs.ext4"),
+	}}}
+
+	_, err := inspectVMJailerUpgradeRuntime(service, "amd64")
+	if err == nil || !strings.Contains(err.Error(), "decode VM image runtime manifest") {
+		t.Fatalf("error = %v, want invalid manifest failure", err)
+	}
+}
+
+func TestInspectVMJailerUpgradeRuntimeDoesNotTreatMissingDeclaredFirecrackerAsLegacy(t *testing.T) {
+	dir := t.TempDir()
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v11", vmImageTestContents())
+	if err := writeManifestFile(filepath.Join(dir, "manifest.json"), manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	service := db.Service{VM: &db.VMConfig{Image: db.VMImageConfig{
+		Version: manifest.Version,
+		RootFS:  filepath.Join(dir, manifest.RootFS),
+	}}}
+
+	_, err := inspectVMJailerUpgradeRuntime(service, "amd64")
+	if err == nil || !strings.Contains(err.Error(), "verify VM image runtime Firecracker") {
+		t.Fatalf("error = %v, want missing declared Firecracker failure", err)
+	}
+}
+
 func TestCachedVMUpgradeJailerCandidateVerifiesManifestAndRuntimePair(t *testing.T) {
 	cacheRoot := t.TempDir()
 	candidateFirecracker, candidateJailer, candidateChecksum := writeVMJailerUpgradeManagedBundle(t, cacheRoot, "ubuntu-26.04-amd64-v2", "amd64")
