@@ -1346,6 +1346,9 @@ func TestSnapshotsRestoreVMFullCompatibleCheckpointRestoresDiskSchedulesStateLoa
 		calls = append(calls, strings.Join(args, " "))
 		return zfsRunner(ctx, args...)
 	}
+	stubFullVMRestoreHealth(t, func(context.Context, string) (vmAgentGuestReadyState, error) {
+		return vmAgentGuestReadyState{SSHReady: true}, nil
+	})
 
 	var out bytes.Buffer
 	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Stop: true, Yes: true, Mode: recoveryModeFull}, &out)
@@ -1485,6 +1488,7 @@ func TestWaitForFullVMStateRestoreToleratesTransientPartialResult(t *testing.T) 
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
 	installFakeSystemctl(t)
 	service := mustService(t, server, "devbox")
+	service.VM.Sockets.VsockSocketPath = filepath.Join(serviceRunDirForRoot(root), "vsock.sock")
 	resultPath := vmFullRestoreResultPath(service.VM.Sockets.APISocketPath)
 	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
 		t.Fatalf("mkdir restore result dir: %v", err)
@@ -1503,11 +1507,150 @@ func TestWaitForFullVMStateRestoreToleratesTransientPartialResult(t *testing.T) 
 	})
 	go func() {
 		time.Sleep(10 * time.Millisecond)
-		_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess})
+		_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess, RunnerPID: 1})
 	}()
+	stubFullVMRestoreHealth(t, func(context.Context, string) (vmAgentGuestReadyState, error) {
+		return vmAgentGuestReadyState{SSHReady: true}, nil
+	})
 
 	if err := server.waitForFullVMStateRestore(context.Background(), service, "pre-restore-point"); err != nil {
 		t.Fatalf("waitForFullVMStateRestore: %v", err)
+	}
+}
+
+func TestWaitForFullVMStateRestoreRejectsSuccessWithoutRunnerPID(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	service := mustService(t, server, "devbox")
+	resultPath := vmFullRestoreResultPath(service.VM.Sockets.APISocketPath)
+	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess}); err != nil {
+		t.Fatalf("write restore result: %v", err)
+	}
+
+	err := server.waitForFullVMStateRestore(context.Background(), service, "pre-restore-point")
+	if err == nil || !strings.Contains(err.Error(), "success without a runner PID") {
+		t.Fatalf("waitForFullVMStateRestore error = %v, want missing runner PID rejection", err)
+	}
+}
+
+func TestWaitForFullVMStateRestoreRejectsVMMExitAfterLoadSuccess(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	service := mustService(t, server, "devbox")
+	resultPath := vmFullRestoreResultPath(service.VM.Sockets.APISocketPath)
+	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess, RunnerPID: 1}); err != nil {
+		t.Fatalf("write restore result: %v", err)
+	}
+
+	oldStatus := vmFullRestoreRuntimeStatus
+	oldMainPID := vmFullRestoreMainPID
+	oldStability := vmFullRestoreStabilityWait
+	oldInterval := vmFullRestoreHealthWaitInterval
+	statuses := []svc.Status{svc.StatusRunning, svc.StatusStopped}
+	vmFullRestoreRuntimeStatus = func(*vmRunner) (svc.Status, error) {
+		status := statuses[0]
+		if len(statuses) > 1 {
+			statuses = statuses[1:]
+		}
+		return status, nil
+	}
+	vmFullRestoreMainPID = func(*vmRunner) (int, error) { return 1, nil }
+	vmFullRestoreStabilityWait = 10 * time.Millisecond
+	vmFullRestoreHealthWaitInterval = time.Millisecond
+	t.Cleanup(func() {
+		vmFullRestoreRuntimeStatus = oldStatus
+		vmFullRestoreMainPID = oldMainPID
+		vmFullRestoreStabilityWait = oldStability
+		vmFullRestoreHealthWaitInterval = oldInterval
+	})
+
+	err := server.waitForFullVMStateRestore(context.Background(), service, "pre-restore-point")
+	if err == nil {
+		t.Fatal("waitForFullVMStateRestore error = nil, want delayed VMM exit failure")
+	}
+	for _, want := range []string{"post-load stabilization", "pre-restore-point"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("waitForFullVMStateRestore error = %v, want %q", err, want)
+		}
+	}
+}
+
+func TestWaitForFullVMStateRestoreRequiresGuestAgentSSHReadiness(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	service := mustService(t, server, "devbox")
+	service.VM.Sockets.VsockSocketPath = filepath.Join(serviceRunDirForRoot(root), "vsock.sock")
+	resultPath := vmFullRestoreResultPath(service.VM.Sockets.APISocketPath)
+	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess, RunnerPID: 1}); err != nil {
+		t.Fatalf("write restore result: %v", err)
+	}
+
+	queries := 0
+	stubFullVMRestoreHealth(t, func(_ context.Context, socketPath string) (vmAgentGuestReadyState, error) {
+		queries++
+		if socketPath != service.VM.Sockets.VsockSocketPath {
+			t.Fatalf("guest readiness socket = %q, want %q", socketPath, service.VM.Sockets.VsockSocketPath)
+		}
+		if queries < 2 {
+			return vmAgentGuestReadyState{}, nil
+		}
+		return vmAgentGuestReadyState{SSHReady: true}, nil
+	})
+
+	if err := server.waitForFullVMStateRestore(context.Background(), service, "pre-restore-point"); err != nil {
+		t.Fatalf("waitForFullVMStateRestore: %v", err)
+	}
+	if queries < 2 {
+		t.Fatalf("guest readiness queries = %d, want retry before success", queries)
+	}
+}
+
+func TestWaitForFullVMStateRestoreRejectsRestartedRunnerAfterGuestReadiness(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	service := mustService(t, server, "devbox")
+	service.VM.Sockets.VsockSocketPath = filepath.Join(serviceRunDirForRoot(root), "vsock.sock")
+	resultPath := vmFullRestoreResultPath(service.VM.Sockets.APISocketPath)
+	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess, RunnerPID: 101}); err != nil {
+		t.Fatalf("write restore result: %v", err)
+	}
+
+	oldStatus := vmFullRestoreRuntimeStatus
+	oldMainPID := vmFullRestoreMainPID
+	oldQuery := vmFullRestoreGuestReadyQuery
+	oldStability := vmFullRestoreStabilityWait
+	vmFullRestoreRuntimeStatus = func(*vmRunner) (svc.Status, error) { return svc.StatusRunning, nil }
+	mainPIDs := []int{101, 101, 202}
+	vmFullRestoreMainPID = func(*vmRunner) (int, error) {
+		pid := mainPIDs[0]
+		if len(mainPIDs) > 1 {
+			mainPIDs = mainPIDs[1:]
+		}
+		return pid, nil
+	}
+	vmFullRestoreGuestReadyQuery = func(context.Context, string) (vmAgentGuestReadyState, error) {
+		return vmAgentGuestReadyState{SSHReady: true}, nil
+	}
+	vmFullRestoreStabilityWait = 0
+	t.Cleanup(func() {
+		vmFullRestoreRuntimeStatus = oldStatus
+		vmFullRestoreMainPID = oldMainPID
+		vmFullRestoreGuestReadyQuery = oldQuery
+		vmFullRestoreStabilityWait = oldStability
+	})
+
+	err := server.waitForFullVMStateRestore(context.Background(), service, "pre-restore-point")
+	if err == nil {
+		t.Fatal("waitForFullVMStateRestore error = nil, want restarted runner rejection")
+	}
+	for _, want := range []string{"runtime changed from PID 101 to 202", "pre-restore-point"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("waitForFullVMStateRestore error = %v, want %q", err, want)
+		}
 	}
 }
 
@@ -1673,6 +1816,27 @@ func withVMRecoveryStatus(t *testing.T, status svc.Status) {
 	t.Cleanup(func() { serverVMStatusFunc = old })
 }
 
+func stubFullVMRestoreHealth(t *testing.T, query func(context.Context, string) (vmAgentGuestReadyState, error)) {
+	t.Helper()
+	oldQuery := vmFullRestoreGuestReadyQuery
+	oldStatus := vmFullRestoreRuntimeStatus
+	oldMainPID := vmFullRestoreMainPID
+	oldStability := vmFullRestoreStabilityWait
+	oldInterval := vmFullRestoreHealthWaitInterval
+	vmFullRestoreGuestReadyQuery = query
+	vmFullRestoreRuntimeStatus = func(*vmRunner) (svc.Status, error) { return svc.StatusRunning, nil }
+	vmFullRestoreMainPID = func(*vmRunner) (int, error) { return 1, nil }
+	vmFullRestoreStabilityWait = 0
+	vmFullRestoreHealthWaitInterval = time.Millisecond
+	t.Cleanup(func() {
+		vmFullRestoreGuestReadyQuery = oldQuery
+		vmFullRestoreRuntimeStatus = oldStatus
+		vmFullRestoreMainPID = oldMainPID
+		vmFullRestoreStabilityWait = oldStability
+		vmFullRestoreHealthWaitInterval = oldInterval
+	})
+}
+
 type vmRecoveryFirecrackerIdentity struct {
 	SHA256  string
 	Version string
@@ -1732,6 +1896,12 @@ func stubVMRecoveryFirecrackerVersion(t *testing.T, version string) {
 func seedCompatibleFullVMCheckpointMetadata(t *testing.T, server *Server, root string, snapshotName string, edit func(map[string]any)) (string, string) {
 	t.Helper()
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.Sockets.VsockSocketPath = filepath.Join(serviceRunDirForRoot(root), "vsock.sock")
+		return nil
+	}); err != nil {
+		t.Fatalf("set VM vsock socket: %v", err)
+	}
 	service := mustService(t, server, "devbox")
 	vm := *service.VM.Clone()
 	dir := vmCheckpointDir(root, vmSnapshotShortName(snapshotName))
@@ -1814,7 +1984,7 @@ func installFakeSystemctl(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "systemctl.log")
-	script := "#!/bin/sh\nprintf 'systemctl %s\\n' \"$*\" >> " + strconv.Quote(logPath) + "\nif [ \"$1\" = \"start\" ] && [ -n \"$YEET_TEST_VM_RESTORE_RESULT\" ]; then\n\tprintf '{\"status\":\"success\"}\\n' > \"$YEET_TEST_VM_RESTORE_RESULT\"\nfi\n"
+	script := "#!/bin/sh\nprintf 'systemctl %s\\n' \"$*\" >> " + strconv.Quote(logPath) + "\nif [ \"$1\" = \"start\" ] && [ -n \"$YEET_TEST_VM_RESTORE_RESULT\" ]; then\n\tprintf '{\"status\":\"success\",\"runnerPid\":1}\\n' > \"$YEET_TEST_VM_RESTORE_RESULT\"\nfi\n"
 	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake systemctl: %v", err)
 	}
