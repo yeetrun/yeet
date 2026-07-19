@@ -211,11 +211,33 @@ func planInitLegacyStorageMigration(ctx context.Context, client hostStorageClien
 	if !shouldPlanInitLegacyStorageMigration(storage) {
 		return initLegacyStorageCandidate{}, nil
 	}
-	plan, err := client.HostStoragePlan(ctx, initLegacyStoragePlanRequest())
-	if err != nil {
-		return initLegacyStorageCandidate{}, fmt.Errorf("plan legacy host storage migration on %s: %w", userAtRemote, err)
+	retryCtx, cancel := context.WithTimeout(ctx, hostStorageReconnectTimeout)
+	defer cancel()
+	var deadline time.Time
+	delay := hostStorageReconnectInitial
+	var lastErr error
+	for {
+		plan, err := client.HostStoragePlan(retryCtx, initLegacyStoragePlanRequest())
+		if err == nil {
+			return initLegacyStorageCandidateFromPlan(plan), nil
+		}
+		lastErr = err
+		if !isHostStorageReconnectError(retryCtx, err) {
+			return initLegacyStorageCandidate{}, fmt.Errorf("plan legacy host storage migration on %s: %w", userAtRemote, err)
+		}
+		now := hostStorageReconnectNowFn()
+		if deadline.IsZero() {
+			deadline = now.Add(hostStorageReconnectTimeout)
+		}
+		if !now.Before(deadline) {
+			return initLegacyStorageCandidate{}, fmt.Errorf("catch did not become ready within %s to plan legacy host storage migration on %s: %w", hostStorageReconnectTimeout, userAtRemote, lastErr)
+		}
+		wait := min(delay, deadline.Sub(now))
+		if err := hostStorageReconnectSleepFn(retryCtx, wait); err != nil {
+			return initLegacyStorageCandidate{}, fmt.Errorf("wait for Catch to plan legacy host storage migration on %s: %w", userAtRemote, errors.Join(lastErr, err))
+		}
+		delay = min(delay*2, hostStorageReconnectMaximum)
 	}
-	return initLegacyStorageCandidateFromPlan(plan), nil
 }
 
 func runInitLegacyStorageCandidate(ui *initUI, client hostStorageClient, host string, candidate initLegacyStorageCandidate) error {
