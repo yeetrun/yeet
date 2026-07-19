@@ -21,6 +21,218 @@ import (
 	"github.com/yeetrun/yeet/pkg/netns"
 )
 
+func TestFileInstallerRollbackInstalledGenerationRestoresCapturedGeneration(t *testing.T) {
+	server := newTestServer(t)
+	root := server.cfg.ServicesRoot
+	previousBinary := filepath.Join(root, CatchService, "bin", "catch-previous")
+	currentBinary := filepath.Join(root, CatchService, "bin", "catch-current")
+	for _, dir := range []string{filepath.Dir(previousBinary), filepath.Join(root, CatchService, "env")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q): %v", dir, err)
+		}
+	}
+	artifacts := db.ArtifactStore{
+		db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{
+			db.Gen(1): previousBinary,
+			db.Gen(2): currentBinary,
+			"latest":  currentBinary,
+		}},
+	}
+	addTestServices(t, server, db.Service{
+		Name:             CatchService,
+		ServiceType:      db.ServiceTypeSystemd,
+		Generation:       1,
+		LatestGeneration: 1,
+		Artifacts:        artifacts,
+	})
+	installer := &FileInstaller{
+		s:                   server,
+		cfg:                 FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: CatchService}},
+		existingService:     First(server.serviceView(CatchService)),
+		installedGeneration: 2,
+		readInstalledGeneration: func() (int, error) {
+			return testService(t, server, CatchService).Generation, nil
+		},
+		installGenerationIfCurrent: func(installer *Installer, expected, generation int) error {
+			return installer.installGenIfCurrent(expected, generation)
+		},
+	}
+	addTestServices(t, server, db.Service{
+		Name:             CatchService,
+		ServiceType:      db.ServiceTypeSystemd,
+		Generation:       2,
+		LatestGeneration: 2,
+		Artifacts:        artifacts,
+	})
+	previousInstallPhase := runInstallPhaseForSnapshot
+	installPhaseCalls := 0
+	runInstallPhaseForSnapshot = func(_ *Installer, service *db.Service) error {
+		installPhaseCalls++
+		if service.Name != CatchService || service.ServiceType != db.ServiceTypeSystemd {
+			t.Fatalf("rollback service = %#v, want Catch systemd service", service)
+		}
+		if service.Generation != 1 {
+			t.Fatalf("rollback generation during install = %d, want 1", service.Generation)
+		}
+		if got := service.Artifacts[db.ArtifactBinary].Refs["latest"]; got != previousBinary {
+			t.Fatalf("latest binary during rollback = %q, want %q", got, previousBinary)
+		}
+		return nil
+	}
+	t.Cleanup(func() { runInstallPhaseForSnapshot = previousInstallPhase })
+
+	if err := installer.RollbackInstalledGeneration(); err != nil {
+		t.Fatalf("RollbackInstalledGeneration: %v", err)
+	}
+	if installPhaseCalls != 1 {
+		t.Fatalf("systemd install phase calls = %d, want 1", installPhaseCalls)
+	}
+	service := testService(t, server, CatchService)
+	if service.Generation != 1 || service.LatestGeneration != 2 {
+		t.Fatalf("generation/latest = %d/%d, want 1/2", service.Generation, service.LatestGeneration)
+	}
+}
+
+func TestFileInstallerRollbackInstalledGenerationRequiresPreviousGeneration(t *testing.T) {
+	installer := &FileInstaller{}
+	if err := installer.RollbackInstalledGeneration(); err == nil || !strings.Contains(err.Error(), "no previous Catch generation") {
+		t.Fatalf("RollbackInstalledGeneration error = %v, want no previous generation", err)
+	}
+}
+
+func TestFileInstallerRollbackInstalledGenerationAvailable(t *testing.T) {
+	tests := []struct {
+		name      string
+		installer *FileInstaller
+		want      bool
+	}{
+		{name: "nil installer"},
+		{name: "missing service", installer: &FileInstaller{}},
+		{name: "generation zero", installer: &FileInstaller{existingService: (&db.Service{}).View()}},
+		{name: "previous generation", installer: &FileInstaller{existingService: (&db.Service{Generation: 1}).View()}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.installer.RollbackInstalledGenerationAvailable(); got != tt.want {
+				t.Fatalf("RollbackInstalledGenerationAvailable = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFileInstallerCaptureInstalledGenerationUsesObservedGeneration(t *testing.T) {
+	installer := &FileInstaller{
+		existingService: (&db.Service{Generation: 4, LatestGeneration: 9}).View(),
+		readInstalledGeneration: func() (int, error) {
+			return 27, nil
+		},
+	}
+
+	if err := installer.captureInstalledGenerationOrRollback(); err != nil {
+		t.Fatalf("captureInstalledGenerationOrRollback: %v", err)
+	}
+	if installer.installedGeneration != 27 {
+		t.Fatalf("installed generation = %d, want observed generation 27", installer.installedGeneration)
+	}
+}
+
+func TestFileInstallerCaptureFailureRestoresPreviousGeneration(t *testing.T) {
+	server := newTestServer(t)
+	readErr := errors.New("read installed generation")
+	rollbackErr := errors.New("restore previous generation")
+	installedGenerationCalls := 0
+	installer := &FileInstaller{
+		s:                   server,
+		cfg:                 FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: CatchService}},
+		existingService:     (&db.Service{Generation: 4, LatestGeneration: 9}).View(),
+		installedGeneration: 27,
+		readInstalledGeneration: func() (int, error) {
+			return 0, readErr
+		},
+		installGenerationIfCurrent: func(_ *Installer, expected, generation int) error {
+			installedGenerationCalls++
+			if expected != 27 {
+				t.Fatalf("expected current generation = %d, want 27", expected)
+			}
+			if generation != 4 {
+				t.Fatalf("restored generation = %d, want 4", generation)
+			}
+			return rollbackErr
+		},
+	}
+
+	err := installer.captureInstalledGenerationOrRollback()
+	if !errors.Is(err, readErr) || !errors.Is(err, rollbackErr) {
+		t.Fatalf("capture error = %v, want read and rollback errors", err)
+	}
+	if installedGenerationCalls != 1 {
+		t.Fatalf("generation install calls = %d, want 1", installedGenerationCalls)
+	}
+	if installer.installedGeneration != 27 {
+		t.Fatalf("installed generation = %d, want exact committed generation 27", installer.installedGeneration)
+	}
+}
+
+func TestFileInstallerRollbackCASPreservesConcurrentGenerationAdvance(t *testing.T) {
+	server := newTestServer(t)
+	previousBinary := "/srv/catch/bin/catch-4"
+	installedBinary := "/srv/catch/bin/catch-27"
+	advancedBinary := "/srv/catch/bin/catch-28"
+	artifacts := db.ArtifactStore{db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{
+		db.Gen(4):  previousBinary,
+		db.Gen(27): installedBinary,
+		db.Gen(28): advancedBinary,
+		"latest":   installedBinary,
+	}}}
+	addTestServices(t, server, db.Service{
+		Name: CatchService, ServiceType: db.ServiceTypeSystemd,
+		Generation: 27, LatestGeneration: 27, Artifacts: artifacts,
+	})
+	installPhaseCalls := 0
+	previousInstallPhase := runInstallPhaseForSnapshot
+	runInstallPhaseForSnapshot = func(*Installer, *db.Service) error {
+		installPhaseCalls++
+		return nil
+	}
+	t.Cleanup(func() { runInstallPhaseForSnapshot = previousInstallPhase })
+	installer := &FileInstaller{
+		s:                   server,
+		cfg:                 FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: CatchService}},
+		existingService:     (&db.Service{Generation: 4}).View(),
+		installedGeneration: 27,
+		installGenerationIfCurrent: func(inst *Installer, expected, target int) error {
+			if expected != 27 || target != 4 {
+				t.Fatalf("CAS arguments = expected %d target %d, want 27 and 4", expected, target)
+			}
+			_, _, err := server.cfg.DB.MutateService(CatchService, func(_ *db.Data, service *db.Service) error {
+				service.Generation = 28
+				service.LatestGeneration = 28
+				service.Artifacts[db.ArtifactBinary].Refs["latest"] = advancedBinary
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("advance generation: %v", err)
+			}
+			return inst.installGenIfCurrent(expected, target)
+		},
+	}
+
+	err := installer.RollbackInstalledGeneration()
+	if err == nil || !strings.Contains(err.Error(), "generation changed from expected 27 to 28") {
+		t.Fatalf("RollbackInstalledGeneration error = %v, want concurrent advancement refusal", err)
+	}
+	if installPhaseCalls != 0 {
+		t.Fatalf("systemd install phase calls = %d, want 0", installPhaseCalls)
+	}
+	service := testService(t, server, CatchService)
+	if service.Generation != 28 || service.LatestGeneration != 28 {
+		t.Fatalf("generation/latest = %d/%d, want concurrent 28/28 preserved", service.Generation, service.LatestGeneration)
+	}
+	if got := service.Artifacts[db.ArtifactBinary].Refs["latest"]; got != advancedBinary {
+		t.Fatalf("latest binary = %q, want concurrent %q", got, advancedBinary)
+	}
+}
+
 func TestHostDefaultRouteInterfaceFromProcRoute(t *testing.T) {
 	routeTable := strings.Join([]string{
 		"Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT",

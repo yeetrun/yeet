@@ -29,6 +29,7 @@ import (
 	cdb "github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/dnet"
 	"github.com/yeetrun/yeet/pkg/svc"
+	"golang.org/x/sys/unix"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/tsnet"
 	"tailscale.com/util/must"
@@ -353,6 +354,12 @@ func handleVMRunCommand(args []string) error {
 	consoleSock := fs.String("console-sock", "", "VM serial console socket path")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if strings.TrimSpace(*jailer) == "" {
+		return fmt.Errorf("vm-run requires --jailer")
+	}
+	if strings.TrimSpace(*jailerBase) == "" {
+		return fmt.Errorf("vm-run requires --jailer-base")
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -1092,16 +1099,26 @@ type catchServiceInstaller interface {
 	io.Writer
 	closeErrorer
 	Fail()
+	RollbackInstalledGenerationAvailable() bool
+	RollbackInstalledGeneration() error
+}
+
+type catchVMJailerUpgrade interface {
+	Commit() error
+	Close() error
+	Summary() catch.VMJailerUpgradeSummary
 }
 
 type catchInstallDeps struct {
-	writeInstallMeta func(string) error
-	initTSNet        func(string) (installTSNet, error)
-	newInstaller     func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error)
-	executable       func() (string, error)
-	readFile         func(string) ([]byte, error)
-	logf             func(string, ...any)
-	tsnetHost        func() string
+	writeInstallMeta       func(string) error
+	initTSNet              func(string) (installTSNet, error)
+	newInstaller           func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error)
+	executable             func() (string, error)
+	readFile               func(string) ([]byte, error)
+	logf                   func(string, ...any)
+	tsnetHost              func() string
+	prepareVMJailerUpgrade func(context.Context, *catch.Config) (catchVMJailerUpgrade, error)
+	acquireInstallLock     func(context.Context, string) (io.Closer, error)
 }
 
 type catchInstallPlan struct {
@@ -1129,6 +1146,12 @@ func defaultCatchInstallDeps() catchInstallDeps {
 		tsnetHost: func() string {
 			return *tsnetHost
 		},
+		prepareVMJailerUpgrade: func(ctx context.Context, cfg *catch.Config) (catchVMJailerUpgrade, error) {
+			return catch.PrepareVMJailerUpgrade(ctx, cfg)
+		},
+		acquireInstallLock: func(ctx context.Context, dataDir string) (io.Closer, error) {
+			return acquireCatchInstallLock(ctx, dataDir, 0)
+		},
 	}
 }
 
@@ -1145,19 +1168,67 @@ func doInstallWith(cfg *catch.Config, dataDir string, deps catchInstallDeps) (er
 	}
 	// Close it at the end so that when the systemd service is started, it
 	// doesn't fight for tsnet.
-	defer assignOrLogClose(&err, "tsnet server", ts)
+	defer func() {
+		if closeErr := ts.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("failed to close tsnet server: %w", closeErr))
+		}
+	}()
+	return runCatchInstallTransaction(cfg, dataDir, deps)
+}
 
+func runCatchInstallTransaction(cfg *catch.Config, dataDir string, deps catchInstallDeps) (err error) {
 	plan := selectCatchInstallMode(dataDir, cfg.ServicesRoot, deps.tsnetHost())
 	if err := validateCatchInstallPlan(plan); err != nil {
 		return err
 	}
+	installLock, err := deps.acquireInstallLock(context.Background(), dataDir)
+	if err != nil {
+		return fmt.Errorf("acquire Catch install transaction lock: %w", err)
+	}
+	defer func() {
+		if closeErr := installLock.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("release Catch install transaction lock: %w", closeErr))
+		}
+	}()
+	upgrade, err := deps.prepareVMJailerUpgrade(context.Background(), cfg)
+	if err != nil {
+		return fmt.Errorf("prepare VM jailer upgrade: %w", err)
+	}
+	defer func() {
+		err = errors.Join(err, upgrade.Close())
+	}()
 	inst, err := deps.newInstaller(cfg, catchFileInstallerConfig(plan))
 	if err != nil {
 		return fmt.Errorf("failed to create installer: %w", err)
 	}
-	defer assignOrLogClose(&err, "file installer", inst)
+	summary := upgrade.Summary()
+	if err := requireCatchRollbackForVMUnits(summary, inst); err != nil {
+		return err
+	}
+	if err := installCurrentCatchExecutable(inst, deps); err != nil {
+		return err
+	}
+	if err := upgrade.Commit(); err != nil {
+		return errors.Join(err, inst.RollbackInstalledGeneration())
+	}
+	deps.logf("VM jailer upgrade: %d ready, %d pending restart", len(summary.Ready), len(summary.PendingRestart))
+	return nil
+}
 
-	return writeCurrentExecutable(inst, deps)
+func requireCatchRollbackForVMUnits(summary catch.VMJailerUpgradeSummary, inst catchServiceInstaller) error {
+	if len(summary.Ready)+len(summary.PendingRestart) == 0 || inst.RollbackInstalledGenerationAvailable() {
+		return nil
+	}
+	inst.Fail()
+	gateErr := fmt.Errorf("cannot transactionally update VM units: no previous Catch generation to restore")
+	return errors.Join(gateErr, inst.Close())
+}
+
+func installCurrentCatchExecutable(inst catchServiceInstaller, deps catchInstallDeps) error {
+	if err := writeCurrentExecutable(inst, deps); err != nil {
+		return errors.Join(err, inst.Close())
+	}
+	return inst.Close()
 }
 
 func normalizeCatchInstallDeps(deps catchInstallDeps) catchInstallDeps {
@@ -1183,7 +1254,64 @@ func normalizeCatchInstallDeps(deps catchInstallDeps) catchInstallDeps {
 	if deps.tsnetHost == nil {
 		deps.tsnetHost = defaults.tsnetHost
 	}
+	if deps.prepareVMJailerUpgrade == nil {
+		deps.prepareVMJailerUpgrade = defaults.prepareVMJailerUpgrade
+	}
+	if deps.acquireInstallLock == nil {
+		deps.acquireInstallLock = defaults.acquireInstallLock
+	}
 	return deps
+}
+
+func acquireCatchInstallLock(ctx context.Context, dataDir string, trustedUID uint32) (*os.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	dir, err := openValidatedCatchInstallRoot(dataDir, trustedUID)
+	if err != nil {
+		return nil, err
+	}
+	for {
+		err := unix.Flock(int(dir.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		if err == nil {
+			return dir, nil
+		}
+		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
+			return nil, errors.Join(fmt.Errorf("lock Catch data root: %w", err), dir.Close())
+		}
+		select {
+		case <-ctx.Done():
+			return nil, errors.Join(ctx.Err(), dir.Close())
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
+func openValidatedCatchInstallRoot(dataDir string, trustedUID uint32) (*os.File, error) {
+	fd, err := unix.Open(dataDir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open Catch data root without following symlinks: %w", err)
+	}
+	dir := os.NewFile(uintptr(fd), dataDir)
+	if dir == nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("bind Catch data root directory descriptor")
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return nil, errors.Join(fmt.Errorf("inspect Catch data root: %w", err), dir.Close())
+	}
+	mode := uint32(stat.Mode)
+	if mode&unix.S_IFMT != unix.S_IFDIR {
+		return nil, errors.Join(fmt.Errorf("catch data root is not a directory"), dir.Close())
+	}
+	if stat.Uid != trustedUID {
+		return nil, errors.Join(fmt.Errorf("catch data root owner is %d, want %d", stat.Uid, trustedUID), dir.Close())
+	}
+	if mode&0o022 != 0 {
+		return nil, errors.Join(fmt.Errorf("catch data root is writable by group or others: mode %o", mode&0o7777), dir.Close())
+	}
+	return dir, nil
 }
 
 func validateCatchInstallConfig(cfg *catch.Config) error {

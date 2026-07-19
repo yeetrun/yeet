@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -173,7 +174,7 @@ func TestCopyVMConsoleInputStopsOnEscapeSequence(t *testing.T) {
 
 func TestRunVMConsoleProxyBridgesPTYToSocket(t *testing.T) {
 	dir := shortUnixSocketDirForTest(t)
-	fakeFirecracker := filepath.Join(dir, "firecracker")
+	fakeJailer := filepath.Join(dir, "jailer")
 	script := `#!/bin/sh
 printf 'fake-ready\n'
 while IFS= read -r line; do
@@ -183,21 +184,25 @@ while IFS= read -r line; do
 	fi
 done
 `
-	if err := os.WriteFile(fakeFirecracker, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake firecracker: %v", err)
+	if err := os.WriteFile(fakeJailer, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake jailer: %v", err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	socketPath := filepath.Join(dir, "serial.sock")
+	cfg := vmConsoleProxyConfigForTest(t, dir, fakeJailer)
+	socketPath := cfg.ConsoleSocket
+	launchedViaJailer := false
+	processConstructor := func(ctx context.Context, cfg VMConsoleProxyConfig, restoreMode bool) (*exec.Cmd, func(), error) {
+		launchedViaJailer = true
+		if cfg.Jailer != fakeJailer || cfg.JailerBase == "" {
+			return nil, func() {}, errors.New("console process missing mandatory jailer inputs")
+		}
+		return vmConsoleProcessForTest(ctx, cfg, restoreMode)
+	}
 	done := make(chan error, 1)
 	go func() {
-		done <- RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
-			Firecracker:   fakeFirecracker,
-			APISocket:     filepath.Join(dir, "firecracker.sock"),
-			ConfigFile:    filepath.Join(dir, "firecracker.json"),
-			ConsoleSocket: socketPath,
-		})
+		done <- runVMConsoleProxyWithProcessConstructor(ctx, cfg, processConstructor)
 	}()
 
 	conn := dialUnixSocketForTest(t, socketPath)
@@ -216,7 +221,10 @@ done
 			t.Fatalf("RunVMConsoleProxy: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("RunVMConsoleProxy did not return after fake Firecracker exited")
+		t.Fatal("RunVMConsoleProxy did not return after fake jailer exited")
+	}
+	if !launchedViaJailer {
+		t.Fatal("VM console process was not launched through the jailer fixture")
 	}
 }
 
@@ -229,7 +237,8 @@ func TestRunVMConsoleProxyLoadsOneShotSnapshotRequestBeforeGuestBoot(t *testing.
 		t.Fatalf("write fake firecracker: %v", err)
 	}
 
-	apiSocket := filepath.Join(dir, "firecracker.sock")
+	cfg := vmConsoleProxyConfigForTest(t, dir, fakeFirecracker)
+	apiSocket := cfg.APISocket
 	requestPath := vmFullRestoreRequestPath(apiSocket)
 	request := vmFullRestoreRequest{
 		StatePath:  filepath.Join(dir, "state.bin"),
@@ -259,15 +268,10 @@ func TestRunVMConsoleProxyLoadsOneShotSnapshotRequestBeforeGuestBoot(t *testing.
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	consoleSocket := filepath.Join(dir, "serial.sock")
+	consoleSocket := cfg.ConsoleSocket
 	done := make(chan error, 1)
 	go func() {
-		done <- RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
-			Firecracker:   fakeFirecracker,
-			APISocket:     apiSocket,
-			ConfigFile:    filepath.Join(dir, "firecracker.json"),
-			ConsoleSocket: consoleSocket,
-		})
+		done <- runVMConsoleProxyWithProcessConstructor(ctx, cfg, vmConsoleProcessForTest)
 	}()
 
 	conn := dialUnixSocketForTest(t, consoleSocket)
@@ -341,7 +345,8 @@ func TestRunVMConsoleProxyReturnsRestoreFailureWhenRequestInvalid(t *testing.T) 
 		t.Fatalf("write fake firecracker: %v", err)
 	}
 
-	apiSocket := filepath.Join(dir, "firecracker.sock")
+	cfg := vmConsoleProxyConfigForTest(t, dir, fakeFirecracker)
+	apiSocket := cfg.APISocket
 	requestPath := vmFullRestoreRequestPath(apiSocket)
 	if err := os.WriteFile(requestPath, []byte("{"), 0o600); err != nil {
 		t.Fatalf("write invalid restore request: %v", err)
@@ -349,12 +354,7 @@ func TestRunVMConsoleProxyReturnsRestoreFailureWhenRequestInvalid(t *testing.T) 
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
-		Firecracker:   fakeFirecracker,
-		APISocket:     apiSocket,
-		ConfigFile:    filepath.Join(dir, "firecracker.json"),
-		ConsoleSocket: filepath.Join(dir, "serial.sock"),
-	})
+	err := runVMConsoleProxyWithProcessConstructor(ctx, cfg, vmConsoleProcessForTest)
 	if !errors.Is(err, ErrVMRestoreLoadFailed) {
 		t.Fatalf("RunVMConsoleProxy error = %v, want ErrVMRestoreLoadFailed", err)
 	}
@@ -374,7 +374,8 @@ func TestRunVMConsoleProxyKillsFirecrackerWhenSnapshotLoadFails(t *testing.T) {
 		t.Fatalf("write fake firecracker: %v", err)
 	}
 
-	apiSocket := filepath.Join(dir, "firecracker.sock")
+	cfg := vmConsoleProxyConfigForTest(t, dir, fakeFirecracker)
+	apiSocket := cfg.APISocket
 	request := vmFullRestoreRequest{
 		StatePath:  filepath.Join(dir, "state.bin"),
 		MemoryPath: filepath.Join(dir, "memory.bin"),
@@ -400,12 +401,7 @@ func TestRunVMConsoleProxyKillsFirecrackerWhenSnapshotLoadFails(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	start := time.Now()
-	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
-		Firecracker:   fakeFirecracker,
-		APISocket:     apiSocket,
-		ConfigFile:    filepath.Join(dir, "firecracker.json"),
-		ConsoleSocket: filepath.Join(dir, "serial.sock"),
-	})
+	err := runVMConsoleProxyWithProcessConstructor(ctx, cfg, vmConsoleProcessForTest)
 	if !errors.Is(err, ErrVMRestoreLoadFailed) {
 		t.Fatalf("RunVMConsoleProxy error = %v, want ErrVMRestoreLoadFailed", err)
 	}
@@ -434,12 +430,7 @@ sleep 30
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
-		Firecracker:   fakeFirecracker,
-		APISocket:     filepath.Join(dir, "firecracker.sock"),
-		ConfigFile:    filepath.Join(dir, "firecracker.json"),
-		ConsoleSocket: filepath.Join(dir, "serial.sock"),
-	})
+	err := runVMConsoleProxyWithProcessConstructor(ctx, vmConsoleProxyConfigForTest(t, dir, fakeFirecracker), vmConsoleProcessForTest)
 	if err != nil {
 		t.Fatalf("RunVMConsoleProxy: %v", err)
 	}
@@ -485,12 +476,7 @@ sleep 30
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
-		Firecracker:   fakeFirecracker,
-		APISocket:     filepath.Join(dir, "firecracker.sock"),
-		ConfigFile:    filepath.Join(dir, "firecracker.json"),
-		ConsoleSocket: filepath.Join(dir, "serial.sock"),
-	})
+	err := runVMConsoleProxyWithProcessConstructor(ctx, vmConsoleProxyConfigForTest(t, dir, fakeFirecracker), vmConsoleProcessForTest)
 	if !errors.Is(err, ErrVMGuestReboot) {
 		t.Fatalf("RunVMConsoleProxy error = %v, want ErrVMGuestReboot", err)
 	}
@@ -510,22 +496,15 @@ sleep 30
 	var hookCalled bool
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
-		Service:       "devbox",
-		ServiceRoot:   "/srv/yeet/services/devbox",
-		DiskPath:      "/srv/yeet/services/devbox/rootfs.ext4",
-		Firecracker:   fakeFirecracker,
-		APISocket:     filepath.Join(dir, "firecracker.sock"),
-		ConfigFile:    filepath.Join(dir, "firecracker.json"),
-		ConsoleSocket: filepath.Join(dir, "serial.sock"),
-		OnGuestReboot: func(_ context.Context, cfg VMConsoleProxyConfig) error {
-			hookCalled = true
-			if cfg.Service != "devbox" || cfg.ServiceRoot == "" || cfg.DiskPath == "" {
-				t.Fatalf("reboot hook cfg = %#v, want service/root/disk", cfg)
-			}
-			return nil
-		},
-	})
+	cfg := vmConsoleProxyConfigForTest(t, dir, fakeFirecracker)
+	cfg.OnGuestReboot = func(_ context.Context, cfg VMConsoleProxyConfig) error {
+		hookCalled = true
+		if cfg.Service != "devbox" || cfg.ServiceRoot == "" || cfg.DiskPath == "" {
+			t.Fatalf("reboot hook cfg = %#v, want service/root/disk", cfg)
+		}
+		return nil
+	}
+	err := runVMConsoleProxyWithProcessConstructor(ctx, cfg, vmConsoleProcessForTest)
 	if !errors.Is(err, ErrVMGuestReboot) {
 		t.Fatalf("RunVMConsoleProxy error = %v, want ErrVMGuestReboot", err)
 	}
@@ -547,15 +526,11 @@ sleep 30
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := RunVMConsoleProxy(ctx, VMConsoleProxyConfig{
-		Firecracker:   fakeFirecracker,
-		APISocket:     filepath.Join(dir, "firecracker.sock"),
-		ConfigFile:    filepath.Join(dir, "firecracker.json"),
-		ConsoleSocket: filepath.Join(dir, "serial.sock"),
-		OnGuestReboot: func(context.Context, VMConsoleProxyConfig) error {
-			return errors.New("kernel sync failed")
-		},
-	})
+	cfg := vmConsoleProxyConfigForTest(t, dir, fakeFirecracker)
+	cfg.OnGuestReboot = func(context.Context, VMConsoleProxyConfig) error {
+		return errors.New("kernel sync failed")
+	}
+	err := runVMConsoleProxyWithProcessConstructor(ctx, cfg, vmConsoleProcessForTest)
 	if !errors.Is(err, ErrVMGuestReboot) {
 		t.Fatalf("RunVMConsoleProxy error = %v, want ErrVMGuestReboot despite hook failure", err)
 	}
@@ -587,6 +562,34 @@ func shortUnixSocketDirForTest(t *testing.T) string {
 		_ = os.RemoveAll(dir)
 	})
 	return dir
+}
+
+func vmConsoleProxyConfigForTest(t *testing.T, dir, launcher string) VMConsoleProxyConfig {
+	t.Helper()
+	configPath := filepath.Join(dir, "firecracker.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatalf("write Firecracker config: %v", err)
+	}
+	serviceRoot := filepath.Join(dir, "service")
+	return VMConsoleProxyConfig{
+		Service:       "devbox",
+		ServiceRoot:   serviceRoot,
+		DiskPath:      filepath.Join(serviceRoot, "data", "rootfs.raw"),
+		Firecracker:   launcher,
+		Jailer:        launcher,
+		JailerBase:    filepath.Join(dir, "jails"),
+		APISocket:     filepath.Join(dir, "firecracker.sock"),
+		ConfigFile:    configPath,
+		ConsoleSocket: filepath.Join(dir, "serial.sock"),
+	}
+}
+
+func vmConsoleProcessForTest(ctx context.Context, cfg VMConsoleProxyConfig, restoreMode bool) (*exec.Cmd, func(), error) {
+	args := []string{"--api-sock", cfg.APISocket}
+	if !restoreMode {
+		args = append(args, "--config-file", cfg.ConfigFile)
+	}
+	return exec.CommandContext(ctx, cfg.Jailer, args...), func() {}, nil
 }
 
 func readUntilForTest(t *testing.T, r io.Reader, want string) string {

@@ -819,12 +819,6 @@ func TestParseVMSetFlags(t *testing.T) {
 			wantOut: []string{"devbox"},
 		},
 		{
-			name:    "VMM isolation",
-			args:    []string{"devbox", "--vmm-isolation=jailer"},
-			want:    VMSetFlags{VMMIsolation: "jailer"},
-			wantOut: []string{"devbox"},
-		},
-		{
 			name: "network flags",
 			args: []string{"--net", "svc,lan", "--macvlan-parent=vmbr0", "--macvlan-vlan=42", "--macvlan-mac=02:00:00:00:00:42", "devbox"},
 			want: VMSetFlags{
@@ -846,7 +840,6 @@ func TestParseVMSetFlags(t *testing.T) {
 		{name: "empty net separate", args: []string{"devbox", "--net", ""}, wantErr: "--net must not be empty"},
 		{name: "missing net value", args: []string{"devbox", "--net", "--vcpus=2"}, wantErr: "--net must not be empty"},
 		{name: "empty net component", args: []string{"devbox", "--net=svc,"}, wantErr: "--net must not contain empty network modes"},
-		{name: "invalid VMM isolation", args: []string{"devbox", "--vmm-isolation=dynamic"}, wantErr: "--vmm-isolation must be jailer or legacy-root"},
 	}
 
 	for _, tt := range tests {
@@ -868,6 +861,47 @@ func TestParseVMSetFlags(t *testing.T) {
 				t.Fatalf("args = %#v, want %#v", out, tt.wantOut)
 			}
 		})
+	}
+}
+
+func TestParseVMSetForwardsRemovedVMMIsolation(t *testing.T) {
+	flags, rest, err := ParseVMSet([]string{"devbox", "--vmm-isolation=jailer"})
+	if err != nil {
+		t.Fatalf("ParseVMSet: %v", err)
+	}
+	if flags != (VMSetFlags{}) {
+		t.Fatalf("flags = %#v, want none", flags)
+	}
+	want := []string{"devbox", "--vmm-isolation=jailer"}
+	if !reflect.DeepEqual(rest, want) {
+		t.Fatalf("rest = %#v, want %#v", rest, want)
+	}
+}
+
+func TestParseVMSetForwardsFutureFlagsInOrderAndParsesKnownFlags(t *testing.T) {
+	flags, rest, err := ParseVMSet([]string{
+		"devbox",
+		"--future-mode", "turbo",
+		"--vcpus=8",
+		"--future-limit=2",
+		"--memory", "8g",
+	})
+	if err != nil {
+		t.Fatalf("ParseVMSet: %v", err)
+	}
+	if flags.CPUs != 8 || flags.Memory != "8g" {
+		t.Fatalf("flags = %#v, want vcpus=8 memory=8g", flags)
+	}
+	want := []string{"devbox", "--future-mode", "turbo", "--future-limit=2"}
+	if !reflect.DeepEqual(rest, want) {
+		t.Fatalf("rest = %#v, want %#v", rest, want)
+	}
+}
+
+func TestParseVMSetValidatesKnownFlagsAfterFutureFlags(t *testing.T) {
+	_, _, err := ParseVMSet([]string{"--future-mode", "turbo", "--vcpus=-1"})
+	if err == nil || !strings.Contains(err.Error(), "VM vCPU count must be positive") {
+		t.Fatalf("ParseVMSet error = %v, want invalid vCPU count", err)
 	}
 }
 
@@ -1308,8 +1342,17 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if !reflect.DeepEqual(reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples) {
 		t.Fatalf("service set examples = %#v, want %#v", reg.Groups["service"].Commands["set"].Info.Examples, wantServiceSetExamples)
 	}
-	if reg.Groups["vm"].Commands["set"].Info.Usage != "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC] [--vmm-isolation=jailer|legacy-root]" {
+	if reg.Groups["vm"].Commands["set"].Info.Usage != "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
 		t.Fatalf("vm set usage = %q", reg.Groups["vm"].Commands["set"].Info.Usage)
+	}
+	wantVMSetExamples := []string{
+		"yeet vm set <vm> --vcpus=8 --memory=8g --disk=128g",
+		"yeet vm set <vm> --memory-min=1g --balloon=auto",
+		"yeet vm set <vm> --net=lan",
+		"yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4",
+	}
+	if got := reg.Groups["vm"].Commands["set"].Info.Examples; !reflect.DeepEqual(got, wantVMSetExamples) {
+		t.Fatalf("vm set examples = %#v, want %#v", got, wantVMSetExamples)
 	}
 	if reg.Groups["vm"].Commands["memory"].Info.Usage != "vm memory [set --policy=safe|balanced|aggressive] [--format=table|json|json-pretty]" {
 		t.Fatalf("vm memory usage = %q", reg.Groups["vm"].Commands["memory"].Info.Usage)
@@ -1553,13 +1596,16 @@ func TestRemoteRegistryIncludesVMConsole(t *testing.T) {
 	if _, ok := RemoteGroupFlagSpecs()["vm"]["set"]; !ok {
 		t.Fatal("vm set flag spec missing")
 	}
-	for _, flag := range []string{"--vcpus", "--memory", "--memory-min", "--balloon", "--disk", "--net", "--macvlan-parent", "--macvlan-vlan", "--macvlan-mac", "--vmm-isolation"} {
+	for _, flag := range []string{"--vcpus", "--memory", "--memory-min", "--balloon", "--disk", "--net", "--macvlan-parent", "--macvlan-vlan", "--macvlan-mac"} {
 		if !RemoteGroupFlagSpecs()["vm"]["set"][flag].ConsumesValue {
 			t.Fatalf("vm set %s should consume a value", flag)
 		}
 		if _, ok := RemoteGroupFlagSpecs()["service"]["set"][flag]; ok {
 			t.Fatalf("service set %s should not be registered", flag)
 		}
+	}
+	if _, ok := RemoteGroupFlagSpecs()["vm"]["set"]["--vmm-isolation"]; ok {
+		t.Fatal("vm set should not register removed --vmm-isolation flag")
 	}
 	if _, ok := group.Commands["images"]; !ok {
 		t.Fatal("vm images command missing")

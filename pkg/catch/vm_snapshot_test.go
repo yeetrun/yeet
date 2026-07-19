@@ -24,6 +24,7 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"golang.org/x/sys/unix"
 )
 
 func TestVMSnapshotRejectsRawDisk(t *testing.T) {
@@ -39,6 +40,7 @@ func TestVMSnapshotRejectsRawDisk(t *testing.T) {
 
 func TestVMSnapshotDiskOnlyFlushesPausedDiskBeforeZFSSnapshot(t *testing.T) {
 	server := newTestServer(t)
+	expectVMCheckpointDelegation(t)
 	root := t.TempDir()
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
 	var calls []string
@@ -80,6 +82,7 @@ func TestVMSnapshotDiskOnlyFlushesPausedDiskBeforeZFSSnapshot(t *testing.T) {
 
 func TestVMSnapshotAttemptsResumeAfterSnapshotFailure(t *testing.T) {
 	server := newTestServer(t)
+	expectVMCheckpointDelegation(t)
 	root := t.TempDir()
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
 	var calls []string
@@ -104,6 +107,7 @@ func TestVMSnapshotAttemptsResumeAfterSnapshotFailure(t *testing.T) {
 
 func TestVMSnapshotResumeIgnoresCanceledOperationContext(t *testing.T) {
 	server := newTestServer(t)
+	expectVMCheckpointDelegation(t)
 	root := t.TempDir()
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -293,6 +297,7 @@ func TestVMSnapshotPrunesCheckpointDirsAfterPartialZFSPruneFailure(t *testing.T)
 
 func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 	server := newTestServer(t)
+	expectVMCheckpointDelegation(t)
 	root := t.TempDir()
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
 	firecrackerBinary := filepath.Join(root, "firecracker")
@@ -305,16 +310,25 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 	oldSystemdDir := vmSystemdSystemDir
 	vmSystemdSystemDir = systemdDir
 	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
-	unit := renderVMSystemdUnit(vmSystemdConfig{
+	unit, err := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          "devbox",
 		Runner:           "/srv/catch/run/catch",
 		DataDir:          "/srv/catch/data",
+		ServicesRoot:     "/srv/services",
+		ServiceRoot:      root,
+		DiskPath:         filepath.Join(serviceDataDirForRoot(root), "rootfs.raw"),
 		Firecracker:      firecrackerBinary,
+		Jailer:           filepath.Join(root, "jailer"),
+		JailerBase:       filepath.Join(root, "jails"),
 		ConfigPath:       filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
 		APISocket:        filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"),
 		ConsoleSocket:    filepath.Join(serviceRunDirForRoot(root), "serial.sock"),
 		WorkingDirectory: root,
 	})
+	if err != nil {
+		t.Fatalf("render VM systemd unit: %v", err)
+	}
+	assertJailerOnlyVMUnit(t, unit)
 	if err := os.WriteFile(filepath.Join(systemdDir, vmSystemdUnitName("devbox")), []byte(unit), 0o644); err != nil {
 		t.Fatalf("write VM systemd unit: %v", err)
 	}
@@ -333,7 +347,7 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 	})
 	var out bytes.Buffer
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Full: true, Comment: "checkpoint"}, &out)
+	err = server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Full: true, Comment: "checkpoint"}, &out)
 	if err != nil {
 		t.Fatalf("createVMSnapshot: %v", err)
 	}
@@ -413,46 +427,315 @@ func TestVMSnapshotFullCreatesCheckpointAndMetadata(t *testing.T) {
 	}
 }
 
-func TestTemporaryFullVMCheckpointDelegatesJailedOutputDirectory(t *testing.T) {
+func TestVMSnapshotFullRejectsReplacedTemporaryDirectory(t *testing.T) {
 	server := newTestServer(t)
-	root := t.TempDir()
-	if err := writeVMIsolationMode(root, vmIsolationJailer); err != nil {
+	root := filepath.Join(t.TempDir(), "custom", "services", "devbox")
+	service := &db.Service{Name: "devbox", ServiceType: db.ServiceTypeVM, ServiceRoot: root}
+	vm := db.VMConfig{Sockets: db.VMSocketConfig{APISocketPath: filepath.Join(serviceRunDirForRoot(root), "firecracker.sock")}}
+	withCurrentVMCheckpointIdentity(t)
+
+	var originalDir string
+	controller := replacingVMCheckpointController{
+		replace: func(dir string) error {
+			originalDir = dir + ".original"
+			if err := os.Rename(dir, originalDir); err != nil {
+				return err
+			}
+			if err := os.Mkdir(dir, 0o700); err != nil {
+				return err
+			}
+			return os.WriteFile(filepath.Join(dir, "attacker-marker"), []byte("replacement"), 0o600)
+		},
+	}
+	var calls []string
+	server.zfsRunner = recordingVMSnapshotZFSRunner(&calls, nil)
+	now := time.Date(2026, 7, 19, 12, 34, 56, 0, time.UTC)
+
+	result, err := server.createPausedFullVMSnapshot(
+		context.Background(), service, vm, "tank/vms/devbox", cli.SnapshotsCreateFlags{Full: true},
+		controller, vmCheckpointCompatibility{}, now, "full",
+	)
+
+	if err == nil || !strings.Contains(err.Error(), "changed") {
+		t.Errorf("createPausedFullVMSnapshot error = %v, want temporary directory replacement rejection", err)
+	}
+	if result.Name != "" {
+		t.Errorf("result name = %q, want unpublished checkpoint", result.Name)
+	}
+	finalDir := vmCheckpointDir(root, "yeet-20260719T123456Z-vm-manual")
+	if _, statErr := os.Lstat(finalDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("published checkpoint stat = %v, want no publication", statErr)
+	}
+	if originalDir == "" {
+		t.Fatal("controller did not replace the temporary directory")
+	}
+	if got := vmSnapshotZFSCall(calls, "destroy"); got != "zfs destroy tank/vms/devbox@yeet-20260719T123456Z-vm-manual" {
+		t.Errorf("destroy call = %q, want rollback of incomplete ZFS snapshot", got)
+	}
+}
+
+func TestVMSnapshotFullRejectsReplacedMetadataWithoutTouchingOutsideFile(t *testing.T) {
+	server := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "custom", "services", "devbox")
+	service := &db.Service{Name: "devbox", ServiceType: db.ServiceTypeVM, ServiceRoot: root}
+	vm := db.VMConfig{Sockets: db.VMSocketConfig{APISocketPath: filepath.Join(serviceRunDirForRoot(root), "firecracker.sock")}}
+	withCurrentVMCheckpointIdentity(t)
+
+	outside := filepath.Join(t.TempDir(), "outside-metadata.json")
+	wantOutside := []byte("outside must remain unchanged\n")
+	if err := os.WriteFile(outside, wantOutside, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	controller := replacingVMCheckpointController{
+		replace: func(dir string) error {
+			return os.Symlink(outside, filepath.Join(dir, "metadata.json"))
+		},
+	}
+	var calls []string
+	server.zfsRunner = recordingVMSnapshotZFSRunner(&calls, nil)
+	now := time.Date(2026, 7, 19, 12, 34, 56, 0, time.UTC)
+
+	result, err := server.createPausedFullVMSnapshot(
+		context.Background(), service, vm, "tank/vms/devbox", cli.SnapshotsCreateFlags{Full: true},
+		controller, vmCheckpointCompatibility{}, now, "full",
+	)
+
+	if err == nil || !strings.Contains(err.Error(), "metadata") {
+		t.Errorf("createPausedFullVMSnapshot error = %v, want metadata replacement rejection", err)
+	}
+	if result.Name != "" {
+		t.Errorf("result name = %q, want unpublished checkpoint", result.Name)
+	}
+	gotOutside, readErr := os.ReadFile(outside)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(gotOutside, wantOutside) {
+		t.Errorf("outside file = %q, want unchanged %q", gotOutside, wantOutside)
+	}
+	finalDir := vmCheckpointDir(root, "yeet-20260719T123456Z-vm-manual")
+	if _, statErr := os.Lstat(finalDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("published checkpoint stat = %v, want no publication", statErr)
+	}
+	if got := vmSnapshotZFSCall(calls, "destroy"); got != "zfs destroy tank/vms/devbox@yeet-20260719T123456Z-vm-manual" {
+		t.Errorf("destroy call = %q, want rollback of incomplete ZFS snapshot", got)
+	}
+}
+
+func TestVMCheckpointDirDelegatesEveryFullCheckpoint(t *testing.T) {
+	server := newTestServer(t)
+	root := t.TempDir()
 	service := &db.Service{Name: "devbox", ServiceType: db.ServiceTypeVM, ServiceRoot: root}
 	vm := db.VMConfig{Sockets: db.VMSocketConfig{APISocketPath: filepath.Join(serviceRunDirForRoot(root), "firecracker.sock")}}
 	oldIdentity := vmSnapshotEnsureRuntimeIdentity
-	oldChown := vmSnapshotChown
+	oldChown := vmSnapshotFileChown
+	oldChmod := vmSnapshotFileChmod
 	vmSnapshotEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
 		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
 	}
 	var delegated string
-	vmSnapshotChown = func(path string, uid, gid int) error {
+	vmSnapshotFileChown = func(file *os.File, uid, gid int) error {
+		if uid == 0 && gid == 0 {
+			return nil
+		}
 		if uid != 812 || gid != 813 {
 			t.Fatalf("chown identity = %d:%d", uid, gid)
 		}
-		delegated = path
+		delegated = file.Name()
 		return nil
 	}
+	vmSnapshotFileChmod = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
 	t.Cleanup(func() {
 		vmSnapshotEnsureRuntimeIdentity = oldIdentity
-		vmSnapshotChown = oldChown
+		vmSnapshotFileChown = oldChown
+		vmSnapshotFileChmod = oldChmod
 	})
 	var calls []string
 	controller := &recordingVMFirecracker{calls: &calls}
 
-	_, tempDir, err := server.createTemporaryFullVMCheckpoint(context.Background(), service, vm, controller)
+	_, workspace, err := server.createTemporaryFullVMCheckpoint(context.Background(), service, vm, controller)
 	if err != nil {
 		t.Fatalf("createTemporaryFullVMCheckpoint: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(tempDir) })
-	if delegated != tempDir {
-		t.Fatalf("delegated path = %q, want %q", delegated, tempDir)
+	t.Cleanup(func() {
+		_ = workspace.remove()
+		_ = workspace.close()
+	})
+	if delegated != workspace.path() {
+		t.Fatalf("delegated path = %q, want %q", delegated, workspace.path())
 	}
+}
+
+func TestVMCheckpointWorkspaceNormalizesRootAndClosesDescriptors(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(root, "custom", "services", "devbox", "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	baseDir := filepath.Join(dataDir, "checkpoints")
+	oldChown := vmSnapshotFileChown
+	oldChmod := vmSnapshotFileChmod
+	owners := make(map[string]vmRuntimeIdentity)
+	modes := make(map[string]os.FileMode)
+	vmSnapshotFileChown = func(file *os.File, uid, gid int) error {
+		owners[file.Name()] = vmRuntimeIdentity{UID: uid, GID: gid}
+		return nil
+	}
+	vmSnapshotFileChmod = func(file *os.File, mode os.FileMode) error {
+		modes[file.Name()] = mode
+		return file.Chmod(mode)
+	}
+	t.Cleanup(func() {
+		vmSnapshotFileChown = oldChown
+		vmSnapshotFileChmod = oldChmod
+	})
+
+	workspace, err := newVMCheckpointWorkspace(baseDir, vmRuntimeIdentity{UID: 812, GID: 813})
+	if err != nil {
+		t.Fatalf("newVMCheckpointWorkspace: %v", err)
+	}
+	dataParentFD := int(workspace.dataParent.Fd())
+	parentFD := int(workspace.parent.Fd())
+	dirFD := int(workspace.dir.Fd())
+	if got := owners[baseDir]; got != (vmRuntimeIdentity{UID: 0, GID: 0}) {
+		t.Fatalf("checkpoint root owner = %#v, want root:root", got)
+	}
+	if got := modes[baseDir].Perm(); got != 0o755 {
+		t.Fatalf("checkpoint root mode = %#o, want 0755", got)
+	}
+	if got := owners[workspace.path()]; got != (vmRuntimeIdentity{UID: 812, GID: 813}) {
+		t.Fatalf("temporary checkpoint owner = %#v, want 812:813", got)
+	}
+	if got := modes[workspace.path()].Perm(); got != 0o700 {
+		t.Fatalf("temporary checkpoint mode = %#o, want 0700", got)
+	}
+	nestedDir := filepath.Join(workspace.path(), "runtime", "nested")
+	if err := os.MkdirAll(nestedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "state.bin"), []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside")
+	if err := os.WriteFile(outside, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(nestedDir, "outside-link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.remove(); err != nil {
+		t.Fatalf("remove workspace: %v", err)
+	}
+	if raw, err := os.ReadFile(outside); err != nil || string(raw) != "outside" {
+		t.Fatalf("outside file after cleanup = %q, %v; want unchanged", raw, err)
+	}
+	if err := workspace.close(); err != nil {
+		t.Fatalf("close workspace: %v", err)
+	}
+	for _, fd := range []int{dataParentFD, parentFD, dirFD} {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); !errors.Is(err, unix.EBADF) {
+			t.Errorf("workspace descriptor %d remains open: %v", fd, err)
+		}
+	}
+}
+
+func TestVMCheckpointWorkspaceRejectsMetadataReplacementBeforePublication(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldChown := vmSnapshotFileChown
+	oldChmod := vmSnapshotFileChmod
+	vmSnapshotFileChown = func(*os.File, int, int) error { return nil }
+	vmSnapshotFileChmod = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
+	t.Cleanup(func() {
+		vmSnapshotFileChown = oldChown
+		vmSnapshotFileChmod = oldChmod
+	})
+	workspace, err := newVMCheckpointWorkspace(filepath.Join(dataDir, "checkpoints"), vmRuntimeIdentity{UID: 812, GID: 813})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = workspace.remove()
+		_ = workspace.close()
+	})
+	if err := workspace.writeMetadata([]byte("{\"service\":\"devbox\"}\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	metadataPath := filepath.Join(workspace.path(), "metadata.json")
+	if err := os.Rename(metadataPath, metadataPath+".original"); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(root, "outside.json")
+	wantOutside := []byte("outside must remain unchanged\n")
+	if err := os.WriteFile(outside, wantOutside, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, metadataPath); err != nil {
+		t.Fatal(err)
+	}
+
+	err = workspace.publish("yeet-final")
+	if err == nil || !strings.Contains(err.Error(), "metadata") {
+		t.Errorf("publish error = %v, want metadata replacement rejection", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(dataDir, "checkpoints", "yeet-final")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("published checkpoint stat = %v, want no publication", statErr)
+	}
+	gotOutside, err := os.ReadFile(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotOutside, wantOutside) {
+		t.Errorf("outside file = %q, want unchanged %q", gotOutside, wantOutside)
+	}
+}
+
+func expectVMCheckpointDelegation(t *testing.T) {
+	t.Helper()
+	oldIdentity := vmSnapshotEnsureRuntimeIdentity
+	oldChown := vmSnapshotFileChown
+	oldChmod := vmSnapshotFileChmod
+	delegations := 0
+	vmSnapshotEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	vmSnapshotFileChown = func(file *os.File, uid, gid int) error {
+		if strings.TrimSpace(file.Name()) == "" {
+			t.Fatal("delegated an empty VM checkpoint path")
+		}
+		if uid == 0 && gid == 0 {
+			return nil
+		}
+		if uid != 812 || gid != 813 {
+			t.Fatalf("chown identity = %d:%d, want 812:813", uid, gid)
+		}
+		delegations++
+		return nil
+	}
+	vmSnapshotFileChmod = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
+	t.Cleanup(func() {
+		vmSnapshotEnsureRuntimeIdentity = oldIdentity
+		vmSnapshotFileChown = oldChown
+		vmSnapshotFileChmod = oldChmod
+		if delegations == 0 {
+			t.Error("VM checkpoint directory was not delegated")
+		}
+	})
 }
 
 func TestFullVMCheckpointMetadataIncludesBalloonConfigHash(t *testing.T) {
 	server := newTestServer(t)
+	expectVMCheckpointDelegation(t)
 	root := t.TempDir()
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
 	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
@@ -515,6 +798,7 @@ func TestVMSnapshotFullRequiresRunningVM(t *testing.T) {
 
 func TestVMSnapshotFullFailureCleansIncompleteCheckpoint(t *testing.T) {
 	server := newTestServer(t)
+	expectVMCheckpointDelegation(t)
 	root := t.TempDir()
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
 	var calls []string
@@ -594,16 +878,25 @@ func TestVMSnapshotFullFailsWhenKnownFirecrackerVersionUnavailable(t *testing.T)
 	oldSystemdDir := vmSystemdSystemDir
 	vmSystemdSystemDir = systemdDir
 	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
-	unit := renderVMSystemdUnit(vmSystemdConfig{
+	unit, err := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          "devbox",
 		Runner:           "/srv/catch/run/catch",
 		DataDir:          "/srv/catch/data",
+		ServicesRoot:     "/srv/services",
+		ServiceRoot:      root,
+		DiskPath:         filepath.Join(serviceDataDirForRoot(root), "rootfs.raw"),
 		Firecracker:      firecrackerBinary,
+		Jailer:           filepath.Join(root, "jailer"),
+		JailerBase:       filepath.Join(root, "jails"),
 		ConfigPath:       filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
 		APISocket:        filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"),
 		ConsoleSocket:    filepath.Join(serviceRunDirForRoot(root), "serial.sock"),
 		WorkingDirectory: root,
 	})
+	if err != nil {
+		t.Fatalf("render VM systemd unit: %v", err)
+	}
+	assertJailerOnlyVMUnit(t, unit)
 	if err := os.WriteFile(filepath.Join(systemdDir, vmSystemdUnitName("devbox")), []byte(unit), 0o644); err != nil {
 		t.Fatalf("write VM systemd unit: %v", err)
 	}
@@ -619,7 +912,7 @@ func TestVMSnapshotFullFailsWhenKnownFirecrackerVersionUnavailable(t *testing.T)
 		vmSnapshotFirecracker = oldController
 	})
 
-	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Full: true}, io.Discard)
+	err = server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Full: true}, io.Discard)
 
 	if err == nil || !strings.Contains(err.Error(), "read Firecracker version") {
 		t.Fatalf("createVMSnapshot error = %v, want Firecracker version failure", err)
@@ -766,6 +1059,47 @@ type recordingVMFirecracker struct {
 	fullErr          error
 	resumeErr        error
 	resumeContextErr error
+}
+
+type replacingVMCheckpointController struct {
+	replace func(string) error
+}
+
+func (replacingVMCheckpointController) Pause(context.Context, string) error  { return nil }
+func (replacingVMCheckpointController) Resume(context.Context, string) error { return nil }
+
+func (r replacingVMCheckpointController) CreateFullSnapshot(_ context.Context, _ string, statePath, memPath string) error {
+	if err := os.WriteFile(statePath, []byte("state"), 0o600); err != nil {
+		return err
+	}
+	if err := os.WriteFile(memPath, []byte("memory"), 0o600); err != nil {
+		return err
+	}
+	if r.replace == nil {
+		return nil
+	}
+	return r.replace(filepath.Dir(statePath))
+}
+
+func withCurrentVMCheckpointIdentity(t *testing.T) {
+	t.Helper()
+	oldIdentity := vmSnapshotEnsureRuntimeIdentity
+	oldChown := vmSnapshotFileChown
+	oldChmod := vmSnapshotFileChmod
+	vmSnapshotEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		uid, gid := os.Getuid(), os.Getgid()
+		if uid == 0 || gid == 0 {
+			uid, gid = 812, 813
+		}
+		return vmRuntimeIdentity{UID: uid, GID: gid}, nil
+	}
+	vmSnapshotFileChown = func(*os.File, int, int) error { return nil }
+	vmSnapshotFileChmod = func(file *os.File, mode os.FileMode) error { return file.Chmod(mode) }
+	t.Cleanup(func() {
+		vmSnapshotEnsureRuntimeIdentity = oldIdentity
+		vmSnapshotFileChown = oldChown
+		vmSnapshotFileChmod = oldChmod
+	})
 }
 
 func (r *recordingVMFirecracker) Pause(_ context.Context, socket string) error {

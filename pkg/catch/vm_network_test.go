@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -1048,6 +1049,7 @@ func TestVMNetworkRouteCleanupCommandsRejectsBroadAndNonBridgeTargets(t *testing
 
 func TestReconcileVMNetworksEnsuresOwnedStateAndDeletesUnownedState(t *testing.T) {
 	server := newTestServer(t)
+	stubVMNetworkRuntimeIdentity(t)
 	live := newVMNetworkPlan("livebox", []string{"svc", "lan"}, vmNetworkInputs{
 		ServiceIP:         "192.168.100.12",
 		LANParent:         "vmbr0",
@@ -1116,6 +1118,10 @@ func TestReconcileVMNetworksEnsuresOwnedStateAndDeletesUnownedState(t *testing.T
 
 func TestEnsureVMNetworkEnsuresOnlyNamedVM(t *testing.T) {
 	server := newTestServer(t)
+	stubVMNetworkRuntimeIdentity(t)
+	if err := markVMJailerReady(server.defaultServiceRootDir("target")); err != nil {
+		t.Fatal(err)
+	}
 	target := newVMNetworkPlan("target", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 	other := newVMNetworkPlan("other", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.13"})
 	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
@@ -1135,7 +1141,7 @@ func TestEnsureVMNetworkEnsuresOnlyNamedVM(t *testing.T) {
 	if err := server.EnsureVMNetwork(context.Background(), "target"); err != nil {
 		t.Fatalf("EnsureVMNetwork: %v", err)
 	}
-	if !containsCommand(commands, []string{"ip", "tuntap", "add", target.Interfaces[0].Tap, "mode", "tap"}) {
+	if !containsCommand(commands, []string{"ip", "tuntap", "add", target.Interfaces[0].Tap, "mode", "tap", "user", "812", "group", "813"}) {
 		t.Fatalf("target setup missing: %#v", commands)
 	}
 	if containsCommand(commands, []string{"ip", "tuntap", "add", other.Interfaces[0].Tap, "mode", "tap"}) {
@@ -1143,10 +1149,10 @@ func TestEnsureVMNetworkEnsuresOnlyNamedVM(t *testing.T) {
 	}
 }
 
-func TestEnsureVMNetworkDelegatesTapForJailedVM(t *testing.T) {
+func TestEnsureVMNetworkDelegatesTapForReadyVM(t *testing.T) {
 	server := newTestServer(t)
 	root := filepath.Join(t.TempDir(), "services", "target")
-	if err := writeVMIsolationMode(root, vmIsolationJailer); err != nil {
+	if err := markVMJailerReady(root); err != nil {
 		t.Fatal(err)
 	}
 	plan := newVMNetworkPlan("target", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
@@ -1179,15 +1185,88 @@ func TestEnsureVMNetworkDelegatesTapForJailedVM(t *testing.T) {
 	}
 }
 
-func TestReconcileVMNetworksDelegatesTapForJailedVM(t *testing.T) {
+func TestEnsureVMNetworkTransitionsPendingVM(t *testing.T) {
 	server := newTestServer(t)
-	root := filepath.Join(t.TempDir(), "services", "target")
-	if err := writeVMIsolationMode(root, vmIsolationJailer); err != nil {
+	resolvedDataRoot, err := filepath.EvalSymlinks(server.cfg.RootDir)
+	if err != nil {
 		t.Fatal(err)
 	}
+	server.cfg.RootDir = resolvedDataRoot
+	fixture := newVMJailerTransitionFixture(t)
+	service := fixture.Data.Services().Get(fixture.Service).AsStruct()
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{fixture.Service: service}}); err != nil {
+		t.Fatalf("seed db: %v", err)
+	}
+
+	oldIdentity := vmNetworkEnsureRuntimeIdentity
+	oldTrustedInput := vmJailValidateTrustedInput
+	oldTrustedReadOnly := vmJailValidateReadOnlyPath
+	oldProbeVersion := vmJailProbeVersion
+	oldStorageChown := vmJailStorageChown
+	oldStorageChmod := vmJailStorageChmod
+	oldRunner := vmNetworkReconcileRunner
+	vmNetworkEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	vmJailValidateTrustedInput = func(string) error { return nil }
+	vmJailValidateReadOnlyPath = func(string) error { return nil }
+	vmJailProbeVersion = func(context.Context, string) (string, error) { return "Firecracker v1.12.0", nil }
+	var delegated []string
+	vmJailStorageChown = func(file *os.File, uid, gid int) error {
+		if uid != 812 || gid != 813 {
+			t.Fatalf("storage identity = %d:%d", uid, gid)
+		}
+		delegated = append(delegated, file.Name())
+		return nil
+	}
+	vmJailStorageChmod = func(*os.File, os.FileMode) error { return nil }
+	var commands [][]string
+	vmNetworkReconcileRunner = func(command []string) error {
+		commands = append(commands, append([]string(nil), command...))
+		return nil
+	}
+	t.Cleanup(func() {
+		vmNetworkEnsureRuntimeIdentity = oldIdentity
+		vmJailValidateTrustedInput = oldTrustedInput
+		vmJailValidateReadOnlyPath = oldTrustedReadOnly
+		vmJailProbeVersion = oldProbeVersion
+		vmJailStorageChown = oldStorageChown
+		vmJailStorageChmod = oldStorageChmod
+		vmNetworkReconcileRunner = oldRunner
+	})
+
+	if err := server.EnsureVMNetwork(context.Background(), fixture.Service); err != nil {
+		t.Fatalf("EnsureVMNetwork: %v", err)
+	}
+	readiness, err := vmJailerReadinessForRoot(fixture.ServiceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readiness != vmJailerReady {
+		t.Fatalf("readiness = %q, want %q", readiness, vmJailerReady)
+	}
+	if !slices.Contains(delegated, fixture.Disk) {
+		t.Fatalf("delegated storage = %#v, missing raw disk %q", delegated, fixture.Disk)
+	}
+	network, err := vmNetworkPlanForVMService(fixture.Data, fixture.Service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tap := network.Interfaces[0].Tap
+	cleanup := []string{"ip", "link", "del", tap}
+	setup := []string{"ip", "tuntap", "add", tap, "mode", "tap", "user", "812", "group", "813"}
+	cleanupIndex := slices.IndexFunc(commands, func(command []string) bool { return reflect.DeepEqual(command, cleanup) })
+	setupIndex := slices.IndexFunc(commands, func(command []string) bool { return reflect.DeepEqual(command, setup) })
+	if cleanupIndex < 0 || setupIndex <= cleanupIndex {
+		t.Fatalf("network commands = %#v, want cleanup before owned setup", commands)
+	}
+}
+
+func TestReconcileVMNetworksDelegatesTapForEveryVM(t *testing.T) {
+	server := newTestServer(t)
 	plan := newVMNetworkPlan("target", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
-		"target": {Name: "target", ServiceType: db.ServiceTypeVM, ServiceRoot: root, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: plan.DBNetworks()}},
+		"target": {Name: "target", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: plan.DBNetworks()}},
 	}}); err != nil {
 		t.Fatalf("seed db: %v", err)
 	}
@@ -1221,7 +1300,13 @@ func TestReconcileVMNetworksDelegatesTapForJailedVM(t *testing.T) {
 func TestPackageEnsureVMNetworkUsesMinimalDBConfig(t *testing.T) {
 	root := t.TempDir()
 	cfg := Config{
-		DB: db.NewStore(root+"/db.json", root+"/services"),
+		DB:           db.NewStore(root+"/db.json", root+"/services"),
+		RootDir:      root,
+		ServicesRoot: root + "/services",
+	}
+	stubVMNetworkRuntimeIdentity(t)
+	if err := markVMJailerReady(filepath.Join(cfg.ServicesRoot, "target")); err != nil {
+		t.Fatal(err)
 	}
 	target := newVMNetworkPlan("target", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.12"})
 	other := newVMNetworkPlan("other", []string{"svc"}, vmNetworkInputs{ServiceIP: "192.168.100.13"})
@@ -1245,7 +1330,7 @@ func TestPackageEnsureVMNetworkUsesMinimalDBConfig(t *testing.T) {
 	if err := EnsureVMNetwork(context.Background(), &cfg, "target"); err != nil {
 		t.Fatalf("EnsureVMNetwork: %v", err)
 	}
-	if !containsCommand(commands, []string{"ip", "tuntap", "add", target.Interfaces[0].Tap, "mode", "tap"}) {
+	if !containsCommand(commands, []string{"ip", "tuntap", "add", target.Interfaces[0].Tap, "mode", "tap", "user", "812", "group", "813"}) {
 		t.Fatalf("target setup missing: %#v", commands)
 	}
 	if containsCommand(commands, []string{"ip", "tuntap", "add", other.Interfaces[0].Tap, "mode", "tap"}) {
@@ -1264,6 +1349,7 @@ func TestEnsureVMNetworkReportsMissingService(t *testing.T) {
 
 func TestEnsureVMNetworkReportsNonVMService(t *testing.T) {
 	server := newTestServer(t)
+	stubVMNetworkRuntimeIdentity(t)
 	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
 		"web": {Name: "web", ServiceType: db.ServiceTypeDockerCompose},
 	}}); err != nil {
@@ -1278,6 +1364,10 @@ func TestEnsureVMNetworkReportsNonVMService(t *testing.T) {
 
 func TestEnsureVMNetworkRejectsUnsupportedLANState(t *testing.T) {
 	server := newTestServer(t)
+	stubVMNetworkRuntimeIdentity(t)
+	if err := markVMJailerReady(server.defaultServiceRootDir("badlan")); err != nil {
+		t.Fatal(err)
+	}
 	plan := newVMNetworkPlan("badlan", []string{"lan"}, vmNetworkInputs{})
 	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
 		"badlan": {Name: "badlan", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: plan.DBNetworks()}},
@@ -1303,6 +1393,10 @@ func TestEnsureVMNetworkRejectsUnsupportedLANState(t *testing.T) {
 
 func TestEnsureVMNetworkRejectsDBBackedNonBridgeLANParent(t *testing.T) {
 	server := newTestServer(t)
+	stubVMNetworkRuntimeIdentity(t)
+	if err := markVMJailerReady(server.defaultServiceRootDir("badlan")); err != nil {
+		t.Fatal(err)
+	}
 	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
 		"badlan": {
 			Name:        "badlan",
@@ -1340,6 +1434,7 @@ func TestEnsureVMNetworkRejectsDBBackedNonBridgeLANParent(t *testing.T) {
 
 func TestReconcileVMNetworksRejectsUnsupportedLANStateBeforeCleanup(t *testing.T) {
 	server := newTestServer(t)
+	stubVMNetworkRuntimeIdentity(t)
 	plan := newVMNetworkPlan("badlan", []string{"lan"}, vmNetworkInputs{})
 	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
 		"badlan": {Name: "badlan", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Networks: plan.DBNetworks()}},
@@ -1372,6 +1467,15 @@ func TestReconcileVMNetworksRejectsUnsupportedLANStateBeforeCleanup(t *testing.T
 	if len(commands) != 0 {
 		t.Fatalf("commands = %#v, want validation to block setup and cleanup", commands)
 	}
+}
+
+func stubVMNetworkRuntimeIdentity(t *testing.T) {
+	t.Helper()
+	oldIdentity := vmNetworkEnsureRuntimeIdentity
+	vmNetworkEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	t.Cleanup(func() { vmNetworkEnsureRuntimeIdentity = oldIdentity })
 }
 
 func TestReconcileOrphanedVMServiceNetworksIgnoresRouteListerFailure(t *testing.T) {

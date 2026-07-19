@@ -43,6 +43,12 @@ type vmNetworkCheckReport struct {
 	Findings []string
 }
 
+type vmNetworkEnsureInput struct {
+	DataRoot    string
+	Service     string
+	ServiceRoot string
+}
+
 func (d vmNetworkDesiredState) Check(live vmNetworkLiveState) vmNetworkCheckReport {
 	liveLinks := vmNetworkLiveLinkSet(live.Links)
 	findings := vmNetworkMissingLinkFindings(d.Plans, liveLinks)
@@ -126,7 +132,11 @@ func (s *Server) EnsureVMNetwork(ctx context.Context, service string) error {
 	if !ok {
 		return fmt.Errorf("service %q not found", service)
 	}
-	return ensureVMNetworkFromDataView(ctx, dv, service, s.serviceRootFromService(sv.AsStruct()))
+	return ensureVMNetworkFromDataView(ctx, dv, vmNetworkEnsureInput{
+		DataRoot:    s.cfg.RootDir,
+		Service:     service,
+		ServiceRoot: s.serviceRootFromService(sv.AsStruct()),
+	})
 }
 
 func EnsureVMNetwork(ctx context.Context, cfg *Config, service string) error {
@@ -144,30 +154,34 @@ func EnsureVMNetwork(ctx context.Context, cfg *Config, service string) error {
 	if !ok {
 		return fmt.Errorf("service %q not found", service)
 	}
-	return ensureVMNetworkFromDataView(ctx, &dv, service, serviceRootFromConfig(*cfg, *sv.AsStruct()))
+	return ensureVMNetworkFromDataView(ctx, &dv, vmNetworkEnsureInput{
+		DataRoot:    cfg.RootDir,
+		Service:     service,
+		ServiceRoot: serviceRootFromConfig(*cfg, *sv.AsStruct()),
+	})
 }
 
-func ensureVMNetworkFromDataView(_ context.Context, dv *db.DataView, service, serviceRoot string) error {
-	plan, err := vmNetworkPlanForVMService(dv, service)
+func ensureVMNetworkFromDataView(ctx context.Context, dv *db.DataView, input vmNetworkEnsureInput) error {
+	identity, err := vmNetworkEnsureRuntimeIdentity()
 	if err != nil {
 		return err
 	}
-	isolation, err := vmIsolationModeForRoot(serviceRoot)
+	readiness, err := vmJailerReadinessForRoot(input.ServiceRoot)
 	if err != nil {
 		return err
 	}
-	if isolation == vmIsolationJailer {
-		identity, err := vmNetworkEnsureRuntimeIdentity()
+	if readiness == vmJailerPendingRestart {
+		plan, err := newVMJailerTransitionPlan(dv, vmJailerTransitionInput(input), identity)
 		if err != nil {
 			return err
 		}
-		plan = plan.WithTapOwner(identity)
+		return executeVMJailerTransition(ctx, plan, defaultVMJailerTransitionDeps())
 	}
-	setupCmds, err := vmNetworkSetupCommands(plan)
+	plan, err := vmNetworkPlanForVMService(dv, input.Service)
 	if err != nil {
 		return err
 	}
-	return runVMNetworkLifecycleCommands(setupCmds, nil, fmt.Sprintf("ensure VM network for %q", service))
+	return ensureOwnedVMNetwork(plan.WithTapOwner(identity), input.Service)
 }
 
 func (s *Server) reconcileOrphanedVMServiceNetworks(ctx context.Context) error {
@@ -196,14 +210,7 @@ func (s *Server) reconcileOrphanedVMServiceNetworks(ctx context.Context) error {
 
 func (s *Server) vmNetworkDesiredStateFromDB(dv *db.DataView) (vmNetworkDesiredState, error) {
 	var runtimeIdentity *vmRuntimeIdentity
-	return vmNetworkDesiredStateFromDBWithTransform(dv, func(sv db.ServiceView, plan vmNetworkPlan) (vmNetworkPlan, error) {
-		mode, err := vmIsolationModeForRoot(s.serviceRootFromService(sv.AsStruct()))
-		if err != nil {
-			return vmNetworkPlan{}, err
-		}
-		if mode != vmIsolationJailer {
-			return plan, nil
-		}
+	return vmNetworkDesiredStateFromDBWithTransform(dv, func(_ db.ServiceView, plan vmNetworkPlan) (vmNetworkPlan, error) {
 		if runtimeIdentity == nil {
 			identity, err := vmNetworkEnsureRuntimeIdentity()
 			if err != nil {
@@ -330,6 +337,14 @@ func runVMNetworkLifecycleCommands(ensureCmds, cleanupCmds [][]string, label str
 		return fmt.Errorf("%s: %w", label, err)
 	}
 	return nil
+}
+
+func ensureOwnedVMNetwork(plan vmNetworkPlan, service string) error {
+	setup, err := vmNetworkSetupCommands(plan)
+	if err != nil {
+		return err
+	}
+	return runVMNetworkLifecycleCommands(setup, nil, fmt.Sprintf("ensure VM network for %q", service))
 }
 
 func ownedVMServiceNetworkBases(dv *db.DataView) map[string]bool {

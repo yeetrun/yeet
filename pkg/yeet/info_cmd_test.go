@@ -133,6 +133,18 @@ func TestRenderInfoPlainIncludesVMSection(t *testing.T) {
 	}
 }
 
+func TestFormatVMMIsolation(t *testing.T) {
+	tests := map[string]string{
+		"jailer":                 "jailer",
+		"jailer-pending-restart": "jailer (pending restart)",
+	}
+	for input, want := range tests {
+		if got := formatVMMIsolation(input); got != want {
+			t.Fatalf("formatVMMIsolation(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestNormalizeInfoFormat(t *testing.T) {
 	tests := []struct {
 		name    string

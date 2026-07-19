@@ -97,6 +97,9 @@ func TestRemoveServiceCleansVMNetwork(t *testing.T) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatalf("mkdir root: %v", err)
 	}
+	if err := markVMJailerReady(root); err != nil {
+		t.Fatalf("mark VM jailer ready: %v", err)
+	}
 	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
 		name: {
 			Name:        name,

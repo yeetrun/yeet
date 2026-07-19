@@ -87,6 +87,7 @@ func TestServiceInfoVMJSONRoundTrip(t *testing.T) {
 		Name: "devbox",
 		VM: &ServiceVM{
 			Runtime:      "firecracker",
+			VMMIsolation: "jailer-pending-restart",
 			Image:        "vm://ubuntu/26.04",
 			ImageVersion: "ubuntu-26.04-amd64-v1",
 			CPUs:         4,
@@ -107,6 +108,7 @@ func TestServiceInfoVMJSONRoundTrip(t *testing.T) {
 	}
 	for _, want := range []string{
 		`"vm"`,
+		`"vmmIsolation":"jailer-pending-restart"`,
 		`"imageVersion":"ubuntu-26.04-amd64-v1"`,
 		`"memoryBytes":4294967296`,
 		`"balloon":{"mode":"auto","minBytes":1073741824,"minMemory":"1 GB","lastTargetBytes":536870912}`,
@@ -125,8 +127,32 @@ func TestServiceInfoVMJSONRoundTrip(t *testing.T) {
 	if roundTrip.VM == nil || roundTrip.VM.Image != "vm://ubuntu/26.04" || roundTrip.VM.SSH.User != "ubuntu" || !roundTrip.VM.Console.Available {
 		t.Fatalf("round trip VM = %#v", roundTrip.VM)
 	}
+	if roundTrip.VM.VMMIsolation != "jailer-pending-restart" {
+		t.Fatalf("round trip VMM isolation = %q", roundTrip.VM.VMMIsolation)
+	}
 	if roundTrip.VM.Balloon.Mode != "auto" || roundTrip.VM.Balloon.MinBytes != 1<<30 || roundTrip.VM.Balloon.MinMemory != "1 GB" || roundTrip.VM.Balloon.LastTarget != 512<<20 {
 		t.Fatalf("round trip balloon = %#v, want auto 1 GB with target", roundTrip.VM.Balloon)
+	}
+}
+
+func TestServiceVMVMMIsolationJSONRoundTrip(t *testing.T) {
+	for _, want := range []string{"jailer", "jailer-pending-restart"} {
+		t.Run(want, func(t *testing.T) {
+			raw, err := json.Marshal(ServiceVM{VMMIsolation: want})
+			if err != nil {
+				t.Fatalf("Marshal ServiceVM: %v", err)
+			}
+			if !strings.Contains(string(raw), `"vmmIsolation":"`+want+`"`) {
+				t.Fatalf("ServiceVM JSON = %s, want VMM isolation %q", raw, want)
+			}
+			var got ServiceVM
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("Unmarshal ServiceVM: %v", err)
+			}
+			if got.VMMIsolation != want {
+				t.Fatalf("round trip VMM isolation = %q, want %q", got.VMMIsolation, want)
+			}
+		})
 	}
 }
 

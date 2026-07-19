@@ -2601,17 +2601,20 @@ func saveVMSetConfig(cfgLoc *projectConfigLocation, hostOverride string, flags c
 	if !ok {
 		return false, nil
 	}
-	applyVMSetConfigFlags(&entry, flags)
+	if !applyVMSetConfigFlags(&entry, flags) {
+		return false, nil
+	}
 	cfgLoc.Config.SetServiceEntry(entry)
 	return true, saveProjectConfig(cfgLoc)
 }
 
-func applyVMSetConfigFlags(entry *ServiceEntry, flags cli.VMSetFlags) {
+func applyVMSetConfigFlags(entry *ServiceEntry, flags cli.VMSetFlags) bool {
 	removals, updates := vmSetRunFlagChanges(flags)
 	if len(removals) == 0 || !serviceEntryIsVM(*entry) {
-		return
+		return false
 	}
 	entry.Args = rewriteStoredRunArgs(entry.Args, removals, updates)
+	return true
 }
 
 func serviceEntryIsVM(entry ServiceEntry) bool {

@@ -5,6 +5,10 @@
 package catch
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
@@ -101,6 +105,43 @@ func TestRewriteHostStorageDataPaths(t *testing.T) {
 	}
 	if got := vm.PIDFile; got != "/flash/yeet/services/devbox/run/firecracker.pid" {
 		t.Fatalf("VM PID file = %q", got)
+	}
+
+	systemdDir := t.TempDir()
+	oldSystemdDir := vmSystemdSystemDir
+	vmSystemdSystemDir = systemdDir
+	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
+	cfg := Config{RootDir: "/flash/yeet/data", ServicesRoot: "/flash/yeet/services"}
+	units, err := regenerateHostStorageVMSystemdUnit(
+		context.Background(),
+		cfg,
+		data.Services["devbox"],
+		"/flash/yeet/services/catch/run/catch",
+	)
+	if err != nil {
+		t.Fatalf("regenerate host-storage VM unit: %v", err)
+	}
+	if len(units) != 1 || units[0] != vmSystemdUnitName("devbox") {
+		t.Fatalf("regenerated units = %#v, want %q", units, vmSystemdUnitName("devbox"))
+	}
+	unitRaw, err := os.ReadFile(filepath.Join(systemdDir, vmSystemdUnitName("devbox")))
+	if err != nil {
+		t.Fatalf("read regenerated host-storage VM unit: %v", err)
+	}
+	unit := string(unitRaw)
+	assertJailerOnlyVMUnit(t, unit)
+	for _, want := range []string{
+		"-data-dir /flash/yeet/data",
+		"-services-root /flash/yeet/services",
+		"--service-root /flash/yeet/services/devbox",
+		"--disk-path " + vm.Disk.Path,
+		"--firecracker /flash/yeet/data/vm-images/ubuntu/firecracker",
+		"--jailer /flash/yeet/data/vm-images/ubuntu/jailer",
+		"--jailer-base /flash/yeet/data/vm-jailer",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("regenerated host-storage VM unit missing %q:\n%s", want, unit)
+		}
 	}
 }
 

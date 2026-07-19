@@ -32,7 +32,6 @@ var (
 	vmSnapshotIsRunning                                      = (*Server).IsServiceRunning
 	vmSnapshotFirecracker           vmFirecrackerSnapshotter = firecrackerSnapshotAPI{}
 	vmSnapshotEnsureRuntimeIdentity                          = ensureVMRuntimeIdentity
-	vmSnapshotChown                                          = os.Chown
 )
 
 const vmSnapshotRecoveryTimeout = 30 * time.Second
@@ -244,16 +243,11 @@ func (s *Server) createPausedVMSnapshot(ctx context.Context, service *db.Service
 }
 
 func (s *Server) createPausedFullVMSnapshot(ctx context.Context, service *db.Service, vm db.VMConfig, dataset string, flags cli.SnapshotsCreateFlags, controller vmFirecrackerSnapshotter, fullCompatibility vmCheckpointCompatibility, now time.Time, checkpoint string) (vmSnapshotResult, error) {
-	result, tempDir, err := s.createTemporaryFullVMCheckpoint(ctx, service, vm, controller)
+	result, workspace, err := s.createTemporaryFullVMCheckpoint(ctx, service, vm, controller)
 	if err != nil {
 		return result, fmt.Errorf("create full VM checkpoint: %w", err)
 	}
-	cleanupTemp := true
-	defer func() {
-		if cleanupTemp {
-			_ = os.RemoveAll(tempDir)
-		}
-	}()
+	defer func() { _ = workspace.close() }()
 
 	req := snapshotCreateRequest{
 		Service:    service.Name,
@@ -265,78 +259,88 @@ func (s *Server) createPausedFullVMSnapshot(ctx context.Context, service *db.Ser
 	}
 	name, err := createServiceSnapshot(ctx, s.zfsRunner, req)
 	if err != nil {
-		return vmSnapshotResult{}, fmt.Errorf("create full VM checkpoint for snapshot %s@%s: %w", dataset, snapshotShortName(req), err)
+		cleanupErr := workspace.remove()
+		return vmSnapshotResult{}, errors.Join(
+			fmt.Errorf("create full VM checkpoint for snapshot %s@%s: %w", dataset, snapshotShortName(req), err),
+			checkpointWorkspaceCleanupError(workspace.path(), cleanupErr),
+		)
 	}
 
-	finalDir := vmCheckpointDir(s.serviceRootFromService(service), vmSnapshotShortName(name))
-	if err := os.Rename(tempDir, finalDir); err != nil {
-		return result, s.failFullVMSnapshot(ctx, name, tempDir, fmt.Errorf("publish VM checkpoint directory: %w", err))
+	finalName := vmSnapshotShortName(name)
+	finalDir := vmCheckpointDir(s.serviceRootFromService(service), finalName)
+	finalResult := vmSnapshotResult{
+		Name:       name,
+		StatePath:  filepath.Join(finalDir, "firecracker-state.bin"),
+		MemoryPath: filepath.Join(finalDir, "memory.bin"),
 	}
-	cleanupTemp = false
-
-	result.Name = name
-	result.StatePath = filepath.Join(finalDir, "firecracker-state.bin")
-	result.MemoryPath = filepath.Join(finalDir, "memory.bin")
-	if err := s.writeVMCheckpointMetadataWithCompatibility(finalDir, service, fullCompatibility, flags.Comment, name, result, now); err != nil {
-		return result, s.failFullVMSnapshot(ctx, name, finalDir, err)
+	metadata, err := s.marshalVMCheckpointMetadataWithCompatibility(service, fullCompatibility, flags.Comment, name, finalResult, now)
+	if err != nil {
+		return result, s.failFullVMCheckpointWorkspace(ctx, name, workspace, err)
 	}
-	return result, nil
+	if err := workspace.writeMetadata(metadata); err != nil {
+		return result, s.failFullVMCheckpointWorkspace(ctx, name, workspace, err)
+	}
+	if err := workspace.publish(finalName); err != nil {
+		return result, s.failFullVMCheckpointWorkspace(ctx, name, workspace, err)
+	}
+	return finalResult, nil
 }
 
 func (s *Server) flushPausedVMDiskForSnapshot(ctx context.Context, service *db.Service, vm db.VMConfig, controller vmFirecrackerSnapshotter) error {
-	_, tempDir, err := s.createTemporaryFullVMCheckpoint(ctx, service, vm, controller)
+	_, workspace, err := s.createTemporaryFullVMCheckpoint(ctx, service, vm, controller)
 	if err != nil {
 		return fmt.Errorf("flush VM disk before snapshot: %w", err)
 	}
-	if err := os.RemoveAll(tempDir); err != nil {
-		return fmt.Errorf("remove temporary VM disk flush checkpoint %s: %w", tempDir, err)
+	path := workspace.path()
+	removeErr := workspace.remove()
+	closeErr := workspace.close()
+	if err := errors.Join(removeErr, closeErr); err != nil {
+		return fmt.Errorf("remove temporary VM disk flush checkpoint %s: %w", path, err)
 	}
 	return nil
 }
 
-func (s *Server) createTemporaryFullVMCheckpoint(ctx context.Context, service *db.Service, vm db.VMConfig, controller vmFirecrackerSnapshotter) (vmSnapshotResult, string, error) {
+func (s *Server) createTemporaryFullVMCheckpoint(ctx context.Context, service *db.Service, vm db.VMConfig, controller vmFirecrackerSnapshotter) (vmSnapshotResult, *vmCheckpointWorkspace, error) {
 	if controller == nil {
 		controller = currentVMSnapshotController()
 	}
 	baseDir := filepath.Join(serviceDataDirForRoot(s.serviceRootFromService(service)), "checkpoints")
-	if err := os.MkdirAll(baseDir, 0o755); err != nil {
-		return vmSnapshotResult{}, "", fmt.Errorf("create VM checkpoint directory: %w", err)
-	}
-	dir, err := os.MkdirTemp(baseDir, ".firecracker-checkpoint-*")
-	if err != nil {
-		return vmSnapshotResult{}, "", fmt.Errorf("create temporary VM checkpoint directory: %w", err)
-	}
-	if err := delegateVMCheckpointDirIfJailed(s.serviceRootFromService(service), dir); err != nil {
-		_ = os.RemoveAll(dir)
-		return vmSnapshotResult{}, "", err
-	}
-	result := vmSnapshotResult{
-		StatePath:  filepath.Join(dir, "firecracker-state.bin"),
-		MemoryPath: filepath.Join(dir, "memory.bin"),
-	}
-	if err := controller.CreateFullSnapshot(ctx, vm.Sockets.APISocketPath, result.StatePath, result.MemoryPath); err != nil {
-		_ = os.RemoveAll(dir)
-		return result, "", fmt.Errorf("create Firecracker checkpoint: %w", err)
-	}
-	return result, dir, nil
-}
-
-func delegateVMCheckpointDirIfJailed(root, dir string) error {
-	mode, err := vmIsolationModeForRoot(root)
-	if err != nil {
-		return err
-	}
-	if mode != vmIsolationJailer {
-		return nil
-	}
 	identity, err := vmSnapshotEnsureRuntimeIdentity()
 	if err != nil {
-		return err
+		return vmSnapshotResult{}, nil, err
 	}
-	if err := vmSnapshotChown(dir, identity.UID, identity.GID); err != nil {
-		return fmt.Errorf("delegate VM checkpoint directory %s: %w", dir, err)
+	workspace, err := newVMCheckpointWorkspace(baseDir, identity)
+	if err != nil {
+		return vmSnapshotResult{}, nil, err
 	}
-	return nil
+	result := vmSnapshotResult{
+		StatePath:  filepath.Join(workspace.path(), "firecracker-state.bin"),
+		MemoryPath: filepath.Join(workspace.path(), "memory.bin"),
+	}
+	if err := controller.CreateFullSnapshot(ctx, vm.Sockets.APISocketPath, result.StatePath, result.MemoryPath); err != nil {
+		cleanupErr := errors.Join(workspace.remove(), workspace.close())
+		return result, nil, errors.Join(
+			fmt.Errorf("create Firecracker checkpoint: %w", err),
+			checkpointWorkspaceCleanupError(workspace.path(), cleanupErr),
+		)
+	}
+	return result, workspace, nil
+}
+
+func (s *Server) failFullVMCheckpointWorkspace(ctx context.Context, snapshotName string, workspace *vmCheckpointWorkspace, cause error) error {
+	path := workspace.path()
+	cleanupErr := errors.Join(workspace.remove(), workspace.close())
+	if err := checkpointWorkspaceCleanupError(path, cleanupErr); err != nil {
+		cause = errors.Join(cause, err)
+	}
+	return s.failFullVMSnapshot(ctx, snapshotName, "", cause)
+}
+
+func checkpointWorkspaceCleanupError(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("clean up temporary VM checkpoint workspace %s: %w", path, err)
 }
 
 func (s *Server) failFullVMSnapshot(ctx context.Context, snapshotName string, checkpointDir string, cause error) error {

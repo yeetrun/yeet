@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -68,6 +67,8 @@ type vmJailPlan struct {
 	RuntimeIdentity vmRuntimeIdentity
 }
 
+var errVMJailerRuntimeVersionMismatch = errors.New("VM jailer runtime version mismatch")
+
 var (
 	vmJailerVersionPattern      = regexp.MustCompile(`\bv?([0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?)\b`)
 	vmJailRunCommand            = runVMJailCommand
@@ -75,8 +76,6 @@ var (
 	vmJailValidateRuntimePair   = validateVMJailerRuntimePair
 	vmJailPrepare               = prepareVMJail
 	vmJailCleanup               = cleanupVMJail
-	vmJailStorageChown          = os.Chown
-	vmJailStorageChmod          = os.Chmod
 	vmJailResourceChown         = os.Chown
 	vmJailResourceChmod         = os.Chmod
 	vmJailDeviceStat            = unix.Stat
@@ -118,9 +117,6 @@ func buildVMJailPlan(cfg VMConsoleProxyConfig, identity vmRuntimeIdentity) (vmJa
 		return vmJailPlan{}, err
 	}
 	base := strings.TrimSpace(cfg.JailerBase)
-	if base == "" {
-		base = defaultVMJailerBase
-	}
 	execName := filepath.Base(cfg.Firecracker)
 	instanceRoot := filepath.Join(base, execName, vmJailerID(cfg.Service))
 	plan := vmJailPlan{
@@ -164,7 +160,7 @@ func addVMJailConfigResources(plan *vmJailPlan, cfg VMConsoleProxyConfig, fcConf
 		}
 	}
 	checkpointDir := filepath.Join(serviceDataDirForRoot(cfg.ServiceRoot), "checkpoints")
-	plan.addBind(checkpointDir, false, true, true)
+	plan.addBind(checkpointDir, false, false, true)
 	plan.SocketLinks = append(plan.SocketLinks, vmJailSocketLink{
 		HostPath: cfg.APISocket,
 		JailPath: vmJailCanonicalPath(plan.JailRoot, cfg.APISocket),
@@ -194,6 +190,7 @@ func validateVMJailCanonicalInputs(cfg VMConsoleProxyConfig) error {
 		{"VM service root", cfg.ServiceRoot},
 		{"Firecracker path", cfg.Firecracker},
 		{"jailer path", cfg.Jailer},
+		{"VM jailer base", cfg.JailerBase},
 		{"Firecracker API socket", cfg.APISocket},
 		{"Firecracker config", cfg.ConfigFile},
 	}
@@ -206,9 +203,6 @@ func validateVMJailCanonicalInputs(cfg VMConsoleProxyConfig) error {
 		if !filepath.IsAbs(input.value) {
 			return fmt.Errorf("%s must be an absolute path for VM jail: %s", input.label, input.value)
 		}
-	}
-	if strings.TrimSpace(cfg.JailerBase) != "" && !filepath.IsAbs(cfg.JailerBase) {
-		return fmt.Errorf("VM jailer base must be an absolute path: %s", cfg.JailerBase)
 	}
 	return nil
 }
@@ -252,16 +246,12 @@ func vmJailCanonicalPath(jailRoot, canonical string) string {
 }
 
 func vmJailerCommandArgs(cfg VMConsoleProxyConfig, identity vmRuntimeIdentity, restoreMode bool) []string {
-	base := strings.TrimSpace(cfg.JailerBase)
-	if base == "" {
-		base = defaultVMJailerBase
-	}
 	args := []string{
 		"--id", vmJailerID(cfg.Service),
 		"--exec-file", cfg.Firecracker,
 		"--uid", strconv.Itoa(identity.UID),
 		"--gid", strconv.Itoa(identity.GID),
-		"--chroot-base-dir", base,
+		"--chroot-base-dir", cfg.JailerBase,
 		"--cgroup-version", "2",
 		"--resource-limit", "no-file=" + strconv.Itoa(vmJailerNoFileLimit),
 		"--",
@@ -274,8 +264,8 @@ func vmJailerCommandArgs(cfg VMConsoleProxyConfig, identity vmRuntimeIdentity, r
 }
 
 func prepareVMConsoleProcess(ctx context.Context, cfg VMConsoleProxyConfig, restoreMode bool) (*exec.Cmd, func(), error) {
-	if strings.TrimSpace(cfg.Jailer) == "" {
-		return vmFirecrackerCommand(ctx, cfg, restoreMode), func() {}, nil
+	if err := validateVMJailCanonicalInputs(cfg); err != nil {
+		return nil, nil, err
 	}
 	identity, err := vmJailEnsureRuntimeIdentity()
 	if err != nil {
@@ -312,7 +302,7 @@ func validateVMJailerPairVersion(firecrackerOutput, jailerOutput string) error {
 		return fmt.Errorf("read Firecracker/jailer version: Firecracker=%q jailer=%q", strings.TrimSpace(firecrackerOutput), strings.TrimSpace(jailerOutput))
 	}
 	if firecrackerVersion != jailerVersion {
-		return fmt.Errorf("firecracker version %s does not match jailer version %s", firecrackerVersion, jailerVersion)
+		return fmt.Errorf("%w: firecracker version %s does not match jailer version %s", errVMJailerRuntimeVersionMismatch, firecrackerVersion, jailerVersion)
 	}
 	return nil
 }
@@ -484,14 +474,11 @@ func prepareVMJailBind(bind vmJailBind, identity vmRuntimeIdentity) error {
 	if err != nil {
 		return err
 	}
-	if bind.ReadOnly {
-		linkInfo, err := os.Lstat(bind.Source)
-		if err != nil {
-			return fmt.Errorf("inspect VM jail read-only resource %s: %w", bind.Source, err)
-		}
-		if err := validateVMJailReadOnlyResource(bind.Source, linkInfo, identity); err != nil {
-			return err
-		}
+	if err := normalizeVMJailBindSource(bind, identity); err != nil {
+		return err
+	}
+	if err := validateVMJailBindSource(bind, identity); err != nil {
+		return err
 	}
 	if err := createVMJailBindTarget(bind.Target, info.IsDir()); err != nil {
 		return err
@@ -508,6 +495,24 @@ func prepareVMJailBind(bind vmJailBind, identity vmRuntimeIdentity) error {
 		return vmJailRunCommand([]string{"mount", "-o", "remount,bind,ro,nosuid,nodev,noexec", bind.Target})
 	}
 	return nil
+}
+
+func validateVMJailBindSource(bind vmJailBind, identity vmRuntimeIdentity) error {
+	if !bind.ReadOnly {
+		return nil
+	}
+	linkInfo, err := os.Lstat(bind.Source)
+	if err != nil {
+		return fmt.Errorf("inspect VM jail read-only resource %s: %w", bind.Source, err)
+	}
+	return validateVMJailReadOnlyResource(bind.Source, linkInfo, identity)
+}
+
+func normalizeVMJailBindSource(bind vmJailBind, identity vmRuntimeIdentity) error {
+	if !bind.CreateDirectory || bind.ReadOnly || bind.OwnedByRuntime {
+		return nil
+	}
+	return delegateVMJailCheckpoints(bind.Source, identity)
 }
 
 func ensureVMJailBindSource(bind vmJailBind) (os.FileInfo, error) {
@@ -593,53 +598,78 @@ func delegateVMJailDisk(disk string, identity vmRuntimeIdentity) error {
 	if disk == "." || strings.HasPrefix(disk, "/dev/") {
 		return nil
 	}
-	info, err := os.Lstat(disk)
-	if err != nil {
-		return fmt.Errorf("inspect VM disk for jail delegation: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return fmt.Errorf("VM raw disk %s must be a regular non-symlink file", disk)
-	}
-	return delegateVMJailStoragePath(disk, info, identity)
-}
-
-func delegateVMJailCheckpoints(checkpointDir string, identity vmRuntimeIdentity) error {
-	if _, err := os.Lstat(checkpointDir); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("inspect VM checkpoints for jail delegation: %w", err)
-	}
-	if err := filepath.WalkDir(checkpointDir, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to delegate symbolic link in VM checkpoints: %s", path)
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		return delegateVMJailStoragePath(path, info, identity)
-	}); err != nil {
-		return fmt.Errorf("delegate VM checkpoints %s: %w", checkpointDir, err)
+	if err := delegateVMJailStorageFile(disk, identity); err != nil {
+		return fmt.Errorf("delegate VM raw disk: %w", err)
 	}
 	return nil
 }
 
-func delegateVMJailStoragePath(path string, info os.FileInfo, identity vmRuntimeIdentity) error {
-	requiredMode := os.FileMode(0o600)
-	if info.IsDir() {
-		requiredMode = 0o700
-	} else if !info.Mode().IsRegular() {
-		return fmt.Errorf("VM jail storage %s must be a regular file or directory", path)
+func delegateVMJailCheckpoints(checkpointDir string, identity vmRuntimeIdentity) error {
+	root, parent, name, err := openVMJailStoragePath(checkpointDir)
+	if err != nil {
+		return openVMJailCheckpointsError(checkpointDir, err)
 	}
-	if err := vmJailStorageChown(path, identity.UID, identity.GID); err != nil {
-		return fmt.Errorf("delegate VM jail storage %s: %w", path, err)
+	defer func() { _ = root.Close() }()
+	if parent != nil {
+		defer func() { _ = parent.Close() }()
 	}
-	if err := vmJailStorageChmod(path, info.Mode().Perm()|requiredMode); err != nil {
-		return fmt.Errorf("set delegated VM jail storage permissions %s: %w", path, err)
+	return delegateOpenedVMJailCheckpoints(root, parent, name, checkpointDir, identity)
+}
+
+func openVMJailCheckpointsError(checkpointDir string, err error) error {
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return fmt.Errorf("delegate VM checkpoints %s: %w", checkpointDir, err)
+}
+
+func delegateOpenedVMJailCheckpoints(root, parent *os.File, name, checkpointDir string, identity vmRuntimeIdentity) error {
+	info, err := root.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect VM checkpoint root %s: %w", checkpointDir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("VM checkpoint root %s must be a directory", checkpointDir)
+	}
+	if err := vmJailStorageChown(root, 0, 0); err != nil {
+		return fmt.Errorf("set VM checkpoint root owner %s: %w", checkpointDir, err)
+	}
+	if err := vmJailStorageChmod(root, 0o755); err != nil {
+		return fmt.Errorf("set VM checkpoint root mode %s: %w", checkpointDir, err)
+	}
+	if err := verifyVMJailStorageEntryUnchanged(parent, name, root, checkpointDir); err != nil {
+		return err
+	}
+	names, err := root.Readdirnames(-1)
+	if err != nil {
+		return fmt.Errorf("read VM checkpoint root %s: %w", checkpointDir, err)
+	}
+	sort.Strings(names)
+	return delegateVMJailCheckpointChildren(root, checkpointDir, names, identity)
+}
+
+func delegateVMJailCheckpointChildren(root *os.File, checkpointDir string, names []string, identity vmRuntimeIdentity) error {
+	for _, childName := range names {
+		if err := delegateVMJailCheckpointChild(root, checkpointDir, childName, identity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func delegateVMJailCheckpointChild(root *os.File, checkpointDir, childName string, identity vmRuntimeIdentity) error {
+	childPath := filepath.Join(checkpointDir, childName)
+	child, childInfo, err := openVerifiedVMJailStorageChild(root, childName, childPath)
+	if err != nil {
+		return err
+	}
+	delegateErr := delegateOpenedVMJailStorageTree(root, childName, child, childPath, childInfo, identity)
+	closeErr := child.Close()
+	if delegateErr != nil {
+		return delegateErr
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close VM checkpoint storage %s: %w", childPath, closeErr)
 	}
 	return nil
 }

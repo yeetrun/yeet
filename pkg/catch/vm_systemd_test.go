@@ -17,25 +17,32 @@ import (
 )
 
 func TestRenderVMSystemdUnit(t *testing.T) {
-	unit := renderVMSystemdUnit(vmSystemdConfig{
+	cfg := vmSystemdConfig{
 		Service:          "devbox",
 		Runner:           "/srv/catch/run/catch",
 		DataDir:          "/srv/catch/data",
+		ServicesRoot:     "/srv/services",
 		ServiceRoot:      "/srv/vms/devbox",
 		DiskPath:         "/srv/vms/devbox/rootfs.ext4",
 		Firecracker:      "/srv/images/firecracker",
+		Jailer:           "/opt/vm/jailer",
+		JailerBase:       "/var/lib/yeet/vm-jailer",
 		ConfigPath:       "/srv/vms/devbox/run/firecracker.json",
 		APISocket:        "/srv/vms/devbox/run/firecracker.sock",
 		ConsoleSocket:    "/srv/vms/devbox/run/serial.sock",
 		VsockSocket:      "/srv/vms/devbox/run/vsock.sock",
 		WorkingDirectory: "/srv/vms/devbox",
-	})
+	}
+	unit, err := renderVMSystemdUnit(cfg)
+	if err != nil {
+		t.Fatalf("renderVMSystemdUnit: %v", err)
+	}
 	for _, want := range []string{
 		"[Unit]",
 		"Description=yeet VM devbox",
 		"ExecStartPre=/bin/rm -f /srv/vms/devbox/run/firecracker.sock /srv/vms/devbox/run/serial.sock /srv/vms/devbox/run/vsock.sock",
-		"ExecStartPre=/srv/catch/run/catch -data-dir /srv/catch/data vm-network-ensure devbox",
-		"ExecStart=/srv/catch/run/catch vm-run --service devbox --service-root /srv/vms/devbox --disk-path /srv/vms/devbox/rootfs.ext4 --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
+		"ExecStartPre=/srv/catch/run/catch -data-dir /srv/catch/data -services-root /srv/services vm-network-ensure devbox",
+		"ExecStart=/srv/catch/run/catch vm-run --service devbox --service-root /srv/vms/devbox --disk-path /srv/vms/devbox/rootfs.ext4 --firecracker /srv/images/firecracker --jailer /opt/vm/jailer --jailer-base /var/lib/yeet/vm-jailer --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
 		"Restart=on-failure",
 		"RestartForceExitStatus=75",
 		"RestartPreventExitStatus=76",
@@ -44,18 +51,40 @@ func TestRenderVMSystemdUnit(t *testing.T) {
 			t.Fatalf("unit missing %q:\n%s", want, unit)
 		}
 	}
+	for _, want := range []string{
+		"--jailer /opt/vm/jailer",
+		"--jailer-base /var/lib/yeet/vm-jailer",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("unit missing %q:\n%s", want, unit)
+		}
+	}
 	assertTextOrder(t, unit,
 		"ExecStartPre=/bin/rm -f /srv/vms/devbox/run/firecracker.sock /srv/vms/devbox/run/serial.sock /srv/vms/devbox/run/vsock.sock",
-		"ExecStartPre=/srv/catch/run/catch -data-dir /srv/catch/data vm-network-ensure devbox",
-		"ExecStart=/srv/catch/run/catch vm-run --service devbox --service-root /srv/vms/devbox --disk-path /srv/vms/devbox/rootfs.ext4 --firecracker /srv/images/firecracker --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
+		"ExecStartPre=/srv/catch/run/catch -data-dir /srv/catch/data -services-root /srv/services vm-network-ensure devbox",
+		"ExecStart=/srv/catch/run/catch vm-run --service devbox --service-root /srv/vms/devbox --disk-path /srv/vms/devbox/rootfs.ext4 --firecracker /srv/images/firecracker --jailer /opt/vm/jailer --jailer-base /var/lib/yeet/vm-jailer --api-sock /srv/vms/devbox/run/firecracker.sock --config-file /srv/vms/devbox/run/firecracker.json --console-sock /srv/vms/devbox/run/serial.sock",
 	)
 }
 
+func TestRenderVMSystemdUnitRequiresJailer(t *testing.T) {
+	_, err := renderVMSystemdUnit(vmSystemdConfig{
+		Service: "devbox", Runner: "/run/catch", DataDir: "/var/lib/yeet",
+		ServicesRoot: "/srv/services", ServiceRoot: "/srv/devbox", DiskPath: "/srv/devbox/data/rootfs.raw",
+		Firecracker: "/opt/vm/firecracker", JailerBase: "/var/lib/yeet/vm-jailer",
+		ConfigPath: "/srv/devbox/run/firecracker.json", APISocket: "/srv/devbox/run/firecracker.sock",
+		ConsoleSocket: "/srv/devbox/run/serial.sock", WorkingDirectory: "/srv/devbox/data",
+	})
+	if err == nil || !strings.Contains(err.Error(), "jailer") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestRenderVMSystemdUnitUsesJailerWhenConfigured(t *testing.T) {
-	unit := renderVMSystemdUnit(vmSystemdConfig{
+	unit, err := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          "devbox",
 		Runner:           "/srv/catch/run/catch",
 		DataDir:          "/srv/catch/data",
+		ServicesRoot:     "/srv/services",
 		ServiceRoot:      "/srv/vms/devbox",
 		DiskPath:         "/srv/vms/devbox/data/rootfs.raw",
 		Firecracker:      "/srv/images/firecracker",
@@ -67,6 +96,9 @@ func TestRenderVMSystemdUnitUsesJailerWhenConfigured(t *testing.T) {
 		VsockSocket:      "/srv/vms/devbox/run/vsock.sock",
 		WorkingDirectory: "/srv/vms/devbox",
 	})
+	if err != nil {
+		t.Fatalf("renderVMSystemdUnit: %v", err)
+	}
 	want := "--firecracker /srv/images/firecracker --jailer /srv/images/jailer --jailer-base /run/yeet/vm-jailer --api-sock"
 	if !strings.Contains(unit, want) {
 		t.Fatalf("jailed unit missing %q:\n%s", want, unit)
@@ -101,8 +133,11 @@ func TestRegenerateHostStorageVMSystemdUnitUsesCurrentRoots(t *testing.T) {
 		},
 	}
 	cfg := Config{RootDir: "/flash/yeet/data", ServicesRoot: "/flash/yeet/services"}
-	if err := writeVMIsolationMode(service.ServiceRoot, vmIsolationJailer); err != nil {
-		t.Fatalf("write VM isolation mode: %v", err)
+	if err := os.MkdirAll(serviceRunDirForRoot(service.ServiceRoot), 0o755); err != nil {
+		t.Fatalf("create VM run directory: %v", err)
+	}
+	if err := os.WriteFile(vmJailerReadinessMarkerPath(service.ServiceRoot), []byte("dynamic\n"), 0o600); err != nil {
+		t.Fatalf("write invalid VM jailer readiness marker: %v", err)
 	}
 
 	units, err := regenerateHostStorageVMSystemdUnit(context.Background(), cfg, service, "/flash/yeet/services/catch/run/catch")
@@ -119,6 +154,7 @@ func TestRegenerateHostStorageVMSystemdUnitUsesCurrentRoots(t *testing.T) {
 	unit := string(raw)
 	for _, want := range []string{
 		"/flash/yeet/data",
+		"-services-root /flash/yeet/services",
 		"/flash/yeet/services/catch/run/catch",
 		serviceRoot,
 		filepath.Join(serviceRoot, "data", "rootfs.raw"),

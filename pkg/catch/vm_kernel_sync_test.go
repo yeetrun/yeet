@@ -123,6 +123,9 @@ func TestSyncGuestSelectedKernelReadsSelectorThroughGuestAbsoluteSymlink(t *test
 func TestAutoSyncVMGuestKernelOnRebootUpdatesFirecrackerConfig(t *testing.T) {
 	root := t.TempDir()
 	writeKernelSyncFirecrackerConfig(t, root, "/old/vmlinux", "/old/initrd.img")
+	if err := markVMJailerReady(root); err != nil {
+		t.Fatalf("mark VM jailer ready: %v", err)
+	}
 	withVMKernelSyncRunner(t, mountedGuestKernelRunner(t))
 
 	err := AutoSyncVMGuestKernelOnReboot(context.Background(), VMConsoleProxyConfig{
@@ -145,6 +148,13 @@ func TestAutoSyncVMGuestKernelOnRebootUpdatesFirecrackerConfig(t *testing.T) {
 	}
 	if strings.Contains(text, "initrd.img") {
 		t.Fatalf("firecracker config = %s, want initrd cleared", text)
+	}
+	readiness, err := vmJailerReadinessForRoot(root)
+	if err != nil {
+		t.Fatalf("read VM jailer readiness: %v", err)
+	}
+	if readiness != vmJailerReady {
+		t.Fatalf("VM jailer readiness = %q after guest reboot kernel sync, want %q", readiness, vmJailerReady)
 	}
 }
 

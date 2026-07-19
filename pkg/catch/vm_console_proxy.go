@@ -51,6 +51,8 @@ type vmSnapshotLoader interface {
 
 type vmSnapshotLoaderFunc func(context.Context, string, string, string, bool) error
 
+type vmConsoleProcessConstructor func(context.Context, VMConsoleProxyConfig, bool) (*exec.Cmd, func(), error)
+
 func (f vmSnapshotLoaderFunc) LoadSnapshot(ctx context.Context, socket, statePath, memoryPath string, resume bool) error {
 	return f(ctx, socket, statePath, memoryPath, resume)
 }
@@ -81,6 +83,10 @@ const (
 )
 
 func RunVMConsoleProxy(ctx context.Context, cfg VMConsoleProxyConfig) error {
+	return runVMConsoleProxyWithProcessConstructor(ctx, cfg, prepareVMConsoleProcess)
+}
+
+func runVMConsoleProxyWithProcessConstructor(ctx context.Context, cfg VMConsoleProxyConfig, constructProcess vmConsoleProcessConstructor) error {
 	if err := validateVMConsoleProxyConfig(cfg); err != nil {
 		return err
 	}
@@ -96,7 +102,7 @@ func RunVMConsoleProxy(ctx context.Context, cfg VMConsoleProxyConfig) error {
 	if err != nil {
 		return failVMRestoreLoadBeforeStart(resultPath, err)
 	}
-	cmd, cleanupProcess, err := prepareVMConsoleProcess(ctx, cfg, restoreMode)
+	cmd, cleanupProcess, err := constructProcess(ctx, cfg, restoreMode)
 	if err != nil {
 		return err
 	}
@@ -164,13 +170,6 @@ func stopVMConsoleProcess(cmd *exec.Cmd) {
 		_ = cmd.Process.Kill()
 	}
 	_ = cmd.Wait()
-}
-
-func vmFirecrackerCommand(ctx context.Context, cfg VMConsoleProxyConfig, restoreMode bool) *exec.Cmd {
-	if restoreMode {
-		return exec.CommandContext(ctx, cfg.Firecracker, "--api-sock", cfg.APISocket)
-	}
-	return exec.CommandContext(ctx, cfg.Firecracker, "--api-sock", cfg.APISocket, "--config-file", cfg.ConfigFile)
 }
 
 func loadFullVMSnapshot(ctx context.Context, apiSocket string, request vmFullRestoreRequest) error {
@@ -250,10 +249,8 @@ func validateVMConsoleProxyConfig(cfg VMConsoleProxyConfig) error {
 	if cfg.ConsoleSocket == "" {
 		return fmt.Errorf("console socket path is required")
 	}
-	if strings.TrimSpace(cfg.Jailer) != "" {
-		if err := validateVMJailCanonicalInputs(cfg); err != nil {
-			return err
-		}
+	if err := validateVMJailCanonicalInputs(cfg); err != nil {
+		return err
 	}
 	return nil
 }

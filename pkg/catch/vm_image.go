@@ -856,6 +856,43 @@ func verifyVMImageArtifactChecksum(path, artifactName, want string) error {
 	return nil
 }
 
+func readValidatedVMImageRuntimeManifest(firecrackerPath string) (vmImageManifest, error) {
+	dir := filepath.Dir(filepath.Clean(strings.TrimSpace(firecrackerPath)))
+	raw, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		return vmImageManifest{}, fmt.Errorf("read VM image runtime manifest: %w", err)
+	}
+	var manifest vmImageManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return vmImageManifest{}, fmt.Errorf("decode VM image runtime manifest: %w", err)
+	}
+	if err := manifest.validate(); err != nil {
+		return vmImageManifest{}, fmt.Errorf("validate VM image runtime manifest: %w", err)
+	}
+	architecture, err := normalizeVMImageArchitecture(manifest.Architecture)
+	if err != nil {
+		return vmImageManifest{}, err
+	}
+	manifest.Architecture = architecture
+	wantFirecracker := filepath.Join(dir, manifest.Firecracker)
+	if filepath.Clean(firecrackerPath) != filepath.Clean(wantFirecracker) {
+		return vmImageManifest{}, fmt.Errorf("VM image runtime manifest references Firecracker %s, not %s", wantFirecracker, firecrackerPath)
+	}
+	if err := verifyVMImageArtifactChecksum(firecrackerPath, manifest.Firecracker, manifest.Checksums[manifest.Firecracker]); err != nil {
+		return vmImageManifest{}, fmt.Errorf("verify VM image runtime Firecracker: %w", err)
+	}
+	return manifest, nil
+}
+
+func normalizeVMImageArchitecture(architecture string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(architecture)) {
+	case "amd64", "x86_64":
+		return "amd64", nil
+	default:
+		return "", fmt.Errorf("unsupported VM image architecture %q", architecture)
+	}
+}
+
 func (c vmImageCache) artifactURL(artifactName string) (string, error) {
 	if err := validateVMImageArtifactName(artifactName); err != nil {
 		return "", err

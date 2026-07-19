@@ -902,6 +902,53 @@ func TestVMSetFlagsUpdateStoredRunArgs(t *testing.T) {
 	}
 }
 
+func TestVMSetFutureFlagsForwardWithoutClaimingLocalConfigUpdate(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "devbox"
+	loadedPrefs.DefaultHost = "host-a"
+	var gotArgs []string
+	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		gotArgs = append([]string{}, args...)
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name:        "devbox",
+		Host:        "host-a",
+		Type:        serviceTypeVM,
+		Payload:     "vm://ubuntu/26.04",
+		PayloadKind: serviceTypeVM,
+		Args:        []string{"--vcpus=4"},
+	})
+	configPath := filepath.Join(tmp, projectConfigName)
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile before vm set: %v", err)
+	}
+
+	out, err := captureSvcStdout(t, func() error {
+		return HandleSvcCmd([]string{"vm", "set", "--future-mode", "turbo", "--future-limit=2"})
+	})
+	if err != nil {
+		t.Fatalf("HandleSvcCmd: %v", err)
+	}
+	wantArgs := []string{"vm", "set", "--future-mode", "turbo", "--future-limit=2"}
+	if !reflect.DeepEqual(gotArgs, wantArgs) {
+		t.Fatalf("remote args = %#v, want %#v", gotArgs, wantArgs)
+	}
+	if !strings.Contains(out, "No matching yeet.toml entry was updated") {
+		t.Fatalf("output = %q, want local config sync hint", out)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("ReadFile after vm set: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("yeet.toml changed for unknown-only vm set\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
 func TestVMSetConfigRewritesBalloonRunFlags(t *testing.T) {
 	entry := ServiceEntry{
 		Name: "devbox",
