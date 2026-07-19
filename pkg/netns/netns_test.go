@@ -53,6 +53,7 @@ func TestWriteServiceNetNSOrdersBeforeDockerPrereqs(t *testing.T) {
 		"After=yeet-ns.service\n",
 		"Before=yeet-docker-prereqs.target docker.service\n",
 		"WantedBy=multi-user.target yeet-docker-prereqs.target\n",
+		"EnvironmentFile=" + filepath.Join(root, "env", "netns.env") + "\n",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("unit missing %q:\n%s", want, got)

@@ -14,12 +14,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/copyutil"
 	cdb "github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/ftdetect"
 	"github.com/yeetrun/yeet/pkg/iso"
 )
 
@@ -190,6 +192,113 @@ func TestCopyToRemoteExtractsArchiveAtDataRoot(t *testing.T) {
 	}
 	if string(got) != "archived" {
 		t.Fatalf("extracted file = %q, want archived", got)
+	}
+}
+
+func TestCopyToRemoteAppliesPersistedNativeIdentityWithoutFollowingSymlinks(t *testing.T) {
+	uid := uint32(os.Geteuid())
+	gid := uint32(os.Getegid())
+	requestedUser := strconv.FormatUint(uint64(uid), 10)
+	requestedGroup := strconv.FormatUint(uint64(gid), 10)
+	server := newTestServer(t)
+	identity := cdb.ServiceIdentity{RequestedUser: requestedUser, RequestedGroup: requestedGroup, UID: uid, GID: gid}
+	addTestServices(t, server, cdb.Service{Name: "svc-copy", ServiceType: cdb.ServiceTypeSystemd, Identity: &identity})
+	oldLchown := nativeServiceLchown
+	nativeServiceLchown = func(string, int, int) error { return nil }
+	t.Cleanup(func() { nativeServiceLchown = oldLchown })
+
+	execer := &ttyExecer{s: server, sn: "svc-copy", rw: bytes.NewBufferString("hello")}
+	if err := execer.copyToRemote(copyExecArgs{To: "data/sub/file.txt"}); err != nil {
+		t.Fatalf("copyToRemote: %v", err)
+	}
+	dst := filepath.Join(server.serviceDataDir("svc-copy"), "sub", "file.txt")
+	info, err := os.Lstat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotUID, gotGID, err := nativeServiceFileOwner(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotUID != uid || gotGID != gid || info.Mode().Perm() != 0o644 {
+		t.Fatalf("copied file owner/mode = %d:%d %04o, want %d:%d 0644", gotUID, gotGID, info.Mode().Perm(), uid, gid)
+	}
+}
+
+func TestNativeCopyToRemotePublishesThroughStableParentDescriptor(t *testing.T) {
+	uid := uint32(os.Geteuid())
+	gid := uint32(os.Getegid())
+	identity := cdb.ServiceIdentity{
+		RequestedUser: strconv.FormatUint(uint64(uid), 10), RequestedGroup: strconv.FormatUint(uint64(gid), 10),
+		UID: uid, GID: gid,
+	}
+	server := newTestServer(t)
+	addTestServices(t, server, cdb.Service{Name: "svc-copy-race", ServiceType: cdb.ServiceTypeSystemd, Identity: &identity})
+	if err := server.ensureDirs("svc-copy-race", ""); err != nil {
+		t.Fatal(err)
+	}
+	oldLchown := nativeServiceLchown
+	nativeServiceLchown = func(string, int, int) error { return nil }
+	t.Cleanup(func() { nativeServiceLchown = oldLchown })
+
+	data := server.serviceDataDir("svc-copy-race")
+	originalParent := filepath.Join(data, "sub")
+	movedParent := filepath.Join(data, "moved")
+	if err := os.Mkdir(originalParent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	victim := t.TempDir()
+	execer := &ttyExecer{s: server, sn: "svc-copy-race", rw: bytes.NewBufferString("safe")}
+	execer.nativeCopyHook = func(phase string) {
+		if phase != "before-file-publish" {
+			return
+		}
+		if err := os.Rename(originalParent, movedParent); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(victim, originalParent); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := execer.copyToRemote(copyExecArgs{To: "data/sub/file.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(victim, "file.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("native copy escaped through replacement symlink: %v", err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(movedParent, "file.txt")); err != nil || string(raw) != "safe" {
+		t.Fatalf("stable-parent copy = %q, %v", raw, err)
+	}
+}
+
+func TestCopyArchiveToRemoteRejectsUnsafeEntryTypesAndLinks(t *testing.T) {
+	tests := []struct {
+		name    string
+		header  tar.Header
+		wantErr string
+	}{
+		{name: "absolute symlink", header: tar.Header{Name: "link", Typeflag: tar.TypeSymlink, Linkname: "/etc/passwd", Mode: 0o777}, wantErr: "symlink target escapes"},
+		{name: "parent symlink", header: tar.Header{Name: "nested/link", Typeflag: tar.TypeSymlink, Linkname: "../../outside", Mode: 0o777}, wantErr: "symlink target escapes"},
+		{name: "parent hardlink", header: tar.Header{Name: "link", Typeflag: tar.TypeLink, Linkname: "../outside", Mode: 0o600}, wantErr: "hard link target escapes"},
+		{name: "character device", header: tar.Header{Name: "device", Typeflag: tar.TypeChar, Mode: 0o600}, wantErr: "special file"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var input bytes.Buffer
+			tw := tar.NewWriter(&input)
+			if err := tw.WriteHeader(&tt.header); err != nil {
+				t.Fatalf("write header: %v", err)
+			}
+			if err := tw.Close(); err != nil {
+				t.Fatalf("close tar: %v", err)
+			}
+			server := newTestServer(t)
+			execer := &ttyExecer{s: server, sn: "svc-archive", rw: &input}
+			err := execer.copyToRemote(copyExecArgs{To: "data", Archive: true})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("copyToRemote error = %v, want %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -769,6 +878,49 @@ func TestCronCmdFuncConvertsCronAndInstallsTimer(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotCfg.Args, []string{"--hello"}) {
 		t.Fatalf("args = %#v, want --hello", gotCfg.Args)
+	}
+}
+
+func TestCronCommandRoutesRunAsToInstaller(t *testing.T) {
+	var got FileInstallerCfg
+	execer := &ttyExecer{s: newTestServer(t), sn: "backup", rawRW: bytes.NewBufferString("payload"), rw: &bytes.Buffer{}, installFunc: func(_ string, _ io.Reader, cfg FileInstallerCfg) error { got = cfg; return nil }}
+	if err := execer.dispatch([]string{"cron", "--run-as=backup", "--schedule=0 3 * * *", "--", "--daily"}); err != nil {
+		t.Fatal(err)
+	}
+	if got.RunAs != "backup" || !got.RunAsSet || !reflect.DeepEqual(got.Args, []string{"--daily"}) {
+		t.Fatalf("installer cfg = %#v", got)
+	}
+}
+
+func TestRunCmdFuncRoutesRunAsToInstaller(t *testing.T) {
+	var got FileInstallerCfg
+	execer := &ttyExecer{s: newTestServer(t), sn: "api", rawRW: bytes.NewBufferString("payload"), rw: &bytes.Buffer{}, installFunc: func(_ string, _ io.Reader, cfg FileInstallerCfg) error { got = cfg; return nil }}
+	if err := execer.runCmdFunc(cli.RunFlags{RunAs: "app", RunAsSet: true}, []string{"--serve"}); err != nil {
+		t.Fatal(err)
+	}
+	if got.RunAs != "app" || !got.RunAsSet {
+		t.Fatalf("installer cfg = %#v", got)
+	}
+}
+
+func TestRunCmdFuncRejectsVMRunAsBeforeLaunch(t *testing.T) {
+	execer := &ttyExecer{s: newTestServer(t), sn: "devbox"}
+	err := execer.runCmdFunc(cli.RunFlags{RunAs: "app", RunAsSet: true}, []string{"vm://ubuntu/26.04"})
+	if err == nil || !strings.Contains(err.Error(), "does not control VM guest") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestExplicitRunAsRejectsContainerPayloadTypes(t *testing.T) {
+	for _, ft := range []ftdetect.FileType{ftdetect.DockerCompose, ftdetect.Python, ftdetect.TypeScript} {
+		if err := validateExplicitRunAsForPayloadType(true, ft); err == nil || !strings.Contains(err.Error(), "applies only to native systemd workloads") {
+			t.Fatalf("type %v error = %v", ft, err)
+		}
+	}
+	for _, ft := range []ftdetect.FileType{ftdetect.Binary, ftdetect.Script} {
+		if err := validateExplicitRunAsForPayloadType(true, ft); err != nil {
+			t.Fatalf("type %v: %v", ft, err)
+		}
 	}
 }
 

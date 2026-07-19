@@ -17,13 +17,118 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/netns"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
+
+func TestRemoveServiceTakesOuterServiceOperationLock(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"api": {Name: "api", ServiceType: db.ServiceType("unknown")},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	release := server.serviceOperationLocks.Lock("api")
+	done := make(chan error, 1)
+	go func() {
+		_, err := server.RemoveServiceWithOptions("api", RemoveOptions{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("remove bypassed service lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RemoveServiceWithOptions: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remove did not resume after service lock release")
+	}
+}
+
+func TestRemoveServiceRechecksIdentityRecoveryInsideLock(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"api": {Name: "api", ServiceType: db.ServiceType("unknown")},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	release := server.serviceOperationLocks.Lock("api")
+	done := make(chan error, 1)
+	go func() {
+		_, err := server.RemoveServiceWithOptions("api", RemoveOptions{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("remove bypassed service lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	server.setServiceIdentityMutationBlock("api", errors.New("recovery required"))
+	release()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errServiceIdentityRecoveryBlocked) {
+			t.Fatalf("RemoveServiceWithOptions error = %v, want identity recovery block", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("remove did not resume after service lock release")
+	}
+	if _, err := server.serviceView("api"); err != nil {
+		t.Fatalf("service was removed despite recovery block: %v", err)
+	}
+}
+
+func TestTTYRemoveRechecksIdentityRecoveryInsideLock(t *testing.T) {
+	server := newTestServer(t)
+	seedService(t, server, "api", db.ServiceTypeSystemd, nil)
+	runner := &recordingServiceRunner{}
+	execer := &ttyExecer{
+		ctx:      context.Background(),
+		s:        server,
+		sn:       "api",
+		rw:       &bytes.Buffer{},
+		progress: catchrpc.ProgressQuiet,
+		serviceRunnerFn: func() (ServiceRunner, error) {
+			return runner, nil
+		},
+	}
+	release := server.serviceOperationLocks.Lock("api")
+	done := make(chan error, 1)
+	go func() { done <- execer.removeCmdFunc(cli.RemoveFlags{Yes: true}) }()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("TTY remove bypassed service lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	server.setServiceIdentityMutationBlock("api", errors.New("recovery required"))
+	release()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, errServiceIdentityRecoveryBlocked) {
+			t.Fatalf("removeCmdFunc error = %v, want identity recovery block", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TTY remove did not resume after service lock release")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %#v, want none", runner.calls)
+	}
+}
 
 type fakeRunner struct {
 	removeErr error

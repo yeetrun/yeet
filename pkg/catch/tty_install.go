@@ -5,11 +5,14 @@
 package catch
 
 import (
+	"archive/tar"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,6 +22,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/copyutil"
 	"github.com/yeetrun/yeet/pkg/cronutil"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/ftdetect"
 	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/serviceid"
 	"github.com/yeetrun/yeet/pkg/svc"
@@ -39,6 +43,18 @@ func humanReadableBytes(bts float64) string {
 	}
 
 	return fmt.Sprintf("%.2f %cB", n, prefix[i])
+}
+
+func validateExplicitRunAsForPayloadType(runAsSet bool, binFT ftdetect.FileType) error {
+	if !runAsSet {
+		return nil
+	}
+	switch binFT {
+	case ftdetect.DockerCompose, ftdetect.Python, ftdetect.TypeScript:
+		return fmt.Errorf("--run-as applies only to native systemd workloads; configure the container image or Compose service \"user:\" field instead")
+	default:
+		return nil
+	}
 }
 
 // install installs a service by reading the binary from the `in` input stream.
@@ -73,8 +89,23 @@ func (e *ttyExecer) installLinux(action string, in io.Reader, cfg FileInstallerC
 	if err := e.copyInstallPayload(in, cfg, ui, inst); err != nil {
 		return err
 	}
+	if err := validateExplicitRunAsInstallPayload(cfg, inst); err != nil {
+		inst.Fail()
+		return err
+	}
 	finishInstallUploadStep(ui, inst, cfg)
 	return nil
+}
+
+func validateExplicitRunAsInstallPayload(cfg FileInstallerCfg, inst *FileInstaller) error {
+	if !cfg.RunAsSet || cfg.EnvFile || cfg.NoBinary {
+		return nil
+	}
+	binFT, err := detectInstallPayloadType(inst.tempFilePath())
+	if err != nil {
+		return err
+	}
+	return validateExplicitRunAsForPayloadType(true, binFT)
 }
 
 func (e *ttyExecer) startInstallUI(action string) *runUI {
@@ -86,12 +117,19 @@ func (e *ttyExecer) startInstallUI(action string) *runUI {
 func (e *ttyExecer) newFileInstallerWithUI(cfg *FileInstallerCfg, ui *runUI) (*FileInstaller, error) {
 	cfg.Printer = ui.Printer
 	cfg.UI = ui
-	inst, err := NewFileInstaller(e.s, *cfg)
+	inst, err := e.newFileInstaller(*cfg)
 	if err != nil {
 		ui.FailStep("failed to create installer")
 		return nil, fmt.Errorf("failed to create installer: %w", err)
 	}
 	return inst, nil
+}
+
+func (e *ttyExecer) newFileInstaller(cfg FileInstallerCfg) (*FileInstaller, error) {
+	if e.serviceOperationLockHeld {
+		return newFileInstaller(e.s, cfg, true)
+	}
+	return NewFileInstaller(e.s, cfg)
 }
 
 func closeInstallerWithUI(inst *FileInstaller, ui *runUI, retErr *error) {
@@ -285,6 +323,9 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 		return err
 	}
 	if len(argsIn) > 0 && isVMImagePayload(argsIn[0]) {
+		if flags.RunAsSet {
+			return fmt.Errorf("--run-as does not control VM guest or Firecracker jailer identities; use VM guest settings because Firecracker host execution is managed separately")
+		}
 		if len(argsIn) != 1 {
 			return fmt.Errorf("VM payloads do not accept payload args")
 		}
@@ -301,6 +342,8 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	cfg.ServiceRoot = flags.ServiceRoot
 	cfg.ServiceRootZFS = flags.ZFS
 	cfg.Pull = flags.Pull
+	cfg.RunAs = flags.RunAs
+	cfg.RunAsSet = flags.RunAsSet
 	cfg.snapshotPolicyFlags = snapshotFlags
 	return e.runInstall("run", e.payloadReader(), cfg)
 }
@@ -427,14 +470,28 @@ func (c copyExecArgs) validate() error {
 }
 
 func (e *ttyExecer) copyToRemote(parsed copyExecArgs) error {
-	dstRoot, err := e.prepareCopyDestination(parsed.To, parsed.Archive)
+	dstRoot, identity, err := e.prepareCopyDestination(parsed.To, parsed.Archive)
 	if err != nil {
 		return err
 	}
-	if parsed.Archive {
-		return e.copyArchiveToRemote(dstRoot, parsed.Compress)
+	if identity != nil {
+		serviceRoot, err := e.s.serviceRootDir(e.sn)
+		if err != nil {
+			return err
+		}
+		destination, err := filepath.Rel(serviceDataDirForRoot(serviceRoot), dstRoot)
+		if err != nil {
+			return err
+		}
+		if destination == "." {
+			destination = ""
+		}
+		return e.copyToNativeRemote(parsed, serviceRoot, destination, *identity)
 	}
-	return e.copyFileToRemote(parsed.To, dstRoot, parsed.Compress)
+	if parsed.Archive {
+		return e.copyArchiveToRemoteAs(dstRoot, parsed.Compress, nil)
+	}
+	return e.copyFileToRemoteAs(parsed.To, dstRoot, parsed.Compress, nil)
 }
 
 func (e *ttyExecer) copyFromRemote(parsed copyExecArgs) error {
@@ -469,22 +526,47 @@ func normalizeCopyRelPath(raw string, allowEmpty bool) (string, error) {
 	return clean, nil
 }
 
-func (e *ttyExecer) prepareCopyDestination(raw string, allowEmpty bool) (string, error) {
+func (e *ttyExecer) prepareCopyDestination(raw string, allowEmpty bool) (string, *db.ServiceIdentity, error) {
 	dest, err := normalizeCopyRelPath(raw, allowEmpty)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if dest == "" && !allowEmpty {
-		return "", fmt.Errorf("copy destination must include a file name")
+		return "", nil, fmt.Errorf("copy destination must include a file name")
 	}
 	if err := e.s.ensureDirs(e.sn, e.user); err != nil {
-		return "", fmt.Errorf("failed to ensure directories: %w", err)
+		return "", nil, fmt.Errorf("failed to ensure directories: %w", err)
 	}
 	serviceRoot, err := e.s.serviceRootDir(e.sn)
 	if err != nil {
-		return "", fmt.Errorf("failed to resolve service root: %w", err)
+		return "", nil, fmt.Errorf("failed to resolve service root: %w", err)
 	}
-	return copyDestinationRoot(serviceDataDirForRoot(serviceRoot), dest), nil
+	identity, err := e.nativeCopyIdentity(serviceRoot)
+	if err != nil {
+		return "", nil, err
+	}
+	return copyDestinationRoot(serviceDataDirForRoot(serviceRoot), dest), identity, nil
+}
+
+func (e *ttyExecer) nativeCopyIdentity(serviceRoot string) (*db.ServiceIdentity, error) {
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		if errors.Is(err, errServiceNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if sv.ServiceType() != db.ServiceTypeSystemd {
+		return nil, nil
+	}
+	identity := effectiveServiceIdentity(sv).Persisted
+	if err := validateServiceIdentityDrift(identity); err != nil {
+		return nil, fmt.Errorf("service %q identity changed on this host: %w", e.sn, err)
+	}
+	if err := applyNativeServiceLayout(serviceRoot, identity); err != nil {
+		return nil, fmt.Errorf("prepare service %q copy destination ownership: %w", e.sn, err)
+	}
+	return &identity, nil
 }
 
 func copyDestinationRoot(dataDir, dest string) string {
@@ -494,8 +576,8 @@ func copyDestinationRoot(dataDir, dest string) string {
 	return filepath.Join(dataDir, dest)
 }
 
-func (e *ttyExecer) copyArchiveToRemote(dstRoot string, compressed bool) (err error) {
-	if err := os.MkdirAll(filepath.Dir(dstRoot), 0755); err != nil {
+func (e *ttyExecer) copyArchiveToRemoteAs(dstRoot string, compressed bool, identity *db.ServiceIdentity) (err error) {
+	if err := e.prepareCopyParent(filepath.Dir(dstRoot), identity); err != nil {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 	stageDir, err := os.MkdirTemp(filepath.Dir(dstRoot), "yeet-copy-*")
@@ -510,8 +592,13 @@ func (e *ttyExecer) copyArchiveToRemote(dstRoot string, compressed bool) (err er
 	}
 	defer closeWithError(closer, &err, "failed to close compressed payload")
 
-	if err = copyutil.ExtractTarWithOptions(input, stageDir, copyutil.ExtractOptions{}); err != nil {
+	if err = copyutil.ExtractTarWithOptions(input, stageDir, copyutil.ExtractOptions{
+		ValidateEntry: validateServiceCopyArchiveEntry,
+	}); err != nil {
 		return fmt.Errorf("failed to extract archive: %w", err)
+	}
+	if err = applyCopyIdentity(stageDir, identity); err != nil {
+		return fmt.Errorf("failed to set copied archive ownership: %w", err)
 	}
 	if err = copyutil.MoveTree(stageDir, dstRoot); err != nil {
 		return fmt.Errorf("failed to move staged files: %w", err)
@@ -520,10 +607,14 @@ func (e *ttyExecer) copyArchiveToRemote(dstRoot string, compressed bool) (err er
 }
 
 func (e *ttyExecer) copyFileToRemote(rawTo, dstRoot string, compressed bool) (err error) {
+	return e.copyFileToRemoteAs(rawTo, dstRoot, compressed, nil)
+}
+
+func (e *ttyExecer) copyFileToRemoteAs(rawTo, dstRoot string, compressed bool, identity *db.ServiceIdentity) error {
 	if strings.HasSuffix(rawTo, "/") {
 		return fmt.Errorf("copy destination must include a file name")
 	}
-	if err := os.MkdirAll(filepath.Dir(dstRoot), 0755); err != nil {
+	if err := e.prepareCopyParent(filepath.Dir(dstRoot), identity); err != nil {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 	tmpf, err := os.CreateTemp(filepath.Dir(dstRoot), "yeet-copy-*")
@@ -531,20 +622,31 @@ func (e *ttyExecer) copyFileToRemote(rawTo, dstRoot string, compressed bool) (er
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	tmpPath := tmpf.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			removeBestEffort(tmpPath)
+	defer removeBestEffort(tmpPath)
+	if err := copyPayloadToTemporaryFile(e.rw, tmpf, compressed); err != nil {
+		return err
+	}
+	if identity != nil {
+		if err := nativeServiceLchown(tmpPath, int(identity.UID), int(identity.GID)); err != nil {
+			return fmt.Errorf("failed to set copied file ownership: %w", err)
 		}
-	}()
+	}
+	if err := os.Rename(tmpPath, dstRoot); err != nil {
+		return fmt.Errorf("failed to move file in place: %w", err)
+	}
+	if err := os.Chmod(dstRoot, 0644); err != nil {
+		return fmt.Errorf("failed to set permissions: %w", err)
+	}
+	return nil
+}
 
-	input, closer, err := copyPayloadReader(e.rw, compressed)
+func copyPayloadToTemporaryFile(rw io.ReadWriter, tmpf *os.File, compressed bool) (err error) {
+	input, closer, err := copyPayloadReader(rw, compressed)
 	if err != nil {
 		closeBestEffort(tmpf)
 		return fmt.Errorf("failed to read compressed payload: %w", err)
 	}
 	defer closeWithError(closer, &err, "failed to close compressed payload")
-
 	if _, err = io.Copy(tmpf, input); err != nil {
 		closeBestEffort(tmpf)
 		return fmt.Errorf("failed to copy file: %w", err)
@@ -552,14 +654,94 @@ func (e *ttyExecer) copyFileToRemote(rawTo, dstRoot string, compressed bool) (er
 	if err = tmpf.Close(); err != nil {
 		return fmt.Errorf("failed to close temp file: %w", err)
 	}
-	if err = os.Rename(tmpPath, dstRoot); err != nil {
-		return fmt.Errorf("failed to move file in place: %w", err)
+	return nil
+}
+
+func (e *ttyExecer) prepareCopyParent(parent string, identity *db.ServiceIdentity) error {
+	if identity == nil {
+		return os.MkdirAll(parent, 0o755)
 	}
-	cleanup = false
-	if err = os.Chmod(dstRoot, 0644); err != nil {
-		return fmt.Errorf("failed to set permissions: %w", err)
+	dataRoot := filepath.Clean(e.s.serviceDataDir(e.sn))
+	parent = filepath.Clean(parent)
+	rel, err := filepath.Rel(dataRoot, parent)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("copy destination parent %s is outside service data %s", parent, dataRoot)
+	}
+	current := dataRoot
+	if rel == "." {
+		return nil
+	}
+	for _, component := range strings.Split(rel, string(filepath.Separator)) {
+		current = filepath.Join(current, component)
+		if err := prepareCopyParentComponent(current, *identity); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func prepareCopyParentComponent(path string, identity db.ServiceIdentity) error {
+	info, statErr := os.Lstat(path)
+	if errors.Is(statErr, os.ErrNotExist) {
+		if err := os.Mkdir(path, 0o755); err != nil {
+			return err
+		}
+		info, statErr = os.Lstat(path)
+	}
+	if statErr != nil {
+		return statErr
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("copy destination parent %s is not a directory", path)
+	}
+	return nativeServiceLchown(path, int(identity.UID), int(identity.GID))
+}
+
+func applyCopyIdentity(root string, identity *db.ServiceIdentity) error {
+	if identity == nil {
+		return nil
+	}
+	return filepath.WalkDir(root, func(path string, _ os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := nativeServiceLchown(path, int(identity.UID), int(identity.GID)); err != nil {
+			return fmt.Errorf("set copied path owner %s: %w", path, err)
+		}
+		return nil
+	})
+}
+
+func validateServiceCopyArchiveEntry(entry copyutil.TarEntry) error {
+	switch entry.Type {
+	case tar.TypeChar, tar.TypeBlock, tar.TypeFifo:
+		return fmt.Errorf("special file %q is not allowed in a service copy", entry.Name)
+	case tar.TypeSymlink:
+		if archiveSymlinkEscapes(entry.Name, entry.Linkname) {
+			return fmt.Errorf("symlink target escapes the copied destination: %s -> %s", entry.Name, entry.Linkname)
+		}
+	case tar.TypeLink:
+		if archiveRootLinkEscapes(entry.Linkname) {
+			return fmt.Errorf("hard link target escapes the copied destination: %s -> %s", entry.Name, entry.Linkname)
+		}
+	}
+	return nil
+}
+
+func archiveSymlinkEscapes(name, target string) bool {
+	if path.IsAbs(target) {
+		return true
+	}
+	resolved := path.Clean(path.Join(path.Dir(path.Clean(name)), target))
+	return resolved == ".." || strings.HasPrefix(resolved, "../")
+}
+
+func archiveRootLinkEscapes(target string) bool {
+	if path.IsAbs(target) {
+		return true
+	}
+	clean := path.Clean(target)
+	return clean == ".." || strings.HasPrefix(clean, "../")
 }
 
 func (e *ttyExecer) remoteCopySource(raw string) (string, string, os.FileInfo, error) {
@@ -812,7 +994,7 @@ func (e *ttyExecer) closeNewStageInstaller(fi FileInstallerCfg) error {
 	if e.closeNewStageInstallerFunc != nil {
 		return e.closeNewStageInstallerFunc(fi)
 	}
-	inst, err := NewFileInstaller(e.s, fi)
+	inst, err := e.newFileInstaller(fi)
 	if err != nil {
 		return fmt.Errorf("failed to create installer: %w", err)
 	}
@@ -991,11 +1173,17 @@ func composePathFromArtifacts(af db.ArtifactStore) (string, error) {
 }
 
 func (e *ttyExecer) cronCmdFunc(cronexpr string, args []string) error {
-	oncal, err := cronutil.CronToCalender(cronexpr)
+	return e.cronCmdFuncFlags(cli.CronFlags{Schedule: cronexpr}, args)
+}
+
+func (e *ttyExecer) cronCmdFuncFlags(flags cli.CronFlags, args []string) error {
+	oncal, err := cronutil.CronToCalender(flags.Schedule)
 	if err != nil {
 		return fmt.Errorf("invalid cron expression: %w", err)
 	}
 	cfg := e.fileInstaller(netFlags{}, args)
+	cfg.RunAs = flags.RunAs
+	cfg.RunAsSet = flags.RunAsSet
 	cfg.Timer = &svc.TimerConfig{
 		OnCalendar: oncal,
 		Persistent: true, // This should be an option keyvalue in the future

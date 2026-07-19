@@ -17,11 +17,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/cli"
@@ -42,7 +45,9 @@ import (
 
 type FileInstallerCfg struct {
 	InstallerCfg
-	EnvFile bool
+	EnvFile  bool
+	RunAs    string
+	RunAsSet bool
 
 	Args                 []string
 	Network              NetworkOpts
@@ -86,17 +91,23 @@ type FileInstaller struct {
 	cfg FileInstallerCfg
 	ch  chan struct{}
 
-	existingService            db.ServiceView
-	installedGeneration        int
-	readInstalledGeneration    func() (int, error)
-	installGenerationIfCurrent func(*Installer, int, int) error
-	svcNet                     *db.SvcNetwork
-	macvlan                    *db.MacvlanNetwork
-	tsNet                      *db.TailscaleNetwork
-	isoAllocation              *db.ISOAllocation
-	tsAuthKey                  string
-	artifacts                  map[db.ArtifactName]string
-	lazyNetwork                lazy.GValue[*networkConfig]
+	existingService             db.ServiceView
+	resolvedIdentity            resolvedServiceIdentity
+	installedGeneration         int
+	readInstalledGeneration     func() (int, error)
+	installGenerationIfCurrent  func(*Installer, int, int) error
+	ensureManagedServiceAccount func() (resolvedServiceIdentity, error)
+	identityMigrationNeeded     bool
+	newNativeIdentity           bool
+	nativePredecessorAbsent     bool
+	migrateServiceIdentityFunc  func(context.Context, serviceIdentityMigrationRequest, io.Writer) (serviceIdentityMigrationResult, error)
+	svcNet                      *db.SvcNetwork
+	macvlan                     *db.MacvlanNetwork
+	tsNet                       *db.TailscaleNetwork
+	isoAllocation               *db.ISOAllocation
+	tsAuthKey                   string
+	artifacts                   map[db.ArtifactName]string
+	lazyNetwork                 lazy.GValue[*networkConfig]
 
 	File     *os.File
 	received atomic.Int64
@@ -105,6 +116,9 @@ type FileInstaller struct {
 	err    error
 	closed bool
 
+	serviceLockRelease func()
+	serviceLockOnce    sync.Once
+
 	ver string // memoized version number
 
 	failed bool
@@ -112,8 +126,13 @@ type FileInstaller struct {
 	tmpDir  string
 	tmpPath string
 
-	serviceRoot    string
-	serviceRootZFS string
+	serviceRoot               string
+	serviceRootZFS            string
+	serviceRootCreated        bool
+	serviceRootDev            uint64
+	serviceRootIno            uint64
+	serviceRootDatasetCreated bool
+	serviceRootDatasetGUID    string
 
 	transitionHandled bool
 	transitionFromISO func(context.Context, string, []string, isoTransitionSteps) error
@@ -406,21 +425,66 @@ var reservedServiceNames = map[string]struct{}{
 }
 
 func NewFileInstaller(s *Server, cfg FileInstallerCfg) (*FileInstaller, error) {
+	return newFileInstaller(s, cfg, false)
+}
+
+func newFileInstaller(s *Server, cfg FileInstallerCfg, serviceLockHeld bool) (_ *FileInstaller, retErr error) {
 	if _, ok := reservedServiceNames[cfg.ServiceName]; ok {
 		return nil, fmt.Errorf("%s is a reserved service name", cfg.ServiceName)
 	}
+	releaseServiceLock := func() {}
+	if !serviceLockHeld {
+		releaseServiceLock = s.serviceOperationLocks.Lock(cfg.ServiceName)
+	}
+	lockTransferred := false
+	defer func() {
+		if !lockTransferred {
+			releaseServiceLock()
+		}
+	}()
 	existingService := First(s.serviceView(cfg.ServiceName))
-	resolvedRoot, err := s.prepareServiceRootForInstall(cfg.ServiceName, cfg.ServiceRoot, cfg.ServiceRootZFS)
+	resolvedRoot, rootExisted, err := s.prepareFileInstallerRoot(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare service root: %w", err)
+		return nil, err
 	}
 	cfg.ServiceRoot = resolvedRoot.Root
 	printServiceRootWarnings(cfg, resolvedRoot.Warnings)
-	i := &FileInstaller{
-		s:                          s,
-		cfg:                        cfg,
-		ch:                         make(chan struct{}),
-		installGenerationIfCurrent: (*Installer).InstallGenIfCurrent,
+	i := newPreparedFileInstaller(s, cfg, existingService, resolvedRoot, releaseServiceLock)
+	i.serviceRootCreated = resolvedRoot.Created || !rootExisted
+	i.serviceRootDatasetCreated = resolvedRoot.Created
+	constructorComplete := false
+	defer func() {
+		if !constructorComplete {
+			retErr = errors.Join(retErr, i.cleanupUncommittedServiceRoot())
+		}
+	}()
+	if err := i.initializePreparedFileInstaller(resolvedRoot); err != nil {
+		return nil, err
+	}
+	lockTransferred = true
+	constructorComplete = true
+	return i, nil
+}
+
+func (s *Server) prepareFileInstallerRoot(cfg FileInstallerCfg) (resolvedServiceRoot, bool, error) {
+	resolved, err := s.prepareServiceRootForInstall(cfg.ServiceName, cfg.ServiceRoot, cfg.ServiceRootZFS)
+	if err != nil {
+		return resolvedServiceRoot{}, false, fmt.Errorf("failed to prepare service root: %w", err)
+	}
+	if err := validateHostControlledServiceRootPath(resolved.Root); err != nil {
+		return resolvedServiceRoot{}, false, err
+	}
+	_, statErr := os.Lstat(resolved.Root)
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) && !errors.Is(statErr, syscall.ENOTDIR) {
+		return resolvedServiceRoot{}, false, fmt.Errorf("inspect prepared service root: %w", statErr)
+	}
+	return resolved, statErr == nil, nil
+}
+
+func newPreparedFileInstaller(s *Server, cfg FileInstallerCfg, existing db.ServiceView, root resolvedServiceRoot, release func()) *FileInstaller {
+	return &FileInstaller{
+		s: s, cfg: cfg, ch: make(chan struct{}), installGenerationIfCurrent: (*Installer).InstallGenIfCurrent,
+		ensureManagedServiceAccount: EnsureManagedServiceAccount,
 		readInstalledGeneration: func() (int, error) {
 			sv, err := s.serviceView(cfg.ServiceName)
 			if err != nil {
@@ -428,30 +492,64 @@ func NewFileInstaller(s *Server, cfg FileInstallerCfg) (*FileInstaller, error) {
 			}
 			return sv.Generation(), nil
 		},
-		rateVal: rate.Value{
-			HalfLife: 250 * time.Millisecond,
-		},
-		existingService: existingService,
-		serviceRoot:     resolvedRoot.Root,
-		serviceRootZFS:  resolvedRoot.Dataset,
+		rateVal: rate.Value{HalfLife: 250 * time.Millisecond}, existingService: existing,
+		serviceRoot: root.Root, serviceRootZFS: root.Dataset, serviceLockRelease: release,
 	}
+}
+
+func (i *FileInstaller) initializePreparedFileInstaller(root resolvedServiceRoot) error {
 	if i.cfg.NewCmd == nil {
 		i.cfg.NewCmd = cmdutil.NewStdCmd
 	}
-	if err := ensureDirsForRoot(resolvedRoot.Root, cfg.User); err != nil {
-		return nil, fmt.Errorf("failed to ensure directories: %w", err)
+	if err := i.capturePreparedServiceDataset(root); err != nil {
+		return err
+	}
+	if err := ensureDirsForRoot(root.Root, ""); err != nil {
+		captureErr := i.capturePreparedServiceRootIdentity()
+		return errors.Join(fmt.Errorf("failed to ensure directories: %w", err), captureErr)
+	}
+	if err := i.capturePreparedServiceRootIdentity(); err != nil {
+		return err
 	}
 	if err := i.initTempFile(); err != nil {
-		return nil, err
+		return err
 	}
-	// Create temporary file.
-	file, err := os.OpenFile(i.tempFilePath(), os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(i.tempFilePath(), os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		i.cleanupTemp()
-		return nil, fmt.Errorf("failed to create temp file: %w", err)
+		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	i.File = file
-	return i, nil
+	return nil
+}
+
+func (i *FileInstaller) capturePreparedServiceDataset(root resolvedServiceRoot) error {
+	if !root.Created {
+		return nil
+	}
+	runner := i.s.zfsRunner
+	if runner == nil {
+		runner = runZFSCommand
+	}
+	guid, err := zfsDatasetGUID(context.Background(), runner, root.Dataset)
+	if err != nil {
+		return fmt.Errorf("capture prepared service dataset: %w", err)
+	}
+	i.serviceRootDatasetGUID = guid
+	return nil
+}
+
+func (i *FileInstaller) capturePreparedServiceRootIdentity() error {
+	rootInfo, err := os.Lstat(i.serviceRoot)
+	if err != nil {
+		return fmt.Errorf("capture prepared service root: %w", err)
+	}
+	rootMeta, err := serviceIdentityMetadata(rootInfo)
+	if err != nil {
+		return err
+	}
+	i.serviceRootDev, i.serviceRootIno = rootMeta.Dev, rootMeta.Ino
+	return nil
 }
 
 func printServiceRootWarnings(cfg FileInstallerCfg, warnings []string) {
@@ -974,12 +1072,20 @@ func (i *FileInstaller) setArtifacts(files map[db.ArtifactName]string) {
 
 // Close closes the temporary file and installs the service.
 func (i *FileInstaller) Close() (err error) {
+	if i != nil {
+		defer i.releaseServiceLock()
+	}
 	done, err := i.closePreflight()
 	if err != nil || done {
 		return err
 	}
 
 	defer i.finishClose(&err)
+	if i.s != nil {
+		if err := i.s.checkServiceIdentityMutationAllowed(i.cfg.ServiceName); err != nil {
+			return errors.Join(err, i.closeTempFile())
+		}
+	}
 	if err := i.closeAndInstall(); err != nil {
 		return err
 	}
@@ -987,6 +1093,44 @@ func (i *FileInstaller) Close() (err error) {
 		return i.captureInstalledGenerationOrRollback()
 	}
 	return nil
+}
+
+// Abort discards a staged upload without installing it and releases the
+// service mutation lock acquired by NewFileInstaller. It is safe to call more
+// than once and is the required cleanup path for callers that stage with a
+// FileInstaller but deliberately complete installation through another path.
+func (i *FileInstaller) Abort() {
+	if i == nil {
+		return
+	}
+	defer i.releaseServiceLock()
+	if i.closed {
+		return
+	}
+	if i.File != nil {
+		_ = i.File.Close()
+	}
+	i.cleanupTemp()
+	if err := i.cleanupUncommittedServiceRoot(); err != nil {
+		i.err = err
+		log.Printf("failed to clean aborted service root: %v", err)
+	}
+	i.File = nil
+	i.closed = true
+	if i.ch != nil {
+		close(i.ch)
+	}
+}
+
+func (i *FileInstaller) releaseServiceLock() {
+	if i == nil {
+		return
+	}
+	i.serviceLockOnce.Do(func() {
+		if i.serviceLockRelease != nil {
+			i.serviceLockRelease()
+		}
+	})
 }
 
 func (i *FileInstaller) RollbackInstalledGenerationAvailable() bool {
@@ -1090,10 +1234,92 @@ func (i *FileInstaller) closePreflight() (bool, error) {
 
 func (i *FileInstaller) finishClose(err *error) {
 	i.cleanupTemp()
+	if *err != nil {
+		*err = errors.Join(*err, i.cleanupUncommittedServiceRoot())
+	}
 	i.File = nil
 	i.closed = true
 	close(i.ch)
 	i.err = *err
+}
+
+func (i *FileInstaller) cleanupUncommittedServiceRoot() error {
+	eligible, err := i.uncommittedServiceRootCleanupEligible()
+	if err != nil || !eligible {
+		return err
+	}
+	if i.serviceRootDatasetCreated {
+		return i.cleanupUncommittedServiceDataset()
+	}
+	return i.cleanupUncommittedServiceDirectory()
+}
+
+func (i *FileInstaller) uncommittedServiceRootCleanupEligible() (bool, error) {
+	if i == nil || i.s == nil || !i.serviceRootCreated {
+		return false, nil
+	}
+	if _, err := i.s.serviceView(i.cfg.ServiceName); err == nil {
+		return false, nil
+	} else if !errors.Is(err, errServiceNotFound) {
+		return false, fmt.Errorf("verify failed install database state before root cleanup: %w", err)
+	}
+	return true, nil
+}
+
+func (i *FileInstaller) cleanupUncommittedServiceDataset() error {
+	runner := i.s.zfsRunner
+	if runner == nil {
+		runner = runZFSCommand
+	}
+	guid, err := zfsDatasetGUID(context.Background(), runner, i.serviceRootZFS)
+	if err != nil {
+		return err
+	}
+	if guid != i.serviceRootDatasetGUID {
+		return fmt.Errorf("failed install dataset %s changed identity; it was left untouched", i.serviceRootZFS)
+	}
+	return zfsDestroyDataset(context.Background(), runner, i.serviceRootZFS)
+}
+
+func (i *FileInstaller) cleanupUncommittedServiceDirectory() error {
+	info, err := os.Lstat(i.serviceRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := i.validateUncommittedServiceDirectory(info); err != nil {
+		return err
+	}
+	return i.removeUncommittedServiceDirectory()
+}
+
+func (i *FileInstaller) validateUncommittedServiceDirectory(info os.FileInfo) error {
+	meta, err := serviceIdentityMetadata(info)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || meta.Dev != i.serviceRootDev || meta.Ino != i.serviceRootIno {
+		return fmt.Errorf("failed install root %s changed inode; it was left untouched", i.serviceRoot)
+	}
+	return nil
+}
+
+func (i *FileInstaller) removeUncommittedServiceDirectory() error {
+	if err := os.Chown(i.serviceRoot, os.Geteuid(), os.Getegid()); err != nil {
+		return err
+	}
+	if err := os.Chmod(i.serviceRoot, 0o700); err != nil {
+		return err
+	}
+	if err := syncServiceIdentityJournalDirectory(i.serviceRoot); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(i.serviceRoot); err != nil {
+		return err
+	}
+	return syncServiceIdentityJournalDirectory(filepath.Dir(i.serviceRoot))
 }
 
 func (i *FileInstaller) closeTempFile() error {
@@ -1133,11 +1359,20 @@ func rewriteSystemdUnitContent(unit, exe string, args []string) string {
 	sc := bufio.NewScanner(strings.NewReader(unit))
 	for sc.Scan() {
 		line := sc.Text()
-		if strings.HasPrefix(strings.TrimSpace(line), "ExecStart=") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "ExecStart=") {
 			b.WriteString("ExecStart=")
 			b.WriteString(exe)
-			b.WriteByte(' ')
-			b.WriteString(strings.Join(args, " "))
+			switch {
+			case args == nil:
+				current := strings.TrimPrefix(trimmed, "ExecStart=")
+				if split := strings.IndexAny(current, " \t"); split >= 0 {
+					b.WriteString(current[split:])
+				}
+			case len(args) != 0:
+				b.WriteByte(' ')
+				b.WriteString(strings.Join(args, " "))
+			}
 			b.WriteByte('\n')
 		} else {
 			b.WriteString(line)
@@ -1147,8 +1382,8 @@ func rewriteSystemdUnitContent(unit, exe string, args []string) string {
 	return b.String()
 }
 
-func (i *FileInstaller) ensureSystemdUnit() error {
-	exe := filepath.Join(i.serviceRunDir(), i.cfg.ServiceName)
+func (i *FileInstaller) ensureSystemdUnit(executable ...string) error {
+	exe := i.systemdExecutable(executable)
 	if reused, err := i.reuseExistingSystemdUnit(exe); err != nil || reused {
 		return err
 	}
@@ -1160,6 +1395,18 @@ func (i *FileInstaller) ensureSystemdUnit() error {
 		return err
 	}
 	return i.writeSystemdUnit(su)
+}
+
+func (i *FileInstaller) systemdExecutable(explicit []string) string {
+	if len(explicit) != 0 && strings.TrimSpace(explicit[0]) != "" {
+		return explicit[0]
+	}
+	if i.existingService.Valid() {
+		if path, ok := i.existingService.AsStruct().Artifacts.Latest(db.ArtifactBinary); ok {
+			return path
+		}
+	}
+	return filepath.Join(i.serviceRunDir(), i.cfg.ServiceName)
 }
 
 func (i *FileInstaller) reuseExistingSystemdUnit(exe string) (bool, error) {
@@ -1174,9 +1421,6 @@ func (i *FileInstaller) reuseExistingSystemdUnit(exe string) (bool, error) {
 	if !ok {
 		return false, nil
 	}
-	if i.cfg.Args == nil {
-		return true, nil
-	}
 	p, err := rewriteSystemdUnit(p, exe, i.cfg.Args)
 	if err != nil {
 		return false, fmt.Errorf("failed to rewrite systemd unit: %w", err)
@@ -1186,7 +1430,7 @@ func (i *FileInstaller) reuseExistingSystemdUnit(exe string) (bool, error) {
 }
 
 func (i *FileInstaller) canReuseExistingSystemdUnit() bool {
-	return i.existingService.Valid() && i.cfg.ServiceName != CatchService
+	return i.existingService.Valid() && i.cfg.ServiceName != CatchService && !i.identityMigrationNeeded && !i.newNativeIdentity
 }
 
 func (i *FileInstaller) skipSystemdUnitGeneration() bool {
@@ -1202,11 +1446,14 @@ func (i *FileInstaller) newSystemdUnit(exe string) (*svc.SystemdUnit, error) {
 		Executable:       exe,
 		WorkingDirectory: i.serviceDataDir(),
 		Arguments:        i.cfg.Args,
-		EnvFile:          "-" + filepath.Join(i.serviceRunDir(), "env"),
+		EnvFile:          "-" + filepath.Join(i.serviceEnvDir(), "env"),
 		Timer:            i.cfg.Timer,
 	}
 	if i.cfg.ServiceName == CatchService {
 		configureCatchSystemdUnit(su)
+	} else {
+		su.User = i.resolvedIdentity.Persisted.RequestedUser
+		su.Group = i.resolvedIdentity.Persisted.RequestedGroup
 	}
 	if err := i.applyNetworkToSystemdUnit(su); err != nil {
 		return nil, err
@@ -1471,21 +1718,35 @@ func (i *FileInstaller) prepareNoBinaryInstall() (fileInstallPlan, error) {
 	service := i.existingService.AsStruct()
 	requestedPublished := len(normalizePublish(i.cfg.Publish)) != 0 || i.cfg.PublishReset
 	published := len(service.Publish) != 0 || requestedPublished
-	if !networkInterfacesEnabled(i.cfg.Network.Interfaces) && service.ISO != nil {
-		if err := validateInstallNetworkRequestWithPublished(service, requestedPublished); err != nil {
-			return plan, err
-		}
-	}
-	if err := i.normalizeNetworkForServiceType(plan.detectedServiceType, published); err != nil {
+	if err := i.prepareNoBinaryNetwork(service, plan.detectedServiceType, requestedPublished, published); err != nil {
 		return plan, err
 	}
 	if plan.detectedServiceType != db.ServiceTypeSystemd {
 		return plan, nil
 	}
-	if err := i.ensureSystemdUnit(); err != nil {
-		return plan, fmt.Errorf("failed to ensure systemd unit: %w", err)
+	return plan, i.prepareNoBinaryNativeService()
+}
+
+func (i *FileInstaller) prepareNoBinaryNetwork(service *db.Service, serviceType db.ServiceType, requestedPublished, published bool) error {
+	if !networkInterfacesEnabled(i.cfg.Network.Interfaces) && service.ISO != nil {
+		if err := validateInstallNetworkRequestWithPublished(service, requestedPublished); err != nil {
+			return err
+		}
 	}
-	return plan, nil
+	return i.normalizeNetworkForServiceType(serviceType, published)
+}
+
+func (i *FileInstaller) prepareNoBinaryNativeService() error {
+	if err := i.resolveNativeInstallIdentity(); err != nil {
+		return err
+	}
+	if err := validateNativeServicePrivilegedPorts(i.cfg.ServiceName, i.cfg.Publish, i.resolvedIdentity.Persisted); err != nil {
+		return err
+	}
+	if err := i.ensureSystemdUnit(); err != nil {
+		return fmt.Errorf("failed to ensure systemd unit: %w", err)
+	}
+	return nil
 }
 
 func (i *FileInstaller) preparePayloadInstall(bin string) (fileInstallPlan, error) {
@@ -1652,11 +1913,87 @@ func (i *FileInstaller) prepareSystemdPayload(binFT ftdetect.FileType) (fileInst
 		postRenameActions:   []func() error{chmodExecutableAction(dst)},
 		detectedServiceType: db.ServiceTypeSystemd,
 	}
+	if err := i.resolveNativeInstallIdentity(); err != nil {
+		return plan, err
+	}
+	if err := validateNativeServicePrivilegedPorts(i.cfg.ServiceName, i.cfg.Publish, i.resolvedIdentity.Persisted); err != nil {
+		return plan, err
+	}
 	mak.Set(&i.artifacts, db.ArtifactBinary, dst)
-	if err := i.ensureSystemdUnit(); err != nil {
+	if err := i.ensureSystemdUnit(dst); err != nil {
 		return plan, fmt.Errorf("failed to ensure systemd unit: %w", err)
 	}
 	return plan, nil
+}
+
+func (i *FileInstaller) resolveNativeInstallIdentity() error {
+	provisional := provisionalNativeIdentityInstall(i.existingService)
+	switch {
+	case (!i.existingService.Valid() || provisional) && !i.cfg.RunAsSet:
+		return i.resolveNewManagedNativeIdentity()
+	case (!i.existingService.Valid() || provisional) && i.cfg.RunAsSet:
+		return i.resolveNewExplicitNativeIdentity()
+	case i.existingService.Valid() && !i.cfg.RunAsSet:
+		return i.resolveExistingNativeIdentity()
+	default:
+		return i.resolveMigratedNativeIdentity()
+	}
+}
+
+func (i *FileInstaller) resolveNewManagedNativeIdentity() error {
+	ensure := i.ensureManagedServiceAccount
+	if ensure == nil {
+		ensure = EnsureManagedServiceAccount
+	}
+	resolved, err := ensure()
+	if err != nil {
+		return err
+	}
+	i.setNewNativeIdentity(resolved)
+	return nil
+}
+
+func (i *FileInstaller) resolveNewExplicitNativeIdentity() error {
+	resolved, err := resolveServiceIdentity(i.cfg.RunAs)
+	if err != nil {
+		return err
+	}
+	i.setNewNativeIdentity(resolved)
+	return nil
+}
+
+func (i *FileInstaller) setNewNativeIdentity(resolved resolvedServiceIdentity) {
+	i.resolvedIdentity = resolved
+	i.newNativeIdentity = true
+	i.nativePredecessorAbsent = true
+}
+
+func (i *FileInstaller) resolveExistingNativeIdentity() error {
+	i.resolvedIdentity = effectiveServiceIdentity(i.existingService)
+	if !i.existingService.Identity().Valid() {
+		return nil
+	}
+	return validateServiceIdentityDrift(i.resolvedIdentity.Persisted)
+}
+
+func (i *FileInstaller) resolveMigratedNativeIdentity() error {
+	resolved, err := resolveServiceIdentity(i.cfg.RunAs)
+	if err != nil {
+		return err
+	}
+	current := effectiveServiceIdentity(i.existingService)
+	i.identityMigrationNeeded = !i.existingService.Identity().Valid() || resolved.Persisted != current.Persisted
+	i.resolvedIdentity = resolved
+	return validateServiceIdentityDrift(resolved.Persisted)
+}
+
+func provisionalNativeIdentityInstall(sv db.ServiceView) bool {
+	if !sv.Valid() {
+		return false
+	}
+	service := sv.AsStruct()
+	return service.IdentityInstallPending && service.ServiceType == db.ServiceTypeSystemd &&
+		service.Identity == nil && service.Generation == 0 && service.LatestGeneration == 0
 }
 
 func (i *FileInstaller) printDetectedSystemdPayload(binFT ftdetect.FileType) {
@@ -1780,6 +2117,9 @@ func (i *FileInstaller) applyInstallPlanToService(s *db.Service, plan fileInstal
 	applyInstallNetworks(s, i.macvlan, i.svcNet, i.tsNet)
 	applyInstallPublish(s, plan)
 	stageArtifacts(s, i.artifacts)
+	if i.nativePredecessorAbsent && plan.detectedServiceType == db.ServiceTypeSystemd {
+		s.IdentityInstallPending = true
+	}
 	return nil
 }
 
@@ -1862,11 +2202,140 @@ func (i *FileInstaller) installStagedService() error {
 	}
 	si.NewCmd = i.cfg.NewCmd
 	si.isoTailscaleAuthKey = i.tsAuthKey
+	if i.newNativeIdentity || i.identityMigrationNeeded {
+		return i.installStagedNativeIdentity(si)
+	}
 	if err := si.Install(); err != nil {
 		return fmt.Errorf("failed to install service: %w", err)
 	}
 	i.installedGeneration = si.committedGeneration
 	i.printf("Service %q installed\n", i.cfg.ServiceName)
+	return nil
+}
+
+func (i *FileInstaller) installStagedNativeIdentity(si *Installer) (retErr error) {
+	prepared, err := i.prepareStagedNativeIdentityInstall(si)
+	if err != nil {
+		return err
+	}
+	migrationStarted := false
+	defer func() {
+		if retErr != nil && prepared.predecessorAbsent && !migrationStarted {
+			retErr = errors.Join(retErr, i.removeProvisionalNativeService(prepared.previous))
+		}
+	}()
+	migrationStarted = true
+	if _, err := i.runStagedNativeIdentityMigration(prepared.request); err != nil {
+		return fmt.Errorf("failed to migrate native service identity: %w", err)
+	}
+	i.installedGeneration = prepared.target.Generation
+	si.prune()
+	si.publishInstallEvent(prepared.target)
+	i.printf("Service %q installed\n", i.cfg.ServiceName)
+	return nil
+}
+
+type stagedNativeIdentityInstall struct {
+	previous          *db.Service
+	target            *db.Service
+	request           serviceIdentityMigrationRequest
+	predecessorAbsent bool
+}
+
+func (i *FileInstaller) prepareStagedNativeIdentityInstall(si *Installer) (stagedNativeIdentityInstall, error) {
+	sv, err := i.s.serviceView(i.cfg.ServiceName)
+	if err != nil {
+		return stagedNativeIdentityInstall{}, err
+	}
+	previous := sv.AsStruct()
+	if previous.ServiceType != db.ServiceTypeSystemd {
+		return stagedNativeIdentityInstall{}, serviceIdentityTypeError(i.cfg.ServiceName, previous.ServiceType)
+	}
+	target, replacement, err := i.prepareStagedNativeIdentityTarget(previous)
+	if err != nil {
+		return stagedNativeIdentityInstall{}, err
+	}
+	request, err := i.prepareStagedNativeIdentityRequest(si, target, replacement)
+	if err != nil {
+		return stagedNativeIdentityInstall{}, err
+	}
+	predecessorAbsent := i.nativePredecessorAbsent || (i.newNativeIdentity && !i.existingService.Valid())
+	request.PredecessorAbsent = predecessorAbsent
+	return stagedNativeIdentityInstall{previous: previous, target: target, request: request, predecessorAbsent: predecessorAbsent}, nil
+}
+
+func (i *FileInstaller) prepareStagedNativeIdentityTarget(previous *db.Service) (*db.Service, []byte, error) {
+	target := previous.Clone()
+	commitGeneratedServiceRefs(nil, target, i.cfg.ServiceName, generatedServiceCommitForGen(0, target.LatestGeneration))
+	identity := i.resolvedIdentity.Persisted
+	target.Identity = &identity
+	target.IdentityInstallPending = false
+	unitArtifact, ok := target.Artifacts.Gen(db.ArtifactSystemdUnit, target.Generation)
+	if !ok {
+		return nil, nil, fmt.Errorf("staged native service %q has no generation %d systemd unit", i.cfg.ServiceName, target.Generation)
+	}
+	replacement, err := os.ReadFile(unitArtifact)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read staged native systemd unit: %w", err)
+	}
+	return target, replacement, nil
+}
+
+func (i *FileInstaller) prepareStagedNativeIdentityRequest(si *Installer, target *db.Service, replacement []byte) (serviceIdentityMigrationRequest, error) {
+	generationService, err := newSystemdInstallService(si, target)
+	if err != nil {
+		return serviceIdentityMigrationRequest{}, err
+	}
+	units := generationService.InstallUnits()
+	states, err := generationService.InstallTargetStatesExcluding(generationService.PrimaryUnitPath())
+	if err != nil {
+		return serviceIdentityMigrationRequest{}, fmt.Errorf("capture staged generation install intent: %w", err)
+	}
+	identity := i.resolvedIdentity.Persisted
+	return serviceIdentityMigrationRequest{
+		Service: i.cfg.ServiceName, Requested: identity.RequestedUser + ":" + identity.RequestedGroup,
+		Target: i.resolvedIdentity, ReplacementUnit: string(replacement), TargetService: target,
+		StartNew: i.newNativeIdentity, GenerationPaths: generationService.InstallTargetPaths(),
+		GenerationIntents: serviceIdentityInstallTargetStates(states), GenerationUnits: units,
+		StageGeneration: stagedNativeIdentityGeneration(generationService, units),
+	}, nil
+}
+
+func stagedNativeIdentityGeneration(service *svc.SystemdService, expected []string) func(context.Context) error {
+	return func(context.Context) error {
+		staged, err := service.StageInstallForReloadExcluding(service.PrimaryUnitPath())
+		if err != nil {
+			return err
+		}
+		if !slices.Equal(staged, expected) {
+			return fmt.Errorf("staged systemd units changed during native identity migration: got %v, want %v", staged, expected)
+		}
+		return nil
+	}
+}
+
+func (i *FileInstaller) runStagedNativeIdentityMigration(request serviceIdentityMigrationRequest) (serviceIdentityMigrationResult, error) {
+	if i.migrateServiceIdentityFunc != nil {
+		return i.migrateServiceIdentityFunc(context.Background(), request, i.cfg.ClientOut)
+	}
+	return i.s.migrateServiceIdentityLocked(context.Background(), request, i.cfg.ClientOut)
+}
+
+func (i *FileInstaller) removeProvisionalNativeService(expected *db.Service) error {
+	_, err := i.s.cfg.DB.MutateData(func(data *db.Data) error {
+		current, ok := data.Services[i.cfg.ServiceName]
+		if !ok {
+			return nil
+		}
+		if !reflect.DeepEqual(current, expected) {
+			return fmt.Errorf("provisional service %q changed while install was failing; it was left untouched", i.cfg.ServiceName)
+		}
+		delete(data.Services, i.cfg.ServiceName)
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("remove provisional native service after failed install: %w", err)
+	}
 	return nil
 }
 

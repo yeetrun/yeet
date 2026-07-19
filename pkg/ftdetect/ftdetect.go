@@ -43,6 +43,16 @@ func DetectFile(path, goos, goarch string) (FileType, error) {
 	if err != nil {
 		return Unknown, err
 	}
+	return detectOpenedFile(f, goos, goarch)
+}
+
+func detectOpenedFile(f *file, goos, goarch string) (fileType FileType, err error) {
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			fileType = Unknown
+			err = errors.Join(err, fmt.Errorf("failed to close detected file: %w", closeErr))
+		}
+	}()
 	f.goarch = goarch
 	f.goos = goos
 

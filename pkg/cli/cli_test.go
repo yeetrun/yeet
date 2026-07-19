@@ -27,6 +27,7 @@ func FuzzParseRemoteArgs(f *testing.F) {
 		args := fuzzArgs(raw)
 
 		_, _, _ = ParseRun(args)
+		_, _, _ = ParseCron(args)
 		_, _, _, _ = ParseStage(args)
 		_, _, _ = ParseRemove(args)
 		_, _, _ = ParseLogs(args)
@@ -129,6 +130,76 @@ func TestParseRunFlagsAndArgs(t *testing.T) {
 	}
 	if got := strings.Join(outArgs, " "); got != "arg1 arg2" {
 		t.Errorf("args = %q, want %q", got, "arg1 arg2")
+	}
+}
+
+func TestParseRunAsPreservesPresence(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    string
+		wantSet bool
+		wantErr string
+	}{
+		{name: "inline", args: []string{"--run-as=app", "payload"}, want: "app", wantSet: true},
+		{name: "separate", args: []string{"--run-as", "app:workers", "payload"}, want: "app:workers", wantSet: true},
+		{name: "explicit root", args: []string{"payload", "--run-as=root"}, want: "root", wantSet: true},
+		{name: "absent", args: []string{"payload"}},
+		{name: "empty", args: []string{"--run-as=", "payload"}, wantSet: true, wantErr: "--run-as requires USER[:GROUP]"},
+		{name: "repeated", args: []string{"--run-as=app", "--run-as=root", "payload"}, wantErr: "--run-as may only be supplied once"},
+		{name: "payload argument", args: []string{"payload", "--", "--run-as=root"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags, _, err := ParseRun(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseRun error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if flags.RunAs != tt.want || flags.RunAsSet != tt.wantSet {
+				t.Fatalf("RunAs/RunAsSet = %q/%v, want %q/%v", flags.RunAs, flags.RunAsSet, tt.want, tt.wantSet)
+			}
+		})
+	}
+}
+
+func TestParseCronRunAsAndSchedule(t *testing.T) {
+	tests := []struct {
+		name     string
+		args     []string
+		want     CronFlags
+		wantArgs []string
+		wantErr  string
+	}{
+		{name: "flags before schedule", args: []string{"--run-as=backup", `0 3 * * *`, "--", "--daily"}, want: CronFlags{RunAs: "backup", RunAsSet: true, Schedule: `0 3 * * *`}, wantArgs: []string{"--daily"}},
+		{name: "flags after schedule", args: []string{`0 3 * * *`, "--run-as", "backup", "--", "--daily"}, want: CronFlags{RunAs: "backup", RunAsSet: true, Schedule: `0 3 * * *`}, wantArgs: []string{"--daily"}},
+		{name: "canonical schedule flag", args: []string{"--run-as=root", `--schedule=0 3 * * *`, "--", "--daily"}, want: CronFlags{RunAs: "root", RunAsSet: true, Schedule: `0 3 * * *`}, wantArgs: []string{"--daily"}},
+		{name: "absent run as", args: []string{`0 3 * * *`}, want: CronFlags{Schedule: `0 3 * * *`}},
+		{name: "payload run as argument", args: []string{`0 3 * * *`, "--", "--run-as=root"}, want: CronFlags{Schedule: `0 3 * * *`}, wantArgs: []string{"--run-as=root"}},
+		{name: "empty run as", args: []string{"--run-as=", `0 3 * * *`}, wantErr: "--run-as requires USER[:GROUP]"},
+		{name: "repeated run as", args: []string{"--run-as=app", "--run-as=root", `0 3 * * *`}, wantErr: "--run-as may only be supplied once"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flags, args, err := ParseCron(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseCron error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if flags != tt.want || !reflect.DeepEqual(args, tt.wantArgs) {
+				t.Fatalf("ParseCron = %#v %#v, want %#v %#v", flags, args, tt.want, tt.wantArgs)
+			}
+		})
 	}
 }
 
@@ -540,6 +611,12 @@ func TestParseSnapshotDefaultsShowRejectsArgs(t *testing.T) {
 }
 
 func TestParseSnapshotsLifecycleCommands(t *testing.T) {
+	if args, err := ParseSnapshotsProtect([]string{"svc-a", "yeet-abc"}, "protect"); err != nil || len(args) != 2 {
+		t.Fatalf("ParseSnapshotsProtect valid = %v, %v", args, err)
+	}
+	if _, err := ParseSnapshotsProtect([]string{"svc-a"}, "protect"); err == nil || !strings.Contains(err.Error(), "requires service and snapshot") {
+		t.Fatalf("ParseSnapshotsProtect invalid = %v", err)
+	}
 	listFlags, listArgs, err := ParseSnapshotsList([]string{"svc-a", "--format=json-pretty"})
 	if err != nil {
 		t.Fatalf("ParseSnapshotsList: %v", err)
@@ -789,6 +866,29 @@ func TestParseServiceSetFlags(t *testing.T) {
 				t.Fatalf("args = %#v, want %#v", out, tt.wantOut)
 			}
 		})
+	}
+}
+
+func TestParseServiceSetRunAs(t *testing.T) {
+	flags, args, err := ParseServiceSet([]string{"svc-a", "--service-root=/var/lib/yeet/services/api", "--copy", "--run-as=app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags.RunAs != "app" || !flags.RunAsSet || flags.ServiceRoot != "/var/lib/yeet/services/api" || !flags.Copy {
+		t.Fatalf("flags = %#v", flags)
+	}
+	if !reflect.DeepEqual(args, []string{"svc-a"}) {
+		t.Fatalf("args = %#v", args)
+	}
+	if _, _, err := ParseServiceSet([]string{"svc-a", "--run-as=app", "--run-as=root"}); err == nil || !strings.Contains(err.Error(), "--run-as may only be supplied once") {
+		t.Fatalf("repeated run-as error = %v", err)
+	}
+	root, _, err := ParseServiceSet([]string{"svc-a", "--run-as=root"})
+	if err != nil || root.RunAs != "root" || !root.RunAsSet {
+		t.Fatalf("explicit root = %#v, error %v", root, err)
+	}
+	if _, _, err := ParseServiceSet([]string{"svc-a", "--run-as="}); err == nil || !strings.Contains(err.Error(), "--run-as requires USER[:GROUP]") {
+		t.Fatalf("empty run-as error = %v", err)
 	}
 }
 
@@ -1359,6 +1459,12 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if infos["copy"].Aliases[0] != "cp" {
 		t.Fatalf("copy aliases = %v, want cp", infos["copy"].Aliases)
 	}
+	if info, ok := RemoteCommandInfo("run"); !ok || info.Name != "run" {
+		t.Fatalf("RemoteCommandInfo(run) = %#v, %t", info, ok)
+	}
+	if _, ok := RemoteCommandInfo("missing"); ok {
+		t.Fatal("RemoteCommandInfo accepted an unknown command")
+	}
 
 	reg := RemoteCommandRegistry()
 	if reg.Command.Name != "yeet" {
@@ -1367,7 +1473,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if reg.SubCommands["run"].Info.Name != "run" {
 		t.Fatalf("registry run command = %#v", reg.SubCommands["run"])
 	}
-	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
+	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
 		t.Fatalf("run usage = %q", got)
 	}
 	if !containsString(reg.SubCommands["run"].Info.Examples, "yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs") {
@@ -1388,7 +1494,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if reg.Groups["service"].Commands["set"].Info.Name != "set" {
 		t.Fatalf("registry service set command = %#v", reg.Groups["service"].Commands["set"])
 	}
-	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]" {
+	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]" {
 		t.Fatalf("service set usage = %q", reg.Groups["service"].Commands["set"].Info.Usage)
 	}
 	hostSet, ok := reg.Groups["host"].Commands["set"]
@@ -1439,7 +1545,10 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 		"yeet service set <svc> -p 80:80 -p 443:443",
 		"yeet service set <svc> --publish-reset -p 443:443",
 		"yeet service set <svc> --publish-reset",
+		"yeet service set <svc> --run-as=yeet-svc",
+		"yeet service set <svc> --run-as=app:app",
 		"yeet service set <svc> --service-root=/srv/apps/<svc>",
+		"yeet service set <svc> --service-root=/var/lib/yeet/services/<svc> --copy --run-as=yeet-svc",
 		"yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy",
 		"yeet service set <svc> --service-root=/srv/apps/<svc> --empty",
 		"yeet service set <svc> --snapshots=off",

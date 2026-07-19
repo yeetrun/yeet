@@ -81,6 +81,7 @@ func validateRunDraftLocal(draft RunDraft, cwd string) (RunDraft, RunDraftValida
 	validateRunDraftRequired(draft, &result)
 	validateRunDraftCron(&draft, &result)
 	validateRunDraftPaths(cwd, &draft, &result)
+	validateRunDraftIdentity(draft, &result)
 	validateRunDraftVM(&draft, &result)
 	if draft.PayloadKind == serviceTypeCron {
 		draft.Network.Modes = normalizeRunDraftNetworkModes(draft.Network.Modes, &result)
@@ -100,6 +101,7 @@ func trimRunDraftFields(draft RunDraft) RunDraft {
 	draft.Payload = strings.TrimSpace(draft.Payload)
 	draft.PayloadKind = strings.ToLower(strings.TrimSpace(draft.PayloadKind))
 	draft.EnvFile = strings.TrimSpace(draft.EnvFile)
+	draft.RunAs = strings.TrimSpace(draft.RunAs)
 	draft.VM.Memory = strings.TrimSpace(draft.VM.Memory)
 	draft.VM.MemoryMin = strings.TrimSpace(draft.VM.MemoryMin)
 	draft.VM.Balloon = strings.ToLower(strings.TrimSpace(draft.VM.Balloon))
@@ -109,6 +111,24 @@ func trimRunDraftFields(draft RunDraft) RunDraft {
 	draft.Snapshots.Mode = strings.TrimSpace(draft.Snapshots.Mode)
 	draft.Snapshots.MaxAge = strings.TrimSpace(draft.Snapshots.MaxAge)
 	return draft
+}
+
+func validateRunDraftIdentity(draft RunDraft, result *RunDraftValidationResult) {
+	if !draft.RunAsSet {
+		return
+	}
+	if draft.RunAs == "" {
+		result.addError("runAs", "--run-as requires USER[:GROUP]")
+		return
+	}
+	if draft.PayloadKind == serviceTypeVM {
+		result.addError("runAs", "--run-as does not control VM guest or Firecracker jailer identities; use VM guest settings because Firecracker host execution is managed separately")
+		return
+	}
+	switch draft.PayloadKind {
+	case "python", "typescript", "local-image", "remote-image", "dockerfile", "docker", "docker-compose", "compose":
+		result.addError("runAs", "--run-as applies only to native systemd workloads; configure the container image or Compose service \"user:\" field instead")
+	}
 }
 
 func validateRunDraftNetwork(draft *RunDraft, result *RunDraftValidationResult) {

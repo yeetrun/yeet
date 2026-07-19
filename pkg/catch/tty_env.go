@@ -248,7 +248,7 @@ func (e *ttyExecer) installEditedEnvFile(tmpPath string) (retErr error) {
 	}()
 	icfg := e.fileInstaller(netFlags{}, nil)
 	icfg.EnvFile = true
-	fi, err := NewFileInstaller(e.s, icfg)
+	fi, err := e.newFileInstaller(icfg)
 	if err != nil {
 		return fmt.Errorf("failed to create installer: %w", err)
 	}

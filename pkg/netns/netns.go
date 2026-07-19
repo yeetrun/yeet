@@ -55,7 +55,7 @@ var (
 		return filepath.Join("/etc/systemd/system", unit)
 	}
 	newYeetNSSystemdService = func(cfg db.ServiceView, runDir string) (yeetNSServiceInstaller, error) {
-		return svc.NewSystemdService(nil, cfg, runDir)
+		return svc.NewHostSystemdService(nil, cfg, runDir)
 	}
 	systemdUnitActive = func(unit string) bool {
 		return exec.Command("systemctl", "is-active", "--quiet", unit).Run() == nil
@@ -351,7 +351,7 @@ func WriteServiceNetNS(binDir, runDir string, se Service) (map[db.ArtifactName]s
 	unit := svc.SystemdUnit{
 		Name:             se.NetNS(),
 		Executable:       exe,
-		EnvFile:          filepath.Join(runDir, "netns.env"),
+		EnvFile:          filepath.Join(filepath.Dir(runDir), "env", "netns.env"),
 		WorkingDirectory: "/",
 		Requires:         "yeet-ns.service",
 		After:            "yeet-ns.service",

@@ -351,11 +351,14 @@ type tailscaleInstallPlan struct {
 }
 
 func newTailscaleSystemdUnit(plan tailscaleInstallPlan) svc.SystemdUnit {
+	root := filepath.Dir(plan.runDir)
+	binDir := filepath.Join(root, "bin")
+	envDir := filepath.Join(root, "env")
 	unit := svc.SystemdUnit{
 		Name:             "yeet-" + plan.service + "-ts",
-		Executable:       filepath.Join(plan.runDir, "tailscaled"),
-		Arguments:        tailscaleSystemdArgs(plan.runDir, plan.interfaceName, plan.runInNetNS == ""),
-		EnvFile:          filepath.Join(plan.runDir, "tailscaled.env"),
+		Executable:       filepath.Join(binDir, "tailscaled"),
+		Arguments:        tailscaleSystemdArgs(plan.runDir, envDir, plan.interfaceName, plan.runInNetNS == ""),
+		EnvFile:          filepath.Join(envDir, "tailscaled.env"),
 		WorkingDirectory: plan.serviceTSDir,
 	}
 	if plan.runInNetNS != "" {
@@ -364,7 +367,7 @@ func newTailscaleSystemdUnit(plan tailscaleInstallPlan) svc.SystemdUnit {
 	return unit
 }
 
-func tailscaleSystemdArgs(runDir, interfaceName string, tapMode bool) []string {
+func tailscaleSystemdArgs(runDir, envDir, interfaceName string, tapMode bool) []string {
 	tunArg := "--tun=" + interfaceName
 	if tapMode {
 		tunArg = "--tun=tap:" + interfaceName
@@ -372,7 +375,7 @@ func tailscaleSystemdArgs(runDir, interfaceName string, tapMode bool) []string {
 	return []string{
 		"--statedir=.",
 		"--socket=" + filepath.Join(runDir, "tailscaled.sock"),
-		"--config=" + filepath.Join(runDir, "tailscaled.json"),
+		"--config=" + filepath.Join(envDir, "tailscaled.json"),
 		tunArg,
 	}
 }

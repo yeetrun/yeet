@@ -25,6 +25,12 @@ func NewSystemdService(db *db.Store, cfg db.ServiceView, runDir string) (*System
 	return &SystemdService{db: db, cfg: cfg, runDir: runDir}, nil
 }
 
+// NewHostSystemdService creates a privileged, self-managed host daemon that
+// intentionally keeps the historical flat runtime artifact layout.
+func NewHostSystemdService(db *db.Store, cfg db.ServiceView, runDir string) (*SystemdService, error) {
+	return &SystemdService{db: db, cfg: cfg, runDir: runDir, flatRuntimeArtifacts: true}, nil
+}
+
 // NewDockerComposeService creates a new docker compose service from a config.
 func NewDockerComposeService(db *db.Store, cfg db.ServiceView, dataDir, runDir string) (*DockerComposeService, error) {
 	sd, err := NewSystemdService(db, cfg, runDir)

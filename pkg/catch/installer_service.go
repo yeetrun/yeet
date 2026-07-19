@@ -570,6 +570,9 @@ func (w printerFuncWriter) Write(p []byte) (int, error) {
 }
 
 func (si *Installer) runInstallPhase(s *db.Service) error {
+	if err := si.applyPersistedNativeServiceLayout(s); err != nil {
+		return err
+	}
 	phase, err := installPhaseForServiceType(s.ServiceType)
 	if err != nil {
 		return err
@@ -578,11 +581,49 @@ func (si *Installer) runInstallPhase(s *db.Service) error {
 }
 
 func (si *Installer) runDefinitionInstallPhase(s *db.Service) error {
+	if err := si.applyPersistedNativeServiceLayout(s); err != nil {
+		return err
+	}
 	phase, err := definitionInstallPhaseForServiceType(s.ServiceType)
 	if err != nil {
 		return err
 	}
 	return phase(si, s)
+}
+
+func (si *Installer) applyPersistedNativeServiceLayout(service *db.Service) error {
+	identity, ok, err := persistedNativeLayoutIdentity(service)
+	if err != nil || !ok {
+		return err
+	}
+	if si == nil || si.s == nil {
+		return fmt.Errorf("prepare native service %q layout: catch server is unavailable", service.Name)
+	}
+	root := si.s.serviceRootFromView(service.View())
+	if err := validateHostControlledServiceRootPath(root); err != nil {
+		return fmt.Errorf("validate service %q identity root: %w", service.Name, err)
+	}
+	if err := ensureDirsForRoot(root, ""); err != nil {
+		return fmt.Errorf("ensure service %q identity layout: %w", service.Name, err)
+	}
+	if err := applyNativeServiceLayout(root, identity); err != nil {
+		return fmt.Errorf("apply service %q identity layout: %w", service.Name, err)
+	}
+	return nil
+}
+
+func persistedNativeLayoutIdentity(service *db.Service) (db.ServiceIdentity, bool, error) {
+	if service == nil || service.ServiceType != db.ServiceTypeSystemd || service.Name == CatchService || service.Name == SystemService {
+		return db.ServiceIdentity{}, false, nil
+	}
+	identity := effectiveServiceIdentity(service.View()).Persisted
+	if service.Identity == nil {
+		return identity, true, nil
+	}
+	if err := validateServiceIdentityDrift(identity); err != nil {
+		return db.ServiceIdentity{}, false, fmt.Errorf("service %q identity changed on this host: %w", service.Name, err)
+	}
+	return identity, true, nil
 }
 
 func installPhaseForServiceType(serviceType db.ServiceType) (installPhase, error) {

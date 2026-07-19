@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/netip"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,6 +19,48 @@ import (
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/tailcfg"
 )
+
+func TestServiceIdentityInfoClassifiesNativeIdentityAndReportsDrift(t *testing.T) {
+	oldUserLookup := serviceUserLookup
+	oldGroupLookup := serviceGroupLookup
+	t.Cleanup(func() {
+		serviceUserLookup = oldUserLookup
+		serviceGroupLookup = oldGroupLookup
+	})
+	serviceUserLookup = func(name string) (*user.User, error) {
+		if name != "app" {
+			return nil, user.UnknownUserError(name)
+		}
+		return &user.User{Username: "app", Uid: "1012", Gid: "1003"}, nil
+	}
+	serviceGroupLookup = func(name string) (*user.Group, error) {
+		if name != "app" {
+			return nil, user.UnknownGroupError(name)
+		}
+		return &user.Group{Name: "app", Gid: "1003"}, nil
+	}
+
+	legacy := serviceIdentityInfo((&db.Service{Name: "legacy", ServiceType: db.ServiceTypeSystemd}).View())
+	if legacy == nil || legacy.Class != "legacy-root" || legacy.RequestedUser != "root" || legacy.UID != 0 {
+		t.Fatalf("legacy identity = %#v", legacy)
+	}
+
+	persisted := &db.ServiceIdentity{
+		RequestedUser: "app", RequestedGroup: "app", UID: 1002, GID: 1003,
+	}
+	operator := serviceIdentityInfo((&db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, Identity: persisted}).View())
+	if operator == nil || operator.Class != "operator" || operator.UID != 1002 || operator.GID != 1003 ||
+		!strings.Contains(operator.Mismatch, "now resolves to UID 1012") {
+		t.Fatalf("operator identity = %#v", operator)
+	}
+
+	if got := serviceIdentityInfo((&db.Service{Name: "compose", ServiceType: db.ServiceTypeDockerCompose, Identity: persisted}).View()); got != nil {
+		t.Fatalf("compose identity = %#v, want nil", got)
+	}
+	if got := serviceIdentityInfo((&db.Service{Name: "vm", ServiceType: db.ServiceTypeVM, Identity: persisted}).View()); got != nil {
+		t.Fatalf("VM identity = %#v, want nil", got)
+	}
+}
 
 func TestLabelForIP(t *testing.T) {
 	tests := []struct {

@@ -22,6 +22,8 @@ var (
 	installServiceRootCloneDefinition   = installServiceRootCloneDefinitionDefault
 	stopServiceRootClone                = stopServiceRootCloneDefault
 	rewriteServiceRootCloneArtifacts    = rewriteServiceRootCloneArtifactsDefault
+	reconcileServiceRootCloneIdentity   = reconcileServiceRootCloneIdentityDefault
+	reconcileServiceRootRestoreIdentity = reconcileServiceRootRestoreIdentityDefault
 	installServiceRootRestoreGeneration = installServiceRootRestoreGenerationDefault
 	placeServiceRootRestoreStage        = prepareServiceRootRestoreStageDefault
 )
@@ -64,6 +66,9 @@ func (s *Server) materializeServiceRootRecoveryClone(ctx context.Context, servic
 	if err := currentServiceRootCloneArtifactRewriter()(clonedService.Artifacts, service.ServiceRoot, targetRoot); err != nil {
 		return s.cleanupFailedRecoveryClone(ctx, targetDataset, newServiceName, false, err)
 	}
+	if err := currentServiceRootCloneIdentityReconciler()(ctx, s, clonedService, targetRoot); err != nil {
+		return s.cleanupFailedRecoveryClone(ctx, targetDataset, newServiceName, false, err)
+	}
 	inserted, err := s.insertRecoveryCloneService(clonedService)
 	if err != nil {
 		return s.cleanupFailedRecoveryClone(ctx, targetDataset, newServiceName, inserted, err)
@@ -82,6 +87,7 @@ func (s *Server) materializeServiceRootRecoveryClone(ctx context.Context, servic
 type serviceRootCloneDefinitionInstaller func(*Server, *db.Service) error
 type serviceRootCloneStopper func(*Server, *db.Service) error
 type serviceRootCloneArtifactRewriter func(db.ArtifactStore, string, string) error
+type serviceRootCloneIdentityReconciler func(context.Context, *Server, *db.Service, string) error
 
 func currentServiceRootCloneDefinitionInstaller() serviceRootCloneDefinitionInstaller {
 	if installServiceRootCloneDefinition != nil {
@@ -102,6 +108,13 @@ func currentServiceRootCloneArtifactRewriter() serviceRootCloneArtifactRewriter 
 		return rewriteServiceRootCloneArtifacts
 	}
 	return rewriteServiceRootCloneArtifactsDefault
+}
+
+func currentServiceRootCloneIdentityReconciler() serviceRootCloneIdentityReconciler {
+	if reconcileServiceRootCloneIdentity != nil {
+		return reconcileServiceRootCloneIdentity
+	}
+	return reconcileServiceRootCloneIdentityDefault
 }
 
 func installServiceRootCloneDefinitionDefault(s *Server, service *db.Service) error {
@@ -178,7 +191,7 @@ func (s *Server) restoreServiceRootRecoveryPoint(ctx context.Context, service *d
 		return err
 	}
 	writef(rw, "Restored service root: %s\n", point.Name)
-	if err := s.finishServiceRootRestore(service, point, flags, rw); err != nil {
+	if err := s.finishServiceRootRestore(ctx, service, point, flags, rw); err != nil {
 		return err
 	}
 	writef(rw, "Restore complete.\n")
@@ -201,7 +214,10 @@ func (s *Server) prepareServiceRootForRestore(ctx context.Context, service *db.S
 	return nil
 }
 
-func (s *Server) finishServiceRootRestore(service *db.Service, point recoveryPoint, flags cli.SnapshotsRestoreFlags, rw io.ReadWriter) error {
+func (s *Server) finishServiceRootRestore(ctx context.Context, service *db.Service, point recoveryPoint, flags cli.SnapshotsRestoreFlags, rw io.ReadWriter) error {
+	if err := reconcileServiceRootRestoreIdentity(ctx, s, service, rw); err != nil {
+		return err
+	}
 	if err := s.restoreServiceRootSnapshotGeneration(service.Name, point, flags.Generation); err != nil {
 		return err
 	}
@@ -309,7 +325,7 @@ func (s *Server) restoreServiceRootFromSnapshot(ctx context.Context, service *db
 	}
 
 	activeRoot := s.serviceRootFromView(service.View())
-	copyErr := restoreServiceRootFromCloneMountpoint(tempRoot, activeRoot)
+	copyErr := restoreServiceRootFromCloneMountpointContext(ctx, tempRoot, activeRoot)
 	destroyErr := zfsDestroyDataset(ctx, s.zfsRunner, tempDataset)
 	if copyErr != nil {
 		return serviceRootRestoreTempCleanupError(tempDataset, copyErr, destroyErr)
@@ -321,6 +337,10 @@ func (s *Server) restoreServiceRootFromSnapshot(ctx context.Context, service *db
 }
 
 func restoreServiceRootFromCloneMountpoint(sourceRoot, targetRoot string) error {
+	return restoreServiceRootFromCloneMountpointContext(context.Background(), sourceRoot, targetRoot)
+}
+
+func restoreServiceRootFromCloneMountpointContext(ctx context.Context, sourceRoot, targetRoot string) error {
 	sourceRoot = filepath.Clean(sourceRoot)
 	targetRoot = filepath.Clean(targetRoot)
 	if err := requireSafeServiceRootPath(sourceRoot, "temporary service-root clone mountpoint"); err != nil {
@@ -348,7 +368,11 @@ func restoreServiceRootFromCloneMountpoint(sourceRoot, targetRoot string) error 
 		}
 	}()
 
-	if err := copyServiceRootToStage(sourceRoot, stage); err != nil {
+	guard, err := newServiceIdentityCopyGuard(ctx, sourceRoot, "", nil)
+	if err != nil {
+		return fmt.Errorf("guard temporary service-root clone: %w", err)
+	}
+	if err := guard.copyToStage(stage); err != nil {
 		return fmt.Errorf("copy temporary service-root clone: %w", err)
 	}
 	removeStage = false

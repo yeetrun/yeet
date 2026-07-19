@@ -39,6 +39,8 @@ type serviceSyncResult struct {
 	SnapshotEvents   []string
 	Ports            []string
 	PortsSynced      bool
+	RunAs            string
+	RunAsSynced      bool
 	Skip             string
 }
 
@@ -207,6 +209,9 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 	if err := syncServiceEntryRoot(cfgLoc.Config, target, resp.Info, root, zfs, &result); err != nil {
 		return serviceSyncResult{}, false, err
 	}
+	if err := syncServiceIdentity(cfgLoc.Config, target, resp.Info, &result); err != nil {
+		return serviceSyncResult{}, false, err
+	}
 	if err := syncServiceSnapshotPolicy(cfgLoc.Config, target, resp.Info.Snapshots, &result); err != nil {
 		return serviceSyncResult{}, false, err
 	}
@@ -214,6 +219,29 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 		return serviceSyncResult{}, false, err
 	}
 	return result, true, nil
+}
+
+func syncServiceIdentity(cfg *ProjectConfig, target serviceSyncTarget, info catchrpc.ServiceInfo, result *serviceSyncResult) error {
+	if info.Identity == nil {
+		return nil
+	}
+	if strings.TrimSpace(info.ServiceType) != "systemd" {
+		return fmt.Errorf("catch returned a native run identity for non-native service %s@%s", target.Service, target.Host)
+	}
+	requestedUser := strings.TrimSpace(info.Identity.RequestedUser)
+	requestedGroup := strings.TrimSpace(info.Identity.RequestedGroup)
+	if requestedUser == "" || requestedGroup == "" {
+		return fmt.Errorf("catch returned an incomplete native run identity for %s@%s", target.Service, target.Host)
+	}
+	entry, ok := cfg.ServiceEntry(target.Service, target.Host)
+	if !ok {
+		return serviceSyncMissingEntryError(target)
+	}
+	result.RunAs = requestedUser + ":" + requestedGroup
+	result.RunAsSynced = true
+	entry.RunAs = result.RunAs
+	cfg.SetServiceEntry(entry)
+	return nil
 }
 
 func syncServiceEntryRoot(cfg *ProjectConfig, target serviceSyncTarget, info catchrpc.ServiceInfo, root string, zfs bool, result *serviceSyncResult) error {
@@ -270,6 +298,9 @@ func serviceEntryFromSyncInfo(target serviceSyncTarget, info catchrpc.ServiceInf
 			entry.Payload = strings.TrimSpace(info.VM.Image)
 			entry.Args = serviceSyncVMArgs(info.VM)
 		}
+	}
+	if info.Identity != nil {
+		entry.RunAs = strings.TrimSpace(info.Identity.RequestedUser) + ":" + strings.TrimSpace(info.Identity.RequestedGroup)
 	}
 	return entry
 }
@@ -469,6 +500,11 @@ func renderServiceSyncDetail(w io.Writer, configPath string, verb string, target
 	}
 	if result.PortsSynced {
 		if _, err := fmt.Fprintf(w, "  ports = [%s]\n", formatServiceSyncPorts(result.Ports)); err != nil {
+			return err
+		}
+	}
+	if result.RunAsSynced {
+		if _, err := fmt.Fprintf(w, "  run_as = %q\n", result.RunAs); err != nil {
 			return err
 		}
 	}

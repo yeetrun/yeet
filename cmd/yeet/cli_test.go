@@ -163,7 +163,7 @@ func TestRunServiceSetHelpShowsLeafCommand(t *testing.T) {
 	if !strings.Contains(stdout, "Set service settings") {
 		t.Fatalf("stdout = %q, want service set command help", stdout)
 	}
-	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit]") {
+	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit]") {
 		t.Fatalf("stdout = %q, want service set usage", stdout)
 	}
 	if strings.Contains(stdout, "service COMMAND [ARGS...]") {
@@ -937,12 +937,27 @@ func TestRunCronHelpAgentUsesSingleServicePlaceholder(t *testing.T) {
 		t.Fatalf("read stdout: %v", err)
 	}
 	stdout := string(rawStdout)
-	wantUsage := `yeet [GLOBAL_OPTIONS] cron <SERVICE> FILE "<cron expr>" [-- <args...>]`
+	wantUsage := `yeet [GLOBAL_OPTIONS] cron <SERVICE> FILE "<cron expr>" [--run-as=USER[:GROUP]] [-- <args...>]`
 	if !strings.Contains(stdout, wantUsage) {
 		t.Fatalf("stdout missing usage %q:\n%s", wantUsage, stdout)
 	}
 	if strings.Contains(stdout, `SVC FILE "<cron expr>"`) {
 		t.Fatalf("stdout contains duplicate service placeholder:\n%s", stdout)
+	}
+}
+
+func TestRunAsHelpMetadata(t *testing.T) {
+	run := cli.RemoteCommandInfos()["run"]
+	if run.FlagsSchema == nil {
+		t.Fatalf("run metadata = %#v", run)
+	}
+	cron := cli.RemoteCommandInfos()["cron"]
+	if cron.FlagsSchema == nil {
+		t.Fatalf("cron metadata = %#v", cron)
+	}
+	set, ok := cli.RemoteGroupCommandInfo("service", "set")
+	if !ok || set.FlagsSchema == nil {
+		t.Fatalf("service set metadata = %#v ok=%v", set, ok)
 	}
 }
 

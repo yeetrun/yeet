@@ -8,10 +8,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +26,31 @@ import (
 func TestServiceSetRootRegistersTTYCommand(t *testing.T) {
 	if ttyCommandHandlers["service"] == nil {
 		t.Fatal(`expected tty command handler for "service"`)
+	}
+}
+
+func TestMaterializeServiceRootMigrationGuardsNonRootSource(t *testing.T) {
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(serviceDataDirForRoot(oldRoot), "state")
+	if err := os.WriteFile(source, []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(source, source+".link"); err != nil {
+		t.Fatal(err)
+	}
+	newRoot := filepath.Join(t.TempDir(), "new")
+	err := materializeServiceRootMigration(context.Background(), serviceRootMigrationPlan{
+		ServiceName: "api", OldRoot: oldRoot, NewRoot: newRoot,
+		Mode: serviceRootMigrationCopy, GuardSource: true,
+	}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "hard-linked source entry") {
+		t.Fatalf("materialize error = %v, want guarded hard-link rejection", err)
+	}
+	if _, statErr := os.Stat(newRoot); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("guarded failure published target root: %v", statErr)
 	}
 }
 
@@ -52,6 +79,133 @@ func TestServiceSetRejectsVMFlags(t *testing.T) {
 	err := execer.serviceCmdFunc([]string{"set", "--cpus=8"})
 	if err == nil || !strings.Contains(err.Error(), "unknown flag") {
 		t.Fatalf("service set --cpus error = %v, want unknown flag", err)
+	}
+}
+
+func TestServiceSetRunAsRejectsUnsupportedServiceTypes(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		typ  db.ServiceType
+		want string
+	}{
+		{name: "compose", typ: db.ServiceTypeDockerCompose, want: "applies only to native systemd workloads"},
+		{name: "vm", typ: db.ServiceTypeVM, want: "does not control VM guest"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": {Name: "api", ServiceType: tt.typ}}}); err != nil {
+				t.Fatal(err)
+			}
+			execer := &ttyExecer{s: server, sn: "api"}
+			err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{RunAs: "app", RunAsSet: true})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestServiceSetRunAsRoutesNativeToMigrationEngine(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": {Name: "api", ServiceType: db.ServiceTypeSystemd}}}); err != nil {
+		t.Fatal(err)
+	}
+	spec := strconv.Itoa(os.Geteuid()) + ":" + strconv.Itoa(os.Getegid())
+	var got serviceIdentityMigrationRequest
+	execer := &ttyExecer{s: server, sn: "api", migrateServiceIdentityFunc: func(_ context.Context, req serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
+		got = req
+		return serviceIdentityMigrationResult{}, nil
+	}}
+	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{RunAs: spec, RunAsSet: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got.Service != "api" || got.Requested != spec || got.Target.Persisted.UID != uint32(os.Geteuid()) || got.RootPlan != nil {
+		t.Fatalf("migration request = %#v", got)
+	}
+}
+
+func TestCombinedRootIdentityRoutesOneMigrationTransaction(t *testing.T) {
+	server := newTestServer(t)
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	newRoot := filepath.Join(t.TempDir(), "new")
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": {
+		Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: oldRoot,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	spec := strconv.Itoa(os.Geteuid()) + ":" + strconv.Itoa(os.Getegid())
+	calls := 0
+	var got serviceIdentityMigrationRequest
+	execer := &ttyExecer{s: server, sn: "api", migrateServiceIdentityFunc: func(_ context.Context, req serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
+		calls++
+		got = req
+		return serviceIdentityMigrationResult{}, nil
+	}}
+	err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{
+		RunAs: spec, RunAsSet: true, ServiceRoot: newRoot, Copy: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || got.RootPlan == nil || got.RootPlan.OldRoot != oldRoot || got.RootPlan.NewRoot != newRoot || got.RootPlan.Mode != serviceRootMigrationCopy {
+		t.Fatalf("calls/request = %d %#v", calls, got)
+	}
+}
+
+func TestServiceSetRejectsRunAsWithComposePublishBeforeMigration(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": {
+		Name: "api", ServiceType: db.ServiceTypeSystemd,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	execer := &ttyExecer{s: server, sn: "api", migrateServiceIdentityFunc: func(_ context.Context, _ serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
+		called = true
+		return serviceIdentityMigrationResult{}, nil
+	}}
+	err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{
+		RunAs: strconv.Itoa(os.Geteuid()), RunAsSet: true, Publish: []string{"8080:80"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("service set error = %v, want incompatible flag rejection", err)
+	}
+	if called {
+		t.Fatal("identity migration ran before rejecting compose-only publish flags")
+	}
+}
+
+func TestServiceSetRejectsRunAsWithEmptyRootBeforeMigration(t *testing.T) {
+	server := newTestServer(t)
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatal(err)
+	}
+	previous := &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: oldRoot}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": previous.Clone()}}); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	execer := &ttyExecer{s: server, sn: "api", migrateServiceIdentityFunc: func(_ context.Context, _ serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
+		called = true
+		return serviceIdentityMigrationResult{}, nil
+	}}
+	err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{
+		RunAs: strconv.Itoa(os.Geteuid()), RunAsSet: true,
+		ServiceRoot: filepath.Join(t.TempDir(), "empty"), Empty: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "redeploy") || !strings.Contains(err.Error(), "separate commands") {
+		t.Fatalf("service set error = %v, want split/redeploy guidance", err)
+	}
+	if called {
+		t.Fatal("identity migration ran before rejecting --empty with --run-as")
+	}
+	service, err := server.serviceView("api")
+	if err != nil || !reflect.DeepEqual(service.AsStruct(), previous) {
+		t.Fatalf("database service = %#v, %v, want unchanged %#v", service.AsStruct(), err, previous)
 	}
 }
 
@@ -1298,7 +1452,13 @@ func TestServiceSetZFSMigrationCreatesDatasetAndLeavesDBOnCopyFailure(t *testing
 		"tank/apps":     {Mountpoint: parentRoot, Exists: true},
 		"tank/apps/svc": {Mountpoint: newRoot},
 	})
-	server.zfsRunner = runner.Run
+	createCalls := 0
+	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
+		if len(args) == 2 && args[0] == "create" && args[1] == "tank/apps/svc" {
+			createCalls++
+		}
+		return runner.Run(ctx, args...)
+	}
 	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, s *db.Service) error {
 		s.ServiceRoot = oldRoot
 		return nil
@@ -1311,6 +1471,9 @@ func TestServiceSetZFSMigrationCreatesDatasetAndLeavesDBOnCopyFailure(t *testing
 	}
 	if !runner["tank/apps/svc"].Exists {
 		t.Fatal("dataset was not created before migration failure")
+	}
+	if createCalls != 1 {
+		t.Fatalf("zfs create calls = %d, want 1", createCalls)
 	}
 	assertServiceRoot(t, server, name, oldRoot)
 	assertServiceRootZFS(t, server, name, "")
@@ -1556,6 +1719,61 @@ func TestServiceRootMigrationReportsRecoverySnapshotOnFailure(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, "recovery snapshot: tank/apps/svc@yeet-") {
 		t.Fatalf("output = %q, want recovery snapshot", got)
+	}
+}
+
+func TestServiceRootMigrationRevalidatesPlanInsideLock(t *testing.T) {
+	server := newTestServer(t)
+	name := "svc"
+	oldRoot := filepath.Join(t.TempDir(), "old")
+	newRoot := filepath.Join(t.TempDir(), "new")
+	changedRoot := filepath.Join(t.TempDir(), "changed")
+	withServiceSetRootStopped(t)
+	if err := ensureDirsForRoot(oldRoot, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, service *db.Service) error {
+		service.ServiceType = db.ServiceTypeSystemd
+		service.ServiceRoot = oldRoot
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := server.validateServiceRootMigration(name, serviceRootMigrationRequest{Root: newRoot})
+	if err != nil {
+		t.Fatalf("validateServiceRootMigration: %v", err)
+	}
+
+	release := server.serviceOperationLocks.Lock(name)
+	done := make(chan error, 1)
+	go func() {
+		done <- server.migrateServiceRootWithPlanWriter(plan, serviceRootMigrationEmpty, io.Discard)
+	}()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("root migration bypassed service lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, service *db.Service) error {
+		service.ServiceRoot = changedRoot
+		return nil
+	}); err != nil {
+		release()
+		t.Fatal(err)
+	}
+	release()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "changed during migration planning") {
+			t.Fatalf("migrateServiceRootWithPlanWriter error = %v, want stale-plan rejection", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("root migration did not resume after service lock release")
+	}
+	if _, err := os.Stat(newRoot); !os.IsNotExist(err) {
+		t.Fatalf("target root stat error = %v, want not exist", err)
 	}
 }
 

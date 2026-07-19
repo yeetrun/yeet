@@ -190,7 +190,8 @@ func ExtractTar(r io.Reader, dest string) error {
 }
 
 type ExtractOptions struct {
-	OnEntry TarObserver
+	OnEntry       TarObserver
+	ValidateEntry func(TarEntry) error
 }
 
 // ExtractTarWithOptions extracts a tar archive stream into dest with optional callbacks.
@@ -199,24 +200,12 @@ func ExtractTarWithOptions(r io.Reader, dest string, opts ExtractOptions) error 
 	dest = filepath.Clean(dest)
 	var dirs []dirMeta
 	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
+		dir, done, err := extractNextTarEntry(tr, dest, opts)
+		if err != nil {
+			return err
+		}
+		if done {
 			break
-		}
-		if err != nil {
-			return err
-		}
-		target, ok, err := tarTargetPath(dest, hdr.Name)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			continue
-		}
-		notifyTarObserver(opts.OnEntry, hdr)
-		dir, err := extractTarEntry(tr, dest, target, hdr)
-		if err != nil {
-			return err
 		}
 		if dir != nil {
 			dirs = append(dirs, *dir)
@@ -228,6 +217,29 @@ func ExtractTarWithOptions(r io.Reader, dest string, opts ExtractOptions) error 
 		}
 	}
 	return nil
+}
+
+func extractNextTarEntry(tr *tar.Reader, dest string, opts ExtractOptions) (*dirMeta, bool, error) {
+	hdr, err := tr.Next()
+	if err == io.EOF {
+		return nil, true, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	target, ok, err := tarTargetPath(dest, hdr.Name)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	entry := tarEntryFromHeader(hdr)
+	if opts.ValidateEntry != nil {
+		if err := opts.ValidateEntry(entry); err != nil {
+			return nil, false, fmt.Errorf("validate tar entry %q: %w", entry.Name, err)
+		}
+	}
+	notifyTarObserver(opts.OnEntry, hdr)
+	dir, err := extractTarEntry(tr, dest, target, hdr)
+	return dir, false, err
 }
 
 type dirMeta struct {

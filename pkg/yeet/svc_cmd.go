@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -540,7 +541,11 @@ func effectiveSvcRunArgs(entry ServiceEntry, hasEntry bool, runArgs []string) ([
 	if !hasEntry {
 		return runArgs, nil
 	}
-	return effectiveRunArgsForExistingEntry(entry, runArgs)
+	effective, err := effectiveRunArgsForExistingEntry(entry, runArgs)
+	if err != nil {
+		return nil, err
+	}
+	return runArgsWithConfiguredIdentity(effective, entry.RunAs), nil
 }
 
 func svcRunEnvFile(flags svcRunControlFlags, entry ServiceEntry, hasEntry bool, cfgLoc *projectConfigLocation) string {
@@ -919,14 +924,32 @@ func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 	if err := execRemoteFn(ctx, req.Service, req.Command.RawArgs, nil, tty); err != nil {
 		return wrapServiceSetRemoteError(err, flags)
 	}
+	return saveServiceSetResult(req, flags)
+}
+
+func saveServiceSetResult(req svcCommandRequest, flags cli.ServiceSetFlags) error {
 	updated, err := saveServiceSetConfig(req.Config, req.HostOverride, flags)
 	if err != nil {
+		if flags.RunAsSet {
+			return serviceIdentityConfigWriteError(serviceSetConfigHost(req), req.Service, flags.RunAs, err)
+		}
 		return fmt.Errorf("updated catch service settings, but failed to update %s: %w", projectConfigName, err)
 	}
 	if !updated {
 		return printServiceSetSyncHint(os.Stdout, req.Service, serviceSetSyncHintHost(req))
 	}
 	return nil
+}
+
+func serviceSetConfigHost(req svcCommandRequest) string {
+	if host := strings.TrimSpace(req.HostOverride); host != "" {
+		return host
+	}
+	return Host()
+}
+
+func serviceIdentityConfigWriteError(host, service, runAs string, _ error) error {
+	return fmt.Errorf("service identity changed on %s, but %s was not updated; set run_as = %q for service %q and retry sync", strings.TrimSpace(host), projectConfigName, strings.TrimSpace(runAs), strings.TrimSpace(service))
 }
 
 func wrapServiceSetRemoteError(err error, flags cli.ServiceSetFlags) error {
@@ -992,15 +1015,44 @@ func handleSvcCron(req svcCommandRequest) error {
 	if len(cmdArgs) == 0 {
 		return runCronFromProjectConfig(req.Config, req.HostOverride)
 	}
-	payload := cmdArgs[0]
-	cronFields, binArgs, err := splitCronArgs(cmdArgs[1:])
+	payload, cronArgs, err := splitRunPayloadArgs(cmdArgs)
 	if err != nil {
 		return err
 	}
-	if err := runCron(payload, cronFields, binArgs); err != nil {
+	flags, binArgs, err := cli.ParseCron(cronArgs)
+	if err != nil {
 		return err
 	}
-	return saveCronConfig(req.Config, req.HostOverride, payload, cronFields, binArgs)
+	explicitRunAs := flags.RunAsSet
+	flags = cronFlagsWithConfiguredIdentity(req.Config, req.HostOverride, flags)
+	cronFields := strings.Fields(flags.Schedule)
+	if err := runCronIdentity(payload, flags, binArgs); err != nil {
+		return err
+	}
+	if err := saveCronConfigWithRunAs(req.Config, req.HostOverride, payload, cronFields, binArgs, flags.RunAs, explicitRunAs); err != nil {
+		if explicitRunAs {
+			return serviceIdentityConfigWriteError(serviceSetConfigHost(req), req.Service, flags.RunAs, err)
+		}
+		return err
+	}
+	return nil
+}
+
+func cronFlagsWithConfiguredIdentity(cfgLoc *projectConfigLocation, hostOverride string, flags cli.CronFlags) cli.CronFlags {
+	if flags.RunAsSet {
+		return flags
+	}
+	entry, ok := serviceEntryForConfig(cfgLoc, hostOverride)
+	if !ok {
+		return flags
+	}
+	runAs := strings.TrimSpace(entry.RunAs)
+	if runAs == "" {
+		return flags
+	}
+	flags.RunAs = runAs
+	flags.RunAsSet = true
+	return flags
 }
 
 func handleSvcStage(ctx context.Context, req svcCommandRequest) error {
@@ -1823,6 +1875,10 @@ func isASCIIDigit(r rune) bool {
 }
 
 func runCron(file string, cronFields []string, binArgs []string) error {
+	return runCronIdentity(file, cli.CronFlags{Schedule: strings.Join(cronFields, " ")}, binArgs)
+}
+
+func runCronIdentity(file string, flags cli.CronFlags, binArgs []string) error {
 	goos, goarch, err := remoteCatchOSAndArchFn()
 	if err != nil {
 		return err
@@ -1832,11 +1888,21 @@ func runCron(file string, cronFields []string, binArgs []string) error {
 		return err
 	}
 	defer cleanup()
+	cronFields := strings.Fields(flags.Schedule)
 	if len(cronFields) != 5 {
 		return fmt.Errorf("cron expression must have 5 fields, got %d", len(cronFields))
 	}
 	svc := getService()
-	nargs := append([]string{"cron"}, cronFields...)
+	nargs := []string{"cron"}
+	if flags.RunAsSet {
+		nargs = append(nargs, "--run-as="+flags.RunAs)
+		nargs = append(nargs, "--schedule="+strings.Join(cronFields, " "))
+		if len(binArgs) > 0 {
+			nargs = append(nargs, "--")
+		}
+	} else {
+		nargs = append(nargs, cronFields...)
+	}
 	if len(binArgs) > 0 {
 		nargs = append(nargs, binArgs...)
 	}
@@ -1850,14 +1916,9 @@ func splitCronArgs(args []string) ([]string, []string, error) {
 	}
 	cronArgs := args
 	var binArgs []string
-	for i, arg := range args {
-		if arg == "--" {
-			cronArgs = args[:i]
-			if i+1 < len(args) {
-				binArgs = args[i+1:]
-			}
-			break
-		}
+	if delimiter := slices.Index(args, "--"); delimiter >= 0 {
+		cronArgs = args[:delimiter]
+		binArgs = append(binArgs, args[delimiter+1:]...)
 	}
 	if len(cronArgs) == 1 {
 		cronArgs = strings.Fields(cronArgs[0])
@@ -2292,6 +2353,7 @@ func runFromProjectConfigWithForce(cfgLoc *projectConfigLocation, hostOverride s
 	}
 	envFile := resolveEnvFilePath(cfgLoc.Dir, stored.Entry.EnvFile)
 	runArgs := runArgsWithPublishOptions(rehydrateRunArgs(stored.Entry.Args), stored.Entry.Ports)
+	runArgs = runArgsWithConfiguredIdentity(runArgs, stored.Entry.RunAs)
 	runArgs = runArgsWithServiceRootOptions(runArgs, serviceRootOptions{Root: stored.Entry.ServiceRoot, ZFS: stored.Entry.ServiceRootZFS})
 	runArgs = runArgsWithSnapshotOptions(runArgs, snapshotOptions{
 		Snapshots: stored.Entry.Snapshots,
@@ -2348,7 +2410,12 @@ func runCronFromProjectConfig(cfgLoc *projectConfigLocation, hostOverride string
 	if err != nil {
 		return fmt.Errorf("invalid schedule for %s@%s: %w", stored.Service, stored.Host, err)
 	}
-	return runCron(payload, cronFields, stored.Entry.Args)
+	runAs := strings.TrimSpace(stored.Entry.RunAs)
+	return runCronIdentity(payload, cli.CronFlags{
+		RunAs:    runAs,
+		RunAsSet: runAs != "",
+		Schedule: strings.Join(cronFields, " "),
+	}, stored.Entry.Args)
 }
 
 type storedService struct {
@@ -2449,6 +2516,11 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 	if err != nil {
 		return err
 	}
+	runFlags, _, err := cli.ParseRun(filteredArgs)
+	if err != nil {
+		return err
+	}
+	filteredArgs = removeRunAsControlFlag(filteredArgs)
 	entryType, payloadKind := runConfigEntryType(payload, payloadKind)
 	payloadRel := relativePayloadPathForKind(loc.Dir, payload, payloadKind)
 	entry := ServiceEntry{
@@ -2457,6 +2529,7 @@ func saveRunConfigWithPayloadKind(cfgLoc *projectConfigLocation, hostOverride st
 		Type:           entryType,
 		Payload:        payloadRel,
 		PayloadKind:    payloadKind,
+		RunAs:          runFlags.RunAs,
 		ServiceRoot:    strings.TrimSpace(serviceRoot),
 		ServiceRootZFS: serviceRootZFS,
 		Ports:          normalizePublishPorts(ports),
@@ -2578,6 +2651,9 @@ func validateServiceSetConfigFlags(flags cli.ServiceSetFlags) error {
 }
 
 func applyServiceSetConfigFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) error {
+	if flags.RunAsSet {
+		entry.RunAs = strings.TrimSpace(flags.RunAs)
+	}
 	if strings.TrimSpace(flags.ServiceRoot) != "" {
 		entry.ServiceRoot = strings.TrimSpace(flags.ServiceRoot)
 		entry.ServiceRootZFS = flags.ZFS
@@ -2818,6 +2894,10 @@ func printServiceSetSyncHint(w io.Writer, service string, host string) error {
 }
 
 func saveCronConfig(cfgLoc *projectConfigLocation, hostOverride string, payload string, cronFields []string, binArgs []string) error {
+	return saveCronConfigWithRunAs(cfgLoc, hostOverride, payload, cronFields, binArgs, "", false)
+}
+
+func saveCronConfigWithRunAs(cfgLoc *projectConfigLocation, hostOverride string, payload string, cronFields []string, binArgs []string, runAs string, runAsSet bool) error {
 	if serviceOverride == "" {
 		return nil
 	}
@@ -2836,15 +2916,43 @@ func saveCronConfig(cfgLoc *projectConfigLocation, hostOverride string, payload 
 	if host == "" {
 		host = Host()
 	}
+	if !runAsSet {
+		if existing, ok := loc.Config.ServiceEntry(serviceOverride, host); ok {
+			runAs = existing.RunAs
+		}
+	}
 	payloadRel := relativePayloadPath(loc.Dir, payload)
 	entry := ServiceEntry{
 		Name:     serviceOverride,
 		Host:     host,
 		Type:     serviceTypeCron,
 		Payload:  payloadRel,
+		RunAs:    strings.TrimSpace(runAs),
 		Schedule: strings.Join(cronFields, " "),
 		Args:     normalizeArgs(binArgs),
 	}
 	loc.Config.ReplaceServiceEntry(entry)
 	return saveProjectConfig(loc)
+}
+
+func runArgsWithConfiguredIdentity(args []string, runAs string) []string {
+	runAs = strings.TrimSpace(runAs)
+	if runAs == "" || runArgsHaveFlag(args, "--run-as") {
+		return args
+	}
+	flagArgs, payloadArgs := splitRunArgsForParsing(args)
+	flagArgs = append(flagArgs, "--run-as="+runAs)
+	if len(payloadArgs) == 0 {
+		return flagArgs
+	}
+	return append(append(flagArgs, "--"), payloadArgs...)
+}
+
+func removeRunAsControlFlag(args []string) []string {
+	flagArgs, payloadArgs := splitRunArgsForParsing(args)
+	flagArgs = removeRunFlags(flagArgs, map[string]bool{"--run-as": true})
+	if len(payloadArgs) == 0 {
+		return flagArgs
+	}
+	return append(append(flagArgs, "--"), payloadArgs...)
 }

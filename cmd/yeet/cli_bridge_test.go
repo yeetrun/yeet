@@ -374,6 +374,25 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 	}
 }
 
+func TestBridgeServiceArgsRunAsCanonicalShapes(t *testing.T) {
+	tests := []struct {
+		args        []string
+		wantService string
+		want        []string
+	}{
+		{args: []string{"run", "api", "--run-as=app", "./api", "--", "--serve"}, wantService: "api", want: []string{"run", "--run-as=app", "./api", "--", "--serve"}},
+		{args: []string{"cron", "backup", "--run-as=backup", "./backup", `0 3 * * *`, "--", "--daily"}, wantService: "backup", want: []string{"cron", "--run-as=backup", "./backup", `0 3 * * *`, "--", "--daily"}},
+		{args: []string{"service", "set", "api", "--run-as=app"}, wantService: "api", want: []string{"service", "set", "--run-as=app"}},
+		{args: []string{"service", "set", "api", "--service-root=/var/lib/yeet/services/api", "--copy", "--run-as=app"}, wantService: "api", want: []string{"service", "set", "--service-root=/var/lib/yeet/services/api", "--copy", "--run-as=app"}},
+	}
+	for _, tt := range tests {
+		service, host, got, ok := bridgeServiceArgs(tt.args, cli.RemoteFlagSpecs(), cli.RemoteGroupFlagSpecs(), "")
+		if !ok || service != tt.wantService || host != "" || !reflect.DeepEqual(got, tt.want) {
+			t.Fatalf("bridgeServiceArgs(%#v) = %q %q %#v %v, want %q empty %#v true", tt.args, service, host, got, ok, tt.wantService, tt.want)
+		}
+	}
+}
+
 func TestBridgeServiceArgsHostSetIsHostLevel(t *testing.T) {
 	remoteSpecs := cli.RemoteFlagSpecs()
 	groupSpecs := cli.RemoteGroupFlagSpecs()

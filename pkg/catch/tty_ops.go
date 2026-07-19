@@ -821,21 +821,57 @@ func resolveTSUpdate(sv db.ServiceView, args []string) (current, track, latest s
 }
 
 func (e *ttyExecer) applyTSUpdate(current, latest string) error {
+	tsd, err := e.downloadTSUpdate(latest)
+	if err != nil {
+		return err
+	}
+	serviceRoot, sv, managedBinary, err := e.resolveTSUpdateTarget()
+	if err != nil {
+		return err
+	}
+	if err := replaceTailscaledManagedBinary(tsd, managedBinary, serviceRoot, sv); err != nil {
+		return err
+	}
+	return e.finishTSUpdate(current, latest, tsd)
+}
+
+func (e *ttyExecer) downloadTSUpdate(latest string) (string, error) {
 	tsd, err := e.s.getTailscaledBinary(latest)
 	if err != nil {
-		return fmt.Errorf("failed to download tailscaled %s: %w", latest, err)
+		return "", fmt.Errorf("failed to download tailscaled %s: %w", latest, err)
 	}
 	if _, err := e.s.getTailscaleBinary(latest); err != nil {
-		return fmt.Errorf("failed to download tailscale %s: %w", latest, err)
+		return "", fmt.Errorf("failed to download tailscale %s: %w", latest, err)
 	}
+	return tsd, nil
+}
+
+func (e *ttyExecer) resolveTSUpdateTarget() (string, db.ServiceView, string, error) {
 	serviceRoot, err := e.s.serviceRootDir(e.sn)
 	if err != nil {
-		return fmt.Errorf("failed to resolve service root: %w", err)
+		return "", db.ServiceView{}, "", fmt.Errorf("failed to resolve service root: %w", err)
 	}
-	runBinary := filepath.Join(serviceRunDirForRoot(serviceRoot), "tailscaled")
-	if err := fileutil.CopyFile(tsd, runBinary); err != nil {
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return "", db.ServiceView{}, "", fmt.Errorf("failed to load service for tailscale update: %w", err)
+	}
+	managedBinary, err := tailscaledManagedBinaryPath(sv, serviceRoot)
+	return serviceRoot, sv, managedBinary, err
+}
+
+func replaceTailscaledManagedBinary(tsd, managedBinary, serviceRoot string, sv db.ServiceView) error {
+	if err := fileutil.CopyFile(tsd, managedBinary); err != nil {
 		return fmt.Errorf("failed to replace tailscaled binary: %w", err)
 	}
+	if sv.ServiceType() == db.ServiceTypeSystemd && sv.Identity().Valid() && managedBinary == filepath.Join(serviceBinDirForRoot(serviceRoot), "tailscaled") {
+		if err := applyNativeExecutableLayout(managedBinary, sv.Identity().AsStruct().GID); err != nil {
+			return fmt.Errorf("failed to apply native tailscaled layout: %w", err)
+		}
+	}
+	return nil
+}
+
+func (e *ttyExecer) finishTSUpdate(current, latest, tsd string) error {
 	if err := e.persistTSUpdate(latest, tsd); err != nil {
 		return fmt.Errorf("failed to persist tailscale version update: %w", err)
 	}
@@ -847,6 +883,65 @@ func (e *ttyExecer) applyTSUpdate(current, latest string) error {
 		return fmt.Errorf("failed to write tailscale update result: %w", err)
 	}
 	return nil
+}
+
+func tailscaledManagedBinaryPath(sv db.ServiceView, serviceRoot string) (string, error) {
+	managed := filepath.Join(serviceBinDirForRoot(serviceRoot), "tailscaled")
+	legacy := filepath.Join(serviceRunDirForRoot(serviceRoot), "tailscaled")
+	if unitPath, ok := sv.AsStruct().Artifacts.Latest(db.ArtifactTSService); ok {
+		path, found, err := tailscaledManagedBinaryPathFromUnit(unitPath, managed, legacy)
+		if err != nil || found {
+			return path, err
+		}
+	}
+	return existingTailscaledManagedBinaryPath(managed, legacy)
+}
+
+func tailscaledManagedBinaryPathFromUnit(unitPath, managed, legacy string) (string, bool, error) {
+	raw, err := os.ReadFile(unitPath)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("inspect tailscale service unit for update: %w", err)
+	}
+	executable, ok := systemdUnitExecStart(raw)
+	if !ok {
+		return "", false, fmt.Errorf("tailscale service unit %s has no ExecStart", unitPath)
+	}
+	switch filepath.Clean(executable) {
+	case filepath.Clean(managed):
+		return managed, true, nil
+	case filepath.Clean(legacy):
+		return legacy, true, nil
+	default:
+		return "", false, fmt.Errorf("tailscale service unit %s executes unmanaged binary %s", unitPath, executable)
+	}
+}
+
+func existingTailscaledManagedBinaryPath(managed, legacy string) (string, error) {
+	for _, path := range []string{managed, legacy} {
+		if _, err := os.Lstat(path); err == nil {
+			return path, nil
+		} else if !os.IsNotExist(err) {
+			return "", fmt.Errorf("inspect tailscaled binary %s: %w", path, err)
+		}
+	}
+	return managed, nil
+}
+
+func systemdUnitExecStart(raw []byte) (string, bool) {
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "ExecStart=") {
+			continue
+		}
+		fields := strings.Fields(strings.TrimPrefix(line, "ExecStart="))
+		if len(fields) != 0 {
+			return fields[0], true
+		}
+	}
+	return "", false
 }
 
 func (e *ttyExecer) persistTSUpdate(latest, tsd string) error {

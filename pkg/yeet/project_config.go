@@ -35,6 +35,7 @@ type ServiceEntry struct {
 	Payload          string   `toml:"payload,omitempty"`
 	PayloadKind      string   `toml:"payload_kind,omitempty"`
 	EnvFile          string   `toml:"env_file,omitempty"`
+	RunAs            string   `toml:"run_as,omitempty"`
 	ServiceRoot      string   `toml:"service_root,omitempty"`
 	ServiceRootZFS   bool     `toml:"service_root_zfs,omitempty"`
 	Snapshots        string   `toml:"snapshots,omitempty"`
@@ -60,6 +61,7 @@ type serviceEntryTOML struct {
 	Payload          string   `toml:"payload,omitempty"`
 	PayloadKind      string   `toml:"payload_kind,omitempty"`
 	EnvFile          string   `toml:"env_file,omitempty"`
+	RunAs            string   `toml:"run_as,omitempty"`
 	ServiceRoot      string   `toml:"service_root,omitempty"`
 	ServiceRootZFS   bool     `toml:"service_root_zfs,omitempty"`
 	Snapshots        string   `toml:"snapshots,omitempty"`
@@ -512,6 +514,7 @@ func serviceEntryForTOML(entry ServiceEntry) serviceEntryTOML {
 		Payload:          entry.Payload,
 		PayloadKind:      entry.PayloadKind,
 		EnvFile:          entry.EnvFile,
+		RunAs:            entry.RunAs,
 		ServiceRoot:      entry.ServiceRoot,
 		ServiceRootZFS:   entry.ServiceRootZFS,
 		Snapshots:        entry.Snapshots,
@@ -749,6 +752,9 @@ func (c *ProjectConfig) SetServiceEntry(entry ServiceEntry) {
 			c.Services[i].Args = cloneStringSlice(entry.Args)
 			if entry.EnvFile != "" {
 				c.Services[i].EnvFile = entry.EnvFile
+			}
+			if entry.RunAs != "" {
+				c.Services[i].RunAs = entry.RunAs
 			}
 			if entry.ServiceRoot != "" {
 				c.Services[i].ServiceRoot = entry.ServiceRoot

@@ -3,6 +3,7 @@ package db
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/netip"
@@ -15,9 +16,13 @@ import (
 	"tailscale.com/util/mak"
 )
 
-var renameDBFile = os.Rename
+var (
+	renameDBFile    = os.Rename
+	syncDBFile      = func(f *os.File) error { return f.Sync() }
+	syncDBDirectory = func(f *os.File) error { return f.Sync() }
+)
 
-//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent --copyright=false
+//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,ServiceIdentity,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent --copyright=false
 
 // Data is the full JSON structure of the database.
 type Data struct {
@@ -151,12 +156,23 @@ const (
 	ServiceTypeVM            ServiceType = "vm"
 )
 
+type ServiceIdentity struct {
+	RequestedUser  string
+	RequestedGroup string
+	UID            uint32
+	GID            uint32
+}
+
 // Service is the configuration for one service.
 type Service struct {
 	// Name is the name of the service.
 	Name string
 
 	ServiceType ServiceType
+	Identity    *ServiceIdentity `json:",omitempty"`
+	// IdentityInstallPending marks a first native install that has staged its
+	// database row but has not yet durably entered the identity journal.
+	IdentityInstallPending bool `json:",omitempty"`
 
 	// ServiceRoot is the absolute service root on the catch host.
 	// Empty means filepath.Join(Store.serviceRoot, Name).
@@ -421,8 +437,13 @@ func (s *Store) migrateLoadedDataLocked() error {
 		s.d = nil
 		return fmt.Errorf("backing up migrated data: %v", err)
 	}
-	if err := s.saveDataLocked(staged); err != nil {
-		s.d = nil
+	renamed, err := s.saveDataLocked(staged)
+	if err != nil {
+		if renamed {
+			s.d = staged
+		} else {
+			s.d = nil
+		}
 		return fmt.Errorf("saving migrated data: %v", err)
 	}
 	s.d = staged
@@ -447,11 +468,11 @@ func (s *Store) Set(d *Data) error {
 
 func (s *Store) setLocked(d *Data) error {
 	next := d.Clone()
-	if err := s.saveDataLocked(next); err != nil {
-		return err
+	renamed, err := s.saveDataLocked(next)
+	if err == nil || renamed {
+		s.d = next
 	}
-	s.d = next
-	return nil
+	return err
 }
 
 // readLocked reads s.file into s.d.
@@ -482,28 +503,47 @@ func (s *Store) readLocked() (created bool, err error) {
 }
 
 // saveDataLocked saves d to s.file.
-func (s *Store) saveDataLocked(d *Data) error {
+func (s *Store) saveDataLocked(d *Data) (bool, error) {
 	if d == nil {
-		return nil
+		return false, nil
 	}
 	dir := filepath.Dir(s.file)
 	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+		return false, err
 	}
 	tmp, err := os.CreateTemp(dir, "db.json")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer removeTempFile(tmp.Name())
 	jc := json.NewEncoder(tmp)
 	jc.SetIndent("", "  ")
 	if err := jc.Encode(d); err != nil {
+		return false, err
+	}
+	if err := syncAndCloseDBFile(tmp); err != nil {
+		return false, err
+	}
+	if err := renameDBFile(tmp.Name(), s.file); err != nil {
+		return false, err
+	}
+	return true, syncDBParentDirectory(s.file)
+}
+
+func syncAndCloseDBFile(f *os.File) error {
+	syncErr := syncDBFile(f)
+	closeErr := f.Close()
+	return errors.Join(syncErr, closeErr)
+}
+
+func syncDBParentDirectory(path string) error {
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
 		return err
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return renameDBFile(tmp.Name(), s.file)
+	syncErr := syncDBDirectory(dir)
+	closeErr := dir.Close()
+	return errors.Join(syncErr, closeErr)
 }
 
 func removeTempFile(path string) {

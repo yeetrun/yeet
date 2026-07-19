@@ -34,12 +34,26 @@ type serviceRootMigrationRequest struct {
 }
 
 type serviceRootMigrationPlan struct {
-	ServiceName string
-	OldRoot     string
-	OldRootZFS  string
-	NewRoot     string
-	NewRootZFS  string
-	Mode        serviceRootMigrationMode
+	ServiceName      string
+	OldRoot          string
+	OldRootZFS       string
+	NewRoot          string
+	NewRootZFS       string
+	CreateNewRootZFS bool
+	NewRootExisted   bool
+	NewRootSkeleton  bool
+	NewRootState     []serviceRootTargetPathState
+	Mode             serviceRootMigrationMode
+	GuardSource      bool
+}
+
+type serviceRootTargetPathState struct {
+	Path string
+	Mode os.FileMode
+	UID  uint32
+	GID  uint32
+	Dev  uint64
+	Ino  uint64
 }
 
 var (
@@ -118,10 +132,23 @@ func hasServiceCommandArg(args []string) bool {
 func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	changes := serviceSetChangesFromFlags(flags)
 	if !changes.any() {
-		return fmt.Errorf("service set requires --service-root, snapshot settings, or published ports")
+		return fmt.Errorf("service set requires --run-as, --service-root, snapshot settings, or published ports")
+	}
+	if err := validateServiceSetMutationCombination(flags, changes); err != nil {
+		return err
 	}
 	if err := validateServiceSetSnapshotChange(flags, changes); err != nil {
 		return err
+	}
+	if changes.identity {
+		if err := e.validateServiceSetIdentityType(); err != nil {
+			return err
+		}
+		if err := e.applyServiceSetIdentityChange(flags, changes); err != nil {
+			return err
+		}
+		changes.identity = false
+		changes.root = false
 	}
 	if err := e.applyServiceSetRootChange(flags, changes); err != nil {
 		return err
@@ -135,7 +162,18 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	return nil
 }
 
+func validateServiceSetMutationCombination(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
+	if changes.identity && changes.publish {
+		return fmt.Errorf("--run-as cannot be combined with published-port changes; apply identity and publish changes as separate commands")
+	}
+	if changes.identity && changes.root && flags.Empty {
+		return fmt.Errorf("--run-as cannot be combined with --empty because an empty root has no native generation to rewrite; move the root with --empty, then redeploy the service with --run-as as separate commands")
+	}
+	return nil
+}
+
 type serviceSetChanges struct {
+	identity bool
 	root     bool
 	publish  bool
 	snapshot bool
@@ -143,6 +181,7 @@ type serviceSetChanges struct {
 
 func serviceSetChangesFromFlags(flags cli.ServiceSetFlags) serviceSetChanges {
 	return serviceSetChanges{
+		identity: flags.RunAsSet,
 		root:     strings.TrimSpace(flags.ServiceRoot) != "" || flags.ZFS,
 		publish:  len(flags.Publish) != 0 || flags.PublishReset,
 		snapshot: flags.SnapshotChange,
@@ -150,7 +189,89 @@ func serviceSetChangesFromFlags(flags cli.ServiceSetFlags) serviceSetChanges {
 }
 
 func (c serviceSetChanges) any() bool {
-	return c.root || c.publish || c.snapshot
+	return c.identity || c.root || c.publish || c.snapshot
+}
+
+func (e *ttyExecer) validateServiceSetIdentityType() error {
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return err
+	}
+	switch sv.ServiceType() {
+	case db.ServiceTypeVM:
+		return fmt.Errorf("--run-as does not control VM guest or Firecracker jailer identities; use VM guest settings because Firecracker host execution is managed separately")
+	case db.ServiceTypeDockerCompose:
+		return fmt.Errorf("--run-as applies only to native systemd workloads; configure the container image or Compose service \"user:\" field instead")
+	case db.ServiceTypeSystemd:
+		return nil
+	default:
+		return fmt.Errorf("service %q has unsupported type %q for --run-as", e.sn, sv.ServiceType())
+	}
+}
+
+func (e *ttyExecer) applyServiceSetIdentityChange(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
+	target, err := resolveServiceIdentity(flags.RunAs)
+	if err != nil {
+		return err
+	}
+	rootPlan, err := e.prepareServiceSetIdentityRootPlan(flags, changes)
+	if err != nil {
+		return err
+	}
+	req := serviceIdentityMigrationRequest{
+		Service: e.sn, Requested: flags.RunAs, Target: target, RootPlan: rootPlan,
+	}
+	if e.migrateServiceIdentityFunc != nil {
+		_, err = e.migrateServiceIdentityFunc(context.Background(), req, e.rw)
+		return err
+	}
+	if e.serviceOperationLockHeld {
+		_, err = e.s.migrateServiceIdentityLocked(context.Background(), req, e.rw)
+	} else {
+		_, err = e.s.migrateServiceIdentity(context.Background(), req, e.rw)
+	}
+	return err
+}
+
+func (e *ttyExecer) prepareServiceSetIdentityRootPlan(flags cli.ServiceSetFlags, changes serviceSetChanges) (*serviceRootMigrationPlan, error) {
+	if !changes.root {
+		return nil, nil
+	}
+	mode := serviceRootMigrationPrompt
+	if flags.Copy {
+		mode = serviceRootMigrationCopy
+	}
+	if flags.Empty {
+		mode = serviceRootMigrationEmpty
+	}
+	if mode == serviceRootMigrationPrompt && !e.isPty {
+		return nil, serviceRootMigrationModeRequiredError()
+	}
+	request := serviceRootMigrationRequest{Root: flags.ServiceRoot, ZFS: flags.ZFS}
+	plan, err := e.s.planServiceRootMigrationForIdentity(e.sn, request)
+	if err != nil {
+		return nil, err
+	}
+	mode, err = e.confirmServiceRootMigrationMode(mode, plan)
+	if err != nil {
+		return nil, err
+	}
+	plan.Mode = mode
+	return &plan, nil
+}
+
+func (s *Server) planServiceRootMigrationForIdentity(name string, request serviceRootMigrationRequest) (serviceRootMigrationPlan, error) {
+	sv, err := s.serviceView(name)
+	if err != nil {
+		if errors.Is(err, errServiceNotFound) {
+			return serviceRootMigrationPlan{}, fmt.Errorf("service %q not found", name)
+		}
+		return serviceRootMigrationPlan{}, err
+	}
+	if s.zfsRunner == nil {
+		return buildServiceRootMigrationPlan(context.Background(), s.cfg, *sv.AsStruct(), request)
+	}
+	return buildServiceRootMigrationPlanWithRunner(context.Background(), s.cfg, s.zfsRunner, *sv.AsStruct(), request)
 }
 
 func validateServiceSetSnapshotChange(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
@@ -472,6 +593,9 @@ func (e *ttyExecer) serviceSetRoot(flags cli.ServiceSetFlags) error {
 	if err != nil {
 		return err
 	}
+	if e.serviceOperationLockHeld {
+		return e.s.migrateServiceRootWithPlanWriterLocked(plan, mode, e.rw)
+	}
 	return e.s.migrateServiceRootWithPlanWriter(plan, mode, e.rw)
 }
 
@@ -676,6 +800,18 @@ func (s *Server) migrateServiceRootWithPlan(plan serviceRootMigrationPlan, mode 
 }
 
 func (s *Server) migrateServiceRootWithPlanWriter(plan serviceRootMigrationPlan, mode serviceRootMigrationMode, w io.Writer) error {
+	if err := s.checkServiceIdentityMutationAllowed(plan.ServiceName); err != nil {
+		return err
+	}
+	release := s.serviceOperationLocks.Lock(plan.ServiceName)
+	defer release()
+	if err := s.checkServiceIdentityMutationAllowed(plan.ServiceName); err != nil {
+		return err
+	}
+	return s.migrateServiceRootWithPlanWriterLocked(plan, mode, w)
+}
+
+func (s *Server) migrateServiceRootWithPlanWriterLocked(plan serviceRootMigrationPlan, mode serviceRootMigrationMode, w io.Writer) error {
 	oldService, err := s.serviceForRootMigrationPlan(plan)
 	if err != nil {
 		return err
@@ -686,26 +822,53 @@ func (s *Server) migrateServiceRootWithPlanWriter(plan serviceRootMigrationPlan,
 		Event:   snapshotEventServiceRootMigration,
 		Writer:  w,
 		Operation: func() error {
-			if err := materializeServiceRootMigration(context.Background(), plan, w); err != nil {
-				return err
-			}
-
-			updatedService, err := updatedServiceForRootMigration(s.cfg, plan, oldService)
-			if err != nil {
-				return err
-			}
-			if err := s.validateServiceRootMigrationPlanCurrent(plan); err != nil {
-				return err
-			}
-			if err := applyServiceRootMigrationRuntimeChanges(context.Background(), s.cfg, *oldService, *updatedService, w); err != nil {
-				return err
-			}
-			if err := s.updateMigratedServiceRoot(plan, updatedService); err != nil {
-				return err
-			}
-			return s.refreshServiceRootMigrationPrereqs(oldService, updatedService)
+			return s.executeServiceRootMigrationPlan(oldService, plan, w)
 		},
 	})
+}
+
+func (s *Server) executeServiceRootMigrationPlan(oldService *db.Service, plan serviceRootMigrationPlan, w io.Writer) error {
+	if err := s.prepareServiceRootMigrationTargetDataset(plan); err != nil {
+		return err
+	}
+	if err := materializeServiceRootMigration(context.Background(), plan, w); err != nil {
+		return err
+	}
+	updatedService, err := updatedServiceForRootMigration(s.cfg, plan, oldService)
+	if err != nil {
+		return err
+	}
+	if err := s.validateServiceRootMigrationPlanCurrent(plan); err != nil {
+		return err
+	}
+	if err := applyServiceRootMigrationRuntimeChanges(context.Background(), s.cfg, *oldService, *updatedService, w); err != nil {
+		return err
+	}
+	if err := s.updateMigratedServiceRoot(plan, updatedService); err != nil {
+		return err
+	}
+	return s.refreshServiceRootMigrationPrereqs(oldService, updatedService)
+}
+
+func (s *Server) prepareServiceRootMigrationTargetDataset(plan serviceRootMigrationPlan) error {
+	if !plan.CreateNewRootZFS {
+		return nil
+	}
+	runner := s.zfsRunner
+	if runner == nil {
+		runner = runZFSCommand
+	}
+	if err := zfsCreateDataset(context.Background(), runner, plan.NewRootZFS); err != nil {
+		return err
+	}
+	mountpoint, err := zfsDatasetMountpoint(context.Background(), runner, plan.NewRootZFS)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(mountpoint) != filepath.Clean(plan.NewRoot) {
+		return fmt.Errorf("new ZFS dataset %q mounted at %s, planned %s", plan.NewRootZFS, mountpoint, plan.NewRoot)
+	}
+	return nil
 }
 
 func (s *Server) validateServiceRootMigrationPlanCurrent(plan serviceRootMigrationPlan) error {

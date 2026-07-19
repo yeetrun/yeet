@@ -704,6 +704,18 @@ func TestValidateRequestedServiceRoot(t *testing.T) {
 	if err := os.WriteFile(fileRoot, []byte("not a dir"), 0o644); err != nil {
 		t.Fatalf("write file root: %v", err)
 	}
+	symlinkRoot := filepath.Join(parent, "symlink-root")
+	if err := os.Symlink(emptyExisting, symlinkRoot); err != nil {
+		t.Fatalf("symlink root: %v", err)
+	}
+	symlinkParent := filepath.Join(parent, "symlink-parent")
+	if err := os.Symlink(parent, symlinkParent); err != nil {
+		t.Fatalf("symlink parent: %v", err)
+	}
+	nestedParent := filepath.Join(parent, "nested-parent")
+	if err := os.Mkdir(nestedParent, 0o755); err != nil {
+		t.Fatalf("mkdir nested parent: %v", err)
+	}
 	nonEmptyRoot := filepath.Join(parent, "non-empty-root")
 	if err := os.Mkdir(nonEmptyRoot, 0o755); err != nil {
 		t.Fatalf("mkdir non-empty root: %v", err)
@@ -753,7 +765,10 @@ func TestValidateRequestedServiceRoot(t *testing.T) {
 		{name: "relative", root: "relative/root", wantErr: "absolute"},
 		{name: "cleans missing final root", root: cleanRoot, want: filepath.Join(parent, "clean-root")},
 		{name: "missing parent", root: filepath.Join(parent, "missing-parent", "svc"), wantErr: "parent"},
+		{name: "symlink parent", root: filepath.Join(symlinkParent, "svc"), wantErr: "symbolic link"},
+		{name: "symlink ancestor", root: filepath.Join(symlinkParent, filepath.Base(nestedParent), "svc"), wantErr: "symbolic link"},
 		{name: "final root is file", root: fileRoot, wantErr: "file"},
+		{name: "final root is symlink", root: symlinkRoot, wantErr: "symbolic link"},
 		{name: "final root is non-empty dir", root: nonEmptyRoot, wantErr: "empty"},
 		{name: "final root is empty existing dir", root: emptyExisting, want: emptyExisting},
 		{name: "retry skeleton is allowed", root: retrySkeleton, want: retrySkeleton},

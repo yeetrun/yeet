@@ -125,9 +125,22 @@ func completeHostStorageCleanupTransaction(tx *hostStorageTransaction) error {
 }
 
 func (s *Server) FinalizeHostStorage(ctx context.Context, req catchrpc.HostStorageFinalizeRequest) (catchrpc.HostStorageFinalizeResult, error) {
+	tx, err := loadTargetHostStorageTransaction(s.cfg.RootDir, req.TransactionID)
+	if err != nil {
+		return catchrpc.HostStorageFinalizeResult{}, err
+	}
+	lockNames, err := s.hostStorageServiceOperationNamesForApply(ctx, tx.Plan)
+	if err != nil {
+		return catchrpc.HostStorageFinalizeResult{}, err
+	}
+	release := s.serviceOperationLocks.Lock(lockNames...)
+	defer release()
+	if err := s.checkServiceIdentityMutationsAllowed(lockNames); err != nil {
+		return catchrpc.HostStorageFinalizeResult{}, err
+	}
 	s.hostStorageMutationMu.Lock()
 	defer s.hostStorageMutationMu.Unlock()
-	tx, err := loadTargetHostStorageTransaction(s.cfg.RootDir, req.TransactionID)
+	tx, err = loadTargetHostStorageTransaction(s.cfg.RootDir, req.TransactionID)
 	if err != nil {
 		return catchrpc.HostStorageFinalizeResult{}, err
 	}
@@ -315,13 +328,26 @@ func stopUnexpectedFinalHostStorageServices(ctx context.Context, ops hostStorage
 }
 
 func (s *Server) CleanupHostStorage(ctx context.Context, req catchrpc.HostStorageCleanupRequest) (catchrpc.HostStorageCleanupResult, error) {
-	s.hostStorageMutationMu.Lock()
-	defer s.hostStorageMutationMu.Unlock()
 	source, err := validatedHostStorageCleanupSource(req)
 	if err != nil {
 		return catchrpc.HostStorageCleanupResult{}, err
 	}
 	tx, err := s.validatedHostStorageCleanupTransaction(source)
+	if err != nil {
+		return catchrpc.HostStorageCleanupResult{}, err
+	}
+	lockNames, err := s.hostStorageServiceOperationNamesForApply(ctx, tx.Plan)
+	if err != nil {
+		return catchrpc.HostStorageCleanupResult{}, err
+	}
+	release := s.serviceOperationLocks.Lock(lockNames...)
+	defer release()
+	if err := s.checkServiceIdentityMutationsAllowed(lockNames); err != nil {
+		return catchrpc.HostStorageCleanupResult{}, err
+	}
+	s.hostStorageMutationMu.Lock()
+	defer s.hostStorageMutationMu.Unlock()
+	tx, err = s.validatedHostStorageCleanupTransaction(source)
 	if err != nil {
 		return catchrpc.HostStorageCleanupResult{}, err
 	}
@@ -455,6 +481,15 @@ func (s *Server) PlanHostStorage(ctx context.Context, req catchrpc.HostStoragePl
 }
 
 func (s *Server) ApplyHostStoragePlan(ctx context.Context, plan catchrpc.HostStoragePlan, yes bool, w io.Writer) (catchrpc.HostStorageApplyResult, error) {
+	lockNames, err := s.hostStorageServiceOperationNamesForApply(ctx, plan)
+	if err != nil {
+		return catchrpc.HostStorageApplyResult{}, err
+	}
+	release := s.serviceOperationLocks.Lock(lockNames...)
+	defer release()
+	if err := s.checkServiceIdentityMutationsAllowed(lockNames); err != nil {
+		return catchrpc.HostStorageApplyResult{}, err
+	}
 	s.hostStorageMutationMu.Lock()
 	defer s.hostStorageMutationMu.Unlock()
 	if s.hostStorageMutationBlock != nil {
@@ -467,10 +502,53 @@ func (s *Server) ApplyHostStoragePlan(ctx context.Context, plan catchrpc.HostSto
 		config:                 s.cfg,
 		store:                  s.cfg.DB,
 		zfs:                    s.zfsRunner,
+		lockedServiceNames:     lockNames,
 		runningCatchState:      hostStorageStateFromConfig(s.cfg),
 		runningCatchStateKnown: true,
 	}
 	return applier.Apply(ctx, plan, yes, w)
+}
+
+func hostStorageServiceOperationNames(plan catchrpc.HostStoragePlan) []string {
+	names := make([]string, 0, len(plan.ServicesAction.AffectedServices)+len(plan.RepairAction.RestartServices))
+	for _, move := range plan.ServicesAction.AffectedServices {
+		names = append(names, move.Name)
+	}
+	names = append(names, plan.RepairAction.RestartServices...)
+	return uniqueSortedServiceOperationNames(names)
+}
+
+func (s *Server) hostStorageServiceOperationNamesForApply(ctx context.Context, plan catchrpc.HostStoragePlan) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	names := hostStorageServiceOperationNames(plan)
+	planner := &hostStoragePlanner{config: s.cfg, store: s.cfg.DB, zfs: s.zfsRunner}
+	preservedRoots := slices.Clone(plan.Legacy.PreservedRoots)
+	services, err := planner.hostStorageServices()
+	if err != nil {
+		return nil, fmt.Errorf("load services for host storage operation locks: %w", err)
+	}
+	if hostStorageLegacyPlanOmitted(plan.Legacy) {
+		candidate, authoritativeServices, err := planner.authoritativeLegacyCandidate(plan.Current, plan.Desired)
+		if err != nil {
+			return nil, fmt.Errorf("derive host storage operation locks: %w", err)
+		}
+		if candidate {
+			services = authoritativeServices
+			preservedRoots = hostStoragePreservedServiceRoots(s.cfg, services, plan.Current.DataDir)
+		}
+	}
+	for _, service := range services {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		root := cleanHostStoragePath(serviceRootFromConfig(s.cfg, service))
+		if slices.Contains(preservedRoots, root) {
+			names = append(names, service.Name)
+		}
+	}
+	return uniqueSortedServiceOperationNames(names), nil
 }
 
 func hostStorageRecoveryRequestMatches(req catchrpc.HostStoragePlanRequest, plan catchrpc.HostStoragePlan) bool {
@@ -1108,6 +1186,7 @@ type hostStorageApplier struct {
 	store                  *db.Store
 	zfs                    zfsCommandRunner
 	ops                    hostStorageApplyOperations
+	lockedServiceNames     []string
 	runningCatchState      catchrpc.HostStorageState
 	runningCatchStateKnown bool
 }
@@ -1295,6 +1374,9 @@ func (a *hostStorageApplier) prepareApply(ctx context.Context, plan catchrpc.Hos
 	if err != nil {
 		return nil, err
 	}
+	if err := validateHostStorageLockedServiceMoves(serviceMoves, a.lockedServiceNames); err != nil {
+		return nil, err
+	}
 	if err := a.preflightCatchRestart(ctx, plan); err != nil {
 		return nil, err
 	}
@@ -1305,6 +1387,18 @@ func (a *hostStorageApplier) prepareApply(ctx context.Context, plan catchrpc.Hos
 		return nil, err
 	}
 	return serviceMoves, nil
+}
+
+func validateHostStorageLockedServiceMoves(moves []hostStorageServiceApplyMove, locked []string) error {
+	if locked == nil {
+		return nil
+	}
+	for _, move := range moves {
+		if !slices.Contains(locked, move.move.Name) {
+			return fmt.Errorf("service %q entered the host storage plan after operation locks were acquired; run yeet host set again", move.move.Name)
+		}
+	}
+	return nil
 }
 
 func (a *hostStorageApplier) preflightHostStorageEstimate(plan catchrpc.HostStoragePlan) error {
@@ -1351,6 +1445,7 @@ func (a *hostStorageApplier) appendLegacyPreservedServicePins(ctx context.Contex
 				NewRoot:     root,
 				NewRootZFS:  strings.TrimSpace(service.ServiceRootZFS),
 				Mode:        serviceRootMigrationCopy,
+				GuardSource: serviceRootCopyRequiresGuard(service),
 			},
 			move: catchrpc.HostStorageServiceMove{Name: service.Name, From: root, To: root, ToZFS: strings.TrimSpace(service.ServiceRootZFS)},
 			old:  *service.Clone(),
@@ -1882,6 +1977,7 @@ func (a *hostStorageApplier) buildServiceRootApplyMove(ctx context.Context, plan
 			NewRoot:     plannedTo,
 			NewRootZFS:  plannedToZFS,
 			Mode:        serviceRootApplyMigrationMode(plan.ServicesAction.Mode),
+			GuardSource: serviceRootCopyRequiresGuard(*oldService),
 		},
 		move: catchrpc.HostStorageServiceMove{
 			Name:  name,
@@ -3194,13 +3290,7 @@ func hostStorageCatchUnitArgs(req hostStorageInstallRequest) []string {
 }
 
 func cleanupHostStorageFileInstaller(installer *FileInstaller) {
-	if installer == nil {
-		return
-	}
-	if installer.File != nil {
-		_ = installer.File.Close()
-	}
-	installer.cleanupTemp()
+	installer.Abort()
 }
 
 func copyHostStorageDataDir(ctx context.Context, from string, to string, options ...hostStorageDataDirCopyOptions) error {

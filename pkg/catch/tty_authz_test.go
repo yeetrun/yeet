@@ -57,12 +57,15 @@ func TestTTYCommandPermissions(t *testing.T) {
 		{name: "snapshots restore", args: []string{"snapshots", "restore", "svc", "snap"}, want: permissionManage},
 		{name: "service generations", args: []string{"service", "generations"}, want: permissionRead},
 		{name: "service set", args: []string{"service", "set", "--copy"}, want: permissionManage},
+		{name: "service set run as", args: []string{"service", "set", "--run-as=app"}, want: permissionManage},
 		{name: "tailscale status", args: []string{"tailscale", "status"}, want: permissionRead},
 		{name: "tailscale update", args: []string{"tailscale", "update"}, want: permissionManage},
 		{name: "vm images ls", args: []string{"vm", "images", "ls"}, want: permissionRead},
 		{name: "vm memory status", args: []string{"vm", "memory"}, want: permissionRead},
 		{name: "vm console", args: []string{"vm", "console"}, want: permissionManage},
 		{name: "run", args: []string{"run", "ghcr.io/example/app:latest"}, want: permissionManage},
+		{name: "run as", args: []string{"run", "--run-as=app", "./api"}, want: permissionManage},
+		{name: "cron run as", args: []string{"cron", "--run-as=backup", "./job", "0 3 * * *"}, want: permissionManage},
 		{name: "remove", args: []string{"remove", "--clean"}, want: permissionManage},
 	}
 	for _, tt := range tests {

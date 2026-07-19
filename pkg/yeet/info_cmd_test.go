@@ -134,6 +134,32 @@ func TestRenderInfoPlainIncludesVMSection(t *testing.T) {
 	}
 }
 
+func TestRenderInfoPlainIncludesNativeIdentityAndWarning(t *testing.T) {
+	server := catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+		ServiceType: "systemd", DataType: "binary",
+		Identity: &catchrpc.ServiceIdentity{
+			RequestedUser: "app", RequestedGroup: "app", UID: 1002, GID: 1003,
+			Class: "operator", Mismatch: "service identity UID drift: app now resolves to UID 1012, persisted UID is 1002",
+		},
+	}}
+	var out bytes.Buffer
+	if err := renderInfoPlain(&out, "api", "host", nil, serverInfo{}, clientInfo{}, server); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	assertPlainRow(t, text, "Run as", "app:app (UID 1002, GID 1003; operator)")
+	assertPlainRow(t, text, "Identity warning", server.Info.Identity.Mismatch)
+}
+
+func TestFormatManagedServiceIdentityInfo(t *testing.T) {
+	got := formatServiceIdentityInfo(&catchrpc.ServiceIdentity{
+		RequestedUser: "yeet-svc", RequestedGroup: "yeet-svc", UID: 997, GID: 997, Class: "managed",
+	})
+	if want := "yeet-svc:yeet-svc (system UID 997, GID 997; managed)"; got != want {
+		t.Fatalf("formatServiceIdentityInfo = %q, want %q", got, want)
+	}
+}
+
 func TestFormatVMMIsolation(t *testing.T) {
 	tests := map[string]string{
 		"jailer":                 "jailer",

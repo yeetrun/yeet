@@ -208,7 +208,7 @@ func TestBuildStatusDataFromSnapshotsMapsConfiguredServices(t *testing.T) {
 	})
 	seedService(t, server, "api", db.ServiceTypeSystemd, nil)
 	seedService(t, server, "timer", db.ServiceTypeSystemd, db.ArtifactStore{
-		db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/timer.timer"}},
+		db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/timer.timer"}},
 	})
 	seedService(t, server, "devbox", db.ServiceTypeVM, nil)
 
@@ -240,7 +240,7 @@ func TestStatusSnapshotUnitNamesIncludesSystemdAndVMUnits(t *testing.T) {
 	seedService(t, server, "web", db.ServiceTypeDockerCompose, nil)
 	seedService(t, server, "api", db.ServiceTypeSystemd, nil)
 	seedService(t, server, "timer", db.ServiceTypeSystemd, db.ArtifactStore{
-		db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/timer.timer"}},
+		db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/timer.timer"}},
 	})
 	seedService(t, server, "devbox", db.ServiceTypeVM, nil)
 

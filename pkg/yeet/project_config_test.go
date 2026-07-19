@@ -284,6 +284,47 @@ func TestProjectConfigSnapshotFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProjectConfigRunAsRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: 1, Services: []ServiceEntry{{Name: "api", Host: "host-a", RunAs: "app:workers"}}}}
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `run_as = "app:workers"`) {
+		t.Fatalf("toml = %s", raw)
+	}
+	loaded, err := loadProjectConfigFromFile(loc.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("api", "host-a")
+	if !ok || entry.RunAs != "app:workers" {
+		t.Fatalf("entry = %#v ok=%v", entry, ok)
+	}
+}
+
+func TestProjectConfigRunAsPayloadArgumentIsNotControlFlag(t *testing.T) {
+	oldService := serviceOverride
+	t.Cleanup(func() { serviceOverride = oldService })
+	serviceOverride = "api"
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: 1}}
+	if err := saveRunConfig(loc, "host-a", "api", []string{"--", "--run-as=root"}, "", false); err != nil {
+		t.Fatal(err)
+	}
+	entry, ok := loc.Config.ServiceEntry("api", "host-a")
+	if !ok {
+		t.Fatal("entry missing")
+	}
+	if entry.RunAs != "" || !reflect.DeepEqual(entry.Args, []string{"--run-as=root"}) {
+		t.Fatalf("entry = %#v", entry)
+	}
+}
+
 func TestProjectConfigOmitsZeroSnapshotKeepLast(t *testing.T) {
 	cfg := &ProjectConfig{Version: projectConfigVersion}
 	cfg.SetServiceEntry(ServiceEntry{

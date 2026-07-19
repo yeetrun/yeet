@@ -413,6 +413,16 @@ type ServiceInfo struct {
 	Images           []ServiceImage    `json:"images,omitempty"`
 	VM               *ServiceVM        `json:"vm,omitempty"`
 	Snapshots        *ServiceSnapshots `json:"snapshots,omitempty"`
+	Identity         *ServiceIdentity  `json:"identity,omitempty"`
+}
+
+type ServiceIdentity struct {
+	RequestedUser  string `json:"requestedUser,omitempty"`
+	RequestedGroup string `json:"requestedGroup,omitempty"`
+	UID            uint32 `json:"uid"`
+	GID            uint32 `json:"gid"`
+	Class          string `json:"class,omitempty"`
+	Mismatch       string `json:"mismatch,omitempty"`
 }
 
 type ServiceVM struct {

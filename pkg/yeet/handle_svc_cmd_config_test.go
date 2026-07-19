@@ -173,6 +173,103 @@ func TestRunFromProjectConfigRehydratesArgs(t *testing.T) {
 	}
 }
 
+func TestRunFromProjectConfigRehydratesRunAs(t *testing.T) {
+	oldExec, oldArch, oldService, oldTerminal, oldHashes := execRemoteFn, remoteCatchOSAndArchFn, serviceOverride, isTerminalFn, fetchRemoteArtifactHashesFn
+	t.Cleanup(func() {
+		execRemoteFn, remoteCatchOSAndArchFn, serviceOverride, isTerminalFn, fetchRemoteArtifactHashesFn = oldExec, oldArch, oldService, oldTerminal, oldHashes
+	})
+	serviceOverride = "api"
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	isTerminalFn = func(int) bool { return false }
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "api"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: 1, Services: []ServiceEntry{{Name: "api", Host: "host-a", Payload: "api", RunAs: "app:workers"}}}}
+	var got []string
+	execRemoteFn = func(_ context.Context, _ string, args []string, _ io.Reader, _ bool) error {
+		got = append([]string{}, args...)
+		return nil
+	}
+	if err := runFromProjectConfig(loc, "host-a"); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"run", "--run-as=app:workers"}) {
+		t.Fatalf("args = %#v", got)
+	}
+}
+
+func TestCronFromProjectConfigRehydratesRunAs(t *testing.T) {
+	oldExec, oldArch, oldService, oldTerminal := execRemoteFn, remoteCatchOSAndArchFn, serviceOverride, isTerminalFn
+	t.Cleanup(func() {
+		execRemoteFn, remoteCatchOSAndArchFn, serviceOverride, isTerminalFn = oldExec, oldArch, oldService, oldTerminal
+	})
+	serviceOverride = "backup"
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	isTerminalFn = func(int) bool { return false }
+	tmp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tmp, "backup"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: 1, Services: []ServiceEntry{{Name: "backup", Host: "host-a", Type: serviceTypeCron, Payload: "backup", Schedule: "0 3 * * *", RunAs: "backup"}}}}
+	var got []string
+	execRemoteFn = func(_ context.Context, _ string, args []string, _ io.Reader, _ bool) error {
+		got = append([]string{}, args...)
+		return nil
+	}
+	if err := runCronFromProjectConfig(loc, "host-a"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cron", "--run-as=backup", "--schedule=0 3 * * *"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("args = %#v, want %#v", got, want)
+	}
+}
+
+func TestHandleSvcCronRehydratesConfiguredRunAs(t *testing.T) {
+	oldExec, oldArch, oldService := execRemoteFn, remoteCatchOSAndArchFn, serviceOverride
+	t.Cleanup(func() { execRemoteFn, remoteCatchOSAndArchFn, serviceOverride = oldExec, oldArch, oldService })
+	serviceOverride = "backup"
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "backup")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	loc := &projectConfigLocation{
+		Path: filepath.Join(tmp, projectConfigName),
+		Dir:  tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+			Name: "backup", Host: "host-a", Type: serviceTypeCron, Payload: "backup", Schedule: "0 1 * * *", RunAs: "backup",
+		}}},
+	}
+	var got []string
+	execRemoteFn = func(_ context.Context, _ string, args []string, _ io.Reader, _ bool) error {
+		got = append([]string{}, args...)
+		return nil
+	}
+	err := handleSvcCron(svcCommandRequest{
+		Command:      svcCommand{Args: []string{payload, "0 3 * * *"}},
+		Config:       loc,
+		HostOverride: "host-a",
+		Service:      "backup",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cron", "--run-as=backup", "--schedule=0 3 * * *"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("remote args = %#v, want %#v", got, want)
+	}
+	entry, ok := loc.Config.ServiceEntry("backup", "host-a")
+	if !ok || entry.RunAs != "backup" {
+		t.Fatalf("saved entry = %#v, want configured run-as preserved", entry)
+	}
+}
+
 func TestRunFromProjectConfigRehydratesServiceRoot(t *testing.T) {
 	oldExec := execRemoteFn
 	oldArch := remoteCatchOSAndArchFn

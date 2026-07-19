@@ -122,12 +122,14 @@ type ttyExecer struct {
 	ptyReq             PtySpec
 
 	// Assigned during run
-	rw             io.ReadWriter // May be a pty
-	bypassPtyInput bool
-	traceStart     time.Time
+	rw                       io.ReadWriter // May be a pty
+	bypassPtyInput           bool
+	traceStart               time.Time
+	serviceOperationLockHeld bool
 
 	// Optional override for tests.
 	serviceRunnerFn            func() (ServiceRunner, error)
+	migrateServiceIdentityFunc func(context.Context, serviceIdentityMigrationRequest, io.Writer) (serviceIdentityMigrationResult, error)
 	installFunc                func(action string, in io.Reader, cfg FileInstallerCfg) error
 	editFileFunc               func(path string) error
 	systemdStatusFunc          func(string) (svc.Status, error)
@@ -140,6 +142,7 @@ type ttyExecer struct {
 	serviceInstallGenFunc      func(InstallerCfg, int) error
 	closeNewStageInstallerFunc func(FileInstallerCfg) error
 	removeServiceFunc          func(string, RemoveOptions) (*RemoveReport, error)
+	nativeCopyHook             func(string)
 }
 
 type ttyPtySession struct {
@@ -345,7 +348,9 @@ func (e *ttyExecer) exec() error {
 	case catchrpc.ExecTargetHostShell:
 		return e.hostShellCmdFunc(e.args)
 	case catchrpc.ExecTargetServiceShell:
-		return e.serviceShellCmdFunc(e.args)
+		return e.withLockedServiceMutation(func() error {
+			return e.serviceShellCmdFunc(e.args)
+		})
 	case catchrpc.ExecTargetVMSSHProxy:
 		return e.vmSSHProxyCmdFunc(e.args)
 	}
@@ -359,11 +364,11 @@ type ttyCommandHandler func(*ttyExecer, []string) error
 
 var ttyCommandHandlers = map[string]ttyCommandHandler{
 	"cron": func(e *ttyExecer, args []string) error {
-		if err := cli.RequireArgsAtLeast("cron", args, 5); err != nil {
+		flags, payloadArgs, err := cli.ParseCron(args)
+		if err != nil {
 			return err
 		}
-		cronexpr := strings.Join(args[0:5], " ")
-		return e.cronCmdFunc(cronexpr, args[5:])
+		return e.cronCmdFuncFlags(flags, payloadArgs)
 	},
 	"disable": func(e *ttyExecer, _ []string) error {
 		return e.disableCmdFunc()
@@ -482,11 +487,20 @@ var ttyCommandHandlers = map[string]ttyCommandHandler{
 
 func (e *ttyExecer) dispatch(args []string) error {
 	cmd := args[0]
-	args = args[1:]
 	handler, ok := ttyCommandHandlers[cmd]
 	if !ok {
 		log.Printf("Unhandled command %q", cmd)
 		return fmt.Errorf("unhandled command %q", cmd)
+	}
+	permissions, err := ttyCommandPermissions(args)
+	if err != nil {
+		return err
+	}
+	args = args[1:]
+	if permissions.has(permissionManage) {
+		return e.withLockedServiceMutation(func() error {
+			return handler(e, args)
+		})
 	}
 	return handler(e, args)
 }
@@ -514,11 +528,72 @@ func (e *ttyExecer) hostShellCmdFunc(args []string) error {
 }
 
 func (e *ttyExecer) serviceShellCmdFunc(args []string) error {
-	dir, err := e.serviceShellDir()
+	cmd, err := e.serviceShellCommand(args)
 	if err != nil {
 		return err
 	}
-	return e.runShellCommand(args, dir)
+	return cmd.Run()
+}
+
+func (e *ttyExecer) serviceShellCommand(args []string) (*exec.Cmd, error) {
+	dir, err := e.serviceShellDir()
+	if err != nil {
+		return nil, err
+	}
+	var cmd *exec.Cmd
+	if len(args) == 0 {
+		cmd = e.newCmd("/bin/sh")
+	} else {
+		cmd = e.newCmd(args[0], args[1:]...)
+	}
+	cmd.Dir = dir
+
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return nil, err
+	}
+	if sv.ServiceType() != db.ServiceTypeSystemd {
+		return cmd, nil
+	}
+	identity := effectiveServiceIdentity(sv).Persisted
+	if err := validateServiceIdentityDrift(identity); err != nil {
+		return nil, fmt.Errorf("service %q identity changed on this host: %w", e.sn, err)
+	}
+	cmd.Env = serviceShellEnvironment(cmd.Env, dir, identity.RequestedUser)
+	if identity.UID != 0 || identity.GID != 0 {
+		if cmd.SysProcAttr == nil {
+			cmd.SysProcAttr = &syscall.SysProcAttr{}
+		}
+		cmd.SysProcAttr.Credential = &syscall.Credential{
+			Uid: identity.UID, Gid: identity.GID,
+			// Keep NoSetGroups false so StartProcess invokes setgroups with
+			// this empty list instead of inheriting Catch's root groups.
+			Groups: []uint32{},
+		}
+	}
+	return cmd, nil
+}
+
+func serviceShellEnvironment(base []string, home, userName string) []string {
+	identityKeys := map[string]struct{}{
+		"HOME": {}, "USER": {}, "LOGNAME": {}, "SHELL": {},
+	}
+	env := make([]string, 0, len(base)+4)
+	for _, entry := range base {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok {
+			if _, identity := identityKeys[key]; identity {
+				continue
+			}
+		}
+		env = append(env, entry)
+	}
+	return append(env,
+		"HOME="+home,
+		"USER="+userName,
+		"LOGNAME="+userName,
+		"SHELL=/bin/sh",
+	)
 }
 
 func (e *ttyExecer) serviceShellDir() (string, error) {
