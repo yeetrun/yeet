@@ -218,7 +218,7 @@ func TestServiceInfoSnapshotServiceOverridePrecedence(t *testing.T) {
 func TestServiceInfoIncludesVMConfig(t *testing.T) {
 	server := newTestServer(t)
 	serviceRoot := t.TempDir()
-	if err := writeVMIsolationMode(serviceRoot, vmIsolationJailer); err != nil {
+	if err := markVMJailerReady(serviceRoot); err != nil {
 		t.Fatal(err)
 	}
 	oldListIPv4Addrs := listIPv4AddrsFn
@@ -286,8 +286,8 @@ func TestServiceInfoIncludesVMConfig(t *testing.T) {
 	if vm.Runtime != "firecracker" || vm.Image != testUbuntuVMPayload || vm.ImageVersion != "ubuntu-26.04-amd64-v1" {
 		t.Fatalf("VM image/runtime = %#v", vm)
 	}
-	if vm.VMMIsolation != vmIsolationJailer {
-		t.Fatalf("VM VMM isolation = %q, want %q", vm.VMMIsolation, vmIsolationJailer)
+	if vm.VMMIsolation != string(vmJailerReady) {
+		t.Fatalf("VM VMM isolation = %q, want %q", vm.VMMIsolation, vmJailerReady)
 	}
 	if vm.CPUs != 4 || vm.MemoryBytes != 4<<30 || vm.DiskBytes != 128<<30 || vm.DiskBackend != "zvol" || vm.DiskPath != "flash/yeet/vms/devbox/root" {
 		t.Fatalf("VM resources/disk = %#v", vm)
@@ -312,6 +312,16 @@ func TestServiceInfoIncludesVMConfig(t *testing.T) {
 	}
 	if vm.SetupState != "ready" {
 		t.Fatalf("VM setup state = %q", vm.SetupState)
+	}
+	if err := os.Remove(vmJailerReadinessMarkerPath(serviceRoot)); err != nil {
+		t.Fatal(err)
+	}
+	pendingResp, err := server.serviceInfo("devbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pendingResp.Info.VM.VMMIsolation; got != string(vmJailerPendingRestart) {
+		t.Fatalf("pending VMM isolation = %q", got)
 	}
 }
 

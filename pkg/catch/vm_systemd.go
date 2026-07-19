@@ -19,6 +19,7 @@ type vmSystemdConfig struct {
 	Service          string
 	Runner           string
 	DataDir          string
+	ServicesRoot     string
 	ServiceRoot      string
 	DiskPath         string
 	Firecracker      string
@@ -31,30 +32,34 @@ type vmSystemdConfig struct {
 	WorkingDirectory string
 }
 
-func renderVMSystemdUnit(cfg vmSystemdConfig) string {
+func renderVMSystemdUnit(cfg vmSystemdConfig) (string, error) {
+	required := []struct{ label, value string }{
+		{"service", cfg.Service}, {"runner", cfg.Runner}, {"services root", cfg.ServicesRoot},
+		{"service root", cfg.ServiceRoot},
+		{"disk", cfg.DiskPath}, {"firecracker", cfg.Firecracker}, {"jailer", cfg.Jailer},
+		{"jailer base", cfg.JailerBase}, {"config", cfg.ConfigPath},
+		{"API socket", cfg.APISocket}, {"console socket", cfg.ConsoleSocket},
+	}
+	for _, input := range required {
+		if strings.TrimSpace(input.value) == "" {
+			return "", fmt.Errorf("VM systemd %s is required", input.label)
+		}
+	}
+	launchArgs := []string{
+		"vm-run", "--service", cfg.Service, "--service-root", cfg.ServiceRoot,
+		"--disk-path", cfg.DiskPath, "--firecracker", cfg.Firecracker,
+		"--jailer", cfg.Jailer, "--jailer-base", cfg.JailerBase,
+		"--api-sock", cfg.APISocket, "--config-file", cfg.ConfigPath,
+		"--console-sock", cfg.ConsoleSocket,
+	}
+	return renderVMSystemdUnitText(cfg, launchArgs), nil
+}
+
+func renderVMSystemdUnitText(cfg vmSystemdConfig, launchArgs []string) string {
 	cleanupSockets := []string{cfg.APISocket, cfg.ConsoleSocket}
 	if strings.TrimSpace(cfg.VsockSocket) != "" {
 		cleanupSockets = append(cleanupSockets, cfg.VsockSocket)
 	}
-	launchArgs := []string{
-		"vm-run",
-		"--service", cfg.Service,
-		"--service-root", cfg.ServiceRoot,
-		"--disk-path", cfg.DiskPath,
-		"--firecracker", cfg.Firecracker,
-	}
-	if strings.TrimSpace(cfg.Jailer) != "" {
-		jailerBase := strings.TrimSpace(cfg.JailerBase)
-		if jailerBase == "" {
-			jailerBase = defaultVMJailerBase
-		}
-		launchArgs = append(launchArgs, "--jailer", cfg.Jailer, "--jailer-base", jailerBase)
-	}
-	launchArgs = append(launchArgs,
-		"--api-sock", cfg.APISocket,
-		"--config-file", cfg.ConfigPath,
-		"--console-sock", cfg.ConsoleSocket,
-	)
 	return fmt.Sprintf(`[Unit]
 Description=yeet VM %s
 After=network-online.target yeet-ns.service
@@ -64,7 +69,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%s
 ExecStartPre=/bin/rm -f %s
-ExecStartPre=%s -data-dir %s vm-network-ensure %s
+ExecStartPre=%s -data-dir %s -services-root %s vm-network-ensure %s
 ExecStart=%s %s
 Restart=on-failure
 RestartForceExitStatus=75
@@ -75,7 +80,7 @@ TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
-`, cfg.Service, cfg.WorkingDirectory, strings.Join(cleanupSockets, " "), cfg.Runner, cfg.DataDir, cfg.Service, cfg.Runner, strings.Join(launchArgs, " "), VMRestoreLoadFailedExitCode)
+`, cfg.Service, cfg.WorkingDirectory, strings.Join(cleanupSockets, " "), cfg.Runner, cfg.DataDir, cfg.ServicesRoot, cfg.Service, cfg.Runner, strings.Join(launchArgs, " "), VMRestoreLoadFailedExitCode)
 }
 
 func ensureVMSystemdRestorePrevent(name string) error {
@@ -118,18 +123,12 @@ func regenerateHostStorageVMSystemdUnit(ctx context.Context, cfg Config, service
 	if strings.TrimSpace(diskPath) == "" {
 		diskPath = rootFS
 	}
-	isolation, err := vmIsolationModeForRoot(root)
-	if err != nil {
-		return nil, err
-	}
-	var jailer string
-	if isolation == vmIsolationJailer {
-		jailer = filepath.Join(filepath.Dir(rootFS), "jailer")
-	}
-	unit := renderVMSystemdUnit(vmSystemdConfig{
+	jailer := filepath.Join(filepath.Dir(rootFS), "jailer")
+	unit, err := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          service.Name,
 		Runner:           runner,
 		DataDir:          cfg.RootDir,
+		ServicesRoot:     cfg.ServicesRoot,
 		ServiceRoot:      root,
 		DiskPath:         diskPath,
 		Firecracker:      filepath.Join(filepath.Dir(rootFS), "firecracker"),
@@ -141,6 +140,9 @@ func regenerateHostStorageVMSystemdUnit(ctx context.Context, cfg Config, service
 		VsockSocket:      filepath.Join(runDir, "vsock.sock"),
 		WorkingDirectory: dataDir,
 	})
+	if err != nil {
+		return nil, err
+	}
 	unitPath := filepath.Join(vmSystemdSystemDir, vmSystemdUnitName(service.Name))
 	if err := writeVMSystemdUnitAtomic(unitPath, []byte(unit), 0o644); err != nil {
 		return nil, fmt.Errorf("write VM systemd unit %s: %w", unitPath, err)

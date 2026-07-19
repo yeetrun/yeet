@@ -1689,16 +1689,25 @@ func installVMRecoveryFirecrackerLauncher(t *testing.T, root string, version str
 	oldSystemdDir := vmSystemdSystemDir
 	vmSystemdSystemDir = systemdDir
 	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
-	unit := renderVMSystemdUnit(vmSystemdConfig{
+	unit, err := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          "devbox",
 		Runner:           "/srv/catch/run/catch",
 		DataDir:          "/srv/catch/data",
+		ServicesRoot:     "/srv/services",
+		ServiceRoot:      root,
+		DiskPath:         filepath.Join(serviceDataDirForRoot(root), "rootfs.raw"),
 		Firecracker:      firecrackerBinary,
+		Jailer:           filepath.Join(root, "jailer"),
+		JailerBase:       filepath.Join(root, "jails"),
 		ConfigPath:       filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
 		APISocket:        filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"),
 		ConsoleSocket:    filepath.Join(serviceRunDirForRoot(root), "serial.sock"),
 		WorkingDirectory: root,
 	})
+	if err != nil {
+		t.Fatalf("render VM systemd unit: %v", err)
+	}
+	assertJailerOnlyVMUnit(t, unit)
 	if err := os.WriteFile(filepath.Join(systemdDir, vmSystemdUnitName("devbox")), []byte(unit), 0o644); err != nil {
 		t.Fatalf("write VM systemd unit: %v", err)
 	}

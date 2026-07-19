@@ -58,7 +58,6 @@ type vmProvisionPlan struct {
 	APISocket              string
 	VsockSocket            string
 	PIDFile                string
-	IsolationMode          string
 	RuntimeIdentity        vmRuntimeIdentity
 }
 
@@ -1076,10 +1075,11 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 	if err != nil {
 		return vmProvisionPlan{}, err
 	}
-	unit := renderVMSystemdUnit(vmSystemdConfig{
+	unit, err := renderVMSystemdUnit(vmSystemdConfig{
 		Service:          e.sn,
 		Runner:           e.s.catchRunnerPath(),
 		DataDir:          e.s.cfg.RootDir,
+		ServicesRoot:     e.s.cfg.ServicesRoot,
 		ServiceRoot:      resolvedRoot.Root,
 		DiskPath:         diskPath,
 		Firecracker:      image.Paths.FirecrackerPath,
@@ -1091,6 +1091,9 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 		VsockSocket:      vsockSocket,
 		WorkingDirectory: resolvedRoot.Root,
 	})
+	if err != nil {
+		return vmProvisionPlan{}, err
+	}
 
 	return vmProvisionPlan{
 		Service:                e.sn,
@@ -1113,7 +1116,6 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 		APISocket:              apiSocket,
 		VsockSocket:            vsockSocket,
 		PIDFile:                filepath.Join(runDir, "firecracker.pid"),
-		IsolationMode:          vmIsolationJailer,
 		RuntimeIdentity:        runtimeIdentity,
 	}, nil
 }
@@ -1206,8 +1208,8 @@ func writeVMProvisionConfigArtifacts(plan vmProvisionPlan) error {
 	if err := writeVMFile(plan.FirecrackerConfigPath, plan.FirecrackerConfig, 0o644); err != nil {
 		return fmt.Errorf("write Firecracker config: %w", err)
 	}
-	if err := writeVMIsolationMode(plan.ServiceRoot.Root, plan.IsolationMode); err != nil {
-		return fmt.Errorf("write VM isolation mode: %w", err)
+	if err := markVMJailerReady(plan.ServiceRoot.Root); err != nil {
+		return fmt.Errorf("mark VM jailer ready: %w", err)
 	}
 	return nil
 }

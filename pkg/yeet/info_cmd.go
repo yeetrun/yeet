@@ -573,7 +573,7 @@ func renderVMSection(server catchrpc.ServiceInfoResponse) infoSection {
 func vmInfoRows(vm *catchrpc.ServiceVM) []infoRow {
 	candidates := []infoRow{
 		{Label: "Runtime", Value: vm.Runtime},
-		{Label: "VMM isolation", Value: vm.VMMIsolation},
+		{Label: "VMM isolation", Value: formatVMMIsolation(vm.VMMIsolation)},
 		{Label: "Image", Value: formatVMImage(vm)},
 		{Label: "CPU", Value: formatVMCPU(vm.CPUs)},
 		{Label: "Memory", Value: formatOptionalBytes(vm.MemoryBytes)},
@@ -590,6 +590,17 @@ func vmInfoRows(vm *catchrpc.ServiceVM) []infoRow {
 		}
 	}
 	return rows
+}
+
+func formatVMMIsolation(value string) string {
+	switch strings.TrimSpace(value) {
+	case "jailer-pending-restart":
+		return "jailer (pending restart)"
+	case "jailer":
+		return "jailer"
+	default:
+		return strings.TrimSpace(value)
+	}
 }
 
 func formatVMCPU(cpus int) string {

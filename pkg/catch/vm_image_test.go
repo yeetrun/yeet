@@ -1537,6 +1537,35 @@ func TestVMImageCacheRejectsUnsafeVersionNames(t *testing.T) {
 	}
 }
 
+func TestReadValidatedVMImageRuntimeManifest(t *testing.T) {
+	dir := t.TempDir()
+	contents := vmImageTestContents()
+	manifest := vmImageTestManifest("ubuntu-26.04-amd64-v1", contents)
+	manifest.Architecture = "x86_64"
+	if err := writeManifestFile(filepath.Join(dir, "manifest.json"), manifest); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, manifest.Firecracker), contents[manifest.Firecracker], 0o755); err != nil {
+		t.Fatalf("write Firecracker: %v", err)
+	}
+
+	got, err := readValidatedVMImageRuntimeManifest(filepath.Join(dir, manifest.Firecracker))
+	if err != nil {
+		t.Fatalf("readValidatedVMImageRuntimeManifest: %v", err)
+	}
+	if got.Version != manifest.Version || got.Architecture != "amd64" {
+		t.Fatalf("manifest = %#v", got)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, manifest.Firecracker), []byte("tampered"), 0o755); err != nil {
+		t.Fatalf("tamper Firecracker: %v", err)
+	}
+	_, err = readValidatedVMImageRuntimeManifest(filepath.Join(dir, manifest.Firecracker))
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("tampered error = %v, want checksum mismatch", err)
+	}
+}
+
 func vmImageTestContents() map[string][]byte {
 	return map[string][]byte{
 		"vmlinux":         []byte("kernel"),

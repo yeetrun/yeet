@@ -62,7 +62,7 @@ type vmCheckpointCompatibility struct {
 	VMConfigHash       string
 }
 
-func (s *Server) writeVMCheckpointMetadataWithCompatibility(dir string, service *db.Service, compat vmCheckpointCompatibility, comment string, zvolSnapshot string, result vmSnapshotResult, created time.Time) error {
+func (s *Server) marshalVMCheckpointMetadataWithCompatibility(service *db.Service, compat vmCheckpointCompatibility, comment string, zvolSnapshot string, result vmSnapshotResult, created time.Time) ([]byte, error) {
 	metadata := vmCheckpointMetadata{
 		Service:            service.Name,
 		Comment:            strings.TrimSpace(comment),
@@ -84,10 +84,10 @@ func (s *Server) writeVMCheckpointMetadataWithCompatibility(dir string, service 
 	}
 	raw, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	raw = append(raw, '\n')
-	return os.WriteFile(filepath.Join(dir, "metadata.json"), raw, 0o644)
+	return raw, nil
 }
 
 func (s *Server) vmCheckpointCompatibility(service *db.Service, vm db.VMConfig) (vmCheckpointCompatibility, error) {

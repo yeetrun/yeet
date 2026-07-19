@@ -89,11 +89,11 @@ func (s *Server) serviceInfoWithContext(ctx context.Context, sn string) (catchrp
 			info.Network.IPError = vmNetwork.Err.Error()
 		}
 		info.Network.IPWarning = vmNetwork.Warning
-		isolation, err := vmIsolationModeForRoot(effectiveRoot)
+		readiness, err := vmJailerReadinessForRoot(effectiveRoot)
 		if err != nil {
 			return resp, err
 		}
-		vmInfo, err := serviceVMInfo(sv.VM(), vmNetwork.IPs, isolation)
+		vmInfo, err := serviceVMInfo(sv.VM(), vmNetwork.IPs, string(readiness))
 		if err != nil {
 			return resp, err
 		}

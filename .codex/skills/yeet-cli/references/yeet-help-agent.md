@@ -4705,7 +4705,7 @@ Set VM resources and networking
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC] [--vmm-isolation=jailer|legacy-root]
+yeet [GLOBAL_OPTIONS] vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
 ```
 
 ## Operating Rules
@@ -4772,9 +4772,5 @@ yeet vm set <vm> --net=lan
 
 ```
 yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4
-```
-
-```
-yeet vm set <vm> --vmm-isolation=jailer
 ```
 ````

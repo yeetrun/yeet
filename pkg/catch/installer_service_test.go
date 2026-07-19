@@ -343,6 +343,66 @@ func TestInstallGenSnapshotFailureDoesNotCommitGeneration(t *testing.T) {
 	}
 }
 
+func TestInstallGenIfCurrentRejectsAdvanceBetweenSnapshotAndCommit(t *testing.T) {
+	server := newTestServer(t)
+	previousBinary := "/srv/catch/bin/catch-1"
+	installedBinary := "/srv/catch/bin/catch-2"
+	advancedBinary := "/srv/catch/bin/catch-3"
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		CatchService: {
+			Name:             CatchService,
+			ServiceType:      db.ServiceTypeSystemd,
+			ServiceRootZFS:   "tank/apps/catch",
+			Generation:       2,
+			LatestGeneration: 2,
+			Artifacts: db.ArtifactStore{db.ArtifactBinary: {Refs: map[db.ArtifactRef]string{
+				db.Gen(1): previousBinary,
+				db.Gen(2): installedBinary,
+				"latest":  installedBinary,
+			}}},
+		},
+	}}); err != nil {
+		t.Fatalf("DB.Set: %v", err)
+	}
+
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		if args[0] != "snapshot" {
+			return "", "", nil
+		}
+		_, _, err := server.cfg.DB.MutateService(CatchService, func(_ *db.Data, service *db.Service) error {
+			service.Generation = 3
+			service.LatestGeneration = 3
+			service.Artifacts[db.ArtifactBinary].Refs[db.Gen(3)] = advancedBinary
+			service.Artifacts[db.ArtifactBinary].Refs["latest"] = advancedBinary
+			return nil
+		})
+		return "", "", err
+	}
+	previousInstallPhase := runInstallPhaseForSnapshot
+	installPhaseCalls := 0
+	runInstallPhaseForSnapshot = func(*Installer, *db.Service) error {
+		installPhaseCalls++
+		return nil
+	}
+	t.Cleanup(func() { runInstallPhaseForSnapshot = previousInstallPhase })
+
+	inst := &Installer{s: server, icfg: InstallerCfg{ServiceName: CatchService}}
+	err := inst.installGenIfCurrent(2, 1)
+	if err == nil || !strings.Contains(err.Error(), "generation changed from expected 2 to 3") {
+		t.Fatalf("installGenIfCurrent error = %v, want generation CAS failure", err)
+	}
+	if installPhaseCalls != 0 {
+		t.Fatalf("systemd install phase calls = %d, want 0", installPhaseCalls)
+	}
+	service := testService(t, server, CatchService)
+	if service.Generation != 3 || service.LatestGeneration != 3 {
+		t.Fatalf("generation/latest = %d/%d, want concurrent 3/3 preserved", service.Generation, service.LatestGeneration)
+	}
+	if got := service.Artifacts[db.ArtifactBinary].Refs["latest"]; got != advancedBinary {
+		t.Fatalf("latest binary = %q, want concurrent %q", got, advancedBinary)
+	}
+}
+
 func TestInstallGenReportsRecoverySnapshotOnInstallFailure(t *testing.T) {
 	server := newTestServer(t)
 	if err := server.cfg.DB.Set(&db.Data{

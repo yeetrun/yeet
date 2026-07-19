@@ -636,11 +636,24 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "ip=192.168.100.")
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "yeet.hostname=svc")
 	assertFileContains(t, filepath.Join(serviceRoot, "metadata", "hostname"), "svc")
-	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("svc")), "ExecStart=")
-	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("svc")), "--jailer "+filepath.Join(filepath.Dir(vm.Image.RootFS), "jailer"))
-	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("svc")), "--jailer-base "+vmJailerBaseForDataRoot(server.cfg.RootDir))
-	assertFileContains(t, filepath.Join(systemdDir, vmSystemdUnitName("svc")), "--api-sock")
-	assertFileContains(t, vmIsolationMarkerPath(serviceRoot), vmIsolationJailer)
+	generatedUnitPath := filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("svc"))
+	generatedUnit, err := os.ReadFile(generatedUnitPath)
+	if err != nil {
+		t.Fatalf("read generated VM unit: %v", err)
+	}
+	assertJailerOnlyVMUnit(t, string(generatedUnit))
+	assertFileContains(t, generatedUnitPath, "-services-root "+server.cfg.ServicesRoot+" vm-network-ensure svc")
+	assertFileContains(t, generatedUnitPath, "--jailer "+filepath.Join(filepath.Dir(vm.Image.RootFS), "jailer"))
+	assertFileContains(t, generatedUnitPath, "--jailer-base "+vmJailerBaseForDataRoot(server.cfg.RootDir))
+	installedUnit, err := os.ReadFile(filepath.Join(systemdDir, vmSystemdUnitName("svc")))
+	if err != nil {
+		t.Fatalf("read installed VM unit: %v", err)
+	}
+	assertJailerOnlyVMUnit(t, string(installedUnit))
+	if !strings.Contains(string(installedUnit), "--api-sock") {
+		t.Fatalf("installed VM unit missing API socket argument:\n%s", installedUnit)
+	}
+	assertFileContains(t, vmJailerReadinessMarkerPath(serviceRoot), string(vmJailerReady))
 
 	wantSystemctl := [][]string{
 		{"daemon-reload"},
@@ -648,6 +661,54 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 	}
 	if !reflect.DeepEqual(*systemctlCalls, wantSystemctl) {
 		t.Fatalf("systemctl calls = %#v, want %#v", *systemctlCalls, wantSystemctl)
+	}
+}
+
+func TestWriteVMProvisionConfigArtifactsMarksJailerReady(t *testing.T) {
+	serviceRoot := t.TempDir()
+	plan := vmProvisionPlan{
+		ServiceRoot:           resolvedServiceRoot{Root: serviceRoot},
+		FirecrackerConfigPath: filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"),
+		FirecrackerConfig:     []byte("{}\n"),
+	}
+
+	if err := writeVMProvisionConfigArtifacts(plan); err != nil {
+		t.Fatalf("write VM provisioning config artifacts: %v", err)
+	}
+	readiness, err := vmJailerReadinessForRoot(serviceRoot)
+	if err != nil {
+		t.Fatalf("read VM jailer readiness: %v", err)
+	}
+	if readiness != vmJailerReady {
+		t.Fatalf("VM jailer readiness = %q, want %q", readiness, vmJailerReady)
+	}
+}
+
+func TestWriteVMProvisionConfigArtifactsFailureLeavesJailerPending(t *testing.T) {
+	serviceRoot := t.TempDir()
+	blockedParent := filepath.Join(serviceRoot, "blocked")
+	if err := os.WriteFile(blockedParent, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plan := vmProvisionPlan{
+		ServiceRoot:           resolvedServiceRoot{Root: serviceRoot},
+		FirecrackerConfigPath: filepath.Join(blockedParent, "firecracker.json"),
+		FirecrackerConfig:     []byte("{}\n"),
+	}
+
+	err := writeVMProvisionConfigArtifacts(plan)
+	if err == nil || !strings.Contains(err.Error(), "write Firecracker config") {
+		t.Fatalf("write VM provisioning config artifacts error = %v, want Firecracker config failure", err)
+	}
+	if _, statErr := os.Stat(vmJailerReadinessMarkerPath(serviceRoot)); !os.IsNotExist(statErr) {
+		t.Fatalf("VM jailer readiness marker stat error = %v, want absent", statErr)
+	}
+	readiness, readinessErr := vmJailerReadinessForRoot(serviceRoot)
+	if readinessErr != nil {
+		t.Fatalf("read VM jailer readiness: %v", readinessErr)
+	}
+	if readiness != vmJailerPendingRestart {
+		t.Fatalf("VM jailer readiness = %q, want %q", readiness, vmJailerPendingRestart)
 	}
 }
 
@@ -687,8 +748,14 @@ func TestRunVMConfiguresVsockRuntimeMetadata(t *testing.T) {
 			t.Fatalf("firecracker config missing %q:\n%s", want, string(raw))
 		}
 	}
-	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("devbox")), svc.VM.Sockets.VsockSocketPath)
-	assertFileContains(t, filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("devbox")), "ExecStartPre=/bin/rm -f")
+	unitPath := filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("devbox"))
+	unitRaw, err := os.ReadFile(unitPath)
+	if err != nil {
+		t.Fatalf("read generated VM unit: %v", err)
+	}
+	assertJailerOnlyVMUnit(t, string(unitRaw))
+	assertFileContains(t, unitPath, svc.VM.Sockets.VsockSocketPath)
+	assertFileContains(t, unitPath, "ExecStartPre=/bin/rm -f")
 }
 
 func TestRunVMPersistsSnapshotPolicyFlags(t *testing.T) {
@@ -1077,6 +1144,14 @@ func TestRunVMZVOLProvisionUsesDevicePathForFirecracker(t *testing.T) {
 		t.Fatalf("db disk path = %q, want %q", svc.VM.Disk.Path, wantDevice)
 	}
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), `"path_on_host": "`+wantDevice+`"`)
+	unitRaw, err := os.ReadFile(filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("svc")))
+	if err != nil {
+		t.Fatalf("read generated ZFS VM unit: %v", err)
+	}
+	assertJailerOnlyVMUnit(t, string(unitRaw))
+	if !strings.Contains(string(unitRaw), "--disk-path "+wantDevice) {
+		t.Fatalf("generated ZFS VM unit missing stored device path %q:\n%s", wantDevice, unitRaw)
+	}
 	foundClone := false
 	for _, command := range diskCommands {
 		if reflect.DeepEqual(command, []string{"zfs", "clone", "-o", "volsize=68719476736", wantSnapshot, wantDataset}) {
@@ -2301,6 +2376,18 @@ func vmProvisionImageTestManifest(version string, contents map[string][]byte) vm
 	manifest.Jailer = "jailer"
 	manifest.Checksums[manifest.Jailer] = testSHA256Hex(contents[manifest.Jailer])
 	return manifest
+}
+
+func assertJailerOnlyVMUnit(t *testing.T, unit string) {
+	t.Helper()
+	for _, want := range []string{" vm-run ", " --jailer ", " --jailer-base "} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("unit missing %q:\n%s", want, unit)
+		}
+	}
+	if strings.Contains(unit, "ExecStart=/") && strings.Contains(unit, "firecracker --api-sock") {
+		t.Fatalf("unit directly launches Firecracker:\n%s", unit)
+	}
 }
 
 func assertVMImageVersion(t *testing.T, server *Server, service, version string) {

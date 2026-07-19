@@ -43,8 +43,9 @@ func (s *Server) NewInstaller(cfg InstallerCfg) (*Installer, error) {
 type Installer struct {
 	NewCmd func(name string, arg ...string) *exec.Cmd
 
-	icfg InstallerCfg
-	s    *Server
+	icfg                InstallerCfg
+	s                   *Server
+	committedGeneration int
 }
 
 var liveSvcNetworkIPsFunc = liveSvcNetworkIPs
@@ -135,7 +136,18 @@ func (si *Installer) mutateService(f func(*db.Data, *db.Service) error) (*db.Dat
 }
 
 func (si *Installer) commitGen(gen int) (*db.Data, *db.Service, error) {
+	return si.commitGenWithExpected(gen, nil)
+}
+
+func (si *Installer) commitGenIfCurrent(expected, gen int) (*db.Data, *db.Service, error) {
+	return si.commitGenWithExpected(gen, &expected)
+}
+
+func (si *Installer) commitGenWithExpected(gen int, expected *int) (*db.Data, *db.Service, error) {
 	d, s, err := si.mutateService(func(d *db.Data, s *db.Service) error {
+		if expected != nil && s.Generation != *expected {
+			return fmt.Errorf("service generation changed from expected %d to %d", *expected, s.Generation)
+		}
 		commitGeneratedServiceRefs(d, s, si.icfg.ServiceName, generatedServiceCommitForGen(gen, s.LatestGeneration))
 		return nil
 	})
@@ -331,6 +343,23 @@ func (si *Installer) InstallGen(gen int) error {
 }
 
 func (si *Installer) installGen(gen int) error {
+	return si.installGenWithExpected(gen, nil)
+}
+
+// InstallGenIfCurrent installs gen only when the service still has expected as
+// its current generation at the database mutation that starts installation.
+func (si *Installer) InstallGenIfCurrent(expected, gen int) error {
+	if runtime.GOOS == "darwin" {
+		panic("macOS is not supported")
+	}
+	return si.installGenIfCurrent(expected, gen)
+}
+
+func (si *Installer) installGenIfCurrent(expected, gen int) error {
+	return si.installGenWithExpected(gen, &expected)
+}
+
+func (si *Installer) installGenWithExpected(gen int, expected *int) error {
 	preService, err := si.serviceBeforeInstall()
 	if err != nil {
 		return err
@@ -342,10 +371,17 @@ func (si *Installer) installGen(gen int) error {
 	}
 
 	operation := func() error {
-		d, s, err := si.commitGen(gen)
+		var d *db.Data
+		var s *db.Service
+		if expected == nil {
+			d, s, err = si.commitGen(gen)
+		} else {
+			d, s, err = si.commitGenIfCurrent(*expected, gen)
+		}
 		if err != nil {
 			return fmt.Errorf("failed to commit gen: %v", err)
 		}
+		si.committedGeneration = s.Generation
 		si.prune()
 		return si.doInstall(d, s)
 	}

@@ -7,6 +7,7 @@ package catch
 import (
 	"bufio"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -79,13 +80,16 @@ type FileInstaller struct {
 	cfg FileInstallerCfg
 	ch  chan struct{}
 
-	existingService db.ServiceView
-	svcNet          *db.SvcNetwork
-	macvlan         *db.MacvlanNetwork
-	tsNet           *db.TailscaleNetwork
-	tsAuthKey       string
-	artifacts       map[db.ArtifactName]string
-	lazyNetwork     lazy.GValue[*networkConfig]
+	existingService            db.ServiceView
+	installedGeneration        int
+	readInstalledGeneration    func() (int, error)
+	installGenerationIfCurrent func(*Installer, int, int) error
+	svcNet                     *db.SvcNetwork
+	macvlan                    *db.MacvlanNetwork
+	tsNet                      *db.TailscaleNetwork
+	tsAuthKey                  string
+	artifacts                  map[db.ArtifactName]string
+	lazyNetwork                lazy.GValue[*networkConfig]
 
 	File     *os.File
 	received atomic.Int64
@@ -156,9 +160,17 @@ func NewFileInstaller(s *Server, cfg FileInstallerCfg) (*FileInstaller, error) {
 	cfg.ServiceRoot = resolvedRoot.Root
 	printServiceRootWarnings(cfg, resolvedRoot.Warnings)
 	i := &FileInstaller{
-		s:   s,
-		cfg: cfg,
-		ch:  make(chan struct{}),
+		s:                          s,
+		cfg:                        cfg,
+		ch:                         make(chan struct{}),
+		installGenerationIfCurrent: (*Installer).InstallGenIfCurrent,
+		readInstalledGeneration: func() (int, error) {
+			sv, err := s.serviceView(cfg.ServiceName)
+			if err != nil {
+				return 0, err
+			}
+			return sv.Generation(), nil
+		},
 		rateVal: rate.Value{
 			HalfLife: 250 * time.Millisecond,
 		},
@@ -664,7 +676,86 @@ func (i *FileInstaller) Close() (err error) {
 	}
 
 	defer i.finishClose(&err)
-	return i.closeAndInstall()
+	if err := i.closeAndInstall(); err != nil {
+		return err
+	}
+	if i.cfg.ServiceName == CatchService && i.RollbackInstalledGenerationAvailable() {
+		return i.captureInstalledGenerationOrRollback()
+	}
+	return nil
+}
+
+func (i *FileInstaller) RollbackInstalledGenerationAvailable() bool {
+	return i != nil && i.existingService.Valid() && i.existingService.Generation() > 0
+}
+
+func (i *FileInstaller) RollbackInstalledGeneration() error {
+	if !i.RollbackInstalledGenerationAvailable() {
+		return fmt.Errorf("no previous Catch generation to restore")
+	}
+	if i.installedGeneration <= 0 {
+		return fmt.Errorf("no installed Catch generation was recorded for rollback")
+	}
+	return i.restorePreviousGeneration(i.installedGeneration)
+}
+
+func (i *FileInstaller) captureInstalledGenerationOrRollback() error {
+	installed, err := i.currentInstalledGeneration()
+	if err == nil && installed <= 0 {
+		err = fmt.Errorf("observed invalid Catch generation %d after install", installed)
+	}
+	if err == nil && i.installedGeneration > 0 && installed != i.installedGeneration {
+		err = fmt.Errorf("observed Catch generation %d after committing generation %d", installed, i.installedGeneration)
+	}
+	if err != nil {
+		captureErr := fmt.Errorf("record installed Catch generation: %w", err)
+		if i.installedGeneration <= 0 {
+			return captureErr
+		}
+		return errors.Join(captureErr, i.restorePreviousGeneration(i.installedGeneration))
+	}
+	if i.installedGeneration <= 0 {
+		i.installedGeneration = installed
+	}
+	return nil
+}
+
+func (i *FileInstaller) currentInstalledGeneration() (int, error) {
+	if i == nil {
+		return 0, fmt.Errorf("catch installer is required")
+	}
+	if i.readInstalledGeneration != nil {
+		return i.readInstalledGeneration()
+	}
+	if i.s == nil {
+		return 0, fmt.Errorf("installer server is required")
+	}
+	sv, err := i.s.serviceView(i.cfg.ServiceName)
+	if err != nil {
+		return 0, err
+	}
+	return sv.Generation(), nil
+}
+
+func (i *FileInstaller) restorePreviousGeneration(expected int) error {
+	if !i.RollbackInstalledGenerationAvailable() {
+		return fmt.Errorf("no previous Catch generation to restore")
+	}
+	if i.s == nil {
+		return fmt.Errorf("restore previous Catch generation: installer server is required")
+	}
+	installer, err := i.s.NewInstaller(i.cfg.InstallerCfg)
+	if err != nil {
+		return fmt.Errorf("restore previous Catch generation: %w", err)
+	}
+	installGeneration := i.installGenerationIfCurrent
+	if installGeneration == nil {
+		installGeneration = (*Installer).InstallGenIfCurrent
+	}
+	if err := installGeneration(installer, expected, i.existingService.Generation()); err != nil {
+		return fmt.Errorf("restore previous Catch generation %d: %w", i.existingService.Generation(), err)
+	}
+	return nil
 }
 
 func (i *FileInstaller) closeAndInstall() error {
@@ -1244,6 +1335,7 @@ func (i *FileInstaller) installStagedService() error {
 	if err := si.Install(); err != nil {
 		return fmt.Errorf("failed to install service: %w", err)
 	}
+	i.installedGeneration = si.committedGeneration
 	i.printf("Service %q installed\n", i.cfg.ServiceName)
 	return nil
 }
