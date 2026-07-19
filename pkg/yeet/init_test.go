@@ -818,8 +818,24 @@ func TestInitLegacyStorageNonInteractivePrintsInstallHomeCommands(t *testing.T) 
 	if len(state.client.applyRequests) != 0 || len(state.prompter.confirmPrompts) != 0 {
 		t.Fatalf("apply/prompts = %#v/%#v, want none", state.client.applyRequests, state.prompter.confirmPrompts)
 	}
-	if !reflect.DeepEqual(state.clientHosts, []string{"example.com"}) {
-		t.Fatalf("RPC hosts = %#v, want SSH user removed", state.clientHosts)
+	if !reflect.DeepEqual(state.clientHosts, []string{"catch"}) {
+		t.Fatalf("RPC hosts = %#v, want configured Catch host", state.clientHosts)
+	}
+}
+
+func TestInitLegacyStorageUsesConfiguredCatchHostAfterMachineInstall(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/root/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, false)
+	state.ui.host = "yeet-pve1"
+
+	if err := runInitLegacyStorageMigration(state.ui, "root@pve1", initStorageOptions{
+		DataDir:       plan.Current.DataDir,
+		existingCatch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(state.clientHosts, []string{"yeet-pve1"}) {
+		t.Fatalf("RPC hosts = %#v, want configured Catch host after machine install", state.clientHosts)
 	}
 }
 
@@ -970,7 +986,7 @@ func TestInitLegacyStorageAfterExplicitHostSetRequiresCleanupConsent(t *testing.
 			activePrompter = prompter
 			isTerminalFn = func(int) bool { return tt.interactive }
 			var output strings.Builder
-			ui := newInitUI(&output, false, false, "catch", "catch-a", catchServiceName)
+			ui := newInitUI(&output, false, false, "catch-a", "catch-a", catchServiceName)
 			if err := runInitLegacyStorageMigration(ui, "ubuntu@catch-a", initStorageOptions{
 				DataDir:             "/var/lib/yeet",
 				existingCatch:       true,

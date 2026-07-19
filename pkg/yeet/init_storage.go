@@ -192,7 +192,7 @@ func runInitLegacyStorageMigration(ui *initUI, userAtRemote string, storage init
 	if !storage.existingCatch || storage.DataDirZFS || storage.ServicesRootZFS {
 		return nil
 	}
-	host := initLegacyStorageRPCHost(userAtRemote)
+	host := initLegacyStorageRPCHost(ui, userAtRemote)
 	client := newHostStorageClientFn(host)
 	if hostSetPathsEqual(storage.DataDir, defaultInitDataDir) {
 		return resumeInitLegacyStorageCleanup(context.Background(), ui, client, storage)
@@ -237,7 +237,14 @@ func runInitLegacyStorageCandidate(ui *initUI, client hostStorageClient, host st
 	return applyInitLegacyStorageMigration(context.Background(), ui.out, client, host, candidate)
 }
 
-func initLegacyStorageRPCHost(userAtRemote string) string {
+func initLegacyStorageRPCHost(ui *initUI, userAtRemote string) string {
+	// SSH installs through the machine address, but Catch RPCs use the
+	// configured Catch identity and may not be reachable on the machine LAN.
+	if ui != nil {
+		if host := strings.TrimSpace(ui.host); host != "" {
+			return host
+		}
+	}
 	_, host, ok := strings.Cut(strings.TrimSpace(userAtRemote), "@")
 	if ok {
 		return host
