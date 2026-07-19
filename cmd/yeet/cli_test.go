@@ -1102,6 +1102,50 @@ func TestSnapshotsDefaultsHelpShowsSubcommands(t *testing.T) {
 	}
 }
 
+func TestSnapshotsRestoreHelpUsesDiskOnlySyntax(t *testing.T) {
+	oldArgs := os.Args
+	oldHandleSvcCmdFn := handleSvcCmdFn
+	oldStdout := os.Stdout
+	oldBridgedArgs := bridgedArgs
+	oldRawArgs := rawArgs
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		handleSvcCmdFn = oldHandleSvcCmdFn
+		os.Stdout = oldStdout
+		bridgedArgs = oldBridgedArgs
+		rawArgs = oldRawArgs
+	})
+
+	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout-*")
+	if err != nil {
+		t.Fatalf("create stdout temp file: %v", err)
+	}
+	os.Stdout = stdoutFile
+	os.Args = []string{"yeet", "snapshots", "restore", "--help"}
+	handleSvcCmdFn = func(args []string) error {
+		t.Fatalf("snapshots restore help should not call handler with args %v", args)
+		return nil
+	}
+
+	if got := run(); got != 0 {
+		t.Fatalf("run exit code = %d, want 0", got)
+	}
+	if _, err := stdoutFile.Seek(0, 0); err != nil {
+		t.Fatalf("seek stdout: %v", err)
+	}
+	rawStdout, err := os.ReadFile(stdoutFile.Name())
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	stdout := string(rawStdout)
+	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] snapshots restore <svc> <snapshot> [--stop] [--start] [--yes] [--generation=current|snapshot]") {
+		t.Fatalf("stdout = %q, want disk-only snapshots restore usage", stdout)
+	}
+	if strings.Contains(stdout, "--mode") || strings.Contains(stdout, "--full") {
+		t.Fatalf("stdout includes retired memory checkpoint syntax:\n%s", stdout)
+	}
+}
+
 func TestParseGlobalFlags(t *testing.T) {
 	tests := []struct {
 		name    string

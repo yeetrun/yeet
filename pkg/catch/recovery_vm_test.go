@@ -7,9 +7,6 @@ package catch
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
@@ -112,6 +108,33 @@ func TestSnapshotsCloneVMRejectsStartBeforeMutation(t *testing.T) {
 	}
 	if got := readRecoveryLog(t, logPath); strings.Contains(got, "systemctl start") {
 		t.Fatalf("systemctl log = %q, --start rejection should not start VM", got)
+	}
+}
+
+func TestSnapshotsCloneVMRejectsAdoptedRuntimeBeforeMutation(t *testing.T) {
+	server := newTestServer(t)
+	seedVMRecoverySource(t, server)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.Components = &db.VMComponentsConfig{}
+		return nil
+	}); err != nil {
+		t.Fatalf("mark VM adopted: %v", err)
+	}
+	var calls []string
+	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
+		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeDisk),
+	})
+
+	err := server.cloneRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", "devbox-copy", cli.SnapshotsCloneFlags{}, io.Discard)
+
+	if err == nil || !strings.Contains(err.Error(), "component-aware recovery cloning") {
+		t.Fatalf("cloneRecoveryPoint error = %v, want component-aware clone rejection", err)
+	}
+	if hasRecoveryCall(calls, "create ") || hasRecoveryCall(calls, "clone ") {
+		t.Fatalf("zfs calls = %#v, adopted VM rejection should not create or clone datasets", calls)
+	}
+	if serviceExists(t, server, "devbox-copy") {
+		t.Fatal("devbox-copy exists after adopted VM rejection; want no DB insert")
 	}
 }
 
@@ -604,7 +627,7 @@ func TestSnapshotsCloneVMDestroysCreatedParentsAfterSuccessfulCloneDBInsertFailu
 	}
 }
 
-func TestSnapshotsCloneVMRemovesInsertedServiceAfterDBSaveFailure(t *testing.T) {
+func TestSnapshotsCloneVMCleansUpAfterDBMutationFailure(t *testing.T) {
 	server := newTestServer(t)
 	seedVMRecoverySource(t, server)
 	dbPath := filepath.Join(server.cfg.RootDir, "db.json")
@@ -634,18 +657,91 @@ func TestSnapshotsCloneVMRemovesInsertedServiceAfterDBSaveFailure(t *testing.T) 
 
 	err := server.cloneRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", "devbox-copy", cli.SnapshotsCloneFlags{}, io.Discard)
 
-	if err == nil || !strings.Contains(err.Error(), "failed to save data") {
-		t.Fatalf("cloneRecoveryPoint error = %v, want DB save failure", err)
+	if err == nil || !strings.Contains(err.Error(), "failed to get data") {
+		t.Fatalf("cloneRecoveryPoint error = %v, want DB mutation failure", err)
 	}
 	if !hasRecoveryCall(calls, "destroy -r "+targetDataset) {
-		t.Fatalf("zfs calls = %#v, want cleanup destroy after DB save failure", calls)
+		t.Fatalf("zfs calls = %#v, want cleanup destroy after DB mutation failure", calls)
 	}
 	if serviceExists(t, server, "devbox-copy") {
-		t.Fatal("devbox-copy remains in memory after DB save failure cleanup")
+		t.Fatal("devbox-copy remains in memory after DB mutation failure cleanup")
 	}
 }
 
-func TestSnapshotsCloneVMRemovesInsertedServiceAfterDBSaveFailureWithParentCleanupFailure(t *testing.T) {
+func TestSnapshotsCloneVMDestroysDatasetAfterUnpublishedSaveFailureAfterInsertCallback(t *testing.T) {
+	server := newTestServer(t)
+	seedVMRecoverySource(t, server)
+	targetDataset := "flash/yeet/vms/devbox-copy/vm/d-abc/root"
+	var calls []string
+	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
+		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeDisk),
+	})
+	dbPath := filepath.Join(server.cfg.RootDir, "db.json")
+	saveErr := errors.New("database save failed after insert callback")
+	realMutate := mutateRecoveryCloneData
+	mutateRecoveryCloneData = func(store *db.Store, f func(*db.Data) error) (*db.Data, error) {
+		dv, err := store.Get()
+		if err != nil {
+			return nil, err
+		}
+		staged := dv.AsStruct().Clone()
+		if err := f(staged); err != nil {
+			return nil, err
+		}
+		if err := os.Remove(dbPath); err != nil {
+			t.Fatalf("remove database before persistent save failure: %v", err)
+		}
+		if err := os.Mkdir(dbPath, 0o755); err != nil {
+			t.Fatalf("make database path persistently unsaveable: %v", err)
+		}
+		return nil, saveErr
+	}
+	t.Cleanup(func() { mutateRecoveryCloneData = realMutate })
+
+	err := server.cloneRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", "devbox-copy", cli.SnapshotsCloneFlags{}, io.Discard)
+	if !errors.Is(err, saveErr) {
+		t.Fatalf("cloneRecoveryPoint error = %v, want persistent save failure", err)
+	}
+	if !hasRecoveryCall(calls, "destroy -r "+targetDataset) {
+		t.Fatalf("zfs calls = %#v, want direct dataset cleanup after unpublished insert", calls)
+	}
+}
+
+func TestSnapshotsCloneVMPreservesPublishedCloneAfterDBDurabilityWarning(t *testing.T) {
+	server := newTestServer(t)
+	seedVMRecoverySource(t, server)
+	var calls []string
+	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
+		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeDisk),
+	})
+	injected := errors.New("database parent sync failed")
+	realMutate := mutateRecoveryCloneData
+	mutateRecoveryCloneData = func(store *db.Store, f func(*db.Data) error) (*db.Data, error) {
+		data, err := store.MutateData(f)
+		if err != nil {
+			return data, err
+		}
+		return data, &db.PostPublicationError{Err: injected, MutationCommitted: true}
+	}
+	t.Cleanup(func() { mutateRecoveryCloneData = realMutate })
+
+	err := server.cloneRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", "devbox-copy", cli.SnapshotsCloneFlags{}, io.Discard)
+	if !errors.Is(err, injected) {
+		t.Fatalf("cloneRecoveryPoint error = %v, want durability warning", err)
+	}
+	var publishedErr *db.PostPublicationError
+	if !errors.As(err, &publishedErr) {
+		t.Fatalf("cloneRecoveryPoint error = %v, want *db.PostPublicationError", err)
+	}
+	if hasRecoveryCall(calls, "destroy -r ") {
+		t.Fatalf("zfs calls = %#v, published clone must not be destroyed", calls)
+	}
+	if !serviceExists(t, server, "devbox-copy") {
+		t.Fatal("published devbox-copy service was removed after durability warning")
+	}
+}
+
+func TestSnapshotsCloneVMReportsDBMutationAndParentCleanupFailures(t *testing.T) {
 	server := newTestServer(t)
 	seedVMRecoverySource(t, server)
 	dbPath := filepath.Join(server.cfg.RootDir, "db.json")
@@ -695,8 +791,8 @@ func TestSnapshotsCloneVMRemovesInsertedServiceAfterDBSaveFailureWithParentClean
 
 	err := server.cloneRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", "devbox-copy", cli.SnapshotsCloneFlags{}, io.Discard)
 
-	if err == nil || !strings.Contains(err.Error(), "failed to save data") {
-		t.Fatalf("cloneRecoveryPoint error = %v, want DB save failure", err)
+	if err == nil || !strings.Contains(err.Error(), "failed to get data") {
+		t.Fatalf("cloneRecoveryPoint error = %v, want DB mutation failure", err)
 	}
 	if !strings.Contains(err.Error(), "dataset is busy") {
 		t.Fatalf("cloneRecoveryPoint error = %v, want parent cleanup failure", err)
@@ -710,7 +806,7 @@ func TestSnapshotsCloneVMRemovesInsertedServiceAfterDBSaveFailureWithParentClean
 		"destroy "+targetParent,
 	)
 	if serviceExists(t, server, "devbox-copy") {
-		t.Fatal("devbox-copy remains in memory after DB save failure cleanup with parent cleanup failure")
+		t.Fatal("devbox-copy remains in memory after DB mutation failure cleanup with parent cleanup failure")
 	}
 }
 
@@ -866,7 +962,7 @@ func TestSnapshotsRestoreVMCloneCopiesSelectedSnapshot(t *testing.T) {
 	}
 	t.Cleanup(func() { vmRestoreZVOLDeviceWaiter = oldWaiter })
 	oldController := vmSnapshotFirecracker
-	vmSnapshotFirecracker = &recordingVMFirecracker{calls: &[]string{}}
+	vmSnapshotFirecracker = &recordingVMFirecrackerPauser{}
 	t.Cleanup(func() { vmSnapshotFirecracker = oldController })
 	server.zfsRunner = vmRecoveryLoggedZFSRunner(t, logPath, map[string]string{
 		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeDisk),
@@ -1079,642 +1175,6 @@ func TestSnapshotsRestoreVMPreRestoreFailureStopsBeforeNoMoreMutation(t *testing
 	}
 }
 
-func TestSnapshotsRestoreVMFullModeFailsBeforeMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	seedFullVMCheckpointMetadata(t, root, "devbox", vmRecoverySnapshot)
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "full checkpoint metadata is missing compatibility fields") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want old metadata compatibility rejection", err)
-	}
-	if hasRecoveryCall(calls, "snapshot ") || hasRecoveryCall(calls, "clone ") || hasRecoveryCall(calls, "destroy ") || hasRecoveryCall(calls, "rollback ") {
-		t.Fatalf("zfs calls = %#v, full mode should not mutate disk", calls)
-	}
-	if got := readRecoveryLog(t, logPath); strings.Contains(got, "systemctl stop") || strings.Contains(got, "dd ") {
-		t.Fatalf("system command log = %q, full mode should not stop or copy", got)
-	}
-}
-
-func TestSnapshotsRestoreVMFullRejectsCPUMemoryMismatchBeforeMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, nil)
-	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
-		service.VM.CPUs = 8
-		service.VM.MemoryBytes = 8 << 30
-		return nil
-	}); err != nil {
-		t.Fatalf("mutate VM shape: %v", err)
-	}
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "checkpoint CPU or memory does not match current VM config") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want CPU/memory compatibility rejection", err)
-	}
-	assertNoFullVMRestoreMutation(t, calls, logPath)
-}
-
-func TestSnapshotsRestoreVMFullRejectsDiskPathMismatchBeforeMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, func(metadata map[string]any) {
-		metadata["diskPath"] = "/dev/zvol/flash/yeet/vms/devbox/vm/d-old/root"
-	})
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "checkpoint disk path does not match current VM config") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want disk path compatibility rejection", err)
-	}
-	assertNoFullVMRestoreMutation(t, calls, logPath)
-}
-
-func TestSnapshotsRestoreVMFullRejectsVMConfigHashMismatchBeforeMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, nil)
-	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
-		service.VM.SSH.User = "root"
-		return nil
-	}); err != nil {
-		t.Fatalf("mutate VM config: %v", err)
-	}
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "checkpoint VM config hash does not match current VM config") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want VM config hash compatibility rejection", err)
-	}
-	assertNoFullVMRestoreMutation(t, calls, logPath)
-}
-
-func TestSnapshotsRestoreVMFullRejectsBalloonConfigHashMismatchBeforeMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
-		service.VM.Balloon = db.VMBalloonConfig{Mode: vmBalloonModeAuto, MinBytes: 1 << 30, StatsIntervalSeconds: vmBalloonDefaultStatsIntervalSeconds}
-		return nil
-	}); err != nil {
-		t.Fatalf("seed VM balloon config: %v", err)
-	}
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, nil)
-	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
-		service.VM.Balloon.MinBytes = 2 << 30
-		return nil
-	}); err != nil {
-		t.Fatalf("mutate VM balloon config: %v", err)
-	}
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "checkpoint balloon config hash does not match current VM config") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want balloon config hash compatibility rejection", err)
-	}
-	assertNoFullVMRestoreMutation(t, calls, logPath)
-}
-
-func TestSnapshotsRestoreVMFullRejectsMissingCheckpointFilesBeforeMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	_, memoryPath := seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, nil)
-	if err := os.Remove(memoryPath); err != nil {
-		t.Fatalf("remove checkpoint memory file: %v", err)
-	}
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "full checkpoint state or memory file is missing") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want missing checkpoint file rejection", err)
-	}
-	assertNoFullVMRestoreMutation(t, calls, logPath)
-}
-
-func TestSnapshotsRestoreVMFullRejectsMissingFirecrackerIdentityBeforeMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, nil)
-	identity := installVMRecoveryFirecrackerLauncher(t, root, "Firecracker v1.7.0-test")
-	stubVMRecoveryFirecrackerVersion(t, identity.Version)
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "full checkpoint metadata is missing compatibility fields") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want missing Firecracker identity rejection", err)
-	}
-	assertNoFullVMRestoreMutation(t, calls, logPath)
-}
-
-func TestSnapshotsRestoreVMFullRejectsFirecrackerSHAMismatchBeforeMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	identity := installVMRecoveryFirecrackerLauncher(t, root, "Firecracker v1.7.0-test")
-	stubVMRecoveryFirecrackerVersion(t, identity.Version)
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, func(metadata map[string]any) {
-		metadata["firecrackerSha256"] = "sha256:" + strings.Repeat("0", 64)
-		metadata["firecrackerVersion"] = identity.Version
-	})
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "checkpoint Firecracker binary hash does not match current launcher") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want Firecracker SHA mismatch rejection", err)
-	}
-	assertNoFullVMRestoreMutation(t, calls, logPath)
-}
-
-func TestSnapshotsRestoreVMFullRejectsFirecrackerVersionMismatchBeforeMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	identity := installVMRecoveryFirecrackerLauncher(t, root, "Firecracker v1.7.0-test")
-	stubVMRecoveryFirecrackerVersion(t, identity.Version)
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, func(metadata map[string]any) {
-		metadata["firecrackerSha256"] = identity.SHA256
-		metadata["firecrackerVersion"] = "Firecracker v9.9.9-other"
-	})
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "checkpoint Firecracker version does not match current launcher") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want Firecracker version mismatch rejection", err)
-	}
-	assertNoFullVMRestoreMutation(t, calls, logPath)
-}
-
-func TestValidateFullVMCheckpointFirecrackerIdentityNormalizesVersionNoise(t *testing.T) {
-	err := validateFullVMCheckpointFirecrackerIdentity(
-		vmCheckpointMetadata{
-			FirecrackerSha256:  "sha256:" + strings.Repeat("a", 64),
-			FirecrackerVersion: "Firecracker v1.14.3\n\n2026-06-14T11:38:52.280711996 [anonymous-instance:main] Firecracker exiting successfully. exit_code=0",
-		},
-		vmCheckpointCompatibility{
-			FirecrackerSha256:  "sha256:" + strings.Repeat("a", 64),
-			FirecrackerVersion: "Firecracker v1.14.3",
-		},
-	)
-	if err != nil {
-		t.Fatalf("validateFullVMCheckpointFirecrackerIdentity: %v, want noisy metadata version accepted", err)
-	}
-}
-
-func TestValidateFullVMCheckpointRequiresBalloonConfigHash(t *testing.T) {
-	metadata := vmCheckpointMetadata{
-		Mode:              recoveryModeFull,
-		FirecrackerState:  "/tmp/state",
-		FirecrackerMemory: "/tmp/memory",
-		MachineConfigHash: "sha256:" + strings.Repeat("a", 64),
-		NetworkConfigHash: "sha256:" + strings.Repeat("b", 64),
-		DiskPath:          "/dev/zvol/tank/vms/devbox/root",
-		VCPU:              4,
-		MemoryMiB:         4096,
-		VMConfigHash:      "sha256:" + strings.Repeat("c", 64),
-	}
-
-	if metadata.hasFullCompatibilityFields() {
-		t.Fatalf("hasFullCompatibilityFields = true without balloonConfigHash; want false")
-	}
-}
-
-func TestSnapshotsRestoreVMFullReportsMissingBalloonCompatibilityField(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, func(metadata map[string]any) {
-		delete(metadata, "balloonConfigHash")
-	})
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "balloonConfigHash") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want missing balloonConfigHash compatibility rejection", err)
-	}
-	assertNoFullVMRestoreMutation(t, calls, logPath)
-}
-
-func TestSnapshotsRestoreVMFullCompatibleCheckpointRestoresDiskSchedulesStateLoadAndStarts(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	identity := installVMRecoveryFirecrackerLauncher(t, root, "Firecracker v1.7.0-test")
-	statePath, memoryPath := seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, func(metadata map[string]any) {
-		metadata["firecrackerSha256"] = identity.SHA256
-		metadata["firecrackerVersion"] = identity.Version
-	})
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	resultPath := vmFullRestoreResultPath(filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"))
-	t.Setenv("YEET_TEST_VM_RESTORE_RESULT", resultPath)
-	var calls []string
-	zfsRunner := vmRecoveryLoggedZFSRunner(t, logPath, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
-		calls = append(calls, strings.Join(args, " "))
-		return zfsRunner(ctx, args...)
-	}
-	stubFullVMRestoreHealth(t, func(context.Context, string) (vmAgentGuestReadyState, error) {
-		return vmAgentGuestReadyState{SSHReady: true}, nil
-	})
-
-	var out bytes.Buffer
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Stop: true, Yes: true, Mode: recoveryModeFull}, &out)
-	if err != nil {
-		t.Fatalf("restoreRecoveryPoint: %v; zfs calls = %#v; system calls = %q", err, calls, readRecoveryLog(t, logPath))
-	}
-
-	lines := readRecoveryLogLines(t, logPath)
-	assertCallOrder(t, lines, "systemctl stop yeet-vm-devbox.service", "zfs snapshot", "systemctl daemon-reload", "dd ", "systemctl start yeet-vm-devbox.service")
-	requestPath := vmFullRestoreRequestPath(filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"))
-	raw, err := os.ReadFile(requestPath)
-	if err != nil {
-		t.Fatalf("read full restore request: %v", err)
-	}
-	var request vmFullRestoreRequest
-	if err := json.Unmarshal(raw, &request); err != nil {
-		t.Fatalf("decode full restore request: %v", err)
-	}
-	if request.StatePath != statePath || request.MemoryPath != memoryPath || !request.Resume {
-		t.Fatalf("restore request = %#v, want state=%q memory=%q resume=true", request, statePath, memoryPath)
-	}
-	output := out.String()
-	for _, want := range []string{
-		"Pre-restore recovery point:",
-		"Restored VM disk: " + vmRecoverySnapshot,
-		"Scheduled full VM state restore: yeet-20260613T203100Z",
-		"Started service: devbox",
-		"Restored full VM state: yeet-20260613T203100Z",
-		"Restore complete.",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("output missing %q:\n%s", want, output)
-		}
-	}
-}
-
-func TestSnapshotsRestoreVMFullRequiresRestorableSystemdUnitBeforeDiskMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	identity := installVMRecoveryFirecrackerLauncher(t, root, "Firecracker v1.7.0-test")
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, func(metadata map[string]any) {
-		metadata["firecrackerSha256"] = identity.SHA256
-		metadata["firecrackerVersion"] = identity.Version
-	})
-	unitPath := filepath.Join(vmSystemdSystemDir, vmSystemdUnitName("devbox"))
-	rawUnit, err := os.ReadFile(unitPath)
-	if err != nil {
-		t.Fatalf("read VM systemd unit: %v", err)
-	}
-	brokenUnit := strings.ReplaceAll(string(rawUnit), "RestartForceExitStatus=75\n", "")
-	brokenUnit = strings.ReplaceAll(brokenUnit, "RestartPreventExitStatus=76\n", "")
-	if err := os.WriteFile(unitPath, []byte(brokenUnit), 0o644); err != nil {
-		t.Fatalf("write broken VM systemd unit: %v", err)
-	}
-
-	withVMRecoveryStatus(t, svc.StatusStopped)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	zfsRunner := vmRecoveryLoggedZFSRunner(t, logPath, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
-		calls = append(calls, strings.Join(args, " "))
-		return zfsRunner(ctx, args...)
-	}
-
-	err = server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-	if err == nil {
-		t.Fatal("restoreRecoveryPoint error = nil, want systemd restore-prevent failure")
-	}
-	for _, want := range []string{
-		"does not contain RestartForceExitStatus=75",
-		"pre-restore recovery point:",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("restoreRecoveryPoint error = %v, want %q", err, want)
-		}
-	}
-	if !hasRecoveryCall(calls, "snapshot ") {
-		t.Fatalf("zfs calls = %#v, want pre-restore snapshot", calls)
-	}
-	if strings.Contains(readRecoveryLog(t, logPath), "dd ") {
-		t.Fatalf("system command log = %q, disk copy should not run before restore startup is prepared", readRecoveryLog(t, logPath))
-	}
-}
-
-func TestSnapshotsRestoreVMFullStartWithoutLoadResultFailsWithPreRestorePoint(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	identity := installVMRecoveryFirecrackerLauncher(t, root, "Firecracker v1.7.0-test")
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, func(metadata map[string]any) {
-		metadata["firecrackerSha256"] = identity.SHA256
-		metadata["firecrackerVersion"] = identity.Version
-	})
-	withVMRecoveryStatus(t, svc.StatusRunning)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	zfsRunner := vmRecoveryLoggedZFSRunner(t, logPath, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeFull),
-	})
-	server.zfsRunner = func(ctx context.Context, args ...string) (string, string, error) {
-		calls = append(calls, strings.Join(args, " "))
-		return zfsRunner(ctx, args...)
-	}
-
-	oldTimeout := vmFullRestoreResultWaitTimeout
-	oldInterval := vmFullRestoreResultWaitInterval
-	vmFullRestoreResultWaitTimeout = 50 * time.Millisecond
-	vmFullRestoreResultWaitInterval = time.Millisecond
-	t.Cleanup(func() {
-		vmFullRestoreResultWaitTimeout = oldTimeout
-		vmFullRestoreResultWaitInterval = oldInterval
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Stop: true, Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-	if err == nil {
-		t.Fatal("restoreRecoveryPoint error = nil, want missing restore-load result error")
-	}
-	for _, want := range []string{
-		"full VM state restore did not report completion",
-		"pre-restore recovery point:",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("restoreRecoveryPoint error = %v, want %q", err, want)
-		}
-	}
-	if !hasRecoveryCall(calls, "snapshot ") || !strings.Contains(readRecoveryLog(t, logPath), "systemctl start yeet-vm-devbox.service") {
-		t.Fatalf("expected disk restore and VM start before load-result failure; zfs calls=%#v log=%q", calls, readRecoveryLog(t, logPath))
-	}
-}
-
-func TestWaitForFullVMStateRestoreToleratesTransientPartialResult(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	installFakeSystemctl(t)
-	service := mustService(t, server, "devbox")
-	service.VM.Sockets.VsockSocketPath = filepath.Join(serviceRunDirForRoot(root), "vsock.sock")
-	resultPath := vmFullRestoreResultPath(service.VM.Sockets.APISocketPath)
-	if err := os.MkdirAll(filepath.Dir(resultPath), 0o755); err != nil {
-		t.Fatalf("mkdir restore result dir: %v", err)
-	}
-	if err := os.WriteFile(resultPath, []byte("{"), 0o600); err != nil {
-		t.Fatalf("write partial restore result: %v", err)
-	}
-
-	oldTimeout := vmFullRestoreResultWaitTimeout
-	oldInterval := vmFullRestoreResultWaitInterval
-	vmFullRestoreResultWaitTimeout = 5 * time.Second
-	vmFullRestoreResultWaitInterval = time.Millisecond
-	t.Cleanup(func() {
-		vmFullRestoreResultWaitTimeout = oldTimeout
-		vmFullRestoreResultWaitInterval = oldInterval
-	})
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		_ = writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess, RunnerPID: 1})
-	}()
-	stubFullVMRestoreHealth(t, func(context.Context, string) (vmAgentGuestReadyState, error) {
-		return vmAgentGuestReadyState{SSHReady: true}, nil
-	})
-
-	if err := server.waitForFullVMStateRestore(context.Background(), service, "pre-restore-point"); err != nil {
-		t.Fatalf("waitForFullVMStateRestore: %v", err)
-	}
-}
-
-func TestWaitForFullVMStateRestoreRejectsSuccessWithoutRunnerPID(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	service := mustService(t, server, "devbox")
-	resultPath := vmFullRestoreResultPath(service.VM.Sockets.APISocketPath)
-	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess}); err != nil {
-		t.Fatalf("write restore result: %v", err)
-	}
-
-	err := server.waitForFullVMStateRestore(context.Background(), service, "pre-restore-point")
-	if err == nil || !strings.Contains(err.Error(), "success without a runner PID") {
-		t.Fatalf("waitForFullVMStateRestore error = %v, want missing runner PID rejection", err)
-	}
-}
-
-func TestWaitForFullVMStateRestoreRejectsVMMExitAfterLoadSuccess(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	service := mustService(t, server, "devbox")
-	resultPath := vmFullRestoreResultPath(service.VM.Sockets.APISocketPath)
-	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess, RunnerPID: 1}); err != nil {
-		t.Fatalf("write restore result: %v", err)
-	}
-
-	oldStatus := vmFullRestoreRuntimeStatus
-	oldMainPID := vmFullRestoreMainPID
-	oldStability := vmFullRestoreStabilityWait
-	oldInterval := vmFullRestoreHealthWaitInterval
-	statuses := []svc.Status{svc.StatusRunning, svc.StatusStopped}
-	vmFullRestoreRuntimeStatus = func(*vmRunner) (svc.Status, error) {
-		status := statuses[0]
-		if len(statuses) > 1 {
-			statuses = statuses[1:]
-		}
-		return status, nil
-	}
-	vmFullRestoreMainPID = func(*vmRunner) (int, error) { return 1, nil }
-	vmFullRestoreStabilityWait = 10 * time.Millisecond
-	vmFullRestoreHealthWaitInterval = time.Millisecond
-	t.Cleanup(func() {
-		vmFullRestoreRuntimeStatus = oldStatus
-		vmFullRestoreMainPID = oldMainPID
-		vmFullRestoreStabilityWait = oldStability
-		vmFullRestoreHealthWaitInterval = oldInterval
-	})
-
-	err := server.waitForFullVMStateRestore(context.Background(), service, "pre-restore-point")
-	if err == nil {
-		t.Fatal("waitForFullVMStateRestore error = nil, want delayed VMM exit failure")
-	}
-	for _, want := range []string{"post-load stabilization", "pre-restore-point"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("waitForFullVMStateRestore error = %v, want %q", err, want)
-		}
-	}
-}
-
-func TestWaitForFullVMStateRestoreRequiresGuestAgentSSHReadiness(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	service := mustService(t, server, "devbox")
-	service.VM.Sockets.VsockSocketPath = filepath.Join(serviceRunDirForRoot(root), "vsock.sock")
-	resultPath := vmFullRestoreResultPath(service.VM.Sockets.APISocketPath)
-	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess, RunnerPID: 1}); err != nil {
-		t.Fatalf("write restore result: %v", err)
-	}
-
-	queries := 0
-	stubFullVMRestoreHealth(t, func(_ context.Context, socketPath string) (vmAgentGuestReadyState, error) {
-		queries++
-		if socketPath != service.VM.Sockets.VsockSocketPath {
-			t.Fatalf("guest readiness socket = %q, want %q", socketPath, service.VM.Sockets.VsockSocketPath)
-		}
-		if queries < 2 {
-			return vmAgentGuestReadyState{}, nil
-		}
-		return vmAgentGuestReadyState{SSHReady: true}, nil
-	})
-
-	if err := server.waitForFullVMStateRestore(context.Background(), service, "pre-restore-point"); err != nil {
-		t.Fatalf("waitForFullVMStateRestore: %v", err)
-	}
-	if queries < 2 {
-		t.Fatalf("guest readiness queries = %d, want retry before success", queries)
-	}
-}
-
-func TestWaitForFullVMStateRestoreRejectsRestartedRunnerAfterGuestReadiness(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	service := mustService(t, server, "devbox")
-	service.VM.Sockets.VsockSocketPath = filepath.Join(serviceRunDirForRoot(root), "vsock.sock")
-	resultPath := vmFullRestoreResultPath(service.VM.Sockets.APISocketPath)
-	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess, RunnerPID: 101}); err != nil {
-		t.Fatalf("write restore result: %v", err)
-	}
-
-	oldStatus := vmFullRestoreRuntimeStatus
-	oldMainPID := vmFullRestoreMainPID
-	oldQuery := vmFullRestoreGuestReadyQuery
-	oldStability := vmFullRestoreStabilityWait
-	vmFullRestoreRuntimeStatus = func(*vmRunner) (svc.Status, error) { return svc.StatusRunning, nil }
-	mainPIDs := []int{101, 101, 202}
-	vmFullRestoreMainPID = func(*vmRunner) (int, error) {
-		pid := mainPIDs[0]
-		if len(mainPIDs) > 1 {
-			mainPIDs = mainPIDs[1:]
-		}
-		return pid, nil
-	}
-	vmFullRestoreGuestReadyQuery = func(context.Context, string) (vmAgentGuestReadyState, error) {
-		return vmAgentGuestReadyState{SSHReady: true}, nil
-	}
-	vmFullRestoreStabilityWait = 0
-	t.Cleanup(func() {
-		vmFullRestoreRuntimeStatus = oldStatus
-		vmFullRestoreMainPID = oldMainPID
-		vmFullRestoreGuestReadyQuery = oldQuery
-		vmFullRestoreStabilityWait = oldStability
-	})
-
-	err := server.waitForFullVMStateRestore(context.Background(), service, "pre-restore-point")
-	if err == nil {
-		t.Fatal("waitForFullVMStateRestore error = nil, want restarted runner rejection")
-	}
-	for _, want := range []string{"runtime changed from PID 101 to 202", "pre-restore-point"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("waitForFullVMStateRestore error = %v, want %q", err, want)
-		}
-	}
-}
-
-func TestSnapshotsRestoreVMFullRequiresFullRecoveryPointBeforeMutation(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedCompatibleFullVMCheckpointMetadata(t, server, root, vmRecoverySnapshot, nil)
-	withVMRecoveryStatus(t, svc.StatusStopped)
-	logPath := installFakeSystemctl(t)
-	installFakeDD(t, logPath)
-	var calls []string
-	server.zfsRunner = vmRecoveryZFSRunner(t, &calls, map[string]string{
-		vmRecoveryDataset: vmRecoverySnapshotLine(vmRecoverySnapshot, "devbox", recoveryModeDisk),
-	})
-
-	err := server.restoreRecoveryPoint(context.Background(), "devbox", "yeet-20260613T203100Z", cli.SnapshotsRestoreFlags{Yes: true, Mode: recoveryModeFull}, ioDiscardReadWriter{})
-
-	if err == nil || !strings.Contains(err.Error(), "is not a full VM checkpoint") {
-		t.Fatalf("restoreRecoveryPoint error = %v, want full checkpoint rejection", err)
-	}
-	assertNoFullVMRestoreMutation(t, calls, logPath)
-}
-
 func TestSnapshotsRestoreVMPreRestoreDoesNotPrune(t *testing.T) {
 	server := newTestServer(t)
 	seedVMRecoverySource(t, server)
@@ -1833,23 +1293,6 @@ func vmRecoveryLoggedZFSRunnerWithSizes(t *testing.T, logPath string, lists map[
 	}
 }
 
-func isRecoverySnapshotList(args []string) bool {
-	if len(args) <= 4 || args[0] != "list" {
-		return false
-	}
-	hasType := false
-	hasSnapshot := false
-	for _, arg := range args {
-		if arg == "-t" {
-			hasType = true
-		}
-		if arg == "snapshot" {
-			hasSnapshot = true
-		}
-	}
-	return hasType && hasSnapshot
-}
-
 func withVMRecoveryStatus(t *testing.T, status svc.Status) {
 	t.Helper()
 	old := serverVMStatusFunc
@@ -1857,175 +1300,11 @@ func withVMRecoveryStatus(t *testing.T, status svc.Status) {
 	t.Cleanup(func() { serverVMStatusFunc = old })
 }
 
-func stubFullVMRestoreHealth(t *testing.T, query func(context.Context, string) (vmAgentGuestReadyState, error)) {
-	t.Helper()
-	oldQuery := vmFullRestoreGuestReadyQuery
-	oldStatus := vmFullRestoreRuntimeStatus
-	oldMainPID := vmFullRestoreMainPID
-	oldStability := vmFullRestoreStabilityWait
-	oldInterval := vmFullRestoreHealthWaitInterval
-	vmFullRestoreGuestReadyQuery = query
-	vmFullRestoreRuntimeStatus = func(*vmRunner) (svc.Status, error) { return svc.StatusRunning, nil }
-	vmFullRestoreMainPID = func(*vmRunner) (int, error) { return 1, nil }
-	vmFullRestoreStabilityWait = 0
-	vmFullRestoreHealthWaitInterval = time.Millisecond
-	t.Cleanup(func() {
-		vmFullRestoreGuestReadyQuery = oldQuery
-		vmFullRestoreRuntimeStatus = oldStatus
-		vmFullRestoreMainPID = oldMainPID
-		vmFullRestoreStabilityWait = oldStability
-		vmFullRestoreHealthWaitInterval = oldInterval
-	})
-}
-
-type vmRecoveryFirecrackerIdentity struct {
-	SHA256  string
-	Version string
-}
-
-func installVMRecoveryFirecrackerLauncher(t *testing.T, root string, version string) vmRecoveryFirecrackerIdentity {
-	t.Helper()
-	firecrackerBinary := filepath.Join(root, "firecracker")
-	firecrackerBytes := []byte("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo " + strconv.Quote(version) + "; exit 0; fi\nexit 1\n")
-	if err := os.WriteFile(firecrackerBinary, firecrackerBytes, 0o755); err != nil {
-		t.Fatalf("write firecracker binary: %v", err)
-	}
-	systemdDir := t.TempDir()
-	oldSystemdDir := vmSystemdSystemDir
-	vmSystemdSystemDir = systemdDir
-	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
-	unit, err := renderVMSystemdUnit(vmSystemdConfig{
-		Service:          "devbox",
-		Runner:           "/srv/catch/run/catch",
-		DataDir:          "/srv/catch/data",
-		ServicesRoot:     "/srv/services",
-		ServiceRoot:      root,
-		DiskPath:         filepath.Join(serviceDataDirForRoot(root), "rootfs.raw"),
-		Firecracker:      firecrackerBinary,
-		Jailer:           filepath.Join(root, "jailer"),
-		JailerBase:       filepath.Join(root, "jails"),
-		ConfigPath:       filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
-		APISocket:        filepath.Join(serviceRunDirForRoot(root), "firecracker.sock"),
-		ConsoleSocket:    filepath.Join(serviceRunDirForRoot(root), "serial.sock"),
-		WorkingDirectory: root,
-	})
-	if err != nil {
-		t.Fatalf("render VM systemd unit: %v", err)
-	}
-	assertJailerOnlyVMUnit(t, unit)
-	if err := os.WriteFile(filepath.Join(systemdDir, vmSystemdUnitName("devbox")), []byte(unit), 0o644); err != nil {
-		t.Fatalf("write VM systemd unit: %v", err)
-	}
-	sum := sha256.Sum256(firecrackerBytes)
-	return vmRecoveryFirecrackerIdentity{
-		SHA256:  "sha256:" + hex.EncodeToString(sum[:]),
-		Version: version,
-	}
-}
-
-func stubVMRecoveryFirecrackerVersion(t *testing.T, version string) {
-	t.Helper()
-	oldVersionFunc := vmCheckpointFirecrackerVersionFunc
-	vmCheckpointFirecrackerVersionFunc = func(string) (string, error) {
-		return version, nil
-	}
-	t.Cleanup(func() {
-		vmCheckpointFirecrackerVersionFunc = oldVersionFunc
-	})
-}
-
-func seedCompatibleFullVMCheckpointMetadata(t *testing.T, server *Server, root string, snapshotName string, edit func(map[string]any)) (string, string) {
-	t.Helper()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
-		service.VM.Sockets.VsockSocketPath = filepath.Join(serviceRunDirForRoot(root), "vsock.sock")
-		return nil
-	}); err != nil {
-		t.Fatalf("set VM vsock socket: %v", err)
-	}
-	service := mustService(t, server, "devbox")
-	vm := *service.VM.Clone()
-	dir := vmCheckpointDir(root, vmSnapshotShortName(snapshotName))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir checkpoint dir: %v", err)
-	}
-	statePath := filepath.Join(dir, "firecracker-state.bin")
-	memoryPath := filepath.Join(dir, "memory.bin")
-	if err := os.WriteFile(statePath, []byte("state"), 0o644); err != nil {
-		t.Fatalf("write checkpoint state: %v", err)
-	}
-	if err := os.WriteFile(memoryPath, []byte("memory"), 0o644); err != nil {
-		t.Fatalf("write checkpoint memory: %v", err)
-	}
-	var cfg firecrackerConfig
-	rawConfig, err := os.ReadFile(filepath.Join(serviceRunDirForRoot(root), "firecracker.json"))
-	if err != nil {
-		t.Fatalf("read firecracker config: %v", err)
-	}
-	if err := json.Unmarshal(rawConfig, &cfg); err != nil {
-		t.Fatalf("decode firecracker config: %v", err)
-	}
-	balloonHash, vmHash, err := vmCheckpointConfigHashes(vm)
-	if err != nil {
-		t.Fatalf("VM checkpoint config hashes: %v", err)
-	}
-	metadata := map[string]any{
-		"service":           "devbox",
-		"zvolSnapshot":      snapshotName,
-		"firecrackerState":  statePath,
-		"firecrackerMemory": memoryPath,
-		"createdBy":         "catch",
-		"createdAt":         "2026-06-13T20:31:00Z",
-		"mode":              recoveryModeFull,
-		"machineConfigHash": canonicalJSONHashForRecoveryTest(t, cfg.MachineConfig),
-		"networkConfigHash": canonicalJSONHashForRecoveryTest(t, cfg.NetworkInterfaces),
-		"diskPath":          vm.Disk.Path,
-		"vcpu":              vm.CPUs,
-		"memoryMiB":         int(vm.MemoryBytes >> 20),
-		"balloonConfigHash": balloonHash,
-		"vmConfigHash":      vmHash,
-	}
-	if edit != nil {
-		edit(metadata)
-	}
-	raw, err := json.MarshalIndent(metadata, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal checkpoint metadata: %v", err)
-	}
-	raw = append(raw, '\n')
-	if err := os.WriteFile(filepath.Join(dir, "metadata.json"), raw, 0o644); err != nil {
-		t.Fatalf("write checkpoint metadata: %v", err)
-	}
-	return statePath, memoryPath
-}
-
-func canonicalJSONHashForRecoveryTest(t *testing.T, value any) string {
-	t.Helper()
-	raw, err := json.Marshal(value)
-	if err != nil {
-		t.Fatalf("marshal canonical JSON: %v", err)
-	}
-	sum := sha256.Sum256(raw)
-	return "sha256:" + hex.EncodeToString(sum[:])
-}
-
-func assertNoFullVMRestoreMutation(t *testing.T, zfsCalls []string, logPath string) {
-	t.Helper()
-	for _, forbidden := range []string{"snapshot ", "clone ", "destroy ", "rollback "} {
-		if hasRecoveryCall(zfsCalls, forbidden) {
-			t.Fatalf("zfs calls = %#v, full mode should not run %q", zfsCalls, forbidden)
-		}
-	}
-	if got := readRecoveryLog(t, logPath); strings.Contains(got, "systemctl stop") || strings.Contains(got, "dd ") {
-		t.Fatalf("system command log = %q, full mode should not stop or copy", got)
-	}
-}
-
 func installFakeSystemctl(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "systemctl.log")
-	script := "#!/bin/sh\nprintf 'systemctl %s\\n' \"$*\" >> " + strconv.Quote(logPath) + "\nif [ \"$1\" = \"start\" ] && [ -n \"$YEET_TEST_VM_RESTORE_RESULT\" ]; then\n\tprintf '{\"status\":\"success\",\"runnerPid\":1}\\n' > \"$YEET_TEST_VM_RESTORE_RESULT\"\nfi\n"
+	script := "#!/bin/sh\nprintf 'systemctl %s\\n' \"$*\" >> " + strconv.Quote(logPath) + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "systemctl"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake systemctl: %v", err)
 	}
@@ -2059,18 +1338,6 @@ func appendRecoveryLog(t *testing.T, path string, line string) {
 	}
 }
 
-func readRecoveryLog(t *testing.T, path string) string {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return ""
-	}
-	if err != nil {
-		t.Fatalf("read recovery log: %v", err)
-	}
-	return string(raw)
-}
-
 func readRecoveryLogLines(t *testing.T, path string) []string {
 	t.Helper()
 	raw := strings.TrimSpace(readRecoveryLog(t, path))
@@ -2080,29 +1347,6 @@ func readRecoveryLogLines(t *testing.T, path string) []string {
 	return strings.Split(raw, "\n")
 }
 
-func mustService(t *testing.T, server *Server, name string) *db.Service {
-	t.Helper()
-	dv, err := server.cfg.DB.Get()
-	if err != nil {
-		t.Fatalf("get db: %v", err)
-	}
-	sv, ok := dv.Services().GetOk(name)
-	if !ok {
-		t.Fatalf("service %q not found", name)
-	}
-	return sv.AsStruct()
-}
-
-func serviceExists(t *testing.T, server *Server, name string) bool {
-	t.Helper()
-	dv, err := server.cfg.DB.Get()
-	if err != nil {
-		t.Fatalf("get db: %v", err)
-	}
-	_, ok := dv.Services().GetOk(name)
-	return ok
-}
-
 func serviceCount(t *testing.T, server *Server) int {
 	t.Helper()
 	dv, err := server.cfg.DB.Get()
@@ -2110,15 +1354,6 @@ func serviceCount(t *testing.T, server *Server) int {
 		t.Fatalf("get db: %v", err)
 	}
 	return dv.Services().Len()
-}
-
-func hasRecoveryCall(calls []string, needle string) bool {
-	for _, call := range calls {
-		if strings.HasPrefix(call, needle) {
-			return true
-		}
-	}
-	return false
 }
 
 func assertExactRecoveryCallOrder(t *testing.T, calls []string, want ...string) {
@@ -2175,8 +1410,3 @@ func hasNameSegment(value string, name string) bool {
 	}
 	return false
 }
-
-type ioDiscardReadWriter struct{}
-
-func (ioDiscardReadWriter) Read([]byte) (int, error)    { return 0, io.EOF }
-func (ioDiscardReadWriter) Write(p []byte) (int, error) { return len(p), nil }

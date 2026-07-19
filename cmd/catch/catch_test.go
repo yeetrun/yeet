@@ -630,15 +630,16 @@ func TestHandleSpecialCommandVMRun(t *testing.T) {
 		t.Fatal("vm-run was not handled")
 	}
 	want := catch.VMConsoleProxyConfig{
-		Service:       "devbox",
-		ServiceRoot:   "/srv/vms/devbox",
-		DiskPath:      "/srv/vms/devbox/rootfs.ext4",
-		Firecracker:   "/srv/firecracker",
-		Jailer:        "/srv/jailer",
-		JailerBase:    "/run/yeet/vm-jailer",
-		APISocket:     "/run/fc.sock",
-		ConfigFile:    "/run/fc.json",
-		ConsoleSocket: "/run/serial.sock",
+		Service:         "devbox",
+		ServiceRoot:     "/srv/vms/devbox",
+		DiskPath:        "/srv/vms/devbox/rootfs.ext4",
+		Firecracker:     "/srv/firecracker",
+		Jailer:          "/srv/jailer",
+		RuntimeDataRoot: *legacyDataDir,
+		JailerBase:      "/run/yeet/vm-jailer",
+		APISocket:       "/run/fc.sock",
+		ConfigFile:      "/run/fc.json",
+		ConsoleSocket:   "/run/serial.sock",
 	}
 	if got.OnGuestReboot == nil {
 		t.Fatal("OnGuestReboot is nil, want automatic guest kernel sync hook")
@@ -646,6 +647,145 @@ func TestHandleSpecialCommandVMRun(t *testing.T) {
 	got.OnGuestReboot = nil
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("config = %#v, want %#v", got, want)
+	}
+}
+
+func TestHandleSpecialCommandVMRunUsesRuntimeDescriptor(t *testing.T) {
+	oldRun := runVMConsoleProxy
+	t.Cleanup(func() {
+		runVMConsoleProxy = oldRun
+	})
+
+	var got catch.VMConsoleProxyConfig
+	runVMConsoleProxy = func(_ context.Context, cfg catch.VMConsoleProxyConfig) error {
+		got = cfg
+		return nil
+	}
+	handled, err := handleSpecialCommand([]string{
+		"vm-run",
+		"--service", "devbox",
+		"--service-root", "/srv/vms/devbox",
+		"--disk-path", "/srv/vms/devbox/rootfs.ext4",
+		"--runtime-descriptor", "/srv/vms/devbox/data/vmm-runtime.json",
+		"--runtime-running-marker", "/srv/vms/devbox/run/vmm-runtime-running.json",
+		"--runtime-trial-result", "/srv/vms/devbox/run/vmm-runtime-trial-result.json",
+		"--jailer-base", "/run/yeet/vm-jailer",
+		"--api-sock", "/run/fc.sock",
+		"--config-file", "/run/fc.json",
+		"--console-sock", "/run/serial.sock",
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("handleSpecialCommand: %v", err)
+	}
+	if !handled {
+		t.Fatal("vm-run was not handled")
+	}
+	want := catch.VMConsoleProxyConfig{
+		Service:              "devbox",
+		ServiceRoot:          "/srv/vms/devbox",
+		DiskPath:             "/srv/vms/devbox/rootfs.ext4",
+		RuntimeDescriptor:    "/srv/vms/devbox/data/vmm-runtime.json",
+		RuntimeRunningMarker: "/srv/vms/devbox/run/vmm-runtime-running.json",
+		RuntimeTrialResult:   "/srv/vms/devbox/run/vmm-runtime-trial-result.json",
+		RuntimeDataRoot:      *legacyDataDir,
+		JailerBase:           "/run/yeet/vm-jailer",
+		APISocket:            "/run/fc.sock",
+		ConfigFile:           "/run/fc.json",
+		ConsoleSocket:        "/run/serial.sock",
+	}
+	if got.OnGuestReboot == nil {
+		t.Fatal("OnGuestReboot is nil")
+	}
+	got.OnGuestReboot = nil
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("config = %#v, want %#v", got, want)
+	}
+}
+
+func TestHandleVMRunCommandRejectsMixedOrPartialRuntimeMode(t *testing.T) {
+	oldRun := runVMConsoleProxy
+	t.Cleanup(func() {
+		runVMConsoleProxy = oldRun
+	})
+	runVMConsoleProxy = func(context.Context, catch.VMConsoleProxyConfig) error {
+		t.Fatal("runVMConsoleProxy called")
+		return nil
+	}
+	base := []string{"--service", "devbox", "--jailer-base", "/jails", "--api-sock", "/api", "--config-file", "/cfg", "--console-sock", "/console"}
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "partial descriptor", args: []string{"--runtime-descriptor", "/descriptor"}},
+		{name: "mixed", args: []string{
+			"--runtime-descriptor", "/descriptor", "--runtime-running-marker", "/running", "--runtime-trial-result", "/trial",
+			"--firecracker", "/fc", "--jailer", "/jailer",
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append(append([]string(nil), base...), tt.args...)
+			if err := handleVMRunCommand(args); err == nil || !strings.Contains(err.Error(), "runtime mode") {
+				t.Fatalf("handleVMRunCommand error = %v, want runtime mode", err)
+			}
+		})
+	}
+}
+
+func TestHandleVMRunCommandDefersRuntimeDescriptorReadToSupervisor(t *testing.T) {
+	oldRun := runVMConsoleProxy
+	t.Cleanup(func() {
+		runVMConsoleProxy = oldRun
+	})
+	descriptorErr := errors.New("untrusted descriptor")
+	runVMConsoleProxy = func(_ context.Context, cfg catch.VMConsoleProxyConfig) error {
+		if cfg.Firecracker != "" || cfg.Jailer != "" || cfg.RuntimeDescriptor != "/srv/vms/devbox/data/vmm-runtime.json" {
+			t.Fatalf("descriptor-mode config = %#v", cfg)
+		}
+		return descriptorErr
+	}
+	err := handleVMRunCommand([]string{
+		"--service", "devbox", "--service-root", "/srv/vms/devbox",
+		"--runtime-descriptor", "/srv/vms/devbox/data/vmm-runtime.json",
+		"--runtime-running-marker", "/srv/vms/devbox/run/vmm-runtime-running.json",
+		"--runtime-trial-result", "/srv/vms/devbox/run/vmm-runtime-trial-result.json",
+		"--jailer-base", "/jails", "--api-sock", "/api", "--config-file", "/cfg", "--console-sock", "/console",
+	})
+	if !errors.Is(err, descriptorErr) {
+		t.Fatalf("handleVMRunCommand error = %v, want %v", err, descriptorErr)
+	}
+}
+
+func TestHandleVMRunCommandRejectsRuntimeDescriptorPathMismatch(t *testing.T) {
+	oldRun := runVMConsoleProxy
+	t.Cleanup(func() {
+		runVMConsoleProxy = oldRun
+	})
+	runVMConsoleProxy = func(context.Context, catch.VMConsoleProxyConfig) error {
+		t.Fatal("runVMConsoleProxy called")
+		return nil
+	}
+	root := "/srv/vms/devbox"
+	exactDescriptor := root + "/data/vmm-runtime.json"
+	exactRunning := root + "/run/vmm-runtime-running.json"
+	exactTrial := root + "/run/vmm-runtime-trial-result.json"
+	for _, tt := range []struct {
+		name, serviceRoot, descriptor, running, trial string
+	}{
+		{name: "relative service root", serviceRoot: "srv/vms/devbox", descriptor: exactDescriptor, running: exactRunning, trial: exactTrial},
+		{name: "descriptor", serviceRoot: root, descriptor: root + "/data/other.json", running: exactRunning, trial: exactTrial},
+		{name: "running", serviceRoot: root, descriptor: exactDescriptor, running: root + "/run/other.json", trial: exactTrial},
+		{name: "trial", serviceRoot: root, descriptor: exactDescriptor, running: exactRunning, trial: root + "/run/other.json"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := handleVMRunCommand([]string{
+				"--service", "devbox", "--service-root", tt.serviceRoot,
+				"--runtime-descriptor", tt.descriptor, "--runtime-running-marker", tt.running, "--runtime-trial-result", tt.trial,
+				"--jailer-base", "/jails", "--api-sock", "/api", "--config-file", "/cfg", "--console-sock", "/console",
+			})
+			if err == nil || !strings.Contains(err.Error(), "runtime") {
+				t.Fatalf("handleVMRunCommand error = %v, want runtime path refusal", err)
+			}
+		})
 	}
 }
 
@@ -712,30 +852,27 @@ func TestHandleSpecialCommandVMRunExitsWithRebootCode(t *testing.T) {
 	_, _ = handleSpecialCommand([]string{"vm-run", "--firecracker", "/fc", "--jailer", "/jailer", "--jailer-base", "/jails", "--api-sock", "/api", "--config-file", "/cfg", "--console-sock", "/serial"}, io.Discard)
 }
 
-func TestHandleSpecialCommandVMRunExitsWithRestoreLoadFailureCode(t *testing.T) {
+func TestHandleSpecialCommandVMRunExitsWithNoFallbackCode(t *testing.T) {
 	oldRun := runVMConsoleProxy
 	oldExit := exitProcess
 	t.Cleanup(func() {
 		runVMConsoleProxy = oldRun
 		exitProcess = oldExit
 	})
-
 	var exitCode int
 	runVMConsoleProxy = func(context.Context, catch.VMConsoleProxyConfig) error {
-		return fmt.Errorf("context: %w", catch.ErrVMRestoreLoadFailed)
+		return catch.ErrVMRuntimeNoFallback
 	}
 	exitProcess = func(code int) {
 		exitCode = code
 		panic("exit intercepted")
 	}
-
 	defer func() {
-		recovered := recover()
-		if recovered == nil {
-			t.Fatal("exit was not intercepted")
+		if recovered := recover(); recovered != "exit intercepted" {
+			t.Fatalf("panic = %#v", recovered)
 		}
-		if exitCode != catch.VMRestoreLoadFailedExitCode {
-			t.Fatalf("exit code = %d, want %d", exitCode, catch.VMRestoreLoadFailedExitCode)
+		if exitCode != catch.VMRuntimeNoFallbackExitCode {
+			t.Fatalf("exit code = %d, want %d", exitCode, catch.VMRuntimeNoFallbackExitCode)
 		}
 	}()
 	_, _ = handleSpecialCommand([]string{"vm-run", "--firecracker", "/fc", "--jailer", "/jailer", "--jailer-base", "/jails", "--api-sock", "/api", "--config-file", "/cfg", "--console-sock", "/serial"}, io.Discard)
@@ -1550,34 +1687,94 @@ func TestCatchFileInstallerConfigOmitsDerivedServicesRoot(t *testing.T) {
 	}
 }
 
-func TestDoInstallOrdersJailerUpgradeAroundCatchInstall(t *testing.T) {
+func TestDoInstallOrdersRuntimeAdoptionAroundCatchInstall(t *testing.T) {
 	var got []string
 	ts := &fakeInstallTSNet{}
 	inst := &fakeCatchInstaller{rollbackAvailable: true, closeHook: func() { got = append(got, "install-catch") }}
 	deps := successfulCatchInstallDeps(ts, inst)
-	deps.prepareVMJailerUpgrade = func(context.Context, *catch.Config) (catchVMJailerUpgrade, error) {
+	deps.inspectVMRuntimeAdoption = func(context.Context, *catch.Config) (catch.VMRuntimeAdoptionSummary, error) {
+		got = append(got, "inspect-vms")
+		return changedVMRuntimeAdoptionSummary("alpha"), nil
+	}
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
 		got = append(got, "prepare-vm-units")
-		return &fakeCatchVMJailerUpgrade{commit: func() error {
+		return &fakeCatchVMRuntimeAdoption{commit: func() error {
 			got = append(got, "commit-vm-units")
 			return nil
-		}, summary: catch.VMJailerUpgradeSummary{Ready: []string{"alpha"}}}, nil
+		}, summary: changedVMRuntimeAdoptionSummary("alpha")}, nil
 	}
 
 	if err := doInstallWith(&catch.Config{}, t.TempDir(), deps); err != nil {
 		t.Fatalf("doInstallWith: %v", err)
 	}
-	want := []string{"prepare-vm-units", "install-catch", "commit-vm-units"}
+	want := []string{"inspect-vms", "install-catch", "prepare-vm-units", "commit-vm-units"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("order = %v, want %v", got, want)
 	}
 }
 
-func TestDoInstallJailerPreparationFailureLeavesCatchUntouched(t *testing.T) {
+func TestDoInstallRuntimeAdoptionInspectionFailureLeavesCatchUntouched(t *testing.T) {
+	inspectErr := errors.New("inventory unavailable")
+	installerCalls := 0
+	prepareCalls := 0
+	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, &fakeCatchInstaller{})
+	deps.inspectVMRuntimeAdoption = func(context.Context, *catch.Config) (catch.VMRuntimeAdoptionSummary, error) {
+		return catch.VMRuntimeAdoptionSummary{}, inspectErr
+	}
+	deps.newInstaller = func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
+		installerCalls++
+		return &fakeCatchInstaller{}, nil
+	}
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
+		prepareCalls++
+		return &fakeCatchVMRuntimeAdoption{}, nil
+	}
+
+	err := runCatchInstallTransaction(&catch.Config{}, t.TempDir(), deps)
+	if !errors.Is(err, inspectErr) {
+		t.Fatalf("runCatchInstallTransaction error = %v, want %v", err, inspectErr)
+	}
+	if installerCalls != 0 || prepareCalls != 0 {
+		t.Fatalf("installer/prepare calls = %d/%d, want 0/0", installerCalls, prepareCalls)
+	}
+}
+
+func TestDoInstallRuntimeAdoptionDriftWithoutRollbackKeepsNewCatch(t *testing.T) {
+	installCalls := 0
+	commitCalls := 0
+	closeCalls := 0
+	rollbackCalls := 0
+	installer := &fakeCatchInstaller{
+		closeHook: func() { installCalls++ },
+		rollbackHook: func() error {
+			rollbackCalls++
+			return nil
+		},
+	}
+	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, installer)
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
+		return &fakeCatchVMRuntimeAdoption{
+			commit:  func() error { commitCalls++; return nil },
+			close:   func() error { closeCalls++; return nil },
+			summary: changedVMRuntimeAdoptionSummary("alpha"),
+		}, nil
+	}
+
+	err := doInstallWith(&catch.Config{}, t.TempDir(), deps)
+	if err == nil || !strings.Contains(err.Error(), "keeping the new Catch generation") {
+		t.Fatalf("doInstallWith error = %v, want keep-new-generation drift error", err)
+	}
+	if installCalls != 1 || commitCalls != 0 || closeCalls != 1 || rollbackCalls != 0 {
+		t.Fatalf("install/commit/close/rollback calls = %d/%d/%d/%d, want 1/0/1/0", installCalls, commitCalls, closeCalls, rollbackCalls)
+	}
+}
+
+func TestDoInstallRuntimeAdoptionPreparationFailureKeepsInstalledCatch(t *testing.T) {
 	prepareErr := errors.New("ensure VM runtime identity")
 	installerCalls := 0
 	inst := &fakeCatchInstaller{}
 	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, inst)
-	deps.prepareVMJailerUpgrade = func(context.Context, *catch.Config) (catchVMJailerUpgrade, error) {
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
 		return nil, prepareErr
 	}
 	deps.newInstaller = func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
@@ -1589,15 +1786,15 @@ func TestDoInstallJailerPreparationFailureLeavesCatchUntouched(t *testing.T) {
 	if !errors.Is(err, prepareErr) {
 		t.Fatalf("runCatchInstallTransaction error = %v, want %v", err, prepareErr)
 	}
-	if installerCalls != 0 {
-		t.Fatalf("Catch installer creation calls = %d, want 0", installerCalls)
+	if installerCalls != 1 {
+		t.Fatalf("Catch installer creation calls = %d, want 1", installerCalls)
 	}
-	if inst.closeCalls != 0 || inst.Len() != 0 {
-		t.Fatalf("Catch installer state after preparation failure = close calls %d, bytes %d; want untouched", inst.closeCalls, inst.Len())
+	if inst.closeCalls != 1 || inst.Len() == 0 {
+		t.Fatalf("Catch installer state after preparation failure = close calls %d, bytes %d; want installed generation", inst.closeCalls, inst.Len())
 	}
 }
 
-func TestDoInstallJailerCommitFailureRollsBackCatchGeneration(t *testing.T) {
+func TestDoInstallRuntimeAdoptionSafeCommitFailureRollsBackCatchGeneration(t *testing.T) {
 	commitErr := errors.New("replace VM unit")
 	rollbackErr := errors.New("restore Catch generation")
 	var order []string
@@ -1609,8 +1806,8 @@ func TestDoInstallJailerCommitFailureRollsBackCatchGeneration(t *testing.T) {
 	}}
 	upgradeCloseCalls := 0
 	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, inst)
-	deps.prepareVMJailerUpgrade = func(context.Context, *catch.Config) (catchVMJailerUpgrade, error) {
-		return &fakeCatchVMJailerUpgrade{
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
+		return &fakeCatchVMRuntimeAdoption{
 			commit: func() error {
 				order = append(order, "restore-vm-units")
 				return commitErr
@@ -1619,7 +1816,8 @@ func TestDoInstallJailerCommitFailureRollsBackCatchGeneration(t *testing.T) {
 				upgradeCloseCalls++
 				return nil
 			},
-			summary: catch.VMJailerUpgradeSummary{Ready: []string{"alpha"}},
+			summary:      changedVMRuntimeAdoptionSummary("alpha"),
+			rollbackSafe: true,
 		}, nil
 	}
 
@@ -1638,7 +1836,31 @@ func TestDoInstallJailerCommitFailureRollsBackCatchGeneration(t *testing.T) {
 	}
 }
 
-func TestDoInstallCatchInstallFailureClosesStagedJailerUpgradeWithoutCommit(t *testing.T) {
+func TestDoInstallRuntimeAdoptionUncertainCommitFailureKeepsCatchGeneration(t *testing.T) {
+	commitErr := errors.New("runtime adoption requires recovery")
+	rollbackCalls := 0
+	inst := &fakeCatchInstaller{rollbackAvailable: true, rollbackHook: func() error {
+		rollbackCalls++
+		return nil
+	}}
+	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, inst)
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
+		return &fakeCatchVMRuntimeAdoption{
+			commit:  func() error { return commitErr },
+			summary: changedVMRuntimeAdoptionSummary("alpha"),
+		}, nil
+	}
+
+	err := doInstallWith(&catch.Config{}, t.TempDir(), deps)
+	if !errors.Is(err, commitErr) {
+		t.Fatalf("doInstallWith error = %v, want %v", err, commitErr)
+	}
+	if rollbackCalls != 0 {
+		t.Fatalf("Catch generation rollback calls = %d, want 0", rollbackCalls)
+	}
+}
+
+func TestDoInstallCatchInstallFailureDoesNotPrepareRuntimeAdoption(t *testing.T) {
 	staged := filepath.Join(t.TempDir(), "vm-unit.staged")
 	if err := os.WriteFile(staged, []byte("unit"), 0o644); err != nil {
 		t.Fatalf("WriteFile staged unit: %v", err)
@@ -1648,8 +1870,8 @@ func TestDoInstallCatchInstallFailureClosesStagedJailerUpgradeWithoutCommit(t *t
 	closeCalls := 0
 	installer := &fakeCatchInstaller{rollbackAvailable: true, closeErr: installErr}
 	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, installer)
-	deps.prepareVMJailerUpgrade = func(context.Context, *catch.Config) (catchVMJailerUpgrade, error) {
-		return &fakeCatchVMJailerUpgrade{
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
+		return &fakeCatchVMRuntimeAdoption{
 			commit: func() error {
 				commitCalls++
 				return nil
@@ -1658,7 +1880,7 @@ func TestDoInstallCatchInstallFailureClosesStagedJailerUpgradeWithoutCommit(t *t
 				closeCalls++
 				return os.Remove(staged)
 			},
-			summary: catch.VMJailerUpgradeSummary{Ready: []string{"alpha"}},
+			summary: changedVMRuntimeAdoptionSummary("alpha"),
 		}, nil
 	}
 
@@ -1669,48 +1891,51 @@ func TestDoInstallCatchInstallFailureClosesStagedJailerUpgradeWithoutCommit(t *t
 	if commitCalls != 0 {
 		t.Fatalf("VM unit Commit calls = %d, want 0", commitCalls)
 	}
-	if closeCalls != 1 {
-		t.Fatalf("VM unit Close calls = %d, want 1", closeCalls)
+	if closeCalls != 0 {
+		t.Fatalf("VM runtime adoption Close calls = %d, want 0", closeCalls)
 	}
 	if installer.closeCalls != 1 {
 		t.Fatalf("Catch installer Close calls = %d, want one install attempt", installer.closeCalls)
 	}
-	if _, statErr := os.Stat(staged); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("staged unit still exists after Catch install failure: %v", statErr)
+	if _, statErr := os.Stat(staged); statErr != nil {
+		t.Fatalf("unprepared adoption fixture changed after Catch install failure: %v", statErr)
 	}
 }
 
-func TestDoInstallJoinsCatchInstallAndJailerCleanupErrors(t *testing.T) {
-	installErr := errors.New("install Catch")
+func TestDoInstallJoinsRuntimeAdoptionCommitAndCleanupErrors(t *testing.T) {
+	commitErr := errors.New("commit VM runtime adoption")
 	cleanupErr := errors.New("remove staged VM units")
 	tsCloseErr := errors.New("close install tsnet")
-	deps := successfulCatchInstallDeps(&fakeInstallTSNet{closeErr: tsCloseErr}, &fakeCatchInstaller{rollbackAvailable: true, closeErr: installErr})
-	deps.prepareVMJailerUpgrade = func(context.Context, *catch.Config) (catchVMJailerUpgrade, error) {
-		return &fakeCatchVMJailerUpgrade{
-			commit:  func() error { return nil },
+	deps := successfulCatchInstallDeps(&fakeInstallTSNet{closeErr: tsCloseErr}, &fakeCatchInstaller{rollbackAvailable: true})
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
+		return &fakeCatchVMRuntimeAdoption{
+			commit:  func() error { return commitErr },
 			close:   func() error { return cleanupErr },
-			summary: catch.VMJailerUpgradeSummary{Ready: []string{"alpha"}},
+			summary: changedVMRuntimeAdoptionSummary("alpha"),
 		}, nil
 	}
 
 	err := doInstallWith(&catch.Config{}, t.TempDir(), deps)
-	if !errors.Is(err, installErr) || !errors.Is(err, cleanupErr) || !errors.Is(err, tsCloseErr) {
-		t.Fatalf("doInstallWith error = %v, want install and all cleanup errors", err)
+	if !errors.Is(err, commitErr) || !errors.Is(err, cleanupErr) || !errors.Is(err, tsCloseErr) {
+		t.Fatalf("doInstallWith error = %v, want commit and all cleanup errors", err)
 	}
 }
 
-func TestDoInstallNonemptyJailerUpgradeRequiresCatchRollbackGeneration(t *testing.T) {
+func TestDoInstallChangedRuntimeAdoptionRequiresCatchRollbackGeneration(t *testing.T) {
 	installCalls := 0
 	commitCalls := 0
 	installer := &fakeCatchInstaller{closeHook: func() { installCalls++ }}
 	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, installer)
-	deps.prepareVMJailerUpgrade = func(context.Context, *catch.Config) (catchVMJailerUpgrade, error) {
-		return &fakeCatchVMJailerUpgrade{
+	deps.inspectVMRuntimeAdoption = func(context.Context, *catch.Config) (catch.VMRuntimeAdoptionSummary, error) {
+		return changedVMRuntimeAdoptionSummary("alpha"), nil
+	}
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
+		return &fakeCatchVMRuntimeAdoption{
 			commit: func() error {
 				commitCalls++
 				return nil
 			},
-			summary: catch.VMJailerUpgradeSummary{Ready: []string{"alpha"}},
+			summary: changedVMRuntimeAdoptionSummary("alpha"),
 		}, nil
 	}
 
@@ -1729,11 +1954,11 @@ func TestDoInstallNonemptyJailerUpgradeRequiresCatchRollbackGeneration(t *testin
 	}
 }
 
-func TestDoInstallEmptyJailerUpgradeAllowsInitialCatchInstall(t *testing.T) {
+func TestDoInstallEmptyRuntimeAdoptionAllowsInitialCatchInstall(t *testing.T) {
 	installCalls := 0
 	installer := &fakeCatchInstaller{closeHook: func() { installCalls++ }}
 	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, installer)
-	deps.prepareVMJailerUpgrade = emptyCatchVMJailerUpgrade
+	deps.prepareVMRuntimeAdoption = emptyCatchVMRuntimeAdoption
 
 	if err := doInstallWith(&catch.Config{}, t.TempDir(), deps); err != nil {
 		t.Fatalf("doInstallWith: %v", err)
@@ -1748,7 +1973,6 @@ func TestCatchInstallEnsuresServiceAccount(t *testing.T) {
 		var order []string
 		installer := &fakeCatchInstaller{closeHook: func() { order = append(order, "install-catch") }}
 		deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, installer)
-		deps.prepareVMJailerUpgrade = emptyCatchVMJailerUpgrade
 		deps.ensureManagedServiceAccount = func() error {
 			order = append(order, "ensure-service-account")
 			return nil
@@ -1771,7 +1995,6 @@ func TestCatchInstallEnsuresServiceAccount(t *testing.T) {
 		wantErr := errors.New("incompatible account")
 		installerCalls := 0
 		deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, &fakeCatchInstaller{})
-		deps.prepareVMJailerUpgrade = emptyCatchVMJailerUpgrade
 		deps.ensureManagedServiceAccount = func() error { return wantErr }
 		deps.newInstaller = func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			installerCalls++
@@ -1788,7 +2011,7 @@ func TestCatchInstallEnsuresServiceAccount(t *testing.T) {
 	})
 }
 
-func TestDoInstallHoldsInstallLockThroughUpgradeClose(t *testing.T) {
+func TestDoInstallHoldsInstallLockThroughRuntimeAdoptionClose(t *testing.T) {
 	var order []string
 	installer := &fakeCatchInstaller{rollbackAvailable: true, closeHook: func() { order = append(order, "install-catch") }}
 	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, installer)
@@ -1799,9 +2022,9 @@ func TestDoInstallHoldsInstallLockThroughUpgradeClose(t *testing.T) {
 			return nil
 		}), nil
 	}
-	deps.prepareVMJailerUpgrade = func(context.Context, *catch.Config) (catchVMJailerUpgrade, error) {
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
 		order = append(order, "prepare-vm-units")
-		return &fakeCatchVMJailerUpgrade{
+		return &fakeCatchVMRuntimeAdoption{
 			commit: func() error {
 				order = append(order, "commit-vm-units")
 				return nil
@@ -1810,16 +2033,49 @@ func TestDoInstallHoldsInstallLockThroughUpgradeClose(t *testing.T) {
 				order = append(order, "close-vm-upgrade")
 				return nil
 			},
-			summary: catch.VMJailerUpgradeSummary{Ready: []string{"alpha"}},
+			summary: changedVMRuntimeAdoptionSummary("alpha"),
 		}, nil
+	}
+	deps.reconcileVMRuntimePolicy = func(context.Context, *catch.Config) (catch.VMRuntimePolicyReconcileSummary, error) {
+		order = append(order, "reconcile-runtime-policy")
+		return catch.VMRuntimePolicyReconcileSummary{}, nil
 	}
 
 	if err := doInstallWith(&catch.Config{}, t.TempDir(), deps); err != nil {
 		t.Fatalf("doInstallWith: %v", err)
 	}
-	want := []string{"acquire-install-lock", "prepare-vm-units", "install-catch", "commit-vm-units", "close-vm-upgrade", "release-install-lock"}
+	want := []string{"acquire-install-lock", "install-catch", "prepare-vm-units", "commit-vm-units", "close-vm-upgrade", "reconcile-runtime-policy", "release-install-lock"}
 	if !reflect.DeepEqual(order, want) {
 		t.Fatalf("order = %v, want %v", order, want)
+	}
+}
+
+func TestCatchUpgradeDoesNotRestartVMsWhileReconcilingRuntimePolicy(t *testing.T) {
+	var order []string
+	deps := successfulCatchInstallDeps(&fakeInstallTSNet{}, &fakeCatchInstaller{rollbackAvailable: true})
+	deps.prepareVMRuntimeAdoption = func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
+		return &fakeCatchVMRuntimeAdoption{
+			commit:  func() error { order = append(order, "adoption-commit"); return nil },
+			close:   func() error { order = append(order, "adoption-close"); return nil },
+			summary: changedVMRuntimeAdoptionSummary("devbox"),
+		}, nil
+	}
+	deps.reconcileVMRuntimePolicy = func(context.Context, *catch.Config) (catch.VMRuntimePolicyReconcileSummary, error) {
+		order = append(order, "policy-stage-only")
+		// The install dependency deliberately has no VM Start, Stop, or Restart
+		// capability. Policy reconciliation can only publish staged selection.
+		return catch.VMRuntimePolicyReconcileSummary{Staged: []string{"devbox"}, Warnings: []string{"catalog refresh deferred for other VM"}}, nil
+	}
+	var logs []string
+	deps.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+	if err := doInstallWith(&catch.Config{}, t.TempDir(), deps); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"adoption-commit", "adoption-close", "policy-stage-only"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("Catch upgrade order = %v, want %v", order, want)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "catalog refresh deferred") {
+		t.Fatalf("Catch upgrade warnings = %v", logs)
 	}
 }
 
@@ -1898,10 +2154,15 @@ func successfulCatchInstallDeps(ts installTSNet, inst catchServiceInstaller) cat
 		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			return inst, nil
 		},
-		executable: func() (string, error) { return "/tmp/catch-bin", nil },
-		readFile:   func(string) ([]byte, error) { return []byte("binary"), nil },
-		logf:       func(string, ...any) {},
-		tsnetHost:  func() string { return "catch-test" },
+		executable:               func() (string, error) { return "/tmp/catch-bin", nil },
+		readFile:                 func(string) ([]byte, error) { return []byte("binary"), nil },
+		logf:                     func(string, ...any) {},
+		tsnetHost:                func() string { return "catch-test" },
+		inspectVMRuntimeAdoption: emptyCatchVMRuntimeInspection,
+		prepareVMRuntimeAdoption: emptyCatchVMRuntimeAdoption,
+		reconcileVMRuntimePolicy: func(context.Context, *catch.Config) (catch.VMRuntimePolicyReconcileSummary, error) {
+			return catch.VMRuntimePolicyReconcileSummary{}, nil
+		},
 		acquireInstallLock: func(context.Context, string) (io.Closer, error) {
 			return closeFunc(func() error { return nil }), nil
 		},
@@ -1947,7 +2208,8 @@ func TestDoInstallWritesCurrentExecutableWithGeneratedServiceConfig(t *testing.T
 		tsnetHost: func() string {
 			return "catch-test"
 		},
-		prepareVMJailerUpgrade: emptyCatchVMJailerUpgrade,
+		inspectVMRuntimeAdoption: emptyCatchVMRuntimeInspection,
+		prepareVMRuntimeAdoption: emptyCatchVMRuntimeAdoption,
 		acquireInstallLock: func(context.Context, string) (io.Closer, error) {
 			return closeFunc(func() error { return nil }), nil
 		},
@@ -2004,9 +2266,10 @@ func TestDoInstallExecutableErrorFailsInstaller(t *testing.T) {
 			t.Fatalf("readFile should not be called after executable error")
 			return nil, nil
 		},
-		logf:                   func(string, ...any) {},
-		tsnetHost:              func() string { return "catch-test" },
-		prepareVMJailerUpgrade: emptyCatchVMJailerUpgrade,
+		logf:                     func(string, ...any) {},
+		tsnetHost:                func() string { return "catch-test" },
+		inspectVMRuntimeAdoption: emptyCatchVMRuntimeInspection,
+		prepareVMRuntimeAdoption: emptyCatchVMRuntimeAdoption,
 		acquireInstallLock: func(context.Context, string) (io.Closer, error) {
 			return closeFunc(func() error { return nil }), nil
 		},
@@ -2038,11 +2301,12 @@ func TestDoInstallRequiresTSNet(t *testing.T) {
 			newInstallerCalled = true
 			return nil, nil
 		},
-		executable:             func() (string, error) { return "/tmp/catch-bin", nil },
-		readFile:               func(string) ([]byte, error) { return []byte("binary"), nil },
-		logf:                   func(string, ...any) {},
-		tsnetHost:              func() string { return "catch-test" },
-		prepareVMJailerUpgrade: emptyCatchVMJailerUpgrade,
+		executable:               func() (string, error) { return "/tmp/catch-bin", nil },
+		readFile:                 func(string) ([]byte, error) { return []byte("binary"), nil },
+		logf:                     func(string, ...any) {},
+		tsnetHost:                func() string { return "catch-test" },
+		inspectVMRuntimeAdoption: emptyCatchVMRuntimeInspection,
+		prepareVMRuntimeAdoption: emptyCatchVMRuntimeAdoption,
 		acquireInstallLock: func(context.Context, string) (io.Closer, error) {
 			return closeFunc(func() error { return nil }), nil
 		},
@@ -2072,11 +2336,12 @@ func TestDoInstallValidationAndInstallerErrors(t *testing.T) {
 		newInstaller: func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error) {
 			return nil, wantErr
 		},
-		executable:             func() (string, error) { return "/tmp/catch-bin", nil },
-		readFile:               func(string) ([]byte, error) { return []byte("binary"), nil },
-		logf:                   func(string, ...any) {},
-		tsnetHost:              func() string { return "catch-test" },
-		prepareVMJailerUpgrade: emptyCatchVMJailerUpgrade,
+		executable:               func() (string, error) { return "/tmp/catch-bin", nil },
+		readFile:                 func(string) ([]byte, error) { return []byte("binary"), nil },
+		logf:                     func(string, ...any) {},
+		tsnetHost:                func() string { return "catch-test" },
+		inspectVMRuntimeAdoption: emptyCatchVMRuntimeInspection,
+		prepareVMRuntimeAdoption: emptyCatchVMRuntimeAdoption,
 		acquireInstallLock: func(context.Context, string) (io.Closer, error) {
 			return closeFunc(func() error { return nil }), nil
 		},
@@ -2199,32 +2464,50 @@ func (f *fakeCatchInstaller) Fail() {
 	f.failed = true
 }
 
-type fakeCatchVMJailerUpgrade struct {
-	commit  func() error
-	close   func() error
-	summary catch.VMJailerUpgradeSummary
+type fakeCatchVMRuntimeAdoption struct {
+	commit       func() error
+	close        func() error
+	summary      catch.VMRuntimeAdoptionSummary
+	rollbackSafe bool
 }
 
-func (f *fakeCatchVMJailerUpgrade) Commit() error {
+func (f *fakeCatchVMRuntimeAdoption) Commit() error {
 	if f.commit == nil {
 		return nil
 	}
 	return f.commit()
 }
 
-func (f *fakeCatchVMJailerUpgrade) Close() error {
+func (f *fakeCatchVMRuntimeAdoption) Close() error {
 	if f.close == nil {
 		return nil
 	}
 	return f.close()
 }
 
-func (f *fakeCatchVMJailerUpgrade) Summary() catch.VMJailerUpgradeSummary {
+func (f *fakeCatchVMRuntimeAdoption) Summary() catch.VMRuntimeAdoptionSummary {
 	return f.summary
 }
 
-func emptyCatchVMJailerUpgrade(context.Context, *catch.Config) (catchVMJailerUpgrade, error) {
-	return &fakeCatchVMJailerUpgrade{}, nil
+func (f *fakeCatchVMRuntimeAdoption) CatchRollbackSafe() bool {
+	return f.rollbackSafe
+}
+
+func emptyCatchVMRuntimeAdoption(context.Context, *catch.Config) (catchVMRuntimeAdoption, error) {
+	return &fakeCatchVMRuntimeAdoption{rollbackSafe: true}, nil
+}
+
+func emptyCatchVMRuntimeInspection(context.Context, *catch.Config) (catch.VMRuntimeAdoptionSummary, error) {
+	return catch.VMRuntimeAdoptionSummary{}, nil
+}
+
+func changedVMRuntimeAdoptionSummary(services ...string) catch.VMRuntimeAdoptionSummary {
+	return catch.VMRuntimeAdoptionSummary{
+		Ready:                      append([]string(nil), services...),
+		Adopting:                   append([]string(nil), services...),
+		HasChanges:                 len(services) != 0,
+		RequiresRollbackGeneration: len(services) != 0,
+	}
 }
 
 type closeFunc func() error

@@ -2055,6 +2055,144 @@ func TestHostStorageApplyMigrateAllStopsRunningServicesBeforeMoves(t *testing.T)
 	}
 }
 
+func TestHostStorageApplyMigratesAdoptedVM(t *testing.T) {
+	root := t.TempDir()
+	oldServicesRoot := filepath.Join(root, "services")
+	newServicesRoot := filepath.Join(root, "services2")
+	applier, ops := newTestHostStorageApplier(t, Config{
+		RootDir:      root,
+		ServicesRoot: oldServicesRoot,
+	}, map[string]*db.Service{
+		"devbox": {
+			Name: "devbox", ServiceType: db.ServiceTypeVM,
+			VM: &db.VMConfig{Components: &db.VMComponentsConfig{}},
+		},
+	})
+	ops.running["devbox"] = true
+	plan := testHostStorageApplyServicesPlan(root, oldServicesRoot, newServicesRoot, catchrpc.HostStorageMigrateAll, "devbox")
+
+	_, err := applier.Apply(context.Background(), plan, true, nil)
+	if err != nil {
+		t.Fatalf("Apply adopted VM migration: %v", err)
+	}
+	for _, want := range []string{"stop:devbox", "move:devbox", "runtime:devbox", "start:devbox"} {
+		if !slices.Contains(ops.calls, want) {
+			t.Fatalf("calls = %#v, missing %q", ops.calls, want)
+		}
+	}
+	data, err := applier.store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := data.Services().Get("devbox")
+	if service.ServiceRoot() != filepath.Join(newServicesRoot, "devbox") || service.VM().Components().AsStruct() == nil {
+		t.Fatalf("service was not migrated with component state intact: %#v", service.AsStruct())
+	}
+}
+
+func TestHostStorageApplyCatchRootOnlyMoveIgnoresUnrelatedAdoptedVM(t *testing.T) {
+	root := t.TempDir()
+	servicesRoot := filepath.Join(root, "services")
+	oldCatchRoot := filepath.Join(root, "old-catch")
+	applier, ops := newTestHostStorageApplier(t, Config{
+		RootDir:      root,
+		ServicesRoot: servicesRoot,
+	}, map[string]*db.Service{
+		CatchService: {Name: CatchService, ServiceType: db.ServiceTypeSystemd, ServiceRoot: oldCatchRoot},
+		"devbox": {
+			Name: "devbox", ServiceType: db.ServiceTypeVM,
+			ServiceRoot: filepath.Join(root, "custom-devbox"),
+			VM:          &db.VMConfig{Components: &db.VMComponentsConfig{}},
+		},
+	})
+	plan := catchrpc.HostStoragePlan{
+		Current: catchrpc.HostStorageState{DataDir: root, ServicesRoot: servicesRoot},
+		Desired: catchrpc.HostStorageState{DataDir: root, ServicesRoot: servicesRoot},
+		CatchAction: catchrpc.HostStorageCatchAction{
+			Move: true, From: oldCatchRoot, To: filepath.Join(servicesRoot, CatchService),
+		},
+	}
+
+	_, err := applier.Apply(context.Background(), plan, true, nil)
+	if err != nil {
+		t.Fatalf("Apply catch-root move with unrelated adopted VM: %v", err)
+	}
+	if !slices.Contains(ops.calls, "regenerate-vm:devbox") {
+		t.Fatalf("calls = %#v, want adopted VM unit regenerated for moved Catch runner", ops.calls)
+	}
+	for _, call := range ops.calls {
+		if call == "stop:devbox" || call == "start:devbox" {
+			t.Fatalf("stopped unrelated adopted VM for Catch-root-only move: calls=%#v", ops.calls)
+		}
+	}
+}
+
+func TestHostStorageApplyAllowsAdoptedRepairRestart(t *testing.T) {
+	root := t.TempDir()
+	servicesRoot := filepath.Join(root, "services")
+	applier, ops := newTestHostStorageApplier(t, Config{RootDir: root, ServicesRoot: servicesRoot}, map[string]*db.Service{
+		"devbox": {
+			Name: "devbox", ServiceType: db.ServiceTypeVM,
+			VM: &db.VMConfig{Components: &db.VMComponentsConfig{}},
+		},
+	})
+	ops.running["devbox"] = true
+	plan := catchrpc.HostStoragePlan{
+		Current:      catchrpc.HostStorageState{DataDir: root, ServicesRoot: servicesRoot},
+		Desired:      catchrpc.HostStorageState{DataDir: root, ServicesRoot: servicesRoot},
+		RepairAction: catchrpc.HostStorageRepairAction{RestartServices: []string{"devbox"}},
+	}
+	_, err := applier.Apply(context.Background(), plan, true, nil)
+	if err != nil {
+		t.Fatalf("Apply adopted repair restart: %v", err)
+	}
+	for _, want := range []string{"stop:devbox", "start:devbox"} {
+		if !slices.Contains(ops.calls, want) {
+			t.Fatalf("calls = %#v, missing %q", ops.calls, want)
+		}
+	}
+}
+
+func TestHostStorageApplyDerivesDataDirActionBeforeSideEffects(t *testing.T) {
+	root := t.TempDir()
+	servicesRoot := filepath.Join(root, "services")
+	applier, ops := newTestHostStorageApplier(t, Config{RootDir: root, ServicesRoot: servicesRoot}, nil)
+	plan := catchrpc.HostStoragePlan{
+		Current: catchrpc.HostStorageState{DataDir: root, ServicesRoot: servicesRoot},
+		Desired: catchrpc.HostStorageState{DataDir: filepath.Join(root, "new-data"), ServicesRoot: servicesRoot},
+	}
+	_, err := applier.Apply(context.Background(), plan, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot copy host data dir between nested paths") {
+		t.Fatalf("Apply error = %v, want derived nested data dir rejection", err)
+	}
+	if len(ops.calls) != 0 {
+		t.Fatalf("calls = %#v, want no side effects for inconsistent plan", ops.calls)
+	}
+}
+
+func TestHostStorageApplyReleasesRuntimeLockBeforeRestarts(t *testing.T) {
+	root := t.TempDir()
+	oldServicesRoot := filepath.Join(root, "services")
+	newServicesRoot := filepath.Join(root, "services2")
+	applier, ops := newTestHostStorageApplier(t, Config{RootDir: root, ServicesRoot: oldServicesRoot}, map[string]*db.Service{
+		"api": {Name: "api", ServiceType: db.ServiceTypeSystemd},
+	})
+	ops.running["api"] = true
+	ops.startHook = func(string) error {
+		return WithVMRuntimeTransactionLock(context.Background(), &applier.config, func() error { return nil })
+	}
+	ops.restartCatchHook = func() error {
+		return WithVMRuntimeTransactionLock(context.Background(), &applier.config, func() error { return nil })
+	}
+	plan := testHostStorageApplyServicesPlan(root, oldServicesRoot, newServicesRoot, catchrpc.HostStorageMigrateAll, "api")
+	if _, err := applier.Apply(context.Background(), plan, true, nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !slices.Contains(ops.calls, "start:api") || !slices.Contains(ops.calls, "restart-catch") {
+		t.Fatalf("calls = %#v, want service and Catch restart", ops.calls)
+	}
+}
+
 func TestHostStorageApplyFailedStopAttemptsRollbackWithoutMoves(t *testing.T) {
 	root := t.TempDir()
 	oldServicesRoot := filepath.Join(root, "services")
@@ -4135,15 +4273,14 @@ func newTestHostStorageApplier(t *testing.T, config Config, services map[string]
 			runnerForService:                        ops.runnerForService,
 			materializeServiceRootMigration:         ops.materializeServiceRootMigration,
 			applyServiceRootMigrationRuntimeChanges: ops.applyServiceRootMigrationRuntimeChanges,
-			reloadSystemd: func(context.Context) error {
-				ops.calls = append(ops.calls, "daemon-reload")
-				return nil
-			},
-			applyManagedTargetLayout: func(string) error { return nil },
-			reinstallCatchUnit:       ops.reinstallCatchUnit,
-			cancelCatchRestarts:      func(context.Context) error { return nil },
-			restartCatch:             ops.restartCatch,
-			verifyCatchInfo:          ops.verifyCatchInfo,
+			regenerateVMUnit:                        ops.regenerateVMUnit,
+			reloadSystemd:                           ops.reloadSystemd,
+			enableSystemdUnits:                      ops.enableSystemdUnits,
+			applyManagedTargetLayout:                func(string) error { return nil },
+			reinstallCatchUnit:                      ops.reinstallCatchUnit,
+			cancelCatchRestarts:                     func(context.Context) error { return nil },
+			restartCatch:                            ops.restartCatch,
+			verifyCatchInfo:                         ops.verifyCatchInfo,
 		},
 	}
 	return applier, ops
@@ -4177,11 +4314,13 @@ func testHostStorageApplyServicesPlan(dataDir, oldServicesRoot, newServicesRoot 
 }
 
 type recordingHostStorageApplyOps struct {
-	running  map[string]bool
-	stopErr  map[string]error
-	startErr map[string]error
-	moveErr  map[string]error
-	calls    []string
+	running          map[string]bool
+	stopErr          map[string]error
+	startErr         map[string]error
+	moveErr          map[string]error
+	startHook        func(string) error
+	restartCatchHook func() error
+	calls            []string
 }
 
 func (o *recordingHostStorageApplyOps) isServiceRunning(_ context.Context, name string) (bool, error) {
@@ -4203,6 +4342,21 @@ func (o *recordingHostStorageApplyOps) applyServiceRootMigrationRuntimeChanges(_
 	return nil
 }
 
+func (o *recordingHostStorageApplyOps) regenerateVMUnit(_ context.Context, _ Config, service *db.Service, _ string) ([]string, error) {
+	o.calls = append(o.calls, "regenerate-vm:"+service.Name)
+	return []string{vmSystemdUnitName(service.Name)}, nil
+}
+
+func (o *recordingHostStorageApplyOps) reloadSystemd(context.Context) error {
+	o.calls = append(o.calls, "daemon-reload")
+	return nil
+}
+
+func (o *recordingHostStorageApplyOps) enableSystemdUnits(_ context.Context, units []string) error {
+	o.calls = append(o.calls, "enable:"+strings.Join(units, ","))
+	return nil
+}
+
 func (o *recordingHostStorageApplyOps) reinstallCatchUnit(_ context.Context, req hostStorageInstallRequest, _ io.Writer) error {
 	o.calls = append(o.calls, "install-catch:"+req.DataDir+":"+req.ServicesRoot)
 	return nil
@@ -4210,6 +4364,9 @@ func (o *recordingHostStorageApplyOps) reinstallCatchUnit(_ context.Context, req
 
 func (o *recordingHostStorageApplyOps) restartCatch(_ context.Context, _ hostStorageInstallRequest, _ io.Writer) error {
 	o.calls = append(o.calls, "restart-catch")
+	if o.restartCatchHook != nil {
+		return o.restartCatchHook()
+	}
 	return nil
 }
 
@@ -4237,6 +4394,11 @@ func (r hostStorageRecordingServiceRunner) SetNewCmd(func(string, ...string) *ex
 
 func (r hostStorageRecordingServiceRunner) Start() error {
 	r.ops.calls = append(r.ops.calls, "start:"+r.name)
+	if r.ops.startHook != nil {
+		if err := r.ops.startHook(r.name); err != nil {
+			return err
+		}
+	}
 	if err := r.ops.startErr[r.name]; err != nil {
 		return err
 	}

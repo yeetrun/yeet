@@ -2563,7 +2563,7 @@ Run `yeet snapshots protect --help-agent` for command-specific context.
 
 ### `snapshots restore`
 
-Restore disk state, service-root state, or full VM state from a recovery point
+Restore disk state or service-root state from a recovery point
 
 Run `yeet snapshots restore --help-agent` for command-specific context.
 
@@ -2608,6 +2608,7 @@ yeet [GLOBAL_OPTIONS] vm COMMAND [ARGS...]
 - Run `yeet vm images --help-agent` for command-specific context.
 - Run `yeet vm kernel --help-agent` for command-specific context.
 - Run `yeet vm memory --help-agent` for command-specific context.
+- Run `yeet vm runtime --help-agent` for command-specific context.
 - Run `yeet vm set --help-agent` for command-specific context.
 
 ## Global Options
@@ -2667,6 +2668,12 @@ Run `yeet vm kernel --help-agent` for command-specific context.
 Show or set host VM memory policy
 
 Run `yeet vm memory --help-agent` for command-specific context.
+
+### `vm runtime`
+
+Manage host Firecracker and jailer runtimes
+
+Run `yeet vm runtime --help-agent` for command-specific context.
 
 ### `vm set`
 
@@ -3729,7 +3736,7 @@ Create a manual recovery point
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] snapshots create <svc> [--comment=TEXT] [--full]
+yeet [GLOBAL_OPTIONS] snapshots create <svc> [--comment=TEXT]
 ```
 
 ## Operating Rules
@@ -3746,12 +3753,6 @@ yeet [GLOBAL_OPTIONS] snapshots create <svc> [--comment=TEXT] [--full]
 Human note stored with the recovery point
 
 - **Type**: `string`
-
-### `--full`
-
-For VMs, also write Firecracker state and memory checkpoint files
-
-- **Type**: `bool`
 
 ## Global Options
 
@@ -3793,10 +3794,6 @@ yeet snapshots create <svc>
 
 ```
 yeet snapshots create <svc> --comment="before upgrade"
-```
-
-```
-yeet snapshots create <vm> --full --comment="checkpoint before risky change"
 ```
 ````
 
@@ -4099,12 +4096,12 @@ yeet snapshots protect <svc> yeet-20260613T203100Z-vm-manual-g0
 
 ## Purpose
 
-Restore disk state, service-root state, or full VM state from a recovery point
+Restore disk state or service-root state from a recovery point
 
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] snapshots restore <svc> <snapshot> [--stop] [--start] [--yes] [--mode=disk|full] [--generation=current|snapshot]
+yeet [GLOBAL_OPTIONS] snapshots restore <svc> <snapshot> [--stop] [--start] [--yes] [--generation=current|snapshot]
 ```
 
 ## Operating Rules
@@ -4133,12 +4130,6 @@ Start the service after restoring
 Skip the restore confirmation prompt
 
 - **Type**: `bool`
-
-### `--mode`
-
-Restore mode: disk, full
-
-- **Type**: `string`
 
 ### `--generation`
 
@@ -4186,10 +4177,6 @@ yeet snapshots restore <svc> yeet-20260613T203100Z-vm-manual-g0 --yes
 
 ```
 yeet snapshots restore <svc> yeet-20260613 --stop --yes
-```
-
-```
-yeet snapshots restore <vm> yeet-20260613T203100Z-vm-manual --mode=full --stop --yes
 ```
 ````
 
@@ -4690,6 +4677,148 @@ yeet vm memory set --policy=balanced
 
 ```
 yeet vm memory --format=json
+```
+````
+
+## Group Command: vm runtime
+
+````
+# yeet vm runtime Agent Context
+
+## Purpose
+
+Manage host Firecracker and jailer runtimes
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] vm runtime status [<vm>] [--format=table|json|json-pretty] | vm runtime update | vm runtime import <name> <dir> | vm runtime upgrade <vm> [--to=VERSION] [--channel=stable|candidate] [--restart] | vm runtime rollback <vm> [--restart] | vm runtime policy defaults show | vm runtime policy defaults set manual|stage-on-restart [--channel=stable|candidate] | vm runtime policy <vm> inherit|manual|stage-on-restart [--channel=stable|candidate] | vm runtime protect <runtime-id> | vm runtime unprotect <runtime-id> | vm runtime prune [--dry-run]
+```
+
+## Operating Rules
+
+- Prefer exact examples when they match the task.
+- Use command-specific agent help before running an unfamiliar command.
+- Do not invent flags; use only flags listed in this context or command help.
+- Preserve arguments after `--` as payload or application arguments.
+
+## Arguments
+
+### `ACTION`
+
+Action (status, update, import, upgrade, rollback, policy, protect, unprotect, prune)
+
+- **Type**: `string`
+- **Required**: true
+
+## Options
+
+### `--format`
+
+Output format: table, json, json-pretty
+
+- **Type**: `string`
+
+### `--to`
+
+Exact runtime ID or upstream version
+
+- **Type**: `string`
+
+### `--channel`
+
+Runtime channel: stable, candidate
+
+- **Type**: `string`
+
+### `--restart`
+
+Restart the VM to trial the selected runtime
+
+- **Type**: `bool`
+
+### `--dry-run`
+
+Show what would be pruned without removing anything
+
+- **Type**: `bool`
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet vm runtime status
+```
+
+```
+yeet vm runtime status <vm> --format=json
+```
+
+```
+yeet vm runtime update
+```
+
+```
+yeet vm runtime import local-v1 ./dist/runtime
+```
+
+```
+yeet vm runtime upgrade <vm>
+```
+
+```
+yeet vm runtime upgrade <vm> --channel=candidate --restart
+```
+
+```
+yeet vm runtime rollback <vm> --restart
+```
+
+```
+yeet vm runtime policy defaults set stage-on-restart --channel=stable
+```
+
+```
+yeet vm runtime policy <vm> inherit
+```
+
+```
+yeet vm runtime protect firecracker-v1.16.1-yeet-v1
+```
+
+```
+yeet vm runtime prune --dry-run
 ```
 ````
 

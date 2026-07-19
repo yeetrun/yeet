@@ -17,8 +17,6 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
 	"golang.org/x/sys/unix"
@@ -49,33 +47,10 @@ type vmJailerUpgradePlan struct {
 	Summary VMJailerUpgradeSummary
 }
 
-type vmJailerUnitReplacement struct {
-	Service      string
-	Path         string
-	Staged       string
-	Previous     []byte
-	Existed      bool
-	dir          *os.File
-	liveName     string
-	stagedName   string
-	previousID   vmJailerFileIdentity
-	previousMode uint32
-	previousUID  uint32
-	previousGID  uint32
-	stagedID     vmJailerFileIdentity
-	stagedMode   uint32
-	installedID  vmJailerFileIdentity
-}
-
 type VMJailerUpgrade struct {
-	units           []vmJailerUnitReplacement
-	unitDirs        []*os.File
-	summary         VMJailerUpgradeSummary
-	deps            vmJailerUpgradeDeps
-	closed          bool
-	commitMu        sync.Mutex
-	commitAttempted bool
-	commitErr       error
+	*vmUnitTransaction
+	adoption *VMRuntimeAdoption
+	summary  VMJailerUpgradeSummary
 }
 
 type vmJailerCandidate struct {
@@ -108,10 +83,31 @@ type vmJailerUpgradeDeps struct {
 var (
 	errVMJailerUpgradeUnknownPayload             = errors.New("VM image payload is not in the trusted official catalog")
 	errVMJailerUpgradeIncompatibleCacheCandidate = errors.New("cached VM jailer is incompatible with the target runtime")
+	prepareVMRuntimeAdoptionForJailerUpgrade     = PrepareVMRuntimeAdoption
 )
 
+// PrepareVMJailerUpgrade is retained for callers compiled against the old
+// jailer-only API. The durable operation now adopts the complete matching
+// Firecracker and jailer runtime pair through the fleet transaction.
 func PrepareVMJailerUpgrade(ctx context.Context, cfg *Config) (*VMJailerUpgrade, error) {
-	return prepareVMJailerUpgradeWithDeps(ctx, cfg, defaultVMJailerUpgradeDeps())
+	adoption, err := prepareVMRuntimeAdoptionForJailerUpgrade(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	summary := adoption.Summary()
+	if len(summary.Blocked) != 0 {
+		return nil, errors.Join(
+			fmt.Errorf("legacy jailer upgrade compatibility API cannot adopt blocked VMs: %s", strings.Join(summary.Blocked, ", ")),
+			adoption.Close(),
+		)
+	}
+	return &VMJailerUpgrade{
+		adoption: adoption,
+		summary: VMJailerUpgradeSummary{
+			Ready:          summary.Ready,
+			PendingRestart: summary.PendingRestart,
+		},
+	}, nil
 }
 
 func prepareVMJailerUpgradeWithDeps(ctx context.Context, cfg *Config, deps vmJailerUpgradeDeps) (*VMJailerUpgrade, error) {
@@ -130,541 +126,71 @@ func prepareVMJailerUpgradeWithDeps(ctx context.Context, cfg *Config, deps vmJai
 
 func prepareVMJailerUnitTransaction(ctx context.Context, vms []vmJailerUpgradeVM, summary VMJailerUpgradeSummary, deps vmJailerUpgradeDeps) (*VMJailerUpgrade, error) {
 	deps = completeVMJailerUpgradeTransactionDeps(deps)
-	dirs, byPath, err := acquireVMJailerUnitDirs(ctx, vms, deps.unitUID)
+	specs := make([]vmUnitSpec, 0, len(vms))
+	for _, vm := range vms {
+		specs = append(specs, vmUnitSpec{
+			Service: vm.Service,
+			Path:    vm.UnitPath,
+			Content: vm.UnitContent,
+		})
+	}
+	tx, err := prepareVMUnitTransaction(ctx, specs, vmUnitTransactionDepsForJailerUpgrade(deps))
 	if err != nil {
 		return nil, err
 	}
-	tx := &VMJailerUpgrade{summary: summary, deps: deps, unitDirs: dirs}
-	for _, vm := range vms {
-		replacement, err := stageVMJailerUnitAt(byPath[filepath.Dir(vm.UnitPath)], vm, deps)
-		if err != nil {
-			return nil, errors.Join(err, tx.Close())
-		}
-		tx.units = append(tx.units, replacement)
-	}
-	return tx, nil
+	return &VMJailerUpgrade{vmUnitTransaction: tx, summary: summary}, nil
 }
 
-func acquireVMJailerUnitDirs(ctx context.Context, vms []vmJailerUpgradeVM, trustedUID uint32) ([]*os.File, map[string]*os.File, error) {
-	paths := make([]string, 0, len(vms))
-	seen := make(map[string]struct{}, len(vms))
-	for _, vm := range vms {
-		path := filepath.Dir(vm.UnitPath)
-		if _, ok := seen[path]; ok {
-			continue
-		}
-		seen[path] = struct{}{}
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
-	dirs := make([]*os.File, 0, len(paths))
-	byPath := make(map[string]*os.File, len(paths))
-	for _, path := range paths {
-		if err := ctx.Err(); err != nil {
-			return nil, nil, errors.Join(err, closeVMJailerUnitDirs(dirs))
-		}
-		dir, err := openValidatedVMUnitDir(path, trustedUID)
-		if err != nil {
-			return nil, nil, errors.Join(err, closeVMJailerUnitDirs(dirs))
-		}
-		if err := acquireVMJailerUpgradeDirLock(ctx, dir); err != nil {
-			return nil, nil, errors.Join(fmt.Errorf("lock VM unit directory %s: %w", path, err), dir.Close(), closeVMJailerUnitDirs(dirs))
-		}
-		dirs = append(dirs, dir)
-		byPath[path] = dir
-	}
-	return dirs, byPath, nil
-}
-
-func closeVMJailerUnitDirs(dirs []*os.File) error {
-	var retErr error
-	for i := len(dirs) - 1; i >= 0; i-- {
-		dir := dirs[i]
-		retErr = errors.Join(retErr, releaseVMJailerUpgradeDirLock(dir), dir.Close())
-	}
-	return retErr
-}
-
-func stageVMJailerUnit(vm vmJailerUpgradeVM, deps vmJailerUpgradeDeps) (replacement vmJailerUnitReplacement, retErr error) {
+func stageVMJailerUnit(vm vmJailerUpgradeVM, deps vmJailerUpgradeDeps) (vmUnitReplacement, error) {
 	deps = completeVMJailerUpgradeTransactionDeps(deps)
-	replacement = vmJailerUnitReplacement{Service: vm.Service, Path: vm.UnitPath}
-	dir, err := openValidatedVMUnitDir(filepath.Dir(vm.UnitPath), deps.unitUID)
-	if err != nil {
-		return replacement, err
-	}
-	defer func() {
-		retErr = closeVMUnitStagingDir(dir, replacement.Staged, os.Remove, retErr)
-	}()
-	raw, existed, err := readVMUnitAt(dir, filepath.Base(vm.UnitPath), deps.unitUID)
-	if err != nil {
-		return replacement, err
-	}
-	if existed {
-		replacement.Previous = raw
-		replacement.Existed = true
-	}
-	staged, stagedID, stagedMode, err := prepareStagedVMUnitAt(dir, vm, deps)
-	if err != nil {
-		return replacement, err
-	}
-	replacement.Staged = staged
-	replacement.stagedID = stagedID
-	replacement.stagedMode = stagedMode
-	return replacement, nil
+	return stageVMUnit(vmUnitSpec{
+		Service: vm.Service,
+		Path:    vm.UnitPath,
+		Content: vm.UnitContent,
+	}, vmUnitTransactionDepsForJailerUpgrade(deps))
 }
 
-func stageVMJailerUnitAt(dir *os.File, vm vmJailerUpgradeVM, deps vmJailerUpgradeDeps) (vmJailerUnitReplacement, error) {
-	if dir == nil {
-		return vmJailerUnitReplacement{}, fmt.Errorf("bound VM unit directory is required for %s", vm.UnitPath)
+func vmUnitTransactionDepsForJailerUpgrade(deps vmJailerUpgradeDeps) vmUnitTransactionDeps {
+	return vmUnitTransactionDeps{
+		renameAt:          deps.renameAt,
+		exchangeAt:        deps.exchangeAt,
+		renameNoReplaceAt: deps.renameNoReplaceAt,
+		restoreUnitAt:     deps.restoreUnitAt,
+		unlinkAt:          deps.unlinkAt,
+		systemctl:         deps.systemctl,
+		unitUID:           deps.unitUID,
+		unitGID:           deps.unitGID,
 	}
-	replacement := vmJailerUnitReplacement{
-		Service: vm.Service, Path: vm.UnitPath, dir: dir, liveName: filepath.Base(vm.UnitPath),
-	}
-	raw, existed, id, stat, err := readVMUnitStateAt(dir, replacement.liveName, deps.unitUID)
-	if err != nil {
-		return replacement, err
-	}
-	if existed {
-		replacement.Previous = raw
-		replacement.Existed = true
-		replacement.previousID = id
-		replacement.previousMode = uint32(stat.Mode)
-		replacement.previousUID = stat.Uid
-		replacement.previousGID = stat.Gid
-	}
-	staged, stagedID, stagedMode, err := prepareStagedVMUnitAt(dir, vm, deps)
-	if err != nil {
-		return replacement, err
-	}
-	replacement.Staged = staged
-	replacement.stagedName = filepath.Base(staged)
-	replacement.stagedID = stagedID
-	replacement.stagedMode = stagedMode
-	return replacement, nil
-}
-
-func closeVMUnitStagingDir(dir *os.File, staged string, remove func(string) error, cause error) error {
-	if closeErr := dir.Close(); closeErr != nil {
-		cause = errors.Join(cause, fmt.Errorf("close VM unit directory: %w", closeErr))
-		if staged != "" {
-			cause = errors.Join(cause, remove(staged))
-		}
-	}
-	return cause
-}
-
-func prepareStagedVMUnitAt(dir *os.File, vm vmJailerUpgradeVM, deps vmJailerUpgradeDeps) (string, vmJailerFileIdentity, uint32, error) {
-	name := filepath.Base(vm.UnitPath)
-	temp, tempName, tempID, err := createStagedVMUnitAt(dir, name)
-	if err != nil {
-		return "", vmJailerFileIdentity{}, 0, fmt.Errorf("create staged VM unit %s: %w", vm.UnitPath, err)
-	}
-	stat, err := writeAndSecureStagedVMUnit(temp, vm, deps, tempID)
-	if err != nil {
-		return "", vmJailerFileIdentity{}, 0, cleanupFailedStagedVMUnit(dir, temp, tempName, tempID, err)
-	}
-	if err := temp.Close(); err != nil {
-		cause := fmt.Errorf("close staged VM unit %s: %w", vm.UnitPath, err)
-		cause = errors.Join(cause, unlinkVMJailerNameIfIdentity(dir, tempName, tempID))
-		return "", vmJailerFileIdentity{}, 0, cause
-	}
-	return filepath.Join(filepath.Dir(vm.UnitPath), tempName), tempID, uint32(stat.Mode), nil
-}
-
-func writeAndSecureStagedVMUnit(temp *os.File, vm vmJailerUpgradeVM, deps vmJailerUpgradeDeps, tempID vmJailerFileIdentity) (unix.Stat_t, error) {
-	if _, err := temp.Write(vm.UnitContent); err != nil {
-		return unix.Stat_t{}, fmt.Errorf("write staged VM unit %s: %w", vm.UnitPath, err)
-	}
-	if err := temp.Chown(int(deps.unitUID), int(deps.unitGID)); err != nil {
-		return unix.Stat_t{}, fmt.Errorf("chown staged VM unit %s: %w", vm.UnitPath, err)
-	}
-	if err := temp.Chmod(0o644); err != nil {
-		return unix.Stat_t{}, fmt.Errorf("chmod staged VM unit %s: %w", vm.UnitPath, err)
-	}
-	if err := temp.Sync(); err != nil {
-		return unix.Stat_t{}, fmt.Errorf("sync staged VM unit %s: %w", vm.UnitPath, err)
-	}
-	return validateStagedVMUnitFile(temp, tempID, deps.unitUID, deps.unitGID)
-}
-
-func cleanupFailedStagedVMUnit(dir, temp *os.File, tempName string, tempID vmJailerFileIdentity, cause error) error {
-	cleanupErr := unlinkVMJailerNameIfIdentity(dir, tempName, tempID)
-	closeErr := temp.Close()
-	return errors.Join(cause, cleanupErr, closeErr)
-}
-
-func openValidatedVMUnitDir(path string, trustedUID uint32) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, fmt.Errorf("open VM unit directory without following symlinks: %w", err)
-	}
-	dir := os.NewFile(uintptr(fd), path)
-	if dir == nil {
-		_ = unix.Close(fd)
-		return nil, fmt.Errorf("bind VM unit directory file descriptor")
-	}
-	if err := validateOpenVMUnitDir(dir, trustedUID); err != nil {
-		return nil, closeVMJailerFileOnError(dir, err)
-	}
-	return dir, nil
-}
-
-func validateOpenVMUnitDir(dir *os.File, trustedUID uint32) error {
-	_, stat, err := vmJailerFileIdentityForFile(dir)
-	if err != nil {
-		return fmt.Errorf("inspect VM unit directory: %w", err)
-	}
-	mode := uint32(stat.Mode)
-	if mode&unix.S_IFMT != unix.S_IFDIR {
-		return fmt.Errorf("VM unit directory is not a directory")
-	}
-	if stat.Uid != trustedUID {
-		return fmt.Errorf("VM unit directory owner is %d, want %d", stat.Uid, trustedUID)
-	}
-	if mode&0o022 != 0 {
-		return fmt.Errorf("VM unit directory is writable by group or others: mode %o", mode&0o7777)
-	}
-	return nil
-}
-
-func readVMUnitAt(dir *os.File, name string, trustedUID uint32) ([]byte, bool, error) {
-	raw, existed, _, _, err := readVMUnitStateAt(dir, name, trustedUID)
-	return raw, existed, err
-}
-
-func readVMUnitStateAt(dir *os.File, name string, trustedUID uint32) ([]byte, bool, vmJailerFileIdentity, unix.Stat_t, error) {
-	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if errors.Is(err, unix.ENOENT) {
-		return nil, false, vmJailerFileIdentity{}, unix.Stat_t{}, nil
-	}
-	if err != nil {
-		return nil, false, vmJailerFileIdentity{}, unix.Stat_t{}, fmt.Errorf("open VM unit without following symlinks: %w", err)
-	}
-	file := os.NewFile(uintptr(fd), name)
-	if file == nil {
-		_ = unix.Close(fd)
-		return nil, false, vmJailerFileIdentity{}, unix.Stat_t{}, fmt.Errorf("bind VM unit file descriptor")
-	}
-	id, stat, statErr := vmJailerFileIdentityForFile(file)
-	if statErr != nil {
-		return nil, false, vmJailerFileIdentity{}, unix.Stat_t{}, closeVMJailerFileOnError(file, fmt.Errorf("inspect VM unit: %w", statErr))
-	}
-	if uint32(stat.Mode)&unix.S_IFMT != unix.S_IFREG {
-		return nil, false, vmJailerFileIdentity{}, unix.Stat_t{}, closeVMJailerFileOnError(file, fmt.Errorf("VM unit is not a regular file"))
-	}
-	if stat.Uid != trustedUID {
-		return nil, false, vmJailerFileIdentity{}, unix.Stat_t{}, closeVMJailerFileOnError(file, fmt.Errorf("VM unit owner is %d, want %d", stat.Uid, trustedUID))
-	}
-	raw, readErr := io.ReadAll(file)
-	closeErr := file.Close()
-	if readErr != nil {
-		return nil, false, vmJailerFileIdentity{}, unix.Stat_t{}, errors.Join(fmt.Errorf("read VM unit: %w", readErr), closeErr)
-	}
-	if closeErr != nil {
-		return nil, false, vmJailerFileIdentity{}, unix.Stat_t{}, fmt.Errorf("close VM unit: %w", closeErr)
-	}
-	return raw, true, id, stat, nil
-}
-
-func createStagedVMUnitAt(dir *os.File, unitName string) (*os.File, string, vmJailerFileIdentity, error) {
-	for range 128 {
-		var random [12]byte
-		if _, err := rand.Read(random[:]); err != nil {
-			return nil, "", vmJailerFileIdentity{}, fmt.Errorf("generate staged VM unit name: %w", err)
-		}
-		name := "." + unitName + ".jailer-" + hex.EncodeToString(random[:])
-		fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
-		if errors.Is(err, unix.EEXIST) {
-			continue
-		}
-		if err != nil {
-			return nil, "", vmJailerFileIdentity{}, err
-		}
-		file := os.NewFile(uintptr(fd), name)
-		if file == nil {
-			_ = unix.Close(fd)
-			_ = unix.Unlinkat(int(dir.Fd()), name, 0)
-			return nil, "", vmJailerFileIdentity{}, fmt.Errorf("bind staged VM unit file descriptor")
-		}
-		id, _, err := vmJailerFileIdentityForFile(file)
-		if err != nil {
-			cause := closeVMJailerFileOnError(file, err)
-			return nil, "", vmJailerFileIdentity{}, errors.Join(cause, unix.Unlinkat(int(dir.Fd()), name, 0))
-		}
-		return file, name, id, nil
-	}
-	return nil, "", vmJailerFileIdentity{}, fmt.Errorf("create staged VM unit: exhausted unique names")
-}
-
-func validateStagedVMUnitFile(file *os.File, want vmJailerFileIdentity, uid, gid uint32) (unix.Stat_t, error) {
-	got, stat, err := vmJailerFileIdentityForFile(file)
-	if err != nil {
-		return unix.Stat_t{}, fmt.Errorf("inspect staged VM unit: %w", err)
-	}
-	if got != want || uint32(stat.Mode)&unix.S_IFMT != unix.S_IFREG {
-		return unix.Stat_t{}, fmt.Errorf("staged VM unit inode changed or is not a regular file")
-	}
-	if stat.Uid != uid || stat.Gid != gid {
-		return unix.Stat_t{}, fmt.Errorf("staged VM unit owner is %d:%d, want %d:%d", stat.Uid, stat.Gid, uid, gid)
-	}
-	if uint32(stat.Mode)&0o777 != 0o644 {
-		return unix.Stat_t{}, fmt.Errorf("staged VM unit permissions are %o, want 0644", uint32(stat.Mode)&0o777)
-	}
-	return stat, nil
-}
-
-func restoreVMJailerUnitAt(
-	dir *os.File,
-	name string,
-	installedID vmJailerFileIdentity,
-	contents []byte,
-	mode os.FileMode,
-	uid, gid uint32,
-	exchangeAt func(int, string, int, string) error,
-	unlinkAt func(int, string, int) error,
-) (retErr error) {
-	temp, tempName, tempID, err := createStagedVMUnitAt(dir, name)
-	if err != nil {
-		return fmt.Errorf("create restoration file: %w", err)
-	}
-	cleanupTemp := true
-	defer func() {
-		if cleanupTemp {
-			retErr = errors.Join(retErr, cleanupVMJailerRestorationTemp(dir, temp, tempName, tempID, unlinkAt))
-		}
-	}()
-	if err := writeVMJailerRestorationTemp(temp, contents, mode, uid, gid); err != nil {
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return fmt.Errorf("close restoration file: %w", err)
-	}
-	temp = nil
-	if err := validateVMJailerRestorationTemp(dir, tempName, tempID, mode, uid, gid); err != nil {
-		return err
-	}
-	cleanupTemp, retErr = finishVMJailerUnitRestoration(dir, tempName, name, installedID, exchangeAt, unlinkAt)
-	return retErr
-}
-
-func finishVMJailerUnitRestoration(
-	dir *os.File,
-	tempName, liveName string,
-	installedID vmJailerFileIdentity,
-	exchangeAt func(int, string, int, string) error,
-	unlinkAt func(int, string, int) error,
-) (bool, error) {
-	if err := exchangeAt(int(dir.Fd()), tempName, int(dir.Fd()), liveName); err != nil {
-		return true, fmt.Errorf("exchange restoration file with live VM unit: %w", err)
-	}
-	displacedID, _, displacedErr := vmJailerNameIdentityAt(dir, tempName)
-	if displacedErr == nil && displacedID == installedID {
-		return false, unlinkVMJailerNameIfIdentityWith(dir, tempName, installedID, unlinkAt)
-	}
-	if displacedErr == nil {
-		displacedErr = fmt.Errorf("inode changed")
-	}
-	refusal := fmt.Errorf("live VM unit changed after install; refusing rollback: %w", displacedErr)
-	if err := exchangeAt(int(dir.Fd()), tempName, int(dir.Fd()), liveName); err != nil {
-		return false, errors.Join(refusal, fmt.Errorf("exchange concurrent VM unit back into place: %w", err))
-	}
-	return true, refusal
-}
-
-func writeVMJailerRestorationTemp(temp *os.File, contents []byte, mode os.FileMode, uid, gid uint32) error {
-	if _, err := temp.Write(contents); err != nil {
-		return fmt.Errorf("write restoration file: %w", err)
-	}
-	if err := temp.Chown(int(uid), int(gid)); err != nil {
-		return fmt.Errorf("chown restoration file: %w", err)
-	}
-	if err := temp.Chmod(mode); err != nil {
-		return fmt.Errorf("chmod restoration file: %w", err)
-	}
-	if err := temp.Sync(); err != nil {
-		return fmt.Errorf("sync restoration file: %w", err)
-	}
-	return nil
-}
-
-func validateVMJailerRestorationTemp(dir *os.File, name string, want vmJailerFileIdentity, mode os.FileMode, uid, gid uint32) error {
-	got, stat, err := vmJailerNameIdentityAt(dir, name)
-	if err != nil {
-		return fmt.Errorf("inspect restoration file: %w", err)
-	}
-	if got != want || uint32(stat.Mode)&unix.S_IFMT != unix.S_IFREG || stat.Uid != uid || stat.Gid != gid || os.FileMode(stat.Mode)&os.ModePerm != mode.Perm() {
-		return fmt.Errorf("restoration file changed before rename")
-	}
-	return nil
-}
-
-func cleanupVMJailerRestorationTemp(dir, temp *os.File, name string, id vmJailerFileIdentity, unlinkAt func(int, string, int) error) error {
-	var closeErr error
-	if temp != nil {
-		closeErr = temp.Close()
-	}
-	return errors.Join(closeErr, unlinkVMJailerNameIfIdentityWith(dir, name, id, unlinkAt))
 }
 
 func (tx *VMJailerUpgrade) Commit() error {
 	if tx == nil {
 		return nil
 	}
-	tx.commitMu.Lock()
-	defer tx.commitMu.Unlock()
-	if tx.commitAttempted {
-		return tx.commitErr
+	if tx.adoption != nil {
+		return tx.adoption.Commit()
 	}
-	tx.commitAttempted = true
-	tx.commitErr = tx.commitOnce()
-	return tx.commitErr
-}
-
-func (tx *VMJailerUpgrade) commitOnce() error {
-	if len(tx.units) == 0 {
-		return nil
-	}
-	for i := range tx.units {
-		unit := &tx.units[i]
-		if err := validateVMJailerUnitReplacement(*unit, tx.deps.unitUID, tx.deps.unitGID); err != nil {
-			return tx.rollbackUnits(i, err)
-		}
-		if err := tx.deps.renameAt(int(unit.dir.Fd()), unit.stagedName, int(unit.dir.Fd()), unit.liveName); err != nil {
-			return tx.rollbackUnits(i, fmt.Errorf("replace VM unit %s: %w", unit.Path, err))
-		}
-		unit.installedID = unit.stagedID
-		if err := validateInstalledVMJailerUnit(*unit, tx.deps.unitUID, tx.deps.unitGID); err != nil {
-			return tx.rollbackUnits(i+1, err)
-		}
-	}
-	if err := tx.deps.systemctl("daemon-reload"); err != nil {
-		return tx.rollbackUnits(len(tx.units), fmt.Errorf("reload systemd after replacing VM units: %w", err))
-	}
-	return nil
-}
-
-func validateVMJailerUnitReplacement(unit vmJailerUnitReplacement, uid, gid uint32) (retErr error) {
-	if unit.dir == nil || unit.stagedID == (vmJailerFileIdentity{}) {
-		return fmt.Errorf("VM unit replacement %s is not bound to a staged inode", unit.Path)
-	}
-	if err := validateOpenVMUnitDir(unit.dir, uid); err != nil {
-		return fmt.Errorf("validate bound VM unit directory for %s: %w", unit.Path, err)
-	}
-	got, stat, err := vmJailerNameIdentityAt(unit.dir, unit.stagedName)
-	if err != nil {
-		return fmt.Errorf("inspect staged VM unit %s before commit: %w", unit.Staged, err)
-	}
-	// The directory is root-owned and not writable by group or others, so a
-	// non-root process cannot replace this name. Rechecking identity and mode
-	// here also refuses accidental or concurrent root-level replacement.
-	if got != unit.stagedID || uint32(stat.Mode) != unit.stagedMode || uint32(stat.Mode)&unix.S_IFMT != unix.S_IFREG {
-		return fmt.Errorf("staged VM unit %s changed before commit", unit.Staged)
-	}
-	if stat.Uid != uid || stat.Gid != gid {
-		return fmt.Errorf("staged VM unit %s owner is %d:%d, want %d:%d", unit.Staged, stat.Uid, stat.Gid, uid, gid)
-	}
-	return validateOriginalVMJailerUnit(unit)
-}
-
-func validateOriginalVMJailerUnit(unit vmJailerUnitReplacement) error {
-	got, stat, err := vmJailerNameIdentityAt(unit.dir, unit.liveName)
-	if !unit.Existed {
-		if errors.Is(err, unix.ENOENT) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("inspect live VM unit %s before commit: %w", unit.Path, err)
-		}
-		return fmt.Errorf("live VM unit %s appeared before commit with inode %d:%d", unit.Path, got.dev, got.ino)
-	}
-	if err != nil {
-		return fmt.Errorf("live VM unit %s changed before commit: %w", unit.Path, err)
-	}
-	if got != unit.previousID || uint32(stat.Mode) != unit.previousMode || stat.Uid != unit.previousUID || stat.Gid != unit.previousGID {
-		return fmt.Errorf("live VM unit %s changed before commit", unit.Path)
-	}
-	return nil
-}
-
-func validateInstalledVMJailerUnit(unit vmJailerUnitReplacement, uid, gid uint32) error {
-	got, stat, err := vmJailerNameIdentityAt(unit.dir, unit.liveName)
-	if err != nil {
-		return fmt.Errorf("inspect installed VM unit %s: %w", unit.Path, err)
-	}
-	if got != unit.installedID || uint32(stat.Mode) != unit.stagedMode || uint32(stat.Mode)&unix.S_IFMT != unix.S_IFREG {
-		return fmt.Errorf("installed VM unit %s changed immediately after rename", unit.Path)
-	}
-	if stat.Uid != uid || stat.Gid != gid {
-		return fmt.Errorf("installed VM unit %s owner is %d:%d, want %d:%d", unit.Path, stat.Uid, stat.Gid, uid, gid)
-	}
-	return nil
-}
-
-func (tx *VMJailerUpgrade) rollbackUnits(applied int, cause error) error {
-	var rollbackErr error
-	for i := applied - 1; i >= 0; i-- {
-		unit := &tx.units[i]
-		if unit.Existed {
-			mode := os.FileMode(unit.previousMode & 0o7777)
-			if err := tx.deps.restoreUnitAt(
-				unit.dir, unit.liveName, unit.installedID, unit.Previous, mode,
-				unit.previousUID, unit.previousGID, tx.deps.exchangeAt, tx.deps.unlinkAt,
-			); err != nil {
-				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore VM unit %s: %w", unit.Path, err))
-			}
-		} else if err := rollbackNewVMJailerUnit(unit, tx.deps); err != nil {
-			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("remove new VM unit %s: %w", unit.Path, err))
-		}
-	}
-	if err := tx.deps.systemctl("daemon-reload"); err != nil {
-		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("reload systemd after restoring VM units: %w", err))
-	}
-	return errors.Join(cause, rollbackErr)
-}
-
-func rollbackNewVMJailerUnit(unit *vmJailerUnitReplacement, deps vmJailerUpgradeDeps) error {
-	dirFD := int(unit.dir.Fd())
-	if err := deps.renameNoReplaceAt(dirFD, unit.liveName, dirFD, unit.stagedName); err != nil {
-		return fmt.Errorf("quarantine live VM unit: %w", err)
-	}
-	displacedID, _, displacedErr := vmJailerNameIdentityAt(unit.dir, unit.stagedName)
-	if displacedErr == nil && displacedID == unit.installedID {
-		return unlinkVMJailerNameIfIdentityWith(unit.dir, unit.stagedName, unit.installedID, deps.unlinkAt)
-	}
-	if displacedErr == nil {
-		displacedErr = fmt.Errorf("inode changed")
-	}
-	refusal := fmt.Errorf("live VM unit changed after install; refusing rollback: %w", displacedErr)
-	if err := deps.renameNoReplaceAt(dirFD, unit.stagedName, dirFD, unit.liveName); err != nil {
-		// The quarantine now contains an inode that does not belong to this
-		// transaction. Keep it for operator recovery instead of letting Close
-		// remove it as if it were the original staging file.
-		unit.stagedName = ""
-		return errors.Join(refusal, fmt.Errorf("restore quarantined concurrent VM unit: %w", err))
-	}
-	return refusal
+	return tx.vmUnitTransaction.Commit()
 }
 
 func (tx *VMJailerUpgrade) Close() error {
-	if tx == nil || tx.closed {
+	if tx == nil {
 		return nil
 	}
-	tx.closed = true
-	var retErr error
-	for _, unit := range tx.units {
-		if unit.dir == nil {
-			retErr = errors.Join(retErr, fmt.Errorf("remove staged VM unit %s: replacement is not bound to a directory", unit.Staged))
-			continue
-		}
-		if unit.stagedName == "" {
-			continue
-		}
-		if err := tx.deps.unlinkAt(int(unit.dir.Fd()), unit.stagedName, 0); err != nil && !errors.Is(err, unix.ENOENT) {
-			retErr = errors.Join(retErr, fmt.Errorf("remove staged VM unit %s: %w", unit.Staged, err))
-		}
+	if tx.adoption != nil {
+		return tx.adoption.Close()
 	}
-	retErr = errors.Join(retErr, closeVMJailerUnitDirs(tx.unitDirs))
-	return retErr
+	return tx.vmUnitTransaction.Close()
+}
+
+func (tx *VMJailerUpgrade) RestorePreviousAndVerify() error {
+	if tx == nil {
+		return nil
+	}
+	if tx.adoption != nil {
+		return fmt.Errorf("legacy jailer upgrade rollback is unavailable for a VM runtime adoption transaction; close it before commit or use runtime rollback")
+	}
+	return tx.vmUnitTransaction.RestorePreviousAndVerify()
 }
 
 func (tx *VMJailerUpgrade) Summary() VMJailerUpgradeSummary {
@@ -676,7 +202,6 @@ func (tx *VMJailerUpgrade) Summary() VMJailerUpgradeSummary {
 		PendingRestart: append([]string(nil), tx.summary.PendingRestart...),
 	}
 }
-
 func resolveVMUpgradeJailer(ctx context.Context, vm vmJailerUpgradeVM, deps vmJailerUpgradeDeps) (string, string, error) {
 	if path, ok, err := deps.sibling(ctx, vm); err != nil {
 		return "", "", err
@@ -724,12 +249,23 @@ func planVMJailerUpgrade(ctx context.Context, cfg *Config, deps vmJailerUpgradeD
 		return vmJailerUpgradePlan{}, err
 	}
 	server := &Server{cfg: effectiveCfg}
+	retired, err := inventoryRetiredVMCheckpoints(ctx, server, services)
+	if err != nil {
+		return vmJailerUpgradePlan{}, fmt.Errorf("inventory retired VM checkpoints: %w", err)
+	}
+	if err := validateNoRetiredVMCheckpoints(retired); err != nil {
+		return vmJailerUpgradePlan{}, err
+	}
+	return planVMJailerUpgradeServices(ctx, &effectiveCfg, server, services, names, deps)
+}
+
+func planVMJailerUpgradeServices(ctx context.Context, cfg *Config, server *Server, services map[string]*db.Service, names []string, deps vmJailerUpgradeDeps) (vmJailerUpgradePlan, error) {
 	plan := vmJailerUpgradePlan{VMs: make([]vmJailerUpgradeVM, 0, len(names))}
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return vmJailerUpgradePlan{}, err
 		}
-		vm, err := planVMJailerUpgradeService(ctx, &effectiveCfg, server, *services[name], deps)
+		vm, err := planVMJailerUpgradeService(ctx, cfg, server, *services[name], deps)
 		if err != nil {
 			return vmJailerUpgradePlan{}, err
 		}
@@ -977,7 +513,7 @@ func defaultVMJailerUpgradeDeps() vmJailerUpgradeDeps {
 		renameAt:              unix.Renameat,
 		exchangeAt:            exchangeVMJailerUnitNamesAt,
 		renameNoReplaceAt:     renameVMJailerUnitNameNoReplaceAt,
-		restoreUnitAt:         restoreVMJailerUnitAt,
+		restoreUnitAt:         restoreVMUnitAt,
 		unlinkAt:              unix.Unlinkat,
 		systemctl:             runVMSystemctl,
 		unitUID:               0,
@@ -1455,30 +991,6 @@ func openValidatedVMJailerUpgradeDir(path string, trustedUID uint32) (*os.File, 
 		return nil, vmJailerFileIdentity{}, closeVMJailerFileOnError(dir, fmt.Errorf("VM jailer target directory is writable by group or others: mode %o", mode&0o7777))
 	}
 	return dir, id, nil
-}
-
-func acquireVMJailerUpgradeDirLock(ctx context.Context, dir *os.File) error {
-	for {
-		err := unix.Flock(int(dir.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			return nil
-		}
-		if !errors.Is(err, unix.EWOULDBLOCK) && !errors.Is(err, unix.EAGAIN) {
-			return fmt.Errorf("lock VM jailer target directory: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(25 * time.Millisecond):
-		}
-	}
-}
-
-func releaseVMJailerUpgradeDirLock(dir *os.File) error {
-	if err := unix.Flock(int(dir.Fd()), unix.LOCK_UN); err != nil {
-		return fmt.Errorf("unlock VM jailer target directory: %w", err)
-	}
-	return nil
 }
 
 func prepareUpgradeJailerTempAt(dir *os.File, candidate vmJailerCandidate, ops vmJailerUpgradeInstallOps) (*os.File, string, vmJailerFileIdentity, error) {

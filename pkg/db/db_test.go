@@ -5,13 +5,19 @@
 package db
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"slices"
+	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestDataCloneDeepCopiesTopLevelCollections(t *testing.T) {
@@ -126,7 +132,7 @@ func TestMigrateVersion12LeavesOldServiceIdentityNil(t *testing.T) {
 	if _, err := migrate(d); err != nil {
 		t.Fatal(err)
 	}
-	if d.DataVersion != 13 || d.Services["api"].Identity != nil {
+	if d.DataVersion != CurrentDataVersion || d.Services["api"].Identity != nil {
 		t.Fatalf("migrated data = %#v", d)
 	}
 }
@@ -436,6 +442,136 @@ func TestVMHostAndBalloonCloneAndView(t *testing.T) {
 	}
 	if got := svc.VM().Balloon(); got != data.Services["devbox"].VM.Balloon {
 		t.Fatalf("view VM Balloon = %#v, want %#v", got, data.Services["devbox"].VM.Balloon)
+	}
+}
+
+func testVMComponentsConfig() *VMComponentsConfig {
+	return &VMComponentsConfig{
+		GuestBase: VMGuestBaseConfig{
+			ID:               "guest-ubuntu-26.04-amd64-v1",
+			ManifestSHA256:   strings.Repeat("a", 64),
+			Source:           "official",
+			RootFSProvenance: "ubuntu-26.04-server-cloudimg-amd64.img",
+		},
+		Kernel: VMKernelArtifactConfig{
+			ID:             "kernel-linux-7.1.1-yeet-v1",
+			ManifestSHA256: strings.Repeat("b", 64),
+			SHA256:         strings.Repeat("c", 64),
+			Path:           "/var/lib/yeet/vm-kernels/vmlinux",
+			Source:         "official",
+		},
+		Runtime: VMRuntimeLifecycleConfig{
+			Policy:  "manual",
+			Channel: "stable",
+			Configured: VMRuntimeArtifactConfig{
+				ID:                "firecracker-v1.16.1-yeet-v1",
+				ManifestSHA256:    strings.Repeat("d", 64),
+				FirecrackerSHA256: strings.Repeat("e", 64),
+				JailerSHA256:      strings.Repeat("f", 64),
+				Firecracker:       "/var/lib/yeet/vm-runtimes/amd64/fc/firecracker",
+				Jailer:            "/var/lib/yeet/vm-runtimes/amd64/fc/jailer",
+				Source:            "official",
+			},
+		},
+	}
+}
+
+func TestVMComponentsClone(t *testing.T) {
+	components := testVMComponentsConfig()
+	components.Runtime.Staged = &VMRuntimeArtifactConfig{
+		ID:                "firecracker-v1.17.0-yeet-v1",
+		ManifestSHA256:    strings.Repeat("1", 64),
+		FirecrackerSHA256: strings.Repeat("2", 64),
+		JailerSHA256:      strings.Repeat("3", 64),
+		Firecracker:       "/var/lib/yeet/vm-runtimes/amd64/staged/firecracker",
+		Jailer:            "/var/lib/yeet/vm-runtimes/amd64/staged/jailer",
+		Source:            "official",
+	}
+	components.Runtime.Previous = &VMRuntimeArtifactConfig{
+		ID:                "firecracker-v1.15.0-yeet-v2",
+		ManifestSHA256:    strings.Repeat("4", 64),
+		FirecrackerSHA256: strings.Repeat("5", 64),
+		JailerSHA256:      strings.Repeat("6", 64),
+		Firecracker:       "/var/lib/yeet/vm-runtimes/amd64/previous/firecracker",
+		Jailer:            "/var/lib/yeet/vm-runtimes/amd64/previous/jailer",
+		Source:            "official",
+	}
+	components.Runtime.Trial = &VMRuntimeTrialConfig{
+		State:         "pending",
+		CandidateID:   components.Runtime.Staged.ID,
+		PreviousID:    components.Runtime.Previous.ID,
+		RecoveryPoint: "runtime-trial-before-v1.17.0",
+		StartedAt:     "2026-07-19T14:00:00Z",
+		LastError:     "previous attempt timed out",
+	}
+
+	src := &Data{
+		DataVersion: CurrentDataVersion,
+		VMHost: &VMHostConfig{
+			MemoryPolicy:        "balanced",
+			RuntimePolicy:       "stage-on-restart",
+			RuntimeChannel:      "candidate",
+			ProtectedRuntimeIDs: []string{components.Runtime.Configured.ID, components.Runtime.Previous.ID},
+		},
+		Services: map[string]*Service{
+			"devbox": {
+				Name:        "devbox",
+				ServiceType: ServiceTypeVM,
+				VM: &VMConfig{
+					Runtime:    "firecracker",
+					Image:      VMImageConfig{Payload: "vm://ubuntu/26.04", Version: "ubuntu-26.04-amd64-v29"},
+					Components: components,
+				},
+			},
+		},
+	}
+
+	raw, err := json.Marshal(src)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	var roundTrip Data
+	if err := json.Unmarshal(raw, &roundTrip); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(&roundTrip, src) {
+		t.Fatalf("round-trip differs:\ngot=%#v\nwant=%#v", &roundTrip, src)
+	}
+
+	clone := src.Clone()
+	if !reflect.DeepEqual(clone, src) {
+		t.Fatalf("clone differs:\ngot=%#v\nwant=%#v", clone, src)
+	}
+	requireDistinctPtr(t, "VM host", clone.VMHost, src.VMHost)
+	requireDistinctPtr(t, "VM components", clone.Services["devbox"].VM.Components, components)
+	requireDistinctPtr(t, "staged runtime", clone.Services["devbox"].VM.Components.Runtime.Staged, components.Runtime.Staged)
+	requireDistinctPtr(t, "previous runtime", clone.Services["devbox"].VM.Components.Runtime.Previous, components.Runtime.Previous)
+	requireDistinctPtr(t, "runtime trial", clone.Services["devbox"].VM.Components.Runtime.Trial, components.Runtime.Trial)
+
+	clone.VMHost.ProtectedRuntimeIDs[0] = "firecracker-v9.9.9-yeet-v9"
+	clone.Services["devbox"].VM.Components.GuestBase.ID = "guest-clone"
+	clone.Services["devbox"].VM.Components.Runtime.Staged.ID = "runtime-staged-clone"
+	clone.Services["devbox"].VM.Components.Runtime.Previous.ID = "runtime-previous-clone"
+	clone.Services["devbox"].VM.Components.Runtime.Trial.LastError = "clone"
+	clone.Services["new"] = &Service{Name: "new"}
+
+	if got := src.VMHost.ProtectedRuntimeIDs[0]; got != components.Runtime.Configured.ID {
+		t.Fatalf("source protected runtime IDs mutated through clone: %q", got)
+	}
+	if got := components.GuestBase.ID; got != "guest-ubuntu-26.04-amd64-v1" {
+		t.Fatalf("source guest base mutated through clone: %q", got)
+	}
+	if got := components.Runtime.Staged.ID; got != "firecracker-v1.17.0-yeet-v1" {
+		t.Fatalf("source staged runtime mutated through clone: %q", got)
+	}
+	if got := components.Runtime.Previous.ID; got != "firecracker-v1.15.0-yeet-v2" {
+		t.Fatalf("source previous runtime mutated through clone: %q", got)
+	}
+	if got := components.Runtime.Trial.LastError; got != "previous attempt timed out" {
+		t.Fatalf("source runtime trial mutated through clone: %q", got)
+	}
+	if _, ok := src.Services["new"]; ok {
+		t.Fatal("source services map mutated through clone")
 	}
 }
 
@@ -926,8 +1062,12 @@ func TestStoreSetSyncsTemporaryFileBeforeRenameAndDirectoryAfter(t *testing.T) {
 	if err := store.Set(&Data{DataVersion: CurrentDataVersion}); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"file-sync", "rename", "directory-sync"}; !reflect.DeepEqual(events, want) {
-		t.Fatalf("durability events = %v, want %v", events, want)
+	fileSync := slices.Index(events, "file-sync")
+	if fileSync < 0 {
+		t.Fatalf("durability events = %v, missing temporary file sync", events)
+	}
+	if got, want := events[fileSync:], []string{"file-sync", "rename", "directory-sync"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("database publication events = %v, want %v (all durability events: %v)", got, want, events)
 	}
 }
 
@@ -1005,7 +1145,12 @@ func TestStoreSetPropagatesDirectorySyncFailureAndExposesRenamedStateForRollback
 		renameCalled = true
 		return oldRename(oldPath, newPath)
 	}
-	syncDBDirectory = func(*os.File) error { return wantErr }
+	syncDBDirectory = func(f *os.File) error {
+		if renameCalled {
+			return wantErr
+		}
+		return oldDirectorySync(f)
+	}
 	t.Cleanup(func() {
 		renameDBFile = oldRename
 		syncDBDirectory = oldDirectorySync
@@ -1047,6 +1192,25 @@ func TestStoreSetPropagatesDirectorySyncFailureAndExposesRenamedStateForRollback
 	}
 	if generation := mustReadData(t, path).Services["svc"].Generation; generation != 1 {
 		t.Fatalf("on-disk generation after rollback = %d, want 1", generation)
+	}
+}
+
+func TestStoreSetNormalizesZeroDataVersion(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+
+	if err := store.Set(&Data{Services: map[string]*Service{"svc": {Name: "svc"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustReadData(t, path).DataVersion; got != CurrentDataVersion {
+		t.Fatalf("on-disk DataVersion = %d, want %d", got, CurrentDataVersion)
+	}
+	if _, err := store.MutateData(func(d *Data) error {
+		d.Services["svc"].Generation++
+		return nil
+	}); err != nil {
+		t.Fatalf("MutateData after Set: %v", err)
 	}
 }
 
@@ -1404,6 +1568,91 @@ func TestStoreGetMigratesVersion10VMWithoutBalloonOrHost(t *testing.T) {
 	}
 }
 
+func TestStoreGetMigratesVersion11VMComponents(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	if err := os.WriteFile(path, []byte(`{
+  "DataVersion": 11,
+  "Services": {
+    "devbox": {
+      "Name": "devbox",
+      "ServiceType": "vm",
+      "VM": {
+        "Runtime": "firecracker",
+        "Image": {
+          "Payload": "vm://ubuntu/26.04",
+          "Version": "ubuntu-26.04-amd64-v29",
+          "Digest": "sha256:legacy-image",
+          "Kernel": "/var/lib/yeet/images/v29/vmlinux",
+          "RootFS": "/var/lib/yeet/images/v29/rootfs.ext4"
+        },
+        "CPUs": 2,
+        "MemoryBytes": 4294967296,
+        "SetupState": "ready"
+      }
+    }
+  }
+}
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewStore(path, filepath.Join(root, "services"))
+	got, err := store.Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DataVersion() != CurrentDataVersion {
+		t.Fatalf("DataVersion = %d, CurrentDataVersion = %d; want current", got.DataVersion(), CurrentDataVersion)
+	}
+	if got.VMHost().Valid() {
+		t.Fatal("migration invented a VMHost runtime policy container")
+	}
+	service, ok := got.Services().GetOk("devbox")
+	if !ok {
+		t.Fatal("missing migrated VM service")
+	}
+	vm := service.VM()
+	if got := vm.Image(); got.Payload != "vm://ubuntu/26.04" || got.Version != "ubuntu-26.04-amd64-v29" || got.Digest != "sha256:legacy-image" || got.Kernel != "/var/lib/yeet/images/v29/vmlinux" || got.RootFS != "/var/lib/yeet/images/v29/rootfs.ext4" {
+		t.Fatalf("migrated VM image = %#v; legacy image identity was not preserved", got)
+	}
+	if vm.Components().Valid() {
+		t.Fatalf("migration invented VM component identity: %#v", vm.Components().AsStruct())
+	}
+
+	onDisk := mustReadData(t, path)
+	if onDisk.DataVersion != CurrentDataVersion {
+		t.Fatalf("on-disk DataVersion = %d, want %d", onDisk.DataVersion, CurrentDataVersion)
+	}
+	if onDisk.VMHost != nil {
+		t.Fatalf("on-disk VMHost = %#v, want nil", onDisk.VMHost)
+	}
+	if onDisk.Services["devbox"].VM.Components != nil {
+		t.Fatalf("on-disk components = %#v, want nil", onDisk.Services["devbox"].VM.Components)
+	}
+	if got := onDisk.Services["devbox"].VM.Image.Version; got != "ubuntu-26.04-amd64-v29" {
+		t.Fatalf("on-disk VM image version = %q, want ubuntu-26.04-amd64-v29", got)
+	}
+
+	backups, err := filepath.Glob(path + ".v11.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("migration backups = %v, want exactly one v11 backup", backups)
+	}
+	backup := mustReadData(t, backups[0])
+	if backup.DataVersion != 11 {
+		t.Fatalf("backup DataVersion = %d, want 11", backup.DataVersion)
+	}
+	if backup.Services["devbox"].VM.Components != nil {
+		t.Fatalf("backup components = %#v, want nil", backup.Services["devbox"].VM.Components)
+	}
+	if got := backup.Services["devbox"].VM.Image.Version; got != "ubuntu-26.04-amd64-v29" {
+		t.Fatalf("backup VM image version = %q, want ubuntu-26.04-amd64-v29", got)
+	}
+}
+
 func TestStoreGetDoesNotCacheFailedMigrationSave(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "db.json")
@@ -1498,12 +1747,82 @@ func TestStoreGetMigratesVersion12WithBackupAndRetriesFailedSave(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get after restoring rename: %v", err)
 	}
-	if got.DataVersion() != 13 || got.Services().Get("api").Identity().Valid() {
+	if got.DataVersion() != CurrentDataVersion || got.Services().Get("api").Identity().Valid() {
 		t.Fatalf("migrated view = %#v", got.AsStruct())
 	}
 	onDisk = mustReadData(t, path)
-	if onDisk.DataVersion != 13 || onDisk.Services["api"].Identity != nil {
+	if onDisk.DataVersion != CurrentDataVersion || onDisk.Services["api"].Identity != nil {
 		t.Fatalf("on-disk data after retry = %#v", onDisk)
+	}
+}
+
+func TestStoreCachesPublishedMigrationAfterDurabilityWarning(t *testing.T) {
+	operations := []struct {
+		name string
+		run  func(*Store, error) error
+	}{
+		{name: "Get", run: func(store *Store, _ error) error {
+			_, err := store.Get()
+			return err
+		}},
+		{name: "MutateData", run: func(store *Store, callbackErr error) error {
+			_, err := store.MutateData(func(*Data) error { return callbackErr })
+			return err
+		}},
+	}
+	failures := []struct {
+		name        string
+		inject      func(*Store, error)
+		callbackErr error
+	}{
+		{name: "parent sync", inject: func(store *Store, injected error) {
+			afterSuccessfulDBRename(store, func() {
+				store.deps.syncDir = func(*os.File) error { return injected }
+			})
+		}},
+		{name: "unlock", callbackErr: errors.New("stop after migration"), inject: func(store *Store, injected error) {
+			realUnlock := store.deps.unlockFile
+			store.deps.unlockFile = func(lock *os.File) error {
+				return errors.Join(realUnlock(lock), injected)
+			}
+		}},
+	}
+	for _, operation := range operations {
+		for _, failure := range failures {
+			t.Run(operation.name+"/"+failure.name, func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "db.json")
+				writeData(t, path, &Data{
+					DataVersion: 11,
+					Services:    map[string]*Service{"svc": {Name: "svc", ServiceType: ServiceTypeSystemd}},
+				})
+				store := NewStore(path, filepath.Join(root, "services"))
+				injected := errors.New("injected migration " + failure.name + " failure")
+				failure.inject(store, injected)
+
+				err := operation.run(store, failure.callbackErr)
+				if !errors.Is(err, injected) {
+					t.Fatalf("%s error = %v, want injected failure", operation.name, err)
+				}
+				var publishedErr *PostPublicationError
+				if !errors.As(err, &publishedErr) {
+					t.Fatalf("%s error = %v, want *PostPublicationError", operation.name, err)
+				}
+				if publishedErr.MutationCommitted {
+					t.Fatalf("%s outcome says requested mutation committed after migration-only publication", operation.name)
+				}
+				if got := mustReadData(t, path).DataVersion; got != CurrentDataVersion {
+					t.Fatalf("on-disk DataVersion = %d, want %d", got, CurrentDataVersion)
+				}
+				cached, getErr := store.Get()
+				if getErr != nil {
+					t.Fatalf("Get cached migration: %v", getErr)
+				}
+				if got := cached.DataVersion(); got != CurrentDataVersion {
+					t.Fatalf("cached DataVersion = %d, want %d", got, CurrentDataVersion)
+				}
+			})
+		}
 	}
 }
 
@@ -1731,6 +2050,988 @@ func TestStoreMutateServiceCreatesAndUpdatesServices(t *testing.T) {
 	}
 	if got := mustReadData(t, path).Services["svc"].Generation; got != 2 {
 		t.Fatalf("on-disk generation = %d, want 2", got)
+	}
+}
+
+func TestStoreMutateDataReloadsLatestAcrossStores(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	servicesRoot := filepath.Join(root, "services")
+	storeA := NewStore(path, servicesRoot)
+	storeB := NewStore(path, servicesRoot)
+	if err := storeA.Set(&Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", Generation: 1},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeA.Get(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeB.MutateData(func(d *Data) error {
+		d.Volumes = map[string]*Volume{"other": {Name: "other", Path: "/other"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeA.MutateData(func(d *Data) error {
+		d.Services["svc"].Generation = 2
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := mustReadData(t, path)
+	if got.Services["svc"].Generation != 2 {
+		t.Fatalf("generation = %d, want 2", got.Services["svc"].Generation)
+	}
+	if got.Volumes["other"] == nil || got.Volumes["other"].Path != "/other" {
+		t.Fatalf("unrelated volume was lost: %#v", got.Volumes)
+	}
+}
+
+func TestStoreMutateDataSerializesAcrossStores(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	servicesRoot := filepath.Join(root, "services")
+	storeA := NewStore(path, servicesRoot)
+	storeB := NewStore(path, servicesRoot)
+	if err := storeA.Set(&Data{DataVersion: CurrentDataVersion}); err != nil {
+		t.Fatal(err)
+	}
+
+	enteredA := make(chan struct{})
+	releaseA := make(chan struct{})
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := storeA.MutateData(func(d *Data) error {
+			close(enteredA)
+			<-releaseA
+			d.Volumes = map[string]*Volume{"a": {Name: "a", Path: "/a"}}
+			return nil
+		})
+		doneA <- err
+	}()
+	<-enteredA
+
+	enteredB := make(chan struct{})
+	doneB := make(chan error, 1)
+	attemptedBLock := make(chan struct{})
+	realLockB := storeB.deps.lockFile
+	storeB.deps.lockFile = func(file *os.File) error {
+		close(attemptedBLock)
+		return realLockB(file)
+	}
+	go func() {
+		_, err := storeB.MutateData(func(d *Data) error {
+			close(enteredB)
+			if d.Volumes["a"] == nil {
+				return errors.New("second mutation did not observe first mutation")
+			}
+			d.Volumes["b"] = &Volume{Name: "b", Path: "/b"}
+			return nil
+		})
+		doneB <- err
+	}()
+	<-attemptedBLock
+	select {
+	case <-enteredB:
+		t.Fatal("second Store entered mutation callback while first held the database lock")
+	default:
+	}
+	close(releaseA)
+	if err := <-doneA; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatal(err)
+	}
+	got := mustReadData(t, path)
+	if got.Volumes["a"] == nil || got.Volumes["b"] == nil {
+		t.Fatalf("serialized volumes = %#v, want a and b", got.Volumes)
+	}
+}
+
+func TestStoreWithLatestDataLockedReloadsAndBlocksWriterAcrossStores(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	servicesRoot := filepath.Join(root, "services")
+	storeA := NewStore(path, servicesRoot)
+	storeB := NewStore(path, servicesRoot)
+	if err := storeA.Set(&Data{
+		DataVersion: CurrentDataVersion,
+		Services: map[string]*Service{
+			"svc": {Name: "svc", Generation: 1},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeA.Get(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storeB.MutateData(func(d *Data) error {
+		d.Services["svc"].Generation = 2
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	enteredFinalizer := make(chan struct{})
+	releaseFinalizer := make(chan struct{})
+	observedGeneration := make(chan int, 1)
+	finalizerDone := make(chan error, 1)
+	go func() {
+		finalizerDone <- storeA.WithLatestDataLocked(func(dv DataView) error {
+			observedGeneration <- dv.AsStruct().Services["svc"].Generation
+			close(enteredFinalizer)
+			<-releaseFinalizer
+			return nil
+		})
+	}()
+	<-enteredFinalizer
+	if got := <-observedGeneration; got != 2 {
+		t.Fatalf("finalizer generation = %d, want fresh on-disk generation 2", got)
+	}
+
+	attemptedWriterLock := make(chan struct{})
+	realLock := storeB.deps.lockFile
+	storeB.deps.lockFile = func(file *os.File) error {
+		close(attemptedWriterLock)
+		return realLock(file)
+	}
+	enteredWriter := make(chan struct{})
+	writerDone := make(chan error, 1)
+	go func() {
+		_, err := storeB.MutateData(func(d *Data) error {
+			close(enteredWriter)
+			d.Services["svc"].Generation = 3
+			return nil
+		})
+		writerDone <- err
+	}()
+	<-attemptedWriterLock
+	select {
+	case <-enteredWriter:
+		t.Fatal("writer entered while latest-data finalizer held the database lock")
+	default:
+	}
+
+	close(releaseFinalizer)
+	if err := <-finalizerDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-writerDone; err != nil {
+		t.Fatal(err)
+	}
+	if got := mustReadData(t, path).Services["svc"].Generation; got != 3 {
+		t.Fatalf("on-disk generation = %d, want serialized writer generation 3", got)
+	}
+}
+
+func TestStoreWithLatestDataLockedDoesNotRewriteDatabase(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+	if err := store.Set(&Data{
+		DataVersion: CurrentDataVersion,
+		Services:    map[string]*Service{"svc": {Name: "svc", Generation: 1}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.WithLatestDataLocked(func(dv DataView) error {
+		if got := dv.AsStruct().Services["svc"].Generation; got != 1 {
+			t.Fatalf("finalizer generation = %d, want 1", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeInfo, afterInfo) {
+		t.Fatal("WithLatestDataLocked replaced db.json on ordinary success")
+	}
+	if !bytes.Equal(beforeRaw, afterRaw) {
+		t.Fatal("WithLatestDataLocked changed db.json contents on ordinary success")
+	}
+}
+
+func TestStoreWithLatestDataLockedIsolatesCallbackMutation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+	if err := store.Set(&Data{
+		DataVersion: CurrentDataVersion,
+		Services:    map[string]*Service{"svc": {Name: "svc", Generation: 1}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.WithLatestDataLocked(func(dv DataView) error {
+		isolated := dv.AsStruct()
+		isolated.Services["svc"].Generation = 99
+		isolated.Services["new"] = &Service{Name: "new"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cached, err := store.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cached.AsStruct().Services["svc"].Generation; got != 1 {
+		t.Fatalf("cached generation = %d, want isolated generation 1", got)
+	}
+	if _, ok := cached.AsStruct().Services["new"]; ok {
+		t.Fatal("callback mutation leaked into cached data")
+	}
+	if got := mustReadData(t, path).Services["svc"].Generation; got != 1 {
+		t.Fatalf("on-disk generation = %d, want isolated generation 1", got)
+	}
+}
+
+func TestStoreWithLatestDataLockedReturnsCallbackError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+	if err := store.Set(&Data{DataVersion: CurrentDataVersion}); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("finalizer rejected latest data")
+
+	err := store.WithLatestDataLocked(func(DataView) error { return injected })
+	if !errors.Is(err, injected) {
+		t.Fatalf("WithLatestDataLocked error = %v, want callback error", err)
+	}
+	var postFinalization *PostFinalizationError
+	if errors.As(err, &postFinalization) {
+		t.Fatalf("WithLatestDataLocked error = %v, want ordinary callback error", err)
+	}
+}
+
+func TestStoreWithLatestDataLockedReportsCleanupOutcome(t *testing.T) {
+	cleanupFailures := []struct {
+		name   string
+		inject func(*Store, error)
+	}{
+		{name: "unlock", inject: func(store *Store, injected error) {
+			realUnlock := store.deps.unlockFile
+			store.deps.unlockFile = func(file *os.File) error {
+				return errors.Join(realUnlock(file), injected)
+			}
+		}},
+		{name: "close", inject: func(store *Store, injected error) {
+			realClose := store.deps.closeLockFile
+			store.deps.closeLockFile = func(file *os.File) error {
+				return errors.Join(realClose(file), injected)
+			}
+		}},
+	}
+	callbackOutcomes := []struct {
+		name      string
+		err       error
+		completed bool
+	}{
+		{name: "completed", completed: true},
+		{name: "failed", err: errors.New("finalizer failed")},
+	}
+	for _, cleanup := range cleanupFailures {
+		for _, callback := range callbackOutcomes {
+			t.Run(cleanup.name+"/"+callback.name, func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "db.json")
+				store := NewStore(path, filepath.Join(root, "services"))
+				if err := store.Set(&Data{DataVersion: CurrentDataVersion}); err != nil {
+					t.Fatal(err)
+				}
+				cleanupErr := errors.New(cleanup.name + " failed")
+				cleanup.inject(store, cleanupErr)
+
+				err := store.WithLatestDataLocked(func(DataView) error { return callback.err })
+				if !errors.Is(err, cleanupErr) {
+					t.Fatalf("WithLatestDataLocked error = %v, want cleanup error", err)
+				}
+				if callback.err != nil && !errors.Is(err, callback.err) {
+					t.Fatalf("WithLatestDataLocked error = %v, want callback error", err)
+				}
+				var outcome *PostFinalizationError
+				if !errors.As(err, &outcome) {
+					t.Fatalf("WithLatestDataLocked error = %v, want *PostFinalizationError", err)
+				}
+				if outcome.FinalizerCompleted != callback.completed {
+					t.Fatalf("FinalizerCompleted = %t, want %t", outcome.FinalizerCompleted, callback.completed)
+				}
+			})
+		}
+	}
+}
+
+func TestStoreWithLatestDataLockedReleasesLockAfterNonLocalExit(t *testing.T) {
+	nonLocalExits := []struct {
+		name string
+		run  func(*testing.T, *Store)
+	}{
+		{name: "panic", run: func(t *testing.T, store *Store) {
+			const panicValue = "finalizer panic"
+			func() {
+				defer func() {
+					if got := recover(); got != panicValue {
+						t.Errorf("recovered value = %#v, want %q", got, panicValue)
+					}
+				}()
+				if err := store.WithLatestDataLocked(func(DataView) error {
+					panic(panicValue)
+				}); err != nil {
+					t.Errorf("WithLatestDataLocked returned error instead of panicking: %v", err)
+				}
+				t.Error("WithLatestDataLocked returned instead of panicking")
+			}()
+		}},
+		{name: "goexit", run: func(t *testing.T, store *Store) {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if err := store.WithLatestDataLocked(func(DataView) error {
+					runtime.Goexit()
+					return nil
+				}); err != nil {
+					t.Errorf("WithLatestDataLocked returned error after Goexit: %v", err)
+				}
+				t.Error("WithLatestDataLocked returned after Goexit")
+			}()
+			<-done
+		}},
+	}
+
+	for _, exit := range nonLocalExits {
+		t.Run(exit.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "db.json")
+			servicesRoot := filepath.Join(root, "services")
+			store := NewStore(path, servicesRoot)
+			if err := store.Set(&Data{
+				DataVersion: CurrentDataVersion,
+				Services:    map[string]*Service{"svc": {Name: "svc", Generation: 1}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			unlocked := make(chan struct{}, 1)
+			closed := make(chan struct{}, 1)
+			realUnlock := store.deps.unlockFile
+			store.deps.unlockFile = func(file *os.File) error {
+				err := realUnlock(file)
+				unlocked <- struct{}{}
+				return err
+			}
+			realClose := store.deps.closeLockFile
+			store.deps.closeLockFile = func(file *os.File) error {
+				err := realClose(file)
+				closed <- struct{}{}
+				return err
+			}
+
+			exit.run(t, store)
+			for name, signal := range map[string]<-chan struct{}{
+				"unlock": unlocked,
+				"close":  closed,
+			} {
+				select {
+				case <-signal:
+				default:
+					t.Fatalf("%s was not called after %s", name, exit.name)
+				}
+			}
+
+			if _, err := store.MutateData(func(d *Data) error {
+				d.Services["svc"].Generation = 2
+				return nil
+			}); err != nil {
+				t.Fatalf("same-Store writer after %s: %v", exit.name, err)
+			}
+			otherStore := NewStore(path, servicesRoot)
+			if _, err := otherStore.MutateData(func(d *Data) error {
+				d.Services["svc"].Generation = 3
+				return nil
+			}); err != nil {
+				t.Fatalf("cross-Store writer after %s: %v", exit.name, err)
+			}
+			if got := mustReadData(t, path).Services["svc"].Generation; got != 3 {
+				t.Fatalf("on-disk generation after %s = %d, want 3", exit.name, got)
+			}
+		})
+	}
+}
+
+func TestStoreWithLatestDataLockedDoesNotFinalizeAfterMigrationDurabilityError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	writeData(t, path, &Data{
+		DataVersion: 11,
+		Services:    map[string]*Service{"svc": {Name: "svc", ServiceType: ServiceTypeSystemd}},
+	})
+	store := NewStore(path, filepath.Join(root, "services"))
+	injected := errors.New("migration parent sync failed")
+	afterSuccessfulDBRename(store, func() {
+		store.deps.syncDir = func(*os.File) error { return injected }
+	})
+	finalizerCalled := false
+
+	err := store.WithLatestDataLocked(func(DataView) error {
+		finalizerCalled = true
+		return nil
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("WithLatestDataLocked error = %v, want migration durability error", err)
+	}
+	var publishedErr *PostPublicationError
+	if !errors.As(err, &publishedErr) || publishedErr.MutationCommitted {
+		t.Fatalf("WithLatestDataLocked error = %v, want migration-only *PostPublicationError", err)
+	}
+	if finalizerCalled {
+		t.Fatal("finalizer ran after ambiguous migration publication")
+	}
+	if got := mustReadData(t, path).DataVersion; got != CurrentDataVersion {
+		t.Fatalf("on-disk DataVersion = %d, want published migration %d", got, CurrentDataVersion)
+	}
+	cached, getErr := store.Get()
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if got := cached.DataVersion(); got != CurrentDataVersion {
+		t.Fatalf("cached DataVersion = %d, want %d", got, CurrentDataVersion)
+	}
+}
+
+func TestStoreDurablyCreatesNestedDatabaseParents(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "custom")
+	second := filepath.Join(first, "data")
+	path := filepath.Join(second, "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+	realOpen := store.deps.openDir
+	realSync := store.deps.syncDir
+	var synced []string
+	store.deps.openDir = func(path string) (*os.File, error) {
+		return realOpen(path)
+	}
+	store.deps.syncDir = func(dir *os.File) error {
+		synced = append(synced, filepath.Clean(dir.Name()))
+		return realSync(dir)
+	}
+
+	if err := store.Set(&Data{DataVersion: CurrentDataVersion}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Dir(filepath.Clean(root)), filepath.Clean(root), first, first, second}
+	if !reflect.DeepEqual(synced, want) {
+		t.Fatalf("synced database parent links = %#v, want %#v", synced, want)
+	}
+}
+
+func TestStoreStopsBeforePublicationWhenCreatedParentSyncFails(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "custom", "data", "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+	injected := errors.New("sync created parent")
+	realSync := store.deps.syncDir
+	store.deps.syncDir = func(dir *os.File) error {
+		if filepath.Clean(dir.Name()) == filepath.Clean(root) {
+			return injected
+		}
+		return realSync(dir)
+	}
+
+	err := store.Set(&Data{DataVersion: CurrentDataVersion})
+	if !errors.Is(err, injected) {
+		t.Fatalf("Set error = %v, want created-parent sync failure", err)
+	}
+	var publishedErr *PostPublicationError
+	if errors.As(err, &publishedErr) {
+		t.Fatalf("Set error = %v, want pre-publication failure", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("database file stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestStoreRetriesSyncForExistingParentAfterCreatedLinkSyncFailure(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "custom")
+	path := filepath.Join(first, "data", "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+	injected := errors.New("sync created parent")
+	realSync := store.deps.syncDir
+	failFirst := true
+	store.deps.syncDir = func(dir *os.File) error {
+		if failFirst && filepath.Clean(dir.Name()) == filepath.Clean(root) {
+			return injected
+		}
+		return realSync(dir)
+	}
+	if err := store.Set(&Data{DataVersion: CurrentDataVersion}); !errors.Is(err, injected) {
+		t.Fatalf("first Set error = %v, want created-link sync failure", err)
+	}
+	if info, err := os.Stat(first); err != nil || !info.IsDir() {
+		t.Fatalf("created first parent stat = %v, %#v", err, info)
+	}
+
+	failFirst = false
+	retryStore := NewStore(path, filepath.Join(root, "services"))
+	var synced []string
+	retryStore.deps.syncDir = func(dir *os.File) error {
+		synced = append(synced, filepath.Clean(dir.Name()))
+		return realSync(dir)
+	}
+	if err := retryStore.Set(&Data{DataVersion: CurrentDataVersion}); err != nil {
+		t.Fatalf("retry Set: %v", err)
+	}
+	if !slices.Contains(synced, filepath.Clean(root)) {
+		t.Fatalf("retry synced directories = %#v, want parent link %s", synced, root)
+	}
+}
+
+func TestStoreSyncsParentLinkAfterConcurrentMkdir(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "custom")
+	path := filepath.Join(first, "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+	realMkdir := store.deps.mkdirDir
+	store.deps.mkdirDir = func(path string, mode os.FileMode) error {
+		if filepath.Clean(path) == first {
+			if err := realMkdir(path, mode); err != nil {
+				return err
+			}
+			return os.ErrExist
+		}
+		return realMkdir(path, mode)
+	}
+	realSync := store.deps.syncDir
+	var synced []string
+	store.deps.syncDir = func(dir *os.File) error {
+		synced = append(synced, filepath.Clean(dir.Name()))
+		return realSync(dir)
+	}
+
+	if err := store.Set(&Data{DataVersion: CurrentDataVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(synced, filepath.Clean(root)) {
+		t.Fatalf("synced directories = %#v, want concurrent parent link %s", synced, root)
+	}
+}
+
+func TestStorePrePublicationCompensationRunsWhileFileLockHeld(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	storeA := NewStore(path, filepath.Join(root, "services"))
+	storeB := NewStore(path, filepath.Join(root, "services"))
+	if err := storeA.Set(&Data{DataVersion: CurrentDataVersion, Services: map[string]*Service{"svc": {Name: "svc", Generation: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("temporary database sync failed")
+	storeA.deps.syncFile = func(*os.File) error { return injected }
+	compensationEntered := make(chan struct{})
+	releaseCompensation := make(chan struct{})
+	mutationDone := make(chan error, 1)
+	go func() {
+		_, err := storeA.MutateDataWithPrePublicationCompensation(func(d *Data) (func() error, error) {
+			d.Services["svc"].Generation = 2
+			return func() error {
+				close(compensationEntered)
+				<-releaseCompensation
+				return nil
+			}, nil
+		})
+		mutationDone <- err
+	}()
+	<-compensationEntered
+
+	attemptedBLock := make(chan struct{})
+	realLockB := storeB.deps.lockFile
+	storeB.deps.lockFile = func(file *os.File) error {
+		close(attemptedBLock)
+		return realLockB(file)
+	}
+	enteredB := make(chan struct{})
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := storeB.MutateData(func(d *Data) error {
+			close(enteredB)
+			d.Services["svc"].Generation = 3
+			return nil
+		})
+		doneB <- err
+	}()
+	<-attemptedBLock
+	select {
+	case <-enteredB:
+		t.Fatal("second Store entered while pre-publication compensation held the database lock")
+	default:
+	}
+	close(releaseCompensation)
+	if err := <-mutationDone; !errors.Is(err, injected) {
+		t.Fatalf("compensated mutation error = %v, want save failure", err)
+	}
+	if err := <-doneB; err != nil {
+		t.Fatal(err)
+	}
+	if got := mustReadData(t, path).Services["svc"].Generation; got != 3 {
+		t.Fatalf("on-disk generation = %d, want serialized generation 3", got)
+	}
+}
+
+func TestStorePrePublicationCompensationFailureIsJoined(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+	if err := store.Set(&Data{DataVersion: CurrentDataVersion, Services: map[string]*Service{"svc": {Name: "svc", Generation: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	saveErr := errors.New("replace database failed")
+	compensationErr := errors.New("compensation failed")
+	store.deps.rename = func(string, string) error { return saveErr }
+	compensationCalls := 0
+
+	_, err := store.MutateDataWithPrePublicationCompensation(func(d *Data) (func() error, error) {
+		d.Services["svc"].Generation = 2
+		return func() error {
+			compensationCalls++
+			return compensationErr
+		}, nil
+	})
+	if !errors.Is(err, saveErr) || !errors.Is(err, compensationErr) {
+		t.Fatalf("mutation error = %v, want save and compensation failures", err)
+	}
+	var publishedErr *PostPublicationError
+	if errors.As(err, &publishedErr) {
+		t.Fatalf("mutation error = %v, want pre-publication outcome", err)
+	}
+	if compensationCalls != 1 {
+		t.Fatalf("compensation calls = %d, want 1", compensationCalls)
+	}
+	if got := mustReadData(t, path).Services["svc"].Generation; got != 1 {
+		t.Fatalf("on-disk generation = %d, want 1", got)
+	}
+}
+
+func TestStoreCommittedMutationDoesNotRunPrePublicationCompensation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+	if err := store.Set(&Data{DataVersion: CurrentDataVersion, Services: map[string]*Service{"svc": {Name: "svc", Generation: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	injected := errors.New("database parent sync failed")
+	realSync := store.deps.syncDir
+	store.deps.syncDir = func(dir *os.File) error {
+		if filepath.Clean(dir.Name()) == filepath.Clean(root) {
+			return injected
+		}
+		return realSync(dir)
+	}
+	compensationCalls := 0
+
+	_, err := store.MutateDataWithPrePublicationCompensation(func(d *Data) (func() error, error) {
+		d.Services["svc"].Generation = 2
+		return func() error {
+			compensationCalls++
+			return nil
+		}, nil
+	})
+	var publishedErr *PostPublicationError
+	if !errors.As(err, &publishedErr) || !publishedErr.MutationCommitted {
+		t.Fatalf("mutation error = %v, want committed *PostPublicationError", err)
+	}
+	if compensationCalls != 0 {
+		t.Fatalf("compensation calls = %d, want 0", compensationCalls)
+	}
+	if got := mustReadData(t, path).Services["svc"].Generation; got != 2 {
+		t.Fatalf("on-disk generation = %d, want 2", got)
+	}
+}
+
+func TestStoreMutationFailureInjectionPreservesCache(t *testing.T) {
+	tests := []struct {
+		name   string
+		inject func(*Store, error)
+	}{
+		{name: "lock", inject: func(store *Store, injected error) {
+			store.deps.lockFile = func(*os.File) error { return injected }
+		}},
+		{name: "file sync", inject: func(store *Store, injected error) {
+			store.deps.syncFile = func(*os.File) error { return injected }
+		}},
+		{name: "rename", inject: func(store *Store, injected error) {
+			store.deps.rename = func(string, string) error { return injected }
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "db.json")
+			store := NewStore(path, filepath.Join(root, "services"))
+			if err := store.Set(&Data{DataVersion: CurrentDataVersion, Services: map[string]*Service{"svc": {Name: "svc", Generation: 1}}}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Get(); err != nil {
+				t.Fatal(err)
+			}
+			injected := errors.New("injected " + tt.name + " failure")
+			tt.inject(store, injected)
+			callbackCalled := false
+			_, err := store.MutateData(func(d *Data) error {
+				callbackCalled = true
+				d.Services["svc"].Generation = 2
+				return nil
+			})
+			if !errors.Is(err, injected) {
+				t.Fatalf("MutateData error = %v, want injected failure", err)
+			}
+			var publishedErr *PostPublicationError
+			if errors.As(err, &publishedErr) {
+				t.Fatalf("MutateData error = %v, want pre-publication failure", err)
+			}
+			if tt.name == "lock" && callbackCalled {
+				t.Fatal("callback ran after lock failure")
+			}
+			dv, getErr := store.Get()
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if got := dv.AsStruct().Services["svc"].Generation; got != 1 {
+				t.Fatalf("cached generation = %d, want 1 after failed mutation", got)
+			}
+			if got := mustReadData(t, path).Services["svc"].Generation; got != 1 {
+				t.Fatalf("on-disk generation = %d, want 1 after failed mutation", got)
+			}
+		})
+	}
+}
+
+func TestStorePostPublicationFailuresPublishCacheAndDisk(t *testing.T) {
+	operations := []struct {
+		name string
+		run  func(*Store) (*Data, error)
+	}{
+		{name: "Set", run: func(store *Store) (*Data, error) {
+			next := &Data{
+				DataVersion: CurrentDataVersion,
+				Services:    map[string]*Service{"svc": {Name: "svc", Generation: 2}},
+			}
+			return nil, store.Set(next)
+		}},
+		{name: "MutateData", run: func(store *Store) (*Data, error) {
+			return store.MutateData(func(d *Data) error {
+				d.Services["svc"].Generation = 2
+				return nil
+			})
+		}},
+	}
+	failures := []struct {
+		name   string
+		inject func(*Store, error)
+	}{
+		{name: "parent open", inject: func(store *Store, injected error) {
+			afterSuccessfulDBRename(store, func() {
+				store.deps.openDir = func(string) (*os.File, error) { return nil, injected }
+			})
+		}},
+		{name: "parent sync", inject: func(store *Store, injected error) {
+			afterSuccessfulDBRename(store, func() {
+				store.deps.syncDir = func(*os.File) error { return injected }
+			})
+		}},
+		{name: "parent close", inject: func(store *Store, injected error) {
+			realClose := store.deps.closeDir
+			afterSuccessfulDBRename(store, func() {
+				store.deps.closeDir = func(dir *os.File) error {
+					return errors.Join(realClose(dir), injected)
+				}
+			})
+		}},
+		{name: "unlock", inject: func(store *Store, injected error) {
+			realUnlock := store.deps.unlockFile
+			store.deps.unlockFile = func(lock *os.File) error {
+				return errors.Join(realUnlock(lock), injected)
+			}
+		}},
+		{name: "lock close", inject: func(store *Store, injected error) {
+			realClose := store.deps.closeLockFile
+			store.deps.closeLockFile = func(lock *os.File) error {
+				return errors.Join(realClose(lock), injected)
+			}
+		}},
+	}
+	for _, operation := range operations {
+		for _, failure := range failures {
+			t.Run(operation.name+"/"+failure.name, func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "db.json")
+				store := NewStore(path, filepath.Join(root, "services"))
+				if err := store.Set(&Data{
+					DataVersion: CurrentDataVersion,
+					Services:    map[string]*Service{"svc": {Name: "svc", Generation: 1}},
+				}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.Get(); err != nil {
+					t.Fatal(err)
+				}
+				injected := errors.New("injected " + failure.name + " failure")
+				failure.inject(store, injected)
+
+				updated, err := operation.run(store)
+				if !errors.Is(err, injected) {
+					t.Fatalf("%s error = %v, want injected failure", operation.name, err)
+				}
+				var publishedErr *PostPublicationError
+				if !errors.As(err, &publishedErr) {
+					t.Fatalf("%s error = %v, want *PostPublicationError", operation.name, err)
+				}
+				if !publishedErr.MutationCommitted {
+					t.Fatalf("%s outcome says requested mutation was not committed", operation.name)
+				}
+				if operation.name == "MutateData" {
+					if updated == nil || updated.Services["svc"].Generation != 2 {
+						t.Fatalf("MutateData result = %#v, want published generation 2", updated)
+					}
+				}
+				dv, getErr := store.Get()
+				if getErr != nil {
+					t.Fatal(getErr)
+				}
+				if got := dv.AsStruct().Services["svc"].Generation; got != 2 {
+					t.Fatalf("cached generation = %d, want published generation 2", got)
+				}
+				if got := mustReadData(t, path).Services["svc"].Generation; got != 2 {
+					t.Fatalf("on-disk generation = %d, want published generation 2", got)
+				}
+			})
+		}
+	}
+}
+
+func afterSuccessfulDBRename(store *Store, f func()) {
+	realRename := store.deps.rename
+	store.deps.rename = func(oldPath, newPath string) error {
+		err := realRename(oldPath, newPath)
+		if err == nil {
+			f()
+		}
+		return err
+	}
+}
+
+func TestStoreMutationJoinsUnlockAndCloseFailures(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "db.json")
+	store := NewStore(path, filepath.Join(root, "services"))
+	if err := store.Set(&Data{DataVersion: CurrentDataVersion}); err != nil {
+		t.Fatal(err)
+	}
+	unlockErr := errors.New("unlock failed")
+	closeErr := errors.New("close failed")
+	realUnlock := store.deps.unlockFile
+	realClose := store.deps.closeLockFile
+	store.deps.unlockFile = func(file *os.File) error {
+		return errors.Join(realUnlock(file), unlockErr)
+	}
+	store.deps.closeLockFile = func(file *os.File) error {
+		return errors.Join(realClose(file), closeErr)
+	}
+
+	_, err := store.MutateData(func(d *Data) error {
+		d.Volumes = map[string]*Volume{"data": {Name: "data", Path: "/data"}}
+		return nil
+	})
+	if !errors.Is(err, unlockErr) || !errors.Is(err, closeErr) {
+		t.Fatalf("MutateData error = %v, want joined unlock and close failures", err)
+	}
+	var publishedErr *PostPublicationError
+	if !errors.As(err, &publishedErr) {
+		t.Fatalf("MutateData error = %v, want *PostPublicationError", err)
+	}
+}
+
+func TestValidatePersistentDBLockMetadataAllowsInheritedGID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "db.json.lock")
+	file, err := openPersistentDBLock(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	var stat unix.Stat_t
+	if err := unix.Fstat(int(file.Fd()), &stat); err != nil {
+		t.Fatal(err)
+	}
+	metadata := persistentDBLockMetadata{
+		mode: uint32(stat.Mode),
+		uid:  stat.Uid,
+		gid:  stat.Gid + 1,
+	}
+	if err := validatePersistentDBLockMetadata(metadata, stat.Uid); err != nil {
+		t.Fatalf("validate inherited setgid group: %v", err)
+	}
+}
+
+func TestStoreRejectsUntrustedPersistentLock(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		setup func(testing.TB, string)
+	}{
+		{name: "symlink", setup: func(t testing.TB, path string) {
+			t.Helper()
+			target := path + ".target"
+			if err := os.WriteFile(target, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "permissive mode", setup: func(t testing.TB, path string) {
+			t.Helper()
+			if err := os.WriteFile(path, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "not regular", setup: func(t testing.TB, path string) {
+			t.Helper()
+			if err := os.Mkdir(path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "db.json")
+			lockPath := path + ".lock"
+			tt.setup(t, lockPath)
+			store := NewStore(path, filepath.Join(root, "services"))
+			if err := store.Set(&Data{DataVersion: CurrentDataVersion}); err == nil {
+				t.Fatal("Set accepted untrusted persistent lock")
+			}
+		})
 	}
 }
 

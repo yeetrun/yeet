@@ -33,6 +33,7 @@ var (
 	verifyVMNetworkPlanForSettings          = verifyVMNetworkPlan
 	verifyVMISONetworkAbsentForSettings     = verifyVMISONetworkPlanAbsent
 	installVMISOPolicyAfterTransitionForSet = installVMISOPolicyAfterTransition
+	vmServiceSetCommitResultFunc            func(error) error
 )
 
 type vmSettingsPlan struct {
@@ -78,8 +79,9 @@ func (s *Server) updateVMServiceSettingsLocked(ctx context.Context, name string,
 		return s.applyVMTransitionFromISO(ctx, plan)
 	}
 	transition, err := s.applyVMServiceSettingsPlan(ctx, plan)
+	committed := false
 	defer func() {
-		if retErr == nil {
+		if retErr == nil || committed {
 			return
 		}
 		if err := transition.rollback(ctx, retErr); err != nil {
@@ -89,7 +91,11 @@ func (s *Server) updateVMServiceSettingsLocked(ctx context.Context, name string,
 	if err != nil {
 		return err
 	}
-	return s.commitVMServiceSettingsPlan(name, plan)
+	commitErr := s.commitVMServiceSettingsPlan(name, plan)
+	if dbMutationCommitted(commitErr) {
+		committed = true
+	}
+	return commitErr
 }
 
 func (s *Server) planVMServiceSettings(ctx context.Context, name string, flags cli.VMSetFlags) (vmSettingsPlan, error) {
@@ -1009,6 +1015,9 @@ func (s *Server) commitVMServiceSettingsPlan(name string, plan vmSettingsPlan) e
 		}
 		return nil
 	})
+	if vmServiceSetCommitResultFunc != nil {
+		return vmServiceSetCommitResultFunc(err)
+	}
 	return err
 }
 

@@ -160,6 +160,72 @@ func TestVMMemoryRejectsAggressiveWithoutSet(t *testing.T) {
 	}
 }
 
+func TestVMRuntimeCommandDispatchValidatesHostAndServiceShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		svc  string
+		args []string
+		want string
+	}{
+		{name: "upgrade", svc: "missing", args: []string{"runtime", "upgrade", "--to=v1.16.1", "--restart"}, want: "not an adopted VM"},
+		{name: "rollback", svc: "missing", args: []string{"runtime", "rollback"}, want: "not an adopted VM"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			execer := &ttyExecer{ctx: context.Background(), s: newTestServer(t), sn: tt.svc, rw: &bytes.Buffer{}}
+			err := execer.vmCmdFunc(tt.args)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("vmCmdFunc error = %v, want %q after successful parse", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestVMRuntimeCommandDispatchRunsImplementedHostAndServiceActions(t *testing.T) {
+	tests := []struct {
+		name string
+		svc  string
+		args []string
+	}{
+		{name: "host status", svc: SystemService, args: []string{"runtime", "status", "--format=json"}},
+		{name: "service status", svc: "devbox", args: []string{"runtime", "status", "--format=json"}},
+		{name: "service status flags first", svc: "devbox", args: []string{"runtime", "--format", "json", "status"}},
+		{name: "per VM policy", svc: "devbox", args: []string{"runtime", "policy", "stage-on-restart", "--channel=candidate"}},
+		{name: "per VM policy flags first", svc: "devbox", args: []string{"runtime", "--channel", "candidate", "policy", "stage-on-restart"}},
+		{name: "policy defaults", svc: SystemService, args: []string{"runtime", "policy", "defaults", "show"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			catalog := validVMRuntimeCatalog()
+			seedRuntimeCommandVM(t, server, db.VMRuntimeLifecycleConfig{
+				Configured: vmRuntimeCommandArtifact(catalog.Architectures["amd64"].Runtimes[0], "official"),
+			})
+			server.vmRuntimeCommandDeps = vmRuntimeStatusTestDeps(catalog, vmRuntimeUnitState{ActiveState: "inactive"}, func(int) bool { return false })
+			execer := &ttyExecer{ctx: context.Background(), s: server, sn: tt.svc, rw: &bytes.Buffer{}}
+			if err := execer.vmCmdFunc(tt.args); err != nil {
+				t.Fatalf("vmCmdFunc: %v", err)
+			}
+		})
+	}
+}
+
+func TestVMRuntimeCommandDispatchRejectsInvalidShape(t *testing.T) {
+	execer := &ttyExecer{sn: "devbox"}
+	err := execer.vmCmdFunc([]string{"runtime", "upgrade", "--channel=nightly"})
+	if err == nil || !strings.Contains(err.Error(), "stable or candidate") {
+		t.Fatalf("vmCmdFunc error = %v, want invalid channel", err)
+	}
+}
+
+func TestVMRuntimeRemoteImportRejectsNonStreamSource(t *testing.T) {
+	execer := &ttyExecer{sn: SystemService}
+	err := execer.vmCmdFunc([]string{"runtime", "import", "local-test", "/tmp/runtime"})
+	if err == nil || !strings.Contains(err.Error(), "authenticated input stream") {
+		t.Fatalf("vmCmdFunc error = %v, want stream-only import rejection", err)
+	}
+}
+
 func TestSnapshotsDefaultsShow(t *testing.T) {
 	server := newTestServer(t)
 	keep := 3
@@ -281,34 +347,6 @@ func TestSnapshotsInspectCommandRendersRecoveryPoint(t *testing.T) {
 	}
 }
 
-func TestSnapshotsInspectCommandRendersFullVMCheckpointPaths(t *testing.T) {
-	server := newTestServer(t)
-	root := t.TempDir()
-	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
-	snapshotName := "flash/yeet/vms/devbox/vm/d-abc/root@yeet-20260613T203100Z-vm-manual-g0"
-	statePath, memoryPath := seedFullVMCheckpointMetadata(t, root, "devbox", snapshotName)
-	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
-		if args[0] == "list" {
-			return snapshotName + "\t1781382660\tcatch\tdevbox\tvm-manual\t0\tfull checkpoint\tfull\tfalse\n", "", nil
-		}
-		return "", "", nil
-	}
-	var out bytes.Buffer
-	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
-	if err := execer.snapshotsCmdFunc([]string{"inspect", "devbox", "yeet-20260613T203100Z"}); err != nil {
-		t.Fatalf("snapshots inspect: %v", err)
-	}
-	for _, want := range []string{
-		"Mode: full",
-		"Firecracker state: " + statePath,
-		"Firecracker memory: " + memoryPath,
-	} {
-		if !strings.Contains(out.String(), want) {
-			t.Fatalf("inspect output missing %q:\n%s", want, out.String())
-		}
-	}
-}
-
 func TestSnapshotsInspectCommandRendersJSON(t *testing.T) {
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
@@ -395,7 +433,7 @@ func TestSnapshotsUnprotectCommand(t *testing.T) {
 	}
 }
 
-func TestSnapshotsCloneRestoreLifecycleDispatchServiceRootErrors(t *testing.T) {
+func TestSnapshotsCloneLifecycleDispatchServiceRootErrors(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
@@ -405,11 +443,6 @@ func TestSnapshotsCloneRestoreLifecycleDispatchServiceRootErrors(t *testing.T) {
 			name:    "clone",
 			args:    []string{"clone", "app", "yeet-20260613T203100Z", "app-copy", "--start"},
 			wantErr: "starting service-root clones is not supported yet; run snapshots clone without --start",
-		},
-		{
-			name:    "restore",
-			args:    []string{"restore", "app", "yeet-20260613T203100Z", "--stop", "--start", "--yes", "--mode=full", "--generation=snapshot"},
-			wantErr: "--mode=full is only supported for VM recovery points",
 		},
 	}
 	for _, tt := range tests {
@@ -625,6 +658,148 @@ func TestMountCmdCreatePersistsVolumeAndRunsMount(t *testing.T) {
 	}
 }
 
+func TestMountCmdCreateDoesNotMountAfterPrePublicationFailure(t *testing.T) {
+	server := newTestServer(t)
+	oldCheckMountCommand := checkMountCommand
+	oldMountVolume := mountVolume
+	oldMutate := mutateMountVolumeData
+	checkMountCommand = func(string) error { return nil }
+	mountCalled := false
+	mountVolume = func(db.Volume) error {
+		mountCalled = true
+		return nil
+	}
+	injected := errors.New("save failed before publication")
+	mutateMountVolumeData = func(*db.Store, func(*db.Data) error) (*db.Data, error) {
+		return nil, injected
+	}
+	t.Cleanup(func() {
+		checkMountCommand = oldCheckMountCommand
+		mountVolume = oldMountVolume
+		mutateMountVolumeData = oldMutate
+	})
+
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+	err := execer.mountCmdFunc(cli.MountFlags{Type: "sshfs"}, []string{"host:/srv/data", "data"})
+	if !errors.Is(err, injected) {
+		t.Fatalf("mountCmdFunc error = %v, want pre-publication failure", err)
+	}
+	var publishedErr *db.PostPublicationError
+	if errors.As(err, &publishedErr) {
+		t.Fatalf("mountCmdFunc error = %v, want ordinary save failure", err)
+	}
+	if mountCalled {
+		t.Fatal("physical mount ran after pre-publication failure")
+	}
+	dv, getErr := db.NewStore(filepath.Join(server.cfg.RootDir, "db.json"), server.cfg.ServicesRoot).Get()
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if dv.Volumes().Contains("data") {
+		t.Fatal("volume record was published after pre-publication failure")
+	}
+}
+
+func TestMountCmdCreateMountsPublishedVolumeBeforeReturningDurabilityWarning(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		mountErr error
+	}{
+		{name: "mount succeeds"},
+		{name: "mount also fails", mountErr: errors.New("mount failed")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			oldCheckMountCommand := checkMountCommand
+			oldMountVolume := mountVolume
+			oldMutate := mutateMountVolumeData
+			checkMountCommand = func(string) error { return nil }
+			mountCalled := false
+			mountVolume = func(db.Volume) error {
+				mountCalled = true
+				return tt.mountErr
+			}
+			injected := errors.New("database parent sync failed")
+			mutateMountVolumeData = func(store *db.Store, f func(*db.Data) error) (*db.Data, error) {
+				data, err := store.MutateData(f)
+				if err != nil {
+					return data, err
+				}
+				return data, &db.PostPublicationError{Err: injected, MutationCommitted: true}
+			}
+			t.Cleanup(func() {
+				checkMountCommand = oldCheckMountCommand
+				mountVolume = oldMountVolume
+				mutateMountVolumeData = oldMutate
+			})
+
+			execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+			err := execer.mountCmdFunc(cli.MountFlags{Type: "sshfs"}, []string{"host:/srv/data", "data"})
+			if !errors.Is(err, injected) {
+				t.Fatalf("mountCmdFunc error = %v, want durability warning", err)
+			}
+			var publishedErr *db.PostPublicationError
+			if !errors.As(err, &publishedErr) || !publishedErr.MutationCommitted {
+				t.Fatalf("mountCmdFunc error = %v, want committed *db.PostPublicationError", err)
+			}
+			if tt.mountErr != nil && !errors.Is(err, tt.mountErr) {
+				t.Fatalf("mountCmdFunc error = %v, want joined mount failure", err)
+			}
+			if !mountCalled {
+				t.Fatal("physical mount did not run for published volume")
+			}
+			cached, getErr := server.cfg.DB.Get()
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			onDisk, diskErr := db.NewStore(filepath.Join(server.cfg.RootDir, "db.json"), server.cfg.ServicesRoot).Get()
+			if diskErr != nil {
+				t.Fatal(diskErr)
+			}
+			if !cached.Volumes().Contains("data") || !onDisk.Volumes().Contains("data") {
+				t.Fatal("published volume is missing from cache or disk")
+			}
+		})
+	}
+}
+
+func TestMountCmdCreatePreservesConcurrentDatabaseChanges(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{DataVersion: db.CurrentDataVersion}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := server.cfg.DB.Get(); err != nil {
+		t.Fatal(err)
+	}
+	otherStore := db.NewStore(filepath.Join(server.cfg.RootDir, "db.json"), server.cfg.ServicesRoot)
+	if _, err := otherStore.MutateData(func(d *db.Data) error {
+		d.Volumes = map[string]*db.Volume{"other": {Name: "other", Path: "/other"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldCheckMountCommand := checkMountCommand
+	oldMountVolume := mountVolume
+	checkMountCommand = func(string) error { return nil }
+	mountVolume = func(db.Volume) error { return nil }
+	t.Cleanup(func() {
+		checkMountCommand = oldCheckMountCommand
+		mountVolume = oldMountVolume
+	})
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+	if err := execer.mountCmdFunc(cli.MountFlags{Type: "sshfs"}, []string{"host:/srv/data", "data"}); err != nil {
+		t.Fatalf("mountCmdFunc: %v", err)
+	}
+	got, err := db.NewStore(filepath.Join(server.cfg.RootDir, "db.json"), server.cfg.ServicesRoot).Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Volumes().Contains("data") || !got.Volumes().Contains("other") {
+		t.Fatalf("persisted volumes = %#v, want data and other", got.AsStruct().Volumes)
+	}
+}
+
 func TestUmountNameFromArgs(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -722,6 +897,221 @@ func TestUmountCmdFuncKeepsVolumeWhenUnmountFails(t *testing.T) {
 	}
 	if !dv.Volumes().Contains("data") {
 		t.Fatal("expected data volume to remain")
+	}
+}
+
+func TestUmountCmdFuncRefusesChangedVolumeBeforeUnmountSideEffect(t *testing.T) {
+	server := newTestServer(t)
+	seedTTYOpsVolumes(t, server)
+	otherStore := db.NewStore(filepath.Join(server.cfg.RootDir, "db.json"), server.cfg.ServicesRoot)
+	if _, err := otherStore.MutateData(func(d *db.Data) error {
+		d.Volumes["data"] = &db.Volume{Name: "data", Src: "host:/replacement", Path: "/mnt/replacement", Type: "sshfs"}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldUnmountVolume := unmountVolume
+	unmountCalled := false
+	unmountVolume = func(_ *ttyExecer, _ db.Volume) error {
+		unmountCalled = true
+		return nil
+	}
+	t.Cleanup(func() { unmountVolume = oldUnmountVolume })
+
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+	err := execer.umountCmdFunc([]string{"data"})
+	if err == nil || !strings.Contains(err.Error(), "changed before it could be unmounted") {
+		t.Fatalf("umountCmdFunc error = %v, want pre-unmount changed-volume refusal", err)
+	}
+	if unmountCalled {
+		t.Fatal("physical unmount ran after the volume record changed")
+	}
+	got, getErr := db.NewStore(filepath.Join(server.cfg.RootDir, "db.json"), server.cfg.ServicesRoot).Get()
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	volume, ok := got.Volumes().GetOk("data")
+	if !ok || volume.Path() != "/mnt/replacement" {
+		t.Fatalf("replacement volume = %#v, want /mnt/replacement", volume)
+	}
+}
+
+func TestUmountCmdFuncSerializesConcurrentReplacement(t *testing.T) {
+	server := newTestServer(t)
+	seedTTYOpsVolumes(t, server)
+
+	oldUnmountVolume := unmountVolume
+	unmountStarted := make(chan struct{})
+	releaseUnmount := make(chan struct{})
+	unmountVolume = func(_ *ttyExecer, _ db.Volume) error {
+		close(unmountStarted)
+		<-releaseUnmount
+		return nil
+	}
+	t.Cleanup(func() { unmountVolume = oldUnmountVolume })
+
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+	unmountDone := make(chan error, 1)
+	go func() { unmountDone <- execer.umountCmdFunc([]string{"data"}) }()
+	<-unmountStarted
+	replacementAttempted := make(chan struct{})
+	replacementDone := make(chan error, 1)
+	go func() {
+		close(replacementAttempted)
+		otherStore := db.NewStore(filepath.Join(server.cfg.RootDir, "db.json"), server.cfg.ServicesRoot)
+		_, err := otherStore.MutateData(func(d *db.Data) error {
+			d.Volumes["data"] = &db.Volume{Name: "data", Src: "host:/replacement", Path: "/mnt/replacement", Type: "sshfs"}
+			return nil
+		})
+		replacementDone <- err
+	}()
+	<-replacementAttempted
+	close(releaseUnmount)
+
+	if err := <-unmountDone; err != nil {
+		t.Fatalf("umountCmdFunc: %v", err)
+	}
+	if err := <-replacementDone; err != nil {
+		t.Fatalf("replace volume after unmount transaction: %v", err)
+	}
+	got, getErr := db.NewStore(filepath.Join(server.cfg.RootDir, "db.json"), server.cfg.ServicesRoot).Get()
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	volume, ok := got.Volumes().GetOk("data")
+	if !ok || volume.Path() != "/mnt/replacement" {
+		t.Fatalf("replacement volume = %#v, want /mnt/replacement", volume)
+	}
+	if !got.Volumes().Contains("logs") {
+		t.Fatal("unrelated volume was lost")
+	}
+}
+
+func TestUmountCmdFuncCompensatesWhenSaveFailsAfterSideEffect(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		compensationErr error
+	}{
+		{name: "compensation succeeds"},
+		{name: "compensation fails", compensationErr: errors.New("remount failed")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			seedTTYOpsVolumes(t, server)
+			oldUnmountVolume := unmountVolume
+			unmountCalled := false
+			unmountVolume = func(_ *ttyExecer, _ db.Volume) error {
+				unmountCalled = true
+				return nil
+			}
+			oldMountVolume := mountVolume
+			compensationCalled := false
+			mountVolume = func(db.Volume) error {
+				compensationCalled = true
+				return tt.compensationErr
+			}
+			oldMutate := mutateUnmountVolumeData
+			injected := errors.New("save failed before publication")
+			mutateUnmountVolumeData = func(store *db.Store, f func(*db.Data) (func() error, error)) (*db.Data, error) {
+				dv, err := store.Get()
+				if err != nil {
+					return nil, err
+				}
+				staged := dv.AsStruct().Clone()
+				compensate, err := f(staged)
+				if err != nil {
+					return nil, err
+				}
+				var compensationErr error
+				if compensate != nil {
+					compensationErr = compensate()
+				}
+				return nil, errors.Join(injected, compensationErr)
+			}
+			t.Cleanup(func() {
+				unmountVolume = oldUnmountVolume
+				mountVolume = oldMountVolume
+				mutateUnmountVolumeData = oldMutate
+			})
+
+			execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+			err := execer.umountCmdFunc([]string{"data"})
+			if !errors.Is(err, injected) {
+				t.Fatalf("umountCmdFunc error = %v, want save failure", err)
+			}
+			if tt.compensationErr != nil && !errors.Is(err, tt.compensationErr) {
+				t.Fatalf("umountCmdFunc error = %v, want compensation failure", err)
+			}
+			var publishedErr *db.PostPublicationError
+			if errors.As(err, &publishedErr) {
+				t.Fatalf("umountCmdFunc error = %v, want pre-publication save failure", err)
+			}
+			if !unmountCalled || !compensationCalled {
+				t.Fatalf("unmount/compensation calls = %t/%t, want both", unmountCalled, compensationCalled)
+			}
+			dv, getErr := server.cfg.DB.Get()
+			if getErr != nil {
+				t.Fatal(getErr)
+			}
+			if !dv.Volumes().Contains("data") {
+				t.Fatal("volume record was removed after pre-publication save failure")
+			}
+		})
+	}
+}
+
+func TestUmountCmdFuncReportsPublishedDeletionAfterDurabilityWarning(t *testing.T) {
+	server := newTestServer(t)
+	seedTTYOpsVolumes(t, server)
+	oldUnmountVolume := unmountVolume
+	unmountCalled := false
+	unmountVolume = func(_ *ttyExecer, _ db.Volume) error {
+		unmountCalled = true
+		return nil
+	}
+	oldMountVolume := mountVolume
+	compensationCalled := false
+	mountVolume = func(db.Volume) error {
+		compensationCalled = true
+		return nil
+	}
+	oldMutate := mutateUnmountVolumeData
+	injected := errors.New("database parent sync failed")
+	mutateUnmountVolumeData = func(store *db.Store, f func(*db.Data) (func() error, error)) (*db.Data, error) {
+		data, err := store.MutateDataWithPrePublicationCompensation(f)
+		if err != nil {
+			return data, err
+		}
+		return data, &db.PostPublicationError{Err: injected, MutationCommitted: true}
+	}
+	t.Cleanup(func() {
+		unmountVolume = oldUnmountVolume
+		mountVolume = oldMountVolume
+		mutateUnmountVolumeData = oldMutate
+	})
+
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &bytes.Buffer{}}
+	err := execer.umountCmdFunc([]string{"data"})
+	if !errors.Is(err, injected) {
+		t.Fatalf("umountCmdFunc error = %v, want durability warning", err)
+	}
+	var publishedErr *db.PostPublicationError
+	if !errors.As(err, &publishedErr) || !publishedErr.MutationCommitted {
+		t.Fatalf("umountCmdFunc error = %v, want committed *db.PostPublicationError", err)
+	}
+	if !unmountCalled {
+		t.Fatal("physical unmount did not run")
+	}
+	if compensationCalled {
+		t.Fatal("pre-publication compensation ran after committed deletion")
+	}
+	dv, getErr := server.cfg.DB.Get()
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if dv.Volumes().Contains("data") {
+		t.Fatal("published volume deletion is missing from the cache")
 	}
 }
 

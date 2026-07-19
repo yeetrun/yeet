@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/yeet"
 )
 
 func TestBridgeServiceArgsSkipsFlagValues(t *testing.T) {
@@ -924,6 +925,45 @@ func TestBridgeServiceArgsVMKernelSync(t *testing.T) {
 	}
 	if got := strings.Join(bridged, " "); got != "vm kernel sync --restart" {
 		t.Fatalf("bridged args = %q, want vm kernel sync --restart", got)
+	}
+}
+
+func TestBridgeVMRuntimeCommands(t *testing.T) {
+	remoteSpecs := cli.RemoteFlagSpecs()
+	groupSpecs := cli.RemoteGroupFlagSpecs()
+	tests := []struct {
+		name        string
+		args        []string
+		override    string
+		wantService string
+		wantHost    string
+		wantArgs    []string
+	}{
+		{name: "host status", args: []string{"vm", "runtime", "status"}, wantService: yeet.SystemServiceName(), wantArgs: []string{"vm", "runtime", "status"}},
+		{name: "service override supplies status VM", args: []string{"vm", "runtime", "status"}, override: "devbox", wantService: "devbox", wantArgs: []string{"vm", "runtime", "status"}},
+		{name: "service status", args: []string{"vm", "runtime", "status", "devbox@host-a", "--format=json"}, wantService: "devbox", wantHost: "host-a", wantArgs: []string{"vm", "runtime", "status", "--format=json"}},
+		{name: "flags before action", args: []string{"vm", "runtime", "--format", "json", "status", "devbox@host-a"}, wantService: "devbox", wantHost: "host-a", wantArgs: []string{"vm", "runtime", "--format", "json", "status"}},
+		{name: "upgrade flags before service", args: []string{"vm", "runtime", "upgrade", "--channel", "candidate", "devbox@host-a", "--restart"}, wantService: "devbox", wantHost: "host-a", wantArgs: []string{"vm", "runtime", "upgrade", "--channel", "candidate", "--restart"}},
+		{name: "rollback", args: []string{"vm", "runtime", "rollback", "devbox"}, wantService: "devbox", wantArgs: []string{"vm", "runtime", "rollback"}},
+		{name: "per VM policy", args: []string{"vm", "runtime", "policy", "devbox", "stage-on-restart", "--channel=candidate"}, wantService: "devbox", wantArgs: []string{"vm", "runtime", "policy", "stage-on-restart", "--channel=candidate"}},
+		{name: "service override supplies policy VM", args: []string{"vm", "runtime", "policy", "stage-on-restart", "--channel=candidate"}, override: "devbox", wantService: "devbox", wantArgs: []string{"vm", "runtime", "policy", "stage-on-restart", "--channel=candidate"}},
+		{name: "policy defaults", args: []string{"vm", "runtime", "policy", "defaults", "show"}, wantService: yeet.SystemServiceName(), wantArgs: []string{"vm", "runtime", "policy", "defaults", "show"}},
+		{name: "host update ignores override", args: []string{"vm", "runtime", "update"}, override: "devbox", wantService: yeet.SystemServiceName(), wantArgs: []string{"vm", "runtime", "update"}},
+		{name: "service override supplies VM", args: []string{"vm", "runtime", "upgrade", "--to=v1.16.1"}, override: "devbox", wantService: "devbox", wantArgs: []string{"vm", "runtime", "upgrade", "--to=v1.16.1"}},
+		{name: "service override replaces VM", args: []string{"vm", "runtime", "status", "other@host-a"}, override: "devbox", wantService: "devbox", wantArgs: []string{"vm", "runtime", "status"}},
+		{name: "import host action", args: []string{"vm", "runtime", "import", "custom", "./runtime"}, wantService: yeet.SystemServiceName(), wantArgs: []string{"vm", "runtime", "import", "custom", "./runtime"}},
+		{name: "prune host action", args: []string{"vm", "runtime", "prune", "--dry-run"}, wantService: yeet.SystemServiceName(), wantArgs: []string{"vm", "runtime", "prune", "--dry-run"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, host, bridged, ok := bridgeServiceArgs(tt.args, remoteSpecs, groupSpecs, tt.override)
+			if !ok {
+				t.Fatalf("bridgeServiceArgs(%v) not recognized", tt.args)
+			}
+			if service != tt.wantService || host != tt.wantHost || !reflect.DeepEqual(bridged, tt.wantArgs) {
+				t.Fatalf("bridge = service %q host %q args %#v, want %q %q %#v", service, host, bridged, tt.wantService, tt.wantHost, tt.wantArgs)
+			}
+		})
 	}
 }
 

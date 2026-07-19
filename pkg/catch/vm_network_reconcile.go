@@ -158,6 +158,12 @@ func (s *Server) reconcileVMNetworks(ctx context.Context) error {
 }
 
 func (s *Server) EnsureVMNetwork(ctx context.Context, service string) error {
+	return WithVMRuntimeTransactionLock(ctx, &s.cfg, func() error {
+		return s.ensureVMNetworkLocked(ctx, service)
+	})
+}
+
+func (s *Server) ensureVMNetworkLocked(ctx context.Context, service string) error {
 	dv, err := s.getDB()
 	if err != nil {
 		return err
@@ -179,6 +185,12 @@ func EnsureVMNetwork(ctx context.Context, cfg *Config, service string) error {
 	if cfg == nil || cfg.DB == nil {
 		return fmt.Errorf("config DB is required")
 	}
+	return WithVMRuntimeTransactionLock(ctx, cfg, func() error {
+		return ensureVMNetworkLocked(ctx, cfg, service)
+	})
+}
+
+func ensureVMNetworkLocked(ctx context.Context, cfg *Config, service string) error {
 	dv, err := cfg.DB.Get()
 	if err != nil {
 		return fmt.Errorf("failed to get data: %v", err)

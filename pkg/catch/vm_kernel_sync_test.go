@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 func TestSyncGuestSelectedKernelCopiesVerifiedKernel(t *testing.T) {
@@ -121,8 +122,10 @@ func TestSyncGuestSelectedKernelReadsSelectorThroughGuestAbsoluteSymlink(t *test
 }
 
 func TestAutoSyncVMGuestKernelOnRebootUpdatesFirecrackerConfig(t *testing.T) {
-	root := t.TempDir()
+	dataRoot := t.TempDir()
+	root := filepath.Join(dataRoot, "services", "devbox")
 	writeKernelSyncFirecrackerConfig(t, root, "/old/vmlinux", "/old/initrd.img")
+	writeVMKernelSyncHostDB(t, dataRoot, root, nil)
 	if err := markVMJailerReady(root); err != nil {
 		t.Fatalf("mark VM jailer ready: %v", err)
 	}
@@ -133,6 +136,7 @@ func TestAutoSyncVMGuestKernelOnRebootUpdatesFirecrackerConfig(t *testing.T) {
 		ServiceRoot: root,
 		DiskPath:    "/srv/vms/devbox/rootfs.ext4",
 		ConfigFile:  filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
+		JailerBase:  vmJailerBaseForDataRoot(dataRoot),
 	})
 	if err != nil {
 		t.Fatalf("AutoSyncVMGuestKernelOnReboot: %v", err)
@@ -158,6 +162,74 @@ func TestAutoSyncVMGuestKernelOnRebootUpdatesFirecrackerConfig(t *testing.T) {
 	}
 }
 
+func TestAutoSyncVMGuestKernelOnRebootPreservesAdoptedRuntimeSelectionBeforeMutation(t *testing.T) {
+	dataRoot := t.TempDir()
+	root := filepath.Join(dataRoot, "custom", "vm-root")
+	configPath := filepath.Join(serviceRunDirForRoot(root), "firecracker.json")
+	writeKernelSyncFirecrackerConfig(t, root, "/old/vmlinux", "")
+	configured := vmRuntimeLaunchTestArtifact("v1.16.1", filepath.Join(dataRoot, "configured"))
+	staged := vmRuntimeLaunchTestArtifact("v1.17.0", filepath.Join(dataRoot, "staged"))
+	writeVMKernelSyncHostDB(t, dataRoot, root, &db.VMComponentsConfig{
+		Runtime: db.VMRuntimeLifecycleConfig{
+			Configured: configured,
+			Staged:     &staged,
+		},
+	})
+	if err := os.MkdirAll(serviceDataDirForRoot(root), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	descriptorPath := filepath.Join(serviceDataDirForRoot(root), vmRuntimeDescriptorFileName)
+	descriptorDeps := defaultVMRuntimeDescriptorFileDeps()
+	descriptorDeps.uid = uint32(os.Geteuid())
+	descriptorDeps.gid = uint32(os.Getegid())
+	if err := writeVMRuntimeDescriptorWithDeps(descriptorPath, vmRuntimeDescriptor{
+		SchemaVersion: vmRuntimeDescriptorSchemaVersion, Service: "devbox",
+		Configured: configured, Staged: &staged, Trial: true,
+	}, descriptorDeps); err != nil {
+		t.Fatal(err)
+	}
+	descriptorBefore, err := os.ReadFile(descriptorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnerCalls := 0
+	withVMKernelSyncRunner(t, func(context.Context, []string) error {
+		runnerCalls++
+		return nil
+	})
+
+	err = AutoSyncVMGuestKernelOnReboot(context.Background(), VMConsoleProxyConfig{
+		Service:     "devbox",
+		ServiceRoot: root,
+		DiskPath:    filepath.Join(root, "rootfs.ext4"),
+		ConfigFile:  configPath,
+		JailerBase:  vmJailerBaseForDataRoot(dataRoot),
+	})
+	if err == nil || !strings.Contains(err.Error(), `disabled for adopted VM "devbox"`) {
+		t.Fatalf("AutoSync error = %v, want adopted-VM refusal", err)
+	}
+	if runnerCalls != 0 {
+		t.Fatalf("kernel sync runner calls = %d, want none", runnerCalls)
+	}
+	assertFileContains(t, configPath, "/old/vmlinux")
+	descriptorAfter, err := os.ReadFile(descriptorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(descriptorBefore, descriptorAfter) {
+		t.Fatal("guest reboot hook changed the staged host runtime descriptor")
+	}
+
+	dv, err := db.NewStore(filepath.Join(dataRoot, "db.json"), filepath.Join(dataRoot, "services")).Get()
+	if err != nil {
+		t.Fatalf("read host DB after refusal: %v", err)
+	}
+	runtimeState := dv.Services().Get("devbox").VM().Components().Runtime()
+	if !runtimeState.Staged().Valid() || runtimeState.Staged().ID() != staged.ID {
+		t.Fatalf("staged runtime = %#v, want %q preserved", runtimeState.Staged().AsStruct(), staged.ID)
+	}
+}
+
 func TestAutoSyncVMGuestKernelOnRebootInfersLegacyVMRunMetadata(t *testing.T) {
 	root := t.TempDir()
 	writeKernelSyncFirecrackerConfig(t, root, "/old/vmlinux", "/old/initrd.img")
@@ -165,6 +237,7 @@ func TestAutoSyncVMGuestKernelOnRebootInfersLegacyVMRunMetadata(t *testing.T) {
 
 	err := AutoSyncVMGuestKernelOnReboot(context.Background(), VMConsoleProxyConfig{
 		ConfigFile: filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
+		JailerBase: vmJailerBaseForDataRoot(root),
 	})
 	if err != nil {
 		t.Fatalf("AutoSyncVMGuestKernelOnReboot: %v", err)
@@ -201,11 +274,83 @@ func TestAutoSyncVMGuestKernelOnRebootSkipsMissingSelector(t *testing.T) {
 		ServiceRoot: root,
 		DiskPath:    "/srv/vms/devbox/rootfs.ext4",
 		ConfigFile:  filepath.Join(serviceRunDirForRoot(root), "firecracker.json"),
+		JailerBase:  vmJailerBaseForDataRoot(root),
 	})
 	if err != nil {
 		t.Fatalf("AutoSyncVMGuestKernelOnReboot: %v", err)
 	}
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), "/old/vmlinux")
+}
+
+func TestAutoSyncVMGuestKernelOnRebootRejectsDescriptorModeBeforeMutation(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(serviceRunDirForRoot(root), "firecracker.json")
+	writeKernelSyncFirecrackerConfig(t, root, "/old/vmlinux", "")
+	runnerCalls := 0
+	withVMKernelSyncRunner(t, func(context.Context, []string) error {
+		runnerCalls++
+		return nil
+	})
+
+	err := AutoSyncVMGuestKernelOnReboot(context.Background(), VMConsoleProxyConfig{
+		Service:           "devbox",
+		ServiceRoot:       root,
+		DiskPath:          "/srv/vms/devbox/rootfs.ext4",
+		ConfigFile:        configPath,
+		RuntimeDescriptor: filepath.Join(serviceDataDirForRoot(root), vmRuntimeDescriptorFileName),
+		JailerBase:        vmJailerBaseForDataRoot(root),
+	})
+	if err == nil || !strings.Contains(err.Error(), "component-aware kernel reconciliation") {
+		t.Fatalf("AutoSync error = %v, want descriptor-mode rejection", err)
+	}
+	if runnerCalls != 0 {
+		t.Fatalf("kernel sync runner calls = %d, want none", runnerCalls)
+	}
+	assertFileContains(t, configPath, "/old/vmlinux")
+}
+
+func TestAutoSyncVMGuestKernelOnRebootRefusesPendingRuntimeRecovery(t *testing.T) {
+	fixture, deps, _ := newVMRuntimeAdoptionTransactionFixture(t, false)
+	tx, err := prepareVMRuntimeAdoptionWithDeps(context.Background(), &fixture.cfg, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	abandonPreparedVMRuntimeAdoption(t, tx)
+	runnerCalls := 0
+	withVMKernelSyncRunner(t, func(context.Context, []string) error {
+		runnerCalls++
+		return nil
+	})
+
+	err = AutoSyncVMGuestKernelOnReboot(context.Background(), VMConsoleProxyConfig{
+		Service:     "devbox",
+		ServiceRoot: fixture.serviceRoot,
+		DiskPath:    fixture.disk,
+		ConfigFile:  filepath.Join(serviceRunDirForRoot(fixture.serviceRoot), "firecracker.json"),
+		JailerBase:  vmJailerBaseForDataRoot(fixture.dataRoot),
+	})
+	if err == nil || !strings.Contains(err.Error(), "VM runtime recovery is pending") {
+		t.Fatalf("AutoSync error = %v, want pending recovery refusal", err)
+	}
+	if runnerCalls != 0 {
+		t.Fatalf("kernel sync runner calls = %d, want none", runnerCalls)
+	}
+}
+
+func writeVMKernelSyncHostDB(t *testing.T, dataRoot, serviceRoot string, components *db.VMComponentsConfig) {
+	t.Helper()
+	store := db.NewStore(filepath.Join(dataRoot, "db.json"), filepath.Join(dataRoot, "services"))
+	err := store.Set(&db.Data{Services: map[string]*db.Service{
+		"devbox": {
+			Name:        "devbox",
+			ServiceType: db.ServiceTypeVM,
+			ServiceRoot: serviceRoot,
+			VM:          &db.VMConfig{Components: components},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("write VM kernel sync host DB: %v", err)
+	}
 }
 
 func TestVMKernelSyncRejectsRunningVMWithoutRestart(t *testing.T) {
@@ -217,6 +362,41 @@ func TestVMKernelSyncRejectsRunningVMWithoutRestart(t *testing.T) {
 	err := server.syncVMGuestKernel(context.Background(), "devbox", cli.VMKernelFlags{})
 	if err == nil || !strings.Contains(err.Error(), `cannot sync VM kernel while "devbox" is running`) {
 		t.Fatalf("sync error = %v, want running VM error", err)
+	}
+}
+
+func TestVMKernelSyncRejectsAdoptedVMBeforeSideEffects(t *testing.T) {
+	root := t.TempDir()
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.Components = &db.VMComponentsConfig{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runningChecks := 0
+	withVMKernelSyncRunningCheck(t, func(*Server, string) (bool, error) {
+		runningChecks++
+		return true, nil
+	})
+	runnerCalls := 0
+	withVMKernelSyncRunner(t, func(context.Context, []string) error {
+		runnerCalls++
+		return nil
+	})
+	var systemctlCalls [][]string
+	withVMKernelSyncSystemctl(t, func(args ...string) error {
+		systemctlCalls = append(systemctlCalls, args)
+		return nil
+	})
+
+	err := server.syncVMGuestKernel(context.Background(), "devbox", cli.VMKernelFlags{Restart: true})
+	if err == nil || !strings.Contains(err.Error(), "component-aware kernel reconciliation") {
+		t.Fatalf("sync error = %v, want adopted VM rejection", err)
+	}
+	if runningChecks != 0 || runnerCalls != 0 || len(systemctlCalls) != 0 {
+		t.Fatalf("side effects after adopted rejection: running=%d runner=%d systemctl=%v", runningChecks, runnerCalls, systemctlCalls)
 	}
 }
 
@@ -296,6 +476,9 @@ func TestVMKernelSyncRestartsRunningVM(t *testing.T) {
 	var systemctlCalls [][]string
 	withVMKernelSyncSystemctl(t, func(args ...string) error {
 		systemctlCalls = append(systemctlCalls, append([]string(nil), args...))
+		if len(args) != 0 && args[0] == "restart" {
+			return WithVMRuntimeTransactionLock(context.Background(), &server.cfg, func() error { return nil })
+		}
 		return nil
 	})
 
@@ -326,6 +509,9 @@ func TestVMKernelSyncRestartsRunningVMOnSyncError(t *testing.T) {
 	var systemctlCalls [][]string
 	withVMKernelSyncSystemctl(t, func(args ...string) error {
 		systemctlCalls = append(systemctlCalls, append([]string(nil), args...))
+		if len(args) != 0 && args[0] == "start" {
+			return WithVMRuntimeTransactionLock(context.Background(), &server.cfg, func() error { return nil })
+		}
 		return nil
 	})
 

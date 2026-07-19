@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,6 +43,8 @@ type vmJailerTransitionTrustedPath struct {
 	label string
 	path  string
 }
+
+var readVMJailerTransitionRuntimeDescriptor = ReadVMRuntimeDescriptor
 
 func newVMJailerTransitionPlan(dv *db.DataView, input vmJailerTransitionInput, identity vmRuntimeIdentity) (vmJailerTransitionPlan, error) {
 	service := strings.TrimSpace(input.Service)
@@ -82,26 +83,14 @@ func deriveVMJailerTransitionPlan(dv *db.DataView, input vmJailerTransitionInput
 	if identity.UID <= 0 || identity.GID <= 0 {
 		return vmJailerTransitionPlan{}, db.VMDiskConfig{}, "", fmt.Errorf("VM jail runtime identity must be non-root")
 	}
-
-	root := strings.TrimSpace(input.ServiceRoot)
-	if root == "" || !filepath.IsAbs(root) {
-		return vmJailerTransitionPlan{}, db.VMDiskConfig{}, "", fmt.Errorf("VM service root must be an absolute path for jailer transition: %s", root)
+	root, disk, diskConfig, firecracker, jailer, err := resolveVMJailerTransitionRuntime(vm, input.ServiceRoot, service)
+	if err != nil {
+		return vmJailerTransitionPlan{}, db.VMDiskConfig{}, "", err
 	}
-	image := vm.Image()
-	rootFS := strings.TrimSpace(image.RootFS)
-	if rootFS == "" || !filepath.IsAbs(rootFS) {
-		return vmJailerTransitionPlan{}, db.VMDiskConfig{}, "", fmt.Errorf("VM image rootfs must be an absolute path for jailer transition: %s", rootFS)
-	}
-	diskConfig := vm.Disk()
-	disk := strings.TrimSpace(diskConfig.Path)
-	if disk == "" {
-		disk = rootFS
-	}
-	imageDir := filepath.Dir(rootFS)
 	runDir := serviceRunDirForRoot(root)
 	runtime := VMConsoleProxyConfig{
-		Firecracker:   filepath.Join(imageDir, "firecracker"),
-		Jailer:        filepath.Join(imageDir, "jailer"),
+		Firecracker:   firecracker,
+		Jailer:        jailer,
 		JailerBase:    vmJailerBaseForDataRoot(input.DataRoot),
 		APISocket:     vm.Sockets().APISocketPath,
 		ConfigFile:    filepath.Join(runDir, "firecracker.json"),
@@ -123,6 +112,39 @@ func deriveVMJailerTransitionPlan(dv *db.DataView, input vmJailerTransitionInput
 		Network:  network.WithTapOwner(identity),
 	}
 	return plan, diskConfig, vm.Sockets().VsockSocketPath, nil
+}
+
+func resolveVMJailerTransitionRuntime(vm db.VMConfigView, serviceRoot, service string) (root, disk string, diskConfig db.VMDiskConfig, firecracker, jailer string, err error) {
+	root = strings.TrimSpace(serviceRoot)
+	if root == "" || !filepath.IsAbs(root) {
+		return "", "", diskConfig, "", "", fmt.Errorf("VM service root must be an absolute path for jailer transition: %s", root)
+	}
+	rootFS := strings.TrimSpace(vm.Image().RootFS)
+	if rootFS == "" || !filepath.IsAbs(rootFS) {
+		return "", "", diskConfig, "", "", fmt.Errorf("VM image rootfs must be an absolute path for jailer transition: %s", rootFS)
+	}
+	diskConfig = vm.Disk()
+	disk = strings.TrimSpace(diskConfig.Path)
+	if disk == "" {
+		disk = rootFS
+	}
+	imageDir := filepath.Dir(rootFS)
+	firecracker = filepath.Join(imageDir, "firecracker")
+	jailer = filepath.Join(imageDir, "jailer")
+	components := vm.Components()
+	if !components.Valid() {
+		return root, disk, diskConfig, firecracker, jailer, nil
+	}
+	configured := components.Runtime().Configured()
+	descriptorPath := filepath.Join(serviceDataDirForRoot(root), vmRuntimeDescriptorFileName)
+	descriptorRuntime, readErr := readVMJailerTransitionRuntimeDescriptor(descriptorPath, service)
+	if readErr != nil {
+		return "", "", diskConfig, "", "", fmt.Errorf("read adopted VM runtime descriptor: %w", readErr)
+	}
+	if descriptorRuntime != configured {
+		return "", "", diskConfig, "", "", fmt.Errorf("adopted VM runtime descriptor does not match configured component state")
+	}
+	return root, disk, diskConfig, configured.Firecracker, configured.Jailer, nil
 }
 
 func vmJailerTransitionVM(dv *db.DataView, service string) (db.VMConfigView, error) {
@@ -286,14 +308,13 @@ func validateVMJailerTransitionPlanningPaths(plan vmJailerTransitionPlan, dataRo
 		return err
 	}
 
-	checkpointRoot := filepath.Join(serviceDataDirForRoot(plan.Root), "checkpoints")
-	trustedPaths := vmJailerTransitionPlanningTrustedPaths(plan, dataRoot, runRoot, checkpointRoot, diskBackend, vsockSocket)
+	trustedPaths := vmJailerTransitionPlanningTrustedPaths(plan, dataRoot, runRoot, diskBackend, vsockSocket)
 	for _, trusted := range trustedPaths {
 		if err := validateVMJailerTransitionTrustedExistingPath(trusted.path, trusted.label, plan.Identity); err != nil {
 			return err
 		}
 	}
-	return validateVMJailerTransitionCheckpoints(checkpointRoot)
+	return nil
 }
 
 func validateVMJailerTransitionSocketPaths(runRoot string, sockets []vmJailerTransitionTrustedPath) error {
@@ -309,13 +330,12 @@ func validateVMJailerTransitionSocketPaths(runRoot string, sockets []vmJailerTra
 	return nil
 }
 
-func vmJailerTransitionPlanningTrustedPaths(plan vmJailerTransitionPlan, dataRoot, runRoot, checkpointRoot, diskBackend, vsockSocket string) []vmJailerTransitionTrustedPath {
+func vmJailerTransitionPlanningTrustedPaths(plan vmJailerTransitionPlan, dataRoot, runRoot, diskBackend, vsockSocket string) []vmJailerTransitionTrustedPath {
 	trusted := []vmJailerTransitionTrustedPath{
 		{label: "configured data root", path: dataRoot},
 		{label: "configured service root", path: plan.Root},
 		{label: "service run directory", path: runRoot},
 		{label: "Firecracker config", path: plan.Runtime.ConfigFile},
-		{label: "VM checkpoint root", path: checkpointRoot},
 		{label: "VM jailer base", path: plan.Runtime.JailerBase},
 		{label: "Firecracker API socket parent", path: filepath.Dir(plan.Runtime.APISocket)},
 		{label: "VM console socket parent", path: filepath.Dir(plan.Runtime.ConsoleSocket)},
@@ -396,9 +416,6 @@ func vmJailerTransitionStrictlyWithin(root, path string) bool {
 }
 
 func validateVMJailerTransitionResources(plan vmJailerTransitionPlan, vsockSocket string) error {
-	if err := validateVMJailerTransitionCheckpoints(filepath.Join(serviceDataDirForRoot(plan.Root), "checkpoints")); err != nil {
-		return err
-	}
 	if err := validateVMJailerTransitionBinds(plan); err != nil {
 		return err
 	}
@@ -470,35 +487,6 @@ func validateVMJailerTransitionSocketLinks(plan vmJailPlan) error {
 		}
 	}
 	return nil
-}
-
-func validateVMJailerTransitionCheckpoints(checkpointDir string) error {
-	info, err := os.Lstat(checkpointDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect VM checkpoints for jailer transition: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing symbolic link VM checkpoint directory: %s", checkpointDir)
-	}
-	return filepath.WalkDir(checkpointDir, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing symbolic link in VM checkpoints: %s", path)
-		}
-		entryInfo, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if !entryInfo.IsDir() && !entryInfo.Mode().IsRegular() {
-			return fmt.Errorf("VM checkpoint storage %s must be a regular file or directory", path)
-		}
-		return nil
-	})
 }
 
 func vmJailerTransitionPathWithin(root, path string) bool {

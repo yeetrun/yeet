@@ -38,6 +38,9 @@ func TestStageVMJailerUnitCreatesOwnedRegularFile(t *testing.T) {
 		t.Fatalf("stageVMJailerUnit: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Remove(replacement.Staged) })
+	if matched, err := filepath.Match(".yeet-vm-alpha.service.unit-*", filepath.Base(replacement.Staged)); err != nil || !matched {
+		t.Fatalf("staged unit name = %q, want actual .unit-* namespace (match error %v)", filepath.Base(replacement.Staged), err)
+	}
 	if !replacement.Existed || string(replacement.Previous) != "old-alpha" {
 		t.Fatalf("replacement previous state = %#v", replacement)
 	}
@@ -79,7 +82,7 @@ func TestStageVMJailerUnitRejectsSymlinkUnit(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "without following symlinks") {
 		t.Fatalf("stageVMJailerUnit error = %v, want symlink refusal", err)
 	}
-	matches, globErr := filepath.Glob(filepath.Join(dir, ".yeet-vm-alpha.service.jailer-*"))
+	matches, globErr := filepath.Glob(filepath.Join(dir, ".yeet-vm-alpha.service.unit-*"))
 	if globErr != nil {
 		t.Fatalf("Glob staged units: %v", globErr)
 	}
@@ -169,6 +172,113 @@ func TestPrepareVMJailerUpgradeResolvesEveryVMBeforeStaging(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("staged units before all jailers resolved = %v", entries)
+	}
+}
+
+func TestPrepareVMJailerUpgradeDelegatesToRuntimeAdoption(t *testing.T) {
+	oldPrepare := prepareVMRuntimeAdoptionForJailerUpgrade
+	adoption := &VMRuntimeAdoption{
+		summary: VMRuntimeAdoptionSummary{
+			Ready:          []string{"alpha"},
+			PendingRestart: []string{"beta"},
+		},
+	}
+	var gotCfg *Config
+	prepareVMRuntimeAdoptionForJailerUpgrade = func(_ context.Context, cfg *Config) (*VMRuntimeAdoption, error) {
+		gotCfg = cfg
+		return adoption, nil
+	}
+	t.Cleanup(func() { prepareVMRuntimeAdoptionForJailerUpgrade = oldPrepare })
+	cfg := &Config{}
+
+	tx, err := PrepareVMJailerUpgrade(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("PrepareVMJailerUpgrade: %v", err)
+	}
+	if gotCfg != cfg || tx.adoption != adoption {
+		t.Fatalf("delegation = cfg %p adoption %p, want cfg %p adoption %p", gotCfg, tx.adoption, cfg, adoption)
+	}
+	if got := tx.Summary(); !reflect.DeepEqual(got, VMJailerUpgradeSummary{
+		Ready: []string{"alpha"}, PendingRestart: []string{"beta"},
+	}) {
+		t.Fatalf("Summary = %#v", got)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	if err := tx.RestorePreviousAndVerify(); err == nil || !strings.Contains(err.Error(), "runtime adoption transaction") {
+		t.Fatalf("RestorePreviousAndVerify error = %v, want explicit compatibility rejection", err)
+	}
+	if err := tx.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+func TestPrepareVMJailerUpgradeRejectsBlockedRuntimeAdoption(t *testing.T) {
+	oldPrepare := prepareVMRuntimeAdoptionForJailerUpgrade
+	adoption := &VMRuntimeAdoption{
+		summary: VMRuntimeAdoptionSummary{Blocked: []string{"alpha"}},
+	}
+	prepareVMRuntimeAdoptionForJailerUpgrade = func(context.Context, *Config) (*VMRuntimeAdoption, error) {
+		return adoption, nil
+	}
+	t.Cleanup(func() { prepareVMRuntimeAdoptionForJailerUpgrade = oldPrepare })
+
+	tx, err := PrepareVMJailerUpgrade(context.Background(), &Config{})
+	if tx != nil || err == nil || !strings.Contains(err.Error(), "cannot adopt blocked VMs: alpha") {
+		t.Fatalf("PrepareVMJailerUpgrade = %#v, %v; want blocked adoption rejection", tx, err)
+	}
+	if !adoption.closed {
+		t.Fatal("blocked adoption transaction remains open")
+	}
+}
+
+func TestPrepareVMJailerUpgradeResolvesEveryVMBeforeStagingBlocksLegacyCheckpoint(t *testing.T) {
+	dataRoot := t.TempDir()
+	servicesRoot := filepath.Join(dataRoot, "services")
+	systemdDir := filepath.Join(dataRoot, "systemd")
+	if err := os.MkdirAll(systemdDir, 0o700); err != nil {
+		t.Fatalf("MkdirAll systemd dir: %v", err)
+	}
+	store := db.NewStore(filepath.Join(dataRoot, "db.json"), servicesRoot)
+	cfg := &Config{RootDir: dataRoot, ServicesRoot: servicesRoot, DB: store}
+	rootFS := writeVMJailerUpgradeTargetBundle(t, filepath.Join(dataRoot, "vm-images", "alpha-v1"), "alpha-v1", "amd64")
+	addTestServices(t, &Server{cfg: *cfg}, db.Service{
+		Name: "alpha", ServiceType: db.ServiceTypeVM,
+		VM: &db.VMConfig{
+			Runtime: vmRuntimeFirecracker,
+			Image:   db.VMImageConfig{Payload: "vm://custom/alpha", Version: "alpha-v1", RootFS: rootFS},
+		},
+	})
+	checkpoint := filepath.Join(servicesRoot, "alpha", "data", "checkpoints", "yeet-old")
+	if err := os.MkdirAll(checkpoint, 0o700); err != nil {
+		t.Fatalf("MkdirAll checkpoint: %v", err)
+	}
+	resolverCalls := 0
+	deps := defaultVMJailerUpgradeDeps()
+	deps.sibling = func(context.Context, vmJailerUpgradeVM) (string, bool, error) {
+		resolverCalls++
+		return "", false, errors.New("runtime resolution must not run")
+	}
+	deps.unitUID = uint32(os.Geteuid())
+	deps.unitGID = uint32(os.Getegid())
+	oldSystemdDir := vmSystemdSystemDir
+	vmSystemdSystemDir = systemdDir
+	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
+
+	_, err := prepareVMJailerUpgradeWithDeps(context.Background(), cfg, deps)
+	if err == nil || !strings.Contains(err.Error(), "retired Firecracker memory checkpoints block this Catch upgrade") {
+		t.Fatalf("prepareVMJailerUpgradeWithDeps error = %v, want legacy checkpoint gate", err)
+	}
+	if resolverCalls != 0 {
+		t.Fatalf("runtime resolver calls = %d, want 0 after legacy checkpoint gate", resolverCalls)
+	}
+	entries, readErr := os.ReadDir(systemdDir)
+	if readErr != nil {
+		t.Fatalf("ReadDir systemd: %v", readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("staged units after legacy checkpoint gate = %v", entries)
 	}
 }
 
@@ -841,10 +951,10 @@ func TestVMJailerUpgradeCommitFailureIsIdempotent(t *testing.T) {
 
 func TestVMJailerUpgradeEmptyTransactionDoesNotReloadSystemd(t *testing.T) {
 	called := false
-	tx := &VMJailerUpgrade{deps: vmJailerUpgradeDeps{systemctl: func(...string) error {
+	tx := &VMJailerUpgrade{vmUnitTransaction: &vmUnitTransaction{deps: vmUnitTransactionDeps{systemctl: func(...string) error {
 		called = true
 		return nil
-	}}}
+	}}}}
 	if err := tx.Commit(); err != nil {
 		t.Fatalf("Commit: %v", err)
 	}

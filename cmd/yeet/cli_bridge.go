@@ -9,6 +9,7 @@ import (
 
 	"github.com/shayne/yargs"
 	"github.com/yeetrun/yeet/pkg/cli"
+	"github.com/yeetrun/yeet/pkg/yeet"
 )
 
 // serviceBridgeSkippedGroupCommands lists group commands whose positional args
@@ -153,7 +154,10 @@ func bridgeWithOverride(args []string, remoteSpecs map[string]map[string]cli.Fla
 		return "", "", nil, false
 	}
 	if group, ok := groupSpecs[args[0]]; ok {
-		if _, ok := group[args[1]]; ok {
+		if flags, ok := group[args[1]]; ok {
+			if args[0] == "vm" && args[1] == "runtime" {
+				return bridgeVMRuntimeArgs(args, flags, override)
+			}
 			return override, "", args, true
 		}
 	}
@@ -184,10 +188,102 @@ func bridgeGroupArgs(args []string, groupSpecs map[string]map[string]map[string]
 	if args[0] == "vm" && args[1] == "kernel" {
 		return bridgeVMKernelArgs(args, flags)
 	}
+	if args[0] == "vm" && args[1] == "runtime" {
+		return bridgeVMRuntimeArgs(args, flags, "")
+	}
 	if isVariadicServiceGroupCommand(args[0], args[1]) {
 		return "", "", nil, false
 	}
 	return bridgeCommandArgs(args, 2, flags)
+}
+
+func bridgeVMRuntimeArgs(args []string, flags map[string]cli.FlagSpec, override string) (service string, host string, bridged []string, ok bool) {
+	positionals := positionalArgIndices(args, 2, flags)
+	if len(positionals) == 0 {
+		return "", "", nil, false
+	}
+	direct, serviceIndex, valid := vmRuntimeBridgeTarget(args, positionals, override)
+	if !valid {
+		return "", "", nil, false
+	}
+	if direct != "" {
+		return direct, "", append([]string(nil), args...), true
+	}
+	if serviceIndex < 0 {
+		return yeet.SystemServiceName(), "", append([]string(nil), args...), true
+	}
+	service, host, _ = splitQualifiedName(args[serviceIndex])
+	if override != "" {
+		service = override
+		host = ""
+	}
+	return service, host, removeArgAt(args, serviceIndex), true
+}
+
+func vmRuntimeBridgeTarget(args []string, positionals []int, override string) (direct string, serviceIndex int, ok bool) {
+	action := args[positionals[0]]
+	switch action {
+	case cli.VMRuntimeActionStatus, cli.VMRuntimeActionUpgrade, cli.VMRuntimeActionRollback:
+		return vmRuntimeBridgeServiceTarget(positionals, override)
+	case cli.VMRuntimeActionPolicy:
+		return vmRuntimePolicyBridgeTarget(args, positionals, override)
+	case cli.VMRuntimeActionUpdate, cli.VMRuntimeActionImport, cli.VMRuntimeActionProtect,
+		cli.VMRuntimeActionUnprotect, cli.VMRuntimeActionPrune:
+		return yeet.SystemServiceName(), -1, true
+	default:
+		return "", -1, false
+	}
+}
+
+func vmRuntimeBridgeServiceTarget(positionals []int, override string) (direct string, serviceIndex int, ok bool) {
+	if len(positionals) > 1 {
+		return "", positionals[1], true
+	}
+	if override != "" {
+		return override, -1, true
+	}
+	return "", -1, true
+}
+
+func vmRuntimePolicyBridgeTarget(args []string, positionals []int, override string) (direct string, serviceIndex int, ok bool) {
+	if len(positionals) <= 1 {
+		return vmRuntimeBridgeServiceTarget(positionals, override)
+	}
+	value := args[positionals[1]]
+	if value == "defaults" {
+		return yeet.SystemServiceName(), -1, true
+	}
+	if override != "" && len(positionals) == 2 && isVMRuntimePolicy(value) {
+		return override, -1, true
+	}
+	return "", positionals[1], true
+}
+
+func isVMRuntimePolicy(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case cli.VMRuntimePolicyInherit, cli.VMRuntimePolicyManual, cli.VMRuntimePolicyStageOnRestart:
+		return true
+	default:
+		return false
+	}
+}
+
+func positionalArgIndices(args []string, start int, flags map[string]cli.FlagSpec) []int {
+	var result []int
+	for i := start; i < len(args); i++ {
+		if args[i] == "--" {
+			for i++; i < len(args); i++ {
+				result = append(result, i)
+			}
+			break
+		}
+		if skip, ok := flagTokenSkip(args[i], flags); ok {
+			i += skip
+			continue
+		}
+		result = append(result, i)
+	}
+	return result
 }
 
 func bridgeVMKernelArgs(args []string, flags map[string]cli.FlagSpec) (service string, host string, bridged []string, ok bool) {

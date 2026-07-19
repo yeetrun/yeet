@@ -1393,6 +1393,106 @@ func TestServerStartReturnsBeforeNetNSReconciliationFinishes(t *testing.T) {
 	sawCleanup = true
 }
 
+func TestServerStartReturnsBeforeVMRuntimeRecoveryAndDelaysLaterReconciliation(t *testing.T) {
+	s := newTestServer(t)
+	prevInstall := installYeetNSService
+	installYeetNSService = func() error { return nil }
+	defer func() { installYeetNSService = prevInstall }()
+	stubYeetDNSInstaller(t, func(string) error { return nil })
+	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+
+	recoveryStarted := make(chan struct{})
+	releaseRecovery := make(chan struct{})
+	s.recoverVMRuntimeState = func(ctx context.Context, _ *Config) error {
+		close(recoveryStarted)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-releaseRecovery:
+			return nil
+		}
+	}
+	reconciled := make(chan struct{})
+	prevNAT := reconcileDockerNetNSPortForwards
+	reconcileDockerNetNSPortForwards = func(*db.Store) error {
+		close(reconciled)
+		return nil
+	}
+	defer func() { reconcileDockerNetNSPortForwards = prevNAT }()
+
+	startDone := make(chan struct{})
+	go func() {
+		s.Start()
+		close(startDone)
+	}()
+	select {
+	case <-recoveryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("VM runtime recovery did not start")
+	}
+	select {
+	case <-startDone:
+	case <-time.After(50 * time.Millisecond):
+		t.Fatal("Start waited for VM runtime recovery")
+	}
+	select {
+	case <-reconciled:
+		t.Fatal("later reconciliation ran before VM runtime recovery completed")
+	default:
+	}
+
+	close(releaseRecovery)
+	select {
+	case <-reconciled:
+	case <-time.After(time.Second):
+		t.Fatal("later reconciliation did not run after VM runtime recovery")
+	}
+	s.Shutdown()
+}
+
+func TestVMRuntimeRecoveryBarrierPrefersCancellationAfterCompletion(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	barrier := &vmRuntimeRecoveryBarrier{done: done}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if barrier.Wait(ctx) {
+		t.Fatal("completed recovery barrier released work after cancellation")
+	}
+}
+
+func TestServerStartLogsVMRuntimeRecoveryFailureAndBlocksLaterReconciliation(t *testing.T) {
+	s := newTestServer(t)
+	logs := captureLogs(t)
+	prevInstall := installYeetNSService
+	installYeetNSService = func() error { return nil }
+	defer func() { installYeetNSService = prevInstall }()
+	stubYeetDNSInstaller(t, func(string) error { return nil })
+	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+
+	s.recoverVMRuntimeState = func(context.Context, *Config) error {
+		return errors.New("recovery state retained")
+	}
+	reconciled := make(chan struct{}, 1)
+	prevNAT := reconcileDockerNetNSPortForwards
+	reconcileDockerNetNSPortForwards = func(*db.Store) error {
+		reconciled <- struct{}{}
+		return nil
+	}
+	defer func() { reconcileDockerNetNSPortForwards = prevNAT }()
+
+	s.Start()
+	t.Cleanup(s.Shutdown)
+	if out := waitForLogContains(t, logs, "VM runtime adoption recovery failed: recovery state retained"); !strings.Contains(out, "VM runtime adoption recovery failed: recovery state retained") {
+		t.Fatalf("missing VM runtime recovery failure log:\n%s", out)
+	}
+	select {
+	case <-reconciled:
+		t.Fatal("later reconciliation ran after VM runtime recovery failed")
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestServerShutdownCancelsNetNSReconciliation(t *testing.T) {
 	s := newTestServer(t)
 	addTestServices(t, s, db.Service{

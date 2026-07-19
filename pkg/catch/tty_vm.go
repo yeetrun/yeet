@@ -50,9 +50,125 @@ func (e *ttyExecer) vmCmdFunc(args []string) error {
 		return e.vmKernelRemoteCmdFunc(args[1:])
 	case "memory":
 		return e.vmMemoryRemoteCmdFunc(args[1:])
+	case "runtime":
+		return e.vmRuntimeRemoteCmdFunc(args[1:])
 	default:
 		return fmt.Errorf("unknown vm command %q", args[0])
 	}
+}
+
+func (e *ttyExecer) vmRuntimeRemoteCmdFunc(args []string) error {
+	logicalArgs := vmRuntimeLogicalArgs(e.sn, args)
+	flags, remaining, err := cli.ParseVMRuntime(logicalArgs)
+	if err != nil {
+		return err
+	}
+	return e.vmRuntimeCmdFunc(flags, remaining)
+}
+
+func vmRuntimeLogicalArgs(service string, args []string) []string {
+	if service == "" || service == SystemService || len(args) == 0 {
+		return append([]string(nil), args...)
+	}
+	action, actionIndex, ok := cli.FindVMRuntimeAction(args)
+	if !ok {
+		return append([]string(nil), args...)
+	}
+	insertAt := actionIndex + 1
+	switch action {
+	case cli.VMRuntimeActionStatus, cli.VMRuntimeActionUpgrade, cli.VMRuntimeActionRollback:
+	case cli.VMRuntimeActionPolicy:
+		// Runtime policy defaults are always routed to the system service, so a
+		// non-system target is necessarily the per-VM form with its VM removed.
+	default:
+		insertAt = -1
+	}
+	if insertAt < 0 {
+		return append([]string(nil), args...)
+	}
+	result := make([]string, 0, len(args)+1)
+	result = append(result, args[:insertAt]...)
+	result = append(result, service)
+	result = append(result, args[insertAt:]...)
+	return result
+}
+
+func (e *ttyExecer) vmRuntimeCmdFunc(flags cli.VMRuntimeFlags, remaining []string) error {
+	action, err := vmRuntimeCommandAction(remaining)
+	if err != nil {
+		return err
+	}
+	switch action {
+	case cli.VMRuntimeActionStatus:
+		return e.vmRuntimeStatusCmd(flags)
+	case cli.VMRuntimeActionUpdate:
+		return e.s.updateVMRuntimes(e.ctx, e.rw)
+	case cli.VMRuntimeActionImport:
+		return e.vmRuntimeImportCmd(remaining)
+	case cli.VMRuntimeActionPolicy:
+		return e.vmRuntimePolicyCmd(flags, remaining)
+	case cli.VMRuntimeActionProtect:
+		return e.s.setVMRuntimeProtection(e.ctx, e.rw, remaining[1], true)
+	case cli.VMRuntimeActionUnprotect:
+		return e.s.setVMRuntimeProtection(e.ctx, e.rw, remaining[1], false)
+	default:
+		return e.vmRuntimeLifecycleCmd(action, flags, remaining)
+	}
+}
+
+func (e *ttyExecer) vmRuntimeLifecycleCmd(action string, flags cli.VMRuntimeFlags, remaining []string) error {
+	switch action {
+	case cli.VMRuntimeActionUpgrade:
+		return e.vmRuntimeUpgradeCmd(flags, remaining[1])
+	case cli.VMRuntimeActionRollback:
+		return e.s.rollbackVMRuntime(e.ctx, e.rw, remaining[1], flags.Restart)
+	case cli.VMRuntimeActionPrune:
+		return e.s.pruneVMRuntimes(e.ctx, e.rw, flags.DryRun)
+	default:
+		return fmt.Errorf("unknown vm runtime action %q", action)
+	}
+}
+
+func vmRuntimeCommandAction(remaining []string) (string, error) {
+	if len(remaining) == 0 {
+		return "", fmt.Errorf("vm runtime requires an action")
+	}
+	return remaining[0], nil
+}
+
+func (e *ttyExecer) vmRuntimeStatusCmd(flags cli.VMRuntimeFlags) error {
+	service := ""
+	if e.sn != "" && e.sn != SystemService {
+		service = e.sn
+	}
+	return e.s.printVMRuntimeStatus(e.ctx, e.rw, service, flags.Format)
+}
+
+func (e *ttyExecer) vmRuntimeImportCmd(remaining []string) error {
+	if remaining[2] != "-" {
+		return fmt.Errorf("vm runtime import source must be the authenticated input stream")
+	}
+	return e.s.importVMRuntime(e.ctx, e.rw, remaining[1], e.payloadReader())
+}
+
+func (e *ttyExecer) vmRuntimePolicyCmd(flags cli.VMRuntimeFlags, remaining []string) error {
+	if len(remaining) <= 1 || remaining[1] != "defaults" {
+		return e.s.setVMRuntimePolicy(e.ctx, e.rw, e.sn, flags.Policy, flags.Channel)
+	}
+	if remaining[2] == "show" {
+		return e.s.printVMRuntimePolicyDefaults(e.rw)
+	}
+	return e.s.setVMRuntimePolicyDefaults(e.ctx, e.rw, flags.Policy, flags.Channel)
+}
+
+func (e *ttyExecer) vmRuntimeUpgradeCmd(flags cli.VMRuntimeFlags, service string) error {
+	if err := e.s.upgradeVMRuntime(e.ctx, e.rw, service, flags.To, flags.Channel); err != nil {
+		return err
+	}
+	if flags.Restart {
+		return e.s.restartStagedVMRuntime(e.ctx, e.rw, service)
+	}
+	return nil
 }
 
 func (e *ttyExecer) vmConsoleRemoteCmdFunc(args []string) error {

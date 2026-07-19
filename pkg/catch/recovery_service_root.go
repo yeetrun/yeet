@@ -69,19 +69,24 @@ func (s *Server) materializeServiceRootRecoveryClone(ctx context.Context, servic
 	if err := currentServiceRootCloneIdentityReconciler()(ctx, s, clonedService, targetRoot); err != nil {
 		return s.cleanupFailedRecoveryClone(ctx, targetDataset, newServiceName, false, err)
 	}
-	inserted, err := s.insertRecoveryCloneService(clonedService)
+	_, err = s.insertRecoveryCloneService(clonedService)
+	var insertWarning error
 	if err != nil {
-		return s.cleanupFailedRecoveryClone(ctx, targetDataset, newServiceName, inserted, err)
+		if dbMutationCommitted(err) {
+			insertWarning = fmt.Errorf("record cloned service %q: %w", newServiceName, err)
+		} else {
+			return s.cleanupFailedRecoveryClone(ctx, targetDataset, newServiceName, false, err)
+		}
 	}
 	if err := currentServiceRootCloneDefinitionInstaller()(s, clonedService); err != nil {
-		return s.cleanupFailedRecoveryClone(ctx, targetDataset, newServiceName, true, err)
+		return s.cleanupFailedRecoveryClone(ctx, targetDataset, newServiceName, true, errors.Join(insertWarning, err))
 	}
 	if !flags.Start {
 		if err := currentServiceRootCloneStopper()(s, clonedService); err != nil {
-			return fmt.Errorf("created clone %q but failed to stop it: %w", newServiceName, err)
+			return errors.Join(insertWarning, fmt.Errorf("created clone %q but failed to stop it: %w", newServiceName, err))
 		}
 	}
-	return nil
+	return insertWarning
 }
 
 type serviceRootCloneDefinitionInstaller func(*Server, *db.Service) error
@@ -177,9 +182,6 @@ func (s *Server) restoreServiceRootRecoveryPoint(ctx context.Context, service *d
 	if err := validateServiceRootRecoveryPoint(service, point); err != nil {
 		return err
 	}
-	if err := validateServiceRootRestoreMode(flags.Mode); err != nil {
-		return err
-	}
 	confirmed, err := confirmServiceRootRestore(service, point, flags, rw)
 	if err != nil || !confirmed {
 		return err
@@ -225,17 +227,6 @@ func (s *Server) finishServiceRootRestore(ctx context.Context, service *db.Servi
 		writef(rw, "Restored service definition generation: %d\n", *point.Generation)
 	}
 	return s.startServiceRootAfterRestore(service, flags.Start, rw)
-}
-
-func validateServiceRootRestoreMode(raw string) error {
-	mode := strings.TrimSpace(raw)
-	if mode == "" || mode == recoveryModeDisk {
-		return nil
-	}
-	if mode == recoveryModeFull {
-		return fmt.Errorf("--mode=full is only supported for VM recovery points")
-	}
-	return fmt.Errorf("unsupported service-root restore mode %q", mode)
 }
 
 func confirmServiceRootRestore(service *db.Service, point recoveryPoint, flags cli.SnapshotsRestoreFlags, rw io.ReadWriter) (bool, error) {
@@ -764,19 +755,24 @@ func serviceRootCloneArtifactPath(artifact *db.Artifact, generation int, latestG
 
 func (s *Server) cleanupFailedRecoveryClone(ctx context.Context, targetDataset string, serviceName string, removeService bool, cause error) error {
 	var cleanupErrs []error
-	if err := zfsDestroyDataset(ctx, s.zfsRunner, targetDataset); err != nil {
-		cleanupErrs = append(cleanupErrs, fmt.Errorf("destroy cloned dataset %s: %w", targetDataset, err))
-	}
-	if removeService && len(cleanupErrs) == 0 {
-		if _, err := s.cfg.DB.MutateData(func(d *db.Data) error {
+	if removeService {
+		_, err := mutateRecoveryCloneData(s.cfg.DB, func(d *db.Data) error {
 			service, ok := d.Services[serviceName]
 			if ok && recoveryCloneServiceMatchesTarget(service, targetDataset) {
 				delete(d.Services, serviceName)
 			}
 			return nil
-		}); err != nil {
-			cleanupErrs = append(cleanupErrs, fmt.Errorf("remove cloned service %q: %w", serviceName, err))
+		})
+		if err != nil {
+			removeErr := fmt.Errorf("remove cloned service %q: %w", serviceName, err)
+			cleanupErrs = append(cleanupErrs, removeErr)
+			if !dbMutationCommitted(removeErr) {
+				return fmt.Errorf("%w; cleanup failed: %w", cause, errors.Join(cleanupErrs...))
+			}
 		}
+	}
+	if err := zfsDestroyDataset(ctx, s.zfsRunner, targetDataset); err != nil {
+		cleanupErrs = append(cleanupErrs, fmt.Errorf("destroy cloned dataset %s: %w", targetDataset, err))
 	}
 	if cleanupErr := errors.Join(cleanupErrs...); cleanupErr != nil {
 		return fmt.Errorf("%w; cleanup failed: %w", cause, cleanupErr)

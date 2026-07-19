@@ -77,6 +77,10 @@ func rewriteHostStorageVMPaths(serviceName string, vm *db.VMConfig, mappings, se
 	if err != nil {
 		return changed, err
 	}
+	runtimeChanged, err := rewriteHostStorageVMRuntimePaths(serviceName, vm.Components, mappings)
+	if err != nil {
+		return changed, err
+	}
 	serviceChanged, err := rewriteHostStorageVMFields(serviceName, serviceScopedMappings, []hostStorageRewriteField{
 		{name: "VM.Disk.Path", value: &vm.Disk.Path},
 		{name: "VM.Console.SocketPath", value: &vm.Console.SocketPath},
@@ -85,7 +89,36 @@ func rewriteHostStorageVMPaths(serviceName string, vm *db.VMConfig, mappings, se
 		{name: "VM.Sockets.VsockSocketPath", value: &vm.Sockets.VsockSocketPath},
 		{name: "VM.PIDFile", value: &vm.PIDFile},
 	})
-	return changed + serviceChanged, err
+	return changed + runtimeChanged + serviceChanged, err
+}
+
+func rewriteHostStorageVMRuntimePaths(serviceName string, components *db.VMComponentsConfig, mappings hostStoragePathMappings) (int, error) {
+	if components == nil {
+		return 0, nil
+	}
+	artifacts := []struct {
+		name     string
+		artifact *db.VMRuntimeArtifactConfig
+	}{
+		{name: "Configured", artifact: &components.Runtime.Configured},
+		{name: "Staged", artifact: components.Runtime.Staged},
+		{name: "Previous", artifact: components.Runtime.Previous},
+	}
+	var changed int
+	for _, candidate := range artifacts {
+		if candidate.artifact == nil {
+			continue
+		}
+		artifactChanged, err := rewriteHostStorageVMFields(serviceName, mappings, []hostStorageRewriteField{
+			{name: "VM.Components.Runtime." + candidate.name + ".Firecracker", value: &candidate.artifact.Firecracker},
+			{name: "VM.Components.Runtime." + candidate.name + ".Jailer", value: &candidate.artifact.Jailer},
+		})
+		changed += artifactChanged
+		if err != nil {
+			return changed, err
+		}
+	}
+	return changed, nil
 }
 
 type hostStorageRewriteField struct {

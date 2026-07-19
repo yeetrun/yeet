@@ -98,6 +98,19 @@ type Server struct {
 	hostStorageMutationBlock           error
 	hostStorageRecovery                *hostStorageTransaction
 	newISORemoveSteps                  func(string, RemoveOptions, *RemoveReport, string) (isoRemoveSteps, error)
+	recoverVMRuntimeState              func(context.Context, *Config) error
+	acquireCatchInstallLock            func(context.Context, string) (io.Closer, error)
+	vmRuntimeCommandDeps    *vmRuntimeCommandDeps
+	vmRuntimePruneDeps      *vmRuntimePruneDeps
+	vmRuntimeReconcileDeps  *vmRuntimeReconcileDeps
+	vmRuntimeTrialDeps      *vmRuntimeTrialConsumerDeps
+	vmRuntimeRestartDeps    *vmRuntimeRestartDeps
+	vmRuntimeRestartLocks   sync.Map
+}
+
+type vmRuntimeRecoveryBarrier struct {
+	done chan struct{}
+	err  error
 }
 
 type EventListener struct {
@@ -204,6 +217,10 @@ func NewUnstartedServer(config *Config) *Server {
 		root := s.serviceRootFromView(sv)
 		return svc.NewDockerComposeService(s.cfg.DB, sv, serviceDataDirForRoot(root), serviceRunDirForRoot(root))
 	}
+	s.recoverVMRuntimeState = RecoverVMRuntimeAdoptions
+	s.acquireCatchInstallLock = func(ctx context.Context, dataRoot string) (io.Closer, error) {
+		return AcquireCatchInstallTransactionLock(ctx, dataRoot, uint32(os.Geteuid()))
+	}
 	return s
 }
 
@@ -238,16 +255,40 @@ func (s *Server) Start() {
 		panic("server already started")
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	if s.recoverVMRuntimeState == nil {
+		s.recoverVMRuntimeState = RecoverVMRuntimeAdoptions
+	}
+	if s.acquireCatchInstallLock == nil {
+		s.acquireCatchInstallLock = func(ctx context.Context, dataRoot string) (io.Closer, error) {
+			return AcquireCatchInstallTransactionLock(ctx, dataRoot, uint32(os.Geteuid()))
+		}
+	}
+	runtimeRecovery := &vmRuntimeRecoveryBarrier{done: make(chan struct{})}
+	s.waitGroup.Go(func() {
+		defer close(runtimeRecovery.done)
+		runtimeRecovery.err = s.recoverVMRuntimeStateAfterInstall(s.ctx)
+		logRuntimeReconcileError("VM runtime adoption recovery failed", runtimeRecovery.err)
+	})
 	s.waitGroup.Go(s.monitorSystemd)
 	s.waitGroup.Go(s.monitorDocker)
 	s.waitGroup.Go(s.heartbeat)
 	s.waitGroup.Go(func() {
+		if !runtimeRecovery.Wait(s.ctx) {
+			return
+		}
 		s.runVMBalloonController(s.ctx)
 	})
 	if err := s.prepareNetworkRuntime(s.ctx); err != nil {
 		log.Fatalf("Failed to prepare network runtime: %v", err)
 	}
-	s.waitGroup.Go(s.reconcileRuntimeState)
+	s.waitGroup.Go(func() {
+		if !runtimeRecovery.Wait(s.ctx) {
+			return
+		}
+		logRuntimeReconcileError("VM runtime trial-result startup reconciliation failed", s.consumeVMRuntimeTrialResults(s.ctx))
+		s.reconcileRuntimeState()
+		s.runVMRuntimeTrialWatcher(s.ctx)
+	})
 }
 
 func (s *Server) prepareNetworkRuntime(ctx context.Context) error {
@@ -341,7 +382,26 @@ func waitForISODockerRetry(ctx context.Context, retry <-chan time.Time) error {
 	}
 }
 
+func (s *Server) recoverVMRuntimeStateAfterInstall(ctx context.Context) (retErr error) {
+	installLock, err := s.acquireCatchInstallLock(ctx, s.cfg.RootDir)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, installLock.Close()) }()
+	return s.recoverVMRuntimeState(ctx, &s.cfg)
+}
+
+func (b *vmRuntimeRecoveryBarrier) Wait(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-b.done:
+		return ctx.Err() == nil && b.err == nil
+	}
+}
+
 func (s *Server) reconcileRuntimeState() {
+	logRuntimeReconcileError("VM runtime state reconciliation failed", s.reconcileVMRuntimeState(s.ctx))
 	logRuntimeReconcileError("tailscale DNS config reconciliation failed", s.reconcileTailscaleDNSConfigs(s.ctx))
 	logRuntimeReconcileError("tailscale resolver isolation reconciliation failed", s.reconcileTailscaleResolverIsolation(s.ctx))
 	logRuntimeReconcileError("netns reconciliation failed", s.reconcileNetNSBackedDockerServices(s.ctx))
@@ -1253,6 +1313,16 @@ func (s *Server) RemoveServiceWithOptions(name string, opts RemoveOptions) (*Rem
 }
 
 func (s *Server) removeServiceWithOptionsUnlocked(name string, opts RemoveOptions) (*RemoveReport, error) {
+	var report *RemoveReport
+	err := WithVMRuntimeTransactionLock(context.Background(), &s.cfg, func() error {
+		var err error
+		report, err = s.removeServiceWithOptionsLocked(name, opts)
+		return err
+	})
+	return report, err
+}
+
+func (s *Server) removeServiceWithOptionsLocked(name string, opts RemoveOptions) (*RemoveReport, error) {
 	doneRemove := removeTraceBlock(opts, "remove service")
 	defer doneRemove()
 	report := &RemoveReport{}
@@ -1383,17 +1453,55 @@ func (s *Server) cleanupVMJailForRemoval(report *RemoveReport, name string) {
 	if service.ServiceType != db.ServiceTypeVM || service.VM == nil {
 		return
 	}
-	rootFS := strings.TrimSpace(service.VM.Image.RootFS)
-	if !filepath.IsAbs(rootFS) {
+	root := serviceRootFromConfig(s.cfg, *service)
+	firecracker, err := vmRemovalFirecrackerPathForRoot(service, root, 0, 0)
+	if err != nil {
+		report.addWarning(fmt.Errorf("failed to resolve VM runtime for jail cleanup for %q: %w", name, err))
 		return
 	}
-	plan := newVMJailCleanupPlan(name, filepath.Join(filepath.Dir(rootFS), "firecracker"), vmJailerBaseForDataRoot(s.cfg.RootDir), []string{
+	if firecracker == "" {
+		return
+	}
+	plan := newVMJailCleanupPlan(name, firecracker, vmJailerBaseForDataRoot(s.cfg.RootDir), []string{
 		service.VM.Sockets.APISocketPath,
 		service.VM.Sockets.VsockSocketPath,
 	})
 	if err := vmRemovalJailCleanup(plan); err != nil {
 		report.addWarning(fmt.Errorf("failed to clean up VM jail for %q: %w", name, err))
 	}
+}
+
+func vmRemovalFirecrackerPath(service *db.Service) (string, error) {
+	if service == nil || service.VM == nil {
+		return "", fmt.Errorf("VM configuration is missing")
+	}
+	if service.VM.Components == nil {
+		return "", nil
+	}
+	configured := service.VM.Components.Runtime.Configured
+	if err := validateVMRuntimeArtifact(configured, "configured"); err != nil {
+		return "", err
+	}
+	return configured.Firecracker, nil
+}
+
+func vmRemovalFirecrackerPathForRoot(service *db.Service, serviceRoot string, uid, gid uint32) (string, error) {
+	if service == nil || service.VM == nil {
+		return "", fmt.Errorf("VM configuration is missing")
+	}
+	if service.VM.Components == nil {
+		return "", nil
+	}
+	markerPath := filepath.Join(serviceRunDirForRoot(serviceRoot), vmRuntimeRunningMarkerFileName)
+	if marker, err := readTrustedVMRuntimeRunningMarker(markerPath, service.Name, uid, gid); err == nil {
+		if artifact, _, ok := matchVMRuntimeRunningMarker(marker, service.VM.Components.Runtime); ok {
+			if err := validateVMRuntimeArtifact(artifact, "running"); err != nil {
+				return "", err
+			}
+			return artifact.Firecracker, nil
+		}
+	}
+	return vmRemovalFirecrackerPath(service)
 }
 
 func removeTrace(opts RemoveOptions, format string, args ...any) {

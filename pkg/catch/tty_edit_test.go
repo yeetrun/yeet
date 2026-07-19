@@ -457,6 +457,59 @@ func TestEditCmdFuncAppliesChangedConfigWithInstallHook(t *testing.T) {
 	}
 }
 
+func TestApplyEditedConfigRejectsVMBeforeMutation(t *testing.T) {
+	server := newTestServer(t)
+	components := &db.VMComponentsConfig{
+		GuestBase: db.VMGuestBaseConfig{ID: "guest-current"},
+		Kernel:    db.VMKernelArtifactConfig{ID: "kernel-current", Path: "/srv/current-vmlinux"},
+		Runtime:   db.VMRuntimeLifecycleConfig{Configured: db.VMRuntimeArtifactConfig{ID: "runtime-current"}},
+	}
+	current := db.Service{
+		Name: "vm-edit", ServiceType: db.ServiceTypeVM, Generation: 1,
+		VM: &db.VMConfig{Image: db.VMImageConfig{Kernel: "/srv/current-vmlinux"}, Components: components.Clone()},
+	}
+	if _, _, err := server.cfg.DB.MutateService("vm-edit", func(_ *db.Data, service *db.Service) error {
+		*service = *current.Clone()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	edited := current.Clone()
+	edited.Generation = 2
+	edited.VM.Components = nil
+	edited.VM.Image.Kernel = "/srv/invented-vmlinux"
+	raw, err := json.Marshal(edited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "vm-edit.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	execer := &ttyExecer{
+		s: server, sn: "vm-edit", rw: &bytes.Buffer{},
+		serviceInstallGenFunc: func(InstallerCfg, int) error { return nil },
+	}
+	if err := execer.applyEditedConfig(path, current.Clone()); err == nil || !strings.Contains(err.Error(), "VM-specific commands") {
+		t.Fatalf("applyEditedConfig error = %v, want VM-specific command rejection", err)
+	}
+
+	stored, err := server.serviceView("vm-edit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := stored.AsStruct()
+	if got.Generation != 1 {
+		t.Fatalf("generation = %d, want unchanged generation 1", got.Generation)
+	}
+	if !reflect.DeepEqual(got.VM.Components, components) {
+		t.Fatalf("components = %#v, want current %#v", got.VM.Components, components)
+	}
+	if got.VM.Image.Kernel != "/srv/current-vmlinux" {
+		t.Fatalf("compatibility kernel = %q, want current value", got.VM.Image.Kernel)
+	}
+}
+
 func TestEditFileRequiresPTYBeforeRunningCommand(t *testing.T) {
 	execer := &ttyExecer{isPty: false}
 	err := execer.editFile("/tmp/service")
@@ -552,7 +605,7 @@ func TestInstallEditedFileReturnsOpenError(t *testing.T) {
 
 func TestApplyEditedConfigReturnsReadAndJSONErrors(t *testing.T) {
 	execer := &ttyExecer{}
-	err := execer.applyEditedConfig(filepath.Join(t.TempDir(), "missing.json"))
+	err := execer.applyEditedConfig(filepath.Join(t.TempDir(), "missing.json"), nil)
 	if err == nil || !strings.Contains(err.Error(), "failed to read temp file") {
 		t.Fatalf("applyEditedConfig read error = %v, want read failure", err)
 	}
@@ -561,7 +614,7 @@ func TestApplyEditedConfigReturnsReadAndJSONErrors(t *testing.T) {
 	if err := os.WriteFile(tmp, []byte("{bad json"), 0o644); err != nil {
 		t.Fatalf("write bad json: %v", err)
 	}
-	err = execer.applyEditedConfig(tmp)
+	err = execer.applyEditedConfig(tmp, nil)
 	if err == nil || !strings.Contains(err.Error(), "failed to unmarshal temp file") {
 		t.Fatalf("applyEditedConfig json error = %v, want unmarshal failure", err)
 	}

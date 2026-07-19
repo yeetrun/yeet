@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -46,40 +45,6 @@ func delegateVMJailStorageFile(path string, identity vmRuntimeIdentity) error {
 		return err
 	}
 	return verifyVMJailStorageEntryUnchanged(parent, name, file, path)
-}
-
-func delegateOpenedVMJailStorageTree(parent *os.File, name string, file *os.File, path string, info os.FileInfo, identity vmRuntimeIdentity) error {
-	if err := mutateVMJailStorageFile(file, path, info, identity); err != nil {
-		return err
-	}
-	if err := verifyVMJailStorageEntryUnchanged(parent, name, file, path); err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return nil
-	}
-
-	names, err := file.Readdirnames(-1)
-	if err != nil {
-		return fmt.Errorf("read VM jail storage directory %s: %w", path, err)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		childPath := filepath.Join(path, name)
-		child, childInfo, err := openVerifiedVMJailStorageChild(file, name, childPath)
-		if err != nil {
-			return err
-		}
-		err = delegateOpenedVMJailStorageTree(file, name, child, childPath, childInfo, identity)
-		closeErr := child.Close()
-		if err != nil {
-			return err
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close VM jail storage %s: %w", childPath, closeErr)
-		}
-	}
-	return nil
 }
 
 func mutateVMJailStorageFile(file *os.File, path string, info os.FileInfo, identity vmRuntimeIdentity) error {

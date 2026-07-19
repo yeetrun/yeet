@@ -19,6 +19,12 @@ func (s *Server) cloneRecoveryPoint(ctx context.Context, serviceName, selector, 
 	if err := validateRecoveryCloneServiceName(newServiceName); err != nil {
 		return err
 	}
+	return WithVMRuntimeTransactionLock(ctx, &s.cfg, func() error {
+		return s.cloneRecoveryPointLocked(ctx, serviceName, selector, newServiceName, flags, w)
+	})
+}
+
+func (s *Server) cloneRecoveryPointLocked(ctx context.Context, serviceName, selector, newServiceName string, flags cli.SnapshotsCloneFlags, w io.Writer) error {
 	initialService, err := s.recoveryService(serviceName)
 	if err != nil {
 		return err
@@ -32,6 +38,9 @@ func (s *Server) cloneRecoveryPoint(ctx context.Context, serviceName, selector, 
 	}
 	if service.ServiceType != db.ServiceTypeVM {
 		return s.cloneServiceRootRecoveryPoint(ctx, service, point, newServiceName, flags, w)
+	}
+	if service.VM != nil && service.VM.Components != nil {
+		return fmt.Errorf("cannot clone adopted VM %q until component-aware recovery cloning is available", service.Name)
 	}
 	return s.cloneVMRecoveryPoint(ctx, service, point, newServiceName, flags, w)
 }

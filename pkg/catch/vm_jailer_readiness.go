@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -15,6 +16,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 type vmJailerReadiness string
@@ -70,12 +73,49 @@ func vmJailerReadinessMarkerPath(root string) string {
 }
 
 func vmJailerReadinessForRoot(root string) (vmJailerReadiness, error) {
-	raw, err := os.ReadFile(vmJailerReadinessMarkerPath(root))
+	return vmJailerReadinessForRootWithOwner(root, uint32(os.Geteuid()), uint32(os.Getegid()))
+}
+
+func vmJailerReadinessForRootWithOwner(root string, uid, gid uint32) (vmJailerReadiness, error) {
+	path := vmJailerReadinessMarkerPath(root)
+	dir, err := openValidatedVMRuntimeDescriptorDir(filepath.Dir(path), uid)
 	if errors.Is(err, os.ErrNotExist) {
 		return vmJailerPendingRestart, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("read VM jailer readiness: %w", err)
+		return "", fmt.Errorf("open VM jailer readiness parent: %w", err)
+	}
+	defer func() { _ = dir.Close() }()
+	fd, err := unix.Openat(int(dir.Fd()), filepath.Base(path), unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ENOENT) {
+		return vmJailerPendingRestart, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("open VM jailer readiness without following symlinks: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), path)
+	if file == nil {
+		_ = unix.Close(fd)
+		return "", fmt.Errorf("bind VM jailer readiness file descriptor")
+	}
+	return readVMJailerReadinessMarker(dir, file, path, uid, gid)
+}
+
+func readVMJailerReadinessMarker(dir, file *os.File, path string, uid, gid uint32) (vmJailerReadiness, error) {
+	id, stat, err := validateOpenVMRuntimeMarker(file, uid, gid)
+	if err != nil {
+		return "", closeVMJailerFileOnError(file, err)
+	}
+	raw, readErr := io.ReadAll(io.LimitReader(file, 65))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil {
+		return "", errors.Join(readErr, closeErr)
+	}
+	if len(raw) > 64 {
+		return "", fmt.Errorf("VM jailer readiness marker is too large")
+	}
+	if err := validateVMRuntimeDescriptorName(dir, filepath.Base(path), id, stat, uid, gid); err != nil {
+		return "", fmt.Errorf("VM jailer readiness marker changed while it was read: %w", err)
 	}
 	if strings.TrimSpace(string(raw)) != string(vmJailerReady) {
 		return "", fmt.Errorf("unsupported VM jailer readiness marker %q", strings.TrimSpace(string(raw)))

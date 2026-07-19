@@ -166,7 +166,7 @@ func (i vmImageCatalogImage) validateRuntimeMetadata(payload string) error {
 	return nil
 }
 
-func validateTrustedVMImageRepoURL(rawURL, kind string) error {
+func validateTrustedYeetVMArtifactURL(rawURL, kind string) error {
 	u, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil {
 		return fmt.Errorf("parse VM image %s URL: %w", kind, err)
@@ -191,6 +191,12 @@ func validateTrustedVMImageRepoURL(rawURL, kind string) error {
 		return fmt.Errorf("untrusted VM image %s URL %q", kind, rawURL)
 	}
 	return nil
+}
+
+// validateTrustedVMImageRepoURL preserves the image-specific helper name for
+// existing callers while runtime and image artifacts share one trust root.
+func validateTrustedVMImageRepoURL(rawURL, kind string) error {
+	return validateTrustedYeetVMArtifactURL(rawURL, kind)
 }
 
 func trustedVMImageRepoPath(u *url.URL) (string, error) {

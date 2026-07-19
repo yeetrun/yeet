@@ -1595,6 +1595,91 @@ func TestRunVMCleansSystemdWhenCommitFailsAfterInstall(t *testing.T) {
 	}
 }
 
+func TestRunVMPreservesPublishedVMWhenCommitReturnsDurabilityWarning(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, systemdDir, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
+	var out bytes.Buffer
+	execer.rw = &out
+	readinessCalled := false
+	vmProvisionGuestReadyWaitFunc = func(context.Context, vmGuestReadyWaitInput) (vmGuestReadyReport, error) {
+		readinessCalled = true
+		return vmGuestReadyReport{}, nil
+	}
+	var networkCommands [][]string
+	vmProvisionNetworkRunner = func(command []string) error {
+		networkCommands = append(networkCommands, append([]string(nil), command...))
+		return nil
+	}
+	injected := errors.New("database parent sync failed")
+	vmProvisionCommitFunc = func(e *ttyExecer, plan vmProvisionPlan, payload string, flags *cli.ServiceSetFlags) error {
+		if err := e.commitVMProvision(plan, payload, flags); err != nil {
+			return err
+		}
+		return &db.PostPublicationError{Err: injected, MutationCommitted: true}
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc", Restart: true}, testUbuntuVMPayload)
+	if !errors.Is(err, injected) {
+		t.Fatalf("runVM error = %v, want durability warning", err)
+	}
+	var publishedErr *db.PostPublicationError
+	if !errors.As(err, &publishedErr) || !publishedErr.MutationCommitted {
+		t.Fatalf("runVM error = %v, want committed *db.PostPublicationError", err)
+	}
+	assertReadyVM(t, server, "svc")
+	if containsCommandPrefix(networkCommands, []string{"ip", "link", "del"}) {
+		t.Fatalf("network cleanup ran after published VM commit: %#v", networkCommands)
+	}
+	unitPath := filepath.Join(systemdDir, vmSystemdUnitName("svc"))
+	if _, statErr := os.Stat(unitPath); statErr != nil {
+		t.Fatalf("published VM unit stat = %v, want installed unit", statErr)
+	}
+	if vmTestSystemctlCalled(*systemctlCalls, "disable", vmSystemdUnitName("svc")) {
+		t.Fatalf("systemd disable ran after published VM commit: %#v", *systemctlCalls)
+	}
+	if !vmTestSystemctlCalled(*systemctlCalls, "restart", vmSystemdUnitName("svc")) || !readinessCalled {
+		t.Fatalf("default start/readiness path did not continue after durability warning: calls=%#v readiness=%t", *systemctlCalls, readinessCalled)
+	}
+	for _, unwanted := range []string{
+		"VM service was created, but readiness did not complete.",
+		"Console  yeet vm console svc",
+		"Logs     yeet logs svc",
+	} {
+		if strings.Contains(out.String(), unwanted) {
+			t.Fatalf("successful readiness after commit warning printed failure recovery %q:\n%s", unwanted, out.String())
+		}
+	}
+}
+
+func TestRunVMJoinsCommitDurabilityWarningWithLaterReadinessFailure(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, systemctlCalls := newVMProvisionTestExecer(t, server, "svc")
+	commitWarning := errors.New("database parent sync failed")
+	readinessErr := errors.New("guest readiness failed")
+	vmProvisionCommitFunc = func(e *ttyExecer, plan vmProvisionPlan, payload string, flags *cli.ServiceSetFlags) error {
+		if err := e.commitVMProvision(plan, payload, flags); err != nil {
+			return err
+		}
+		return &db.PostPublicationError{Err: commitWarning, MutationCommitted: true}
+	}
+	vmProvisionGuestReadyWaitFunc = func(context.Context, vmGuestReadyWaitInput) (vmGuestReadyReport, error) {
+		return vmGuestReadyReport{}, readinessErr
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc", Restart: true}, testUbuntuVMPayload)
+	if !errors.Is(err, commitWarning) || !errors.Is(err, readinessErr) {
+		t.Fatalf("runVM error = %v, want commit durability warning and readiness failure", err)
+	}
+	var publishedErr *db.PostPublicationError
+	if !errors.As(err, &publishedErr) || !publishedErr.MutationCommitted {
+		t.Fatalf("runVM error = %v, want committed *db.PostPublicationError", err)
+	}
+	if !vmTestSystemctlCalled(*systemctlCalls, "restart", vmSystemdUnitName("svc")) {
+		t.Fatalf("systemd restart missing after commit durability warning: %#v", *systemctlCalls)
+	}
+	assertReadyVM(t, server, "svc")
+}
+
 func TestRunVMRollsBackNewServiceReservationOnProvisionFailure(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")

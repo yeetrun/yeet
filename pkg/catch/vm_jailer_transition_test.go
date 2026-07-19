@@ -155,6 +155,48 @@ func TestNewVMJailerTransitionPlanUsesDatabasePaths(t *testing.T) {
 	}
 }
 
+func TestNewVMJailerTransitionPlanUsesAdoptedRuntimeDescriptor(t *testing.T) {
+	fixture := newVMJailerTransitionFixture(t)
+	runtimeDir := filepath.Join(fixture.DataRoot, "vm-runtimes", "v1")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	configured := db.VMRuntimeArtifactConfig{
+		ID: "runtime-v1", Firecracker: filepath.Join(runtimeDir, "firecracker"), Jailer: filepath.Join(runtimeDir, "jailer"),
+	}
+	for _, path := range []string{configured.Firecracker, configured.Jailer} {
+		if err := os.WriteFile(path, []byte(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dv := replaceVMJailerTransitionService(t, fixture, func(service *db.Service) {
+		service.VM.Components = &db.VMComponentsConfig{
+			GuestBase: db.VMGuestBaseConfig{ID: "guest"},
+			Kernel:    db.VMKernelArtifactConfig{ID: "kernel", Path: fixture.Kernel},
+			Runtime:   db.VMRuntimeLifecycleConfig{Configured: configured},
+		}
+	})
+	originalRead := readVMJailerTransitionRuntimeDescriptor
+	readVMJailerTransitionRuntimeDescriptor = func(path, service string) (db.VMRuntimeArtifactConfig, error) {
+		wantPath := filepath.Join(serviceDataDirForRoot(fixture.ServiceRoot), vmRuntimeDescriptorFileName)
+		if path != wantPath || service != fixture.Service {
+			t.Fatalf("descriptor read = %q/%q, want %q/%q", path, service, wantPath, fixture.Service)
+		}
+		return configured, nil
+	}
+	t.Cleanup(func() { readVMJailerTransitionRuntimeDescriptor = originalRead })
+
+	plan, err := newVMJailerTransitionPlan(dv, vmJailerTransitionInput{
+		DataRoot: fixture.DataRoot, Service: fixture.Service, ServiceRoot: fixture.ServiceRoot,
+	}, vmRuntimeIdentity{UID: 812, GID: 813})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Runtime.Firecracker != configured.Firecracker || plan.Runtime.Jailer != configured.Jailer {
+		t.Fatalf("adopted runtime paths = %q/%q, want %q/%q", plan.Runtime.Firecracker, plan.Runtime.Jailer, configured.Firecracker, configured.Jailer)
+	}
+}
+
 func TestNewVMJailerTransitionPlanUsesImageRootFSFallback(t *testing.T) {
 	fixture := newVMJailerTransitionFixture(t)
 	service := fixture.Data.Services().Get(fixture.Service).AsStruct()
@@ -182,36 +224,6 @@ func TestNewVMJailerTransitionPlanUsesImageRootFSFallback(t *testing.T) {
 	}
 	if plan.Disk != fixture.RootFS || plan.Runtime.DiskPath != fixture.RootFS {
 		t.Fatalf("fallback disk = %q/%q, want %q", plan.Disk, plan.Runtime.DiskPath, fixture.RootFS)
-	}
-}
-
-func TestNewVMJailerTransitionPlanRejectsCheckpointSymlink(t *testing.T) {
-	fixture := newVMJailerTransitionFixture(t)
-	checkpointDir := filepath.Join(serviceDataDirForRoot(fixture.ServiceRoot), "checkpoints", "full")
-	if err := os.MkdirAll(checkpointDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(fixture.Disk, filepath.Join(checkpointDir, "memory.bin")); err != nil {
-		t.Fatal(err)
-	}
-	oldChown := vmJailStorageChown
-	mutated := false
-	vmJailStorageChown = func(*os.File, int, int) error {
-		mutated = true
-		return nil
-	}
-	t.Cleanup(func() { vmJailStorageChown = oldChown })
-
-	_, err := newVMJailerTransitionPlan(fixture.Data, vmJailerTransitionInput{
-		DataRoot:    fixture.DataRoot,
-		Service:     fixture.Service,
-		ServiceRoot: fixture.ServiceRoot,
-	}, vmRuntimeIdentity{UID: 812, GID: 813})
-	if err == nil || !strings.Contains(err.Error(), "symbolic link") {
-		t.Fatalf("newVMJailerTransitionPlan error = %v, want checkpoint symlink rejection", err)
-	}
-	if mutated {
-		t.Fatal("checkpoint validation mutated storage")
 	}
 }
 
@@ -337,35 +349,6 @@ func TestVMJailerTransitionRejectsRawDiskAncestorSymlinkWithoutMutation(t *testi
 	}})
 	dv := replaceVMJailerTransitionService(t, fixture, func(service *db.Service) {
 		service.VM.Disk.Path = linkedDisk
-	})
-
-	assertVMJailerTransitionEnsureRejectedWithoutMutation(t, fixture, dv, "symbolic link")
-}
-
-func TestVMJailerTransitionRejectsCheckpointAncestorSymlinkWithoutMutation(t *testing.T) {
-	fixture := newVMJailerTransitionFixture(t)
-	serviceData := serviceDataDirForRoot(fixture.ServiceRoot)
-	if err := os.RemoveAll(serviceData); err != nil {
-		t.Fatal(err)
-	}
-	external := filepath.Join(resolvedVMJailerTransitionTempDir(t), "external-data")
-	checkpoint := filepath.Join(external, "checkpoints", "full", "memory.bin")
-	if err := os.MkdirAll(filepath.Dir(checkpoint), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(checkpoint, []byte("checkpoint"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(external, serviceData); err != nil {
-		t.Fatal(err)
-	}
-	writeVMJailerTransitionFirecrackerConfig(t, fixture, []firecrackerDrive{{
-		DriveID:      "rootfs",
-		PathOnHost:   fixture.RootFS,
-		IsRootDevice: true,
-	}})
-	dv := replaceVMJailerTransitionService(t, fixture, func(service *db.Service) {
-		service.VM.Disk.Path = ""
 	})
 
 	assertVMJailerTransitionEnsureRejectedWithoutMutation(t, fixture, dv, "symbolic link")

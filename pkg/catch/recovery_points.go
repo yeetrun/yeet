@@ -6,11 +6,8 @@ package catch
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -25,7 +22,6 @@ const (
 	recoveryStorageVMZVOL      = "vm-zvol"
 	recoveryModeServiceRoot    = "service-root"
 	recoveryModeDisk           = "disk"
-	recoveryModeFull           = "full"
 )
 
 type recoveryPoint struct {
@@ -42,8 +38,6 @@ type recoveryPoint struct {
 	Comment     string    `json:"comment,omitempty"`
 	Mode        string    `json:"mode"`
 	Protected   bool      `json:"protected"`
-	StatePath   string    `json:"statePath,omitempty"`
-	MemoryPath  string    `json:"memoryPath,omitempty"`
 	Actions     []string  `json:"actions"`
 	Retention   string    `json:"retention"`
 }
@@ -142,9 +136,6 @@ func (s *Server) createRecoveryPoint(ctx context.Context, serviceName string, fl
 }
 
 func (s *Server) createServiceRootRecoveryPoint(ctx context.Context, service *db.Service, flags cli.SnapshotsCreateFlags, w io.Writer) error {
-	if flags.Full {
-		return fmt.Errorf("--full is only supported for VM recovery points")
-	}
 	target, ok, err := recoveryTargetForService(service)
 	if err != nil {
 		return fmt.Errorf("service %q is not a supported recovery target: %w", service.Name, err)
@@ -196,7 +187,7 @@ func (s *Server) setRecoveryPointProtected(ctx context.Context, serviceName, sel
 }
 
 func (s *Server) removeRecoveryPoint(ctx context.Context, serviceName, selector string, yes bool, rw io.ReadWriter) error {
-	point, service, err := s.resolveRecoveryPoint(ctx, serviceName, selector)
+	point, _, err := s.resolveRecoveryPoint(ctx, serviceName, selector)
 	if err != nil {
 		return err
 	}
@@ -215,11 +206,6 @@ func (s *Server) removeRecoveryPoint(ctx context.Context, serviceName, selector 
 	}
 	if err := destroySnapshot(ctx, s.zfsRunner, point.Name); err != nil {
 		return err
-	}
-	if point.ServiceType == string(db.ServiceTypeVM) && point.Mode == recoveryModeFull {
-		if err := s.pruneVMCheckpointDirsForSnapshots(service, []string{point.Name}); err != nil {
-			return fmt.Errorf("remove VM checkpoint files for %s: %w", point.ShortName, err)
-		}
 	}
 	writef(rw, "Removed recovery point: %s\n", point.Name)
 	return nil
@@ -286,9 +272,7 @@ func (s *Server) listRecoveryPointsForService(ctx context.Context, service *db.S
 		if !isRecoverySnapshotForTarget(snap, target) {
 			continue
 		}
-		point := recoveryPointFromSnapshot(target, snap)
-		s.enrichFullVMRecoveryPoint(service, &point)
-		points = append(points, point)
+		points = append(points, recoveryPointFromSnapshot(target, snap))
 	}
 	return points, nil
 }
@@ -337,83 +321,6 @@ func recoveryPointGeneration(target recoveryTarget, snap listedSnapshot) *int {
 	}
 	gen := *snap.Generation
 	return &gen
-}
-
-func (s *Server) enrichFullVMRecoveryPoint(service *db.Service, point *recoveryPoint) {
-	if service == nil || !isFullVMRecoveryPoint(point) {
-		return
-	}
-
-	dir := vmCheckpointDir(s.serviceRootFromService(service), point.ShortName)
-	if metadata, ok := readVMCheckpointMetadata(filepath.Join(dir, "metadata.json"), service.Name, point.Name); ok {
-		applyVMCheckpointMetadata(point, metadata)
-	}
-	fillMissingCheckpointPaths(point, dir)
-}
-
-func isFullVMRecoveryPoint(point *recoveryPoint) bool {
-	if point == nil {
-		return false
-	}
-	if point.ServiceType != string(db.ServiceTypeVM) {
-		return false
-	}
-	if point.StorageKind != recoveryStorageVMZVOL {
-		return false
-	}
-	return point.Mode == recoveryModeFull
-}
-
-func applyVMCheckpointMetadata(point *recoveryPoint, metadata vmCheckpointMetadata) {
-	point.StatePath = strings.TrimSpace(metadata.FirecrackerState)
-	point.MemoryPath = strings.TrimSpace(metadata.FirecrackerMemory)
-}
-
-func fillMissingCheckpointPaths(point *recoveryPoint, dir string) {
-	if point.StatePath != "" && point.MemoryPath != "" {
-		return
-	}
-	fallbackState := filepath.Join(dir, "firecracker-state.bin")
-	fallbackMemory := filepath.Join(dir, "memory.bin")
-	if !checkpointFilesExist(fallbackState, fallbackMemory) {
-		return
-	}
-	if point.StatePath == "" {
-		point.StatePath = fallbackState
-	}
-	if point.MemoryPath == "" {
-		point.MemoryPath = fallbackMemory
-	}
-}
-
-func readVMCheckpointMetadata(path string, serviceName string, snapshotName string) (vmCheckpointMetadata, bool) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		return vmCheckpointMetadata{}, false
-	}
-	var metadata vmCheckpointMetadata
-	if err := json.Unmarshal(raw, &metadata); err != nil {
-		return vmCheckpointMetadata{}, false
-	}
-	if strings.TrimSpace(metadata.CreatedBy) != "catch" ||
-		strings.TrimSpace(metadata.Service) != serviceName ||
-		strings.TrimSpace(metadata.ZVOLSnapshot) != snapshotName {
-		return vmCheckpointMetadata{}, false
-	}
-	return metadata, true
-}
-
-func checkpointFilesExist(statePath string, memoryPath string) bool {
-	if strings.TrimSpace(statePath) == "" || strings.TrimSpace(memoryPath) == "" {
-		return false
-	}
-	if _, err := os.Stat(statePath); err != nil {
-		return false
-	}
-	if _, err := os.Stat(memoryPath); err != nil {
-		return false
-	}
-	return true
 }
 
 func recoveryRetentionLabel(protected bool) string {

@@ -13,7 +13,7 @@ import (
 	"tailscale.com/types/views"
 )
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,ServiceIdentity,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,ServiceIdentity,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent,VMGuestBaseConfig,VMKernelArtifactConfig,VMRuntimeArtifactConfig,VMRuntimeTrialConfig,VMRuntimeLifecycleConfig,VMComponentsConfig
 
 // View returns a read-only view of Data.
 func (p *Data) View() DataView {
@@ -1064,6 +1064,7 @@ func (v *VMConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 
 func (v VMConfigView) Runtime() string                        { return v.ж.Runtime }
 func (v VMConfigView) Image() VMImageConfig                   { return v.ж.Image }
+func (v VMConfigView) Components() VMComponentsConfigView     { return v.ж.Components.View() }
 func (v VMConfigView) CPUs() int                              { return v.ж.CPUs }
 func (v VMConfigView) MemoryBytes() int64                     { return v.ж.MemoryBytes }
 func (v VMConfigView) Balloon() VMBalloonConfig               { return v.ж.Balloon }
@@ -1079,6 +1080,7 @@ func (v VMConfigView) SetupState() string                     { return v.ж.Setu
 var _VMConfigViewNeedsRegeneration = VMConfig(struct {
 	Runtime     string
 	Image       VMImageConfig
+	Components  *VMComponentsConfig
 	CPUs        int
 	MemoryBytes int64
 	Balloon     VMBalloonConfig
@@ -1726,11 +1728,19 @@ func (v *VMHostConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
 	return nil
 }
 
-func (v VMHostConfigView) MemoryPolicy() string { return v.ж.MemoryPolicy }
+func (v VMHostConfigView) MemoryPolicy() string   { return v.ж.MemoryPolicy }
+func (v VMHostConfigView) RuntimePolicy() string  { return v.ж.RuntimePolicy }
+func (v VMHostConfigView) RuntimeChannel() string { return v.ж.RuntimeChannel }
+func (v VMHostConfigView) ProtectedRuntimeIDs() views.Slice[string] {
+	return views.SliceOf(v.ж.ProtectedRuntimeIDs)
+}
 
 // A compilation failure here means this code must be regenerated, with the command at the top of this file.
 var _VMHostConfigViewNeedsRegeneration = VMHostConfig(struct {
-	MemoryPolicy string
+	MemoryPolicy        string
+	RuntimePolicy       string
+	RuntimeChannel      string
+	ProtectedRuntimeIDs []string
 }{})
 
 // View returns a read-only view of ISOPool.
@@ -2009,4 +2019,500 @@ func (v ISOComponentView) State() string       { return v.ж.State }
 var _ISOComponentViewNeedsRegeneration = ISOComponent(struct {
 	Address netip.Addr
 	State   string
+}{})
+
+// View returns a read-only view of VMGuestBaseConfig.
+func (p *VMGuestBaseConfig) View() VMGuestBaseConfigView {
+	return VMGuestBaseConfigView{ж: p}
+}
+
+// VMGuestBaseConfigView provides a read-only view over VMGuestBaseConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMGuestBaseConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMGuestBaseConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMGuestBaseConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMGuestBaseConfigView) AsStruct() *VMGuestBaseConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMGuestBaseConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMGuestBaseConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMGuestBaseConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMGuestBaseConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMGuestBaseConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMGuestBaseConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMGuestBaseConfigView) ID() string               { return v.ж.ID }
+func (v VMGuestBaseConfigView) ManifestSHA256() string   { return v.ж.ManifestSHA256 }
+func (v VMGuestBaseConfigView) Source() string           { return v.ж.Source }
+func (v VMGuestBaseConfigView) RootFSProvenance() string { return v.ж.RootFSProvenance }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMGuestBaseConfigViewNeedsRegeneration = VMGuestBaseConfig(struct {
+	ID               string
+	ManifestSHA256   string
+	Source           string
+	RootFSProvenance string
+}{})
+
+// View returns a read-only view of VMKernelArtifactConfig.
+func (p *VMKernelArtifactConfig) View() VMKernelArtifactConfigView {
+	return VMKernelArtifactConfigView{ж: p}
+}
+
+// VMKernelArtifactConfigView provides a read-only view over VMKernelArtifactConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMKernelArtifactConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMKernelArtifactConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMKernelArtifactConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMKernelArtifactConfigView) AsStruct() *VMKernelArtifactConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMKernelArtifactConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMKernelArtifactConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMKernelArtifactConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMKernelArtifactConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMKernelArtifactConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMKernelArtifactConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMKernelArtifactConfigView) ID() string             { return v.ж.ID }
+func (v VMKernelArtifactConfigView) ManifestSHA256() string { return v.ж.ManifestSHA256 }
+func (v VMKernelArtifactConfigView) SHA256() string         { return v.ж.SHA256 }
+func (v VMKernelArtifactConfigView) Path() string           { return v.ж.Path }
+func (v VMKernelArtifactConfigView) Source() string         { return v.ж.Source }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMKernelArtifactConfigViewNeedsRegeneration = VMKernelArtifactConfig(struct {
+	ID             string
+	ManifestSHA256 string
+	SHA256         string
+	Path           string
+	Source         string
+}{})
+
+// View returns a read-only view of VMRuntimeArtifactConfig.
+func (p *VMRuntimeArtifactConfig) View() VMRuntimeArtifactConfigView {
+	return VMRuntimeArtifactConfigView{ж: p}
+}
+
+// VMRuntimeArtifactConfigView provides a read-only view over VMRuntimeArtifactConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMRuntimeArtifactConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMRuntimeArtifactConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMRuntimeArtifactConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMRuntimeArtifactConfigView) AsStruct() *VMRuntimeArtifactConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMRuntimeArtifactConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMRuntimeArtifactConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMRuntimeArtifactConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMRuntimeArtifactConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMRuntimeArtifactConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMRuntimeArtifactConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMRuntimeArtifactConfigView) ID() string                { return v.ж.ID }
+func (v VMRuntimeArtifactConfigView) ManifestSHA256() string    { return v.ж.ManifestSHA256 }
+func (v VMRuntimeArtifactConfigView) FirecrackerSHA256() string { return v.ж.FirecrackerSHA256 }
+func (v VMRuntimeArtifactConfigView) JailerSHA256() string      { return v.ж.JailerSHA256 }
+func (v VMRuntimeArtifactConfigView) Firecracker() string       { return v.ж.Firecracker }
+func (v VMRuntimeArtifactConfigView) Jailer() string            { return v.ж.Jailer }
+func (v VMRuntimeArtifactConfigView) Source() string            { return v.ж.Source }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMRuntimeArtifactConfigViewNeedsRegeneration = VMRuntimeArtifactConfig(struct {
+	ID                string
+	ManifestSHA256    string
+	FirecrackerSHA256 string
+	JailerSHA256      string
+	Firecracker       string
+	Jailer            string
+	Source            string
+}{})
+
+// View returns a read-only view of VMRuntimeTrialConfig.
+func (p *VMRuntimeTrialConfig) View() VMRuntimeTrialConfigView {
+	return VMRuntimeTrialConfigView{ж: p}
+}
+
+// VMRuntimeTrialConfigView provides a read-only view over VMRuntimeTrialConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMRuntimeTrialConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMRuntimeTrialConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMRuntimeTrialConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMRuntimeTrialConfigView) AsStruct() *VMRuntimeTrialConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMRuntimeTrialConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMRuntimeTrialConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMRuntimeTrialConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMRuntimeTrialConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMRuntimeTrialConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMRuntimeTrialConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMRuntimeTrialConfigView) State() string         { return v.ж.State }
+func (v VMRuntimeTrialConfigView) CandidateID() string   { return v.ж.CandidateID }
+func (v VMRuntimeTrialConfigView) PreviousID() string    { return v.ж.PreviousID }
+func (v VMRuntimeTrialConfigView) RecoveryPoint() string { return v.ж.RecoveryPoint }
+func (v VMRuntimeTrialConfigView) StartedAt() string     { return v.ж.StartedAt }
+func (v VMRuntimeTrialConfigView) LastError() string     { return v.ж.LastError }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMRuntimeTrialConfigViewNeedsRegeneration = VMRuntimeTrialConfig(struct {
+	State         string
+	CandidateID   string
+	PreviousID    string
+	RecoveryPoint string
+	StartedAt     string
+	LastError     string
+}{})
+
+// View returns a read-only view of VMRuntimeLifecycleConfig.
+func (p *VMRuntimeLifecycleConfig) View() VMRuntimeLifecycleConfigView {
+	return VMRuntimeLifecycleConfigView{ж: p}
+}
+
+// VMRuntimeLifecycleConfigView provides a read-only view over VMRuntimeLifecycleConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMRuntimeLifecycleConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMRuntimeLifecycleConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMRuntimeLifecycleConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMRuntimeLifecycleConfigView) AsStruct() *VMRuntimeLifecycleConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMRuntimeLifecycleConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMRuntimeLifecycleConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMRuntimeLifecycleConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMRuntimeLifecycleConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMRuntimeLifecycleConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMRuntimeLifecycleConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMRuntimeLifecycleConfigView) Policy() string                      { return v.ж.Policy }
+func (v VMRuntimeLifecycleConfigView) Channel() string                     { return v.ж.Channel }
+func (v VMRuntimeLifecycleConfigView) Configured() VMRuntimeArtifactConfig { return v.ж.Configured }
+func (v VMRuntimeLifecycleConfigView) Staged() VMRuntimeArtifactConfigView { return v.ж.Staged.View() }
+func (v VMRuntimeLifecycleConfigView) Previous() VMRuntimeArtifactConfigView {
+	return v.ж.Previous.View()
+}
+func (v VMRuntimeLifecycleConfigView) Trial() VMRuntimeTrialConfigView { return v.ж.Trial.View() }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMRuntimeLifecycleConfigViewNeedsRegeneration = VMRuntimeLifecycleConfig(struct {
+	Policy     string
+	Channel    string
+	Configured VMRuntimeArtifactConfig
+	Staged     *VMRuntimeArtifactConfig
+	Previous   *VMRuntimeArtifactConfig
+	Trial      *VMRuntimeTrialConfig
+}{})
+
+// View returns a read-only view of VMComponentsConfig.
+func (p *VMComponentsConfig) View() VMComponentsConfigView {
+	return VMComponentsConfigView{ж: p}
+}
+
+// VMComponentsConfigView provides a read-only view over VMComponentsConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type VMComponentsConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *VMComponentsConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v VMComponentsConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v VMComponentsConfigView) AsStruct() *VMComponentsConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v VMComponentsConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v VMComponentsConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *VMComponentsConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x VMComponentsConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *VMComponentsConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x VMComponentsConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v VMComponentsConfigView) GuestBase() VMGuestBaseConfig          { return v.ж.GuestBase }
+func (v VMComponentsConfigView) Kernel() VMKernelArtifactConfig        { return v.ж.Kernel }
+func (v VMComponentsConfigView) Runtime() VMRuntimeLifecycleConfigView { return v.ж.Runtime.View() }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _VMComponentsConfigViewNeedsRegeneration = VMComponentsConfig(struct {
+	GuestBase VMGuestBaseConfig
+	Kernel    VMKernelArtifactConfig
+	Runtime   VMRuntimeLifecycleConfig
 }{})

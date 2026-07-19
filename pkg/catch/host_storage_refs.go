@@ -444,7 +444,31 @@ func scanHostStorageDataRefs(data *db.Data, mappings hostStoragePathMappings) []
 			refs = appendHostStoragePathRef(refs, serviceName, "VM.Sockets.APISocketPath", service.VM.Sockets.APISocketPath, mappings)
 			refs = appendHostStoragePathRef(refs, serviceName, "VM.Sockets.VsockSocketPath", service.VM.Sockets.VsockSocketPath, mappings)
 			refs = appendHostStoragePathRef(refs, serviceName, "VM.PIDFile", service.VM.PIDFile, mappings)
+			refs = appendHostStorageVMRuntimeArtifactRefs(refs, serviceName, service.VM.Components, mappings)
 		}
+	}
+	return refs
+}
+
+func appendHostStorageVMRuntimeArtifactRefs(refs []hostStorageReference, serviceName string, components *db.VMComponentsConfig, mappings hostStoragePathMappings) []hostStorageReference {
+	if components == nil {
+		return refs
+	}
+	artifacts := []struct {
+		name     string
+		artifact *db.VMRuntimeArtifactConfig
+	}{
+		{name: "Configured", artifact: &components.Runtime.Configured},
+		{name: "Staged", artifact: components.Runtime.Staged},
+		{name: "Previous", artifact: components.Runtime.Previous},
+	}
+	for _, candidate := range artifacts {
+		if candidate.artifact == nil {
+			continue
+		}
+		prefix := "VM.Components.Runtime." + candidate.name
+		refs = appendHostStoragePathRef(refs, serviceName, prefix+".Firecracker", candidate.artifact.Firecracker, mappings)
+		refs = appendHostStoragePathRef(refs, serviceName, prefix+".Jailer", candidate.artifact.Jailer, mappings)
 	}
 	return refs
 }

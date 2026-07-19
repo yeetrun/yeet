@@ -42,7 +42,9 @@ var (
 	unmountVolume = func(e *ttyExecer, vol db.Volume) error {
 		return (&systemdMounter{e: e, v: vol}).umount()
 	}
-	dockerComposeUpdate = (*svc.DockerComposeService).Update
+	mutateMountVolumeData   = (*db.Store).MutateData
+	mutateUnmountVolumeData = (*db.Store).MutateDataWithPrePublicationCompensation
+	dockerComposeUpdate     = (*svc.DockerComposeService).Update
 )
 
 var snapshotCommandHandlers = map[string]func(*ttyExecer, []string) error{
@@ -494,14 +496,11 @@ func (e *ttyExecer) umountCmdFunc(args []string) error {
 	if err != nil {
 		return err
 	}
-	d, vol, err := e.unmountVolumeData(mountName)
+	vol, err := e.unmountVolumeData(mountName)
 	if err != nil {
 		return err
 	}
-	if err := unmountVolume(e, vol); err != nil {
-		return fmt.Errorf("failed to umount %s: %w", vol.Path, err)
-	}
-	return e.deleteUnmountedVolume(d, mountName)
+	return e.unmountAndDeleteVolume(vol, mountName)
 }
 
 func umountNameFromArgs(args []string) (string, error) {
@@ -511,21 +510,43 @@ func umountNameFromArgs(args []string) (string, error) {
 	return args[0], nil
 }
 
-func (e *ttyExecer) unmountVolumeData(mountName string) (*db.Data, db.Volume, error) {
+func (e *ttyExecer) unmountVolumeData(mountName string) (db.Volume, error) {
 	dv, err := e.s.cfg.DB.Get()
 	if err != nil {
-		return nil, db.Volume{}, fmt.Errorf("failed to get services: %w", err)
+		return db.Volume{}, fmt.Errorf("failed to get services: %w", err)
 	}
 	vol, ok := dv.Volumes().GetOk(mountName)
 	if !ok {
-		return nil, db.Volume{}, fmt.Errorf("volume %q not found", mountName)
+		return db.Volume{}, fmt.Errorf("volume %q not found", mountName)
 	}
-	return dv.AsStruct(), *vol.AsStruct(), nil
+	return *vol.AsStruct(), nil
 }
 
-func (e *ttyExecer) deleteUnmountedVolume(d *db.Data, mountName string) error {
-	delete(d.Volumes, mountName)
-	if err := e.s.cfg.DB.Set(d); err != nil {
+func (e *ttyExecer) unmountAndDeleteVolume(expected db.Volume, mountName string) error {
+	if _, err := mutateUnmountVolumeData(e.s.cfg.DB, func(d *db.Data) (func() error, error) {
+		current, ok := d.Volumes[mountName]
+		if !ok {
+			return nil, fmt.Errorf("volume %q not found", mountName)
+		}
+		if current == nil || *current != expected {
+			return nil, fmt.Errorf("volume %q changed before it could be unmounted", mountName)
+		}
+		if err := unmountVolume(e, expected); err != nil {
+			return nil, fmt.Errorf("failed to umount %s: %w", expected.Path, err)
+		}
+		compensate := func() error {
+			if err := mountVolume(expected); err != nil {
+				return fmt.Errorf("failed to remount %s after database update failure: %w", expected.Path, err)
+			}
+			return nil
+		}
+		current, ok = d.Volumes[mountName]
+		if !ok || current == nil || *current != expected {
+			return compensate, fmt.Errorf("volume %q changed while it was being unmounted", mountName)
+		}
+		delete(d.Volumes, mountName)
+		return compensate, nil
+	}); err != nil {
 		return fmt.Errorf("failed to save data: %w", err)
 	}
 	return nil
@@ -560,15 +581,7 @@ func (e *ttyExecer) mountCreateCmdFunc(flags cli.MountFlags, args []string) erro
 
 	opts := flags.Opts
 	target := filepath.Join(e.s.cfg.MountsRoot, mountName)
-	dv, err := e.s.cfg.DB.Get()
-	if err != nil {
-		return fmt.Errorf("failed to get services: %w", err)
-	}
-	if dv.Volumes().Contains(mountName) {
-		return fmt.Errorf("volume %q already exists; please remove it first", mountName)
-	}
 	deps := flags.Deps
-	d := dv.AsStruct()
 	vol := db.Volume{
 		Name: mountName,
 		Src:  source,
@@ -577,12 +590,25 @@ func (e *ttyExecer) mountCreateCmdFunc(flags cli.MountFlags, args []string) erro
 		Opts: opts,
 		Deps: strings.Join(deps, " "),
 	}
-	mak.Set(&d.Volumes, mountName, &vol)
-	if err := e.s.cfg.DB.Set(d); err != nil {
-		return fmt.Errorf("failed to save data: %w", err)
+	_, mutationErr := mutateMountVolumeData(e.s.cfg.DB, func(d *db.Data) error {
+		if _, ok := d.Volumes[mountName]; ok {
+			return fmt.Errorf("volume %q already exists; please remove it first", mountName)
+		}
+		mak.Set(&d.Volumes, mountName, &vol)
+		return nil
+	})
+	var commitWarning error
+	if mutationErr != nil {
+		if !dbMutationCommitted(mutationErr) {
+			return fmt.Errorf("failed to save data: %w", mutationErr)
+		}
+		commitWarning = fmt.Errorf("failed to durably save mounted volume: %w", mutationErr)
 	}
 	if err := mountVolume(vol); err != nil {
-		return fmt.Errorf("failed to mount %s at %s: %w", source, target, err)
+		return errors.Join(commitWarning, fmt.Errorf("failed to mount %s at %s: %w", source, target, err))
+	}
+	if commitWarning != nil {
+		return commitWarning
 	}
 
 	if _, err := fmt.Fprintf(e.rw, "Mounted %s at %s\n", source, target); err != nil {
