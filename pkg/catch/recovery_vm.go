@@ -23,12 +23,22 @@ import (
 )
 
 var (
-	vmRestoreTempSuffixFunc   = generateRandomSnapshotSuffix
-	vmRestoreCopyRunner       = copyVMRestoreZVOL
-	vmRestoreZVOLDeviceWaiter = waitForVMRestoreZVOLDevices
+	vmRestoreTempSuffixFunc    = generateRandomSnapshotSuffix
+	vmRestoreCopyRunner        = copyVMRestoreZVOL
+	vmRestoreZVOLDeviceWaiter  = waitForVMRestoreZVOLDevices
+	vmFullRestoreRuntimeStatus = func(runner *vmRunner) (svc.Status, error) {
+		return runner.Status()
+	}
+	vmFullRestoreMainPID = func(runner *vmRunner) (int, error) {
+		return systemdMainPID(runner.unit())
+	}
+	vmFullRestoreGuestReadyQuery = queryVMGuestReady
 
 	vmFullRestoreResultWaitTimeout  = 30 * time.Second
 	vmFullRestoreResultWaitInterval = 100 * time.Millisecond
+	vmFullRestoreStabilityWait      = 3 * time.Second
+	vmFullRestoreHealthWaitTimeout  = 30 * time.Second
+	vmFullRestoreHealthWaitInterval = 500 * time.Millisecond
 	vmRestoreZVOLDeviceWaitTimeout  = 10 * time.Second
 	vmRestoreZVOLDeviceWaitInterval = 50 * time.Millisecond
 )
@@ -419,33 +429,127 @@ func (s *Server) waitForFullVMStateRestore(ctx context.Context, service *db.Serv
 	deadline := time.Now().Add(vmFullRestoreResultWaitTimeout)
 	runner := &vmRunner{name: service.Name}
 	for {
-		done, err := pollFullVMStateRestore(ctx, runner, resultPath, preRestore, deadline)
-		if done || err != nil {
+		done, runnerPID, err := pollFullVMStateRestore(ctx, runner, resultPath, preRestore, deadline)
+		if err != nil {
 			return err
+		}
+		if done {
+			return waitForFullVMRestoreHealth(ctx, runner, service, runnerPID, preRestore)
 		}
 		time.Sleep(vmFullRestoreResultWaitInterval)
 	}
 }
 
-func pollFullVMStateRestore(ctx context.Context, runner *vmRunner, resultPath, preRestore string, deadline time.Time) (bool, error) {
+func waitForFullVMRestoreHealth(ctx context.Context, runner *vmRunner, service *db.Service, expectedRunnerPID int, preRestore string) error {
+	if err := waitForFullVMRestoreStability(ctx, runner, expectedRunnerPID, preRestore); err != nil {
+		return err
+	}
+	vsockSocket := strings.TrimSpace(service.VM.Sockets.VsockSocketPath)
+	if vsockSocket == "" {
+		return fmt.Errorf("full VM state restore loaded, but VM %s has no guest-agent vsock socket; pre-restore recovery point: %s", service.Name, preRestore)
+	}
+
+	healthCtx, cancel := context.WithTimeout(ctx, vmFullRestoreHealthWaitTimeout)
+	defer cancel()
+	var lastErr error
+	for {
+		if err := requireFullVMRestoreRunner(runner, expectedRunnerPID, preRestore); err != nil {
+			return err
+		}
+
+		ready, err := vmFullRestoreGuestReadyQuery(healthCtx, vsockSocket)
+		if err != nil {
+			lastErr = err
+		} else if ready.SSHReady {
+			if err := requireFullVMRestoreRunner(runner, expectedRunnerPID, preRestore); err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := waitForFullVMRestoreHealthPoll(healthCtx); err != nil {
+			message := fmt.Sprintf("full VM state restore loaded, but guest-agent SSH readiness was not reported within %s; pre-restore recovery point: %s", vmFullRestoreHealthWaitTimeout, preRestore)
+			if lastErr != nil {
+				return fmt.Errorf("%s: %w", message, lastErr)
+			}
+			return fmt.Errorf("%s: %w", message, err)
+		}
+	}
+}
+
+func waitForFullVMRestoreStability(ctx context.Context, runner *vmRunner, expectedRunnerPID int, preRestore string) error {
+	deadline := time.Now().Add(vmFullRestoreStabilityWait)
+	for {
+		if err := requireFullVMRestoreRunner(runner, expectedRunnerPID, preRestore); err != nil {
+			return fmt.Errorf("post-load stabilization: %w", err)
+		}
+		if !time.Now().Before(deadline) {
+			return nil
+		}
+		if err := waitForFullVMRestoreHealthPoll(ctx); err != nil {
+			return fmt.Errorf("verify full VM state restore stability; pre-restore recovery point: %s: %w", preRestore, err)
+		}
+	}
+}
+
+func requireFullVMRestoreRunner(runner *vmRunner, expectedRunnerPID int, preRestore string) error {
+	status, err := vmFullRestoreRuntimeStatus(runner)
+	if err != nil {
+		return fmt.Errorf("verify full VM state restore runtime; pre-restore recovery point: %s: %w", preRestore, err)
+	}
+	if status != svc.StatusRunning {
+		return fmt.Errorf("full VM state restore loaded, but VM is %s; pre-restore recovery point: %s", status, preRestore)
+	}
+	mainPID, err := vmFullRestoreMainPID(runner)
+	if err != nil {
+		return fmt.Errorf("verify full VM state restore runner PID; pre-restore recovery point: %s: %w", preRestore, err)
+	}
+	if mainPID != expectedRunnerPID {
+		return fmt.Errorf("full VM state restore runtime changed from PID %d to %d; pre-restore recovery point: %s", expectedRunnerPID, mainPID, preRestore)
+	}
+	return nil
+}
+
+func waitForFullVMRestoreHealthPoll(ctx context.Context) error {
+	timer := time.NewTimer(vmFullRestoreHealthWaitInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func pollFullVMStateRestore(ctx context.Context, runner *vmRunner, resultPath, preRestore string, deadline time.Time) (bool, int, error) {
 	result, ok, err := readVMFullRestoreResult(resultPath)
 	if err != nil && !ok {
-		return true, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s: %w", preRestore, err)
+		return true, 0, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s: %w", preRestore, err)
 	}
 	if ok && err == nil {
-		return true, fullVMStateRestoreResultError(result, preRestore)
+		runnerPID, err := completedFullVMStateRestore(result, preRestore)
+		return true, runnerPID, err
 	}
 	status, err := runner.Status()
 	if err == nil && status != svc.StatusRunning {
-		return true, fmt.Errorf("full VM state restore did not report completion and VM is %s; pre-restore recovery point: %s", status, preRestore)
+		return true, 0, fmt.Errorf("full VM state restore did not report completion and VM is %s; pre-restore recovery point: %s", status, preRestore)
 	}
 	if err := ctx.Err(); err != nil {
-		return true, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s: %w", preRestore, err)
+		return true, 0, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s: %w", preRestore, err)
 	}
 	if time.Now().After(deadline) {
-		return true, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s", preRestore)
+		return true, 0, fmt.Errorf("full VM state restore did not report completion; pre-restore recovery point: %s", preRestore)
 	}
-	return false, nil
+	return false, 0, nil
+}
+
+func completedFullVMStateRestore(result vmFullRestoreResult, preRestore string) (int, error) {
+	if err := fullVMStateRestoreResultError(result, preRestore); err != nil {
+		return 0, err
+	}
+	if result.RunnerPID <= 0 {
+		return 0, fmt.Errorf("full VM state restore reported success without a runner PID; pre-restore recovery point: %s", preRestore)
+	}
+	return result.RunnerPID, nil
 }
 
 func fullVMStateRestoreResultError(result vmFullRestoreResult, preRestore string) error {

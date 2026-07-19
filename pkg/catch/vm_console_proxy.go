@@ -41,8 +41,9 @@ type vmFullRestoreRequest struct {
 }
 
 type vmFullRestoreResult struct {
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
+	Status    string `json:"status"`
+	Error     string `json:"error,omitempty"`
+	RunnerPID int    `json:"runnerPid,omitempty"`
 }
 
 type vmSnapshotLoader interface {
@@ -150,7 +151,7 @@ func completeVMFullRestoreStartup(ctx context.Context, cmd *exec.Cmd, apiSocket,
 	if err := os.Remove(requestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return failRunningVMRestoreLoad(cmd, resultPath, "consume full restore request", err)
 	}
-	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess}); err != nil {
+	if err := writeVMFullRestoreResult(resultPath, vmFullRestoreResult{Status: vmFullRestoreStatusSuccess, RunnerPID: os.Getpid()}); err != nil {
 		return failRunningVMRestoreLoad(cmd, resultPath, "write full restore result", err)
 	}
 	return nil

@@ -306,7 +306,7 @@ func TestRunVMConsoleProxyLoadsOneShotSnapshotRequestBeforeGuestBoot(t *testing.
 	if err != nil {
 		t.Fatalf("read restore result: %v", err)
 	}
-	if !ok || result.Status != vmFullRestoreStatusSuccess || result.Error != "" {
+	if !ok || result.Status != vmFullRestoreStatusSuccess || result.Error != "" || result.RunnerPID != os.Getpid() {
 		t.Fatalf("restore result = %#v, ok=%v; want success", result, ok)
 	}
 }
