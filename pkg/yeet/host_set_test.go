@@ -930,6 +930,7 @@ type fakeHostStorageClient struct {
 	finalize         catchrpc.HostStorageFinalizeResult
 	cleanup          catchrpc.HostStorageCleanupResult
 	planErr          error
+	planErrs         []error
 	applyErr         error
 	finalizeErrs     []error
 	cleanupErr       error
@@ -956,6 +957,11 @@ func (c *fakeISOPoolClient) ISOPoolApply(_ context.Context, req catchrpc.ISOPool
 
 func (c *fakeHostStorageClient) HostStoragePlan(_ context.Context, req catchrpc.HostStoragePlanRequest) (catchrpc.HostStoragePlan, error) {
 	c.planRequests = append(c.planRequests, req)
+	if len(c.planErrs) != 0 {
+		err := c.planErrs[0]
+		c.planErrs = c.planErrs[1:]
+		return c.plan, err
+	}
 	return c.plan, c.planErr
 }
 

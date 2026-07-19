@@ -839,6 +839,66 @@ func TestInitLegacyStorageUsesConfiguredCatchHostAfterMachineInstall(t *testing.
 	}
 }
 
+func TestInitLegacyStorageRetriesPlanWhileCatchRestarts(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/root/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, false)
+	state.client.planErrs = []error{
+		&net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET},
+		nil,
+	}
+
+	if err := runInitLegacyStorageMigration(state.ui, "root@lab-host", initStorageOptions{
+		DataDir:       plan.Current.DataDir,
+		existingCatch: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(state.client.planRequests) != 2 {
+		t.Fatalf("plan requests = %d, want retry after transient Catch restart error", len(state.client.planRequests))
+	}
+}
+
+func TestInitLegacyStoragePlanDoesNotRetryApplicationFailure(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/root/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, false)
+	state.client.planErr = errors.New("permission denied")
+
+	err := runInitLegacyStorageMigration(state.ui, "root@lab-host", initStorageOptions{
+		DataDir:       plan.Current.DataDir,
+		existingCatch: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "permission denied") {
+		t.Fatalf("error = %v, want application failure", err)
+	}
+	if len(state.client.planRequests) != 1 {
+		t.Fatalf("plan requests = %d, want no retry for application failure", len(state.client.planRequests))
+	}
+}
+
+func TestInitLegacyStoragePlanReportsCatchReadinessTimeout(t *testing.T) {
+	plan := initLegacyStorageTestPlan("/root/yeet-data")
+	state := stubInitLegacyStorageMigration(t, plan, false)
+	state.client.planErr = &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+	start := time.Unix(100, 0)
+	times := []time.Time{start, start.Add(hostStorageReconnectTimeout)}
+	hostStorageReconnectNowFn = func() time.Time {
+		now := times[0]
+		times = times[1:]
+		return now
+	}
+
+	err := runInitLegacyStorageMigration(state.ui, "root@lab-host", initStorageOptions{
+		DataDir:       plan.Current.DataDir,
+		existingCatch: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "did not become ready within 1m0s") || !strings.Contains(err.Error(), "connection reset by peer") {
+		t.Fatalf("error = %v, want bounded Catch readiness timeout", err)
+	}
+	if len(state.client.planRequests) != 2 {
+		t.Fatalf("plan requests = %d, want initial attempt and one attempt at simulated deadline", len(state.client.planRequests))
+	}
+}
+
 func TestInitLegacyStorageDeclineRendersBoundaryAndPreservesOldHost(t *testing.T) {
 	plan := initLegacyStorageTestPlan("/home/ubuntu/yeet-data")
 	state := stubInitLegacyStorageMigration(t, plan, true)
