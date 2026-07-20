@@ -267,8 +267,8 @@ func isoRouterPolicyCommands(spec ISOTopologySpec, bridge string) []ISOCommand {
 		restore4, _, _ := isoIPTablesTools(backend, false)
 		restore6, _, _ := isoIPTablesTools(backend, true)
 		commands := []ISOCommand{
-			{Name: "ip", Args: []string{"netns", "exec", spec.Allocation.NetNS, restore4, "--noflush"}, Input: iptablesRestoreOwnedRouterChains(ipv4)},
-			{Name: "ip", Args: []string{"netns", "exec", spec.Allocation.NetNS, restore6, "--noflush"}, Input: iptablesRestoreOwnedRouterChains(ipv6)},
+			{Name: "ip", Args: []string{"netns", "exec", spec.Allocation.NetNS, restore4, iptablesWaitArg, "--noflush"}, Input: iptablesRestoreOwnedRouterChains(ipv4)},
+			{Name: "ip", Args: []string{"netns", "exec", spec.Allocation.NetNS, restore6, iptablesWaitArg, "--noflush"}, Input: iptablesRestoreOwnedRouterChains(ipv6)},
 		}
 		commands = append(commands, isoRouterJumpCommands(spec, backend)...)
 		return commands

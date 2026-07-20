@@ -814,15 +814,23 @@ func (s *Server) ensureOrVerifyVMISOAttachmentForStartup(ctx context.Context, se
 	if err != nil {
 		return err
 	}
-	if !running {
-		if err := ensureOwnedVMNetwork(plan, service); err != nil {
-			return errors.Join(err, cleanupVMISONetworkPlan(plan))
-		}
+	if err := ensureVMISOAttachmentForStartup(plan, service, running); err != nil {
+		return err
 	}
 	if err := verifyVMNetworkPlanForReconcile(ctx, plan); err != nil {
 		if running {
 			return err
 		}
+		return errors.Join(err, cleanupVMISONetworkPlan(plan))
+	}
+	return nil
+}
+
+func ensureVMISOAttachmentForStartup(plan vmNetworkPlan, service string, running bool) error {
+	if running {
+		return ensureRunningVMISOSecuritySysctls(plan, service)
+	}
+	if err := ensureOwnedVMNetwork(plan, service); err != nil {
 		return errors.Join(err, cleanupVMISONetworkPlan(plan))
 	}
 	return nil

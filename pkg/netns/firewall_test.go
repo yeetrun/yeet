@@ -75,6 +75,25 @@ func TestDetectFirewallBackendFromProbe(t *testing.T) {
 	}
 }
 
+func TestWithFirewallCommandDefaultsWaitsForXTablesLock(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "iptables-nft", args: []string{"-t", "filter", "-S"}, want: []string{"--wait", "-t", "filter", "-S"}},
+		{name: "iptables-legacy", args: []string{"-t", "filter", "-A", "INPUT"}, want: []string{"--wait", "-t", "filter", "-A", "INPUT"}},
+		{name: "iptables", args: []string{"-w", "-t", "nat", "-S"}, want: []string{"-w", "-t", "nat", "-S"}},
+		{name: "nft", args: []string{"list", "table", "ip", "yeet"}, want: []string{"list", "table", "ip", "yeet"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := withFirewallCommandDefaults(tt.name, tt.args); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("command defaults = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRenderRuleset(t *testing.T) {
 	t.Parallel()
 
@@ -668,10 +687,10 @@ func TestVerifyFirewallIPTablesAcceptsExpectedRules(t *testing.T) {
 		case "iptables-nft --version":
 			return []byte("iptables v1.8.11 (nf_tables)"), nil
 		default:
-			if len(args) >= 4 && args[1] == "filter" && args[2] == "-C" {
+			if len(args) >= 5 && args[0] == iptablesWaitArg && args[2] == "filter" && args[3] == "-C" {
 				return []byte("ok"), nil
 			}
-			if len(args) >= 4 && args[1] == "nat" && args[2] == "-C" {
+			if len(args) >= 5 && args[0] == iptablesWaitArg && args[2] == "nat" && args[3] == "-C" {
 				return []byte("ok"), nil
 			}
 			return nil, fmt.Errorf("unexpected command: %s", commandKey(name, args...))
@@ -692,10 +711,10 @@ func TestVerifyFirewallIPTablesUsesRuleChecksInsteadOfParsingSaveOutput(t *testi
 		case "iptables-nft -S YEET_INPUT":
 			return nil, errors.New("do not parse iptables-save order")
 		default:
-			if len(args) >= 4 && args[1] == "filter" && args[2] == "-C" {
+			if len(args) >= 5 && args[0] == iptablesWaitArg && args[2] == "filter" && args[3] == "-C" {
 				return []byte("ok"), nil
 			}
-			if len(args) >= 4 && args[1] == "nat" && args[2] == "-C" {
+			if len(args) >= 5 && args[0] == iptablesWaitArg && args[2] == "nat" && args[3] == "-C" {
 				return []byte("ok"), nil
 			}
 			return nil, fmt.Errorf("unexpected command: %s", commandKey(name, args...))
@@ -713,13 +732,13 @@ func TestVerifyFirewallIPTablesReportsMissingRule(t *testing.T) {
 		switch commandKey(name, args...) {
 		case "iptables-nft --version":
 			return []byte("iptables v1.8.11 (nf_tables)"), nil
-		case "iptables-nft -t filter -C YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT":
+		case "iptables-nft --wait -t filter -C YEET_FORWARD -o yeet0 -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT":
 			return nil, errors.New("missing")
 		default:
-			if len(args) >= 4 && args[1] == "filter" && args[2] == "-C" {
+			if len(args) >= 5 && args[0] == iptablesWaitArg && args[2] == "filter" && args[3] == "-C" {
 				return []byte("ok"), nil
 			}
-			if len(args) >= 4 && args[1] == "nat" && args[2] == "-C" {
+			if len(args) >= 5 && args[0] == iptablesWaitArg && args[2] == "nat" && args[3] == "-C" {
 				return []byte("ok"), nil
 			}
 			return nil, fmt.Errorf("unexpected command: %s", commandKey(name, args...))
@@ -883,7 +902,7 @@ func TestFirewallHelperErrorBranches(t *testing.T) {
 		withFirewallCommandFakes(t, nil, func(name string, args ...string) ([]byte, error) {
 			return nil, errors.New("exit 1")
 		}, nil)
-		if _, err := commandOutput("iptables", "--bad"); err == nil || !strings.Contains(err.Error(), "failed to run iptables --bad") {
+		if _, err := commandOutput("iptables", "--bad"); err == nil || !strings.Contains(err.Error(), "failed to run iptables --wait --bad") {
 			t.Fatalf("commandOutput empty error = %v, want command context", err)
 		}
 	})

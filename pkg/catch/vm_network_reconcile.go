@@ -503,6 +503,10 @@ func ensureOwnedVMNetwork(plan vmNetworkPlan, service string) error {
 	return runVMNetworkLifecycleCommands(setup, nil, fmt.Sprintf("ensure VM network for %q", service))
 }
 
+func ensureRunningVMISOSecuritySysctls(plan vmNetworkPlan, service string) error {
+	return runVMNetworkLifecycleCommands(plan.isoInterfaceSysctlCommands(), nil, fmt.Sprintf("repair VM ISO security sysctls for %q", service))
+}
+
 func verifyVMNetworkPlan(ctx context.Context, plan vmNetworkPlan) error {
 	for _, iface := range plan.Interfaces {
 		if iface.Mode != "iso" {
@@ -581,11 +585,19 @@ func verifyVMISOAddresses(tap string, want netip.Prefix, link vmISOAddressEviden
 }
 
 func verifyVMISOSysctls(ctx context.Context, tap string) error {
-	for _, setting := range []string{"net.ipv4.conf." + tap + ".rp_filter", "net.ipv6.conf." + tap + ".disable_ipv6"} {
-		value, err := vmNetworkVerifyCommand(ctx, "sysctl", "-n", setting)
-		if err != nil || strings.TrimSpace(string(value)) != "1" {
-			return fmt.Errorf("verify VM ISO TAP %s: %s is not 1", tap, setting)
-		}
+	rpFilter := "net.ipv4.conf." + tap + ".rp_filter"
+	value, err := vmNetworkVerifyCommand(ctx, "sysctl", "-n", rpFilter)
+	if err != nil {
+		return fmt.Errorf("verify VM ISO TAP %s: read %s: %w", tap, rpFilter, err)
+	}
+	mode := strings.TrimSpace(string(value))
+	if mode != "1" && mode != "2" {
+		return fmt.Errorf("verify VM ISO TAP %s: source validation is disabled or invalid (%s=%q)", tap, rpFilter, mode)
+	}
+	disableIPv6 := "net.ipv6.conf." + tap + ".disable_ipv6"
+	value, err = vmNetworkVerifyCommand(ctx, "sysctl", "-n", disableIPv6)
+	if err != nil || strings.TrimSpace(string(value)) != "1" {
+		return fmt.Errorf("verify VM ISO TAP %s: %s is not 1", tap, disableIPv6)
 	}
 	return nil
 }

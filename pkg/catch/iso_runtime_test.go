@@ -1373,16 +1373,68 @@ func TestISOConcreteReconcileRepairsStoppedVMTAPBehindVerifiedPolicy(t *testing.
 	}
 }
 
+func TestISOConcreteReconcileRepairsRunningVMTAPSysctlsBeforeVerification(t *testing.T) {
+	server, allocation := newISOReconcileVMTestServer(t, iso.StateReady)
+	withISORuntimeBackend(t, netns.BackendNFT)
+	oldVerifyPolicy := verifyISOPolicyForRuntime
+	oldStatus := serverVMStatusFunc
+	oldRunner := vmNetworkReconcileRunner
+	oldVerifyPlan := verifyVMNetworkPlanForReconcile
+	oldIdentity := vmNetworkEnsureRuntimeIdentity
+	var events []string
+	verifyISOPolicyForRuntime = func(context.Context, netns.ISOPolicyRules) error {
+		events = append(events, "verify-policy")
+		return nil
+	}
+	serverVMStatusFunc = func(string) (svc.Status, error) { return svc.StatusRunning, nil }
+	vmNetworkReconcileRunner = func(command []string) error {
+		if len(command) == 3 && command[0] == "sysctl" && command[1] == "-w" {
+			events = append(events, command[2])
+			return nil
+		}
+		t.Fatalf("startup repair ran unsafe command on a running VM: %v", command)
+		return nil
+	}
+	verifyVMNetworkPlanForReconcile = func(context.Context, vmNetworkPlan) error {
+		events = append(events, "verify-tap")
+		return nil
+	}
+	vmNetworkEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) { return vmRuntimeIdentity{UID: 812, GID: 813}, nil }
+	t.Cleanup(func() {
+		verifyISOPolicyForRuntime = oldVerifyPolicy
+		serverVMStatusFunc = oldStatus
+		vmNetworkReconcileRunner = oldRunner
+		verifyVMNetworkPlanForReconcile = oldVerifyPlan
+		vmNetworkEnsureRuntimeIdentity = oldIdentity
+	})
+
+	steps := &isoConcreteReconcileSteps{server: server}
+	if err := steps.VerifyPolicy(context.Background(), "devbox"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"verify-policy",
+		"net.ipv4.conf." + allocation.Interface + ".rp_filter=1",
+		"net.ipv6.conf." + allocation.Interface + ".disable_ipv6=1",
+		"verify-tap",
+	}
+	if !slices.Equal(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
 func TestISOConcreteReconcileStopsRunningVMWhenTAPDrifts(t *testing.T) {
 	server, _ := newISOReconcileVMTestServer(t, iso.StateReady)
 	withISORuntimeBackend(t, netns.BackendNFT)
 	oldVerifyPolicy := verifyISOPolicyForRuntime
 	oldStatus := serverVMStatusFunc
+	oldRunner := vmNetworkReconcileRunner
 	oldVerifyPlan := verifyVMNetworkPlanForReconcile
 	oldSystemctl := runISOReconcileVMSystemctl
 	oldIdentity := vmNetworkEnsureRuntimeIdentity
 	verifyISOPolicyForRuntime = func(context.Context, netns.ISOPolicyRules) error { return nil }
 	serverVMStatusFunc = func(string) (svc.Status, error) { return svc.StatusRunning, nil }
+	vmNetworkReconcileRunner = func([]string) error { return nil }
 	verifyVMNetworkPlanForReconcile = func(context.Context, vmNetworkPlan) error { return errors.New("tap attached to bridge") }
 	vmNetworkEnsureRuntimeIdentity = func() (vmRuntimeIdentity, error) { return vmRuntimeIdentity{UID: 812, GID: 813}, nil }
 	var stopped bool
@@ -1393,6 +1445,7 @@ func TestISOConcreteReconcileStopsRunningVMWhenTAPDrifts(t *testing.T) {
 	t.Cleanup(func() {
 		verifyISOPolicyForRuntime = oldVerifyPolicy
 		serverVMStatusFunc = oldStatus
+		vmNetworkReconcileRunner = oldRunner
 		verifyVMNetworkPlanForReconcile = oldVerifyPlan
 		runISOReconcileVMSystemctl = oldSystemctl
 		vmNetworkEnsureRuntimeIdentity = oldIdentity

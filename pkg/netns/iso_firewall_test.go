@@ -486,7 +486,7 @@ func TestEnsureISOPolicyIPTablesAppliesSetsThenAtomicRestores(t *testing.T) {
 	if err := EnsureISOPolicy(context.Background(), rules); err != nil {
 		t.Fatalf("EnsureISOPolicy returned error: %v", err)
 	}
-	wantPrefix := []string{"ipset restore -exist", "iptables-nft-restore --noflush", "ip6tables-nft-restore --noflush"}
+	wantPrefix := []string{"ipset restore -exist", "iptables-nft-restore --wait --noflush", "ip6tables-nft-restore --wait --noflush"}
 	if diff := cmp.Diff(wantPrefix, mutating); diff != "" {
 		t.Fatalf("mutation order (-want +got):\n%s", diff)
 	}
@@ -540,18 +540,21 @@ func TestEnsureISOIPTablesJumpsReconcilesPolicyLinesStaleOrderAndDuplicates(t *t
 					if len(input) != 0 {
 						return nil, errors.New("unexpected restore input")
 					}
-					table := args[1]
-					chain := args[3]
+					if len(args) < 5 || args[0] != iptablesWaitArg {
+						return nil, errors.New("iptables jump command did not wait for xtables lock")
+					}
+					table := args[2]
+					chain := args[4]
 					state := states[table+"/"+chain]
 					if state == nil {
 						return nil, errors.New("unexpected chain")
 					}
-					switch args[2] {
+					switch args[3] {
 					case "-S":
 						return []byte("-P " + chain + " ACCEPT\n" + strings.Join(state.rules, "\n") + "\n"), nil
 					case "-D":
 						mutations++
-						want := "-A " + chain + " -j " + args[5]
+						want := "-A " + chain + " -j " + args[6]
 						for index, rule := range state.rules {
 							if rule == want {
 								state.rules = append(state.rules[:index], state.rules[index+1:]...)
@@ -561,10 +564,10 @@ func TestEnsureISOIPTablesJumpsReconcilesPolicyLinesStaleOrderAndDuplicates(t *t
 						return nil, errors.New("delete missing jump")
 					case "-I":
 						mutations++
-						state.rules = append([]string{"-A " + chain + " -j " + args[6]}, state.rules...)
+						state.rules = append([]string{"-A " + chain + " -j " + args[7]}, state.rules...)
 						return nil, nil
 					default:
-						return nil, errors.New("unexpected operation " + args[2])
+						return nil, errors.New("unexpected operation " + args[3])
 					}
 				}
 

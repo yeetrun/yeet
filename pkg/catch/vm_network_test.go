@@ -473,7 +473,7 @@ func TestVerifyVMISONetworkRejectsLiveEvidenceDrift(t *testing.T) {
 		{name: "bridge master", address: `[{"ifname":"yi-devbox","master":"br0","addr_info":[{"family":"inet","local":"172.30.0.1","prefixlen":30}]}]`, sysctl: "1", want: "attached to a bridge"},
 		{name: "extra IPv4", address: `[{"ifname":"yi-devbox","addr_info":[{"family":"inet","local":"172.30.0.1","prefixlen":30},{"family":"inet","local":"172.30.0.9","prefixlen":30}]}]`, sysctl: "1", want: "unexpected IPv4"},
 		{name: "IPv6", address: `[{"ifname":"yi-devbox","addr_info":[{"family":"inet","local":"172.30.0.1","prefixlen":30},{"family":"inet6","local":"fe80::1","prefixlen":64}]}]`, sysctl: "1", want: "IPv6 address"},
-		{name: "source validation", address: `[{"ifname":"yi-devbox","addr_info":[{"family":"inet","local":"172.30.0.1","prefixlen":30}]}]`, sysctl: "0", want: "is not 1"},
+		{name: "source validation", address: `[{"ifname":"yi-devbox","addr_info":[{"family":"inet","local":"172.30.0.1","prefixlen":30}]}]`, sysctl: "0", want: "source validation is disabled"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -487,6 +487,33 @@ func TestVerifyVMISONetworkRejectsLiveEvidenceDrift(t *testing.T) {
 			t.Cleanup(func() { vmNetworkVerifyCommand = oldVerify })
 			if err := verifyVMNetworkPlan(context.Background(), plan); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("verifyVMNetworkPlan error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestVerifyVMISONetworkAcceptsOnlyEnabledReversePathModes(t *testing.T) {
+	plan := newVMNetworkPlan("devbox", []string{"iso"}, vmNetworkInputs{
+		ISOHostIP: netip.MustParseAddr("172.30.0.1"), ISOGuestIP: netip.MustParseAddr("172.30.0.2"),
+		ISOLink: netip.MustParsePrefix("172.30.0.0/30"), ISOTap: "yi-devbox",
+	})
+	address := `[{"ifname":"yi-devbox","addr_info":[{"family":"inet","local":"172.30.0.1","prefixlen":30}]}]`
+	for _, mode := range []string{"1", "2"} {
+		t.Run(mode, func(t *testing.T) {
+			oldVerify := vmNetworkVerifyCommand
+			vmNetworkVerifyCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "ip" {
+					return []byte(address), nil
+				}
+				setting := args[len(args)-1]
+				if strings.HasSuffix(setting, ".disable_ipv6") {
+					return []byte("1"), nil
+				}
+				return []byte(mode), nil
+			}
+			t.Cleanup(func() { vmNetworkVerifyCommand = oldVerify })
+			if err := verifyVMNetworkPlan(context.Background(), plan); err != nil {
+				t.Fatalf("verifyVMNetworkPlan rp_filter=%s: %v", mode, err)
 			}
 		})
 	}

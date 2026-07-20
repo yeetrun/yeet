@@ -680,12 +680,33 @@ func (p vmNetworkPlan) SetupCommands() [][]string {
 			cmds = append(cmds,
 				[]string{"ip", "link", "set", iface.Tap, "up"},
 				[]string{"ip", "-4", "addr", "replace", vmISOHostPrefix(iface), "dev", iface.Tap},
-				[]string{"sysctl", "-w", "net.ipv4.conf." + iface.Tap + ".rp_filter=1"},
-				[]string{"sysctl", "-w", "net.ipv6.conf." + iface.Tap + ".disable_ipv6=1"},
 			)
+			cmds = append(cmds, vmISOInterfaceSysctlCommands(iface)...)
 		}
 	}
 	return cmds
+}
+
+// vmISOInterfaceSysctlCommands is safe to replay against a running VM TAP.
+// The dedicated /30 route is symmetric, so Yeet prefers strict reverse-path
+// validation. Verification also permits the kernel's documented loose mode:
+// host-wide rp_filter uses max(all, interface), while the verified ISO firewall
+// independently pins this TAP to the allocation's exact guest source address.
+func vmISOInterfaceSysctlCommands(iface vmNetworkInterfacePlan) [][]string {
+	return [][]string{
+		{"sysctl", "-w", "net.ipv4.conf." + iface.Tap + ".rp_filter=1"},
+		{"sysctl", "-w", "net.ipv6.conf." + iface.Tap + ".disable_ipv6=1"},
+	}
+}
+
+func (p vmNetworkPlan) isoInterfaceSysctlCommands() [][]string {
+	var commands [][]string
+	for _, iface := range p.Interfaces {
+		if iface.Mode == "iso" {
+			commands = append(commands, vmISOInterfaceSysctlCommands(iface)...)
+		}
+	}
+	return commands
 }
 
 func (p vmNetworkPlan) CleanupCommands() [][]string {
