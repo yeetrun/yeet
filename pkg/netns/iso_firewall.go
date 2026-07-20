@@ -506,7 +506,7 @@ func applyISOIPv4(ctx context.Context, rules ISOPolicyRules) error {
 		if err != nil {
 			return err
 		}
-		if _, err := runISOCommand(ctx, []byte(iptablesRestoreOwnedChains(rules.IPv4)), restore, "--noflush"); err != nil {
+		if _, err := runISOCommand(ctx, []byte(iptablesRestoreOwnedChains(rules.IPv4)), restore, iptablesWaitArg, "--noflush"); err != nil {
 			return fmt.Errorf("apply ISO IPv4 policy: %w", err)
 		}
 		return ensureISOIPTablesJumps(ctx, rules.Backend, false)
@@ -527,7 +527,7 @@ func applyISOIPv6(ctx context.Context, rules ISOPolicyRules) error {
 		if err != nil {
 			return err
 		}
-		if _, err := runISOCommand(ctx, []byte(iptablesRestoreOwnedChains(rules.IPv6)), restore, "--noflush"); err != nil {
+		if _, err := runISOCommand(ctx, []byte(iptablesRestoreOwnedChains(rules.IPv6)), restore, iptablesWaitArg, "--noflush"); err != nil {
 			return fmt.Errorf("apply ISO IPv6 policy: %w", err)
 		}
 		return ensureISOIPTablesJumps(ctx, rules.Backend, true)
@@ -638,7 +638,7 @@ func ensureISOIPTablesJumps(ctx context.Context, backend FirewallBackend, ipv6 b
 func reconcileISOIPTablesJump(ctx context.Context, name string, prefix []string, table, chain, target string) error {
 	args := func(operation ...string) []string {
 		out := append([]string(nil), prefix...)
-		out = append(out, "-t", table)
+		out = append(out, iptablesWaitArg, "-t", table)
 		return append(out, operation...)
 	}
 	out, err := runISOCommand(ctx, nil, name, args("-S", chain)...)

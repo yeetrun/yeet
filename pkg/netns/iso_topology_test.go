@@ -36,6 +36,47 @@ func TestISOTopologyCommandsRouteProjectThroughPeer(t *testing.T) {
 	}
 }
 
+func TestISORouterIPTablesRestoresWaitForXTablesLock(t *testing.T) {
+	for _, backend := range []FirewallBackend{BackendIPTablesNFT, BackendIPTablesLegacy} {
+		backend := backend
+		t.Run(string(backend), func(t *testing.T) {
+			spec := testISOTopologySpec()
+			spec.Backend = backend
+			oldLookPath := lookPath
+			oldCombined := runCombinedOutput
+			t.Cleanup(func() {
+				lookPath = oldLookPath
+				runCombinedOutput = oldCombined
+			})
+			lookPath = func(name string) (string, error) { return "/usr/sbin/" + name, nil }
+			runCombinedOutput = func(name string, _ ...string) ([]byte, error) {
+				if strings.Contains(name, "legacy") {
+					return []byte("iptables v1.8.11 (legacy)"), nil
+				}
+				return []byte("iptables v1.8.11 (nf_tables)"), nil
+			}
+
+			commands, err := ISOTopologyEnsureCommands(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restores int
+			for _, command := range commands {
+				if !strings.Contains(strings.Join(command.Args, " "), "tables-") || !strings.Contains(strings.Join(command.Args, " "), "-restore") {
+					continue
+				}
+				restores++
+				if !slices.Contains(command.Args, "--wait") {
+					t.Fatalf("restore command does not wait for xtables lock: %v", command.Args)
+				}
+			}
+			if restores != 2 {
+				t.Fatalf("restore commands = %d, want 2", restores)
+			}
+		})
+	}
+}
+
 func TestISOTopologyCommandsAddOnlyExplicitTailscaleRoutePolicy(t *testing.T) {
 	spec := testISOTopologySpec()
 	spec.TailscaleInterface = "ts0"
@@ -195,19 +236,19 @@ func TestISORouterIPTablesJumpsReconcileDuplicatesAndPolicyLines(t *testing.T) {
 
 			mutations := 0
 			runISOCommand = func(_ context.Context, input []byte, name string, args ...string) ([]byte, error) {
-				if name != "ip" || len(input) != 0 || len(args) < 8 {
+				if name != "ip" || len(input) != 0 || len(args) < 9 || args[4] != iptablesWaitArg {
 					return nil, errors.New("unexpected router jump command")
 				}
-				state := states[args[3]+"/"+args[5]+"/"+args[7]]
+				state := states[args[3]+"/"+args[6]+"/"+args[8]]
 				if state == nil {
 					return nil, errors.New("unexpected router jump state")
 				}
-				switch args[6] {
+				switch args[7] {
 				case "-S":
 					return []byte("-P " + state.chain + " ACCEPT\n" + strings.Join(state.rules, "\n") + "\n"), nil
 				case "-D":
 					mutations++
-					want := "-A " + state.chain + " -j " + args[9]
+					want := "-A " + state.chain + " -j " + args[10]
 					for index, rule := range state.rules {
 						if rule == want {
 							state.rules = append(state.rules[:index], state.rules[index+1:]...)
@@ -217,10 +258,10 @@ func TestISORouterIPTablesJumpsReconcileDuplicatesAndPolicyLines(t *testing.T) {
 					return nil, errors.New("delete missing router jump")
 				case "-I":
 					mutations++
-					state.rules = append([]string{"-A " + state.chain + " -j " + args[10]}, state.rules...)
+					state.rules = append([]string{"-A " + state.chain + " -j " + args[11]}, state.rules...)
 					return nil, nil
 				default:
-					return nil, errors.New("unexpected router jump operation")
+					return nil, errors.New("unexpected router jump operation " + args[7])
 				}
 			}
 

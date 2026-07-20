@@ -19,6 +19,7 @@ const (
 	BackendNFT            FirewallBackend = "nft"
 	BackendIPTablesNFT    FirewallBackend = "iptables-nft"
 	BackendIPTablesLegacy FirewallBackend = "iptables-legacy"
+	iptablesWaitArg                       = "--wait"
 )
 
 type FirewallSpec struct {
@@ -66,6 +67,7 @@ var (
 		return exec.Command(name, args...).CombinedOutput()
 	}
 	runCommandWithInput = func(input []byte, name string, args ...string) error {
+		args = withFirewallCommandDefaults(name, args)
 		cmd := exec.Command(name, args...)
 		if len(input) > 0 {
 			cmd.Stdin = bytes.NewReader(input)
@@ -81,6 +83,20 @@ var (
 		return nil
 	}
 )
+
+func withFirewallCommandDefaults(name string, args []string) []string {
+	if !strings.HasPrefix(name, "iptables") && !strings.HasPrefix(name, "ip6tables") {
+		return args
+	}
+	for _, arg := range args {
+		if arg == "-w" || arg == iptablesWaitArg {
+			return args
+		}
+	}
+	out := make([]string, 0, len(args)+1)
+	out = append(out, iptablesWaitArg)
+	return append(out, args...)
+}
 
 func DetectFirewallBackend() (FirewallBackend, error) {
 	probe, err := probeFirewallBackend()
@@ -720,6 +736,7 @@ func nftTableExists() (bool, error) {
 }
 
 func commandOutput(name string, args ...string) (string, error) {
+	args = withFirewallCommandDefaults(name, args)
 	out, err := runCombinedOutput(name, args...)
 	msg := strings.TrimSpace(string(out))
 	if err != nil {
