@@ -64,3 +64,39 @@ func TestVMGuestKernelSelectionAllowsNixStorePackagePaths(t *testing.T) {
 		t.Fatalf("validate: %v", err)
 	}
 }
+
+func TestVMGuestKernelSelectionSchema2RequiresImmutableReleaseIdentity(t *testing.T) {
+	selection := vmGuestKernelSelection{
+		SchemaVersion:  2,
+		ReleaseID:      "kernel-linux-7.1.1-yeet-v1",
+		ManifestSHA256: strings.Repeat("a", 64),
+		Version:        "linux-7.1.1-yeet",
+		Kernel:         "/usr/lib/yeet-vm/kernels/linux-7.1.1-yeet/vmlinux",
+		KernelConfig:   "/usr/lib/yeet-vm/kernels/linux-7.1.1-yeet/kernel.config",
+		SHA256: map[string]string{
+			"vmlinux":       strings.Repeat("b", 64),
+			"kernel.config": strings.Repeat("c", 64),
+		},
+	}
+	if err := selection.validate(); err != nil {
+		t.Fatalf("validate schema 2 selector: %v", err)
+	}
+	selection.ManifestSHA256 = "stable"
+	if err := selection.validate(); err == nil || !strings.Contains(err.Error(), "manifest_sha256") {
+		t.Fatalf("invalid immutable identity error = %v", err)
+	}
+}
+
+func TestVMGuestKernelSelectionSchema1RejectsComponentIdentity(t *testing.T) {
+	selection := vmGuestKernelSelection{
+		SchemaVersion:  1,
+		ReleaseID:      "kernel-linux-7.1.1-yeet-v1",
+		ManifestSHA256: strings.Repeat("a", 64),
+		Version:        "linux-7.1.1-yeet",
+		Kernel:         "/usr/lib/yeet-vm/kernels/linux-7.1.1-yeet/vmlinux",
+		SHA256:         map[string]string{"vmlinux": strings.Repeat("b", 64)},
+	}
+	if err := selection.validate(); err == nil || !strings.Contains(err.Error(), "must not declare") {
+		t.Fatalf("schema 1 component identity error = %v", err)
+	}
+}
