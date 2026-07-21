@@ -6,6 +6,7 @@ package catch
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -374,9 +375,13 @@ func validateVMJailerRuntimePair(ctx context.Context, firecracker, jailer string
 func probeVMRuntimeVersion(ctx context.Context, path string) (string, error) {
 	probeCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(probeCtx, path, "--version").CombinedOutput()
+	command := exec.CommandContext(probeCtx, path, "--version")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	out, err := command.Output()
 	if err != nil {
-		return "", fmt.Errorf("read VM runtime version from %s: %w: %s", path, err, strings.TrimSpace(string(out)))
+		detail := strings.TrimSpace(strings.TrimSpace(string(out)) + "\n" + strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("read VM runtime version from %s: %w: %s", path, err, detail)
 	}
 	return string(out), nil
 }

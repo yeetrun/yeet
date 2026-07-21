@@ -440,6 +440,20 @@ func TestValidateVMJailerPairVersion(t *testing.T) {
 	}
 }
 
+func TestProbeVMRuntimeVersionIgnoresSuccessfulStderr(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf 'Firecracker v1.16.1\\n'\nprintf 'shutdown log\\n' >&2\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := probeVMRuntimeVersion(context.Background(), path)
+	if err != nil {
+		t.Fatalf("probeVMRuntimeVersion: %v", err)
+	}
+	if got != "Firecracker v1.16.1\n" {
+		t.Fatalf("probe output = %q", got)
+	}
+}
+
 func TestValidateVMJailerRuntimePairValidatesInputsAndMatchingVersions(t *testing.T) {
 	oldValidate := vmJailValidateTrustedInput
 	oldProbe := vmJailProbeVersion
