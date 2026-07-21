@@ -20,6 +20,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/yeetrun/yeet/pkg/db"
 )
 
 const (
@@ -111,6 +113,139 @@ type vmImageAsset struct {
 	Paths              vmImagePaths
 	PreparedRootFSPath string
 	Manifest           vmImageManifest
+}
+
+type vmProvisionArtifacts struct {
+	Image                  vmImageAsset
+	GuestBase              db.VMGuestBaseConfig
+	Kernel                 db.VMKernelArtifactConfig
+	Runtime                db.VMRuntimeArtifactConfig
+	RuntimePolicy          string
+	RuntimeChannel         string
+	Legacy                 *vmImageAsset
+	KernelSourcePath       string
+	KernelConfigSourcePath string
+	KernelConfigTargetPath string
+	KernelConfigSHA256     string
+}
+
+func (a vmProvisionArtifacts) Components() *db.VMComponentsConfig {
+	if a.GuestBase.ID == "" && a.Kernel.ID == "" && a.Runtime.ID == "" {
+		return nil
+	}
+	return &db.VMComponentsConfig{
+		GuestBase: a.GuestBase,
+		Kernel:    a.Kernel,
+		Runtime: db.VMRuntimeLifecycleConfig{
+			Policy:     a.RuntimePolicy,
+			Channel:    a.RuntimeChannel,
+			Configured: a.Runtime,
+		},
+	}
+}
+
+type vmProvisionComponentSelection struct {
+	GuestBaseID             string
+	GuestBaseManifestSHA256 string
+	KernelID                string
+	KernelManifestSHA256    string
+	RuntimeID               string
+	RuntimeManifestSHA256   string
+}
+
+type vmProvisionComponentRefs struct {
+	GuestBase vmGuestBaseCatalogRef
+	Kernel    vmKernelCatalogRef
+	Runtime   vmRuntimeCatalogRef
+}
+
+func resolveVMProvisionComponentRefs(image vmImageCatalogImage, catalogs vmComponentCatalogSet, selection vmProvisionComponentSelection, runtimeChannel string) (vmProvisionComponentRefs, error) {
+	family, err := vmProvisionGuestFamily(image)
+	if err != nil {
+		return vmProvisionComponentRefs{}, err
+	}
+	guest, err := resolveVMProvisionGuestRef(catalogs.GuestBases, family, selection)
+	if err != nil {
+		return vmProvisionComponentRefs{}, err
+	}
+	if got := guest.OS + "-" + guest.OSVersion + "-" + guest.Architecture; got != family {
+		return vmProvisionComponentRefs{}, fmt.Errorf("selected VM guest base %s does not match payload family %s", guest.GuestBaseID, family)
+	}
+	kernel, err := resolveVMProvisionKernelRef(catalogs.Kernels, guest.Architecture, selection, "stable")
+	if err != nil {
+		return vmProvisionComponentRefs{}, err
+	}
+	if runtimeChannel == "" {
+		runtimeChannel = "stable"
+	}
+	runtimeRef, err := resolveVMProvisionRuntimeRef(catalogs.Runtimes, guest.Architecture, selection, runtimeChannel)
+	if err != nil {
+		return vmProvisionComponentRefs{}, err
+	}
+	return vmProvisionComponentRefs{GuestBase: guest, Kernel: kernel, Runtime: runtimeRef}, nil
+}
+
+func vmProvisionGuestFamily(image vmImageCatalogImage) (string, error) {
+	payload := strings.TrimSpace(image.Payload)
+	if !strings.HasPrefix(payload, vmImagePayloadPrefix) {
+		return "", fmt.Errorf("VM component provisioning requires an official vm:// payload")
+	}
+	parts := strings.Split(strings.TrimPrefix(payload, vmImagePayloadPrefix), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || image.Architecture == "" {
+		return "", fmt.Errorf("VM payload %q does not identify one component guest family", payload)
+	}
+	return parts[0] + "-" + parts[1] + "-" + image.Architecture, nil
+}
+
+func resolveVMProvisionGuestRef(catalog vmGuestBaseCatalog, family string, selection vmProvisionComponentSelection) (vmGuestBaseCatalogRef, error) {
+	if selection.GuestBaseID == "" && selection.GuestBaseManifestSHA256 == "" {
+		if ref, ok := catalog.GuestBaseForChannel(family, "stable"); ok {
+			return ref, nil
+		}
+		return vmGuestBaseCatalogRef{}, fmt.Errorf("VM guest-base catalog has no promoted stable entry for %s", family)
+	}
+	if selection.GuestBaseID == "" || selection.GuestBaseManifestSHA256 == "" {
+		return vmGuestBaseCatalogRef{}, fmt.Errorf("explicit VM guest-base selection requires both immutable ID and manifest SHA-256")
+	}
+	ref, ok := catalog.GuestBaseByID(selection.GuestBaseID)
+	if !ok || ref.ManifestSHA256 != selection.GuestBaseManifestSHA256 {
+		return vmGuestBaseCatalogRef{}, fmt.Errorf("explicit VM guest-base selection does not resolve to one immutable catalog entry")
+	}
+	return ref, nil
+}
+
+func resolveVMProvisionKernelRef(catalog vmKernelCatalog, architecture string, selection vmProvisionComponentSelection, channel string) (vmKernelCatalogRef, error) {
+	if selection.KernelID == "" && selection.KernelManifestSHA256 == "" {
+		if ref, ok := catalog.KernelForChannel(architecture, channel); ok {
+			return ref, nil
+		}
+		return vmKernelCatalogRef{}, fmt.Errorf("VM kernel catalog has no promoted %s entry for %s", channel, architecture)
+	}
+	if selection.KernelID == "" || selection.KernelManifestSHA256 == "" {
+		return vmKernelCatalogRef{}, fmt.Errorf("explicit VM kernel selection requires both immutable ID and manifest SHA-256")
+	}
+	ref, ok := catalog.KernelByID(selection.KernelID)
+	if !ok || ref.ManifestSHA256 != selection.KernelManifestSHA256 || ref.Architecture != architecture {
+		return vmKernelCatalogRef{}, fmt.Errorf("explicit VM kernel selection does not resolve to one immutable catalog entry")
+	}
+	return ref, nil
+}
+
+func resolveVMProvisionRuntimeRef(catalog vmRuntimeCatalog, architecture string, selection vmProvisionComponentSelection, channel string) (vmRuntimeCatalogRef, error) {
+	if selection.RuntimeID == "" && selection.RuntimeManifestSHA256 == "" {
+		if ref, ok := catalog.RuntimeForChannel(architecture, channel); ok {
+			return ref, nil
+		}
+		return vmRuntimeCatalogRef{}, fmt.Errorf("VM runtime catalog has no promoted %s entry for %s", channel, architecture)
+	}
+	if selection.RuntimeID == "" || selection.RuntimeManifestSHA256 == "" {
+		return vmRuntimeCatalogRef{}, fmt.Errorf("explicit VM runtime selection requires both immutable ID and manifest SHA-256")
+	}
+	ref, ok := catalog.RuntimeByID(architecture, selection.RuntimeID)
+	if !ok || ref.ManifestSHA != selection.RuntimeManifestSHA256 {
+		return vmRuntimeCatalogRef{}, fmt.Errorf("explicit VM runtime selection does not resolve to one immutable catalog entry")
+	}
+	return ref, nil
 }
 
 func (a vmImageAsset) DiskRootFSPath() string {
@@ -353,6 +488,55 @@ func prepareVMRootFS(ctx context.Context, source string) (string, error) {
 		return "", fmt.Errorf("install decompressed VM rootfs: %w", err)
 	}
 	cleanup = false
+	return target, nil
+}
+
+func prepareVMComponentRootFS(ctx context.Context, serviceRoot string, guest vmGuestBaseArtifact) (target string, retErr error) {
+	dataDir := serviceDataDirForRoot(serviceRoot)
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return "", fmt.Errorf("create VM component provisioning directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dataDir, ".guest-rootfs-*.ext4")
+	if err != nil {
+		return "", fmt.Errorf("create VM component rootfs staging file: %w", err)
+	}
+	target = tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(target)
+		return "", fmt.Errorf("close VM component rootfs staging file: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			_ = os.Remove(target)
+		}
+	}()
+	if err := vmRootFSDecompressRunner(ctx, "zstd", "-d", "-f", "--no-progress", "-o", target, guest.RootFSPath); err != nil {
+		return "", fmt.Errorf("decompress VM component rootfs: %w", err)
+	}
+	info, err := os.Lstat(target)
+	if err != nil {
+		return "", fmt.Errorf("inspect VM component rootfs: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("VM component rootfs staging path is not a regular file")
+	}
+	if info.Size() != guest.Manifest.RootFS.UncompressedBytes {
+		return "", fmt.Errorf("VM component rootfs size mismatch: got %d, want %d", info.Size(), guest.Manifest.RootFS.UncompressedBytes)
+	}
+	if err := os.Chmod(target, 0o644); err != nil {
+		return "", fmt.Errorf("set VM component rootfs permissions: %w", err)
+	}
+	file, err := os.Open(target)
+	if err != nil {
+		return "", fmt.Errorf("open VM component rootfs for sync: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return "", fmt.Errorf("sync VM component rootfs: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return "", fmt.Errorf("close VM component rootfs after sync: %w", err)
+	}
 	return target, nil
 }
 

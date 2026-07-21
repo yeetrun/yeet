@@ -7,6 +7,7 @@ package catch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +40,198 @@ func TestRunVMStagesDBAfterArtifacts(t *testing.T) {
 	assertNoReadyVM(t, server, "svc")
 	if _, statErr := os.Stat(serviceRoot); !os.IsNotExist(statErr) {
 		t.Fatalf("service root stat after failed VM inputs = %v, want not exists", statErr)
+	}
+}
+
+func TestProvisionVMComponentComposition(t *testing.T) {
+	server := newTestServer(t)
+	execer, root, systemdDir, _ := newVMProvisionTestExecer(t, server, "devbox")
+	artifacts := vmProvisionComponentTestArtifacts(t, root)
+	vmProvisionArtifactsResolver = func(_ *ttyExecer, _ context.Context, _ cli.RunFlags, _ string, _ ProgressUI, gotRoot resolvedServiceRoot) (vmProvisionArtifacts, error) {
+		if gotRoot.Root != root {
+			t.Fatalf("resolver root = %q, want %q", gotRoot.Root, root)
+		}
+		return artifacts, nil
+	}
+	vmProvisionRuntimeDescriptorDeps = vmRuntimeDescriptorFileDeps{uid: uint32(os.Geteuid()), gid: uint32(os.Getegid())}
+
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: false}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("runVM: %v", err)
+	}
+	service := getTestService(t, server, "devbox")
+	if service.VM.Components == nil {
+		t.Fatal("component composition was not persisted")
+	}
+	if got := service.VM.Components.GuestBase; got.ID != artifacts.GuestBase.ID || got.ManifestSHA256 != artifacts.GuestBase.ManifestSHA256 {
+		t.Fatalf("guest lock = %#v, want %#v", got, artifacts.GuestBase)
+	}
+	if got := service.VM.Components.Kernel; got.ID != artifacts.Kernel.ID || got.ManifestSHA256 != artifacts.Kernel.ManifestSHA256 || got.Path != artifacts.Kernel.Path {
+		t.Fatalf("kernel lock = %#v, want %#v", got, artifacts.Kernel)
+	}
+	if got := service.VM.Components.Runtime.Configured; got != artifacts.Runtime {
+		t.Fatalf("runtime lock = %#v, want %#v", got, artifacts.Runtime)
+	}
+	if service.VM.Image.Version != artifacts.Image.Manifest.Version || service.VM.Image.Kernel != artifacts.Kernel.Path || service.VM.Image.RootFS != artifacts.Image.Paths.RootFSPath {
+		t.Fatalf("compatibility image = %#v", service.VM.Image)
+	}
+	if got, err := os.ReadFile(artifacts.Kernel.Path); err != nil || string(got) != "component-kernel" {
+		t.Fatalf("service kernel = %q, %v", got, err)
+	}
+	descriptorPath := filepath.Join(serviceDataDirForRoot(root), vmRuntimeDescriptorFileName)
+	if descriptor, err := readVMRuntimeDescriptorWithOwner(descriptorPath, "devbox", uint32(os.Geteuid()), uint32(os.Getegid())); err != nil || descriptor.Configured != artifacts.Runtime {
+		t.Fatalf("runtime descriptor = %#v, %v", descriptor, err)
+	}
+	unit, err := os.ReadFile(filepath.Join(systemdDir, vmSystemdUnitName("devbox")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unit), "--runtime-descriptor") || strings.Contains(string(unit), "--firecracker ") {
+		t.Fatalf("unit is not descriptor-managed:\n%s", unit)
+	}
+}
+
+func TestProvisionVMComponentFailureAtomic(t *testing.T) {
+	server := newTestServer(t)
+	execer, root, _, _ := newVMProvisionTestExecer(t, server, "devbox")
+	diskCalls := 0
+	vmProvisionDiskRunner = func(context.Context, []string) error {
+		diskCalls++
+		return nil
+	}
+	vmProvisionArtifactsResolver = func(*ttyExecer, context.Context, cli.RunFlags, string, ProgressUI, resolvedServiceRoot) (vmProvisionArtifacts, error) {
+		return vmProvisionArtifacts{}, errors.New("kernel manifest verification failed")
+	}
+
+	err := execer.runVM(cli.RunFlags{Net: "svc", Restart: false}, testUbuntuVMPayload)
+	if err == nil || !strings.Contains(err.Error(), "kernel manifest verification failed") {
+		t.Fatalf("runVM error = %v", err)
+	}
+	if diskCalls != 0 {
+		t.Fatalf("disk calls = %d, want 0", diskCalls)
+	}
+	assertNoReadyVM(t, server, "devbox")
+	if _, statErr := os.Stat(root); !os.IsNotExist(statErr) {
+		t.Fatalf("service root remains after component failure: %v", statErr)
+	}
+}
+
+func TestProvisionVMComponentCompositionExplicitImmutableSelection(t *testing.T) {
+	guestCatalog, err := decodeVMGuestBaseCatalog(vmGuestBaseCatalogFixture(t), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kernelCatalog, err := decodeVMKernelCatalog(vmKernelCatalogFixture(t), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeCatalog := validVMRuntimeCatalog()
+	guest := guestCatalog.GuestBases[0]
+	kernel := kernelCatalog.Kernels[0]
+	runtimeRef := runtimeCatalog.Architectures["amd64"].Runtimes[0]
+	selection := vmProvisionComponentSelection{
+		GuestBaseID: guest.GuestBaseID, GuestBaseManifestSHA256: guest.ManifestSHA256,
+		KernelID: kernel.KernelID, KernelManifestSHA256: kernel.ManifestSHA256,
+		RuntimeID: runtimeRef.RuntimeID, RuntimeManifestSHA256: runtimeRef.ManifestSHA,
+	}
+	refs, err := resolveVMProvisionComponentRefs(
+		vmImageCatalogImage{Payload: "vm://ubuntu/26.04", Architecture: "amd64"},
+		vmComponentCatalogSet{GuestBases: guestCatalog, Kernels: kernelCatalog, Runtimes: runtimeCatalog},
+		selection, "stable",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refs.GuestBase != guest || refs.Kernel != kernel || refs.Runtime != runtimeRef {
+		t.Fatalf("resolved refs = %#v", refs)
+	}
+}
+
+func TestProvisionVMLegacyMonolithicPersistsAdoptedComposition(t *testing.T) {
+	server := newTestServer(t)
+	execer, root, systemdDir, _ := newVMProvisionTestExecer(t, server, "legacy")
+	imageDir := t.TempDir()
+	paths := vmImagePaths{
+		Manifest: filepath.Join(imageDir, "manifest.json"), Dir: imageDir,
+		KernelPath: filepath.Join(imageDir, "vmlinux"), RootFSPath: filepath.Join(imageDir, "rootfs.ext4"),
+		FirecrackerPath: filepath.Join(imageDir, "firecracker"), JailerPath: filepath.Join(imageDir, "jailer"),
+	}
+	for path, contents := range map[string]string{
+		paths.KernelPath: "legacy-kernel", paths.RootFSPath: "legacy-rootfs",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	versionScript := "#!/bin/sh\ncase \"$0\" in\n  *firecracker) echo 'Firecracker v1.16.1' ;;\n  *) echo 'jailer v1.16.1' ;;\nesac\n"
+	for _, path := range []string{paths.FirecrackerPath, paths.JailerPath} {
+		if err := os.WriteFile(path, []byte(versionScript), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checksums := map[string]string{}
+	for name, path := range map[string]string{
+		"vmlinux": paths.KernelPath, "rootfs.ext4": paths.RootFSPath,
+		"firecracker": paths.FirecrackerPath, "jailer": paths.JailerPath,
+	} {
+		digest, err := sha256File(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checksums[name] = digest
+	}
+	manifest := vmImageManifest{
+		Name: "ubuntu", Version: "ubuntu-26.04-amd64-v29", Architecture: "x86_64",
+		Distro: "ubuntu", DistroVersion: "26.04", DefaultUser: "ubuntu", MetadataDriver: "ubuntu",
+		Kernel: "vmlinux", RootFS: "rootfs.ext4", Firecracker: "firecracker", Jailer: "jailer",
+		RootFSSize: int64(len("legacy-rootfs")), KernelVersion: "7.1.1", Checksums: checksums,
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Manifest, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	image := vmImageAsset{Paths: paths, PreparedRootFSPath: paths.RootFSPath, Manifest: manifest}
+	vmProvisionInspectRuntimePair = func(_ context.Context, firecracker, jailer string) (string, error) {
+		if firecracker != paths.FirecrackerPath || jailer != paths.JailerPath {
+			t.Fatalf("runtime pair = %q %q", firecracker, jailer)
+		}
+		return "1.16.1", nil
+	}
+	artifacts, err := execer.materializeVMLegacyProvisionArtifacts(context.Background(), image)
+	if err != nil {
+		t.Fatalf("derive legacy components: %v", err)
+	}
+	if artifacts.Legacy == nil || artifacts.GuestBase.ID == "" || artifacts.Kernel.ID == "" || artifacts.Runtime.ID == "" {
+		t.Fatalf("legacy artifacts = %#v", artifacts)
+	}
+	if artifacts.Runtime.Firecracker != paths.FirecrackerPath || artifacts.Runtime.Jailer != paths.JailerPath {
+		t.Fatalf("legacy runtime paths = %#v", artifacts.Runtime)
+	}
+	vmProvisionArtifactsResolver = func(*ttyExecer, context.Context, cli.RunFlags, string, ProgressUI, resolvedServiceRoot) (vmProvisionArtifacts, error) {
+		return artifacts, nil
+	}
+	vmProvisionRuntimeDescriptorDeps = vmRuntimeDescriptorFileDeps{uid: uint32(os.Geteuid()), gid: uint32(os.Getegid())}
+	if err := execer.runVM(cli.RunFlags{Net: "svc", Restart: false}, testUbuntuVMPayload); err != nil {
+		t.Fatalf("run legacy VM: %v", err)
+	}
+	service := getTestService(t, server, "legacy")
+	if service.VM.Components == nil || service.VM.Components.Runtime.Configured.ID != artifacts.Runtime.ID {
+		t.Fatalf("persisted legacy components = %#v", service.VM.Components)
+	}
+	if runtime := service.VM.Components.Runtime; runtime.Policy != "manual" || runtime.Channel != "stable" {
+		t.Fatalf("persisted legacy runtime policy = %q/%q, want manual/stable", runtime.Policy, runtime.Channel)
+	}
+	unit, err := os.ReadFile(filepath.Join(systemdDir, vmSystemdUnitName("legacy")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(unit), "--runtime-descriptor") {
+		t.Fatalf("legacy unit is not descriptor-managed:\n%s", unit)
+	}
+	if _, err := os.Stat(filepath.Join(serviceDataDirForRoot(root), vmRuntimeDescriptorFileName)); err != nil {
+		t.Fatalf("legacy descriptor: %v", err)
 	}
 }
 
@@ -712,6 +905,26 @@ func TestWriteVMProvisionConfigArtifactsFailureLeavesJailerPending(t *testing.T)
 	}
 	if readiness != vmJailerPendingRestart {
 		t.Fatalf("VM jailer readiness = %q, want %q", readiness, vmJailerPendingRestart)
+	}
+}
+
+func TestPublishVMProvisionVerifiedFileDigestMismatchDoesNotPublish(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	target := filepath.Join(root, "published", "vmlinux")
+	if err := os.WriteFile(source, []byte("wrong kernel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := publishVMProvisionVerifiedFile(source, target, vmRuntimeSHA256Bytes([]byte("expected kernel")), "kernel")
+	if err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("publish error = %v, want digest mismatch", err)
+	}
+	if strings.Contains(err.Error(), "%!w") {
+		t.Fatalf("publish error contains invalid nil wrapping: %v", err)
+	}
+	if _, statErr := os.Lstat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("mismatched kernel target stat error = %v, want absent", statErr)
 	}
 }
 
@@ -2470,6 +2683,9 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	oldGuestReadyBoundary := vmProvisionGuestReadyBoundaryFunc
 	oldGuestReadyWait := vmProvisionGuestReadyWaitFunc
 	oldRuntimeIdentity := vmProvisionEnsureRuntimeIdentity
+	oldArtifactsResolver := vmProvisionArtifactsResolver
+	oldDescriptorDeps := vmProvisionRuntimeDescriptorDeps
+	oldInspectRuntimePair := vmProvisionInspectRuntimePair
 	t.Cleanup(func() {
 		vmProvisionHostProfileFunc = oldHostProfile
 		vmImageInspectFunc = oldImageInspect
@@ -2485,6 +2701,9 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 		vmProvisionGuestReadyBoundaryFunc = oldGuestReadyBoundary
 		vmProvisionGuestReadyWaitFunc = oldGuestReadyWait
 		vmProvisionEnsureRuntimeIdentity = oldRuntimeIdentity
+		vmProvisionArtifactsResolver = oldArtifactsResolver
+		vmProvisionRuntimeDescriptorDeps = oldDescriptorDeps
+		vmProvisionInspectRuntimePair = oldInspectRuntimePair
 	})
 	vmProvisionHostProfileFunc = func(_ *ttyExecer, resolved resolvedServiceRoot, runningVMBytes int64) (vmHostProfile, error) {
 		if resolved.Root != serviceRoot {
@@ -2511,6 +2730,10 @@ func newVMProvisionTestExecer(t *testing.T, server *Server, service string) (*tt
 	}
 	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
 		return fakeVMImageAsset(t)
+	}
+	vmProvisionArtifactsResolver = func(e *ttyExecer, ctx context.Context, flags cli.RunFlags, payload string, ui ProgressUI, _ resolvedServiceRoot) (vmProvisionArtifacts, error) {
+		image, err := e.selectVMProvisionImage(ctx, flags, payload, ui)
+		return vmProvisionArtifacts{Image: image, Legacy: &image}, err
 	}
 	prepareVMRootFSFunc = func(_ context.Context, source string) (string, error) {
 		return strings.TrimSuffix(source, ".zst"), nil
@@ -2599,6 +2822,52 @@ func fakeVMImageAssetVersion(t *testing.T, version string) (vmImageAsset, error)
 			RootFSSize:   2 << 30,
 		},
 	}, nil
+}
+
+func vmProvisionComponentTestArtifacts(t *testing.T, serviceRoot string) vmProvisionArtifacts {
+	t.Helper()
+	cacheRoot := t.TempDir()
+	rootFS := filepath.Join(cacheRoot, "rootfs.ext4.zst")
+	preparedRootFS := filepath.Join(cacheRoot, "prepared-rootfs.ext4")
+	kernelSource := filepath.Join(cacheRoot, "vmlinux")
+	configSource := filepath.Join(cacheRoot, "kernel.config")
+	firecracker := filepath.Join(cacheRoot, "firecracker")
+	jailer := filepath.Join(cacheRoot, "jailer")
+	for path, contents := range map[string]string{
+		rootFS: "component-rootfs", preparedRootFS: "prepared-component-rootfs",
+		kernelSource: "component-kernel", configSource: "CONFIG_VIRTIO=y\n",
+		firecracker: "component-firecracker", jailer: "component-jailer",
+	} {
+		mode := os.FileMode(0o644)
+		if path == firecracker || path == jailer {
+			mode = 0o755
+		}
+		if err := os.WriteFile(path, []byte(contents), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	guestDigest := strings.Repeat("a", 64)
+	kernelManifestDigest := strings.Repeat("b", 64)
+	runtimeManifestDigest := strings.Repeat("c", 64)
+	kernelTarget := filepath.Join(serviceDataDirForRoot(serviceRoot), "kernels", "kernel-linux-7.1.1-yeet-v1", kernelManifestDigest, "vmlinux")
+	configTarget := filepath.Join(filepath.Dir(kernelTarget), "kernel.config")
+	guest := db.VMGuestBaseConfig{ID: "guest-ubuntu-26.04-amd64-v1", ManifestSHA256: guestDigest, Source: "official", RootFSProvenance: strings.Repeat("d", 64)}
+	kernel := db.VMKernelArtifactConfig{ID: "kernel-linux-7.1.1-yeet-v1", ManifestSHA256: kernelManifestDigest, SHA256: vmRuntimeSHA256Bytes([]byte("component-kernel")), Path: kernelTarget, Source: "official"}
+	runtimeArtifact := db.VMRuntimeArtifactConfig{
+		ID: "firecracker-v1.16.1-yeet-v1", ManifestSHA256: runtimeManifestDigest,
+		FirecrackerSHA256: vmRuntimeSHA256Bytes([]byte("component-firecracker")), JailerSHA256: vmRuntimeSHA256Bytes([]byte("component-jailer")),
+		Firecracker: firecracker, Jailer: jailer, Source: "official",
+	}
+	return vmProvisionArtifacts{
+		Image: vmImageAsset{
+			Paths:              vmImagePaths{Manifest: filepath.Join(cacheRoot, "guest-manifest.json"), Dir: cacheRoot, KernelPath: kernelTarget, RootFSPath: rootFS, FirecrackerPath: firecracker, JailerPath: jailer},
+			PreparedRootFSPath: preparedRootFS,
+			Manifest:           vmImageManifest{Name: "Ubuntu 26.04", Version: guest.ID, Architecture: "amd64", Distro: "ubuntu", DistroVersion: "26.04", DefaultUser: "ubuntu", GuestInit: vmGuestInitPath, MetadataDriver: "ubuntu", Kernel: "vmlinux", RootFS: "rootfs.ext4.zst", Firecracker: "firecracker", Jailer: "jailer", RootFSSize: 2 << 30},
+		},
+		GuestBase: guest, Kernel: kernel, Runtime: runtimeArtifact,
+		KernelSourcePath: kernelSource, KernelConfigSourcePath: configSource, KernelConfigTargetPath: configTarget,
+		KernelConfigSHA256: vmRuntimeSHA256Bytes([]byte("CONFIG_VIRTIO=y\n")),
+	}
 }
 
 func staleVMProvisionImageState(cachedVersion, latestVersion string) vmImageCacheState {
