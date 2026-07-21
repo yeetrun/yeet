@@ -100,12 +100,12 @@ type Server struct {
 	newISORemoveSteps                  func(string, RemoveOptions, *RemoveReport, string) (isoRemoveSteps, error)
 	recoverVMRuntimeState              func(context.Context, *Config) error
 	acquireCatchInstallLock            func(context.Context, string) (io.Closer, error)
-	vmRuntimeCommandDeps    *vmRuntimeCommandDeps
-	vmRuntimePruneDeps      *vmRuntimePruneDeps
-	vmRuntimeReconcileDeps  *vmRuntimeReconcileDeps
-	vmRuntimeTrialDeps      *vmRuntimeTrialConsumerDeps
-	vmRuntimeRestartDeps    *vmRuntimeRestartDeps
-	vmRuntimeRestartLocks   sync.Map
+	vmRuntimeCommandDeps               *vmRuntimeCommandDeps
+	vmRuntimePruneDeps                 *vmRuntimePruneDeps
+	vmRuntimeReconcileDeps             *vmRuntimeReconcileDeps
+	vmRuntimeTrialDeps                 *vmRuntimeTrialConsumerDeps
+	vmRuntimeRestartDeps               *vmRuntimeRestartDeps
+	vmRuntimeRestartLocks              sync.Map
 }
 
 type vmRuntimeRecoveryBarrier struct {
@@ -222,6 +222,14 @@ func NewUnstartedServer(config *Config) *Server {
 		return AcquireCatchInstallTransactionLock(ctx, dataRoot, uint32(os.Geteuid()))
 	}
 	return s
+}
+
+func (s *Server) vmGuestBaseCache() vmGuestBaseCache {
+	return vmGuestBaseCache{Root: filepath.Join(s.cfg.RootDir, "vm-guest-bases")}
+}
+
+func (s *Server) vmKernelArtifactCache() vmKernelArtifactCache {
+	return vmKernelArtifactCache{Root: filepath.Join(s.cfg.RootDir, "vm-kernels")}
 }
 
 func findHostStorageStartupRecoveryForConfig(ctx context.Context, config Config) (*hostStorageTransaction, error) {

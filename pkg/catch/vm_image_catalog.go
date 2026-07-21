@@ -18,8 +18,15 @@ import (
 const defaultVMImageCatalogURL = "https://raw.githubusercontent.com/yeetrun/yeet-vm-images/main/catalog.json"
 
 type vmImageCatalog struct {
-	SchemaVersion int                   `json:"schema_version"`
-	Images        []vmImageCatalogImage `json:"images"`
+	SchemaVersion     int                       `json:"schema_version"`
+	Images            []vmImageCatalogImage     `json:"images"`
+	ComponentCatalogs *vmImageComponentCatalogs `json:"component_catalogs,omitempty"`
+}
+
+type vmImageComponentCatalogs struct {
+	GuestBases string `json:"guest_bases"`
+	Kernels    string `json:"kernels"`
+	Runtimes   string `json:"runtimes"`
 }
 
 type vmImageCatalogImage struct {
@@ -105,6 +112,11 @@ func (c vmImageCatalog) validate(requireTrustedURL bool) error {
 	}
 	if defaults == 0 {
 		return fmt.Errorf("no default VM image in catalog: %s", vmImageCatalogPayloadsForError(c))
+	}
+	if c.ComponentCatalogs != nil {
+		if err := c.ComponentCatalogs.validate(requireTrustedURL); err != nil {
+			return err
+		}
 	}
 	return nil
 }

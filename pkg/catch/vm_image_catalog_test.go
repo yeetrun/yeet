@@ -65,6 +65,50 @@ func TestFetchVMImageCatalogValidatesAndFindsImages(t *testing.T) {
 	}
 }
 
+func TestVMImageCatalogLegacySchemaWithoutComponentCatalogsStillValidates(t *testing.T) {
+	raw := []byte(`{
+		"schema_version": 1,
+		"images": [{
+			"payload": "vm://ubuntu/26.04",
+			"name": "Ubuntu 26.04",
+			"architecture": "amd64",
+			"manifest_url": "https://github.com/yeetrun/yeet-vm-images/releases/download/ubuntu-26.04-amd64-latest/manifest.json",
+			"version_prefix": "ubuntu-26.04-amd64-",
+			"default": true
+		}]
+	}`)
+	var catalog vmImageCatalog
+	if err := json.Unmarshal(raw, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.validate(true); err != nil {
+		t.Fatalf("legacy catalog validate: %v", err)
+	}
+	if catalog.ComponentCatalogs != nil {
+		t.Fatalf("legacy component catalogs = %#v, want nil", catalog.ComponentCatalogs)
+	}
+	if _, ok := catalog.ImageByPayload("vm://ubuntu/26.04"); !ok {
+		t.Fatal("legacy image lookup failed")
+	}
+}
+
+func TestVMImageCatalogAdditiveComponentCatalogsRequireTrustedHTTPS(t *testing.T) {
+	catalog := vmImageCatalogValidationTestCatalog()
+	catalog.ComponentCatalogs = &vmImageComponentCatalogs{
+		GuestBases: "https://raw.githubusercontent.com/yeetrun/yeet-vm-images/main/guest-catalog.json",
+		Kernels:    "https://raw.githubusercontent.com/yeetrun/yeet-vm-images/main/kernel-catalog.json",
+		Runtimes:   "https://raw.githubusercontent.com/yeetrun/yeet-vm-images/main/runtime-catalog.json",
+	}
+	if err := catalog.validate(true); err != nil {
+		t.Fatalf("component catalog validate: %v", err)
+	}
+
+	catalog.ComponentCatalogs.Kernels = "http://raw.githubusercontent.com/yeetrun/yeet-vm-images/main/kernel-catalog.json"
+	if err := catalog.validate(true); err == nil || !strings.Contains(err.Error(), "scheme must be https") {
+		t.Fatalf("insecure component catalog error = %v", err)
+	}
+}
+
 func TestVMImageCatalogRejectsUntrustedManifestURL(t *testing.T) {
 	catalog := vmImageCatalog{
 		SchemaVersion: 1,
