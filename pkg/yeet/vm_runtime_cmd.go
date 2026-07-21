@@ -55,7 +55,7 @@ func handleVMRuntimeImportParsed(ctx context.Context, _ cli.VMRuntimeFlags, rema
 		producerDone <- err
 	}()
 
-	remoteArgs := []string{"vm", "runtime", cli.VMRuntimeActionImport, remaining[1], vmRuntimeImportStdinPath}
+	remoteArgs := []string{"vm", "runtime", "--", cli.VMRuntimeActionImport, remaining[1], vmRuntimeImportStdinPath}
 	remoteErr := withRemoteExecTTYDisabled(func() error {
 		return execRemoteFn(ctx, systemServiceName, remoteArgs, pr, false)
 	})
