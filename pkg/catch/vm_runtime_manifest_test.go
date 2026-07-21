@@ -89,6 +89,13 @@ func TestVMRuntimeManifestRejectsMismatchedVersions(t *testing.T) {
 	}
 }
 
+func TestTrimmedVMRuntimeVersionOutputUsesStableFirstLine(t *testing.T) {
+	output := "Firecracker v1.16.1\n\n2026-07-20T22:13:26Z Firecracker exiting successfully. exit_code=0\n"
+	if got := trimmedVMRuntimeVersionOutput(output); got != "Firecracker v1.16.1" {
+		t.Fatalf("trimmed output = %q", got)
+	}
+}
+
 func FuzzParseVMRuntimeManifest(f *testing.F) {
 	raw, err := json.Marshal(validVMRuntimeManifest())
 	if err != nil {

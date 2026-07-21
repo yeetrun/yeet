@@ -345,5 +345,7 @@ func validVMRuntimeSupport(support string) bool {
 }
 
 func trimmedVMRuntimeVersionOutput(output string) string {
-	return strings.TrimSpace(output)
+	trimmed := strings.TrimSpace(output)
+	line, _, _ := strings.Cut(trimmed, "\n")
+	return strings.TrimSpace(line)
 }
