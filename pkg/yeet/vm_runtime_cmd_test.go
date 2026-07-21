@@ -55,7 +55,7 @@ func TestHandleSvcVMRuntimeImportStreamsDeterministicRequiredFiles(t *testing.T)
 	if gotService != systemServiceName {
 		t.Fatalf("service = %q, want %s", gotService, systemServiceName)
 	}
-	wantArgs := []string{"vm", "runtime", "import", "local-v1", vmRuntimeImportStdinPath}
+	wantArgs := []string{"vm", "runtime", "--", "import", "local-v1", vmRuntimeImportStdinPath}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("args = %#v, want %#v", gotArgs, wantArgs)
 	}
