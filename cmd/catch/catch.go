@@ -386,6 +386,7 @@ func handleVMRunCommand(args []string) error {
 		RuntimeRunningMarker: *runtimeRunningMarker,
 		RuntimeTrialResult:   *runtimeTrialResult,
 		RuntimeDataRoot:      *legacyDataDir,
+		ServicesRoot:         resolveVMRunServicesRoot(*legacyDataDir, *servicesRoot),
 		JailerBase:           *jailerBase,
 		APISocket:            *apiSock,
 		ConfigFile:           *configFile,
@@ -401,6 +402,13 @@ func handleVMRunCommand(args []string) error {
 		return nil
 	}
 	return err
+}
+
+func resolveVMRunServicesRoot(dataRoot, configured string) string {
+	if configured = strings.TrimSpace(configured); configured != "" {
+		return configured
+	}
+	return filepath.Join(dataRoot, "services")
 }
 
 func resolveVMRunRuntimeMode(service, serviceRoot, firecracker, jailer, descriptor, runningMarker, trialResult string) (string, string, error) {

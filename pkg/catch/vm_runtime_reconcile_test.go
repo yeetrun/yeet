@@ -158,6 +158,92 @@ func TestReconcileVMRuntimeStateWithoutAdoptedVMsIsNoOp(t *testing.T) {
 	}
 }
 
+func TestReconcileVMComponentKernelCompatibilityRepairsOnlyMissingImagePath(t *testing.T) {
+	server := newTestServer(t)
+	root := filepath.Join(server.cfg.RootDir, "custom", "devbox")
+	kernelID := "kernel-linux-7.1.1-yeet-v1"
+	manifestSHA := strings.Repeat("a", 64)
+	kernelPath := filepath.Join(serviceDataDirForRoot(root), "kernels", kernelID, manifestSHA, vmKernelFilename)
+	if err := os.MkdirAll(filepath.Dir(kernelPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kernelPath, []byte("verified kernel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service := &db.Service{
+		Name: "devbox", ServiceType: db.ServiceTypeVM, ServiceRoot: root,
+		VM: &db.VMConfig{Components: &db.VMComponentsConfig{Kernel: db.VMKernelArtifactConfig{
+			ID: kernelID, ManifestSHA256: manifestSHA, SHA256: vmRuntimeSHA256Bytes([]byte("verified kernel")),
+			Path: kernelPath, Source: "official",
+		}}},
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"devbox": service}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := server.reconcileVMComponentKernelCompatibility(); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stored.Services().Get("devbox").VM().Image().Kernel; got != kernelPath {
+		t.Fatalf("compatibility kernel = %q, want %q", got, kernelPath)
+	}
+
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.Image.Kernel = "/operator/pinned/vmlinux"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.reconcileVMComponentKernelCompatibility(); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = server.cfg.DB.Get()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stored.Services().Get("devbox").VM().Image().Kernel; got != "/operator/pinned/vmlinux" {
+		t.Fatalf("non-empty compatibility kernel was overwritten with %q", got)
+	}
+}
+
+func TestReconcileVMComponentKernelCompatibilityRejectsUnverifiedComponent(t *testing.T) {
+	server := newTestServer(t)
+	root := filepath.Join(server.cfg.RootDir, "services", "devbox")
+	kernelID := "kernel-linux-7.1.1-yeet-v1"
+	manifestSHA := strings.Repeat("a", 64)
+	kernelPath := filepath.Join(serviceDataDirForRoot(root), "kernels", kernelID, manifestSHA, vmKernelFilename)
+	if err := os.MkdirAll(filepath.Dir(kernelPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(kernelPath, []byte("tampered kernel"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	service := &db.Service{Name: "devbox", ServiceType: db.ServiceTypeVM, ServiceRoot: root, VM: &db.VMConfig{
+		Components: &db.VMComponentsConfig{Kernel: db.VMKernelArtifactConfig{
+			ID: kernelID, ManifestSHA256: manifestSHA, SHA256: strings.Repeat("b", 64), Path: kernelPath, Source: "official",
+		}},
+	}}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"devbox": service}}); err != nil {
+		t.Fatal(err)
+	}
+
+	err := server.reconcileVMComponentKernelCompatibility()
+	if err == nil || !strings.Contains(err.Error(), "sha256 mismatch") {
+		t.Fatalf("reconcile error = %v, want digest rejection", err)
+	}
+	stored, getErr := server.cfg.DB.Get()
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if got := stored.Services().Get("devbox").VM().Image().Kernel; got != "" {
+		t.Fatalf("unverified compatibility kernel was persisted as %q", got)
+	}
+}
+
 func reconcileVMRuntimeTestService(name, root string, artifact db.VMRuntimeArtifactConfig) *db.Service {
 	runDir := serviceRunDirForRoot(root)
 	return &db.Service{

@@ -27,6 +27,7 @@ type VMConsoleProxyConfig struct {
 	RuntimeRunningMarker string
 	RuntimeTrialResult   string
 	RuntimeDataRoot      string
+	ServicesRoot         string
 	JailerBase           string
 	APISocket            string
 	ConfigFile           string

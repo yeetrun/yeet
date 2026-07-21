@@ -636,6 +636,7 @@ func TestHandleSpecialCommandVMRun(t *testing.T) {
 		Firecracker:     "/srv/firecracker",
 		Jailer:          "/srv/jailer",
 		RuntimeDataRoot: *legacyDataDir,
+		ServicesRoot:    resolveVMRunServicesRoot(*legacyDataDir, *servicesRoot),
 		JailerBase:      "/run/yeet/vm-jailer",
 		APISocket:       "/run/fc.sock",
 		ConfigFile:      "/run/fc.json",
@@ -688,6 +689,7 @@ func TestHandleSpecialCommandVMRunUsesRuntimeDescriptor(t *testing.T) {
 		RuntimeRunningMarker: "/srv/vms/devbox/run/vmm-runtime-running.json",
 		RuntimeTrialResult:   "/srv/vms/devbox/run/vmm-runtime-trial-result.json",
 		RuntimeDataRoot:      *legacyDataDir,
+		ServicesRoot:         resolveVMRunServicesRoot(*legacyDataDir, *servicesRoot),
 		JailerBase:           "/run/yeet/vm-jailer",
 		APISocket:            "/run/fc.sock",
 		ConfigFile:           "/run/fc.json",
@@ -699,6 +701,15 @@ func TestHandleSpecialCommandVMRunUsesRuntimeDescriptor(t *testing.T) {
 	got.OnGuestReboot = nil
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("config = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveVMRunServicesRootSupportsCustomAndDefaultRoots(t *testing.T) {
+	if got := resolveVMRunServicesRoot("/var/lib/custom-yeet", ""); got != "/var/lib/custom-yeet/services" {
+		t.Fatalf("default services root = %q", got)
+	}
+	if got := resolveVMRunServicesRoot("/var/lib/custom-yeet", "/zfs/yeet-services"); got != "/zfs/yeet-services" {
+		t.Fatalf("custom services root = %q", got)
 	}
 }
 

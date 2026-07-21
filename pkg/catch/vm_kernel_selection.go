@@ -13,19 +13,36 @@ import (
 
 const vmGuestKernelSelectionPath = "/etc/yeet-vm/kernel/selected.json"
 
-var vmGuestKernelVersionPattern = regexp.MustCompile(`^linux-[0-9]+[.][0-9]+([.][0-9]+)?-yeet$`)
+var vmGuestKernelVersionPattern = regexp.MustCompile(`^linux-[0-9]+[.][0-9]+([.][0-9]+)*-yeet$`)
 var vmGuestKernelSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type vmGuestKernelSelection struct {
-	SchemaVersion int               `json:"schema_version"`
-	Version       string            `json:"version"`
-	Kernel        string            `json:"kernel"`
-	KernelConfig  string            `json:"kernel_config,omitempty"`
-	SHA256        map[string]string `json:"sha256"`
+	SchemaVersion  int               `json:"schema_version"`
+	ReleaseID      string            `json:"release_id,omitempty"`
+	ManifestSHA256 string            `json:"manifest_sha256,omitempty"`
+	Version        string            `json:"version"`
+	Kernel         string            `json:"kernel"`
+	KernelConfig   string            `json:"kernel_config,omitempty"`
+	SHA256         map[string]string `json:"sha256"`
 }
 
 func (s vmGuestKernelSelection) validate() error {
-	if s.SchemaVersion != 1 {
+	switch s.SchemaVersion {
+	case 1:
+		if strings.TrimSpace(s.ReleaseID) != "" || strings.TrimSpace(s.ManifestSHA256) != "" {
+			return fmt.Errorf("VM guest kernel selector schema_version 1 must not declare component release identity")
+		}
+	case 2:
+		if !vmKernelIDPattern.MatchString(strings.TrimSpace(s.ReleaseID)) {
+			return fmt.Errorf("invalid VM guest kernel release_id %q", s.ReleaseID)
+		}
+		if !vmGuestKernelSHA256Pattern.MatchString(s.ManifestSHA256) {
+			return fmt.Errorf("invalid VM guest kernel manifest_sha256")
+		}
+		if strings.TrimSpace(s.KernelConfig) == "" {
+			return fmt.Errorf("VM guest kernel selector schema_version 2 requires kernel_config")
+		}
+	default:
 		return fmt.Errorf("unsupported VM guest kernel selector schema_version %d", s.SchemaVersion)
 	}
 	if !vmGuestKernelVersionPattern.MatchString(strings.TrimSpace(s.Version)) {
@@ -44,6 +61,11 @@ func (s vmGuestKernelSelection) validate() error {
 	}
 	if strings.TrimSpace(s.KernelConfig) != "" && !vmGuestKernelSHA256Pattern.MatchString(s.SHA256["kernel.config"]) {
 		return fmt.Errorf("invalid VM guest kernel config sha256")
+	}
+	for name := range s.SHA256 {
+		if name != "vmlinux" && name != "kernel.config" {
+			return fmt.Errorf("invalid VM guest kernel sha256 key %q", name)
+		}
 	}
 	return nil
 }

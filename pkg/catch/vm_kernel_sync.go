@@ -25,12 +25,17 @@ var (
 	vmKernelSyncSystemctlFunc       func(args ...string) error
 	isServiceRunningForVMKernelSync = (*Server).IsServiceRunning
 	syncVMGuestKernelFunc           = syncVMGuestKernelDefault
+	fetchVMKernelSyncCatalog        = fetchTrustedVMKernelSyncCatalog
+	fetchVMKernelSyncManifest       = fetchTrustedVMKernelSyncManifest
 )
+
+var errVMGuestKernelSelectorMissing = errors.New("VM guest kernel selector is missing")
 
 type vmKernelSyncResult struct {
 	Version        string
 	HostKernelPath string
 	HostConfigPath string
+	Component      *db.VMKernelArtifactConfig
 }
 
 type vmKernelSyncTarget struct {
@@ -147,9 +152,6 @@ func syncVMGuestKernelToHost(ctx context.Context, target vmKernelSyncTarget) (vm
 }
 
 func AutoSyncVMGuestKernelOnReboot(ctx context.Context, cfg VMConsoleProxyConfig) error {
-	if strings.TrimSpace(cfg.RuntimeDescriptor) != "" {
-		return fmt.Errorf("automatic kernel sync for descriptor-managed VMs requires component-aware kernel reconciliation")
-	}
 	service, serviceRoot, diskPath, configPath, err := resolveVMKernelAutoSyncConfig(cfg)
 	if err != nil {
 		return err
@@ -161,38 +163,56 @@ func AutoSyncVMGuestKernelOnReboot(ctx context.Context, cfg VMConsoleProxyConfig
 	if err != nil {
 		return err
 	}
-	err = autoSyncVMGuestKernelLocked(ctx, dataRoot, service, serviceRoot, diskPath, configPath)
-	if err != nil && errors.Is(err, os.ErrNotExist) {
+	servicesRoot, err := vmKernelSyncServicesRoot(dataRoot, cfg.ServicesRoot)
+	if err != nil {
+		return err
+	}
+	err = autoSyncVMGuestKernelLocked(ctx, dataRoot, servicesRoot, service, serviceRoot, diskPath, configPath, strings.TrimSpace(cfg.RuntimeDescriptor) != "")
+	if err != nil && errors.Is(err, errVMGuestKernelSelectorMissing) {
 		return nil
 	}
 	return err
 }
 
-func autoSyncVMGuestKernelLocked(ctx context.Context, dataRoot, service, serviceRoot, diskPath, configPath string) error {
+func autoSyncVMGuestKernelLocked(ctx context.Context, dataRoot, servicesRoot, service, serviceRoot, diskPath, configPath string, descriptorMode bool) error {
 	return WithVMRuntimeRootLock(ctx, dataRoot, func() error {
-		if err := refuseAdoptedVMLegacyKernelAutoSync(dataRoot, service); err != nil {
+		stored, err := vmKernelSyncStoredService(dataRoot, servicesRoot, service)
+		if err != nil {
 			return err
 		}
-		_, err := syncVMGuestKernelSelectionToHost(ctx, serviceRoot, service, diskPath, configPath)
-		return err
+		if stored == nil {
+			if descriptorMode {
+				return fmt.Errorf("automatic kernel sync for descriptor-managed VMs requires component-aware kernel reconciliation")
+			}
+			_, err := syncVMGuestKernelSelectionToHost(ctx, serviceRoot, service, diskPath, configPath)
+			return err
+		}
+		if stored.VM == nil || stored.VM.Components == nil {
+			_, err := syncVMGuestKernelSelectionToHost(ctx, serviceRoot, service, diskPath, configPath)
+			return err
+		}
+		if !descriptorMode {
+			return fmt.Errorf("automatic legacy kernel sync is disabled for adopted VM %q", service)
+		}
+		return syncVMComponentGuestKernelToHost(ctx, dataRoot, servicesRoot, serviceRoot, service, diskPath, configPath, *stored.VM.Components)
 	})
 }
 
-func refuseAdoptedVMLegacyKernelAutoSync(dataRoot, service string) error {
-	store := db.NewStore(filepath.Join(dataRoot, "db.json"), filepath.Join(dataRoot, "services"))
+func vmKernelSyncStoredService(dataRoot, servicesRoot, service string) (*db.Service, error) {
+	store := db.NewStore(filepath.Join(dataRoot, "db.json"), servicesRoot)
 	dv, err := store.Get()
 	if err != nil {
-		return fmt.Errorf("read host VM state before automatic kernel sync: %w", err)
+		return nil, fmt.Errorf("read host VM state before automatic kernel sync: %w", err)
 	}
 	sv, ok := dv.Services().GetOk(service)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	stored := sv.AsStruct()
-	if stored.ServiceType == db.ServiceTypeVM && stored.VM != nil && stored.VM.Components != nil {
-		return fmt.Errorf("automatic legacy kernel sync is disabled for adopted VM %q", service)
+	if stored.ServiceType != db.ServiceTypeVM || stored.VM == nil {
+		return nil, fmt.Errorf("service %q is not a VM service", service)
 	}
-	return nil
+	return stored, nil
 }
 
 func vmKernelSyncDataRoot(jailerBase string) (string, error) {
@@ -201,6 +221,17 @@ func vmKernelSyncDataRoot(jailerBase string) (string, error) {
 		return "", fmt.Errorf("automatic VM kernel sync requires the canonical jailer base under the Catch data root")
 	}
 	return filepath.Dir(jailerBase), nil
+}
+
+func vmKernelSyncServicesRoot(dataRoot, configured string) (string, error) {
+	configured = strings.TrimSpace(configured)
+	if configured == "" {
+		return filepath.Join(dataRoot, "services"), nil
+	}
+	if !filepath.IsAbs(configured) || filepath.Clean(configured) != configured {
+		return "", fmt.Errorf("automatic VM kernel sync requires a clean absolute services root")
+	}
+	return configured, nil
 }
 
 func resolveVMKernelAutoSyncConfig(cfg VMConsoleProxyConfig) (service, serviceRoot, diskPath, configPath string, err error) {
@@ -273,6 +304,12 @@ func syncVMGuestKernelSelectionToHost(ctx context.Context, serviceRoot, service,
 }
 
 func syncVMGuestKernelFromRootFS(ctx context.Context, root, service, diskPath string) (result vmKernelSyncResult, retErr error) {
+	return withMountedVMGuestRootFS(ctx, diskPath, func(mountRoot string) (vmKernelSyncResult, error) {
+		return syncGuestSelectedKernelFromMountedRoot(ctx, root, service, mountRoot)
+	})
+}
+
+func withMountedVMGuestRootFS(ctx context.Context, diskPath string, sync func(string) (vmKernelSyncResult, error)) (result vmKernelSyncResult, retErr error) {
 	mountRoot, err := os.MkdirTemp("", "yeet-vm-kernel-rootfs-*")
 	if err != nil {
 		return vmKernelSyncResult{}, fmt.Errorf("create VM rootfs mount dir: %w", err)
@@ -302,7 +339,241 @@ func syncVMGuestKernelFromRootFS(ctx context.Context, root, service, diskPath st
 		retErr = joinVMMetadataDeferredError(retErr, runner(ctx, []string{"umount", mountRoot}), "unmount VM rootfs")
 	}()
 
-	return syncGuestSelectedKernelFromMountedRoot(ctx, root, service, mountRoot)
+	return sync(mountRoot)
+}
+
+func fetchTrustedVMKernelSyncCatalog(ctx context.Context) (vmKernelCatalog, error) {
+	raw, err := fetchVMComponentCatalogRaw(ctx, nil, defaultVMKernelCatalogURL, "kernel", true)
+	if err != nil {
+		return vmKernelCatalog{}, err
+	}
+	return decodeVMKernelCatalog(raw, true)
+}
+
+func fetchTrustedVMKernelSyncManifest(ctx context.Context, dataRoot string, ref vmKernelCatalogRef) (vmKernelManifest, error) {
+	cache := vmKernelArtifactCache{Root: filepath.Join(dataRoot, "vm-kernels")}
+	manifest, _, err := cache.fetchValidatedManifest(ctx, ref, true)
+	return manifest, err
+}
+
+func syncVMComponentGuestKernelToHost(ctx context.Context, dataRoot, servicesRoot, serviceRoot, service, diskPath, configPath string, components db.VMComponentsConfig) error {
+	result, err := withMountedVMGuestRootFS(ctx, diskPath, func(mountRoot string) (vmKernelSyncResult, error) {
+		return syncVMComponentGuestKernelFromMountedRoot(ctx, dataRoot, serviceRoot, mountRoot, components)
+	})
+	if err != nil {
+		return err
+	}
+	if result.Component == nil {
+		return fmt.Errorf("component-aware VM kernel sync did not resolve an authoritative kernel")
+	}
+	return commitVMComponentKernelSync(dataRoot, servicesRoot, service, configPath, components.Kernel, *result.Component)
+}
+
+func syncVMComponentGuestKernelFromMountedRoot(ctx context.Context, dataRoot, serviceRoot, mountRoot string, components db.VMComponentsConfig) (vmKernelSyncResult, error) {
+	selection, err := readGuestKernelSelection(mountRoot)
+	if err != nil {
+		return vmKernelSyncResult{}, err
+	}
+	if selection.SchemaVersion == 1 {
+		return syncVMLegacyComponentKernelFromMountedRoot(dataRoot, serviceRoot, mountRoot, selection, components)
+	}
+	ref, manifest, err := resolveTrustedVMKernelSelection(ctx, dataRoot, selection)
+	if err != nil {
+		return vmKernelSyncResult{}, err
+	}
+
+	srcKernel, err := resolveGuestRootPath(mountRoot, selection.Kernel)
+	if err != nil {
+		return vmKernelSyncResult{}, fmt.Errorf("resolve guest kernel path: %w", err)
+	}
+	srcConfig, err := resolveGuestRootPath(mountRoot, selection.KernelConfig)
+	if err != nil {
+		return vmKernelSyncResult{}, fmt.Errorf("resolve guest kernel config path: %w", err)
+	}
+	dstDir := filepath.Join(serviceDataDirForRoot(serviceRoot), "kernels", ref.KernelID, ref.ManifestSHA256)
+	dstKernel := filepath.Join(dstDir, vmKernelFilename)
+	dstConfig := filepath.Join(dstDir, vmKernelConfigFilename)
+	if err := publishVMProvisionVerifiedFile(srcKernel, dstKernel, manifest.VMLinux.SHA256, "guest-selected kernel"); err != nil {
+		return vmKernelSyncResult{}, err
+	}
+	if err := publishVMProvisionVerifiedFile(srcConfig, dstConfig, manifest.Config.SHA256, "guest-selected kernel config"); err != nil {
+		return vmKernelSyncResult{}, err
+	}
+	component := db.VMKernelArtifactConfig{
+		ID: ref.KernelID, ManifestSHA256: ref.ManifestSHA256,
+		SHA256: manifest.VMLinux.SHA256, Path: dstKernel, Source: "official",
+	}
+	return vmKernelSyncResult{
+		Version: selection.Version, HostKernelPath: dstKernel, HostConfigPath: dstConfig, Component: &component,
+	}, nil
+}
+
+func syncVMLegacyComponentKernelFromMountedRoot(dataRoot, serviceRoot, mountRoot string, selection vmGuestKernelSelection, components db.VMComponentsConfig) (vmKernelSyncResult, error) {
+	if !isVMLegacyKernelSource(components.Kernel.Source) {
+		return vmKernelSyncResult{}, fmt.Errorf("VM guest kernel selector schema_version 1 is not valid for non-legacy component source %q", components.Kernel.Source)
+	}
+	record, provenanceSHA, err := readPinnedVMLegacyKernelComposition(dataRoot, components.GuestBase.RootFSProvenance)
+	if err != nil {
+		return vmKernelSyncResult{}, err
+	}
+	_, kernelID, _, err := vmLegacyCompositionIDs(record, provenanceSHA)
+	if err != nil {
+		return vmKernelSyncResult{}, err
+	}
+	if kernelID != components.Kernel.ID || record.Kernel.KernelSHA256 != components.Kernel.SHA256 {
+		return vmKernelSyncResult{}, fmt.Errorf("pinned legacy VM composition does not match the configured kernel component")
+	}
+	if selection.SHA256["vmlinux"] != record.Kernel.KernelSHA256 ||
+		(strings.TrimSpace(selection.KernelConfig) != "" && selection.SHA256["kernel.config"] != record.Kernel.ConfigSHA256) {
+		return vmKernelSyncResult{}, fmt.Errorf("VM guest kernel selector does not match the pinned legacy composition")
+	}
+
+	srcKernel, err := resolveGuestRootPath(mountRoot, selection.Kernel)
+	if err != nil {
+		return vmKernelSyncResult{}, fmt.Errorf("resolve guest kernel path: %w", err)
+	}
+	if !vmRuntimeSHA256Pattern.MatchString(components.Kernel.ManifestSHA256) {
+		return vmKernelSyncResult{}, fmt.Errorf("configured legacy VM kernel has invalid manifest SHA-256")
+	}
+	dstDir := filepath.Join(serviceDataDirForRoot(serviceRoot), "kernels", components.Kernel.ID, components.Kernel.ManifestSHA256)
+	dstKernel := filepath.Join(dstDir, vmKernelFilename)
+	if err := publishVMProvisionVerifiedFile(srcKernel, dstKernel, record.Kernel.KernelSHA256, "guest-selected legacy kernel"); err != nil {
+		return vmKernelSyncResult{}, err
+	}
+	dstConfig := ""
+	if strings.TrimSpace(selection.KernelConfig) != "" {
+		srcConfig, err := resolveGuestRootPath(mountRoot, selection.KernelConfig)
+		if err != nil {
+			return vmKernelSyncResult{}, fmt.Errorf("resolve guest kernel config path: %w", err)
+		}
+		dstConfig = filepath.Join(dstDir, vmKernelConfigFilename)
+		if err := publishVMProvisionVerifiedFile(srcConfig, dstConfig, record.Kernel.ConfigSHA256, "guest-selected legacy kernel config"); err != nil {
+			return vmKernelSyncResult{}, err
+		}
+	}
+	next := components.Kernel
+	next.Path = dstKernel
+	return vmKernelSyncResult{
+		Version: selection.Version, HostKernelPath: dstKernel, HostConfigPath: dstConfig, Component: &next,
+	}, nil
+}
+
+func isVMLegacyKernelSource(source string) bool {
+	switch vmRuntimeAdoptionClassification(source) {
+	case vmRuntimeAdoptionOfficialLegacy, vmRuntimeAdoptionLocalLegacy, vmRuntimeAdoptionCustomLegacy:
+		return true
+	default:
+		return false
+	}
+}
+
+func readPinnedVMLegacyKernelComposition(dataRoot, digest string) (vmLegacyCompositionRecord, string, error) {
+	digest = strings.TrimSpace(digest)
+	if !vmRuntimeSHA256Pattern.MatchString(digest) {
+		return vmLegacyCompositionRecord{}, "", fmt.Errorf("adopted VM has invalid legacy composition provenance")
+	}
+	dirPath := filepath.Join(dataRoot, vmLegacyProvenanceDirName, vmLegacyProvenanceDigestDirName)
+	info, err := os.Lstat(dirPath)
+	if err != nil {
+		return vmLegacyCompositionRecord{}, "", fmt.Errorf("inspect pinned legacy VM composition directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return vmLegacyCompositionRecord{}, "", fmt.Errorf("pinned legacy VM composition directory is not a directory")
+	}
+	dir, err := os.Open(dirPath)
+	if err != nil {
+		return vmLegacyCompositionRecord{}, "", fmt.Errorf("open pinned legacy VM composition directory: %w", err)
+	}
+	defer func() { _ = dir.Close() }()
+	raw, err := readVMLegacyCompositionEntry(dir, digest+".json", uint32(os.Geteuid()))
+	if err != nil {
+		return vmLegacyCompositionRecord{}, "", fmt.Errorf("read pinned legacy VM composition: %w", err)
+	}
+	var record vmLegacyCompositionRecord
+	if err := decodeStrictVMRuntimeJSON(raw, &record, "legacy VM composition"); err != nil {
+		return vmLegacyCompositionRecord{}, "", err
+	}
+	_, got, err := canonicalVMLegacyComposition(record)
+	if err != nil {
+		return vmLegacyCompositionRecord{}, "", err
+	}
+	if got != digest {
+		return vmLegacyCompositionRecord{}, "", fmt.Errorf("pinned legacy VM composition digest mismatch")
+	}
+	return record, digest, nil
+}
+
+func resolveTrustedVMKernelSelection(ctx context.Context, dataRoot string, selection vmGuestKernelSelection) (vmKernelCatalogRef, vmKernelManifest, error) {
+	catalog, err := fetchVMKernelSyncCatalog(ctx)
+	if err != nil {
+		return vmKernelCatalogRef{}, vmKernelManifest{}, err
+	}
+	if err := catalog.validate(true); err != nil {
+		return vmKernelCatalogRef{}, vmKernelManifest{}, fmt.Errorf("validate trusted VM kernel catalog: %w", err)
+	}
+	ref, ok := catalog.KernelByID(selection.ReleaseID)
+	if !ok || ref.ManifestSHA256 != selection.ManifestSHA256 {
+		return vmKernelCatalogRef{}, vmKernelManifest{}, fmt.Errorf("VM guest kernel selection does not resolve to one immutable trusted catalog entry")
+	}
+	manifest, err := fetchVMKernelSyncManifest(ctx, dataRoot, ref)
+	if err != nil {
+		return vmKernelCatalogRef{}, vmKernelManifest{}, err
+	}
+	if err := manifest.validate(true); err != nil {
+		return vmKernelCatalogRef{}, vmKernelManifest{}, fmt.Errorf("validate trusted VM kernel manifest: %w", err)
+	}
+	if err := validateVMKernelManifestRef(manifest, ref); err != nil {
+		return vmKernelCatalogRef{}, vmKernelManifest{}, err
+	}
+	wantVersion := "linux-" + manifest.UpstreamVersion + "-yeet"
+	if selection.Version != wantVersion ||
+		selection.SHA256["vmlinux"] != manifest.VMLinux.SHA256 ||
+		selection.SHA256["kernel.config"] != manifest.Config.SHA256 {
+		return vmKernelCatalogRef{}, vmKernelManifest{}, fmt.Errorf("VM guest kernel selector does not match the trusted manifest for %s", ref.KernelID)
+	}
+	return ref, manifest, nil
+}
+
+func commitVMComponentKernelSync(dataRoot, servicesRoot, service, configPath string, current, next db.VMKernelArtifactConfig) error {
+	oldConfig, nextConfig, err := renderVMKernelFirecrackerConfigUpdate(configPath, next.Path)
+	if err != nil {
+		return err
+	}
+	store := db.NewStore(filepath.Join(dataRoot, "db.json"), servicesRoot)
+	_, err = store.MutateDataWithPrePublicationCompensation(func(data *db.Data) (func() error, error) {
+		stored, ok := data.Services[service]
+		if !ok || stored == nil || stored.ServiceType != db.ServiceTypeVM || stored.VM == nil || stored.VM.Components == nil {
+			return nil, fmt.Errorf("adopted VM %q no longer exists", service)
+		}
+		if stored.VM.Components.Kernel != current {
+			return nil, fmt.Errorf("VM %q kernel selection changed concurrently", service)
+		}
+		if err := writeVMFileAtomic(configPath, nextConfig, 0o644); err != nil {
+			return nil, fmt.Errorf("write Firecracker config: %w", err)
+		}
+		stored.VM.Components.Kernel = next
+		stored.VM.Image.Kernel = next.Path
+		return func() error { return writeVMFileAtomic(configPath, oldConfig, 0o644) }, nil
+	})
+	return err
+}
+
+func renderVMKernelFirecrackerConfigUpdate(configPath, kernelPath string) ([]byte, []byte, error) {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("read Firecracker config: %w", err)
+	}
+	var cfg firecrackerConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, nil, fmt.Errorf("decode Firecracker config: %w", err)
+	}
+	cfg.BootSource.KernelImagePath = kernelPath
+	cfg.BootSource.InitrdPath = ""
+	rendered, err := renderFirecrackerConfig(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return raw, rendered, nil
 }
 
 func syncGuestSelectedKernelFromMountedRoot(_ context.Context, serviceRoot, service, mountRoot string) (vmKernelSyncResult, error) {
@@ -337,14 +608,20 @@ func syncGuestSelectedKernelFromMountedRoot(_ context.Context, serviceRoot, serv
 func readGuestKernelSelection(mountRoot string) (vmGuestKernelSelection, error) {
 	selectorPath, err := resolveGuestRootPath(mountRoot, vmGuestKernelSelectionPath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return vmGuestKernelSelection{}, fmt.Errorf("%w: %v", errVMGuestKernelSelectorMissing, err)
+		}
 		return vmGuestKernelSelection{}, fmt.Errorf("resolve guest kernel selector: %w", err)
 	}
 	raw, err := os.ReadFile(selectorPath)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return vmGuestKernelSelection{}, fmt.Errorf("%w: %v", errVMGuestKernelSelectorMissing, err)
+		}
 		return vmGuestKernelSelection{}, fmt.Errorf("read guest kernel selector: %w", err)
 	}
 	var selection vmGuestKernelSelection
-	if err := json.Unmarshal(raw, &selection); err != nil {
+	if err := decodeStrictVMRuntimeJSON(raw, &selection, "VM guest kernel selector"); err != nil {
 		return vmGuestKernelSelection{}, fmt.Errorf("decode guest kernel selector: %w", err)
 	}
 	if err := selection.validate(); err != nil {

@@ -282,6 +282,45 @@ func TestAutoSyncVMGuestKernelOnRebootSkipsMissingSelector(t *testing.T) {
 	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), "/old/vmlinux")
 }
 
+func TestAutoSyncVMGuestKernelOnRebootDoesNotHideMissingSelectedPayload(t *testing.T) {
+	dataRoot := t.TempDir()
+	root := filepath.Join(dataRoot, "services", "devbox")
+	writeKernelSyncFirecrackerConfig(t, root, "/old/vmlinux", "")
+	writeVMKernelSyncHostDB(t, dataRoot, root, nil)
+	withVMKernelSyncRunner(t, func(_ context.Context, command []string) error {
+		switch {
+		case len(command) > 0 && command[0] == "sh":
+			return nil
+		case len(command) > 0 && command[0] == "mount":
+			mountRoot := command[len(command)-1]
+			selectorDir := filepath.Join(mountRoot, "etc/yeet-vm/kernel")
+			if err := os.MkdirAll(selectorDir, 0o755); err != nil {
+				return err
+			}
+			selector := `{
+				"schema_version":1,
+				"version":"linux-7.1.1-yeet",
+				"kernel":"/usr/lib/yeet-vm/kernels/linux-7.1.1-yeet/vmlinux",
+				"sha256":{"vmlinux":"` + strings.Repeat("a", 64) + `"}
+			}`
+			return os.WriteFile(filepath.Join(selectorDir, "selected.json"), []byte(selector), 0o644)
+		case len(command) == 2 && command[0] == "umount":
+			return nil
+		default:
+			return errors.New("unexpected kernel sync command: " + strings.Join(command, " "))
+		}
+	})
+
+	err := AutoSyncVMGuestKernelOnReboot(context.Background(), VMConsoleProxyConfig{
+		Service: "devbox", ServiceRoot: root, DiskPath: "/srv/vms/devbox/rootfs.ext4",
+		ConfigFile: filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), JailerBase: vmJailerBaseForDataRoot(dataRoot),
+	})
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("AutoSync error = %v, want missing selected payload", err)
+	}
+	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), "/old/vmlinux")
+}
+
 func TestAutoSyncVMGuestKernelOnRebootRejectsDescriptorModeBeforeMutation(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(serviceRunDirForRoot(root), "firecracker.json")
