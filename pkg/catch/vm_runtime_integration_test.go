@@ -398,13 +398,13 @@ func prepareVMRuntimeIntegrationISOPool(t *testing.T, ctx context.Context, serve
 		}
 		for i, link := range occupied {
 			name := fmt.Sprintf("runtime-integration-occupied-%d", i)
+			allocation := newDBISOAllocation(name, isoReservationRequest{Kind: iso.PayloadVM, Modes: []string{"iso"}}, link)
+			allocation.State = string(iso.StateTombstoned)
+			allocation.RemoveRequested = true
+			allocation.CleanupVerified = true
 			data.Services[name] = &db.Service{
 				Name: name,
-				ISO: &db.ISOAllocation{
-					Kind:  string(iso.PayloadVM),
-					State: string(iso.StateTombstoned),
-					Link:  link,
-				},
+				ISO:  allocation,
 			}
 		}
 		return nil
