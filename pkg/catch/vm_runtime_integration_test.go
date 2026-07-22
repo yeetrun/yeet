@@ -393,6 +393,9 @@ func prepareVMRuntimeIntegrationISOPool(t *testing.T, ctx context.Context, serve
 			AllocatorVersion: iso.AllocatorVersion,
 			PolicyVersion:    iso.PolicyVersion,
 		}
+		if data.Services == nil {
+			data.Services = map[string]*db.Service{}
+		}
 		for i, link := range occupied {
 			name := fmt.Sprintf("runtime-integration-occupied-%d", i)
 			data.Services[name] = &db.Service{
