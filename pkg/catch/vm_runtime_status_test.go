@@ -49,6 +49,45 @@ func TestVMRuntimeStatusUsesTrustedHostMarkerAndReportsExactDigests(t *testing.T
 	}
 }
 
+func TestVMStatusComponents(t *testing.T) {
+	server := newTestServer(t)
+	catalog := validVMRuntimeCatalog()
+	configured := vmRuntimeCommandArtifact(catalog.Architectures["amd64"].Runtimes[0], "official")
+	staged := configured
+	staged.ID = "firecracker-v1.17.0-yeet-v1"
+	staged.ManifestSHA256 = strings.Repeat("9", 64)
+	seedRuntimeCommandVM(t, server, db.VMRuntimeLifecycleConfig{Configured: configured, Staged: &staged})
+	guest := db.VMGuestBaseConfig{ID: "guest-ubuntu-26.04-amd64-v4", ManifestSHA256: strings.Repeat("a", 64), Source: "official", RootFSProvenance: strings.Repeat("b", 64)}
+	kernel := db.VMKernelArtifactConfig{ID: "kernel-linux-7.1.1-yeet-v2", ManifestSHA256: strings.Repeat("c", 64), SHA256: strings.Repeat("d", 64), Path: "/srv/devbox/data/kernels/vmlinux", Source: "official"}
+	if _, _, err := server.cfg.DB.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.Components.GuestBase = guest
+		service.VM.Components.Kernel = kernel
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server.vmRuntimeCommandDeps = vmRuntimeStatusTestDeps(catalog, vmRuntimeUnitState{ActiveState: "inactive"}, func(int) bool { return false })
+
+	rows, err := server.vmRuntimeStatusRows(context.Background(), "devbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].GuestBase.ID != guest.ID || rows[0].GuestBase.ManifestSHA256 != guest.ManifestSHA256 ||
+		rows[0].Kernel.ID != kernel.ID || rows[0].Kernel.ManifestSHA256 != kernel.ManifestSHA256 || rows[0].Kernel.SHA256 != kernel.SHA256 ||
+		rows[0].Configured.ID != configured.ID || rows[0].Staged == nil || rows[0].Staged.ID != staged.ID {
+		t.Fatalf("component status = %#v", rows)
+	}
+	var out bytes.Buffer
+	if err := renderVMRuntimeStatus(&out, "table", rows); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"GUEST BASE", "KERNEL", guest.ID + "@" + guest.ManifestSHA256, kernel.ID + "@" + kernel.ManifestSHA256, configured.ID} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("status table missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
 func TestVMRuntimeStatusDoesNotConsultGuestAgent(t *testing.T) {
 	oldReady := queryVMGuestReadyFn
 	oldNetwork := queryVMNetworkStateFn
