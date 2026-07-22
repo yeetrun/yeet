@@ -38,6 +38,31 @@ func stubVMSnapshotDiskFlusher(t *testing.T) {
 	t.Cleanup(func() { vmSnapshotDiskFlusher = old })
 }
 
+func TestFlushVMSnapshotDiskRejectsInvalidPaths(t *testing.T) {
+	tests := []string{
+		"",
+		"relative/zvol",
+		"/dev/zvol",
+		"/dev/zvol/../null",
+	}
+	for _, path := range tests {
+		t.Run(path, func(t *testing.T) {
+			err := flushVMSnapshotDisk(path)
+			if err == nil || !strings.Contains(err.Error(), "not a ZFS zvol device") {
+				t.Fatalf("flushVMSnapshotDisk(%q) error = %v", path, err)
+			}
+		})
+	}
+}
+
+func TestFlushVMSnapshotDiskReportsMissingDevice(t *testing.T) {
+	path := "/dev/zvol/yeet-test/missing-device"
+	err := flushVMSnapshotDisk(path)
+	if err == nil || !strings.Contains(err.Error(), "open VM snapshot disk "+path) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("flushVMSnapshotDisk(%q) error = %v", path, err)
+	}
+}
+
 func (r *recordingVMFirecrackerPauser) Pause(_ context.Context, _ string) error {
 	r.calls = append(r.calls, "pause")
 	return nil

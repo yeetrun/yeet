@@ -144,7 +144,7 @@ func flushVMSnapshotDisk(path string) error {
 	if err != nil {
 		return fmt.Errorf("open VM snapshot disk %s: %w", path, err)
 	}
-	defer disk.Close()
+	defer func() { _ = disk.Close() }()
 	info, err := disk.Stat()
 	if err != nil {
 		return fmt.Errorf("inspect VM snapshot disk %s: %w", path, err)

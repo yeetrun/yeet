@@ -128,16 +128,9 @@ func (i localVMImageImporter) validateImportRequest(req localVMImageImportReques
 }
 
 func (i localVMImageImporter) importExtracted(cacheRoot string, req localVMImageImportRequest, managed vmImageAsset, stagingDir string) (localVMImageRef, error) {
-	rootFSName, rootFSPath, rootFSSize, err := localVMImageRootFS(stagingDir)
+	rootFSName, rootFSPath, rootFSSize, sourceManifest, hasSourceManifest, err := localVMImageRootFSSource(stagingDir)
 	if err != nil {
 		return localVMImageRef{}, err
-	}
-	sourceManifest, hasSourceManifest, err := localVMImageSourceManifest(stagingDir, rootFSName)
-	if err != nil {
-		return localVMImageRef{}, err
-	}
-	if hasSourceManifest && localVMImageCompressedRootFS(rootFSName) && sourceManifest.RootFSSize > 0 {
-		rootFSSize = sourceManifest.RootFSSize
 	}
 	kernelSource, kernelPolicy, err := localVMImageKernelSource(stagingDir, managed.Paths.KernelPath, req.AllowLocalKernel)
 	if err != nil {
@@ -179,6 +172,21 @@ func (i localVMImageImporter) importExtracted(cacheRoot string, req localVMImage
 		return localVMImageRef{}, err
 	}
 	return ref, nil
+}
+
+func localVMImageRootFSSource(stagingDir string) (name, path string, size int64, manifest vmImageManifest, hasManifest bool, err error) {
+	name, path, size, err = localVMImageRootFS(stagingDir)
+	if err != nil {
+		return "", "", 0, vmImageManifest{}, false, err
+	}
+	manifest, hasManifest, err = localVMImageSourceManifest(stagingDir, name)
+	if err != nil {
+		return "", "", 0, vmImageManifest{}, false, err
+	}
+	if hasManifest && localVMImageCompressedRootFS(name) && manifest.RootFSSize > 0 {
+		size = manifest.RootFSSize
+	}
+	return name, path, size, manifest, hasManifest, nil
 }
 
 func localVMImageCompressedRootFS(name string) bool {
