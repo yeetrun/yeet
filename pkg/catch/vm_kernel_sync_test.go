@@ -404,7 +404,7 @@ func TestVMKernelSyncRejectsRunningVMWithoutRestart(t *testing.T) {
 	}
 }
 
-func TestVMKernelSyncRejectsAdoptedVMBeforeSideEffects(t *testing.T) {
+func TestVMKernelSyncRejectsIncompleteComponentLockBeforeSideEffects(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
@@ -431,8 +431,8 @@ func TestVMKernelSyncRejectsAdoptedVMBeforeSideEffects(t *testing.T) {
 	})
 
 	err := server.syncVMGuestKernel(context.Background(), "devbox", cli.VMKernelFlags{Restart: true})
-	if err == nil || !strings.Contains(err.Error(), "component-aware kernel reconciliation") {
-		t.Fatalf("sync error = %v, want adopted VM rejection", err)
+	if err == nil || !strings.Contains(err.Error(), "kernel lock is incomplete") {
+		t.Fatalf("sync error = %v, want incomplete component lock rejection", err)
 	}
 	if runningChecks != 0 || runnerCalls != 0 || len(systemctlCalls) != 0 {
 		t.Fatalf("side effects after adopted rejection: running=%d runner=%d systemctl=%v", runningChecks, runnerCalls, systemctlCalls)
