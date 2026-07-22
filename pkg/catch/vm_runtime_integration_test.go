@@ -849,7 +849,8 @@ func runVMRuntimeIntegrationSSH(ctx context.Context, cfg vmRuntimeIntegrationCon
 func verifyVMRuntimeIntegrationDiskRestore(t *testing.T, ctx context.Context, server *Server, cfg vmRuntimeIntegrationConfig, ip netip.Addr, priorPID int) {
 	t.Helper()
 	service := vmRuntimeIntegrationService(t, server, cfg.Service)
-	if _, err := runVMRuntimeIntegrationSSH(ctx, cfg, service.VM.SSH.User, ip, "printf 'before\\n' > /var/tmp/yeet-runtime-integration-state && sync"); err != nil {
+	const markerPath = "/var/lib/yeet-runtime-integration-state"
+	if _, err := runVMRuntimeIntegrationSSH(ctx, cfg, service.VM.SSH.User, ip, "printf 'before\\n' | sudo tee "+markerPath+" >/dev/null && sync"); err != nil {
 		t.Fatalf("write pre-snapshot guest marker: %v", err)
 	}
 	var snapshotOut bytes.Buffer
@@ -860,7 +861,7 @@ func verifyVMRuntimeIntegrationDiskRestore(t *testing.T, ctx context.Context, se
 	if snapshot == "" || snapshot == snapshotOut.String() {
 		t.Fatalf("parse VM snapshot output: %q", snapshotOut.String())
 	}
-	if _, err := runVMRuntimeIntegrationSSH(ctx, cfg, service.VM.SSH.User, ip, "printf 'after\\n' > /var/tmp/yeet-runtime-integration-state && sync"); err != nil {
+	if _, err := runVMRuntimeIntegrationSSH(ctx, cfg, service.VM.SSH.User, ip, "printf 'after\\n' | sudo tee "+markerPath+" >/dev/null && sync"); err != nil {
 		t.Fatalf("write post-snapshot guest marker: %v", err)
 	}
 	var restoreIO bytes.Buffer
@@ -870,7 +871,7 @@ func verifyVMRuntimeIntegrationDiskRestore(t *testing.T, ctx context.Context, se
 	service = vmRuntimeIntegrationService(t, server, cfg.Service)
 	ip = waitVMRuntimeIntegrationGuest(t, ctx, service.VM.Sockets.VsockSocketPath)
 	waitVMRuntimeIntegrationSSH(t, ctx, cfg, service.VM.SSH.User, ip)
-	value, err := runVMRuntimeIntegrationSSH(ctx, cfg, service.VM.SSH.User, ip, "cat /var/tmp/yeet-runtime-integration-state")
+	value, err := runVMRuntimeIntegrationSSH(ctx, cfg, service.VM.SSH.User, ip, "sudo cat "+markerPath)
 	if err != nil {
 		t.Fatalf("read restored guest marker: %v", err)
 	}
