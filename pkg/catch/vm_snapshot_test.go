@@ -31,6 +31,13 @@ type recordingVMFirecrackerPauser struct {
 	resumeContextErr error
 }
 
+func stubVMSnapshotDiskFlusher(t *testing.T) {
+	t.Helper()
+	old := vmSnapshotDiskFlusher
+	vmSnapshotDiskFlusher = func(string) error { return nil }
+	t.Cleanup(func() { vmSnapshotDiskFlusher = old })
+}
+
 func (r *recordingVMFirecrackerPauser) Pause(_ context.Context, _ string) error {
 	r.calls = append(r.calls, "pause")
 	return nil
@@ -55,20 +62,36 @@ func TestCreateVMSnapshotPauseZFSSnapshotResumeUsesNoMemoryCheckpoint(t *testing
 	root := t.TempDir()
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendZVOL)
 	pauser := &recordingVMFirecrackerPauser{}
+	flushed := false
 	var snapshotCall string
 	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
 		if args[0] == "snapshot" {
 			if !reflect.DeepEqual(pauser.calls, []string{"pause"}) {
 				t.Fatalf("pause/resume calls at snapshot = %#v", pauser.calls)
 			}
+			if !flushed {
+				t.Fatal("ZFS snapshot ran before the VM disk was flushed")
+			}
 			snapshotCall = strings.Join(args, " ")
 		}
 		return "", "", nil
 	}
-	oldRunning, oldController := vmSnapshotIsRunning, vmSnapshotFirecracker
+	oldRunning, oldController, oldFlusher := vmSnapshotIsRunning, vmSnapshotFirecracker, vmSnapshotDiskFlusher
 	vmSnapshotIsRunning = func(*Server, string) (bool, error) { return true, nil }
 	vmSnapshotFirecracker = pauser
-	t.Cleanup(func() { vmSnapshotIsRunning, vmSnapshotFirecracker = oldRunning, oldController })
+	vmSnapshotDiskFlusher = func(path string) error {
+		if path != "/dev/zvol/flash/yeet/vms/devbox/vm/d-abc/root" {
+			t.Fatalf("flushed disk = %q", path)
+		}
+		if !reflect.DeepEqual(pauser.calls, []string{"pause"}) {
+			t.Fatalf("pause/resume calls at flush = %#v", pauser.calls)
+		}
+		flushed = true
+		return nil
+	}
+	t.Cleanup(func() {
+		vmSnapshotIsRunning, vmSnapshotFirecracker, vmSnapshotDiskFlusher = oldRunning, oldController, oldFlusher
+	})
 
 	if err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{Comment: "before upgrade"}, io.Discard); err != nil {
 		t.Fatalf("createVMSnapshot: %v", err)
@@ -86,6 +109,7 @@ func TestCreateVMSnapshotPauseZFSSnapshotResumeUsesNoMemoryCheckpoint(t *testing
 }
 
 func TestCreateVMSnapshotResumesAfterZFSSnapshotFailure(t *testing.T) {
+	stubVMSnapshotDiskFlusher(t)
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
 	pauser := &recordingVMFirecrackerPauser{}
@@ -107,7 +131,39 @@ func TestCreateVMSnapshotResumesAfterZFSSnapshotFailure(t *testing.T) {
 	}
 }
 
+func TestCreateVMSnapshotResumesWithoutSnapshotAfterDiskFlushFailure(t *testing.T) {
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
+	pauser := &recordingVMFirecrackerPauser{}
+	snapshotCalled := false
+	server.zfsRunner = func(_ context.Context, args ...string) (string, string, error) {
+		if args[0] == "snapshot" {
+			snapshotCalled = true
+		}
+		return "", "", nil
+	}
+	oldRunning, oldController, oldFlusher := vmSnapshotIsRunning, vmSnapshotFirecracker, vmSnapshotDiskFlusher
+	vmSnapshotIsRunning = func(*Server, string) (bool, error) { return true, nil }
+	vmSnapshotFirecracker = pauser
+	vmSnapshotDiskFlusher = func(string) error { return errVMSnapshotTest }
+	t.Cleanup(func() {
+		vmSnapshotIsRunning, vmSnapshotFirecracker, vmSnapshotDiskFlusher = oldRunning, oldController, oldFlusher
+	})
+
+	err := server.createVMSnapshot(context.Background(), "devbox", cli.SnapshotsCreateFlags{}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "flush VM") {
+		t.Fatalf("createVMSnapshot error = %v, want disk flush failure", err)
+	}
+	if snapshotCalled {
+		t.Fatal("ZFS snapshot ran after disk flush failed")
+	}
+	if !reflect.DeepEqual(pauser.calls, []string{"pause", "resume"}) {
+		t.Fatalf("pause/resume calls = %#v", pauser.calls)
+	}
+}
+
 func TestCreateVMSnapshotResumeIgnoresCanceledOperationContext(t *testing.T) {
+	stubVMSnapshotDiskFlusher(t)
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -148,6 +204,7 @@ func TestCreateVMSnapshotStoppedVMDoesNotPause(t *testing.T) {
 }
 
 func TestCreateVMSnapshotReportsResumeFailureAfterSuccessfulZFSSnapshot(t *testing.T) {
+	stubVMSnapshotDiskFlusher(t)
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendZVOL)
 	pauser := &recordingVMFirecrackerPauser{resumeErr: errVMSnapshotTest}
@@ -191,13 +248,14 @@ func TestCreateVMRuntimeUpgradeRecoveryPointForStoppedZVOL(t *testing.T) {
 }
 
 func TestCreatePausedVMRuntimeUpgradeRecoveryPointCombinesFailures(t *testing.T) {
+	stubVMSnapshotDiskFlusher(t)
 	pauser := &recordingVMFirecrackerPauser{resumeErr: errors.New("resume failed")}
 	oldController := vmSnapshotFirecracker
 	vmSnapshotFirecracker = pauser
 	t.Cleanup(func() { vmSnapshotFirecracker = oldController })
 
 	name, err := createPausedVMRuntimeUpgradeRecoveryPoint(
-		context.Background(), "devbox", "/run/devbox/firecracker.sock",
+		context.Background(), "devbox", "/run/devbox/firecracker.sock", "/dev/zvol/pool/devbox",
 		func(context.Context) (string, error) {
 			return "pool/devbox@runtime-upgrade", errors.New("snapshot failed")
 		},
