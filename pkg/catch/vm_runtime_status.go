@@ -18,6 +18,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
 
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/serviceid"
@@ -84,6 +85,13 @@ type vmRuntimeUnitState struct {
 	MainPID     int
 }
 
+type vmRuntimeStatusView uint8
+
+const (
+	vmRuntimeStatusFleetView vmRuntimeStatusView = iota
+	vmRuntimeStatusDetailView
+)
+
 func readVMRuntimeUnitState(ctx context.Context, unit string) (vmRuntimeUnitState, error) {
 	active, err := systemctlVMRuntimeAdoptionProperty(ctx, unit, "ActiveState")
 	if err != nil {
@@ -105,7 +113,11 @@ func (s *Server) printVMRuntimeStatus(ctx context.Context, w io.Writer, serviceN
 	if err != nil {
 		return err
 	}
-	return renderVMRuntimeStatus(w, format, rows)
+	view := vmRuntimeStatusFleetView
+	if serviceName != "" {
+		view = vmRuntimeStatusDetailView
+	}
+	return renderVMRuntimeStatus(w, format, rows, view)
 }
 
 func (s *Server) vmRuntimeStatusRows(ctx context.Context, serviceName string) ([]vmRuntimeStatusRow, error) {
@@ -431,6 +443,11 @@ func vmRuntimeStatusIdentityEqual(left, right vmRuntimeStatusIdentity) bool {
 	return left.ID == right.ID && left.ManifestSHA256 == right.ManifestSHA256
 }
 
+func vmRuntimeStatusRuntimeEquivalent(left, right vmRuntimeStatusIdentity) bool {
+	return vmRuntimeStatusIdentityEqual(left, right) &&
+		left.FirecrackerSHA256 == right.FirecrackerSHA256 && left.JailerSHA256 == right.JailerSHA256
+}
+
 func matchVMRuntimeRunningMarker(marker vmRuntimeRunningMarker, runtimeState db.VMRuntimeLifecycleConfig) (db.VMRuntimeArtifactConfig, string, bool) {
 	candidates := []struct {
 		artifact *db.VMRuntimeArtifactConfig
@@ -596,7 +613,7 @@ func validateVMRuntimeRunningMarkerProcess(marker vmRuntimeRunningMarker) error 
 	return nil
 }
 
-func renderVMRuntimeStatus(w io.Writer, format string, rows []vmRuntimeStatusRow) error {
+func renderVMRuntimeStatus(w io.Writer, format string, rows []vmRuntimeStatusRow, view vmRuntimeStatusView) error {
 	switch format {
 	case "json":
 		return json.NewEncoder(w).Encode(rows)
@@ -605,42 +622,555 @@ func renderVMRuntimeStatus(w io.Writer, format string, rows []vmRuntimeStatusRow
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(rows)
 	case "", "table":
-		table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-		if _, err := fmt.Fprintln(table, "SERVICE\tGUEST BASE\tKERNEL\tRUNNING\tCONFIGURED\tSTAGED\tPREVIOUS\tPOLICY\tCHANNEL\tPROMOTED\tJAILER\tSTATE\tACTION"); err != nil {
-			return err
+		if view == vmRuntimeStatusDetailView {
+			return renderVMRuntimeStatusDetail(w, rows)
 		}
-		for _, row := range rows {
-			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				row.Service, vmComponentStatusIdentityDisplay(row.GuestBase), vmComponentStatusIdentityDisplay(row.Kernel),
-				vmRuntimeStatusIdentityDisplay(row.Running), vmRuntimeStatusIdentityDisplay(&row.Configured),
-				vmRuntimeStatusIdentityDisplay(row.Staged), vmRuntimeStatusIdentityDisplay(row.Previous),
-				row.Policy, row.Channel, vmRuntimeStatusIdentityDisplay(row.LatestPromoted), row.JailerIsolation,
-				row.State, row.RecommendedAction); err != nil {
-				return err
-			}
-		}
-		return table.Flush()
+		return renderVMRuntimeStatusFleet(w, rows)
 	default:
 		return fmt.Errorf("unsupported VM runtime status format %q", format)
 	}
 }
 
-func vmComponentStatusIdentityDisplay(identity vmComponentStatusIdentity) string {
-	if identity.ID == "" {
-		return "-"
+const vmRuntimeStatusHumanWidth = 100
+
+func renderVMRuntimeStatusDetail(w io.Writer, rows []vmRuntimeStatusRow) error {
+	for index, row := range rows {
+		if index > 0 {
+			if _, err := fmt.Fprintln(w); err != nil {
+				return err
+			}
+		}
+		if err := renderVMRuntimeStatusDetailRow(w, row); err != nil {
+			return err
+		}
 	}
-	if identity.ManifestSHA256 == "" {
-		return identity.ID
-	}
-	return identity.ID + "@" + identity.ManifestSHA256
+	return nil
 }
 
-func vmRuntimeStatusIdentityDisplay(identity *vmRuntimeStatusIdentity) string {
+func renderVMRuntimeStatusDetailRow(w io.Writer, row vmRuntimeStatusRow) error {
+	if err := writeVMRuntimeStatusDetailHeader(w, row); err != nil {
+		return err
+	}
+	if err := writeVMRuntimeStatusDetailComponents(w, row); err != nil {
+		return err
+	}
+	if err := writeVMRuntimeStatusDetailRuntime(w, row); err != nil {
+		return err
+	}
+	if err := writeVMRuntimeStatusDetailMetadata(w, row); err != nil {
+		return err
+	}
+	return writeVMRuntimeStatusDetailAction(w, row.RecommendedAction)
+}
+
+func writeVMRuntimeStatusDetailHeader(w io.Writer, row vmRuntimeStatusRow) error {
+	_, err := fmt.Fprintf(w, "%s  %s\n\n", vmRuntimeStatusServiceDisplay(row.Service), vmRuntimeStatusHumanState(row.State))
+	return err
+}
+
+func writeVMRuntimeStatusDetailComponents(w io.Writer, row vmRuntimeStatusRow) error {
+	section := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintf(section, "  Guest base:\t%s\n  Kernel:\t%s\n",
+		vmRuntimeStatusComponentSummary(row.GuestBase), vmRuntimeStatusComponentSummary(row.Kernel)); err != nil {
+		return err
+	}
+	return section.Flush()
+}
+
+func writeVMRuntimeStatusDetailRuntime(w io.Writer, row vmRuntimeStatusRow) error {
+	if _, err := fmt.Fprintln(w, "\n  Runtime"); err != nil {
+		return err
+	}
+	running := vmRuntimeStatusRuntimeDetail(row.Running, true)
+	configured := vmRuntimeStatusRuntimeDetail(&row.Configured, true)
+	if row.Running != nil && vmRuntimeStatusRuntimeEquivalent(*row.Running, row.Configured) {
+		configured = "same as running"
+	}
+	section := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintf(section, "    Running:\t%s\n    Configured:\t%s\n    Staged:\t%s\n    Previous:\t%s\n",
+		running, configured, vmRuntimeStatusRuntimeDetail(row.Staged, true), vmRuntimeStatusRuntimeDetail(row.Previous, true)); err != nil {
+		return err
+	}
+	return section.Flush()
+}
+
+func writeVMRuntimeStatusDetailMetadata(w io.Writer, row vmRuntimeStatusRow) error {
+	section := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
+	if _, err := fmt.Fprintf(section, "\n  Policy:\t%s\n  Promoted:\t%s\n  Isolation:\t%s\n  Last change:\t%s\n",
+		vmRuntimeStatusPolicyDisplay(row), vmRuntimeStatusRuntimeDetail(row.LatestPromoted, false),
+		vmRuntimeStatusValueOrDash(row.JailerIsolation), vmRuntimeStatusTransitionDisplay(row.LastTransition)); err != nil {
+		return err
+	}
+	return section.Flush()
+}
+
+func writeVMRuntimeStatusDetailAction(w io.Writer, action string) error {
+	if action == "" {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
+	return writeVMRuntimeStatusWrapped(w, "  Action: ", sentenceCaseVMRuntimeStatusAction(action))
+}
+
+func vmRuntimeStatusTransitionDisplay(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return vmRuntimeStatusBoundedID(value)
+	}
+	return parsed.UTC().Format("2006-01-02 15:04:05 UTC")
+}
+
+func vmRuntimeStatusValueOrDash(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "-"
+	}
+	return vmRuntimeStatusBoundedID(value)
+}
+
+func writeVMRuntimeStatusWrapped(w io.Writer, prefix, value string) error {
+	continuation := strings.Repeat(" ", len([]rune(prefix)))
+	width := vmRuntimeStatusHumanWidth - len([]rune(prefix))
+	if width < 20 {
+		width = 20
+	}
+	for index, line := range vmRuntimeStatusWrapWords(value, width) {
+		linePrefix := prefix
+		if index > 0 {
+			linePrefix = continuation
+		}
+		if _, err := fmt.Fprintln(w, linePrefix+line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func vmRuntimeStatusWrapWords(value string, width int) []string {
+	words := strings.Fields(value)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	lines := []string{}
+	current := ""
+	for _, word := range words {
+		wordRunes := []rune(word)
+		if len(wordRunes) > width {
+			if current != "" {
+				lines = append(lines, current)
+			}
+			for len(wordRunes) > width {
+				lines = append(lines, string(wordRunes[:width]))
+				wordRunes = wordRunes[width:]
+			}
+			current = string(wordRunes)
+			continue
+		}
+		if current == "" {
+			current = word
+			continue
+		}
+		if len([]rune(current))+1+len([]rune(word)) <= width {
+			current += " " + word
+			continue
+		}
+		lines = append(lines, current)
+		current = word
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
+}
+
+func renderVMRuntimeStatusFleet(w io.Writer, rows []vmRuntimeStatusRow) error {
+	if err := writeVMRuntimeStatusFleetTable(w, rows); err != nil {
+		return err
+	}
+	if err := writeVMRuntimeStatusFleetPromotion(w, rows); err != nil {
+		return err
+	}
+	return writeVMRuntimeStatusFleetActions(w, vmRuntimeStatusActionRows(rows))
+}
+
+func writeVMRuntimeStatusFleetTable(w io.Writer, rows []vmRuntimeStatusRow) error {
+	table := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(table, "VM\tRUNNING\tCONFIGURED\tSTAGED\tPOLICY\tSTATE"); err != nil {
+		return err
+	}
+	for _, row := range rows {
+		running := "unverified"
+		if row.Running != nil {
+			running = vmRuntimeStatusRuntimeSummary(row.Running)
+		}
+		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			vmRuntimeStatusServiceDisplay(row.Service), running, vmRuntimeStatusRuntimeSummary(&row.Configured),
+			vmRuntimeStatusRuntimeSummary(row.Staged), vmRuntimeStatusPolicySummary(row),
+			vmRuntimeStatusHumanState(row.State)); err != nil {
+			return err
+		}
+	}
+	if err := table.Flush(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func writeVMRuntimeStatusFleetPromotion(w io.Writer, rows []vmRuntimeStatusRow) error {
+	if promoted, channel, ok := sharedVMRuntimeStatusPromotion(rows); ok {
+		_, err := fmt.Fprintf(w, "\nPromoted %s runtime: %s\n", vmRuntimeStatusBoundedID(channel), vmRuntimeStatusPromotionSummary(promoted))
+		return err
+	}
+	return nil
+}
+
+func vmRuntimeStatusActionRows(rows []vmRuntimeStatusRow) []vmRuntimeStatusRow {
+	actions := make([]vmRuntimeStatusRow, 0, len(rows))
+	for _, row := range rows {
+		if strings.TrimSpace(row.RecommendedAction) != "" {
+			actions = append(actions, row)
+		}
+	}
+	return actions
+}
+
+func writeVMRuntimeStatusFleetActions(w io.Writer, actions []vmRuntimeStatusRow) error {
+	if len(actions) == 0 {
+		return nil
+	}
+	if _, err := fmt.Fprintln(w, "\nNeeds attention:"); err != nil {
+		return err
+	}
+	for _, row := range actions {
+		if err := writeVMRuntimeStatusWrapped(w, "  "+vmRuntimeStatusServiceDisplay(row.Service)+": ", sentenceCaseVMRuntimeStatusAction(row.RecommendedAction)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func sharedVMRuntimeStatusPromotion(rows []vmRuntimeStatusRow) (*vmRuntimeStatusIdentity, string, bool) {
+	if len(rows) == 0 || rows[0].LatestPromoted == nil || rows[0].Channel == "" {
+		return nil, "", false
+	}
+	want := rows[0].LatestPromoted
+	channel := rows[0].Channel
+	for _, row := range rows[1:] {
+		if row.LatestPromoted == nil || row.Channel != channel || !vmRuntimeStatusIdentityEqual(*want, *row.LatestPromoted) {
+			return nil, "", false
+		}
+	}
+	return want, channel, true
+}
+
+const (
+	vmRuntimeStatusFingerprintLength = 12
+	vmRuntimeStatusFallbackIDMax     = 48
+	vmRuntimeStatusSummaryMax        = 48
+	vmRuntimeStatusHumanLabelMax     = 64
+	vmRuntimeStatusMetadataMax       = 24
+	vmRuntimeStatusVersionPartMax    = 10
+)
+
+func vmRuntimeStatusRuntimeSummary(identity *vmRuntimeStatusIdentity) string {
 	if identity == nil {
 		return "-"
 	}
-	if identity.ManifestSHA256 == "" {
-		return identity.ID
+	label := strings.TrimPrefix(vmRuntimeStatusRuntimeVersion(identity), "v")
+	if label == "" {
+		label = vmRuntimeStatusBoundedID(identity.ID)
 	}
-	return identity.ID + "@" + identity.ManifestSHA256
+	if source := vmRuntimeStatusSourceSummary(identity.Source); source != "" {
+		return vmRuntimeStatusCompleteLabelWithin(label, vmRuntimeStatusSummaryMax, vmRuntimeStatusBoundedText(source, vmRuntimeStatusMetadataMax))
+	}
+	return vmRuntimeStatusCompleteLabelWithin(label, vmRuntimeStatusSummaryMax)
+}
+
+func vmRuntimeStatusRuntimeDetail(identity *vmRuntimeStatusIdentity, includeFingerprint bool) string {
+	if identity == nil {
+		return "-"
+	}
+	label := vmRuntimeStatusRuntimeRelease(identity)
+	if label == "" {
+		label = vmRuntimeStatusBoundedID(identity.ID)
+	}
+	qualifiers := []string{}
+	if includeFingerprint && isLowerSHA256(identity.ManifestSHA256) {
+		qualifiers = append(qualifiers, "["+identity.ManifestSHA256[:vmRuntimeStatusFingerprintLength]+"]")
+	}
+	metadata := []string{}
+	if source := vmRuntimeStatusSourceDetail(identity.Source); source != "" {
+		metadata = append(metadata, source)
+	}
+	if support := vmRuntimeStatusSupportDetail(identity.Support); support != "" {
+		metadata = append(metadata, support)
+	}
+	if len(metadata) > 0 {
+		metadataLabel := vmRuntimeStatusBoundedText(strings.Join(metadata, ", "), vmRuntimeStatusMetadataMax)
+		qualifiers = append(qualifiers, "("+metadataLabel+")")
+	}
+	return vmRuntimeStatusCompleteLabel(label, qualifiers...)
+}
+
+func vmRuntimeStatusPromotionSummary(identity *vmRuntimeStatusIdentity) string {
+	if identity == nil {
+		return "-"
+	}
+	label := vmRuntimeStatusRuntimeRelease(identity)
+	if label != "" {
+		return vmRuntimeStatusCompleteLabel(strings.TrimPrefix(label, "v"))
+	}
+	return vmRuntimeStatusCompleteLabel(vmRuntimeStatusBoundedID(identity.ID))
+}
+
+func vmRuntimeStatusRuntimeVersion(identity *vmRuntimeStatusIdentity) string {
+	if identity == nil {
+		return ""
+	}
+	if version := strings.TrimSpace(identity.UpstreamVersion); vmRuntimeStatusReasonableVersion(version) {
+		return version
+	}
+	if match := legacyVMRuntimePolicyIDPattern.FindStringSubmatch(identity.ID); vmRuntimeStatusReasonableLegacyMatch(match) {
+		return "v" + strings.Join(match[1:], ".")
+	}
+	if match := officialVMRuntimePolicyIDPattern.FindStringSubmatch(identity.ID); vmRuntimeStatusReasonableOfficialMatch(match) {
+		return match[1]
+	}
+	return ""
+}
+
+func vmRuntimeStatusRuntimeRelease(identity *vmRuntimeStatusIdentity) string {
+	if identity == nil {
+		return ""
+	}
+	if match := officialVMRuntimePolicyIDPattern.FindStringSubmatch(identity.ID); vmRuntimeStatusReasonableOfficialMatch(match) {
+		return match[1] + " / yeet-v" + match[2]
+	}
+	if match := legacyVMRuntimePolicyIDPattern.FindStringSubmatch(identity.ID); vmRuntimeStatusReasonableLegacyMatch(match) {
+		return "v" + strings.Join(match[1:], ".")
+	}
+	return ""
+}
+
+func vmRuntimeStatusComponentSummary(identity vmComponentStatusIdentity) string {
+	if strings.TrimSpace(identity.ID) == "" {
+		return "-"
+	}
+	label := vmRuntimeStatusTrimDigestSuffix(identity.ID)
+	if strings.HasPrefix(label, "legacy-guest-") {
+		label = vmRuntimeStatusCollapseRepeatedPrefix(strings.TrimPrefix(label, "legacy-guest-"))
+	} else if strings.HasPrefix(label, "legacy-kernel-") {
+		label = strings.TrimPrefix(label, "legacy-kernel-")
+	} else if strings.HasPrefix(label, "guest-") {
+		label = strings.TrimPrefix(label, "guest-")
+	} else if strings.HasPrefix(label, "kernel-") {
+		label = strings.TrimPrefix(label, "kernel-")
+	}
+	label = vmRuntimeStatusBoundedID(label)
+	if source := vmRuntimeStatusSourceDetail(identity.Source); source != "" {
+		return vmRuntimeStatusCompleteLabel(label, "("+vmRuntimeStatusBoundedText(source, vmRuntimeStatusMetadataMax)+")")
+	}
+	return vmRuntimeStatusCompleteLabel(label)
+}
+
+func vmRuntimeStatusTrimDigestSuffix(value string) string {
+	const suffixLength = 65
+	if len(value) >= suffixLength && value[len(value)-suffixLength] == '-' && isLowerSHA256(value[len(value)-64:]) {
+		return value[:len(value)-suffixLength]
+	}
+	return value
+}
+
+func vmRuntimeStatusCollapseRepeatedPrefix(value string) string {
+	for offset := strings.IndexByte(value, '-'); offset >= 0; {
+		prefix := value[:offset]
+		if strings.HasPrefix(value[offset+1:], prefix+"-") {
+			return value[offset+1:]
+		}
+		next := strings.IndexByte(value[offset+1:], '-')
+		if next < 0 {
+			break
+		}
+		offset += next + 1
+	}
+	return value
+}
+
+func vmRuntimeStatusBoundedID(value string) string {
+	return vmRuntimeStatusBoundedText(value, vmRuntimeStatusFallbackIDMax)
+}
+
+func vmRuntimeStatusServiceDisplay(value string) string {
+	value = vmRuntimeStatusSingleLine(value)
+	if serviceid.Validate(value) == nil {
+		return value
+	}
+	return vmRuntimeStatusBoundedID(value)
+}
+
+func vmRuntimeStatusBoundedText(value string, limit int) string {
+	value = vmRuntimeStatusSingleLine(value)
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return string(runes[:limit])
+	}
+	return string(runes[:limit-3]) + "..."
+}
+
+func vmRuntimeStatusSingleLine(value string) string {
+	value = strings.ToValidUTF8(value, "�")
+	return strings.Join(strings.FieldsFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}), " ")
+}
+
+func vmRuntimeStatusCompleteLabel(base string, qualifiers ...string) string {
+	return vmRuntimeStatusCompleteLabelWithin(base, vmRuntimeStatusHumanLabelMax, qualifiers...)
+}
+
+func vmRuntimeStatusCompleteLabelWithin(base string, limit int, qualifiers ...string) string {
+	base = vmRuntimeStatusSingleLine(base)
+	clean := make([]string, 0, len(qualifiers))
+	for _, qualifier := range qualifiers {
+		if qualifier = vmRuntimeStatusSingleLine(qualifier); qualifier != "" {
+			clean = append(clean, qualifier)
+		}
+	}
+	if len(clean) == 0 {
+		return vmRuntimeStatusBoundedText(base, limit)
+	}
+	qualifier := strings.Join(clean, " ")
+	maxQualifier := limit - 4
+	if len([]rune(qualifier)) > maxQualifier {
+		qualifier = vmRuntimeStatusBoundedText(qualifier, maxQualifier)
+	}
+	if base == "" {
+		return qualifier
+	}
+	baseLimit := limit - 1 - len([]rune(qualifier))
+	return vmRuntimeStatusBoundedText(base, baseLimit) + " " + qualifier
+}
+
+func vmRuntimeStatusReasonableVersion(version string) bool {
+	if !vmRuntimeVersionPattern.MatchString(version) {
+		return false
+	}
+	for _, part := range strings.Split(strings.TrimPrefix(version, "v"), ".") {
+		if len(part) > vmRuntimeStatusVersionPartMax {
+			return false
+		}
+	}
+	return true
+}
+
+func vmRuntimeStatusReasonableOfficialMatch(match []string) bool {
+	return len(match) == 3 && vmRuntimeStatusReasonableVersion(match[1]) && len(match[2]) <= vmRuntimeStatusVersionPartMax
+}
+
+func vmRuntimeStatusReasonableLegacyMatch(match []string) bool {
+	if len(match) != 4 {
+		return false
+	}
+	for _, part := range match[1:] {
+		if len(part) > vmRuntimeStatusVersionPartMax {
+			return false
+		}
+	}
+	return true
+}
+
+func vmRuntimeStatusSourceSummary(source string) string {
+	switch {
+	case source == "official":
+		return "official"
+	case strings.HasSuffix(source, "-legacy"):
+		return "legacy"
+	case strings.HasPrefix(source, "local:"):
+		return "local"
+	default:
+		return vmRuntimeStatusWords(source)
+	}
+}
+
+func vmRuntimeStatusSourceDetail(source string) string {
+	if strings.HasPrefix(source, "local:") {
+		return "local"
+	}
+	return vmRuntimeStatusWords(source)
+}
+
+func vmRuntimeStatusSupportDetail(support string) string {
+	switch support {
+	case "", "legacy-unlisted", "local":
+		return ""
+	default:
+		return vmRuntimeStatusWords(support)
+	}
+}
+
+func vmRuntimeStatusWords(value string) string {
+	return vmRuntimeStatusBoundedID(strings.ReplaceAll(vmRuntimeStatusSingleLine(value), "-", " "))
+}
+
+func vmRuntimeStatusHumanState(state string) string {
+	switch state {
+	case "":
+		return "unknown"
+	case "current":
+		return "healthy"
+	case "missing-or-untrusted-marker":
+		return "marker unverified"
+	case "running-config-diverged":
+		return "config diverged"
+	case "failed-rolled-back":
+		return "failed, rolled back"
+	default:
+		return vmRuntimeStatusWords(state)
+	}
+}
+
+func vmRuntimeStatusPolicySummary(row vmRuntimeStatusRow) string {
+	if row.Policy == "" && row.Channel == "" {
+		return "-"
+	}
+	if row.Channel == "" {
+		return vmRuntimeStatusCompleteLabelWithin(row.Policy, vmRuntimeStatusSummaryMax)
+	}
+	if row.Policy == "" {
+		return vmRuntimeStatusCompleteLabelWithin(row.Channel, vmRuntimeStatusSummaryMax)
+	}
+	return vmRuntimeStatusCompleteLabelWithin(vmRuntimeStatusSingleLine(row.Policy)+"/"+vmRuntimeStatusSingleLine(row.Channel), vmRuntimeStatusSummaryMax)
+}
+
+func vmRuntimeStatusPolicyDisplay(row vmRuntimeStatusRow) string {
+	if row.Policy == "" && row.Channel == "" {
+		return "-"
+	}
+	if row.Channel == "" {
+		return vmRuntimeStatusCompleteLabel(row.Policy)
+	}
+	if row.Policy == "" {
+		return vmRuntimeStatusCompleteLabel(row.Channel)
+	}
+	return vmRuntimeStatusCompleteLabel(vmRuntimeStatusSingleLine(row.Policy) + " / " + vmRuntimeStatusSingleLine(row.Channel))
+}
+
+func sentenceCaseVMRuntimeStatusAction(action string) string {
+	action = vmRuntimeStatusSingleLine(action)
+	if action == "" {
+		return ""
+	}
+	runes := []rune(action)
+	runes[0] = unicode.ToUpper(runes[0])
+	if runes[len(runes)-1] != '.' {
+		runes = append(runes, '.')
+	}
+	return string(runes)
 }
