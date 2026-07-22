@@ -12,6 +12,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,6 +29,7 @@ type vmFirecrackerPauser interface {
 var (
 	vmSnapshotIsRunning                       = (*Server).IsServiceRunning
 	vmSnapshotFirecracker vmFirecrackerPauser = firecrackerSnapshotAPI{}
+	vmSnapshotDiskFlusher                     = flushVMSnapshotDisk
 )
 
 const vmSnapshotRecoveryTimeout = 30 * time.Second
@@ -42,6 +45,7 @@ type vmSnapshotPlan struct {
 	Flags    cli.SnapshotsCreateFlags
 	Running  bool
 	Socket   string
+	DiskPath string
 	Snapshot vmFirecrackerPauser
 }
 
@@ -85,7 +89,7 @@ func (s *Server) newVMSnapshotPlan(name string, flags cli.SnapshotsCreateFlags) 
 	if running && socket == "" {
 		return vmSnapshotPlan{}, fmt.Errorf("service %q has no Firecracker API socket", name)
 	}
-	return vmSnapshotPlan{Service: service, Dataset: dataset, Policy: policy, Flags: flags, Running: running, Socket: socket, Snapshot: currentVMSnapshotController()}, nil
+	return vmSnapshotPlan{Service: service, Dataset: dataset, Policy: policy, Flags: flags, Running: running, Socket: socket, DiskPath: vm.Disk.Path, Snapshot: currentVMSnapshotController()}, nil
 }
 
 func currentVMSnapshotRunning(s *Server, name string) (bool, error) {
@@ -110,11 +114,48 @@ func (s *Server) executeVMSnapshotPlan(ctx context.Context, name string, plan vm
 	if err := plan.Snapshot.Pause(ctx, plan.Socket); err != nil {
 		return vmSnapshotResult{}, fmt.Errorf("pause VM %q: %w", name, err)
 	}
-	result, snapErr := s.createPausedVMSnapshot(ctx, plan.Service, plan.Dataset, plan.Flags)
+	flushErr := currentVMSnapshotDiskFlusher()(plan.DiskPath)
+	var result vmSnapshotResult
+	var snapErr error
+	if flushErr != nil {
+		snapErr = fmt.Errorf("flush VM %q disk before snapshot: %w", name, flushErr)
+	} else {
+		result, snapErr = s.createPausedVMSnapshot(ctx, plan.Service, plan.Dataset, plan.Flags)
+	}
 	resumeCtx, cancel := vmSnapshotRecoveryContext(ctx)
 	defer cancel()
 	resumeErr := plan.Snapshot.Resume(resumeCtx, plan.Socket)
 	return finishVMSnapshotResume(name, result, snapErr, resumeErr)
+}
+
+func currentVMSnapshotDiskFlusher() func(string) error {
+	if vmSnapshotDiskFlusher != nil {
+		return vmSnapshotDiskFlusher
+	}
+	return flushVMSnapshotDisk
+}
+
+func flushVMSnapshotDisk(path string) error {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if !strings.HasPrefix(path, "/dev/zvol/") || path == "/dev/zvol" {
+		return fmt.Errorf("VM snapshot disk is not a ZFS zvol device: %s", path)
+	}
+	disk, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open VM snapshot disk %s: %w", path, err)
+	}
+	defer disk.Close()
+	info, err := disk.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect VM snapshot disk %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeDevice == 0 || info.Mode()&os.ModeCharDevice != 0 {
+		return fmt.Errorf("VM snapshot disk is not a block device: %s", path)
+	}
+	if err := disk.Sync(); err != nil {
+		return fmt.Errorf("fsync VM snapshot disk %s: %w", path, err)
+	}
+	return nil
 }
 
 func vmSnapshotRecoveryContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -211,15 +252,22 @@ func (s *Server) createVMRuntimeUpgradeRecoveryPoint(ctx context.Context, servic
 	if !running {
 		return create(ctx)
 	}
-	return createPausedVMRuntimeUpgradeRecoveryPoint(ctx, service.Name, socket, create)
+	return createPausedVMRuntimeUpgradeRecoveryPoint(ctx, service.Name, socket, service.VM.Disk.Path, create)
 }
 
-func createPausedVMRuntimeUpgradeRecoveryPoint(ctx context.Context, serviceName, socket string, create func(context.Context) (string, error)) (string, error) {
+func createPausedVMRuntimeUpgradeRecoveryPoint(ctx context.Context, serviceName, socket, diskPath string, create func(context.Context) (string, error)) (string, error) {
 	controller := currentVMSnapshotController()
 	if err := controller.Pause(ctx, socket); err != nil {
 		return "", fmt.Errorf("pause VM %q before runtime upgrade recovery point: %w", serviceName, err)
 	}
-	name, snapshotErr := create(ctx)
+	flushErr := currentVMSnapshotDiskFlusher()(diskPath)
+	var name string
+	var snapshotErr error
+	if flushErr != nil {
+		snapshotErr = fmt.Errorf("flush VM %q disk before runtime upgrade recovery point: %w", serviceName, flushErr)
+	} else {
+		name, snapshotErr = create(ctx)
+	}
 	resumeCtx, cancel := vmSnapshotRecoveryContext(ctx)
 	defer cancel()
 	resumeErr := controller.Resume(resumeCtx, socket)
