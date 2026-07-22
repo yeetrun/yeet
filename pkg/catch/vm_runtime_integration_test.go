@@ -248,8 +248,8 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "failed host readiness") {
 		t.Fatalf("candidate fallback result = %v, output = %q", err, fallbackOut.String())
 	}
-	if !strings.Contains(fallbackOut.String(), broken.ID) {
-		t.Fatalf("candidate fallback output omitted candidate %s: %q", broken.ID, fallbackOut.String())
+	if !strings.Contains(err.Error(), broken.ID) {
+		t.Fatalf("candidate fallback error omitted candidate %s: %v", broken.ID, err)
 	}
 	marker, candidateIP = waitVMRuntimeIntegrationRunning(t, ctx, server, cfg, candidate, candidateVersion, marker.RunnerPID)
 	finalService := vmRuntimeIntegrationService(t, server, cfg.Service)
