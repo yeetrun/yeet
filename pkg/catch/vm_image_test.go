@@ -1484,6 +1484,60 @@ func TestPrepareVMRootFSRunsZstdForCompressedRootFS(t *testing.T) {
 	}
 }
 
+func TestPrepareVMComponentRootFSStagesVerifiedGuestDisk(t *testing.T) {
+	serviceRoot := t.TempDir()
+	oldRunner := vmRootFSDecompressRunner
+	t.Cleanup(func() { vmRootFSDecompressRunner = oldRunner })
+	vmRootFSDecompressRunner = func(_ context.Context, name string, args ...string) error {
+		if name != "zstd" || len(args) < 2 {
+			t.Fatalf("decompress command = %q %v", name, args)
+		}
+		return os.WriteFile(args[len(args)-2], []byte("rootfs"), 0o600)
+	}
+	guest := vmGuestBaseArtifact{
+		RootFSPath: filepath.Join(t.TempDir(), vmGuestBaseRootFSFilename),
+		Manifest:   vmGuestBaseManifest{RootFS: vmGuestBaseManifestRootFS{UncompressedBytes: int64(len("rootfs"))}},
+	}
+
+	target, err := prepareVMComponentRootFS(context.Background(), serviceRoot, guest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !vmProvisionPathWithin(serviceDataDirForRoot(serviceRoot), target) {
+		t.Fatalf("component rootfs target %q is outside service data", target)
+	}
+	if got, err := os.ReadFile(target); err != nil || string(got) != "rootfs" {
+		t.Fatalf("component rootfs = %q, %v", got, err)
+	}
+	if info, err := os.Stat(target); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatalf("component rootfs mode = %v, %v", info, err)
+	}
+}
+
+func TestPrepareVMComponentRootFSCleansFailedStaging(t *testing.T) {
+	serviceRoot := t.TempDir()
+	oldRunner := vmRootFSDecompressRunner
+	t.Cleanup(func() { vmRootFSDecompressRunner = oldRunner })
+	vmRootFSDecompressRunner = func(_ context.Context, _ string, args ...string) error {
+		return os.WriteFile(args[len(args)-2], []byte("short"), 0o600)
+	}
+	guest := vmGuestBaseArtifact{
+		RootFSPath: filepath.Join(t.TempDir(), vmGuestBaseRootFSFilename),
+		Manifest:   vmGuestBaseManifest{RootFS: vmGuestBaseManifestRootFS{UncompressedBytes: 4096}},
+	}
+
+	if _, err := prepareVMComponentRootFS(context.Background(), serviceRoot, guest); err == nil || !strings.Contains(err.Error(), "size mismatch") {
+		t.Fatalf("prepare error = %v, want size mismatch", err)
+	}
+	entries, err := os.ReadDir(serviceDataDirForRoot(serviceRoot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("failed component rootfs left staging files: %v", entries)
+	}
+}
+
 func TestVMImageCacheRejectsChecksumMismatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

@@ -505,13 +505,14 @@ func prepareVMComponentRootFS(ctx context.Context, serviceRoot string, guest vmG
 		return "", fmt.Errorf("create VM component rootfs staging file: %w", err)
 	}
 	target = tmp.Name()
+	stagingPath := target
 	if err := tmp.Close(); err != nil {
-		_ = os.Remove(target)
+		_ = os.Remove(stagingPath)
 		return "", fmt.Errorf("close VM component rootfs staging file: %w", err)
 	}
 	defer func() {
 		if retErr != nil {
-			_ = os.Remove(target)
+			_ = os.Remove(stagingPath)
 		}
 	}()
 	if err := vmRootFSDecompressRunner(ctx, "zstd", "-d", "-f", "--no-progress", "-o", target, guest.RootFSPath); err != nil {

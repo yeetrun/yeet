@@ -235,6 +235,127 @@ func TestProvisionVMLegacyMonolithicPersistsAdoptedComposition(t *testing.T) {
 	}
 }
 
+func TestResolveVMProvisionArtifactsDefaultFallsBackToMonolithicWithoutPromotion(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "legacy-fallback")
+	image := newVMLegacyProvisionTestAsset(t, t.TempDir())
+	stubVMImageCatalogFetch(t, vmImageTestCatalog())
+	vmImageEnsureFunc = func(context.Context, vmImageCache, string, ProgressUI) (vmImageAsset, error) {
+		return image, nil
+	}
+	vmProvisionInspectRuntimePair = func(context.Context, string, string) (string, error) { return "1.16.1", nil }
+
+	artifacts, err := resolveVMProvisionArtifactsDefault(
+		execer, context.Background(), cli.RunFlags{}, testUbuntuVMPayload, nil,
+		resolvedServiceRoot{Root: serviceRoot},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifacts.Legacy == nil || artifacts.GuestBase.ID == "" || artifacts.Kernel.ID == "" || artifacts.Runtime.ID == "" {
+		t.Fatalf("monolithic fallback artifacts = %#v", artifacts)
+	}
+}
+
+func TestResolveVMProvisionArtifactsDefaultRejectsUntrustedComponentCatalogs(t *testing.T) {
+	server := newTestServer(t)
+	execer, serviceRoot, _, _ := newVMProvisionTestExecer(t, server, "component-catalogs")
+	catalog := vmImageTestCatalog()
+	catalog.ComponentCatalogs = &vmImageComponentCatalogs{
+		GuestBases: "http://127.0.0.1/guest-catalog.json",
+		Kernels:    "http://127.0.0.1/kernel-catalog.json",
+		Runtimes:   "http://127.0.0.1/runtime-catalog.json",
+	}
+	stubVMImageCatalogFetch(t, catalog)
+
+	_, err := resolveVMProvisionArtifactsDefault(
+		execer, context.Background(), cli.RunFlags{}, testUbuntuVMPayload, nil,
+		resolvedServiceRoot{Root: serviceRoot},
+	)
+	if err == nil || !strings.Contains(err.Error(), "untrusted VM image component catalog") {
+		t.Fatalf("component catalog error = %v", err)
+	}
+}
+
+func TestMaterializeVMLegacyProvisionArtifactsUsesMeasuredLocalFallbacks(t *testing.T) {
+	server := newTestServer(t)
+	execer, _, _, _ := newVMProvisionTestExecer(t, server, "local-legacy")
+	localDir := filepath.Join(server.cfg.RootDir, "vm-images", "local", "lab", "blob")
+	image := newVMLegacyProvisionTestAsset(t, localDir)
+	prepared := filepath.Join(t.TempDir(), "prepared-rootfs.ext4")
+	if err := os.WriteFile(prepared, []byte("legacy-rootfs"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	image.PreparedRootFSPath = prepared
+	image.Manifest.Name = ""
+	image.Manifest.Distro = "ubuntu"
+	image.Manifest.KernelVersion = ""
+	image.Manifest.Kernel = "manifest-kernel-name-does-not-bind"
+	image.Manifest.Firecracker = "manifest-firecracker-name-does-not-bind"
+	image.Manifest.Jailer = "manifest-jailer-name-does-not-bind"
+	image.Paths.Manifest = filepath.Join(localDir, "missing-manifest.json")
+	vmProvisionInspectRuntimePair = func(context.Context, string, string) (string, error) { return "1.16.1", nil }
+
+	artifacts, err := execer.materializeVMLegacyProvisionArtifacts(context.Background(), image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if artifacts.GuestBase.Source != string(vmRuntimeAdoptionLocalLegacy) || artifacts.Kernel.Source != string(vmRuntimeAdoptionLocalLegacy) || artifacts.Runtime.Source != string(vmRuntimeAdoptionLocalLegacy) {
+		t.Fatalf("local legacy sources = %#v %#v %#v", artifacts.GuestBase, artifacts.Kernel, artifacts.Runtime)
+	}
+	if artifacts.GuestBase.ManifestSHA256 != artifacts.GuestBase.RootFSProvenance || artifacts.Kernel.ManifestSHA256 != artifacts.GuestBase.RootFSProvenance || artifacts.Runtime.ManifestSHA256 != artifacts.GuestBase.RootFSProvenance {
+		t.Fatalf("measured fallback digests = %#v %#v %#v", artifacts.GuestBase, artifacts.Kernel, artifacts.Runtime)
+	}
+}
+
+func newVMLegacyProvisionTestAsset(t *testing.T, dir string) vmImageAsset {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	paths := vmImagePaths{
+		Manifest: filepath.Join(dir, "manifest.json"), Dir: dir,
+		KernelPath: filepath.Join(dir, "vmlinux"), RootFSPath: filepath.Join(dir, "rootfs.ext4"),
+		FirecrackerPath: filepath.Join(dir, "firecracker"), JailerPath: filepath.Join(dir, "jailer"),
+	}
+	for path, contents := range map[string]string{
+		paths.KernelPath: "legacy-kernel", paths.RootFSPath: "legacy-rootfs",
+		paths.FirecrackerPath: "legacy-firecracker", paths.JailerPath: "legacy-jailer",
+	} {
+		mode := os.FileMode(0o644)
+		if path == paths.FirecrackerPath || path == paths.JailerPath {
+			mode = 0o755
+		}
+		if err := os.WriteFile(path, []byte(contents), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	checksums := map[string]string{}
+	for name, path := range map[string]string{
+		"vmlinux": paths.KernelPath, "rootfs.ext4": paths.RootFSPath,
+		"firecracker": paths.FirecrackerPath, "jailer": paths.JailerPath,
+	} {
+		digest, err := sha256File(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		checksums[name] = digest
+	}
+	manifest := vmImageManifest{
+		Name: "ubuntu", Version: "ubuntu-26.04-amd64-v29", Architecture: "amd64", Distro: "ubuntu",
+		Kernel: "vmlinux", RootFS: "rootfs.ext4", Firecracker: "firecracker", Jailer: "jailer",
+		KernelVersion: "linux-7.1.4-yeet", RootFSSize: int64(len("legacy-rootfs")), Checksums: checksums,
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.Manifest, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return vmImageAsset{Paths: paths, PreparedRootFSPath: paths.RootFSPath, Manifest: manifest}
+}
+
 func TestRunVMDoesNotCommitReadyOnArtifactFailure(t *testing.T) {
 	server := newTestServer(t)
 	execer, _, _, _ := newVMProvisionTestExecer(t, server, "svc")

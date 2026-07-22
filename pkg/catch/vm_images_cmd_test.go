@@ -703,6 +703,49 @@ func TestVMImagesPruneComponentApplyRevalidatesPlan(t *testing.T) {
 	}
 }
 
+func TestVMImagesPruneComponentRejectsInvalidApplyTargets(t *testing.T) {
+	server := newTestServer(t)
+	components, _, _ := seedVMImagePruneComponentArtifacts(t, server)
+	rows, err := server.planVMComponentImagePrune(components)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := vmImagePruneRowForKindAndVersion(t, rows, vmImagePruneKindGuestBase, components.GuestBases.GuestBases[0].GuestBaseID)
+	kernel := vmImagePruneRowForKindAndVersion(t, rows, vmImagePruneKindKernel, components.Kernels.Kernels[0].KernelID)
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := server.validateVMImageComponentPruneTarget(canceled, guest); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled validation error = %v", err)
+	}
+	if _, _, err := server.validateVMImageComponentPruneTarget(context.Background(), vmImagePruneRow{Kind: "runtime"}); err == nil || !strings.Contains(err.Error(), "unsupported") {
+		t.Fatalf("unsupported-kind error = %v", err)
+	}
+
+	badLeaf := guest
+	badLeaf.Path = filepath.Dir(badLeaf.Path)
+	if _, _, err := server.validateVMImageComponentPruneTarget(context.Background(), badLeaf); err == nil || !strings.Contains(err.Error(), "immutable cache leaf") {
+		t.Fatalf("bad-leaf error = %v", err)
+	}
+	missingGuestIdentity := guest
+	missingGuestIdentity.guestBaseRef = nil
+	if _, _, err := server.validateVMImageComponentPruneTarget(context.Background(), missingGuestIdentity); err == nil || !strings.Contains(err.Error(), "exact catalog identity") {
+		t.Fatalf("missing guest identity error = %v", err)
+	}
+	wrongGuestIdentity := guest
+	wrongGuestRef := *wrongGuestIdentity.guestBaseRef
+	wrongGuestRef.GuestBaseID += "-other"
+	wrongGuestIdentity.guestBaseRef = &wrongGuestRef
+	if _, _, err := server.validateVMImageComponentPruneTarget(context.Background(), wrongGuestIdentity); err == nil || !strings.Contains(err.Error(), "exact catalog identity") {
+		t.Fatalf("wrong guest identity error = %v", err)
+	}
+	missingKernelIdentity := kernel
+	missingKernelIdentity.kernelRef = nil
+	if _, _, err := server.validateVMImageComponentPruneTarget(context.Background(), missingKernelIdentity); err == nil || !strings.Contains(err.Error(), "exact catalog identity") {
+		t.Fatalf("missing kernel identity error = %v", err)
+	}
+}
+
 func vmImagePruneRowForKindAndVersion(t *testing.T, rows []vmImagePruneRow, kind, version string) vmImagePruneRow {
 	t.Helper()
 	for _, row := range rows {
