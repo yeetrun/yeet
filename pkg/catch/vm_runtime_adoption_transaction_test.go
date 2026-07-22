@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -60,6 +61,108 @@ func TestVMRuntimeAdoptionCommitPublishesFleetWithoutRestart(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestAdoptMonolithicVMComponents(t *testing.T) {
+	tests := []struct {
+		name           string
+		version        string
+		kernelVersion  string
+		runtimeVersion string
+		withManifest   bool
+		syncedKernel   bool
+	}{
+		{name: "v11", version: "ubuntu-26.04-amd64-v11", kernelVersion: "linux-7.1.2-yeet", runtimeVersion: "1.14.3", syncedKernel: true},
+		{name: "v15", version: "ubuntu-26.04-amd64-v15", kernelVersion: "linux-7.1.3-yeet", runtimeVersion: "1.14.3", syncedKernel: true},
+		{name: "v29", version: "ubuntu-26.04-amd64-kernel-7.1.4-v29", kernelVersion: "linux-7.1.4-yeet", runtimeVersion: "1.16.1", withManifest: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture, deps, systemctlCalls := newVMRuntimeAdoptionTransactionFixture(t, false)
+			configureVMRuntimeAdoptionBundle(t, fixture, &deps, tt.version, tt.kernelVersion, tt.runtimeVersion, tt.withManifest, tt.syncedKernel)
+			before := readLatestVMRuntimeAdoptionData(t, fixture.store).Services[fixture.service.Name]
+			diskBefore := readVMRuntimeAdoptionTestFile(t, fixture.disk)
+
+			tx, err := prepareVMRuntimeAdoptionWithDeps(context.Background(), &fixture.cfg, deps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = tx.Close() })
+			if err := tx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+
+			after := readLatestVMRuntimeAdoptionData(t, fixture.store).Services[fixture.service.Name]
+			if after.VM.Image != before.VM.Image {
+				t.Fatalf("image provenance changed during adoption: before %#v after %#v", before.VM.Image, after.VM.Image)
+			}
+			if after.VM.Disk != before.VM.Disk || !bytes.Equal(readVMRuntimeAdoptionTestFile(t, fixture.disk), diskBefore) {
+				t.Fatal("active VM disk changed during adoption")
+			}
+			components := after.VM.Components
+			if components == nil || components.Kernel.Path != fixture.kernel || components.Kernel.SHA256 == "" {
+				t.Fatalf("adopted kernel = %#v", components)
+			}
+			if components.Runtime.Configured.Firecracker != fixture.firecracker || components.Runtime.Configured.Jailer != fixture.jailer || components.Runtime.Configured.FirecrackerSHA256 == "" || components.Runtime.Configured.JailerSHA256 == "" {
+				t.Fatalf("adopted runtime = %#v", components.Runtime.Configured)
+			}
+			if tt.withManifest && components.Runtime.Configured.Source != string(vmRuntimeAdoptionCustomLegacy) {
+				t.Fatalf("v29 source = %q, want measured custom legacy without an install receipt", components.Runtime.Configured.Source)
+			}
+			for _, call := range *systemctlCalls {
+				if !slices.Equal(call, []string{"daemon-reload"}) {
+					t.Fatalf("systemctl call = %v; adoption must not start, stop, or restart a VM", call)
+				}
+			}
+		})
+	}
+}
+
+func TestMixedMonolithicAndComponentFleet(t *testing.T) {
+	fixture, deps, systemctlCalls := newVMRuntimeAdoptionTransactionFixture(t, false)
+	configured := &db.VMComponentsConfig{
+		GuestBase: db.VMGuestBaseConfig{ID: "guest-existing", ManifestSHA256: strings.Repeat("a", 64)},
+		Kernel: db.VMKernelArtifactConfig{
+			ID: "kernel-existing", ManifestSHA256: strings.Repeat("b", 64), SHA256: strings.Repeat("c", 64),
+			Path: "/var/lib/yeet/vm-kernels/amd64/kernel-existing/vmlinux",
+		},
+		Runtime: db.VMRuntimeLifecycleConfig{Policy: "manual", Channel: "stable", Configured: db.VMRuntimeArtifactConfig{
+			ID: "runtime-existing", ManifestSHA256: strings.Repeat("d", 64), FirecrackerSHA256: strings.Repeat("e", 64), JailerSHA256: strings.Repeat("f", 64),
+			Firecracker: "/var/lib/yeet/vm-runtimes/amd64/runtime-existing/firecracker", Jailer: "/var/lib/yeet/vm-runtimes/amd64/runtime-existing/jailer",
+		}},
+	}
+	already := &db.Service{
+		Name: "already", ServiceType: db.ServiceTypeVM, ServiceRoot: filepath.Join(fixture.dataRoot, "zfs-mounts", "already"),
+		VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Image: db.VMImageConfig{Version: "component-v1"}, Components: configured.Clone()},
+	}
+	if err := fixture.store.Set(&db.Data{Services: map[string]*db.Service{fixture.service.Name: fixture.service, already.Name: already}}); err != nil {
+		t.Fatal(err)
+	}
+	deps.inventory.readiness = func(string) (vmJailerReadiness, error) { return vmJailerReady, nil }
+
+	tx, err := prepareVMRuntimeAdoptionWithDeps(context.Background(), &fixture.cfg, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Close() })
+	if summary := tx.Summary(); !slices.Equal(summary.AlreadyAdopted, []string{"already"}) || !slices.Equal(summary.Adopting, []string{"devbox"}) {
+		t.Fatalf("mixed fleet summary = %#v", summary)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	latest := readLatestVMRuntimeAdoptionData(t, fixture.store)
+	if latest.Services[fixture.service.Name].VM.Components == nil {
+		t.Fatal("monolithic VM was not adopted")
+	}
+	if got := latest.Services[already.Name].VM.Components; !reflect.DeepEqual(got, configured) {
+		t.Fatalf("existing component VM changed: got %#v want %#v", got, configured)
+	}
+	for _, call := range *systemctlCalls {
+		if !slices.Equal(call, []string{"daemon-reload"}) {
+			t.Fatalf("systemctl call = %v; mixed-fleet adoption must not start, stop, or restart a VM", call)
+		}
 	}
 }
 
@@ -900,6 +1003,51 @@ func newVMRuntimeAdoptionTransactionFixture(t *testing.T, stopped bool) (*vmRunt
 		return nil
 	}
 	return fixture, deps, systemctlCalls
+}
+
+func configureVMRuntimeAdoptionBundle(
+	t *testing.T,
+	fixture *vmRuntimeAdoptionFixture,
+	deps *vmRuntimeAdoptionCoordinatorDeps,
+	version, kernelVersion, runtimeVersion string,
+	withManifest, syncedKernel bool,
+) {
+	t.Helper()
+	newImageDir := filepath.Join(filepath.Dir(fixture.imageDir), version)
+	if err := os.Rename(fixture.imageDir, newImageDir); err != nil {
+		t.Fatal(err)
+	}
+	fixture.imageDir = newImageDir
+	fixture.rootFS = filepath.Join(newImageDir, "rootfs.ext4")
+	fixture.firecracker = filepath.Join(newImageDir, "firecracker")
+	fixture.jailer = filepath.Join(newImageDir, "jailer")
+	fixture.kernel = filepath.Join(newImageDir, "vmlinux")
+	if syncedKernel {
+		syncedDir := filepath.Join(serviceRunDirForRoot(fixture.serviceRoot), "kernels", fixture.service.Name, kernelVersion)
+		syncedKernelPath := filepath.Join(syncedDir, "vmlinux")
+		if err := os.MkdirAll(syncedDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(fixture.kernel, syncedKernelPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(newImageDir, "kernel.config"), filepath.Join(syncedDir, "kernel.config")); err != nil {
+			t.Fatal(err)
+		}
+		fixture.kernel = syncedKernelPath
+	}
+	fixture.service.VM.Image.Version = version
+	fixture.service.VM.Image.RootFS = fixture.rootFS
+	fixture.service.VM.Image.Kernel = fixture.kernel
+	fixture.writeFirecrackerConfig(t)
+	fixture.unitExec = fixture.execStart()
+	writeVMRuntimeAdoptionTestFile(t, fixture.unitPath, "[Service]\nExecStart="+strings.Join(systemdVMExecArguments(fixture.unitExec), " ")+"\n", 0o644)
+	if withManifest {
+		writeVMRuntimeAdoptionTestJSON(t, filepath.Join(newImageDir, "manifest.json"), fixture.newManifest(t), 0o644)
+	}
+	fixture.deps.runtimePair = func(context.Context, string, string) (string, error) { return runtimeVersion, nil }
+	deps.inventory.runtimePair = fixture.deps.runtimePair
+	fixture.persist(t)
 }
 
 func assertVMRuntimeAdoptionDatabaseGeneration(t *testing.T, store *db.Store, service string, wantNew bool) {
