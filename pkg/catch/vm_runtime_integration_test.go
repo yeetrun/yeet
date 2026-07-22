@@ -133,6 +133,9 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 	if initialService.VM.Components == nil {
 		t.Fatal("new component VM has no component state before legacy-adoption simulation")
 	}
+	if initialService.ISO == nil || !initialService.ISO.Link.IsValid() || !initialService.ISO.HostIP.IsValid() || !initialService.ISO.PeerIP.IsValid() {
+		t.Fatalf("integration VM does not have a dedicated ISO network: %#v", initialService.ISO)
+	}
 	initialArtifact := initialService.VM.Components.Runtime.Configured
 	initialVersion, err := probeMatchingVMRuntimePair(ctx, guestAsset.Paths.FirecrackerPath, guestAsset.Paths.JailerPath)
 	if err != nil {
@@ -444,7 +447,7 @@ func provisionVMRuntimeIntegrationGuest(t *testing.T, ctx context.Context, serve
 		progress:           catchrpc.ProgressQuiet, rawRW: &output, rw: &output,
 	}
 	flags := cli.RunFlags{
-		CPUs: 1, Memory: "512m", Balloon: "off", Disk: "8g", Net: "svc",
+		CPUs: 1, Memory: "512m", Balloon: "off", Disk: "8g", Net: "iso",
 		Restart: true, ImagePolicy: "cached", ServiceRoot: serviceRoot, ZFS: cfg.Storage == "zfs",
 		Snapshots: "on", SnapshotChange: true,
 	}
