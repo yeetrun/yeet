@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -381,6 +382,44 @@ func TestCollectVMRuntimeActiveDiskEvidenceNeverReadsContent(t *testing.T) {
 		if _, err := collectVMRuntimeActiveDiskEvidence(invalid.path, invalid.backend, invalid.bytes, deps); err == nil {
 			t.Errorf("backend %q bytes %d unexpectedly accepted", invalid.backend, invalid.bytes)
 		}
+	}
+}
+
+func TestRevalidateVMRuntimeAdoptionRawDiskNameAllowsWritesButRejectsReplacement(t *testing.T) {
+	root := resolvedTempDir(t)
+	path := filepath.Join(root, "disk.raw")
+	if err := os.WriteFile(path, []byte("mutable raw disk"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, parent, name, err := openVMRuntimeAdoptionPath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := closeVMRuntimeAdoptionPath(file, parent); err != nil {
+			t.Errorf("close raw disk evidence: %v", err)
+		}
+	}()
+	want, err := vmRuntimeAdoptionMetadataForFile(file, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := time.Now().Add(time.Hour)
+	if err := os.Chtimes(path, changed, changed); err != nil {
+		t.Fatal(err)
+	}
+	if err := revalidateVMRuntimeAdoptionRawDiskName(parent, name, want); err != nil {
+		t.Fatalf("mutable raw disk timestamp was rejected: %v", err)
+	}
+	replacement := filepath.Join(root, "replacement.raw")
+	if err := os.WriteFile(replacement, []byte("replacement"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	if err := revalidateVMRuntimeAdoptionRawDiskName(parent, name, want); err == nil {
+		t.Fatal("replacement raw disk identity was accepted")
 	}
 }
 

@@ -596,7 +596,7 @@ func collectVMRuntimeRawDiskEvidence(path, backend string, bytes int64) (evidenc
 		RDevice: metadata.RDevice, Size: metadata.Size, Mode: metadata.Mode, UID: metadata.UID,
 		GID: metadata.GID, MTimeNS: metadata.MTimeNS,
 	}
-	if err := revalidateVMRuntimeAdoptionName(parent, name, metadata); err != nil {
+	if err := revalidateVMRuntimeAdoptionRawDiskName(parent, name, metadata); err != nil {
 		return vmRuntimeAdoptionActiveDiskEvidence{}, fmt.Errorf("revalidate active VM disk %s: %w", path, err)
 	}
 	return evidence, nil
@@ -917,6 +917,16 @@ func closeVMRuntimeAdoptionPath(file, parent *os.File) error {
 }
 
 func revalidateVMRuntimeAdoptionName(parent *os.File, name string, want vmRuntimeAdoptionFileMetadata) error {
+	return revalidateVMRuntimeAdoptionNameWith(parent, name, want, nil)
+}
+
+func revalidateVMRuntimeAdoptionRawDiskName(parent *os.File, name string, want vmRuntimeAdoptionFileMetadata) error {
+	return revalidateVMRuntimeAdoptionNameWith(parent, name, want, func(metadata *vmRuntimeAdoptionFileMetadata) {
+		metadata.MTimeNS = 0
+	})
+}
+
+func revalidateVMRuntimeAdoptionNameWith(parent *os.File, name string, want vmRuntimeAdoptionFileMetadata, normalize func(*vmRuntimeAdoptionFileMetadata)) error {
 	if parent == nil || name == "" {
 		return fmt.Errorf("VM path has no parent entry")
 	}
@@ -933,6 +943,10 @@ func revalidateVMRuntimeAdoptionName(parent *os.File, name string, want vmRuntim
 	closeErr := file.Close()
 	if inspectErr != nil || closeErr != nil {
 		return errors.Join(inspectErr, closeErr)
+	}
+	if normalize != nil {
+		normalize(&want)
+		normalize(&got)
 	}
 	if got != want {
 		return fmt.Errorf("VM path metadata changed")
