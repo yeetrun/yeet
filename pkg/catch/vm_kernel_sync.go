@@ -61,12 +61,20 @@ func syncVMGuestKernelDefault(ctx context.Context, s *Server, name string, flags
 		if err != nil {
 			return err
 		}
-		if target.service.VM.Components != nil {
-			return fmt.Errorf("cannot sync the kernel for adopted VM %q until component-aware kernel reconciliation is available", name)
+		components := target.service.VM.Components
+		if components != nil && !vmKernelComponentConfigured(components.Kernel) {
+			return fmt.Errorf("cannot sync the kernel for component-managed VM %q because its kernel lock is incomplete", name)
 		}
 		restart, err = s.prepareVMKernelSyncRestart(name, flags)
 		if err != nil {
 			return err
+		}
+		if components != nil {
+			configPath := filepath.Join(serviceRunDirForRoot(target.serviceRoot), "firecracker.json")
+			return syncVMComponentGuestKernelToHost(
+				ctx, s.cfg.RootDir, s.cfg.ServicesRoot, target.serviceRoot, name,
+				target.service.VM.Disk.Path, configPath, *components,
+			)
 		}
 		result, err := syncVMGuestKernelToHost(ctx, target)
 		if err != nil {
