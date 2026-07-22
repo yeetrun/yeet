@@ -136,6 +136,9 @@ func (i localVMImageImporter) importExtracted(cacheRoot string, req localVMImage
 	if err != nil {
 		return localVMImageRef{}, err
 	}
+	if hasSourceManifest && localVMImageCompressedRootFS(rootFSName) && sourceManifest.RootFSSize > 0 {
+		rootFSSize = sourceManifest.RootFSSize
+	}
 	kernelSource, kernelPolicy, err := localVMImageKernelSource(stagingDir, managed.Paths.KernelPath, req.AllowLocalKernel)
 	if err != nil {
 		return localVMImageRef{}, err
@@ -176,6 +179,10 @@ func (i localVMImageImporter) importExtracted(cacheRoot string, req localVMImage
 		return localVMImageRef{}, err
 	}
 	return ref, nil
+}
+
+func localVMImageCompressedRootFS(name string) bool {
+	return strings.HasSuffix(name, ".zst") || strings.HasSuffix(name, ".zstd")
 }
 
 func localVMImageKernelSource(stagingDir, managedKernelPath string, allowLocalKernel bool) (string, string, error) {
