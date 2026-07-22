@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,6 +27,7 @@ import (
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/registry"
 )
 
@@ -102,6 +104,7 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 
 	guestManifestRaw, guestAsset := readVMRuntimeIntegrationGuest(t, cfg)
 	server := newVMRuntimeIntegrationServer(t, cfg)
+	prepareVMRuntimeIntegrationISOPool(t, ctx, server)
 	serviceRootFlag, dataset := prepareVMRuntimeIntegrationStorage(t, ctx, cfg)
 	datasetRemoved := false
 	defer func() {
@@ -366,6 +369,106 @@ func newVMRuntimeIntegrationServer(t *testing.T, input vmRuntimeIntegrationConfi
 		AuthorizeFunc:        func(context.Context, string) error { return nil },
 	}
 	return NewUnstartedServer(cfg)
+}
+
+func prepareVMRuntimeIntegrationISOPool(t *testing.T, ctx context.Context, server *Server) {
+	t.Helper()
+	if err := server.ensureISOPool(ctx); err == nil {
+		return
+	} else if !strings.Contains(err.Error(), "no collision-free ISO /16") {
+		t.Fatalf("select integration ISO pool: %v", err)
+	}
+	raw, err := exec.CommandContext(ctx, "ip", "-j", "route", "show", "table", "all").Output()
+	if err != nil {
+		t.Fatalf("inspect live ISO routes: %v", err)
+	}
+	pool, occupied, err := vmRuntimeIntegrationLiveISOPool(raw)
+	if err != nil {
+		t.Fatalf("reuse live Yeet ISO pool: %v", err)
+	}
+	if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+		data.ISOPool = &db.ISOPool{
+			Prefix:           pool,
+			Source:           "automatic",
+			AllocatorVersion: iso.AllocatorVersion,
+			PolicyVersion:    iso.PolicyVersion,
+		}
+		for i, link := range occupied {
+			name := fmt.Sprintf("runtime-integration-occupied-%d", i)
+			data.Services[name] = &db.Service{
+				Name: name,
+				ISO: &db.ISOAllocation{
+					Kind:  string(iso.PayloadVM),
+					State: string(iso.StateTombstoned),
+					Link:  link,
+				},
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed live ISO allocation occupancy: %v", err)
+	}
+}
+
+func vmRuntimeIntegrationLiveISOPool(raw []byte) (netip.Prefix, []netip.Prefix, error) {
+	var routes []struct {
+		Type        string `json:"type"`
+		Destination string `json:"dst"`
+		Device      string `json:"dev"`
+	}
+	if err := json.Unmarshal(raw, &routes); err != nil {
+		return netip.Prefix{}, nil, fmt.Errorf("decode live routes: %w", err)
+	}
+	blackholes := map[netip.Prefix]bool{}
+	var links []netip.Prefix
+	for _, route := range routes {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(route.Destination))
+		if err != nil || !prefix.Addr().Is4() {
+			continue
+		}
+		prefix = prefix.Masked()
+		if route.Type == "blackhole" && prefix.Bits() == 16 {
+			blackholes[prefix] = true
+		}
+		if strings.HasPrefix(route.Device, "yi-") && prefix.Bits() == 30 {
+			links = append(links, prefix)
+		}
+	}
+	for _, rawCandidate := range automaticISOPoolCandidates {
+		candidate := netip.MustParsePrefix(rawCandidate)
+		if !blackholes[candidate] {
+			continue
+		}
+		occupied := slices.DeleteFunc(slices.Clone(links), func(link netip.Prefix) bool {
+			return !candidate.Contains(link.Addr())
+		})
+		if len(occupied) == 0 {
+			continue
+		}
+		slices.SortFunc(occupied, func(a, b netip.Prefix) int { return a.Addr().Compare(b.Addr()) })
+		return candidate, occupied, nil
+	}
+	return netip.Prefix{}, nil, fmt.Errorf("no live Yeet ISO pool with allocated /30 routes found")
+}
+
+func TestVMRuntimeIntegrationLiveISOPool(t *testing.T) {
+	raw := []byte(`[
+		{"type":"blackhole","dst":"172.16.0.0/16","metric":42760},
+		{"dst":"172.16.0.4/30","dev":"yi-second"},
+		{"dst":"172.16.0.0/30","dev":"yi-first"},
+		{"dst":"172.17.0.0/16","dev":"docker0"}
+	]`)
+	pool, occupied, err := vmRuntimeIntegrationLiveISOPool(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := netip.MustParsePrefix("172.16.0.0/16"); pool != want {
+		t.Fatalf("pool = %s, want %s", pool, want)
+	}
+	want := []netip.Prefix{netip.MustParsePrefix("172.16.0.0/30"), netip.MustParsePrefix("172.16.0.4/30")}
+	if !slices.Equal(occupied, want) {
+		t.Fatalf("occupied links = %v, want %v", occupied, want)
+	}
 }
 
 func readVMRuntimeIntegrationGuest(t *testing.T, cfg vmRuntimeIntegrationConfig) ([]byte, vmImageAsset) {
