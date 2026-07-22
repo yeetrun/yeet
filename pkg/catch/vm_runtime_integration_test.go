@@ -130,6 +130,10 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 		t.Fatalf("initial VM unit state = %#v, err = %v", initialUnit, err)
 	}
 	initialService := vmRuntimeIntegrationService(t, server, cfg.Service)
+	if initialService.VM.Components == nil {
+		t.Fatal("new component VM has no component state before legacy-adoption simulation")
+	}
+	initialArtifact := initialService.VM.Components.Runtime.Configured
 	initialVersion, err := probeMatchingVMRuntimePair(ctx, guestAsset.Paths.FirecrackerPath, guestAsset.Paths.JailerPath)
 	if err != nil {
 		t.Fatalf("probe initial runtime pair: %v", err)
@@ -140,6 +144,15 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 	initialIP := waitVMRuntimeIntegrationGuest(t, ctx, initialService.VM.Sockets.VsockSocketPath)
 	if _, err := runVMRuntimeIntegrationSSH(ctx, cfg, initialService.VM.SSH.User, initialIP, "true"); err != nil {
 		t.Fatalf("verify initial guest network and SSH readiness: %v", err)
+	}
+	if _, _, err := server.cfg.DB.MutateService(cfg.Service, func(_ *db.Data, service *db.Service) error {
+		if service.VM == nil || service.VM.Components == nil {
+			return errors.New("component VM state disappeared before legacy-adoption simulation")
+		}
+		service.VM.Components = nil
+		return nil
+	}); err != nil {
+		t.Fatalf("simulate legacy VM database state: %v", err)
 	}
 
 	adoption, err := PrepareVMRuntimeAdoption(ctx, &server.cfg)
@@ -165,7 +178,10 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 	if adoptedUnit.MainPID != initialUnit.MainPID {
 		t.Fatalf("runtime adoption restarted VM: PID changed from %d to %d", initialUnit.MainPID, adoptedUnit.MainPID)
 	}
-	initialArtifact := vmRuntimeIntegrationService(t, server, cfg.Service).VM.Components.Runtime.Configured
+	adoptedService := vmRuntimeIntegrationService(t, server, cfg.Service)
+	if adoptedService.VM.Components == nil || adoptedService.VM.Components.Runtime.Configured != initialArtifact {
+		t.Fatalf("runtime adoption did not restore the exact configured runtime: %#v", adoptedService.VM.Components)
+	}
 
 	candidate := importVMRuntimeIntegrationCandidate(t, ctx, server, cfg, "candidate-"+cfg.Scenario, candidateManifestRaw, cfg.Firecracker, cfg.Jailer)
 	if candidate.ID != cfg.RuntimeID || candidate.ManifestSHA256 != cfg.RuntimeManifestSHA256 {
