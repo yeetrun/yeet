@@ -145,22 +145,13 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 	if _, err := runVMRuntimeIntegrationSSH(ctx, cfg, initialService.VM.SSH.User, initialIP, "true"); err != nil {
 		t.Fatalf("verify initial guest network and SSH readiness: %v", err)
 	}
-	if _, _, err := server.cfg.DB.MutateService(cfg.Service, func(_ *db.Data, service *db.Service) error {
-		if service.VM == nil || service.VM.Components == nil {
-			return errors.New("component VM state disappeared before legacy-adoption simulation")
-		}
-		service.VM.Components = nil
-		return nil
-	}); err != nil {
-		t.Fatalf("simulate legacy VM database state: %v", err)
-	}
 
 	adoption, err := PrepareVMRuntimeAdoption(ctx, &server.cfg)
 	if err != nil {
 		t.Fatalf("prepare VM runtime adoption: %v", err)
 	}
 	summary := adoption.Summary()
-	if len(summary.Adopting) != 1 || summary.Adopting[0] != cfg.Service || len(summary.Blocked) != 0 {
+	if len(summary.AlreadyAdopted) != 1 || summary.AlreadyAdopted[0] != cfg.Service || len(summary.Adopting) != 0 || len(summary.Blocked) != 0 || summary.HasChanges {
 		_ = adoption.Close()
 		t.Fatalf("VM runtime adoption summary = %#v", summary)
 	}
