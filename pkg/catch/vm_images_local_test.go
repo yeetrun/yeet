@@ -203,6 +203,41 @@ func TestImportLocalVMImagePreservesBundleManifestFastBootCapability(t *testing.
 	}
 }
 
+func TestImportLocalVMImagePreservesCompressedRootFSUncompressedSize(t *testing.T) {
+	importer := localVMImageImporter{
+		CacheRoot: t.TempDir(),
+		EnsureManagedAsset: func(context.Context) (vmImageAsset, error) {
+			return fakeManagedVMImageAsset(t), nil
+		},
+	}
+	const uncompressedBytes = int64(2 << 30)
+	sourceManifest := vmImageManifest{
+		RootFS:     "rootfs.ext4.zst",
+		RootFSSize: uncompressedBytes,
+	}
+	manifestRaw, err := json.Marshal(sourceManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := importer.Import(context.Background(), localVMImageImportRequest{
+		Name: "foo/compressed",
+		Reader: localVMImageBundleTar(t, map[string][]byte{
+			"rootfs.ext4.zst": []byte("compressed-rootfs"),
+			"manifest.json":   manifestRaw,
+		}),
+	})
+	if err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	manifest, err := readLocalVMImageBlobManifest(ref.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.RootFSSize != uncompressedBytes {
+		t.Fatalf("rootfs_size = %d, want source uncompressed size %d", manifest.RootFSSize, uncompressedBytes)
+	}
+}
+
 func TestImportLocalVMImageContentIDIncludesRuntimeMetadata(t *testing.T) {
 	importer := localVMImageImporter{
 		CacheRoot: t.TempDir(),
