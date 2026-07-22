@@ -142,9 +142,7 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 		t.Fatalf("probe initial Firecracker API: %v", err)
 	}
 	initialIP := waitVMRuntimeIntegrationGuest(t, ctx, initialService.VM.Sockets.VsockSocketPath)
-	if _, err := runVMRuntimeIntegrationSSH(ctx, cfg, initialService.VM.SSH.User, initialIP, "true"); err != nil {
-		t.Fatalf("verify initial guest network and SSH readiness: %v", err)
-	}
+	waitVMRuntimeIntegrationSSH(t, ctx, cfg, initialService.VM.SSH.User, initialIP)
 
 	adoption, err := PrepareVMRuntimeAdoption(ctx, &server.cfg)
 	if err != nil {
@@ -253,9 +251,7 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 	if finalRuntime.Configured != candidate || finalRuntime.Staged != nil || finalRuntime.Trial == nil || finalRuntime.Trial.State != string(vmRuntimeTrialFailedRolledBack) {
 		t.Fatalf("final runtime lifecycle = %#v, want candidate configured after fallback", finalRuntime)
 	}
-	if _, err := runVMRuntimeIntegrationSSH(ctx, cfg, finalService.VM.SSH.User, candidateIP, "true"); err != nil {
-		t.Fatalf("final guest readiness: %v", err)
-	}
+	waitVMRuntimeIntegrationSSH(t, ctx, cfg, finalService.VM.SSH.User, candidateIP)
 
 	serviceRoot := serviceRootFromConfig(server.cfg, *finalService)
 	jailRoot := filepath.Join(vmJailerBaseForDataRoot(cfg.DataRoot), filepath.Base(candidate.Firecracker), vmJailerID(cfg.Service))
@@ -605,6 +601,25 @@ func waitVMRuntimeIntegrationGuest(t *testing.T, ctx context.Context, socket str
 	}
 }
 
+func waitVMRuntimeIntegrationSSH(t *testing.T, ctx context.Context, cfg vmRuntimeIntegrationConfig, user string, ip netip.Addr) {
+	t.Helper()
+	sshCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	var lastErr error
+	for {
+		if _, err := runVMRuntimeIntegrationSSH(sshCtx, cfg, user, ip, "true"); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-sshCtx.Done():
+			t.Fatalf("wait for authenticated guest SSH readiness: %v (last error: %v)", sshCtx.Err(), lastErr)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
 func waitVMRuntimeIntegrationRunning(t *testing.T, ctx context.Context, server *Server, cfg vmRuntimeIntegrationConfig, artifact db.VMRuntimeArtifactConfig, version string, priorPID int) (vmRuntimeRunningMarker, netip.Addr) {
 	t.Helper()
 	var lastErr error
@@ -617,7 +632,9 @@ func waitVMRuntimeIntegrationRunning(t *testing.T, ctx context.Context, server *
 			if err := probeFirecrackerInstance(ctx, service.VM.Sockets.APISocketPath, vmJailerID(cfg.Service), version); err == nil {
 				if err := verifyVMRuntimeIntegrationProcessIdentity(marker.ChildPID, cfg.TestUID, cfg.TestGID); err == nil {
 					if readiness, err := vmJailerReadinessForRootWithOwner(root, 0, 0); err == nil && readiness == vmJailerReady {
-						return marker, waitVMRuntimeIntegrationGuest(t, ctx, service.VM.Sockets.VsockSocketPath)
+						ip := waitVMRuntimeIntegrationGuest(t, ctx, service.VM.Sockets.VsockSocketPath)
+						waitVMRuntimeIntegrationSSH(t, ctx, cfg, service.VM.SSH.User, ip)
+						return marker, ip
 					}
 				}
 			}
@@ -743,6 +760,7 @@ func verifyVMRuntimeIntegrationDiskRestore(t *testing.T, ctx context.Context, se
 	}
 	service = vmRuntimeIntegrationService(t, server, cfg.Service)
 	ip = waitVMRuntimeIntegrationGuest(t, ctx, service.VM.Sockets.VsockSocketPath)
+	waitVMRuntimeIntegrationSSH(t, ctx, cfg, service.VM.SSH.User, ip)
 	value, err := runVMRuntimeIntegrationSSH(ctx, cfg, service.VM.SSH.User, ip, "cat /var/tmp/yeet-runtime-integration-state")
 	if err != nil {
 		t.Fatalf("read restored guest marker: %v", err)
