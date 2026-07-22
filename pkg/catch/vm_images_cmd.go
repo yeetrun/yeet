@@ -54,6 +54,18 @@ var vmImageEnsureCatalogFunc = func(ctx context.Context, cache vmImageCache, ima
 	return ensureVMImageCatalogAssetWithProgress(ctx, cache, image, ui)
 }
 
+var fetchVMImageUpdateComponentCatalogs = func(ctx context.Context, refs *vmImageComponentCatalogs) (vmImageGuestKernelCatalogs, error) {
+	return fetchVMImageGuestKernelCatalogs(ctx, nil, refs, true)
+}
+
+var ensureVMImageUpdateGuestBase = func(ctx context.Context, cache vmGuestBaseCache, ref vmGuestBaseCatalogRef) (vmGuestBaseArtifact, error) {
+	return cache.Ensure(ctx, ref)
+}
+
+var ensureVMImageUpdateKernel = func(ctx context.Context, cache vmKernelArtifactCache, ref vmKernelCatalogRef) (vmKernelArtifact, error) {
+	return cache.Ensure(ctx, ref)
+}
+
 func (e *ttyExecer) vmImagesCmdFunc(flags cli.VMImagesFlags, args []string) error {
 	if len(args) == 0 {
 		return e.vmImagesListCmdFunc(flags)
@@ -168,6 +180,14 @@ func (e *ttyExecer) vmImagesUpdateCmdFunc(flags cli.VMImagesFlags, args []string
 	if err != nil {
 		return err
 	}
+	var componentCatalogs *vmImageGuestKernelCatalogs
+	if catalog.ComponentCatalogs != nil {
+		fetched, err := fetchVMImageUpdateComponentCatalogs(ctx, catalog.ComponentCatalogs)
+		if err != nil {
+			return err
+		}
+		componentCatalogs = &fetched
+	}
 	states := make([]vmImageCacheState, 0, len(images))
 	for _, image := range images {
 		asset, err := e.ensureCatalogVMImageAndPrune(ctx, cache, image, e.vmImagesProgressUI(flags))
@@ -185,12 +205,46 @@ func (e *ttyExecer) vmImagesUpdateCmdFunc(flags cli.VMImagesFlags, args []string
 		if state.CachePath == "" && state.CachedVersion != "" {
 			state.CachePath = filepath.Join(cache.Root, state.CachedVersion)
 		}
+		if componentCatalogs != nil {
+			guest, kernel, err := e.ensureVMImageUpdateComponents(ctx, image, *componentCatalogs)
+			if err != nil {
+				return err
+			}
+			state.GuestBaseID = guest.Manifest.GuestBaseID
+			state.GuestBaseManifestSHA256 = guest.ManifestSHA256
+			state.KernelID = kernel.Manifest.KernelID
+			state.KernelManifestSHA256 = kernel.ManifestSHA256
+		}
 		states = append(states, state)
 	}
 	if len(states) == 1 {
 		return renderVMImageCacheState(e.rw, flags.Format, states[0])
 	}
 	return renderVMImageCacheStates(e.rw, flags.Format, states)
+}
+
+func (e *ttyExecer) ensureVMImageUpdateComponents(ctx context.Context, image vmImageCatalogImage, catalogs vmImageGuestKernelCatalogs) (vmGuestBaseArtifact, vmKernelArtifact, error) {
+	family, err := vmProvisionGuestFamily(image)
+	if err != nil {
+		return vmGuestBaseArtifact{}, vmKernelArtifact{}, err
+	}
+	guestRef, ok := catalogs.GuestBases.GuestBaseForChannel(family, "stable")
+	if !ok {
+		return vmGuestBaseArtifact{}, vmKernelArtifact{}, nil
+	}
+	kernelRef, ok := catalogs.Kernels.KernelForChannel(guestRef.Architecture, "stable")
+	if !ok {
+		return vmGuestBaseArtifact{}, vmKernelArtifact{}, nil
+	}
+	guest, err := ensureVMImageUpdateGuestBase(ctx, e.s.vmGuestBaseCache(), guestRef)
+	if err != nil {
+		return vmGuestBaseArtifact{}, vmKernelArtifact{}, fmt.Errorf("cache VM guest base %s: %w", guestRef.GuestBaseID, err)
+	}
+	kernel, err := ensureVMImageUpdateKernel(ctx, e.s.vmKernelArtifactCache(), kernelRef)
+	if err != nil {
+		return vmGuestBaseArtifact{}, vmKernelArtifact{}, fmt.Errorf("cache VM kernel %s: %w", kernelRef.KernelID, err)
+	}
+	return guest, kernel, nil
 }
 
 func vmImagesUpdateImages(args []string, catalog vmImageCatalog) ([]vmImageCatalogImage, error) {
@@ -505,15 +559,17 @@ func renderVMImageCacheStates(w io.Writer, formatOut string, states []vmImageCac
 
 func renderVMImageCacheStatesTable(w io.Writer, states []vmImageCacheState) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "PAYLOAD\tSTATE\tCACHED\tLATEST\tCACHE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "PAYLOAD\tSTATE\tCACHED\tLATEST\tGUEST_BASE\tKERNEL\tCACHE"); err != nil {
 		return err
 	}
 	for _, state := range states {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			state.Payload,
 			state.State,
 			dash(state.CachedVersion),
 			dash(state.LatestVersion),
+			vmImageCacheComponentDisplay(state.GuestBaseID, state.GuestBaseManifestSHA256),
+			vmImageCacheComponentDisplay(state.KernelID, state.KernelManifestSHA256),
 			dash(state.CachePath),
 		); err != nil {
 			return err
@@ -524,17 +580,29 @@ func renderVMImageCacheStatesTable(w io.Writer, states []vmImageCacheState) erro
 
 func renderVMImageCacheStateTable(w io.Writer, state vmImageCacheState) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "PAYLOAD\tSTATE\tCACHED\tLATEST\tCACHE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "PAYLOAD\tSTATE\tCACHED\tLATEST\tGUEST_BASE\tKERNEL\tCACHE"); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+	if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 		state.Payload,
 		state.State,
 		dash(state.CachedVersion),
 		dash(state.LatestVersion),
+		vmImageCacheComponentDisplay(state.GuestBaseID, state.GuestBaseManifestSHA256),
+		vmImageCacheComponentDisplay(state.KernelID, state.KernelManifestSHA256),
 		dash(state.CachePath),
 	); err != nil {
 		return err
 	}
 	return tw.Flush()
+}
+
+func vmImageCacheComponentDisplay(id, manifestSHA string) string {
+	if strings.TrimSpace(id) == "" {
+		return "-"
+	}
+	if strings.TrimSpace(manifestSHA) == "" {
+		return id
+	}
+	return id + "@" + manifestSHA
 }

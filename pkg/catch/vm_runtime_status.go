@@ -53,19 +53,30 @@ type vmRuntimeStatusIdentity struct {
 	Support           string `json:"support"`
 }
 
+type vmComponentStatusIdentity struct {
+	ID               string `json:"id"`
+	ManifestSHA256   string `json:"manifestSHA256,omitempty"`
+	SHA256           string `json:"sha256,omitempty"`
+	Source           string `json:"source"`
+	Path             string `json:"path,omitempty"`
+	RootFSProvenance string `json:"rootfsProvenance,omitempty"`
+}
+
 type vmRuntimeStatusRow struct {
-	Service           string                   `json:"service"`
-	Running           *vmRuntimeStatusIdentity `json:"running,omitempty"`
-	Configured        vmRuntimeStatusIdentity  `json:"configured"`
-	Staged            *vmRuntimeStatusIdentity `json:"staged,omitempty"`
-	Previous          *vmRuntimeStatusIdentity `json:"previous,omitempty"`
-	Policy            string                   `json:"policy"`
-	Channel           string                   `json:"channel"`
-	LatestPromoted    *vmRuntimeStatusIdentity `json:"latestPromoted,omitempty"`
-	JailerIsolation   string                   `json:"jailerIsolation"`
-	State             string                   `json:"state"`
-	LastTransition    string                   `json:"lastTransition,omitempty"`
-	RecommendedAction string                   `json:"recommendedAction,omitempty"`
+	Service           string                    `json:"service"`
+	GuestBase         vmComponentStatusIdentity `json:"guestBase"`
+	Kernel            vmComponentStatusIdentity `json:"kernel"`
+	Running           *vmRuntimeStatusIdentity  `json:"running,omitempty"`
+	Configured        vmRuntimeStatusIdentity   `json:"configured"`
+	Staged            *vmRuntimeStatusIdentity  `json:"staged,omitempty"`
+	Previous          *vmRuntimeStatusIdentity  `json:"previous,omitempty"`
+	Policy            string                    `json:"policy"`
+	Channel           string                    `json:"channel"`
+	LatestPromoted    *vmRuntimeStatusIdentity  `json:"latestPromoted,omitempty"`
+	JailerIsolation   string                    `json:"jailerIsolation"`
+	State             string                    `json:"state"`
+	LastTransition    string                    `json:"lastTransition,omitempty"`
+	RecommendedAction string                    `json:"recommendedAction,omitempty"`
 }
 
 type vmRuntimeUnitState struct {
@@ -164,7 +175,19 @@ func initialVMRuntimeStatusRow(host *db.VMHostConfig, service *db.Service, catal
 	if err != nil {
 		return vmRuntimeStatusRow{}, fmt.Errorf("VM runtime policy for %s: %w", service.Name, err)
 	}
-	row := vmRuntimeStatusRow{Service: service.Name, Configured: vmRuntimeStatusIdentityForArtifact(runtimeState.Configured, catalog, catalogErr), Policy: policy.Mode, Channel: policy.Channel, State: "unknown"}
+	row := vmRuntimeStatusRow{
+		Service: service.Name,
+		GuestBase: vmComponentStatusIdentity{
+			ID: service.VM.Components.GuestBase.ID, ManifestSHA256: service.VM.Components.GuestBase.ManifestSHA256,
+			Source: service.VM.Components.GuestBase.Source, RootFSProvenance: service.VM.Components.GuestBase.RootFSProvenance,
+		},
+		Kernel: vmComponentStatusIdentity{
+			ID: service.VM.Components.Kernel.ID, ManifestSHA256: service.VM.Components.Kernel.ManifestSHA256,
+			SHA256: service.VM.Components.Kernel.SHA256, Source: service.VM.Components.Kernel.Source, Path: service.VM.Components.Kernel.Path,
+		},
+		Configured: vmRuntimeStatusIdentityForArtifact(runtimeState.Configured, catalog, catalogErr),
+		Policy:     policy.Mode, Channel: policy.Channel, State: "unknown",
+	}
 	if runtimeState.Staged != nil {
 		identity := vmRuntimeStatusIdentityForArtifact(*runtimeState.Staged, catalog, catalogErr)
 		row.Staged = &identity
@@ -583,12 +606,14 @@ func renderVMRuntimeStatus(w io.Writer, format string, rows []vmRuntimeStatusRow
 		return encoder.Encode(rows)
 	case "", "table":
 		table := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-		if _, err := fmt.Fprintln(table, "SERVICE\tRUNNING\tCONFIGURED\tPOLICY\tCHANNEL\tPROMOTED\tJAILER\tSTATE\tACTION"); err != nil {
+		if _, err := fmt.Fprintln(table, "SERVICE\tGUEST BASE\tKERNEL\tRUNNING\tCONFIGURED\tSTAGED\tPREVIOUS\tPOLICY\tCHANNEL\tPROMOTED\tJAILER\tSTATE\tACTION"); err != nil {
 			return err
 		}
 		for _, row := range rows {
-			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				row.Service, vmRuntimeStatusIdentityDisplay(row.Running), vmRuntimeStatusIdentityDisplay(&row.Configured),
+			if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				row.Service, vmComponentStatusIdentityDisplay(row.GuestBase), vmComponentStatusIdentityDisplay(row.Kernel),
+				vmRuntimeStatusIdentityDisplay(row.Running), vmRuntimeStatusIdentityDisplay(&row.Configured),
+				vmRuntimeStatusIdentityDisplay(row.Staged), vmRuntimeStatusIdentityDisplay(row.Previous),
 				row.Policy, row.Channel, vmRuntimeStatusIdentityDisplay(row.LatestPromoted), row.JailerIsolation,
 				row.State, row.RecommendedAction); err != nil {
 				return err
@@ -598,6 +623,16 @@ func renderVMRuntimeStatus(w io.Writer, format string, rows []vmRuntimeStatusRow
 	default:
 		return fmt.Errorf("unsupported VM runtime status format %q", format)
 	}
+}
+
+func vmComponentStatusIdentityDisplay(identity vmComponentStatusIdentity) string {
+	if identity.ID == "" {
+		return "-"
+	}
+	if identity.ManifestSHA256 == "" {
+		return identity.ID
+	}
+	return identity.ID + "@" + identity.ManifestSHA256
 }
 
 func vmRuntimeStatusIdentityDisplay(identity *vmRuntimeStatusIdentity) string {

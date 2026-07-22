@@ -83,6 +83,11 @@ type vmComponentCatalogSet struct {
 	Runtimes   vmRuntimeCatalog
 }
 
+type vmImageGuestKernelCatalogs struct {
+	GuestBases vmGuestBaseCatalog
+	Kernels    vmKernelCatalog
+}
+
 func (c vmImageComponentCatalogs) validate(requireTrustedURL bool) error {
 	for _, catalog := range []struct {
 		name     string
@@ -434,6 +439,32 @@ func fetchVMComponentCatalogs(ctx context.Context, client *http.Client, refs vmI
 		return vmComponentCatalogSet{}, err
 	}
 	return vmComponentCatalogSet{GuestBases: guest, Kernels: kernel, Runtimes: runtimes}, nil
+}
+
+func fetchVMImageGuestKernelCatalogs(ctx context.Context, client *http.Client, refs *vmImageComponentCatalogs, requireTrustedURL bool) (vmImageGuestKernelCatalogs, error) {
+	if refs == nil {
+		return vmImageGuestKernelCatalogs{}, fmt.Errorf("VM image catalog does not publish component catalogs")
+	}
+	if err := refs.validate(requireTrustedURL); err != nil {
+		return vmImageGuestKernelCatalogs{}, err
+	}
+	guestRaw, err := fetchVMComponentCatalogRaw(ctx, client, refs.GuestBases, "guest-base", requireTrustedURL)
+	if err != nil {
+		return vmImageGuestKernelCatalogs{}, err
+	}
+	guest, err := decodeVMGuestBaseCatalog(guestRaw, requireTrustedURL)
+	if err != nil {
+		return vmImageGuestKernelCatalogs{}, err
+	}
+	kernelRaw, err := fetchVMComponentCatalogRaw(ctx, client, refs.Kernels, "kernel", requireTrustedURL)
+	if err != nil {
+		return vmImageGuestKernelCatalogs{}, err
+	}
+	kernels, err := decodeVMKernelCatalog(kernelRaw, requireTrustedURL)
+	if err != nil {
+		return vmImageGuestKernelCatalogs{}, err
+	}
+	return vmImageGuestKernelCatalogs{GuestBases: guest, Kernels: kernels}, nil
 }
 
 func fetchVMComponentCatalogRaw(ctx context.Context, client *http.Client, rawURL, label string, requireTrustedURL bool) ([]byte, error) {

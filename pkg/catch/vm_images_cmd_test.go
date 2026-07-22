@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -592,6 +593,178 @@ func TestVMImagesCmdPruneDryRunPreviewsOldCacheWithoutRemoving(t *testing.T) {
 	}
 }
 
+func TestVMImagesPruneComponentReferences(t *testing.T) {
+	server := newTestServer(t)
+	catalog := vmImageTestCatalog()
+	catalog.ComponentCatalogs = &vmImageComponentCatalogs{
+		GuestBases: defaultVMGuestBaseCatalogURL, Kernels: defaultVMKernelCatalogURL, Runtimes: defaultVMRuntimeCatalogURL,
+	}
+	stubVMImageCatalogFetch(t, catalog)
+	components, guestDirs, kernelDirs := seedVMImagePruneComponentArtifacts(t, server)
+	oldFetch := fetchVMImagePruneComponentCatalogs
+	fetchVMImagePruneComponentCatalogs = func(context.Context, *vmImageComponentCatalogs) (vmImageGuestKernelCatalogs, error) {
+		return components, nil
+	}
+	t.Cleanup(func() { fetchVMImagePruneComponentCatalogs = oldFetch })
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"devbox": {Name: "devbox", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Components: &db.VMComponentsConfig{
+			GuestBase: db.VMGuestBaseConfig{ID: components.GuestBases.GuestBases[1].GuestBaseID, ManifestSHA256: components.GuestBases.GuestBases[1].ManifestSHA256, Source: "official"},
+			Kernel:    db.VMKernelArtifactConfig{ID: components.Kernels.Kernels[1].KernelID, ManifestSHA256: components.Kernels.Kernels[1].ManifestSHA256, Source: "official"},
+		}}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	runtimeSentinel := filepath.Join(server.cfg.RootDir, "vm-runtimes", "amd64", "must-remain")
+	if err := os.MkdirAll(runtimeSentinel, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var dry bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &dry}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json", DryRun: true}, []string{"prune"}); err != nil {
+		t.Fatalf("component prune dry-run: %v", err)
+	}
+	dryRows := decodeVMImagePruneRows(t, dry.Bytes())
+	for _, test := range []struct {
+		kind, id, state, path string
+	}{
+		{"guest-base", components.GuestBases.GuestBases[0].GuestBaseID, "prunable", guestDirs[0]},
+		{"guest-base", components.GuestBases.GuestBases[1].GuestBaseID, "in-use", guestDirs[1]},
+		{"guest-base", components.GuestBases.GuestBases[2].GuestBaseID, "current", guestDirs[2]},
+		{"kernel", components.Kernels.Kernels[0].KernelID, "prunable", kernelDirs[0]},
+		{"kernel", components.Kernels.Kernels[1].KernelID, "in-use", kernelDirs[1]},
+		{"kernel", components.Kernels.Kernels[2].KernelID, "current", kernelDirs[2]},
+	} {
+		assertPruneRow(t, dryRows, test.kind, test.id, test.state, test.path)
+	}
+	for _, dir := range append(append([]string{}, guestDirs...), kernelDirs...) {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("dry-run removed %s: %v", dir, err)
+		}
+	}
+
+	var applied bytes.Buffer
+	execer.rw = &applied
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json", Yes: true}, []string{"prune"}); err != nil {
+		t.Fatalf("component prune: %v", err)
+	}
+	appliedRows := decodeVMImagePruneRows(t, applied.Bytes())
+	assertPruneRow(t, appliedRows, "guest-base", components.GuestBases.GuestBases[0].GuestBaseID, "removed", guestDirs[0])
+	assertPruneRow(t, appliedRows, "kernel", components.Kernels.Kernels[0].KernelID, "removed", kernelDirs[0])
+	for _, dir := range []string{guestDirs[0], kernelDirs[0]} {
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("prunable component still exists at %s: %v", dir, err)
+		}
+	}
+	for _, dir := range []string{guestDirs[1], guestDirs[2], kernelDirs[1], kernelDirs[2], runtimeSentinel} {
+		if _, err := os.Stat(dir); err != nil {
+			t.Fatalf("protected or runtime artifact was removed at %s: %v", dir, err)
+		}
+	}
+}
+
+func TestVMImagesPruneComponentApplyRevalidatesPlan(t *testing.T) {
+	server := newTestServer(t)
+	components, guestDirs, _ := seedVMImagePruneComponentArtifacts(t, server)
+	rows, err := server.planVMComponentImagePrune(components)
+	if err != nil {
+		t.Fatalf("plan component prune: %v", err)
+	}
+
+	guestRow := vmImagePruneRowForKindAndVersion(
+		t, rows, vmImagePruneKindGuestBase, components.GuestBases.GuestBases[0].GuestBaseID,
+	)
+	if err := os.WriteFile(filepath.Join(guestDirs[0], vmGuestBaseManifestFilename), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("replace planned guest manifest: %v", err)
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside-component")
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("create outside component: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "sentinel"), []byte("keep\n"), 0o644); err != nil {
+		t.Fatalf("write outside sentinel: %v", err)
+	}
+	kernelRow := vmImagePruneRowForKindAndVersion(
+		t, rows, vmImagePruneKindKernel, components.Kernels.Kernels[0].KernelID,
+	)
+	kernelRow.Path = outside
+
+	applied := server.applyVMImagePrune(context.Background(), []vmImagePruneRow{guestRow, kernelRow})
+	for _, row := range applied {
+		if row.State != vmImagePruneStateSkipped {
+			t.Fatalf("apply row = %#v, want skipped after revalidation", row)
+		}
+	}
+	for _, path := range []string{guestDirs[0], outside, filepath.Join(outside, "sentinel")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("rejected prune target %s was removed: %v", path, err)
+		}
+	}
+}
+
+func vmImagePruneRowForKindAndVersion(t *testing.T, rows []vmImagePruneRow, kind, version string) vmImagePruneRow {
+	t.Helper()
+	for _, row := range rows {
+		if row.Kind == kind && row.Version == version {
+			return row
+		}
+	}
+	t.Fatalf("missing %s prune row for %s in %#v", kind, version, rows)
+	return vmImagePruneRow{}
+}
+
+func seedVMImagePruneComponentArtifacts(t *testing.T, server *Server) (vmImageGuestKernelCatalogs, []string, []string) {
+	t.Helper()
+	guestFixture := newVMGuestBaseCacheFixture(t)
+	guestCache := server.vmGuestBaseCache()
+	guests := make([]vmGuestBaseCatalogRef, 0, 3)
+	guestDirs := make([]string, 0, 3)
+	for revision := 1; revision <= 3; revision++ {
+		guestFixture.rootfs = []byte(fmt.Sprintf("guest rootfs revision %d", revision))
+		guestFixture.manifest.GuestBaseID = fmt.Sprintf("guest-ubuntu-26.04-amd64-v%d", revision)
+		guestFixture.manifest.RootFS.SHA256 = vmComponentTestSHA256(guestFixture.rootfs)
+		guestFixture.refresh(t)
+		artifact, err := guestCache.ensure(context.Background(), guestFixture.ref, false)
+		if err != nil {
+			t.Fatalf("seed guest component %d: %v", revision, err)
+		}
+		guests = append(guests, guestFixture.ref)
+		guestDirs = append(guestDirs, artifact.Dir)
+	}
+	kernelFixture := newVMKernelArtifactCacheFixture(t)
+	kernelCache := server.vmKernelArtifactCache()
+	kernels := make([]vmKernelCatalogRef, 0, 3)
+	kernelDirs := make([]string, 0, 3)
+	for revision := 1; revision <= 3; revision++ {
+		kernelFixture.kernel = []byte(fmt.Sprintf("kernel revision %d", revision))
+		kernelFixture.config = []byte(fmt.Sprintf("CONFIG_REVISION_%d=y\n", revision))
+		kernelFixture.manifest.KernelID = fmt.Sprintf("kernel-linux-7.1.1-yeet-v%d", revision)
+		kernelFixture.manifest.PackagingRevision = revision
+		kernelFixture.manifest.VMLinux.SHA256 = vmComponentTestSHA256(kernelFixture.kernel)
+		kernelFixture.manifest.Config.SHA256 = vmComponentTestSHA256(kernelFixture.config)
+		kernelFixture.manifest.GuestPackages.ReleaseID = kernelFixture.manifest.KernelID
+		kernelFixture.refresh(t)
+		artifact, err := kernelCache.ensure(context.Background(), kernelFixture.ref, false)
+		if err != nil {
+			t.Fatalf("seed kernel component %d: %v", revision, err)
+		}
+		kernels = append(kernels, kernelFixture.ref)
+		kernelDirs = append(kernelDirs, artifact.Dir)
+	}
+	guestStable := guests[2]
+	kernelStable := kernels[2]
+	return vmImageGuestKernelCatalogs{
+		GuestBases: vmGuestBaseCatalog{SchemaVersion: 1, GuestBases: guests, Channels: map[string]vmGuestBaseCatalogChannels{
+			"ubuntu-26.04-amd64": {Stable: &vmGuestBaseCatalogIdentity{GuestBaseID: guestStable.GuestBaseID, ManifestSHA256: guestStable.ManifestSHA256}},
+			"nixos-26.05-amd64":  {},
+		}},
+		Kernels: vmKernelCatalog{SchemaVersion: 1, Kernels: kernels, Channels: map[string]vmKernelCatalogChannels{
+			"amd64": {Stable: &vmKernelCatalogIdentity{KernelID: kernelStable.KernelID, ManifestSHA256: kernelStable.ManifestSHA256}},
+		}},
+	}, guestDirs, kernelDirs
+}
+
 func TestVMImagesCmdPruneClassifiesCatalogVersionPrefixes(t *testing.T) {
 	server := newTestServer(t)
 	cacheRoot := filepath.Join(server.cfg.RootDir, "vm-images")
@@ -872,6 +1045,154 @@ func TestVMImagesCmdUpdateEnsuresImageAndPrintsState(t *testing.T) {
 			t.Fatalf("update output missing %q:\n%s", want, got)
 		}
 	}
+}
+
+func TestVMImagesUpdateComponentsNoRuntimeMutation(t *testing.T) {
+	server := newTestServer(t)
+	catalog := vmImageTestCatalog()
+	catalog.ComponentCatalogs = &vmImageComponentCatalogs{
+		GuestBases: defaultVMGuestBaseCatalogURL, Kernels: defaultVMKernelCatalogURL, Runtimes: defaultVMRuntimeCatalogURL,
+	}
+	stubVMImageCatalogFetch(t, catalog)
+	componentCatalogs := vmImageUpdateTestComponentCatalogs()
+	oldFetch := fetchVMImageUpdateComponentCatalogs
+	oldGuest := ensureVMImageUpdateGuestBase
+	oldKernel := ensureVMImageUpdateKernel
+	var guestRefs []vmGuestBaseCatalogRef
+	var kernelRefs []vmKernelCatalogRef
+	fetchVMImageUpdateComponentCatalogs = func(context.Context, *vmImageComponentCatalogs) (vmImageGuestKernelCatalogs, error) {
+		return componentCatalogs, nil
+	}
+	ensureVMImageUpdateGuestBase = func(_ context.Context, _ vmGuestBaseCache, ref vmGuestBaseCatalogRef) (vmGuestBaseArtifact, error) {
+		guestRefs = append(guestRefs, ref)
+		return vmGuestBaseArtifact{ManifestSHA256: ref.ManifestSHA256, Manifest: vmGuestBaseManifest{GuestBaseID: ref.GuestBaseID}}, nil
+	}
+	ensureVMImageUpdateKernel = func(_ context.Context, _ vmKernelArtifactCache, ref vmKernelCatalogRef) (vmKernelArtifact, error) {
+		kernelRefs = append(kernelRefs, ref)
+		return vmKernelArtifact{ManifestSHA256: ref.ManifestSHA256, Manifest: vmKernelManifest{KernelID: ref.KernelID}}, nil
+	}
+	t.Cleanup(func() {
+		fetchVMImageUpdateComponentCatalogs = oldFetch
+		ensureVMImageUpdateGuestBase = oldGuest
+		ensureVMImageUpdateKernel = oldKernel
+	})
+	restoreEnsure := stubVMImageEnsure(t, func(_ context.Context, cache vmImageCache, payload string, _ ProgressUI) (vmImageAsset, error) {
+		version := testUbuntuVMImageVersion
+		if payload == testNixOSVMPayload {
+			version = testNixOSVMImageVersion
+		}
+		return vmImageAsset{Paths: vmImagePaths{Dir: filepath.Join(cache.Root, version)}, Manifest: vmImageManifest{Version: version}}, nil
+	})
+	defer restoreEnsure()
+
+	runtime := vmRuntimeLaunchTestArtifact("v1.16.1", filepath.Join(server.cfg.RootDir, "vm-runtimes", "configured"))
+	service := &db.Service{Name: "devbox", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Components: &db.VMComponentsConfig{
+		GuestBase: db.VMGuestBaseConfig{ID: "guest-ubuntu-26.04-amd64-v0", ManifestSHA256: strings.Repeat("1", 64), Source: "official"},
+		Kernel:    db.VMKernelArtifactConfig{ID: "kernel-linux-6.1.1-yeet-v1", ManifestSHA256: strings.Repeat("2", 64), SHA256: strings.Repeat("3", 64), Path: "/service/vmlinux", Source: "official"},
+		Runtime:   db.VMRuntimeLifecycleConfig{Configured: runtime},
+	}}}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"devbox": service}}); err != nil {
+		t.Fatal(err)
+	}
+	beforeDB, err := os.ReadFile(filepath.Join(server.cfg.RootDir, "db.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeSentinel := filepath.Join(server.cfg.RootDir, "vm-runtimes", "sentinel")
+	if err := os.MkdirAll(filepath.Dir(runtimeSentinel), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtimeSentinel, []byte("unchanged runtime cache"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update"}); err != nil {
+		t.Fatalf("vm images update: %v", err)
+	}
+	if len(guestRefs) != 2 || len(kernelRefs) != 2 {
+		t.Fatalf("component ensures = guest %#v kernel %#v, want one per guest family", guestRefs, kernelRefs)
+	}
+	afterDB, err := os.ReadFile(filepath.Join(server.cfg.RootDir, "db.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(beforeDB, afterDB) {
+		t.Fatal("vm images update changed an existing VM component or runtime lock")
+	}
+	assertFileContains(t, runtimeSentinel, "unchanged runtime cache")
+}
+
+func TestVMImagesUpdateAllowsUnpromotedComponentCatalogs(t *testing.T) {
+	server := newTestServer(t)
+	catalog := vmImageTestCatalog()
+	catalog.ComponentCatalogs = &vmImageComponentCatalogs{
+		GuestBases: defaultVMGuestBaseCatalogURL, Kernels: defaultVMKernelCatalogURL, Runtimes: defaultVMRuntimeCatalogURL,
+	}
+	stubVMImageCatalogFetch(t, catalog)
+	oldFetch := fetchVMImageUpdateComponentCatalogs
+	oldGuest := ensureVMImageUpdateGuestBase
+	oldKernel := ensureVMImageUpdateKernel
+	fetchVMImageUpdateComponentCatalogs = func(context.Context, *vmImageComponentCatalogs) (vmImageGuestKernelCatalogs, error) {
+		return vmImageGuestKernelCatalogs{
+			GuestBases: vmGuestBaseCatalog{SchemaVersion: 1, Channels: map[string]vmGuestBaseCatalogChannels{
+				"ubuntu-26.04-amd64": {}, "nixos-26.05-amd64": {},
+			}},
+			Kernels: vmKernelCatalog{SchemaVersion: 1, Channels: map[string]vmKernelCatalogChannels{"amd64": {}}},
+		}, nil
+	}
+	ensureVMImageUpdateGuestBase = func(context.Context, vmGuestBaseCache, vmGuestBaseCatalogRef) (vmGuestBaseArtifact, error) {
+		t.Fatal("unpromoted guest base must not be cached")
+		return vmGuestBaseArtifact{}, nil
+	}
+	ensureVMImageUpdateKernel = func(context.Context, vmKernelArtifactCache, vmKernelCatalogRef) (vmKernelArtifact, error) {
+		t.Fatal("unpromoted kernel must not be cached")
+		return vmKernelArtifact{}, nil
+	}
+	t.Cleanup(func() {
+		fetchVMImageUpdateComponentCatalogs = oldFetch
+		ensureVMImageUpdateGuestBase = oldGuest
+		ensureVMImageUpdateKernel = oldKernel
+	})
+	restoreEnsure := stubVMImageEnsure(t, func(_ context.Context, cache vmImageCache, _ string, _ ProgressUI) (vmImageAsset, error) {
+		return vmImageAsset{
+			Paths:    vmImagePaths{Dir: filepath.Join(cache.Root, testUbuntuVMImageVersion)},
+			Manifest: vmImageManifest{Version: testUbuntuVMImageVersion},
+		}, nil
+	})
+	defer restoreEnsure()
+
+	var out bytes.Buffer
+	execer := &ttyExecer{ctx: context.Background(), s: server, rw: &out}
+	if err := execer.vmImagesCmdFunc(cli.VMImagesFlags{Format: "json"}, []string{"update", testUbuntuVMPayload}); err != nil {
+		t.Fatalf("vm images update before component promotion: %v", err)
+	}
+	var state vmImageCacheState
+	if err := json.Unmarshal(out.Bytes(), &state); err != nil {
+		t.Fatalf("decode update state: %v", err)
+	}
+	if state.GuestBaseID != "" || state.KernelID != "" {
+		t.Fatalf("unpromoted component state = %#v", state)
+	}
+}
+
+func vmImageUpdateTestComponentCatalogs() vmImageGuestKernelCatalogs {
+	guestDigest := strings.Repeat("a", 64)
+	kernelDigest := strings.Repeat("b", 64)
+	guests := vmGuestBaseCatalog{SchemaVersion: 1, GuestBases: []vmGuestBaseCatalogRef{
+		{GuestBaseID: "guest-ubuntu-26.04-amd64-v1", OS: "ubuntu", OSVersion: "26.04", Architecture: "amd64", ManifestSHA256: guestDigest},
+		{GuestBaseID: "guest-nixos-26.05-amd64-v1", OS: "nixos", OSVersion: "26.05", Architecture: "amd64", ManifestSHA256: guestDigest},
+	}, Channels: map[string]vmGuestBaseCatalogChannels{
+		"ubuntu-26.04-amd64": {Stable: &vmGuestBaseCatalogIdentity{GuestBaseID: "guest-ubuntu-26.04-amd64-v1", ManifestSHA256: guestDigest}},
+		"nixos-26.05-amd64":  {Stable: &vmGuestBaseCatalogIdentity{GuestBaseID: "guest-nixos-26.05-amd64-v1", ManifestSHA256: guestDigest}},
+	}}
+	kernels := vmKernelCatalog{SchemaVersion: 1, Kernels: []vmKernelCatalogRef{{
+		KernelID: "kernel-linux-7.1.1-yeet-v1", UpstreamVersion: "7.1.1", PackagingRevision: 1, Architecture: "amd64", ManifestSHA256: kernelDigest,
+	}}, Channels: map[string]vmKernelCatalogChannels{
+		"amd64": {Stable: &vmKernelCatalogIdentity{KernelID: "kernel-linux-7.1.1-yeet-v1", ManifestSHA256: kernelDigest}},
+	}}
+	return vmImageGuestKernelCatalogs{GuestBases: guests, Kernels: kernels}
 }
 
 func TestVMImagesUpdateWithoutArgsUsesCatalogPayloads(t *testing.T) {

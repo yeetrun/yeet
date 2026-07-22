@@ -77,12 +77,16 @@ type vmImageCache struct {
 }
 
 type vmImageCacheState struct {
-	Payload       string `json:"payload"`
-	CachedVersion string `json:"cachedVersion,omitempty"`
-	LatestVersion string `json:"latestVersion"`
-	State         string `json:"state"`
-	CachePath     string `json:"cachePath"`
-	ManifestURL   string `json:"manifestURL"`
+	Payload                 string `json:"payload"`
+	CachedVersion           string `json:"cachedVersion,omitempty"`
+	LatestVersion           string `json:"latestVersion"`
+	State                   string `json:"state"`
+	CachePath               string `json:"cachePath"`
+	ManifestURL             string `json:"manifestURL"`
+	GuestBaseID             string `json:"guestBaseId,omitempty"`
+	GuestBaseManifestSHA256 string `json:"guestBaseManifestSHA256,omitempty"`
+	KernelID                string `json:"kernelId,omitempty"`
+	KernelManifestSHA256    string `json:"kernelManifestSHA256,omitempty"`
 }
 
 type vmImageSourceKind string
