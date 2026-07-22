@@ -14,8 +14,42 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 )
+
+func TestVMKernelSyncManuallyReconcilesComponentLockWithRestart(t *testing.T) {
+	fixture := newVMKernelComponentSyncFixture(t)
+	server := newTestServer(t)
+	server.cfg.RootDir = fixture.dataRoot
+	server.cfg.ServicesRoot = filepath.Join(fixture.dataRoot, "services")
+	server.cfg.DB = db.NewStore(filepath.Join(fixture.dataRoot, "db.json"), server.cfg.ServicesRoot)
+	withVMKernelComponentCatalog(t, fixture.catalog, fixture.manifest, nil)
+	withVMKernelSyncRunner(t, mountedGuestKernelComponentRunner(t, fixture.selector(false), fixture.kernel, fixture.config))
+	withVMKernelSyncRunningCheck(t, func(*Server, string) (bool, error) { return true, nil })
+	var systemctlCalls [][]string
+	withVMKernelSyncSystemctl(t, func(args ...string) error {
+		systemctlCalls = append(systemctlCalls, append([]string(nil), args...))
+		return nil
+	})
+
+	if err := server.syncVMGuestKernel(context.Background(), "devbox", cli.VMKernelFlags{Restart: true}); err != nil {
+		t.Fatalf("syncVMGuestKernel: %v", err)
+	}
+
+	wantCalls := [][]string{{"stop", vmSystemdUnitName("devbox")}, {"restart", vmSystemdUnitName("devbox")}}
+	if !reflect.DeepEqual(systemctlCalls, wantCalls) {
+		t.Fatalf("systemctl calls = %#v, want %#v", systemctlCalls, wantCalls)
+	}
+	service := readVMKernelComponentSyncService(t, fixture.dataRoot)
+	got := service.VM.Components.Kernel
+	if got.ID != fixture.ref.KernelID || got.ManifestSHA256 != fixture.ref.ManifestSHA256 || got.SHA256 != fixture.manifest.VMLinux.SHA256 || got.Source != "official" {
+		t.Fatalf("component kernel = %#v, want canonical catalog selection", got)
+	}
+	if service.VM.Components.Runtime.Configured != fixture.runtime.Configured {
+		t.Fatalf("runtime changed during manual guest kernel sync: got %#v want %#v", service.VM.Components.Runtime, fixture.runtime)
+	}
+}
 
 func TestAutoSyncVMGuestKernelComponentLock(t *testing.T) {
 	fixture := newVMKernelComponentSyncFixture(t)
