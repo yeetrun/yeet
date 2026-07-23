@@ -143,6 +143,7 @@ func TestPrepareVMJailerUpgradeResolvesEveryVMBeforeStaging(t *testing.T) {
 	var resolved []string
 	resolveErr := errors.New("beta jailer unavailable")
 	deps := defaultVMJailerUpgradeDeps()
+	deps.preJailerUnit = func(context.Context, string) (bool, error) { return true, nil }
 	deps.sibling = func(_ context.Context, vm vmJailerUpgradeVM) (string, bool, error) {
 		resolved = append(resolved, vm.Service)
 		if vm.Service == "beta" {
@@ -172,6 +173,104 @@ func TestPrepareVMJailerUpgradeResolvesEveryVMBeforeStaging(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("staged units before all jailers resolved = %v", entries)
+	}
+}
+
+func TestReadVMJailerUpgradeServicesSelectsOnlyPreJailerVMs(t *testing.T) {
+	dataRoot := t.TempDir()
+	servicesRoot := filepath.Join(dataRoot, "services")
+	store := db.NewStore(filepath.Join(dataRoot, "db.json"), servicesRoot)
+	server := &Server{cfg: Config{RootDir: dataRoot, ServicesRoot: servicesRoot, DB: store}}
+	addTestServices(t, server,
+		db.Service{
+			Name: "legacy", ServiceType: db.ServiceTypeVM,
+			VM: &db.VMConfig{Runtime: vmRuntimeFirecracker},
+		},
+		db.Service{
+			Name: "adopted", ServiceType: db.ServiceTypeVM,
+			VM: &db.VMConfig{
+				Runtime:    vmRuntimeFirecracker,
+				Components: &db.VMComponentsConfig{},
+			},
+		},
+		db.Service{
+			Name: "already-jailer", ServiceType: db.ServiceTypeVM,
+			VM: &db.VMConfig{Runtime: vmRuntimeFirecracker},
+		},
+	)
+	deps := vmJailerUpgradeDeps{preJailerUnit: func(_ context.Context, service string) (bool, error) {
+		return service == "legacy", nil
+	}}
+
+	_, names, err := readVMJailerUpgradeServices(context.Background(), &server.cfg, deps)
+	if err != nil {
+		t.Fatalf("readVMJailerUpgradeServices: %v", err)
+	}
+	if !reflect.DeepEqual(names, []string{"legacy"}) {
+		t.Fatalf("legacy jailer bootstrap services = %v, want [legacy]", names)
+	}
+}
+
+func TestIsPreJailerVMRuntimeUnit(t *testing.T) {
+	service := "legacy"
+	base := vmRuntimeAdoptionLoadedUnit{
+		Name: vmSystemdUnitName(service),
+		ExecStart: []string{
+			"/var/lib/yeet/services/catch/run/catch", "vm-run",
+			"--service", service,
+			"--service-root", "/var/lib/yeet/services/legacy",
+			"--disk-path", "/var/lib/yeet/services/legacy/data/rootfs.ext4",
+			"--firecracker", "/var/lib/yeet/vm-images/v11/firecracker",
+			"--api-sock", "/var/lib/yeet/services/legacy/run/firecracker.sock",
+			"--config-file", "/var/lib/yeet/services/legacy/run/firecracker.json",
+			"--console-sock", "/var/lib/yeet/services/legacy/run/console.sock",
+		},
+		Fragments:        []vmRuntimeAdoptionUnitFragment{{Path: "/etc/systemd/system/" + vmSystemdUnitName(service)}},
+		ActiveState:      "active",
+		MainPID:          123,
+		NeedDaemonReload: "no",
+	}
+	withFlags := func(unit vmRuntimeAdoptionLoadedUnit, flags ...string) vmRuntimeAdoptionLoadedUnit {
+		unit.ExecStart = append(append([]string(nil), unit.ExecStart...), flags...)
+		return unit
+	}
+	wrongService := base
+	wrongService.ExecStart = append([]string(nil), base.ExecStart...)
+	wrongService.ExecStart[3] = "other"
+	missingFirecracker := base
+	missingFirecracker.ExecStart = []string{base.ExecStart[0], "vm-run", "--service", service}
+
+	tests := []struct {
+		name string
+		unit vmRuntimeAdoptionLoadedUnit
+		want bool
+	}{
+		{name: "pre-jailer", unit: base, want: true},
+		{name: "matching jailer", unit: withFlags(base, "--jailer", "/var/lib/yeet/vm-images/v11/jailer", "--jailer-base", "/var/lib/yeet/jailer")},
+		{name: "descriptor mode", unit: withFlags(base, "--runtime-descriptor", "/var/lib/yeet/services/legacy/run/runtime.json")},
+		{name: "wrong service", unit: wrongService},
+		{name: "missing firecracker", unit: missingFirecracker},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPreJailerVMRuntimeUnit(tt.unit, service); got != tt.want {
+				t.Fatalf("isPreJailerVMRuntimeUnit() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSelectedVMJailerUpgradeServicesExcludesUnselectedVMs(t *testing.T) {
+	legacy := &db.Service{Name: "legacy"}
+	adopted := &db.Service{Name: "adopted"}
+
+	got := selectedVMJailerUpgradeServices(map[string]*db.Service{
+		"legacy":  legacy,
+		"adopted": adopted,
+	}, []string{"legacy"})
+
+	if !reflect.DeepEqual(got, map[string]*db.Service{"legacy": legacy}) {
+		t.Fatalf("selected services = %#v, want legacy only", got)
 	}
 }
 
@@ -256,6 +355,7 @@ func TestPrepareVMJailerUpgradeResolvesEveryVMBeforeStagingBlocksLegacyCheckpoin
 	}
 	resolverCalls := 0
 	deps := defaultVMJailerUpgradeDeps()
+	deps.preJailerUnit = func(context.Context, string) (bool, error) { return true, nil }
 	deps.sibling = func(context.Context, vmJailerUpgradeVM) (string, bool, error) {
 		resolverCalls++
 		return "", false, errors.New("runtime resolution must not run")
@@ -1095,6 +1195,7 @@ func newVMJailerUpgradeIdentityFixture(t *testing.T) vmJailerUpgradeIdentityFixt
 	t.Cleanup(func() { vmSystemdSystemDir = oldSystemdDir })
 
 	deps := defaultVMJailerUpgradeDeps()
+	deps.preJailerUnit = func(context.Context, string) (bool, error) { return true, nil }
 	deps.sibling = func(_ context.Context, vm vmJailerUpgradeVM) (string, bool, error) {
 		return vm.Jailer, true, nil
 	}
@@ -1440,11 +1541,16 @@ func TestPlanVMJailerUpgradeInventory(t *testing.T) {
 		vmService("zeta", "vm://ubuntu/26.04", "zeta-v1", zetaRootFS, "", "", ""),
 		vmService("alpha", "vm://custom/alpha", "alpha-v1", alphaRootFS, customRoot, "", filepath.Join(customRoot, "data", "alpha.raw")),
 		vmService("middle", "vm://ubuntu/26.04", "middle-v1", middleRootFS, zfsRoot, "tank/vms/middle", filepath.Join(zfsRoot, "data", "middle.raw")),
+		{Name: "adopted", ServiceType: db.ServiceTypeVM, VM: &db.VMConfig{Runtime: vmRuntimeFirecracker, Components: &db.VMComponentsConfig{}}},
 		{Name: "not-a-vm", ServiceType: db.ServiceTypeSystemd},
 		{Name: "invalid-vm", ServiceType: db.ServiceTypeVM},
 		{Name: CatchService, ServiceType: db.ServiceTypeSystemd, ServiceRoot: filepath.Join(dataRoot, "custom-catch")},
 	}
 	addTestServices(t, &Server{cfg: *cfg}, services...)
+	adoptedCheckpoint := filepath.Join(servicesRoot, "adopted", "data", "checkpoints", "yeet-old")
+	if err := os.MkdirAll(adoptedCheckpoint, 0o700); err != nil {
+		t.Fatalf("MkdirAll adopted checkpoint: %v", err)
+	}
 
 	readiness := map[string]vmJailerReadiness{
 		defaultRoot: vmJailerPendingRestart,
@@ -1454,6 +1560,7 @@ func TestPlanVMJailerUpgradeInventory(t *testing.T) {
 	running := map[string]bool{"alpha": true, "middle": false, "zeta": true}
 	var rendered []vmSystemdConfig
 	deps := vmJailerUpgradeDeps{
+		preJailerUnit: func(context.Context, string) (bool, error) { return true, nil },
 		sibling: func(_ context.Context, vm vmJailerUpgradeVM) (string, bool, error) {
 			return vm.Jailer, true, nil
 		},

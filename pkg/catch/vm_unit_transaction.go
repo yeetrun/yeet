@@ -70,6 +70,10 @@ type vmUnitTransactionDeps struct {
 	unitGID           uint32
 }
 
+// ErrVMUnitRestorationUncertain marks a VM unit transaction whose exact prior
+// state could not be proven after compensating restoration.
+var ErrVMUnitRestorationUncertain = errors.New("VM unit restoration is uncertain")
+
 // vmUnitRestorationUncertainError means a compensating restoration could not
 // prove both exact prior files and a successful daemon-reload. Callers must
 // retain their recovery journal and must not roll Catch back.
@@ -84,6 +88,10 @@ func (err *vmUnitRestorationUncertainError) Error() string {
 
 func (err *vmUnitRestorationUncertainError) Unwrap() error {
 	return err.cause
+}
+
+func (err *vmUnitRestorationUncertainError) Is(target error) bool {
+	return target == ErrVMUnitRestorationUncertain
 }
 
 func (err *vmUnitRestorationUncertainError) Paths() []string {

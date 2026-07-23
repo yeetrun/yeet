@@ -16,6 +16,18 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestVMUnitRestorationUncertainErrorMatchesPublicSentinel(t *testing.T) {
+	cause := errors.New("restore prior unit")
+	err := &vmUnitRestorationUncertainError{cause: cause, paths: []string{"/etc/systemd/system/yeet-alpha.service"}}
+
+	if !errors.Is(err, ErrVMUnitRestorationUncertain) {
+		t.Fatalf("errors.Is(%v, ErrVMUnitRestorationUncertain) = false, want true", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("errors.Is(%v, cause) = false, want true", err)
+	}
+}
+
 func TestVMUnitTransactionPublishesAllAndReloadsOnce(t *testing.T) {
 	dir := t.TempDir()
 	first := filepath.Join(dir, "yeet-vm-alpha.service")

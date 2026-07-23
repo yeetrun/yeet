@@ -61,6 +61,7 @@ type vmJailerCandidate struct {
 }
 
 type vmJailerUpgradeDeps struct {
+	preJailerUnit         func(context.Context, string) (bool, error)
 	sibling               func(context.Context, vmJailerUpgradeVM) (string, bool, error)
 	cached                func(context.Context, vmJailerUpgradeVM) (vmJailerCandidate, bool, error)
 	localPayload          func(string) bool
@@ -108,6 +109,13 @@ func PrepareVMJailerUpgrade(ctx context.Context, cfg *Config) (*VMJailerUpgrade,
 			PendingRestart: summary.PendingRestart,
 		},
 	}, nil
+}
+
+// PrepareLegacyVMJailerUpgrade stages the one-way unit conversion required by
+// VMs created before Catch passed an explicit matching jailer to vm-run. It is
+// used only as an install-time bridge before complete runtime adoption.
+func PrepareLegacyVMJailerUpgrade(ctx context.Context, cfg *Config) (*VMJailerUpgrade, error) {
+	return prepareVMJailerUpgradeWithDeps(ctx, cfg, defaultVMJailerUpgradeDeps())
 }
 
 func prepareVMJailerUpgradeWithDeps(ctx context.Context, cfg *Config, deps vmJailerUpgradeDeps) (*VMJailerUpgrade, error) {
@@ -244,10 +252,11 @@ func planVMJailerUpgrade(ctx context.Context, cfg *Config, deps vmJailerUpgradeD
 	if err := validateVMJailerUpgradeDeps(deps); err != nil {
 		return vmJailerUpgradePlan{}, err
 	}
-	services, names, err := readVMJailerUpgradeServices(&effectiveCfg)
+	services, names, err := readVMJailerUpgradeServices(ctx, &effectiveCfg, deps)
 	if err != nil {
 		return vmJailerUpgradePlan{}, err
 	}
+	services = selectedVMJailerUpgradeServices(services, names)
 	server := &Server{cfg: effectiveCfg}
 	retired, err := inventoryRetiredVMCheckpoints(ctx, server, services)
 	if err != nil {
@@ -295,7 +304,7 @@ func prepareVMJailerUpgradeConfig(cfg *Config) (Config, error) {
 	return effectiveCfg, nil
 }
 
-func readVMJailerUpgradeServices(cfg *Config) (map[string]*db.Service, []string, error) {
+func readVMJailerUpgradeServices(ctx context.Context, cfg *Config, deps vmJailerUpgradeDeps) (map[string]*db.Service, []string, error) {
 	dv, err := cfg.DB.Get()
 	if err != nil {
 		return nil, nil, fmt.Errorf("read VM upgrade inventory: %w", err)
@@ -306,12 +315,100 @@ func readVMJailerUpgradeServices(cfg *Config) (map[string]*db.Service, []string,
 	services := dv.AsStruct().Services
 	names := make([]string, 0, len(services))
 	for name, service := range services {
-		if isVMJailerUpgradeService(service) {
+		if !isVMJailerUpgradeService(service) || service.VM.Components != nil {
+			continue
+		}
+		preJailer, err := deps.preJailerUnit(ctx, name)
+		if err != nil {
+			return nil, nil, fmt.Errorf("classify effective VM unit for %q: %w", name, err)
+		}
+		if preJailer {
 			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
 	return services, names, nil
+}
+
+func selectedVMJailerUpgradeServices(services map[string]*db.Service, names []string) map[string]*db.Service {
+	selected := make(map[string]*db.Service, len(names))
+	for _, name := range names {
+		if service := services[name]; service != nil {
+			selected[name] = service
+		}
+	}
+	return selected
+}
+
+func isPreJailerVMRuntimeUnit(unit vmRuntimeAdoptionLoadedUnit, service string) bool {
+	preJailer, err := classifyPreJailerVMRuntimeUnit(unit, service)
+	return err == nil && preJailer
+}
+
+func classifyPreJailerVMRuntimeUnit(unit vmRuntimeAdoptionLoadedUnit, service string) (bool, error) {
+	if err := validateVMRuntimeAdoptionLoadedUnitEvidence(unit, service); err != nil {
+		return false, err
+	}
+	_, flags, err := validateVMRuntimeAdoptionLoadedCommand(unit.ExecStart)
+	if err != nil {
+		return false, err
+	}
+	if flags["--service"] != service {
+		return false, fmt.Errorf("loaded VM unit --service is %q, want %q", flags["--service"], service)
+	}
+	if err := validateVMJailerUpgradeUnitPaths(flags, "loaded VM unit", "--service-root", "--disk-path", "--config-file"); err != nil {
+		return false, err
+	}
+	descriptorMode, err := classifyVMJailerUpgradeDescriptorMode(flags)
+	if err != nil || descriptorMode {
+		return false, err
+	}
+	explicitMode, err := classifyVMJailerUpgradeExplicitMode(flags)
+	if err != nil || explicitMode {
+		return false, err
+	}
+	if err := validateVMJailerUpgradeUnitPaths(flags, "loaded pre-jailer unit", "--firecracker"); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func classifyVMJailerUpgradeDescriptorMode(flags map[string]string) (bool, error) {
+	descriptorFlags := []string{"--runtime-descriptor", "--runtime-running-marker", "--runtime-trial-result"}
+	descriptorCount := 0
+	for _, name := range descriptorFlags {
+		if _, present := flags[name]; present {
+			descriptorCount++
+		}
+	}
+	if descriptorCount == 0 {
+		return false, nil
+	}
+	if descriptorCount != len(descriptorFlags) {
+		return false, fmt.Errorf("loaded VM unit has incomplete runtime descriptor mode")
+	}
+	return true, validateVMJailerUpgradeUnitPaths(flags, "loaded descriptor unit", append(descriptorFlags, "--jailer-base")...)
+}
+
+func classifyVMJailerUpgradeExplicitMode(flags map[string]string) (bool, error) {
+	_, hasJailer := flags["--jailer"]
+	_, hasJailerBase := flags["--jailer-base"]
+	if !hasJailer && !hasJailerBase {
+		return false, nil
+	}
+	if !hasJailer || !hasJailerBase {
+		return false, fmt.Errorf("loaded VM unit has incomplete explicit jailer mode")
+	}
+	return true, validateVMJailerUpgradeUnitPaths(flags, "loaded explicit unit", "--firecracker", "--jailer", "--jailer-base")
+}
+
+func validateVMJailerUpgradeUnitPaths(flags map[string]string, label string, names ...string) error {
+	for _, name := range names {
+		if _, err := cleanRequiredVMRuntimeAdoptionPath(label+" "+name, flags[name]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func isVMJailerUpgradeService(service *db.Service) bool {
@@ -484,7 +581,8 @@ func vmJailerUpgradeSystemdConfig(cfg *Config, server *Server, service db.Servic
 func validateVMJailerUpgradeDeps(deps vmJailerUpgradeDeps) error {
 	missing := ""
 	for name, present := range map[string]bool{
-		"sibling": deps.sibling != nil, "cached": deps.cached != nil,
+		"pre-jailer unit classifier": deps.preJailerUnit != nil,
+		"sibling":                    deps.sibling != nil, "cached": deps.cached != nil,
 		"local payload": deps.localPayload != nil, "official": deps.official != nil,
 		"install": deps.install != nil, "readiness": deps.readiness != nil,
 		"running state": deps.isRunning != nil, "unit renderer": deps.renderUnit != nil,
@@ -502,6 +600,13 @@ func validateVMJailerUpgradeDeps(deps vmJailerUpgradeDeps) error {
 
 func defaultVMJailerUpgradeDeps() vmJailerUpgradeDeps {
 	return vmJailerUpgradeDeps{
+		preJailerUnit: func(ctx context.Context, service string) (bool, error) {
+			unit, err := loadEffectiveVMRuntimeAdoptionUnit(ctx, vmSystemdUnitName(service))
+			if err != nil {
+				return false, err
+			}
+			return classifyPreJailerVMRuntimeUnit(unit, service)
+		},
 		sibling:   resolveSiblingVMUpgradeJailer,
 		install:   installUpgradeJailer,
 		readiness: vmJailerReadinessForRoot,
@@ -551,6 +656,9 @@ func completeVMJailerUpgradeDeps(cfg *Config, deps vmJailerUpgradeDeps) vmJailer
 
 func completeVMJailerUpgradeRuntimeDeps(deps vmJailerUpgradeDeps) vmJailerUpgradeDeps {
 	defaults := defaultVMJailerUpgradeDeps()
+	if deps.preJailerUnit == nil {
+		deps.preJailerUnit = defaults.preJailerUnit
+	}
 	if deps.sibling == nil {
 		deps.sibling = defaults.sibling
 	}

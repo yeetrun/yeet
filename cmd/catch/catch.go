@@ -1240,19 +1240,26 @@ type catchVMRuntimeAdoption interface {
 	CatchRollbackSafe() bool
 }
 
+type catchVMLegacyJailerUpgrade interface {
+	Commit() error
+	Close() error
+	Summary() catch.VMJailerUpgradeSummary
+}
+
 type catchInstallDeps struct {
-	writeInstallMeta            func(string) error
-	initTSNet                   func(string) (installTSNet, error)
-	ensureManagedServiceAccount func() error
-	newInstaller                func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error)
-	executable                  func() (string, error)
-	readFile                    func(string) ([]byte, error)
-	logf                        func(string, ...any)
-	tsnetHost                   func() string
-	inspectVMRuntimeAdoption    func(context.Context, *catch.Config) (catch.VMRuntimeAdoptionSummary, error)
-	prepareVMRuntimeAdoption    func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error)
-	reconcileVMRuntimePolicy    func(context.Context, *catch.Config) (catch.VMRuntimePolicyReconcileSummary, error)
-	acquireInstallLock          func(context.Context, string) (io.Closer, error)
+	writeInstallMeta             func(string) error
+	initTSNet                    func(string) (installTSNet, error)
+	ensureManagedServiceAccount  func() error
+	newInstaller                 func(*catch.Config, catch.FileInstallerCfg) (catchServiceInstaller, error)
+	executable                   func() (string, error)
+	readFile                     func(string) ([]byte, error)
+	logf                         func(string, ...any)
+	tsnetHost                    func() string
+	prepareLegacyVMJailerUpgrade func(context.Context, *catch.Config) (catchVMLegacyJailerUpgrade, error)
+	inspectVMRuntimeAdoption     func(context.Context, *catch.Config) (catch.VMRuntimeAdoptionSummary, error)
+	prepareVMRuntimeAdoption     func(context.Context, *catch.Config) (catchVMRuntimeAdoption, error)
+	reconcileVMRuntimePolicy     func(context.Context, *catch.Config) (catch.VMRuntimePolicyReconcileSummary, error)
+	acquireInstallLock           func(context.Context, string) (io.Closer, error)
 }
 
 type catchInstallPlan struct {
@@ -1283,6 +1290,9 @@ func defaultCatchInstallDeps() catchInstallDeps {
 		logf:         log.Printf,
 		tsnetHost: func() string {
 			return *tsnetHost
+		},
+		prepareLegacyVMJailerUpgrade: func(ctx context.Context, cfg *catch.Config) (catchVMLegacyJailerUpgrade, error) {
+			return catch.PrepareLegacyVMJailerUpgrade(ctx, cfg)
 		},
 		inspectVMRuntimeAdoption: catch.InspectVMRuntimeAdoption,
 		prepareVMRuntimeAdoption: func(ctx context.Context, cfg *catch.Config) (catchVMRuntimeAdoption, error) {
@@ -1343,6 +1353,14 @@ func installCatchAndAdoptVMRuntimes(cfg *catch.Config, plan catchInstallPlan, de
 	if err != nil {
 		return summary, fmt.Errorf("inspect VM runtime adoption: %w", err)
 	}
+	legacyUpgrade, err := deps.prepareLegacyVMJailerUpgrade(context.Background(), cfg)
+	if err != nil {
+		return summary, fmt.Errorf("prepare legacy VM jailer upgrade: %w", err)
+	}
+	defer func() {
+		err = errors.Join(err, legacyUpgrade.Close())
+	}()
+	legacySummary := legacyUpgrade.Summary()
 	if err := deps.ensureManagedServiceAccount(); err != nil {
 		return summary, fmt.Errorf("prepare managed native service account: %w", err)
 	}
@@ -1350,20 +1368,37 @@ func installCatchAndAdoptVMRuntimes(cfg *catch.Config, plan catchInstallPlan, de
 	if err != nil {
 		return summary, fmt.Errorf("failed to create installer: %w", err)
 	}
-	if err := requireCatchRollbackForVMUnits(preflight, inst); err != nil {
+	if err := requireCatchRollbackForVMUnits(preflight, legacySummary, inst); err != nil {
 		return summary, err
 	}
 	if err := installCurrentCatchExecutable(inst, deps); err != nil {
+		return summary, err
+	}
+	if err := commitCatchLegacyVMJailerUpgrade(legacyUpgrade, inst); err != nil {
 		return summary, err
 	}
 	adoption, err := deps.prepareVMRuntimeAdoption(context.Background(), cfg)
 	if err != nil {
 		return summary, fmt.Errorf("prepare VM runtime adoption after installing Catch: %w", err)
 	}
-	return commitCatchRuntimeAdoption(adoption, inst)
+	return commitCatchRuntimeAdoption(adoption, inst, !vmJailerUpgradeSummaryHasChanges(legacySummary))
 }
 
-func commitCatchRuntimeAdoption(adoption catchVMRuntimeAdoption, inst catchServiceInstaller) (summary catch.VMRuntimeAdoptionSummary, err error) {
+func commitCatchLegacyVMJailerUpgrade(upgrade catchVMLegacyJailerUpgrade, inst catchServiceInstaller) (err error) {
+	defer func() {
+		err = errors.Join(err, upgrade.Close())
+	}()
+	if err := upgrade.Commit(); err != nil {
+		commitErr := fmt.Errorf("commit legacy VM jailer upgrade: %w", err)
+		if errors.Is(err, catch.ErrVMUnitRestorationUncertain) {
+			return commitErr
+		}
+		return errors.Join(commitErr, inst.RollbackInstalledGeneration())
+	}
+	return nil
+}
+
+func commitCatchRuntimeAdoption(adoption catchVMRuntimeAdoption, inst catchServiceInstaller, allowCatchRollback bool) (summary catch.VMRuntimeAdoptionSummary, err error) {
 	adoptionClosed := false
 	defer func() {
 		if !adoptionClosed {
@@ -1375,7 +1410,7 @@ func commitCatchRuntimeAdoption(adoption catchVMRuntimeAdoption, inst catchServi
 		return summary, fmt.Errorf("VM runtime adoption changed after preflight; keeping the new Catch generation because no previous generation is available")
 	}
 	if err := adoption.Commit(); err != nil {
-		if adoption.CatchRollbackSafe() {
+		if adoption.CatchRollbackSafe() && allowCatchRollback {
 			return summary, errors.Join(err, inst.RollbackInstalledGeneration())
 		}
 		return summary, err
@@ -1389,6 +1424,13 @@ func commitCatchRuntimeAdoption(adoption catchVMRuntimeAdoption, inst catchServi
 
 func logCatchRuntimeAdoption(summary catch.VMRuntimeAdoptionSummary, deps catchInstallDeps) {
 	deps.logf("VM runtime adoption: %d ready, %d pending restart, %d adopting, %d blocked", len(summary.Ready), len(summary.PendingRestart), len(summary.Adopting), len(summary.Blocked))
+	for _, service := range summary.Blocked {
+		reason := strings.TrimSpace(summary.BlockedReasons[service])
+		if reason == "" {
+			reason = "reason unavailable"
+		}
+		deps.logf("warning: VM runtime adoption blocked for %s: %s", service, reason)
+	}
 }
 
 func reconcileCatchRuntimePolicy(cfg *catch.Config, summary catch.VMRuntimeAdoptionSummary, deps catchInstallDeps) error {
@@ -1410,13 +1452,17 @@ func catchInstallSummaryHasRuntimePolicyVMs(summary catch.VMRuntimeAdoptionSumma
 	return len(summary.Ready)+len(summary.PendingRestart)+len(summary.AlreadyAdopted)+len(summary.Adopting) != 0
 }
 
-func requireCatchRollbackForVMUnits(summary catch.VMRuntimeAdoptionSummary, inst catchServiceInstaller) error {
-	if !summary.RequiresRollbackGeneration || inst.RollbackInstalledGenerationAvailable() {
+func requireCatchRollbackForVMUnits(runtimeSummary catch.VMRuntimeAdoptionSummary, legacySummary catch.VMJailerUpgradeSummary, inst catchServiceInstaller) error {
+	if (!runtimeSummary.RequiresRollbackGeneration && !vmJailerUpgradeSummaryHasChanges(legacySummary)) || inst.RollbackInstalledGenerationAvailable() {
 		return nil
 	}
 	inst.Fail()
 	gateErr := fmt.Errorf("cannot transactionally update VM units: no previous Catch generation to restore")
 	return errors.Join(gateErr, inst.Close())
+}
+
+func vmJailerUpgradeSummaryHasChanges(summary catch.VMJailerUpgradeSummary) bool {
+	return len(summary.Ready)+len(summary.PendingRestart) != 0
 }
 
 func installCurrentCatchExecutable(inst catchServiceInstaller, deps catchInstallDeps) error {
@@ -1461,6 +1507,9 @@ func normalizeCatchInstallFileDeps(deps, defaults catchInstallDeps) catchInstall
 }
 
 func normalizeCatchInstallRuntimeDeps(deps, defaults catchInstallDeps) catchInstallDeps {
+	if deps.prepareLegacyVMJailerUpgrade == nil {
+		deps.prepareLegacyVMJailerUpgrade = defaults.prepareLegacyVMJailerUpgrade
+	}
 	if deps.inspectVMRuntimeAdoption == nil {
 		deps.inspectVMRuntimeAdoption = defaults.inspectVMRuntimeAdoption
 	}
