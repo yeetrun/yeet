@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -2059,6 +2060,56 @@ func TestInstallUpgradeJailer(t *testing.T) {
 	wantValidated := [][2]string{{vm.Firecracker, source}, {vm.Firecracker, vm.Jailer}}
 	if !reflect.DeepEqual(validated, wantValidated) {
 		t.Fatalf("validated pairs = %#v, want %#v", validated, wantValidated)
+	}
+}
+
+func TestVMJailerExecutableProbeHelper(t *testing.T) {
+	if os.Getenv("YEET_VM_JAILER_PROBE_HELPER") != "1" {
+		return
+	}
+	_, _ = os.Stdout.WriteString("jailer v1.14.3\n")
+	os.Exit(0)
+}
+
+func TestInstallUpgradeJailerClosesWritableDescriptorBeforePostPublishValidation(t *testing.T) {
+	fixture := newVMJailerInstallFixture(t)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test executable: %v", err)
+	}
+	contents, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatalf("read test executable: %v", err)
+	}
+	if err := os.WriteFile(fixture.candidate.Path, contents, 0o755); err != nil {
+		t.Fatalf("write executable jailer candidate: %v", err)
+	}
+	fixture.candidate.SHA256 = testSHA256Hex(contents)
+
+	ops := fixture.ops()
+	validationCalls := 0
+	ops.validatePair = func(ctx context.Context, _, jailer string) error {
+		validationCalls++
+		if validationCalls == 1 {
+			return nil
+		}
+		command := exec.CommandContext(ctx, jailer, "-test.run=^TestVMJailerExecutableProbeHelper$")
+		command.Env = append(os.Environ(), "YEET_VM_JAILER_PROBE_HELPER=1")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			return errors.Join(err, errors.New(strings.TrimSpace(string(output))))
+		}
+		if strings.TrimSpace(string(output)) != "jailer v1.14.3" {
+			return errors.New("unexpected jailer version output")
+		}
+		return nil
+	}
+
+	if _, err := installUpgradeJailerWithOps(context.Background(), fixture.vm, fixture.candidate, ops); err != nil {
+		t.Fatalf("installUpgradeJailerWithOps: %v", err)
+	}
+	if validationCalls != 2 {
+		t.Fatalf("runtime pair validation calls = %d, want 2", validationCalls)
 	}
 }
 

@@ -1008,7 +1008,11 @@ func installUpgradeJailerInLockedDir(
 	if err != nil {
 		return "", err
 	}
+	tempOpen := true
 	defer func() {
+		if !tempOpen {
+			return
+		}
 		if closeErr := temp.Close(); closeErr != nil {
 			retErr = errors.Join(retErr, fmt.Errorf("close staged VM jailer: %w", closeErr))
 		}
@@ -1027,6 +1031,12 @@ func installUpgradeJailerInLockedDir(
 		return "", err
 	}
 	tempPublished = true
+	closeErr := temp.Close()
+	tempOpen = false
+	if closeErr != nil {
+		cause := fmt.Errorf("close published VM jailer staging descriptor: %w", closeErr)
+		return "", cleanupFailedUpgradeJailerPublish(dir, filepath.Base(target), installedID, cause)
+	}
 	if _, err := validatePublishedUpgradeJailer(ctx, vm, candidate, target, targetDir, dir, dirID, installedID, ops); err != nil {
 		return "", err
 	}
