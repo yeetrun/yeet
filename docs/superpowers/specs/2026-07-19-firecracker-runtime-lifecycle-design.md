@@ -315,6 +315,19 @@ For each existing VM, Catch:
 7. stages all database and unit changes before committing any of them;
 8. publishes the transaction without stopping or restarting the VM.
 
+Before publishing a jailer-backed unit for a pre-jailer VM, Catch repairs the
+known legacy download modes of manifest-backed, Yeet-managed image artifacts:
+kernel and initrd files become `0644`, while Firecracker and jailer remain
+`0755`. The same repair and validation run for an unadopted VM whose explicit
+jailer unit was published by an earlier interrupted or corrective upgrade,
+without rewriting that unit again. The repair uses no-follow descriptor
+operations and preserves manifest and checksum verification. Catch then
+validates the complete next-start jailer transition with the `yeet-vm`
+identity. If that validation fails, the install leaves the existing unit and
+running VM unchanged. Catch does not change permissions on custom or
+manifest-less bundles automatically; those fail with an actionable operator
+error.
+
 A legacy monolithic directory may initially back all three logical component
 references. It is not deleted until component-aware pruning proves that no
 guest base, kernel, runtime, ZFS clone, or active transaction references it.

@@ -177,7 +177,7 @@ func TestPrepareVMJailerUpgradeResolvesEveryVMBeforeStaging(t *testing.T) {
 	}
 }
 
-func TestReadVMJailerUpgradeServicesSelectsOnlyPreJailerVMs(t *testing.T) {
+func TestReadVMJailerUpgradeServicesSelectsUnadoptedVMsAndClassifiesUnitUpgrade(t *testing.T) {
 	dataRoot := t.TempDir()
 	servicesRoot := filepath.Join(dataRoot, "services")
 	store := db.NewStore(filepath.Join(dataRoot, "db.json"), servicesRoot)
@@ -203,12 +203,15 @@ func TestReadVMJailerUpgradeServicesSelectsOnlyPreJailerVMs(t *testing.T) {
 		return service == "legacy", nil
 	}}
 
-	_, names, err := readVMJailerUpgradeServices(context.Background(), &server.cfg, deps)
+	_, names, unitUpgrades, err := readVMJailerUpgradeServices(context.Background(), &server.cfg, deps)
 	if err != nil {
 		t.Fatalf("readVMJailerUpgradeServices: %v", err)
 	}
-	if !reflect.DeepEqual(names, []string{"legacy"}) {
-		t.Fatalf("legacy jailer bootstrap services = %v, want [legacy]", names)
+	if !reflect.DeepEqual(names, []string{"already-jailer", "legacy"}) {
+		t.Fatalf("unadopted VM services = %v, want [already-jailer legacy]", names)
+	}
+	if !reflect.DeepEqual(unitUpgrades, map[string]bool{"already-jailer": false, "legacy": true}) {
+		t.Fatalf("unit upgrade classifications = %v", unitUpgrades)
 	}
 }
 
@@ -446,6 +449,81 @@ func TestPrepareVMJailerUpgradeIdentityFailureLeavesUnitsUntouched(t *testing.T)
 	}
 	if got := vmJailerUpgradeEntryNames(entries); !reflect.DeepEqual(got, []string{filepath.Base(fixture.unitPath)}) {
 		t.Fatalf("systemd entries after identity failure = %v, want live unit only", got)
+	}
+}
+
+func TestPrepareVMJailerUpgradeValidatesNextStartBeforeStaging(t *testing.T) {
+	fixture := newVMJailerUpgradeIdentityFixture(t)
+	preflightErr := errors.New("kernel is not readable by runtime")
+	var calls []string
+	fixture.deps.ensureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	fixture.deps.normalizeArtifacts = func(vm vmJailerUpgradeVM) error {
+		calls = append(calls, "normalize:"+vm.Service)
+		return nil
+	}
+	fixture.deps.validateNextStart = func(
+		context.Context, *Config, vmJailerUpgradeVM, vmRuntimeIdentity,
+	) error {
+		calls = append(calls, "validate:alpha")
+		return preflightErr
+	}
+
+	tx, err := prepareVMJailerUpgradeWithDeps(context.Background(), fixture.cfg, fixture.deps)
+	if tx != nil {
+		_ = tx.Close()
+		t.Fatal("preflight failure returned a unit transaction")
+	}
+	if !errors.Is(err, preflightErr) {
+		t.Fatalf("error = %v, want %v", err, preflightErr)
+	}
+	if !reflect.DeepEqual(calls, []string{"normalize:alpha", "validate:alpha"}) {
+		t.Fatalf("calls = %v", calls)
+	}
+	if raw, readErr := os.ReadFile(fixture.unitPath); readErr != nil || string(raw) != "old-alpha" {
+		t.Fatalf("live unit = %q, %v; want old-alpha", raw, readErr)
+	}
+	entries, readErr := os.ReadDir(fixture.systemdDir)
+	if readErr != nil {
+		t.Fatalf("read systemd directory: %v", readErr)
+	}
+	if got := vmJailerUpgradeEntryNames(entries); !reflect.DeepEqual(got, []string{filepath.Base(fixture.unitPath)}) {
+		t.Fatalf("systemd entries = %v, want live unit only", got)
+	}
+}
+
+func TestPrepareVMJailerUpgradePreflightsExplicitUnadoptedVMWithoutStaging(t *testing.T) {
+	fixture := newVMJailerUpgradeIdentityFixture(t)
+	fixture.deps.preJailerUnit = func(context.Context, string) (bool, error) { return false, nil }
+	fixture.deps.ensureRuntimeIdentity = func() (vmRuntimeIdentity, error) {
+		return vmRuntimeIdentity{UID: 812, GID: 813}, nil
+	}
+	var calls []string
+	fixture.deps.normalizeArtifacts = func(vm vmJailerUpgradeVM) error {
+		calls = append(calls, "normalize:"+vm.Service)
+		return nil
+	}
+	fixture.deps.validateNextStart = func(
+		context.Context, *Config, vmJailerUpgradeVM, vmRuntimeIdentity,
+	) error {
+		calls = append(calls, "validate:alpha")
+		return nil
+	}
+
+	tx, err := prepareVMJailerUpgradeWithDeps(context.Background(), fixture.cfg, fixture.deps)
+	if err != nil {
+		t.Fatalf("prepareVMJailerUpgradeWithDeps: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Close() })
+	if !reflect.DeepEqual(calls, []string{"normalize:alpha", "validate:alpha"}) {
+		t.Fatalf("calls = %v, want explicit unadopted VM preflight", calls)
+	}
+	if len(tx.units) != 0 {
+		t.Fatalf("staged unit count = %d, want 0 for explicit unit", len(tx.units))
+	}
+	if raw, readErr := os.ReadFile(fixture.unitPath); readErr != nil || string(raw) != "old-alpha" {
+		t.Fatalf("live unit = %q, %v; want old-alpha", raw, readErr)
 	}
 }
 
@@ -1203,6 +1281,10 @@ func newVMJailerUpgradeIdentityFixture(t *testing.T) vmJailerUpgradeIdentityFixt
 	deps.readiness = func(string) (vmJailerReadiness, error) { return vmJailerPendingRestart, nil }
 	deps.isRunning = func(*Server, string) (bool, error) { return false, nil }
 	deps.renderUnit = func(vmSystemdConfig) (string, error) { return "new-alpha", nil }
+	deps.normalizeArtifacts = func(vmJailerUpgradeVM) error { return nil }
+	deps.validateNextStart = func(context.Context, *Config, vmJailerUpgradeVM, vmRuntimeIdentity) error {
+		return nil
+	}
 	deps.unitUID = uint32(os.Geteuid())
 	deps.unitGID = uint32(os.Getegid())
 	return vmJailerUpgradeIdentityFixture{cfg: cfg, deps: deps, systemdDir: systemdDir, unitPath: unitPath}

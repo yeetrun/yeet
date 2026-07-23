@@ -23,18 +23,21 @@ import (
 )
 
 type vmJailerUpgradeVM struct {
-	Service      string
-	Payload      string
-	ImageVersion string
-	Architecture string
-	ServiceRoot  string
-	Disk         string
-	Firecracker  string
-	Jailer       string
-	UnitPath     string
-	UnitContent  []byte
-	Readiness    vmJailerReadiness
-	Running      bool
+	Service                   string
+	Payload                   string
+	ImageVersion              string
+	Architecture              string
+	ServiceRoot               string
+	Disk                      string
+	Firecracker               string
+	Jailer                    string
+	UnitPath                  string
+	UnitContent               []byte
+	Readiness                 vmJailerReadiness
+	Running                   bool
+	Manifest                  vmImageManifest
+	NormalizeManagedArtifacts bool
+	NeedsUnitUpgrade          bool
 }
 
 type VMJailerUpgradeSummary struct {
@@ -71,6 +74,8 @@ type vmJailerUpgradeDeps struct {
 	isRunning             func(*Server, string) (bool, error)
 	renderUnit            func(vmSystemdConfig) (string, error)
 	ensureRuntimeIdentity func() (vmRuntimeIdentity, error)
+	normalizeArtifacts    func(vmJailerUpgradeVM) error
+	validateNextStart     func(context.Context, *Config, vmJailerUpgradeVM, vmRuntimeIdentity) error
 	renameAt              func(int, string, int, string) error
 	exchangeAt            func(int, string, int, string) error
 	renameNoReplaceAt     func(int, string, int, string) error
@@ -125,11 +130,20 @@ func prepareVMJailerUpgradeWithDeps(ctx context.Context, cfg *Config, deps vmJai
 		return nil, err
 	}
 	if len(plan.VMs) > 0 {
-		if _, err := deps.ensureRuntimeIdentity(); err != nil {
+		identity, err := deps.ensureRuntimeIdentity()
+		if err != nil {
 			return nil, fmt.Errorf("ensure VM runtime identity for jailer upgrade: %w", err)
 		}
+		for _, vm := range plan.VMs {
+			if err := deps.normalizeArtifacts(vm); err != nil {
+				return nil, fmt.Errorf("normalize managed VM image artifacts for %q: %w", vm.Service, err)
+			}
+			if err := deps.validateNextStart(ctx, cfg, vm, identity); err != nil {
+				return nil, fmt.Errorf("validate next jailer start for %q: %w", vm.Service, err)
+			}
+		}
 	}
-	return prepareVMJailerUnitTransaction(ctx, plan.VMs, plan.Summary, deps)
+	return prepareVMJailerUnitTransaction(ctx, vmJailerUpgradeUnitVMs(plan.VMs), plan.Summary, deps)
 }
 
 func prepareVMJailerUnitTransaction(ctx context.Context, vms []vmJailerUpgradeVM, summary VMJailerUpgradeSummary, deps vmJailerUpgradeDeps) (*VMJailerUpgrade, error) {
@@ -252,7 +266,7 @@ func planVMJailerUpgrade(ctx context.Context, cfg *Config, deps vmJailerUpgradeD
 	if err := validateVMJailerUpgradeDeps(deps); err != nil {
 		return vmJailerUpgradePlan{}, err
 	}
-	services, names, err := readVMJailerUpgradeServices(ctx, &effectiveCfg, deps)
+	services, names, unitUpgrades, err := readVMJailerUpgradeServices(ctx, &effectiveCfg, deps)
 	if err != nil {
 		return vmJailerUpgradePlan{}, err
 	}
@@ -265,22 +279,24 @@ func planVMJailerUpgrade(ctx context.Context, cfg *Config, deps vmJailerUpgradeD
 	if err := validateNoRetiredVMCheckpoints(retired); err != nil {
 		return vmJailerUpgradePlan{}, err
 	}
-	return planVMJailerUpgradeServices(ctx, &effectiveCfg, server, services, names, deps)
+	return planVMJailerUpgradeServices(ctx, &effectiveCfg, server, services, names, unitUpgrades, deps)
 }
 
-func planVMJailerUpgradeServices(ctx context.Context, cfg *Config, server *Server, services map[string]*db.Service, names []string, deps vmJailerUpgradeDeps) (vmJailerUpgradePlan, error) {
+func planVMJailerUpgradeServices(ctx context.Context, cfg *Config, server *Server, services map[string]*db.Service, names []string, unitUpgrades map[string]bool, deps vmJailerUpgradeDeps) (vmJailerUpgradePlan, error) {
 	plan := vmJailerUpgradePlan{VMs: make([]vmJailerUpgradeVM, 0, len(names))}
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return vmJailerUpgradePlan{}, err
 		}
-		vm, err := planVMJailerUpgradeService(ctx, cfg, server, *services[name], deps)
+		vm, err := planVMJailerUpgradeService(ctx, cfg, server, *services[name], unitUpgrades[name], deps)
 		if err != nil {
 			return vmJailerUpgradePlan{}, err
 		}
 		plan.VMs = append(plan.VMs, vm)
-		if err := addVMJailerUpgradeSummary(&plan.Summary, vm); err != nil {
-			return vmJailerUpgradePlan{}, err
+		if vm.NeedsUnitUpgrade {
+			if err := addVMJailerUpgradeSummary(&plan.Summary, vm); err != nil {
+				return vmJailerUpgradePlan{}, err
+			}
 		}
 	}
 	sort.Slice(plan.VMs, func(i, j int) bool { return plan.VMs[i].Service < plan.VMs[j].Service })
@@ -304,30 +320,30 @@ func prepareVMJailerUpgradeConfig(cfg *Config) (Config, error) {
 	return effectiveCfg, nil
 }
 
-func readVMJailerUpgradeServices(ctx context.Context, cfg *Config, deps vmJailerUpgradeDeps) (map[string]*db.Service, []string, error) {
+func readVMJailerUpgradeServices(ctx context.Context, cfg *Config, deps vmJailerUpgradeDeps) (map[string]*db.Service, []string, map[string]bool, error) {
 	dv, err := cfg.DB.Get()
 	if err != nil {
-		return nil, nil, fmt.Errorf("read VM upgrade inventory: %w", err)
+		return nil, nil, nil, fmt.Errorf("read VM upgrade inventory: %w", err)
 	}
 	if !dv.Valid() {
-		return nil, nil, fmt.Errorf("read VM upgrade inventory: database is invalid")
+		return nil, nil, nil, fmt.Errorf("read VM upgrade inventory: database is invalid")
 	}
 	services := dv.AsStruct().Services
 	names := make([]string, 0, len(services))
+	unitUpgrades := make(map[string]bool, len(services))
 	for name, service := range services {
 		if !isVMJailerUpgradeService(service) || service.VM.Components != nil {
 			continue
 		}
 		preJailer, err := deps.preJailerUnit(ctx, name)
 		if err != nil {
-			return nil, nil, fmt.Errorf("classify effective VM unit for %q: %w", name, err)
+			return nil, nil, nil, fmt.Errorf("classify effective VM unit for %q: %w", name, err)
 		}
-		if preJailer {
-			names = append(names, name)
-		}
+		names = append(names, name)
+		unitUpgrades[name] = preJailer
 	}
 	sort.Strings(names)
-	return services, names, nil
+	return services, names, unitUpgrades, nil
 }
 
 func selectedVMJailerUpgradeServices(services map[string]*db.Service, names []string) map[string]*db.Service {
@@ -415,10 +431,14 @@ func isVMJailerUpgradeService(service *db.Service) bool {
 	return service != nil && service.ServiceType == db.ServiceTypeVM && service.VM != nil && strings.TrimSpace(service.Name) != ""
 }
 
-func planVMJailerUpgradeService(ctx context.Context, cfg *Config, server *Server, service db.Service, deps vmJailerUpgradeDeps) (vmJailerUpgradeVM, error) {
+func planVMJailerUpgradeService(ctx context.Context, cfg *Config, server *Server, service db.Service, needsUnitUpgrade bool, deps vmJailerUpgradeDeps) (vmJailerUpgradeVM, error) {
 	vm, renderCfg, err := inventoryVMJailerUpgrade(ctx, cfg, server, service, deps)
 	if err != nil {
 		return vmJailerUpgradeVM{}, fmt.Errorf("plan VM jailer upgrade for %q: %w", service.Name, err)
+	}
+	vm.NeedsUnitUpgrade = needsUnitUpgrade
+	if !needsUnitUpgrade {
+		return vm, nil
 	}
 	unit, err := deps.renderUnit(renderCfg)
 	if err != nil {
@@ -426,6 +446,16 @@ func planVMJailerUpgradeService(ctx context.Context, cfg *Config, server *Server
 	}
 	vm.UnitContent = []byte(unit)
 	return vm, nil
+}
+
+func vmJailerUpgradeUnitVMs(vms []vmJailerUpgradeVM) []vmJailerUpgradeVM {
+	selected := make([]vmJailerUpgradeVM, 0, len(vms))
+	for _, vm := range vms {
+		if vm.NeedsUnitUpgrade {
+			selected = append(selected, vm)
+		}
+	}
+	return selected
 }
 
 func addVMJailerUpgradeSummary(summary *VMJailerUpgradeSummary, vm vmJailerUpgradeVM) error {
@@ -475,7 +505,15 @@ func inventoryVMJailerUpgrade(ctx context.Context, cfg *Config, server *Server, 
 		UnitPath:     filepath.Join(vmSystemdSystemDir, vmSystemdUnitName(service.Name)),
 		Readiness:    readiness,
 		Running:      running,
+		Manifest:     vmRuntime.manifest,
 	}
+	vm.NormalizeManagedArtifacts = shouldNormalizeManagedVMJailerUpgradeArtifacts(
+		cfg.RootDir,
+		vm.Payload,
+		vm.Firecracker,
+		vm.Manifest,
+		deps.localPayload,
+	)
 	resolvedJailer, _, err := resolveVMUpgradeJailer(ctx, vm, deps)
 	if err != nil {
 		return vmJailerUpgradeVM{}, vmSystemdConfig{}, err
@@ -586,6 +624,8 @@ func validateVMJailerUpgradeDeps(deps vmJailerUpgradeDeps) error {
 		"local payload": deps.localPayload != nil, "official": deps.official != nil,
 		"install": deps.install != nil, "readiness": deps.readiness != nil,
 		"running state": deps.isRunning != nil, "unit renderer": deps.renderUnit != nil,
+		"artifact normalizer":  deps.normalizeArtifacts != nil,
+		"next-start validator": deps.validateNextStart != nil,
 	} {
 		if !present {
 			missing = name
@@ -615,6 +655,8 @@ func defaultVMJailerUpgradeDeps() vmJailerUpgradeDeps {
 		},
 		renderUnit:            renderVMSystemdUnit,
 		ensureRuntimeIdentity: ensureVMRuntimeIdentity,
+		normalizeArtifacts:    normalizeManagedVMJailerUpgradeArtifacts,
+		validateNextStart:     validateVMJailerUpgradeNextStart,
 		renameAt:              unix.Renameat,
 		exchangeAt:            exchangeVMJailerUnitNamesAt,
 		renameNoReplaceAt:     renameVMJailerUnitNameNoReplaceAt,
@@ -676,6 +718,12 @@ func completeVMJailerUpgradeRuntimeDeps(deps vmJailerUpgradeDeps) vmJailerUpgrad
 	}
 	if deps.ensureRuntimeIdentity == nil {
 		deps.ensureRuntimeIdentity = defaults.ensureRuntimeIdentity
+	}
+	if deps.normalizeArtifacts == nil {
+		deps.normalizeArtifacts = defaults.normalizeArtifacts
+	}
+	if deps.validateNextStart == nil {
+		deps.validateNextStart = defaults.validateNextStart
 	}
 	return deps
 }
