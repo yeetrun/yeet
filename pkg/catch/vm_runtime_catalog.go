@@ -446,6 +446,33 @@ func (c vmRuntimeCatalog) RuntimeByID(architecture, runtimeID string) (vmRuntime
 	return found, matches == 1
 }
 
+func (c vmRuntimeCatalog) RuntimeForUpstreamVersion(architecture, upstreamVersion string) (vmRuntimeCatalogRef, bool) {
+	architecture, err := normalizeVMRuntimeArchitecture(architecture)
+	if err != nil {
+		return vmRuntimeCatalogRef{}, false
+	}
+	entries, ok := c.Architectures[architecture]
+	if !ok {
+		return vmRuntimeCatalogRef{}, false
+	}
+	var found vmRuntimeCatalogRef
+	foundRevision := 0
+	for _, ref := range entries.Runtimes {
+		if ref.UpstreamVersion != upstreamVersion || ref.Support == "revoked" {
+			continue
+		}
+		revision, err := vmRuntimePolicyPackagingRevision(ref.RuntimeID)
+		if err != nil {
+			continue
+		}
+		if revision > foundRevision {
+			found = ref
+			foundRevision = revision
+		}
+	}
+	return found, foundRevision != 0
+}
+
 func (c vmRuntimeCatalog) RuntimeForChannel(architecture, channel string) (vmRuntimeCatalogRef, bool) {
 	architecture, err := normalizeVMRuntimeArchitecture(architecture)
 	if err != nil {

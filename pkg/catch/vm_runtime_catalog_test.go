@@ -30,6 +30,30 @@ func TestVMRuntimeCatalogAcceptsStrictSchemaAndResolvesEntries(t *testing.T) {
 	}
 }
 
+func TestVMRuntimeCatalogResolvesNewestNonRevokedPackagingForUpstreamVersion(t *testing.T) {
+	catalog := validVMRuntimeCatalog()
+	base := catalog.Architectures["amd64"]
+	legacy := base.Runtimes[0]
+	legacy.RuntimeID = "firecracker-v1.14.3-yeet-v1"
+	legacy.UpstreamVersion = "v1.14.3"
+	legacy.Support = "eol"
+	repacked := legacy
+	repacked.RuntimeID = "firecracker-v1.14.3-yeet-v2"
+	revoked := legacy
+	revoked.RuntimeID = "firecracker-v1.14.3-yeet-v3"
+	revoked.Support = "revoked"
+	base.Runtimes = append(base.Runtimes, legacy, repacked, revoked)
+	catalog.Architectures["amd64"] = base
+
+	got, ok := catalog.RuntimeForUpstreamVersion("amd64", "v1.14.3")
+	if !ok || got.RuntimeID != repacked.RuntimeID {
+		t.Fatalf("runtime = %#v, %v; want %s", got, ok, repacked.RuntimeID)
+	}
+	if _, ok := catalog.RuntimeForUpstreamVersion("amd64", "v1.13.0"); ok {
+		t.Fatal("unknown upstream version resolved")
+	}
+}
+
 func TestVMRuntimeCatalogFetchUsesExplicitTestTrustOverride(t *testing.T) {
 	raw := marshalVMRuntimeTestJSON(t, validVMRuntimeCatalog())
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

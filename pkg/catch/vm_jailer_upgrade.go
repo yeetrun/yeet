@@ -230,7 +230,7 @@ func resolveVMUpgradeJailer(ctx context.Context, vm vmJailerUpgradeVM, deps vmJa
 		if errors.Is(err, errVMJailerUpgradeUnknownPayload) {
 			return "", "", vmJailerUpgradeReimportError(vm)
 		}
-		return "", "", fmt.Errorf("VM %q: refresh the official VM image cache: %w", vm.Service, err)
+		return "", "", fmt.Errorf("VM %q: resolve a matching official jailer: %w", vm.Service, err)
 	}
 	path, err := deps.install(ctx, vm, candidate)
 	return path, "remote", err
@@ -683,6 +683,7 @@ func completeVMJailerUpgradeRuntimeDeps(deps vmJailerUpgradeDeps) vmJailerUpgrad
 func completeVMJailerUpgradeSourceDeps(cfg *Config, deps vmJailerUpgradeDeps) vmJailerUpgradeDeps {
 	cacheRoot := filepath.Join(filepath.Clean(strings.TrimSpace(cfg.RootDir)), "vm-images")
 	cache := vmImageCache{Root: cacheRoot}
+	runtimeCache := vmRuntimeCache{Root: filepath.Join(filepath.Clean(strings.TrimSpace(cfg.RootDir)), "vm-runtimes")}
 	if deps.cached == nil {
 		deps.cached = func(ctx context.Context, vm vmJailerUpgradeVM) (vmJailerCandidate, bool, error) {
 			return cachedVMUpgradeJailerCandidate(ctx, vm, cacheRoot, validateVMJailerRuntimePair)
@@ -701,7 +702,15 @@ func completeVMJailerUpgradeSourceDeps(cfg *Config, deps vmJailerUpgradeDeps) vm
 	}
 	if deps.official == nil {
 		deps.official = func(ctx context.Context, vm vmJailerUpgradeVM) (vmJailerCandidate, error) {
-			return fetchOfficialVMUpgradeJailer(ctx, vm, cache, validateVMJailerRuntimePair)
+			return fetchOfficialVMUpgradeJailer(
+				ctx,
+				vm,
+				cache,
+				runtimeCache.FetchCatalog,
+				runtimeCache.Ensure,
+				officialVMUpgradeFirecrackerVersion,
+				validateVMJailerRuntimePair,
+			)
 		}
 	}
 	return deps
@@ -812,21 +821,82 @@ func classifyCachedVMUpgradeJailerArchitecture(candidateArchitecture, targetArch
 	return fmt.Errorf("%w: cached VM jailer architecture %q does not match target architecture %q", errVMJailerUpgradeIncompatibleCacheCandidate, candidateArchitecture, targetArchitecture)
 }
 
-func fetchOfficialVMUpgradeJailer(ctx context.Context, vm vmJailerUpgradeVM, cache vmImageCache, validatePair func(context.Context, string, string) error) (vmJailerCandidate, error) {
-	if validatePair == nil {
-		return vmJailerCandidate{}, fmt.Errorf("VM jailer runtime-pair validator is required")
+func fetchOfficialVMUpgradeJailer(
+	ctx context.Context,
+	vm vmJailerUpgradeVM,
+	imageCache vmImageCache,
+	fetchRuntimeCatalog func(context.Context) (vmRuntimeCatalog, error),
+	ensureRuntime func(context.Context, vmRuntimeCatalogRef) (db.VMRuntimeArtifactConfig, error),
+	probeFirecrackerVersion func(context.Context, string) (string, error),
+	validatePair func(context.Context, string, string) error,
+) (vmJailerCandidate, error) {
+	if err := validateOfficialVMUpgradeJailerResolverDeps(fetchRuntimeCatalog, ensureRuntime, probeFirecrackerVersion, validatePair); err != nil {
+		return vmJailerCandidate{}, err
 	}
-	family, targetArchitecture, err := officialVMUpgradeJailerFamily(ctx, vm, cache)
+	_, targetArchitecture, err := officialVMUpgradeJailerFamily(ctx, vm, imageCache)
 	if err != nil {
 		return vmJailerCandidate{}, err
 	}
-	manifestCache := cache
-	manifestCache.ManifestURL = family.ManifestURL
-	manifest, artifactName, architecture, err := officialVMUpgradeJailerManifest(ctx, vm, manifestCache, family, targetArchitecture)
+	upstreamVersion, err := probeFirecrackerVersion(ctx, vm.Firecracker)
 	if err != nil {
-		return vmJailerCandidate{}, err
+		return vmJailerCandidate{}, fmt.Errorf("read target Firecracker version: %w", err)
 	}
-	return stageOfficialVMUpgradeJailer(ctx, vm, manifestCache, manifest, artifactName, architecture, validatePair)
+	catalog, err := fetchRuntimeCatalog(ctx)
+	if err != nil {
+		return vmJailerCandidate{}, fmt.Errorf("fetch official VM runtime catalog: %w", err)
+	}
+	ref, ok := catalog.RuntimeForUpstreamVersion(targetArchitecture, upstreamVersion)
+	if !ok {
+		return vmJailerCandidate{}, fmt.Errorf("official VM runtime catalog has no non-revoked runtime for Firecracker %s", upstreamVersion)
+	}
+	artifact, err := ensureRuntime(ctx, ref)
+	if err != nil {
+		return vmJailerCandidate{}, fmt.Errorf("cache official VM runtime %s: %w", ref.RuntimeID, err)
+	}
+	if err := validatePair(ctx, vm.Firecracker, artifact.Jailer); err != nil {
+		return vmJailerCandidate{}, fmt.Errorf("validate official jailer against target Firecracker: %w", err)
+	}
+	return vmJailerCandidate{
+		Path:         artifact.Jailer,
+		ArtifactName: "jailer",
+		SHA256:       artifact.JailerSHA256,
+		Architecture: targetArchitecture,
+	}, nil
+}
+
+func validateOfficialVMUpgradeJailerResolverDeps(
+	fetchRuntimeCatalog func(context.Context) (vmRuntimeCatalog, error),
+	ensureRuntime func(context.Context, vmRuntimeCatalogRef) (db.VMRuntimeArtifactConfig, error),
+	probeFirecrackerVersion func(context.Context, string) (string, error),
+	validatePair func(context.Context, string, string) error,
+) error {
+	switch {
+	case fetchRuntimeCatalog == nil:
+		return fmt.Errorf("official VM runtime catalog fetcher is required")
+	case ensureRuntime == nil:
+		return fmt.Errorf("official VM runtime cache is required")
+	case probeFirecrackerVersion == nil:
+		return fmt.Errorf("target Firecracker version probe is required")
+	case validatePair == nil:
+		return fmt.Errorf("VM jailer runtime-pair validator is required")
+	default:
+		return nil
+	}
+}
+
+func officialVMUpgradeFirecrackerVersion(ctx context.Context, firecracker string) (string, error) {
+	if err := vmJailValidateTrustedInput(firecracker); err != nil {
+		return "", err
+	}
+	output, err := probeVMRuntimeVersion(ctx, firecracker)
+	if err != nil {
+		return "", err
+	}
+	version := vmJailerVersion(output)
+	if version == "" {
+		return "", fmt.Errorf("unrecognized Firecracker version output %q", strings.TrimSpace(output))
+	}
+	return "v" + version, nil
 }
 
 func officialVMUpgradeJailerFamily(ctx context.Context, vm vmJailerUpgradeVM, cache vmImageCache) (vmImageCatalogImage, string, error) {
@@ -853,74 +923,6 @@ func officialVMUpgradeJailerFamily(ctx context.Context, vm vmJailerUpgradeVM, ca
 		return vmImageCatalogImage{}, "", fmt.Errorf("official VM image architecture %q does not match target architecture %q", familyArchitecture, targetArchitecture)
 	}
 	return family, targetArchitecture, nil
-}
-
-func officialVMUpgradeJailerManifest(
-	ctx context.Context,
-	vm vmJailerUpgradeVM,
-	cache vmImageCache,
-	family vmImageCatalogImage,
-	targetArchitecture string,
-) (vmImageManifest, string, string, error) {
-	manifest, err := cache.fetchValidatedManifest(ctx)
-	if err != nil {
-		return vmImageManifest{}, "", "", err
-	}
-	if err := validateVMImageManifestCatalogFamily(manifest, family, vm.Payload); err != nil {
-		return vmImageManifest{}, "", "", err
-	}
-	manifestArchitecture, err := normalizeVMImageArchitecture(manifest.Architecture)
-	if err != nil {
-		return vmImageManifest{}, "", "", err
-	}
-	if manifestArchitecture != targetArchitecture {
-		return vmImageManifest{}, "", "", fmt.Errorf("official VM jailer architecture %q does not match target architecture %q", manifestArchitecture, targetArchitecture)
-	}
-	artifactName := strings.TrimSpace(manifest.Jailer)
-	if artifactName == "" {
-		return vmImageManifest{}, "", "", fmt.Errorf("official VM image manifest for %s does not declare a jailer", vm.Payload)
-	}
-	return manifest, artifactName, manifestArchitecture, nil
-}
-
-func stageOfficialVMUpgradeJailer(
-	ctx context.Context,
-	vm vmJailerUpgradeVM,
-	cache vmImageCache,
-	manifest vmImageManifest,
-	artifactName string,
-	architecture string,
-	validatePair func(context.Context, string, string) error,
-) (vmJailerCandidate, error) {
-	stagingRoot := filepath.Join(filepath.Clean(cache.Root), "upgrade-jailers")
-	stagingDir := filepath.Join(stagingRoot, manifest.Version)
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.RemoveAll(stagingDir)
-			_ = os.Remove(stagingRoot)
-		}
-	}()
-	path, err := cache.ensureArtifact(ctx, stagingDir, manifest, artifactName, nil, nil)
-	if err != nil {
-		return vmJailerCandidate{}, err
-	}
-	if err := os.Chmod(path, 0o755); err != nil {
-		return vmJailerCandidate{}, fmt.Errorf("chmod staged VM jailer: %w", err)
-	}
-	if err := verifyVMImageArtifactChecksum(path, artifactName, manifest.Checksums[artifactName]); err != nil {
-		return vmJailerCandidate{}, err
-	}
-	if err := validatePair(ctx, vm.Firecracker, path); err != nil {
-		return vmJailerCandidate{}, fmt.Errorf("validate official jailer against target Firecracker: %w", err)
-	}
-	cleanup = false
-	return vmJailerCandidate{
-		Path:         path,
-		ArtifactName: artifactName,
-		SHA256:       manifest.Checksums[artifactName],
-		Architecture: architecture,
-	}, nil
 }
 
 type vmJailerUpgradeInstallOps struct {

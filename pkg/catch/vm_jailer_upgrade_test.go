@@ -1828,9 +1828,8 @@ func TestCachedVMUpgradeJailerCandidateRejectsUntrustedCandidates(t *testing.T) 
 	}
 }
 
-func TestFetchOfficialVMUpgradeJailerDownloadsOnlyDeclaredJailer(t *testing.T) {
+func TestFetchOfficialVMUpgradeJailerSelectsExactPinnedRuntimeVersion(t *testing.T) {
 	fixture := newVMJailerUpgradeHTTPFixture(t, testUbuntuVMPayload, "amd64", false, false)
-	cache := vmImageCache{Root: t.TempDir(), ManifestURL: "https://evil.example/override.json", Client: fixture.client}
 	vm := vmJailerUpgradeVM{
 		Service:      "devbox",
 		Payload:      testUbuntuVMPayload,
@@ -1838,55 +1837,111 @@ func TestFetchOfficialVMUpgradeJailerDownloadsOnlyDeclaredJailer(t *testing.T) {
 		Architecture: "amd64",
 		Firecracker:  "/images/v1/firecracker",
 	}
-	var validated [][2]string
-	candidate, err := fetchOfficialVMUpgradeJailer(context.Background(), vm, cache, func(_ context.Context, firecracker, jailer string) error {
-		validated = append(validated, [2]string{firecracker, jailer})
-		return nil
-	})
+	catalog := validVMRuntimeCatalog()
+	architecture := catalog.Architectures["amd64"]
+	legacy := architecture.Runtimes[0]
+	legacy.RuntimeID = "firecracker-v1.14.3-yeet-v1"
+	legacy.UpstreamVersion = "v1.14.3"
+	legacy.Support = "eol"
+	architecture.Runtimes = append(architecture.Runtimes, legacy)
+	catalog.Architectures["amd64"] = architecture
+	ensured := vmRuntimeCatalogRef{}
+	candidate, err := fetchOfficialVMUpgradeJailer(
+		context.Background(),
+		vm,
+		vmImageCache{Root: t.TempDir(), Client: fixture.client},
+		func(context.Context) (vmRuntimeCatalog, error) { return catalog, nil },
+		func(_ context.Context, ref vmRuntimeCatalogRef) (db.VMRuntimeArtifactConfig, error) {
+			ensured = ref
+			return db.VMRuntimeArtifactConfig{
+				ID:           ref.RuntimeID,
+				Jailer:       "/runtime/v1.14.3/jailer",
+				JailerSHA256: strings.Repeat("a", 64),
+				Source:       "official",
+			}, nil
+		},
+		func(context.Context, string) (string, error) { return "v1.14.3", nil },
+		func(_ context.Context, firecracker, jailer string) error {
+			if firecracker != vm.Firecracker || jailer != "/runtime/v1.14.3/jailer" {
+				t.Fatalf("validated pair = %q, %q", firecracker, jailer)
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		t.Fatalf("fetchOfficialVMUpgradeJailer: %v", err)
 	}
-	if candidate.ArtifactName != "jailer" || candidate.Architecture != "amd64" || candidate.SHA256 != fixture.jailerChecksum {
+	if ensured.RuntimeID != legacy.RuntimeID {
+		t.Fatalf("ensured runtime = %q, want %q", ensured.RuntimeID, legacy.RuntimeID)
+	}
+	if candidate.Path != "/runtime/v1.14.3/jailer" || candidate.ArtifactName != "jailer" ||
+		candidate.Architecture != "amd64" || candidate.SHA256 != strings.Repeat("a", 64) {
 		t.Fatalf("candidate = %#v", candidate)
 	}
-	if got, err := os.ReadFile(candidate.Path); err != nil || !bytes.Equal(got, fixture.jailer) {
-		t.Fatalf("downloaded jailer = %q, %v", got, err)
-	}
-	if !reflect.DeepEqual(validated, [][2]string{{vm.Firecracker, candidate.Path}}) {
-		t.Fatalf("validated pairs = %#v", validated)
-	}
-	wantURLs := []string{defaultVMImageCatalogURL, testDefaultVMImageManifest, strings.TrimSuffix(testDefaultVMImageManifest, "manifest.json") + "jailer"}
-	if !reflect.DeepEqual(fixture.urls, wantURLs) {
-		t.Fatalf("requested URLs = %#v, want %#v", fixture.urls, wantURLs)
-	}
-	for _, rawURL := range fixture.urls {
-		if strings.Contains(rawURL, "rootfs") || strings.Contains(rawURL, "vmlinux") || strings.HasSuffix(rawURL, "/firecracker") {
-			t.Fatalf("official jailer fetch requested unrelated artifact %q", rawURL)
-		}
+	if !reflect.DeepEqual(fixture.urls, []string{defaultVMImageCatalogURL}) {
+		t.Fatalf("requested image URLs = %#v, want catalog only", fixture.urls)
 	}
 }
 
-func TestFetchOfficialVMUpgradeJailerRejectsChecksumAndArchitecture(t *testing.T) {
+func TestFetchOfficialVMUpgradeJailerRejectsMissingPinnedRuntimeVersion(t *testing.T) {
+	fixture := newVMJailerUpgradeHTTPFixture(t, testUbuntuVMPayload, "amd64", false, false)
+	vm := vmJailerUpgradeVM{
+		Service:      "devbox",
+		Payload:      testUbuntuVMPayload,
+		ImageVersion: "ubuntu-26.04-amd64-v1",
+		Architecture: "amd64",
+		Firecracker:  "/images/v1/firecracker",
+	}
+	ensureCalls := 0
+	_, err := fetchOfficialVMUpgradeJailer(
+		context.Background(),
+		vm,
+		vmImageCache{Root: t.TempDir(), Client: fixture.client},
+		func(context.Context) (vmRuntimeCatalog, error) { return validVMRuntimeCatalog(), nil },
+		func(context.Context, vmRuntimeCatalogRef) (db.VMRuntimeArtifactConfig, error) {
+			ensureCalls++
+			return db.VMRuntimeArtifactConfig{}, nil
+		},
+		func(context.Context, string) (string, error) { return "v1.14.3", nil },
+		func(context.Context, string, string) error {
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "v1.14.3") || !strings.Contains(err.Error(), "catalog") {
+		t.Fatalf("error = %v, want missing exact runtime guidance", err)
+	}
+	if ensureCalls != 0 {
+		t.Fatalf("ensure calls = %d, want 0", ensureCalls)
+	}
+}
+
+func TestFetchOfficialVMUpgradeJailerRejectsRuntimeCacheAndArchitectureFailures(t *testing.T) {
 	tests := []struct {
-		name         string
-		architecture string
-		badChecksum  bool
-		wantErr      string
+		name           string
+		vmArchitecture string
+		ensureErr      error
+		wantErr        string
 	}{
-		{name: "checksum mismatch", architecture: "amd64", badChecksum: true, wantErr: "checksum mismatch"},
-		{name: "architecture mismatch", architecture: "arm64", wantErr: "architecture"},
+		{name: "runtime cache verification", vmArchitecture: "amd64", ensureErr: errors.New("checksum mismatch"), wantErr: "checksum mismatch"},
+		{name: "architecture mismatch", vmArchitecture: "arm64", wantErr: "architecture"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fixture := newVMJailerUpgradeHTTPFixture(t, testUbuntuVMPayload, tt.architecture, tt.badChecksum, false)
-			cacheRoot := t.TempDir()
-			vm := vmJailerUpgradeVM{Service: "devbox", Payload: testUbuntuVMPayload, Architecture: "amd64", Firecracker: "/images/v1/firecracker"}
-			_, err := fetchOfficialVMUpgradeJailer(context.Background(), vm, vmImageCache{Root: cacheRoot, Client: fixture.client}, func(context.Context, string, string) error { return nil })
+			fixture := newVMJailerUpgradeHTTPFixture(t, testUbuntuVMPayload, "amd64", false, false)
+			vm := vmJailerUpgradeVM{Service: "devbox", Payload: testUbuntuVMPayload, Architecture: tt.vmArchitecture, Firecracker: "/images/v1/firecracker"}
+			_, err := fetchOfficialVMUpgradeJailer(
+				context.Background(),
+				vm,
+				vmImageCache{Root: t.TempDir(), Client: fixture.client},
+				func(context.Context) (vmRuntimeCatalog, error) { return validVMRuntimeCatalog(), nil },
+				func(context.Context, vmRuntimeCatalogRef) (db.VMRuntimeArtifactConfig, error) {
+					return db.VMRuntimeArtifactConfig{}, tt.ensureErr
+				},
+				func(context.Context, string) (string, error) { return "v1.16.1", nil },
+				func(context.Context, string, string) error { return nil },
+			)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
-			}
-			if entries, readErr := os.ReadDir(filepath.Join(cacheRoot, "upgrade-jailers")); readErr == nil && len(entries) != 0 {
-				t.Fatalf("partial upgrade artifacts remain: %#v", entries)
 			}
 		})
 	}
@@ -1903,7 +1958,21 @@ func TestResolveVMUpgradeJailerUnknownCatalogPayloadRequiresReimportWithoutArtif
 		},
 		localPayload: func(string) bool { return false },
 		official: func(ctx context.Context, got vmJailerUpgradeVM) (vmJailerCandidate, error) {
-			return fetchOfficialVMUpgradeJailer(ctx, got, cache, func(context.Context, string, string) error { return nil })
+			return fetchOfficialVMUpgradeJailer(
+				ctx,
+				got,
+				cache,
+				func(context.Context) (vmRuntimeCatalog, error) {
+					t.Fatal("runtime catalog fetched for unknown image payload")
+					return vmRuntimeCatalog{}, nil
+				},
+				func(context.Context, vmRuntimeCatalogRef) (db.VMRuntimeArtifactConfig, error) {
+					t.Fatal("runtime artifact fetched for unknown image payload")
+					return db.VMRuntimeArtifactConfig{}, nil
+				},
+				func(context.Context, string) (string, error) { return "v1.14.3", nil },
+				func(context.Context, string, string) error { return nil },
+			)
 		},
 		install: func(context.Context, vmJailerUpgradeVM, vmJailerCandidate) (string, error) {
 			t.Fatal("install called for unknown catalog payload")
@@ -1922,7 +1991,17 @@ func TestResolveVMUpgradeJailerUnknownCatalogPayloadRequiresReimportWithoutArtif
 func TestFetchOfficialVMUpgradeJailerRejectsUntrustedManifestURL(t *testing.T) {
 	fixture := newVMJailerUpgradeHTTPFixture(t, testUbuntuVMPayload, "amd64", false, true)
 	vm := vmJailerUpgradeVM{Service: "devbox", Payload: testUbuntuVMPayload, Architecture: "amd64", Firecracker: "/images/v1/firecracker"}
-	_, err := fetchOfficialVMUpgradeJailer(context.Background(), vm, vmImageCache{Root: t.TempDir(), Client: fixture.client}, func(context.Context, string, string) error { return nil })
+	_, err := fetchOfficialVMUpgradeJailer(
+		context.Background(),
+		vm,
+		vmImageCache{Root: t.TempDir(), Client: fixture.client},
+		func(context.Context) (vmRuntimeCatalog, error) { return validVMRuntimeCatalog(), nil },
+		func(context.Context, vmRuntimeCatalogRef) (db.VMRuntimeArtifactConfig, error) {
+			return db.VMRuntimeArtifactConfig{}, nil
+		},
+		func(context.Context, string) (string, error) { return "v1.16.1", nil },
+		func(context.Context, string, string) error { return nil },
+	)
 	if err == nil || !strings.Contains(err.Error(), "untrusted VM image manifest URL") {
 		t.Fatalf("error = %v, want untrusted manifest URL", err)
 	}
