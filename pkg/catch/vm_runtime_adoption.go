@@ -943,10 +943,17 @@ func validateVMRuntimeAdoptionManifestBootRelation(service db.Service, root stri
 
 func validateVMRuntimeAdoptionManifestRuntimeRelation(state vmRuntimeAdoptionManifestState, firecracker, jailer string) error {
 	manifest := state.Manifest
-	if firecracker != filepath.Join(filepath.Dir(state.Path), manifest.Firecracker) {
+	dir := filepath.Dir(state.Path)
+	if firecracker != filepath.Join(dir, manifest.Firecracker) {
 		return fmt.Errorf("installed VM manifest Firecracker contradicts loaded unit path %q", firecracker)
 	}
-	if strings.TrimSpace(manifest.Jailer) == "" || jailer != filepath.Join(filepath.Dir(state.Path), manifest.Jailer) {
+	if strings.TrimSpace(manifest.Jailer) == "" {
+		if jailer != filepath.Join(dir, "jailer") {
+			return fmt.Errorf("installed legacy VM manifest requires loaded unit legacy sibling jailer, got %q", jailer)
+		}
+		return nil
+	}
+	if jailer != filepath.Join(dir, manifest.Jailer) {
 		return fmt.Errorf("installed VM manifest jailer contradicts loaded unit path %q", jailer)
 	}
 	return nil

@@ -72,6 +72,42 @@ func TestVMRuntimeAdoptionInventoryMeasuresEffectiveLaunchComposition(t *testing
 	}
 }
 
+func TestVMRuntimeAdoptionInventoryLegacyManifestJailerCompatibility(t *testing.T) {
+	t.Run("measured sibling jailer is adoptable", func(t *testing.T) {
+		fixture := newVMRuntimeAdoptionFixture(t, true)
+		manifest := fixture.manifest(t)
+		delete(manifest.Checksums, manifest.Jailer)
+		manifest.Jailer = ""
+		writeVMRuntimeAdoptionTestJSON(t, filepath.Join(fixture.imageDir, "manifest.json"), manifest, 0o644)
+
+		vm := fixture.onlyVM(t)
+		if vm.Classification != vmRuntimeAdoptionCustomLegacy || vm.Components == nil {
+			t.Fatalf("classification = %q, components = %#v, blocked = %q", vm.Classification, vm.Components, vm.BlockedReason)
+		}
+		if vm.Components.Runtime.Configured.Jailer != fixture.jailer ||
+			vm.Components.Runtime.Configured.JailerSHA256 != sha256FileForVMRuntimeAdoptionTest(t, fixture.jailer) {
+			t.Fatalf("configured runtime = %#v, want measured sibling jailer", vm.Components.Runtime.Configured)
+		}
+	})
+
+	t.Run("non-sibling jailer remains blocked", func(t *testing.T) {
+		fixture := newVMRuntimeAdoptionFixture(t, true)
+		manifest := fixture.manifest(t)
+		delete(manifest.Checksums, manifest.Jailer)
+		manifest.Jailer = ""
+		writeVMRuntimeAdoptionTestJSON(t, filepath.Join(fixture.imageDir, "manifest.json"), manifest, 0o644)
+		fixture.jailer = filepath.Join(fixture.dataRoot, "other-runtime", "jailer")
+		writeVMRuntimeAdoptionTestFile(t, fixture.jailer, "jailer", 0o755)
+		fixture.unitExec = fixture.execStart()
+
+		vm := fixture.onlyVM(t)
+		if vm.Classification != vmRuntimeAdoptionBlocked || vm.Components != nil ||
+			!strings.Contains(vm.BlockedReason, "legacy sibling jailer") {
+			t.Fatalf("classification = %q, components = %#v, blocked = %q", vm.Classification, vm.Components, vm.BlockedReason)
+		}
+	})
+}
+
 func TestVMRuntimeAdoptionInventoryUsesFirecrackerKernelSyncPath(t *testing.T) {
 	fixture := newVMRuntimeAdoptionFixture(t, true)
 	syncedDir := filepath.Join(serviceRunDirForRoot(fixture.serviceRoot), "kernels", fixture.service.Name, "linux-7.2.0-yeet")
