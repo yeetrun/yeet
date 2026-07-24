@@ -413,6 +413,7 @@ func (s *Server) reconcileRuntimeState() {
 	logRuntimeReconcileError("tailscale DNS config reconciliation failed", s.reconcileTailscaleDNSConfigs(s.ctx))
 	logRuntimeReconcileError("tailscale resolver isolation reconciliation failed", s.reconcileTailscaleResolverIsolation(s.ctx))
 	logRuntimeReconcileError("netns reconciliation failed", s.reconcileNetNSBackedDockerServices(s.ctx))
+	logRuntimeReconcileError("tailscale resolver mount reconciliation failed", s.reconcileTailscaleResolverMounts(s.ctx))
 	logRuntimeReconcileError("docker netns NAT reconciliation failed", reconcileDockerNetNSPortForwards(s.cfg.DB))
 	logRuntimeReconcileError("VM network reconciliation failed", s.reconcileVMNetworks(s.ctx))
 }

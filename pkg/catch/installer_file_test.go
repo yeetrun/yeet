@@ -1789,7 +1789,7 @@ func TestNewSystemdUnitBindsResolverForLANNetNS(t *testing.T) {
 	rendered := string(raw)
 	for _, want := range []string{
 		"NetworkNamespacePath=/var/run/netns/yeet-lan-systemd-ns",
-		"BindPaths=/etc/netns/yeet-lan-systemd-ns/resolv.conf:/etc/resolv.conf",
+		"BindReadOnlyPaths=/etc/netns/yeet-lan-systemd-ns/resolv.conf:/etc/resolv.conf",
 		"PrivateMounts=yes",
 	} {
 		if !strings.Contains(rendered, want) {
@@ -2102,7 +2102,7 @@ func TestInstallerCloseNoBinaryRegeneratesNetNSSystemdArtifact(t *testing.T) {
 		"User=70000",
 		"Group=70001",
 		"NetworkNamespacePath=/var/run/netns/yeet-nobin-lan-ns",
-		"BindPaths=/etc/netns/yeet-nobin-lan-ns/resolv.conf:/etc/resolv.conf",
+		"BindReadOnlyPaths=/etc/netns/yeet-nobin-lan-ns/resolv.conf:/etc/resolv.conf",
 		"PrivateMounts=yes",
 	} {
 		if !strings.Contains(unit, want) {
@@ -2411,7 +2411,7 @@ func TestInstallerCloseStagesComposeLANTailscaleUnitBindsNetNSResolver(t *testin
 	unit := string(raw)
 	for _, want := range []string{
 		"NetworkNamespacePath=/var/run/netns/yeet-lan-ts-ns",
-		"BindPaths=/etc/netns/yeet-lan-ts-ns/resolv.conf:/etc/resolv.conf",
+		"BindReadOnlyPaths=/etc/netns/yeet-lan-ts-ns/resolv.conf:/etc/resolv.conf",
 		"PrivateMounts=yes",
 		"ExecStart=" + filepath.Join(server.serviceBinDir(service), "tailscaled"),
 		"--config=" + filepath.Join(server.serviceEnvDir(service), "tailscaled.json"),

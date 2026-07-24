@@ -534,7 +534,7 @@ WantedBy=multi-user.target
 	}
 	unit := string(raw)
 	for _, want := range []string{
-		"BindPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf",
+		"BindReadOnlyPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf",
 		"PrivateMounts=yes",
 	} {
 		if !strings.Contains(unit, want) {
@@ -559,7 +559,7 @@ After=yeet-api-ns.service
 [Service]
 ExecStart=/srv/api/run/tailscaled --tun=ts0
 NetworkNamespacePath=/var/run/netns/yeet-api-ns
-BindPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf
+BindReadOnlyPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf
 PrivateMounts=yes
 
 [Install]
@@ -604,6 +604,103 @@ WantedBy=multi-user.target
 	}
 	if string(raw) != string(unitRaw) {
 		t.Fatalf("safe unit changed:\n%s", raw)
+	}
+}
+
+func TestEnsureTailscaleResolverIsolationMigratesWritableBind(t *testing.T) {
+	const writable = `[Service]
+ExecStart=/srv/api/run/tailscaled --tun=ts0
+NetworkNamespacePath=/var/run/netns/yeet-api-ns
+BindPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf
+PrivateMounts=yes
+`
+
+	got, changed := ensureTailscaleUnitResolverIsolation(writable)
+	if !changed {
+		t.Fatal("ensureTailscaleUnitResolverIsolation changed = false, want writable bind migration")
+	}
+	if strings.Contains(got, "\nBindPaths=") {
+		t.Fatalf("migrated unit retained writable resolver bind:\n%s", got)
+	}
+	want := "BindReadOnlyPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf"
+	if !strings.Contains(got, want) {
+		t.Fatalf("migrated unit missing %q:\n%s", want, got)
+	}
+}
+
+func TestReconcileTailscaleResolverMountsRestartsUnhealthySidecar(t *testing.T) {
+	s := newTestServer(t)
+	systemdDir := useTestSystemdSystemDir(t)
+	unitPath := filepath.Join(systemdDir, "yeet-api-ts.service")
+	if err := os.MkdirAll(systemdDir, 0o755); err != nil {
+		t.Fatalf("mkdir systemd dir: %v", err)
+	}
+	unit := `[Service]
+ExecStart=/srv/api/run/tailscaled --tun=ts0
+NetworkNamespacePath=/var/run/netns/yeet-api-ns
+BindReadOnlyPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf
+PrivateMounts=yes
+`
+	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+	addTestServices(t, s, db.Service{
+		Name:       "api",
+		Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): unitPath}},
+		},
+	})
+
+	dir := t.TempDir()
+	currentInfo := writeNetNSTestFile(t, filepath.Join(dir, "current"))
+	staleInfo := writeNetNSTestFile(t, filepath.Join(dir, "stale"))
+	var pidCalls int
+	prevPID := tailscaleSidecarMainPID
+	tailscaleSidecarMainPID = func(string) (int, error) {
+		pidCalls++
+		if pidCalls == 1 {
+			return 1234, nil
+		}
+		if pidCalls == 2 {
+			return 0, nil
+		}
+		return 5678, nil
+	}
+	t.Cleanup(func() {
+		tailscaleSidecarMainPID = prevPID
+	})
+
+	prevStat := statNetNSPath
+	statNetNSPath = func(path string) (os.FileInfo, error) {
+		switch path {
+		case "/etc/netns/yeet-api-ns/resolv.conf", "/proc/5678/root/etc/resolv.conf":
+			return currentInfo, nil
+		case "/proc/1234/root/etc/resolv.conf":
+			return staleInfo, nil
+		default:
+			return nil, os.ErrNotExist
+		}
+	}
+	t.Cleanup(func() {
+		statNetNSPath = prevStat
+	})
+
+	var calls []string
+	prevSystemctl := catchSystemctl
+	catchSystemctl = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl = prevSystemctl
+	})
+
+	if err := s.reconcileTailscaleResolverMounts(context.Background()); err != nil {
+		t.Fatalf("reconcileTailscaleResolverMounts returned error: %v", err)
+	}
+	if diff := cmp.Diff([]string{"restart yeet-api-ts.service"}, calls); diff != "" {
+		t.Fatalf("systemctl calls (-want +got):\n%s", diff)
 	}
 }
 

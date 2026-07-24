@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/template"
@@ -86,7 +87,7 @@ RestartMaxDelaySec=60
 {{if .OneShot}}RemainAfterExit=yes{{end}}
 {{if .StopCmd}}ExecStop={{.StopCmd}}{{end}}
 {{if .ResolvConf}}
-BindPaths={{.ResolvConf}}:/etc/resolv.conf
+BindReadOnlyPaths={{.ResolvConf}}:/etc/resolv.conf
 PrivateMounts=yes
 {{end}}
 [Install]
@@ -113,6 +114,9 @@ var (
 			UseSocketOnly: true,
 		}
 		return lc.StatusWithoutPeers(ctx)
+	}
+	tailscaleResolverMountHealthyFn = func(s *SystemdService) (bool, error) {
+		return s.tailscaleResolverMountHealthy()
 	}
 
 	systemdServiceTmpl = template.Must(template.New("systemdService").Parse(systemdServiceTemplate))
@@ -996,8 +1000,112 @@ func (s *SystemdService) StartAuxiliaryUnits() error {
 		if err := waitTailscaleReadyFn(ctx, s); err != nil {
 			return err
 		}
+		if err := s.ensureTailscaleResolverMount(ctx); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (s *SystemdService) ensureTailscaleResolverMount(ctx context.Context) error {
+	healthy, err := tailscaleResolverMountHealthyFn(s)
+	if err != nil {
+		return err
+	}
+	if healthy {
+		return nil
+	}
+
+	log.Printf("tailscaled resolver mount missing for %s; restarting sidecar once", s.Name())
+	if err := s.run("restart", s.tailscaledServiceUnit()); err != nil {
+		return fmt.Errorf("restart tailscaled to repair resolver mount: %w", err)
+	}
+	if err := waitTailscaleReadyFn(ctx, s); err != nil {
+		return err
+	}
+	healthy, err = tailscaleResolverMountHealthyFn(s)
+	if err != nil {
+		return err
+	}
+	if !healthy {
+		return fmt.Errorf("tailscaled resolver mount is still missing after restart")
+	}
+	return nil
+}
+
+func (s *SystemdService) tailscaleResolverMountHealthy() (bool, error) {
+	source, err := tailscaleResolverBindSourceFromFile(s.tailscaledServicePath())
+	if err != nil {
+		return false, err
+	}
+	if source == "" {
+		return true, nil
+	}
+	pid, err := systemdServiceMainPID(s.tailscaledServiceUnit())
+	if err != nil {
+		return false, err
+	}
+	if pid == 0 {
+		return false, nil
+	}
+	return tailscaleResolverMountMatchesProcess(source, pid)
+}
+
+func tailscaleResolverBindSourceFromFile(path string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read tailscaled unit for resolver mount check: %w", err)
+	}
+	return tailscaleResolverBindSource(string(raw)), nil
+}
+
+func tailscaleResolverMountMatchesProcess(source string, pid int) (bool, error) {
+	sourceInfo, err := os.Stat(source)
+	if err != nil {
+		return false, fmt.Errorf("stat tailscaled resolver source %s: %w", source, err)
+	}
+	processPath := fmt.Sprintf("/proc/%d/root/etc/resolv.conf", pid)
+	processInfo, err := os.Stat(processPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("stat tailscaled resolver mount %s: %w", processPath, err)
+	}
+	return os.SameFile(sourceInfo, processInfo), nil
+}
+
+func tailscaleResolverBindSource(unit string) string {
+	for _, line := range strings.Split(unit, "\n") {
+		value, ok := strings.CutPrefix(strings.TrimSpace(line), "BindReadOnlyPaths=")
+		if !ok {
+			continue
+		}
+		source, target, ok := strings.Cut(value, ":")
+		if ok && target == "/etc/resolv.conf" {
+			return source
+		}
+	}
+	return ""
+}
+
+func systemdServiceMainPID(unit string) (int, error) {
+	output, err := exec.Command("systemctl", "show", "-p", "MainPID", "--value", unit).Output()
+	if err != nil {
+		return 0, fmt.Errorf("systemctl show MainPID for %s: %w", unit, err)
+	}
+	text := strings.TrimSpace(string(output))
+	if text == "" || text == "0" {
+		return 0, nil
+	}
+	pid, err := strconv.Atoi(text)
+	if err != nil {
+		return 0, fmt.Errorf("parse MainPID for %s: %w", unit, err)
+	}
+	return pid, nil
 }
 
 func (s *SystemdService) waitTailscaleReady(ctx context.Context) error {

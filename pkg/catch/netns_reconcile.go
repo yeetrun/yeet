@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
 	"tailscale.com/ipn"
@@ -298,21 +299,142 @@ func ensureTailscaleUnitResolverIsolation(unit string) (string, bool) {
 		return unit, false
 	}
 
-	bind := fmt.Sprintf("BindPaths=/etc/netns/%s/resolv.conf:/etc/resolv.conf", netNS)
-	hasBind := systemdUnitHasDirective(unit, bind)
+	readOnlyBind := fmt.Sprintf("BindReadOnlyPaths=/etc/netns/%s/resolv.conf:/etc/resolv.conf", netNS)
+	writableBind := fmt.Sprintf("BindPaths=/etc/netns/%s/resolv.conf:/etc/resolv.conf", netNS)
+	hasReadOnlyBind := systemdUnitHasDirective(unit, readOnlyBind)
+	hasWritableBind := systemdUnitHasDirective(unit, writableBind)
 	hasPrivateMounts := systemdUnitHasDirective(unit, "PrivateMounts=yes")
-	if hasBind && hasPrivateMounts {
+	if hasReadOnlyBind && !hasWritableBind && hasPrivateMounts {
 		return unit, false
 	}
 
+	if hasWritableBind {
+		unit = removeSystemdUnitDirective(unit, writableBind)
+	}
 	var insert []string
-	if !hasBind {
-		insert = append(insert, bind)
+	if !hasReadOnlyBind {
+		insert = append(insert, readOnlyBind)
 	}
 	if !hasPrivateMounts {
 		insert = append(insert, "PrivateMounts=yes")
 	}
 	return insertSystemdServiceDirectives(unit, insert), true
+}
+
+func removeSystemdUnitDirective(unit, directive string) string {
+	lines := strings.Split(unit, "\n")
+	out := lines[:0]
+	for _, line := range lines {
+		if strings.TrimSpace(line) != directive {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+func (s *Server) reconcileTailscaleResolverMounts(ctx context.Context) error {
+	dv, err := s.getDB()
+	if err != nil {
+		return err
+	}
+
+	var errs []error
+	for name, sv := range dv.Services().All() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		service := sv.AsStruct()
+		if _, ok := service.Artifacts.Gen(db.ArtifactTSService, service.Generation); !ok {
+			continue
+		}
+
+		active, healthy, err := tailscaleResolverMountStatus(name)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("check tailscale resolver mount for %q: %w", name, err))
+			continue
+		}
+		if !active || healthy {
+			continue
+		}
+		if err := catchSystemctl("restart", fmt.Sprintf("yeet-%s-ts.service", name)); err != nil {
+			errs = append(errs, fmt.Errorf("restart tailscale sidecar for %q to repair resolver mount: %w", name, err))
+			continue
+		}
+		if err := waitTailscaleResolverMount(ctx, name); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		log.Printf("repaired tailscale resolver mount for service %q", name)
+	}
+	return errors.Join(errs...)
+}
+
+func waitTailscaleResolverMount(ctx context.Context, serviceName string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		active, healthy, err := tailscaleResolverMountStatus(serviceName)
+		switch {
+		case err == nil && active && healthy:
+			return nil
+		case err != nil:
+			lastErr = err
+		case !active:
+			lastErr = errors.New("tailscale sidecar is not active yet")
+		default:
+			lastErr = errors.New("resolver bind is not mounted yet")
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("tailscale resolver mount for %q is still missing after restart: %w", serviceName, lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
+func tailscaleResolverMountStatus(serviceName string) (active, healthy bool, err error) {
+	unitPath := tailscaleSidecarInstalledUnitPath(serviceName)
+	raw, err := os.ReadFile(unitPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, true, nil
+		}
+		return false, false, fmt.Errorf("read tailscale unit %s: %w", unitPath, err)
+	}
+	netNS, ok := tailscaleUnitNetworkNamespace(string(raw))
+	if !ok {
+		return false, true, nil
+	}
+	readOnlyBind := fmt.Sprintf("BindReadOnlyPaths=/etc/netns/%s/resolv.conf:/etc/resolv.conf", netNS)
+	if !systemdUnitHasDirective(string(raw), readOnlyBind) {
+		return false, true, nil
+	}
+
+	unit := fmt.Sprintf("yeet-%s-ts.service", serviceName)
+	pid, err := tailscaleSidecarMainPID(unit)
+	if err != nil {
+		return false, false, err
+	}
+	if pid == 0 {
+		return false, true, nil
+	}
+	sourceInfo, err := statNetNSPath(fmt.Sprintf("/etc/netns/%s/resolv.conf", netNS))
+	if err != nil {
+		return true, false, fmt.Errorf("stat resolver source for %s: %w", unit, err)
+	}
+	processInfo, err := statNetNSPath(fmt.Sprintf("/proc/%d/root/etc/resolv.conf", pid))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, false, nil
+		}
+		return true, false, fmt.Errorf("stat resolver mount for %s: %w", unit, err)
+	}
+	return true, os.SameFile(sourceInfo, processInfo), nil
 }
 
 func tailscaleUnitNetworkNamespace(unit string) (string, bool) {

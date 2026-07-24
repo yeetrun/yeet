@@ -266,7 +266,7 @@ func TestInstallTSWritesArtifactsWithoutNetworkWhenAuthKeyProvided(t *testing.T)
 	for _, want := range []string{
 		"--tun=ts0",
 		"NetworkNamespacePath=/var/run/netns/yeet-demo-net",
-		"BindPaths=/srv/demo/resolv.conf:/etc/resolv.conf",
+		"BindReadOnlyPaths=/srv/demo/resolv.conf:/etc/resolv.conf",
 		"ExecStartPre=/bin/systemctl is-active --quiet yeet-demo-net.service",
 	} {
 		if !strings.Contains(unit, want) {

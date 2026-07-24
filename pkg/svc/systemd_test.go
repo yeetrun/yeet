@@ -477,7 +477,7 @@ func TestSystemdUnitRendersTimerAndServiceOptions(t *testing.T) {
 		"NetworkNamespacePath=/var/run/netns/demo-ns\n",
 		"RemainAfterExit=yes\n",
 		"ExecStop=/opt/demo/bin/demo-stop\n",
-		"BindPaths=/run/demo/resolv.conf:/etc/resolv.conf\n",
+		"BindReadOnlyPaths=/run/demo/resolv.conf:/etc/resolv.conf\n",
 		"PrivateMounts=yes\n",
 	} {
 		if !strings.Contains(service, want) {
@@ -817,6 +817,132 @@ func TestSystemdServiceStartAuxiliaryUnitsWaitsForTailscaleReady(t *testing.T) {
 	gotLog := readSystemctlLog(t, systemctlLog)
 	if diff := cmp.Diff([]string{"start yeet-demo-ts.service"}, gotLog); diff != "" {
 		t.Fatalf("systemctl log mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestSystemdServiceStartAuxiliaryUnitsRepairsMissingTailscaleResolverMount(t *testing.T) {
+	tmp := t.TempDir()
+	systemctlLog := installFakeSystemctl(t, tmp)
+	cfg := db.Service{
+		Name:       "demo",
+		Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSService: artifactAt(1, filepath.Join(tmp, "tailscale.service")),
+		},
+	}
+	svc := &SystemdService{cfg: cfg.View(), runDir: filepath.Join(tmp, "run"), systemdDir: filepath.Join(tmp, "systemd")}
+
+	oldWait := waitTailscaleReadyFn
+	defer func() { waitTailscaleReadyFn = oldWait }()
+	var waits int
+	waitTailscaleReadyFn = func(context.Context, *SystemdService) error {
+		waits++
+		return nil
+	}
+
+	oldHealthy := tailscaleResolverMountHealthyFn
+	defer func() { tailscaleResolverMountHealthyFn = oldHealthy }()
+	var checks int
+	tailscaleResolverMountHealthyFn = func(*SystemdService) (bool, error) {
+		checks++
+		return checks > 1, nil
+	}
+
+	if err := svc.StartAuxiliaryUnits(); err != nil {
+		t.Fatalf("StartAuxiliaryUnits returned error: %v", err)
+	}
+	if waits != 2 {
+		t.Fatalf("tailscale readiness waits = %d, want 2", waits)
+	}
+	if checks != 2 {
+		t.Fatalf("resolver mount checks = %d, want 2", checks)
+	}
+	gotLog := readSystemctlLog(t, systemctlLog)
+	wantLog := []string{
+		"start yeet-demo-ts.service",
+		"restart yeet-demo-ts.service",
+	}
+	if diff := cmp.Diff(wantLog, gotLog); diff != "" {
+		t.Fatalf("systemctl log mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestSystemdServiceTailscaleResolverMountHealthy(t *testing.T) {
+	tmp := t.TempDir()
+	installFakeSystemctl(t, tmp)
+	systemdDir := filepath.Join(tmp, "systemd")
+	if err := os.MkdirAll(systemdDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := db.Service{Name: "demo"}
+	svc := &SystemdService{cfg: cfg.View(), systemdDir: systemdDir}
+
+	healthy, err := svc.tailscaleResolverMountHealthy()
+	if err != nil {
+		t.Fatalf("missing unit check returned error: %v", err)
+	}
+	if !healthy {
+		t.Fatal("missing unit check = unhealthy, want healthy")
+	}
+
+	writeTempFile(t, systemdDir, "yeet-demo-ts.service", "[Service]\nPrivateMounts=yes\n")
+	healthy, err = svc.tailscaleResolverMountHealthy()
+	if err != nil {
+		t.Fatalf("unit without resolver bind returned error: %v", err)
+	}
+	if !healthy {
+		t.Fatal("unit without resolver bind = unhealthy, want healthy")
+	}
+
+	writeTempFile(t, systemdDir, "yeet-demo-ts.service", "[Service]\nBindReadOnlyPaths=/run/demo/resolv.conf:/etc/resolv.conf\n")
+	healthy, err = svc.tailscaleResolverMountHealthy()
+	if err != nil {
+		t.Fatalf("stopped unit check returned error: %v", err)
+	}
+	if healthy {
+		t.Fatal("stopped unit check = healthy, want unhealthy")
+	}
+}
+
+func TestTailscaleResolverBindSourceFromFile(t *testing.T) {
+	tmp := t.TempDir()
+
+	got, err := tailscaleResolverBindSourceFromFile(filepath.Join(tmp, "missing.service"))
+	if err != nil {
+		t.Fatalf("missing unit returned error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("missing unit source = %q, want empty", got)
+	}
+
+	unitPath := writeTempFile(t, tmp, "tailscale.service", "[Service]\nBindReadOnlyPaths=/run/demo/resolv.conf:/etc/resolv.conf\n")
+	got, err = tailscaleResolverBindSourceFromFile(unitPath)
+	if err != nil {
+		t.Fatalf("read unit returned error: %v", err)
+	}
+	if got != "/run/demo/resolv.conf" {
+		t.Fatalf("resolver bind source = %q, want /run/demo/resolv.conf", got)
+	}
+
+	_, err = tailscaleResolverBindSourceFromFile(tmp)
+	if err == nil {
+		t.Fatal("directory unit path returned nil error")
+	}
+}
+
+func TestTailscaleResolverMountMatchesProcess(t *testing.T) {
+	source := writeTempFile(t, t.TempDir(), "resolv.conf", "nameserver 192.0.2.53\n")
+	healthy, err := tailscaleResolverMountMatchesProcess(source, int(^uint(0)>>1))
+	if err != nil {
+		t.Fatalf("missing process resolver returned error: %v", err)
+	}
+	if healthy {
+		t.Fatal("missing process resolver = healthy, want unhealthy")
+	}
+
+	_, err = tailscaleResolverMountMatchesProcess(source+".missing", 1)
+	if err == nil {
+		t.Fatal("missing resolver source returned nil error")
 	}
 }
 
