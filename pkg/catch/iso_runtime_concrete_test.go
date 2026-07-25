@@ -274,6 +274,18 @@ func TestISOConcreteVMRemovalStepsCleanEveryBoundary(t *testing.T) {
 	}
 	withISORuntimeBackend(t, netns.BackendNFT)
 
+	oldVMSystemdSystemDir := vmSystemdSystemDir
+	vmSystemdSystemDir = t.TempDir()
+	unitPath := filepath.Join(vmSystemdSystemDir, vmSystemdUnitName("devbox"))
+	if err := os.WriteFile(unitPath, []byte("[Service]\nExecStart=/bin/true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBin, "systemctl"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
 	oldVMSystemctl := runISOReconcileVMSystemctl
 	oldNetworkRunner := vmRemovalNetworkRunner
 	oldJailCleanup := vmRemovalJailCleanup
@@ -281,6 +293,7 @@ func TestISOConcreteVMRemovalStepsCleanEveryBoundary(t *testing.T) {
 	oldEnsurePolicy := ensureISOPolicyForRuntime
 	oldVerifyPolicy := verifyISOPolicyForRuntime
 	t.Cleanup(func() {
+		vmSystemdSystemDir = oldVMSystemdSystemDir
 		runISOReconcileVMSystemctl = oldVMSystemctl
 		vmRemovalNetworkRunner = oldNetworkRunner
 		vmRemovalJailCleanup = oldJailCleanup
@@ -338,6 +351,9 @@ func TestISOConcreteVMRemovalStepsCleanEveryBoundary(t *testing.T) {
 	}
 	if !slices.Contains(events, "stop:devbox") || !slices.Contains(events, "topology-absent") || !slices.Contains(events, "jail:yeet-devbox") {
 		t.Fatalf("removal events = %#v", events)
+	}
+	if _, err := os.Lstat(unitPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("VM unit remains after ISO removal: %s (%v)", unitPath, err)
 	}
 	if allocation.PeerIP.IsValid() == false {
 		t.Fatal("test allocation lost peer address")

@@ -273,6 +273,10 @@ func TestFirecrackerRuntimeIntegration(t *testing.T) {
 	if state, err := readVMRuntimeUnitState(ctx, vmSystemdUnitName(cfg.Service)); err == nil && state.ActiveState == "active" {
 		t.Fatalf("VM unit remains active after cleanup: %#v", state)
 	}
+	unitPath := filepath.Join(vmSystemdSystemDir, vmSystemdUnitName(cfg.Service))
+	if _, err := os.Lstat(unitPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("VM unit file remains after cleanup: %s (%v)", unitPath, err)
+	}
 	if _, err := os.Lstat(jailRoot); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("jailer instance root remains after cleanup: %s (%v)", jailRoot, err)
 	}

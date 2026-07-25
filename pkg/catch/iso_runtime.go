@@ -1615,10 +1615,23 @@ func (r *isoConcreteRemoveSteps) BeforeDelete(_ context.Context, _ string) error
 	if err := r.cleanVMJailBeforeDelete(); err != nil {
 		return err
 	}
+	if err := r.cleanVMUnitBeforeDelete(); err != nil {
+		return err
+	}
 	if !r.options.CleanData {
 		return nil
 	}
 	return r.server.destroyServiceRootZFS(r.zfsDataset)
+}
+
+func (r *isoConcreteRemoveSteps) cleanVMUnitBeforeDelete() error {
+	if !r.vm {
+		return nil
+	}
+	if err := (&vmRunner{name: r.service.Name}).Remove(); err != nil {
+		return fmt.Errorf("remove VM systemd unit: %w", err)
+	}
+	return nil
 }
 
 func (r *isoConcreteRemoveSteps) cleanVMJailBeforeDelete() error {
