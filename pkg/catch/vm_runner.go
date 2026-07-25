@@ -101,7 +101,11 @@ func (r *vmRunner) Remove() error {
 		removeErr = fmt.Errorf("failed to remove VM systemd unit %s: %w", r.unitPath(), removeErr)
 	}
 	reloadErr := r.systemctl("daemon-reload")
-	return errors.Join(disableErr, removeErr, reloadErr)
+	resetErr := r.systemctl("reset-failed", r.unit())
+	if vmSystemdUnitMissingError(resetErr, r.unit()) {
+		resetErr = nil
+	}
+	return errors.Join(disableErr, removeErr, reloadErr, resetErr)
 }
 
 func vmSystemdUnitMissingError(err error, unit string) bool {
@@ -110,7 +114,9 @@ func vmSystemdUnitMissingError(err error, unit string) bool {
 	}
 	message := strings.ToLower(err.Error())
 	return strings.Contains(message, strings.ToLower(unit)) &&
-		(strings.Contains(message, "does not exist") || strings.Contains(message, "could not be found"))
+		(strings.Contains(message, "does not exist") ||
+			strings.Contains(message, "could not be found") ||
+			strings.Contains(message, "not loaded"))
 }
 
 func (r *vmRunner) Logs(opts *svc.LogOptions) error {

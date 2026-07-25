@@ -45,6 +45,7 @@ func TestVMRunnerSystemctlCommands(t *testing.T) {
 		{"systemctl", "disable", "yeet-vm-devbox.service"},
 		{"systemctl", "disable", "--now", "yeet-vm-devbox.service"},
 		{"systemctl", "daemon-reload"},
+		{"systemctl", "reset-failed", "yeet-vm-devbox.service"},
 	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Fatalf("calls = %#v, want %#v", *calls, want)
@@ -101,6 +102,7 @@ func TestVMRunnerRemoveDeletesUnitAndReloads(t *testing.T) {
 	want := [][]string{
 		{"systemctl", "disable", "--now", "yeet-vm-devbox.service"},
 		{"systemctl", "daemon-reload"},
+		{"systemctl", "reset-failed", "yeet-vm-devbox.service"},
 	}
 	if !reflect.DeepEqual(*calls, want) {
 		t.Fatalf("calls = %#v, want %#v", *calls, want)
@@ -114,8 +116,11 @@ func TestVMRunnerRemoveTreatsMissingUnitAsAlreadyRemoved(t *testing.T) {
 	runner.SetNewCmd(func(name string, args ...string) *exec.Cmd {
 		call := append([]string{name}, args...)
 		calls = append(calls, call)
-		if name == "systemctl" && strings.Join(args, " ") == "disable --now yeet-vm-devbox.service" {
+		switch strings.Join(args, " ") {
+		case "disable --now yeet-vm-devbox.service":
 			return exec.Command("sh", "-c", "printf '%s\n' 'Failed to disable unit: Unit yeet-vm-devbox.service does not exist' >&2; exit 1")
+		case "reset-failed yeet-vm-devbox.service":
+			return exec.Command("sh", "-c", "printf '%s\n' 'Failed to reset failed state of unit yeet-vm-devbox.service: Unit yeet-vm-devbox.service not loaded.' >&2; exit 1")
 		}
 		return exec.Command("true")
 	})
@@ -126,6 +131,7 @@ func TestVMRunnerRemoveTreatsMissingUnitAsAlreadyRemoved(t *testing.T) {
 	want := [][]string{
 		{"systemctl", "disable", "--now", "yeet-vm-devbox.service"},
 		{"systemctl", "daemon-reload"},
+		{"systemctl", "reset-failed", "yeet-vm-devbox.service"},
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("calls = %#v, want %#v", calls, want)
