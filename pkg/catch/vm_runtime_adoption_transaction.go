@@ -1027,6 +1027,14 @@ func (tx *VMRuntimeAdoption) Close() error {
 // suitable for asynchronous startup recovery and deliberately does not acquire
 // the Catch installer lock.
 func RecoverVMRuntimeAdoptions(ctx context.Context, cfg *Config) (retErr error) {
+	return recoverVMRuntimeAdoptionsWithMutationGuard(ctx, cfg, nil)
+}
+
+func recoverVMRuntimeAdoptionsWithMutationGuard(
+	ctx context.Context,
+	cfg *Config,
+	mutationGuard func(func() error) error,
+) (retErr error) {
 	effectiveCfg, err := prepareVMRuntimeAdoptionConfig(cfg)
 	if err != nil {
 		return err
@@ -1037,10 +1045,16 @@ func RecoverVMRuntimeAdoptions(ctx context.Context, cfg *Config) (retErr error) 
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, store.Close()) }()
-	if err := recoverVMRuntimeAdoptionsWithStore(ctx, effectiveCfg, store, deps); err != nil {
-		return err
+	recover := func() error {
+		if err := recoverVMRuntimeAdoptionsWithStore(ctx, effectiveCfg, store, deps); err != nil {
+			return err
+		}
+		return store.CleanupCommittedTombstones()
 	}
-	return store.CleanupCommittedTombstones()
+	if mutationGuard != nil {
+		return mutationGuard(recover)
+	}
+	return recover()
 }
 
 func recoverVMRuntimeAdoptionsWithStore(ctx context.Context, cfg *Config, store *vmRuntimeJournalStore, deps vmRuntimeAdoptionCoordinatorDeps) error {

@@ -502,6 +502,7 @@ func (s *Server) ApplyHostStoragePlan(ctx context.Context, plan catchrpc.HostSto
 		config:                 s.cfg,
 		store:                  s.cfg.DB,
 		zfs:                    s.zfsRunner,
+		resolverServer:         s,
 		lockedServiceNames:     lockNames,
 		runningCatchState:      hostStorageStateFromConfig(s.cfg),
 		runningCatchStateKnown: true,
@@ -1186,6 +1187,7 @@ type hostStorageApplier struct {
 	store                  *db.Store
 	zfs                    zfsCommandRunner
 	ops                    hostStorageApplyOperations
+	resolverServer         *Server
 	lockedServiceNames     []string
 	runningCatchState      catchrpc.HostStorageState
 	runningCatchStateKnown bool
@@ -1253,13 +1255,25 @@ func (a *hostStorageApplier) Apply(ctx context.Context, plan catchrpc.HostStorag
 	a.ops = a.completeOperations()
 	state := hostStorageApplyState{plan: plan}
 	err := WithVMRuntimeTransactionLock(ctx, &a.config, func() error {
-		return a.applyHostStorageWithRuntimeLock(ctx, &state, w)
+		if err := a.prepareHostStorageWithRuntimeLock(ctx, &state); err != nil {
+			return err
+		}
+		apply := func() error {
+			if err := a.applyPreparedHostStorageWithRuntimeLock(ctx, &state, w); err != nil {
+				return a.rollbackHostStorageApplyError(ctx, state.tx, err, w)
+			}
+			if err := a.finishHostStorageApply(ctx, state.plan, state.serviceMoves, state.tx, w, &state.result); err != nil {
+				return a.rollbackHostStorageApplyError(ctx, state.tx, err, w)
+			}
+			return nil
+		}
+		if a.resolverServer != nil && hostStorageMovesHaveTailscale(state.serviceMoves) {
+			return a.resolverServer.withTailscaleResolverMutationGuard(apply)
+		}
+		return apply()
 	})
 	if err != nil {
-		return catchrpc.HostStorageApplyResult{}, a.rollbackHostStorageApplyError(ctx, state.tx, err, w)
-	}
-	if err := a.finishHostStorageApply(ctx, state.plan, state.serviceMoves, state.tx, w, &state.result); err != nil {
-		return catchrpc.HostStorageApplyResult{}, a.rollbackHostStorageApplyError(ctx, state.tx, err, w)
+		return catchrpc.HostStorageApplyResult{}, err
 	}
 	return state.result, nil
 }
@@ -1271,7 +1285,7 @@ type hostStorageApplyState struct {
 	tx           *hostStorageTransaction
 }
 
-func (a *hostStorageApplier) applyHostStorageWithRuntimeLock(ctx context.Context, state *hostStorageApplyState, w io.Writer) error {
+func (a *hostStorageApplier) prepareHostStorageWithRuntimeLock(ctx context.Context, state *hostStorageApplyState) error {
 	plan, err := a.authoritativeHostStoragePreflight(ctx, state.plan)
 	if err != nil {
 		return err
@@ -1281,6 +1295,12 @@ func (a *hostStorageApplier) applyHostStorageWithRuntimeLock(ctx context.Context
 	if err != nil {
 		return err
 	}
+	return nil
+}
+
+func (a *hostStorageApplier) applyPreparedHostStorageWithRuntimeLock(ctx context.Context, state *hostStorageApplyState, w io.Writer) error {
+	plan := state.plan
+	var err error
 	if !hostStoragePlanNeedsTransaction(plan, state.serviceMoves) {
 		state.result, err = a.applyPreparedPlanLocked(ctx, plan, state.serviceMoves, nil, w)
 		return err
@@ -1634,6 +1654,17 @@ func (a *hostStorageApplier) completeServiceOperations(ops *hostStorageApplyOper
 	}
 	if ops.applyServiceRootMigrationRuntimeChanges == nil {
 		ops.applyServiceRootMigrationRuntimeChanges = func(ctx context.Context, desired Config, before db.Service, after db.Service, w io.Writer) error {
+			if a.resolverServer != nil {
+				return a.resolverServer.applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(
+					ctx,
+					a.config,
+					desired,
+					before,
+					after,
+					w,
+					defaultVMRuntimeDescriptorFileDeps(),
+				)
+			}
 			return applyServiceRootMigrationRuntimeChangesForConfigs(ctx, a.config, desired, before, after, w)
 		}
 	}
@@ -2479,6 +2510,15 @@ func (a *hostStorageApplier) applyServiceDBUpdates(ctx context.Context, plan cat
 		return err
 	}
 	return a.commitServiceDBUpdates(ctx, plan, moves, updates)
+}
+
+func hostStorageMovesHaveTailscale(moves []hostStorageServiceApplyMove) bool {
+	for _, move := range moves {
+		if tailscaleResolverPersistedRecord(move.old) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *hostStorageApplier) prepareServiceDBUpdates(ctx context.Context, desiredConfig Config, moves []hostStorageServiceApplyMove, w io.Writer) (map[string]*db.Service, error) {

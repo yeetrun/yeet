@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 	"golang.org/x/sys/unix"
 )
 
@@ -28,6 +29,7 @@ func currentTestServiceIdentity() db.ServiceIdentity {
 }
 
 func TestRestoreServiceIdentityRuntimeStateReconcilesOrderedUnits(t *testing.T) {
+	server := newTestServer(t)
 	oldActive, oldSystemctl := catchSystemdUnitActive, catchSystemctl
 	active := map[string]bool{"api.service": true}
 	catchSystemdUnitActive = func(unit string) bool { return active[unit] }
@@ -54,7 +56,14 @@ func TestRestoreServiceIdentityRuntimeStateReconcilesOrderedUnits(t *testing.T) 
 		{Unit: "yeet-api-ts.service", Active: true},
 		{Unit: "yeet-api-ns.service", Active: true},
 	}
-	if err := restoreServiceIdentityRuntimeState(context.Background(), service, "api", desired); err != nil {
+	addTestServices(t, server, *service)
+	oldStart, oldVerify := startTailscaleSystemdSidecar, verifyTailscaleSystemdSidecar
+	startTailscaleSystemdSidecar = func(_ context.Context, systemdService *svc.SystemdService) error {
+		return catchSystemctl("start", "yeet-"+systemdService.Name()+"-ts.service")
+	}
+	verifyTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error { return nil }
+	t.Cleanup(func() { startTailscaleSystemdSidecar, verifyTailscaleSystemdSidecar = oldStart, oldVerify })
+	if err := restoreServiceIdentityRuntimeState(context.Background(), server, service, "api", desired); err != nil {
 		t.Fatalf("restoreServiceIdentityRuntimeState: %v", err)
 	}
 }

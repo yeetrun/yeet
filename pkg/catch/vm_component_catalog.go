@@ -220,20 +220,32 @@ func (c vmGuestBaseCatalog) validate(requireTrustedURL bool) error {
 	if c.SchemaVersion != 1 {
 		return fmt.Errorf("unsupported VM guest-base catalog schema_version %d", c.SchemaVersion)
 	}
-	byID := make(map[string]vmGuestBaseCatalogRef, len(c.GuestBases))
-	for _, ref := range c.GuestBases {
-		if err := ref.validate(requireTrustedURL); err != nil {
-			return err
-		}
-		if _, exists := byID[ref.GuestBaseID]; exists {
-			return fmt.Errorf("duplicate VM guest-base catalog ID %q", ref.GuestBaseID)
-		}
-		byID[ref.GuestBaseID] = ref
+	byID, err := c.validatedRefs(requireTrustedURL)
+	if err != nil {
+		return err
 	}
 	wantFamilies := []string{"nixos-26.05-amd64", "ubuntu-26.04-amd64"}
 	if !sameVMComponentKeys(c.Channels, wantFamilies) {
 		return fmt.Errorf("VM guest-base catalog channels must contain exactly %s", strings.Join(wantFamilies, ", "))
 	}
+	return c.validateChannels(byID)
+}
+
+func (c vmGuestBaseCatalog) validatedRefs(requireTrustedURL bool) (map[string]vmGuestBaseCatalogRef, error) {
+	byID := make(map[string]vmGuestBaseCatalogRef, len(c.GuestBases))
+	for _, ref := range c.GuestBases {
+		if err := ref.validate(requireTrustedURL); err != nil {
+			return nil, err
+		}
+		if _, exists := byID[ref.GuestBaseID]; exists {
+			return nil, fmt.Errorf("duplicate VM guest-base catalog ID %q", ref.GuestBaseID)
+		}
+		byID[ref.GuestBaseID] = ref
+	}
+	return byID, nil
+}
+
+func (c vmGuestBaseCatalog) validateChannels(byID map[string]vmGuestBaseCatalogRef) error {
 	for family, channels := range c.Channels {
 		for channel, identity := range map[string]*vmGuestBaseCatalogIdentity{
 			"stable": channels.Stable, "candidate": channels.Candidate,
@@ -283,19 +295,31 @@ func (c vmKernelCatalog) validate(requireTrustedURL bool) error {
 	if c.SchemaVersion != 1 {
 		return fmt.Errorf("unsupported VM kernel catalog schema_version %d", c.SchemaVersion)
 	}
-	byID := make(map[string]vmKernelCatalogRef, len(c.Kernels))
-	for _, ref := range c.Kernels {
-		if err := ref.validate(requireTrustedURL); err != nil {
-			return err
-		}
-		if _, exists := byID[ref.KernelID]; exists {
-			return fmt.Errorf("duplicate VM kernel catalog ID %q", ref.KernelID)
-		}
-		byID[ref.KernelID] = ref
+	byID, err := c.validatedRefs(requireTrustedURL)
+	if err != nil {
+		return err
 	}
 	if !sameVMComponentKeys(c.Channels, []string{"amd64"}) {
 		return fmt.Errorf("VM kernel catalog channels must contain exactly amd64")
 	}
+	return c.validateChannels(byID)
+}
+
+func (c vmKernelCatalog) validatedRefs(requireTrustedURL bool) (map[string]vmKernelCatalogRef, error) {
+	byID := make(map[string]vmKernelCatalogRef, len(c.Kernels))
+	for _, ref := range c.Kernels {
+		if err := ref.validate(requireTrustedURL); err != nil {
+			return nil, err
+		}
+		if _, exists := byID[ref.KernelID]; exists {
+			return nil, fmt.Errorf("duplicate VM kernel catalog ID %q", ref.KernelID)
+		}
+		byID[ref.KernelID] = ref
+	}
+	return byID, nil
+}
+
+func (c vmKernelCatalog) validateChannels(byID map[string]vmKernelCatalogRef) error {
 	for architecture, channels := range c.Channels {
 		for channel, identity := range map[string]*vmKernelCatalogIdentity{
 			"stable": channels.Stable, "candidate": channels.Candidate,

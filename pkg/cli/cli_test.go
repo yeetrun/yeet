@@ -1449,6 +1449,9 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if _, ok := RemoteCommandInfo("missing"); ok {
 		t.Fatal("RemoteCommandInfo accepted an unknown command")
 	}
+	if _, ok := RemoteCommandInfo("tailscale-resolver-exec"); ok {
+		t.Fatal("RemoteCommandInfo accepted the local resolver launcher")
+	}
 
 	reg := RemoteCommandRegistry()
 	if reg.Command.Name != "yeet" {

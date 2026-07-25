@@ -171,25 +171,47 @@ func (m vmKernelManifest) validate(requireTrustedURL bool) error {
 	if m.SchemaVersion != 1 {
 		return fmt.Errorf("unsupported VM kernel manifest schema_version %d", m.SchemaVersion)
 	}
+	if err := m.validateIdentity(); err != nil {
+		return err
+	}
+	if err := m.validatePayloads(); err != nil {
+		return err
+	}
+	if err := m.validateGuestPackages(); err != nil {
+		return err
+	}
+	if err := m.Provenance.validate(); err != nil {
+		return err
+	}
+	return m.validatePayloadURLs(requireTrustedURL)
+}
+
+func (m vmKernelManifest) validateIdentity() error {
 	ref := vmKernelCatalogRef{
 		KernelID: m.KernelID, UpstreamVersion: m.UpstreamVersion,
 		PackagingRevision: m.PackagingRevision, Architecture: m.Architecture,
 		ManifestSHA256: strings.Repeat("0", 64),
 	}
-	if err := ref.validate(false); err != nil {
-		return err
-	}
+	return ref.validate(false)
+}
+
+func (m vmKernelManifest) validatePayloads() error {
 	if !vmRuntimeSHA256Pattern.MatchString(m.VMLinux.SHA256) || !vmRuntimeSHA256Pattern.MatchString(m.Config.SHA256) {
 		return fmt.Errorf("VM kernel %s has invalid payload sha256", m.KernelID)
 	}
+	return nil
+}
+
+func (m vmKernelManifest) validateGuestPackages() error {
 	if m.GuestPackages.CatalogURL != vmKernelPackageCatalogURL ||
 		m.GuestPackages.SelectorSchemaVersion != 2 ||
 		m.GuestPackages.ReleaseID != m.KernelID {
 		return fmt.Errorf("VM kernel %s has invalid guest package selector metadata", m.KernelID)
 	}
-	if err := m.Provenance.validate(); err != nil {
-		return err
-	}
+	return nil
+}
+
+func (m vmKernelManifest) validatePayloadURLs(requireTrustedURL bool) error {
 	if requireTrustedURL {
 		base := "https://github.com/yeetrun/yeet-vm-images/releases/download/" + m.KernelID + "/"
 		for _, asset := range []struct {
@@ -231,11 +253,22 @@ func (c vmKernelArtifactCache) publish(ctx context.Context, parent, final string
 			_ = os.RemoveAll(staging)
 		}
 	}()
-	if err := secureVMComponentStagingDirectory(staging, "kernel"); err != nil {
+	if err := c.stageArtifact(ctx, staging, manifestRaw, manifest, ref, requireTrustedURL); err != nil {
 		return vmKernelArtifact{}, err
 	}
-	if err := writeVMRuntimeCacheFile(filepath.Join(staging, vmKernelManifestFilename), manifestRaw, 0o644); err != nil {
+	artifact, published, err := c.publishStagedArtifact(parent, staging, final, ref)
+	if err != nil {
 		return vmKernelArtifact{}, err
+	}
+	return artifact, nil
+}
+
+func (c vmKernelArtifactCache) stageArtifact(ctx context.Context, staging string, manifestRaw []byte, manifest vmKernelManifest, ref vmKernelCatalogRef, requireTrustedURL bool) error {
+	if err := secureVMComponentStagingDirectory(staging, "kernel"); err != nil {
+		return err
+	}
+	if err := writeVMRuntimeCacheFile(filepath.Join(staging, vmKernelManifestFilename), manifestRaw, 0o644); err != nil {
+		return err
 	}
 	for _, asset := range []struct {
 		name   string
@@ -250,33 +283,38 @@ func (c vmKernelArtifactCache) publish(ctx context.Context, parent, final string
 			ctx, c.Client, asset.rawURL, filepath.Join(staging, asset.name),
 			"kernel "+asset.name, asset.want, asset.limit, 0o644, requireTrustedURL,
 		); err != nil {
-			return vmKernelArtifact{}, err
+			return err
 		}
 	}
 	if _, err := validateVMKernelArtifactDirectory(staging, ref); err != nil {
-		return vmKernelArtifact{}, err
+		return err
 	}
 	if err := os.Chmod(staging, 0o755); err != nil {
-		return vmKernelArtifact{}, fmt.Errorf("set VM kernel cache directory permissions: %w", err)
+		return fmt.Errorf("set VM kernel cache directory permissions: %w", err)
 	}
 	if err := syncVMRuntimeDirectory(staging); err != nil {
-		return vmKernelArtifact{}, err
+		return err
 	}
+	return nil
+}
+
+func (c vmKernelArtifactCache) publishStagedArtifact(parent, staging, final string, ref vmKernelCatalogRef) (vmKernelArtifact, bool, error) {
 	publish := c.publishNoReplace
 	if publish == nil {
 		publish = publishVMRuntimeCacheNoReplace
 	}
 	if err := publish(parent, staging, final); err != nil {
 		if errors.Is(err, syscall.EEXIST) {
-			return validateVMKernelArtifactDirectory(final, ref)
+			artifact, err := validateVMKernelArtifactDirectory(final, ref)
+			return artifact, false, err
 		}
-		return vmKernelArtifact{}, fmt.Errorf("publish immutable VM kernel cache entry: %w", err)
+		return vmKernelArtifact{}, false, fmt.Errorf("publish immutable VM kernel cache entry: %w", err)
 	}
-	published = true
 	if err := syncVMRuntimeDirectory(parent); err != nil {
-		return vmKernelArtifact{}, err
+		return vmKernelArtifact{}, true, err
 	}
-	return validateVMKernelArtifactDirectory(final, ref)
+	artifact, err := validateVMKernelArtifactDirectory(final, ref)
+	return artifact, true, err
 }
 
 func validateVMKernelArtifactDirectory(dir string, ref vmKernelCatalogRef) (vmKernelArtifact, error) {

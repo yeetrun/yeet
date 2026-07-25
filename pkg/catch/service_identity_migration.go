@@ -246,6 +246,29 @@ func (s *Server) migrateServiceIdentityLocked(ctx context.Context, req serviceId
 	if m.isNoop() {
 		return m.result, nil
 	}
+	if !tailscaleResolverPersistedRecord(*m.target) {
+		return s.runServiceIdentityMigration(ctx, m)
+	}
+	var result serviceIdentityMigrationResult
+	err := s.withTailscaleResolverMutationGuard(func() error {
+		canonical := m.target
+		if m.req.RootPlan != nil {
+			canonical = m.previous
+		}
+		if err := s.checkTailscaleResolverCanonicalReady(ctx, *canonical); err != nil {
+			return err
+		}
+		var runErr error
+		result, runErr = s.runServiceIdentityMigration(ctx, m)
+		return runErr
+	})
+	return result, err
+}
+
+func (s *Server) runServiceIdentityMigration(
+	ctx context.Context,
+	m *serviceIdentityMigration,
+) (serviceIdentityMigrationResult, error) {
 	if err := m.run(ctx); err != nil {
 		if m.completed {
 			committedErr := fmt.Errorf(
@@ -475,14 +498,8 @@ func (m *serviceIdentityMigration) isNoop() bool {
 }
 
 func (m *serviceIdentityMigration) run(ctx context.Context) error {
-	if err := m.captureAndStop(ctx); err != nil {
-		return err
-	}
-	snapshotted, err := m.materializeServiceIdentityRoot(ctx)
+	snapshotted, err := m.prepareServiceIdentityRuntime(ctx)
 	if err != nil {
-		return err
-	}
-	if err := m.backupServiceIdentityRuntime(); err != nil {
 		return err
 	}
 	if err := m.stageServiceIdentityGeneration(ctx); err != nil {
@@ -500,10 +517,37 @@ func (m *serviceIdentityMigration) run(ctx context.Context) error {
 	if err := m.installServiceIdentityGeneration(ctx); err != nil {
 		return err
 	}
+	if err := m.activateServiceIdentityGeneration(ctx); err != nil {
+		return err
+	}
 	if err := m.startVerifyAndCommitServiceIdentity(ctx); err != nil {
 		return err
 	}
 	return m.completeServiceIdentityMigration(ctx)
+}
+
+func (m *serviceIdentityMigration) prepareServiceIdentityRuntime(ctx context.Context) (bool, error) {
+	if err := m.captureAndStop(ctx); err != nil {
+		return false, err
+	}
+	snapshotted, err := m.materializeServiceIdentityRoot(ctx)
+	if err != nil {
+		return false, err
+	}
+	if err := m.backupServiceIdentityRuntime(); err != nil {
+		return false, err
+	}
+	return snapshotted, nil
+}
+
+func (m *serviceIdentityMigration) activateServiceIdentityGeneration(ctx context.Context) error {
+	if err := m.server.checkTailscaleResolverReady(ctx, *m.target); err != nil {
+		return err
+	}
+	if len(m.req.GenerationUnits) != 0 {
+		return m.activateGenerationUnits(ctx)
+	}
+	return nil
 }
 
 func (m *serviceIdentityMigration) captureAndStop(ctx context.Context) error {
@@ -922,9 +966,6 @@ func (m *serviceIdentityMigration) installServiceIdentityGeneration(ctx context.
 			return err
 		}
 	}
-	if len(m.req.GenerationUnits) != 0 {
-		return m.activateGenerationUnits(ctx)
-	}
 	return nil
 }
 
@@ -940,6 +981,9 @@ func (m *serviceIdentityMigration) startVerifyAndCommitServiceIdentity(ctx conte
 
 func (m *serviceIdentityMigration) startReplacementServiceIdentity(ctx context.Context) error {
 	if m.result.WasRunning || m.req.StartNew {
+		if err := m.server.checkTailscaleResolverReady(ctx, *m.target); err != nil {
+			return err
+		}
 		if err := m.phase(serviceIdentityPhaseStart); err != nil {
 			return err
 		}
@@ -2184,15 +2228,15 @@ func (m *serviceIdentityMigration) replacementUnit() (string, error) {
 
 func (m *serviceIdentityMigration) defaultOps() serviceIdentityMigrationOps {
 	previousStop := func(ctx context.Context, fallback string) error {
-		stop, _ := serviceIdentityRuntimeActions(m.previous)
+		stop, _ := serviceIdentityRuntimeActions(m.server, m.previous)
 		return stop(ctx, fallback)
 	}
 	previousStart := func(ctx context.Context, fallback string) error {
-		_, start := serviceIdentityRuntimeActions(m.previous)
+		_, start := serviceIdentityRuntimeActions(m.server, m.previous)
 		return start(ctx, fallback)
 	}
 	targetStart := func(ctx context.Context, fallback string) error {
-		_, start := serviceIdentityRuntimeActions(m.target)
+		_, start := serviceIdentityRuntimeActions(m.server, m.target)
 		return start(ctx, fallback)
 	}
 	replacementStop := func(ctx context.Context, fallback string) error {
@@ -2217,7 +2261,7 @@ func (m *serviceIdentityMigration) defaultOps() serviceIdentityMigrationOps {
 			return captureServiceIdentityRuntimeState(ctx, m.previous, fallback)
 		},
 		restoreRuntime: func(ctx context.Context, fallback string, state []serviceIdentityRuntimeUnitState) error {
-			return restoreServiceIdentityRuntimeState(ctx, m.previous, fallback, state)
+			return restoreServiceIdentityRuntimeState(ctx, m.server, m.previous, fallback, state)
 		},
 		isRunning: func(_ context.Context, service string) (bool, error) {
 			return m.server.IsServiceRunning(service)
@@ -2274,7 +2318,12 @@ func (m *serviceIdentityMigration) defaultOps() serviceIdentityMigrationOps {
 		enable:  func(_ context.Context, unit string) error { return catchSystemctl("enable", unit) },
 		disable: func(_ context.Context, unit string) error { return catchSystemctl("disable", unit) },
 		newGenerationStager: func(service *db.Service, root string) (serviceIdentityGenerationStager, error) {
-			stager, err := svc.NewSystemdService(m.server.cfg.DB, service.View(), serviceRunDirForRoot(root))
+			stager, err := svc.NewSystemdService(
+				m.server.cfg.DB,
+				service.View(),
+				serviceRunDirForRoot(root),
+				svc.WithTailscaleGuardRunner(m.server.catchRunnerPath()),
+			)
 			if err != nil {
 				return nil, err
 			}
@@ -2283,7 +2332,7 @@ func (m *serviceIdentityMigration) defaultOps() serviceIdentityMigrationOps {
 	}
 }
 
-func serviceIdentityRuntimeActions(service *db.Service) (
+func serviceIdentityRuntimeActions(server *Server, service *db.Service) (
 	func(context.Context, string) error,
 	func(context.Context, string) error,
 ) {
@@ -2292,7 +2341,7 @@ func serviceIdentityRuntimeActions(service *db.Service) (
 			return stopServiceIdentityUnits(ctx, stopUnits)
 		}, func(ctx context.Context, fallback string) error {
 			_, startUnits := serviceIdentityRuntimeUnits(service, fallback)
-			return startServiceIdentityUnits(ctx, startUnits)
+			return startServiceIdentityUnits(ctx, server, service, fallback, startUnits)
 		}
 }
 
@@ -2412,7 +2461,7 @@ func serviceIdentityPrimaryRuntimeActive(service *db.Service, fallback string, s
 	return false
 }
 
-func restoreServiceIdentityRuntimeState(ctx context.Context, service *db.Service, fallback string, desired []serviceIdentityRuntimeUnitState) error {
+func restoreServiceIdentityRuntimeState(ctx context.Context, server *Server, service *db.Service, fallback string, desired []serviceIdentityRuntimeUnitState) error {
 	want := make(map[string]bool, len(desired))
 	for _, state := range desired {
 		want[state.Unit] = state.Active
@@ -2421,11 +2470,11 @@ func restoreServiceIdentityRuntimeState(ctx context.Context, service *db.Service
 	if err := restoreInactiveServiceIdentityUnits(ctx, stop, want); err != nil {
 		return err
 	}
-	started, err := restoreOrderedServiceIdentityUnits(ctx, start, want)
+	started, err := restoreOrderedServiceIdentityUnits(ctx, server, service, fallback, start, want)
 	if err != nil {
 		return err
 	}
-	if err := restoreRemainingServiceIdentityUnits(ctx, desired, started); err != nil {
+	if err := restoreRemainingServiceIdentityUnits(ctx, server, service, fallback, desired, started); err != nil {
 		return err
 	}
 	actual, err := captureServiceIdentityRuntimeState(ctx, service, fallback)
@@ -2435,7 +2484,7 @@ func restoreServiceIdentityRuntimeState(ctx context.Context, service *db.Service
 	if !reflect.DeepEqual(actual, desired) {
 		return fmt.Errorf("restored runtime state is %#v, want %#v", actual, desired)
 	}
-	return nil
+	return verifyRestoredTailscaleSidecar(ctx, server, service, fallback, want)
 }
 
 func restoreInactiveServiceIdentityUnits(ctx context.Context, units []string, want map[string]bool) error {
@@ -2452,12 +2501,12 @@ func restoreInactiveServiceIdentityUnits(ctx context.Context, units []string, wa
 	return nil
 }
 
-func restoreOrderedServiceIdentityUnits(ctx context.Context, units []string, want map[string]bool) (map[string]struct{}, error) {
+func restoreOrderedServiceIdentityUnits(ctx context.Context, server *Server, service *db.Service, fallback string, units []string, want map[string]bool) (map[string]struct{}, error) {
 	started := make(map[string]struct{}, len(units))
 	for _, unit := range units {
 		started[unit] = struct{}{}
 		if want[unit] && !catchSystemdUnitActive(unit) {
-			if err := catchSystemctl("start", unit); err != nil {
+			if err := startServiceIdentityUnit(ctx, server, service, fallback, unit); err != nil {
 				return nil, fmt.Errorf("restore active state for %s: %w", unit, err)
 			}
 		}
@@ -2465,7 +2514,7 @@ func restoreOrderedServiceIdentityUnits(ctx context.Context, units []string, wan
 	return started, nil
 }
 
-func restoreRemainingServiceIdentityUnits(ctx context.Context, desired []serviceIdentityRuntimeUnitState, started map[string]struct{}) error {
+func restoreRemainingServiceIdentityUnits(ctx context.Context, server *Server, service *db.Service, fallback string, desired []serviceIdentityRuntimeUnitState, started map[string]struct{}) error {
 	for _, state := range desired {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -2473,7 +2522,7 @@ func restoreRemainingServiceIdentityUnits(ctx context.Context, desired []service
 		if _, ordered := started[state.Unit]; ordered || !state.Active || catchSystemdUnitActive(state.Unit) {
 			continue
 		}
-		if err := catchSystemctl("start", state.Unit); err != nil {
+		if err := startServiceIdentityUnit(ctx, server, service, fallback, state.Unit); err != nil {
 			return fmt.Errorf("restore active state for %s: %w", state.Unit, err)
 		}
 	}
@@ -2498,19 +2547,84 @@ func stopServiceIdentityUnits(ctx context.Context, units []string) error {
 	return nil
 }
 
-func startServiceIdentityUnits(ctx context.Context, units []string) error {
+func startServiceIdentityUnits(ctx context.Context, server *Server, service *db.Service, fallback string, units []string) error {
 	for _, unit := range units {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := catchSystemctl("start", unit); err != nil {
+		if err := startServiceIdentityUnit(ctx, server, service, fallback, unit); err != nil {
 			return fmt.Errorf("start %s: %w", unit, err)
 		}
 		if !catchSystemdUnitActive(unit) {
 			return fmt.Errorf("unit %s is not active after start", unit)
 		}
 	}
+	unit := tailscaleServiceIdentityUnit(service, fallback)
+	if unit == "" || !serviceIdentityUnitIncluded(units, unit) {
+		return nil
+	}
+	return verifyRestoredTailscaleSidecar(ctx, server, service, fallback, map[string]bool{unit: true})
+}
+
+func serviceIdentityUnitIncluded(units []string, want string) bool {
+	for _, unit := range units {
+		if unit == want {
+			return true
+		}
+	}
+	return false
+}
+
+func startServiceIdentityUnit(ctx context.Context, server *Server, service *db.Service, fallback, unit string) error {
+	if unit == tailscaleServiceIdentityUnit(service, fallback) {
+		if server == nil {
+			return errors.New("load tailscale sidecar without owning server")
+		}
+		systemdService, err := server.systemdService(serviceIdentityRuntimeName(service, fallback))
+		if err != nil {
+			return fmt.Errorf("load tailscale sidecar for %s: %w", unit, err)
+		}
+		if err := startTailscaleSystemdSidecar(ctx, systemdService); err != nil {
+			return fmt.Errorf("start tailscale sidecar for %s: %w", unit, err)
+		}
+		return nil
+	}
+	if err := catchSystemctl("start", unit); err != nil {
+		return err
+	}
 	return nil
+}
+
+func verifyRestoredTailscaleSidecar(ctx context.Context, server *Server, service *db.Service, fallback string, want map[string]bool) error {
+	unit := tailscaleServiceIdentityUnit(service, fallback)
+	if unit == "" || !want[unit] {
+		return nil
+	}
+	if server == nil {
+		return errors.New("verify tailscale sidecar without owning server")
+	}
+	systemdService, err := server.systemdService(serviceIdentityRuntimeName(service, fallback))
+	if err != nil {
+		return fmt.Errorf("load tailscale sidecar for %s: %w", unit, err)
+	}
+	if err := verifyTailscaleSystemdSidecar(ctx, systemdService); err != nil {
+		return fmt.Errorf("verify restored tailscale sidecar for %s: %w", unit, err)
+	}
+	return nil
+}
+
+func tailscaleServiceIdentityUnit(service *db.Service, fallback string) string {
+	if service == nil {
+		return ""
+	}
+	return "yeet-" + serviceIdentityRuntimeName(service, fallback) + "-ts.service"
+}
+
+func serviceIdentityRuntimeName(service *db.Service, fallback string) string {
+	if service != nil && service.Name != "" {
+		return service.Name
+	}
+	return fallback
 }
 
 func (ops *serviceIdentityMigrationOps) merge(overrides serviceIdentityMigrationOps) {

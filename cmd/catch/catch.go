@@ -338,6 +338,8 @@ func handleSpecialCommand(args []string, out io.Writer) (bool, error) {
 		// is-catch is a special command that is used to determine if the
 		// binary is a catch binary.
 		return true, writeLine(out, "yes")
+	case "tailscale-resolver-exec":
+		return true, catch.RunTailscaleResolverExec(args[1:])
 	case "netns-firewall":
 		return true, handleNetNSFirewallCommand(args[1:])
 	case "vm-run":

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/svc"
 )
@@ -1984,6 +1986,7 @@ func TestServiceIdentityDefaultRuntimeOpsUseTimerAndAuxiliaryUnits(t *testing.T)
 	for _, name := range []db.ArtifactName{db.ArtifactSystemdUnit, db.ArtifactSystemdTimerFile, db.ArtifactNetNSService, db.ArtifactTSService} {
 		service.Artifacts[name] = &db.Artifact{Refs: map[db.ArtifactRef]string{db.Gen(2): "/artifact"}}
 	}
+	addTestServices(t, server, *service)
 	migration := &serviceIdentityMigration{server: server, previous: service.Clone(), target: service.Clone()}
 	active := map[string]bool{
 		"api.timer": true, "api.service": true, "yeet-api-ns.service": true, "yeet-api-ts.service": true,
@@ -2002,9 +2005,16 @@ func TestServiceIdentityDefaultRuntimeOpsUseTimerAndAuxiliaryUnits(t *testing.T)
 		return nil
 	}
 	catchSystemdUnitActive = func(unit string) bool { return active[unit] }
+	oldStart, oldVerify := startTailscaleSystemdSidecar, verifyTailscaleSystemdSidecar
+	startTailscaleSystemdSidecar = func(_ context.Context, systemdService *svc.SystemdService) error {
+		return catchSystemctl("start", "yeet-"+systemdService.Name()+"-ts.service")
+	}
+	verifyTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error { return nil }
 	t.Cleanup(func() {
 		catchSystemctl = oldSystemctl
 		catchSystemdUnitActive = oldActive
+		startTailscaleSystemdSidecar = oldStart
+		verifyTailscaleSystemdSidecar = oldVerify
 	})
 
 	ops := migration.defaultOps()
@@ -2020,6 +2030,53 @@ func TestServiceIdentityDefaultRuntimeOpsUseTimerAndAuxiliaryUnits(t *testing.T)
 	}
 	if strings.Join(calls, "|") != strings.Join(want, "|") {
 		t.Fatalf("runtime calls = %v, want %v", calls, want)
+	}
+}
+
+func TestServiceIdentityRuntimeStartVerifiesRestoredTailscaleSidecar(t *testing.T) {
+	server := newTestServer(t)
+	service := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd, Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(1): "/ts"}},
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/ns"}},
+		},
+	}
+	addTestServices(t, server, *service)
+	migration := &serviceIdentityMigration{server: server, target: service}
+	active := map[string]bool{}
+	var calls []string
+	oldSystemctl, oldActive := catchSystemctl, catchSystemdUnitActive
+	catchSystemctl = func(args ...string) error {
+		if len(args) != 2 || args[0] != "start" {
+			return fmt.Errorf("unexpected systemctl args: %v", args)
+		}
+		active[args[1]] = true
+		calls = append(calls, "raw-start:"+args[1])
+		return nil
+	}
+	catchSystemdUnitActive = func(unit string) bool { return active[unit] }
+	oldStart, oldVerify := startTailscaleSystemdSidecar, verifyTailscaleSystemdSidecar
+	startTailscaleSystemdSidecar = func(_ context.Context, systemdService *svc.SystemdService) error {
+		active["yeet-"+systemdService.Name()+"-ts.service"] = true
+		return nil
+	}
+	verifyTailscaleSystemdSidecar = func(_ context.Context, got *svc.SystemdService) error {
+		calls = append(calls, "verified:"+got.Name())
+		return nil
+	}
+	t.Cleanup(func() {
+		catchSystemctl, catchSystemdUnitActive = oldSystemctl, oldActive
+		startTailscaleSystemdSidecar = oldStart
+		verifyTailscaleSystemdSidecar = oldVerify
+	})
+
+	if err := migration.defaultOps().start(context.Background(), "api"); err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	want := []string{"raw-start:yeet-api-ns.service", "raw-start:api.service", "verified:api"}
+	if diff := cmp.Diff(want, calls); diff != "" {
+		t.Fatalf("runtime lifecycle calls (-want +got):\n%s", diff)
 	}
 }
 
@@ -2300,7 +2357,6 @@ func TestServiceIdentityMigrationStopsAndRestoresActiveAuxiliaryUnits(t *testing
 	old := &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: root, Generation: 1,
 		Artifacts: db.ArtifactStore{
 			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/artifact/ns"}},
-			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(1): "/artifact/ts"}},
 		},
 	}
 	if _, _, err := server.cfg.DB.MutateService("api", func(_ *db.Data, current *db.Service) error {
@@ -2314,7 +2370,7 @@ func TestServiceIdentityMigrationStopsAndRestoresActiveAuxiliaryUnits(t *testing
 		t.Fatal(err)
 	}
 	wantRuntime := []serviceIdentityRuntimeUnitState{
-		{Unit: "api.service"}, {Unit: "yeet-api-ts.service", Active: true}, {Unit: "yeet-api-ns.service", Active: true},
+		{Unit: "api.service"}, {Unit: "yeet-api-ns.service", Active: true},
 	}
 	currentRuntime := append([]serviceIdentityRuntimeUnitState(nil), wantRuntime...)
 	stopCalls, restoreCalls := 0, 0
@@ -2398,6 +2454,113 @@ func TestServiceIdentityCopyRejectsSourceBoundaryBeforeTargetCreation(t *testing
 	}
 	if _, statErr := os.Stat(targetRoot); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("target root was created before source preflight: %v", statErr)
+	}
+}
+
+func TestServiceIdentityCombinedTailscaleCopyPreflightsMaterializedSourceBeforeAbsentTarget(t *testing.T) {
+	fixture := newGuardedTailscaleResolverFixture(t, "identity-copy-ts", tailscaleResolverGenerationCurrent)
+	oldRoot := fixture.service.ServiceRoot
+	targetRoot := filepath.Join(filepath.Dir(oldRoot), "identity-copy-ts-target")
+	primaryArtifact := filepath.Join(oldRoot, "bin", "identity-copy-ts.service")
+	primaryUnit := filepath.Join(filepath.Dir(fixture.installed), "identity-copy-ts.service")
+	unit := "[Service]\nUser=root\nGroup=root\nWorkingDirectory=" + serviceDataDirForRoot(oldRoot) + "\n"
+	for _, path := range []string{primaryArtifact, primaryUnit} {
+		if err := os.WriteFile(path, []byte(unit), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture.service.ServiceType = db.ServiceTypeSystemd
+	fixture.service.Artifacts[db.ArtifactSystemdUnit] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+		db.Gen(fixture.service.Generation): primaryArtifact,
+	}}
+	if _, _, err := fixture.server.cfg.DB.MutateService(fixture.service.Name, func(_ *db.Data, current *db.Service) error {
+		*current = *fixture.service.Clone()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	identity := db.ServiceIdentity{
+		RequestedUser: strconv.Itoa(os.Geteuid()), RequestedGroup: strconv.Itoa(os.Getegid()),
+		UID: uint32(os.Geteuid()), GID: uint32(os.Getegid()),
+	}
+	ops := serviceIdentityMigrationOps{
+		unitPath:       func(string) string { return primaryUnit },
+		captureRuntime: func(context.Context, string) ([]serviceIdentityRuntimeUnitState, error) { return nil, nil },
+		restoreRuntime: func(context.Context, string, []serviceIdentityRuntimeUnitState) error { return nil },
+		materialize: func(_ context.Context, plan serviceRootMigrationPlan, _ io.Writer) (bool, error) {
+			if err := copyServiceRootToStage(plan.OldRoot, plan.NewRoot); err != nil {
+				return false, err
+			}
+			if err := filepath.WalkDir(plan.NewRoot, func(path string, entry os.DirEntry, walkErr error) error {
+				if walkErr != nil || entry.IsDir() {
+					return walkErr
+				}
+				raw, readErr := os.ReadFile(path)
+				if readErr != nil {
+					return readErr
+				}
+				info, statErr := entry.Info()
+				if statErr != nil {
+					return statErr
+				}
+				return os.WriteFile(path, []byte(strings.ReplaceAll(string(raw), plan.OldRoot, plan.NewRoot)), info.Mode().Perm())
+			}); err != nil {
+				return false, err
+			}
+			if xattr, lookupErr := exec.LookPath("xattr"); lookupErr == nil {
+				if raw, clearErr := exec.Command(xattr, "-cr", plan.NewRoot).CombinedOutput(); clearErr != nil {
+					return false, fmt.Errorf("clear copied test xattrs: %w: %s", clearErr, raw)
+				}
+			}
+			return false, nil
+		},
+		inspect: func(context.Context, serviceIdentityInspectionRequest) (serviceIdentityInspection, error) {
+			return serviceIdentityInspection{}, nil
+		},
+		apply:     func(serviceIdentityInspection, *serviceIdentityJournal) error { return nil },
+		reload:    func(context.Context) error { return nil },
+		verify:    func(context.Context, serviceIdentityMigrationVerification) error { return nil },
+		isEnabled: func(context.Context, string) (bool, error) { return false, nil },
+		enable:    func(context.Context, string) error { return nil },
+		disable:   func(context.Context, string) error { return nil },
+	}
+
+	result, err := fixture.server.migrateServiceIdentity(context.Background(), serviceIdentityMigrationRequest{
+		Service: fixture.service.Name, Requested: identity.RequestedUser,
+		Target: resolvedServiceIdentity{Persisted: identity},
+		RootPlan: &serviceRootMigrationPlan{
+			ServiceName: fixture.service.Name, OldRoot: oldRoot, NewRoot: targetRoot,
+			Mode: serviceRootMigrationCopy,
+		},
+		ReplacementUnit: strings.ReplaceAll(unit, oldRoot, targetRoot),
+		InstallGeneration: func(context.Context) error {
+			targetCanonical := filepath.Join(
+				targetRoot,
+				strings.TrimPrefix(fixture.canonical, oldRoot+string(filepath.Separator)),
+			)
+			raw, readErr := os.ReadFile(targetCanonical)
+			if readErr != nil {
+				return readErr
+			}
+			return os.WriteFile(fixture.installed, raw, 0o640)
+		},
+		ops: &ops,
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("combined Tailscale identity/root copy: %v", err)
+	}
+	if result.Root != targetRoot {
+		t.Fatalf("migration root = %q, want %q", result.Root, targetRoot)
+	}
+	if _, err := os.Stat(targetRoot); err != nil {
+		t.Fatalf("materialized target: %v", err)
+	}
+	current, err := fixture.server.serviceView(fixture.service.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ServiceRoot() != targetRoot {
+		t.Fatalf("persisted target root = %q, want %q", current.ServiceRoot(), targetRoot)
 	}
 }
 

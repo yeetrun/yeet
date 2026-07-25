@@ -514,46 +514,13 @@ func (e *ttyExecer) materializeVMLegacyProvisionArtifacts(ctx context.Context, i
 	if err != nil {
 		return vmProvisionArtifacts{}, fmt.Errorf("verify legacy VM Firecracker and jailer pair: %w", err)
 	}
-	rootFS, err := vmProvisionLegacyEvidence(image.DiskRootFSPath(), true)
+	evidence, err := vmProvisionLegacyEvidenceForImage(image, jailer)
 	if err != nil {
 		return vmProvisionArtifacts{}, err
 	}
-	kernel, err := vmProvisionLegacyEvidence(image.Paths.KernelPath, true)
+	composition, err := vmProvisionLegacyCompositionForImage(image, runtimeVersion, evidence)
 	if err != nil {
 		return vmProvisionArtifacts{}, err
-	}
-	config, err := vmProvisionLegacyEvidence(filepath.Join(image.Paths.Dir, vmKernelConfigFilename), false)
-	if err != nil {
-		return vmProvisionArtifacts{}, err
-	}
-	initrd, err := vmProvisionLegacyEvidence(image.Paths.InitrdPath, false)
-	if err != nil {
-		return vmProvisionArtifacts{}, err
-	}
-	firecracker, err := vmProvisionLegacyEvidence(image.Paths.FirecrackerPath, true)
-	if err != nil {
-		return vmProvisionArtifacts{}, err
-	}
-	jailerEvidence, err := vmProvisionLegacyEvidence(jailer, true)
-	if err != nil {
-		return vmProvisionArtifacts{}, err
-	}
-	guestName := strings.TrimSpace(image.Manifest.Name)
-	if guestName == "" {
-		guestName = image.Manifest.Distro
-	}
-	kernelVersion := strings.TrimSpace(image.Manifest.KernelVersion)
-	if kernelVersion == "" {
-		kernelVersion = image.Manifest.Version
-	}
-	composition, err := newVMLegacyCompositionRecord(vmLegacyCompositionInput{
-		Architecture: image.Manifest.Architecture, GuestName: guestName, GuestVersion: image.Manifest.Version,
-		KernelVersion: kernelVersion, FirecrackerVersion: runtimeVersion,
-		RootFS: rootFS, Kernel: kernel, KernelConfig: config, Initrd: initrd,
-		Firecracker: firecracker, Jailer: jailerEvidence,
-	})
-	if err != nil {
-		return vmProvisionArtifacts{}, fmt.Errorf("derive legacy VM component composition: %w", err)
 	}
 	_, compositionSHA, err := canonicalVMLegacyComposition(composition)
 	if err != nil {
@@ -563,44 +530,113 @@ func (e *ttyExecer) materializeVMLegacyProvisionArtifacts(ctx context.Context, i
 	if err != nil {
 		return vmProvisionArtifacts{}, err
 	}
-	manifestSHA := compositionSHA
-	if digest, hashErr := sha256File(image.Paths.Manifest); hashErr == nil {
-		manifestSHA = digest
-	}
-	guestManifestSHA := compositionSHA
-	if image.DiskRootFSPath() == image.Paths.RootFSPath && image.Manifest.Checksums[image.Manifest.RootFS] == rootFS.SHA256 {
-		guestManifestSHA = manifestSHA
-	}
-	kernelManifestSHA := compositionSHA
-	if image.Paths.KernelPath == filepath.Join(image.Paths.Dir, image.Manifest.Kernel) && image.Manifest.Checksums[image.Manifest.Kernel] == kernel.SHA256 {
-		kernelManifestSHA = manifestSHA
-	}
-	runtimeManifestSHA := compositionSHA
-	if image.Paths.FirecrackerPath == filepath.Join(image.Paths.Dir, image.Manifest.Firecracker) &&
-		jailer == filepath.Join(image.Paths.Dir, image.Manifest.Jailer) &&
-		image.Manifest.Checksums[image.Manifest.Firecracker] == firecracker.SHA256 &&
-		image.Manifest.Checksums[image.Manifest.Jailer] == jailerEvidence.SHA256 {
-		runtimeManifestSHA = manifestSHA
-	}
-	source := string(vmRuntimeAdoptionOfficialLegacy)
-	if vmProvisionPathWithin(filepath.Join(e.s.cfg.RootDir, "vm-images", "local"), image.Paths.Dir) {
-		source = string(vmRuntimeAdoptionLocalLegacy)
-	}
+	guestManifestSHA, kernelManifestSHA, runtimeManifestSHA := vmProvisionLegacyManifestSHAs(image, jailer, evidence, compositionSHA)
+	source := e.vmProvisionLegacySource(image)
 	return vmProvisionArtifacts{
 		Image: image, Legacy: &image, RuntimePolicy: "manual", RuntimeChannel: "stable",
 		GuestBase: db.VMGuestBaseConfig{
 			ID: guestID, ManifestSHA256: guestManifestSHA, Source: source, RootFSProvenance: compositionSHA,
 		},
 		Kernel: db.VMKernelArtifactConfig{
-			ID: kernelID, ManifestSHA256: kernelManifestSHA, SHA256: kernel.SHA256,
+			ID: kernelID, ManifestSHA256: kernelManifestSHA, SHA256: evidence.Kernel.SHA256,
 			Path: image.Paths.KernelPath, Source: source,
 		},
 		Runtime: db.VMRuntimeArtifactConfig{
 			ID: runtimeID, ManifestSHA256: runtimeManifestSHA,
-			FirecrackerSHA256: firecracker.SHA256, JailerSHA256: jailerEvidence.SHA256,
+			FirecrackerSHA256: evidence.Firecracker.SHA256, JailerSHA256: evidence.Jailer.SHA256,
 			Firecracker: image.Paths.FirecrackerPath, Jailer: jailer, Source: source,
 		},
 	}, nil
+}
+
+type vmProvisionLegacyEvidenceSet struct {
+	RootFS, Kernel, Config, Initrd, Firecracker, Jailer vmRuntimeAdoptionFileEvidence
+}
+
+func vmProvisionLegacyEvidenceForImage(image vmImageAsset, jailer string) (vmProvisionLegacyEvidenceSet, error) {
+	rootFS, err := vmProvisionLegacyEvidence(image.DiskRootFSPath(), true)
+	if err != nil {
+		return vmProvisionLegacyEvidenceSet{}, err
+	}
+	kernel, err := vmProvisionLegacyEvidence(image.Paths.KernelPath, true)
+	if err != nil {
+		return vmProvisionLegacyEvidenceSet{}, err
+	}
+	config, err := vmProvisionLegacyEvidence(filepath.Join(image.Paths.Dir, vmKernelConfigFilename), false)
+	if err != nil {
+		return vmProvisionLegacyEvidenceSet{}, err
+	}
+	initrd, err := vmProvisionLegacyEvidence(image.Paths.InitrdPath, false)
+	if err != nil {
+		return vmProvisionLegacyEvidenceSet{}, err
+	}
+	firecracker, err := vmProvisionLegacyEvidence(image.Paths.FirecrackerPath, true)
+	if err != nil {
+		return vmProvisionLegacyEvidenceSet{}, err
+	}
+	jailerEvidence, err := vmProvisionLegacyEvidence(jailer, true)
+	if err != nil {
+		return vmProvisionLegacyEvidenceSet{}, err
+	}
+	return vmProvisionLegacyEvidenceSet{
+		RootFS: rootFS, Kernel: kernel, Config: config, Initrd: initrd, Firecracker: firecracker, Jailer: jailerEvidence,
+	}, nil
+}
+
+func vmProvisionLegacyCompositionForImage(image vmImageAsset, runtimeVersion string, evidence vmProvisionLegacyEvidenceSet) (vmLegacyCompositionRecord, error) {
+	guestName := image.Manifest.Distro
+	if name := strings.TrimSpace(image.Manifest.Name); name != "" {
+		guestName = name
+	}
+	kernelVersion := image.Manifest.Version
+	if version := strings.TrimSpace(image.Manifest.KernelVersion); version != "" {
+		kernelVersion = version
+	}
+	composition, err := newVMLegacyCompositionRecord(vmLegacyCompositionInput{
+		Architecture: image.Manifest.Architecture, GuestName: guestName, GuestVersion: image.Manifest.Version,
+		KernelVersion: kernelVersion, FirecrackerVersion: runtimeVersion,
+		RootFS: evidence.RootFS, Kernel: evidence.Kernel, KernelConfig: evidence.Config, Initrd: evidence.Initrd,
+		Firecracker: evidence.Firecracker, Jailer: evidence.Jailer,
+	})
+	if err != nil {
+		return vmLegacyCompositionRecord{}, fmt.Errorf("derive legacy VM component composition: %w", err)
+	}
+	return composition, nil
+}
+
+func vmProvisionLegacyManifestSHAs(image vmImageAsset, jailer string, evidence vmProvisionLegacyEvidenceSet, compositionSHA string) (guest, kernel, runtime string) {
+	manifestSHA := vmProvisionLegacyManifestSHA(image.Paths.Manifest, compositionSHA)
+	guest = compositionSHA
+	if image.DiskRootFSPath() == image.Paths.RootFSPath && image.Manifest.Checksums[image.Manifest.RootFS] == evidence.RootFS.SHA256 {
+		guest = manifestSHA
+	}
+	kernel = compositionSHA
+	if image.Paths.KernelPath == filepath.Join(image.Paths.Dir, image.Manifest.Kernel) && image.Manifest.Checksums[image.Manifest.Kernel] == evidence.Kernel.SHA256 {
+		kernel = manifestSHA
+	}
+	runtime = compositionSHA
+	if image.Paths.FirecrackerPath == filepath.Join(image.Paths.Dir, image.Manifest.Firecracker) &&
+		jailer == filepath.Join(image.Paths.Dir, image.Manifest.Jailer) &&
+		image.Manifest.Checksums[image.Manifest.Firecracker] == evidence.Firecracker.SHA256 &&
+		image.Manifest.Checksums[image.Manifest.Jailer] == evidence.Jailer.SHA256 {
+		runtime = manifestSHA
+	}
+	return guest, kernel, runtime
+}
+
+func vmProvisionLegacyManifestSHA(path, fallback string) string {
+	digest, err := sha256File(path)
+	if err != nil {
+		return fallback
+	}
+	return digest
+}
+
+func (e *ttyExecer) vmProvisionLegacySource(image vmImageAsset) string {
+	if vmProvisionPathWithin(filepath.Join(e.s.cfg.RootDir, "vm-images", "local"), image.Paths.Dir) {
+		return string(vmRuntimeAdoptionLocalLegacy)
+	}
+	return string(vmRuntimeAdoptionOfficialLegacy)
 }
 
 func vmProvisionLegacyEvidence(path string, required bool) (vmRuntimeAdoptionFileEvidence, error) {
@@ -1336,30 +1372,14 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 
 	runDir := serviceRunDirForRoot(resolvedRoot.Root)
 	binDir := serviceBinDirForRoot(resolvedRoot.Root)
-	diskPlan := vmDiskPlan{
-		Service:    e.sn,
-		Backend:    shape.DiskBackend,
-		Path:       filepath.Join(serviceDataDirForRoot(resolvedRoot.Root), "rootfs.raw"),
-		Bytes:      shape.DiskBytes,
-		BaseRootFS: image.DiskRootFSPath(),
-		BaseBytes:  image.Manifest.RootFSSize,
-	}
-	if shape.DiskBackend == vmDiskBackendZVOL {
-		baseDataset := vmZVOLBaseDataset(resolvedRoot, image.Manifest.Version)
-		diskPlan.Path = vmZVOLRootDataset(resolvedRoot, e.sn)
-		diskPlan.BaseDataset = baseDataset
-		diskPlan.ImageVersion = image.Manifest.Version
-	}
+	diskPlan := newVMProvisionDiskPlan(e.sn, resolvedRoot, shape, image)
 	diskPath := vmDiskPathForRuntime(diskPlan)
 
 	firecrackerPath := filepath.Join(runDir, "firecracker.json")
 	apiSocket := filepath.Join(runDir, "firecracker.sock")
 	vsockSocket := filepath.Join(runDir, "vsock.sock")
 	unitName := vmSystemdUnitName(e.sn)
-	systemdDir := vmProvisionSystemdDir
-	if systemdDir == "" {
-		systemdDir = vmSystemdSystemDir
-	}
+	systemdDir := vmProvisionSystemdDirectory()
 
 	fastBoot := vmImageSupportsFastBoot(image.Manifest)
 	bootArgs := vmLegacyKernelBootArgs
@@ -1471,6 +1491,31 @@ func (e *ttyExecer) newVMProvisionPlan(flags cli.RunFlags, payload string, resol
 	}, nil
 }
 
+func newVMProvisionDiskPlan(service string, resolvedRoot resolvedServiceRoot, shape vmShape, image vmImageAsset) vmDiskPlan {
+	plan := vmDiskPlan{
+		Service:    service,
+		Backend:    shape.DiskBackend,
+		Path:       filepath.Join(serviceDataDirForRoot(resolvedRoot.Root), "rootfs.raw"),
+		Bytes:      shape.DiskBytes,
+		BaseRootFS: image.DiskRootFSPath(),
+		BaseBytes:  image.Manifest.RootFSSize,
+	}
+	if shape.DiskBackend != vmDiskBackendZVOL {
+		return plan
+	}
+	plan.Path = vmZVOLRootDataset(resolvedRoot, service)
+	plan.BaseDataset = vmZVOLBaseDataset(resolvedRoot, image.Manifest.Version)
+	plan.ImageVersion = image.Manifest.Version
+	return plan
+}
+
+func vmProvisionSystemdDirectory() string {
+	if vmProvisionSystemdDir != "" {
+		return vmProvisionSystemdDir
+	}
+	return vmSystemdSystemDir
+}
+
 func prepareVMProvisionRuntime(image vmImageAsset, identity vmRuntimeIdentity, network vmNetworkPlan) (vmNetworkPlan, string, error) {
 	if identity.UID <= 0 || identity.GID <= 0 {
 		return vmNetworkPlan{}, "", fmt.Errorf("VM runtime identity must be non-root")
@@ -1483,27 +1528,11 @@ func prepareVMProvisionRuntime(image vmImageAsset, identity vmRuntimeIdentity, n
 }
 
 func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvisionPlan, ui *vmProvisionUI) (networkTouched bool, err error) {
-	ui.StartStep(vmRunStepDisk)
-	doneDisk := e.traceBlock("vm disk provision")
-	if plan.Disk.Backend == vmDiskBackendZVOL {
-		if err := runVMProvisionDiskPlanWithProgress(ctx, plan.Disk, vmProvisionDiskRunner, ui.UpdateDetail); err != nil {
-			doneDisk()
-			ui.FailStep(err.Error())
-			return networkTouched, err
-		}
-	} else {
-		if err := runVMProvisionDiskPlan(ctx, plan.Disk, vmProvisionDiskRunner); err != nil {
-			doneDisk()
-			ui.FailStep(err.Error())
-			return networkTouched, err
-		}
+	if err := e.applyVMProvisionDisk(ctx, plan, ui); err != nil {
+		return networkTouched, err
 	}
-	doneDisk()
-	ui.DoneStep(formatVMProvisionBytes(plan.Shape.DiskBytes))
-	if plan.Components != nil && plan.Artifacts.Legacy == nil && vmProvisionPathWithin(plan.ServiceRoot.Root, plan.Disk.BaseRootFS) {
-		if err := os.Remove(plan.Disk.BaseRootFS); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return networkTouched, fmt.Errorf("remove VM component rootfs staging file: %w", err)
-		}
+	if err := removeVMProvisionComponentRootFSStaging(plan); err != nil {
+		return networkTouched, err
 	}
 	ui.StartStep(vmRunStepMetadata)
 	doneWriteMetadata := e.traceBlock("vm write metadata")
@@ -1558,6 +1587,34 @@ func (e *ttyExecer) applyVMProvisionArtifacts(ctx context.Context, plan vmProvis
 	doneUnit()
 	ui.DoneStep("")
 	return networkTouched, nil
+}
+
+func (e *ttyExecer) applyVMProvisionDisk(ctx context.Context, plan vmProvisionPlan, ui *vmProvisionUI) error {
+	ui.StartStep(vmRunStepDisk)
+	doneDisk := e.traceBlock("vm disk provision")
+	var err error
+	if plan.Disk.Backend == vmDiskBackendZVOL {
+		err = runVMProvisionDiskPlanWithProgress(ctx, plan.Disk, vmProvisionDiskRunner, ui.UpdateDetail)
+	} else {
+		err = runVMProvisionDiskPlan(ctx, plan.Disk, vmProvisionDiskRunner)
+	}
+	doneDisk()
+	if err != nil {
+		ui.FailStep(err.Error())
+		return err
+	}
+	ui.DoneStep(formatVMProvisionBytes(plan.Shape.DiskBytes))
+	return nil
+}
+
+func removeVMProvisionComponentRootFSStaging(plan vmProvisionPlan) error {
+	if plan.Components == nil || plan.Artifacts.Legacy != nil || !vmProvisionPathWithin(plan.ServiceRoot.Root, plan.Disk.BaseRootFS) {
+		return nil
+	}
+	if err := os.Remove(plan.Disk.BaseRootFS); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove VM component rootfs staging file: %w", err)
+	}
+	return nil
 }
 
 func (e *ttyExecer) applyVMProvisionNetwork(ctx context.Context, plan vmNetworkPlan) error {
@@ -1629,52 +1686,28 @@ func publishVMProvisionKernelArtifacts(artifacts vmProvisionArtifacts) error {
 }
 
 func publishVMProvisionVerifiedFile(source, target, want, label string) (retErr error) {
-	if !vmRuntimeSHA256Pattern.MatchString(want) {
-		return fmt.Errorf("VM provision %s has invalid expected SHA-256", label)
+	parent, targetCurrent, err := prepareVMProvisionVerifiedTarget(target, want, label)
+	if err != nil {
+		return err
 	}
-	parent := filepath.Dir(target)
-	if err := os.MkdirAll(parent, 0o755); err != nil {
-		return fmt.Errorf("create VM provision %s directory: %w", label, err)
-	}
-	if _, err := os.Lstat(target); err == nil {
-		if digest, hashErr := sha256File(target); hashErr == nil && digest == want {
-			return nil
-		}
-		return fmt.Errorf("VM provision %s target already exists with different contents", label)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect VM provision %s target: %w", label, err)
+	if targetCurrent {
+		return nil
 	}
 	src, err := os.Open(source)
 	if err != nil {
 		return fmt.Errorf("open VM provision %s source: %w", label, err)
 	}
 	defer func() { retErr = errors.Join(retErr, src.Close()) }()
-	tmp, err := os.CreateTemp(parent, "."+filepath.Base(target)+".tmp-")
+	tmpPath, err := stageVMProvisionVerifiedFile(src, parent, target, label)
 	if err != nil {
-		return fmt.Errorf("create VM provision %s staging file: %w", label, err)
+		return err
 	}
-	tmpPath := tmp.Name()
 	published := false
 	defer func() {
 		if !published {
 			_ = os.Remove(tmpPath)
 		}
 	}()
-	if _, err := io.Copy(tmp, src); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("copy VM provision %s: %w", label, err)
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("set VM provision %s permissions: %w", label, err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return fmt.Errorf("sync VM provision %s: %w", label, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close VM provision %s: %w", label, err)
-	}
 	got, err := sha256File(tmpPath)
 	if err != nil {
 		return fmt.Errorf("hash VM provision %s staging file: %w", label, err)
@@ -1687,6 +1720,55 @@ func publishVMProvisionVerifiedFile(source, target, want, label string) (retErr 
 	}
 	published = true
 	return syncVMRuntimeDirectory(parent)
+}
+
+func prepareVMProvisionVerifiedTarget(target, want, label string) (string, bool, error) {
+	if !vmRuntimeSHA256Pattern.MatchString(want) {
+		return "", false, fmt.Errorf("VM provision %s has invalid expected SHA-256", label)
+	}
+	parent := filepath.Dir(target)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return "", false, fmt.Errorf("create VM provision %s directory: %w", label, err)
+	}
+	if _, err := os.Lstat(target); err == nil {
+		if digest, hashErr := sha256File(target); hashErr == nil && digest == want {
+			return parent, true, nil
+		}
+		return "", false, fmt.Errorf("VM provision %s target already exists with different contents", label)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", false, fmt.Errorf("inspect VM provision %s target: %w", label, err)
+	}
+	return parent, false, nil
+}
+
+func stageVMProvisionVerifiedFile(source io.Reader, parent, target, label string) (stagedPath string, retErr error) {
+	tmp, err := os.CreateTemp(parent, "."+filepath.Base(target)+".tmp-")
+	if err != nil {
+		return "", fmt.Errorf("create VM provision %s staging file: %w", label, err)
+	}
+	staged := false
+	defer func() {
+		if !staged {
+			_ = os.Remove(tmp.Name())
+		}
+	}()
+	if _, err := io.Copy(tmp, source); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("copy VM provision %s: %w", label, err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("set VM provision %s permissions: %w", label, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return "", fmt.Errorf("sync VM provision %s: %w", label, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return "", fmt.Errorf("close VM provision %s: %w", label, err)
+	}
+	staged = true
+	return tmp.Name(), nil
 }
 
 //nolint:cyclop // Generation and ISO allocation checks stay adjacent to the atomic DB mutation.

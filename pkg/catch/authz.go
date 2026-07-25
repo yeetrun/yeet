@@ -120,6 +120,11 @@ func (s *Server) whoIs(ctx context.Context, remoteAddr string) (*apitype.WhoIsRe
 }
 
 func (s *Server) authorizeCaller(ctx context.Context, remoteAddr string, required ...yeetPermission) error {
+	if slices.Contains(required, permissionManage) {
+		if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+			return err
+		}
+	}
 	if s.cfg.AuthorizeFunc != nil {
 		return s.cfg.AuthorizeFunc(ctx, remoteAddr)
 	}

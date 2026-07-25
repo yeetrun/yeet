@@ -164,7 +164,7 @@ func TestISOConcreteReconcileVMLifecycle(t *testing.T) {
 	}
 }
 
-func TestISOTailscaleAndAuxiliaryUnitVerification(t *testing.T) {
+func TestISOAuxiliaryUnitVerification(t *testing.T) {
 	oldSystemctl := runISOSystemctlForRuntime
 	t.Cleanup(func() { runISOSystemctlForRuntime = oldSystemctl })
 
@@ -193,45 +193,6 @@ func TestISOTailscaleAndAuxiliaryUnitVerification(t *testing.T) {
 	}
 	if len(calls) != 3 || !reflect.DeepEqual(calls[0], []string{"stop", "yeet-app-ts.service", "yeet-app-ns.service"}) {
 		t.Fatalf("systemctl calls = %#v", calls)
-	}
-
-	runISOSystemctlForRuntime = func(context.Context, ...string) ([]byte, error) { return []byte("active\n"), nil }
-	if err := verifyISOTailscaleUnit(context.Background(), "yeet-app-ts.service"); err != nil {
-		t.Fatal(err)
-	}
-	runISOSystemctlForRuntime = func(context.Context, ...string) ([]byte, error) { return []byte("inactive\n"), nil }
-	if err := verifyISOTailscaleUnit(context.Background(), "yeet-app-ts.service"); err == nil {
-		t.Fatal("verifyISOTailscaleUnit accepted inactive unit")
-	}
-	wantErr := errors.New("systemctl unavailable")
-	runISOSystemctlForRuntime = func(context.Context, ...string) ([]byte, error) { return []byte("detail"), wantErr }
-	if err := verifyISOTailscaleUnit(context.Background(), "yeet-app-ts.service"); !errors.Is(err, wantErr) {
-		t.Fatalf("verifyISOTailscaleUnit error = %v", err)
-	}
-
-	socketDir, err := os.MkdirTemp("/tmp", "yeet-iso-socket-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
-	socketPath := filepath.Join(socketDir, "ts.sock")
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	if err := verifyISOTailscaleSocket(socketPath); err != nil {
-		t.Fatal(err)
-	}
-	regular := filepath.Join(t.TempDir(), "regular")
-	if err := os.WriteFile(regular, []byte("x"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyISOTailscaleSocket(regular); err == nil {
-		t.Fatal("verifyISOTailscaleSocket accepted regular file")
-	}
-	if err := verifyISOTailscaleSocket(filepath.Join(t.TempDir(), "missing")); err == nil {
-		t.Fatal("verifyISOTailscaleSocket accepted missing path")
 	}
 }
 
@@ -512,7 +473,7 @@ func TestISOConcreteComposeRuntimeInspectionAndStoppedProof(t *testing.T) {
 	}
 }
 
-func TestISOConcreteVerifyTailscaleUsesPersistedSocket(t *testing.T) {
+func TestISOTailscaleConcreteVerificationUsesFinalSidecarCheck(t *testing.T) {
 	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{
 		"app": testISORuntimeAllocation("app", iso.StateReady),
 	})
@@ -540,12 +501,29 @@ func TestISOConcreteVerifyTailscaleUsesPersistedSocket(t *testing.T) {
 	}
 	defer listener.Close()
 	oldSystemctl := runISOSystemctlForRuntime
-	runISOSystemctlForRuntime = func(context.Context, ...string) ([]byte, error) { return []byte("active\n"), nil }
+	rawProbes := 0
+	runISOSystemctlForRuntime = func(context.Context, ...string) ([]byte, error) {
+		rawProbes++
+		return []byte("active\n"), nil
+	}
 	t.Cleanup(func() { runISOSystemctlForRuntime = oldSystemctl })
+	var lifecycleCalls []string
+	oldVerify := verifyTailscaleSystemdSidecar
+	verifyTailscaleSystemdSidecar = func(_ context.Context, got *svc.SystemdService) error {
+		lifecycleCalls = append(lifecycleCalls, "verified:"+got.Name())
+		return nil
+	}
+	t.Cleanup(func() { verifyTailscaleSystemdSidecar = oldVerify })
 
 	steps := &isoConcreteReconcileSteps{server: server}
 	if err := steps.VerifyTailscale(context.Background(), "app"); err != nil {
 		t.Fatal(err)
+	}
+	if !slices.Equal(lifecycleCalls, []string{"verified:app"}) {
+		t.Fatalf("lifecycle calls = %#v, want final sidecar verification", lifecycleCalls)
+	}
+	if rawProbes != 0 {
+		t.Fatalf("raw ISO Tailscale probes = %d, want shared sidecar verifier only", rawProbes)
 	}
 	_, _, err = server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
 		service.TSNet = nil

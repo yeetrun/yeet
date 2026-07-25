@@ -674,7 +674,12 @@ func installSystemdServiceDefinition(si *Installer, s *db.Service) error {
 
 func newSystemdInstallService(si *Installer, s *db.Service) (*svc.SystemdService, error) {
 	serviceRoot := si.s.serviceRootFromView(s.View())
-	service, err := svc.NewSystemdService(si.s.cfg.DB, s.View(), serviceRunDirForRoot(serviceRoot))
+	service, err := svc.NewSystemdService(
+		si.s.cfg.DB,
+		s.View(),
+		serviceRunDirForRoot(serviceRoot),
+		svc.WithTailscaleGuardRunner(si.s.catchRunnerPath()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create service: %v", err)
 	}
@@ -1246,7 +1251,13 @@ func (si *Installer) suspendUI() {
 
 func (si *Installer) newDockerComposeService(s *db.Service) (*svc.DockerComposeService, error) {
 	serviceRoot := si.s.serviceRootFromView(s.View())
-	service, err := svc.NewDockerComposeService(si.s.cfg.DB, s.View(), serviceDataDirForRoot(serviceRoot), serviceRunDirForRoot(serviceRoot))
+	service, err := svc.NewDockerComposeService(
+		si.s.cfg.DB,
+		s.View(),
+		serviceDataDirForRoot(serviceRoot),
+		serviceRunDirForRoot(serviceRoot),
+		svc.WithTailscaleGuardRunner(si.s.catchRunnerPath()),
+	)
 	if err != nil {
 		return nil, err
 	}

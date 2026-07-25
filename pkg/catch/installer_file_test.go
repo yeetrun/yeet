@@ -2245,10 +2245,14 @@ func TestISOTailscaleUsesPersistedRouterNamespaceWithoutChangingOrdinaryModes(t 
 	if installer.tsNet.Interface != "ts0" {
 		t.Fatalf("ISO tailscaled interface = %q, want Task 7 policy identity ts0", installer.tsNet.Interface)
 	}
-	unit := newTailscaleSystemdUnit(tailscaleInstallPlan{
+	unit, err := newTailscaleSystemdUnit(tailscaleInstallPlan{
 		service: "app", runDir: "/srv/app/run", serviceTSDir: "/srv/app/tailscale",
 		runInNetNS: runIn, interfaceName: installer.tsNet.Interface,
+		catchBin: "/srv/catch/run/catch",
 	})
+	if err != nil {
+		t.Fatalf("newTailscaleSystemdUnit: %v", err)
+	}
 	if got := strings.Join(unit.Arguments, " "); !strings.Contains(got, "--tun=ts0") || strings.Contains(got, "--tun=yts-") {
 		t.Fatalf("ISO tailscaled unit args = %q, want persisted ts0 TUN", got)
 	}
@@ -2354,7 +2358,7 @@ func TestISOTailscaleVMCombinationRemainsRejected(t *testing.T) {
 	}
 }
 
-func TestInstallerCloseStagesComposeLANTailscaleUnitBindsNetNSResolver(t *testing.T) {
+func TestInstallerCloseStagesComposeLANTailscaleUnitUsesResolverOverlayGuard(t *testing.T) {
 	oldHostDefaultRouteInterfaceFn := hostDefaultRouteInterfaceFn
 	defer func() {
 		hostDefaultRouteInterfaceFn = oldHostDefaultRouteInterfaceFn
@@ -2410,16 +2414,19 @@ func TestInstallerCloseStagesComposeLANTailscaleUnitBindsNetNSResolver(t *testin
 	}
 	unit := string(raw)
 	for _, want := range []string{
+		"ConditionFileIsExecutable=" + filepath.Join(server.serviceBinDir(service), "tailscaled"),
 		"NetworkNamespacePath=/var/run/netns/yeet-lan-ts-ns",
-		"BindReadOnlyPaths=/etc/netns/yeet-lan-ts-ns/resolv.conf:/etc/resolv.conf",
 		"PrivateMounts=yes",
-		"ExecStart=" + filepath.Join(server.serviceBinDir(service), "tailscaled"),
+		"ExecStart=" + server.catchRunnerPath() + " tailscale-resolver-exec --source /etc/netns/yeet-lan-ts-ns/resolv.conf -- " + filepath.Join(server.serviceBinDir(service), "tailscaled") + " --statedir=. --socket=" + filepath.Join(server.serviceRunDir(service), "tailscaled.sock") + " --config=" + filepath.Join(server.serviceEnvDir(service), "tailscaled.json") + " --tun=" + installer.tsNet.Interface,
 		"--config=" + filepath.Join(server.serviceEnvDir(service), "tailscaled.json"),
 		"EnvironmentFile=" + filepath.Join(server.serviceEnvDir(service), "tailscaled.env"),
 	} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("tailscale unit missing %q:\n%s", want, unit)
 		}
+	}
+	if strings.Contains(unit, "BindReadOnlyPaths=") {
+		t.Fatalf("tailscale unit retained replaceable resolver bind:\n%s", unit)
 	}
 	for _, forbidden := range []string{"User=app", "Group=app"} {
 		if strings.Contains(unit, forbidden) {
@@ -3172,6 +3179,7 @@ func TestStageInstallPlanMismatchAndNetworkApplication(t *testing.T) {
 }
 
 func TestInstallerTailscaleInstallUsesResolvedServiceRoot(t *testing.T) {
+	withTailscaleResolverCatchPath(t, "/srv/catch/run/catch")
 	server := newTestServer(t)
 	const (
 		service = "svc-ts-root"

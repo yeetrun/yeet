@@ -902,6 +902,7 @@ func TestServiceSetRootCopyStagesRenamesUpdatesDBAndLeavesOldRoot(t *testing.T) 
 
 func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {
 	server := newTestServer(t)
+	useTestSystemdSystemDir(t)
 	oldRoot := filepath.Join(t.TempDir(), "old-root")
 	name := seedServiceWithRoot(t, server, oldRoot, "")
 	withServiceSetRootStopped(t)
@@ -917,13 +918,74 @@ func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {
 	if err := os.WriteFile(composePath, []byte(composeContent), 0o644); err != nil {
 		t.Fatalf("write compose: %v", err)
 	}
-	tsUnitPath := filepath.Join(serviceBinDirForRoot(oldRoot), "yeet-svc-root-ts.service")
-	tsUnitContent := "[Service]\nExecStart=" + filepath.Join(serviceRunDirForRoot(oldRoot), "tailscaled") + " --socket=" + filepath.Join(serviceRunDirForRoot(oldRoot), "tailscaled.sock") + "\nWorkingDirectory=" + filepath.Join(oldRoot, "tailscale") + "\nEnvironment=BACKUP=" + oldBackupPath + "\n"
+	tsUnitPath := filepath.Join(
+		serviceBinDirForRoot(oldRoot),
+		"yeet-svc-root-ts-"+tailscaleResolverFixtureArtifactVersion+".service",
+	)
 	if err := os.MkdirAll(filepath.Join(oldRoot, "tailscale"), 0o755); err != nil {
 		t.Fatalf("mkdir tailscale: %v", err)
 	}
+	tailscaleRecord := db.Service{
+		Name:        name,
+		ServiceType: db.ServiceTypeDockerCompose,
+		ServiceRoot: oldRoot,
+		Generation:  7,
+		TSNet: &db.TailscaleNetwork{
+			Interface: "ts0",
+			Version:   tailscaleResolverFixtureDaemonVersion,
+		},
+	}
+	tailscaleTuple := fixtureTuple(tailscaleRecord, tailscaleResolverGenerationHistorical)
+	tsUnitContent := tailscaleResolverFixtureUnit(name, tailscaleTuple, "")
+	tsUnitContent = strings.Replace(
+		tsUnitContent,
+		"\n[Install]",
+		"Environment=BACKUP="+oldBackupPath+"\n\n[Install]",
+		1,
+	)
+	tsUnitContent, changed, err := ensureTailscaleUnitResolverIsolation(
+		tsUnitContent,
+		server.catchRunnerPath(),
+	)
+	if err != nil {
+		t.Fatalf("guard tailscale unit: %v", err)
+	}
+	if !changed {
+		t.Fatal("root-migration fixture unit unexpectedly already guarded")
+	}
 	if err := os.WriteFile(tsUnitPath, []byte(tsUnitContent), 0o644); err != nil {
 		t.Fatalf("write ts unit: %v", err)
+	}
+	tsBinaryArtifact := filepath.Join(
+		server.cfg.RootDir,
+		"tsd",
+		"tailscaled-"+tailscaleResolverFixtureDaemonVersion,
+	)
+	tsEnvArtifact := filepath.Join(
+		oldRoot,
+		"tailscale",
+		"tailscaled-"+tailscaleResolverFixtureArtifactVersion+".env",
+	)
+	tsConfigArtifact := filepath.Join(
+		oldRoot,
+		"tailscale",
+		"tailscaled-"+tailscaleResolverFixtureArtifactVersion+".json",
+	)
+	for path, raw := range map[string]string{
+		tailscaleTuple.daemon:          "tailscaled\n",
+		tailscaleTuple.environmentFile: "TS_LOGS_DIR=/var/log/tailscale\n",
+		tailscaleTuple.configFile:      `{"acceptDNS":false}`,
+		tsBinaryArtifact:               "tailscaled\n",
+		tsEnvArtifact:                  "TS_LOGS_DIR=/var/log/tailscale\n",
+		tsConfigArtifact:               `{"acceptDNS":false}`,
+		server.catchRunnerPath():       "catch\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(raw), 0o640); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
 	}
 	systemdUnitPath := filepath.Join(serviceBinDirForRoot(oldRoot), "svc-root.service")
 	systemdUnitContent := "[Service]\nExecStart=" + filepath.Join(serviceRunDirForRoot(oldRoot), "svc-root") + "\nEnvironmentFile=-" + filepath.Join(serviceRunDirForRoot(oldRoot), "env") + "\n"
@@ -939,6 +1001,7 @@ func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {
 		s.ServiceType = db.ServiceTypeDockerCompose
 		s.Generation = 7
 		s.LatestGeneration = 7
+		s.TSNet = tailscaleRecord.TSNet.Clone()
 		s.Artifacts = db.ArtifactStore{
 			db.ArtifactDockerComposeFile: {
 				Refs: map[db.ArtifactRef]string{
@@ -950,6 +1013,24 @@ func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {
 				Refs: map[db.ArtifactRef]string{
 					db.Gen(7): tsUnitPath,
 					"latest":  tsUnitPath,
+				},
+			},
+			db.ArtifactTSBinary: {
+				Refs: map[db.ArtifactRef]string{
+					db.Gen(7): tsBinaryArtifact,
+					"latest":  tsBinaryArtifact,
+				},
+			},
+			db.ArtifactTSEnv: {
+				Refs: map[db.ArtifactRef]string{
+					db.Gen(7): tsEnvArtifact,
+					"latest":  tsEnvArtifact,
+				},
+			},
+			db.ArtifactTSConfig: {
+				Refs: map[db.ArtifactRef]string{
+					db.Gen(7): tsConfigArtifact,
+					"latest":  tsConfigArtifact,
 				},
 			},
 			db.ArtifactSystemdUnit: {
@@ -991,18 +1072,40 @@ func TestServiceSetRootCopyRewritesRootBoundArtifacts(t *testing.T) {
 		if got := oldService.Artifacts[db.ArtifactTSService].Refs[db.Gen(7)]; filepath.Clean(got) != filepath.Clean(tsUnitPath) {
 			t.Fatalf("old systemd artifact path = %q, want %q", got, tsUnitPath)
 		}
-		if got := updatedService.Artifacts[db.ArtifactTSService].Refs[db.Gen(7)]; filepath.Clean(got) != filepath.Clean(filepath.Join(serviceBinDirForRoot(newRoot), "yeet-svc-root-ts.service")) {
-			t.Fatalf("updated systemd artifact path = %q, want new root", got)
+		want := filepath.Join(serviceBinDirForRoot(newRoot), filepath.Base(tsUnitPath))
+		if got := updatedService.Artifacts[db.ArtifactTSService].Refs[db.Gen(7)]; filepath.Clean(got) != filepath.Clean(want) {
+			t.Fatalf("updated systemd artifact path = %q, want %q", got, want)
+		}
+		updatedUnit := updatedService.Artifacts[db.ArtifactTSService].Refs[db.Gen(7)]
+		raw, err := os.ReadFile(updatedUnit)
+		if err != nil {
+			t.Fatalf("read updated tailscale unit: %v", err)
+		}
+		installed := tailscaleSidecarInstalledUnitPath(name)
+		if err := os.MkdirAll(filepath.Dir(installed), 0o755); err != nil {
+			t.Fatalf("mkdir installed unit dir: %v", err)
+		}
+		if err := os.WriteFile(installed, raw, 0o644); err != nil {
+			t.Fatalf("install updated tailscale unit fixture: %v", err)
 		}
 		return nil
 	})
+	oldResolverUnitActive := tailscaleResolverUnitActive
+	tailscaleResolverUnitActive = func(unit string) (bool, error) {
+		want := "yeet-" + name + "-ts.service"
+		if unit != want {
+			t.Fatalf("inspect resolver unit = %q, want %q", unit, want)
+		}
+		return false, nil
+	}
+	t.Cleanup(func() { tailscaleResolverUnitActive = oldResolverUnitActive })
 
 	if err := server.migrateServiceRoot(name, serviceRootMigrationRequest{Root: newRoot}, serviceRootMigrationCopy); err != nil {
 		t.Fatalf("migrateServiceRoot: %v", err)
 	}
 
 	newComposePath := filepath.Join(serviceBinDirForRoot(newRoot), "docker-compose.7.yml")
-	newTSUnitPath := filepath.Join(serviceBinDirForRoot(newRoot), "yeet-svc-root-ts.service")
+	newTSUnitPath := filepath.Join(serviceBinDirForRoot(newRoot), filepath.Base(tsUnitPath))
 	newSystemdUnitPath := filepath.Join(serviceBinDirForRoot(newRoot), "svc-root.service")
 	assertArtifactRef(t, server, name, db.ArtifactDockerComposeFile, db.Gen(7), newComposePath)
 	assertArtifactRef(t, server, name, db.ArtifactDockerComposeFile, "latest", newComposePath)

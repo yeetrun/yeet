@@ -496,20 +496,11 @@ func prepareVMRootFS(ctx context.Context, source string) (string, error) {
 }
 
 func prepareVMComponentRootFS(ctx context.Context, serviceRoot string, guest vmGuestBaseArtifact) (target string, retErr error) {
-	dataDir := serviceDataDirForRoot(serviceRoot)
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return "", fmt.Errorf("create VM component provisioning directory: %w", err)
-	}
-	tmp, err := os.CreateTemp(dataDir, ".guest-rootfs-*.ext4")
+	target, err := createVMComponentRootFSStagingFile(serviceDataDirForRoot(serviceRoot))
 	if err != nil {
-		return "", fmt.Errorf("create VM component rootfs staging file: %w", err)
+		return "", err
 	}
-	target = tmp.Name()
 	stagingPath := target
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(stagingPath)
-		return "", fmt.Errorf("close VM component rootfs staging file: %w", err)
-	}
 	defer func() {
 		if retErr != nil {
 			_ = os.Remove(stagingPath)
@@ -518,31 +509,65 @@ func prepareVMComponentRootFS(ctx context.Context, serviceRoot string, guest vmG
 	if err := vmRootFSDecompressRunner(ctx, "zstd", "-d", "-f", "--no-progress", "-o", target, guest.RootFSPath); err != nil {
 		return "", fmt.Errorf("decompress VM component rootfs: %w", err)
 	}
-	info, err := os.Lstat(target)
+	if err := verifyAndSyncVMComponentRootFS(target, guest.Manifest.RootFS.UncompressedBytes); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func createVMComponentRootFSStagingFile(dataDir string) (string, error) {
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		return "", fmt.Errorf("create VM component provisioning directory: %w", err)
+	}
+	tmp, err := os.CreateTemp(dataDir, ".guest-rootfs-*.ext4")
 	if err != nil {
-		return "", fmt.Errorf("inspect VM component rootfs: %w", err)
+		return "", fmt.Errorf("create VM component rootfs staging file: %w", err)
+	}
+	path := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close VM component rootfs staging file: %w", err)
+	}
+	return path, nil
+}
+
+func verifyAndSyncVMComponentRootFS(path string, wantSize int64) error {
+	if err := validateVMComponentRootFSStagingFile(path, wantSize); err != nil {
+		return err
+	}
+	return syncVMComponentRootFSStagingFile(path)
+}
+
+func validateVMComponentRootFSStagingFile(path string, wantSize int64) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect VM component rootfs: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return "", fmt.Errorf("VM component rootfs staging path is not a regular file")
+		return fmt.Errorf("VM component rootfs staging path is not a regular file")
 	}
-	if info.Size() != guest.Manifest.RootFS.UncompressedBytes {
-		return "", fmt.Errorf("VM component rootfs size mismatch: got %d, want %d", info.Size(), guest.Manifest.RootFS.UncompressedBytes)
+	if info.Size() != wantSize {
+		return fmt.Errorf("VM component rootfs size mismatch: got %d, want %d", info.Size(), wantSize)
 	}
-	if err := os.Chmod(target, 0o644); err != nil {
-		return "", fmt.Errorf("set VM component rootfs permissions: %w", err)
+	if err := os.Chmod(path, 0o644); err != nil {
+		return fmt.Errorf("set VM component rootfs permissions: %w", err)
 	}
-	file, err := os.Open(target)
+	return nil
+}
+
+func syncVMComponentRootFSStagingFile(path string) error {
+	file, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("open VM component rootfs for sync: %w", err)
+		return fmt.Errorf("open VM component rootfs for sync: %w", err)
 	}
 	if err := file.Sync(); err != nil {
 		_ = file.Close()
-		return "", fmt.Errorf("sync VM component rootfs: %w", err)
+		return fmt.Errorf("sync VM component rootfs: %w", err)
 	}
 	if err := file.Close(); err != nil {
-		return "", fmt.Errorf("close VM component rootfs after sync: %w", err)
+		return fmt.Errorf("close VM component rootfs after sync: %w", err)
 	}
-	return target, nil
+	return nil
 }
 
 func runVMRootFSDecompress(ctx context.Context, name string, args ...string) error {

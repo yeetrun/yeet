@@ -2170,7 +2170,7 @@ func TestHostStorageApplyDerivesDataDirActionBeforeSideEffects(t *testing.T) {
 	}
 }
 
-func TestHostStorageApplyReleasesRuntimeLockBeforeRestarts(t *testing.T) {
+func TestHostStorageApplyHoldsRuntimeLockThroughRestarts(t *testing.T) {
 	root := t.TempDir()
 	oldServicesRoot := filepath.Join(root, "services")
 	newServicesRoot := filepath.Join(root, "services2")
@@ -2178,12 +2178,19 @@ func TestHostStorageApplyReleasesRuntimeLockBeforeRestarts(t *testing.T) {
 		"api": {Name: "api", ServiceType: db.ServiceTypeSystemd},
 	})
 	ops.running["api"] = true
-	ops.startHook = func(string) error {
-		return WithVMRuntimeTransactionLock(context.Background(), &applier.config, func() error { return nil })
+	assertRuntimeHeld := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+		defer cancel()
+		err := WithVMRuntimeTransactionLock(ctx, &applier.config, func() error {
+			return errors.New("nested runtime transaction unexpectedly acquired V")
+		})
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("nested runtime transaction error = %v, want deadline while outer V is held", err)
+		}
+		return nil
 	}
-	ops.restartCatchHook = func() error {
-		return WithVMRuntimeTransactionLock(context.Background(), &applier.config, func() error { return nil })
-	}
+	ops.startHook = func(string) error { return assertRuntimeHeld() }
+	ops.restartCatchHook = assertRuntimeHeld
 	plan := testHostStorageApplyServicesPlan(root, oldServicesRoot, newServicesRoot, catchrpc.HostStorageMigrateAll, "api")
 	if _, err := applier.Apply(context.Background(), plan, true, nil); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -3448,6 +3455,75 @@ func TestHostStorageApplyDefaultServerDataDirChangeCopiesAndRestartsCatch(t *tes
 	}
 	if !reflect.DeepEqual(ops.calls, wantCalls) {
 		t.Fatalf("calls = %#v, want %#v", ops.calls, wantCalls)
+	}
+}
+
+func TestHostStorageTailscaleTransactionHoldsResolverGuardThroughFinishAndRollback(t *testing.T) {
+	for _, failFinish := range []bool{false, true} {
+		name := "finish"
+		if failFinish {
+			name = "rollback"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			oldServicesRoot := filepath.Join(root, "old-services")
+			newServicesRoot := filepath.Join(root, "new-services")
+			oldServiceRoot := filepath.Join(oldServicesRoot, "api")
+			if err := ensureDirsForRoot(oldServiceRoot, ""); err != nil {
+				t.Fatal(err)
+			}
+			service := &db.Service{
+				Name: "api", ServiceType: db.ServiceTypeSystemd, ServiceRoot: oldServiceRoot,
+				TSNet: &db.TailscaleNetwork{Interface: "ts0", Version: "1.80.0"},
+			}
+			applier, ops := newTestHostStorageApplier(t, Config{
+				RootDir: root, ServicesRoot: oldServicesRoot,
+			}, map[string]*db.Service{"api": service})
+			server := &Server{cfg: applier.config}
+			applier.resolverServer = server
+			ops.running["api"] = true
+			startCalls := 0
+			guardChecks := make([]string, 0, 2)
+			finishErr := errors.New("force finish rollback")
+			ops.startHook = func(name string) error {
+				if name != "api" {
+					return nil
+				}
+				startCalls++
+				phase := "finish"
+				if startCalls > 1 {
+					phase = "rollback"
+				}
+				if server.tailscaleResolverRecovery.mu.TryLock() {
+					server.tailscaleResolverRecovery.mu.Unlock()
+					return fmt.Errorf("resolver G was not held during host storage %s", phase)
+				}
+				guardChecks = append(guardChecks, phase)
+				if startCalls == 1 {
+					if failFinish {
+						return finishErr
+					}
+					return nil
+				}
+				return nil
+			}
+			plan := testHostStorageApplyServicesPlan(
+				root, oldServicesRoot, newServicesRoot, catchrpc.HostStorageMigrateAll, "api",
+			)
+			_, err := applier.Apply(context.Background(), plan, true, io.Discard)
+			if failFinish {
+				if !errors.Is(err, finishErr) {
+					t.Fatalf("Apply error = %v, want %v", err, finishErr)
+				}
+				if !reflect.DeepEqual(guardChecks, []string{"finish", "rollback"}) {
+					t.Fatalf("resolver guard checks = %v, want finish and rollback", guardChecks)
+				}
+			} else if err != nil {
+				t.Fatalf("Apply: %v", err)
+			} else if !reflect.DeepEqual(guardChecks, []string{"finish"}) {
+				t.Fatalf("resolver guard checks = %v, want finish", guardChecks)
+			}
+		})
 	}
 }
 

@@ -25,6 +25,13 @@ import (
 	"tailscale.com/ipn"
 )
 
+func withTailscaleResolverCatchPath(t *testing.T, path string) {
+	t.Helper()
+	previous := catchExecutablePath
+	catchExecutablePath = func() (string, error) { return path, nil }
+	t.Cleanup(func() { catchExecutablePath = previous })
+}
+
 func TestNewTailscaleDownloadSelectsTrackAndURL(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -137,57 +144,118 @@ func TestDownloadTailscaleArchiveUsesHTTPClientAndClosesBody(t *testing.T) {
 	assertFileContent(t, filepath.Join(dstDir, "tailscale-1.92.3"), "client")
 }
 
-func TestNewTailscaleSystemdUnitPlansTapAndNetNSModes(t *testing.T) {
-	tap := newTailscaleSystemdUnit(tailscaleInstallPlan{
+func TestNewTailscaleSystemdUnitPlansTapAndGuardedNetNSModes(t *testing.T) {
+	tap, err := newTailscaleSystemdUnit(tailscaleInstallPlan{
 		service:       "demo",
 		runDir:        "/srv/demo/run",
 		serviceTSDir:  "/srv/demo/tailscale",
 		interfaceName: "ts0",
 	})
+	if err != nil {
+		t.Fatalf("newTailscaleSystemdUnit TAP: %v", err)
+	}
 	if got := strings.Join(tap.Arguments, " "); !strings.Contains(got, "--tun=tap:ts0") {
 		t.Fatalf("tap args = %q", got)
 	}
 	if tap.NetNS != "" || tap.Wants != "" || len(tap.ExecStartPre) != 0 {
 		t.Fatalf("tap unit has netns fields: %+v", tap)
 	}
-	if tap.Executable != "/srv/demo/bin/tailscaled" || tap.EnvFile != "/srv/demo/env/tailscaled.env" {
-		t.Fatalf("tap managed paths = executable %q env %q", tap.Executable, tap.EnvFile)
+	if tap.Executable != "/srv/demo/bin/tailscaled" || tap.ConditionExecutable != "" || tap.EnvFile != "/srv/demo/env/tailscaled.env" {
+		t.Fatalf("tap managed paths = executable %q condition %q env %q", tap.Executable, tap.ConditionExecutable, tap.EnvFile)
 	}
-	if got := strings.Join(tap.Arguments, " "); !strings.Contains(got, "--config=/srv/demo/env/tailscaled.json") || !strings.Contains(got, "--socket=/srv/demo/run/tailscaled.sock") {
+	if got := strings.Join(tap.Arguments, " "); strings.Contains(got, "tailscale-resolver-exec") || !strings.Contains(got, "--config=/srv/demo/env/tailscaled.json") || !strings.Contains(got, "--socket=/srv/demo/run/tailscaled.sock") {
 		t.Fatalf("tap args use wrong stable/runtime paths: %q", got)
 	}
 
-	netns := newTailscaleSystemdUnit(tailscaleInstallPlan{
+	netns, err := newTailscaleSystemdUnit(tailscaleInstallPlan{
 		service:       "demo",
 		runDir:        "/srv/demo/run",
 		serviceTSDir:  "/srv/demo/tailscale",
 		runInNetNS:    "yeet-demo-net",
 		interfaceName: "ts0",
-		resolvConf:    "/srv/demo/bin/resolv.conf",
+		resolvConf:    "/etc/netns/yeet-demo-net/resolv.conf",
+		catchBin:      "/srv/catch/run/catch",
 	})
-	if got := strings.Join(netns.Arguments, " "); !strings.Contains(got, "--tun=ts0") || strings.Contains(got, "--tun=tap:") {
-		t.Fatalf("netns args = %q", got)
+	if err != nil {
+		t.Fatalf("newTailscaleSystemdUnit netns: %v", err)
+	}
+	if netns.Executable != "/srv/catch/run/catch" || netns.ConditionExecutable != "/srv/demo/bin/tailscaled" {
+		t.Fatalf("netns executable and condition = %q, %q", netns.Executable, netns.ConditionExecutable)
+	}
+	if got, want := strings.Join(netns.Arguments, " "), "tailscale-resolver-exec --source /etc/netns/yeet-demo-net/resolv.conf -- /srv/demo/bin/tailscaled --statedir=. --socket=/srv/demo/run/tailscaled.sock --config=/srv/demo/env/tailscaled.json --tun=ts0"; got != want {
+		t.Fatalf("netns args = %q, want %q", got, want)
 	}
 	if netns.Wants != "yeet-demo-net.service" || netns.After != "yeet-demo-net.service" {
 		t.Fatalf("netns deps = wants %q after %q", netns.Wants, netns.After)
 	}
-	if netns.NetNS != "yeet-demo-net" || netns.ResolvConf != "/srv/demo/bin/resolv.conf" {
-		t.Fatalf("netns fields = netns %q resolv %q", netns.NetNS, netns.ResolvConf)
+	if netns.NetNS != "yeet-demo-net" || netns.ResolvConf != "" || !netns.PrivateMounts {
+		t.Fatalf("netns fields = netns %q resolv %q private mounts %t", netns.NetNS, netns.ResolvConf, netns.PrivateMounts)
 	}
 	if len(netns.ExecStartPre) != 1 || netns.ExecStartPre[0] != "/bin/systemctl is-active --quiet yeet-demo-net.service" {
 		t.Fatalf("ExecStartPre = %#v", netns.ExecStartPre)
 	}
+	if netns.EnvFile != "/srv/demo/env/tailscaled.env" || netns.WorkingDirectory != "/srv/demo/tailscale" {
+		t.Fatalf("netns environment paths = env %q working directory %q", netns.EnvFile, netns.WorkingDirectory)
+	}
+	paths, err := netns.WriteOutUnitFiles(t.TempDir())
+	if err != nil {
+		t.Fatalf("WriteOutUnitFiles netns: %v", err)
+	}
+	raw, err := os.ReadFile(paths[db.ArtifactSystemdUnit])
+	if err != nil {
+		t.Fatalf("ReadFile netns unit: %v", err)
+	}
+	for _, want := range []string{
+		"PrivateMounts=yes\n",
+		"NetworkNamespacePath=/var/run/netns/yeet-demo-net\n",
+		"ExecStart=/srv/catch/run/catch tailscale-resolver-exec --source /etc/netns/yeet-demo-net/resolv.conf -- /srv/demo/bin/tailscaled --statedir=. --socket=/srv/demo/run/tailscaled.sock --config=/srv/demo/env/tailscaled.json --tun=ts0\n",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("netns unit missing %q:\n%s", want, raw)
+		}
+	}
+	if strings.Contains(string(raw), "BindReadOnlyPaths=") {
+		t.Fatalf("netns Tailscale unit retained replaceable resolver bind:\n%s", raw)
+	}
+}
+
+func TestNewTailscaleSystemdUnitRejectsUnsafeResolverGuardPath(t *testing.T) {
+	plan := tailscaleInstallPlan{
+		service:       "demo",
+		runDir:        "/srv/demo/run",
+		serviceTSDir:  "/srv/demo/tailscale",
+		runInNetNS:    "yeet-demo-net",
+		interfaceName: "ts0",
+		resolvConf:    "/etc/netns/yeet-demo-net/resolv.conf",
+	}
+	for _, catchBin := range []string{
+		"catch",
+		"/srv/catch/run/catch-v1",
+		"/srv/catch/run/catch.install",
+		"/srv/catch/run/../run/catch",
+	} {
+		t.Run(catchBin, func(t *testing.T) {
+			plan.catchBin = catchBin
+			if _, err := newTailscaleSystemdUnit(plan); err == nil {
+				t.Fatalf("newTailscaleSystemdUnit accepted unsafe Catch path %q", catchBin)
+			}
+		})
+	}
 }
 
 func TestNewTailscaleSystemdUnitUsesPersistedISONamespaceAndActualGateUnit(t *testing.T) {
-	unit := newTailscaleSystemdUnit(tailscaleInstallPlan{
+	unit, err := newTailscaleSystemdUnit(tailscaleInstallPlan{
 		service:       "demo",
 		runDir:        "/srv/demo/run",
 		serviceTSDir:  "/srv/demo/tailscale",
 		runInNetNS:    "yeet-a172cedcae-ns",
 		netNSUnit:     "yeet-demo-ns.service",
 		interfaceName: "ts0",
+		catchBin:      "/srv/catch/run/catch",
 	})
+	if err != nil {
+		t.Fatalf("newTailscaleSystemdUnit: %v", err)
+	}
 	if unit.NetNS != "yeet-a172cedcae-ns" {
 		t.Fatalf("NetNS = %q, want persisted ISO namespace", unit.NetNS)
 	}
@@ -198,6 +266,7 @@ func TestNewTailscaleSystemdUnitUsesPersistedISONamespaceAndActualGateUnit(t *te
 }
 
 func TestInstallTSWritesArtifactsWithoutNetworkWhenAuthKeyProvided(t *testing.T) {
+	withTailscaleResolverCatchPath(t, "/srv/catch/run/catch")
 	server := newTestServer(t)
 	const (
 		service = "demo"
@@ -266,12 +335,174 @@ func TestInstallTSWritesArtifactsWithoutNetworkWhenAuthKeyProvided(t *testing.T)
 	for _, want := range []string{
 		"--tun=ts0",
 		"NetworkNamespacePath=/var/run/netns/yeet-demo-net",
-		"BindReadOnlyPaths=/srv/demo/resolv.conf:/etc/resolv.conf",
+		"PrivateMounts=yes",
 		"ExecStartPre=/bin/systemctl is-active --quiet yeet-demo-net.service",
 	} {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("unit missing %q:\n%s", want, unit)
 		}
+	}
+	if strings.Contains(unit, "BindReadOnlyPaths=") {
+		t.Fatalf("unit retained replaceable resolver bind:\n%s", unit)
+	}
+}
+
+func TestInstallTSUsesStableConfiguredCatchRunnerWhenExecutableIsVersioned(t *testing.T) {
+	server := newTestServer(t)
+	customCatchRoot := filepath.Join(t.TempDir(), "custom-catch")
+	addTestServices(t, server, db.Service{
+		Name:        CatchService,
+		ServiceType: db.ServiceTypeSystemd,
+		ServiceRoot: customCatchRoot,
+	})
+
+	oldCatchExecutablePath := catchExecutablePath
+	var executablePathCalls int
+	versionedCatch := filepath.Join(customCatchRoot, "bin", "catch-20260725035920")
+	catchExecutablePath = func() (string, error) {
+		executablePathCalls++
+		return versionedCatch, nil
+	}
+	t.Cleanup(func() { catchExecutablePath = oldCatchExecutablePath })
+
+	const (
+		service = "demo-stable-runner"
+		version = "1.92.3"
+	)
+	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
+	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
+		t.Fatalf("mkdir tsd dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscaled-"+version), []byte("daemon"), 0o755); err != nil {
+		t.Fatalf("write tailscaled: %v", err)
+	}
+	if err := server.ensureDirs(service, ""); err != nil {
+		t.Fatalf("ensure service dirs: %v", err)
+	}
+
+	artifacts, err := server.installTS(service, "yeet-demo-stable-runner-ns", &db.TailscaleNetwork{
+		Interface: "ts0",
+		Version:   version,
+	}, "tskey-auth-test", "/etc/netns/yeet-demo-stable-runner-ns/resolv.conf")
+	if err != nil {
+		t.Fatalf("installTS: %v", err)
+	}
+	unitRaw, err := os.ReadFile(artifacts[db.ArtifactTSService])
+	if err != nil {
+		t.Fatalf("read Tailscale unit: %v", err)
+	}
+	stableCatch := filepath.Join(customCatchRoot, "run", "catch")
+	if want := "ExecStart=" + stableCatch + " tailscale-resolver-exec "; !strings.Contains(string(unitRaw), want) {
+		t.Fatalf("Tailscale unit missing stable configured Catch runner %q:\n%s", want, unitRaw)
+	}
+	if strings.Contains(string(unitRaw), versionedCatch) {
+		t.Fatalf("Tailscale unit uses versioned Catch executable %q:\n%s", versionedCatch, unitRaw)
+	}
+	if executablePathCalls != 0 {
+		t.Fatalf("Catch executable resolver called %d times, want 0", executablePathCalls)
+	}
+}
+
+func TestInstallTSRejectsUnsafeResolverGuardBeforeTailscaleDownloadOrArtifactWrites(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name:        CatchService,
+		ServiceType: db.ServiceTypeSystemd,
+		ServiceRoot: "relative-catch-root",
+	})
+	const (
+		service = "demo"
+		version = "1.92.3"
+	)
+	if err := server.ensureDirs(service, ""); err != nil {
+		t.Fatalf("ensureDirs: %v", err)
+	}
+	oldHTTPClient := tailscaleHTTPClient
+	var downloadAttempts int
+	tailscaleHTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		downloadAttempts++
+		return nil, errors.New("tailscale download attempted")
+	})}
+	t.Cleanup(func() { tailscaleHTTPClient = oldHTTPClient })
+	oldGenerateAuthKey := generateTailscaleAuthKeyFn
+	var authKeyRequests int
+	generateTailscaleAuthKeyFn = func(context.Context, []string) (string, error) {
+		authKeyRequests++
+		return "tskey-auth-test", nil
+	}
+	t.Cleanup(func() { generateTailscaleAuthKeyFn = oldGenerateAuthKey })
+
+	artifacts, err := server.installTS(service, "yeet-demo-net", &db.TailscaleNetwork{
+		Interface: "ts0",
+		Version:   version,
+	}, "", "/etc/netns/yeet-demo-net/resolv.conf")
+	if err == nil || !strings.Contains(err.Error(), "resolver guard") {
+		t.Fatalf("installTS error = %v, want unsafe resolver guard path", err)
+	}
+	if artifacts != nil {
+		t.Fatalf("installTS artifacts = %#v, want nil after guard validation failure", artifacts)
+	}
+	if authKeyRequests != 0 {
+		t.Fatalf("Tailscale auth key requests = %d, want 0 after guard validation failure", authKeyRequests)
+	}
+	if downloadAttempts != 0 {
+		t.Fatalf("Tailscale download attempts = %d, want 0 after guard validation failure", downloadAttempts)
+	}
+	if _, err := os.Stat(filepath.Join(server.cfg.RootDir, "tsd")); !os.IsNotExist(err) {
+		t.Fatalf("Tailscale cache artifacts were written before guard validation: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(server.defaultServiceRootDir(service), "tailscale")); !os.IsNotExist(err) {
+		t.Fatalf("tailscale artifacts were written before guard validation: %v", err)
+	}
+}
+
+func TestInstallTSTAPKeepsDirectTailscaledExecution(t *testing.T) {
+	oldCatchExecutablePath := catchExecutablePath
+	catchExecutablePath = func() (string, error) {
+		t.Fatal("TAP install resolved Catch executable")
+		return "", errors.New("unreachable")
+	}
+	t.Cleanup(func() { catchExecutablePath = oldCatchExecutablePath })
+
+	server := newTestServer(t)
+	const (
+		service = "tap-demo"
+		version = "1.92.3"
+	)
+	if err := server.ensureDirs(service, ""); err != nil {
+		t.Fatalf("ensureDirs: %v", err)
+	}
+	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
+	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
+		t.Fatalf("mkdir tsd dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscaled-"+version), []byte("daemon"), 0o755); err != nil {
+		t.Fatalf("write tailscaled: %v", err)
+	}
+
+	artifacts, err := server.installTS(service, "", &db.TailscaleNetwork{
+		Interface: "ts0",
+		Version:   version,
+	}, "tskey-auth-test", "")
+	if err != nil {
+		t.Fatalf("installTS TAP: %v", err)
+	}
+	raw, err := os.ReadFile(artifacts[db.ArtifactTSService])
+	if err != nil {
+		t.Fatalf("read TAP Tailscale unit: %v", err)
+	}
+	unit := string(raw)
+	daemon := filepath.Join(server.serviceBinDir(service), "tailscaled")
+	for _, want := range []string{
+		"ConditionFileIsExecutable=" + daemon + "\n",
+		"ExecStart=" + daemon + " --statedir=. --socket=" + filepath.Join(server.serviceRunDir(service), "tailscaled.sock") + " --config=" + filepath.Join(server.serviceEnvDir(service), "tailscaled.json") + " --tun=tap:ts0\n",
+	} {
+		if !strings.Contains(unit, want) {
+			t.Fatalf("TAP Tailscale unit missing %q:\n%s", want, unit)
+		}
+	}
+	if strings.Contains(unit, "tailscale-resolver-exec") {
+		t.Fatalf("TAP Tailscale unit contains resolver guard:\n%s", unit)
 	}
 }
 

@@ -7,7 +7,6 @@ package svc
 import (
 	"context"
 	"errors"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/yeetrun/yeet/pkg/db"
-	"tailscale.com/ipn/ipnstate"
 )
 
 func TestTailscaleMonitorLoopReturnsAfterStableIDStored(t *testing.T) {
@@ -178,6 +176,60 @@ func TestSystemdUnitRendersExplicitDependencies(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("unit missing %q:\n%s", want, got)
 		}
+	}
+}
+
+func TestSystemdUnitConditionExecutable(t *testing.T) {
+	tests := []struct {
+		name                string
+		conditionExecutable string
+		wantCondition       string
+	}{
+		{
+			name:                "uses condition executable without changing ExecStart",
+			conditionExecutable: "/srv/app/bin/tailscaled",
+			wantCondition:       "ConditionFileIsExecutable=/srv/app/bin/tailscaled\n",
+		},
+		{
+			name:          "defaults condition executable to ExecStart executable",
+			wantCondition: "ConditionFileIsExecutable=/srv/catch/run/catch\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			unit := SystemdUnit{
+				Name:                "yeet-app-ts",
+				Executable:          "/srv/catch/run/catch",
+				ConditionExecutable: tt.conditionExecutable,
+				Arguments: []string{
+					"tailscale-resolver-exec",
+					"--source",
+					"/etc/netns/yeet-app-ns/resolv.conf",
+					"--",
+					"/srv/app/bin/tailscaled",
+					"--tun=ts0",
+				},
+			}
+
+			paths, err := unit.WriteOutUnitFiles(t.TempDir())
+			if err != nil {
+				t.Fatalf("WriteOutUnitFiles: %v", err)
+			}
+			raw, err := os.ReadFile(paths[db.ArtifactSystemdUnit])
+			if err != nil {
+				t.Fatalf("ReadFile: %v", err)
+			}
+			got := string(raw)
+			for _, want := range []string{
+				tt.wantCondition,
+				"ExecStart=/srv/catch/run/catch tailscale-resolver-exec --source /etc/netns/yeet-app-ns/resolv.conf -- /srv/app/bin/tailscaled --tun=ts0\n",
+			} {
+				if !strings.Contains(got, want) {
+					t.Fatalf("unit missing %q:\n%s", want, got)
+				}
+			}
+		})
 	}
 }
 
@@ -572,6 +624,178 @@ func TestSystemdServiceInstallCopiesArtifactsRemovesStaleOptionalAndEnablesTimer
 	}
 }
 
+func TestSystemdServiceInstallWithActivationCheckStagesBeforeSystemctl(t *testing.T) {
+	tmp := t.TempDir()
+	systemdDir := filepath.Join(tmp, "systemd")
+	runDir := filepath.Join(tmp, "run")
+	for _, dir := range []string{systemdDir, runDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("failed to create %s: %v", dir, err)
+		}
+	}
+	systemctlLog := installFakeSystemctl(t, tmp)
+	serviceSrc := writeTempFile(t, tmp, "demo.service", "service unit\n")
+	cfg := db.Service{
+		Name:       "demo",
+		Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit: artifactAt(1, serviceSrc),
+		},
+	}
+	service := &SystemdService{cfg: cfg.View(), runDir: runDir, systemdDir: systemdDir}
+	checkErr := errors.New("resolver proof changed")
+
+	err := service.InstallWithActivationCheck(func() error {
+		assertFileContent(t, filepath.Join(systemdDir, "demo.service"), "service unit\n")
+		if raw, readErr := os.ReadFile(systemctlLog); readErr == nil {
+			t.Fatalf("systemctl calls before activation check completed = %q", raw)
+		} else if !os.IsNotExist(readErr) {
+			t.Fatalf("read systemctl log before activation check: %v", readErr)
+		}
+		return checkErr
+	})
+	if !errors.Is(err, checkErr) {
+		t.Fatalf("InstallWithActivationCheck error = %v, want %v", err, checkErr)
+	}
+	if raw, readErr := os.ReadFile(systemctlLog); readErr == nil {
+		t.Fatalf("systemctl calls after rejected activation check = %q, want none", raw)
+	} else if !os.IsNotExist(readErr) {
+		t.Fatalf("read systemctl log after rejected activation check: %v", readErr)
+	}
+}
+
+func TestSystemdServiceInstallWithActivationCheckRestoresEveryDestinationOnRejection(t *testing.T) {
+	tmp := t.TempDir()
+	systemdDir := filepath.Join(tmp, "systemd")
+	runDir := filepath.Join(tmp, "service", "run")
+	for _, dir := range []string{systemdDir, runDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	systemctlLog := installFakeSystemctl(t, tmp)
+	cfg := db.Service{Name: "catch", Generation: 1, Artifacts: db.ArtifactStore{}}
+	service := &SystemdService{cfg: cfg.View(), runDir: runDir, systemdDir: systemdDir}
+	plan := service.installPlan()
+
+	type priorState struct {
+		present bool
+		content string
+		mode    os.FileMode
+	}
+	prior := make(map[string]priorState, len(plan))
+	for index, step := range plan {
+		if err := os.MkdirAll(filepath.Dir(step.dstPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		switch index % 3 {
+		case 0: // Existing destination replaced by a generated artifact.
+			content := "prior-" + string(step.artifact)
+			mode := os.FileMode(0o600 + index%8)
+			if err := os.WriteFile(step.dstPath, []byte(content), mode); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(step.dstPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source := writeTempFile(t, tmp, "source-"+string(step.artifact), "replacement\n")
+			cfg.Artifacts[step.artifact] = artifactAt(1, source)
+			prior[step.dstPath] = priorState{present: true, content: content, mode: info.Mode().Perm()}
+		case 1: // Existing optional destination removed because its artifact is absent.
+			content := "optional-" + string(step.artifact)
+			mode := os.FileMode(0o640 + index%8)
+			if err := os.WriteFile(step.dstPath, []byte(content), mode); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(step.dstPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prior[step.dstPath] = priorState{present: true, content: content, mode: info.Mode().Perm()}
+		case 2: // Newly introduced destination.
+			source := writeTempFile(t, tmp, "source-"+string(step.artifact), "introduced\n")
+			cfg.Artifacts[step.artifact] = artifactAt(1, source)
+			prior[step.dstPath] = priorState{}
+		}
+	}
+	service.cfg = cfg.View()
+	checkErr := errors.New("resolver proof changed")
+
+	err := service.InstallWithActivationCheck(func() error { return checkErr })
+	if !errors.Is(err, checkErr) {
+		t.Fatalf("InstallWithActivationCheck error = %v, want %v", err, checkErr)
+	}
+	for path, want := range prior {
+		info, statErr := os.Stat(path)
+		if !want.present {
+			if !errors.Is(statErr, os.ErrNotExist) {
+				t.Errorf("introduced destination %s survived rejection: %v", path, statErr)
+			}
+			continue
+		}
+		if statErr != nil {
+			t.Errorf("restored destination %s: %v", path, statErr)
+			continue
+		}
+		raw, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Errorf("read restored destination %s: %v", path, readErr)
+			continue
+		}
+		if string(raw) != want.content || info.Mode().Perm() != want.mode.Perm() {
+			t.Errorf("restored destination %s = (%q, %04o), want (%q, %04o)",
+				path, raw, info.Mode().Perm(), want.content, want.mode.Perm())
+		}
+	}
+	if raw, readErr := os.ReadFile(systemctlLog); readErr == nil {
+		t.Fatalf("systemctl calls after rejected activation check = %q, want none", raw)
+	} else if !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatal(readErr)
+	}
+}
+
+func TestSystemdServiceInstallWithActivationCheckJoinsRestoreFailure(t *testing.T) {
+	tmp := t.TempDir()
+	systemdDir := filepath.Join(tmp, "systemd")
+	runDir := filepath.Join(tmp, "service", "run")
+	for _, dir := range []string{systemdDir, runDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = installFakeSystemctl(t, tmp)
+	source := writeTempFile(t, tmp, "demo.service", "replacement\n")
+	cfg := db.Service{Name: "demo", Generation: 1, Artifacts: db.ArtifactStore{
+		db.ArtifactSystemdUnit: artifactAt(1, source),
+	}}
+	service := &SystemdService{cfg: cfg.View(), runDir: runDir, systemdDir: systemdDir}
+	destination := service.servicePath()
+	if err := os.WriteFile(destination, []byte("prior\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	checkErr := errors.New("resolver proof changed")
+
+	err := service.InstallWithActivationCheck(func() error {
+		if removeErr := os.Remove(destination); removeErr != nil {
+			return removeErr
+		}
+		if removeErr := os.Remove(systemdDir); removeErr != nil {
+			return removeErr
+		}
+		if writeErr := os.WriteFile(systemdDir, []byte("blocks restore"), 0o600); writeErr != nil {
+			return writeErr
+		}
+		return checkErr
+	})
+	if !errors.Is(err, checkErr) {
+		t.Fatalf("InstallWithActivationCheck error = %v, want joined %v", err, checkErr)
+	}
+	if err == checkErr || !strings.Contains(err.Error(), "restore") {
+		t.Fatalf("InstallWithActivationCheck error = %v, want surfaced restore failure", err)
+	}
+}
+
 func TestSystemdServiceStageInstallForReloadCopiesArtifactsWithoutSystemctl(t *testing.T) {
 	tmp := t.TempDir()
 	systemdDir := filepath.Join(tmp, "systemd")
@@ -782,125 +1006,72 @@ func TestSystemdServiceEnableUsesPrimaryUnit(t *testing.T) {
 	}
 }
 
-func TestSystemdServiceStartAuxiliaryUnitsWaitsForTailscaleReady(t *testing.T) {
+func TestSystemdServiceStartAuxiliaryUnitsVerifiesTailscaleBeforeMonitoring(t *testing.T) {
 	tmp := t.TempDir()
 	systemctlLog := installFakeSystemctl(t, tmp)
 	cfg := db.Service{
 		Name:       "demo",
 		Generation: 1,
 		Artifacts: db.ArtifactStore{
-			db.ArtifactTSService: artifactAt(1, filepath.Join(tmp, "tailscale.service")),
+			db.ArtifactNetNSService: artifactAt(1, filepath.Join(tmp, "netns.service")),
+			db.ArtifactTSService:    artifactAt(1, filepath.Join(tmp, "tailscale.service")),
 		},
 	}
 	svc := &SystemdService{cfg: cfg.View(), runDir: filepath.Join(tmp, "run"), systemdDir: filepath.Join(tmp, "systemd")}
-
-	oldWait := waitTailscaleReadyFn
-	defer func() { waitTailscaleReadyFn = oldWait }()
-	var calls int
-	waitTailscaleReadyFn = func(ctx context.Context, got *SystemdService) error {
-		calls++
-		if got != svc {
-			t.Fatalf("wait service = %#v, want %#v", got, svc)
-		}
-		if err := ctx.Err(); err != nil {
-			t.Fatalf("wait context already done: %v", err)
-		}
-		return nil
-	}
-
-	if err := svc.StartAuxiliaryUnits(); err != nil {
-		t.Fatalf("StartAuxiliaryUnits returned error: %v", err)
-	}
-	if calls != 1 {
-		t.Fatalf("tailscale readiness wait calls = %d, want 1", calls)
-	}
-	gotLog := readSystemctlLog(t, systemctlLog)
-	if diff := cmp.Diff([]string{"start yeet-demo-ts.service"}, gotLog); diff != "" {
-		t.Fatalf("systemctl log mismatch (-want +got):\n%s", diff)
-	}
-}
-
-func TestSystemdServiceStartAuxiliaryUnitsRepairsMissingTailscaleResolverMount(t *testing.T) {
-	tmp := t.TempDir()
-	systemctlLog := installFakeSystemctl(t, tmp)
-	cfg := db.Service{
-		Name:       "demo",
-		Generation: 1,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactTSService: artifactAt(1, filepath.Join(tmp, "tailscale.service")),
-		},
-	}
-	svc := &SystemdService{cfg: cfg.View(), runDir: filepath.Join(tmp, "run"), systemdDir: filepath.Join(tmp, "systemd")}
-
-	oldWait := waitTailscaleReadyFn
-	defer func() { waitTailscaleReadyFn = oldWait }()
-	var waits int
-	waitTailscaleReadyFn = func(context.Context, *SystemdService) error {
-		waits++
-		return nil
-	}
-
-	oldHealthy := tailscaleResolverMountHealthyFn
-	defer func() { tailscaleResolverMountHealthyFn = oldHealthy }()
-	var checks int
-	tailscaleResolverMountHealthyFn = func(*SystemdService) (bool, error) {
-		checks++
-		return checks > 1, nil
-	}
-
-	if err := svc.StartAuxiliaryUnits(); err != nil {
-		t.Fatalf("StartAuxiliaryUnits returned error: %v", err)
-	}
-	if waits != 2 {
-		t.Fatalf("tailscale readiness waits = %d, want 2", waits)
-	}
-	if checks != 2 {
-		t.Fatalf("resolver mount checks = %d, want 2", checks)
-	}
-	gotLog := readSystemctlLog(t, systemctlLog)
-	wantLog := []string{
-		"start yeet-demo-ts.service",
-		"restart yeet-demo-ts.service",
-	}
-	if diff := cmp.Diff(wantLog, gotLog); diff != "" {
-		t.Fatalf("systemctl log mismatch (-want +got):\n%s", diff)
-	}
-}
-
-func TestSystemdServiceTailscaleResolverMountHealthy(t *testing.T) {
-	tmp := t.TempDir()
-	installFakeSystemctl(t, tmp)
-	systemdDir := filepath.Join(tmp, "systemd")
-	if err := os.MkdirAll(systemdDir, 0755); err != nil {
+	if err := os.MkdirAll(svc.systemdDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := db.Service{Name: "demo"}
-	svc := &SystemdService{cfg: cfg.View(), systemdDir: systemdDir}
-
-	healthy, err := svc.tailscaleResolverMountHealthy()
-	if err != nil {
-		t.Fatalf("missing unit check returned error: %v", err)
+	binaryPath := svc.artifactInstaller()[db.ArtifactTSBinary].dstPath
+	unit := "[Service]\nExecStart=" + binaryPath + " --statedir=. --tun=ts0\n" +
+		"BindReadOnlyPaths=/run/demo/resolv.conf:/etc/resolv.conf\n"
+	if err := os.WriteFile(svc.tailscaledServicePath(), []byte(unit), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !healthy {
-		t.Fatal("missing unit check = unhealthy, want healthy")
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o755); err != nil {
+		t.Fatal(err)
 	}
-
-	writeTempFile(t, systemdDir, "yeet-demo-ts.service", "[Service]\nPrivateMounts=yes\n")
-	healthy, err = svc.tailscaleResolverMountHealthy()
-	if err != nil {
-		t.Fatalf("unit without resolver bind returned error: %v", err)
-	}
-	if !healthy {
-		t.Fatal("unit without resolver bind = unhealthy, want healthy")
+	if err := os.WriteFile(binaryPath, []byte("tailscaled"), 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	writeTempFile(t, systemdDir, "yeet-demo-ts.service", "[Service]\nBindReadOnlyPaths=/run/demo/resolv.conf:/etc/resolv.conf\n")
-	healthy, err = svc.tailscaleResolverMountHealthy()
-	if err != nil {
-		t.Fatalf("stopped unit check returned error: %v", err)
+	oldDeps := tailscaleLifecycleDepsFn
+	var verified int
+	tailscaleLifecycleDepsFn = func() tailscaleLifecycleDeps {
+		return tailscaleLifecycleDeps{
+			mainPID: func(string) (int, error) { return 101, nil },
+			stat:    lifecycleMatchingStat(svc, 101),
+			status:  lifecycleReadyStatus,
+			verifyMount: func(ResolverMountProbe) error {
+				verified++
+				return nil
+			},
+			wait: func(context.Context, time.Duration) error { return nil },
+		}
 	}
-	if healthy {
-		t.Fatal("stopped unit check = healthy, want unhealthy")
+	t.Cleanup(func() { tailscaleLifecycleDepsFn = oldDeps })
+
+	oldMonitor := monitorTailscaleFn
+	monitorStarted := make(chan struct{}, 1)
+	monitorTailscaleFn = func(*SystemdService) error {
+		if verified != 2 {
+			t.Errorf("resolver verification samples = %d, want 2 before monitor starts", verified)
+		}
+		monitorStarted <- struct{}{}
+		return nil
+	}
+	t.Cleanup(func() { monitorTailscaleFn = oldMonitor })
+
+	if err := svc.StartAuxiliaryUnits(); err != nil {
+		t.Fatalf("StartAuxiliaryUnits returned error: %v", err)
+	}
+	select {
+	case <-monitorStarted:
+	case <-time.After(time.Second):
+		t.Fatal("monitor did not start after final Tailscale verification")
+	}
+	gotLog := readSystemctlLog(t, systemctlLog)
+	if diff := cmp.Diff([]string{"start yeet-demo-ns.service", "start yeet-demo-ts.service"}, gotLog); diff != "" {
+		t.Fatalf("systemctl log mismatch (-want +got):\n%s", diff)
 	}
 }
 
@@ -927,67 +1098,6 @@ func TestTailscaleResolverBindSourceFromFile(t *testing.T) {
 	_, err = tailscaleResolverBindSourceFromFile(tmp)
 	if err == nil {
 		t.Fatal("directory unit path returned nil error")
-	}
-}
-
-func TestTailscaleResolverMountMatchesProcess(t *testing.T) {
-	source := writeTempFile(t, t.TempDir(), "resolv.conf", "nameserver 192.0.2.53\n")
-	healthy, err := tailscaleResolverMountMatchesProcess(source, int(^uint(0)>>1))
-	if err != nil {
-		t.Fatalf("missing process resolver returned error: %v", err)
-	}
-	if healthy {
-		t.Fatal("missing process resolver = healthy, want unhealthy")
-	}
-
-	_, err = tailscaleResolverMountMatchesProcess(source+".missing", 1)
-	if err == nil {
-		t.Fatal("missing resolver source returned nil error")
-	}
-}
-
-func TestSystemdServiceWaitTailscaleReadyReturnsAfterIP(t *testing.T) {
-	tmp := t.TempDir()
-	svc := &SystemdService{runDir: filepath.Join(tmp, "run")}
-	wantSock := filepath.Join(tmp, "run", "tailscaled.sock")
-	oldStatus := tailscaleStatusWithoutPeersFn
-	defer func() { tailscaleStatusWithoutPeersFn = oldStatus }()
-	var calls int
-	tailscaleStatusWithoutPeersFn = func(ctx context.Context, sock string) (*ipnstate.Status, error) {
-		calls++
-		if sock != wantSock {
-			t.Fatalf("sock = %q, want %q", sock, wantSock)
-		}
-		if calls == 1 {
-			return nil, errors.New("socket not ready")
-		}
-		return &ipnstate.Status{TailscaleIPs: []netip.Addr{netip.MustParseAddr("100.64.0.1")}}, nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	if err := svc.waitTailscaleReady(ctx); err != nil {
-		t.Fatalf("waitTailscaleReady returned error: %v", err)
-	}
-	if calls != 2 {
-		t.Fatalf("status calls = %d, want 2", calls)
-	}
-}
-
-func TestSystemdServiceWaitTailscaleReadyReturnsLastErrorOnTimeout(t *testing.T) {
-	tmp := t.TempDir()
-	svc := &SystemdService{runDir: filepath.Join(tmp, "run")}
-	oldStatus := tailscaleStatusWithoutPeersFn
-	defer func() { tailscaleStatusWithoutPeersFn = oldStatus }()
-	tailscaleStatusWithoutPeersFn = func(context.Context, string) (*ipnstate.Status, error) {
-		return &ipnstate.Status{}, nil
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	err := svc.waitTailscaleReady(ctx)
-	if err == nil || !strings.Contains(err.Error(), "tailscale has no IPs yet") {
-		t.Fatalf("waitTailscaleReady error = %v, want no IPs", err)
 	}
 }
 

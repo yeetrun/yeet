@@ -281,7 +281,24 @@ func (s *Server) installISOServiceTSAtRoot(serviceRoot, service string, runInNet
 }
 
 func (s *Server) installTSAtRootWithNamespace(serviceRoot, service string, runInNetNS string, tsNet *db.TailscaleNetwork, tsAuthKey, resolvConf, netNSUnit string) (map[db.ArtifactName]string, error) {
-	tsAuthKey, err := s.resolveTailscaleAuthKey(tsNet, tsAuthKey)
+	plan := tailscaleInstallPlan{
+		service:       service,
+		runDir:        serviceRunDirForRoot(serviceRoot),
+		serviceTSDir:  filepath.Join(serviceRoot, "tailscale"),
+		runInNetNS:    runInNetNS,
+		interfaceName: tsNet.Interface,
+		resolvConf:    resolvConf,
+		netNSUnit:     netNSUnit,
+	}
+	var unit svc.SystemdUnit
+	var err error
+	if runInNetNS != "" {
+		unit, err = s.newGuardedTailscaleSystemdUnit(plan)
+		if err != nil {
+			return nil, err
+		}
+	}
+	tsAuthKey, err = s.resolveTailscaleAuthKey(tsNet, tsAuthKey)
 	if err != nil {
 		return nil, err
 	}
@@ -289,6 +306,25 @@ func (s *Server) installTSAtRootWithNamespace(serviceRoot, service string, runIn
 	if err != nil {
 		return nil, err
 	}
+	if runInNetNS == "" {
+		unit, err = newTailscaleSystemdUnit(plan)
+		if err != nil {
+			return nil, fmt.Errorf("build Tailscale systemd unit: %w", err)
+		}
+	}
+	return writeTailscaleInstallArtifacts(serviceRoot, service, tsAuthKey, tsd, tsNet.ExitNode, unit)
+}
+
+func (s *Server) newGuardedTailscaleSystemdUnit(plan tailscaleInstallPlan) (svc.SystemdUnit, error) {
+	plan.catchBin = s.catchRunnerPath()
+	unit, err := newTailscaleSystemdUnit(plan)
+	if err != nil {
+		return svc.SystemdUnit{}, fmt.Errorf("build Tailscale systemd unit: %w", err)
+	}
+	return unit, nil
+}
+
+func writeTailscaleInstallArtifacts(serviceRoot, service, tsAuthKey, tsd, exitNode string, unit svc.SystemdUnit) (map[db.ArtifactName]string, error) {
 	serviceTSDir := filepath.Join(serviceRoot, "tailscale")
 	if err := os.MkdirAll(serviceTSDir, 0o755); err != nil {
 		return nil, err
@@ -297,21 +333,12 @@ func (s *Server) installTSAtRootWithNamespace(serviceRoot, service string, runIn
 	if err != nil {
 		return nil, fmt.Errorf("failed to write env: %v", err)
 	}
-	unit := newTailscaleSystemdUnit(tailscaleInstallPlan{
-		service:       service,
-		runDir:        serviceRunDirForRoot(serviceRoot),
-		serviceTSDir:  serviceTSDir,
-		runInNetNS:    runInNetNS,
-		interfaceName: tsNet.Interface,
-		resolvConf:    resolvConf,
-		netNSUnit:     netNSUnit,
-	})
 	artifacts, err := unit.WriteOutUnitFiles(serviceBinDirForRoot(serviceRoot))
 	if err != nil {
 		return nil, fmt.Errorf("failed to write unit files: %v", err)
 	}
 
-	tsCfgFile, err := writeTailscaleConfig(serviceTSDir, service, tsAuthKey, tsNet.ExitNode)
+	tsCfgFile, err := writeTailscaleConfig(serviceTSDir, service, tsAuthKey, exitNode)
 	if err != nil {
 		return nil, err
 	}
@@ -348,23 +375,52 @@ type tailscaleInstallPlan struct {
 	interfaceName string
 	resolvConf    string
 	netNSUnit     string
+	catchBin      string
 }
 
-func newTailscaleSystemdUnit(plan tailscaleInstallPlan) svc.SystemdUnit {
+func newTailscaleSystemdUnit(plan tailscaleInstallPlan) (svc.SystemdUnit, error) {
 	root := filepath.Dir(plan.runDir)
 	binDir := filepath.Join(root, "bin")
 	envDir := filepath.Join(root, "env")
+	daemon := filepath.Join(binDir, "tailscaled")
+	daemonArgs := tailscaleSystemdArgs(plan.runDir, envDir, plan.interfaceName, plan.runInNetNS == "")
 	unit := svc.SystemdUnit{
 		Name:             "yeet-" + plan.service + "-ts",
-		Executable:       filepath.Join(binDir, "tailscaled"),
-		Arguments:        tailscaleSystemdArgs(plan.runDir, envDir, plan.interfaceName, plan.runInNetNS == ""),
+		Executable:       daemon,
+		Arguments:        daemonArgs,
 		EnvFile:          filepath.Join(envDir, "tailscaled.env"),
 		WorkingDirectory: plan.serviceTSDir,
 	}
 	if plan.runInNetNS != "" {
+		if err := validateTailscaleResolverCatchPath(plan.catchBin); err != nil {
+			return svc.SystemdUnit{}, err
+		}
+		unit.ConditionExecutable = daemon
+		unit.Executable = plan.catchBin
+		unit.Arguments = append([]string{
+			"tailscale-resolver-exec",
+			"--source",
+			plan.resolvConf,
+			"--",
+			daemon,
+		}, daemonArgs...)
 		applyTailscaleNetNS(&unit, plan.runInNetNS, plan.resolvConf, plan.netNSUnit)
 	}
-	return unit
+	return unit, nil
+}
+
+func validateTailscaleResolverCatchPath(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return fmt.Errorf("tailscale resolver guard requires an absolute clean Catch path: %q", path)
+	}
+	base := filepath.Base(path)
+	if strings.Contains(base, ".install") {
+		return fmt.Errorf("tailscale resolver guard rejects transient Catch path: %q", path)
+	}
+	if base != "catch" {
+		return fmt.Errorf("tailscale resolver guard requires Catch basename %q, got %q", "catch", base)
+	}
+	return nil
 }
 
 func tailscaleSystemdArgs(runDir, envDir, interfaceName string, tapMode bool) []string {
@@ -388,7 +444,7 @@ func applyTailscaleNetNS(unit *svc.SystemdUnit, runInNetNS, resolvConf, nsUnit s
 	unit.After = nsUnit
 	unit.ExecStartPre = []string{"/bin/systemctl is-active --quiet " + nsUnit}
 	unit.NetNS = runInNetNS
-	unit.ResolvConf = resolvConf
+	unit.PrivateMounts = true
 }
 
 func writeTailscaleConfig(serviceTSDir, service, tsAuthKey, exitNode string) (string, error) {

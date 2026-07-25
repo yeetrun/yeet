@@ -19,7 +19,9 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/ipn"
+	"tailscale.com/types/opt"
 )
 
 type fakeDockerNetNSReconciler struct {
@@ -156,17 +158,17 @@ func TestReconcileNetNSBackedDockerServices(t *testing.T) {
 }
 
 func TestReconcileNetNSBackedDockerServicesRestartsTailscaleSidecar(t *testing.T) {
-	s := newTestServer(t)
-	addTestServices(t, s, db.Service{
-		Name:             "docker-netns",
-		ServiceType:      db.ServiceTypeDockerCompose,
-		Generation:       1,
-		LatestGeneration: 1,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ns.service"}},
-			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ts.service"}},
-		},
-	})
+	fixture := newGuardedTailscaleResolverFixture(t, "docker-netns", tailscaleResolverGenerationCurrent)
+	s := fixture.server
+	if _, _, err := s.cfg.DB.MutateService("docker-netns", func(_ *db.Data, service *db.Service) error {
+		service.ServiceType = db.ServiceTypeDockerCompose
+		service.Artifacts[db.ArtifactNetNSService] = &db.Artifact{
+			Refs: map[db.ArtifactRef]string{db.Gen(service.Generation): "/tmp/yeet-docker-netns-ns.service"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("add netns artifact: %v", err)
+	}
 
 	var calls []string
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
@@ -180,13 +182,13 @@ func TestReconcileNetNSBackedDockerServicesRestartsTailscaleSidecar(t *testing.T
 		}, nil
 	}
 
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		calls = append(calls, "systemctl:"+strings.Join(args, " "))
+	prevRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(_ context.Context, service *svc.SystemdService) error {
+		calls = append(calls, "verified-restart:"+service.Name())
 		return nil
 	}
 	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
+		restartTailscaleSystemdSidecar = prevRestart
 	})
 
 	if err := s.reconcileNetNSBackedDockerServices(context.Background()); err != nil {
@@ -194,25 +196,154 @@ func TestReconcileNetNSBackedDockerServicesRestartsTailscaleSidecar(t *testing.T
 	}
 	want := []string{
 		"reconcile:docker-netns",
-		"systemctl:restart yeet-docker-netns-ts.service",
+		"verified-restart:docker-netns",
 	}
 	if diff := cmp.Diff(want, calls); diff != "" {
 		t.Fatalf("unexpected reconciliation side effects (-want +got):\n%s", diff)
 	}
 }
 
-func TestReconcileNetNSBackedDockerServicesRepairsStaleTailscaleSidecar(t *testing.T) {
-	s := newTestServer(t)
-	addTestServices(t, s, db.Service{
-		Name:             "docker-netns",
-		ServiceType:      db.ServiceTypeDockerCompose,
-		Generation:       1,
-		LatestGeneration: 1,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ns.service"}},
-			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ts.service"}},
+func TestTailscaleResolverReadinessGatesAllStartupReconciliationRestarts(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*testing.T, tailscaleResolverPlanFixture) error
+	}{
+		{
+			name: "DNS",
+			run: func(t *testing.T, fixture tailscaleResolverPlanFixture) error {
+				tuple := fixtureTuple(fixture.service, tailscaleResolverGenerationCurrent)
+				unsafe := ipn.ConfigVAlpha{
+					Version:  "alpha0",
+					Hostname: ptrString(fixture.service.Name),
+				}
+				writeTailscaleTestConfig(t, tuple.configFile, unsafe)
+				generationConfig := fixture.service.Artifacts[db.ArtifactTSConfig].Refs[db.Gen(fixture.service.Generation)]
+				writeTailscaleTestConfig(t, generationConfig, unsafe)
+				return fixture.server.reconcileTailscaleDNSConfigs(context.Background())
+			},
 		},
+		{
+			name: "mount",
+			run: func(t *testing.T, fixture tailscaleResolverPlanFixture) error {
+				oldActive := catchSystemdUnitActive
+				catchSystemdUnitActive = func(string) bool { return true }
+				t.Cleanup(func() { catchSystemdUnitActive = oldActive })
+				oldVerify := verifyTailscaleSystemdSidecar
+				verifyTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error {
+					return errors.New("resolver mount drift")
+				}
+				t.Cleanup(func() { verifyTailscaleSystemdSidecar = oldVerify })
+				return fixture.server.reconcileTailscaleResolverMounts(context.Background())
+			},
+		},
+		{
+			name: "netns",
+			run: func(t *testing.T, fixture tailscaleResolverPlanFixture) error {
+				netnsUnit := filepath.Join(fixture.service.ServiceRoot, "bin", "yeet-"+fixture.service.Name+"-ns.service")
+				if err := os.WriteFile(netnsUnit, []byte("[Service]\n"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := fixture.server.cfg.DB.MutateService(
+					fixture.service.Name,
+					func(_ *db.Data, service *db.Service) error {
+						service.Artifacts[db.ArtifactNetNSService] = &db.Artifact{
+							Refs: map[db.ArtifactRef]string{db.Gen(service.Generation): netnsUnit},
+						}
+						return nil
+					},
+				); err != nil {
+					t.Fatal(err)
+				}
+				fixture.server.newDockerComposeService = func(db.ServiceView) (dockerNetNSReconciler, error) {
+					return fakeDockerNetNSReconciler{
+						reconcile: func(context.Context) (bool, error) { return true, nil },
+					}, nil
+				}
+				return fixture.server.reconcileNetNSBackedDockerServices(context.Background())
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newTailscaleResolverPlanFixture(
+				t,
+				"reconcile-"+strings.ToLower(test.name),
+				tailscaleResolverGenerationCurrent,
+				"",
+			)
+			restarts := 0
+			oldRestart := restartTailscaleSystemdSidecar
+			restartTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error {
+				restarts++
+				return nil
+			}
+			t.Cleanup(func() { restartTailscaleSystemdSidecar = oldRestart })
+
+			err := test.run(t, fixture)
+			if err == nil || !strings.Contains(err.Error(), "resolver") {
+				t.Fatalf("%s reconciliation error = %v, want resolver readiness rejection", test.name, err)
+			}
+			if restarts != 0 {
+				t.Fatalf("%s reconciliation restart calls = %d, want 0", test.name, restarts)
+			}
+		})
+	}
+}
+
+func TestRestartTailscaleSidecarForServiceUsesKeyedServiceLock(t *testing.T) {
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		"reconcile-lock",
+		tailscaleResolverGenerationCurrent,
+	)
+	entered := make(chan struct{})
+	releaseRestart := make(chan struct{})
+	oldRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error {
+		close(entered)
+		<-releaseRestart
+		return nil
+	}
+	t.Cleanup(func() {
+		restartTailscaleSystemdSidecar = oldRestart
+		select {
+		case <-releaseRestart:
+		default:
+			close(releaseRestart)
+		}
 	})
+	releaseLock := fixture.server.serviceOperationLocks.Lock(fixture.service.Name)
+	done := make(chan error, 1)
+	go func() {
+		done <- fixture.server.restartTailscaleSidecarForService(
+			context.Background(),
+			fixture.service.Name,
+		)
+	}()
+	select {
+	case <-entered:
+		t.Fatal("reconciliation restart bypassed the keyed service lock")
+	case <-time.After(25 * time.Millisecond):
+	}
+	releaseLock()
+	awaitResolverTestSignal(t, entered, "serialized reconciliation restart")
+	close(releaseRestart)
+	if err := awaitResolverTestResult(t, done); err != nil {
+		t.Fatalf("serialized reconciliation restart: %v", err)
+	}
+}
+
+func TestReconcileNetNSBackedDockerServicesRepairsStaleTailscaleSidecar(t *testing.T) {
+	fixture := newGuardedTailscaleResolverFixture(t, "docker-netns", tailscaleResolverGenerationCurrent)
+	s := fixture.server
+	if _, _, err := s.cfg.DB.MutateService("docker-netns", func(_ *db.Data, service *db.Service) error {
+		service.ServiceType = db.ServiceTypeDockerCompose
+		service.Artifacts[db.ArtifactNetNSService] = &db.Artifact{
+			Refs: map[db.ArtifactRef]string{db.Gen(service.Generation): "/tmp/yeet-docker-netns-ns.service"},
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("add netns artifact: %v", err)
+	}
 
 	var calls []string
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
@@ -235,13 +366,13 @@ func TestReconcileNetNSBackedDockerServicesRepairsStaleTailscaleSidecar(t *testi
 		tailscaleSidecarNetNSStale = prevStale
 	})
 
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		calls = append(calls, "systemctl:"+strings.Join(args, " "))
+	prevRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(_ context.Context, service *svc.SystemdService) error {
+		calls = append(calls, "verified-restart:"+service.Name())
 		return nil
 	}
 	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
+		restartTailscaleSystemdSidecar = prevRestart
 	})
 
 	if err := s.reconcileNetNSBackedDockerServices(context.Background()); err != nil {
@@ -250,7 +381,7 @@ func TestReconcileNetNSBackedDockerServicesRepairsStaleTailscaleSidecar(t *testi
 	want := []string{
 		"reconcile:docker-netns",
 		"stale-check:docker-netns",
-		"systemctl:restart yeet-docker-netns-ts.service",
+		"verified-restart:docker-netns",
 	}
 	if diff := cmp.Diff(want, calls); diff != "" {
 		t.Fatalf("unexpected reconciliation side effects (-want +got):\n%s", diff)
@@ -313,10 +444,11 @@ func TestReconcileNetNSBackedDockerServicesSkipsCurrentTailscaleSidecar(t *testi
 }
 
 func TestReconcileTailscaleDNSConfigsDisablesDNSAndRestartsSidecar(t *testing.T) {
-	s := newTestServer(t)
-	root := filepath.Join(t.TempDir(), "services", "api")
-	configPath := filepath.Join(root, "tailscale", "tailscaled-3.json")
-	runtimeConfigPath := filepath.Join(serviceRunDirForRoot(root), "tailscaled.json")
+	fixture := newGuardedTailscaleResolverFixture(t, "api", tailscaleResolverGenerationCurrent)
+	s := fixture.server
+	tuple := fixtureTuple(fixture.service, tailscaleResolverGenerationCurrent)
+	configPath := fixture.service.Artifacts[db.ArtifactTSConfig].Refs[db.Gen(fixture.service.Generation)]
+	runtimeConfigPath := tuple.configFile
 	writeTailscaleTestConfig(t, configPath, ipn.ConfigVAlpha{
 		Version:  "alpha0",
 		AuthKey:  ptrString("tskey-auth-test"),
@@ -329,17 +461,6 @@ func TestReconcileTailscaleDNSConfigsDisablesDNSAndRestartsSidecar(t *testing.T)
 	})
 	addTestServices(t, s,
 		db.Service{
-			Name:             "api",
-			ServiceType:      db.ServiceTypeDockerCompose,
-			ServiceRoot:      root,
-			Generation:       3,
-			LatestGeneration: 3,
-			Artifacts: db.ArtifactStore{
-				db.ArtifactTSConfig:  {Refs: map[db.ArtifactRef]string{db.Gen(3): configPath}},
-				db.ArtifactTSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ts.service"}},
-			},
-		},
-		db.Service{
 			Name:             "plain",
 			ServiceType:      db.ServiceTypeDockerCompose,
 			Generation:       1,
@@ -348,13 +469,13 @@ func TestReconcileTailscaleDNSConfigsDisablesDNSAndRestartsSidecar(t *testing.T)
 	)
 
 	var calls []string
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		calls = append(calls, strings.Join(args, " "))
+	prevRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(_ context.Context, service *svc.SystemdService) error {
+		calls = append(calls, "verified-restart:"+service.Name())
 		return nil
 	}
 	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
+		restartTailscaleSystemdSidecar = prevRestart
 	})
 
 	if err := s.reconcileTailscaleDNSConfigs(context.Background()); err != nil {
@@ -369,8 +490,8 @@ func TestReconcileTailscaleDNSConfigsDisablesDNSAndRestartsSidecar(t *testing.T)
 	if !runtimeCfg.AcceptDNS.EqualBool(false) {
 		t.Fatalf("runtime AcceptDNS = %q, want explicit false", runtimeCfg.AcceptDNS)
 	}
-	if diff := cmp.Diff([]string{"restart yeet-api-ts.service"}, calls); diff != "" {
-		t.Fatalf("unexpected systemctl calls (-want +got):\n%s", diff)
+	if diff := cmp.Diff([]string{"verified-restart:api"}, calls); diff != "" {
+		t.Fatalf("unexpected sidecar lifecycle calls (-want +got):\n%s", diff)
 	}
 }
 
@@ -395,36 +516,29 @@ func TestTailscaleDNSConfigPathsIncludesManagedAndLegacyRuntimeCopies(t *testing
 }
 
 func TestReconcileTailscaleDNSConfigsRepairsUnsafeRuntimeCopy(t *testing.T) {
-	s := newTestServer(t)
-	root := filepath.Join(t.TempDir(), "services", "api")
-	configPath := filepath.Join(root, "tailscale", "tailscaled-3.json")
-	runtimeConfigPath := filepath.Join(serviceRunDirForRoot(root), "tailscaled.json")
-	writeTailscaleTestConfig(t, configPath, tailscaleConfig("api", "tskey-auth-test", ""))
-	writeTailscaleTestConfig(t, runtimeConfigPath, ipn.ConfigVAlpha{
-		Version:  "alpha0",
-		AuthKey:  ptrString("tskey-auth-test"),
-		Hostname: ptrString("api"),
-	})
-	addTestServices(t, s, db.Service{
-		Name:             "api",
-		ServiceType:      db.ServiceTypeDockerCompose,
-		ServiceRoot:      root,
-		Generation:       3,
-		LatestGeneration: 3,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactTSConfig:  {Refs: map[db.ArtifactRef]string{db.Gen(3): configPath}},
-			db.ArtifactTSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ts.service"}},
-		},
-	})
-
+	fixture := newGuardedTailscaleResolverFixture(t, "api", tailscaleResolverGenerationCurrent)
+	s := fixture.server
+	tuple := fixtureTuple(fixture.service, tailscaleResolverGenerationCurrent)
+	configPath := fixture.service.Artifacts[db.ArtifactTSConfig].Refs[db.Gen(fixture.service.Generation)]
+	runtimeConfigPath := tuple.configFile
+	generationConfig := ipn.ConfigVAlpha{
+		Version:   "alpha0",
+		AuthKey:   ptrString("tskey-auth-test"),
+		Hostname:  ptrString("api"),
+		AcceptDNS: "true",
+	}
+	runtimeConfig := generationConfig
+	runtimeConfig.AcceptDNS = ""
+	writeTailscaleTestConfig(t, configPath, generationConfig)
+	writeTailscaleTestConfig(t, runtimeConfigPath, runtimeConfig)
 	var calls []string
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		calls = append(calls, strings.Join(args, " "))
+	prevRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(_ context.Context, service *svc.SystemdService) error {
+		calls = append(calls, "verified-restart:"+service.Name())
 		return nil
 	}
 	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
+		restartTailscaleSystemdSidecar = prevRestart
 	})
 
 	if err := s.reconcileTailscaleDNSConfigs(context.Background()); err != nil {
@@ -439,8 +553,8 @@ func TestReconcileTailscaleDNSConfigsRepairsUnsafeRuntimeCopy(t *testing.T) {
 	if !runtimeCfg.AcceptDNS.EqualBool(false) {
 		t.Fatalf("runtime AcceptDNS = %q, want explicit false", runtimeCfg.AcceptDNS)
 	}
-	if diff := cmp.Diff([]string{"restart yeet-api-ts.service"}, calls); diff != "" {
-		t.Fatalf("unexpected systemctl calls (-want +got):\n%s", diff)
+	if diff := cmp.Diff([]string{"verified-restart:api"}, calls); diff != "" {
+		t.Fatalf("unexpected sidecar lifecycle calls (-want +got):\n%s", diff)
 	}
 }
 
@@ -479,178 +593,428 @@ func TestReconcileTailscaleDNSConfigsSkipsAlreadySafeConfig(t *testing.T) {
 }
 
 func TestReconcileTailscaleResolverIsolationRepairsMissingBind(t *testing.T) {
-	s := newTestServer(t)
-	root := filepath.Join(t.TempDir(), "services", "api")
-	systemdDir := useTestSystemdSystemDir(t)
-	artifactPath := filepath.Join(t.TempDir(), "artifact-yeet-api-ts.service")
-	unitPath := filepath.Join(systemdDir, "yeet-api-ts.service")
-	unitRaw := []byte(`[Unit]
-After=yeet-api-ns.service
+	testTailscaleResolverReconcileMissingBind(t)
+}
 
-[Service]
-ExecStart=/srv/api/run/tailscaled --tun=ts0
-NetworkNamespacePath=/var/run/netns/yeet-api-ns
+func TestReconcileTailscaleResolverIsolationConvergesCanonicalArtifactAndInstalledUnit(t *testing.T) {
+	testTailscaleResolverReconcileConvergesUnits(t)
+}
 
-[Install]
-WantedBy=multi-user.target
-`)
-	if err := os.WriteFile(artifactPath, unitRaw, 0o644); err != nil {
-		t.Fatalf("write artifact unit: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
-		t.Fatalf("mkdir systemd dir: %v", err)
-	}
-	if err := os.WriteFile(unitPath, unitRaw, 0o644); err != nil {
-		t.Fatalf("write unit: %v", err)
-	}
-	addTestServices(t, s, db.Service{
-		Name:             "api",
-		ServiceType:      db.ServiceTypeDockerCompose,
-		ServiceRoot:      root,
-		Generation:       3,
-		LatestGeneration: 3,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(3): artifactPath}},
-			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ns.service"}},
+func TestReconcileTailscaleResolverIsolationUsesStableConfiguredCatchRunnerWhenExecutableIsVersioned(t *testing.T) {
+	testTailscaleResolverReconcileUsesStableRunner(t)
+}
+
+func TestReconcileTailscaleResolverIsolationMigratesHistoricalTailscaledRunner(t *testing.T) {
+	testTailscaleResolverReconcileMigratesHistoricalRunner(t)
+}
+
+func TestReconcileTailscaleResolverIsolationUsesDefaultServiceRoot(t *testing.T) {
+	testTailscaleResolverReconcileUsesDefaultServiceRoot(t)
+}
+
+func TestReconcileTailscaleResolverIsolationRejectsDivergentInstalledArgumentsWithoutWriting(t *testing.T) {
+	testTailscaleResolverReconcileRejectsDivergentArguments(t)
+}
+
+func TestReconcileTailscaleResolverIsolationRejectsMultipleExecStartsBeforeWriting(t *testing.T) {
+	testTailscaleResolverReconcileRejectsMultipleExecStarts(t)
+}
+
+func TestParseTailscaleResolverUnitRejectsInvalidStrictGrammar(t *testing.T) {
+	const (
+		namespace   = "NetworkNamespacePath=/var/run/netns/yeet-api-ns\n"
+		environment = "EnvironmentFile=/srv/api/env/tailscaled.env\n"
+		working     = "WorkingDirectory=/srv/api/tailscale\n"
+		execStart   = "ExecStart=/srv/api/bin/tailscaled\n"
+	)
+	for _, tt := range []struct {
+		name string
+		unit string
+		want string
+	}{
+		{
+			name: "exec start outside service section",
+			unit: "[Unit]\n" + execStart + "[Service]\n" + namespace,
+			want: "ExecStart outside [Service]",
 		},
-	})
-
-	var calls []string
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		calls = append(calls, strings.Join(args, " "))
-		return nil
-	}
-	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
-	})
-
-	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
-		t.Fatalf("reconcileTailscaleResolverIsolation returned error: %v", err)
-	}
-	raw, err := os.ReadFile(unitPath)
-	if err != nil {
-		t.Fatalf("read repaired unit: %v", err)
-	}
-	unit := string(raw)
-	for _, want := range []string{
-		"BindReadOnlyPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf",
-		"PrivateMounts=yes",
+		{
+			name: "duplicate network namespace",
+			unit: "[Service]\n" + execStart + namespace +
+				"NetworkNamespacePath=/var/run/netns/yeet-other-ns\n",
+			want: "multiple NetworkNamespacePath",
+		},
+		{
+			name: "relative network namespace",
+			unit: "[Service]\n" + execStart +
+				"NetworkNamespacePath=var/run/netns/yeet-api-ns\n",
+			want: "invalid NetworkNamespacePath",
+		},
+		{
+			name: "empty exec start",
+			unit: "[Service]\nExecStart=\n" + namespace,
+			want: "ExecStart executable must be an absolute clean path",
+		},
+		{
+			name: "relative guarded resolver source",
+			unit: "[Service]\n" +
+				"ExecStart=/srv/catch/run/catch tailscale-resolver-exec --source etc/netns/yeet-api-ns/resolv.conf -- /srv/api/bin/tailscaled\n" +
+				namespace + environment + working,
+			want: "invalid guarded Tailscale ExecStart",
+		},
+		{
+			name: "empty then valid network namespace",
+			unit: "[Service]\n" + execStart +
+				"NetworkNamespacePath=\n" + namespace + environment + working,
+			want: "multiple NetworkNamespacePath",
+		},
+		{
+			name: "empty then valid environment file",
+			unit: "[Service]\n" + execStart + namespace +
+				"EnvironmentFile=\n" + environment + working,
+			want: "multiple EnvironmentFile",
+		},
+		{
+			name: "empty then valid working directory",
+			unit: "[Service]\n" + execStart + namespace + environment +
+				"WorkingDirectory=\n" + working,
+			want: "multiple WorkingDirectory",
+		},
 	} {
-		if !strings.Contains(unit, want) {
-			t.Fatalf("repaired unit missing %q:\n%s", want, unit)
-		}
-	}
-	wantCalls := []string{"daemon-reload", "restart yeet-api-ts.service"}
-	if diff := cmp.Diff(wantCalls, calls); diff != "" {
-		t.Fatalf("systemctl calls (-want +got):\n%s", diff)
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseTailscaleResolverUnit(tt.unit)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("parseTailscaleResolverUnit error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 
-func TestReconcileTailscaleResolverIsolationSkipsSafeUnit(t *testing.T) {
-	s := newTestServer(t)
-	root := filepath.Join(t.TempDir(), "services", "api")
-	systemdDir := useTestSystemdSystemDir(t)
-	artifactPath := filepath.Join(t.TempDir(), "artifact-yeet-api-ts.service")
-	unitPath := filepath.Join(systemdDir, "yeet-api-ts.service")
-	unitRaw := []byte(`[Unit]
-After=yeet-api-ns.service
+func TestReconcileTailscaleResolverIsolationRejectsUnsafeCanonicalExecStartBeforeWriting(t *testing.T) {
+	testTailscaleResolverReconcileRejectsUnsafeExecStart(t)
+}
 
-[Service]
-ExecStart=/srv/api/run/tailscaled --tun=ts0
-NetworkNamespacePath=/var/run/netns/yeet-api-ns
-BindReadOnlyPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf
-PrivateMounts=yes
+func TestReconcileTailscaleResolverIsolationRejectsUnitStatFailureWithoutSideEffects(t *testing.T) {
+	testTailscaleResolverReconcileRejectsMissingUnit(t)
+}
 
-[Install]
-WantedBy=multi-user.target
-`)
-	if err := os.WriteFile(artifactPath, unitRaw, 0o644); err != nil {
-		t.Fatalf("write artifact unit: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
-		t.Fatalf("mkdir systemd dir: %v", err)
-	}
-	if err := os.WriteFile(unitPath, unitRaw, 0o644); err != nil {
-		t.Fatalf("write unit: %v", err)
-	}
-	addTestServices(t, s, db.Service{
-		Name:             "api",
-		ServiceType:      db.ServiceTypeDockerCompose,
-		ServiceRoot:      root,
-		Generation:       3,
-		LatestGeneration: 3,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(3): artifactPath}},
-			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ns.service"}},
-		},
-	})
+func TestReconcileTailscaleResolverIsolationRejectsDivergentInstalledDaemonBeforeWriting(t *testing.T) {
+	testTailscaleResolverReconcileRejectsDivergentInstalledDaemon(t)
+}
 
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		t.Fatalf("unexpected systemctl call: %v", args)
-		return nil
-	}
-	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
-	})
+func TestReconcileTailscaleResolverIsolationRejectsManagedDaemonLayoutDivergence(t *testing.T) {
+	testTailscaleResolverReconcileRejectsMixedLayout(t)
+}
 
-	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
-		t.Fatalf("reconcileTailscaleResolverIsolation returned error: %v", err)
+func TestTailscaleResolverUnitRejectsUnmanagedDaemonPaths(t *testing.T) {
+	service := db.Service{
+		Name:        "api",
+		ServiceRoot: "/srv/api",
+		TSNet:       &db.TailscaleNetwork{Interface: "ts0"},
 	}
-	raw, err := os.ReadFile(unitPath)
-	if err != nil {
-		t.Fatalf("read unit: %v", err)
+	args := tailscaleSystemdArgs("/srv/api/run", "/srv/api/env", "ts0", false)
+	for _, daemon := range []string{
+		"/srv/api/data/tailscaled",
+		"/srv/api/run/tailscaled-old",
+		"run/tailscaled",
+	} {
+		t.Run(daemon, func(t *testing.T) {
+			unit := tailscaleResolverUnit{
+				networkNamespace: "/var/run/netns/yeet-api-ns",
+				daemon:           daemon,
+				args:             args,
+			}
+			err := unit.validateForService(service)
+			if err == nil || !strings.Contains(err.Error(), "tailscaled path") {
+				t.Fatalf("validateForService(%q) error = %v, want unmanaged daemon rejection", daemon, err)
+			}
+		})
 	}
-	if string(raw) != string(unitRaw) {
-		t.Fatalf("safe unit changed:\n%s", raw)
-	}
+}
+
+func TestReconcileTailscaleResolverIsolationMigratesInactiveFleetWithOneReloadAndNoStarts(t *testing.T) {
+	testTailscaleResolverReconcileMigratesInactiveFleetWithOneReloadAndNoStarts(t)
+}
+
+func TestReconcileTailscaleResolverIsolationRejectsAliasedCanonicalAndInstalledUnitPaths(t *testing.T) {
+	testTailscaleResolverReconcileRejectsAliasedUnitPaths(t)
+}
+
+func TestReconcileTailscaleResolverIsolationRollsBackPartialWriteAndStopsActiveSidecar(t *testing.T) {
+	testTailscaleResolverReconcileRollsBackPartialWrite(t)
+}
+
+func TestReconcileTailscaleResolverIsolationSafeFleetIsNoop(t *testing.T) {
+	testTailscaleResolverReconcileSafeFleetIsNoop(t)
 }
 
 func TestEnsureTailscaleResolverIsolationMigratesWritableBind(t *testing.T) {
-	const writable = `[Service]
+	const writable = `[Unit]
+
+[Service]
+EnvironmentFile=/srv/api/run/tailscaled.env
+WorkingDirectory=/srv/api/tailscale
 ExecStart=/srv/api/run/tailscaled --tun=ts0
 NetworkNamespacePath=/var/run/netns/yeet-api-ns
 BindPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf
 PrivateMounts=yes
 `
 
-	got, changed := ensureTailscaleUnitResolverIsolation(writable)
+	got, changed, err := ensureTailscaleUnitResolverIsolation(writable, "/srv/catch/run/catch")
+	if err != nil {
+		t.Fatalf("ensureTailscaleUnitResolverIsolation: %v", err)
+	}
 	if !changed {
 		t.Fatal("ensureTailscaleUnitResolverIsolation changed = false, want writable bind migration")
 	}
 	if strings.Contains(got, "\nBindPaths=") {
 		t.Fatalf("migrated unit retained writable resolver bind:\n%s", got)
 	}
-	want := "BindReadOnlyPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf"
-	if !strings.Contains(got, want) {
-		t.Fatalf("migrated unit missing %q:\n%s", want, got)
+	if strings.Contains(got, "\nBindReadOnlyPaths=") {
+		t.Fatalf("migrated unit retained replaceable read-only resolver bind:\n%s", got)
+	}
+	if !strings.Contains(got, "\nPrivateMounts=yes\n") {
+		t.Fatalf("migrated unit missing private mount namespace:\n%s", got)
 	}
 }
 
-func TestReconcileTailscaleResolverMountsRestartsUnhealthySidecar(t *testing.T) {
-	s := newTestServer(t)
-	systemdDir := useTestSystemdSystemDir(t)
-	unitPath := filepath.Join(systemdDir, "yeet-api-ts.service")
-	if err := os.MkdirAll(systemdDir, 0o755); err != nil {
-		t.Fatalf("mkdir systemd dir: %v", err)
-	}
-	unit := `[Service]
-ExecStart=/srv/api/run/tailscaled --tun=ts0
+func TestEnsureTailscaleResolverIsolationRequiresExactServiceMountGrammar(t *testing.T) {
+	const guarded = `[Unit]
+ConditionFileIsExecutable=/srv/api/run/tailscaled
+
+[Service]
+EnvironmentFile=/srv/api/run/tailscaled.env
+WorkingDirectory=/srv/api/tailscale
+ExecStart=/srv/catch/run/catch tailscale-resolver-exec --source /etc/netns/yeet-api-ns/resolv.conf -- /srv/api/run/tailscaled --tun=ts0
 NetworkNamespacePath=/var/run/netns/yeet-api-ns
 BindReadOnlyPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf
 PrivateMounts=yes
-`
-	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
-		t.Fatalf("write unit: %v", err)
-	}
-	addTestServices(t, s, db.Service{
-		Name:       "api",
-		Generation: 1,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactTSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): unitPath}},
+
+[Install]
+WantedBy=multi-user.target
+	`
+	const bind = "BindReadOnlyPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf"
+	const condition = "ConditionFileIsExecutable=/srv/api/run/tailscaled"
+
+	tests := []struct {
+		name        string
+		unit        string
+		wantChanged bool
+		wantErr     string
+		preserved   []string
+	}{
+		{
+			name: "mount directives outside service fail closed",
+			unit: strings.ReplaceAll(
+				strings.ReplaceAll(guarded, bind+"\n", ""),
+				"PrivateMounts=yes\n",
+				"",
+			) + "\n[Unit]\n" + bind + "\nPrivateMounts=yes\n",
+			wantErr: "outside [Service]",
 		},
+		{
+			name: "duplicate managed directives normalize",
+			unit: strings.Replace(
+				guarded,
+				bind+"\n",
+				bind+"\n"+bind+"\nPrivateMounts=yes\nTemporaryFileSystem=/var/cache/private\n",
+				1,
+			),
+			wantChanged: true,
+		},
+		{
+			name:    "additional private mounts no fails closed",
+			unit:    strings.Replace(guarded, "PrivateMounts=yes\n", "PrivateMounts=yes\nPrivateMounts=no\n", 1),
+			wantErr: "conflicting PrivateMounts",
+		},
+		{
+			name: "conflicting read only bind fails closed",
+			unit: strings.Replace(
+				guarded,
+				bind+"\n",
+				bind+"\nBindReadOnlyPaths=/unmanaged/resolv.conf:/etc/resolv.conf\n",
+				1,
+			),
+			wantErr: "conflicting BindReadOnlyPaths",
+		},
+		{
+			name: "unrelated writable bind fails closed",
+			unit: strings.Replace(
+				guarded,
+				bind+"\n",
+				bind+"\nBindPaths=/srv/private:/mnt/private\n",
+				1,
+			),
+			wantErr: "conflicting BindPaths",
+		},
+		{
+			name: "desired condition outside unit does not count",
+			unit: strings.Replace(
+				strings.Replace(guarded, condition+"\n", "", 1),
+				"[Service]\n",
+				"[Service]\n"+condition+"\n",
+				1,
+			),
+			wantChanged: true,
+		},
+		{
+			name:        "duplicate managed condition normalizes",
+			unit:        strings.Replace(guarded, condition+"\n", condition+"\n"+condition+"\n", 1),
+			wantChanged: true,
+		},
+		{
+			name: "missing unit section synthesizes managed condition",
+			unit: strings.TrimPrefix(
+				guarded,
+				"[Unit]\n"+condition+"\n\n",
+			),
+			wantChanged: true,
+		},
+		{
+			name: "non unit section before service synthesizes managed condition",
+			unit: "# preserve preface\n[Install]\nAlias=api-ts.service\n\n" + strings.TrimPrefix(
+				guarded,
+				"[Unit]\n"+condition+"\n\n",
+			),
+			wantChanged: true,
+			preserved:   []string{"# preserve preface", "Alias=api-ts.service"},
+		},
+		{
+			name: "conflicting condition fails closed",
+			unit: strings.Replace(
+				guarded,
+				condition+"\n",
+				condition+"\nConditionFileIsExecutable=/unmanaged/daemon\n",
+				1,
+			),
+			wantErr: "conflicting ConditionFileIsExecutable",
+		},
+		{
+			name: "exec start outside service fails closed",
+			unit: strings.Replace(
+				strings.Replace(
+					guarded,
+					"ExecStart=/srv/catch/run/catch tailscale-resolver-exec --source /etc/netns/yeet-api-ns/resolv.conf -- /srv/api/run/tailscaled --tun=ts0\n",
+					"",
+					1,
+				),
+				condition+"\n",
+				condition+"\nExecStart=/srv/catch/run/catch tailscale-resolver-exec --source /etc/netns/yeet-api-ns/resolv.conf -- /srv/api/run/tailscaled --tun=ts0\n",
+				1,
+			),
+			wantErr: "ExecStart outside [Service]",
+		},
+		{
+			name:    "protect system in service fails closed",
+			unit:    strings.Replace(guarded, "PrivateMounts=yes\n", "PrivateMounts=yes\nProtectSystem=strict\n", 1),
+			wantErr: "ProtectSystem",
+		},
+		{
+			name: "protect system outside service is unrelated",
+			unit: strings.Replace(
+				guarded,
+				"ConditionFileIsExecutable=/srv/api/run/tailscaled\n",
+				"ConditionFileIsExecutable=/srv/api/run/tailscaled\nProtectSystem=strict\n",
+				1,
+			),
+			wantChanged: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			next, changed, err := ensureTailscaleUnitResolverIsolation(
+				test.unit,
+				"/srv/catch/run/catch",
+			)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("ensure error = %v, want %q rejection", err, test.wantErr)
+				}
+				if changed {
+					t.Fatal("rejected resolver unit changed = true, want false")
+				}
+				if next != test.unit {
+					t.Fatalf("rejected resolver unit was modified:\n--- want\n%s\n--- got\n%s", test.unit, next)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ensure exact resolver guard: %v", err)
+			}
+			if changed != test.wantChanged {
+				t.Fatalf("changed = %v, want %v", changed, test.wantChanged)
+			}
+			assertExactTailscaleResolverUnitGrammar(t, next, condition)
+			for _, preserved := range test.preserved {
+				if !strings.Contains(next, preserved) {
+					t.Fatalf("rewriter removed %q:\n%s", preserved, next)
+				}
+			}
+			if strings.Contains(test.unit, "TemporaryFileSystem=") &&
+				!strings.Contains(next, "TemporaryFileSystem=/var/cache/private") {
+				t.Fatalf("rewriter removed unrelated mount sandboxing:\n%s", next)
+			}
+		})
+	}
+}
+
+func assertExactTailscaleResolverUnitGrammar(
+	t *testing.T,
+	unit, wantCondition string,
+) {
+	t.Helper()
+	section := ""
+	var conditions []string
+	var mounts []string
+	for _, line := range strings.Split(unit, "\n") {
+		line = strings.TrimSpace(line)
+		if isSystemdUnitSection(line) {
+			section = line
+			continue
+		}
+		if strings.HasPrefix(line, "ConditionFileIsExecutable=") {
+			conditions = append(conditions, section+":"+line)
+		}
+		if isTailscaleResolverMountDirective(line) ||
+			(section == "[Service]" && strings.HasPrefix(line, "ProtectSystem=")) {
+			mounts = append(mounts, section+":"+line)
+		}
+	}
+	if diff := cmp.Diff([]string{"[Unit]:" + wantCondition}, conditions); diff != "" {
+		t.Fatalf("effective resolver condition grammar (-want +got):\n%s\nunit:\n%s", diff, unit)
+	}
+	if diff := cmp.Diff(
+		[]string{"[Service]:PrivateMounts=yes"},
+		mounts,
+	); diff != "" {
+		t.Fatalf("effective resolver mount grammar (-want +got):\n%s\nunit:\n%s", diff, unit)
+	}
+}
+
+func FuzzParseTailscaleResolverUnit(f *testing.F) {
+	for _, seed := range []string{
+		"[Service]\nExecStart=/srv/api/run/tailscaled --tun=ts0\nNetworkNamespacePath=/var/run/netns/yeet-api-ns\nEnvironmentFile=/srv/api/run/tailscaled.env\nWorkingDirectory=/srv/api/tailscale\n",
+		"[Service]\nExecStart=/srv/catch/run/catch tailscale-resolver-exec --source /etc/netns/yeet-api-ns/resolv.conf -- /srv/api/run/tailscaled --tun=ts0\nNetworkNamespacePath=/var/run/netns/yeet-api-ns\nEnvironmentFile=/srv/api/run/tailscaled.env\nWorkingDirectory=/srv/api/tailscale\nBindReadOnlyPaths=/etc/netns/yeet-api-ns/resolv.conf:/etc/resolv.conf\nPrivateMounts=yes\n",
+		"[Unit]\nBindReadOnlyPaths=/ignored:/etc/resolv.conf\n[Service]\nProtectSystem=strict\n",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, unit string) {
+		_, _ = parseTailscaleResolverUnit(unit)
 	})
+}
+
+func TestReconcileTailscaleResolverMountsRestartsUnhealthySidecar(t *testing.T) {
+	fixture := newGuardedTailscaleResolverFixture(t, "api", tailscaleResolverGenerationCurrent)
+	s := fixture.server
+	oldActive := catchSystemdUnitActive
+	catchSystemdUnitActive = func(string) bool { return true }
+	t.Cleanup(func() { catchSystemdUnitActive = oldActive })
+	previousVerify := verifyTailscaleSystemdSidecar
+	verifyTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error {
+		return errors.New("resolver mount is unhealthy")
+	}
+	t.Cleanup(func() { verifyTailscaleSystemdSidecar = previousVerify })
 
 	dir := t.TempDir()
 	currentInfo := writeNetNSTestFile(t, filepath.Join(dir, "current"))
@@ -687,233 +1051,65 @@ PrivateMounts=yes
 	})
 
 	var calls []string
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		calls = append(calls, strings.Join(args, " "))
+	prevRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(_ context.Context, service *svc.SystemdService) error {
+		calls = append(calls, "verified-restart:"+service.Name())
 		return nil
 	}
 	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
+		restartTailscaleSystemdSidecar = prevRestart
 	})
 
 	if err := s.reconcileTailscaleResolverMounts(context.Background()); err != nil {
 		t.Fatalf("reconcileTailscaleResolverMounts returned error: %v", err)
 	}
-	if diff := cmp.Diff([]string{"restart yeet-api-ts.service"}, calls); diff != "" {
-		t.Fatalf("systemctl calls (-want +got):\n%s", diff)
+	if diff := cmp.Diff([]string{"verified-restart:api"}, calls); diff != "" {
+		t.Fatalf("sidecar lifecycle calls (-want +got):\n%s", diff)
 	}
 }
 
-func TestReconcileTailscaleResolverIsolationSkipsUnitWithoutNetworkNamespacePath(t *testing.T) {
-	s := newTestServer(t)
-	root := filepath.Join(t.TempDir(), "services", "tap")
-	systemdDir := useTestSystemdSystemDir(t)
-	artifactPath := filepath.Join(t.TempDir(), "artifact-yeet-tap-ts.service")
-	unitPath := filepath.Join(systemdDir, "yeet-tap-ts.service")
-	unitRaw := []byte(`[Unit]
-After=network-online.target
-
-[Service]
-ExecStart=/srv/tap/run/tailscaled --tun=tailscale0
-
-[Install]
-WantedBy=multi-user.target
-`)
-	if err := os.WriteFile(artifactPath, unitRaw, 0o644); err != nil {
-		t.Fatalf("write artifact unit: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
-		t.Fatalf("mkdir systemd dir: %v", err)
-	}
-	if err := os.WriteFile(unitPath, unitRaw, 0o644); err != nil {
-		t.Fatalf("write unit: %v", err)
-	}
-	addTestServices(t, s, db.Service{
-		Name:             "tap",
-		ServiceType:      db.ServiceTypeDockerCompose,
-		ServiceRoot:      root,
-		Generation:       3,
-		LatestGeneration: 3,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(3): artifactPath}},
-			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-tap-ns.service"}},
-		},
-	})
-
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		t.Fatalf("unexpected systemctl call: %v", args)
-		return nil
-	}
-	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
-	})
-
-	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
-		t.Fatalf("reconcileTailscaleResolverIsolation returned error: %v", err)
-	}
-	raw, err := os.ReadFile(unitPath)
-	if err != nil {
-		t.Fatalf("read unit: %v", err)
-	}
-	if string(raw) != string(unitRaw) {
-		t.Fatalf("host namespace unit changed:\n%s", raw)
-	}
+func TestReconcileTailscaleResolverIsolationRejectsUnitWithoutNetworkNamespacePath(t *testing.T) {
+	testTailscaleResolverReconcileRejectsMissingNetworkNamespace(t)
 }
 
-func TestReconcileTailscaleResolverIsolationRetriesAfterDaemonReloadFailure(t *testing.T) {
-	s := newTestServer(t)
-	unitPath, original := addStaleInstalledTailscaleUnit(t, s, "api")
-
-	var calls []string
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		call := strings.Join(args, " ")
-		calls = append(calls, call)
-		if call == "daemon-reload" {
-			return errors.New("reload failed")
-		}
-		return nil
-	}
-	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
-	})
-
-	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err == nil || !strings.Contains(err.Error(), "daemon-reload") {
-		t.Fatalf("first reconcile error = %v, want daemon-reload failure", err)
-	}
-	assertFileContent(t, unitPath, original)
-	if diff := cmp.Diff([]string{"daemon-reload"}, calls); diff != "" {
-		t.Fatalf("first systemctl calls (-want +got):\n%s", diff)
-	}
-
-	calls = nil
-	catchSystemctl = func(args ...string) error {
-		calls = append(calls, strings.Join(args, " "))
-		return nil
-	}
-	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
-		t.Fatalf("second reconcile returned error: %v", err)
-	}
-	if diff := cmp.Diff([]string{"daemon-reload", "restart yeet-api-ts.service"}, calls); diff != "" {
-		t.Fatalf("second systemctl calls (-want +got):\n%s", diff)
-	}
+func TestReconcileTailscaleResolverIsolationRollsBackExactOriginalsAfterDaemonReloadFailure(t *testing.T) {
+	testTailscaleResolverReconcileRollsBackDaemonReloadFailure(t)
 }
 
-func TestReconcileTailscaleResolverIsolationRetriesAfterRestartFailure(t *testing.T) {
-	s := newTestServer(t)
-	unitPath, original := addStaleInstalledTailscaleUnit(t, s, "api")
-
-	var calls []string
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		call := strings.Join(args, " ")
-		calls = append(calls, call)
-		if call == "restart yeet-api-ts.service" {
-			return errors.New("restart failed")
-		}
-		return nil
-	}
-	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
-	})
-
-	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err == nil || !strings.Contains(err.Error(), "restart failed") {
-		t.Fatalf("first reconcile error = %v, want restart failure", err)
-	}
-	assertFileContent(t, unitPath, original)
-	if diff := cmp.Diff([]string{"daemon-reload", "restart yeet-api-ts.service"}, calls); diff != "" {
-		t.Fatalf("first systemctl calls (-want +got):\n%s", diff)
-	}
-
-	calls = nil
-	catchSystemctl = func(args ...string) error {
-		calls = append(calls, strings.Join(args, " "))
-		return nil
-	}
-	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
-		t.Fatalf("second reconcile returned error: %v", err)
-	}
-	if diff := cmp.Diff([]string{"daemon-reload", "restart yeet-api-ts.service"}, calls); diff != "" {
-		t.Fatalf("second systemctl calls (-want +got):\n%s", diff)
-	}
+func TestReconcileTailscaleResolverIsolationRollsBackExactOriginalsAfterRestartFailure(t *testing.T) {
+	testTailscaleResolverReconcileRollsBackRestartFailure(t)
 }
 
 func TestReconcileTailscaleResolverIsolationSkipsNonTailscaleServices(t *testing.T) {
-	s := newTestServer(t)
-	addTestServices(t, s, db.Service{
-		Name:             "api",
-		ServiceType:      db.ServiceTypeDockerCompose,
-		ServiceRoot:      filepath.Join(t.TempDir(), "services", "api"),
-		Generation:       3,
-		LatestGeneration: 3,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-api-ns.service"}},
-		},
-	})
-
-	prevSystemctl := catchSystemctl
-	catchSystemctl = func(args ...string) error {
-		t.Fatalf("unexpected systemctl call: %v", args)
-		return nil
-	}
-	t.Cleanup(func() {
-		catchSystemctl = prevSystemctl
-	})
-
-	if err := s.reconcileTailscaleResolverIsolation(context.Background()); err != nil {
-		t.Fatalf("reconcileTailscaleResolverIsolation returned error: %v", err)
-	}
+	testTailscaleResolverReconcileSkipsNonTailscaleServices(t)
 }
 
 func useTestSystemdSystemDir(t *testing.T) string {
 	t.Helper()
+	withTailscaleResolverCatchPath(t, "/srv/catch/run/catch")
 	old := systemdSystemDir
 	systemdDir := filepath.Join(t.TempDir(), "systemd")
 	systemdSystemDir = systemdDir
+	oldActive := catchSystemdUnitActive
+	catchSystemdUnitActive = func(string) bool { return true }
+	oldRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(_ context.Context, service *svc.SystemdService) error {
+		return catchSystemctl("restart", "yeet-"+service.Name()+"-ts.service")
+	}
+	oldVerify := verifyTailscaleSystemdSidecar
+	verifyTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error { return nil }
+	oldDropIns := tailscaleResolverUnitDropInPaths
+	tailscaleResolverUnitDropInPaths = func(context.Context, string) ([]string, error) {
+		return nil, nil
+	}
 	t.Cleanup(func() {
 		systemdSystemDir = old
+		catchSystemdUnitActive = oldActive
+		restartTailscaleSystemdSidecar = oldRestart
+		verifyTailscaleSystemdSidecar = oldVerify
+		tailscaleResolverUnitDropInPaths = oldDropIns
 	})
 	return systemdDir
-}
-
-func addStaleInstalledTailscaleUnit(t *testing.T, s *Server, serviceName string) (string, string) {
-	t.Helper()
-	systemdDir := useTestSystemdSystemDir(t)
-	unitName := "yeet-" + serviceName + "-ts.service"
-	artifactPath := filepath.Join(t.TempDir(), "artifact-"+unitName)
-	unitPath := filepath.Join(systemdDir, unitName)
-	unitRaw := `[Unit]
-After=yeet-` + serviceName + `-ns.service
-
-[Service]
-ExecStart=/srv/` + serviceName + `/run/tailscaled --tun=ts0
-NetworkNamespacePath=/var/run/netns/yeet-` + serviceName + `-ns
-
-[Install]
-WantedBy=multi-user.target
-`
-	if err := os.WriteFile(artifactPath, []byte(unitRaw), 0o644); err != nil {
-		t.Fatalf("write artifact unit: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
-		t.Fatalf("mkdir systemd dir: %v", err)
-	}
-	if err := os.WriteFile(unitPath, []byte(unitRaw), 0o644); err != nil {
-		t.Fatalf("write unit: %v", err)
-	}
-	addTestServices(t, s, db.Service{
-		Name:             serviceName,
-		ServiceType:      db.ServiceTypeDockerCompose,
-		ServiceRoot:      filepath.Join(t.TempDir(), "services", serviceName),
-		Generation:       3,
-		LatestGeneration: 3,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(3): artifactPath}},
-			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/tmp/yeet-" + serviceName + "-ns.service"}},
-		},
-	})
-	return unitPath, unitRaw
 }
 
 func ptrString(s string) *string {
@@ -1132,39 +1328,22 @@ func TestReconcileNetNSBackedDockerServicesContinuesAfterServiceError(t *testing
 }
 
 func TestReconcileRuntimeStateRunsResolverIsolationBeforeNetNSReconciliation(t *testing.T) {
+	stubTailscaleResolverJournalOwner(t)
 	s := newTestServer(t)
-	systemdDir := useTestSystemdSystemDir(t)
-	artifactPath := filepath.Join(t.TempDir(), "artifact-yeet-docker-netns-ts.service")
-	unitPath := filepath.Join(systemdDir, "yeet-docker-netns-ts.service")
-	unitRaw := []byte(`[Unit]
-After=yeet-docker-netns-ns.service
-
-[Service]
-ExecStart=/srv/docker-netns/run/tailscaled --tun=ts0
-NetworkNamespacePath=/var/run/netns/yeet-docker-netns-ns
-
-[Install]
-WantedBy=multi-user.target
-`)
-	if err := os.WriteFile(artifactPath, unitRaw, 0o644); err != nil {
-		t.Fatalf("write artifact unit: %v", err)
+	useTestSystemdSystemDir(t)
+	fixture := addTailscaleResolverPlanService(
+		t,
+		s,
+		"docker-netns",
+		tailscaleResolverGenerationHistorical,
+		"",
+		nil,
+	)
+	service := fixture.service
+	service.Artifacts[db.ArtifactNetNSService] = &db.Artifact{
+		Refs: map[db.ArtifactRef]string{db.Gen(service.Generation): "/tmp/yeet-docker-netns-ns.service"},
 	}
-	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
-		t.Fatalf("mkdir systemd dir: %v", err)
-	}
-	if err := os.WriteFile(unitPath, unitRaw, 0o644); err != nil {
-		t.Fatalf("write unit: %v", err)
-	}
-	addTestServices(t, s, db.Service{
-		Name:             "docker-netns",
-		ServiceType:      db.ServiceTypeDockerCompose,
-		Generation:       1,
-		LatestGeneration: 1,
-		Artifacts: db.ArtifactStore{
-			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/yeet-docker-netns-ns.service"}},
-			db.ArtifactTSService:    {Refs: map[db.ArtifactRef]string{db.Gen(1): artifactPath}},
-		},
-	})
+	replaceTailscaleResolverPlanService(t, s, service)
 
 	var calls []string
 	reconciled := make(chan struct{})
@@ -1194,6 +1373,31 @@ WantedBy=multi-user.target
 	}
 	t.Cleanup(func() {
 		catchSystemctl = prevSystemctl
+	})
+	stubTailscaleResolverActive(t, map[string]bool{
+		"yeet-docker-netns-ts.service": true,
+	})
+	prevRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(_ context.Context, service *svc.SystemdService) error {
+		calls = append(calls, "systemctl:restart yeet-"+service.Name()+"-ts.service")
+		return nil
+	}
+	t.Cleanup(func() {
+		restartTailscaleSystemdSidecar = prevRestart
+	})
+	prevVerify := verifyTailscaleSystemdSidecar
+	verifyTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error {
+		return nil
+	}
+	t.Cleanup(func() {
+		verifyTailscaleSystemdSidecar = prevVerify
+	})
+	prevStale := tailscaleSidecarNetNSStale
+	tailscaleSidecarNetNSStale = func(string) (bool, error) {
+		return false, nil
+	}
+	t.Cleanup(func() {
+		tailscaleSidecarNetNSStale = prevStale
 	})
 	prevNAT := reconcileDockerNetNSPortForwards
 	reconcileDockerNetNSPortForwards = func(*db.Store) error {
@@ -1235,6 +1439,104 @@ WantedBy=multi-user.target
 		"nat-reconcile",
 	}, calls); diff != "" {
 		t.Fatalf("unexpected startup call order (-want +got):\n%s", diff)
+	}
+}
+
+func TestServerStartRepairsTailscaleDNSBeforeResolverFleetMigration(t *testing.T) {
+	for _, layout := range []tailscaleResolverGenerationLayout{
+		tailscaleResolverGenerationHistorical,
+		tailscaleResolverGenerationCurrent,
+	} {
+		for _, forms := range []struct {
+			name        string
+			runtimeDNS  opt.Bool
+			artifactDNS opt.Bool
+		}{
+			{name: "runtime-true-generation-omitted", runtimeDNS: "true"},
+			{name: "runtime-omitted-generation-true", artifactDNS: "true"},
+		} {
+			t.Run(string(layout)+"/"+forms.name, func(t *testing.T) {
+				stubTailscaleResolverJournalOwner(t)
+				fixture := newTailscaleResolverPlanFixture(
+					t,
+					"startup-"+string(layout)+"-"+forms.name,
+					layout,
+					"",
+				)
+				s := fixture.server
+				s.recoverVMRuntimeState = func(context.Context, *Config) error { return nil }
+				tuple := fixtureTuple(fixture.service, layout)
+				generationConfig := fixture.service.Artifacts[db.ArtifactTSConfig].
+					Refs[db.Gen(fixture.service.Generation)]
+				writeTailscaleTestConfig(t, tuple.configFile, ipn.ConfigVAlpha{
+					Version: "alpha0", AcceptDNS: forms.runtimeDNS,
+				})
+				writeTailscaleTestConfig(t, generationConfig, ipn.ConfigVAlpha{
+					Version: "alpha0", AcceptDNS: forms.artifactDNS,
+				})
+
+				previousInstall := installYeetNSService
+				installYeetNSService = func() error { return nil }
+				t.Cleanup(func() { installYeetNSService = previousInstall })
+				stubYeetDNSInstaller(t, func(string) error { return nil })
+				stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
+				previousSystemctl := catchSystemctl
+				catchSystemctl = func(...string) error { return nil }
+				t.Cleanup(func() { catchSystemctl = previousSystemctl })
+				stubTailscaleResolverActive(t, map[string]bool{
+					"yeet-" + fixture.service.Name + "-ts.service": true,
+				})
+				restarts := 0
+				previousRestart := restartTailscaleSystemdSidecar
+				restartTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error {
+					restarts++
+					return nil
+				}
+				t.Cleanup(func() { restartTailscaleSystemdSidecar = previousRestart })
+				previousVerify := verifyTailscaleSystemdSidecar
+				verifyTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error {
+					return nil
+				}
+				t.Cleanup(func() { verifyTailscaleSystemdSidecar = previousVerify })
+				previousActive := catchSystemdUnitActive
+				catchSystemdUnitActive = func(string) bool { return false }
+				t.Cleanup(func() { catchSystemdUnitActive = previousActive })
+				reconciled := make(chan struct{})
+				previousNAT := reconcileDockerNetNSPortForwards
+				reconcileDockerNetNSPortForwards = func(*db.Store) error {
+					close(reconciled)
+					return nil
+				}
+				t.Cleanup(func() { reconcileDockerNetNSPortForwards = previousNAT })
+				logs := captureLogs(t)
+
+				s.Start()
+				t.Cleanup(s.Shutdown)
+				select {
+				case <-reconciled:
+				case <-time.After(time.Second):
+					t.Fatal("timed out waiting for startup reconciliation")
+				}
+
+				for label, path := range map[string]string{
+					"runtime": tuple.configFile, "generation": generationConfig,
+				} {
+					if cfg := readTailscaleTestConfig(t, path); !cfg.AcceptDNS.EqualBool(false) {
+						t.Fatalf("%s config AcceptDNS = %q, want explicit false", label, cfg.AcceptDNS)
+					}
+				}
+				if err := s.checkTailscaleResolverReady(context.Background(), fixture.service); err != nil {
+					t.Fatalf("startup resolver readiness: %v", err)
+				}
+				if restarts != 1 {
+					t.Fatalf("startup verified restarts = %d, want one fleet-migration restart", restarts)
+				}
+				if out := logs.String(); strings.Contains(out, "tailscale resolver isolation startup migration failed") ||
+					strings.Contains(out, "after DNS config reconciliation") {
+					t.Fatalf("startup emitted misleading resolver failure:\n%s", out)
+				}
+			})
+		}
 	}
 }
 

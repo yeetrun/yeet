@@ -7,14 +7,18 @@ package catch
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/svc"
+	"golang.org/x/sys/unix"
 )
 
 func TestTsCmdUpdateUsesYeetManagedUpdater(t *testing.T) {
@@ -22,24 +26,18 @@ func TestTsCmdUpdateUsesYeetManagedUpdater(t *testing.T) {
 		t.Skip("requires shell scripts")
 	}
 
-	server := newTestServer(t)
 	const (
 		svcName    = "svc-ts-update"
-		oldVersion = "1.90.0"
+		oldVersion = tailscaleResolverFixtureDaemonVersion
 		newVersion = "1.94.2"
 	)
-
-	runDir := server.serviceRunDir(svcName)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		t.Fatalf("mkdir run dir: %v", err)
-	}
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		svcName,
+		tailscaleResolverGenerationCurrent,
+	)
+	server := fixture.server
 	serviceBinDir := server.serviceBinDir(svcName)
-	if err := os.MkdirAll(serviceBinDir, 0o755); err != nil {
-		t.Fatalf("mkdir service bin dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(serviceBinDir, "tailscaled"), []byte("old-daemon"), 0o755); err != nil {
-		t.Fatalf("write existing tailscaled: %v", err)
-	}
 
 	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
 	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
@@ -54,34 +52,6 @@ func TestTsCmdUpdateUsesYeetManagedUpdater(t *testing.T) {
 		t.Fatalf("write new tailscale: %v", err)
 	}
 
-	if _, _, err := server.cfg.DB.MutateService(svcName, func(_ *db.Data, s *db.Service) error {
-		s.ServiceType = db.ServiceTypeDockerCompose
-		s.Generation = 1
-		s.LatestGeneration = 1
-		s.TSNet = &db.TailscaleNetwork{Interface: "yts-test", Version: oldVersion}
-		s.Artifacts = db.ArtifactStore{
-			db.ArtifactTSBinary: {
-				Refs: map[db.ArtifactRef]string{
-					db.ArtifactRef("latest"): filepath.Join(tsdDir, "tailscaled-"+oldVersion),
-					db.Gen(s.Generation):     filepath.Join(tsdDir, "tailscaled-"+oldVersion),
-				},
-			},
-		}
-		return nil
-	}); err != nil {
-		t.Fatalf("seed service: %v", err)
-	}
-
-	fakeBin := t.TempDir()
-	systemctlLog := filepath.Join(fakeBin, "systemctl.log")
-	systemctlScript := filepath.Join(fakeBin, "systemctl")
-	script := "#!/bin/sh\nprintf '%s\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\n"
-	if err := os.WriteFile(systemctlScript, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake systemctl: %v", err)
-	}
-	t.Setenv("SYSTEMCTL_LOG", systemctlLog)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	origLatest := tailscaleLatestVersionForTrackFn
 	defer func() { tailscaleLatestVersionForTrackFn = origLatest }()
 	var gotTrack string
@@ -91,8 +61,12 @@ func TestTsCmdUpdateUsesYeetManagedUpdater(t *testing.T) {
 	}
 
 	var out bytes.Buffer
+	var verifiedRestarts []string
+	stubVerifiedTailscaleRestart(t, &verifiedRestarts)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
 	execer := &ttyExecer{
-		ctx: context.Background(),
+		ctx: ctx,
 		s:   server,
 		sn:  svcName,
 		rw:  readWriter{Reader: strings.NewReader("y\n"), Writer: &out},
@@ -127,14 +101,136 @@ func TestTsCmdUpdateUsesYeetManagedUpdater(t *testing.T) {
 	if got := string(runBinary); got != "new-daemon" {
 		t.Fatalf("managed tailscaled = %q, want %q", got, "new-daemon")
 	}
-
-	systemctlCalls, err := os.ReadFile(systemctlLog)
-	if err != nil {
-		t.Fatalf("read systemctl log: %v", err)
+	if len(verifiedRestarts) != 1 || verifiedRestarts[0] != svcName {
+		t.Fatalf("verified restarts = %v, want [%s]", verifiedRestarts, svcName)
 	}
-	wantCall := fmt.Sprintf("restart yeet-%s-ts.service", svcName)
-	if got := strings.TrimSpace(string(systemctlCalls)); got != wantCall {
-		t.Fatalf("systemctl call = %q, want %q", got, wantCall)
+}
+
+func TestTailscaleResolverReadinessGatesUpdateBeforeBinaryReplacement(t *testing.T) {
+	fixture := newTailscaleResolverPlanFixture(
+		t,
+		"update-readiness",
+		tailscaleResolverGenerationCurrent,
+		"",
+	)
+	const latest = "1.94.2"
+	tsdDir := filepath.Join(fixture.server.cfg.RootDir, "tsd")
+	for name, raw := range map[string]string{
+		"tailscaled-" + latest: "replacement-daemon",
+		"tailscale-" + latest:  "replacement-client",
+	} {
+		if err := os.WriteFile(filepath.Join(tsdDir, name), []byte(raw), 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	managedBinary := fixtureTuple(
+		fixture.service,
+		tailscaleResolverGenerationCurrent,
+	).daemon
+	before, err := os.ReadFile(managedBinary)
+	if err != nil {
+		t.Fatalf("read managed binary before update: %v", err)
+	}
+	oldRestart := restartTailscaleSystemdSidecar
+	restartCalls := 0
+	restartTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error {
+		restartCalls++
+		return nil
+	}
+	t.Cleanup(func() { restartTailscaleSystemdSidecar = oldRestart })
+
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   fixture.server,
+		sn:  fixture.service.Name,
+		rw:  readWriter{Reader: strings.NewReader(""), Writer: &bytes.Buffer{}},
+	}
+	err = execer.applyTSUpdate(tailscaleResolverFixtureDaemonVersion, latest)
+	if err == nil || !strings.Contains(err.Error(), "resolver") {
+		t.Fatalf("applyTSUpdate error = %v, want resolver readiness rejection", err)
+	}
+	after, readErr := os.ReadFile(managedBinary)
+	if readErr != nil {
+		t.Fatalf("read managed binary after rejected update: %v", readErr)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("rejected update replaced managed binary: got %q, want %q", after, before)
+	}
+	if restartCalls != 0 {
+		t.Fatalf("rejected update restart calls = %d, want 0", restartCalls)
+	}
+}
+
+func TestTailscaleResolverReadinessLinearizesUpdateBinaryCopyWithGlobalBlock(t *testing.T) {
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		"update-copy-linearized",
+		tailscaleResolverGenerationCurrent,
+	)
+	const latest = "1.94.2"
+	tsdDir := filepath.Join(fixture.server.cfg.RootDir, "tsd")
+	sourceDaemon := filepath.Join(tsdDir, "tailscaled-"+latest)
+	if err := unix.Mkfifo(sourceDaemon, 0o600); err != nil {
+		t.Fatalf("create blocking tailscaled source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscale-"+latest), []byte("client"), 0o755); err != nil {
+		t.Fatalf("write tailscale client: %v", err)
+	}
+	copyEntered := make(chan struct{})
+	releaseCopy := make(chan struct{}, 1)
+	t.Cleanup(func() {
+		select {
+		case releaseCopy <- struct{}{}:
+		default:
+		}
+	})
+	go func() {
+		f, err := os.OpenFile(sourceDaemon, os.O_WRONLY, 0)
+		if err != nil {
+			return
+		}
+		close(copyEntered)
+		<-releaseCopy
+		_, _ = f.WriteString("replacement-daemon")
+		_ = f.Close()
+	}()
+	oldRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error { return nil }
+	t.Cleanup(func() { restartTailscaleSystemdSidecar = oldRestart })
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   fixture.server,
+		sn:  fixture.service.Name,
+		rw:  readWriter{Reader: strings.NewReader(""), Writer: &bytes.Buffer{}},
+	}
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- execer.applyTSUpdate(tailscaleResolverFixtureDaemonVersion, latest)
+	}()
+	awaitResolverTestSignal(t, copyEntered, "tailscaled binary copy")
+
+	writerAttempted := make(chan struct{})
+	writerAcquired := make(chan struct{})
+	fixture.server.tailscaleResolverRecovery.afterBlockLock = func() {
+		close(writerAcquired)
+	}
+	blockDone := make(chan error, 1)
+	go func() {
+		close(writerAttempted)
+		blockDone <- fixture.server.blockTailscaleResolverRecovery(errors.New("block during update copy"))
+	}()
+	awaitResolverTestSignal(t, writerAttempted, "resolver block attempt during binary copy")
+	select {
+	case <-writerAcquired:
+		t.Fatal("resolver block acquired the global guard during tailscaled binary copy")
+	case <-time.After(25 * time.Millisecond):
+	}
+	releaseCopy <- struct{}{}
+	if err := awaitResolverTestResult(t, updateDone); err != nil {
+		t.Fatalf("applyTSUpdate: %v", err)
+	}
+	if err := awaitResolverTestResult(t, blockDone); !errors.Is(err, errTailscaleResolverRecoveryBlocked) {
+		t.Fatalf("resolver block after update copy = %v", err)
 	}
 }
 
@@ -216,6 +312,7 @@ func TestTsCmdUpdatePassthroughWithDoubleDash(t *testing.T) {
 
 func TestTailscaledManagedBinaryPathFollowsGeneratedUnit(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "svc")
+	stableCatchRunner := "/srv/catch/run/catch"
 	for _, dir := range []string{serviceBinDirForRoot(root), serviceRunDirForRoot(root)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -230,15 +327,26 @@ func TestTailscaledManagedBinaryPathFollowsGeneratedUnit(t *testing.T) {
 	}
 
 	for _, tt := range []struct {
-		name string
-		exe  string
+		name      string
+		execStart string
+		want      string
 	}{
-		{name: "managed layout", exe: newPath},
-		{name: "legacy layout", exe: legacyPath},
+		{name: "direct managed layout", execStart: newPath + " --statedir=.", want: newPath},
+		{name: "direct legacy layout", execStart: legacyPath + " --statedir=.", want: legacyPath},
+		{
+			name:      "guarded managed layout",
+			execStart: stableCatchRunner + " tailscale-resolver-exec --source /etc/netns/yeet-svc-ns/resolv.conf -- " + newPath + " --statedir=.",
+			want:      newPath,
+		},
+		{
+			name:      "guarded legacy layout",
+			execStart: stableCatchRunner + " tailscale-resolver-exec --source /etc/netns/yeet-svc-ns/resolv.conf -- " + legacyPath + " --statedir=.",
+			want:      legacyPath,
+		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			unit := filepath.Join(t.TempDir(), "tailscale.service")
-			if err := os.WriteFile(unit, []byte("[Service]\nExecStart="+tt.exe+" --statedir=.\n"), 0o644); err != nil {
+			if err := os.WriteFile(unit, []byte("[Service]\nExecStart="+tt.execStart+"\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			sv := (&db.Service{
@@ -247,14 +355,240 @@ func TestTailscaledManagedBinaryPathFollowsGeneratedUnit(t *testing.T) {
 					Refs: map[db.ArtifactRef]string{"latest": unit},
 				}},
 			}).View()
-			got, err := tailscaledManagedBinaryPath(sv, root)
+			got, err := tailscaledManagedBinaryPath(sv, root, stableCatchRunner)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got != tt.exe {
-				t.Fatalf("managed binary = %q, want unit executable %q", got, tt.exe)
+			if got != tt.want {
+				t.Fatalf("managed binary = %q, want unit daemon %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestTailscaledManagedBinaryPathRejectsUnsafeGeneratedUnit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "svc")
+	managed := filepath.Join(serviceBinDirForRoot(root), "tailscaled")
+	legacy := filepath.Join(serviceRunDirForRoot(root), "tailscaled")
+	stableCatchRunner := "/srv/catch/run/catch"
+	for _, tt := range []struct {
+		name                string
+		unit                string
+		expectedCatchRunner string
+	}{
+		{
+			name:                "malformed guarded separator",
+			unit:                "[Service]\nExecStart=" + stableCatchRunner + " tailscale-resolver-exec --source /etc/resolv.conf " + managed + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{
+			name:                "malformed guarded source flag",
+			unit:                "[Service]\nExecStart=" + stableCatchRunner + " tailscale-resolver-exec --resolver /etc/resolv.conf -- " + managed + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{name: "unmanaged directory", unit: "[Service]\nExecStart=" + filepath.Join(root, "data", "tailscaled") + "\n", expectedCatchRunner: stableCatchRunner},
+		{name: "wrong basename", unit: "[Service]\nExecStart=" + filepath.Join(root, "run", "tailscaled-old") + "\n", expectedCatchRunner: stableCatchRunner},
+		{name: "relative executable", unit: "[Service]\nExecStart=run/tailscaled\n", expectedCatchRunner: stableCatchRunner},
+		{name: "unclean managed path", unit: "[Service]\nExecStart=" + filepath.Join(root, "bin") + "/../bin/tailscaled\n", expectedCatchRunner: stableCatchRunner},
+		{name: "multiple exec starts", unit: "[Service]\nExecStart=" + managed + "\nExecStart=" + legacy + "\n", expectedCatchRunner: stableCatchRunner},
+		{name: "empty then managed", unit: "[Service]\nExecStart=\nExecStart=" + managed + "\n", expectedCatchRunner: stableCatchRunner},
+		{name: "exec start outside service", unit: "[Unit]\nExecStart=" + managed + "\n[Service]\n", expectedCatchRunner: stableCatchRunner},
+		{name: "quoted executable", unit: "[Service]\nExecStart=\"" + managed + "\"\n", expectedCatchRunner: stableCatchRunner},
+		{name: "continued exec start", unit: "[Service]\nExecStart=" + managed + " \\\n --statedir=.\n", expectedCatchRunner: stableCatchRunner},
+		{
+			name:                "guarded unmanaged daemon",
+			unit:                "[Service]\nExecStart=" + stableCatchRunner + " tailscale-resolver-exec --source /etc/resolv.conf -- " + filepath.Join(root, "data", "tailscaled") + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{
+			name:                "arbitrary guard launcher",
+			unit:                "[Service]\nExecStart=/bin/echo tailscale-resolver-exec --source /etc/resolv.conf -- " + legacy + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{
+			name:                "current daemon as guard launcher",
+			unit:                "[Service]\nExecStart=" + managed + " tailscale-resolver-exec --source /etc/resolv.conf -- " + legacy + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{
+			name:                "historical daemon as guard launcher",
+			unit:                "[Service]\nExecStart=" + legacy + " tailscale-resolver-exec --source /etc/resolv.conf -- " + managed + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{
+			name:                "versioned guard launcher",
+			unit:                "[Service]\nExecStart=/srv/catch/run/catch-20260725 tailscale-resolver-exec --source /etc/resolv.conf -- " + legacy + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{
+			name:                "install staging guard launcher",
+			unit:                "[Service]\nExecStart=/srv/catch/run/.install/catch tailscale-resolver-exec --source /etc/resolv.conf -- " + legacy + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{
+			name:                "relative guard launcher",
+			unit:                "[Service]\nExecStart=run/catch tailscale-resolver-exec --source /etc/resolv.conf -- " + legacy + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{
+			name:                "unclean guard launcher",
+			unit:                "[Service]\nExecStart=/srv/catch/run/../run/catch tailscale-resolver-exec --source /etc/resolv.conf -- " + legacy + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{
+			name:                "wrong basename guard launcher",
+			unit:                "[Service]\nExecStart=/srv/catch/run/not-catch tailscale-resolver-exec --source /etc/resolv.conf -- " + legacy + "\n",
+			expectedCatchRunner: stableCatchRunner,
+		},
+		{
+			name: "missing expected catch runner",
+			unit: "[Service]\nExecStart=" + stableCatchRunner + " tailscale-resolver-exec --source /etc/resolv.conf -- " + legacy + "\n",
+		},
+		{
+			name:                "mismatched expected catch runner",
+			unit:                "[Service]\nExecStart=" + stableCatchRunner + " tailscale-resolver-exec --source /etc/resolv.conf -- " + legacy + "\n",
+			expectedCatchRunner: "/srv/other/run/catch",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			unitPath := filepath.Join(t.TempDir(), "tailscale.service")
+			if err := os.WriteFile(unitPath, []byte(tt.unit), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sv := (&db.Service{
+				Name: "svc",
+				Artifacts: db.ArtifactStore{db.ArtifactTSService: {
+					Refs: map[db.ArtifactRef]string{"latest": unitPath},
+				}},
+			}).View()
+			if got, err := tailscaledManagedBinaryPath(sv, root, tt.expectedCatchRunner); err == nil {
+				t.Fatalf("tailscaledManagedBinaryPath = %q, want unsafe unit rejection", got)
+			}
+		})
+	}
+}
+
+func TestTailscaledManagedBinaryPathResolvesMigratedHistoricalUnit(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "svc")
+	legacy := filepath.Join(serviceRunDirForRoot(root), "tailscaled")
+	stableCatchRunner := "/srv/catch/run/catch"
+	direct := "[Service]\nExecStart=" + legacy + " --statedir=.\n" +
+		"NetworkNamespacePath=/var/run/netns/yeet-svc-ns\n" +
+		"EnvironmentFile=" + filepath.Join(serviceEnvDirForRoot(root), "tailscaled.env") + "\n" +
+		"WorkingDirectory=" + filepath.Join(root, "tailscale") + "\n"
+	guarded, changed, err := ensureTailscaleUnitResolverIsolation(direct, stableCatchRunner)
+	if err != nil {
+		t.Fatalf("ensureTailscaleUnitResolverIsolation: %v", err)
+	}
+	if !changed {
+		t.Fatal("ensureTailscaleUnitResolverIsolation changed = false")
+	}
+	unitPath := filepath.Join(t.TempDir(), "tailscale.service")
+	if err := os.WriteFile(unitPath, []byte(guarded), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sv := (&db.Service{
+		Name: "svc",
+		Artifacts: db.ArtifactStore{db.ArtifactTSService: {
+			Refs: map[db.ArtifactRef]string{"latest": unitPath},
+		}},
+	}).View()
+
+	got, err := tailscaledManagedBinaryPath(sv, root, stableCatchRunner)
+	if err != nil {
+		t.Fatalf("tailscaledManagedBinaryPath after migration: %v", err)
+	}
+	if got != legacy {
+		t.Fatalf("managed binary after migration = %q, want historical daemon %q", got, legacy)
+	}
+}
+
+func TestTsCmdUpdateGuardedHistoricalReplacesPersistsAndVerifiedRestarts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires shell scripts")
+	}
+
+	const (
+		svcName    = "svc-ts-guarded-historical-update"
+		oldVersion = tailscaleResolverFixtureDaemonVersion
+		newVersion = "1.95.112"
+	)
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		svcName,
+		tailscaleResolverGenerationHistorical,
+	)
+	server := fixture.server
+	runDir := server.serviceRunDir(svcName)
+	historicalDaemon := filepath.Join(runDir, "tailscaled")
+	currentDaemon := filepath.Join(server.serviceBinDir(svcName), "tailscaled")
+
+	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
+	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
+		t.Fatalf("mkdir tsd dir: %v", err)
+	}
+	newDaemon := filepath.Join(tsdDir, "tailscaled-"+newVersion)
+	if err := os.WriteFile(newDaemon, []byte("new-daemon"), 0o755); err != nil {
+		t.Fatalf("write new tailscaled: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tsdDir, "tailscale-"+newVersion), []byte("new-client"), 0o755); err != nil {
+		t.Fatalf("write new tailscale client: %v", err)
+	}
+
+	previousLatest := tailscaleLatestVersionForTrackFn
+	tailscaleLatestVersionForTrackFn = func(string) (string, error) { return newVersion, nil }
+	t.Cleanup(func() { tailscaleLatestVersionForTrackFn = previousLatest })
+
+	previousRestart := restartTailscaleSystemdSidecar
+	var verifiedRestarts int
+	restartTailscaleSystemdSidecar = func(ctx context.Context, service *svc.SystemdService) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		verifiedRestarts++
+		if service.Name() != svcName {
+			t.Fatalf("verified restart service = %q, want %q", service.Name(), svcName)
+		}
+		assertFileContent(t, historicalDaemon, "new-daemon")
+		persisted, err := server.serviceView(svcName)
+		if err != nil {
+			t.Fatalf("serviceView during verified restart: %v", err)
+		}
+		if got := persisted.TSNet().Version(); got != newVersion {
+			t.Fatalf("persisted version before verified restart = %q, want %q", got, newVersion)
+		}
+		binaryArtifact, ok := persisted.Artifacts().GetOk(db.ArtifactTSBinary)
+		if !ok {
+			t.Fatal("persisted tailscaled artifact is missing before verified restart")
+		}
+		if got, ok := binaryArtifact.Refs().GetOk(db.ArtifactRef("latest")); !ok || got != newDaemon {
+			t.Fatalf("persisted latest tailscaled ref = %q, %v, want %q", got, ok, newDaemon)
+		}
+		if got, ok := binaryArtifact.Refs().GetOk(db.Gen(fixture.service.Generation)); !ok || got != newDaemon {
+			t.Fatalf("persisted generation tailscaled ref = %q, %v, want %q", got, ok, newDaemon)
+		}
+		return nil
+	}
+	t.Cleanup(func() { restartTailscaleSystemdSidecar = previousRestart })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
+	execer := &ttyExecer{
+		ctx: ctx,
+		s:   server,
+		sn:  svcName,
+		rw:  readWriter{Reader: strings.NewReader("y\n"), Writer: &bytes.Buffer{}},
+	}
+	if err := execer.tsCmdFunc([]string{"update"}); err != nil {
+		t.Fatalf("tsCmdFunc(update): %v", err)
+	}
+
+	if verifiedRestarts != 1 {
+		t.Fatalf("verified restart calls = %d, want 1", verifiedRestarts)
+	}
+	assertFileContent(t, historicalDaemon, "new-daemon")
+	if _, err := os.Lstat(currentDaemon); !os.IsNotExist(err) {
+		t.Fatalf("current-layout daemon unexpectedly created at %s: %v", currentDaemon, err)
 	}
 }
 
@@ -263,20 +597,18 @@ func TestTsCmdUpdatePinnedVersion(t *testing.T) {
 		t.Skip("requires shell scripts")
 	}
 
-	server := newTestServer(t)
 	const (
 		svcName       = "svc-ts-pinned-update"
-		currentVer    = "1.90.0"
+		currentVer    = tailscaleResolverFixtureDaemonVersion
 		pinnedVersion = "1.95.112"
 	)
-
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		svcName,
+		tailscaleResolverGenerationHistorical,
+	)
+	server := fixture.server
 	runDir := server.serviceRunDir(svcName)
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		t.Fatalf("mkdir run dir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(runDir, "tailscaled"), []byte("old-daemon"), 0o755); err != nil {
-		t.Fatalf("write existing tailscaled: %v", err)
-	}
 
 	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
 	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
@@ -291,26 +623,6 @@ func TestTsCmdUpdatePinnedVersion(t *testing.T) {
 		t.Fatalf("write new tailscale: %v", err)
 	}
 
-	if _, _, err := server.cfg.DB.MutateService(svcName, func(_ *db.Data, s *db.Service) error {
-		s.ServiceType = db.ServiceTypeDockerCompose
-		s.Generation = 1
-		s.LatestGeneration = 1
-		s.TSNet = &db.TailscaleNetwork{Interface: "yts-test", Version: currentVer}
-		return nil
-	}); err != nil {
-		t.Fatalf("seed service: %v", err)
-	}
-
-	fakeBin := t.TempDir()
-	systemctlLog := filepath.Join(fakeBin, "systemctl.log")
-	systemctlScript := filepath.Join(fakeBin, "systemctl")
-	script := "#!/bin/sh\nprintf '%s\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\n"
-	if err := os.WriteFile(systemctlScript, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake systemctl: %v", err)
-	}
-	t.Setenv("SYSTEMCTL_LOG", systemctlLog)
-	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	origLatest := tailscaleLatestVersionForTrackFn
 	defer func() { tailscaleLatestVersionForTrackFn = origLatest }()
 	tailscaleLatestVersionForTrackFn = func(track string) (string, error) {
@@ -318,8 +630,12 @@ func TestTsCmdUpdatePinnedVersion(t *testing.T) {
 		return "", nil
 	}
 
+	var verifiedRestarts []string
+	stubVerifiedTailscaleRestart(t, &verifiedRestarts)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	t.Cleanup(cancel)
 	execer := &ttyExecer{
-		ctx: context.Background(),
+		ctx: ctx,
 		s:   server,
 		sn:  svcName,
 		rw:  readWriter{Reader: strings.NewReader("y\n"), Writer: &bytes.Buffer{}},
@@ -336,6 +652,168 @@ func TestTsCmdUpdatePinnedVersion(t *testing.T) {
 		t.Fatalf("TSNet.Version = %q, want %q", got, pinnedVersion)
 	}
 	assertFileContent(t, filepath.Join(runDir, "tailscaled"), "pinned-daemon")
+	if len(verifiedRestarts) != 1 || verifiedRestarts[0] != svcName {
+		t.Fatalf("verified restarts = %v, want [%s]", verifiedRestarts, svcName)
+	}
+}
+
+func TestTsCmdUpdateRepairsMetadataMatchedButSelectedBinaryOlder(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires shell scripts")
+	}
+
+	const targetVersion = "1.95.112"
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		"svc-ts-stale-version-metadata",
+		tailscaleResolverGenerationCurrent,
+	)
+	server := fixture.server
+	if _, _, err := server.cfg.DB.MutateService(fixture.service.Name, func(_ *db.Data, service *db.Service) error {
+		service.TSNet.Version = targetVersion
+		return nil
+	}); err != nil {
+		t.Fatalf("seed stale version metadata: %v", err)
+	}
+
+	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
+	for name, raw := range map[string]string{
+		"tailscaled-" + targetVersion: "replacement-daemon",
+		"tailscale-" + targetVersion:  "replacement-client",
+	} {
+		if err := os.WriteFile(filepath.Join(tsdDir, name), []byte(raw), 0o755); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	var verifiedRestarts []string
+	stubVerifiedTailscaleRestart(t, &verifiedRestarts)
+	var out bytes.Buffer
+	execer := &ttyExecer{
+		ctx: context.Background(),
+		s:   server,
+		sn:  fixture.service.Name,
+		rw:  readWriter{Reader: strings.NewReader("y\n"), Writer: &out},
+	}
+	if err := execer.tsCmdFunc([]string{"update", targetVersion}); err != nil {
+		t.Fatalf("tsCmdFunc(update <version>): %v", err)
+	}
+
+	if strings.Contains(out.String(), "Already up to date") {
+		t.Fatalf("update output trusted stale metadata: %q", out.String())
+	}
+	if !strings.Contains(out.String(), tailscaleResolverFixtureDaemonVersion+" -> "+targetVersion) {
+		t.Fatalf("update output = %q, want selected generation version transition", out.String())
+	}
+	assertFileContent(t, filepath.Join(server.serviceBinDir(fixture.service.Name), "tailscaled"), "replacement-daemon")
+	if len(verifiedRestarts) != 1 || verifiedRestarts[0] != fixture.service.Name {
+		t.Fatalf("verified restarts = %v, want [%s]", verifiedRestarts, fixture.service.Name)
+	}
+	persisted, err := server.serviceView(fixture.service.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryArtifact, ok := persisted.Artifacts().GetOk(db.ArtifactTSBinary)
+	if !ok {
+		t.Fatal("persisted tailscaled artifact is missing")
+	}
+	if got, ok := binaryArtifact.Refs().GetOk(db.Gen(fixture.service.Generation)); !ok ||
+		got != filepath.Join(tsdDir, "tailscaled-"+targetVersion) {
+		t.Fatalf("persisted selected tailscaled artifact = %q, %v", got, ok)
+	}
+}
+
+func TestTsCmdUpdateDoesNotReportCurrentWhenSelectedRuntimeDrifted(t *testing.T) {
+	const targetVersion = "1.95.112"
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		"svc-ts-drifted-selected-runtime",
+		tailscaleResolverGenerationCurrent,
+	)
+	targetArtifact := filepath.Join(fixture.server.cfg.RootDir, "tsd", "tailscaled-"+targetVersion)
+	if err := os.WriteFile(targetArtifact, []byte("replacement-daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fixture.server.cfg.DB.MutateService(
+		fixture.service.Name,
+		func(_ *db.Data, service *db.Service) error {
+			service.TSNet.Version = targetVersion
+			artifact := service.Artifacts[db.ArtifactTSBinary]
+			artifact.Refs[db.Gen(service.Generation)] = targetArtifact
+			artifact.Refs[db.ArtifactRef("latest")] = targetArtifact
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := (&ttyExecer{
+		ctx: context.Background(),
+		s:   fixture.server,
+		sn:  fixture.service.Name,
+		rw:  readWriter{Reader: strings.NewReader(""), Writer: &out},
+	}).tsCmdFunc([]string{"update", targetVersion})
+	if err == nil || !strings.Contains(err.Error(), "does not match selected runtime") {
+		t.Fatalf("tsCmdFunc error = %v, want selected runtime drift rejection", err)
+	}
+	if strings.Contains(out.String(), "Already up to date") {
+		t.Fatalf("update output reported unproved current state: %q", out.String())
+	}
+}
+
+func TestTsCmdUpdateRepairsMetadataOlderThanProvenSelectedRuntime(t *testing.T) {
+	for index, staleMetadata := range []string{"1.90.0", " 1.92.3 "} {
+		t.Run(fmt.Sprintf("case-%d", index), func(t *testing.T) {
+			fixture := newGuardedTailscaleResolverFixture(
+				t,
+				fmt.Sprintf("svc-ts-stale-old-version-metadata-%d", index),
+				tailscaleResolverGenerationCurrent,
+			)
+			if _, _, err := fixture.server.cfg.DB.MutateService(
+				fixture.service.Name,
+				func(_ *db.Data, service *db.Service) error {
+					service.TSNet.Version = staleMetadata
+					return nil
+				},
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			var out bytes.Buffer
+			if err := (&ttyExecer{
+				ctx: context.Background(),
+				s:   fixture.server,
+				sn:  fixture.service.Name,
+				rw:  readWriter{Reader: strings.NewReader(""), Writer: &out},
+			}).tsCmdFunc([]string{"update", tailscaleResolverFixtureDaemonVersion}); err != nil {
+				t.Fatalf("tsCmdFunc(update <version>): %v", err)
+			}
+			if !strings.Contains(out.String(), "Already up to date") {
+				t.Fatalf("update output = %q, want proven current status", out.String())
+			}
+			persisted, err := fixture.server.serviceView(fixture.service.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := persisted.TSNet().Version(); got != tailscaleResolverFixtureDaemonVersion {
+				t.Fatalf("repaired TSNet.Version = %q, want %q", got, tailscaleResolverFixtureDaemonVersion)
+			}
+		})
+	}
+}
+
+func stubVerifiedTailscaleRestart(t *testing.T, calls *[]string) {
+	t.Helper()
+	previous := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(ctx context.Context, service *svc.SystemdService) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		*calls = append(*calls, service.Name())
+		return nil
+	}
+	t.Cleanup(func() { restartTailscaleSystemdSidecar = previous })
 }
 
 func TestTsCmdUpdateCanceledByUser(t *testing.T) {

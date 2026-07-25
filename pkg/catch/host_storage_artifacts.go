@@ -414,7 +414,13 @@ func newHostStorageSystemdService(cfg Config, service *db.Service) (*svc.Systemd
 		return nil, fmt.Errorf("host storage unit reinstall requires a db store")
 	}
 	root := serviceRootFromConfig(cfg, *service)
-	systemdService, err := svc.NewSystemdService(cfg.DB, service.View(), serviceRunDirForRoot(root))
+	catchServer := &Server{cfg: cfg}
+	systemdService, err := svc.NewSystemdService(
+		cfg.DB,
+		service.View(),
+		serviceRunDirForRoot(root),
+		svc.WithTailscaleGuardRunner(catchServer.catchRunnerPath()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("load systemd service %s: %w", service.Name, err)
 	}

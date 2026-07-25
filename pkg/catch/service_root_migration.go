@@ -241,20 +241,49 @@ func updatedServiceForRootMigration(cfg Config, plan serviceRootMigrationPlan, o
 }
 
 func applyServiceRootMigrationRuntimeChangesForConfigs(ctx context.Context, beforeCfg Config, afterCfg Config, before db.Service, after db.Service, w io.Writer) error {
-	return applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(ctx, beforeCfg, afterCfg, before, after, w, defaultVMRuntimeDescriptorFileDeps())
+	afterServer := &Server{cfg: afterCfg}
+	return afterServer.applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(
+		ctx,
+		beforeCfg,
+		afterCfg,
+		before,
+		after,
+		w,
+		defaultVMRuntimeDescriptorFileDeps(),
+	)
 }
 
-func applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(ctx context.Context, beforeCfg Config, afterCfg Config, before db.Service, after db.Service, w io.Writer, descriptorDeps vmRuntimeDescriptorFileDeps) error {
+func (s *Server) applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(ctx context.Context, beforeCfg Config, afterCfg Config, before db.Service, after db.Service, w io.Writer, descriptorDeps vmRuntimeDescriptorFileDeps) error {
 	_ = w
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := s.checkTailscaleResolverCanonicalReady(ctx, after); err != nil {
+		return err
+	}
+	return s.applyReadyServiceRootMigrationRuntimeChanges(
+		ctx,
+		beforeCfg,
+		afterCfg,
+		before,
+		after,
+		descriptorDeps,
+	)
+}
+
+func (s *Server) applyReadyServiceRootMigrationRuntimeChanges(
+	ctx context.Context,
+	beforeCfg Config,
+	afterCfg Config,
+	before db.Service,
+	after db.Service,
+	descriptorDeps vmRuntimeDescriptorFileDeps,
+) error {
 	beforeServer := &Server{cfg: beforeCfg}
-	afterServer := &Server{cfg: afterCfg}
 	oldRoot := serviceRootFromConfig(beforeCfg, before)
 	newRoot := serviceRootFromConfig(afterCfg, after)
 	if after.VM != nil && after.VM.Components != nil {
-		_, err := regenerateHostStorageVMSystemdUnitWithDeps(ctx, afterCfg, &after, afterServer.catchRunnerPath(), descriptorDeps)
+		_, err := regenerateHostStorageVMSystemdUnitWithDeps(ctx, afterCfg, &after, s.catchRunnerPath(), descriptorDeps)
 		return err
 	}
 	if err := downDockerComposeForRootMigration(beforeServer, &before, oldRoot); err != nil {
@@ -267,11 +296,11 @@ func applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(ctx context.Conte
 			}
 		}
 	} else if serviceRootMigrationNeedsSystemdInstall(&before, &after) {
-		if err := installSystemdForRootMigration(afterServer, &before, &after, newRoot); err != nil {
+		if err := installSystemdForRootMigration(s, &before, &after, newRoot); err != nil {
 			return err
 		}
 	}
-	return nil
+	return s.checkTailscaleResolverReady(ctx, after)
 }
 
 func serviceRootMigrationArtifactsCleared(before db.Service, after db.Service) bool {
@@ -1015,7 +1044,13 @@ func (s *Server) downDockerComposeForRootMigration(service *db.Service, oldRoot 
 	if !serviceRootMigrationHasDockerCompose(service) {
 		return nil
 	}
-	composeService, err := svc.NewDockerComposeService(s.cfg.DB, service.View(), serviceDataDirForRoot(oldRoot), serviceRunDirForRoot(oldRoot))
+	composeService, err := svc.NewDockerComposeService(
+		s.cfg.DB,
+		service.View(),
+		serviceDataDirForRoot(oldRoot),
+		serviceRunDirForRoot(oldRoot),
+		svc.WithTailscaleGuardRunner(s.catchRunnerPath()),
+	)
 	if err != nil {
 		return fmt.Errorf("load old docker compose project: %w", err)
 	}
@@ -1033,18 +1068,30 @@ func serviceRootMigrationHasDockerCompose(service *db.Service) bool {
 }
 
 func (s *Server) installSystemdForRootMigration(_ *db.Service, updatedService *db.Service, newRoot string) error {
-	systemdService, err := svc.NewSystemdService(s.cfg.DB, updatedService.View(), serviceRunDirForRoot(newRoot))
+	systemdService, err := svc.NewSystemdService(
+		s.cfg.DB,
+		updatedService.View(),
+		serviceRunDirForRoot(newRoot),
+		svc.WithTailscaleGuardRunner(s.catchRunnerPath()),
+	)
 	if err != nil {
 		return fmt.Errorf("load migrated systemd artifacts: %w", err)
 	}
-	if err := systemdService.Install(); err != nil {
+	if err := systemdService.InstallWithActivationCheck(func() error {
+		return s.checkTailscaleResolverReady(context.Background(), *updatedService)
+	}); err != nil {
 		return fmt.Errorf("install migrated systemd artifacts: %w", err)
 	}
 	return nil
 }
 
 func (s *Server) uninstallSystemdForRootMigration(oldService *db.Service, oldRoot string) error {
-	systemdService, err := svc.NewSystemdService(s.cfg.DB, oldService.View(), serviceRunDirForRoot(oldRoot))
+	systemdService, err := svc.NewSystemdService(
+		s.cfg.DB,
+		oldService.View(),
+		serviceRunDirForRoot(oldRoot),
+		svc.WithTailscaleGuardRunner(s.catchRunnerPath()),
+	)
 	if err != nil {
 		return fmt.Errorf("load old systemd artifacts: %w", err)
 	}

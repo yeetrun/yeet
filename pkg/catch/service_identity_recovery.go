@@ -1348,6 +1348,13 @@ func (s *Server) clearServiceIdentityMutationBlock(service string) {
 }
 
 func (s *Server) checkServiceIdentityMutationAllowed(service string) error {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return err
+	}
+	return s.checkServiceIdentityRecoveryMutationAllowed(service)
+}
+
+func (s *Server) checkServiceIdentityRecoveryMutationAllowed(service string) error {
 	s.serviceIdentityRecoveryMu.RLock()
 	defer s.serviceIdentityRecoveryMu.RUnlock()
 	if s.serviceIdentityGlobalMutationBlock != nil {
@@ -1366,6 +1373,9 @@ func (s *Server) setServiceIdentityGlobalMutationBlock(err error) {
 }
 
 func (s *Server) checkServiceIdentityMutationsAllowed(services []string) error {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return err
+	}
 	s.serviceIdentityRecoveryMu.RLock()
 	defer s.serviceIdentityRecoveryMu.RUnlock()
 	if s.serviceIdentityGlobalMutationBlock != nil {

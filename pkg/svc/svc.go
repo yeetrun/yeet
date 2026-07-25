@@ -20,9 +20,24 @@ type LogOptions struct {
 	Lines  int
 }
 
+// SystemdServiceOption configures a SystemdService at construction time.
+type SystemdServiceOption func(*SystemdService)
+
+// WithTailscaleGuardRunner configures the exact stable Catch runner accepted
+// by resolver-guarded Tailscale sidecar units.
+func WithTailscaleGuardRunner(path string) SystemdServiceOption {
+	return func(service *SystemdService) {
+		service.tailscaleGuardRunner = path
+	}
+}
+
 // NewSystemdService creates a new systemd service from a SystemdConfigView.
-func NewSystemdService(db *db.Store, cfg db.ServiceView, runDir string) (*SystemdService, error) {
-	return &SystemdService{db: db, cfg: cfg, runDir: runDir}, nil
+func NewSystemdService(db *db.Store, cfg db.ServiceView, runDir string, options ...SystemdServiceOption) (*SystemdService, error) {
+	service := &SystemdService{db: db, cfg: cfg, runDir: runDir}
+	for _, option := range options {
+		option(service)
+	}
+	return service, nil
 }
 
 // NewHostSystemdService creates a privileged, self-managed host daemon that
@@ -32,8 +47,8 @@ func NewHostSystemdService(db *db.Store, cfg db.ServiceView, runDir string) (*Sy
 }
 
 // NewDockerComposeService creates a new docker compose service from a config.
-func NewDockerComposeService(db *db.Store, cfg db.ServiceView, dataDir, runDir string) (*DockerComposeService, error) {
-	sd, err := NewSystemdService(db, cfg, runDir)
+func NewDockerComposeService(db *db.Store, cfg db.ServiceView, dataDir, runDir string, options ...SystemdServiceOption) (*DockerComposeService, error) {
+	sd, err := NewSystemdService(db, cfg, runDir, options...)
 	if err != nil {
 		return nil, err
 	}

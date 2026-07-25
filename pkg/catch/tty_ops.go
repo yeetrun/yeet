@@ -811,6 +811,9 @@ func (e *ttyExecer) tsUpdateCmdFunc(sv db.ServiceView, args []string) error {
 		return err
 	}
 	if latest == current {
+		if err := e.verifyTSUpdateAlreadyCurrent(current); err != nil {
+			return err
+		}
 		return printTSUpdateStatus(e.rw, "Already up to date (%s)\n", current)
 	}
 	ok, err := confirmTSUpdate(e.rw, current, latest)
@@ -828,7 +831,10 @@ func resolveTSUpdate(sv db.ServiceView, args []string) (current, track, latest s
 	if err != nil {
 		return "", "", "", false, err
 	}
-	current = strings.TrimSpace(sv.TSNet().Version())
+	current, _, err = selectedTailscaleUpdateVersion(sv)
+	if err != nil {
+		return "", "", "", false, err
+	}
 	if current == "" {
 		return "", "", "", false, errors.New("service tailscale version is not set")
 	}
@@ -846,19 +852,95 @@ func resolveTSUpdate(sv db.ServiceView, args []string) (current, track, latest s
 	return current, track, latest, pinned, nil
 }
 
+func selectedTailscaleUpdateVersion(sv db.ServiceView) (string, bool, error) {
+	if artifact, ok := sv.Artifacts().GetOk(db.ArtifactTSBinary); ok {
+		if path, ok := artifact.Refs().GetOk(db.Gen(sv.Generation())); ok {
+			version, err := tailscaleResolverGenerationBinaryVersion(path)
+			if err != nil {
+				return "", true, fmt.Errorf("selected tailscaled artifact version: %w", err)
+			}
+			return version, true, nil
+		}
+	}
+	return strings.TrimSpace(sv.TSNet().Version()), false, nil
+}
+
+func (e *ttyExecer) verifyTSUpdateAlreadyCurrent(expectedVersion string) error {
+	return e.withLockedServiceMutation(func() error {
+		sv, err := e.s.serviceView(e.sn)
+		if err != nil {
+			return fmt.Errorf("reload service before verifying tailscale version: %w", err)
+		}
+		current, selected, err := selectedTailscaleUpdateVersion(sv)
+		if err != nil {
+			return err
+		}
+		if current != expectedVersion {
+			return fmt.Errorf(
+				"tailscale version changed while verifying current state: got %q, want %q",
+				current,
+				expectedVersion,
+			)
+		}
+		if !selected {
+			return nil
+		}
+		var normalizeMetadata func() error
+		if sv.TSNet().Version() != expectedVersion {
+			normalizeMetadata = func() error {
+				return e.persistProvenSelectedTailscaleVersion(expectedVersion)
+			}
+		}
+		if err := e.s.withTailscaleResolverReadyForActivation(e.ctx, e.sn, normalizeMetadata); err != nil {
+			return fmt.Errorf("verify selected tailscaled artifact before reporting current: %w", err)
+		}
+		return nil
+	})
+}
+
+func (e *ttyExecer) persistProvenSelectedTailscaleVersion(expectedVersion string) error {
+	_, _, err := e.s.cfg.DB.MutateService(e.sn, func(_ *db.Data, service *db.Service) error {
+		if service.TSNet == nil {
+			return errors.New("service is not connected to tailscale")
+		}
+		path, ok := service.Artifacts.Gen(db.ArtifactTSBinary, service.Generation)
+		if !ok {
+			return errors.New("selected tailscaled artifact is missing")
+		}
+		version, err := tailscaleResolverGenerationBinaryVersion(path)
+		if err != nil {
+			return err
+		}
+		if version != expectedVersion {
+			return fmt.Errorf(
+				"selected tailscaled artifact version changed: got %q, want %q",
+				version,
+				expectedVersion,
+			)
+		}
+		service.TSNet.Version = expectedVersion
+		return nil
+	})
+	return err
+}
+
 func (e *ttyExecer) applyTSUpdate(current, latest string) error {
-	tsd, err := e.downloadTSUpdate(latest)
-	if err != nil {
-		return err
-	}
-	serviceRoot, sv, managedBinary, err := e.resolveTSUpdateTarget()
-	if err != nil {
-		return err
-	}
-	if err := replaceTailscaledManagedBinary(tsd, managedBinary, serviceRoot, sv); err != nil {
-		return err
-	}
-	return e.finishTSUpdate(current, latest, tsd)
+	return e.withLockedServiceMutation(func() error {
+		tsd, err := e.downloadTSUpdate(latest)
+		if err != nil {
+			return err
+		}
+		serviceRoot, sv, managedBinary, err := e.resolveTSUpdateTarget()
+		if err != nil {
+			return err
+		}
+		return e.s.withTailscaleResolverReadyForActivation(e.ctx, e.sn, func() error {
+			if err := replaceTailscaledManagedBinary(tsd, managedBinary, serviceRoot, sv); err != nil {
+				return err
+			}
+			return e.finishTSUpdate(current, latest, tsd)
+		})
+	})
 }
 
 func (e *ttyExecer) downloadTSUpdate(latest string) (string, error) {
@@ -881,7 +963,7 @@ func (e *ttyExecer) resolveTSUpdateTarget() (string, db.ServiceView, string, err
 	if err != nil {
 		return "", db.ServiceView{}, "", fmt.Errorf("failed to load service for tailscale update: %w", err)
 	}
-	managedBinary, err := tailscaledManagedBinaryPath(sv, serviceRoot)
+	managedBinary, err := tailscaledManagedBinaryPath(sv, serviceRoot, e.s.catchRunnerPath())
 	return serviceRoot, sv, managedBinary, err
 }
 
@@ -901,9 +983,12 @@ func (e *ttyExecer) finishTSUpdate(current, latest, tsd string) error {
 	if err := e.persistTSUpdate(latest, tsd); err != nil {
 		return fmt.Errorf("failed to persist tailscale version update: %w", err)
 	}
-	unit := fmt.Sprintf("yeet-%s-ts.service", e.sn)
-	if err := e.newCmd("systemctl", "restart", unit).Run(); err != nil {
-		return fmt.Errorf("failed to restart tailscaled service: %w", err)
+	service, err := e.s.systemdService(e.sn)
+	if err != nil {
+		return fmt.Errorf("failed to load tailscaled service: %w", err)
+	}
+	if err := restartTailscaleSystemdSidecar(e.ctx, service); err != nil {
+		return fmt.Errorf("failed to restart and verify tailscaled service: %w", err)
 	}
 	if _, err := fmt.Fprintf(e.rw, "Updated tailscale for %s: %s -> %s\n", e.sn, current, latest); err != nil {
 		return fmt.Errorf("failed to write tailscale update result: %w", err)
@@ -911,11 +996,11 @@ func (e *ttyExecer) finishTSUpdate(current, latest, tsd string) error {
 	return nil
 }
 
-func tailscaledManagedBinaryPath(sv db.ServiceView, serviceRoot string) (string, error) {
+func tailscaledManagedBinaryPath(sv db.ServiceView, serviceRoot, expectedCatchRunner string) (string, error) {
 	managed := filepath.Join(serviceBinDirForRoot(serviceRoot), "tailscaled")
 	legacy := filepath.Join(serviceRunDirForRoot(serviceRoot), "tailscaled")
 	if unitPath, ok := sv.AsStruct().Artifacts.Latest(db.ArtifactTSService); ok {
-		path, found, err := tailscaledManagedBinaryPathFromUnit(unitPath, managed, legacy)
+		path, found, err := tailscaledManagedBinaryPathFromUnit(unitPath, serviceRoot, expectedCatchRunner)
 		if err != nil || found {
 			return path, err
 		}
@@ -923,7 +1008,7 @@ func tailscaledManagedBinaryPath(sv db.ServiceView, serviceRoot string) (string,
 	return existingTailscaledManagedBinaryPath(managed, legacy)
 }
 
-func tailscaledManagedBinaryPathFromUnit(unitPath, managed, legacy string) (string, bool, error) {
+func tailscaledManagedBinaryPathFromUnit(unitPath, serviceRoot, expectedCatchRunner string) (string, bool, error) {
 	raw, err := os.ReadFile(unitPath)
 	if os.IsNotExist(err) {
 		return "", false, nil
@@ -931,18 +1016,11 @@ func tailscaledManagedBinaryPathFromUnit(unitPath, managed, legacy string) (stri
 	if err != nil {
 		return "", false, fmt.Errorf("inspect tailscale service unit for update: %w", err)
 	}
-	executable, ok := systemdUnitExecStart(raw)
-	if !ok {
-		return "", false, fmt.Errorf("tailscale service unit %s has no ExecStart", unitPath)
+	daemon, err := svc.TailscaledDaemonFromUnit(string(raw), serviceRoot, expectedCatchRunner)
+	if err != nil {
+		return "", false, fmt.Errorf("inspect tailscale service unit %s for update: %w", unitPath, err)
 	}
-	switch filepath.Clean(executable) {
-	case filepath.Clean(managed):
-		return managed, true, nil
-	case filepath.Clean(legacy):
-		return legacy, true, nil
-	default:
-		return "", false, fmt.Errorf("tailscale service unit %s executes unmanaged binary %s", unitPath, executable)
-	}
+	return daemon, true, nil
 }
 
 func existingTailscaledManagedBinaryPath(managed, legacy string) (string, error) {
@@ -954,20 +1032,6 @@ func existingTailscaledManagedBinaryPath(managed, legacy string) (string, error)
 		}
 	}
 	return managed, nil
-}
-
-func systemdUnitExecStart(raw []byte) (string, bool) {
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "ExecStart=") {
-			continue
-		}
-		fields := strings.Fields(strings.TrimPrefix(line, "ExecStart="))
-		if len(fields) != 0 {
-			return fields[0], true
-		}
-	}
-	return "", false
 }
 
 func (e *ttyExecer) persistTSUpdate(latest, tsd string) error {

@@ -180,47 +180,74 @@ func (e *ttyExecer) vmImagesUpdateCmdFunc(flags cli.VMImagesFlags, args []string
 	if err != nil {
 		return err
 	}
-	var componentCatalogs *vmImageGuestKernelCatalogs
-	if catalog.ComponentCatalogs != nil {
-		fetched, err := fetchVMImageUpdateComponentCatalogs(ctx, catalog.ComponentCatalogs)
-		if err != nil {
-			return err
-		}
-		componentCatalogs = &fetched
+	componentCatalogs, err := fetchVMImagesUpdateComponentCatalogs(ctx, catalog.ComponentCatalogs)
+	if err != nil {
+		return err
 	}
 	states := make([]vmImageCacheState, 0, len(images))
 	for _, image := range images {
-		asset, err := e.ensureCatalogVMImageAndPrune(ctx, cache, image, e.vmImagesProgressUI(flags))
+		state, err := e.updateVMImageState(ctx, cache, flags, image, componentCatalogs)
 		if err != nil {
 			return err
 		}
-		state := vmImageCacheState{
-			Payload:       image.Payload,
-			CachedVersion: asset.Manifest.Version,
-			LatestVersion: asset.Manifest.Version,
-			State:         vmImageCacheCurrent,
-			CachePath:     asset.Paths.Dir,
-			ManifestURL:   image.ManifestURL,
-		}
-		if state.CachePath == "" && state.CachedVersion != "" {
-			state.CachePath = filepath.Join(cache.Root, state.CachedVersion)
-		}
-		if componentCatalogs != nil {
-			guest, kernel, err := e.ensureVMImageUpdateComponents(ctx, image, *componentCatalogs)
-			if err != nil {
-				return err
-			}
-			state.GuestBaseID = guest.Manifest.GuestBaseID
-			state.GuestBaseManifestSHA256 = guest.ManifestSHA256
-			state.KernelID = kernel.Manifest.KernelID
-			state.KernelManifestSHA256 = kernel.ManifestSHA256
-		}
 		states = append(states, state)
 	}
-	if len(states) == 1 {
-		return renderVMImageCacheState(e.rw, flags.Format, states[0])
+	return renderVMImagesUpdateStates(e.rw, flags.Format, states)
+}
+
+func fetchVMImagesUpdateComponentCatalogs(ctx context.Context, refs *vmImageComponentCatalogs) (*vmImageGuestKernelCatalogs, error) {
+	if refs == nil {
+		return nil, nil
 	}
-	return renderVMImageCacheStates(e.rw, flags.Format, states)
+	fetched, err := fetchVMImageUpdateComponentCatalogs(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	return &fetched, nil
+}
+
+func (e *ttyExecer) updateVMImageState(ctx context.Context, cache vmImageCache, flags cli.VMImagesFlags, image vmImageCatalogImage, componentCatalogs *vmImageGuestKernelCatalogs) (vmImageCacheState, error) {
+	asset, err := e.ensureCatalogVMImageAndPrune(ctx, cache, image, e.vmImagesProgressUI(flags))
+	if err != nil {
+		return vmImageCacheState{}, err
+	}
+	state := vmImageCacheState{
+		Payload:       image.Payload,
+		CachedVersion: asset.Manifest.Version,
+		LatestVersion: asset.Manifest.Version,
+		State:         vmImageCacheCurrent,
+		CachePath:     asset.Paths.Dir,
+		ManifestURL:   image.ManifestURL,
+	}
+	if state.CachePath == "" && state.CachedVersion != "" {
+		state.CachePath = filepath.Join(cache.Root, state.CachedVersion)
+	}
+	if err := e.addVMImageUpdateComponents(ctx, &state, image, componentCatalogs); err != nil {
+		return vmImageCacheState{}, err
+	}
+	return state, nil
+}
+
+func (e *ttyExecer) addVMImageUpdateComponents(ctx context.Context, state *vmImageCacheState, image vmImageCatalogImage, catalogs *vmImageGuestKernelCatalogs) error {
+	if catalogs == nil {
+		return nil
+	}
+	guest, kernel, err := e.ensureVMImageUpdateComponents(ctx, image, *catalogs)
+	if err != nil {
+		return err
+	}
+	state.GuestBaseID = guest.Manifest.GuestBaseID
+	state.GuestBaseManifestSHA256 = guest.ManifestSHA256
+	state.KernelID = kernel.Manifest.KernelID
+	state.KernelManifestSHA256 = kernel.ManifestSHA256
+	return nil
+}
+
+func renderVMImagesUpdateStates(w io.Writer, formatOut string, states []vmImageCacheState) error {
+	if len(states) == 1 {
+		return renderVMImageCacheState(w, formatOut, states[0])
+	}
+	return renderVMImageCacheStates(w, formatOut, states)
 }
 
 func (e *ttyExecer) ensureVMImageUpdateComponents(ctx context.Context, image vmImageCatalogImage, catalogs vmImageGuestKernelCatalogs) (vmGuestBaseArtifact, vmKernelArtifact, error) {

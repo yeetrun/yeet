@@ -823,14 +823,20 @@ func (s *Server) migrateServiceRootWithPlanWriterRuntimeLocked(plan serviceRootM
 		return err
 	}
 	plan.Mode = mode
-	return s.withServiceSnapshot(context.Background(), snapshotOperation{
-		Service: oldService,
-		Event:   snapshotEventServiceRootMigration,
-		Writer:  w,
-		Operation: func() error {
-			return s.executeServiceRootMigrationPlan(oldService, plan, w)
-		},
-	})
+	operation := func() error {
+		return s.withServiceSnapshot(context.Background(), snapshotOperation{
+			Service: oldService,
+			Event:   snapshotEventServiceRootMigration,
+			Writer:  w,
+			Operation: func() error {
+				return s.executeServiceRootMigrationPlan(oldService, plan, w)
+			},
+		})
+	}
+	if !tailscaleResolverPersistedRecord(*oldService) {
+		return operation()
+	}
+	return s.withTailscaleResolverMutationGuard(operation)
 }
 
 func (s *Server) executeServiceRootMigrationPlan(oldService *db.Service, plan serviceRootMigrationPlan, w io.Writer) error {
@@ -847,7 +853,7 @@ func (s *Server) executeServiceRootMigrationPlan(oldService *db.Service, plan se
 	if err := s.validateServiceRootMigrationPlanCurrent(plan); err != nil {
 		return err
 	}
-	if err := applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(
+	if err := s.applyServiceRootMigrationRuntimeChangesForConfigsWithDeps(
 		context.Background(), s.cfg, s.cfg, *oldService, *updatedService, w, s.runtimeReconcileDependencies().descriptor,
 	); err != nil {
 		return err

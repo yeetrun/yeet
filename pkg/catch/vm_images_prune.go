@@ -85,33 +85,51 @@ func (s *Server) planVMImagePruneWithCatalog(ctx context.Context, cache vmImageC
 	if err != nil {
 		return nil, err
 	}
-
-	rows := make([]vmImagePruneRow, 0, len(cacheEntries)+len(zfsBases))
-	for _, entry := range cacheEntries {
-		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindCache, entry.Version, entry.Dir, currentVersions, inUseVersions, false, nil, catalog))
+	rows := planCachedVMImagePruneRows(cacheEntries, currentVersions, inUseVersions, catalog)
+	rows = append(rows, s.planVMImageZFSPruneRows(ctx, zfsBases, currentVersions, inUseVersions, catalog)...)
+	componentRows, err := s.planVMComponentImagePruneRows(ctx, catalog.ComponentCatalogs)
+	if err != nil {
+		return nil, err
 	}
-	runner := s.vmImagePruneZFSRunner()
-	for _, base := range zfsBases {
-		hasClones := false
-		var cloneErr error
-		if !vmImageVersionIsCurrent(currentVersions, base.Version, catalog) && !vmImageVersionInUse(inUseVersions, base.Version) {
-			hasClones, cloneErr = vmImageZFSSnapshotHasClones(ctx, runner, base.Snapshot)
-		}
-		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindZFSBase, base.Version, base.Dataset, currentVersions, inUseVersions, hasClones, cloneErr, catalog))
-	}
-	if catalog.ComponentCatalogs != nil {
-		componentCatalogs, err := fetchVMImagePruneComponentCatalogs(ctx, catalog.ComponentCatalogs)
-		if err != nil {
-			return nil, err
-		}
-		componentRows, err := s.planVMComponentImagePrune(componentCatalogs)
-		if err != nil {
-			return nil, err
-		}
-		rows = append(rows, componentRows...)
-	}
+	rows = append(rows, componentRows...)
 	sortVMImagePruneRows(rows)
 	return rows, nil
+}
+
+func planCachedVMImagePruneRows(entries []cachedVMImagePruneEntry, currentVersions map[string]string, inUseVersions map[string]struct{}, catalog vmImageCatalog) []vmImagePruneRow {
+	rows := make([]vmImagePruneRow, 0, len(entries))
+	for _, entry := range entries {
+		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindCache, entry.Version, entry.Dir, currentVersions, inUseVersions, false, nil, catalog))
+	}
+	return rows
+}
+
+func (s *Server) planVMImageZFSPruneRows(ctx context.Context, bases []vmImageZFSBase, currentVersions map[string]string, inUseVersions map[string]struct{}, catalog vmImageCatalog) []vmImagePruneRow {
+	runner := s.vmImagePruneZFSRunner()
+	rows := make([]vmImagePruneRow, 0, len(bases))
+	for _, base := range bases {
+		hasClones, cloneErr := vmImageZFSPruneCloneStatus(ctx, runner, base, currentVersions, inUseVersions, catalog)
+		rows = append(rows, classifyVMImagePruneRow(vmImagePruneKindZFSBase, base.Version, base.Dataset, currentVersions, inUseVersions, hasClones, cloneErr, catalog))
+	}
+	return rows
+}
+
+func vmImageZFSPruneCloneStatus(ctx context.Context, runner zfsCommandRunner, base vmImageZFSBase, currentVersions map[string]string, inUseVersions map[string]struct{}, catalog vmImageCatalog) (bool, error) {
+	if vmImageVersionIsCurrent(currentVersions, base.Version, catalog) || vmImageVersionInUse(inUseVersions, base.Version) {
+		return false, nil
+	}
+	return vmImageZFSSnapshotHasClones(ctx, runner, base.Snapshot)
+}
+
+func (s *Server) planVMComponentImagePruneRows(ctx context.Context, refs *vmImageComponentCatalogs) ([]vmImagePruneRow, error) {
+	if refs == nil {
+		return nil, nil
+	}
+	catalogs, err := fetchVMImagePruneComponentCatalogs(ctx, refs)
+	if err != nil {
+		return nil, err
+	}
+	return s.planVMComponentImagePrune(catalogs)
 }
 
 func (s *Server) planVMComponentImagePrune(catalogs vmImageGuestKernelCatalogs) ([]vmImagePruneRow, error) {
@@ -219,20 +237,25 @@ func (s *Server) inUseVMImageComponents() (map[string]struct{}, error) {
 		return nil, err
 	}
 	for _, sv := range dv.Services().All() {
-		if sv.ServiceType() != db.ServiceTypeVM || !sv.VM().Valid() || !sv.VM().Components().Valid() {
-			continue
-		}
-		components := sv.VM().Components()
-		guest := components.GuestBase()
-		kernel := components.Kernel()
-		if guest.ID != "" && guest.ManifestSHA256 != "" {
-			inUse[vmImageComponentPruneKey(vmImagePruneKindGuestBase, guest.ID, guest.ManifestSHA256)] = struct{}{}
-		}
-		if kernel.ID != "" && kernel.ManifestSHA256 != "" {
-			inUse[vmImageComponentPruneKey(vmImagePruneKindKernel, kernel.ID, kernel.ManifestSHA256)] = struct{}{}
-		}
+		addInUseVMImageComponents(inUse, sv)
 	}
 	return inUse, nil
+}
+
+func addInUseVMImageComponents(inUse map[string]struct{}, sv db.ServiceView) {
+	if sv.ServiceType() != db.ServiceTypeVM || !sv.VM().Valid() || !sv.VM().Components().Valid() {
+		return
+	}
+	components := sv.VM().Components()
+	addInUseVMImageComponent(inUse, vmImagePruneKindGuestBase, components.GuestBase().ID, components.GuestBase().ManifestSHA256)
+	addInUseVMImageComponent(inUse, vmImagePruneKindKernel, components.Kernel().ID, components.Kernel().ManifestSHA256)
+}
+
+func addInUseVMImageComponent(inUse map[string]struct{}, kind, id, manifestSHA256 string) {
+	if id == "" || manifestSHA256 == "" {
+		return
+	}
+	inUse[vmImageComponentPruneKey(kind, id, manifestSHA256)] = struct{}{}
 }
 
 func vmImageComponentPruneKey(kind, id, manifestSHA256 string) string {
@@ -537,58 +560,77 @@ func (s *Server) validateVMImageComponentPruneTarget(ctx context.Context, row vm
 	if err := ctx.Err(); err != nil {
 		return "", "", err
 	}
-	var rawRoot, label string
-	switch row.Kind {
-	case vmImagePruneKindGuestBase:
-		rawRoot, label = s.vmGuestBaseCache().Root, "guest-base"
-	case vmImagePruneKindKernel:
-		rawRoot, label = s.vmKernelArtifactCache().Root, "kernel"
-	default:
-		return "", "", fmt.Errorf("unsupported VM component prune kind %q", row.Kind)
-	}
-	root, err := validatedVMComponentCacheRoot(rawRoot, label)
+	root, label, err := s.validatedVMImageComponentPruneCacheRoot(row.Kind)
 	if err != nil {
 		return "", "", err
 	}
 	if err := validateTrustedVMRuntimeCachePath(root, true); err != nil {
 		return "", "", err
 	}
+	path, parts, err := validatedVMImageComponentPrunePath(root, label, row)
+	if err != nil {
+		return "", "", err
+	}
+	if err := validateVMImageComponentPruneIdentity(path, parts, row); err != nil {
+		return "", "", err
+	}
+	return root, path, nil
+}
+
+func (s *Server) validatedVMImageComponentPruneCacheRoot(kind string) (string, string, error) {
+	var rawRoot, label string
+	switch kind {
+	case vmImagePruneKindGuestBase:
+		rawRoot, label = s.vmGuestBaseCache().Root, "guest-base"
+	case vmImagePruneKindKernel:
+		rawRoot, label = s.vmKernelArtifactCache().Root, "kernel"
+	default:
+		return "", "", fmt.Errorf("unsupported VM component prune kind %q", kind)
+	}
+	root, err := validatedVMComponentCacheRoot(rawRoot, label)
+	if err != nil {
+		return "", "", err
+	}
+	return root, label, nil
+}
+
+func validatedVMImageComponentPrunePath(root, label string, row vmImagePruneRow) (string, []string, error) {
 	path := filepath.Clean(row.Path)
 	rel, err := filepath.Rel(root, path)
 	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("VM %s prune path is outside cache root", label)
+		return "", nil, fmt.Errorf("VM %s prune path is outside cache root", label)
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
-	if len(parts) != 3 ||
-		parts[0] != row.componentArchitecture ||
-		parts[1] != row.Version ||
-		parts[2] != row.componentManifestSHA256 ||
-		!isLowerSHA256(parts[2]) {
-		return "", "", fmt.Errorf("VM %s prune path is not an immutable cache leaf", label)
+	if len(parts) != 3 || parts[0] != row.componentArchitecture || parts[1] != row.Version || parts[2] != row.componentManifestSHA256 || !isLowerSHA256(parts[2]) {
+		return "", nil, fmt.Errorf("VM %s prune path is not an immutable cache leaf", label)
 	}
+	return path, parts, nil
+}
+
+func validateVMImageComponentPruneIdentity(path string, parts []string, row vmImagePruneRow) error {
 	switch row.Kind {
 	case vmImagePruneKindGuestBase:
-		if row.guestBaseRef == nil ||
-			row.guestBaseRef.Architecture != parts[0] ||
-			row.guestBaseRef.GuestBaseID != parts[1] ||
-			row.guestBaseRef.ManifestSHA256 != parts[2] {
-			return "", "", fmt.Errorf("VM guest-base prune row lacks its exact catalog identity")
-		}
-		if _, err := validateVMGuestBaseArtifactDirectory(path, *row.guestBaseRef); err != nil {
-			return "", "", err
-		}
+		return validateVMGuestBasePruneIdentity(path, parts, row.guestBaseRef)
 	case vmImagePruneKindKernel:
-		if row.kernelRef == nil ||
-			row.kernelRef.Architecture != parts[0] ||
-			row.kernelRef.KernelID != parts[1] ||
-			row.kernelRef.ManifestSHA256 != parts[2] {
-			return "", "", fmt.Errorf("VM kernel prune row lacks its exact catalog identity")
-		}
-		if _, err := validateVMKernelArtifactDirectory(path, *row.kernelRef); err != nil {
-			return "", "", err
-		}
+		return validateVMKernelPruneIdentity(path, parts, row.kernelRef)
 	}
-	return root, path, nil
+	return nil
+}
+
+func validateVMGuestBasePruneIdentity(path string, parts []string, ref *vmGuestBaseCatalogRef) error {
+	if ref == nil || ref.Architecture != parts[0] || ref.GuestBaseID != parts[1] || ref.ManifestSHA256 != parts[2] {
+		return fmt.Errorf("VM guest-base prune row lacks its exact catalog identity")
+	}
+	_, err := validateVMGuestBaseArtifactDirectory(path, *ref)
+	return err
+}
+
+func validateVMKernelPruneIdentity(path string, parts []string, ref *vmKernelCatalogRef) error {
+	if ref == nil || ref.Architecture != parts[0] || ref.KernelID != parts[1] || ref.ManifestSHA256 != parts[2] {
+		return fmt.Errorf("VM kernel prune row lacks its exact catalog identity")
+	}
+	_, err := validateVMKernelArtifactDirectory(path, *ref)
+	return err
 }
 
 func removeEmptyVMComponentPruneParents(root, componentDir string) {

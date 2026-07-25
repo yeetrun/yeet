@@ -16,18 +16,20 @@ import (
 )
 
 type vmRuntimeTrialConsumerDeps struct {
-	control      vmRuntimeControlFileDeps
-	coordinator  vmRuntimeAdoptionCoordinatorDeps
-	unitState    func(context.Context, string) (vmRuntimeUnitState, error)
-	processAlive func(int) bool
-	jailerState  func(string, uint32, uint32) (vmJailerReadiness, error)
-	interval     time.Duration
+	control       vmRuntimeControlFileDeps
+	coordinator   vmRuntimeAdoptionCoordinatorDeps
+	mutationGuard func(func() error) error
+	unitState     func(context.Context, string) (vmRuntimeUnitState, error)
+	processAlive  func(int) bool
+	jailerState   func(string, uint32, uint32) (vmJailerReadiness, error)
+	interval      time.Duration
 }
 
 func (s *Server) runtimeTrialConsumerDependencies() vmRuntimeTrialConsumerDeps {
 	deps := vmRuntimeTrialConsumerDeps{
-		control:     defaultVMRuntimeControlFileDeps(),
-		coordinator: defaultVMRuntimeAdoptionCoordinatorDeps(),
+		control:       defaultVMRuntimeControlFileDeps(),
+		coordinator:   defaultVMRuntimeAdoptionCoordinatorDeps(),
+		mutationGuard: s.withTailscaleResolverMutationGuard,
 		unitState: func(ctx context.Context, service string) (vmRuntimeUnitState, error) {
 			return readVMRuntimeUnitState(ctx, vmSystemdUnitName(service))
 		},
@@ -59,6 +61,9 @@ func (s *Server) runtimeTrialConsumerDependencies() vmRuntimeTrialConsumerDeps {
 }
 
 func (s *Server) consumeVMRuntimeTrialResults(ctx context.Context) error {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return err
+	}
 	dv, err := s.getDB()
 	if err != nil {
 		return err
@@ -67,24 +72,66 @@ func (s *Server) consumeVMRuntimeTrialResults(ctx context.Context) error {
 	deps := s.runtimeTrialConsumerDependencies()
 	var result error
 	for _, service := range services {
-		if _, err := consumeVMRuntimeTrialResult(ctx, &s.cfg, service.Name, deps); err != nil && !errors.Is(err, os.ErrNotExist) {
-			result = errors.Join(result, fmt.Errorf("consume VM runtime trial result for %s: %w", service.Name, err))
-		}
-		if trial := service.VM.Components.Runtime.Trial; trial != nil && trial.State == string(vmRuntimeTrialHealthy) && trial.RecoveryPoint != "" {
-			if err := s.reconcileHealthyVMRuntimeRecoveryPoint(ctx, service.Name, s.runtimeRestartDependencies().unprotect); err != nil {
-				result = errors.Join(result, fmt.Errorf("reconcile VM runtime recovery point for %s: %w", service.Name, err))
-			}
-		}
+		result = errors.Join(
+			result,
+			s.consumeVMRuntimeTrialService(ctx, service, deps),
+		)
+	}
+	return result
+}
+
+func (s *Server) consumeVMRuntimeTrialService(
+	ctx context.Context,
+	service *db.Service,
+	deps vmRuntimeTrialConsumerDeps,
+) error {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return err
+	}
+	deps.mutationGuard = s.withTailscaleResolverMutationGuard
+	var result error
+	_, consumeErr := consumeVMRuntimeTrialResult(ctx, &s.cfg, service.Name, deps)
+	if consumeErr != nil &&
+		!errors.Is(consumeErr, os.ErrNotExist) {
+		result = fmt.Errorf(
+			"consume VM runtime trial result for %s: %w",
+			service.Name,
+			consumeErr,
+		)
+	}
+	trial := service.VM.Components.Runtime.Trial
+	if trial == nil ||
+		trial.State != string(vmRuntimeTrialHealthy) ||
+		trial.RecoveryPoint == "" {
+		return result
+	}
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return errors.Join(result, err)
+	}
+	if err := s.reconcileHealthyVMRuntimeRecoveryPoint(
+		ctx,
+		service.Name,
+		s.runtimeRestartDependencies().unprotect,
+	); err != nil {
+		result = errors.Join(
+			result,
+			fmt.Errorf("reconcile VM runtime recovery point for %s: %w", service.Name, err),
+		)
 	}
 	return result
 }
 
 func (s *Server) reconcileHealthyVMRuntimeRecoveryPoint(ctx context.Context, serviceName string, unprotect func(context.Context, string) error) error {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return err
+	}
 	if unprotect == nil {
 		return fmt.Errorf("VM runtime recovery-point unprotect dependency is required")
 	}
 	return WithVMRuntimeTransactionLock(ctx, &s.cfg, func() error {
-		return s.reconcileHealthyVMRuntimeRecoveryPointLocked(ctx, serviceName, unprotect)
+		return s.withTailscaleResolverMutationGuard(func() error {
+			return s.reconcileHealthyVMRuntimeRecoveryPointLocked(ctx, serviceName, unprotect)
+		})
 	})
 }
 
@@ -94,18 +141,36 @@ func (s *Server) reconcileHealthyVMRuntimeRecoveryPointLocked(ctx context.Contex
 		return err
 	}
 	service := view.AsStruct().Services[serviceName]
-	if service == nil || service.VM == nil || service.VM.Components == nil {
+	recoveryPoint, ok := healthyVMRuntimeRecoveryPoint(service)
+	if !ok {
 		return nil
+	}
+	return s.clearHealthyVMRuntimeRecoveryPoint(ctx, serviceName, recoveryPoint, unprotect)
+}
+
+func healthyVMRuntimeRecoveryPoint(service *db.Service) (string, bool) {
+	if service == nil || service.VM == nil || service.VM.Components == nil {
+		return "", false
 	}
 	trial := service.VM.Components.Runtime.Trial
-	if trial == nil || trial.State != string(vmRuntimeTrialHealthy) || trial.RecoveryPoint == "" {
-		return nil
+	if trial == nil ||
+		trial.State != string(vmRuntimeTrialHealthy) ||
+		trial.RecoveryPoint == "" {
+		return "", false
 	}
-	recoveryPoint := trial.RecoveryPoint
+	return trial.RecoveryPoint, true
+}
+
+func (s *Server) clearHealthyVMRuntimeRecoveryPoint(
+	ctx context.Context,
+	serviceName string,
+	recoveryPoint string,
+	unprotect func(context.Context, string) error,
+) error {
 	if err := unprotect(ctx, recoveryPoint); err != nil {
 		return err
 	}
-	_, _, err = s.cfg.DB.MutateService(serviceName, func(_ *db.Data, current *db.Service) error {
+	_, _, err := s.cfg.DB.MutateService(serviceName, func(_ *db.Data, current *db.Service) error {
 		return clearHealthyVMRuntimeRecoveryPoint(current, recoveryPoint)
 	})
 	return err
@@ -139,7 +204,7 @@ func consumeVMRuntimeTrialResult(
 	cfg *Config,
 	serviceName string,
 	deps vmRuntimeTrialConsumerDeps,
-) (_ vmRuntimeTrialOutcome, retErr error) {
+) (outcome vmRuntimeTrialOutcome, retErr error) {
 	effectiveCfg, deps, resultPath, result, resultID, err := prepareVMRuntimeTrialConsumption(cfg, serviceName, deps)
 	if err != nil {
 		return "", err
@@ -150,24 +215,52 @@ func consumeVMRuntimeTrialResult(
 		return "", err
 	}
 	defer func() { retErr = errors.Join(retErr, journal.Close()) }()
-	if err := recoverVMRuntimeAdoptionsWithStore(ctx, effectiveCfg, journal, deps.coordinator); err != nil {
-		return "", fmt.Errorf("recover VM runtime transactions before consuming trial: %w", err)
-	}
-	if err := journal.CleanupCommittedTombstones(); err != nil {
-		return "", err
-	}
+	consume := func() error {
+		if err := recoverVMRuntimeAdoptionsWithStore(ctx, effectiveCfg, journal, deps.coordinator); err != nil {
+			return fmt.Errorf("recover VM runtime transactions before consuming trial: %w", err)
+		}
+		if err := journal.CleanupCommittedTombstones(); err != nil {
+			return err
+		}
 
-	data, service, err := loadCurrentVMRuntimeTrialService(effectiveCfg, serviceName)
-	if err != nil {
-		return "", err
+		data, service, err := loadCurrentVMRuntimeTrialService(effectiveCfg, serviceName)
+		if err != nil {
+			return err
+		}
+		switch {
+		case result.Outcome == vmRuntimeTrialFailedNoFallback:
+			outcome, err = consumeTerminalVMRuntimeTrialResult(
+				effectiveCfg,
+				service,
+				resultPath,
+				resultID,
+				result,
+				deps.control,
+			)
+		case alreadyConsumedVMRuntimeTrial(service, result):
+			outcome = result.Outcome
+			err = removeVMRuntimeTrialResult(resultPath, resultID, deps.control)
+		default:
+			outcome, err = commitVMRuntimeTrialResult(
+				ctx,
+				effectiveCfg,
+				journal,
+				data,
+				service,
+				resultPath,
+				resultID,
+				result,
+				deps,
+			)
+		}
+		return err
 	}
-	if result.Outcome == vmRuntimeTrialFailedNoFallback {
-		return consumeTerminalVMRuntimeTrialResult(effectiveCfg, service, resultPath, resultID, result, deps.control)
+	if deps.mutationGuard != nil {
+		retErr = deps.mutationGuard(consume)
+	} else {
+		retErr = consume()
 	}
-	if alreadyConsumedVMRuntimeTrial(service, result) {
-		return result.Outcome, removeVMRuntimeTrialResult(resultPath, resultID, deps.control)
-	}
-	return commitVMRuntimeTrialResult(ctx, effectiveCfg, journal, data, service, resultPath, resultID, result, deps)
+	return outcome, retErr
 }
 
 func prepareVMRuntimeTrialConsumption(cfg *Config, serviceName string, deps vmRuntimeTrialConsumerDeps) (*Config, vmRuntimeTrialConsumerDeps, string, vmRuntimeTrialResult, vmJailerFileIdentity, error) {

@@ -469,25 +469,10 @@ func automaticVMKernelSelectionIsNewer(next vmKernelCatalogRef, current db.VMKer
 }
 
 func syncVMLegacyComponentKernelFromMountedRoot(dataRoot, serviceRoot, mountRoot string, selection vmGuestKernelSelection, components db.VMComponentsConfig) (vmKernelSyncResult, error) {
-	if !isVMLegacyKernelSource(components.Kernel.Source) {
-		return vmKernelSyncResult{}, fmt.Errorf("VM guest kernel selector schema_version 1 is not valid for non-legacy component source %q", components.Kernel.Source)
-	}
-	record, provenanceSHA, err := readPinnedVMLegacyKernelComposition(dataRoot, components.GuestBase.RootFSProvenance)
+	record, err := validateVMLegacyComponentKernelSelection(dataRoot, selection, components)
 	if err != nil {
 		return vmKernelSyncResult{}, err
 	}
-	_, kernelID, _, err := vmLegacyCompositionIDs(record, provenanceSHA)
-	if err != nil {
-		return vmKernelSyncResult{}, err
-	}
-	if kernelID != components.Kernel.ID || record.Kernel.KernelSHA256 != components.Kernel.SHA256 {
-		return vmKernelSyncResult{}, fmt.Errorf("pinned legacy VM composition does not match the configured kernel component")
-	}
-	if selection.SHA256["vmlinux"] != record.Kernel.KernelSHA256 ||
-		(strings.TrimSpace(selection.KernelConfig) != "" && selection.SHA256["kernel.config"] != record.Kernel.ConfigSHA256) {
-		return vmKernelSyncResult{}, fmt.Errorf("VM guest kernel selector does not match the pinned legacy composition")
-	}
-
 	srcKernel, err := resolveGuestRootPath(mountRoot, selection.Kernel)
 	if err != nil {
 		return vmKernelSyncResult{}, fmt.Errorf("resolve guest kernel path: %w", err)
@@ -500,22 +485,58 @@ func syncVMLegacyComponentKernelFromMountedRoot(dataRoot, serviceRoot, mountRoot
 	if err := publishVMProvisionVerifiedFile(srcKernel, dstKernel, record.Kernel.KernelSHA256, "guest-selected legacy kernel"); err != nil {
 		return vmKernelSyncResult{}, err
 	}
-	dstConfig := ""
-	if strings.TrimSpace(selection.KernelConfig) != "" {
-		srcConfig, err := resolveGuestRootPath(mountRoot, selection.KernelConfig)
-		if err != nil {
-			return vmKernelSyncResult{}, fmt.Errorf("resolve guest kernel config path: %w", err)
-		}
-		dstConfig = filepath.Join(dstDir, vmKernelConfigFilename)
-		if err := publishVMProvisionVerifiedFile(srcConfig, dstConfig, record.Kernel.ConfigSHA256, "guest-selected legacy kernel config"); err != nil {
-			return vmKernelSyncResult{}, err
-		}
+	dstConfig, err := syncVMLegacyComponentKernelConfig(mountRoot, dstDir, selection, record)
+	if err != nil {
+		return vmKernelSyncResult{}, err
 	}
 	next := components.Kernel
 	next.Path = dstKernel
 	return vmKernelSyncResult{
 		Version: selection.Version, HostKernelPath: dstKernel, HostConfigPath: dstConfig, Component: &next,
 	}, nil
+}
+
+func validateVMLegacyComponentKernelSelection(dataRoot string, selection vmGuestKernelSelection, components db.VMComponentsConfig) (vmLegacyCompositionRecord, error) {
+	if !isVMLegacyKernelSource(components.Kernel.Source) {
+		return vmLegacyCompositionRecord{}, fmt.Errorf("VM guest kernel selector schema_version 1 is not valid for non-legacy component source %q", components.Kernel.Source)
+	}
+	record, provenanceSHA, err := readPinnedVMLegacyKernelComposition(dataRoot, components.GuestBase.RootFSProvenance)
+	if err != nil {
+		return vmLegacyCompositionRecord{}, err
+	}
+	if err := validateVMLegacyComponentKernelRecord(record, provenanceSHA, selection, components.Kernel); err != nil {
+		return vmLegacyCompositionRecord{}, err
+	}
+	return record, nil
+}
+
+func validateVMLegacyComponentKernelRecord(record vmLegacyCompositionRecord, provenanceSHA string, selection vmGuestKernelSelection, kernel db.VMKernelArtifactConfig) error {
+	_, kernelID, _, err := vmLegacyCompositionIDs(record, provenanceSHA)
+	if err != nil {
+		return err
+	}
+	if kernelID != kernel.ID || record.Kernel.KernelSHA256 != kernel.SHA256 {
+		return fmt.Errorf("pinned legacy VM composition does not match the configured kernel component")
+	}
+	if selection.SHA256["vmlinux"] != record.Kernel.KernelSHA256 || (strings.TrimSpace(selection.KernelConfig) != "" && selection.SHA256["kernel.config"] != record.Kernel.ConfigSHA256) {
+		return fmt.Errorf("VM guest kernel selector does not match the pinned legacy composition")
+	}
+	return nil
+}
+
+func syncVMLegacyComponentKernelConfig(mountRoot, dstDir string, selection vmGuestKernelSelection, record vmLegacyCompositionRecord) (string, error) {
+	if strings.TrimSpace(selection.KernelConfig) == "" {
+		return "", nil
+	}
+	srcConfig, err := resolveGuestRootPath(mountRoot, selection.KernelConfig)
+	if err != nil {
+		return "", fmt.Errorf("resolve guest kernel config path: %w", err)
+	}
+	dstConfig := filepath.Join(dstDir, vmKernelConfigFilename)
+	if err := publishVMProvisionVerifiedFile(srcConfig, dstConfig, record.Kernel.ConfigSHA256, "guest-selected legacy kernel config"); err != nil {
+		return "", err
+	}
+	return dstConfig, nil
 }
 
 func isVMLegacyKernelSource(source string) bool {
@@ -568,30 +589,43 @@ func resolveTrustedVMKernelSelection(ctx context.Context, dataRoot string, selec
 	if err != nil {
 		return vmKernelCatalogRef{}, vmKernelManifest{}, err
 	}
-	if err := catalog.validate(true); err != nil {
-		return vmKernelCatalogRef{}, vmKernelManifest{}, fmt.Errorf("validate trusted VM kernel catalog: %w", err)
-	}
-	ref, ok := catalog.KernelByID(selection.ReleaseID)
-	if !ok || ref.ManifestSHA256 != selection.ManifestSHA256 {
-		return vmKernelCatalogRef{}, vmKernelManifest{}, fmt.Errorf("VM guest kernel selection does not resolve to one immutable trusted catalog entry")
+	ref, err := resolveTrustedVMKernelCatalogRef(catalog, selection)
+	if err != nil {
+		return vmKernelCatalogRef{}, vmKernelManifest{}, err
 	}
 	manifest, err := fetchVMKernelSyncManifest(ctx, dataRoot, ref)
 	if err != nil {
 		return vmKernelCatalogRef{}, vmKernelManifest{}, err
 	}
-	if err := manifest.validate(true); err != nil {
-		return vmKernelCatalogRef{}, vmKernelManifest{}, fmt.Errorf("validate trusted VM kernel manifest: %w", err)
-	}
-	if err := validateVMKernelManifestRef(manifest, ref); err != nil {
+	if err := validateTrustedVMKernelSelectionManifest(manifest, ref, selection); err != nil {
 		return vmKernelCatalogRef{}, vmKernelManifest{}, err
 	}
-	wantVersion := "linux-" + manifest.UpstreamVersion + "-yeet"
-	if selection.Version != wantVersion ||
-		selection.SHA256["vmlinux"] != manifest.VMLinux.SHA256 ||
-		selection.SHA256["kernel.config"] != manifest.Config.SHA256 {
-		return vmKernelCatalogRef{}, vmKernelManifest{}, fmt.Errorf("VM guest kernel selector does not match the trusted manifest for %s", ref.KernelID)
-	}
 	return ref, manifest, nil
+}
+
+func resolveTrustedVMKernelCatalogRef(catalog vmKernelCatalog, selection vmGuestKernelSelection) (vmKernelCatalogRef, error) {
+	if err := catalog.validate(true); err != nil {
+		return vmKernelCatalogRef{}, fmt.Errorf("validate trusted VM kernel catalog: %w", err)
+	}
+	ref, ok := catalog.KernelByID(selection.ReleaseID)
+	if !ok || ref.ManifestSHA256 != selection.ManifestSHA256 {
+		return vmKernelCatalogRef{}, fmt.Errorf("VM guest kernel selection does not resolve to one immutable trusted catalog entry")
+	}
+	return ref, nil
+}
+
+func validateTrustedVMKernelSelectionManifest(manifest vmKernelManifest, ref vmKernelCatalogRef, selection vmGuestKernelSelection) error {
+	if err := manifest.validate(true); err != nil {
+		return fmt.Errorf("validate trusted VM kernel manifest: %w", err)
+	}
+	if err := validateVMKernelManifestRef(manifest, ref); err != nil {
+		return err
+	}
+	wantVersion := "linux-" + manifest.UpstreamVersion + "-yeet"
+	if selection.Version != wantVersion || selection.SHA256["vmlinux"] != manifest.VMLinux.SHA256 || selection.SHA256["kernel.config"] != manifest.Config.SHA256 {
+		return fmt.Errorf("VM guest kernel selector does not match the trusted manifest for %s", ref.KernelID)
+	}
+	return nil
 }
 
 func commitVMComponentKernelSync(dataRoot, servicesRoot, service, configPath string, current, next db.VMKernelArtifactConfig) error {

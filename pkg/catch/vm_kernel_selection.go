@@ -27,6 +27,19 @@ type vmGuestKernelSelection struct {
 }
 
 func (s vmGuestKernelSelection) validate() error {
+	if err := s.validateSchema(); err != nil {
+		return err
+	}
+	if !vmGuestKernelVersionPattern.MatchString(strings.TrimSpace(s.Version)) {
+		return fmt.Errorf("invalid VM guest kernel version %q", s.Version)
+	}
+	if err := s.validatePaths(); err != nil {
+		return err
+	}
+	return s.validateSHA256()
+}
+
+func (s vmGuestKernelSelection) validateSchema() error {
 	switch s.SchemaVersion {
 	case 1:
 		if strings.TrimSpace(s.ReleaseID) != "" || strings.TrimSpace(s.ManifestSHA256) != "" {
@@ -45,9 +58,10 @@ func (s vmGuestKernelSelection) validate() error {
 	default:
 		return fmt.Errorf("unsupported VM guest kernel selector schema_version %d", s.SchemaVersion)
 	}
-	if !vmGuestKernelVersionPattern.MatchString(strings.TrimSpace(s.Version)) {
-		return fmt.Errorf("invalid VM guest kernel version %q", s.Version)
-	}
+	return nil
+}
+
+func (s vmGuestKernelSelection) validatePaths() error {
 	if err := validateGuestKernelPackagePath("kernel path", s.Kernel); err != nil {
 		return err
 	}
@@ -56,6 +70,10 @@ func (s vmGuestKernelSelection) validate() error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (s vmGuestKernelSelection) validateSHA256() error {
 	if !vmGuestKernelSHA256Pattern.MatchString(s.SHA256["vmlinux"]) {
 		return fmt.Errorf("invalid VM guest kernel vmlinux sha256")
 	}

@@ -140,6 +140,7 @@ type ttyExecer struct {
 	dockerOutdatedAllFunc      func(context.Context) ([]svc.DockerOutdatedRow, error)
 	serviceInstallFunc         func(InstallerCfg) error
 	serviceInstallGenFunc      func(InstallerCfg, int) error
+	vmRuntimeTransactionFunc   func(context.Context, *Config, func() error) error
 	closeNewStageInstallerFunc func(FileInstallerCfg) error
 	removeServiceFunc          func(string, RemoveOptions) (*RemoveReport, error)
 	nativeCopyHook             func(string)

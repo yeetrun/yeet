@@ -86,37 +86,52 @@ func (c vmImageCatalog) validate(requireTrustedURL bool) error {
 	if len(c.Images) == 0 {
 		return fmt.Errorf("VM image catalog has no images")
 	}
+	defaults, err := c.validateImages(requireTrustedURL)
+	if err != nil {
+		return err
+	}
+	if err := c.validateDefaultCount(defaults); err != nil {
+		return err
+	}
+	if c.ComponentCatalogs != nil {
+		if err := c.ComponentCatalogs.validate(requireTrustedURL); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c vmImageCatalog) validateImages(requireTrustedURL bool) (int, error) {
 	seenPayloads := map[string]struct{}{}
 	seenVersionPrefixes := map[string]struct{}{}
 	defaults := 0
 	for _, image := range c.Images {
 		if err := image.validate(requireTrustedURL); err != nil {
-			return err
+			return 0, err
 		}
 		payload := strings.TrimSpace(image.Payload)
 		if _, ok := seenPayloads[payload]; ok {
-			return fmt.Errorf("duplicate VM image payload %q in catalog", payload)
+			return 0, fmt.Errorf("duplicate VM image payload %q in catalog", payload)
 		}
 		seenPayloads[payload] = struct{}{}
 		versionPrefix := strings.TrimSpace(image.VersionPrefix)
 		if _, ok := seenVersionPrefixes[versionPrefix]; ok {
-			return fmt.Errorf("duplicate VM image version_prefix %q in catalog", versionPrefix)
+			return 0, fmt.Errorf("duplicate VM image version_prefix %q in catalog", versionPrefix)
 		}
 		seenVersionPrefixes[versionPrefix] = struct{}{}
 		if image.Default {
 			defaults++
 		}
 	}
+	return defaults, nil
+}
+
+func (c vmImageCatalog) validateDefaultCount(defaults int) error {
 	if defaults > 1 {
 		return fmt.Errorf("multiple default VM images in catalog: %s", vmImageCatalogPayloadsForError(c))
 	}
 	if defaults == 0 {
 		return fmt.Errorf("no default VM image in catalog: %s", vmImageCatalogPayloadsForError(c))
-	}
-	if c.ComponentCatalogs != nil {
-		if err := c.ComponentCatalogs.validate(requireTrustedURL); err != nil {
-			return err
-		}
 	}
 	return nil
 }

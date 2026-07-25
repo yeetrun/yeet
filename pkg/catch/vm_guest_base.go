@@ -170,27 +170,49 @@ func (m vmGuestBaseManifest) validate(requireTrustedURL bool) error {
 	if m.SchemaVersion != 1 {
 		return fmt.Errorf("unsupported VM guest-base manifest schema_version %d", m.SchemaVersion)
 	}
+	if err := m.validateIdentity(); err != nil {
+		return err
+	}
+	if err := m.validateRootFS(); err != nil {
+		return err
+	}
+	if err := m.validateDefaultKernelChannel(); err != nil {
+		return err
+	}
+	if err := m.Provenance.validate(); err != nil {
+		return err
+	}
+	return m.validateRootFSURL(requireTrustedURL)
+}
+
+func (m vmGuestBaseManifest) validateIdentity() error {
 	ref := vmGuestBaseCatalogRef{
 		GuestBaseID: m.GuestBaseID, OS: m.OS, OSVersion: m.OSVersion,
 		Architecture: m.Architecture, ManifestSHA256: strings.Repeat("0", 64),
 	}
-	if err := ref.validate(false); err != nil {
-		return err
-	}
+	return ref.validate(false)
+}
+
+func (m vmGuestBaseManifest) validateRootFS() error {
 	if !vmRuntimeSHA256Pattern.MatchString(m.RootFS.SHA256) {
 		return fmt.Errorf("VM guest-base %s has invalid rootfs sha256", m.GuestBaseID)
 	}
 	if m.RootFS.UncompressedBytes <= 0 {
 		return fmt.Errorf("VM guest-base %s has invalid rootfs uncompressed_bytes", m.GuestBaseID)
 	}
+	return nil
+}
+
+func (m vmGuestBaseManifest) validateDefaultKernelChannel() error {
 	switch m.DefaultKernelChannel {
 	case "stable", "candidate":
 	default:
 		return fmt.Errorf("VM guest-base %s has invalid default_kernel_channel %q", m.GuestBaseID, m.DefaultKernelChannel)
 	}
-	if err := m.Provenance.validate(); err != nil {
-		return err
-	}
+	return nil
+}
+
+func (m vmGuestBaseManifest) validateRootFSURL(requireTrustedURL bool) error {
 	if requireTrustedURL {
 		want := "https://github.com/yeetrun/yeet-vm-images/releases/download/" + m.GuestBaseID + "/" + vmGuestBaseRootFSFilename
 		if err := validateTrustedYeetVMArtifactURL(m.RootFS.URL, "guest-base rootfs"); err != nil {
@@ -236,42 +258,58 @@ func (c vmGuestBaseCache) publish(ctx context.Context, parent, final string, man
 			_ = os.RemoveAll(staging)
 		}
 	}()
-	if err := secureVMComponentStagingDirectory(staging, "guest-base"); err != nil {
+	if err := c.stageArtifact(ctx, staging, manifestRaw, manifest, ref, requireTrustedURL); err != nil {
 		return vmGuestBaseArtifact{}, err
 	}
-	if err := writeVMRuntimeCacheFile(filepath.Join(staging, vmGuestBaseManifestFilename), manifestRaw, 0o644); err != nil {
+	artifact, published, err := c.publishStagedArtifact(parent, staging, final, ref)
+	if err != nil {
 		return vmGuestBaseArtifact{}, err
+	}
+	return artifact, nil
+}
+
+func (c vmGuestBaseCache) stageArtifact(ctx context.Context, staging string, manifestRaw []byte, manifest vmGuestBaseManifest, ref vmGuestBaseCatalogRef, requireTrustedURL bool) error {
+	if err := secureVMComponentStagingDirectory(staging, "guest-base"); err != nil {
+		return err
+	}
+	if err := writeVMRuntimeCacheFile(filepath.Join(staging, vmGuestBaseManifestFilename), manifestRaw, 0o644); err != nil {
+		return err
 	}
 	if err := downloadVMComponentFile(
 		ctx, c.Client, manifest.RootFS.URL, filepath.Join(staging, vmGuestBaseRootFSFilename),
 		"guest-base rootfs", manifest.RootFS.SHA256, maxVMGuestBaseRootFSBytes, 0o644, requireTrustedURL,
 	); err != nil {
-		return vmGuestBaseArtifact{}, err
+		return err
 	}
 	if _, err := validateVMGuestBaseArtifactDirectory(staging, ref); err != nil {
-		return vmGuestBaseArtifact{}, err
+		return err
 	}
 	if err := os.Chmod(staging, 0o755); err != nil {
-		return vmGuestBaseArtifact{}, fmt.Errorf("set VM guest-base cache directory permissions: %w", err)
+		return fmt.Errorf("set VM guest-base cache directory permissions: %w", err)
 	}
 	if err := syncVMRuntimeDirectory(staging); err != nil {
-		return vmGuestBaseArtifact{}, err
+		return err
 	}
+	return nil
+}
+
+func (c vmGuestBaseCache) publishStagedArtifact(parent, staging, final string, ref vmGuestBaseCatalogRef) (vmGuestBaseArtifact, bool, error) {
 	publish := c.publishNoReplace
 	if publish == nil {
 		publish = publishVMRuntimeCacheNoReplace
 	}
 	if err := publish(parent, staging, final); err != nil {
 		if errors.Is(err, syscall.EEXIST) {
-			return validateVMGuestBaseArtifactDirectory(final, ref)
+			artifact, err := validateVMGuestBaseArtifactDirectory(final, ref)
+			return artifact, false, err
 		}
-		return vmGuestBaseArtifact{}, fmt.Errorf("publish immutable VM guest-base cache entry: %w", err)
+		return vmGuestBaseArtifact{}, false, fmt.Errorf("publish immutable VM guest-base cache entry: %w", err)
 	}
-	published = true
 	if err := syncVMRuntimeDirectory(parent); err != nil {
-		return vmGuestBaseArtifact{}, err
+		return vmGuestBaseArtifact{}, true, err
 	}
-	return validateVMGuestBaseArtifactDirectory(final, ref)
+	artifact, err := validateVMGuestBaseArtifactDirectory(final, ref)
+	return artifact, true, err
 }
 
 func validateVMGuestBaseArtifactDirectory(dir string, ref vmGuestBaseCatalogRef) (vmGuestBaseArtifact, error) {

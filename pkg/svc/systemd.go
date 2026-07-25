@@ -15,7 +15,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"text/template"
@@ -23,11 +22,9 @@ import (
 
 	"github.com/yeetrun/yeet/pkg/db"
 	"github.com/yeetrun/yeet/pkg/fileutil"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/sys/unix"
 	"tailscale.com/client/local"
 	"tailscale.com/ipn"
-	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/logtail/backoff"
 )
 
@@ -62,7 +59,7 @@ type TimerConfig struct {
 const (
 	systemdServiceTemplate = `[Unit]
 {{with .Description}}Description={{.}}
-{{end}}ConditionFileIsExecutable={{.Executable}}
+{{end}}ConditionFileIsExecutable={{.ConditionExecutable}}
 {{if .Wants}}Wants={{.Wants}}{{end}}
 {{if .Requires}}Requires={{.Requires}}{{end}}
 {{if .Before}}Before={{.Before}}{{end}}
@@ -88,6 +85,8 @@ RestartMaxDelaySec=60
 {{if .StopCmd}}ExecStop={{.StopCmd}}{{end}}
 {{if .ResolvConf}}
 BindReadOnlyPaths={{.ResolvConf}}:/etc/resolv.conf
+{{end}}
+{{if or .ResolvConf .PrivateMounts}}
 PrivateMounts=yes
 {{end}}
 [Install]
@@ -105,18 +104,8 @@ WantedBy=timers.target
 )
 
 var (
-	waitTailscaleReadyFn = func(ctx context.Context, s *SystemdService) error {
-		return s.waitTailscaleReady(ctx)
-	}
-	tailscaleStatusWithoutPeersFn = func(ctx context.Context, sock string) (*ipnstate.Status, error) {
-		lc := local.Client{
-			Socket:        sock,
-			UseSocketOnly: true,
-		}
-		return lc.StatusWithoutPeers(ctx)
-	}
-	tailscaleResolverMountHealthyFn = func(s *SystemdService) (bool, error) {
-		return s.tailscaleResolverMountHealthy()
+	monitorTailscaleFn = func(s *SystemdService) error {
+		return s.monitorTailscale()
 	}
 
 	systemdServiceTmpl = template.Must(template.New("systemdService").Parse(systemdServiceTemplate))
@@ -141,6 +130,10 @@ type SystemdUnit struct {
 
 	// Executable is the path to the executable to run or the command to run.
 	Executable string
+
+	// ConditionExecutable overrides ConditionFileIsExecutable while ExecStart
+	// still uses Executable. Empty preserves the historical behavior.
+	ConditionExecutable string
 
 	// Arguments are the arguments to pass to the service.
 	Arguments []string
@@ -198,6 +191,10 @@ type SystemdUnit struct {
 
 	// ResolvConf is the path to the resolv.conf file to use.
 	ResolvConf string
+
+	// PrivateMounts gives the service its own mount namespace without adding
+	// a generated bind mount.
+	PrivateMounts bool
 }
 
 // NewISONetworkUnit renders the local-only, fail-closed network gate for an
@@ -267,6 +264,10 @@ func (u *SystemdUnit) writeOutService(path string) (err error) {
 	if wantedBy == "" {
 		wantedBy = "multi-user.target"
 	}
+	conditionExecutable := u.ConditionExecutable
+	if conditionExecutable == "" {
+		conditionExecutable = u.Executable
+	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
@@ -274,12 +275,14 @@ func (u *SystemdUnit) writeOutService(path string) (err error) {
 	defer closeFile(f, &err)
 	return systemdServiceTmpl.Execute(f, struct {
 		*SystemdUnit
-		Restart  string
-		WantedBy string
+		Restart             string
+		WantedBy            string
+		ConditionExecutable string
 	}{
 		u,
 		restartDefault,
 		wantedBy,
+		conditionExecutable,
 	})
 }
 
@@ -304,6 +307,7 @@ type SystemdService struct {
 	runDir               string
 	systemdDir           string
 	flatRuntimeArtifacts bool
+	tailscaleGuardRunner string
 }
 
 func (s *SystemdService) Name() string {
@@ -610,9 +614,86 @@ func removeOptionalArtifact(path string) error {
 }
 
 func (s *SystemdService) Install() error {
+	return s.InstallWithActivationCheck(nil)
+}
+
+type installDestinationRollback struct {
+	path    string
+	present bool
+	raw     []byte
+	mode    os.FileMode
+}
+
+func captureInstallDestinationRollback(plan []installStep) ([]installDestinationRollback, error) {
+	states := make([]installDestinationRollback, 0, len(plan))
+	for _, step := range plan {
+		state := installDestinationRollback{path: step.dstPath}
+		file, err := os.OpenFile(step.dstPath, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+		if errors.Is(err, os.ErrNotExist) {
+			states = append(states, state)
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("capture install destination %s: %w", step.dstPath, err)
+		}
+		info, statErr := file.Stat()
+		if statErr != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("inspect install destination %s: %w", step.dstPath, statErr)
+		}
+		if !info.Mode().IsRegular() {
+			_ = file.Close()
+			return nil, fmt.Errorf("install destination %s is not a regular file", step.dstPath)
+		}
+		raw, readErr := io.ReadAll(file)
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil {
+			return nil, fmt.Errorf("read install destination %s: %w", step.dstPath, errors.Join(readErr, closeErr))
+		}
+		state.present = true
+		state.raw = raw
+		state.mode = info.Mode().Perm()
+		states = append(states, state)
+	}
+	return states, nil
+}
+
+func restoreInstallDestinations(states []installDestinationRollback) error {
+	var restoreErr error
+	for index := len(states) - 1; index >= 0; index-- {
+		state := states[index]
+		var err error
+		if state.present {
+			err = writeInstalledSystemdUnit(state.path, state.raw, state.mode)
+		} else {
+			err = removeOptionalArtifact(state.path)
+		}
+		if err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore install destination %s: %w", state.path, err))
+		}
+	}
+	return restoreErr
+}
+
+// InstallWithActivationCheck stages all stable destinations, then runs check
+// before daemon-reload or enable can activate them.
+func (s *SystemdService) InstallWithActivationCheck(check func() error) error {
+	var rollback []installDestinationRollback
+	if check != nil {
+		var err error
+		rollback, err = captureInstallDestinationRollback(s.installPlan())
+		if err != nil {
+			return err
+		}
+	}
 	units, err := s.StageInstallForReload()
 	if err != nil {
 		return err
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			return errors.Join(err, restoreInstallDestinations(rollback))
+		}
 	}
 
 	if err := s.run("daemon-reload"); err != nil {
@@ -966,172 +1047,24 @@ func (s *SystemdService) Start() error {
 
 func (s *SystemdService) StartAuxiliaryUnits() error {
 	af := s.cfg.AsStruct().Artifacts
-	var wg errgroup.Group
-	hasTailscale := false
 	if _, ok := af.Gen(db.ArtifactNetNSService, s.cfg.Generation()); ok {
-		wg.Go(func() error {
-			if err := s.run("start", s.netnsServiceUnit()); err != nil {
-				return err
-			}
-			return nil
-		})
+		if err := s.run("start", s.netnsServiceUnit()); err != nil {
+			return err
+		}
 	}
 	if _, ok := af.Gen(db.ArtifactTSService, s.cfg.Generation()); ok {
-		hasTailscale = true
-		wg.Go(func() error {
-			log.Printf("starting tailscaled for %s", s.Name())
-			if err := s.run("start", s.tailscaledServiceUnit()); err != nil {
-				return err
-			}
-			go func() {
-				if err := s.monitorTailscale(); err != nil {
-					log.Printf("failed to monitor tailscale: %v", err)
-				}
-			}()
-			return nil
-		})
-	}
-	if err := wg.Wait(); err != nil {
-		return err
-	}
-	if hasTailscale {
 		ctx, cancel := context.WithTimeout(context.Background(), tailscaleReadyTimeout)
 		defer cancel()
-		if err := waitTailscaleReadyFn(ctx, s); err != nil {
+		if err := s.StartTailscaleSidecar(ctx); err != nil {
 			return err
 		}
-		if err := s.ensureTailscaleResolverMount(ctx); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *SystemdService) ensureTailscaleResolverMount(ctx context.Context) error {
-	healthy, err := tailscaleResolverMountHealthyFn(s)
-	if err != nil {
-		return err
-	}
-	if healthy {
-		return nil
-	}
-
-	log.Printf("tailscaled resolver mount missing for %s; restarting sidecar once", s.Name())
-	if err := s.run("restart", s.tailscaledServiceUnit()); err != nil {
-		return fmt.Errorf("restart tailscaled to repair resolver mount: %w", err)
-	}
-	if err := waitTailscaleReadyFn(ctx, s); err != nil {
-		return err
-	}
-	healthy, err = tailscaleResolverMountHealthyFn(s)
-	if err != nil {
-		return err
-	}
-	if !healthy {
-		return fmt.Errorf("tailscaled resolver mount is still missing after restart")
-	}
-	return nil
-}
-
-func (s *SystemdService) tailscaleResolverMountHealthy() (bool, error) {
-	source, err := tailscaleResolverBindSourceFromFile(s.tailscaledServicePath())
-	if err != nil {
-		return false, err
-	}
-	if source == "" {
-		return true, nil
-	}
-	pid, err := systemdServiceMainPID(s.tailscaledServiceUnit())
-	if err != nil {
-		return false, err
-	}
-	if pid == 0 {
-		return false, nil
-	}
-	return tailscaleResolverMountMatchesProcess(source, pid)
-}
-
-func tailscaleResolverBindSourceFromFile(path string) (string, error) {
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", fmt.Errorf("read tailscaled unit for resolver mount check: %w", err)
-	}
-	return tailscaleResolverBindSource(string(raw)), nil
-}
-
-func tailscaleResolverMountMatchesProcess(source string, pid int) (bool, error) {
-	sourceInfo, err := os.Stat(source)
-	if err != nil {
-		return false, fmt.Errorf("stat tailscaled resolver source %s: %w", source, err)
-	}
-	processPath := fmt.Sprintf("/proc/%d/root/etc/resolv.conf", pid)
-	processInfo, err := os.Stat(processPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("stat tailscaled resolver mount %s: %w", processPath, err)
-	}
-	return os.SameFile(sourceInfo, processInfo), nil
-}
-
-func tailscaleResolverBindSource(unit string) string {
-	for _, line := range strings.Split(unit, "\n") {
-		value, ok := strings.CutPrefix(strings.TrimSpace(line), "BindReadOnlyPaths=")
-		if !ok {
-			continue
-		}
-		source, target, ok := strings.Cut(value, ":")
-		if ok && target == "/etc/resolv.conf" {
-			return source
-		}
-	}
-	return ""
-}
-
-func systemdServiceMainPID(unit string) (int, error) {
-	output, err := exec.Command("systemctl", "show", "-p", "MainPID", "--value", unit).Output()
-	if err != nil {
-		return 0, fmt.Errorf("systemctl show MainPID for %s: %w", unit, err)
-	}
-	text := strings.TrimSpace(string(output))
-	if text == "" || text == "0" {
-		return 0, nil
-	}
-	pid, err := strconv.Atoi(text)
-	if err != nil {
-		return 0, fmt.Errorf("parse MainPID for %s: %w", unit, err)
-	}
-	return pid, nil
-}
-
-func (s *SystemdService) waitTailscaleReady(ctx context.Context) error {
-	sock := filepath.Join(s.runDir, "tailscaled.sock")
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	var lastErr error
-	for {
-		st, err := tailscaleStatusWithoutPeersFn(ctx, sock)
-		switch {
-		case err == nil && len(st.TailscaleIPs) > 0:
-			return nil
-		case err != nil:
-			lastErr = err
-		default:
-			lastErr = errors.New("tailscale has no IPs yet")
-		}
-		select {
-		case <-ctx.Done():
-			if lastErr != nil {
-				return fmt.Errorf("tailscale endpoint not ready: %w", lastErr)
+		go func() {
+			if err := monitorTailscaleFn(s); err != nil {
+				log.Printf("failed to monitor tailscale: %v", err)
 			}
-			return fmt.Errorf("tailscale endpoint not ready: %w", ctx.Err())
-		case <-ticker.C:
-		}
+		}()
 	}
+	return nil
 }
 
 func (s *SystemdService) hasArtifact(a db.ArtifactName) bool {

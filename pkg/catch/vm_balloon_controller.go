@@ -90,6 +90,9 @@ type vmBalloonReconcileCandidate struct {
 }
 
 func (s *Server) reconcileVMBalloons(ctx context.Context, api vmBalloonAPI) error {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return err
+	}
 	dv, err := s.getDB()
 	if err != nil {
 		return err
@@ -189,6 +192,10 @@ func currentVMBalloonHostMemory() (int64, int64, error) {
 func (s *Server) applyVMBalloonTargets(ctx context.Context, api vmBalloonAPI, plan vmBalloonControllerPlan, candidates map[string]vmBalloonReconcileCandidate) []error {
 	var errs []error
 	for service, target := range plan.Targets {
+		if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+			errs = append(errs, err)
+			break
+		}
 		candidate, ok := candidates[service]
 		if !ok || target == candidate.currentTarget {
 			continue
@@ -196,6 +203,10 @@ func (s *Server) applyVMBalloonTargets(ctx context.Context, api vmBalloonAPI, pl
 		if err := api.SetTarget(ctx, candidate.socket, target); err != nil {
 			errs = append(errs, fmt.Errorf("VM %q set balloon target: %w", service, err))
 			continue
+		}
+		if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+			errs = append(errs, err)
+			break
 		}
 		if err := s.persistVMBalloonLastTarget(service, target); err != nil {
 			errs = append(errs, fmt.Errorf("VM %q persist balloon target: %w", service, err))
@@ -205,6 +216,9 @@ func (s *Server) applyVMBalloonTargets(ctx context.Context, api vmBalloonAPI, pl
 }
 
 func (s *Server) persistVMBalloonLastTarget(service string, targetBytes int64) error {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return err
+	}
 	_, err := s.cfg.DB.MutateData(func(d *db.Data) error {
 		if d.Services == nil {
 			return nil

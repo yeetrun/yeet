@@ -451,6 +451,17 @@ func TestRPCMethodNotFound(t *testing.T) {
 	}
 }
 
+func TestRPCTailscaleResolverExecMethodNotFound(t *testing.T) {
+	response := newTestServer(t).dispatchRPC(catchrpc.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage("1"),
+		Method:  "catch.TailscaleResolverExec",
+	})
+	if response.Error == nil || response.Error.Code != catchrpc.ErrMethodNotFound {
+		t.Fatalf("catch.TailscaleResolverExec response = %#v, want method not found", response)
+	}
+}
+
 func TestRPCInvalidJSON(t *testing.T) {
 	server := newTestServer(t)
 	ts := httptest.NewServer(server.RPCMux())

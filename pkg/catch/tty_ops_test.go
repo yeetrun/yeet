@@ -1709,14 +1709,26 @@ func TestRunRawTailscaleCmdReportsMissingSocketBeforeDownload(t *testing.T) {
 	}
 }
 
-func TestApplyTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
-	server := newTestServer(t)
+func TestTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
 	identity := db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "app", UID: 1002, GID: 1003}
 	const (
 		service = "svc"
-		current = "1.92.3"
+		current = tailscaleResolverFixtureDaemonVersion
 		latest  = "1.94.0"
 	)
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		service,
+		tailscaleResolverGenerationCurrent,
+	)
+	server := fixture.server
+	if _, _, err := server.cfg.DB.MutateService(service, func(_ *db.Data, record *db.Service) error {
+		record.ServiceType = db.ServiceTypeSystemd
+		record.Identity = &identity
+		return nil
+	}); err != nil {
+		t.Fatalf("set native service identity: %v", err)
+	}
 	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
 	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
 		t.Fatalf("mkdir tsd: %v", err)
@@ -1726,25 +1738,6 @@ func TestApplyTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(tsdDir, "tailscale-"+latest), []byte("client-new"), 0o755); err != nil {
 		t.Fatalf("write tailscale: %v", err)
-	}
-	if err := os.MkdirAll(server.serviceRunDir(service), 0o755); err != nil {
-		t.Fatalf("mkdir run: %v", err)
-	}
-	if err := os.MkdirAll(server.serviceBinDir(service), 0o755); err != nil {
-		t.Fatalf("mkdir service bin: %v", err)
-	}
-	if err := server.cfg.DB.Set(&db.Data{
-		Services: map[string]*db.Service{
-			service: {
-				Name:        service,
-				ServiceType: db.ServiceTypeSystemd,
-				Identity:    &identity,
-				Generation:  4,
-				TSNet:       &db.TailscaleNetwork{Version: current},
-			},
-		},
-	}); err != nil {
-		t.Fatalf("DB.Set: %v", err)
 	}
 	binDir := filepath.Join(t.TempDir(), "bin")
 	if err := os.Mkdir(binDir, 0o755); err != nil {
@@ -1757,6 +1750,16 @@ func TestApplyTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("SYSTEMCTL_LOG", logPath)
+	if err := os.WriteFile(logPath, nil, 0o600); err != nil {
+		t.Fatalf("initialize systemctl log: %v", err)
+	}
+	var lifecycleCalls []string
+	oldRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(_ context.Context, service *svc.SystemdService) error {
+		lifecycleCalls = append(lifecycleCalls, "verified-restart:"+service.Name())
+		return nil
+	}
+	t.Cleanup(func() { restartTailscaleSystemdSidecar = oldRestart })
 
 	var out bytes.Buffer
 	var chownedPath string
@@ -1796,17 +1799,21 @@ func TestApplyTSUpdateCopiesBinaryPersistsVersionAndRestarts(t *testing.T) {
 		t.Fatalf("persisted version = %q, want %q", svcData.TSNet.Version, latest)
 	}
 	refs := svcData.Artifacts[db.ArtifactTSBinary].Refs
-	if refs["latest"] != filepath.Join(tsdDir, "tailscaled-"+latest) || refs[db.Gen(4)] != filepath.Join(tsdDir, "tailscaled-"+latest) {
+	if refs["latest"] != filepath.Join(tsdDir, "tailscaled-"+latest) ||
+		refs[db.Gen(fixture.service.Generation)] != filepath.Join(tsdDir, "tailscaled-"+latest) {
 		t.Fatalf("tailscale binary refs = %#v", refs)
 	}
 	logRaw, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read systemctl log: %v", err)
 	}
-	if strings.TrimSpace(string(logRaw)) != "restart yeet-svc-ts.service" {
-		t.Fatalf("systemctl log = %q", logRaw)
+	if strings.TrimSpace(string(logRaw)) != "" {
+		t.Fatalf("raw systemctl log = %q, want no direct lifecycle call", logRaw)
 	}
-	if !strings.Contains(out.String(), "Updated tailscale for svc: 1.92.3 -> 1.94.0") {
+	if !reflect.DeepEqual(lifecycleCalls, []string{"verified-restart:svc"}) {
+		t.Fatalf("lifecycle calls = %v, want verified restart", lifecycleCalls)
+	}
+	if !strings.Contains(out.String(), "Updated tailscale for svc: "+current+" -> 1.94.0") {
 		t.Fatalf("output = %q", out.String())
 	}
 }
@@ -1821,9 +1828,14 @@ func TestPrintLinesAndIfaceIPsReturnWriteErrors(t *testing.T) {
 	}
 }
 
-func TestApplyTSUpdatePropagatesRestartFailure(t *testing.T) {
-	server := newTestServer(t)
+func TestTSUpdatePropagatesRestartAndVerificationFailure(t *testing.T) {
 	const latest = "1.94.0"
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		"svc",
+		tailscaleResolverGenerationCurrent,
+	)
+	server := fixture.server
 	tsdDir := filepath.Join(server.cfg.RootDir, "tsd")
 	if err := os.MkdirAll(tsdDir, 0o755); err != nil {
 		t.Fatalf("mkdir tsd: %v", err)
@@ -1834,28 +1846,10 @@ func TestApplyTSUpdatePropagatesRestartFailure(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(tsdDir, "tailscale-"+latest), []byte("client-new"), 0o755); err != nil {
 		t.Fatalf("write tailscale: %v", err)
 	}
-	if err := os.MkdirAll(server.serviceRunDir("svc"), 0o755); err != nil {
-		t.Fatalf("mkdir run: %v", err)
-	}
-	if err := os.MkdirAll(server.serviceBinDir("svc"), 0o755); err != nil {
-		t.Fatalf("mkdir service bin: %v", err)
-	}
-	if err := server.cfg.DB.Set(&db.Data{
-		Services: map[string]*db.Service{
-			"svc": {Name: "svc", Generation: 1, TSNet: &db.TailscaleNetwork{Version: "1.92.3"}},
-		},
-	}); err != nil {
-		t.Fatalf("DB.Set: %v", err)
-	}
-	binDir := filepath.Join(t.TempDir(), "bin")
-	if err := os.Mkdir(binDir, 0o755); err != nil {
-		t.Fatalf("mkdir bin: %v", err)
-	}
-	systemctl := filepath.Join(binDir, "systemctl")
-	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nexit 7\n"), 0o755); err != nil {
-		t.Fatalf("write systemctl shim: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	verificationErr := errors.New("sidecar never became ready")
+	oldRestart := restartTailscaleSystemdSidecar
+	restartTailscaleSystemdSidecar = func(context.Context, *svc.SystemdService) error { return verificationErr }
+	t.Cleanup(func() { restartTailscaleSystemdSidecar = oldRestart })
 
 	var out bytes.Buffer
 	err := (&ttyExecer{
@@ -1863,8 +1857,11 @@ func TestApplyTSUpdatePropagatesRestartFailure(t *testing.T) {
 		s:   server,
 		sn:  "svc",
 		rw:  readWriter{Reader: strings.NewReader(""), Writer: &out},
-	}).applyTSUpdate("1.92.3", latest)
-	if err == nil || !strings.Contains(err.Error(), "failed to restart tailscaled service") {
+	}).applyTSUpdate(tailscaleResolverFixtureDaemonVersion, latest)
+	if err == nil || !strings.Contains(err.Error(), "failed to restart and verify tailscaled service") || !errors.Is(err, verificationErr) {
 		t.Fatalf("applyTSUpdate error = %v", err)
+	}
+	if strings.Contains(out.String(), "Updated tailscale") {
+		t.Fatalf("update success output = %q, want no success message after failed verification", out.String())
 	}
 }

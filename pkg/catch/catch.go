@@ -94,6 +94,7 @@ type Server struct {
 	serviceIdentityRecoveryMu          sync.RWMutex
 	serviceIdentityMutationBlocks      map[string]error
 	serviceIdentityGlobalMutationBlock error
+	tailscaleResolverRecovery          tailscaleResolverRecoveryState
 	hostStorageMutationMu              sync.Mutex
 	hostStorageMutationBlock           error
 	hostStorageRecovery                *hostStorageTransaction
@@ -212,12 +213,21 @@ func NewUnstartedServer(config *Config) *Server {
 	if err := s.recoverServiceIdentityMigrations(context.Background()); err != nil {
 		log.Printf("service identity startup recovery requires operator repair: %v", err)
 	}
+	if err := s.recoverTailscaleResolverIsolation(context.Background()); err != nil {
+		log.Printf("tailscale resolver startup recovery requires operator repair: %v", err)
+	}
 	s.registry = s.newRegistry()
 	s.newDockerComposeService = func(sv db.ServiceView) (dockerNetNSReconciler, error) {
 		root := s.serviceRootFromView(sv)
-		return svc.NewDockerComposeService(s.cfg.DB, sv, serviceDataDirForRoot(root), serviceRunDirForRoot(root))
+		return svc.NewDockerComposeService(
+			s.cfg.DB,
+			sv,
+			serviceDataDirForRoot(root),
+			serviceRunDirForRoot(root),
+			svc.WithTailscaleGuardRunner(s.catchRunnerPath()),
+		)
 	}
-	s.recoverVMRuntimeState = RecoverVMRuntimeAdoptions
+	s.recoverVMRuntimeState = s.recoverVMRuntimeAdoptions
 	s.acquireCatchInstallLock = func(ctx context.Context, dataRoot string) (io.Closer, error) {
 		return AcquireCatchInstallTransactionLock(ctx, dataRoot, uint32(os.Geteuid()))
 	}
@@ -264,7 +274,7 @@ func (s *Server) Start() {
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	if s.recoverVMRuntimeState == nil {
-		s.recoverVMRuntimeState = RecoverVMRuntimeAdoptions
+		s.recoverVMRuntimeState = s.recoverVMRuntimeAdoptions
 	}
 	if s.acquireCatchInstallLock == nil {
 		s.acquireCatchInstallLock = func(ctx context.Context, dataRoot string) (io.Closer, error) {
@@ -286,9 +296,15 @@ func (s *Server) Start() {
 		}
 		s.runVMBalloonController(s.ctx)
 	})
-	if err := s.prepareNetworkRuntime(s.ctx); err != nil {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		log.Printf("network runtime startup reconciliation blocked: %v", err)
+	} else if err := s.prepareNetworkRuntime(s.ctx); err != nil {
 		log.Fatalf("Failed to prepare network runtime: %v", err)
 	}
+	logRuntimeReconcileError(
+		"tailscale resolver isolation startup migration failed",
+		s.reconcileTailscaleResolverStartup(s.ctx),
+	)
 	s.waitGroup.Go(func() {
 		if !runtimeRecovery.Wait(s.ctx) {
 			return
@@ -300,6 +316,13 @@ func (s *Server) Start() {
 }
 
 func (s *Server) prepareNetworkRuntime(ctx context.Context) error {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return err
+	}
+	return s.prepareNetworkRuntimeAllowed(ctx)
+}
+
+func (s *Server) prepareNetworkRuntimeAllowed(ctx context.Context) error {
 	hasISO, requiresDocker, err := s.isoRecordKinds()
 	if err != nil {
 		return err
@@ -391,12 +414,26 @@ func waitForISODockerRetry(ctx context.Context, retry <-chan time.Time) error {
 }
 
 func (s *Server) recoverVMRuntimeStateAfterInstall(ctx context.Context) (retErr error) {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return err
+	}
 	installLock, err := s.acquireCatchInstallLock(ctx, s.cfg.RootDir)
 	if err != nil {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, installLock.Close()) }()
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		return err
+	}
 	return s.recoverVMRuntimeState(ctx, &s.cfg)
+}
+
+func (s *Server) recoverVMRuntimeAdoptions(ctx context.Context, cfg *Config) error {
+	return recoverVMRuntimeAdoptionsWithMutationGuard(
+		ctx,
+		cfg,
+		s.withTailscaleResolverMutationGuard,
+	)
 }
 
 func (b *vmRuntimeRecoveryBarrier) Wait(ctx context.Context) bool {
@@ -409,11 +446,14 @@ func (b *vmRuntimeRecoveryBarrier) Wait(ctx context.Context) bool {
 }
 
 func (s *Server) reconcileRuntimeState() {
+	if err := s.checkTailscaleResolverMutationAllowed(); err != nil {
+		logRuntimeReconcileError("runtime state reconciliation blocked", err)
+		return
+	}
 	logRuntimeReconcileError("VM runtime state reconciliation failed", s.reconcileVMRuntimeState(s.ctx))
 	logRuntimeReconcileError("tailscale DNS config reconciliation failed", s.reconcileTailscaleDNSConfigs(s.ctx))
-	logRuntimeReconcileError("tailscale resolver isolation reconciliation failed", s.reconcileTailscaleResolverIsolation(s.ctx))
 	logRuntimeReconcileError("netns reconciliation failed", s.reconcileNetNSBackedDockerServices(s.ctx))
-	logRuntimeReconcileError("tailscale resolver mount reconciliation failed", s.reconcileTailscaleResolverMounts(s.ctx))
+	logRuntimeReconcileError("tailscale sidecar verification failed", s.reconcileTailscaleResolverMounts(s.ctx))
 	logRuntimeReconcileError("docker netns NAT reconciliation failed", reconcileDockerNetNSPortForwards(s.cfg.DB))
 	logRuntimeReconcileError("VM network reconciliation failed", s.reconcileVMNetworks(s.ctx))
 }
@@ -481,7 +521,13 @@ func (s *Server) dockerComposeService(sn string) (*svc.DockerComposeService, err
 		return nil, errServiceNotFound
 	}
 	root := s.serviceRootFromView(sv)
-	service, err := svc.NewDockerComposeService(s.cfg.DB, sv, serviceDataDirForRoot(root), serviceRunDirForRoot(root))
+	service, err := svc.NewDockerComposeService(
+		s.cfg.DB,
+		sv,
+		serviceDataDirForRoot(root),
+		serviceRunDirForRoot(root),
+		svc.WithTailscaleGuardRunner(s.catchRunnerPath()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load service: %v", err)
 	}
@@ -495,7 +541,12 @@ func (s *Server) systemdService(sn string) (*svc.SystemdService, error) {
 		return nil, fmt.Errorf("failed to get service view: %v", err)
 	}
 	root := s.serviceRootFromView(sv)
-	service, err := svc.NewSystemdService(s.cfg.DB, sv, serviceRunDirForRoot(root))
+	service, err := svc.NewSystemdService(
+		s.cfg.DB,
+		sv,
+		serviceRunDirForRoot(root),
+		svc.WithTailscaleGuardRunner(s.catchRunnerPath()),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load service: %v", err)
 	}

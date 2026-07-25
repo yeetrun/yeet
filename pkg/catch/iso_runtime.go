@@ -998,32 +998,12 @@ func (r *isoConcreteReconcileSteps) VerifyTailscale(ctx context.Context, service
 	if record.TSNet == nil {
 		return fmt.Errorf("ISO service %q requests Tailscale without persisted Tailscale state", service)
 	}
-	unit := "yeet-" + service + "-ts.service"
-	if err := verifyISOTailscaleUnit(ctx, unit); err != nil {
-		return err
-	}
-	socket := filepath.Join(serviceRunDirForRoot(r.server.serviceRootFromView(view)), "tailscaled.sock")
-	return verifyISOTailscaleSocket(socket)
-}
-
-func verifyISOTailscaleUnit(ctx context.Context, unit string) error {
-	output, err := runISOSystemctlForRuntime(ctx, "show", "--property=ActiveState", "--value", unit)
+	systemdService, err := r.server.systemdService(service)
 	if err != nil {
-		return fmt.Errorf("verify ISO Tailscale unit %s: %w: %s", unit, err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("load ISO Tailscale service %q: %w", service, err)
 	}
-	if state := strings.TrimSpace(string(output)); state != "active" {
-		return fmt.Errorf("ISO Tailscale unit %s is %s", unit, state)
-	}
-	return nil
-}
-
-func verifyISOTailscaleSocket(socket string) error {
-	info, err := os.Stat(socket)
-	if err != nil {
-		return fmt.Errorf("verify ISO Tailscale socket: %w", err)
-	}
-	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("ISO Tailscale socket path %q is not a socket", socket)
+	if err := verifyTailscaleSystemdSidecar(ctx, systemdService); err != nil {
+		return fmt.Errorf("verify ISO Tailscale service %q: %w", service, err)
 	}
 	return nil
 }

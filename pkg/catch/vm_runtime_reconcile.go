@@ -103,36 +103,55 @@ func (s *Server) reconcileVMComponentKernelCompatibility() error {
 }
 
 func (s *Server) reconcileVMComponentKernelCompatibilityLocked(services []*db.Service) error {
+	repairs, err := collectVMComponentKernelCompatibilityRepairs(s.cfg, services)
+	if err != nil {
+		return err
+	}
+	if len(repairs) == 0 {
+		return nil
+	}
+	return applyVMComponentKernelCompatibilityRepairs(s.cfg.DB, repairs)
+}
+
+func collectVMComponentKernelCompatibilityRepairs(cfg Config, services []*db.Service) (map[string]db.VMKernelArtifactConfig, error) {
 	repairs := make(map[string]db.VMKernelArtifactConfig)
 	for _, service := range services {
 		if strings.TrimSpace(service.VM.Image.Kernel) != "" || !vmKernelComponentConfigured(service.VM.Components.Kernel) {
 			continue
 		}
-		if err := validateVMComponentKernelForCompatibility(s.cfg, service, service.VM.Components.Kernel); err != nil {
-			return fmt.Errorf("verify VM component kernel for %s: %w", service.Name, err)
+		if err := validateVMComponentKernelForCompatibility(cfg, service, service.VM.Components.Kernel); err != nil {
+			return nil, fmt.Errorf("verify VM component kernel for %s: %w", service.Name, err)
 		}
 		repairs[service.Name] = service.VM.Components.Kernel
 	}
-	if len(repairs) == 0 {
-		return nil
-	}
-	_, err := s.cfg.DB.MutateData(func(data *db.Data) error {
+	return repairs, nil
+}
+
+func applyVMComponentKernelCompatibilityRepairs(store *db.Store, repairs map[string]db.VMKernelArtifactConfig) error {
+	_, err := store.MutateData(func(data *db.Data) error {
 		for name, kernel := range repairs {
-			service, ok := data.Services[name]
-			if !ok || service == nil || service.VM == nil || service.VM.Components == nil {
-				return fmt.Errorf("adopted VM %q disappeared during kernel compatibility repair", name)
+			if err := applyVMComponentKernelCompatibilityRepair(data, name, kernel); err != nil {
+				return err
 			}
-			if strings.TrimSpace(service.VM.Image.Kernel) != "" {
-				continue
-			}
-			if service.VM.Components.Kernel != kernel {
-				return fmt.Errorf("VM %q kernel component changed during compatibility repair", name)
-			}
-			service.VM.Image.Kernel = kernel.Path
 		}
 		return nil
 	})
 	return err
+}
+
+func applyVMComponentKernelCompatibilityRepair(data *db.Data, name string, kernel db.VMKernelArtifactConfig) error {
+	service, ok := data.Services[name]
+	if !ok || service == nil || service.VM == nil || service.VM.Components == nil {
+		return fmt.Errorf("adopted VM %q disappeared during kernel compatibility repair", name)
+	}
+	if strings.TrimSpace(service.VM.Image.Kernel) != "" {
+		return nil
+	}
+	if service.VM.Components.Kernel != kernel {
+		return fmt.Errorf("VM %q kernel component changed during compatibility repair", name)
+	}
+	service.VM.Image.Kernel = kernel.Path
+	return nil
 }
 
 func vmKernelComponentConfigured(kernel db.VMKernelArtifactConfig) bool {
@@ -141,19 +160,39 @@ func vmKernelComponentConfigured(kernel db.VMKernelArtifactConfig) bool {
 }
 
 func validateVMComponentKernelForCompatibility(cfg Config, service *db.Service, kernel db.VMKernelArtifactConfig) error {
+	if err := validateVMComponentKernelLock(kernel); err != nil {
+		return err
+	}
+	if err := validateVMComponentKernelSource(cfg, service, kernel); err != nil {
+		return err
+	}
+	return validateVMComponentKernelFile(kernel)
+}
+
+func validateVMComponentKernelLock(kernel db.VMKernelArtifactConfig) error {
 	if strings.TrimSpace(kernel.ID) == "" || !vmRuntimeSHA256Pattern.MatchString(kernel.ManifestSHA256) ||
 		!vmRuntimeSHA256Pattern.MatchString(kernel.SHA256) || !filepath.IsAbs(kernel.Path) || filepath.Clean(kernel.Path) != kernel.Path {
 		return fmt.Errorf("kernel component lock is incomplete or invalid")
 	}
-	if kernel.Source == "official" {
-		root := serviceRootFromConfig(cfg, *service)
-		want := filepath.Join(serviceDataDirForRoot(root), "kernels", kernel.ID, kernel.ManifestSHA256, vmKernelFilename)
-		if kernel.Path != want {
-			return fmt.Errorf("official kernel path %q does not match immutable service path %q", kernel.Path, want)
+	return nil
+}
+
+func validateVMComponentKernelSource(cfg Config, service *db.Service, kernel db.VMKernelArtifactConfig) error {
+	if kernel.Source != "official" {
+		if isVMLegacyKernelSource(kernel.Source) {
+			return nil
 		}
-	} else if !isVMLegacyKernelSource(kernel.Source) {
 		return fmt.Errorf("unsupported kernel component source %q", kernel.Source)
 	}
+	root := serviceRootFromConfig(cfg, *service)
+	want := filepath.Join(serviceDataDirForRoot(root), "kernels", kernel.ID, kernel.ManifestSHA256, vmKernelFilename)
+	if kernel.Path != want {
+		return fmt.Errorf("official kernel path %q does not match immutable service path %q", kernel.Path, want)
+	}
+	return nil
+}
+
+func validateVMComponentKernelFile(kernel db.VMKernelArtifactConfig) error {
 	info, err := os.Lstat(kernel.Path)
 	if err != nil {
 		return err

@@ -24,39 +24,84 @@ import (
 
 var errUnhandledServiceType = errors.New("unhandled service type")
 
-var ensureVMNetworkForServiceAction = (*Server).EnsureVMNetwork
+var ensureVMNetworkForServiceAction = (*Server).ensureVMNetworkLocked
 
 func (e *ttyExecer) startCmdFunc() error {
 	if e.sn == SystemService || e.sn == CatchService {
 		return fmt.Errorf("cannot start system service")
 	}
 	target := e.managedTargetLabel()
-	return e.withLockedServiceMutation(func() error {
+	return e.withLockedServiceActivationMutation(func() error {
 		return e.runAction("start", "Start "+target, func() error {
-			if handled, err := e.installISOServiceIfAllocated(); handled {
+			if handled, err := e.activateISOVM(func(runner ServiceRunner) error {
+				return runner.Start()
+			}); handled {
 				if err != nil {
 					return fmt.Errorf("failed to start %s: %w", target, err)
 				}
 				return nil
 			}
-			runner, err := e.serviceRunner()
-			if err != nil {
-				return fmt.Errorf("failed to get service runner: %w", err)
-			}
-			if err := runner.Start(); err != nil {
-				return fmt.Errorf("failed to start %s: %w", target, err)
-			}
-			return nil
+			return e.withTailscaleResolverReadyForActivation(func() error {
+				if handled, err := e.installISOServiceIfAllocated(); handled {
+					if err != nil {
+						return fmt.Errorf("failed to start %s: %w", target, err)
+					}
+					return nil
+				}
+				runner, err := e.serviceRunner()
+				if err != nil {
+					return fmt.Errorf("failed to get service runner: %w", err)
+				}
+				if err := runner.Start(); err != nil {
+					return fmt.Errorf("failed to start %s: %w", target, err)
+				}
+				return nil
+			})
 		})
 	})
 }
 
+func (e *ttyExecer) withTailscaleResolverReadyForActivation(operation func() error) error {
+	if e.s == nil {
+		return operation()
+	}
+	return e.s.withTailscaleResolverReadyForActivation(e.ctx, e.sn, operation)
+}
+
 func (e *ttyExecer) withLockedServiceMutation(operation func() error) error {
+	return e.withLockedServiceMutationCheck(
+		func() error { return e.s.checkServiceIdentityMutationAllowed(e.sn) },
+		operation,
+	)
+}
+
+func (e *ttyExecer) withLockedServiceActivationMutation(operation func() error) error {
+	return e.withLockedServiceMutationCheck(e.checkServiceActivationMutationAllowed, operation)
+}
+
+func (e *ttyExecer) checkServiceActivationMutationAllowed() error {
+	if err := e.s.checkServiceIdentityRecoveryMutationAllowed(e.sn); err != nil {
+		return err
+	}
+	service, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return err
+	}
+	record := service.AsStruct()
+	if !tailscaleResolverPersistedRecord(*record) &&
+		record.ServiceType == db.ServiceTypeVM &&
+		record.ISO != nil {
+		return nil
+	}
+	return e.s.checkTailscaleResolverMutationAllowed()
+}
+
+func (e *ttyExecer) withLockedServiceMutationCheck(check func() error, operation func() error) error {
 	if e.s == nil {
 		return operation()
 	}
 	if e.serviceOperationLockHeld {
-		if err := e.s.checkServiceIdentityMutationAllowed(e.sn); err != nil {
+		if err := check(); err != nil {
 			return err
 		}
 		return operation()
@@ -65,7 +110,7 @@ func (e *ttyExecer) withLockedServiceMutation(operation func() error) error {
 	defer release()
 	e.serviceOperationLockHeld = true
 	defer func() { e.serviceOperationLockHeld = false }()
-	if err := e.s.checkServiceIdentityMutationAllowed(e.sn); err != nil {
+	if err := check(); err != nil {
 		return err
 	}
 	return operation()
@@ -236,24 +281,65 @@ func (e *ttyExecer) installServiceGeneration(cfg InstallerCfg, gen int) error {
 
 func (e *ttyExecer) restartCmdFunc() error {
 	target := e.managedTargetLabel()
-	return e.withLockedServiceMutation(func() error {
+	return e.withLockedServiceActivationMutation(func() error {
 		return e.runAction("restart", "Restart "+target, func() error {
-			if handled, err := e.installISOServiceIfAllocated(); handled {
+			if handled, err := e.activateISOVM(func(runner ServiceRunner) error {
+				return runner.Restart()
+			}); handled {
 				if err != nil {
 					return fmt.Errorf("failed to restart %s: %w", target, err)
 				}
 				return nil
 			}
+			return e.withTailscaleResolverReadyForActivation(func() error {
+				if handled, err := e.installISOServiceIfAllocated(); handled {
+					if err != nil {
+						return fmt.Errorf("failed to restart %s: %w", target, err)
+					}
+					return nil
+				}
+				runner, err := e.serviceRunner()
+				if err != nil {
+					return fmt.Errorf("failed to get service runner: %w", err)
+				}
+				if err := runner.Restart(); err != nil {
+					return fmt.Errorf("failed to restart %s: %w", target, err)
+				}
+				return nil
+			})
+		})
+	})
+}
+
+func (e *ttyExecer) activateISOVM(activate func(ServiceRunner) error) (bool, error) {
+	if e.s == nil {
+		return false, nil
+	}
+	service, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return true, fmt.Errorf("load service network state: %w", err)
+	}
+	record := service.AsStruct()
+	if record.ISO == nil || record.ServiceType != db.ServiceTypeVM {
+		return false, nil
+	}
+	transaction := e.vmRuntimeTransactionFunc
+	if transaction == nil {
+		transaction = WithVMRuntimeTransactionLock
+	}
+	err = transaction(e.ctx, &e.s.cfg, func() error {
+		return e.s.withTailscaleResolverReadyForActivation(e.ctx, e.sn, func() error {
+			if err := ensureVMNetworkForServiceAction(e.s, e.ctx, e.sn); err != nil {
+				return err
+			}
 			runner, err := e.serviceRunner()
 			if err != nil {
 				return fmt.Errorf("failed to get service runner: %w", err)
 			}
-			if err := runner.Restart(); err != nil {
-				return fmt.Errorf("failed to restart %s: %w", target, err)
-			}
-			return nil
+			return activate(runner)
 		})
 	})
+	return true, err
 }
 
 func (e *ttyExecer) installISOServiceIfAllocated() (bool, error) {
@@ -281,15 +367,19 @@ func (e *ttyExecer) enableCmdFunc() error {
 	if e.sn == SystemService || e.sn == CatchService {
 		return fmt.Errorf("cannot install, reserved service name")
 	}
-	runner, err := e.serviceRunner()
-	if err != nil {
-		return err
-	}
-	enabler, ok := runner.(ServiceEnabler)
-	if !ok {
-		return fmt.Errorf("service does not support enable")
-	}
-	return enabler.Enable()
+	return e.withLockedServiceMutation(func() error {
+		return e.withTailscaleResolverReadyForActivation(func() error {
+			runner, err := e.serviceRunner()
+			if err != nil {
+				return err
+			}
+			enabler, ok := runner.(ServiceEnabler)
+			if !ok {
+				return fmt.Errorf("service does not support enable")
+			}
+			return enabler.Enable()
+		})
+	})
 }
 
 func (e *ttyExecer) disableCmdFunc() error {

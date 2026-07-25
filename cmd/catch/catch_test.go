@@ -2720,6 +2720,16 @@ func TestHandleSpecialCommand(t *testing.T) {
 	}
 }
 
+func TestHandleSpecialCommandRunsTailscaleResolverExec(t *testing.T) {
+	handled, err := handleSpecialCommand([]string{"tailscale-resolver-exec"}, io.Discard)
+	if !handled {
+		t.Fatal("tailscale-resolver-exec was not handled")
+	}
+	if err == nil {
+		t.Fatal("tailscale-resolver-exec accepted missing launcher arguments")
+	}
+}
+
 func TestListenDockerPluginSocketRemovesStaleSocket(t *testing.T) {
 	dir, err := os.MkdirTemp("/tmp", "yeet-sock-")
 	if err != nil {

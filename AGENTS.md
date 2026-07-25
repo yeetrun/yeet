@@ -142,14 +142,25 @@ If `AGENTS.local.md` exists, read it and merge its instructions with this file.
 - Use Go’s `testing` package; name tests `TestXxx`.
 - Prefer table-driven tests for flag parsing and CLI routing.
 - Add tests for command bridging, parsing edge cases, and service behavior.
-- Run targeted tests for packages you touch, plus `mise exec -- go test ./...`
-  before integration or release.
+- Keep iteration fast: while implementing or correcting review findings, run
+  only the smallest relevant focused, package, race, fuzz, or stress tests.
+- Run the complete required test suite once at the end of a coherent task,
+  immediately before its commit. Do not rerun the whole suite between small
+  fix iterations unless the change invalidates broad results.
+- Run `mise exec -- go test ./...` again at the final integration or release
+  boundary only when commits have changed since the task-level suite.
 
 ## Quality Standard
 - Treat `main` as release-grade at all times: no known broken tests, red checks, reachable vulnerabilities, private-info leaks, or unreviewed quality regressions.
-- Pre-commit is the deterministic local gate. Run `pre-commit run --all-files` before commits that change code, tooling, docs examples, or release surfaces.
+- Pre-commit is the deterministic local gate. Run `pre-commit run --all-files`
+  once at the end of a coherent task before committing changes to code,
+  tooling, docs examples, or release surfaces; use targeted hooks while
+  iterating.
 - `mise run quality` must stay clean: private-info scan, coverage, CRAP, golangci, depaware, and hotspot reporting are the normal ratchet.
-- `mise run quality:goal` is the heavy destination gate. Use it before releases and after meaningful quality-tooling, parser, RPC, concurrency, or service-orchestration changes.
+- `mise run quality:goal` is the heavy destination gate. Run it once on a
+  stable release candidate, or after a coherent task that directly changes the
+  quality tooling or invalidates its broad guarantees. Do not run it between
+  implementation or review-fix iterations.
 - Current destination goals: at least 80% total coverage, zero CRAP hotspots, zero golangci findings, race detector clean, at least four active fuzz targets, and at least 80% mutation score on the bounded mutation target set.
 - Do not lower goals, refresh baselines, or mark findings acceptable just to get green. Burn down the issue, add focused tests, or document a technical reason in the relevant review/commit context.
 - Fuzz every parser, normalizer, RPC codec, config reader, path handler, and network-input surface when touched. Commit minimized fuzz corpus files for bugs found by fuzzing.

@@ -273,7 +273,12 @@ func serviceViewFromDataView(dv *db.DataView, name string) (db.ServiceView, erro
 
 func (s *Server) primaryUnitForServiceView(service db.ServiceView) (string, error) {
 	root := s.serviceRootFromView(service)
-	systemd, err := svc.NewSystemdService(s.cfg.DB, service, serviceRunDirForRoot(root))
+	systemd, err := svc.NewSystemdService(
+		s.cfg.DB,
+		service,
+		serviceRunDirForRoot(root),
+		svc.WithTailscaleGuardRunner(s.catchRunnerPath()),
+	)
 	if err != nil {
 		return "", fmt.Errorf("load systemd service %s: %w", service.Name(), err)
 	}
