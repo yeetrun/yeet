@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
 )
@@ -73,7 +74,7 @@ func syncVMGuestKernelDefault(ctx context.Context, s *Server, name string, flags
 			configPath := filepath.Join(serviceRunDirForRoot(target.serviceRoot), "firecracker.json")
 			return syncVMComponentGuestKernelToHost(
 				ctx, s.cfg.RootDir, s.cfg.ServicesRoot, target.serviceRoot, name,
-				target.service.VM.Disk.Path, configPath, *components,
+				target.service.VM.Disk.Path, configPath, *components, false,
 			)
 		}
 		result, err := syncVMGuestKernelToHost(ctx, target)
@@ -202,7 +203,7 @@ func autoSyncVMGuestKernelLocked(ctx context.Context, dataRoot, servicesRoot, se
 		if !descriptorMode {
 			return fmt.Errorf("automatic legacy kernel sync is disabled for adopted VM %q", service)
 		}
-		return syncVMComponentGuestKernelToHost(ctx, dataRoot, servicesRoot, serviceRoot, service, diskPath, configPath, *stored.VM.Components)
+		return syncVMComponentGuestKernelToHost(ctx, dataRoot, servicesRoot, serviceRoot, service, diskPath, configPath, *stored.VM.Components, true)
 	})
 }
 
@@ -364,9 +365,9 @@ func fetchTrustedVMKernelSyncManifest(ctx context.Context, dataRoot string, ref 
 	return manifest, err
 }
 
-func syncVMComponentGuestKernelToHost(ctx context.Context, dataRoot, servicesRoot, serviceRoot, service, diskPath, configPath string, components db.VMComponentsConfig) error {
+func syncVMComponentGuestKernelToHost(ctx context.Context, dataRoot, servicesRoot, serviceRoot, service, diskPath, configPath string, components db.VMComponentsConfig, automatic bool) error {
 	result, err := withMountedVMGuestRootFS(ctx, diskPath, func(mountRoot string) (vmKernelSyncResult, error) {
-		return syncVMComponentGuestKernelFromMountedRoot(ctx, dataRoot, serviceRoot, mountRoot, components)
+		return syncVMComponentGuestKernelFromMountedRoot(ctx, dataRoot, serviceRoot, mountRoot, components, automatic)
 	})
 	if err != nil {
 		return err
@@ -377,7 +378,7 @@ func syncVMComponentGuestKernelToHost(ctx context.Context, dataRoot, servicesRoo
 	return commitVMComponentKernelSync(dataRoot, servicesRoot, service, configPath, components.Kernel, *result.Component)
 }
 
-func syncVMComponentGuestKernelFromMountedRoot(ctx context.Context, dataRoot, serviceRoot, mountRoot string, components db.VMComponentsConfig) (vmKernelSyncResult, error) {
+func syncVMComponentGuestKernelFromMountedRoot(ctx context.Context, dataRoot, serviceRoot, mountRoot string, components db.VMComponentsConfig, automatic bool) (vmKernelSyncResult, error) {
 	selection, err := readGuestKernelSelection(mountRoot)
 	if err != nil {
 		return vmKernelSyncResult{}, err
@@ -388,6 +389,22 @@ func syncVMComponentGuestKernelFromMountedRoot(ctx context.Context, dataRoot, se
 	ref, manifest, err := resolveTrustedVMKernelSelection(ctx, dataRoot, selection)
 	if err != nil {
 		return vmKernelSyncResult{}, err
+	}
+	return syncTrustedVMComponentGuestKernelFromMountedRoot(serviceRoot, mountRoot, selection, components, ref, manifest, automatic)
+}
+
+func syncTrustedVMComponentGuestKernelFromMountedRoot(serviceRoot, mountRoot string, selection vmGuestKernelSelection, components db.VMComponentsConfig, ref vmKernelCatalogRef, manifest vmKernelManifest, automatic bool) (vmKernelSyncResult, error) {
+	if automatic {
+		newer, err := automaticVMKernelSelectionIsNewer(ref, components.Kernel)
+		if err != nil {
+			return vmKernelSyncResult{}, err
+		}
+		if !newer {
+			current := components.Kernel
+			return vmKernelSyncResult{
+				Version: selection.Version, HostKernelPath: current.Path, Component: &current,
+			}, nil
+		}
 	}
 
 	srcKernel, err := resolveGuestRootPath(mountRoot, selection.Kernel)
@@ -414,6 +431,41 @@ func syncVMComponentGuestKernelFromMountedRoot(ctx context.Context, dataRoot, se
 	return vmKernelSyncResult{
 		Version: selection.Version, HostKernelPath: dstKernel, HostConfigPath: dstConfig, Component: &component,
 	}, nil
+}
+
+func automaticVMKernelSelectionIsNewer(next vmKernelCatalogRef, current db.VMKernelArtifactConfig) (bool, error) {
+	if current.Source != "official" {
+		return true, nil
+	}
+	match := vmKernelIDPattern.FindStringSubmatch(current.ID)
+	if match == nil {
+		return false, fmt.Errorf("configured official VM kernel has invalid ID %q", current.ID)
+	}
+	if current.ID == next.KernelID {
+		if current.ManifestSHA256 != next.ManifestSHA256 {
+			return false, fmt.Errorf("official VM kernel ID %s changed immutable manifest identity", current.ID)
+		}
+		return false, nil
+	}
+	currentVersion, err := semver.NewVersion(match[1])
+	if err != nil {
+		return false, fmt.Errorf("configured official VM kernel version %q is invalid: %w", match[1], err)
+	}
+	nextVersion, err := semver.NewVersion(next.UpstreamVersion)
+	if err != nil {
+		return false, fmt.Errorf("guest-selected official VM kernel version %q is invalid: %w", next.UpstreamVersion, err)
+	}
+	if nextVersion.GreaterThan(currentVersion) {
+		return true, nil
+	}
+	if nextVersion.LessThan(currentVersion) {
+		return false, nil
+	}
+	var currentRevision int
+	if _, err := fmt.Sscan(match[2], &currentRevision); err != nil {
+		return false, fmt.Errorf("configured official VM kernel packaging revision in %q is invalid: %w", current.ID, err)
+	}
+	return next.PackagingRevision > currentRevision, nil
 }
 
 func syncVMLegacyComponentKernelFromMountedRoot(dataRoot, serviceRoot, mountRoot string, selection vmGuestKernelSelection, components db.VMComponentsConfig) (vmKernelSyncResult, error) {

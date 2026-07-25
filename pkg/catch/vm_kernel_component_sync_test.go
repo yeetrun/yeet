@@ -79,6 +79,46 @@ func TestAutoSyncVMGuestKernelComponentLock(t *testing.T) {
 	}
 }
 
+func TestAutoSyncVMGuestKernelDoesNotDowngradeComponentLock(t *testing.T) {
+	fixture := newVMKernelComponentSyncFixture(t)
+	currentRef := fixture.ref
+	currentRef.KernelID = "kernel-linux-7.1.5-yeet-v1"
+	currentRef.UpstreamVersion = "7.1.5"
+	currentRef.ManifestSHA256 = strings.Repeat("f", 64)
+	currentRef.ManifestURL = "https://github.com/yeetrun/yeet-vm-images/releases/download/" + currentRef.KernelID + "/kernel-manifest.json"
+	fixture.catalog.Kernels = append(fixture.catalog.Kernels, currentRef)
+	current := db.VMKernelArtifactConfig{
+		ID: currentRef.KernelID, ManifestSHA256: currentRef.ManifestSHA256,
+		SHA256: strings.Repeat("9", 64),
+		Path:   filepath.Join(serviceDataDirForRoot(fixture.serviceRoot), "kernels", currentRef.KernelID, currentRef.ManifestSHA256, vmKernelFilename),
+		Source: "official",
+	}
+	store := db.NewStore(filepath.Join(fixture.dataRoot, "db.json"), filepath.Join(fixture.dataRoot, "services"))
+	if _, _, err := store.MutateService("devbox", func(_ *db.Data, service *db.Service) error {
+		service.VM.Components.Kernel = current
+		service.VM.Image.Kernel = current.Path
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	writeKernelSyncFirecrackerConfig(t, fixture.serviceRoot, current.Path, "")
+	withVMKernelComponentCatalog(t, fixture.catalog, fixture.manifest, nil)
+	withVMKernelSyncRunner(t, mountedGuestKernelComponentRunner(t, fixture.selector(false), fixture.kernel, fixture.config))
+
+	if err := AutoSyncVMGuestKernelOnReboot(context.Background(), fixture.consoleConfig()); err != nil {
+		t.Fatalf("AutoSyncVMGuestKernelOnReboot: %v", err)
+	}
+
+	service := readVMKernelComponentSyncService(t, fixture.dataRoot)
+	if service.VM.Components.Kernel != current {
+		t.Fatalf("component kernel = %#v, want newer configured kernel %#v", service.VM.Components.Kernel, current)
+	}
+	if service.VM.Image.Kernel != current.Path {
+		t.Fatalf("compatibility kernel path = %q, want %q", service.VM.Image.Kernel, current.Path)
+	}
+	assertFileContains(t, fixture.configPath, current.Path)
+}
+
 func TestAutoSyncVMGuestKernelRejectsGuestAuthority(t *testing.T) {
 	fixture := newVMKernelComponentSyncFixture(t)
 	catalogCalls := 0
