@@ -728,10 +728,12 @@ func (i *FileInstaller) parseNetworkPart(net string, dv db.DataView) error {
 	return nil
 }
 
+const defaultTailscaleVersion = "1.101.284"
+
 func tailscaleNetworkFromOpts(opts TailscaleOpts) (*db.TailscaleNetwork, string) {
 	tsNet := &db.TailscaleNetwork{
 		Interface: "yts-" + hexStr(4),
-		Version:   "1.77.33",
+		Version:   defaultTailscaleVersion,
 	}
 	if opts.Version != "" {
 		tsNet.Version = opts.Version

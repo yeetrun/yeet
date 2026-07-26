@@ -7,6 +7,7 @@ package netns
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -212,9 +213,10 @@ func TestServiceNSScriptUsesPerServiceDhclientLeaseFileAndNetNSResolverHook(t *t
 		`DHCP_RELEASE="dhcpcd --nohook resolv.conf -k"`,
 		`DHCP="dhclient -e YEET_NETNS_NAME=${NS_NAME} ${DHCP_RESOLV_CONF_ENV} -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"`,
 		`DHCP_RELEASE="dhclient -e YEET_NETNS_NAME=${NS_NAME} ${DHCP_RESOLV_CONF_ENV} -r -pf ${DHCP_PIDFILE} -lf ${DHCP_LEASEFILE}"`,
+		`NETNS_ETC_DIR="${NETNS_ETC_DIR:-/etc/netns}"`,
 		`refresh_netns_resolv_conf() {`,
-		`mkdir -p "/etc/netns/$NS_NAME"`,
-		`cp /etc/resolv.conf "/etc/netns/$NS_NAME/resolv.conf"`,
+		`mkdir -p "$NETNS_ETC_DIR/$NS_NAME"`,
+		`cp /etc/resolv.conf "$NETNS_ETC_DIR/$NS_NAME/resolv.conf"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("service-ns missing %q:\n%s", want, got)
@@ -254,12 +256,83 @@ func TestServiceNSScriptRefreshesSeededNetNSResolver(t *testing.T) {
 	if want := `if [ -r /etc/resolv.conf ]; then`; !strings.Contains(got, want) {
 		t.Fatalf("service-ns missing %q:\n%s", want, got)
 	}
-	if want := `cp /etc/resolv.conf "/etc/netns/$NS_NAME/resolv.conf"`; !strings.Contains(got, want) {
+	if want := `cp /etc/resolv.conf "$NETNS_ETC_DIR/$NS_NAME/resolv.conf"`; !strings.Contains(got, want) {
 		t.Fatalf("service-ns missing %q:\n%s", want, got)
 	}
 	if strings.Count(got, `refresh_netns_resolv_conf`) < 3 {
 		t.Fatalf("service-ns should define and call refresh_netns_resolv_conf for setup and cleanup:\n%s", got)
 	}
+}
+
+func TestServiceNSScriptCleanupRemovesResolverDirectory(t *testing.T) {
+	resolverDir := runServiceNSScriptCleanup(t, map[string]string{
+		"resolv.conf": "nameserver 192.0.2.53\n",
+	})
+
+	if _, err := os.Stat(resolverDir); !os.IsNotExist(err) {
+		t.Fatalf("resolver directory stat error = %v, want not exist", err)
+	}
+}
+
+func TestServiceNSScriptCleanupPreservesUnexpectedFiles(t *testing.T) {
+	resolverDir := runServiceNSScriptCleanup(t, map[string]string{
+		"keep":        "operator state\n",
+		"resolv.conf": "nameserver 192.0.2.53\n",
+	})
+
+	if _, err := os.Stat(filepath.Join(resolverDir, "resolv.conf")); !os.IsNotExist(err) {
+		t.Fatalf("resolv.conf stat error = %v, want not exist", err)
+	}
+	got, err := os.ReadFile(filepath.Join(resolverDir, "keep"))
+	if err != nil {
+		t.Fatalf("ReadFile keep returned error: %v", err)
+	}
+	if string(got) != "operator state\n" {
+		t.Fatalf("keep content = %q, want %q", got, "operator state\n")
+	}
+}
+
+func runServiceNSScriptCleanup(t *testing.T, resolverFiles map[string]string) string {
+	t.Helper()
+
+	raw, err := netnsScripts.ReadFile("netns-scripts/service-ns")
+	if err != nil {
+		t.Fatalf("ReadFile embedded service-ns returned error: %v", err)
+	}
+	root := t.TempDir()
+	scriptPath := filepath.Join(root, "service-ns")
+	if err := os.WriteFile(scriptPath, raw, 0755); err != nil {
+		t.Fatalf("WriteFile service-ns returned error: %v", err)
+	}
+	fakeBinDir := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBinDir, 0755); err != nil {
+		t.Fatalf("Mkdir fake bin returned error: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "ip"), []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatalf("WriteFile fake ip returned error: %v", err)
+	}
+
+	netNSEtcDir := filepath.Join(root, "etc-netns")
+	resolverDir := filepath.Join(netNSEtcDir, "yeet-cleanup-test-ns")
+	if err := os.MkdirAll(resolverDir, 0755); err != nil {
+		t.Fatalf("MkdirAll resolver directory returned error: %v", err)
+	}
+	for name, content := range resolverFiles {
+		if err := os.WriteFile(filepath.Join(resolverDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("WriteFile resolver file %q returned error: %v", name, err)
+		}
+	}
+
+	cmd := exec.Command(scriptPath, "cleanup")
+	cmd.Env = append(os.Environ(),
+		"SERVICE_NAME=cleanup-test",
+		"NETNS_ETC_DIR="+netNSEtcDir,
+		"PATH="+fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("service-ns cleanup returned error: %v\n%s", err, output)
+	}
+	return resolverDir
 }
 
 func TestDhclientEnterHookRedirectsResolverWritesForYeetNetNS(t *testing.T) {

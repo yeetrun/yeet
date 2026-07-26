@@ -408,6 +408,18 @@ func TestParseNetworkLANUsesHostDefaultRoute(t *testing.T) {
 	}
 }
 
+func TestTailscaleNetworkFromOptsUsesCurrentDefault(t *testing.T) {
+	defaultNetwork, _ := tailscaleNetworkFromOpts(TailscaleOpts{})
+	if defaultNetwork.Version != "1.101.284" {
+		t.Fatalf("default Version = %q, want %q", defaultNetwork.Version, "1.101.284")
+	}
+
+	explicitNetwork, _ := tailscaleNetworkFromOpts(TailscaleOpts{Version: "1.2.3"})
+	if explicitNetwork.Version != "1.2.3" {
+		t.Fatalf("explicit Version = %q, want %q", explicitNetwork.Version, "1.2.3")
+	}
+}
+
 func TestParseNetworkISO(t *testing.T) {
 	tailscale := TailscaleOpts{Version: "1.2.3", AuthKey: "tskey-auth"}
 	macvlan := MacvlanOpts{Parent: "vmbr0", VLAN: 42, Mac: "02:00:00:00:00:42"}

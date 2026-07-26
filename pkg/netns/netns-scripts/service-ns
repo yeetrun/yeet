@@ -6,6 +6,7 @@ set -ex
 # Use environment variables with defaults
 SERVICE_NAME="${SERVICE_NAME:-service1}"
 NS_NAME="yeet-$SERVICE_NAME-ns"
+NETNS_ETC_DIR="${NETNS_ETC_DIR:-/etc/netns}"
 
 RANGE="${RANGE:-}"
 HOST_IP="${HOST_IP:-}"
@@ -39,10 +40,16 @@ if ! command -v dhcpcd &> /dev/null; then
 fi
 
 refresh_netns_resolv_conf() {
-    mkdir -p "/etc/netns/$NS_NAME"
+    mkdir -p "$NETNS_ETC_DIR/$NS_NAME"
     if [ -r /etc/resolv.conf ]; then
-        cp /etc/resolv.conf "/etc/netns/$NS_NAME/resolv.conf"
+        cp /etc/resolv.conf "$NETNS_ETC_DIR/$NS_NAME/resolv.conf"
     fi
+}
+
+cleanup_netns_resolv_conf() {
+    resolver_dir="$NETNS_ETC_DIR/$NS_NAME"
+    rm -f "$resolver_dir/resolv.conf"
+    rmdir "$resolver_dir" 2>/dev/null || true
 }
 
 if [ "$1" == "cleanup" ]; then
@@ -59,6 +66,7 @@ if [ "$1" == "cleanup" ]; then
         fi
     fi
     ip netns del $NS_NAME || true
+    cleanup_netns_resolv_conf
     exit 0
 fi
 
@@ -148,8 +156,8 @@ if [ -n "$TAILSCALE_TAP_INTERFACE" ]; then
 fi
 
 if [ -n "$RESOLV_CONF" ]; then
-    mkdir -p /etc/netns/$NS_NAME
-    cp $RESOLV_CONF "/etc/netns/$NS_NAME/resolv.conf"
+    mkdir -p "$NETNS_ETC_DIR/$NS_NAME"
+    cp "$RESOLV_CONF" "$NETNS_ETC_DIR/$NS_NAME/resolv.conf"
 fi
 
 echo "Service namespace $NS_NAME set up and connected to yeet-ns"
