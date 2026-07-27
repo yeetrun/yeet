@@ -296,9 +296,11 @@
           <p id="terminalSubtitle">Waiting for terminal output</p>
         </div>
         <span id="terminalStatus" class="terminal-status" role="status">Idle</span>
+        <button type="button" id="terminalCopy" class="quiet-button" disabled>Copy</button>
         <button type="button" id="terminalExpand" class="quiet-button" aria-expanded="false">Expand</button>
       </div>
-      <pre id="terminalOutput" tabindex="0" aria-live="polite"></pre>
+      <p id="terminalWarning" class="terminal-warning" role="status" hidden></p>
+      <div id="terminalOutput" class="terminal-output" tabindex="0" role="region" aria-label="Deploy output"></div>
     </section>
 
     <div class="field-picker" id="filePicker" role="listbox" hidden>
@@ -318,6 +320,6 @@
     </div>
 
     <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
-    <script src="/app.js" defer></script>
+    <script type="module" src="/app.js"></script>
   </body>
 </html>

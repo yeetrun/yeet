@@ -16,17 +16,20 @@ if [[ "${1:-}" == "--check" ]]; then
   shift
 fi
 
-# Apply/check BSD headers across tracked source files.
+# Apply/check BSD headers across Yeet source files.
 paths=(cmd pkg tools)
 if [[ -d example ]]; then
   paths+=(example)
 fi
+# This vendored upstream bundle is MIT; its license is retained alongside it.
+ignore_paths=(-ignore pkg/yeet/web_run_assets/ghostty-web.js)
 
 set +e
 tools/hooks/mise-exec go run github.com/google/addlicense $check_mode \
   -l bsd \
   -c "AUTHORS" \
   -y 2025 \
+  "${ignore_paths[@]}" \
   "${paths[@]}"
 status=$?
 set -e
@@ -37,6 +40,7 @@ if [[ $status -ne 0 && "$auto_fix" == "true" ]]; then
     -l bsd \
     -c "AUTHORS" \
     -y 2025 \
+    "${ignore_paths[@]}" \
     "${paths[@]}"
   echo "License headers added. Please stage the changes and retry the commit."
   exit 1

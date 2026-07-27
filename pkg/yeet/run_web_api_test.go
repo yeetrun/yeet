@@ -5,14 +5,17 @@
 package yeet
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1017,6 +1020,46 @@ func TestRunWebAPIDeployStartsJobWithoutWaitingForCompletion(t *testing.T) {
 	waitRunWebJobState(t, s, startedResp.JobID, runWebJobSucceeded)
 }
 
+func TestRunWebAPIDeployJournalCreationFailureDoesNotExecute(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executed := false
+	executeRunDraftWithOptionsFn = func(context.Context, RunDraft, *projectConfigLocation, runDraftExecuteOptions) error {
+		executed = true
+		return nil
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	want := errors.New("journal creation failed")
+	s := newRunWebServer(runWebServerConfig{
+		Token: "secret",
+		Root:  root,
+		NewJournal: func(string, int64) (runWebEventJournal, error) {
+			return nil, want
+		},
+	})
+
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "run.sh",
+	})
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), want.Error()) {
+		t.Fatalf("deploy = %d %q, want 500 with journal creation error", rec.Code, rec.Body.String())
+	}
+	if executed {
+		t.Fatal("executor called after journal creation failed")
+	}
+}
+
 func TestRunWebAPIDeployStreamReplaysOutputAndStatus(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
 	oldExecDraft := executeRunDraftWithOptionsFn
@@ -1048,17 +1091,21 @@ func TestRunWebAPIDeployStreamReplaysOutputAndStatus(t *testing.T) {
 		t.Fatalf("stream Content-Type = %q, want text/event-stream", ct)
 	}
 	events := parseRunWebSSE(t, stream.Body.String())
-	if len(events) != 2 {
-		t.Fatalf("events = %#v, want output and status", events)
+	if len(events) != 3 {
+		t.Fatalf("events = %#v, want terminal, output, and status", events)
 	}
-	if events[0].Name != "output" || events[0].ID == "" {
-		t.Fatalf("first event = %#v, want output with id", events[0])
+	if events[0].Name != "terminal" || events[0].ID == "" ||
+		events[0].Data != `{"tty":false,"cols":80,"rows":24,"scrollback":1000}` {
+		t.Fatalf("first event = %#v, want stable non-TTY terminal profile with id", events[0])
+	}
+	if events[1].Name != "output" || events[1].ID == "" {
+		t.Fatalf("second event = %#v, want output with id", events[1])
 	}
 	var output struct {
 		Encoding string `json:"encoding"`
 		Chunk    string `json:"chunk"`
 	}
-	if err := json.Unmarshal([]byte(events[0].Data), &output); err != nil {
+	if err := json.Unmarshal([]byte(events[1].Data), &output); err != nil {
 		t.Fatalf("decode output data: %v", err)
 	}
 	chunk, err := base64.StdEncoding.DecodeString(output.Chunk)
@@ -1068,11 +1115,441 @@ func TestRunWebAPIDeployStreamReplaysOutputAndStatus(t *testing.T) {
 	if output.Encoding != "base64" || string(chunk) != "deploying\n" {
 		t.Fatalf("output event = %#v chunk=%q, want deploying", output, string(chunk))
 	}
-	if events[1].Name != "status" || !strings.Contains(events[1].Data, `"state":"succeeded"`) {
-		t.Fatalf("second event = %#v, want succeeded status", events[1])
+	if events[2].Name != "status" || !strings.Contains(events[2].Data, `"state":"succeeded"`) {
+		t.Fatalf("third event = %#v, want succeeded status", events[2])
 	}
 	if terminal.String() != "deploying\n" {
 		t.Fatalf("terminal output = %q, want deploying", terminal.String())
+	}
+}
+
+func TestRunWebAPIDeployStreamRetryAndCursorValidation(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftWithOptionsFn = func(_ context.Context, _ RunDraft, _ *projectConfigLocation, opts runDraftExecuteOptions) error {
+		_, _ = io.WriteString(opts.Stdout, "first\n")
+		_, _ = io.WriteString(opts.Stdout, "second\n")
+		return nil
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root})
+	t.Cleanup(func() {
+		if err := s.(*runWebServer).close(); err != nil {
+			t.Errorf("close server: %v", err)
+		}
+	})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "run.sh",
+	})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
+
+	streamPath := "/api/deploy/" + jobID + "/stream"
+	stream := runWebAPIRequest(t, s, http.MethodGet, streamPath, nil)
+	if stream.Code != http.StatusOK {
+		t.Fatalf("stream status = %d body=%s", stream.Code, stream.Body.String())
+	}
+	if !strings.HasPrefix(stream.Body.String(), "retry: 250\n\n") {
+		t.Fatalf("stream prefix = %q, want retry directive before events", stream.Body.String())
+	}
+	if got := stream.Header().Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("Cache-Control = %q, want no-cache", got)
+	}
+	if got := stream.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("X-Accel-Buffering = %q, want no", got)
+	}
+	events := parseRunWebSSE(t, stream.Body.String())
+	if len(events) != 3 {
+		t.Fatalf("events = %#v, want terminal, combined output, status", events)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, streamPath, nil)
+	req.Header.Set("X-Yeet-Run-Token", "secret")
+	req.Header.Set("Last-Event-ID", events[0].ID)
+	replay := httptest.NewRecorder()
+	s.ServeHTTP(replay, req)
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replay status = %d body=%s", replay.Code, replay.Body.String())
+	}
+	replayed := parseRunWebSSE(t, replay.Body.String())
+	if len(replayed) != 2 || replayed[0].Name != "output" || replayed[1].Name != "status" {
+		t.Fatalf("replayed events = %#v, want ordered output then status", replayed)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		cursor string
+		want   int
+	}{
+		{name: "malformed", cursor: "wat", want: http.StatusBadRequest},
+		{name: "negative", cursor: "-1", want: http.StatusBadRequest},
+		{name: "impossible", cursor: "1", want: http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, streamPath, nil)
+			req.Header.Set("X-Yeet-Run-Token", "secret")
+			req.Header.Set("Last-Event-ID", tc.cursor)
+			rec := httptest.NewRecorder()
+			s.ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("cursor %q status = %d, want %d body=%s", tc.cursor, rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRunWebAPIDeployStreamRealHTTPReconnectPreservesRapidOutput(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+
+	const chunkCount = 96
+	chunks := make([][]byte, 0, chunkCount)
+	var wantOutput bytes.Buffer
+	for i := 0; i < chunkCount; i++ {
+		chunk := []byte(fmt.Sprintf("chunk-%03d:%c\n", i, rune('a'+i%26)))
+		chunks = append(chunks, chunk)
+		wantOutput.Write(chunk)
+	}
+	tail := []byte("unique-tail-after-reader-pause\n")
+	wantOutput.Write(tail)
+
+	testCtx, cancelTest := context.WithCancel(context.Background())
+	streamReady := make(chan struct{})
+	outputBlocked := make(chan struct{})
+	releaseOutput := make(chan struct{})
+	var outputBlockedOnce sync.Once
+	var releaseOutputOnce sync.Once
+	releaseOutputGate := func() {
+		releaseOutputOnce.Do(func() { close(releaseOutput) })
+	}
+	burstWritten := make(chan struct{})
+	allowTail := make(chan struct{})
+	writerCompleted := make(chan struct{})
+	executeRunDraftWithOptionsFn = func(ctx context.Context, _ RunDraft, _ *projectConfigLocation, opts runDraftExecuteOptions) error {
+		select {
+		case <-streamReady:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-testCtx.Done():
+			return testCtx.Err()
+		}
+		for i, chunk := range chunks {
+			if _, err := opts.Stdout.Write(chunk); err != nil {
+				return err
+			}
+			if i == 0 {
+				select {
+				case <-outputBlocked:
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-testCtx.Done():
+					return testCtx.Err()
+				}
+			}
+		}
+		close(burstWritten)
+		select {
+		case <-allowTail:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-testCtx.Done():
+			return testCtx.Err()
+		}
+		if _, err := opts.Stdout.Write(tail); err != nil {
+			return err
+		}
+		close(writerCompleted)
+		return nil
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	completed := make(chan struct{})
+	handler := newRunWebServer(runWebServerConfig{
+		Token:      "secret",
+		Root:       root,
+		Out:        io.Discard,
+		OnComplete: func() { close(completed) },
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/stream") && r.Header.Get("Last-Event-ID") == "" {
+			w = &runWebOutputGateWriter{
+				ResponseWriter: w,
+				ctx:            r.Context(),
+				cleanup:        testCtx.Done(),
+				release:        releaseOutput,
+				blocked: func() {
+					outputBlockedOnce.Do(func() { close(outputBlocked) })
+				},
+			}
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(func() {
+		releaseOutputGate()
+		cancelTest()
+		server.CloseClientConnections()
+		server.Close()
+		if err := handler.(*runWebServer).close(); err != nil {
+			t.Errorf("close web server: %v", err)
+		}
+	})
+
+	deployBody, err := json.Marshal(RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"})
+	if err != nil {
+		t.Fatalf("encode deploy request: %v", err)
+	}
+	deployReq, err := http.NewRequest(http.MethodPost, server.URL+"/api/deploy", bytes.NewReader(deployBody))
+	if err != nil {
+		t.Fatalf("create deploy request: %v", err)
+	}
+	deployReq.Header.Set("X-Yeet-Run-Token", "secret")
+	deployResp, err := server.Client().Do(deployReq)
+	if err != nil {
+		t.Fatalf("deploy request: %v", err)
+	}
+	deployResponseBody, err := io.ReadAll(deployResp.Body)
+	_ = deployResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read deploy response: %v", err)
+	}
+	if deployResp.StatusCode != http.StatusOK {
+		t.Fatalf("deploy status = %d body=%s, want 200", deployResp.StatusCode, deployResponseBody)
+	}
+	var started runWebDeployStartedResponse
+	if err := json.Unmarshal(deployResponseBody, &started); err != nil {
+		t.Fatalf("decode deploy response %q: %v", deployResponseBody, err)
+	}
+	if !started.OK || started.JobID == "" {
+		t.Fatalf("deploy response = %#v, want ok job ID", started)
+	}
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	streamURL := server.URL + "/api/deploy/" + url.PathEscape(started.JobID) + "/stream"
+	firstReq, err := http.NewRequestWithContext(firstCtx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		t.Fatalf("create first stream request: %v", err)
+	}
+	firstReq.Header.Set("X-Yeet-Run-Token", "secret")
+	firstResp, err := server.Client().Do(firstReq)
+	if err != nil {
+		t.Fatalf("open first stream: %v", err)
+	}
+	if firstResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(firstResp.Body)
+		_ = firstResp.Body.Close()
+		t.Fatalf("first stream status = %d body=%s, want 200", firstResp.StatusCode, body)
+	}
+	firstEvent := readRunWebSSEEvent(t, bufio.NewReader(firstResp.Body))
+	if firstEvent.Name != string(runWebStreamTerminal) || firstEvent.ID == "" {
+		t.Fatalf("first stream event = %#v, want terminal profile with event ID", firstEvent)
+	}
+	close(streamReady)
+
+	select {
+	case <-outputBlocked:
+	case <-time.After(time.Second):
+		t.Fatal("first output delivery did not reach the deterministic server-side gate")
+	}
+	select {
+	case <-burstWritten:
+	case <-time.After(2 * time.Second):
+		t.Fatal("rapid terminal burst did not finish while the first HTTP reader was paused")
+	}
+	close(allowTail)
+	select {
+	case <-writerCompleted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("terminal writer did not complete independently of the paused HTTP reader")
+	}
+	select {
+	case <-completed:
+		t.Fatal("server completed before the browser drained and acknowledged terminal output")
+	default:
+	}
+
+	cancelFirst()
+	_ = firstResp.Body.Close()
+	releaseOutputGate()
+
+	replayReq, err := http.NewRequest(http.MethodGet, streamURL, nil)
+	if err != nil {
+		t.Fatalf("create replay request: %v", err)
+	}
+	replayReq.Header.Set("X-Yeet-Run-Token", "secret")
+	replayReq.Header.Set("Last-Event-ID", firstEvent.ID)
+	replayResp, err := server.Client().Do(replayReq)
+	if err != nil {
+		t.Fatalf("open replay stream: %v", err)
+	}
+	replayBody, err := io.ReadAll(replayResp.Body)
+	_ = replayResp.Body.Close()
+	if err != nil {
+		t.Fatalf("read replay stream: %v", err)
+	}
+	if replayResp.StatusCode != http.StatusOK {
+		t.Fatalf("replay status = %d body=%s, want 200", replayResp.StatusCode, replayBody)
+	}
+	events := parseRunWebSSE(t, string(replayBody))
+	if got := decodeRunWebOutputText(t, events); got != wantOutput.String() {
+		t.Fatalf("reconnected output length = %d, want %d exact once", len(got), wantOutput.Len())
+	}
+	if len(events) < 2 {
+		t.Fatalf("reconnected events = %#v, want output followed by final status", events)
+	}
+	for i, event := range events[:len(events)-1] {
+		if event.Name != string(runWebStreamOutput) {
+			t.Fatalf("reconnected event %d = %#v, want output before final status", i, event)
+		}
+	}
+	last := events[len(events)-1]
+	if last.Name != string(runWebStreamStatus) || last.Data != `{"state":"succeeded"}` {
+		t.Fatalf("final replay event = %#v, want succeeded status", last)
+	}
+	select {
+	case <-completed:
+		t.Fatal("server completed before the post-drain acknowledgement")
+	default:
+	}
+
+	ackReq, err := http.NewRequest(http.MethodPost, server.URL+"/api/deploy/"+url.PathEscape(started.JobID)+"/ack", nil)
+	if err != nil {
+		t.Fatalf("create acknowledgement request: %v", err)
+	}
+	ackReq.Header.Set("X-Yeet-Run-Token", "secret")
+	ackResp, err := server.Client().Do(ackReq)
+	if err != nil {
+		t.Fatalf("acknowledge drained stream: %v", err)
+	}
+	_ = ackResp.Body.Close()
+	if ackResp.StatusCode != http.StatusNoContent {
+		t.Fatalf("acknowledgement status = %d, want 204", ackResp.StatusCode)
+	}
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for completion after post-drain acknowledgement")
+	}
+}
+
+func TestRunWebAPIDeployUsesConfiguredTerminalProfileAndResizeStream(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	resizes := make(chan catchrpc.Resize)
+	resizeAppended := make(chan struct{})
+	journal := &runWebResizeSignalJournal{
+		runWebEventJournal: newRunWebMemoryJournal(),
+		appended:           resizeAppended,
+	}
+	executeRunDraftWithOptionsFn = func(ctx context.Context, _ RunDraft, _ *projectConfigLocation, opts runDraftExecuteOptions) error {
+		terminal, ok := remoteExecTerminalStateFromContext(ctx)
+		if !ok {
+			return errors.New("deploy context did not contain shared terminal state")
+		}
+		cols, rows, remoteResize, stopResize := terminal.subscribe()
+		if stopResize != nil {
+			defer stopResize()
+		}
+		if !terminal.TTY || cols != 120 || rows != 40 || terminal.Term != "xterm-256color" {
+			return fmt.Errorf("shared terminal state = %#v, want configured profile", terminal)
+		}
+		if _, err := io.WriteString(opts.Stdout, "before"); err != nil {
+			return err
+		}
+		resizes <- catchrpc.Resize{Cols: 132, Rows: 44}
+		select {
+		case resize := <-remoteResize:
+			if resize != (catchrpc.Resize{Cols: 132, Rows: 44}) {
+				return fmt.Errorf("remote resize = %#v, want 132x44", resize)
+			}
+		case <-time.After(time.Second):
+			return errors.New("timed out waiting for shared remote resize")
+		}
+		select {
+		case <-resizeAppended:
+		default:
+			return errors.New("remote resize was delivered before its journal event")
+		}
+		if _, err := io.WriteString(opts.Stdout, "after"); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	profile := runWebTerminalProfile{
+		TTY: true, Cols: 120, Rows: 40, Term: "xterm-256color", Scrollback: 1000,
+	}
+	var profileCalls, resizeCalls int
+	s := newRunWebServer(runWebServerConfig{
+		Token: "secret",
+		Root:  root,
+		TerminalProfile: func() runWebTerminalProfile {
+			profileCalls++
+			return profile
+		},
+		TerminalResize: func(ctx context.Context) <-chan catchrpc.Resize {
+			if ctx == nil {
+				t.Fatal("TerminalResize received nil context")
+			}
+			resizeCalls++
+			return resizes
+		},
+		NewJournal: func(string, int64) (runWebEventJournal, error) {
+			return journal, nil
+		},
+	})
+	t.Cleanup(func() { _ = s.(*runWebServer).close() })
+
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{
+		Service: "svc-a",
+		Host:    "host-a",
+		Payload: "run.sh",
+	})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
+	stream := runWebAPIRequest(t, s, http.MethodGet, "/api/deploy/"+jobID+"/stream", nil)
+	events := parseRunWebSSE(t, stream.Body.String())
+	if len(events) != 5 {
+		t.Fatalf("events = %#v, want terminal, output, resize, output, status", events)
+	}
+	if events[0].Name != "terminal" || events[0].Data != `{"tty":true,"cols":120,"rows":40,"term":"xterm-256color","scrollback":1000}` {
+		t.Fatalf("terminal event = %#v, want configured profile", events[0])
+	}
+	if events[1].Name != "output" || decodeRunWebOutputText(t, events[1:2]) != "before" ||
+		events[2].Name != "resize" || events[2].Data != `{"cols":132,"rows":44}` ||
+		events[3].Name != "output" || decodeRunWebOutputText(t, events[3:4]) != "after" ||
+		events[4].Name != "status" {
+		t.Fatalf("events = %#v, want exact terminal/output/resize/output/status ordering", events)
+	}
+	if profileCalls != 1 || resizeCalls != 1 {
+		t.Fatalf("profile calls = %d resize calls = %d, want one each", profileCalls, resizeCalls)
 	}
 }
 
@@ -1196,7 +1673,7 @@ func TestRunWebAPIDeployKeepsTerminalBackedOutputTTY(t *testing.T) {
 	}
 }
 
-func TestRunWebAPISuccessfulJobCompletesAndRejectsFurtherDeploys(t *testing.T) {
+func TestRunWebAPISuccessfulJobWaitsForAckAndCompletesExactlyOnce(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
 	oldExecDraft := executeRunDraftWithOptionsFn
 	defer func() {
@@ -1210,9 +1687,22 @@ func TestRunWebAPISuccessfulJobCompletesAndRejectsFurtherDeploys(t *testing.T) {
 		return nil
 	}
 	completed := make(chan struct{})
+	var completedOnce sync.Once
+	var completedMu sync.Mutex
+	completedCalls := 0
 	root := t.TempDir()
 	writeRunWebTestPayload(t, root)
-	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, OnComplete: func() { close(completed) }})
+	s := newRunWebServer(runWebServerConfig{
+		Token: "secret",
+		Root:  root,
+		OnComplete: func() {
+			completedMu.Lock()
+			completedCalls++
+			completedMu.Unlock()
+			completedOnce.Do(func() { close(completed) })
+		},
+	})
+	t.Cleanup(func() { _ = s.(*runWebServer).close() })
 	draft := RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"}
 
 	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
@@ -1220,12 +1710,198 @@ func TestRunWebAPISuccessfulJobCompletesAndRejectsFurtherDeploys(t *testing.T) {
 	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
 	select {
 	case <-completed:
+		t.Fatal("OnComplete ran before browser acknowledgement")
+	case <-time.After(50 * time.Millisecond):
+	}
+	for i := 0; i < 2; i++ {
+		ack := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy/"+jobID+"/ack", nil)
+		if ack.Code != http.StatusNoContent {
+			t.Fatalf("ack %d status = %d, want 204 body=%s", i+1, ack.Code, ack.Body.String())
+		}
+	}
+	select {
+	case <-completed:
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for OnComplete")
 	}
+	time.Sleep(25 * time.Millisecond)
+	completedMu.Lock()
+	if completedCalls != 1 {
+		t.Fatalf("OnComplete calls = %d, want exactly 1", completedCalls)
+	}
+	completedMu.Unlock()
 	again := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
 	if again.Code != http.StatusConflict {
 		t.Fatalf("second deploy status = %d, want 409 body=%s", again.Code, again.Body.String())
+	}
+}
+
+func TestRunWebAPICompletionFallbackAndSessionClose(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		release func(http.Handler, string)
+	}{
+		{name: "fallback"},
+		{
+			name: "session close",
+			release: func(s http.Handler, _ string) {
+				rec := runWebAPIRequest(t, s, http.MethodPost, "/api/session/closed", nil)
+				if rec.Code != http.StatusNoContent {
+					t.Fatalf("session close status = %d body=%s", rec.Code, rec.Body.String())
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			restore := stubRunWebSuccessfulDeploy(t)
+			defer restore()
+			completed := make(chan struct{})
+			root := t.TempDir()
+			writeRunWebTestPayload(t, root)
+			cfg := runWebServerConfig{
+				Token: "secret",
+				Root:  root,
+				OnComplete: func() {
+					close(completed)
+				},
+			}
+			if tc.release == nil {
+				cfg.CompletionAckTimeout = 25 * time.Millisecond
+			} else {
+				cfg.CompletionAckTimeout = time.Second
+			}
+			s := newRunWebServer(cfg)
+			t.Cleanup(func() { _ = s.(*runWebServer).close() })
+			rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{
+				Service: "svc-a", Host: "host-a", Payload: "run.sh",
+			})
+			jobID := decodeRunWebDeployStarted(t, rec).JobID
+			waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
+			if tc.release != nil {
+				tc.release(s, jobID)
+			}
+			select {
+			case <-completed:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for completion release")
+			}
+		})
+	}
+}
+
+func TestRunWebAPIDefaultCompletionTimeoutAndNilContext(t *testing.T) {
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()}).(*runWebServer)
+	t.Cleanup(func() { _ = s.close() })
+	if s.ctx == nil {
+		t.Fatal("server context is nil")
+	}
+	if got := s.completionAckTimeout(); got != 10*time.Second {
+		t.Fatalf("completion acknowledgement timeout = %s, want 10s", got)
+	}
+}
+
+func TestRunWebAPIDegradedSuccessUsesCompletionFallback(t *testing.T) {
+	restore := stubRunWebSuccessfulDeploy(t)
+	defer restore()
+	completed := make(chan struct{})
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	s := newRunWebServer(runWebServerConfig{
+		Token:                "secret",
+		Root:                 root,
+		CompletionAckTimeout: 25 * time.Millisecond,
+		OnComplete:           func() { close(completed) },
+		NewJournal: func(string, int64) (runWebEventJournal, error) {
+			return &runWebFailAfterTerminalJournal{
+				runWebEventJournal: newRunWebMemoryJournal(),
+				err:                errors.New("journal write failed"),
+			}, nil
+		},
+	})
+	t.Cleanup(func() { _ = s.(*runWebServer).close() })
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{
+		Service: "svc-a", Host: "host-a", Payload: "run.sh",
+	})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	status := waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
+	if !status.Degraded {
+		t.Fatalf("status = %#v, want degraded success", status)
+	}
+	ack := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy/"+jobID+"/ack", nil)
+	if ack.Code != http.StatusConflict {
+		t.Fatalf("degraded ack status = %d, want 409 body=%s", ack.Code, ack.Body.String())
+	}
+	select {
+	case <-completed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for degraded-success completion fallback")
+	}
+}
+
+func TestRunWebAPIFailedAndCanceledJobsNeverComplete(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		exec func(context.Context) error
+	}{
+		{
+			name: "failed",
+			ctx:  func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+			exec: func(context.Context) error {
+				return errors.New("deploy failed")
+			},
+		},
+		{
+			name: "context cancellation",
+			ctx:  func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+			exec: func(ctx context.Context) error {
+				<-ctx.Done()
+				return ctx.Err()
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			oldInfo := fetchRunDraftServiceInfoFn
+			oldExecDraft := executeRunDraftWithOptionsFn
+			defer func() {
+				fetchRunDraftServiceInfoFn = oldInfo
+				executeRunDraftWithOptionsFn = oldExecDraft
+			}()
+			fetchRunDraftServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+				return catchrpc.ServiceInfoResponse{Found: false}, nil
+			}
+			executeRunDraftWithOptionsFn = func(ctx context.Context, _ RunDraft, _ *projectConfigLocation, _ runDraftExecuteOptions) error {
+				return tc.exec(ctx)
+			}
+			ctx, cancel := tc.ctx()
+			root := t.TempDir()
+			writeRunWebTestPayload(t, root)
+			completed := make(chan struct{})
+			s := newRunWebServer(runWebServerConfig{
+				Token:                "secret",
+				Root:                 root,
+				Context:              ctx,
+				CompletionAckTimeout: 25 * time.Millisecond,
+				OnComplete:           func() { close(completed) },
+			})
+			t.Cleanup(func() { _ = s.(*runWebServer).close() })
+			rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{
+				Service: "svc-a", Host: "host-a", Payload: "run.sh",
+			})
+			jobID := decodeRunWebDeployStarted(t, rec).JobID
+			if tc.name == "context cancellation" {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			waitRunWebJobState(t, s, jobID, runWebJobFailed)
+			select {
+			case <-completed:
+				t.Fatal("OnComplete ran for unsuccessful job")
+			case <-time.After(75 * time.Millisecond):
+			}
+		})
 	}
 }
 
@@ -1319,6 +1995,175 @@ func TestRunWebAPIFailedJobAllowsRetry(t *testing.T) {
 		t.Fatalf("second job id = %q, want new job id", secondID)
 	}
 	waitRunWebJobState(t, s, secondID, runWebJobSucceeded)
+}
+
+func TestRunWebAPIRetryClosesFailedJournalBeforeReplacingJob(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	var execMu sync.Mutex
+	execCalls := 0
+	executeRunDraftWithOptionsFn = func(context.Context, RunDraft, *projectConfigLocation, runDraftExecuteOptions) error {
+		execMu.Lock()
+		defer execMu.Unlock()
+		execCalls++
+		if execCalls == 1 {
+			return errors.New("deploy failed")
+		}
+		return nil
+	}
+	firstJournal := newRunWebMemoryJournal()
+	secondJournal := newRunWebMemoryJournal()
+	journals := []runWebEventJournal{firstJournal, secondJournal}
+	var journalMu sync.Mutex
+	s := newRunWebServer(runWebServerConfig{
+		Token: "secret",
+		Root:  t.TempDir(),
+		NewJournal: func(string, int64) (runWebEventJournal, error) {
+			journalMu.Lock()
+			defer journalMu.Unlock()
+			journal := journals[0]
+			journals = journals[1:]
+			return journal, nil
+		},
+	})
+	t.Cleanup(func() { _ = s.(*runWebServer).close() })
+	root := s.(*runWebServer).cfg.Root
+	writeRunWebTestPayload(t, root)
+	draft := RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh"}
+
+	first := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
+	firstID := decodeRunWebDeployStarted(t, first).JobID
+	waitRunWebJobState(t, s, firstID, runWebJobFailed)
+	second := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", draft)
+	secondID := decodeRunWebDeployStarted(t, second).JobID
+	waitRunWebJobState(t, s, secondID, runWebJobSucceeded)
+
+	firstJournal.mu.Lock()
+	firstCloseCalls := firstJournal.closeCalls
+	firstJournal.mu.Unlock()
+	if firstCloseCalls != 1 {
+		t.Fatalf("failed journal close calls = %d, want 1 before replacement", firstCloseCalls)
+	}
+}
+
+func TestRunWebServerCloseAndContextCancellationCleanJournalExactlyOnce(t *testing.T) {
+	t.Run("explicit close", func(t *testing.T) {
+		journal := newRunWebMemoryJournal()
+		server := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()}).(*runWebServer)
+		job, err := newRunWebJob("1", runWebJobConfig{
+			NewJournal: func(string, int64) (runWebEventJournal, error) {
+				return journal, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		server.active = job
+		if err := server.close(); err != nil {
+			t.Fatalf("first close: %v", err)
+		}
+		if err := server.close(); err != nil {
+			t.Fatalf("second close: %v", err)
+		}
+		journal.mu.Lock()
+		defer journal.mu.Unlock()
+		if journal.closeCalls != 1 {
+			t.Fatalf("journal close calls = %d, want 1", journal.closeCalls)
+		}
+	})
+
+	t.Run("context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		journal := newRunWebMemoryJournal()
+		server := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir(), Context: ctx}).(*runWebServer)
+		job, err := newRunWebJob("1", runWebJobConfig{
+			NewJournal: func(string, int64) (runWebEventJournal, error) {
+				return journal, nil
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		server.active = job
+		cancel()
+		deadline := time.Now().Add(time.Second)
+		for {
+			journal.mu.Lock()
+			closeCalls := journal.closeCalls
+			journal.mu.Unlock()
+			if closeCalls == 1 {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("journal close calls = %d, want 1 after context cancellation", closeCalls)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		if err := server.close(); err != nil {
+			t.Fatalf("idempotent close: %v", err)
+		}
+	})
+}
+
+func TestRunWebServerCloseStopsLifecycleWatcherWithLiveParent(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+	server := newRunWebServer(runWebServerConfig{
+		Token:   "secret",
+		Root:    t.TempDir(),
+		Context: parent,
+	}).(*runWebServer)
+
+	if err := server.close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-server.lifecycleDone:
+	case <-time.After(time.Second):
+		t.Fatal("lifecycle watcher did not stop after explicit server close")
+	}
+	if err := parent.Err(); err != nil {
+		t.Fatalf("parent context error = %v, want live parent", err)
+	}
+}
+
+func TestRunWebServerCloseRejectsLateDeployBeforeCreatingJournal(t *testing.T) {
+	oldInfo := fetchRunDraftServiceInfoFn
+	defer func() { fetchRunDraftServiceInfoFn = oldInfo }()
+	fetchRunDraftServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	root := t.TempDir()
+	writeRunWebTestPayload(t, root)
+	journalCreated := false
+	server := newRunWebServer(runWebServerConfig{
+		Token: "secret",
+		Root:  root,
+		NewJournal: func(string, int64) (runWebEventJournal, error) {
+			journalCreated = true
+			return newRunWebMemoryJournal(), nil
+		},
+	}).(*runWebServer)
+	if err := server.close(); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := runWebAPIRequest(t, server, http.MethodPost, "/api/deploy", RunDraft{
+		Service: "svc-a", Host: "host-a", Payload: "run.sh",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("late deploy status = %d, want 409 body=%s", rec.Code, rec.Body.String())
+	}
+	if journalCreated {
+		t.Fatal("late deploy created a journal after server close")
+	}
 }
 
 func TestRunWebAPISessionClosedWritesNoticeForFailedIncompleteJob(t *testing.T) {
@@ -1592,6 +2437,254 @@ func TestRunWebAPIDeployJobUnknownAndBadMethods(t *testing.T) {
 	}
 }
 
+func TestRunWebAPIDeployAckAuthorizationAndEligibility(t *testing.T) {
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		prepare func(*runWebServer)
+		want    int
+	}{
+		{
+			name:   "unknown job",
+			method: http.MethodPost,
+			path:   "/api/deploy/missing/ack",
+			want:   http.StatusNotFound,
+		},
+		{
+			name:   "wrong method",
+			method: http.MethodGet,
+			path:   "/api/deploy/1/ack",
+			prepare: func(s *runWebServer) {
+				s.active = mustNewRunWebJob(t, runWebJobConfig{})
+				s.active.id = "1"
+			},
+			want: http.StatusMethodNotAllowed,
+		},
+		{
+			name:   "running job",
+			method: http.MethodPost,
+			path:   "/api/deploy/1/ack",
+			prepare: func(s *runWebServer) {
+				s.active = mustNewRunWebJob(t, runWebJobConfig{})
+				s.active.id = "1"
+			},
+			want: http.StatusConflict,
+		},
+		{
+			name:   "failed job",
+			method: http.MethodPost,
+			path:   "/api/deploy/1/ack",
+			prepare: func(s *runWebServer) {
+				s.active = mustNewRunWebJob(t, runWebJobConfig{})
+				s.active.id = "1"
+				s.active.finish(errors.New("deploy failed"))
+			},
+			want: http.StatusConflict,
+		},
+		{
+			name:   "degraded success",
+			method: http.MethodPost,
+			path:   "/api/deploy/1/ack",
+			prepare: func(s *runWebServer) {
+				s.active = mustNewRunWebJob(t, runWebJobConfig{})
+				s.active.id = "1"
+				s.active.mu.Lock()
+				s.active.degraded = true
+				s.active.mu.Unlock()
+				s.active.finish(nil)
+			},
+			want: http.StatusConflict,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()}).(*runWebServer)
+			if tc.prepare != nil {
+				tc.prepare(s)
+			}
+			rec := runWebAPIRequest(t, s, tc.method, tc.path, nil)
+			if rec.Code != tc.want {
+				t.Fatalf("%s %s status = %d, want %d body=%s", tc.method, tc.path, rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestRunWebAPIDeployAckCookieRequiresCSRFAndEligibleDuplicatesSucceed(t *testing.T) {
+	s := newRunWebServer(runWebServerConfig{
+		Token:     "secret",
+		CSRFToken: "csrf-value",
+		Root:      t.TempDir(),
+	}).(*runWebServer)
+	s.active = mustNewRunWebJob(t, runWebJobConfig{})
+	s.active.finish(nil)
+
+	request := func(csrf string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/deploy/job-a/ack", nil)
+		req.AddCookie(&http.Cookie{Name: runWebTokenCookieName, Value: "secret"})
+		if csrf != "" {
+			req.Header.Set("X-Yeet-Run-CSRF", csrf)
+		}
+		rec := httptest.NewRecorder()
+		s.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := request(""); rec.Code != http.StatusForbidden {
+		t.Fatalf("cookie-only ack status = %d, want 403 body=%s", rec.Code, rec.Body.String())
+	}
+	for i := 0; i < 2; i++ {
+		if rec := request("csrf-value"); rec.Code != http.StatusNoContent {
+			t.Fatalf("eligible ack %d status = %d, want 204 body=%s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestRunWebAPICompletionReleaseFollowsFlushedNoContentResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "deploy acknowledgement", path: "/api/deploy/job-a/ack"},
+		{name: "session close", path: "/api/session/closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			callback := make(chan runWebResponseOrderSnapshot, 1)
+			var writer *runWebResponseOrderWriter
+			server := newRunWebServer(runWebServerConfig{
+				Token:                "secret",
+				Root:                 t.TempDir(),
+				CompletionAckTimeout: time.Second,
+				OnComplete: func() {
+					callback <- writer.snapshot()
+				},
+			}).(*runWebServer)
+			t.Cleanup(func() { _ = server.close() })
+			job := mustNewRunWebJob(t, runWebJobConfig{})
+			job.finish(nil)
+			server.active = job
+			go server.awaitSuccessfulRender(job)
+
+			writer = newRunWebResponseOrderWriter(job)
+			req := httptest.NewRequest(http.MethodPost, tc.path, nil)
+			req.Header.Set("X-Yeet-Run-Token", "secret")
+			server.ServeHTTP(writer, req)
+
+			response := writer.snapshot()
+			if response.status != http.StatusNoContent {
+				t.Fatalf("response status = %d, want 204", response.status)
+			}
+			if !response.flushed {
+				t.Fatal("204 response was not flushed before handler returned")
+			}
+			if response.releasedBeforeCommit {
+				t.Fatal("completion acknowledgement was released before the 204 response was committed")
+			}
+			select {
+			case completed := <-callback:
+				if completed.status != http.StatusNoContent || !completed.flushed {
+					t.Fatalf("OnComplete observed response = %#v, want committed and flushed 204", completed)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for OnComplete")
+			}
+		})
+	}
+}
+
+func stubRunWebSuccessfulDeploy(t *testing.T) func() {
+	t.Helper()
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	fetchRunDraftServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftWithOptionsFn = func(context.Context, RunDraft, *projectConfigLocation, runDraftExecuteOptions) error {
+		return nil
+	}
+	return func() {
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}
+}
+
+type runWebResizeSignalJournal struct {
+	runWebEventJournal
+	appended chan struct{}
+	once     sync.Once
+}
+
+type runWebResponseOrderSnapshot struct {
+	status               int
+	flushed              bool
+	releasedBeforeCommit bool
+}
+
+type runWebResponseOrderWriter struct {
+	job    *runWebJob
+	header http.Header
+
+	mu                   sync.Mutex
+	status               int
+	flushed              bool
+	releasedBeforeCommit bool
+}
+
+func newRunWebResponseOrderWriter(job *runWebJob) *runWebResponseOrderWriter {
+	return &runWebResponseOrderWriter{job: job, header: make(http.Header)}
+}
+
+func (w *runWebResponseOrderWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *runWebResponseOrderWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return len(p), nil
+}
+
+func (w *runWebResponseOrderWriter) WriteHeader(status int) {
+	released := false
+	select {
+	case <-w.job.acknowledged():
+		released = true
+	default:
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.status = status
+	w.releasedBeforeCommit = released
+}
+
+func (w *runWebResponseOrderWriter) Flush() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.flushed = true
+}
+
+func (w *runWebResponseOrderWriter) snapshot() runWebResponseOrderSnapshot {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return runWebResponseOrderSnapshot{
+		status:               w.status,
+		flushed:              w.flushed,
+		releasedBeforeCommit: w.releasedBeforeCommit,
+	}
+}
+
+func (j *runWebResizeSignalJournal) append(ev runWebStreamEvent, control bool) (int64, error) {
+	id, err := j.runWebEventJournal.append(ev, control)
+	if err == nil && ev.Type == runWebStreamResize {
+		j.once.Do(func() { close(j.appended) })
+	}
+	return id, err
+}
+
 func runWebAPIRequest(t *testing.T, handler http.Handler, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 	var r io.Reader
@@ -1682,9 +2775,73 @@ func parseRunWebSSE(t *testing.T, body string) []runWebSSETestEvent {
 				ev.Data = value
 			}
 		}
-		events = append(events, ev)
+		if ev.Name != "" || ev.ID != "" || ev.Data != "" {
+			events = append(events, ev)
+		}
 	}
 	return events
+}
+
+func readRunWebSSEEvent(t *testing.T, reader *bufio.Reader) runWebSSETestEvent {
+	t.Helper()
+	for {
+		var event runWebSSETestEvent
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				t.Fatalf("read SSE event: %v", err)
+			}
+			line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
+			if line == "" {
+				break
+			}
+			key, value, ok := strings.Cut(line, ": ")
+			if !ok {
+				continue
+			}
+			switch key {
+			case "event":
+				event.Name = value
+			case "id":
+				event.ID = value
+			case "data":
+				event.Data = value
+			}
+		}
+		if event.Name != "" || event.ID != "" || event.Data != "" {
+			return event
+		}
+	}
+}
+
+type runWebOutputGateWriter struct {
+	http.ResponseWriter
+	ctx     context.Context
+	cleanup <-chan struct{}
+	release <-chan struct{}
+	blocked func()
+}
+
+func (w *runWebOutputGateWriter) Write(p []byte) (int, error) {
+	if bytes.HasPrefix(p, []byte("event: output\n")) {
+		if w.blocked != nil {
+			w.blocked()
+		}
+		select {
+		case <-w.release:
+		case <-w.ctx.Done():
+			return 0, w.ctx.Err()
+		case <-w.cleanup:
+			return 0, context.Canceled
+		}
+	}
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *runWebOutputGateWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func decodeRunWebOutputText(t *testing.T, events []runWebSSETestEvent) string {

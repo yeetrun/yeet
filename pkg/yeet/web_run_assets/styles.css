@@ -743,7 +743,7 @@ legend {
 
 .terminal-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
   gap: 10px;
   align-items: center;
   padding: 10px 12px;
@@ -783,21 +783,43 @@ legend {
   color: var(--danger);
 }
 
+.terminal-status[data-tone="warning"] {
+  color: var(--warning);
+}
+
 .terminal-status[data-tone="done"] {
   color: var(--brand);
 }
 
-#terminalOutput {
+.terminal-warning {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  color: var(--warning);
+  background: color-mix(in oklch, var(--warning) 9%, var(--surface));
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.terminal-warning[hidden] {
+  display: none;
+}
+
+.terminal-output {
+  position: relative;
   height: 150px;
   max-height: 42vh;
   margin: 0;
-  overflow: auto;
   padding: 12px;
   color: oklch(0.89 0.018 155);
   background: oklch(0.115 0.01 165);
-  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
+  overflow-x: auto;
+  overflow-y: auto;
+}
+
+.terminal-output canvas {
+  display: block;
+  max-width: none;
 }
 
 .terminal-sheet[data-expanded="true"] #terminalOutput {

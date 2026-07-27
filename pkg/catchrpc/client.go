@@ -237,10 +237,15 @@ func (c *Client) Exec(ctx context.Context, req ExecRequest, stdin io.Reader, std
 	exitCh := make(chan int, 1)
 
 	startExecStdin(writer, stdin, errCh)
-	startExecResize(writer, resizeCh)
+	resizeCtx, stopResize := context.WithCancel(ctx)
+	resizeDone := startExecResize(resizeCtx, writer, resizeCh)
 	go readExecMessages(conn, stdout, exitCh, errCh)
 
-	return waitExecResult(ctx, exitCh, errCh)
+	code, execErr := waitExecResult(ctx, exitCh, errCh)
+	stopResize()
+	closeIgnoringError(conn)
+	<-resizeDone
+	return code, execErr
 }
 
 func websocketDialError(err error, resp *http.Response) error {
@@ -286,15 +291,29 @@ func copyExecStdin(writer *wsBinaryWriter, stdin io.Reader, errCh chan<- error) 
 	_ = writer.WriteControl(ExecMessage{Type: ExecMsgStdinClose})
 }
 
-func startExecResize(writer *wsBinaryWriter, resizeCh <-chan Resize) {
+func startExecResize(ctx context.Context, writer *wsBinaryWriter, resizeCh <-chan Resize) <-chan struct{} {
+	done := make(chan struct{})
 	if resizeCh == nil {
-		return
+		close(done)
+		return done
 	}
 	go func() {
-		for r := range resizeCh {
-			_ = writer.WriteControl(ExecMessage{Type: ExecMsgResize, Rows: r.Rows, Cols: r.Cols})
+		defer close(done)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case r, ok := <-resizeCh:
+				if !ok {
+					return
+				}
+				if err := writer.WriteControl(ExecMessage{Type: ExecMsgResize, Rows: r.Rows, Cols: r.Cols}); err != nil {
+					return
+				}
+			}
 		}
 	}()
+	return done
 }
 
 func readExecMessages(conn *websocket.Conn, stdout io.Writer, exitCh chan<- int, errCh chan<- error) {

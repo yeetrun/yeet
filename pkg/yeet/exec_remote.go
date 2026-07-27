@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,22 +34,38 @@ func newRPCClient(host string) *catchrpc.Client {
 }
 
 func watchResize(ctx context.Context, fd int) <-chan catchrpc.Resize {
-	ch := make(chan catchrpc.Resize, 4)
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGWINCH)
+	return watchResizeSignals(ctx, fd, sigCh, func() {
+		signal.Stop(sigCh)
+	}, termGetSizeFn)
+}
+
+func watchResizeSignals(
+	ctx context.Context,
+	fd int,
+	sigCh <-chan os.Signal,
+	stop func(),
+	getSize func(int) (int, int, error),
+) <-chan catchrpc.Resize {
+	ch := make(chan catchrpc.Resize, 4)
 	go func() {
 		defer close(ch)
-		defer signal.Stop(sigCh)
+		defer stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-sigCh:
-				cols, rows, err := term.GetSize(fd)
+				cols, rows, err := getSize(fd)
 				if err != nil {
 					continue
 				}
-				ch <- catchrpc.Resize{Rows: rows, Cols: cols}
+				select {
+				case ch <- catchrpc.Resize{Rows: rows, Cols: cols}:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}()
@@ -311,6 +328,166 @@ type remoteExecSession struct {
 	cleanups []remoteExecCleanup
 }
 
+type remoteExecTerminalState struct {
+	TTY    bool
+	Cols   int
+	Rows   int
+	Term   string
+	Resize <-chan catchrpc.Resize
+
+	dispatcher *remoteExecTerminalDispatcher
+}
+
+type remoteExecTerminalDispatcher struct {
+	mu            sync.Mutex
+	cols          int
+	rows          int
+	resizeEnabled bool
+	closed        bool
+	nextID        uint64
+	subscribers   map[uint64]chan catchrpc.Resize
+}
+
+type remoteExecTerminalStateContextKey struct{}
+
+func withRemoteExecTerminalState(ctx context.Context, state remoteExecTerminalState) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if state.dispatcher == nil {
+		state.dispatcher = newRemoteExecTerminalDispatcher(ctx, state.Cols, state.Rows, state.Resize)
+	}
+	state.Resize = nil
+	return context.WithValue(ctx, remoteExecTerminalStateContextKey{}, state)
+}
+
+func newRemoteExecTerminalDispatcher(
+	ctx context.Context,
+	cols int,
+	rows int,
+	source <-chan catchrpc.Resize,
+) *remoteExecTerminalDispatcher {
+	d := &remoteExecTerminalDispatcher{
+		cols:          cols,
+		rows:          rows,
+		resizeEnabled: source != nil,
+		subscribers:   make(map[uint64]chan catchrpc.Resize),
+	}
+	if source == nil {
+		return d
+	}
+	go func() {
+		defer d.close()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case size, ok := <-source:
+				if !ok {
+					return
+				}
+				d.publish(size)
+			}
+		}
+	}()
+	return d
+}
+
+func (d *remoteExecTerminalDispatcher) publish(size catchrpc.Resize) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return
+	}
+	d.cols = size.Cols
+	d.rows = size.Rows
+	for _, subscriber := range d.subscribers {
+		select {
+		case subscriber <- size:
+			continue
+		default:
+		}
+		select {
+		case <-subscriber:
+		default:
+		}
+		select {
+		case subscriber <- size:
+		default:
+		}
+	}
+}
+
+func (d *remoteExecTerminalDispatcher) close() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return
+	}
+	d.closed = true
+	for id, subscriber := range d.subscribers {
+		delete(d.subscribers, id)
+		close(subscriber)
+	}
+}
+
+func (d *remoteExecTerminalDispatcher) size() (int, int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cols, d.rows
+}
+
+func (d *remoteExecTerminalDispatcher) subscribe() (int, int, <-chan catchrpc.Resize, func()) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.resizeEnabled || d.closed {
+		return d.cols, d.rows, nil, nil
+	}
+	id := d.nextID
+	d.nextID++
+	subscriber := make(chan catchrpc.Resize, 1)
+	d.subscribers[id] = subscriber
+	var once sync.Once
+	return d.cols, d.rows, subscriber, func() {
+		once.Do(func() {
+			d.unsubscribe(id)
+		})
+	}
+}
+
+func (d *remoteExecTerminalDispatcher) unsubscribe(id uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	subscriber, ok := d.subscribers[id]
+	if !ok {
+		return
+	}
+	delete(d.subscribers, id)
+	close(subscriber)
+}
+
+func (s remoteExecTerminalState) size() (int, int) {
+	if s.dispatcher == nil {
+		return s.Cols, s.Rows
+	}
+	return s.dispatcher.size()
+}
+
+func (s remoteExecTerminalState) subscribe() (int, int, <-chan catchrpc.Resize, func()) {
+	if s.dispatcher == nil {
+		return s.Cols, s.Rows, s.Resize, nil
+	}
+	return s.dispatcher.subscribe()
+}
+
+func remoteExecTerminalStateFromContext(ctx context.Context) (remoteExecTerminalState, bool) {
+	if ctx == nil {
+		return remoteExecTerminalState{}, false
+	}
+	state, ok := ctx.Value(remoteExecTerminalStateContextKey{}).(remoteExecTerminalState)
+	return state, ok
+}
+
 func newRemoteExecRequest(host string, service string, args []string, stdin io.Reader, tty bool) catchrpc.ExecRequest {
 	req := catchrpc.ExecRequest{
 		Service:  service,
@@ -463,16 +640,31 @@ func (s *remoteExecSession) configureTTY(ctx context.Context) {
 		return
 	}
 	fd := int(os.Stdin.Fd())
-	if !isTerminalFn(fd) {
-		s.req.TTY = false
-		return
+	shared, hasShared := remoteExecTerminalStateFromContext(ctx)
+	var stopSharedResize func()
+	if hasShared {
+		if !shared.TTY {
+			s.req.TTY = false
+			return
+		}
+		s.req.Cols, s.req.Rows, s.resizeCh, stopSharedResize = shared.subscribe()
+		s.req.Term = shared.Term
+	} else {
+		if !isTerminalFn(fd) {
+			s.req.TTY = false
+			return
+		}
+		s.applyTerminalSize(fd)
+		s.req.Term = os.Getenv("TERM")
 	}
-	s.applyTerminalSize(fd)
-	s.req.Term = os.Getenv("TERM")
 	if s.stdinNeedsRawMode() {
 		state, err := termMakeRawFn(fd)
 		if err != nil {
 			s.req.TTY = false
+			if stopSharedResize != nil {
+				stopSharedResize()
+				s.resizeCh = nil
+			}
 			return
 		}
 		s.rawMode = true
@@ -480,7 +672,15 @@ func (s *remoteExecSession) configureTTY(ctx context.Context) {
 			return termRestoreFn(fd, state)
 		})
 	}
-	s.resizeCh = watchResize(ctx, fd)
+	if stopSharedResize != nil {
+		s.addCleanup("stop shared terminal resize", func() error {
+			stopSharedResize()
+			return nil
+		})
+	}
+	if !hasShared {
+		s.resizeCh = watchResize(ctx, fd)
+	}
 }
 
 func (s *remoteExecSession) applyTerminalSize(fd int) {

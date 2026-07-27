@@ -1,0 +1,11 @@
+{
+  "package": "ghostty-web",
+  "version": "0.4.0",
+  "tarball": "https://registry.npmjs.org/ghostty-web/-/ghostty-web-0.4.0.tgz",
+  "integrity": "sha512-0puDBik2qapbD/QQBW9o5ZHfXnZBqZWx/ctBiVtKZ6ZLds4NYb+wZuw1cRLXZk9zYovIQ908z3rvFhexAvc5Hg==",
+  "license": "MIT",
+  "inlineWasmReplacedWith": "./ghostty-vt.wasm",
+  "selectAllPatch": "absolute rows 0 through scrollback plus screen",
+  "scrollbackPatch": "expose newest configured line window",
+  "resetPatch": "failure-atomic owner swap with selection scroll and link reset"
+}

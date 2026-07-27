@@ -4,15 +4,18 @@
  * license that can be found in the LICENSE file.
  */
 
+import { createTerminalAdapter, loadTerminalRuntime } from "./terminal.js";
+
 const params = new URLSearchParams(window.location.search);
 const token = params.get("token") || "";
 const csrfToken = window.__YEET_CSRF_TOKEN__ || "";
+const activeJobStorageKey = "yeet.run.activeJob";
 const state = {
   bootstrap: null,
   currentDir: ".",
   validateSeq: 0,
   validateTimer: null,
-  phase: "editing",
+  phase: "bootstrapping",
   activePicker: "",
   filePickerMode: "browse",
   filePickerEntries: [],
@@ -21,7 +24,16 @@ const state = {
   fileSearchTimer: null,
   deployJobId: "",
   deployEvents: null,
+  deployEventQueue: Promise.resolve(),
+  deployLastEventID: 0,
+  deployStreamGeneration: 0,
+  deployStatusRecoveryGeneration: 0,
   terminal: null,
+  terminalProfile: null,
+  terminalDegraded: false,
+  ackTimer: null,
+  sessionCloseEligible: false,
+  shuttingDown: false,
   workload: "",
   workloadOverride: "",
   networkSelections: {},
@@ -51,6 +63,11 @@ const state = {
 };
 
 const $ = (id) => document.getElementById(id);
+
+function setPhase(phase) {
+  state.phase = phase;
+  document.body.dataset.phase = phase;
+}
 
 function api(path, options = {}) {
   const headers = {
@@ -1365,215 +1382,25 @@ function handlePayloadFilterInput() {
   }, 100);
 }
 
-function createTerminalRenderer(output) {
-  const decoder = new TextDecoder();
-  let lines = [""];
-  let row = 0;
-  let col = 0;
-  let ansiState = "normal";
-  let csi = "";
-
-  function ensureLine() {
-    while (lines.length <= row) lines.push("");
-  }
-
-  function eraseLine(mode) {
-    ensureLine();
-    if (mode === 1) {
-      lines[row] = `${" ".repeat(Math.min(col, lines[row].length))}${lines[row].slice(col)}`;
-      return;
-    }
-    if (mode === 2) {
-      lines[row] = "";
-      return;
-    }
-    lines[row] = lines[row].slice(0, col);
-  }
-
-  function eraseDisplay(mode) {
-    ensureLine();
-    if (mode === 2 || mode === 3) {
-      lines = [""];
-      row = 0;
-      col = 0;
-      return;
-    }
-    if (mode === 1) {
-      for (let i = 0; i < row; i += 1) lines[i] = "";
-      lines[row] = `${" ".repeat(Math.min(col, lines[row].length))}${lines[row].slice(col)}`;
-      return;
-    }
-    lines[row] = lines[row].slice(0, col);
-    lines = lines.slice(0, row + 1);
-  }
-
-  function numbers(raw) {
-    return raw
-      .replace(/^\?/, "")
-      .split(";")
-      .filter((part) => part !== "")
-      .map((part) => Number.parseInt(part, 10))
-      .filter((num) => !Number.isNaN(num));
-  }
-
-  function firstNumber(raw, fallback) {
-    const parsed = numbers(raw);
-    return parsed.length ? parsed[0] : fallback;
-  }
-
-  function handleCSI(sequence) {
-    const command = sequence[sequence.length - 1];
-    const raw = sequence.slice(0, -1);
-    const parsed = numbers(raw);
-    const amount = parsed.length ? parsed[0] : 1;
-    switch (command) {
-      case "A":
-        row = Math.max(0, row - amount);
-        break;
-      case "B":
-        row += amount;
-        ensureLine();
-        break;
-      case "C":
-        col += amount;
-        break;
-      case "D":
-        col = Math.max(0, col - amount);
-        break;
-      case "E":
-        row += amount;
-        col = 0;
-        ensureLine();
-        break;
-      case "F":
-        row = Math.max(0, row - amount);
-        col = 0;
-        break;
-      case "G":
-        col = Math.max(0, firstNumber(raw, 1) - 1);
-        break;
-      case "H":
-      case "f":
-        row = Math.max(0, (parsed[0] || 1) - 1);
-        col = Math.max(0, (parsed[1] || 1) - 1);
-        ensureLine();
-        break;
-      case "J":
-        eraseDisplay(parsed.length ? parsed[0] : 0);
-        break;
-      case "K":
-        eraseLine(parsed.length ? parsed[0] : 0);
-        break;
-      default:
-        break;
-    }
-  }
-
-  function writeChar(char) {
-    ensureLine();
-    const line = lines[row];
-    const padded = col > line.length ? `${line}${" ".repeat(col - line.length)}` : line;
-    lines[row] = `${padded.slice(0, col)}${char}${padded.slice(col + 1)}`;
-    col += 1;
-  }
-
-  function applyChar(char) {
-    if (ansiState === "normal") {
-      if (char === "\x1B") {
-        ansiState = "esc";
-        return;
-      }
-      if (char === "\r") {
-        col = 0;
-        return;
-      }
-      if (char === "\n") {
-        row += 1;
-        col = 0;
-        ensureLine();
-        return;
-      }
-      if (char === "\b") {
-        col = Math.max(0, col - 1);
-        return;
-      }
-      if (char === "\t") {
-        const spaces = 8 - (col % 8);
-        for (let i = 0; i < spaces; i += 1) writeChar(" ");
-        return;
-      }
-      if (char >= " ") writeChar(char);
-      return;
-    }
-    if (ansiState === "esc") {
-      if (char === "[") {
-        csi = "";
-        ansiState = "csi";
-        return;
-      }
-      if (char === "]") {
-        ansiState = "osc";
-        return;
-      }
-      ansiState = "normal";
-      return;
-    }
-    if (ansiState === "csi") {
-      csi += char;
-      if (char >= "@" && char <= "~") {
-        handleCSI(csi);
-        csi = "";
-        ansiState = "normal";
-      }
-      return;
-    }
-    if (ansiState === "osc") {
-      if (char === "\x07") {
-        ansiState = "normal";
-        return;
-      }
-      if (char === "\x1B") ansiState = "oscEsc";
-      return;
-    }
-    if (ansiState === "oscEsc") {
-      ansiState = char === "\\" ? "normal" : "osc";
-    }
-  }
-
-  function render(shouldStick) {
-    output.textContent = lines.join("\n");
-    if (shouldStick) output.scrollTop = output.scrollHeight;
-  }
-
-  function applyText(text) {
-    for (const char of text) applyChar(char);
-  }
-
-  return {
-    write(bytes) {
-      const shouldStick = output.scrollTop + output.clientHeight >= output.scrollHeight - 8;
-      applyText(decoder.decode(bytes, { stream: true }));
-      render(shouldStick);
-    },
-    clear() {
-      lines = [""];
-      row = 0;
-      col = 0;
-      ansiState = "normal";
-      csi = "";
-      output.textContent = "";
-      output.scrollTop = 0;
-    },
-    text() {
-      return lines.join("\n");
-    },
-  };
-}
-
 function showTerminal(draft) {
-  if (!state.terminal) state.terminal = createTerminalRenderer($("terminalOutput"));
-  state.terminal.clear();
+  if (state.terminal) {
+    try {
+      state.terminal.dispose();
+    } catch {
+      // The previous terminal is already terminally complete; a new job owns
+      // a fresh viewport even when the old runtime cleanup reports an error.
+    }
+  }
+  state.terminal = null;
+  state.terminalProfile = null;
+  state.terminalDegraded = false;
+  state.sessionCloseEligible = false;
+  $("terminalOutput").replaceChildren();
+  $("terminalCopy").disabled = true;
+  $("terminalWarning").textContent = "";
+  $("terminalWarning").hidden = true;
   $("terminalSheet").hidden = false;
+  collapseTerminal();
   document.body.dataset.terminalVisible = "true";
   $("terminalSubtitle").textContent = `${draft.service || "service"} on ${draft.host || "host"}`;
   setTerminalStatus("Connecting", "");
@@ -1595,41 +1422,19 @@ function setDeployMode(enabled) {
 
 function decodeOutputChunk(data) {
   const payload = JSON.parse(data);
-  if (payload.encoding === "base64") {
-    const raw = window.atob(payload.chunk || "");
-    const bytes = new Uint8Array(raw.length);
-    for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
-    return bytes;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("terminal output payload must be an object");
   }
-  return new TextEncoder().encode(payload.chunk || "");
-}
-
-function closeDeployStream() {
-  if (!state.deployEvents) return;
-  state.deployEvents.close();
-  state.deployEvents = null;
-}
-
-function finishDeployStream(status) {
-  closeDeployStream();
-  if (status.state === "succeeded") {
-    state.phase = "done";
-    setDeployMode(true);
-    $("deployButton").disabled = true;
-    setTerminalStatus("Deployed", "done");
-    setStatus("Deployed. Close this tab and return to the terminal.", "done");
-    $("hostStatus").textContent = "Deployed";
-    return;
+  if (payload.encoding !== "base64") {
+    throw new Error("terminal output encoding must be base64");
   }
-  if (status.state === "failed") {
-    state.phase = "editing";
-    setDeployMode(false);
-    collapseTerminal();
-    setTerminalStatus("Failed", "error");
-    $("hostStatus").textContent = "";
-    update();
-    setStatus(status.error || "Deploy failed. Fix the form and retry.", "error");
+  if (typeof payload.chunk !== "string") {
+    throw new Error("terminal output chunk must be a string");
   }
+  const raw = window.atob(payload.chunk);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+  return bytes;
 }
 
 async function checkDeployStatus(jobId) {
@@ -1638,51 +1443,298 @@ async function checkDeployStatus(jobId) {
   return res.json();
 }
 
-async function recoverDeployStream(jobId) {
-  closeDeployStream();
-  setTerminalStatus("Output stream lost", "error");
+function clearAckTimer() {
+  if (state.ackTimer === null) return;
+  window.clearTimeout(state.ackTimer);
+  state.ackTimer = null;
+}
+
+function closeDeployStream(events = state.deployEvents) {
+  if (!events) return;
+  events.close();
+  if (state.deployEvents === events) state.deployEvents = null;
+}
+
+function markTerminalDegraded(message) {
+  state.terminalDegraded = true;
+  if ($("terminalWarning").hidden || !$("terminalWarning").textContent) {
+    $("terminalWarning").textContent = message;
+  }
+  $("terminalWarning").hidden = false;
+  setTerminalStatus("Degraded", "warning");
+}
+
+function parseEventData(event) {
+  return JSON.parse(event.data);
+}
+
+function validTerminalDimension(value) {
+  return Number.isSafeInteger(value) && value > 0;
+}
+
+async function applyTerminalProfile(event) {
+  if (state.terminalProfile) {
+    markTerminalDegraded("Browser terminal received more than one terminal profile.");
+    return;
+  }
+  const profile = parseEventData(event);
+  state.terminalProfile = profile;
+  if (profile.scrollback !== 1000) {
+    markTerminalDegraded("Browser terminal requires exactly 1,000 lines of scrollback.");
+    return;
+  }
+  if (!validTerminalDimension(profile.cols) || !validTerminalDimension(profile.rows)) {
+    markTerminalDegraded("Browser terminal received invalid terminal dimensions.");
+    return;
+  }
   try {
-    const status = await checkDeployStatus(jobId);
-    if (status.state === "succeeded" || status.state === "failed") {
-      finishDeployStream(status);
+    state.terminal = await createTerminalAdapter($("terminalOutput"), profile);
+    $("terminalCopy").disabled = false;
+  } catch (err) {
+    markTerminalDegraded(`Browser terminal could not be initialized: ${err}`);
+  }
+}
+
+function applyOutput(event) {
+  if (!state.terminalProfile) {
+    markTerminalDegraded("Browser terminal output arrived before the terminal profile.");
+    return;
+  }
+  if (!state.terminal) return;
+  state.terminal.write(decodeOutputChunk(event.data));
+}
+
+function applyResize(event) {
+  const resize = parseEventData(event);
+  if (!state.terminal) {
+    markTerminalDegraded("Browser terminal resize arrived before a usable terminal profile.");
+    return;
+  }
+  if (!validTerminalDimension(resize.cols) || !validTerminalDimension(resize.rows)) {
+    markTerminalDegraded("Browser terminal received invalid resize dimensions.");
+    return;
+  }
+  state.terminal.resize(resize.cols, resize.rows);
+}
+
+function applyWarning(event) {
+  const warning = parseEventData(event);
+  markTerminalDegraded(warning.message || "Browser terminal replay became incomplete.");
+}
+
+async function postDeployAcknowledgement(jobId) {
+  const res = await api(`/api/deploy/${encodeURIComponent(jobId)}/ack`, { method: "POST" });
+  if (!res.ok) throw new Error(await res.text());
+}
+
+function acknowledgementStillCurrent(jobId) {
+  return !state.shuttingDown &&
+    state.phase === "done" &&
+    state.deployJobId === jobId &&
+    sessionStorage.getItem(activeJobStorageKey) === jobId;
+}
+
+function scheduleAcknowledgementRetry(jobId) {
+  if (!acknowledgementStillCurrent(jobId) || state.ackTimer !== null) return;
+  state.ackTimer = window.setTimeout(async () => {
+    state.ackTimer = null;
+    try {
+      const status = await checkDeployStatus(jobId);
+      if (status.state !== "succeeded" || status.degraded || !acknowledgementStillCurrent(jobId)) return;
+      await acknowledgeSuccessfulDeploy(jobId);
+    } catch {
+      // A failed status request means the local server is no longer reachable.
+    }
+  }, 250);
+}
+
+async function acknowledgeSuccessfulDeploy(jobId) {
+  if (!acknowledgementStillCurrent(jobId)) return;
+  try {
+    await postDeployAcknowledgement(jobId);
+    state.sessionCloseEligible = false;
+    clearAckTimer();
+    if (sessionStorage.getItem(activeJobStorageKey) === jobId) {
+      sessionStorage.removeItem(activeJobStorageKey);
+    }
+    setStatus("Deployed. Close this tab and return to the terminal.", "done");
+  } catch {
+    setStatus("Deployed; finishing the local terminal session.", "warning");
+    scheduleAcknowledgementRetry(jobId);
+  }
+}
+
+async function finishDeployStream(status, jobId, events) {
+  if (status.state !== "succeeded" && status.state !== "failed") {
+    markTerminalDegraded("Browser terminal received an invalid final deployment status.");
+    return;
+  }
+  if (state.terminal) {
+    try {
+      await state.terminal.drain();
+    } catch (err) {
+      markTerminalDegraded(`Browser terminal could not finish rendering: ${err}`);
+    }
+  }
+  closeDeployStream(events);
+  if (status.state === "succeeded") {
+    setPhase("done");
+    setDeployMode(true);
+    $("deployButton").disabled = true;
+    $("hostStatus").textContent = state.terminalDegraded ? "Degraded" : "Deployed";
+    if (state.terminalDegraded) {
+      state.sessionCloseEligible = false;
+      setTerminalStatus("Degraded", "warning");
+      setStatus("Deployment completed, but browser terminal replay is incomplete.", "warning");
       return;
     }
-  } catch {
-    // Fall through to unlock the form when recovery status cannot be fetched.
+    state.sessionCloseEligible = true;
+    setTerminalStatus("Deployed", "done");
+    setStatus("Deployed; finishing the local terminal session.", "warning");
+    await acknowledgeSuccessfulDeploy(jobId);
+    return;
   }
-  if (state.phase !== "deploying") return;
-  state.phase = "editing";
+
+  state.sessionCloseEligible = false;
+  setPhase("editing");
   setDeployMode(false);
+  setTerminalStatus("Failed", "error");
   $("hostStatus").textContent = "";
   update();
-  setStatus("Output stream was lost; the terminal deploy may still be running. Edit and retry if needed.", "error");
+  setStatus(status.error || "Deploy failed. Fix the form and retry.", "error");
+}
+
+function numericEventID(event) {
+  const raw = event.lastEventId;
+  if (typeof raw !== "string" || !/^[1-9][0-9]*$/.test(raw)) {
+    throw new Error(`invalid terminal event ID ${JSON.stringify(raw)}`);
+  }
+  const id = Number(raw);
+  if (!Number.isSafeInteger(id)) {
+    throw new Error(`invalid terminal event ID ${JSON.stringify(event.lastEventId)}`);
+  }
+  return id;
+}
+
+function enqueueDeployEvent(events, generation, event, apply) {
+  state.deployEventQueue = state.deployEventQueue.then(async () => {
+    if (state.deployEvents !== events || state.deployStreamGeneration !== generation) return;
+    try {
+      const id = numericEventID(event);
+      if (id <= state.deployLastEventID) return;
+      state.deployLastEventID = id;
+      await apply(event);
+    } catch (err) {
+      markTerminalDegraded(`Browser terminal could not apply streamed output: ${err}`);
+    }
+  });
+}
+
+async function recoverDegradedDeployStatus(jobId, events, generation) {
+  if (state.deployStatusRecoveryGeneration === generation) return;
+  state.deployStatusRecoveryGeneration = generation;
+  try {
+    const status = await checkDeployStatus(jobId);
+    if (state.deployEvents !== events ||
+        state.deployStreamGeneration !== generation ||
+        state.phase !== "deploying" ||
+        !status.degraded ||
+        !["succeeded", "failed"].includes(status.state)) {
+      return;
+    }
+    await state.deployEventQueue;
+    if (state.deployEvents !== events ||
+        state.deployStreamGeneration !== generation ||
+        state.phase !== "deploying") {
+      return;
+    }
+    markTerminalDegraded(
+      "Browser terminal replay ended before its final status. " +
+      "The deployment result was recovered separately.",
+    );
+    await finishDeployStream(status, jobId, events);
+  } catch {
+    // A running deployment or unreachable local server keeps the native
+    // EventSource reconnect path active.
+  } finally {
+    if (state.deployStatusRecoveryGeneration === generation) {
+      state.deployStatusRecoveryGeneration = 0;
+    }
+  }
 }
 
 function followDeployStream(jobId) {
   closeDeployStream();
+  const generation = ++state.deployStreamGeneration;
+  state.deployStatusRecoveryGeneration = 0;
+  state.deployLastEventID = 0;
+  state.deployEventQueue = Promise.resolve();
   const events = new EventSource(`/api/deploy/${encodeURIComponent(jobId)}/stream`);
   state.deployEvents = events;
   events.addEventListener("open", () => {
+    if (state.deployEvents !== events || state.phase !== "deploying") return;
     setTerminalStatus("Streaming", "ready");
   });
+  events.addEventListener("terminal", (event) => {
+    enqueueDeployEvent(events, generation, event, applyTerminalProfile);
+  });
   events.addEventListener("output", (event) => {
-    try {
-      state.terminal.write(decodeOutputChunk(event.data));
-    } catch (err) {
-      setTerminalStatus(`Output decode failed: ${err}`, "error");
-    }
+    enqueueDeployEvent(events, generation, event, applyOutput);
+  });
+  events.addEventListener("resize", (event) => {
+    enqueueDeployEvent(events, generation, event, applyResize);
+  });
+  events.addEventListener("warning", (event) => {
+    enqueueDeployEvent(events, generation, event, applyWarning);
   });
   events.addEventListener("status", (event) => {
-    const status = JSON.parse(event.data);
-    finishDeployStream(status);
+    enqueueDeployEvent(events, generation, event, async (statusEvent) => {
+      await finishDeployStream(parseEventData(statusEvent), jobId, events);
+    });
   });
   events.addEventListener("error", () => {
-    if (state.phase !== "deploying") return;
-    recoverDeployStream(jobId);
+    if (state.deployEvents !== events) return;
+    if (state.phase === "deploying") {
+      setTerminalStatus("Reconnecting", "warning");
+      void recoverDegradedDeployStatus(jobId, events, generation);
+    }
   });
 }
 
+async function restoreActiveDeploy() {
+  const jobId = sessionStorage.getItem(activeJobStorageKey);
+  if (!jobId) return false;
+
+  setPhase("deploying");
+  state.validateSeq += 1;
+  window.clearTimeout(state.validateTimer);
+  state.deployJobId = jobId;
+  $("deployButton").disabled = true;
+  setDeployMode(true);
+  showTerminal(buildDraft());
+  setTerminalStatus("Restoring", "");
+  setStatus("Restoring deploy output");
+  try {
+    const status = await checkDeployStatus(jobId);
+    if (!["running", "succeeded", "failed"].includes(status.state)) {
+      throw new Error(`invalid deployment state ${JSON.stringify(status.state)}`);
+    }
+    followDeployStream(jobId);
+  } catch (err) {
+    setPhase("editing");
+    setDeployMode(false);
+    $("hostStatus").textContent = "";
+    update();
+    setStatus(`Could not restore deploy output: ${err}`, "error");
+  }
+  return true;
+}
+
 async function bootstrap() {
+  const runtimeResult = loadTerminalRuntime().then(
+    () => null,
+    (err) => err,
+  );
   const res = await api("/api/bootstrap");
   if (!res.ok) throw new Error(await res.text());
   state.bootstrap = await res.json();
@@ -1722,6 +1774,15 @@ async function bootstrap() {
   syncVMDefaults();
   $("service").focus();
   if ($("service").value && !$("payload").closest("label").hidden) $("payload").focus();
+  const runtimeError = await runtimeResult;
+  if (runtimeError) {
+    setPhase("incompatible");
+    $("deployButton").disabled = true;
+    setStatus(`This browser cannot initialize the embedded terminal: ${runtimeError}`, "error");
+    return;
+  }
+  if (await restoreActiveDeploy()) return;
+  setPhase("editing");
   update();
 }
 
@@ -1848,9 +1909,12 @@ async function deploy(event) {
   event.preventDefault();
   if (state.phase !== "editing") return;
   const draft = buildDraft();
-  state.phase = "deploying";
+  setPhase("deploying");
   state.validateSeq += 1;
   window.clearTimeout(state.validateTimer);
+  clearAckTimer();
+  closeDeployStream();
+  state.deployStreamGeneration += 1;
   $("deployButton").disabled = true;
   setDeployMode(true);
   showTerminal(draft);
@@ -1862,7 +1926,10 @@ async function deploy(event) {
     });
     if (res.ok) {
       const data = await res.json();
-      state.deployJobId = data.jobId || "";
+      const jobId = data.jobId || "";
+      if (!jobId) throw new Error("deploy response did not include a job ID");
+      state.deployJobId = jobId;
+      sessionStorage.setItem("yeet.run.activeJob", jobId);
       setTerminalStatus("Starting", "");
       followDeployStream(state.deployJobId);
       return;
@@ -1877,14 +1944,14 @@ async function deploy(event) {
     } else {
       message = await res.text();
     }
-    state.phase = "editing";
+    setPhase("editing");
     setDeployMode(false);
     setTerminalStatus("Failed", "error");
     update();
     if (validation) applyValidationErrors(validation);
     setStatus(message, "error");
   } catch (err) {
-    state.phase = "editing";
+    setPhase("editing");
     setDeployMode(false);
     setTerminalStatus("Failed", "error");
     update();
@@ -1948,6 +2015,14 @@ $("host").addEventListener("focus", showHostPicker);
 $("host").addEventListener("click", showHostPicker);
 $("hostPickerButton").addEventListener("click", showHostPicker);
 $("zfsRootPickerButton").addEventListener("click", showZFSRootPicker);
+$("terminalCopy").addEventListener("click", async () => {
+  if (!state.terminal) return;
+  try {
+    await navigator.clipboard.writeText(state.terminal.copyText());
+  } catch (err) {
+    setStatus(`Could not copy terminal output: ${err}`, "error");
+  }
+});
 $("terminalExpand").addEventListener("click", () => {
   const sheet = $("terminalSheet");
   const expanded = sheet.dataset.expanded !== "true";
@@ -2005,7 +2080,11 @@ document.addEventListener("focusout", (event) => {
   if (event.target.closest(".help")) hideTooltip();
 });
 window.addEventListener("pagehide", () => {
-  if (state.phase === "done") return;
+  const shouldReleaseSession = state.sessionCloseEligible;
+  state.shuttingDown = true;
+  clearAckTimer();
+  closeDeployStream();
+  if (!shouldReleaseSession) return;
   const url = token ? `/api/session/closed?token=${encodeURIComponent(token)}` : "/api/session/closed";
   if (navigator.sendBeacon && token) {
     navigator.sendBeacon(url);

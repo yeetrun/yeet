@@ -5,14 +5,17 @@
 package yeet
 
 import (
+	"encoding/json"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
 )
 
 func TestWebRunAssetsEmbedded(t *testing.T) {
-	for _, name := range []string{"index.html", "styles.css", "app.js", "yeet-mark.svg"} {
+	for _, name := range []string{"index.html", "styles.css", "app.js", "terminal.js", "yeet-mark.svg"} {
 		b, err := fs.ReadFile(webRunAssets, "web_run_assets/"+name)
 		if err != nil {
 			t.Fatalf("read embedded %s: %v", name, err)
@@ -20,6 +23,110 @@ func TestWebRunAssetsEmbedded(t *testing.T) {
 		if len(b) == 0 {
 			t.Fatalf("embedded %s is empty", name)
 		}
+	}
+}
+
+func TestWebRunAssetsGhosttyTerminalContract(t *testing.T) {
+	index, err := fs.ReadFile(webRunAssets, "web_run_assets/index.html")
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
+	terminal, err := fs.ReadFile(webRunAssets, "web_run_assets/terminal.js")
+	if err != nil {
+		t.Fatalf("read terminal adapter: %v", err)
+	}
+	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
+	if err != nil {
+		t.Fatalf("read app: %v", err)
+	}
+	styles, err := fs.ReadFile(webRunAssets, "web_run_assets/styles.css")
+	if err != nil {
+		t.Fatalf("read styles: %v", err)
+	}
+
+	indexSource := string(index)
+	for _, snippet := range []string{
+		`<script type="module" src="/app.js"></script>`,
+		`<div id="terminalOutput" class="terminal-output" tabindex="0" role="region" aria-label="Deploy output"></div>`,
+		`id="terminalStatus" class="terminal-status" role="status"`,
+	} {
+		if !strings.Contains(indexSource, snippet) {
+			t.Fatalf("index missing terminal contract %q", snippet)
+		}
+	}
+	if strings.Contains(indexSource, `id="terminalOutput" tabindex="0" aria-live=`) ||
+		strings.Contains(indexSource, `class="terminal-output" tabindex="0" aria-live=`) {
+		t.Fatal("raw terminal viewport must not be aria-live")
+	}
+	if strings.Contains(indexSource, `id="terminalOutput" class="terminal-output" tabindex="0" role="log"`) {
+		t.Fatal("raw terminal viewport must not expose an implicit live log role")
+	}
+
+	terminalSource := string(terminal)
+	for _, snippet := range []string{
+		`import { Ghostty, Terminal } from "./ghostty-web.js";`,
+		`Ghostty.load(new URL("./ghostty-vt.wasm", import.meta.url).href)`,
+		`scrollback: 1000`,
+		`disableStdin: true`,
+		`convertEol: false`,
+		`cursorBlink: false`,
+	} {
+		if !strings.Contains(terminalSource, snippet) {
+			t.Fatalf("terminal adapter missing %q", snippet)
+		}
+	}
+	if strings.Contains(terminalSource, "handleCSI") {
+		t.Fatal("terminal adapter must delegate escape parsing to Ghostty")
+	}
+
+	appSource := string(app)
+	for _, snippet := range []string{
+		`import { createTerminalAdapter, loadTerminalRuntime } from "./terminal.js";`,
+		`sessionStorage.setItem("yeet.run.activeJob", jobId)`,
+		`state.terminal.write(decodeOutputChunk(event.data))`,
+		`state.terminal.resize(resize.cols, resize.rows)`,
+		`await state.terminal.drain()`,
+		`navigator.clipboard.writeText(state.terminal.copyText())`,
+		`setTerminalStatus("Reconnecting", "warning")`,
+		`setTerminalStatus("Streaming", "ready")`,
+	} {
+		if !strings.Contains(appSource, snippet) {
+			t.Fatalf("app missing durable terminal contract %q", snippet)
+		}
+	}
+	for _, forbidden := range []string{
+		"createTerminalRenderer",
+		"handleCSI",
+		"recoverDeployStream",
+		`state.terminal.text()`,
+	} {
+		if strings.Contains(appSource, forbidden) {
+			t.Fatalf("app still contains custom terminal lifecycle %q", forbidden)
+		}
+	}
+
+	styleSource := string(styles)
+	for _, snippet := range []string{
+		".terminal-output canvas",
+		".terminal-warning",
+		"overflow-x: auto",
+		"overflow-y: auto",
+		"max-width: none",
+	} {
+		if !strings.Contains(styleSource, snippet) {
+			t.Fatalf("terminal styles missing %q", snippet)
+		}
+	}
+
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: t.TempDir()})
+	req := httptest.NewRequest(http.MethodGet, "/ghostty-vt.wasm?token=secret", nil)
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("WASM status = %d, want 200 body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); !strings.Contains(got, "application/wasm") {
+		t.Fatalf("WASM Content-Type = %q, want application/wasm", got)
 	}
 }
 
@@ -100,6 +207,8 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`id="terminalSheet"`,
 		`id="terminalOutput"`,
 		`id="terminalStatus"`,
+		`id="terminalWarning"`,
+		`id="terminalCopy"`,
 		`id="terminalExpand"`,
 		`id="terminalSubtitle"`,
 		`id="payloadPicker"`,
@@ -157,8 +266,6 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"Needs attention",
-		`id="terminalCopy"`,
-		"terminalCopy",
 		`<div class="file-browser" id="fileBrowser"`,
 		`<summary>VM settings`,
 		`placeholder="auto"`,
@@ -213,13 +320,13 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`"network.tsTags": "tsTags"`,
 		"EventSource",
 		"/api/session/closed",
-		"TextDecoder",
 		"setDeployMode",
 		"checkDeployStatus",
-		"recoverDeployStream",
 		"collapseTerminal",
-		"createTerminalRenderer",
-		"handleCSI",
+		"createTerminalAdapter",
+		"loadTerminalRuntime",
+		"terminalCopy",
+		"terminalWarning",
 		"showHostPicker",
 		"hideHostPicker",
 		"updateServiceRootPlaceholder",
@@ -528,6 +635,128 @@ func TestWebRunPayloadPickerSupportsFuzzyKeyboardFiltering(t *testing.T) {
 	} {
 		if !strings.Contains(source, snippet) {
 			t.Fatalf("app missing fuzzy payload picker behavior %s", snippet)
+		}
+	}
+}
+
+func TestWebRunGhosttyAssetsEmbeddedAndPinned(t *testing.T) {
+	for _, name := range []string{
+		"ghostty-web.js",
+		"ghostty-vt.wasm",
+		"ghostty-web.LICENSE",
+		"ghostty-web.manifest.json",
+	} {
+		b, err := fs.ReadFile(webRunAssets, "web_run_assets/"+name)
+		if err != nil {
+			t.Fatalf("read embedded %s: %v", name, err)
+		}
+		if len(b) == 0 {
+			t.Fatalf("embedded %s is empty", name)
+		}
+	}
+
+	manifestBytes, err := fs.ReadFile(webRunAssets, "web_run_assets/ghostty-web.manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest struct {
+		Package                string `json:"package"`
+		Version                string `json:"version"`
+		Tarball                string `json:"tarball"`
+		Integrity              string `json:"integrity"`
+		License                string `json:"license"`
+		InlineWasmReplacedWith string `json:"inlineWasmReplacedWith"`
+		SelectAllPatch         string `json:"selectAllPatch"`
+		ScrollbackPatch        string `json:"scrollbackPatch"`
+		ResetPatch             string `json:"resetPatch"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatalf("parse Ghostty manifest: %v", err)
+	}
+	if want := (struct {
+		Package                string
+		Version                string
+		Tarball                string
+		Integrity              string
+		License                string
+		InlineWasmReplacedWith string
+		SelectAllPatch         string
+		ScrollbackPatch        string
+		ResetPatch             string
+	}{
+		Package:                "ghostty-web",
+		Version:                "0.4.0",
+		Tarball:                "https://registry.npmjs.org/ghostty-web/-/ghostty-web-0.4.0.tgz",
+		Integrity:              "sha512-0puDBik2qapbD/QQBW9o5ZHfXnZBqZWx/ctBiVtKZ6ZLds4NYb+wZuw1cRLXZk9zYovIQ908z3rvFhexAvc5Hg==",
+		License:                "MIT",
+		InlineWasmReplacedWith: "./ghostty-vt.wasm",
+		SelectAllPatch:         "absolute rows 0 through scrollback plus screen",
+		ScrollbackPatch:        "expose newest configured line window",
+		ResetPatch:             "failure-atomic owner swap with selection scroll and link reset",
+	}); manifest.Package != want.Package ||
+		manifest.Version != want.Version ||
+		manifest.Tarball != want.Tarball ||
+		manifest.Integrity != want.Integrity ||
+		manifest.License != want.License ||
+		manifest.InlineWasmReplacedWith != want.InlineWasmReplacedWith ||
+		manifest.SelectAllPatch != want.SelectAllPatch ||
+		manifest.ScrollbackPatch != want.ScrollbackPatch ||
+		manifest.ResetPatch != want.ResetPatch {
+		t.Fatalf("unexpected Ghostty manifest: %+v", manifest)
+	}
+
+	js, err := fs.ReadFile(webRunAssets, "web_run_assets/ghostty-web.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(js), "data:application/wasm;base64") {
+		t.Fatal("vendored Ghostty JS still embeds the WASM payload")
+	}
+	if strings.Contains(string(js), "Copyright (c) 2025 AUTHORS") {
+		t.Fatal("vendored Ghostty JS must retain its upstream MIT attribution")
+	}
+	if !strings.Contains(string(js), "./ghostty-vt.wasm") {
+		t.Fatal("vendored Ghostty JS does not load the local WASM asset")
+	}
+	if strings.Contains(string(js), "this.selectionStart = { col: 0, absoluteRow: B }") {
+		t.Fatal("vendored Ghostty selectAll still starts at the viewport offset")
+	}
+	if !strings.Contains(string(js), "this.selectionStart = { col: 0, absoluteRow: 0 }") ||
+		!strings.Contains(string(js), "absoluteRow: B + A.rows - 1") {
+		t.Fatal("vendored Ghostty selectAll does not span scrollback and the active screen")
+	}
+	for _, snippet := range []string{
+		"this.scrollbackLimit = C ? C.scrollbackLimit ?? 1e4 : 1e4",
+		"this.getNativeScrollbackLength() - this.scrollbackLimit",
+	} {
+		if !strings.Contains(string(js), snippet) {
+			t.Fatalf("vendored Ghostty scrollback window missing %q", snippet)
+		}
+	}
+	if got := strings.Count(string(js), "A + this.getScrollbackStart()"); got != 2 {
+		t.Fatalf("vendored Ghostty scrollback offset consumers = %d, want line and grapheme accessors", got)
+	}
+	for _, snippet := range []string{
+		"const A = this.buildWasmConfig(), B = this.wasmTerm, g = this.ghostty.createTerminal",
+		"this.wasmTerm = g, this.selectionManager && (this.selectionManager.wasmTerm = g)",
+		"this.renderer && (this.renderer.currentBuffer = g",
+		"this.renderer.currentSelectionCoords = null",
+		"this.renderer.hoveredHyperlinkId = 0",
+		"this.renderer.previousHoveredHyperlinkId = 0",
+		"this.renderer.hoveredLinkRange = null",
+		"this.renderer.previousHoveredLinkRange = null",
+		"this.linkDetector && this.linkDetector.invalidateCache()",
+		"this.currentHoveredLink = void 0",
+		`this.element && (this.element.style.cursor = "text")`,
+		"this.scrollAnimationFrame && cancelAnimationFrame(this.scrollAnimationFrame)",
+		"this.scrollAnimationStartTime = void 0",
+		"this.scrollAnimationStartY = void 0",
+		"this.targetViewportY = 0",
+		"this.viewportY = 0",
+		"B && B.free()",
+	} {
+		if !strings.Contains(string(js), snippet) {
+			t.Fatalf("vendored Ghostty failure-atomic reset missing %q", snippet)
 		}
 	}
 }

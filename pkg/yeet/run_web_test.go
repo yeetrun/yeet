@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -59,6 +60,76 @@ func TestExtractRunWebFlag(t *testing.T) {
 				t.Fatalf("args = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunWebTerminalProfileUsesTTYGeometryAndTerm(t *testing.T) {
+	oldIsTerminal := isTerminalFn
+	oldGetSize := termGetSizeFn
+	t.Cleanup(func() {
+		isTerminalFn = oldIsTerminal
+		termGetSizeFn = oldGetSize
+	})
+	t.Setenv("TERM", "xterm-256color")
+	isTerminalFn = func(fd int) bool {
+		return fd == 42
+	}
+	termGetSizeFn = func(fd int) (int, int, error) {
+		if fd != 42 {
+			t.Fatalf("termGetSizeFn fd = %d, want 42", fd)
+		}
+		return 120, 40, nil
+	}
+
+	got := currentRunWebTerminalProfile(42)
+	want := runWebTerminalProfile{
+		TTY: true, Cols: 120, Rows: 40, Term: "xterm-256color", Scrollback: runWebTerminalScrollback,
+	}
+	if got != want {
+		t.Fatalf("currentRunWebTerminalProfile = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunWebTerminalProfileUsesStableNonTTYGeometry(t *testing.T) {
+	oldIsTerminal := isTerminalFn
+	oldGetSize := termGetSizeFn
+	t.Cleanup(func() {
+		isTerminalFn = oldIsTerminal
+		termGetSizeFn = oldGetSize
+	})
+	t.Setenv("TERM", "ignored")
+	isTerminalFn = func(int) bool { return false }
+	termGetSizeFn = func(int) (int, int, error) {
+		t.Fatal("termGetSizeFn called for non-TTY")
+		return 0, 0, nil
+	}
+
+	got := currentRunWebTerminalProfile(42)
+	want := runWebTerminalProfile{Cols: 80, Rows: 24, Scrollback: runWebTerminalScrollback}
+	if got != want {
+		t.Fatalf("currentRunWebTerminalProfile = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunWebTerminalProfileFallsBackWhenSizeLookupFails(t *testing.T) {
+	oldIsTerminal := isTerminalFn
+	oldGetSize := termGetSizeFn
+	t.Cleanup(func() {
+		isTerminalFn = oldIsTerminal
+		termGetSizeFn = oldGetSize
+	})
+	t.Setenv("TERM", "screen-256color")
+	isTerminalFn = func(int) bool { return true }
+	termGetSizeFn = func(int) (int, int, error) {
+		return 0, 0, errors.New("no terminal size")
+	}
+
+	got := currentRunWebTerminalProfile(42)
+	want := runWebTerminalProfile{
+		TTY: true, Cols: 80, Rows: 24, Term: "screen-256color", Scrollback: runWebTerminalScrollback,
+	}
+	if got != want {
+		t.Fatalf("currentRunWebTerminalProfile = %#v, want %#v", got, want)
 	}
 }
 
@@ -364,6 +435,14 @@ func TestRunWebReturnsAfterSuccessfulDeploy(t *testing.T) {
 			}
 			defer resp.Body.Close()
 			body, err := io.ReadAll(resp.Body)
+			if err == nil {
+				var started runWebDeployStartedResponse
+				if decodeErr := json.Unmarshal(body, &started); decodeErr != nil {
+					err = decodeErr
+				} else {
+					err = acknowledgeRunWebJobAfterSuccess(parsed, started.JobID)
+				}
+			}
 			postResult <- runWebHTTPResult{status: resp.StatusCode, body: string(body), err: err}
 		}()
 		return nil
@@ -454,6 +533,9 @@ func TestRunWebKeepsServerAliveForTerminalStatusAfterFastDeploy(t *testing.T) {
 			}
 			body, readErr = io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
+			if readErr == nil {
+				readErr = acknowledgeRunWebJobAfterSuccess(parsed, started.JobID)
+			}
 			streamResult <- runWebHTTPResult{status: resp.StatusCode, body: string(body), err: readErr}
 		}()
 		return nil
@@ -544,6 +626,271 @@ func TestWaitRunWebServerDrainsDoneResponseBeforeShutdown(t *testing.T) {
 	}
 }
 
+func TestWaitRunWebServerCommitsFallbackAckBeforeClosingListener(t *testing.T) {
+	const completionFallback = 25 * time.Millisecond
+
+	testCtx, cancelTest := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	handler := newRunWebServer(runWebServerConfig{
+		Token:                "secret",
+		Root:                 t.TempDir(),
+		CompletionAckTimeout: completionFallback,
+		OnComplete:           func() { close(done) },
+	}).(*runWebServer)
+	job := mustNewRunWebJob(t, runWebJobConfig{})
+	job.finish(nil)
+	handler.active = job
+
+	writeHeaderReached := make(chan struct{})
+	releaseWriteHeader := make(chan struct{})
+	var writeHeaderReachedOnce sync.Once
+	var releaseWriteHeaderOnce sync.Once
+	releaseCommitGate := func() {
+		releaseWriteHeaderOnce.Do(func() { close(releaseWriteHeader) })
+	}
+	order := newRunWebShutdownOrder()
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writer := &runWebFlushBarrierWriter{
+				ResponseWriter: w,
+				ctx:            r.Context(),
+				cleanup:        testCtx.Done(),
+				release:        releaseWriteHeader,
+				writeHeaderReached: func() {
+					writeHeaderReachedOnce.Do(func() { close(writeHeaderReached) })
+				},
+				order: order,
+			}
+			handler.ServeHTTP(writer, r)
+		}),
+	}
+	rawListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	listener := &runWebOrderedListener{Listener: rawListener, order: order}
+	t.Cleanup(func() {
+		releaseCommitGate()
+		cancelTest()
+		_ = server.Close()
+		_ = listener.Close()
+		_ = handler.close()
+	})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Serve(listener)
+	}()
+
+	ackResult := make(chan runWebHTTPResult, 1)
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, "http://"+listener.Addr().String()+"/api/deploy/job-a/ack", nil)
+		if err != nil {
+			ackResult <- runWebHTTPResult{err: err}
+			return
+		}
+		req.Header.Set("X-Yeet-Run-Token", "secret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			ackResult <- runWebHTTPResult{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		_, readErr := io.ReadAll(resp.Body)
+		if readErr == nil && resp.StatusCode == http.StatusNoContent {
+			order.markClientNoContent()
+		}
+		ackResult <- runWebHTTPResult{status: resp.StatusCode, err: readErr}
+	}()
+
+	select {
+	case <-writeHeaderReached:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for acknowledgement handler to reach the 204 response")
+	}
+
+	go handler.awaitSuccessfulRender(job)
+	ctx, cancel := context.WithCancel(context.Background())
+	waitResult := make(chan error, 1)
+	go func() {
+		err := waitRunWebServer(ctx, cancel, server, errCh, done, io.Discard)
+		order.markWaitReturned()
+		waitResult <- err
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for injected 25ms completion fallback")
+	}
+	select {
+	case <-job.acknowledged():
+		t.Fatal("completion fallback was not the source of done; acknowledgement was released while WriteHeader was gated")
+	default:
+	}
+
+	releaseCommitGate()
+	select {
+	case err := <-waitResult:
+		t.Fatalf("waitRunWebServer returned before delegated acknowledgement flush: %v", err)
+	case <-order.flushed:
+	}
+	select {
+	case err := <-waitResult:
+		t.Fatalf("waitRunWebServer returned before the real HTTP client received 204: %v", err)
+	case ack := <-ackResult:
+		if ack.err != nil {
+			t.Fatalf("acknowledgement request: %v", ack.err)
+		}
+		if ack.status != http.StatusNoContent {
+			t.Fatalf("acknowledgement status = %d, want 204", ack.status)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for the real HTTP client to receive 204")
+	}
+
+	select {
+	case err := <-waitResult:
+		if err != nil {
+			t.Fatalf("waitRunWebServer error = %v, want nil", err)
+		}
+	case <-time.After(runWebCompletionGracePeriod + 250*time.Millisecond):
+		t.Fatal("waitRunWebServer did not finish within the normal post-flush completion grace period")
+	}
+	select {
+	case <-order.listenerClosed:
+	default:
+		t.Fatal("waitRunWebServer returned before closing the real listener")
+	}
+	gotOrder := order.snapshot()
+	if gotOrder.listenerClosedBeforeFlush {
+		t.Fatal("real listener Close ran before delegated acknowledgement Flush returned")
+	}
+	if gotOrder.waitReturnedBeforeFlush {
+		t.Fatal("waitRunWebServer returned before delegated acknowledgement Flush returned")
+	}
+	if gotOrder.waitReturnedBeforeClientNoContent {
+		t.Fatal("waitRunWebServer returned before the real HTTP client received 204")
+	}
+}
+
+type runWebShutdownOrderSnapshot struct {
+	listenerClosedBeforeFlush         bool
+	waitReturnedBeforeFlush           bool
+	waitReturnedBeforeClientNoContent bool
+}
+
+type runWebShutdownOrder struct {
+	mu sync.Mutex
+
+	flushComplete   bool
+	clientNoContent bool
+
+	listenerClosedBeforeFlush         bool
+	waitReturnedBeforeFlush           bool
+	waitReturnedBeforeClientNoContent bool
+
+	flushed        chan struct{}
+	listenerClosed chan struct{}
+	flushOnce      sync.Once
+	clientOnce     sync.Once
+	listenerOnce   sync.Once
+	waitOnce       sync.Once
+}
+
+func newRunWebShutdownOrder() *runWebShutdownOrder {
+	return &runWebShutdownOrder{
+		flushed:        make(chan struct{}),
+		listenerClosed: make(chan struct{}),
+	}
+}
+
+func (o *runWebShutdownOrder) markFlushed() {
+	o.flushOnce.Do(func() {
+		o.mu.Lock()
+		o.flushComplete = true
+		o.mu.Unlock()
+		close(o.flushed)
+	})
+}
+
+func (o *runWebShutdownOrder) markClientNoContent() {
+	o.clientOnce.Do(func() {
+		o.mu.Lock()
+		o.clientNoContent = true
+		o.mu.Unlock()
+	})
+}
+
+func (o *runWebShutdownOrder) markListenerClosed() {
+	o.listenerOnce.Do(func() {
+		o.mu.Lock()
+		o.listenerClosedBeforeFlush = !o.flushComplete
+		o.mu.Unlock()
+		close(o.listenerClosed)
+	})
+}
+
+func (o *runWebShutdownOrder) markWaitReturned() {
+	o.waitOnce.Do(func() {
+		o.mu.Lock()
+		o.waitReturnedBeforeFlush = !o.flushComplete
+		o.waitReturnedBeforeClientNoContent = !o.clientNoContent
+		o.mu.Unlock()
+	})
+}
+
+func (o *runWebShutdownOrder) snapshot() runWebShutdownOrderSnapshot {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return runWebShutdownOrderSnapshot{
+		listenerClosedBeforeFlush:         o.listenerClosedBeforeFlush,
+		waitReturnedBeforeFlush:           o.waitReturnedBeforeFlush,
+		waitReturnedBeforeClientNoContent: o.waitReturnedBeforeClientNoContent,
+	}
+}
+
+type runWebOrderedListener struct {
+	net.Listener
+	order *runWebShutdownOrder
+}
+
+func (l *runWebOrderedListener) Close() error {
+	l.order.markListenerClosed()
+	return l.Listener.Close()
+}
+
+type runWebFlushBarrierWriter struct {
+	http.ResponseWriter
+	ctx                context.Context
+	cleanup            <-chan struct{}
+	release            <-chan struct{}
+	writeHeaderReached func()
+	order              *runWebShutdownOrder
+}
+
+func (w *runWebFlushBarrierWriter) WriteHeader(status int) {
+	if status == http.StatusNoContent {
+		if w.writeHeaderReached != nil {
+			w.writeHeaderReached()
+		}
+		select {
+		case <-w.release:
+		case <-w.ctx.Done():
+			return
+		case <-w.cleanup:
+			return
+		}
+	}
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *runWebFlushBarrierWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	w.order.markFlushed()
+}
+
 func TestRunWebReturnsAfterDeployWithActiveValidate(t *testing.T) {
 	oldOpenBrowser := openBrowserFn
 	oldInfo := fetchRunDraftServiceInfoFn
@@ -592,7 +939,16 @@ func TestRunWebReturnsAfterDeployWithActiveValidate(t *testing.T) {
 			}
 			deployURL := *parsed
 			deployURL.Path = "/api/deploy"
-			_, _ = http.Post(deployURL.String(), "application/json", strings.NewReader(`{"service":"svc-a","host":"host-a","payload":"run.sh"}`))
+			resp, err := http.Post(deployURL.String(), "application/json", strings.NewReader(`{"service":"svc-a","host":"host-a","payload":"run.sh"}`))
+			if err != nil {
+				return
+			}
+			defer resp.Body.Close()
+			var started runWebDeployStartedResponse
+			if err := json.NewDecoder(resp.Body).Decode(&started); err != nil {
+				return
+			}
+			_ = acknowledgeRunWebJobAfterSuccess(parsed, started.JobID)
 		}()
 		return nil
 	}
@@ -609,10 +965,193 @@ func TestRunWebReturnsAfterDeployWithActiveValidate(t *testing.T) {
 	}
 }
 
+func TestStartRunWebServerWiresCurrentStdinProfileAndSeparateResizeWatcher(t *testing.T) {
+	oldProfile := currentRunWebTerminalProfileFn
+	oldResize := watchRunWebResizeFn
+	oldInfo := fetchRunDraftServiceInfoFn
+	oldExecDraft := executeRunDraftWithOptionsFn
+	defer func() {
+		currentRunWebTerminalProfileFn = oldProfile
+		watchRunWebResizeFn = oldResize
+		fetchRunDraftServiceInfoFn = oldInfo
+		executeRunDraftWithOptionsFn = oldExecDraft
+	}()
+	fetchRunDraftServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+	executeRunDraftWithOptionsFn = func(context.Context, RunDraft, *projectConfigLocation, runDraftExecuteOptions) error {
+		return nil
+	}
+	profile := runWebTerminalProfile{
+		TTY: true, Cols: 101, Rows: 37, Term: "xterm-test", Scrollback: 1000,
+	}
+	var gotProfileFD, gotResizeFD int
+	currentRunWebTerminalProfileFn = func(fd int) runWebTerminalProfile {
+		gotProfileFD = fd
+		return profile
+	}
+	watchRunWebResizeFn = func(ctx context.Context, fd int) <-chan catchrpc.Resize {
+		if ctx == nil {
+			t.Fatal("resize watcher received nil context")
+		}
+		gotResizeFD = fd
+		ch := make(chan catchrpc.Resize)
+		close(ch)
+		return ch
+	}
+
+	root := t.TempDir()
+	t.Chdir(root)
+	writeRunWebTestPayload(t, root)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	server, listener, errCh, _, _, err := startRunWebServer(ctx, runWebRequest{Out: io.Discard, Err: io.Discard}, "secret", "csrf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	defer server.Close()
+
+	rec := runWebAPIRequest(t, server.Handler, http.MethodPost, "/api/deploy", RunDraft{
+		Service: "svc-a", Host: "host-a", Payload: "run.sh",
+	})
+	jobID := decodeRunWebDeployStarted(t, rec).JobID
+	waitRunWebJobState(t, server.Handler, jobID, runWebJobSucceeded)
+	stream := runWebAPIRequest(t, server.Handler, http.MethodGet, "/api/deploy/"+jobID+"/stream", nil)
+	events := parseRunWebSSE(t, stream.Body.String())
+	if len(events) == 0 || events[0].Name != "terminal" ||
+		events[0].Data != `{"tty":true,"cols":101,"rows":37,"term":"xterm-test","scrollback":1000}` {
+		t.Fatalf("first event = %#v, want current stdin profile", events)
+	}
+	wantFD := int(os.Stdin.Fd())
+	if gotProfileFD != wantFD || gotResizeFD != wantFD {
+		t.Fatalf("profile fd = %d resize fd = %d, want stdin fd %d", gotProfileFD, gotResizeFD, wantFD)
+	}
+
+	cancel()
+	_ = server.Close()
+	select {
+	case <-errCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for server close")
+	}
+}
+
+func TestStartRunWebServerGracefulAndHardCloseRemoveActiveJournal(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		close func(*http.Server) error
+	}{
+		{
+			name: "graceful shutdown",
+			close: func(server *http.Server) error {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				return server.Shutdown(ctx)
+			},
+		},
+		{name: "hard close", close: func(server *http.Server) error { return server.Close() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldInfo := fetchRunDraftServiceInfoFn
+			oldExecDraft := executeRunDraftWithOptionsFn
+			oldResize := watchRunWebResizeFn
+			defer func() {
+				fetchRunDraftServiceInfoFn = oldInfo
+				executeRunDraftWithOptionsFn = oldExecDraft
+				watchRunWebResizeFn = oldResize
+			}()
+			fetchRunDraftServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+				return catchrpc.ServiceInfoResponse{Found: false}, nil
+			}
+			executeRunDraftWithOptionsFn = func(context.Context, RunDraft, *projectConfigLocation, runDraftExecuteOptions) error {
+				return nil
+			}
+			watchRunWebResizeFn = func(context.Context, int) <-chan catchrpc.Resize {
+				ch := make(chan catchrpc.Resize)
+				close(ch)
+				return ch
+			}
+
+			root := t.TempDir()
+			journalDir := t.TempDir()
+			t.Setenv("TMPDIR", journalDir)
+			t.Chdir(root)
+			writeRunWebTestPayload(t, root)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			server, listener, errCh, _, _, err := startRunWebServer(ctx, runWebRequest{Out: io.Discard, Err: io.Discard}, "secret", "csrf")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+
+			rec := runWebAPIRequest(t, server.Handler, http.MethodPost, "/api/deploy", RunDraft{
+				Service: "svc-a", Host: "host-a", Payload: "run.sh",
+			})
+			jobID := decodeRunWebDeployStarted(t, rec).JobID
+			waitRunWebJobState(t, server.Handler, jobID, runWebJobSucceeded)
+			paths, err := filepath.Glob(filepath.Join(journalDir, "yeet-web-run-*.journal"))
+			if err != nil || len(paths) != 1 {
+				t.Fatalf("journal paths = %#v, %v; want one active journal", paths, err)
+			}
+
+			if err := tc.close(server); err != nil {
+				t.Fatalf("close server: %v", err)
+			}
+			select {
+			case <-errCh:
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for server close")
+			}
+			if _, err := os.Stat(paths[0]); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("journal after server close = %v, want removed", err)
+			}
+		})
+	}
+}
+
 type runWebHTTPResult struct {
 	status int
 	body   string
 	err    error
+}
+
+func acknowledgeRunWebJobAfterSuccess(base *url.URL, jobID string) error {
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		statusURL := *base
+		statusURL.Path = "/api/deploy/" + url.PathEscape(jobID) + "/status"
+		resp, err := http.Get(statusURL.String())
+		if err != nil {
+			return err
+		}
+		var status runWebJobStatus
+		decodeErr := json.NewDecoder(resp.Body).Decode(&status)
+		_ = resp.Body.Close()
+		if decodeErr != nil {
+			return decodeErr
+		}
+		if resp.StatusCode == http.StatusOK && status.State == runWebJobSucceeded {
+			ackURL := *base
+			ackURL.Path = "/api/deploy/" + url.PathEscape(jobID) + "/ack"
+			req, err := http.NewRequest(http.MethodPost, ackURL.String(), nil)
+			if err != nil {
+				return err
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return err
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				return fmt.Errorf("ack status = %d, want 204", resp.StatusCode)
+			}
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("timed out waiting to acknowledge successful job")
 }
 
 func readRunWebHTTPResult(t *testing.T, ch <-chan runWebHTTPResult) runWebHTTPResult {

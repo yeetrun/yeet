@@ -959,6 +959,40 @@ func TestClientExecSendsResizeMessages(t *testing.T) {
 	}
 }
 
+func TestClientExecStopsReadingResizeOnReturn(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("upgrade: %v", err)
+		}
+		defer conn.Close()
+
+		if _, _, err := conn.ReadMessage(); err != nil {
+			t.Fatalf("read exec request: %v", err)
+		}
+		exit := ExecMessage{Type: ExecMsgExit, Code: 0}
+		payload, _ := json.Marshal(exit)
+		_ = conn.WriteMessage(websocket.TextMessage, payload)
+	}))
+	defer srv.Close()
+
+	host, port := splitHostPort(t, srv.URL)
+	resizeCh := make(chan Resize)
+	defer close(resizeCh)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := NewClient(host, port).Exec(ctx, ExecRequest{Service: "svc"}, nil, nil, resizeCh); err != nil {
+		t.Fatalf("Exec returned error: %v", err)
+	}
+
+	select {
+	case resizeCh <- Resize{Rows: 55, Cols: 180}:
+		t.Fatal("completed Exec continued consuming resize events")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 type partialWriter struct {
 	maxChunk int
 	buf      bytes.Buffer

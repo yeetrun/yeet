@@ -8,6 +8,7 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
@@ -26,25 +28,40 @@ var webRunAssets embed.FS
 
 const runWebTokenCookieName = "yeet_run_token"
 
+const runWebDefaultCompletionAckTimeout = 10 * time.Second
+
 type runWebServerConfig struct {
-	Token      string
-	CSRFToken  string
-	Root       string
-	Bootstrap  runWebBootstrap
-	Config     *projectConfigLocation
-	Context    context.Context
-	Out        io.Writer
-	Err        io.Writer
-	OnComplete func()
+	Token                string
+	CSRFToken            string
+	Root                 string
+	Bootstrap            runWebBootstrap
+	Config               *projectConfigLocation
+	Context              context.Context
+	Out                  io.Writer
+	Err                  io.Writer
+	OnComplete           func()
+	CompletionAckTimeout time.Duration
+	TerminalProfile      func() runWebTerminalProfile
+	TerminalResize       func(context.Context) <-chan catchrpc.Resize
+	JournalDir           string
+	JournalLimit         int64
+	NewJournal           func(string, int64) (runWebEventJournal, error)
 }
 
 type runWebServer struct {
-	cfg      runWebServerConfig
-	mux      *http.ServeMux
-	deployMu sync.Mutex
-	active   *runWebJob
-	complete bool
-	nextJob  int64
+	cfg           runWebServerConfig
+	ctx           context.Context
+	cancel        context.CancelFunc
+	mux           *http.ServeMux
+	deployMu      sync.Mutex
+	active        *runWebJob
+	complete      bool
+	closed        bool
+	nextJob       int64
+	completeOnce  sync.Once
+	closeOnce     sync.Once
+	closeErr      error
+	lifecycleDone chan struct{}
 }
 
 var executeRunDraftWithOptionsFn = executeRunDraftWithOptions
@@ -56,7 +73,19 @@ type runWebValidateResponse struct {
 }
 
 func newRunWebServer(cfg runWebServerConfig) http.Handler {
-	s := &runWebServer{cfg: cfg, mux: http.NewServeMux()}
+	parent := cfg.Context
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	cfg.Context = ctx
+	s := &runWebServer{
+		cfg:           cfg,
+		ctx:           ctx,
+		cancel:        cancel,
+		mux:           http.NewServeMux(),
+		lifecycleDone: make(chan struct{}),
+	}
 	s.mux.HandleFunc("/api/bootstrap", s.handleBootstrap)
 	s.mux.HandleFunc("/api/files", s.handleFiles)
 	s.mux.HandleFunc("/api/host-storage", s.handleHostStorage)
@@ -67,6 +96,11 @@ func newRunWebServer(cfg runWebServerConfig) http.Handler {
 	s.mux.HandleFunc("/api/deploy/", s.handleDeployJob)
 	s.mux.HandleFunc("/api/session/closed", s.handleSessionClosed)
 	s.mux.HandleFunc("/", s.handleStatic)
+	go func() {
+		defer close(s.lifecycleDone)
+		<-s.ctx.Done()
+		_ = s.cleanupActive()
+	}()
 	return s
 }
 
@@ -260,13 +294,42 @@ func runWebValidationResponse(draft RunDraft, result RunDraftValidationResult) r
 func (s *runWebServer) startDeployJob(draft RunDraft) (*runWebJob, int, string) {
 	s.deployMu.Lock()
 	defer s.deployMu.Unlock()
+	if s.closed {
+		return nil, http.StatusConflict, "deployment server is closed"
+	}
 	if s.complete {
 		return nil, http.StatusConflict, "deployment already completed"
 	}
 	if s.active != nil && s.active.status().State == runWebJobRunning {
 		return nil, http.StatusConflict, "deployment already in progress"
 	}
+	previous := s.active
 	s.nextJob++
+	ctx, cancel := runWebDeployContext(s.ctx)
+	job, execCtx, err := s.newDeployJob(ctx, strconv.FormatInt(s.nextJob, 10))
+	if err != nil {
+		cancel()
+		return nil, http.StatusInternalServerError, fmt.Sprintf("create deployment journal: %v", err)
+	}
+	if previous != nil {
+		_ = previous.close()
+	}
+	s.active = job
+	if s.ctx.Err() != nil {
+		_ = job.close()
+	}
+	go s.runDeployJob(execCtx, draft, job)
+	go func() {
+		<-job.done
+		cancel()
+		if s.ctx.Err() != nil {
+			_ = job.close()
+		}
+	}()
+	return job, http.StatusOK, ""
+}
+
+func (s *runWebServer) newDeployJob(ctx context.Context, id string) (*runWebJob, context.Context, error) {
 	out := s.cfg.Out
 	if out == nil {
 		out = os.Stdout
@@ -275,18 +338,62 @@ func (s *runWebServer) startDeployJob(draft RunDraft) (*runWebJob, int, string) 
 	if errOut == nil {
 		errOut = os.Stderr
 	}
-	job := newRunWebJob(strconv.FormatInt(s.nextJob, 10), runWebJobConfig{
-		Stdout: out,
-		Notice: errOut,
+	profile := runWebTerminalProfile{}
+	if s.cfg.TerminalProfile != nil {
+		profile = s.cfg.TerminalProfile()
+	}
+	profile = normalizeRunWebTerminalProfile(profile)
+	var resizeSource <-chan catchrpc.Resize
+	if s.cfg.TerminalResize != nil {
+		resizeSource = s.cfg.TerminalResize(ctx)
+	}
+	job, err := newRunWebJob(id, runWebJobConfig{
+		Stdout:       out,
+		Notice:       errOut,
+		JournalDir:   s.cfg.JournalDir,
+		JournalLimit: s.cfg.JournalLimit,
+		Profile:      profile,
+		NewJournal:   s.cfg.NewJournal,
 	})
-	s.active = job
-	ctx, cancel := runWebDeployContext(s.cfg.Context)
-	go s.runDeployJob(ctx, draft, job)
+	if err != nil {
+		return nil, ctx, err
+	}
+	remoteResize := bridgeRunWebTerminalResizes(ctx, job, resizeSource)
+	execCtx := withRemoteExecTerminalState(ctx, remoteExecTerminalState{
+		TTY:    profile.TTY,
+		Cols:   profile.Cols,
+		Rows:   profile.Rows,
+		Term:   profile.Term,
+		Resize: remoteResize,
+	})
+	return job, execCtx, nil
+}
+
+func bridgeRunWebTerminalResizes(ctx context.Context, job *runWebJob, source <-chan catchrpc.Resize) <-chan catchrpc.Resize {
+	if source == nil {
+		return nil
+	}
+	remote := make(chan catchrpc.Resize)
 	go func() {
-		<-job.done
-		cancel()
+		defer close(remote)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case size, ok := <-source:
+				if !ok {
+					return
+				}
+				job.recordResize(size)
+				select {
+				case remote <- size:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
 	}()
-	return job, http.StatusOK, ""
+	return remote
 }
 
 func (s *runWebServer) runDeployJob(ctx context.Context, draft RunDraft, job *runWebJob) {
@@ -303,9 +410,31 @@ func (s *runWebServer) runDeployJob(ctx context.Context, draft RunDraft, job *ru
 	s.complete = true
 	s.deployMu.Unlock()
 	job.finish(nil)
-	if s.cfg.OnComplete != nil {
-		go s.cfg.OnComplete()
+	status := job.status()
+	if s.cfg.OnComplete != nil && status.State == runWebJobSucceeded {
+		go s.awaitSuccessfulRender(job)
 	}
+}
+
+func (s *runWebServer) completionAckTimeout() time.Duration {
+	if s.cfg.CompletionAckTimeout > 0 {
+		return s.cfg.CompletionAckTimeout
+	}
+	return runWebDefaultCompletionAckTimeout
+}
+
+func (s *runWebServer) awaitSuccessfulRender(job *runWebJob) {
+	timer := time.NewTimer(s.completionAckTimeout())
+	defer timer.Stop()
+	select {
+	case <-job.acknowledged():
+	case <-timer.C:
+	case <-s.ctx.Done():
+		return
+	}
+	s.completeOnce.Do(func() {
+		s.cfg.OnComplete()
+	})
 }
 
 func (s *runWebServer) lookupJob(id string) (*runWebJob, bool) {
@@ -326,30 +455,58 @@ func (s *runWebServer) handleDeployJob(w http.ResponseWriter, r *http.Request) {
 	}
 	switch action {
 	case "status":
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		job, ok := s.lookupJob(jobID)
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		writeRunWebJSON(w, http.StatusOK, job.status())
+		s.handleDeployStatus(w, r, jobID)
 	case "stream":
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		job, ok := s.lookupJob(jobID)
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		s.handleDeployStream(w, r, job)
+		s.handleDeployStreamAction(w, r, jobID)
+	case "ack":
+		s.handleDeployAck(w, r, jobID)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *runWebServer) handleDeployStatus(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	job, ok := s.lookupJob(jobID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	writeRunWebJSON(w, http.StatusOK, job.status())
+}
+
+func (s *runWebServer) handleDeployStreamAction(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	job, ok := s.lookupJob(jobID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	s.handleDeployStream(w, r, job)
+}
+
+func (s *runWebServer) handleDeployAck(w http.ResponseWriter, r *http.Request, jobID string) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	job, ok := s.lookupJob(jobID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if !job.prepareAcknowledgement() {
+		http.Error(w, "deployment is not eligible for acknowledgement", http.StatusConflict)
+		return
+	}
+	writeRunWebNoContent(w)
+	job.releaseAcknowledgement()
 }
 
 func (s *runWebServer) handleDeployStream(w http.ResponseWriter, r *http.Request, job *runWebJob) {
@@ -358,10 +515,26 @@ func (s *runWebServer) handleDeployStream(w http.ResponseWriter, r *http.Request
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	lastID, _ := strconv.ParseInt(strings.TrimSpace(r.Header.Get("Last-Event-ID")), 10, 64)
+	lastID, err := parseRunWebLastEventID(r.Header.Get("Last-Event-ID"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := job.validateCursor(lastID); err != nil {
+		if errors.Is(err, errRunWebJournalCursor) {
+			http.Error(w, "Last-Event-ID is not a journal boundary", http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
+	if _, err := io.WriteString(w, "retry: 250\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
 	events, _ := job.subscribe(r.Context(), lastID)
 	for ev := range events {
 		if err := writeRunWebSSE(w, ev); err != nil {
@@ -369,6 +542,18 @@ func (s *runWebServer) handleDeployStream(w http.ResponseWriter, r *http.Request
 		}
 		flusher.Flush()
 	}
+}
+
+func parseRunWebLastEventID(value string) (int64, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	cursor, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || cursor < 0 {
+		return 0, fmt.Errorf("invalid Last-Event-ID %q", value)
+	}
+	return cursor, nil
 }
 
 func writeRunWebSSE(w io.Writer, ev runWebStreamEvent) error {
@@ -387,12 +572,45 @@ func (s *runWebServer) handleSessionClosed(w http.ResponseWriter, r *http.Reques
 	}
 	s.deployMu.Lock()
 	job := s.active
-	complete := s.complete
 	s.deployMu.Unlock()
-	if job != nil && !complete {
+	eligible := job != nil && job.prepareAcknowledgement()
+	writeRunWebNoContent(w)
+	if eligible {
+		job.releaseAcknowledgement()
+	} else if job != nil {
 		job.browserClosed()
 	}
+}
+
+func writeRunWebNoContent(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNoContent)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (s *runWebServer) close() error {
+	s.closeOnce.Do(func() {
+		s.cancel()
+		s.deployMu.Lock()
+		s.closed = true
+		job := s.active
+		s.deployMu.Unlock()
+		if job != nil {
+			s.closeErr = job.close()
+		}
+	})
+	return s.closeErr
+}
+
+func (s *runWebServer) cleanupActive() error {
+	s.deployMu.Lock()
+	job := s.active
+	s.deployMu.Unlock()
+	if job == nil {
+		return nil
+	}
+	return job.close()
 }
 
 func (s *runWebServer) handleStatic(w http.ResponseWriter, r *http.Request) {

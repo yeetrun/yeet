@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 type runWebRequest struct {
@@ -67,11 +69,31 @@ type runWebVMImageHint struct {
 
 var openBrowserFn = openBrowser
 var runWebFn = runWeb
+var currentRunWebTerminalProfileFn = currentRunWebTerminalProfile
+var watchRunWebResizeFn = watchResize
 
 const (
 	runWebCompletionGracePeriod   = 500 * time.Millisecond
 	runWebCompletionShutdownLimit = 250 * time.Millisecond
 )
+
+func currentRunWebTerminalProfile(fd int) runWebTerminalProfile {
+	profile := runWebTerminalProfile{
+		Cols:       runWebDefaultTerminalCols,
+		Rows:       runWebDefaultTerminalRows,
+		Scrollback: runWebTerminalScrollback,
+	}
+	if !isTerminalFn(fd) {
+		return profile
+	}
+	profile.TTY = true
+	profile.Term = os.Getenv("TERM")
+	if cols, rows, err := termGetSizeFn(fd); err == nil {
+		profile.Cols = cols
+		profile.Rows = rows
+	}
+	return profile
+}
 
 func extractRunWebFlag(args []string) ([]string, bool, error) {
 	out := make([]string, 0, len(args))
@@ -271,6 +293,9 @@ func runWeb(ctx context.Context, req runWebRequest) error {
 }
 
 func startRunWebServer(ctx context.Context, req runWebRequest, token string, csrfToken string) (*http.Server, net.Listener, <-chan error, <-chan struct{}, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, nil, nil, nil, "", err
@@ -292,6 +317,12 @@ func startRunWebServer(ctx context.Context, req runWebRequest, token string, csr
 		Context:   ctx,
 		Out:       req.Out,
 		Err:       req.Err,
+		TerminalProfile: func() runWebTerminalProfile {
+			return currentRunWebTerminalProfileFn(int(os.Stdin.Fd()))
+		},
+		TerminalResize: func(ctx context.Context) <-chan catchrpc.Resize {
+			return watchRunWebResizeFn(ctx, int(os.Stdin.Fd()))
+		},
 		OnComplete: func() {
 			doneOnce.Do(func() { close(done) })
 		},
@@ -304,7 +335,9 @@ func startRunWebServer(ctx context.Context, req runWebRequest, token string, csr
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- server.Serve(listener)
+		err := server.Serve(listener)
+		_ = handler.(*runWebServer).close()
+		errCh <- err
 	}()
 	url := fmt.Sprintf("http://%s/?token=%s", listener.Addr().String(), token)
 	return server, listener, errCh, done, url, nil

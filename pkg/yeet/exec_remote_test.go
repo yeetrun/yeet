@@ -128,6 +128,37 @@ func TestNewRPCClientReturnsClient(t *testing.T) {
 	}
 }
 
+func TestWatchResizeCancellationUnblocksSaturatedProducer(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 1)
+	stopped := make(chan struct{})
+	resizes := watchResizeSignals(
+		ctx,
+		42,
+		signals,
+		func() { close(stopped) },
+		func(fd int) (int, int, error) {
+			if fd != 42 {
+				t.Fatalf("terminal fd = %d, want 42", fd)
+			}
+			return 120, 40, nil
+		},
+	)
+
+	for range 6 {
+		signals <- syscall.SIGWINCH
+	}
+	cancel()
+
+	select {
+	case <-stopped:
+	case <-time.After(time.Second):
+		t.Fatal("saturated resize producer did not stop after context cancellation")
+	}
+	for range resizes {
+	}
+}
+
 func TestPayloadNameForStdinIgnoresNilAndProcessStdin(t *testing.T) {
 	if got := payloadNameForStdin(nil); got != "" {
 		t.Fatalf("payloadNameForStdin nil = %q, want empty", got)
@@ -556,6 +587,95 @@ func TestExecRemoteReturnsTerminalRestoreError(t *testing.T) {
 	err = execRemote(context.Background(), "app", []string{"shell"}, nil, true)
 	if !errors.Is(err, restoreErr) {
 		t.Fatalf("execRemote error = %v, want restore error", err)
+	}
+}
+
+func TestPrepareRemoteExecSessionUsesSharedTerminalState(t *testing.T) {
+	restoreExecRemoteGlobals(t)
+	isTerminalFn = func(int) bool { return true }
+	sizeCalls := 0
+	termGetSizeFn = func(int) (int, int, error) {
+		sizeCalls++
+		return 80, 24, nil
+	}
+	resizes := make(chan catchrpc.Resize, 8)
+	baseCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx := withRemoteExecTerminalState(baseCtx, remoteExecTerminalState{
+		TTY:    true,
+		Cols:   132,
+		Rows:   44,
+		Term:   "xterm-shared",
+		Resize: resizes,
+	})
+	shared, ok := remoteExecTerminalStateFromContext(ctx)
+	if !ok {
+		t.Fatal("shared terminal state missing from context")
+	}
+	waitForSize := func(cols, rows int) {
+		t.Helper()
+		deadline := time.Now().Add(time.Second)
+		for {
+			gotCols, gotRows := shared.size()
+			if gotCols == cols && gotRows == rows {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("shared terminal size = %dx%d, want latest %dx%d", gotCols, gotRows, cols, rows)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	resizes <- catchrpc.Resize{Cols: 150, Rows: 50}
+	resizes <- catchrpc.Resize{Cols: 180, Rows: 55}
+	waitForSize(180, 55)
+
+	session, err := prepareRemoteExecSession(ctx, "host-a", "svc-a", []string{"run"}, strings.NewReader(""), true)
+	if err != nil {
+		t.Fatalf("prepareRemoteExecSession: %v", err)
+	}
+	if !session.req.TTY || session.req.Cols != 180 || session.req.Rows != 55 || session.req.Term != "xterm-shared" {
+		t.Fatalf("request terminal state = %#v, want latest shared 180x55 xterm-shared", session.req)
+	}
+	select {
+	case stale := <-session.resizeCh:
+		t.Fatalf("first session replayed stale resize %#v", stale)
+	default:
+	}
+	resizes <- catchrpc.Resize{Cols: 200, Rows: 60}
+	select {
+	case resize := <-session.resizeCh:
+		if resize != (catchrpc.Resize{Cols: 200, Rows: 60}) {
+			t.Fatalf("first session resize = %#v, want 200x60", resize)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first session resize")
+	}
+	var closeErr error
+	session.close(&closeErr)
+	if closeErr != nil {
+		t.Fatalf("close first remote exec session: %v", closeErr)
+	}
+
+	resizes <- catchrpc.Resize{Cols: 220, Rows: 70}
+	resizes <- catchrpc.Resize{Cols: 240, Rows: 80}
+	waitForSize(240, 80)
+
+	next, err := prepareRemoteExecSession(ctx, "host-a", "svc-a", []string{"commit"}, strings.NewReader(""), true)
+	if err != nil {
+		t.Fatalf("prepare second remote exec session: %v", err)
+	}
+	if next.req.Cols != 240 || next.req.Rows != 80 {
+		t.Fatalf("second request terminal size = %dx%d, want latest 240x80", next.req.Cols, next.req.Rows)
+	}
+	select {
+	case stale := <-next.resizeCh:
+		t.Fatalf("second session replayed stale resize %#v", stale)
+	default:
+	}
+	if sizeCalls != 0 {
+		t.Fatalf("terminal size reads = %d, want none after the shared profile snapshot", sizeCalls)
 	}
 }
 
