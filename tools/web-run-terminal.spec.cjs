@@ -515,6 +515,32 @@ test("web run refresh replays a failed job before unlocking retry", async ({ pag
   expect(await copyTerminalText(page)).toContain("failure detail");
 });
 
+test("web run clears a failed attempt before retry output", async ({ page }) => {
+  await openFixture(page, { manualEvents: true });
+  await startManualDeploy(page);
+  await dispatchSSE(page, "open");
+  await dispatchTerminalProfile(page, 1);
+  await dispatchOutput(page, "first attempt output\r\n", 2);
+  await dispatchSSE(page, "status", { state: "failed", error: "first attempt failed" }, 3);
+
+  await page.waitForFunction(() => document.body.dataset.phase === "editing");
+  expect(await copyTerminalText(page)).toContain("first attempt output");
+
+  await waitForDeployReady(page);
+  await page.click("#deployButton");
+  await page.waitForFunction(() => window.__eventSources?.length === 2);
+  await expect(page.locator("#terminalCopy")).toBeDisabled();
+  await expect(page.locator("#terminalOutput canvas")).toHaveCount(0);
+
+  await dispatchSSE(page, "open");
+  await dispatchTerminalProfile(page, 1);
+  await dispatchOutput(page, "second attempt output\r\n", 2);
+  await page.waitForFunction(() => !document.querySelector("#terminalCopy")?.disabled);
+  const copied = await copyTerminalText(page);
+  expect(copied).toContain("second attempt output");
+  expect(copied).not.toContain("first attempt output");
+});
+
 test("web run degraded success keeps its warning visible without acknowledging or unlocking", async ({ page }) => {
   await openFixture(page, { manualEvents: true });
   await startManualDeploy(page);
@@ -935,6 +961,120 @@ test("Ghostty adapter bounds scrollback and keeps explicit geometry", async ({ p
   expect(result.before).toEqual(result.after);
   expect(result.after.cols).toBe(132);
   expect(result.after.rows).toBe(44);
+});
+
+test("Ghostty adapter follows the outer viewport until the user scrolls up", async ({ page }) => {
+  await openFixture(page);
+
+  const result = await page.evaluate(async () => {
+    const { createTerminalAdapter } = await import("/terminal.js");
+    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+    const atBottom = (element) =>
+      Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop) <= 2;
+    const element = document.createElement("div");
+    element.className = "terminal-output";
+    element.style.width = "560px";
+    element.style.height = "96px";
+    document.body.appendChild(element);
+
+    const adapter = await createTerminalAdapter(element, { cols: 80, rows: 24 });
+    const initialOutput = Array.from(
+      { length: 40 },
+      (_, index) => `initial ${String(index).padStart(2, "0")}\r\n`,
+    ).join("");
+    adapter.write(new TextEncoder().encode(initialOutput));
+    await adapter.drain();
+    const initial = {
+      atBottom: atBottom(element),
+      scrollTop: element.scrollTop,
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight,
+    };
+
+    element.scrollTop = 0;
+    await frame();
+    adapter.write(new TextEncoder().encode("paused output\r\n"));
+    await adapter.drain();
+    const pausedTop = element.scrollTop;
+
+    element.style.height = "72px";
+    await frame();
+    await frame();
+    const pausedAfterResize = element.scrollTop;
+
+    element.scrollTop = element.scrollHeight;
+    await frame();
+    adapter.write(new TextEncoder().encode("followed output\r\n"));
+    await adapter.drain();
+    const resumedAtBottom = atBottom(element);
+
+    element.scrollTop = 0;
+    await frame();
+    adapter.clear();
+    await adapter.drain();
+    const clearAtBottom = atBottom(element);
+    adapter.dispose();
+
+    return { initial, pausedTop, pausedAfterResize, resumedAtBottom, clearAtBottom };
+  });
+
+  expect(result.initial.scrollHeight).toBeGreaterThan(result.initial.clientHeight);
+  expect(result.initial.scrollTop).toBeGreaterThan(0);
+  expect(result.initial.atBottom).toBe(true);
+  expect(result.pausedTop).toBe(0);
+  expect(result.pausedAfterResize).toBe(0);
+  expect(result.resumedAtBottom).toBe(true);
+  expect(result.clearAtBottom).toBe(true);
+});
+
+test("Ghostty adapter preserves manual terminal scrollback across writes", async ({ page }) => {
+  await openFixture(page);
+
+  const result = await page.evaluate(async () => {
+    const { Terminal } = await import("/ghostty-web.js");
+    const originalOpen = Terminal.prototype.open;
+    let terminal;
+    Terminal.prototype.open = function open(element) {
+      terminal = this;
+      return originalOpen.call(this, element);
+    };
+
+    try {
+      const { createTerminalAdapter } = await import("/terminal.js");
+      const element = document.createElement("div");
+      element.style.width = "600px";
+      element.style.height = "320px";
+      document.body.appendChild(element);
+      const adapter = await createTerminalAdapter(element, { cols: 80, rows: 6 });
+      const initialOutput = Array.from(
+        { length: 1101 },
+        (_, index) => `line ${String(index).padStart(4, "0")}\r\n`,
+      ).join("");
+      adapter.write(new TextEncoder().encode(initialOutput));
+      await adapter.drain();
+
+      terminal.scrollToLine(10);
+      const beforeWrite = terminal.getViewportY();
+      adapter.write(new TextEncoder().encode("new 1\r\nnew 2\r\nnew 3\r\n"));
+      await adapter.drain();
+      const afterPausedWrite = terminal.getViewportY();
+
+      terminal.scrollToBottom();
+      adapter.write(new TextEncoder().encode("live again\r\n"));
+      await adapter.drain();
+      const afterResumedWrite = terminal.getViewportY();
+      adapter.dispose();
+      return { beforeWrite, afterPausedWrite, afterResumedWrite };
+    } finally {
+      Terminal.prototype.open = originalOpen;
+    }
+  });
+
+  expect(result).toEqual({
+    beforeWrite: 10,
+    afterPausedWrite: 13,
+    afterResumedWrite: 0,
+  });
 });
 
 test("Ghostty adapter bounds write batches and settles lifecycle drains", async ({ page }) => {

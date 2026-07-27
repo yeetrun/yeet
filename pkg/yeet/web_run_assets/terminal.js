@@ -38,6 +38,39 @@ export async function createTerminalAdapter(element, profile) {
   let writing = false;
   let disposed = false;
   let failure = null;
+  let following = true;
+  let suppressTerminalScroll = false;
+
+  function elementAtBottom() {
+    return element.scrollHeight - element.clientHeight - element.scrollTop <= 2;
+  }
+
+  function updateFollowState() {
+    if (disposed || failure || suppressTerminalScroll) return;
+    following = terminal.getViewportY() === 0 && elementAtBottom();
+  }
+
+  function alignFollowedViewport() {
+    if (disposed || failure || !following) return;
+    suppressTerminalScroll = true;
+    try {
+      terminal.scrollToBottom();
+      element.scrollTop = element.scrollHeight;
+    } finally {
+      suppressTerminalScroll = false;
+    }
+  }
+
+  function terminalScrollbackPosition() {
+    return terminal.wasmTerm?.getNativeScrollbackLength?.() ?? terminal.getScrollbackLength();
+  }
+
+  function restorePausedTerminalViewport(viewportY, scrollbackPosition) {
+    if (viewportY <= 0) return;
+    const currentScrollbackLength = terminal.getScrollbackLength();
+    const growth = Math.max(0, terminalScrollbackPosition() - scrollbackPosition);
+    terminal.scrollToLine(Math.min(currentScrollbackLength, viewportY + growth));
+  }
 
   function restoreViewportSemantics() {
     element.setAttribute("tabindex", "0");
@@ -106,6 +139,7 @@ export async function createTerminalAdapter(element, profile) {
       try {
         if (next.type === "resize") {
           terminal.resize(next.cols, next.rows);
+          alignFollowedViewport();
         } else {
           terminal.clearSelection();
           terminal.scrollToBottom();
@@ -113,6 +147,8 @@ export async function createTerminalAdapter(element, profile) {
           terminal.clear();
           terminal.clearSelection();
           terminal.scrollToBottom();
+          following = true;
+          alignFollowedViewport();
         }
       } catch (error) {
         fail(error);
@@ -123,15 +159,27 @@ export async function createTerminalAdapter(element, profile) {
     }
     writing = true;
     const batch = takeBatch();
+    const viewportY = terminal.getViewportY();
+    const scrollbackPosition = terminalScrollbackPosition();
+    const preservePausedViewport = !following;
     try {
-      terminal.write(batch, () => {
-        writing = false;
-        if (disposed) {
-          settleDrains();
-          return;
+      suppressTerminalScroll = true;
+      try {
+        terminal.write(batch, () => {
+          alignFollowedViewport();
+          writing = false;
+          if (disposed) {
+            settleDrains();
+            return;
+          }
+          scheduleFlush();
+        });
+        if (preservePausedViewport) {
+          restorePausedTerminalViewport(viewportY, scrollbackPosition);
         }
-        scheduleFlush();
-      });
+      } finally {
+        suppressTerminalScroll = false;
+      }
     } catch (error) {
       fail(error);
     }
@@ -145,6 +193,12 @@ export async function createTerminalAdapter(element, profile) {
     }
     scheduledFrame = requestAnimationFrame(flush);
   }
+
+  const terminalScroll = terminal.onScroll(updateFollowState);
+  element.addEventListener("scroll", updateFollowState, { passive: true });
+  const resizeObserver = new ResizeObserver(alignFollowedViewport);
+  resizeObserver.observe(element);
+  alignFollowedViewport();
 
   return {
     get cols() {
@@ -167,6 +221,7 @@ export async function createTerminalAdapter(element, profile) {
       if (!writing && queue.length === 0) {
         try {
           terminal.resize(cols, rows);
+          alignFollowedViewport();
         } catch (error) {
           throw fail(error);
         }
@@ -205,6 +260,9 @@ export async function createTerminalAdapter(element, profile) {
     dispose() {
       if (disposed) return;
       disposed = true;
+      resizeObserver.disconnect();
+      terminalScroll.dispose();
+      element.removeEventListener("scroll", updateFollowState);
       if (scheduledFrame !== null) {
         cancelAnimationFrame(scheduledFrame);
         scheduledFrame = null;
