@@ -943,7 +943,6 @@ test("Ghostty adapter fits native geometry inside the panel without outer scroll
       terminal = this;
       return originalOpen.call(this, element);
     };
-
     try {
       const { createTerminalAdapter } = await import("/terminal.js");
       const element = document.createElement("div");
@@ -953,6 +952,27 @@ test("Ghostty adapter fits native geometry inside the panel without outer scroll
       document.body.appendChild(element);
 
       const adapter = await createTerminalAdapter(element, { cols: 132, rows: 44 });
+      adapter.write(new TextEncoder().encode("\x1b[7mX\x1b[0m"));
+      await adapter.drain();
+      const backgroundCanvas = document.createElement("canvas");
+      backgroundCanvas.width = backgroundCanvas.height = 1;
+      const backgroundContext = backgroundCanvas.getContext("2d", { willReadFrequently: true });
+      backgroundContext.fillStyle = getComputedStyle(element).backgroundColor;
+      backgroundContext.fillRect(0, 0, 1, 1);
+      const expectedBackground = Array.from(backgroundContext.getImageData(0, 0, 1, 1).data);
+      const inverseCanvas = element.querySelector("canvas");
+      const inversePixels = inverseCanvas.getContext("2d", { willReadFrequently: true }).getImageData(
+        0,
+        0,
+        Math.ceil(inverseCanvas.width / adapter.cols),
+        Math.ceil(inverseCanvas.height / adapter.rows),
+      ).data;
+      let inverseBackgroundPixelCount = 0;
+      for (let index = 0; index < inversePixels.length; index += 4) {
+        if (expectedBackground.every((value, channel) => inversePixels[index + channel] === value)) {
+          inverseBackgroundPixelCount += 1;
+        }
+      }
       adapter.write(new TextEncoder().encode(
         "line 1\r\nline 2\r\nline 3\r\nline 4\r\nline 5\r\n",
       ));
@@ -970,6 +990,7 @@ test("Ghostty adapter fits native geometry inside the panel without outer scroll
       const boundedText = adapter.copyText();
 
       const style = getComputedStyle(element);
+      const sheetStyle = getComputedStyle(document.querySelector("#terminalSheet"));
       const canvas = element.querySelector("canvas");
       const result = {
         profile: [132, 44],
@@ -983,14 +1004,54 @@ test("Ghostty adapter fits native geometry inside the panel without outer scroll
         scrollSize: [element.scrollWidth, element.scrollHeight],
         scrollPosition: [element.scrollLeft, element.scrollTop],
         overflow: [style.overflowX, style.overflowY],
+        outputBackground: style.backgroundColor,
+        sheetBackground: sheetStyle.backgroundColor,
         backgroundToken: style.getPropertyValue("--terminal-background").trim(),
         terminalBackground: terminal.options.theme.background,
+        wasmBackground: terminal.buildWasmConfig().bgColor,
+        expectedBackground,
+        inverseBackgroundPixelCount,
         shortText,
         boundedText,
       };
       adapter.dispose();
       return result;
     } finally {
+      Terminal.prototype.open = originalOpen;
+    }
+  });
+
+  const fallbackResult = await page.evaluate(async () => {
+    const { Terminal } = await import("/ghostty-web.js");
+    const originalOpen = Terminal.prototype.open;
+    let terminal;
+    Terminal.prototype.open = function open(element) {
+      terminal = this;
+      return originalOpen.call(this, element);
+    };
+    const previousRootToken = document.documentElement.style.getPropertyValue("--terminal-background");
+    document.documentElement.style.setProperty("--terminal-background", "rgb(4, 5, 6)");
+
+    try {
+      const { createTerminalAdapter } = await import("/terminal.js");
+      const element = document.createElement("div");
+      element.className = "terminal-output";
+      element.style.setProperty("--terminal-background", "initial");
+      element.style.width = "560px";
+      element.style.height = "96px";
+      document.body.appendChild(element);
+      const rootToken = getComputedStyle(document.documentElement)
+        .getPropertyValue("--terminal-background")
+        .trim();
+      const adapter = await createTerminalAdapter(element, { cols: 80, rows: 12 });
+      const result = {
+        rootToken,
+        terminalBackground: terminal.options.theme.background,
+      };
+      adapter.dispose();
+      return result;
+    } finally {
+      document.documentElement.style.setProperty("--terminal-background", previousRootToken);
       Terminal.prototype.open = originalOpen;
     }
   });
@@ -1003,14 +1064,23 @@ test("Ghostty adapter fits native geometry inside the panel without outer scroll
   expect(result.scrollSize).toEqual(result.client);
   expect(result.scrollPosition).toEqual([0, 0]);
   expect(result.overflow).toEqual(["hidden", "hidden"]);
-  expect(result.backgroundToken).toBe("#101216");
-  expect(result.terminalBackground).toBe(result.backgroundToken);
+  expect(result.backgroundToken).toBe("oklch(0.14 0.011 165)");
+  expect(result.outputBackground).toBe(result.sheetBackground);
+  expect(result.terminalBackground).toMatch(/^rgb\(\d+, \d+, \d+\)$/);
+  expect(result.wasmBackground).toBe(
+    (result.expectedBackground[0] << 16) |
+      (result.expectedBackground[1] << 8) |
+      result.expectedBackground[2],
+  );
+  expect(result.inverseBackgroundPixelCount).toBeGreaterThan(0);
   expect(result.shortText).toContain("line 1");
   expect(result.shortText).toContain("line 5");
   expect(result.boundedText).toContain("line 1100");
   expect(result.boundedText).toContain("line 0900 界  e\u0301");
   expect(result.boundedText).not.toContain("line 0000");
   expect(result.boundedText.split("\n").length).toBeLessThanOrEqual(1002 + result.fitted[1]);
+  expect(fallbackResult.rootToken).toBe("rgb(4, 5, 6)");
+  expect(fallbackResult.terminalBackground).toBe(fallbackResult.rootToken);
 });
 
 test("Ghostty adapter preserves manual scrollback while the panel refits", async ({ page }) => {

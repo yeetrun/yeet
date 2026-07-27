@@ -39,7 +39,8 @@ The adapter will:
 1. create and open Ghostty using the streamed profile as a bootstrap;
 2. immediately fit the terminal grid to the panel before returning the adapter;
 3. observe the panel content box and refit when its dimensions change; and
-4. keep the canvas and unused partial-cell area on the same background.
+4. keep the sheet, output viewport, canvas, and unused partial-cell area on one
+   shared background.
 
 This is preferred over scaling the native canvas, which makes text tiny or
 distorted, and over cropping the native canvas, which preserves the broken
@@ -59,8 +60,16 @@ After Ghostty opens, fitted dimensions are calculated from:
 - the scrollbar reservation used by `FitAddon`.
 
 Rows and columns are whole cells, so a small remainder can exist on the right or
-bottom. The container and Ghostty canvas will use the same terminal background,
-making that remainder visually continuous with the terminal surface.
+bottom. The terminal sheet's existing green-neutral surface,
+`oklch(0.14 0.011 165)`, becomes the single terminal background token. The
+sheet and output viewport use that token in CSS. Before creating Ghostty, the
+adapter rasterizes the computed CSS color to an opaque integer `rgb(r, g, b)`
+string, which Ghostty 0.4.0 and its WASM default-color parser support. If the
+output token is unset, the adapter uses the same root token rather than a
+second color constant. This removes the blue-biased code-surface rectangle and
+makes the canvas, padding, and partial-cell remainder visually continuous. The
+canvas will not use transparency because explicit clearing is safer for
+terminal redraws.
 
 The canvas must never be wider or taller than the panel's content box. The
 panel will not provide horizontal or vertical content scrolling.
@@ -137,7 +146,9 @@ The real-browser regression suite will prove:
 - short output is visible instead of scrolling to blank source rows;
 - expand, collapse, and width changes refit rows and columns;
 - a streamed native resize cannot restore native canvas dimensions;
-- the terminal background covers partial-cell remainders without seams;
+- the sheet and output viewport resolve to the same CSS background, while
+  Ghostty receives its opaque parsed RGB equivalent and inverse video uses that
+  same default background;
 - live output follows Ghostty's bottom;
 - manual Ghostty scrollback remains anchored across writes and panel refits;
 - returning to live output resumes following;

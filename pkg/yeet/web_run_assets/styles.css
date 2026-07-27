@@ -12,6 +12,7 @@
   --warning: oklch(0.78 0.12 78);
   --canvas: oklch(0.17 0.012 165);
   --surface: oklch(0.21 0.014 165);
+  --terminal-background: oklch(0.14 0.011 165);
   --surface-2: oklch(0.25 0.015 190);
   --line: oklch(0.34 0.018 190);
   --line-strong: oklch(0.43 0.02 190);
@@ -732,7 +733,7 @@ legend {
   margin: 0 auto;
   border: 1px solid var(--line-strong);
   border-radius: 8px 8px 0 0;
-  background: oklch(0.14 0.011 165);
+  background: var(--terminal-background);
   box-shadow: 0 -16px 42px color-mix(in oklch, var(--canvas) 70%, transparent);
   overflow: hidden;
 }
@@ -806,7 +807,6 @@ legend {
 }
 
 .terminal-output {
-  --terminal-background: #101216;
   position: relative;
   height: 150px;
   max-height: 42vh;

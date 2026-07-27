@@ -71,6 +71,9 @@ func TestWebRunAssetsContainTerminalContracts(t *testing.T) {
 		`disableStdin: true`,
 		`convertEol: false`,
 		`cursorBlink: false`,
+		`resolveTerminalBackground`,
+		`getComputedStyle(document.documentElement)`,
+		`terminal background must be opaque`,
 	} {
 		if !strings.Contains(terminalSource, snippet) {
 			t.Fatalf("terminal adapter missing %q", snippet)
@@ -110,13 +113,16 @@ func TestWebRunAssetsContainTerminalContracts(t *testing.T) {
 	for _, snippet := range []string{
 		".terminal-output canvas",
 		".terminal-warning",
-		"--terminal-background: #101216",
+		"--terminal-background: oklch(0.14 0.011 165)",
 		"overflow: hidden",
 		"max-width: none",
 	} {
 		if !strings.Contains(styleSource, snippet) {
 			t.Fatalf("terminal styles missing %q", snippet)
 		}
+	}
+	if got := strings.Count(styleSource, "background: var(--terminal-background);"); got != 2 {
+		t.Fatalf("shared terminal background use count = %d, want 2", got)
 	}
 	for _, forbidden := range []string{
 		"overflow-x: auto",

@@ -7,6 +7,21 @@ import { FitAddon, Ghostty, Terminal } from "./ghostty-web.js";
 const maxWriteBatch = 64 * 1024;
 let runtimePromise;
 
+function resolveTerminalBackground(element) {
+  const rootStyle = getComputedStyle(document.documentElement);
+  const token =
+    getComputedStyle(element).getPropertyValue("--terminal-background").trim() ||
+    rootStyle.getPropertyValue("--terminal-background").trim();
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 1;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  context.fillStyle = token;
+  context.fillRect(0, 0, 1, 1);
+  const [red, green, blue, alpha] = context.getImageData(0, 0, 1, 1).data;
+  if (alpha !== 255) throw new Error("terminal background must be opaque");
+  return `rgb(${red}, ${green}, ${blue})`;
+}
+
 export function loadTerminalRuntime() {
   if (!runtimePromise) {
     runtimePromise = Ghostty.load(new URL("./ghostty-vt.wasm", import.meta.url).href);
@@ -16,8 +31,7 @@ export function loadTerminalRuntime() {
 
 export async function createTerminalAdapter(element, profile) {
   const ghostty = await loadTerminalRuntime();
-  const terminalBackground =
-    getComputedStyle(element).getPropertyValue("--terminal-background").trim() || "#101216";
+  const terminalBackground = resolveTerminalBackground(element);
   const terminal = new Terminal({
     ghostty,
     cols: profile.cols,
