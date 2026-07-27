@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-import { Ghostty, Terminal } from "./ghostty-web.js";
+import { FitAddon, Ghostty, Terminal } from "./ghostty-web.js";
 
 const maxWriteBatch = 64 * 1024;
 let runtimePromise;
@@ -16,6 +16,8 @@ export function loadTerminalRuntime() {
 
 export async function createTerminalAdapter(element, profile) {
   const ghostty = await loadTerminalRuntime();
+  const terminalBackground =
+    getComputedStyle(element).getPropertyValue("--terminal-background").trim() || "#101216";
   const terminal = new Terminal({
     ghostty,
     cols: profile.cols,
@@ -25,11 +27,13 @@ export async function createTerminalAdapter(element, profile) {
     convertEol: false,
     cursorBlink: false,
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    theme: { background: terminalBackground },
   });
   const viewportRole = element.getAttribute("role") || "log";
   const viewportLabel = element.getAttribute("aria-label") || "Deploy output";
+  const fitAddon = new FitAddon();
+  terminal.loadAddon(fitAddon);
   terminal.open(element);
-  restoreViewportSemantics();
 
   const queue = [];
   const drainWaiters = [];
@@ -40,14 +44,11 @@ export async function createTerminalAdapter(element, profile) {
   let failure = null;
   let following = true;
   let suppressTerminalScroll = false;
-
-  function elementAtBottom() {
-    return element.scrollHeight - element.clientHeight - element.scrollTop <= 2;
-  }
+  let scheduledFit = null;
 
   function updateFollowState() {
     if (disposed || failure || suppressTerminalScroll) return;
-    following = terminal.getViewportY() === 0 && elementAtBottom();
+    following = terminal.getViewportY() === 0;
   }
 
   function alignFollowedViewport() {
@@ -55,10 +56,31 @@ export async function createTerminalAdapter(element, profile) {
     suppressTerminalScroll = true;
     try {
       terminal.scrollToBottom();
-      element.scrollTop = element.scrollHeight;
     } finally {
       suppressTerminalScroll = false;
     }
+  }
+
+  function fitTerminal() {
+    if (disposed || failure) return;
+    const dimensions = fitAddon.proposeDimensions();
+    if (!dimensions) return;
+    if (terminal.cols !== dimensions.cols || terminal.rows !== dimensions.rows) {
+      terminal.resize(dimensions.cols, dimensions.rows);
+    }
+    alignFollowedViewport();
+  }
+
+  function scheduleFit() {
+    if (disposed || failure || scheduledFit !== null) return;
+    scheduledFit = requestAnimationFrame(() => {
+      scheduledFit = null;
+      try {
+        fitTerminal();
+      } catch (error) {
+        fail(error);
+      }
+    });
   }
 
   function terminalScrollbackPosition() {
@@ -138,8 +160,7 @@ export async function createTerminalAdapter(element, profile) {
       queue.shift();
       try {
         if (next.type === "resize") {
-          terminal.resize(next.cols, next.rows);
-          alignFollowedViewport();
+          fitTerminal();
         } else {
           terminal.clearSelection();
           terminal.scrollToBottom();
@@ -194,11 +215,57 @@ export async function createTerminalAdapter(element, profile) {
     scheduledFrame = requestAnimationFrame(flush);
   }
 
-  const terminalScroll = terminal.onScroll(updateFollowState);
-  element.addEventListener("scroll", updateFollowState, { passive: true });
-  const resizeObserver = new ResizeObserver(alignFollowedViewport);
-  resizeObserver.observe(element);
-  alignFollowedViewport();
+  let resizeObserver;
+  let terminalScroll;
+
+  function removeTerminalResources() {
+    for (const resource of element.querySelectorAll("canvas, textarea")) {
+      resource.remove();
+    }
+  }
+
+  function disposeTerminal({ suppressErrors = false } = {}) {
+    if (disposed) return;
+    disposed = true;
+    let cleanupError;
+    const cleanup = (operation) => {
+      try {
+        operation();
+      } catch (error) {
+        if (!cleanupError) cleanupError = error;
+      }
+    };
+
+    cleanup(() => terminalScroll?.dispose());
+    cleanup(() => resizeObserver?.disconnect());
+    if (scheduledFit !== null) {
+      cancelAnimationFrame(scheduledFit);
+      scheduledFit = null;
+    }
+    if (scheduledFrame !== null) {
+      cancelAnimationFrame(scheduledFrame);
+      scheduledFrame = null;
+    }
+    queue.length = 0;
+    queueOffset = 0;
+    writing = false;
+    cleanup(() => terminal.dispose());
+    cleanup(restoreViewportSemantics);
+    cleanup(removeTerminalResources);
+    cleanup(settleDrains);
+    if (!suppressErrors && cleanupError) throw cleanupError;
+  }
+
+  try {
+    restoreViewportSemantics();
+    resizeObserver = new ResizeObserver(scheduleFit);
+    resizeObserver.observe(element);
+    terminalScroll = terminal.onScroll(updateFollowState);
+    fitTerminal();
+  } catch (error) {
+    disposeTerminal({ suppressErrors: true });
+    throw error;
+  }
 
   return {
     get cols() {
@@ -220,8 +287,7 @@ export async function createTerminalAdapter(element, profile) {
       if (failure) throw failure;
       if (!writing && queue.length === 0) {
         try {
-          terminal.resize(cols, rows);
-          alignFollowedViewport();
+          fitTerminal();
         } catch (error) {
           throw fail(error);
         }
@@ -258,24 +324,7 @@ export async function createTerminalAdapter(element, profile) {
       }
     },
     dispose() {
-      if (disposed) return;
-      disposed = true;
-      resizeObserver.disconnect();
-      terminalScroll.dispose();
-      element.removeEventListener("scroll", updateFollowState);
-      if (scheduledFrame !== null) {
-        cancelAnimationFrame(scheduledFrame);
-        scheduledFrame = null;
-      }
-      queue.length = 0;
-      queueOffset = 0;
-      writing = false;
-      try {
-        terminal.dispose();
-      } finally {
-        restoreViewportSemantics();
-        settleDrains();
-      }
+      disposeTerminal();
     },
   };
 }

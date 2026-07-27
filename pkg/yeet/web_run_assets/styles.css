@@ -806,15 +806,15 @@ legend {
 }
 
 .terminal-output {
+  --terminal-background: #101216;
   position: relative;
   height: 150px;
   max-height: 42vh;
   margin: 0;
   padding: 12px;
   color: oklch(0.89 0.018 155);
-  background: oklch(0.115 0.01 165);
-  overflow-x: auto;
-  overflow-y: auto;
+  background: var(--terminal-background);
+  overflow: hidden;
 }
 
 .terminal-output canvas {

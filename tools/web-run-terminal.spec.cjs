@@ -770,7 +770,7 @@ test("web run refresh during final drain reconstructs and acknowledges without r
   }))).toEqual({ ackTotal: "1", sessionCloseTotal: "0", activeJob: null });
 });
 
-test("web run copies through the adapter and expand preserves fixed terminal columns and accessibility", async ({ page }) => {
+test("web run copies through the adapter and expand refits terminal geometry", async ({ page }) => {
   await openFixture(page, { manualEvents: true });
   await page.evaluate(async () => {
     const { Terminal } = await import("/ghostty-web.js");
@@ -788,12 +788,33 @@ test("web run copies through the adapter and expand preserves fixed terminal col
   await page.waitForFunction(() => !document.querySelector("#terminalCopy")?.disabled);
 
   expect(await copyTerminalText(page)).toContain("copy me");
+  const initial = await page.evaluate(() => window.__terminalResizes.at(-1));
   await page.click("#terminalExpand");
   await expect(page.locator("#terminalExpand")).toHaveAttribute("aria-expanded", "true");
+  await page.waitForFunction(
+    ([cols, rows]) => {
+      const [nextCols, nextRows] = window.__terminalResizes.at(-1);
+      return nextCols === cols && nextRows > rows;
+    },
+    initial,
+  );
+  const expanded = await page.evaluate(() => window.__terminalResizes.at(-1));
   await expect(page.locator("#terminalExpand")).toHaveText("Collapse");
   await page.click("#terminalExpand");
   await expect(page.locator("#terminalExpand")).toHaveAttribute("aria-expanded", "false");
-  expect(await page.evaluate(() => window.__terminalResizes)).toEqual([]);
+  await page.waitForFunction(
+    ([cols, rows]) => {
+      const [nextCols, nextRows] = window.__terminalResizes.at(-1);
+      return nextCols === cols && nextRows < rows;
+    },
+    expanded,
+  );
+  const collapsed = await page.evaluate(() => window.__terminalResizes.at(-1));
+
+  expect(expanded[0]).toBe(initial[0]);
+  expect(expanded[1]).toBeGreaterThan(initial[1]);
+  expect(collapsed[0]).toBe(initial[0]);
+  expect(collapsed[1]).toBeLessThan(expanded[1]);
   await expect(page.locator("#terminalOutput")).toHaveAttribute("role", "region");
   await expect(page.locator("#terminalOutput")).not.toHaveAttribute("aria-live", /.+/);
   await expect(
@@ -911,120 +932,159 @@ test("Ghostty adapter preserves terminal bytes and rendering semantics", async (
   expect(copied).not.toContain("xxxxxxxx");
 });
 
-test("Ghostty adapter bounds scrollback and keeps explicit geometry", async ({ page }) => {
+test("Ghostty adapter fits native geometry inside the panel without outer scrolling", async ({ page }) => {
   await openFixture(page);
 
   const result = await page.evaluate(async () => {
-    const { createTerminalAdapter } = await import("/terminal.js");
-    const parent = document.createElement("div");
-    parent.style.width = "240px";
-    parent.style.height = "220px";
-    const element = document.createElement("div");
-    element.className = "terminal-output";
-    parent.appendChild(element);
-    document.body.appendChild(parent);
-
-    const adapter = await createTerminalAdapter(element, { cols: 40, rows: 10 });
-    const lines = Array.from(
-      { length: 1101 },
-      (_, index) => `line ${String(index).padStart(4, "0")}${index === 100 ? " 界 e\u0301" : ""}\r\n`,
-    ).join("");
-    adapter.write(new TextEncoder().encode(lines));
-    await adapter.drain();
-    const text = adapter.copyText();
-
-    adapter.resize(132, 44);
-    await adapter.drain();
-    const before = {
-      cols: adapter.cols,
-      rows: adapter.rows,
-      canvasWidth: element.querySelector("canvas").style.width,
-      canvasHeight: element.querySelector("canvas").style.height,
+    const { Terminal } = await import("/ghostty-web.js");
+    const originalOpen = Terminal.prototype.open;
+    let terminal;
+    Terminal.prototype.open = function open(element) {
+      terminal = this;
+      return originalOpen.call(this, element);
     };
-    parent.style.width = "1200px";
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    const after = {
-      cols: adapter.cols,
-      rows: adapter.rows,
-      canvasWidth: element.querySelector("canvas").style.width,
-      canvasHeight: element.querySelector("canvas").style.height,
-    };
-    adapter.dispose();
-    return { text, copiedLineCount: text.split("\n").length, before, after };
+
+    try {
+      const { createTerminalAdapter } = await import("/terminal.js");
+      const element = document.createElement("div");
+      element.className = "terminal-output";
+      element.style.width = "560px";
+      element.style.height = "96px";
+      document.body.appendChild(element);
+
+      const adapter = await createTerminalAdapter(element, { cols: 132, rows: 44 });
+      adapter.write(new TextEncoder().encode(
+        "line 1\r\nline 2\r\nline 3\r\nline 4\r\nline 5\r\n",
+      ));
+      await adapter.drain();
+      const shortText = adapter.copyText();
+
+      const longOutput = Array.from(
+        { length: 1101 },
+        (_, index) => `line ${String(index).padStart(4, "0")}${
+          index === 900 ? " 界 e\u0301" : ""
+        }\r\n`,
+      ).join("");
+      adapter.write(new TextEncoder().encode(longOutput));
+      await adapter.drain();
+      const boundedText = adapter.copyText();
+
+      const style = getComputedStyle(element);
+      const canvas = element.querySelector("canvas");
+      const result = {
+        profile: [132, 44],
+        fitted: [adapter.cols, adapter.rows],
+        client: [element.clientWidth, element.clientHeight],
+        content: [
+          element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+          element.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+        ],
+        canvas: [parseFloat(canvas.style.width), parseFloat(canvas.style.height)],
+        scrollSize: [element.scrollWidth, element.scrollHeight],
+        scrollPosition: [element.scrollLeft, element.scrollTop],
+        overflow: [style.overflowX, style.overflowY],
+        backgroundToken: style.getPropertyValue("--terminal-background").trim(),
+        terminalBackground: terminal.options.theme.background,
+        shortText,
+        boundedText,
+      };
+      adapter.dispose();
+      return result;
+    } finally {
+      Terminal.prototype.open = originalOpen;
+    }
   });
 
-  expect(result.text).toContain("line 1100");
-  // Ghostty's selection text includes the wide glyph's trailing display cell.
-  expect(result.text).toContain("line 0100 界  e\u0301");
-  expect(result.text).not.toContain("line 0000");
-  expect(result.copiedLineCount).toBe(1010);
-  expect(result.before).toEqual(result.after);
-  expect(result.after.cols).toBe(132);
-  expect(result.after.rows).toBe(44);
+  expect(result.fitted).not.toEqual(result.profile);
+  expect(result.fitted[0]).toBeGreaterThan(1);
+  expect(result.fitted[1]).toBeGreaterThan(0);
+  expect(result.canvas[0]).toBeLessThanOrEqual(result.content[0]);
+  expect(result.canvas[1]).toBeLessThanOrEqual(result.content[1]);
+  expect(result.scrollSize).toEqual(result.client);
+  expect(result.scrollPosition).toEqual([0, 0]);
+  expect(result.overflow).toEqual(["hidden", "hidden"]);
+  expect(result.backgroundToken).toBe("#101216");
+  expect(result.terminalBackground).toBe(result.backgroundToken);
+  expect(result.shortText).toContain("line 1");
+  expect(result.shortText).toContain("line 5");
+  expect(result.boundedText).toContain("line 1100");
+  expect(result.boundedText).toContain("line 0900 界  e\u0301");
+  expect(result.boundedText).not.toContain("line 0000");
+  expect(result.boundedText.split("\n").length).toBeLessThanOrEqual(1002 + result.fitted[1]);
 });
 
-test("Ghostty adapter follows the outer viewport until the user scrolls up", async ({ page }) => {
+test("Ghostty adapter preserves manual scrollback while the panel refits", async ({ page }) => {
   await openFixture(page);
 
   const result = await page.evaluate(async () => {
-    const { createTerminalAdapter } = await import("/terminal.js");
-    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
-    const atBottom = (element) =>
-      Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop) <= 2;
-    const element = document.createElement("div");
-    element.className = "terminal-output";
-    element.style.width = "560px";
-    element.style.height = "96px";
-    document.body.appendChild(element);
-
-    const adapter = await createTerminalAdapter(element, { cols: 80, rows: 24 });
-    const initialOutput = Array.from(
-      { length: 40 },
-      (_, index) => `initial ${String(index).padStart(2, "0")}\r\n`,
-    ).join("");
-    adapter.write(new TextEncoder().encode(initialOutput));
-    await adapter.drain();
-    const initial = {
-      atBottom: atBottom(element),
-      scrollTop: element.scrollTop,
-      scrollHeight: element.scrollHeight,
-      clientHeight: element.clientHeight,
+    const { Terminal } = await import("/ghostty-web.js");
+    const originalOpen = Terminal.prototype.open;
+    let terminal;
+    Terminal.prototype.open = function open(element) {
+      terminal = this;
+      return originalOpen.call(this, element);
     };
 
-    element.scrollTop = 0;
-    await frame();
-    adapter.write(new TextEncoder().encode("paused output\r\n"));
-    await adapter.drain();
-    const pausedTop = element.scrollTop;
+    try {
+      const { createTerminalAdapter } = await import("/terminal.js");
+      const element = document.createElement("div");
+      element.className = "terminal-output";
+      element.style.width = "600px";
+      element.style.height = "160px";
+      document.body.appendChild(element);
 
-    element.style.height = "72px";
-    await frame();
-    await frame();
-    const pausedAfterResize = element.scrollTop;
+      const adapter = await createTerminalAdapter(element, { cols: 132, rows: 44 });
+      const output = Array.from(
+        { length: 120 },
+        (_, index) => `line ${String(index).padStart(3, "0")}\r\n`,
+      ).join("");
+      adapter.write(new TextEncoder().encode(output));
+      await adapter.drain();
 
-    element.scrollTop = element.scrollHeight;
-    await frame();
-    adapter.write(new TextEncoder().encode("followed output\r\n"));
-    await adapter.drain();
-    const resumedAtBottom = atBottom(element);
+      terminal.scrollToLine(10);
+      const before = {
+        cols: adapter.cols,
+        rows: adapter.rows,
+        viewport: terminal.getViewportY(),
+      };
 
-    element.scrollTop = 0;
-    await frame();
-    adapter.clear();
-    await adapter.drain();
-    const clearAtBottom = atBottom(element);
-    adapter.dispose();
+      element.style.width = "420px";
+      element.style.height = "320px";
+      for (
+        let attempts = 0;
+        attempts < 60 && adapter.cols === before.cols && adapter.rows === before.rows;
+        attempts += 1
+      ) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      const afterFit = {
+        cols: adapter.cols,
+        rows: adapter.rows,
+        viewport: terminal.getViewportY(),
+      };
 
-    return { initial, pausedTop, pausedAfterResize, resumedAtBottom, clearAtBottom };
+      adapter.write(new TextEncoder().encode("new 1\r\nnew 2\r\nnew 3\r\n"));
+      await adapter.drain();
+      const afterWrite = terminal.getViewportY();
+
+      terminal.scrollToBottom();
+      adapter.write(new TextEncoder().encode("live again\r\n"));
+      await adapter.drain();
+      const afterResume = terminal.getViewportY();
+      adapter.dispose();
+
+      return { before, afterFit, afterWrite, afterResume };
+    } finally {
+      Terminal.prototype.open = originalOpen;
+    }
   });
 
-  expect(result.initial.scrollHeight).toBeGreaterThan(result.initial.clientHeight);
-  expect(result.initial.scrollTop).toBeGreaterThan(0);
-  expect(result.initial.atBottom).toBe(true);
-  expect(result.pausedTop).toBe(0);
-  expect(result.pausedAfterResize).toBe(0);
-  expect(result.resumedAtBottom).toBe(true);
-  expect(result.clearAtBottom).toBe(true);
+  expect(result.before.viewport).toBe(10);
+  expect(result.afterFit.cols).toBeLessThan(result.before.cols);
+  expect(result.afterFit.rows).toBeGreaterThan(result.before.rows);
+  expect(result.afterFit.viewport).toBe(10);
+  expect(result.afterWrite).toBe(13);
+  expect(result.afterResume).toBe(0);
 });
 
 test("Ghostty adapter preserves manual terminal scrollback across writes", async ({ page }) => {
@@ -1161,8 +1221,13 @@ test("Ghostty adapter preserves resize barriers between byte writes", async ({ p
     try {
       const { createTerminalAdapter } = await import("/terminal.js");
       const element = document.createElement("div");
+      element.className = "terminal-output";
+      element.style.width = "600px";
+      element.style.height = "160px";
       document.body.appendChild(element);
       const adapter = await createTerminalAdapter(element, { cols: 80, rows: 24 });
+      const fitted = { cols: adapter.cols, rows: adapter.rows };
+      seen.length = 0;
       adapter.write(new TextEncoder().encode("before"));
       await frame();
       adapter.resize(132, 44);
@@ -1178,7 +1243,7 @@ test("Ghostty adapter preserves resize barriers between byte writes", async ({ p
       }
       await drainPromise;
       adapter.dispose();
-      return { beforeCallback, seen };
+      return { fitted, beforeCallback, seen };
     } finally {
       Terminal.prototype.write = originalWrite;
       Terminal.prototype.resize = originalResize;
@@ -1186,13 +1251,52 @@ test("Ghostty adapter preserves resize barriers between byte writes", async ({ p
   });
 
   expect(operations.beforeCallback).toEqual([
-    { type: "write", cols: 80, rows: 24, text: "before" },
+    { type: "write", ...operations.fitted, text: "before" },
   ]);
   expect(operations.seen).toEqual([
-    { type: "write", cols: 80, rows: 24, text: "before" },
-    { type: "resize", cols: 132, rows: 44 },
-    { type: "write", cols: 132, rows: 44, text: "after" },
+    { type: "write", ...operations.fitted, text: "before" },
+    { type: "write", ...operations.fitted, text: "after" },
   ]);
+});
+
+test("Ghostty adapter fits when a zero-sized panel becomes usable", async ({ page }) => {
+  await openFixture(page);
+
+  const result = await page.evaluate(async () => {
+    const { createTerminalAdapter } = await import("/terminal.js");
+    const element = document.createElement("div");
+    element.className = "terminal-output";
+    element.style.display = "none";
+    element.style.width = "560px";
+    element.style.height = "96px";
+    document.body.appendChild(element);
+
+    const adapter = await createTerminalAdapter(element, { cols: 132, rows: 44 });
+    const hidden = [adapter.cols, adapter.rows];
+    element.style.display = "block";
+    for (
+      let attempts = 0;
+      attempts < 60 && adapter.cols === hidden[0] && adapter.rows === hidden[1];
+      attempts += 1
+    ) {
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+    const visible = [adapter.cols, adapter.rows];
+    const canvas = element.querySelector("canvas");
+    const style = getComputedStyle(element);
+    const content = [
+      element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+      element.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+    ];
+    const canvasSize = [parseFloat(canvas.style.width), parseFloat(canvas.style.height)];
+    adapter.dispose();
+    return { hidden, visible, content, canvasSize };
+  });
+
+  expect(result.hidden).toEqual([132, 44]);
+  expect(result.visible).not.toEqual(result.hidden);
+  expect(result.canvasSize[0]).toBeLessThanOrEqual(result.content[0]);
+  expect(result.canvasSize[1]).toBeLessThanOrEqual(result.content[1]);
 });
 
 test("Ghostty adapter clear removes screen and exposed scrollback in FIFO order", async ({ page }) => {
@@ -1233,32 +1337,43 @@ test("Ghostty adapter clear removes screen and exposed scrollback in FIFO order"
   expect(result.afterWrite).not.toContain("old deploy");
 });
 
-test("Ghostty adapter permanently fails when a queued resize throws", async ({ page }) => {
+test("Ghostty adapter permanently fails when a queued panel fit throws", async ({ page }) => {
   await openFixture(page);
 
   const result = await page.evaluate(async () => {
-    const { Terminal } = await import("/ghostty-web.js");
+    const { FitAddon, Terminal } = await import("/ghostty-web.js");
+    const originalProposeDimensions = FitAddon.prototype.proposeDimensions;
     const originalWrite = Terminal.prototype.write;
-    const originalResize = Terminal.prototype.resize;
+    const OriginalResizeObserver = window.ResizeObserver;
     const pendingCallbacks = [];
+    let throwOnFit = false;
+    FitAddon.prototype.proposeDimensions = function proposeDimensions() {
+      if (throwOnFit) throw new Error("fit failed");
+      return originalProposeDimensions.call(this);
+    };
     Terminal.prototype.write = function write(bytes, callback) {
       originalWrite.call(this, bytes);
       pendingCallbacks.push(callback);
     };
-    Terminal.prototype.resize = function resize(cols, rows) {
-      if (cols === 132 && rows === 44) throw new Error("resize failed");
-      return originalResize.call(this, cols, rows);
+    window.ResizeObserver = class ResizeObserver {
+      observe() {}
+      disconnect() {}
     };
-    const frame = () => new Promise((resolve) => requestAnimationFrame(resolve));
 
     let adapter;
     try {
       const { createTerminalAdapter } = await import("/terminal.js");
       const element = document.createElement("div");
+      element.className = "terminal-output";
+      element.style.width = "600px";
+      element.style.height = "160px";
       document.body.appendChild(element);
       adapter = await createTerminalAdapter(element, { cols: 80, rows: 24 });
       adapter.write(new TextEncoder().encode("before"));
-      await frame();
+
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+
+      throwOnFit = true;
       adapter.resize(132, 44);
       adapter.write(new TextEncoder().encode("after"));
       const drainOutcome = adapter.drain().then(
@@ -1267,12 +1382,10 @@ test("Ghostty adapter permanently fails when a queued resize throws", async ({ p
       );
 
       pendingCallbacks.shift()();
-      await frame();
-      await frame();
-      const first = await Promise.race([
-        drainOutcome,
-        new Promise((resolve) => setTimeout(() => resolve({ state: "pending" }), 100)),
-      ]);
+      for (let attempts = 0; attempts < 10; attempts += 1) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      const first = await drainOutcome;
 
       const sameFailure = {};
       for (const [name, operation] of Object.entries({
@@ -1299,14 +1412,15 @@ test("Ghostty adapter permanently fails when a queued resize throws", async ({ p
       };
     } finally {
       if (adapter) adapter.dispose();
+      FitAddon.prototype.proposeDimensions = originalProposeDimensions;
       Terminal.prototype.write = originalWrite;
-      Terminal.prototype.resize = originalResize;
+      window.ResizeObserver = OriginalResizeObserver;
     }
   });
 
   expect(result).toEqual({
     state: "rejected",
-    message: "resize failed",
+    message: "fit failed",
     sameFailure: {
       write: true,
       resize: true,
@@ -1314,6 +1428,120 @@ test("Ghostty adapter permanently fails when a queued resize throws", async ({ p
       copyText: true,
       drain: true,
     },
+  });
+});
+
+test("Ghostty adapter tears down an initial fit failure before retrying", async ({ page }) => {
+  await openFixture(page);
+
+  const result = await page.evaluate(async () => {
+    const { FitAddon, Terminal } = await import("/ghostty-web.js");
+    const originalProposeDimensions = FitAddon.prototype.proposeDimensions;
+    const originalDispose = Terminal.prototype.dispose;
+    const OriginalResizeObserver = window.ResizeObserver;
+    const initialFitFailure = new Error("initial fit failed");
+    let failInitialFit = true;
+    let terminalDisposeCalls = 0;
+    const observers = [];
+
+    FitAddon.prototype.proposeDimensions = function proposeDimensions() {
+      if (failInitialFit) {
+        failInitialFit = false;
+        throw initialFitFailure;
+      }
+      return originalProposeDimensions.call(this);
+    };
+    Terminal.prototype.dispose = function dispose() {
+      terminalDisposeCalls += 1;
+      return originalDispose.call(this);
+    };
+    window.ResizeObserver = class ResizeObserver {
+      constructor() {
+        this.observed = 0;
+        this.disconnected = 0;
+        observers.push(this);
+      }
+
+      observe() {
+        this.observed += 1;
+      }
+
+      disconnect() {
+        this.disconnected += 1;
+      }
+    };
+
+    let adapter;
+    try {
+      const { createTerminalAdapter } = await import("/terminal.js");
+      const element = document.createElement("div");
+      element.className = "terminal-output";
+      element.setAttribute("role", "region");
+      element.setAttribute("aria-label", "Native deploy transcript");
+      element.setAttribute("tabindex", "-1");
+      element.setAttribute("contenteditable", "true");
+      element.setAttribute("aria-multiline", "true");
+      element.style.width = "600px";
+      element.style.height = "160px";
+      document.body.appendChild(element);
+
+      let rejection;
+      try {
+        await createTerminalAdapter(element, { cols: 80, rows: 24 });
+      } catch (error) {
+        rejection = error;
+      }
+      const afterFailure = {
+        sameError: rejection === initialFitFailure,
+        observer: observers.map(({ observed, disconnected }) => ({ observed, disconnected })),
+        terminalDisposeCalls,
+        tabindex: element.getAttribute("tabindex"),
+        role: element.getAttribute("role"),
+        label: element.getAttribute("aria-label"),
+        contenteditable: element.getAttribute("contenteditable"),
+        multiline: element.getAttribute("aria-multiline"),
+        terminalResources: element.querySelectorAll("canvas, textarea").length,
+      };
+
+      adapter = await createTerminalAdapter(element, { cols: 80, rows: 24 });
+      adapter.write(new TextEncoder().encode("retry output\\r\\n"));
+      await adapter.drain();
+      const retryText = adapter.copyText();
+      const retryResources = element.querySelectorAll("canvas, textarea").length;
+      adapter.dispose();
+      adapter = null;
+
+      return {
+        afterFailure,
+        retryText,
+        retryResources,
+        resourcesAfterRetryDispose: element.querySelectorAll("canvas, textarea").length,
+        terminalDisposeCalls,
+      };
+    } finally {
+      if (adapter) adapter.dispose();
+      FitAddon.prototype.proposeDimensions = originalProposeDimensions;
+      Terminal.prototype.dispose = originalDispose;
+      window.ResizeObserver = OriginalResizeObserver;
+    }
+  });
+
+  expect(result).toEqual({
+    afterFailure: {
+      sameError: true,
+      observer: [{ observed: 1, disconnected: 1 }],
+      terminalDisposeCalls: 1,
+      tabindex: "0",
+      role: "region",
+      label: "Native deploy transcript",
+      contenteditable: null,
+      multiline: null,
+      terminalResources: 0,
+    },
+    retryText: expect.stringContaining("retry output"),
+    retryResources: 2,
+    resourcesAfterRetryDispose: 0,
+    terminalDisposeCalls: 2,
   });
 });
 

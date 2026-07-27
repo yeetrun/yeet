@@ -26,7 +26,7 @@ func TestWebRunAssetsEmbedded(t *testing.T) {
 	}
 }
 
-func TestWebRunAssetsGhosttyTerminalContract(t *testing.T) {
+func TestWebRunAssetsContainTerminalContracts(t *testing.T) {
 	index, err := fs.ReadFile(webRunAssets, "web_run_assets/index.html")
 	if err != nil {
 		t.Fatalf("read index: %v", err)
@@ -64,9 +64,10 @@ func TestWebRunAssetsGhosttyTerminalContract(t *testing.T) {
 
 	terminalSource := string(terminal)
 	for _, snippet := range []string{
-		`import { Ghostty, Terminal } from "./ghostty-web.js";`,
+		`import { FitAddon, Ghostty, Terminal } from "./ghostty-web.js";`,
 		`Ghostty.load(new URL("./ghostty-vt.wasm", import.meta.url).href)`,
 		`scrollback: 1000`,
+		`new FitAddon()`,
 		`disableStdin: true`,
 		`convertEol: false`,
 		`cursorBlink: false`,
@@ -109,12 +110,20 @@ func TestWebRunAssetsGhosttyTerminalContract(t *testing.T) {
 	for _, snippet := range []string{
 		".terminal-output canvas",
 		".terminal-warning",
-		"overflow-x: auto",
-		"overflow-y: auto",
+		"--terminal-background: #101216",
+		"overflow: hidden",
 		"max-width: none",
 	} {
 		if !strings.Contains(styleSource, snippet) {
 			t.Fatalf("terminal styles missing %q", snippet)
+		}
+	}
+	for _, forbidden := range []string{
+		"overflow-x: auto",
+		"overflow-y: auto",
+	} {
+		if strings.Contains(styleSource, forbidden) {
+			t.Fatalf("terminal styles retain outer scrolling %q", forbidden)
 		}
 	}
 
