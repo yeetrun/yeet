@@ -333,7 +333,7 @@ func (s *Server) prepareNetworkRuntimeAllowed(ctx context.Context) error {
 		}
 		return errors.Join(cause, failClosedISONetworksForServer(ctx, s, cause))
 	}
-	if err := installYeetNSService(); err != nil {
+	if err := installYeetNSService(s.catchRunnerPath()); err != nil {
 		return failPrerequisite(fmt.Errorf("install bridge service: %w", err))
 	}
 	if err := installYeetDNSServiceForServer(s.cfg.RootDir); err != nil {

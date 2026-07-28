@@ -48,7 +48,6 @@ ip netns exec yeet-ns ip route replace ${HOST_IP} dev br0
 # Configure routing
 ip netns exec yeet-ns ip route replace default via ${HOST_IP_BASE} dev br0
 
-ip route del ${RANGE} || true
 ip route replace ${RANGE} dev ${BRIDGE_IF}
 
 # Enable IP forwarding

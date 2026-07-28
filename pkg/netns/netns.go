@@ -39,15 +39,13 @@ var netnsScripts embed.FS
 type yeetNSServiceInstaller interface {
 	Install() error
 	Start() error
-	Restart() error
 }
 
 var (
-	executablePath = os.Executable
-	mkdirAll       = os.MkdirAll
-	writeFile      = os.WriteFile
-	chmodFile      = os.Chmod
-	readFile       = os.ReadFile
+	mkdirAll  = os.MkdirAll
+	writeFile = os.WriteFile
+	chmodFile = os.Chmod
+	readFile  = os.ReadFile
 
 	dhclientEnterHookPath = "/etc/dhcp/dhclient-enter-hooks.d/yeet-netns-resolv"
 
@@ -60,6 +58,7 @@ var (
 	systemdUnitActive = func(unit string) bool {
 		return exec.Command("systemctl", "is-active", "--quiet", unit).Run() == nil
 	}
+	runYeetNSSetup = executeYeetNSSetup
 )
 
 func writeNetNSScripts() (changed bool, err error) {
@@ -151,7 +150,10 @@ func chmodDhclientEnterHookIfNeeded() (bool, error) {
 	return true, nil
 }
 
-func InstallYeetNSService() error {
+func InstallYeetNSService(catchBin string) error {
+	if !filepath.IsAbs(catchBin) {
+		return fmt.Errorf("catch binary path must be absolute: %q", catchBin)
+	}
 	scriptsChanged, err := writeNetNSScripts()
 	if err != nil {
 		return fmt.Errorf("failed to write netns scripts: %v", err)
@@ -164,16 +166,14 @@ func InstallYeetNSService() error {
 	if err != nil {
 		return fmt.Errorf("failed to detect firewall backend: %v", err)
 	}
-	catchBin, err := executablePath()
-	if err != nil {
-		return fmt.Errorf("failed to resolve catch binary path: %v", err)
-	}
-	envChanged, err := writeYeetNSEnv(defaultYeetNSEnv(backend, catchBin))
+	desiredEnv := defaultYeetNSEnv(backend, catchBin)
+	envChanged, err := writeYeetNSEnv(desiredEnv)
 	if err != nil {
 		return err
 	}
 
-	unitFiles, err := newYeetNSUnit().WriteOutUnitFiles(".")
+	unit := newYeetNSUnit()
+	unitFiles, err := unit.WriteOutUnitFiles(".")
 	if err != nil {
 		return fmt.Errorf("failed to write unit files: %v", err)
 	}
@@ -184,9 +184,10 @@ func InstallYeetNSService() error {
 		return err
 	}
 	if !anyChanged(scriptsChanged, dhclientHookChanged, envChanged, unitChanged) {
+		log.Println("yeet-ns artifacts unchanged")
 		return nil
 	}
-	if err := installYeetNSService(unitFiles); err != nil {
+	if err := installYeetNSService(unitFiles, unit.Executable, desiredEnv); err != nil {
 		return err
 	}
 	return nil
@@ -260,7 +261,7 @@ func anyChanged(changes ...bool) bool {
 	return false
 }
 
-func installYeetNSService(unitFiles map[db.ArtifactName]string) error {
+func installYeetNSService(unitFiles map[db.ArtifactName]string, scriptPath string, desiredEnv yeetNSEnv) error {
 	cfg := &db.Service{
 		Name:       "yeet-ns",
 		Generation: 1,
@@ -276,7 +277,7 @@ func installYeetNSService(unitFiles map[db.ArtifactName]string) error {
 			}},
 		},
 	}
-	// Install and start the service.
+	// Install updated artifacts, then converge an active namespace or start an inactive one.
 	service, err := newYeetNSSystemdService(cfg.View(), ".")
 	if err != nil {
 		return fmt.Errorf("failed to create service: %v", err)
@@ -286,15 +287,16 @@ func installYeetNSService(unitFiles map[db.ArtifactName]string) error {
 		return fmt.Errorf("failed to install service: %v", err)
 	}
 	if alreadyActive {
-		if err := service.Restart(); err != nil {
-			return fmt.Errorf("failed to restart yeet-ns service: %v", err)
+		if err := runYeetNSSetup(scriptPath, desiredEnv); err != nil {
+			return fmt.Errorf("failed to converge active yeet-ns service in place: %w", err)
 		}
-		log.Printf("installed updated yeet-ns.service and restarted active namespace")
+		log.Printf("installed updated yeet-ns artifacts and converged active namespace in place")
 		return nil
 	}
 	if err := service.Start(); err != nil {
 		return fmt.Errorf("failed to start yeet-ns service: %v", err)
 	}
+	log.Printf("installed updated yeet-ns artifacts and started inactive namespace")
 
 	return nil
 }
@@ -307,6 +309,26 @@ type yeetNSEnv struct {
 	BridgeIf        string `env:"BRIDGE_IF"`
 	FirewallBackend string `env:"FIREWALL_BACKEND"`
 	CatchBin        string `env:"CATCH_BIN"`
+}
+
+func executeYeetNSSetup(path string, environment yeetNSEnv) error {
+	cmd := exec.Command(path)
+	cmd.Env = append(os.Environ(), environment.environ()...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+func (e yeetNSEnv) environ() []string {
+	return []string{
+		"RANGE=" + e.Range,
+		"HOST_IP=" + e.HostIP,
+		"BRIDGE_IP=" + e.BridgeIP,
+		"YEET_IP=" + e.YeetIP,
+		"BRIDGE_IF=" + e.BridgeIf,
+		"FIREWALL_BACKEND=" + e.FirewallBackend,
+		"CATCH_BIN=" + e.CatchBin,
+	}
 }
 
 type Service struct {

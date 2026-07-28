@@ -1021,7 +1021,14 @@ func TestPrepareNetworkRuntimeOrdersISOReconcileAfterDockerDNSAndReadiness(t *te
 	oldISODNS := installISODNSServiceForServer
 	oldReady := waitDockerReadyForISOForServer
 	oldReconcile := reconcileISONetworksForServer
-	installYeetNSService = func() error { events = append(events, "yeet-ns"); return nil }
+	wantCatchRunner := server.catchRunnerPath()
+	installYeetNSService = func(gotCatchRunner string) error {
+		if gotCatchRunner != wantCatchRunner {
+			t.Fatalf("Catch runner = %q, want stable runner %q", gotCatchRunner, wantCatchRunner)
+		}
+		events = append(events, "yeet-ns")
+		return nil
+	}
 	installYeetDNSServiceForServer = func(string) error { events = append(events, "yeet-dns"); return nil }
 	installDockerPrereqs = func(*Server) error { events = append(events, "docker-prereqs"); return nil }
 	installISODNSServiceForServer = func(string) error { events = append(events, "iso-dns"); return nil }
@@ -1053,7 +1060,7 @@ func TestPrepareNetworkRuntimeSkipsDockerWaitWithoutContainerISO(t *testing.T) {
 	oldISODNS := installISODNSServiceForServer
 	oldReady := waitDockerReadyForISOForServer
 	oldReconcile := reconcileISONetworksForServer
-	installYeetNSService = func() error { return nil }
+	installYeetNSService = func(string) error { return nil }
 	installYeetDNSServiceForServer = func(string) error { return nil }
 	installDockerPrereqs = func(*Server) error { return nil }
 	installISODNSServiceForServer = func(string) error { return nil }
@@ -1096,7 +1103,7 @@ func TestPrepareNetworkRuntimeFailsClosedWhenISOPrerequisitesFail(t *testing.T) 
 			oldReady := waitDockerReadyForISOForServer
 			oldReconcile := reconcileISONetworksForServer
 			oldFailClosed := failClosedISONetworksForServer
-			installYeetNSService = func() error { return step("yeet-ns") }
+			installYeetNSService = func(string) error { return step("yeet-ns") }
 			installYeetDNSServiceForServer = func(string) error { return step("yeet-dns") }
 			installDockerPrereqs = func(*Server) error { return step("docker-prereqs") }
 			waitDockerReadyForISOForServer = func(context.Context) error { return step("docker-ready") }

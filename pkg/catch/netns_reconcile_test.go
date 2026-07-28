@@ -1348,7 +1348,7 @@ func TestReconcileRuntimeStateRunsResolverIsolationBeforeNetNSReconciliation(t *
 	var calls []string
 	reconciled := make(chan struct{})
 	prevInstall := installYeetNSService
-	installYeetNSService = func() error {
+	installYeetNSService = func(string) error {
 		calls = append(calls, "install")
 		return nil
 	}
@@ -1476,7 +1476,7 @@ func TestServerStartRepairsTailscaleDNSBeforeResolverFleetMigration(t *testing.T
 				})
 
 				previousInstall := installYeetNSService
-				installYeetNSService = func() error { return nil }
+				installYeetNSService = func(string) error { return nil }
 				t.Cleanup(func() { installYeetNSService = previousInstall })
 				stubYeetDNSInstaller(t, func(string) error { return nil })
 				stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
@@ -1554,7 +1554,7 @@ func TestServerStartLogsNATReconciliationFailureNonFatally(t *testing.T) {
 	})
 
 	prevInstall := installYeetNSService
-	installYeetNSService = func() error { return nil }
+	installYeetNSService = func(string) error { return nil }
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
@@ -1616,7 +1616,7 @@ func TestServerStartLogsReconciliationFailureNonFatally(t *testing.T) {
 	})
 
 	prevInstall := installYeetNSService
-	installYeetNSService = func() error { return nil }
+	installYeetNSService = func(string) error { return nil }
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
@@ -1673,7 +1673,7 @@ func TestServerStartLogsRestartedNetNSService(t *testing.T) {
 	})
 
 	prevInstall := installYeetNSService
-	installYeetNSService = func() error { return nil }
+	installYeetNSService = func(string) error { return nil }
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
@@ -1726,7 +1726,7 @@ func TestServerStartReturnsBeforeNetNSReconciliationFinishes(t *testing.T) {
 	})
 
 	prevInstall := installYeetNSService
-	installYeetNSService = func() error { return nil }
+	installYeetNSService = func(string) error { return nil }
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
@@ -1795,7 +1795,7 @@ func TestServerStartReturnsBeforeNetNSReconciliationFinishes(t *testing.T) {
 func TestServerStartReturnsBeforeVMRuntimeRecoveryAndDelaysLaterReconciliation(t *testing.T) {
 	s := newTestServer(t)
 	prevInstall := installYeetNSService
-	installYeetNSService = func() error { return nil }
+	installYeetNSService = func(string) error { return nil }
 	defer func() { installYeetNSService = prevInstall }()
 	stubYeetDNSInstaller(t, func(string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
@@ -1864,7 +1864,7 @@ func TestServerStartLogsVMRuntimeRecoveryFailureAndBlocksLaterReconciliation(t *
 	s := newTestServer(t)
 	logs := captureLogs(t)
 	prevInstall := installYeetNSService
-	installYeetNSService = func() error { return nil }
+	installYeetNSService = func(string) error { return nil }
 	defer func() { installYeetNSService = prevInstall }()
 	stubYeetDNSInstaller(t, func(string) error { return nil })
 	stubDockerPrereqsInstaller(t, func(*Server) error { return nil })
@@ -1905,7 +1905,7 @@ func TestServerShutdownCancelsNetNSReconciliation(t *testing.T) {
 	})
 
 	prevInstall := installYeetNSService
-	installYeetNSService = func() error { return nil }
+	installYeetNSService = func(string) error { return nil }
 	defer func() {
 		installYeetNSService = prevInstall
 	}()
@@ -1992,7 +1992,7 @@ func TestServerShutdownDoesNotLogCancellationAsFailure(t *testing.T) {
 	})
 
 	prevInstall := installYeetNSService
-	installYeetNSService = func() error { return nil }
+	installYeetNSService = func(string) error { return nil }
 	defer func() {
 		installYeetNSService = prevInstall
 	}()

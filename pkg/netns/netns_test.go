@@ -5,7 +5,9 @@
 package netns
 
 import (
+	"bytes"
 	"errors"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -489,6 +491,46 @@ func TestWriteYeetNSEnvWritesAndSkipsIdenticalFiles(t *testing.T) {
 	}
 }
 
+func TestExecuteYeetNSSetupUsesDesiredEnvironment(t *testing.T) {
+	root := t.TempDir()
+	output := filepath.Join(root, "environment")
+	script := filepath.Join(root, "yeet-ns")
+	content := "#!/bin/sh\nprintf '%s\\n' \"$RANGE\" \"$HOST_IP\" \"$BRIDGE_IP\" \"$YEET_IP\" \"$BRIDGE_IF\" \"$FIREWALL_BACKEND\" \"$CATCH_BIN\" > " + output + "\n"
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("WriteFile script: %v", err)
+	}
+	environment := yeetNSEnv{
+		Range:           "10.0.0.0/24",
+		HostIP:          "10.0.0.1/32",
+		BridgeIP:        "10.0.0.254/32",
+		YeetIP:          "10.0.0.2/32",
+		BridgeIf:        "bridge-test0",
+		FirewallBackend: "nft",
+		CatchBin:        "/flash/yeet/services/catch/run/catch",
+	}
+
+	if err := executeYeetNSSetup(script, environment); err != nil {
+		t.Fatalf("executeYeetNSSetup: %v", err)
+	}
+	raw, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatalf("ReadFile output: %v", err)
+	}
+	want := strings.Join([]string{
+		environment.Range,
+		environment.HostIP,
+		environment.BridgeIP,
+		environment.YeetIP,
+		environment.BridgeIf,
+		environment.FirewallBackend,
+		environment.CatchBin,
+		"",
+	}, "\n")
+	if got := string(raw); got != want {
+		t.Fatalf("command environment = %q, want %q", got, want)
+	}
+}
+
 func TestYeetNSScriptConnectsHostPeerToServiceBridge(t *testing.T) {
 	raw, err := netnsScripts.ReadFile("netns-scripts/yeet-ns")
 	if err != nil {
@@ -496,11 +538,17 @@ func TestYeetNSScriptConnectsHostPeerToServiceBridge(t *testing.T) {
 	}
 	script := string(raw)
 	for _, want := range []string{
+		"if ! ip netns list | grep -q yeet-ns; then",
+		"if ! ip netns exec yeet-ns ip link show br0; then",
+		"if ! ip link show yeet0; then",
 		"ip netns exec yeet-ns ip link set yeet0-peer master br0",
 		"ip netns exec yeet-ns ip addr replace ${YEET_IP} dev br0",
+		"ip netns exec yeet-ns ip addr replace ${BRIDGE_IP} dev br0",
 		"ip netns exec yeet-ns ip route replace ${HOST_IP} dev br0",
 		"ip netns exec yeet-ns ip route replace default via ${HOST_IP_BASE} dev br0",
 		"ip route replace ${RANGE} dev ${BRIDGE_IF}",
+		`"${CATCH_BIN}" netns-firewall ensure`,
+		`"${CATCH_BIN}" netns-firewall verify`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("yeet-ns script missing %q:\n%s", want, script)
@@ -509,6 +557,7 @@ func TestYeetNSScriptConnectsHostPeerToServiceBridge(t *testing.T) {
 	for _, bad := range []string{
 		"ip netns exec yeet-ns ip addr replace ${YEET_IP} dev yeet0-peer",
 		"ip route replace ${RANGE} via ${YEET_IP_BASE} dev ${BRIDGE_IF}",
+		"ip route del ${RANGE}",
 	} {
 		if strings.Contains(script, bad) {
 			t.Fatalf("yeet-ns script contains obsolete routed host peer command %q:\n%s", bad, script)
@@ -526,7 +575,6 @@ func TestInstallYeetNSServiceNoopsWhenArtifactsAreCurrent(t *testing.T) {
 	catchBin := "/usr/local/bin/catch"
 	withDetectedFirewallBackend(t, BackendNFT)
 	withInstallYeetNSServiceFakes(t, installYeetNSServiceFakes{
-		catchBin:    catchBin,
 		systemdPath: systemdPath,
 		newService: func(cfg db.ServiceView, runDir string) (yeetNSServiceInstaller, error) {
 			t.Fatalf("new systemd service called for unchanged artifacts")
@@ -539,20 +587,58 @@ func TestInstallYeetNSServiceNoopsWhenArtifactsAreCurrent(t *testing.T) {
 	})
 	writeCurrentYeetNSArtifacts(t, BackendNFT, catchBin, systemdPath)
 
-	if err := InstallYeetNSService(); err != nil {
+	if err := InstallYeetNSService(catchBin); err != nil {
 		t.Fatalf("InstallYeetNSService() returned error: %v", err)
 	}
 }
 
-func TestInstallYeetNSServiceRestartsActiveNamespaceAfterArtifactChange(t *testing.T) {
+func TestInstallYeetNSServiceLogsWhenArtifactsAreCurrent(t *testing.T) {
+	root := chdirTemp(t)
+	systemdPath := filepath.Join(root, "systemd", "yeet-ns.service")
+	if err := os.MkdirAll(filepath.Dir(systemdPath), 0755); err != nil {
+		t.Fatalf("MkdirAll systemd dir returned error: %v", err)
+	}
+
+	catchBin := "/usr/local/bin/catch"
+	withDetectedFirewallBackend(t, BackendNFT)
+	withInstallYeetNSServiceFakes(t, installYeetNSServiceFakes{
+		systemdPath: systemdPath,
+		newService: func(cfg db.ServiceView, runDir string) (yeetNSServiceInstaller, error) {
+			t.Fatalf("new systemd service called for unchanged artifacts")
+			return nil, nil
+		},
+		unitActive: func(unit string) bool {
+			t.Fatalf("systemdUnitActive called for unchanged artifacts")
+			return false
+		},
+	})
+	writeCurrentYeetNSArtifacts(t, BackendNFT, catchBin, systemdPath)
+
+	var logs bytes.Buffer
+	previousLogOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previousLogOutput) })
+
+	if err := InstallYeetNSService(catchBin); err != nil {
+		t.Fatalf("InstallYeetNSService() returned error: %v", err)
+	}
+	if got := logs.String(); !strings.Contains(got, "yeet-ns artifacts unchanged") {
+		t.Fatalf("InstallYeetNSService() logs = %q, want unchanged artifact message", got)
+	}
+}
+
+func TestInstallYeetNSServiceConvergesActiveNamespaceAfterArtifactChange(t *testing.T) {
 	chdirTemp(t)
+	const stableCatchRunner = "/flash/yeet/services/catch/run/catch"
 	var installCalls int
 	var startCalls int
-	var restartCalls int
+	var setupCalls int
+	installed := false
+	var gotSetupPath string
+	var gotSetupEnv yeetNSEnv
 
 	withDetectedFirewallBackend(t, BackendNFT)
 	withInstallYeetNSServiceFakes(t, installYeetNSServiceFakes{
-		catchBin:    "/usr/local/bin/catch",
 		systemdPath: filepath.Join(t.TempDir(), "yeet-ns.service"),
 		newService: func(cfg db.ServiceView, runDir string) (yeetNSServiceInstaller, error) {
 			if got := cfg.Name(); got != "yeet-ns" {
@@ -564,14 +650,11 @@ func TestInstallYeetNSServiceRestartsActiveNamespaceAfterArtifactChange(t *testi
 			return fakeYeetNSSystemdService{
 				install: func() error {
 					installCalls++
+					installed = true
 					return nil
 				},
 				start: func() error {
 					startCalls++
-					return nil
-				},
-				restart: func() error {
-					restartCalls++
 					return nil
 				},
 			}, nil
@@ -579,9 +662,21 @@ func TestInstallYeetNSServiceRestartsActiveNamespaceAfterArtifactChange(t *testi
 		unitActive: func(unit string) bool {
 			return unit == "yeet-ns.service"
 		},
+		runSetup: func(path string, environment yeetNSEnv) error {
+			if !installed {
+				t.Fatal("setup ran before updated artifacts were installed")
+			}
+			setupCalls++
+			gotSetupPath = path
+			gotSetupEnv = environment
+			return nil
+		},
 	})
+	if err := env.Write("yeet-ns.env", defaultYeetNSEnv(BackendNFT, "/flash/yeet/services/catch/bin/catch-20260727")); err != nil {
+		t.Fatalf("seed yeet-ns.env: %v", err)
+	}
 
-	if err := InstallYeetNSService(); err != nil {
+	if err := InstallYeetNSService(stableCatchRunner); err != nil {
 		t.Fatalf("InstallYeetNSService() returned error: %v", err)
 	}
 	if installCalls != 1 {
@@ -590,8 +685,21 @@ func TestInstallYeetNSServiceRestartsActiveNamespaceAfterArtifactChange(t *testi
 	if startCalls != 0 {
 		t.Fatalf("start calls = %d, want 0 for active namespace", startCalls)
 	}
-	if restartCalls != 1 {
-		t.Fatalf("restart calls = %d, want 1 for active namespace", restartCalls)
+	if setupCalls != 1 {
+		t.Fatalf("setup calls = %d, want 1 for active namespace", setupCalls)
+	}
+	if want := filepath.Join(mustGetwd(t), "yeet-ns"); gotSetupPath != want {
+		t.Fatalf("setup path = %q, want %q", gotSetupPath, want)
+	}
+	if gotSetupEnv.CatchBin != stableCatchRunner {
+		t.Fatalf("setup CATCH_BIN = %q, want stable runner %q", gotSetupEnv.CatchBin, stableCatchRunner)
+	}
+	raw, err := os.ReadFile("yeet-ns.env")
+	if err != nil {
+		t.Fatalf("ReadFile yeet-ns.env: %v", err)
+	}
+	if got := string(raw); !strings.Contains(got, "CATCH_BIN="+stableCatchRunner) || strings.Contains(got, "catch-20260727") {
+		t.Fatalf("yeet-ns.env = %q, want rewritten stable runner", got)
 	}
 }
 
@@ -602,7 +710,6 @@ func TestInstallYeetNSServiceStartsInactiveNamespace(t *testing.T) {
 
 	withDetectedFirewallBackend(t, BackendNFT)
 	withInstallYeetNSServiceFakes(t, installYeetNSServiceFakes{
-		catchBin:    "/usr/local/bin/catch",
 		systemdPath: filepath.Join(t.TempDir(), "yeet-ns.service"),
 		newService: func(cfg db.ServiceView, runDir string) (yeetNSServiceInstaller, error) {
 			return fakeYeetNSSystemdService{
@@ -621,7 +728,7 @@ func TestInstallYeetNSServiceStartsInactiveNamespace(t *testing.T) {
 		},
 	})
 
-	if err := InstallYeetNSService(); err != nil {
+	if err := InstallYeetNSService("/flash/yeet/services/catch/run/catch"); err != nil {
 		t.Fatalf("InstallYeetNSService() returned error: %v", err)
 	}
 	if installCalls != 1 {
@@ -629,26 +736,6 @@ func TestInstallYeetNSServiceStartsInactiveNamespace(t *testing.T) {
 	}
 	if startCalls != 1 {
 		t.Fatalf("start calls = %d, want 1 for inactive namespace", startCalls)
-	}
-}
-
-func TestInstallYeetNSServiceReturnsExecutableError(t *testing.T) {
-	chdirTemp(t)
-	wantErr := errors.New("executable failed")
-	withDetectedFirewallBackend(t, BackendNFT)
-	withInstallYeetNSServiceFakes(t, installYeetNSServiceFakes{
-		executableErr: wantErr,
-		systemdPath:   filepath.Join(t.TempDir(), "yeet-ns.service"),
-		newService: func(db.ServiceView, string) (yeetNSServiceInstaller, error) {
-			t.Fatalf("new service should not be called after executable error")
-			return nil, nil
-		},
-		unitActive: func(string) bool { return false },
-	})
-
-	err := InstallYeetNSService()
-	if err == nil || !strings.Contains(err.Error(), wantErr.Error()) || !strings.Contains(err.Error(), "failed to resolve catch binary path") {
-		t.Fatalf("InstallYeetNSService error = %v, want wrapped %v", err, wantErr)
 	}
 }
 
@@ -682,6 +769,14 @@ func TestInstallYeetNSServicePropagatesInstallerErrors(t *testing.T) {
 			},
 			want: "failed to start yeet-ns service",
 		},
+		{
+			name: "converge active namespace",
+			service: fakeYeetNSSystemdService{
+				install: func() error { return nil },
+				start:   func() error { t.Fatal("Start called after active setup failure"); return nil },
+			},
+			want: "failed to converge active yeet-ns service in place",
+		},
 	}
 
 	for _, tt := range tests {
@@ -689,7 +784,6 @@ func TestInstallYeetNSServicePropagatesInstallerErrors(t *testing.T) {
 			chdirTemp(t)
 			withDetectedFirewallBackend(t, BackendNFT)
 			withInstallYeetNSServiceFakes(t, installYeetNSServiceFakes{
-				catchBin:    "/usr/local/bin/catch",
 				systemdPath: filepath.Join(t.TempDir(), "yeet-ns.service"),
 				newService: func(db.ServiceView, string) (yeetNSServiceInstaller, error) {
 					if tt.factory != nil {
@@ -697,12 +791,16 @@ func TestInstallYeetNSServicePropagatesInstallerErrors(t *testing.T) {
 					}
 					return tt.service, nil
 				},
-				unitActive: func(string) bool {
-					return false
+				unitActive: func(string) bool { return tt.name == "converge active namespace" },
+				runSetup: func(string, yeetNSEnv) error {
+					if tt.name == "converge active namespace" {
+						return errors.New("setup failed")
+					}
+					return nil
 				},
 			})
 
-			err := InstallYeetNSService()
+			err := InstallYeetNSService("/flash/yeet/services/catch/run/catch")
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("InstallYeetNSService error = %v, want %q", err, tt.want)
 			}
@@ -711,17 +809,15 @@ func TestInstallYeetNSServicePropagatesInstallerErrors(t *testing.T) {
 }
 
 type installYeetNSServiceFakes struct {
-	catchBin      string
-	executableErr error
-	systemdPath   string
-	newService    func(db.ServiceView, string) (yeetNSServiceInstaller, error)
-	unitActive    func(string) bool
+	systemdPath string
+	newService  func(db.ServiceView, string) (yeetNSServiceInstaller, error)
+	unitActive  func(string) bool
+	runSetup    func(string, yeetNSEnv) error
 }
 
 type fakeYeetNSSystemdService struct {
 	install func() error
 	start   func() error
-	restart func() error
 }
 
 func (s fakeYeetNSSystemdService) Install() error {
@@ -730,10 +826,6 @@ func (s fakeYeetNSSystemdService) Install() error {
 
 func (s fakeYeetNSSystemdService) Start() error {
 	return s.start()
-}
-
-func (s fakeYeetNSSystemdService) Restart() error {
-	return s.restart()
 }
 
 func chdirTemp(t *testing.T) string {
@@ -753,6 +845,15 @@ func chdirTemp(t *testing.T) string {
 		}
 	})
 	return root
+}
+
+func mustGetwd(t *testing.T) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+	return wd
 }
 
 func withDetectedFirewallBackend(t *testing.T, backend FirewallBackend) {
@@ -781,18 +882,12 @@ func withDetectedFirewallBackend(t *testing.T, backend FirewallBackend) {
 func withInstallYeetNSServiceFakes(t *testing.T, fakes installYeetNSServiceFakes) {
 	t.Helper()
 
-	oldExecutablePath := executablePath
 	oldDhclientEnterHookPath := dhclientEnterHookPath
 	oldSystemdUnitPath := systemdUnitPath
 	oldNewSystemdService := newYeetNSSystemdService
 	oldSystemdUnitActive := systemdUnitActive
+	oldRunSetup := runYeetNSSetup
 	dhclientEnterHookPath = filepath.Join(t.TempDir(), "dhclient-enter-hooks.d", "yeet-netns-resolv")
-	executablePath = func() (string, error) {
-		if fakes.executableErr != nil {
-			return "", fakes.executableErr
-		}
-		return fakes.catchBin, nil
-	}
 	systemdUnitPath = func(unit string) string {
 		if unit != "yeet-ns.service" {
 			t.Fatalf("systemdUnitPath(%q), want yeet-ns.service", unit)
@@ -801,12 +896,13 @@ func withInstallYeetNSServiceFakes(t *testing.T, fakes installYeetNSServiceFakes
 	}
 	newYeetNSSystemdService = fakes.newService
 	systemdUnitActive = fakes.unitActive
+	runYeetNSSetup = fakes.runSetup
 	t.Cleanup(func() {
-		executablePath = oldExecutablePath
 		dhclientEnterHookPath = oldDhclientEnterHookPath
 		systemdUnitPath = oldSystemdUnitPath
 		newYeetNSSystemdService = oldNewSystemdService
 		systemdUnitActive = oldSystemdUnitActive
+		runYeetNSSetup = oldRunSetup
 	})
 }
 
