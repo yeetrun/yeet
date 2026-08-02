@@ -642,6 +642,35 @@ func TestMoveTreeNoopsAndRenamesWhenDestinationMissing(t *testing.T) {
 	}
 }
 
+func TestMoveTreePreservesDirectoryIdentityWhenMergingIntoExistingDestination(t *testing.T) {
+	root := t.TempDir()
+	src := filepath.Join(root, "src")
+	srcNested := filepath.Join(src, "nested")
+	if err := os.MkdirAll(srcNested, 0o750); err != nil {
+		t.Fatalf("mkdir nested src: %v", err)
+	}
+	before, err := os.Stat(srcNested)
+	if err != nil {
+		t.Fatalf("stat nested src: %v", err)
+	}
+
+	dst := filepath.Join(root, "dst")
+	if err := os.Mkdir(dst, 0o755); err != nil {
+		t.Fatalf("mkdir dst: %v", err)
+	}
+
+	if err := MoveTree(src, dst); err != nil {
+		t.Fatalf("MoveTree returned error: %v", err)
+	}
+	after, err := os.Stat(filepath.Join(dst, "nested"))
+	if err != nil {
+		t.Fatalf("stat nested dst: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("nested directory was recreated instead of renamed; ownership metadata may be lost")
+	}
+}
+
 func TestMoveTreeReplacesNestedFileDestinationWithDirectory(t *testing.T) {
 	root := t.TempDir()
 	src := filepath.Join(root, "src")

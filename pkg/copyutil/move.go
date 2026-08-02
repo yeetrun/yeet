@@ -67,6 +67,11 @@ func ensureDirectoryTarget(dst string) error {
 
 func moveEntry(src, dst string, entry fs.DirEntry, info fs.FileInfo) error {
 	if entry.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		if _, err := os.Lstat(dst); errors.Is(err, os.ErrNotExist) {
+			if err := os.Rename(src, dst); err == nil {
+				return nil
+			}
+		}
 		return moveTreeContents(src, dst, true)
 	}
 	return replacePath(src, dst, info)
