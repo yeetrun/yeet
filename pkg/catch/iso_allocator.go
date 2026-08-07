@@ -22,22 +22,29 @@ type isoReservationRequest struct {
 }
 
 func (s *Server) reserveISOAllocation(ctx context.Context, name string, req isoReservationRequest) (*db.ISOAllocation, error) {
+	allocation, _, err := s.reserveISOAllocationExact(ctx, name, req)
+	return allocation, err
+}
+
+func (s *Server) reserveISOAllocationExact(ctx context.Context, name string, req isoReservationRequest) (*db.ISOAllocation, *db.Service, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := s.ensureISOPool(ctx); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var result *db.ISOAllocation
+	var reserved *db.Service
 	_, _, err := s.cfg.DB.MutateService(name, func(data *db.Data, service *db.Service) error {
 		allocation, err := reserveISOAllocationInData(name, req, data, service)
 		if err != nil {
 			return err
 		}
 		result = allocation
+		reserved = service.Clone()
 		return nil
 	})
-	return result, err
+	return result, reserved, err
 }
 
 func reserveISOAllocationInData(name string, req isoReservationRequest, data *db.Data, service *db.Service) (*db.ISOAllocation, error) {
@@ -73,6 +80,9 @@ func isoLayoutForPool(pool *db.ISOPool) (iso.Layout, error) {
 
 func ensureISOAllocation(name string, req isoReservationRequest, layout iso.Layout, services map[string]*db.Service, service *db.Service) error {
 	if service.ISO != nil {
+		if service.ISO.Kind != string(req.Kind) {
+			return fmt.Errorf("service %q ISO payload kind is %q, cannot reserve %q", name, service.ISO.Kind, req.Kind)
+		}
 		return nil
 	}
 	link, err := firstFreeISOLink(layout, services)
@@ -80,7 +90,7 @@ func ensureISOAllocation(name string, req isoReservationRequest, layout iso.Layo
 		return err
 	}
 	service.ISO = newDBISOAllocation(name, req, link)
-	if req.Kind == iso.PayloadVM {
+	if req.Kind != iso.PayloadCompose && req.Kind != iso.PayloadContainer {
 		return nil
 	}
 	project, err := firstFreeISOProject(layout, services)
@@ -94,6 +104,9 @@ func ensureISOAllocation(name string, req isoReservationRequest, layout iso.Layo
 
 func planISOComponents(components []string, allocation *db.ISOAllocation) error {
 	if !allocation.Project.IsValid() {
+		if len(components) != 0 {
+			return fmt.Errorf("ISO %s allocation does not support components", allocation.Kind)
+		}
 		return nil
 	}
 	current := make(map[string]netip.Addr, len(allocation.Components)+len(allocation.RetiredComponents))

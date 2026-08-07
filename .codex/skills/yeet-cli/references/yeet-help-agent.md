@@ -484,7 +484,7 @@ Install a cron job from a file and 5-field expression
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] cron <SERVICE> FILE "<cron expr>" [-- <args...>]
+yeet [GLOBAL_OPTIONS] cron <SERVICE> FILE "<cron expr>" [--run-as=USER[:GROUP]] [-- <args...>]
 ```
 
 ## Operating Rules
@@ -502,6 +502,14 @@ Service name
 
 - **Type**: `cli.ServiceName`
 - **Required**: true
+
+## Options
+
+### `--run-as`
+
+Run a native service as USER[:GROUP]
+
+- **Type**: `string`
 
 ## Global Options
 
@@ -539,6 +547,10 @@ Progress output (auto|tty|plain|quiet)
 
 ```
 yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo
+```
+
+```
+yeet cron <svc> ./backup.sh "0 3 * * *" --run-as=backup
 ```
 ````
 
@@ -1353,7 +1365,7 @@ Install/update from a payload (binary, compose, image, Dockerfile, VM)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] run SVC [PAYLOAD] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]
+yeet [GLOBAL_OPTIONS] run SVC [PAYLOAD] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]
 ```
 
 ## Operating Rules
@@ -1371,6 +1383,127 @@ Service name
 
 - **Type**: `cli.ServiceName`
 - **Required**: true
+
+## Options
+
+### `--run-as`
+
+Run a native service as USER[:GROUP]
+
+- **Type**: `string`
+
+### `--vcpus`
+
+- **Type**: `int`
+
+### `--memory`
+
+- **Type**: `string`
+
+### `--memory-min`
+
+- **Type**: `string`
+
+### `--balloon`
+
+- **Type**: `string`
+
+### `--disk`
+
+- **Type**: `string`
+
+### `--net`
+
+- **Type**: `string`
+
+### `--ts-ver`
+
+- **Type**: `string`
+
+### `--ts-exit`
+
+- **Type**: `string`
+
+### `--ts-tags`
+
+- **Type**: `[]string`
+
+### `--ts-auth-key`
+
+- **Type**: `string`
+
+### `--macvlan-mac`
+
+- **Type**: `string`
+
+### `--macvlan-vlan`
+
+- **Type**: `int`
+
+### `--macvlan-parent`
+
+- **Type**: `string`
+
+### `--restart`
+
+- **Type**: `bool`
+- **Default**: `true`
+
+### `--pull`
+
+- **Type**: `bool`
+
+### `--force`
+
+- **Type**: `bool`
+
+### `--web`
+
+- **Type**: `bool`
+
+### `--image-policy`
+
+- **Type**: `string`
+
+### `--publish` (short: `-p`)
+
+- **Type**: `[]string`
+
+### `--publish-reset`
+
+- **Type**: `bool`
+
+### `--env-file`
+
+- **Type**: `string`
+
+### `--service-root`
+
+- **Type**: `string`
+
+### `--zfs`
+
+- **Type**: `bool`
+
+### `--snapshots`
+
+- **Type**: `string`
+
+### `--snapshot-keep-last`
+
+- **Type**: `string`
+
+### `--snapshot-max-age`
+
+- **Type**: `string`
+
+### `--snapshot-required`
+
+- **Type**: `string`
+
+### `--snapshot-events`
+
+- **Type**: `string`
 
 ## Global Options
 
@@ -1420,6 +1553,10 @@ yeet run --web <svc> ./compose.yml
 
 ```
 yeet run <svc> ./bin/<svc> -- --app-flag value
+```
+
+```
+yeet run <svc> ./bin/<svc> --run-as=app:app
 ```
 
 ```
@@ -2326,6 +2463,7 @@ yeet [GLOBAL_OPTIONS] host COMMAND [ARGS...]
 
 ## Discovery
 
+- Run `yeet host cleanup --help-agent` for command-specific context.
 - Run `yeet host set --help-agent` for command-specific context.
 
 ## Global Options
@@ -2362,9 +2500,15 @@ Progress output (auto|tty|plain|quiet)
 
 ## Commands
 
+### `host cleanup`
+
+Remove an exact journaled inactive storage source after Catch revalidates it
+
+Run `yeet host cleanup --help-agent` for command-specific context.
+
 ### `host set`
 
-Configure catch host storage
+Configure catch host storage and networking
 
 Run `yeet host set --help-agent` for command-specific context.
 ````
@@ -2677,7 +2821,7 @@ Run `yeet vm runtime --help-agent` for command-specific context.
 
 ### `vm set`
 
-Set VM resources and networking
+Set resources and networking on a stopped VM
 
 Run `yeet vm set --help-agent` for command-specific context.
 ````
@@ -3236,19 +3380,19 @@ Progress output (auto|tty|plain|quiet)
 - **Type**: `string`
 ````
 
-## Group Command: host set
+## Group Command: host cleanup
 
 ````
-# yeet host set Agent Context
+# yeet host cleanup Agent Context
 
 ## Purpose
 
-Configure catch host storage
+Remove an exact journaled inactive storage source after Catch revalidates it
 
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] host set [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET_PREFIX] [--zfs] [--migrate-services=all|none] [--config=PATH] [--yes]
+yeet [GLOBAL_OPTIONS] host cleanup --from=PATH [--yes]
 ```
 
 ## Operating Rules
@@ -3260,39 +3404,15 @@ yeet [GLOBAL_OPTIONS] host set [--data-dir=PATH_OR_DATASET] [--services-root=PAT
 
 ## Options
 
-### `--data-dir`
+### `--from`
 
-Set catch data directory path or ZFS dataset
-
-- **Type**: `string`
-
-### `--services-root`
-
-Set default root for service directories or ZFS dataset prefix
-
-- **Type**: `string`
-
-### `--zfs`
-
-Treat supplied storage targets as ZFS datasets or dataset prefixes
-
-- **Type**: `bool`
-
-### `--migrate-services`
-
-Service migration mode: all, none
-
-- **Type**: `string`
-
-### `--config`
-
-Path to yeet.toml to update after service migration
+Exact journaled source path to remove
 
 - **Type**: `string`
 
 ### `--yes` (short: `-y`)
 
-Confirm disruptive host storage changes without prompting
+Confirm removal without prompting
 
 - **Type**: `bool`
 
@@ -3331,15 +3451,124 @@ Progress output (auto|tty|plain|quiet)
 ## Examples
 
 ```
-yeet host set --data-dir=$HOME/yeet-data
+yeet host cleanup --from=/root/yeet-data --yes
+```
+````
+
+## Group Command: host set
+
+````
+# yeet host set Agent Context
+
+## Purpose
+
+Configure catch host storage and networking
+
+## Usage
+
+```
+yeet [GLOBAL_OPTIONS] host set [--data-dir=PATH_OR_DATASET] [--services-root=PATH_OR_DATASET_PREFIX] [--zfs] [--migrate-services=all|none] [--iso-pool=RFC1918_IPV4/16] [--config=PATH] [--yes]
+```
+
+## Operating Rules
+
+- Prefer exact examples when they match the task.
+- Use command-specific agent help before running an unfamiliar command.
+- Do not invent flags; use only flags listed in this context or command help.
+- Preserve arguments after `--` as payload or application arguments.
+
+## Options
+
+### `--data-dir`
+
+Catch state directory (default /var/lib/yeet)
+
+- **Type**: `string`
+
+### `--services-root`
+
+Default service root (default: data directory/services)
+
+- **Type**: `string`
+
+### `--zfs`
+
+Treat supplied storage targets as ZFS datasets or dataset prefixes
+
+- **Type**: `bool`
+
+### `--migrate-services`
+
+Service migration mode: all, none
+
+- **Type**: `string`
+
+### `--iso-pool`
+
+Set the ISO network RFC1918 IPv4 /16 before any ISO allocation exists
+
+- **Type**: `string`
+
+### `--config`
+
+Path to yeet.toml to update after service migration
+
+- **Type**: `string`
+
+### `--yes` (short: `-y`)
+
+Confirm disruptive host changes without prompting
+
+- **Type**: `bool`
+
+## Global Options
+
+### `--host`
+
+Override target host (CATCH_HOST)
+
+- **Type**: `string`
+
+### `--service`
+
+Force the service name for the command
+
+- **Type**: `string`
+
+### `--tty`
+
+Force TTY for remote commands
+
+- **Type**: `bool`
+
+### `--no-tty`
+
+Disable TTY for remote commands
+
+- **Type**: `bool`
+
+### `--progress`
+
+Progress output (auto|tty|plain|quiet)
+
+- **Type**: `string`
+
+## Examples
+
+```
+yeet host set --data-dir=/var/lib/yeet --services-root=/var/lib/yeet/services --migrate-services=all --yes
 ```
 
 ```
-yeet host set --services-root=$HOME/yeet-data/services2 --migrate-services=none
+yeet host set --services-root=/srv/yeet/services --migrate-services=none
 ```
 
 ```
 yeet host set --zfs --data-dir=flash/yeet/data --services-root=flash/yeet/services --migrate-services=all
+```
+
+```
+yeet host set --iso-pool=172.30.0.0/16
 ```
 ````
 
@@ -3491,7 +3720,7 @@ Set service settings
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] service set <svc> [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]
+yeet [GLOBAL_OPTIONS] service set <svc> [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
 ```
 
 ## Operating Rules
@@ -3509,6 +3738,106 @@ Service name
 
 - **Type**: `cli.ServiceName`
 - **Required**: true
+
+## Options
+
+### `--run-as`
+
+Run a native service as USER[:GROUP]
+
+- **Type**: `string`
+
+### `--net`
+
+Replace all network modes for an existing non-VM service; use yeet vm set for VMs. Resulting modes that include ts require tags; stored tags may be inherited
+
+- **Type**: `string`
+
+### `--ts-ver`
+
+Patch the Tailscale version; pass an empty value to clear
+
+- **Type**: `string`
+
+### `--ts-exit`
+
+Patch the Tailscale exit node; pass an empty value to clear
+
+- **Type**: `string`
+
+### `--ts-tags`
+
+Patch Tailscale tags; repeat to replace the list or pass an empty value to clear when ts is not selected
+
+- **Type**: `[]string`
+
+### `--ts-auth-key`
+
+Use a non-empty transient, write-only Tailscale auth key for this operation
+
+- **Type**: `string`
+
+### `--macvlan-mac`
+
+Patch the macvlan MAC used by lan; pass an empty value to clear
+
+- **Type**: `string`
+
+### `--macvlan-vlan`
+
+Patch the macvlan VLAN used by lan; pass an empty value to clear
+
+- **Type**: `string`
+
+### `--macvlan-parent`
+
+Patch the macvlan parent used by lan; pass an empty value to clear
+
+- **Type**: `string`
+
+### `--service-root`
+
+- **Type**: `string`
+
+### `--zfs`
+
+- **Type**: `bool`
+
+### `--copy`
+
+- **Type**: `bool`
+
+### `--empty`
+
+- **Type**: `bool`
+
+### `--publish` (short: `-p`)
+
+- **Type**: `[]string`
+
+### `--publish-reset`
+
+- **Type**: `bool`
+
+### `--snapshots`
+
+- **Type**: `string`
+
+### `--snapshot-keep-last`
+
+- **Type**: `string`
+
+### `--snapshot-max-age`
+
+- **Type**: `string`
+
+### `--snapshot-required`
+
+- **Type**: `string`
+
+### `--snapshot-events`
+
+- **Type**: `string`
 
 ## Global Options
 
@@ -3557,7 +3886,35 @@ yeet service set <svc> --publish-reset
 ```
 
 ```
+yeet service set <svc> --run-as=yeet-svc
+```
+
+```
+yeet service set <svc> --run-as=app:app
+```
+
+```
+yeet service set <svc> --net=iso
+```
+
+```
+yeet service set <svc> --net=ts --ts-tags=tag:app
+```
+
+```
+yeet service set <svc> --net=host
+```
+
+```
+yeet service set <svc> --ts-exit=
+```
+
+```
 yeet service set <svc> --service-root=/srv/apps/<svc>
+```
+
+```
+yeet service set <svc> --service-root=/var/lib/yeet/services/<svc> --copy --run-as=yeet-svc
 ```
 
 ```
@@ -4829,12 +5186,12 @@ yeet vm runtime prune --dry-run
 
 ## Purpose
 
-Set VM resources and networking
+Set resources and networking on a stopped VM
 
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
+yeet [GLOBAL_OPTIONS] vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan|iso] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
 ```
 
 ## Operating Rules
@@ -4901,5 +5258,9 @@ yeet vm set <vm> --net=lan
 
 ```
 yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0 --macvlan-vlan=4
+```
+
+```
+yeet vm set <vm> --net=iso
 ```
 ````

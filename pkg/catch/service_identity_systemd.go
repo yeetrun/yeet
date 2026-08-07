@@ -6,12 +6,14 @@ package catch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
 )
@@ -59,7 +61,7 @@ func verifyEffectiveServiceIdentity(ctx context.Context, service string, identit
 	if properties.MainPID <= 0 {
 		return fmt.Errorf("effective systemd MainPID is %d, want a running workload", properties.MainPID)
 	}
-	return verifyServiceIdentityProcess(properties.MainPID, identity)
+	return verifyServiceIdentityProcess(ctx, properties.MainPID, identity)
 }
 
 func loadServiceIdentitySystemdProperties(ctx context.Context, unit string) (serviceIdentitySystemdProperties, error) {
@@ -119,7 +121,43 @@ func parseServiceIdentitySystemdEnvironment(value string, environment map[string
 	}
 }
 
-func verifyServiceIdentityProcess(pid int, identity db.ServiceIdentity) error {
+const (
+	serviceIdentityCredentialPollInterval = 10 * time.Millisecond
+	serviceIdentityCredentialPollTimeout  = time.Second
+)
+
+type serviceIdentityCredentialTransitionError struct {
+	message string
+}
+
+func (e *serviceIdentityCredentialTransitionError) Error() string { return e.message }
+
+func verifyServiceIdentityProcess(ctx context.Context, pid int, identity db.ServiceIdentity) error {
+	ticker := time.NewTicker(serviceIdentityCredentialPollInterval)
+	defer ticker.Stop()
+	timeout := time.NewTimer(serviceIdentityCredentialPollTimeout)
+	defer timeout.Stop()
+
+	for {
+		err := verifyServiceIdentityProcessOnce(pid, identity)
+		if err == nil {
+			return nil
+		}
+		var transition *serviceIdentityCredentialTransitionError
+		if !errors.As(err, &transition) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-timeout.C:
+			return err
+		case <-ticker.C:
+		}
+	}
+}
+
+func verifyServiceIdentityProcessOnce(pid int, identity db.ServiceIdentity) error {
 	statusPath := filepath.Join("/proc", strconv.Itoa(pid), "status")
 	raw, err := readServiceIdentityProcStatus(statusPath)
 	if err != nil {
@@ -131,12 +169,12 @@ func verifyServiceIdentityProcess(pid int, identity db.ServiceIdentity) error {
 	}
 	for _, uid := range uids {
 		if uid != identity.UID {
-			return fmt.Errorf("running workload UID set is %v, want only %d", uids, identity.UID)
+			return &serviceIdentityCredentialTransitionError{message: fmt.Sprintf("running workload UID set is %v, want only %d", uids, identity.UID)}
 		}
 	}
 	for _, gid := range gids {
 		if gid != identity.GID {
-			return fmt.Errorf("running workload GID set is %v, want only %d", gids, identity.GID)
+			return &serviceIdentityCredentialTransitionError{message: fmt.Sprintf("running workload GID set is %v, want only %d", gids, identity.GID)}
 		}
 	}
 	return nil

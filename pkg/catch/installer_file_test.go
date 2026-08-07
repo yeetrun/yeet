@@ -432,7 +432,10 @@ func TestParseNetworkISO(t *testing.T) {
 		{raw: "iso", kind: iso.PayloadContainer, wantISO: true},
 		{raw: "iso,ts", kind: iso.PayloadCompose, wantISO: true},
 		{raw: "iso,svc", kind: iso.PayloadCompose, wantErr: "cannot combine"},
-		{raw: "iso", kind: iso.PayloadNative, wantErr: "native root"},
+		{raw: "iso", kind: iso.PayloadNative, wantISO: true},
+		{raw: "iso,ts", kind: iso.PayloadNative, wantErr: "native ISO supports only iso"},
+		{raw: "iso", kind: iso.PayloadCron, wantISO: true},
+		{raw: "iso,ts", kind: iso.PayloadCron, wantErr: "timer ISO supports only iso"},
 	} {
 		opts, err := parseNetworkForPayload(NetworkOpts{Interfaces: tt.raw, Tailscale: tailscale, Macvlan: macvlan}, tt.kind, false)
 		if tt.wantErr == "" {
@@ -564,13 +567,16 @@ func TestPreparePayloadPublishResetClearsComposePorts(t *testing.T) {
 	}
 }
 
-func TestValidateInstallNetworkRequestRejectsNativeISO(t *testing.T) {
-	service := &db.Service{
-		ServiceType: db.ServiceTypeSystemd,
-		ISO:         &db.ISOAllocation{DesiredModes: []string{"iso"}},
-	}
-	if err := validateInstallNetworkRequest(service); err == nil || !strings.Contains(err.Error(), "native root") {
-		t.Fatalf("validateInstallNetworkRequest error = %v, want native root rejection", err)
+func TestValidateInstallNetworkRequestAcceptsIdentityIndependentNativeISO(t *testing.T) {
+	for _, service := range []*db.Service{
+		{ServiceType: db.ServiceTypeSystemd, ISO: &db.ISOAllocation{DesiredModes: []string{"iso"}}},
+		{ServiceType: db.ServiceTypeSystemd, Identity: &db.ServiceIdentity{RequestedUser: "root", RequestedGroup: "root"}, ISO: &db.ISOAllocation{DesiredModes: []string{"iso"}}},
+		{ServiceType: db.ServiceTypeSystemd, Identity: &db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "app", UID: 1001, GID: 1001}, ISO: &db.ISOAllocation{DesiredModes: []string{"iso"}}},
+		{ServiceType: db.ServiceTypeSystemd, ISO: &db.ISOAllocation{DesiredModes: []string{"iso"}}, Artifacts: db.ArtifactStore{db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/app.timer"}}}},
+	} {
+		if err := validateInstallNetworkRequest(service); err != nil {
+			t.Fatalf("validateInstallNetworkRequest(%#v): %v", service.Identity, err)
+		}
 	}
 }
 
@@ -1268,6 +1274,44 @@ func TestNewFileInstallerPersistsZFSServiceRoot(t *testing.T) {
 	}
 }
 
+func TestExistingRunNetworkGuardRejectsChangedPersistentSettingsBeforePreparingRoot(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd,
+		Network: &db.ServiceNetworkConfig{Modes: []string{"host"}},
+	})
+	_, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "api"},
+		Network:      NetworkOpts{Interfaces: "svc", Modes: []string{"svc"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "yeet service set <service>") {
+		t.Fatalf("NewFileInstaller error = %v, want service-set guidance", err)
+	}
+	service, viewErr := server.serviceView("api")
+	if viewErr != nil || service.Network().AsStruct() == nil || !reflect.DeepEqual(service.Network().AsStruct().Modes, []string{"host"}) {
+		t.Fatalf("guard staged changed desired state before rejecting: service=%#v error=%v", service.AsStruct(), viewErr)
+	}
+}
+
+func TestExistingRunNetworkGuardAllowsUnchangedSettingsAndRejectsTransientAuth(t *testing.T) {
+	server := newTestServer(t)
+	desired := &db.ServiceNetworkConfig{Modes: []string{"ts"}, TSVersion: "1.101.284", TSTags: []string{"tag:app"}}
+	addTestServices(t, server, db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, Network: desired})
+	unchanged := NetworkOpts{Interfaces: "ts", Modes: []string{"ts"}, Tailscale: TailscaleOpts{Version: "1.101.284", Tags: []string{"tag:app"}}}
+	installer, err := NewFileInstaller(server, FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "api"}, Network: unchanged})
+	if err != nil {
+		t.Fatalf("unchanged request rejected: %v", err)
+	}
+	installer.Fail()
+	_ = installer.Close()
+	withAuth := unchanged
+	withAuth.Tailscale.AuthKey = "tskey-auth-secret"
+	_, err = NewFileInstaller(server, FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "api"}, Network: withAuth})
+	if err == nil || !strings.Contains(err.Error(), "move the explicit --ts-auth-key to service set") {
+		t.Fatalf("auth-key redeploy error = %v", err)
+	}
+}
+
 func TestNewFileInstallerPrintsZFSServiceRootWarnings(t *testing.T) {
 	server := newTestServer(t)
 	mountpoint := t.TempDir()
@@ -1603,6 +1647,81 @@ func TestInstallerCloseStagesScriptPayloadWithSystemdUnit(t *testing.T) {
 		if !strings.Contains(unit, want) {
 			t.Fatalf("systemd unit missing %q:\n%s", want, unit)
 		}
+	}
+}
+
+func TestInstallerCloseStagesIdentityIndependentNativeAndTimerISO(t *testing.T) {
+	tests := []struct {
+		name  string
+		runAs string
+		timer *svc.TimerConfig
+	}{
+		{name: "root", runAs: "0:0"},
+		{name: "non-root", runAs: "70000:70001"},
+		{name: "timer", runAs: "0:0", timer: &svc.TimerConfig{OnCalendar: "hourly"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+				data.ISOPool = &db.ISOPool{Prefix: netip.MustParsePrefix("172.30.0.0/16"), AllocatorVersion: iso.AllocatorVersion, PolicyVersion: iso.PolicyVersion}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			installer, err := NewFileInstaller(server, FileInstallerCfg{
+				InstallerCfg: InstallerCfg{ServiceName: "native-iso-" + tt.name, Timer: tt.timer},
+				Network:      NetworkOpts{Interfaces: "iso"},
+				RunAs:        tt.runAs,
+				RunAsSet:     true,
+				StageOnly:    true,
+				PayloadName:  "run",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := installer.Close(); err != nil {
+				t.Fatalf("Close returned error: %v", err)
+			}
+
+			service := testService(t, server, "native-iso-"+tt.name)
+			if service.ISO == nil || service.ISO.Kind != string(iso.PayloadNative) || service.ISO.Project.IsValid() || service.ISO.NetNS == "" {
+				t.Fatalf("native allocation = %#v", service.ISO)
+			}
+			unitRaw, err := os.ReadFile(stagedArtifactPath(t, service, db.ArtifactSystemdUnit))
+			if err != nil {
+				t.Fatal(err)
+			}
+			unit := string(unitRaw)
+			for _, want := range []string{
+				"NetworkNamespacePath=/var/run/netns/" + service.ISO.NetNS + "\n",
+				"Requires=yeet-" + service.Name + "-ns.service\n",
+				"After=yeet-" + service.Name + "-ns.service\n",
+				"BindReadOnlyPaths=" + stagedArtifactPath(t, service, db.ArtifactNetNSResolv) + ":/etc/resolv.conf\n",
+			} {
+				if !strings.Contains(unit, want) {
+					t.Errorf("native ISO unit missing %q:\n%s", want, unit)
+				}
+			}
+			for _, forbidden := range []string{"NoNewPrivileges=", "CapabilityBoundingSet=", "AmbientCapabilities=", "RestrictNamespaces=", "RestrictAddressFamilies="} {
+				if strings.Contains(unit, forbidden) {
+					t.Errorf("native ISO networking added privilege policy %q:\n%s", forbidden, unit)
+				}
+			}
+			assertInstallerFileContent(t, stagedArtifactPath(t, service, db.ArtifactNetNSResolv), "nameserver "+service.ISO.HostIP.String()+"\n")
+			if tt.timer != nil {
+				timerRaw, err := os.ReadFile(stagedArtifactPath(t, service, db.ArtifactSystemdTimerFile))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(string(timerRaw), "NetworkNamespacePath=") || strings.Contains(string(timerRaw), "Requires=") {
+					t.Fatalf("timer scheduling unit contains workload networking:\n%s", timerRaw)
+				}
+			}
+		})
 	}
 }
 
@@ -2009,6 +2128,204 @@ func TestNewNativeInstallRoutesIdentityAndGenerationThroughOneTransaction(t *tes
 	}
 }
 
+func TestNewNativeISOIdentityInstallFinalizesRuntimeAfterMigration(t *testing.T) {
+	server := newTestServer(t)
+	root := filepath.Join(t.TempDir(), "native-iso")
+	if err := ensureDirsForRoot(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	unitArtifact := filepath.Join(serviceBinDirForRoot(root), "native-iso.service")
+	if err := os.WriteFile(unitArtifact, []byte("[Service]\nUser=70000\nGroup=70001\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	allocation := testISONativeRuntimeAllocation("native-iso", iso.StateReserved)
+	if err := server.cfg.DB.Set(&db.Data{
+		ISOPool: &db.ISOPool{Prefix: netip.MustParsePrefix("172.30.0.0/16"), AllocatorVersion: iso.AllocatorVersion, PolicyVersion: iso.PolicyVersion},
+		Services: map[string]*db.Service{
+			"native-iso": {
+				Name: "native-iso", ServiceType: db.ServiceTypeSystemd, ServiceRoot: root, ISO: allocation,
+				Artifacts: db.ArtifactStore{db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": unitArtifact}}},
+			},
+		}}); err != nil {
+		t.Fatal(err)
+	}
+	identity := db.ServiceIdentity{RequestedUser: "70000", RequestedGroup: "70001", UID: 70000, GID: 70001}
+	var events []string
+	installer := &FileInstaller{
+		s:                 server,
+		cfg:               FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "native-iso"}},
+		resolvedIdentity:  resolvedServiceIdentity{Persisted: identity},
+		newNativeIdentity: true,
+		migrateServiceIdentityFunc: func(_ context.Context, req serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
+			events = append(events, "migrate")
+			if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+				data.Services[req.Service] = req.TargetService.Clone()
+				return nil
+			}); err != nil {
+				return serviceIdentityMigrationResult{}, err
+			}
+			return serviceIdentityMigrationResult{Current: req.Target}, nil
+		},
+		completeNativeISOInstall: func(_ context.Context, target *db.Service) error {
+			events = append(events, "finalize")
+			if target.Identity == nil || *target.Identity != identity || target.ISO == nil {
+				t.Fatalf("native ISO target = %#v", target)
+			}
+			return nil
+		},
+	}
+	if err := installer.installStagedService(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(events, []string{"migrate", "finalize"}) {
+		t.Fatalf("native ISO identity events = %#v", events)
+	}
+}
+
+func TestInitialNativeISOIdentityInstallCommitsReadyAndDesiredAtomically(t *testing.T) {
+	activationErr := errors.New("activation failed")
+	tests := []struct {
+		name               string
+		activation         func(*Server, *db.Service) error
+		wantErr            error
+		wantState          iso.AllocationState
+		wantNetworkModes   []string
+		wantConcurrentMode string
+		wantStop           bool
+	}{
+		{
+			name: "activation failure leaves desired uncommitted",
+			activation: func(_ *Server, _ *db.Service) error {
+				return activationErr
+			},
+			wantErr:   activationErr,
+			wantState: iso.StateQuarantined,
+			wantStop:  true,
+		},
+		{
+			name: "success commits ready and desired together",
+			activation: func(server *Server, target *db.Service) error {
+				current, err := server.serviceView(target.Name)
+				if err != nil {
+					return err
+				}
+				if current.Network().Valid() || current.ISO().State() == string(iso.StateReady) {
+					return fmt.Errorf("desired or ready was visible before activation completed: %#v", current.AsStruct())
+				}
+				return nil
+			},
+			wantState:        iso.StateReady,
+			wantNetworkModes: []string{"iso"},
+		},
+		{
+			name: "same generation concurrent network update is preserved",
+			activation: func(server *Server, target *db.Service) error {
+				_, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+					current := data.Services[target.Name]
+					if current.Generation != target.Generation {
+						return fmt.Errorf("test generation changed to %d", current.Generation)
+					}
+					current.Network = &db.ServiceNetworkConfig{Modes: []string{"host"}}
+					return nil
+				})
+				return err
+			},
+			wantErr:            errors.New("service record changed"),
+			wantState:          iso.StateReserved,
+			wantConcurrentMode: "host",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			root := filepath.Join(t.TempDir(), "native-iso")
+			if err := ensureDirsForRoot(root, ""); err != nil {
+				t.Fatal(err)
+			}
+			unitArtifact := filepath.Join(serviceBinDirForRoot(root), "native-iso.service")
+			if err := os.WriteFile(unitArtifact, []byte("[Service]\nUser=70000\nGroup=70001\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			allocation := testISONativeRuntimeAllocation("native-iso", iso.StateReserved)
+			if err := server.cfg.DB.Set(&db.Data{
+				ISOPool: &db.ISOPool{Prefix: netip.MustParsePrefix("172.30.0.0/16"), AllocatorVersion: iso.AllocatorVersion, PolicyVersion: iso.PolicyVersion},
+				Services: map[string]*db.Service{
+					"native-iso": {
+						Name: "native-iso", ServiceType: db.ServiceTypeSystemd, ServiceRoot: root, ISO: allocation,
+						Artifacts: db.ArtifactStore{db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": unitArtifact}}},
+					},
+				}}); err != nil {
+				t.Fatal(err)
+			}
+			identity := db.ServiceIdentity{RequestedUser: "70000", RequestedGroup: "70001", UID: 70000, GID: 70001}
+			oldSystemctl := runISOSystemctlForRuntime
+			stopCalls := 0
+			runISOSystemctlForRuntime = func(_ context.Context, args ...string) ([]byte, error) {
+				if len(args) != 0 && args[0] == "stop" {
+					stopCalls++
+				}
+				if len(args) != 0 && args[0] == "show" {
+					return []byte("inactive\n"), nil
+				}
+				return nil, nil
+			}
+			t.Cleanup(func() { runISOSystemctlForRuntime = oldSystemctl })
+			installer := &FileInstaller{
+				s: server,
+				cfg: FileInstallerCfg{
+					InstallerCfg: InstallerCfg{ServiceName: "native-iso"},
+					Network:      NetworkOpts{Interfaces: "iso", Modes: []string{"iso"}, ISO: true},
+				},
+				resolvedIdentity:      resolvedServiceIdentity{Persisted: identity},
+				newNativeIdentity:     true,
+				persistInitialNetwork: true,
+				migrateServiceIdentityFunc: func(_ context.Context, req serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
+					if _, err := server.cfg.DB.MutateData(func(data *db.Data) error {
+						data.Services[req.Service] = req.TargetService.Clone()
+						return nil
+					}); err != nil {
+						return serviceIdentityMigrationResult{}, err
+					}
+					return serviceIdentityMigrationResult{Current: req.Target}, nil
+				},
+				completeNativeISOInstall: func(_ context.Context, target *db.Service) error {
+					return tt.activation(server, target)
+				},
+			}
+			err := installer.installStagedService()
+			if tt.wantErr == nil && err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantErr != nil && (err == nil || (!errors.Is(err, tt.wantErr) && !strings.Contains(err.Error(), "changed"))) {
+				t.Fatalf("installStagedService error = %v, want %v", err, tt.wantErr)
+			}
+			if got := stopCalls > 0; got != tt.wantStop {
+				t.Fatalf("runtime stop invoked = %t, want %t", got, tt.wantStop)
+			}
+			current, viewErr := server.serviceView("native-iso")
+			if viewErr != nil {
+				t.Fatal(viewErr)
+			}
+			if got := iso.AllocationState(current.ISO().State()); got != tt.wantState {
+				t.Fatalf("ISO state = %q, want %q", got, tt.wantState)
+			}
+			if tt.wantConcurrentMode != "" {
+				if got := current.Network().AsStruct().Modes; !slices.Equal(got, []string{tt.wantConcurrentMode}) {
+					t.Fatalf("concurrent desired modes = %v, want %q", got, tt.wantConcurrentMode)
+				}
+				return
+			}
+			var got []string
+			if desired := current.Network().AsStruct(); desired != nil {
+				got = desired.Modes
+			}
+			if !slices.Equal(got, tt.wantNetworkModes) {
+				t.Fatalf("desired modes = %v, want %v", got, tt.wantNetworkModes)
+			}
+		})
+	}
+}
+
 func TestInstallerCloseNoBinaryRewritesExistingSystemdArtifact(t *testing.T) {
 	server := newTestServer(t)
 	oldUnit := filepath.Join(server.serviceBinDir("nobin-svc"), "nobin-svc-old.service")
@@ -2081,6 +2398,8 @@ func TestInstallerCloseNoBinaryRegeneratesNetNSSystemdArtifact(t *testing.T) {
 		Name:        "nobin-lan",
 		ServiceType: db.ServiceTypeSystemd,
 		Identity:    &identity,
+		Network:     &db.ServiceNetworkConfig{Modes: []string{"lan"}},
+		Macvlan:     &db.MacvlanNetwork{Interface: "ymv-stable", Parent: "vmbr0", Mac: "02:00:00:00:00:41"},
 		Artifacts: db.ArtifactStore{
 			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{"staged": oldUnit}},
 			db.ArtifactBinary:      {Refs: map[db.ArtifactRef]string{"latest": filepath.Join(server.serviceBinDir("nobin-lan"), "nobin-lan-1")}},
@@ -2777,7 +3096,8 @@ func TestConfigureAndStageInstallTransitionsISOToSvcTailscaleAndHost(t *testing.
 			interfaces: "ts",
 			modes:      []string{"ts"},
 			configure: func(installer *FileInstaller) {
-				installer.tsNet = &db.TailscaleNetwork{Interface: "yts-test", Version: "1.88.2"}
+				installer.cfg.Network.Tailscale.Tags = []string{"tag:app"}
+				installer.tsNet = &db.TailscaleNetwork{Interface: "yts-test", Version: "1.88.2", Tags: []string{"tag:app"}}
 				installer.artifacts[db.ArtifactTSService] = "/new/yeet-app-ts.service"
 			},
 			assert: func(t *testing.T, service db.ServiceView) {
@@ -2872,6 +3192,60 @@ func TestConfigureAndStageInstallRetainsISOWhenConcreteTransitionCleanupFails(t 
 	}
 	if _, staged := service.AsStruct().Artifacts[db.ArtifactDockerComposeFile].Refs["staged"]; staged {
 		t.Fatalf("replacement payload staged after cleanup failure: %#v", service.AsStruct().Artifacts)
+	}
+}
+
+func TestTransitionAwayFromISONativeUsesDirectLifecycleWithoutCompose(t *testing.T) {
+	withISORuntimeBackend(t, netns.BackendNFT)
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{
+		"native": testISONativeRuntimeAllocation("native", iso.StateReady),
+	})
+	if err := server.ensureDirs("native", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := server.cfg.DB.MutateService("native", func(_ *db.Data, service *db.Service) error {
+		service.ServiceType = db.ServiceTypeSystemd
+		service.Generation = 3
+		service.Network = &db.ServiceNetworkConfig{Modes: []string{"iso"}}
+		service.Artifacts = db.ArtifactStore{
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(3): "/old/native.service"}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := server.serviceView("native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{
+			InstallerCfg: InstallerCfg{ServiceName: "native"},
+			Network:      NetworkOpts{Interfaces: "host", Modes: []string{"host"}},
+			StageOnly:    true,
+		},
+		existingService: view,
+		serviceRoot:     server.defaultServiceRootDir("native"),
+		artifacts:       map[db.ArtifactName]string{},
+	}
+	called := false
+	installer.transitionFromISO = func(_ context.Context, service string, desired []string, steps isoTransitionSteps) error {
+		called = true
+		transition, ok := steps.(*fileInstallerISOTransition)
+		if !ok || !transition.native || transition.compose != nil {
+			t.Fatalf("native transition adapter = %#v", steps)
+		}
+		if service != "native" || !reflect.DeepEqual(desired, []string{"host"}) {
+			t.Fatalf("transition = %q %v", service, desired)
+		}
+		return nil
+	}
+	if err := installer.transitionAwayFromISO(context.Background(), fileInstallPlan{detectedServiceType: db.ServiceTypeSystemd}); err != nil {
+		t.Fatal(err)
+	}
+	if !called || !installer.transitionHandled {
+		t.Fatalf("transition called=%t handled=%t", called, installer.transitionHandled)
 	}
 }
 

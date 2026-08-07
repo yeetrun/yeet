@@ -681,7 +681,7 @@ func (p vmNetworkPlan) SetupCommands() [][]string {
 				[]string{"ip", "link", "set", iface.Tap, "up"},
 				[]string{"ip", "-4", "addr", "replace", vmISOHostPrefix(iface), "dev", iface.Tap},
 			)
-			cmds = append(cmds, vmISOInterfaceSysctlCommands(iface)...)
+			cmds = append(cmds, vmISOInterfaceSetupSysctlCommands(iface)...)
 		}
 	}
 	return cmds
@@ -697,6 +697,11 @@ func vmISOInterfaceSysctlCommands(iface vmNetworkInterfacePlan) [][]string {
 		{"sysctl", "-w", "net.ipv4.conf." + iface.Tap + ".rp_filter=1"},
 		{"sysctl", "-w", "net.ipv6.conf." + iface.Tap + ".disable_ipv6=1"},
 	}
+}
+
+func vmISOInterfaceSetupSysctlCommands(iface vmNetworkInterfacePlan) [][]string {
+	commands := [][]string{{"udevadm", "settle", "--timeout=10"}}
+	return append(commands, vmISOInterfaceSysctlCommands(iface)...)
 }
 
 func (p vmNetworkPlan) isoInterfaceSysctlCommands() [][]string {

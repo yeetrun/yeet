@@ -341,8 +341,12 @@ func TestSvcRunParsingErrorsAndStoredEnv(t *testing.T) {
 		EnvFile: "stored.env",
 	})
 
-	if _, err := parseSvcRun([]string{"app", "--net=lan"}, loc, ""); err == nil || !strings.Contains(err.Error(), "cannot change --net") {
-		t.Fatalf("parseSvcRun locked flags error = %v", err)
+	changedNetwork, err := parseSvcRun([]string{"app", "--net=lan"}, loc, "")
+	if err != nil {
+		t.Fatalf("parseSvcRun network change error = %v", err)
+	}
+	if !runArgsHaveFlag(changedNetwork.Args, "--net") || !slices.Contains(changedNetwork.Args, "--net=lan") {
+		t.Fatalf("parseSvcRun network args = %#v, want --net=lan", changedNetwork.Args)
 	}
 
 	loc.Config.SetServiceEntry(ServiceEntry{
@@ -794,6 +798,155 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	}
 }
 
+func TestServiceSetNetworkRunFlagChanges(t *testing.T) {
+	base := []string{
+		"--pull", "--net=svc", "--ts-ver=old", "--ts-exit=old-exit",
+		"--ts-tags=tag:old-a", "--ts-tags=tag:old-b", "--ts-auth-key=stale-secret",
+		"--macvlan-parent=eno1", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01",
+		"app-arg", "--net=payload-value", "literal value",
+	}
+	tests := []struct {
+		name  string
+		flags cli.ServiceSetFlags
+		want  []string
+	}{
+		{
+			name:  "replace modes and retain inactive settings",
+			flags: cli.ServiceSetFlags{Net: "host", NetSet: true},
+			want:  []string{"--pull", "--ts-ver=old", "--ts-exit=old-exit", "--ts-tags=tag:old-a", "--ts-tags=tag:old-b", "--macvlan-parent=eno1", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01", "--net=host", "app-arg", "--net=payload-value", "literal value"},
+		},
+		{
+			name:  "replace repeated tags",
+			flags: cli.ServiceSetFlags{TsTags: []string{"tag:new-a", "tag:new-b"}, TsTagsSet: true},
+			want:  []string{"--pull", "--net=svc", "--ts-ver=old", "--ts-exit=old-exit", "--macvlan-parent=eno1", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01", "--ts-tags=tag:new-a", "--ts-tags=tag:new-b", "app-arg", "--net=payload-value", "literal value"},
+		},
+		{
+			name: "clear tailscale version", flags: cli.ServiceSetFlags{TsVerSet: true},
+			want: []string{"--pull", "--net=svc", "--ts-exit=old-exit", "--ts-tags=tag:old-a", "--ts-tags=tag:old-b", "--macvlan-parent=eno1", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01", "app-arg", "--net=payload-value", "literal value"},
+		},
+		{
+			name: "clear tailscale exit node", flags: cli.ServiceSetFlags{TsExitSet: true},
+			want: []string{"--pull", "--net=svc", "--ts-ver=old", "--ts-tags=tag:old-a", "--ts-tags=tag:old-b", "--macvlan-parent=eno1", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01", "app-arg", "--net=payload-value", "literal value"},
+		},
+		{
+			name: "clear tailscale tags", flags: cli.ServiceSetFlags{TsTagsSet: true},
+			want: []string{"--pull", "--net=svc", "--ts-ver=old", "--ts-exit=old-exit", "--macvlan-parent=eno1", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01", "app-arg", "--net=payload-value", "literal value"},
+		},
+		{
+			name: "clear macvlan parent", flags: cli.ServiceSetFlags{MacvlanParentSet: true},
+			want: []string{"--pull", "--net=svc", "--ts-ver=old", "--ts-exit=old-exit", "--ts-tags=tag:old-a", "--ts-tags=tag:old-b", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01", "app-arg", "--net=payload-value", "literal value"},
+		},
+		{
+			name: "clear macvlan vlan", flags: cli.ServiceSetFlags{MacvlanVlanSet: true},
+			want: []string{"--pull", "--net=svc", "--ts-ver=old", "--ts-exit=old-exit", "--ts-tags=tag:old-a", "--ts-tags=tag:old-b", "--macvlan-parent=eno1", "--macvlan-mac=02:00:00:00:00:01", "app-arg", "--net=payload-value", "literal value"},
+		},
+		{
+			name: "clear macvlan mac", flags: cli.ServiceSetFlags{MacvlanMacSet: true},
+			want: []string{"--pull", "--net=svc", "--ts-ver=old", "--ts-exit=old-exit", "--ts-tags=tag:old-a", "--ts-tags=tag:old-b", "--macvlan-parent=eno1", "--macvlan-vlan=10", "app-arg", "--net=payload-value", "literal value"},
+		},
+		{
+			name: "never persist auth key", flags: cli.ServiceSetFlags{TsAuthKey: "new-secret", TsAuthKeySet: true},
+			want: []string{"--pull", "--net=svc", "--ts-ver=old", "--ts-exit=old-exit", "--ts-tags=tag:old-a", "--ts-tags=tag:old-b", "--macvlan-parent=eno1", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01", "app-arg", "--net=payload-value", "literal value"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			removals, updates := serviceSetNetworkRunFlagChanges(tt.flags)
+			got := rewriteStoredRunArgs(base, removals, updates)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("rewritten args = %#v\nwant %#v", got, tt.want)
+			}
+			if runArgsHaveFlag(got, "--ts-auth-key") {
+				t.Fatalf("rewritten args persisted --ts-auth-key: %#v", got)
+			}
+			if !reflect.DeepEqual(got[len(got)-3:], []string{"app-arg", "--net=payload-value", "literal value"}) {
+				t.Fatalf("payload args changed: %#v", got[len(got)-3:])
+			}
+		})
+	}
+}
+
+func TestServiceSetNetworkRewritePreservesRecognizedFirstPayloadFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		payloadArg string
+	}{
+		{name: "network mode", payloadArg: "--net=payload"},
+		{name: "tailscale tags", payloadArg: "--ts-tags=payload"},
+		{name: "macvlan vlan", payloadArg: "--macvlan-vlan=99"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stored := []string{"--net=host", "--", tt.payloadArg, "literal"}
+			removals, updates := serviceSetNetworkRunFlagChanges(cli.ServiceSetFlags{Net: "svc", NetSet: true})
+			got := rewriteStoredRunArgs(stored, removals, updates)
+			want := []string{"--net=svc", "--", tt.payloadArg, "literal"}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("rewritten args = %#v, want %#v", got, want)
+			}
+			flagArgs, payloadArgs := splitRunArgsForParsing(rehydrateRunArgs(got))
+			if !reflect.DeepEqual(flagArgs, []string{"--net=svc"}) || !reflect.DeepEqual(payloadArgs, []string{tt.payloadArg, "literal"}) {
+				t.Fatalf("semantic args = flags %#v payload %#v", flagArgs, payloadArgs)
+			}
+		})
+	}
+}
+
+func TestServiceSetAppliesNetworkPatchToStoredConfig(t *testing.T) {
+	entry := ServiceEntry{Args: []string{"--pull", "--net=host", "app-arg", "--ts-tags=payload"}}
+	flags := cli.ServiceSetFlags{Net: "ts", NetSet: true, TsTags: []string{"tag:api"}, TsTagsSet: true}
+	if err := applyServiceSetConfigFlags(&entry, flags); err != nil {
+		t.Fatalf("applyServiceSetConfigFlags: %v", err)
+	}
+	want := []string{"--pull", "--net=ts", "--ts-tags=tag:api", "app-arg", "--ts-tags=payload"}
+	if !reflect.DeepEqual(entry.Args, want) {
+		t.Fatalf("entry args = %#v, want %#v", entry.Args, want)
+	}
+}
+
+func TestServiceSetNetworkPartialSuccessIncludesQualifiedSyncRecovery(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	oldCreate := createProjectConfigFileFn
+	t.Cleanup(func() { createProjectConfigFileFn = oldCreate })
+	serviceOverride = "api"
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: projectConfigVersion}}
+	loc.Config.SetServiceEntry(ServiceEntry{Name: "api", Host: "host.example.com", Type: serviceTypeRun})
+	execRemoteFn = func(context.Context, string, []string, io.Reader, bool) error { return nil }
+	createProjectConfigFileFn = func(string) (io.WriteCloser, error) { return nil, errors.New("disk full") }
+	req := svcCommandRequest{
+		Command: svcCommand{Name: "service", Args: []string{"set", "--net=ts"}, RawArgs: []string{"service", "set", "--net=ts"}},
+		Config:  loc, HostOverride: "host.example.com", HostOverrideSet: true, Service: "api",
+	}
+	err := handleServiceSet(context.Background(), req)
+	if err == nil || !strings.Contains(err.Error(), "remote network changed") ||
+		!strings.Contains(err.Error(), "`yeet --host host.example.com service sync api --config "+loc.Path+"`") {
+		t.Fatalf("error = %v, want remote-change recovery command", err)
+	}
+}
+
+func TestServiceSetNetworkPartialSuccessQuotesExactConfigPath(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	oldCreate := createProjectConfigFileFn
+	t.Cleanup(func() { createProjectConfigFileFn = oldCreate })
+	serviceOverride = "api"
+	tmp := filepath.Join(t.TempDir(), "config with spaces")
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, "custom.toml"), Dir: tmp, Config: &ProjectConfig{Version: projectConfigVersion}}
+	loc.Config.SetServiceEntry(ServiceEntry{Name: "api", Host: "host.example.com", Type: serviceTypeRun})
+	execRemoteFn = func(context.Context, string, []string, io.Reader, bool) error { return nil }
+	createProjectConfigFileFn = func(string) (io.WriteCloser, error) { return nil, errors.New("disk full") }
+	req := svcCommandRequest{
+		Command: svcCommand{Name: "service", Args: []string{"set", "--net=ts"}, RawArgs: []string{"service", "set", "--net=ts"}},
+		Config:  loc, HostOverride: "host.example.com", HostOverrideSet: true, Service: "api",
+	}
+	err := handleServiceSet(context.Background(), req)
+	wantCommand := "`yeet --host host.example.com service sync api --config '" + loc.Path + "'`"
+	if err == nil || !strings.Contains(err.Error(), wantCommand) {
+		t.Fatalf("error = %v, want exact quoted recovery %s", err, wantCommand)
+	}
+}
+
 func TestServiceSetUpdatesSnapshotConfig(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)
@@ -899,6 +1052,43 @@ func TestVMSetFlagsUpdateStoredRunArgs(t *testing.T) {
 	want := []string{"--zfs", "--vcpus=8", "--memory=8g", "--disk=128g", "--net=lan", "--macvlan-parent=vmbr0", "guest-arg"}
 	if !reflect.DeepEqual(entry.Args, want) {
 		t.Fatalf("args = %#v, want %#v", entry.Args, want)
+	}
+}
+
+func TestVMSetNetworkRegressionRoutesAndUpdatesStoredFlags(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	oldRunInfo := fetchRunChangeServiceInfoFn
+	t.Cleanup(func() { fetchRunChangeServiceInfoFn = oldRunInfo })
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		t.Fatal("non-VM run network guard intercepted vm set")
+		return catchrpc.ServiceInfoResponse{}, nil
+	}
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "devbox"
+	loadedPrefs.DefaultHost = "host-a"
+	var gotArgs []string
+	execRemoteFn = func(_ context.Context, service string, args []string, _ io.Reader, _ bool) error {
+		if service != "devbox" {
+			t.Fatalf("service = %q, want devbox", service)
+		}
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name: "devbox", Host: "host-a", Type: serviceTypeVM, Payload: "vm://ubuntu/26.04", PayloadKind: serviceTypeVM,
+		Args: []string{"--vcpus=2", "--net=svc", "--macvlan-parent=old0"},
+	})
+
+	if err := HandleSvcCmd([]string{"vm", "set", "--net=lan"}); err != nil {
+		t.Fatalf("HandleSvcCmd vm set: %v", err)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"vm", "set", "--net=lan"}) {
+		t.Fatalf("remote args = %#v, want vm set routing", gotArgs)
+	}
+	loaded := mustLoadProjectConfig(t)
+	entry, _ := loaded.Config.ServiceEntry("devbox", "host-a")
+	if !reflect.DeepEqual(entry.Args, []string{"--vcpus=2", "--net=lan"}) {
+		t.Fatalf("stored args = %#v, want VM network update", entry.Args)
 	}
 }
 

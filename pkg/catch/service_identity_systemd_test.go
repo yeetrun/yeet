@@ -6,11 +6,13 @@ package catch
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/db"
 )
@@ -67,6 +69,71 @@ func TestVerifyEffectiveServiceIdentityChecksEnvironmentAndProcess(t *testing.T)
 		RequestedUser: "app", RequestedGroup: "app", UID: 1001, GID: 1002,
 	}, "/srv/api", true); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestVerifyEffectiveServiceIdentityWaitsForSystemdCredentialTransition(t *testing.T) {
+	stubServiceIdentityLookups(t, map[string]*user.User{
+		"app": {Username: "app", Uid: "1001", Gid: "1002"},
+	}, map[string]*user.Group{
+		"app": {Name: "app", Gid: "1002"},
+	})
+	oldProperties, oldStatus := readServiceIdentitySystemdProperties, readServiceIdentityProcStatus
+	readServiceIdentitySystemdProperties = func(context.Context, string) (serviceIdentitySystemdProperties, error) {
+		return serviceIdentitySystemdProperties{
+			User: "app", Group: "app", MainPID: 44,
+			Environment: map[string]string{"HOME": "/srv/api/data", "USER": "app", "LOGNAME": "app", "SHELL": "/bin/sh"},
+		}, nil
+	}
+	reads := 0
+	readServiceIdentityProcStatus = func(string) ([]byte, error) {
+		reads++
+		if reads == 1 {
+			return []byte("Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n"), nil
+		}
+		return []byte("Uid:\t1001\t1001\t1001\t1001\nGid:\t1002\t1002\t1002\t1002\n"), nil
+	}
+	t.Cleanup(func() {
+		readServiceIdentitySystemdProperties, readServiceIdentityProcStatus = oldProperties, oldStatus
+	})
+
+	if err := verifyEffectiveServiceIdentity(context.Background(), "api", db.ServiceIdentity{
+		RequestedUser: "app", RequestedGroup: "app", UID: 1001, GID: 1002,
+	}, "/srv/api", true); err != nil {
+		t.Fatal(err)
+	}
+	if reads != 2 {
+		t.Fatalf("process credential reads = %d, want 2", reads)
+	}
+}
+
+func TestVerifyEffectiveServiceIdentityRejectsPersistentRootProcess(t *testing.T) {
+	stubServiceIdentityLookups(t, map[string]*user.User{
+		"app": {Username: "app", Uid: "1001", Gid: "1002"},
+	}, map[string]*user.Group{
+		"app": {Name: "app", Gid: "1002"},
+	})
+	oldProperties, oldStatus := readServiceIdentitySystemdProperties, readServiceIdentityProcStatus
+	readServiceIdentitySystemdProperties = func(context.Context, string) (serviceIdentitySystemdProperties, error) {
+		return serviceIdentitySystemdProperties{
+			User: "app", Group: "app", MainPID: 44,
+			Environment: map[string]string{"HOME": "/srv/api/data", "USER": "app", "LOGNAME": "app", "SHELL": "/bin/sh"},
+		}, nil
+	}
+	readServiceIdentityProcStatus = func(string) ([]byte, error) {
+		return []byte("Uid:\t0\t0\t0\t0\nGid:\t0\t0\t0\t0\n"), nil
+	}
+	t.Cleanup(func() {
+		readServiceIdentitySystemdProperties, readServiceIdentityProcStatus = oldProperties, oldStatus
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	err := verifyEffectiveServiceIdentity(ctx, "api", db.ServiceIdentity{
+		RequestedUser: "app", RequestedGroup: "app", UID: 1001, GID: 1002,
+	}, "/srv/api", true)
+	if err == nil || !strings.Contains(err.Error(), "running workload UID set is [0 0 0 0], want only 1001") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("verification error = %v, want persistent-root and deadline errors", err)
 	}
 }
 

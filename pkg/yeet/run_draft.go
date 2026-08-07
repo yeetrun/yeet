@@ -612,7 +612,22 @@ func runDraftWithChangesTo(ctx context.Context, stdout io.Writer, draft RunDraft
 		}
 	}
 	alwaysDeploy := draft.PayloadKind == "local-image" || draft.PayloadKind == serviceTypeVM
-	return runWithChangesToWithContextRunner(ctx, stdout, draft.Payload, runArgs, draft.EnvFile, draft.ExistingEntry, forceDeploy, runner, alwaysDeploy)
+	entry := runDraftNetworkGuardEntry(draft)
+	return runWithChangesToWithContextRunner(ctx, stdout, draft.Payload, runArgs, draft.EnvFile, entry, forceDeploy, runner, alwaysDeploy)
+}
+
+func runDraftNetworkGuardEntry(draft RunDraft) ServiceEntry {
+	entry := draft.ExistingEntry
+	if strings.TrimSpace(entry.Name) == "" {
+		entry.Name = strings.TrimSpace(draft.Service)
+	}
+	if strings.TrimSpace(entry.Host) == "" {
+		entry.Host = strings.TrimSpace(draft.Host)
+	}
+	if draft.PayloadKind == serviceTypeVM && !serviceEntryIsVM(entry) {
+		entry.PayloadKind = serviceTypeVM
+	}
+	return entry
 }
 
 func runLocalImagePayload(payload string, args []string) error {

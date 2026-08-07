@@ -543,6 +543,116 @@ func TestServiceSyncOmittedPortsPreservesLocalPorts(t *testing.T) {
 	}
 }
 
+func TestServiceSyncNetworkDesiredReplacesCompleteStoredFamily(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	loadedPrefs.DefaultHost = "host-a"
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name: "api", Host: "host-a", Type: serviceTypeRun, Payload: "api",
+		Args: []string{
+			"--pull", "--net=host", "--net=svc", "--ts-ver=old", "--ts-exit=old",
+			"--ts-tags=tag:old-a", "--ts-tags=tag:old-b", "--ts-auth-key=stale-secret",
+			"--macvlan-parent=old0", "--macvlan-vlan=2", "--macvlan-mac=02:00:00:00:00:01",
+			"app-arg", "--net=payload",
+		},
+	})
+	fetchServiceInfoForSyncFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: serviceTypeRun,
+			Paths:       catchrpc.ServicePaths{ServiceRoot: "/srv/api"},
+			Network: catchrpc.ServiceNetwork{Desired: &catchrpc.ServiceNetworkSettings{
+				Modes: []string{"ts", "lan"}, TSVersion: "1.2.3", TSExitNode: "exit.example", TSTags: []string{"tag:api", "tag:prod"},
+				MacvlanParent: "eno2", MacvlanVLAN: 20, MacvlanMAC: "02:00:00:00:00:02",
+			}},
+		}}, nil
+	}
+
+	if err := HandleSvcCmd([]string{"service", "sync", "api"}); err != nil {
+		t.Fatalf("HandleSvcCmd service sync: %v", err)
+	}
+	loaded := mustLoadProjectConfig(t)
+	entry, _ := loaded.Config.ServiceEntry("api", "host-a")
+	want := []string{
+		"--pull", "--net=lan,ts", "--ts-ver=1.2.3", "--ts-exit=exit.example",
+		"--ts-tags=tag:api", "--ts-tags=tag:prod", "--macvlan-parent=eno2", "--macvlan-vlan=20", "--macvlan-mac=02:00:00:00:00:02",
+		"app-arg", "--net=payload",
+	}
+	if !reflect.DeepEqual(entry.Args, want) {
+		t.Fatalf("synced args = %#v\nwant %#v", entry.Args, want)
+	}
+	if strings.Contains(strings.Join(entry.Args, " "), "ts-auth-key") {
+		t.Fatalf("synced args persisted auth key: %#v", entry.Args)
+	}
+}
+
+func TestServiceSyncNetworkPreservesRecognizedFirstPayloadFlag(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	loadedPrefs.DefaultHost = "host-a"
+	writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name: "api", Host: "host-a", Type: serviceTypeRun, Payload: "api",
+		Args: []string{"--net=host", "--", "--ts-tags=payload", "literal"},
+	})
+	fetchServiceInfoForSyncFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		desired := catchrpc.ServiceNetworkSettings{Modes: []string{"svc"}}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: serviceTypeRun,
+			Paths:       catchrpc.ServicePaths{ServiceRoot: "/srv/api"},
+			Network:     catchrpc.ServiceNetwork{Desired: &desired},
+		}}, nil
+	}
+
+	if err := HandleSvcCmd([]string{"service", "sync", "api"}); err != nil {
+		t.Fatalf("HandleSvcCmd service sync: %v", err)
+	}
+	loaded := mustLoadProjectConfig(t)
+	entry, _ := loaded.Config.ServiceEntry("api", "host-a")
+	want := []string{"--net=svc", "--", "--ts-tags=payload", "literal"}
+	if !reflect.DeepEqual(entry.Args, want) {
+		t.Fatalf("synced args = %#v, want %#v", entry.Args, want)
+	}
+	flagArgs, payloadArgs := splitRunArgsForParsing(rehydrateRunArgs(entry.Args))
+	if !reflect.DeepEqual(flagArgs, []string{"--net=svc"}) || !reflect.DeepEqual(payloadArgs, []string{"--ts-tags=payload", "literal"}) {
+		t.Fatalf("semantic args = flags %#v payload %#v", flagArgs, payloadArgs)
+	}
+}
+
+func TestServiceSyncNetworkLegacyFallbackCreatesCanonicalFlags(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	writeSvcBranchConfig(t, tmp, ServiceEntry{Name: "other", Host: "host-a", Type: serviceTypeRun})
+	fetchServiceInfoForSyncFn = func(_ context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+		if host != "host-b" || service != "api" {
+			t.Fatalf("fetch = %s/%s, want host-b/api", host, service)
+		}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			ServiceType: serviceTypeRun,
+			Paths:       catchrpc.ServicePaths{ServiceRoot: "/srv/api"},
+			Network: catchrpc.ServiceNetwork{
+				Modes:     []string{"lan", "ts"},
+				Tailscale: &catchrpc.ServiceTailscale{Version: "1.2.3", ExitNode: "exit.example", Tags: []string{"tag:api"}},
+				Macvlan:   &catchrpc.ServiceMacvlan{Parent: "eno2", VLAN: 20, Mac: "02:00:00:00:00:02"},
+			},
+		}}, nil
+	}
+
+	if err := HandleSvcCmd([]string{"service", "sync", "api@host-b"}); err != nil {
+		t.Fatalf("HandleSvcCmd service sync: %v", err)
+	}
+	loaded := mustLoadProjectConfig(t)
+	entry, ok := loaded.Config.ServiceEntry("api", "host-b")
+	if !ok {
+		t.Fatal("missing created api@host-b entry")
+	}
+	want := []string{
+		"--net=lan,ts", "--ts-ver=1.2.3", "--ts-exit=exit.example", "--ts-tags=tag:api",
+		"--macvlan-parent=eno2", "--macvlan-vlan=20", "--macvlan-mac=02:00:00:00:00:02",
+	}
+	if !reflect.DeepEqual(entry.Args, want) {
+		t.Fatalf("created args = %#v, want %#v", entry.Args, want)
+	}
+}
+
 func TestServiceSyncRejectsLegacyOnlyRootIdentity(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	tmp := useTempSvcCwd(t)

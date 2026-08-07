@@ -74,13 +74,20 @@ func TestISOPacketPolicy(t *testing.T) {
 
 			projectA := lab.projectSpec("a", "172.30.0.0/30", "172.30.128.0/27", []string{"172.30.128.2", "172.30.128.3"})
 			projectB := lab.projectSpec("b", "172.30.0.4/30", "172.30.128.32/27", []string{"172.30.128.34"})
-			lab.ensurePolicy(projectA, projectB)
+			nativeA := lab.nativeSpec("native-a", "172.30.0.8/30")
+			nativeB := lab.nativeSpec("native-b", "172.30.0.12/30")
+			lab.ensurePolicy(projectA, projectB, nativeA, nativeB)
 			lab.ensureProject("a", projectA)
 			lab.ensureProject("b", projectB)
+			lab.ensureNative(nativeA)
+			lab.ensureNative(nativeB)
 			lab.startEndpointTCP("a", "172.30.128.2", 18080)
 			lab.startEndpointTCP("a", "172.30.128.3", 18080)
 			lab.startEndpointTCP("b", "172.30.128.34", 18080)
 			lab.startRootPrivateTargets(18080)
+			lab.startTCP(projectA.Allocation.NetNS, "172.30.128.1:18080")
+			lab.startTCP(nativeB.Allocation.NetNS, nativeB.Allocation.PeerIP.String()+":18080")
+			lab.startTCP("", nativeA.Allocation.HostIP.String()+":18080")
 
 			lab.assertHostConnects("172.30.128.2", 18080)
 			lab.assertEndpointConnects("a", "172.30.128.2", "1.1.1.10", 18080, "1.1.1.1")
@@ -96,6 +103,13 @@ func TestISOPacketPolicy(t *testing.T) {
 			lab.assertEndpointRejected("a", "172.30.128.2", "1.1.1.10", 853)
 			lab.assertSpoofedSourceDropped("a", "172.30.128.2", "172.30.128.34")
 			lab.assertIPv6Unavailable("a", "172.30.128.2")
+
+			lab.assertNativeConnects(nativeA, "1.1.1.10", 18080, "1.1.1.1")
+			lab.assertNativeRejected(nativeA, nativeA.Allocation.HostIP.String(), 18080)
+			lab.assertNativeRejected(nativeA, "192.168.100.1", 18080)
+			lab.assertNativeRejected(nativeA, "192.168.100.3", 18080)
+			lab.assertNativeRejected(nativeA, projectA.Allocation.Gateway.String(), 18080)
+			lab.assertNativeRejected(nativeA, nativeB.Allocation.PeerIP.String(), 18080)
 		})
 	}
 }
@@ -211,6 +225,20 @@ func (l *isoIntegrationLab) projectSpec(label, linkRaw, projectRaw string, endpo
 	return ISOTopologySpec{Backend: l.backend, Pool: netip.MustParsePrefix("172.30.0.0/16"), Allocation: allocation}
 }
 
+func (l *isoIntegrationLab) nativeSpec(label, linkRaw string) ISOTopologySpec {
+	l.t.Helper()
+	link := netip.MustParsePrefix(linkRaw)
+	allocation := db.ISOAllocation{
+		Kind: string(iso.PayloadNative), DesiredModes: []string{"iso"}, State: string(iso.StateReady),
+		Link: link, HostIP: link.Addr().Next(), PeerIP: link.Addr().Next().Next(),
+		Interface:        "yi" + l.suffix + strings.TrimPrefix(label, "native-"),
+		PeerInterface:    "yo" + l.suffix + strings.TrimPrefix(label, "native-"),
+		NetNS:            "yin-" + l.suffix + "-" + label,
+		AllocatorVersion: iso.AllocatorVersion, PolicyVersion: iso.PolicyVersion,
+	}
+	return ISOTopologySpec{Backend: l.backend, Pool: netip.MustParsePrefix("172.30.0.0/16"), Allocation: allocation}
+}
+
 func (l *isoIntegrationLab) ensurePolicy(specs ...ISOTopologySpec) {
 	l.t.Helper()
 	endpoints := make([]ISOEndpoint, 0, len(specs))
@@ -283,6 +311,18 @@ func (l *isoIntegrationLab) ensureProject(label string, spec ISOTopologySpec) {
 	l.projects[label] = project
 }
 
+func (l *isoIntegrationLab) ensureNative(spec ISOTopologySpec) {
+	l.t.Helper()
+	if err := EnsureISOTopology(context.Background(), spec); err != nil {
+		l.t.Fatalf("ensure native topology %s: %v", spec.Allocation.NetNS, err)
+	}
+	l.t.Cleanup(func() {
+		if err := RemoveISOTopology(context.Background(), spec); err != nil {
+			l.t.Errorf("remove native topology %s: %v", spec.Allocation.NetNS, err)
+		}
+	})
+}
+
 func (l *isoIntegrationLab) startRootDNS(records map[string]string) {
 	l.startDNS("", "0.0.0.0:5353", "127.0.0.1:5353", records)
 }
@@ -328,7 +368,7 @@ func (l *isoIntegrationLab) startTCP(namespace, address string) {
 
 func (l *isoIntegrationLab) startRootPrivateTargets(port int) {
 	l.t.Helper()
-	for _, ip := range []string{"192.168.100.1", "169.254.169.254", "100.100.100.100"} {
+	for _, ip := range []string{"192.168.100.1", "192.168.100.3", "169.254.169.254", "100.100.100.100"} {
 		l.mustRun("ip", "address", "add", ip+"/32", "dev", "lo")
 		ip := ip
 		l.t.Cleanup(func() { l.runIgnoringError("ip", "address", "delete", ip+"/32", "dev", "lo") })
@@ -359,6 +399,24 @@ func (l *isoIntegrationLab) assertEndpointRejected(project, source, destination 
 	l.t.Helper()
 	if output, err := l.runHelper(l.endpointNamespace(project, source), "connect", "--address", fmt.Sprintf("%s:%d", destination, port), "--source", source); err == nil {
 		l.t.Fatalf("endpoint %s unexpectedly connected to %s:%d\n%s", source, destination, port, output)
+	}
+}
+
+func (l *isoIntegrationLab) assertNativeConnects(spec ISOTopologySpec, destination string, port int, wantRemote string) {
+	l.t.Helper()
+	args := []string{"connect", "--address", fmt.Sprintf("%s:%d", destination, port), "--source", spec.Allocation.PeerIP.String()}
+	if wantRemote != "" {
+		args = append(args, "--want-remote", wantRemote)
+	}
+	if output, err := l.runHelper(spec.Allocation.NetNS, args...); err != nil {
+		l.t.Fatalf("native endpoint %s cannot connect to %s: %v\n%s", spec.Allocation.PeerIP, destination, err, output)
+	}
+}
+
+func (l *isoIntegrationLab) assertNativeRejected(spec ISOTopologySpec, destination string, port int) {
+	l.t.Helper()
+	if output, err := l.runHelper(spec.Allocation.NetNS, "connect", "--address", fmt.Sprintf("%s:%d", destination, port), "--source", spec.Allocation.PeerIP.String()); err == nil {
+		l.t.Fatalf("native endpoint %s unexpectedly connected to %s:%d\n%s", spec.Allocation.PeerIP, destination, port, output)
 	}
 }
 
@@ -526,7 +584,7 @@ func (l *isoIntegrationLab) runIgnoringError(name string, args ...string) {
 func requireISOIntegrationCommand(t *testing.T, name string) {
 	t.Helper()
 	if _, err := exec.LookPath(name); err != nil {
-		t.Fatalf("ISO integration test requires %s", name)
+		t.Skipf("ISO integration test requires %s", name)
 	}
 }
 

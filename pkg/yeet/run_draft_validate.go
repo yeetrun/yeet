@@ -352,7 +352,7 @@ func normalizeRunDraftNetworkModes(modes []string, result *RunDraftValidationRes
 
 func validRunDraftNetworkMode(mode string) bool {
 	switch mode {
-	case "svc", "ts", "lan", "iso":
+	case "host", "svc", "ts", "lan", "iso":
 		return true
 	default:
 		return false

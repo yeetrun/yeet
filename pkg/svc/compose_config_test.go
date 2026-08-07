@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
 )
 
 func TestResolveComposeJSONUsesExactFiles(t *testing.T) {
@@ -54,6 +55,24 @@ func TestResolveComposeJSONUsesExactFiles(t *testing.T) {
 	}
 	if diff := cmp.Diff([]byte(`{"services":{"api":{"image":"nginx"}}}`), out); diff != "" {
 		t.Fatalf("output mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestResolveComposeJSONCapturesPrewiredCommandStreams(t *testing.T) {
+	opts := ComposeResolveOptions{
+		ProjectName: "catch-app",
+		ProjectDir:  t.TempDir(),
+		Files:       []string{"compose.yml"},
+		NewCmd: func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+			return cmdutil.NewStdCmdContext(ctx, "sh", "-c", `printf '%s' '{"services":{"api":{"image":"nginx"}}}'`)
+		},
+	}
+	out, err := ResolveComposeJSON(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"api"`) {
+		t.Fatalf("output = %q, want resolved service", out)
 	}
 }
 

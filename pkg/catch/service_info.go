@@ -7,6 +7,7 @@ package catch
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -265,7 +266,16 @@ func serviceHasStagedChanges(sv db.ServiceView) bool {
 }
 
 func serviceNetworkInfo(sv db.ServiceView) catchrpc.ServiceNetwork {
-	var out catchrpc.ServiceNetwork
+	desired := desiredServiceNetworkConfig(sv)
+	out := catchrpc.ServiceNetwork{Modes: effectiveServiceNetworkModes(sv), Desired: &catchrpc.ServiceNetworkSettings{
+		Modes:         slices.Clone(desired.Modes),
+		TSVersion:     desired.TSVersion,
+		TSExitNode:    desired.TSExitNode,
+		TSTags:        slices.Clone(desired.TSTags),
+		MacvlanParent: desired.MacvlanParent,
+		MacvlanVLAN:   desired.MacvlanVLAN,
+		MacvlanMAC:    desired.MacvlanMAC,
+	}}
 	out.ISO = serviceISOInfo(sv.ISO())
 	if svcNet, ok := sv.SvcNetwork().GetOk(); ok && svcNet.IPv4.IsValid() {
 		out.SvcIP = svcNet.IPv4.String()
@@ -295,6 +305,52 @@ func serviceNetworkInfo(sv db.ServiceView) catchrpc.ServiceNetwork {
 		}
 		out.Tailscale = tsOut
 	}
+	return out
+}
+
+func effectiveServiceNetworkModes(sv db.ServiceView) []string {
+	if allocation := sv.ISO(); allocation.Valid() && isoAllocationIsEffective(allocation.State()) {
+		return normalizedServiceNetworkModes(allocation.DesiredModes().AsSlice())
+	}
+	service := sv.AsStruct()
+	modes := make([]string, 0, 3)
+	if service.SvcNetwork != nil {
+		modes = append(modes, "svc")
+	}
+	if service.Macvlan != nil {
+		modes = append(modes, "lan")
+	}
+	if service.TSNet != nil {
+		modes = append(modes, "ts")
+	}
+	if service.VM != nil {
+		for _, network := range service.VM.Networks {
+			modes = append(modes, network.Mode)
+		}
+	}
+	modes = normalizedServiceNetworkModes(modes)
+	if len(modes) == 0 {
+		return []string{"host"}
+	}
+	return modes
+}
+
+func isoAllocationIsEffective(state string) bool {
+	return iso.AllocationState(state) == iso.StateReady
+}
+
+func normalizedServiceNetworkModes(modes []string) []string {
+	seen := make(map[string]bool, len(modes))
+	out := make([]string, 0, len(modes))
+	for _, raw := range modes {
+		mode := strings.ToLower(strings.TrimSpace(raw))
+		if mode == "" || seen[mode] {
+			continue
+		}
+		seen[mode] = true
+		out = append(out, mode)
+	}
+	sort.Strings(out)
 	return out
 }
 

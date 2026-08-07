@@ -92,6 +92,64 @@ func TestRunDraftFromCLIParsesFirstDeployOptions(t *testing.T) {
 	}
 }
 
+func TestRunDraftWithoutLocalEntryUsesRemoteNetworkAuthority(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	oldInfo := fetchRunChangeServiceInfoFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldRemoteImage := tryRunRemoteImageWithOutputFn
+	t.Cleanup(func() {
+		fetchRunChangeServiceInfoFn = oldInfo
+		fetchRemoteArtifactHashesFn = oldHashes
+		tryRunRemoteImageWithOutputFn = oldRemoteImage
+	})
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+
+	tests := []struct {
+		name       string
+		found      bool
+		wantErr    bool
+		wantRunner int
+	}{
+		{name: "remote exists and differs", found: true, wantErr: true},
+		{name: "remote not found is initial deploy", found: false, wantRunner: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infoCalls := 0
+			fetchRunChangeServiceInfoFn = func(_ context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+				infoCalls++
+				if host != "catch.example" || service != "api" {
+					t.Fatalf("service info target = %s/%s, want catch.example/api", host, service)
+				}
+				desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
+				return catchrpc.ServiceInfoResponse{Found: tt.found, Info: catchrpc.ServiceInfo{Network: catchrpc.ServiceNetwork{Desired: &desired}}}, nil
+			}
+			runs := 0
+			tryRunRemoteImageWithOutputFn = func(context.Context, io.Writer, string, []string) (bool, error) {
+				runs++
+				return true, nil
+			}
+			draft := RunDraft{Service: "api", Host: "catch.example", Payload: "ghcr.io/example/api:latest"}
+			err := runDraftWithChangesTo(context.Background(), io.Discard, draft, []string{"--net=iso"}, false)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "network changes for existing services require `yeet service set <service> ...`") {
+					t.Fatalf("error = %v, want service-set guidance", err)
+				}
+			} else if err != nil {
+				t.Fatalf("runDraftWithChangesTo: %v", err)
+			}
+			if infoCalls != 1 {
+				t.Fatalf("service info calls = %d, want 1", infoCalls)
+			}
+			if runs != tt.wantRunner {
+				t.Fatalf("runner calls = %d, want %d", runs, tt.wantRunner)
+			}
+		})
+	}
+}
+
 func TestRunDraftBuildsExistingRunArgs(t *testing.T) {
 	required := false
 	draft := RunDraft{

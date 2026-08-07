@@ -18,37 +18,54 @@ func (s *Server) withTailscaleResolverReadyForActivation(
 	serviceName string,
 	mutate func() error,
 ) error {
+	release, err := s.lockTailscaleResolverReadyForActivation(ctx, serviceName)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if mutate == nil {
+		return nil
+	}
+	return mutate()
+}
+
+func (s *Server) lockTailscaleResolverReadyForActivation(
+	ctx context.Context,
+	serviceName string,
+) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	serviceView, err := s.serviceView(serviceName)
 	if err != nil {
-		return fmt.Errorf("load service for tailscale resolver readiness: %w", err)
+		return nil, fmt.Errorf("load service for tailscale resolver readiness: %w", err)
 	}
 	if !tailscaleResolverPersistedRecord(*serviceView.AsStruct()) {
-		if mutate == nil {
-			return nil
-		}
-		return mutate()
+		return func() {}, nil
 	}
-	return s.withTailscaleResolverMutationGuard(func() error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		serviceView, err := s.serviceView(serviceName)
-		if err != nil {
-			return fmt.Errorf("load service for tailscale resolver readiness: %w", err)
-		}
-		service := *serviceView.AsStruct()
-		service.ServiceRoot = s.serviceRootFromView(serviceView)
-		if err := s.checkTailscaleResolverReady(ctx, service); err != nil {
-			return err
-		}
-		if mutate == nil {
-			return nil
-		}
-		return mutate()
-	})
+	s.tailscaleResolverRecovery.mu.RLock()
+	release := s.tailscaleResolverRecovery.mu.RUnlock
+	if s.tailscaleResolverRecovery.block != nil {
+		err := s.tailscaleResolverRecovery.block
+		release()
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		release()
+		return nil, err
+	}
+	serviceView, err = s.serviceView(serviceName)
+	if err != nil {
+		release()
+		return nil, fmt.Errorf("load service for tailscale resolver readiness: %w", err)
+	}
+	service := *serviceView.AsStruct()
+	service.ServiceRoot = s.serviceRootFromView(serviceView)
+	if err := s.checkTailscaleResolverReady(ctx, service); err != nil {
+		release()
+		return nil, err
+	}
+	return release, nil
 }
 
 func (s *Server) checkTailscaleResolverReady(ctx context.Context, service db.Service) error {

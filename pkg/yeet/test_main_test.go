@@ -5,15 +5,21 @@
 package yeet
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/catchrpc"
 )
 
 func TestMain(m *testing.M) {
 	cleanup, err := isolateYeetTestEnvironment()
 	if err != nil {
 		panic(err)
+	}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
 	}
 	code := m.Run()
 	cleanup()

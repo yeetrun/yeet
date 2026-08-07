@@ -23,7 +23,7 @@ var (
 	syncDBDirectory = func(f *os.File) error { return f.Sync() }
 )
 
-//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,ServiceIdentity,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent,VMGuestBaseConfig,VMKernelArtifactConfig,VMRuntimeArtifactConfig,VMRuntimeTrialConfig,VMRuntimeLifecycleConfig,VMComponentsConfig --copyright=false
+//go:generate go run tailscale.com/cmd/viewer -type=Data,Service,ServiceIdentity,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent,VMGuestBaseConfig,VMKernelArtifactConfig,VMRuntimeArtifactConfig,VMRuntimeTrialConfig,VMRuntimeLifecycleConfig,VMComponentsConfig,ServiceNetworkConfig --copyright=false
 
 // Data is the full JSON structure of the database.
 type Data struct {
@@ -202,11 +202,26 @@ type Service struct {
 	// Artifacts are the artifacts generated for this service.
 	Artifacts ArtifactStore
 
+	// Network is the desired network configuration. Nil preserves legacy
+	// runtime-derived behavior until a network setting is explicitly changed.
+	Network    *ServiceNetworkConfig `json:",omitempty"`
 	SvcNetwork *SvcNetwork
 	Macvlan    *MacvlanNetwork
 	TSNet      *TailscaleNetwork
 	VM         *VMConfig      `json:",omitempty"`
 	ISO        *ISOAllocation `json:",omitempty"`
+}
+
+// ServiceNetworkConfig stores desired network settings independently from
+// runtime network records. It intentionally excludes transient auth material.
+type ServiceNetworkConfig struct {
+	Modes         []string `json:",omitempty"`
+	TSVersion     string   `json:",omitempty"`
+	TSExitNode    string   `json:",omitempty"`
+	TSTags        []string `json:",omitempty"`
+	MacvlanParent string   `json:",omitempty"`
+	MacvlanVLAN   int      `json:",omitempty"`
+	MacvlanMAC    string   `json:",omitempty"`
 }
 
 type VMConfig struct {

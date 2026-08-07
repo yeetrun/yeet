@@ -127,12 +127,22 @@ func TestVMISONetworkPlanUsesDedicatedTap(t *testing.T) {
 		{"ip", "tuntap", "add", "yi-devbox", "mode", "tap"},
 		{"ip", "link", "set", "yi-devbox", "up"},
 		{"ip", "-4", "addr", "replace", "172.30.0.1/30", "dev", "yi-devbox"},
+		{"udevadm", "settle", "--timeout=10"},
 		{"sysctl", "-w", "net.ipv4.conf.yi-devbox.rp_filter=1"},
 		{"sysctl", "-w", "net.ipv6.conf.yi-devbox.disable_ipv6=1"},
 	} {
 		if !containsCommand(setup, want) {
 			t.Fatalf("setup commands = %#v, missing %#v", setup, want)
 		}
+	}
+	settle := slices.IndexFunc(setup, func(command []string) bool {
+		return reflect.DeepEqual(command, []string{"udevadm", "settle", "--timeout=10"})
+	})
+	rpFilter := slices.IndexFunc(setup, func(command []string) bool {
+		return reflect.DeepEqual(command, []string{"sysctl", "-w", "net.ipv4.conf.yi-devbox.rp_filter=1"})
+	})
+	if settle < 0 || rpFilter < 0 || settle >= rpFilter {
+		t.Fatalf("setup commands = %#v, want udev settle before rp_filter", setup)
 	}
 	if !reflect.DeepEqual(plan.CleanupCommands(), [][]string{{"ip", "link", "del", "yi-devbox"}}) {
 		t.Fatalf("cleanup commands = %#v", plan.CleanupCommands())

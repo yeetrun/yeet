@@ -7,6 +7,7 @@ package catch
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -161,6 +162,67 @@ func TestISOConcreteReconcileVMLifecycle(t *testing.T) {
 	statusErr = errors.New("status unavailable")
 	if _, err := steps.InspectRuntime(context.Background(), "devbox"); !errors.Is(err, statusErr) {
 		t.Fatalf("InspectRuntime error = %v", err)
+	}
+}
+
+func TestISOConcreteNativeTimerLifecycleUsesSchedulingUnitWithoutExecutingJob(t *testing.T) {
+	allocation := testISONativeRuntimeAllocation("native", iso.StateReady)
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"native": allocation})
+	if _, _, err := server.cfg.DB.MutateService("native", func(_ *db.Data, service *db.Service) error {
+		service.ServiceType = db.ServiceTypeSystemd
+		service.Generation = 1
+		service.Artifacts = db.ArtifactStore{
+			db.ArtifactSystemdUnit:      {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/native.service"}},
+			db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/native.timer"}},
+			db.ArtifactNetNSService:     {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/native-ns.service"}},
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldSystemctl := runISOSystemctlForRuntime
+	t.Cleanup(func() { runISOSystemctlForRuntime = oldSystemctl })
+	active := map[string]bool{"native.timer": true, "native.service": false, "yeet-native-ns.service": true}
+	var calls [][]string
+	runISOSystemctlForRuntime = func(_ context.Context, args ...string) ([]byte, error) {
+		calls = append(calls, slices.Clone(args))
+		switch args[0] {
+		case "stop":
+			for _, unit := range args[1:] {
+				active[unit] = false
+			}
+			return nil, nil
+		case "show":
+			if active[args[len(args)-1]] {
+				return []byte("active\n"), nil
+			}
+			return []byte("inactive\n"), nil
+		default:
+			return nil, fmt.Errorf("unexpected systemctl call %v", args)
+		}
+	}
+
+	steps := &isoConcreteReconcileSteps{server: server}
+	state, err := steps.InspectRuntime(context.Background(), "native")
+	if err != nil || state != isoReconcileRuntimeRunning {
+		t.Fatalf("InspectRuntime timer = %q, %v", state, err)
+	}
+	if len(calls) != 1 || calls[0][len(calls[0])-1] != "native.timer" {
+		t.Fatalf("timer inspection calls = %#v, want scheduling unit only", calls)
+	}
+	calls = nil
+	steps.unlock = func() { calls = append(calls, []string{"unlock"}) }
+	if err := steps.StopUntrusted(context.Background(), "native"); err != nil {
+		t.Fatal(err)
+	}
+	wantStop := []string{"stop", "native.timer", "native.service", "yeet-native-ns.service"}
+	if len(calls) < 2 || !slices.Equal(calls[1], wantStop) {
+		t.Fatalf("native timer stop calls = %#v, want %v", calls, wantStop)
+	}
+	for _, call := range calls {
+		if len(call) > 1 && (call[0] == "start" || call[0] == "restart") && call[len(call)-1] == "native.service" {
+			t.Fatalf("timer lifecycle executed workload for verification: %#v", calls)
+		}
 	}
 }
 

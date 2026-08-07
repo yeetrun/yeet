@@ -25,7 +25,12 @@ func TestISOTopologyCommandsRouteProjectThroughPeer(t *testing.T) {
 	assertISOCommand(t, commands, "ip", "route", "replace", "172.30.128.0/27", "via", "172.30.0.2", "dev", "yi-a1b2c3")
 	assertISOCommand(t, commands, "ip", "netns", "exec", "yeet-app-ns", "ip", "route", "replace", "default", "via", "172.30.0.1", "dev", "yo-a1b2c3")
 	assertISOCommand(t, commands, "ip", "netns", "exec", "yeet-app-ns", "sysctl", "-w", "net.ipv4.ip_forward=1")
+	assertISOCommand(t, commands, "udevadm", "settle", "--timeout=10")
 	assertISOCommand(t, commands, "sysctl", "-w", "net.ipv6.conf.yi-a1b2c3.disable_ipv6=1")
+	assertISOCommandBefore(t, commands,
+		ISOCommand{Name: "udevadm", Args: []string{"settle", "--timeout=10"}},
+		ISOCommand{Name: "sysctl", Args: []string{"-w", "net.ipv4.conf.yi-a1b2c3.rp_filter=1"}},
+	)
 
 	joined := joinISOCommandInput(commands)
 	assertContainsAll(t, joined,
@@ -33,6 +38,44 @@ func TestISOTopologyCommandsRouteProjectThroughPeer(t *testing.T) {
 	)
 	if strings.Contains(joined, "masquerade") || strings.Contains(joined, "MASQUERADE") {
 		t.Fatalf("router namespace policy must not masquerade:\n%s", joined)
+	}
+}
+
+func assertISOCommandBefore(t *testing.T, commands []ISOCommand, first, second ISOCommand) {
+	t.Helper()
+	firstIndex, secondIndex := -1, -1
+	for index, command := range commands {
+		if command.Name == first.Name && slices.Equal(command.Args, first.Args) {
+			firstIndex = index
+		}
+		if command.Name == second.Name && slices.Equal(command.Args, second.Args) {
+			secondIndex = index
+		}
+	}
+	if firstIndex < 0 || secondIndex < 0 || firstIndex >= secondIndex {
+		t.Fatalf("command order = %#v, want %#v before %#v", commands, first, second)
+	}
+}
+
+func TestISOTopologyNativeUsesDirectPointToPointNamespace(t *testing.T) {
+	spec := testISONativeTopologySpec()
+	commands, err := ISOTopologyEnsureCommands(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertISOCommand(t, commands, "ip", "route", "replace", "blackhole", "172.30.0.0/16", "metric", "42760")
+	assertISOCommand(t, commands, "ip", "netns", "add", "yeet-app-ns")
+	assertISOCommand(t, commands, "ip", "address", "replace", "172.30.0.1/30", "dev", "yi-a1b2c3")
+	assertISOCommand(t, commands, "ip", "netns", "exec", "yeet-app-ns", "ip", "address", "replace", "172.30.0.2/30", "dev", "yo-a1b2c3")
+	assertISOCommand(t, commands, "ip", "netns", "exec", "yeet-app-ns", "ip", "route", "replace", "default", "via", "172.30.0.1", "dev", "yo-a1b2c3")
+	assertISOCommand(t, commands, "ip", "netns", "exec", "yeet-app-ns", "sysctl", "-w", "net.ipv4.ip_forward=0")
+
+	for _, command := range commands {
+		joined := command.Name + " " + strings.Join(command.Args, " ") + "\n" + command.Input
+		if strings.Contains(joined, "172.30.128.0/27") || strings.Contains(joined, "br0") || strings.Contains(joined, isoRouterNFTTable) || strings.Contains(joined, isoRouterForward) {
+			t.Fatalf("native topology contains router/project state: %s", joined)
+		}
 	}
 }
 
@@ -565,7 +608,7 @@ func TestISOTopologyRejectsNonAllocatorAddressShape(t *testing.T) {
 	}
 }
 
-func TestISOTopologyVMOnlyOwnsAggregateRoute(t *testing.T) {
+func TestISOTopologyVMOwnsAggregateRouteAndReplaysSecuritySysctls(t *testing.T) {
 	spec := testISOTopologySpec()
 	spec.Allocation.Kind = "vm"
 	spec.Allocation.Project = netip.Prefix{}
@@ -577,8 +620,60 @@ func TestISOTopologyVMOnlyOwnsAggregateRoute(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(commands) != 1 || !slices.Equal(commands[0].Args, []string{"route", "replace", "blackhole", "172.30.0.0/16", "metric", "42760"}) {
-		t.Fatalf("VM topology commands = %#v", commands)
+	for _, want := range []ISOCommand{
+		{Name: "ip", Args: []string{"route", "replace", "blackhole", "172.30.0.0/16", "metric", "42760"}},
+		{Name: "sysctl", Args: []string{"-w", "net.ipv4.conf.yi-a1b2c3.rp_filter=1"}, IgnoreNotFound: true},
+		{Name: "sysctl", Args: []string{"-w", "net.ipv6.conf.yi-a1b2c3.disable_ipv6=1"}, IgnoreNotFound: true},
+	} {
+		matched := slices.ContainsFunc(commands, func(command ISOCommand) bool {
+			return command.Name == want.Name && slices.Equal(command.Args, want.Args) && command.IgnoreNotFound == want.IgnoreNotFound
+		})
+		if !matched {
+			t.Fatalf("VM topology commands = %#v, missing %#v", commands, want)
+		}
+	}
+	for _, command := range commands {
+		if command.Name == "ip" && len(command.Args) > 0 && command.Args[0] != "route" {
+			t.Fatalf("VM topology mutates attachment: %#v", command)
+		}
+	}
+}
+
+func TestISOTopologyNativeRejectsRouterAndTailscaleState(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*ISOTopologySpec)
+	}{
+		{name: "project", edit: func(s *ISOTopologySpec) { s.Allocation.Project = netip.MustParsePrefix("172.30.128.0/27") }},
+		{name: "gateway", edit: func(s *ISOTopologySpec) { s.Allocation.Gateway = netip.MustParseAddr("172.30.128.1") }},
+		{name: "bridge", edit: func(s *ISOTopologySpec) { s.Allocation.Bridge = "br0" }},
+		{name: "component", edit: func(s *ISOTopologySpec) {
+			s.Allocation.Components = map[string]db.ISOComponent{"api": {Address: netip.MustParseAddr("172.30.128.2")}}
+		}},
+		{name: "tailscale", edit: func(s *ISOTopologySpec) { s.TailscaleInterface = "ts0" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := testISONativeTopologySpec()
+			tt.edit(&spec)
+			if _, err := ISOTopologyEnsureCommands(spec); err == nil {
+				t.Fatal("ISOTopologyEnsureCommands returned nil error")
+			}
+		})
+	}
+}
+
+func TestISOTopologyNativeRemovalOwnsOnlyDirectLinkAndNamespace(t *testing.T) {
+	commands := ISOTopologyRemoveCommands(testISONativeTopologySpec())
+	if len(commands) != 2 {
+		t.Fatalf("native removal commands = %#v, want link and namespace deletion", commands)
+	}
+	assertISOCommand(t, commands, "ip", "link", "delete", "yi-a1b2c3")
+	assertISOCommand(t, commands, "ip", "netns", "delete", "yeet-app-ns")
+	for _, command := range commands {
+		if slices.Contains(command.Args, "route") {
+			t.Fatalf("native removal attempted a project route mutation: %#v", command)
+		}
 	}
 }
 
@@ -629,6 +724,22 @@ func testISOTopologySpec() ISOTopologySpec {
 			PeerInterface: "yo-a1b2c3",
 			NetNS:         "yeet-app-ns",
 			Bridge:        "br0",
+		},
+	}
+}
+
+func testISONativeTopologySpec() ISOTopologySpec {
+	return ISOTopologySpec{
+		Backend: BackendNFT,
+		Pool:    netip.MustParsePrefix("172.30.0.0/16"),
+		Allocation: db.ISOAllocation{
+			Kind:          "native",
+			Link:          netip.MustParsePrefix("172.30.0.0/30"),
+			HostIP:        netip.MustParseAddr("172.30.0.1"),
+			PeerIP:        netip.MustParseAddr("172.30.0.2"),
+			Interface:     "yi-a1b2c3",
+			PeerInterface: "yo-a1b2c3",
+			NetNS:         "yeet-app-ns",
 		},
 	}
 }

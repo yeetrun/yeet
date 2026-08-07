@@ -38,7 +38,8 @@ func (s *Server) NewInstaller(cfg InstallerCfg) (*Installer, error) {
 		icfg: cfg,
 		s:    s,
 
-		NewCmd: cmdutil.NewStdCmd,
+		NewCmd:        cmdutil.NewStdCmd,
+		NewCmdContext: cmdutil.NewStdCmdContext,
 	}
 	return si, nil
 }
@@ -46,13 +47,81 @@ func (s *Server) NewInstaller(cfg InstallerCfg) (*Installer, error) {
 // Installer is an io.WriteCloser that writes the received binary to a file and
 // installs the service when closed.
 type Installer struct {
-	NewCmd func(name string, arg ...string) *exec.Cmd
+	NewCmd        func(name string, arg ...string) *exec.Cmd
+	NewCmdContext func(context.Context, string, ...string) *exec.Cmd
 
 	icfg                InstallerCfg
 	s                   *Server
 	committedGeneration int
 	isoComposeInstall   func(*db.Service) error
 	isoTailscaleAuthKey string
+	initialISODesired   *db.ServiceNetworkConfig
+	initialISOCommitted bool
+}
+
+// markNativeISOReadyExact publishes effective readiness and, for an initial
+// install, desired intent in one exact-record database transition. The desired
+// record is intentionally supplied only after activation succeeds.
+func (s *Server) markNativeISOReadyExact(expected *db.Service, desired *db.ServiceNetworkConfig) error {
+	if expected == nil {
+		return errors.New("mark native ISO ready without an exact expected service record")
+	}
+	_, err := s.cfg.DB.MutateData(func(data *db.Data) error {
+		current := data.Services[expected.Name]
+		if !reflect.DeepEqual(current, expected) {
+			return fmt.Errorf("service %q record changed before native ISO ready commit", expected.Name)
+		}
+		if data.ISOPool == nil {
+			return fmt.Errorf("ISO pool disappeared while marking %q ready", expected.Name)
+		}
+		if current.ISO == nil {
+			return fmt.Errorf("service %q has no ISO allocation", expected.Name)
+		}
+		if current.ISO.RemoveRequested || current.ISO.CleanupVerified {
+			return fmt.Errorf("service %q ISO removal or cleanup is in progress", expected.Name)
+		}
+		switch iso.AllocationState(current.ISO.State) {
+		case iso.StateRemoving, iso.StateTombstoned, iso.StateQuarantined:
+			return fmt.Errorf("service %q ISO lifecycle state %q cannot become ready", expected.Name, current.ISO.State)
+		}
+		if desired != nil {
+			current.Network = desired.Clone()
+		}
+		data.ISOPool.AggregateRouteState = "ready"
+		data.ISOPool.LastConflict = ""
+		current.ISO.State = string(iso.StateReady)
+		current.ISO.LastError = ""
+		return nil
+	})
+	return err
+}
+
+// persistInitialDesiredNetwork publishes desired intent only after the first
+// activation has completed. Existing deployments are guarded before staging
+// and service-set mutations commit through their dedicated transaction.
+func (i *FileInstaller) persistInitialDesiredNetwork() error {
+	if i == nil || i.s == nil || !i.persistInitialNetwork {
+		return nil
+	}
+	desired, err := desiredNetworkConfigFromOpts(i.cfg.Network)
+	if err != nil {
+		return err
+	}
+	_, err = i.s.cfg.DB.MutateData(func(data *db.Data) error {
+		service, ok := data.Services[i.cfg.ServiceName]
+		if !ok || service == nil {
+			return fmt.Errorf("service %q disappeared before desired network commit", i.cfg.ServiceName)
+		}
+		if i.installedGeneration != 0 && service.Generation != i.installedGeneration {
+			return fmt.Errorf("service generation changed from activated %d to %d before desired network commit", i.installedGeneration, service.Generation)
+		}
+		service.Network = desired.Clone()
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("persist desired service network: %w", err)
+	}
+	return nil
 }
 
 type isoTailscaleInstallFunc func(string, string, string, *db.TailscaleNetwork, string, string) (map[db.ArtifactName]string, error)
@@ -534,9 +603,6 @@ func networkPayloadKind(serviceType db.ServiceType) iso.PayloadKind {
 		return iso.PayloadVM
 	case db.ServiceTypeDockerCompose:
 		return iso.PayloadCompose
-	// ISO intentionally rejects native root services. Host root can reconfigure or
-	// leave a network namespace, so non-root systemd sandboxing is a prerequisite
-	// for adding native ISO support without making a false security claim.
 	case db.ServiceTypeSystemd:
 		return iso.PayloadNative
 	default:
@@ -653,6 +719,9 @@ func installSystemdService(si *Installer, s *db.Service) error {
 	if err != nil {
 		return err
 	}
+	if s.ISO != nil && s.ISO.Kind == string(iso.PayloadNative) {
+		return installISONativeWith(context.Background(), &isoNativeSystemdInstallSteps{si: si, record: s, service: service})
+	}
 	if err := installSystemdUnit(service); err != nil {
 		return err
 	}
@@ -665,11 +734,95 @@ func installSystemdServiceDefinition(si *Installer, s *db.Service) error {
 	if err != nil {
 		return err
 	}
+	nativeISO := serviceUsesNativeISO(s)
 	if err := installSystemdUnit(service); err != nil {
-		return err
+		return failSystemdServiceDefinitionInstall(si, s, nativeISO, err)
 	}
 	closeSelfUpdateClient(si, s.Name)
+	if nativeISO {
+		return si.s.markISOStoppedIfAllocated(s.Name)
+	}
 	return nil
+}
+
+func failSystemdServiceDefinitionInstall(si *Installer, service *db.Service, nativeISO bool, cause error) error {
+	if !nativeISO {
+		return cause
+	}
+	return errors.Join(cause, stopAndQuarantineISO(context.Background(), &isoConcreteReconcileSteps{server: si.s}, service.Name, cause))
+}
+
+type isoNativeInstallSteps interface {
+	Install(context.Context) error
+	Restart(context.Context) error
+	Inspect(context.Context) (isoReconcileRuntimeState, error)
+	MarkReady(context.Context) error
+	Quarantine(context.Context, error) error
+}
+
+func installISONativeWith(ctx context.Context, steps isoNativeInstallSteps) error {
+	if err := steps.Install(ctx); err != nil {
+		return errors.Join(err, steps.Quarantine(ctx, err))
+	}
+	if err := steps.Restart(ctx); err != nil {
+		return errors.Join(err, steps.Quarantine(ctx, err))
+	}
+	state, err := steps.Inspect(ctx)
+	if err == nil && state != isoReconcileRuntimeRunning {
+		err = fmt.Errorf("native ISO workload is %s after activation", state)
+	}
+	if err != nil {
+		return errors.Join(err, steps.Quarantine(ctx, err))
+	}
+	if err := steps.MarkReady(ctx); err != nil {
+		return errors.Join(err, steps.Quarantine(ctx, err))
+	}
+	return nil
+}
+
+type isoNativeSystemdInstallSteps struct {
+	si      *Installer
+	record  *db.Service
+	service *svc.SystemdService
+}
+
+func (s *isoNativeSystemdInstallSteps) Install(context.Context) error {
+	return installSystemdUnit(s.service)
+}
+
+func (s *isoNativeSystemdInstallSteps) Restart(context.Context) error {
+	closeSelfUpdateClient(s.si, s.record.Name)
+	return restartSystemdUnit(s.service)
+}
+
+func (s *isoNativeSystemdInstallSteps) Inspect(ctx context.Context) (isoReconcileRuntimeState, error) {
+	return (&isoConcreteReconcileSteps{server: s.si.s}).InspectRuntime(ctx, s.record.Name)
+}
+
+func (s *isoNativeSystemdInstallSteps) MarkReady(context.Context) error {
+	err := s.si.s.markNativeISOReadyExact(s.record, s.si.initialISODesired)
+	if err == nil && s.si.initialISODesired != nil {
+		s.si.initialISOCommitted = true
+	}
+	return err
+}
+
+func (s *isoNativeSystemdInstallSteps) Quarantine(ctx context.Context, cause error) error {
+	return s.si.s.quarantineNativeISORecordExact(ctx, s.record, cause, "quarantining failed native ISO install")
+}
+
+func (s *Server) quarantineNativeISORecordExact(ctx context.Context, expected *db.Service, cause error, operation string) error {
+	if s == nil || expected == nil {
+		return errors.New("quarantine native ISO without an exact expected service record")
+	}
+	if err := s.markISOStateExact(expected.Name, expected, string(iso.StateQuarantined), cause, operation); err != nil {
+		return err
+	}
+	steps := &isoConcreteReconcileSteps{server: s}
+	stopCtx, stopCancel := isoSecurityCleanupContext(ctx)
+	stopErr := steps.StopUntrusted(stopCtx, expected.Name)
+	stopCancel()
+	return stopErr
 }
 
 func newSystemdInstallService(si *Installer, s *db.Service) (*svc.SystemdService, error) {
@@ -1270,7 +1423,10 @@ func (si *Installer) configureDockerComposeCommands(service *svc.DockerComposeSe
 	service.NewCmdContext = si.newCommandContext
 }
 
-func (si *Installer) newCommandContext(_ context.Context, name string, args ...string) *exec.Cmd {
+func (si *Installer) newCommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if si.NewCmdContext != nil {
+		return si.NewCmdContext(ctx, name, args...)
+	}
 	return si.NewCmd(name, args...)
 }
 

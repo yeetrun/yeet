@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -935,7 +936,10 @@ func renderNetworkSection(server catchrpc.ServiceInfoResponse) infoSection {
 }
 
 func serviceNetworkRows(net catchrpc.ServiceNetwork) []infoRow {
-	rows := serviceISORows(net.ISO)
+	effective := effectiveInfoNetworkSettings(net)
+	rows := []infoRow{{Label: "Network modes", Value: strings.Join(effective.Modes, ",")}}
+	rows = append(rows, desiredInfoNetworkRows(net.Desired, effective)...)
+	rows = append(rows, serviceISORows(net.ISO)...)
 	ipNet, hasIPs := serviceEndpointNetwork(net)
 	if net.ISO == nil && (hasIPs || ipNet.IPError != "") {
 		rows = append(rows, networkIPRows(ipNet)...)
@@ -951,6 +955,91 @@ func serviceNetworkRows(net catchrpc.ServiceNetwork) []infoRow {
 		rows = append(rows, infoRow{Label: "Macvlan", Value: describeMacvlan(net.Macvlan)})
 	}
 	return rows
+}
+
+func effectiveInfoNetworkSettings(net catchrpc.ServiceNetwork) catchrpc.ServiceNetworkSettings {
+	settings := catchrpc.ServiceNetworkSettings{Modes: net.Modes}
+	if len(settings.Modes) == 0 {
+		switch {
+		case net.ISO != nil && net.ISO.State == "ready":
+			settings.Modes = net.ISO.Modes
+		default:
+			if strings.TrimSpace(net.SvcIP) != "" {
+				settings.Modes = append(settings.Modes, "svc")
+			}
+			if net.Macvlan != nil {
+				settings.Modes = append(settings.Modes, "lan")
+			}
+			if net.Tailscale != nil {
+				settings.Modes = append(settings.Modes, "ts")
+			}
+		}
+	}
+	if net.Tailscale != nil {
+		settings.TSVersion = net.Tailscale.Version
+		settings.TSExitNode = net.Tailscale.ExitNode
+		settings.TSTags = net.Tailscale.Tags
+	}
+	if net.Macvlan != nil {
+		settings.MacvlanParent = net.Macvlan.Parent
+		settings.MacvlanVLAN = net.Macvlan.VLAN
+		settings.MacvlanMAC = net.Macvlan.Mac
+	}
+	return normalizeRunNetworkSettings(settings)
+}
+
+func desiredInfoNetworkRows(desired *catchrpc.ServiceNetworkSettings, effective catchrpc.ServiceNetworkSettings) []infoRow {
+	if desired == nil {
+		return nil
+	}
+	normalized := normalizeRunNetworkSettings(*desired)
+	rows := make([]infoRow, 0, 3)
+	if !slices.Equal(normalized.Modes, effective.Modes) {
+		rows = append(rows, infoRow{Label: "Desired network modes", Value: strings.Join(normalized.Modes, ",")})
+	}
+	if !slices.Equal(normalized.TSTags, effective.TSTags) ||
+		normalized.TSVersion != effective.TSVersion || normalized.TSExitNode != effective.TSExitNode {
+		rows = append(rows, infoRow{Label: "Desired Tailscale", Value: describeDesiredTailscale(normalized)})
+	}
+	if normalized.MacvlanParent != effective.MacvlanParent ||
+		normalized.MacvlanVLAN != effective.MacvlanVLAN || normalized.MacvlanMAC != effective.MacvlanMAC {
+		rows = append(rows, infoRow{Label: "Desired macvlan", Value: describeDesiredMacvlan(normalized)})
+	}
+	return rows
+}
+
+func describeDesiredTailscale(settings catchrpc.ServiceNetworkSettings) string {
+	parts := make([]string, 0, 3)
+	if settings.TSVersion != "" {
+		parts = append(parts, "ver "+settings.TSVersion)
+	}
+	if len(settings.TSTags) != 0 {
+		parts = append(parts, "tags: "+strings.Join(settings.TSTags, ", "))
+	}
+	if settings.TSExitNode != "" {
+		parts = append(parts, "exit: "+settings.TSExitNode)
+	}
+	if len(parts) == 0 {
+		return "defaults"
+	}
+	return strings.Join(parts, ", ")
+}
+
+func describeDesiredMacvlan(settings catchrpc.ServiceNetworkSettings) string {
+	parts := make([]string, 0, 3)
+	if settings.MacvlanParent != "" {
+		parts = append(parts, "parent "+settings.MacvlanParent)
+	}
+	if settings.MacvlanVLAN != 0 {
+		parts = append(parts, fmt.Sprintf("vlan %d", settings.MacvlanVLAN))
+	}
+	if settings.MacvlanMAC != "" {
+		parts = append(parts, "mac "+settings.MacvlanMAC)
+	}
+	if len(parts) == 0 {
+		return "defaults"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func serviceISORows(network *catchrpc.ServiceISO) []infoRow {

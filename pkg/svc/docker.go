@@ -293,7 +293,10 @@ func (s *DockerComposeService) stopProjectContainersByLabel(ctx context.Context)
 		return err
 	}
 	args := append([]string{"rm", "--force"}, ids...)
-	output, err := s.newDockerCommand(ctx, dockerPath, args...).CombinedOutput()
+	cmd := s.newDockerCommand(ctx, dockerPath, args...)
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("force-remove Compose project %q containers: %w: %s", s.composeProjectName(), err, strings.TrimSpace(string(output)))
 	}
@@ -308,6 +311,7 @@ func (s *DockerComposeService) projectContainerIDs(ctx context.Context) ([]strin
 	filter := "label=com.docker.compose.project=" + s.composeProjectName()
 	cmd := s.newDockerCommand(ctx, dockerPath, "ps", "-aq", "--filter", filter)
 	var stderr bytes.Buffer
+	cmd.Stdout = nil
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
@@ -351,6 +355,8 @@ func (s *DockerComposeService) VerifyDefaultNetworkAbsent(ctx context.Context) e
 		return err
 	}
 	cmd := s.newDockerCommand(ctx, dockerPath, "network", "ls", "--filter", "name=^"+s.defaultNetworkName()+"$", "--format", "{{.Name}}")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("inspect Docker network absence: %w: %s", err, strings.TrimSpace(string(out)))

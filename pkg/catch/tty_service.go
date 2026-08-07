@@ -327,19 +327,28 @@ func (e *ttyExecer) activateISOVM(activate func(ServiceRunner) error) (bool, err
 	if transaction == nil {
 		transaction = WithVMRuntimeTransactionLock
 	}
-	err = transaction(e.ctx, &e.s.cfg, func() error {
-		return e.s.withTailscaleResolverReadyForActivation(e.ctx, e.sn, func() error {
-			if err := ensureVMNetworkForServiceAction(e.s, e.ctx, e.sn); err != nil {
-				return err
-			}
-			runner, err := e.serviceRunner()
-			if err != nil {
-				return fmt.Errorf("failed to get service runner: %w", err)
-			}
-			return activate(runner)
-		})
-	})
-	return true, err
+	releaseResolver := func() {}
+	defer func() { releaseResolver() }()
+	if err := transaction(e.ctx, &e.s.cfg, func() error {
+		release, err := e.s.lockTailscaleResolverReadyForActivation(e.ctx, e.sn)
+		if err != nil {
+			return err
+		}
+		releaseResolver = release
+		if err := ensureVMNetworkForServiceAction(e.s, e.ctx, e.sn); err != nil {
+			releaseResolver()
+			releaseResolver = func() {}
+			return err
+		}
+		return nil
+	}); err != nil {
+		return true, err
+	}
+	runner, err := e.serviceRunner()
+	if err != nil {
+		return true, fmt.Errorf("failed to get service runner: %w", err)
+	}
+	return true, activate(runner)
 }
 
 func (e *ttyExecer) installISOServiceIfAllocated() (bool, error) {

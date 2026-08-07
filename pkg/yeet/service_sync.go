@@ -218,7 +218,39 @@ func syncOneServiceRoot(ctx context.Context, cfgLoc *projectConfigLocation, targ
 	if err := syncServicePorts(cfgLoc.Config, target, resp.Info.Network.PortsPresent, resp.Info.Network.Ports, &result); err != nil {
 		return serviceSyncResult{}, false, err
 	}
+	if err := syncServiceNetwork(cfgLoc.Config, target, resp.Info.Network); err != nil {
+		return serviceSyncResult{}, false, err
+	}
 	return result, true, nil
+}
+
+func syncServiceNetwork(cfg *ProjectConfig, target serviceSyncTarget, network catchrpc.ServiceNetwork) error {
+	entry, ok := cfg.ServiceEntry(target.Service, target.Host)
+	if !ok {
+		return serviceSyncMissingEntryError(target)
+	}
+	if serviceEntryIsVM(entry) {
+		return nil
+	}
+	settings := authoritativeRunNetworkSettings(network)
+	flags := serviceSetFlagsForNetworkSettings(settings)
+	removals, updates := serviceSetNetworkRunFlagChanges(flags)
+	entry.Args = rewriteStoredRunArgs(entry.Args, removals, updates)
+	cfg.SetServiceEntry(entry)
+	return nil
+}
+
+func serviceSetFlagsForNetworkSettings(settings catchrpc.ServiceNetworkSettings) cli.ServiceSetFlags {
+	settings = normalizeRunNetworkSettings(settings)
+	return cli.ServiceSetFlags{
+		Net: strings.Join(settings.Modes, ","), NetSet: true,
+		TsVer: settings.TSVersion, TsVerSet: true,
+		TsExit: settings.TSExitNode, TsExitSet: true,
+		TsTags: append([]string(nil), settings.TSTags...), TsTagsSet: true,
+		MacvlanParent: settings.MacvlanParent, MacvlanParentSet: true,
+		MacvlanVlan: settings.MacvlanVLAN, MacvlanVlanSet: true,
+		MacvlanMac: settings.MacvlanMAC, MacvlanMacSet: true,
+	}
 }
 
 func syncServiceIdentity(cfg *ProjectConfig, target serviceSyncTarget, info catchrpc.ServiceInfo, result *serviceSyncResult) error {

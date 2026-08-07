@@ -955,6 +955,9 @@ func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 func saveServiceSetResult(req svcCommandRequest, flags cli.ServiceSetFlags) error {
 	updated, err := saveServiceSetConfig(req.Config, req.HostOverride, flags)
 	if err != nil {
+		if flags.HasNetworkChange() {
+			return serviceNetworkConfigWriteError(req, err)
+		}
 		if flags.RunAsSet {
 			return serviceIdentityConfigWriteError(serviceSetConfigHost(req), req.Service, flags.RunAs, err)
 		}
@@ -964,6 +967,31 @@ func saveServiceSetResult(req svcCommandRequest, flags cli.ServiceSetFlags) erro
 		return printServiceSetSyncHint(os.Stdout, req.Service, serviceSetSyncHintHost(req))
 	}
 	return nil
+}
+
+func serviceNetworkConfigWriteError(req svcCommandRequest, err error) error {
+	configPath := ""
+	if req.Config != nil {
+		configPath = strings.TrimSpace(req.Config.Path)
+	}
+	return fmt.Errorf("remote network changed, but failed to update %s: %w; recover with `%s`", projectConfigName, err, serviceSetSyncCommand(req.Service, serviceSetSyncHintHost(req), configPath))
+}
+
+func serviceSetSyncCommand(service, host, configPath string) string {
+	cmd := "yeet"
+	if host = strings.TrimSpace(host); host != "" {
+		cmd += " --host " + shellQuote(host)
+	}
+	cmd += " service sync "
+	if service = strings.TrimSpace(service); service == "" {
+		cmd += "<svc>"
+	} else {
+		cmd += shellQuote(service)
+	}
+	if configPath = strings.TrimSpace(configPath); configPath == "" {
+		configPath = "~/yeet-services/yeet.toml"
+	}
+	return cmd + " --config " + shellQuote(configPath)
 }
 
 func serviceSetConfigHost(req svcCommandRequest) string {
@@ -2686,12 +2714,50 @@ func applyServiceSetConfigFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) 
 	if len(flags.Publish) != 0 || flags.PublishReset {
 		entry.Ports = normalizePublishPorts(flags.Publish)
 	}
+	if flags.HasNetworkChange() {
+		removals, updates := serviceSetNetworkRunFlagChanges(flags)
+		entry.Args = rewriteStoredRunArgs(entry.Args, removals, updates)
+	}
 	return applyServiceSetSnapshotFlags(entry, flags)
 }
 
 type runFlagUpdate struct {
 	Name  string
 	Value string
+}
+
+func serviceSetNetworkRunFlagChanges(flags cli.ServiceSetFlags) (map[string]bool, []runFlagUpdate) {
+	removals := map[string]bool{"--ts-auth-key": true}
+	updates := make([]runFlagUpdate, 0, 8)
+	set := func(supplied bool, name, value string) {
+		if !supplied {
+			return
+		}
+		removals[name] = true
+		if value = strings.TrimSpace(value); value != "" {
+			updates = append(updates, runFlagUpdate{Name: name, Value: value})
+		}
+	}
+	set(flags.NetSet, "--net", flags.Net)
+	set(flags.TsVerSet, "--ts-ver", flags.TsVer)
+	set(flags.TsExitSet, "--ts-exit", flags.TsExit)
+	if flags.TsTagsSet {
+		removals["--ts-tags"] = true
+		for _, tag := range flags.TsTags {
+			if tag = strings.TrimSpace(tag); tag != "" {
+				updates = append(updates, runFlagUpdate{Name: "--ts-tags", Value: tag})
+			}
+		}
+	}
+	set(flags.MacvlanParentSet, "--macvlan-parent", flags.MacvlanParent)
+	if flags.MacvlanVlanSet {
+		removals["--macvlan-vlan"] = true
+		if flags.MacvlanVlan != 0 {
+			updates = append(updates, runFlagUpdate{Name: "--macvlan-vlan", Value: strconv.Itoa(flags.MacvlanVlan)})
+		}
+	}
+	set(flags.MacvlanMacSet, "--macvlan-mac", flags.MacvlanMac)
+	return removals, updates
 }
 
 func saveVMSetConfig(cfgLoc *projectConfigLocation, hostOverride string, flags cli.VMSetFlags) (bool, error) {
@@ -2790,6 +2856,7 @@ func addVMSetNetworkRunFlagChanges(flags cli.VMSetFlags, removals map[string]boo
 }
 
 func rewriteStoredRunArgs(args []string, removals map[string]bool, updates []runFlagUpdate) []string {
+	hadDelimiter := slices.Contains(args, "--")
 	flagArgs, payloadArgs := splitRunArgsForParsing(rehydrateRunArgs(args))
 	out := removeRunFlags(flagArgs, removals)
 	for _, update := range updates {
@@ -2798,6 +2865,9 @@ func rewriteStoredRunArgs(args []string, removals map[string]bool, updates []run
 	if len(payloadArgs) != 0 {
 		out = append(out, "--")
 		out = append(out, payloadArgs...)
+	}
+	if hadDelimiter {
+		return normalizeArgs(out)
 	}
 	return normalizeRunArgs(out)
 }
@@ -2906,15 +2976,7 @@ func printServiceSetSyncHint(w io.Writer, service string, host string) error {
 	if _, err := fmt.Fprintln(w, "Run from the project directory, or run:"); err != nil {
 		return err
 	}
-	cmd := "yeet"
-	if host = strings.TrimSpace(host); host != "" {
-		cmd += " --host " + host
-	}
-	if strings.TrimSpace(service) == "" {
-		_, err := fmt.Fprintf(w, "  %s service sync <svc> --config ~/yeet-services/yeet.toml\n", cmd)
-		return err
-	}
-	_, err := fmt.Fprintf(w, "  %s service sync %s --config ~/yeet-services/yeet.toml\n", cmd, service)
+	_, err := fmt.Fprintf(w, "  %s\n", serviceSetSyncCommand(service, host, ""))
 	return err
 }
 

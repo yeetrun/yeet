@@ -117,10 +117,22 @@ func ISOTopologyEnsureCommands(spec ISOTopologySpec) ([]ISOCommand, error) {
 		Name: "ip", Args: []string{"route", "replace", "blackhole", spec.Pool.String(), "metric", isoAggregateRouteMetric},
 	}}
 	if spec.Allocation.Kind == string(iso.PayloadVM) {
+		iface := spec.Allocation.Interface
+		commands = append(commands,
+			ISOCommand{Name: "sysctl", Args: []string{"-w", "net.ipv4.conf." + iface + ".forwarding=1"}, IgnoreNotFound: true},
+			ISOCommand{Name: "sysctl", Args: []string{"-w", "net.ipv4.conf." + iface + ".rp_filter=1"}, IgnoreNotFound: true},
+			ISOCommand{Name: "sysctl", Args: []string{"-w", "net.ipv4.conf." + iface + ".accept_local=0"}, IgnoreNotFound: true},
+			ISOCommand{Name: "sysctl", Args: []string{"-w", "net.ipv4.conf." + iface + ".route_localnet=0"}, IgnoreNotFound: true},
+			ISOCommand{Name: "sysctl", Args: []string{"-w", "net.ipv6.conf." + iface + ".disable_ipv6=1"}, IgnoreNotFound: true},
+		)
 		return commands, nil
 	}
 	allocation := spec.Allocation
 	bridge := isoTopologyBridge(allocation)
+	namespaceForwarding := "1"
+	if allocation.Kind == string(iso.PayloadNative) {
+		namespaceForwarding = "0"
+	}
 	hostCIDR := netip.PrefixFrom(allocation.HostIP, allocation.Link.Bits()).String()
 	peerCIDR := netip.PrefixFrom(allocation.PeerIP, allocation.Link.Bits()).String()
 	commands = append(commands,
@@ -129,6 +141,7 @@ func ISOTopologyEnsureCommands(spec ISOTopologySpec) ([]ISOCommand, error) {
 		ISOCommand{Name: "ip", Args: []string{"link", "set", allocation.PeerInterface, "netns", allocation.NetNS}, IgnoreNotFound: true},
 		ISOCommand{Name: "ip", Args: []string{"address", "replace", hostCIDR, "dev", allocation.Interface}},
 		ISOCommand{Name: "ip", Args: []string{"link", "set", allocation.Interface, "up"}},
+		ISOCommand{Name: "udevadm", Args: []string{"settle", "--timeout=10"}},
 		ISOCommand{Name: "sysctl", Args: []string{"-w", "net.ipv4.ip_forward=1"}},
 		ISOCommand{Name: "sysctl", Args: []string{"-w", "net.ipv4.conf." + allocation.Interface + ".forwarding=1"}},
 		ISOCommand{Name: "sysctl", Args: []string{"-w", "net.ipv4.conf." + allocation.Interface + ".rp_filter=1"}},
@@ -138,16 +151,19 @@ func ISOTopologyEnsureCommands(spec ISOTopologySpec) ([]ISOCommand, error) {
 		isoNetNSCommand(allocation.NetNS, "ip", "link", "set", "lo", "up"),
 		isoNetNSCommand(allocation.NetNS, "ip", "address", "replace", peerCIDR, "dev", allocation.PeerInterface),
 		isoNetNSCommand(allocation.NetNS, "ip", "link", "set", allocation.PeerInterface, "up"),
-		isoNetNSCommand(allocation.NetNS, "sysctl", "-w", "net.ipv4.ip_forward=1"),
+		isoNetNSCommand(allocation.NetNS, "sysctl", "-w", "net.ipv4.ip_forward="+namespaceForwarding),
 		isoNetNSCommand(allocation.NetNS, "sysctl", "-w", "net.ipv4.conf.all.rp_filter=1"),
 		isoNetNSCommand(allocation.NetNS, "sysctl", "-w", "net.ipv4.conf.default.rp_filter=1"),
 		isoNetNSCommand(allocation.NetNS, "sysctl", "-w", "net.ipv4.conf."+allocation.PeerInterface+".rp_filter=1"),
 		isoNetNSCommand(allocation.NetNS, "sysctl", "-w", "net.ipv6.conf.all.disable_ipv6=1"),
 		isoNetNSCommand(allocation.NetNS, "sysctl", "-w", "net.ipv6.conf.default.disable_ipv6=1"),
 		isoNetNSCommand(allocation.NetNS, "sysctl", "-w", "net.ipv6.conf."+allocation.PeerInterface+".disable_ipv6=1"),
-		ISOCommand{Name: "ip", Args: []string{"route", "replace", allocation.Project.String(), "via", allocation.PeerIP.String(), "dev", allocation.Interface}},
 		isoNetNSCommand(allocation.NetNS, "ip", "route", "replace", "default", "via", allocation.HostIP.String(), "dev", allocation.PeerInterface),
 	)
+	if allocation.Kind == string(iso.PayloadNative) {
+		return commands, nil
+	}
+	commands = append(commands, ISOCommand{Name: "ip", Args: []string{"route", "replace", allocation.Project.String(), "via", allocation.PeerIP.String(), "dev", allocation.Interface}})
 	commands = append(commands, isoRouterPolicyCommands(spec, bridge)...)
 	return commands, nil
 }
@@ -168,6 +184,9 @@ func validateISOTopologySpec(spec ISOTopologySpec) error {
 	}
 	if spec.Allocation.Kind == string(iso.PayloadVM) {
 		return validateISOVMTopology(spec.Allocation)
+	}
+	if spec.Allocation.Kind == string(iso.PayloadNative) {
+		return validateISONativeTopology(spec)
 	}
 	return validateISORouterTopology(layout, spec)
 }
@@ -203,6 +222,23 @@ func validateISOVMTopology(allocation db.ISOAllocation) error {
 	if allocation.Project.IsValid() || allocation.Gateway.IsValid() || allocation.NetNS != "" || allocation.Bridge != "" ||
 		len(allocation.Components) != 0 || len(allocation.RetiredComponents) != 0 {
 		return fmt.Errorf("ISO VM topology must not contain router or project state")
+	}
+	return nil
+}
+
+func validateISONativeTopology(spec ISOTopologySpec) error {
+	a := spec.Allocation
+	if !isoInterfaceNameRE.MatchString(a.PeerInterface) {
+		return fmt.Errorf("invalid ISO native peer interface %q", a.PeerInterface)
+	}
+	if strings.TrimSpace(a.NetNS) == "" {
+		return fmt.Errorf("ISO native topology namespace is required")
+	}
+	if a.Project.IsValid() || a.Gateway.IsValid() || a.Bridge != "" || len(a.Components) != 0 || len(a.RetiredComponents) != 0 {
+		return fmt.Errorf("ISO native topology must not contain router or project state")
+	}
+	if spec.TailscaleInterface != "" {
+		return fmt.Errorf("ISO native topology does not support Tailscale")
 	}
 	return nil
 }
@@ -434,6 +470,9 @@ func VerifyISOTopology(ctx context.Context, spec ISOTopologySpec) error {
 	if err := verifyISOSysctlState(ctx, spec.Allocation); err != nil {
 		return err
 	}
+	if spec.Allocation.Kind == string(iso.PayloadNative) {
+		return nil
+	}
 	return verifyISORouterPolicy(ctx, spec)
 }
 
@@ -461,8 +500,10 @@ func verifyISORouteAndLinkState(ctx context.Context, allocation db.ISOAllocation
 	if err := verifyISOAddress(ctx, "root address", []string{"-o", "-4", "address", "show", "dev", allocation.Interface, "scope", "global"}, allocation.Interface, hostCIDR); err != nil {
 		return err
 	}
-	if err := verifyISORoute(ctx, "project route", []string{"-o", "route", "show", "exact", allocation.Project.String()}, allocation.Project.String(), allocation.PeerIP.String(), allocation.Interface); err != nil {
-		return err
+	if allocation.Kind != string(iso.PayloadNative) {
+		if err := verifyISORoute(ctx, "project route", []string{"-o", "route", "show", "exact", allocation.Project.String()}, allocation.Project.String(), allocation.PeerIP.String(), allocation.Interface); err != nil {
+			return err
+		}
 	}
 	nsPrefix := []string{"netns", "exec", allocation.NetNS, "ip"}
 	if err := verifyISOLinkUp(ctx, "namespace peer link", append(append([]string{}, nsPrefix...), "-o", "link", "show", "dev", allocation.PeerInterface), allocation.PeerInterface); err != nil {
@@ -563,6 +604,10 @@ func isoLinkFlagsContain(raw, want string) bool {
 }
 
 func verifyISOSysctlState(ctx context.Context, allocation db.ISOAllocation) error {
+	namespaceForwarding := "1"
+	if allocation.Kind == string(iso.PayloadNative) {
+		namespaceForwarding = "0"
+	}
 	for _, check := range []struct {
 		label string
 		name  string
@@ -575,7 +620,7 @@ func verifyISOSysctlState(ctx context.Context, allocation db.ISOAllocation) erro
 		{label: "root accept local", name: "sysctl", args: []string{"-n", "net.ipv4.conf." + allocation.Interface + ".accept_local"}, want: "0"},
 		{label: "root route localnet", name: "sysctl", args: []string{"-n", "net.ipv4.conf." + allocation.Interface + ".route_localnet"}, want: "0"},
 		{label: "root IPv6 disable", name: "sysctl", args: []string{"-n", "net.ipv6.conf." + allocation.Interface + ".disable_ipv6"}, want: "1"},
-		{label: "router forwarding", name: "ip", args: []string{"netns", "exec", allocation.NetNS, "sysctl", "-n", "net.ipv4.ip_forward"}, want: "1"},
+		{label: "namespace forwarding", name: "ip", args: []string{"netns", "exec", allocation.NetNS, "sysctl", "-n", "net.ipv4.ip_forward"}, want: namespaceForwarding},
 		{label: "router all source validation", name: "ip", args: []string{"netns", "exec", allocation.NetNS, "sysctl", "-n", "net.ipv4.conf.all.rp_filter"}, want: "1"},
 		{label: "router default source validation", name: "ip", args: []string{"netns", "exec", allocation.NetNS, "sysctl", "-n", "net.ipv4.conf.default.rp_filter"}, want: "1"},
 		{label: "router peer source validation", name: "ip", args: []string{"netns", "exec", allocation.NetNS, "sysctl", "-n", "net.ipv4.conf." + allocation.PeerInterface + ".rp_filter"}, want: "1"},
@@ -660,11 +705,14 @@ func ISOTopologyRemoveCommands(spec ISOTopologySpec) []ISOCommand {
 	if a.Kind == string(iso.PayloadVM) {
 		return nil
 	}
-	return []ISOCommand{
-		{Name: "ip", Args: []string{"route", "delete", a.Project.String(), "via", a.PeerIP.String(), "dev", a.Interface}, IgnoreNotFound: true},
+	commands := []ISOCommand{
 		{Name: "ip", Args: []string{"link", "delete", a.Interface}, IgnoreNotFound: true},
 		{Name: "ip", Args: []string{"netns", "delete", a.NetNS}, IgnoreNotFound: true},
 	}
+	if a.Kind == string(iso.PayloadNative) {
+		return commands
+	}
+	return append([]ISOCommand{{Name: "ip", Args: []string{"route", "delete", a.Project.String(), "via", a.PeerIP.String(), "dev", a.Interface}, IgnoreNotFound: true}}, commands...)
 }
 
 // RemoveISOTopology removes and verifies a per-service topology.
@@ -691,6 +739,9 @@ func VerifyISOTopologyAbsent(ctx context.Context, spec ISOTopologySpec) error {
 	}
 	if err := verifyISONamespaceAbsent(ctx, a.NetNS); err != nil {
 		return err
+	}
+	if a.Kind == string(iso.PayloadNative) {
+		return nil
 	}
 	return verifyISOProjectRouteAbsent(ctx, a.Project)
 }

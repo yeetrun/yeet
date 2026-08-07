@@ -53,6 +53,69 @@ func TestReserveISOAllocationStableAcrossRetries(t *testing.T) {
 	}
 }
 
+func TestReserveISONativeAllocationUsesOnlyPointToPointLink(t *testing.T) {
+	server := newISOAllocatorTestServer(t, "172.30.0.0/16")
+	allocation, err := server.reserveISOAllocation(context.Background(), "native", isoReservationRequest{
+		Kind:  iso.PayloadNative,
+		Modes: []string{"iso"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := allocation.Link.String(), "172.30.0.0/30"; got != want {
+		t.Fatalf("native link = %s, want %s", got, want)
+	}
+	if allocation.NetNS == "" {
+		t.Fatal("native namespace is empty")
+	}
+	if allocation.Project.IsValid() || allocation.Gateway.IsValid() || allocation.Bridge != "" || len(allocation.Components) != 0 {
+		t.Fatalf("native allocation contains router/project state: %#v", allocation)
+	}
+}
+
+func TestReserveISONativeAllocationDoesNotConsumeProjectCapacity(t *testing.T) {
+	server := newISOAllocatorTestServer(t, "172.30.0.0/16")
+	layout := mustISOLayout(t, "172.30.0.0/16")
+	data := newISOAllocatorData("172.30.0.0/16")
+	for index := range iso.MaxProjects {
+		project, err := layout.Project(index)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := fmt.Sprintf("used-%04d", index)
+		data.Services[name] = &db.Service{Name: name, ISO: &db.ISOAllocation{Project: project, State: string(iso.StateTombstoned)}}
+	}
+	setISOAllocatorData(t, server, data)
+
+	allocation, err := server.reserveISOAllocation(context.Background(), "native", isoReservationRequest{Kind: iso.PayloadNative, Modes: []string{"iso"}})
+	if err != nil {
+		t.Fatalf("reserve native with exhausted project pool: %v", err)
+	}
+	if allocation.Project.IsValid() {
+		t.Fatalf("native project = %s, want none", allocation.Project)
+	}
+}
+
+func TestReserveISOAllocationRejectsPayloadKindChange(t *testing.T) {
+	server := newISOAllocatorTestServer(t, "172.30.0.0/16")
+	if _, err := server.reserveISOAllocation(context.Background(), "app", isoReservationRequest{
+		Kind: iso.PayloadCompose, Modes: []string{"iso"}, Components: []string{"app"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := server.reserveISOAllocation(context.Background(), "app", isoReservationRequest{Kind: iso.PayloadNative, Modes: []string{"iso"}})
+	if err == nil || !strings.Contains(err.Error(), "payload kind") {
+		t.Fatalf("kind-changing reservation error = %v", err)
+	}
+	view, loadErr := server.serviceView("app")
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if view.ISO().Kind() != string(iso.PayloadCompose) {
+		t.Fatalf("rejected kind change mutated allocation: %#v", view.ISO().AsStruct())
+	}
+}
+
 func TestReserveISOAllocationPreservesRetiredComponentsAcrossRetries(t *testing.T) {
 	server := newISOAllocatorTestServer(t, "172.30.0.0/16")
 	initial, err := server.reserveISOAllocation(context.Background(), "app", isoReservationRequest{

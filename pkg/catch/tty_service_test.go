@@ -527,6 +527,44 @@ func TestStartAndRestartISOVMUseVMRunner(t *testing.T) {
 	}
 }
 
+func TestStartISOVMReleasesRuntimeTransactionBeforeRunner(t *testing.T) {
+	previousEnsure := ensureVMNetworkForServiceAction
+	defer func() { ensureVMNetworkForServiceAction = previousEnsure }()
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name: "devbox", ServiceType: db.ServiceTypeVM,
+		ISO: testISORuntimeAllocation("devbox", iso.StateStopped),
+	})
+	held := false
+	ensureVMNetworkForServiceAction = func(*Server, context.Context, string) error {
+		if !held {
+			t.Fatal("VM network preflight ran outside the runtime transaction")
+		}
+		return nil
+	}
+	runner := &recordingServiceRunner{onCall: func(call string) {
+		if call == "start" && held {
+			t.Fatal("VM runner started while holding the runtime transaction lock")
+		}
+	}}
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "devbox", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+		vmRuntimeTransactionFunc: func(_ context.Context, _ *Config, operation func() error) error {
+			held = true
+			defer func() { held = false }()
+			return operation()
+		},
+	}
+
+	if err := execer.startCmdFunc(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(runner.calls, []string{"start"}) {
+		t.Fatalf("runner calls = %#v, want start", runner.calls)
+	}
+}
+
 func TestStartISOVMStopsBeforeRunnerWhenNetworkEnsureFails(t *testing.T) {
 	previousEnsure := ensureVMNetworkForServiceAction
 	defer func() { ensureVMNetworkForServiceAction = previousEnsure }()
@@ -1365,22 +1403,32 @@ type recordingServiceRunner struct {
 	calls      []string
 	errs       map[string]error
 	logOptions *svc.LogOptions
+	onCall     func(string)
 }
 
 func (r *recordingServiceRunner) SetNewCmd(func(string, ...string) *exec.Cmd) {}
 
 func (r *recordingServiceRunner) Start() error {
 	r.calls = append(r.calls, "start")
+	if r.onCall != nil {
+		r.onCall("start")
+	}
 	return r.errs["start"]
 }
 
 func (r *recordingServiceRunner) Stop() error {
 	r.calls = append(r.calls, "stop")
+	if r.onCall != nil {
+		r.onCall("stop")
+	}
 	return r.errs["stop"]
 }
 
 func (r *recordingServiceRunner) Restart() error {
 	r.calls = append(r.calls, "restart")
+	if r.onCall != nil {
+		r.onCall("restart")
+	}
 	return r.errs["restart"]
 }
 

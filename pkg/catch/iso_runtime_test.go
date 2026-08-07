@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -102,6 +103,47 @@ func TestEnsureISONetworkMarksAllocationAndPoolReady(t *testing.T) {
 	allocation := dv.Services().Get("app").ISO()
 	if allocation.State() != string(iso.StateReady) || allocation.LastError() != "" {
 		t.Fatalf("allocation = %#v, want ready", allocation.AsStruct())
+	}
+}
+
+func TestISORuntimeSpecAcceptsIdentityIndependentNativeAndTimerWorkloads(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity *db.ServiceIdentity
+		timer    bool
+	}{
+		{name: "implicit identity"},
+		{name: "root", identity: &db.ServiceIdentity{RequestedUser: "root", RequestedGroup: "root"}},
+		{name: "non-root", identity: &db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "app", UID: 1001, GID: 1001}},
+		{name: "timer", timer: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			allocation := testISONativeRuntimeAllocation("native", iso.StateReserved)
+			server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{"native": allocation})
+			if _, _, err := server.cfg.DB.MutateService("native", func(_ *db.Data, service *db.Service) error {
+				service.ServiceType = db.ServiceTypeSystemd
+				service.Identity = tt.identity
+				if tt.timer {
+					service.Artifacts = db.ArtifactStore{db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/native.timer"}}}
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			withISORuntimeBackend(t, netns.BackendNFT)
+			dv, err := server.cfg.DB.Get()
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec, err := server.isoRuntimeSpec(dv, "native")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if spec.Topology.Allocation.Kind != string(iso.PayloadNative) || spec.Topology.Allocation.Project.IsValid() {
+				t.Fatalf("native topology = %#v", spec.Topology)
+			}
+		})
 	}
 }
 
@@ -293,9 +335,15 @@ func TestEnsureISONetworkDoesNotClearConflictUntilSiblingTopologyVerifies(t *tes
 		return nil
 	}
 	want := errors.New("sibling project route drift")
+	var events []string
 	verifyCalls := 0
+	ensureISOTopologyForRuntime = func(_ context.Context, spec netns.ISOTopologySpec) error {
+		events = append(events, "ensure:"+spec.Allocation.Interface)
+		return nil
+	}
 	verifyISOTopologyForRuntime = func(_ context.Context, spec netns.ISOTopologySpec) error {
 		verifyCalls++
+		events = append(events, "verify:"+spec.Allocation.Interface)
 		if spec.Allocation.Interface == testISORuntimeAllocation("other", iso.StateReady).Interface {
 			return want
 		}
@@ -306,6 +354,14 @@ func TestEnsureISONetworkDoesNotClearConflictUntilSiblingTopologyVerifies(t *tes
 	}
 	if verifyCalls != 1 {
 		t.Fatalf("sibling topology verify calls = %d, want 1", verifyCalls)
+	}
+	wantEvents := []string{
+		"ensure:" + testISORuntimeAllocation("app", iso.StateReserved).Interface,
+		"ensure:" + testISORuntimeAllocation("other", iso.StateReady).Interface,
+		"verify:" + testISORuntimeAllocation("other", iso.StateReady).Interface,
+	}
+	if !slices.Equal(events, wantEvents) {
+		t.Fatalf("events = %#v, want %#v", events, wantEvents)
 	}
 	dv, err := server.cfg.DB.Get()
 	if err != nil {
@@ -1135,6 +1191,15 @@ func testISORuntimeAllocation(name string, state iso.AllocationState) *db.ISOAll
 	return allocation
 }
 
+func testISONativeRuntimeAllocation(name string, state iso.AllocationState) *db.ISOAllocation {
+	layout, _ := iso.NewLayout(netip.MustParsePrefix("172.30.0.0/16"))
+	sum := sha256.Sum256([]byte(name))
+	link, _ := layout.Link(int(binary.BigEndian.Uint16(sum[:2])) % iso.MaxLinks)
+	allocation := newDBISOAllocation(name, isoReservationRequest{Kind: iso.PayloadNative, Modes: []string{"iso"}}, link)
+	allocation.State = string(state)
+	return allocation
+}
+
 func testISOAllocatorRuntimeAllocation(t *testing.T, name string, linkIndex, projectIndex int) *db.ISOAllocation {
 	t.Helper()
 	layout, err := iso.NewLayout(netip.MustParsePrefix("172.30.0.0/16"))
@@ -1786,6 +1851,84 @@ func TestTransitionAwayFromISOCommitsOnlyAfterVerifiedCleanup(t *testing.T) {
 	}
 	if _, ok := artifacts[db.ArtifactNetNSResolv]; ok {
 		t.Fatalf("retired ISO network artifact survived transition: %#v", artifacts[db.ArtifactNetNSResolv])
+	}
+}
+
+func TestCommitReplacementNetworkPersistsFullDesiredConfiguration(t *testing.T) {
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{
+		"app": testISORuntimeAllocation("app", iso.StateReady),
+	})
+	desired := db.ServiceNetworkConfig{
+		Modes: []string{"ts"}, TSVersion: "1.100.0", TSExitNode: "100.64.0.1", TSTags: []string{"tag:app"},
+	}
+	prepared := isoReplacementNetwork{
+		Modes: []string{"ts"}, Desired: desired.Clone(),
+		Tailscale: &db.TailscaleNetwork{Version: desired.TSVersion, ExitNode: desired.TSExitNode, Tags: slices.Clone(desired.TSTags)},
+	}
+	if err := server.commitReplacementNetwork("app", prepared); err != nil {
+		t.Fatal(err)
+	}
+	view, err := server.serviceView("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := view.Network().AsStruct(); !reflect.DeepEqual(got, &desired) {
+		t.Fatalf("desired network = %#v, want %#v", got, &desired)
+	}
+	if view.ISO().Valid() {
+		t.Fatalf("ISO allocation survived replacement commit: %#v", view.ISO().AsStruct())
+	}
+}
+
+func TestCommitReplacementNetworkAcceptsPersistenceEquivalentExpectedRecord(t *testing.T) {
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{
+		"app": testISORuntimeAllocation("app", iso.StateReady),
+	})
+	if _, _, err := server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
+		service.Network = &db.ServiceNetworkConfig{Modes: []string{"iso"}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	view, err := server.serviceView("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := view.AsStruct()
+	expected.Network.TSTags = []string{}
+	prepared := isoReplacementNetwork{
+		Modes: []string{"host"}, Desired: &db.ServiceNetworkConfig{Modes: []string{"host"}}, Expected: expected,
+	}
+	if err := server.commitReplacementNetwork("app", prepared); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCommitReplacementNetworkRejectsConcurrentServiceChange(t *testing.T) {
+	server := newISORuntimeTestServer(t, map[string]*db.ISOAllocation{
+		"app": testISORuntimeAllocation("app", iso.StateReady),
+	})
+	view, err := server.serviceView("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := view.AsStruct()
+	if _, _, err := server.cfg.DB.MutateService("app", func(_ *db.Data, service *db.Service) error {
+		service.LatestGeneration++
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	prepared := isoReplacementNetwork{Modes: []string{"host"}, Desired: (&db.ServiceNetworkConfig{Modes: []string{"host"}}), Expected: expected}
+	if err := server.commitReplacementNetwork("app", prepared); err == nil || !strings.Contains(err.Error(), "changed before ISO replacement commit") {
+		t.Fatalf("commitReplacementNetwork error = %v", err)
+	}
+	got, err := server.serviceView("app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ISO().Valid() || got.LatestGeneration() != expected.LatestGeneration+1 {
+		t.Fatalf("concurrent service change was overwritten: %#v", got.AsStruct())
 	}
 }
 

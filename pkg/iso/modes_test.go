@@ -18,11 +18,18 @@ func TestValidateNetworkMatrix(t *testing.T) {
 	}{
 		{name: "vm", req: NetworkRequest{Payload: PayloadVM, Modes: []string{"iso"}}},
 		{name: "compose tailscale", req: NetworkRequest{Payload: PayloadCompose, Modes: []string{"iso", "ts"}}},
+		{name: "explicit host", req: NetworkRequest{Payload: PayloadCompose, Modes: []string{"host"}}},
+		{name: "host cannot combine", req: NetworkRequest{Payload: PayloadCompose, Modes: []string{"host", "iso"}}, wantErr: "host cannot combine"},
 		{name: "svc conflict", req: NetworkRequest{Payload: PayloadCompose, Modes: []string{"iso", "svc"}}, wantErr: "cannot combine"},
 		{name: "lan conflict", req: NetworkRequest{Payload: PayloadContainer, Modes: []string{"iso", "lan"}}, wantErr: "cannot combine"},
 		{name: "vm tailscale", req: NetworkRequest{Payload: PayloadVM, Modes: []string{"iso", "ts"}}, wantErr: "VMs support only iso"},
-		{name: "native", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso"}}, wantErr: "native"},
-		{name: "cron", req: NetworkRequest{Payload: PayloadCron, Modes: []string{"iso"}}, wantErr: "cron"},
+		{name: "native binary", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso"}}},
+		{name: "native script", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso"}}},
+		{name: "native root", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso"}}},
+		{name: "native non-root", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso"}}},
+		{name: "native tailscale", req: NetworkRequest{Payload: PayloadNative, Modes: []string{"iso", "ts"}}, wantErr: "native ISO supports only iso"},
+		{name: "timer", req: NetworkRequest{Payload: PayloadCron, Modes: []string{"iso"}}},
+		{name: "timer tailscale", req: NetworkRequest{Payload: PayloadCron, Modes: []string{"iso", "ts"}}, wantErr: "timer ISO supports only iso"},
 		{name: "publish", req: NetworkRequest{Payload: PayloadContainer, Modes: []string{"iso"}, Published: true}, wantErr: "published ports"},
 	}
 	for _, tt := range tests {

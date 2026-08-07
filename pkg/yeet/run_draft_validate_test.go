@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,7 +100,7 @@ func TestValidateRunDraftRejectsUnsupportedNetworkModes(t *testing.T) {
 		Host:    "host-a",
 		Payload: "ghcr.io/example/app:latest",
 		Network: RunDraftNetwork{
-			Modes: []string{"svc", "host", "macvlan"},
+			Modes: []string{"svc", "macvlan"},
 		},
 	}
 	_, validation := validateRunDraft(context.Background(), draft, t.TempDir())
@@ -107,8 +108,25 @@ func TestValidateRunDraftRejectsUnsupportedNetworkModes(t *testing.T) {
 	if validation.OK {
 		t.Fatal("validation OK = true, want false")
 	}
-	if got := validation.fieldError("network.modes"); !strings.Contains(got, `unsupported network mode "host"`) {
-		t.Fatalf("network.modes error = %q, want unsupported host", got)
+	if got := validation.fieldError("network.modes"); !strings.Contains(got, `unsupported network mode "macvlan"`) {
+		t.Fatalf("network.modes error = %q, want unsupported macvlan", got)
+	}
+}
+
+func TestValidateRunDraftAcceptsExplicitHostNetwork(t *testing.T) {
+	stubRunDraftServiceInfo(t, func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	})
+	draft := RunDraft{
+		Service: "svc-a", Host: "host-a", Payload: "ghcr.io/example/app:latest", NewServiceOnly: true,
+		Network: RunDraftNetwork{Modes: []string{"host"}},
+	}
+	normalized, validation := validateRunDraft(context.Background(), draft, t.TempDir())
+	if !validation.OK {
+		t.Fatalf("validation OK = false, errors = %#v", validation.Errors)
+	}
+	if !slices.Equal(normalized.Network.Modes, []string{"host"}) {
+		t.Fatalf("network modes = %#v, want host", normalized.Network.Modes)
 	}
 }
 
@@ -139,7 +157,9 @@ func TestRunDraftISOCompatibility(t *testing.T) {
 		{name: "file python ISO", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: pythonPath, PayloadKind: "file", Network: RunDraftNetwork{Modes: []string{"iso"}}}},
 		{name: "ISO SVC", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: composePath, PayloadKind: "compose", Network: RunDraftNetwork{Modes: []string{"iso", "svc"}}}, wantField: "network.modes", wantErr: "cannot combine"},
 		{name: "VM ISO TS", draft: RunDraft{Service: "devbox", Host: "catch", Payload: "vm://ubuntu/26.04", PayloadKind: serviceTypeVM, Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "VMs support only iso"},
-		{name: "cron ISO", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: serviceTypeCron, Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso"}}}, wantField: "network.modes", wantErr: "cron root services"},
+		{name: "cron ISO", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: serviceTypeCron, Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
+		{name: "native ISO TS", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: cronPath, PayloadKind: "file", Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "native ISO supports only iso"},
+		{name: "cron ISO TS", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: serviceTypeCron, Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "timer ISO supports only iso"},
 		{name: "ISO publish", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso"}, Publish: []string{"8080:80"}}}, wantField: "network.publish", wantErr: "published ports"},
 		{name: "ISO publish reset", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso"}, PublishReset: true}}, wantField: "network.publish", wantErr: "published ports"},
 	}

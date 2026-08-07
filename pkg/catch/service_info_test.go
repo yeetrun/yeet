@@ -6,16 +6,20 @@ package catch
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"os"
 	"os/user"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/db"
+	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/svc"
 	"tailscale.com/tailcfg"
 )
@@ -59,6 +63,128 @@ func TestServiceIdentityInfoClassifiesNativeIdentityAndReportsDrift(t *testing.T
 	}
 	if got := serviceIdentityInfo((&db.Service{Name: "vm", ServiceType: db.ServiceTypeVM, Identity: persisted}).View()); got != nil {
 		t.Fatalf("VM identity = %#v, want nil", got)
+	}
+}
+
+func TestServiceNetworkInfoReportsEffectiveModes(t *testing.T) {
+	runtimeService := func(state iso.AllocationState) *db.Service {
+		return &db.Service{
+			SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.9")},
+			TSNet:      &db.TailscaleNetwork{},
+			ISO:        &db.ISOAllocation{State: string(state), DesiredModes: []string{"iso", "ts"}},
+		}
+	}
+	tests := []struct {
+		name    string
+		service *db.Service
+		want    []string
+	}{
+		{name: "host", service: &db.Service{Name: "host"}, want: []string{"host"}},
+		{name: "combined modes", service: &db.Service{SvcNetwork: &db.SvcNetwork{IPv4: netip.MustParseAddr("192.168.100.9")}, Macvlan: &db.MacvlanNetwork{}, TSNet: &db.TailscaleNetwork{}}, want: []string{"lan", "svc", "ts"}},
+		{name: "reserved ISO keeps runtime attachments", service: runtimeService(iso.StateReserved), want: []string{"svc", "ts"}},
+		{name: "staged ISO keeps runtime attachments", service: runtimeService(iso.StateStopped), want: []string{"svc", "ts"}},
+		{name: "ready ISO is effective", service: runtimeService(iso.StateReady), want: []string{"iso", "ts"}},
+		{name: "removing ISO keeps runtime attachments", service: runtimeService(iso.StateRemoving), want: []string{"svc", "ts"}},
+		{name: "tombstoned ISO keeps runtime attachments", service: runtimeService(iso.StateTombstoned), want: []string{"svc", "ts"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := serviceNetworkInfo(tt.service.View()).Modes; !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("effective modes = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestServiceNetworkDesiredInfoUsesPersistedConfigWithoutMutatingLegacyService(t *testing.T) {
+	legacy := &db.Service{
+		Name:       "legacy",
+		SvcNetwork: &db.SvcNetwork{},
+		TSNet:      &db.TailscaleNetwork{Version: "1.101.284", Tags: []string{"tag:app"}},
+	}
+	before, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := serviceNetworkInfo(legacy.View())
+	after, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("service info mutated legacy service JSON: before %s after %s", before, after)
+	}
+	if got, want := info.Modes, []string{"svc", "ts"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("effective modes = %#v, want %#v", got, want)
+	}
+	if info.Desired == nil || !reflect.DeepEqual(info.Desired.Modes, []string{"svc", "ts"}) || info.Desired.TSVersion != "1.101.284" || !reflect.DeepEqual(info.Desired.TSTags, []string{"tag:app"}) {
+		t.Fatalf("desired network = %#v", info.Desired)
+	}
+	if legacy.Network != nil {
+		t.Fatalf("service info wrote a lazy migration: %#v", legacy.Network)
+	}
+}
+
+func TestAuthKeyRedactionFromSavedNetworkAndServiceInfo(t *testing.T) {
+	const secret = "tskey-auth-task6-must-not-leak"
+	flags, _, err := cli.ParseServiceSet([]string{
+		"app", "--net=lan,ts", "--ts-tags=tag:app", "--ts-ver=1.96.1",
+		"--ts-exit=exit.example", "--macvlan-parent=vmbr0", "--macvlan-vlan=42",
+		"--macvlan-mac=02:00:00:00:00:42", "--ts-auth-key=" + secret,
+	})
+	if err != nil {
+		t.Fatalf("ParseServiceSet: %v", err)
+	}
+	saved, err := applyServiceNetworkPatch(db.ServiceNetworkConfig{Modes: []string{"host"}}, flags)
+	if err != nil {
+		t.Fatalf("applyServiceNetworkPatch: %v", err)
+	}
+	service := &db.Service{Name: "app", Network: &saved}
+	info := serviceNetworkInfo(service.View())
+	wantDesired := &catchrpc.ServiceNetworkSettings{
+		Modes:         []string{"lan", "ts"},
+		TSVersion:     "1.96.1",
+		TSExitNode:    "exit.example",
+		TSTags:        []string{"tag:app"},
+		MacvlanParent: "vmbr0",
+		MacvlanVLAN:   42,
+		MacvlanMAC:    "02:00:00:00:00:42",
+	}
+	if !reflect.DeepEqual(info.Desired, wantDesired) {
+		t.Fatalf("RPC desired network = %#v, want %#v", info.Desired, wantDesired)
+	}
+	rpcRaw, err := json.Marshal(info)
+	if err != nil {
+		t.Fatalf("marshal RPC network info: %v", err)
+	}
+	savedRaw, err := json.Marshal(saved)
+	if err != nil {
+		t.Fatalf("marshal saved network: %v", err)
+	}
+	for name, raw := range map[string][]byte{"RPC network info": rpcRaw, "saved network": savedRaw} {
+		if strings.Contains(string(raw), secret) || strings.Contains(string(raw), "tsAuthKey") {
+			t.Fatalf("%s leaked auth key: %s", name, raw)
+		}
+	}
+	for _, want := range []string{
+		`"modes":["lan","ts"]`, `"tsVersion":"1.96.1"`, `"tsExitNode":"exit.example"`,
+		`"tsTags":["tag:app"]`, `"macvlanParent":"vmbr0"`, `"macvlanVlan":42`,
+		`"macvlanMac":"02:00:00:00:00:42"`,
+	} {
+		if !strings.Contains(string(rpcRaw), want) {
+			t.Fatalf("RPC network info = %s, want %s", rpcRaw, want)
+		}
+	}
+
+	badFlags := flags
+	badFlags.TsTags = nil
+	badFlags.TsTagsSet = true
+	_, err = applyServiceNetworkPatch(saved, badFlags)
+	if err == nil {
+		t.Fatal("applyServiceNetworkPatch accepted Tailscale without tags")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("network validation error leaked auth key: %v", err)
 	}
 }
 

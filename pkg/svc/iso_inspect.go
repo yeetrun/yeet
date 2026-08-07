@@ -395,7 +395,7 @@ func safeISOContainerNamespaceMode(kind, mode string) bool {
 	if mode == "" {
 		return true
 	}
-	return kind == "cgroup" && mode == "private"
+	return mode == "private" && (kind == "cgroup" || kind == "ipc")
 }
 
 func inspectISONetworkSettings(inspection *ISOInspection, opts ISOInspectOptions, component string, container isoDockerInspectContainer) {
@@ -587,9 +587,12 @@ func defaultISOInspectRunner(opts ISOInspectOptions) isoInspectRunner {
 		if opts.ProjectDir != "" {
 			cmd.Dir = opts.ProjectDir
 		}
+		cmd.Stdout = nil
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
 		output, err := cmd.Output()
 		if err != nil {
-			return nil, fmt.Errorf("docker %s: %w", operation, err)
+			return nil, fmt.Errorf("docker %s: %w: %s", operation, err, strings.TrimSpace(stderr.String()))
 		}
 		return output, nil
 	}

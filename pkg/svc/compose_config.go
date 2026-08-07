@@ -46,6 +46,8 @@ func ResolveComposeJSON(ctx context.Context, opts ComposeResolveOptions) ([]byte
 	}
 	cmd := newCmd(ctx, docker, args...)
 	cmd.Dir = opts.ProjectDir
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("resolve Docker Compose application model: %w: %s", err, strings.TrimSpace(string(out)))

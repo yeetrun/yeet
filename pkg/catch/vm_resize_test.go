@@ -45,6 +45,27 @@ func TestVMSetRejectsRunningVM(t *testing.T) {
 	}
 }
 
+func TestVMSetRejectsRunningVMNetworkChangeBeforePlanning(t *testing.T) {
+	server := newTestServer(t)
+	seedVMForResize(t, server, "devbox", t.TempDir(), vmDiskBackendRaw)
+	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return true, nil })
+	withServiceSetVMNetworkRunner(t, func([]string) error {
+		t.Fatal("running VM network change reached the network runner")
+		return nil
+	})
+
+	err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{
+		Net: "iso", NetworkChange: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), `cannot change VM settings while "devbox" is running; stop it first`) {
+		t.Fatalf("error = %v, want stopped-VM requirement", err)
+	}
+	service := getTestService(t, server, "devbox")
+	if got := vmNetworkModesForServiceSet(service.VM.Networks); got != "svc" {
+		t.Fatalf("network modes = %q, want unchanged svc", got)
+	}
+}
+
 func TestVMSetUpdatesShapeAndFirecrackerConfig(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)

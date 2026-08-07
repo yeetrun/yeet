@@ -521,9 +521,14 @@ func runArgsWithStoredLockedFlags(entry ServiceEntry, runArgs []string) ([]strin
 
 func storedLockedRunFlagsPrefix(storedFlags cli.RunFlags, runArgs []string) []string {
 	var prefix []string
-	if net := strings.TrimSpace(storedFlags.Net); net != "" && !runArgsHaveFlag(runArgs, "--net") {
-		prefix = append(prefix, "--net="+net)
+	appendValue := func(name, value string) {
+		if value = strings.TrimSpace(value); value != "" && !runArgsHaveFlag(runArgs, name) {
+			prefix = append(prefix, name+"="+value)
+		}
 	}
+	appendValue("--net", storedFlags.Net)
+	appendValue("--ts-ver", storedFlags.TsVer)
+	appendValue("--ts-exit", storedFlags.TsExit)
 	if len(storedFlags.TsTags) != 0 && !runArgsHaveFlag(runArgs, "--ts-tags") {
 		for _, tag := range storedFlags.TsTags {
 			tag = strings.TrimSpace(tag)
@@ -532,6 +537,11 @@ func storedLockedRunFlagsPrefix(storedFlags cli.RunFlags, runArgs []string) []st
 			}
 		}
 	}
+	appendValue("--macvlan-parent", storedFlags.MacvlanParent)
+	if storedFlags.MacvlanVlan != 0 && !runArgsHaveFlag(runArgs, "--macvlan-vlan") {
+		prefix = append(prefix, "--macvlan-vlan="+strconv.Itoa(storedFlags.MacvlanVlan))
+	}
+	appendValue("--macvlan-mac", storedFlags.MacvlanMac)
 	return prefix
 }
 
@@ -549,29 +559,8 @@ func ensureLockedRunFlags(entry ServiceEntry, runArgs []string) error {
 	if entry.Name == "" || entry.Host == "" {
 		return nil
 	}
-	storedFlags, _, err := cli.ParseRun(rehydrateRunArgs(entry.Args))
-	if err != nil {
-		return err
-	}
-	newFlags, _, err := cli.ParseRun(runArgs)
-	if err != nil {
-		return err
-	}
-	if strings.TrimSpace(storedFlags.Net) != strings.TrimSpace(newFlags.Net) || !tagsEqual(storedFlags.TsTags, newFlags.TsTags) {
-		return fmt.Errorf("cannot change --net or --ts-tags after initial deploy; remove with --clean-config and redeploy")
-	}
-	return nil
-}
-
-func tagsEqual(a, b []string) bool {
-	if len(a) == 0 && len(b) == 0 {
-		return true
-	}
-	aa := append([]string{}, a...)
-	bb := append([]string{}, b...)
-	sort.Strings(aa)
-	sort.Strings(bb)
-	return reflect.DeepEqual(aa, bb)
+	_, _, err := cli.ParseRun(runArgs)
+	return err
 }
 
 type runPayloadFunc func(string, []string) error
@@ -601,6 +590,9 @@ func runWithChangesToWithRunner(stdout io.Writer, payload string, runArgs []stri
 }
 
 func runWithChangesToWithContextRunner(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadContextFunc, alwaysDeployPayload bool) error {
+	if err := rejectExistingRunNetworkChange(ctx, entry, runArgs); err != nil {
+		return err
+	}
 	storedArgs := runArgsWithServiceRootOptions(entry.Args, serviceRootOptions{Root: entry.ServiceRoot, ZFS: entry.ServiceRootZFS})
 	storedArgs = runArgsWithSnapshotOptions(storedArgs, snapshotOptions{
 		Snapshots: entry.Snapshots,
@@ -655,6 +647,148 @@ func writeRunDeployStatus(stdout io.Writer, summary runChangeSummary) error {
 		return writeRunChangeLine(stdout, "Updated run config")
 	}
 	return nil
+}
+
+var fetchRunChangeServiceInfoFn = func(ctx context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+	return newRPCClient(host).ServiceInfo(ctx, service)
+}
+
+func rejectExistingRunNetworkChange(ctx context.Context, entry ServiceEntry, runArgs []string) error {
+	if strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Host) == "" || serviceEntryIsVM(entry) {
+		return nil
+	}
+	requested, authKeySet, err := requestedRunNetworkSettings(runArgs)
+	if err != nil {
+		return err
+	}
+	response, err := fetchRunChangeServiceInfoFn(ctx, entry.Host, entry.Name)
+	if err != nil {
+		return err
+	}
+	if !response.Found {
+		return nil
+	}
+	if !authKeySet && reflect.DeepEqual(requested, authoritativeRunNetworkSettings(response.Info.Network)) {
+		return nil
+	}
+	detail := ""
+	if authKeySet {
+		detail = "; move the explicit --ts-auth-key to service set"
+	}
+	return fmt.Errorf("network changes for existing services require `yeet service set <service> ...`%s", detail)
+}
+
+func requestedRunNetworkSettings(runArgs []string) (catchrpc.ServiceNetworkSettings, bool, error) {
+	flags, _, err := cli.ParseRun(runArgs)
+	if err != nil {
+		return catchrpc.ServiceNetworkSettings{}, false, err
+	}
+	modes, err := normalizeRunNetworkModes(flags.Net)
+	if err != nil {
+		return catchrpc.ServiceNetworkSettings{}, false, err
+	}
+	return normalizeRunNetworkSettings(catchrpc.ServiceNetworkSettings{
+		Modes: modes, TSVersion: flags.TsVer, TSExitNode: flags.TsExit, TSTags: flags.TsTags,
+		MacvlanParent: flags.MacvlanParent, MacvlanVLAN: flags.MacvlanVlan, MacvlanMAC: flags.MacvlanMac,
+	}), runArgsHaveFlag(runArgs, "--ts-auth-key"), nil
+}
+
+func authoritativeRunNetworkSettings(network catchrpc.ServiceNetwork) catchrpc.ServiceNetworkSettings {
+	if network.Desired != nil {
+		return normalizeRunNetworkSettings(*network.Desired)
+	}
+	modes := normalizeRunNetworkModeValues(network.Modes)
+	if len(modes) == 0 {
+		if network.ISO != nil {
+			modes = normalizeRunNetworkModeValues(network.ISO.Modes)
+		} else {
+			if strings.TrimSpace(network.SvcIP) != "" {
+				modes = append(modes, "svc")
+			}
+			if network.Macvlan != nil {
+				modes = append(modes, "lan")
+			}
+			if network.Tailscale != nil {
+				modes = append(modes, "ts")
+			}
+			modes = normalizeRunNetworkModeValues(modes)
+		}
+	}
+	if len(modes) == 0 {
+		modes = []string{"host"}
+	}
+	settings := catchrpc.ServiceNetworkSettings{Modes: modes}
+	if network.Tailscale != nil {
+		settings.TSVersion = network.Tailscale.Version
+		settings.TSExitNode = network.Tailscale.ExitNode
+		settings.TSTags = network.Tailscale.Tags
+	}
+	if network.Macvlan != nil {
+		settings.MacvlanParent = network.Macvlan.Parent
+		settings.MacvlanVLAN = network.Macvlan.VLAN
+		settings.MacvlanMAC = network.Macvlan.Mac
+	}
+	return normalizeRunNetworkSettings(settings)
+}
+
+func normalizeRunNetworkSettings(settings catchrpc.ServiceNetworkSettings) catchrpc.ServiceNetworkSettings {
+	settings.Modes = normalizeRunNetworkModeValues(settings.Modes)
+	if len(settings.Modes) == 0 {
+		settings.Modes = []string{"host"}
+	}
+	settings.TSVersion = strings.TrimSpace(settings.TSVersion)
+	settings.TSExitNode = strings.TrimSpace(settings.TSExitNode)
+	settings.TSTags = normalizeRunNetworkTags(settings.TSTags)
+	settings.MacvlanParent = strings.TrimSpace(settings.MacvlanParent)
+	settings.MacvlanMAC = strings.TrimSpace(settings.MacvlanMAC)
+	return settings
+}
+
+func normalizeRunNetworkModes(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.EqualFold(raw, "host") {
+		return []string{"host"}, nil
+	}
+	parts := strings.Split(raw, ",")
+	modes := normalizeRunNetworkModeValues(parts)
+	for _, mode := range modes {
+		switch mode {
+		case "svc", "lan", "ts", "iso":
+		default:
+			return nil, fmt.Errorf("unsupported network mode %q", mode)
+		}
+	}
+	return modes, nil
+}
+
+func normalizeRunNetworkModeValues(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func normalizeRunNetworkTags(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	out := make([]string, 0, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func writeRunChangeLine(stdout io.Writer, format string, args ...any) error {

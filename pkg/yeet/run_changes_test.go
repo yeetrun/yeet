@@ -152,6 +152,183 @@ func TestDetectRunChangesServiceRootZFSOnly(t *testing.T) {
 	}
 }
 
+func TestRunRejectsExistingNetworkChangesBeforeRunner(t *testing.T) {
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldInfo := fetchRunChangeServiceInfoFn
+	defer func() {
+		fetchRemoteArtifactHashesFn = oldHashes
+		fetchRunChangeServiceInfoFn = oldInfo
+	}()
+
+	payload := filepath.Join(t.TempDir(), "app")
+	if err := os.WriteFile(payload, []byte("payload\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	hash, err := hashFileSHA256(payload)
+	if err != nil {
+		t.Fatalf("hash payload: %v", err)
+	}
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{
+			Found:   true,
+			Payload: &catchrpc.ArtifactHash{Kind: "binary", SHA256: hash},
+		}, true, nil
+	}
+	tests := []struct {
+		name    string
+		runArgs []string
+		desired catchrpc.ServiceNetworkSettings
+	}{
+		{name: "modes", runArgs: []string{"--net=iso"}, desired: catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}},
+		{name: "tags", runArgs: []string{"--net=ts", "--ts-tags=tag:new"}, desired: catchrpc.ServiceNetworkSettings{Modes: []string{"ts"}, TSTags: []string{"tag:old"}}},
+		{name: "version", runArgs: []string{"--net=ts", "--ts-ver=1.2.3"}, desired: catchrpc.ServiceNetworkSettings{Modes: []string{"ts"}, TSVersion: "1.2.2"}},
+		{name: "exit node", runArgs: []string{"--net=ts", "--ts-exit=new"}, desired: catchrpc.ServiceNetworkSettings{Modes: []string{"ts"}, TSExitNode: "old"}},
+		{name: "macvlan parent", runArgs: []string{"--net=lan", "--macvlan-parent=eno2"}, desired: catchrpc.ServiceNetworkSettings{Modes: []string{"lan"}, MacvlanParent: "eno1"}},
+		{name: "macvlan vlan", runArgs: []string{"--net=lan", "--macvlan-vlan=20"}, desired: catchrpc.ServiceNetworkSettings{Modes: []string{"lan"}, MacvlanVLAN: 10}},
+		{name: "macvlan mac", runArgs: []string{"--net=lan", "--macvlan-mac=02:00:00:00:00:02"}, desired: catchrpc.ServiceNetworkSettings{Modes: []string{"lan"}, MacvlanMAC: "02:00:00:00:00:01"}},
+		{name: "auth key", runArgs: []string{"--net=ts", "--ts-auth-key=secret"}, desired: catchrpc.ServiceNetworkSettings{Modes: []string{"ts"}}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetchRunChangeServiceInfoFn = func(_ context.Context, host, service string) (catchrpc.ServiceInfoResponse, error) {
+				if host != "catch.example" || service != "api" {
+					t.Fatalf("service info target = %s/%s, want catch.example/api", host, service)
+				}
+				return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{Network: catchrpc.ServiceNetwork{Desired: &tt.desired}}}, nil
+			}
+			runs := 0
+			err := runWithChangesToWithContextRunner(
+				context.Background(), io.Discard, payload, tt.runArgs, "", ServiceEntry{Name: "api", Host: "catch.example"}, false,
+				func(context.Context, string, []string) error { runs++; return nil }, false,
+			)
+			if err == nil || !strings.Contains(err.Error(), "network changes for existing services require `yeet service set <service> ...`") {
+				t.Fatalf("error = %v, want service set guidance", err)
+			}
+			if tt.name == "auth key" && !strings.Contains(err.Error(), "--ts-auth-key") {
+				t.Fatalf("auth-key error = %v, want explicit auth-key guidance", err)
+			}
+			if runs != 0 {
+				t.Fatalf("runner calls = %d, want 0", runs)
+			}
+		})
+	}
+}
+
+func TestRunNetworkGuardAllowsUnchangedNetworkAndInitialDeploy(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	defer func() { fetchRunChangeServiceInfoFn = oldInfo }()
+
+	tests := []struct {
+		name    string
+		runArgs []string
+		remote  catchrpc.ServiceNetwork
+		found   bool
+	}{
+		{
+			name:    "desired settings normalize",
+			runArgs: []string{"--pull", "--net=ts,lan", "--ts-ver=1.2.3", "--ts-exit=exit", "--ts-tags=tag:b", "--ts-tags=tag:a", "--macvlan-parent=eno1", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01", "app-arg"},
+			remote: catchrpc.ServiceNetwork{Desired: &catchrpc.ServiceNetworkSettings{
+				Modes: []string{"lan", "ts"}, TSVersion: "1.2.3", TSExitNode: "exit", TSTags: []string{"tag:a", "tag:b"},
+				MacvlanParent: "eno1", MacvlanVLAN: 10, MacvlanMAC: "02:00:00:00:00:01",
+			}},
+			found: true,
+		},
+		{
+			name:    "legacy effective fallback",
+			runArgs: []string{"--net=ts", "--ts-ver=1.2.3", "--ts-exit=exit", "--ts-tags=tag:a"},
+			remote:  catchrpc.ServiceNetwork{Modes: []string{"ts"}, Tailscale: &catchrpc.ServiceTailscale{Version: "1.2.3", ExitNode: "exit", Tags: []string{"tag:a"}}},
+			found:   true,
+		},
+		{
+			name:    "not found remains initial deploy",
+			runArgs: []string{"--net=iso"},
+			found:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+				return catchrpc.ServiceInfoResponse{Found: tt.found, Info: catchrpc.ServiceInfo{Network: tt.remote}}, nil
+			}
+			if err := rejectExistingRunNetworkChange(context.Background(), ServiceEntry{Name: "api", Host: "catch.example"}, tt.runArgs); err != nil {
+				t.Fatalf("rejectExistingRunNetworkChange error: %v", err)
+			}
+		})
+	}
+}
+
+func TestRunUnchangedNetworkAllowsOtherRedeploymentChanges(t *testing.T) {
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldInfo := fetchRunChangeServiceInfoFn
+	defer func() {
+		fetchRemoteArtifactHashesFn = oldHashes
+		fetchRunChangeServiceInfoFn = oldInfo
+	}()
+	payload := filepath.Join(t.TempDir(), "app")
+	if err := os.WriteFile(payload, []byte("payload\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := hashFileSHA256(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: true, Payload: &catchrpc.ArtifactHash{Kind: "binary", SHA256: hash}}, true, nil
+	}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		desired := catchrpc.ServiceNetworkSettings{Modes: []string{"host"}}
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{Network: catchrpc.ServiceNetwork{Desired: &desired}}}, nil
+	}
+	runs := 0
+	err = runWithChangesToWithContextRunner(
+		context.Background(), io.Discard, payload, []string{"--net=host", "--pull"}, "",
+		ServiceEntry{Name: "api", Host: "catch.example", Args: []string{"--net=host"}}, false,
+		func(context.Context, string, []string) error { runs++; return nil }, false,
+	)
+	if err != nil {
+		t.Fatalf("runWithChangesToWithContextRunner: %v", err)
+	}
+	if runs != 1 {
+		t.Fatalf("runner calls = %d, want 1 for non-network config change", runs)
+	}
+}
+
+func TestRunPreservesStoredNetworkFlagsForUnrelatedOverrides(t *testing.T) {
+	entry := ServiceEntry{Args: []string{
+		"--net=ts,lan", "--ts-ver=1.2.3", "--ts-exit=exit", "--ts-tags=tag:api",
+		"--macvlan-parent=eno1", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01",
+	}}
+	got, err := effectiveRunArgsForExistingEntry(entry, []string{"--pull"})
+	if err != nil {
+		t.Fatalf("effectiveRunArgsForExistingEntry: %v", err)
+	}
+	want := []string{
+		"--net=ts,lan", "--ts-ver=1.2.3", "--ts-exit=exit", "--ts-tags=tag:api",
+		"--macvlan-parent=eno1", "--macvlan-vlan=10", "--macvlan-mac=02:00:00:00:00:01", "--pull",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("effective run args = %#v, want %#v", got, want)
+	}
+}
+
+func TestRunNetworkGuardFailsClosedOnServiceInfoError(t *testing.T) {
+	oldInfo := fetchRunChangeServiceInfoFn
+	defer func() { fetchRunChangeServiceInfoFn = oldInfo }()
+	want := errors.New("service info unavailable")
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{}, want
+	}
+
+	err := rejectExistingRunNetworkChange(
+		context.Background(), ServiceEntry{Name: "api", Host: "catch.example"}, []string{"--net=iso"},
+	)
+	if !errors.Is(err, want) {
+		t.Fatalf("rejectExistingRunNetworkChange = %v, want %v", err, want)
+	}
+}
+
 func TestServiceEntryForConfigAndHasServiceConfig(t *testing.T) {
 	oldService := serviceOverride
 	oldPrefs := loadedPrefs
@@ -926,7 +1103,7 @@ func TestSaveEnvFileConfigSkipsPersistenceWhenWorkspaceDeclined(t *testing.T) {
 	}
 }
 
-func TestEnsureLockedRunFlagsRejectsChanges(t *testing.T) {
+func TestEnsureLockedRunFlagsAcceptsNetworkChanges(t *testing.T) {
 	entry := ServiceEntry{
 		Name: "svc-a",
 		Host: "host-a",
@@ -935,11 +1112,11 @@ func TestEnsureLockedRunFlagsRejectsChanges(t *testing.T) {
 	if err := ensureLockedRunFlags(entry, []string{"--net=ts", "--ts-tags=tag:a"}); err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
-	if err := ensureLockedRunFlags(entry, []string{"--net=lan"}); err == nil {
-		t.Fatalf("expected error for --net change")
+	if err := ensureLockedRunFlags(entry, []string{"--net=lan"}); err != nil {
+		t.Fatalf("--net change rejected: %v", err)
 	}
-	if err := ensureLockedRunFlags(entry, []string{"--net=ts", "--ts-tags=tag:b"}); err == nil {
-		t.Fatalf("expected error for --ts-tags change")
+	if err := ensureLockedRunFlags(entry, []string{"--net=ts", "--ts-tags=tag:b"}); err != nil {
+		t.Fatalf("--ts-tags change rejected: %v", err)
 	}
 }
 

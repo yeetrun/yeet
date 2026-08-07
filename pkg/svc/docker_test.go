@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/yeetrun/yeet/pkg/cmdutil"
 	"github.com/yeetrun/yeet/pkg/db"
 )
 
@@ -747,6 +748,27 @@ func TestDockerComposeStopProjectContainersUsesIndependentLabelBudgetBeforeCompo
 	want := []string{"label-list", "label-remove", "compose-down"}
 	if !slices.Equal(calls, want) {
 		t.Fatalf("cleanup order = %#v, want %#v", calls, want)
+	}
+}
+
+func TestDockerComposeAbsenceVerificationCapturesStandardStreamCommands(t *testing.T) {
+	tmp := t.TempDir()
+	dockerPath := filepath.Join(tmp, "docker")
+	if err := os.WriteFile(dockerPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+	service := &DockerComposeService{
+		Name:          "app",
+		cfg:           &db.Service{Name: "app", Generation: 1},
+		NewCmdContext: cmdutil.NewStdCmdContext,
+	}
+
+	if err := service.VerifyProjectAbsent(context.Background()); err != nil {
+		t.Fatalf("VerifyProjectAbsent with standard-stream command: %v", err)
+	}
+	if err := service.VerifyDefaultNetworkAbsent(context.Background()); err != nil {
+		t.Fatalf("VerifyDefaultNetworkAbsent with standard-stream command: %v", err)
 	}
 }
 

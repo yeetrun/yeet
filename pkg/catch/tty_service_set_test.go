@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/user"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -79,6 +80,115 @@ func TestServiceSetRejectsVMFlags(t *testing.T) {
 	err := execer.serviceCmdFunc([]string{"set", "--cpus=8"})
 	if err == nil || !strings.Contains(err.Error(), "unknown flag") {
 		t.Fatalf("service set --cpus error = %v, want unknown flag", err)
+	}
+}
+
+func TestServiceSetNetworkUsesManageRoute(t *testing.T) {
+	permissions, err := ttyCommandPermissions([]string{"service", "set", "api", "--net=host"})
+	if err != nil {
+		t.Fatalf("ttyCommandPermissions: %v", err)
+	}
+	if !permissions.has(permissionManage) || permissions.has(permissionRead) || permissions.has(permissionSSH) {
+		t.Fatalf("permissions = %#v, want manage only", permissions)
+	}
+}
+
+func TestServiceSetNetworkRoutesRootAndNonRootThroughSameMutationWithoutIdentityLookup(t *testing.T) {
+	oldUpdate := updateServiceNetworkLockedForServiceSet
+	oldUser, oldUserID := serviceUserLookup, serviceUserLookupID
+	oldGroup, oldGroupID := serviceGroupLookup, serviceGroupLookupID
+	t.Cleanup(func() {
+		updateServiceNetworkLockedForServiceSet = oldUpdate
+		serviceUserLookup, serviceUserLookupID = oldUser, oldUserID
+		serviceGroupLookup, serviceGroupLookupID = oldGroup, oldGroupID
+	})
+	lookupCalled := false
+	serviceUserLookup = func(string) (*user.User, error) {
+		lookupCalled = true
+		return nil, errors.New("unexpected identity lookup")
+	}
+	serviceUserLookupID = func(string) (*user.User, error) {
+		lookupCalled = true
+		return nil, errors.New("unexpected identity lookup")
+	}
+	serviceGroupLookup = func(string) (*user.Group, error) {
+		lookupCalled = true
+		return nil, errors.New("unexpected identity lookup")
+	}
+	serviceGroupLookupID = func(string) (*user.Group, error) {
+		lookupCalled = true
+		return nil, errors.New("unexpected identity lookup")
+	}
+
+	var called []string
+	updateServiceNetworkLockedForServiceSet = func(_ context.Context, _ *Server, name string, flags cli.ServiceSetFlags, _ io.Writer) error {
+		if !flags.HasNetworkChange() {
+			t.Fatal("network mutation callback received flags without a network change")
+		}
+		called = append(called, name)
+		return nil
+	}
+	for _, service := range []db.Service{
+		{Name: "root-app", ServiceType: db.ServiceTypeSystemd, Identity: &db.ServiceIdentity{RequestedUser: "root", RequestedGroup: "root"}},
+		{Name: "user-app", ServiceType: db.ServiceTypeSystemd, Identity: &db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "app", UID: 1000, GID: 1000}},
+	} {
+		t.Run(service.Name, func(t *testing.T) {
+			server := newTestServer(t)
+			if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{service.Name: service.Clone()}}); err != nil {
+				t.Fatal(err)
+			}
+			execer := &ttyExecer{s: server, sn: service.Name, rw: &bytes.Buffer{}, serviceOperationLockHeld: true}
+			if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{Net: "host", NetSet: true}); err != nil {
+				t.Fatalf("serviceSetCmdFunc: %v", err)
+			}
+		})
+	}
+	if lookupCalled {
+		t.Fatal("network-only service set consulted the identity resolver")
+	}
+	if want := []string{"root-app", "user-app"}; !reflect.DeepEqual(called, want) {
+		t.Fatalf("network mutation calls = %v, want %v", called, want)
+	}
+}
+
+func TestServiceSetNetworkRejectsMissingServiceAndVMBeforeStaging(t *testing.T) {
+	server := newTestServer(t)
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{
+		"vm-app": {Name: "vm-app", ServiceType: db.ServiceTypeVM},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name    string
+		service string
+		want    string
+	}{
+		{name: "missing", service: "missing", want: `service "missing" not found`},
+		{name: "VM", service: "vm-app", want: "use yeet vm set"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := server.planServiceNetworkMutation(context.Background(), tt.service, cli.ServiceSetFlags{Net: "host", NetSet: true})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("planServiceNetworkMutation error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestServiceSetNetworkAllowsRunAsOnlyAsAtomicCompanion(t *testing.T) {
+	changes := serviceSetChangesFromFlags(cli.ServiceSetFlags{RunAsSet: true, Net: "svc", NetSet: true})
+	if !changes.identity || !changes.network {
+		t.Fatalf("changes = %#v, want identity and network", changes)
+	}
+	for _, flags := range []cli.ServiceSetFlags{
+		{Net: "host", NetSet: true, PublishReset: true},
+		{Net: "host", NetSet: true, SnapshotChange: true, Snapshots: "off"},
+		{Net: "host", NetSet: true, ServiceRoot: "/srv/app", Copy: true},
+	} {
+		err := validateServiceSetMutationCombination(flags, serviceSetChangesFromFlags(flags))
+		if err == nil || !strings.Contains(err.Error(), "separate") {
+			t.Fatalf("validateServiceSetMutationCombination(%#v) = %v, want separate-command guidance", flags, err)
+		}
 	}
 }
 

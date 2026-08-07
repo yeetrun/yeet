@@ -9,9 +9,21 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repo_root"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "ISO packet-policy integration tests require Linux" >&2
+  echo "ISO functional packet-policy integration tests require Linux" >&2
   exit 1
 fi
+
+require_command() {
+  local name=$1
+  if ! command -v "$name" >/dev/null 2>&1; then
+    echo "ISO functional packet-policy integration tests require $name" >&2
+    exit 1
+  fi
+}
+
+for command in mise unshare sudo ip sysctl; do
+  require_command "$command"
+done
 
 unshare_bin=$(command -v unshare)
 task_tmp=$(mktemp -d)

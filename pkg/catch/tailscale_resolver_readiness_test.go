@@ -243,6 +243,106 @@ func TestTailscaleResolverVMActivationAcquiresRuntimeBeforeGlobalGuard(t *testin
 	}
 }
 
+func TestTailscaleResolverISOVMActivationHoldsGuardAfterRuntimePreflight(t *testing.T) {
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		"vm-activation-guard",
+		tailscaleResolverGenerationCurrent,
+	)
+	allocation := testISORuntimeAllocation(fixture.service.Name, iso.StateStopped)
+	if _, _, err := fixture.server.cfg.DB.MutateService(fixture.service.Name, func(_ *db.Data, current *db.Service) error {
+		current.ServiceType = db.ServiceTypeVM
+		current.ISO = allocation
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	previousEnsure := ensureVMNetworkForServiceAction
+	ensureVMNetworkForServiceAction = func(*Server, context.Context, string) error { return nil }
+	t.Cleanup(func() { ensureVMNetworkForServiceAction = previousEnsure })
+
+	runnerEntered := make(chan struct{})
+	releaseRunner := make(chan struct{})
+	runner := &blockingServiceActivationRunner{
+		action: "start", entered: runnerEntered, release: releaseRunner,
+	}
+	execer := &ttyExecer{
+		ctx: context.Background(), s: fixture.server, sn: fixture.service.Name,
+		rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceRunnerFn: func() (ServiceRunner, error) { return runner, nil },
+		vmRuntimeTransactionFunc: func(_ context.Context, _ *Config, operation func() error) error {
+			return operation()
+		},
+	}
+	actionDone := make(chan error, 1)
+	go func() { actionDone <- execer.startCmdFunc() }()
+	awaitResolverTestSignal(t, runnerEntered, "VM runner")
+
+	blockDone := make(chan error, 1)
+	go func() {
+		blockDone <- fixture.server.blockTailscaleResolverRecovery(errors.New("block after VM preflight"))
+	}()
+	select {
+	case err := <-blockDone:
+		t.Fatalf("resolver block completed during VM activation: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseRunner)
+	if err := awaitResolverTestResult(t, actionDone); err != nil {
+		t.Fatalf("VM activation: %v", err)
+	}
+	if err := awaitResolverTestResult(t, blockDone); !errors.Is(err, errTailscaleResolverRecoveryBlocked) {
+		t.Fatalf("resolver block after VM activation = %v", err)
+	}
+}
+
+func TestTailscaleResolverISOVMActivationReleasesGuardOnRuntimeError(t *testing.T) {
+	fixture := newGuardedTailscaleResolverFixture(
+		t,
+		"vm-activation-runtime-error",
+		tailscaleResolverGenerationCurrent,
+	)
+	allocation := testISORuntimeAllocation(fixture.service.Name, iso.StateStopped)
+	if _, _, err := fixture.server.cfg.DB.MutateService(fixture.service.Name, func(_ *db.Data, current *db.Service) error {
+		current.ServiceType = db.ServiceTypeVM
+		current.ISO = allocation
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	previousEnsure := ensureVMNetworkForServiceAction
+	ensureVMNetworkForServiceAction = func(*Server, context.Context, string) error { return nil }
+	t.Cleanup(func() { ensureVMNetworkForServiceAction = previousEnsure })
+	wantErr := errors.New("runtime transaction completion failed")
+	execer := &ttyExecer{
+		ctx: context.Background(), s: fixture.server, sn: fixture.service.Name,
+		rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceRunnerFn: func() (ServiceRunner, error) {
+			t.Fatal("runtime transaction failure must stop before the VM runner")
+			return nil, nil
+		},
+		vmRuntimeTransactionFunc: func(_ context.Context, _ *Config, operation func() error) error {
+			if err := operation(); err != nil {
+				return err
+			}
+			return wantErr
+		},
+	}
+	if err := execer.startCmdFunc(); !errors.Is(err, wantErr) {
+		t.Fatalf("VM activation error = %v, want %v", err, wantErr)
+	}
+
+	blockDone := make(chan error, 1)
+	go func() {
+		blockDone <- fixture.server.blockTailscaleResolverRecovery(errors.New("block after VM runtime error"))
+	}()
+	if err := awaitResolverTestResult(t, blockDone); !errors.Is(err, errTailscaleResolverRecoveryBlocked) {
+		t.Fatalf("resolver block after VM runtime error = %v", err)
+	}
+}
+
 func TestNonTailscaleISOVMActivationBypassesResolverRecoveryBlock(t *testing.T) {
 	for _, test := range []struct {
 		name string

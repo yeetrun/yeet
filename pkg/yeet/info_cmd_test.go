@@ -760,6 +760,154 @@ func TestInfoServiceNetworkRowsRenderISOStatusAndComponents(t *testing.T) {
 	}
 }
 
+func TestInfoNetworkRowsShowEffectiveModesAndDesiredDrift(t *testing.T) {
+	tests := []struct {
+		name string
+		net  catchrpc.ServiceNetwork
+		want []infoRow
+	}{
+		{
+			name: "implicit host",
+			net:  catchrpc.ServiceNetwork{},
+			want: []infoRow{{Label: "Network modes", Value: "host"}},
+		},
+		{
+			name: "matching desired modes stay concise",
+			net: catchrpc.ServiceNetwork{
+				Modes:   []string{"svc", "ts"},
+				Desired: &catchrpc.ServiceNetworkSettings{Modes: []string{"svc", "ts"}},
+			},
+			want: []infoRow{{Label: "Network modes", Value: "svc,ts"}},
+		},
+		{
+			name: "failed transition shows desired and lifecycle",
+			net: catchrpc.ServiceNetwork{
+				Modes:   []string{"host"},
+				Desired: &catchrpc.ServiceNetworkSettings{Modes: []string{"iso"}},
+				ISO: &catchrpc.ServiceISO{
+					Modes: []string{"iso"}, State: "quarantined", LastError: "firewall digest mismatch",
+				},
+			},
+			want: []infoRow{
+				{Label: "Network modes", Value: "host"},
+				{Label: "Desired network modes", Value: "iso"},
+				{Label: "ISO modes", Value: "iso"},
+				{Label: "ISO state", Value: "quarantined"},
+				{Label: "ISO error", Value: "firewall digest mismatch"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertInfoRows(t, serviceNetworkRows(tt.net), tt.want)
+		})
+	}
+}
+
+func TestInfoNetworkRowsDistinguishDesiredSettingsFromRuntimeAttachments(t *testing.T) {
+	net := catchrpc.ServiceNetwork{
+		Modes: []string{"lan", "ts"},
+		Desired: &catchrpc.ServiceNetworkSettings{
+			Modes:         []string{"lan", "ts"},
+			TSVersion:     "1.96.1",
+			TSExitNode:    "exit.example",
+			TSTags:        []string{"tag:app", "tag:worker"},
+			MacvlanParent: "vmbr0",
+			MacvlanVLAN:   42,
+			MacvlanMAC:    "02:00:00:00:00:42",
+		},
+		Tailscale: &catchrpc.ServiceTailscale{
+			Interface: "yts-app", StableID: "node-runtime", Version: "1.94.0",
+			ExitNode: "old-exit.example", Tags: []string{"tag:old"},
+		},
+		Macvlan: &catchrpc.ServiceMacvlan{
+			Interface: "ymv-app", Parent: "eno1", VLAN: 20, Mac: "02:00:00:00:00:20",
+		},
+	}
+
+	assertInfoRows(t, serviceNetworkRows(net), []infoRow{
+		{Label: "Network modes", Value: "lan,ts"},
+		{Label: "Desired Tailscale", Value: "ver 1.96.1, tags: tag:app, tag:worker, exit: exit.example"},
+		{Label: "Desired macvlan", Value: "parent vmbr0, vlan 42, mac 02:00:00:00:00:42"},
+		{Label: "Tailscale", Value: "yts-app (ver 1.94.0), tags: tag:old, exit: old-exit.example"},
+		{Label: "Macvlan", Value: "ymv-app, parent eno1, vlan 20, mac 02:00:00:00:00:20"},
+	})
+}
+
+func TestAuthKeyRedactionAcrossErrorPreviewRPCInfoAndSavedConfig(t *testing.T) {
+	const secret = "tskey-auth-task6-must-not-leak"
+	runArgs := []string{"--net=ts", "--ts-tags=tag:app", "--ts-auth-key=" + secret}
+
+	desired, authKeySet, err := requestedRunNetworkSettings(runArgs)
+	if err != nil {
+		t.Fatalf("requestedRunNetworkSettings: %v", err)
+	}
+	if !authKeySet {
+		t.Fatal("requestedRunNetworkSettings did not preserve auth-key presence")
+	}
+
+	oldFetch := fetchRunChangeServiceInfoFn
+	t.Cleanup(func() { fetchRunChangeServiceInfoFn = oldFetch })
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			Network: catchrpc.ServiceNetwork{Modes: []string{"ts"}, Desired: &desired},
+		}}, nil
+	}
+	guardErr := rejectExistingRunNetworkChange(context.Background(), ServiceEntry{Name: "app", Host: "catch.example"}, runArgs)
+	if guardErr == nil {
+		t.Fatal("rejectExistingRunNetworkChange accepted an auth key for an existing service")
+	}
+
+	preview := runDraftCommandPreview(RunDraft{
+		Service: "app", Host: "catch.example", Payload: "ghcr.io/example/app:latest",
+		RunArgsSet: true, RunArgs: runArgs,
+	})
+
+	flags, _, err := cli.ParseServiceSet(append([]string{"app"}, runArgs...))
+	if err != nil {
+		t.Fatalf("ParseServiceSet: %v", err)
+	}
+	entry := ServiceEntry{Args: []string{"--net=host", "--ts-auth-key=stale-secret"}}
+	if err := applyServiceSetConfigFlags(&entry, flags); err != nil {
+		t.Fatalf("applyServiceSetConfigFlags: %v", err)
+	}
+
+	server := catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+		Network: catchrpc.ServiceNetwork{Modes: []string{"ts"}, Desired: &desired},
+	}}
+	rpcJSON, err := json.Marshal(server)
+	if err != nil {
+		t.Fatalf("marshal service info: %v", err)
+	}
+	var plain bytes.Buffer
+	if err := renderInfoPlain(&plain, "app", "catch.example", nil, serverInfo{}, clientInfo{}, server); err != nil {
+		t.Fatalf("renderInfoPlain: %v", err)
+	}
+
+	surfaces := map[string]string{
+		"error":        guardErr.Error(),
+		"preview":      preview,
+		"RPC JSON":     string(rpcJSON),
+		"plain info":   plain.String(),
+		"saved config": strings.Join(entry.Args, " "),
+	}
+	for name, surface := range surfaces {
+		if strings.Contains(surface, secret) {
+			t.Fatalf("%s leaked auth key: %s", name, surface)
+		}
+	}
+	if !strings.Contains(preview, "--ts-auth-key=<hidden>") {
+		t.Fatalf("preview = %q, want hidden auth-key marker", preview)
+	}
+	if strings.Contains(surfaces["saved config"], "--ts-auth-key") {
+		t.Fatalf("saved config retained auth-key flag: %q", surfaces["saved config"])
+	}
+	if !strings.Contains(string(rpcJSON), `"desired":{"modes":["ts"],"tsTags":["tag:app"]}`) {
+		t.Fatalf("RPC JSON = %s, want non-secret desired settings", rpcJSON)
+	}
+}
+
 func TestInfoDescribeTailscale(t *testing.T) {
 	tests := []struct {
 		name string
@@ -982,6 +1130,7 @@ func TestInfoRenderNetworkSection(t *testing.T) {
 		},
 	})
 	assertInfoRows(t, got.Rows, []infoRow{
+		{Label: "Network modes", Value: "lan,svc,ts"},
 		{Label: "IPs", Value: ""},
 		{Label: "  service", Value: "10.0.0.2"},
 		{Label: "IP warning", Value: "configured IP not present in guest"},
@@ -1003,7 +1152,7 @@ func TestInfoRenderNetworkSection(t *testing.T) {
 			},
 		},
 	})
-	assertInfoRows(t, got.Rows, nil)
+	assertInfoRows(t, got.Rows, []infoRow{{Label: "Network modes", Value: "host"}})
 
 	got = renderNetworkSection(catchrpc.ServiceInfoResponse{
 		Found: true,
@@ -1013,7 +1162,7 @@ func TestInfoRenderNetworkSection(t *testing.T) {
 			},
 		},
 	})
-	assertInfoRows(t, got.Rows, nil)
+	assertInfoRows(t, got.Rows, []infoRow{{Label: "Network modes", Value: "host"}})
 }
 
 func TestInfoRenderNetworkSectionUsesVMContext(t *testing.T) {

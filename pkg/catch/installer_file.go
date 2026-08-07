@@ -92,10 +92,12 @@ type FileInstaller struct {
 	ch  chan struct{}
 
 	existingService             db.ServiceView
+	persistInitialNetwork       bool
 	resolvedIdentity            resolvedServiceIdentity
 	installedGeneration         int
 	readInstalledGeneration     func() (int, error)
 	installGenerationIfCurrent  func(*Installer, int, int) error
+	completeNativeISOInstall    func(context.Context, *db.Service) error
 	ensureManagedServiceAccount func() (resolvedServiceIdentity, error)
 	identityMigrationNeeded     bool
 	newNativeIdentity           bool
@@ -107,6 +109,7 @@ type FileInstaller struct {
 	isoAllocation               *db.ISOAllocation
 	tsAuthKey                   string
 	artifacts                   map[db.ArtifactName]string
+	networkArtifactTxn          *regularNetworkArtifactTransaction
 	lazyNetwork                 lazy.GValue[*networkConfig]
 
 	File     *os.File
@@ -447,9 +450,13 @@ func newFileInstaller(s *Server, cfg FileInstallerCfg, serviceLockHeld bool) (_ 
 	if err != nil {
 		return nil, err
 	}
+	if err := validateExistingRunNetwork(cfg, existingService); err != nil {
+		return nil, err
+	}
 	cfg.ServiceRoot = resolvedRoot.Root
 	printServiceRootWarnings(cfg, resolvedRoot.Warnings)
 	i := newPreparedFileInstaller(s, cfg, existingService, resolvedRoot, releaseServiceLock)
+	i.persistInitialNetwork = !existingService.Valid()
 	i.serviceRootCreated = resolvedRoot.Created || !rootExisted
 	i.serviceRootDatasetCreated = resolvedRoot.Created
 	constructorComplete := false
@@ -464,6 +471,44 @@ func newFileInstaller(s *Server, cfg FileInstallerCfg, serviceLockHeld bool) (_ 
 	lockTransferred = true
 	constructorComplete = true
 	return i, nil
+}
+
+func validateExistingRunNetwork(cfg FileInstallerCfg, existing db.ServiceView) error {
+	if !existing.Valid() || cfg.EnvFile || cfg.ServiceName == CatchService || cfg.ServiceName == SystemService {
+		return nil
+	}
+	requested, err := desiredNetworkConfigFromOpts(cfg.Network)
+	if err != nil {
+		return err
+	}
+	current, err := normalizeServiceNetworkConfig(desiredServiceNetworkConfig(existing))
+	if err != nil {
+		return fmt.Errorf("normalize existing desired network: %w", err)
+	}
+	if reflect.DeepEqual(current, requested) && strings.TrimSpace(cfg.Network.Tailscale.AuthKey) == "" {
+		return nil
+	}
+	guidance := "network changes for existing services require `yeet service set <service> ...`"
+	if strings.TrimSpace(cfg.Network.Tailscale.AuthKey) != "" {
+		guidance += "; move the explicit --ts-auth-key to service set"
+	}
+	return errors.New(guidance)
+}
+
+func desiredNetworkConfigFromOpts(opts NetworkOpts) (db.ServiceNetworkConfig, error) {
+	modes := slices.Clone(opts.Modes)
+	if len(modes) == 0 {
+		interfaces := strings.TrimSpace(opts.Interfaces)
+		if interfaces == "" {
+			interfaces = "host"
+		}
+		modes = strings.Split(interfaces, ",")
+	}
+	return normalizeServiceNetworkConfig(db.ServiceNetworkConfig{
+		Modes: modes, TSVersion: opts.Tailscale.Version, TSExitNode: opts.Tailscale.ExitNode,
+		TSTags: slices.Clone(opts.Tailscale.Tags), MacvlanParent: opts.Macvlan.Parent,
+		MacvlanVLAN: opts.Macvlan.VLAN, MacvlanMAC: opts.Macvlan.Mac,
+	})
 }
 
 func (s *Server) prepareFileInstallerRoot(cfg FileInstallerCfg) (resolvedServiceRoot, bool, error) {
@@ -756,18 +801,19 @@ func svcNetworkFromData(dv db.DataView) (*db.SvcNetwork, error) {
 }
 
 func macvlanNetworkFromOpts(opts MacvlanOpts) (*db.MacvlanNetwork, error) {
-	iface, err := hostDefaultRouteInterfaceFn()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get default route interface: %v", err)
+	iface := strings.TrimSpace(opts.Parent)
+	if iface == "" {
+		var err error
+		iface, err = hostDefaultRouteInterfaceFn()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get default route interface: %v", err)
+		}
+		log.Printf("default route interface: %v", iface)
 	}
-	log.Printf("default route interface: %v", iface)
 	macvlan := &db.MacvlanNetwork{
 		Interface: "ymv-" + hexStr(4),
 		Parent:    iface,
 		Mac:       randomMAC(),
-	}
-	if opts.Parent != "" {
-		macvlan.Parent = opts.Parent
 	}
 	if opts.VLAN != 0 {
 		macvlan.VLAN = opts.VLAN
@@ -1439,9 +1485,6 @@ func (i *FileInstaller) skipSystemdUnitGeneration() bool {
 	return i.cfg.StageOnly && i.cfg.Network.Interfaces == "" && i.cfg.Args == nil
 }
 
-// ISO intentionally rejects native root services. Host root can reconfigure or
-// leave a network namespace, so non-root systemd sandboxing is a prerequisite
-// for adding native ISO support without making a false security claim.
 func (i *FileInstaller) newSystemdUnit(exe string) (*svc.SystemdUnit, error) {
 	su := &svc.SystemdUnit{
 		Name:             i.cfg.ServiceName,
@@ -1464,6 +1507,18 @@ func (i *FileInstaller) newSystemdUnit(exe string) (*svc.SystemdUnit, error) {
 }
 
 func (i *FileInstaller) applyNetworkToSystemdUnit(su *svc.SystemdUnit) error {
+	if i.isoAllocation != nil && i.isoAllocation.Kind == string(iso.PayloadNative) {
+		gate := "yeet-" + i.cfg.ServiceName + "-ns.service"
+		resolver := i.artifacts[db.ArtifactNetNSResolv]
+		if strings.TrimSpace(resolver) == "" {
+			return fmt.Errorf("native ISO resolver artifact is missing")
+		}
+		su.NetNS = i.isoAllocation.NetNS
+		su.Requires = gate
+		su.After = gate
+		su.ResolvConf = resolver
+		return nil
+	}
 	n, err := i.configureNetwork()
 	if err != nil {
 		return fmt.Errorf("failed to configure network: %v", err)
@@ -1514,10 +1569,23 @@ func (i *FileInstaller) installOnClose() error {
 	if err != nil {
 		return err
 	}
-	if err := i.configureAndStageInstall(plan); err != nil {
+	return i.withRegularServiceNetworkAllocationLock(func() error {
+		if err := i.configureAndStageInstall(plan); err != nil {
+			return err
+		}
+		return i.installIfRequested()
+	})
+}
+
+func (i *FileInstaller) withRegularServiceNetworkAllocationLock(run func() error) error {
+	if networkRequestsISO(i.cfg.Network) {
+		return run()
+	}
+	desired, err := desiredNetworkConfigFromOpts(i.cfg.Network)
+	if err != nil {
 		return err
 	}
-	return i.installIfRequested()
+	return i.s.withRegularServiceNetworkAllocation(slices.Contains(desired.Modes, "svc"), run)
 }
 
 func (i *FileInstaller) prepareAndInstallTempFile(tmppath string) (fileInstallPlan, error) {
@@ -1539,9 +1607,24 @@ func (i *FileInstaller) configureAndStageInstall(plan fileInstallPlan) error {
 }
 
 func (i *FileInstaller) configureAndStageISOInstall(plan fileInstallPlan) error {
-	if i.isoInstallServiceType(plan) != db.ServiceTypeDockerCompose {
-		return fmt.Errorf("ISO installation requires a Docker Compose payload")
+	switch i.isoInstallServiceType(plan) {
+	case db.ServiceTypeSystemd:
+		return i.configureAndStageNativeISOInstall(plan)
+	case db.ServiceTypeDockerCompose:
+		return i.configureAndStageComposeISOInstall(plan)
+	default:
+		return fmt.Errorf("ISO installation requires a Docker Compose or native systemd payload")
 	}
+}
+
+func (i *FileInstaller) configureAndStageNativeISOInstall(plan fileInstallPlan) error {
+	if i.isoAllocation == nil || i.isoAllocation.Kind != string(iso.PayloadNative) {
+		return fmt.Errorf("native ISO installation is missing its reserved allocation")
+	}
+	return i.stageInstallPlan(plan)
+}
+
+func (i *FileInstaller) configureAndStageComposeISOInstall(plan fileInstallPlan) error {
 	if _, err := i.prepareISOCompose(context.Background(), nil); err != nil {
 		return err
 	}
@@ -1572,7 +1655,11 @@ func (i *FileInstaller) validateISOInstallTailscale() error {
 	if err == nil {
 		return nil
 	}
-	return errors.Join(err, i.s.markISOState(i.cfg.ServiceName, string(iso.StateQuarantined), err))
+	view, viewErr := i.s.serviceView(i.cfg.ServiceName)
+	if viewErr != nil {
+		return errors.Join(err, viewErr)
+	}
+	return errors.Join(err, i.s.markISOStateExact(i.cfg.ServiceName, view.AsStruct(), string(iso.StateQuarantined), err, "rejecting invalid ISO Tailscale allocation"))
 }
 
 func (i *FileInstaller) configureAndStageRegularInstall(plan fileInstallPlan) error {
@@ -1601,12 +1688,22 @@ type fileInstallerISOTransition struct {
 	plan      fileInstallPlan
 	prepared  isoReplacementNetwork
 	compose   *svc.DockerComposeService
+	native    bool
 	spec      isoRuntimeNetworkSpec
 }
 
 func (i *FileInstaller) transitionAwayFromISO(ctx context.Context, plan fileInstallPlan) error {
+	modes := slices.Clone(i.cfg.Network.Modes)
+	if strings.EqualFold(strings.TrimSpace(i.cfg.Network.Interfaces), "host") {
+		modes = []string{"host"}
+	}
+	desired, err := desiredNetworkConfigFromOpts(i.cfg.Network)
+	if err != nil {
+		return err
+	}
 	prepared := isoReplacementNetwork{
-		Modes:      slices.Clone(i.cfg.Network.Modes),
+		Modes:      modes,
+		Desired:    desired.Clone(),
 		SvcNetwork: cloneISOReplacementSvcNetwork(i.svcNet),
 		Macvlan:    cloneISOReplacementMacvlan(i.macvlan),
 		Tailscale:  i.tsNet.Clone(),
@@ -1616,15 +1713,20 @@ func (i *FileInstaller) transitionAwayFromISO(ctx context.Context, plan fileInst
 	if err != nil {
 		return err
 	}
-	compose, err := i.s.dockerComposeService(i.cfg.ServiceName)
-	if err != nil {
-		return fmt.Errorf("load ISO Compose service for transition: %w", err)
+	prepared.Expected = view.AsStruct()
+	native := view.ServiceType() == db.ServiceTypeSystemd && view.ISO().Kind() == string(iso.PayloadNative)
+	var compose *svc.DockerComposeService
+	if !native {
+		compose, err = i.s.dockerComposeService(i.cfg.ServiceName)
+		if err != nil {
+			return fmt.Errorf("load ISO Compose service for transition: %w", err)
+		}
 	}
 	spec, err := i.s.loadISORuntimeSpec(i.cfg.ServiceName)
 	if err != nil {
 		return fmt.Errorf("load ISO network for transition: %w", err)
 	}
-	steps := &fileInstallerISOTransition{installer: i, plan: plan, prepared: prepared, compose: compose, spec: spec}
+	steps := &fileInstallerISOTransition{installer: i, plan: plan, prepared: prepared, compose: compose, native: native, spec: spec}
 	transition := i.transitionFromISO
 	if transition == nil {
 		transition = i.s.transitionFromISO
@@ -1639,7 +1741,7 @@ func (i *FileInstaller) transitionAwayFromISO(ctx context.Context, plan fileInst
 func stagedISONetworkArtifacts(paths map[db.ArtifactName]string) db.ArtifactStore {
 	artifacts := db.ArtifactStore{}
 	for name, path := range paths {
-		if !isoNetworkArtifactNames[name] {
+		if !isoReplacementArtifactNames[name] {
 			continue
 		}
 		artifacts[name] = &db.Artifact{Refs: map[db.ArtifactRef]string{"staged": path}}
@@ -1656,6 +1758,9 @@ func (t *fileInstallerISOTransition) StopISO(ctx context.Context, _ string) erro
 	if err != nil {
 		return err
 	}
+	if t.native {
+		return stopAndVerifyISONativeUnits(ctx, view.AsStruct())
+	}
 	return errors.Join(t.compose.StopProjectContainers(ctx), stopAndVerifyISOAuxiliaryUnits(ctx, view.AsStruct()))
 }
 
@@ -1664,8 +1769,14 @@ func (t *fileInstallerISOTransition) CleanISO(ctx context.Context, _ string) err
 }
 
 func (t *fileInstallerISOTransition) VerifyISOAbsent(ctx context.Context, _ string) error {
+	if t.native {
+		return errors.Join(
+			verifyISOTopologyAbsentForRuntime(ctx, t.spec.Topology),
+			verifyISOAllocationDNetAbsent(t.installer.s, t.spec.Topology.Allocation),
+		)
+	}
 	return errors.Join(
-		netns.VerifyISOTopologyAbsent(ctx, t.spec.Topology),
+		verifyISOTopologyAbsentForRuntime(ctx, t.spec.Topology),
 		t.compose.VerifyProjectAbsent(ctx),
 		t.compose.VerifyDefaultNetworkAbsent(ctx),
 		verifyISOAllocationDNetAbsent(t.installer.s, t.spec.Topology.Allocation),
@@ -1745,6 +1856,11 @@ func (i *FileInstaller) prepareNoBinaryNativeService() error {
 	if err := validateNativeServicePrivilegedPorts(i.cfg.ServiceName, i.cfg.Publish, i.resolvedIdentity.Persisted); err != nil {
 		return err
 	}
+	if networkRequestsISO(i.cfg.Network) && i.isoAllocation == nil {
+		if err := i.prepareNativeISO(context.Background()); err != nil {
+			return err
+		}
+	}
 	if err := i.ensureSystemdUnit(); err != nil {
 		return fmt.Errorf("failed to ensure systemd unit: %w", err)
 	}
@@ -1804,7 +1920,11 @@ func (i *FileInstaller) normalizeNetworkForServiceType(serviceType db.ServiceTyp
 	if !networkInterfacesEnabled(i.cfg.Network.Interfaces) {
 		return nil
 	}
-	network, err := parseNetworkForPayload(i.cfg.Network, networkPayloadKind(serviceType), published)
+	payload := networkPayloadKind(serviceType)
+	if serviceType == db.ServiceTypeSystemd && i.cfg.Timer != nil {
+		payload = iso.PayloadCron
+	}
+	network, err := parseNetworkForPayload(i.cfg.Network, payload, published)
 	if err != nil {
 		return err
 	}
@@ -1922,10 +2042,39 @@ func (i *FileInstaller) prepareSystemdPayload(binFT ftdetect.FileType) (fileInst
 		return plan, err
 	}
 	mak.Set(&i.artifacts, db.ArtifactBinary, dst)
+	if networkRequestsISO(i.cfg.Network) {
+		if err := i.prepareNativeISO(context.Background()); err != nil {
+			return plan, err
+		}
+	}
 	if err := i.ensureSystemdUnit(dst); err != nil {
 		return plan, fmt.Errorf("failed to ensure systemd unit: %w", err)
 	}
 	return plan, nil
+}
+
+func (i *FileInstaller) prepareNativeISO(ctx context.Context) error {
+	allocation, err := i.s.reserveISOAllocation(ctx, i.cfg.ServiceName, isoReservationRequest{
+		Kind:  iso.PayloadNative,
+		Modes: slices.Clone(i.cfg.Network.Modes),
+	})
+	if err != nil {
+		return fmt.Errorf("reserve native ISO allocation: %w", err)
+	}
+	i.isoAllocation = allocation.Clone()
+	failReserved := func(cause error) error {
+		cleanupErr := stopAndQuarantineISO(ctx, &isoConcreteReconcileSteps{server: i.s}, i.cfg.ServiceName, cause)
+		return errors.Join(cause, cleanupErr)
+	}
+	resolver := filepath.Join(i.serviceBinDir(), fileutil.ApplyVersion("iso-resolv.conf"))
+	if err := os.WriteFile(resolver, []byte("nameserver "+allocation.HostIP.String()+"\n"), 0o644); err != nil {
+		return failReserved(fmt.Errorf("write native ISO resolver: %w", err))
+	}
+	mak.Set(&i.artifacts, db.ArtifactNetNSResolv, resolver)
+	if err := i.stageISONetworkGate(); err != nil {
+		return failReserved(err)
+	}
+	return nil
 }
 
 func (i *FileInstaller) resolveNativeInstallIdentity() error {
@@ -2204,13 +2353,45 @@ func (i *FileInstaller) installStagedService() error {
 	}
 	si.NewCmd = i.cfg.NewCmd
 	si.isoTailscaleAuthKey = i.tsAuthKey
-	if i.newNativeIdentity || i.identityMigrationNeeded {
-		return i.installStagedNativeIdentity(si)
+	if err := i.configureInitialNativeISODesired(si); err != nil {
+		return err
 	}
+	if i.newNativeIdentity || i.identityMigrationNeeded {
+		return i.installStagedServiceWithIdentity(si)
+	}
+	return i.installStagedServiceDirect(si)
+}
+
+func (i *FileInstaller) configureInitialNativeISODesired(si *Installer) error {
+	if !i.persistInitialNetwork || i.isoAllocation == nil || i.isoAllocation.Kind != string(iso.PayloadNative) {
+		return nil
+	}
+	desired, err := desiredNetworkConfigFromOpts(i.cfg.Network)
+	if err != nil {
+		return err
+	}
+	si.initialISODesired = &desired
+	return nil
+}
+
+func (i *FileInstaller) installStagedServiceWithIdentity(si *Installer) error {
+	if err := i.installStagedNativeIdentity(si); err != nil {
+		return err
+	}
+	return i.persistInitialDesiredNetwork()
+}
+
+func (i *FileInstaller) installStagedServiceDirect(si *Installer) error {
 	if err := si.Install(); err != nil {
 		return fmt.Errorf("failed to install service: %w", err)
 	}
+	if si.initialISOCommitted {
+		i.persistInitialNetwork = false
+	}
 	i.installedGeneration = si.committedGeneration
+	if err := i.persistInitialDesiredNetwork(); err != nil {
+		return err
+	}
 	i.printf("Service %q installed\n", i.cfg.ServiceName)
 	return nil
 }
@@ -2220,21 +2401,85 @@ func (i *FileInstaller) installStagedNativeIdentity(si *Installer) (retErr error
 	if err != nil {
 		return err
 	}
+	nativeISO := serviceUsesNativeISO(prepared.target)
 	migrationStarted := false
-	defer func() {
-		if retErr != nil && prepared.predecessorAbsent && !migrationStarted {
-			retErr = errors.Join(retErr, i.removeProvisionalNativeService(prepared.previous))
-		}
-	}()
+	defer i.finishUnstartedNativeIdentityInstall(&retErr, prepared, &migrationStarted, nativeISO)
 	migrationStarted = true
 	if _, err := i.runStagedNativeIdentityMigration(prepared.request); err != nil {
-		return fmt.Errorf("failed to migrate native service identity: %w", err)
+		return i.nativeIdentityMigrationFailure(err, nativeISO)
+	}
+	if err := i.completeStagedNativeISOInstall(prepared.target, nativeISO); err != nil {
+		return err
 	}
 	i.installedGeneration = prepared.target.Generation
 	si.prune()
 	si.publishInstallEvent(prepared.target)
 	i.printf("Service %q installed\n", i.cfg.ServiceName)
 	return nil
+}
+
+func (i *FileInstaller) finishUnstartedNativeIdentityInstall(retErr *error, prepared stagedNativeIdentityInstall, migrationStarted *bool, nativeISO bool) {
+	if *retErr == nil || !prepared.predecessorAbsent || *migrationStarted || nativeISO {
+		return
+	}
+	*retErr = errors.Join(*retErr, i.removeProvisionalNativeService(prepared.previous))
+}
+
+func (i *FileInstaller) nativeIdentityMigrationFailure(err error, nativeISO bool) error {
+	cause := fmt.Errorf("failed to migrate native service identity: %w", err)
+	if !nativeISO {
+		return cause
+	}
+	return errors.Join(cause, stopAndQuarantineISO(context.Background(), &isoConcreteReconcileSteps{server: i.s}, i.cfg.ServiceName, cause))
+}
+
+func (i *FileInstaller) completeStagedNativeISOInstall(target *db.Service, nativeISO bool) error {
+	if !nativeISO {
+		return nil
+	}
+	complete := i.completeNativeISOInstall
+	if complete == nil {
+		complete = i.finalizeNativeISOInstall
+	}
+	ctx := context.Background()
+	if err := complete(ctx, target); err != nil {
+		return errors.Join(err, i.quarantineNativeISOExact(ctx, target, err))
+	}
+	var desired *db.ServiceNetworkConfig
+	if i.persistInitialNetwork {
+		desiredValue, err := desiredNetworkConfigFromOpts(i.cfg.Network)
+		if err != nil {
+			return errors.Join(err, i.quarantineNativeISOExact(ctx, target, err))
+		}
+		desired = &desiredValue
+	}
+	if err := i.s.markNativeISOReadyExact(target, desired); err != nil {
+		return errors.Join(err, i.quarantineNativeISOExact(ctx, target, err))
+	}
+	if desired != nil {
+		i.persistInitialNetwork = false
+	}
+	return nil
+}
+
+func serviceUsesNativeISO(service *db.Service) bool {
+	return service != nil && service.ISO != nil && service.ISO.Kind == string(iso.PayloadNative)
+}
+
+func (i *FileInstaller) finalizeNativeISOInstall(ctx context.Context, service *db.Service) error {
+	steps := &isoConcreteReconcileSteps{server: i.s}
+	state, err := steps.InspectRuntime(ctx, service.Name)
+	if err == nil && state != isoReconcileRuntimeRunning {
+		err = fmt.Errorf("native ISO workload is %s after identity activation", state)
+	}
+	return err
+}
+
+func (i *FileInstaller) quarantineNativeISOExact(ctx context.Context, expected *db.Service, cause error) error {
+	if i == nil || i.s == nil || expected == nil {
+		return errors.New("quarantine native ISO without an exact expected service record")
+	}
+	return i.s.quarantineNativeISORecordExact(ctx, expected, cause, "quarantining failed native ISO activation")
 }
 
 type stagedNativeIdentityInstall struct {

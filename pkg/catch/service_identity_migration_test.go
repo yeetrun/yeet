@@ -2227,6 +2227,68 @@ func TestServiceIdentityGenerationActivationReplacesPreviousPrimaryUnit(t *testi
 	}
 }
 
+func TestServiceIdentityGenerationEnablementSeparatesInventoryFromTargetIntent(t *testing.T) {
+	server := newTestServer(t)
+	previous := &db.Service{
+		Name: "api", ServiceType: db.ServiceTypeSystemd, Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit:  {Refs: map[db.ArtifactRef]string{db.Gen(1): "/service-1"}},
+			db.ArtifactNetNSService: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/ns-1"}},
+		},
+	}
+	target := previous.Clone()
+	target.Artifacts[db.ArtifactTSService] = &db.Artifact{Refs: map[db.ArtifactRef]string{db.Gen(1): "/ts-1"}}
+	desired := []serviceIdentityUnitEnablement{
+		{Unit: "api.service", TargetEnabled: false},
+		{Unit: "yeet-api-ns.service", TargetEnabled: true},
+		{Unit: "yeet-api-ts.service", TargetEnabled: false},
+	}
+	enabled := map[string]bool{
+		"api.service": false, "yeet-api-ns.service": true, "yeet-api-ts.service": true,
+	}
+	migration := &serviceIdentityMigration{
+		server: server, previous: previous, target: target,
+		req: serviceIdentityMigrationRequest{
+			Service: "api", GenerationUnits: []string{"api.service", "yeet-api-ns.service", "yeet-api-ts.service"},
+			GenerationEnablement: &desired,
+		},
+		ops: serviceIdentityMigrationOps{isEnabled: func(_ context.Context, unit string) (bool, error) {
+			return enabled[unit], nil
+		}},
+	}
+
+	states, err := migration.captureGenerationUnitEnablement(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []serviceIdentityUnitEnablement{
+		{Unit: "api.service", Enabled: false, TargetEnabled: false},
+		{Unit: "yeet-api-ns.service", Enabled: true, TargetEnabled: true},
+		{Unit: "yeet-api-ts.service", Enabled: true, TargetEnabled: false},
+	}
+	if !reflect.DeepEqual(states, want) {
+		t.Fatalf("enablement = %#v, want %#v", states, want)
+	}
+	if got := migration.req.GenerationUnits; !reflect.DeepEqual(got, []string{"api.service", "yeet-api-ns.service", "yeet-api-ts.service"}) {
+		t.Fatalf("generation inventory = %v", got)
+	}
+}
+
+func TestServiceIdentityGenerationEnablementRejectsIncompleteExplicitIntent(t *testing.T) {
+	desired := []serviceIdentityUnitEnablement{{Unit: "api.service", TargetEnabled: false}}
+	migration := &serviceIdentityMigration{
+		previous: &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd},
+		req: serviceIdentityMigrationRequest{
+			Service: "api", GenerationUnits: []string{"api.service", "api.timer"}, GenerationEnablement: &desired,
+		},
+		ops: serviceIdentityMigrationOps{isEnabled: func(context.Context, string) (bool, error) { return false, nil }},
+	}
+	_, err := migration.captureGenerationUnitEnablement(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "explicit generation enablement") {
+		t.Fatalf("captureGenerationUnitEnablement error = %v, want explicit-plan validation", err)
+	}
+}
+
 func TestServiceIdentityMigrationPreservesExternalReplacementAfterDurableGenerationStage(t *testing.T) {
 	server := newTestServer(t)
 	root := filepath.Join(t.TempDir(), "root")

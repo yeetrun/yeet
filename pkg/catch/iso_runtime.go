@@ -8,11 +8,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -205,10 +207,14 @@ func validateISORuntimeAllocation(
 	if err := validateISORuntimePayload(service, allocation); err != nil {
 		return err
 	}
-	if iso.PayloadKind(allocation.Kind) == iso.PayloadVM {
+	switch iso.PayloadKind(allocation.Kind) {
+	case iso.PayloadVM:
 		return validateISORuntimeVM(service, allocation)
+	case iso.PayloadNative:
+		return validateISORuntimeNative(service, allocation, identities)
+	default:
+		return validateISORuntimeRouter(layout, service, allocation, projects, identities)
 	}
-	return validateISORuntimeRouter(layout, service, allocation, projects, identities)
 }
 
 func isoRuntimeAllocationError(service, format string, args ...any) error {
@@ -251,7 +257,7 @@ func validateISORuntimeLinkIdentities(service string, allocation *db.ISOAllocati
 
 func validateISORuntimePayload(service string, allocation *db.ISOAllocation) error {
 	kind := iso.PayloadKind(allocation.Kind)
-	if kind != iso.PayloadVM && kind != iso.PayloadCompose && kind != iso.PayloadContainer {
+	if kind != iso.PayloadVM && kind != iso.PayloadCompose && kind != iso.PayloadContainer && kind != iso.PayloadNative {
 		return isoRuntimeAllocationError(service, "unsupported payload kind %q", allocation.Kind)
 	}
 	if err := iso.ValidateNetwork(iso.NetworkRequest{Payload: kind, Modes: allocation.DesiredModes}); err != nil {
@@ -264,6 +270,22 @@ func validateISORuntimeVM(service string, allocation *db.ISOAllocation) error {
 	if allocation.Project.IsValid() || allocation.Gateway.IsValid() || allocation.NetNS != "" || allocation.Bridge != "" ||
 		len(allocation.Components) != 0 || len(allocation.RetiredComponents) != 0 {
 		return isoRuntimeAllocationError(service, "VM contains router or project state")
+	}
+	return nil
+}
+
+func validateISORuntimeNative(service string, allocation *db.ISOAllocation, identities map[string]string) error {
+	wantNetNS := isoRouterNamespace(service)
+	if allocation.NetNS != wantNetNS {
+		return isoRuntimeAllocationError(service, "namespace %q does not match %q", allocation.NetNS, wantNetNS)
+	}
+	if owner, exists := identities[allocation.NetNS]; exists {
+		return isoRuntimeAllocationError(service, "identity %q duplicates service %q", allocation.NetNS, owner)
+	}
+	identities[allocation.NetNS] = service
+	if allocation.Project.IsValid() || allocation.Gateway.IsValid() || allocation.Bridge != "" ||
+		len(allocation.Components) != 0 || len(allocation.RetiredComponents) != 0 {
+		return isoRuntimeAllocationError(service, "native payload contains router or project state")
 	}
 	return nil
 }
@@ -866,7 +888,34 @@ func (r *isoConcreteReconcileSteps) InspectRuntime(ctx context.Context, service 
 	if view.ServiceType() == db.ServiceTypeVM {
 		return r.inspectISOVMRuntime(service)
 	}
+	if view.ServiceType() == db.ServiceTypeSystemd {
+		return inspectISONativeRuntime(ctx, view.AsStruct())
+	}
 	return r.inspectISOComposeRuntime(ctx, service)
+}
+
+func inspectISONativeRuntime(ctx context.Context, service *db.Service) (isoReconcileRuntimeState, error) {
+	unit := serviceIdentityPrimaryRuntimeUnit(service, service.Name)
+	state, err := isoSystemdUnitState(ctx, unit)
+	if err != nil {
+		return "", err
+	}
+	switch state {
+	case "active":
+		return isoReconcileRuntimeRunning, nil
+	case "inactive", "failed":
+		return isoReconcileRuntimeAbsent, nil
+	default:
+		return "", fmt.Errorf("ISO native service %q has indeterminate systemd state %q", service.Name, state)
+	}
+}
+
+func isoSystemdUnitState(ctx context.Context, unit string) (string, error) {
+	output, err := runISOSystemctlForRuntime(ctx, "show", "--property=ActiveState", "--value", unit)
+	if err != nil {
+		return "", fmt.Errorf("inspect ISO systemd unit %s: %w: %s", unit, err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func (r *isoConcreteReconcileSteps) inspectISOVMRuntime(service string) (isoReconcileRuntimeState, error) {
@@ -950,7 +999,15 @@ func (r *isoConcreteReconcileSteps) VerifyStopped(ctx context.Context, service s
 	if view.ServiceType() == db.ServiceTypeVM {
 		return r.verifyStoppedISOVM(service)
 	}
+	if view.ServiceType() == db.ServiceTypeSystemd {
+		return verifyStoppedISONative(ctx, view.AsStruct())
+	}
 	return r.verifyStoppedISOCompose(ctx, service, view)
+}
+
+func verifyStoppedISONative(ctx context.Context, service *db.Service) error {
+	stop, _ := serviceIdentityRuntimeUnits(service, service.Name)
+	return verifyISOUnitsStopped(ctx, stop)
 }
 
 func (r *isoConcreteReconcileSteps) verifyStoppedISOVM(service string) error {
@@ -1025,6 +1082,9 @@ func (r *isoConcreteReconcileSteps) StopUntrusted(ctx context.Context, service s
 	}
 	if view.ServiceType() == db.ServiceTypeVM {
 		return runISOReconcileVMSystemctl(ctx, "stop", service)
+	}
+	if view.ServiceType() == db.ServiceTypeSystemd {
+		return stopAndVerifyISONativeUnits(ctx, view.AsStruct())
 	}
 	compose, record, err := r.composeService(service)
 	if err != nil {
@@ -1377,6 +1437,8 @@ func quarantineISORetirement(ctx context.Context, steps isoRetirementSteps, serv
 
 type isoReplacementNetwork struct {
 	Modes      []string
+	Desired    *db.ServiceNetworkConfig
+	Expected   *db.Service
 	SvcNetwork *db.SvcNetwork
 	Macvlan    *db.MacvlanNetwork
 	Tailscale  *db.TailscaleNetwork
@@ -1409,6 +1471,7 @@ type isoConcreteRemoveSteps struct {
 	service    *db.Service
 	compose    *svc.DockerComposeService
 	vm         bool
+	native     bool
 	spec       isoRuntimeNetworkSpec
 	options    RemoveOptions
 	report     *RemoveReport
@@ -1421,43 +1484,77 @@ func (s *Server) newConcreteISORemoveSteps(service string, options RemoveOptions
 		return nil, err
 	}
 	record := view.AsStruct()
-	isVM := record.ServiceType == db.ServiceTypeVM || record.ISO != nil && record.ISO.Kind == string(iso.PayloadVM)
-	if record.ServiceType != db.ServiceTypeDockerCompose && !isVM {
-		return nil, fmt.Errorf("ISO removal for service type %q is not implemented in the container lifecycle", record.ServiceType)
+	isVM, isNative, err := classifyISORemoveRecord(record)
+	if err != nil {
+		return nil, err
 	}
-	var compose *svc.DockerComposeService
-	if !isVM {
-		compose, err = dockerComposeServiceForISO(s, service)
-		if err != nil {
-			return nil, err
-		}
+	compose, err := s.isoRemoveComposeService(service, isVM, isNative)
+	if err != nil {
+		return nil, err
 	}
 	spec, err := s.loadISORuntimeSpec(service)
 	if err != nil {
 		return nil, err
 	}
 	return &isoConcreteRemoveSteps{
-		server: s, service: record, compose: compose, vm: isVM, spec: spec,
+		server: s, service: record, compose: compose, vm: isVM, native: isNative, spec: spec,
 		options: options, report: report, zfsDataset: zfsDataset,
 	}, nil
+}
+
+func classifyISORemoveRecord(record *db.Service) (vm, native bool, err error) {
+	switch {
+	case record.ServiceType == db.ServiceTypeVM:
+		return true, false, nil
+	case serviceRecordHasISOKind(record, iso.PayloadVM):
+		return true, false, nil
+	case record.ServiceType == db.ServiceTypeDockerCompose:
+		return false, false, nil
+	case record.ServiceType == db.ServiceTypeSystemd && serviceRecordHasISOKind(record, iso.PayloadNative):
+		return false, true, nil
+	default:
+		return false, false, fmt.Errorf("ISO removal for service type %q is not implemented in the container lifecycle", record.ServiceType)
+	}
+}
+
+func serviceRecordHasISOKind(record *db.Service, kind iso.PayloadKind) bool {
+	return record.ISO != nil && record.ISO.Kind == string(kind)
+}
+
+func (s *Server) isoRemoveComposeService(service string, vm, native bool) (*svc.DockerComposeService, error) {
+	if vm || native {
+		return nil, nil
+	}
+	return dockerComposeServiceForISO(s, service)
 }
 
 func (r *isoConcreteRemoveSteps) StopWorkload(ctx context.Context, _ string) error {
 	if r.vm {
 		return runISOReconcileVMSystemctl(ctx, "stop", r.service.Name)
 	}
+	if r.native {
+		return stopAndVerifyISONativeUnits(ctx, r.service)
+	}
 	return r.compose.StopProjectContainers(ctx)
 }
 
 func (r *isoConcreteRemoveSteps) StopTailscale(ctx context.Context, _ string) error {
-	if r.vm {
+	if r.vm || r.native {
 		return nil
 	}
 	return stopAndVerifyISOAuxiliaryUnits(ctx, r.service)
 }
 
 func stopAndVerifyISOAuxiliaryUnits(ctx context.Context, service *db.Service) error {
-	units := isoAuxiliaryUnits(service)
+	return stopAndVerifyISOUnits(ctx, isoAuxiliaryUnits(service))
+}
+
+func stopAndVerifyISONativeUnits(ctx context.Context, service *db.Service) error {
+	units, _ := serviceIdentityRuntimeUnits(service, service.Name)
+	return stopAndVerifyISOUnits(ctx, units)
+}
+
+func stopAndVerifyISOUnits(ctx context.Context, units []string) error {
 	if len(units) == 0 {
 		return nil
 	}
@@ -1465,11 +1562,15 @@ func stopAndVerifyISOAuxiliaryUnits(ctx context.Context, service *db.Service) er
 	if output, err := runISOSystemctlForRuntime(ctx, args...); err != nil {
 		return fmt.Errorf("stop ISO auxiliary units: %w: %s", err, strings.TrimSpace(string(output)))
 	}
-	return verifyISOAuxiliaryUnitsStopped(ctx, service)
+	return verifyISOUnitsStopped(ctx, units)
 }
 
 func verifyISOAuxiliaryUnitsStopped(ctx context.Context, service *db.Service) error {
-	for _, unit := range isoAuxiliaryUnits(service) {
+	return verifyISOUnitsStopped(ctx, isoAuxiliaryUnits(service))
+}
+
+func verifyISOUnitsStopped(ctx context.Context, units []string) error {
+	for _, unit := range units {
 		output, err := runISOSystemctlForRuntime(ctx, "show", "--property=ActiveState", "--value", unit)
 		if err != nil {
 			return fmt.Errorf("verify ISO auxiliary unit %s stopped: %w: %s", unit, err, strings.TrimSpace(string(output)))
@@ -1495,7 +1596,7 @@ func isoAuxiliaryUnits(service *db.Service) []string {
 }
 
 func (r *isoConcreteRemoveSteps) RemoveDockerEndpoints(ctx context.Context, _ string) error {
-	if r.vm {
+	if r.vm || r.native {
 		return nil
 	}
 	return r.compose.StopProjectContainers(ctx)
@@ -1528,13 +1629,16 @@ func (r *isoConcreteRemoveSteps) VerifyTopologyAbsent(ctx context.Context, _ str
 }
 
 func (r *isoConcreteRemoveSteps) VerifyDockerAbsent(ctx context.Context, _ string) error {
-	if r.vm {
+	if r.vm || r.native {
 		return nil
 	}
 	return errors.Join(r.compose.VerifyProjectAbsent(ctx), r.compose.VerifyDefaultNetworkAbsent(ctx))
 }
 
 func (r *isoConcreteRemoveSteps) VerifyDNetAbsent(_ context.Context, _ string) error {
+	if r.native {
+		return nil
+	}
 	return verifyISOAllocationDNetAbsent(r.server, *r.service.ISO)
 }
 
@@ -1770,6 +1874,15 @@ func validateISOReplacementNetwork(desired []string, prepared isoReplacementNetw
 	if !slices.Equal(prepared.Modes, normalizedDesired) {
 		return fmt.Errorf("prepared replacement modes %v do not match requested modes %v", prepared.Modes, normalizedDesired)
 	}
+	if prepared.Desired != nil {
+		normalizedConfig, err := normalizeServiceNetworkConfig(*prepared.Desired)
+		if err != nil {
+			return fmt.Errorf("normalize prepared desired network: %w", err)
+		}
+		if !reflect.DeepEqual(normalizedConfig, *prepared.Desired) || !slices.Equal(normalizedConfig.Modes, normalizedDesired) {
+			return fmt.Errorf("prepared desired network does not match normalized replacement modes")
+		}
+	}
 	if slices.Contains(prepared.Modes, "iso") {
 		return fmt.Errorf("prepared replacement modes must not contain iso")
 	}
@@ -1805,7 +1918,7 @@ func validateISOReplacementModeState(prepared isoReplacementNetwork) error {
 
 func validateISOReplacementArtifacts(artifacts db.ArtifactStore) error {
 	for name := range artifacts {
-		if !isoNetworkArtifactNames[name] {
+		if !isoReplacementArtifactNames[name] {
 			return fmt.Errorf("prepared artifact %q is not network-owned", name)
 		}
 	}
@@ -1818,6 +1931,9 @@ func (s *Server) retainISOTransitionTombstone(service string, cause error) error
 
 func (s *Server) commitReplacementNetwork(service string, prepared isoReplacementNetwork) error {
 	_, _, err := s.cfg.DB.MutateService(service, func(_ *db.Data, record *db.Service) error {
+		if prepared.Expected != nil && !serviceNetworkRecordsEqual(record, prepared.Expected) {
+			return fmt.Errorf("service %q changed before ISO replacement commit", service)
+		}
 		if record.ISO == nil {
 			return fmt.Errorf("service %q lost its ISO allocation before replacement commit", service)
 		}
@@ -1825,6 +1941,9 @@ func (s *Server) commitReplacementNetwork(service string, prepared isoReplacemen
 		record.Macvlan = cloneISOReplacementMacvlan(prepared.Macvlan)
 		record.TSNet = prepared.Tailscale.Clone()
 		record.Artifacts = mergeISOReplacementNetworkArtifacts(record.Artifacts, prepared.Artifacts)
+		if prepared.Desired != nil {
+			record.Network = prepared.Desired.Clone()
+		}
 		record.ISO = nil
 		return nil
 	})
@@ -1861,6 +1980,17 @@ var isoNetworkArtifactNames = map[db.ArtifactName]bool{
 	db.ArtifactTSBinary:             true,
 	db.ArtifactTSConfig:             true,
 }
+
+// ISO-to-regular replacement preparation may also stage a fresh workload
+// service unit. The unit is network-owned for the duration of the mutation
+// because it contains the replacement namespace and dependency directives,
+// but it is not an ISO cleanup artifact: the service definition must survive
+// when an ISO allocation is removed.
+var isoReplacementArtifactNames = func() map[db.ArtifactName]bool {
+	names := maps.Clone(isoNetworkArtifactNames)
+	names[db.ArtifactSystemdUnit] = true
+	return names
+}()
 
 func clearISOCloneState(service *db.Service) {
 	if service == nil {
@@ -1917,6 +2047,9 @@ func verifyISORuntimeSiblings(ctx context.Context, service string, topologies []
 	for _, topology := range topologies {
 		if topology.Service == service {
 			continue
+		}
+		if err := ensureISOTopologyForRuntime(ctx, topology.Spec); err != nil {
+			return fmt.Errorf("reconcile ISO sibling %q: %w", topology.Service, err)
 		}
 		if err := verifyISOTopologyForRuntime(ctx, topology.Spec); err != nil {
 			return err

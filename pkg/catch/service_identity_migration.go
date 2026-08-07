@@ -79,9 +79,14 @@ type serviceIdentityMigrationRequest struct {
 	GenerationPaths   []string
 	GenerationIntents []serviceIdentityPathState
 	GenerationUnits   []string
-	StartNew          bool
-	PredecessorAbsent bool
-	ForceReconcile    bool
+	// GenerationEnablement separates the complete staged unit inventory from
+	// the exact enablement intent. Nil preserves the legacy behavior where each
+	// GenerationUnits entry is enabled; a non-nil empty slice explicitly
+	// disables every unit in the generation plan.
+	GenerationEnablement *[]serviceIdentityUnitEnablement
+	StartNew             bool
+	PredecessorAbsent    bool
+	ForceReconcile       bool
 
 	ops *serviceIdentityMigrationOps
 }
@@ -228,6 +233,18 @@ func (s *Server) migrateServiceIdentity(ctx context.Context, req serviceIdentity
 // such as FileInstaller.Close, which must keep one lock across staging and the
 // identity commit.
 func (s *Server) migrateServiceIdentityLocked(ctx context.Context, req serviceIdentityMigrationRequest, w io.Writer) (serviceIdentityMigrationResult, error) {
+	return s.migrateServiceIdentityLockedWithResolverState(ctx, req, w, false)
+}
+
+// migrateServiceIdentityLockedWithResolverGuard runs an identity transaction
+// while the caller owns both the keyed service-operation lock and the
+// Tailscale resolver mutation guard. It is reserved for composed transactions
+// that must keep the resolver guard across their own staging phase.
+func (s *Server) migrateServiceIdentityLockedWithResolverGuard(ctx context.Context, req serviceIdentityMigrationRequest, w io.Writer) (serviceIdentityMigrationResult, error) {
+	return s.migrateServiceIdentityLockedWithResolverState(ctx, req, w, true)
+}
+
+func (s *Server) migrateServiceIdentityLockedWithResolverState(ctx context.Context, req serviceIdentityMigrationRequest, w io.Writer, resolverGuardHeld bool) (serviceIdentityMigrationResult, error) {
 	if err := s.checkServiceIdentityMutationAllowed(req.Service); err != nil {
 		return serviceIdentityMigrationResult{}, err
 	}
@@ -246,15 +263,25 @@ func (s *Server) migrateServiceIdentityLocked(ctx context.Context, req serviceId
 	if m.isNoop() {
 		return m.result, nil
 	}
+	return s.runPreparedServiceIdentityMigration(ctx, m, resolverGuardHeld)
+}
+
+func (s *Server) runPreparedServiceIdentityMigration(ctx context.Context, m *serviceIdentityMigration, resolverGuardHeld bool) (serviceIdentityMigrationResult, error) {
 	if !tailscaleResolverPersistedRecord(*m.target) {
+		return s.runServiceIdentityMigration(ctx, m)
+	}
+	canonical := m.target
+	if m.req.RootPlan != nil {
+		canonical = m.previous
+	}
+	if resolverGuardHeld {
+		if err := s.checkTailscaleResolverCanonicalReady(ctx, *canonical); err != nil {
+			return serviceIdentityMigrationResult{}, err
+		}
 		return s.runServiceIdentityMigration(ctx, m)
 	}
 	var result serviceIdentityMigrationResult
 	err := s.withTailscaleResolverMutationGuard(func() error {
-		canonical := m.target
-		if m.req.RootPlan != nil {
-			canonical = m.previous
-		}
 		if err := s.checkTailscaleResolverCanonicalReady(ctx, *canonical); err != nil {
 			return err
 		}
@@ -1318,30 +1345,79 @@ func serviceIdentityExpectedBackupPaths(paths []string, primaryUnit string) []st
 
 func (m *serviceIdentityMigration) captureGenerationUnitEnablement(ctx context.Context) ([]serviceIdentityUnitEnablement, error) {
 	if len(m.req.GenerationUnits) == 0 {
+		if m.req.GenerationEnablement != nil && len(*m.req.GenerationEnablement) != 0 {
+			return nil, fmt.Errorf("explicit generation enablement requires generation units")
+		}
 		return nil, nil
 	}
-	target := make(map[string]struct{}, len(m.req.GenerationUnits))
-	for _, unit := range m.req.GenerationUnits {
-		unit = strings.TrimSpace(unit)
-		if unit == "" || filepath.Base(unit) != unit || strings.ContainsAny(unit, "\x00\r\n\t ") {
-			return nil, fmt.Errorf("invalid generation unit %q", unit)
-		}
-		if _, duplicate := target[unit]; duplicate {
-			return nil, fmt.Errorf("duplicate generation unit %q", unit)
-		}
-		target[unit] = struct{}{}
+	target, plan, err := m.generationUnitTargets()
+	if err != nil {
+		return nil, err
 	}
-	plan := serviceIdentityGenerationUnitPlan(m.previous, m.req.Service, m.req.GenerationUnits)
 	units := make([]serviceIdentityUnitEnablement, 0, len(plan))
 	for _, unit := range plan {
 		enabled, err := m.ops.isEnabled(ctx, unit)
 		if err != nil {
 			return nil, fmt.Errorf("inspect enablement for %s: %w", unit, err)
 		}
-		_, targetEnabled := target[unit]
+		targetEnabled := target[unit]
 		units = append(units, serviceIdentityUnitEnablement{Unit: unit, Enabled: enabled, TargetEnabled: targetEnabled})
 	}
 	return units, nil
+}
+
+func (m *serviceIdentityMigration) generationUnitTargets() (map[string]bool, []string, error) {
+	target := make(map[string]bool, len(m.req.GenerationUnits))
+	for _, raw := range m.req.GenerationUnits {
+		unit, err := validateServiceIdentityGenerationUnitName(raw, "generation unit")
+		if err != nil {
+			return nil, nil, err
+		}
+		if _, duplicate := target[unit]; duplicate {
+			return nil, nil, fmt.Errorf("duplicate generation unit %q", unit)
+		}
+		target[unit] = true
+	}
+	plan := serviceIdentityGenerationUnitPlan(m.previous, m.req.Service, m.req.GenerationUnits)
+	if m.req.GenerationEnablement == nil {
+		return target, plan, nil
+	}
+	explicit, err := explicitServiceIdentityGenerationEnablement(*m.req.GenerationEnablement, plan)
+	if err != nil {
+		return nil, nil, err
+	}
+	return explicit, plan, nil
+}
+
+func explicitServiceIdentityGenerationEnablement(states []serviceIdentityUnitEnablement, plan []string) (map[string]bool, error) {
+	explicit := make(map[string]bool, len(states))
+	for _, state := range states {
+		unit, err := validateServiceIdentityGenerationUnitName(state.Unit, "explicit generation enablement unit")
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := explicit[unit]; duplicate {
+			return nil, fmt.Errorf("duplicate explicit generation enablement unit %q", unit)
+		}
+		explicit[unit] = state.TargetEnabled
+	}
+	if len(explicit) != len(plan) {
+		return nil, fmt.Errorf("explicit generation enablement does not match the complete generation unit plan")
+	}
+	for _, unit := range plan {
+		if _, ok := explicit[unit]; !ok {
+			return nil, fmt.Errorf("explicit generation enablement is missing unit %q", unit)
+		}
+	}
+	return explicit, nil
+}
+
+func validateServiceIdentityGenerationUnitName(raw, label string) (string, error) {
+	unit := strings.TrimSpace(raw)
+	if unit == "" || filepath.Base(unit) != unit || strings.ContainsAny(unit, "\x00\r\n\t ") {
+		return "", fmt.Errorf("invalid %s %q", label, raw)
+	}
+	return unit, nil
 }
 
 func serviceIdentityGenerationUnitPlan(previous *db.Service, fallback string, targetUnits []string) []string {

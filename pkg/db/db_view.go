@@ -13,7 +13,7 @@ import (
 	"tailscale.com/types/views"
 )
 
-//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,ServiceIdentity,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent,VMGuestBaseConfig,VMKernelArtifactConfig,VMRuntimeArtifactConfig,VMRuntimeTrialConfig,VMRuntimeLifecycleConfig,VMComponentsConfig
+//go:generate go run tailscale.com/cmd/cloner  -clonefunc=false -type=Data,Service,ServiceIdentity,SnapshotPolicy,Volume,ImageRepo,Artifact,DockerNetwork,DockerEndpoint,TailscaleNetwork,EndpointPort,VMConfig,VMImageConfig,VMDiskConfig,VMNetworkConfig,VMSSHConfig,VMConsoleConfig,VMSocketConfig,VMBalloonConfig,VMHostConfig,ISOPool,ISOAllocation,ISOComponent,VMGuestBaseConfig,VMKernelArtifactConfig,VMRuntimeArtifactConfig,VMRuntimeTrialConfig,VMRuntimeLifecycleConfig,VMComponentsConfig,ServiceNetworkConfig
 
 // View returns a read-only view of Data.
 func (p *Data) View() DataView {
@@ -224,6 +224,10 @@ func (v ServiceView) Artifacts() views.MapFn[ArtifactName, *Artifact, ArtifactVi
 		return t.View()
 	})
 }
+
+// Network is the desired network configuration. Nil preserves legacy
+// runtime-derived behavior until a network setting is explicitly changed.
+func (v ServiceView) Network() ServiceNetworkConfigView { return v.ж.Network.View() }
 func (v ServiceView) SvcNetwork() views.ValuePointer[SvcNetwork] {
 	return views.ValuePointerOf(v.ж.SvcNetwork)
 }
@@ -249,6 +253,7 @@ var _ServiceViewNeedsRegeneration = Service(struct {
 	LatestGeneration       int
 	Publish                []string
 	Artifacts              ArtifactStore
+	Network                *ServiceNetworkConfig
 	SvcNetwork             *SvcNetwork
 	Macvlan                *MacvlanNetwork
 	TSNet                  *TailscaleNetwork
@@ -2515,4 +2520,90 @@ var _VMComponentsConfigViewNeedsRegeneration = VMComponentsConfig(struct {
 	GuestBase VMGuestBaseConfig
 	Kernel    VMKernelArtifactConfig
 	Runtime   VMRuntimeLifecycleConfig
+}{})
+
+// View returns a read-only view of ServiceNetworkConfig.
+func (p *ServiceNetworkConfig) View() ServiceNetworkConfigView {
+	return ServiceNetworkConfigView{ж: p}
+}
+
+// ServiceNetworkConfigView provides a read-only view over ServiceNetworkConfig.
+//
+// Its methods should only be called if `Valid()` returns true.
+type ServiceNetworkConfigView struct {
+	// ж is the underlying mutable value, named with a hard-to-type
+	// character that looks pointy like a pointer.
+	// It is named distinctively to make you think of how dangerous it is to escape
+	// to callers. You must not let callers be able to mutate it.
+	ж *ServiceNetworkConfig
+}
+
+// Valid reports whether v's underlying value is non-nil.
+func (v ServiceNetworkConfigView) Valid() bool { return v.ж != nil }
+
+// AsStruct returns a clone of the underlying value which aliases no memory with
+// the original.
+func (v ServiceNetworkConfigView) AsStruct() *ServiceNetworkConfig {
+	if v.ж == nil {
+		return nil
+	}
+	return v.ж.Clone()
+}
+
+// MarshalJSON implements [jsonv1.Marshaler].
+func (v ServiceNetworkConfigView) MarshalJSON() ([]byte, error) {
+	return jsonv1.Marshal(v.ж)
+}
+
+// MarshalJSONTo implements [jsonv2.MarshalerTo].
+func (v ServiceNetworkConfigView) MarshalJSONTo(enc *jsontext.Encoder) error {
+	return jsonv2.MarshalEncode(enc, v.ж)
+}
+
+// UnmarshalJSON implements [jsonv1.Unmarshaler].
+func (v *ServiceNetworkConfigView) UnmarshalJSON(b []byte) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	if len(b) == 0 {
+		return nil
+	}
+	var x ServiceNetworkConfig
+	if err := jsonv1.Unmarshal(b, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+// UnmarshalJSONFrom implements [jsonv2.UnmarshalerFrom].
+func (v *ServiceNetworkConfigView) UnmarshalJSONFrom(dec *jsontext.Decoder) error {
+	if v.ж != nil {
+		return errors.New("already initialized")
+	}
+	var x ServiceNetworkConfig
+	if err := jsonv2.UnmarshalDecode(dec, &x); err != nil {
+		return err
+	}
+	v.ж = &x
+	return nil
+}
+
+func (v ServiceNetworkConfigView) Modes() views.Slice[string]  { return views.SliceOf(v.ж.Modes) }
+func (v ServiceNetworkConfigView) TSVersion() string           { return v.ж.TSVersion }
+func (v ServiceNetworkConfigView) TSExitNode() string          { return v.ж.TSExitNode }
+func (v ServiceNetworkConfigView) TSTags() views.Slice[string] { return views.SliceOf(v.ж.TSTags) }
+func (v ServiceNetworkConfigView) MacvlanParent() string       { return v.ж.MacvlanParent }
+func (v ServiceNetworkConfigView) MacvlanVLAN() int            { return v.ж.MacvlanVLAN }
+func (v ServiceNetworkConfigView) MacvlanMAC() string          { return v.ж.MacvlanMAC }
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ServiceNetworkConfigViewNeedsRegeneration = ServiceNetworkConfig(struct {
+	Modes         []string
+	TSVersion     string
+	TSExitNode    string
+	TSTags        []string
+	MacvlanParent string
+	MacvlanVLAN   int
+	MacvlanMAC    string
 }{})

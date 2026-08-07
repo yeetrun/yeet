@@ -1,0 +1,2 @@
+go test fuzz v1
+string("--ts-ver -ts-exit 0")

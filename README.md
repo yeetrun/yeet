@@ -453,13 +453,41 @@ Yeet has a few network modes because services have different reachability and ro
 - `--net=iso,ts`: `iso` behavior plus a service-owned Tailscale identity for
   supported container-backed payloads.
 
+Choose network flags on `yeet run` when you first deploy a service. Change an
+existing non-VM service through `service set`:
+
+```bash
+yeet service set <svc> --net=iso
+yeet service set <svc> --net=ts --ts-tags=tag:app
+yeet service set <svc> --net=host
+yeet service set <svc> --ts-exit=
+```
+
+`--net` replaces the complete mode set. Other supplied network flags patch one
+setting, and an explicit empty value clears an optional setting. A resulting
+mode set that includes `ts` must keep at least one Tailscale tag. The mutation
+restarts the service immediately. If Catch changes the live service but the
+local config cannot be saved, run `yeet service sync <svc>`.
+
+Rerunning `yeet run` can still update a payload or unrelated configuration, but
+it rejects network drift for an existing service with `service set` guidance.
+VM network changes stay under `vm set`; stop the VM before changing it:
+
+```bash
+yeet stop <vm>
+yeet vm set <vm> --net=lan
+yeet vm set <vm> --net=svc,lan --macvlan-parent=vmbr0
+yeet start <vm>
+```
+
 VM `--net=lan` attaches the guest TAP to a host bridge. On supported Debian/Ubuntu hosts, yeet can prepare `br0` during `yeet init` or before the first VM LAN create.
 
-ISO supports VMs and container-backed payloads. VMs use `iso` alone and can
-install Tailscale inside the guest when needed. Native binaries, scripts, and
-cron jobs cannot use ISO while they run as root-owned host services. ISO also
-rejects published ports and unsafe Compose features instead of pretending they
-are contained.
+ISO supports VMs, native binaries and scripts, timer-backed jobs, and supported
+container payloads. Native and timer workloads use the same ISO networking
+whether they run as root or another account; the mode does not change their
+identity or privilege policy and does not claim to contain a hostile host-root
+process. VMs use `iso` alone and can install Tailscale inside the guest when
+needed. ISO also rejects published ports and unsafe Compose features.
 
 Read the docs before combining networking modes with real services. Future you is the person who has to debug it.
 

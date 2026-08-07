@@ -502,6 +502,8 @@ func TestSystemdUnitRendersTimerAndServiceOptions(t *testing.T) {
 		EnvFile:          "/run/demo/env",
 		WorkingDirectory: "/srv/demo",
 		NetNS:            "demo-ns",
+		Requires:         "yeet-demo-ns.service",
+		After:            "yeet-demo-ns.service",
 		ResolvConf:       "/run/demo/resolv.conf",
 	}
 
@@ -527,6 +529,8 @@ func TestSystemdUnitRendersTimerAndServiceOptions(t *testing.T) {
 		"User=nobody\n",
 		"EnvironmentFile=/run/demo/env\n",
 		"NetworkNamespacePath=/var/run/netns/demo-ns\n",
+		"Requires=yeet-demo-ns.service\n",
+		"After=yeet-demo-ns.service\n",
 		"RemainAfterExit=yes\n",
 		"ExecStop=/opt/demo/bin/demo-stop\n",
 		"BindReadOnlyPaths=/run/demo/resolv.conf:/etc/resolv.conf\n",
@@ -544,6 +548,18 @@ func TestSystemdUnitRendersTimerAndServiceOptions(t *testing.T) {
 	} {
 		if !strings.Contains(timer, want) {
 			t.Fatalf("timer unit missing %q:\n%s", want, timer)
+		}
+	}
+	for _, forbidden := range []string{
+		"NetworkNamespacePath=", "BindReadOnlyPaths=", "Requires=yeet-demo-ns.service", "After=yeet-demo-ns.service",
+	} {
+		if strings.Contains(timer, forbidden) {
+			t.Fatalf("timer unit contains service-only networking directive %q:\n%s", forbidden, timer)
+		}
+	}
+	for _, forbidden := range []string{"NoNewPrivileges=", "CapabilityBoundingSet=", "RestrictNamespaces=", "RestrictAddressFamilies="} {
+		if strings.Contains(service, forbidden) {
+			t.Fatalf("service unit contains unrequested privilege policy %q:\n%s", forbidden, service)
 		}
 	}
 }

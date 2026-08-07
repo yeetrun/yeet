@@ -104,6 +104,7 @@ func (src *Service) Clone() *Service {
 			}
 		}
 	}
+	dst.Network = src.Network.Clone()
 	if dst.SvcNetwork != nil {
 		dst.SvcNetwork = ptr.To(*src.SvcNetwork)
 	}
@@ -129,6 +130,7 @@ var _ServiceCloneNeedsRegeneration = Service(struct {
 	LatestGeneration       int
 	Publish                []string
 	Artifacts              ArtifactStore
+	Network                *ServiceNetworkConfig
 	SvcNetwork             *SvcNetwork
 	Macvlan                *MacvlanNetwork
 	TSNet                  *TailscaleNetwork
@@ -731,4 +733,28 @@ var _VMComponentsConfigCloneNeedsRegeneration = VMComponentsConfig(struct {
 	GuestBase VMGuestBaseConfig
 	Kernel    VMKernelArtifactConfig
 	Runtime   VMRuntimeLifecycleConfig
+}{})
+
+// Clone makes a deep copy of ServiceNetworkConfig.
+// The result aliases no memory with the original.
+func (src *ServiceNetworkConfig) Clone() *ServiceNetworkConfig {
+	if src == nil {
+		return nil
+	}
+	dst := new(ServiceNetworkConfig)
+	*dst = *src
+	dst.Modes = append(src.Modes[:0:0], src.Modes...)
+	dst.TSTags = append(src.TSTags[:0:0], src.TSTags...)
+	return dst
+}
+
+// A compilation failure here means this code must be regenerated, with the command at the top of this file.
+var _ServiceNetworkConfigCloneNeedsRegeneration = ServiceNetworkConfig(struct {
+	Modes         []string
+	TSVersion     string
+	TSExitNode    string
+	TSTags        []string
+	MacvlanParent string
+	MacvlanVLAN   int
+	MacvlanMAC    string
 }{})

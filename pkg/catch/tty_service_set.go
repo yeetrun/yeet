@@ -67,6 +67,9 @@ var (
 	upDockerComposeForServiceSet      = func(compose *svc.DockerComposeService) error {
 		return compose.Start()
 	}
+	updateServiceNetworkLockedForServiceSet = func(ctx context.Context, s *Server, name string, flags cli.ServiceSetFlags, out io.Writer) error {
+		return s.updateServiceNetworkLocked(ctx, name, flags, out)
+	}
 )
 
 func (e *ttyExecer) serviceCmdFunc(args []string) error {
@@ -132,7 +135,7 @@ func hasServiceCommandArg(args []string) bool {
 func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	changes := serviceSetChangesFromFlags(flags)
 	if !changes.any() {
-		return fmt.Errorf("service set requires --run-as, --service-root, snapshot settings, or published ports")
+		return fmt.Errorf("service set requires --run-as, network settings, --service-root, snapshot settings, or published ports")
 	}
 	if err := validateServiceSetMutationCombination(flags, changes); err != nil {
 		return err
@@ -140,6 +143,21 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 	if err := validateServiceSetSnapshotChange(flags, changes); err != nil {
 		return err
 	}
+	if changes.network {
+		return e.applyServiceSetNetworkChange(flags)
+	}
+	return e.applyServiceSetNonNetworkChanges(flags, changes)
+}
+
+func (e *ttyExecer) applyServiceSetNetworkChange(flags cli.ServiceSetFlags) error {
+	ctx := e.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return updateServiceNetworkLockedForServiceSet(ctx, e.s, e.sn, flags, e.rw)
+}
+
+func (e *ttyExecer) applyServiceSetNonNetworkChanges(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
 	if changes.identity {
 		if err := e.validateServiceSetIdentityType(); err != nil {
 			return err
@@ -163,6 +181,9 @@ func (e *ttyExecer) serviceSetCmdFunc(flags cli.ServiceSetFlags) error {
 }
 
 func validateServiceSetMutationCombination(flags cli.ServiceSetFlags, changes serviceSetChanges) error {
+	if changes.network && (changes.root || changes.publish || changes.snapshot) {
+		return fmt.Errorf("network changes can only be combined with --run-as; apply other service settings with separate service set commands")
+	}
 	if changes.identity && changes.publish {
 		return fmt.Errorf("--run-as cannot be combined with published-port changes; apply identity and publish changes as separate commands")
 	}
@@ -174,6 +195,7 @@ func validateServiceSetMutationCombination(flags cli.ServiceSetFlags, changes se
 
 type serviceSetChanges struct {
 	identity bool
+	network  bool
 	root     bool
 	publish  bool
 	snapshot bool
@@ -182,6 +204,7 @@ type serviceSetChanges struct {
 func serviceSetChangesFromFlags(flags cli.ServiceSetFlags) serviceSetChanges {
 	return serviceSetChanges{
 		identity: flags.RunAsSet,
+		network:  flags.HasNetworkChange(),
 		root:     strings.TrimSpace(flags.ServiceRoot) != "" || flags.ZFS,
 		publish:  len(flags.Publish) != 0 || flags.PublishReset,
 		snapshot: flags.SnapshotChange,
@@ -189,7 +212,7 @@ func serviceSetChangesFromFlags(flags cli.ServiceSetFlags) serviceSetChanges {
 }
 
 func (c serviceSetChanges) any() bool {
-	return c.identity || c.root || c.publish || c.snapshot
+	return c.identity || c.network || c.root || c.publish || c.snapshot
 }
 
 func (e *ttyExecer) validateServiceSetIdentityType() error {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/shayne/yargs"
@@ -75,6 +76,22 @@ type RunFlags struct {
 type ServiceSetFlags struct {
 	RunAs            string
 	RunAsSet         bool
+	Net              string
+	NetSet           bool
+	TsVer            string
+	TsVerSet         bool
+	TsExit           string
+	TsExitSet        bool
+	TsTags           []string
+	TsTagsSet        bool
+	TsAuthKey        string
+	TsAuthKeySet     bool
+	MacvlanMac       string
+	MacvlanMacSet    bool
+	MacvlanVlan      int
+	MacvlanVlanSet   bool
+	MacvlanParent    string
+	MacvlanParentSet bool
 	ServiceRoot      string
 	ZFS              bool
 	Copy             bool
@@ -87,6 +104,13 @@ type ServiceSetFlags struct {
 	SnapshotRequired string
 	SnapshotEvents   string
 	SnapshotChange   bool
+}
+
+// HasNetworkChange reports whether any network setting was explicitly supplied.
+func (f ServiceSetFlags) HasNetworkChange() bool {
+	return f.NetSet || f.TsVerSet || f.TsExitSet || f.TsTagsSet ||
+		f.TsAuthKeySet || f.MacvlanMacSet || f.MacvlanVlanSet ||
+		f.MacvlanParentSet
 }
 
 type CronFlags struct {
@@ -355,6 +379,14 @@ type envCopyFlagsParsed struct {
 
 type serviceSetFlagsParsed struct {
 	RunAs            string   `flag:"run-as" help:"Run a native service as USER[:GROUP]"`
+	Net              string   `flag:"net" help:"Replace all network modes for an existing non-VM service; use yeet vm set for VMs. Resulting modes that include ts require tags; stored tags may be inherited"`
+	TsVer            string   `flag:"ts-ver" help:"Patch the Tailscale version; pass an empty value to clear"`
+	TsExit           string   `flag:"ts-exit" help:"Patch the Tailscale exit node; pass an empty value to clear"`
+	TsTags           []string `flag:"ts-tags" help:"Patch Tailscale tags; repeat to replace the list or pass an empty value to clear when ts is not selected"`
+	TsAuthKey        string   `flag:"ts-auth-key" help:"Use a non-empty transient, write-only Tailscale auth key for this operation"`
+	MacvlanMac       string   `flag:"macvlan-mac" help:"Patch the macvlan MAC used by lan; pass an empty value to clear"`
+	MacvlanVlan      string   `flag:"macvlan-vlan" help:"Patch the macvlan VLAN used by lan; pass an empty value to clear"`
+	MacvlanParent    string   `flag:"macvlan-parent" help:"Patch the macvlan parent used by lan; pass an empty value to clear"`
 	ServiceRoot      string   `flag:"service-root"`
 	ZFS              bool     `flag:"zfs"`
 	Copy             bool     `flag:"copy"`
@@ -705,7 +737,7 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"console": {Name: "console", Description: "Stream VM serial console output", Usage: "vm console <svc>", ArgsSchema: ServiceArgs{}},
 			"set": {
 				Name:        "set",
-				Description: "Set VM resources and networking",
+				Description: "Set resources and networking on a stopped VM",
 				Usage:       "vm set <vm> [--vcpus=N] [--memory=SIZE] [--memory-min=SIZE] [--balloon=auto|off] [--disk=SIZE] [--net=svc|lan|svc,lan|iso] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
 				Examples: []string{
 					"yeet vm set <vm> --vcpus=8 --memory=8g --disk=128g",
@@ -822,13 +854,17 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set service settings",
-				Usage:       "service set <svc> [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false]",
+				Usage:       "service set <svc> [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
 				Examples: []string{
 					"yeet service set <svc> -p 80:80 -p 443:443",
 					"yeet service set <svc> --publish-reset -p 443:443",
 					"yeet service set <svc> --publish-reset",
 					"yeet service set <svc> --run-as=yeet-svc",
 					"yeet service set <svc> --run-as=app:app",
+					"yeet service set <svc> --net=iso",
+					"yeet service set <svc> --net=ts --ts-tags=tag:app",
+					"yeet service set <svc> --net=host",
+					"yeet service set <svc> --ts-exit=",
 					"yeet service set <svc> --service-root=/srv/apps/<svc>",
 					"yeet service set <svc> --service-root=/var/lib/yeet/services/<svc> --copy --run-as=yeet-svc",
 					"yeet service set <svc> --service-root=tank/apps/<svc> --zfs --copy",
@@ -1296,8 +1332,8 @@ func rejectServiceSetVMFlags(args []string) error {
 		}
 		name, _ := splitInlineFlagValue(arg)
 		switch name {
-		case "--cpus", "--vcpus", "--memory", "--memory-min", "--balloon", "--disk", "--net", "--macvlan-mac", "--macvlan-vlan", "--macvlan-parent":
-			return fmt.Errorf("unknown flag %s; use `yeet vm set` for VM resources and networking", name)
+		case "--cpus", "--vcpus", "--memory", "--memory-min", "--balloon", "--disk":
+			return fmt.Errorf("unknown flag %s; use `yeet vm set` for VM resources", name)
 		}
 	}
 	return nil
@@ -1315,9 +1351,29 @@ func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string)
 	if err != nil {
 		return ServiceSetFlags{}, err
 	}
+	network, err := serviceSetNetworkFlagsFromParsed(parsed, parseArgs)
+	if err != nil {
+		return ServiceSetFlags{}, err
+	}
 	flags := ServiceSetFlags{
 		RunAs:            runAs,
 		RunAsSet:         runAsSet,
+		Net:              network.Net,
+		NetSet:           network.NetSet,
+		TsVer:            network.TsVer,
+		TsVerSet:         network.TsVerSet,
+		TsExit:           network.TsExit,
+		TsExitSet:        network.TsExitSet,
+		TsTags:           network.TsTags,
+		TsTagsSet:        network.TsTagsSet,
+		TsAuthKey:        network.TsAuthKey,
+		TsAuthKeySet:     network.TsAuthKeySet,
+		MacvlanMac:       network.MacvlanMac,
+		MacvlanMacSet:    network.MacvlanMacSet,
+		MacvlanVlan:      network.MacvlanVlan,
+		MacvlanVlanSet:   network.MacvlanVlanSet,
+		MacvlanParent:    network.MacvlanParent,
+		MacvlanParentSet: network.MacvlanParentSet,
 		ServiceRoot:      strings.TrimSpace(parsed.ServiceRoot),
 		ZFS:              parsed.ZFS,
 		Copy:             parsed.Copy,
@@ -1335,6 +1391,92 @@ func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string)
 		return ServiceSetFlags{}, err
 	}
 	return flags, nil
+}
+
+func serviceSetNetworkFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string) (ServiceSetFlags, error) {
+	flags := ServiceSetFlags{
+		NetSet:           longFlagWasSupplied(parseArgs, "--net"),
+		TsVerSet:         longFlagWasSupplied(parseArgs, "--ts-ver"),
+		TsExitSet:        longFlagWasSupplied(parseArgs, "--ts-exit"),
+		TsTagsSet:        longFlagWasSupplied(parseArgs, "--ts-tags"),
+		TsAuthKeySet:     longFlagWasSupplied(parseArgs, "--ts-auth-key"),
+		MacvlanMacSet:    longFlagWasSupplied(parseArgs, "--macvlan-mac"),
+		MacvlanVlanSet:   longFlagWasSupplied(parseArgs, "--macvlan-vlan"),
+		MacvlanParentSet: longFlagWasSupplied(parseArgs, "--macvlan-parent"),
+	}
+	var err error
+	if flags.Net, err = normalizeServiceSetNetworkModes(parsed.Net, flags.NetSet); err != nil {
+		return ServiceSetFlags{}, err
+	}
+	if flags.TsVerSet {
+		flags.TsVer = strings.TrimSpace(parsed.TsVer)
+	}
+	if flags.TsExitSet {
+		flags.TsExit = strings.TrimSpace(parsed.TsExit)
+	}
+	flags.TsTags = normalizeServiceSetTags(orderedFlagValues(parseArgs, "--ts-tags", ""), flags.TsTagsSet)
+	if flags.TsAuthKeySet {
+		flags.TsAuthKey = strings.TrimSpace(parsed.TsAuthKey)
+		if flags.TsAuthKey == "" {
+			return ServiceSetFlags{}, fmt.Errorf("--ts-auth-key must not be empty")
+		}
+	}
+	if flags.MacvlanMacSet {
+		flags.MacvlanMac = strings.TrimSpace(parsed.MacvlanMac)
+	}
+	if flags.MacvlanParentSet {
+		flags.MacvlanParent = strings.TrimSpace(parsed.MacvlanParent)
+	}
+	flags.MacvlanVlan, err = parseServiceSetMacvlanVLAN(parsed.MacvlanVlan, flags.MacvlanVlanSet)
+	if err != nil {
+		return ServiceSetFlags{}, err
+	}
+	return flags, nil
+}
+
+func normalizeServiceSetNetworkModes(raw string, set bool) (string, error) {
+	if !set {
+		return "", nil
+	}
+	if strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("--net must not be empty")
+	}
+	parts := strings.Split(raw, ",")
+	for i, part := range parts {
+		parts[i] = strings.ToLower(strings.TrimSpace(part))
+	}
+	normalized := strings.Join(parts, ",")
+	if err := validateNetworkModesNotEmpty(normalized); err != nil {
+		return "", err
+	}
+	return normalized, nil
+}
+
+func normalizeServiceSetTags(values []string, set bool) []string {
+	if !set {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func parseServiceSetMacvlanVLAN(raw string, set bool) (int, error) {
+	if !set || strings.TrimSpace(raw) == "" {
+		return 0, nil
+	}
+	vlan, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("--macvlan-vlan must be an integer")
+	}
+	if err := validateMacvlanVLAN(vlan); err != nil {
+		return 0, err
+	}
+	return vlan, nil
 }
 
 func validateServiceSetFlags(flags ServiceSetFlags) error {
@@ -1394,7 +1536,7 @@ func validateServiceSetRootValue(flags ServiceSetFlags, rootChange bool) error {
 }
 
 func serviceSetHasChange(flags ServiceSetFlags, rootChange bool) bool {
-	return flags.RunAsSet || rootChange || flags.SnapshotChange || hasServiceSetPublishChange(flags)
+	return flags.RunAsSet || flags.HasNetworkChange() || rootChange || flags.SnapshotChange || hasServiceSetPublishChange(flags)
 }
 
 func parseRunAs(args []string, value string) (string, bool, error) {

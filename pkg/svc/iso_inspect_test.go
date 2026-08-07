@@ -12,15 +12,19 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/cmdutil"
 )
 
 func TestInspectISOProjectAcceptsExactAdmittedRuntime(t *testing.T) {
 	opts, runner := newISOInspectTestOptions(t)
+	runner.inspect[0]["HostConfig"].(map[string]any)["IpcMode"] = "private"
 	inspection, err := InspectISOProject(context.Background(), opts)
 	if err != nil {
 		t.Fatal(err)
@@ -33,6 +37,33 @@ func TestInspectISOProjectAcceptsExactAdmittedRuntime(t *testing.T) {
 	}
 	if !slices.Equal(runner.calls, []string{"compose-ps", "inspect"}) {
 		t.Fatalf("inspection calls = %v, want compose ps then docker inspect", runner.calls)
+	}
+}
+
+func TestInspectISOProjectCapturesPrewiredCommandStreams(t *testing.T) {
+	opts, fixture := newISOInspectTestOptions(t)
+	ps, err := json.Marshal(fixture.ps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspect, err := json.Marshal(fixture.inspect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts.run = nil
+	opts.NewCmd = func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+		output := ps
+		if len(args) > 0 && args[0] == "inspect" {
+			output = inspect
+		}
+		return cmdutil.NewStdCmdContext(ctx, "sh", "-c", "printf '%s' \"$1\"", "sh", string(output))
+	}
+	inspection, err := InspectISOProject(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := inspection.Verify(); err != nil {
+		t.Fatal(err)
 	}
 }
 

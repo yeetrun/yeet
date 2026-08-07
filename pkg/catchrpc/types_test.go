@@ -59,6 +59,39 @@ func TestServiceISOJSONRoundTripPreservesPortPresence(t *testing.T) {
 	}
 }
 
+func TestServiceNetworkModesJSONRoundTrip(t *testing.T) {
+	want := ServiceNetwork{
+		Modes: []string{"ts"},
+		Desired: &ServiceNetworkSettings{
+			Modes:       []string{"ts"},
+			TSVersion:   "1.101.284",
+			TSTags:      []string{"tag:server"},
+			MacvlanVLAN: 42,
+		},
+		Tailscale: &ServiceTailscale{
+			Interface: "ts0",
+			Tags:      []string{"tag:server"},
+		},
+	}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(`"modes":["ts"]`)) {
+		t.Fatalf("ServiceNetwork JSON = %s, want effective modes", raw)
+	}
+	if !bytes.Contains(raw, []byte(`"desired":{"modes":["ts"],"tsVersion":"1.101.284","tsTags":["tag:server"],"macvlanVlan":42}`)) {
+		t.Fatalf("ServiceNetwork JSON = %s, want desired network settings", raw)
+	}
+	var got ServiceNetwork
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ServiceNetwork round trip = %#v, want %#v", got, want)
+	}
+}
+
 func TestISOPoolClientMethodsCallTypedRPC(t *testing.T) {
 	var methods []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

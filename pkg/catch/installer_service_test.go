@@ -107,6 +107,213 @@ func TestCommitGenPlanForSpecificGenerationPromotesOnlyLatest(t *testing.T) {
 	}
 }
 
+func TestInitialInstallDesiredNetworkPersistsOnlyAfterSuccessfulActivation(t *testing.T) {
+	server := newTestServer(t)
+	service := &db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, Generation: 1}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": service}}); err != nil {
+		t.Fatal(err)
+	}
+	installer := &FileInstaller{
+		s: server,
+		cfg: FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "api"}, Network: NetworkOpts{
+			Interfaces: "ts", Modes: []string{"ts"}, Tailscale: TailscaleOpts{Version: "1.101.284", Tags: []string{"tag:app"}, AuthKey: "tskey-auth-secret"},
+		}},
+		installedGeneration:   1,
+		persistInitialNetwork: true,
+	}
+	if err := installer.persistInitialDesiredNetwork(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := server.serviceView("api")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Network().AsStruct() == nil || !reflect.DeepEqual(got.Network().AsStruct().Modes, []string{"ts"}) || got.Network().AsStruct().TSVersion != "1.101.284" {
+		t.Fatalf("persisted desired network = %#v", got.Network().AsStruct())
+	}
+	if strings.Contains(asJSON(got.AsStruct()), "tskey-auth-secret") {
+		t.Fatal("persisted transient auth key")
+	}
+}
+
+func TestInitialInstallDesiredNetworkDoesNotRecreateMissingService(t *testing.T) {
+	server := newTestServer(t)
+	installer := &FileInstaller{
+		s:                   server,
+		cfg:                 FileInstallerCfg{InstallerCfg: InstallerCfg{ServiceName: "api"}, Network: NetworkOpts{Interfaces: "host", Modes: []string{"host"}}},
+		installedGeneration: 1, persistInitialNetwork: true,
+	}
+	err := installer.persistInitialDesiredNetwork()
+	if err == nil || !strings.Contains(err.Error(), "disappeared") {
+		t.Fatalf("persistInitialDesiredNetwork error = %v, want disappeared service", err)
+	}
+	view, getErr := server.cfg.DB.Get()
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if _, ok := view.Services().GetOk("api"); ok {
+		t.Fatal("desired-state commit recreated a missing service")
+	}
+}
+
+func TestInstallISONativeOrdersActivationInspectionAndReady(t *testing.T) {
+	recorder := &isoNativeInstallRecorder{}
+	if err := installISONativeWith(context.Background(), recorder); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(recorder.events, []string{"install", "restart", "inspect", "ready"}) {
+		t.Fatalf("native ISO install events = %v", recorder.events)
+	}
+
+	recorder = &isoNativeInstallRecorder{failAt: "restart"}
+	err := installISONativeWith(context.Background(), recorder)
+	if err == nil || !strings.Contains(err.Error(), "restart") {
+		t.Fatalf("installISONativeWith error = %v, want restart failure", err)
+	}
+	if !reflect.DeepEqual(recorder.events, []string{"install", "restart", "quarantine"}) {
+		t.Fatalf("failed native ISO install events = %v", recorder.events)
+	}
+}
+
+func TestISONativeInstallQuarantineAttributesRecordBeforeStoppingRuntime(t *testing.T) {
+	cause := errors.New("activation failed")
+	for _, tt := range []struct {
+		name       string
+		concurrent func(*db.Service)
+		wantStop   bool
+		wantState  iso.AllocationState
+	}{
+		{
+			name:      "attributable record is quarantined then stopped",
+			wantStop:  true,
+			wantState: iso.StateQuarantined,
+		},
+		{
+			name: "concurrent replacement is neither changed nor stopped",
+			concurrent: func(service *db.Service) {
+				service.Network = &db.ServiceNetworkConfig{Modes: []string{"host"}}
+				service.ISO = nil
+			},
+			wantState: iso.StateReserved,
+		},
+		{
+			name: "concurrent Compose replacement is neither changed nor stopped",
+			concurrent: func(service *db.Service) {
+				service.ServiceType = db.ServiceTypeDockerCompose
+				service.Network = &db.ServiceNetworkConfig{Modes: []string{"host"}}
+				service.ISO = nil
+				service.Artifacts = db.ArtifactStore{db.ArtifactDockerComposeFile: {Refs: map[db.ArtifactRef]string{
+					"latest": "/unused/compose.yml",
+				}}}
+			},
+			wantState: iso.StateReserved,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTestServer(t)
+			record := &db.Service{
+				Name: "api", ServiceType: db.ServiceTypeSystemd,
+				Network: &db.ServiceNetworkConfig{Modes: []string{"iso"}},
+				ISO:     testISONativeRuntimeAllocation("api", iso.StateReserved),
+				Artifacts: db.ArtifactStore{db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{
+					"latest": filepath.Join(t.TempDir(), "api.service"),
+				}}},
+			}
+			if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": record.Clone()}}); err != nil {
+				t.Fatal(err)
+			}
+			expected := record.Clone()
+			if tt.concurrent != nil {
+				if _, _, err := server.cfg.DB.MutateService("api", func(_ *db.Data, service *db.Service) error {
+					tt.concurrent(service)
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := server.serviceView("api")
+			if err != nil {
+				t.Fatal(err)
+			}
+			oldSystemctl := runISOSystemctlForRuntime
+			oldCompose := dockerComposeServiceForISO
+			stopCalls := 0
+			composeCalls := 0
+			runISOSystemctlForRuntime = func(_ context.Context, args ...string) ([]byte, error) {
+				if len(args) != 0 && args[0] == "stop" {
+					stopCalls++
+				}
+				if len(args) != 0 && args[0] == "show" {
+					return []byte("inactive\n"), nil
+				}
+				return nil, nil
+			}
+			dockerComposeServiceForISO = func(*Server, string) (*svc.DockerComposeService, error) {
+				composeCalls++
+				return nil, errors.New("unexpected Compose stop")
+			}
+			t.Cleanup(func() {
+				runISOSystemctlForRuntime = oldSystemctl
+				dockerComposeServiceForISO = oldCompose
+			})
+
+			steps := &isoNativeSystemdInstallSteps{si: &Installer{s: server}, record: expected}
+			err = steps.Quarantine(context.Background(), cause)
+			if tt.concurrent == nil && err != nil {
+				t.Fatal(err)
+			}
+			if tt.concurrent != nil && (err == nil || !strings.Contains(err.Error(), "changed")) {
+				t.Fatalf("Quarantine error = %v, want exact-record conflict", err)
+			}
+			if got := stopCalls > 0; got != tt.wantStop {
+				t.Fatalf("runtime stop invoked = %t, want %t", got, tt.wantStop)
+			}
+			if composeCalls != 0 {
+				t.Fatalf("Compose stop callback invoked %d times, want 0", composeCalls)
+			}
+			after, err := server.serviceView("api")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tt.concurrent != nil {
+				if !reflect.DeepEqual(after.AsStruct(), before.AsStruct()) {
+					t.Fatalf("concurrent record changed: got %#v, want %#v", after.AsStruct(), before.AsStruct())
+				}
+				return
+			}
+			if got := iso.AllocationState(after.ISO().State()); got != tt.wantState || after.ISO().LastError() != cause.Error() {
+				t.Fatalf("quarantine state/error = %q/%q, want %q/%q", got, after.ISO().LastError(), tt.wantState, cause)
+			}
+		})
+	}
+}
+
+type isoNativeInstallRecorder struct {
+	events []string
+	failAt string
+}
+
+func (r *isoNativeInstallRecorder) step(name string) error {
+	r.events = append(r.events, name)
+	if name == r.failAt {
+		return errors.New(name + " failed")
+	}
+	return nil
+}
+
+func (r *isoNativeInstallRecorder) Install(context.Context) error { return r.step("install") }
+func (r *isoNativeInstallRecorder) Restart(context.Context) error { return r.step("restart") }
+func (r *isoNativeInstallRecorder) Inspect(context.Context) (isoReconcileRuntimeState, error) {
+	if err := r.step("inspect"); err != nil {
+		return "", err
+	}
+	return isoReconcileRuntimeRunning, nil
+}
+func (r *isoNativeInstallRecorder) MarkReady(context.Context) error { return r.step("ready") }
+func (r *isoNativeInstallRecorder) Quarantine(context.Context, error) error {
+	return r.step("quarantine")
+}
+
 func TestCommitGenAppliesServiceArtifactsAndOwnImagesOnly(t *testing.T) {
 	data := &db.Data{
 		Images: map[db.ImageRepoName]*db.ImageRepo{
