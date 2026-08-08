@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -199,6 +200,26 @@ func (rw *testDuplexRW) String() string {
 	return rw.output.String()
 }
 
+func writeTestShell(t *testing.T, name string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), mode); err != nil {
+		t.Fatalf("write shell: %v", err)
+	}
+	return path
+}
+
+func setTestPasswd(t *testing.T, entries ...string) {
+	t.Helper()
+	oldPasswd := passwdFilePath
+	t.Cleanup(func() { passwdFilePath = oldPasswd })
+	path := filepath.Join(t.TempDir(), "passwd")
+	if err := os.WriteFile(path, []byte(strings.Join(append(entries, ""), "\n")), 0o600); err != nil {
+		t.Fatalf("write passwd: %v", err)
+	}
+	passwdFilePath = path
+}
+
 func TestServiceShellTargetRunsCommandInServiceDataDir(t *testing.T) {
 	server := newTestServer(t)
 	serviceRoot := server.defaultServiceRootDir("api")
@@ -234,6 +255,8 @@ func TestServiceShellTargetRunsCommandInServiceDataDir(t *testing.T) {
 }
 
 func TestServiceShellCommandUsesPersistedNativeIdentity(t *testing.T) {
+	preferredShell := writeTestShell(t, "native-shell", 0o700)
+	setTestPasswd(t, "app:x:1002:1003::/srv/app:"+preferredShell)
 	stubServiceIdentityLookups(t,
 		map[string]*user.User{"app": {Username: "app", Uid: "1002", Gid: "1003"}},
 		map[string]*user.Group{"workers": {Name: "workers", Gid: "1003"}},
@@ -252,8 +275,8 @@ func TestServiceShellCommandUsesPersistedNativeIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("serviceShellCommand: %v", err)
 	}
-	if cmd.Path != "/bin/sh" || len(cmd.Args) != 1 || cmd.Args[0] != "/bin/sh" {
-		t.Fatalf("service shell command = path %q args %#v, want /bin/sh", cmd.Path, cmd.Args)
+	if cmd.Path != preferredShell || len(cmd.Args) != 1 || cmd.Args[0] != preferredShell {
+		t.Fatalf("service shell command = path %q args %#v, want %q", cmd.Path, cmd.Args, preferredShell)
 	}
 	if cmd.Dir != data {
 		t.Fatalf("service shell dir = %q, want %q", cmd.Dir, data)
@@ -268,11 +291,71 @@ func TestServiceShellCommandUsesPersistedNativeIdentity(t *testing.T) {
 	if !cmd.SysProcAttr.Setctty || !cmd.SysProcAttr.Setsid {
 		t.Fatalf("service shell lost PTY attributes: %#v", cmd.SysProcAttr)
 	}
-	wantEnv := map[string]string{"HOME": data, "USER": "app", "LOGNAME": "app", "SHELL": "/bin/sh"}
+	wantEnv := map[string]string{"HOME": data, "USER": "app", "LOGNAME": "app", "SHELL": preferredShell}
 	for key, want := range wantEnv {
 		if got := envValue(cmd.Env, key); got != want {
 			t.Fatalf("service shell %s = %q, want %q", key, got, want)
 		}
+	}
+}
+
+func TestServiceShellCommandUsesPreferredComposeShellWithoutChangingIdentity(t *testing.T) {
+	preferredShell := writeTestShell(t, "install-shell", 0o700)
+	setTestPasswd(t, "deploy:x:1000:1000::/home/deploy:"+preferredShell)
+
+	server := newTestServer(t)
+	server.cfg.InstallUser = "deploy"
+	root := server.defaultServiceRootDir("api")
+	data := serviceDataDirForRoot(root)
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatalf("mkdir service data: %v", err)
+	}
+	addTestServices(t, server, db.Service{Name: "api", ServiceType: db.ServiceTypeDockerCompose})
+
+	execer := &ttyExecer{ctx: context.Background(), s: server, sn: "api", rw: &bytes.Buffer{}, isPty: true}
+	cmd, err := execer.serviceShellCommand(nil)
+	if err != nil {
+		t.Fatalf("serviceShellCommand: %v", err)
+	}
+	if cmd.Path != preferredShell || len(cmd.Args) != 1 || cmd.Args[0] != preferredShell {
+		t.Fatalf("compose shell = path %q args %#v, want %q", cmd.Path, cmd.Args, preferredShell)
+	}
+	if cmd.Dir != data {
+		t.Fatalf("compose shell dir = %q, want %q", cmd.Dir, data)
+	}
+	if cmd.SysProcAttr == nil || cmd.SysProcAttr.Credential != nil {
+		t.Fatalf("compose shell credentials = %#v, want Catch identity", cmd.SysProcAttr)
+	}
+	if got := envValue(cmd.Env, "SHELL"); got != preferredShell {
+		t.Fatalf("compose SHELL = %q, want %q", got, preferredShell)
+	}
+}
+
+func TestServiceShellCommandPreservesExplicitNativeCommand(t *testing.T) {
+	preferredShell := writeTestShell(t, "native-shell", 0o700)
+	setTestPasswd(t, "app:x:1002:1003::/srv/app:"+preferredShell)
+	stubServiceIdentityLookups(t,
+		map[string]*user.User{"app": {Username: "app", Uid: "1002", Gid: "1003"}},
+		map[string]*user.Group{"workers": {Name: "workers", Gid: "1003"}},
+	)
+
+	server := newTestServer(t)
+	root := server.defaultServiceRootDir("api")
+	if err := os.MkdirAll(serviceDataDirForRoot(root), 0o755); err != nil {
+		t.Fatalf("mkdir service data: %v", err)
+	}
+	identity := db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1002, GID: 1003}
+	addTestServices(t, server, db.Service{Name: "api", ServiceType: db.ServiceTypeSystemd, Identity: &identity})
+
+	cmd, err := (&ttyExecer{ctx: context.Background(), s: server, sn: "api", rw: &bytes.Buffer{}}).serviceShellCommand([]string{"printf", "ok"})
+	if err != nil {
+		t.Fatalf("serviceShellCommand: %v", err)
+	}
+	if filepath.Base(cmd.Path) != "printf" || !slices.Equal(cmd.Args, []string{"printf", "ok"}) {
+		t.Fatalf("explicit command = path %q args %#v, want printf ok", cmd.Path, cmd.Args)
+	}
+	if got := envValue(cmd.Env, "SHELL"); got != "/bin/sh" {
+		t.Fatalf("explicit command SHELL = %q, want /bin/sh", got)
 	}
 }
 
@@ -302,7 +385,7 @@ func envValue(env []string, key string) string {
 
 func TestServiceShellEnvironmentReplacesIdentityVariables(t *testing.T) {
 	base := []string{"PATH=/bin", "HOME=/root", "USER=root", "LOGNAME=root", "SHELL=/bin/bash", "KEEP=yes"}
-	got := serviceShellEnvironment(base, "/srv/api/data", "1002")
+	got := serviceShellEnvironment(base, "/srv/api/data", "1002", "/bin/sh")
 	for key, want := range map[string]string{
 		"PATH": "/bin", "KEEP": "yes", "HOME": "/srv/api/data",
 		"USER": "1002", "LOGNAME": "1002", "SHELL": "/bin/sh",
@@ -511,6 +594,43 @@ func TestDefaultShellPathUsesInstallUserThenRootThenSh(t *testing.T) {
 	passwdFilePath = filepath.Join(t.TempDir(), "missing-passwd")
 	if got := (&ttyExecer{s: server}).defaultShellPath(); got != "/bin/sh" {
 		t.Fatalf("missing passwd shell = %q, want /bin/sh", got)
+	}
+}
+
+func TestPreferredServiceShellPath(t *testing.T) {
+	nativeShell := writeTestShell(t, "native-shell", 0o700)
+	installShell := writeTestShell(t, "install-shell", 0o700)
+	rootShell := writeTestShell(t, "root-shell", 0o700)
+	nonExecutable := writeTestShell(t, "non-executable", 0o600)
+	shellDirectory := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing-shell")
+
+	tests := []struct {
+		name     string
+		identity db.ServiceIdentity
+		passwd   []string
+		want     string
+	}{
+		{name: "named native", identity: db.ServiceIdentity{RequestedUser: "app", UID: 1002}, passwd: []string{"app:x:1002:1003::/srv/app:" + nativeShell, "deploy:x:1000:1000::/home/deploy:" + installShell, "root:x:0:0::/root:" + rootShell}, want: nativeShell},
+		{name: "numeric native", identity: db.ServiceIdentity{RequestedUser: "1002", UID: 1002}, passwd: []string{"app:x:1002:1003::/srv/app:" + nativeShell, "deploy:x:1000:1000::/home/deploy:" + installShell, "root:x:0:0::/root:" + rootShell}, want: nativeShell},
+		{name: "native nologin", identity: db.ServiceIdentity{RequestedUser: "app", UID: 1002}, passwd: []string{"app:x:1002:1003::/nonexistent:/usr/sbin/nologin", "deploy:x:1000:1000::/home/deploy:" + installShell, "root:x:0:0::/root:" + rootShell}, want: installShell},
+		{name: "native false", identity: db.ServiceIdentity{RequestedUser: "app", UID: 1002}, passwd: []string{"app:x:1002:1003::/nonexistent:/bin/false", "deploy:x:1000:1000::/home/deploy:" + installShell, "root:x:0:0::/root:" + rootShell}, want: installShell},
+		{name: "missing native", identity: db.ServiceIdentity{RequestedUser: "app", UID: 1002}, passwd: []string{"deploy:x:1000:1000::/home/deploy:" + installShell, "root:x:0:0::/root:" + rootShell}, want: installShell},
+		{name: "missing install shell", passwd: []string{"deploy:x:1000:1000::/home/deploy:" + missing, "root:x:0:0::/root:" + rootShell}, want: rootShell},
+		{name: "non-executable install shell", passwd: []string{"deploy:x:1000:1000::/home/deploy:" + nonExecutable, "root:x:0:0::/root:" + rootShell}, want: rootShell},
+		{name: "directory install shell", passwd: []string{"deploy:x:1000:1000::/home/deploy:" + shellDirectory, "root:x:0:0::/root:" + rootShell}, want: rootShell},
+		{name: "sh fallback", passwd: []string{"deploy:x:1000:1000::/nonexistent:/usr/sbin/nologin", "root:x:0:0::/nonexistent:/bin/false"}, want: "/bin/sh"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setTestPasswd(t, tt.passwd...)
+			server := newTestServer(t)
+			server.cfg.InstallUser = "deploy"
+			if got := (&ttyExecer{s: server}).preferredServiceShellPath(tt.identity); got != tt.want {
+				t.Fatalf("preferredServiceShellPath() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

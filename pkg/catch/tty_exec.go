@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -549,26 +550,50 @@ func (e *ttyExecer) serviceShellCommand(args []string) (*exec.Cmd, error) {
 	if err != nil {
 		return nil, err
 	}
-	var cmd *exec.Cmd
-	if len(args) == 0 {
-		cmd = e.newCmd("/bin/sh")
-	} else {
-		cmd = e.newCmd(args[0], args[1:]...)
-	}
-	cmd.Dir = dir
-
-	sv, err := e.s.serviceView(e.sn)
+	identity, isNative, err := e.serviceShellIdentity()
 	if err != nil {
 		return nil, err
 	}
+
+	interactive := len(args) == 0
+	cmd := e.newServiceShellCommand(args, identity)
+	cmd.Dir = dir
+	if isNative {
+		configureNativeServiceShellCommand(cmd, dir, identity, interactive)
+	} else if interactive {
+		cmd.Env = replaceEnvironmentValue(cmd.Env, "SHELL", cmd.Path)
+	}
+	return cmd, nil
+}
+
+func (e *ttyExecer) serviceShellIdentity() (db.ServiceIdentity, bool, error) {
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return db.ServiceIdentity{}, false, err
+	}
 	if sv.ServiceType() != db.ServiceTypeSystemd {
-		return cmd, nil
+		return db.ServiceIdentity{}, false, nil
 	}
 	identity := effectiveServiceIdentity(sv).Persisted
 	if err := validateServiceIdentityDrift(identity); err != nil {
-		return nil, fmt.Errorf("service %q identity changed on this host: %w", e.sn, err)
+		return db.ServiceIdentity{}, false, fmt.Errorf("service %q identity changed on this host: %w", e.sn, err)
 	}
-	cmd.Env = serviceShellEnvironment(cmd.Env, dir, identity.RequestedUser)
+	return identity, true, nil
+}
+
+func (e *ttyExecer) newServiceShellCommand(args []string, identity db.ServiceIdentity) *exec.Cmd {
+	if len(args) == 0 {
+		return e.newCmd(e.preferredServiceShellPath(identity))
+	}
+	return e.newCmd(args[0], args[1:]...)
+}
+
+func configureNativeServiceShellCommand(cmd *exec.Cmd, dir string, identity db.ServiceIdentity, interactive bool) {
+	shell := "/bin/sh"
+	if interactive {
+		shell = cmd.Path
+	}
+	cmd.Env = serviceShellEnvironment(cmd.Env, dir, identity.RequestedUser, shell)
 	if identity.UID != 0 || identity.GID != 0 {
 		if cmd.SysProcAttr == nil {
 			cmd.SysProcAttr = &syscall.SysProcAttr{}
@@ -580,10 +605,9 @@ func (e *ttyExecer) serviceShellCommand(args []string) (*exec.Cmd, error) {
 			Groups: []uint32{},
 		}
 	}
-	return cmd, nil
 }
 
-func serviceShellEnvironment(base []string, home, userName string) []string {
+func serviceShellEnvironment(base []string, home, userName, shell string) []string {
 	identityKeys := map[string]struct{}{
 		"HOME": {}, "USER": {}, "LOGNAME": {}, "SHELL": {},
 	}
@@ -601,8 +625,20 @@ func serviceShellEnvironment(base []string, home, userName string) []string {
 		"HOME="+home,
 		"USER="+userName,
 		"LOGNAME="+userName,
-		"SHELL=/bin/sh",
+		"SHELL="+shell,
 	)
+}
+
+func replaceEnvironmentValue(base []string, key, value string) []string {
+	env := make([]string, 0, len(base)+1)
+	for _, entry := range base {
+		entryKey, _, ok := strings.Cut(entry, "=")
+		if ok && entryKey == key {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return append(env, key+"="+value)
 }
 
 func (e *ttyExecer) serviceShellDir() (string, error) {
@@ -698,6 +734,69 @@ func passwdEntryForUser(username string) (passwdEntry, bool) {
 		}, true
 	}
 	return passwdEntry{}, false
+}
+
+func passwdEntryForServiceIdentity(identity db.ServiceIdentity) (passwdEntry, bool) {
+	requestedUser := strings.TrimSpace(identity.RequestedUser)
+	if requestedUser == "" {
+		return passwdEntry{}, false
+	}
+	if !numericID(requestedUser) {
+		return passwdEntryForUser(requestedUser)
+	}
+
+	raw, err := os.ReadFile(passwdFilePath)
+	if err != nil {
+		return passwdEntry{}, false
+	}
+	wantUID := strconv.FormatUint(uint64(identity.UID), 10)
+	for _, line := range strings.Split(string(raw), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) < 7 || strings.TrimSpace(fields[2]) != wantUID {
+			continue
+		}
+		return passwdEntry{
+			home:  strings.TrimSpace(fields[5]),
+			shell: strings.TrimSpace(fields[6]),
+		}, true
+	}
+	return passwdEntry{}, false
+}
+
+func (e *ttyExecer) preferredServiceShellPath(identity db.ServiceIdentity) string {
+	entries := make([]passwdEntry, 0, 3)
+	if entry, ok := passwdEntryForServiceIdentity(identity); ok {
+		entries = append(entries, entry)
+	}
+	if e != nil && e.s != nil {
+		if userName := strings.TrimSpace(e.s.cfg.InstallUser); userName != "" {
+			if entry, ok := passwdEntryForUser(userName); ok {
+				entries = append(entries, entry)
+			}
+		}
+	}
+	if entry, ok := passwdEntryForUser("root"); ok {
+		entries = append(entries, entry)
+	}
+	for _, entry := range entries {
+		if usableInteractiveShell(entry.shell) {
+			return entry.shell
+		}
+	}
+	return "/bin/sh"
+}
+
+func usableInteractiveShell(path string) bool {
+	path = strings.TrimSpace(path)
+	switch strings.ToLower(filepath.Base(path)) {
+	case "nologin", "false":
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
 }
 
 func (e *ttyExecer) newCmdContext(ctx context.Context, name string, args ...string) *exec.Cmd {
