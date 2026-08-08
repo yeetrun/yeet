@@ -6,7 +6,9 @@ package yeet
 
 import (
 	"context"
+	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -139,6 +141,144 @@ func TestClientConfigSaveLoadToml(t *testing.T) {
 	}
 	if got := workspacePaths(); !reflect.DeepEqual(got, []string{filepath.Join(tmp, "workspace")}) {
 		t.Fatalf("workspacePaths = %#v, want workspace", got)
+	}
+}
+
+func TestClientConfigSaveToSkipsEquivalentManagedSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	workspaceA := filepath.Join(tmp, "workspace-a")
+	workspaceB := filepath.Join(tmp, "workspace-b")
+	managedDir := filepath.Join(tmp, "managed")
+	if err := os.Mkdir(managedDir, 0o755); err != nil {
+		t.Fatalf("Mkdir managed dir: %v", err)
+	}
+	target := filepath.Join(managedDir, "config.toml")
+	wantRaw := []byte("# managed by the system\n" +
+		"workspaces = [\n" +
+		"  \"" + workspaceB + "\",\n" +
+		"  \"" + workspaceA + "\",\n" +
+		"  \"" + workspaceB + "\",\n" +
+		"]\n" +
+		"default_host = \"YEET-LAB\"\n")
+	if err := os.WriteFile(target, wantRaw, 0o444); err != nil {
+		t.Fatalf("WriteFile managed config: %v", err)
+	}
+	configDir := filepath.Join(tmp, "config")
+	if err := os.Mkdir(configDir, 0o755); err != nil {
+		t.Fatalf("Mkdir config dir: %v", err)
+	}
+	path := filepath.Join(configDir, "config.toml")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("Symlink config: %v", err)
+	}
+
+	cfg := clientConfig{
+		DefaultHost: "yeet-lab",
+		savedHost:   "yeet-lab",
+		Workspaces:  []string{workspaceA, workspaceB},
+	}
+	if err := cfg.saveTo(path); err != nil {
+		t.Fatalf("saveTo equivalent managed config: %v", err)
+	}
+	gotRaw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile managed config: %v", err)
+	}
+	if string(gotRaw) != string(wantRaw) {
+		t.Fatalf("managed config changed:\n%s\nwant original:\n%s", gotRaw, wantRaw)
+	}
+	gotTarget, err := os.Readlink(path)
+	if err != nil {
+		t.Fatalf("Readlink config: %v", err)
+	}
+	if gotTarget != target {
+		t.Fatalf("config symlink target = %q, want %q", gotTarget, target)
+	}
+}
+
+func TestClientConfigSaveToChangedManagedSymlinkFailsWithGuidance(t *testing.T) {
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "managed.toml")
+	wantRaw := []byte("default_host = \"old-host\"\n")
+	if err := os.WriteFile(target, wantRaw, 0o444); err != nil {
+		t.Fatalf("WriteFile managed config: %v", err)
+	}
+	path := filepath.Join(tmp, "config.toml")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("Symlink config: %v", err)
+	}
+
+	oldWriteFile := clientConfigWriteFile
+	writeCalled := false
+	clientConfigWriteFile = func(gotPath string, gotPayload []byte, gotMode fs.FileMode) error {
+		writeCalled = true
+		if gotPath != path {
+			t.Errorf("write path = %q, want %q", gotPath, path)
+		}
+		if gotMode != 0o600 {
+			t.Errorf("write mode = %o, want 600", gotMode)
+		}
+		if !strings.Contains(string(gotPayload), `default_host = "new-host"`) {
+			t.Errorf("write payload = %q, want new host", gotPayload)
+		}
+		return fs.ErrPermission
+	}
+	t.Cleanup(func() { clientConfigWriteFile = oldWriteFile })
+
+	cfg := clientConfig{DefaultHost: "new-host", savedHost: "new-host"}
+	err := cfg.saveTo(path)
+	if err == nil {
+		t.Fatal("saveTo changed managed config succeeded, want error")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("saveTo error = %v, want permission cause", err)
+	}
+	if !strings.Contains(err.Error(), "declaratively managed") {
+		t.Fatalf("saveTo error = %q, want declarative-management guidance", err)
+	}
+	if !writeCalled {
+		t.Fatal("saveTo did not attempt to persist a real semantic change")
+	}
+	gotRaw, readErr := os.ReadFile(target)
+	if readErr != nil {
+		t.Fatalf("ReadFile managed config: %v", readErr)
+	}
+	if string(gotRaw) != string(wantRaw) {
+		t.Fatalf("managed config changed to %q, want %q", gotRaw, wantRaw)
+	}
+	if _, readErr := os.Readlink(path); readErr != nil {
+		t.Fatalf("config path no longer a symlink: %v", readErr)
+	}
+}
+
+func TestClientConfigSaveToChangedWritableSymlinkFollowsTarget(t *testing.T) {
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "managed.toml")
+	if err := os.WriteFile(target, []byte("default_host = \"old-host\"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile managed config: %v", err)
+	}
+	path := filepath.Join(tmp, "config.toml")
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatalf("Symlink config: %v", err)
+	}
+
+	cfg := clientConfig{DefaultHost: "new-host", savedHost: "new-host"}
+	if err := cfg.saveTo(path); err != nil {
+		t.Fatalf("saveTo changed writable symlink: %v", err)
+	}
+	gotRaw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile managed config: %v", err)
+	}
+	if !strings.Contains(string(gotRaw), `default_host = "new-host"`) {
+		t.Fatalf("managed config = %q, want new host", gotRaw)
+	}
+	gotTarget, err := os.Readlink(path)
+	if err != nil {
+		t.Fatalf("config path no longer a symlink: %v", err)
+	}
+	if gotTarget != target {
+		t.Fatalf("config symlink target = %q, want %q", gotTarget, target)
 	}
 }
 

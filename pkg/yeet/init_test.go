@@ -187,6 +187,54 @@ func TestFinishInitWorkspaceSetupExplicitWorkspaceCreatesSeedAndSavesConfig(t *t
 	}
 }
 
+func TestFinishInitWorkspaceSetupPreservesEquivalentManagedConfig(t *testing.T) {
+	tmp := t.TempDir()
+	workspace := filepath.Join(tmp, "services")
+	managedDir := filepath.Join(tmp, "managed")
+	if err := os.Mkdir(managedDir, 0o755); err != nil {
+		t.Fatalf("Mkdir managed dir: %v", err)
+	}
+	target := filepath.Join(managedDir, "config.toml")
+	wantRaw := []byte("# managed client config\n" +
+		"workspaces = [\"" + workspace + "\"]\n" +
+		"default_host = \"YEET-LAB\"\n")
+	if err := os.WriteFile(target, wantRaw, 0o444); err != nil {
+		t.Fatalf("WriteFile managed config: %v", err)
+	}
+	configDir := filepath.Join(tmp, "config")
+	if err := os.Mkdir(configDir, 0o755); err != nil {
+		t.Fatalf("Mkdir config dir: %v", err)
+	}
+	configPath := filepath.Join(configDir, "config.toml")
+	if err := os.Symlink(target, configPath); err != nil {
+		t.Fatalf("Symlink config: %v", err)
+	}
+
+	restore := stubClientConfigState(t, clientConfig{
+		DefaultHost: "yeet-lab",
+		Workspaces:  []string{workspace},
+	})
+	defer restore()
+	oldConfigPath := clientConfigPathFn
+	clientConfigPathFn = func() (string, error) { return configPath, nil }
+	t.Cleanup(func() { clientConfigPathFn = oldConfigPath })
+
+	ui := newInitUI(io.Discard, false, true, "yeet-lab", "root@example.com", catchServiceName)
+	if err := finishInitWorkspaceSetup(ui, initOptions{workspace: workspace}); err != nil {
+		t.Fatalf("finishInitWorkspaceSetup error: %v", err)
+	}
+	gotRaw, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile managed config: %v", err)
+	}
+	if string(gotRaw) != string(wantRaw) {
+		t.Fatalf("managed config changed:\n%s\nwant original:\n%s", gotRaw, wantRaw)
+	}
+	if _, err := os.Readlink(configPath); err != nil {
+		t.Fatalf("config path no longer a symlink: %v", err)
+	}
+}
+
 func TestFinishInitWorkspaceSetupNoWorkspaceSkipsPrompt(t *testing.T) {
 	restore := stubClientConfigState(t, clientConfig{DefaultHost: "yeet-lab"})
 	defer restore()

@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -21,8 +22,9 @@ import (
 )
 
 var (
-	clientConfigPathFn = defaultClientConfigPath
-	legacyPrefsPathFn  = defaultLegacyPrefsPath
+	clientConfigPathFn    = defaultClientConfigPath
+	legacyPrefsPathFn     = defaultLegacyPrefsPath
+	clientConfigWriteFile = os.WriteFile
 
 	serviceOverride  string
 	hostOverride     string
@@ -217,16 +219,47 @@ func saveClientConfig() error {
 }
 
 func (c *clientConfig) saveTo(path string) error {
+	payload := clientConfigForTOML(*c)
+	payload.normalize()
+	if existingClientConfigMatches(path, payload) {
+		return nil
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	var buf bytes.Buffer
-	payload := clientConfigForTOML(*c)
-	payload.normalize()
 	if err := toml.NewEncoder(&buf).Encode(payload); err != nil {
 		return err
 	}
-	return os.WriteFile(path, buf.Bytes(), 0o600)
+	if err := clientConfigWriteFile(path, buf.Bytes(), 0o600); err != nil {
+		return clientConfigWriteError(path, err)
+	}
+	return nil
+}
+
+func existingClientConfigMatches(path string, desired clientConfig) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return clientConfigTOMLMatches(raw, desired)
+}
+
+func clientConfigTOMLMatches(raw []byte, desired clientConfig) bool {
+	var existing clientConfig
+	if _, err := toml.Decode(string(raw), &existing); err != nil {
+		return false
+	}
+	existing.normalize()
+	return existing.DefaultHost == desired.DefaultHost && slices.Equal(existing.Workspaces, desired.Workspaces)
+}
+
+func clientConfigWriteError(path string, err error) error {
+	info, statErr := os.Lstat(path)
+	if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("client config %s may be declaratively managed; update its source configuration instead: %w", path, err)
+	}
+	return err
 }
 
 func clientConfigForTOML(c clientConfig) clientConfig {
