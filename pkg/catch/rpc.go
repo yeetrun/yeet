@@ -343,7 +343,7 @@ func (s *Server) handleRPCISOPoolPlan(ctx context.Context, req catchrpc.Request)
 	}
 	resp, err := s.PlanISOPool(ctx, params)
 	if err != nil {
-		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to plan ISO pool", err.Error())
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to plan isolated network pool", err.Error())
 	}
 	return newRPCResponse(req.ID, resp)
 }
@@ -355,7 +355,7 @@ func (s *Server) handleRPCISOPoolApply(ctx context.Context, req catchrpc.Request
 	}
 	resp, err := s.ApplyISOPool(ctx, params)
 	if err != nil {
-		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to apply ISO pool", err.Error())
+		return newRPCError(req.ID, catchrpc.ErrInternal, "failed to apply isolated network pool", err.Error())
 	}
 	return newRPCResponse(req.ID, resp)
 }

@@ -414,7 +414,7 @@ type hostSetFlagsParsed struct {
 	ServicesRoot    string `flag:"services-root" help:"Default service root (default: data directory/services)"`
 	ZFS             bool   `flag:"zfs" help:"Treat supplied storage targets as ZFS datasets or dataset prefixes"`
 	MigrateServices string `flag:"migrate-services" help:"Service migration mode: all, none"`
-	ISOPool         string `flag:"iso-pool" help:"Set the ISO network RFC1918 IPv4 /16 before any ISO allocation exists"`
+	ISOPool         string `flag:"iso-pool" help:"Set the RFC1918 IPv4 /16 used by isolated networks before any allocation exists"`
 	Config          string `flag:"config" help:"Path to yeet.toml to update after service migration"`
 	Yes             bool   `flag:"yes" short:"y" help:"Confirm disruptive host changes without prompting"`
 }

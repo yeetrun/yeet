@@ -3505,7 +3505,7 @@ Service migration mode: all, none
 
 ### `--iso-pool`
 
-Set the ISO network RFC1918 IPv4 /16 before any ISO allocation exists
+Set the RFC1918 IPv4 /16 used by isolated networks before any allocation exists
 
 - **Type**: `string`
 

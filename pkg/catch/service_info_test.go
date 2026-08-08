@@ -96,6 +96,86 @@ func TestServiceNetworkInfoReportsEffectiveModes(t *testing.T) {
 	}
 }
 
+func TestServiceISOInfoProjectsEndpointAndNamespaceByPayloadKind(t *testing.T) {
+	tests := []struct {
+		name           string
+		allocation     *db.ISOAllocation
+		wantNamespace  string
+		wantComponents []catchrpc.ServiceISOComponent
+	}{
+		{
+			name: "native",
+			allocation: &db.ISOAllocation{
+				Kind: string(iso.PayloadNative), State: string(iso.StateReady),
+				HostIP: netip.MustParseAddr("172.16.0.5"), PeerIP: netip.MustParseAddr("172.16.0.6"),
+				Interface: "yi-private", PeerInterface: "yo-private", NetNS: "yeet-0123456789-ns",
+				LastError: `service "MYISOAPP" ISO network firewall drift`,
+			},
+			wantNamespace:  "yeet-0123456789-ns",
+			wantComponents: []catchrpc.ServiceISOComponent{{Name: "service", IP: "172.16.0.6", State: "ready"}},
+		},
+		{
+			name: "timer",
+			allocation: &db.ISOAllocation{
+				Kind: string(iso.PayloadCron), State: string(iso.StateReady),
+				PeerIP: netip.MustParseAddr("172.16.0.10"), NetNS: "yeet-abcdef0123-ns",
+			},
+			wantNamespace:  "yeet-abcdef0123-ns",
+			wantComponents: []catchrpc.ServiceISOComponent{{Name: "service", IP: "172.16.0.10", State: "ready"}},
+		},
+		{
+			name: "vm",
+			allocation: &db.ISOAllocation{
+				Kind: string(iso.PayloadVM), State: string(iso.StateReady),
+				PeerIP: netip.MustParseAddr("172.16.0.14"),
+			},
+			wantComponents: []catchrpc.ServiceISOComponent{{Name: "vm", IP: "172.16.0.14", State: "ready"}},
+		},
+		{
+			name: "compose",
+			allocation: &db.ISOAllocation{
+				Kind: string(iso.PayloadCompose), State: string(iso.StateReady), NetNS: "yeet-fedcba9876-ns",
+				Components: map[string]db.ISOComponent{
+					"worker": {Address: netip.MustParseAddr("172.16.1.3"), State: "ready"},
+					"api":    {Address: netip.MustParseAddr("172.16.1.2"), State: "ready"},
+				},
+			},
+			wantNamespace: "yeet-fedcba9876-ns",
+			wantComponents: []catchrpc.ServiceISOComponent{
+				{Name: "api", IP: "172.16.1.2", State: "ready"},
+				{Name: "worker", IP: "172.16.1.3", State: "ready"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := serviceISOInfo((&db.Service{Name: "app", ISO: tt.allocation}).View().ISO())
+			if got == nil {
+				t.Fatal("serviceISOInfo returned nil")
+			}
+			if got.Namespace != tt.wantNamespace {
+				t.Fatalf("namespace = %q, want %q", got.Namespace, tt.wantNamespace)
+			}
+			if !reflect.DeepEqual(got.Components, tt.wantComponents) {
+				t.Fatalf("components = %#v, want %#v", got.Components, tt.wantComponents)
+			}
+			if tt.name == "native" && got.LastError != `service "MYISOAPP" isolated network firewall drift` {
+				t.Fatalf("last error = %q, want public isolated-network terminology", got.LastError)
+			}
+			raw, err := json.Marshal(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, private := range []string{"172.16.0.5", "yi-private", "yo-private", "ISO network"} {
+				if strings.Contains(string(raw), private) {
+					t.Fatalf("service isolated-network info leaked host-only value %q: %s", private, raw)
+				}
+			}
+		})
+	}
+}
+
 func TestServiceNetworkDesiredInfoUsesPersistedConfigWithoutMutatingLegacyService(t *testing.T) {
 	legacy := &db.Service{
 		Name:       "legacy",

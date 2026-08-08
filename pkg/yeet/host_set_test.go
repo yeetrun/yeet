@@ -138,15 +138,15 @@ func TestRunHostSetISOPoolPlansPromptsAndApplies(t *testing.T) {
 	if len(state.poolClient.applyRequests) != 1 || !reflect.DeepEqual(state.poolClient.applyRequests[0].Plan, state.poolClient.plan) {
 		t.Fatalf("apply requests = %#v", state.poolClient.applyRequests)
 	}
-	if len(state.prompts) != 1 || !strings.Contains(state.prompts[0], "ISO pool") {
+	if len(state.prompts) != 1 || !strings.Contains(state.prompts[0], "isolated network pool") {
 		t.Fatalf("prompts = %#v", state.prompts)
 	}
 	for _, want := range []string{
-		"ISO pool plan for catch-a",
+		"Isolated network pool plan for catch-a",
 		"Current: 172.30.0.0/16",
 		"Desired: 10.42.0.0/16",
 		"Source: explicit",
-		"ISO pool set to 10.42.0.0/16 (explicit)",
+		"Isolated network pool set to 10.42.0.0/16 (explicit)",
 	} {
 		if !strings.Contains(state.stdout.String(), want) {
 			t.Fatalf("stdout = %q, want %q", state.stdout.String(), want)
@@ -171,7 +171,7 @@ func TestRunHostSetISOPoolRendersRealBlockedPlansWithoutApply(t *testing.T) {
 		{
 			name:        "live collision",
 			hostAddress: "10.42.1.7",
-			wantDetail:  "Conflicts: ISO pool 10.42.0.0/16 conflicts with 10.42.1.0/24",
+			wantDetail:  "Conflicts: isolated network pool 10.42.0.0/16 conflicts with 10.42.1.0/24",
 		},
 	}
 	for _, tt := range tests {
@@ -198,7 +198,7 @@ func TestRunHostSetISOPoolRendersRealBlockedPlansWithoutApply(t *testing.T) {
 				t.Fatalf("RPC plan/apply calls = %d/%d, want 1/0", calls.plan.Load(), calls.apply.Load())
 			}
 			for _, want := range []string{
-				"ISO pool plan for catch-a",
+				"Isolated network pool plan for catch-a",
 				"Current: 172.30.0.0/16",
 				"Desired: 10.42.0.0/16",
 				"Source: explicit",
@@ -331,7 +331,7 @@ func TestRunHostSetISOPoolYesSkipsPromptAndNoopSkipsApply(t *testing.T) {
 	if len(state.prompts) != 0 || len(state.poolClient.applyRequests) != 0 {
 		t.Fatalf("prompts/apply = %#v/%#v", state.prompts, state.poolClient.applyRequests)
 	}
-	if !strings.Contains(state.stdout.String(), "No ISO pool changes to apply") {
+	if !strings.Contains(state.stdout.String(), "No isolated network pool changes to apply") {
 		t.Fatalf("stdout = %q", state.stdout.String())
 	}
 }

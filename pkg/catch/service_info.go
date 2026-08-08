@@ -7,6 +7,7 @@ package catch
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -22,6 +23,8 @@ var listIPv4AddrsFn = listIPv4Addrs
 var serviceVMStatusFn = serviceVMStatus
 var queryVMNetworkStateFn = queryVMNetworkState
 var queryVMGuestReadyFn = queryVMGuestReady
+
+var publicISONameRE = regexp.MustCompile(`\bISO\b`)
 
 type vmDiscoveredIP struct {
 	IP     string
@@ -364,12 +367,22 @@ func serviceISOInfo(view db.ISOAllocationView) *catchrpc.ServiceISO {
 		State:        record.State,
 		PublicEgress: true,
 		DNS:          "public-only",
-		LastError:    record.LastError,
+		Namespace:    record.NetNS,
+		LastError:    publicIsolationText(record.LastError),
 	}
 	populateServiceISOAddresses(out, record)
 	out.DNS = serviceISODNS(record.DesiredModes)
 	out.Components = serviceISOComponents(record)
 	return out
+}
+
+func publicIsolationText(text string) string {
+	text = strings.NewReplacer(
+		"ISO network", "isolated network",
+		"ISO pool", "isolated network pool",
+		"ISO allocation", "isolated-network allocation",
+	).Replace(text)
+	return publicISONameRE.ReplaceAllString(text, "isolation")
 }
 
 func populateServiceISOAddresses(out *catchrpc.ServiceISO, record *db.ISOAllocation) {
@@ -394,9 +407,15 @@ func serviceISODNS(modes []string) string {
 }
 
 func serviceISOComponents(record *db.ISOAllocation) []catchrpc.ServiceISOComponent {
-	if record.Kind == string(iso.PayloadVM) {
+	switch iso.PayloadKind(record.Kind) {
+	case iso.PayloadVM:
 		if record.PeerIP.IsValid() {
 			return []catchrpc.ServiceISOComponent{{Name: "vm", IP: record.PeerIP.String(), State: record.State}}
+		}
+		return nil
+	case iso.PayloadNative, iso.PayloadCron:
+		if record.PeerIP.IsValid() {
+			return []catchrpc.ServiceISOComponent{{Name: "service", IP: record.PeerIP.String(), State: record.State}}
 		}
 		return nil
 	}

@@ -482,12 +482,14 @@ yeet start <vm>
 
 VM `--net=lan` attaches the guest TAP to a host bridge. On supported Debian/Ubuntu hosts, yeet can prepare `br0` during `yeet init` or before the first VM LAN create.
 
-ISO supports VMs, native binaries and scripts, timer-backed jobs, and supported
-container payloads. Native and timer workloads use the same ISO networking
+The `iso` mode supports VMs, native binaries and scripts, timer-backed jobs,
+and supported container payloads. Native and timer workloads use the same
+isolated networking
 whether they run as root or another account; the mode does not change their
 identity or privilege policy and does not claim to contain a hostile host-root
 process. VMs use `iso` alone and can install Tailscale inside the guest when
-needed. ISO also rejects published ports and unsafe Compose features.
+needed. Isolated networking also rejects published ports and unsafe Compose
+features.
 
 Read the docs before combining networking modes with real services. Future you is the person who has to debug it.
 

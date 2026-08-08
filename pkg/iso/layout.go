@@ -35,7 +35,7 @@ type Layout struct {
 func NewLayout(pool netip.Prefix) (Layout, error) {
 	pool = pool.Masked()
 	if !pool.IsValid() || !pool.Addr().Is4() || pool.Bits() != 16 {
-		return Layout{}, fmt.Errorf("ISO pool must be an IPv4 /16: %v", pool)
+		return Layout{}, fmt.Errorf("isolated network pool must be an IPv4 /16: %v", pool)
 	}
 	projectBase, err := addIPv4(pool.Addr(), 1<<15)
 	if err != nil {

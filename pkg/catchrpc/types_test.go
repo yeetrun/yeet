@@ -41,13 +41,16 @@ func TestServiceISOJSONRoundTripPreservesPortPresence(t *testing.T) {
 	want := ServiceISO{
 		Modes: []string{"iso", "ts"}, State: "ready", PublicEgress: true,
 		DNS: "tailscale", Link: "172.30.0.0/30", Project: "172.30.128.0/27",
+		Namespace:  "yeet-0123456789-ns",
 		Components: []ServiceISOComponent{{Name: "api", IP: "172.30.128.2", State: "ready"}},
 	}
 	raw, err := json.Marshal(ServiceNetwork{ISO: &want, PortsPresent: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(raw, []byte(`"ports":[]`)) || !bytes.Contains(raw, []byte(`"iso"`)) {
+	if !bytes.Contains(raw, []byte(`"ports":[]`)) ||
+		!bytes.Contains(raw, []byte(`"namespace":"yeet-0123456789-ns"`)) ||
+		!bytes.Contains(raw, []byte(`"iso"`)) {
 		t.Fatalf("ServiceNetwork JSON = %s", raw)
 	}
 	var got ServiceNetwork
@@ -56,6 +59,23 @@ func TestServiceISOJSONRoundTripPreservesPortPresence(t *testing.T) {
 	}
 	if got.ISO == nil || !reflect.DeepEqual(*got.ISO, want) || !got.PortsPresent {
 		t.Fatalf("ServiceNetwork round trip = %#v, want ISO %#v with ports present", got, want)
+	}
+}
+
+func TestServiceISOJSONWithoutNamespaceRemainsCompatible(t *testing.T) {
+	const legacy = `{"modes":["iso"],"iso":{"modes":["iso"],"state":"ready","publicEgress":true,"dns":"public-only","components":[{"name":"service","ip":"172.16.0.6"}]}}`
+	var got ServiceNetwork
+	if err := json.Unmarshal([]byte(legacy), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.ISO == nil {
+		t.Fatal("legacy ServiceNetwork lost isolated-network details")
+	}
+	if got.ISO.Namespace != "" {
+		t.Fatalf("legacy namespace = %q, want empty", got.ISO.Namespace)
+	}
+	if !reflect.DeepEqual(got.ISO.Components, []ServiceISOComponent{{Name: "service", IP: "172.16.0.6"}}) {
+		t.Fatalf("legacy components = %#v", got.ISO.Components)
 	}
 }
 

@@ -604,6 +604,7 @@ type ServiceISO struct {
 	Link         string                `json:"link,omitempty"`
 	Project      string                `json:"project,omitempty"`
 	Gateway      string                `json:"gateway,omitempty"`
+	Namespace    string                `json:"namespace,omitempty"`
 	Components   []ServiceISOComponent `json:"components,omitempty"`
 	LastError    string                `json:"lastError,omitempty"`
 }

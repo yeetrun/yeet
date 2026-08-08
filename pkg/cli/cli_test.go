@@ -1627,11 +1627,14 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if !reflect.DeepEqual(hostSet.Info.Examples, wantHostSetExamples) {
 		t.Fatalf("host set examples = %#v, want %#v", hostSet.Info.Examples, wantHostSetExamples)
 	}
-	hostSetHelp := yargs.GenerateGroupCommandHelp(reg.HelpConfig(), "host", "set", struct{}{})
+	hostSetHelp := yargs.GenerateGroupCommandHelp(reg.HelpConfig(), "host", "set", hostSetFlagsParsed{})
 	for _, want := range []string{"--data-dir", "--services-root", "--zfs", "--migrate-services", "--iso-pool", "--config", "--yes"} {
 		if !strings.Contains(hostSetHelp, want) {
 			t.Fatalf("host set help missing %q:\n%s", want, hostSetHelp)
 		}
+	}
+	if !strings.Contains(hostSetHelp, "Set the RFC1918 IPv4 /16 used by isolated networks before any allocation exists") || strings.Contains(hostSetHelp, "ISO network") {
+		t.Fatalf("host set help uses inconsistent isolation terminology:\n%s", hostSetHelp)
 	}
 	hostCleanup, ok := reg.Groups["host"].Commands["cleanup"]
 	if !ok {

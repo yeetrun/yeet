@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -241,7 +240,16 @@ func TestNewInfoOutputIncludesHostInfoOnlyWhenAvailable(t *testing.T) {
 }
 
 func TestEncodeInfoOutputFormatsJSON(t *testing.T) {
-	out := infoOutput{Service: "svc", Host: "host-a", Client: clientInfo{Found: true}}
+	out := infoOutput{
+		Service: "svc",
+		Host:    "host-a",
+		Client:  clientInfo{Found: true},
+		Server: catchrpc.ServiceInfoResponse{Found: true, Info: catchrpc.ServiceInfo{
+			Network: catchrpc.ServiceNetwork{ISO: &catchrpc.ServiceISO{
+				Modes: []string{"iso"}, State: "ready", Namespace: "yeet-0123456789-ns",
+			}},
+		}},
+	}
 
 	var compact bytes.Buffer
 	if err := encodeInfoOutput(&compact, "json", out); err != nil {
@@ -253,6 +261,13 @@ func TestEncodeInfoOutputFormatsJSON(t *testing.T) {
 	}
 	if decoded.Service != "svc" || decoded.Host != "host-a" {
 		t.Fatalf("decoded = %#v, want service and host", decoded)
+	}
+	if decoded.Server.Info.Network.ISO == nil ||
+		decoded.Server.Info.Network.ISO.Namespace != "yeet-0123456789-ns" {
+		t.Fatalf("decoded isolated-network info = %#v, want namespace", decoded.Server.Info.Network.ISO)
+	}
+	if !bytes.Contains(compact.Bytes(), []byte(`"namespace":"yeet-0123456789-ns"`)) {
+		t.Fatalf("compact JSON omitted isolated-network namespace: %s", compact.String())
 	}
 
 	var pretty bytes.Buffer
@@ -402,7 +417,7 @@ func TestInfoCatchRendersConfiguredISOPool(t *testing.T) {
 				Active:       2,
 				Quarantined:  1,
 				Tombstoned:   1,
-				Conflict:     "aggregate route missing",
+				Conflict:     "ISO pool aggregate route missing",
 			},
 		},
 	}
@@ -411,12 +426,15 @@ func TestInfoCatchRendersConfiguredISOPool(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := rendered.String()
-	assertPlainRow(t, text, "ISO pool", "172.30.0.0/16")
-	assertPlainRow(t, text, "ISO source", "automatic")
-	assertPlainRow(t, text, "ISO version", "allocator 1, policy 1")
-	assertPlainRow(t, text, "ISO capacity", "links 3/8192, projects 2/1024")
-	assertPlainRow(t, text, "ISO state", "active 2, reserved 1, quarantined 1, tombstoned 1")
-	assertPlainRow(t, text, "ISO conflict", "aggregate route missing")
+	assertPlainRow(t, text, "Pool", "172.30.0.0/16")
+	assertPlainRow(t, text, "Source", "automatic")
+	assertPlainRow(t, text, "Version", "allocator 1, policy 1")
+	assertPlainRow(t, text, "Capacity", "links 3/8192, projects 2/1024")
+	assertPlainRow(t, text, "State", "active 2, reserved 1, quarantined 1, tombstoned 1")
+	assertPlainRow(t, text, "Conflict", "isolated network pool aggregate route missing")
+	if !strings.Contains(text, "Isolated network\n") || strings.Contains(text, "ISO") {
+		t.Fatalf("host info uses inconsistent isolation terminology:\n%s", text)
+	}
 }
 
 func TestInfoCatchZeroISOSummaryPreservesJSONCompatibility(t *testing.T) {
@@ -743,21 +761,66 @@ func TestInfoNetworkIPRowsReportsErrorsAndEmpty(t *testing.T) {
 	assertInfoRows(t, got, []infoRow{{Label: "IPs", Value: "none"}})
 }
 
-func TestInfoServiceNetworkRowsRenderISOStatusAndComponents(t *testing.T) {
-	rows := serviceNetworkRows(catchrpc.ServiceNetwork{ISO: &catchrpc.ServiceISO{
-		Modes: []string{"iso"}, State: "quarantined", PublicEgress: true, DNS: "public-only",
-		Components: []catchrpc.ServiceISOComponent{{Name: "api", IP: "172.30.128.2"}},
-		LastError:  "firewall digest mismatch",
-	}})
-	var rendered strings.Builder
-	for _, row := range rows {
-		fmt.Fprintf(&rendered, "%s=%s\n", row.Label, row.Value)
-	}
-	for _, want := range []string{"ISO modes=iso", "ISO state=quarantined", "Egress=public IPv4 via NAT", "DNS=public-only", "ISO api=172.30.128.2", "ISO error=firewall digest mismatch"} {
-		if !strings.Contains(rendered.String(), want) {
-			t.Fatalf("ISO rows missing %q:\n%s", want, rendered.String())
-		}
-	}
+func TestInfoServiceNetworkRowsRenderHealthyNativeIsolation(t *testing.T) {
+	rows := serviceNetworkRows(catchrpc.ServiceNetwork{
+		Modes: []string{"iso"},
+		ISO: &catchrpc.ServiceISO{
+			Modes: []string{"iso"}, State: "ready", PublicEgress: true, DNS: "public-only",
+			Namespace:  "yeet-0123456789-ns",
+			Components: []catchrpc.ServiceISOComponent{{Name: "service", IP: "172.16.0.6"}},
+		},
+	})
+	assertInfoRows(t, rows, []infoRow{
+		{Label: "Network modes", Value: "iso"},
+		{Label: "IP", Value: "172.16.0.6"},
+		{Label: "Namespace", Value: "yeet-0123456789-ns"},
+		{Label: "Egress", Value: "public IPv4 via NAT"},
+		{Label: "DNS", Value: "public-only"},
+	})
+}
+
+func TestInfoServiceNetworkRowsRenderComposeEndpointsAndAbnormalState(t *testing.T) {
+	rows := serviceNetworkRows(catchrpc.ServiceNetwork{
+		Modes: []string{"host"}, Desired: &catchrpc.ServiceNetworkSettings{Modes: []string{"iso"}},
+		ISO: &catchrpc.ServiceISO{
+			Modes: []string{"iso"}, State: "quarantined", PublicEgress: true, DNS: "public-only",
+			Namespace: "yeet-fedcba9876-ns",
+			Components: []catchrpc.ServiceISOComponent{
+				{Name: "api", IP: "172.30.128.2"},
+				{Name: "worker", IP: "172.30.128.3"},
+			},
+			LastError: "service MYISOAPP ISO network firewall digest mismatch",
+		},
+	})
+	assertInfoRows(t, rows, []infoRow{
+		{Label: "Network modes", Value: "host"},
+		{Label: "Desired network modes", Value: "iso"},
+		{Label: "Network state", Value: "quarantined"},
+		{Label: "IP (api)", Value: "172.30.128.2"},
+		{Label: "IP (worker)", Value: "172.30.128.3"},
+		{Label: "Namespace", Value: "yeet-fedcba9876-ns"},
+		{Label: "Egress", Value: "public IPv4 via NAT"},
+		{Label: "DNS", Value: "public-only"},
+		{Label: "Network error", Value: "service MYISOAPP isolated network firewall digest mismatch"},
+	})
+}
+
+func TestInfoVMNetworkRowsRenderIsolatedPeerIP(t *testing.T) {
+	section := renderVMNetworkSection(catchrpc.ServiceInfo{
+		Network: catchrpc.ServiceNetwork{
+			Modes: []string{"iso"},
+			ISO: &catchrpc.ServiceISO{
+				Modes: []string{"iso"}, State: "ready", PublicEgress: true, DNS: "public-only",
+				Components: []catchrpc.ServiceISOComponent{{Name: "vm", IP: "172.16.0.14"}},
+			},
+		},
+	})
+	assertInfoRows(t, section.Rows, []infoRow{
+		{Label: "Network modes", Value: "iso"},
+		{Label: "IP", Value: "172.16.0.14"},
+		{Label: "Egress", Value: "public IPv4 via NAT"},
+		{Label: "DNS", Value: "public-only"},
+	})
 }
 
 func TestInfoNetworkRowsShowEffectiveModesAndDesiredDrift(t *testing.T) {
@@ -791,9 +854,8 @@ func TestInfoNetworkRowsShowEffectiveModesAndDesiredDrift(t *testing.T) {
 			want: []infoRow{
 				{Label: "Network modes", Value: "host"},
 				{Label: "Desired network modes", Value: "iso"},
-				{Label: "ISO modes", Value: "iso"},
-				{Label: "ISO state", Value: "quarantined"},
-				{Label: "ISO error", Value: "firewall digest mismatch"},
+				{Label: "Network state", Value: "quarantined"},
+				{Label: "Network error", Value: "firewall digest mismatch"},
 			},
 		},
 	}

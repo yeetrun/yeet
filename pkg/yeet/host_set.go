@@ -124,7 +124,7 @@ func runHostSetISOPool(ctx context.Context, flags cli.HostSetFlags) error {
 	client := newISOPoolClientFn(host)
 	plan, err := client.ISOPoolPlan(ctx, catchrpc.ISOPoolPlanRequest{Prefix: prefix.String()})
 	if err != nil {
-		return fmt.Errorf("plan ISO pool change on %s: %w", host, err)
+		return fmt.Errorf("plan isolated network pool change on %s: %w", host, err)
 	}
 	if err := renderISOPoolPlan(hostSetStdout, host, plan); err != nil {
 		return err
@@ -137,11 +137,11 @@ func applyISOPoolPlan(ctx context.Context, client isoPoolClient, host string, pl
 		return err
 	}
 	if !plan.Changed {
-		_, err := fmt.Fprintln(hostSetStdout, "No ISO pool changes to apply.")
+		_, err := fmt.Fprintln(hostSetStdout, "No isolated network pool changes to apply.")
 		return err
 	}
 	if !flags.Yes {
-		ok, confirmErr := confirmHostSetFn(hostSetStdin, hostSetStdout, "Apply ISO pool change now?")
+		ok, confirmErr := confirmHostSetFn(hostSetStdin, hostSetStdout, "Apply isolated network pool change now?")
 		if confirmErr != nil {
 			return confirmErr
 		}
@@ -152,9 +152,9 @@ func applyISOPoolPlan(ctx context.Context, client isoPoolClient, host string, pl
 	}
 	result, err := client.ISOPoolApply(ctx, catchrpc.ISOPoolApplyRequest{Plan: plan})
 	if err != nil {
-		return fmt.Errorf("apply ISO pool change on %s: %w", host, err)
+		return fmt.Errorf("apply isolated network pool change on %s: %w", host, err)
 	}
-	_, err = fmt.Fprintf(hostSetStdout, "ISO pool set to %s (%s).\n", result.Prefix, result.Source)
+	_, err = fmt.Fprintf(hostSetStdout, "Isolated network pool set to %s (%s).\n", result.Prefix, result.Source)
 	return err
 }
 
@@ -169,7 +169,7 @@ func blockedISOPoolPlanError(plan catchrpc.ISOPoolPlan) error {
 	if len(reasons) == 0 {
 		return nil
 	}
-	return fmt.Errorf("ISO pool change cannot be applied: %s", strings.Join(reasons, "; "))
+	return fmt.Errorf("isolated network pool change cannot be applied: %s", strings.Join(reasons, "; "))
 }
 
 func hostSetHasStorageFlags(flags cli.HostSetFlags) bool {
@@ -199,7 +199,7 @@ func validateExplicitISOPool(raw string) (netip.Prefix, error) {
 }
 
 func renderISOPoolPlan(w io.Writer, host string, plan catchrpc.ISOPoolPlan) error {
-	if _, err := fmt.Fprintf(w, "ISO pool plan for %s\n", host); err != nil {
+	if _, err := fmt.Fprintf(w, "Isolated network pool plan for %s\n", host); err != nil {
 		return err
 	}
 	for _, row := range []struct {

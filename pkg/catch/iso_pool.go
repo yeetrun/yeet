@@ -264,7 +264,7 @@ type isoPoolConflictError struct {
 }
 
 func (e isoPoolConflictError) Error() string {
-	return fmt.Sprintf("ISO pool %s conflicts with %s", e.candidate, e.occupied)
+	return fmt.Sprintf("isolated network pool %s conflicts with %s", e.candidate, e.occupied)
 }
 
 func (s *Server) PlanISOPool(ctx context.Context, req catchrpc.ISOPoolPlanRequest) (catchrpc.ISOPoolPlan, error) {
@@ -318,14 +318,14 @@ func (s *Server) ApplyISOPool(ctx context.Context, req catchrpc.ISOPoolApplyRequ
 			currentSource = data.ISOPool.Source
 		}
 		if currentPrefix != plan.CurrentPrefix {
-			return fmt.Errorf("ISO pool changed while applying; plan again")
+			return fmt.Errorf("isolated network pool changed while applying; plan again")
 		}
 		if currentPrefix == desired.String() {
 			result = catchrpc.ISOPoolApplyResult{Prefix: currentPrefix, Source: currentSource}
 			return nil
 		}
 		if blockers := isoPoolAllocationBlockers(data.Services); len(blockers) != 0 {
-			return fmt.Errorf("ISO pool change is blocked by allocations: %s", strings.Join(blockers, ", "))
+			return fmt.Errorf("isolated network pool change is blocked by allocations: %s", strings.Join(blockers, ", "))
 		}
 		data.ISOPool = &db.ISOPool{
 			Prefix:           desired,
@@ -341,10 +341,10 @@ func (s *Server) ApplyISOPool(ctx context.Context, req catchrpc.ISOPoolApplyRequ
 
 func blockedISOPoolPlanError(plan catchrpc.ISOPoolPlan) error {
 	if len(plan.Blockers) != 0 {
-		return fmt.Errorf("ISO pool change is blocked by allocations: %s", strings.Join(plan.Blockers, ", "))
+		return fmt.Errorf("isolated network pool change is blocked by allocations: %s", strings.Join(plan.Blockers, ", "))
 	}
 	if len(plan.Conflicts) != 0 {
-		return fmt.Errorf("ISO pool change has conflicts: %s", strings.Join(plan.Conflicts, ", "))
+		return fmt.Errorf("isolated network pool change has conflicts: %s", strings.Join(plan.Conflicts, ", "))
 	}
 	return nil
 }
@@ -352,7 +352,7 @@ func blockedISOPoolPlanError(plan catchrpc.ISOPoolPlan) error {
 func validateServerISOPool(raw string) (netip.Prefix, error) {
 	prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
 	if err != nil || !prefix.Addr().Is4() || prefix.Bits() != 16 || prefix != prefix.Masked() {
-		return netip.Prefix{}, fmt.Errorf("ISO pool must be a canonical RFC1918 IPv4 /16")
+		return netip.Prefix{}, fmt.Errorf("isolated network pool must be a canonical RFC1918 IPv4 /16")
 	}
 	private := []netip.Prefix{
 		netip.MustParsePrefix("10.0.0.0/8"),
@@ -364,7 +364,7 @@ func validateServerISOPool(raw string) (netip.Prefix, error) {
 			return prefix, nil
 		}
 	}
-	return netip.Prefix{}, fmt.Errorf("ISO pool must be contained by RFC1918 space")
+	return netip.Prefix{}, fmt.Errorf("isolated network pool must be contained by RFC1918 space")
 }
 
 func verifyISOPoolCandidate(ctx context.Context, probe isoPoolProbe, candidate netip.Prefix, persisted []netip.Prefix) error {

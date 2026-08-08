@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
@@ -384,16 +385,16 @@ func renderHostInfoISOSection(info *serverInfo) infoSection {
 	}
 	summary := info.ISO
 	rows := []infoRow{
-		{Label: "ISO pool", Value: summary.Prefix},
-		{Label: "ISO source", Value: summary.Source},
-		{Label: "ISO version", Value: fmt.Sprintf("allocator %d, policy %d", summary.Allocator, summary.Policy)},
-		{Label: "ISO capacity", Value: fmt.Sprintf("links %d/%d, projects %d/%d", summary.LinksUsed, iso.MaxLinks, summary.ProjectsUsed, iso.MaxProjects)},
-		{Label: "ISO state", Value: fmt.Sprintf("active %d, reserved %d, quarantined %d, tombstoned %d", summary.Active, summary.Reserved, summary.Quarantined, summary.Tombstoned)},
+		{Label: "Pool", Value: summary.Prefix},
+		{Label: "Source", Value: summary.Source},
+		{Label: "Version", Value: fmt.Sprintf("allocator %d, policy %d", summary.Allocator, summary.Policy)},
+		{Label: "Capacity", Value: fmt.Sprintf("links %d/%d, projects %d/%d", summary.LinksUsed, iso.MaxLinks, summary.ProjectsUsed, iso.MaxProjects)},
+		{Label: "State", Value: fmt.Sprintf("active %d, reserved %d, quarantined %d, tombstoned %d", summary.Active, summary.Reserved, summary.Quarantined, summary.Tombstoned)},
 	}
 	if strings.TrimSpace(summary.Conflict) != "" {
-		rows = append(rows, infoRow{Label: "ISO conflict", Value: summary.Conflict})
+		rows = append(rows, infoRow{Label: "Conflict", Value: displayIsolationText(summary.Conflict)})
 	}
-	return infoSection{Title: "ISO network", Rows: rows}
+	return infoSection{Title: "Isolated network", Rows: rows}
 }
 
 func renderInfoSections(w io.Writer, sections []infoSection) error {
@@ -1046,9 +1047,45 @@ func serviceISORows(network *catchrpc.ServiceISO) []infoRow {
 	if network == nil {
 		return nil
 	}
-	rows := []infoRow{
-		{Label: "ISO modes", Value: strings.Join(network.Modes, ",")},
-		{Label: "ISO state", Value: network.State},
+	rows := serviceISOStateRows(network.State)
+	rows = append(rows, serviceISOComponentRows(network.Components)...)
+	return append(rows, serviceISOMetadataRows(network)...)
+}
+
+func serviceISOStateRows(state string) []infoRow {
+	state = strings.TrimSpace(state)
+	if state == "" || state == "ready" {
+		return nil
+	}
+	return []infoRow{{Label: "Network state", Value: state}}
+}
+
+func serviceISOComponentRows(input []catchrpc.ServiceISOComponent) []infoRow {
+	rows := make([]infoRow, 0, len(input))
+	components := slices.Clone(input)
+	sort.SliceStable(components, func(i, j int) bool {
+		if components[i].Name == components[j].Name {
+			return components[i].IP < components[j].IP
+		}
+		return components[i].Name < components[j].Name
+	})
+	for _, component := range components {
+		if component.IP == "" {
+			continue
+		}
+		label := "IP"
+		if component.Name != "" && component.Name != "service" && component.Name != "vm" {
+			label = "IP (" + component.Name + ")"
+		}
+		rows = append(rows, infoRow{Label: label, Value: component.IP})
+	}
+	return rows
+}
+
+func serviceISOMetadataRows(network *catchrpc.ServiceISO) []infoRow {
+	rows := make([]infoRow, 0, 4)
+	if namespace := strings.TrimSpace(network.Namespace); namespace != "" {
+		rows = append(rows, infoRow{Label: "Namespace", Value: namespace})
 	}
 	if network.PublicEgress {
 		rows = append(rows, infoRow{Label: "Egress", Value: "public IPv4 via NAT"})
@@ -1060,15 +1097,21 @@ func serviceISORows(network *catchrpc.ServiceISO) []infoRow {
 		}
 		rows = append(rows, infoRow{Label: "DNS", Value: dns})
 	}
-	for _, component := range network.Components {
-		if component.Name != "" && component.IP != "" {
-			rows = append(rows, infoRow{Label: "ISO " + component.Name, Value: component.IP})
-		}
-	}
 	if network.LastError != "" {
-		rows = append(rows, infoRow{Label: "ISO error", Value: network.LastError})
+		rows = append(rows, infoRow{Label: "Network error", Value: displayIsolationText(network.LastError)})
 	}
 	return rows
+}
+
+var displayISONameRE = regexp.MustCompile(`\bISO\b`)
+
+func displayIsolationText(text string) string {
+	text = strings.NewReplacer(
+		"ISO network", "isolated network",
+		"ISO pool", "isolated network pool",
+		"ISO allocation", "isolated-network allocation",
+	).Replace(text)
+	return displayISONameRE.ReplaceAllString(text, "isolation")
 }
 
 func serviceEndpointNetwork(net catchrpc.ServiceNetwork) (catchrpc.ServiceNetwork, bool) {
@@ -1107,10 +1150,10 @@ func serviceIPVisibleInPlainNetwork(ip catchrpc.ServiceIP, net catchrpc.ServiceN
 
 func renderVMNetworkSection(info catchrpc.ServiceInfo) infoSection {
 	net := info.Network
-	rows := serviceISORows(net.ISO)
-	if net.ISO == nil {
-		rows = networkIPRows(net)
+	if net.ISO != nil {
+		return infoSection{Title: "Network", Rows: serviceNetworkRows(net)}
 	}
+	rows := networkIPRows(net)
 	if net.IPWarning != "" {
 		rows = append(rows, infoRow{Label: "IP warning", Value: net.IPWarning})
 	}
