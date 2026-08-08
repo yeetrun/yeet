@@ -7,6 +7,7 @@ package svc
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,6 +93,50 @@ func TestSystemdIdentityInstallPlanSurfaces(t *testing.T) {
 	rewritten, err := rewriteInstalledSystemdUnitIdentity("[Service]\nWorkingDirectory=/srv/api\n", "app", "app")
 	if err != nil || !strings.Contains(rewritten, systemdIdentityEnvironment("app", "/srv/api")) {
 		t.Fatalf("rewritten unit = %q, %v", rewritten, err)
+	}
+}
+
+func TestSystemdInstallTargetXattrsOnlyIgnoresDarwinProvenance(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		goos string
+		raw  string
+		want bool
+	}{
+		{name: "none", goos: "darwin", raw: "", want: false},
+		{name: "Darwin provenance", goos: "darwin", raw: "com.apple.provenance\x00", want: false},
+		{name: "Darwin workload xattr", goos: "darwin", raw: "com.apple.provenance\x00user.operator\x00", want: true},
+		{name: "Linux provenance", goos: "linux", raw: "com.apple.provenance\x00", want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := systemdInstallTargetXattrsUnsupportedForOS(tt.goos, []byte(tt.raw)); got != tt.want {
+				t.Fatalf("unsupported xattrs = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSystemdServiceManagedArtifactMetadataUsesPersistedIdentity(t *testing.T) {
+	identity := &db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1002, GID: 1010}
+	service := &SystemdService{cfg: (&db.Service{Name: "demo", Identity: identity}).View()}
+	for _, tt := range []struct {
+		name     string
+		artifact db.ArtifactName
+		mode     os.FileMode
+		wantUID  uint32
+		wantGID  uint32
+		wantMode os.FileMode
+	}{
+		{name: "environment", artifact: db.ArtifactEnvFile, mode: 0o666, wantUID: uint32(os.Geteuid()), wantGID: 1010, wantMode: 0o640},
+		{name: "tailscale binary", artifact: db.ArtifactTSBinary, mode: 0o777, wantUID: uint32(os.Geteuid()), wantGID: 1010, wantMode: 0o750},
+		{name: "script", artifact: db.ArtifactTypeScriptFile, mode: 0o600, wantUID: 1002, wantGID: 1010, wantMode: 0o600},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			uid, gid, mode, ok := service.managedArtifactMetadata(tt.artifact, tt.mode)
+			if !ok || uid != tt.wantUID || gid != tt.wantGID || mode != tt.wantMode {
+				t.Fatalf("managed artifact metadata = %d:%d %04o, %t; want %d:%d %04o, true", uid, gid, mode, ok, tt.wantUID, tt.wantGID, tt.wantMode)
+			}
+		})
 	}
 }
 
@@ -902,19 +947,42 @@ func TestSystemdServiceInstallTargetStatesExcludingCapturesPresentAndAbsentArtif
 func TestSystemdServiceStageInstallEnforcesPersistedIdentityOnStaleUnitArtifact(t *testing.T) {
 	tmp := t.TempDir()
 	systemdDir := filepath.Join(tmp, "systemd")
-	runDir := filepath.Join(tmp, "run")
-	for _, dir := range []string{systemdDir, runDir} {
+	root := filepath.Join(tmp, "service")
+	runDir := filepath.Join(root, "run")
+	binDir := filepath.Join(root, "bin")
+	envDir := filepath.Join(root, "env")
+	for _, dir := range []string{systemdDir, runDir, binDir, envDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	unitSrc := writeTempFile(t, tmp, "demo.source.service", "[Unit]\nDescription=demo\n[Service]\nExecStart=/srv/demo\nUser=root\nGroup=root\n[Install]\nWantedBy=multi-user.target\n")
+	binarySrc := writeTempFile(t, binDir, "demo-1", "binary\n")
+	envSrc := writeTempFile(t, envDir, "env-1", "TOKEN=value\n")
+	legacyBinary := filepath.Join(runDir, "demo")
+	legacyEnv := filepath.Join(runDir, "env")
+	unitSrc := writeTempFile(t, binDir, "demo.source.service",
+		"[Unit]\nConditionFileIsExecutable="+legacyBinary+"\nDescription=demo\n[Service]\nExecStart="+legacyBinary+" --serve\nEnvironmentFile=-"+legacyEnv+"\nUser=root\nGroup=root\n[Install]\nWantedBy=multi-user.target\n")
 	identity := &db.ServiceIdentity{RequestedUser: "app", RequestedGroup: "workers", UID: 1002, GID: 1010}
 	cfg := db.Service{
 		Name: "demo", Generation: 1, Identity: identity,
-		Artifacts: db.ArtifactStore{db.ArtifactSystemdUnit: artifactAt(1, unitSrc)},
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit: artifactAt(1, unitSrc),
+			db.ArtifactBinary:      artifactAt(1, binarySrc),
+			db.ArtifactEnvFile:     artifactAt(1, envSrc),
+		},
 	}
 	service := &SystemdService{cfg: cfg.View(), runDir: runDir, systemdDir: systemdDir}
+	oldChown := systemdInstallArtifactChown
+	t.Cleanup(func() { systemdInstallArtifactChown = oldChown })
+	var chowns []string
+	systemdInstallArtifactChown = func(file *os.File, uid, gid int) error {
+		chowns = append(chowns, fmt.Sprintf("%s=%d:%d", filepath.Base(file.Name()), uid, gid))
+		return nil
+	}
+	rendered, err := service.RenderedPrimaryUnit()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := service.StageInstallForReload(); err != nil {
 		t.Fatal(err)
 	}
@@ -922,9 +990,33 @@ func TestSystemdServiceStageInstallEnforcesPersistedIdentityOnStaleUnitArtifact(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "User=root") || strings.Contains(string(raw), "Group=root") ||
-		!strings.Contains(string(raw), "User=app\n") || !strings.Contains(string(raw), "Group=workers\n") {
-		t.Fatalf("installed unit did not enforce persisted identity:\n%s", raw)
+	if rendered != string(raw) {
+		t.Fatalf("rendered primary unit differs from installed unit:\nrendered:\n%s\ninstalled:\n%s", rendered, raw)
+	}
+	for _, unwanted := range []string{legacyBinary, legacyEnv, "User=root", "Group=root"} {
+		if strings.Contains(string(raw), unwanted) {
+			t.Fatalf("installed unit retained legacy value %q:\n%s", unwanted, raw)
+		}
+	}
+	for _, want := range []string{
+		"ConditionFileIsExecutable=" + binarySrc + "\n",
+		"ExecStart=" + binarySrc + " --serve\n",
+		"EnvironmentFile=-" + filepath.Join(envDir, "env") + "\n",
+		"User=app\n",
+		"Group=workers\n",
+	} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("installed unit missing %q:\n%s", want, raw)
+		}
+	}
+	if got, err := os.ReadFile(filepath.Join(envDir, "env")); err != nil || string(got) != "TOKEN=value\n" {
+		t.Fatalf("managed environment = %q, %v", got, err)
+	}
+	if diff := cmp.Diff([]string{fmt.Sprintf("env=%d:1010", os.Geteuid())}, chowns); diff != "" {
+		t.Fatalf("managed artifact chowns mismatch (-want +got):\n%s", diff)
+	}
+	if info, err := os.Stat(filepath.Join(envDir, "env")); err != nil || info.Mode().Perm() != 0o640 {
+		t.Fatalf("managed environment mode = %v, %v; want 0640", info, err)
 	}
 }
 

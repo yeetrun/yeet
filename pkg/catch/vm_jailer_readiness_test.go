@@ -133,13 +133,23 @@ func TestVMRuntimeIdentityCreatesMissingAccountOnce(t *testing.T) {
 	if identity != (vmRuntimeIdentity{UID: 914, GID: 915}) {
 		t.Fatalf("identity = %#v", identity)
 	}
-	wantArgs := []string{"--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "--user-group", vmRuntimeUser}
+	wantArgs := []string{"--system", "--user-group", "--home-dir", "/nonexistent", "--no-create-home", "--shell", "/usr/sbin/nologin", vmRuntimeUser}
 	if !reflect.DeepEqual(gotArgs, wantArgs) {
 		t.Fatalf("useradd args = %#v, want %#v", gotArgs, wantArgs)
 	}
 	if lookups != 2 {
 		t.Fatalf("lookups = %d, want 2", lookups)
 	}
+}
+
+func TestVMRuntimeIdentityRejectsWrongHome(t *testing.T) {
+	stubExistingVMRuntimeUser(t, &user.User{Uid: "812", Gid: "813", Username: vmRuntimeUser})
+	records := validVMRuntimeNSS("812", "813")
+	records["passwd "+vmRuntimeUser] = vmRuntimeUser + ":x:812:813::/home/yeet-vm:" + vmRuntimeNologin + "\n"
+	vmRuntimeNSSLookup = stubVMRuntimeNSSLookup(t, records, nil)
+
+	_, err := ensureVMRuntimeIdentity()
+	requireUnsafeVMRuntimeAccountError(t, err, "/nonexistent")
 }
 
 func TestVMRuntimeIdentityRejectsRootAndInvalidIDs(t *testing.T) {
@@ -265,7 +275,7 @@ func TestValidateVMRuntimePrimaryGroupRejectsUnsafeLookupResults(t *testing.T) {
 
 func TestValidateVMRuntimePasswdEnumerationRejectsUnsafeLookupResults(t *testing.T) {
 	identity := vmRuntimeIdentity{UID: 812, GID: 813}
-	account := vmRuntimePasswdRecord{Name: vmRuntimeUser, UID: 812, GID: 813, Shell: vmRuntimeNologin}
+	account := vmRuntimePasswdRecord{Name: vmRuntimeUser, UID: 812, GID: 813, Home: staticSystemAccountHome, Shell: vmRuntimeNologin}
 	valid := validVMRuntimeNSS("812", "813")["passwd"]
 	tests := []struct {
 		name      string
@@ -356,7 +366,7 @@ func requireUnsafeVMRuntimeAccountError(t *testing.T, err error, reason string) 
 	for _, want := range []string{
 		reason,
 		"manually recreate",
-		"useradd --system --no-create-home --shell /usr/sbin/nologin --user-group " + vmRuntimeUser,
+		"useradd --system --user-group --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin " + vmRuntimeUser,
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error = %q, want substring %q", err, want)

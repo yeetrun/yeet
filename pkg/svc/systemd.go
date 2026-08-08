@@ -15,6 +15,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"text/template"
@@ -41,7 +43,10 @@ type InstallTargetState struct {
 	SHA256  string
 }
 
-var systemdInstallTargetFlistxattr = unix.Flistxattr
+var (
+	systemdInstallTargetFlistxattr = unix.Flistxattr
+	systemdInstallArtifactChown    = (*os.File).Chown
+)
 
 const (
 	StatusRunning Status = "Running"
@@ -437,39 +442,179 @@ func (s *SystemdService) installArtifacts(plan []installStep) error {
 }
 
 func (s *SystemdService) installArtifact(step installStep, srcPath string) error {
-	identity := s.cfg.Identity()
-	if step.artifact != db.ArtifactSystemdUnit || !identity.Valid() {
-		return fileutil.CopyFile(srcPath, step.dstPath)
+	if !isSystemdUnitArtifact(step.artifact) {
+		if err := fileutil.CopyFile(srcPath, step.dstPath); err != nil {
+			return err
+		}
+		return s.enforceManagedArtifactMetadata(step)
 	}
-	return installSystemdUnitWithIdentity(srcPath, step.dstPath, identity.RequestedUser(), identity.RequestedGroup())
-}
-
-func installSystemdUnitWithIdentity(srcPath, dstPath, user, group string) (retErr error) {
-	src, err := os.OpenFile(srcPath, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	raw, mode, err := s.renderSystemdUnitArtifact(step, srcPath)
 	if err != nil {
 		return err
+	}
+	return writeInstalledSystemdUnit(step.dstPath, raw, mode)
+}
+
+func (s *SystemdService) enforceManagedArtifactMetadata(step installStep) (retErr error) {
+	file, err := os.OpenFile(step.dstPath, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := file.Close(); retErr == nil {
+			retErr = closeErr
+		}
+	}()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("managed artifact destination %s is not a regular file", step.dstPath)
+	}
+	uid, gid, mode, managed := s.managedArtifactMetadata(step.artifact, info.Mode())
+	if !managed {
+		return nil
+	}
+	if err := systemdInstallArtifactChown(file, int(uid), int(gid)); err != nil {
+		return fmt.Errorf("set managed artifact owner %s to %d:%d: %w", step.dstPath, uid, gid, err)
+	}
+	if err := file.Chmod(mode); err != nil {
+		return fmt.Errorf("set managed artifact mode %s to %04o: %w", step.dstPath, mode, err)
+	}
+	return file.Sync()
+}
+
+func (s *SystemdService) managedArtifactMetadata(artifact db.ArtifactName, current os.FileMode) (uint32, uint32, os.FileMode, bool) {
+	identity := s.cfg.Identity()
+	if !identity.Valid() {
+		return 0, 0, 0, false
+	}
+	switch artifact {
+	case db.ArtifactEnvFile, db.ArtifactNetNSEnv, db.ArtifactTSEnv, db.ArtifactTSConfig:
+		return uint32(os.Geteuid()), identity.GID(), tightenedManagedArtifactMode(current, 0o640, 0o040), true
+	case db.ArtifactBinary, db.ArtifactTSBinary:
+		return uint32(os.Geteuid()), identity.GID(), tightenedManagedArtifactMode(current, 0o750, 0o050), true
+	case db.ArtifactTypeScriptFile, db.ArtifactPythonFile:
+		return identity.UID(), identity.GID(), current.Perm(), true
+	default:
+		return 0, 0, 0, false
+	}
+}
+
+func tightenedManagedArtifactMode(current, allowed, required os.FileMode) os.FileMode {
+	mode := current.Perm() & allowed.Perm()
+	if mode&required.Perm() != required.Perm() {
+		mode |= required.Perm()
+	}
+	return mode
+}
+
+func isSystemdUnitArtifact(artifact db.ArtifactName) bool {
+	switch artifact {
+	case db.ArtifactSystemdUnit, db.ArtifactSystemdTimerFile, db.ArtifactNetNSService, db.ArtifactTSService:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *SystemdService) renderSystemdUnitArtifact(step installStep, srcPath string) (_ []byte, _ os.FileMode, retErr error) {
+	src, err := os.OpenFile(srcPath, os.O_RDONLY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, 0, err
 	}
 	defer func() {
 		if closeErr := src.Close(); retErr == nil {
 			retErr = closeErr
 		}
 	}()
-	info, err := src.Stat()
+	info, err := validateSystemdInstallTargetArtifact(src, step.artifact, srcPath)
 	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("systemd unit artifact %s is not a regular file", srcPath)
+		return nil, 0, err
 	}
 	raw, err := io.ReadAll(src)
 	if err != nil {
-		return err
+		return nil, 0, err
 	}
-	rewritten, err := rewriteInstalledSystemdUnitIdentity(string(raw), user, group)
+	raw, err = s.renderSystemdUnitContent(step, raw)
 	if err != nil {
-		return fmt.Errorf("enforce persisted service identity in %s: %w", srcPath, err)
+		return nil, 0, fmt.Errorf("render systemd unit artifact %s: %w", srcPath, err)
 	}
-	return writeInstalledSystemdUnit(dstPath, []byte(rewritten), info.Mode().Perm())
+	return raw, info.Mode().Perm(), nil
+}
+
+func (s *SystemdService) renderSystemdUnitContent(step installStep, raw []byte) ([]byte, error) {
+	raw = []byte(s.rewriteLegacyRuntimePaths(string(raw)))
+	identity := s.cfg.Identity()
+	if step.artifact == db.ArtifactSystemdUnit && identity.Valid() {
+		rewritten, err := rewriteInstalledSystemdUnitIdentity(string(raw), identity.RequestedUser(), identity.RequestedGroup())
+		if err != nil {
+			return nil, err
+		}
+		raw = []byte(rewritten)
+	}
+	return raw, nil
+}
+
+func (s *SystemdService) rewriteLegacyRuntimePaths(raw string) string {
+	if s.keepsStableRuntimeBinary() {
+		return raw
+	}
+	service := s.cfg.AsStruct()
+	installers := s.artifactInstaller()
+	type replacement struct{ old, new string }
+	var replacements []replacement
+	add := func(artifact db.ArtifactName, oldName string, immutable bool) {
+		path, ok := service.Artifacts.Gen(artifact, service.Generation)
+		if !ok {
+			return
+		}
+		if !immutable {
+			path = installers[artifact].dstPath
+		}
+		replacements = append(replacements, replacement{old: filepath.Join(s.runDir, oldName), new: path})
+	}
+	add(db.ArtifactTSEnv, "tailscaled.env", false)
+	add(db.ArtifactTSConfig, "tailscaled.json", false)
+	add(db.ArtifactTSBinary, "tailscaled", false)
+	add(db.ArtifactNetNSEnv, "netns.env", false)
+	add(db.ArtifactEnvFile, "env", false)
+	add(db.ArtifactBinary, s.Name(), true)
+	sort.Slice(replacements, func(i, j int) bool { return len(replacements[i].old) > len(replacements[j].old) })
+	for _, replacement := range replacements {
+		raw = strings.ReplaceAll(raw, replacement.old, replacement.new)
+	}
+	return raw
+}
+
+// RenderedPrimaryUnit returns the exact primary unit content that installation
+// would publish for the current generation.
+func (s *SystemdService) RenderedPrimaryUnit() (string, error) {
+	step := installStep{artifact: db.ArtifactSystemdUnit, artifactInstall: s.artifactInstaller()[db.ArtifactSystemdUnit]}
+	source, ok := s.cfg.AsStruct().Artifacts.Gen(step.artifact, s.cfg.Generation())
+	if !ok {
+		return "", fmt.Errorf("service %q generation %d has no systemd unit artifact", s.Name(), s.cfg.Generation())
+	}
+	raw, _, err := s.renderSystemdUnitArtifact(step, source)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// RenderPrimaryUnit returns the exact primary unit content that installation
+// would publish for raw generated unit content.
+func (s *SystemdService) RenderPrimaryUnit(raw string) (string, error) {
+	step := installStep{artifact: db.ArtifactSystemdUnit, artifactInstall: s.artifactInstaller()[db.ArtifactSystemdUnit]}
+	rendered, err := s.renderSystemdUnitContent(step, []byte(raw))
+	if err != nil {
+		return "", err
+	}
+	return string(rendered), nil
 }
 
 func rewriteInstalledSystemdUnitIdentity(raw, user, group string) (string, error) {
@@ -774,6 +919,21 @@ func (s *SystemdService) installTargetState(step installStep, artifacts db.Artif
 	if !present {
 		return state, nil
 	}
+	if isSystemdUnitArtifact(step.artifact) {
+		raw, mode, err := s.renderSystemdUnitArtifact(step, source)
+		if err != nil {
+			return InstallTargetState{}, err
+		}
+		hash := sha256.Sum256(raw)
+		state.Present = true
+		state.Mode = mode
+		state.UID = uint32(os.Geteuid())
+		state.GID = uint32(os.Getegid())
+		state.Nlink = 1
+		state.Size = int64(len(raw))
+		state.SHA256 = hex.EncodeToString(hash[:])
+		return state, nil
+	}
 	file, err := os.OpenFile(source, os.O_RDONLY|unix.O_NOFOLLOW, 0)
 	if err != nil {
 		return InstallTargetState{}, fmt.Errorf("open %s artifact for transaction intent: %w", step.artifact, err)
@@ -795,6 +955,11 @@ func (s *SystemdService) installTargetState(step installStep, artifacts db.Artif
 	state.Mode = info.Mode()
 	state.UID = uint32(os.Geteuid())
 	state.GID = uint32(os.Getegid())
+	if uid, gid, mode, managed := s.managedArtifactMetadata(step.artifact, info.Mode()); managed {
+		state.Mode = mode
+		state.UID = uid
+		state.GID = gid
+	}
 	state.Nlink = 1
 	state.Size = info.Size()
 	state.SHA256 = hex.EncodeToString(hash.Sum(nil))
@@ -810,14 +975,39 @@ func validateSystemdInstallTargetArtifact(file *os.File, artifact db.ArtifactNam
 	if !ok || !info.Mode().IsRegular() || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || stat.Nlink != 1 {
 		return nil, fmt.Errorf("%s artifact %s is not a safe single-link regular file", artifact, source)
 	}
-	size, xattrErr := systemdInstallTargetFlistxattr(int(file.Fd()), nil)
-	if xattrErr != nil && !errors.Is(xattrErr, unix.ENOTSUP) && !errors.Is(xattrErr, unix.ENODATA) {
-		return nil, xattrErr
+	unsupportedXattrs, err := systemdInstallTargetHasUnsupportedXattrs(int(file.Fd()))
+	if err != nil {
+		return nil, err
 	}
-	if size != 0 {
+	if unsupportedXattrs {
 		return nil, fmt.Errorf("%s artifact %s has extended attributes that transactional staging cannot preserve", artifact, source)
 	}
 	return info, nil
+}
+
+func systemdInstallTargetHasUnsupportedXattrs(fd int) (bool, error) {
+	size, err := systemdInstallTargetFlistxattr(fd, nil)
+	if errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.ENODATA) {
+		return false, nil
+	}
+	if err != nil || size == 0 {
+		return false, err
+	}
+	buf := make([]byte, size)
+	n, err := systemdInstallTargetFlistxattr(fd, buf)
+	if err != nil {
+		return false, err
+	}
+	return systemdInstallTargetXattrsUnsupportedForOS(runtime.GOOS, buf[:n]), nil
+}
+
+func systemdInstallTargetXattrsUnsupportedForOS(goos string, raw []byte) bool {
+	for _, name := range strings.Split(string(raw), "\x00") {
+		if name != "" && (goos != "darwin" || name != "com.apple.provenance") {
+			return true
+		}
+	}
+	return false
 }
 
 // PrimaryUnitPath returns the stable systemd unit destination for this service.

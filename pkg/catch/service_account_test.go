@@ -79,6 +79,14 @@ func TestManagedServiceAccountRejectsIncompatibleProperties(t *testing.T) {
 			wantErr: "home directory",
 		},
 		{
+			name: "wrong absent home path",
+			change: func(f *managedServiceAccountFixture) {
+				f.account.HomeDir = "/var/empty/yeet-svc"
+				f.passwd = strings.Replace(f.passwd, "/nonexistent", f.account.HomeDir, 1)
+			},
+			wantErr: "/nonexistent",
+		},
+		{
 			name: "supplementary group membership",
 			change: func(f *managedServiceAccountFixture) {
 				f.groupIDs = "992 20\n"

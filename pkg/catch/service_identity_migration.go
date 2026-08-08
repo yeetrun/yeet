@@ -1268,9 +1268,18 @@ func (m *serviceIdentityMigration) prepareCopiedRootGeneration(unitArtifact, act
 	if err != nil {
 		return fmt.Errorf("read copied target systemd unit: %w", err)
 	}
-	replacement, err := rewriteServiceIdentityUnit(string(raw), m.req.Target.Persisted, m.result.Root)
+	systemdService, err := svc.NewSystemdService(
+		m.server.cfg.DB,
+		m.target.View(),
+		serviceRunDirForRoot(m.result.Root),
+		svc.WithTailscaleGuardRunner(m.server.catchRunnerPath()),
+	)
 	if err != nil {
-		return fmt.Errorf("rewrite copied target systemd unit: %w", err)
+		return fmt.Errorf("load copied target systemd generation: %w", err)
+	}
+	replacement, err := systemdService.RenderPrimaryUnit(string(raw))
+	if err != nil {
+		return fmt.Errorf("render copied target systemd unit: %w", err)
 	}
 	info, err := os.Stat(actualUnit)
 	if err != nil {

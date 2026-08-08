@@ -217,19 +217,87 @@ func TestServiceSetRunAsRejectsUnsupportedServiceTypes(t *testing.T) {
 
 func TestServiceSetRunAsRoutesNativeToMigrationEngine(t *testing.T) {
 	server := newTestServer(t)
-	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{"api": {Name: "api", ServiceType: db.ServiceTypeSystemd}}}); err != nil {
+	const serviceName = "service-set-identity-runtime-test"
+	root := filepath.Join(t.TempDir(), "service")
+	if err := ensureDirsForRoot(root, ""); err != nil {
+		t.Fatal(err)
+	}
+	binaryArtifact := filepath.Join(serviceBinDirForRoot(root), serviceName+"-1")
+	envArtifact := filepath.Join(serviceEnvDirForRoot(root), "env-1")
+	unitArtifact := filepath.Join(serviceBinDirForRoot(root), serviceName+"-1.service")
+	legacyBinary := filepath.Join(serviceRunDirForRoot(root), serviceName)
+	legacyEnv := filepath.Join(serviceRunDirForRoot(root), "env")
+	for path, contents := range map[string]string{
+		binaryArtifact: "binary-generation\n",
+		envArtifact:    "TOKEN=value\n",
+		unitArtifact: "[Unit]\nConditionFileIsExecutable=" + legacyBinary + "\n[Service]\nExecStart=" + legacyBinary + " --serve\n" +
+			"EnvironmentFile=-" + legacyEnv + "\nWorkingDirectory=" + serviceDataDirForRoot(root) + "\nUser=root\nGroup=root\n[Install]\nWantedBy=multi-user.target\n",
+		legacyBinary: "legacy-binary\n",
+		legacyEnv:    "TOKEN=value\n",
+	} {
+		if err := os.WriteFile(path, []byte(contents), 0o640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(binaryArtifact, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	service := &db.Service{
+		Name: serviceName, ServiceType: db.ServiceTypeSystemd, ServiceRoot: root, Generation: 1, LatestGeneration: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactBinary:      {Refs: map[db.ArtifactRef]string{db.Gen(1): binaryArtifact, "latest": binaryArtifact}},
+			db.ArtifactEnvFile:     {Refs: map[db.ArtifactRef]string{db.Gen(1): envArtifact, "latest": envArtifact}},
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{db.Gen(1): unitArtifact, "latest": unitArtifact}},
+		},
+	}
+	if err := server.cfg.DB.Set(&db.Data{Services: map[string]*db.Service{serviceName: service}}); err != nil {
 		t.Fatal(err)
 	}
 	spec := strconv.Itoa(os.Geteuid()) + ":" + strconv.Itoa(os.Getegid())
 	var got serviceIdentityMigrationRequest
-	execer := &ttyExecer{s: server, sn: "api", migrateServiceIdentityFunc: func(_ context.Context, req serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
+	execer := &ttyExecer{s: server, sn: serviceName, migrateServiceIdentityFunc: func(ctx context.Context, req serviceIdentityMigrationRequest, _ io.Writer) (serviceIdentityMigrationResult, error) {
 		got = req
+		if req.StageGeneration == nil {
+			t.Fatal("identity-only service set did not provide generation staging")
+		}
+		if req.TargetService == nil || req.TargetService.Identity == nil || len(req.GenerationPaths) == 0 || len(req.GenerationIntents) == 0 || len(req.GenerationUnits) == 0 {
+			t.Fatalf("incomplete migration request = %#v", req)
+		}
+		for _, unwanted := range []string{legacyBinary, legacyEnv} {
+			if strings.Contains(req.ReplacementUnit, unwanted) {
+				t.Fatalf("replacement unit retained legacy runtime path %q:\n%s", unwanted, req.ReplacementUnit)
+			}
+		}
+		for _, want := range []string{
+			"ConditionFileIsExecutable=" + binaryArtifact + "\n",
+			"ExecStart=" + binaryArtifact + " --serve\n",
+			"EnvironmentFile=-" + filepath.Join(serviceEnvDirForRoot(root), "env") + "\n",
+		} {
+			if !strings.Contains(req.ReplacementUnit, want) {
+				t.Fatalf("replacement unit missing %q:\n%s", want, req.ReplacementUnit)
+			}
+		}
+		if err := os.Remove(legacyBinary); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(legacyEnv); err != nil {
+			t.Fatal(err)
+		}
+		if err := req.StageGeneration(ctx); err != nil {
+			t.Fatalf("stage persisted generation: %v", err)
+		}
+		if raw, err := os.ReadFile(filepath.Join(serviceEnvDirForRoot(root), "env")); err != nil || string(raw) != "TOKEN=value\n" {
+			t.Fatalf("staged managed environment = %q, %v", raw, err)
+		}
+		if _, err := os.Stat(legacyBinary); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("legacy runtime binary was recreated: %v", err)
+		}
 		return serviceIdentityMigrationResult{}, nil
 	}}
 	if err := execer.serviceSetCmdFunc(cli.ServiceSetFlags{RunAs: spec, RunAsSet: true}); err != nil {
 		t.Fatal(err)
 	}
-	if got.Service != "api" || got.Requested != spec || got.Target.Persisted.UID != uint32(os.Geteuid()) || got.RootPlan != nil {
+	if got.Service != serviceName || got.Requested != spec || got.Target.Persisted.UID != uint32(os.Geteuid()) || got.RootPlan != nil {
 		t.Fatalf("migration request = %#v", got)
 	}
 }

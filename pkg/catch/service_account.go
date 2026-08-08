@@ -51,10 +51,7 @@ func lookupOrCreateManagedServiceAccount() (*user.User, error) {
 	if err := ensureManagedServiceGroup(); err != nil {
 		return nil, err
 	}
-	if err := runManagedServiceAccountCommand(
-		"useradd", "--system", "--gid", managedServiceUser, "--home-dir", "/nonexistent", "--no-create-home",
-		"--shell", "/usr/sbin/nologin", managedServiceUser,
-	); err != nil {
+	if err := runManagedServiceAccountCommand("useradd", staticSystemUserAddArgs(managedServiceUser, "--gid", managedServiceUser)...); err != nil {
 		return nil, err
 	}
 	account, err = serviceUserLookup(managedServiceUser)
@@ -173,8 +170,8 @@ func validateManagedServicePasswd(account *user.User, passwd managedPasswd, uid,
 }
 
 func validateManagedServiceHome(home string) error {
-	if home == "" {
-		return incompatibleManagedServiceAccount("home directory must be an absent path")
+	if home != staticSystemAccountHome {
+		return incompatibleManagedServiceAccount("home directory is %q, want %q", home, staticSystemAccountHome)
 	}
 	if _, err := serviceAccountStat(home); err == nil {
 		return incompatibleManagedServiceAccount("home directory %q exists", home)

@@ -27,7 +27,7 @@ const (
 	vmJailerPendingRestart      vmJailerReadiness = "jailer-pending-restart"
 	vmJailerReadinessMarkerName                   = "vmm-isolation"
 	vmRuntimeUser                                 = "yeet-vm"
-	vmRuntimeNologin                              = "/usr/sbin/nologin"
+	vmRuntimeNologin                              = staticSystemAccountShell
 )
 
 type vmRuntimeIdentity struct {
@@ -39,6 +39,7 @@ type vmRuntimePasswdRecord struct {
 	Name  string
 	UID   int
 	GID   int
+	Home  string
 	Shell string
 }
 
@@ -161,7 +162,7 @@ func ensureVMRuntimeIdentity() (vmRuntimeIdentity, error) {
 		if !errors.As(err, &unknown) {
 			return vmRuntimeIdentity{}, fmt.Errorf("lookup %s system account: %w", vmRuntimeUser, err)
 		}
-		args := []string{"--system", "--no-create-home", "--shell", vmRuntimeNologin, "--user-group", vmRuntimeUser}
+		args := staticSystemUserAddArgs(vmRuntimeUser, "--user-group")
 		if err := vmRuntimeUserAdd(args); err != nil {
 			return vmRuntimeIdentity{}, err
 		}
@@ -217,6 +218,9 @@ func validatedVMRuntimePasswdRecord(identity vmRuntimeIdentity) (vmRuntimePasswd
 			"passwd UID:GID is %d:%d, but account lookup returned %d:%d",
 			account.UID, account.GID, identity.UID, identity.GID,
 		)
+	}
+	if account.Home != staticSystemAccountHome {
+		return vmRuntimePasswdRecord{}, unsafeVMRuntimeAccountError("passwd record home is %q, want %q", account.Home, staticSystemAccountHome)
 	}
 	if !approvedVMRuntimeShell(account.Shell) {
 		return vmRuntimePasswdRecord{}, unsafeVMRuntimeAccountError("passwd record shell %q is not an approved non-login shell", account.Shell)
@@ -307,7 +311,7 @@ func parseVMRuntimePasswdRecords(raw []byte) ([]vmRuntimePasswdRecord, error) {
 		if err != nil {
 			return nil, fmt.Errorf("malformed passwd GID in record %q: %w", line, err)
 		}
-		records = append(records, vmRuntimePasswdRecord{Name: fields[0], UID: uid, GID: gid, Shell: fields[6]})
+		records = append(records, vmRuntimePasswdRecord{Name: fields[0], UID: uid, GID: gid, Home: fields[5], Shell: fields[6]})
 	}
 	return records, nil
 }
@@ -370,8 +374,8 @@ func parseVMRuntimeNSSID(value string) (int, error) {
 func unsafeVMRuntimeAccountError(format string, args ...any) error {
 	reason := fmt.Sprintf(format, args...)
 	return fmt.Errorf(
-		"existing %s system account is unsafe: %s; manually recreate it as a dedicated account after confirming it is unused: useradd --system --no-create-home --shell %s --user-group %s",
-		vmRuntimeUser, reason, vmRuntimeNologin, vmRuntimeUser,
+		"existing %s system account is unsafe: %s; manually recreate it as a dedicated account after confirming it is unused: useradd %s",
+		vmRuntimeUser, reason, strings.Join(staticSystemUserAddArgs(vmRuntimeUser, "--user-group"), " "),
 	)
 }
 

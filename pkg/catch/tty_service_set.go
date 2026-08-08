@@ -241,8 +241,9 @@ func (e *ttyExecer) applyServiceSetIdentityChange(flags cli.ServiceSetFlags, cha
 	if err != nil {
 		return err
 	}
-	req := serviceIdentityMigrationRequest{
-		Service: e.sn, Requested: flags.RunAs, Target: target, RootPlan: rootPlan,
+	req, err := e.prepareServiceSetIdentityMigrationRequest(flags, target, rootPlan)
+	if err != nil {
+		return err
 	}
 	if e.migrateServiceIdentityFunc != nil {
 		_, err = e.migrateServiceIdentityFunc(context.Background(), req, e.rw)
@@ -254,6 +255,46 @@ func (e *ttyExecer) applyServiceSetIdentityChange(flags cli.ServiceSetFlags, cha
 		_, err = e.s.migrateServiceIdentity(context.Background(), req, e.rw)
 	}
 	return err
+}
+
+func (e *ttyExecer) prepareServiceSetIdentityMigrationRequest(flags cli.ServiceSetFlags, target resolvedServiceIdentity, rootPlan *serviceRootMigrationPlan) (serviceIdentityMigrationRequest, error) {
+	req := serviceIdentityMigrationRequest{
+		Service: e.sn, Requested: flags.RunAs, Target: target, RootPlan: rootPlan,
+	}
+	if rootPlan != nil {
+		return req, nil
+	}
+	sv, err := e.s.serviceView(e.sn)
+	if err != nil {
+		return serviceIdentityMigrationRequest{}, err
+	}
+	service := sv.AsStruct()
+	identity := target.Persisted
+	service.Identity = &identity
+	installer, err := e.s.NewInstaller(InstallerCfg{ServiceName: e.sn, ClientOut: e.rw})
+	if err != nil {
+		return serviceIdentityMigrationRequest{}, err
+	}
+	generationService, err := newSystemdInstallService(installer, service)
+	if err != nil {
+		return serviceIdentityMigrationRequest{}, err
+	}
+	replacement, err := generationService.RenderedPrimaryUnit()
+	if err != nil {
+		return serviceIdentityMigrationRequest{}, fmt.Errorf("render identity migration systemd unit: %w", err)
+	}
+	units := generationService.InstallUnits()
+	states, err := generationService.InstallTargetStatesExcluding(generationService.PrimaryUnitPath())
+	if err != nil {
+		return serviceIdentityMigrationRequest{}, fmt.Errorf("capture identity migration generation intent: %w", err)
+	}
+	req.ReplacementUnit = replacement
+	req.TargetService = service
+	req.GenerationPaths = generationService.InstallTargetPaths()
+	req.GenerationIntents = serviceIdentityInstallTargetStates(states)
+	req.GenerationUnits = units
+	req.StageGeneration = stagedNativeIdentityGeneration(generationService, units)
+	return req, nil
 }
 
 func (e *ttyExecer) prepareServiceSetIdentityRootPlan(flags cli.ServiceSetFlags, changes serviceSetChanges) (*serviceRootMigrationPlan, error) {
