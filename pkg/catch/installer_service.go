@@ -832,6 +832,7 @@ func newSystemdInstallService(si *Installer, s *db.Service) (*svc.SystemdService
 		s.View(),
 		serviceRunDirForRoot(serviceRoot),
 		svc.WithTailscaleGuardRunner(si.s.catchRunnerPath()),
+		svc.WithSystemdDirectory(systemdSystemDir),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create service: %v", err)

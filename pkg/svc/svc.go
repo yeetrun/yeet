@@ -31,6 +31,14 @@ func WithTailscaleGuardRunner(path string) SystemdServiceOption {
 	}
 }
 
+// WithSystemdDirectory configures the stable systemd unit directory used by
+// install planning and lifecycle operations.
+func WithSystemdDirectory(path string) SystemdServiceOption {
+	return func(service *SystemdService) {
+		service.systemdDir = path
+	}
+}
+
 // NewSystemdService creates a new systemd service from a SystemdConfigView.
 func NewSystemdService(db *db.Store, cfg db.ServiceView, runDir string, options ...SystemdServiceOption) (*SystemdService, error) {
 	service := &SystemdService{db: db, cfg: cfg, runDir: runDir}

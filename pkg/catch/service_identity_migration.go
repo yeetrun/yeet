@@ -84,9 +84,18 @@ type serviceIdentityMigrationRequest struct {
 	// GenerationUnits entry is enabled; a non-nil empty slice explicitly
 	// disables every unit in the generation plan.
 	GenerationEnablement *[]serviceIdentityUnitEnablement
-	StartNew             bool
-	PredecessorAbsent    bool
-	ForceReconcile       bool
+	// PreserveTargetServiceIdentity keeps TargetService.Identity byte-for-byte
+	// instead of materializing the effective identity into the database record.
+	// Generation-only mutations use this while still supplying Target for
+	// ownership, validation, and rendered-unit behavior.
+	PreserveTargetServiceIdentity bool
+	// Schedule marks the transaction as a schedule-only generation change. It
+	// is captured in the durable journal before any stable unit mutation and
+	// keeps payload and sidecar runtime outside the timer activation protocol.
+	Schedule          *serviceScheduleJournalState
+	StartNew          bool
+	PredecessorAbsent bool
+	ForceReconcile    bool
 
 	ops *serviceIdentityMigrationOps
 }
@@ -130,6 +139,8 @@ type serviceIdentityMigrationOps struct {
 	enable               func(context.Context, string) error
 	disable              func(context.Context, string) error
 	newGenerationStager  func(*db.Service, string) (serviceIdentityGenerationStager, error)
+	inspectScheduleTimer func(context.Context, string) (serviceScheduleTimerRuntimeState, error)
+	scheduleSystemctl    func(context.Context, ...string) error
 }
 
 type serviceIdentityGenerationStager interface {
@@ -267,6 +278,9 @@ func (s *Server) migrateServiceIdentityLockedWithResolverState(ctx context.Conte
 }
 
 func (s *Server) runPreparedServiceIdentityMigration(ctx context.Context, m *serviceIdentityMigration, resolverGuardHeld bool) (serviceIdentityMigrationResult, error) {
+	if m.req.Schedule != nil {
+		return s.runServiceIdentityMigration(ctx, m)
+	}
 	if !tailscaleResolverPersistedRecord(*m.target) {
 		return s.runServiceIdentityMigration(ctx, m)
 	}
@@ -407,8 +421,10 @@ func (m *serviceIdentityMigration) prepareTargetService(ctx context.Context) err
 			return err
 		}
 	}
-	targetIdentity := m.req.Target.Persisted
-	m.target.Identity = &targetIdentity
+	if !m.req.PreserveTargetServiceIdentity {
+		targetIdentity := m.req.Target.Persisted
+		m.target.Identity = &targetIdentity
+	}
 	m.target.Name = m.req.Service
 	m.target.ServiceType = db.ServiceTypeSystemd
 	if err := validateNativeServicePrivilegedPorts(m.req.Service, m.target.Publish, m.req.Target.Persisted); err != nil {
@@ -568,11 +584,20 @@ func (m *serviceIdentityMigration) prepareServiceIdentityRuntime(ctx context.Con
 }
 
 func (m *serviceIdentityMigration) activateServiceIdentityGeneration(ctx context.Context) error {
-	if err := m.server.checkTailscaleResolverReady(ctx, *m.target); err != nil {
-		return err
+	// A schedule-only generation preserves every sidecar definition byte-for-byte
+	// and must not expand into an unrelated resolver migration prerequisite.
+	if m.req.Schedule == nil {
+		if err := m.server.checkTailscaleResolverReady(ctx, *m.target); err != nil {
+			return err
+		}
 	}
 	if len(m.req.GenerationUnits) != 0 {
-		return m.activateGenerationUnits(ctx)
+		if err := m.activateGenerationUnits(ctx); err != nil {
+			return err
+		}
+	}
+	if m.req.Schedule != nil {
+		return reconcileServiceScheduleTimerRuntime(ctx, m.ops, *m.req.Schedule, m.req.Schedule.PreviousActive)
 	}
 	return nil
 }
@@ -583,6 +608,9 @@ func (m *serviceIdentityMigration) captureAndStop(ctx context.Context) error {
 	}
 	if err := m.captureJournal(ctx); err != nil {
 		return fmt.Errorf("%s: %w", serviceIdentityPhaseJournal, err)
+	}
+	if m.req.Schedule != nil {
+		return m.captureAndQuiesceServiceScheduleTimer(ctx)
 	}
 	if serviceIdentityAnyRuntimeActive(m.previousRuntime) || m.req.ops == nil {
 		if err := m.phase(serviceIdentityPhaseStop); err != nil {
@@ -597,6 +625,26 @@ func (m *serviceIdentityMigration) captureAndStop(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (m *serviceIdentityMigration) captureAndQuiesceServiceScheduleTimer(ctx context.Context) error {
+	current, err := m.ops.inspectScheduleTimer(ctx, m.req.Schedule.TimerUnit)
+	if err != nil {
+		return fmt.Errorf("%s: inspect schedule timer before quiescing: %w", serviceIdentityPhaseStop, err)
+	}
+	if current.Active != m.req.Schedule.PreviousActive {
+		return fmt.Errorf("%s: schedule timer runtime changed after preflight", serviceIdentityPhaseStop)
+	}
+	if !current.Active {
+		return nil
+	}
+	if err := m.phase(serviceIdentityPhaseStop); err != nil {
+		return err
+	}
+	if err := quiesceServiceScheduleTimer(ctx, m.ops, *m.req.Schedule); err != nil {
+		return fmt.Errorf("%s: %w", serviceIdentityPhaseStop, err)
+	}
+	return m.appendPhase(serviceIdentityPhaseStop, serviceIdentityPhaseRecord{})
 }
 
 func (m *serviceIdentityMigration) materializeServiceIdentityRoot(ctx context.Context) (bool, error) {
@@ -1007,6 +1055,9 @@ func (m *serviceIdentityMigration) startVerifyAndCommitServiceIdentity(ctx conte
 }
 
 func (m *serviceIdentityMigration) startReplacementServiceIdentity(ctx context.Context) error {
+	if m.req.Schedule != nil {
+		return nil
+	}
 	if m.result.WasRunning || m.req.StartNew {
 		if err := m.server.checkTailscaleResolverReady(ctx, *m.target); err != nil {
 			return err
@@ -1316,7 +1367,12 @@ func serviceIdentityExpectedGenerationTargets(service *db.Service, root, primary
 	if service == nil {
 		return nil, nil, fmt.Errorf("target service is unavailable for generation validation")
 	}
-	systemdService, err := svc.NewSystemdService(nil, service.View(), serviceRunDirForRoot(root))
+	systemdService, err := svc.NewSystemdService(
+		nil,
+		service.View(),
+		serviceRunDirForRoot(root),
+		svc.WithSystemdDirectory(systemdSystemDir),
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load target service install plan: %w", err)
 	}
@@ -1903,6 +1959,7 @@ func (m *serviceIdentityMigration) captureJournal(ctx context.Context) error {
 		PreviousUnitPath: m.unitPath, PreviousUnitMode: m.previousUnitMode,
 		PreviousRoot: serviceRootFromConfig(m.server.cfg, *m.previous), PreviousDataset: m.previous.ServiceRootZFS,
 		TargetRoot: m.result.Root, TargetDataset: m.target.ServiceRootZFS,
+		Schedule: cloneServiceScheduleJournalState(m.req.Schedule),
 	}
 	header.GenerationBackups, err = captureServiceIdentityGenerationBackups(m.server.cfg.RootDir, m.req.GenerationPaths, m.unitPath, id)
 	if err != nil {
@@ -1950,10 +2007,20 @@ func (m *serviceIdentityMigration) rollback(ctx context.Context) error {
 	if err := m.validateRollbackPreconditions(); err != nil {
 		return m.closeJournalAfterRollbackError(err)
 	}
-	criticalErr := m.restoreCriticalServiceIdentityState(ctx)
+	var criticalErr error
+	if m.req.Schedule != nil {
+		criticalErr = quiesceServiceScheduleTimer(ctx, m.ops, *m.req.Schedule)
+	}
+	if criticalErr == nil {
+		criticalErr = m.restoreCriticalServiceIdentityState(ctx)
+	}
 	rollbackErr := criticalErr
 	if criticalErr == nil {
-		rollbackErr = m.ops.restoreRuntime(ctx, m.req.Service, m.previousRuntime)
+		if m.req.Schedule != nil {
+			rollbackErr = restoreServiceScheduleRuntimeState(ctx, m.ops, *m.req.Schedule, m.previousRuntime)
+		} else {
+			rollbackErr = m.ops.restoreRuntime(ctx, m.req.Service, m.previousRuntime)
+		}
 	}
 	if rollbackErr == nil {
 		rollbackErr = m.verifyRollback(ctx)
@@ -2312,6 +2379,10 @@ func (m *serviceIdentityMigration) replacementUnit() (string, error) {
 }
 
 func (m *serviceIdentityMigration) defaultOps() serviceIdentityMigrationOps {
+	isEnabled := serviceIdentitySystemdUnitEnabled
+	if m.req.Schedule != nil {
+		isEnabled = serviceScheduleSystemdUnitEnabled
+	}
 	previousStop := func(ctx context.Context, fallback string) error {
 		stop, _ := serviceIdentityRuntimeActions(m.server, m.previous)
 		return stop(ctx, fallback)
@@ -2389,19 +2460,11 @@ func (m *serviceIdentityMigration) defaultOps() serviceIdentityMigrationOps {
 			}
 			return syncServiceIdentityJournalDir(filepath.Dir(path))
 		},
-		isEnabled: func(ctx context.Context, unit string) (bool, error) {
-			err := exec.CommandContext(ctx, "systemctl", "is-enabled", unit).Run()
-			if err == nil {
-				return true, nil
-			}
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				return false, nil
-			}
-			return false, err
-		},
-		enable:  func(_ context.Context, unit string) error { return catchSystemctl("enable", unit) },
-		disable: func(_ context.Context, unit string) error { return catchSystemctl("disable", unit) },
+		isEnabled:            isEnabled,
+		enable:               func(_ context.Context, unit string) error { return catchSystemctl("enable", unit) },
+		disable:              func(_ context.Context, unit string) error { return catchSystemctl("disable", unit) },
+		inspectScheduleTimer: inspectServiceScheduleTimer,
+		scheduleSystemctl:    runServiceScheduleSystemctl,
 		newGenerationStager: func(service *db.Service, root string) (serviceIdentityGenerationStager, error) {
 			stager, err := svc.NewSystemdService(
 				m.server.cfg.DB,
@@ -2874,6 +2937,12 @@ func (ops *serviceIdentityMigrationOps) mergeEnablementOverrides(overrides servi
 	}
 	if overrides.newGenerationStager != nil {
 		ops.newGenerationStager = overrides.newGenerationStager
+	}
+	if overrides.inspectScheduleTimer != nil {
+		ops.inspectScheduleTimer = overrides.inspectScheduleTimer
+	}
+	if overrides.scheduleSystemctl != nil {
+		ops.scheduleSystemctl = overrides.scheduleSystemctl
 	}
 }
 

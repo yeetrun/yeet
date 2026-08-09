@@ -147,8 +147,10 @@ type serviceIdentityRecoveryTransaction struct {
 
 func newServiceIdentityRecoveryTransaction(s *Server, path string, contents serviceIdentityJournalContents, overrides *serviceIdentityMigrationOps) *serviceIdentityRecoveryTransaction {
 	m := &serviceIdentityMigration{
-		server:             s,
-		req:                serviceIdentityMigrationRequest{Service: contents.Header.Service},
+		server: s,
+		req: serviceIdentityMigrationRequest{
+			Service: contents.Header.Service, Schedule: cloneServiceScheduleJournalState(contents.Header.Schedule),
+		},
 		migrationID:        contents.Header.ID,
 		previous:           serviceIdentityJournalObservedService(contents.Header).Clone(),
 		predecessor:        contents.Header.PreviousService.Clone(),
@@ -236,10 +238,16 @@ func (r *serviceIdentityRecoveryTransaction) validateRollback() error {
 func (r *serviceIdentityRecoveryTransaction) restoreRollback(ctx context.Context) error {
 	contents := r.contents
 	var recoveryErr error
-	running, runningErr := r.ops.isReplacementRunning(ctx, contents.Header.Service)
-	recoveryErr = errors.Join(recoveryErr, runningErr)
-	if runningErr == nil && running {
-		recoveryErr = errors.Join(recoveryErr, stopServiceIdentityObserved(ctx, r.ops.stopReplacement, r.ops.isReplacementRunning, contents.Header.Service))
+	if contents.Header.Schedule != nil {
+		if err := quiesceServiceScheduleTimer(ctx, r.ops, *contents.Header.Schedule); err != nil {
+			return err
+		}
+	} else {
+		running, runningErr := r.ops.isReplacementRunning(ctx, contents.Header.Service)
+		recoveryErr = errors.Join(recoveryErr, runningErr)
+		if runningErr == nil && running {
+			recoveryErr = errors.Join(recoveryErr, stopServiceIdentityObserved(ctx, r.ops.stopReplacement, r.ops.isReplacementRunning, contents.Header.Service))
+		}
 	}
 	if r.unitMutation {
 		recoveryErr = errors.Join(recoveryErr, restoreServiceIdentityRecoveryUnit(contents))
@@ -341,6 +349,9 @@ func (r *serviceIdentityRecoveryTransaction) finishRollback(ctx context.Context)
 	if err := verifyServiceIdentityRecoveryState(ctx, r.server, r.ops, r.contents.Header); err != nil {
 		return serviceIdentityRecoveryError(r.contents, r.path, "verify rollback", err)
 	}
+	if err := r.server.cleanupRecoveredServiceScheduleTimer(r.contents.Header); err != nil {
+		return serviceIdentityRecoveryError(r.contents, r.path, "cleanup recovered schedule timer source", err)
+	}
 	if err := cleanupServiceIdentityTransactionBackupDir(r.server.cfg.RootDir, r.contents.Header.ID); err != nil {
 		return serviceIdentityRecoveryError(r.contents, r.path, "remove recovered transaction backup directory", err)
 	}
@@ -358,6 +369,9 @@ func (s *Server) validateServiceIdentityRecoveryHeader(contents serviceIdentityJ
 		return err
 	}
 	if err := s.validateServiceIdentityRecoveryGenerationBackups(header); err != nil {
+		return err
+	}
+	if err := validateServiceScheduleRecoveryHeader(header); err != nil {
 		return err
 	}
 	if err := s.validateServiceIdentityRecoveryRuntimeBackups(contents); err != nil {
@@ -403,7 +417,14 @@ func serviceIdentityRecoveryRecordTypesMatch(header serviceIdentityJournalHeader
 }
 
 func validateServiceIdentityRecoveryRecordIdentities(header serviceIdentityJournalHeader, predecessorPresent bool) error {
-	if header.TargetService.Identity == nil || *header.TargetService.Identity != header.TargetIdentity {
+	if header.TargetService.Identity == nil {
+		if _, _, scheduleOnly := recoveredServiceScheduleTimerSource(header); !scheduleOnly {
+			return fmt.Errorf("target database identity does not match journal identity")
+		}
+		if header.TargetIdentity != effectiveServiceIdentity(header.PreviousService.View()).Persisted {
+			return fmt.Errorf("target database identity does not match journal identity")
+		}
+	} else if *header.TargetService.Identity != header.TargetIdentity {
 		return fmt.Errorf("target database identity does not match journal identity")
 	}
 	var predecessorIdentity *db.ServiceIdentity
@@ -721,6 +742,9 @@ func validateServiceIdentityRecoveryGenerationUnits(header serviceIdentityJourna
 	for index, state := range header.GenerationUnits {
 		actual[index] = state.Unit
 		_, wantTargetEnabled := targetSet[state.Unit]
+		if header.Schedule != nil {
+			wantTargetEnabled = state.Enabled
+		}
 		if state.TargetEnabled != wantTargetEnabled {
 			return fmt.Errorf("generation unit %s target enablement does not match the target service install plan", state.Unit)
 		}
@@ -1143,6 +1167,9 @@ func restoreServiceIdentityRecoveryDatabaseRecord(data *db.Data, header serviceI
 }
 
 func restoreServiceIdentityRecoveryRunningState(ctx context.Context, ops serviceIdentityMigrationOps, header serviceIdentityJournalHeader) error {
+	if header.Schedule != nil {
+		return restoreServiceScheduleRuntimeState(ctx, ops, *header.Schedule, serviceIdentityJournalRuntimeState(header))
+	}
 	return ops.restoreRuntime(ctx, header.Service, serviceIdentityJournalRuntimeState(header))
 }
 

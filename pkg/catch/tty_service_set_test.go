@@ -93,6 +93,63 @@ func TestServiceSetNetworkUsesManageRoute(t *testing.T) {
 	}
 }
 
+func TestServiceSetCronDispatchHoldsServiceOperationLock(t *testing.T) {
+	oldUpdate := updateServiceScheduleLockedForServiceSet
+	t.Cleanup(func() { updateServiceScheduleLockedForServiceSet = oldUpdate })
+
+	called := false
+	server := newTestServer(t)
+	execer := &ttyExecer{s: server, sn: "reports", rw: &bytes.Buffer{}}
+	updateServiceScheduleLockedForServiceSet = func(_ context.Context, got *ttyExecer, cron string) error {
+		called = true
+		if got != execer {
+			t.Fatalf("schedule callback execer = %p, want %p", got, execer)
+		}
+		if !got.serviceOperationLockHeld {
+			t.Fatal("schedule callback ran without the service operation lock")
+		}
+		if cron != "30 2 * * *" {
+			t.Fatalf("schedule callback cron = %q", cron)
+		}
+		return nil
+	}
+
+	if err := execer.dispatch([]string{"service", "set", "--cron=30 2 * * *"}); err != nil {
+		t.Fatalf("dispatch service set cron: %v", err)
+	}
+	if !called {
+		t.Fatal("schedule callback was not called")
+	}
+}
+
+func TestServiceSetCronRejectsOtherMutationsCatchSide(t *testing.T) {
+	oldUpdate := updateServiceScheduleLockedForServiceSet
+	t.Cleanup(func() { updateServiceScheduleLockedForServiceSet = oldUpdate })
+	called := false
+	updateServiceScheduleLockedForServiceSet = func(context.Context, *ttyExecer, string) error {
+		called = true
+		return nil
+	}
+
+	for _, flags := range []cli.ServiceSetFlags{
+		{Cron: "30 2 * * *", CronSet: true, RunAs: "backup", RunAsSet: true},
+		{Cron: "30 2 * * *", CronSet: true, Net: "host", NetSet: true},
+		{Cron: "30 2 * * *", CronSet: true, ServiceRoot: "/srv/reports"},
+		{Cron: "30 2 * * *", CronSet: true, Copy: true},
+		{Cron: "30 2 * * *", CronSet: true, Empty: true},
+		{Cron: "30 2 * * *", CronSet: true, Publish: []string{"8080:80"}},
+		{Cron: "30 2 * * *", CronSet: true, Snapshots: "off", SnapshotChange: true},
+	} {
+		err := (&ttyExecer{s: newTestServer(t), sn: "reports", rw: &bytes.Buffer{}}).serviceSetCmdFunc(flags)
+		if err == nil || !strings.Contains(err.Error(), "--cron cannot be combined with other service settings") {
+			t.Fatalf("serviceSetCmdFunc(%#v) error = %v, want separate-command guidance", flags, err)
+		}
+	}
+	if called {
+		t.Fatal("schedule callback ran before Catch-side exclusivity validation")
+	}
+}
+
 func TestServiceSetNetworkRoutesRootAndNonRootThroughSameMutationWithoutIdentityLookup(t *testing.T) {
 	oldUpdate := updateServiceNetworkLockedForServiceSet
 	oldUser, oldUserID := serviceUserLookup, serviceUserLookupID

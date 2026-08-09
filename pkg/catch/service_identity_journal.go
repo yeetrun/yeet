@@ -61,6 +61,7 @@ type serviceIdentityJournalHeader struct {
 	GenerationBackups      []serviceIdentityGenerationBackup `json:"generationBackups,omitempty"`
 	PreviousUnitProof      serviceIdentityPathProof          `json:"previousUnitProof,omitempty"`
 	GenerationUnits        []serviceIdentityUnitEnablement   `json:"generationUnits,omitempty"`
+	Schedule               *serviceScheduleJournalState      `json:"schedule,omitempty"`
 }
 
 type serviceIdentityGenerationBackup struct {

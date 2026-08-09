@@ -57,6 +57,7 @@ func TestTTYAuthorizationCommandPermissions(t *testing.T) {
 		{name: "snapshots restore", args: []string{"snapshots", "restore", "svc", "snap"}, want: permissionManage},
 		{name: "service generations", args: []string{"service", "generations"}, want: permissionRead},
 		{name: "service set", args: []string{"service", "set", "--copy"}, want: permissionManage},
+		{name: "service set cron", args: []string{"service", "set", "--cron=30 2 * * *"}, want: permissionManage},
 		{name: "service set run as", args: []string{"service", "set", "--run-as=app"}, want: permissionManage},
 		{name: "tailscale status", args: []string{"tailscale", "status"}, want: permissionRead},
 		{name: "tailscale update", args: []string{"tailscale", "update"}, want: permissionManage},
@@ -85,8 +86,9 @@ func TestTTYAuthorizationCommandPermissions(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ttyCommandPermissions: %v", err)
 			}
-			if !got.has(tt.want) {
-				t.Fatalf("permissions = %#v, want %q", got, tt.want)
+			want := newPermissionSet(tt.want)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("permissions = %#v, want exactly %#v", got, want)
 			}
 		})
 	}
