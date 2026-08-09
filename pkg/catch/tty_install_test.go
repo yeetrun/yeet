@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/copyutil"
@@ -851,7 +852,7 @@ func TestRunCommandRejectsWebFlagBeforeInstall(t *testing.T) {
 	}
 }
 
-func TestCronCmdFuncConvertsCronAndInstallsTimer(t *testing.T) {
+func TestRunCmdFuncRoutesCronToInstaller(t *testing.T) {
 	var gotCfg FileInstallerCfg
 	execer := &ttyExecer{
 		s:     newTestServer(t),
@@ -859,36 +860,23 @@ func TestCronCmdFuncConvertsCronAndInstallsTimer(t *testing.T) {
 		rawRW: bytes.NewBufferString("payload"),
 		rw:    &bytes.Buffer{},
 		installFunc: func(action string, in io.Reader, cfg FileInstallerCfg) error {
-			if action != "cron" {
-				t.Fatalf("action = %q, want cron", action)
+			if action != "run" {
+				t.Fatalf("action = %q, want run", action)
 			}
 			gotCfg = cfg
 			return nil
 		},
 	}
 
-	if err := execer.cronCmdFunc("* * * * *", []string{"--hello"}); err != nil {
-		t.Fatalf("cronCmdFunc returned error: %v", err)
-	}
-	if gotCfg.Timer == nil {
-		t.Fatal("expected timer config")
-	}
-	if gotCfg.Timer.OnCalendar != "*-*-* *:*:00" || !gotCfg.Timer.Persistent {
-		t.Fatalf("timer = %#v, want minutely persistent timer", gotCfg.Timer)
-	}
-	if !reflect.DeepEqual(gotCfg.Args, []string{"--hello"}) {
-		t.Fatalf("args = %#v, want --hello", gotCfg.Args)
-	}
-}
-
-func TestCronCommandRoutesRunAsToInstaller(t *testing.T) {
-	var got FileInstallerCfg
-	execer := &ttyExecer{s: newTestServer(t), sn: "backup", rawRW: bytes.NewBufferString("payload"), rw: &bytes.Buffer{}, installFunc: func(_ string, _ io.Reader, cfg FileInstallerCfg) error { got = cfg; return nil }}
-	if err := execer.dispatch([]string{"cron", "--run-as=backup", "--schedule=0 3 * * *", "--", "--daily"}); err != nil {
+	err := execer.dispatch([]string{"run", "--cron=0 3 * * *", "--run-as=backup", "--net=iso", "--", "--daily"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got.RunAs != "backup" || !got.RunAsSet || !reflect.DeepEqual(got.Args, []string{"--daily"}) {
-		t.Fatalf("installer cfg = %#v", got)
+	if gotCfg.Timer == nil || gotCfg.Timer.OnCalendar != "*-*-* 03:00" || !gotCfg.Timer.Persistent {
+		t.Fatalf("timer = %#v", gotCfg.Timer)
+	}
+	if gotCfg.RunAs != "backup" || !gotCfg.RunAsSet || gotCfg.Network.Interfaces != "iso" || !reflect.DeepEqual(gotCfg.Args, []string{"--daily"}) {
+		t.Fatalf("cfg = %#v", gotCfg)
 	}
 }
 
@@ -911,6 +899,64 @@ func TestRunCmdFuncRejectsVMRunAsBeforeLaunch(t *testing.T) {
 	}
 }
 
+func TestRunCmdFuncRejectsCronVMBeforeLaunch(t *testing.T) {
+	oldRunVM := runVMCmdFunc
+	called := false
+	runVMCmdFunc = func(*ttyExecer, cli.RunFlags, string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { runVMCmdFunc = oldRunVM })
+
+	execer := &ttyExecer{s: newTestServer(t), sn: "scheduled-vm"}
+	err := execer.runCmdFunc(cli.RunFlags{Cron: "0 3 * * *", CronSet: true}, []string{"vm://ubuntu/26.04"})
+	if err == nil || !strings.Contains(err.Error(), "scheduled service can only be updated with a native binary or script") {
+		t.Fatalf("runCmdFunc error = %v, want scheduled native payload rejection", err)
+	}
+	if called {
+		t.Fatal("VM provisioning ran before scheduled payload rejection")
+	}
+}
+
+func TestRunCmdFuncRejectsExistingScheduledServiceVMConversionInsideServiceLock(t *testing.T) {
+	server := newTestServer(t)
+	seedScheduledService(t, server, "scheduled-vm", "*-*-* 03:00:00", true)
+
+	oldRunVM := runVMCmdFunc
+	called := false
+	runVMCmdFunc = func(*ttyExecer, cli.RunFlags, string) error {
+		called = true
+		return nil
+	}
+	t.Cleanup(func() { runVMCmdFunc = oldRunVM })
+
+	execer := &ttyExecer{s: server, sn: "scheduled-vm"}
+	release := server.serviceOperationLocks.Lock("scheduled-vm")
+	done := make(chan error, 1)
+	go func() {
+		done <- execer.runCmdFunc(cli.RunFlags{}, []string{"vm://ubuntu/26.04"})
+	}()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("VM conversion bypassed service mutation lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "scheduled service can only be updated with a native binary or script") {
+			t.Fatalf("runCmdFunc error = %v, want scheduled native payload rejection", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("VM conversion did not resume after service mutation lock release")
+	}
+	if called {
+		t.Fatal("VM provisioning ran for an active scheduled generation")
+	}
+}
+
 func TestExplicitRunAsRejectsContainerPayloadTypes(t *testing.T) {
 	for _, ft := range []ftdetect.FileType{ftdetect.DockerCompose, ftdetect.Python, ftdetect.TypeScript} {
 		if err := validateExplicitRunAsForPayloadType(true, ft); err == nil || !strings.Contains(err.Error(), "applies only to native systemd workloads") {
@@ -924,18 +970,20 @@ func TestExplicitRunAsRejectsContainerPayloadTypes(t *testing.T) {
 	}
 }
 
-func TestCronCmdFuncRejectsInvalidCronBeforeInstall(t *testing.T) {
+func TestRunCmdFuncRejectsInvalidCronBeforeInstall(t *testing.T) {
 	called := false
 	execer := &ttyExecer{
+		s:  newTestServer(t),
+		sn: "svc-cron",
 		installFunc: func(string, io.Reader, FileInstallerCfg) error {
 			called = true
 			return nil
 		},
 	}
 
-	err := execer.cronCmdFunc("* * *", nil)
+	err := execer.runCmdFunc(cli.RunFlags{Cron: "* * *", CronSet: true}, nil)
 	if err == nil || !strings.Contains(err.Error(), "invalid cron expression") {
-		t.Fatalf("cron error = %v, want invalid cron", err)
+		t.Fatalf("run error = %v, want invalid cron", err)
 	}
 	if called {
 		t.Fatal("install seam was called for invalid cron")
@@ -1183,6 +1231,92 @@ func TestStageCmdFuncStagesNoBinaryWithoutLiveInstall(t *testing.T) {
 	}
 	if got := out.String(); !strings.Contains(got, `Staged service "svc-stage"`) {
 		t.Fatalf("stage output = %q, want staged message", got)
+	}
+}
+
+func TestStageCommitRestoresAuthoritativeScheduledTimer(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		clearFirst bool
+	}{
+		{name: "overwrites stale staged timer"},
+		{name: "reconstructs timer after stage clear", clearFirst: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTestServer(t)
+			const serviceName = "scheduled-stage"
+			seedScheduledService(t, server, serviceName, "*-*-15 09:00:00", true)
+			primaryUnit := ""
+			execer := &ttyExecer{
+				ctx:      context.Background(),
+				s:        server,
+				sn:       serviceName,
+				rw:       &bytes.Buffer{},
+				progress: "quiet",
+				closeNewStageInstallerFunc: func(cfg FileInstallerCfg) error {
+					// Exercise the real no-binary preparation and staging path, then
+					// commit its refs without invoking the platform-specific runtime.
+					cfg.StageOnly = true
+					fileInstaller, err := newFileInstaller(server, cfg, true)
+					if err != nil {
+						return err
+					}
+					if err := fileInstaller.Close(); err != nil {
+						return err
+					}
+					installer, err := server.NewInstaller(cfg.InstallerCfg)
+					if err != nil {
+						return err
+					}
+					_, service, err := installer.commitGen(0)
+					if err != nil {
+						return err
+					}
+					runner, err := newSystemdInstallService(installer, service)
+					if err != nil {
+						return err
+					}
+					primaryUnit = runner.PrimaryUnit()
+					return nil
+				},
+			}
+
+			if tc.clearFirst {
+				if err := execer.dispatch([]string{"stage", "clear"}); err != nil {
+					t.Fatalf("stage clear: %v", err)
+				}
+			}
+
+			if err := execer.dispatch([]string{"stage", "commit"}); err != nil {
+				t.Fatalf("stage commit: %v", err)
+			}
+			service := testService(t, server, serviceName)
+			timerPath, ok := service.Artifacts.Gen(cdb.ArtifactSystemdTimerFile, service.Generation)
+			if !ok {
+				t.Fatalf("generation %d has no timer artifact: %#v", service.Generation, service.Artifacts)
+			}
+			timerRaw, err := os.ReadFile(timerPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(timerRaw), "OnCalendar=*-*-15 09:00:00\n") {
+				t.Fatalf("committed timer = %q, want authoritative schedule", timerRaw)
+			}
+			unitPath, ok := service.Artifacts.Gen(cdb.ArtifactSystemdUnit, service.Generation)
+			if !ok {
+				t.Fatalf("generation %d has no service unit artifact", service.Generation)
+			}
+			unitRaw, err := os.ReadFile(unitPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(unitRaw), "Type=oneshot\n") {
+				t.Fatalf("scheduled service unit is not oneshot:\n%s", unitRaw)
+			}
+			if primaryUnit != serviceName+".timer" {
+				t.Fatalf("install primary unit = %q, want timer so stage commit cannot start the oneshot payload", primaryUnit)
+			}
+		})
 	}
 }
 

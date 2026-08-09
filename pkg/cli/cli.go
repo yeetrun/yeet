@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/shayne/yargs"
+	"github.com/yeetrun/yeet/pkg/cronutil"
 )
 
 type FlagSpec struct {
@@ -40,6 +41,8 @@ type GroupInfo struct {
 }
 
 type RunFlags struct {
+	Cron             string
+	CronSet          bool
 	RunAs            string
 	RunAsSet         bool
 	CPUs             int
@@ -111,12 +114,6 @@ func (f ServiceSetFlags) HasNetworkChange() bool {
 	return f.NetSet || f.TsVerSet || f.TsExitSet || f.TsTagsSet ||
 		f.TsAuthKeySet || f.MacvlanMacSet || f.MacvlanVlanSet ||
 		f.MacvlanParentSet
-}
-
-type CronFlags struct {
-	RunAs    string
-	RunAsSet bool
-	Schedule string
 }
 
 type HostSetFlags struct {
@@ -341,6 +338,7 @@ type dockerPushFlagsParsed struct {
 }
 
 type runFlagsParsed struct {
+	Cron             string   `flag:"cron" help:"Schedule a native binary or script with a five-field cron expression"`
 	RunAs            string   `flag:"run-as" help:"Run a native service as USER[:GROUP]"`
 	CPUs             int      `flag:"vcpus"`
 	Memory           string   `flag:"memory"`
@@ -398,15 +396,6 @@ type serviceSetFlagsParsed struct {
 	SnapshotMaxAge   string   `flag:"snapshot-max-age"`
 	SnapshotRequired string   `flag:"snapshot-required"`
 	SnapshotEvents   string   `flag:"snapshot-events"`
-}
-
-type cronFlagsParsed struct {
-	RunAs    string `flag:"run-as" help:"Run a native service as USER[:GROUP]"`
-	Schedule string `flag:"schedule" help:"Five-field cron schedule"`
-}
-
-type cronPublicFlagsParsed struct {
-	RunAs string `flag:"run-as" help:"Run a native service as USER[:GROUP]"`
 }
 
 type hostSetFlagsParsed struct {
@@ -614,7 +603,6 @@ func IsServiceArgSpec(spec yargs.ArgSpec) bool {
 }
 
 var remoteCommandInfos = map[string]CommandInfo{
-	"cron": {Name: "cron", Description: "Install a cron job from a file and 5-field expression", Usage: `FILE "<cron expr>" [--run-as=USER[:GROUP]] [-- <args...>]`, Examples: []string{`yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo`, `yeet cron <svc> ./backup.sh "0 3 * * *" --run-as=backup`}, ArgsSchema: ServiceArgs{}, FlagsSchema: cronPublicFlagsParsed{}},
 	"copy": {Name: "copy", Description: "Copy files between local paths and service data or VM guests", Usage: "[--force-proxy] [-avz] <src>... <dst>", Examples: []string{
 		"yeet copy ./config.yml svc:data/config.yml",
 		"yeet copy ./configs/*.yml devbox:~/configs/",
@@ -635,11 +623,12 @@ var remoteCommandInfos = map[string]CommandInfo{
 	"umount":  {Name: "umount", Description: "Unmount a host mount by name", Usage: "NAME", Examples: []string{"yeet umount data-share"}},
 	"remove":  {Name: "remove", Description: "Remove a service", Aliases: []string{"rm"}, ArgsSchema: ServiceArgs{}, FlagsSchema: removeFlagsParsed{}},
 	"restart": {Name: "restart", Description: "Restart a service", ArgsSchema: ServiceArgs{}},
-	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile, VM)", Usage: "SVC [PAYLOAD] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
+	"run": {Name: "run", Description: "Install/update from a payload (binary, compose, image, Dockerfile, VM)", Usage: "SVC [PAYLOAD] [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]", Examples: []string{
 		"yeet run --web",
 		"yeet run --web <svc>",
 		"yeet run --web <svc> ./compose.yml",
 		"yeet run <svc> ./bin/<svc> -- --app-flag value",
+		`yeet run <svc> ./job --cron="0 3 * * *" --run-as=backup --net=iso -- --daily`,
 		"yeet run <svc> ./bin/<svc> --run-as=app:app",
 		"yeet run -p 80:80 <svc> nginx:latest",
 		"yeet run --publish-reset -p 443:443 <svc> nginx:latest",
@@ -689,7 +678,6 @@ var remoteFlagSpecs = map[string]map[string]FlagSpec{
 	"mount":     flagSpecsFromStruct(mountFlagsParsed{}),
 	"version":   flagSpecsFromStruct(versionFlagsParsed{}),
 	"copy":      {},
-	"cron":      flagSpecsFromStruct(cronPublicFlagsParsed{}),
 	"disable":   {},
 	"enable":    {},
 	"ip":        {},
@@ -1139,7 +1127,13 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 	if err != nil {
 		return RunFlags{}, nil, err
 	}
+	cron, cronSet, err := parseRunCron(parseArgs, parsed.Flags.Cron)
+	if err != nil {
+		return RunFlags{}, nil, err
+	}
 	flags := RunFlags{
+		Cron:             cron,
+		CronSet:          cronSet,
 		RunAs:            runAs,
 		RunAsSet:         runAsSet,
 		CPUs:             parsed.Flags.CPUs,
@@ -1174,52 +1168,6 @@ func ParseRun(args []string) (RunFlags, []string, error) {
 	}
 	argsOut := append(parsed.Args, extraArgs...)
 	return flags, argsOut, nil
-}
-
-func ParseCron(args []string) (CronFlags, []string, error) {
-	parseArgs, payloadArgs := splitArgsAtDoubleDash(args)
-	parsed, err := parseFlags[cronFlagsParsed](parseArgs)
-	if err != nil {
-		return CronFlags{}, nil, err
-	}
-	runAs, runAsSet, err := parseRunAs(parseArgs, parsed.Flags.RunAs)
-	if err != nil {
-		return CronFlags{}, nil, err
-	}
-	schedule, payloadArgs, err := parseCronSchedule(parseArgs, parsed.Args, payloadArgs, parsed.Flags.Schedule)
-	if err != nil {
-		return CronFlags{}, nil, err
-	}
-	fields := strings.Fields(schedule)
-	if len(fields) != 5 {
-		return CronFlags{}, nil, fmt.Errorf("cron expression must have 5 fields, got %d", len(fields))
-	}
-	return CronFlags{RunAs: runAs, RunAsSet: runAsSet, Schedule: strings.Join(fields, " ")}, payloadArgs, nil
-}
-
-func parseCronSchedule(parseArgs, positional, payloadArgs []string, rawSchedule string) (string, []string, error) {
-	schedule := strings.TrimSpace(rawSchedule)
-	if countLongFlag(parseArgs, "--schedule") > 1 {
-		return "", nil, fmt.Errorf("--schedule may only be supplied once")
-	}
-	if schedule != "" && len(positional) != 0 {
-		return "", nil, fmt.Errorf("cron schedule must be supplied once")
-	}
-	if schedule == "" {
-		if len(positional) == 0 {
-			return "", nil, fmt.Errorf("cron requires a cron expression")
-		}
-		switch {
-		case len(positional) == 1:
-			schedule = strings.TrimSpace(positional[0])
-		case len(positional) >= 5:
-			schedule = strings.Join(positional[:5], " ")
-			payloadArgs = append(append([]string{}, positional[5:]...), payloadArgs...)
-		default:
-			return "", nil, fmt.Errorf("cron schedule must be supplied once")
-		}
-	}
-	return schedule, payloadArgs, nil
 }
 
 type normalizedRunFlagValues struct {
@@ -1550,6 +1498,29 @@ func parseRunAs(args []string, value string) (string, bool, error) {
 		return "", true, fmt.Errorf("--run-as requires USER[:GROUP]")
 	}
 	return value, set, nil
+}
+
+func parseRunCron(args []string, value string) (string, bool, error) {
+	if countLongFlag(args, "--cron") > 1 {
+		return "", true, fmt.Errorf("--cron may only be supplied once")
+	}
+	set := longFlagWasSupplied(args, "--cron")
+	value = strings.TrimSpace(value)
+	if !set {
+		return "", false, nil
+	}
+	if value == "" {
+		return "", true, fmt.Errorf("--cron requires a five-field expression")
+	}
+	fields := strings.Fields(value)
+	if len(fields) != 5 {
+		return "", true, fmt.Errorf("cron expression must have 5 fields, got %d", len(fields))
+	}
+	value = strings.Join(fields, " ")
+	if _, err := cronutil.CronToCalender(value); err != nil {
+		return "", true, fmt.Errorf("invalid cron expression: %w", err)
+	}
+	return value, true, nil
 }
 
 func longFlagWasSupplied(args []string, name string) bool {

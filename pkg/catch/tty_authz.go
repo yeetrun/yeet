@@ -41,7 +41,7 @@ func ttyCommandPermissions(args []string) (permissionSet, error) {
 		return tailscaleCommandPermissions(args[1:])
 	case "vm":
 		return vmCommandPermissions(args[1:])
-	case "cron", "disable", "edit", "enable", "mount", "umount", "env", "remove", "restart", "run", "copy", "stage", "start", "stop":
+	case "disable", "edit", "enable", "mount", "umount", "env", "remove", "restart", "run", "copy", "stage", "start", "stop":
 		return newPermissionSet(permissionManage), nil
 	default:
 		return nil, fmt.Errorf("unclassified command %q", args[0])

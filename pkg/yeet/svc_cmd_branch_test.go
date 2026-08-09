@@ -395,6 +395,7 @@ func TestSvcRunPayloadOnlyReusesStoredRunArgs(t *testing.T) {
 
 func TestSvcRunWebFlagRoutesToLocalWeb(t *testing.T) {
 	preserveSvcCommandGlobals(t)
+	useTempSvcCwd(t)
 	serviceOverride = "svc-a"
 	tryRunRemoteImageFn = func(ctx context.Context, image string, args []string) (bool, error) {
 		t.Fatalf("unexpected remote deploy for image=%q args=%v", image, args)
@@ -650,7 +651,7 @@ func TestSvcRunPreservesServiceRootPayloadArgsInSavedConfig(t *testing.T) {
 	if entry.ServiceRoot != "" {
 		t.Fatalf("ServiceRoot = %q, want empty", entry.ServiceRoot)
 	}
-	wantArgs := []string{"--service-root", "/tmp/app"}
+	wantArgs := []string{"--", "--service-root", "/tmp/app"}
 	if !reflect.DeepEqual(entry.Args, wantArgs) {
 		t.Fatalf("Args = %#v, want %#v", entry.Args, wantArgs)
 	}
@@ -891,6 +892,40 @@ func TestServiceSetNetworkRewritePreservesRecognizedFirstPayloadFlag(t *testing.
 			}
 		})
 	}
+}
+
+func TestScheduledServiceSetAndSyncPreserveScheduleAndArgumentBoundary(t *testing.T) {
+	wantArgs := []string{"--net=iso", "--", "-live"}
+	base := ServiceEntry{
+		Name:     "owesplit",
+		Host:     "host-a",
+		Payload:  "owesplit",
+		Schedule: "0 9 15 * *",
+		Args:     append([]string{}, wantArgs...),
+	}
+
+	t.Run("service set", func(t *testing.T) {
+		entry := base
+		if err := applyServiceSetConfigFlags(&entry, cli.ServiceSetFlags{Net: "iso", NetSet: true}); err != nil {
+			t.Fatal(err)
+		}
+		if entry.Schedule != "0 9 15 * *" || !reflect.DeepEqual(entry.Args, wantArgs) {
+			t.Fatalf("entry = %#v, want schedule and args preserved", entry)
+		}
+	})
+
+	t.Run("service sync", func(t *testing.T) {
+		cfg := &ProjectConfig{Version: projectConfigVersion}
+		cfg.SetServiceEntry(base)
+		desired := catchrpc.ServiceNetworkSettings{Modes: []string{"iso"}}
+		if err := syncServiceNetwork(cfg, serviceSyncTarget{Service: "owesplit", Host: "host-a"}, catchrpc.ServiceNetwork{Desired: &desired}); err != nil {
+			t.Fatal(err)
+		}
+		entry, ok := cfg.ServiceEntry("owesplit", "host-a")
+		if !ok || entry.Schedule != "0 9 15 * *" || !reflect.DeepEqual(entry.Args, wantArgs) {
+			t.Fatalf("entry = %#v, ok=%v, want schedule and args preserved", entry, ok)
+		}
+	})
 }
 
 func TestServiceSetAppliesNetworkPatchToStoredConfig(t *testing.T) {
@@ -2098,8 +2133,8 @@ func TestSvcRunFromStoredConfigErrors(t *testing.T) {
 		t.Fatalf("runFromProjectConfig no entry error = %v", err)
 	}
 
-	loc.Config.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-a", Type: serviceTypeCron, Payload: "job.sh"})
-	if err := runFromProjectConfig(loc, "host-a"); err == nil || !strings.Contains(err.Error(), "configured as cron") {
+	loc.Config.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-a", Type: "custom", Payload: "job.sh"})
+	if err := runFromProjectConfig(loc, "host-a"); err == nil || !strings.Contains(err.Error(), "configured as custom") {
 		t.Fatalf("runFromProjectConfig type error = %v", err)
 	}
 
@@ -2131,122 +2166,9 @@ func TestSvcShouldRunFromConfigWithForce(t *testing.T) {
 	}
 }
 
-func TestSvcCronFromStoredConfig(t *testing.T) {
-	preserveSvcCommandGlobals(t)
-	tmp := t.TempDir()
-	serviceOverride = "svc-a"
-	remoteCatchOSAndArchFn = func() (string, string, error) {
-		return "linux", "amd64", nil
-	}
-	isTerminalFn = func(int) bool { return false }
-
-	payload := filepath.Join(tmp, "job.sh")
-	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho cron\n"), 0o700); err != nil {
-		t.Fatalf("WriteFile payload error: %v", err)
-	}
-	loc := &projectConfigLocation{Dir: tmp, Config: &ProjectConfig{Version: projectConfigVersion}}
-	loc.Config.SetServiceEntry(ServiceEntry{
-		Name:     "svc-a",
-		Host:     "host-a",
-		Type:     serviceTypeCron,
-		Payload:  "job.sh",
-		Schedule: "5 4 * * *",
-		Args:     []string{"--daily"},
-	})
-
-	var gotArgs []string
-	execRemoteFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool) error {
-		gotArgs = append([]string{}, args...)
-		if service != "svc-a" {
-			t.Fatalf("service = %q, want svc-a", service)
-		}
-		if stdin == nil {
-			t.Fatalf("expected cron payload")
-		}
-		return nil
-	}
-
-	if err := runCronFromProjectConfig(loc, "host-a"); err != nil {
-		t.Fatalf("runCronFromProjectConfig error: %v", err)
-	}
-	wantArgs := []string{"cron", "5", "4", "*", "*", "*", "--daily"}
-	if !reflect.DeepEqual(gotArgs, wantArgs) {
-		t.Fatalf("remote args = %#v, want %#v", gotArgs, wantArgs)
-	}
-}
-
-func TestSvcCronFromStoredConfigErrors(t *testing.T) {
-	preserveSvcCommandGlobals(t)
-	tmp := t.TempDir()
-
-	serviceOverride = ""
-	if err := runCronFromProjectConfig(nil, ""); err == nil || !strings.Contains(err.Error(), "cron requires a service name") {
-		t.Fatalf("runCronFromProjectConfig no service error = %v", err)
-	}
-
-	serviceOverride = "svc-a"
-	loc := &projectConfigLocation{Dir: tmp, Config: &ProjectConfig{Version: projectConfigVersion}}
-	loc.Config.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-a", Type: "", Payload: "job.sh"})
-	if err := runCronFromProjectConfig(loc, "host-a"); err == nil || !strings.Contains(err.Error(), "not configured for cron") {
-		t.Fatalf("runCronFromProjectConfig blank type error = %v", err)
-	}
-
-	loc.Config.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-a", Type: serviceTypeCron, Payload: " ", Schedule: "0 9 * * *"})
-	if err := runCronFromProjectConfig(loc, "host-a"); err == nil || !strings.Contains(err.Error(), "no payload configured") {
-		t.Fatalf("runCronFromProjectConfig payload error = %v", err)
-	}
-
-	loc.Config.SetServiceEntry(ServiceEntry{Name: "svc-a", Host: "host-a", Type: serviceTypeCron, Payload: "job.sh", Schedule: "* * *"})
-	if err := runCronFromProjectConfig(loc, "host-a"); err == nil || !strings.Contains(err.Error(), "invalid schedule") {
-		t.Fatalf("runCronFromProjectConfig schedule error = %v", err)
-	}
-}
-
-func TestSvcCronAndStageErrorBranches(t *testing.T) {
+func TestSvcStageBinaryDirectoryError(t *testing.T) {
 	preserveSvcCommandGlobals(t)
 	serviceOverride = "svc-a"
-
-	if _, _, err := splitCronArgs(nil); err == nil || !strings.Contains(err.Error(), "cron requires") {
-		t.Fatalf("splitCronArgs nil error = %v", err)
-	}
-	for _, tc := range []struct {
-		name     string
-		args     []string
-		wantCron []string
-		wantBin  []string
-	}{
-		{name: "single schedule", args: []string{"0 9 * * *"}, wantCron: []string{"0", "9", "*", "*", "*"}},
-		{name: "fields and command", args: []string{"0", "9", "*", "*", "*", "--", "--send", "daily"}, wantCron: []string{"0", "9", "*", "*", "*"}, wantBin: []string{"--send", "daily"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			gotCron, gotBin, err := splitCronArgs(tc.args)
-			if err != nil {
-				t.Fatalf("splitCronArgs(%v): %v", tc.args, err)
-			}
-			if !reflect.DeepEqual(gotCron, tc.wantCron) {
-				t.Fatalf("cron fields = %v, want %v", gotCron, tc.wantCron)
-			}
-			if !reflect.DeepEqual(gotBin, tc.wantBin) {
-				t.Fatalf("binary args = %v, want %v", gotBin, tc.wantBin)
-			}
-		})
-	}
-	if _, _, err := splitCronArgs([]string{"*", "*"}); err == nil || !strings.Contains(err.Error(), "5 fields") {
-		t.Fatalf("splitCronArgs short schedule error = %v", err)
-	}
-	if _, err := parseCronSchedule("* * *"); err == nil || !strings.Contains(err.Error(), "5 fields") {
-		t.Fatalf("parseCronSchedule error = %v", err)
-	}
-	if _, err := parseCronSchedule("0 9 * * *"); err != nil {
-		t.Fatalf("parseCronSchedule valid error: %v", err)
-	}
-
-	remoteCatchOSAndArchFn = func() (string, string, error) {
-		return "", "", errors.New("arch unavailable")
-	}
-	if err := runCron("missing.sh", []string{"0", "9", "*", "*", "*"}, nil); err == nil || !strings.Contains(err.Error(), "arch unavailable") {
-		t.Fatalf("runCron arch error = %v", err)
-	}
 
 	dir := t.TempDir()
 	oldStderr := os.Stderr
@@ -2656,7 +2578,7 @@ func TestHandleStatusCommandFiltersSelectedProjectServicesAcrossHosts(t *testing
 		case "host-b":
 			return []statusService{
 				{ServiceName: "web", ServiceType: dockerServiceType, Components: []statusComponent{{Name: "app", Status: "running"}, {Name: "worker", Status: "stopped"}}},
-				{ServiceName: "extra-b", ServiceType: serviceTypeCron, Components: []statusComponent{{Name: "extra-b", Status: "running"}}},
+				{ServiceName: "extra-b", ServiceType: "cron", Components: []statusComponent{{Name: "extra-b", Status: "running"}}},
 			}, nil
 		default:
 			t.Fatalf("unexpected host %q", host)
@@ -2710,7 +2632,7 @@ func TestHandleStatusCommandFiltersSelectedProjectServicesJSON(t *testing.T) {
 		case "host-b":
 			return []statusService{
 				{ServiceName: "web", ServiceType: dockerServiceType},
-				{ServiceName: "extra-b", ServiceType: serviceTypeCron},
+				{ServiceName: "extra-b", ServiceType: "cron"},
 			}, nil
 		default:
 			t.Fatalf("unexpected host %q", host)
@@ -2972,10 +2894,6 @@ func TestSvcSaveConfigEarlyReturnsAndCreation(t *testing.T) {
 	if err := saveRunConfig(nil, "", "payload", []string{"--pull"}, "", false); err != nil {
 		t.Fatalf("saveRunConfig no service error: %v", err)
 	}
-	if err := saveCronConfig(nil, "", "payload", []string{"0", "9", "*", "*", "*"}, nil); err != nil {
-		t.Fatalf("saveCronConfig no service error: %v", err)
-	}
-
 	serviceOverride = "svc-a"
 	loadedPrefs.DefaultHost = "host-a"
 	oldPrompt := activePrompter
@@ -3009,15 +2927,15 @@ func TestSvcSaveConfigEarlyReturnsAndCreation(t *testing.T) {
 		t.Fatalf("saveRunConfig existing config error: %v", err)
 	}
 	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
-	if !ok || filepath.Base(entry.Payload) != "run.sh" || !reflect.DeepEqual(entry.Args, []string{"--app-flag"}) {
+	if !ok || filepath.Base(entry.Payload) != "run.sh" || !reflect.DeepEqual(entry.Args, []string{"--", "--app-flag"}) {
 		t.Fatalf("run entry = %#v, ok=%v", entry, ok)
 	}
 
-	if err := saveCronConfig(loaded, "host-b", payload, []string{"0", "9", "*", "*", "*"}, []string{" "}); err != nil {
-		t.Fatalf("saveCronConfig error: %v", err)
+	if err := saveRunConfig(loaded, "host-b", payload, []string{"--cron=0 9 * * *", "--"}, "", false); err != nil {
+		t.Fatalf("saveRunConfig scheduled error: %v", err)
 	}
 	entry, ok = loaded.Config.ServiceEntry("svc-a", "host-b")
-	if !ok || entry.Type != serviceTypeCron || entry.Schedule != "0 9 * * *" || len(entry.Args) != 0 {
-		t.Fatalf("cron entry = %#v, ok=%v", entry, ok)
+	if !ok || entry.Type != "" || entry.Schedule != "0 9 * * *" || len(entry.Args) != 0 {
+		t.Fatalf("scheduled run entry = %#v, ok=%v", entry, ok)
 	}
 }

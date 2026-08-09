@@ -14,6 +14,8 @@ import (
 type ServiceDataType string
 type ComponentStatus string
 
+const scheduledNativeOnlyMessage = "scheduled service can only be updated with a native binary or script"
+
 const (
 	ServiceDataTypeService    ServiceDataType = "service"
 	ServiceDataTypeCron       ServiceDataType = "cron"
@@ -92,7 +94,29 @@ func ServiceDataTypeForService(sv db.ServiceView) ServiceDataType {
 }
 
 func hasTimerArtifact(sv db.ServiceView) bool {
-	return hasArtifact(sv, db.ArtifactSystemdTimerFile)
+	if _, ok := activeGenerationArtifactPath(sv, db.ArtifactSystemdTimerFile); ok {
+		return true
+	}
+	if !sv.Valid() || sv.Generation() != 0 {
+		return false
+	}
+	timer, ok := sv.Artifacts().GetOk(db.ArtifactSystemdTimerFile)
+	if !ok || !timer.Valid() {
+		return false
+	}
+	_, ok = timer.Refs().GetOk(db.ArtifactRef("staged"))
+	return ok
+}
+
+func activeGenerationArtifactPath(sv db.ServiceView, name db.ArtifactName) (string, bool) {
+	if !sv.Valid() {
+		return "", false
+	}
+	artifact, ok := sv.Artifacts().GetOk(name)
+	if !ok || !artifact.Valid() {
+		return "", false
+	}
+	return artifact.Refs().GetOk(db.Gen(sv.Generation()))
 }
 
 func hasArtifact(sv db.ServiceView, name db.ArtifactName) bool {

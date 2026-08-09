@@ -27,7 +27,6 @@ func FuzzParseRemoteArgs(f *testing.F) {
 		args := fuzzArgs(raw)
 
 		_, _, _ = ParseRun(args)
-		_, _, _ = ParseCron(args)
 		_, _, _, _ = ParseStage(args)
 		_, _, _ = ParseRemove(args)
 		_, _, _ = ParseLogs(args)
@@ -169,36 +168,34 @@ func TestParseRunAsPreservesPresence(t *testing.T) {
 	}
 }
 
-func TestParseCronRunAsAndSchedule(t *testing.T) {
+func TestParseRunCron(t *testing.T) {
 	tests := []struct {
 		name     string
 		args     []string
-		want     CronFlags
+		want     RunFlags
 		wantArgs []string
 		wantErr  string
 	}{
-		{name: "flags before schedule", args: []string{"--run-as=backup", `0 3 * * *`, "--", "--daily"}, want: CronFlags{RunAs: "backup", RunAsSet: true, Schedule: `0 3 * * *`}, wantArgs: []string{"--daily"}},
-		{name: "flags after schedule", args: []string{`0 3 * * *`, "--run-as", "backup", "--", "--daily"}, want: CronFlags{RunAs: "backup", RunAsSet: true, Schedule: `0 3 * * *`}, wantArgs: []string{"--daily"}},
-		{name: "canonical schedule flag", args: []string{"--run-as=root", `--schedule=0 3 * * *`, "--", "--daily"}, want: CronFlags{RunAs: "root", RunAsSet: true, Schedule: `0 3 * * *`}, wantArgs: []string{"--daily"}},
-		{name: "absent run as", args: []string{`0 3 * * *`}, want: CronFlags{Schedule: `0 3 * * *`}},
-		{name: "payload run as argument", args: []string{`0 3 * * *`, "--", "--run-as=root"}, want: CronFlags{Schedule: `0 3 * * *`}, wantArgs: []string{"--run-as=root"}},
-		{name: "empty run as", args: []string{"--run-as=", `0 3 * * *`}, wantErr: "--run-as requires USER[:GROUP]"},
-		{name: "repeated run as", args: []string{"--run-as=app", "--run-as=root", `0 3 * * *`}, wantErr: "--run-as may only be supplied once"},
+		{name: "scheduled", args: []string{`--cron=0 3 * * *`, "--net=iso", "--", "-live"}, want: RunFlags{Cron: "0 3 * * *", CronSet: true, Net: "iso", Restart: true, ImagePolicy: "prompt"}, wantArgs: []string{"-live"}},
+		{name: "payload cron flag", args: []string{"--", `--cron=0 3 * * *`}, want: RunFlags{Restart: true, ImagePolicy: "prompt"}, wantArgs: []string{`--cron=0 3 * * *`}},
+		{name: "empty", args: []string{"--cron="}, wantErr: "--cron requires a five-field expression"},
+		{name: "repeated", args: []string{`--cron=0 3 * * *`, `--cron=0 4 * * *`}, wantErr: "--cron may only be supplied once"},
+		{name: "short", args: []string{`--cron=0 3 * *`}, wantErr: "cron expression must have 5 fields"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			flags, args, err := ParseCron(tt.args)
+			flags, args, err := ParseRun(tt.args)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("ParseCron error = %v, want %q", err, tt.wantErr)
+					t.Fatalf("ParseRun error = %v, want %q", err, tt.wantErr)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
-			if flags != tt.want || !reflect.DeepEqual(args, tt.wantArgs) {
-				t.Fatalf("ParseCron = %#v %#v, want %#v %#v", flags, args, tt.want, tt.wantArgs)
+			if !reflect.DeepEqual(flags, tt.want) || !reflect.DeepEqual(args, tt.wantArgs) {
+				t.Fatalf("ParseRun = %#v %#v, want %#v %#v", flags, args, tt.want, tt.wantArgs)
 			}
 		})
 	}
@@ -1564,6 +1561,15 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if infos["run"].Name != "run" || infos["run"].ArgsSchema == nil {
 		t.Fatalf("run command info = %#v, want name and args schema", infos["run"])
 	}
+	if _, ok := infos["cron"]; ok {
+		t.Fatalf("RemoteCommandInfos exposes removed cron command: %#v", infos["cron"])
+	}
+	if _, ok := RemoteFlagSpecs()["cron"]; ok {
+		t.Fatalf("RemoteFlagSpecs exposes removed cron command: %#v", RemoteFlagSpecs()["cron"])
+	}
+	if _, ok := RemoteFlagSpecs()["run"]["--cron"]; !ok {
+		t.Fatalf("run flags = %#v, want --cron", RemoteFlagSpecs()["run"])
+	}
 	if infos["copy"].Aliases[0] != "cp" {
 		t.Fatalf("copy aliases = %v, want cp", infos["copy"].Aliases)
 	}
@@ -1584,8 +1590,11 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if reg.SubCommands["run"].Info.Name != "run" {
 		t.Fatalf("registry run command = %#v", reg.SubCommands["run"])
 	}
-	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
+	if got := reg.SubCommands["run"].Info.Usage; got != "SVC [PAYLOAD] [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]" {
 		t.Fatalf("run usage = %q", got)
+	}
+	if !containsString(reg.SubCommands["run"].Info.Examples, `yeet run <svc> ./job --cron="0 3 * * *" --run-as=backup --net=iso -- --daily`) {
+		t.Fatalf("run examples = %#v, want scheduled native job example", reg.SubCommands["run"].Info.Examples)
 	}
 	if !containsString(reg.SubCommands["run"].Info.Examples, "yeet run <svc> ./compose.yml --service-root=tank/apps/<svc> --zfs") {
 		t.Fatalf("run examples = %#v, want zfs service-root example", reg.SubCommands["run"].Info.Examples)

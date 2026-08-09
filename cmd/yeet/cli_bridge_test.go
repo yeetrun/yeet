@@ -382,7 +382,7 @@ func TestBridgeServiceArgsRunAsCanonicalShapes(t *testing.T) {
 		want        []string
 	}{
 		{args: []string{"run", "api", "--run-as=app", "./api", "--", "--serve"}, wantService: "api", want: []string{"run", "--run-as=app", "./api", "--", "--serve"}},
-		{args: []string{"cron", "backup", "--run-as=backup", "./backup", `0 3 * * *`, "--", "--daily"}, wantService: "backup", want: []string{"cron", "--run-as=backup", "./backup", `0 3 * * *`, "--", "--daily"}},
+		{args: []string{"run", "backup", `--cron=0 3 * * *`, "./backup", "--", "--daily"}, wantService: "backup", want: []string{"run", `--cron=0 3 * * *`, "./backup", "--", "--daily"}},
 		{args: []string{"service", "set", "api", "--run-as=app"}, wantService: "api", want: []string{"service", "set", "--run-as=app"}},
 		{args: []string{"service", "set", "api", "--service-root=/var/lib/yeet/services/api", "--copy", "--run-as=app"}, wantService: "api", want: []string{"service", "set", "--service-root=/var/lib/yeet/services/api", "--copy", "--run-as=app"}},
 	}

@@ -134,8 +134,7 @@ const NETWORK_COMPATIBILITY = Object.freeze({
   vm: new Set(["svc", "lan", "iso"]),
   dockerfile: new Set(["svc", "lan", "ts", "iso"]),
   "remote-image": new Set(["svc", "lan", "ts", "iso"]),
-  file: new Set(["svc", "lan", "ts"]),
-  cron: new Set([]),
+  file: new Set(["svc", "lan", "ts", "iso"]),
 });
 
 const ISO_PUBLISH_MESSAGE = "ISO does not support published ports";
@@ -190,19 +189,10 @@ const workloadDefinitions = {
   file: {
     payloadKind: "file",
     payloadLabel: "Binary/script",
-    payloadHelp: "Local binary or script to upload and run.",
+    payloadHelp: "Local binary or script to upload and run, or schedule.",
     sourceHint: "Choose a local executable or script.",
     placeholder: "./run.sh",
     networkModes: [...NETWORK_COMPATIBILITY.file],
-    defaultModes: [],
-  },
-  cron: {
-    payloadKind: "cron",
-    payloadLabel: "Job file",
-    payloadHelp: "Local binary or script to install as a scheduled job.",
-    sourceHint: "Choose a job file and schedule.",
-    placeholder: "./job.sh",
-    networkModes: [...NETWORK_COMPATIBILITY.cron],
     defaultModes: [],
   },
 };
@@ -221,7 +211,7 @@ function workloadPayloadKind(workload) {
 
 function payloadArgsEnabled() {
   const payloadKind = workloadPayloadKind(selectedWorkload());
-  return payloadKind === "file" || payloadKind === "cron";
+  return payloadKind === "file";
 }
 
 function defaultNetworkModesForWorkload(workload) {
@@ -275,11 +265,12 @@ function buildDraft() {
   const payload = sourcePayloadForWorkload(workload);
   const payloadKind = workloadPayloadKind(workload);
   const vmPayload = payloadKind === "vm";
-  const cronPayload = payloadKind === "cron";
-  const envFile = vmPayload || cronPayload ? "" : $("envFile").value.trim();
+  const schedule = $("cronSchedule").value;
+  const runAs = $("runAs").value;
+  const envFile = vmPayload ? "" : $("envFile").value.trim();
   const snapshots = snapshotDraftForPayloadKind(payloadKind);
   const modes = selectedNetworkModes();
-  const publish = vmPayload || cronPayload || modes.includes("iso") ? [] : splitCSV($("publish").value);
+  const publish = vmPayload || modes.includes("iso") ? [] : splitCSV($("publish").value);
   const hasTailscale = modes.includes("ts");
   const hasLAN = modes.includes("lan");
   return {
@@ -288,10 +279,12 @@ function buildDraft() {
     payload,
     payloadKind,
     envFile,
+    runAs: payloadKind === "file" ? runAs.trim() : "",
+    runAsSet: payloadKind === "file" && Boolean(runAs.trim()),
     payloadArgs: payloadArgsEnabled() ? splitArgs($("payloadArgs").value) : [],
-    cron: cronPayload ? {
-      schedule: $("cronSchedule").value.trim(),
-    } : {},
+    cron: payloadKind === "file" && schedule.trim()
+      ? { schedule: schedule.trim() }
+      : {},
     vm: vmPayload ? {
       cpus: Number.parseInt($("vmCPUs").value, 10) || 0,
       memory: $("vmMemory").value.trim(),
@@ -299,7 +292,7 @@ function buildDraft() {
       balloon: $("vmBalloon").value,
       disk: $("vmDisk").value.trim(),
     } : {},
-    network: cronPayload ? {} : {
+    network: {
       modes,
       tsVersion: hasTailscale ? $("tsVersion").value.trim() : "",
       tsExitNode: hasTailscale ? $("tsExitNode").value.trim() : "",
@@ -311,11 +304,11 @@ function buildDraft() {
       publish,
       restart,
     },
-    storage: cronPayload ? {} : {
+    storage: {
       serviceRoot: $("serviceRoot").value.trim(),
       zfs: $("zfs").checked,
     },
-    ...(cronPayload ? {} : { snapshots }),
+    snapshots,
   };
 }
 
@@ -335,7 +328,6 @@ function snapshotRequiredValue() {
 }
 
 function snapshotDraftForPayloadKind(payloadKind) {
-  if (payloadKind === "cron") return {};
   const vmPayload = payloadKind === "vm";
   const retention = {
     mode: $("snapshots").value,
@@ -356,22 +348,17 @@ function shell(value) {
 }
 
 function updatePreview(draft) {
-  const parts = draft.payloadKind === "cron" ? ["yeet", "cron"] : ["yeet", "run"];
+  const parts = ["yeet", "run"];
   const serviceTarget = draft.service && draft.host && !draft.service.includes("@")
     ? `${draft.service}@${draft.host}`
     : draft.service;
   if (serviceTarget) parts.push(shell(serviceTarget));
   if (draft.payload) parts.push(shell(draft.payload));
-  if (draft.payloadKind === "cron") {
-    if (draft.cron?.schedule) parts.push(shell(draft.cron.schedule));
-    if (draft.payloadArgs.length) parts.push("--", ...draft.payloadArgs.map(shell));
-    $("commandPreview").textContent = parts.join(" ");
-    return;
-  }
   const network = draft.network || {};
   const storage = draft.storage || {};
   const snapshots = draft.snapshots || {};
   if (draft.envFile) parts.push(`--env-file=${shell(draft.envFile)}`);
+  if (draft.runAsSet) parts.push(`--run-as=${shell(draft.runAs)}`);
   for (const mode of network.modes || []) parts.push(`--net=${shell(mode)}`);
   if (network.tsVersion) parts.push(`--ts-ver=${shell(network.tsVersion)}`);
   if (network.tsExitNode) parts.push(`--ts-exit=${shell(network.tsExitNode)}`);
@@ -385,6 +372,7 @@ function updatePreview(draft) {
     parts.push(`--service-root=${shell(storage.serviceRoot)}`);
     if (storage.zfs) parts.push("--zfs");
   }
+  if (draft.cron?.schedule) parts.push(`--cron=${shell(draft.cron.schedule)}`);
   if (draft.vm?.cpus) parts.push(`--vcpus=${draft.vm.cpus}`);
   if (draft.vm?.memory) parts.push(`--memory=${shell(draft.vm.memory)}`);
   if (draft.vm?.memoryMin) parts.push(`--memory-min=${shell(draft.vm.memoryMin)}`);
@@ -453,7 +441,6 @@ function syncWorkloadUI() {
   }
   state.workload = workload;
   const isVM = workload === "vm";
-  const isCron = workload === "cron";
   $("sourceHint").textContent = def.sourceHint;
   $("payloadLabel").firstChild.textContent = `${def.payloadLabel} `;
   $("payloadLabel").querySelector(".help").dataset.help = def.payloadHelp;
@@ -465,12 +452,14 @@ function syncWorkloadUI() {
   else $("payload").removeAttribute("aria-haspopup");
   if (!payloadPickerEnabled && state.activePicker === "payload") hidePicker();
   $("vmCatalogBlock").hidden = !isVM;
-  $("cronScheduleField").hidden = !isCron;
-  $("envFile").closest("label").hidden = isVM || isCron;
-  if ((isVM || isCron) && state.activePicker === "envFile") hidePicker();
-  $("publish").closest("label").hidden = isVM || isCron;
-  $("serviceRoot").disabled = isCron;
-  $("zfs").disabled = isCron;
+  $("cronScheduleField").hidden = def.payloadKind !== "file";
+  $("runAs").closest("label").hidden = def.payloadKind !== "file";
+  if (def.payloadKind !== "file") $("runAs").value = "";
+  $("envFile").closest("label").hidden = isVM;
+  if (isVM && state.activePicker === "envFile") hidePicker();
+  $("publish").closest("label").hidden = isVM;
+  $("serviceRoot").disabled = false;
+  $("zfs").disabled = false;
   syncSnapshotUI(def.payloadKind);
   const zfsChecked = $("zfs").checked;
   const storageHelp = $("storageModeLabel").querySelector(".help");
@@ -490,11 +479,9 @@ function syncWorkloadUI() {
 }
 
 function syncSnapshotUI(payloadKind) {
-  const isCron = payloadKind === "cron";
   const isVM = payloadKind === "vm";
   const details = $("snapshotDetails");
-  details.hidden = isCron;
-  if (isCron) return;
+  details.hidden = false;
 
   $("snapshotSummaryText").textContent = isVM ? "VM snapshots" : "Snapshots";
   $("snapshotModeLabel").textContent = isVM ? "Policy" : "Mode";
@@ -554,7 +541,6 @@ function hideHostPicker() {
 function syncNetworkUI() {
   const payloadKind = workloadPayloadKind(selectedWorkload());
   const vmPayload = payloadKind === "vm";
-  const cronPayload = payloadKind === "cron";
   reconcileISOSelection();
   ensureVMNetworkSelection();
   document.querySelectorAll("input[name='net']").forEach((input) => {
@@ -567,7 +553,7 @@ function syncNetworkUI() {
   const isoSelected = modes.includes("iso");
   const publish = $("publish");
   if (isoSelected) publish.value = "";
-  publish.disabled = vmPayload || cronPayload || isoSelected;
+  publish.disabled = vmPayload || isoSelected;
   publish.closest("label").hidden = publish.disabled;
   publish.title = isoSelected ? ISO_PUBLISH_MESSAGE : "";
   $("networkOptions").dataset.isoValidation = vmPayload && isoSelected ? ISO_VM_MESSAGE : "";
@@ -860,7 +846,7 @@ function updateServiceRootPlaceholder() {
 }
 
 function zfsRootPickerEnabled() {
-  return $("zfs").checked && !$("zfs").disabled && selectedWorkload() !== "cron";
+  return $("zfs").checked && !$("zfs").disabled;
 }
 
 function zfsRootRequestKey() {
@@ -1820,6 +1806,7 @@ const validationFieldIDs = {
   host: "host",
   payload: "payload",
   envFile: "envFile",
+  runAs: "runAs",
   serviceRoot: "serviceRoot",
   "cron.schedule": "cronSchedule",
   "network.modes": "hostDefault",

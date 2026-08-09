@@ -1089,49 +1089,58 @@ func (s *SystemdService) primaryUnit() string {
 }
 
 func (s *SystemdService) Uninstall() error {
-	if err := s.disableAndRemovePrimaryUnitIfInstalled(); err != nil {
-		return err
-	}
-	for _, unit := range s.uninstallDisableUnits()[1:] {
-		s.disableNowForCleanup(unit)
-	}
-	if err := s.removeAuxiliaryUnitFiles(); err != nil {
-		return err
+	for _, target := range s.uninstallUnitTargets() {
+		if err := s.disableAndRemoveUnitIfPresent(target.unit, target.path); err != nil {
+			return err
+		}
 	}
 	return s.run("daemon-reload")
 }
 
-func (s *SystemdService) disableAndRemovePrimaryUnitIfInstalled() error {
-	if !s.isInstalled() {
+type systemdUnitTarget struct {
+	unit string
+	path string
+}
+
+func (s *SystemdService) uninstallUnitTargets() []systemdUnitTarget {
+	return []systemdUnitTarget{
+		{unit: s.timerUnit(), path: s.timerPath()},
+		{unit: s.serviceUnit(), path: s.servicePath()},
+		{unit: s.netnsServiceUnit(), path: s.netnsServicePath()},
+		{unit: s.tailscaledServiceUnit(), path: s.tailscaledServicePath()},
+	}
+}
+
+func (s *SystemdService) disableAndRemoveUnitIfPresent(unit, path string) error {
+	present, err := systemdUnitPathPresent(path)
+	if err != nil {
+		return fmt.Errorf("inspect systemd unit %s: %w", unit, err)
+	}
+	if !present {
 		return nil
 	}
-	if err := s.run("disable", "--now", s.primaryUnit()); err != nil {
+	if err := s.run("disable", "--now", unit); err != nil {
 		return err
 	}
-	return removeFilesIfPresent(s.timerPath(), s.servicePath())
-}
-
-func (s *SystemdService) removeAuxiliaryUnitFiles() error {
-	return removeFilesIfPresent(s.netnsServicePath(), s.tailscaledServicePath())
-}
-
-func removeFilesIfPresent(paths ...string) error {
-	for _, path := range paths {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			return err
-		}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
 	return nil
 }
 
-func (s *SystemdService) uninstallDisableUnits() []string {
-	return []string{s.primaryUnit(), s.netnsServiceUnit(), s.tailscaledServiceUnit()}
+func systemdUnitPathPresent(path string) (bool, error) {
+	_, err := os.Lstat(path)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
-func (s *SystemdService) disableNowForCleanup(unit string) {
-	if err := s.run("disable", "--now", unit); err != nil {
-		log.Printf("failed to disable optional unit %s during cleanup: %v", unit, err)
-	}
+func (s *SystemdService) uninstallDisableUnits() []string {
+	return []string{s.primaryUnit(), s.netnsServiceUnit(), s.tailscaledServiceUnit()}
 }
 
 func (s *SystemdService) Status() (Status, error) {

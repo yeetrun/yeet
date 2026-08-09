@@ -147,8 +147,7 @@ func defaultRunWebOptionHints() runWebOptionHints {
 			{Kind: "remote-image", Label: "Container image", PayloadKind: "remote-image", Networks: []string{"host", "svc", "ts", "lan", "iso"}, Description: "Deploy an image reference."},
 			{Kind: "python", Label: "Python app", PayloadKind: "python", Networks: []string{"host", "svc", "ts", "lan", "iso"}, Description: "Deploy Python code in a generated container."},
 			{Kind: "typescript", Label: "TypeScript app", PayloadKind: "typescript", Networks: []string{"host", "svc", "ts", "lan", "iso"}, Description: "Deploy TypeScript code in a generated container."},
-			{Kind: "file", Label: "Binary/script", PayloadKind: "file", Networks: []string{"host", "svc", "ts", "lan"}, Description: "Upload and run a binary or script."},
-			{Kind: serviceTypeCron, Label: "Scheduled job", PayloadKind: serviceTypeCron, Networks: []string{"host"}, Description: "Install a cron-style systemd timer."},
+			{Kind: "file", Label: "Binary/script", PayloadKind: "file", Networks: []string{"host", "svc", "ts", "lan", "iso"}, Description: "Upload and run, or schedule, a native binary or script."},
 		},
 		VMImages: []runWebVMImageHint{
 			{Payload: "vm://ubuntu/26.04", Label: "Ubuntu 26.04"},

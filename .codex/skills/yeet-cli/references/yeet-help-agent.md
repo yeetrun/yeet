@@ -35,7 +35,6 @@ yeet [GLOBAL_OPTIONS] COMMAND [ARGS...]
 
 - Run `yeet config --help-agent` for command-specific context.
 - Run `yeet copy --help-agent` for command-specific context.
-- Run `yeet cron --help-agent` for command-specific context.
 - Run `yeet disable --help-agent` for command-specific context.
 - Run `yeet edit --help-agent` for command-specific context.
 - Run `yeet enable --help-agent` for command-specific context.
@@ -112,12 +111,6 @@ Copy files between local paths and service data or VM guests
 **Aliases**: `cp`
 
 Run `yeet copy --help-agent` for command-specific context.
-
-### `cron`
-
-Install a cron job from a file and 5-field expression
-
-Run `yeet cron --help-agent` for command-specific context.
 
 ### `disable`
 
@@ -469,88 +462,6 @@ yeet copy devbox:"/var/log/*.log" ./logs/
 
 ```
 yeet copy --force-proxy ./configs/ devbox:~/configs/
-```
-````
-
-## Command: cron
-
-````
-# yeet cron Agent Context
-
-## Purpose
-
-Install a cron job from a file and 5-field expression
-
-## Usage
-
-```
-yeet [GLOBAL_OPTIONS] cron <SERVICE> FILE "<cron expr>" [--run-as=USER[:GROUP]] [-- <args...>]
-```
-
-## Operating Rules
-
-- Prefer exact examples when they match the task.
-- Use command-specific agent help before running an unfamiliar command.
-- Do not invent flags; use only flags listed in this context or command help.
-- Preserve arguments after `--` as payload or application arguments.
-
-## Arguments
-
-### `SERVICE`
-
-Service name
-
-- **Type**: `cli.ServiceName`
-- **Required**: true
-
-## Options
-
-### `--run-as`
-
-Run a native service as USER[:GROUP]
-
-- **Type**: `string`
-
-## Global Options
-
-### `--host`
-
-Override target host (CATCH_HOST)
-
-- **Type**: `string`
-
-### `--service`
-
-Force the service name for the command
-
-- **Type**: `string`
-
-### `--tty`
-
-Force TTY for remote commands
-
-- **Type**: `bool`
-
-### `--no-tty`
-
-Disable TTY for remote commands
-
-- **Type**: `bool`
-
-### `--progress`
-
-Progress output (auto|tty|plain|quiet)
-
-- **Type**: `string`
-
-## Examples
-
-```
-yeet cron <svc> ./job.sh "0 9 * * *" -- --job-arg foo
-```
-
-```
-yeet cron <svc> ./backup.sh "0 3 * * *" --run-as=backup
 ```
 ````
 
@@ -1365,7 +1276,7 @@ Install/update from a payload (binary, compose, image, Dockerfile, VM)
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] run SVC [PAYLOAD] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]
+yeet [GLOBAL_OPTIONS] run SVC [PAYLOAD] [--cron="M H DOM MON DOW"] [--run-as=USER[:GROUP]] [--net=svc|ts|lan|iso] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--snapshots=on|off|inherit] [-- <payload args>] | --web [SVC] [PAYLOAD]
 ```
 
 ## Operating Rules
@@ -1385,6 +1296,12 @@ Service name
 - **Required**: true
 
 ## Options
+
+### `--cron`
+
+Schedule a native binary or script with a five-field cron expression
+
+- **Type**: `string`
 
 ### `--run-as`
 
@@ -1553,6 +1470,10 @@ yeet run --web <svc> ./compose.yml
 
 ```
 yeet run <svc> ./bin/<svc> -- --app-flag value
+```
+
+```
+yeet run <svc> ./job --cron="0 3 * * *" --run-as=backup --net=iso -- --daily
 ```
 
 ```

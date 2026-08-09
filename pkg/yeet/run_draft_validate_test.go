@@ -157,9 +157,9 @@ func TestRunDraftISOCompatibility(t *testing.T) {
 		{name: "file python ISO", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: pythonPath, PayloadKind: "file", Network: RunDraftNetwork{Modes: []string{"iso"}}}},
 		{name: "ISO SVC", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: composePath, PayloadKind: "compose", Network: RunDraftNetwork{Modes: []string{"iso", "svc"}}}, wantField: "network.modes", wantErr: "cannot combine"},
 		{name: "VM ISO TS", draft: RunDraft{Service: "devbox", Host: "catch", Payload: "vm://ubuntu/26.04", PayloadKind: serviceTypeVM, Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "VMs support only iso"},
-		{name: "cron ISO", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: serviceTypeCron, Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
+		{name: "scheduled ISO", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: "file", Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso"}}}},
 		{name: "native ISO TS", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: cronPath, PayloadKind: "file", Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "native ISO supports only iso"},
-		{name: "cron ISO TS", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: serviceTypeCron, Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "timer ISO supports only iso"},
+		{name: "scheduled ISO TS", draft: RunDraft{Service: "job", Host: "catch", Payload: cronPath, PayloadKind: "file", Cron: RunDraftCron{Schedule: "0 3 * * *"}, Network: RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"}}, wantField: "network.modes", wantErr: "timer ISO supports only iso"},
 		{name: "ISO publish", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso"}, Publish: []string{"8080:80"}}}, wantField: "network.publish", wantErr: "published ports"},
 		{name: "ISO publish reset", draft: RunDraft{Service: "svc-a", Host: "catch", Payload: "ghcr.io/example/app:latest", PayloadKind: "remote-image", Network: RunDraftNetwork{Modes: []string{"iso"}, PublishReset: true}}, wantField: "network.publish", wantErr: "published ports"},
 	}
@@ -473,7 +473,7 @@ func TestValidateRunDraftRejectsVMFlagsForNonVMPayload(t *testing.T) {
 	}
 }
 
-func TestValidateRunDraftCronSchedule(t *testing.T) {
+func TestValidateRunDraftScheduledSchedule(t *testing.T) {
 	tmp := t.TempDir()
 	payload := filepath.Join(tmp, "job.sh")
 	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
@@ -484,23 +484,167 @@ func TestValidateRunDraftCronSchedule(t *testing.T) {
 		Service:     "backup",
 		Host:        "yeet-lab",
 		Payload:     "job.sh",
-		PayloadKind: serviceTypeCron,
+		PayloadKind: "file",
 		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
 	}, tmp)
 	if !validation.OK {
 		t.Fatalf("validation = %#v, want OK", validation)
 	}
-	if normalized.PayloadKind != serviceTypeCron || normalized.Cron.Schedule != "0 3 * * *" {
-		t.Fatalf("normalized cron = kind %q schedule %q", normalized.PayloadKind, normalized.Cron.Schedule)
+	if normalized.PayloadKind != "file" || normalized.Cron.Schedule != "0 3 * * *" {
+		t.Fatalf("normalized scheduled run = kind %q schedule %q", normalized.PayloadKind, normalized.Cron.Schedule)
 	}
 }
 
-func TestValidateRunDraftCronRejectsBadSchedule(t *testing.T) {
+func TestValidateRunDraftScheduledNativeKeepsRunFields(t *testing.T) {
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "job.sh")
+	envFile := filepath.Join(tmp, ".env")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envFile, []byte("LIVE=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	required := true
+	draft := RunDraft{
+		Service:     "backup",
+		Host:        "yeet-lab",
+		Payload:     payload,
+		PayloadKind: "file",
+		EnvFile:     envFile,
+		RunAs:       "yeet-svc",
+		RunAsSet:    true,
+		Network:     RunDraftNetwork{Modes: []string{"iso"}},
+		Storage:     RunDraftStorage{ServiceRoot: "/srv/backup"},
+		Snapshots:   RunDraftSnapshots{Mode: "on", KeepLast: 3, Required: &required},
+		Cron:        RunDraftCron{Schedule: " 0  9  15  *  * "},
+	}
+
+	normalized, validation := validateRunDraft(context.Background(), draft, tmp)
+	if !validation.OK {
+		t.Fatalf("validation errors = %#v", validation.Errors)
+	}
+	if normalized.PayloadKind != "file" || normalized.Cron.Schedule != "0 9 15 * *" {
+		t.Fatalf("normalized draft = %#v", normalized)
+	}
+}
+
+func TestValidateRunDraftScheduledAcceptsCrossTargetBinary(t *testing.T) {
+	tmp := t.TempDir()
+	payload := buildTestELF(t, tmp)
+
+	normalized, validation := validateRunDraftLocal(RunDraft{
+		Service:     "backup",
+		Host:        "yeet-lab",
+		Payload:     payload,
+		PayloadKind: "file",
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+	}, tmp)
+	if !validation.OK {
+		t.Fatalf("validation errors = %#v, want cross-target binary accepted before upload", validation.Errors)
+	}
+	if normalized.PayloadKind != "file" {
+		t.Fatalf("PayloadKind = %q, want file", normalized.PayloadKind)
+	}
+}
+
+func TestValidateRunDraftScheduledRejectsNonNativePayloads(t *testing.T) {
+	tmp := t.TempDir()
+	compose := filepath.Join(tmp, "compose.yml")
+	dockerfile := filepath.Join(tmp, "Dockerfile")
+	python := filepath.Join(tmp, "main.py")
+	typescript := filepath.Join(tmp, "main.ts")
+	files := map[string]string{
+		compose:    "services:\n  app:\n    image: busybox\n",
+		dockerfile: "FROM busybox\n",
+		python:     "print('ok')\n",
+		typescript: "console.log('ok')\n",
+	}
+	for path, contents := range files {
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, tt := range []struct {
+		name    string
+		payload string
+		kind    string
+	}{
+		{name: "VM", payload: "vm://ubuntu/26.04", kind: serviceTypeVM},
+		{name: "Compose", payload: compose, kind: "compose"},
+		{name: "Dockerfile", payload: dockerfile, kind: "dockerfile"},
+		{name: "Python", payload: python, kind: "file"},
+		{name: "TypeScript", payload: typescript, kind: "file"},
+		{name: "remote image", payload: "ghcr.io/example/job:latest", kind: "remote-image"},
+		{name: "local image", payload: "backup-job", kind: "local-image"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, validation := validateRunDraftLocal(RunDraft{
+				Service:     "backup",
+				Host:        "yeet-lab",
+				Payload:     tt.payload,
+				PayloadKind: tt.kind,
+				Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+			}, tmp)
+			if validation.OK {
+				t.Fatal("validation OK = true, want false")
+			}
+			if got := validation.fieldError("payload"); !strings.Contains(got, "scheduled workloads require a native binary or script payload") {
+				t.Fatalf("payload error = %q, errors = %#v", got, validation.Errors)
+			}
+		})
+	}
+}
+
+func TestValidateRunDraftScheduledMissingPathStatsBeforeImageHeuristics(t *testing.T) {
+	_, validation := validateRunDraftLocal(RunDraft{
+		Service:  "backup",
+		Host:     "yeet-lab",
+		Payload:  "missing-scheduled-job:latest",
+		RunAs:    "yeet-svc",
+		RunAsSet: true,
+		Cron:     RunDraftCron{Schedule: "0 3 * * *"},
+	}, t.TempDir())
+	if validation.OK {
+		t.Fatal("validation OK = true, want false")
+	}
+	got := validation.fieldError("payload")
+	if !strings.Contains(got, "stat ") || !strings.Contains(got, "no such file or directory") {
+		t.Fatalf("payload error = %q, want stat missing-path error", got)
+	}
+	for _, validationErr := range validation.Errors {
+		if strings.Contains(validationErr.Message, "container image") || strings.Contains(validationErr.Message, "--run-as") {
+			t.Fatalf("validation error used image heuristic: %#v", validationErr)
+		}
+	}
+}
+
+func TestValidateRunDraftScheduledISOUsesTimerPolicy(t *testing.T) {
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "job.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, validation := validateRunDraftLocal(RunDraft{
+		Service:     "backup",
+		Host:        "yeet-lab",
+		Payload:     payload,
+		PayloadKind: "file",
+		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
+		Network:     RunDraftNetwork{Modes: []string{"iso", "ts"}, TSAuthKey: "tskey-auth-service"},
+	}, tmp)
+	if got := validation.fieldError("network.modes"); !strings.Contains(got, "timer ISO supports only iso") {
+		t.Fatalf("network.modes error = %q, errors = %#v", got, validation.Errors)
+	}
+}
+
+func TestValidateRunDraftScheduledRejectsBadSchedule(t *testing.T) {
 	_, validation := validateRunDraft(context.Background(), RunDraft{
 		Service:     "backup",
 		Host:        "yeet-lab",
 		Payload:     "job.sh",
-		PayloadKind: serviceTypeCron,
+		PayloadKind: "file",
 		Cron:        RunDraftCron{Schedule: "daily"},
 	}, t.TempDir())
 	if got := validation.fieldError("cron.schedule"); !strings.Contains(got, "cron expression must have 5 fields") {
@@ -520,134 +664,6 @@ func TestValidateRunDraftRunAsRejectsUnsupportedPayloadKinds(t *testing.T) {
 		if result.OK || !strings.Contains(result.fieldError("runAs"), tt.want) {
 			t.Fatalf("kind %q result = %#v, want %q", tt.kind, result, tt.want)
 		}
-	}
-}
-
-func TestValidateRunDraftCronRejectsRunOnlyFields(t *testing.T) {
-	_, validation := validateRunDraft(context.Background(), RunDraft{
-		Service:     "backup",
-		Host:        "yeet-lab",
-		Payload:     "job.sh",
-		PayloadKind: serviceTypeCron,
-		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
-		Network:     RunDraftNetwork{Modes: []string{"svc"}},
-		Storage:     RunDraftStorage{ServiceRoot: "tank/apps/backup", ZFS: true},
-		Pull:        true,
-		ForceDeploy: true,
-	}, t.TempDir())
-	if got := validation.fieldError("network.modes"); !strings.Contains(got, "network modes are not supported for scheduled jobs") {
-		t.Fatalf("network.modes error = %q, want cron network rejection", got)
-	}
-	if got := validation.fieldError("serviceRoot"); !strings.Contains(got, "service root is not supported for scheduled jobs during web deploy") {
-		t.Fatalf("serviceRoot error = %q, want cron service root rejection", got)
-	}
-	if got := validation.fieldError("pull"); !strings.Contains(got, "pull is not supported for scheduled jobs during web deploy") {
-		t.Fatalf("pull error = %q, want cron pull rejection", got)
-	}
-	if got := validation.fieldError("forceDeploy"); !strings.Contains(got, "force deploy is not supported for scheduled jobs during web deploy") {
-		t.Fatalf("forceDeploy error = %q, want cron force deploy rejection", got)
-	}
-}
-
-func TestValidateRunDraftCronRejectsEnvFile(t *testing.T) {
-	tmp := t.TempDir()
-	envFile := filepath.Join(tmp, ".env")
-	if err := os.WriteFile(envFile, []byte("BACKUP=true\n"), 0o644); err != nil {
-		t.Fatalf("write env file: %v", err)
-	}
-	_, validation := validateRunDraft(context.Background(), RunDraft{
-		Service:     "backup",
-		Host:        "yeet-lab",
-		Payload:     "job.sh",
-		PayloadKind: serviceTypeCron,
-		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
-		EnvFile:     ".env",
-	}, tmp)
-	if got := validation.fieldError("envFile"); !strings.Contains(got, "env file is not supported for scheduled jobs during web deploy") {
-		t.Fatalf("envFile error = %q, want cron env file rejection", got)
-	}
-}
-
-func TestValidateRunDraftCronRejectsMissingEnvFileBeforePathCheck(t *testing.T) {
-	_, validation := validateRunDraft(context.Background(), RunDraft{
-		Service:     "backup",
-		Host:        "yeet-lab",
-		Payload:     "job.sh",
-		PayloadKind: serviceTypeCron,
-		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
-		EnvFile:     "missing.env",
-	}, t.TempDir())
-	if len(validation.Errors) == 0 {
-		t.Fatal("validation errors = nil, want cron env file rejection")
-	}
-	if got := validation.Errors[0]; got.Field != "envFile" || !strings.Contains(got.Message, "env file is not supported for scheduled jobs during web deploy") {
-		t.Fatalf("first error = %#v, want cron env file rejection", got)
-	}
-	for _, got := range validation.Errors {
-		if got.Field == "envFile" && strings.Contains(got.Message, "does not exist") {
-			t.Fatalf("envFile error = %#v, want no path existence error", got)
-		}
-	}
-}
-
-func TestValidateRunDraftCronRejectsRunOnlyNetworkFields(t *testing.T) {
-	tests := []struct {
-		name    string
-		network RunDraftNetwork
-		field   string
-	}{
-		{
-			name:    "publish",
-			network: RunDraftNetwork{Publish: []string{"8080:80"}},
-			field:   "network.publish",
-		},
-		{
-			name:    "tailscale auth key",
-			network: RunDraftNetwork{TSAuthKey: "tskey-secret"},
-			field:   "network.tsAuthKey",
-		},
-		{
-			name:    "macvlan parent",
-			network: RunDraftNetwork{MacvlanParent: "vmbr0"},
-			field:   "network.macvlanParent",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, validation := validateRunDraft(context.Background(), RunDraft{
-				Service:     "backup",
-				Host:        "yeet-lab",
-				Payload:     "job.sh",
-				PayloadKind: serviceTypeCron,
-				Cron:        RunDraftCron{Schedule: "0 3 * * *"},
-				Network:     tt.network,
-			}, t.TempDir())
-			got := validation.fieldError(tt.field)
-			if !strings.Contains(got, "network settings are not supported for scheduled jobs during web deploy") {
-				t.Fatalf("%s error = %q, want cron network rejection", tt.field, got)
-			}
-			if generic := validation.fieldError("network.modes"); strings.Contains(generic, "--macvlan-* settings require LAN networking") {
-				t.Fatalf("network.modes error = %q, want no generic macvlan validation error", generic)
-			}
-		})
-	}
-}
-
-func TestValidateRunDraftCronRejectsZFSWithoutMissingDatasetError(t *testing.T) {
-	_, validation := validateRunDraft(context.Background(), RunDraft{
-		Service:     "backup",
-		Host:        "yeet-lab",
-		Payload:     "job.sh",
-		PayloadKind: serviceTypeCron,
-		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
-		Storage:     RunDraftStorage{ZFS: true},
-	}, t.TempDir())
-	got := validation.fieldError("serviceRoot")
-	if !strings.Contains(got, "service root is not supported for scheduled jobs during web deploy") {
-		t.Fatalf("serviceRoot error = %q, want cron service root rejection", got)
-	}
-	if strings.Contains(got, "service root or ZFS dataset is required") {
-		t.Fatalf("serviceRoot error = %q, want no missing dataset error", got)
 	}
 }
 

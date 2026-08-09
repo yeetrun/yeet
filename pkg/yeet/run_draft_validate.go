@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
+	"github.com/yeetrun/yeet/pkg/cli"
 	"github.com/yeetrun/yeet/pkg/ftdetect"
 	"github.com/yeetrun/yeet/pkg/iso"
 	"github.com/yeetrun/yeet/pkg/serviceid"
@@ -79,15 +80,10 @@ func validateRunDraftLocal(draft RunDraft, cwd string) (RunDraft, RunDraftValida
 
 	draft = trimRunDraftFields(draft)
 	validateRunDraftRequired(draft, &result)
-	validateRunDraftCron(&draft, &result)
+	validateRunDraftSchedule(&draft, &result)
 	validateRunDraftPaths(cwd, &draft, &result)
 	validateRunDraftIdentity(draft, &result)
 	validateRunDraftVM(&draft, &result)
-	if draft.PayloadKind == serviceTypeCron {
-		draft.Network.Modes = normalizeRunDraftNetworkModes(draft.Network.Modes, &result)
-		validateRunDraftISO(draft, &result)
-		return draft, result
-	}
 	validateRunDraftNetwork(&draft, &result)
 	validateRunDraftStorage(&draft, &result)
 	validateRunDraftSnapshots(&draft, &result)
@@ -170,6 +166,9 @@ func validateRunDraftISO(draft RunDraft, result *RunDraftValidationResult) {
 }
 
 func runDraftISOPayloadKind(draft RunDraft) iso.PayloadKind {
+	if draft.Cron.Schedule != "" {
+		return iso.PayloadCron
+	}
 	if kind, ok := declaredRunDraftISOPayloadKind(draft.PayloadKind); ok {
 		return kind
 	}
@@ -198,8 +197,6 @@ func declaredRunDraftISOPayloadKind(kind string) (iso.PayloadKind, bool) {
 		return iso.PayloadCompose, true
 	case "image", "remote-image", "local-image", "dockerfile", "python", "typescript":
 		return iso.PayloadContainer, true
-	case serviceTypeCron:
-		return iso.PayloadCron, true
 	default:
 		return "", false
 	}
@@ -399,6 +396,11 @@ func validateRunDraftService(ctx context.Context, draft RunDraft, result *RunDra
 }
 
 func validateRunDraftPaths(cwd string, draft *RunDraft, result *RunDraftValidationResult) {
+	if draft.Cron.Schedule != "" {
+		validateScheduledRunDraftPayload(cwd, draft, result)
+		validateRunDraftEnvFile(cwd, draft, result)
+		return
+	}
 	payloadKindOK := true
 	if unknownPayloadKind(draft.PayloadKind) {
 		payloadKindOK = false
@@ -414,14 +416,62 @@ func validateRunDraftPaths(cwd string, draft *RunDraft, result *RunDraftValidati
 		}
 	}
 
-	if draft.EnvFile != "" && draft.PayloadKind != serviceTypeCron {
-		envFile, err := normalizeExistingRunDraftPath(cwd, draft.EnvFile)
-		if err != nil {
-			result.addError("envFile", "%v", err)
-		} else {
-			draft.EnvFile = envFile
-		}
+	validateRunDraftEnvFile(cwd, draft, result)
+}
+
+func validateRunDraftEnvFile(cwd string, draft *RunDraft, result *RunDraftValidationResult) {
+	if draft.EnvFile == "" {
+		return
 	}
+	envFile, err := normalizeExistingRunDraftPath(cwd, draft.EnvFile)
+	if err != nil {
+		result.addError("envFile", "%v", err)
+	} else {
+		draft.EnvFile = envFile
+	}
+}
+
+func validateScheduledRunDraftPayload(cwd string, draft *RunDraft, result *RunDraftValidationResult) {
+	kind := strings.TrimSpace(draft.PayloadKind)
+	switch kind {
+	case serviceTypeVM, "compose", "dockerfile", "remote-image", "local-image", "python", "typescript":
+		result.addError("payload", "scheduled workloads require a native binary or script payload")
+		return
+	case "", "auto", "file":
+	default:
+		result.addError("payloadKind", "unknown payload kind %q", kind)
+		return
+	}
+	payload, err := normalizeScheduledRunDraftPath(cwd, draft.Payload)
+	if err != nil {
+		result.addError("payload", "%v", err)
+		return
+	}
+	draft.Payload = payload
+	draft.PayloadKind = "file"
+	if filepath.Base(payload) == "Dockerfile" {
+		result.addError("payload", "scheduled workloads require a native binary or script payload")
+		return
+	}
+	ft, err := ftdetect.DetectFile(payload, "", "")
+	if err != nil || ft != ftdetect.Binary && ft != ftdetect.Script {
+		result.addError("payload", "scheduled workloads require a native binary or script payload")
+	}
+}
+
+func normalizeScheduledRunDraftPath(cwd, path string) (string, error) {
+	path, err := resolveRunDraftPath(cwd, path)
+	if err != nil {
+		return "", err
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("stat %q: %w", path, err)
+	}
+	if st.IsDir() {
+		return "", fmt.Errorf("%q is a directory", path)
+	}
+	return path, nil
 }
 
 func validateRunDraftStorage(draft *RunDraft, result *RunDraftValidationResult) {
@@ -450,76 +500,15 @@ func runDraftZFSStorageLabel(draft RunDraft) string {
 	return "zfs service root"
 }
 
-func validateRunDraftCron(draft *RunDraft, result *RunDraftValidationResult) {
-	if draft.PayloadKind != serviceTypeCron {
-		if strings.TrimSpace(draft.Cron.Schedule) != "" {
-			result.addError("cron.schedule", "cron schedule is only valid for scheduled jobs")
-		}
+func validateRunDraftSchedule(draft *RunDraft, result *RunDraftValidationResult) {
+	if draft.Cron.Schedule == "" {
 		return
 	}
-	validateRunDraftCronSchedule(draft, result)
-	validateRunDraftCronUnsupportedFields(*draft, result)
-}
-
-func validateRunDraftCronSchedule(draft *RunDraft, result *RunDraftValidationResult) {
-	fields, err := parseCronSchedule(draft.Cron.Schedule)
+	flags, _, err := cli.ParseRun([]string{"--cron=" + draft.Cron.Schedule})
 	if err != nil {
 		result.addError("cron.schedule", "%v", err)
 	} else {
-		draft.Cron.Schedule = strings.Join(fields, " ")
-	}
-}
-
-func validateRunDraftCronUnsupportedFields(draft RunDraft, result *RunDraftValidationResult) {
-	if len(trimNonEmptyStrings(draft.Network.Modes)) != 0 && !runDraftNetworkModeSet(draft.Network.Modes, "iso") {
-		result.addError("network.modes", "network modes are not supported for scheduled jobs during web deploy")
-	}
-	validateRunDraftCronNetworkFields(draft.Network, result)
-	if strings.TrimSpace(draft.EnvFile) != "" {
-		result.addError("envFile", "env file is not supported for scheduled jobs during web deploy")
-	}
-	if draft.Pull {
-		result.addError("pull", "pull is not supported for scheduled jobs during web deploy")
-	}
-	if draft.ForceDeploy {
-		result.addError("forceDeploy", "force deploy is not supported for scheduled jobs during web deploy")
-	}
-	if draft.Storage.ServiceRoot != "" || draft.Storage.ZFS {
-		result.addError("serviceRoot", "service root is not supported for scheduled jobs during web deploy")
-	}
-	if runDraftSnapshotsHasFieldOverrides(draft.Snapshots) || strings.TrimSpace(draft.Snapshots.Mode) != "" {
-		result.addError("snapshots.mode", "snapshot overrides are not supported for scheduled jobs during web deploy")
-	}
-}
-
-func validateRunDraftCronNetworkFields(network RunDraftNetwork, result *RunDraftValidationResult) {
-	const message = "network settings are not supported for scheduled jobs during web deploy"
-	if strings.TrimSpace(network.TSVersion) != "" {
-		result.addError("network.tsVersion", message)
-	}
-	if strings.TrimSpace(network.TSExitNode) != "" {
-		result.addError("network.tsExitNode", message)
-	}
-	if len(trimNonEmptyStrings(network.TSTags)) != 0 {
-		result.addError("network.tsTags", message)
-	}
-	if strings.TrimSpace(network.TSAuthKey) != "" {
-		result.addError("network.tsAuthKey", message)
-	}
-	if strings.TrimSpace(network.MacvlanMAC) != "" {
-		result.addError("network.macvlanMac", message)
-	}
-	if network.MacvlanVLAN != 0 {
-		result.addError("network.macvlanVlan", message)
-	}
-	if strings.TrimSpace(network.MacvlanParent) != "" {
-		result.addError("network.macvlanParent", message)
-	}
-	if network.Restart != nil {
-		result.addError("network.restart", message)
-	}
-	if len(trimNonEmptyStrings(network.Publish)) != 0 {
-		result.addError("network.publish", message)
+		draft.Cron.Schedule = flags.Cron
 	}
 }
 
@@ -674,14 +663,13 @@ type runDraftPayloadNormalizerFunc func(cwd, payload, kind string) (string, stri
 
 func runDraftPayloadNormalizer(kind string) (runDraftPayloadNormalizerFunc, bool) {
 	normalizers := map[string]runDraftPayloadNormalizerFunc{
-		"":              normalizeAutoRunDraftPayloadKind,
-		"auto":          normalizeAutoRunDraftPayloadKind,
-		"file":          normalizeFileRunDraftPayloadKind,
-		serviceTypeCron: normalizeFileRunDraftPayloadKind,
-		"compose":       normalizeComposeRunDraftPayloadKind,
-		"dockerfile":    normalizeDockerfileRunDraftPayloadKind,
-		"remote-image":  normalizeRemoteImageRunDraftPayloadKind,
-		"local-image":   normalizeLocalImageRunDraftPayloadKind,
+		"":             normalizeAutoRunDraftPayloadKind,
+		"auto":         normalizeAutoRunDraftPayloadKind,
+		"file":         normalizeFileRunDraftPayloadKind,
+		"compose":      normalizeComposeRunDraftPayloadKind,
+		"dockerfile":   normalizeDockerfileRunDraftPayloadKind,
+		"remote-image": normalizeRemoteImageRunDraftPayloadKind,
+		"local-image":  normalizeLocalImageRunDraftPayloadKind,
 	}
 	normalizer, ok := normalizers[kind]
 	return normalizer, ok
@@ -803,7 +791,7 @@ func looksLikeRunDraftLocalImageName(payload string) bool {
 
 func unknownPayloadKind(kind string) bool {
 	switch kind {
-	case "", "auto", "file", "compose", "dockerfile", "remote-image", "local-image", serviceTypeVM, serviceTypeCron:
+	case "", "auto", "file", "compose", "dockerfile", "remote-image", "local-image", serviceTypeVM:
 		return false
 	default:
 		return true
@@ -832,6 +820,25 @@ func validateRunDraftZFSDatasetName(dataset, label string) error {
 }
 
 func normalizeExistingRunDraftPath(cwd, path string) (string, error) {
+	path, err := resolveRunDraftPath(cwd, path)
+	if err != nil {
+		return "", err
+	}
+
+	st, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return "", fmt.Errorf("%q does not exist", path)
+	}
+	if err != nil {
+		return "", fmt.Errorf("stat %q: %w", path, err)
+	}
+	if st.IsDir() {
+		return "", fmt.Errorf("%q is a directory", path)
+	}
+	return path, nil
+}
+
+func resolveRunDraftPath(cwd, path string) (string, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return "", fmt.Errorf("path is required")
@@ -848,16 +855,5 @@ func normalizeExistingRunDraftPath(cwd, path string) (string, error) {
 		path = filepath.Join(absBase, path)
 	}
 	path = filepath.Clean(path)
-
-	st, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return "", fmt.Errorf("%q does not exist", path)
-	}
-	if err != nil {
-		return "", fmt.Errorf("stat %q: %w", path, err)
-	}
-	if st.IsDir() {
-		return "", fmt.Errorf("%q is a directory", path)
-	}
 	return path, nil
 }

@@ -204,6 +204,37 @@ host = "host-a"
 	}
 }
 
+func TestLoadProjectConfigRejectsRemovedCronType(t *testing.T) {
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, projectConfigName)
+	if err := os.WriteFile(path, []byte(`
+version = 1
+
+[[services]]
+name = "backup"
+host = "host-a"
+type = "cron"
+payload = "job.sh"
+schedule = "0 3 * * *"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := `service backup uses removed type "cron"; remove type and keep schedule`
+	for _, load := range []struct {
+		name string
+		fn   func() (*projectConfigLocation, error)
+	}{
+		{name: "directory", fn: func() (*projectConfigLocation, error) { return loadProjectConfigFromDir(tmp) }},
+		{name: "explicit file", fn: func() (*projectConfigLocation, error) { return loadProjectConfigFromFile(path) }},
+	} {
+		t.Run(load.name, func(t *testing.T) {
+			if _, err := load.fn(); err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("load error = %v, want %q", err, want)
+			}
+		})
+	}
+}
+
 func TestLoadProjectConfigFromFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "custom.toml")
@@ -320,7 +351,7 @@ func TestProjectConfigRunAsPayloadArgumentIsNotControlFlag(t *testing.T) {
 	if !ok {
 		t.Fatal("entry missing")
 	}
-	if entry.RunAs != "" || !reflect.DeepEqual(entry.Args, []string{"--run-as=root"}) {
+	if entry.RunAs != "" || !reflect.DeepEqual(entry.Args, []string{"--", "--run-as=root"}) {
 		t.Fatalf("entry = %#v", entry)
 	}
 }
@@ -618,7 +649,7 @@ func TestSaveRunConfigCreatesToml(t *testing.T) {
 	}
 
 	runArgs := []string{"--net=svc", "--", "--flag", "value"}
-	wantArgs := []string{"--net=svc", "--flag", "value"}
+	wantArgs := []string{"--net=svc", "--", "--flag", "value"}
 	loc := &projectConfigLocation{
 		Path:   filepath.Join(tmp, projectConfigName),
 		Dir:    tmp,
@@ -961,7 +992,7 @@ func TestSaveRunConfigOverwritesArgs(t *testing.T) {
 	}
 
 	secondArgs := []string{"--", "--flagB", "valueB", "--bool-flag2", "posArg2"}
-	wantArgs := []string{"--flagB", "valueB", "--bool-flag2", "posArg2"}
+	wantArgs := []string{"--", "--flagB", "valueB", "--bool-flag2", "posArg2"}
 	if err := saveRunConfig(loc, "host-a", payload, secondArgs, "", false); err != nil {
 		t.Fatalf("saveRunConfig error: %v", err)
 	}
@@ -1021,7 +1052,7 @@ func TestSaveRunConfigClearsStalePayloadKind(t *testing.T) {
 	}
 }
 
-func TestSaveCronConfigCreatesToml(t *testing.T) {
+func TestSaveRunConfigRoundTripsScheduleWithoutCronType(t *testing.T) {
 	oldService := serviceOverride
 	defer func() { serviceOverride = oldService }()
 
@@ -1035,7 +1066,7 @@ func TestSaveCronConfigCreatesToml(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(cwd) }()
 
-	serviceOverride = "svc-cron"
+	serviceOverride = "owesplit"
 	payload := filepath.Join(tmp, "apps", "owesplit")
 	if err := os.MkdirAll(filepath.Dir(payload), 0o755); err != nil {
 		t.Fatalf("MkdirAll error: %v", err)
@@ -1044,27 +1075,29 @@ func TestSaveCronConfigCreatesToml(t *testing.T) {
 		t.Fatalf("WriteFile error: %v", err)
 	}
 
-	cronFields := []string{"0", "9", "15", "*", "*"}
-	binArgs := []string{"-live"}
 	loc := &projectConfigLocation{
 		Path:   filepath.Join(tmp, projectConfigName),
 		Dir:    tmp,
 		Config: &ProjectConfig{Version: projectConfigVersion},
 	}
-	if err := saveCronConfig(loc, "host-a", payload, cronFields, binArgs); err != nil {
-		t.Fatalf("saveCronConfig error: %v", err)
+	args := []string{"--cron=0 9 15 * *", "--net=iso", "--", "-live"}
+	if err := saveRunConfigWithPayloadKind(loc, "host-a", payload, "file", args, "", false); err != nil {
+		t.Fatalf("saveRunConfigWithPayloadKind error: %v", err)
 	}
 
 	loaded, err := loadProjectConfigFromCwd()
 	if err != nil {
 		t.Fatalf("loadProjectConfigFromCwd error: %v", err)
 	}
-	entry, ok := loaded.Config.ServiceEntry("svc-cron", "host-a")
+	entry, ok := loaded.Config.ServiceEntry("owesplit", "host-a")
 	if !ok {
-		t.Fatalf("expected cron config to be saved")
+		t.Fatal("expected scheduled run config to be saved")
 	}
-	if entry.Type != serviceTypeCron {
-		t.Fatalf("type = %q", entry.Type)
+	if entry.Type != "" {
+		t.Fatalf("type = %q, want empty", entry.Type)
+	}
+	if entry.PayloadKind != "" {
+		t.Fatalf("payload kind = %q, want empty for scheduled native file", entry.PayloadKind)
 	}
 	if entry.Payload != filepath.Join("apps", "owesplit") {
 		t.Fatalf("payload = %q", entry.Payload)
@@ -1072,21 +1105,23 @@ func TestSaveCronConfigCreatesToml(t *testing.T) {
 	if entry.Schedule != "0 9 15 * *" {
 		t.Fatalf("schedule = %q", entry.Schedule)
 	}
-	if len(entry.Args) != len(binArgs) {
-		t.Fatalf("args = %#v", entry.Args)
+	wantArgs := []string{"--net=iso", "--", "-live"}
+	if !reflect.DeepEqual(entry.Args, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", entry.Args, wantArgs)
 	}
-	for i := range binArgs {
-		if entry.Args[i] != binArgs[i] {
-			t.Fatalf("args[%d] = %q, want %q", i, entry.Args[i], binArgs[i])
-		}
+	raw, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `type = "cron"`) || strings.Contains(string(raw), `payload_kind = "file"`) {
+		t.Fatalf("saved config contains redundant scheduled native metadata:\n%s", raw)
 	}
 }
 
-func TestSaveCronConfigClearsRunOnlyFields(t *testing.T) {
+func TestSaveRunConfigPreservesExistingScheduleWhenCronFlagIsOmitted(t *testing.T) {
 	oldService := serviceOverride
 	defer func() { serviceOverride = oldService }()
 
-	required := true
 	tmp := t.TempDir()
 	payload := filepath.Join(tmp, "job.sh")
 	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
@@ -1098,36 +1133,61 @@ func TestSaveCronConfigClearsRunOnlyFields(t *testing.T) {
 		Config: &ProjectConfig{Version: projectConfigVersion},
 	}
 	loc.Config.SetServiceEntry(ServiceEntry{
-		Name:             "backup",
-		Host:             "yeet-lab",
-		Type:             serviceTypeRun,
-		Payload:          "compose.yml",
-		PayloadKind:      "compose",
-		EnvFile:          ".env",
-		ServiceRoot:      "tank/apps/backup",
-		ServiceRootZFS:   true,
-		Snapshots:        "on",
-		SnapshotKeepLast: 3,
-		SnapshotMaxAge:   "72h",
-		SnapshotRequired: &required,
-		SnapshotEvents:   []string{"run"},
-		Ports:            []string{"8080:80"},
+		Name:     "backup",
+		Host:     "yeet-lab",
+		Payload:  "job.sh",
+		Schedule: "0 3 * * *",
+		Args:     []string{"--net=iso", "--", "--full"},
 	})
 
 	serviceOverride = "backup"
-	if err := saveCronConfig(loc, "yeet-lab", payload, []string{"0", "3", "*", "*", "*"}, []string{"--full"}); err != nil {
-		t.Fatalf("saveCronConfig: %v", err)
+	if err := saveRunConfigWithPayloadKind(loc, "yeet-lab", payload, "file", []string{"--net=iso", "--", "--full"}, "", false); err != nil {
+		t.Fatalf("saveRunConfigWithPayloadKind: %v", err)
 	}
 
 	entry, ok := loc.Config.ServiceEntry("backup", "yeet-lab")
 	if !ok {
 		t.Fatal("saved config missing backup@yeet-lab")
 	}
-	if entry.Type != serviceTypeCron || entry.Payload != "job.sh" || entry.Schedule != "0 3 * * *" || !reflect.DeepEqual(entry.Args, []string{"--full"}) {
-		t.Fatalf("cron entry core fields = %#v", entry)
+	if entry.Type != "" || entry.Payload != "job.sh" || entry.PayloadKind != "" || entry.Schedule != "0 3 * * *" || !reflect.DeepEqual(entry.Args, []string{"--net=iso", "--", "--full"}) {
+		t.Fatalf("scheduled run entry = %#v", entry)
 	}
-	if entry.PayloadKind != "" || entry.EnvFile != "" || entry.ServiceRoot != "" || entry.ServiceRootZFS || entry.Snapshots != "" || entry.SnapshotKeepLast != 0 || entry.SnapshotMaxAge != "" || entry.SnapshotRequired != nil || len(entry.SnapshotEvents) != 0 || len(entry.Ports) != 0 {
-		t.Fatalf("cron entry kept run-only fields: %#v", entry)
+}
+
+func TestSaveRunConfigKeepsUnscheduledFilePayloadKind(t *testing.T) {
+	oldService := serviceOverride
+	defer func() { serviceOverride = oldService }()
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "job.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	loc := &projectConfigLocation{
+		Path:   filepath.Join(tmp, projectConfigName),
+		Dir:    tmp,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+
+	serviceOverride = "backup"
+	if err := saveRunConfigWithPayloadKind(loc, "yeet-lab", payload, "file", []string{"--net=iso", "--", "--full"}, "", false); err != nil {
+		t.Fatalf("saveRunConfigWithPayloadKind: %v", err)
+	}
+
+	entry, ok := loc.Config.ServiceEntry("backup", "yeet-lab")
+	if !ok {
+		t.Fatal("saved config missing backup@yeet-lab")
+	}
+	if entry.Schedule != "" || entry.PayloadKind != "file" {
+		t.Fatalf("unscheduled run entry = %#v, want file payload kind", entry)
+	}
+	reloaded, err := loadProjectConfigFromDir(tmp)
+	if err != nil {
+		t.Fatalf("reload project config: %v", err)
+	}
+	reloadedEntry, ok := reloaded.Config.ServiceEntry("backup", "yeet-lab")
+	if !ok || reloadedEntry.Schedule != "" || reloadedEntry.PayloadKind != "file" {
+		t.Fatalf("serialized unscheduled run entry = %#v, ok=%v; want file payload kind", reloadedEntry, ok)
 	}
 }
 

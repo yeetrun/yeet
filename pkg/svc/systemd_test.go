@@ -1045,6 +1045,7 @@ func TestSystemdServiceLifecycleUsesConfiguredSystemdDir(t *testing.T) {
 
 	writeTempSystemdFile(t, systemdDir, "demo.service")
 	writeTempSystemdFile(t, systemdDir, "demo.timer")
+	writeTempSystemdFile(t, systemdDir, "yeet-demo-ns.service")
 	status, err = svc.Status()
 	if err != nil {
 		t.Fatalf("Status returned error: %v", err)
@@ -1095,6 +1096,120 @@ func TestSystemdServiceLifecycleUsesConfiguredSystemdDir(t *testing.T) {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("unit file %s stat error = %v, want not exist", path, err)
 		}
+	}
+}
+
+func TestSystemdServiceUninstallReturnsAuxiliaryDisableError(t *testing.T) {
+	tmp := t.TempDir()
+	systemdDir := filepath.Join(tmp, "systemd")
+	installFakeSystemctl(t, tmp)
+	t.Setenv("YEET_SYSTEMCTL_FAIL", "disable --now yeet-demo-ns.service")
+	cfg := db.Service{
+		Name:       "demo",
+		Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactNetNSService: artifactAt(1, filepath.Join(tmp, "netns.artifact")),
+		},
+	}
+	svc := &SystemdService{cfg: cfg.View(), runDir: filepath.Join(tmp, "run"), systemdDir: systemdDir}
+	writeTempSystemdFile(t, systemdDir, "demo.service")
+	writeTempSystemdFile(t, systemdDir, "yeet-demo-ns.service")
+
+	err := svc.Uninstall()
+	if err == nil || !strings.Contains(err.Error(), "disable --now yeet-demo-ns.service") {
+		t.Fatalf("Uninstall error = %v, want auxiliary disable failure", err)
+	}
+	if _, statErr := os.Stat(svc.netnsServicePath()); statErr != nil {
+		t.Fatalf("failed auxiliary unit was removed: %v", statErr)
+	}
+}
+
+func TestSystemdServiceUninstallRetriesRemainingScheduledPrimaryUnit(t *testing.T) {
+	tmp := t.TempDir()
+	systemdDir := filepath.Join(tmp, "systemd")
+	systemctlLog := installFakeSystemctl(t, tmp)
+	t.Setenv("YEET_SYSTEMCTL_FAIL", "disable --now demo.service")
+	cfg := db.Service{
+		Name:       "demo",
+		Generation: 1,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdTimerFile: artifactAt(1, filepath.Join(tmp, "demo.timer.artifact")),
+		},
+	}
+	svc := &SystemdService{cfg: cfg.View(), runDir: filepath.Join(tmp, "run"), systemdDir: systemdDir}
+	writeTempSystemdFile(t, systemdDir, "demo.service")
+	writeTempSystemdFile(t, systemdDir, "demo.timer")
+
+	err := svc.Uninstall()
+	if err == nil || !strings.Contains(err.Error(), "disable --now demo.service") {
+		t.Fatalf("first Uninstall error = %v, want service disable failure", err)
+	}
+	if _, statErr := os.Stat(svc.timerPath()); !os.IsNotExist(statErr) {
+		t.Fatalf("successfully removed timer stat error = %v, want not exist", statErr)
+	}
+	if _, statErr := os.Stat(svc.servicePath()); statErr != nil {
+		t.Fatalf("failed service unit was removed: %v", statErr)
+	}
+
+	t.Setenv("YEET_SYSTEMCTL_FAIL", "")
+	if err := svc.Uninstall(); err != nil {
+		t.Fatalf("retry Uninstall returned error: %v", err)
+	}
+	if _, statErr := os.Stat(svc.servicePath()); !os.IsNotExist(statErr) {
+		t.Fatalf("service stat after retry = %v, want not exist", statErr)
+	}
+	wantLog := []string{
+		"disable --now demo.timer",
+		"disable --now demo.service",
+		"disable --now demo.service",
+		"daemon-reload",
+	}
+	if diff := cmp.Diff(wantLog, readSystemctlLog(t, systemctlLog)); diff != "" {
+		t.Fatalf("systemctl log mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestSystemdServiceUninstallRemovesDanglingUnitSymlink(t *testing.T) {
+	tmp := t.TempDir()
+	systemdDir := filepath.Join(tmp, "systemd")
+	installFakeSystemctl(t, tmp)
+	if err := os.MkdirAll(systemdDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	servicePath := filepath.Join(systemdDir, "demo.service")
+	if err := os.Symlink(filepath.Join(tmp, "missing.service"), servicePath); err != nil {
+		t.Fatal(err)
+	}
+	svc := &SystemdService{
+		cfg:        (&db.Service{Name: "demo", Generation: 1}).View(),
+		runDir:     filepath.Join(tmp, "run"),
+		systemdDir: systemdDir,
+	}
+
+	if err := svc.Uninstall(); err != nil {
+		t.Fatalf("Uninstall returned error: %v", err)
+	}
+	if _, err := os.Lstat(servicePath); !os.IsNotExist(err) {
+		t.Fatalf("dangling service symlink stat error = %v, want not exist", err)
+	}
+}
+
+func TestSystemdServiceUninstallReturnsUnitInspectionError(t *testing.T) {
+	tmp := t.TempDir()
+	installFakeSystemctl(t, tmp)
+	systemdDir := filepath.Join(tmp, "not-a-directory")
+	if err := os.WriteFile(systemdDir, []byte("file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := &SystemdService{
+		cfg:        (&db.Service{Name: "demo", Generation: 1}).View(),
+		runDir:     filepath.Join(tmp, "run"),
+		systemdDir: systemdDir,
+	}
+
+	err := svc.Uninstall()
+	if err == nil || !strings.Contains(err.Error(), "inspect systemd unit") {
+		t.Fatalf("Uninstall error = %v, want unit inspection failure", err)
 	}
 }
 

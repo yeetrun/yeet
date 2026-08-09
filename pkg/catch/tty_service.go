@@ -155,15 +155,17 @@ func (e *ttyExecer) rollbackCmdFunc(serviceName string) error {
 	ui.Start()
 	defer ui.Stop()
 
-	ui.StartStep("Select generation")
-	gen, err := e.rollbackGeneration(serviceName)
-	if err != nil {
-		ui.FailStep(err.Error())
-		return fmt.Errorf("failed to rollback service: %w", err)
-	}
-	ui.DoneStep(fmt.Sprintf("generation=%d", gen))
+	return e.withLockedServiceMutation(func() error {
+		ui.StartStep("Select generation")
+		gen, err := e.rollbackGeneration(serviceName)
+		if err != nil {
+			ui.FailStep(err.Error())
+			return fmt.Errorf("failed to rollback service: %w", err)
+		}
+		ui.DoneStep(fmt.Sprintf("generation=%d", gen))
 
-	return e.installRollbackGeneration(ui, serviceName, gen)
+		return e.installRollbackGeneration(ui, serviceName, gen)
+	})
 }
 
 func (e *ttyExecer) rollbackGeneration(serviceName string) (int, error) {
@@ -190,6 +192,11 @@ func selectPreviousGeneration(s *db.Service) error {
 	}
 	if gen == 0 {
 		return fmt.Errorf("generation %d is the oldest, cannot rollback", s.Generation)
+	}
+	if _, currentScheduled := s.Artifacts.Gen(db.ArtifactSystemdTimerFile, s.Generation); currentScheduled {
+		if _, targetScheduled := s.Artifacts.Gen(db.ArtifactSystemdTimerFile, gen); !targetScheduled {
+			return errors.New(scheduledNativeOnlyMessage)
+		}
 	}
 	s.Generation = gen
 	return nil

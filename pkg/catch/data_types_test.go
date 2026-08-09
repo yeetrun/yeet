@@ -21,8 +21,36 @@ func TestServiceDataTypeForService(t *testing.T) {
 			service: &db.Service{
 				Name:        "svc-cron",
 				ServiceType: db.ServiceTypeSystemd,
+				Generation:  1,
 				Artifacts: db.ArtifactStore{
-					db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/svc-cron.timer"}},
+					db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/svc-cron.timer", "latest": "/tmp/svc-cron.timer"}},
+				},
+			},
+			want: ServiceDataTypeCron,
+		},
+		{
+			name: "systemd-active-ordinary-with-historical-and-staged-timer",
+			service: &db.Service{
+				Name:        "svc-ordinary",
+				ServiceType: db.ServiceTypeSystemd,
+				Generation:  2,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{
+						db.Gen(1): "/tmp/svc-old.timer",
+						"latest":  "/tmp/svc-old.timer",
+						"staged":  "/tmp/svc-next.timer",
+					}},
+				},
+			},
+			want: ServiceDataTypeService,
+		},
+		{
+			name: "systemd-staged-only-cron",
+			service: &db.Service{
+				Name:        "svc-staged-cron",
+				ServiceType: db.ServiceTypeSystemd,
+				Artifacts: db.ArtifactStore{
+					db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"staged": "/tmp/svc-staged.timer"}},
 				},
 			},
 			want: ServiceDataTypeCron,

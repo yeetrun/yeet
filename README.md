@@ -267,24 +267,32 @@ yeet run <svc> ./bin/<svc>
 yeet run <svc> ./script.sh -- --app-flag value
 ```
 
-### Cron job
+### Scheduled job
 
 ```bash
-yeet cron <svc> ./job.sh "0 9 * * *"
+yeet run backup ./backup --cron="0 3 * * *" --run-as=backup --net=iso -- --full
 ```
 
-New native binaries, scripts, and cron-style timers run as the managed
-`yeet-svc` system account by default. Choose an existing host account with
+Scheduling is available for native binaries and shebang scripts. Scheduled
+runs retain native service options such as `--run-as`, `--net=iso`, environment
+files, custom service roots, ZFS, snapshots, and payload arguments after `--`.
+
+Omitting `--cron` when you rerun a scheduled service preserves its installed
+schedule. A new non-empty `--cron` value replaces the schedule. To return the
+name to ordinary service mode, remove it with `yeet rm` and recreate it without
+`--cron`.
+
+Native binaries, scripts, and scheduled jobs run as the managed `yeet-svc`
+system account by default. Choose an existing host account with
 `--run-as=USER[:GROUP]` when the workload needs it:
 
 ```bash
 yeet run <svc> ./bin/<svc> --run-as=app:app
-yeet cron <svc> ./job.sh "0 9 * * *" --run-as=backup
 ```
 
 Docker execution identities stay in Compose (`user:`), and VM host execution
-uses the separate `yeet-vm` jailer account. Existing native services keep their
-current identity until you migrate one explicitly:
+uses the separate `yeet-vm` jailer account. Use `service set` to change a native
+service identity:
 
 ```bash
 yeet service set <svc> --run-as=yeet-svc
@@ -294,7 +302,7 @@ yeet service set <svc> \
   --run-as=yeet-svc
 ```
 
-The migration stops the native workload, verifies the service root, updates
+This operation stops the native workload, verifies the service root, updates
 ownership and systemd definitions as one rollback-safe transaction, and then
 restores its prior running state. ZFS-backed roots remain on their configured
 dataset. Non-root native workloads cannot request privileged host ports below

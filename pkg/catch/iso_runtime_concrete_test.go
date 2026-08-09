@@ -383,6 +383,39 @@ func TestISOConcreteVMRemovalStepsCleanEveryBoundary(t *testing.T) {
 	}
 }
 
+func TestISOConcreteNativeRemovalUninstallsSystemdUnitsBeforeDelete(t *testing.T) {
+	oldUninstall := uninstallISONativeSystemd
+	t.Cleanup(func() { uninstallISONativeSystemd = oldUninstall })
+
+	server := newTestServer(t)
+	steps := &isoConcreteRemoveSteps{
+		server:  server,
+		service: &db.Service{Name: "scheduled-job"},
+		native:  true,
+	}
+	called := false
+	uninstallISONativeSystemd = func(gotServer *Server, service string) error {
+		called = true
+		if gotServer != server || service != "scheduled-job" {
+			t.Fatalf("uninstall target = (%p, %q), want (%p, scheduled-job)", gotServer, service, server)
+		}
+		return nil
+	}
+
+	if err := steps.BeforeDelete(context.Background(), "scheduled-job"); err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatal("native ISO removal skipped systemd uninstall")
+	}
+
+	wantErr := errors.New("uninstall failed")
+	uninstallISONativeSystemd = func(*Server, string) error { return wantErr }
+	if err := steps.BeforeDelete(context.Background(), "scheduled-job"); !errors.Is(err, wantErr) {
+		t.Fatalf("BeforeDelete error = %v, want uninstall failure", err)
+	}
+}
+
 func TestISODNetAbsenceChecksActiveAndRetiredAddresses(t *testing.T) {
 	server := newISORuntimeTestServer(t, nil)
 	active := netip.MustParseAddr("172.30.128.2")

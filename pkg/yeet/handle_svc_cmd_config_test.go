@@ -202,71 +202,234 @@ func TestRunFromProjectConfigRehydratesRunAs(t *testing.T) {
 	}
 }
 
-func TestCronFromProjectConfigRehydratesRunAs(t *testing.T) {
-	oldExec, oldArch, oldService, oldTerminal := execRemoteFn, remoteCatchOSAndArchFn, serviceOverride, isTerminalFn
+func TestScheduledRunUsesNormalPipelineForExplicitAndConfiguredPayload(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldService := serviceOverride
+	oldTerminal := isTerminalFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldInfo := fetchRunChangeServiceInfoFn
 	t.Cleanup(func() {
-		execRemoteFn, remoteCatchOSAndArchFn, serviceOverride, isTerminalFn = oldExec, oldArch, oldService, oldTerminal
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		serviceOverride = oldService
+		isTerminalFn = oldTerminal
+		fetchRemoteArtifactHashesFn = oldHashes
+		fetchRunChangeServiceInfoFn = oldInfo
 	})
-	serviceOverride = "backup"
+
+	serviceOverride = "owesplit"
 	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
 	isTerminalFn = func(int) bool { return false }
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+
 	tmp := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmp, "backup"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+	payload := filepath.Join(tmp, "owesplit")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: 1, Services: []ServiceEntry{{Name: "backup", Host: "host-a", Type: serviceTypeCron, Payload: "backup", Schedule: "0 3 * * *", RunAs: "backup"}}}}
-	var got []string
-	execRemoteFn = func(_ context.Context, _ string, args []string, _ io.Reader, _ bool) error {
-		got = append([]string{}, args...)
-		return nil
-	}
-	if err := runCronFromProjectConfig(loc, "host-a"); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"cron", "--run-as=backup", "--schedule=0 3 * * *"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("args = %#v, want %#v", got, want)
+	wantPrefix := []string{"run", "--cron=0 9 15 * *", "--run-as=yeet-svc", "--net=iso", "--", "-live"}
+
+	for _, tt := range []struct {
+		name string
+		args []string
+	}{
+		{name: "explicit payload", args: []string{payload}},
+		{name: "config only"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			loc := &projectConfigLocation{
+				Path: filepath.Join(tmp, tt.name+"-"+projectConfigName),
+				Dir:  tmp,
+				Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+					Name: "owesplit", Host: "host-a", Payload: "owesplit", Schedule: "0 9 15 * *", RunAs: "yeet-svc",
+					Args: []string{"--net=iso", "--", "-live"},
+				}}},
+			}
+
+			var calls [][]string
+			execRemoteFn = func(_ context.Context, service string, args []string, stdin io.Reader, _ bool) error {
+				if service != "owesplit" || stdin == nil {
+					t.Fatalf("remote call = service %q stdin %v", service, stdin)
+				}
+				calls = append(calls, append([]string{}, args...))
+				return nil
+			}
+			req := svcCommandRequest{
+				Command:      svcCommand{Args: tt.args},
+				Config:       loc,
+				HostOverride: "host-a",
+				Service:      "owesplit",
+			}
+			if err := handleSvcRun(req); err != nil {
+				t.Fatal(err)
+			}
+			if len(calls) != 1 || len(calls[0]) < len(wantPrefix) || !reflect.DeepEqual(calls[0][:len(wantPrefix)], wantPrefix) {
+				t.Fatalf("remote calls = %#v, want one call beginning %#v", calls, wantPrefix)
+			}
+		})
 	}
 }
 
-func TestHandleSvcCronRehydratesConfiguredRunAs(t *testing.T) {
-	oldExec, oldArch, oldService := execRemoteFn, remoteCatchOSAndArchFn, serviceOverride
-	t.Cleanup(func() { execRemoteFn, remoteCatchOSAndArchFn, serviceOverride = oldExec, oldArch, oldService })
+func TestScheduledConfigOnlyRunResolvesImageLookingNativePathFromConfigDirectory(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldService := serviceOverride
+	oldTerminal := isTerminalFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldInfo := fetchRunChangeServiceInfoFn
+	t.Cleanup(func() {
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		serviceOverride = oldService
+		isTerminalFn = oldTerminal
+		fetchRemoteArtifactHashesFn = oldHashes
+		fetchRunChangeServiceInfoFn = oldInfo
+	})
+
+	serviceOverride = "scheduled-path"
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	isTerminalFn = func(int) bool { return false }
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+
+	configDir := t.TempDir()
+	childDir := filepath.Join(configDir, "nested", "child")
+	if err := os.MkdirAll(childDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(childDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	for _, payload := range []string{"jobs/backup:daily", "jobs/worker@v2"} {
+		t.Run(payload, func(t *testing.T) {
+			absolute := filepath.Join(configDir, payload)
+			if err := os.MkdirAll(filepath.Dir(absolute), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			wantPayload := "#!/bin/sh\necho " + payload + "\n"
+			if err := os.WriteFile(absolute, []byte(wantPayload), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			loc := &projectConfigLocation{
+				Path: filepath.Join(configDir, projectConfigName),
+				Dir:  configDir,
+				Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
+					Name: "scheduled-path", Host: "host-a", Payload: payload, Schedule: "0 9 15 * *",
+				}}},
+			}
+
+			var gotArgs []string
+			gotPayload := ""
+			execRemoteFn = func(_ context.Context, service string, args []string, stdin io.Reader, _ bool) error {
+				if service != "scheduled-path" {
+					t.Fatalf("service = %q", service)
+				}
+				gotArgs = append([]string{}, args...)
+				raw, err := io.ReadAll(stdin)
+				if err != nil {
+					return err
+				}
+				gotPayload = string(raw)
+				return nil
+			}
+			if err := runFromProjectConfig(loc, "host-a"); err != nil {
+				t.Fatalf("runFromProjectConfig: %v", err)
+			}
+			if !reflect.DeepEqual(gotArgs, []string{"run", "--cron=0 9 15 * *"}) {
+				t.Fatalf("remote args = %#v", gotArgs)
+			}
+			if gotPayload != wantPayload {
+				t.Fatalf("uploaded payload = %q, want config-relative file content %q", gotPayload, wantPayload)
+			}
+		})
+	}
+}
+
+func TestExplicitCronReplacesConfiguredScheduleInRemoteRunAndPersistedConfig(t *testing.T) {
+	oldExec := execRemoteFn
+	oldArch := remoteCatchOSAndArchFn
+	oldService := serviceOverride
+	oldTerminal := isTerminalFn
+	oldHashes := fetchRemoteArtifactHashesFn
+	oldInfo := fetchRunChangeServiceInfoFn
+	t.Cleanup(func() {
+		execRemoteFn = oldExec
+		remoteCatchOSAndArchFn = oldArch
+		serviceOverride = oldService
+		isTerminalFn = oldTerminal
+		fetchRemoteArtifactHashesFn = oldHashes
+		fetchRunChangeServiceInfoFn = oldInfo
+	})
+
 	serviceOverride = "backup"
 	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	isTerminalFn = func(int) bool { return false }
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
+	fetchRunChangeServiceInfoFn = func(context.Context, string, string) (catchrpc.ServiceInfoResponse, error) {
+		return catchrpc.ServiceInfoResponse{Found: false}, nil
+	}
+
 	tmp := t.TempDir()
-	payload := filepath.Join(tmp, "backup")
-	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+	payload := filepath.Join(tmp, "backup.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	loc := &projectConfigLocation{
 		Path: filepath.Join(tmp, projectConfigName),
 		Dir:  tmp,
 		Config: &ProjectConfig{Version: projectConfigVersion, Services: []ServiceEntry{{
-			Name: "backup", Host: "host-a", Type: serviceTypeCron, Payload: "backup", Schedule: "0 1 * * *", RunAs: "backup",
+			Name: "backup", Host: "host-a", Payload: "backup.sh", Schedule: "0 3 * * *",
 		}}},
 	}
-	var got []string
-	execRemoteFn = func(_ context.Context, _ string, args []string, _ io.Reader, _ bool) error {
-		got = append([]string{}, args...)
+	if err := saveProjectConfig(loc); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotArgs []string
+	execRemoteFn = func(_ context.Context, _ string, args []string, stdin io.Reader, _ bool) error {
+		if stdin == nil {
+			t.Fatal("scheduled file run did not upload its payload")
+		}
+		gotArgs = append([]string{}, args...)
 		return nil
 	}
-	err := handleSvcCron(svcCommandRequest{
-		Command:      svcCommand{Args: []string{payload, "0 3 * * *"}},
+	request := svcCommandRequest{
+		Command:      svcCommand{Args: []string{payload, "--cron=30 4 * * *"}},
 		Config:       loc,
 		HostOverride: "host-a",
 		Service:      "backup",
-	})
+	}
+	if err := handleSvcRun(request); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotArgs, []string{"run", "--cron=30 4 * * *"}) {
+		t.Fatalf("remote args = %#v, want explicit replacement schedule", gotArgs)
+	}
+	reloaded, err := loadProjectConfigFromDir(tmp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"cron", "--run-as=backup", "--schedule=0 3 * * *"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("remote args = %#v, want %#v", got, want)
-	}
-	entry, ok := loc.Config.ServiceEntry("backup", "host-a")
-	if !ok || entry.RunAs != "backup" {
-		t.Fatalf("saved entry = %#v, want configured run-as preserved", entry)
+	entry, ok := reloaded.Config.ServiceEntry("backup", "host-a")
+	if !ok || entry.Schedule != "30 4 * * *" {
+		t.Fatalf("persisted entry = %#v, ok=%v", entry, ok)
 	}
 }
 

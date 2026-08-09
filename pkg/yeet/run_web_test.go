@@ -198,8 +198,7 @@ func TestRunWebBootstrapISOCompatibilityEnums(t *testing.T) {
 		"remote-image": true,
 		"python":       true,
 		"typescript":   true,
-		"file":         false,
-		"cron":         false,
+		"file":         true,
 	}
 	for _, workload := range boot.Options.Workloads {
 		gotISO := false
@@ -215,9 +214,16 @@ func TestRunWebBootstrapISOCompatibilityEnums(t *testing.T) {
 func TestRunWebBootstrapExposesWorkloadsAndCatalogVMImages(t *testing.T) {
 	boot := newRunWebBootstrap(nil, "", "", nil)
 
-	wantKinds := []string{"compose", "vm", "dockerfile", "remote-image", "python", "typescript", "file", "cron"}
+	wantKinds := []string{"compose", "vm", "dockerfile", "remote-image", "python", "typescript", "file"}
 	if got := runWebWorkloadKinds(boot.Options.Workloads); !reflect.DeepEqual(got, wantKinds) {
 		t.Fatalf("workload kinds = %#v, want %#v", got, wantKinds)
+	}
+	fileHint := boot.Options.Workloads[len(boot.Options.Workloads)-1]
+	if !reflect.DeepEqual(fileHint.Networks, []string{"host", "svc", "ts", "lan", "iso"}) {
+		t.Fatalf("file networks = %#v, want host, svc, ts, lan, iso", fileHint.Networks)
+	}
+	if fileHint.Description != "Upload and run, or schedule, a native binary or script." {
+		t.Fatalf("file description = %q", fileHint.Description)
 	}
 	if len(boot.Options.VMImages) != 2 {
 		t.Fatalf("VMImages = %#v, want ubuntu and nixos catalog images", boot.Options.VMImages)

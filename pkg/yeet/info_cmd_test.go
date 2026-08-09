@@ -1054,11 +1054,11 @@ func TestInfoClientConfigRows(t *testing.T) {
 
 	got = clientConfigRows(clientInfo{
 		Found: true,
-		Entry: &clientServiceEntry{Host: "host-a", Type: serviceTypeCron},
+		Entry: &clientServiceEntry{Host: "host-a", Schedule: "0 3 * * *"},
 	})
 	assertInfoRows(t, got, []infoRow{
 		{Label: "Saved host", Value: "host-a"},
-		{Label: "Saved type", Value: serviceTypeCron},
+		{Label: "Schedule", Value: "0 3 * * *"},
 	})
 }
 
@@ -1095,6 +1095,53 @@ func TestInfoClientEntryMetadataRows(t *testing.T) {
 		{Label: "Schedule", Value: "@hourly"},
 	}
 	assertInfoRows(t, got, want)
+}
+
+func TestInfoRendersScheduledClientTypeFromSchedule(t *testing.T) {
+	section := renderServiceSection("backup", "host-a", clientInfo{
+		Found: true,
+		Entry: &clientServiceEntry{Host: "host-a", Schedule: "0 3 * * *"},
+	}, catchrpc.ServiceInfoResponse{})
+	assertInfoRows(t, section.Rows, []infoRow{
+		{Label: "Name", Value: "backup"},
+		{Label: "Host", Value: "host-a"},
+		{Label: "Type", Value: "cron service (local config)"},
+		{Label: "Status", Value: "unknown"},
+	})
+}
+
+func TestInfoRendersUnknownClientTypeForUnscheduledBlankType(t *testing.T) {
+	section := renderServiceSection("api", "host-a", clientInfo{
+		Found: true,
+		Entry: &clientServiceEntry{Host: "host-a"},
+	}, catchrpc.ServiceInfoResponse{})
+	assertInfoRows(t, section.Rows, []infoRow{
+		{Label: "Name", Value: "api"},
+		{Label: "Host", Value: "host-a"},
+		{Label: "Type", Value: "unknown"},
+		{Label: "Status", Value: "unknown"},
+	})
+}
+
+func TestInfoReportsScheduledServerConfigDriftWithoutInventingSchedule(t *testing.T) {
+	var out strings.Builder
+	err := renderInfoPlain(&out, "backup", "host-a", nil, serverInfo{}, clientInfo{
+		Found: true,
+		Entry: &clientServiceEntry{Host: "host-a", Payload: "job.sh"},
+	}, catchrpc.ServiceInfoResponse{
+		Found: true,
+		Info:  catchrpc.ServiceInfo{DataType: "cron"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if !strings.Contains(got, `schedule = "<five-field expression>"`) {
+		t.Fatalf("info output = %q, want schedule drift guidance", got)
+	}
+	if strings.Contains(got, "yeet cron") {
+		t.Fatalf("info output suggests removed command: %q", got)
+	}
 }
 
 func TestInfoRenderServerSection(t *testing.T) {
@@ -1383,17 +1430,17 @@ func TestInfoRenderImagesSection(t *testing.T) {
 
 func TestInfoFormatClientServiceType(t *testing.T) {
 	tests := []struct {
-		in   string
-		want string
+		entry clientServiceEntry
+		want  string
 	}{
-		{serviceTypeCron, "cron service (local config)"},
-		{serviceTypeRun, "run service (local config)"},
-		{"custom", "custom"},
+		{clientServiceEntry{Schedule: "0 3 * * *"}, "cron service (local config)"},
+		{clientServiceEntry{Type: serviceTypeRun}, "run service (local config)"},
+		{clientServiceEntry{Type: "custom"}, "custom"},
 	}
 
 	for _, tt := range tests {
-		if got := formatClientServiceType(tt.in); got != tt.want {
-			t.Fatalf("formatClientServiceType(%q) = %q, want %q", tt.in, got, tt.want)
+		if got := formatClientServiceType(tt.entry.Type, tt.entry.Schedule); got != tt.want {
+			t.Fatalf("formatClientServiceType(%#v) = %q, want %q", tt.entry, got, tt.want)
 		}
 	}
 }

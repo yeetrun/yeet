@@ -174,6 +174,7 @@ func TestSSHHostShellUsesRPCWithoutSSHCLI(t *testing.T) {
 }
 
 func TestSSHNonVMServiceUsesRPCShell(t *testing.T) {
+	useTempSvcCwd(t)
 	oldFetchInfo := fetchSSHServerInfoFunc
 	oldFetchSvc := fetchSSHServiceInfoFunc
 	oldExec := execRemoteShellFn

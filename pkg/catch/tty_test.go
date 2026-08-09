@@ -652,16 +652,6 @@ func TestProgressUIIncludesHostLabel(t *testing.T) {
 	}
 }
 
-func TestShouldBypassPtyInputForCron(t *testing.T) {
-	execer := &ttyExecer{
-		isPty: true,
-		args:  []string{"cron"},
-	}
-	if !execer.shouldBypassPtyInput() {
-		t.Fatalf("expected cron to bypass pty input")
-	}
-}
-
 func TestShouldBypassPtyInputModes(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -674,6 +664,7 @@ func TestShouldBypassPtyInputModes(t *testing.T) {
 		{name: "run", isPty: true, args: []string{"run"}, want: true},
 		{name: "copy", isPty: true, args: []string{"copy"}, want: true},
 		{name: "stage", isPty: true, args: []string{"stage"}, want: true},
+		{name: "legacy cron", isPty: true, args: []string{"cron"}},
 		{name: "vm images import stdin", isPty: true, args: []string{"vm", "images", "import", "foo/bar", "--stdin"}, want: true},
 		{name: "vm images import stdin flags before action", isPty: true, args: []string{"vm", "images", "--format=json", "import", "foo/bar", "--stdin"}, want: true},
 		{name: "vm images import without stdin", isPty: true, args: []string{"vm", "images", "import", "foo/bar"}},
@@ -809,7 +800,6 @@ func TestIsExpectedCopyErrUnwrapsOpaqueErrors(t *testing.T) {
 func TestTTYCommandHandlersCoverDispatchCommands(t *testing.T) {
 	expected := []string{
 		"copy",
-		"cron",
 		"disable",
 		"docker",
 		"edit",
@@ -850,10 +840,12 @@ func TestExecWithNoArgsReturnsNil(t *testing.T) {
 }
 
 func TestDispatchUnknownCommandReturnsError(t *testing.T) {
-	execer := &ttyExecer{}
-	err := execer.dispatch([]string{"bogus"})
-	if err == nil || !strings.Contains(err.Error(), `unhandled command "bogus"`) {
-		t.Fatalf("dispatch error = %v, want unhandled command", err)
+	for _, command := range []string{"bogus", "cron"} {
+		execer := &ttyExecer{}
+		err := execer.dispatch([]string{command})
+		if err == nil || !strings.Contains(err.Error(), `unhandled command "`+command+`"`) {
+			t.Fatalf("dispatch(%q) error = %v, want unhandled command", command, err)
+		}
 	}
 }
 

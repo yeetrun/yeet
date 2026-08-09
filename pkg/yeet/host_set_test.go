@@ -787,6 +787,7 @@ func TestRunHostSetCancelSkipsApply(t *testing.T) {
 }
 
 func TestRunHostSetBuildsZFSRequest(t *testing.T) {
+	useTempSvcCwd(t)
 	state := stubHostSetRuntime(t)
 	state.client.plan = catchrpc.HostStoragePlan{
 		Current:         catchrpc.HostStorageState{DataDir: "/flash/old-data", ServicesRoot: "/flash/old-services"},

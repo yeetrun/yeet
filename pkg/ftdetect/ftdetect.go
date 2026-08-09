@@ -38,6 +38,9 @@ type file struct {
 	goarch string
 }
 
+// DetectFile classifies a file and checks binary compatibility against goos
+// and goarch. Supplying both target values as empty performs kind detection
+// without compatibility enforcement.
 func DetectFile(path, goos, goarch string) (FileType, error) {
 	f, err := newFile(path)
 	if err != nil {
@@ -101,6 +104,9 @@ func (f *file) detectBinaryType() (FileType, bool, error) {
 	}
 
 	log.Printf("Detected binary file")
+	if f.goos == "" && f.goarch == "" {
+		return Binary, true, nil
+	}
 	same, err := f.isSameArch()
 	if err != nil {
 		log.Printf("Failed to check architecture: %v", err)
@@ -221,7 +227,7 @@ func (f *file) detectBinary() (bool, error) {
 		}
 		return true, nil
 	case macho.Magic32, macho.Magic64, macho.MagicFat: // Mach-O magic numbers
-		if f.goos != "darwin" {
+		if f.goos != "" && f.goos != "darwin" {
 			return false, fmt.Errorf("darwin binary (Mach-O) on non-darwin system")
 		}
 		return true, nil

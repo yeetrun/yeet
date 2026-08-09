@@ -306,7 +306,7 @@ func (e *ttyExecer) shouldBypassPtyInput() bool {
 		return false
 	}
 	switch e.args[0] {
-	case "run", "copy", "stage", "cron":
+	case "run", "copy", "stage":
 		return true
 	case "vm":
 		return vmCommandShouldBypassPtyInput(e.args[1:])
@@ -373,13 +373,6 @@ func (e *ttyExecer) exec() error {
 type ttyCommandHandler func(*ttyExecer, []string) error
 
 var ttyCommandHandlers = map[string]ttyCommandHandler{
-	"cron": func(e *ttyExecer, args []string) error {
-		flags, payloadArgs, err := cli.ParseCron(args)
-		if err != nil {
-			return err
-		}
-		return e.cronCmdFuncFlags(flags, payloadArgs)
-	},
 	"disable": func(e *ttyExecer, _ []string) error {
 		return e.disableCmdFunc()
 	},
@@ -508,11 +501,35 @@ func (e *ttyExecer) dispatch(args []string) error {
 	}
 	args = args[1:]
 	if permissions.has(permissionManage) {
-		return e.withLockedServiceMutation(func() error {
-			return handler(e, args)
+		target, err := e.serviceMutationTarget(cmd, args)
+		if err != nil {
+			return err
+		}
+		return e.withServiceTarget(target, func() error {
+			return e.withLockedServiceMutation(func() error {
+				return handler(e, args)
+			})
 		})
 	}
 	return handler(e, args)
+}
+
+func (e *ttyExecer) serviceMutationTarget(cmd string, args []string) (string, error) {
+	if cmd != "service" || len(args) == 0 || args[0] != "rollback" {
+		return e.sn, nil
+	}
+	rest, err := cli.ParseServiceRollback(argsWithServiceDefault(args[1:], e.sn))
+	if err != nil {
+		return "", err
+	}
+	return rest[0], nil
+}
+
+func (e *ttyExecer) withServiceTarget(serviceName string, operation func() error) error {
+	previous := e.sn
+	e.sn = serviceName
+	defer func() { e.sn = previous }()
+	return operation()
 }
 
 func (e *ttyExecer) printf(format string, a ...any) {

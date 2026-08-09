@@ -178,6 +178,152 @@ func TestRollbackCmdFuncSelectsPreviousGenerationAndInstallsWithHook(t *testing.
 	}
 }
 
+func TestRollbackRejectsScheduledToOrdinaryGenerationInsideServiceLock(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name:             "scheduled-rollback",
+		ServiceType:      db.ServiceTypeSystemd,
+		Generation:       2,
+		LatestGeneration: 2,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{
+				db.Gen(1): "/tmp/ordinary.service",
+				db.Gen(2): "/tmp/scheduled.service",
+			}},
+			db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{
+				db.Gen(2): "/tmp/scheduled.timer",
+				"latest":  "/tmp/scheduled.timer",
+			}},
+		},
+	})
+	installCalled := false
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "scheduled-rollback", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceInstallGenFunc: func(InstallerCfg, int) error {
+			installCalled = true
+			return nil
+		},
+	}
+
+	release := server.serviceOperationLocks.Lock("scheduled-rollback")
+	done := make(chan error, 1)
+	go func() { done <- execer.rollbackCmdFunc("scheduled-rollback") }()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("rollback bypassed service mutation lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "scheduled service can only be updated with a native binary or script") {
+			t.Fatalf("rollback error = %v, want scheduled-to-ordinary rejection", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("rollback did not resume after service mutation lock release")
+	}
+	if installCalled {
+		t.Fatal("rollback reached generation install/start seam")
+	}
+	service, err := server.serviceView("scheduled-rollback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service.Generation() != 2 {
+		t.Fatalf("generation = %d, want unchanged generation 2", service.Generation())
+	}
+}
+
+func TestRollbackDispatchLocksExplicitTargetService(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name:             "scheduled-target",
+		ServiceType:      db.ServiceTypeSystemd,
+		Generation:       2,
+		LatestGeneration: 2,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{
+				db.Gen(1): "/tmp/ordinary.service",
+				db.Gen(2): "/tmp/scheduled.service",
+			}},
+			db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{
+				db.Gen(2): "/tmp/scheduled.timer",
+				"latest":  "/tmp/scheduled.timer",
+			}},
+		},
+	})
+	installCalled := false
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: SystemService, rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceInstallGenFunc: func(InstallerCfg, int) error {
+			installCalled = true
+			return nil
+		},
+	}
+
+	release := server.serviceOperationLocks.Lock("scheduled-target")
+	done := make(chan error, 1)
+	go func() { done <- execer.dispatch([]string{"service", "rollback", "scheduled-target"}) }()
+	select {
+	case err := <-done:
+		release()
+		t.Fatalf("rollback bypassed explicit target mutation lock: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), scheduledNativeOnlyMessage) {
+			t.Fatalf("rollback error = %v, want scheduled-to-ordinary rejection", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("rollback did not resume after explicit target lock release")
+	}
+	if installCalled {
+		t.Fatal("rollback reached generation install/start seam")
+	}
+	if execer.sn != SystemService {
+		t.Fatalf("transport service = %q, want restored %q", execer.sn, SystemService)
+	}
+}
+
+func TestRollbackAllowsScheduledToScheduledGeneration(t *testing.T) {
+	server := newTestServer(t)
+	addTestServices(t, server, db.Service{
+		Name:             "scheduled-rollback",
+		ServiceType:      db.ServiceTypeSystemd,
+		Generation:       2,
+		LatestGeneration: 2,
+		Artifacts: db.ArtifactStore{
+			db.ArtifactSystemdUnit: {Refs: map[db.ArtifactRef]string{
+				db.Gen(1): "/tmp/previous.service",
+				db.Gen(2): "/tmp/current.service",
+			}},
+			db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{
+				db.Gen(1): "/tmp/previous.timer",
+				db.Gen(2): "/tmp/current.timer",
+			}},
+		},
+	})
+	installed := 0
+	execer := &ttyExecer{
+		ctx: context.Background(), s: server, sn: "scheduled-rollback", rw: &bytes.Buffer{}, progress: catchrpc.ProgressQuiet,
+		serviceInstallGenFunc: func(_ InstallerCfg, gen int) error {
+			installed = gen
+			return nil
+		},
+	}
+	if err := execer.rollbackCmdFunc("scheduled-rollback"); err != nil {
+		t.Fatal(err)
+	}
+	if installed != 1 {
+		t.Fatalf("installed generation = %d, want 1", installed)
+	}
+}
+
 func TestServiceCommandDispatchesRollbackAndGenerations(t *testing.T) {
 	server := newTestServer(t)
 	seedService(t, server, "svc-rollback", db.ServiceTypeSystemd, db.ArtifactStore{
@@ -791,7 +937,7 @@ func TestLogsCommandRejectsSystemService(t *testing.T) {
 func TestStatusCmdFuncRendersSystemStatusesWithoutLiveCommands(t *testing.T) {
 	server := newTestServer(t)
 	seedService(t, server, "timer", db.ServiceTypeSystemd, db.ArtifactStore{
-		db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{"latest": "/tmp/timer.timer"}},
+		db.ArtifactSystemdTimerFile: {Refs: map[db.ArtifactRef]string{db.Gen(1): "/tmp/timer.timer", "latest": "/tmp/timer.timer"}},
 	})
 	seedService(t, server, "devbox", db.ServiceTypeVM, nil)
 	seedService(t, server, "web", db.ServiceTypeDockerCompose, db.ArtifactStore{

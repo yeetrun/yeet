@@ -6,9 +6,46 @@ package yeet
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestUnifiedScheduledRunReleaseAssets(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", ".."))
+	assetPaths := []string{
+		"README.md",
+		".codex/skills/yeet-cli/references/yeet-help-agent.md",
+	}
+
+	assets := make(map[string]string, len(assetPaths))
+	for _, relPath := range assetPaths {
+		raw, err := os.ReadFile(filepath.Join(repoRoot, relPath))
+		if err != nil {
+			t.Fatalf("read %s: %v", relPath, err)
+		}
+		assets[relPath] = string(raw)
+		if strings.Contains(string(raw), "yeet cron") {
+			t.Errorf("%s documents removed yeet cron command", relPath)
+		}
+	}
+
+	help := assets[".codex/skills/yeet-cli/references/yeet-help-agent.md"]
+	runStart := strings.Index(help, "## Command: run\n")
+	if runStart < 0 {
+		t.Fatal("generated help is missing the run command section")
+	}
+	runEnd := strings.Index(help[runStart+1:], "\n## Command:")
+	if runEnd < 0 {
+		runEnd = len(help)
+	} else {
+		runEnd += runStart + 1
+	}
+	if !strings.Contains(help[runStart:runEnd], "--cron") {
+		t.Error("generated run help does not document --cron")
+	}
+}
 
 func TestYeetReleaseAssetNames(t *testing.T) {
 	tests := []struct {

@@ -23,7 +23,7 @@ type RunDraft struct {
 	PayloadKind    string            `json:"payloadKind,omitempty"`
 	EnvFile        string            `json:"envFile,omitempty"`
 	RunAs          string            `json:"runAs,omitempty"`
-	RunAsSet       bool              `json:"-"`
+	RunAsSet       bool              `json:"runAsSet,omitempty"`
 	Pull           bool              `json:"pull,omitempty"`
 	EnvFileArg     string            `json:"-"`
 	EnvFileSet     bool              `json:"-"`
@@ -117,6 +117,7 @@ func runDraftFromCLI(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverri
 	snapshots := snapshotOptionsForSvcRun(entry, flags)
 	filteredArgs := runArgsWithServiceRootOptions(effectiveArgs, serviceRootOptions{Root: serviceRoot, ZFS: serviceRootZFS})
 	filteredArgs = runArgsWithSnapshotOptions(filteredArgs, snapshots)
+	payloadKind := runDraftPayloadKind(payload, cfgLoc, entry, hasEntry, effectiveParsed.Cron)
 	host := strings.TrimSpace(hostOverride)
 	if host == "" {
 		host = Host()
@@ -126,6 +127,7 @@ func runDraftFromCLI(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverri
 		Service:        getService(),
 		Host:           host,
 		Payload:        payload,
+		PayloadKind:    payloadKind,
 		EnvFile:        envFile,
 		RunAs:          effectiveParsed.RunAs,
 		RunAsSet:       effectiveParsed.RunAsSet,
@@ -133,6 +135,7 @@ func runDraftFromCLI(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverri
 		EnvFileArg:     flags.EnvFileArg,
 		EnvFileSet:     flags.EnvFileSet,
 		PayloadArgs:    payloadArgsFromRunArgs(effectiveArgs),
+		Cron:           RunDraftCron{Schedule: effectiveParsed.Cron},
 		VM:             runDraftVMFromRunFlags(effectiveParsed),
 		Network:        runDraftNetworkFromRunFlags(effectiveParsed),
 		Storage:        RunDraftStorage{ServiceRoot: serviceRoot, ZFS: serviceRootZFS},
@@ -145,9 +148,23 @@ func runDraftFromCLI(cmdArgs []string, cfgLoc *projectConfigLocation, hostOverri
 	}, nil
 }
 
+func runDraftPayloadKind(payload string, cfgLoc *projectConfigLocation, entry ServiceEntry, hasEntry bool, schedule string) string {
+	storedPayload := hasEntry && payload == resolvePayloadPathForEntry(cfgLoc.Dir, entry)
+	if isVMPayload(payload) || storedPayload && entry.Type == serviceTypeVM {
+		return serviceTypeVM
+	}
+	if strings.TrimSpace(schedule) != "" {
+		return "file"
+	}
+	if !storedPayload {
+		return ""
+	}
+	return entry.PayloadKind
+}
+
 func (d RunDraft) runArgs() []string {
 	if d.RunArgsSet {
-		return append([]string{}, d.RunArgs...)
+		return runArgsWithScheduledDraftControls(append([]string{}, d.RunArgs...), d)
 	}
 	args := runArgsFromDraftNetwork(d.Network)
 	if d.RunAsSet {
@@ -166,7 +183,26 @@ func (d RunDraft) runArgs() []string {
 		args = append(args, "--")
 		args = append(args, d.PayloadArgs...)
 	}
-	return args
+	return runArgsWithScheduledDraftControls(args, d)
+}
+
+func runArgsWithScheduledDraftControls(args []string, draft RunDraft) []string {
+	schedule := strings.TrimSpace(draft.Cron.Schedule)
+	if schedule == "" {
+		return args
+	}
+	flagArgs, payloadArgs := splitRunArgsForParsing(args)
+	flagArgs = removeRunFlags(flagArgs, map[string]bool{"--cron": true, "--run-as": true})
+	out := []string{"--cron=" + schedule}
+	if draft.RunAsSet {
+		out = append(out, "--run-as="+strings.TrimSpace(draft.RunAs))
+	}
+	out = append(out, flagArgs...)
+	if len(payloadArgs) != 0 {
+		out = append(out, "--")
+		out = append(out, payloadArgs...)
+	}
+	return out
 }
 
 func runArgsFromDraftNetwork(n RunDraftNetwork) []string {
@@ -317,8 +353,6 @@ type runDraftExecuteOptions struct {
 	ForceDeploy bool
 }
 
-var runCronWithOutputFn = runCronWithOutput
-
 func executeRunDraft(ctx context.Context, draft RunDraft, cfgLoc *projectConfigLocation, forceDeploy bool) error {
 	return executeRunDraftWithOptions(ctx, draft, cfgLoc, runDraftExecuteOptions{
 		Stdout:      os.Stdout,
@@ -364,10 +398,6 @@ func executeRunDraftWithOptions(ctx context.Context, draft RunDraft, cfgLoc *pro
 		loadedPrefs = prevPrefs
 	}()
 
-	if draft.PayloadKind == serviceTypeCron {
-		return executeCronRunDraft(ctx, opts.Stdout, cfgLoc, host, draft)
-	}
-
 	runArgs := draft.runArgs()
 	if err := executeRunDraftOutput(ctx, opts.Stdout, draft, runArgs, opts.ForceDeploy || draft.ForceDeploy || draft.SnapshotChange); err != nil {
 		return cleanupFailedNewRunDraft(ctx, draft, host, service, err)
@@ -406,69 +436,6 @@ func runDraftStagedOnlyService(resp catchrpc.ServiceInfoResponse) bool {
 	return resp.Info.DataType == "" || resp.Info.DataType == "unknown"
 }
 
-func executeCronRunDraft(ctx context.Context, stdout io.Writer, cfgLoc *projectConfigLocation, host string, draft RunDraft) error {
-	if stdout == nil {
-		stdout = io.Discard
-	}
-	fields, err := parseCronSchedule(draft.Cron.Schedule)
-	if err != nil {
-		return err
-	}
-	cronFlags := cli.CronFlags{RunAs: draft.RunAs, RunAsSet: draft.RunAsSet, Schedule: strings.Join(fields, " ")}
-	var runErr error
-	if draft.RunAsSet {
-		runErr = runCronWithOutputIdentity(ctx, stdout, draft.Payload, cronFlags, draft.PayloadArgs)
-	} else {
-		runErr = runCronWithOutputFn(ctx, stdout, draft.Payload, fields, draft.PayloadArgs)
-	}
-	if runErr != nil {
-		return runErr
-	}
-	if err := saveCronConfigWithRunAs(cfgLoc, host, draft.Payload, fields, draft.PayloadArgs, draft.RunAs, draft.RunAsSet); err != nil {
-		if draft.RunAsSet {
-			return serviceIdentityConfigWriteError(serviceConfigHost(host), draft.Service, draft.RunAs, err)
-		}
-		return err
-	}
-	return nil
-}
-
-func runCronWithOutput(ctx context.Context, stdout io.Writer, file string, cronFields []string, binArgs []string) error {
-	return runCronWithOutputIdentity(ctx, stdout, file, cli.CronFlags{Schedule: strings.Join(cronFields, " ")}, binArgs)
-}
-
-func runCronWithOutputIdentity(ctx context.Context, stdout io.Writer, file string, flags cli.CronFlags, binArgs []string) error {
-	goos, goarch, err := remoteCatchOSAndArchFn()
-	if err != nil {
-		return err
-	}
-	payload, cleanup, _, err := openPayloadForUpload(file, goos, goarch)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-	cronFields := strings.Fields(flags.Schedule)
-	if len(cronFields) != 5 {
-		return fmt.Errorf("cron expression must have 5 fields, got %d", len(cronFields))
-	}
-	svc := getService()
-	nargs := []string{"cron"}
-	if flags.RunAsSet {
-		nargs = append(nargs, "--run-as="+flags.RunAs)
-		nargs = append(nargs, "--schedule="+strings.Join(cronFields, " "))
-		if len(binArgs) > 0 {
-			nargs = append(nargs, "--")
-		}
-	} else {
-		nargs = append(nargs, cronFields...)
-	}
-	if len(binArgs) > 0 {
-		nargs = append(nargs, binArgs...)
-	}
-	tty := isWriterTerminal(stdout)
-	return execRemoteToFn(ctx, svc, nargs, payload, tty, stdout)
-}
-
 func executeRunDraftOutput(ctx context.Context, stdout io.Writer, draft RunDraft, runArgs []string, forceDeploy bool) error {
 	if isStdoutWriter(stdout) {
 		return runDraftWithChanges(ctx, draft, runArgs, forceDeploy)
@@ -491,9 +458,6 @@ func saveRunDraftExecutionConfig(cfgLoc *projectConfigLocation, host string, dra
 }
 
 func runDraftCommandPreview(draft RunDraft) string {
-	if draft.PayloadKind == serviceTypeCron {
-		return runDraftCronCommandPreview(draft)
-	}
 	parts := []string{"yeet", "run"}
 	if target := runDraftCommandTarget(draft); target != "" {
 		parts = append(parts, target)
@@ -503,24 +467,6 @@ func runDraftCommandPreview(draft RunDraft) string {
 	}
 	parts = appendRunDraftCommandPreviewControlArgs(parts, draft)
 	parts = append(parts, runArgsWithSensitiveRunOptionsHidden(draft.runArgs())...)
-	return shellJoin(parts)
-}
-
-func runDraftCronCommandPreview(draft RunDraft) string {
-	parts := []string{"yeet", "cron"}
-	if target := runDraftCommandTarget(draft); target != "" {
-		parts = append(parts, target)
-	}
-	if strings.TrimSpace(draft.Payload) != "" {
-		parts = append(parts, draft.Payload)
-	}
-	if schedule := strings.TrimSpace(draft.Cron.Schedule); schedule != "" {
-		parts = append(parts, schedule)
-	}
-	if len(draft.PayloadArgs) != 0 {
-		parts = append(parts, "--")
-		parts = append(parts, draft.PayloadArgs...)
-	}
 	return shellJoin(parts)
 }
 
@@ -628,10 +574,6 @@ func runDraftNetworkGuardEntry(draft RunDraft) ServiceEntry {
 		entry.PayloadKind = serviceTypeVM
 	}
 	return entry
-}
-
-func runLocalImagePayload(payload string, args []string) error {
-	return runLocalImagePayloadContext(context.Background(), payload, args)
 }
 
 func runLocalImagePayloadContext(ctx context.Context, payload string, args []string) error {

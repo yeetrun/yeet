@@ -911,7 +911,7 @@ func TestRunWebAPIValidateAndDeploy(t *testing.T) {
 			Config: &ProjectConfig{Version: projectConfigVersion},
 		},
 	})
-	draft := RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh", EnvFile: ".env"}
+	draft := RunDraft{Service: "svc-a", Host: "host-a", Payload: "run.sh", EnvFile: ".env", RunAs: "app:app", RunAsSet: true}
 	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/validate", draft)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("validate status = %d body=%s", rec.Code, rec.Body.String())
@@ -932,10 +932,13 @@ func TestRunWebAPIValidateAndDeploy(t *testing.T) {
 	if deployed.EnvFile != envFile || !deployed.EnvFileSet || deployed.EnvFileArg != envFile {
 		t.Fatalf("deployed env = file:%q set:%v arg:%q, want normalized explicit env", deployed.EnvFile, deployed.EnvFileSet, deployed.EnvFileArg)
 	}
+	if deployed.RunAs != "app:app" || !deployed.RunAsSet {
+		t.Fatalf("deployed identity = %q/%v, want app:app/true", deployed.RunAs, deployed.RunAsSet)
+	}
 	waitRunWebJobState(t, s, jobID, runWebJobSucceeded)
 }
 
-func TestRunWebAPIDeployCronDraft(t *testing.T) {
+func TestRunWebAPIDeployScheduledNativeDraft(t *testing.T) {
 	oldInfo := fetchRunDraftServiceInfoFn
 	oldExecDraft := executeRunDraftWithOptionsFn
 	defer func() {
@@ -946,9 +949,11 @@ func TestRunWebAPIDeployCronDraft(t *testing.T) {
 		return catchrpc.ServiceInfoResponse{Found: false}, nil
 	}
 	var deployed RunDraft
+	var deployedConfig *projectConfigLocation
 	done := make(chan struct{})
 	executeRunDraftWithOptionsFn = func(ctx context.Context, draft RunDraft, cfg *projectConfigLocation, opts runDraftExecuteOptions) error {
 		deployed = draft
+		deployedConfig = cfg
 		close(done)
 		return nil
 	}
@@ -958,12 +963,18 @@ func TestRunWebAPIDeployCronDraft(t *testing.T) {
 	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
 		t.Fatalf("write payload: %v", err)
 	}
-	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root})
+	config := &projectConfigLocation{
+		Dir:    root,
+		Config: &ProjectConfig{Version: projectConfigVersion},
+	}
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root, Config: config})
 	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/deploy", RunDraft{
 		Service:     "backup",
 		Host:        "yeet-lab",
 		Payload:     "job.sh",
-		PayloadKind: serviceTypeCron,
+		PayloadKind: "file",
+		RunAs:       "backup:backup",
+		RunAsSet:    true,
 		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
 		PayloadArgs: []string{"--full"},
 	})
@@ -973,10 +984,39 @@ func TestRunWebAPIDeployCronDraft(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for cron deploy")
+		t.Fatal("timed out waiting for scheduled deploy")
 	}
-	if deployed.PayloadKind != serviceTypeCron || deployed.Cron.Schedule != "0 3 * * *" || !reflect.DeepEqual(deployed.PayloadArgs, []string{"--full"}) {
-		t.Fatalf("deployed cron draft = %#v", deployed)
+	if deployedConfig != config {
+		t.Fatalf("deployed config = %#v, want ordinary run config %#v", deployedConfig, config)
+	}
+	if deployed.PayloadKind != "file" || deployed.Cron.Schedule != "0 3 * * *" || deployed.RunAs != "backup:backup" || !deployed.RunAsSet || !reflect.DeepEqual(deployed.PayloadArgs, []string{"--full"}) {
+		t.Fatalf("deployed scheduled native draft = %#v", deployed)
+	}
+}
+
+func TestRunWebAPIValidateMapsExplicitEmptyRunAs(t *testing.T) {
+	root := t.TempDir()
+	payload := filepath.Join(root, "run.sh")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	s := newRunWebServer(runWebServerConfig{Token: "secret", Root: root})
+	rec := runWebAPIRequest(t, s, http.MethodPost, "/api/validate", RunDraft{
+		Service:     "svc-a",
+		Host:        "host-a",
+		Payload:     "run.sh",
+		PayloadKind: "file",
+		RunAsSet:    true,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp runWebValidateResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode validate response: %v", err)
+	}
+	if got := resp.Validation.fieldError("runAs"); got != "--run-as requires USER[:GROUP]" {
+		t.Fatalf("runAs error = %q", got)
 	}
 }
 

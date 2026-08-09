@@ -71,10 +71,6 @@
               <input type="radio" name="workload" value="file">
               <span>Binary/script</span>
             </label>
-            <label class="workload-option">
-              <input type="radio" name="workload" value="cron">
-              <span>Scheduled job</span>
-            </label>
           </fieldset>
 
           <div class="source-head">
@@ -108,9 +104,15 @@
           </div>
 
           <label for="cronSchedule" data-field="cron.schedule" id="cronScheduleField" hidden>
-            <span>Schedule <button type="button" class="help" tabindex="-1" data-help="Five-field cron expression. Presets fill this raw value." aria-label="Help for cron schedule">?</button></span>
+            <span>Schedule (optional five-field cron) <button type="button" class="help" tabindex="-1" data-help="Five-field cron expression. Presets fill this raw value." aria-label="Help for cron schedule">?</button></span>
             <input id="cronSchedule" name="cronSchedule" autocomplete="off" spellcheck="false" placeholder="0 3 * * *">
             <span class="field-error" id="cronScheduleError"></span>
+          </label>
+
+          <label for="runAs" data-field="runAs" id="runAsField" hidden>
+            <span>Run as <button type="button" class="help" tabindex="-1" data-help="Optional USER[:GROUP] identity for a native binary or script." aria-label="Help for run as">?</button></span>
+            <input id="runAs" name="runAs" autocomplete="off" spellcheck="false" placeholder="app:app">
+            <span class="field-error" id="runAsError"></span>
           </label>
 
           <label for="envFile" data-field="envFile">

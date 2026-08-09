@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/yeetrun/yeet/pkg/catchrpc"
-	"github.com/yeetrun/yeet/pkg/cli"
 )
 
 func preserveRunDraftGlobals(t *testing.T) {
@@ -89,6 +88,47 @@ func TestRunDraftFromCLIParsesFirstDeployOptions(t *testing.T) {
 	}
 	if !reflect.DeepEqual(draft.PayloadArgs, []string{"--app-flag"}) {
 		t.Fatalf("PayloadArgs = %#v", draft.PayloadArgs)
+	}
+}
+
+func TestRunDraftFromCLIParsesScheduledNativeWorkload(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	serviceOverride = "owesplit"
+
+	tmp := t.TempDir()
+	payload := filepath.Join(tmp, "owesplit")
+	if err := os.WriteFile(payload, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: projectConfigVersion}}
+
+	draft, err := runDraftFromCLI([]string{payload, `--cron=0 9 15 * *`, "--net=iso", "--", "-live"}, loc, "yeet-pve1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.PayloadKind != "file" || draft.Cron.Schedule != "0 9 15 * *" || !reflect.DeepEqual(draft.PayloadArgs, []string{"-live"}) {
+		t.Fatalf("draft = %#v", draft)
+	}
+	wantArgs := []string{"--cron=0 9 15 * *", "--net=iso", "--", "-live"}
+	if got := draft.runArgs(); !reflect.DeepEqual(got, wantArgs) {
+		t.Fatalf("runArgs() = %#v, want %#v", got, wantArgs)
+	}
+}
+
+func TestRunDraftFromCLIPreservesScheduledVMKindForNativeOnlyValidation(t *testing.T) {
+	preserveRunDraftGlobals(t)
+	serviceOverride = "devbox"
+
+	draft, err := runDraftFromCLI([]string{"vm://ubuntu/26.04", `--cron=0 9 15 * *`}, nil, "yeet-pve1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if draft.PayloadKind != serviceTypeVM {
+		t.Fatalf("PayloadKind = %q, want %q", draft.PayloadKind, serviceTypeVM)
+	}
+	_, validation := validateRunDraftLocal(draft, t.TempDir())
+	if got := validation.fieldError("payload"); !strings.Contains(got, "scheduled workloads require a native binary or script payload") {
+		t.Fatalf("payload error = %q, errors = %#v", got, validation.Errors)
 	}
 }
 
@@ -277,18 +317,18 @@ func TestRunDraftCommandPreviewRedactsSeparatedTailscaleAuthKey(t *testing.T) {
 	}
 }
 
-func TestRunDraftCommandPreviewForCronWorkload(t *testing.T) {
+func TestRunDraftCommandPreviewForScheduledWorkload(t *testing.T) {
 	draft := RunDraft{
 		Service:     "backup",
 		Host:        "yeet-lab",
 		Payload:     "./job.sh",
-		PayloadKind: serviceTypeCron,
+		PayloadKind: "file",
 		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
 		PayloadArgs: []string{"--full"},
 	}
 
 	got := runDraftCommandPreview(draft)
-	want := "yeet cron backup@yeet-lab ./job.sh '0 3 * * *' -- --full"
+	want := "yeet run backup@yeet-lab ./job.sh '--cron=0 3 * * *' -- --full"
 	if got != want {
 		t.Fatalf("preview = %q, want %q", got, want)
 	}
@@ -731,19 +771,23 @@ func TestExecuteRunDraftCleansStagedOnlyServiceAfterFailedNewDeploy(t *testing.T
 	}
 }
 
-func TestExecuteRunDraftCronUsesCronRunnerAndSavesConfig(t *testing.T) {
+func TestExecuteRunDraftScheduledUsesStandardRunOutputAndSavesConfig(t *testing.T) {
 	preserveRunDraftGlobals(t)
-	oldCron := runCronWithOutputFn
-	defer func() { runCronWithOutputFn = oldCron }()
-
-	var gotFile string
-	var gotFields []string
+	oldArch, oldExec, oldHashes := remoteCatchOSAndArchFn, execRemoteToFn, fetchRemoteArtifactHashesFn
+	t.Cleanup(func() {
+		remoteCatchOSAndArchFn, execRemoteToFn, fetchRemoteArtifactHashesFn = oldArch, oldExec, oldHashes
+	})
+	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
 	var gotArgs []string
-	runCronWithOutputFn = func(ctx context.Context, stdout io.Writer, file string, cronFields []string, binArgs []string) error {
-		gotFile = file
-		gotFields = append([]string{}, cronFields...)
-		gotArgs = append([]string{}, binArgs...)
-		_, _ = io.WriteString(stdout, "cron installed\n")
+	execRemoteToFn = func(_ context.Context, service string, args []string, stdin io.Reader, _ bool, stdout io.Writer) error {
+		if service != "backup" || stdin == nil {
+			t.Fatalf("remote call = service %q stdin %v", service, stdin)
+		}
+		gotArgs = append([]string{}, args...)
+		_, _ = io.WriteString(stdout, "scheduled run installed\n")
 		return nil
 	}
 
@@ -763,35 +807,38 @@ func TestExecuteRunDraftCronUsesCronRunnerAndSavesConfig(t *testing.T) {
 		Service:     "backup",
 		Host:        "yeet-lab",
 		Payload:     payload,
-		PayloadKind: serviceTypeCron,
+		PayloadKind: "file",
 		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
 		PayloadArgs: []string{"--full"},
 	}, loc, runDraftExecuteOptions{Stdout: &out})
 	if err != nil {
 		t.Fatalf("executeRunDraftWithOptions: %v", err)
 	}
-	if gotFile != payload || !reflect.DeepEqual(gotFields, []string{"0", "3", "*", "*", "*"}) || !reflect.DeepEqual(gotArgs, []string{"--full"}) {
-		t.Fatalf("cron runner got file=%q fields=%#v args=%#v", gotFile, gotFields, gotArgs)
+	if !reflect.DeepEqual(gotArgs, []string{"run", "--cron=0 3 * * *", "--", "--full"}) {
+		t.Fatalf("standard run args = %#v", gotArgs)
 	}
-	if !strings.Contains(out.String(), "cron installed") {
-		t.Fatalf("stdout = %q, want cron output", out.String())
+	if !strings.Contains(out.String(), "scheduled run installed") {
+		t.Fatalf("stdout = %q, want standard run output", out.String())
 	}
 	entry, ok := loc.Config.ServiceEntry("backup", "yeet-lab")
 	if !ok {
 		t.Fatal("saved config missing backup@yeet-lab")
 	}
-	if entry.Type != serviceTypeCron || entry.Payload != "job.sh" || entry.Schedule != "0 3 * * *" || !reflect.DeepEqual(entry.Args, []string{"--full"}) {
-		t.Fatalf("saved cron entry = %#v", entry)
+	if entry.Type != "" || entry.Payload != "job.sh" || entry.Schedule != "0 3 * * *" || !reflect.DeepEqual(entry.Args, []string{"--", "--full"}) {
+		t.Fatalf("saved scheduled run entry = %#v", entry)
 	}
 }
 
-func TestExecuteRunDraftCronRunAsReportsConfigPartialSuccess(t *testing.T) {
+func TestExecuteRunDraftScheduledRunAsReportsConfigPartialSuccess(t *testing.T) {
 	preserveRunDraftGlobals(t)
-	oldArch, oldExec, oldCreate := remoteCatchOSAndArchFn, execRemoteToFn, createProjectConfigFileFn
+	oldArch, oldExec, oldCreate, oldHashes := remoteCatchOSAndArchFn, execRemoteToFn, createProjectConfigFileFn, fetchRemoteArtifactHashesFn
 	t.Cleanup(func() {
-		remoteCatchOSAndArchFn, execRemoteToFn, createProjectConfigFileFn = oldArch, oldExec, oldCreate
+		remoteCatchOSAndArchFn, execRemoteToFn, createProjectConfigFileFn, fetchRemoteArtifactHashesFn = oldArch, oldExec, oldCreate, oldHashes
 	})
 	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
+	fetchRemoteArtifactHashesFn = func(context.Context, string) (catchrpc.ArtifactHashesResponse, bool, error) {
+		return catchrpc.ArtifactHashesResponse{Found: false}, true, nil
+	}
 	remoteCalls := 0
 	execRemoteToFn = func(context.Context, string, []string, io.Reader, bool, io.Writer) error {
 		remoteCalls++
@@ -808,7 +855,7 @@ func TestExecuteRunDraftCronRunAsReportsConfigPartialSuccess(t *testing.T) {
 		Service:     "api",
 		Host:        "host.example.com",
 		Payload:     payload,
-		PayloadKind: serviceTypeCron,
+		PayloadKind: "file",
 		RunAs:       "app:app",
 		RunAsSet:    true,
 		Cron:        RunDraftCron{Schedule: "0 3 * * *"},
@@ -858,132 +905,6 @@ func TestRunDraftFromCLIPreservesAbsentLegacyRunAs(t *testing.T) {
 	}
 	if draft.RunAs != "" || draft.RunAsSet || runArgsHaveFlag(draft.runArgs(), "--run-as") {
 		t.Fatalf("legacy draft = %#v args=%#v", draft, draft.runArgs())
-	}
-}
-
-func TestRunCronWithOutputForwardsCanonicalRunAs(t *testing.T) {
-	preserveRunDraftGlobals(t)
-	oldRemoteArch := remoteCatchOSAndArchFn
-	oldExecRemoteTo := execRemoteToFn
-	defer func() { remoteCatchOSAndArchFn = oldRemoteArch; execRemoteToFn = oldExecRemoteTo }()
-	serviceOverride = "backup"
-	remoteCatchOSAndArchFn = func() (string, string, error) { return "linux", "amd64", nil }
-	var got []string
-	execRemoteToFn = func(_ context.Context, _ string, args []string, _ io.Reader, _ bool, _ io.Writer) error {
-		got = append([]string{}, args...)
-		return nil
-	}
-	payload := filepath.Join(t.TempDir(), "backup")
-	if err := os.WriteFile(payload, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	err := runCronWithOutputIdentity(context.Background(), io.Discard, payload, cli.CronFlags{RunAs: "backup", RunAsSet: true, Schedule: "0 3 * * *"}, []string{"--daily"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"cron", "--run-as=backup", "--schedule=0 3 * * *", "--", "--daily"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("args = %#v, want %#v", got, want)
-	}
-}
-
-func TestRunCronWithOutputUsesRemoteExecToAndWriter(t *testing.T) {
-	preserveRunDraftGlobals(t)
-	oldRemoteArch := remoteCatchOSAndArchFn
-	oldExecRemoteTo := execRemoteToFn
-	defer func() {
-		remoteCatchOSAndArchFn = oldRemoteArch
-		execRemoteToFn = oldExecRemoteTo
-	}()
-
-	serviceOverride = "backup"
-	remoteCatchOSAndArchFn = func() (string, string, error) {
-		return "linux", "amd64", nil
-	}
-	var gotService string
-	var gotArgs []string
-	var gotTTY bool
-	execRemoteToFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
-		gotService = service
-		gotArgs = append([]string{}, args...)
-		gotTTY = tty
-		_, _ = io.WriteString(stdout, "cron installed\n")
-		return nil
-	}
-
-	tmp := t.TempDir()
-	payload := filepath.Join(tmp, "job.sh")
-	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	var out strings.Builder
-	err := runCronWithOutput(context.Background(), &out, payload, []string{"0", "3", "*", "*", "*"}, []string{"--full"})
-	if err != nil {
-		t.Fatalf("runCronWithOutput: %v", err)
-	}
-	if gotService != "backup" {
-		t.Fatalf("service = %q, want backup", gotService)
-	}
-	if !reflect.DeepEqual(gotArgs, []string{"cron", "0", "3", "*", "*", "*", "--full"}) {
-		t.Fatalf("args = %#v", gotArgs)
-	}
-	if gotTTY {
-		t.Fatalf("tty = true, want false for test stdout")
-	}
-	if !strings.Contains(out.String(), "cron installed") {
-		t.Fatalf("stdout = %q, want cron output", out.String())
-	}
-}
-
-type runDraftTerminalWriter struct {
-	strings.Builder
-	file *os.File
-}
-
-func (w *runDraftTerminalWriter) terminalFile() *os.File {
-	return w.file
-}
-
-func TestRunCronWithOutputPreservesTerminalWriterTTY(t *testing.T) {
-	preserveRunDraftGlobals(t)
-	oldRemoteArch := remoteCatchOSAndArchFn
-	oldExecRemoteTo := execRemoteToFn
-	oldIsTerminal := isTerminalFn
-	defer func() {
-		remoteCatchOSAndArchFn = oldRemoteArch
-		execRemoteToFn = oldExecRemoteTo
-		isTerminalFn = oldIsTerminal
-	}()
-
-	serviceOverride = "backup"
-	remoteCatchOSAndArchFn = func() (string, string, error) {
-		return "linux", "amd64", nil
-	}
-	isTerminalFn = func(fd int) bool {
-		return fd == int(os.Stdout.Fd())
-	}
-	var gotTTY bool
-	execRemoteToFn = func(ctx context.Context, service string, args []string, stdin io.Reader, tty bool, stdout io.Writer) error {
-		gotTTY = tty
-		_, _ = io.WriteString(stdout, "cron installed\n")
-		return nil
-	}
-
-	tmp := t.TempDir()
-	payload := filepath.Join(tmp, "job.sh")
-	if err := os.WriteFile(payload, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
-		t.Fatalf("write payload: %v", err)
-	}
-	out := &runDraftTerminalWriter{file: os.Stdout}
-	err := runCronWithOutput(context.Background(), out, payload, []string{"0", "3", "*", "*", "*"}, nil)
-	if err != nil {
-		t.Fatalf("runCronWithOutput: %v", err)
-	}
-	if !gotTTY {
-		t.Fatal("tty = false, want true for terminal-backed writer")
-	}
-	if !strings.Contains(out.String(), "cron installed") {
-		t.Fatalf("stdout = %q, want cron output", out.String())
 	}
 }
 

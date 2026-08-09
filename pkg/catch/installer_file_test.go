@@ -1659,6 +1659,7 @@ func TestInstallerCloseStagesIdentityIndependentNativeAndTimerISO(t *testing.T) 
 		{name: "root", runAs: "0:0"},
 		{name: "non-root", runAs: "70000:70001"},
 		{name: "timer", runAs: "0:0", timer: &svc.TimerConfig{OnCalendar: "hourly"}},
+		{name: "timer-non-root", runAs: "70000:70001", timer: &svc.TimerConfig{OnCalendar: "hourly"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1696,7 +1697,10 @@ func TestInstallerCloseStagesIdentityIndependentNativeAndTimerISO(t *testing.T) 
 				t.Fatal(err)
 			}
 			unit := string(unitRaw)
+			user, group, _ := strings.Cut(tt.runAs, ":")
 			for _, want := range []string{
+				"User=" + user + "\n",
+				"Group=" + group + "\n",
 				"NetworkNamespacePath=/var/run/netns/" + service.ISO.NetNS + "\n",
 				"Requires=yeet-" + service.Name + "-ns.service\n",
 				"After=yeet-" + service.Name + "-ns.service\n",
@@ -1722,6 +1726,157 @@ func TestInstallerCloseStagesIdentityIndependentNativeAndTimerISO(t *testing.T) 
 				}
 			}
 		})
+	}
+}
+
+func TestInstallerCloseScheduledRedeployPreservesCommittedTimer(t *testing.T) {
+	server := newTestServer(t)
+	seedScheduledService(t, server, "scheduled-preserved", "*-*-15 09:00:00", true)
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "scheduled-preserved"},
+		StageOnly:    true,
+		PayloadName:  "job.sh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	service := testService(t, server, "scheduled-preserved")
+	timerRaw, err := os.ReadFile(stagedArtifactPath(t, service, db.ArtifactSystemdTimerFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(timerRaw), "OnCalendar=*-*-15 09:00:00\n") {
+		t.Fatalf("preserved timer = %q", timerRaw)
+	}
+}
+
+func TestInstallerCloseScheduledRedeployRejectsCompose(t *testing.T) {
+	server := newTestServer(t)
+	seedScheduledService(t, server, "scheduled-compose", "*-*-15 09:00:00", true)
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "scheduled-compose"},
+		StageOnly:    true,
+		PayloadName:  "compose.yml",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installer.Write([]byte("services:\n  scheduled-compose:\n    image: busybox\n")); err != nil {
+		t.Fatal(err)
+	}
+	err = installer.Close()
+	if err == nil || !strings.Contains(err.Error(), "scheduled service can only be updated with a native binary or script") {
+		t.Fatalf("Close error = %v", err)
+	}
+}
+
+func TestInstallerCloseScheduledRedeployLeavesOrdinaryNativeServiceOrdinary(t *testing.T) {
+	server := newTestServer(t)
+	seedNativeService(t, server, "ordinary-native")
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{ServiceName: "ordinary-native"},
+		StageOnly:    true,
+		PayloadName:  "job.sh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	service := testService(t, server, "ordinary-native")
+	if _, ok := service.Artifacts.Staged(db.ArtifactSystemdTimerFile); ok {
+		t.Fatalf("ordinary service staged a timer: %#v", service.Artifacts)
+	}
+}
+
+func TestInstallerCloseScheduledRedeployReplacesCommittedTimer(t *testing.T) {
+	server := newTestServer(t)
+	seedScheduledService(t, server, "scheduled-replaced", "*-*-15 09:00:00", true)
+	installer, err := NewFileInstaller(server, FileInstallerCfg{
+		InstallerCfg: InstallerCfg{
+			ServiceName: "scheduled-replaced",
+			Timer:       &svc.TimerConfig{OnCalendar: "*-*-* 03:00", Persistent: false},
+		},
+		StageOnly:   true,
+		PayloadName: "job.sh",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installer.Write([]byte("#!/bin/sh\nexit 0\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := installer.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+
+	service := testService(t, server, "scheduled-replaced")
+	timerRaw, err := os.ReadFile(stagedArtifactPath(t, service, db.ArtifactSystemdTimerFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(timerRaw), "OnCalendar=*-*-* 03:00\n") || !strings.Contains(string(timerRaw), "Persistent=false\n") {
+		t.Fatalf("replacement timer = %q", timerRaw)
+	}
+}
+
+func seedScheduledService(t *testing.T, server *Server, name, onCalendar string, persistent bool) {
+	t.Helper()
+	artifactsDir := t.TempDir()
+	timerPath := filepath.Join(artifactsDir, name+"-latest.timer")
+	timer := fmt.Sprintf("[Timer]\nOnCalendar=%s\nPersistent=%t\n", onCalendar, persistent)
+	if err := os.WriteFile(timerPath, []byte(timer), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stagedTimerPath := filepath.Join(artifactsDir, name+"-stale-staged.timer")
+	if err := os.WriteFile(stagedTimerPath, []byte("[Timer]\nOnCalendar=*-*-1 01:00:00\nPersistent=true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stagedUnitPath := filepath.Join(artifactsDir, name+"-staged.service")
+	if err := os.WriteFile(stagedUnitPath, []byte("[Service]\nExecStart=/old/job\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedNativeService(t, server, name)
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, service *db.Service) error {
+		service.Artifacts[db.ArtifactSystemdUnit] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+			"staged":  stagedUnitPath,
+			"latest":  stagedUnitPath,
+			db.Gen(1): stagedUnitPath,
+		}}
+		service.Artifacts[db.ArtifactSystemdTimerFile] = &db.Artifact{Refs: map[db.ArtifactRef]string{
+			"staged":  stagedTimerPath,
+			"latest":  timerPath,
+			db.Gen(1): timerPath,
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedNativeService(t *testing.T, server *Server, name string) {
+	t.Helper()
+	if _, _, err := server.cfg.DB.MutateService(name, func(_ *db.Data, service *db.Service) error {
+		service.ServiceType = db.ServiceTypeSystemd
+		service.Generation = 1
+		service.LatestGeneration = 1
+		service.Identity = &db.ServiceIdentity{RequestedUser: "root", RequestedGroup: "root", UID: 0, GID: 0}
+		service.Artifacts = db.ArtifactStore{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

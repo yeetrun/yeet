@@ -361,7 +361,7 @@ func renderInfoPlain(w io.Writer, service, host string, hostInfoErr error, hostI
 		renderHostSection(host, hostInfoErr, hostInfo),
 		renderServiceSection(service, host, client, server),
 		renderVMSection(server),
-		renderClientSection(client),
+		renderClientSection(client, server),
 		renderServerSection(server),
 		renderNetworkSection(server),
 		renderRuntimeSection(service, server),
@@ -571,8 +571,10 @@ func renderServiceSection(service, host string, client clientInfo, server catchr
 	serviceType := "unknown"
 	if server.Found && server.Info.DataType != "" {
 		serviceType = formatServiceDataType(server.Info.DataType)
-	} else if client.Entry != nil && client.Entry.Type != "" {
-		serviceType = formatClientServiceType(client.Entry.Type)
+	} else if client.Entry != nil {
+		if clientType := formatClientServiceType(client.Entry.Type, client.Entry.Schedule); clientType != "" {
+			serviceType = clientType
+		}
 	}
 	rows = append(rows, infoRow{Label: "Type", Value: serviceType})
 	status := "unknown"
@@ -748,8 +750,15 @@ func formatVMSSH(ssh *catchrpc.ServiceVMSSH) string {
 	return ""
 }
 
-func renderClientSection(client clientInfo) infoSection {
-	return infoSection{Title: "Client (yeet.toml)", Rows: clientConfigRows(client)}
+func renderClientSection(client clientInfo, server catchrpc.ServiceInfoResponse) infoSection {
+	rows := clientConfigRows(client)
+	if server.Found && server.Info.DataType == "cron" && (client.Entry == nil || strings.TrimSpace(client.Entry.Schedule) == "") {
+		rows = append(rows, infoRow{
+			Label: "Schedule drift",
+			Value: `catch reports a scheduled service; add schedule = "<five-field expression>" to yeet.toml`,
+		})
+	}
+	return infoSection{Title: "Client (yeet.toml)", Rows: rows}
 }
 
 func clientConfigRows(client clientInfo) []infoRow {
@@ -1411,10 +1420,11 @@ func formatServiceDataType(dt string) string {
 	}
 }
 
-func formatClientServiceType(t string) string {
-	switch t {
-	case serviceTypeCron:
+func formatClientServiceType(t, schedule string) string {
+	if strings.TrimSpace(schedule) != "" {
 		return "cron service (local config)"
+	}
+	switch t {
 	case serviceTypeRun:
 		return "run service (local config)"
 	default:

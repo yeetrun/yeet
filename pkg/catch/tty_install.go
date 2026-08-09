@@ -323,20 +323,46 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 		return err
 	}
 	if len(argsIn) > 0 && isVMImagePayload(argsIn[0]) {
-		if flags.RunAsSet {
-			return fmt.Errorf("--run-as does not control VM guest or Firecracker jailer identities; use VM guest settings because Firecracker host execution is managed separately")
-		}
-		if len(argsIn) != 1 {
-			return fmt.Errorf("VM payloads do not accept payload args")
-		}
-		if err := validateVMRunNetwork(flags); err != nil {
-			return err
-		}
-		return runVMCmdFunc(e, flags, argsIn[0])
+		return e.runVMPayload(flags, argsIn)
 	}
-	snapshotFlags, err := snapshotFlagsFromRunFlags(flags)
+	cfg, err := e.runFileInstallerCfg(flags, argsIn)
 	if err != nil {
 		return err
+	}
+	return e.runInstall("run", e.payloadReader(), cfg)
+}
+
+func (e *ttyExecer) runVMPayload(flags cli.RunFlags, args []string) error {
+	if flags.CronSet {
+		return errors.New(scheduledNativeOnlyMessage)
+	}
+	if flags.RunAsSet {
+		return fmt.Errorf("--run-as does not control VM guest or Firecracker jailer identities; use VM guest settings because Firecracker host execution is managed separately")
+	}
+	if len(args) != 1 {
+		return fmt.Errorf("VM payloads do not accept payload args")
+	}
+	if err := validateVMRunNetwork(flags); err != nil {
+		return err
+	}
+	return e.withLockedServiceMutation(func() error {
+		service, err := e.s.serviceView(e.sn)
+		if err != nil && !errors.Is(err, errServiceNotFound) {
+			return fmt.Errorf("inspect existing service before VM conversion: %w", err)
+		}
+		if err == nil {
+			if _, scheduled := activeGenerationArtifactPath(service, db.ArtifactSystemdTimerFile); scheduled {
+				return errors.New(scheduledNativeOnlyMessage)
+			}
+		}
+		return runVMCmdFunc(e, flags, args[0])
+	})
+}
+
+func (e *ttyExecer) runFileInstallerCfg(flags cli.RunFlags, argsIn []string) (FileInstallerCfg, error) {
+	snapshotFlags, err := snapshotFlagsFromRunFlags(flags)
+	if err != nil {
+		return FileInstallerCfg{}, err
 	}
 	cfg := e.fileInstaller(netFlagsFromRun(flags), argsIn)
 	cfg.ServiceRoot = flags.ServiceRoot
@@ -345,7 +371,14 @@ func (e *ttyExecer) runCmdFunc(flags cli.RunFlags, argsIn []string) error {
 	cfg.RunAs = flags.RunAs
 	cfg.RunAsSet = flags.RunAsSet
 	cfg.snapshotPolicyFlags = snapshotFlags
-	return e.runInstall("run", e.payloadReader(), cfg)
+	if flags.CronSet {
+		onCalendar, err := cronutil.CronToCalender(flags.Cron)
+		if err != nil {
+			return FileInstallerCfg{}, fmt.Errorf("invalid cron expression: %w", err)
+		}
+		cfg.Timer = &svc.TimerConfig{OnCalendar: onCalendar, Persistent: true}
+	}
+	return cfg, nil
 }
 
 func validateVMRunNetwork(flags cli.RunFlags) error {
@@ -1170,23 +1203,4 @@ func composePathFromArtifacts(af db.ArtifactStore) (string, error) {
 		return "", fmt.Errorf("compose file not found")
 	}
 	return path, nil
-}
-
-func (e *ttyExecer) cronCmdFunc(cronexpr string, args []string) error {
-	return e.cronCmdFuncFlags(cli.CronFlags{Schedule: cronexpr}, args)
-}
-
-func (e *ttyExecer) cronCmdFuncFlags(flags cli.CronFlags, args []string) error {
-	oncal, err := cronutil.CronToCalender(flags.Schedule)
-	if err != nil {
-		return fmt.Errorf("invalid cron expression: %w", err)
-	}
-	cfg := e.fileInstaller(netFlags{}, args)
-	cfg.RunAs = flags.RunAs
-	cfg.RunAsSet = flags.RunAsSet
-	cfg.Timer = &svc.TimerConfig{
-		OnCalendar: oncal,
-		Persistent: true, // This should be an option keyvalue in the future
-	}
-	return e.runInstall("cron", e.payloadReader(), cfg)
 }

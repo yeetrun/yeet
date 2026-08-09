@@ -901,48 +901,10 @@ func TestRunCallsUpdateAdvisoryAfterSuccessfulCommand(t *testing.T) {
 	}
 }
 
-func TestRunCronHelpAgentUsesSingleServicePlaceholder(t *testing.T) {
-	oldArgs := os.Args
-	oldHandleSvcCmdFn := handleSvcCmdFn
-	oldStdout := os.Stdout
-	oldBridgedArgs := bridgedArgs
-	oldRawArgs := rawArgs
-	t.Cleanup(func() {
-		os.Args = oldArgs
-		handleSvcCmdFn = oldHandleSvcCmdFn
-		os.Stdout = oldStdout
-		bridgedArgs = oldBridgedArgs
-		rawArgs = oldRawArgs
-	})
-
-	stdoutFile, err := os.CreateTemp(t.TempDir(), "stdout-*")
-	if err != nil {
-		t.Fatalf("create stdout temp file: %v", err)
-	}
-	os.Stdout = stdoutFile
-	os.Args = []string{"yeet", "cron", "--help-agent"}
-	handleSvcCmdFn = func(args []string) error {
-		t.Fatalf("cron help should not call handler with args %v", args)
-		return nil
-	}
-
-	if got := run(); got != 0 {
-		t.Fatalf("run exit code = %d, want 0", got)
-	}
-	if _, err := stdoutFile.Seek(0, 0); err != nil {
-		t.Fatalf("seek stdout: %v", err)
-	}
-	rawStdout, err := os.ReadFile(stdoutFile.Name())
-	if err != nil {
-		t.Fatalf("read stdout: %v", err)
-	}
-	stdout := string(rawStdout)
-	wantUsage := `yeet [GLOBAL_OPTIONS] cron <SERVICE> FILE "<cron expr>" [--run-as=USER[:GROUP]] [-- <args...>]`
-	if !strings.Contains(stdout, wantUsage) {
-		t.Fatalf("stdout missing usage %q:\n%s", wantUsage, stdout)
-	}
-	if strings.Contains(stdout, `SVC FILE "<cron expr>"`) {
-		t.Fatalf("stdout contains duplicate service placeholder:\n%s", stdout)
+func TestRunHelpAgentDoesNotExposeCronCommand(t *testing.T) {
+	stdout := captureCLIHelpOutput(t, "--help-agent")
+	if strings.Contains(stdout, "cron") {
+		t.Fatalf("top-level agent help exposes removed cron command:\n%s", stdout)
 	}
 }
 
@@ -950,10 +912,6 @@ func TestRunAsHelpMetadata(t *testing.T) {
 	run := cli.RemoteCommandInfos()["run"]
 	if run.FlagsSchema == nil {
 		t.Fatalf("run metadata = %#v", run)
-	}
-	cron := cli.RemoteCommandInfos()["cron"]
-	if cron.FlagsSchema == nil {
-		t.Fatalf("cron metadata = %#v", cron)
 	}
 	set, ok := cli.RemoteGroupCommandInfo("service", "set")
 	if !ok || set.FlagsSchema == nil {

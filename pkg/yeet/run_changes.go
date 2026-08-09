@@ -563,7 +563,6 @@ func ensureLockedRunFlags(entry ServiceEntry, runArgs []string) error {
 	return err
 }
 
-type runPayloadFunc func(string, []string) error
 type runPayloadContextFunc func(context.Context, string, []string) error
 
 func runWithChanges(payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
@@ -580,13 +579,6 @@ func runWithChangesContext(ctx context.Context, payload string, runArgs []string
 
 func runWithChangesToContext(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool) error {
 	return runWithChangesToWithContextRunner(ctx, stdout, payload, runArgs, envFile, entry, forceDeploy, runRunContext, false)
-}
-
-func runWithChangesToWithRunner(stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadFunc, alwaysDeployPayload bool) error {
-	contextRunner := func(_ context.Context, payload string, runArgs []string) error {
-		return runner(payload, runArgs)
-	}
-	return runWithChangesToWithContextRunner(context.Background(), stdout, payload, runArgs, envFile, entry, forceDeploy, contextRunner, alwaysDeployPayload)
 }
 
 func runWithChangesToWithContextRunner(ctx context.Context, stdout io.Writer, payload string, runArgs []string, envFile string, entry ServiceEntry, forceDeploy bool, runner runPayloadContextFunc, alwaysDeployPayload bool) error {

@@ -112,36 +112,3 @@ func TestBuildStatusRowsHandlesAggregateAndEmptyServices(t *testing.T) {
 		t.Fatalf("rows = %#v, want %#v", got, want)
 	}
 }
-
-func TestStoredServiceConfigSelectsSingleHostAndValidatesType(t *testing.T) {
-	oldService := serviceOverride
-	defer func() {
-		serviceOverride = oldService
-		resetHostOverride()
-	}()
-
-	serviceOverride = "svc-a"
-	cfg := &ProjectConfig{Version: projectConfigVersion}
-	cfg.SetServiceEntry(ServiceEntry{
-		Name:    "svc-a",
-		Host:    "host-a",
-		Type:    serviceTypeCron,
-		Payload: "run.sh",
-	})
-	loc := &projectConfigLocation{Dir: "/tmp/project", Config: cfg}
-
-	got, err := storedServiceConfig(loc, "", "cron", serviceTypeCron)
-	if err != nil {
-		t.Fatalf("storedServiceConfig error: %v", err)
-	}
-	if got.Service != "svc-a" || got.Host != "host-a" || got.Entry.Payload != "run.sh" {
-		t.Fatalf("stored config = %#v", got)
-	}
-	if Host() != "host-a" {
-		t.Fatalf("Host() = %q, want host-a", Host())
-	}
-
-	if _, err := storedServiceConfig(loc, "host-a", "run", serviceTypeRun); err == nil {
-		t.Fatalf("expected type validation error")
-	}
-}

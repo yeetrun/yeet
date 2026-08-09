@@ -154,13 +154,12 @@ func TestWebRunAssetsExposeISOCompatibility(t *testing.T) {
 	for _, want := range []string{
 		`vm: new Set(["svc", "lan", "iso"])`,
 		`compose: new Set(["svc", "lan", "ts", "iso"])`,
-		`file: new Set(["svc", "lan", "ts"])`,
-		`cron: new Set([])`,
+		`file: new Set(["svc", "lan", "ts", "iso"])`,
 		`function reconcileISOSelection(changedInput)`,
 		`if (changedInput.value === "iso")`,
 		`["svc", "lan"].includes(input.value)`,
 		`publish.value = ""`,
-		`publish.disabled = vmPayload || cronPayload || isoSelected`,
+		`publish.disabled = vmPayload || isoSelected`,
 		`ISO does not support published ports`,
 		`VMs support only iso as a Yeet-managed isolated mode`,
 	} {
@@ -196,12 +195,12 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		`value="dockerfile"`,
 		`value="remote-image"`,
 		`value="file"`,
-		`value="cron"`,
 		`id="sourceTitle"`,
 		`id="vmCatalog"`,
 		`id="manualVMSource"`,
 		`id="manualVMSourceError"`,
 		`id="cronSchedule"`,
+		`Schedule (optional five-field cron)`,
 		`id="tsVersion"`,
 		`id="tsExitNode"`,
 		`id="macvlanParent"`,
@@ -280,6 +279,10 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		`value="cron"`,
+		`payloadKind === "cron"`,
+		`cronPayload`,
+		`selectedWorkload() !== "cron"`,
 		"Needs attention",
 		`<div class="file-browser" id="fileBrowser"`,
 		`<summary>VM settings`,
@@ -316,7 +319,7 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 		"validate(draft, seq)",
 		"async function validate(draft, seq)",
 		`tsAuthKey = "<hidden>"`,
-		"cron: {",
+		`cron: payloadKind === "file" && schedule.trim()`,
 		"schedule:",
 		"manualVMSource",
 		"vmCatalog",
@@ -384,12 +387,9 @@ func TestWebRunAssetsExposeFirstDeployFields(t *testing.T) {
 	if strings.Contains(string(index)+string(app)+string(styles), "zfs-root-suggested") {
 		t.Fatal("ZFS root picker should not repeat the selected dataset and suggested path in each row")
 	}
-	if strings.Contains(string(app), "snapshots: snapshotDraftForPayloadKind(payloadKind),") {
-		t.Fatal("cron drafts must omit the snapshots field instead of sending an empty object")
-	}
 	if !strings.Contains(string(app), "const snapshots = snapshotDraftForPayloadKind(payloadKind);") ||
-		!strings.Contains(string(app), "...(cronPayload ? {} : { snapshots }),") {
-		t.Fatal("buildDraft must include snapshots only for non-cron payloads")
+		!strings.Contains(string(app), "snapshots,") {
+		t.Fatal("buildDraft must include snapshots for native files whether or not they are scheduled")
 	}
 	if strings.Contains(string(app), "required: vmPayload ? undefined") ||
 		strings.Contains(string(app), "events: vmPayload ? []") {
@@ -565,7 +565,11 @@ func TestWebRunServiceRootPlaceholderUsesHostStorageDefaults(t *testing.T) {
 	}
 }
 
-func TestWebRunPayloadArgsOnlyShowForRunnableFilesAndCron(t *testing.T) {
+func TestWebRunNativeFileScheduleUsesRunContract(t *testing.T) {
+	index, err := fs.ReadFile(webRunAssets, "web_run_assets/index.html")
+	if err != nil {
+		t.Fatalf("read index: %v", err)
+	}
 	app, err := fs.ReadFile(webRunAssets, "web_run_assets/app.js")
 	if err != nil {
 		t.Fatalf("read app: %v", err)
@@ -573,14 +577,40 @@ func TestWebRunPayloadArgsOnlyShowForRunnableFilesAndCron(t *testing.T) {
 	source := string(app)
 
 	for _, snippet := range []string{
+		`id="cronScheduleField"`,
+		`data-field="cron.schedule"`,
+		`Schedule (optional five-field cron)`,
+		`id="runAs"`,
+		`data-field="runAs"`,
 		"function payloadArgsEnabled()",
-		`return payloadKind === "file" || payloadKind === "cron"`,
+		`return payloadKind === "file"`,
 		`payloadArgs: payloadArgsEnabled() ? splitArgs($("payloadArgs").value) : []`,
+		`cron: payloadKind === "file" && schedule.trim()`,
+		`? { schedule: schedule.trim() }`,
+		`const runAs = $("runAs").value`,
+		`runAs: payloadKind === "file" ? runAs.trim() : ""`,
+		`runAsSet: payloadKind === "file" && Boolean(runAs.trim())`,
+		`if (draft.cron?.schedule) parts.push(`,
+		`--cron=${shell(draft.cron.schedule)}`,
+		`if (draft.runAsSet) parts.push(`,
+		`--run-as=${shell(draft.runAs)}`,
+		`$("runAs").closest("label").hidden = def.payloadKind !== "file"`,
+		`if (def.payloadKind !== "file") $("runAs").value = ""`,
+		`runAs: "runAs"`,
 		`$("payloadArgsBlock").hidden = !payloadArgsEnabled()`,
 	} {
-		if !strings.Contains(source, snippet) {
-			t.Fatalf("app missing payload args visibility behavior %s", snippet)
+		if strings.Contains(snippet, `id=`) || strings.Contains(snippet, `data-field=`) || strings.Contains(snippet, "Schedule (") {
+			if !strings.Contains(string(index), snippet) {
+				t.Fatalf("index missing native schedule behavior %s", snippet)
+			}
+			continue
 		}
+		if !strings.Contains(source, snippet) {
+			t.Fatalf("app missing native schedule behavior %s", snippet)
+		}
+	}
+	if strings.Contains(source, `["yeet", "cron"]`) || !strings.Contains(source, `const parts = ["yeet", "run"];`) {
+		t.Fatal("preview must always use yeet run")
 	}
 }
 

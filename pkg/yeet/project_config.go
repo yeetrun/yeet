@@ -394,6 +394,9 @@ func loadProjectConfigFromDir(startDir string) (*projectConfigLocation, error) {
 	if cfg.Version == 0 {
 		cfg.Version = projectConfigVersion
 	}
+	if err := validateLoadedProjectConfig(&cfg); err != nil {
+		return nil, err
+	}
 	return &projectConfigLocation{Path: path, Dir: filepath.Dir(path), Config: &cfg}, nil
 }
 
@@ -427,7 +430,22 @@ func loadProjectConfigFromFile(path string) (*projectConfigLocation, error) {
 	if cfg.Version == 0 {
 		cfg.Version = projectConfigVersion
 	}
+	if err := validateLoadedProjectConfig(&cfg); err != nil {
+		return nil, err
+	}
 	return &projectConfigLocation{Path: abs, Dir: filepath.Dir(abs), Config: &cfg}, nil
+}
+
+func validateLoadedProjectConfig(cfg *ProjectConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	for _, entry := range cfg.Services {
+		if strings.EqualFold(strings.TrimSpace(entry.Type), "cron") {
+			return fmt.Errorf("service %s uses removed type %q; remove type and keep schedule", entry.Name, entry.Type)
+		}
+	}
+	return nil
 }
 
 func expandUserConfigPath(path string) (string, error) {
@@ -902,6 +920,13 @@ func resolvePayloadPathForEntry(configDir string, entry ServiceEntry) string {
 	}
 	if strings.TrimSpace(entry.PayloadKind) == "local-image" {
 		return strings.TrimSpace(entry.Payload)
+	}
+	if strings.TrimSpace(entry.Schedule) != "" {
+		payload := strings.TrimSpace(entry.Payload)
+		if payload == "" || filepath.IsAbs(payload) {
+			return payload
+		}
+		return filepath.Join(configDir, payload)
 	}
 	return resolvePayloadPath(configDir, entry.Payload)
 }

@@ -9,6 +9,5 @@ const (
 	catchServiceName  = "catch"
 	dockerServiceType = "docker"
 	serviceTypeRun    = "run"
-	serviceTypeCron   = "cron"
 	serviceTypeVM     = "vm"
 )

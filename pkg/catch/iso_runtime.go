@@ -60,6 +60,13 @@ var (
 		}
 		return nil
 	}
+	uninstallISONativeSystemd = func(server *Server, service string) error {
+		runner, err := server.systemdService(service)
+		if err != nil {
+			return err
+		}
+		return runner.Uninstall()
+	}
 )
 
 func verifyISODNSListenerReady(ctx context.Context) error {
@@ -1702,10 +1709,23 @@ func (r *isoConcreteRemoveSteps) BeforeDelete(_ context.Context, _ string) error
 	if err := r.cleanVMUnitBeforeDelete(); err != nil {
 		return err
 	}
+	if err := r.cleanNativeUnitBeforeDelete(); err != nil {
+		return err
+	}
 	if !r.options.CleanData {
 		return nil
 	}
 	return r.server.destroyServiceRootZFS(r.zfsDataset)
+}
+
+func (r *isoConcreteRemoveSteps) cleanNativeUnitBeforeDelete() error {
+	if !r.native {
+		return nil
+	}
+	if err := uninstallISONativeSystemd(r.server, r.service.Name); err != nil {
+		return fmt.Errorf("remove native systemd units: %w", err)
+	}
+	return nil
 }
 
 func (r *isoConcreteRemoveSteps) cleanVMUnitBeforeDelete() error {

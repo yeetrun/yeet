@@ -1478,11 +1478,11 @@ func (i *FileInstaller) reuseExistingSystemdUnit(exe string) (bool, error) {
 }
 
 func (i *FileInstaller) canReuseExistingSystemdUnit() bool {
-	return i.existingService.Valid() && i.cfg.ServiceName != CatchService && !i.identityMigrationNeeded && !i.newNativeIdentity
+	return i.existingService.Valid() && i.cfg.Timer == nil && i.cfg.ServiceName != CatchService && !i.identityMigrationNeeded && !i.newNativeIdentity
 }
 
 func (i *FileInstaller) skipSystemdUnitGeneration() bool {
-	return i.cfg.StageOnly && i.cfg.Network.Interfaces == "" && i.cfg.Args == nil
+	return i.cfg.StageOnly && i.cfg.Network.Interfaces == "" && i.cfg.Args == nil && i.cfg.Timer == nil
 }
 
 func (i *FileInstaller) newSystemdUnit(exe string) (*svc.SystemdUnit, error) {
@@ -1829,6 +1829,9 @@ func (i *FileInstaller) prepareNoBinaryInstall() (fileInstallPlan, error) {
 	}
 	plan.detectedServiceType = i.existingService.ServiceType()
 	service := i.existingService.AsStruct()
+	if err := i.restoreScheduledTimer(); err != nil {
+		return plan, err
+	}
 	requestedPublished := len(normalizePublish(i.cfg.Publish)) != 0 || i.cfg.PublishReset
 	published := len(service.Publish) != 0 || requestedPublished
 	if err := i.prepareNoBinaryNetwork(service, plan.detectedServiceType, requestedPublished, published); err != nil {
@@ -1872,6 +1875,9 @@ func (i *FileInstaller) preparePayloadInstall(bin string) (fileInstallPlan, erro
 	if err != nil {
 		return fileInstallPlan{}, err
 	}
+	if err := i.resolveScheduledTimer(binFT); err != nil {
+		return fileInstallPlan{}, err
+	}
 	if err := validatePullPayloadType(i.cfg.Pull, binFT); err != nil {
 		return fileInstallPlan{}, err
 	}
@@ -1890,6 +1896,67 @@ func (i *FileInstaller) preparePayloadInstall(bin string) (fileInstallPlan, erro
 		}
 	}
 	return i.preparePayloadByType(bin, binFT)
+}
+
+func (i *FileInstaller) resolveScheduledTimer(binFT ftdetect.FileType) error {
+	if err := i.restoreScheduledTimer(); err != nil {
+		return err
+	}
+	if i.cfg.Timer != nil && !systemdPayloadType(binFT) {
+		return errors.New(scheduledNativeOnlyMessage)
+	}
+	return nil
+}
+
+func (i *FileInstaller) restoreScheduledTimer() error {
+	if i.cfg.Timer != nil || !i.existingService.Valid() {
+		return nil
+	}
+	path, installed := activeGenerationArtifactPath(i.existingService, db.ArtifactSystemdTimerFile)
+	if !installed {
+		return nil
+	}
+	timer, err := readSystemdTimerConfig(path)
+	if err != nil {
+		return fmt.Errorf("preserve installed timer: %w", err)
+	}
+	i.cfg.Timer = timer
+	return nil
+}
+
+func readSystemdTimerConfig(path string) (*svc.TimerConfig, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	timer := &svc.TimerConfig{Persistent: true}
+	seenCalendar := false
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		switch {
+		case strings.HasPrefix(line, "OnCalendar="):
+			if seenCalendar {
+				return nil, fmt.Errorf("timer has repeated OnCalendar")
+			}
+			timer.OnCalendar = strings.TrimSpace(strings.TrimPrefix(line, "OnCalendar="))
+			seenCalendar = true
+		case strings.HasPrefix(line, "Persistent="):
+			persistent, err := strconv.ParseBool(strings.TrimSpace(strings.TrimPrefix(line, "Persistent=")))
+			if err != nil {
+				return nil, fmt.Errorf("invalid Persistent value: %w", err)
+			}
+			timer.Persistent = persistent
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if !seenCalendar || timer.OnCalendar == "" {
+		return nil, fmt.Errorf("timer is missing OnCalendar")
+	}
+	return timer, nil
 }
 
 func networkRequestsISO(network NetworkOpts) bool {

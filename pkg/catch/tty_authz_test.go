@@ -38,7 +38,7 @@ func TestExecRequestPermissionsForShellTargets(t *testing.T) {
 	}
 }
 
-func TestTTYCommandPermissions(t *testing.T) {
+func TestTTYAuthorizationCommandPermissions(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
@@ -76,7 +76,7 @@ func TestTTYCommandPermissions(t *testing.T) {
 		{name: "vm console", args: []string{"vm", "console"}, want: permissionManage},
 		{name: "run", args: []string{"run", "ghcr.io/example/app:latest"}, want: permissionManage},
 		{name: "run as", args: []string{"run", "--run-as=app", "./api"}, want: permissionManage},
-		{name: "cron run as", args: []string{"cron", "--run-as=backup", "./job", "0 3 * * *"}, want: permissionManage},
+		{name: "run cron", args: []string{"run", "--cron=0 3 * * *", "./job"}, want: permissionManage},
 		{name: "remove", args: []string{"remove", "--clean"}, want: permissionManage},
 	}
 	for _, tt := range tests {
@@ -92,10 +92,11 @@ func TestTTYCommandPermissions(t *testing.T) {
 	}
 }
 
-func TestTTYCommandPermissionsFailClosed(t *testing.T) {
+func TestTTYAuthorizationCommandPermissionsFailClosed(t *testing.T) {
 	for _, args := range [][]string{
 		nil,
 		{"unknown"},
+		{"cron"},
 		{"docker", "system"},
 		{"snapshots", "unknown"},
 		{"service", "unknown"},
