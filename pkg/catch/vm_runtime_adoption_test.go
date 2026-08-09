@@ -23,6 +23,7 @@ import (
 
 func TestVMRuntimeAdoptionInventoryMeasuresEffectiveLaunchComposition(t *testing.T) {
 	fixture := newVMRuntimeAdoptionFixture(t, false)
+	assertFileNotContains(t, filepath.Join(serviceRunDirForRoot(fixture.serviceRoot), "firecracker.json"), `"cpu-config"`)
 	decoyDir := filepath.Join(fixture.dataRoot, "decoy")
 	writeVMRuntimeAdoptionTestFile(t, filepath.Join(decoyDir, "firecracker"), "wrong-firecracker", 0o755)
 	writeVMRuntimeAdoptionTestFile(t, filepath.Join(decoyDir, "jailer"), "wrong-jailer", 0o755)
@@ -69,6 +70,26 @@ func TestVMRuntimeAdoptionInventoryMeasuresEffectiveLaunchComposition(t *testing
 	fixture.persist(t)
 	if changed := fixture.onlyVM(t); changed.PreconditionSHA256 == vm.PreconditionSHA256 {
 		t.Fatal("stored VM state drift did not change the adoption precondition")
+	}
+}
+
+func TestVMRuntimeAdoptionInventoryAcceptsHardenedCPUConfig(t *testing.T) {
+	fixture := newVMRuntimeAdoptionFixture(t, false)
+	configPath := filepath.Join(serviceRunDirForRoot(fixture.serviceRoot), "firecracker.json")
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read Firecracker config: %v", err)
+	}
+	var config firecrackerConfig
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatalf("decode Firecracker config: %v", err)
+	}
+	config.CPUConfig = firecrackerNestedVirtualizationDisabledCPUConfig()
+	writeVMRuntimeAdoptionTestJSON(t, configPath, config, 0o644)
+
+	vm := fixture.onlyVM(t)
+	if vm.BlockedReason != "" {
+		t.Fatalf("hardened config blocked adoption: %s", vm.BlockedReason)
 	}
 }
 
@@ -718,6 +739,14 @@ func FuzzDecodeVMRuntimeAdoptionReceipt(f *testing.F) {
 	})
 }
 
+func FuzzDecodeVMRuntimeAdoptionFirecrackerConfig(f *testing.F) {
+	f.Add(`{"boot-source":{"kernel_image_path":"/vmlinux"},"drives":[],"network-interfaces":[],"machine-config":{"vcpu_count":1,"mem_size_mib":256}}`)
+	f.Add(`{"boot-source":{"kernel_image_path":"/vmlinux"},"drives":[],"network-interfaces":[],"machine-config":{"vcpu_count":1,"mem_size_mib":256},"cpu-config":{"cpuid_modifiers":[{"leaf":"0x1","subleaf":"0x0","flags":0,"modifiers":[{"register":"ecx","bitmap":"0bxxxxxxxxxxxxxxxxxxxxxxxxxx0xxxxx"}]}]}}`)
+	f.Fuzz(func(t *testing.T, input string) {
+		_, _ = decodeVMRuntimeAdoptionFirecrackerConfig([]byte(input))
+	})
+}
+
 type vmRuntimeAdoptionFixture struct {
 	t            *testing.T
 	dataRoot     string
@@ -835,7 +864,12 @@ func (f *vmRuntimeAdoptionFixture) onlyVM(t *testing.T) vmRuntimeAdoptionPrepara
 
 func (f *vmRuntimeAdoptionFixture) writeFirecrackerConfig(t *testing.T) {
 	t.Helper()
-	config := firecrackerConfig{
+	config := struct {
+		BootSource        firecrackerBootSource         `json:"boot-source"`
+		Drives            []firecrackerDrive            `json:"drives"`
+		NetworkInterfaces []firecrackerNetworkInterface `json:"network-interfaces"`
+		MachineConfig     firecrackerMachineConfig      `json:"machine-config"`
+	}{
 		BootSource:    firecrackerBootSource{KernelImagePath: f.kernel, BootArgs: "console=ttyS0"},
 		Drives:        []firecrackerDrive{{DriveID: "rootfs", PathOnHost: f.disk, IsRootDevice: true}},
 		MachineConfig: firecrackerMachineConfig{VCPUCount: 2, MemSizeMib: 2048},

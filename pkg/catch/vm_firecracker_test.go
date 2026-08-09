@@ -6,6 +6,7 @@ package catch
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,42 @@ func TestRenderFirecrackerConfig(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("config missing %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestRenderFirecrackerConfigDisablesNestedVirtualization(t *testing.T) {
+	raw, err := renderFirecrackerConfig(firecrackerConfig{
+		BootSource:    firecrackerBootSource{KernelImagePath: "/vmlinux"},
+		Drives:        []firecrackerDrive{{DriveID: "rootfs", PathOnHost: "/rootfs", IsRootDevice: true}},
+		MachineConfig: firecrackerMachineConfig{VCPUCount: 2, MemSizeMib: 1024},
+	})
+	if err != nil {
+		t.Fatalf("renderFirecrackerConfig: %v", err)
+	}
+	var got firecrackerConfig
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode rendered config: %v", err)
+	}
+	want := firecrackerCPUConfig{CPUIDModifiers: []firecrackerCPUIDLeafModifier{
+		{
+			Leaf: "0x1", Subleaf: "0x0", Flags: 0,
+			Modifiers: []firecrackerCPUIDRegisterModifier{{
+				Register: "ecx", Bitmap: "0bxxxxxxxxxxxxxxxxxxxxxxxxxx0xxxxx",
+			}},
+		},
+		{
+			Leaf: "0x80000001", Subleaf: "0x0", Flags: 0,
+			Modifiers: []firecrackerCPUIDRegisterModifier{{
+				Register: "ecx", Bitmap: "0bxxxxxxxxxxxxxxxxxxxxxxxxxxxxx0xx",
+			}},
+		},
+	}}
+	if !reflect.DeepEqual(got.CPUConfig, want) {
+		t.Fatalf("CPUConfig = %#v, want %#v", got.CPUConfig, want)
+	}
+	text := string(raw)
+	if strings.Contains(text, "cpu_template") || strings.Contains(text, "msr_modifiers") {
+		t.Fatalf("config contains broad CPU-template state:\n%s", raw)
 	}
 }
 

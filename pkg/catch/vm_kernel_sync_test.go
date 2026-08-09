@@ -443,6 +443,9 @@ func TestVMKernelSyncUpdatesFirecrackerConfigAndDB(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	firecrackerPath := filepath.Join(serviceRunDirForRoot(root), "firecracker.json")
+	seedLegacyFirecrackerConfigForRewriteTest(t, firecrackerPath)
+	assertFileNotContains(t, firecrackerPath, `"cpu-config"`)
 	withVMKernelSyncRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
 	withVMKernelSyncRunner(t, mountedGuestKernelRunner(t))
 	var systemctlCalls [][]string
@@ -460,7 +463,13 @@ func TestVMKernelSyncUpdatesFirecrackerConfigAndDB(t *testing.T) {
 	if !strings.HasSuffix(svc.VM.Image.Kernel, wantKernelSuffix) {
 		t.Fatalf("DB kernel = %q, want suffix %q", svc.VM.Image.Kernel, wantKernelSuffix)
 	}
-	firecrackerPath := filepath.Join(serviceRunDirForRoot(root), "firecracker.json")
+	for _, want := range []string{
+		`"cpu-config"`,
+		`"bitmap": "0bxxxxxxxxxxxxxxxxxxxxxxxxxx0xxxxx"`,
+		`"bitmap": "0bxxxxxxxxxxxxxxxxxxxxxxxxxxxxx0xx"`,
+	} {
+		assertFileContains(t, firecrackerPath, want)
+	}
 	assertFileContains(t, firecrackerPath, svc.VM.Image.Kernel)
 	assertFileNotContains(t, firecrackerPath, "initrd.img")
 	if len(systemctlCalls) != 0 {

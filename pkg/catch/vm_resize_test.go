@@ -7,6 +7,7 @@ package catch
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"os"
@@ -70,6 +71,9 @@ func TestVMSetUpdatesShapeAndFirecrackerConfig(t *testing.T) {
 	root := t.TempDir()
 	server := newTestServer(t)
 	seedVMForResize(t, server, "devbox", root, vmDiskBackendRaw)
+	firecrackerPath := filepath.Join(serviceRunDirForRoot(root), "firecracker.json")
+	seedLegacyFirecrackerConfigForRewriteTest(t, firecrackerPath)
+	assertFileNotContains(t, firecrackerPath, `"cpu-config"`)
 	withServiceSetVMRunningCheck(t, func(*Server, string) (bool, error) { return false, nil })
 
 	if err := server.updateVMServiceSettings(context.Background(), "devbox", cli.VMSetFlags{CPUs: 6, Memory: "6g"}); err != nil {
@@ -80,8 +84,15 @@ func TestVMSetUpdatesShapeAndFirecrackerConfig(t *testing.T) {
 	if svc.VM.CPUs != 6 || svc.VM.MemoryBytes != 6<<30 {
 		t.Fatalf("vm shape = %d/%d, want 6/%d", svc.VM.CPUs, svc.VM.MemoryBytes, int64(6<<30))
 	}
-	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"vcpu_count": 6`)
-	assertFileContains(t, filepath.Join(serviceRunDirForRoot(root), "firecracker.json"), `"mem_size_mib": 6144`)
+	for _, want := range []string{
+		`"cpu-config"`,
+		`"bitmap": "0bxxxxxxxxxxxxxxxxxxxxxxxxxx0xxxxx"`,
+		`"bitmap": "0bxxxxxxxxxxxxxxxxxxxxxxxxxxxxx0xx"`,
+	} {
+		assertFileContains(t, firecrackerPath, want)
+	}
+	assertFileContains(t, firecrackerPath, `"vcpu_count": 6`)
+	assertFileContains(t, firecrackerPath, `"mem_size_mib": 6144`)
 }
 
 func TestVMSetResolvesRuntimeIdentityOnce(t *testing.T) {
@@ -972,6 +983,26 @@ func seedVMForResize(t *testing.T, server *Server, name, root, backend string) {
 		},
 	}}); err != nil {
 		t.Fatalf("DB.Set: %v", err)
+	}
+}
+
+func seedLegacyFirecrackerConfigForRewriteTest(t *testing.T, path string) {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read Firecracker config: %v", err)
+	}
+	var config map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &config); err != nil {
+		t.Fatalf("decode Firecracker config: %v", err)
+	}
+	delete(config, "cpu-config")
+	raw, err = json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		t.Fatalf("encode legacy Firecracker config: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatalf("write legacy Firecracker config: %v", err)
 	}
 }
 

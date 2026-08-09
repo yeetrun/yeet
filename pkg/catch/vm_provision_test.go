@@ -947,11 +947,19 @@ func TestRunVMProvisionSuccessWritesArtifactsAndDB(t *testing.T) {
 		t.Fatal("metadata FastBoot = false, want true for guest_init image")
 	}
 
-	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), `"kernel_image_path"`)
-	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), vm.Disk.Path)
-	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "init=/usr/local/lib/yeet-vm/yeet-init")
-	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "ip=192.168.100.")
-	assertFileContains(t, filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json"), "yeet.hostname=svc")
+	firecrackerPath := filepath.Join(serviceRunDirForRoot(serviceRoot), "firecracker.json")
+	for _, want := range []string{
+		`"cpu-config"`,
+		`"bitmap": "0bxxxxxxxxxxxxxxxxxxxxxxxxxx0xxxxx"`,
+		`"bitmap": "0bxxxxxxxxxxxxxxxxxxxxxxxxxxxxx0xx"`,
+	} {
+		assertFileContains(t, firecrackerPath, want)
+	}
+	assertFileContains(t, firecrackerPath, `"kernel_image_path"`)
+	assertFileContains(t, firecrackerPath, vm.Disk.Path)
+	assertFileContains(t, firecrackerPath, "init=/usr/local/lib/yeet-vm/yeet-init")
+	assertFileContains(t, firecrackerPath, "ip=192.168.100.")
+	assertFileContains(t, firecrackerPath, "yeet.hostname=svc")
 	assertFileContains(t, filepath.Join(serviceRoot, "metadata", "hostname"), "svc")
 	generatedUnitPath := filepath.Join(serviceBinDirForRoot(serviceRoot), vmSystemdUnitName("svc"))
 	generatedUnit, err := os.ReadFile(generatedUnitPath)

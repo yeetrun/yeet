@@ -11,6 +11,7 @@ type firecrackerConfig struct {
 	Drives            []firecrackerDrive            `json:"drives"`
 	NetworkInterfaces []firecrackerNetworkInterface `json:"network-interfaces"`
 	MachineConfig     firecrackerMachineConfig      `json:"machine-config"`
+	CPUConfig         firecrackerCPUConfig          `json:"cpu-config"`
 	Vsock             *firecrackerVsock             `json:"vsock,omitempty"`
 	Balloon           *firecrackerBalloon           `json:"balloon,omitempty"`
 }
@@ -39,6 +40,39 @@ type firecrackerMachineConfig struct {
 	MemSizeMib int `json:"mem_size_mib"`
 }
 
+type firecrackerCPUConfig struct {
+	CPUIDModifiers []firecrackerCPUIDLeafModifier `json:"cpuid_modifiers"`
+}
+
+type firecrackerCPUIDLeafModifier struct {
+	Leaf      string                             `json:"leaf"`
+	Subleaf   string                             `json:"subleaf"`
+	Flags     uint32                             `json:"flags"`
+	Modifiers []firecrackerCPUIDRegisterModifier `json:"modifiers"`
+}
+
+type firecrackerCPUIDRegisterModifier struct {
+	Register string `json:"register"`
+	Bitmap   string `json:"bitmap"`
+}
+
+func firecrackerNestedVirtualizationDisabledCPUConfig() firecrackerCPUConfig {
+	return firecrackerCPUConfig{CPUIDModifiers: []firecrackerCPUIDLeafModifier{
+		{
+			Leaf: "0x1", Subleaf: "0x0", Flags: 0,
+			Modifiers: []firecrackerCPUIDRegisterModifier{{
+				Register: "ecx", Bitmap: "0bxxxxxxxxxxxxxxxxxxxxxxxxxx0xxxxx",
+			}},
+		},
+		{
+			Leaf: "0x80000001", Subleaf: "0x0", Flags: 0,
+			Modifiers: []firecrackerCPUIDRegisterModifier{{
+				Register: "ecx", Bitmap: "0bxxxxxxxxxxxxxxxxxxxxxxxxxxxxx0xx",
+			}},
+		},
+	}}
+}
+
 type firecrackerVsock struct {
 	VsockID  string `json:"vsock_id"`
 	GuestCID uint32 `json:"guest_cid"`
@@ -52,5 +86,6 @@ type firecrackerBalloon struct {
 }
 
 func renderFirecrackerConfig(cfg firecrackerConfig) ([]byte, error) {
+	cfg.CPUConfig = firecrackerNestedVirtualizationDisabledCPUConfig()
 	return json.MarshalIndent(cfg, "", "  ")
 }

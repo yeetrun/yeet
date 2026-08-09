@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -149,7 +150,55 @@ func TestRunWebJournalCoalescesOutputWithinBatchAndControlBoundaries(t *testing.
 }
 
 func TestRunWebJournalSlowReaderDoesNotBlockWriter(t *testing.T) {
-	journal := newRunWebJournalForTest(t, 1<<20)
+	const (
+		childEnv = "YEET_TEST_RUN_WEB_JOURNAL_SLOW_READER"
+		dirEnv   = "YEET_TEST_RUN_WEB_JOURNAL_SLOW_READER_DIR"
+	)
+	if os.Getenv(childEnv) == "1" {
+		testRunWebJournalSlowReaderDoesNotBlockWriter(t, os.Getenv(dirEnv))
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestRunWebJournalSlowReaderDoesNotBlockWriter$")
+	cmd.Env = append(os.Environ(), childEnv+"=1", dirEnv+"="+t.TempDir())
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	appendDone := make(chan error, 1)
+	go func() { appendDone <- cmd.Wait() }()
+
+	select {
+	case err := <-appendDone:
+		if err != nil {
+			t.Fatalf("slow-reader subprocess failed: %v\n%s", err, strings.TrimSpace(output.String()))
+		}
+	case <-time.After(5 * time.Second):
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			<-appendDone
+			t.Fatalf("kill blocked slow-reader subprocess: %v\n%s", err, strings.TrimSpace(output.String()))
+		}
+		<-appendDone
+		t.Fatalf("append blocked while readers were idle\n%s", strings.TrimSpace(output.String()))
+	}
+}
+
+func testRunWebJournalSlowReaderDoesNotBlockWriter(t *testing.T, dir string) {
+	t.Helper()
+	if dir == "" {
+		t.Fatal("missing slow-reader journal directory")
+	}
+	journal, err := newRunWebJournal(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := journal.close(); err != nil {
+			t.Errorf("close journal: %v", err)
+		}
+	})
 
 	_, _, wakeA, sealed, err := journal.readAfter(0, runWebJournalReadBatch)
 	if err != nil {
@@ -166,16 +215,10 @@ func TestRunWebJournalSlowReaderDoesNotBlockWriter(t *testing.T) {
 		t.Fatal("idle readers did not share the coalesced wake channel")
 	}
 
-	start := time.Now()
-	for i := 0; i < 10_000; i++ {
-		if _, err := journal.append(runWebStreamEvent{
-			Type: runWebStreamOutput, Chunk: []byte{'x'},
-		}, false); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if elapsed := time.Since(start); elapsed >= time.Second {
-		t.Fatalf("10,000 appends took %v; slow reader blocked the writer", elapsed)
+	if _, err := journal.append(runWebStreamEvent{
+		Type: runWebStreamOutput, Chunk: []byte{'x'},
+	}, false); err != nil {
+		t.Fatal(err)
 	}
 	select {
 	case <-wakeA:
