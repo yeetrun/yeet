@@ -776,8 +776,11 @@ func runServer(dataDir string, scfg *catch.Config) {
 	internalRegLn := must.Get(net.Listen("tcp", *registryInternalAddr))
 	scfg.InternalRegistryAddr = internalRegLn.Addr().String()
 	regln := must.Get(ts.ListenTLS("tcp", ":443"))
-	server := catch.NewServer(scfg)
-	go startDockerPlugin(scfg.DB)
+	dockerPluginSock := dockerPluginSocket()
+	runtime := must.Get(startCatchServerWithDockerPlugin(scfg, dockerPluginSock, catch.NewServer))
+	defer logRemove(dockerPluginSock)
+	defer logClose("Docker network plugin listener", runtime.dockerPluginListener)
+	server := runtime.server
 	go func() {
 		if err := http.Serve(internalRegLn, server.RegistryHandler()); err != nil {
 			log.Fatalf("internal registry server error: %v", err)
@@ -1626,16 +1629,27 @@ func writeCurrentExecutable(inst catchServiceInstaller, deps catchInstallDeps) e
 	return nil
 }
 
-// main function starts the HTTP server
-func startDockerPlugin(db *cdb.Store) {
-	sock := dockerPluginSocket()
+type catchServerConstructor func(*catch.Config) *catch.Server
+
+type catchServerRuntime struct {
+	server               *catch.Server
+	dockerPluginListener net.Listener
+}
+
+func startCatchServerWithDockerPlugin(
+	scfg *catch.Config,
+	sock string,
+	newServer catchServerConstructor,
+) (catchServerRuntime, error) {
 	ln, err := listenDockerPluginSocket(sock)
 	if err != nil {
-		log.Fatal(err)
+		return catchServerRuntime{}, err
 	}
-	defer logRemove(sock)
-
-	serveDockerPlugin(ln, db)
+	go serveDockerPlugin(ln, scfg.DB)
+	return catchServerRuntime{
+		server:               newServer(scfg),
+		dockerPluginListener: ln,
+	}, nil
 }
 
 func dockerPluginSocket() string {
@@ -1659,7 +1673,9 @@ func listenDockerPluginSocket(sock string) (net.Listener, error) {
 
 func serveDockerPlugin(ln net.Listener, db *cdb.Store) {
 	p := dnet.New(db)
-	if err := http.Serve(ln, p); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := http.Serve(ln, p); err != nil &&
+		!errors.Is(err, http.ErrServerClosed) &&
+		!errors.Is(err, net.ErrClosed) {
 		log.Fatalf("docker plugin server error: %v", err)
 	}
 }

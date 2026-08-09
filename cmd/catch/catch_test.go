@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/yeetrun/yeet/pkg/catch"
+	cdb "github.com/yeetrun/yeet/pkg/db"
 	"tailscale.com/ipn/ipnstate"
 	"tailscale.com/types/views"
 )
@@ -2779,6 +2780,99 @@ func TestListenDockerPluginSocketRefusesLiveSocket(t *testing.T) {
 	}
 	if _, err := os.Stat(sock); err != nil {
 		t.Fatalf("live socket was removed: %v", err)
+	}
+}
+
+func TestStartCatchServerWithDockerPluginServesBeforeCatchStartup(t *testing.T) {
+	root, err := os.MkdirTemp("/tmp", "yeet-plugin-start-")
+	if err != nil {
+		t.Fatalf("create short socket root: %v", err)
+	}
+	defer os.RemoveAll(root)
+	sock := filepath.Join(root, "plugins", "yeet.sock")
+	store := cdb.NewStore(filepath.Join(root, "db.json"), filepath.Join(root, "services"))
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+		},
+	}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: time.Second}
+
+	var activationStatus int
+	var activationBody []byte
+	var activationErr error
+	constructorCalled := false
+	runtime, err := startCatchServerWithDockerPlugin(
+		&catch.Config{DB: store},
+		sock,
+		func(*catch.Config) *catch.Server {
+			constructorCalled = true
+			request, err := http.NewRequest(http.MethodPost, "http://docker/Plugin.Activate", http.NoBody)
+			if err != nil {
+				activationErr = err
+				return nil
+			}
+			response, err := client.Do(request)
+			if err != nil {
+				activationErr = err
+				return nil
+			}
+			activationStatus = response.StatusCode
+			activationBody, activationErr = io.ReadAll(response.Body)
+			if closeErr := response.Body.Close(); activationErr == nil {
+				activationErr = closeErr
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("startCatchServerWithDockerPlugin: %v", err)
+	}
+	if runtime.dockerPluginListener == nil {
+		t.Fatal("startCatchServerWithDockerPlugin returned a nil listener")
+	}
+	if err := runtime.dockerPluginListener.Close(); err != nil {
+		t.Fatalf("close Docker plugin listener: %v", err)
+	}
+	if !constructorCalled {
+		t.Fatal("Catch server constructor was not called")
+	}
+	if activationErr != nil {
+		t.Fatalf("activate Docker plugin before Catch startup: %v", activationErr)
+	}
+	if activationStatus != http.StatusOK {
+		t.Fatalf("activate Docker plugin status = %d, want %d", activationStatus, http.StatusOK)
+	}
+	if got, want := strings.TrimSpace(string(activationBody)), `{"Implements":["NetworkDriver"]}`; got != want {
+		t.Fatalf("activate Docker plugin response = %s, want %s", got, want)
+	}
+}
+
+func TestStartCatchServerWithDockerPluginListenFailureSkipsCatchStartup(t *testing.T) {
+	root := t.TempDir()
+	parentFile := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(parentFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write socket parent file: %v", err)
+	}
+
+	constructorCalled := false
+	runtime, err := startCatchServerWithDockerPlugin(
+		&catch.Config{},
+		filepath.Join(parentFile, "yeet.sock"),
+		func(*catch.Config) *catch.Server {
+			constructorCalled = true
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "failed to create socket dir") {
+		t.Fatalf("startCatchServerWithDockerPlugin error = %v, want socket-dir failure", err)
+	}
+	if runtime.server != nil || runtime.dockerPluginListener != nil {
+		t.Fatalf("listen failure returned runtime=%+v, want zero value", runtime)
+	}
+	if constructorCalled {
+		t.Fatal("Catch server constructor ran after Docker plugin listen failure")
 	}
 }
 
