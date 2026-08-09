@@ -799,6 +799,138 @@ func TestServiceSetUpdatesExistingConfigOnly(t *testing.T) {
 	}
 }
 
+func TestServiceSetCronUpdatesOnlyScheduleAfterRemoteSuccess(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	required := true
+	original := ServiceEntry{
+		Name:             "svc-a",
+		Host:             "host-a",
+		Type:             serviceTypeRun,
+		Payload:          "./deploy.sh",
+		RunAs:            "app:app",
+		ServiceRoot:      "tank/services/svc-a",
+		ServiceRootZFS:   true,
+		Ports:            []string{"80:8080", "443:8443"},
+		Snapshots:        "on",
+		SnapshotKeepLast: 3,
+		SnapshotMaxAge:   "168h",
+		SnapshotRequired: &required,
+		SnapshotEvents:   []string{"deploy", "timer"},
+		Schedule:         "0 1 * * *",
+		Args:             []string{"--pull", "--", "--config", "value"},
+	}
+	writeSvcBranchConfig(t, tmp, original)
+
+	execRemoteFn = func(_ context.Context, service string, args []string, stdin io.Reader, tty bool) error {
+		if service != "svc-a" {
+			t.Fatalf("service = %q, want svc-a", service)
+		}
+		if !reflect.DeepEqual(args, []string{"service", "set", "--cron=30 2 * * *"}) {
+			t.Fatalf("remote args = %#v", args)
+		}
+		if stdin != nil {
+			t.Fatalf("remote stdin = %T, want nil", stdin)
+		}
+		if tty {
+			t.Fatal("remote tty = true, want false")
+		}
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	if err := HandleSvcCmd([]string{"service", "set", "--cron=30 2 * * *"}); err != nil {
+		t.Fatalf("HandleSvcCmd: %v", err)
+	}
+	loaded, err := loadProjectConfigFromCwd()
+	if err != nil {
+		t.Fatalf("loadProjectConfigFromCwd: %v", err)
+	}
+	entry, ok := loaded.Config.ServiceEntry("svc-a", "host-a")
+	if !ok {
+		t.Fatal("missing service entry")
+	}
+	if entry.Schedule != "30 2 * * *" {
+		t.Fatalf("schedule = %q", entry.Schedule)
+	}
+	if !reflect.DeepEqual(entry.Args, original.Args) || entry.Payload != original.Payload || entry.RunAs != original.RunAs {
+		t.Fatalf("schedule update changed unrelated config: %#v", entry)
+	}
+	want := original
+	want.Schedule = "30 2 * * *"
+	if !reflect.DeepEqual(entry, want) {
+		t.Fatalf("entry = %#v, want only schedule update %#v", entry, want)
+	}
+}
+
+func TestServiceSetCronRemoteFailureLeavesConfigByteIdentical(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	loadedPrefs.DefaultHost = "host-a"
+	loc := writeSvcBranchConfig(t, tmp, ServiceEntry{
+		Name: "svc-a", Host: "host-a", Type: serviceTypeRun, Payload: "run.sh", Schedule: "0 1 * * *", Args: []string{"--", "--keep"},
+	})
+	before, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatalf("ReadFile before: %v", err)
+	}
+	execRemoteFn = func(_ context.Context, _ string, _ []string, stdin io.Reader, _ bool) error {
+		if stdin != nil {
+			t.Fatalf("remote stdin = %T, want nil", stdin)
+		}
+		return errors.New("remote rejected schedule")
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	err = HandleSvcCmd([]string{"service", "set", "--cron=30 2 * * *"})
+	if err == nil || !strings.Contains(err.Error(), "remote rejected schedule") {
+		t.Fatalf("HandleSvcCmd error = %v, want remote failure", err)
+	}
+	if strings.Contains(err.Error(), "schedule updates require") {
+		t.Fatalf("HandleSvcCmd error = %v, must not add old-Catch guidance to a non-exit error", err)
+	}
+	after, err := os.ReadFile(loc.Path)
+	if err != nil {
+		t.Fatalf("ReadFile after: %v", err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("config changed after remote failure:\n before=%q\n after=%q", before, after)
+	}
+}
+
+func TestServiceSetCronWithoutMatchingConfigPrintsHostSyncHint(t *testing.T) {
+	preserveSvcCommandGlobals(t)
+	tmp := useTempSvcCwd(t)
+	serviceOverride = "svc-a"
+	SetHostOverride("host.example.com")
+	execRemoteFn = func(_ context.Context, _ string, args []string, stdin io.Reader, _ bool) error {
+		if !reflect.DeepEqual(args, []string{"service", "set", "--cron=30 2 * * *"}) {
+			t.Fatalf("remote args = %#v", args)
+		}
+		if stdin != nil {
+			t.Fatalf("remote stdin = %T, want nil", stdin)
+		}
+		return nil
+	}
+	isTerminalFn = func(int) bool { return false }
+
+	out, err := captureSvcStdout(t, func() error {
+		return HandleSvcCmd([]string{"service", "set", "--cron=30 2 * * *"})
+	})
+	if err != nil {
+		t.Fatalf("HandleSvcCmd: %v", err)
+	}
+	if !strings.Contains(out, "yeet --host host.example.com service sync svc-a --config ~/yeet-services/yeet.toml") {
+		t.Fatalf("sync hint = %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, projectConfigName)); !os.IsNotExist(err) {
+		t.Fatalf("service set without matching config should not create yeet.toml, stat err=%v", err)
+	}
+}
+
 func TestServiceSetNetworkRunFlagChanges(t *testing.T) {
 	base := []string{
 		"--pull", "--net=svc", "--ts-ver=old", "--ts-exit=old-exit",

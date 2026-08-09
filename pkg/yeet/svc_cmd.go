@@ -975,6 +975,9 @@ func handleServiceSet(ctx context.Context, req svcCommandRequest) error {
 func saveServiceSetResult(req svcCommandRequest, flags cli.ServiceSetFlags) error {
 	updated, err := saveServiceSetConfig(req.Config, req.HostOverride, flags)
 	if err != nil {
+		if flags.CronSet {
+			return serviceScheduleConfigWriteError(req, err)
+		}
 		if flags.HasNetworkChange() {
 			return serviceNetworkConfigWriteError(req, err)
 		}
@@ -995,6 +998,14 @@ func serviceNetworkConfigWriteError(req svcCommandRequest, err error) error {
 		configPath = strings.TrimSpace(req.Config.Path)
 	}
 	return fmt.Errorf("remote network changed, but failed to update %s: %w; recover with `%s`", projectConfigName, err, serviceSetSyncCommand(req.Service, serviceSetSyncHintHost(req), configPath))
+}
+
+func serviceScheduleConfigWriteError(req svcCommandRequest, err error) error {
+	configPath := ""
+	if req.Config != nil {
+		configPath = strings.TrimSpace(req.Config.Path)
+	}
+	return fmt.Errorf("remote schedule changed, but failed to update %s: %w; recover with `%s`", projectConfigName, err, serviceSetSyncCommand(req.Service, serviceSetSyncHintHost(req), configPath))
 }
 
 func serviceSetSyncCommand(service, host, configPath string) string {
@@ -1026,14 +1037,42 @@ func serviceIdentityConfigWriteError(host, service, runAs string, _ error) error
 }
 
 func wrapServiceSetRemoteError(err error, flags cli.ServiceSetFlags) error {
-	if err == nil || !serviceSetPublishChanged(flags) {
+	if err == nil {
 		return err
 	}
 	var exitErr remoteExitError
 	if !errors.As(err, &exitErr) {
 		return err
 	}
-	return fmt.Errorf("%w\npublished-port changes require catch v0.4.3 or newer; if the remote output says service set requires --service-root or snapshot settings, run `yeet init` for this host and retry", err)
+	var guidance []string
+	if flags.CronSet && serviceSetCronUnsupportedByRemote(exitErr.output) {
+		guidance = append(guidance, "schedule updates require a newer catch; run `yeet init` for this host and retry")
+	}
+	if serviceSetPublishChanged(flags) {
+		guidance = append(guidance, "published-port changes require catch v0.4.3 or newer; if the remote output says service set requires --service-root or snapshot settings, run `yeet init` for this host and retry")
+	}
+	if len(guidance) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w\n%s", err, strings.Join(guidance, "\n"))
+}
+
+func serviceSetCronUnsupportedByRemote(raw string) bool {
+	output := strings.ToLower(raw)
+	patterns := []string{
+		"unknown flag: --cron",
+		"unknown flag --cron",
+		"unknown option: --cron",
+		"unknown option '--cron'",
+		"unrecognized option: --cron",
+		"unrecognized option '--cron'",
+		"flag provided but not defined: -cron",
+		"unknown argument: cron",
+		"unknown argument: --cron",
+	}
+	return slices.ContainsFunc(patterns, func(pattern string) bool {
+		return strings.Contains(output, pattern)
+	})
 }
 
 func serviceSetPublishChanged(flags cli.ServiceSetFlags) bool {
@@ -2586,6 +2625,9 @@ func validateServiceSetConfigFlags(flags cli.ServiceSetFlags) error {
 }
 
 func applyServiceSetConfigFlags(entry *ServiceEntry, flags cli.ServiceSetFlags) error {
+	if flags.CronSet {
+		entry.Schedule = strings.TrimSpace(flags.Cron)
+	}
 	if flags.RunAsSet {
 		entry.RunAs = strings.TrimSpace(flags.RunAs)
 	}

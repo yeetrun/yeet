@@ -102,6 +102,7 @@ type errorPrefixer interface {
 type remoteExitError struct {
 	code   int
 	prefix string
+	output string
 }
 
 func (e remoteExitError) Error() string {
@@ -116,7 +117,10 @@ type trackingWriter struct {
 	w    io.Writer
 	last byte
 	saw  bool
+	tail []byte
 }
+
+const remoteErrorOutputLimit = 16 << 10
 
 type rawTerminalOutputWriter struct {
 	w    io.Writer
@@ -273,12 +277,20 @@ func (t *trackingWriter) Write(p []byte) (int, error) {
 	if len(p) > 0 {
 		t.last = p[len(p)-1]
 		t.saw = true
+		t.tail = append(t.tail, p...)
+		if len(t.tail) > remoteErrorOutputLimit {
+			t.tail = append([]byte(nil), t.tail[len(t.tail)-remoteErrorOutputLimit:]...)
+		}
 	}
 	return t.w.Write(p)
 }
 
 func (t *trackingWriter) LastByte() (byte, bool) {
 	return t.last, t.saw
+}
+
+func (t *trackingWriter) OutputTail() string {
+	return string(t.tail)
 }
 
 func errorPrefixForRemoteExit(rawMode bool, lastByte byte, sawOutput bool) string {
@@ -778,7 +790,7 @@ func remoteExecExitError(code int, rawMode bool, out *trackingWriter) error {
 	}
 	last, saw := out.LastByte()
 	prefix := errorPrefixForRemoteExit(rawMode && isTerminalFn(int(os.Stderr.Fd())), last, saw)
-	return remoteExitError{code: code, prefix: prefix}
+	return remoteExitError{code: code, prefix: prefix, output: out.OutputTail()}
 }
 
 var execRemoteFn = execRemote

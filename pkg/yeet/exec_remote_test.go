@@ -184,6 +184,22 @@ func TestTrackingWriterRecordsLastByte(t *testing.T) {
 	if last, ok := tw.LastByte(); !ok || last != '\n' {
 		t.Fatalf("LastByte after write = %q %v, want newline true", last, ok)
 	}
+	if got, want := tw.OutputTail(), "abc\n"; got != want {
+		t.Fatalf("OutputTail = %q, want %q", got, want)
+	}
+}
+
+func TestTrackingWriterBoundsRemoteErrorOutputTail(t *testing.T) {
+	raw := bytes.Repeat([]byte("x"), remoteErrorOutputLimit+17)
+	raw[len(raw)-1] = 'z'
+	tw := &trackingWriter{w: io.Discard}
+	if _, err := tw.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	got := tw.OutputTail()
+	if len(got) != remoteErrorOutputLimit || got[len(got)-1] != 'z' {
+		t.Fatalf("bounded output tail length/last = %d/%q, want %d/z", len(got), got[len(got)-1], remoteErrorOutputLimit)
+	}
 }
 
 func TestRawTerminalOutputWriterConvertsBareNewlines(t *testing.T) {
@@ -554,8 +570,8 @@ func TestRemoteExecExitErrorUsesRawModePrefix(t *testing.T) {
 	}
 	err := remoteExecExitError(5, true, out)
 	var exitErr remoteExitError
-	if !errors.As(err, &exitErr) || exitErr.code != 5 || exitErr.prefix != "\r\n" {
-		t.Fatalf("remoteExecExitError = %#v, want code 5 with raw prefix", err)
+	if !errors.As(err, &exitErr) || exitErr.code != 5 || exitErr.prefix != "\r\n" || exitErr.output != "partial" {
+		t.Fatalf("remoteExecExitError = %#v, want code 5 with raw prefix and captured output", err)
 	}
 }
 

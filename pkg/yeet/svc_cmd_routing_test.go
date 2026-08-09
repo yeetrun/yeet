@@ -11,7 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/yeetrun/yeet/pkg/cli"
 )
 
 func TestHandleSvcCmdRoutesRemoteFallbackCommands(t *testing.T) {
@@ -84,6 +87,74 @@ func TestHandleServiceSetRunAsReportsConfigPartialSuccess(t *testing.T) {
 	want := `service identity changed on host.example.com, but yeet.toml was not updated; set run_as = "app:app" for service "api" and retry sync`
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func TestServiceSetCronReportsConfigPartialSuccess(t *testing.T) {
+	oldExec, oldCreate, oldService := execRemoteFn, createProjectConfigFileFn, serviceOverride
+	t.Cleanup(func() { execRemoteFn, createProjectConfigFileFn, serviceOverride = oldExec, oldCreate, oldService })
+	serviceOverride = "api"
+	tmp := t.TempDir()
+	loc := &projectConfigLocation{Path: filepath.Join(tmp, "config with spaces", projectConfigName), Dir: tmp, Config: &ProjectConfig{Version: 1, Services: []ServiceEntry{{Name: "api", Host: "host.example.com", Schedule: "0 1 * * *"}}}}
+	execRemoteFn = func(context.Context, string, []string, io.Reader, bool) error { return nil }
+	createProjectConfigFileFn = func(string) (io.WriteCloser, error) { return nil, errors.New("disk full") }
+	err := handleServiceSet(context.Background(), svcCommandRequest{Command: svcCommand{Name: "service", Args: []string{"set", "--cron=30 2 * * *"}, RawArgs: []string{"service", "set", "--cron=30 2 * * *"}}, Config: loc, HostOverride: "host.example.com", HostOverrideSet: true, Service: "api"})
+	want := "remote schedule changed, but failed to update yeet.toml: disk full; recover with `yeet --host host.example.com service sync api --config '" + loc.Path + "'`"
+	if err == nil || err.Error() != want {
+		t.Fatalf("error = %v, want %q", err, want)
+	}
+}
+
+func TestServiceSetCronRemoteExitMentionsCatchUpgrade(t *testing.T) {
+	oldExec, oldService := execRemoteFn, serviceOverride
+	t.Cleanup(func() { execRemoteFn, serviceOverride = oldExec, oldService })
+	serviceOverride = "api"
+	execRemoteFn = func(context.Context, string, []string, io.Reader, bool) error {
+		return remoteExitError{code: 1, output: "Error: unknown flag: --cron\nUsage: yeet service set <svc> [flags]\n"}
+	}
+	err := handleServiceSet(context.Background(), svcCommandRequest{Command: svcCommand{Name: "service", Args: []string{"set", "--cron=30 2 * * *"}, RawArgs: []string{"service", "set", "--cron=30 2 * * *"}}, Service: "api"})
+	if err == nil {
+		t.Fatal("handleServiceSet error = nil, want remote exit")
+	}
+	for _, want := range []string{"remote exit 1", "schedule updates require", "yeet init"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want containing %q", err.Error(), want)
+		}
+	}
+	if strings.Contains(err.Error(), "yeet run") {
+		t.Fatalf("error = %q, must not recommend yeet run", err)
+	}
+}
+
+func TestServiceSetCronRemoteExitPreservesAuthoritativeRejection(t *testing.T) {
+	tests := []struct {
+		name        string
+		output      string
+		wantUpgrade bool
+	}{
+		{
+			name:   "scheduled native only",
+			output: "Error: service api: --cron only updates an existing scheduled native service; deploy a scheduled native payload with yeet run\n",
+		},
+		{name: "invalid timer state", output: "Error: service api timer is in unsupported state failed/failed\n"},
+		{name: "old catch unknown flag with usage", output: "Error: unknown flag: --cron\nUsage: yeet service set <svc> [flags]\n", wantUpgrade: true},
+		{name: "old catch unknown argument with usage", output: "Unknown argument: cron\nUsage: yeet service set <svc>\n", wantUpgrade: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := wrapServiceSetRemoteError(remoteExitError{code: 1, output: tt.output}, cli.ServiceSetFlags{CronSet: true})
+			if err == nil {
+				t.Fatal("wrapServiceSetRemoteError error = nil, want remote exit")
+			}
+			gotUpgrade := strings.Contains(err.Error(), "schedule updates require a newer catch")
+			if gotUpgrade != tt.wantUpgrade {
+				t.Fatalf("wrapServiceSetRemoteError = %q, upgrade=%t, want %t", err, gotUpgrade, tt.wantUpgrade)
+			}
+			if !tt.wantUpgrade && err.Error() != "remote exit 1" {
+				t.Fatalf("authoritative rejection wrapper = %q, want unmodified remote exit", err)
+			}
+		})
 	}
 }
 
