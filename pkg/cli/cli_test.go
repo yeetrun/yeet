@@ -855,6 +855,64 @@ func TestParseServiceSetFlags(t *testing.T) {
 	}
 }
 
+func TestParseServiceSetCron(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		want    ServiceSetFlags
+		wantErr string
+	}{
+		{name: "cron only", args: []string{"reports", `--cron= 30  2 * * * `}, want: ServiceSetFlags{Cron: "30 2 * * *", CronSet: true}},
+		{name: "empty", args: []string{"reports", "--cron="}, wantErr: "--cron requires a five-field expression"},
+		{name: "repeated", args: []string{"reports", `--cron=0 2 * * *`, `--cron=0 3 * * *`}, wantErr: "--cron may only be supplied once"},
+		{name: "short", args: []string{"reports", `--cron=0 2 * *`}, wantErr: "cron expression must have 5 fields"},
+		{name: "invalid", args: []string{"reports", `--cron=99 99 * * *`}, wantErr: "invalid cron expression"},
+		{name: "invalid step", args: []string{"reports", `--cron=60/2 * * * *`}, wantErr: "invalid cron expression"},
+		{name: "invalid range", args: []string{"reports", `--cron=60-61 * * * *`}, wantErr: "invalid cron expression"},
+		{name: "invalid list", args: []string{"reports", `--cron=1,99 * * * *`}, wantErr: "invalid cron expression"},
+		{name: "signed exact", args: []string{"reports", `--cron=+1 * * * *`}, wantErr: "invalid cron expression"},
+		{name: "non-digit exact", args: []string{"reports", `--cron=1x * * * *`}, wantErr: "invalid cron expression"},
+		{name: "signed list", args: []string{"reports", `--cron=1,+2 * * * *`}, wantErr: "invalid cron expression"},
+		{name: "non-digit list", args: []string{"reports", `--cron=1,x * * * *`}, wantErr: "invalid cron expression"},
+		{name: "signed range start", args: []string{"reports", `--cron=+1-2 * * * *`}, wantErr: "invalid cron expression"},
+		{name: "signed range end", args: []string{"reports", `--cron=1-+2 * * * *`}, wantErr: "invalid cron expression"},
+		{name: "non-digit range", args: []string{"reports", `--cron=1-x * * * *`}, wantErr: "invalid cron expression"},
+		{name: "signed step", args: []string{"reports", `--cron=*/+2 * * * *`}, wantErr: "invalid cron expression"},
+		{name: "non-digit step", args: []string{"reports", `--cron=*/x * * * *`}, wantErr: "invalid cron expression"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, args, err := ParseServiceSet(tt.args)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("ParseServiceSet error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || !reflect.DeepEqual(got, tt.want) || !reflect.DeepEqual(args, []string{"reports"}) {
+				t.Fatalf("ParseServiceSet = %#v %#v %v, want %#v reports nil", got, args, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseServiceSetCronRejectsOtherMutations(t *testing.T) {
+	for _, args := range [][]string{
+		{"reports", `--cron=30 2 * * *`, "--run-as=backup"},
+		{"reports", `--cron=30 2 * * *`, "--net=iso"},
+		{"reports", `--cron=30 2 * * *`, "--service-root=/srv/reports", "--copy"},
+		{"reports", `--cron=30 2 * * *`, "--copy"},
+		{"reports", `--cron=30 2 * * *`, "--empty"},
+		{"reports", `--cron=30 2 * * *`, "--service-root="},
+		{"reports", `--cron=30 2 * * *`, "--publish=8080:80"},
+		{"reports", `--cron=30 2 * * *`, "--snapshots=off"},
+	} {
+		if _, _, err := ParseServiceSet(args); err == nil || !strings.Contains(err.Error(), "--cron cannot be combined with other service settings") {
+			t.Fatalf("ParseServiceSet(%#v) error = %v", args, err)
+		}
+	}
+}
+
 func TestParseServiceSetNetworkFlags(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1614,7 +1672,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	if reg.Groups["service"].Commands["set"].Info.Name != "set" {
 		t.Fatalf("registry service set command = %#v", reg.Groups["service"].Commands["set"])
 	}
-	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
+	if reg.Groups["service"].Commands["set"].Info.Usage != "service set <svc> [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]" {
 		t.Fatalf("service set usage = %q", reg.Groups["service"].Commands["set"].Info.Usage)
 	}
 	hostSet, ok := reg.Groups["host"].Commands["set"]
@@ -1668,6 +1726,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 		"yeet service set <svc> -p 80:80 -p 443:443",
 		"yeet service set <svc> --publish-reset -p 443:443",
 		"yeet service set <svc> --publish-reset",
+		"yeet service set <svc> --cron=\"30 2 * * *\"",
 		"yeet service set <svc> --run-as=yeet-svc",
 		"yeet service set <svc> --run-as=app:app",
 		"yeet service set <svc> --net=iso",
@@ -1686,6 +1745,7 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	}
 	serviceSetHelp := yargs.GenerateAgentHelpFromRegistry(reg, []string{"service", "set"}, struct{}{})
 	for _, want := range []string{
+		"Update the schedule of an existing scheduled native service with a five-field cron expression",
 		"Replace all network modes for an existing non-VM service; use yeet vm set for VMs",
 		"Resulting modes that include ts require tags; stored tags may be inherited",
 		"Patch Tailscale tags; repeat to replace the list or pass an empty value to clear when ts is not selected",
@@ -1800,6 +1860,9 @@ func TestRemoteCommandRegistryAndFlagSpecs(t *testing.T) {
 	}
 	if !RemoteGroupFlagSpecs()["docker"]["outdated"]["--format"].ConsumesValue {
 		t.Fatal("docker outdated --format should consume a value")
+	}
+	if !RemoteGroupFlagSpecs()["service"]["set"]["--cron"].ConsumesValue {
+		t.Fatal("service set --cron must consume a value")
 	}
 	if !RemoteGroupFlagSpecs()["service"]["set"]["--service-root"].ConsumesValue {
 		t.Fatal("service set --service-root should consume a value")

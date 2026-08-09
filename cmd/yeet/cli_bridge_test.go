@@ -355,6 +355,20 @@ func TestBridgeServiceArgsServiceSet(t *testing.T) {
 			wantBridged: "service set -p 80:80",
 			wantOK:      true,
 		},
+		{
+			name:        "service set cron inline",
+			args:        []string{"service", "set", "reports", `--cron=30 2 * * *`},
+			wantService: "reports",
+			wantBridged: `service set --cron=30 2 * * *`,
+			wantOK:      true,
+		},
+		{
+			name:        "service set cron separate value",
+			args:        []string{"service", "set", "--cron", "30 2 * * *", "reports"},
+			wantService: "reports",
+			wantBridged: "service set --cron 30 2 * * *",
+			wantOK:      true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -384,6 +398,8 @@ func TestBridgeServiceArgsRunAsCanonicalShapes(t *testing.T) {
 		{args: []string{"run", "api", "--run-as=app", "./api", "--", "--serve"}, wantService: "api", want: []string{"run", "--run-as=app", "./api", "--", "--serve"}},
 		{args: []string{"run", "backup", `--cron=0 3 * * *`, "./backup", "--", "--daily"}, wantService: "backup", want: []string{"run", `--cron=0 3 * * *`, "./backup", "--", "--daily"}},
 		{args: []string{"service", "set", "api", "--run-as=app"}, wantService: "api", want: []string{"service", "set", "--run-as=app"}},
+		{args: []string{"service", "set", "reports", `--cron=30 2 * * *`}, wantService: "reports", want: []string{"service", "set", `--cron=30 2 * * *`}},
+		{args: []string{"service", "set", "--cron", "30 2 * * *", "reports"}, wantService: "reports", want: []string{"service", "set", "--cron", "30 2 * * *"}},
 		{args: []string{"service", "set", "api", "--service-root=/var/lib/yeet/services/api", "--copy", "--run-as=app"}, wantService: "api", want: []string{"service", "set", "--service-root=/var/lib/yeet/services/api", "--copy", "--run-as=app"}},
 	}
 	for _, tt := range tests {

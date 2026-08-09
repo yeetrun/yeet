@@ -77,6 +77,8 @@ type RunFlags struct {
 }
 
 type ServiceSetFlags struct {
+	Cron             string
+	CronSet          bool
 	RunAs            string
 	RunAsSet         bool
 	Net              string
@@ -376,6 +378,7 @@ type envCopyFlagsParsed struct {
 }
 
 type serviceSetFlagsParsed struct {
+	Cron             string   `flag:"cron" help:"Update the schedule of an existing scheduled native service with a five-field cron expression"`
 	RunAs            string   `flag:"run-as" help:"Run a native service as USER[:GROUP]"`
 	Net              string   `flag:"net" help:"Replace all network modes for an existing non-VM service; use yeet vm set for VMs. Resulting modes that include ts require tags; stored tags may be inherited"`
 	TsVer            string   `flag:"ts-ver" help:"Patch the Tailscale version; pass an empty value to clear"`
@@ -842,11 +845,12 @@ var remoteGroupInfos = map[string]GroupInfo{
 			"set": {
 				Name:        "set",
 				Description: "Set service settings",
-				Usage:       "service set <svc> [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
+				Usage:       "service set <svc> [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]",
 				Examples: []string{
 					"yeet service set <svc> -p 80:80 -p 443:443",
 					"yeet service set <svc> --publish-reset -p 443:443",
 					"yeet service set <svc> --publish-reset",
+					"yeet service set <svc> --cron=\"30 2 * * *\"",
 					"yeet service set <svc> --run-as=yeet-svc",
 					"yeet service set <svc> --run-as=app:app",
 					"yeet service set <svc> --net=iso",
@@ -1288,6 +1292,10 @@ func rejectServiceSetVMFlags(args []string) error {
 }
 
 func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string) (ServiceSetFlags, error) {
+	cron, cronSet, err := parseRunCron(parseArgs, parsed.Cron)
+	if err != nil {
+		return ServiceSetFlags{}, err
+	}
 	if hasMissingSnapshotMode(parseArgs) {
 		return ServiceSetFlags{}, fmt.Errorf("--snapshots must be on, off, or inherit")
 	}
@@ -1304,6 +1312,8 @@ func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string)
 		return ServiceSetFlags{}, err
 	}
 	flags := ServiceSetFlags{
+		Cron:             cron,
+		CronSet:          cronSet,
 		RunAs:            runAs,
 		RunAsSet:         runAsSet,
 		Net:              network.Net,
@@ -1335,7 +1345,7 @@ func serviceSetFlagsFromParsed(parsed serviceSetFlagsParsed, parseArgs []string)
 		SnapshotEvents:   strings.TrimSpace(parsed.SnapshotEvents),
 		SnapshotChange:   hasAnySnapshotServiceSetFlag(parsed),
 	}
-	if err := validateServiceSetFlags(flags); err != nil {
+	if err := validateServiceSetFlags(flags, longFlagWasSupplied(parseArgs, "--service-root")); err != nil {
 		return ServiceSetFlags{}, err
 	}
 	return flags, nil
@@ -1427,7 +1437,10 @@ func parseServiceSetMacvlanVLAN(raw string, set bool) (int, error) {
 	return vlan, nil
 }
 
-func validateServiceSetFlags(flags ServiceSetFlags) error {
+func validateServiceSetFlags(flags ServiceSetFlags, serviceRootSet bool) error {
+	if err := validateServiceSetCronExclusivity(flags, serviceRootSet); err != nil {
+		return err
+	}
 	if err := validateServiceSetRootFlags(flags); err != nil {
 		return err
 	}
@@ -1483,8 +1496,19 @@ func validateServiceSetRootValue(flags ServiceSetFlags, rootChange bool) error {
 	return nil
 }
 
+func serviceSetHasNonCronChange(flags ServiceSetFlags, rootChange bool) bool {
+	return flags.RunAsSet || flags.HasNetworkChange() || rootChange || flags.Copy || flags.Empty || flags.SnapshotChange || hasServiceSetPublishChange(flags)
+}
+
 func serviceSetHasChange(flags ServiceSetFlags, rootChange bool) bool {
-	return flags.RunAsSet || flags.HasNetworkChange() || rootChange || flags.SnapshotChange || hasServiceSetPublishChange(flags)
+	return flags.CronSet || serviceSetHasNonCronChange(flags, rootChange)
+}
+
+func validateServiceSetCronExclusivity(flags ServiceSetFlags, serviceRootSet bool) error {
+	if flags.CronSet && (serviceRootSet || serviceSetHasNonCronChange(flags, hasServiceSetRootChange(flags))) {
+		return fmt.Errorf("--cron cannot be combined with other service settings; apply them with separate service set commands")
+	}
+	return nil
 }
 
 func parseRunAs(args []string, value string) (string, bool, error) {
@@ -1516,11 +1540,84 @@ func parseRunCron(args []string, value string) (string, bool, error) {
 	if len(fields) != 5 {
 		return "", true, fmt.Errorf("cron expression must have 5 fields, got %d", len(fields))
 	}
+	for _, field := range []struct {
+		value string
+		min   int
+		max   int
+	}{
+		{value: fields[0], min: 0, max: 59},
+		{value: fields[1], min: 0, max: 23},
+		{value: fields[2], min: 1, max: 31},
+		{value: fields[3], min: 1, max: 12},
+		{value: fields[4], min: 0, max: 7},
+	} {
+		if !validCronField(field.value, field.min, field.max) {
+			return "", true, fmt.Errorf("invalid cron expression")
+		}
+	}
 	value = strings.Join(fields, " ")
 	if _, err := cronutil.CronToCalender(value); err != nil {
 		return "", true, fmt.Errorf("invalid cron expression: %w", err)
 	}
 	return value, true, nil
+}
+
+func validCronField(value string, min, max int) bool {
+	for _, term := range strings.Split(value, ",") {
+		if !validCronTerm(term, min, max) {
+			return false
+		}
+	}
+	return true
+}
+
+func validCronTerm(term string, min, max int) bool {
+	parts := strings.Split(term, "/")
+	if term == "" || len(parts) > 2 {
+		return false
+	}
+	if len(parts) == 2 {
+		return validCronStep(parts[0], parts[1], min, max)
+	}
+	return validCronBase(parts[0], min, max)
+}
+
+func validCronStep(base, rawStep string, min, max int) bool {
+	step, ok := parseCronNumber(rawStep)
+	return base == "*" && ok && step >= 1 && step <= max-min+1
+}
+
+func validCronBase(base string, min, max int) bool {
+	if base == "*" {
+		return true
+	}
+	if value, ok := parseCronNumber(base); ok {
+		return value >= min && value <= max
+	}
+	return validCronRange(base, min, max)
+}
+
+func validCronRange(base string, min, max int) bool {
+	rangeParts := strings.Split(base, "-")
+	if len(rangeParts) != 2 {
+		return false
+	}
+	start, startOK := parseCronNumber(rangeParts[0])
+	end, endOK := parseCronNumber(rangeParts[1])
+	return startOK && endOK && start >= min && end <= max && start <= end
+}
+
+func parseCronNumber(value string) (int, bool) {
+	if value == "" {
+		return 0, false
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+	}
+	parsed, err := strconv.Atoi(value)
+	return parsed, err == nil
 }
 
 func longFlagWasSupplied(args []string, name string) bool {

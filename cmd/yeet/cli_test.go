@@ -124,7 +124,7 @@ func TestRunDispatchesHiddenVMSSHProxyCommand(t *testing.T) {
 	}
 }
 
-func TestRunServiceSetHelpShowsLeafCommand(t *testing.T) {
+func TestCLIServiceSetHelp(t *testing.T) {
 	oldArgs := os.Args
 	oldHandleSvcCmdFn := handleSvcCmdFn
 	oldStdout := os.Stdout
@@ -163,7 +163,7 @@ func TestRunServiceSetHelpShowsLeafCommand(t *testing.T) {
 	if !strings.Contains(stdout, "Set service settings") {
 		t.Fatalf("stdout = %q, want service set command help", stdout)
 	}
-	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit]") {
+	if !strings.Contains(stdout, "yeet [GLOBAL OPTIONS] service set <svc> [--cron=\"M H DOM MON DOW\"] [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit]") {
 		t.Fatalf("stdout = %q, want service set usage", stdout)
 	}
 	if strings.Contains(stdout, "service COMMAND [ARGS...]") {
