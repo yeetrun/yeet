@@ -274,13 +274,29 @@ yeet run backup ./backup --cron="0 3 * * *" --run-as=backup --net=iso -- --full
 ```
 
 Scheduling is available for native binaries and shebang scripts. Scheduled
-runs retain native service options such as `--run-as`, `--net=iso`, environment
-files, custom service roots, ZFS, snapshots, and payload arguments after `--`.
+runs deploy or redeploy the payload with native service options such as
+`--run-as`, `--net=iso`, environment files, custom service roots, ZFS,
+snapshots, and payload arguments after `--`.
 
 Omitting `--cron` when you rerun a scheduled service preserves its installed
 schedule. A new non-empty `--cron` value replaces the schedule. To return the
 name to ordinary service mode, remove it with `yeet rm` and recreate it without
 `--cron`.
+
+Change only the schedule of an installed scheduled native service without a
+payload:
+
+```bash
+yeet service set backup --cron="30 2 * * *"
+```
+
+`service set --cron` works only for an already scheduled native binary or
+script. It never converts an ordinary, container, or VM service into a
+scheduled service, cannot clear a schedule or combine with another service
+mutation, and preserves the server-side payload and other settings. After
+Catch updates the schedule, yeet updates a matching `yeet.toml`; if the local
+config is absent or cannot be saved, run `yeet service sync <svc>` to recover
+it.
 
 Native binaries, scripts, and scheduled jobs run as the managed `yeet-svc`
 system account by default. Choose an existing host account with

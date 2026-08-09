@@ -3641,7 +3641,7 @@ Set service settings
 ## Usage
 
 ```
-yeet [GLOBAL_OPTIONS] service set <svc> [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
+yeet [GLOBAL_OPTIONS] service set <svc> [--cron="M H DOM MON DOW"] [--run-as=USER[:GROUP]] [-p HOST:CONTAINER] [--publish-reset] [--service-root=/abs/path|dataset] [--zfs] [--copy|--empty] [--snapshots=on|off|inherit] [--snapshot-keep-last=N] [--snapshot-max-age=7d] [--snapshot-events=run,docker-update] [--snapshot-required=true|false] [--net=host|svc|ts|lan|iso] [--ts-ver=VERSION] [--ts-exit=HOST] [--ts-tags=TAG] [--ts-auth-key=KEY] [--macvlan-parent=IFACE] [--macvlan-vlan=ID] [--macvlan-mac=MAC]
 ```
 
 ## Operating Rules
@@ -3661,6 +3661,12 @@ Service name
 - **Required**: true
 
 ## Options
+
+### `--cron`
+
+Update the schedule of an existing scheduled native service with a five-field cron expression
+
+- **Type**: `string`
 
 ### `--run-as`
 
@@ -3804,6 +3810,10 @@ yeet service set <svc> --publish-reset -p 443:443
 
 ```
 yeet service set <svc> --publish-reset
+```
+
+```
+yeet service set <svc> --cron="30 2 * * *"
 ```
 
 ```

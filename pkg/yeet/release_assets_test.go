@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func TestUnifiedScheduledRunReleaseAssets(t *testing.T) {
+func TestReleaseAssetsMatchCurrentCLI(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", ".."))
 	assetPaths := []string{
 		"README.md",
@@ -44,6 +44,19 @@ func TestUnifiedScheduledRunReleaseAssets(t *testing.T) {
 	}
 	if !strings.Contains(help[runStart:runEnd], "--cron") {
 		t.Error("generated run help does not document --cron")
+	}
+
+	serviceSetStart := strings.Index(help, "## Group Command: service set\n")
+	serviceSetEnd := strings.Index(help[serviceSetStart+1:], "\n## Group Command:")
+	if serviceSetStart < 0 || serviceSetEnd < 0 || !strings.Contains(help[serviceSetStart:serviceSetStart+1+serviceSetEnd], "--cron") {
+		t.Error("generated service set help does not document --cron")
+	}
+
+	readme := assets["README.md"]
+	scheduleStart := strings.Index(readme, "### Scheduled job\n")
+	scheduleEnd := strings.Index(readme[scheduleStart+1:], "\n### ")
+	if scheduleStart < 0 || scheduleEnd < 0 || !strings.Contains(readme[scheduleStart:scheduleStart+1+scheduleEnd], "service set") || !strings.Contains(readme[scheduleStart:scheduleStart+1+scheduleEnd], "--cron") {
+		t.Error("README scheduled job section does not document service set --cron")
 	}
 }
 
